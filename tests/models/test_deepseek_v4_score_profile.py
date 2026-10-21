@@ -121,6 +121,17 @@ def test_base_step_env_override(armed, monkeypatch):
     assert dsv4._prefill_score_profile(None, caches).base_step is None
 
 
+def test_streamed_model_takes_the_streaming_step(armed, monkeypatch):
+    monkeypatch.delenv("GMLX_V4_PREFILL_STEP", raising=False)
+    caches = _cache(_sparse_layer())
+    streamed = SimpleNamespace(_kq_streaming=True)
+    assert dsv4._prefill_score_profile(streamed, caches).base_step == 8192
+    resident = SimpleNamespace(_kq_streaming=False)
+    assert dsv4._prefill_score_profile(resident, caches).base_step == 4096
+    monkeypatch.setenv("GMLX_V4_PREFILL_STEP", "2048")
+    assert dsv4._prefill_score_profile(streamed, caches).base_step == 2048
+
+
 # indexer kernel arm: unaligned-width padding
 
 

@@ -25,8 +25,10 @@ empty and self-organizes toward the workload's hot set.
 On by default for ``--stream-experts`` models (``--no-decode-feeder`` or
 ``GMLX_FEEDER_DECODE=0`` disables; the every-token layers must be on the
 GPU). Arena size defaults to what the memory ceiling leaves after the
-every-token weights, the priced KV room, the prefill ring and the host
-floor; ``GMLX_DECODE_ARENA_GB`` overrides. The
+every-token weights, the priced KV room and the host floor; the arena
+either keeps the prefill ring's room apart or holds it and lends it back
+at each prefill (see ``ring_share`` below). ``GMLX_DECODE_ARENA_GB``
+overrides. The
 arena also answers system memory pressure arriving after load by shrinking
 (and later regrowing) itself - see the pressure constants below. Miss reads
 are joined with a timeout: a read wedged in the kernel is contained (slot
@@ -43,10 +45,11 @@ import os
 import queue
 import threading
 import time
+import weakref
 from concurrent.futures import (
     Future, ThreadPoolExecutor, wait as futures_wait)
 from contextlib import contextmanager
-from functools import lru_cache
+from functools import lru_cache, partial
 
 import numpy as np
 
@@ -58,6 +61,7 @@ from .feeder_common import (
     KINDS,
     DaemonPool,
     lock_pages,
+    copy_experts,
     read_range,
     swapped_weights,
     unlock_pages,
@@ -154,17 +158,214 @@ _DECAY_EVERY = 4096
 # prefill ring anyway, so the prompt's most-routed experts are copied from
 # the ring slot into empty arena slots (memory bandwidth only) while the
 # ring moves on. Without it decode starts cold and misses every expert of
-# its first tokens. The prompt's routing counts enter the popularity ledger
-# at the weight of _SEED_COUNT_TOKENS decode tokens. GMLX_DECODE_SEED=0
-# disables.
+# its first tokens. Each prefill chunk's routing counts enter the
+# popularity ledger at the weight of _SEED_COUNT_TOKENS decode tokens.
+# GMLX_DECODE_SEED=0 disables.
 _SEED_COUNT_TOKENS = 32
 _SEED_COPY_WORKERS = 4
 
 
-def _copy_experts(dst, src, pairs, stride: int) -> None:
-    for e, s in pairs:
-        np.copyto(dst[s * stride:(s + 1) * stride],
-                  src[e * stride:(e + 1) * stride])
+# A prefill ring pass copies the experts the arena holds out of their slots
+# instead of reading them from the drive (arena_sources). Arena writes wait
+# for those copies. GMLX_RING_FROM_ARENA=0 reads every expert from the drive.
+# A copy takes milliseconds: a claim held past _SOURCE_JOIN_S belongs to a
+# stage queued behind a wedged read, of a pass that ended, whose slot the
+# next pass stages again.
+_SOURCE_JOIN_S = 60.0
+
+
+class ArenaSources:
+    """A layer's arena residents for one prefill ring stage: expert
+    ``experts[i]`` is in slot ``slots[i]`` of ``bufs[kind]``, a
+    (arena pair, stride) tuple. The arena writes none of its slots until
+    ``release``."""
+
+    __slots__ = ("experts", "slots", "bufs", "_done")
+
+    def __init__(self, experts, slots, bufs, done):
+        self.experts = experts
+        self.slots = slots
+        self.bufs = bufs
+        self._done = done
+
+    def release(self) -> None:
+        # A stage blocked on a wedged read keeps this object for good, so
+        # it lets go of the arena and the feeder.
+        done, self._done = self._done, None
+        self.bufs = None
+        if done is not None:
+            done()
+
+
+def _sync_gpu() -> None:
+    """Wait for every queued GPU command."""
+    try:
+        import mlx.core as mx
+
+        mx.synchronize()
+    except Exception:  # noqa: S110 - no Metal device: nothing in flight
+        pass
+
+
+def _residency_apply(kq, ops: list) -> None:
+    for old, new in ops:
+        if old is not None:
+            kq.residency_erase(old)
+        if new is not None:
+            kq.residency_insert(new)
+    kq.residency_commit()
+
+
+def _removed_bytes(ops: list) -> int:
+    return sum(int(old.nbytes) for old, _ in ops if old is not None)
+
+
+# Buffers a failed residency worker could not erase. They stay alive until
+# exit: freeing a buffer the set still holds is the worse fault.
+_PARKED: list = []
+
+
+def _erase_or_park(kq, olds: list) -> None:
+    try:
+        _residency_apply(kq, [(old, None) for old in olds])
+    except BaseException as e:
+        _PARKED.extend(olds)
+        try:
+            print(f"[stream] residency erase failed again ({e!r}), keeping "
+                  f"{len(olds)} buffers until exit")
+        except BaseException:  # noqa: S110
+            pass
+
+
+def _wire_grown_ref(ref, key, a) -> None:
+    # A queued job must not keep its feeder alive.
+    feeder = ref()
+    if feeder is not None:
+        feeder._wire_grown(key, a)
+
+
+class _ResidencyWorker:
+    """Applies Metal residency set changes and commits them on its own
+    thread, so a commit does not stall decode. A queued change holds the
+    buffer it removes until the commit after it runs. ``held`` counts
+    those bytes. Jobs queued with a change (wiring its added buffers) run
+    just before it, and one that raises is skipped. If a residency call
+    raises, the worker erases the buffers it was to remove, runs every job
+    it has not run, and the calling thread commits every later change."""
+
+    def __init__(self):
+        self._cv = threading.Condition()
+        self._ops: list = []
+        self._jobs: list = []
+        self._busy = False
+        self._stop = False
+        self._failed = False
+        self.held = 0
+        self._stats = env_bool("GMLX_DECODE_PHASE_STATS", False)
+        self._thread = threading.Thread(
+            target=self._run, name="gmlx-residency", daemon=True)
+        self._thread.start()
+
+    def put(self, ops: list, jobs: list = ()) -> bool:
+        """Queue (removed, added) array pairs, either side None, and the
+        callables to run before them. False once the worker has failed or
+        stopped: the caller applies and runs them itself."""
+        with self._cv:
+            if self._failed or self._stop:
+                return False
+            self._ops.extend(ops)
+            self._jobs.extend(jobs)
+            self.held += _removed_bytes(ops)
+            self._cv.notify()
+        return True
+
+    def drain(self) -> None:
+        """Wait until every queued change is committed, or a failed worker
+        has erased the buffers it removed."""
+        if threading.current_thread() is self._thread:
+            return  # it would wait for itself
+        with self._cv:
+            self._cv.wait_for(
+                lambda: not (self._ops or self._jobs or self._busy))
+
+    def stop(self, wait: bool = True) -> None:
+        """End the thread once the queue is empty."""
+        if wait:
+            self.drain()
+        with self._cv:
+            self._stop = True
+            self._cv.notify()
+
+    def _run(self) -> None:
+        import mlx_kquant as kq
+
+        ops: list = []
+        jobs: list = []
+        try:
+            while True:
+                with self._cv:
+                    self._cv.wait_for(
+                        lambda: self._ops or self._jobs or self._stop)
+                    if not (self._ops or self._jobs):
+                        return
+                    ops, self._ops = self._ops, []
+                    jobs, self._jobs = self._jobs, []
+                    self._busy = True
+                t0 = time.monotonic()
+                while jobs:
+                    job = jobs.pop(0)
+                    try:
+                        job()
+                    except Exception:  # noqa: S110 - a job never fails a commit
+                        pass
+                    del job  # it holds a buffer a shrink may replace
+                t1 = time.monotonic()
+                if ops:
+                    _residency_apply(kq, ops)
+                dt, dw = time.monotonic() - t1, t1 - t0
+                n, gone = len(ops), _removed_bytes(ops)
+                ops = []    # the removed buffers go only after their commit
+                with self._cv:
+                    self.held -= gone
+                    self._busy = False
+                    self._cv.notify_all()
+                if self._stats:
+                    try:
+                        print(f"[phase] residency worker: {n} changes "
+                              f"committed in {dt:.2f}s, wiring "
+                              f"{dw:.2f}s", flush=True)
+                    except Exception:  # noqa: S110 - a stats line never fails a commit
+                        pass
+        except BaseException as e:
+            # The set's state is unknown. Erase every buffer a change
+            # removes before it can be freed, here, since a closing feeder
+            # leaves no other thread to do it. The arena holds the added
+            # ones, and a later swap erases them inline.
+            with self._cv:
+                self._failed = True
+                olds = [old for old, _ in ops + self._ops if old is not None]
+                jobs = jobs + self._jobs
+                ops, self._ops, self._jobs = [], [], []
+            try:
+                try:
+                    print(f"[stream] residency worker failed ({e!r}), "
+                          "committing on the decode thread from here on")
+                except BaseException:  # noqa: S110
+                    pass
+                _erase_or_park(kq, olds)
+                del olds
+                for job in jobs:  # wiring touches no residency set
+                    try:
+                        job()
+                    except BaseException:  # noqa: S110
+                        pass
+                del jobs
+            finally:
+                with self._cv:
+                    self.held = 0
+                    self._busy = False
+                    self._cv.notify_all()
+
 
 # System memory pressure: the arena is wired, so the kernel can never
 # reclaim it - pressure arriving after load (another model, a build) must
@@ -184,6 +385,11 @@ _PRESSURE_STEP_FRAC = 0.25
 _PRESSURE_MAX_STEPS = 3
 _PRESSURE_COOLDOWN_POLLS = 8
 _REGROW_NORMAL_POLLS = 256
+
+# Longest hold, in forwards, of a ring lend that wide calls keep after the
+# ring came back in the forward one of them repaid in (see
+# DecodeFeeder.repay_at).
+_HOLD_FORWARDS = 16
 
 
 @lru_cache(maxsize=1)
@@ -239,6 +445,7 @@ class DecodeFeeder:
         stats_verbose: bool | None = None,
         lend_bytes: int = 0,
         fast_disk: str | None = None,
+        ring_share: int = 0,
     ):
         import mlx_kquant as kq
 
@@ -307,8 +514,37 @@ class DecodeFeeder:
             self._orig_slots[li] * self._per_expert[li] for li in self._layers)
         self._pressure_steps = 0
         self._lend_frac = 1.0
+        # Ring time-share: ``ring_share`` bytes of the arena are the prefill
+        # ring's room. Each prefill pass that builds the ring takes them
+        # back by shrinking whole layers to one slot (``_lent``), which
+        # copies one expert per layer and frees the memory before the ring
+        # allocates. The next decode drops the ring and clears ``_lent``,
+        # and those layers regrow at their own stage(). The first prefill
+        # starts lent, so the ring and the arena never sum past the budget.
+        # A ring quarantined with its slots keeps the room for good
+        # (``_ring_dead``): every layer then gives up its share of it.
+        self._ring_share = int(ring_share)
+        self._lent: set[int] = set()
+        self._ring_lends = 0
+        self._ring_dead = False
+        # When the ring comes back in the forward a wide call repaid in,
+        # the wide calls after it keep the new lend for a hold: one
+        # forward, doubling each time it recurs up to _HOLD_FORWARDS. A
+        # batch that overflows a later layer then does not release and
+        # rebuild the ring every step, and one that overflows only now
+        # and then is not held long.
+        self._wide_repaid = False
+        self._repaying_wide = False
+        self._hold_left = 0
+        self._hold_next = 1
+        if self._ring_share:
+            self._lent = self._pick_lent(self._ring_share)
+            for li in self._lent:
+                self._slots[li] = 1
         if lend_bytes > 0 and self.nominal_bytes:
-            self._lend_frac = max(0.0, 1.0 - lend_bytes / self.nominal_bytes)
+            # The time-share layers have freed their bytes already.
+            rest = self.nominal_bytes - self._ring_share
+            self._lend_frac = max(0.0, 1.0 - lend_bytes / max(rest, 1))
             self._slots = {li: self._target_slots(li) for li in self._layers}
         # Priced KV room outside the arena (set by the loader); regrow keeps
         # the governor's headroom above half of it.
@@ -351,6 +587,9 @@ class DecodeFeeder:
                 self.arena_bytes += s * stride
         self._locked: dict[tuple[int, str], tuple[int, int]] = {}
         self.locked_bytes = 0
+        # _locked, locked_bytes and the swap of an arena buffer: the
+        # residency worker wires grown buffers (_wire_grown).
+        self._lock_mu = threading.RLock()
         # The one-time wiring pass waits for ensure_wired (the wrapper's
         # first decode call), after the prefill ring is released. Until
         # then a layer wires at its first stage() call, before its slots
@@ -415,6 +654,10 @@ class DecodeFeeder:
         self._seeded = 0
         self._seed_bytes = 0
         self._t_seed = 0.0
+        # Prefill ring stages copying out of the arena (arena_sources).
+        self._ring_from_arena = env_bool("GMLX_RING_FROM_ARENA", True)
+        self._source_reads = 0
+        self._source_cv = threading.Condition()
         self._la_pool: DaemonPool | None = None
         self._la_bounce: queue.Queue | None = None
         self._la_k = env_int("GMLX_DECODE_LOOKAHEAD_K", _LA_K)
@@ -519,21 +762,45 @@ class DecodeFeeder:
     def _mlock_buf(self, key: tuple[int, str]) -> bool:
         if os.environ.get("GMLX_DECODE_ARENA_MLOCK", "1") == "0":
             return False
-        if key in self._locked:
-            return True
-        entry = lock_pages(self._arena[key][1])
+        return self._lock_current(key, self._arena[key])
+
+    def _lock_current(self, key: tuple[int, str], a) -> bool:
+        """Lock ``a``'s pages and record them under ``key`` if ``a`` is
+        still the layer's buffer. The lock runs outside ``_lock_mu``. A
+        lock that lands on a replaced or already recorded buffer is undone,
+        since page locks nest, so ``_locked`` names each current buffer once.
+        False when ``a`` is not current or the kernel refuses."""
+        with self._lock_mu:
+            if getattr(self, "_closed", False) or self._arena.get(key) is not a:
+                return False
+            if key in self._locked:
+                return True
+        entry = lock_pages(a[1])
         if entry is None:
             return False
-        self._locked[key] = entry
-        self.locked_bytes += entry[1]
-        return True
+        with self._lock_mu:
+            current = (not getattr(self, "_closed", False)
+                       and self._arena.get(key) is a)
+            first = current and key not in self._locked
+            if first:
+                self._locked[key] = entry
+                self.locked_bytes += entry[1]
+        if not first:
+            unlock_pages(entry)
+        return current
 
     def _munlock_buf(self, key: tuple[int, str]) -> None:
-        entry = self._locked.pop(key, None)
-        if entry is None:
-            return
-        unlock_pages(entry)
-        self.locked_bytes -= entry[1]
+        with self._lock_mu:
+            entry = self._locked.pop(key, None)
+            if entry is None:
+                return
+            unlock_pages(entry)
+            self.locked_bytes -= entry[1]
+
+    def _wire_grown(self, key: tuple[int, str], a) -> None:
+        """Wire a grown buffer, on the residency worker."""
+        if os.environ.get("GMLX_DECODE_ARENA_MLOCK", "1") != "0":
+            self._lock_current(key, a)
 
     def _verify_zero_copy(self) -> None:
         li = min(self._layers)
@@ -563,10 +830,13 @@ class DecodeFeeder:
         """True when a stage() refusal was a slot-count overflow that a
         smaller (token-split) call could clear, as opposed to a wedge or
         staging being disabled outright."""
+        # A lent layer holds one slot: split pieces would bottom out at
+        # one-token page-cache gathers. It takes the ring or one fallback.
         return (
             not self._staging_disabled
             and li in self._layers
             and li not in self._wedged_layers
+            and li not in self._lent
         )
 
     # staging
@@ -625,22 +895,40 @@ class DecodeFeeder:
                         f"expert {e} slot {s} kind {kind} sample_off {o} "
                         f"owner={int(self._owner[li][s])} pending={pend}")
 
+    def _residency_worker(self) -> _ResidencyWorker | None:
+        """The thread that commits the arena's residency set changes, or
+        None to commit on the calling thread (GMLX_RESIDENCY_ASYNC=0)."""
+        rw = getattr(self, "_rworker", None)
+        if rw is None and env_bool("GMLX_RESIDENCY_ASYNC", True):
+            rw = self._rworker = _ResidencyWorker()
+        return rw
+
+    def _residency_drain(self) -> None:
+        """Commit every queued residency change before one made here."""
+        rw = getattr(self, "_rworker", None)
+        if rw is not None:
+            rw.drain()
+
     def ensure_wired(self) -> None:
         """First decode call: release the prefill ring and wire the arena
         (one-time fault pass; a few seconds on a tens-of-GB arena). Called
-        by the offload wrapper on decode-sized calls only - a small prefill
-        chunk served from the arena must not tear the ring down mid-pass.
+        by the offload wrapper on one-token calls and, through repay_at,
+        on wider calls at a forward's first layer, never inside a ring
+        pass.
 
         Later decode calls repay a ring lend: the ring is dropped again and
         the arena's slot targets return to full size (layers regrow lazily
         at their own stage() calls, each re-wiring as it resizes)."""
+        # A wide repay marks its forward: a ring rebuild later in it
+        # starts a hold (see repay_at).
+        if self._repaying_wide:
+            self._repaying_wide = False
+            self._wide_repaid = True
         if self._mlock_deferred:
             self._mlock_deferred = False
-            if self._release_ring is not None:
-                self._release_ring()
-                # Ring buffers land in MLX's freed-buffer cache; flush so
-                # the arena wires into pages the OS actually has back.
-                self._clear_mlx_cache()
+            # Ring buffers land in MLX's freed-buffer cache; _drop_ring
+            # flushes it, so the arena wires into pages the OS has back.
+            released = self._drop_ring()
             for li in list(self._seeds):
                 self._flush_seeds(li)
             if self._seeded:
@@ -651,45 +939,187 @@ class DecodeFeeder:
             t0 = time.monotonic()
             self._mlock_arena()
             t1 = time.monotonic()
-            # The ring is gone: layers regrow to capacity at their own
-            # stage() calls.
-            self._lend_frac = 1.0
+            self._repay_lend(released)
             t2 = t3 = t1
+            queued = False
             if env_bool("GMLX_GPU_RESIDENT", True):
                 import mlx_kquant as kq
 
                 if getattr(kq, "residency_insert", None):
                     self._gpu_resident = True
-                    for a in self._arena.values():
-                        kq.residency_insert(a[0])
-                    t2 = time.monotonic()
-                    kq.residency_commit()
+                    adds = [(None, a[0]) for a in self._arena.values()]
+                    rw = self._residency_worker()
+                    queued = rw is not None and rw.put(adds)
+                    if not queued:
+                        for _, a in adds:
+                            kq.residency_insert(a)
+                        t2 = time.monotonic()
+                        kq.residency_commit()
                     t3 = time.monotonic()
             if env_bool("GMLX_DECODE_PHASE_STATS", False):
-                print(
-                    f"[phase] first decode: arena wiring {t1 - t0:.2f}s, "
-                    f"residency insert {t2 - t1:.2f}s, commit {t3 - t2:.2f}s",
-                    flush=True)
+                res = ("residency queued to the worker" if queued else
+                       f"residency insert {t2 - t1:.2f}s, "
+                       f"commit {t3 - t2:.2f}s")
+                print(f"[phase] first decode: arena wiring {t1 - t0:.2f}s, "
+                      f"{res}", flush=True)
             return
-        if self._lend_frac < 1.0:
-            if self._release_ring is not None:
-                self._release_ring()
-                self._clear_mlx_cache()
+        if self._owes_lend():
+            self._repay_lend(self._drop_ring())
+
+    def _owes_lend(self) -> bool:
+        return not self._ring_dead and (self._lend_frac < 1.0
+                                        or bool(self._lent))
+
+    def _drop_ring(self) -> bool:
+        """Release the prefill ring. False when the ring keeps its slots
+        (quarantined: a staging read may still write them)."""
+        if self._release_ring is None:
+            return True
+        gone = self._release_ring() is not False
+        self._clear_mlx_cache()
+        return gone
+
+    def _repay_lend(self, released: bool) -> None:
+        """The ring is gone: lent layers regrow to capacity at their own
+        stage() calls. A ring that kept its slots still holds their room
+        for good and nothing lends again. Every layer gives up its share
+        of that room instead of the lent ones holding one slot each, so
+        none is left out of the arena."""
+        if released:
             self._lend_frac = 1.0
+            self._lent.clear()
+            return
+        if self._ring_share and self.nominal_bytes:
+            self._lend_frac = min(self._lend_frac, max(
+                0.0, 1.0 - self._ring_share / self.nominal_bytes))
+        self._lent.clear()
+        self._ring_dead = True
+        self._ring_share = 0
+        # Before any lent layer regrows into the room.
+        self._shrink_now()
+
+    def at_target(self, li: int) -> bool:
+        """Whether layer ``li`` holds its target slot count. A layer that
+        still owes a resize (a repaid lend, a pressure step) must take
+        stage() once, the only place it resizes."""
+        return self._slots.get(li) == self._target_slots(li)
+
+    def forward_start(self, li: int) -> None:
+        """A multi-token call at ``li``, outside a token split. At the
+        forward's first covered layer it ends the forward before, so a
+        ring rebuild from here on belongs to this one. Every lend that
+        follows no wide repay resets the hold to one forward."""
+        if self._layers and li == min(self._layers):
+            self._wide_repaid = False
+
+    def repay_at(self, li: int, ids: np.ndarray,
+                 ring_ok: bool = False) -> bool:
+        """Whether a multi-token call routed to ``ids`` at ``li`` runs
+        ensure_wired: the first decode's wiring, or the repay of a ring
+        lend. Only at a forward's first covered layer: a call the arena
+        serves there is a decode step (batched or speculative) or a short
+        prompt, and a later layer of a ring pass must not drop the ring
+        under the layers after it. Batched and speculative decode never
+        send a one-token call, so without this they would never wire.
+
+        ``ring_ok``: the call is wide enough to take a live ring. It keeps
+        the lend when its experts overflow this layer once repaid, as it
+        would take the ring here anyway, and while a hold from an earlier
+        rebuild lasts. The caller has called forward_start."""
+        if not self._layers or li != min(self._layers):
+            return False
+        if self._mlock_deferred:
+            return True  # the first decode wires, at any width
+        if not self._owes_lend():
+            return False
+        if not ring_ok:
+            return True
+        if self._hold_left:
+            self._hold_left -= 1
+            return False
+        if (np.unique(ids.reshape(-1)).size
+                > self._target_slots(li, lend=False)):
+            return False
+        self._repaying_wide = True
+        return True
+
+    def _pick_lent(self, nbytes: int) -> set[int]:
+        """Layers whose capacity, shrunk to one slot, frees ``nbytes``.
+        Layers still at one slot go first: a lend the last decode did not
+        refill costs nothing to keep. Then the coldest, by decode hit
+        rate, so the lend costs the fewest hits; layers with no lookups
+        yet go in layer order. Counting capacity rather than live slots
+        keeps the arena at its nominal size less one share, however often
+        the ring returns before the layers refill."""
+        hits = getattr(self, "_layer_hits", {})
+        looks = getattr(self, "_layer_lookups", {})
+        wedged = getattr(self, "_wedged_layers", set())
+
+        def order(li):
+            n = looks.get(li, 0)
+            return (self._slots[li] > 1,
+                    hits.get(li, 0) / n if n else 1.0, li)
+
+        picked: set[int] = set()
+        freed = 0
+        for li in sorted((li for li in self._layers if li not in wedged),
+                         key=order):
+            if freed >= nbytes:
+                break
+            picked.add(li)
+            freed += max(0, self._orig_slots[li] - 1) * self._per_expert[li]
+        return picked
+
+    def _lend_ring_share(self) -> int:
+        """Shrink the time-share layers to one slot now. Their in-flight
+        prestage reads join first (a resize must not free a buffer a read
+        still writes into), after the queued gathers: a read that wedges
+        in the join zeroes its slot. Returns the bytes freed."""
+        _sync_gpu()
+        self._lent = self._pick_lent(self._ring_share)
+        empty = np.empty(0, dtype=np.int64)
+        for li in self._lent:
+            if self._pending.get(li):
+                self._settle_pending(li, empty)
+        freed = self._shrink_now()
+        self._ring_lends += 1
+        return freed
 
     def lend_for_ring(self, nbytes: int) -> None:
         """Shrink the wired arena by ~``nbytes`` so the prefill ring can
         re-allocate without breaching the wired cap. The prefill feeder
         calls this before rebuilding its slots on a post-decode prefill
-        pass (chat follow-up turns). The budget keeps the ring's room out
-        of the arena, so the lend is a no-op while the kernel still has
+        pass (chat follow-up turns). An arena that holds the ring's room
+        (``ring_share``) frees it first, by emptying its coldest layers.
+        Past that, the budget keeps the ring's room out of the arena, so
+        the proportional lend below is a no-op while the kernel still has
         that room; it fires only on a box whose free RAM is gone.
 
         Shrinking is eager (every layer now): the ring path never calls
         stage(), so the lazy per-layer resize would not fire during the
         prefill that needs the memory. Each layer keeps its most popular
         residents, so the decode resume after this turn starts warm.
-        ensure_wired repays the lend on the next decode-sized call."""
+        ensure_wired repays the lend on the next decode call."""
+        # A rebuild in the forward a wide call repaid in starts a hold,
+        # twice as long as the last each time it recurs.
+        if self._wide_repaid:
+            self._wide_repaid = False
+            self._hold_left = self._hold_next
+            self._hold_next = min(2 * self._hold_next, _HOLD_FORWARDS)
+        else:
+            self._hold_left = 0
+            self._hold_next = 1
+        if self._ring_share and not self._lent:
+            freed = self._lend_ring_share()
+            if self._ring_lends == 1:
+                loadlog.info(
+                    f"[stream] decode arena lends {len(self._lent)} layers "
+                    f"({freed / 1e9:.1f} GB) to the prefill ring at each "
+                    "prefill; they refill at the next decode "
+                    "(GMLX_RING_TIMESHARE=0 keeps the ring's room apart)")
+            nbytes = max(0, nbytes - freed)
+            if not nbytes:
+                return
         if self._mlock_deferred:
             return  # arena never wired; ring + cold arena already coexist
         if not self.arena_bytes:
@@ -728,12 +1158,7 @@ class DecodeFeeder:
         """Resize every layer down to its current target now. Eager,
         unlike the lazy per-layer resize at stage(): the caller needs the
         bytes before its next allocation. Returns the bytes freed."""
-        try:
-            import mlx.core as mx
-
-            mx.synchronize()  # no in-flight gather may reference a layer
-        except Exception:  # noqa: S110 - no Metal device: nothing in flight
-            pass
+        _sync_gpu()  # no in-flight gather may reference a layer
         freed = 0
         for li in list(self._layers):
             self._flush_seeds(li)
@@ -790,6 +1215,7 @@ class DecodeFeeder:
         in-flight gather references this layer's arena (see module docstring).
         """
         keepwarm.touch()
+        self._join_source_reads()
         if ((self._pressure_on or self._pressure_steps)
                 and self._calls % _PRESSURE_POLL_EVERY == 0):
             self._poll_pressure()
@@ -811,6 +1237,8 @@ class DecodeFeeder:
         target = self._target_slots(li)
         if (
             target != self._slots[li]
+            # A call the grown layer cannot hold is refused either way.
+            and not (self._slots[li] < target < uniq.size)
             and li not in self._wedged_layers
             and not self._pending.get(li)
         ):
@@ -1132,6 +1560,7 @@ class DecodeFeeder:
             or li in self._wedged_layers
         ):
             return
+        self._join_source_reads()
         self._flush_pending(li)
         if li in self._wedged_layers or li not in self._layers:
             return  # the flush itself may have wedged the layer
@@ -1266,6 +1695,69 @@ class DecodeFeeder:
                     li, e, s, -1,
                     np.zeros(len(owner), dtype=bool), pend, pool="la")
 
+    # prefill ring copies out of the arena
+
+    def arena_sources(
+        self, li: int, geometry: dict[str, tuple[str, int, int]],
+    ) -> ArenaSources | None:
+        """The layer's resident experts for a prefill ring stage to copy
+        instead of reading, or None. ``geometry`` maps each kind to the
+        ring's (path, offset, nbytes) for the layer, and a layer whose
+        stacks differ from the arena's gives none. Called on the thread
+        that writes the arena, so the residents cannot change before the
+        writers' next join."""
+        if (
+            not self._ring_from_arena
+            or li not in self._layers
+            or li in self._wedged_layers
+        ):
+            return None
+        entry = self._layers[li]
+        if set(geometry) != set(entry):
+            return None
+        for kind, (path, off, nbytes) in geometry.items():
+            _, a_path, a_off, stride, shape = entry[kind]
+            if (path, off, nbytes) != (a_path, a_off, stride * shape[0]):
+                return None
+        # A later chunk of a cold prompt copies what an earlier one seeded.
+        item = self._seeds.get(li)
+        if item is not None and item[1].done():
+            self._flush_seeds(li)
+        owner = self._owner[li]
+        slots = np.flatnonzero(owner >= 0)
+        if not len(slots):
+            return None
+        bufs = {kind: (self._arena[(li, kind)], entry[kind][3])
+                for kind in entry}
+        with self._source_cv:
+            self._source_reads += 1
+        return ArenaSources(owner[slots].astype(np.int64),
+                            slots.astype(np.int64), bufs,
+                            self._end_source_read)
+
+    def _end_source_read(self) -> None:
+        with self._source_cv:
+            self._source_reads -= 1
+            if self._source_reads <= 0:
+                self._source_reads = 0
+                self._source_cv.notify_all()
+
+    def _join_source_reads(self) -> None:
+        """Wait for the ring copies out of the arena. Every arena write
+        (stage, prestage, resize, the zero slot) joins first."""
+        if not self._source_reads:
+            return
+        with self._source_cv:
+            if self._source_cv.wait_for(
+                    lambda: not self._source_reads, timeout=_SOURCE_JOIN_S):
+                return
+            self._source_reads = 0
+            self._ring_from_arena = False
+        print(
+            f"[stream] decode feeder: a prefill ring stage held arena slots "
+            f"past {_SOURCE_JOIN_S:.0f}s; the ring reads every expert from "
+            "the drive from here on")
+
     # prefill seeding
 
     def seed_from_ring(
@@ -1325,7 +1817,7 @@ class DecodeFeeder:
             for chunk in np.array_split(pairs, _SEED_COPY_WORKERS):
                 if len(chunk):
                     jobs.append(self._seed_copy_pool.submit(
-                        _copy_experts, dst, src, chunk, stride))
+                        copy_experts, dst, src, chunk, stride))
         for j in jobs:
             j.result()
         # Wire the layer now: its pages are resident from the copy, so
@@ -1496,6 +1988,7 @@ class DecodeFeeder:
         zs = self._zslot.get(li)
         if zs is not None:
             return zs
+        self._join_source_reads()
         owner = self._owner[li]
         empty = np.flatnonzero(owner == -1)
         if len(empty):
@@ -1545,17 +2038,26 @@ class DecodeFeeder:
 
     # memory pressure
 
-    def _target_slots(self, li: int) -> int:
-        frac = (1.0 - self._pressure_steps * _PRESSURE_STEP_FRAC) \
-            * self._lend_frac
+    def _target_slots(self, li: int, lend: bool = True) -> int:
+        """Slots layer ``li`` should hold now; ``lend=False`` leaves out
+        any ring lend."""
+        if lend and li in self._lent:
+            return 1
+        frac = 1.0 - self._pressure_steps * _PRESSURE_STEP_FRAC
+        if lend:
+            frac *= self._lend_frac
         if frac >= 1.0:
             return self._orig_slots[li]
         return max(1, int(self._orig_slots[li] * frac))
 
     def _arena_bytes_at(self, steps: int) -> int:
-        frac = max(0.0, 1.0 - steps * _PRESSURE_STEP_FRAC)
+        """Arena bytes at ``steps`` pressure steps, with the ring lend now
+        in force: the targets _target_slots gives at that step."""
+        frac = max(0.0, 1.0 - steps * _PRESSURE_STEP_FRAC) * self._lend_frac
         return sum(
-            max(1, int(self._orig_slots[li] * frac)) * self._per_expert[li]
+            (1 if li in self._lent
+             else max(1, int(self._orig_slots[li] * frac)))
+            * self._per_expert[li]
             for li in self._layers
         )
 
@@ -1656,10 +2158,12 @@ class DecodeFeeder:
         token, so its pages stay GPU-resident whatever madvise says - only
         dropping the buffer returns memory. Reallocating one layer at its
         own stage() call bounds the transient old+new overlap to a single
-        layer's stacks, and the caller's eval fence guarantees no in-flight
-        gather references this layer."""
+        layer's stacks, plus the old stacks a grow leaves to the residency
+        worker, at most one grown layer's. The caller's eval fence
+        guarantees no in-flight gather references this layer."""
         import mlx_kquant as kq
 
+        self._join_source_reads()
         old_s = self._slots[li]
         entry = self._layers[li]
         owner = self._owner[li]
@@ -1677,6 +2181,12 @@ class DecodeFeeder:
             new_owner[ns] = e
             slot_of[e] = ns
         resident = getattr(self, "_gpu_resident", False)
+        wire: list = []
+        row = sum(v[3] for v in entry.values())
+        rw = getattr(self, "_rworker", None)
+        if resident and rw is not None and rw.held + old_s * row > new_s * row:
+            rw.drain()  # at most one grown layer of old buffers waits
+        swaps = []
         for kind, (_, _, _, stride, shape) in entry.items():
             key = (li, kind)
             a = kq.arena_alloc([new_s * stride])
@@ -1685,24 +2195,37 @@ class DecodeFeeder:
             for ns, os_ in enumerate(keep):
                 mv_new[ns * stride:(ns + 1) * stride] = \
                     mv_old[os_ * stride:(os_ + 1) * stride]
-            self._munlock_buf(key)
-            if resident:
-                # a freed buffer must not stay in the residency set
-                kq.residency_erase(self._arena[key][0])
-                kq.residency_insert(a[0])
-            self._arena[key] = a
+            with self._lock_mu:
+                self._munlock_buf(key)
+                if resident:
+                    # a freed buffer must not stay in the residency set
+                    swaps.append((self._arena[key][0], a[0]))
+                self._arena[key] = a
             self._views[key] = a[0].reshape((new_s,) + shape[1:])
             self.arena_bytes += (new_s - old_s) * stride
             if not self._mlock_deferred:
+                wire.append(key)
+        # A grown layer wires and commits on the worker. A shrink frees its
+        # bytes now, after every queued change: the check above drained
+        # them.
+        rw = self._residency_worker() if swaps and new_s > old_s else None
+        jobs = ([partial(_wire_grown_ref, weakref.ref(self), k,
+                         self._arena[k]) for k in wire]
+                if rw is not None else [])
+        if rw is None or not rw.put(swaps, jobs):
+            for key in wire:
                 self._mlock_buf(key)
-        if resident:
-            kq.residency_commit()
+            if swaps:
+                for old, new in swaps:
+                    kq.residency_erase(old)
+                    kq.residency_insert(new)
+                kq.residency_commit()
+        del swaps, jobs
         self._owner[li] = new_owner
         self._slots[li] = new_s
-        # The dropped buffers land in MLX's cache of freed GPU buffers,
-        # not back with the OS; on a box sized to the wired cap that idle
-        # anon memory is what the kernel starts compressing. Flush it
-        # while the freed bytes are the point of the resize.
+        # Flush MLX's cache of freed GPU buffers: on a box sized to the
+        # wired cap, that idle anon memory is what the kernel starts
+        # compressing.
         self._clear_mlx_cache()
 
     @contextmanager
@@ -1716,12 +2239,14 @@ class DecodeFeeder:
                              slot_owner=lambda: self._owner[li]):
             yield
 
-    def close(self, wait: bool = True) -> None:
+    def close(self, wait: bool = True, report: bool = True) -> None:
         """``wait=False`` is the finalizer's form: a join from ``__del__``
         deadlocks when the collection runs inside a thread's bootstrap,
         which holds ``threading._shutdown_locks_lock`` that the join of a
         finished thread takes again. Nothing in flight references the
-        feeder once it is collectable, so the pools drain on their own."""
+        feeder once it is collectable, so the pools drain on their own.
+        ``report=False`` skips the stats lines, which from a finalizer
+        would land in whatever the process prints then."""
         if getattr(self, "_closed", False):
             return
         self._closed = True
@@ -1729,14 +2254,20 @@ class DecodeFeeder:
                      getattr(self, "_seed_copy_pool", None)):
             if pool is not None:
                 pool.shutdown(wait=wait)
+        rw = getattr(self, "_rworker", None)
         if getattr(self, "_gpu_resident", False):
             import mlx_kquant as kq
 
             if getattr(kq, "residency_erase", None):
-                for a in self._arena.values():
-                    kq.residency_erase(a[0])
-                kq.residency_commit()
+                # Queued behind the worker's changes, in their order.
+                drops = [(a[0], None) for a in self._arena.values()]
+                if rw is None or not rw.put(drops):
+                    for a, _ in drops:
+                        kq.residency_erase(a)
+                    kq.residency_commit()
             self._gpu_resident = False
+        if rw is not None:
+            rw.stop(wait)
         if getattr(self, "_routed_log", None):
             lis = np.array([li for li, _ in self._routed_log], np.uint16)
             rows = [ids for _, ids in self._routed_log]
@@ -1750,7 +2281,7 @@ class DecodeFeeder:
                 f"[stream] routed-id trace: {len(rows)} stage calls -> "
                 f"{self._routed_log_path}")
             self._routed_log = None
-        if not getattr(self, "_stats_verbose", True):
+        if not report or not getattr(self, "_stats_verbose", True):
             self._print_wedges(wait=wait)
             return
         if getattr(self, "_lookups", 0):
@@ -1807,6 +2338,10 @@ class DecodeFeeder:
                 f"[stream] decode feeder seeded {self._seeded} experts "
                 f"({self._seed_bytes / 1e9:.1f} GB) from the prefill ring, "
                 f"copies {self._t_seed:.1f}s")
+        if getattr(self, "_ring_lends", 0):
+            print(
+                f"[stream] decode arena lent layers to the prefill ring at "
+                f"{self._ring_lends} prefills")
         if getattr(self, "_shed_tokens", 0):
             print(
                 f"[stream] miss-shed: {self._shed_n} experts shed over "
@@ -1816,7 +2351,7 @@ class DecodeFeeder:
         if getattr(self, "_layer_shed_n", 0):
             print(
                 f"[stream] layer-shed: {self._layer_shed_n} token-layer "
-                "routed paths skipped (shared expert only)")
+                "routed paths shed")
         self._print_wedges(wait=wait)
 
     def _print_wedges(self, wait: bool = True) -> None:
@@ -1832,8 +2367,9 @@ class DecodeFeeder:
                 # The finalizer passes wait=False: a collection that runs
                 # on a read worker cannot join its own thread.
                 pool.shutdown(wait=wait and wedges == 0)
-        locked, self._locked = getattr(self, "_locked", {}), {}
-        self.locked_bytes = 0
+        with getattr(self, "_lock_mu", threading.RLock()):
+            locked, self._locked = getattr(self, "_locked", {}), {}
+            self.locked_bytes = 0
         if locked:
             import ctypes
 
@@ -1850,7 +2386,7 @@ class DecodeFeeder:
 
     def __del__(self):
         try:
-            self.close(wait=False)
+            self.close(wait=False, report=False)
         except BaseException:  # noqa: BLE001, S110 - incl. ^C during interpreter exit
             pass
 
@@ -1880,7 +2416,7 @@ def _register_exit_close(feeder) -> None:
 
 def maybe_make_decode_feeder(
     offsets, modules, arena_bytes: int, stats_verbose: bool | None = None,
-    lend_bytes: int = 0, fast_disk: str | None = None,
+    lend_bytes: int = 0, fast_disk: str | None = None, ring_share: int = 0,
 ) -> DecodeFeeder | None:
     """A DecodeFeeder over the coverable layers, or None with a printed
     reason (opt-in feature: silence would read as 'enabled')."""
@@ -1902,7 +2438,7 @@ def maybe_make_decode_feeder(
                 f"arena budget too small ({arena_bytes / 1e9:.1f} GB)")
         feeder = DecodeFeeder(
             offsets, modules, arena_bytes, stats_verbose, lend_bytes=lend_bytes,
-            fast_disk=fast_disk)
+            fast_disk=fast_disk, ring_share=ring_share)
         # CLI runs never tear the feeder down explicitly and __del__ is
         # not reliable at interpreter exit, so the hit-rate/prestage stats
         # lines would silently vanish; close() is idempotent, so the

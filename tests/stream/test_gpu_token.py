@@ -118,6 +118,12 @@ def _autonomous_glu(monkeypatch, fake_df):
 
 
 class _FakeDF:
+    def forward_start(self, li):
+        pass
+
+    def repay_at(self, li, ids, ring_ok=False):
+        return False
+
     def ensure_wired(self):
         pass
 
@@ -148,6 +154,11 @@ class _FakeDF:
 
     def covers(self, li):
         return True
+
+    target = True
+
+    def at_target(self, li):
+        return self.target
 
     def wedged_at(self, li):
         return False
@@ -228,6 +239,41 @@ def test_wrapper_autonomous_all_resident_is_transparent(monkeypatch):
     assert df.swap_calls == [5]
     gt = glu._kq_gpu_token
     assert gt.layer_calls == 1 and gt.tokens == 0  # boundary not yet
+
+
+def test_wrapper_layer_owing_a_resize_takes_stage(monkeypatch):
+    """A layer below its target slot count, such as one a ring lend left
+    at one slot, resizes only in stage(). It takes the stage path until
+    it has, so its experts are not shed for want of slots."""
+    df = _FakeDF()
+    df.target = False
+    glu = _autonomous_glu(monkeypatch, df)
+    x1 = mx.random.normal((1, 1, 16))
+    i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
+    sc = mx.array([[[0.6, 0.4]]], dtype=mx.float32)
+    mx.eval(glu(x1, i1, sc))
+    assert [li for li, _ in df.stage_calls] == [5]
+    assert df._shed_n == 0
+
+
+def test_wrapper_layer_shed_keeps_the_top_expert_on_the_stage_path(
+        monkeypatch):
+    """A shed layer that keeps its top expert stages only that one: the
+    syncless path would run the whole routed set."""
+    df = _FakeDF()
+    df._layer_shed_n = 0
+    glu = _autonomous_glu(monkeypatch, df)
+    object.__setattr__(glu, "_kq_layer_shed", 1.0)
+    object.__setattr__(glu, "_kq_shed_keeps_top1", True)
+    x1 = mx.random.normal((1, 1, 16))
+    i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
+    out = glu(x1, i1, mx.array([[[0.4, 0.6]]], dtype=mx.float32))
+    ref = glu.__class__.__bases__[0].__call__(
+        glu, x1, mx.array([[[3]]], dtype=mx.uint32))[..., 0, :]
+    mx.eval(out, ref)
+    assert [ids.reshape(-1).tolist() for _, ids in df.stage_calls] == [[3]]
+    assert df._layer_shed_n == 1
+    assert mx.allclose(out, ref, atol=1e-5, rtol=1e-5)
 
 
 def test_wrapper_autonomous_miss_sheds_and_prestages(monkeypatch):

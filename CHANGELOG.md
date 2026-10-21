@@ -6,11 +6,37 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- With `--stream-experts`, decoding is faster: between prefills the expert
+  arena uses the prefill ring's memory. `GMLX_RING_TIMESHARE=0` turns it off.
+- With `--stream-experts`, replies start sooner and their first tokens come
+  faster: the expert arena updates its GPU residency and locks regrown memory
+  on a background thread. `GMLX_RESIDENCY_ASYNC=0` turns it off.
+- `gmlx serve --stream-experts` prefills in larger chunks, so a long prompt
+  reaches its first token sooner.
+- With `--stream-experts`, prompts prefill faster: experts the decode arena
+  already holds are copied from memory. `GMLX_RING_FROM_ARENA=0` turns it off.
+- With `--stream-experts`, Muse Spark and other sliding-window models start
+  answering sooner on many follow-up turns and long prompts.
+
 ### Fixed
 
 - A Ctrl-C that reached a `gmlx launch --container` session without a
   terminal just as its client exited was lost, and the session kept waiting
   for its other copies.
+- `--moe-miss-shed` dropped no experts on Muse Spark, though the load said
+  it was on. It now sheds them as on other MoE models.
+- `--moe-layer-shed` no longer drops a shed layer's whole MoE output on models
+  with no shared expert: Muse Spark keeps the top expert, others run in full.
+- `--moe-layer-shed` could stop a request with a concatenate error on models
+  such as DeepSeek-V4, GLM-5.2, GLM-5.3-Flash and K2 Horizon.
+- With `--stream-experts`, the expert arena came out one prefill ring smaller
+  than the memory budget allows when free RAM set its size.
+- With `--stream-experts`, batched or speculative decoding of up to 64 tokens
+  a step gets the GPU-wired expert arena from its first step.
+- With `--stream-experts`, a long prompt on some models stopped
+  prefilling and never answered.
 
 ## [0.5.1] - 2026-10-18
 

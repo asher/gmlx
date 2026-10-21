@@ -100,6 +100,20 @@ def governor_headroom_bytes() -> float | None:
     return _headroom_and_ws(margin())[0]
 
 
+def ring_share_bytes(full_bytes: int, held_bytes: int, ring_bytes: int) -> int:
+    """Bytes of the prefill ring's room the decode arena holds while
+    decoding and lends back for each prefill pass, instead of leaving the
+    room idle under the ceiling. ``full_bytes`` is the arena sized with
+    the room, ``held_bytes`` the arena with the room set aside; the share
+    is what the room adds. Lends free whole layers, so the arena must be
+    at least twice the ring. ``GMLX_RING_TIMESHARE=0`` keeps the room
+    apart for the process lifetime."""
+    if (not env_bool("GMLX_RING_TIMESHARE", True) or ring_bytes <= 0
+            or full_bytes < 2 * ring_bytes):
+        return 0
+    return max(0, min(int(ring_bytes), int(full_bytes) - int(held_bytes)))
+
+
 def legacy_room_bytes() -> int:
     raw = os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "")
     try:
@@ -224,6 +238,7 @@ def _decode_arena_bytes(
     total_bytes: int, offsets, budget: int | None, room_bytes: int | None = None,
     pinned_bytes: int = 0, streamable_bytes: int = 0,
     cast_dead_bytes: int = 0, ring_bytes: int = 0, forced: bool = False,
+    avail_bytes: int | None = None,
 ) -> int:
     """Arena budget for the decode feeder: what the memory ceiling leaves
     after the non-expert weights, the KV room, the prefill ring and the
@@ -236,17 +251,21 @@ def _decode_arena_bytes(
     arena, the prefill ring and the KV cache share one budget: at decode
     the governor's headroom is the room minus live KV, whatever the box's
     working-set ratio or the quant's ring size. ``ring_bytes`` keeps the
-    ring's room out of the arena for good: a ring rebuilt on top of a
-    full wired arena, or lent out of it with a copy of every layer, is a
-    transient the kernel has to swap for on a box the arena has already
-    filled. ``room_bytes`` is the priced KV room
+    ring's room out of the arena: a ring rebuilt on top of a full wired
+    arena is a transient the kernel has to swap for on a box the arena
+    has already filled. The loader sizes the arena before the ring is
+    wired, with and without the ring's room, and ``ring_share_bytes``
+    decides whether the arena holds the room and lends it at prefill; an
+    explicit ``GMLX_DECODE_ARENA_GB`` keeps the whole ring apart and is
+    sized once, against ``avail_bytes`` read before the ring was wired.
+    ``room_bytes`` is the priced KV room
     (``budget.kv_room_bytes``); None keeps the flat legacy reserve.
     ``GMLX_DECODE_ARENA_RAM_FRAC`` caps the ceiling at a fraction of
     physical RAM when set. ``GMLX_DECODE_ARENA_GB`` overrides the
     ceilings but is still clamped to what is reclaimable minus the floor
-    - an arena wired past that starves the page cache every buffered
-    read path depends on (``GMLX_DECODE_ARENA_FORCE=1`` restores the
-    unclamped behavior).
+    and the ring: an arena wired past that starves the page cache every
+    buffered read path depends on (``GMLX_DECODE_ARENA_FORCE=1`` restores
+    the unclamped behavior).
 
     A second live streaming install needs no term here: mlock moves a page
     out of the file-backed count and an arena is anonymous, so the
@@ -256,18 +275,21 @@ def _decode_arena_bytes(
         want = int(float(env) * (1 << 30))
         if env_bool("GMLX_DECODE_ARENA_FORCE", False):
             return want
-        avail = _available_ram_bytes()
+        avail = (_available_ram_bytes() if avail_bytes is None
+                 else avail_bytes)
         if avail is None:
             return want
         try:
             ram = int(metal_value("memory_size"))
         except Exception:
             ram = avail
-        cap = max(0, avail - _ram_floor_bytes(ram))
+        cap = max(0, avail - _ram_floor_bytes(ram) - int(ring_bytes))
         if want > cap:
             print(
                 f"[stream] GMLX_DECODE_ARENA_GB={env} exceeds reclaimable"
-                f" RAM minus the floor; clamping the arena to"
+                f" RAM minus the floor"
+                f"{' and the prefill ring' if ring_bytes else ''};"
+                f" clamping the arena to"
                 f" {cap / (1 << 30):.1f}GB (GMLX_DECODE_ARENA_FORCE=1"
                 f" overrides)"
             )

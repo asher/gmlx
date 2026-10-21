@@ -63,6 +63,20 @@ def test_inert_without_pressure_or_observation(monkeypatch):
     assert pd.decayed_for_batch(_batch(2048, 0)) == 2048
 
 
+def test_inert_on_a_streamed_model(monkeypatch):
+    _cap(monkeypatch, 100.0)
+    _arm(rows=2, cost=(8192, 22.0))  # a full expert pass per chunk
+    streamed = _batch(8192, 0)
+    streamed.model.layers = [SimpleNamespace(
+        modules=lambda: [SimpleNamespace(_kq_cpu_only=True)])]
+    assert pd.decayed_for_batch(streamed) == 8192
+    assert pd.decayed_for_batch(_batch(8192, 0)) == 256
+    # A resident CPU-only expert codec marks its modules the same way, and
+    # its chunk costs in proportion to its width.
+    streamed.model._kq_streaming = False
+    assert pd.decayed_for_batch(streamed) == 256
+
+
 def test_tier_math_against_budget(monkeypatch):
     _cap(monkeypatch, 100.0)
     _arm(rows=2, cost=(2048, 2.0))  # 0.9766 ms per token

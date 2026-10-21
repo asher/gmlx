@@ -1207,9 +1207,11 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "model).")
     ap.add_argument("--moe-layer-shed", type=float, default=None, metavar="P",
                     help="Lossy: at decode, skip each streamed MoE layer's routed "
-                         "experts with probability P (0 < P < 1) per token; the "
-                         "shared expert still runs on shed layers (config mode: "
-                         "set `moe_layer_shed: P` per model).")
+                         "experts with probability P (0 < P < 1) per token. A "
+                         "shed layer still runs its shared expert or dense MLP. "
+                         "On a layer with neither, Muse Spark runs its top "
+                         "expert and other models run the layer in full "
+                         "(config mode: set `moe_layer_shed: P` per model).")
     ap.add_argument("--moe-prestage", choices=("ranked", "keepers"),
                     default=None,
                     help="Lookahead prestage targeting for a streamed model; "
@@ -1251,7 +1253,7 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "`server.family_defaults: false`, which a config "
                          "reload restores).")
     ap.add_argument("--prefill-step-size", type=int, default=None, metavar="N",
-                    help="Prefill chunk size in tokens (default 2048) - lower "
+                    help="Prefill chunk size in tokens (default 2048, 8192 for a streamed model) - lower "
                          "it to cap peak memory on long prompts, at some "
                          "prefill-throughput cost. Also via PREFILL_STEP_SIZE; "
                          "config mode: server.prefill_step_size.")

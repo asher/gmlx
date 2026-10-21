@@ -74,6 +74,79 @@ def test_cursor_no_step_uses_block_grid():
     assert _positions(bounds) == [96]
 
 
+def test_streamed_grid_starts_at_the_restored_prefix(monkeypatch):
+    """A streamed model reads every expert once per chunk, so a boundary
+    that cuts its chunk adds a full pass. Its grid starts where this
+    prefill's chunks start, the restored prefix, not at token 0."""
+    def batch(streamed, tags=("rot:2048:0", "kv")):
+        return SimpleNamespace(prefill_step_size=8192, model=SimpleNamespace(
+            _kq_streaming=streamed, _kq_apc_ckpt_layout=tags))
+
+    # A warm turn at 7299 + 1735 tokens: one chunk, no cut at 8192.
+    assert ckpt._ckpt_cursor_init(
+        batch(True), guard=9033, restored=7299, block_size=16) == ([], 0, 0)
+    bounds, terminal, _ = ckpt._ckpt_cursor_init(
+        batch(False), guard=9033, restored=7299, block_size=16)
+    assert _positions(bounds) == [8192]
+    # A long warm turn stores at its own chunk edges.
+    bounds, terminal, _ = ckpt._ckpt_cursor_init(
+        batch(True), guard=30000, restored=7299, block_size=16)
+    assert _positions(bounds) == [15491, 23683]
+    # A cold prompt keeps the absolute grid, and so do recurrent layouts.
+    bounds, _, _ = ckpt._ckpt_cursor_init(
+        batch(True), guard=30000, restored=0, block_size=16)
+    assert _positions(bounds) == [8192, 16384, 24576]
+    bounds, _, _ = ckpt._ckpt_cursor_init(
+        batch(True, ("kv", "arr")), guard=30000, restored=7299,
+        block_size=16)
+    assert _positions(bounds) == [8192, 16384, 24576]
+
+
+def test_streamed_origin_snaps_to_a_block_below_the_rotating_window():
+    """Below a rotating window the store takes only block-aligned
+    positions, so an off-block restore there starts the grid at its
+    block. Past the window the grid starts at the restore itself."""
+    batch = SimpleNamespace(prefill_step_size=32, model=SimpleNamespace(
+        _kq_streaming=True, _kq_apc_ckpt_layout=("rot:64:0", "kv")))
+    bounds, _, _ = ckpt._ckpt_cursor_init(
+        batch, guard=56, restored=5, block_size=16)
+    assert _positions(bounds) == [32]
+    bounds, _, _ = ckpt._ckpt_cursor_init(
+        batch, guard=200, restored=100, block_size=16)
+    assert _positions(bounds) == [196]
+
+
+def test_grid_follows_the_profile_step_the_loop_runs(monkeypatch):
+    """On a streamed model an arch profile's step replaces a default
+    batch step in the prefill loop, and a cut off it costs an expert
+    pass, so the grid is cut at that step too. A resident model keeps
+    the batch's grid."""
+    import gmlx.gen.prefill_decay as pd
+
+    monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
+    monkeypatch.setitem(pd._SCORE_PROFILES, "grid_probe", lambda m, c: (
+        pd.ScoreTransientProfile(heads=4, bytes_per_elem=4, depth_divisor=4,
+                                 base_step=8192)))
+
+    def batch(streamed):
+        return SimpleNamespace(
+            prefill_step_size=2048, prompt_cache=[], model=SimpleNamespace(
+                model_type="grid_probe", _kq_streaming=streamed,
+                _kq_apc_ckpt_layout=("arr", "kv")))
+
+    bounds, terminal, interval = ckpt._ckpt_cursor_init(
+        batch(True), guard=20000, restored=0, block_size=16)
+    assert (interval, terminal) == (8192, 16384)
+    assert _positions(bounds) == [8192, 16384]
+    _, terminal, interval = ckpt._ckpt_cursor_init(
+        batch(False), guard=20000, restored=0, block_size=16)
+    assert (interval, terminal) == (4096, 18432)
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "2048")
+    _, _, interval = ckpt._ckpt_cursor_init(
+        batch(True), guard=20000, restored=0, block_size=16)
+    assert interval == 4096
+
+
 # -- Stage 5: replay boundary at N-1 --
 
 def _arm_meta(n, tags, restored=0, guard=None, step=2048):
@@ -184,6 +257,189 @@ def test_turn_boundary_grid_collides_with_terminal(monkeypatch):
     meta = _arm_meta(5000, ("kv", "arr"))
     assert meta["ckpt_boundaries"] == [(4096, "boundary"), (4999, "replay")]
     assert meta["ckpt_p_stable_bounds"] == [4096]
+
+
+def test_turn_boundary_streamed_grid_starts_at_the_restore(monkeypatch):
+    _stub_p_stable(monkeypatch, 9020)
+    batch = SimpleNamespace(prefill_step_size=8192, model=SimpleNamespace(
+        _kq_streaming=True, _kq_apc_ckpt_layout=("rot:2048:0", "kv")))
+    meta = {"full_input_ids": list(range(9034))}
+    ckpt._ckpt_arm_schedule(batch, meta, 9033, 7299, block_size=16)
+    # No grid point inside the one chunk; the exact pause and N-1 stay.
+    assert meta["ckpt_boundaries"] == [(9020, "boundary"), (9033, "replay")]
+    assert meta["ckpt_p_stable_bounds"] == [9020]
+
+
+def _streamed_meta(n, restored, tags=("rot:2048:0", "kv"), streamed=True,
+                   **model):
+    batch = SimpleNamespace(prefill_step_size=8192, model=SimpleNamespace(
+        _kq_streaming=streamed, _kq_apc_ckpt_layout=tuple(tags), **model))
+    meta = {"full_input_ids": list(range(n))}
+    ckpt._ckpt_arm_schedule(batch, meta, n - 16, restored, block_size=16)
+    return meta
+
+
+def _at(bounds):
+    return [p for p, _ in bounds]
+
+
+def _no_decay(monkeypatch, sys_anchor=False):
+    # The score cap that keeps the step whole at every depth used here.
+    monkeypatch.setenv("GMLX_PREFILL_SCORE_CAP_GB", "1000")
+    monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
+    if not sys_anchor:
+        monkeypatch.setattr(ckpt, "_ckpt_sys_boundary", lambda *a: None)
+
+
+def test_streamed_schedule_keeps_a_merged_tail_whole(monkeypatch):
+    """A streamed prefill widens its last chunk by up to an eighth so a
+    short tail joins it. A grid point in that tail would cut it into a
+    second full expert pass, while the turn pause after it stores the
+    turn anyway."""
+    _no_decay(monkeypatch)
+    # A cold 9000-token prompt: one chunk, not 8192 and then 798.
+    _stub_p_stable(monkeypatch, 8990)
+    meta = _streamed_meta(9000, 0)
+    assert _at(meta["ckpt_boundaries"]) == [8990, 8999]
+    assert meta["ckpt_p_stable_bounds"] == [8990]
+    assert _at(_streamed_meta(9000, 0, streamed=False)[
+        "ckpt_boundaries"]) == [8192, 8990, 8999]
+    # A warm turn of 8192 + 100 tokens: one pass, as for 8000 tokens.
+    _stub_p_stable(monkeypatch, 7299 + 8292 - 14)
+    meta = _streamed_meta(7299 + 8292, 7299)
+    assert _at(meta["ckpt_boundaries"]) == [15577, 15590]
+    # A grid point well before the end stays.
+    _stub_p_stable(monkeypatch, 19990)
+    assert _at(_streamed_meta(20000, 0)["ckpt_boundaries"]) == [
+        8192, 16384, 19990, 19999]
+    # A turn pause below the grid point starts the chunk: 8000 and 1499,
+    # not 8000, 192 and 1307.
+    _stub_p_stable(monkeypatch, 8000)
+    assert _at(_streamed_meta(9500, 0)["ckpt_boundaries"]) == [8000, 9499]
+
+
+def test_streamed_schedule_keeps_a_grid_point_a_next_turn_needs(
+        monkeypatch):
+    """A grid point stays when it is the only record a next turn can
+    adopt: on a media prompt, whose turn record is not known, or where
+    the window keeps the exact turn pause out. A text prompt with no turn
+    record drops it: a resend that extends it adopts the N-1 record."""
+    _no_decay(monkeypatch)
+    _stub_p_stable(monkeypatch, None)
+    meta = _streamed_meta(9000, 0)
+    assert _at(meta["ckpt_boundaries"]) == [8999]
+    assert meta["ckpt_p_stable_bounds"] == []
+    ids = list(range(9000))
+    ids[100:356] = [99999] * 256
+    batch = SimpleNamespace(prefill_step_size=8192, model=SimpleNamespace(
+        _kq_streaming=True, _kq_apc_ckpt_layout=("rot:2048:0", "kv"),
+        config=SimpleNamespace(image_token_id=99999)))
+    meta = {"full_input_ids": ids}
+    ckpt._ckpt_arm_schedule(batch, meta, 8984, 0, block_size=16)
+    assert _at(meta["ckpt_boundaries"]) == [8192, 8999]
+    _stub_p_stable(monkeypatch, 8286)
+    meta = _streamed_meta(8300, 0, tags=("rot:8290:0", "kv"))
+    assert _at(meta["ckpt_boundaries"]) == [8192, 8299]
+    assert meta["ckpt_p_stable_bounds"] == [8192]
+
+
+def test_streamed_schedule_drops_a_cut_only_where_the_loop_merges(
+        monkeypatch):
+    """A grid point goes only where the loop would merge the tail past
+    it. A batch that runs its last token in the last chunk merges over
+    the whole prompt, so a tail one token over an eighth stays cut. A
+    step that decays at depth never merges."""
+    _no_decay(monkeypatch)
+    _stub_p_stable(monkeypatch, 9203)
+    folding = {"language_model": SimpleNamespace(
+        supports_logits_to_keep=True)}
+    assert _at(_streamed_meta(9217, 0, **folding)[
+        "ckpt_boundaries"]) == [8192, 9203, 9216]
+    assert _at(_streamed_meta(9216, 0)["ckpt_boundaries"]) == [9203, 9215]
+    # 16 heads under a 5.4 GB cap decay 8192 to 4096 past about 12.4k.
+    monkeypatch.setenv("GMLX_PREFILL_SCORE_CAP_GB", "5.4")
+    _stub_p_stable(monkeypatch, 16000 + 8492 - 14)
+    meta = _streamed_meta(16000 + 8492, 16000,
+                          config=SimpleNamespace(num_attention_heads=16))
+    assert 24192 in _at(meta["ckpt_boundaries"])
+
+
+def test_streamed_cold_grid_starts_at_the_system_prefix(monkeypatch):
+    """The anchor at the end of the system prefix cuts a cold prompt, so
+    the chunks after it start there and so does the grid: two passes for
+    10000 tokens, not three. A resident model keeps the grid from 0."""
+    import gmlx.cache.retire_key as retire_key
+
+    _no_decay(monkeypatch, sys_anchor=True)
+    _stub_p_stable(monkeypatch, 9986)
+    monkeypatch.setattr(retire_key, "system_prefix_lcp", lambda ctx, ids: 3000)
+    meta = _streamed_meta(10000, 0)
+    assert meta["ckpt_boundaries"] == [
+        (2992, "anchor"), (9986, "boundary"), (9999, "replay")]
+    assert _at(_streamed_meta(10000, 0, streamed=False)[
+        "ckpt_boundaries"]) == [2992, 8192, 9986, 9999]
+    _stub_p_stable(monkeypatch, 19986)
+    assert _at(_streamed_meta(20000, 0)["ckpt_boundaries"]) == [
+        2992, 11184, 19986, 19999]
+    # No grid point below the anchor, where no chunk edge is.
+    monkeypatch.setattr(retire_key, "system_prefix_lcp", lambda ctx, ids: 9010)
+    _stub_p_stable(monkeypatch, 9000)
+    assert _at(_streamed_meta(10000, 0)["ckpt_boundaries"]) == [
+        9000, 9008, 9999]
+
+
+def test_an_mtp_batch_arms_its_grid_from_the_base_step(monkeypatch):
+    """Serve installs the MTP prompt step before the load installs prefill
+    decay, so the MTP body that arms the schedule runs while the decay
+    wrapper holds this chunk's merged width in prefill_step_size. The
+    grid follows the batch's step all the same."""
+    import gmlx.gen.prefill_decay as pd
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch as P
+
+    _no_decay(monkeypatch)
+    _stub_p_stable(monkeypatch, 8986)
+    seen = {}
+
+    def mtp_body(batch):
+        seen["step"] = batch.prefill_step_size
+        meta = {"full_input_ids": list(range(9000))}
+        ckpt._ckpt_arm_schedule(batch, meta, 8984, 0, block_size=16)
+        seen["meta"] = meta
+
+    monkeypatch.setattr(P, "prompt_step", mtp_body)
+    monkeypatch.setattr(P, "needs_processing", P.needs_processing)
+    monkeypatch.setattr(P, pd._FLAG, False, raising=False)
+    assert pd.install_prefill_decay()
+    model = SimpleNamespace(_kq_streaming=True,
+                            _kq_apc_ckpt_layout=("arr", "kv"))
+    batch = SimpleNamespace(
+        prefill_step_size=8192, model=model, prompt_cache=[],
+        draft_model=object(), _gmlx_pinned_step=None,
+        _inputs_embeds=SimpleNamespace(shape=(1, 9000, 8)),
+        _next_apc_checkpoint_column=lambda: None)
+    P.prompt_step(batch)
+    assert seen["step"] == 8999
+    assert seen["meta"]["ckpt_boundaries"] == [
+        (8192, "boundary"), (8999, "replay")]
+    assert seen["meta"]["ckpt_p_stable_bounds"] == [8192]
+    assert batch.prefill_step_size == 8192
+    assert not hasattr(batch, "_gmlx_base_step")
+
+
+def test_short_cold_prompt_keeps_the_anchor_out_of_the_turn_set(
+        monkeypatch):
+    """The anchor is its own record. Less than one step past it, it is
+    neither the turn's grid point nor the terminal."""
+    import gmlx.cache.retire_key as retire_key
+
+    _no_decay(monkeypatch, sys_anchor=True)
+    _stub_p_stable(monkeypatch, 4986)
+    monkeypatch.setattr(retire_key, "system_prefix_lcp", lambda ctx, ids: 3000)
+    meta = _streamed_meta(5000, 0)
+    assert meta["ckpt_boundaries"] == [
+        (2992, "anchor"), (4986, "boundary"), (4999, "replay")]
+    assert meta["ckpt_p_stable_bounds"] == [4986]
+    assert (meta["ckpt_terminal"], meta["ckpt_interval"]) == (0, 0)
 
 
 def test_turn_boundary_kill_switch(monkeypatch):

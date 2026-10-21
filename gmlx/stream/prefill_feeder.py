@@ -39,6 +39,7 @@ from .feeder_common import (
     ATTRS,
     KINDS,
     DaemonPool,
+    copy_experts,
     lock_pages,
     read_range,
     read_range_aligned,
@@ -54,6 +55,8 @@ from .feeder_common import (
 # small enough that one layer's three stacks spread across the pool.
 _READ_CHUNK = 32 << 20
 _READ_WORKERS = 12
+# Memory copies of the experts the decode arena holds (see _copy_held).
+_COPY_WORKERS = 4
 
 # A staging wait longer than this means the SSD or the staging thread died;
 # raising beats silently demand-faulting garbage.
@@ -172,6 +175,7 @@ class PrefillFeeder:
         # exit.
         self._stage_pool = DaemonPool(1, name="gmlx-prefill-stage")
         self._read_pool = DaemonPool(_READ_WORKERS, name="gmlx-prefill-read")
+        self._copy_pool = DaemonPool(_COPY_WORKERS, name="gmlx-prefill-copy")
         self._ready: dict[int, threading.Event] = {}
         self._last_li: int | None = None
         self._error: BaseException | None = None
@@ -180,8 +184,8 @@ class PrefillFeeder:
         self._wedged: list[int] = []
         # Set by the loader to DecodeFeeder.lend_for_ring when a decode
         # arena coexists with this ring: called before a post-decode slot
-        # rebuild; it shrinks the arena only when the kernel has lost the
-        # ring's room.
+        # rebuild, it frees the room the arena holds for the ring, or
+        # shrinks the arena when the kernel has lost the ring's room.
         self._lend_hook = None
         # Set by the loader to DecodeFeeder.seed_from_ring: after a layer's
         # compute, its slot's most-routed experts are copied into the
@@ -193,6 +197,12 @@ class PrefillFeeder:
         self._seed_prev: int | None = None
         self._t_seed_wait = 0.0
         self._t_ready_wait = 0.0  # compute blocked on a slot still staging
+        # Set by the loader to DecodeFeeder.arena_sources: a stage copies
+        # the experts the decode arena holds and reads only the rest.
+        self._arena_hook = None
+        self._sources: dict[int, object] = {}  # li -> ArenaSources to copy
+        self._bytes_staged = 0
+        self._bytes_copied = 0
 
     def _alloc_slots(self) -> None:
         import mlx_kquant as kq
@@ -227,15 +237,18 @@ class PrefillFeeder:
                     f"{want / 1e9:.1f} GB; unwired slots page out under "
                     f"pressure and the GPU pays on every use")
 
-    def release_slots(self) -> None:
-        """Drop the ring (its physical pages with it) once decode starts;
-        the ring's room stays reserved under the ceiling and the next
-        prefill pass re-allocates into it."""
+    def release_slots(self) -> bool:
+        """Drop the ring (its physical pages with it) once decode starts.
+        The next prefill pass re-allocates it, in the room kept under the
+        ceiling or lent from the decode arena. False when the ring keeps
+        its slots."""
+        if not self._slots:
+            return True
         # An out-of-service ring keeps its slots (see _quarantine).
-        if not self._slots or self._wedged:
-            return
+        if self._wedged:
+            return False
         if not self._drain_staging():  # a worker may still write a slot
-            return
+            return False
         self._submit_seed()
         for futs in self._seed_futs.values():
             futures_wait(futs)
@@ -252,6 +265,12 @@ class PrefillFeeder:
                 f"[stream] feeder prefill: compute waited "
                 f"{self._t_ready_wait:.2f}s for slots still staging")
             self._t_ready_wait = 0.0
+        if self._bytes_copied:
+            print(
+                f"[stream] feeder prefill: {self._bytes_copied / 1e9:.1f} of "
+                f"{self._bytes_staged / 1e9:.1f} GB staged were copied from "
+                "the decode arena")
+        self._bytes_staged = self._bytes_copied = 0
         self._ready.clear()
         self._error = None
         self._last_li = None
@@ -260,6 +279,7 @@ class PrefillFeeder:
         self._locked = []
         self._slots = []
         self._views = {}
+        return True
 
     def _verify_zero_copy(self) -> None:
         li = min(self._layers)
@@ -318,7 +338,8 @@ class PrefillFeeder:
         self._locked = []
         self._layers = {}
         self._views = {}
-        self._lend_hook = self._seed_hook = None
+        self._lend_hook = self._seed_hook = self._arena_hook = None
+        self._release_sources()
         self._seed_futs.clear()
         self._seed_ids.clear()
         self._seed_present.clear()
@@ -337,6 +358,8 @@ class PrefillFeeder:
     # staging
 
     def _stage(self, li: int) -> None:
+        src = self._sources.pop(li, None)
+        copies: list = []
         try:
             seeds = self._seed_futs.pop(self._slot_of[li], None)
             if seeds:  # the slot's last layer is still being copied out
@@ -349,24 +372,80 @@ class PrefillFeeder:
             seeds = None
             reads = [(kind, path, off, nbytes)
                      for kind, (_, path, off, nbytes) in self._layers[li].items()]
+            held = self._copy_held(
+                src, slot, {kind: nb for kind, _, _, nb in reads}, copies)
             futs = []
             for kind, path, off, nbytes in reads:
                 fd = self._fds[path]
                 mv = slot[kind][1]
-                for start in range(0, nbytes, _READ_CHUNK):
-                    end = min(start + _READ_CHUNK, nbytes)
+                for start, end in _read_spans(nbytes, held.get(kind)):
                     futs.append(self._submit_read(
                         path, fd, mv[start:end], off + start))
+            # The arena gets its slots back before a read can wedge.
+            futures_wait(copies)
+            if src is not None:
+                src.release()
             # Every read ends before the slot counts as staged, a failed one
             # included: a sibling still in flight would write the slot the
             # next pass stages.
             futures_wait(futs)
-            for f in futs:
+            for f in copies + futs:
                 f.result()
         except BaseException as e:  # surfaced on the caller's next wait
             self._error = e
         finally:
+            if src is not None:
+                futures_wait(copies)
+                src.release()
             self._ready[li].set()
+
+    def _copy_held(self, src, slot, sizes: dict[str, int], copies: list,
+                   want: np.ndarray | None = None) -> dict:
+        """Submit copies of the experts ``src`` holds (those ``want`` marks,
+        if given) from the decode arena into ``slot``. ``sizes`` maps kind
+        to stack bytes. Returns kind -> (held mask, stride) for the reads
+        to skip."""
+        held: dict = {}
+        self._bytes_staged += sum(
+            nb if want is None else int(want.sum()) * (nb // len(want))
+            for nb in sizes.values())
+        if src is None:
+            return held
+        experts, slots = src.experts, src.slots
+        if want is not None:
+            keep = want[experts]
+            experts, slots = experts[keep], slots[keep]
+        for kind, nbytes in sizes.items():
+            (_, a_mv), stride = src.bufs[kind]
+            mask = np.zeros(nbytes // stride, dtype=bool)
+            mask[experts] = True
+            held[kind] = (mask, stride)
+            if not len(experts):
+                continue
+            dst = np.frombuffer(slot[kind][1], dtype=np.uint8)
+            arena = np.frombuffer(a_mv, dtype=np.uint8)
+            pairs = np.stack([slots, experts], axis=1)
+            for chunk in np.array_split(pairs, _COPY_WORKERS):
+                if len(chunk):
+                    copies.append(self._copy_pool.submit(
+                        copy_experts, dst, arena, chunk, stride))
+            self._bytes_copied += len(experts) * stride
+        return held
+
+    def _take_sources(self, li: int):
+        """The decode arena's residents of layer ``li`` (main thread)."""
+        if self._arena_hook is None:
+            return None
+        return self._arena_hook(li, {
+            kind: (path, off, nbytes)
+            for kind, (_, path, off, nbytes) in self._layers[li].items()})
+
+    def _release_sources(self) -> None:
+        """Give the arena back the slots of stages that never started."""
+        for li in list(self._sources):
+            src = self._sources.pop(li, None)
+            if src is not None:
+                src.release()
 
     def _submit_read(self, path: str, fd: int, dest, off: int):
         if self._nocache:
@@ -379,7 +458,10 @@ class PrefillFeeder:
             li in self._layers and li not in self._ready
             and (self._pass_last is None or li <= self._pass_last)
         ):
+            src = self._take_sources(li)
             self._ready[li] = threading.Event()
+            if src is not None:
+                self._sources[li] = src
             self._stage_pool.submit(self._stage, li)
 
     def limit_pass(self, last_li: int | None) -> None:
@@ -502,21 +584,40 @@ class PrefillFeeder:
         slot = self._slots[parity]
         futs = []
         n_exp = 0
-        for kind, (mod, path, off, nbytes) in entry.items():
-            n_exp = getattr(mod, ATTRS[kind]).weight.shape[0]
-            stride = nbytes // n_exp
-            mv = slot[kind][1]
-            fd = self._fds[path]
-            for e in ids:
-                if 0 <= e < n_exp:
-                    futs.append(self._submit_read(
-                        path, fd, mv[e * stride:(e + 1) * stride],
-                        off + e * stride))
-        _, pending = futures_wait(futs, timeout=_STAGE_TIMEOUT_S)
+        src = self._take_sources(li)
+        copies: list = []
+        try:
+            kind0, (mod0, *_) = next(iter(entry.items()))
+            want = np.zeros(getattr(mod0, ATTRS[kind0]).weight.shape[0],
+                            dtype=bool)
+            want[[e for e in ids if 0 <= e < len(want)]] = True
+            held = self._copy_held(
+                src, slot,
+                {kind: nb for kind, (_, _, _, nb) in entry.items()},
+                copies, want=want)
+            for kind, (mod, path, off, nbytes) in entry.items():
+                n_exp = getattr(mod, ATTRS[kind]).weight.shape[0]
+                stride = nbytes // n_exp
+                mv = slot[kind][1]
+                fd = self._fds[path]
+                mask = held.get(kind, (None,))[0]
+                for e in ids:
+                    if 0 <= e < n_exp and not (mask is not None and mask[e]):
+                        futs.append(self._submit_read(
+                            path, fd, mv[e * stride:(e + 1) * stride],
+                            off + e * stride))
+        finally:
+            futures_wait(copies)
+            if src is not None:
+                src.release()
+            # Every read ends before the call returns or raises: one still
+            # in flight would write the slot the next pass stages.
+            _, pending = futures_wait(futs, timeout=_STAGE_TIMEOUT_S)
+            if pending:
+                self._quarantine([li])
         if pending:
-            self._quarantine([li])
             raise RuntimeError(f"[feeder] partial staging of layer {li} timed out")
-        for f in futs:
+        for f in copies + futs:
             f.result()
         with self._swapped(li):
             yield
@@ -531,10 +632,12 @@ class PrefillFeeder:
         # A wedged worker never returns: joining it would hang the close.
         # Its queued work is dropped, since no slot is staged again.
         wedged = bool(getattr(self, "_wedged", None))
-        for name in ("_stage_pool", "_read_pool"):
+        for name in ("_stage_pool", "_read_pool", "_copy_pool"):
             pool = getattr(self, name, None)
             if pool is not None:
                 pool.shutdown(wait=wait and not wedged, cancel_futures=wedged)
+        if getattr(self, "_sources", None):
+            self._release_sources()
         fds, self._fds = getattr(self, "_fds", {}), {}
         if wedged:
             # The wedged read still uses its fd, and a closed fd number
@@ -552,6 +655,24 @@ class PrefillFeeder:
             self.close(wait=False)
         except Exception:  # noqa: S110 - GC-time cleanup must never raise
             pass
+
+
+def _read_spans(nbytes: int, held=None):
+    """Byte ranges of a layer stack to read, in _READ_CHUNK pieces: the
+    whole stack, or the experts the (mask, stride) ``held`` leaves out."""
+    if held is None:
+        runs = [(0, nbytes)]
+    else:
+        mask, stride = held
+        need = np.concatenate(([False], ~mask, [False]))
+        edges = np.flatnonzero(need[1:] != need[:-1])
+        runs = [(int(a) * stride, int(b) * stride)
+                for a, b in zip(edges[::2], edges[1::2])]
+        if len(mask) * stride < nbytes:
+            runs.append((len(mask) * stride, nbytes))
+    for a, b in runs:
+        for start in range(a, b, _READ_CHUNK):
+            yield start, min(start + _READ_CHUNK, b)
 
 
 def ring_bytes(offsets) -> int:

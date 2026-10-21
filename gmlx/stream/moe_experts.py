@@ -603,28 +603,60 @@ def install_moe_prestage_keepers(model) -> int:
     return n
 
 
+def _ffn_beside(mods: dict, name: str) -> bool:
+    """Whether the layer runs a feed-forward path beside the routed experts
+    at ``name``: a shared expert (``shared_experts``, ``shared_mlp``,
+    ``share_expert`` and the like) or a dense MLP, in the experts' block or
+    any block above it. ``mods`` is the layer's ``named_modules``."""
+    path = name.split(".")
+    for i in range(len(path) - 1, -1, -1):
+        node = mods[".".join(path[:i])]
+        for k, v in node.children().items():
+            if k != path[i] and isinstance(v, nn.Module) and (
+                    "share" in k or hasattr(v, "down_proj")):
+                return True
+    return False
+
+
 def install_moe_layer_shed(model, p: float) -> int:
     """Skip each streamed MoE layer's routed path with probability ``p``
-    per decode token; the layer's shared expert still runs. Lossy.
+    per decode token; the layer's shared expert or dense MLP still runs.
+    A layer with neither keeps its top-scored expert where its block sets
+    ``_kq_layer_shed_top1``, and is not hooked where it does not. Lossy.
     Returns the number of layers hooked; raises on p outside (0, 1)."""
     if not 0.0 < p < 1.0:
         raise ValueError(
             f"MoE layer-shed probability must be in (0, 1), got {p}")
+    layers = getattr(model, "layers", None)
+    if layers is None:
+        layers = model.model.layers
     n = 0
-    for m in _streamed_modules(model):
-        if hasattr(m, "_kq_li") and hasattr(m, "_kq_cpu_only"):
+    seen: set = set()
+    for layer in layers:
+        mods = dict(layer.named_modules())
+        for name, m in mods.items():
+            if (id(m) in seen or not hasattr(m, "_kq_li")
+                    or not hasattr(m, "_kq_cpu_only")):
+                continue
+            seen.add(id(m))
+            top1 = not _ffn_beside(mods, name)
+            block = mods[name.rpartition(".")[0]]
+            if top1 and not getattr(block, "_kq_layer_shed_top1", False):
+                continue    # a shed would add nothing
             object.__setattr__(m, "_kq_layer_shed", float(p))
+            object.__setattr__(m, "_kq_shed_keeps_top1", top1)
             n += 1
     if n:
         loadlog.info(
             f"[stream] MoE layer-shed {p:g}: each of {n} streamed MoE "
             "layers skips its routed experts with that probability per "
-            "token (lossy - shared expert only on shed layers)"
+            "token. Lossy: a shed layer keeps its shared expert or dense "
+            "MLP, or on Muse Spark its top expert."
         )
     else:
         print(
-            "[stream] MoE layer-shed found no streamed MoE layer - "
-            "no effect"
+            "[stream] MoE layer-shed: no streamed MoE layer here can shed, "
+            "so the flag has no effect"
         )
     return n
 

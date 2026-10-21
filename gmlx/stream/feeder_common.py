@@ -29,6 +29,14 @@ def read_range(fd, mv, off: int) -> None:
         done += r
 
 
+def copy_experts(dst, src, pairs, stride: int) -> None:
+    """Copy expert ``src`` slot ``e`` to ``dst`` slot ``s`` for each
+    (e, s) row of ``pairs``, ``stride`` bytes each."""
+    for e, s in pairs:
+        np.copyto(dst[s * stride:(s + 1) * stride],
+                  src[e * stride:(e + 1) * stride])
+
+
 def read_range_aligned(fd, mv, off: int, file_size: int) -> None:
     """``read_range`` with every pread page-aligned. The kernel services
     an F_NOCACHE read at an unaligned offset through the page cache, and

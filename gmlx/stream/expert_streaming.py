@@ -242,6 +242,15 @@ def _set_allocator_limits(tracked_bytes: int, room_bytes: int = 0) -> None:
 
 
 _NO_EXPERT_LOGGED: set = set()
+_UNSHED_NOTED = False
+
+
+def _note_unshed() -> None:
+    global _UNSHED_NOTED
+    if not _UNSHED_NOTED:
+        _UNSHED_NOTED = True
+        print("[stream] --moe-layer-shed: layers that cannot keep their "
+              "top expert run in full")
 
 
 def _valid_expert_ids(module, indices):
@@ -490,7 +499,13 @@ def install_expert_streaming(
                     # scores for the miss-shed hook and strip them from what
                     # gets forwarded.
                     scores_arg = args[0] if args else None
-                    if args and not _fwd_scores:
+                    # A block that norms each expert output before its own
+                    # sum (muse-spark) hands scores over for miss-shed only:
+                    # they are never forwarded, and a shed call returns
+                    # per-expert outputs with zeros at the shed experts.
+                    unmixed = getattr(self, "_kq_scores_unmixed", False)
+                    fwd = _fwd_scores and not unmixed
+                    if args and not fwd:
                         args = args[1:]
                     # Threshold read per call (cheap; once per MoE layer per
                     # forward) so env changes A/B without a reload. Streaming
@@ -509,6 +524,8 @@ def install_expert_streaming(
                     fdr = getattr(self, "_kq_feeder", None)
                     dfr = getattr(self, "_kq_decode_feeder", None)
                     small = n_tokens <= _arena_stage_max_tokens()
+                    if dfr is not None and n_tokens > 1 and not in_split:
+                        dfr.forward_start(self._kq_li)
                     la = getattr(self, "_kq_lookahead", None)
                     la_pred = None
                     routed_ids = None
@@ -519,7 +536,13 @@ def install_expert_streaming(
                         if n_tokens != 1:
                             ph = None
                     lsp = getattr(self, "_kq_layer_shed", None)
-                    if lsp is not None and cpu_only and n_tokens == 1:
+                    shed_top1 = False
+                    # Decode only: a one-token leaf of an arena token split
+                    # is prefill or verify work, and a shed leaf's
+                    # per-expert zeros cannot join a clean leaf's mixed
+                    # output.
+                    if (lsp is not None and cpu_only and n_tokens == 1
+                            and not in_split):
                         rng = getattr(self, "_kq_shed_rng", None)
                         if rng is None:
                             # per-layer seed: reproducible shed pattern
@@ -527,15 +550,30 @@ def install_expert_streaming(
                                 0x5EED ^ (getattr(self, "_kq_li", 0) or 0))
                             object.__setattr__(self, "_kq_shed_rng", rng)
                         if rng.random() < lsp:
-                            # Skip the routed path entirely (gather, stage
-                            # and this layer's eval fence). The unmixed
-                            # zeros return makes the block mix nothing and
-                            # still add its shared expert.
-                            if dfr is not None:
-                                dfr._layer_shed_n += 1
-                            return mx.zeros(
-                                (*x.shape[:-1], indices.shape[-1],
-                                 x.shape[-1]), dtype=x.dtype)
+                            # A layer with no shared expert or dense MLP
+                            # keeps its top-scored expert from the arena:
+                            # with nothing routed it would add nothing.
+                            # Where it cannot, it runs in full.
+                            top1 = getattr(self, "_kq_shed_keeps_top1", False)
+                            shed_top1 = (
+                                top1
+                                and scores_arg is not None
+                                and dfr is not None
+                                and dfr.covers(self._kq_li))
+                            if shed_top1 or not top1:
+                                if dfr is not None:
+                                    dfr._layer_shed_n += 1
+                            else:
+                                _note_unshed()
+                            if not top1:
+                                # Skip the routed path entirely (gather,
+                                # stage and this layer's eval fence). The
+                                # unmixed zeros return makes the block mix
+                                # nothing, and the layer keeps its shared
+                                # expert or dense MLP.
+                                return mx.zeros(
+                                    (*x.shape[:-1], indices.shape[-1],
+                                     x.shape[-1]), dtype=x.dtype)
                     gt = getattr(self, "_kq_gpu_token", None)
                     gt_live = (
                         gt is not None
@@ -556,7 +594,10 @@ def install_expert_streaming(
                     if (
                         gt_live
                         and scores_arg is not None
+                        and not unmixed
+                        and not shed_top1
                         and not dfr.wedged_at(self._kq_li)
+                        and dfr.at_target(self._kq_li)
                         and gt.layer_autonomous(self._kq_li)
                     ):
                         # GPU-autonomous layer (gpu-dispatch Tier 2): no
@@ -581,7 +622,7 @@ def install_expert_streaming(
                                             indices.astype(mx.uint32),
                                             sc_f32, tbl))
                                     mix_c = mix.astype(x.dtype)
-                                    if _fwd_scores:
+                                    if fwd:
                                         y = super().__call__(
                                             x, slots, mix_c,
                                             *args[1:], **kwargs)
@@ -637,7 +678,7 @@ def install_expert_streaming(
                         # returns None when the call routes to more distinct
                         # experts than the arena has slots - fall through.
                         t0 = time.perf_counter() if ph is not None else 0.0
-                        if n_tokens == 1 and not in_split:
+                        if not in_split and n_tokens == 1:
                             # A one-token piece of a split is prefill work:
                             # wiring here would release the prefill ring
                             # in the middle of a pass.
@@ -653,7 +694,8 @@ def install_expert_streaming(
                         ms = (None if in_split
                               else getattr(self, "_kq_miss_shed", None))
                         sc_f32 = None
-                        if (ms is not None and scores_arg is not None
+                        if ((ms is not None or shed_top1)
+                                and scores_arg is not None
                                 and n_tokens == 1):
                             # Shed reads the scores host-side; fold them into
                             # the router eval so the hook adds a small D2H
@@ -667,16 +709,32 @@ def install_expert_streaming(
                             ph["ev"] += t1 - t0
                             _ph_li(ph, self._kq_li, "ev", t1 - t0)
                             wait0 = getattr(dfr, "_t_demand", 0.0)
+                            settle0 = getattr(dfr, "_t_settle", 0.0)
                             ph.setdefault("miss_hist", []).append(
                                 (self._kq_li, dfr._lookups - dfr._hits))
                         ids, indices = _valid_expert_ids(self, indices)
+                        if (not in_split and n_tokens > 1
+                                and dfr.repay_at(
+                                    self._kq_li, ids,
+                                    ring_ok=fdr is not None
+                                    and fdr.covers(self._kq_li)
+                                    and n_tokens
+                                    >= _STREAM_PREFETCH_MIN_TOKENS)):
+                            # A wider call wires the arena or repays a
+                            # ring lend at the forward's first layer.
+                            dfr.ensure_wired()
                         routed_ids = ids
                         shed_args = None
                         shed_mix = None
+                        shed_pos = None
                         if sc_f32 is not None:
                             sc = np.asarray(sc_f32).reshape(-1)
-                            keep = dfr.shed_misses(
-                                self._kq_li, ids.reshape(-1), sc, ms)
+                            if shed_top1:
+                                keep = np.arange(sc.size) == int(
+                                    np.argmax(sc))
+                            else:
+                                keep = dfr.shed_misses(
+                                    self._kq_li, ids.reshape(-1), sc, ms)
                             if keep is not None:
                                 # Arena-path only: the overflow fallback
                                 # below keeps the original routed set.
@@ -688,8 +746,14 @@ def install_expert_streaming(
                                 scn = scn * (sc.sum() / max(scn.sum(), 1e-20))
                                 sc_mx = mx.array(scn.reshape(shp)).astype(
                                     scores_arg.dtype)
-                                if _fwd_scores:
+                                if fwd:
                                     shed_args = (sc_mx,) + args[1:]
+                                elif unmixed:
+                                    # Row j of the return reads kept output
+                                    # pos[j], or the zero row past the end.
+                                    pos = np.full(keep.size, kept.size)
+                                    pos[keep] = np.arange(kept.size)
+                                    shed_pos = mx.array(pos)
                                 else:
                                     # Stock base returns per-expert outputs;
                                     # the block's weights still cover the
@@ -700,11 +764,14 @@ def install_expert_streaming(
                         if ph is not None:
                             t2 = time.perf_counter()
                             w = getattr(dfr, "_t_demand", 0.0) - wait0
+                            st = getattr(dfr, "_t_settle", 0.0) - settle0
+                            book = (t2 - t1) - w - st
                             ph["stage_wait"] += w
-                            ph["stage_book"] += (t2 - t1) - w
+                            ph["stage_settle"] += st
+                            ph["stage_book"] += book
                             _ph_li(ph, self._kq_li, "stage_wait", w)
-                            _ph_li(ph, self._kq_li, "stage_book",
-                                   (t2 - t1) - w)
+                            _ph_li(ph, self._kq_li, "stage_settle", st)
+                            _ph_li(ph, self._kq_li, "stage_book", book)
                         if la_pred:
                             # This layer's demand misses have joined
                             # (stage returned); the predicted layers'
@@ -761,6 +828,14 @@ def install_expert_streaming(
                                                 and y.ndim == x.ndim + 1):
                                             y = (y * shed_mix[..., None]).sum(
                                                 axis=-2)
+                                        if shed_pos is not None:
+                                            pad = mx.zeros(
+                                                (*y.shape[:-2], 1,
+                                                 y.shape[-1]), dtype=y.dtype)
+                                            y = mx.take(
+                                                mx.concatenate(
+                                                    [y, pad], axis=-2),
+                                                shed_pos, axis=-2)
                                         if _ASYNC_GATHER and n_tokens == 1:
                                             mx.async_eval(y)
                                 if ph is not None:
@@ -817,7 +892,7 @@ def install_expert_streaming(
                         # which always takes a non-split path.
                         ax = x.ndim - 2
                         orig = ((scores_arg,) + args
-                                if scores_arg is not None and not _fwd_scores
+                                if scores_arg is not None and not fwd
                                 else args)
                         sliceable = (
                             x.shape[ax] == n_tokens
@@ -1050,19 +1125,38 @@ def install_expert_streaming(
             streamable_bytes=streamed_table_bytes(model),
             cast_dead_bytes=cast_dead_bytes,
             forced=explicit and not over_budget)
+    ring = 0
+    ring_share = 0
+    held = None
+    # The user's arena keeps the whole ring apart, as the serve footprint
+    # prices it. It is sized once, when it is known whether the ring is built.
+    env_arena = bool(arena_kw and feeder_prefill
+                     and os.environ.get("GMLX_DECODE_ARENA_GB"))
+    avail0 = None
+    if arena_kw and feeder_prefill:
+        from gmlx.stream.budget import _available_ram_bytes
+        from gmlx.stream.prefill_feeder import ring_bytes
+
+        # Sized before the ring exists: its slots are wired at
+        # construction, and a live RAM snapshot taken after would charge
+        # them twice.
+        ring = ring_bytes(prefetcher.offsets)
+        if env_arena:
+            avail0 = _available_ram_bytes()
+        else:
+            held = _decode_arena_bytes(
+                total_bytes, prefetcher.offsets, budget, ring_bytes=ring,
+                **arena_kw)
+    if arena_kw and not env_arena:
         arena = _decode_arena_bytes(
             total_bytes, prefetcher.offsets, budget, **arena_kw)
-    ring = 0
     if (
         streaming
         and prefetcher is not None
         and moe_modules
         and feeder_prefill
     ):
-        from gmlx.stream.prefill_feeder import (
-            maybe_make_prefill_feeder,
-            ring_bytes,
-        )
+        from gmlx.stream.prefill_feeder import maybe_make_prefill_feeder
 
         # No working-set budget (the CPU device): the ring is not judged.
         reason = _prefill_ring_reason(
@@ -1073,13 +1167,22 @@ def install_expert_streaming(
         else:
             feeder = maybe_make_prefill_feeder(
                 prefetcher.offsets, moe_modules)
-        if feeder is not None and arena is not None:
-            # The ring keeps its room for the process lifetime: a later
-            # prefill rebuilds it there, with no lend out of the arena.
-            ring = ring_bytes(prefetcher.offsets)
+        if feeder is not None and held is not None:
+            from gmlx.stream.budget import ring_share_bytes
+
+            # The arena holds the ring's room while decoding and lends
+            # whole layers back for each prefill pass that builds the ring
+            # (DecodeFeeder._lend_ring_share). Without a share the ring
+            # keeps its room for the process lifetime.
+            ring_share = ring_share_bytes(arena, held, ring)
+            if not ring_share:
+                arena = held
+        if feeder is None:
+            ring = 0
+        if env_arena:
             arena = _decode_arena_bytes(
                 total_bytes, prefetcher.offsets, budget, ring_bytes=ring,
-                **arena_kw)
+                avail_bytes=avail0, **arena_kw)
         if feeder is not None:
             n_cov = sum(feeder.covers(li) for li in moe_modules)
             for li, mods in moe_modules.items():
@@ -1107,13 +1210,14 @@ def install_expert_streaming(
 
         from gmlx.stream.budget import ceiling_bytes
 
-        # The ring's room is out of the arena's budget already, so the
-        # two never sum past the ceiling; the lend (DecodeFeeder
+        # The arena's budget leaves the ring's room out, or holds it as
+        # ring_share and lends it back at each prefill, so the two never
+        # sum past the ceiling; the proportional lend (DecodeFeeder
         # .lend_for_ring) stays as the fallback for a box whose free RAM
         # is gone when a later prefill rebuilds the ring.
         dfeeder = maybe_make_decode_feeder(
             prefetcher.offsets, moe_modules, arena, stats_verbose,
-            fast_disk=fast_disk)
+            fast_disk=fast_disk, ring_share=ring_share)
         if dfeeder is not None:
             dfeeder._room_bytes = room.bytes
             n_cov = sum(dfeeder.covers(li) for li in moe_modules)
@@ -1136,6 +1240,7 @@ def install_expert_streaming(
                 dfeeder._release_ring = feeder.release_slots
                 feeder._lend_hook = dfeeder.lend_for_ring
                 feeder._seed_hook = dfeeder.seed_from_ring
+                feeder._arena_hook = dfeeder.arena_sources
             wired = (
                 "fully wired at first decode"
                 if dfeeder._mlock_deferred
@@ -1175,7 +1280,10 @@ def install_expert_streaming(
                 f"[stream] memory budget: ceiling {ceiling / 1e9:.1f} GB = "
                 f"every-token {every / 1e9:.1f} + "
                 f"arena {dfeeder.nominal_bytes / 1e9:.1f} + ring "
-                f"{ring / 1e9:.1f} + kv room {room.bytes / 1e9:.1f} "
+                f"{(ring - ring_share) / 1e9:.1f}"
+                + (f" ({ring_share / 1e9:.1f} more lent from the arena at "
+                   "each prefill)" if ring_share else "")
+                + f" + kv room {room.bytes / 1e9:.1f} "
                 f"({room_how}) + floor {floor / 1e9:.1f}; {tables}"
                 "GMLX_STREAM_KV_CTX sizes the room"
             )
@@ -1213,7 +1321,8 @@ def install_expert_streaming(
             model, moe_modules, skip_ids=tskip,
             include_expert_stacks=bool(table_offloaded) and not streaming,
             room=(None if budget is None
-                  else max(0, budget - held_wired - int(arena or 0) - ring)))
+                  else max(0, budget - held_wired - int(arena or 0)
+                           - (ring - ring_share))))
     if (
         streaming and feeder is not None and dfeeder is not None
         and env_bool("GMLX_STREAM_UNMAP_STACKS", True)
@@ -1374,12 +1483,26 @@ def install_expert_streaming(
     return n_wrapped, offloaded
 
 
+def experts_streamed(model) -> bool:
+    """True when the install streams this model's experts from the drive.
+    Reads the install's verdict on the model or a module it wraps, since a
+    CPU-only expert codec marks its modules the way streaming does."""
+    from .installs import wrapper_chain
+
+    chain = list(wrapper_chain(model))
+    for m in chain:
+        flag = getattr(m, "_kq_streaming", None)
+        if flag is not None:
+            return bool(flag)
+    return any(moe_streaming_active(m) for m in chain)
+
+
 def _resolve_prefill_step(model, requested: int | None) -> tuple[int | None, bool]:
     """Pick the prefill chunk width: an explicit request always wins; a
     streaming-mode model defaults to ``_STREAMING_PREFILL_STEP``, or to its
     model_type's narrower entry; everything else keeps mlx-lm's own
     default. Returns ``(step_or_none, defaulted)``."""
-    if requested is not None or not moe_streaming_active(model):
+    if requested is not None or not experts_streamed(model):
         return requested, False
     mt = getattr(model, "model_type", None) or getattr(
         getattr(model, "args", None), "model_type", None)

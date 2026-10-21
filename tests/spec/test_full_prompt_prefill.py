@@ -190,11 +190,13 @@ def _head_last(lm, input_ids, cache):
     return logits[0, -1]
 
 
-def _last_logits(model, ids, chunks=None, tail=1):
+def _last_logits(model, ids, chunks=None, tail=1, block=False):
     """Float32 logits of the last position from the bare language model:
     one un-chunked forward, or with ``chunks`` the engine's order, which
     runs ``ids`` up to its last ``tail`` tokens in prefill chunks of those
-    lengths and then each of those tokens alone, as decode does."""
+    lengths and then each of those tokens alone, as decode does. With
+    ``block``, the tail tokens after the first run as one forward, as the
+    first verify round of a speculative engine does."""
     from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
     mx.clear_cache()
     lm = model.language_model
@@ -207,7 +209,11 @@ def _last_logits(model, ids, chunks=None, tail=1):
         for n in chunks:
             parts.append(body[pos:pos + n])
             pos += n
-        parts += [[t] for t in ids[-tail:]]
+        rest = list(ids[-tail:])
+        if block and len(rest) > 1:
+            parts += [rest[:1], rest[1:]]
+        else:
+            parts += [[t] for t in rest]
     for part in parts:
         row = _head_last(lm, mx.array([part], dtype=mx.int32), cache)
         mx.eval(row)
@@ -268,9 +274,11 @@ def _near_top(row, t):
 def _assert_greedy_match(model, ids, ref, got, label):
     """``got`` reproduces ``ref`` token for token, except that the first
     divergence is accepted as a fork the bare model makes too: a near tie
-    (see _NEAR_TIE_LOGITS), or a position where the bare model's greedy pick
-    is one stream's token in one forward and the other's in the engine's
-    order. A model can move its logits by more than the band with the order
+    (see _NEAR_TIE_LOGITS), or a position where each stream's token is the
+    bare model's greedy pick, within the band, in one of the orders the
+    engines run: one forward, the engine's order with each decoded token
+    alone, or the engine's order with the decoded tokens in one verify
+    block. A model can move its logits by more than the band with the order
     alone: gemma-4-26B-A4B does on a repeated paragraph, and stock llama.cpp
     changes its own greedy token with its batch size there. Nothing after
     the fork is compared, and an accepted order fork is reported as a
@@ -287,15 +295,20 @@ def _assert_greedy_match(model, ids, ref, got, label):
         margin = float(one[a] - one[b])
         if abs(margin) <= _NEAR_TIE_LOGITS:
             return
-        rep = _last_logits(model, prefix, _engine_chunks(ids), tail=i + 1)
-        forked = ((_near_top(one, a) and _near_top(rep, b))
-                  or (_near_top(one, b) and _near_top(rep, a)))
+        chunks = _engine_chunks(ids)
+        orders = [("one forward", one), ("the engine's order", _last_logits(
+            model, prefix, chunks, tail=i + 1))]
+        if i > 1:
+            orders.append(("a verify block", _last_logits(
+                model, prefix, chunks, tail=i + 1, block=True)))
+        forked = (any(_near_top(r, a) for _, r in orders)
+                  and any(_near_top(r, b) for _, r in orders))
+        margins = ", ".join(
+            f"{float(r[a] - r[b]):+.3f} in {name} "
+            f"(top {int(mx.argmax(r).item())})" for name, r in orders)
         detail = (
             f"diverged at token {i}: {list(got[:i + 2])} vs "
-            f"{list(ref[:i + 2])}; bare-model margin {margin:+.3f} logits in "
-            f"one forward (top {int(mx.argmax(one).item())}), "
-            f"{float(rep[a] - rep[b]):+.3f} in the engine's order "
-            f"(top {int(mx.argmax(rep).item())})")
+            f"{list(ref[:i + 2])}; bare-model margin in logits {margins}")
         assert forked, f"{label}: {detail}"
         warnings.warn(f"{label}: accepted an evaluation-order fork: {detail}")
         return
@@ -1469,10 +1482,9 @@ def test_scalar_injection_defers_and_completes(mtp_model):
         "stale injection entry left on the model"
     )
     got = results[uids_c[0]]
-    n = min(len(got), len(ref_c))
-    assert n >= 5 and got[:n] == ref_c[:n], (
-        f"injected request content diverged/truncated: {got[:6]} vs solo {ref_c}"
-    )
+    assert min(len(got), len(ref_c)) >= 5, (
+        f"injected request truncated: {got[:6]} vs solo {ref_c}")
+    _assert_greedy_match(model, ids_c, ref_c, got, "injected request vs solo")
 
 
 def test_injection_when_all_rows_finish_same_round(mtp_model):
@@ -1514,10 +1526,9 @@ def test_injection_when_all_rows_finish_same_round(mtp_model):
         "stale injection entry left on the model"
     )
     got = results[uids_c[0]]
-    n = min(len(got), len(ref_c))
-    assert n >= 5 and got[:n] == ref_c[:n], (
-        f"injected request content diverged/truncated: {got[:6]} vs solo {ref_c}"
-    )
+    assert min(len(got), len(ref_c)) >= 5, (
+        f"injected request truncated: {got[:6]} vs solo {ref_c}")
+    _assert_greedy_match(model, ids_c, ref_c, got, "injected request vs solo")
 
 
 # ---------------------------------------------------------------------------

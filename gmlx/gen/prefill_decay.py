@@ -52,9 +52,10 @@ never how long one chunk runs, so every live stream hitches by a full
 chunk (1-2 s at depth, more over-RAM) whenever one lands. While the
 scheduler reports live decode rows, the chunk is halved until its
 predicted wall time - last observed chunk cost scaled by the tier - fits
-GMLX_PREFILL_TICK_MS. Inert at zero decode rows and outside the batched
-serve path, so single-stream TTFT is untouched. The resolver takes the
-min of the depth term and the tick term.
+GMLX_PREFILL_TICK_MS. Inert at zero decode rows, outside the batched
+serve path and on a model that streams its experts (a chunk reads every
+expert once whatever its width), so single-stream TTFT is untouched. The
+resolver takes the min of the depth term and the tick term.
 
 Knobs:
     GMLX_PREFILL_DECAY=0        kill switch, both terms (default on)
@@ -369,6 +370,14 @@ def note_cache_limit(nbytes: float | None) -> None:
     _NOTED_CACHE_LIMIT = None if nbytes is None else float(nbytes)
 
 
+def cap_follows_headroom() -> bool:
+    """Whether the body cap follows the live headroom, which falls as a
+    prefill's KV grows (``_body_cap_bytes``)."""
+    return (_env_cap_bytes() is None
+            and env_bool("GMLX_PREFILL_HEADROOM_CAP", False)
+            and _NOTED_CACHE_LIMIT is not None)
+
+
 def _body_cap_bytes() -> float:
     """Body transient cap. Env keeps absolute authority; with
     GMLX_PREFILL_HEADROOM_CAP=1 AND a noted cache limit, the legacy 5% cap is
@@ -379,13 +388,13 @@ def _body_cap_bytes() -> float:
     if env is not None:
         return env
     legacy = _cap_bytes()
-    if (not env_bool("GMLX_PREFILL_HEADROOM_CAP", False)
-            or _NOTED_CACHE_LIMIT is None):
+    limit = _NOTED_CACHE_LIMIT
+    if not cap_follows_headroom() or limit is None:
         return legacy
     room = _headroom_bytes()
     if room is None:
         return legacy
-    cap = max(legacy, min(_HEADROOM_FRACTION * room, _NOTED_CACHE_LIMIT))
+    cap = max(legacy, min(_HEADROOM_FRACTION * room, limit))
     if cap > legacy and env_bool("GMLX_PREFILL_DECAY_LOG", False) \
             and "headroom-cap" not in _PROFILE_LOGGED:
         _PROFILE_LOGGED.add("headroom-cap")
@@ -774,7 +783,8 @@ _headroom_bytes = headroom_bytes
 
 
 def score_transient_bytes(model, prompt_cache, depth: int,
-                          prefill_rows: int | None = None) -> float:
+                          prefill_rows: int | None = None,
+                          base_step: int | None = None) -> float:
     """Projected peak prefill score transient for a request at ``depth``,
     evaluated at the chunk step the decay policy would actually choose
     there. Uses the arch's ScoreTransientProfile when one arms (resolved
@@ -788,24 +798,47 @@ def score_transient_bytes(model, prompt_cache, depth: int,
         # profile, whose cut chunks can outgrow the dense price.
         from gmlx.cache.kv_cache import KVCache
 
-        dense = _transient_price(None, depth, heads)
+        dense = _transient_price(
+            None, depth, heads, _run_base(model, None, base_step))
         probe = resolve_score_profile(model, [KVCache()])
         if probe is None or not probe.fused_min_step:
             return dense
         probe = probe._replace(fused_mask_bytes=int(prefill_rows or 1) + 1)
-        return max(dense, _transient_price(probe, depth, heads))
+        return max(dense, _transient_price(
+            probe, depth, heads, _run_base(model, probe, base_step)))
     profile = resolve_score_profile(model, prompt_cache)
     if profile is not None and profile.fused_min_step and prefill_rows:
         profile = profile._replace(fused_mask_bytes=int(prefill_rows) + 1)
-    return _transient_price(profile, depth, heads)
+    return _transient_price(
+        profile, depth, heads, _run_base(model, profile, base_step))
+
+
+def _default_base(model, base) -> bool:
+    """True when ``base`` is a default an arch profile's step replaces: the
+    stock step, or the streamed step serve adopted for ``model``, with no
+    PREFILL_STEP_SIZE set."""
+    if "PREFILL_STEP_SIZE" in os.environ:
+        return False
+    return base in (_STOCK_BASE,
+                    getattr(model, "_gmlx_adopted_prefill_step", None))
+
+
+def _run_base(model, profile, base: int | None) -> int:
+    """The base step a prefill of ``model`` runs from: ``base`` (the
+    generator's step) when given, else PREFILL_STEP_SIZE, the adopted
+    streamed step or the stock one; then the arch profile's step over a
+    default."""
+    step = int(base or env_int("PREFILL_STEP_SIZE", 0)
+               or getattr(model, "_gmlx_adopted_prefill_step", None)
+               or _STOCK_BASE)
+    if (profile is not None and profile.base_step
+            and _default_base(model, step)):
+        step = int(profile.base_step)
+    return step
 
 
 def _transient_price(profile: ScoreTransientProfile | None, depth: int,
-                     heads: int) -> float:
-    base = _STOCK_BASE
-    if (profile is not None and profile.base_step
-            and "PREFILL_STEP_SIZE" not in os.environ):
-        base = int(profile.base_step)
+                     heads: int, base: int) -> float:
     step = decayed_step(base, depth, heads, profile=profile)
     if profile is not None:
         h, bpe, div = (profile.heads, profile.bytes_per_elem,
@@ -916,6 +949,39 @@ def fit_cut(batch, n: int) -> int:
                         profile=profile)
 
 
+def size_chunk(model, profile, base: int, depth: int, cols, cut,
+               ) -> tuple[int, int, bool]:
+    """``decayed_for_batch`` on explicit state: ``base`` the batch's step,
+    ``depth`` the cached columns, ``cols()`` the columns the loop chunks
+    (None: no tail merge), ``cut(step)`` the chunk the loop runs from a
+    step. Returns the step, the run base and whether the tick set it."""
+    base = _run_base(model, profile, base)
+    heads = score_heads(model)
+    step = decayed_step(base, depth, heads, profile=profile)
+    from gmlx.stream.expert_streaming import experts_streamed
+
+    streamed = experts_streamed(model)
+    # A streamed chunk reads every expert once at any width, so a narrower
+    # chunk stalls decode as long and adds passes.
+    tick = None if streamed else _tick_step(base)
+    ticked = False
+    if tick is not None and tick < step:
+        step, ticked = tick, True
+        if profile is not None and step < profile.fused_min_step:
+            # Below the fused width the chunk materializes: refit the cap.
+            step = decayed_step(step, depth, heads, profile=profile)
+    if (profile is not None and profile.fused_min_step
+            and step >= profile.fused_min_step):
+        n = cut(step)
+        if 0 < n < profile.fused_min_step:
+            step = decayed_step(n, depth, heads, profile=profile)
+    if step == base and cols is not None and streamed:
+        from gmlx.stream.expert_streaming import merge_prefill_tail
+
+        step = merge_prefill_tail(step, cols()) or step
+    return step, base, ticked
+
+
 def decayed_for_batch(batch) -> int | None:
     """Depth-decayed prefill step for a PromptProcessingBatch-shaped object
     (None passes through: caller falls back to one-shot)."""
@@ -929,39 +995,15 @@ def decayed_for_batch(batch) -> int | None:
     if not base or not _enabled():
         return base
     profile = resolve_score_profile(batch.model, batch.prompt_cache)
-    if (profile is not None and profile.base_step
-            and base == _STOCK_BASE
-            and "PREFILL_STEP_SIZE" not in os.environ):
-        base = int(profile.base_step)
     depth = kv_depth(batch.prompt_cache)
-    step = decayed_step(base, depth, score_heads(batch.model),
-                        profile=profile)
-    tick = _tick_step(base)
-    ticked = False
-    if tick is not None and tick < step:
-        step, ticked = tick, True
-        if profile is not None and step < profile.fused_min_step:
-            # Below the fused width the chunk materializes: refit the cap.
-            step = decayed_step(step, depth, score_heads(batch.model),
-                                profile=profile)
-    if (profile is not None and profile.fused_min_step
-            and step >= profile.fused_min_step):
-        n = _cut_chunk(batch, step)
-        if 0 < n < profile.fused_min_step:
-            step = decayed_step(n, depth, score_heads(batch.model),
-                                profile=profile)
     embeds = getattr(batch, "_inputs_embeds", None)
-    if step == base and embeds is not None:
-        from gmlx.stream.expert_streaming import (
-            merge_prefill_tail,
-            moe_streaming_active,
-        )
-
-        if moe_streaming_active(batch.model):
-            # The loop chunks the prompt less its last token, or the whole
-            # prompt when the last chunk and the last token run as one.
-            step = merge_prefill_tail(
-                step, embeds.shape[1] - (0 if _folds(batch) else 1))
+    # The loop chunks the prompt less its last token, or the whole prompt
+    # when the last chunk and the last token run as one.
+    cols = None if embeds is None else (
+        lambda: embeds.shape[1] - (0 if _folds(batch) else 1))
+    step, base, ticked = size_chunk(
+        batch.model, profile, base, depth, cols,
+        lambda s: _cut_chunk(batch, s))
     global _LAST_STEP
     _LAST_STEP = int(step or 0)
     if env_bool("GMLX_PREFILL_DECAY_LOG", False):
@@ -1001,17 +1043,23 @@ def install_prefill_decay() -> bool:
         step = decayed_for_batch(self)
         if step == base:
             return orig(self)
+        # A checkpoint schedule armed inside orig (the MTP body) reads the
+        # base, not this chunk's width.
+        self._gmlx_base_step = base
         self.prefill_step_size = step
         try:
             return orig(self)
         finally:
             self.prefill_step_size = base
+            vars(self).pop("_gmlx_base_step", None)
 
     def _decay_prompt_step(self):
         return _with_decayed_step(self, orig_step)
 
     def _decay_needs_processing(self):
-        if not _folds(self):
+        # Inside a swapped prompt_step the step is sized already: sizing it
+        # again can merge the tail into one chunk that orig never runs.
+        if not _folds(self) or "_gmlx_base_step" in vars(self):
             return orig_needs(self)
         return _with_decayed_step(self, orig_needs)
 

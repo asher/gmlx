@@ -1956,7 +1956,8 @@ def _ckpt_post_prefill(model, prompt_cache: list, retire_ctx: dict) -> None:
             return
         stored = ckpt_store(manager, retire_ctx["full_ids"], prompt_cache,
                             extra_hash=as_salt(retire_ctx.get("extra_hash", 0)),
-                            grid_truncate=True)
+                            grid_truncate=True,
+                            keep=(meta or {}).get("ckpt_p_stable"))
         if stored and meta is not None:
             meta.setdefault("ckpt_stored_boundaries", []).append(stored)
     except Exception:
@@ -2030,6 +2031,12 @@ def _sidecar_post_prefill(drafter, sidecar_ctx: dict | None) -> None:
             for b in meta.get("ckpt_p_stable_bounds") or ():
                 if b in stored and 0 < b <= n and b not in keys:
                     keys.append(b)
+            # The record a next turn restores: the deepest landed at or
+            # below p_stable, turn record or not.
+            ps = meta.get("ckpt_p_stable")
+            below = [b for b in stored if ps is not None and b <= ps]
+            if below and 0 < max(below) <= n and max(below) not in keys:
+                keys.append(max(below))
             boundary = int(meta.get("ckpt_last_stored", 0) or 0)
             if 0 < boundary <= n and boundary not in keys:
                 keys.append(boundary)

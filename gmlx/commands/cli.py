@@ -198,8 +198,10 @@ def add_moe_expert_args(ap: argparse.ArgumentParser) -> None:
         default=None,
         metavar="P",
         help="Lossy: at decode, skip each streamed MoE layer's routed "
-        "experts with probability P (0 < P < 1) per token; the shared "
-        "expert still runs on shed layers.",
+        "experts with probability P (0 < P < 1) per token. A shed layer "
+        "still runs its shared expert or dense MLP. On a layer with "
+        "neither, Muse Spark runs its top expert and other models run the "
+        "layer in full.",
     )
 
 

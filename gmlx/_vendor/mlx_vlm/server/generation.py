@@ -1023,6 +1023,9 @@ class ResponseGenerator:
         self.quantized_kv_start = quantized_kv_start
         self.top_logprobs_k = top_logprobs_k
         self.apc_manager = apc_manager
+        self._prefill_step_pinned = (
+            prefill_step_size is not None or "PREFILL_STEP_SIZE" in os.environ
+        )
         self.prefill_step_size = (
             get_prefill_step_size()
             if prefill_step_size is None
@@ -1139,6 +1142,33 @@ class ResponseGenerator:
         if self.apc_manager is not None:
             language_model = getattr(model, "language_model", model)
             self.apc_mode = _apc.model_apc_mode(language_model)
+        self._adopt_streamed_prefill_step(model)
+
+    def _adopt_streamed_prefill_step(self, model) -> None:
+        """A model that streams its experts reads every expert once per
+        prefill chunk, so it takes the wider streamed chunk unless a
+        step was set."""
+        if getattr(self, "_prefill_step_pinned", True):
+            return
+        from gmlx.stream.expert_streaming import (
+            _resolve_prefill_step,
+            experts_streamed,
+        )
+
+        language_model = getattr(model, "language_model", model)
+        if not experts_streamed(model):
+            return
+        step, defaulted = _resolve_prefill_step(language_model, None)
+        if defaulted and step:
+            self.prefill_step_size = int(step)
+            # A default an arch profile's step replaces, as it replaces
+            # the stock one (gmlx.gen.prefill_decay).
+            for m in {id(model): model, id(language_model): language_model
+                      }.values():
+                setattr(m, "_gmlx_adopted_prefill_step", int(step))
+            logger.info(
+                "streamed model: prefill chunk defaults to %d tokens "
+                "(prefill_step_size sets it)", step)
 
     def generate(
         self,

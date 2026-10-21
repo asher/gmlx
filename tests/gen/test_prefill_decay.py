@@ -121,6 +121,24 @@ def test_decayed_for_batch(monkeypatch):
     assert pd.decayed_for_batch(_batch(None, 100_000)) is None
 
 
+def test_admission_prices_the_step_the_server_runs(monkeypatch):
+    _cap(monkeypatch, 100.0)
+    monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
+    m = SimpleNamespace(config=SimpleNamespace(
+        model_type="dense_x", num_attention_heads=HEADS))
+    cache = [SimpleNamespace(offset=0)]
+    assert pd.score_transient_bytes(m, cache, 1000) == _transient(2048, 1000)
+    # a streamed serve adopted the wider chunk
+    m._gmlx_adopted_prefill_step = 8192
+    assert pd.score_transient_bytes(m, cache, 1000) == _transient(8192, 1000)
+    # the generator's own step, when the caller has it
+    assert pd.score_transient_bytes(
+        m, cache, 1000, base_step=4096) == _transient(4096, 1000)
+    del m._gmlx_adopted_prefill_step
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "4096")
+    assert pd.score_transient_bytes(m, cache, 1000) == _transient(4096, 1000)
+
+
 def test_kill_switch(monkeypatch):
     _cap(monkeypatch, 1.0)
     monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
@@ -711,7 +729,7 @@ def _installed(monkeypatch):
 
     monkeypatch.setattr(P, "prompt_step", P.prompt_step)
     monkeypatch.setattr(P, "needs_processing", P.needs_processing)
-    monkeypatch.delattr(P, pd._FLAG, raising=False)
+    monkeypatch.setattr(P, pd._FLAG, False, raising=False)
     return P
 
 
@@ -782,6 +800,24 @@ def test_a_streamed_tail_merges_into_the_folded_last_forward(monkeypatch):
     assert pd.decayed_for_batch(batch(False)) == 2099
     assert P.needs_processing(batch(False)) is True
     assert pd.decayed_for_batch(batch(True, draft=object())) == 2099
+
+
+def test_a_folding_streamed_prefill_reaches_generate_as_its_step_decays(
+        monkeypatch):
+    """A folding batch with no checkpoint pause runs the stock loop to
+    generate() on a streamed model whose step decays with depth. Inside a
+    chunk the step is sized already: sized again from the decayed width,
+    the tail merge would take the whole rest as one chunk the stock step
+    never runs, and the loop would spin."""
+    from prefill_loop import Model, drain, install, make_batch
+
+    install(monkeypatch, {"p": None, "sys": None}, [])
+    _cap(monkeypatch, 5.4)
+    for n in (28677, 28818, 20483, 37153):
+        chunks = drain(make_batch(Model(folds=True), n, apc=False))
+        assert sum(chunks) == n
+        if n == 28677:
+            assert chunks == [8192, 8192, 4096, 4096, 4096, 5]
 
 
 def test_decayed_seed_step_with_profile(monkeypatch):

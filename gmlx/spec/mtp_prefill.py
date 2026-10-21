@@ -372,6 +372,32 @@ def _widen_prompt_rope_state(batch, prompt_kwargs: dict) -> dict:
     return prompt_kwargs
 
 
+def _ckpt_plain_post_prefill(result) -> None:
+    """Full-prompt checkpoint store for a stock-path ckpt batch. Never
+    raises."""
+    try:
+        cache = getattr(result, "prompt_cache", None) or []
+        stash = getattr(cache[0], "_kq_apc_retire", None) if cache else None
+        if stash is None or stash.get("mode") != "ckpt":
+            return
+        from gmlx.cache.snapshot import ckpt_full_store_redundant, ckpt_store
+
+        m = stash.get("apc_meta")
+        if ckpt_full_store_redundant(m):
+            _log.info("APC ckpt post-prefill store skipped: render-stable "
+                      "boundary landed")
+        elif ckpt_store(
+                stash["manager"], stash["full_ids"], cache,
+                extra_hash=as_salt(stash.get("extra_hash", 0)),
+                keep=(m or {}).get("ckpt_p_stable")):
+            if m is not None:
+                m.setdefault("ckpt_stored_boundaries", []).append(
+                    len(stash["full_ids"]))
+    except Exception:
+        _log.warning("APC plain post-prefill store failed; continuing",
+                     exc_info=True)
+
+
 def install_full_prompt_mtp_prefill() -> None:
     """Retain full-prompt hidden through the BatchGenerator MTP prefill so the
     native head teacher-forces the whole prompt into its KV (llama parity).
@@ -422,13 +448,21 @@ def install_full_prompt_mtp_prefill() -> None:
     _orig_generate = PromptProcessingBatch.generate
     _orig_init = PromptProcessingBatch.__init__
 
-    def _resolve_mtp_prefill_step() -> int:
+    def _resolve_mtp_prefill_step(model=None) -> int:
         # Honor the serve path's PREFILL_STEP_SIZE env override
         # (mlx_vlm.server.generation.get_prefill_step_size) so MTP prefill
-        # can be chunked smaller to cap peak memory.
+        # can be chunked smaller to cap peak memory. Else a streamed model
+        # takes the step serve adopted for it.
         from gmlx._vendor.mlx_vlm.generate.ar import DEFAULT_PREFILL_STEP_SIZE
+        from gmlx.stream.installs import wrapper_chain
 
-        return int(os.environ.get("PREFILL_STEP_SIZE", DEFAULT_PREFILL_STEP_SIZE))
+        if "PREFILL_STEP_SIZE" in os.environ:
+            return int(os.environ["PREFILL_STEP_SIZE"])
+        for m in wrapper_chain(model):
+            step = getattr(m, "_gmlx_adopted_prefill_step", None)
+            if step:
+                return int(step)
+        return DEFAULT_PREFILL_STEP_SIZE
 
     def _mtp_init(self, *args, **kwargs) -> None:
         warm = kwargs.get("warm_cache")
@@ -451,7 +485,8 @@ def install_full_prompt_mtp_prefill() -> None:
         # an APC-less deep prompt would one-shot the whole prefill.
         if (getattr(self, "draft_kind", None) == "mtp"
                 and self.prefill_step_size is None):
-            self.prefill_step_size = _resolve_mtp_prefill_step()
+            self.prefill_step_size = _resolve_mtp_prefill_step(
+                getattr(self, "model", None))
         # Stock (non-speculative) batches get the checkpoint tier here:
         # lookup, prefix trim, cursor arming, retirement stash.
         if getattr(self, "draft_kind", None) is None and not _SPEC_APC_DISABLED:
@@ -499,7 +534,8 @@ def install_full_prompt_mtp_prefill() -> None:
 
         if not hasattr(self, "_mtp_full_input_ids"):
             if self.prefill_step_size is None:
-                self.prefill_step_size = _resolve_mtp_prefill_step()
+                self.prefill_step_size = _resolve_mtp_prefill_step(
+                    getattr(self, "model", None))
             # APC lookup (L0 then L1) + prefix trim + store arming.
             _mtp_prefill_init(self)
             _mtp_seed_stream_init(self)
@@ -677,30 +713,7 @@ def install_full_prompt_mtp_prefill() -> None:
                 getattr(self, "_kq_ckpt_armed", False)
                 and getattr(self, "draft_kind", None) is None
             ):
-                try:
-                    cache = getattr(result, "prompt_cache", None) or []
-                    stash = getattr(cache[0], "_kq_apc_retire", None) if cache else None
-                    if stash is not None and stash.get("mode") == "ckpt":
-                        from gmlx.cache.snapshot import (
-                            ckpt_full_store_redundant,
-                            ckpt_store,
-                        )
-                        m = stash.get("apc_meta")
-                        if ckpt_full_store_redundant(m):
-                            _log.info("APC ckpt post-prefill store "
-                                      "skipped: render-stable boundary "
-                                      "landed")
-                        elif ckpt_store(
-                                stash["manager"], stash["full_ids"], cache,
-                                extra_hash=as_salt(stash.get("extra_hash", 0))):
-                            if m is not None:
-                                m.setdefault(
-                                    "ckpt_stored_boundaries", []
-                                ).append(len(stash["full_ids"]))
-                except Exception:
-                    _log.warning(
-                        "APC plain post-prefill store failed; continuing", exc_info=True
-                    )
+                _ckpt_plain_post_prefill(result)
             return result
         chunk_hiddens = getattr(self, "_mtp_chunk_hiddens", None)
         full_ids = getattr(self, "_mtp_full_input_ids", None)

@@ -845,10 +845,11 @@ class _CkptRecord:
     # record, retirement stores, and the state prefixes of letter
     # decisions (gmlx/systemone/prefixes.py). Retention differs only in
     # _record_insert's strip-on-extend rules and eviction order;
-    # adoption gates only ever test for "replay".
+    # adoption gates only ever test for "replay". spared: a record
+    # strip-on-extend kept for the next turn (see _record_insert).
     __slots__ = ("ids", "extra_hash", "p", "b_full", "layout",
                  "main_blocks", "bounded_blocks", "rot_meta", "states",
-                 "tails", "qsa", "nbytes", "kind")
+                 "tails", "qsa", "nbytes", "kind", "spared")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -1136,13 +1137,15 @@ def _evict_for_pool(manager, deficit: int, store_ids=None) -> int:
 
 def _evict_lru_record(manager, idx, keep):
     """Release and return the eviction victim: the least-recently-used
-    non-anchor record, else the least-recently-used anchor, never the
+    spared record, else non-anchor record, else anchor, never the
     ``keep`` key (the record being inserted always survives). Lookup
     hits move_to_end, so anchor order is LRU by last hit: an anchor
     that never serves a sibling ages out, one that does stays hot.
     Caller holds the lock and guarantees a non-keep record exists."""
-    key = next((k for k, r in idx.items()
-                if r.kind != "anchor" and k != keep), None)
+    key = next((k for k, r in idx.items() if r.spared and k != keep), None)
+    if key is None:
+        key = next((k for k, r in idx.items()
+                    if r.kind != "anchor" and k != keep), None)
     if key is None:
         key = next(k for k in idx if k != keep)
     victim = idx.pop(key)
@@ -1150,7 +1153,7 @@ def _evict_lru_record(manager, idx, keep):
     return victim
 
 
-def _record_insert(manager, rec) -> None:
+def _record_insert(manager, rec, keep: int | None = None) -> None:
     """Insert a checkpoint record: strip-on-extend superseded records on the
     same chain immediately (LRU would keep exactly the wrong ones - the
     second-newest on a just-grown chain is among the most recently touched),
@@ -1179,7 +1182,12 @@ def _record_insert(manager, rec) -> None:
     and byte bounds evict anchors after non-anchors (LRU by last hit),
     and pool-pressure eviction (_evict_for_pool) gives anchors no
     protection at all: position-salted window chains must never sit
-    pinned on an exhausted pool."""
+    pinned on an exhausted pool.
+
+    ``keep``: the storing request's p_stable. Where a record past it would
+    strip the deepest record at or below it, the one a next turn
+    restores, that record stays, marked spared: the count and byte
+    bounds evict it first, so it never costs another chain a record."""
     idx = _ckpt_records(manager)
     key = (rec.ids, rec.extra_hash)
     rec.nbytes = _rec_nbytes(rec)
@@ -1204,6 +1212,11 @@ def _record_insert(manager, rec) -> None:
                 idx[k].kind not in ("replay", "decision")
                 for k in chain if k in idx):
             rec.kind = "anchor"         # first restorable boundary
+        held = None
+        if keep is not None and rec.p > keep and rec.kind != "decision":
+            below = [k for k in chain if k in idx and idx[k].p <= keep
+                     and idx[k].kind != "decision"]
+            held = max(below, key=lambda k: idx[k].p, default=None)
         if rec.kind == "decision":
             chain = [k for k in chain if k in idx and idx[k].kind == "decision"]
         else:
@@ -1223,7 +1236,10 @@ def _record_insert(manager, rec) -> None:
                  and not any(_is_kvarn(t) for t in idx[k].layout)]
         chain.sort(key=lambda k: idx[k].p, reverse=True)
         for k in chain[_CKPT_HEAVY_PER_CHAIN - 1:]:
-            _release_record(manager, idx.pop(k))
+            if k != held:
+                _release_record(manager, idx.pop(k))
+            else:
+                idx[k].spared = True
         idx[key] = rec
         idx.move_to_end(key)
         if rec.kind == "decision":
@@ -1247,6 +1263,7 @@ def ckpt_store(
     skeleton_disk: bool = True,
     kind: str = "boundary",
     grid_truncate: bool = False,
+    keep: int | None = None,
 ) -> int:
     """Store a hybrid checkpoint at ``p = len(token_ids)``.
 
@@ -1263,6 +1280,8 @@ def ckpt_store(
     the buffer is a temporal prefix, so a slice is a faithful shorter
     run. Non-recurrent layouts only (state cannot rewind), memory-only
     (the live cache's offset would stamp a mismatched skeleton).
+    ``keep``: the request's p_stable, which the record's strip-on-extend
+    honors (see _record_insert).
     Returns the stored length in tokens, 0 when nothing stored. Never
     raises.
     """
@@ -1296,10 +1315,11 @@ def ckpt_store(
         # process a skeleton re-indexes a record whose blocks survived
         # strip-on-extend (the divergent-suffix recovery path); across a
         # restart it misses on the window chain, loudly. Kvarn layouts
-        # widen the set: their replay skeletons are heavy-suppressed
-        # upstream, so the terminal boundary/turn skeleton is the only
-        # restart-restorable record -- its window chain (bounded by W,
-        # not p) must persist with it or the skeleton is dead weight.
+        # widen the set: a kvarn prefill boundary gets a disk skeleton
+        # only where the arm lists it (``ckpt_skeletons``, the replay
+        # included), so each one is restart-restorable, and its window
+        # chain (bounded by W, not p) must persist with it or the skeleton
+        # is dead weight.
         rot_disk = skeleton_disk and (
             kind in ("replay", "retire")
             or any(_is_kvarn(str(t)) for t in layout))
@@ -1471,8 +1491,8 @@ def ckpt_store(
                 manager.release(main_blocks)
                 return 0
             rot_meta = canon[0][2]
-            keep, _w, _off, L = rot_meta
-            canon_ids = ids[:keep] + ids[p - (L - keep):p]
+            sink, _w, _off, L = rot_meta
+            canon_ids = ids[:sink] + ids[p - (L - sink):p]
             bsalt = bounded_extra_hash(extra_hash, p)
             canon_k = [cw[0] for cw in canon]
             canon_v = [cw[1] for cw in canon]
@@ -1547,7 +1567,7 @@ def ckpt_store(
             layout=tuple(layout), main_blocks=main_blocks,
             bounded_blocks=bounded_blocks, rot_meta=rot_meta,
             states=states, tails=tails, qsa=qsa_streams, kind=str(kind))
-        _record_insert(manager, rec)
+        _record_insert(manager, rec, keep)
         # Ownership moved to the record; the except path must not release.
         main_blocks = bounded_blocks = []
 

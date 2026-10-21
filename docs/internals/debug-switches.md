@@ -221,6 +221,8 @@ other layer adds its delta on stock ops.
 | `GMLX_DECODE_PAGECACHE_GB` | Page-cache reserve in GiB that arena sizing adds to the host floor. The default is `2.5`. |
 | `GMLX_DECODE_PRESSURE=0` | Keep the arena at its sized capacity under memory pressure, instead of shrinking it and regrowing it when pressure clears. |
 | `GMLX_PREFILL_NOCACHE=0` | Route prefill ring reads through the page cache, as [The lossless settings](../streaming.md#the-lossless-settings) explains. |
+| `GMLX_RING_TIMESHARE=0` | Keep the prefill ring's room apart from the decode arena for the life of the process, instead of lending it between prefill and decode. |
+| `GMLX_RING_FROM_ARENA=0` | Read every expert of a prefill pass from the disk, instead of copying the ones the decode arena holds. |
 | `GMLX_PREFILL_RING_SLOTS` | Layer slots in the prefill ring. Each extra slot stages one more layer ahead and takes one layer's expert bytes from the arena. The default is `2`. |
 | `GMLX_ARENA_STAGE_MAX_TOKENS` | Largest expert call, in tokens, that the arena serves by reading only its routed experts. The default is `64`. |
 | `GMLX_ARENA_SPLIT_MAX_TOKENS` | Largest expert call, in tokens, that the arena splits when its routed set exceeds the arena. The default is `256`, and `0` disables splitting. |
@@ -228,6 +230,7 @@ other layer adds its delta on stock ops.
 | `GMLX_ARENA_ROW_KERNELS=0` | Let multi-token arena calls pick expert kernels by width. The output then depends on the arena size. |
 | `GMLX_PIN_WEIGHTS=0` | Do not lock the every-token weights of a streamed model in memory. |
 | `GMLX_GPU_RESIDENT=0` | Skip wiring the every-token weights and the decode arena into the Metal residency set. |
+| `GMLX_RESIDENCY_ASYNC=0` | Commit decode arena residency changes and lock regrown arena memory on the decode thread, not on a background thread. |
 | `GMLX_GPU_KEEPWARM=0` | Disable GPU keep-warm, which is on by default for streamed models with the decode feeder. |
 | `GMLX_KEEPWARM_IDLE_S` | Seconds without streamed decode before the keep-warm heartbeat pauses. The default is `1`, and `0` runs it continuously. |
 | `GMLX_DECODE_LOOKAHEAD=0` | Disable lookahead expert prestage on the decode feeder. |

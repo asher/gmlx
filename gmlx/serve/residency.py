@@ -896,7 +896,8 @@ class _ResidencyPool:
             total += int(getattr(feeder, "_room_bytes", 0) or 0)
             ring = _prefill_feeder_of(rg)
             if ring is not None and not getattr(ring, "_slots", None):
-                total += 2 * int(getattr(ring, "slot_bytes", 0) or 0)
+                total += max(0, _ring_room(ring)
+                             - int(getattr(feeder, "_ring_share", 0) or 0))
         return total
 
     def _over_capacity(self, incoming: int, held: int | None = None,
@@ -1489,8 +1490,8 @@ def _stamp_boot_kv_costs(rg, gguf_path: str) -> None:
 def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
     """Resident bytes a ``stream: experts`` entry will hold: the every-token
     weights, the decode arena the loader sizes at install (the env override
-    when set, else the fit planner's arena) and the prefill ring's room,
-    which the budget keeps for the process lifetime. The routed experts and
+    when set, else the fit planner's arena) and the prefill ring's room
+    the arena does not hold and lend at prefill. The routed experts and
     the arch's streamable tables stay on disk, so the file size overstates
     the entry by their bytes and would evict every other model for room
     they never take. Over the budget, a table that alone brings the model
@@ -1530,7 +1531,10 @@ def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
                 if arena is None:
                     arena = int(box.arena_bytes)
                 if box.ring_fits:
-                    ring = int(model.ring_bytes)
+                    # An env-sized arena keeps the whole ring apart.
+                    shared = 0 if raw else int(
+                        getattr(box, "ring_shared_bytes", 0) or 0)
+                    ring = int(model.ring_bytes) - shared
     except Exception:
         _log.warning("streaming footprint: plan for %s failed; arena and "
                      "ring priced at zero", model_path, exc_info=True)
@@ -1565,9 +1569,17 @@ def _streamed_shares(model, predicted, gguf_path) -> tuple[int, int] | None:
 
 def _prefill_ring_of(rg) -> int:
     """Bytes of the prefill ring's room behind a response generator's
-    model: both slots, kept for the process lifetime. 0 without a ring."""
+    model: both slots, kept for the process lifetime, less the share the
+    decode arena holds and lends at each prefill. 0 without a ring."""
     feeder = _prefill_feeder_of(rg)
-    return 2 * int(getattr(feeder, "slot_bytes", 0) or 0)
+    share = int(getattr(_decode_feeder_of(rg), "_ring_share", 0) or 0)
+    return max(0, _ring_room(feeder) - share)
+
+
+def _ring_room(feeder) -> int:
+    """Bytes of all of a prefill ring's slots; 0 for None."""
+    return (int(getattr(feeder, "n_slots", 2) or 0)
+            * int(getattr(feeder, "slot_bytes", 0) or 0))
 
 
 def _decode_feeder_of(rg):

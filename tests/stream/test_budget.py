@@ -178,3 +178,16 @@ def test_a_forced_stream_under_the_budget_wires_half_the_experts(monkeypatch):
               budget=100 << 30, room_bytes=4 << 30)
     assert budget._decode_arena_bytes(**kw) == experts
     assert budget._decode_arena_bytes(**kw, forced=True) == experts // 2
+
+
+def test_ring_share_is_the_room_the_ring_adds_to_the_arena(monkeypatch):
+    monkeypatch.delenv("GMLX_RING_TIMESHARE", raising=False)
+    gb = 1 << 30
+    assert budget.ring_share_bytes(60 * gb, 52 * gb, 8 * gb) == 8 * gb
+    # An arena capped at the expert bytes gains only part of the room.
+    assert budget.ring_share_bytes(60 * gb, 57 * gb, 8 * gb) == 3 * gb
+    # Lends free whole layers: a small arena keeps the room apart.
+    assert budget.ring_share_bytes(15 * gb, 7 * gb, 8 * gb) == 0
+    assert budget.ring_share_bytes(60 * gb, 60 * gb, 0) == 0
+    monkeypatch.setenv("GMLX_RING_TIMESHARE", "0")
+    assert budget.ring_share_bytes(60 * gb, 52 * gb, 8 * gb) == 0

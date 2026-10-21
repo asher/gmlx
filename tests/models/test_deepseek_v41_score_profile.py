@@ -118,14 +118,20 @@ def test_base_step_env_override(armed, monkeypatch):
         _resident(True), caches).base_step is None
 
 
-def _batch(depth, streamed=True):
+def _batch(depth, streamed=True, pinned=None):
+    """The batch serve builds: a streamed model adopts the streamed step
+    unless PREFILL_STEP_SIZE pinned one."""
+    model = SimpleNamespace(
+        config=SimpleNamespace(model_type="deepseek_v41",
+                               num_attention_heads=64),
+        layers=_resident(streamed).layers)
+    step = pinned or 2048
+    if streamed and pinned is None:
+        step = model._gmlx_adopted_prefill_step = 8192
     return SimpleNamespace(
-        prefill_step_size=2048,
+        prefill_step_size=step,
         prompt_cache=[SimpleNamespace(offset=depth), _sparse_layer()],
-        model=SimpleNamespace(
-            config=SimpleNamespace(model_type="deepseek_v41",
-                                   num_attention_heads=64),
-            layers=_resident(streamed).layers),
+        model=model,
     )
 
 
@@ -153,4 +159,11 @@ def test_deep_prompt_keeps_the_streamed_base(armed, monkeypatch):
 def test_explicit_step_stays_authoritative(armed, monkeypatch):
     monkeypatch.setenv("GMLX_PREFILL_SCORE_CAP_GB", "6.0")
     monkeypatch.setenv("PREFILL_STEP_SIZE", "2048")
+    assert pd.decayed_for_batch(_batch(8192, pinned=2048)) == 2048
+
+
+def test_arch_step_wins_over_the_adopted_streamed_step(armed, monkeypatch):
+    monkeypatch.setenv("GMLX_PREFILL_SCORE_CAP_GB", "6.0")
+    monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
+    monkeypatch.setenv("GMLX_DS41_PREFILL_STEP", "2048")
     assert pd.decayed_for_batch(_batch(8192)) == 2048

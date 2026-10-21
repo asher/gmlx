@@ -8,9 +8,13 @@ tests exercise every byte movement without Metal or a real model."""
 
 from __future__ import annotations
 
+import gc
+import threading
+import weakref
 from contextlib import contextmanager
 
 import numpy as np
+import pytest
 import mlx.core as mx
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
@@ -74,7 +78,8 @@ def _fake_arena_alloc(shape):
 
 
 def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
-                 pressure=False, fast_disk="off", lend_bytes=0):
+                 pressure=False, fast_disk="off", lend_bytes=0,
+                 ring_share=0):
     import mlx_kquant as kq
     from gmlx.stream.decode_feeder import DecodeFeeder
 
@@ -95,7 +100,7 @@ def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
     per_expert = sum(_STRIDE.values())
     return DecodeFeeder(
         offsets, modules, arena_bytes=slots_per_layer * per_expert * n_layers,
-        lend_bytes=lend_bytes,
+        lend_bytes=lend_bytes, ring_share=ring_share,
     ), modules
 
 
@@ -460,6 +465,12 @@ def test_wrapper_decode_feeder_branch(monkeypatch):
         mx.eval(ref)
 
         class _FakeDF:
+            def forward_start(self, li):
+                pass
+
+            def repay_at(self, li, ids, ring_ok=False):
+                return False
+
             def ensure_wired(self):
                 pass
 
@@ -542,6 +553,12 @@ def test_arena_call_lifts_cpu_pin(monkeypatch):
         pin_in_swap = []
 
         class _DF:
+            def forward_start(self, li):
+                pass
+
+            def repay_at(self, li, ids, ring_ok=False):
+                return False
+
             def ensure_wired(self):
                 pass
 
@@ -787,6 +804,12 @@ def test_split_pieces_execute_before_next_stage(monkeypatch):
         events = []
 
         class _SplitDF:
+            def forward_start(self, li):
+                pass
+
+            def repay_at(self, li, ids, ring_ok=False):
+                return False
+
             def ensure_wired(self):
                 pass
 
@@ -857,6 +880,12 @@ def test_wrapper_redirects_dead_ids_on_fallback(monkeypatch):
         mx.eval(ref)
 
         class _WedgedDF:
+            def forward_start(self, li):
+                pass
+
+            def repay_at(self, li, ids, ring_ok=False):
+                return False
+
             def ensure_wired(self):
                 pass
 
@@ -1271,8 +1300,10 @@ def test_exit_close_hook_holds_only_weakref(monkeypatch, tmp_path):
 
 
 def test_close_stats_gated_on_stats_verbose(capsys):
-    """All end-of-run stat lines follow _stats_verbose (the CLI's -v); the
-    wedge anomaly warning prints regardless."""
+    """All end-of-run stat lines follow _stats_verbose (the CLI's -v), and
+    a feeder the garbage collector closes prints none: they would land in
+    whatever the process prints then, such as a command's JSON. The wedge
+    anomaly warning prints regardless."""
     import time as _time
 
     from gmlx.stream.decode_feeder import DecodeFeeder
@@ -1303,6 +1334,14 @@ def test_close_stats_gated_on_stats_verbose(capsys):
     assert "arena hit rate" in out
     assert "per-layer hit rate" in out
     assert "stalls" in out
+    assert "wedged" in out
+    f = bare(True)
+    collected = weakref.ref(f)
+    del f
+    gc.collect()
+    assert collected() is None
+    out = capsys.readouterr().out
+    assert "arena hit rate" not in out
     assert "wedged" in out
 
 
@@ -1422,6 +1461,12 @@ def _stream_scores_glu(monkeypatch, recorded, stock=False):
     install_expert_streaming(model)
 
     class _FakeDF:
+        def forward_start(self, li):
+            pass
+
+        def repay_at(self, li, ids, ring_ok=False):
+            return False
+
         def ensure_wired(self):
             pass
 
@@ -1564,6 +1609,43 @@ def test_wrapper_scores_sink_on_stock_base(monkeypatch):
     assert out.shape == (1, 1, 2, 16)
 
 
+@pytest.mark.parametrize("stock", [False, True])
+def test_wrapper_unmixed_scores_shed_keeps_per_expert_rows(monkeypatch, stock):
+    """A block that norms each expert output before its own sum (muse-spark)
+    hands scores over for miss-shed only. The base never sees them, even
+    with the mix seam, and a shed returns one row per routed expert: the
+    survivor's output at its place and zeros at the shed expert."""
+    mx.random.seed(13)
+    recorded = []
+    glu, df = _stream_scores_glu(monkeypatch, recorded, stock=stock)
+    object.__setattr__(glu, "_kq_miss_shed", 0.9)
+    object.__setattr__(glu, "_kq_scores_unmixed", True)
+
+    x1 = mx.random.normal((1, 1, 16))
+    i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
+    sc = mx.array([[[0.25, 0.75]]], dtype=mx.float32)
+    base = super(type(glu), glu).__call__
+
+    df.keep = None
+    out = glu(x1, i1, sc)
+    mx.eval(out)
+    assert df.shed_calls and np.allclose(df.shed_calls[-1][2], [0.25, 0.75])
+    assert recorded[-1][0].reshape(-1).tolist() == [1, 3]
+    assert recorded[-1][1] is None
+    assert out.shape == (1, 1, 2, 16)
+
+    df.keep = np.array([False, True])
+    out = glu(x1, i1, sc)
+    mx.eval(out)
+    assert recorded[-1][0].reshape(-1).tolist() == [3]
+    assert recorded[-1][1] is None
+    assert out.shape == (1, 1, 2, 16)
+    assert not np.array(mx.abs(out[..., 0, :]).sum())
+    ref = base(x1, mx.array([[[3]]], dtype=mx.uint32))
+    assert np.allclose(np.array(out[..., 1, :]), np.array(ref[..., 0, :]),
+                       atol=1e-6)
+
+
 def test_wrapper_layer_shed_returns_unmixed_zeros(monkeypatch):
     """A shed layer skips routing entirely - no stage, no gather - and
     returns unmixed zeros, so the block mixes nothing and still adds its
@@ -1586,6 +1668,116 @@ def test_wrapper_layer_shed_returns_unmixed_zeros(monkeypatch):
     i2 = mx.array([[[1, 3], [0, 2]]], dtype=mx.uint32)
     mx.eval(glu(x2, i2))
     assert df.stage_calls and df._layer_shed_n == 1  # t=2 ran normally
+
+
+@pytest.mark.parametrize("miss_shed", [None, 0.9])
+@pytest.mark.parametrize("unmixed", [True, False])
+def test_wrapper_layer_shed_keeps_the_top_expert(monkeypatch, capsys, unmixed,
+                                                 miss_shed):
+    """On a block with no shared expert a shed layer stages and runs only
+    its top-scored expert, in place of miss-shed, wherever the top score
+    sits. An unmixed block (Muse Spark) gets one row per routed expert,
+    zeros at the others; a mixing base gets the token's full mass on that
+    expert. A call without scores has no top expert: its layer runs in
+    full and a one-time notice says so."""
+    from gmlx.stream import expert_streaming
+
+    monkeypatch.setattr(expert_streaming, "_UNSHED_NOTED", False)
+    mx.random.seed(11)
+    recorded = []
+    glu, df = _stream_scores_glu(monkeypatch, recorded)
+    object.__setattr__(glu, "_kq_layer_shed", 1.0)
+    object.__setattr__(glu, "_kq_shed_keeps_top1", True)
+    object.__setattr__(glu, "_kq_miss_shed", miss_shed)
+    object.__setattr__(glu, "_kq_scores_unmixed", unmixed)
+    base = super(type(glu), glu).__call__
+
+    x1 = mx.random.normal((1, 1, 16))
+    i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
+    for sc, top in (([0.25, 0.75], 3), ([0.75, 0.25], 1)):
+        out = glu(x1, i1, mx.array([[sc]], dtype=mx.float32))
+        mx.eval(out)
+        assert df.shed_calls == []
+        assert df.stage_calls[-1][1].reshape(-1).tolist() == [top]
+        assert recorded[-1][0].reshape(-1).tolist() == [top]
+        slot = [1, 3].index(top)
+        if unmixed:
+            assert recorded[-1][1] is None
+            assert out.shape == (1, 1, 2, 16)
+            assert not np.array(mx.abs(out[..., 1 - slot, :]).sum())
+            ref = base(x1, mx.array([[[top]]], dtype=mx.uint32))
+            assert np.allclose(np.array(out[..., slot, :]),
+                               np.array(ref[..., 0, :]), atol=1e-6)
+        else:
+            assert np.allclose(recorded[-1][1].reshape(-1), [1.0], atol=1e-6)
+    assert df._layer_shed_n == 2
+    assert "run in full" not in capsys.readouterr().out
+
+    out = glu(x1, i1)
+    mx.eval(out)
+    assert df._layer_shed_n == 2
+    assert recorded[-1][0].reshape(-1).tolist() == [1, 3]
+    assert np.allclose(np.array(out), np.array(base(x1, i1)), atol=1e-6)
+    assert "run in full" in capsys.readouterr().out
+
+
+def test_wrapper_layer_shed_runs_an_uncovered_layer_in_full(monkeypatch,
+                                                          capsys):
+    """A shed draw on a block with no shared expert, on a layer the decode
+    feeder does not cover, has no arena to stage the top expert from: the
+    layer runs in full instead of adding nothing, and a notice says so."""
+    from gmlx.stream import expert_streaming
+
+    monkeypatch.setattr(expert_streaming, "_UNSHED_NOTED", False)
+    mx.random.seed(12)
+    recorded = []
+    glu, df = _stream_scores_glu(monkeypatch, recorded)
+    object.__setattr__(glu, "_kq_layer_shed", 1.0)
+    object.__setattr__(glu, "_kq_shed_keeps_top1", True)
+    object.__setattr__(glu, "_kq_scores_unmixed", True)
+    df.covers = lambda li: False
+    base = super(type(glu), glu).__call__
+
+    x1 = mx.random.normal((1, 1, 16))
+    i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
+    out = glu(x1, i1, mx.array([[[0.25, 0.75]]], dtype=mx.float32))
+    mx.eval(out)
+    assert df._layer_shed_n == 0 and df.stage_calls == []
+    assert recorded[-1][0].reshape(-1).tolist() == [1, 3]
+    assert np.allclose(np.array(out), np.array(base(x1, i1)), atol=1e-5)
+    assert "run in full" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("top1", [False, True])
+def test_wrapper_layer_shed_never_sheds_a_split_leaf(monkeypatch, top1):
+    """A multi-token call whose routed union overflows the arena splits
+    down to one-token leaves. Those leaves are prefill or verify work, so
+    none of them sheds: the call matches the same call without the lever."""
+    mx.random.seed(14)
+    recorded = []
+    glu, df = _stream_scores_glu(monkeypatch, recorded)
+    object.__setattr__(glu, "_kq_shed_keeps_top1", top1)
+    staged = df.stage
+
+    def stage(li, ids):
+        return None if np.unique(ids).size > 2 else staged(li, ids)
+
+    df.stage = stage
+    df.slot_count = lambda li: 2
+    df.can_stage_smaller = lambda li: True
+    df.note_split_rule = lambda split, ahead=False: None
+    df.has_dead = lambda li: False
+
+    x = mx.random.normal((1, 4, 16))
+    i = mx.array([[[0, 1], [2, 3], [0, 1], [2, 3]]], dtype=mx.uint32)
+    sc = mx.array([[[0.6, 0.4]] * 4], dtype=mx.float32)
+    ref = glu(x, i, sc)
+    mx.eval(ref)
+    object.__setattr__(glu, "_kq_layer_shed", 1.0)
+    out = glu(x, i, sc)
+    mx.eval(out)
+    assert df._layer_shed_n == 0
+    assert np.array_equal(np.array(out), np.array(ref))
 
 
 def test_available_ram_counts_active_file_cache(monkeypatch):
@@ -1685,6 +1877,522 @@ def test_lend_for_ring_shrinks_then_decode_restores(monkeypatch, tmp_path):
     assert feeder.arena_bytes == before // 2 + 2 * feeder._per_expert[0]
 
 
+class _FakeResidencySet:
+    """mlx_kquant's residency calls on a model set: changes stage until a
+    commit applies them in order. Like kq's, the set does not keep its
+    buffers alive: one freed while a member or with a change staged lands
+    in ``freed_live``. Records the thread of each commit. With a gate, the
+    residency worker's calls wait for it (``waiting`` is set once one
+    finds it closed). The worker's call number ``fail_at`` raises, and so
+    does every erase of a buffer whose id is in ``bad``. With ``hold``,
+    the worker's calls after that one wait for it (``holding`` is set
+    once one does)."""
+
+    def __init__(self, monkeypatch, gate=None):
+        import mlx_kquant as kq
+
+        self.members: set = set()
+        self.staged: list = []
+        self.commits: list = []
+        self.freed_live: list = []
+        self.gate = gate
+        self.waiting = threading.Event()
+        self.worker_calls = 0
+        self.fail_at = None
+        self.bad: set = set()
+        self.hold = None
+        self.holding = threading.Event()
+        for name, fn in (("residency_insert", self.insert),
+                         ("residency_erase", self.erase),
+                         ("residency_commit", self.commit)):
+            monkeypatch.setattr(kq, name, fn, raising=False)
+        monkeypatch.setenv("GMLX_GPU_RESIDENT", "1")
+
+    def _wait(self):
+        if threading.current_thread().name != "gmlx-residency":
+            return
+        self.worker_calls += 1
+        if self.gate is not None:
+            if not self.gate.is_set():
+                self.waiting.set()
+            assert self.gate.wait(10)
+        if self.worker_calls == self.fail_at:
+            raise RuntimeError("residency set is gone")
+        if (self.hold is not None and self.fail_at is not None
+                and self.worker_calls > self.fail_at):
+            self.holding.set()
+            assert self.hold.wait(10)
+
+    def _gone(self, k):
+        if k in self.members or any(x == k for _, x in self.staged):
+            self.freed_live.append(k)
+
+    def insert(self, a):
+        self._wait()
+        weakref.finalize(a, self._gone, id(a))
+        self.staged.append((True, id(a)))
+        return True
+
+    def erase(self, a):
+        self._wait()
+        if id(a) in self.bad:
+            raise RuntimeError("residency set is gone")
+        self.staged.append((False, id(a)))
+        return True
+
+    def commit(self):
+        self._wait()
+        for add, k in self.staged:
+            if add:
+                self.members.add(k)
+            else:
+                self.members.discard(k)
+        self.staged.clear()
+        self.commits.append(threading.current_thread().name)
+        return True
+
+
+def _arena_ids(feeder):
+    return {id(a[0]) for a in feeder._arena.values()}
+
+
+@pytest.mark.parametrize("worker", [True, False])
+def test_a_regrown_layer_commits_off_the_decode_thread(monkeypatch, tmp_path,
+                                                       worker):
+    """The first decode's residency set and a repaid lend's regrow commit
+    on the residency worker, so decode does not wait while pages wire. A
+    lend's shrink commits on the calling thread, which needs the bytes
+    now. GMLX_RESIDENCY_ASYNC=0 commits everything on the caller."""
+    monkeypatch.setenv("GMLX_RESIDENCY_ASYNC", "1" if worker else "0")
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    rs = _FakeResidencySet(monkeypatch)
+    feeder.stage(0, np.array([0, 1, 2, 3]))
+    feeder._release_ring = lambda: None
+    feeder.ensure_wired()
+    feeder._kernel_has_room = lambda n: False
+    feeder.lend_for_ring(feeder.arena_bytes // 2)
+    feeder.ensure_wired()
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder._slots[0] == 4
+    feeder._residency_drain()
+    main = threading.current_thread().name
+    off = "gmlx-residency" if worker else main
+    assert rs.commits == [off, main, main, off]
+    assert rs.members == _arena_ids(feeder)
+    assert rs.freed_live == []
+    feeder.close()
+    assert rs.members == set()
+
+
+@pytest.mark.parametrize("mode", ["worker", "caller", "mlock-off"])
+def test_a_grown_buffer_wires_on_the_worker(monkeypatch, tmp_path, mode):
+    """A repaid lend's regrow wires its new buffers on the residency
+    worker, so decode does not wait while pages lock. Once drained, every
+    arena buffer is wired and recorded. GMLX_RESIDENCY_ASYNC=0 wires on the
+    caller, as before, and GMLX_DECODE_ARENA_MLOCK=0 wires nothing."""
+    from gmlx.stream import decode_feeder as dfm
+
+    monkeypatch.setenv("GMLX_RESIDENCY_ASYNC", "0" if mode == "caller" else "1")
+    feeder, rs = _lent(monkeypatch, tmp_path)
+    real = dfm.lock_pages
+    threads = []
+
+    def lock_pages(mv):
+        threads.append(threading.current_thread().name)
+        return real(mv)
+
+    monkeypatch.setattr(dfm, "lock_pages", lock_pages)
+    if mode == "mlock-off":
+        monkeypatch.setenv("GMLX_DECODE_ARENA_MLOCK", "0")
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder._slots[0] == 4
+    feeder._residency_drain()
+    grown = {(0, k) for k in _KINDS}
+    if mode == "mlock-off":
+        assert threads == [] and not grown & set(feeder._locked)
+    else:
+        off = ("gmlx-residency" if mode == "worker"
+               else threading.current_thread().name)
+        assert threads == [off] * len(_KINDS)
+        assert set(feeder._locked) == set(feeder._arena)
+        assert feeder.locked_bytes == feeder.arena_bytes
+    assert rs.freed_live == []
+    feeder.close()
+
+
+def test_a_buffer_replaced_during_its_wiring_is_unlocked(monkeypatch,
+                                                         tmp_path):
+    """The worker wires a grown buffer while decode may replace it. A
+    buffer no longer the layer's when its lock lands is unlocked again and
+    left out of the record, so a later unlock never names a freed range
+    and the current buffer still wires."""
+    from gmlx.stream import decode_feeder as dfm
+
+    feeder, _ = _lent(monkeypatch, tmp_path)
+    feeder._residency_drain()
+    key = (0, _KINDS[0])
+    stale = feeder._arena[key]
+    feeder._munlock_buf(key)
+    unlocked = []
+    real_lock, real_unlock = dfm.lock_pages, dfm.unlock_pages
+
+    def lock_pages(mv):
+        entry = real_lock(mv)
+        feeder._arena[key] = (stale[0], bytearray(len(stale[1])))
+        return entry
+
+    def unlock_pages(entry):
+        unlocked.append(entry)
+        real_unlock(entry)
+
+    monkeypatch.setattr(dfm, "lock_pages", lock_pages)
+    monkeypatch.setattr(dfm, "unlock_pages", unlock_pages)
+    feeder._wire_grown(key, stale)
+    assert key not in feeder._locked
+    assert len(unlocked) == 1 and unlocked[0][1] == len(stale[1])
+    feeder._arena[key] = stale
+    feeder.close()
+
+
+def test_a_buffer_is_wired_and_counted_once(monkeypatch, tmp_path):
+    """A seed thread and the worker can wire the same grown buffer. A
+    recorded buffer is not locked again, and a lock that lands after
+    another thread recorded the buffer is undone, so the record holds one
+    entry and locked_bytes counts it once."""
+    from gmlx.stream import decode_feeder as dfm
+
+    feeder, _ = _lent(monkeypatch, tmp_path)
+    feeder._residency_drain()
+    key = (0, _KINDS[0])
+    a = feeder._arena[key]
+    calls, unlocked = [], []
+    real_lock, real_unlock = dfm.lock_pages, dfm.unlock_pages
+
+    def lock_pages(mv):
+        calls.append(1)
+        return real_lock(mv)
+
+    def unlock_pages(entry):
+        unlocked.append(entry)
+        real_unlock(entry)
+
+    monkeypatch.setattr(dfm, "lock_pages", lock_pages)
+    monkeypatch.setattr(dfm, "unlock_pages", unlock_pages)
+    feeder._wire_grown(key, a)  # recorded already
+    assert calls == [] and unlocked == []
+    feeder._munlock_buf(key)
+    unlocked.clear()
+
+    def racing_lock(mv):
+        monkeypatch.setattr(dfm, "lock_pages", lock_pages)
+        assert feeder._mlock_buf(key)  # another thread records it first
+        return lock_pages(mv)
+
+    monkeypatch.setattr(dfm, "lock_pages", racing_lock)
+    feeder._wire_grown(key, a)
+    assert len(calls) == 2 and len(unlocked) == 1
+    assert feeder.locked_bytes == sum(n for _, n in feeder._locked.values())
+    assert set(feeder._locked) == set(feeder._arena)
+    feeder.close()
+
+
+def test_a_queued_wiring_job_does_not_keep_its_feeder(monkeypatch, tmp_path):
+    """A wiring job still queued when its model unloads holds the feeder
+    weakly: the feeder is collected and closes, and the job then does
+    nothing."""
+    import gc
+
+    gate = threading.Event()
+    gate.set()
+    feeder, rs = _lent(monkeypatch, tmp_path, n_layers=3, gate=gate)
+    feeder._residency_drain()
+    gate.clear()
+    feeder.stage(0, np.array([0, 1]))  # its commit waits at the gate
+    assert rs.waiting.wait(10)
+    feeder.stage(1, np.array([0, 1]))  # its wiring jobs queue behind it
+    assert feeder._rworker._jobs
+    worker = feeder._rworker._thread
+    ref = weakref.ref(feeder)
+    box = [feeder]
+    del feeder
+    _within(lambda: (box.clear(), gc.collect()))
+    assert ref() is None
+    gate.set()
+    worker.join(10)
+    assert not worker.is_alive()
+    gc.collect()
+    assert rs.members == set()  # the collected feeder closed
+    assert rs.freed_live == []
+
+
+def test_the_worker_keeps_no_buffer_it_wired(monkeypatch, tmp_path):
+    """A wiring job holds its buffer only until it runs. The next lend's
+    shrink then frees the grown buffers at once, so the ring gets their
+    memory."""
+    import gc
+
+    feeder, rs = _lent(monkeypatch, tmp_path)
+    feeder.stage(0, np.array([0, 1]))
+    feeder._residency_drain()
+    grown = [(0, k) for k in _KINDS]
+    assert set(grown) <= set(feeder._locked)
+    refs = [weakref.ref(feeder._arena[k][0]) for k in grown]
+    feeder.lend_for_ring(feeder.arena_bytes // 2)
+    assert feeder._slots[0] < 4
+    gc.collect()
+    assert [r() is None for r in refs] == [True] * len(refs)
+    assert rs.freed_live == []
+    feeder.close()
+
+
+def test_a_shrink_commits_after_the_queued_regrow(monkeypatch, tmp_path):
+    """A shrink waits for the worker's queued changes before making its
+    own, so a buffer a regrow added and the shrink replaced never stays in
+    the set."""
+    gate = threading.Event()
+    gate.set()
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    rs = _FakeResidencySet(monkeypatch, gate)
+    feeder.stage(0, np.array([0, 1, 2, 3]))
+    feeder._release_ring = lambda: None
+    feeder.ensure_wired()
+    feeder._kernel_has_room = lambda n: False
+    feeder.lend_for_ring(feeder.arena_bytes // 2)
+    feeder.ensure_wired()
+    gate.clear()
+    feeder.stage(0, np.array([0, 1]))  # the regrow waits at the gate
+    opener = threading.Timer(0.2, gate.set)
+    opener.start()
+    feeder.lend_for_ring(feeder.arena_bytes // 2)
+    opener.join()
+    assert feeder._slots[0] < 4
+    feeder._residency_drain()
+    assert rs.commits[-2:] == ["gmlx-residency",
+                               threading.current_thread().name]
+    assert rs.members == _arena_ids(feeder)
+    feeder.close()
+
+
+def test_close_empties_the_set_after_a_queued_regrow(monkeypatch, tmp_path):
+    gate = threading.Event()
+    gate.set()
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    rs = _FakeResidencySet(monkeypatch, gate)
+    feeder.stage(0, np.array([0, 1, 2, 3]))
+    feeder._release_ring = lambda: None
+    feeder.ensure_wired()
+    feeder._kernel_has_room = lambda n: False
+    feeder.lend_for_ring(feeder.arena_bytes // 2)
+    feeder.ensure_wired()
+    gate.clear()
+    feeder.stage(0, np.array([0, 1]))  # the regrow waits at the gate
+    opener = threading.Timer(0.2, gate.set)
+    opener.start()
+    feeder.close()
+    opener.join()
+    assert rs.members == set()
+
+
+def _lent(monkeypatch, tmp_path, n_layers=2, gate=None):
+    """A wired feeder whose layers each lent half their slots to the ring
+    and are owed them back: a layer's next stage() call regrows it."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4,
+                             n_layers=n_layers)
+    rs = _FakeResidencySet(monkeypatch, gate)
+    feeder.stage(0, np.array([0, 1, 2, 3]))
+    feeder._release_ring = lambda: None
+    feeder.ensure_wired()
+    feeder._kernel_has_room = lambda n: False
+    feeder.lend_for_ring(feeder.arena_bytes // 2)
+    feeder.ensure_wired()
+    return feeder, rs
+
+
+def test_old_buffers_waiting_on_the_worker_stay_within_a_layer(monkeypatch,
+                                                               tmp_path):
+    """Every layer regrows in one forward while the worker is still
+    committing. A grow that would leave more than one layer's stacks of
+    old buffers waiting on the worker waits for it first, so the old and
+    new arenas never coexist whole."""
+    from gmlx.stream import decode_feeder as dfm
+
+    gate = threading.Event()
+    gate.set()
+    feeder, rs = _lent(monkeypatch, tmp_path, n_layers=4, gate=gate)
+    real_drain = dfm._ResidencyWorker.drain
+
+    def drain(self):
+        gate.set()
+        real_drain(self)
+
+    monkeypatch.setattr(dfm._ResidencyWorker, "drain", drain)
+    gate.clear()
+    held = []
+    for li in range(4):
+        feeder.stage(li, np.array([0, 1]))
+        held.append(feeder._rworker.held)
+    assert [feeder._slots[li] for li in range(4)] == [4] * 4
+    assert 0 < max(held) <= 4 * sum(_STRIDE.values())
+    feeder._residency_drain()
+    assert rs.members == _arena_ids(feeder)
+    assert rs.freed_live == []
+    feeder.close()
+
+
+def test_a_ring_share_repay_regrows_without_waiting_on_the_worker(
+        monkeypatch, tmp_path):
+    """At the first decode every lent layer is owed its slots back and
+    regrows from one slot while the worker is still committing the
+    arena's wiring. None of those grows waits for the worker."""
+    from gmlx.stream import decode_feeder as dfm
+
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4,
+                             n_layers=4, ring_share=9 * per_expert)
+    gate = threading.Event()
+    rs = _FakeResidencySet(monkeypatch, gate)
+    lent = sorted(feeder._lent)
+    assert len(lent) == 3 and {feeder._slots[li] for li in lent} == {1}
+    drains = []
+    real_drain = dfm._ResidencyWorker.drain
+
+    def drain(self):
+        drains.append(1)
+        gate.set()
+        real_drain(self)
+
+    monkeypatch.setattr(dfm._ResidencyWorker, "drain", drain)
+    feeder._release_ring = lambda: None
+    feeder.ensure_wired()  # the wiring commit waits at the gate
+    for li in lent:
+        feeder.stage(li, np.array([0, 1]))
+    assert [feeder._slots[li] for li in lent] == [4] * 3
+    assert drains == []
+    gate.set()
+    feeder._residency_drain()
+    assert rs.members == _arena_ids(feeder)
+    assert rs.freed_live == []
+    feeder.close()
+
+
+def _within(fn, timeout=10):
+    """Run fn on a helper thread, so a wait on a dead worker fails the
+    test instead of hanging it."""
+    err = []
+
+    def run():
+        try:
+            fn()
+        except BaseException as e:  # noqa: BLE001 - re-raised below
+            err.append(e)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout)
+    assert not t.is_alive(), "waited on a dead residency worker"
+    if err:
+        raise err[0]
+
+
+@pytest.mark.parametrize("then", ["drain", "collect", "persistent"])
+def test_a_failed_worker_erases_what_it_removed(monkeypatch, tmp_path,
+                                                capsys, then):
+    """A residency call that raises on the worker leaves the set's state
+    unknown. The worker erases the buffers its failed and queued changes
+    remove, then wakes a waiting drain, so they are freed as non-members.
+    If that erase raises too, it keeps them all until exit. Later changes
+    commit on the calling thread."""
+    import gc
+
+    from gmlx.stream import decode_feeder as dfm
+
+    monkeypatch.setattr(dfm, "_PARKED", [])
+    gate = threading.Event()
+    gate.set()
+    feeder, rs = _lent(monkeypatch, tmp_path, n_layers=3, gate=gate)
+    olds = [feeder._arena[(li, k)][0] for li in (0, 1) for k in _KINDS]
+    removed = [weakref.ref(a) for a in olds]
+    gate.clear()
+    feeder.stage(0, np.array([0, 1]))  # the regrow waits at the gate
+    assert rs.waiting.wait(10)
+    feeder.stage(1, np.array([0, 1]))  # queued behind it
+    # The held erase and the insert after it go through, the next raises.
+    rs.fail_at = rs.worker_calls + 2
+    if then == "persistent":
+        rs.bad.add(id(olds[1]))
+    del olds
+    added = id(feeder._arena[(0, "gate")][0])
+    if then == "drain":
+        rs.hold = threading.Event()
+    threading.Timer(0.2, gate.set).start()
+    box = [feeder]
+    del feeder
+
+    if then == "drain":
+        drained = threading.Event()
+        t = threading.Thread(
+            target=lambda: (box[0]._residency_drain(), drained.set()),
+            daemon=True)
+        t.start()
+        assert rs.holding.wait(10)
+        assert not drained.wait(0.2)  # the drain waits for the erase
+        rs.hold.set()
+        assert drained.wait(10)
+        t.join(10)
+
+    def drain_then_change():
+        box[0]._residency_drain()  # waits while the worker fails
+        assert box[0]._rworker.held == 0
+        # the queued layer's wiring still ran
+        assert set(box[0]._locked) == set(box[0]._arena)
+        box[0].stage(2, np.array([0, 1]))
+        assert rs.commits[-1] == threading.current_thread().name
+        assert added in rs.members  # the failed batch's insert stays
+        box[0].close()
+
+    if then != "collect":
+        _within(drain_then_change)
+    box[0]._rworker._thread.join(10)
+    out = capsys.readouterr().out
+    assert "residency worker failed (RuntimeError('residency set is gone'))" \
+        in out
+    _within(lambda: (box.clear(), gc.collect()))
+    alive = [r() is not None for r in removed]
+    assert alive == [then == "persistent"] * len(removed)
+    assert ("erase failed again" in out) == (then == "persistent")
+    assert rs.freed_live == []
+
+
+def test_a_failure_in_the_collectors_close_frees_no_member(monkeypatch,
+                                                           tmp_path, capsys):
+    """The collector's close queues the arena's erase on the worker and
+    returns. If a call in that batch raises, the worker still erases the
+    arena before the last reference to it goes."""
+    import gc
+
+    gate = threading.Event()
+    gate.set()
+    feeder, rs = _lent(monkeypatch, tmp_path, n_layers=2, gate=gate)
+    feeder._residency_drain()
+    arena = [weakref.ref(a[0]) for a in feeder._arena.values()]
+    gate.clear()
+    feeder.close(wait=False)  # the finalizer's form
+    assert rs.waiting.wait(10)
+    rs.fail_at = rs.worker_calls + 1
+    worker = feeder._rworker._thread
+    box = [feeder]
+    del feeder
+    _within(lambda: (box.clear(), gc.collect()))
+    gate.set()
+    worker.join(10)
+    assert not worker.is_alive()
+    gc.collect()
+    assert "residency worker failed" in capsys.readouterr().out
+    assert [r() for r in arena] == [None] * len(arena)
+    assert rs.members == set()
+    assert rs.freed_live == []
+
+
 def test_lend_is_noop_while_the_kernel_has_the_room(monkeypatch, tmp_path):
     """The budget keeps the ring's room out of the arena, so a rebuild on
     a box that still has that room borrows nothing."""
@@ -1698,6 +2406,300 @@ def test_lend_is_noop_while_the_kernel_has_the_room(monkeypatch, tmp_path):
     feeder.lend_for_ring(before // 2)
     assert asked == [before // 2]
     assert feeder._lend_frac == 1.0 and feeder.arena_bytes == before
+
+
+def test_ring_share_lends_cold_layers_whole_at_each_prefill(
+        monkeypatch, tmp_path):
+    """The arena holds the prefill ring's room while decoding. Each
+    prefill that rebuilds the ring shrinks the coldest layers to one slot,
+    keeping their hottest resident, even while the kernel has room; the
+    next decode releases the ring and they refill. The first prefill
+    starts lent, so the ring and the arena never sum past the budget."""
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4,
+                             ring_share=3 * per_expert)
+    assert feeder.nominal_bytes == 8 * per_expert
+    assert feeder._lent == {0} and feeder._slots == {0: 1, 1: 4}
+    assert feeder.arena_bytes == 5 * per_expert
+    released = []
+    feeder._release_ring = lambda: released.append(1)
+    feeder.stage(0, np.array([0]))  # first prefill: still lent
+    assert feeder._slots[0] == 1
+    feeder.ensure_wired()  # first decode
+    assert released == [1] and not feeder._lent
+    for ids in ([0, 1], [0, 1], [0, 1], [0, 1]):
+        feeder.stage(0, np.array(ids))  # regrows, then hits
+    assert feeder._slots[0] == 4
+    for ids in ([0, 1], [2, 3], [0]):
+        feeder.stage(1, np.array(ids))  # mostly misses: the colder layer
+    feeder._kernel_has_room = lambda n: True
+
+    feeder.lend_for_ring(3 * per_expert)
+    assert feeder._lent == {1} and feeder._slots == {0: 4, 1: 1}
+    assert feeder.arena_bytes == 5 * per_expert
+    assert feeder._arena_bytes_at(0) == 5 * per_expert  # pressure sizes
+    s = int(feeder._slot_of[1][0])
+    assert s == 0 and (feeder._slot_of[1] >= 0).sum() == 1
+    for kind in _KINDS:
+        assert _arena_slot(feeder, 1, kind, s) == _expert_bytes(1, kind, 0)
+
+    feeder.ensure_wired()  # next decode: the ring goes, layer 1 refills
+    assert released == [1, 1] and not feeder._lent
+    feeder.stage(1, np.array([0, 2]))
+    assert feeder._slots[1] == 4
+    assert feeder.arena_bytes == 8 * per_expert
+    feeder.lend_for_ring(3 * per_expert)  # every prefill lends again
+    assert feeder._ring_lends == 2 and feeder._slots[1] == 1
+
+
+def test_ring_share_lend_joins_inflight_prestage(monkeypatch, tmp_path):
+    """A lend never frees a buffer a prestage read still writes into: it
+    joins the layer's reads, then shrinks it."""
+    import threading
+    import time
+
+    import gmlx.stream.decode_feeder as dfm
+
+    monkeypatch.setattr(dfm, "_PAGE", 16)
+    monkeypatch.setenv("GMLX_DECODE_READ_TIMEOUT", "5")
+    release = threading.Event()
+    real = dfm.read_range
+    blocked = {64, 320, 560}  # layer 0, expert 1: gate/up/down slices
+
+    entered = []
+
+    def gated(fd, mv, off):
+        if off in blocked:
+            entered.append(off)
+            release.wait(5)
+        real(fd, mv, off)
+
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4,
+                             ring_share=3 * per_expert)
+    feeder._release_ring = lambda: None
+    feeder.ensure_wired()
+    feeder.stage(0, np.array([0]))
+    feeder.stage(1, np.array([0]))
+    feeder.stage(1, np.array([0]))  # layer 1 hotter: layer 0 is lent
+    monkeypatch.setattr(dfm, "read_range", gated)
+    feeder.prestage(0, np.array([[1]]))
+    assert 1 in feeder._pending[0]
+    deadline = time.time() + 5  # all 3 reads inside the gate, not cancellable
+    while len(entered) < 3 and time.time() < deadline:
+        time.sleep(0.005)
+    threading.Timer(0.05, release.set).start()
+    feeder.lend_for_ring(3 * per_expert)
+    assert release.is_set() and not feeder._pending.get(0)
+    assert feeder._lent == {0} and feeder._slots == {0: 1, 1: 4}
+
+
+def test_ring_share_repays_at_a_wide_call_on_the_first_layer(
+        monkeypatch, tmp_path):
+    """Batched and speculative decode never send a one-token call. A
+    multi-token call the arena serves at the forward's first layer repays
+    the lend; one at a later layer of a ring pass does not, and neither
+    does one routed to more experts than the layer holds repaid, which
+    takes the ring anyway. A lent layer never splits: its pieces would
+    bottom out at one-token fallbacks."""
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=3,
+                             ring_share=2 * per_expert)
+    feeder._release_ring = lambda: True
+    assert feeder._lent == {0}
+    assert not feeder.can_stage_smaller(0) and feeder.can_stage_smaller(1)
+    fits, wide = np.array([[0, 1], [2, 1]]), np.array([[0, 1], [2, 3]])
+    feeder.ensure_wired()  # first decode
+    feeder._kernel_has_room = lambda n: True
+    feeder.lend_for_ring(2 * per_expert)  # the next prefill
+    assert feeder._lent == {0}
+    assert feeder.repay_at(0, fits, ring_ok=True)
+    assert not feeder.repay_at(1, fits, ring_ok=True)
+    assert not feeder.repay_at(0, wide, ring_ok=True)
+    # Too narrow for the ring: it falls back off the arena either way.
+    assert feeder.repay_at(0, wide)
+    feeder.ensure_wired()
+    assert not feeder._lent and not feeder.repay_at(0, fits)
+    assert feeder.can_stage_smaller(0)
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder.at_target(0) and feeder._slots[0] == 3
+
+
+@pytest.mark.parametrize("share", [0, 2])
+def test_a_wide_first_decode_wires_the_arena(monkeypatch, tmp_path, share):
+    """Batched and speculative decode never send a one-token call. Their
+    first call at the first layer runs the one-time wiring and repays any
+    ring lend, even one routed past the layer's slots."""
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=3,
+                             ring_share=share * per_expert)
+    released = []
+    feeder._release_ring = lambda: released.append(1) or True
+    fits, wide = np.array([[0, 1], [2, 1]]), np.array([[0, 1], [2, 3]])
+    assert feeder._mlock_deferred and bool(feeder._lent) == bool(share)
+    assert not feeder.repay_at(1, fits)
+    assert feeder.repay_at(0, wide, ring_ok=True)
+    feeder.ensure_wired()
+    assert not feeder._mlock_deferred and released == [1]
+    assert not feeder._lent and set(feeder._locked) == set(feeder._arena)
+    assert not feeder.repay_at(0, fits)
+
+
+def test_regrow_after_a_quarantined_ring_asks_for_its_step(
+        monkeypatch, tmp_path):
+    """After a quarantined ring every layer holds a share less. A
+    pressure regrow asks only for the bytes its step adds at that size."""
+    import gmlx.stream.budget as budget
+
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4,
+                             ring_share=3 * per_expert)
+    feeder._release_ring = lambda: False
+    feeder.ensure_wired()
+    for li in (0, 1):
+        feeder.stage(li, np.array([0, 1]))
+    assert feeder.arena_bytes == 4 * per_expert
+    monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: 1 << 40)
+    feeder.governor_evict(1 / 3)
+    assert feeder._pressure_steps == 1
+    assert feeder.arena_bytes == 2 * per_expert
+    monkeypatch.setattr(budget, "_ram_floor_bytes", lambda ram: 0)
+    monkeypatch.setattr(budget, "kernel_floor_bytes", lambda: 0)
+    monkeypatch.setattr(budget, "reclaimable_ram_bytes",
+                        lambda: 2 * per_expert)
+    monkeypatch.setattr(feeder, "_governor_room_ok", lambda need: True)
+    assert feeder._regrow_headroom_ok()
+
+
+def test_ring_back_before_a_refill_lends_the_same_layers(
+        monkeypatch, tmp_path):
+    """The ring can come back before the lent layers stage again, as when
+    a wide call that overflows the first layer takes the ring. The new
+    lend keeps the layers still at one slot and empties no more, so the
+    arena stays at its nominal size less one share."""
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=3,
+                             n_layers=6, ring_share=2 * per_expert)
+    feeder._release_ring = lambda: True
+    feeder._kernel_has_room = lambda n: True
+    lent = set(feeder._lent)
+    assert len(lent) == 1
+    # The other layers read colder, but emptying one would cost hits.
+    feeder._layer_lookups = dict.fromkeys(range(6), 10)
+    feeder._layer_hits = {li: 10 if li in lent else 0 for li in range(6)}
+    for _ in range(4):
+        feeder.ensure_wired()  # repaid, but no layer stages before:
+        feeder.lend_for_ring(2 * per_expert)  # the next prefill
+        assert feeder._lent == lent
+        assert feeder.arena_bytes == feeder.nominal_bytes - 2 * per_expert
+
+
+def test_ring_back_in_a_wide_forward_holds_the_lend(monkeypatch, tmp_path):
+    """A wide call fits the first layer and repays, then a later layer
+    overflows and takes the ring. The wide forwards after it keep the
+    lend for a hold of 1, 2, 4 and on up to 16 forwards rather than
+    release and rebuild the ring every step. A prefill starts no hold and
+    resets it to one forward."""
+    import gmlx.stream.decode_feeder as dfm
+
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=3,
+                             n_layers=3, ring_share=2 * per_expert)
+    released = []
+    feeder._release_ring = lambda: released.append(1) or True
+    feeder._kernel_has_room = lambda n: True
+    feeder.ensure_wired()  # first decode
+
+    def prefill():
+        feeder.forward_start(0)
+        feeder.lend_for_ring(2 * per_expert)
+
+    prefill()
+    fits = np.array([[0], [1]])
+
+    def forward(overflows):
+        feeder.forward_start(0)
+        if not feeder.repay_at(0, fits, ring_ok=True):
+            return False
+        feeder.ensure_wired()
+        if overflows:  # a later layer takes the ring
+            feeder.forward_start(2)
+            feeder.lend_for_ring(2 * per_expert)
+        return True
+
+    assert dfm._HOLD_FORWARDS == 16
+    holds = [1, 2, 4, 8, 16, 16]
+    repaid = [forward(True) for _ in range(sum(holds) + len(holds))]
+    assert repaid == [x for h in holds for x in [True] + [False] * h]
+    assert len(released) == 1 + len(holds)
+    assert forward(False)  # this forward fits every layer
+    prefill()
+    assert forward(True)  # a short hold again
+    assert [forward(True) for _ in range(4)] == [False, True, False, False]
+    feeder.ensure_wired()  # a one-token forward
+    prefill()
+    assert forward(True)
+
+
+def test_a_call_the_layer_cannot_hold_does_not_regrow_it(
+        monkeypatch, tmp_path):
+    """A repaid layer regrows at its next stage() call, unless the call
+    routes to more experts than the grown layer holds: it is refused
+    either way, and the next lend would shrink the layer again."""
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=3,
+                             ring_share=2 * per_expert)
+    feeder._release_ring = lambda: True
+    assert feeder._lent == {0}
+    feeder.ensure_wired()
+    assert feeder.stage(0, np.array([0, 1, 2, 3])) is None
+    assert feeder._slots[0] == 1
+    assert feeder.stage(0, np.array([0, 1])) is not None
+    assert feeder._slots[0] == 3
+
+
+def test_ring_share_lend_waits_for_queued_gathers(monkeypatch, tmp_path):
+    """A prestage read that wedges while the lend joins it zeroes its
+    slot, so the gathers already queued on the GPU finish first."""
+    import gmlx.stream.decode_feeder as dfm
+
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4,
+                             ring_share=3 * per_expert)
+    feeder._release_ring = lambda: True
+    feeder.ensure_wired()
+    order = []
+    monkeypatch.setattr(dfm, "_sync_gpu", lambda: order.append("sync"))
+    feeder._pending[0] = {1: None}
+    monkeypatch.setattr(
+        feeder, "_settle_pending",
+        lambda li, uniq: order.append("settle") or feeder._pending[li].clear())
+    feeder._kernel_has_room = lambda n: True
+    feeder.lend_for_ring(3 * per_expert)
+    assert feeder._lent == {0} and order[:2] == ["sync", "settle"]
+
+
+def test_quarantined_ring_spreads_the_lend(monkeypatch, tmp_path):
+    """A ring that cannot release keeps its slots for good. Every layer
+    gives up its share of that room, so the lent layer serves calls from
+    the arena again and nothing lends again."""
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4,
+                             ring_share=3 * per_expert)
+    calls = []
+    feeder._release_ring = lambda: calls.append(1) or False
+    assert feeder._lent == {0}
+    feeder.ensure_wired()
+    assert not feeder._lent and feeder._ring_share == 0
+    assert feeder._slots[1] == 2  # shrunk before layer 0 regrows
+    assert feeder.stage(0, np.array([0, 1])) is not None
+    assert feeder._slots == {0: 2, 1: 2}
+    assert feeder.arena_bytes <= feeder.nominal_bytes - 3 * per_expert
+    feeder.ensure_wired()  # no retry of a dead ring on every token
+    assert calls == [1] and not feeder.repay_at(0, np.array([0, 1]))
+    feeder._kernel_has_room = lambda n: True
+    feeder.lend_for_ring(3 * per_expert)
+    assert feeder._slots == {0: 2, 1: 2} and feeder._ring_lends == 0
 
 
 def test_layer_wires_at_its_first_stage_call(monkeypatch, tmp_path):

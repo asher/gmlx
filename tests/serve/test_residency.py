@@ -847,6 +847,11 @@ def test_load_gate_keeps_the_resident_streams_ring_and_kv_room(monkeypatch):
     ring._slots = [object()]                 # ring filled: its room is live
     acquire(pool, "dense2")
     assert seen[-1] == 10 * GB
+    # A time-shared arena holds 3 GB of the released ring's room.
+    ring._slots = []
+    stock._kq_decode_feeder._ring_share = 3 * GB
+    acquire(pool, "dense3")
+    assert seen[-1] == 11 * GB
     assert held.busy == 0
 
 
@@ -909,6 +914,17 @@ def test_streaming_entry_is_priced_at_every_token_plus_arena(monkeypatch):
                                    SimpleNamespace(arena_bytes=0,
                                                    ring_fits=False)))
     assert residency._streaming_footprint("a", 340 * GB) == 10 * GB + 60 * GB
+    # An arena that holds the ring's room prices it once, inside the arena.
+    monkeypatch.setattr(plan, "plan_path",
+                        lambda p: (SimpleNamespace(ring_bytes=6 * GB),
+                                   SimpleNamespace(arena_bytes=86 * GB,
+                                                   ring_fits=True,
+                                                   ring_shared_bytes=6 * GB)))
+    assert residency._streaming_footprint("a", 340 * GB) == 10 * GB + 66 * GB
+    monkeypatch.delenv("GMLX_DECODE_ARENA_GB")
+    assert residency._streaming_footprint("a", 340 * GB) == 10 * GB + 86 * GB
+    feeder._ring_share = 4 * GB
+    assert residency._prefill_ring_of(proxy.response_generator) == 0
     # A dense entry (no feeder) is still its file.
     stock._kq_decode_feeder = None
     dense = pool.acquire("b", None, "auto")
