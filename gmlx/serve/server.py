@@ -823,7 +823,9 @@ def _ids_speculative_off(path) -> set:
 
 def _ids_with_key(path, key) -> set:
     """The ids of ``path``'s model entries that carry ``key``, live or as a
-    commented-out line such as ``#mmproj: ...`` below the entry's key."""
+    commented-out line below the entry's key: ``#mmproj: ...`` indented
+    past the entry's column, or ``#    mmproj: ...`` with the ``#`` at
+    column 0, as a comment toggle writes it."""
     import re
 
     from ruamel.yaml import YAML
@@ -849,12 +851,23 @@ def _ids_with_key(path, key) -> set:
     block = doc.lc.key("models")[0]
     after = [doc.lc.key(k)[0] for k in doc if doc.lc.key(k)[0] > block]
     stop = min(after) if after else len(lines)
-    pat = re.compile(rf"^(\s*)#\s*{re.escape(key)}\s*:")
+    pat = re.compile(r"^(\s*)#(\s*)(.*)$")
+    is_key = re.compile(rf"{re.escape(key)}\s*:")
     for i, (line, col, mid) in enumerate(starts):
         end = starts[i + 1][0] if i + 1 < len(starts) else stop
         for raw in lines[line + 1:end]:
             m = pat.match(raw)
-            if m and len(m.group(1)) > col:
+            if not m:
+                continue
+            lead = len(m.group(1))
+            # Where the text stood before a `#` went in front of it.
+            text = len(m.group(2))
+            if lead == 0 and text <= col:
+                break          # a commented-out entry of its own starts here
+            # A `#` at the entry's column is a note between entries, such
+            # as the hint lines `gmlx init` writes.
+            if is_key.match(m.group(3)) and (
+                    lead > col or (lead == 0 and text > col)):
                 out.add(mid)
                 break
     return out
@@ -886,7 +899,9 @@ def _insert_key_keep_trailing(ent, after, key, value,
     """Insert ``key: value  # note`` after ``after`` in a ruamel map, with
     no comment when ``note`` is None. The lines that rode ``after``'s
     end-of-line comment token (a blank line, the next entry's comment)
-    move onto the new key, so they stay below it."""
+    move onto the new key, so they stay below it. A flow-style map
+    (``{path: ..., pin: true}``) gets no comment: it would land inside the
+    braces."""
     from ruamel.yaml.error import CommentMark
     from ruamel.yaml.tokens import CommentToken
 
@@ -901,7 +916,7 @@ def _insert_key_keep_trailing(ent, after, key, value,
             else:
                 item[2] = None
     ent.insert(list(ent).index(after) + 1, key, value)
-    if note is not None:
+    if note is not None and not ent.fa.flow_style():
         try:
             column = ent.lc.key(after)[1] + len(f"{key}: {value}") + 2
         except Exception:  # noqa: BLE001 - a map built in memory has no positions

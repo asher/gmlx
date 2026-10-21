@@ -1355,6 +1355,53 @@ def test_sync_add_companions_respects_a_commented_out_mmproj(monkeypatch,
     assert text.endswith("Ternary-Bonsai-2-27B-PQ2_0.gguf\n" + bonsai)
 
 
+def _mmproj_beside(monkeypatch, lib, pairs):
+    """A scan that pairs each configured id in ``pairs`` with an mmproj
+    beside its model."""
+    for mid in pairs:
+        (lib / f"{mid}.gguf").write_bytes(b"x")
+
+    def fake_scan(specs, dirs, **kw):
+        kw["stats"]["mmproj_pairs"] = {mid: str(lib / f"mmproj-{mid}.gguf")
+                                       for mid in pairs}
+        return []
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", fake_scan)
+
+
+@pytest.mark.parametrize("tail, held", [
+    ("#    mmproj: mmproj-old.gguf\n", True),
+    ("#  old:\n#    path: old.gguf\n#    mmproj: mmproj-old.gguf\n", False),
+])
+def test_sync_add_companions_reads_a_key_commented_out_at_column_0(
+        monkeypatch, tmp_path, tail, held):
+    """A comment toggle puts the `#` at column 0. A key commented out that
+    way keeps the entry text-only; a whole entry commented out below one
+    speaks only for itself."""
+    from gmlx.config import load_config
+    cfg_path, lib = _sync_config(
+        tmp_path, f"models:\n  muse:\n    path: muse.gguf\n{tail}")
+    _mmproj_beside(monkeypatch, lib, ["muse"])
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--no-reload"]) == 0
+    mmproj = load_config(cfg_path).models["muse"].mmproj
+    assert mmproj == (None if held else "mmproj-muse.gguf")
+    assert cfg_path.read_text().endswith(tail)
+
+
+def test_sync_add_companions_writes_into_a_flow_style_entry(monkeypatch,
+                                                            tmp_path):
+    from gmlx.config import load_config
+    cfg_path, lib = _sync_config(
+        tmp_path, "models:\n  muse: {path: muse.gguf, pin: true}\n")
+    _mmproj_beside(monkeypatch, lib, ["muse"])
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--no-reload"]) == 0
+    assert cfg_path.read_text().endswith(
+        "  muse: {path: muse.gguf, mmproj: mmproj-muse.gguf, pin: true}\n")
+    assert load_config(cfg_path).models["muse"].mmproj == "mmproj-muse.gguf"
+
+
 def test_sync_never_drops_hf_entries_on_unreadable_cache(monkeypatch, tmp_path,
                                                           capsys):
     # An unreadable hf cache means hf: entries CANNOT BE VERIFIED - removing
