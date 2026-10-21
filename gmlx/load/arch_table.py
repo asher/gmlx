@@ -113,7 +113,7 @@ _FAMILY_NOTES = {
 _CAVEATS = {
     "deepseek2": "DeepSeek-V2, with softmax gating, is not supported.",
     "deepseek4": "The GGUF is not a llama.cpp conversion.",
-    "deepseek41": "MTP is not yet implemented. An engram lookup table larger than one GPU buffer is read from the file row by row.",
+    "deepseek41": "MTP is not yet implemented. An engram table too large for one GPU buffer, or that alone brings the model under budget, is read from the file.",
     "gemma2": "Pass hf_source for 27B. Output matches llama.cpp only up to 4096 tokens, the size of the model's sliding attention window.",
     "gemma3": "Pass hf_source for 27B.",
     "phi3": "Pass hf_source for the 128K long-context variants.",
