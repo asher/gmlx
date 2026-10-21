@@ -111,6 +111,9 @@ contributor's wait. Keep a test small and in this process:
   different code paths.
 - Run in this process, with fakes for programs and services. A subprocess,
   a child interpreter or a real wait needs a comment that says why.
+- Write a fake program once per session and link it into each test's
+  folder. macOS checks each new program file with Apple's servers the first
+  time it runs, which can take seconds.
 - Add a model or image family as rows of the shared tables, not as new
   files per aspect.
 - Assert the text of a message only when users search for that message.
