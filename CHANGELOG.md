@@ -38,6 +38,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds are copied from memory. `GMLX_RING_FROM_ARENA=0` turns it off.
 - With `--stream-experts`, Muse Spark and other sliding-window models start
   answering sooner on many follow-up turns and long prompts.
+- An explicit `GMLX_DECODE_ARENA_GB` is now cut to leave the memory a prefill
+  needs, as the default arena is. `GMLX_DECODE_ARENA_FORCE=1` still keeps it.
 - `--thinking off` now turns thinking off on gpt-oss, Beam, Muse Glimmer, Muse
   Spark and K2 Horizon, whose templates have no switch, by closing each
   thinking block as it opens. Thinking budgets now work for gpt-oss in

@@ -1295,6 +1295,45 @@ def test_a_teardown_releases_an_image_gone_idle_off_the_lock(
     assert not pool._entries
 
 
+def test_streaming_footprint_prices_the_clamped_explicit_arena(monkeypatch):
+    """The loader clamps an explicit GMLX_DECODE_ARENA_GB to the
+    reclaimable RAM less the floor, the ring, the KV room and the host
+    overhead, so the entry is priced at the clamped arena: priced at the
+    raw value, the pre-load eviction freed more than the load took.
+    GMLX_DECODE_ARENA_FORCE=1 keeps the raw value, as the loader does."""
+    from types import SimpleNamespace
+
+    import gmlx.serve.capacity as cap
+    import gmlx.serve.residency as residency
+    import gmlx.stream.budget as budget
+    import gmlx.stream.plan as plan
+
+    for k in ("GMLX_DECODE_ARENA_FORCE", "GMLX_DECODE_RAM_FLOOR_GB",
+              "GMLX_DECODE_PAGECACHE_GB"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(cap, "predicted_stream_bytes",
+                        lambda p, env=None: (0, 330 * GB))
+    model = SimpleNamespace(ring_bytes=8 * GB, every_token_bytes=10 * GB)
+    box = SimpleNamespace(arena_bytes=60 * GB, ring_fits=True,
+                          ring_shared_bytes=8 * GB, ram_bytes=128 * GB,
+                          room=SimpleNamespace(bytes=20 * GB),
+                          host_bytes=10 * GB)
+    monkeypatch.setattr(plan, "plan_path", lambda p: (model, box))
+    monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: 110 * GB)
+    floor = budget.host_floor_bytes(128 * GB)
+    env = {"GMLX_DECODE_ARENA_GB": "70"}
+    clamped = 110 * GB - 10 * GB - floor - 8 * GB - 20 * GB - 10 * GB
+    assert clamped < 70 * GB
+    want = 10 * GB + clamped + 8 * GB
+    assert residency._streaming_footprint("a", 340 * GB, env) == want
+    # A resident model the load may evict counts as free RAM.
+    assert residency._streaming_footprint(
+        "a", 340 * GB, env, held_bytes=30 * GB) == 10 * GB + 70 * GB + 8 * GB
+    env["GMLX_DECODE_ARENA_FORCE"] = "1"
+    assert residency._streaming_footprint("a", 340 * GB, env) == \
+        10 * GB + 70 * GB + 8 * GB
+
+
 def test_streaming_footprint_credits_streamable_tables(monkeypatch):
     """deepseek41's engram tables serve from disk like the experts; pricing
     them resident would evict every other model for room they never take."""

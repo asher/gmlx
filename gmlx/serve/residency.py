@@ -513,7 +513,8 @@ class _ResidencyPool:
             file_bytes = self._footprint_fn(model_path)
             incoming = file_bytes
         if getattr(build_spec, "stream", None) == "experts":
-            incoming = _streaming_footprint(model_path, file_bytes, env)
+            incoming = _streaming_footprint(model_path, file_bytes, env,
+                                            held_bytes=self._resident_bytes())
             _log.info("streaming entry priced at %.1f GB resident of a %.1f GB file",
                       incoming / 1e9, file_bytes / 1e9)
         # Refuse an unloadable GGUF *before* evicting healthy residents for
@@ -1494,11 +1495,39 @@ def _stamp_boot_kv_costs(rg, gguf_path: str) -> None:
             pass
 
 
-def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
+def _env_arena_cap(model, box, env, held_bytes: int) -> int | None:
+    """The clamp the loader puts on an explicit ``GMLX_DECODE_ARENA_GB``
+    (``budget._decode_arena_bytes``): reclaimable RAM, counting what the
+    resident models hold as free to evict, less the incoming every-token
+    weights (pinned before the arena is sized), the host floor, the ring,
+    the KV room and the host overhead. None under
+    ``GMLX_DECODE_ARENA_FORCE=1`` or without a priced box."""
+    force = ((env or {}).get("GMLX_DECODE_ARENA_FORCE")
+             or os.environ.get("GMLX_DECODE_ARENA_FORCE", ""))
+    room = getattr(box, "room", None)
+    if (str(force).strip().lower() in ("1", "true", "yes", "on")
+            or room is None or not getattr(box, "ram_bytes", 0)):
+        return None
+    from gmlx.stream.budget import _available_ram_bytes, host_floor_bytes
+
+    avail = _available_ram_bytes()
+    if avail is None:
+        return None
+    ring = int(model.ring_bytes) if box.ring_fits else 0
+    return max(0, int(avail) + int(held_bytes)
+               - int(model.every_token_bytes)
+               - host_floor_bytes(int(box.ram_bytes)) - ring
+               - int(room.bytes) - int(getattr(box, "host_bytes", 0)))
+
+
+def _streaming_footprint(model_path, file_bytes: int, env=None,
+                         held_bytes: int = 0) -> int:
     """Resident bytes a ``stream: experts`` entry will hold: the every-token
     weights, the decode arena the loader sizes at install (the env override
-    when set, else the fit planner's arena) and the prefill ring's room
-    the arena does not hold and lend at prefill. The routed experts and
+    when set, clamped as the loader clamps it with ``held_bytes`` of
+    residents counted as free to evict, else the fit planner's arena) and
+    the prefill ring's room the arena does not hold and lend at
+    prefill. The routed experts and
     the arch's streamable tables stay on disk, so the file size overstates
     the entry by their bytes and would evict every other model for room
     they never take. Over the budget, a table that alone brings the model
@@ -1537,6 +1566,10 @@ def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
             if box is not None:
                 if arena is None:
                     arena = int(box.arena_bytes)
+                else:
+                    cap = _env_arena_cap(model, box, env, held_bytes)
+                    if cap is not None:
+                        arena = min(arena, cap)
                 if box.ring_fits:
                     # An env-sized arena keeps the whole ring apart.
                     shared = 0 if raw else int(
