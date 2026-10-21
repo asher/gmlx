@@ -354,14 +354,15 @@ def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None,
     entry per recurrent state and one growing entry per layer's pools
     (compressed pools, DSA indexer keys), priced fp16. Admit-side
     throughout: MLA prices the compressed latent, a configured sliding
-    window caps every layer it could apply to. ``geometry`` (from stack_geometry) replaces the
-    config's layer pattern. Per geometry entry: ``per_layer_bpe`` (from
-    the KV policy) prices the storage exactly; ``per_layer_steps`` marks
-    entries whose storage grows in slabs (StepTokens windows); and
-    ``per_layer_regions`` appends the fixed-size buffers a scheme holds
-    beside the per-token record -- kvarn's fp16 sink, horizon and tail
-    -- each as a FixedRows entry after the stack entries. All three must
-    match the geometry length or they are ignored."""
+    window caps every layer it could apply to. ``geometry`` (from
+    stack_geometry) replaces the config's layer pattern. Per geometry
+    entry: ``per_layer_bpe`` (from the KV policy) prices the storage
+    exactly; ``per_layer_steps`` marks entries whose storage grows in
+    slabs (StepTokens windows); and ``per_layer_regions`` appends the
+    fixed-size buffers a scheme holds beside the per-token record
+    (kvarn's fp16 sink, horizon and tail), each as a FixedRows entry
+    after the stack entries. All three must match the geometry length
+    or they are ignored."""
     c = _lm_config(model)
     if geometry is None:
         geometry = config_geometry(c)

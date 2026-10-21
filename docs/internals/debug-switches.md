@@ -204,7 +204,7 @@ other layer adds its delta on stock ops.
 | `GMLX_STREAM_GPU_TOKENS` | On a fitting model with `stream` set, expert calls of this many tokens or more run on the GPU. The default is `1`, and `0` keeps them on the CPU. |
 | `GMLX_STREAM_PREFETCH=0` | Disable sequential expert prefetch, which reads the experts of the next two layers into the page cache on prefill-sized calls. |
 | `GMLX_STREAM_CACHE_GB` | MLX buffer cache of a streamed model in GiB, in the KV room. The default is the size of a prefill chunk, at least `2`; `4` without widths; a flat room's size. |
-| `GMLX_STREAM_ALLOC_LIMITS=0` | Keep the MLX allocator's default limits on a streamed model. Every cache miss then purges the whole buffer cache. |
+| `GMLX_STREAM_ALLOC_LIMITS=0` | Keep the MLX allocator's default limits on a streamed model. With the file-backed weights past the MLX memory limit, each eval waits for the GPU work in flight. |
 | `GMLX_STREAM_KV_WIDTH` | Concurrent streams the KV room is sized for. The default is `1`, and each extra stream takes its KV room out of the arena. |
 | `GMLX_STREAM_UNMAP_STACKS=0` | Keep the expert stacks' Metal buffers after the feeders take a layer, instead of dropping them. |
 | `GMLX_STREAM_PREFILL_TAIL_MERGE=0` | Keep the streamed prefill chunk exact, instead of folding a tail under an eighth of the chunk into the chunks before it. |
