@@ -1229,6 +1229,8 @@ def install_expert_streaming(
             fast_disk=fast_disk, ring_share=ring_share)
         if dfeeder is not None:
             dfeeder._room_bytes = room.bytes
+            dfeeder._floor_bytes = _ram_floor_bytes(_physical_ram())
+            dfeeder._host_bytes = host_bytes
             n_cov = sum(dfeeder.covers(li) for li in moe_modules)
             for li, mods in moe_modules.items():
                 if dfeeder.covers(li):

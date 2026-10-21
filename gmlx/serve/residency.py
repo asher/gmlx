@@ -884,21 +884,28 @@ class _ResidencyPool:
 
     def _reserved_room_bytes(self) -> int:
         """Room the resident streamed models keep but have not filled: a
-        released prefill ring and the priced KV room. The headroom measure
-        reads both as free; a load into them sheds the stream's arena at
-        its next prefill."""
+        released prefill ring, the priced KV room, and the host floor and
+        host overhead each arena was sized to leave in RAM. The headroom
+        measure reads them as free; a load into them sheds the stream's
+        arena at its next prefill, or takes the RAM its prefill needs.
+        The floor and the host overhead are the machine's and the
+        process's, so they count once."""
         total = 0
+        outside = 0
         for e in self._entries.values():
             rg = e.response_generator
             feeder = _decode_feeder_of(rg)
             if feeder is None:
                 continue
             total += int(getattr(feeder, "_room_bytes", 0) or 0)
+            outside = max(outside,
+                          int(getattr(feeder, "_floor_bytes", 0) or 0)
+                          + int(getattr(feeder, "_host_bytes", 0) or 0))
             ring = _prefill_feeder_of(rg)
             if ring is not None and not getattr(ring, "_slots", None):
                 total += max(0, _ring_room(ring)
                              - int(getattr(feeder, "_ring_share", 0) or 0))
-        return total
+        return total + outside
 
     def _over_capacity(self, incoming: int, held: int | None = None,
                        count: int | None = None) -> bool:

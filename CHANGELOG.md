@@ -63,6 +63,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cache as it prefilled, and macOS compressed other apps' memory to make room.
 - A streamed model served with the default decode arena could leave the Mac
   with almost no free memory during a long prefill, and push it into swap.
+- A model loaded beside a streamed model could take the memory the stream's
+  next prefill needed, and leave the Mac with no free memory.
 - unsloth's DeepSeek-V4.1-Flash-1017 GGUFs load. Their one shared engram
   table, larger than a GPU buffer, is read from the file, and MXFP8 tables
   are told apart from STQ1_0 weights, which share the same GGUF type id.

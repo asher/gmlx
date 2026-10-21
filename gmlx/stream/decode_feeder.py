@@ -547,8 +547,12 @@ class DecodeFeeder:
             self._lend_frac = max(0.0, 1.0 - lend_bytes / max(rest, 1))
             self._slots = {li: self._target_slots(li) for li in self._layers}
         # Priced KV room outside the arena (set by the loader); regrow keeps
-        # the governor's headroom above half of it.
+        # the governor's headroom above half of it. The host floor and the
+        # host overhead the arena was sized to leave in RAM: a second model
+        # load must leave them too.
         self._room_bytes = 0
+        self._floor_bytes = 0
+        self._host_bytes = 0
 
         # Miss reads bypass the page cache (F_NOCACHE): each byte is read
         # exactly once into the arena, and letting those reads populate the

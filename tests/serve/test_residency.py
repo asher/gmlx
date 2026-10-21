@@ -855,6 +855,57 @@ def test_load_gate_keeps_the_resident_streams_ring_and_kv_room(monkeypatch):
     assert held.busy == 0
 
 
+def test_load_gate_keeps_the_host_margins_a_resident_stream_leaves(
+        monkeypatch):
+    """DeepSeek V4.1 Flash streamed by default on a 128 GB M5 Max: 52.2 GB
+    of headroom under the ceiling, a 28.1 GB KV room, and an arena sized
+    to leave a 9.6 GB host floor and 10.7 GB of host overhead in RAM. A
+    24 GB model passed beside the room alone and left the stream's next
+    prefill with no free memory. The floor and the overhead are the
+    machine's, so a second stream does not add them again."""
+    from types import SimpleNamespace
+
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 52.2e9)
+    monkeypatch.setattr(cap, "working_set_bytes", lambda: 120.2e9)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 120.2e9)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda path, b, label, env=None: None)
+    proxy = _RuntimeProxy(_FakeOriginal())
+
+    def streamed():
+        feeder = SimpleNamespace(nominal_bytes=53.6e9, _room_bytes=28.1e9,
+                                 _floor_bytes=9.6e9, _host_bytes=10.7e9)
+        return SimpleNamespace(language_model=SimpleNamespace(
+            _model=SimpleNamespace(_kq_decode_feeder=feeder)))
+
+    models = {"ds41": streamed(), "ds41b": streamed()}
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        proxy.response_generator = SimpleNamespace(
+            model=models.get(model_path, SimpleNamespace()))
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": "M",
+        }
+
+    sizes = {"ds41": 8e9, "ds41b": 1e9, "dense24": 24e9}
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(400 * GB), (),
+        footprint_fn=lambda p: int(sizes[p]))
+    acquire(pool, "ds41")
+    assert pool._reserved_room_bytes() == pytest.approx(48.4e9)
+    with pytest.raises(cap.LoadDeferred, match="host margins"):
+        acquire(pool, "dense24")
+    acquire(pool, "ds41b")
+    assert pool._reserved_room_bytes() == pytest.approx(76.5e9)
+
+
 def test_streaming_entry_is_priced_at_every_token_plus_arena(monkeypatch):
     # A stream: experts entry holds its every-token weights, its decode
     # arena and its prefill ring's room, not the file. Admission prices the

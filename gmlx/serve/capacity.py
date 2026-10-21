@@ -582,7 +582,8 @@ def preload_gate(weight_bytes: float, model_id: str, *,
     experts are already discounted, so a smaller quant of the rest is
     the fix, not streaming. ``reserved_bytes`` is room a resident
     streamed model keeps but has not filled (its prefill ring, its KV
-    room); the measure reads it as free, the load may not take it.
+    room, the host floor and overhead its arena leaves in RAM); the
+    measure reads it as free, the load may not take it.
     ``image`` names the bytes as an image model's weights and the memory
     of one image at its default size."""
     if overcommit() or weight_bytes <= 0:
@@ -613,8 +614,9 @@ def preload_gate(weight_bytes: float, model_id: str, *,
         head -= max(0.0, ws - budget)
     if head is not None and reserved_bytes > 0:
         head -= reserved_bytes
-    kept = (f" less the {reserved_bytes / GB:.1f} GB ring and KV room a "
-            "resident streamed model keeps" if reserved_bytes > 0 else "")
+    kept = (f" less the {reserved_bytes / GB:.1f} GB ring, KV room and "
+            "host margins a resident streamed model keeps"
+            if reserved_bytes > 0 else "")
     if budget is not None and weight_bytes > budget:
         raise RuntimeError(
             f"model does not fit: {model_id} {what} "
