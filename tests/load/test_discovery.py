@@ -634,13 +634,55 @@ def test_root_mmproj_unpaired_when_a_quant_folder_holds_another_model(
     root = _quant_tree(tmp_path, _DS41_IQ2, other)
     models = _scan(root, recursive=True)
     assert len(models) == 2 and all(m.mmproj is None for m in models)
-    assert "different models" in capsys.readouterr().err
+    assert "differ in name or arch" in capsys.readouterr().err
 
 
 def test_named_root_mmproj_must_match_the_quants(tmp_path, ds41_classify):
     root = _quant_tree(tmp_path, _DS41_IQ2, _DS41_Q4,
                        mmprojs=("mmproj-Kimi-K2.7-BF16.gguf",))
     assert all(m.mmproj is None for m in _scan(root, recursive=True))
+
+
+def _known(*paths):
+    """``known_models`` for configured entries at ``paths``."""
+    return {str(p): ModelCfg(id=f"m{i}", path=str(p))
+            for i, p in enumerate(paths)}
+
+
+def _scan_known(root, known):
+    stats = {}
+    spec = DiscoverSpec(dir=str(root), recursive=True, pair_mmproj=True,
+                        speculative="auto")
+    models = disc.scan_dirs([spec], [str(root)], known_paths=set(known),
+                            known_models=known, stats=stats)
+    return models, stats["mmproj_pairs"]
+
+
+@pytest.mark.parametrize("chosen", [False, True])
+def test_generic_mmproj_beside_configured_quants_says_why_it_stays_unpaired(
+        tmp_path, monkeypatch, capsys, chosen):
+    """Two configured quants of a VLM and a generic mmproj that arrived
+    later: the scan cannot tell them apart, and says so, unless an entry
+    names an mmproj already."""
+    def _f(path):
+        name = os.path.basename(path)
+        meta = ({"general.architecture": "clip"} if name.startswith("mmproj")
+                else {"general.architecture": "qwen3vl"})
+        return disc._classify_meta(meta, basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+    root = _write(tmp_path, "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+                  "Qwen3-VL-8B-Instruct-Q8_0.gguf", "mmproj-BF16.gguf")
+    known = _known(root / "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+                   root / "Qwen3-VL-8B-Instruct-Q8_0.gguf")
+    if chosen:
+        known[str(root / "Qwen3-VL-8B-Instruct-Q8_0.gguf")].mmproj = \
+            "mmproj-BF16.gguf"
+    _models, pairs = _scan_known(root, known)
+    assert pairs == {}
+    said = "mmproj unpaired (ambiguous; several models)" in \
+        capsys.readouterr().err
+    assert said is not chosen
 
 
 def test_root_mmproj_unpaired_when_pair_mmproj_is_off(tmp_path, ds41_classify):

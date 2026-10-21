@@ -1229,7 +1229,11 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
                 if tgt is not None and tgt.mmproj is None:
                     tgt.mmproj = mm.path
                 if old_mm:
-                    tgt = _best_mmproj_target(mm, made + old_mm, quiet=True)
+                    # Quiet when the call above said why already, or when
+                    # an entry here names an mmproj: the user chose.
+                    tgt = _best_mmproj_target(
+                        mm, made + old_mm,
+                        quiet=bool(made) or any(mc.mmproj for mc, _c in old_mm))
                     if (any(tgt is mc for mc, _c in old_mm)
                             and tgt.mmproj is None
                             and tgt.id not in mmproj_pairs):
@@ -1415,8 +1419,9 @@ def _pair_parent_mmproj(by_dir, made, configured, mmproj_pairs) -> None:
                  for c in below}
         for mm in mmprojs:
             if len(names) > 1:
-                print(f"[discover] mmproj unpaired (the folders below hold "
-                      f"different models): {mm.path}", file=sys.stderr)
+                print(f"[discover] mmproj unpaired (the models in the folders "
+                      f"below differ in name or arch): {mm.path}",
+                      file=sys.stderr)
                 continue
             core = _mmproj_name(mm)
             hits = [mc for mc in targets + old_mcs
