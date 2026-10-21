@@ -269,11 +269,10 @@ def prefill_activation_bytes(cfg, step: int | None = None) -> int:
 def pool_bytes(activation: int, fallback: int = _UNPRICED_POOL_BYTES) -> int:
     """The MLX buffer pool a streamed install sets: one chunk's
     activations, at least 2 GiB; ``fallback`` when the activations are
-    not priced. The pool holds the set of buffers one layer frees for the
-    next, and prefill keeps its speed only when that whole set stays
-    pooled, so the pool is the chunk price. The chunk price is the fp32
-    upper bound of a chunk's activations. ``GMLX_STREAM_CACHE_GB`` sizes
-    it."""
+    not priced. The pool holds the buffers one layer frees for the next,
+    and a pool smaller than that set slows prefill, so the pool is the
+    chunk price, the fp32 upper bound of a chunk's activations.
+    ``GMLX_STREAM_CACHE_GB`` sizes it."""
     raw = os.environ.get("GMLX_STREAM_CACHE_GB", "")
     if raw:
         try:
