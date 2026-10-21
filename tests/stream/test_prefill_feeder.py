@@ -1448,6 +1448,8 @@ def _install_sized(monkeypatch, *, timeshare="0", env_gb=None, built=True,
     monkeypatch.setattr(es, "_install_gpu_residency",
                         lambda *a, room=None, **k: sized.update(room=room))
     monkeypatch.setenv("GMLX_GPU_RESIDENT", "1")
+    # A kept arena would start the keep-warm thread, which outlives the test.
+    monkeypatch.setenv("GMLX_GPU_KEEPWARM", "0")
     glu = SwitchGLU(16, 32, 4)
     install_expert_streaming(_holder_model(glu), gguf_path="m.gguf",
                              force_stream=True)
