@@ -1115,15 +1115,12 @@ def install_expert_streaming(
     host_bytes = 0
     arena_kw: dict = {}
     if streaming and prefetcher is not None and moe_modules:
-        from gmlx.stream.budget import (filebacked_bytes,
-                                        host_overhead_bytes, kv_room_bytes)
+        from gmlx.stream.budget import host_overhead_bytes, kv_room_bytes
         from gmlx.stream.table_stream import streamed_table_bytes
 
         pin = getattr(model, "_kq_weights_pin", None)
         room = kv_room_bytes(gguf_path)
-        # Priced once, before the ring is wired, from the same moment's
-        # page counts the arena's reclaimable snapshot reads.
-        host_bytes = host_overhead_bytes(_physical_ram(), filebacked_bytes())
+        host_bytes = host_overhead_bytes(_physical_ram())
         arena_kw = dict(
             room_bytes=room.bytes,
             host_bytes=host_bytes,
@@ -1292,9 +1289,10 @@ def install_expert_streaming(
                 + (f" ({ring_share / 1e9:.1f} more lent from the arena at "
                    "each prefill)" if ring_share else "")
                 + f" + kv room {room.bytes / 1e9:.1f} "
-                f"({room_how}) + floor {floor / 1e9:.1f} + host "
-                f"{host_bytes / 1e9:.1f} (process and resident page cache);"
-                f" {tables}GMLX_STREAM_KV_CTX sizes the room"
+                f"({room_how}) + floor {floor / 1e9:.1f}; host "
+                f"{host_bytes / 1e9:.1f} outside it (process and resident "
+                f"page cache, out of reclaimable RAM); {tables}"
+                "GMLX_STREAM_KV_CTX sizes the room"
             )
             rate = getattr(dfeeder, "_probe_bps", 0.0)
             measured = (
@@ -1323,7 +1321,7 @@ def install_expert_streaming(
             tskip = streamed_table_array_ids(model)
         # The pin is not a term here: it mlocks the same every-token
         # arrays this inserts, and the arena already priced them (it is
-        # sized as ceiling - non_expert - room - ring - floor), so
+        # sized under ceiling - non_expert - room - ring - floor), so
         # subtracting both would leave the unpinned remainder and
         # disable the residency set rather than cap it.
         _install_gpu_residency(

@@ -236,26 +236,28 @@ def test_a_forced_stream_under_the_budget_wires_half_the_experts(monkeypatch):
     assert budget._decode_arena_bytes(**kw, forced=True) == experts // 2
 
 
-def test_host_overhead_prices_the_process_and_resident_pages(monkeypatch):
+def test_host_overhead_is_priced_at_its_cap(monkeypatch):
+    """DeepSeek V4.1 Flash served on a 128 GB M5 Max held 1.8 GiB of
+    process memory and 8.6 to 8.7 GiB of file pages outside MLX under
+    prefill: 10.4 to 10.5 GiB against the 10 GiB priced. The price does
+    not read the page cache at sizing, so a cold load sizes the arena a
+    warm one does."""
     for k in ("GMLX_DECODE_PROCESS_GB", "GMLX_DECODE_RESIDENT_CACHE_GB"):
         monkeypatch.delenv(k, raising=False)
     gib = 1 << 30
-    ram = 128 * gib
-    # 2 GiB of process memory, and the file pages at sizing up to 1/16 of
-    # RAM and at most 8 GiB: a stale cache past the cap still counts as
-    # reclaimable.
-    assert budget.host_overhead_bytes(ram, 5 * gib) == 7 * gib
-    assert budget.host_overhead_bytes(ram, 40 * gib) == 10 * gib
-    assert budget.host_overhead_bytes(64 * gib, 40 * gib) == 6 * gib
-    assert budget.host_overhead_bytes(512 * gib, 40 * gib) == 10 * gib
-    # No live measure (the header-only plan) prices the cap.
-    assert budget.host_overhead_bytes(ram) == 10 * gib
+    assert budget.host_overhead_bytes(128 * gib) == 10 * gib
+    # 1/16 of RAM, at most 8 GiB, on top of 2 GiB of process memory.
+    assert budget.host_overhead_bytes(64 * gib) == 6 * gib
+    assert budget.host_overhead_bytes(512 * gib) == 10 * gib
     monkeypatch.setenv("GMLX_DECODE_PROCESS_GB", "0")
     monkeypatch.setenv("GMLX_DECODE_RESIDENT_CACHE_GB", "3")
-    assert budget.host_overhead_bytes(ram, 40 * gib) == 3 * gib
+    assert budget.host_overhead_bytes(128 * gib) == 3 * gib
 
 
-def test_arena_leaves_the_host_overhead_and_room_on_every_leg(monkeypatch):
+def test_arena_charges_the_host_overhead_on_ram_not_the_ceiling(monkeypatch):
+    """The host overhead is not MLX memory: the RAM the ceiling leaves
+    outside it holds that, so only the reclaimable leg and an explicit
+    arena's clamp, which measure RAM, charge it."""
     import mlx.core as mx
 
     for k in ("GMLX_DECODE_ARENA_GB", "GMLX_DECODE_ARENA_FORCE",
@@ -270,12 +272,14 @@ def test_arena_leaves_the_host_overhead_and_room_on_every_leg(monkeypatch):
                         lambda *a, **k: avail["v"])
     gib = 1 << 30
     kw = dict(total_bytes=210 * gib, offsets={0: [(0, 0, 200 * gib)]},
-              budget=100 * gib, room_bytes=10 * gib, pinned_bytes=10 * gib,
-              host_bytes=3 * gib)
-    # The ceiling leg: 100 less 10 every-token, 10 room and 3 host.
-    assert budget._decode_arena_bytes(**kw) == 77 * gib
+              budget=100 * gib, room_bytes=10 * gib, pinned_bytes=10 * gib)
+    # The ceiling leg: 100 less 10 every-token and 10 room, whatever the
+    # host overhead.
+    assert budget._decode_arena_bytes(**kw, host_bytes=3 * gib) == 80 * gib
+    assert budget._decode_arena_bytes(**kw, host_bytes=0) == 80 * gib
     # The reclaimable leg: the pin is already out of the 60 GiB snapshot.
     avail["v"] = 60 * gib
+    kw["host_bytes"] = 3 * gib
     assert budget._decode_arena_bytes(**kw) == 47 * gib
     # An explicit arena clamps to the same: the next prefill's transients
     # and the resident pages need the room it would take.
@@ -288,17 +292,23 @@ def test_arena_leaves_the_host_overhead_and_room_on_every_leg(monkeypatch):
     assert budget._decode_arena_bytes(**kw) == 50 * gib
 
 
+# Working sets of a 128 GB M5 Max: the raised GPU wired limit the
+# measurements ran at, and the stock limit, 3/4 of RAM.
+@pytest.mark.parametrize("ws", [120.2e9, 0.75 * (128 << 30)],
+                         ids=["raised", "stock"])
 def test_deepseek41_default_arena_keeps_8_gib_free_at_the_prefill_peak(
-        monkeypatch):
+        monkeypatch, ws):
     """DeepSeek V4.1 Flash UD-IQ2_XXS served by default on a 128 GB M5
     Max. At load: 102.0 GB reclaimable, 8.4 GB of every-token weights
     (pinned), a 135.2 GB table and 156.9 GB of experts on disk, a 9.27 GB
-    ring the arena lends at prefill, 9 GiB of file pages. Measured under
-    an 8k prefill: the buffer pool at its limit, 5.4 GiB of live chunk
-    activations on top, 8.7 GiB of file pages and 1.8 GiB of process
-    memory outside MLX that stayed resident. The room without the chunk,
-    the pool or the host overhead (12.0 GB, and the pool set to all of
-    it) sized an 80.4 GB arena that left the box 7 GiB short."""
+    ring the arena lends at prefill. Measured under an 8k prefill: the
+    buffer pool at its limit, 5.4 GiB of live chunk activations on top,
+    8.7 GiB of file pages and 1.8 GiB of process memory outside MLX that
+    stayed resident. The room without the chunk, the pool or the host
+    overhead (12.0 GB, and the pool set to all of it) sized an 80.4 GB
+    arena that left the box 7 GiB short. At the stock working set the
+    ceiling leg binds: an arena under 50 GB there is the arena that ran
+    decode 15 to 20% slower, for free memory nothing needs."""
     import mlx.core as mx
 
     import gmlx.serve.mem_preflight as mp
@@ -312,7 +322,7 @@ def test_deepseek41_default_arena_keeps_8_gib_free_at_the_prefill_peak(
               "PREFILL_STEP_SIZE", "GMLX_STREAM_PREFILL_TAIL_MERGE"):
         monkeypatch.delenv(k, raising=False)
     gib = 1 << 30
-    ram, ws, avail = 128 * gib, 120.2e9, int(102.0e9)
+    ram, avail = 128 * gib, int(102.0e9)
     every, table, experts, ring = 8.4e9, 135.2e9, 156.9e9, 9.27e9
     monkeypatch.setattr(mx, "device_info", lambda *a: {"memory_size": ram})
     monkeypatch.setattr(budget, "ceiling_bytes", lambda: 0.95 * ws)
@@ -324,7 +334,7 @@ def test_deepseek41_default_arena_keeps_8_gib_free_at_the_prefill_peak(
               offsets={0: [(0, 0, int(experts))]}, budget=int(0.95 * ws),
               room_bytes=room.bytes, pinned_bytes=int(every),
               streamable_bytes=int(table),
-              host_bytes=budget.host_overhead_bytes(ram, 9 * gib))
+              host_bytes=budget.host_overhead_bytes(ram))
     full = budget._decode_arena_bytes(**kw)
     held = budget._decode_arena_bytes(**kw, ring_bytes=int(ring))
     share = budget.ring_share_bytes(full, held, int(ring))

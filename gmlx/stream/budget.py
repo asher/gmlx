@@ -116,36 +116,32 @@ def host_floor_bytes(ram: int | None) -> int:
     return int(gb * (1 << 30))
 
 
-def filebacked_bytes() -> int | None:
-    """File-backed pages right now, or None when the counters cannot be
-    read."""
-    from gmlx.serve import kernel_vm
-
-    s = kernel_vm.snapshot()
-    return None if s is None else int(s["filebacked"])
-
-
-def host_overhead_bytes(ram: int | None, filebacked: int | None = None) -> int:
+def host_overhead_bytes(ram: int | None) -> int:
     """RAM the arena leaves outside MLX beyond the host floor: this
     process's own memory (``GMLX_DECODE_PROCESS_GB``, default 2: the
     Python heap, the tokenizer and the server) and the file pages that
-    stay resident under load (the mapped weights the pin leaves, the
-    table rows, the libraries). The reclaimable snapshot counts those
-    pages as free to take, but they are in use and stay resident. They
-    are priced as the file-backed pages at sizing (``filebacked``) up to
-    ``GMLX_DECODE_RESIDENT_CACHE_GB`` (default 1/16 of RAM, at most 8),
-    so a stale cache past the cap still counts as reclaimable;
-    ``filebacked`` None (no live measure, as in the header-only plan)
-    prices the cap."""
+    stay resident under load (the table rows, the libraries), which the
+    reclaimable snapshot counts as free to take.
+    ``GMLX_DECODE_RESIDENT_CACHE_GB`` prices those pages, default 1/16 of
+    RAM and at most 8. A fixed price, not the page cache seen at sizing,
+    so a cold and a warm load size the same arena."""
     from gmlx.envflags import env_float
 
     process = env_float("GMLX_DECODE_PROCESS_GB", _PROCESS_GB)
     cap_gb = env_float("GMLX_DECODE_RESIDENT_CACHE_GB", min(
         _RESIDENT_CACHE_MAX_GB,
         _RESIDENT_CACHE_RAM_SHARE * (ram or 0) / (1 << 30)))
-    cap = int(max(0.0, cap_gb) * (1 << 30))
-    resident = cap if filebacked is None else min(cap, max(0, int(filebacked)))
-    return int(max(0.0, process) * (1 << 30)) + resident
+    return int((max(0.0, process) + max(0.0, cap_gb)) * (1 << 30))
+
+
+def outside_ceiling_bytes(ram: int | None, ceiling: float,
+                          host: int) -> int:
+    """What the host floor and the host overhead need past the RAM the
+    memory ceiling leaves outside it. Both live outside MLX, so only the
+    excess comes out of an arena sized under the ceiling."""
+    if not ram:
+        return 0
+    return max(0, host_floor_bytes(ram) + int(host) - int(ram - ceiling))
 
 
 def governor_headroom_bytes() -> float | None:
@@ -376,10 +372,12 @@ def _decode_arena_bytes(
     avail_bytes: int | None = None, host_bytes: int = 0,
 ) -> int:
     """Arena budget for the decode feeder: what the memory ceiling leaves
-    after the non-expert weights, the KV room, the prefill ring, the host
-    floor and the host overhead (``host_bytes``, priced by
-    ``host_overhead_bytes``), clamped to the RAM reclaimable right now,
-    and capped at the expert bytes themselves. ``forced`` is a stream the
+    after the non-expert weights, the KV room, the prefill ring and the
+    host floor, clamped to the RAM reclaimable right now less the same
+    and the host overhead (``host_bytes``, ``host_overhead_bytes``), and
+    capped at the expert bytes themselves. The host overhead is not MLX
+    memory: the RAM the ceiling leaves outside it holds that, and only
+    the reclaimable leg, which measures RAM, charges it. ``forced`` is a stream the
     flag asked for on a model under the budget: its cap is
     ``FORCED_ARENA_SHARE`` of the expert bytes, so the experts stay
     streamed rather than all wired.
@@ -458,11 +456,8 @@ def _decode_arena_bytes(
     # .cast_copies), so charging it would cancel the pin it just freed.
     non_expert_bytes = max(
         0, total_bytes - expert_bytes - streamable_bytes - cast_dead_bytes)
-    # The floor and the host overhead on both measures: the ceiling is a
-    # share of the Metal working set, and the OS side (the page cache,
-    # this process outside MLX, other processes) is not in it.
     arena = (ceiling - non_expert_bytes - room - int(ring_bytes)
-             - _ram_floor_bytes(ram) - host)
+             - _ram_floor_bytes(ram))
     # Second ceiling: what is reclaimable right now. The governor ceiling
     # assumes an otherwise idle machine; co-resident workloads shrink the
     # offer, and a wired arena sized past it would evict them to swap. The

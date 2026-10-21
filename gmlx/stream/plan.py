@@ -3,9 +3,10 @@
 Prices a MoE GGUF from its header only. The routed experts stream from
 disk. Every other tensor is an every-token weight and stays resident.
 A box streams the model when the every-token weights and the KV room
-fit under the memory ceiling. What is left after the prefill chunk, the
-host floor and the host overhead is the decode arena, and its share of
-the experts sets the decode speed. ``gmlx validate`` and ``gmlx doctor``
+fit under the memory ceiling. What is left after the prefill chunk, and
+after what the host floor and the host overhead need past the RAM the
+ceiling leaves outside it, is the decode arena, and its share of the
+experts sets the decode speed. ``gmlx validate`` and ``gmlx doctor``
 print this plan; the loader prints the live budget.
 """
 
@@ -119,8 +120,8 @@ class BoxPlan:
     verdict: str
     # Ring room the arena holds while decoding and lends at each prefill.
     ring_shared_bytes: int = 0
-    # Process memory outside MLX and resident page cache, priced at the
-    # cap (budget.host_overhead_bytes with no live measure).
+    # Process memory outside MLX and resident page cache
+    # (budget.host_overhead_bytes).
     host_bytes: int = 0
 
     @property
@@ -202,7 +203,8 @@ def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
     from gmlx.load.memfit import total_ram_bytes
     from gmlx.serve.capacity import classify_weight_share, working_set_bytes
     from gmlx.stream.budget import (host_floor_bytes, host_overhead_bytes,
-                                    price_room, transient_bytes)
+                                    outside_ceiling_bytes, price_room,
+                                    transient_bytes)
 
     if ws_bytes is None:
         ws_bytes = working_set_bytes()
@@ -221,8 +223,11 @@ def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
     ring_fits = model.ring_bytes <= left
     floor = host_floor_bytes(int(ram_bytes))
     host = host_overhead_bytes(int(ram_bytes))
-    full = min(max(0, left - floor - host), model.expert_bytes)
-    held = (min(max(0, left - model.ring_bytes - floor - host),
+    # The floor and the host overhead live outside MLX: only what they
+    # need past the RAM the ceiling leaves comes out of the arena.
+    outside = outside_ceiling_bytes(int(ram_bytes), ceiling, host)
+    full = min(max(0, left - outside), model.expert_bytes)
+    held = (min(max(0, left - model.ring_bytes - outside),
                 model.expert_bytes)
             if ring_fits else full)
     shared = ring_share_bytes(full, held, model.ring_bytes) if ring_fits else 0
@@ -297,9 +302,8 @@ def box_summary(m: ModelPlan, b: BoxPlan) -> str:
                 f"{gb(b.room.fit_bytes)} exceed the {gb(b.ceiling_bytes)} "
                 f"ceiling by {gb(b.short_bytes)}")
     if b.verdict == VERDICT_PAGE_CACHE:
-        return (f"no decode arena ({gb(b.arena_bytes)} left after the "
-                "ring, the host floor and the host overhead), decode runs "
-                "from the page cache")
+        return (f"no decode arena ({gb(b.arena_bytes)} left for it), "
+                "decode runs from the page cache")
     return f"decode arena {gb(b.arena_bytes)}{share_text(b.arena_share)}"
 
 

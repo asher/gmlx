@@ -199,29 +199,31 @@ def test_box_plan_verdicts(flat_room, monkeypatch):
     assert b.verdict == sp.VERDICT_TOO_BIG
     assert b.short_bytes == pytest.approx(50e9 + room - ceiling, abs=2)
     assert b.arena_bytes == 0
-    b = sp.box_plan(_model(total=234.5e9, expert=200e9), ram_bytes=ram, ws_bytes=ws)
+    b = sp.box_plan(_model(total=241.5e9, expert=200e9), ram_bytes=ram, ws_bytes=ws)
     assert b.verdict == sp.VERDICT_PAGE_CACHE
     assert 0 < b.arena_bytes < GiB
     b = sp.box_plan(_model(total=220e9, expert=200e9, ring=5e9),
                     ram_bytes=ram, ws_bytes=ws)
     assert b.verdict == sp.VERDICT_STREAMS
-    # The host floor keeps its room out of the arena; the arena holds the
-    # ring's room and lends it at each prefill.
-    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room - floor, abs=2)
+    # The host floor fits in the RAM outside the ceiling, so the arena
+    # does not pay it; the arena holds the ring's room and lends it at
+    # each prefill.
+    assert b.floor_bytes == floor and ram - ceiling > floor
+    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room, abs=2)
     assert b.ring_shared_bytes == 5e9
     assert b.arena_share == pytest.approx(b.arena_bytes / 200e9)
     assert b.ring_fits
     monkeypatch.setenv("GMLX_RING_TIMESHARE", "0")
     b = sp.box_plan(_model(total=220e9, expert=200e9, ring=5e9),
                     ram_bytes=ram, ws_bytes=ws)
-    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room - floor - 5e9, abs=2)
+    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room - 5e9, abs=2)
     assert b.ring_shared_bytes == 0
     monkeypatch.delenv("GMLX_RING_TIMESHARE")
     b = sp.box_plan(_model(total=220e9, expert=200e9, ring=30e9),
                     ram_bytes=ram, ws_bytes=ws)
     assert b.verdict == sp.VERDICT_STREAMS and not b.ring_fits
     # A ring that does not fit is not built, so it takes nothing.
-    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room - floor, abs=2)
+    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room, abs=2)
 
 
 @pytest.fixture
@@ -248,23 +250,33 @@ def _chunked(activation, **kw):
                                activation_bytes=activation)
 
 
-def test_box_plan_prices_the_chunk_the_pool_and_the_host(priced_room):
-    """The header-only plan sizes the arena the loader does: the room holds
-    one chunk's activations and the pool beside it, and the host overhead
-    is priced at its cap, with no live page counts to read."""
+def test_box_plan_prices_the_chunk_the_pool_and_the_host(priced_room,
+                                                         monkeypatch):
+    """The room holds one chunk's activations and the pool beside it.
+    The host floor and the host overhead live outside MLX: on a 128 GiB
+    box the RAM past the ceiling holds both at the stock and the raised
+    GPU limit, so they leave the arena alone, and only what they need
+    past that RAM comes out of it."""
     ram, ws = priced_room
     m = _chunked(3 * GiB, total=220e9, expert=200e9, ring=5e9)
     b = sp.box_plan(m, ram_bytes=ram, ws_bytes=ws)
-    assert b.room.priced
-    assert b.room.activation_bytes == b.room.pool_bytes == 3 * GiB
-    assert b.room.bytes == pytest.approx(1e9 + 6e9 + 6 * GiB + 6e9)
+    assert b.room.priced and b.room.activation_bytes == 3 * GiB
     assert b.host_bytes == 10 * GiB
     assert b.verdict == sp.VERDICT_STREAMS and b.ring_shared_bytes == 5e9
-    assert b.arena_bytes == pytest.approx(
-        sp.ceiling_for(ram, ws) - 20e9 - b.room.bytes - b.floor_bytes
-        - b.host_bytes, abs=2)
     assert "host overhead 10.7 GB" in sp.box_lines(m, b)[0]
     assert sp.to_dict(m, b)["box"]["host_bytes"] == 10 * GiB
+    for box_ws in (ws, 0.75 * ram):
+        base = sp.box_plan(m, ram_bytes=ram, ws_bytes=box_ws).arena_bytes
+        monkeypatch.setenv("GMLX_DECODE_RESIDENT_CACHE_GB", "1")
+        assert sp.box_plan(m, ram_bytes=ram, ws_bytes=box_ws).arena_bytes == base
+        monkeypatch.delenv("GMLX_DECODE_RESIDENT_CACHE_GB")
+    # A host overhead past the RAM outside the ceiling: the excess comes
+    # out of the arena, byte for byte.
+    outside = ram - b.ceiling_bytes - b.floor_bytes
+    monkeypatch.setenv("GMLX_DECODE_PROCESS_GB", "0")
+    monkeypatch.setenv("GMLX_DECODE_RESIDENT_CACHE_GB", str(outside / GiB + 5))
+    over = sp.box_plan(m, ram_bytes=ram, ws_bytes=ws)
+    assert over.arena_bytes == pytest.approx(b.arena_bytes - 5 * GiB, abs=2)
 
 
 def test_a_chunk_past_the_ceiling_still_streams_without_an_arena(priced_room):

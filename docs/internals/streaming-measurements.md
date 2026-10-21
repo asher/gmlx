@@ -48,18 +48,20 @@ physical RAM. Four things share the ceiling, in this order:
 3. The prefill ring holds two copies of the largest layer's expert stacks.
    When the ring does not fit, prefill reads through the page cache
    instead, and the load says so. Decoding is not affected.
-4. The decode arena takes what is left after a host floor and the host
-   overhead, and it also uses the ring's room while decoding, as
+4. The decode arena takes what is left under the ceiling after a host
+   floor, and no more than the reclaimable RAM less the floor and the
+   host overhead. It also uses the ring's room while decoding, as
    [the lossless settings](#the-lossless-settings) describe. The floor is 5%
    of RAM, at least 4 GiB, plus 2.5 GiB for the page cache, and it keeps
    the rest of the Mac out of swap. Buffered reads, such as prefill without
    the ring and decoding from the page cache, slow sharply when the page
    cache has too little memory. The host overhead is memory outside MLX
-   that stays in use under load: 2 GiB for the process itself, and the
-   file pages the load finds in the page cache, up to 1/16 of RAM and at
-   most 8 GiB, which hold the table rows, the mapped weights and the
-   libraries. Below 1 GiB, the decode feeder does not start, and decoding
-   reads through the page cache.
+   that stays in use under load: 2 GiB for the process itself, and 1/16
+   of RAM, at most 8 GiB, for the file pages that stay resident, which
+   hold the table rows and the libraries. Neither is MLX memory, so the
+   plan charges them only where they need more than the RAM the ceiling
+   leaves outside it. Below 1 GiB, the decode feeder does not start, and
+   decoding reads through the page cache.
 
 A Mac therefore streams a model when the every-token weights and the KV
 room without the prefill chunk fit under the ceiling. Everything else

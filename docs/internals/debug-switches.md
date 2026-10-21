@@ -220,7 +220,7 @@ other layer adds its delta on stock ops.
 | `GMLX_DECODE_RAM_FLOOR_GB` | GiB that arena sizing keeps free for the rest of the machine. The default is 5% of RAM, at least `4`. |
 | `GMLX_DECODE_PAGECACHE_GB` | Page-cache reserve in GiB that arena sizing adds to the host floor. The default is `2.5`. |
 | `GMLX_DECODE_PROCESS_GB` | GiB of the process's own memory outside MLX that arena sizing leaves free. The default is `2`. |
-| `GMLX_DECODE_RESIDENT_CACHE_GB` | Cap in GiB on the file pages found at load that arena sizing leaves resident. The default is 1/16 of RAM, at most `8`. |
+| `GMLX_DECODE_RESIDENT_CACHE_GB` | GiB of file pages that stay resident under load, which arena sizing leaves free. The default is 1/16 of RAM, at most `8`. |
 | `GMLX_DECODE_PRESSURE=0` | Keep the arena at its sized capacity under memory pressure, instead of shrinking it and regrowing it when pressure clears. |
 | `GMLX_PREFILL_NOCACHE=0` | Route prefill ring reads through the page cache, as [The lossless settings](../streaming.md#the-lossless-settings) explains. |
 | `GMLX_RING_TIMESHARE=0` | Keep the prefill ring's room apart from the decode arena for the life of the process, instead of lending it between prefill and decode. |
