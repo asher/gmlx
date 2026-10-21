@@ -1117,24 +1117,11 @@ def _drop_entry(doc, models, key) -> None:
 
 
 def _place_entry(doc, models, pos, key, entry, note) -> None:
-    """Insert ``entry`` at ``pos`` with the sampling comment ``note``
-    directly above it, or replace entry ``key`` in place. The comment that
-    stood above the entry now after it moves along with that entry."""
+    """Insert the new entry ``key`` at ``pos`` with the sampling comment
+    ``note`` directly above it. The comment that stood above the entry now
+    after it moves along with that entry."""
     mine = [f"  # {note}\n"] if note else []
     keys = list(models)
-    if key in models:
-        i = keys.index(key)
-        above = [line for line in _take_above(doc, models, i)
-                 if not discovery.is_family_comment(line)]
-        after = _take_rest(models, key)
-        models[key] = entry
-        _put_above(doc, models, i, above + mine)
-        if i + 1 < len(keys):
-            _put_above(doc, models, i + 1,
-                       _joined(after, _take_before(models, keys[i + 1])))
-        else:
-            _set_rest(models, key, after)
-        return
     if pos >= len(keys):
         trailing = _take_rest(models, keys[-1]) if keys else []
         models.insert(pos, key, entry)
@@ -1260,12 +1247,11 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
             entry = CommentedMap(discovery.model_to_entry(mc, dirs))
             if "stream" in entry:
                 entry.yaml_add_eol_comment(discovery.STREAM_MARK_NOTE, "stream")
-            # A new entry goes at the top of the block, below its head
-            # comment; an update keeps its position.
-            new = mc.id not in models
+            # The scan skips configured ids, so each one is new: it goes at
+            # the top of the block, below its head comment.
             _place_entry(doc, models, pos, mc.id, entry,
                          discovery.family_comment(mc))
-            pos += new
+            pos += 1
         # A companion goes after `path` (a drafter after an `mmproj`), as
         # discovery writes an entry: the last key's comment token holds the
         # next entry's comment, so a key appended there would land below it.

@@ -1128,14 +1128,16 @@ def _drafter_beside(monkeypatch, lib, pairs):
 def test_sync_add_companions_adds_a_drafter_to_an_entry(monkeypatch, tmp_path,
                                                         capsys):
     """A drafter dropped next to a model the config already carries joins
-    its entry after `path`, above the next entry's comment, and only with
-    --add-companions."""
+    its entry after `path`, or after its `mmproj`, above the next entry's
+    comment, and only with --add-companions."""
     from gmlx.config import load_config
     cfg_path, lib = _sync_config(
         tmp_path,
         "models:\n  muse:\n    path: muse.gguf\n    pin: true\n"
-        "\n  # sampling (qwen3.6): t=1\n  qwen:\n    path: qwen.gguf\n")
+        "\n  # sampling (qwen3.6): t=1\n  qwen:\n    path: qwen.gguf\n"
+        "    mmproj: mmproj-qwen.gguf\n")
     _drafter_beside(monkeypatch, lib, ["muse", "qwen"])
+    (lib / "mmproj-qwen.gguf").write_bytes(b"x")
     before = cfg_path.read_text()
     assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
     out = capsys.readouterr().out
@@ -1157,6 +1159,7 @@ def test_sync_add_companions_adds_a_drafter_to_an_entry(monkeypatch, tmp_path,
         "  muse:\n    path: muse.gguf\n"
         f"    draft_gguf: dflash-muse.gguf  # {note}\n    pin: true\n"
         "\n  # sampling (qwen3.6): t=1\n  qwen:\n    path: qwen.gguf\n"
+        "    mmproj: mmproj-qwen.gguf\n"
         f"    draft_gguf: dflash-qwen.gguf  # {note}\n")
 
 
