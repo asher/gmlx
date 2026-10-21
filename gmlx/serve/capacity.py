@@ -664,7 +664,7 @@ def preload_gate(weight_bytes: float, model_id: str, *,
             f"pinned or busy). Retry when a slot frees, or "
             f"GMLX_OVERCOMMIT=1 overrides.")
     _kernel_gate(weight_bytes, model_id, reserved_ram_bytes,
-                 ram_floor_bytes)
+                 ram_floor_bytes, streaming=streaming)
 
 
 _DEFER_WARN_S = 10.0
@@ -722,7 +722,8 @@ def _settle_reclaimable(sample, rec, need: float):
 
 def _kernel_gate(weight_bytes: float, model_id: str,
                  reserved_bytes: float = 0.0,
-                 floor_bytes: float = 0.0) -> None:
+                 floor_bytes: float = 0.0, *,
+                 streaming: bool = False) -> None:
     """The kernel's side of the same question: MLX accounting cannot see
     other processes' pages (2026-08-25: ~16 GB of another app's pages in
     the compressor let an 81 GB load through and Metal OOM'd). Below the
@@ -732,7 +733,8 @@ def _kernel_gate(weight_bytes: float, model_id: str,
     the governor samples. ``reserved_bytes`` is the RAM a resident
     streamed model keeps (``preload_gate``), held back too, and
     ``floor_bytes`` the host floor its arena leaves free. Both floors are
-    free RAM kept for the system, so the larger one applies."""
+    free RAM kept for the system, so the larger one applies.
+    ``streaming`` marks a load whose every-token weights are mlocked."""
     try:
         from .governor import armed_kernel_floor_bytes
         from .kernel_vm import reclaimable_bytes
@@ -750,7 +752,13 @@ def _kernel_gate(weight_bytes: float, model_id: str,
     # needed reclaimable >= 98 GB -- ~11 GB of NON-model free memory --
     # and deferred forever whenever day-to-day noise sat a few GB under
     # that (2026-08-26: reclaimable steady at 91 GB, refused for 240 s).
-    need = weight_bytes - _resident_shard_bytes(model_id)
+    # The credit stands only while no hold needs those pages to stay
+    # reclaimable. GPU work wires the pages it reads, so beside a
+    # streamed model's hold the load is judged in full. A streamed load
+    # mlocks its every-token weights, and its shard bytes count its
+    # experts too, so it takes no credit either.
+    held = streaming or reserved_bytes > 0
+    need = weight_bytes - (0.0 if held else _resident_shard_bytes(model_id))
     hold = floor + max(0.0, float(reserved_bytes))
     if need <= 0 or rec is None or need <= rec - hold:
         return
@@ -760,9 +768,11 @@ def _kernel_gate(weight_bytes: float, model_id: str,
     kept = (f" and the {reserved_bytes / GB:.1f} GB of KV room, ring and "
             "host overhead a resident streamed model keeps"
             if reserved_bytes > 0 else "")
+    cached = ("cached pages included: they are wired once it runs" if held
+              else f"{need / GB:.1f} GB not yet page-cached")
     _defer(
         f"model load deferred: {model_id} weights {weight_bytes / GB:.1f} GB "
-        f"({need / GB:.1f} GB not yet page-cached) exceed the kernel's "
+        f"({cached}) exceed the kernel's "
         f"reclaimable memory {rec / GB:.1f} GB less the {floor / GB:.1f} GB "
         f"floor{kept} (other processes hold the rest). Retry when memory "
         f"frees, or GMLX_OVERCOMMIT=1 overrides.")

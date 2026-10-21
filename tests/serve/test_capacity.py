@@ -402,6 +402,27 @@ def test_kernel_gate_credits_page_cache_resident_bytes(rig, monkeypatch):
         cap.preload_gate(90.0 * GB, "barely-cached")
 
 
+def test_kernel_gate_judges_a_load_beside_a_stream_in_full(rig, monkeypatch):
+    # GPU work wires the pages it reads, so a fully cached model loaded
+    # beside a streamed model takes its whole size out of the RAM the
+    # stream holds. A streamed load mlocks its every-token weights.
+    rig(weights_gb=30.0, ws_gb=200.0)
+    import gmlx.serve.governor as gov
+    import gmlx.serve.kernel_vm as kv
+    import gmlx.gen.prefill_decay as pd
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 500.0 * GB)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 200.0 * GB)
+    monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 4.0 * GB)
+    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 32.0 * GB)
+    monkeypatch.setattr(cap, "_resident_shard_bytes", lambda m: 30.0 * GB)
+    cap.preload_gate(30.0 * GB, "alone")            # cached: need 0
+    with pytest.raises(cap.LoadDeferred, match="wired once it runs"):
+        cap.preload_gate(30.0 * GB, "beside", reserved_ram_bytes=10.0 * GB)
+    with pytest.raises(cap.LoadDeferred, match="wired once it runs"):
+        cap.preload_gate(30.0 * GB, "streamed", streaming=True)
+    cap.preload_gate(18.0 * GB, "fits-beside", reserved_ram_bytes=10.0 * GB)
+
+
 def test_memfit_delegates_to_capacity(monkeypatch):
     from gmlx.load.memfit import classify_fit
     assert classify_fit(65, 100) == "fits"
