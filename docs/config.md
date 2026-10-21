@@ -518,8 +518,20 @@ already has. `gmlx list` shows the names.
 |-----|---------|---------|
 | <a id="discoverdir"></a>`dir` | `null` | The folder to scan. `null` scans every folder in `server.model_dirs`. |
 | <a id="discoverrecursive"></a>`recursive` | `false` | Also scan subfolders |
-| <a id="discoverpair_mmproj"></a>`pair_mmproj` | `true` | Pair each `mmproj*.gguf` with the model in the same folder that it matches |
+| <a id="discoverpair_mmproj"></a>`pair_mmproj` | `true` | Pair each `mmproj*.gguf` with the quants of the model in the same folder that it matches, or with the quant folders below it |
 | <a id="discoverspeculative"></a>`speculative` | `auto` | `auto` and `true` turn on speculative decoding for models with an MTP head, and pair drafters. `false` never does. |
+
+A companion pairs with each quant of its model in the same folder. With
+no model beside it, it pairs with every model in the folders one level
+down when they are all quants of one model, the layout of repositories
+that keep each quant in its own folder. A named companion, such as
+`mmproj-Qwen3.8-27B-BF16.gguf`, must match the model's name. A generic
+one, such as `mmproj-F16.gguf`, stays unpaired beside models that are not
+all quants of one model. Files are quants of one model when their names
+match past the quant and their headers give one arch and hidden size. A
+companion whose header gives another hidden size than the model's also
+stays unpaired. When a folder holds several companions, the first by file
+name wins.
 
 A drafter GGUF becomes a model's `draft_gguf` when all of these hold:
 

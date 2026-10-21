@@ -22,8 +22,11 @@ When both files land in a folder of
 [`server.model_dirs`](config.md#servermodel_dirs), `pull` registers the
 model with its companion and prints `(vlm)` after the id. For a model that
 is already registered, add the [`models.*.mmproj`](config.md#modelsmmproj)
-key to its entry. [`discover[].pair_mmproj`](config.md#discoverpair_mmproj)
-pairs the files that a folder scan finds.
+key to its entry, or run
+[`gmlx sync-models --add-companions`](cli.md#gmlx-sync-models).
+[`discover[].pair_mmproj`](config.md#discoverpair_mmproj)
+pairs the files that a folder scan finds, including a companion at the root
+of a repository whose quants each sit in their own folder.
 
 `--mmproj` pairs the two files for one command. `gmlx validate` recognizes
 a companion and says to pair it with its language model. The language
@@ -88,7 +91,7 @@ projector and architecture that it found. gmlx supports these families:
 | Muse Spark | `muse-glimmer` and `muse-spark-audio` with `muse-spark` | Muse-Spark-Open-816B-A42B | It reads images and audio. It is larger than RAM on most Macs, so it needs `--stream-experts`. |
 | Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | It is larger than RAM on most Macs, so it needs `--stream-experts`. |
 | DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` with `deepseek4` | The unsloth UD builds | |
-| DeepSeek-V4.1-Flash-Vision | `deepseek4-vision` with `deepseek41` | The antirez encoder GGUF | |
+| DeepSeek-V4.1-Flash-Vision | `deepseek4-vision` or `deepseek41v` with `deepseek41` | The antirez encoder GGUF, the unsloth DeepSeek-V4.1-Flash-1017 companion | unsloth puts the companion above the quant folders, and a folder scan pairs it with each quant. `--mmproj` works too. |
 
 Qwen2-VL and Qwen2.5-VL companions, with the projector `qwen2vl_merger`,
 are not supported, and the load fails with a message that names the

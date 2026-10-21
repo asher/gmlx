@@ -752,6 +752,11 @@ entries whose file is gone are dropped, and new files are added. Run it
 after adding files by hand or pulling with `--no-register`. An image DiT
 found with its text encoder and VAE is added to `image_models`.
 
+New entries go at the top of the block, below the block's own comment.
+When a blank line sets that comment apart, the lines after the last blank
+line belong to the first entry and stay with it. Without a blank line,
+the lines from the first entry's sampling comment on stay with it.
+
 ```sh
 gmlx sync-models
 gmlx sync-models --from-hf-cache
@@ -765,9 +770,20 @@ gmlx sync-models --dry-run
 | `--from-hf-cache`, `--hf-cache` | The config's `hf_cache` | Also reconcile the Hugging Face cache. |
 | `-r`, `--recursive`, `--no-recursive` | Deep | Descend into subdirectories. |
 | `--dry-run` | Off | Print the plan without writing. |
+| `--add-companions` | Off | Add an `mmproj` or drafter that the scan pairs with an entry that has no such key. |
 | `--no-reload` | Off | Do not signal a running server to re-read the file. |
 
 An entry on an unmounted drive is kept and reported, not dropped.
+
+`--add-companions` gives an existing entry the vision companion or the
+drafter that a scan pairs with it, such as one downloaded after the
+model. It never changes an `mmproj` or `draft_gguf` key that the entry
+has, and it leaves an entry alone when the key is there but commented
+out. It adds no drafter to an entry set to `speculative: false`. Each
+line it adds carries a comment that says so. Without the flag, a sync
+adds no companion to an entry it keeps, and its plan prints a `hint:`
+line for each companion it would add. `gmlx pull` prints the same hint
+for a companion it leaves out.
 
 A scan writes `stream: experts` for a MoE model whose weights are larger
 than 90% of the GPU working set, with a comment that says so. Each sync

@@ -399,3 +399,49 @@ def test_both_stream_flags_latch_the_warm_touch_for_run_and_chat():
         assert ts._FORCED
         cli._ensure_stream_cb_caps(types.SimpleNamespace())
         assert not ts._FORCED
+
+
+@pytest.fixture
+def vlm_gen(monkeypatch, tmp_path):
+    """Stub the VLM load and generate seams; the text tower streams its
+    experts once placed. Returns the recorded generate kwargs."""
+    import types
+
+    import gmlx._vendor.mlx_vlm as vlm_pkg
+    import gmlx._vendor.mlx_vlm.prompt_utils as prompt_utils
+    import gmlx.load.vlm as vlm
+
+    seen = {}
+    tower = types.SimpleNamespace(model_type="deepseek_v4")
+    model = types.SimpleNamespace(language_model=tower)
+    monkeypatch.setattr(vlm, "load_vlm_model",
+                        lambda *a, **k: (model, {}, object(), None))
+    monkeypatch.setattr(cli, "_apply_placement",
+                        lambda args, m: setattr(m, "_kq_streaming",
+                                                bool(args.stream_experts)))
+    monkeypatch.setattr(cli, "print_family_note", lambda args: None)
+    monkeypatch.setattr(prompt_utils, "apply_chat_template",
+                        lambda *a, **k: "prompt")
+    monkeypatch.setattr(vlm_pkg, "generate",
+                        lambda *a, **k: seen.update(k))
+    mmproj = tmp_path / "mmproj.gguf"
+    mmproj.write_bytes(b"GGUF")
+    return seen, str(mmproj)
+
+
+@pytest.mark.parametrize("extra, step", [
+    (["--stream-experts"], "streamed"),
+    (["--stream-experts", "--prefill-step-size", "1024"], 1024),
+    ([], None),
+])
+def test_vlm_run_takes_the_streamed_prefill_chunk(gguf, vlm_gen, extra, step):
+    """A VLM whose text tower streams its experts prefills in the streamed
+    chunk, as the text path does, unless --prefill-step-size sets one."""
+    from gmlx.load import loader
+
+    seen, mmproj = vlm_gen
+    assert cli.main([gguf, "--mmproj", mmproj, "--prompt", "hi", *extra]) == 0
+    want = (loader._STREAMING_PREFILL_STEP_BY_MODEL_TYPE.get(
+        "deepseek_v4", loader._STREAMING_PREFILL_STEP)
+        if step == "streamed" else step)
+    assert seen.get("prefill_step_size") == want

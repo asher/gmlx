@@ -16,6 +16,7 @@ from gguf.constants import GGML_QUANT_SIZES  # noqa: E402
 
 from gmlx.load.preflight import (  # noqa: E402
     SUPPORTED_QUANT_TYPES,
+    TABLE_ROW_TYPES,
     UnsupportedCodecError,
     find_split_shards,
     preflight,
@@ -153,8 +154,10 @@ def test_supported_codecs_pass(tmp_path):
 
 def test_supported_allowlist_matches_kernels():
     # preflight's allowlist must not drift from the codecs the kernels implement.
+    # MXFP8 table rows decode in gmlx, so a build may or may not name it.
     kq = pytest.importorskip("mlx_kquant")
-    assert {c.lower() for c in SUPPORTED_QUANT_TYPES} == set(kq.codecs())
+    assert {c.lower() for c in SUPPORTED_QUANT_TYPES} == set(kq.codecs()) - {
+        c.lower() for c in TABLE_ROW_TYPES}
 
 
 # split-shard discovery

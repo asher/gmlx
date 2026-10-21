@@ -21,9 +21,10 @@ Codec facts (ggml-common.h):
     16-value groups, each with its own UE4M3 scale byte; the same two-halves
     split applies within each 16-value sub-block. No per-tensor global scale.
 
-mxfp8 is intentionally absent: MLX has a kernel for it, but GGML defines no
-mxfp8 wire type, so it can never appear in a GGUF (listed in
-``NATIVE_FP_MLX_ONLY`` for documentation only).
+mxfp8 is absent here. A GGUF can carry MXFP8 (ggml type 43, shared with
+STQ1_0) only as a gather-only lookup table, which stays in kq wire bytes and
+is never de-interleaved into MLX's packed layout (``NATIVE_FP_MLX_ONLY``
+lists MLX's own mxfp8 mode for documentation only).
 """
 
 from __future__ import annotations
@@ -39,8 +40,8 @@ NATIVE_FP_GEOMETRY: dict[str, tuple[int, int, int, int]] = {
 }
 NATIVE_FP_CODECS = frozenset(NATIVE_FP_GEOMETRY)
 
-# MLX has a native kernel for these, but GGML defines no wire type, so a GGUF
-# can't carry them - kept only so callers can reason about full MLX coverage.
+# MLX has a native kernel for these; a GGUF never stores them in MLX's
+# packed layout. Kept only so callers can reason about full MLX coverage.
 NATIVE_FP_MLX_ONLY = frozenset({"mxfp8"})
 
 # OCP E2M1 code (raw 4-bit nibble) -> value. Shared by mxfp4 and nvfp4; matches

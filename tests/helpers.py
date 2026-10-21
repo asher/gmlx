@@ -56,3 +56,46 @@ def bind_stock_checkpoint_methods(batch):
         setattr(batch, name,
                 types.MethodType(getattr(PromptProcessingBatch, name), batch))
     return batch
+
+
+def mint_type43_gguf(path, tensors, *, pad_last=True, cut=0, tail=0,
+                     arch="deepseek41") -> bytes:
+    """A GGUF whose tensors all carry GGML type id 43, which gguf-py cannot
+    write. ``tensors`` is ``[(name, dims, fmt, data)]`` in file order, with
+    ``fmt`` a key of ``TYPE_43_FORMATS`` and ``data`` the tensor's bytes or
+    None for zeros. ``cut`` drops bytes off the end of the file and ``tail``
+    appends zeros to it."""
+    import struct
+
+    from gmlx.load.headerscan import TYPE_43_FORMATS
+
+    align = 32
+
+    def s(b: bytes) -> bytes:
+        return struct.pack("<Q", len(b)) + b
+
+    kv = s(b"general.architecture") + struct.pack("<I", 8) + s(arch.encode())
+    infos, off, blobs = b"", 0, []
+    for name, dims, fmt, data in tensors:
+        n = 1
+        for d in dims:
+            n *= d
+        block, tsize = TYPE_43_FORMATS[fmt]
+        size = n // block * tsize
+        blob = bytes(size) if data is None else bytes(data)
+        assert len(blob) == size, (name, len(blob), size)
+        infos += (s(name.encode()) + struct.pack("<I", len(dims))
+                  + struct.pack(f"<{len(dims)}Q", *dims)
+                  + struct.pack("<IQ", 43, off))
+        blobs.append(blob)
+        off = (off + size + align - 1) // align * align
+    head = b"GGUF" + struct.pack("<IQQ", 3, len(tensors), 1) + kv + infos
+    body = bytearray(head + bytes(-len(head) % align))
+    for i, blob in enumerate(blobs):
+        body += blob
+        if pad_last or i + 1 < len(blobs):
+            body += bytes(-len(body) % align)
+    out = bytes(body[:len(body) - cut]) + bytes(tail)
+    with open(path, "wb") as f:
+        f.write(out)
+    return out

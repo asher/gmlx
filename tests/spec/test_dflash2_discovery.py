@@ -142,6 +142,26 @@ def test_mirrored_layout_pairs_across_directories(tmp_path, fake_classify, capsy
     assert err.count("configure via draft_gguf") == 1
 
 
+def test_a_drafter_an_entry_names_gets_no_line_on_a_discover_scan(
+        tmp_path, fake_classify, capsys):
+    """A model entry names the drafter beside it, as the line tells the user
+    to do, and a `discover:` scan of that folder finds nothing to say about
+    the drafter."""
+    from gmlx.config import build_config
+    repo = tmp_path / "unsloth__Qwen3.8-27B-GGUF"
+    repo.mkdir()
+    for stem in ("Qwen3.8-27B-UD-Q6_K_XL", "Qwen3.8-27B-DFlash2-Q8_0"):
+        (repo / f"{stem}.gguf").write_bytes(b"GGUF")
+    cfg = build_config({
+        "server": {"model_dirs": [str(tmp_path)]},
+        "discover": [{"dir": str(tmp_path), "recursive": True}],
+        "models": {"qwen": {
+            "path": "unsloth__Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K_XL.gguf",
+            "draft_gguf": "unsloth__Qwen3.8-27B-GGUF/Qwen3.8-27B-DFlash2-Q8_0.gguf"}}})
+    assert disc.discovered_models(cfg) == []
+    assert "configure via draft_gguf" not in capsys.readouterr().err
+
+
 def test_v1_drafter_without_declarations_pairs_as_before(tmp_path, fake_classify):
     layout = {k: v for k, v in LAYOUT.items() if "DFlash2" not in k and "zlab" not in k}
     for d, stems in layout.items():

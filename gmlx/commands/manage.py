@@ -41,11 +41,9 @@ from gmlx.envflags import env_float, env_int
 from gmlx.textfmt import plural_s
 import gmlx.load.remote as remote
 from gmlx.load.preflight import (
-    NATIVE_FP_TYPES,
-    NATIVE_TYPES,
     SPLIT_SHARD_RE,
-    SUPPORTED_QUANT_TYPES,
     find_split_shards,
+    loadable_type,
     shard_names,
 )
 
@@ -85,8 +83,7 @@ def _report_from_scans(scans: list, *, arch: str | None = None) -> remote.Header
         for t in hs.tensors:
             tn = t.type_name
             hist[tn] = hist.get(tn, 0) + 1
-            if (tn not in SUPPORTED_QUANT_TYPES and tn not in NATIVE_TYPES
-                    and tn not in NATIVE_FP_TYPES):
+            if not loadable_type(tn):
                 unsup[tn] = unsup.get(tn, 0) + 1
     return remote.HeaderReport(detected, hist, unsup, sum(hist.values()),
                                gguf_type, hadamard=hadamard)
@@ -146,7 +143,7 @@ def _build_report(ref: remote.Ref, *, arch: str | None = None,
     scans: list | None = []
     for u in urls:
         buf, total = remote.fetch_header_bytes(u, **kwargs)
-        r = remote.classify_header(buf)
+        r = remote.classify_header(buf, total)
         r.total_bytes = total
         reports.append(r)
         if scans is not None:
@@ -1603,10 +1600,19 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
     users = sorted(im.id for im in _all_images(cfg, images)
                    if im.encoder == target)
     if users:
+        # A discovered image model has no entry to point at another
+        # encoder, and a configured one has.
+        if all(u in cfg.image_models for u in users):
+            other = "point `encoder:` at another model"
+        elif len(users) == 1:
+            other = "add an `image_models:` entry with another `encoder:`"
+        else:
+            other = ("set another `encoder:` in an `image_models:` entry "
+                     "for each")
         print(f"error: {target} is the text encoder of image model"
               f"{plural_s(len(users))} {', '.join(users)}; remove "
-              f"{'it' if len(users) == 1 else 'them'} first, or point "
-              "`encoder:` at another model", file=sys.stderr)
+              f"{'it' if len(users) == 1 else 'them'} first, or {other}",
+              file=sys.stderr)
         return 2
 
     to_delete, sizes = _rm_deletion_plan(
@@ -1704,10 +1710,12 @@ def _rm_image(a, cfg, cfg_path, im, disc, images=(), *,
     refs = _image_refs(cfg, disc, im.id, images)
     to_delete: list[str] = []
     if not a.keep_files:
+        chat = im.encoder in cfg.models or any(
+            d.id == im.encoder for d in disc)
         parts = [("model file", im.path), ("vae", im.vae),
-                 ("encoder", None if im.encoder in cfg.models else im.encoder),
+                 ("encoder", None if chat else im.encoder),
                  ("encoder_mmproj", im.encoder_mmproj)]
-        if im.encoder in cfg.models:
+        if chat:
             notes.append(f"encoder {im.encoder} is a chat model; it stays")
         for label, p in parts:
             rp = _try_resolve(p, cfg.model_dirs)

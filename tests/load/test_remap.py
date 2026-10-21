@@ -361,6 +361,17 @@ def test_deepseek41_ds4_spellings_reach_the_same_targets():
         assert d("deepseek41", ds4).hf_name == d("deepseek41", llamacpp).hf_name
 
 
+def test_deepseek41_shared_table_and_folded_gate_routing():
+    # The PLE-keyed conversion: one table for every engram layer, and the
+    # q * k gate product as one tensor.
+    assert d("deepseek41", "per_layer_token_embd.weight").hf_name == \
+        "model.engram_embed.weight"
+    assert d("deepseek41", "blk.14.engram_gate.weight").hf_name == \
+        "model.layers.14.engram.gate_weight"
+    assert d("qwen4exp", "per_layer_token_embd.weight").hf_name != \
+        "model.engram_embed.weight"
+
+
 def test_deepseek41_indexer_owns_its_key_projection():
     # V4 derives index keys from a private compressor; V4.1 gives the indexer
     # its own wk/k_norm over the shared latent.

@@ -4,7 +4,8 @@ Walks one or more directories, reads each GGUF's *header* (architecture +
 ``nextn_predict_layers``, never tensor data), and classifies it as a servable
 **model**, a VLM **mmproj** companion, or an assistant **drafter**. Synthesizes a
 friendly, deterministic id from each model's filename, pairs sibling mmproj files
-into VLM entries, and emits a starter YAML config.
+(or a parent folder's, over quant folders of one model) into VLM entries, and
+emits a starter YAML config.
 
 Classification (header-only):
 
@@ -106,13 +107,15 @@ class ClassifiedGguf:
     loadable: bool          # arch builds a model with no hf override (model kind)
     moe: bool = False       # routed experts present (model kind only)
     name: str | None = None  # general.name, for family refinement (model kind)
-    # hidden size; on a drafter, its target's (see `_drafter_hidden_size`)
+    # hidden size; on a drafter, its target's (see `_drafter_hidden_size`);
+    # on an mmproj, the text model's it projects to
     n_embd: int | None = None
     # drafter kind: "dflash2" for a DFlash 2 header, else the arch
     drafter_kind: str | None = None
     # base-model ids the header declares (general.basename + size_label,
     # general.base_model.0.name), slugged like filename ids; `general.name`
-    # is deliberately not one (it names the file, not the base model)
+    # is deliberately not one (it names the file, not the base model).
+    # On an mmproj, the model it was converted from.
     declared: tuple = ()
 
 
@@ -213,7 +216,13 @@ def _classify_meta(
     ap = os.path.abspath(path)
 
     if arch == "clip" or basename.lower().startswith("mmproj"):
-        return ClassifiedGguf(ap, "mmproj", arch, False, quant, False)
+        # The projection width is the text model's hidden size in a file
+        # that llama.cpp's mmproj converter wrote, which sets general.type.
+        # Its older LLaVA converter stores CLIP's own width there (768).
+        width = (read_int(meta, "clip.vision.projection_dim")
+                 if read_string(meta, "general.type") == "mmproj" else None)
+        return ClassifiedGguf(ap, "mmproj", arch, False, quant, False,
+                              n_embd=width, declared=_declared_base_ids(meta))
     # A LoRA adapter (`gmlx train` / llama.cpp export) carries its base model's
     # `general.architecture`, so without this check it classifies as a loadable
     # chat model and serves a phantom id that 500s on request.
@@ -685,8 +694,16 @@ def discovered_models(cfg, *, progress=False, images=None) -> list[ModelCfg]:
     known_paths = set()
     encoder_ids = {}
     tower_ids: set = set()
+    named: set = set()
     for m in cfg.models.values():
         known_paths.add(m.path)
+        if m.draft_gguf:
+            try:
+                rd = resolve_path(m.draft_gguf, cfg.model_dirs)
+            except ConfigError:
+                rd = None
+            if rd:
+                named.add(rd)
         try:
             rp = resolve_path(m.path, cfg.model_dirs)
         except ConfigError:
@@ -711,7 +728,7 @@ def discovered_models(cfg, *, progress=False, images=None) -> list[ModelCfg]:
                          known_ids=set(cfg.models) | set(cfg.image_models),
                          known_paths=known_paths, progress=progress,
                          images=images, encoder_ids=encoder_ids,
-                         tower_ids=tower_ids)
+                         tower_ids=tower_ids, named_drafters=named)
     except Exception as e:                       # noqa: BLE001 - a flaky scan dir
         print(f"warning: discover scan failed: {e}", file=sys.stderr)
         return []
@@ -742,6 +759,7 @@ def scan_dirs(
     images=None,
     encoder_ids=None,
     tower_ids=None,
+    named_drafters=None,
 ) -> list[ModelCfg]:
     """Discover servable models from ``specs`` (each a :class:`config.DiscoverSpec`).
 
@@ -750,29 +768,40 @@ def scan_dirs(
     A sibling assistant drafter pairs into the models it can serve as their
     ``draft_gguf`` (see :func:`_drafter_targets`), which also turns
     ``speculative`` on. Sibling mmproj files pair into the model they best match when
-    ``pair_mmproj``. Every id carries its quant codec (see :func:`_assign_ids`).
+    ``pair_mmproj``, and one with no model beside it pairs into the models one
+    folder down when they are all one model (see :func:`_pair_parent_mmproj`).
+    Every id carries its quant codec (see :func:`_assign_ids`).
     ``known_ids`` /
     ``known_paths`` (from configured ``models:``) are skipped/deduped against, as
     are paths an earlier spec/root in this same call already emitted.
     ``known_models`` maps a configured model's resolved path to its
-    :class:`config.ModelCfg`. A drafter pairs into one of those too; the model
-    stays out of the return list, and the caller writes the key from
-    ``stats["draft_pairs"]``.
+    :class:`config.ModelCfg`, with any ``draft_gguf`` resolved too. A
+    drafter pairs into one of those, unless it is the one the model names
+    already, and an mmproj into one that has none; the model stays out of
+    the return list, and the caller writes the key from
+    ``stats["draft_pairs"]`` or ``stats["mmproj_pairs"]``.
     ``progress`` streams per-file scan feedback to stderr (used by ``init``).
     ``stats``, if given, is a dict that receives ``skipped``: the count of
     .gguf files seen but unreadable as GGUF (so callers can distinguish an
-    empty dir from a dir of truncated downloads); and ``draft_pairs``:
-    ``{configured id: drafter path}``.
+    empty dir from a dir of truncated downloads); ``draft_pairs``:
+    ``{configured id: drafter path}``; and ``mmproj_pairs``:
+    ``{configured id: mmproj path}``.
     An image DiT pairs with the text encoder and VAE of its family that the
     scan finds, nearest folder first (see :func:`_pair_images`); each whole
     set appends an :class:`config.ImageModelCfg` to ``images`` when it is a
     list. ``encoder_ids`` maps a configured chat model's resolved path to
     its id, so an encoder that is a configured model is shared by id;
-    ``tower_ids`` are the configured ones with an ``mmproj``."""
+    ``tower_ids`` are the configured ones with an ``mmproj``.
+    ``named_drafters`` are the resolved drafter paths that configured
+    entries name, for a caller that passes no ``known_models``: the scan
+    tells the user to configure none of them."""
     known_paths = {os.path.abspath(os.path.expanduser(p)) for p in known_paths}
+    named_drafters = {os.path.abspath(os.path.expanduser(p))
+                      for p in named_drafters or ()}
     configured = {os.path.abspath(os.path.expanduser(p)): mc
                   for p, mc in (known_models or {}).items()}
     draft_pairs: dict[str, str] = {}
+    mmproj_pairs: dict[str, str] = {}
     used_ids = set(known_ids)
     out: list[ModelCfg] = []
     skipped = 0
@@ -797,13 +826,15 @@ def scan_dirs(
             skipped += len(paths) - len(classified)
             every += classified
             _emit_dir(classified, spec, used_ids, out,
-                      configured=configured, draft_pairs=draft_pairs)
+                      configured=configured, draft_pairs=draft_pairs,
+                      mmproj_pairs=mmproj_pairs, named=named_drafters)
     if any(c.kind == "image-dit" for c in every):
         _pair_images(every, out, used_ids, images, encoder_ids or {},
                      tower_ids or set())
     if stats is not None:
         stats["skipped"] = skipped
         stats["draft_pairs"] = draft_pairs
+        stats["mmproj_pairs"] = mmproj_pairs
     return out
 
 
@@ -1132,6 +1163,9 @@ def _fit_in_memory(mc: ModelCfg, c: ClassifiedGguf) -> None:
 # The end-of-line comment on a ``stream:`` key that discovery wrote. Sync
 # re-evaluates the key it marks; a key without it is the user's.
 STREAM_MARK_NOTE = "set by discovery: over the memory budget"
+# The end-of-line comment on a companion key that ``sync-models
+# --add-companions`` added to an entry already in the config.
+COMPANION_MARK_NOTE = "added by sync-models"
 
 
 def rescan_entry(path: str) -> dict | None:
@@ -1148,14 +1182,21 @@ def rescan_entry(path: str) -> dict | None:
 
 
 def _emit_dir(classified, spec, used_ids, out, *, configured=None,
-              draft_pairs=None):
+              draft_pairs=None, mmproj_pairs=None, named=None):
     """Build ModelCfgs for one scan, pairing mmproj/draft per directory.
 
-    A drafter can also pair into a ``configured`` model (resolved path ->
-    :class:`config.ModelCfg`); ``draft_pairs`` collects those as
-    ``{id: drafter path}``."""
+    A drafter or an mmproj can also pair into a ``configured`` model
+    (resolved path -> :class:`config.ModelCfg`); ``draft_pairs`` and
+    ``mmproj_pairs`` collect those as ``{id: path}``. An mmproj pairs into
+    a configured model only when it has none."""
     configured = configured or {}
+    # The drafters configured entries name, before the pairing below
+    # rewrites their draft_gguf: these need no line telling the user to
+    # configure them.
+    named = set(named or ()) | {os.path.abspath(mc.draft_gguf)
+                                for mc in configured.values() if mc.draft_gguf}
     draft_pairs = {} if draft_pairs is None else draft_pairs
+    mmproj_pairs = {} if mmproj_pairs is None else mmproj_pairs
     by_dir: dict[str, list[ClassifiedGguf]] = {}
     for c in classified:
         by_dir.setdefault(os.path.dirname(c.path), []).append(c)
@@ -1206,10 +1247,24 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
             out.append(mc)
 
         if spec.pair_mmproj:
-            for mm in (c for c in group if c.kind == "mmproj"):
-                tgt = _best_mmproj_target(mm, made)
-                if tgt is not None and tgt.mmproj is None:
-                    tgt.mmproj = mm.path
+            mms = [c for c in group if c.kind == "mmproj"]
+            # A configured model is a candidate beside the scanned ones; the
+            # scanned ones pair as they would without it.
+            old_mm = _configured_in_dir(_dir, configured) if mms else []
+            for mm in mms:
+                for tgt in _mmproj_targets(mm, made):
+                    if tgt.mmproj is None:
+                        tgt.mmproj = mm.path
+                if old_mm:
+                    # Quiet when the call above said why already, or when
+                    # an entry here names an mmproj: the user chose.
+                    for tgt in _mmproj_targets(
+                            mm, made + old_mm,
+                            quiet=bool(made) or any(mc.mmproj for mc, _c in old_mm)):
+                        if (any(tgt is mc for mc, _c in old_mm)
+                                and tgt.mmproj is None
+                                and tgt.id not in mmproj_pairs):
+                            mmproj_pairs[tgt.id] = mm.path
 
         drafters = [c for c in group if c.kind == "drafter"]
         # The usual case: the target is configured already, so it is not in
@@ -1224,19 +1279,19 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
             targets = ([] if spec.speculative is False
                        else _drafter_targets(dr, made + old))
             for mc in targets:
+                had = mc.draft_gguf
                 mc.draft_gguf = dr.path
                 mc.speculative = True
-                if mc.id in old_ids:
+                if mc.id in old_ids and had != dr.path:
                     draft_pairs[mc.id] = dr.path
-            if targets:
-                ids = ", ".join(mc.id for mc in targets)
-                print(f"[discover] drafter paired (speculative on for {ids}): "
-                      f"{dr.path}", file=sys.stderr)
-            else:
+            if not targets:
                 unpaired.append(dr)
             if (dr.declared or _sibling_drafter_repo(dr.path)) and (
                     not targets or dr.drafter_kind == "dflash2"):
                 cross.append(dr)
+
+    if spec.pair_mmproj:
+        _pair_parent_mmproj(by_dir, all_made, configured, mmproj_pairs)
 
     # Cross-directory pass: a drafter that declares its base model (a DFlash 2
     # header does), or sits in a marked sibling repo of its target's, pairs
@@ -1253,19 +1308,28 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
                 loser = mc.draft_gguf
                 mc.draft_gguf = dr.path
                 mc.speculative = True
-                if mc.id in all_old_ids:
+                if mc.id in all_old_ids and loser != dr.path:
                     draft_pairs[mc.id] = dr.path
                 if loser and loser != dr.path:
                     print(f"[discover] drafter superseded for {mc.id}: "
                           f"{loser} -> {dr.path}", file=sys.stderr)
             if targets:
-                ids = ", ".join(mc.id for mc in targets)
-                print(f"[discover] drafter paired (speculative on for {ids}): "
-                      f"{dr.path}", file=sys.stderr)
                 unpaired = [d for d in unpaired if d.path != dr.path]
+    # One line per drafter, for the scanned models it ends up with. A
+    # configured model is the caller's to report: a sync writes its
+    # drafter only with --add-companions.
+    paired: dict[str, list[str]] = {}
+    for mc, _c in all_made:
+        if mc.draft_gguf:
+            paired.setdefault(mc.draft_gguf, []).append(mc.id)
+    for dpath in drafter_kinds:
+        if dpath in paired:
+            print(f"[discover] drafter paired (speculative on for "
+                  f"{', '.join(paired[dpath])}): {dpath}", file=sys.stderr)
     for dr in unpaired:
-        print(f"[discover] assistant drafter (configure via "
-              f"draft_gguf: on its model): {dr.path}", file=sys.stderr)
+        if dr.path not in named:
+            print(f"[discover] assistant drafter (configure via "
+                  f"draft_gguf: on its model): {dr.path}", file=sys.stderr)
 
 
 def _assign_ids(models, used_ids: set) -> dict[str, str]:
@@ -1310,39 +1374,162 @@ def _assign_ids(models, used_ids: set) -> dict[str, str]:
     return assigned
 
 
-def _best_mmproj_target(mm: ClassifiedGguf, made):
-    """Pick the model a sibling mmproj belongs to. ``None`` if no confident match
-    (logged). Two cases:
+def _mmproj_targets(mm: ClassifiedGguf, made, *, quiet=False) -> list:
+    """The models a sibling mmproj belongs to: each quant in ``made`` of the
+    model it picks. ``[]`` if no confident match (logged). Two cases:
 
     * A **generic** projector name (``mmproj-F16.gguf`` -> no model name once the
-      ``mmproj`` / codec markers are stripped) carries no signal, so it pairs to
-      the sole model in the directory - and stays unpaired if there are several.
+      ``mmproj`` / codec markers are stripped) carries no signal, so it pairs
+      when the models in the directory are all quants of one model, and stays
+      unpaired when they are several models.
     * A **named** projector (``mmproj-Qwen2-VL-2B-Instruct-f16``) must actually
       match a model: the shared id-prefix has to cover most of the projector's
       name (>=70%, >=6 chars). A bare family overlap like ``qwen`` between a
       Qwen2-VL projector and a Qwen3-Embedding model is *not* enough - that loose
-      match is exactly what mis-paired projectors onto unrelated models before."""
+      match is exactly what mis-paired projectors onto unrelated models before.
+
+    A projector whose header gives another hidden size than the header of
+    the model it picks stays unpaired."""
     if not made:
-        return None
+        return []
+    core = _mmproj_name(mm)
+    if not core:                                     # generic projector, no name
+        if len({_model_name(c) for _mc, c in made}) == 1:
+            return _same_width(mm, made, quiet=quiet)
+        if not quiet:
+            print(f"[discover] mmproj unpaired (ambiguous; several models): "
+                  f"{mm.path}", file=sys.stderr)
+        return []
+    best, best_c, best_len = None, None, 0
+    for mc, c in made:
+        n = _common_prefix_len(core, mc.id)
+        if n > best_len:
+            best, best_c, best_len = mc, c, n
+    if best is not None and best_c is not None \
+            and _mmproj_name_matches(core, best.id):
+        return _same_width(mm, [(mc, c) for mc, c in made
+                                if _model_name(c) == _model_name(best_c)],
+                           quiet=quiet)
+    if not quiet:
+        print(f"[discover] mmproj unpaired (no model name matches {core!r}): "
+              f"{mm.path}", file=sys.stderr)
+    return []
+
+
+def _model_name(c: ClassifiedGguf) -> tuple:
+    """A model's arch, file name past its quant and hidden size: one value
+    for all the quants of one model."""
+    return c.arch, derive_id(os.path.basename(c.path))[0], c.n_embd
+
+
+def _same_width(mm: ClassifiedGguf, made, *, quiet=False) -> list:
+    """The models of ``made`` but those whose header gives another hidden
+    size than the projector's (logged)."""
+    off = [(mc, c) for mc, c in made
+           if mm.n_embd and c.n_embd and mm.n_embd != c.n_embd]
+    if off and not quiet:
+        print(f"[discover] mmproj unpaired (it projects to a hidden size "
+              f"of {mm.n_embd}, {', '.join(mc.id for mc, _c in off)} "
+              f"{'has' if len(off) == 1 else 'have'} "
+              f"{', '.join(sorted({str(c.n_embd) for _mc, c in off}))}): "
+              f"{mm.path}", file=sys.stderr)
+    return [mc for mc, c in made if not any(mc is o for o, _c in off)]
+
+
+def _mmproj_name(mm: ClassifiedGguf) -> str:
+    """The model name in a projector's filename, ``""`` for a generic one."""
     core, _ = derive_id(os.path.basename(mm.path))   # markers (mmproj) stripped
     # llama.cpp's conversion default is mmproj-model-f16.gguf: a residual
     # core of "model" is the generic-name case, not a model called "model".
-    if not core or core == "model":                  # generic projector, no name
-        if len(made) == 1:
-            return made[0][0]
-        print(f"[discover] mmproj unpaired (ambiguous; several models): "
-              f"{mm.path}", file=sys.stderr)
-        return None
-    best, best_len = None, 0
-    for mc, _c in made:
-        n = _common_prefix_len(core, mc.id)
-        if n > best_len:
-            best, best_len = mc, n
-    if best is not None and best_len >= max(6, int(0.7 * len(core))):
-        return best
-    print(f"[discover] mmproj unpaired (no model name matches {core!r}): "
-          f"{mm.path}", file=sys.stderr)
-    return None
+    return "" if core == "model" else core
+
+
+def _mmproj_name_matches(core: str, model_id: str) -> bool:
+    """A named projector matches a model when their shared id prefix covers
+    most of the projector's name (>=70%, >=6 chars)."""
+    return _common_prefix_len(core, model_id) >= max(6, int(0.7 * len(core)))
+
+
+_SIZE_WORD_RE = re.compile(r"(\d+x)?\d+(\.\d+)?[bkm]|a\d+(\.\d+)?[bm]")
+
+
+def _same_model_named(a: str, b: str) -> bool:
+    """Whether the id slugs ``a`` and ``b`` name one model: past their size
+    words, they share a run of two words, or every word of the shorter."""
+    x, y = ([w for w in s.split("-") if not _SIZE_WORD_RE.fullmatch(w)]
+            for s in (a, b))
+    run = max((_common_run(x[i:], y[j:])
+               for i in range(len(x)) for j in range(len(y))), default=0)
+    return run >= min(2, len(x), len(y))
+
+
+def _common_run(x: list, y: list) -> int:
+    """The number of leading words ``x`` and ``y`` share."""
+    n = 0
+    while n < min(len(x), len(y)) and x[n] == y[n]:
+        n += 1
+    return n
+
+
+def _pair_parent_mmproj(by_dir, made, configured, mmproj_pairs) -> None:
+    """Pair a projector with no model beside it into the models one folder
+    down, when every model there is the same one: a repository that keeps
+    each quant in its own folder and the projector at its root, as
+    unsloth's do. A projector whose header gives another hidden size, or
+    names another model, than the models' headers stays unpaired. A
+    configured model without an mmproj lands in ``mmproj_pairs``. Several
+    projectors: the first in scan order wins, as beside a model."""
+    for parent, group in sorted(by_dir.items()):
+        mmprojs = [c for c in group if c.kind == "mmproj"]
+        if (not mmprojs or any(c.kind == "model" for c in group)
+                or _configured_in_dir(parent, configured)):
+            continue
+        below = [c for d, g in by_dir.items() if os.path.dirname(d) == parent
+                 for c in g if c.kind == "model"]
+        old = [(mc, c) for ap, mc in configured.items()
+               if os.path.dirname(os.path.dirname(ap)) == parent
+               for c in [classify_gguf(ap)]
+               if c is not None and c.kind == "model"]
+        below += [c for _mc, c in old]
+        old_mcs = [mc for mc, c in old if c.loadable]
+        targets = [mc for mc, c in made
+                   if os.path.dirname(os.path.dirname(c.path)) == parent]
+        if not targets and not old_mcs:
+            continue
+        names = {_model_name(c) for c in below}
+        ids = {i for c in below for i in c.declared}
+        widths = {c.n_embd for c in below if c.n_embd}
+        for mm in mmprojs:
+            if len(names) > 1:
+                print(f"[discover] mmproj unpaired (the models in the folders "
+                      f"below differ in name or arch): {mm.path}",
+                      file=sys.stderr)
+                continue
+            if mm.n_embd and widths and widths != {mm.n_embd}:
+                print(f"[discover] mmproj unpaired (it projects to a hidden "
+                      f"size of {mm.n_embd}, the models below have "
+                      f"{', '.join(map(str, sorted(widths)))}): {mm.path}",
+                      file=sys.stderr)
+                continue
+            if mm.declared and ids and not any(
+                    _same_model_named(a, b) for a in mm.declared for b in ids):
+                print(f"[discover] mmproj unpaired (its header names "
+                      f"{mm.declared[0]!r}, not the models below): {mm.path}",
+                      file=sys.stderr)
+                continue
+            core = _mmproj_name(mm)
+            hits = [mc for mc in targets + old_mcs
+                    if not core or _mmproj_name_matches(core, mc.id)]
+            if not hits:
+                print(f"[discover] mmproj unpaired (no model name matches "
+                      f"{core!r}): {mm.path}", file=sys.stderr)
+            for mc in hits:
+                if mc.mmproj is not None:
+                    continue
+                if any(mc is o for o in old_mcs):
+                    mmproj_pairs.setdefault(mc.id, mm.path)
+                else:
+                    mc.mmproj = mm.path
 
 
 def _configured_in_dir(dirpath: str, configured) -> list:
@@ -1410,7 +1597,7 @@ def _drafter_targets(dr: ClassifiedGguf, made, *, declared_only: bool = False,
     Header identity decides first: a hit when the drafter's declared base ids
     meet the target's; a veto when both declare and disjointly. Otherwise
     (``declared_only`` off) the filename selects among the candidates, on the
-    :func:`_best_mmproj_target` rule, and a lone candidate pairs without it.
+    :func:`_mmproj_targets` rule, and a lone candidate pairs without it.
     Two quants of one target both pair on purpose."""
     kinds = drafter_kinds or {}
     supersede = dr.drafter_kind == "dflash2"
@@ -1501,6 +1688,26 @@ def _fmt_num(v) -> str:
     return str(v)
 
 
+_SAMPLING_SHORT = (("temperature", "t"), ("top_p", "top_p"), ("top_k", "top_k"),
+                   ("min_p", "min_p"), ("repetition_penalty", "rep"),
+                   ("presence_penalty", "presence"))
+_SAMPLING_PART = (r"(?:" + "|".join(s for _k, s in _SAMPLING_SHORT)
+                  + r")=-?[0-9][0-9.]*(?:e-?[0-9]+)?")
+_FAMILY_COMMENT_RE = re.compile(
+    r"# sampling \((?:gguf|(?:"
+    + "|".join(re.escape(f) for f in sorted(_family_profiles.FAMILIES)
+               if f != "default")
+    + rf")(?: \+ gguf)?)\)(?:: {_SAMPLING_PART}(?: {_SAMPLING_PART})*)?")
+
+
+def is_family_comment(line: str) -> bool:
+    """Whether ``line`` is a comment line that :func:`family_comment`
+    writes above an entry, ``# sampling (<family> + gguf): t=1 ...``. A
+    sync removes only these lines, so a comment the user wrote never
+    matches by accident."""
+    return _FAMILY_COMMENT_RE.fullmatch(line.strip()) is not None
+
+
 def family_comment(mc: ModelCfg) -> str:
     """A one-line sampling summary for a model entry's comment
     (``qwen3.6: t=1.0 top_p=0.95 top_k=20``): the family base refined by the
@@ -1512,10 +1719,7 @@ def family_comment(mc: ModelCfg) -> str:
             if fam and fam != "default" else {})
     hs = header_sampling(mc.path)
     eff = {**base, **hs}
-    short = (("temperature", "t"), ("top_p", "top_p"), ("top_k", "top_k"),
-             ("min_p", "min_p"), ("repetition_penalty", "rep"),
-             ("presence_penalty", "presence"))
-    parts = [f"{s}={_fmt_num(eff[k])}" for k, s in short if eff.get(k)]
+    parts = [f"{s}={_fmt_num(eff[k])}" for k, s in _SAMPLING_SHORT if eff.get(k)]
     src = (fam if fam and fam != "default" else "") if not hs else (
         f"{fam} + gguf" if fam and fam != "default" else "gguf")
     if not src:

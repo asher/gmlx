@@ -14,9 +14,19 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `GMLX_NORM_DTYPE` sets the width of a language model's norm weights:
   `fp32` keeps the F32 norm weights in float32 and `activation` casts them to
   the activation dtype, whatever the model's default.
+- unsloth's DeepSeek-V4.1-Flash-1017 vision companion (`mmproj-BF16.gguf` or
+  `mmproj-F16.gguf`) loads with `--mmproj`, so the 1017 quants read images.
+- A folder scan pairs an `mmproj` file at a repository root with the quants
+  in the folders below it, as unsloth lays them out, when their headers agree
+  on the model and its hidden size.
+- `gmlx sync-models --add-companions` adds a paired `mmproj` or drafter to
+  a model already in the config, so a companion downloaded later is picked up.
 
 ### Changed
 
+- `gmlx sync-models` adds a drafter to a model already in the config only
+  with `--add-companions`. Without it, a sync or pull names each drafter
+  or `mmproj` it leaves out.
 - With `--stream-experts`, decoding is faster: between prefills the expert
   arena uses the prefill ring's memory. `GMLX_RING_TIMESHARE=0` turns it off.
 - With `--stream-experts`, replies start sooner and their first tokens come
@@ -35,6 +45,27 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Qwen-Image 2.1, FLUX.3 klein, Krea 2 and MOSS-Image failed every request
+  when their `encoder` was a chat model served with its `mmproj`.
+- In a `discover:` setup, `gmlx rm` of a chat model that image models share
+  said to point their `encoder:` elsewhere, though they have no entry.
+- A Qwen-Image 2.1 edit on an image model whose shared chat model has no
+  `mmproj` failed in the encoder. It is now refused with a line naming the
+  chat model.
+- A folder scan paired an `mmproj` file with the model beside it when their
+  headers gave different hidden sizes.
+- A folder scan paired an `mmproj` file with only one quant of its model in the
+  folder, or with none when the file name was generic.
+- A sync or pull printed the pairing of a DFlash 2 drafter twice.
+- A sync, pull or `discover:` scan said to configure a drafter that a model's
+  entry already named.
+- With `--stream-experts`, a prompt of more than 64 tokens filled the file
+  cache as it prefilled, and macOS compressed other apps' memory to make room.
+- unsloth's DeepSeek-V4.1-Flash-1017 GGUFs load. Their one shared engram
+  table, larger than a GPU buffer, is read from the file, and MXFP8 tables
+  are told apart from STQ1_0 weights, which share the same GGUF type id.
+- A GGUF with a tensor too large for one GPU buffer now fails with the
+  tensor's name instead of a Metal allocation error.
 - A Ctrl-C that reached a `gmlx launch --container` session without a
   terminal just as its client exited was lost, and the session kept waiting
   for its other copies.
@@ -50,6 +81,23 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a step gets the GPU-wired expert arena from its first step.
 - With `--stream-experts`, a long prompt on some models stopped
   prefilling and never answered.
+- A drafter that `gmlx pull` added to a model already in the config landed
+  below the comment of the next model in the file.
+- `gmlx pull` said it registered a drafter for a model whose entry kept its
+  own `draft_gguf`, and `gmlx sync-models` listed that update on every run.
+- A model that `gmlx sync-models` or `gmlx pull` added went in above the first
+  model but below its sampling comment and notes, and those comments piled up.
+- `gmlx sync-models` left the sampling comment of a model it removed above
+  the next model, and dropped that model's own.
+- A `gmlx sync-models` that removed the last model under a commented
+  `models:` block wrote a config that did not parse.
+- A model that `gmlx sync-models` or `gmlx pull` added to an empty
+  `models:` block went above the comment lines under it.
+- `gmlx run` with `--mmproj` and `--stream-experts` prefilled in smaller
+  chunks than a text run, so a long prompt took longer to its first token.
+- With `--mmproj`, each reply printed a warning that the model was close to
+  the maximum recommended size. It now prints once, and not with
+  `--stream-experts`.
 
 ## [0.5.1] - 2026-10-18
 

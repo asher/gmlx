@@ -33,7 +33,9 @@ as gemma-4 with its assistant drafter, need `--draft-gguf`.
 On the server, a model speculates when its `speculative` key is true.
 `gmlx init` sets it for models with a head, and `gmlx pull` and a
 [discover](config.md#model-discovery) scan pair a drafter that they find
-with its model.
+with its model. For a model already in the config,
+[`gmlx sync-models --add-companions`](cli.md#gmlx-sync-models) adds the
+drafter to its entry.
 
 Speculation works with some other features and stays off with others:
 

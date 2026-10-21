@@ -9,10 +9,16 @@ through ``kq.load_gguf(skip=...)`` and the table module reads its rows
 from the GGUF instead, which is what the reference runtime does too.
 
 The rows a step needs are tiny next to the table: 24 rows of 264 bytes
-per token per engram table. Reads bypass the page cache and round out to
+per token per engram table. Rows stored in a GGUF quant decode through
+``kq.dequantize``, float rows by their bytes' dtype. MXFP8 rows (one E8M0 scale byte, then 32 E4M3 values,
+per block) decode through the engram codec's lookup tables, so reading
+them needs no kquant codec. Reads bypass the page cache and round out to
 page boundaries, per the ``decode_feeder`` rules, since a 264-byte row
 is never page-aligned and an unaligned F_NOCACHE read can wedge in the
 kernel. The cost is one host sync per gather, to read the row ids.
+
+An MXFP8 table is read the same way at any size when mlx-kquant has no
+mxfp8 codec to hold it as an array.
 
 ``GMLX_TABLE_MAX_BUFFER`` overrides the ceiling (bytes), for tests.
 ``GMLX_TABLE_PREAD_WORKERS`` sets the reader thread count.
@@ -55,6 +61,11 @@ class TableSource:
     offset: int          # absolute byte offset of row 0
     rows: int
     row_bytes: int
+    # The kquant codec of the rows, or None for raw bytes the table module
+    # decodes itself.
+    codec: str | None = None
+    dims: int = 0        # values per row, when codec is set
+    out_dtype: mx.Dtype = mx.bfloat16
     _fd: int | None = field(default=None, repr=False)
     _pool: ThreadPoolExecutor | None = field(default=None, repr=False)
     _ahead: ThreadPoolExecutor | None = field(default=None, repr=False)
@@ -193,31 +204,106 @@ class TableSource:
 
 def oversize_tables(shards: list[str], arch: str | None,
                     cap: int | None = None) -> dict[str, TableSource]:
-    """Streamable tables of ``arch`` in ``shards`` that pass the device
-    ceiling, as wire name -> source. A pure function of the files: the
-    wire load calls it for the skip list, the model install for the
-    sources."""
+    """Streamable tables of ``arch`` in ``shards`` that are read from the
+    file, as wire name -> source: those past the device ceiling, and MXFP8
+    ones when mlx-kquant cannot hold them. A function of the files and the
+    mlx-kquant build: the wire load calls it for the skip list, the model
+    install for the sources."""
     from .table_stream import streamable_table_names
 
     pattern = streamable_table_names(arch)
     if pattern is None:
         return {}
     cap = max_buffer_bytes() if cap is None else cap
-    if cap is None:
-        return {}
     from gmlx.load.headerscan import scan_gguf
 
     out: dict[str, TableSource] = {}
     for shard in shards:
         h = scan_gguf(shard, array_limit=0)
         for t in h.tensors:
-            if t.nbytes <= cap or not pattern.fullmatch(t.name):
+            if not pattern.fullmatch(t.name):
+                continue
+            too_big = cap is not None and t.nbytes > cap
+            if not too_big and not (t.type_name == "MXFP8"
+                                    and not _kq_has("mxfp8")):
                 continue
             rows = int(np.prod(t.shape[1:])) if len(t.shape) > 1 else 1
+            codec = _row_codec(t.type_name)
             out[t.name] = TableSource(
                 path=shard, offset=h.data_offset + t.offset, rows=rows,
-                row_bytes=t.nbytes // rows)
+                row_bytes=t.nbytes // rows, codec=codec,
+                dims=int(t.shape[0]) if codec else 0)
     return out
+
+
+def oversize_names(path: str, cap: int | None = None) -> list[str]:
+    """Every tensor in ``path`` past the device ceiling, whatever its role.
+    No array can hold one, so a load of the file must skip it."""
+    cap = max_buffer_bytes() if cap is None else cap
+    if cap is None:
+        return []
+    from gmlx.load.headerscan import scan_gguf
+
+    return [t.name for t in scan_gguf(path, array_limit=0).tensors
+            if t.nbytes > cap]
+
+
+def _row_codec(type_name: str) -> str | None:
+    """The codec of a table stored as GGML type ``type_name``: None for raw
+    bytes (I8 / U8, decoded by the table module), else the lowercase type
+    name, which is the kquant codec name."""
+    name = type_name.lower()
+    return None if name in ("i8", "u8") else name
+
+
+def _check_codec(name: str, src: TableSource) -> None:
+    if src.codec is None or src.codec == "mxfp8" or src.codec in _FLOAT_ROWS:
+        return
+    if not _kq_has(src.codec):
+        raise RuntimeError(
+            f"{name}: reading {src.codec} table rows from the file needs "
+            f"an mlx-kquant build with a {src.codec} codec")
+
+
+def _kq_has(codec: str) -> bool:
+    import mlx_kquant as kq
+
+    return codec in set(kq.codecs())
+
+
+_FLOAT_ROWS = {"f32": mx.float32, "f16": mx.float16, "bf16": mx.bfloat16}
+
+_MXFP8_LUTS: tuple | None = None
+
+
+def _decode_mxfp8(raw: mx.array, dims: int) -> mx.array:
+    global _MXFP8_LUTS
+    if _MXFP8_LUTS is None:
+        from gmlx.models.deepseek_v41.engram_codec import tables
+
+        _MXFP8_LUTS = tuple(mx.array(t) for t in tables())
+    values, scales = _MXFP8_LUTS
+    # Metal flushes subnormals, so a block at the bottom of the scale range
+    # (codes 0 and 1, values under 2^-126) decodes to zero on the GPU.
+    blocks = raw.reshape(*raw.shape[:-1], dims // 32, 33).astype(mx.int32)
+    out = values[blocks[..., 1:]] * scales[blocks[..., :1]]
+    return out.reshape(*raw.shape[:-1], dims)
+
+
+def _decode_rows(raw: mx.array, src: TableSource) -> mx.array:
+    """``[..., row_bytes]`` uint8 rows to ``[..., dims]`` values. K-quant
+    scales live in the row bytes; the scales input is the same 1-byte
+    placeholder ``KQuantEmbedding`` passes."""
+    if src.codec == "mxfp8":
+        out = _decode_mxfp8(raw, src.dims)
+    elif src.codec in _FLOAT_ROWS:
+        out = raw.view(_FLOAT_ROWS[src.codec])
+    else:
+        import mlx_kquant as kq
+
+        out = kq.dequantize(raw.reshape(-1, src.row_bytes),
+                            mx.zeros((1,), dtype=mx.uint8), src.codec)
+    return out.reshape(*raw.shape[:-1], src.dims).astype(src.out_dtype)
 
 
 _PREAD_CACHE: dict[type, type] = {}
@@ -259,6 +345,8 @@ def _pread_class(cls):
             else:
                 rows = src.read(ids)
             out = mx.array(rows).reshape(*x.shape, src.row_bytes)
+            if src.codec is not None:
+                return _decode_rows(out, src)
             if hasattr(self, "kquant_type"):
                 # A skipped tensor brings no <name>.scales, so the module
                 # holds only its own placeholder. Fail rather than
@@ -277,7 +365,8 @@ def _pread_class(cls):
 
         def _extra_repr(self):
             src = self._kq_table_source
-            return f"{src.rows}, file-backed rows of {src.row_bytes} B"
+            kind = f" {src.codec}" if src.codec else ""
+            return f"{src.rows}, file-backed{kind} rows of {src.row_bytes} B"
 
     _TablePread.__name__ = cls.__name__ + "_TablePread"
     _PREAD_CACHE[cls] = _TablePread
@@ -320,10 +409,16 @@ def install_deferred_tables(model, sources: dict[str, TableSource]) -> list[str]
             already.add(tier.gguf_name)
             continue
         w = getattr(mod, "weight", None)
-        if w is not None and int(w.shape[-1]) != src.row_bytes:
+        want = src.dims if src.codec else src.row_bytes
+        if w is not None and int(w.shape[-1]) != want:
             raise ValueError(
                 f"{tier.gguf_name}: model row width {w.shape[-1]} != file "
-                f"{src.row_bytes}")
+                f"{want}")
+        _check_codec(tier.gguf_name, src)
+        if src.codec is not None:
+            from gmlx.load.dtypes import activation_dtype
+
+            src.out_dtype = activation_dtype(getattr(model, "model_type", None))
         mod._kq_table_source = src
         if w is not None:
             del mod["weight"]

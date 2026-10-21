@@ -76,9 +76,10 @@ def host_floor_bytes(ram: int | None) -> int:
     under the ceiling at sizing, against reclaimable RAM at sizing and on
     every pressure-driven regrow (``GMLX_DECODE_RAM_FLOOR_GB`` overrides).
     On top of the base margin, ``GMLX_DECODE_PAGECACHE_GB`` reserves room
-    for the page cache specifically: the prefill feeder and the CPU-mmap
-    fallback read through it, and starving it collapses buffered pread
-    throughput far below the SSD's sequential rate. The margin is what
+    for the page cache specifically: the CPU-mmap fallback and the
+    buffered prefill reads (a ring out of service, or
+    ``GMLX_PREFILL_NOCACHE=0``) go through it, and starving it collapses
+    buffered pread throughput far below the SSD's sequential rate. The margin is what
     keeps the rest of the box out of swap while the arena is wired; a
     swap storm under a wired arena is a watchdog panic."""
     from gmlx.envflags import env_float

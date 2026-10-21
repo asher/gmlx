@@ -1462,15 +1462,17 @@ def test_rm_of_an_image_model_keeps_what_others_use(images, capsys):
     assert "qwen3-4b" in c.models
 
 
-def _discovered_image(monkeypatch, lib, **kw):
+def _discovered_image(monkeypatch, lib, chat=(), ids=("qt8",), **kw):
+    """A discover scan that finds the image models ``ids`` and the chat
+    models ``chat``, as (id, file name) pairs."""
     import gmlx.load.discovery as discovery
-    from gmlx.config import ImageModelCfg
+    from gmlx.config import ImageModelCfg, ModelCfg
 
     def disc(cfg, *, progress=False, images=None):
         if images is not None:
-            images.append(ImageModelCfg(id="qt8", path=str(lib / "qt8.gguf"),
-                                        **kw))
-        return []
+            images.extend(ImageModelCfg(id=i, path=str(lib / f"{i}.gguf"),
+                                        **kw) for i in ids)
+        return [ModelCfg(id=i, path=str(lib / f)) for i, f in chat]
     monkeypatch.setattr(discovery, "discovered_models", disc)
 
 
@@ -1501,14 +1503,59 @@ def test_rm_never_removes_a_chat_model_a_discovered_image_model_shares(
     _discovered_image(monkeypatch, lib, encoder="vl",
                       vae=str(lib / "qvae.gguf"))
     assert manage.cmd_rm(["vl", "--config", str(cfg), "--yes"]) == 2
-    assert "text encoder of image model qt8" in capsys.readouterr().err
+    # qt8 has no entry to point at another encoder.
+    assert ("text encoder of image model qt8; remove it first, or add an "
+            "`image_models:` entry with another `encoder:`"
+            in capsys.readouterr().err)
     assert (lib / "vl.gguf").exists()
+
+
+@pytest.mark.parametrize("configured", [False, True],
+                         ids=["discovered", "mixed"])
+def test_rm_refusal_for_several_image_models_names_an_entry_for_each(
+        images, monkeypatch, capsys, configured):
+    """vl is the encoder of two image models: two discovered ones, or the
+    configured qi and the discovered qt8. Each needs another encoder in
+    an entry, which qi has and qt8 does not."""
+    lib, cfg = images
+    if configured:
+        cfg.write_text(cfg.read_text() + f"discover:\n  - dir: {lib}\n")
+        ids, users = ("qt8",), "qi, qt8"
+    else:
+        cfg.write_text(f"server:\n  model_dirs:\n    - {lib}\nmodels:\n"
+                       "  vl:\n    path: vl.gguf\n    mmproj: tower.gguf\n"
+                       f"discover:\n  - dir: {lib}\n")
+        ids, users = ("qt8", "qt9"), "qt8, qt9"
+    _discovered_image(monkeypatch, lib, ids=ids, encoder="vl",
+                      vae=str(lib / "qvae.gguf"))
+    assert manage.cmd_rm(["vl", "--config", str(cfg), "--yes"]) == 2
+    assert (f"text encoder of image models {users}; remove them first, or "
+            "set another `encoder:` in an `image_models:` entry for each"
+            in capsys.readouterr().err)
+    assert (lib / "vl.gguf").exists()
+
+
+def test_rm_of_a_discovered_image_model_says_its_discovered_chat_encoder_stays(
+        images, monkeypatch, capsys):
+    """A discover setup: qt8 shares the discovered chat model vl8. The rm
+    of qt8 plans its DiT and says the chat model stays."""
+    lib, cfg = images
+    (lib / "qt8.gguf").write_bytes(b"x" * 100)
+    (lib / "vl8.gguf").write_bytes(b"x" * 100)
+    cfg.write_text(f"server:\n  model_dirs:\n    - {lib}\n"
+                   f"discover:\n  - dir: {lib}\n")
+    _discovered_image(monkeypatch, lib, chat=[("vl8", "vl8.gguf")],
+                      encoder="vl8", vae=str(lib / "qvae.gguf"))
+    assert manage.cmd_rm(["qt8", "--config", str(cfg), "--yes"]) == 0
+    assert "encoder vl8 is a chat model; it stays" in capsys.readouterr().out
+    assert not (lib / "qt8.gguf").exists() and (lib / "vl8.gguf").exists()
 
 
 def test_rm_never_removes_a_chat_model_an_image_model_shares(images, capsys):
     lib, cfg = images
     assert manage.cmd_rm(["qwen3-4b", "--config", str(cfg), "--yes"]) == 2
-    assert "text encoder of image model zit" in capsys.readouterr().err
+    assert ("text encoder of image model zit; remove it first, or point "
+            "`encoder:` at another model" in capsys.readouterr().err)
     assert (lib / "enc.gguf").exists() and "qwen3-4b" in _cfg(cfg).models
 
 

@@ -1111,26 +1111,77 @@ def test_sync_of_a_config_in_sync_in_a_read_only_folder_exits_0(monkeypatch, tmp
     assert "already in sync" in captured.out and captured.err == ""
 
 
-def test_sync_adds_a_drafter_to_an_entry_already_in_the_config(monkeypatch,
-                                                               tmp_path):
-    # The user drops a drafter next to a model the config already carries:
-    # sync adds `draft_gguf` to that entry and leaves the rest of it alone.
-    from gmlx.config import load_config
-    cfg_path, lib = _sync_config(
-        tmp_path,
-        "models:\n  muse:\n    path: muse.gguf\n    pin: true\n")
-    (lib / "muse.gguf").write_bytes(b"x")
-    drafter = str(lib / "dflash-muse.gguf")
+def _drafter_beside(monkeypatch, lib, pairs):
+    """A scan that pairs each configured id in ``pairs`` with a drafter
+    beside its model."""
+    for mid in pairs:
+        (lib / f"{mid}.gguf").write_bytes(b"x")
 
     def fake_scan(specs, dirs, **kw):
-        kw["stats"]["draft_pairs"] = {"muse": drafter}
+        kw["stats"]["draft_pairs"] = {mid: str(lib / f"dflash-{mid}.gguf")
+                                      for mid in pairs}
         return []
 
     monkeypatch.setattr(srv.discovery, "scan_dirs", fake_scan)
-    assert srv._cmd_sync(["--config", str(cfg_path)]) == 0
-    mc = load_config(cfg_path).models["muse"]
-    assert mc.draft_gguf == "dflash-muse.gguf"    # relative to model_dirs
-    assert mc.pin is True                         # the hand-edit survives
+
+
+def test_sync_add_companions_adds_a_drafter_to_an_entry(monkeypatch, tmp_path,
+                                                        capsys):
+    """A drafter dropped next to a model the config already carries joins
+    its entry after `path`, or after its `mmproj`, above the next entry's
+    comment, and only with --add-companions."""
+    from gmlx.config import load_config
+    cfg_path, lib = _sync_config(
+        tmp_path,
+        "models:\n  muse:\n    path: muse.gguf\n    pin: true\n"
+        "\n  # sampling (qwen3.6): t=1\n  qwen:\n    path: qwen.gguf\n"
+        "    mmproj: mmproj-qwen.gguf\n")
+    _drafter_beside(monkeypatch, lib, ["muse", "qwen"])
+    (lib / "mmproj-qwen.gguf").write_bytes(b"x")
+    before = cfg_path.read_text()
+    assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
+    out = capsys.readouterr().out
+    assert "already in sync" in out
+    for mid in ("muse", "qwen"):
+        assert out.count(f"  hint:    {mid}  (drafter dflash-{mid}.gguf pairs "
+                         "with it; --add-companions adds it)") == 1
+    assert cfg_path.read_text() == before
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--no-reload"]) == 0
+    out = capsys.readouterr().out
+    assert "update:  muse  (draft_gguf: dflash-muse.gguf)" in out
+    assert "hint:" not in out
+    cfg = load_config(cfg_path)
+    assert cfg.models["muse"].draft_gguf == "dflash-muse.gguf"
+    assert cfg.models["muse"].pin is True         # the hand-edit survives
+    note = srv.discovery.COMPANION_MARK_NOTE
+    assert cfg_path.read_text().endswith(
+        "  muse:\n    path: muse.gguf\n"
+        f"    draft_gguf: dflash-muse.gguf  # {note}\n    pin: true\n"
+        "\n  # sampling (qwen3.6): t=1\n  qwen:\n    path: qwen.gguf\n"
+        "    mmproj: mmproj-qwen.gguf\n"
+        f"    draft_gguf: dflash-qwen.gguf  # {note}\n")
+
+
+@pytest.mark.parametrize("held", [
+    "    draft_gguf: dflash-v1-muse.gguf\n",
+    "    #draft_gguf: dflash-muse.gguf\n",
+    "    speculative: false\n",
+])
+def test_sync_add_companions_leaves_a_drafter_out_of_a_held_entry(
+        monkeypatch, tmp_path, capsys, held):
+    """A drafter key the entry has, one commented out, or speculative
+    decoding turned off: the plan and the write both leave the entry be."""
+    cfg_path, lib = _sync_config(
+        tmp_path, f"models:\n  muse:\n    path: muse.gguf\n{held}")
+    _drafter_beside(monkeypatch, lib, ["muse"])
+    before = cfg_path.read_text()
+    for extra in (["--add-companions", "--dry-run"],
+                  ["--add-companions", "--no-reload"], ["--no-reload"]):
+        assert srv._cmd_sync(["--config", str(cfg_path), *extra]) == 0
+        out = capsys.readouterr().out
+        assert "already in sync" in out and "hint:" not in out
+    assert cfg_path.read_text() == before
 
 
 def test_sync_judges_a_discovery_stream_mark_again(monkeypatch, tmp_path, capsys):
@@ -1193,16 +1244,391 @@ def test_sync_dry_run_keeps_a_drafter_pairing_unwritten(monkeypatch, tmp_path,
     from gmlx.config import load_config
     cfg_path, lib = _sync_config(
         tmp_path, "models:\n  muse:\n    path: muse.gguf\n")
-    (lib / "muse.gguf").write_bytes(b"x")
+    _drafter_beside(monkeypatch, lib, ["muse"])
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--dry-run"]) == 0
+    assert "update:  muse  (draft_gguf: dflash-muse.gguf)" in \
+        capsys.readouterr().out
+    assert load_config(cfg_path).models["muse"].draft_gguf is None
+
+
+def _vlm_library(monkeypatch, lib):
+    """A model library as pull lays it out, read by a header classifier
+    that goes by file name: unsloth's quant folders under a root mmproj,
+    Bonsai beside its named mmproj, and a quant beside two mmprojs."""
+    ds41 = lib / "unsloth__DeepSeek-V4.1-Flash-1017-GGUF"
+    (ds41 / "UD-IQ2_XXS").mkdir(parents=True)
+    bonsai = lib / "prism-ml__Ternary-Bonsai-2-27B-gguf"
+    qwen = lib / "unsloth__Qwen3.8-27B-GGUF"
+    for d in (bonsai, qwen):
+        d.mkdir()
+    for f in (ds41 / "mmproj-BF16.gguf", lib / _DS41_PATH,
+              bonsai / "Ternary-Bonsai-2-27B-PQ2_0.gguf",
+              bonsai / "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf",
+              lib / _QWEN_PATH, qwen / "mmproj-BF16.gguf",
+              qwen / "mmproj-F16.gguf"):
+        f.write_bytes(b"GGUF")
+
+    def classify(path):
+        name = os.path.basename(path)
+        arch = ("clip" if "mmproj" in name
+                else "deepseek41" if "DeepSeek" in name else "qwen35")
+        return srv.discovery._classify_meta(
+            {"general.architecture": arch}, basename=name, path=path)
+
+    monkeypatch.setattr(srv.discovery, "classify_gguf", classify)
+    # The 1017 quant stays over the memory budget.
+    monkeypatch.setattr(srv.discovery, "rescan_entry", lambda p: {
+        "stream": "experts", "speculative": False})
+
+
+_DS41_PATH = ("unsloth__DeepSeek-V4.1-Flash-1017-GGUF/UD-IQ2_XXS/"
+              "DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf")
+_QWEN_PATH = "unsloth__Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf"
+
+
+def _vlm_entries(qwen_extra="", bonsai_extra=""):
+    """Every model of the library, so the scan adds none."""
+    return (
+        "models:\n"
+        "  deepseek-v4.1-flash-1017-ud-iq2:\n"
+        f"    path: {_DS41_PATH}\n"
+        f"    stream: experts  # {srv.discovery.STREAM_MARK_NOTE}\n"
+        f"  qwen3.8-27b-ud-q8:\n    path: {_QWEN_PATH}\n{qwen_extra}"
+        "  # sampling: t=1 top_p=0.95\n"
+        "  ternary-bonsai-2-27b-pq2:\n"
+        "    path: prism-ml__Ternary-Bonsai-2-27B-gguf/"
+        f"Ternary-Bonsai-2-27B-PQ2_0.gguf\n{bonsai_extra}")
+
+
+def test_sync_add_companions_adds_an_mmproj_to_an_entry(monkeypatch,
+                                                        tmp_path):
+    """An mmproj that arrived after its model's entry joins it, from the
+    repository root over the quant folders and from beside the model."""
+    from gmlx.config import load_config
+    cfg_path, lib = _sync_config(tmp_path, _vlm_entries())
+    _vlm_library(monkeypatch, lib)
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--no-reload"]) == 0
+    cfg = load_config(cfg_path)
+    ds41 = cfg.models["deepseek-v4.1-flash-1017-ud-iq2"]
+    assert ds41.mmproj == "unsloth__DeepSeek-V4.1-Flash-1017-GGUF/mmproj-BF16.gguf"
+    assert ds41.stream == "experts"
+    assert cfg.models["qwen3.8-27b-ud-q8"].mmproj == \
+        "unsloth__Qwen3.8-27B-GGUF/mmproj-BF16.gguf"   # first by name
+    note = srv.discovery.COMPANION_MARK_NOTE
+    assert (f"    mmproj: unsloth__Qwen3.8-27B-GGUF/mmproj-BF16.gguf  # {note}\n"
+            "  # sampling: t=1 top_p=0.95\n  ternary-bonsai-2-27b-pq2:"
+            ) in cfg_path.read_text()
+
+
+def test_sync_without_add_companions_leaves_entries_alone(monkeypatch,
+                                                          tmp_path, capsys):
+    """The plan names each mmproj it leaves out, once, and how to add it."""
+    cfg_path, lib = _sync_config(tmp_path, _vlm_entries())
+    _vlm_library(monkeypatch, lib)
+    before = cfg_path.read_text()
+    assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
+    out = capsys.readouterr().out
+    assert "already in sync" in out
+    for mid, mm in (
+            ("deepseek-v4.1-flash-1017-ud-iq2",
+             "unsloth__DeepSeek-V4.1-Flash-1017-GGUF/mmproj-BF16.gguf"),
+            ("qwen3.8-27b-ud-q8", "unsloth__Qwen3.8-27B-GGUF/mmproj-BF16.gguf"),
+            ("ternary-bonsai-2-27b-pq2", "prism-ml__Ternary-Bonsai-2-27B-gguf/"
+             "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf")):
+        assert out.count(f"  hint:    {mid}  (mmproj {mm} pairs with it; "
+                         "--add-companions adds it)") == 1
+    assert out.count("hint:") == 3
+    assert cfg_path.read_text() == before
+
+
+def test_sync_add_companions_keeps_an_mmproj_key_the_entry_has(monkeypatch,
+                                                               tmp_path):
+    from gmlx.config import load_config
+    cfg_path, lib = _sync_config(tmp_path, _vlm_entries(
+        qwen_extra="    mmproj: unsloth__Qwen3.8-27B-GGUF/mmproj-F16.gguf\n"))
+    _vlm_library(monkeypatch, lib)
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--no-reload"]) == 0
+    cfg = load_config(cfg_path)
+    assert cfg.models["qwen3.8-27b-ud-q8"].mmproj == \
+        "unsloth__Qwen3.8-27B-GGUF/mmproj-F16.gguf"
+    text = cfg_path.read_text()
+    assert "    mmproj: unsloth__Qwen3.8-27B-GGUF/mmproj-F16.gguf\n" in text
+    assert "Qwen3.8-27B-GGUF/mmproj-BF16" not in text
+
+
+def test_sync_add_companions_respects_a_commented_out_mmproj(monkeypatch,
+                                                             tmp_path, capsys):
+    """A `#mmproj:` line keeps the model text-only on purpose."""
+    bonsai = ("    #mmproj: prism-ml__Ternary-Bonsai-2-27B-gguf/"
+              "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf\n")
+    cfg_path, lib = _sync_config(tmp_path, _vlm_entries(bonsai_extra=bonsai))
+    _vlm_library(monkeypatch, lib)
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "update:  deepseek-v4.1-flash-1017-ud-iq2" in out
+    assert "ternary-bonsai" not in out
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--no-reload"]) == 0
+    text = cfg_path.read_text()
+    assert text.endswith("Ternary-Bonsai-2-27B-PQ2_0.gguf\n" + bonsai)
+
+
+@pytest.mark.parametrize("quants", [
+    # One GLM model, converted under two arch spellings.
+    {"UD-Q2_K_XL/GLM-5.3-Flash-UD-Q2_K_XL-00001-of-00004.gguf": "glm5-next",
+     "old-glm5next/GLM-5.3-Flash-UD-IQ4_XS-00001-of-00005.gguf": "glm5next"},
+    {"UD-Q2_K_XL/GLM-5.3-Flash-UD-Q2_K_XL-00001-of-00004.gguf": "glm5-next",
+     "UD-IQ4_XS/GLM-5.3-UD-IQ4_XS-00001-of-00005.gguf": "glm5-next"},
+])
+def test_sync_add_companions_leaves_a_root_mmproj_over_unlike_entries(
+        monkeypatch, tmp_path, capsys, quants):
+    """A root mmproj over quant folders whose configured models differ in
+    name or arch joins none of them."""
+    repo = "unsloth__GLM-5.3-Flash-GGUF"
+    entries = "".join(f"  glm{i}:\n    path: {repo}/{rel}\n"
+                      for i, rel in enumerate(quants))
+    cfg_path, lib = _sync_config(tmp_path, "models:\n" + entries)
+    for rel in ["mmproj-F16.gguf", *quants]:
+        (lib / repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (lib / repo / rel).write_bytes(b"GGUF")
+
+    def classify(path):
+        name = os.path.basename(path)
+        arch = ("clip" if name.startswith("mmproj")
+                else quants[os.path.relpath(path, lib / repo)])
+        return srv.discovery._classify_meta(
+            {"general.architecture": arch, f"{arch}.expert_count": 256},
+            basename=name, path=path)
+
+    monkeypatch.setattr(srv.discovery, "classify_gguf", classify)
+    before = cfg_path.read_text()
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--no-reload"]) == 0
+    captured = capsys.readouterr()
+    assert "already in sync" in captured.out
+    assert "differ in name or arch" in captured.err
+    assert cfg_path.read_text() == before
+
+
+def _mmproj_beside(monkeypatch, lib, pairs):
+    """A scan that pairs each configured id in ``pairs`` with an mmproj
+    beside its model."""
+    for mid in pairs:
+        (lib / f"{mid}.gguf").write_bytes(b"x")
 
     def fake_scan(specs, dirs, **kw):
-        kw["stats"]["draft_pairs"] = {"muse": str(lib / "dflash-muse.gguf")}
+        kw["stats"]["mmproj_pairs"] = {mid: str(lib / f"mmproj-{mid}.gguf")
+                                       for mid in pairs}
         return []
 
     monkeypatch.setattr(srv.discovery, "scan_dirs", fake_scan)
-    assert srv._cmd_sync(["--config", str(cfg_path), "--dry-run"]) == 0
-    assert "update:  muse" in capsys.readouterr().out
-    assert load_config(cfg_path).models["muse"].draft_gguf is None
+
+
+@pytest.mark.parametrize("tail, held", [
+    ("#    mmproj: mmproj-old.gguf\n", True),
+    ("#  old:\n#    path: old.gguf\n#    mmproj: mmproj-old.gguf\n", False),
+])
+def test_sync_add_companions_reads_a_key_commented_out_at_column_0(
+        monkeypatch, tmp_path, capsys, tail, held):
+    """A comment toggle puts the `#` at column 0. A key commented out that
+    way keeps the entry text-only, and a plain sync names no mmproj for
+    it; a whole entry commented out below one speaks only for itself."""
+    from gmlx.config import load_config
+    cfg_path, lib = _sync_config(
+        tmp_path, f"models:\n  muse:\n    path: muse.gguf\n{tail}")
+    _mmproj_beside(monkeypatch, lib, ["muse"])
+    assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
+    assert ("hint:" in capsys.readouterr().out) is not held
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--no-reload"]) == 0
+    mmproj = load_config(cfg_path).models["muse"].mmproj
+    assert mmproj == (None if held else "mmproj-muse.gguf")
+    assert cfg_path.read_text().endswith(tail)
+
+
+def test_sync_add_companions_writes_into_a_flow_style_entry(monkeypatch,
+                                                            tmp_path):
+    from gmlx.config import load_config
+    cfg_path, lib = _sync_config(
+        tmp_path, "models:\n  muse: {path: muse.gguf, pin: true}\n")
+    _mmproj_beside(monkeypatch, lib, ["muse"])
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--no-reload"]) == 0
+    assert cfg_path.read_text().endswith(
+        "  muse: {path: muse.gguf, mmproj: mmproj-muse.gguf, pin: true}\n")
+    assert load_config(cfg_path).models["muse"].mmproj == "mmproj-muse.gguf"
+
+
+_HEAD = ("models:\n"
+         "  # Optional per-model keys:\n"
+         "  #   pin: true\n")
+_QWEN3 = "  # sampling (qwen3): t=0.6 top_p=0.95 top_k=20\n  qwen3:\n    path: qwen3.gguf\n"
+_GLM = "  # sampling (glm + gguf): t=1 top_p=0.95\n  glm:\n    path: glm.gguf\n    pin: true\n"
+_GEMMA = "  # sampling (gemma): t=1 top_p=0.95 top_k=64\n  gemma:\n    path: gemma.gguf\n"
+_ALIASES = "\n# Friendly request names:\naliases: {}\n"
+
+
+def _sync_sampling(monkeypatch, tmp_path, body, keep, new=()):
+    """Run sync-models on ``body`` with the files of the ``keep`` ids on
+    disk, and a scan that finds the ``new`` ids with their sampling
+    comment."""
+    from gmlx.config import ModelCfg as MC
+    cfg_path, lib = _sync_config(tmp_path, body)
+    for mid in keep:
+        (lib / f"{mid}.gguf").write_bytes(b"x")
+    notes = dict(new)
+    monkeypatch.setattr(srv.discovery, "scan_dirs", lambda specs, dirs, **kw: [
+        MC(id=mid, path=str(lib / f"{mid}.gguf")) for mid in notes])
+    monkeypatch.setattr(srv.discovery, "family_comment",
+                        lambda mc: notes.get(mc.id, ""))
+    assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
+    text = cfg_path.read_text()
+    srv.load_config(cfg_path)                     # the file still parses
+    return text.split("models:\n", 1)[1]
+
+
+@pytest.mark.parametrize("sep", ["", "\n"])
+@pytest.mark.parametrize("gone", ["qwen3", "glm", "gemma"])
+def test_sync_removes_the_sampling_comment_of_a_removed_entry(
+        monkeypatch, tmp_path, gone, sep):
+    """The comment discovery wrote above an entry goes with it, and the
+    next entry keeps its own, blank line and all."""
+    entries = {"qwen3": _QWEN3, "glm": _GLM, "gemma": _GEMMA}
+    body = sep.join(entries.values()) + _ALIASES
+    got = _sync_sampling(monkeypatch, tmp_path, _HEAD + body,
+                         [m for m in entries if m != gone])
+    # The blank line after a first entry stays below the block's head.
+    lead = sep if gone == "qwen3" else ""
+    del entries[gone]
+    assert got == (_HEAD.split("models:\n", 1)[1] + lead
+                   + sep.join(entries.values()) + _ALIASES)
+
+
+def test_sync_keeps_the_comments_the_user_wrote_above_a_removed_entry(
+        monkeypatch, tmp_path):
+    mine = "\n  # glm: my test quant\n  # sampling: t=0.3, as I serve it\n"
+    got = _sync_sampling(monkeypatch, tmp_path,
+                         _HEAD + _QWEN3 + mine + _GLM + _GEMMA,
+                         ["qwen3", "gemma"])
+    assert got == _HEAD.split("models:\n", 1)[1] + _QWEN3 + mine + _GEMMA
+
+
+def test_sync_writes_a_new_entry_directly_under_its_sampling_comment(
+        monkeypatch, tmp_path):
+    """New entries go at the top of the block, below its head comment, and
+    the entry that was first keeps its comment."""
+    got = _sync_sampling(
+        monkeypatch, tmp_path, _HEAD + _QWEN3 + _GLM, ["qwen3", "glm"],
+        new=[("ds41", "sampling (deepseek41): t=1 top_p=0.95"),
+             ("q36", "sampling (qwen3.6 + gguf): t=1")])
+    assert got == (_HEAD.split("models:\n", 1)[1]
+                   + "  # sampling (deepseek41): t=1 top_p=0.95\n"
+                   "  ds41:\n    path: ds41.gguf\n"
+                   "  # sampling (qwen3.6 + gguf): t=1\n"
+                   "  q36:\n    path: q36.gguf\n" + _QWEN3 + _GLM)
+
+
+def test_sync_that_removes_every_entry_leaves_a_file_that_parses(
+        monkeypatch, tmp_path):
+    got = _sync_sampling(monkeypatch, tmp_path,
+                         _HEAD + _QWEN3 + _GLM + _ALIASES, [])
+    assert got == _HEAD.split("models:\n", 1)[1] + _ALIASES
+
+
+_DS41 = "  # sampling (deepseek41): t=1 top_p=0.95\n  ds41:\n    path: ds41.gguf\n"
+
+
+@pytest.mark.parametrize("gap, above", [
+    ("\n", "  # my note on qwen3\n"),
+    ("\n", "  # sampling (qwen3): t=0.6 top_p=0.95 top_k=20\n" * 3),
+    ("\n", "  # sampling (qwen3): t=0.7\n  # my note on qwen3\n"),
+    ("\n  # More on the block.\n\n", "  # my note on qwen3\n"),
+    ("", ""),
+    ("", "  # sampling (qwen3): t=0.7\n  # my note on qwen3\n"),
+])
+def test_a_new_first_entry_takes_no_comment_of_the_entry_below(
+        monkeypatch, tmp_path, gap, above):
+    """The comment lines after the head's last blank line run into the
+    first entry and stay with it, below a new entry. With no blank line,
+    as gmlx init wrote the head up to 0.4.17, the lines from its first
+    sampling comment on do, and the rest of the head stays on top."""
+    head = _HEAD.split("models:\n", 1)[1]
+    got = _sync_sampling(
+        monkeypatch, tmp_path, _HEAD + gap + above + _QWEN3 + _GLM,
+        ["qwen3", "glm"], new=[("ds41", "sampling (deepseek41): t=1 top_p=0.95")])
+    assert got == head + gap + _DS41 + above + _QWEN3 + _GLM
+
+
+def _resync(monkeypatch, cfg_path, lib, new=(), image=None):
+    """Run sync-models again on ``cfg_path``. The scan finds the ``new``
+    ids with their sampling comment, and the image model ``image`` paired
+    with a text encoder file."""
+    from gmlx.config import ImageModelCfg, ModelCfg as MC
+    notes = dict(new)
+    for mid in notes:
+        (lib / f"{mid}.gguf").write_bytes(b"x")
+
+    def scan(specs, dirs, *, images, **kw):
+        if image:
+            images.append(ImageModelCfg(
+                id=image, path=str(lib / f"{image}.gguf"),
+                encoder=str(lib / "enc.gguf"), vae=str(lib / "vae.gguf")))
+        return [MC(id=mid, path=str(lib / f"{mid}.gguf")) for mid in notes]
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
+    monkeypatch.setattr(srv.discovery, "family_comment",
+                        lambda mc: notes.get(mc.id, ""))
+    assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
+    text = cfg_path.read_text()
+    srv.load_config(cfg_path)                     # the file still parses
+    return text.split("models:", 1)[1]
+
+
+def test_a_sync_after_one_that_removed_every_entry_keeps_the_block_head(
+        monkeypatch, tmp_path):
+    """Removing every entry leaves ``models:`` null with the block's head
+    under it. A later write that adds no model leaves it null, and the
+    next add goes below the head, blank line and all."""
+    head = _HEAD.split("models:", 1)[1]
+    image = "image_models:\n  z:\n    path: z.gguf\n    encoder: enc.gguf\n    vae: vae.gguf\n"
+    cfg_path, lib = _sync_config(tmp_path, _HEAD + "\n" + _QWEN3 + _ALIASES)
+    assert _resync(monkeypatch, cfg_path, lib) == head + _ALIASES
+    assert _resync(monkeypatch, cfg_path, lib, image="z") == (
+        head + _ALIASES + image)
+    assert _resync(monkeypatch, cfg_path, lib, new=[
+        ("ds41", "sampling (deepseek41): t=1 top_p=0.95")]) == (
+        head + "\n" + _DS41 + _ALIASES + image)
+    assert _resync(monkeypatch, cfg_path, lib, new=[
+        ("q36", "sampling (qwen3.6 + gguf): t=1")]) == (
+        head + "\n" + "  # sampling (qwen3.6 + gguf): t=1\n"
+        "  q36:\n    path: q36.gguf\n" + _DS41 + _ALIASES + image)
+
+
+@pytest.mark.parametrize("head, after", [
+    ("  # my models\n  # none yet\n", _ALIASES),
+    ("\n  # none yet\n", "\n# The end.\n"),
+    ("\n", "# Friendly request names:\naliases: {}\n"),
+    ("\n  # none yet\n  # more\n", ""),
+    ("\n  # Optional per-model keys:\n", "aliases: {}\n"),
+])
+def test_an_add_to_a_null_models_block_goes_below_its_comment(
+        monkeypatch, tmp_path, head, after):
+    """The lines indented under a null ``models:`` are the block's head;
+    the lines from the first one at column 0 on stay after the block. The
+    next add goes below the head too, with or without a blank line."""
+    cfg_path, lib = _sync_config(tmp_path, "models:" + head + after)
+    gap = "\n" if after.startswith("\n") else ""
+    assert _resync(monkeypatch, cfg_path, lib, new=[
+        ("ds41", "sampling (deepseek41): t=1 top_p=0.95")]) == (
+        head + gap + _DS41 + after)
+    assert _resync(monkeypatch, cfg_path, lib, new=[
+        ("q36", "sampling (qwen3.6 + gguf): t=1")]) == (
+        head + gap + "  # sampling (qwen3.6 + gguf): t=1\n"
+        "  q36:\n    path: q36.gguf\n" + _DS41 + after)
 
 
 def test_sync_never_drops_hf_entries_on_unreadable_cache(monkeypatch, tmp_path,
@@ -2450,6 +2876,135 @@ def test_register_downloads_never_edits_the_file_that_a_swapped_link_leads_to(
     err = capsys.readouterr().err
     assert "A container client can change where it leads" in err
     assert "sync-models" not in err
+
+
+_QWEN_REPO = "unsloth__Qwen3.8-27B-GGUF"
+_QWEN_HEADERS = {
+    "Qwen3.8-27B-UD-Q6_K_XL.gguf": {
+        "general.architecture": "qwen35", "general.basename": "Qwen3.8-27B",
+        "qwen35.nextn_predict_layers": 1, "qwen35.embedding_length": 5120},
+    "Qwen3.8-27B-DFlash2-Q8_0.gguf": {
+        "general.architecture": "dflash", "general.basename": "Qwen3.8-27B",
+        "general.base_model.0.name": "Qwen3.8 27B",
+        "dflash.selector_top_k": 16, "dflash.embedding_length": 5120},
+    "Qwen3.8-27B-DFlash-Q8_0.gguf": {
+        "general.architecture": "dflash", "dflash.embedding_length": 5120},
+}
+
+
+def _qwen_drafters(monkeypatch, lib):
+    """Qwen3.8-27B with a DFlash 2 drafter and a v1 one beside it, read by
+    a classifier that goes by file name."""
+    repo = lib / _QWEN_REPO
+    repo.mkdir()
+    for name in _QWEN_HEADERS:
+        (repo / name).write_bytes(b"GGUF")
+
+    def classify(path):
+        name = os.path.basename(path)
+        return srv.discovery._classify_meta(dict(_QWEN_HEADERS[name]),
+                                            basename=name, path=path)
+
+    monkeypatch.setattr(srv.discovery, "classify_gguf", classify)
+    monkeypatch.setattr(srv, "_reload_running", lambda path, skip: None)
+    return repo / "Qwen3.8-27B-DFlash2-Q8_0.gguf"
+
+
+def test_register_downloads_adds_a_pulled_drafter_after_the_path(
+        monkeypatch, tmp_path, capsys):
+    cfg_path, lib = _reg_config(
+        tmp_path,
+        f"models:\n  qwen:\n    path: {_QWEN_REPO}/Qwen3.8-27B-UD-Q6_K_XL.gguf\n"
+        "\n  # sampling (gguf): t=0.6\n  old:\n    path: old.gguf\n")
+    drafter = _qwen_drafters(monkeypatch, lib)
+    srv.register_downloads([str(drafter)], str(cfg_path))
+    assert (f"    path: {_QWEN_REPO}/Qwen3.8-27B-UD-Q6_K_XL.gguf\n"
+            f"    draft_gguf: {_QWEN_REPO}/Qwen3.8-27B-DFlash2-Q8_0.gguf\n"
+            "\n  # sampling (gguf): t=0.6\n  old:\n") in cfg_path.read_text()
+    out = capsys.readouterr().out
+    assert "registered Qwen3.8-27B-DFlash2-Q8_0.gguf as the drafter of qwen" in out
+    assert "--add-companions" not in out
+
+
+@pytest.mark.parametrize("drafter, out", [
+    ("Qwen3.8-27B-DFlash2-Q8_0.gguf", ""),        # a re-pull
+    ("Qwen3.8-27B-DFlash-Q8_0.gguf",
+     "Qwen3.8-27B-DFlash2-Q8_0.gguf is not registered as the drafter of qwen"),
+])
+def test_register_downloads_keeps_the_drafter_an_entry_names(
+        monkeypatch, tmp_path, capsys, drafter, out):
+    cfg_path, lib = _reg_config(
+        tmp_path,
+        f"models:\n  qwen:\n    path: {_QWEN_REPO}/Qwen3.8-27B-UD-Q6_K_XL.gguf\n"
+        f"    draft_gguf: {_QWEN_REPO}/{drafter}\n")
+    pulled = _qwen_drafters(monkeypatch, lib)
+    before = cfg_path.read_text()
+    srv.register_downloads([str(pulled)], str(cfg_path))
+    assert cfg_path.read_text() == before
+    got = capsys.readouterr().out
+    assert (out in got) if out else got == ""
+
+
+def test_a_drafter_pairing_prints_once_and_only_for_a_scanned_model(
+        monkeypatch, tmp_path, capsys):
+    """The scan names a drafter it pairs with a model it adds once, though
+    the DFlash 2 pass pairs it again. A configured model gets no such line:
+    the sync writes its drafter only with --add-companions, and says so."""
+    cfg_path, lib = _sync_config(tmp_path, "models: {}\n")
+    drafter = _qwen_drafters(monkeypatch, lib)
+    assert srv._cmd_sync(["--config", str(cfg_path), "--dry-run"]) == 0
+    err = capsys.readouterr().err
+    assert err.count("drafter paired") == 1
+    assert f"drafter paired (speculative on for qwen3.8-27b-ud-q6): {drafter}" in err
+    cfg_path.write_text(
+        f"server:\n  model_dirs:\n    - {lib}\n"
+        f"models:\n  qwen:\n    path: {_QWEN_REPO}/Qwen3.8-27B-UD-Q6_K_XL.gguf\n")
+    assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
+    got = capsys.readouterr()
+    assert "drafter paired" not in got.err
+    assert got.out.count("hint:") == 1
+    assert (f"  hint:    qwen  (drafter {_QWEN_REPO}/Qwen3.8-27B-DFlash2-Q8_0.gguf "
+            "pairs with it; --add-companions adds it)") in got.out
+
+
+def test_a_drafter_an_entry_names_gets_no_line_to_configure_it(
+        monkeypatch, tmp_path, capsys):
+    """An entry names the v1 drafter, and the DFlash 2 one beside it
+    outranks it in the scan. The sync leaves the entry as it is, with no
+    line that tells the user to configure the drafter it names."""
+    v1 = f"{_QWEN_REPO}/Qwen3.8-27B-DFlash-Q8_0.gguf"
+    cfg_path, lib = _sync_config(
+        tmp_path,
+        f"models:\n  qwen:\n    path: {_QWEN_REPO}/Qwen3.8-27B-UD-Q6_K_XL.gguf\n"
+        f"    draft_gguf: {v1}\n")
+    _qwen_drafters(monkeypatch, lib)
+    before = cfg_path.read_text()
+    assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
+    assert cfg_path.read_text() == before
+    assert "configure via draft_gguf" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("held", [False, True])
+def test_register_downloads_names_an_mmproj_it_leaves_out(monkeypatch, tmp_path,
+                                                          capsys, held):
+    """A pulled mmproj for a model already in the config stays out of its
+    entry, and the pull says how to add it, unless the entry has the key
+    commented out."""
+    bonsai = ("    #mmproj: prism-ml__Ternary-Bonsai-2-27B-gguf/"
+              "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf\n") if held else ""
+    cfg_path, lib = _reg_config(tmp_path, _vlm_entries(bonsai_extra=bonsai))
+    _vlm_library(monkeypatch, lib)
+    monkeypatch.setattr(srv, "_reload_running", lambda path, skip: None)
+    before = cfg_path.read_text()
+    srv.register_downloads(
+        [str(lib / "prism-ml__Ternary-Bonsai-2-27B-gguf"
+             / "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf")], str(cfg_path))
+    assert cfg_path.read_text() == before
+    out = capsys.readouterr().out
+    assert out == ("" if held else
+                   "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf pairs with "
+                   "ternary-bonsai-2-27b-pq2 as its mmproj: gmlx sync-models "
+                   "--add-companions adds it\n")
 
 
 def test_register_downloads_skips_outside_model_dirs(monkeypatch, tmp_path):

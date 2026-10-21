@@ -364,6 +364,56 @@ def test_streamed_engram_tables_do_not_change_the_output():
     assert bool(mx.all(got == ref))
 
 
+def _shared_table_twin(model, args):
+    """The same weights laid out as the PLE-keyed conversion stores them:
+    one table, offsets into it, and q * k folded into one gate."""
+    from mlx.utils import tree_flatten
+
+    n_t = len(args.engram_layer_ids)
+    per = len(args.engram_offsets) // n_t
+    base = [sum(args.engram_table_rows[:t]) for t in range(n_t)]
+    twin_args = _args(
+        engram_shared_table=True, engram_folded_gate=True,
+        engram_table_rows=[sum(args.engram_table_rows)],
+        engram_offsets=[o + base[i // per]
+                        for i, o in enumerate(args.engram_offsets)])
+    twin = Model(twin_args)
+    layers = [model.model.layers[i].engram for i in args.engram_layer_ids]
+    weights = [(k, v) for k, v in tree_flatten(model.parameters())
+               if ".engram.embed." not in k and ".engram.q_weight" not in k
+               and ".engram.k_weight" not in k]
+    weights.append(("model.engram_embed.weight",
+                    mx.concatenate([e.embed.weight for e in layers])))
+    weights += [(f"model.layers.{i}.engram.gate_weight", e.q_weight * e.k_weight)
+                for i, e in zip(args.engram_layer_ids, layers)]
+    twin.load_weights(weights, strict=True)
+    mx.eval(twin.parameters())
+    return twin, twin_args
+
+
+def test_a_shared_table_and_folded_gate_match_per_layer_tables():
+    args = _args()
+    model = _randomized(Model(args))
+    twin, twin_args = _shared_table_twin(model, args)
+    toks = mx.array(
+        np.random.default_rng(5).integers(0, args.vocab_size, (1, 9)),
+        dtype=mx.int32)
+    caches = model.make_cache(), twin.make_cache()
+    for chunk in (toks[:, :7], toks[:, 7:8], toks[:, 8:]):
+        ref = model(chunk, cache=caches[0])
+        got = twin(chunk, cache=caches[1])
+        mx.eval(ref, got)
+        assert bool(mx.all(got == ref))
+
+    import gmlx.stream.table_stream as ts
+
+    tabs = ts.streamable_tables_for(twin)
+    assert [(t.param_path, t.gguf_name) for t, _ in tabs] == [
+        ("model.engram_embed", "per_layer_token_embd.weight")]
+    assert ts.streamable_table_names("deepseek41").fullmatch(
+        "per_layer_token_embd.weight")
+
+
 # --- fused hyper-connection route ------------------------------------------
 
 

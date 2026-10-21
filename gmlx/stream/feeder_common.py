@@ -37,40 +37,71 @@ def copy_experts(dst, src, pairs, stride: int) -> None:
                   src[e * stride:(e + 1) * stride])
 
 
-def read_range_aligned(fd, mv, off: int, file_size: int) -> None:
-    """``read_range`` with every pread page-aligned. The kernel services
-    an F_NOCACHE read at an unaligned offset through the page cache, and
-    that path can wedge under pressure (see decode_feeder). The aligned
-    middle lands in ``mv`` directly; the head and tail partial pages go
-    through a scratch page."""
+# Size of a bounce buffer, the largest read through one. The copy out of
+# it costs far less than the read.
+BOUNCE_BYTES = 16 << 20
+_bounce = threading.local()
+
+
+def _bounce_buffer(nbytes: int) -> memoryview:
+    """This thread's page-aligned bounce buffer, ``nbytes`` long."""
+    buf = getattr(_bounce, "buf", None)
+    if buf is None or len(buf) < nbytes:
+        buf = _bounce.buf = mmap.mmap(-1, max(nbytes, mmap.PAGESIZE))
+    return memoryview(buf)[:nbytes]
+
+
+def read_range_aligned(fd, mv, off: int, file_size: int,
+                       bounce: queue.Queue | None = None) -> None:
+    """``read_range`` with every pread on the kernel's direct path: the
+    file offset and the destination address page-aligned. An F_NOCACHE
+    read that misses either is served through the page cache. A prefill
+    ring pass then fills the cache at drive speed and the kernel
+    compresses other memory to make room, and that path can wedge under
+    pressure (see decode_feeder). The whole pages land in ``mv`` directly
+    when ``mv`` and ``off`` share a page phase; the rest goes through a
+    page-aligned bounce buffer: one taken for the call from ``bounce``, a
+    queue of ``kq.arena_alloc`` (array, memoryview) pairs, or else this
+    thread's own. A ring slot is page-aligned and a GGUF stack seldom
+    starts on a page boundary, so in practice the ring bounces every
+    byte."""
+    mv = memoryview(mv).cast("B")
     n = len(mv)
     if n == 0:
         return
-    page = mmap.PAGESIZE
     end = off + n
+    if end > file_size:
+        raise OSError(
+            f"read of {n} bytes at offset {off} runs past the end of the "
+            f"file ({file_size} bytes)")
+    page = mmap.PAGESIZE
     a = off & ~(page - 1)
     b = min((end + page - 1) & ~(page - 1), file_size)
-    if a == off and b == end:
-        read_range(fd, mv, off)
+    dst = np.frombuffer(mv, dtype=np.uint8)
+    pieces = [(a, b)]
+    if (dst.ctypes.data - off) % page == 0:
+        d0 = (off + page - 1) & ~(page - 1)
+        d1 = end & ~(page - 1)
+        if d1 > d0:
+            read_range(fd, mv[d0 - off:d1 - off], d0)
+            pieces = [(p0, p1) for p0, p1 in ((a, d0), (d1, b)) if p1 > p0]
+    if not pieces:
         return
-    head = off - a
-    a_in = a + page if head else a
-    if a_in >= end:
-        buf = bytearray(b - a)
-        read_range(fd, memoryview(buf), a)
-        mv[:] = buf[head:head + n]
-        return
-    if head:
-        buf = bytearray(page)
-        read_range(fd, memoryview(buf), a)
-        mv[:a_in - off] = buf[head:]
-    b_in = end & ~(page - 1)
-    if b_in > a_in:
-        read_range(fd, mv[a_in - off:b_in - off], a_in)
-    if b_in < end:
-        buf = bytearray(b - b_in)
-        read_range(fd, memoryview(buf), b_in)
-        mv[b_in - off:] = buf[:end - b_in]
+    held = bounce.get() if bounce is not None else None
+    try:
+        step = len(held[1]) if held is not None else BOUNCE_BYTES
+        for p0, p1 in pieces:
+            for pos in range(p0, p1, step):
+                stop = min(pos + step, p1)
+                buf = (held[1][:stop - pos] if held is not None
+                       else _bounce_buffer(stop - pos))
+                read_range(fd, buf, pos)
+                lo, hi = max(pos, off), min(stop, end)
+                np.copyto(dst[lo - off:hi - off],
+                          np.frombuffer(buf, dtype=np.uint8)[lo - pos:hi - pos])
+    finally:
+        if held is not None:
+            bounce.put(held)
 
 
 def lock_pages(mv) -> tuple[int, int] | None:

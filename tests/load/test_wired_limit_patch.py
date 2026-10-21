@@ -145,3 +145,30 @@ def test_neutralize_lowers_a_raised_wired_limit(monkeypatch, capsys):
     assert "wired limit lowered from 100.0 GB to 0" in capsys.readouterr().out
     _neutralize_wired_limit_sweep()          # idempotent: no second lowering
     assert calls == [0]
+
+
+def test_the_vlm_context_does_not_warn_with_the_sweep_off(fake_mx, monkeypatch,
+                                                          capsys):
+    """A streamed VLM pins the wired limit, and the copied mlx-vlm context
+    must not warn against it on every turn. A resident model warns on its
+    first turn only, as on the text path."""
+    common = importlib.import_module("gmlx._vendor.mlx_vlm.generate.common")
+    monkeypatch.setattr(common, "_large_model_warned", False)
+    model = _over_budget_model()
+    stock = mx.set_wired_limit
+
+    def _no_sweep(*_a, **_k):
+        return 0
+
+    _no_sweep._kq_no_sweep = True
+    monkeypatch.setattr(mx, "set_wired_limit", _no_sweep)
+    with common.wired_limit(model):
+        pass
+    assert capsys.readouterr().out == ""
+
+    monkeypatch.setattr(mx, "set_wired_limit", stock)
+    for _ in range(3):
+        with common.wired_limit(model):
+            pass
+    out = capsys.readouterr().out
+    assert out.count("close to the maximum recommended size") == 1

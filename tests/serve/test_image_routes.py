@@ -670,8 +670,8 @@ def test_a_shared_encoder_encodes_as_a_step_of_the_chat_engine(monkeypatch):
     monkeypatch.setattr(app_mod, "get_cached_model", lambda *a, **k: None)
     monkeypatch.setattr(runtime_mod, "runtime",
                         SimpleNamespace(response_generator=rg))
-    monkeypatch.setattr(api, "_borrowed", lambda pair, spec, gguf=None: SimpleNamespace(
-        model=pair[0], tokenizer=pair[1]))
+    monkeypatch.setattr(api, "_borrowed", lambda pair, spec, gguf=None, processor=None:
+                        SimpleNamespace(model=pair[0], tokenizer=pair[1]))
     import gmlx.image.text_encoder as text_encoder
     monkeypatch.setattr(text_encoder, "encoder_spec", lambda fam: "SPEC")
     calls = {}

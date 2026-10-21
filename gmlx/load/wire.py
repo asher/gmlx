@@ -63,17 +63,25 @@ def load_gguf_wire_bytes(
     meta: dict = {}
     tensor_shapes: dict = {}
     for i, shard in enumerate(shards):
-        if skip:
-            try:
+        try:
+            if skip:
                 s_arrays, s_codecs, s_meta, s_shapes = kq.load_gguf(
                     shard, zero_copy, skip)
-            except TypeError as e:
-                raise RuntimeError(
-                    f"this model has a tensor past the device buffer ceiling "
-                    f"({', '.join(sorted(skip))}); reading it needs an "
-                    f"mlx-kquant with load_gguf(skip=...)") from e
-        else:
-            s_arrays, s_codecs, s_meta, s_shapes = kq.load_gguf(shard, zero_copy)
+            else:
+                s_arrays, s_codecs, s_meta, s_shapes = kq.load_gguf(
+                    shard, zero_copy)
+        except TypeError as e:
+            if not skip:
+                raise
+            raise RuntimeError(
+                f"this model has a tensor past the device buffer ceiling "
+                f"({', '.join(sorted(skip))}); reading it needs an "
+                f"mlx-kquant with load_gguf(skip=...)") from e
+        except RuntimeError as e:
+            _raise_if_oversize(shard, skip, e)
+            raise
+        if "stq1_0" in s_codecs.values():
+            _check_type43(shard, s_codecs, skip)
         arrays.update(s_arrays)
         kquant_meta.update(s_codecs)
         tensor_shapes.update(s_shapes)
@@ -91,6 +99,43 @@ def load_gguf_wire_bytes(
 
     arch = meta.get("general.architecture")
     return arrays, kquant_meta, arch, meta, tensor_shapes
+
+
+def _check_type43(shard: str, codecs: dict[str, str], skip) -> None:
+    """GGML type id 43 is STQ1_0 or MXFP8, told apart by the bytes a tensor
+    spans. An mlx-kquant that predates MXFP8 reads every id-43 tensor as
+    STQ1_0; refuse rather than decode an MXFP8 tensor as ternary weights.
+    A skipped table is read from the file and decoded in gmlx."""
+    from .headerscan import scan_gguf
+
+    skipped = set(skip or ())
+    for t in scan_gguf(shard, array_limit=0).tensors:
+        if t.name in skipped:
+            continue
+        if t.type_name == "MXFP8" and codecs.get(t.name) == "stq1_0":
+            raise RuntimeError(
+                f"{t.name} is an MXFP8 tensor, which this mlx-kquant reads "
+                f"as STQ1_0 (both use GGML type 43); upgrade mlx-kquant")
+
+
+def _raise_if_oversize(shard: str, skip, err: Exception) -> None:
+    """Name the tensor behind a failed Metal allocation: one past the
+    device buffer ceiling that no file-backed table covers."""
+    if "maximum allowed buffer size" not in str(err):
+        return
+    import os
+
+    from gmlx.stream.table_pread import max_buffer_bytes, oversize_names
+
+    big = [n for n in oversize_names(shard) if n not in set(skip or ())]
+    if not big:
+        return
+    cap = max_buffer_bytes() or 0
+    raise RuntimeError(
+        f"{os.path.basename(shard)}: {big[0]} is larger than the "
+        f"{cap / 2**30:.1f} GiB the GPU holds in one buffer. gmlx reads "
+        f"only an arch's lookup tables (engram, PLE) from the file; this "
+        f"tensor needs a smaller quant or a machine with more memory") from err
 
 
 def _oversize_table_names(shards: list[str], arch: str | None) -> list[str]:

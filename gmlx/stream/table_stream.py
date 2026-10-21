@@ -62,9 +62,13 @@ class ArchTables(NamedTuple):
 
 
 def _deepseek_v41_tiers(model, prefix: str = "") -> tuple[StreamableTable, ...]:
-    """One engram table per engram layer."""
+    """One engram table per engram layer, or one table they all share."""
     root = _resolve(model, prefix.rstrip(".")) if prefix else model
-    layers = getattr(getattr(root, "model", root), "layers", None) or ()
+    inner = getattr(root, "model", root)
+    if getattr(inner, "engram_embed", None) is not None:
+        return (StreamableTable(f"{prefix}model.engram_embed",
+                                "per_layer_token_embd.weight"),)
+    layers = getattr(inner, "layers", None) or ()
     return tuple(
         StreamableTable(f"{prefix}model.layers.{i}.engram.embed",
                         f"blk.{i}.engram_embd.weight")
@@ -78,6 +82,8 @@ def _deepseek_v41_vl_tiers(model) -> tuple[StreamableTable, ...]:
     return _deepseek_v41_tiers(model, "language_model.")
 
 
+_DEEPSEEK_V41_TABLES = r"blk\.\d+\.engram_embd\.weight|per_layer_token_embd\.weight"
+
 # model_type -> tables, cheapest-to-stream first; implemented archs only
 # (embed_tokens is the next candidate, not wired yet).
 STREAMABLE_TABLES: dict[str, ArchTables] = {
@@ -89,12 +95,12 @@ STREAMABLE_TABLES: dict[str, ArchTables] = {
     ),
     "deepseek_v41": ArchTables(
         arch="deepseek41",
-        name_pattern=r"blk\.\d+\.engram_embd\.weight",
+        name_pattern=_DEEPSEEK_V41_TABLES,
         tiers=_deepseek_v41_tiers,
     ),
     "deepseek_v41_vl": ArchTables(
         arch="deepseek41",
-        name_pattern=r"blk\.\d+\.engram_embd\.weight",
+        name_pattern=_DEEPSEEK_V41_TABLES,
         tiers=_deepseek_v41_vl_tiers,
     ),
 }
@@ -308,7 +314,12 @@ def _wrapped_class(cls, kquant: bool):
                 gathered = mx.take(
                     self["weight"], x, axis=0, stream=table_stream())
                 flat = gathered.reshape(-1, gathered.shape[-1])
-                deq = kq.dequantize(flat, self["scales"], self.kquant_type)
+                # As in KQuantEmbedding: a gather-only codec (mxfp8) can
+                # pass the float16 range, so it decodes to the output dtype.
+                dt = (None if kq.codec_has_matmul(self.kquant_type)
+                      else self.out_dtype)
+                deq = kq.dequantize(flat, self["scales"], self.kquant_type,
+                                    dtype=dt)
                 return deq.reshape(
                     *gathered.shape[:-1], self.dims).astype(self.out_dtype)
 

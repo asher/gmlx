@@ -1,10 +1,12 @@
 """DeepSeek-V4.1-Flash-Vision loader plumbing: mmproj remap (fused wqkv and
 w1 split), VLM config synth, the GGUF-only processor (block expansion), and
-the container build. CPU-only, synthetic metadata; the real-mmproj remap
-check runs only when the local file is present."""
+the container build, for the ds4 encoder GGUF and the llama.cpp clip
+conversion. CPU-only, synthetic metadata; the real-mmproj remap checks run
+only when the local files are present."""
 
 import math
 import os
+import re
 import sys
 
 import numpy as np
@@ -16,14 +18,21 @@ sys.path.insert(0, os.path.dirname(__file__))
 from gmlx.load.vlm import (
     DEEPSEEK41V_IMAGE_TOKEN,
     DEEPSEEK41V_IMAGE_TOKEN_ID,
+    UnsupportedVLMError,
     _synthesize_deepseek41v_processor,
     build_vlm_model,
     remap_vision_arrays,
+    resolve_vlm_model_type,
     synthesize_vlm_config,
 )
 from gmlx.models.deepseek_v41 import image_block as ib
 
-from test_config_synth import _DEEPSEEK41_SHAPES, _deepseek41_meta
+from test_config_synth import (
+    _DEEPSEEK41_SHAPES,
+    _PLE_SHAPES,
+    _deepseek41_meta,
+    _deepseek41_ple_meta,
+)
 
 ARCH = "deepseek4-vision"
 MM_META = {
@@ -43,9 +52,34 @@ MM_META = {
     f"{ARCH}.rope.freq_base": 10000.0,
 }
 
+# The same model as the llama.cpp clip conversion writes it (projector
+# deepseek41v): the budget, the width cap and the rope base are clip.cpp
+# constants rather than keys.
+CLIP_META = {
+    "general.architecture": "clip",
+    "general.type": "mmproj",
+    "clip.projector_type": "deepseek41v",
+    "clip.has_vision_encoder": True,
+    "clip.use_silu": True,
+    "clip.vision.block_count": 2,
+    "clip.vision.embedding_length": 16,
+    "clip.vision.feed_forward_length": 24,
+    "clip.vision.attention.head_count": 2,
+    "clip.vision.attention.layer_norm_epsilon": 1e-6,
+    "clip.vision.patch_size": 14,
+    "clip.vision.projection_dim": 64,
+    "clip.vision.projector.scale_factor": 3,
+    "clip.vision.image_min_pixels": 295936,
+    "clip.vision.image_size": 672,
+    "clip.vision.image_mean": [0.5, 0.5, 0.5],
+    "clip.vision.image_std": [0.5, 0.5, 0.5],
+}
+
 MMPROJ = os.path.expanduser(
     "~/llm/gguf/antirez__deepseek-v4.1-flash-gguf/"
     "DeepSeek-V4.1-Flash-Vision.gguf")
+CLIP_MMPROJ = os.path.expanduser(
+    "~/llm/gguf/unsloth__DeepSeek-V4.1-Flash-1017-GGUF/mmproj-BF16.gguf")
 
 
 def _fake_mmproj_arrays(depth=2, dim=16, ffn=24, out=64, patch=14):
@@ -74,11 +108,57 @@ def _fake_mmproj_arrays(depth=2, dim=16, ffn=24, out=64, patch=14):
     return a
 
 
-def _config():
+# llama.cpp's conversion of the reference names (DeepseekV4FlashVisionModel
+# and the gguf-py tensor map): the patch Linear is stored as a conv, w1 is
+# chunked gate then up, and wqkv is written as it is.
+_CLIP_TOP = {
+    "vision.patch_embed.proj.bias": "v.patch_embd.bias",
+    "vision.norm.weight": "v.post_ln.weight",
+    "aligner.w1.weight": "mm.1.weight",
+    "aligner.w1.bias": "mm.1.bias",
+    "aligner.w2.weight": "mm.2.weight",
+    "aligner.w2.bias": "mm.2.bias",
+    "image_start": "v.token_embd.img_start",
+    "image_newline": "v.image_newline",
+    "image_end": "v.token_embd.img_end",
+}
+_CLIP_BLK = {"attn.wqkv": "attn_qkv", "attn.wo": "attn_out",
+             "mlp.w2": "ffn_down", "norm1": "ln1", "norm2": "ln2"}
+
+
+def _as_converted(arrays, patch=14):
+    out = {}
+    for name, arr in arrays.items():
+        if name == "vision.patch_embed.proj.weight":
+            out["v.patch_embd.weight"] = arr.reshape(
+                arr.shape[0], 3, patch, patch)
+            continue
+        if name in _CLIP_TOP:
+            out[_CLIP_TOP[name]] = arr
+            continue
+        bid, rest = re.fullmatch(r"vision\.blocks\.(\d+)\.(.+)", name).groups()
+        sub, leaf = rest.rsplit(".", 1)
+        if sub == "mlp.w1":
+            gate, up = mx.split(arr, 2, axis=0)
+            out[f"v.blk.{bid}.ffn_gate.{leaf}"] = gate
+            out[f"v.blk.{bid}.ffn_up.{leaf}"] = up
+            continue
+        out[f"v.blk.{bid}.{_CLIP_BLK[sub]}.{leaf}"] = arr
+    return out
+
+
+def _random_mmproj_arrays():
+    rng = np.random.default_rng(7)
+    return {k: mx.array(rng.standard_normal(v.shape).astype(np.float32))
+            for k, v in _fake_mmproj_arrays().items()}
+
+
+def _config(mm_meta=None, llm_meta=None, shapes=None):
     from gmlx.models.deepseek_v41.vlm_model import ensure_registered
     ensure_registered()
     return synthesize_vlm_config(
-        "deepseek_v41_vl", _deepseek41_meta(), _DEEPSEEK41_SHAPES, MM_META)
+        "deepseek_v41_vl", llm_meta or _deepseek41_meta(),
+        shapes or _DEEPSEEK41_SHAPES, mm_meta or MM_META)
 
 
 def test_remap_covers_the_whole_tower_and_nothing_else():
@@ -118,6 +198,74 @@ def test_fused_rows_split_in_reference_order():
         want = w[i * dim:(i + 1) * dim]
         assert mx.array_equal(out[f"vision_tower.blocks.0.attn.{proj}.weight"],
                               want)
+
+
+def test_the_clip_conversion_resolves_onto_the_v41_container():
+    assert resolve_vlm_model_type("deepseek41", CLIP_META) == "deepseek_v41_vl"
+    with pytest.raises(UnsupportedVLMError, match="deepseek41v.*'deepseek4'"):
+        resolve_vlm_model_type("deepseek4", CLIP_META)
+
+
+def test_clip_names_remap_to_the_same_weights():
+    """The clip layout splits the fused qkv rows and flattens the patch
+    conv into the very arrays the reference names give."""
+    ref_arrays = _random_mmproj_arrays()
+    want, skipped, _ = remap_vision_arrays(ref_arrays, "deepseek_v41_vl")
+    assert skipped == []
+    clip_arrays = _as_converted(ref_arrays)
+    assert clip_arrays["v.patch_embd.weight"].shape == (16, 3, 14, 14)
+    got, skipped, kq = remap_vision_arrays(
+        clip_arrays, "deepseek_v41_vl", mm_meta=CLIP_META)
+    assert skipped == [] and kq == {}
+    assert sorted(got) == sorted(want)
+    for k in want:
+        assert got[k].shape == want[k].shape, k
+        assert mx.array_equal(got[k], want[k]), k
+
+
+def test_clip_keys_give_the_same_config():
+    want = _config()
+    got = _config(CLIP_META)
+    assert got["vision_config"] == want["vision_config"]
+    assert got == want
+    # no token id key in a clip file: the vocab lookup, then the pin
+    assert got["image_token_id"] == DEEPSEEK41V_IMAGE_TOKEN_ID
+    meta = dict(_deepseek41_meta())
+    meta["tokenizer.ggml.tokens"] = ["a", "b", DEEPSEEK41V_IMAGE_TOKEN, "c"]
+    assert _config(CLIP_META, meta)["image_token_id"] == 2
+
+
+def test_processor_from_clip_metadata_alone():
+    tok, bos = _tokenizer()
+    cfg = _config(CLIP_META)
+    proc = _synthesize_deepseek41v_processor(
+        tok, CLIP_META, {"vocab_size": 8, "image_token_id": 7,
+                         "vision_config": cfg["vision_config"]})
+    ip = proc.image_processor
+    assert (ip.patch_size, ip.downsample_ratio, ip.max_n_token,
+            ip.min_pixels, ip.max_wh_ratio) == (14, 3, 1024, 295936, None)
+    feat = proc(images=[_image()], text=f"{bos}{DEEPSEEK41V_IMAGE_TOKEN}")
+    n_llm_h, n_llm_w = (int(v) for v in feat["image_meta"][0].tolist()[2:])
+    ids = [int(t) for t in feat["input_ids"][0].tolist()]
+    assert len(ids) == 1 + ib.block_length(n_llm_h, n_llm_w)
+    # without a vision_config the patch size comes from the clip key
+    bare = _synthesize_deepseek41v_processor(
+        tok, CLIP_META, {"vocab_size": 8, "image_token_id": 7})
+    assert bare.image_processor.patch_size == 14
+
+
+def test_a_shared_table_build_streams_the_table_under_the_text_tower():
+    """unsloth's 1017 text files hold one engram table; under the container
+    it sits at language_model.model.engram_embed."""
+    import gmlx.stream.table_stream as ts
+
+    cfg = _config(CLIP_META, _deepseek41_ple_meta(), _PLE_SHAPES)
+    assert cfg["text_config"]["engram_shared_table"]
+    model, _ = build_vlm_model(cfg)
+    tabs = ts.streamable_tables_for(model)
+    assert [(t.param_path, t.gguf_name) for t, _ in tabs] == [
+        ("language_model.model.engram_embed", "per_layer_token_embd.weight")]
+    assert [m for _, m in tabs] == [model.language_model.model.engram_embed]
 
 
 def test_config_synth_fields():
@@ -357,6 +505,35 @@ def test_real_mmproj_remaps_onto_the_tower():
     assert vc["max_n_token"] == 1024 and vc["max_wh_ratio"] is None
     assert out["vision_tower.patch_embed.proj.weight"].shape == (1024, 588)
     assert out["vision_tower.blocks.31.attn.q_proj.weight"].shape == (1024, 1024)
+    assert out["vision_tower.blocks.31.mlp.up_proj.weight"].shape == (2816, 1024)
+    assert out["vision_tower.aligner.w1.weight"].shape == (5120, 9216)
+    assert out["image_newline"].shape == (5120,)
+    assert len(out) == 426
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not os.path.exists(CLIP_MMPROJ),
+                    reason="local clip mmproj absent")
+def test_real_clip_mmproj_remaps_onto_the_tower():
+    from gmlx.load.wire import load_gguf_wire_bytes
+    arrays, _codecs, _arch, mm_meta, _shapes = load_gguf_wire_bytes(
+        CLIP_MMPROJ, zero_copy=True, expect_quant=False)
+    assert resolve_vlm_model_type("deepseek41", mm_meta) == "deepseek_v41_vl"
+    out, skipped, kq = remap_vision_arrays(
+        arrays, "deepseek_v41_vl", mm_meta=mm_meta)
+    assert skipped == [] and kq == {}
+    cfg = synthesize_vlm_config(
+        "deepseek_v41_vl", _deepseek41_meta(), _DEEPSEEK41_SHAPES, mm_meta)
+    vc = cfg["vision_config"]
+    assert (vc["depth"], vc["hidden_size"], vc["num_heads"]) == (32, 1024, 16)
+    assert vc["intermediate_size"] == 2816 and vc["patch_size"] == 14
+    assert vc["out_hidden_size"] == 5120 and vc["downsample_ratio"] == 3
+    assert vc["max_n_token"] == 1024 and vc["max_wh_ratio"] is None
+    assert vc["min_pixels"] == 295936 and vc["rope_theta"] == 10000.0
+    assert vc["rms_norm_eps"] == pytest.approx(1e-6)
+    assert out["vision_tower.patch_embed.proj.weight"].shape == (1024, 588)
+    assert out["vision_tower.blocks.31.attn.q_proj.weight"].shape == (1024, 1024)
+    assert out["vision_tower.blocks.31.attn.v_proj.bias"].shape == (1024,)
     assert out["vision_tower.blocks.31.mlp.up_proj.weight"].shape == (2816, 1024)
     assert out["vision_tower.aligner.w1.weight"].shape == (5120, 9216)
     assert out["image_newline"].shape == (5120,)

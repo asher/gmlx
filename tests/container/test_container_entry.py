@@ -9,6 +9,8 @@ from gmlx and needs no conftest, so that job runs it with --noconftest.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import shutil
 import signal
@@ -633,10 +635,28 @@ def _state(pid: int) -> str:
     return done.stdout.strip()[:1]
 
 
+@contextlib.contextmanager
+def _no_stall():
+    """Holds the lock of scripts/stress_tests.py's staller, so no stall is
+    under way. The kernel drops a stop sent to a process that a stall holds
+    stopped, such as the SIGTSTP of a Ctrl-Z, and the stall's SIGCONT would
+    undo a stop sent before it. The terminal posts that SIGTSTP before the
+    write of the Ctrl-Z returns, so the lock covers it."""
+    path = os.environ.get("GMLX_STRESS_LOCK")
+    if not path:
+        yield
+        return
+    with open(path, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
 def _halt(proc) -> None:
-    """Stops ``proc``, and returns once it has stopped."""
-    os.kill(proc.pid, signal.SIGSTOP)
-    _, status = os.waitpid(proc.pid, os.WUNTRACED)
+    """Stops ``proc``, and returns once it has stopped. The staller leaves a
+    stopped process alone, so it stays stopped."""
+    with _no_stall():
+        os.kill(proc.pid, signal.SIGSTOP)
+        _, status = os.waitpid(proc.pid, os.WUNTRACED)
     assert os.WIFSTOPPED(status), status
 
 
@@ -1214,7 +1234,8 @@ def test_ctrl_z_and_sigstop_cannot_suspend_the_client(entry):
     init, master, (client, main), out = _in_terminal(
         entry, INIT, "sh", "-c", "echo pid $$ $PPID; read x; kill -STOP $$; echo resumed; exit 5")
     try:
-        os.write(master, b"\x1a")                 # Ctrl-Z
+        with _no_stall():
+            os.write(master, b"\x1a")             # Ctrl-Z
         out = _read_until(master, RESUMED + b"\r\n", seen=out)
         os.write(master, b"\n")
         out = _read_until(master, b"resumed\r\n", seen=out)
@@ -1233,7 +1254,8 @@ def test_ctrl_z_cannot_suspend_the_main_entry_while_it_waits_for_copies(entry):
         assert copy.stdout.readline() == b"joined\n"
         os.write(master, b"\n")
         _read_until(master, b"stays open")
-        os.write(master, b"\x1a")                 # Ctrl-Z now reaches the entry's group
+        with _no_stall():
+            os.write(master, b"\x1a")             # Ctrl-Z now reaches the entry's group
         _read_until(master, b"[launch] Ctrl-Z cannot suspend this session. Press Ctrl-C twice "
                             b"to end it, which stops the other copy.\r\n")
         _send(copy)

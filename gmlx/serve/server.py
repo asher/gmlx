@@ -536,6 +536,11 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
                          "--no-recursive for a shallow scan.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Show what would change without writing the config.")
+    ap.add_argument("--add-companions", action="store_true",
+                    help="Also add an mmproj or drafter the scan pairs with a "
+                         "model already in the config, when its entry has no "
+                         "such key, live or commented out. No drafter goes to "
+                         "an entry set to speculative: false.")
     ap.add_argument("--no-reload", action="store_true",
                     help="Don't SIGHUP a server already running this config to pick "
                          "up the change.")
@@ -605,7 +610,7 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
         kept.append(mid)
         if rp:
             known_paths.add(rp)
-            known_models[rp] = mc
+            known_models[rp] = _resolved_drafter(mc, cfg.model_dirs)
     if missing_roots:
         print(f"warning: model_dirs root(s) not on disk right now: "
               f"{', '.join(missing_roots)} - their entries are kept unverified",
@@ -626,8 +631,10 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
             restream[mid] = fresh
 
     # Discover, skipping anything already configured (by id or by resolved path).
-    # `draft_pairs`: sibling drafters that pair into an entry already configured.
-    discovered, draft_pairs, images = [], {}, []
+    # `draft_pairs` and `mmproj_pairs` are the drafters and mmprojs that pair
+    # into an entry already configured that can take one. Without
+    # --add-companions they are only named, as hints.
+    discovered, draft_pairs, mmproj_pairs, images = [], {}, {}, []
     if dirs:
         specs = [DiscoverSpec(dir=d, recursive=recursive) for d in dirs]
         stats = {}
@@ -637,7 +644,13 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
             known_paths=known_paths | _image_paths(cfg),
             known_models=known_models, progress=True, stats=stats,
             images=images, encoder_ids=_encoder_ids(known_models))
-        draft_pairs = stats.get("draft_pairs") or {}
+        draft_pairs = _open_pairs(path, "draft_gguf",
+                                  stats.get("draft_pairs"))
+        mmproj_pairs = _open_pairs(path, "mmproj", stats.get("mmproj_pairs"))
+    hints = {}
+    if not a.add_companions:
+        hints = _companion_hints(draft_pairs, mmproj_pairs)
+        draft_pairs, mmproj_pairs = {}, {}
     if scan_cache:
         known_refs = {mc.path for mc in cfg.models.values()
                       if str(mc.path).startswith("hf:")}
@@ -658,11 +671,16 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
         print(f"  add:     {im.id}  (image, {discovery._rel(im.path, dirs)})")
     for mid, dpath in draft_pairs.items():
         print(f"  update:  {mid}  (draft_gguf: {discovery._rel(dpath, dirs)})")
+    for mid, mpath in mmproj_pairs.items():
+        print(f"  update:  {mid}  (mmproj: {discovery._rel(mpath, dirs)})")
     for mid in restream:
         print(f"  update:  {mid}  (stream: experts dropped, the model fits "
               "the memory budget now)")
+    for (mid, what), cpath in hints.items():
+        print(f"  hint:    {mid}  ({what} {discovery._rel(cpath, dirs)} pairs "
+              "with it; --add-companions adds it)")
     if (not removed and not discovered and not draft_pairs and not images
-            and not restream):
+            and not restream and not mmproj_pairs):
         print("  (already in sync)")
         return 0
     if a.dry_run:
@@ -681,14 +699,14 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
     try:
         _apply_sync(path, removed, discovered, dirs, new_roots=new_roots,
                     draft_pairs=draft_pairs, images=images,
-                    restream=restream)
+                    restream=restream, mmproj_pairs=mmproj_pairs)
     except ConfigWriteError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    n_updated = len(draft_pairs) + len(restream) + len(mmproj_pairs)
     changed = (f"\nupdated {path} (+{len(discovered) + len(images)} / "
                f"-{len(removed)}"
-               + (f" / ~{len(draft_pairs) + len(restream)}"
-                  if draft_pairs or restream else "") + ")")
+               + (f" / ~{n_updated}" if n_updated else "") + ")")
     print(changed)
     _reload_running(path, skip=a.no_reload)
     return 0
@@ -770,6 +788,106 @@ def _marked_stream_ids(path) -> list:
     return out
 
 
+def _resolved_drafter(mc, model_dirs):
+    """A copy of ``mc`` whose ``draft_gguf`` is the absolute path the scan
+    names the file by, so a pairing that is in place already reads as one.
+    A value that does not resolve stays as written."""
+    if not mc.draft_gguf:
+        return mc
+    try:
+        rp = resolve_path(mc.draft_gguf, model_dirs)
+    except ConfigError:
+        return mc
+    return dataclasses.replace(mc, draft_gguf=rp)
+
+
+def _companion_hints(draft_pairs, mmproj_pairs) -> dict:
+    """{(id, "drafter" or "mmproj"): path} for the companions a sync leaves
+    out without --add-companions."""
+    hints = {(mid, "mmproj"): p for mid, p in (mmproj_pairs or {}).items()}
+    hints.update({(mid, "drafter"): p for mid, p in (draft_pairs or {}).items()})
+    return dict(sorted(hints.items()))
+
+
+def _open_pairs(path, key, pairs) -> dict:
+    """The ``pairs`` (id -> companion path) whose entry in ``path`` can take
+    ``key``. A key already there is the user's, and a commented-out line
+    such as ``#mmproj:`` keeps the entry without one on purpose. A drafter
+    also skips an entry set to ``speculative: false``, which it would turn
+    on."""
+    hold = _ids_with_key(path, key)
+    if key == "draft_gguf":
+        hold |= _ids_speculative_off(path)
+    return {mid: p for mid, p in (pairs or {}).items() if mid not in hold}
+
+
+def _ids_speculative_off(path) -> set:
+    """The ids of ``path``'s model entries set to ``speculative: false``."""
+    from ruamel.yaml import YAML
+
+    try:
+        doc = YAML().load(Path(path).read_text())
+    except Exception:
+        return set()
+    models = doc.get("models") if isinstance(doc, dict) else None
+    if not isinstance(models, dict):
+        return set()
+    return {str(mid) for mid, ent in models.items()
+            if isinstance(ent, dict) and ent.get("speculative") is False}
+
+
+def _ids_with_key(path, key) -> set:
+    """The ids of ``path``'s model entries that carry ``key``, live or as a
+    commented-out line below the entry's key: ``#mmproj: ...`` indented
+    past the entry's column, or ``#    mmproj: ...`` with the ``#`` at
+    column 0, as a comment toggle writes it."""
+    import re
+
+    from ruamel.yaml import YAML
+    from ruamel.yaml.comments import CommentedMap
+
+    try:
+        text = Path(path).read_text()
+        doc = YAML().load(text)
+    except Exception:
+        return set()
+    models = doc.get("models") if isinstance(doc, CommentedMap) else None
+    if not isinstance(doc, CommentedMap) or not isinstance(
+            models, CommentedMap) or not models:
+        return set()
+    out = {str(mid) for mid, ent in models.items()
+           if isinstance(ent, dict) and key in ent}
+    lines = text.splitlines()
+    # ruamel files a comment line under whichever key precedes it, so the
+    # entry's span in the text decides.
+    starts: list[tuple[int, int, str]] = sorted(
+        (int(models.lc.key(mid)[0]), int(models.lc.key(mid)[1]), str(mid))
+        for mid in models)
+    block = doc.lc.key("models")[0]
+    after = [doc.lc.key(k)[0] for k in doc if doc.lc.key(k)[0] > block]
+    stop = min(after) if after else len(lines)
+    pat = re.compile(r"^(\s*)#(\s*)(.*)$")
+    is_key = re.compile(rf"{re.escape(key)}\s*:")
+    for i, (line, col, mid) in enumerate(starts):
+        end = starts[i + 1][0] if i + 1 < len(starts) else stop
+        for raw in lines[line + 1:end]:
+            m = pat.match(raw)
+            if not m:
+                continue
+            lead = len(m.group(1))
+            # Where the text stood before a `#` went in front of it.
+            text = len(m.group(2))
+            if lead == 0 and text <= col:
+                break          # a commented-out entry of its own starts here
+            # A `#` at the entry's column is a note between entries, such
+            # as the hint lines `gmlx init` writes.
+            if is_key.match(m.group(3)) and (
+                    lead > col or (lead == 0 and text > col)):
+                out.add(mid)
+                break
+    return out
+
+
 def _drop_key_keep_trailing(ent, key) -> None:
     """Delete ``key`` from a ruamel map. Its end-of-line comment token also
     holds the lines after it (a blank line, the next entry's comment), so
@@ -791,20 +909,369 @@ def _drop_key_keep_trailing(ent, key) -> None:
         prev[2] = CommentToken("\n" + rest, CommentMark(0), None)
 
 
+def _insert_key_keep_trailing(ent, after, key, value,
+                              note: str | None = None) -> None:
+    """Insert ``key: value  # note`` after ``after`` in a ruamel map, with
+    no comment when ``note`` is None. The lines that rode ``after``'s
+    end-of-line comment token (a blank line, the next entry's comment)
+    move onto the new key, so they stay below it. A flow-style map
+    (``{path: ..., pin: true}``) gets no comment: it would land inside the
+    braces."""
+    from ruamel.yaml.error import CommentMark
+    from ruamel.yaml.tokens import CommentToken
+
+    item = ent.ca.items.get(after)
+    tok = item[2] if item and len(item) > 2 else None
+    rest = ""
+    if tok is not None and "\n" in tok.value:
+        head, rest = tok.value.split("\n", 1)
+        if rest:
+            if head.strip():
+                tok.value = head + "\n"
+            else:
+                item[2] = None
+    ent.insert(list(ent).index(after) + 1, key, value)
+    if note is not None and not ent.fa.flow_style():
+        try:
+            column = ent.lc.key(after)[1] + len(f"{key}: {value}") + 2
+        except Exception:  # noqa: BLE001 - a map built in memory has no positions
+            column = None
+        ent.yaml_add_eol_comment(note, key, column=column)
+    if rest:
+        new = ent.ca.items.setdefault(key, [None, None, None, None])
+        if new[2] is not None:
+            new[2].value = new[2].value.rstrip("\n") + "\n" + rest
+        else:
+            new[2] = CommentToken("\n" + rest, CommentMark(0), None)
+
+
+# The comment lines above an entry of ``models:``, and the lines after the
+# block, live in one of three places in the ruamel tree: the map's own head
+# (above the first key), the end-of-line token of the previous entry's last
+# line, or the key's before-comment list. These helpers read them as text
+# lines, each with its indentation and newline, and write them back to one
+# place: the head for the first entry, the key's list for the others.
+
+def _tail_slot(models, key):
+    """``(ca.items, key, index)`` of the comment slot after the last line
+    of entry ``key``: the last key's end-of-line token, nested maps and
+    lists followed down to their last item."""
+    from ruamel.yaml.comments import CommentedMap, CommentedSeq
+
+    holder, k, node = models, key, models[key]
+    while (isinstance(node, (CommentedMap, CommentedSeq)) and len(node)
+           and not node.fa.flow_style()):
+        holder = node
+        k = list(node)[-1] if isinstance(node, CommentedMap) else len(node) - 1
+        node = node[k]
+    return holder.ca.items, k, 0 if isinstance(holder, CommentedSeq) else 2
+
+
+def _token_lines(tokens, skip_first=False) -> list[str]:
+    """The text lines of comment tokens. ``skip_first`` drops what the
+    first line of an end-of-line token holds, the comment on the line."""
+    lines = []
+    for n, tok in enumerate(tokens):
+        if tok is None:
+            continue
+        text = tok.value
+        if n == 0 and skip_first:
+            text = text.split("\n", 1)[1] if "\n" in text else ""
+        elif text.strip():
+            text = " " * tok.column + text
+        lines += text.splitlines(keepends=True)
+    return lines
+
+
+def _comment_tokens(lines) -> list:
+    from ruamel.yaml.error import CommentMark
+    from ruamel.yaml.tokens import CommentToken
+
+    out = []
+    for line in lines:
+        body = line.lstrip(" ")
+        col = len(line) - len(body) if body.strip() else 0
+        out.append(CommentToken(body if body.strip() else "\n",
+                                CommentMark(col), None))
+    return out
+
+
+def _take_rest(models, key) -> list[str]:
+    """Remove and return the lines after entry ``key``'s last line."""
+    items, k, i = _tail_slot(models, key)
+    row = items.get(k)
+    tok = row[i] if row and len(row) > i else None
+    if tok is None:
+        return []
+    lines = _token_lines([tok], skip_first=True)
+    head = tok.value.split("\n", 1)[0]
+    if head.strip():
+        tok.value = head + "\n"
+    else:
+        row[i] = None
+    return lines
+
+
+def _set_rest(models, key, lines) -> None:
+    from ruamel.yaml.error import CommentMark
+    from ruamel.yaml.tokens import CommentToken
+
+    _take_rest(models, key)
+    if not lines:
+        return
+    items, k, i = _tail_slot(models, key)
+    row = items.setdefault(k, [None, None, None, None])
+    if row[i] is not None:
+        row[i].value = row[i].value.rstrip("\n") + "\n" + "".join(lines)
+    else:
+        row[i] = CommentToken("\n" + "".join(lines), CommentMark(0), None)
+
+
+def _head_slots(doc, models):
+    """The row and indexes of the ``models:`` line's end-of-line token and
+    of the comment list above the first key. The dump reads the row that
+    ``doc`` keeps for the ``models`` key when there is one."""
+    row = doc.ca.items.get("models")
+    if row is not None:
+        return row, 2, 3
+    if models.ca.comment is None:
+        models.ca.comment = [None, None]
+    return models.ca.comment, 0, 1
+
+
+def _take_head(doc, models) -> list[str]:
+    """Remove and return the comment lines above the first key of
+    ``models``, below the ``models:`` line."""
+    row, e, h = _head_slots(doc, models)
+    eol = row[e]
+    lines = _token_lines([eol], skip_first=True) + _token_lines(row[h] or [])
+    if eol is not None:
+        head = eol.value.split("\n", 1)[0]
+        row[e] = eol if head.strip() else None
+        if head.strip():
+            eol.value = head + "\n"
+    _set_head(doc, models, [])
+    return lines
+
+
+def _set_head(doc, models, lines) -> None:
+    row, e, h = _head_slots(doc, models)
+    row[h] = _comment_tokens(lines) or None
+    if row is not models.ca.comment:
+        models.ca.comment = [row[e], row[h]]
+
+
+def _take_before(models, key) -> list[str]:
+    row = models.ca.items.get(key)
+    if not row or not row[1]:
+        return []
+    lines = _token_lines(row[1])
+    row[1] = None
+    return lines
+
+
+def _take_above(doc, models, i) -> list[str]:
+    """Remove and return the comment lines above entry ``i``."""
+    keys = list(models)
+    lines = (_take_head(doc, models) if i == 0
+             else _take_rest(models, keys[i - 1]))
+    return lines + _take_before(models, keys[i])
+
+
+def _put_above(doc, models, i, lines) -> None:
+    keys = list(models)
+    if i == 0:
+        _set_head(doc, models, lines)
+        return
+    row = models.ca.items.setdefault(keys[i], [None, None, None, None])
+    row[1] = _comment_tokens(lines) or None
+
+
+def _joined(a, b) -> list[str]:
+    """``a`` then ``b``, one blank line where both meet with one."""
+    if a and b and not a[-1].strip() and not b[0].strip():
+        b = b[1:]
+    return a + b
+
+
+def _drop_entry(doc, models, key) -> None:
+    """Delete entry ``key``. The sampling comment discovery wrote above it
+    goes with it; the user's lines above it and the lines above the next
+    entry stay where they were."""
+    keys = list(models)
+    i = keys.index(key)
+    above = [line for line in _take_above(doc, models, i)
+             if not discovery.is_family_comment(line)]
+    after = _take_rest(models, key)
+    if i + 1 < len(keys):
+        after += _take_before(models, keys[i + 1])
+    del models[key]
+    models.ca.items.pop(key, None)
+    lines = _joined(above, after)
+    if i + 1 < len(keys):
+        _put_above(doc, models, i, lines)
+    elif i > 0:
+        _set_rest(models, keys[i - 1], lines)
+    else:
+        _set_head(doc, models, lines)
+
+
+def _place_entry(doc, models, pos, key, entry, note) -> None:
+    """Insert the new entry ``key`` at ``pos`` with the sampling comment
+    ``note`` directly above it. The comment that stood above the entry now
+    after it moves along with that entry."""
+    mine = [f"  # {note}\n"] if note else []
+    keys = list(models)
+    if pos >= len(keys):
+        trailing = _take_rest(models, keys[-1]) if keys else []
+        models.insert(pos, key, entry)
+        if keys:
+            _put_above(doc, models, pos, mine)
+            _set_rest(models, key, trailing)
+        else:
+            _set_head(doc, models, _take_head(doc, models) + mine)
+        return
+    above = _take_above(doc, models, pos)
+    stay = 0
+    if pos == 0:
+        # The head holds the block's own comment, then the first entry's:
+        # the lines after its last blank line, or with no blank line, the
+        # lines from its first sampling comment on.
+        blank = [n + 1 for n, line in enumerate(above) if not line.strip()]
+        if blank:
+            stay = blank[-1]
+        else:
+            stay = next((n for n, line in enumerate(above)
+                         if discovery.is_family_comment(line)), len(above))
+    models.insert(pos, key, entry)
+    _put_above(doc, models, pos, above[:stay] + mine)
+    _put_above(doc, models, pos + 1, above[stay:])
+
+
+def _open_models_block(doc):
+    """Make a null or missing ``models:`` block an empty map and return it.
+    The comment lines indented under the null value become the map's head.
+    The lines from the first one at column 0 on stay above the next key,
+    or at the end of the file."""
+    from ruamel.yaml.comments import CommentedMap
+
+    keys = list(doc)
+    row = doc.ca.items.get("models")
+    lines = []
+    if row is not None and row[2] is not None:
+        eol = row[2]
+        lines = _token_lines([eol], skip_first=True)
+        first = eol.value.split("\n", 1)[0]
+        if first.strip():
+            eol.value = first + "\n"
+        else:
+            row[2] = None
+    i = keys.index("models") + 1 if "models" in keys else len(keys)
+    nxt = keys[i] if i < len(keys) else None
+    if nxt is not None:
+        lines += _take_before(doc, nxt)
+    elif "models" in keys and doc.ca.end:
+        lines += _token_lines(doc.ca.end)
+        doc.ca.end = []
+    cut = next((n for n, line in enumerate(lines)
+                if line.strip() and not line.startswith(" ")), len(lines))
+    head, rest = lines[:cut], lines[cut:]
+    gap = bool(head) and not head[-1].strip()
+    while head and not head[-1].strip():
+        rest.insert(0, head.pop())
+    if head and gap:
+        head.append("\n")
+    if rest and nxt is not None:
+        doc.ca.items.setdefault(nxt, [None, None, None, None])[1] = (
+            _comment_tokens(rest))
+    elif rest:
+        doc.ca.end = _comment_tokens(rest)
+    models = CommentedMap()
+    doc["models"] = models
+    _set_head(doc, models, head)
+    return models
+
+
+def _empty_models_block(doc, models) -> None:
+    """Write an emptied ``models:`` block that has comment lines as a null
+    value under them. The dump would put the lines above the ``{}`` it
+    writes for an empty map, where the file no longer parses."""
+    from ruamel.yaml.error import CommentMark
+    from ruamel.yaml.tokens import CommentToken
+
+    lines = _take_head(doc, models)
+    if not lines:
+        return
+    doc["models"] = None
+    row = doc.ca.items.setdefault("models", [None, None, None, None])
+    if row[2] is not None:
+        row[2].value = row[2].value.rstrip("\n") + "\n" + "".join(lines)
+    else:
+        row[2] = CommentToken("\n" + "".join(lines), CommentMark(0), None)
+
+
 def _apply_sync(path, removed, discovered, dirs, new_roots=(),
-                draft_pairs=None, images=(), restream=None) -> None:
+                draft_pairs=None, images=(), restream=None,
+                mmproj_pairs=None,
+                companion_note: str | None = discovery.COMPANION_MARK_NOTE,
+                ) -> None:
     """Rewrite ``path``'s ``models:`` block in place, preserving comments and
     hand-edits (ruamel round-trip): delete ``removed`` ids, splice in the newly
     ``discovered`` models. Untouched entries keep their exact formatting.
     ``new_roots`` are --models-dir override roots absent from
     ``server.model_dirs``; they're appended so the new entries resolve.
-    ``draft_pairs`` (configured id -> drafter path) adds a ``draft_gguf`` key
-    to that entry; an entry that already has one keeps its value. ``images``
-    (paired :class:`ImageModelCfg`) go under ``image_models:``. ``restream``
-    (id -> a fresh scan's ``stream`` and ``speculative``) drops the
-    ``stream:`` key discovery wrote, and turns speculative decoding back
-    on where the fresh scan would."""
+    ``images`` (paired :class:`ImageModelCfg`) go under ``image_models:``.
+    ``restream`` (id -> a fresh scan's ``stream`` and ``speculative``)
+    drops the ``stream:`` key discovery wrote, and turns speculative
+    decoding back on where the fresh scan would. ``draft_pairs`` and
+    ``mmproj_pairs`` (configured id -> companion path) add a ``draft_gguf``
+    or ``mmproj`` key to an entry that has none, with the end-of-line
+    comment ``companion_note``; a drafter skips an entry set to
+    ``speculative: false``."""
     from ruamel.yaml.comments import CommentedMap
+
+    def edit_models(doc, models):
+        for mid in removed:
+            if mid in models:
+                _drop_entry(doc, models, mid)
+        pos = 0
+        for mid, fresh in (restream or {}).items():
+            ent = models.get(mid)
+            if not isinstance(ent, dict) or ent.get("stream") != "experts":
+                continue
+            if (fresh["speculative"] and "speculative" not in ent
+                    and not ent.get("draft_gguf")):
+                ent.insert(list(ent).index("stream"), "speculative", True)
+            _drop_key_keep_trailing(ent, "stream")
+        for mc in discovered:
+            entry = CommentedMap(discovery.model_to_entry(mc, dirs))
+            if "stream" in entry:
+                entry.yaml_add_eol_comment(discovery.STREAM_MARK_NOTE, "stream")
+            # The scan skips configured ids, so each one is new: it goes at
+            # the top of the block, below its head comment.
+            _place_entry(doc, models, pos, mc.id, entry,
+                         discovery.family_comment(mc))
+            pos += 1
+        # A companion goes after `path` (a drafter after an `mmproj`), as
+        # discovery writes an entry: the last key's comment token holds the
+        # next entry's comment, so a key appended there would land below it.
+        for mid, dpath in (draft_pairs or {}).items():
+            ent = models.get(mid)
+            if (isinstance(ent, dict) and "path" in ent
+                    and "draft_gguf" not in ent
+                    and ent.get("speculative") is not False):
+                _insert_key_keep_trailing(
+                    ent, "mmproj" if "mmproj" in ent else "path",
+                    "draft_gguf", discovery._rel(dpath, dirs), companion_note)
+        for mid, mpath in (mmproj_pairs or {}).items():
+            ent = models.get(mid)
+            if (isinstance(ent, dict) and "path" in ent
+                    and "mmproj" not in ent):
+                _insert_key_keep_trailing(ent, "path", "mmproj",
+                                          discovery._rel(mpath, dirs),
+                                          companion_note)
+        if not models:
+            _empty_models_block(doc, models)
 
     def mutate(doc):
         if new_roots and discovered:
@@ -819,45 +1286,14 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
             for d in new_roots:
                 if d not in roots:
                     roots.append(d)
+        # A null or missing block stays as it is unless the sync adds to it.
         models = doc.get("models")
-        if not isinstance(models, dict):
-            models = CommentedMap()
-            doc["models"] = models
-        for mid in removed:
-            if mid in models:
-                del models[mid]
         if discovered:
             discovery.drop_no_models_comment(doc)
-        pos = 0
-        for mid, fresh in (restream or {}).items():
-            ent = models.get(mid)
-            if not isinstance(ent, dict) or ent.get("stream") != "experts":
-                continue
-            if (fresh["speculative"] and "speculative" not in ent
-                    and not ent.get("draft_gguf")):
-                ent.insert(list(ent).index("stream"), "speculative", True)
-            _drop_key_keep_trailing(ent, "stream")
-        for mc in discovered:
-            entry = CommentedMap(discovery.model_to_entry(mc, dirs))
-            if "stream" in entry:
-                entry.yaml_add_eol_comment(discovery.STREAM_MARK_NOTE, "stream")
-            if mc.id in models:
-                models[mc.id] = entry          # update keeps its position
-            else:
-                # Insert at the top of the block: appending would land the
-                # entry after trailing comments, such as the commented hints
-                # that older `gmlx init` files carry, which ride the last
-                # entry's comment token.
-                models.insert(pos, mc.id, entry)
-                pos += 1
-            note = discovery.family_comment(mc)
-            if note:
-                models.yaml_set_comment_before_after_key(
-                    mc.id, before=note, indent=2)
-        for mid, dpath in (draft_pairs or {}).items():
-            ent = models.get(mid)
-            if isinstance(ent, dict) and not ent.get("draft_gguf"):
-                ent["draft_gguf"] = discovery._rel(dpath, dirs)
+            if not isinstance(models, dict):
+                models = _open_models_block(doc)
+        if isinstance(models, dict):
+            edit_models(doc, models)
         if images:
             block = doc.get("image_models")
             if not isinstance(block, dict):
@@ -912,7 +1348,7 @@ def register_downloads(paths: list, config_path=None) -> None:
                 continue
             known_paths.add(rp)
             if rp:
-                known_models[rp] = mc
+                known_models[rp] = _resolved_drafter(mc, cfg.model_dirs)
         # Scan the parent dirs (mmproj pairing needs the siblings), then keep
         # only models whose file is one we just downloaded - a neighbouring
         # file the user left unregistered stays unregistered.
@@ -930,12 +1366,28 @@ def register_downloads(paths: list, config_path=None) -> None:
         images = [im for im in images if os.path.abspath(im.path) in wanted]
         # Only a drafter from this download may change a configured entry: a
         # file the user left beside a model stays unregistered.
-        pairs = {mid: dp for mid, dp in (stats.get("draft_pairs") or {}).items()
-                 if os.path.abspath(dp) in wanted}
+        pulled = {mid: dp for mid, dp in (stats.get("draft_pairs") or {}).items()
+                  if os.path.abspath(dp) in wanted}
+        pairs = _open_pairs(path, "draft_gguf", pulled)
+        for mid, dp in pulled.items():
+            if mid not in pairs:
+                print(f"{os.path.basename(dp)} is not registered as the "
+                      f"drafter of {mid}: its entry in {path} has a "
+                      "draft_gguf key or speculative: false")
+        # The companions beside a configured entry that a pull leaves out:
+        # a drafter it did not download, and an mmproj.
+        beside = {mid: dp for mid, dp in (stats.get("draft_pairs") or {}).items()
+                  if mid not in pulled}
+        hints = _companion_hints(
+            _open_pairs(path, "draft_gguf", beside),
+            _open_pairs(path, "mmproj", stats.get("mmproj_pairs")))
+        for (mid, what), cp in hints.items():
+            print(f"{os.path.basename(cp)} pairs with {mid} as its {what}: "
+                  "gmlx sync-models --add-companions adds it")
         if not newly and not pairs and not images:
             return                     # already configured (a re-pull) - quiet
         _apply_sync(path, [], newly, cfg.model_dirs, draft_pairs=pairs,
-                    images=images)
+                    images=images, companion_note=None)
         for mid, dp in pairs.items():
             print(f"registered {os.path.basename(dp)} as the drafter of "
                   f"{mid} in {path}")

@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 
-from .preflight import NATIVE_FP_TYPES, NATIVE_TYPES, SUPPORTED_QUANT_TYPES
+from .preflight import loadable_type
 
 _HF_HOST = "https://huggingface.co"
 
@@ -116,6 +116,14 @@ def _parse_header(buf: bytes) -> tuple[str | None, str | None, list, int | None]
     otherwise carry their base model's arch and would grade as loadable);
     ``hadamard`` is ``prism.hadamard.version`` when the weights were stored
     under a Hadamard rotation."""
+    arch, gguf_type, entries, hadamard, _ = _parse_header_full(buf)
+    return arch, gguf_type, [(e[0], e[1]) for e in entries], hadamard
+
+
+def _parse_header_full(buf: bytes):
+    """``_parse_header`` plus each tensor's value count and data offset, and
+    the data section's start: ``(arch, gguf_type, [(name, ggml_type,
+    n_elems, offset), ...], hadamard, (data_start, alignment))``."""
     r = _Reader(buf)
     if r.raw(4) != b"GGUF":
         raise RemoteError("not a GGUF file (bad magic)")
@@ -130,6 +138,7 @@ def _parse_header(buf: bytes) -> tuple[str | None, str | None, list, int | None]
     arch: str | None = None
     gguf_type: str | None = None
     hadamard: int | None = None
+    alignment = 32
     for _ in range(n_kv):
         key = r.string()
         vtype = r.u32()
@@ -140,19 +149,24 @@ def _parse_header(buf: bytes) -> tuple[str | None, str | None, list, int | None]
         elif key == b"prism.hadamard.version" and vtype in _GGUF_UINT_FMT:
             hadamard = struct.unpack(
                 _GGUF_UINT_FMT[vtype], r.raw(_GGUF_SCALAR_SIZE[vtype]))[0]
+        elif key == b"general.alignment" and vtype in _GGUF_UINT_FMT:
+            alignment = struct.unpack(
+                _GGUF_UINT_FMT[vtype], r.raw(_GGUF_SCALAR_SIZE[vtype]))[0] or 32
         else:
             r.skip_value(vtype)
 
-    tensors = []
+    entries = []
     for _ in range(n_tensors):
         name = r.string().decode("utf-8", "replace")
         ndim = r.u32()
+        n_elems = 1
         for _ in range(ndim):
-            r.u64()
+            n_elems *= r.u64()
         ttype = r.u32()
-        r.u64()                                  # data offset (ignored)
-        tensors.append((name, ttype))
-    return arch, gguf_type, tensors, hadamard
+        offset = r.u64()
+        entries.append((name, ttype, n_elems, offset))
+    data_start = (r.i + alignment - 1) // alignment * alignment
+    return arch, gguf_type, entries, hadamard, (data_start, alignment)
 
 
 def _type_name(ttype: int) -> str:
@@ -180,16 +194,29 @@ class HeaderReport:
         return not self.unsupported
 
 
-def classify_header(buf: bytes) -> HeaderReport:
-    """Build a codec report from a header prefix (re-raises :class:`_NeedMore`)."""
-    arch, gguf_type, tensors, hadamard = _parse_header(buf)
+def classify_header(buf: bytes, total: int | None = None) -> HeaderReport:
+    """Build a codec report from a header prefix (re-raises :class:`_NeedMore`).
+    ``total`` is the file's size when known; it tells a type-43 tensor at the
+    end of the file apart (STQ1_0 or MXFP8)."""
+    from gmlx.load.headerscan import TYPE_43, type_43_format, type_43_spans
+
+    arch, gguf_type, tensors, hadamard, (data_start, alignment) = \
+        _parse_header_full(buf)
+    spans = type_43_spans([(t[1], t[3]) for t in tensors],
+                          total - data_start if total else None)
     hist: dict[str, int] = {}
     unsup: dict[str, int] = {}
-    for _name, ttype in tensors:
-        tn = _type_name(ttype)
+    for i, (_name, ttype, n_elems, _off) in enumerate(tensors):
+        if ttype == TYPE_43:
+            span, at_end = spans[i]
+            try:
+                tn = type_43_format(n_elems, span, alignment, at_end=at_end)
+            except ValueError:
+                tn = "TYPE_43"
+        else:
+            tn = _type_name(ttype)
         hist[tn] = hist.get(tn, 0) + 1
-        if (tn not in SUPPORTED_QUANT_TYPES and tn not in NATIVE_TYPES
-                and tn not in NATIVE_FP_TYPES):
+        if not loadable_type(tn):
             unsup[tn] = unsup.get(tn, 0) + 1
     return HeaderReport(arch, hist, unsup, len(tensors), gguf_type,
                         hadamard=hadamard)
@@ -457,6 +484,6 @@ def fetch_header(url: str, *, get=None,
     """The codec report of a remote GGUF, from its header prefix alone."""
     buf, total = fetch_header_bytes(url, get=get, initial=initial,
                                     max_bytes=max_bytes)
-    report = classify_header(buf)
+    report = classify_header(buf, total)
     report.total_bytes = total
     return report

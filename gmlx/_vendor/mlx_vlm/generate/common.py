@@ -212,9 +212,15 @@ def maybe_quantize_kv_cache(
             )
 
 
+# gmlx: the large-model warning prints once per process, as on the text
+# path (gmlx.stream.wired_limit), not on every turn.
+_large_model_warned = False
+
+
 @contextlib.contextmanager
 def wired_limit(model: nn.Module, streams: Optional[List[mx.Stream]] = None):
     """Temporarily set the wired memory limit for generation."""
+    global _large_model_warned
     if not mx.metal.is_available():
         yield
         return
@@ -231,11 +237,20 @@ def wired_limit(model: nn.Module, streams: Optional[List[mx.Stream]] = None):
                 mx.synchronize()
         return
 
-    model_bytes = tree_reduce(
-        lambda acc, x: acc + x.nbytes if isinstance(x, mx.array) else acc, model, 0
-    )
     max_rec_size = mx.device_info()["max_recommended_working_set_size"]
+    # gmlx: a model that streams its experts pins the wired limit (see
+    # gmlx.stream.wired_limit), and a warning sized against the limit it
+    # no longer raises means nothing, once per turn.
+    from gmlx.upstream.patching import wrapped_with
+
+    quiet = _large_model_warned or wrapped_with(mx.set_wired_limit,
+                                                "_kq_no_sweep")
+    model_bytes = 0 if quiet else (
+        tree_reduce(
+            lambda acc, x: acc + x.nbytes if isinstance(x, mx.array) else acc,
+            model, 0))
     if model_bytes > 0.9 * max_rec_size:
+        _large_model_warned = True
         model_mb = model_bytes // 2**20
         max_rec_mb = max_rec_size // 2**20
         print(

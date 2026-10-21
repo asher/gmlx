@@ -1849,8 +1849,17 @@ def _run_vlm(args) -> int:
         )
     if args.max_kv_size is not None:
         extra["max_kv_size"] = args.max_kv_size
-    if args.prefill_step_size is not None:
-        extra["prefill_step_size"] = args.prefill_step_size
+    # A text tower that streams its experts reads every expert once per
+    # chunk, so it takes the wider streamed chunk, as the text path does.
+    from gmlx.stream import expert_streaming
+
+    step, defaulted = expert_streaming._resolve_prefill_step(
+        getattr(model, "language_model", model), args.prefill_step_size)
+    if defaulted and args.verbose:
+        print(f"[prefill] streaming model: chunk size defaults to {step} "
+              "(--prefill-step-size overrides)")
+    if step is not None:
+        extra["prefill_step_size"] = step
 
     # ^T closes an open thinking block: mlx-vlm's generate_step applies extra
     # logits_processors with the mlx-lm (tokens, logits) contract, so the

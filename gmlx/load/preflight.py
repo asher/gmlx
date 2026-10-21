@@ -29,6 +29,9 @@ SUPPORTED_QUANT_TYPES = frozenset({
     "PQ2_0", "PTQ1_0", "Q2_0",
     "MXFP4", "NVFP4",
 })
+# Formats gmlx decodes itself, for the lookup-table rows it reads from the
+# file. MXFP8 only backs gathers, never a matmul.
+TABLE_ROW_TYPES = frozenset({"MXFP8"})
 # Micro-scaling float codecs that additionally have MLX-native packed kernels.
 # Served like every other codec above (zero-copy ggml wire bytes through the
 # kq kernels), or de-interleaved into MLX's packed layout at load
@@ -102,6 +105,12 @@ def find_split_shards(gguf_path: str) -> list[str]:
     return shards
 
 
+def loadable_type(type_name: str) -> bool:
+    """Whether gmlx reads tensors of GGML type ``type_name``."""
+    return (type_name in SUPPORTED_QUANT_TYPES or type_name in NATIVE_TYPES
+            or type_name in NATIVE_FP_TYPES or type_name in TABLE_ROW_TYPES)
+
+
 class UnsupportedCodecError(Exception):
     """A GGUF containing a tensor codec with no kquant kernel (e.g. ternary TQ)."""
 
@@ -115,7 +124,8 @@ class UnsupportedCodecError(Exception):
             f"GGUF (arch={arch!r}) uses codecs this build can't load - "
             f"unsupported tensor types: {listing} ({n} tensors). "
             "Supported codecs: q2_k-q6_k, q4_0/q4_1/q5_0/q5_1/q8_0, the "
-            "iq1/iq2/iq3/iq4 families, stq1_0, pq2_0/ptq1_0, q2_0, and mxfp4/nvfp4. "
+            "iq1/iq2/iq3/iq4 families, stq1_0, pq2_0/ptq1_0, q2_0, mxfp4/nvfp4, and "
+            "mxfp8 lookup tables. "
             "Re-quantize to a supported codec (e.g. Q4_K_M / Q5_K_M / Q6_K).")
 
 
@@ -186,9 +196,7 @@ def preflight(gguf_path: str, *, arch: str | None = None,
             tname = t.type_name
             hist[tname] = hist.get(tname, 0) + 1
             n_params += math.prod(t.shape)
-            if (tname not in SUPPORTED_QUANT_TYPES
-                    and tname not in NATIVE_TYPES
-                    and tname not in NATIVE_FP_TYPES):
+            if not loadable_type(tname):
                 unsupported[tname] = unsupported.get(tname, 0) + 1
 
     if unsupported:
