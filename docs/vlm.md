@@ -88,7 +88,7 @@ projector and architecture that it found. gmlx supports these families:
 | Muse Spark | `muse-glimmer` and `muse-spark-audio` with `muse-spark` | Muse-Spark-Open-816B-A42B | It reads images and audio. It is larger than RAM on most Macs, so it needs `--stream-experts`. |
 | Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | It is larger than RAM on most Macs, so it needs `--stream-experts`. |
 | DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` with `deepseek4` | The unsloth UD builds | |
-| DeepSeek-V4.1-Flash-Vision | `deepseek4-vision` with `deepseek41` | The antirez encoder GGUF | |
+| DeepSeek-V4.1-Flash-Vision | `deepseek4-vision` or `deepseek41v` with `deepseek41` | The antirez encoder GGUF, the unsloth DeepSeek-V4.1-Flash-1017 companion | unsloth puts the companion above the quant folders, so a folder scan does not pair it. Pass `--mmproj` or set [`mmproj`](config.md#modelsmmproj) on the model. |
 
 Qwen2-VL and Qwen2.5-VL companions, with the projector `qwen2vl_merger`,
 are not supported, and the load fails with a message that names the

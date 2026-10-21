@@ -125,6 +125,15 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
                 f"mmproj projector 'deepseek4v' on LLM arch {llm_arch!r} is "
                 "not supported (only DeepSeek-V4 text GGUFs, arch 'deepseek4')")
         return "deepseek_v4_vl"
+    if proj == "deepseek41v":
+        # The llama.cpp conversion of the DeepSeek-V4.1-Flash encoder
+        # (unsloth's 1017 mmproj): clip names and keys, fused attn_qkv.
+        if llm_arch != "deepseek41":
+            raise UnsupportedVLMError(
+                f"mmproj projector 'deepseek41v' on LLM arch {llm_arch!r} is "
+                "not supported (only DeepSeek-V4.1 text GGUFs, arch "
+                "'deepseek41')")
+        return "deepseek_v41_vl"
     if proj == "kimik25":
         # Moonshot Kimi-K2.5/K2.7: a MoonViT tower (SigLIP-so400m shape, 2-D
         # RoPE + a learned position grid that interpolates to the image) and
@@ -906,6 +915,41 @@ _DEEPSEEK41V_TOP_MAP = {
 }
 
 
+def _remap_deepseek41v_clip(arrays, out, skipped) -> None:
+    """The llama.cpp conversion of the V4.1 encoder (projector deepseek41v):
+    the V4 clip names, with wqkv kept fused as attn_qkv and no image_pad."""
+    for name, arr in arrays.items():
+        if name.endswith(".scales") or name.endswith(".biases"):
+            continue
+        if name == "v.patch_embd.weight":
+            # Conv [out, C, ph, pw] -> the reference Linear [out, C*ph*pw].
+            out["vision_tower.patch_embed.proj.weight"] = arr.reshape(
+                arr.shape[0], -1)
+            continue
+        hit = (None if name == "v.token_embd.img_pad"
+               else _DEEPSEEK4V_TOP_MAP.get(name))
+        if hit is not None:
+            out[hit] = arr
+            continue
+        m = _VISION_BLK_RE.match(name)
+        if m is None:
+            skipped.append(name)
+            continue
+        bid, rest = m.group(1), m.group(2)
+        sub, _, leaf = rest.rpartition(".")  # leaf = weight | bias
+        base = f"vision_tower.blocks.{bid}"
+        if sub == "attn_qkv":
+            n = arr.shape[0] // 3
+            for i, proj in enumerate(("q_proj", "k_proj", "v_proj")):
+                out[f"{base}.attn.{proj}.{leaf}"] = arr[i * n:(i + 1) * n]
+            continue
+        tgt = _DEEPSEEK4V_BLK_SUBMAP.get(sub)
+        if tgt is None:
+            skipped.append(name)
+            continue
+        out[f"{base}.{tgt}.{leaf}"] = arr
+
+
 def _qwen35_patch_embed_conv3d(w0: mx.array, w1: mx.array) -> mx.array:
     """Two temporal patch-conv slices -> one MLX Conv3d weight.
 
@@ -1181,6 +1225,11 @@ def remap_vision_arrays(
                 skipped.append(name)
                 continue
             out[f"vision_tower.blocks.{bid}.{tgt}.{leaf}"] = arr
+        return out, skipped, vis_kqmeta
+
+    if model_type == "deepseek_v41_vl" and any(
+            name.startswith("v.") for name in arrays):
+        _remap_deepseek41v_clip(arrays, out, skipped)
         return out, skipped, vis_kqmeta
 
     if model_type == "deepseek_v41_vl":
@@ -2037,19 +2086,11 @@ DEEPSEEK41V_IMAGE_TOKEN = "<\uff5cdeepseek_image\uff5c>"
 DEEPSEEK41V_IMAGE_TOKEN_ID = 129264
 
 
-def _synthesize_deepseek41v_vlm_config(
-    text_config: dict, mm_meta: dict, llm_meta: dict,
-) -> dict:
-    """DeepSeek-V4.1-Flash-Vision VLM config: the deepseek41 text synth plus
-    the DeepSeek ViT read from ``deepseek4-vision.*``.
-
-    Unlike the V4 mmproj this file is not a clip conversion, so every field
-    is a first-class GGUF key. ``max_width_height_ratio`` 0 is the
-    converter's spelling of the reference's ``None``, which every use site
-    guards for, so it means no cap rather than a cap of zero.
-    """
-    from gmlx.models.deepseek_v41.image_block import N_BLOCK_TYPES
-
+def _deepseek41v_vision_config(mm_meta: dict) -> dict:
+    """V4.1 vision_config from the ds4 encoder GGUF, where every field is
+    a first-class ``deepseek4-vision.*`` key. ``max_width_height_ratio`` 0
+    is the converter's spelling of the reference's ``None``, which every
+    use site guards for, so it means no cap rather than a cap of zero."""
     arch = "deepseek4-vision"
     ratio = mm_meta.get(f"{arch}.image.max_width_height_ratio")
     vision_config: dict = {
@@ -2071,6 +2112,50 @@ def _synthesize_deepseek41v_vlm_config(
     eps = _mm(mm_meta, f"{arch}.attention.layer_norm_rms_epsilon")
     if eps is not None:
         vision_config["rms_norm_eps"] = float(eps)
+    return vision_config
+
+
+def _deepseek41v_clip_vision_config(mm_meta: dict) -> dict:
+    """V4.1 vision_config from a llama.cpp clip mmproj (projector
+    ``deepseek41v``). clip.cpp hardcodes the 1024-token block budget, no
+    width cap and rope theta 10000 for this projector, and the converter
+    asserts them against the checkpoint, so they are pinned here too."""
+    vision_config: dict = {
+        "model_type": "deepseek_v41_vl",
+        "depth": _mm_int(mm_meta, "clip.vision.block_count"),
+        "hidden_size": _mm_int(mm_meta, "clip.vision.embedding_length"),
+        "intermediate_size": _mm_int(mm_meta, "clip.vision.feed_forward_length"),
+        "num_heads": _mm_int(mm_meta, "clip.vision.attention.head_count"),
+        "patch_size": _mm_int(mm_meta, "clip.vision.patch_size"),
+        "in_channels": 3,
+        "out_hidden_size": _mm_int(mm_meta, "clip.vision.projection_dim"),
+        "downsample_ratio": _mm_int(mm_meta, "clip.vision.projector.scale_factor"),
+        "max_n_token": 1024,
+        "min_pixels": _mm_int(mm_meta, "clip.vision.image_min_pixels"),
+        "max_wh_ratio": None,
+        "rope_theta": 10000.0,
+    }
+    eps = _mm(mm_meta, "clip.vision.attention.layer_norm_epsilon")
+    if eps is not None:
+        vision_config["rms_norm_eps"] = float(eps)
+    return vision_config
+
+
+def _synthesize_deepseek41v_vlm_config(
+    text_config: dict, mm_meta: dict, llm_meta: dict,
+) -> dict:
+    """DeepSeek-V4.1-Flash-Vision VLM config: the deepseek41 text synth plus
+    the DeepSeek ViT, read from ``deepseek4-vision.*`` (the ds4 encoder
+    GGUF) or from ``clip.vision.*`` (the llama.cpp conversion, projector
+    ``deepseek41v``). Both give the same vision_config for one model.
+    """
+    from gmlx.models.deepseek_v41.image_block import N_BLOCK_TYPES
+
+    arch = "deepseek4-vision"
+    if mm_meta.get("general.architecture") == arch:
+        vision_config = _deepseek41v_vision_config(mm_meta)
+    else:
+        vision_config = _deepseek41v_clip_vision_config(mm_meta)
 
     vocab = int(text_config.get("vocab_size", 129280))
     media_ids = [vocab + t for t in range(N_BLOCK_TYPES)]
@@ -3981,10 +4066,12 @@ def _synthesize_deepseek41v_processor(tokenizer, mm_meta: dict, config: dict):
     from gmlx.models.deepseek_v41.image_block import build_image_block
 
     arch = "deepseek4-vision"
+    patch_key = (f"{arch}.patch_size"
+                 if mm_meta.get("general.architecture") == arch
+                 else "clip.vision.patch_size")
     vision = (config.get("vision_config") or {})
     image_processor = _DeepseekV41VGgufImageProcessor(
-        patch_size=vision.get("patch_size")
-        or _mm_int(mm_meta, f"{arch}.patch_size") or 14,
+        patch_size=vision.get("patch_size") or _mm_int(mm_meta, patch_key),
         downsample_ratio=vision.get("downsample_ratio") or 3,
         max_n_token=vision.get("max_n_token") or 1024,
         min_pixels=vision.get("min_pixels") or 295936,

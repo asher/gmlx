@@ -14,6 +14,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `GMLX_NORM_DTYPE` sets the width of a language model's norm weights:
   `fp32` keeps the F32 norm weights in float32 and `activation` casts them to
   the activation dtype, whatever the model's default.
+- unsloth's DeepSeek-V4.1-Flash-1017 vision companion (`mmproj-BF16.gguf` or
+  `mmproj-F16.gguf`) loads with `--mmproj`, so the 1017 quants read images.
 
 ### Changed
 

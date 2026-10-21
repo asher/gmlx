@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Asher Feldman
 """Vendored mlx-vlm model for DeepSeek-V4.1-Flash-Vision (mmproj arch
-``deepseek4-vision``).
+``deepseek4-vision``, or a clip mmproj with projector ``deepseek41v``).
 
 Pairs the V4.1 text tower (:mod:`gmlx.models.deepseek_v41.model`) with the
 DeepSeek ViT + 3x3 aligner (:mod:`gmlx.models.deepseek_v4.vision`, whose
