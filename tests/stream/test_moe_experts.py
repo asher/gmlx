@@ -619,8 +619,10 @@ def _block_out(block, x, rows=None):
 def test_a_shed_layer_runs_what_its_block_keeps(monkeypatch, capsys):
     """One decode token through real blocks, the layer shed. Qwen3-Next
     keeps its shared expert only. Muse Spark has none and hands the
-    experts its routing scores, so it runs its top expert alone. Qwen3 MoE
-    has none and keeps its scores, so the lever leaves it alone."""
+    experts its routing scores, so it runs its top expert alone. Beam has
+    none and mixes its scores itself, so its top expert carries the full
+    routed mass. Qwen3 MoE has none and keeps its scores, so the lever
+    leaves it alone."""
     from gmlx._vendor.mlx_lm.models.qwen3_moe import Qwen3MoeSparseMoeBlock
     from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
 
@@ -640,11 +642,17 @@ def test_a_shed_layer_runs_what_its_block_keeps(monkeypatch, capsys):
         return (mx.arange(inds.shape[-1])
                 == mx.argmax(a[0], axis=-1)[..., None]).astype(mx.float32)
 
+    def top_mass(inds, a):
+        w = a[0]
+        return top_slot(inds, a) * (w.sum(-1, keepdims=True)
+                                    / w.max(-1, keepdims=True))
+
     for name, block in (("qwen3_next", Qwen3NextSparseMoeBlock(args)),
                         ("muse_spark", _spark_block()),
+                        ("beam", _beam_moe()),
                         ("qwen3_moe", Qwen3MoeSparseMoeBlock(args))):
         mx.random.seed(5)
-        if name != "muse_spark":
+        if name not in ("muse_spark", "beam"):
             block.switch_mlp = _kquant_glu()
         mx.eval(block.parameters())
         install_expert_streaming(_shell(block))
@@ -654,6 +662,8 @@ def test_a_shed_layer_runs_what_its_block_keeps(monkeypatch, capsys):
         full = _block_out(block, x)
         if name == "muse_spark":
             want = _block_out(block, x, top_slot)
+        elif name == "beam":
+            want = _block_out(block, x, top_mass)
         elif name == "qwen3_next":
             want = _block_out(block, x, lambda inds, a: mx.zeros(inds.shape))
         else:
@@ -671,7 +681,7 @@ def test_a_shed_layer_runs_what_its_block_keeps(monkeypatch, capsys):
             assert df._layer_shed_n == 1
             assert not np.allclose(shed, full, atol=1e-3), name
             staged = [len(c) for c in df.stage_calls]
-            assert staged == ([1] if name == "muse_spark" else []), name
+            assert staged == ([] if name == "qwen3_next" else [1]), name
 
 
 def test_layer_shed_sees_a_dense_or_shared_mlp_beside_the_experts(

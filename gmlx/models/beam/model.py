@@ -177,6 +177,10 @@ class BeamGate(nn.Module):
 
 
 class BeamMoE(nn.Module):
+    # No shared expert: a layer-shed draw keeps the top expert, which the
+    # streamed experts mix to the full routed mass.
+    _kq_layer_shed_top1 = True
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.gate = BeamGate(args)

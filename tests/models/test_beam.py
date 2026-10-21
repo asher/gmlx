@@ -408,6 +408,18 @@ def test_sliding_layers_get_a_rotating_cache():
             assert type(c) is KVCache
 
 
+def test_prefill_decay_prices_no_score_tensor_at_head_dim_128(monkeypatch):
+    """Depth decay sizes Beam's prefill chunks as fused attention: no score
+    tensor at head dim 128, so a deep streamed prefill keeps wide chunks."""
+    import gmlx.gen.prefill_decay as pd
+
+    assert pd._SCORE_PROFILES["beam"] is pd.fused_attention_profile
+    monkeypatch.setattr(pd, "cpu_default_device", lambda: False)
+    model = Model(_tiny_args(head_dim=128))
+    profile = pd.resolve_score_profile(model, model.make_cache())
+    assert profile is not None and profile.fused_min_step == 9
+
+
 @pytest.mark.parametrize("mode, norms", [("auto", True), ("fp32", True),
                                          ("activation", False)])
 def test_cast_predicate_matches_the_loader_keep_list(monkeypatch, mode, norms):
