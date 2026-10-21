@@ -765,9 +765,16 @@ gmlx sync-models --dry-run
 | `--from-hf-cache`, `--hf-cache` | The config's `hf_cache` | Also reconcile the Hugging Face cache. |
 | `-r`, `--recursive`, `--no-recursive` | Deep | Descend into subdirectories. |
 | `--dry-run` | Off | Print the plan without writing. |
+| `--add-companions` | Off | Add an `mmproj` that the scan pairs with an entry that has no `mmproj` key. |
 | `--no-reload` | Off | Do not signal a running server to re-read the file. |
 
 An entry on an unmounted drive is kept and reported, not dropped.
+
+`--add-companions` gives an existing entry the vision companion that a
+scan pairs with it, such as one downloaded after the model. It never
+changes an `mmproj` key that the entry has, and it leaves an entry alone
+when the key is there but commented out. Each line it adds carries a
+comment that says so.
 
 A scan writes `stream: experts` for a MoE model whose weights are larger
 than 90% of the GPU working set, with a comment that says so. Each sync

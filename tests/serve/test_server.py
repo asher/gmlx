@@ -1205,6 +1205,120 @@ def test_sync_dry_run_keeps_a_drafter_pairing_unwritten(monkeypatch, tmp_path,
     assert load_config(cfg_path).models["muse"].draft_gguf is None
 
 
+def _vlm_library(monkeypatch, lib):
+    """A model library as pull lays it out, read by a header classifier
+    that goes by file name: unsloth's quant folders under a root mmproj,
+    Bonsai beside its named mmproj, and a quant beside two mmprojs."""
+    ds41 = lib / "unsloth__DeepSeek-V4.1-Flash-1017-GGUF"
+    (ds41 / "UD-IQ2_XXS").mkdir(parents=True)
+    bonsai = lib / "prism-ml__Ternary-Bonsai-2-27B-gguf"
+    qwen = lib / "unsloth__Qwen3.8-27B-GGUF"
+    for d in (bonsai, qwen):
+        d.mkdir()
+    for f in (ds41 / "mmproj-BF16.gguf", lib / _DS41_PATH,
+              bonsai / "Ternary-Bonsai-2-27B-PQ2_0.gguf",
+              bonsai / "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf",
+              lib / _QWEN_PATH, qwen / "mmproj-BF16.gguf",
+              qwen / "mmproj-F16.gguf"):
+        f.write_bytes(b"GGUF")
+
+    def classify(path):
+        name = os.path.basename(path)
+        arch = ("clip" if "mmproj" in name
+                else "deepseek41" if "DeepSeek" in name else "qwen35")
+        return srv.discovery._classify_meta(
+            {"general.architecture": arch}, basename=name, path=path)
+
+    monkeypatch.setattr(srv.discovery, "classify_gguf", classify)
+    # The 1017 quant stays over the memory budget.
+    monkeypatch.setattr(srv.discovery, "rescan_entry", lambda p: {
+        "stream": "experts", "speculative": False})
+
+
+_DS41_PATH = ("unsloth__DeepSeek-V4.1-Flash-1017-GGUF/UD-IQ2_XXS/"
+              "DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf")
+_QWEN_PATH = "unsloth__Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf"
+
+
+def _vlm_entries(qwen_extra="", bonsai_extra=""):
+    """Every model of the library, so the scan adds none."""
+    return (
+        "models:\n"
+        "  deepseek-v4.1-flash-1017-ud-iq2:\n"
+        f"    path: {_DS41_PATH}\n"
+        f"    stream: experts  # {srv.discovery.STREAM_MARK_NOTE}\n"
+        f"  qwen3.8-27b-ud-q8:\n    path: {_QWEN_PATH}\n{qwen_extra}"
+        "  # sampling: t=1 top_p=0.95\n"
+        "  ternary-bonsai-2-27b-pq2:\n"
+        "    path: prism-ml__Ternary-Bonsai-2-27B-gguf/"
+        f"Ternary-Bonsai-2-27B-PQ2_0.gguf\n{bonsai_extra}")
+
+
+def test_sync_add_companions_adds_an_mmproj_to_an_entry(monkeypatch,
+                                                        tmp_path):
+    """An mmproj that arrived after its model's entry joins it, from the
+    repository root over the quant folders and from beside the model."""
+    from gmlx.config import load_config
+    cfg_path, lib = _sync_config(tmp_path, _vlm_entries())
+    _vlm_library(monkeypatch, lib)
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--no-reload"]) == 0
+    cfg = load_config(cfg_path)
+    ds41 = cfg.models["deepseek-v4.1-flash-1017-ud-iq2"]
+    assert ds41.mmproj == "unsloth__DeepSeek-V4.1-Flash-1017-GGUF/mmproj-BF16.gguf"
+    assert ds41.stream == "experts"
+    assert cfg.models["qwen3.8-27b-ud-q8"].mmproj == \
+        "unsloth__Qwen3.8-27B-GGUF/mmproj-BF16.gguf"   # first by name
+    note = srv.discovery.COMPANION_MARK_NOTE
+    assert (f"    mmproj: unsloth__Qwen3.8-27B-GGUF/mmproj-BF16.gguf  # {note}\n"
+            "  # sampling: t=1 top_p=0.95\n  ternary-bonsai-2-27b-pq2:"
+            ) in cfg_path.read_text()
+
+
+def test_sync_without_add_companions_leaves_entries_alone(monkeypatch,
+                                                          tmp_path, capsys):
+    cfg_path, lib = _sync_config(tmp_path, _vlm_entries())
+    _vlm_library(monkeypatch, lib)
+    before = cfg_path.read_text()
+    assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
+    assert "already in sync" in capsys.readouterr().out
+    assert cfg_path.read_text() == before
+
+
+def test_sync_add_companions_keeps_an_mmproj_key_the_entry_has(monkeypatch,
+                                                               tmp_path):
+    from gmlx.config import load_config
+    cfg_path, lib = _sync_config(tmp_path, _vlm_entries(
+        qwen_extra="    mmproj: unsloth__Qwen3.8-27B-GGUF/mmproj-F16.gguf\n"))
+    _vlm_library(monkeypatch, lib)
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--no-reload"]) == 0
+    cfg = load_config(cfg_path)
+    assert cfg.models["qwen3.8-27b-ud-q8"].mmproj == \
+        "unsloth__Qwen3.8-27B-GGUF/mmproj-F16.gguf"
+    text = cfg_path.read_text()
+    assert "    mmproj: unsloth__Qwen3.8-27B-GGUF/mmproj-F16.gguf\n" in text
+    assert "Qwen3.8-27B-GGUF/mmproj-BF16" not in text
+
+
+def test_sync_add_companions_respects_a_commented_out_mmproj(monkeypatch,
+                                                             tmp_path, capsys):
+    """A `#mmproj:` line keeps the model text-only on purpose."""
+    bonsai = ("    #mmproj: prism-ml__Ternary-Bonsai-2-27B-gguf/"
+              "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf\n")
+    cfg_path, lib = _sync_config(tmp_path, _vlm_entries(bonsai_extra=bonsai))
+    _vlm_library(monkeypatch, lib)
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "update:  deepseek-v4.1-flash-1017-ud-iq2" in out
+    assert "ternary-bonsai" not in out
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--no-reload"]) == 0
+    text = cfg_path.read_text()
+    assert text.endswith("Ternary-Bonsai-2-27B-PQ2_0.gguf\n" + bonsai)
+
+
 def test_sync_never_drops_hf_entries_on_unreadable_cache(monkeypatch, tmp_path,
                                                           capsys):
     # An unreadable hf cache means hf: entries CANNOT BE VERIFIED - removing

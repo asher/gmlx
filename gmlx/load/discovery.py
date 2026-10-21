@@ -758,14 +758,16 @@ def scan_dirs(
     ``known_paths`` (from configured ``models:``) are skipped/deduped against, as
     are paths an earlier spec/root in this same call already emitted.
     ``known_models`` maps a configured model's resolved path to its
-    :class:`config.ModelCfg`. A drafter pairs into one of those too; the model
-    stays out of the return list, and the caller writes the key from
-    ``stats["draft_pairs"]``.
+    :class:`config.ModelCfg`. A drafter pairs into one of those too, and an
+    mmproj into one that has none; the model stays out of the return list,
+    and the caller writes the key from ``stats["draft_pairs"]`` or
+    ``stats["mmproj_pairs"]``.
     ``progress`` streams per-file scan feedback to stderr (used by ``init``).
     ``stats``, if given, is a dict that receives ``skipped``: the count of
     .gguf files seen but unreadable as GGUF (so callers can distinguish an
-    empty dir from a dir of truncated downloads); and ``draft_pairs``:
-    ``{configured id: drafter path}``.
+    empty dir from a dir of truncated downloads); ``draft_pairs``:
+    ``{configured id: drafter path}``; and ``mmproj_pairs``:
+    ``{configured id: mmproj path}``.
     An image DiT pairs with the text encoder and VAE of its family that the
     scan finds, nearest folder first (see :func:`_pair_images`); each whole
     set appends an :class:`config.ImageModelCfg` to ``images`` when it is a
@@ -776,6 +778,7 @@ def scan_dirs(
     configured = {os.path.abspath(os.path.expanduser(p)): mc
                   for p, mc in (known_models or {}).items()}
     draft_pairs: dict[str, str] = {}
+    mmproj_pairs: dict[str, str] = {}
     used_ids = set(known_ids)
     out: list[ModelCfg] = []
     skipped = 0
@@ -800,13 +803,15 @@ def scan_dirs(
             skipped += len(paths) - len(classified)
             every += classified
             _emit_dir(classified, spec, used_ids, out,
-                      configured=configured, draft_pairs=draft_pairs)
+                      configured=configured, draft_pairs=draft_pairs,
+                      mmproj_pairs=mmproj_pairs)
     if any(c.kind == "image-dit" for c in every):
         _pair_images(every, out, used_ids, images, encoder_ids or {},
                      tower_ids or set())
     if stats is not None:
         stats["skipped"] = skipped
         stats["draft_pairs"] = draft_pairs
+        stats["mmproj_pairs"] = mmproj_pairs
     return out
 
 
@@ -1135,6 +1140,9 @@ def _fit_in_memory(mc: ModelCfg, c: ClassifiedGguf) -> None:
 # The end-of-line comment on a ``stream:`` key that discovery wrote. Sync
 # re-evaluates the key it marks; a key without it is the user's.
 STREAM_MARK_NOTE = "set by discovery: over the memory budget"
+# The end-of-line comment on a companion key that ``sync-models
+# --add-companions`` added to an entry already in the config.
+COMPANION_MARK_NOTE = "added by sync-models"
 
 
 def rescan_entry(path: str) -> dict | None:
@@ -1151,14 +1159,16 @@ def rescan_entry(path: str) -> dict | None:
 
 
 def _emit_dir(classified, spec, used_ids, out, *, configured=None,
-              draft_pairs=None):
+              draft_pairs=None, mmproj_pairs=None):
     """Build ModelCfgs for one scan, pairing mmproj/draft per directory.
 
-    A drafter can also pair into a ``configured`` model (resolved path ->
-    :class:`config.ModelCfg`); ``draft_pairs`` collects those as
-    ``{id: drafter path}``."""
+    A drafter or an mmproj can also pair into a ``configured`` model
+    (resolved path -> :class:`config.ModelCfg`); ``draft_pairs`` and
+    ``mmproj_pairs`` collect those as ``{id: path}``. An mmproj pairs into
+    a configured model only when it has none."""
     configured = configured or {}
     draft_pairs = {} if draft_pairs is None else draft_pairs
+    mmproj_pairs = {} if mmproj_pairs is None else mmproj_pairs
     by_dir: dict[str, list[ClassifiedGguf]] = {}
     for c in classified:
         by_dir.setdefault(os.path.dirname(c.path), []).append(c)
@@ -1209,10 +1219,20 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
             out.append(mc)
 
         if spec.pair_mmproj:
-            for mm in (c for c in group if c.kind == "mmproj"):
+            mms = [c for c in group if c.kind == "mmproj"]
+            # A configured model is a candidate beside the scanned ones; the
+            # scanned ones pair as they would without it.
+            old_mm = _configured_in_dir(_dir, configured) if mms else []
+            for mm in mms:
                 tgt = _best_mmproj_target(mm, made)
                 if tgt is not None and tgt.mmproj is None:
                     tgt.mmproj = mm.path
+                if old_mm:
+                    tgt = _best_mmproj_target(mm, made + old_mm, quiet=True)
+                    if (any(tgt is mc for mc, _c in old_mm)
+                            and tgt.mmproj is None
+                            and tgt.id not in mmproj_pairs):
+                        mmproj_pairs[tgt.id] = mm.path
 
         drafters = [c for c in group if c.kind == "drafter"]
         # The usual case: the target is configured already, so it is not in
@@ -1242,7 +1262,7 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
                 cross.append(dr)
 
     if spec.pair_mmproj:
-        _pair_parent_mmproj(by_dir, all_made, configured)
+        _pair_parent_mmproj(by_dir, all_made, configured, mmproj_pairs)
 
     # Cross-directory pass: a drafter that declares its base model (a DFlash 2
     # header does), or sits in a marked sibling repo of its target's, pairs
@@ -1316,7 +1336,7 @@ def _assign_ids(models, used_ids: set) -> dict[str, str]:
     return assigned
 
 
-def _best_mmproj_target(mm: ClassifiedGguf, made):
+def _best_mmproj_target(mm: ClassifiedGguf, made, *, quiet=False):
     """Pick the model a sibling mmproj belongs to. ``None`` if no confident match
     (logged). Two cases:
 
@@ -1334,8 +1354,9 @@ def _best_mmproj_target(mm: ClassifiedGguf, made):
     if not core:                                     # generic projector, no name
         if len(made) == 1:
             return made[0][0]
-        print(f"[discover] mmproj unpaired (ambiguous; several models): "
-              f"{mm.path}", file=sys.stderr)
+        if not quiet:
+            print(f"[discover] mmproj unpaired (ambiguous; several models): "
+                  f"{mm.path}", file=sys.stderr)
         return None
     best, best_len = None, 0
     for mc, _c in made:
@@ -1344,8 +1365,9 @@ def _best_mmproj_target(mm: ClassifiedGguf, made):
             best, best_len = mc, n
     if best is not None and _mmproj_name_matches(core, best.id):
         return best
-    print(f"[discover] mmproj unpaired (no model name matches {core!r}): "
-          f"{mm.path}", file=sys.stderr)
+    if not quiet:
+        print(f"[discover] mmproj unpaired (no model name matches {core!r}): "
+              f"{mm.path}", file=sys.stderr)
     return None
 
 
@@ -1363,28 +1385,30 @@ def _mmproj_name_matches(core: str, model_id: str) -> bool:
     return _common_prefix_len(core, model_id) >= max(6, int(0.7 * len(core)))
 
 
-def _pair_parent_mmproj(by_dir, made, configured) -> None:
+def _pair_parent_mmproj(by_dir, made, configured, mmproj_pairs) -> None:
     """Pair a projector with no model beside it into the models one folder
     down, when every model there is the same one: a repository that keeps
     each quant in its own folder and the projector at its root, as
-    unsloth's do. Only models this scan made get it; configured entries
-    are never changed. Several projectors: the first in scan order wins,
-    as beside a model."""
+    unsloth's do. A configured model without an mmproj lands in
+    ``mmproj_pairs``. Several projectors: the first in scan order wins, as
+    beside a model."""
     for parent, group in sorted(by_dir.items()):
         mmprojs = [c for c in group if c.kind == "mmproj"]
         if (not mmprojs or any(c.kind == "model" for c in group)
                 or _configured_in_dir(parent, configured)):
             continue
-        targets = [mc for mc, c in made
-                   if os.path.dirname(os.path.dirname(c.path)) == parent]
-        if not targets:
-            continue
         below = [c for d, g in by_dir.items() if os.path.dirname(d) == parent
                  for c in g if c.kind == "model"]
-        below += [c for ap in configured
-                  if os.path.dirname(os.path.dirname(ap)) == parent
-                  for c in [classify_gguf(ap)]
-                  if c is not None and c.kind == "model"]
+        old = [(mc, c) for ap, mc in configured.items()
+               if os.path.dirname(os.path.dirname(ap)) == parent
+               for c in [classify_gguf(ap)]
+               if c is not None and c.kind == "model"]
+        below += [c for _mc, c in old]
+        old_mcs = [mc for mc, c in old if c.loadable]
+        targets = [mc for mc, c in made
+                   if os.path.dirname(os.path.dirname(c.path)) == parent]
+        if not targets and not old_mcs:
+            continue
         names = {(c.arch, derive_id(os.path.basename(c.path))[0])
                  for c in below}
         for mm in mmprojs:
@@ -1393,13 +1417,17 @@ def _pair_parent_mmproj(by_dir, made, configured) -> None:
                       f"different models): {mm.path}", file=sys.stderr)
                 continue
             core = _mmproj_name(mm)
-            hits = [mc for mc in targets
+            hits = [mc for mc in targets + old_mcs
                     if not core or _mmproj_name_matches(core, mc.id)]
             if not hits:
                 print(f"[discover] mmproj unpaired (no model name matches "
                       f"{core!r}): {mm.path}", file=sys.stderr)
             for mc in hits:
-                if mc.mmproj is None:
+                if mc.mmproj is not None:
+                    continue
+                if any(mc is o for o in old_mcs):
+                    mmproj_pairs.setdefault(mc.id, mm.path)
+                else:
                     mc.mmproj = mm.path
 
 

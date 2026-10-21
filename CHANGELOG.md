@@ -18,6 +18,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mmproj-F16.gguf`) loads with `--mmproj`, so the 1017 quants read images.
 - A folder scan pairs an `mmproj` file at a repository root with the quants
   in the folders below it, when they are all one model, as unsloth lays out.
+- `gmlx sync-models --add-companions` adds a paired `mmproj` to a model
+  already in the config, so a companion downloaded later is picked up.
 
 ### Changed
 

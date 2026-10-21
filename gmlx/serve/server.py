@@ -536,6 +536,10 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
                          "--no-recursive for a shallow scan.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Show what would change without writing the config.")
+    ap.add_argument("--add-companions", action="store_true",
+                    help="Also add an mmproj the scan pairs with a model already "
+                         "in the config, when its entry has no mmproj key, live "
+                         "or commented out.")
     ap.add_argument("--no-reload", action="store_true",
                     help="Don't SIGHUP a server already running this config to pick "
                          "up the change.")
@@ -626,8 +630,10 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
             restream[mid] = fresh
 
     # Discover, skipping anything already configured (by id or by resolved path).
-    # `draft_pairs`: sibling drafters that pair into an entry already configured.
-    discovered, draft_pairs, images = [], {}, []
+    # `draft_pairs`: sibling drafters that pair into an entry already configured;
+    # `mmproj_pairs`: with --add-companions, the same for an mmproj, into an
+    # entry that has no mmproj key.
+    discovered, draft_pairs, mmproj_pairs, images = [], {}, {}, []
     if dirs:
         specs = [DiscoverSpec(dir=d, recursive=recursive) for d in dirs]
         stats = {}
@@ -638,6 +644,13 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
             known_models=known_models, progress=True, stats=stats,
             images=images, encoder_ids=_encoder_ids(known_models))
         draft_pairs = stats.get("draft_pairs") or {}
+        if a.add_companions:
+            # A commented-out `#mmproj:` line keeps an entry text-only on
+            # purpose, and a key already there is the user's.
+            hold = _ids_with_key(path, "mmproj")
+            mmproj_pairs = {mid: mp for mid, mp
+                            in (stats.get("mmproj_pairs") or {}).items()
+                            if mid not in hold}
     if scan_cache:
         known_refs = {mc.path for mc in cfg.models.values()
                       if str(mc.path).startswith("hf:")}
@@ -658,11 +671,13 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
         print(f"  add:     {im.id}  (image, {discovery._rel(im.path, dirs)})")
     for mid, dpath in draft_pairs.items():
         print(f"  update:  {mid}  (draft_gguf: {discovery._rel(dpath, dirs)})")
+    for mid, mpath in mmproj_pairs.items():
+        print(f"  update:  {mid}  (mmproj: {discovery._rel(mpath, dirs)})")
     for mid in restream:
         print(f"  update:  {mid}  (stream: experts dropped, the model fits "
               "the memory budget now)")
     if (not removed and not discovered and not draft_pairs and not images
-            and not restream):
+            and not restream and not mmproj_pairs):
         print("  (already in sync)")
         return 0
     if a.dry_run:
@@ -681,14 +696,14 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
     try:
         _apply_sync(path, removed, discovered, dirs, new_roots=new_roots,
                     draft_pairs=draft_pairs, images=images,
-                    restream=restream)
+                    restream=restream, mmproj_pairs=mmproj_pairs)
     except ConfigWriteError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    n_updated = len(draft_pairs) + len(restream) + len(mmproj_pairs)
     changed = (f"\nupdated {path} (+{len(discovered) + len(images)} / "
                f"-{len(removed)}"
-               + (f" / ~{len(draft_pairs) + len(restream)}"
-                  if draft_pairs or restream else "") + ")")
+               + (f" / ~{n_updated}" if n_updated else "") + ")")
     print(changed)
     _reload_running(path, skip=a.no_reload)
     return 0
@@ -770,6 +785,45 @@ def _marked_stream_ids(path) -> list:
     return out
 
 
+def _ids_with_key(path, key) -> set:
+    """The ids of ``path``'s model entries that carry ``key``, live or as a
+    commented-out line such as ``#mmproj: ...`` below the entry's key."""
+    import re
+
+    from ruamel.yaml import YAML
+    from ruamel.yaml.comments import CommentedMap
+
+    try:
+        text = Path(path).read_text()
+        doc = YAML().load(text)
+    except Exception:
+        return set()
+    models = doc.get("models") if isinstance(doc, CommentedMap) else None
+    if not isinstance(doc, CommentedMap) or not isinstance(
+            models, CommentedMap) or not models:
+        return set()
+    out = {str(mid) for mid, ent in models.items()
+           if isinstance(ent, dict) and key in ent}
+    lines = text.splitlines()
+    # ruamel files a comment line under whichever key precedes it, so the
+    # entry's span in the text decides.
+    starts: list[tuple[int, int, str]] = sorted(
+        (int(models.lc.key(mid)[0]), int(models.lc.key(mid)[1]), str(mid))
+        for mid in models)
+    block = doc.lc.key("models")[0]
+    after = [doc.lc.key(k)[0] for k in doc if doc.lc.key(k)[0] > block]
+    stop = min(after) if after else len(lines)
+    pat = re.compile(rf"^(\s*)#\s*{re.escape(key)}\s*:")
+    for i, (line, col, mid) in enumerate(starts):
+        end = starts[i + 1][0] if i + 1 < len(starts) else stop
+        for raw in lines[line + 1:end]:
+            m = pat.match(raw)
+            if m and len(m.group(1)) > col:
+                out.add(mid)
+                break
+    return out
+
+
 def _drop_key_keep_trailing(ent, key) -> None:
     """Delete ``key`` from a ruamel map. Its end-of-line comment token also
     holds the lines after it (a blank line, the next entry's comment), so
@@ -791,8 +845,35 @@ def _drop_key_keep_trailing(ent, key) -> None:
         prev[2] = CommentToken("\n" + rest, CommentMark(0), None)
 
 
+def _insert_key_keep_trailing(ent, after, key, value, note) -> None:
+    """Insert ``key: value  # note`` after ``after`` in a ruamel map. The
+    lines that rode ``after``'s end-of-line comment token (a blank line,
+    the next entry's comment) move onto the new key, so they stay below
+    it."""
+    item = ent.ca.items.get(after)
+    tok = item[2] if item and len(item) > 2 else None
+    rest = ""
+    if tok is not None and "\n" in tok.value:
+        head, rest = tok.value.split("\n", 1)
+        if rest:
+            if head.strip():
+                tok.value = head + "\n"
+            else:
+                item[2] = None
+    ent.insert(list(ent).index(after) + 1, key, value)
+    try:
+        column = ent.lc.key(after)[1] + len(f"{key}: {value}") + 2
+    except Exception:  # noqa: BLE001 - a map built in memory has no positions
+        column = None
+    ent.yaml_add_eol_comment(note, key, column=column)
+    if rest:
+        new = ent.ca.items[key][2]
+        new.value = new.value.rstrip("\n") + "\n" + rest
+
+
 def _apply_sync(path, removed, discovered, dirs, new_roots=(),
-                draft_pairs=None, images=(), restream=None) -> None:
+                draft_pairs=None, images=(), restream=None,
+                mmproj_pairs=None) -> None:
     """Rewrite ``path``'s ``models:`` block in place, preserving comments and
     hand-edits (ruamel round-trip): delete ``removed`` ids, splice in the newly
     ``discovered`` models. Untouched entries keep their exact formatting.
@@ -803,7 +884,9 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
     (paired :class:`ImageModelCfg`) go under ``image_models:``. ``restream``
     (id -> a fresh scan's ``stream`` and ``speculative``) drops the
     ``stream:`` key discovery wrote, and turns speculative decoding back
-    on where the fresh scan would."""
+    on where the fresh scan would. ``mmproj_pairs`` (configured id -> mmproj
+    path, from --add-companions) adds a marked ``mmproj`` key to an entry
+    that has none."""
     from ruamel.yaml.comments import CommentedMap
 
     def mutate(doc):
@@ -858,6 +941,13 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
             ent = models.get(mid)
             if isinstance(ent, dict) and not ent.get("draft_gguf"):
                 ent["draft_gguf"] = discovery._rel(dpath, dirs)
+        for mid, mpath in (mmproj_pairs or {}).items():
+            ent = models.get(mid)
+            if (isinstance(ent, dict) and "path" in ent
+                    and "mmproj" not in ent):
+                _insert_key_keep_trailing(ent, "path", "mmproj",
+                                          discovery._rel(mpath, dirs),
+                                          discovery.COMPANION_MARK_NOTE)
         if images:
             block = doc.get("image_models")
             if not isinstance(block, dict):

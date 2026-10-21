@@ -22,7 +22,9 @@ When both files land in a folder of
 [`server.model_dirs`](config.md#servermodel_dirs), `pull` registers the
 model with its companion and prints `(vlm)` after the id. For a model that
 is already registered, add the [`models.*.mmproj`](config.md#modelsmmproj)
-key to its entry. [`discover[].pair_mmproj`](config.md#discoverpair_mmproj)
+key to its entry, or run
+[`gmlx sync-models --add-companions`](cli.md#gmlx-sync-models).
+[`discover[].pair_mmproj`](config.md#discoverpair_mmproj)
 pairs the files that a folder scan finds, including a companion at the root
 of a repository whose quants each sit in their own folder.
 
