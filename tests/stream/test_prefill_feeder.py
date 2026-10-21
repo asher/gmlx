@@ -1369,11 +1369,13 @@ def test_arena_sizes_against_ram_before_the_ring_is_wired(
         monkeypatch, capsys, timeshare, env_gb, built):
     """The ring's slots are wired when its feeder is built, so a free-RAM
     snapshot taken after that would charge the ring twice. 7 GB free, 1 GB
-    of KV room, a 2 GB ring: the arena keeping the ring apart gets 4 GB,
-    and a time-shared arena gets 6 GB and lends 2 GB of it at prefill.
-    A GMLX_DECODE_ARENA_GB past free RAM clamps to it less the ring and
-    the KV room and keeps the whole ring apart, as the serve footprint
-    prices it. A ring that is never built is charged nowhere."""
+    of KV room, 0.5 GB of host overhead, a 2 GB ring: the arena keeping the
+    ring apart gets 3.5 GB, and a time-shared arena gets 5.5 GB and lends
+    2 GB of it at prefill. A GMLX_DECODE_ARENA_GB past free RAM clamps to
+    it less the ring, the KV room and the host overhead, and keeps the
+    whole ring apart, as the serve footprint prices it. A ring that is
+    never built is charged nowhere. The allocator's buffer cache is the
+    pool the KV room prices, not the whole room."""
     from types import SimpleNamespace
 
     import gmlx.stream.budget as budget
@@ -1403,8 +1405,15 @@ def test_arena_sizes_against_ram_before_the_ring_is_wired(
     monkeypatch.setattr(budget, "_available_ram_bytes",
                         lambda *a, **k: free["bytes"])
     monkeypatch.setattr(budget, "kv_room_bytes", lambda path, **kw: budget.KvRoom(
-        GB, 32768, 1, 0, 0, 0, priced=False, pool_bytes=GB))
-    monkeypatch.setattr(budget, "host_overhead_bytes", lambda *a, **k: 0)
+        GB, 32768, 1, 0, 0, 0, priced=False, pool_bytes=GB // 4))
+    host = GB // 2
+    monkeypatch.setattr(budget, "host_overhead_bytes", lambda *a, **k: host)
+    alloc = {}
+    monkeypatch.setattr(mx, "set_memory_limit",
+                        lambda b: alloc.update(limit=b))
+    monkeypatch.setattr(mx, "set_cache_limit", lambda b: alloc.update(cache=b))
+    monkeypatch.delenv("GMLX_STREAM_CACHE_GB", raising=False)
+    monkeypatch.delenv("GMLX_STREAM_ALLOC_LIMITS", raising=False)
     monkeypatch.setattr(es, "_prefill_ring_reason", lambda *a: None)
     monkeypatch.setattr(pf, "maybe_make_prefetcher",
                         lambda path: SimpleNamespace(offsets=offsets))
@@ -1434,13 +1443,15 @@ def test_arena_sizes_against_ram_before_the_ring_is_wired(
                              force_stream=True)
     # The residency room charges the ring once, either way.
     ring_b = 6 * third
-    want = {"0": (7 * GB - GB - ring_b, 0), "1": (6 * GB, ring_b)}[timeshare]
+    want = {"0": (7 * GB - GB - host - ring_b, 0),
+            "1": (6 * GB - host, ring_b)}[timeshare]
     if env_gb:
-        want = (7 * GB - ring_b - GB, 0)
+        want = (7 * GB - ring_b - GB - host, 0)
     if not built:
-        want, ring_b = (6 * GB, 0), 0
+        want, ring_b = (6 * GB - host, 0), 0
     assert sized == {"arena": want[0], "share": want[1],
                      "room": 100 * GB - want[0] - (ring_b - want[1])}
+    assert alloc["cache"] == GB // 4
     # One clamp line, for the arena the loader keeps.
     clamps = [ln for ln in capsys.readouterr().out.splitlines()
               if "GMLX_DECODE_ARENA_GB=" in ln]
