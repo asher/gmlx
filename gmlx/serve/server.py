@@ -930,6 +930,235 @@ def _insert_key_keep_trailing(ent, after, key, value,
             new[2] = CommentToken("\n" + rest, CommentMark(0), None)
 
 
+# The comment lines above an entry of ``models:``, and the lines after the
+# block, live in one of three places in the ruamel tree: the map's own head
+# (above the first key), the end-of-line token of the previous entry's last
+# line, or the key's before-comment list. These helpers read them as text
+# lines, each with its indentation and newline, and write them back to one
+# place: the head for the first entry, the key's list for the others.
+
+def _tail_slot(models, key):
+    """``(ca.items, key, index)`` of the comment slot after the last line
+    of entry ``key``: the last key's end-of-line token, nested maps and
+    lists followed down to their last item."""
+    from ruamel.yaml.comments import CommentedMap, CommentedSeq
+
+    holder, k, node = models, key, models[key]
+    while (isinstance(node, (CommentedMap, CommentedSeq)) and len(node)
+           and not node.fa.flow_style()):
+        holder = node
+        k = list(node)[-1] if isinstance(node, CommentedMap) else len(node) - 1
+        node = node[k]
+    return holder.ca.items, k, 0 if isinstance(holder, CommentedSeq) else 2
+
+
+def _token_lines(tokens, skip_first=False) -> list[str]:
+    """The text lines of comment tokens. ``skip_first`` drops what the
+    first line of an end-of-line token holds, the comment on the line."""
+    lines = []
+    for n, tok in enumerate(tokens):
+        if tok is None:
+            continue
+        text = tok.value
+        if n == 0 and skip_first:
+            text = text.split("\n", 1)[1] if "\n" in text else ""
+        elif text.strip():
+            text = " " * tok.column + text
+        lines += text.splitlines(keepends=True)
+    return lines
+
+
+def _comment_tokens(lines) -> list:
+    from ruamel.yaml.error import CommentMark
+    from ruamel.yaml.tokens import CommentToken
+
+    out = []
+    for line in lines:
+        body = line.lstrip(" ")
+        col = len(line) - len(body) if body.strip() else 0
+        out.append(CommentToken(body if body.strip() else "\n",
+                                CommentMark(col), None))
+    return out
+
+
+def _take_rest(models, key) -> list[str]:
+    """Remove and return the lines after entry ``key``'s last line."""
+    items, k, i = _tail_slot(models, key)
+    row = items.get(k)
+    tok = row[i] if row and len(row) > i else None
+    if tok is None:
+        return []
+    lines = _token_lines([tok], skip_first=True)
+    head = tok.value.split("\n", 1)[0]
+    if head.strip():
+        tok.value = head + "\n"
+    else:
+        row[i] = None
+    return lines
+
+
+def _set_rest(models, key, lines) -> None:
+    from ruamel.yaml.error import CommentMark
+    from ruamel.yaml.tokens import CommentToken
+
+    _take_rest(models, key)
+    if not lines:
+        return
+    items, k, i = _tail_slot(models, key)
+    row = items.setdefault(k, [None, None, None, None])
+    if row[i] is not None:
+        row[i].value = row[i].value.rstrip("\n") + "\n" + "".join(lines)
+    else:
+        row[i] = CommentToken("\n" + "".join(lines), CommentMark(0), None)
+
+
+def _head_slots(doc, models):
+    """The row and indexes of the ``models:`` line's end-of-line token and
+    of the comment list above the first key. The dump reads the row that
+    ``doc`` keeps for the ``models`` key when there is one."""
+    row = doc.ca.items.get("models")
+    if row is not None:
+        return row, 2, 3
+    if models.ca.comment is None:
+        models.ca.comment = [None, None]
+    return models.ca.comment, 0, 1
+
+
+def _take_head(doc, models) -> list[str]:
+    """Remove and return the comment lines above the first key of
+    ``models``, below the ``models:`` line."""
+    row, e, h = _head_slots(doc, models)
+    eol = row[e]
+    lines = _token_lines([eol], skip_first=True) + _token_lines(row[h] or [])
+    if eol is not None:
+        head = eol.value.split("\n", 1)[0]
+        row[e] = eol if head.strip() else None
+        if head.strip():
+            eol.value = head + "\n"
+    _set_head(doc, models, [])
+    return lines
+
+
+def _set_head(doc, models, lines) -> None:
+    row, e, h = _head_slots(doc, models)
+    row[h] = _comment_tokens(lines) or None
+    if row is not models.ca.comment:
+        models.ca.comment = [row[e], row[h]]
+
+
+def _take_before(models, key) -> list[str]:
+    row = models.ca.items.get(key)
+    if not row or not row[1]:
+        return []
+    lines = _token_lines(row[1])
+    row[1] = None
+    return lines
+
+
+def _take_above(doc, models, i) -> list[str]:
+    """Remove and return the comment lines above entry ``i``."""
+    keys = list(models)
+    lines = (_take_head(doc, models) if i == 0
+             else _take_rest(models, keys[i - 1]))
+    return lines + _take_before(models, keys[i])
+
+
+def _put_above(doc, models, i, lines) -> None:
+    keys = list(models)
+    if i == 0:
+        _set_head(doc, models, lines)
+        return
+    row = models.ca.items.setdefault(keys[i], [None, None, None, None])
+    row[1] = _comment_tokens(lines) or None
+
+
+def _joined(a, b) -> list[str]:
+    """``a`` then ``b``, one blank line where both meet with one."""
+    if a and b and not a[-1].strip() and not b[0].strip():
+        b = b[1:]
+    return a + b
+
+
+def _drop_entry(doc, models, key) -> None:
+    """Delete entry ``key``. The sampling comment discovery wrote above it
+    goes with it; the user's lines above it and the lines above the next
+    entry stay where they were."""
+    keys = list(models)
+    i = keys.index(key)
+    above = [line for line in _take_above(doc, models, i)
+             if not discovery.is_family_comment(line)]
+    after = _take_rest(models, key)
+    if i + 1 < len(keys):
+        after += _take_before(models, keys[i + 1])
+    del models[key]
+    models.ca.items.pop(key, None)
+    lines = _joined(above, after)
+    if i + 1 < len(keys):
+        _put_above(doc, models, i, lines)
+    elif i > 0:
+        _set_rest(models, keys[i - 1], lines)
+    else:
+        _set_head(doc, models, lines)
+
+
+def _place_entry(doc, models, pos, key, entry, note) -> None:
+    """Insert ``entry`` at ``pos`` with the sampling comment ``note``
+    directly above it, or replace entry ``key`` in place. The comment that
+    stood above the entry now after it moves along with that entry."""
+    mine = [f"  # {note}\n"] if note else []
+    keys = list(models)
+    if key in models:
+        i = keys.index(key)
+        above = [line for line in _take_above(doc, models, i)
+                 if not discovery.is_family_comment(line)]
+        after = _take_rest(models, key)
+        models[key] = entry
+        _put_above(doc, models, i, above + mine)
+        if i + 1 < len(keys):
+            _put_above(doc, models, i + 1,
+                       _joined(after, _take_before(models, keys[i + 1])))
+        else:
+            _set_rest(models, key, after)
+        return
+    if pos >= len(keys):
+        trailing = _take_rest(models, keys[-1]) if keys else []
+        models.insert(pos, key, entry)
+        if keys:
+            _put_above(doc, models, pos, mine)
+            _set_rest(models, key, trailing)
+        else:
+            _set_head(doc, models, _take_head(doc, models) + mine)
+        return
+    above = _take_above(doc, models, pos)
+    stay = 0
+    if pos == 0:
+        # The head holds the block's own comment, then the first entry's.
+        stay = len(above)
+        while stay and discovery.is_family_comment(above[stay - 1]):
+            stay -= 1
+    models.insert(pos, key, entry)
+    _put_above(doc, models, pos, above[:stay] + mine)
+    _put_above(doc, models, pos + 1, above[stay:])
+
+
+def _empty_models_block(doc, models) -> None:
+    """Write an emptied ``models:`` block that has comment lines as a null
+    value under them. The dump would put the lines above the ``{}`` it
+    writes for an empty map, where the file no longer parses."""
+    from ruamel.yaml.error import CommentMark
+    from ruamel.yaml.tokens import CommentToken
+
+    lines = _take_head(doc, models)
+    if not lines:
+        return
+    doc["models"] = None
+    row = doc.ca.items.setdefault("models", [None, None, None, None])
+    if row[2] is not None:
+        row[2].value = row[2].value.rstrip("\n") + "\n" + "".join(lines)
+    else:
+        row[2] = CommentToken("\n" + "".join(lines), CommentMark(0), None)
+
+
 def _apply_sync(path, removed, discovered, dirs, new_roots=(),
                 draft_pairs=None, images=(), restream=None,
                 mmproj_pairs=None,
@@ -969,7 +1198,7 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
             doc["models"] = models
         for mid in removed:
             if mid in models:
-                del models[mid]
+                _drop_entry(doc, models, mid)
         if discovered:
             discovery.drop_no_models_comment(doc)
         pos = 0
@@ -985,19 +1214,12 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
             entry = CommentedMap(discovery.model_to_entry(mc, dirs))
             if "stream" in entry:
                 entry.yaml_add_eol_comment(discovery.STREAM_MARK_NOTE, "stream")
-            if mc.id in models:
-                models[mc.id] = entry          # update keeps its position
-            else:
-                # Insert at the top of the block: appending would land the
-                # entry after trailing comments, such as the commented hints
-                # that older `gmlx init` files carry, which ride the last
-                # entry's comment token.
-                models.insert(pos, mc.id, entry)
-                pos += 1
-            note = discovery.family_comment(mc)
-            if note:
-                models.yaml_set_comment_before_after_key(
-                    mc.id, before=note, indent=2)
+            # A new entry goes at the top of the block, below its head
+            # comment; an update keeps its position.
+            new = mc.id not in models
+            _place_entry(doc, models, pos, mc.id, entry,
+                         discovery.family_comment(mc))
+            pos += new
         # A companion goes after `path` (a drafter after an `mmproj`), as
         # discovery writes an entry: the last key's comment token holds the
         # next entry's comment, so a key appended there would land below it.
@@ -1016,6 +1238,8 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
                 _insert_key_keep_trailing(ent, "path", "mmproj",
                                           discovery._rel(mpath, dirs),
                                           companion_note)
+        if not models:
+            _empty_models_block(doc, models)
         if images:
             block = doc.get("image_models")
             if not isinstance(block, dict):

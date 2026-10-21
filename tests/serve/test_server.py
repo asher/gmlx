@@ -1439,6 +1439,82 @@ def test_sync_add_companions_writes_into_a_flow_style_entry(monkeypatch,
     assert load_config(cfg_path).models["muse"].mmproj == "mmproj-muse.gguf"
 
 
+_HEAD = ("models:\n"
+         "  # Optional per-model keys:\n"
+         "  #   pin: true\n")
+_QWEN3 = "  # sampling (qwen3): t=0.6 top_p=0.95 top_k=20\n  qwen3:\n    path: qwen3.gguf\n"
+_GLM = "  # sampling (glm + gguf): t=1 top_p=0.95\n  glm:\n    path: glm.gguf\n    pin: true\n"
+_GEMMA = "  # sampling (gemma): t=1 top_p=0.95 top_k=64\n  gemma:\n    path: gemma.gguf\n"
+_ALIASES = "\n# Friendly request names:\naliases: {}\n"
+
+
+def _sync_sampling(monkeypatch, tmp_path, body, keep, new=()):
+    """Run sync-models on ``body`` with the files of the ``keep`` ids on
+    disk, and a scan that finds the ``new`` ids with their sampling
+    comment."""
+    from gmlx.config import ModelCfg as MC
+    cfg_path, lib = _sync_config(tmp_path, body)
+    for mid in keep:
+        (lib / f"{mid}.gguf").write_bytes(b"x")
+    notes = dict(new)
+    monkeypatch.setattr(srv.discovery, "scan_dirs", lambda specs, dirs, **kw: [
+        MC(id=mid, path=str(lib / f"{mid}.gguf")) for mid in notes])
+    monkeypatch.setattr(srv.discovery, "family_comment",
+                        lambda mc: notes.get(mc.id, ""))
+    assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
+    text = cfg_path.read_text()
+    srv.load_config(cfg_path)                     # the file still parses
+    return text.split("models:\n", 1)[1]
+
+
+@pytest.mark.parametrize("sep", ["", "\n"])
+@pytest.mark.parametrize("gone", ["qwen3", "glm", "gemma"])
+def test_sync_removes_the_sampling_comment_of_a_removed_entry(
+        monkeypatch, tmp_path, gone, sep):
+    """The comment discovery wrote above an entry goes with it, and the
+    next entry keeps its own, blank line and all."""
+    entries = {"qwen3": _QWEN3, "glm": _GLM, "gemma": _GEMMA}
+    body = sep.join(entries.values()) + _ALIASES
+    got = _sync_sampling(monkeypatch, tmp_path, _HEAD + body,
+                         [m for m in entries if m != gone])
+    # The blank line after a first entry stays below the block's head.
+    lead = sep if gone == "qwen3" else ""
+    del entries[gone]
+    assert got == (_HEAD.split("models:\n", 1)[1] + lead
+                   + sep.join(entries.values()) + _ALIASES)
+
+
+def test_sync_keeps_the_comments_the_user_wrote_above_a_removed_entry(
+        monkeypatch, tmp_path):
+    mine = "\n  # glm: my test quant\n  # sampling: t=0.3, as I serve it\n"
+    got = _sync_sampling(monkeypatch, tmp_path,
+                         _HEAD + _QWEN3 + mine + _GLM + _GEMMA,
+                         ["qwen3", "gemma"])
+    assert got == _HEAD.split("models:\n", 1)[1] + _QWEN3 + mine + _GEMMA
+
+
+def test_sync_writes_a_new_entry_directly_under_its_sampling_comment(
+        monkeypatch, tmp_path):
+    """New entries go at the top of the block, below its head comment, and
+    the entry that was first keeps its comment."""
+    got = _sync_sampling(
+        monkeypatch, tmp_path, _HEAD + _QWEN3 + _GLM, ["qwen3", "glm"],
+        new=[("ds41", "sampling (deepseek41): t=1 top_p=0.95"),
+             ("q36", "sampling (qwen3.6 + gguf): t=1")])
+    assert got == (_HEAD.split("models:\n", 1)[1]
+                   + "  # sampling (deepseek41): t=1 top_p=0.95\n"
+                   "  ds41:\n    path: ds41.gguf\n"
+                   "  # sampling (qwen3.6 + gguf): t=1\n"
+                   "  q36:\n    path: q36.gguf\n" + _QWEN3 + _GLM)
+
+
+def test_sync_that_removes_every_entry_leaves_a_file_that_parses(
+        monkeypatch, tmp_path):
+    got = _sync_sampling(monkeypatch, tmp_path,
+                         _HEAD + _QWEN3 + _GLM + _ALIASES, [])
+    assert got == _HEAD.split("models:\n", 1)[1] + _ALIASES
+
+
 def test_sync_never_drops_hf_entries_on_unreadable_cache(monkeypatch, tmp_path,
                                                           capsys):
     # An unreadable hf cache means hf: entries CANNOT BE VERIFIED - removing

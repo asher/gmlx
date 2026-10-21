@@ -702,6 +702,25 @@ def test_generic_mmproj_beside_configured_quants_says_why_it_stays_unpaired(
     assert said is not chosen
 
 
+def test_family_comment_matcher_takes_only_the_lines_discovery_writes(
+        monkeypatch):
+    written = [disc.family_comment(ModelCfg(id="m", path="/none.gguf",
+                                            family="qwen3.6"))]
+    monkeypatch.setattr(disc, "header_sampling", lambda p: {
+        "temperature": 0.7, "min_p": 0.05, "repetition_penalty": 1.05})
+    written += [disc.family_comment(ModelCfg(id="m", path="/none.gguf",
+                                             family=f)) for f in ("glm", None)]
+    assert written == ["sampling (qwen3.6): t=1 top_p=0.95 top_k=20",
+                       "sampling (glm + gguf): t=0.7 top_p=0.95 min_p=0.05 rep=1.05",
+                       "sampling (gguf): t=0.7 min_p=0.05 rep=1.05"]
+    assert all(disc.is_family_comment(f"  # {w}\n") for w in written)
+    for mine in ("# sampling: t=0.3", "# sampling (mine): t=0.3",
+                 "# sampling (qwen3.6): t=1, as I serve it",
+                 "# sampling (qwen3.6): t=1 top_p=0.95 top_k=20 # mine",
+                 "#sampling (qwen3.6): t=1"):
+        assert not disc.is_family_comment(mine), mine
+
+
 def test_root_mmproj_unpaired_when_pair_mmproj_is_off(tmp_path, ds41_classify):
     root = _quant_tree(tmp_path, _DS41_IQ2, _DS41_Q4)
     models = _scan(root, recursive=True, pair_mmproj=False)

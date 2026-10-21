@@ -1594,6 +1594,26 @@ def _fmt_num(v) -> str:
     return str(v)
 
 
+_SAMPLING_SHORT = (("temperature", "t"), ("top_p", "top_p"), ("top_k", "top_k"),
+                   ("min_p", "min_p"), ("repetition_penalty", "rep"),
+                   ("presence_penalty", "presence"))
+_SAMPLING_PART = (r"(?:" + "|".join(s for _k, s in _SAMPLING_SHORT)
+                  + r")=-?[0-9][0-9.]*(?:e-?[0-9]+)?")
+_FAMILY_COMMENT_RE = re.compile(
+    r"# sampling \((?:gguf|(?:"
+    + "|".join(re.escape(f) for f in sorted(_family_profiles.FAMILIES)
+               if f != "default")
+    + rf")(?: \+ gguf)?)\)(?:: {_SAMPLING_PART}(?: {_SAMPLING_PART})*)?")
+
+
+def is_family_comment(line: str) -> bool:
+    """Whether ``line`` is a comment line that :func:`family_comment`
+    writes above an entry, ``# sampling (<family> + gguf): t=1 ...``. A
+    sync removes only these lines, so a comment the user wrote never
+    matches by accident."""
+    return _FAMILY_COMMENT_RE.fullmatch(line.strip()) is not None
+
+
 def family_comment(mc: ModelCfg) -> str:
     """A one-line sampling summary for a model entry's comment
     (``qwen3.6: t=1.0 top_p=0.95 top_k=20``): the family base refined by the
@@ -1605,10 +1625,7 @@ def family_comment(mc: ModelCfg) -> str:
             if fam and fam != "default" else {})
     hs = header_sampling(mc.path)
     eff = {**base, **hs}
-    short = (("temperature", "t"), ("top_p", "top_p"), ("top_k", "top_k"),
-             ("min_p", "min_p"), ("repetition_penalty", "rep"),
-             ("presence_penalty", "presence"))
-    parts = [f"{s}={_fmt_num(eff[k])}" for k, s in short if eff.get(k)]
+    parts = [f"{s}={_fmt_num(eff[k])}" for k, s in _SAMPLING_SHORT if eff.get(k)]
     src = (fam if fam and fam != "default" else "") if not hs else (
         f"{fam} + gguf" if fam and fam != "default" else "gguf")
     if not src:
