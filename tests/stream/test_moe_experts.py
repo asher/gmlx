@@ -647,11 +647,12 @@ def test_a_shed_layer_runs_what_its_block_keeps(monkeypatch, capsys):
         return top_slot(inds, a) * (w.sum(-1, keepdims=True)
                                     / w.max(-1, keepdims=True))
 
-    for name, block in (("qwen3_next", Qwen3NextSparseMoeBlock(args)),
-                        ("muse_spark", _spark_block()),
-                        ("beam", _beam_moe()),
-                        ("qwen3_moe", Qwen3MoeSparseMoeBlock(args))):
+    for name, make in (("qwen3_next", lambda: Qwen3NextSparseMoeBlock(args)),
+                       ("muse_spark", _spark_block),
+                       ("beam", _beam_moe),
+                       ("qwen3_moe", lambda: Qwen3MoeSparseMoeBlock(args))):
         mx.random.seed(5)
+        block = make()
         if name not in ("muse_spark", "beam"):
             block.switch_mlp = _kquant_glu()
         mx.eval(block.parameters())
