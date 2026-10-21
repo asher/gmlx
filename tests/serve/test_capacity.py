@@ -350,9 +350,6 @@ def test_preload_gate_keeps_a_streamed_residents_room(rig, monkeypatch):
     with pytest.raises(cap.LoadDeferred, match="working set 2.0 GB less the 3.0 GB"):
         cap.preload_gate(4.0 * GB, "room-taker", reserved_bytes=3.0 * GB)
     cap.preload_gate(2.0 * GB, "fits-beside", reserved_bytes=3.0 * GB)
-    # The headroom already counts the 1 GB the room's buffer pool holds.
-    monkeypatch.setattr(pd, "held_cache_bytes", lambda: 1.0 * GB)
-    cap.preload_gate(3.0 * GB, "beside-a-filled-pool", reserved_bytes=3.0 * GB)
 
 
 def test_preload_gate_kernel_floor(rig, monkeypatch):

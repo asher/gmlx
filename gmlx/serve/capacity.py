@@ -612,8 +612,7 @@ def preload_gate(weight_bytes: float, model_id: str, *,
     the fix, not streaming. ``reserved_bytes`` is room a resident
     streamed model keeps under the ceiling but has not filled (its
     prefill ring, its KV room, and the host margins its ceiling leg
-    charged); the measure reads it as free, less the buffer pool it
-    already counts as held, and the load may not take it.
+    charged); the measure reads it as free, the load may not take it.
     ``reserved_ram_bytes`` is the same model's room and host overhead in
     RAM and ``ram_floor_bytes`` the host floor its arena leaves free; the
     kernel gate holds both back from the reclaimable sum.
@@ -632,7 +631,7 @@ def preload_gate(weight_bytes: float, model_id: str, *,
     else:
         what = "weights"
         fix = "for MoE models --stream-experts serves the experts from disk."
-    from gmlx.gen.prefill_decay import headroom_bytes, held_cache_bytes
+    from gmlx.gen.prefill_decay import headroom_bytes
 
     head = headroom_bytes()
     budget = working_budget_bytes()
@@ -646,7 +645,7 @@ def preload_gate(weight_bytes: float, model_id: str, *,
         # 112 GB wire limit) and Metal OOM'd in the mmap warm (2026-08-25).
         head -= max(0.0, ws - budget)
     if head is not None and reserved_bytes > 0:
-        head -= max(0.0, reserved_bytes - held_cache_bytes())
+        head -= reserved_bytes
     kept = (f" less the {reserved_bytes / GB:.1f} GB ring and KV room a "
             "resident streamed model keeps"
             if reserved_bytes > 0 else "")
