@@ -11,6 +11,13 @@ with its parent, for up to --stall-ms, then continues them. Fast idle
 machines never reproduce the lost-signal and FIFO races that a stalled CI
 VM shows; these stalls do.
 
+A stall ends with SIGCONT, which would resume a process that job control
+or a test stopped, so the staller skips a pair in which either process is
+stopped. The kernel drops a stop signal sent to a process that is already
+stopped, so a stop that lands during a stall is lost. Each stall holds the
+lock file that GMLX_STRESS_LOCK names, and a test that stops a process,
+or types Ctrl-Z in its terminal, holds that lock while it does.
+
 A test that hangs fails at --timeout with every thread's stack. A failed
 round keeps its log, a `ps` listing of the tree and any FIFOs left in its
 temporary folders under --out. The failing test ids go to
@@ -24,6 +31,9 @@ Needs pytest-xdist, pytest-repeat and pytest-timeout (the `test` group).
 from __future__ import annotations
 
 import argparse
+import contextlib
+import ctypes
+import fcntl
 import json
 import os
 import random
@@ -66,17 +76,47 @@ def tree(root: int) -> dict[int, int]:
     return found
 
 
+class _BSDInfo(ctypes.Structure):
+    """The head of macOS's struct proc_bsdinfo, padded to its full size."""
+    _fields_ = [("flags", ctypes.c_uint32), ("status", ctypes.c_uint32),
+                ("rest", ctypes.c_char * 128)]
+
+
+_LIBC = ctypes.CDLL(None) if sys.platform == "darwin" else None
+_PROC_PIDTBSDINFO, _SSTOP = 3, 4
+
+
+def stopped(pid: int) -> bool:
+    """Whether ``pid`` is stopped, read without starting a process, since a
+    stall check runs before every stall. A process whose state cannot be
+    read, such as a zombie, a setuid process or one gone, counts as
+    stopped, so the staller leaves it alone."""
+    if _LIBC is not None:
+        info = _BSDInfo()
+        size = ctypes.sizeof(info)
+        got = _LIBC.proc_pidinfo(pid, _PROC_PIDTBSDINFO, ctypes.c_uint64(0),
+                                 ctypes.byref(info), size)
+        return got != size or info.status == _SSTOP
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rpartition(")")[2].split()[0] in ("T", "t")
+    except (OSError, IndexError):
+        return True
+
+
 def tree_pids(root: int) -> list[int]:
     """``root`` and every live descendant."""
     return list(tree(root))
 
 
 class Staller(threading.Thread):
-    """Stops one random process of a tree at a time, for up to ``stall_ms``."""
+    """Stops one random process of a tree at a time, for up to ``stall_ms``.
+    Each stall holds an flock on ``lock`` when one is given."""
 
-    def __init__(self, root: int, stall_ms: float, seed: int):
+    def __init__(self, root: int, stall_ms: float, seed: int, lock: Path | None = None):
         super().__init__(daemon=True)
         self.root, self.stall_ms, self.rnd = root, stall_ms, random.Random(seed)
+        self.lock = lock
         self.done = threading.Event()
         self.stalls = 0
 
@@ -92,16 +132,28 @@ class Staller(threading.Thread):
             # A parent that waits with WUNTRACED, as the guest entry does,
             # sees a stopped child, which a busy machine never shows. The
             # parent stops first and goes on last, so it sees only a delay.
-            stalled = [p for p in (procs[pid], pid) if p in procs]
+            self.stall([p for p in (procs[pid], pid) if p in procs],
+                       self.rnd.uniform(0, self.stall_ms) / 1000)
+
+    def stall(self, pids: list[int], seconds: float) -> bool:
+        """Stops ``pids`` in order for ``seconds``, or until :meth:`stop`,
+        then continues them in the reverse order, unless one of them is
+        stopped already. Returns whether it stalled them."""
+        with contextlib.ExitStack() as held:
+            if self.lock is not None:
+                fcntl.flock(held.enter_context(open(self.lock, "a")), fcntl.LOCK_EX)
+            if any(stopped(p) for p in pids):
+                return False
             try:
-                for p in stalled:
+                for p in pids:
                     os.kill(p, signal.SIGSTOP)
-                time.sleep(self.rnd.uniform(0, self.stall_ms) / 1000)
+                self.done.wait(seconds)
                 self.stalls += 1
+                return True
             except ProcessLookupError:
-                pass
+                return False
             finally:
-                for p in reversed(stalled):
+                for p in reversed(pids):
                     try:
                         os.kill(p, signal.SIGCONT)
                     except ProcessLookupError:
@@ -154,13 +206,16 @@ def one_round(n: int, a, out: Path) -> tuple[int, list[str], int]:
     cmd = [sys.executable, "-m", "pytest", "-q", "-rfE", "-p", "no:cacheprovider",
            "-n", str(workers), "--dist", "worksteal", "--count", str(a.count),
            f"--timeout={a.timeout}", f"--basetemp={tmp}", f"--junitxml={junit}", *a.tests]
+    # pytest empties --basetemp first, so the lock lives beside it.
+    lock = tmp.with_name(tmp.name + ".lock")
     env = {k: v for k, v in os.environ.items() if k != "KQUANT_TEST_GGUF_DIR"}
+    env["GMLX_STRESS_LOCK"] = str(lock)
     with open(log, "w") as f:
         f.write("+ " + " ".join(cmd) + "\n")
         f.flush()
         proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=f, stderr=subprocess.STDOUT,
                                 start_new_session=True)
-        staller = Staller(proc.pid, a.stall_ms, seed=n)
+        staller = Staller(proc.pid, a.stall_ms, seed=n, lock=lock)
         staller.start()
         try:
             code = proc.wait(timeout=a.round_timeout)
@@ -169,6 +224,7 @@ def one_round(n: int, a, out: Path) -> tuple[int, list[str], int]:
             _leftovers(proc.pid, tmp, log)
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait()
+            lock.unlink(missing_ok=True)
             return -1, [f"round {n} hung past {a.round_timeout} s"], staller.stalls
         staller.stop()
     failed = failures(junit, a.count)
@@ -180,6 +236,7 @@ def one_round(n: int, a, out: Path) -> tuple[int, list[str], int]:
         log.unlink()
         junit.unlink(missing_ok=True)
     subprocess.run(["rm", "-rf", str(tmp)])
+    lock.unlink(missing_ok=True)
     return code, failed, staller.stalls
 
 
