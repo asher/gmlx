@@ -6,14 +6,15 @@
 
 Each round is one pytest session with every selected test repeated --count
 times (pytest-repeat) over twice as many xdist workers as cores. While it
-runs, a staller stops one random process of the session's tree at a time,
-with its parent, for up to --stall-ms, then continues them. Fast idle
+runs, a staller stops one random process of the session's tree at a time
+for up to --stall-ms, then continues it. A parent that would see the stop,
+which a busy machine never shows, stops first and goes on last. Fast idle
 machines never reproduce the lost-signal and FIFO races that a stalled CI
 VM shows; these stalls do.
 
 A stall ends with SIGCONT, which would resume a process that job control
-or a test stopped, so the staller skips a pair in which either process is
-stopped. The kernel drops a stop signal sent to a process that is already
+or a test stopped, so the staller skips a stall in which any of its
+processes is stopped. The kernel drops a stop signal sent to a process that is already
 stopped, so a stop that lands during a stall is lost. Each stall holds the
 lock file that GMLX_STRESS_LOCK names, and a test that stops a process,
 or types Ctrl-Z in its terminal, holds that lock while it does.
@@ -61,19 +62,33 @@ PRESETS = {"concurrency": [
 ]}
 
 
-def tree(root: int) -> dict[int, int]:
-    """``root`` and every live descendant, each with its parent."""
-    out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True).stdout
-    children: dict[int, list[int]] = {}
+# The processes that wait for their children with WUNTRACED, and so would
+# see a stall as a stop. A shell or Python sees no stop of its child.
+WATCHERS = ("gmlx-entry",)
+
+
+def tree(root: int) -> dict[int, tuple[int, str]]:
+    """``root`` and every live descendant, each with its parent and name."""
+    out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,comm="], capture_output=True, text=True).stdout
+    children: dict[int, list[tuple[int, str]]] = {}
     for line in out.splitlines():
-        pid, ppid = (int(x) for x in line.split())
-        children.setdefault(ppid, []).append(pid)
-    found, todo = {}, [(root, 0)]
+        pid, ppid, *comm = line.split(None, 2)
+        children.setdefault(int(ppid), []).append((int(pid), os.path.basename(comm[0]) if comm else ""))
+    found, todo = {}, [(root, 0, "")]
     while todo:
-        pid, ppid = todo.pop()
-        found[pid] = ppid
-        todo += [(child, pid) for child in children.get(pid, [])]
+        pid, ppid, name = todo.pop()
+        found[pid] = (ppid, name)
+        todo += [(child, pid, child_name) for child, child_name in children.get(pid, [])]
     return found
+
+
+def stalled(procs: dict[int, tuple[int, str]], pid: int) -> list[int]:
+    """What a stall of ``pid`` stops, in order: each ancestor that would see
+    it stop, from the top, then ``pid``."""
+    out = [pid]
+    while (parent := procs[out[0]][0]) in procs and procs[parent][1] in WATCHERS:
+        out.insert(0, parent)
+    return out
 
 
 class _BSDInfo(ctypes.Structure):
@@ -121,18 +136,14 @@ class Staller(threading.Thread):
         self.stalls = 0
 
     def run(self) -> None:
-        procs: dict[int, int] = {}
+        procs: dict[int, tuple[int, str]] = {}
         refreshed = 0.0
         while not self.done.is_set():
             if time.monotonic() - refreshed > 0.2:
                 procs, refreshed = tree(self.root), time.monotonic()
             if self.done.wait(self.rnd.uniform(0, 2 * self.stall_ms) / 1000) or not procs:
                 continue
-            pid = self.rnd.choice(list(procs))
-            # A parent that waits with WUNTRACED, as the guest entry does,
-            # sees a stopped child, which a busy machine never shows. The
-            # parent stops first and goes on last, so it sees only a delay.
-            self.stall([p for p in (procs[pid], pid) if p in procs],
+            self.stall(stalled(procs, self.rnd.choice(list(procs))),
                        self.rnd.uniform(0, self.stall_ms) / 1000)
 
     def stall(self, pids: list[int], seconds: float) -> bool:
