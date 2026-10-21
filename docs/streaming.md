@@ -111,10 +111,11 @@ To make a model fit, or to give it a decode arena:
 - Shrink the KV room. `GMLX_STREAM_KV_CTX` sets how many tokens it holds,
   and `--kv-bits 8` halves the KV cache part. The safe context is then
   shorter.
-- Shrink the prefill chunk on the server with `--prefill-step-size` or
-  `prefill_step_size`. The KV room holds the chunk's activations and a
-  buffer pool of the same size, and a narrower chunk gives that room to
-  the arena. Prefill reads every expert once per chunk, so it is slower.
+- Shrink the prefill chunk with `--prefill-step-size`, or
+  `prefill_step_size` on the server. The KV room holds the chunk's
+  activations and a buffer pool a quarter of their size, at least 2 GiB,
+  and a narrower chunk gives that room to the arena. Prefill reads every
+  expert once per chunk, so it is slower.
 - Raise the GPU limit, as [The GPU memory limit](memory.md#the-gpu-memory-limit)
   describes.
 - Quit other models and apps. The arena takes what is left of the RAM at

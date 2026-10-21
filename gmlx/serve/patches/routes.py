@@ -520,6 +520,8 @@ def install_runtime_snapshot_enrichment() -> None:
                 mem["arena_nominal_bytes"] = sum(
                     int(getattr(f, "nominal_bytes", f.arena_bytes))
                     for f in arenas)
+                # The room each arena leaves: KV, scores, prefill chunk,
+                # buffer pool and admission reserve.
                 mem["kv_room_bytes"] = sum(
                     int(getattr(f, "_room_bytes", 0)) for f in arenas)
                 mem["arena_hits"] = sum(

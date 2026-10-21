@@ -64,7 +64,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - With `--stream-experts`, a prompt of more than 64 tokens filled the file
   cache as it prefilled, and macOS compressed other apps' memory to make room.
 - A streamed model served with the default decode arena could leave the Mac
-  with almost no free memory during a long prefill, and push it into swap.
+  with almost no free memory during prefill, and push it into swap.
 - A model loaded beside a streamed model could take the memory the stream's
   next prefill needed, and leave the Mac with no free memory.
 - unsloth's DeepSeek-V4.1-Flash-1017 GGUFs load. Their one shared engram
