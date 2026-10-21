@@ -322,6 +322,30 @@ def test_stream_experts_streams_a_model_under_the_budget(monkeypatch):
     assert wrapped_with(mx.set_wired_limit, "_kq_no_sweep")     # sweep neutralized
 
 
+def test_stream_flags_price_the_prefill_step_the_run_asks_for(monkeypatch):
+    """The KV room prices the prefill chunk at --prefill-step-size, which
+    run and chat pass to generation as an argument, not through the
+    environment serve exports."""
+    import types
+
+    import gmlx.stream.expert_streaming as es
+
+    seen = []
+
+    def install(model, **kw):
+        seen.append(kw.get("prefill_step"))
+        return 1, 0
+
+    monkeypatch.setattr(es, "install_expert_streaming", install)
+    monkeypatch.setattr(es, "configure_stream_cpu", install)
+    for flag in ("stream_experts", "stream_cpu"):
+        cli._apply_placement(types.SimpleNamespace(
+            **{flag: True}, gguf=None, prefill_step_size=16384), object())
+    cli._apply_placement(types.SimpleNamespace(stream_experts=True, gguf=None),
+                         object())
+    assert seen == [16384, 16384, None]
+
+
 def test_without_the_flag_a_model_under_the_budget_stays_resident(monkeypatch):
     from gmlx.stream.expert_streaming import install_expert_streaming
 
@@ -368,7 +392,7 @@ def test_a_forced_stream_under_the_budget_sizes_a_half_arena(monkeypatch):
         dead_bytes=0, names=frozenset()))
     monkeypatch.setattr(pins, "maybe_pin_weights", lambda *a, **kw: None)
     monkeypatch.setattr(sbudget, "kv_room_bytes",
-                        lambda p: types.SimpleNamespace(bytes=0))
+                        lambda p, **kw: types.SimpleNamespace(bytes=0))
     monkeypatch.setattr(decay, "note_streamed_tracked_bytes", lambda *a, **kw: None)
     monkeypatch.setattr("gmlx.gen.prefill_decay.deduct_untracked_weights",
                         lambda n, key=None: None)

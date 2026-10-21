@@ -1402,7 +1402,7 @@ def test_arena_sizes_against_ram_before_the_ring_is_wired(
     monkeypatch.setattr(budget, "_ram_floor_bytes", lambda ram: 0)
     monkeypatch.setattr(budget, "_available_ram_bytes",
                         lambda *a, **k: free["bytes"])
-    monkeypatch.setattr(budget, "kv_room_bytes", lambda path: budget.KvRoom(
+    monkeypatch.setattr(budget, "kv_room_bytes", lambda path, **kw: budget.KvRoom(
         GB, 32768, 1, 0, 0, 0, priced=False, pool_bytes=GB))
     monkeypatch.setattr(budget, "host_overhead_bytes", lambda *a, **k: 0)
     monkeypatch.setattr(es, "_prefill_ring_reason", lambda *a: None)

@@ -41,7 +41,8 @@ physical RAM. Four things share the ceiling, in this order:
    attention scores and a reserve for admitting requests, each the larger
    of 2 GB and 5% of the working set. It also holds one prefill chunk:
    the chunk's activations, priced from the model's widths at the
-   streamed chunk width, and the MLX buffer pool of the same size that
+   streamed chunk width (`--prefill-step-size` or the arch's own step
+   switch when set), and the MLX buffer pool of the same size that
    keeps the freed buffers for the next layer. Under prefill the pool
    fills to its limit and the live activations sit on top of it, so the
    room counts both.

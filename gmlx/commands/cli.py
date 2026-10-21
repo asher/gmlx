@@ -1513,12 +1513,15 @@ def _apply_placement(args, model) -> None:
         os.environ["GMLX_DECODE_FAST_DISK"] = fast_disk
     prefill = getattr(args, "prefill_feeder", None)
     decode = getattr(args, "decode_feeder", None)
+    # The KV room prices the prefill chunk at the width the run asks for.
+    step = getattr(args, "prefill_step_size", None)
     if stream_cpu:
         from gmlx.stream.expert_streaming import configure_stream_cpu
 
         n, _ = configure_stream_cpu(model, gguf_path=gguf_path,
                                     feeder_prefill=prefill,
-                                    feeder_decode=decode)
+                                    feeder_decode=decode,
+                                    prefill_step=step)
         if n == 0:
             print(
                 "[stream] note: no MoE expert stacks found - running this "
@@ -1531,7 +1534,8 @@ def _apply_placement(args, model) -> None:
         n, _ = install_expert_streaming(
             model, gguf_path=gguf_path, explicit=True,
             stats_verbose=bool(getattr(args, "verbose", False)),
-            feeder_prefill=prefill, feeder_decode=decode)
+            feeder_prefill=prefill, feeder_decode=decode,
+            prefill_step=step)
         if n == 0:
             print(
                 "[stream] warning: no MoE expert stacks found - "

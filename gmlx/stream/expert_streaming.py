@@ -104,6 +104,7 @@ def configure_stream_cpu(
     feeder_prefill: bool | None = None,
     feeder_decode: bool | None = None,
     fast_disk: str | None = None,
+    prefill_step: int | None = None,
 ):
     """Whole-model CPU streaming (``--stream-cpu``): run the model on the CPU
     device with the streaming-expert machinery always engaged.
@@ -133,6 +134,7 @@ def configure_stream_cpu(
         feeder_prefill=feeder_prefill,
         feeder_decode=feeder_decode,
         fast_disk=fast_disk,
+        prefill_step=prefill_step,
     )
 
 
@@ -301,6 +303,7 @@ def install_expert_streaming(
     stats_verbose: bool | None = None,
     fast_disk: str | None = None,
     explicit: bool = False,
+    prefill_step: int | None = None,
 ):
     """Run routed-expert stacks (SwitchGLU) on the CPU stream.
 
@@ -318,6 +321,9 @@ def install_expert_streaming(
     ``explicit`` is ``--stream-experts`` or ``stream: experts``: a model
     under the budget streams as with ``force_stream``, and one over it
     takes the budget-keyed ladder (table first) as without the flag.
+
+    ``prefill_step`` is the requested prefill chunk width
+    (``--prefill-step-size``), which the KV room prices.
     """
     from gmlx.load.modules import (
         glu_unsorted_call,
@@ -1119,7 +1125,7 @@ def install_expert_streaming(
         from gmlx.stream.table_stream import streamed_table_bytes
 
         pin = getattr(model, "_kq_weights_pin", None)
-        room = kv_room_bytes(gguf_path)
+        room = kv_room_bytes(gguf_path, step=prefill_step)
         host_bytes = host_overhead_bytes(_physical_ram())
         arena_kw = dict(
             room_bytes=room.bytes,

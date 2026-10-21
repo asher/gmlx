@@ -183,12 +183,23 @@ def transient_bytes(ws: float) -> float:
     return cap_bytes_for(ws)
 
 
-def prefill_rows(model_type: str | None) -> int:
-    """Rows of the widest streamed prefill chunk: ``PREFILL_STEP_SIZE``
-    when set, else the loader's streaming step for this model type, and
-    9/8 of it while the short tail merges into the chunk before
-    (``expert_streaming.merge_prefill_tail``)."""
-    step = env_int("PREFILL_STEP_SIZE", 0)
+# The arch prefill steps a streamed prefill takes over the loader's
+# default (the models' _*_base_step); 0 or unparseable keeps the default.
+_ARCH_STEP_ENV = {"deepseek_v41": "GMLX_DS41_PREFILL_STEP",
+                  "deepseek_v4": "GMLX_V4_PREFILL_STEP",
+                  "qwen4_exp": "GMLX_Q4_PREFILL_STEP"}
+
+
+def prefill_rows(model_type: str | None, step: int | None = None) -> int:
+    """Rows of the widest streamed prefill chunk: the requested ``step``
+    (``--prefill-step-size``) or ``PREFILL_STEP_SIZE`` when set, else
+    the arch's own step env, else the loader's streaming step for this
+    model type, and 9/8 of it while the short tail merges into the chunk
+    before (``expert_streaming.merge_prefill_tail``)."""
+    if not (isinstance(step, int) and step > 0):
+        step = env_int("PREFILL_STEP_SIZE", 0)
+    if step <= 0 and model_type in _ARCH_STEP_ENV:
+        step = env_int(_ARCH_STEP_ENV[model_type], 0)
     if step <= 0:
         from gmlx.load.loader import (_STREAMING_PREFILL_STEP,
                                       _STREAMING_PREFILL_STEP_BY_MODEL_TYPE)
@@ -221,9 +232,10 @@ _STREAMS = ("hc_mult", "hc_count")
 _HEAD_DIM = ("head_dim", "v_head_dim", "global_head_dim")
 
 
-def prefill_activation_bytes(cfg) -> int:
+def prefill_activation_bytes(cfg, step: int | None = None) -> int:
     """Live activations of one streamed prefill chunk: one layer's
-    working set at fp32 for ``prefill_rows`` rows. Per row: four
+    working set at fp32 for ``prefill_rows`` rows (``step`` the requested
+    chunk width). Per row: four
     hidden-wide copies (residual, norm, attention and mixer outputs) on
     each residual stream (``hc_mult``), the attention output (heads x
     head_dim), and per routed expert the row takes its input and output
@@ -249,7 +261,7 @@ def prefill_activation_bytes(cfg) -> int:
     per_row = 4 * (4 * hidden * streams + heads * head_dim
                    + k * (2 * expert_in + 3 * ff))
     mt = _get(c, "model_type") or _get(cfg, "model_type")
-    return per_row * prefill_rows(mt if isinstance(mt, str) else None)
+    return per_row * prefill_rows(mt if isinstance(mt, str) else None, step)
 
 
 def pool_bytes(activation: int, fallback: int = _UNPRICED_POOL_BYTES) -> int:
@@ -297,9 +309,11 @@ def price_room(costs, trained_ctx, ws: float, transient: float,
                   activation_bytes=act, pool_bytes=pool)
 
 
-def kv_room_bytes(gguf_path: str | None, env: dict | None = None) -> KvRoom:
-    """The KV room to leave outside the arena. A flat legacy reserve when
-    the header cannot be priced or ``GMLX_DECODE_KV_RESERVE_GB`` is set."""
+def kv_room_bytes(gguf_path: str | None, env: dict | None = None,
+                  step: int | None = None) -> KvRoom:
+    """The KV room to leave outside the arena, its prefill chunk at the
+    requested ``step``. A flat legacy reserve when the header cannot be
+    priced or ``GMLX_DECODE_KV_RESERVE_GB`` is set."""
     if os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "") or not gguf_path:
         return price_room(None, None, 0, 0)
     try:
@@ -312,7 +326,7 @@ def kv_room_bytes(gguf_path: str | None, env: dict | None = None) -> KvRoom:
             return price_room(None, None, 0, 0)
         cfg, costs, _ = priced
         return price_room(costs, cfg.get("max_position_embeddings"), ws,
-                          _cap_bytes(), prefill_activation_bytes(cfg))
+                          _cap_bytes(), prefill_activation_bytes(cfg, step))
     except Exception:
         return price_room(None, None, 0, 0)
 

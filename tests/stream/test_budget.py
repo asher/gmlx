@@ -70,11 +70,22 @@ def chunk_env(monkeypatch):
 
 
 def test_chunk_rows_follow_the_streamed_chunk_width(chunk_env, monkeypatch):
+    for k in budget._ARCH_STEP_ENV.values():
+        monkeypatch.delenv(k, raising=False)
     # The loader's 8192-row streaming step, 9/8 of it with the tail merge.
     assert budget.prefill_rows("deepseek_v41") == 9216
     assert budget.prefill_rows("hy_v4") == 4608
+    # The arch's own step env, as its streamed prefill takes it.
+    monkeypatch.setenv("GMLX_DS41_PREFILL_STEP", "16384")
+    monkeypatch.setenv("GMLX_Q4_PREFILL_STEP", "0")
+    assert budget.prefill_rows("deepseek_v41") == 18432
+    assert budget.prefill_rows("qwen4_exp") == 9216
+    assert budget.prefill_rows("hy_v4") == 4608
+    # An explicit step wins: the server's PREFILL_STEP_SIZE, and the
+    # step run and chat ask for.
     monkeypatch.setenv("PREFILL_STEP_SIZE", "2048")
     assert budget.prefill_rows("deepseek_v41") == 2304
+    assert budget.prefill_rows("deepseek_v41", 4096) == 4608
     monkeypatch.setenv("GMLX_STREAM_PREFILL_TAIL_MERGE", "0")
     assert budget.prefill_rows("deepseek_v41") == 2048
 
