@@ -75,6 +75,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the next model, and dropped that model's own.
 - A `gmlx sync-models` that removed the last model under a commented
   `models:` block wrote a config that did not parse.
+- `gmlx run` with `--mmproj` and `--stream-experts` prefilled in smaller
+  chunks than a text run, so a long prompt took longer to its first token.
 
 ## [0.5.1] - 2026-10-18
 
