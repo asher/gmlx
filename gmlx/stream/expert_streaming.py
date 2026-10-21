@@ -219,7 +219,7 @@ def _set_allocator_limits(tracked_bytes: int, pool_bytes: int = 0) -> None:
     cache limit alone bound the pool. The pool is the one the KV room
     prices (``pool_bytes``, ``budget.pool_bytes``): it fills to its limit
     under prefill, and the live activations sit on top of it, so the room
-    holds both. GMLX_STREAM_ALLOC_LIMITS=0 keeps the defaults;
+    holds both. Without a priced pool it is 4 GiB. GMLX_STREAM_ALLOC_LIMITS=0 keeps the defaults;
     GMLX_STREAM_CACHE_GB sizes the pool."""
     if not env_bool("GMLX_STREAM_ALLOC_LIMITS", True) or not mx.metal.is_available():
         return

@@ -42,10 +42,10 @@ physical RAM. Four things share the ceiling, in this order:
    of 2 GB and 5% of the working set. It also holds one prefill chunk:
    the chunk's activations, priced from the model's widths at the
    streamed chunk width (`--prefill-step-size` or the arch's own step
-   switch when set), and the MLX buffer pool of the same size that
-   keeps the freed buffers for the next layer. Under prefill the pool
-   fills to its limit and the live activations sit on top of it, so the
-   room counts both.
+   switch when set), and the MLX buffer pool that keeps freed buffers
+   for the next layer, a quarter of the chunk and at least 2 GiB. Under
+   prefill the pool fills to its limit and the live activations sit on
+   top of it, so the room counts both.
 3. The prefill ring holds two copies of the largest layer's expert stacks.
    When the ring does not fit, prefill reads through the page cache
    instead, and the load says so. Decoding is not affected.

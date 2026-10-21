@@ -140,25 +140,32 @@ def test_chunk_activations_read_each_archs_width_names(chunk_env):
     assert budget.prefill_activation_bytes({"hidden_size": 1024}) == 0
 
 
-def test_room_prices_the_chunk_and_the_pool_that_keeps_it(header, monkeypatch):
-    """Under prefill the buffer pool fills to its limit and the chunk's
-    live activations sit on top of it, so the room holds both."""
+def test_room_holds_the_chunk_and_the_pool_the_allocator_keeps(
+        header, monkeypatch):
+    """The pool is a quarter of the chunk, at least 2 GiB: on DeepSeek V4.1
+    Flash's 8 GB chunk a 2 GiB pool prefilled 2k and 8k prompts as fast as
+    the whole chunk did. Under prefill it fills to its limit and the live
+    chunk sits on top, so the room moves with both."""
     import gmlx.commands.tool_preflight as tp
 
-    moe = dict(CFG, hidden_size=4096, num_experts_per_tok=8,
-               moe_intermediate_size=2048)
-    monkeypatch.setattr(tp, "_synth_config", lambda p: dict(moe))
-    act = budget.prefill_activation_bytes(moe)
-    assert act > 1 << 30
+    monkeypatch.setattr(tp, "_synth_config", lambda p: dict(CFG, **DS41_CFG))
+    ds41 = budget.kv_room_bytes(header)
+    assert ds41.activation_bytes == budget.prefill_activation_bytes(DS41_CFG)
+    assert ds41.pool_bytes == 2 << 30
+    wide = dict(DS41_CFG, num_experts_per_tok=16)
+    monkeypatch.setattr(tp, "_synth_config", lambda p: dict(CFG, **wide))
     room = budget.kv_room_bytes(header)
-    assert room.activation_bytes == act and room.pool_bytes == act
-    assert room.bytes == (room.kv_bytes + room.transient_bytes + 2 * act
-                          + room.reserve_bytes)
-    monkeypatch.setenv("GMLX_STREAM_CACHE_GB", "2")
-    room = budget.kv_room_bytes(header)
-    assert room.pool_bytes == 2 << 30
-    assert room.bytes == (room.kv_bytes + room.transient_bytes + act
-                          + (2 << 30) + room.reserve_bytes)
+    assert room.pool_bytes == room.activation_bytes // 4 > 2 << 30
+    assert room.bytes - ds41.bytes == (
+        room.activation_bytes - ds41.activation_bytes
+        + room.pool_bytes - ds41.pool_bytes)
+    # GMLX_STREAM_CACHE_GB sets the pool, and the room follows it.
+    monkeypatch.setenv("GMLX_STREAM_CACHE_GB", "1")
+    small = budget.kv_room_bytes(header)
+    assert small.pool_bytes == 1 << 30
+    assert room.bytes - small.bytes == room.pool_bytes - (1 << 30)
+    # The fit leaves out the chunk and its pool.
+    assert small.fit_bytes == room.fit_bytes
 
 
 def test_room_depth_clamped_to_trained_context(header, monkeypatch):
@@ -396,7 +403,7 @@ def test_deepseek41_default_arena_keeps_8_gib_free_at_the_prefill_peak(
     assert share == int(ring)
     free = avail - arena - room.pool_bytes - 5.4 * gib - 8.7 * gib - 1.8 * gib
     assert free >= 8 * gib
-    assert 50e9 < arena < 57e9
+    assert arena >= 50e9
 
 
 def test_ring_share_is_the_room_the_ring_adds_to_the_arena(monkeypatch):

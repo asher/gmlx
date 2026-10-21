@@ -284,7 +284,7 @@ def test_a_chunk_past_the_ceiling_still_streams_without_an_arena(priced_room):
     page cache gives back, so a chunk too big for the ceiling costs the
     arena and the ring, not the verdict."""
     ram, ws = priced_room
-    b = sp.box_plan(_chunked(40 * GiB, total=220e9, expert=200e9, ring=5e9),
+    b = sp.box_plan(_chunked(64 * GiB, total=220e9, expert=200e9, ring=5e9),
                     ram_bytes=ram, ws_bytes=ws)
     assert b.room.fit_bytes == pytest.approx(13e9)
     assert b.verdict == sp.VERDICT_PAGE_CACHE
