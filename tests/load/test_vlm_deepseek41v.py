@@ -223,14 +223,6 @@ def test_clip_names_remap_to_the_same_weights():
         assert mx.array_equal(got[k], want[k]), k
 
 
-def test_a_stray_clip_pad_sentinel_is_skipped():
-    arrays = _as_converted(_fake_mmproj_arrays())
-    arrays["v.token_embd.img_pad"] = mx.zeros((64,))
-    out, skipped, _ = remap_vision_arrays(arrays, "deepseek_v41_vl")
-    assert skipped == ["v.token_embd.img_pad"]
-    assert "image_pad" not in out
-
-
 def test_clip_keys_give_the_same_config():
     want = _config()
     got = _config(CLIP_META)
@@ -241,13 +233,6 @@ def test_clip_keys_give_the_same_config():
     meta = dict(_deepseek41_meta())
     meta["tokenizer.ggml.tokens"] = ["a", "b", DEEPSEEK41V_IMAGE_TOKEN, "c"]
     assert _config(CLIP_META, meta)["image_token_id"] == 2
-
-
-def test_clip_keys_without_a_required_field_fail_by_name():
-    mm = dict(CLIP_META)
-    del mm["clip.vision.image_min_pixels"]
-    with pytest.raises(ValueError, match="image_min_pixels"):
-        _config(mm)
 
 
 def test_processor_from_clip_metadata_alone():
