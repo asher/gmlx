@@ -14,7 +14,9 @@ VM shows; these stalls do.
 A test that hangs fails at --timeout with every thread's stack. A failed
 round keeps its log, a `ps` listing of the tree and any FIFOs left in its
 temporary folders under --out. The failing test ids go to
-<out>/flaky.json, which `scripts/ci_tests.py issues` reads.
+<out>/flaky.json, which `scripts/ci_tests.py issues` reads. A round whose
+pytest exits nonzero with no failing test, as when a plugin is missing or
+nothing is collected, fails too.
 
 Needs pytest-xdist, pytest-repeat and pytest-timeout (the `test` group).
 """
@@ -170,6 +172,8 @@ def one_round(n: int, a, out: Path) -> tuple[int, list[str], int]:
             return -1, [f"round {n} hung past {a.round_timeout} s"], staller.stalls
         staller.stop()
     failed = failures(junit, a.count)
+    if code != 0 and not failed:
+        failed = [f"round {n}: pytest exit {code}"]
     if code != 0:
         _leftovers(proc.pid, tmp, log)
     else:
