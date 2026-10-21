@@ -466,3 +466,154 @@ def test_a_close_that_cancels_queued_fills_ends_the_read(
     assert all(f.cancelled() for f in submitted)
     assert len(raised) == 1 and isinstance(raised[0], CancelledError)
     assert s._fd is None
+
+
+# The PLE-keyed conversion stores one shared table in a GGUF quant (Q5_K
+# on the 1017 UD-IQ2_XXS file).
+Q5K_ROWS, Q5K_DIMS, Q5K_BYTES = 40, 256, 176
+
+
+@pytest.fixture
+def q5k_table_gguf(tmp_path):
+    rng = np.random.default_rng(11)
+    raw = rng.integers(0, 256, size=(Q5K_ROWS, Q5K_BYTES), dtype=np.uint8)
+    # Each block opens with its f16 scale and min; keep them finite.
+    dd = rng.uniform(0.01, 0.1, size=(Q5K_ROWS, 2)).astype(np.float16)
+    raw[:, :4] = dd.view(np.uint8).reshape(Q5K_ROWS, 4)
+    path = str(tmp_path / "q5k.gguf")
+    w = gguf.GGUFWriter(path, "deepseek41")
+    w.add_tensor("per_layer_token_embd.weight", raw,
+                 raw_dtype=gguf.GGMLQuantizationType.Q5_K)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return path, raw
+
+
+class _SharedInner:
+    def __init__(self, table):
+        self.engram_embed = table
+        self.layers = []
+
+
+class _SharedModel:
+    model_type = "deepseek_v41"
+
+    def __init__(self, table):
+        self.model = _SharedInner(table)
+
+
+def test_a_kquant_table_past_the_ceiling_decodes_from_the_file(
+        q5k_table_gguf, monkeypatch):
+    from gguf.quants import dequantize as gguf_dequantize
+    from mlx_kquant.nn import KQuantEmbedding
+
+    from gmlx.load.dtypes import activation_dtype
+    from gmlx.models.deepseek_v41.model import EngramTable
+
+    path, raw = q5k_table_gguf
+    src = _sources(path, monkeypatch)
+    s = src["per_layer_token_embd.weight"]
+    assert (s.codec, s.dims, s.row_bytes) == ("q5_k", Q5K_DIMS, Q5K_BYTES)
+
+    table = EngramTable(Q5K_ROWS, Q5K_DIMS)
+    model = _SharedModel(table)
+    assert install_deferred_tables(model, src) == ["per_layer_token_embd.weight"]
+    try:
+        ids = [[3, 39, 3], [0, 17, 8]]
+        got = table(mx.array(ids))
+        # The same bytes held in an array, through the resident gather.
+        resident = KQuantEmbedding(Q5K_ROWS, Q5K_DIMS, "q5_k",
+                                   out_dtype=activation_dtype("deepseek_v41"))
+        resident.weight = mx.array(raw)
+        want = resident(mx.array(ids))
+        assert got.shape == (2, 3, Q5K_DIMS) and got.dtype == want.dtype
+        assert mx.array_equal(got, want)
+        # And against gguf-py's decode of the format.
+        ref = gguf_dequantize(raw, gguf.GGMLQuantizationType.Q5_K)[np.array(ids)]
+        assert np.allclose(np.array(got.astype(mx.float32)), ref,
+                           rtol=1e-2, atol=1e-3)
+    finally:
+        s.close()
+
+
+def test_a_table_codec_the_build_lacks_is_refused(q5k_table_gguf, monkeypatch):
+    import mlx_kquant as kq
+
+    from gmlx.models.deepseek_v41.model import EngramTable
+
+    path, _raw = q5k_table_gguf
+    src = _sources(path, monkeypatch)
+    monkeypatch.setattr(kq, "codecs", lambda: ["q8_0"])
+    try:
+        with pytest.raises(RuntimeError, match="q5_k codec"):
+            install_deferred_tables(
+                _SharedModel(EngramTable(Q5K_ROWS, Q5K_DIMS)), src)
+    finally:
+        src["per_layer_token_embd.weight"].close()
+
+
+# The larger unsloth quants store the shared table as MXFP8 on GGML type
+# id 43: per 32 values, one E8M0 scale byte, then 32 E4M3 bytes.
+MX_ROWS, MX_DIMS = 24, 256
+
+
+def _mxfp8_reference(raw: np.ndarray) -> np.ndarray:
+    """A numpy port of the format's reference row decode."""
+    code = np.arange(256)
+    exp, man = (code >> 3) & 15, code & 7
+    e4m3 = np.where(exp > 0, (8 + man) * 2.0 ** (exp - 10), man * 2.0 ** -9)
+    e4m3 = np.where(code & 128, -e4m3, e4m3)
+    e4m3[(code & 127) == 127] = np.nan
+    blocks = raw.reshape(raw.shape[0], -1, 33)
+    scale = 2.0 ** (blocks[..., :1].astype(np.float64) - 127)
+    scale[blocks[..., :1] == 255] = np.nan
+    return (e4m3[blocks[..., 1:]] * scale).reshape(raw.shape[0], -1)
+
+
+@pytest.fixture
+def mxfp8_table_gguf(tmp_path):
+    from helpers import mint_type43_gguf
+
+    rng = np.random.default_rng(13)
+    raw = rng.integers(0, 256, size=(MX_ROWS, MX_DIMS // 32, 33),
+                       dtype=np.uint8)
+    # Every E4M3 code, both NaN codes among them, and scales across the
+    # range, up to the NaN code. Scales at the bottom of the range give
+    # subnormal values, which the GPU flushes to zero.
+    raw[:8, :, 1:] = np.arange(256, dtype=np.uint8).reshape(8, 1, 32)
+    raw[:, :, 0] = rng.integers(100, 140, size=(MX_ROWS, MX_DIMS // 32))
+    raw[8, :, 0] = [16, 64, 126, 127, 128, 200, 254, 255]
+    raw = raw.reshape(MX_ROWS, -1)
+    path = str(tmp_path / "mxfp8.gguf")
+    mint_type43_gguf(path, [("per_layer_token_embd.weight",
+                             (MX_DIMS, MX_ROWS), "MXFP8", raw.tobytes())])
+    return path, raw
+
+
+def test_an_mxfp8_table_past_the_ceiling_decodes_from_the_file(
+        mxfp8_table_gguf, monkeypatch):
+    from gmlx.models.deepseek_v41.model import EngramTable
+
+    path, raw = mxfp8_table_gguf
+    src = _sources(path, monkeypatch)
+    s = src["per_layer_token_embd.weight"]
+    assert (s.codec, s.dims, s.row_bytes) == ("mxfp8", MX_DIMS, 264)
+
+    # Read without a kquant mxfp8 codec.
+    import mlx_kquant as kq
+    monkeypatch.setattr(kq, "codecs", lambda: ["q8_0"])
+    table = EngramTable(MX_ROWS, MX_DIMS)
+    install_deferred_tables(_SharedModel(table), src)
+    try:
+        ids = np.array([[0, 7, 8, 23, 8]])
+        got = np.array(table(mx.array(ids)).astype(mx.float32))[0]
+        want = _mxfp8_reference(raw)[ids[0]]
+        # The engram path rounds rows to bfloat16, as the reference does.
+        want = np.array(mx.array(want.astype(np.float32))
+                        .astype(mx.bfloat16).astype(mx.float32))
+        assert np.array_equal(np.isnan(got), np.isnan(want))
+        assert np.array_equal(np.nan_to_num(got), np.nan_to_num(want))
+    finally:
+        s.close()

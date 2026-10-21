@@ -109,7 +109,9 @@ def test_streamable_table_names_by_arch():
     assert ds.fullmatch("blk.1.engram_embd.weight")
     assert ds.fullmatch("blk.14.engram_embd.weight")
     assert not ds.fullmatch("blk.1.engram_q.weight")
-    assert not ds.fullmatch("per_layer_token_embd.weight")
+    # The PLE-keyed conversion's one table for every engram layer.
+    assert ds.fullmatch("per_layer_token_embd.weight")
+    assert not ds.fullmatch("blk.1.engram_gate.weight")
     assert ts.streamable_table_names("llama") is None
     assert ts.streamable_table_names(None) is None
 

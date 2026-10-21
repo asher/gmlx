@@ -66,6 +66,23 @@ def test_an_mlx_kquant_without_skip_is_named(table_gguf, monkeypatch):
                                   expect_quant=False)
 
 
+def test_another_tensor_past_the_ceiling_is_named(table_gguf, monkeypatch):
+    """Only lookup tables can be read from the file. Any other tensor that
+    no buffer can hold fails the load with its name, not Metal's bare
+    allocation error."""
+    monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", "100")
+
+    def load_gguf(path, zero_copy=True, skip=()):
+        raise RuntimeError(
+            "[metal::malloc] Attempting to allocate 128 bytes which is greater "
+            "than the maximum allowed buffer size of 100 bytes.")
+
+    monkeypatch.setattr(wire.kq, "load_gguf", load_gguf)
+    with pytest.raises(RuntimeError, match="token_embd.weight is larger"):
+        wire.load_gguf_wire_bytes(table_gguf, shards=[table_gguf],
+                                  expect_quant=False)
+
+
 @pytest.fixture
 def mtp_table_gguf(tmp_path):
     """The table and one Q8_0 matrix, so the wire load finds a codec."""
@@ -123,3 +140,27 @@ def test_the_mtp_target_install_gets_the_skipped_tables(mtp_table_gguf,
     assert list(tables) == ["blk.1.engram_embd.weight"]
     assert tables["blk.1.engram_embd.weight"].rows == ROWS
 
+
+
+@pytest.mark.parametrize("table_codec", ["stq1_0", "mxfp8"])
+def test_an_mxfp8_tensor_read_as_stq1_0_is_refused(tmp_path, monkeypatch,
+                                                   table_codec):
+    """An mlx-kquant from before MXFP8 reads every type-43 tensor as STQ1_0.
+    A table small enough to load as an array must not decode as ternary
+    weights; a build that names it MXFP8 loads it."""
+    from helpers import mint_type43_gguf
+
+    path = str(tmp_path / "t.gguf")
+    mint_type43_gguf(path, [
+        ("blk.0.ffn_up.weight", (256, 4), "STQ1_0", None),
+        ("per_layer_token_embd.weight", (256, 4), "MXFP8", None)])
+    monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", str(1 << 40))
+    codecs = {"blk.0.ffn_up.weight": "stq1_0",
+              "per_layer_token_embd.weight": table_codec}
+    monkeypatch.setattr(wire.kq, "load_gguf", lambda p, zero_copy=True, skip=(): (
+        {}, codecs, {"general.architecture": "deepseek41"}, {}))
+    if table_codec == "stq1_0":
+        with pytest.raises(RuntimeError, match="is an MXFP8 tensor"):
+            wire.load_gguf_wire_bytes(path, shards=[path], expect_quant=False)
+    else:
+        wire.load_gguf_wire_bytes(path, shards=[path], expect_quant=False)

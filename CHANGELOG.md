@@ -35,6 +35,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- unsloth's DeepSeek-V4.1-Flash-1017 GGUFs load. Their one shared engram
+  table, larger than a GPU buffer, is read from the file, and MXFP8 tables
+  are told apart from STQ1_0 weights, which share the same GGUF type id.
+- A GGUF with a tensor too large for one GPU buffer now fails with the
+  tensor's name instead of a Metal allocation error.
 - A Ctrl-C that reached a `gmlx launch --container` session without a
   terminal just as its client exited was lost, and the session kept waiting
   for its other copies.

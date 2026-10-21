@@ -147,6 +147,11 @@ class ModelArgs(BaseModelArgs):
     # Row byte layout, when the conversion stores the tables as raw bytes
     # rather than a GGUF quant (see engram_codec).
     engram_row_encoding: Optional[str] = None
+    # One table holds every engram layer's rows, in layer order, and the
+    # offsets index it; engram_table_rows then has one entry.
+    engram_shared_table: bool = False
+    # The conversion stores q_weight * k_weight as one gate weight.
+    engram_folded_gate: bool = False
     # intermediate_size is unused: every V4.1 layer is MoE.
     intermediate_size: int = 0
 
@@ -176,9 +181,11 @@ class ModelArgs(BaseModelArgs):
                     f"{len(self.engram_primes)} engram primes for {n_t} tables "
                     f"x {cols} buckets"
                 )
-            if len(self.engram_table_rows) != n_t:
+            want = 1 if self.engram_shared_table else n_t
+            if len(self.engram_table_rows) != want:
                 raise ValueError(
-                    "engram_table_rows needs one row count per engram layer"
+                    f"engram_table_rows needs {want} row count(s), one per "
+                    f"engram table, got {len(self.engram_table_rows)}"
                 )
 
 
@@ -302,34 +309,48 @@ class Engram(nn.Module):
     """One n-gram lookup written into the residual streams, gated by how
     well it matches them."""
 
-    def __init__(self, config: ModelArgs, table_rows: int):
+    def __init__(self, config: ModelArgs, table_rows: Optional[int]):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.hc_mult = config.hc_mult
         self.eps = config.rms_norm_eps
         self.clamp_value = 1e-6
         cols = (config.engram_max_ngram_size - 1) * config.engram_n_heads
-        self.embed = EngramTable(table_rows, config.engram_head_dim,
-                                 config.engram_row_encoding)
+        # No table of its own when the model holds one shared table.
+        if table_rows is not None:
+            self.embed = EngramTable(table_rows, config.engram_head_dim,
+                                     config.engram_row_encoding)
         self.wkv = nn.Linear(
             cols * config.engram_head_dim,
             config.hidden_size * (config.hc_mult + 1),
             bias=False,
         )
-        self.q_weight = mx.ones((config.hc_mult, config.hidden_size), dtype=mx.float32)
-        self.k_weight = mx.ones((config.hc_mult, config.hidden_size), dtype=mx.float32)
+        shape = (config.hc_mult, config.hidden_size)
+        if config.engram_folded_gate:
+            self.gate_weight = mx.ones(shape, dtype=mx.float32)
+        else:
+            self.q_weight = mx.ones(shape, dtype=mx.float32)
+            self.k_weight = mx.ones(shape, dtype=mx.float32)
 
-    def __call__(self, h: mx.array, row_ids: mx.array,
-                 token_mask: Optional[mx.array] = None) -> mx.array:
-        B, L = row_ids.shape[0], row_ids.shape[1]
-        rows = self.embed(row_ids)
+    def __call__(self, h: mx.array, row_ids: Optional[mx.array],
+                 token_mask: Optional[mx.array] = None,
+                 rows: Optional[mx.array] = None) -> mx.array:
+        """``rows`` are the gathered table rows, when the caller gathered
+        them from a shared table; else ``row_ids`` index this layer's own."""
+        if rows is None:
+            rows = self.embed(row_ids)
+        B, L = rows.shape[0], rows.shape[1]
         kv = self.wkv(rows.reshape(B, L, -1))
         split = self.hc_mult * self.hidden_size
         key = kv[..., :split].astype(mx.float32).reshape(
             B, L, self.hc_mult, self.hidden_size
         )
         value = kv[..., split:].astype(mx.float32)
-        weight = self.q_weight.astype(mx.float32) * self.k_weight.astype(mx.float32)
+        if "gate_weight" in self:
+            weight = self.gate_weight.astype(mx.float32)
+        else:
+            weight = (self.q_weight.astype(mx.float32)
+                      * self.k_weight.astype(mx.float32))
 
         hf = h.astype(mx.float32)
         rstd = mx.rsqrt(mx.mean(mx.square(hf), axis=-1) + self.eps) * mx.rsqrt(
@@ -1601,12 +1622,18 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
         ]
         self.norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.engram_hash = None
+        self.engram_embed = None
         if config.engram_layer_ids:
             if config.engram_token_map is not None:
                 self.engram_hash = EngramHash(config)
+            shared = config.engram_shared_table
+            if shared:
+                self.engram_embed = EngramTable(
+                    config.engram_table_rows[0], config.engram_head_dim,
+                    config.engram_row_encoding)
             for slot, layer_id in enumerate(config.engram_layer_ids):
                 self.layers[layer_id].engram = Engram(
-                    config, config.engram_table_rows[slot]
+                    config, None if shared else config.engram_table_rows[slot]
                 )
                 self.layers[layer_id].engram_slot = slot
 
@@ -1731,9 +1758,14 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
             window_size=self.args.sliding_window, return_array=True,
         )
 
+        shared_rows = None
         if row_ids is not None:
             # File-backed tables read their rows off-thread from here on,
             # under the layers that run before each engram.
+            if self.engram_embed is not None:
+                pf = getattr(self.engram_embed, "prefetch", None)
+                if pf is not None:
+                    pf(row_ids)
             for layer in self.layers:
                 pf = getattr(getattr(layer.engram, "embed", None), "prefetch", None)
                 if pf is not None:
@@ -1766,9 +1798,16 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
                     t0 = time.perf_counter()
                 if carry is not None:
                     h, carry = hc_expand_m1(*carry), None
+                rows = None
+                if self.engram_embed is not None:
+                    # One gather serves every engram layer.
+                    if shared_rows is None:
+                        shared_rows = self.engram_embed(row_ids)
+                    rows = shared_rows[:, r0:, layer.engram_slot]
                 h = layer.engram(
                     h, row_ids[:, r0:, layer.engram_slot, :],
                     engram_mask if engram_mask is None else engram_mask[:, r0:],
+                    rows=rows,
                 )
                 if prof:
                     _prof_mark("engram", idx, h, t0)
@@ -1881,6 +1920,7 @@ class Model(nn.Module):
         keep = (
             "_hc.", ".attn_sink", ".e_score_correction_bias",
             ".gate.weight", ".engram.q_weight", ".engram.k_weight",
+            ".engram.gate_weight",
         )
 
         def predicate(path):

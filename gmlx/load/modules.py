@@ -364,9 +364,8 @@ def _kq_wire_k(w, codec):
         wpb, bpb = GGML_QUANT_SIZES[GGMLQuantizationType[name]]
     except KeyError:
         # Codecs newer than the installed gguf-py; headerscan owns the table.
-        from .headerscan import QUANT_TYPE_FALLBACK
+        from .headerscan import FALLBACK_SIZES_BY_NAME as sizes
 
-        sizes = dict(QUANT_TYPE_FALLBACK.values())
         if name not in sizes:
             return -1
         wpb, bpb = sizes[name]

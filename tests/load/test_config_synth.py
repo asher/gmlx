@@ -3154,3 +3154,69 @@ def test_k2_horizon_synth_instantiates(meta_fn, shapes):
     mx.eval(m.parameters())
     logits = m(mx.array([[1, 2, 3]]))
     assert logits.shape == (1, 3, VOCAB)
+
+
+# --- the llama.cpp conversion with one shared table -----------------------
+
+# One table holds both engram layers' rows, so the second layer's offsets
+# start where the first layer's rows end.
+_PLE_OFFSETS = _ENGRAM_OFFSETS[:6] + [o + _ENGRAM_ROWS[0]
+                                      for o in _ENGRAM_OFFSETS[6:]]
+
+_PLE_SHAPES = {k: v for k, v in _DEEPSEEK41_SHAPES.items()
+               if "engram_embd" not in k}
+_PLE_SHAPES["per_layer_token_embd.weight"] = [8, sum(_ENGRAM_ROWS)]
+_PLE_SHAPES.update({f"blk.{i}.engram_gate.weight": [64, 4] for i in (1, 3)})
+
+
+def _deepseek41_ple_meta() -> dict:
+    """The same model under the PLE keys this conversion writes."""
+    from gmlx.load.config_synth import _DEEPSEEK41_PLE_KEYS
+
+    arch = "deepseek41"
+    m = _deepseek41_meta()
+    for src, dst in _DEEPSEEK41_PLE_KEYS.items():
+        m[f"{arch}.{src}"] = m.pop(f"{arch}.{dst}")
+    m[f"{arch}.ple.head_offsets"] = _PLE_OFFSETS
+    return m
+
+
+def test_deepseek41_shared_table_header_synthesizes():
+    import gmlx.models.deepseek_v41.model as deepseek_v41_model
+    deepseek_v41_model.ensure_registered()
+
+    want = synthesize_config(_deepseek41_meta(),
+                             tensor_shapes=_DEEPSEEK41_SHAPES)
+    got = synthesize_config(_deepseek41_ple_meta(), tensor_shapes=_PLE_SHAPES)
+    assert got["engram_shared_table"] and got["engram_folded_gate"]
+    assert got["engram_table_rows"] == [sum(_ENGRAM_ROWS)]
+    assert got["engram_offsets"] == _PLE_OFFSETS
+    assert "hidden_size_per_layer_input" not in got
+    for k in ("engram_shared_table", "engram_folded_gate",
+              "engram_table_rows", "engram_offsets"):
+        got.pop(k), want.pop(k, None)
+    assert got == want
+
+    c = synthesize_config(_deepseek41_ple_meta(), tensor_shapes=_PLE_SHAPES)
+    Model, ModelArgs = _get_classes(c)
+    model = Model(ModelArgs.from_dict(c))
+    mx.eval(model.parameters())
+    out = model(mx.array([[1, 2, 3]]), cache=model.make_cache())
+    mx.eval(out)
+    assert out.shape[-1] == VOCAB
+
+
+def test_deepseek41_shared_table_must_hold_every_bucket():
+    shapes = dict(_PLE_SHAPES)
+    shapes["per_layer_token_embd.weight"] = [8, sum(_ENGRAM_ROWS) - 1]
+    with pytest.raises(ValueError, match="buckets reach row"):
+        synthesize_config(_deepseek41_ple_meta(), tensor_shapes=shapes)
+
+
+def test_deepseek41_engram_tensors_without_constants_are_refused():
+    # Without the keys the model builds no engram layers and the loader
+    # drops the engram weights without a word.
+    meta = {k: v for k, v in _deepseek41_ple_meta().items()
+            if ".ple." not in k}
+    with pytest.raises(ValueError, match="engram tensors"):
+        synthesize_config(meta, tensor_shapes=_PLE_SHAPES)

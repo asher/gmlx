@@ -41,11 +41,9 @@ from gmlx.envflags import env_float, env_int
 from gmlx.textfmt import plural_s
 import gmlx.load.remote as remote
 from gmlx.load.preflight import (
-    NATIVE_FP_TYPES,
-    NATIVE_TYPES,
     SPLIT_SHARD_RE,
-    SUPPORTED_QUANT_TYPES,
     find_split_shards,
+    loadable_type,
     shard_names,
 )
 
@@ -85,8 +83,7 @@ def _report_from_scans(scans: list, *, arch: str | None = None) -> remote.Header
         for t in hs.tensors:
             tn = t.type_name
             hist[tn] = hist.get(tn, 0) + 1
-            if (tn not in SUPPORTED_QUANT_TYPES and tn not in NATIVE_TYPES
-                    and tn not in NATIVE_FP_TYPES):
+            if not loadable_type(tn):
                 unsup[tn] = unsup.get(tn, 0) + 1
     return remote.HeaderReport(detected, hist, unsup, sum(hist.values()),
                                gguf_type, hadamard=hadamard)
@@ -146,7 +143,7 @@ def _build_report(ref: remote.Ref, *, arch: str | None = None,
     scans: list | None = []
     for u in urls:
         buf, total = remote.fetch_header_bytes(u, **kwargs)
-        r = remote.classify_header(buf)
+        r = remote.classify_header(buf, total)
         r.total_bytes = total
         reports.append(r)
         if scans is not None:

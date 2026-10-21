@@ -3294,13 +3294,36 @@ _DEEPSEEK41_DS4_KEYS = {
 _DEEPSEEK41_GATING = {"sqrtsoftplus": 4}
 
 
+# llama.cpp PR #30817 writes the engram constants under qwen4exp's PLE keys,
+# for one table that holds every engram layer's rows in layer order, so
+# ple.head_offsets index that one table.
+_DEEPSEEK41_PLE_KEYS = {
+    "ple.layers": "engram.layer_ids",
+    "ple.ngram_size": "engram.max_ngram_size",
+    "ple.heads_per_ngram": "engram.head_count",
+    "embedding_length_per_layer_input": "engram.key_length",
+    "ple.layer_multipliers": "engram.multipliers",
+    "ple.head_vocab_sizes": "engram.primes",
+    "ple.head_offsets": "engram.offsets",
+    "engram.pad_token_id": "engram.pad_id",
+}
+
+
 def _deepseek41_dialect(meta, shapes):
-    """Translate a ds4-converted deepseek41 header into the llama.cpp
-    spelling. Identified by ds4's own keys rather than by a llama.cpp key
-    being absent, so a rename on the llama.cpp side cannot misfire it; a
-    llama.cpp header has neither and passes through untouched."""
+    """Translate a ds4-converted or PLE-keyed deepseek41 header into the
+    engram spelling the synth reads. Each is identified by its own keys
+    rather than by another key being absent, so a rename elsewhere cannot
+    misfire it; a header with neither passes through untouched."""
     arch = "deepseek41"
     meta = as_kv_dict(meta)  # the shim rewrites keys: dict mode only
+    if f"{arch}.ple.layers" in meta:
+        meta = dict(meta)
+        for src, dst in _DEEPSEEK41_PLE_KEYS.items():
+            key, tgt = f"{arch}.{src}", f"{arch}.{dst}"
+            if key in meta and tgt not in meta:
+                # Moved, not copied: the universal fields read some PLE
+                # keys as qwen4exp's.
+                meta[tgt] = meta.pop(key)
     if not any(f"{arch}.{k}" in meta for k in ("engram.encoding", "config")):
         return meta
 
@@ -3350,6 +3373,10 @@ def _engram_row_width(config: dict) -> int:
     from gmlx.models.deepseek_v41.engram_codec import row_width
 
     return row_width(config["engram_head_dim"], config["engram_row_encoding"])
+
+
+# The llama.cpp conversion's one table for every engram layer.
+_DEEPSEEK41_SHARED_TABLE = "per_layer_token_embd.weight"
 
 
 def _synth_deepseek41(meta, shapes, config: dict) -> None:
@@ -3408,6 +3435,15 @@ def _synth_deepseek41(meta, shapes, config: dict) -> None:
 
     layer_ids = _read_int_array(meta, f"{arch}.engram.layer_ids")
     if not layer_ids:
+        # Engram tensors with no constants to hash them by: the loader would
+        # drop the engram layers without a word.
+        stray = [n for n in shapes if "engram" in n
+                 or n == _DEEPSEEK41_SHARED_TABLE]
+        if stray:
+            raise ValueError(
+                f"deepseek41 synth: the file has engram tensors ({stray[0]}, "
+                f"{len(stray)} in all) but no {arch}.engram.layer_ids or "
+                f"{arch}.ple.layers key")
         config["engram_layer_ids"] = []
         return
     config["engram_layer_ids"] = [int(i) for i in layer_ids]
@@ -3462,6 +3498,27 @@ def _synth_deepseek41(meta, shapes, config: dict) -> None:
             raise ValueError(
                 f"deepseek41 synth: {len(config[key])} {key} for {n_tables} "
                 f"tables x {per_table} buckets")
+
+    config["engram_folded_gate"] = all(
+        f"blk.{lid}.engram_gate.weight" in shapes
+        for lid in config["engram_layer_ids"])
+    shared = shapes.get(_DEEPSEEK41_SHARED_TABLE)
+    config["engram_shared_table"] = shared is not None
+    if shared is not None:
+        width = _engram_row_width(config)
+        if int(shared[0]) != width:
+            raise ValueError(
+                f"deepseek41 synth: engram table row is {int(shared[0])} wide "
+                f"but the key length is {width}")
+        n_rows = int(shared[1])
+        top = max(o + p for o, p in zip(config["engram_offsets"],
+                                        config["engram_primes"]))
+        if top != n_rows:
+            raise ValueError(
+                f"deepseek41 synth: engram buckets reach row {top} but the "
+                f"shared table has {n_rows} rows")
+        config["engram_table_rows"] = [n_rows]
+        return
 
     rows = []
     for i, lid in enumerate(config["engram_layer_ids"]):

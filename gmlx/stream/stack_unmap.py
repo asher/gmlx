@@ -81,7 +81,13 @@ def _remap(files: dict) -> dict:
     for kind, (path, name, shape) in files.items():
         arrays = by_path.get(path)
         if arrays is None:
-            arrays = by_path[path] = kq.load_gguf(path, True)[0]
+            from .table_pread import oversize_names
+
+            # A table no array can hold may share the file with the stacks.
+            skip = oversize_names(path)
+            arrays = by_path[path] = (
+                kq.load_gguf(path, True, skip) if skip
+                else kq.load_gguf(path, True))[0]
         a = arrays[name]
         if tuple(a.shape) != shape:
             if a.size != math.prod(shape):

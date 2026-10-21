@@ -2130,6 +2130,12 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.layers.{bid}.engram.q_weight", "passthrough"),
         (re.compile(r"^blk\.(\d+)\.engram_k_norm\.weight$"),
          "model.layers.{bid}.engram.k_weight", "passthrough"),
+        # The llama.cpp conversion stores one table for every engram layer
+        # and folds q_weight * k_weight into one gate.
+        (re.compile(r"^per_layer_token_embd\.weight$"),
+         "model.engram_embed.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.engram_gate\.weight$"),
+         "model.layers.{bid}.engram.gate_weight", "passthrough"),
         # V4.1 index keys come from the kv-source layer's own latent, so the
         # indexer has its own wk/k_norm instead of V4's private compressor.
         (re.compile(r"^blk\.(\d+)\.indexer\.attn_k\.weight$"),
