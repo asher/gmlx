@@ -194,6 +194,32 @@ def test_wrapped_table_gather_is_bit_exact():
     assert bool(mx.all(out == ref))  # bit-exact, not allclose
 
 
+def test_a_gather_only_table_streams_at_its_output_dtype():
+    """MXFP8 scales reach 2^127. A streamed table decodes like the resident
+    one, straight to the output dtype, not through float16."""
+    import mlx_kquant as kq
+    from mlx_kquant.nn import KQuantEmbedding
+
+    if "mxfp8" not in kq.codecs():
+        pytest.skip("this mlx-kquant has no mxfp8 codec")
+    rows, dims = 4, 64
+    raw = np.full((rows, dims // 32, 33), 0x38, dtype=np.uint8)  # e4m3 1.0
+    raw[:, :, 0] = np.array([[150], [100], [127], [200]], dtype=np.uint8)
+    emb = KQuantEmbedding(rows, dims, "mxfp8")
+    emb.weight = mx.array(raw.reshape(rows, -1))
+    model = _Node()
+    model.model_type = "qwen4_exp"
+    model.model = _Node()
+    model.model.ple_embed = emb
+    ids = mx.array([[0, 1, 2, 3]], dtype=mx.int32)
+    ref = emb(ids)
+    mx.eval(ref)
+    ts.install_table_streaming(model)
+    out = emb(ids)
+    mx.eval(out)
+    assert bool(mx.all(mx.isfinite(out))) and bool(mx.all(out == ref))
+
+
 def test_wrapped_table_as_linear_raises():
     model = _table_model()
     ts.install_table_streaming(model)

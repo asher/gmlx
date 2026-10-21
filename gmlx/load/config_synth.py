@@ -3423,12 +3423,14 @@ def _synth_deepseek41(meta, shapes, config: dict) -> None:
             "owns a compressed-KV stream")
 
     # Two-level candidate selection, which only engages past 16K compressed
-    # positions. The llama.cpp conversion writes it under the indexer keys;
-    # older files have the config's names or nothing, and the reference
-    # config's values are the fallback.
+    # positions. The llama.cpp conversion writes it under the indexer keys
+    # and leaves them out when the model has none (-1). Older files have
+    # the config's names or nothing, and the reference config's values are
+    # the fallback.
+    spelled = f"{arch}.attention.kv_source_layers" in meta
     for cfg, key, old, default in (
         ("candidate_source_layer", "candidate_source_layer",
-         "candidate_source_layer_id", 20),
+         "candidate_source_layer_id", -1 if spelled else 20),
         ("candidate_topk_blocks", "candidate_top_k_blocks",
          "candidate_topk_blocks", 2048),
         ("candidate_block_size", "candidate_block_size",

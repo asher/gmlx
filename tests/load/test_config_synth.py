@@ -3233,3 +3233,15 @@ def test_deepseek41_reads_the_indexer_candidate_keys():
     c = synthesize_config(meta, tensor_shapes=_PLE_SHAPES)
     assert (c["candidate_source_layer"], c["candidate_topk_blocks"],
             c["candidate_block_size"]) == (3, 64, 4)
+
+
+def test_deepseek41_llamacpp_header_without_candidate_keys_has_none():
+    # The conversion leaves the keys out when the model has no candidate
+    # layer; an older file without them gets the reference defaults.
+    arch = "deepseek41"
+    meta = _deepseek41_ple_meta()
+    meta[f"{arch}.attention.kv_source_layers"] = [2]
+    c = synthesize_config(meta, tensor_shapes=_PLE_SHAPES)
+    assert c["candidate_source_layer"] == -1
+    c = synthesize_config(_deepseek41_ple_meta(), tensor_shapes=_PLE_SHAPES)
+    assert c["candidate_source_layer"] == 20

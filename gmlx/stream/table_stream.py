@@ -314,7 +314,12 @@ def _wrapped_class(cls, kquant: bool):
                 gathered = mx.take(
                     self["weight"], x, axis=0, stream=table_stream())
                 flat = gathered.reshape(-1, gathered.shape[-1])
-                deq = kq.dequantize(flat, self["scales"], self.kquant_type)
+                # As in KQuantEmbedding: a gather-only codec (mxfp8) can
+                # pass the float16 range, so it decodes to the output dtype.
+                dt = (None if kq.codec_has_matmul(self.kquant_type)
+                      else self.out_dtype)
+                deq = kq.dequantize(flat, self["scales"], self.kquant_type,
+                                    dtype=dt)
                 return deq.reshape(
                     *gathered.shape[:-1], self.dims).astype(self.out_dtype)
 
