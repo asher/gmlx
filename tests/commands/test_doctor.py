@@ -759,6 +759,30 @@ def test_memory_row_warns_on_over_ram_model(tmp_path, monkeypatch, capsys):
     assert "stream: experts" in out
 
 
+@pytest.mark.parametrize("ram_gib", [256, 128])
+def test_memory_row_judges_a_model_without_its_file_read_tables(
+        tmp_path, monkeypatch, capsys, ram_gib):
+    """DeepSeek-V4.1-Flash 1017 UD-IQ2_XXS: 300.5 GB, 135.2 GB of it an
+    engram table the load reads from the file. A 256 GB Studio holds the
+    rest, so the row passes; a 128 GB M5 Max does not."""
+    import gmlx.commands.manage as manage
+    import gmlx.serve.capacity as cap
+    cfg, lib = _cfg(tmp_path, _BASE)
+    _mint(lib / "m.gguf")
+    _ram(monkeypatch, ram_gib * 1024**3)
+    monkeypatch.setattr(manage, "_model_size_bytes",
+                        lambda path, dirs: 300_469_616_416)
+    monkeypatch.setattr(cap, "deferred_table_bytes",
+                        lambda path, *a, **k: 135_172_021_600)
+    assert doctor.cmd_doctor(["--config", str(cfg)]) == 0
+    out = capsys.readouterr().out
+    if ram_gib == 256:
+        assert "PASS  memory" in out and "configured models fit" in out
+    else:
+        assert "WARN  memory" in out
+        assert "larger than RAM: m (279.8 GB)" in out
+
+
 def test_memory_row_skips_streamed_models(tmp_path, monkeypatch, capsys):
     body = _BASE + "    stream: experts\n"
     cfg, lib = _cfg(tmp_path, body)

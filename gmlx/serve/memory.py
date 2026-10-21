@@ -154,6 +154,28 @@ def admit_reserve_bytes(ws_bytes: float, gen=None) -> float:
     return max(2e9, 0.05 * ws_bytes)
 
 
+def priced_admit_reserve_bytes(costs, depth: int, rows: int) -> float:
+    """``admit_reserve_bytes`` priced from the header before any walk: the
+    same one-cache transient plus whole-shed term, for a batch of
+    ``rows`` rows at ``depth`` tokens over the per-layer KV ``costs``
+    (``mem_preflight.kv_layer_costs``). GMLX_ADMIT_RESERVE_GB overrides.
+    Decimal GB (1e9)."""
+    env = os.environ.get("GMLX_ADMIT_RESERVE_GB", "")
+    if env:
+        try:
+            return max(0.0, float(env)) * 1e9
+        except ValueError:
+            pass
+    from .mem_preflight import span_tokens
+
+    per_row = [bpt * span_tokens(w, depth) for w, bpt in costs or ()]
+    if not per_row:
+        return 1e9
+    rows = max(1, int(rows))
+    shed_term = sum(per_row) / len(per_row)
+    return max(1e9, rows * max(per_row) + shed_term)
+
+
 class cache_release_gate:
     """Pre-armed cache gate for a mutation seam that frees big arrays:
     pin the cache limit at its current fill immediately before the

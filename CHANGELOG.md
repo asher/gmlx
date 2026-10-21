@@ -38,6 +38,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds are copied from memory. `GMLX_RING_FROM_ARENA=0` turns it off.
 - With `--stream-experts`, Muse Spark and other sliding-window models start
   answering sooner on many follow-up turns and long prompts.
+- An explicit `GMLX_DECODE_ARENA_GB` is now cut to leave the memory a prefill
+  needs, as the default arena is. `GMLX_DECODE_ARENA_FORCE=1` still keeps it.
 - `--thinking off` now turns thinking off on gpt-oss, Beam, Muse Glimmer, Muse
   Spark and K2 Horizon, whose templates have no switch, by closing each
   thinking block as it opens. Thinking budgets now work for gpt-oss in
@@ -61,6 +63,26 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   entry already named.
 - With `--stream-experts`, a prompt of more than 64 tokens filled the file
   cache as it prefilled, and macOS compressed other apps' memory to make room.
+- A streamed model served with the default decode arena could leave the Mac
+  with almost no free memory during prefill, and push it into swap.
+- A model loaded beside a streamed model could take the memory the stream's
+  next prefill needed, and leave the Mac with no free memory.
+- With `--stream-experts`, the expert arena came out smaller than the one
+  `gmlx validate` plans, by 5% of RAM or more, when the GPU limit set its size.
+- On a Mac where DeepSeek-V4.1-Flash fits without its engram table, a folder
+  scan and `stream: experts` streamed its experts; they now stay in memory.
+- On that Mac, `gmlx validate` said DeepSeek-V4.1-Flash streams its experts
+  and is larger than RAM, and `gmlx doctor` warned about it.
+- `gmlx validate` overstated the weights and expert bytes of a GGUF with
+  NextN layers, which only a drafter loads.
+- While `serve` loaded a DeepSeek-V4.1-Flash whose engram table is read from
+  the file, requests to other models could take memory the load already held.
+- `gmlx validate` and the server overstated the context DeepSeek-V4, V4.1
+  and GLM-5.3-Flash can hold, by 3.4 GB at 1M tokens on V4.1.
+- `gmlx validate` and the server overstated the context GLM-5.x and HY4 can
+  hold, by a fifth of the KV on GLM-5.x.
+- The server could refuse a long DeepSeek-V4 or V4.1 prompt that the boot
+  capacity table said fits: it priced the prompt's KV 2.6 times higher.
 - unsloth's DeepSeek-V4.1-Flash-1017 GGUFs load. Their one shared engram
   table, larger than a GPU buffer, is read from the file, and MXFP8 tables
   are told apart from STQ1_0 weights, which share the same GGUF type id.

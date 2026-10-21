@@ -51,13 +51,15 @@ def load_gguf_wire_bytes(
     peek the oversize-table check needs.
 
     A streamable table past the device buffer ceiling gets no array: no
-    MTLBuffer holds it, so the load would fail on the whole file. The model
-    reads its rows from the GGUF instead (``stream.table_pread``), and the
-    loader attaches the sources with ``install_deferred_tables``.
+    MTLBuffer holds it, so the load would fail on the whole file. Nor does
+    one whose bytes alone bring an over-budget load under the stream
+    budget. The model reads their rows from the GGUF instead
+    (``stream.table_pread``), and the loader attaches the sources with
+    ``install_deferred_tables``.
     """
     if shards is None:
         shards = find_split_shards(gguf_path)
-    skip = _oversize_table_names(shards, arch)
+    skip = _deferred_table_names(shards, arch)
     arrays: dict[str, mx.array] = {}
     kquant_meta: dict[str, str] = {}
     meta: dict = {}
@@ -138,16 +140,18 @@ def _raise_if_oversize(shard: str, skip, err: Exception) -> None:
         f"tensor needs a smaller quant or a machine with more memory") from err
 
 
-def _oversize_table_names(shards: list[str], arch: str | None) -> list[str]:
-    """Wire names of streamable tables too large for one array."""
-    from gmlx.stream.table_pread import oversize_tables
+def _deferred_table_names(shards: list[str], arch: str | None) -> list[str]:
+    """Wire names of the streamable tables the load reads from the file:
+    too large for one array, or read there to bring the load under the
+    stream budget."""
+    from gmlx.stream.table_pread import deferred_tables
 
     if arch is None:
         from .headerscan import scan_gguf
         arch = scan_gguf(
             shards[0], include_tensors=False, array_limit=0
         ).kv.get("general.architecture")
-    return sorted(oversize_tables(shards, arch))
+    return sorted(deferred_tables(shards, arch))
 
 
 # Tensor-name remap + layout transforms

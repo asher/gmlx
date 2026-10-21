@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from gmlx.stream.table_pread import (
+    deferred_tables,
     install_deferred_tables,
     max_buffer_bytes,
     oversize_tables,
@@ -64,6 +65,56 @@ def test_only_tables_past_the_ceiling(table_gguf, monkeypatch):
     # scans at all.
     assert _sources(path, monkeypatch, cap="100000") == {}
     assert oversize_tables([path], "llama") == {}
+
+
+def test_a_table_that_brings_the_load_under_the_budget_is_read_from_the_file(
+        table_gguf, monkeypatch):
+    """A load over the stream budget whose tables alone bring it under
+    reads them from the file, so its experts stay resident. A load that
+    fits, or that stays over without them, holds them as before; a stream
+    flag leaves them to the install's ladder, and GMLX_STREAM_PLE=0 keeps
+    them."""
+    path, _raw = table_gguf
+    monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", str(1 << 40))
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    table, rest = ROWS * ROW_BYTES, 4 * 8 * 4
+
+    def defer(budget, latched=False):
+        return deferred_tables([path], "deepseek41", budget=budget,
+                               latched=latched)
+
+    assert list(defer(table + rest - 1)) == ["blk.1.engram_embd.weight"]
+    assert list(defer(rest)) == ["blk.1.engram_embd.weight"]
+    assert defer(table + rest) == {}
+    assert defer(rest - 1) == {}
+    assert defer(rest, latched=True) == {}
+    monkeypatch.setenv("GMLX_STREAM_PLE", "0")
+    assert defer(rest) == {}
+    # A table past the ceiling is read from the file whatever the budget.
+    monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", "1000")
+    assert list(defer(rest - 1, latched=True)) == ["blk.1.engram_embd.weight"]
+
+
+def test_a_table_read_layer_by_layer_stays_for_the_install(tmp_path,
+                                                           monkeypatch):
+    """qwen4exp gathers its PLE rows in each layer, with no read ahead, so
+    a load without a stream flag keeps the table, and the install's
+    ladder streams it on the CPU stream under --stream-experts."""
+    path = str(tmp_path / "q.gguf")
+    w = gguf.GGUFWriter(path, "qwen4exp")
+    w.add_tensor("per_layer_token_embd.weight",
+                 np.ones((ROWS, ROW_BYTES), np.int8),
+                 raw_dtype=gguf.GGMLQuantizationType.I8)
+    w.add_tensor("token_embd.weight", np.zeros((4, 8), np.float32),
+                 raw_dtype=gguf.GGMLQuantizationType.F32)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", str(1 << 40))
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    assert deferred_tables([path], "qwen4exp", budget=4 * 8 * 4,
+                           latched=False) == {}
 
 
 def test_read_rows_matches_the_file(table_gguf, monkeypatch):

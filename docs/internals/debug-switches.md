@@ -203,8 +203,8 @@ other layer adds its delta on stock ops.
 | `GMLX_RELEASE_PAGECACHE=0` | Keep a released over-RAM model's pages in the page cache at exit or unload. |
 | `GMLX_STREAM_GPU_TOKENS` | On a fitting model with `stream` set, expert calls of this many tokens or more run on the GPU. The default is `1`, and `0` keeps them on the CPU. |
 | `GMLX_STREAM_PREFETCH=0` | Disable sequential expert prefetch, which reads the experts of the next two layers into the page cache on prefill-sized calls. |
-| `GMLX_STREAM_CACHE_GB` | MLX buffer cache of a streamed model in GiB. The default is the KV room, or `4` when no KV room is reserved. |
-| `GMLX_STREAM_ALLOC_LIMITS=0` | Keep the MLX allocator's default limits on a streamed model. Every cache miss then purges the whole buffer cache. |
+| `GMLX_STREAM_CACHE_GB` | MLX buffer cache of a streamed model in GiB, in the KV room. The default is the size of a prefill chunk, at least `2`; `4` without widths; a flat room's size. |
+| `GMLX_STREAM_ALLOC_LIMITS=0` | Keep the MLX allocator's default limits on a streamed model. With the file-backed weights past the MLX memory limit, each eval waits for the GPU work in flight. |
 | `GMLX_STREAM_KV_WIDTH` | Concurrent streams the KV room is sized for. The default is `1`, and each extra stream takes its KV room out of the arena. |
 | `GMLX_STREAM_UNMAP_STACKS=0` | Keep the expert stacks' Metal buffers after the feeders take a layer, instead of dropping them. |
 | `GMLX_STREAM_PREFILL_TAIL_MERGE=0` | Keep the streamed prefill chunk exact, instead of folding a tail under an eighth of the chunk into the chunks before it. |
@@ -215,10 +215,12 @@ other layer adds its delta on stock ops.
 | `GMLX_DECODE_SEED=0` | Start the decode arena empty instead of seeding it with the prompt's most routed experts. |
 | `GMLX_DECODE_ASYNC_GATHER=0` | Keep each streamed layer's expert gather in the next layer's eval instead of submitting it as soon as it is built. |
 | `GMLX_DECODE_ARENA_RAM_FRAC` | Cap on the arena size as a fraction of physical RAM. Unset by default. |
-| `GMLX_DECODE_ARENA_FORCE=1` | Honor an oversized `GMLX_DECODE_ARENA_GB` instead of clamping it to the reclaimable RAM less the host floor. |
+| `GMLX_DECODE_ARENA_FORCE=1` | Honor an oversized `GMLX_DECODE_ARENA_GB` instead of clamping it to the reclaimable RAM less the host floor, the KV room and the host overhead. |
 | `GMLX_DECODE_KV_RESERVE_GB` | Flat KV reserve in GiB in place of the estimated KV room. The fallback is `8` when the header cannot size the KV cache. |
 | `GMLX_DECODE_RAM_FLOOR_GB` | GiB that arena sizing keeps free for the rest of the machine. The default is 5% of RAM, at least `4`. |
 | `GMLX_DECODE_PAGECACHE_GB` | Page-cache reserve in GiB that arena sizing adds to the host floor. The default is `2.5`. |
+| `GMLX_DECODE_PROCESS_GB` | GiB of the process's own memory outside MLX that arena sizing leaves free. The default is `2`. |
+| `GMLX_DECODE_RESIDENT_CACHE_GB` | GiB of file pages that stay resident under load, which arena sizing leaves free. The default is 1/16 of RAM, at most `8`. |
 | `GMLX_DECODE_PRESSURE=0` | Keep the arena at its sized capacity under memory pressure, instead of shrinking it and regrowing it when pressure clears. |
 | `GMLX_PREFILL_NOCACHE=0` | Route prefill ring reads through the page cache, as [The lossless settings](../streaming.md#the-lossless-settings) explains. |
 | `GMLX_RING_TIMESHARE=0` | Keep the prefill ring's room apart from the decode arena for the life of the process, instead of lending it between prefill and decode. |

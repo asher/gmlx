@@ -37,23 +37,39 @@ physical RAM. Four things share the ceiling, in this order:
 
 1. The every-token weights come first.
 2. The KV room comes next. It holds the KV cache for 32768 tokens, or the
-   trained context when that is shorter. It adds room for prefill and a
-   reserve for admitting requests, each the larger of 2 GB and 5% of the
-   working set.
+   trained context when that is shorter. It adds room for the prefill
+   attention scores, the larger of 2 GB and 5% of the working set, and a
+   reserve for admitting requests, priced from the model's KV layout:
+   one layer's cache for a batch at the decode batch cap at that depth,
+   plus one row's share of a layer, at least 1 GB. It also holds one
+   prefill chunk:
+   the chunk's activations, priced from the model's widths at the
+   streamed chunk width (`--prefill-step-size` or the arch's own step
+   switch when set), and the MLX buffer pool that keeps freed buffers
+   for the next layer, the chunk's size and at least 2 GiB. Under
+   prefill the pool fills to its limit and the live activations sit on
+   top of it, so the room counts both.
 3. The prefill ring holds two copies of the largest layer's expert stacks.
    When the ring does not fit, prefill reads through the page cache
    instead, and the load says so. Decoding is not affected.
-4. The decode arena takes what is left after a host floor, and it also
-   uses the ring's room while decoding, as
-   [the lossless settings](#the-lossless-settings) describe. The floor is 5%
-   of RAM, at least 4 GiB, plus 2.5 GiB for the page cache, and it keeps
-   the rest of the Mac out of swap. Buffered reads, such as prefill without
-   the ring and decoding from the page cache, slow sharply when the page
-   cache has too little memory. Below 1 GiB, the decode feeder does not
-   start, and decoding reads through the page cache.
+4. The decode arena takes what is left under the ceiling, and no more
+   than the reclaimable RAM less a host floor and the host overhead. It
+   also uses the ring's room while decoding, as
+   [the lossless settings](#the-lossless-settings) describe. The floor is
+   5% of RAM, at least 4 GiB, plus 2.5 GiB for the page cache, and it
+   keeps the rest of the Mac out of swap. Buffered reads, such as prefill
+   without the ring and decoding from the page cache, slow sharply when
+   the page cache has too little memory. The host overhead is memory
+   outside MLX that stays in use under load: 2 GiB for the process
+   itself, and 1/16 of RAM, at most 8 GiB, for the file pages that stay
+   resident, which hold the table rows and the libraries. Neither is MLX
+   memory, so the arena under the ceiling gives up only what they need
+   past the RAM the ceiling leaves outside it. Below 1 GiB, the decode
+   feeder does not start, and decoding reads through the page cache.
 
 A Mac therefore streams a model when the every-token weights and the KV
-room fit under the ceiling. Everything else changes only the speed.
+room without the prefill chunk fit under the ceiling. Everything else
+changes only the speed.
 `gmlx validate` and `gmlx doctor` print this plan from the header, through
 `gmlx/stream/plan.py`.
 
@@ -61,22 +77,23 @@ room fit under the ceiling. Everything else changes only the speed.
 
 The default working set is two thirds of RAM below 36 GB and three
 quarters from 36 GB up. Sizes are in decimal GB, and the KV room floor is
-the prefill room and the reserve for admitting requests, before any KV
-cache.
+the score room and the 1 GB floor of the reserve for admitting requests,
+before any KV cache and before the prefill chunk, which depends on the
+model.
 
 | RAM | Working set | Ceiling | KV room floor | Left for weights and KV cache |
 |---|---|---|---|---|
-| 16 | 11.5 | 9.2 | 4.0 | 5.2 |
-| 24 | 17.2 | 16.3 | 4.0 | 12.3 |
-| 32 | 22.9 | 21.8 | 4.0 | 17.8 |
-| 36 | 29.0 | 27.5 | 4.0 | 23.5 |
-| 48 | 38.7 | 36.7 | 4.0 | 32.7 |
-| 64 | 51.5 | 49.0 | 5.2 | 43.8 |
-| 96 | 77.3 | 73.4 | 7.7 | 65.7 |
-| 128 | 103.1 | 97.9 | 10.3 | 87.6 |
-| 192 | 154.6 | 146.9 | 15.5 | 131.4 |
-| 256 | 206.2 | 195.9 | 20.6 | 175.2 |
-| 512 | 412.3 | 391.7 | 41.2 | 350.5 |
+| 16 | 11.5 | 9.2 | 3.0 | 6.2 |
+| 24 | 17.2 | 16.3 | 3.0 | 13.3 |
+| 32 | 22.9 | 21.8 | 3.0 | 18.8 |
+| 36 | 29.0 | 27.5 | 3.0 | 24.5 |
+| 48 | 38.7 | 36.7 | 3.0 | 33.7 |
+| 64 | 51.5 | 49.0 | 3.6 | 45.4 |
+| 96 | 77.3 | 73.4 | 4.9 | 68.5 |
+| 128 | 103.1 | 97.9 | 6.2 | 91.7 |
+| 192 | 154.6 | 146.9 | 8.7 | 138.2 |
+| 256 | 206.2 | 195.9 | 11.3 | 184.6 |
+| 512 | 412.3 | 391.7 | 21.6 | 370.1 |
 
 Raising the GPU limit with `iogpu.wired_limit_mb` raises the working set,
 and the reserve below physical RAM still applies.
@@ -96,11 +113,14 @@ Kimi-K3 UD-Q2_K_XL is an 861 GB file, and its every-token weights are
 
 Its routed experts are 799 GB, with 896 experts in each of 92 layers and
 16 read for each token. On a 128 GB Mac with the default working set, the
-ceiling is 97.9 GB and the KV room is 11.7 GB. That leaves 24 GB, where the
-22.7 GB ring fits and the host floor takes the rest, so there is no arena.
-The model streams, and decoding reads each expert through the page cache.
-On a 512 GB Mac, the arena is about 257 GB, or 32% of the experts,
-with the ring's room lent to it while decoding.
+ceiling is 97.9 GB and the KV room without the prefill chunk is 7.5 GB.
+That leaves 28.2 GB, so the model streams. An 8192-token chunk at 16
+experts a token takes 11.2 GB of activations and a pool of the same
+size, which leaves a 5.9 GB arena, under 1% of the experts. The 22.7 GB
+ring does not fit beside it, so prefill reads each expert through the
+page cache. On a 256 GB Mac, the arena is about 99 GB, or 12% of the
+experts, and on a 512 GB Mac it is about 284 GB, or 36%, with the ring's
+room lent to it while decoding.
 
 The experts' quant does not change the fit. UD-Q4_K_XL is a 1.5 TB file
 with the same 62.2 GB of every-token weights, so it streams on the same
@@ -119,8 +139,9 @@ only the RAM that is free at that moment, so its arena can be smaller than
 the one in the plan.
 
 `GMLX_DECODE_ARENA_GB` sets the arena size. The arena is never larger than
-the experts, and a value past the reclaimable RAM is reduced unless
-`GMLX_DECODE_ARENA_FORCE=1` is set. When a streamed model does not fit
+the experts, and a value past the reclaimable RAM less the floor, the KV
+room and the host overhead is reduced unless `GMLX_DECODE_ARENA_FORCE=1`
+is set. When a streamed model does not fit
 beside pinned or busy models, the server defers the load with a message
 that names `GMLX_DECODE_ARENA_GB`.
 
@@ -128,7 +149,9 @@ Some architectures have large lookup tables that every token reads a few
 rows of, such as DeepSeek-V4.1-Flash's engram tables. gmlx streams these
 tables too, and the plan shows them as `streamed tables`, outside the
 every-token total. A table too large for a single GPU buffer is read from
-the file row by row, and the load names it on an `[install]` line.
+the file row by row, and so is a DeepSeek-V4.1-Flash table whose bytes
+alone bring the model back under the budget. The load names it on an
+`[install]` line.
 
 ## The lossless settings
 

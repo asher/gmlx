@@ -1513,6 +1513,42 @@ def test_the_stream_mark_compares_thetext_tensor_bytes(tmp_path, monkeypatch):
     assert _scan(tmp_path)[0].stream == "experts"
 
 
+def _moe_with_table(path, table_rows=4096, expert_floats=1024):
+    """A deepseek41 GGUF with one engram table and one expert stack."""
+    import numpy as np
+    from gguf import GGMLQuantizationType, GGUFWriter
+
+    w = GGUFWriter(str(path), "deepseek41")
+    w.add_uint32("deepseek41.block_count", 2)
+    w.add_uint32("deepseek41.expert_count", 4)
+    w.add_tensor("blk.1.engram_embd.weight",
+                 np.ones((table_rows, 33), np.int8),
+                 raw_dtype=GGMLQuantizationType.I8)
+    w.add_tensor("blk.0.ffn_gate_exps.weight",
+                 np.zeros(expert_floats, dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return table_rows * 33, 4 * expert_floats
+
+
+def test_a_table_that_brings_the_model_under_the_budget_gets_no_mark(
+        tmp_path, monkeypatch):
+    """A MoE over the budget whose lookup table alone brings it under
+    loads with the table read from the file and its experts resident, so
+    discovery writes no stream mark, which would turn speculative off."""
+    monkeypatch.setattr(disc, "classify_gguf", _classify_as(
+        "deepseek41", {"deepseek41.expert_count": 64}))
+    monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", str(1 << 40))
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    table, rest = _moe_with_table(tmp_path / "DS-IQ2_XXS.gguf")
+    monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: rest)
+    assert _scan(tmp_path)[0].stream is None
+    monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: rest - 1)
+    assert _scan(tmp_path)[0].stream == "experts"
+
+
 def test_scan_overram_dense_gets_hint_only(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(disc, "classify_gguf", _classify_as("llama"))
     monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: 50 * 10**9)

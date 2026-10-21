@@ -1,4 +1,4 @@
-"""The MLX allocator limits a streamed model sets: the gc limit past the
+"""The MLX allocator limits a streamed model sets: the memory limit past the
 tracked file-backed bytes, the buffer cache capped by GMLX_STREAM_CACHE_GB,
 and nothing under GMLX_STREAM_ALLOC_LIMITS=0."""
 from __future__ import annotations
@@ -27,9 +27,9 @@ def test_limits_follow_the_tracked_bytes_and_the_cache_env(limits, monkeypatch):
 
 
 @pytest.mark.skipif(not mx.metal.is_available(), reason="Metal allocator only")
-def test_cache_defaults_to_the_kv_room(limits, monkeypatch):
+def test_cache_is_the_pool_the_kv_room_prices(limits, monkeypatch):
     monkeypatch.delenv("GMLX_STREAM_CACHE_GB", raising=False)
-    es._set_allocator_limits(10**9, room_bytes=11 * 10**9)
+    es._set_allocator_limits(10**9, pool_bytes=11 * 10**9)
     assert limits["cache"] == 11 * 10**9
     limits.clear()
     es._set_allocator_limits(10**9)   # no priced room: the flat 4 GB

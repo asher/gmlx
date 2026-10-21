@@ -33,7 +33,9 @@ from gmlx.load.loader import (
     moe_streaming_active,
 )
 
-from .budget import _decode_arena_bytes, _prefill_ring_reason, _ram_floor_bytes
+from .budget import (_decode_arena_bytes, _prefill_ring_reason,
+                     _ram_floor_bytes, arena_ceiling_bytes,
+                     outside_ceiling_bytes)
 from .stack_unmap import stacks_remapped, unmap_stacks
 from .wired_limit import _neutralize_wired_limit_sweep, configure_cpu_device
 
@@ -104,6 +106,7 @@ def configure_stream_cpu(
     feeder_prefill: bool | None = None,
     feeder_decode: bool | None = None,
     fast_disk: str | None = None,
+    prefill_step: int | None = None,
 ):
     """Whole-model CPU streaming (``--stream-cpu``): run the model on the CPU
     device with the streaming-expert machinery always engaged.
@@ -133,6 +136,7 @@ def configure_stream_cpu(
         feeder_prefill=feeder_prefill,
         feeder_decode=feeder_decode,
         fast_disk=fast_disk,
+        prefill_step=prefill_step,
     )
 
 
@@ -209,16 +213,18 @@ def _physical_ram() -> int:
     return ram
 
 
-def _set_allocator_limits(tracked_bytes: int, room_bytes: int = 0) -> None:
+def _set_allocator_limits(tracked_bytes: int, pool_bytes: int = 0) -> None:
     """MLX's allocator counts the file-backed weights as active memory,
-    which on a streamed model sits past its default gc limit; every cache
-    miss then purged the whole buffer cache and every temporary was a
-    fresh Metal allocation. Put the gc limit out of reach and let the
-    cache limit alone bound the pool. The pool defaults to the priced KV
-    room (``room_bytes``, already reserved under the ceiling): a pool
-    smaller than one layer's transient set allocates fresh buffers every
-    layer, and each pays page population. GMLX_STREAM_ALLOC_LIMITS=0
-    keeps the defaults; GMLX_STREAM_CACHE_GB sizes the pool."""
+    which on a streamed model sits past its default memory limit, so each
+    eval waited for the GPU work in flight to finish. Raise the memory
+    limit past the tracked bytes and let the cache limit bound the pool.
+    MLX caps the gc limit at 0.95 of the working set whatever the memory
+    limit, so a cache miss under pressure still releases the pool. The
+    pool is the one the KV room prices (``pool_bytes``,
+    ``budget.pool_bytes``): it fills to its limit under prefill, and the
+    live activations sit on top of it, so the room holds both. Without a
+    priced pool it is 4 GiB. GMLX_STREAM_ALLOC_LIMITS=0 keeps the
+    defaults; GMLX_STREAM_CACHE_GB sizes the pool."""
     if not env_bool("GMLX_STREAM_ALLOC_LIMITS", True) or not mx.metal.is_available():
         return
     limit = int(tracked_bytes + 2 * _physical_ram())
@@ -226,16 +232,16 @@ def _set_allocator_limits(tracked_bytes: int, room_bytes: int = 0) -> None:
     if env:
         cache = int(float(env) * 2**30)
         how = "GMLX_STREAM_CACHE_GB"
-    elif room_bytes > 0:
-        cache = int(room_bytes)
-        how = "the KV room; GMLX_STREAM_CACHE_GB overrides"
+    elif pool_bytes > 0:
+        cache = int(pool_bytes)
+        how = "priced in the KV room; GMLX_STREAM_CACHE_GB overrides"
     else:
         cache = 4 * 2**30
         how = "GMLX_STREAM_CACHE_GB sizes it"
     mx.set_memory_limit(limit)
     mx.set_cache_limit(cache)
     loadlog.info(
-        f"[stream] allocator: gc limit {limit / 1e9:.0f} GB, past the "
+        f"[stream] allocator: memory limit {limit / 1e9:.0f} GB, past the "
         f"tracked file-backed bytes; buffer cache {cache / 1e9:.1f} GB "
         f"({how}, GMLX_STREAM_ALLOC_LIMITS=0 keeps the MLX defaults)"
     )
@@ -301,6 +307,7 @@ def install_expert_streaming(
     stats_verbose: bool | None = None,
     fast_disk: str | None = None,
     explicit: bool = False,
+    prefill_step: int | None = None,
 ):
     """Run routed-expert stacks (SwitchGLU) on the CPU stream.
 
@@ -318,6 +325,9 @@ def install_expert_streaming(
     ``explicit`` is ``--stream-experts`` or ``stream: experts``: a model
     under the budget streams as with ``force_stream``, and one over it
     takes the budget-keyed ladder (table first) as without the flag.
+
+    ``prefill_step`` is the requested prefill chunk width
+    (``--prefill-step-size``), which the KV room prices.
     """
     from gmlx.load.modules import (
         glu_unsorted_call,
@@ -344,7 +354,15 @@ def install_expert_streaming(
     params = getattr(model, "parameters", None)
     total_bytes = sum(a.nbytes for _, a in tree_flatten(params())) if params else 0
     budget = stream_budget_bytes()
-    over_budget = budget is not None and total_bytes > budget
+    from gmlx.stream.table_stream import file_table_bytes
+
+    # A table read from the file has no array, but the ladder runs on the
+    # text bytes, as the header prediction (predicted_stream_bytes) does:
+    # a model whose tables alone bring it under the budget keeps its
+    # experts resident however its tables were loaded.
+    file_tables = file_table_bytes(model)
+    ladder_bytes = total_bytes + file_tables
+    over_budget = budget is not None and ladder_bytes > budget
     if explicit and not over_budget:
         force_stream = True
 
@@ -370,10 +388,11 @@ def install_expert_streaming(
     # over budget even post-table streams both (compose); --stream-cpu and
     # a forced stream always compose; GMLX_STREAM_PLE_COMPOSE=0 keeps the
     # table resident.
-    plan = stream_plan(total_bytes, table_bytes(model), budget,
-                       force_stream=force_stream)
+    plan = stream_plan(ladder_bytes, table_bytes(model) + file_tables,
+                       budget, force_stream=force_stream)
     compose = plan.tables and plan.experts
-    if plan.table_kept:
+    table_only = plan.tables and not plan.experts
+    if plan.table_kept and table_bytes(model):
         print(
             "[stream] table stays resident "
             "(GMLX_STREAM_PLE_COMPOSE=0); experts stream"
@@ -402,17 +421,19 @@ def install_expert_streaming(
         table_credit = credit_streamed(
             getattr(model, "_kq_weights_key", None), table_offloaded,
             max(0.0, total_bytes - untracked0), "table")
-    elif table_offloaded:
+    elif table_only:
         # The selection test admits the table only when the remainder
         # clears the budget (or streaming is forced on a fits model),
         # so experts are resident from here on.
         over_budget = False
         base = ("" if budget is None
                 else f" of {budget / 2**30:.1f} GiB budget")
+        where = ("stays file-backed on the CPU stream" if table_offloaded
+                 else "is read from the file")
         loadlog.info(
             f"[stream] streamable table {'+'.join(table_names)} "
-            f"({table_offloaded / 2**30:.1f} GiB) stays file-backed on "
-            "the CPU stream; experts resident (post-deduction "
+            f"({(table_offloaded + file_tables) / 2**30:.1f} GiB) "
+            f"{where}; experts resident (post-deduction "
             f"{(total_bytes - table_offloaded) / 2**30:.1f} GiB{base})"
         )
         table_credit = credit_streamed(
@@ -1112,15 +1133,18 @@ def install_expert_streaming(
     feeder = None
     dfeeder = None
     room = arena = None
+    host_bytes = 0
     arena_kw: dict = {}
     if streaming and prefetcher is not None and moe_modules:
-        from gmlx.stream.budget import kv_room_bytes
+        from gmlx.stream.budget import host_overhead_bytes, kv_room_bytes
         from gmlx.stream.table_stream import streamed_table_bytes
 
         pin = getattr(model, "_kq_weights_pin", None)
-        room = kv_room_bytes(gguf_path)
+        room = kv_room_bytes(gguf_path, step=prefill_step)
+        host_bytes = host_overhead_bytes(_physical_ram())
         arena_kw = dict(
             room_bytes=room.bytes,
+            host_bytes=host_bytes,
             pinned_bytes=getattr(pin, "pinned_bytes", 0),
             streamable_bytes=streamed_table_bytes(model),
             cast_dead_bytes=cast_dead_bytes,
@@ -1220,6 +1244,12 @@ def install_expert_streaming(
             fast_disk=fast_disk, ring_share=ring_share)
         if dfeeder is not None:
             dfeeder._room_bytes = room.bytes
+            ram_now = _physical_ram()
+            dfeeder._floor_bytes = _ram_floor_bytes(ram_now)
+            dfeeder._host_bytes = host_bytes
+            if budget is not None:
+                dfeeder._outside_bytes = outside_ceiling_bytes(
+                    ram_now, arena_ceiling_bytes(budget, ram_now), host_bytes)
             n_cov = sum(dfeeder.covers(li) for li in moe_modules)
             for li, mods in moe_modules.items():
                 if dfeeder.covers(li):
@@ -1255,21 +1285,28 @@ def install_expert_streaming(
                 f"popularity-managed expert arena ({wired}){cov} "
                 "(--no-decode-feeder disables, GMLX_DECODE_ARENA_GB sizes)"
             )
-            ceiling = ceiling_bytes() or budget
             expert_bytes = sum(
                 r[2] for rs in prefetcher.offsets.values() for r in rs)
             room_how = (
                 f"{room.depth} tokens x {room.width}: kv "
-                f"{room.kv_bytes / 1e9:.1f} + prefill "
-                f"{room.transient_bytes / 1e9:.1f} + reserve "
+                f"{room.kv_bytes / 1e9:.1f} + prefill scores "
+                f"{room.transient_bytes / 1e9:.1f} + chunk "
+                f"{room.activation_bytes / 1e9:.1f} + pool "
+                f"{room.pool_bytes / 1e9:.1f} + reserve "
                 f"{room.reserve_bytes / 1e9:.1f}"
                 if room.priced else "flat GMLX_DECODE_KV_RESERVE_GB")
             # Always visible, like the pin line: the one line a memory
             # report needs.
             try:
-                floor = _ram_floor_bytes(int(metal_value("memory_size")))
+                ram_b = int(metal_value("memory_size"))
             except Exception:
-                floor = _ram_floor_bytes(None)
+                ram_b = None
+            # The ceiling the arena was sized under.
+            ceiling = (arena_ceiling_bytes(budget, ram_b)
+                       if budget is not None else ceiling_bytes())
+            floor = _ram_floor_bytes(ram_b)
+            past = (outside_ceiling_bytes(ram_b, float(ceiling), host_bytes)
+                    if ram_b and ceiling else floor)
             # Streamed tables are page-cache citizens like the experts, so
             # they are out of the every-token term the arena is sized
             # against (arena_kw carries the same figure).
@@ -1284,7 +1321,10 @@ def install_expert_streaming(
                 + (f" ({ring_share / 1e9:.1f} more lent from the arena at "
                    "each prefill)" if ring_share else "")
                 + f" + kv room {room.bytes / 1e9:.1f} "
-                f"({room_how}) + floor {floor / 1e9:.1f}; {tables}"
+                f"({room_how}) + floor and host past RAM outside it "
+                f"{past / 1e9:.1f} (floor {floor / 1e9:.1f}, host "
+                f"{host_bytes / 1e9:.1f}: process and resident page cache; "
+                f"reclaimable RAM pays both); {tables}"
                 "GMLX_STREAM_KV_CTX sizes the room"
             )
             rate = getattr(dfeeder, "_probe_bps", 0.0)
@@ -1306,7 +1346,7 @@ def install_expert_streaming(
                     " (--stream-fast-disk on overrides,"
                     " GMLX_DECODE_FAST_DISK_GBPS sets the bar)"
                 )
-    if (streaming or table_offloaded) and env_bool("GMLX_GPU_RESIDENT", True):
+    if (streaming or table_only) and env_bool("GMLX_GPU_RESIDENT", True):
         tskip = frozenset()
         if table_offloaded:
             from gmlx.stream.table_stream import streamed_table_array_ids
@@ -1314,12 +1354,13 @@ def install_expert_streaming(
             tskip = streamed_table_array_ids(model)
         # The pin is not a term here: it mlocks the same every-token
         # arrays this inserts, and the arena already priced them (it is
-        # sized as ceiling - non_expert - room - ring - floor), so
-        # subtracting both would leave the unpinned remainder and
-        # disable the residency set rather than cap it.
+        # sized under ceiling - non_expert - room - ring, less the host
+        # margins past the RAM outside the ceiling), so subtracting both
+        # would leave the unpinned remainder and disable the residency
+        # set rather than cap it.
         _install_gpu_residency(
             model, moe_modules, skip_ids=tskip,
-            include_expert_stacks=bool(table_offloaded) and not streaming,
+            include_expert_stacks=table_only and not streaming,
             room=(None if budget is None
                   else max(0, budget - held_wired - int(arena or 0)
                            - (ring - ring_share))))
@@ -1424,7 +1465,7 @@ def install_expert_streaming(
             )
     if streaming:
         _set_allocator_limits(
-            total_bytes, room.bytes if room is not None else 0)
+            total_bytes, room.pool_bytes if room is not None else 0)
         # The context line printed above and the feeder lines cover the
         # normal story; what remains is the fallback mechanics for
         # whatever the feeders don't handle.
@@ -1466,7 +1507,7 @@ def install_expert_streaming(
             staging = f"prefill calls >={gpu_tokens} tokens routed to GPU"
         else:
             staging = "GPU prefill routing disabled"
-        if table_offloaded:
+        if table_only:
             # Table-only mode: the experts are GPU-resident and wired (the
             # streamed table made room); "file-backed" would be wrong.
             loadlog.info(

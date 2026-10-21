@@ -1099,6 +1099,19 @@ def _gguf_set_bytes(path: str) -> int | None:
 _BLK_RE = re.compile(r"^blk\.(\d+)\.")
 
 
+def block_of(name: str) -> str | None:
+    """The block number of a ``blk.N.*`` tensor name, else None."""
+    m = _BLK_RE.match(name)
+    return m.group(1) if m else None
+
+
+def mtp_blocks(tensors) -> set[str]:
+    """The block numbers of the NextN/MTP blocks among header
+    ``tensors``: each ``blk.N`` that carries a ``nextn.*`` tensor."""
+    return {b for t in tensors if ".nextn." in t.name
+            for b in [block_of(t.name)] if b is not None}
+
+
 def text_tensor_bytes(path: str) -> int | None:
     """Bytes of the tensors the text load keeps, from the header tensor
     table: the split set without its metadata and without the NextN/MTP
@@ -1113,27 +1126,28 @@ def text_tensor_bytes(path: str) -> int | None:
                    for t in scan_gguf(shard).tensors]
     except Exception:
         return None
-    mtp = {m.group(1) for t in tensors if ".nextn." in t.name
-           for m in [_BLK_RE.match(t.name)] if m}
-    total = 0
-    for t in tensors:
-        m = _BLK_RE.match(t.name)
-        if m and m.group(1) in mtp:
-            continue
-        total += int(t.nbytes)
+    mtp = mtp_blocks(tensors)
+    total = sum(int(t.nbytes) for t in tensors if block_of(t.name) not in mtp)
     return total or None
 
 
 def _over_budget(c: ClassifiedGguf) -> tuple[int, int] | None:
-    """``(text bytes, budget)`` when the model is over the stream budget,
-    else None. The file size bounds the text bytes, so only a file over
-    the budget pays for the tensor-table scan."""
+    """``(resident bytes, budget)`` when the model is over the stream
+    budget, else None. The resident bytes are the text bytes less the
+    lookup tables a load reads from the file, on an arch that reads them
+    ahead of its layers (``deferred_table_bytes``): a table no array
+    holds, or one whose bytes alone bring the model under the budget, so
+    that model loads with its experts resident. The file size bounds the
+    text bytes, so only a file over the budget pays for the tensor-table
+    scan."""
     total, budget = _gguf_set_bytes(c.path), _stream_budget_bytes()
     if not total or not budget or total <= budget:
         return None
     text = text_tensor_bytes(c.path)
     if text is not None:
-        total = text
+        from gmlx.serve.capacity import deferred_table_bytes
+
+        total = text - deferred_table_bytes(c.path, budget=budget)
     return (total, budget) if total > budget else None
 
 

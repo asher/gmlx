@@ -311,7 +311,7 @@ def test_preload_gate(rig, monkeypatch):
     import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 20.0 * GB)
-    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda *a, **k: None)
 
     cap.preload_gate(4.0 * GB, "small")       # fits: no raise
     with pytest.raises(cap.LoadDeferred, match="deferred"):
@@ -331,7 +331,7 @@ def test_preload_gate_judges_the_serve_ceiling(rig, monkeypatch):
     import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 18.0 * GB)
-    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda *a, **k: None)
     cap.preload_gate(3.0 * GB, "fits")                   # 5 - (20 - 18) = 3
     with pytest.raises(cap.LoadDeferred, match="free working set 3.0 GB"):
         cap.preload_gate(3.5 * GB, "edge")
@@ -345,7 +345,7 @@ def test_preload_gate_keeps_a_streamed_residents_room(rig, monkeypatch):
     import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 20.0 * GB)
-    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda *a, **k: None)
     cap.preload_gate(4.0 * GB, "fits")
     with pytest.raises(cap.LoadDeferred, match="working set 2.0 GB less the 3.0 GB"):
         cap.preload_gate(4.0 * GB, "room-taker", reserved_bytes=3.0 * GB)
@@ -397,6 +397,27 @@ def test_kernel_gate_credits_page_cache_resident_bytes(rig, monkeypatch):
     monkeypatch.setattr(cap, "_resident_shard_bytes", lambda m: 5.0 * GB)
     with pytest.raises(cap.LoadDeferred, match="85.0 GB not yet page-cached"):
         cap.preload_gate(90.0 * GB, "barely-cached")
+
+
+def test_kernel_gate_judges_a_load_beside_a_stream_in_full(rig, monkeypatch):
+    # GPU work wires the pages it reads, so a fully cached model loaded
+    # beside a streamed model takes its whole size out of the RAM the
+    # stream holds. A streamed load mlocks its every-token weights.
+    rig(weights_gb=30.0, ws_gb=200.0)
+    import gmlx.serve.governor as gov
+    import gmlx.serve.kernel_vm as kv
+    import gmlx.gen.prefill_decay as pd
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 500.0 * GB)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 200.0 * GB)
+    monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 4.0 * GB)
+    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 32.0 * GB)
+    monkeypatch.setattr(cap, "_resident_shard_bytes", lambda m: 30.0 * GB)
+    cap.preload_gate(30.0 * GB, "alone")            # cached: need 0
+    with pytest.raises(cap.LoadDeferred, match="wired once it runs"):
+        cap.preload_gate(30.0 * GB, "beside", reserved_ram_bytes=10.0 * GB)
+    with pytest.raises(cap.LoadDeferred, match="wired once it runs"):
+        cap.preload_gate(30.0 * GB, "streamed", streaming=True)
+    cap.preload_gate(18.0 * GB, "fits-beside", reserved_ram_bytes=10.0 * GB)
 
 
 def test_memfit_delegates_to_capacity(monkeypatch):
@@ -595,7 +616,7 @@ def test_preload_gate_names_every_token_weights_when_streaming(rig, monkeypatch)
     import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 20.0 * GB)
-    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda *a, **k: None)
     with pytest.raises(RuntimeError) as e:
         cap.preload_gate(25.0 * GB, "huge", streaming=True)
     msg = str(e.value)
@@ -606,3 +627,98 @@ def test_preload_gate_names_every_token_weights_when_streaming(rig, monkeypatch)
         cap.preload_gate(25.0 * GB, "huge")
     with pytest.raises(cap.LoadDeferred, match="busybox every-token weights"):
         cap.preload_gate(10.0 * GB, "busybox", streaming=True)
+
+
+# DeepSeek-V4.1-Flash-1017's engram table: 768,022,850 rows at Q5_K, Q6_K
+# and MXFP8 row sizes, beside 165.3 GB of every-token weights and experts.
+@pytest.mark.parametrize("row_bytes", [176, 210, 264])
+@pytest.mark.parametrize("max_buffer", [86.6 * GB, 173.2 * GB, 1e15])
+@pytest.mark.parametrize("budget", [108.0 * GB, 185.6 * GB])
+def test_discovery_preflight_and_serve_read_the_table_rule_alike(
+        monkeypatch, row_bytes, max_buffer, budget):
+    """Experts stream only when the model stays over the budget without
+    its table: discovery marks it, the run preflight and a plain serve
+    entry price the same resident bytes, and a stream build predicts the
+    experts streamed. Otherwise the table is read from the file, with no
+    mark, and a stream build keeps the experts resident too."""
+    from types import SimpleNamespace
+
+    import gmlx.device as dev
+    import gmlx.load.discovery as disc
+    import gmlx.load.headerscan as hs
+    import gmlx.load.preflight as pre
+    import gmlx.stream.table_pread as tpr
+    from gmlx.serve.residency import _plain_footprint
+
+    name = "blk.1.engram_embd.weight"
+    table, rest, experts = 768_022_850 * row_bytes, 165.3 * GB, 156.9 * GB
+    text = int(rest + table)
+    path = "/m/DS-00001-of-00006.gguf"
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setattr(pre, "find_split_shards", lambda p: [path])
+    monkeypatch.setattr(hs, "scan_gguf", lambda *a, **k: SimpleNamespace(
+        kv={"general.architecture": "deepseek41"}))
+    monkeypatch.setattr(tpr, "_table_sources", lambda shards, arch, cap: (
+        {name: SimpleNamespace(nbytes=table)},
+        {name} if table > max_buffer else set()))
+    monkeypatch.setattr(disc, "text_tensor_bytes", lambda p: text)
+    monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: text + 10**6)
+    monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: int(budget))
+    monkeypatch.setattr(dev, "stream_budget_bytes", lambda: int(budget))
+    monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: table)
+    monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: int(experts))
+
+    must_stream = rest > budget
+    resident = text - cap.deferred_table_bytes(path)
+    # validate's plan on the same box: 128 GiB at the 108 GB budget,
+    # 256 GiB at 185.6 GB.
+    from gmlx.stream import plan as sp
+    m = sp.ModelPlan(arch="deepseek41", total_bytes=text,
+                     expert_bytes=int(experts), groups={}, moe_layers=40,
+                     n_experts=384, experts_per_token=6, ring_bytes=0,
+                     kv_costs=None, trained_ctx=None, table_bytes=table,
+                     tables=((table, {176: "Q5_K", 210: "Q6_K",
+                                      264: "MXFP8"}[row_bytes]),))
+    monkeypatch.setattr(tpr, "_kq_has", lambda codec: True)
+    box = sp.box_plan(m, ram_bytes=(128 if budget < 150 * GB else 256) << 30,
+                      ws_bytes=budget / 0.9, max_buffer_bytes=int(max_buffer))
+    assert box is not None
+    assert (box.verdict == sp.VERDICT_TABLES) == (not must_stream)
+    entry = disc.ClassifiedGguf(path, "model", "deepseek_v41", False,
+                                "IQ2_XXS", True)
+    assert (disc._over_budget(entry) is not None) == must_stream
+    assert (resident > budget) == must_stream
+    assert _plain_footprint(path, text + 10**6) == resident + 10**6
+    assert cap.predicted_stream_bytes(path) == (
+        table, int(experts) if must_stream else 0)
+
+
+def test_a_table_the_arch_does_not_read_ahead_keeps_the_mark(monkeypatch):
+    """A qwen3.8-flash-next quant on a 36 GB Mac: its 28.8 GB per-layer
+    embedding table is past the 24.4 GB buffer ceiling and is read from
+    the file, and the other 20 GB fit the 26.1 GB budget. The arch does
+    not read the table ahead of its layers, so the resident figure keeps
+    the table and discovery marks the model, as before."""
+    from types import SimpleNamespace
+
+    import gmlx.load.discovery as disc
+    import gmlx.load.headerscan as hs
+    import gmlx.load.preflight as pre
+    import gmlx.stream.table_pread as tpr
+
+    name, path = "per_layer_token_embd.weight", "/m/QN-Q2_K.gguf"
+    table, rest, budget = int(28.8 * GB), int(20 * GB), int(26.1 * GB)
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setattr(pre, "find_split_shards", lambda p: [path])
+    monkeypatch.setattr(hs, "scan_gguf", lambda *a, **k: SimpleNamespace(
+        kv={"general.architecture": "qwen4exp"}))
+    monkeypatch.setattr(tpr, "_table_sources", lambda shards, arch, cap: (
+        {name: SimpleNamespace(nbytes=table)}, {name}))
+    monkeypatch.setattr(disc, "text_tensor_bytes", lambda p: rest + table)
+    monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: rest + table)
+    monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: budget)
+    assert cap.deferred_table_bytes(path) == 0
+    assert cap.held_table_bytes(path) == table
+    entry = disc.ClassifiedGguf(path, "model", "qwen4_exp", False, "Q2_K",
+                                True)
+    assert disc._over_budget(entry) == (rest + table, budget)

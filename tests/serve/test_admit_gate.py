@@ -476,6 +476,43 @@ def test_reserve_geometry_derived_after_walk(monkeypatch):
     assert sm.admit_reserve_bytes(120e9, g) == 3e9
 
 
+class _AcctKV:
+    """A cache that reports its own bytes, as the kvarn classes do."""
+
+    def __init__(self, per_token, depth):
+        self.per_token, self.depth = per_token, depth
+
+    def admit_bytes(self):
+        return self.per_token, self.depth, 0.0
+
+
+def test_reserve_priced_from_the_header_is_what_the_walk_measures(monkeypatch):
+    """A streamed install prices the room's reserve before any batch
+    exists: the header's per-layer KV costs, at a batch of 8 rows at 32k
+    tokens, give the reserve the walk measures on that batch."""
+    monkeypatch.delenv("GMLX_ADMIT_RESERVE_GB", raising=False)
+    from gmlx.serve.mem_preflight import FixedRows
+
+    rows, depth = 8, 32768
+    layer_bpt = [2048.0, 2048.0, 8192.0]
+    state = 4e6
+    g = FakeGen(rows=rows)
+    cache = [_AcctKV(b * rows, depth) for b in layer_bpt]
+    state_cache = SimpleNamespace(admit_bytes=lambda: (0.0, 0, state * rows))
+    g._generation_batch = FakeBatch(range(rows), cache + [state_cache])
+    sm.update_kv_rates(g)
+    walked = sm.admit_reserve_bytes(120e9, g)
+    costs = [(None, b) for b in layer_bpt] + [(FixedRows(1), state)]
+    assert walked > 2e9
+    assert sm.priced_admit_reserve_bytes(costs, depth, rows) == \
+        pytest.approx(walked)
+    # Near-zero KV, as on DeepSeek V4.1, takes the walk's 1 GB floor, not
+    # the 5% of the working set that stands in before a walk.
+    assert sm.priced_admit_reserve_bytes([(None, 8.0)] * 40, depth, rows) == 1e9
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "3")
+    assert sm.priced_admit_reserve_bytes(costs, depth, rows) == 3e9
+
+
 def test_cache_release_gate_arms_syncs_and_restores(monkeypatch):
     calls = []
     monkeypatch.setattr(mx, "get_cache_memory", lambda: 777)

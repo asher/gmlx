@@ -512,10 +512,14 @@ class _ResidencyPool:
         else:
             file_bytes = self._footprint_fn(model_path)
             incoming = file_bytes
-        if getattr(build_spec, "stream", None) == "experts":
-            incoming = _streaming_footprint(model_path, file_bytes, env)
+        stream = getattr(build_spec, "stream", None)
+        if stream == "experts":
+            incoming = _streaming_footprint(model_path, file_bytes, env,
+                                            held_bytes=self._resident_bytes())
             _log.info("streaming entry priced at %.1f GB resident of a %.1f GB file",
                       incoming / 1e9, file_bytes / 1e9)
+        elif stream is None and model_kind != IMAGE_KIND:
+            incoming = _plain_footprint(model_path, file_bytes, env)
         # Refuse an unloadable GGUF *before* evicting healthy residents for
         # room - a corrupt/unsupported file would otherwise cost every LRU
         # victim a full cold reload for a build that was never going to work.
@@ -882,23 +886,38 @@ class _ResidencyPool:
     def _resident_bytes(self) -> int:
         return sum(e.footprint for e in self._entries.values())
 
-    def _reserved_room_bytes(self) -> int:
-        """Room the resident streamed models keep but have not filled: a
-        released prefill ring and the priced KV room. The headroom measure
-        reads both as free; a load into them sheds the stream's arena at
-        its next prefill."""
-        total = 0
+    def _stream_reservations(self) -> tuple[int, int, int, int]:
+        """``(room, ceiling margin, host overhead, host floor)`` the
+        resident streamed models keep but have not filled. The room is a
+        released prefill ring and the priced KV room. The host floor and
+        the host overhead are what each arena was sized to leave in RAM,
+        and the ceiling margin the part of them its ceiling leg charged,
+        past the RAM outside the ceiling. The margins are the machine's
+        and the process's, so they count once."""
+        room = ceiling = host = floor = 0
         for e in self._entries.values():
             rg = e.response_generator
             feeder = _decode_feeder_of(rg)
             if feeder is None:
                 continue
-            total += int(getattr(feeder, "_room_bytes", 0) or 0)
+            room += int(getattr(feeder, "_room_bytes", 0) or 0)
+            ceiling = max(ceiling,
+                          int(getattr(feeder, "_outside_bytes", 0) or 0))
+            host = max(host, int(getattr(feeder, "_host_bytes", 0) or 0))
+            floor = max(floor, int(getattr(feeder, "_floor_bytes", 0) or 0))
             ring = _prefill_feeder_of(rg)
             if ring is not None and not getattr(ring, "_slots", None):
-                total += max(0, _ring_room(ring)
-                             - int(getattr(feeder, "_ring_share", 0) or 0))
-        return total
+                room += max(0, _ring_room(ring)
+                            - int(getattr(feeder, "_ring_share", 0) or 0))
+        return room, ceiling, host, floor
+
+    def _reserved_room_bytes(self) -> int:
+        """What the resident streams keep under the ceiling: their room
+        and the margin their ceiling leg charged. The headroom measure
+        reads it as free; a load into it sheds the stream's arena at its
+        next prefill."""
+        room, ceiling, _, _ = self._stream_reservations()
+        return room + ceiling
 
     def _over_capacity(self, incoming: int, held: int | None = None,
                        count: int | None = None) -> bool:
@@ -1002,8 +1021,11 @@ class _ResidencyPool:
         from .capacity import preload_gate
 
         extra = {"image": True} if image else {}
+        room, ceiling, host, floor = self._stream_reservations()
         preload_gate(gate_bytes, str(model_path), streaming=streaming,
-                     reserved_bytes=self._reserved_room_bytes(), **extra)
+                     reserved_bytes=room + ceiling,
+                     reserved_ram_bytes=room + host, ram_floor_bytes=floor,
+                     **extra)
 
     def _new_entry(self, cache_key, model_path, footprint, ttl,
                    **fields) -> _Entry:
@@ -1031,6 +1053,7 @@ class _ResidencyPool:
         # The capacity table is derived (header-based, no load needed) and
         # gated before the box's biggest allocation starts.
         from .capacity import (
+            held_table_bytes,
             install_boot_table,
             predicted_stream_bytes,
             preload_gate_bytes,
@@ -1045,7 +1068,9 @@ class _ResidencyPool:
         gate_bytes = footprint
         streamed = 0
         shares = (0, 0)
-        if getattr(build_spec, "stream", None) == "experts":
+        if getattr(build_spec, "stream", None) is None:
+            gate_bytes = _plain_footprint(model_path, footprint, env)
+        elif getattr(build_spec, "stream", None) == "experts":
             # What the install will stream, by its own ladder: over the
             # budget, a table that alone brings the model under it streams
             # and the experts stay resident.
@@ -1116,8 +1141,10 @@ class _ResidencyPool:
             # first request. A governor tick in between reads the file as
             # live memory and sheds another model's rows. Credit what the
             # load adds, up to the streamed bytes, until the install's own
-            # credit or deduction takes over.
-            note_build_credit(cache_key, streamed)
+            # credit or deduction takes over. A table no array can hold is
+            # read from the file and never adds any.
+            note_build_credit(cache_key, streamed - min(
+                shares[0], held_table_bytes(str(model_path))))
         try:
             self._stock_get(model_path, adapter_path, model_kind=model_kind)
             # One policy resolve per load, inside the env window. An
@@ -1487,11 +1514,52 @@ def _stamp_boot_kv_costs(rg, gguf_path: str) -> None:
             pass
 
 
-def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
+def _env_arena_cap(model, box, env, held_bytes: int) -> int | None:
+    """The clamp the loader puts on an explicit ``GMLX_DECODE_ARENA_GB``
+    (``budget._decode_arena_bytes``): reclaimable RAM, counting what the
+    resident models hold as free to evict, less the incoming every-token
+    weights (pinned before the arena is sized), the host floor, the ring,
+    the KV room and the host overhead. None under
+    ``GMLX_DECODE_ARENA_FORCE=1`` or without a priced box."""
+    force = ((env or {}).get("GMLX_DECODE_ARENA_FORCE")
+             or os.environ.get("GMLX_DECODE_ARENA_FORCE", ""))
+    room = getattr(box, "room", None)
+    if (str(force).strip().lower() in ("1", "true", "yes", "on")
+            or room is None or not getattr(box, "ram_bytes", 0)):
+        return None
+    from gmlx.stream.budget import _available_ram_bytes, host_floor_bytes
+
+    avail = _available_ram_bytes()
+    if avail is None:
+        return None
+    ring = int(model.ring_bytes) if box.ring_fits else 0
+    return max(0, int(avail) + int(held_bytes)
+               - int(model.every_token_bytes)
+               - host_floor_bytes(int(box.ram_bytes)) - ring
+               - int(room.bytes) - int(getattr(box, "host_bytes", 0)))
+
+
+def _plain_footprint(model_path, file_bytes: int, env=None) -> int:
+    """Resident bytes of a model loaded without a stream placement: its
+    file, less the lookup tables the load reads from the file instead of
+    mapping (``capacity.deferred_table_bytes``). A model over the budget
+    whose tables alone bring it under loads that way, with its experts
+    resident."""
+    from .capacity import deferred_table_bytes
+
+    if not isinstance(model_path, str) or not model_path.endswith(".gguf"):
+        return int(file_bytes)
+    return max(0, int(file_bytes) - deferred_table_bytes(model_path, env=env))
+
+
+def _streaming_footprint(model_path, file_bytes: int, env=None,
+                         held_bytes: int = 0) -> int:
     """Resident bytes a ``stream: experts`` entry will hold: the every-token
     weights, the decode arena the loader sizes at install (the env override
-    when set, else the fit planner's arena) and the prefill ring's room
-    the arena does not hold and lend at prefill. The routed experts and
+    when set, clamped as the loader clamps it with ``held_bytes`` of
+    residents counted as free to evict, else the fit planner's arena) and
+    the prefill ring's room the arena does not hold and lend at
+    prefill. The routed experts and
     the arch's streamable tables stay on disk, so the file size overstates
     the entry by their bytes and would evict every other model for room
     they never take. Over the budget, a table that alone brings the model
@@ -1530,6 +1598,10 @@ def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
             if box is not None:
                 if arena is None:
                     arena = int(box.arena_bytes)
+                else:
+                    cap = _env_arena_cap(model, box, env, held_bytes)
+                    if cap is not None:
+                        arena = min(arena, cap)
                 if box.ring_fits:
                     # An env-sized arena keeps the whole ring apart.
                     shared = 0 if raw else int(

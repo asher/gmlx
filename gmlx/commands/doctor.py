@@ -956,7 +956,10 @@ def check_memory(cfg) -> dict:
         if getattr(m, "stream", None):
             continue                     # streamed on purpose: over-RAM is fine
         size = _model_size_bytes(m.path, cfg.model_dirs)
-        if size and classify_fit(size, ram) == "over":
+        # The tables a load reads from the file stay out of memory.
+        if (size and classify_fit(size, ram) == "over"
+                and classify_fit(size - _deferred_table_bytes(
+                    m.path, cfg.model_dirs), ram) == "over"):
             flagged.append(f"{mid} ({human_gb(size)})")
     # An image model runs its DiT, text encoder and VAE together, and the
     # load of the DiT holds its cast 16-bit tensors beside them.
@@ -991,6 +994,16 @@ def check_memory(cfg) -> dict:
               "ceiling (docs/streaming.md)")
     tail = f"; streaming: {'; '.join(streamed[:3])}" if streamed else ""
     return _check("memory", "PASS", f"{detail}; configured models fit{tail}")
+
+
+def _deferred_table_bytes(path: str, model_dirs: list[str]) -> int:
+    import gmlx.config as cfgmod
+    from gmlx.serve.capacity import deferred_table_bytes
+    try:
+        resolved = cfgmod.resolve_path(path, model_dirs)
+        return deferred_table_bytes(resolved) if resolved else 0
+    except Exception:                                  # noqa: BLE001 - advisory
+        return 0
 
 
 def _stream_summary(path: str, model_dirs: list[str], ram: int

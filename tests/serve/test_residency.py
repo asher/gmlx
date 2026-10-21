@@ -140,6 +140,35 @@ def test_failed_build_after_eviction_drops_proxy_last_ref():
     assert ref() is None
 
 
+def test_a_plain_entry_is_priced_without_the_tables_read_from_the_file(
+        tmp_path, monkeypatch):
+    """A model loaded without a stream placement maps its file less the
+    lookup tables the load reads from it: a table no GPU buffer holds, or
+    one whose bytes alone bring the model under the budget."""
+    import os
+
+    import numpy as np
+    from gguf import GGMLQuantizationType, GGUFWriter
+
+    import gmlx.serve.residency as residency
+
+    path = str(tmp_path / "DS-IQ2_XXS.gguf")
+    w = GGUFWriter(path, "deepseek41")
+    w.add_tensor("blk.1.engram_embd.weight", np.ones((4096, 33), np.int8),
+                 raw_dtype=GGMLQuantizationType.I8)
+    w.add_tensor("token_embd.weight", np.zeros((4, 8), np.float32),
+                 raw_dtype=GGMLQuantizationType.F32)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    size = os.path.getsize(path)
+    monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", "1000")
+    assert residency._plain_footprint(path, size) == size - 4096 * 33
+    monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", str(1 << 40))
+    assert residency._plain_footprint(path, size) == size
+
+
 def test_pin_protected_even_when_over_budget():
     # Two 10 GB models can't both fit a 15 GB budget, but A is pinned: it is
     # never evicted, so B is admitted over budget rather than refused.
@@ -383,6 +412,74 @@ def test_streaming_build_lowers_the_wired_limit_and_credits_the_walk(monkeypatch
     with pytest.raises(RuntimeError):
         pool2.acquire("c", None, "auto", build_spec=spec)
     assert not pd._BUILD_CREDIT
+
+
+# DeepSeek-V4.1-Flash 1017 under stream: experts. On a 256 GB Studio an
+# MXFP8 engram table (202.8 GB) is past the 173.2 GB buffer ceiling and
+# the build streams the table alone; on this 128 GB M5 Max a Q5_K table
+# (135.2 GB) is past 86.6 GB and the experts stream beside it.
+@pytest.mark.parametrize("table, max_buffer, budget, credit", [
+    (202.8e9, 173.2e9, 185.6e9, 0.0),
+    (135.2e9, 86.6e9, 108.0e9, 156.9e9),
+])
+def test_a_build_credits_no_table_it_reads_from_the_file(
+        monkeypatch, table, max_buffer, budget, credit):
+    """The build credit covers what the walk adds, up to the bytes the
+    build streams. A table no array can hold is read from the file and
+    never lands, so the credit leaves it out: otherwise the resident
+    experts and every-token weights the walk maps count as reclaimable."""
+    import gmlx.device as dev
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.load.discovery as disc
+    import gmlx.load.headerscan as hs
+    import gmlx.load.preflight as pre
+    import gmlx.serve.capacity as cap
+    import gmlx.stream.table_pread as tpr
+    import gmlx.stream.wired_limit as wired_limit
+
+    name, path = "blk.1.engram_embd.weight", "/m/DS-00001-of-00006.gguf"
+    rest, experts = 165.3e9, 156.9e9
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    for attr in ("_STREAMED_TRACKED", "_STREAMED_CAP", "_UNTRACKED_OWNERS",
+                 "_UNTRACKED_WEIGHTS", "_BUILD_CREDIT"):
+        monkeypatch.setattr(pd, attr, {})
+    box = {"active": 10e9}
+    monkeypatch.setattr(pd.mx, "get_active_memory", lambda: box["active"])
+    monkeypatch.setattr(pre, "find_split_shards", lambda p: [path])
+    monkeypatch.setattr(hs, "scan_gguf", lambda *a, **k: SimpleNamespace(
+        kv={"general.architecture": "deepseek41"}))
+    monkeypatch.setattr(tpr, "_table_sources", lambda shards, arch, cap: (
+        {name: SimpleNamespace(nbytes=int(table))},
+        {name} if table > max_buffer else set()))
+    monkeypatch.setattr(disc, "text_tensor_bytes", lambda p: int(rest + table))
+    monkeypatch.setattr(dev, "stream_budget_bytes", lambda: int(budget))
+    monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: int(table))
+    monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: int(experts))
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda path, b, label, env=None: None)
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    monkeypatch.setattr(wired_limit, "_neutralize_wired_limit_sweep",
+                        lambda: None)
+    seen = []
+    proxy = _RuntimeProxy(_FakeOriginal())
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        box["active"] += rest           # experts and every-token weights map
+        seen.append(pd.build_credit_bytes())
+        proxy.response_generator = SimpleNamespace(model=None)
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": "M",
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(400e9), (),
+        footprint_fn=lambda p: int(rest + table))
+    entry = pool.acquire(path, None, "auto",
+                         build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert seen == [pytest.approx(credit, abs=1)]
 
 
 def test_release_returns_refcount_to_zero_and_entry_evictable():
@@ -815,7 +912,7 @@ def test_load_gate_keeps_the_resident_streams_ring_and_kv_room(monkeypatch):
     seen = []
     monkeypatch.setattr(
         cap, "preload_gate",
-        lambda w, m, streaming=False, reserved_bytes=0.0:
+        lambda w, m, streaming=False, reserved_bytes=0.0, **k:
             seen.append(int(reserved_bytes)))
     monkeypatch.setattr(cap, "install_boot_table",
                         lambda path, b, label, env=None: None)
@@ -853,6 +950,109 @@ def test_load_gate_keeps_the_resident_streams_ring_and_kv_room(monkeypatch):
     acquire(pool, "dense3")
     assert seen[-1] == 11 * GB
     assert held.busy == 0
+
+
+def _ds41_beside(monkeypatch, *, ws, budget, headroom, reclaimable,
+                 feeder, ring=None):
+    """A pool with DeepSeek V4.1 Flash streamed and idle, and the two gates
+    reading the given measures: ``headroom`` against the full working set
+    and ``reclaimable`` RAM after the arena was wired. The governor's
+    kernel floor is armed at 4 GB."""
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+    import gmlx.serve.governor as gov
+    import gmlx.serve.kernel_vm as kvm
+
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: headroom)
+    monkeypatch.setattr(cap, "working_set_bytes", lambda: ws)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: budget)
+    monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 4e9)
+    monkeypatch.setattr(kvm, "reclaimable_bytes", lambda: reclaimable)
+    monkeypatch.setattr(cap, "_settle_reclaimable", lambda f, rec, n: rec)
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda path, b, label, env=None: None)
+    proxy = _RuntimeProxy(_FakeOriginal())
+
+    def streamed():
+        inner = SimpleNamespace(_kq_decode_feeder=SimpleNamespace(**feeder),
+                                _kq_feeder=ring)
+        return SimpleNamespace(language_model=SimpleNamespace(_model=inner))
+
+    models = {"ds41": streamed(), "ds41b": streamed()}
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        proxy.response_generator = SimpleNamespace(
+            model=models.get(model_path, SimpleNamespace()))
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": "M",
+        }
+
+    sizes = {"ds41": 8.4e9, "ds41b": 1e9, "dense": 20e9, "dense25": 25e9,
+             "small": 3.5e9}
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(400 * GB), (),
+        footprint_fn=lambda p: int(sizes[p]))
+    acquire(pool, "ds41")
+    return pool
+
+
+def test_load_gate_holds_the_host_margins_in_ram_not_under_the_ceiling(
+        monkeypatch):
+    """DeepSeek V4.1 Flash on a stock 128 GB Mac with a 30 GiB arena, the
+    documented way to keep a second model loaded. Loaded at 102 GB
+    reclaimable: 8.4 GB every-token, 32.2 GB arena, a 16.3 GB KV room
+    and a 9.3 GB ring held apart and released between prefills. The RAM
+    outside the 97.9 GB ceiling holds the 9.6 GB floor and the 10.7 GB
+    host overhead, so under the ceiling the stream keeps only its room
+    and ring: 31.7 GB is free there, and 23.9 GB in RAM. A 20 GB model
+    fits both. Charged under the ceiling, the margins left 11.4 GB and
+    refused it. A 25 GB model fits under the ceiling but not in RAM."""
+    import gmlx.serve.capacity as cap
+
+    ws = 0.75 * (128 << 30)
+    ring = SimpleNamespace(_slots=None, n_slots=2, slot_bytes=4.635e9)
+    pool = _ds41_beside(
+        monkeypatch, ws=ws, budget=0.95 * ws,
+        headroom=ws - 8.4e9 - 32.21e9, reclaimable=102e9 - 32.21e9,
+        feeder=dict(nominal_bytes=32.21e9, _room_bytes=16.33e9,
+                    _floor_bytes=9.56e9, _host_bytes=10.74e9,
+                    _outside_bytes=0, _ring_share=0),
+        ring=ring)
+    assert pool._reserved_room_bytes() == pytest.approx(25.6e9)
+    with pytest.raises(cap.LoadDeferred, match="host overhead"):
+        acquire(pool, "dense25")
+    acquire(pool, "dense")
+    # A second stream adds its room and ring; the margins count once.
+    acquire(pool, "ds41b")
+    assert pool._stream_reservations() == pytest.approx(
+        (51.2e9, 0, 10.74e9, 9.56e9))
+
+
+def test_load_gate_defers_a_model_the_ram_beside_a_default_stream_lacks(
+        monkeypatch):
+    """DeepSeek V4.1 Flash served by default on a 128 GB M5 Max, loaded at
+    102 GB reclaimable: the arena took the RAM less the 9.6 GB floor, the
+    17.2 GB room and the 10.7 GB host overhead (64.5 GB), and lends the
+    ring's room at prefill. Under the 114.2 GB ceiling 24.1 GB look
+    free, and the old ceiling-side margins left 3.8 GB, so a 3.5 GB model
+    loaded. In RAM nothing is left past what the next prefill needs."""
+    import gmlx.serve.capacity as cap
+
+    ws = 120.2e9
+    ring = SimpleNamespace(_slots=None, n_slots=2, slot_bytes=4.635e9)
+    pool = _ds41_beside(
+        monkeypatch, ws=ws, budget=114.19e9,
+        headroom=ws - 8.4e9 - 64.51e9, reclaimable=102e9 - 64.51e9,
+        feeder=dict(nominal_bytes=64.51e9, _room_bytes=17.19e9,
+                    _floor_bytes=9.56e9, _host_bytes=10.74e9,
+                    _outside_bytes=0, _ring_share=9.27e9),
+        ring=ring)
+    assert pool._reserved_room_bytes() == pytest.approx(17.19e9)
+    with pytest.raises(cap.LoadDeferred, match="reclaimable memory"):
+        acquire(pool, "small")
 
 
 def test_streaming_entry_is_priced_at_every_token_plus_arena(monkeypatch):
@@ -1242,6 +1442,46 @@ def test_a_teardown_releases_an_image_gone_idle_off_the_lock(
      "reap_idle": pool.reap_idle}[path]()
     assert released == [(["P"], True)]
     assert not pool._entries
+
+
+def test_streaming_footprint_prices_the_clamped_explicit_arena(monkeypatch):
+    """The loader clamps an explicit GMLX_DECODE_ARENA_GB to the
+    reclaimable RAM less the floor, the ring, the KV room and the host
+    overhead, so the entry is priced at the clamped arena: priced at the
+    raw value, the pre-load eviction freed more than the load took.
+    GMLX_DECODE_ARENA_FORCE=1 keeps the raw value, as the loader does."""
+    from types import SimpleNamespace
+
+    import gmlx.serve.capacity as cap
+    import gmlx.serve.residency as residency
+    import gmlx.stream.budget as budget
+    import gmlx.stream.plan as plan
+
+    for k in ("GMLX_DECODE_ARENA_FORCE", "GMLX_DECODE_RAM_FLOOR_GB",
+              "GMLX_DECODE_PAGECACHE_GB"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(cap, "predicted_stream_bytes",
+                        lambda p, env=None: (0, 330 * GB))
+    model = SimpleNamespace(ring_bytes=8 * GB, every_token_bytes=10 * GB)
+    box = SimpleNamespace(arena_bytes=60 * GB, ring_fits=True,
+                          ring_shared_bytes=8 * GB, ram_bytes=128 * GB,
+                          room=SimpleNamespace(bytes=20 * GB),
+                          host_bytes=10 * GB)
+    monkeypatch.setattr(plan, "plan_path", lambda p: (model, box))
+    monkeypatch.setattr(budget, "_available_ram_bytes",
+                        lambda *a, **k: 110 * GB)
+    floor = budget.host_floor_bytes(128 * GB)
+    env = {"GMLX_DECODE_ARENA_GB": "70"}
+    clamped = 110 * GB - 10 * GB - floor - 8 * GB - 20 * GB - 10 * GB
+    assert clamped < 70 * GB
+    want = 10 * GB + clamped + 8 * GB
+    assert residency._streaming_footprint("a", 340 * GB, env) == want
+    # A resident model the load may evict counts as free RAM.
+    assert residency._streaming_footprint(
+        "a", 340 * GB, env, held_bytes=30 * GB) == 10 * GB + 70 * GB + 8 * GB
+    env["GMLX_DECODE_ARENA_FORCE"] = "1"
+    assert residency._streaming_footprint("a", 340 * GB, env) == \
+        10 * GB + 70 * GB + 8 * GB
 
 
 def test_streaming_footprint_credits_streamable_tables(monkeypatch):

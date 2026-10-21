@@ -15,9 +15,10 @@ F16 = 2
 
 
 def _mint_moe(path, *, layers=2, experts=8, used=2, expert_count_kv=True,
-              big_layer=None):
+              big_layer=None, nextn_block=None):
     """A llama-shaped MoE file. ``big_layer`` doubles that layer's expert
-    stacks so the ring (twice the largest layer) is distinguishable."""
+    stacks so the ring (twice the largest layer) is distinguishable;
+    ``nextn_block`` makes that block a NextN block."""
     from gguf import GGUFWriter
 
     w = GGUFWriter(str(path), "llama")
@@ -44,6 +45,9 @@ def _mint_moe(path, *, layers=2, experts=8, used=2, expert_count_kv=True,
         for kind in ("gate", "up", "down"):
             w.add_tensor(f"blk.{i}.ffn_{kind}_exps.weight",
                          np.zeros((experts, rows, 64), dtype=np.float16))
+        if i == nextn_block:
+            w.add_tensor(f"blk.{i}.nextn.eh_proj.weight",
+                         np.zeros((64, 128), dtype=np.float16))
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
@@ -176,6 +180,10 @@ def _model(*, total, expert, ring=0):
 @pytest.fixture
 def flat_room(monkeypatch):
     monkeypatch.setenv("GMLX_DECODE_KV_RESERVE_GB", "1")
+    # The host overhead has its own test; zero here keeps the floor sums.
+    monkeypatch.setenv("GMLX_DECODE_PROCESS_GB", "0")
+    monkeypatch.setenv("GMLX_DECODE_RESIDENT_CACHE_GB", "0")
+    monkeypatch.delenv("GMLX_STREAM_CACHE_GB", raising=False)
     monkeypatch.delenv("GMLX_GOV_MARGIN", raising=False)
     monkeypatch.delenv("GMLX_GOV_RESERVE_GB", raising=False)
     monkeypatch.delenv("GMLX_DECODE_RAM_FLOOR_GB", raising=False)
@@ -189,34 +197,202 @@ def test_box_plan_verdicts(flat_room, monkeypatch):
     floor = 6.5 * GiB          # 4 GiB base on a small box + 2.5 GiB page cache
     b = sp.box_plan(_model(total=10e9, expert=8e9), ram_bytes=ram, ws_bytes=ws)
     assert b.verdict == sp.VERDICT_RESIDENT
-    assert b.room == KvRoom(room, 32768, 1, 0, 0, 0, priced=False)
+    assert b.room == KvRoom(room, 32768, 1, 0, 0, 0, priced=False,
+                            pool_bytes=room)
     b = sp.box_plan(_model(total=250e9, expert=200e9), ram_bytes=ram, ws_bytes=ws)
     assert b.verdict == sp.VERDICT_TOO_BIG
     assert b.short_bytes == pytest.approx(50e9 + room - ceiling, abs=2)
     assert b.arena_bytes == 0
-    b = sp.box_plan(_model(total=234.5e9, expert=200e9), ram_bytes=ram, ws_bytes=ws)
+    b = sp.box_plan(_model(total=241.5e9, expert=200e9), ram_bytes=ram,
+                    ws_bytes=ws)
     assert b.verdict == sp.VERDICT_PAGE_CACHE
     assert 0 < b.arena_bytes < GiB
     b = sp.box_plan(_model(total=220e9, expert=200e9, ring=5e9),
                     ram_bytes=ram, ws_bytes=ws)
     assert b.verdict == sp.VERDICT_STREAMS
-    # The host floor keeps its room out of the arena; the arena holds the
-    # ring's room and lends it at each prefill.
-    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room - floor, abs=2)
+    # The host floor fits in the RAM outside the ceiling, so the arena
+    # does not pay it; the arena holds the ring's room and lends it at
+    # each prefill.
+    assert b.floor_bytes == floor and ram - ceiling > floor
+    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room, abs=2)
     assert b.ring_shared_bytes == 5e9
     assert b.arena_share == pytest.approx(b.arena_bytes / 200e9)
     assert b.ring_fits
     monkeypatch.setenv("GMLX_RING_TIMESHARE", "0")
     b = sp.box_plan(_model(total=220e9, expert=200e9, ring=5e9),
                     ram_bytes=ram, ws_bytes=ws)
-    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room - floor - 5e9, abs=2)
+    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room - 5e9, abs=2)
     assert b.ring_shared_bytes == 0
     monkeypatch.delenv("GMLX_RING_TIMESHARE")
     b = sp.box_plan(_model(total=220e9, expert=200e9, ring=30e9),
                     ram_bytes=ram, ws_bytes=ws)
     assert b.verdict == sp.VERDICT_STREAMS and not b.ring_fits
     # A ring that does not fit is not built, so it takes nothing.
-    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room - floor, abs=2)
+    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room, abs=2)
+
+
+def ds41_plan(table=135_172_021_600, kind="Q5_K"):
+    """DeepSeek-V4.1-Flash 1017 as its header prices it: 165.3 GB beside
+    its engram table, 135.2 GB at UD-IQ2_XXS's Q5_K."""
+    return sp.ModelPlan(arch="deepseek41", total_bytes=165_297_594_816 + table,
+                        expert_bytes=156_881_387_520, groups={}, moe_layers=40,
+                        n_experts=384, experts_per_token=6,
+                        ring_bytes=9_272_033_280, kv_costs=None,
+                        trained_ctx=None, table_bytes=table,
+                        tables=((table, kind),))
+
+
+# The boxes' working sets, with Metal's buffer cap at 0.63 of RAM: a
+# 256 GB Studio at the default 75%, this 128 GB M5 Max as Metal reports
+# it, and a 512 GB Studio.
+STUDIO = dict(ram_bytes=256 * GiB, ws_bytes=192 * GiB,
+              max_buffer_bytes=int(0.63 * 256 * GiB))
+M5_MAX = dict(ram_bytes=128 * GiB, ws_bytes=120_259_084_288,
+              max_buffer_bytes=int(0.63 * 128 * GiB))
+STUDIO_512 = dict(ram_bytes=512 * GiB, ws_bytes=384 * GiB,
+                  max_buffer_bytes=int(0.63 * 512 * GiB))
+MXFP8 = 768_022_850 * 264
+
+
+def test_a_table_that_brings_the_load_under_keeps_the_experts(flat_room,
+                                                              monkeypatch):
+    """On a 256 GB Studio the 165.3 GB DeepSeek-V4.1 keeps once its table
+    is read from the file fit the 185.5 GB budget, so it loads with its
+    experts in memory, with or without --stream-experts. On a 128 GB M5
+    Max they do not, and the experts stream."""
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    m = ds41_plan()
+    b = sp.box_plan(m, **STUDIO)
+    assert b is not None and b.verdict == sp.VERDICT_TABLES
+    assert sp.box_lines(m, b)[1:] == [
+        "tables 135.2 GB read from the file; the other 165.3 GB fit the "
+        "185.5 GB resident budget",
+        "=> loads with its experts in memory, with or without --stream-experts"]
+    assert sp.box_summary(m, b) == (
+        "tables 135.2 GB read from the file, experts in memory (165.3 GB "
+        "under the 185.5 GB budget)")
+    b = sp.box_plan(m, **M5_MAX)
+    assert b is not None and b.verdict == sp.VERDICT_STREAMS
+    assert sp.box_lines(m, b)[-1] == (
+        "=> streams with --stream-experts (server: stream: experts)")
+    monkeypatch.setenv("GMLX_STREAM_PLE", "0")
+    b = sp.box_plan(m, **STUDIO)
+    assert b is not None and b.verdict == sp.VERDICT_STREAMS
+
+
+def test_a_table_no_array_holds_keeps_the_experts_without_the_flag(
+        flat_room, monkeypatch):
+    """A table past the buffer ceiling, or MXFP8 on an mlx-kquant without
+    the codec, is read from the file even where it does not alone bring
+    the model under the budget: with GMLX_STREAM_PLE=0, or on a model
+    already under it. The other bytes fit, so the load keeps its experts
+    in memory, and --stream-experts streams them, as the loader does."""
+    import gmlx.stream.table_pread as tpr
+
+    lines = ["=> loads with its experts in memory; --stream-experts "
+             "streams them"]
+    # The MXFP8 table is past the 256 GB Studio's 173.2 GB ceiling.
+    m = ds41_plan(MXFP8, "MXFP8")
+    monkeypatch.setenv("GMLX_STREAM_PLE", "0")
+    b = sp.box_plan(m, **STUDIO)
+    assert b is not None and b.verdict == sp.VERDICT_TABLES and b.flag_streams
+    assert sp.box_lines(m, b)[1:] == [
+        "tables 202.8 GB read from the file; the other 165.3 GB fit the "
+        "185.5 GB resident budget"] + lines
+    # The whole model is under a 512 GB Studio's 371.1 GB budget, and an
+    # mlx-kquant without MXFP8 holds no such table.
+    monkeypatch.delenv("GMLX_STREAM_PLE")
+    monkeypatch.setattr(tpr, "_kq_has", lambda codec: codec != "mxfp8")
+    b = sp.box_plan(m, **STUDIO_512)
+    assert b is not None and b.verdict == sp.VERDICT_TABLES and b.flag_streams
+    assert sp.box_lines(m, b)[1:] == [
+        "tables 202.8 GB read from the file; the other 165.3 GB fit the "
+        "371.1 GB resident budget"] + lines
+    monkeypatch.setattr(tpr, "_kq_has", lambda codec: True)
+    b = sp.box_plan(m, **STUDIO_512)
+    assert b is not None and b.verdict == sp.VERDICT_RESIDENT
+
+
+def test_the_plan_leaves_out_the_nextn_blocks(tmp_path):
+    """A NextN block loads only into a drafter: the plan prices what the
+    text load holds, as the loader and discovery do."""
+    from gmlx.load.discovery import text_tensor_bytes
+
+    p = _mint_moe(tmp_path / "m.gguf", layers=3, nextn_block=2)
+    m = sp.model_plan(sp.scan_path(p))
+    assert m.total_bytes == text_tensor_bytes(p)
+    assert m.moe_layers == 2
+    assert m.expert_bytes == 2 * 3 * 8 * 64 * 64 * F16
+
+
+@pytest.fixture
+def priced_room(monkeypatch):
+    """A priced room on a 128 GiB box: 1 GB of KV, 6 GB of scores at a
+    120 GB working set, and the 1 GB floor of the admission reserve."""
+    import gmlx.serve.mem_preflight as mp
+
+    for k in ("GMLX_DECODE_KV_RESERVE_GB", "GMLX_DECODE_PROCESS_GB",
+              "GMLX_DECODE_RESIDENT_CACHE_GB", "GMLX_STREAM_CACHE_GB",
+              "GMLX_GOV_MARGIN", "GMLX_GOV_RESERVE_GB",
+              "GMLX_DECODE_RAM_FLOOR_GB", "GMLX_DECODE_PAGECACHE_GB",
+              "GMLX_PREFILL_SCORE_CAP_GB", "GMLX_ADMIT_RESERVE_GB",
+              "GMLX_RING_TIMESHARE"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(mp, "prompt_kv_bytes", lambda costs, n: 1e9)
+    return 128 * GiB, 120e9
+
+
+def _chunked(activation, **kw):
+    import dataclasses
+
+    return dataclasses.replace(_model(**kw), kv_costs=((1, 1),),
+                               activation_bytes=activation)
+
+
+def test_box_plan_prices_the_chunk_the_pool_and_the_host(priced_room,
+                                                         monkeypatch):
+    """The room holds one chunk's activations and the pool beside it.
+    The host floor and the host overhead live outside MLX: on a 128 GiB
+    box the RAM past the ceiling holds both at the stock and the raised
+    GPU limit, so they leave the arena alone, and only what they need
+    past that RAM comes out of it."""
+    ram, ws = priced_room
+    m = _chunked(3 * GiB, total=220e9, expert=200e9, ring=5e9)
+    b = sp.box_plan(m, ram_bytes=ram, ws_bytes=ws)
+    assert b.room.priced and b.room.activation_bytes == 3 * GiB
+    assert b.host_bytes == 10 * GiB
+    assert b.verdict == sp.VERDICT_STREAMS and b.ring_shared_bytes == 5e9
+    assert "host overhead 10.7 GB" in sp.box_lines(m, b)[0]
+    assert sp.to_dict(m, b)["box"]["host_bytes"] == 10 * GiB
+    for box_ws in (ws, 0.75 * ram):
+        base = sp.box_plan(m, ram_bytes=ram, ws_bytes=box_ws).arena_bytes
+        monkeypatch.setenv("GMLX_DECODE_RESIDENT_CACHE_GB", "1")
+        again = sp.box_plan(m, ram_bytes=ram, ws_bytes=box_ws)
+        assert again.arena_bytes == base
+        monkeypatch.delenv("GMLX_DECODE_RESIDENT_CACHE_GB")
+    # A host overhead past the RAM outside the ceiling: the excess comes
+    # out of the arena, byte for byte.
+    outside = ram - b.ceiling_bytes - b.floor_bytes
+    monkeypatch.setenv("GMLX_DECODE_PROCESS_GB", "0")
+    monkeypatch.setenv("GMLX_DECODE_RESIDENT_CACHE_GB", str(outside / GiB + 5))
+    over = sp.box_plan(m, ram_bytes=ram, ws_bytes=ws)
+    assert over.arena_bytes == pytest.approx(b.arena_bytes - 5 * GiB, abs=2)
+
+
+def test_a_chunk_past_the_ceiling_still_streams_without_an_arena(priced_room):
+    """The fit leaves the chunk out: with no arena the chunk takes RAM the
+    page cache gives back, so a chunk too big for the ceiling costs the
+    arena and the ring, not the verdict."""
+    ram, ws = priced_room
+    b = sp.box_plan(_chunked(72 * GiB, total=220e9, expert=200e9, ring=5e9),
+                    ram_bytes=ram, ws_bytes=ws)
+    assert b.room.fit_bytes == pytest.approx(8e9)
+    assert b.verdict == sp.VERDICT_PAGE_CACHE
+    assert b.arena_bytes == 0 and not b.ring_fits and b.short_bytes == 0
+    b = sp.box_plan(_chunked(40 * GiB, total=230e9, expert=120e9),
+                    ram_bytes=ram, ws_bytes=ws)
+    assert b.verdict == sp.VERDICT_TOO_BIG
+    assert b.short_bytes == pytest.approx(110e9 + 8e9 - b.ceiling_bytes, abs=2)
 
 
 def test_box_plan_arena_capped_at_experts(flat_room, monkeypatch):

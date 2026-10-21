@@ -40,7 +40,7 @@ from .loader import (
     weights_source_key,
 )
 from .mtp_target import _vlm_spec_language_model
-from gmlx.stream.table_pread import oversize_tables
+from gmlx.stream.table_pread import deferred_tables
 from .wire import load_gguf_wire_bytes, remap_arrays
 from .hadamard import hadamard_targets_for
 from .preflight import preflight
@@ -4355,7 +4355,7 @@ def load_vlm_model(
                       **float_dtype_rules(model_type),
                       source_key=weights_source_key(*pf.shards, mmproj_path),
                       active_before=active_before,
-                      deferred_tables=oversize_tables(pf.shards, llm_arch),
+                      deferred_tables=deferred_tables(pf.shards, llm_arch),
                       hadamard=hadamard_targets_for(
                           llm_meta, llm_arch, llm_shapes))
     materialize_module_arrays(model)

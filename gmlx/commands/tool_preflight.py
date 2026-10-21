@@ -11,9 +11,9 @@ allocator error mid-run.
 One formula, not two: KV pricing comes from mem_preflight (the serve
 preflight's own admit-side model), the config comes from the loader's
 config synthesis, and weights are the on-disk shard bytes the
-zero-copy load will map. The transient term is the stock prefill score
-peak (heads x chunk x (context + chunk) x 2 bytes), the measured
-serve-peak class.
+zero-copy load will map, less the lookup tables it reads from the file.
+The transient term is the stock prefill score peak (heads x chunk x
+(context + chunk) x 2 bytes), the measured serve-peak class.
 
 Estimates err on the permit side: unknown geometry, an unsupported
 arch, or any estimator failure skips the check silently. Expert
@@ -108,8 +108,13 @@ def estimate(gguf_path: str, ctx_tokens: int | None = None) -> dict | None:
     model's trained context) on this box, or None when any input cannot
     be read (the caller must treat None as permit)."""
     try:
+        from gmlx.serve.capacity import deferred_table_bytes
+
         shards = _shards(gguf_path)
-        weights = float(sum(os.path.getsize(p) for p in shards))
+        # The load maps the wire bytes, less the lookup tables it reads
+        # from the file.
+        weights = float(sum(os.path.getsize(p) for p in shards)
+                        - deferred_table_bytes(shards[0]))
         cfg = _synth_config(shards[0])
         costs = _kv_costs(cfg)
         ws = working_set_bytes()

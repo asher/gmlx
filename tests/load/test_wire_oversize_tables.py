@@ -35,12 +35,12 @@ def table_gguf(tmp_path):
 
 def test_names_the_tables_past_the_ceiling(table_gguf, monkeypatch):
     monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", "1000")
-    assert wire._oversize_table_names([table_gguf], "deepseek41") == [
+    assert wire._deferred_table_names([table_gguf], "deepseek41") == [
         "blk.1.engram_embd.weight"]
-    assert wire._oversize_table_names([table_gguf], None) == [
+    assert wire._deferred_table_names([table_gguf], None) == [
         "blk.1.engram_embd.weight"]        # arch read from the header
     monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", str(1 << 40))
-    assert wire._oversize_table_names([table_gguf], "deepseek41") == []
+    assert wire._deferred_table_names([table_gguf], "deepseek41") == []
 
 
 def test_skips_the_table_and_loads_the_rest(table_gguf, monkeypatch):
