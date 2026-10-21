@@ -49,6 +49,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when their `encoder` was a chat model served with its `mmproj`.
 - In a `discover:` setup, `gmlx rm` of a chat model that image models share
   said to point their `encoder:` elsewhere, though they have no entry.
+- A Qwen-Image 2.1 edit on an image model whose shared chat model has no
+  `mmproj` failed in the encoder. It is now refused with a line naming the
+  chat model.
 - A folder scan paired an `mmproj` file with the model beside it when their
   headers gave different hidden sizes.
 - A folder scan paired an `mmproj` file with only one quant of its model in the

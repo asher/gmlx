@@ -880,13 +880,13 @@ def test_the_fit_check_passes_without_a_budget(monkeypatch):
     assert calls == []
 
 
-def _edit_served(family: str, mmproj=True):
+def _edit_served(family: str, mmproj=True, encoder_model=None):
     from gmlx.image.registry import get_family
 
     fam = get_family(family)
     return SimpleNamespace(
         pipe=SimpleNamespace(family=fam, variant="base", size_multiple=16),
-        spec=SimpleNamespace(id="m", encoder_model=None,
+        spec=SimpleNamespace(id="m", encoder_model=encoder_model,
                              encoder_mmproj="/mm.gguf" if mmproj else None),
         plan=SimpleNamespace(size=(1024, 1024)))
 
@@ -940,6 +940,20 @@ def test_flux3_klein_edits_need_no_vision_tower():
                        match="FLUX.3 klein takes at most 10 images, and the "
                              "request has 11"):
         image_service.check_family(_edit_req(11), _edit_served("flux3_klein"))
+
+
+def test_qwen_image_edits_on_a_shared_chat_model_need_its_mmproj():
+    """An entry that shares a chat model has the chat model's mmproj as
+    its tower. With a text-only chat model the edit is refused before it
+    runs, and the refusal names the chat model."""
+    image_service.check_family(_edit_req(1), _edit_served(
+        "qwen_image21", encoder_model="vl"))
+    with pytest.raises(image_service.ImageRequestError,
+                       match="need the encoder's vision tower: give the "
+                             "chat model 'vl' its mmproj") as e:
+        image_service.check_family(_edit_req(1), _edit_served(
+            "qwen_image21", mmproj=False, encoder_model="vl"))
+    assert e.value.param == "image"
 
 
 @pytest.mark.parametrize("route", ["edits", "variations"])

@@ -1087,11 +1087,13 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
     if len(req.images) > cap:
         raise _bad(f"{fam.title} takes at most {cap} images, and the request "
                    f"has {len(req.images)}", "image")
-    tower = (served.spec.encoder_model is not None
-             or bool(served.spec.encoder_mmproj))
-    if not serves_edits(fam, tower):
+    # A shared chat model brings its mmproj as the entry's tower.
+    if not serves_edits(fam, bool(served.spec.encoder_mmproj)):
+        shared = served.spec.encoder_model
+        fix = ("set encoder_mmproj on the image model" if shared is None
+               else f"give the chat model {shared!r} its mmproj")
         raise _bad(f"edits on {served.spec.id!r} need the encoder's vision "
-                   "tower: set encoder_mmproj on the image model", "image")
+                   f"tower: {fix}", "image")
     if edit.prepare_all is not None:
         try:
             req.refs = edit.prepare_all([i[..., :3] for i in req.images])
