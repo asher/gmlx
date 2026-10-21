@@ -61,27 +61,70 @@ def test_room_prices_ctx_width_transient_reserve(header, monkeypatch):
 DS41_CFG = {"model_type": "deepseek_v41", "hidden_size": 5120,
             "num_attention_heads": 64, "head_dim": 512, "hc_mult": 4,
             "num_experts_per_tok": 6, "moe_intermediate_size": 2304}
-DS41_ROW = 4 * (4 * 5120 * 4 + 64 * 512 + 6 * (2 * 5120 + 3 * 2304))
 
 
-def test_chunk_activations_follow_the_streamed_chunk_width(monkeypatch):
+@pytest.fixture
+def chunk_env(monkeypatch):
     for k in ("PREFILL_STEP_SIZE", "GMLX_STREAM_PREFILL_TAIL_MERGE"):
         monkeypatch.delenv(k, raising=False)
-    assert DS41_ROW == 870_400
+
+
+def test_chunk_rows_follow_the_streamed_chunk_width(chunk_env, monkeypatch):
     # The loader's 8192-row streaming step, 9/8 of it with the tail merge.
     assert budget.prefill_rows("deepseek_v41") == 9216
     assert budget.prefill_rows("hy_v4") == 4608
-    assert budget.prefill_activation_bytes(DS41_CFG) == DS41_ROW * 9216
     monkeypatch.setenv("PREFILL_STEP_SIZE", "2048")
-    assert budget.prefill_activation_bytes(DS41_CFG) == DS41_ROW * 2304
+    assert budget.prefill_rows("deepseek_v41") == 2304
     monkeypatch.setenv("GMLX_STREAM_PREFILL_TAIL_MERGE", "0")
-    assert budget.prefill_activation_bytes(DS41_CFG) == DS41_ROW * 2048
-    # A nested text config; one residual stream, head_dim from the heads.
-    nested = {"text_config": {"hidden_size": 1024, "num_attention_heads": 8,
-                              "num_experts_per_tok": 2,
-                              "moe_intermediate_size": 256}}
-    row = 4 * (4 * 1024 + 8 * 128 + 2 * (2 * 1024 + 3 * 256))
-    assert budget.prefill_activation_bytes(nested) == row * 2048
+    assert budget.prefill_rows("deepseek_v41") == 2048
+
+
+def test_chunk_activations_cover_the_measured_deepseek41_prefill(
+        chunk_env, monkeypatch):
+    """DeepSeek V4.1 Flash UD-IQ2_XXS held 5.4 GiB of live activations
+    over the buffer pool under an 8034-token prefill on an M5 Max. The
+    fp32 price covers it without doubling it."""
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "8034")
+    monkeypatch.setenv("GMLX_STREAM_PREFILL_TAIL_MERGE", "0")
+    act = budget.prefill_activation_bytes(DS41_CFG)
+    assert 5.4 * (1 << 30) <= act <= 1.3 * 5.4 * (1 << 30)
+
+
+def test_chunk_activations_read_each_archs_width_names(chunk_env):
+    """The synth names the widths per arch: qwen4exp's residual streams
+    are hc_count, ernie4_5-moe's top-k is moe_k, hunyuan's moe_topk,
+    gemma4's top_k_experts, hy_v3's expert width expert_hidden_dim, and
+    nemotron_h puzzle models list k and the expert width per layer. Each
+    prices what the same widths do under the common names."""
+    # Qwen3.8-Flash-Next's header: 4 residual streams.
+    qwen = dict(model_type="qwen4_exp", hidden_size=2560,
+                num_attention_heads=24, head_dim=256, hc_count=4,
+                num_experts_per_tok=10, moe_intermediate_size=640)
+    assert budget.prefill_activation_bytes(qwen) == 4_331_667_456
+    # ERNIE-4.5-300B-A47B's widths, top-k under moe_k.
+    ernie = dict(model_type="ernie4_5_moe", hidden_size=8192,
+                 num_attention_heads=64, head_dim=128, moe_k=8,
+                 moe_intermediate_size=3584)
+    assert budget.prefill_activation_bytes(ernie) == 9_512_681_472
+    common = dict(hidden_size=4096, num_attention_heads=32, head_dim=128,
+                  num_experts_per_tok=8, moe_intermediate_size=1536)
+    want = budget.prefill_activation_bytes(common)
+    for key in ("moe_topk", "top_k_experts"):
+        alias = dict(common)
+        alias[key] = alias.pop("num_experts_per_tok")
+        assert budget.prefill_activation_bytes(alias) == want
+    hy = dict(common, intermediate_size=12288)
+    hy["expert_hidden_dim"] = hy.pop("moe_intermediate_size")
+    assert budget.prefill_activation_bytes(hy) == want
+    # A per-layer list prices its widest layer; 0 marks a dense layer.
+    nemo = dict(common, num_experts_per_tok=[0, 6, 8],
+                moe_intermediate_size=[0, 1024, 1536])
+    assert budget.prefill_activation_bytes(nemo) == want
+    # Experts behind a latent projection take their input at its width.
+    latent = dict(common, routed_expert_hidden_size=1024)
+    assert budget.prefill_activation_bytes(latent) < want
+    # A nested text config, and configs without the widths.
+    assert budget.prefill_activation_bytes({"text_config": common}) == want
     assert budget.prefill_activation_bytes({}) == 0
     assert budget.prefill_activation_bytes({"hidden_size": 1024}) == 0
 

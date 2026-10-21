@@ -200,21 +200,37 @@ def prefill_rows(model_type: str | None) -> int:
     return step
 
 
-def _width(c, name) -> int:
+def _width(c, *names) -> int:
+    """The widest positive int under any of ``names``: a per-layer list
+    gives its widest layer."""
     from gmlx.serve.mem_preflight import _get
 
-    v = _get(c, name)
-    return v if isinstance(v, int) and v > 0 else 0
+    best = 0
+    for name in names:
+        v = _get(c, name)
+        for x in (v if isinstance(v, (list, tuple)) else (v,)):
+            if isinstance(x, int) and not isinstance(x, bool) and x > best:
+                best = x
+    return best
+
+
+# The synth's names for the same widths across archs.
+_TOP_K = ("num_experts_per_tok", "moe_k", "moe_topk", "top_k_experts")
+_EXPERT_FF = ("moe_intermediate_size", "expert_hidden_dim")
+_STREAMS = ("hc_mult", "hc_count")
+_HEAD_DIM = ("head_dim", "v_head_dim", "global_head_dim")
 
 
 def prefill_activation_bytes(cfg) -> int:
     """Live activations of one streamed prefill chunk: one layer's
     working set at fp32 for ``prefill_rows`` rows. Per row: four
     hidden-wide copies (residual, norm, attention and mixer outputs) on
-    each of ``hc_mult`` residual streams, the attention output (heads x
+    each residual stream (``hc_mult``), the attention output (heads x
     head_dim), and per routed expert the row takes its input and output
-    (2 x hidden) and its gate, up and GLU product (3 x the expert width).
-    0 when the config lacks the widths."""
+    (2 x the expert's input width: ``routed_expert_hidden_size`` behind a
+    latent projection, else hidden) and its gate, up and GLU product
+    (3 x the expert width). Per-layer widths price the widest layer. 0
+    when the config lacks the widths."""
     from gmlx.serve.mem_preflight import _get
 
     if not cfg:
@@ -225,12 +241,13 @@ def prefill_activation_bytes(cfg) -> int:
     heads = _width(c, "num_attention_heads")
     if not (hidden and heads):
         return 0
-    head_dim = _width(c, "head_dim") or hidden // heads
-    k = _width(c, "num_experts_per_tok")
-    ff = _width(c, "moe_intermediate_size") or _width(c, "intermediate_size")
-    streams = max(1, _width(c, "hc_mult"))
+    head_dim = _width(c, *_HEAD_DIM) or hidden // heads
+    k = _width(c, *_TOP_K)
+    ff = _width(c, *_EXPERT_FF) or _width(c, "intermediate_size")
+    expert_in = _width(c, "routed_expert_hidden_size") or hidden
+    streams = max(1, _width(c, *_STREAMS))
     per_row = 4 * (4 * hidden * streams + heads * head_dim
-                   + k * (2 * hidden + 3 * ff))
+                   + k * (2 * expert_in + 3 * ff))
     mt = _get(c, "model_type") or _get(cfg, "model_type")
     return per_row * prefill_rows(mt if isinstance(mt, str) else None)
 
