@@ -21,6 +21,8 @@ streaming skips too (resident bytes are policy there, not file size).
 
 Knobs:
     GMLX_TOOL_PREFLIGHT=0   kill switch
+    GMLX_OVERCOMMIT=1       judges against physical RAM in place of the
+                            working set
 """
 
 from __future__ import annotations
@@ -103,10 +105,12 @@ def _need_at(weights: float, costs, heads: int | None, ctx: int) -> float:
     return weights + kv + transient
 
 
-def estimate(gguf_path: str, ctx_tokens: int | None = None) -> dict | None:
+def estimate(gguf_path: str, ctx_tokens: int | None = None, *,
+             limit: float | None = None) -> dict | None:
     """Fit estimate for serving ``ctx_tokens`` of context (default: the
     model's trained context) on this box, or None when any input cannot
-    be read (the caller must treat None as permit)."""
+    be read (the caller must treat None as permit). ``limit`` is the
+    bytes judged against in place of the GPU working set: physical RAM."""
     try:
         from gmlx.serve.capacity import deferred_table_bytes
 
@@ -117,7 +121,7 @@ def estimate(gguf_path: str, ctx_tokens: int | None = None) -> dict | None:
                         - deferred_table_bytes(shards[0]))
         cfg = _synth_config(shards[0])
         costs = _kv_costs(cfg)
-        ws = working_set_bytes()
+        ws = working_set_bytes() if limit is None else float(limit)
         if not (cfg and costs and ws):
             return None
         from gmlx.serve.mem_preflight import _get, _lm_config
@@ -147,6 +151,7 @@ def estimate(gguf_path: str, ctx_tokens: int | None = None) -> dict | None:
             "ctx": ctx,
             "need": need,
             "working_set": ws,
+            "against": "GPU working set" if limit is None else "RAM",
             "fits": need <= ws,
             "largest_fit_ctx": lo,
         }
@@ -157,13 +162,15 @@ def estimate(gguf_path: str, ctx_tokens: int | None = None) -> dict | None:
 
 def refusal_text(est: dict) -> str:
     largest = est["largest_fit_ctx"]
+    against = est.get("against", "GPU working set")
+    over = "RAM" if against == "RAM" else "the working set"
     fit = (f"largest fitting context is ~{largest}"
            if largest > 0 else
-           "the weights alone exceed the working set")
+           f"the weights alone exceed {over}")
     return (f"cannot fit: {est['ctx']}-token context needs "
             f"~{est['need'] / GB:.1f} GB "
-            f"(weights {est['weights'] / GB:.1f} GB), this box's GPU "
-            f"working set is {est['working_set'] / GB:.1f} GB; {fit}. "
+            f"(weights {est['weights'] / GB:.1f} GB), this box's "
+            f"{against} is {est['working_set'] / GB:.1f} GB; {fit}. "
             "For MoE models --stream-experts serves the experts from "
             "disk; GMLX_TOOL_PREFLIGHT=0 overrides.")
 
@@ -172,10 +179,19 @@ def check_or_exit(gguf_path: str, ctx_tokens: int | None = None,
                   streaming: bool = False):
     """Refuse (SystemExit 2, numbers on stderr) when the configuration
     definitively cannot fit; otherwise return the estimate (or None
-    when skipped)."""
+    when skipped). Under GMLX_OVERCOMMIT=1 it is judged against physical
+    RAM: a load past the working set goes through, one past RAM does
+    not."""
+    from gmlx.stream.budget import overcommit, ram_bytes
+
     if not _enabled() or streaming:
         return None
-    est = estimate(gguf_path, ctx_tokens)
+    limit = None
+    if overcommit():
+        limit = ram_bytes()
+        if not limit:
+            return None
+    est = estimate(gguf_path, ctx_tokens, limit=limit)
     if est is not None and not est["fits"]:
         print(f"error: {refusal_text(est)}", file=sys.stderr)
         raise SystemExit(2)

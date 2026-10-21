@@ -1131,6 +1131,23 @@ def text_tensor_bytes(path: str) -> int | None:
     return total or None
 
 
+def mtp_block_bytes(path: str) -> int:
+    """Bytes of the NextN/MTP blocks of the split set at ``path``, the
+    tensors ``text_tensor_bytes`` leaves out, which an MTP drafter built
+    from the model's own head loads. 0 when there are none or a shard
+    cannot be scanned."""
+    from .headerscan import scan_gguf
+    from .preflight import find_split_shards
+
+    try:
+        tensors = [t for shard in find_split_shards(path)
+                   for t in scan_gguf(shard).tensors]
+    except Exception:
+        return 0
+    mtp = mtp_blocks(tensors)
+    return sum(int(t.nbytes) for t in tensors if block_of(t.name) in mtp)
+
+
 def _over_budget(c: ClassifiedGguf) -> tuple[int, int] | None:
     """``(resident bytes, budget)`` when the model is over the stream
     budget, else None. The resident bytes are the text bytes less the

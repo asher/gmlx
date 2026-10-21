@@ -105,6 +105,48 @@ def reclaimable_bytes() -> int | None:
     return s["free"] + s["purgeable"] + s["speculative"] + s["filebacked"]
 
 
+# The sysctl page counts of live_reclaimable_bytes. vm.page_free_count
+# leaves out the speculative pages, which Mach's free_count includes, and
+# vm.page_pageable_external_count holds them, as file-backed read-ahead.
+_LIVE_COUNTS = ("vm.page_free_count", "vm.page_purgeable_count",
+                "vm.page_pageable_external_count")
+
+
+def _sysctl_count(name: str) -> int | None:
+    """One integer sysctl, read in process, or None when it fails."""
+    try:
+        _bind()
+        value = ctypes.c_uint64(0)
+        size = ctypes.c_size_t(ctypes.sizeof(value))
+        rc = _libc.sysctlbyname(name.encode(), ctypes.byref(value),
+                                ctypes.byref(size), None, ctypes.c_size_t(0))
+    except Exception:
+        return None
+    if rc != 0:
+        return None
+    if size.value == 4:
+        return value.value & 0xFFFFFFFF
+    return value.value if size.value == 8 else None
+
+
+def live_reclaimable_bytes() -> int | None:
+    """free + purgeable + file-backed pages, from the sysctl counts at
+    the moment of the call. host_statistics64 refreshes its counters
+    about once a second, and a warm wire of tens of GB commits within one
+    refresh, so a reader that must see a wire's own pages reads this.
+    The speculative pages count once, in the file-backed count. None off
+    Darwin or when a read fails."""
+    if sys.platform != "darwin":
+        return None
+    pages = 0
+    for name in _LIVE_COUNTS:
+        n = _sysctl_count(name)
+        if n is None:
+            return None
+        pages += n
+    return pages * _PAGE
+
+
 def available_bytes() -> int | None:
     """free + inactive, what mlx-vlm's ``_free_ram_bytes`` parses out of
     ``vm_stat``, read in process. A fork beside a Metal-mapped buffer

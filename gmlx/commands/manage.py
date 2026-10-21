@@ -188,9 +188,11 @@ def _ref_size_bytes(ref: remote.Ref, report: remote.HeaderReport) -> int | None:
         return None
 
 
-def _stream_plan(scans: list | None) -> dict | None:
+def _stream_plan(scans: list | None, path: str | None = None) -> dict | None:
     """The streaming plan of a MoE file on this Mac as a JSON-ready dict
-    with its report lines, or None (dense file, or unreadable scans)."""
+    with its report lines, or None (dense file, or unreadable scans). For
+    a local ``path``, the live line counts the auto MTP drafter that
+    ``gmlx run`` loads beside the experts."""
     if not scans:
         return None
     from gmlx.stream import plan as sp
@@ -203,6 +205,16 @@ def _stream_plan(scans: list | None) -> dict | None:
         lines = [sp.model_line(model), sp.group_line(model)]
         if box is not None:
             lines += sp.box_lines(model, box)
+            drafter = 0
+            if path:
+                from gmlx.commands.cli import bare_run_drafter_bytes
+
+                drafter = bare_run_drafter_bytes(path)
+            live = sp.live_check(model, box, drafter)
+            if live is not None:
+                lines.append(sp.live_line(live, box))
+                out["experts_in_memory_now"] = live.fits
+                out["auto_mtp_off_now"] = live.mtp_off
         else:
             lines.append("this Mac: working set not readable, no fit verdict")
     except Exception:                                      # noqa: BLE001
@@ -335,7 +347,9 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
     from gmlx.load.preflight import hadamard_fold_error
     fold_err = hadamard_fold_error(report.arch, report.hadamard)
     runs = report.loadable_codecs and arch_ok and fold_err is None
-    stream = (_stream_plan(scans)
+    stream = (_stream_plan(scans,
+                           os.path.expanduser(ref.raw)
+                           if ref.kind == "local" else None)
               if not (mmproj or adapter or drafter or image) else None)
     # A load that reads its tables from the file holds the rest.
     resident = None

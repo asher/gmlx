@@ -138,6 +138,10 @@ class BoxPlan:
     # streams the experts beside them.
     deferred_bytes: int = 0
     flag_streams: bool = False
+    # A streams verdict for a file that fits in RAM past the budget: the
+    # live line (``live_check``) says what a load without a stream flag
+    # does, as GMLX_OVERCOMMIT=1 changes it.
+    past_budget: bool = False
 
     @property
     def arena_share(self) -> float | None:
@@ -280,9 +284,10 @@ def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
     if max_buffer_bytes is None:
         max_buffer_bytes = device_max_buffer()
     deferred, all_tables = _deferred(model, budget, max_buffer_bytes)
+    in_ram = classify_weight_share(model.total_bytes, ram_bytes) != "over"
     if deferred and model.total_bytes - deferred <= budget:
         verdict = VERDICT_TABLES
-    elif classify_weight_share(model.total_bytes, ram_bytes) != "over":
+    elif in_ram and model.total_bytes <= budget:
         verdict = VERDICT_RESIDENT
     elif fit_left < 0:
         verdict = VERDICT_TOO_BIG
@@ -298,7 +303,8 @@ def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
         short_bytes=max(0, -fit_left), verdict=verdict,
         ring_shared_bytes=shared, host_bytes=host, budget_bytes=budget,
         deferred_bytes=deferred if verdict == VERDICT_TABLES else 0,
-        flag_streams=verdict == VERDICT_TABLES and not all_tables)
+        flag_streams=verdict == VERDICT_TABLES and not all_tables,
+        past_budget=in_ram and verdict == VERDICT_STREAMS)
 
 
 def scan_path(gguf_path: str) -> list:
@@ -413,8 +419,38 @@ def box_lines(m: ModelPlan, b: BoxPlan) -> list[str]:
     if not b.ring_fits:
         lines.append(f"prefill ring {gb(m.ring_bytes)} exceeds the arena; "
                      "prefill runs from the page cache")
-    lines.append("=> streams with --stream-experts (server: stream: experts)")
+    if not b.past_budget:
+        # Past the budget in RAM, the live line says what a load does.
+        lines.append("=> streams with --stream-experts (server: stream: "
+                     "experts)")
     return lines
+
+
+LIVE_RESIDENT = "=> with the memory free now, its experts stay in memory"
+
+
+def live_check(m: ModelPlan, b: BoxPlan, drafter_bytes: int = 0):
+    """What a load without a stream flag decides on this Mac's memory
+    free now, for a plan that keeps the experts in memory or one past
+    the budget in RAM: the check the load runs
+    (``budget.check_wire_beside_drafter``) on the bytes it would wire,
+    beside the auto MTP drafter of ``drafter_bytes`` it loads, with the
+    plan's KV room. None for a plan that streams them anyway."""
+    if b.verdict not in (VERDICT_RESIDENT, VERDICT_TABLES) and not b.past_budget:
+        return None
+    from gmlx.stream.budget import check_wire_beside_drafter
+
+    return check_wire_beside_drafter(m.total_bytes - b.deferred_bytes,
+                                     drafter_bytes, auto=True,
+                                     room_bytes=b.room.bytes,
+                                     budget=b.budget_bytes or None)
+
+
+def live_line(check, b: BoxPlan) -> str:
+    """The validate line under the plan for a ``live_check``."""
+    if check.mtp_off and check.fits:
+        return "=> with the memory free now, " + check.mtp_off_line()
+    return LIVE_RESIDENT if check.fits else "=> " + check.line(b.room)
 
 
 def to_dict(m: ModelPlan, b: BoxPlan | None) -> dict:

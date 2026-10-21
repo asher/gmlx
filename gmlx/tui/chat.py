@@ -3320,6 +3320,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             apply_family_defaults,
             maybe_load_from_config,
             normalize_kv_scheme,
+            preload_wire_check,
             split_path_intent,
         )
 
@@ -3327,6 +3328,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         rc = maybe_load_from_config(args, parser, argv)
         if rc is not None:
             return rc
+        # Chat holds the conversation, so its KV room is the serve
+        # context's. The VLM chat has no streamed placement.
+        preload_wire_check(args, depth=None, can_stream=not args.mmproj)
         _ensure_stream_cb_caps(args)
         gguf = os.path.expanduser(args.gguf)
         if not os.path.exists(gguf):
