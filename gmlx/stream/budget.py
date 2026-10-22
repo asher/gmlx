@@ -31,7 +31,7 @@ from gmlx.envflags import env_bool, env_int
 
 _DEFAULT_CTX = 32768
 _LEGACY_RESERVE_GB = 8.0
-_MIN_POOL_BYTES = 2 << 30
+_POOL_BYTES = 2 << 30
 _UNPRICED_POOL_BYTES = 4 << 30
 _PROCESS_GB = 2.0
 _RESIDENT_CACHE_RAM_SHARE = 1 / 16
@@ -298,11 +298,12 @@ def prefill_activation_bytes(cfg, step: int | None = None) -> int:
 
 
 def pool_bytes(activation: int, fallback: int = _UNPRICED_POOL_BYTES) -> int:
-    """The MLX buffer pool a streamed install sets: one chunk's
-    activations, at least 2 GiB; ``fallback`` when the activations are
-    not priced. The pool holds the buffers one layer frees for the next,
-    and a pool smaller than that set slows prefill, so the pool is the
-    chunk price, the fp32 upper bound of a chunk's activations.
+    """The MLX buffer pool a streamed install sets: 2 GiB, or
+    ``fallback`` when the activations are not priced. The pool holds the
+    buffers one layer frees for the next. On DeepSeek V4.1 Flash a pool
+    of one chunk's activations (8.0 GB) prefilled a 32k prompt about 3%
+    faster than 2 GiB and an 8k prompt no faster, and the 6 GB it took
+    from the decode arena cost about 5.5% of the decode speed.
     ``GMLX_STREAM_CACHE_GB`` sizes it."""
     raw = os.environ.get("GMLX_STREAM_CACHE_GB", "")
     if raw:
@@ -312,7 +313,7 @@ def pool_bytes(activation: int, fallback: int = _UNPRICED_POOL_BYTES) -> int:
             pass
     if activation <= 0:
         return int(fallback)
-    return max(_MIN_POOL_BYTES, int(activation))
+    return _POOL_BYTES
 
 
 def price_room(costs, trained_ctx, ws: float, transient: float,
