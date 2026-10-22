@@ -229,6 +229,27 @@ def test_install_steps_skips_a_user_pin_and_the_env_switch(monkeypatch,
     assert lmgen.generate_step._gmlx_cb_phase
 
 
+@pytest.mark.parametrize("flags, streaming",
+                         [([], False), (["--stream-experts"], True)])
+def test_chat_installs_the_phased_steps_as_run_does(monkeypatch, tmp_path,
+                                                    flags, streaming):
+    """gmlx chat sets the caps per phase as run does, so a model decodes at
+    the same speed in both, and a streamed chat prefills on the lift."""
+    import gmlx.commands.cli as cli
+    import gmlx.serve.cb_phase as cb_phase
+    from gmlx.tui import chat
+
+    seen = []
+    monkeypatch.setattr(cli, "maybe_load_from_config", lambda *a: None)
+    monkeypatch.setattr(cli, "preload_wire_check", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_ensure_stream_cb_caps", lambda args: None)
+    monkeypatch.setattr(cb_phase, "install_cb_phase_steps",
+                        lambda streaming=False: seen.append(streaming) or True)
+    missing = str(tmp_path / "missing.gguf")
+    assert chat.cmd_chat([missing, *flags]) == 2
+    assert seen == [streaming]
+
+
 def test_decode_caps_follow_the_streaming_verdict():
     """A streamed decode syncs on the host at every layer, so it decodes on
     the streamed caps; a model in RAM keeps the coarse decode caps."""

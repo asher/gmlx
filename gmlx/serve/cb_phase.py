@@ -12,8 +12,9 @@ GPU memory on multi-thousand-token chunks.
 
 kq.set_cb_caps writes the live device fields, so the serve engine flips
 at prompt steps (fine) and decode steps (decode_caps of the batch's
-model), and `gmlx run` (its bench too) wraps the token-step generators
-the same way. GMLX_CB_PHASE=0 disables both installs.
+model), and `gmlx run` (its bench too) and `gmlx chat` wrap the
+token-step generators the same way. GMLX_CB_PHASE=0 disables both
+installs.
 """
 
 from __future__ import annotations

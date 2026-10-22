@@ -2364,14 +2364,14 @@ def _lift_stream_cb_caps(argv: list[str]) -> None:
     about 1450 command buffers whose turnaround gaps left the GPU 18%
     utilized; the lift measured +40% streamed decode, output
     bit-identical. The device defaults are 50 ops / 50 MB now, and each
-    decode step of run sets its model's caps (cb_phase.decode_caps), so
-    the lift holds the streamed prefill of run and its bench, and all of
-    a streamed chat. In-RAM serving does not take the lifetime lift: a
-    coarse buffer holds every layer's prefill transients live at once and
-    exhausts GPU memory on deep prompts, so the serve engine flips the
-    caps per phase at runtime instead. setdefault keeps explicit
-    overrides in charge, and cb_phase leaves an override set before the
-    lift (the user's pin) alone.
+    decode step of run and chat sets its model's caps
+    (cb_phase.decode_caps), so the lift holds the streamed prefill of
+    run, its bench and chat. In-RAM serving does not take the lifetime
+    lift: a coarse buffer holds every layer's prefill transients live at
+    once and exhausts GPU memory on deep prompts, so the serve engine
+    flips the caps per phase at runtime instead. setdefault keeps
+    explicit overrides in charge, and cb_phase leaves an override set
+    before the lift (the user's pin) alone.
     """
     if any(a in ("--stream-experts", "--stream-cpu") for a in argv):
         if not os.environ.get("MLX_MAX_OPS_PER_BUFFER"):
