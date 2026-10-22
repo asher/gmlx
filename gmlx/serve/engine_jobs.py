@@ -14,10 +14,10 @@ loop calls between decode steps, takes the job out of the queue and runs
 one step per call, so chat keeps decoding while a job runs. The job must
 leave the engine as it found it: it never drains cancellations, never
 touches the stop tokens and never reseeds the RNG. Each step runs under
-the wired limit and the prefill command-buffer caps, and restores any
-rope position state it changed. An engine cancel for the job's uid never
-reaches it, since the batch loop drains that uid and finds no row; the
-job's stop event is its only cancel.
+the wired limit and the model's prefill command-buffer caps, and
+restores any rope position state it changed. An engine cancel for the
+job's uid never reaches it, since the batch loop drains that uid and
+finds no row; the job's stop event is its only cancel.
 
 The caller waits for the engine to dequeue the job with no deadline, as
 chat waits for its generation context. The deadline starts at dequeue and
@@ -188,15 +188,16 @@ def _take_queued(rg) -> list:
 
 @contextlib.contextmanager
 def _step_scope(model):
-    """One job step: the wired limit, the prefill command-buffer caps, and
-    the rope position state of multimodal models put back afterwards."""
+    """One job step: the wired limit, the model's prefill command-buffer
+    caps, and the rope position state of multimodal models put back
+    afterwards."""
     from gmlx.serve import cb_phase
 
     holders = [model, getattr(model, "language_model", None)]
     saved = [(h, name, getattr(h, name)) for h in holders if h is not None
              for name in _ROPE_STATE if hasattr(h, name)]
-    before = cb_phase.phase()
-    cb_phase.flip("prefill")
+    before = cb_phase.snapshot()
+    cb_phase.flip("prefill", model)
     wired: Any = contextlib.nullcontext()
     if model is not None and mx.default_device() == mx.gpu and mx.metal.is_available():
         wired = importlib.import_module("gmlx._vendor.mlx_lm.generate").wired_limit(model)
@@ -206,8 +207,7 @@ def _step_scope(model):
     finally:
         for holder, name, value in saved:
             setattr(holder, name, value)
-        if before is not None:
-            cb_phase.flip(before)
+        cb_phase.restore(before)
 
 
 def _start(rg, request) -> Optional[_StepJob]:

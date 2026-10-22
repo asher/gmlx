@@ -929,6 +929,30 @@ def test_fallback_excludes_streamable_from_pin(monkeypatch):
     assert seen.get("exclude") == {"per_layer_token_embd.weight"}
 
 
+def test_the_pin_also_leaves_out_the_row_fused_members(monkeypatch):
+    """The runtime reads a row-fused pair from its own copy, so the
+    streaming install keeps the members' wire tensors out of the pin."""
+    import gmlx.stream.pin_weights as pw
+
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_STREAM_PLE_COMPOSE", "0")
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    seen = {}
+
+    def _capture(gguf_path, exclude_names=frozenset(), reserved_bytes=0):
+        seen["exclude"] = set(exclude_names)
+        return None
+
+    monkeypatch.setattr(pw, "maybe_pin_weights", _capture)
+    monkeypatch.setattr(pw, "fused_members",
+                        lambda model, gguf_path: frozenset({"blk.0.attn_q_a.weight"}))
+    model, _ = _moe_table_model()
+    _fake_budget(monkeypatch, 10)
+    install_expert_streaming(model, gguf_path="/nonexistent.gguf")
+    assert seen.get("exclude") == {"per_layer_token_embd.weight",
+                                   "blk.0.attn_q_a.weight"}
+
+
 def test_streamed_table_bytes_keys_on_streamed_state(monkeypatch):
     # Declared-but-resident (fallback) tables stay charged: only actually
     # streamed tables report bytes for the arena subtraction.

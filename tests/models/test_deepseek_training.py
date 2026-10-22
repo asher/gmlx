@@ -368,16 +368,22 @@ def _slots(model):
             if getattr(m, s, None) is not None]
 
 
-def test_default_key_adapters_train_through_a_row_fused_pair():
+def _arch_model(arch):
+    return _v4_model() if arch == "v4" else _v41_model()
+
+
+@pytest.mark.parametrize("arch", ["v4", "v41"])
+def test_default_key_adapters_train_through_a_row_fused_pair(arch):
     """Row fusion runs at every load. The student setup splits each fused
     pair back into its members, so the adapters on wq_a, wkv and the
     compressor pair are the modules the forward calls."""
-    model = _v4_model()
+    model = _arch_model(arch)
     model.eval()
     assert v4.install_gemv_row_fusion(model) > 0
     prepare_lora_student(model, rank=4)
     grads = _train_step(model, _tokens(40))
-    modules = [f"model.layers.{i}.attn.{p}" for i in range(3)
+    modules = [f"model.layers.{i}.attn.{p}"
+               for i in range(len(model.model.layers))
                for p in ("wq_a", "wkv")] + [
         "model.layers.2.attn.compressor.wkv",
         "model.layers.2.attn.compressor.wgate",
@@ -388,12 +394,12 @@ def test_default_key_adapters_train_through_a_row_fused_pair():
                 if "_fused" in k]
 
 
-def _serve_model(codec):
-    """A V4 model in eval mode, with attention wq_a and wkv K-quant encoded
-    when ``codec`` is set."""
+def _serve_model(codec, arch="v4"):
+    """A V4 or V4.1 model in eval mode, with attention wq_a and wkv K-quant
+    encoded when ``codec`` is set."""
     from mlx_kquant.nn import KQuantLinear
 
-    model = _v4_model()
+    model = _arch_model(arch)
     if codec is not None:
         for layer in model.model.layers:
             for name in ("wq_a", "wkv"):
@@ -407,9 +413,9 @@ def _serve_model(codec):
     return model
 
 
-def _adapter_plan(model):
+def _adapter_plan(model, arch="v4"):
     """A LoRA plan on a member of each fused pair kind: attention wkv (with
-    wq_a) and the ratio-4 compressor wgate (with its wkv)."""
+    wq_a) and layer 2's gated compressor wgate (with its wkv)."""
     from gmlx.load import adapter
 
     by_path = dict(model.named_modules())
@@ -423,23 +429,26 @@ def _adapter_plan(model):
         modules[path] = adapter.LoraModule(
             module_path=path, a=mx.random.normal((4, in_dims)) * 0.5,
             b=mx.random.normal((out_dims, 4)) * 0.5, rank=4, scale=1.0)
-    return adapter.LoraAdapter(alpha=4.0, arch="deepseek_v4", modules=modules)
+    return adapter.LoraAdapter(
+        alpha=4.0, arch="deepseek_v4" if arch == "v4" else "deepseek_v41",
+        modules=modules)
 
 
+@pytest.mark.parametrize("arch", ["v4", "v41"])
 @pytest.mark.parametrize("codec", [None, "q8_0"], ids=["float", "q8_0"])
-def test_an_adapter_on_a_row_fused_member_reaches_the_serve_logits(codec):
+def test_an_adapter_on_a_row_fused_member_reaches_the_serve_logits(codec, arch):
     """Installing an adapter on a fused member clears its pair, so the
     forward calls the adapted member and matches a model that was never
     fused."""
     from gmlx.load.modules import install_lora_adapter
 
     toks = _tokens(10)
-    plain = _serve_model(codec)
-    fused = _serve_model(codec)
+    plain = _serve_model(codec, arch)
+    fused = _serve_model(codec, arch)
     assert v4.install_gemv_row_fusion(fused) > 0
     base = fused(toks)
     for model in (plain, fused):
-        assert install_lora_adapter(model, _adapter_plan(model)) == 2
+        assert install_lora_adapter(model, _adapter_plan(model, arch)) == 2
     got = fused(toks)
     assert not mx.array_equal(got, base)
     assert mx.array_equal(got, plain(toks))

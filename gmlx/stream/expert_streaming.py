@@ -35,7 +35,8 @@ from gmlx.load.loader import (
 
 from .budget import (_decode_arena_bytes, _prefill_ring_reason,
                      _ram_floor_bytes, arena_ceiling_bytes,
-                     outside_ceiling_bytes)
+                     outside_ceiling_bytes, pool_override)
+from .budget import pool_bytes as _priced_pool_bytes
 from .stack_unmap import stacks_remapped, unmap_stacks
 from .wired_limit import _neutralize_wired_limit_sweep, configure_cpu_device
 
@@ -44,6 +45,19 @@ def _ph_li(ph, li, key, dt):
     """Per-layer phase sums (GMLX_DECODE_PHASE_LAYERS=1 prints them)."""
     d = ph.setdefault("by_li", {}).setdefault(li, {})
     d[key] = d.get(key, 0.0) + dt
+
+
+def _la_observe(ph, li, la_sync):
+    """Score a layer's actual routing (rank gate, probe), timed into the la
+    bucket. Host only, so it can run beside the layer's gather."""
+    if ph is None:
+        la_sync.observe()
+        return
+    t = time.perf_counter()
+    la_sync.observe()
+    dt = time.perf_counter() - t
+    ph["la"] += dt
+    _ph_li(ph, li, "la", dt)
 
 
 # Submit a staged layer's expert gather as soon as it is built, so the GPU
@@ -374,7 +388,7 @@ def _physical_ram() -> int:
     return ram
 
 
-def _set_allocator_limits(tracked_bytes: int, pool_bytes: int = 0) -> None:
+def _set_allocator_limits(tracked_bytes: int, pool_bytes: int | None = None) -> None:
     """MLX's allocator counts the file-backed weights as active memory,
     which on a streamed model sits past its default memory limit, so each
     eval waited for the GPU work in flight to finish. Raise the memory
@@ -384,20 +398,21 @@ def _set_allocator_limits(tracked_bytes: int, pool_bytes: int = 0) -> None:
     pool is the one the KV room prices (``pool_bytes``,
     ``budget.pool_bytes``): it fills to its limit under prefill, and the
     live activations sit on top of it, so the room holds both. Without a
-    priced pool it is 4 GiB. GMLX_STREAM_ALLOC_LIMITS=0 keeps the
-    defaults; GMLX_STREAM_CACHE_GB sizes the pool."""
+    room it is budget.pool_bytes(0), 4 GiB. GMLX_STREAM_ALLOC_LIMITS=0
+    keeps the defaults; GMLX_STREAM_CACHE_GB sizes the pool, read once,
+    by budget.pool_override, for the room and this limit alike."""
     if not env_bool("GMLX_STREAM_ALLOC_LIMITS", True) or not mx.metal.is_available():
         return
     limit = int(tracked_bytes + 2 * _physical_ram())
-    env = os.environ.get("GMLX_STREAM_CACHE_GB", "")
-    if env:
-        cache = int(float(env) * 2**30)
+    cache = _priced_pool_bytes(0) if pool_bytes is None else int(pool_bytes)
+    raw = os.environ.get("GMLX_STREAM_CACHE_GB", "")
+    if raw and pool_override() is None:
+        how = f"GMLX_STREAM_CACHE_GB={raw} is not a number of GB, ignored"
+    elif raw:
         how = "GMLX_STREAM_CACHE_GB"
-    elif pool_bytes > 0:
-        cache = int(pool_bytes)
+    elif pool_bytes is not None:
         how = "priced in the KV room; GMLX_STREAM_CACHE_GB overrides"
     else:
-        cache = 4 * 2**30
         how = "GMLX_STREAM_CACHE_GB sizes it"
     mx.set_memory_limit(limit)
     mx.set_cache_limit(cache)
@@ -660,17 +675,12 @@ def install_expert_streaming(
             object.__setattr__(model, "_kq_prefetcher", prefetcher)
         # Wire the every-token weights before the decode feeder sizes its
         # arena: pinned every-token pages come out of the same wired budget.
-        from gmlx.stream.pin_weights import cast_copies, maybe_pin_weights
-        from gmlx.stream.table_stream import streamable_tables_for
+        from gmlx.stream.pin_weights import maybe_pin_weights, pin_exclusions
 
         # Declared streamable components never enter the pin set, streamed
-        # or resident: mlocking them starves the expert page cache. Cast
-        # tensors go too - their wire bytes have no view left to keep.
-        casts = cast_copies(model, gguf_path)
-        cast_dead_bytes = casts.dead_bytes
-        pin_exclude = frozenset(
-            t.gguf_name for t, _ in streamable_tables_for(model)
-        ) | casts.names
+        # or resident, and neither do wire tensors the runtime reads from
+        # its own copy (casts, row-fused pairs).
+        pin_exclude, cast_dead_bytes = pin_exclusions(model, gguf_path)
         weights_pin = maybe_pin_weights(
             gguf_path, exclude_names=pin_exclude, reserved_bytes=held_wired)
         if weights_pin is not None:
@@ -731,6 +741,7 @@ def install_expert_streaming(
                         dfr.forward_start(self._kq_li)
                     la = getattr(self, "_kq_lookahead", None)
                     la_pred = None
+                    la_sync = None
                     routed_ids = None
                     ph = _PHASE
                     if ph is not None:
@@ -858,18 +869,24 @@ def install_expert_streaming(
                             x_la = x
                         if ph is not None:
                             t_la = time.perf_counter()
-                            la_pred = la.on_call(x_la, indices)
+                            la_sync = la.sync(x_la, indices)
+                            la_pred = la_sync.predictions()
                             _dt = time.perf_counter() - t_la
                             ph["la"] += _dt
                             _ph_li(ph, self._kq_li, "la", _dt)
                         else:
-                            la_pred = la.on_call(x_la, indices)
-                    if (
+                            la_sync = la.sync(x_la, indices)
+                            la_pred = la_sync.predictions()
+                    arena = (
                         dfr is not None
                         and cpu_only
                         and small
                         and dfr.covers(self._kq_li)
-                    ):
+                    )
+                    if la_sync is not None and not arena:
+                        _la_observe(ph, self._kq_li, la_sync)
+                        la_sync = None
+                    if arena:
                         # Decode feeder: the routed experts are served from
                         # this layer's wired GPU arena; misses are pread from
                         # the GGUF into evicted slots first. Small prefill
@@ -995,6 +1012,9 @@ def install_expert_streaming(
                                     dfr.prestage(_dst, _ids)
                             if ph is not None:
                                 ph["prestage"] += time.perf_counter() - t2
+                        if slots is None and la_sync is not None:
+                            _la_observe(ph, self._kq_li, la_sync)
+                            la_sync = None
                         if slots is not None:
                             # arena call: weights are wired GPU views for
                             # this scope, so lift the streaming CPU pin
@@ -1043,12 +1063,16 @@ def install_expert_streaming(
                                             mx.async_eval(y)
                                 if ph is not None:
                                     ph["build"] += time.perf_counter() - t3
-                                return y
                             finally:
                                 self._kq_cpu_only = True
                                 if rows:
                                     object.__setattr__(
                                         self, "_kq_arena_rows", False)
+                            if la_sync is not None:
+                                # The gather is in flight: the routing is
+                                # scored beside it.
+                                _la_observe(ph, self._kq_li, la_sync)
+                            return y
                     split = (
                         dfr is not None
                         and cpu_only
@@ -1659,7 +1683,7 @@ def install_expert_streaming(
             )
     if streaming:
         _set_allocator_limits(
-            total_bytes, room.pool_bytes if room is not None else 0)
+            total_bytes, room.pool_bytes if room is not None else None)
         # The context line printed above and the feeder lines cover the
         # normal story; what remains is the fallback mechanics for
         # whatever the feeders don't handle.
@@ -1715,6 +1739,10 @@ def install_expert_streaming(
                 f"layers ({offloaded / 1e9:.1f} GB stays file-backed; rest "
                 f"of the model + KV on {base_dev}; {staging})"
             )
+    # The coarse caps of the CLI's streaming lift hold the load only.
+    from gmlx.serve.cb_phase import end_lift
+
+    end_lift()
     return n_wrapped, offloaded
 
 

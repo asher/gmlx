@@ -320,6 +320,39 @@ def test_container_build_carries_media_ids_and_sanitize():
         groups, rank, tc["hidden_size"])
 
 
+def test_the_container_load_fuses_the_text_tower_rows():
+    """The VL load runs the text load's row fusion on language_model. The
+    forward reads the fused rows: with the member weights zeroed, the
+    fused tower gives the unfused logits."""
+    import mlx.utils as mu
+
+    from gmlx.load.loader import install_row_fusion
+    from gmlx.stream.pin_weights import FUSED_MEMBERS_ATTR
+
+    mx.random.seed(0)
+    model, _ = build_vlm_model(_config())
+    lm = model.language_model
+    lm.update(mu.tree_map(
+        lambda a: mx.random.normal(a.shape) * 0.2
+        if mx.issubdtype(a.dtype, mx.floating) else a, lm.parameters()))
+    toks = mx.array([[5, 7, 9, 11, 13, 15]])
+    ref = lm(toks, cache=lm.make_cache()).logits
+    mx.eval(ref)
+    assert install_row_fusion(model, "deepseek_v41_vl") >= len(lm.layers)
+    assert getattr(lm, FUSED_MEMBERS_ATTR)
+    for layer in lm.layers:
+        attn = layer.attn
+        mods = [attn.wq_a, attn.wkv]
+        comp = getattr(attn, "compressor", None)
+        if getattr(comp, "_kv_gate_fused", None) is not None:
+            mods += [comp.wkv, comp.wgate]
+        for m in mods:
+            m.weight = mx.zeros_like(m.weight)
+    got = lm(toks, cache=lm.make_cache()).logits
+    mx.eval(got)
+    assert mx.allclose(ref, got, atol=1e-5, rtol=1e-5)
+
+
 def _tokenizer():
     from tokenizers import Tokenizer, models, pre_tokenizers
     from transformers import PreTrainedTokenizerFast

@@ -182,6 +182,84 @@ def test_chunked_prefill_matches_one_pass():
     assert mx.allclose(full[:, -1], tail[:, -1], atol=2e-5)
 
 
+def test_gemv_row_fusion_serves_the_projections():
+    """install_gemv_row_fusion gives wq_a+wkv on every layer and the gated
+    compressor's wkv+wgate one projection each. The forward reads those
+    rows: with the member weights zeroed, prefill and decode still give the
+    unfused logits."""
+    from gmlx.models.deepseek_v4.model import install_gemv_row_fusion
+
+    mx.random.seed(0)
+    model = _randomized(Model(_args()))
+    toks = [5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31]
+
+    def run():
+        cache = model.make_cache()
+        out = [model(mx.array([toks[:8]]), cache=cache)[:, -1:]]
+        out += [model(mx.array([[t]]), cache=cache) for t in toks[8:]]
+        return mx.concatenate(out, axis=1)
+
+    ref = run()
+    mx.eval(ref)
+    # Six attention pairs and layer 2's ratio-2 compressor. Layer 4's
+    # ratio-1 compressor has no gate.
+    assert install_gemv_row_fusion(model) == 7
+    for layer in model.layers:
+        attn = layer.attn
+        mods = [attn.wq_a, attn.wkv]
+        comp = getattr(attn, "compressor", None)
+        if comp is not None and getattr(comp, "_kv_gate_fused", None) is not None:
+            mods += [comp.wkv, comp.wgate]
+        for m in mods:
+            m.weight = mx.zeros_like(m.weight)
+    got = run()
+    mx.eval(got)
+    assert mx.allclose(ref, got, atol=1e-5, rtol=1e-5)
+
+
+def test_the_streaming_pin_leaves_row_fused_members_unwired(tmp_path):
+    """The forward reads a fused pair from its copy, so the members' wire
+    bytes are dead: the every-token pin leaves them out (pinned, they stay
+    wired beside the copy, 0.39 GB on UD-IQ2_XXS) and keeps the rest."""
+    from gguf import GGUFReader, GGUFWriter
+
+    import gmlx.stream.pin_weights as pw
+    from gmlx.models.deepseek_v4.model import install_gemv_row_fusion
+
+    model = _randomized(Model(_args()))
+    assert install_gemv_row_fusion(model) == 7
+    members = {f"blk.{li}.{n}.weight"
+               for li in range(6) for n in ("attn_q_a", "attn_kv")}
+    members |= {"blk.2.attn_compressor_kv.weight",
+                "blk.2.attn_compressor_gate.weight"}
+    # Layer 4's ratio-1 compressor has no gate and stays split.
+    kept = {"blk.0.attn_q_b.weight", "blk.4.attn_compressor_kv.weight",
+            "token_embd.weight"}
+    path = tmp_path / "m.gguf"
+    w = GGUFWriter(str(path), "deepseek41")
+    for name in sorted(members | kept):
+        w.add_tensor(name, np.zeros((128, 128), dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+    excl, _ = pw.pin_exclusions(model, str(path))
+    assert members <= excl and not kept & excl
+    rs = pw.every_token_ranges(str(path), exclude_names=excl)[str(path)]
+    page = pw._PAGE
+    for t in GGUFReader(str(path)).tensors:
+        off = int(t.data_offset)
+        end = off + int(t.n_bytes)
+        if t.name in members:
+            # Only the pages a neighbour shares may stay wired.
+            lo, hi = -(-off // page) * page, end // page * page
+            assert lo < hi
+            assert not any(a < hi and lo < a + n for a, n in rs), t.name
+        else:
+            assert any(a <= off and end <= a + n for a, n in rs), t.name
+
+
 def test_sparse_regime_runs_when_the_pool_outgrows_index_topk():
     """Layer 4 pools one row per token, so 14 tokens put it past
     index_topk=4 and into the gathered path."""

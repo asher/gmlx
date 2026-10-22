@@ -180,9 +180,9 @@ To make a model fit, or to give it a decode arena:
   shorter.
 - Shrink the prefill chunk with `--prefill-step-size`, or
   `prefill_step_size` on the server. The KV room holds the chunk's
-  activations and a buffer pool of the same size, at least 2 GiB,
-  and a narrower chunk gives that room to the arena. Prefill reads every
-  expert once per chunk, so it is slower.
+  activations beside a 2 GiB buffer pool, and a narrower chunk gives the
+  room of its activations to the arena. Prefill reads every expert once
+  per chunk, so it is slower.
 - Raise the GPU limit, as [The GPU memory limit](memory.md#the-gpu-memory-limit)
   describes.
 - Quit other models and apps. The arena takes what is left of the RAM at

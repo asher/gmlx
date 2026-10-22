@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
+from gmlx.serve import media_sinks  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import hardening as sp_hardening  # noqa: E402
 from gmlx.serve.patches import media_gate  # noqa: E402
@@ -58,6 +59,9 @@ def _restore_app():
                  sp_routes._UNCONFIGURED_FLAG):
         if hasattr(app.state, flag):
             delattr(app.state, flag)
+    # The media gate's stock install wraps the model and APC disk loaders
+    # (media_sinks), which would refuse a later test's own paths.
+    media_sinks.uninstall()
 
 
 def _server(origins=(_LISTED,), api_key=None):

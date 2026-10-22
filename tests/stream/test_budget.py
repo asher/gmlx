@@ -141,14 +141,13 @@ QWEN4EXP_CFG = {"model_type": "qwen4_exp", "hidden_size": 2560,
                 "num_experts_per_tok": 10, "moe_intermediate_size": 640}
 
 
-def test_room_holds_the_chunk_and_the_pool_the_allocator_keeps(
-        header, monkeypatch):
-    """The pool holds the buffers one layer frees for the next, and
-    prefill keeps its speed only with that whole set pooled, so the pool
-    is one chunk's price, at least 2 GiB: 8.0 GB on DeepSeek V4.1 Flash
-    and 4.3 GB on Qwen3.8-Flash-Next at the streamed chunk width.
-    Under prefill it fills to its limit and the live chunk sits on top,
-    so the room moves with both."""
+def test_room_holds_the_chunk_and_a_2_gib_pool(header, monkeypatch):
+    """The room holds one chunk's activations (8.0 GB on DeepSeek V4.1
+    Flash and 4.3 GB on Qwen3.8-Flash-Next at the streamed chunk width)
+    and a 2 GiB pool beside them, whatever the chunk: a pool the size of
+    the chunk costs the decode arena more than it gives prefill. Under
+    prefill the pool fills to its limit and the live chunk sits on top,
+    so the room holds both."""
     import gmlx.commands.tool_preflight as tp
 
     rooms = {}
@@ -158,18 +157,18 @@ def test_room_holds_the_chunk_and_the_pool_the_allocator_keeps(
         rooms[name] = budget.kv_room_bytes(header)
         act = budget.prefill_activation_bytes(widths)
         assert rooms[name].activation_bytes == act
-        assert rooms[name].pool_bytes == act
-    assert rooms["ds41"].pool_bytes == 8_021_606_400
-    assert rooms["qwen4exp"].pool_bytes == 4_331_667_456
+        assert rooms[name].pool_bytes == 2 << 30
+    assert rooms["ds41"].activation_bytes == 8_021_606_400
+    assert rooms["qwen4exp"].activation_bytes == 4_331_667_456
     ds41 = rooms["ds41"]
     wide = dict(DS41_CFG, num_experts_per_tok=16)
     monkeypatch.setattr(tp, "_synth_config", lambda p: dict(CFG, **wide))
     room = budget.kv_room_bytes(header)
-    assert room.pool_bytes == room.activation_bytes > ds41.pool_bytes
+    assert room.activation_bytes > ds41.activation_bytes
+    assert room.pool_bytes == 2 << 30
     assert room.bytes - ds41.bytes == (
-        room.activation_bytes - ds41.activation_bytes
-        + room.pool_bytes - ds41.pool_bytes)
-    # A chunk under 2 GiB keeps a 2 GiB pool.
+        room.activation_bytes - ds41.activation_bytes)
+    # A chunk under 2 GiB keeps the same pool.
     monkeypatch.setenv("PREFILL_STEP_SIZE", "1024")
     small_chunk = budget.kv_room_bytes(header)
     assert small_chunk.activation_bytes < 2 << 30
@@ -281,6 +280,36 @@ def test_reclaimable_ram_bytes_prefers_the_kernel_counters(monkeypatch):
     assert budget.reclaimable_ram_bytes() == int(12.5e9)
     monkeypatch.setattr(kv, "reclaimable_bytes", lambda: None)
     assert budget.reclaimable_ram_bytes() == 3
+
+
+# Mach's free and file-backed counts both hold the 4 GiB of speculative
+# pages: 6 GiB free, 1 GiB purgeable and 20 GiB of page cache.
+_MACH = {"free": 10 << 30, "inactive": 0, "purgeable": 1 << 30,
+         "speculative": 4 << 30, "filebacked": 20 << 30, "wired": 0,
+         "compressor": 0}
+
+
+def test_the_kernel_reclaimable_sum_counts_the_speculative_pages_once(
+        monkeypatch):
+    import gmlx.serve.kernel_vm as kv
+
+    monkeypatch.setattr(kv, "snapshot", lambda: dict(_MACH))
+    assert kv.reclaimable_bytes() == 27 << 30
+    assert budget.reclaimable_ram_bytes() == 27 << 30
+
+
+def test_the_arena_sizing_read_is_live(monkeypatch):
+    # The mach snapshot can be a second old, and a wire of tens of GB
+    # commits within one refresh.
+    import gmlx.serve.kernel_vm as kv
+
+    monkeypatch.setattr(kv, "snapshot", lambda: dict(_MACH))
+    monkeypatch.setattr(kv, "live_reclaimable_bytes", lambda: 9 << 30)
+    assert budget._available_ram_bytes() == 9 << 30
+    # The strict set leaves the page cache out, so it never reads live.
+    assert budget._available_ram_bytes(include_inactive=False) == 11 << 30
+    monkeypatch.setattr(kv, "live_reclaimable_bytes", lambda: None)
+    assert budget._available_ram_bytes() == 27 << 30
 
 
 def test_kernel_floor_bytes_is_the_governor_floor(monkeypatch):

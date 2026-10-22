@@ -164,16 +164,16 @@ CLAIMS: tuple[Claim, ...] = (
           install="gmlx.gen.prefill_decay:install_prefill_decay",
           wrappers=("gmlx.gen.prefill_decay",)),
     # stream_generate calls the binding dispatch imported from ar, so
-    # media_spans wraps that one; cb_phase wraps ar's own, which the CLI
-    # generate path imports by name.
+    # media_spans and cb_phase wrap that one too.
     Claim("gmlx._vendor.mlx_vlm.generate.dispatch", "generate_step",
           "media_spans.install_block_aware_generate_step (block starts "
           "ride prompt_cache_checkpoint_lengths through a pass-through "
           "prompt_cache_checkpoint; _TailForward reads the chunk call's "
           "inputs, inputs_embeds and n_to_process keywords, and the final "
-          "_step call's positional ids, from the model's language_model)",
+          "_step call's positional ids, from the model's language_model); "
+          "cb_phase.install_cb_phase_steps (phased steps around the loop)",
           install="gmlx.gen.media_spans:install_block_aware_generate_step",
-          wrappers=("gmlx.gen.media_spans",)),
+          wrappers=("gmlx.gen.media_spans", "gmlx.serve.cb_phase")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "generate_step",
           "cb_phase.install_cb_phase_steps (phased steps around the loop)",
           wrappers=("gmlx.serve.cb_phase",)),

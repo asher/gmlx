@@ -1107,8 +1107,14 @@ def install_gguf_server_bridge() -> None:
     def load_model_resources(model_path, adapter_path=None):
         try:
             loaded = _bridge_load(model_path, adapter_path)
-        except ModuleNotFoundError as e:
-            _raise_if_first_party_import(e)
+        except BaseException as e:
+            # The server outlives a failed load, so the streaming lift of
+            # the caps for that load ends here, as a streamed install ends it.
+            from gmlx.serve.cb_phase import end_lift
+
+            end_lift()
+            if isinstance(e, ModuleNotFoundError):
+                _raise_if_first_party_import(e)
             raise
         if isinstance(loaded, tuple) and len(loaded) == 3:
             # Every route enables the system text fix from the loaded

@@ -380,12 +380,10 @@ class LookaheadHook:
                 return p
         return None
 
-    def on_call(self, x, indices) -> dict:
+    def sync(self, x, indices) -> "LookaheadSync":
         """Evaluate ``indices`` (the fence the caller needed anyway) plus
-        every live lookahead prediction in one sync. Returns a dict of
-        predicted ``(ranked ids, mass scores)`` per destination layer when
-        prefetching, both trimmed to the rank gate prefix; empty when
-        there is nothing to prestage."""
+        every live lookahead prediction in one sync. Returns the host work
+        left to run, in two parts (see LookaheadSync)."""
         probing = self.probe is not None
         ph = _LA_PHASE
         t0 = time.perf_counter() if ph is not None else 0.0
@@ -429,27 +427,37 @@ class LookaheadHook:
             guard.eval(indices, site="lookahead-indices", owner="owned")
         if ph is not None:
             ph["sync"] += time.perf_counter() - t1
-        by_pred: dict = {}
-        for pred, variant, (ids_l, sc_l) in lazy:
+        return LookaheadSync(self, lazy, indices)
+
+
+class LookaheadSync:
+    """One decode call's lookahead after its sync. ``predictions()`` reads
+    the predictions back for the prestage; ``observe()`` then hands the
+    layer's actual routing to the rank gate and the probe, which needs no
+    device work, so the caller can run it once the layer's gather is
+    dispatched. Both run before the next layer's sync: the gate and the
+    probe take the layers in order. A prediction never targets its own
+    layer, so the gate's note for a later layer can come first."""
+
+    __slots__ = ("_hook", "_lazy", "_indices", "_by_pred")
+
+    def __init__(self, hook: LookaheadHook, lazy: list, indices):
+        self._hook = hook
+        self._lazy = lazy
+        self._indices = indices
+        self._by_pred: dict = {}
+
+    def predictions(self) -> dict:
+        """Predicted ``(ranked ids, mass scores)`` per destination layer
+        when prefetching, both trimmed to the rank gate prefix; empty when
+        there is nothing to prestage."""
+        hook = self._hook
+        by_pred = self._by_pred
+        for pred, variant, (ids_l, sc_l) in self._lazy:
             by_pred.setdefault(pred, {})[variant] = (
                 np.array(ids_l), np.array(sc_l, dtype=np.float32))
-        actual_np = None
-        if self.probe is not None or self.gate is not None:
-            actual_np = np.array(indices)
-        if self.gate is not None:
-            self.gate.observe(self.li, actual_np)
-        if self.probe is not None:
-            for pred, pv in by_pred.items():
-                if pred.depth == 1:
-                    labeled = {v: a for v, (a, _) in pv.items()}
-                else:
-                    labeled = {
-                        f"{v}@d{pred.depth}": a for v, (a, _) in pv.items()
-                    }
-                self.probe.note(pred.dst_li, labeled)
-            self.probe.actual(self.li, actual_np)
         out: dict = {}
-        if self.prefetch:
+        if hook.prefetch:
             for pred, pv in by_pred.items():
                 # With the probe co-installed both variants exist;
                 # prefetch uses the configured one.
@@ -458,12 +466,12 @@ class LookaheadHook:
                 if pair is None:
                     pair = next(iter(pv.values()))
                 ids, sc = pair
-                if self.gate is not None:
+                if hook.gate is not None:
                     # Full width is noted (gated-out ranks keep being
                     # scored and can re-qualify); only the submission is
                     # trimmed.
-                    self.gate.note(pred.dst_li, ids, pred.depth)
-                    k = self.gate.k(pred.dst_li, ids.shape[-1], pred.depth)
+                    hook.gate.note(pred.dst_li, ids, pred.depth)
+                    k = hook.gate.k(pred.dst_li, ids.shape[-1], pred.depth)
                     if k <= 0:
                         continue
                     if k < ids.shape[-1]:
@@ -471,6 +479,25 @@ class LookaheadHook:
                         sc = sc[..., :k]
                 out[pred.dst_li] = (ids, sc)
         return out
+
+    def observe(self) -> None:
+        """Score this layer's actual routing. Runs after predictions()."""
+        hook = self._hook
+        if hook.probe is None and hook.gate is None:
+            return
+        actual_np = np.array(self._indices)
+        if hook.gate is not None:
+            hook.gate.observe(hook.li, actual_np)
+        if hook.probe is not None:
+            for pred, pv in self._by_pred.items():
+                if pred.depth == 1:
+                    labeled = {v: a for v, (a, _) in pv.items()}
+                else:
+                    labeled = {
+                        f"{v}@d{pred.depth}": a for v, (a, _) in pv.items()
+                    }
+                hook.probe.note(pred.dst_li, labeled)
+            hook.probe.actual(hook.li, actual_np)
 
 
 def install_lookahead(model, layers, *, probe: bool = False,

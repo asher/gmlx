@@ -3332,6 +3332,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         # context's. The VLM chat has no streamed placement.
         preload_wire_check(args, depth=None, can_stream=not args.mmproj)
         _ensure_stream_cb_caps(args)
+        from gmlx.serve.cb_phase import install_cb_phase_steps
+
+        # The command-buffer caps of run, so a model decodes at the same
+        # speed in chat as in run and serve.
+        install_cb_phase_steps()
         gguf = os.path.expanduser(args.gguf)
         if not os.path.exists(gguf):
             if args.gguf.startswith(("hf:", "http://", "https://")):

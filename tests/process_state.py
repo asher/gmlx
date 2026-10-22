@@ -6,9 +6,9 @@ run, ``gmlx serve`` exports its settings, ``--stream-cpu`` lifts the MLX
 command buffer caps, the umbrella replaces ``warnings.formatwarning``, and
 library entry points set the MLX default device, seed the RNG, set the
 memory, cache and wired limits and the mlx-kquant command buffer caps,
-and rebind ``mx.set_wired_limit``. The caps come back with the phase
-``gmlx.serve.cb_phase`` last flipped to, since a flip to the phase it
-already names sets nothing.
+and rebind ``mx.set_wired_limit``. The caps come back with the phase and
+the caps ``gmlx.serve.cb_phase`` last set, since a flip to the caps it
+already holds sets nothing, and with its record of the CLI's caps lift.
 
 Python-side copies of those settings come back with them: the
 ``wired_limit`` context in ``mlx_lm.generate`` and ``mlx_lm.utils``, which
@@ -167,6 +167,11 @@ def cb_caps():
     return tuple(get())
 
 
+# The cb_phase fields this module hands back, as its import leaves them.
+_CB_PHASE_FRESH = {"phase": None, "caps": None, "lifted": False,
+                   "pre_lift": None}
+
+
 def _cb_phase_state():
     """cb_phase's state dict, or None before the module is imported."""
     mod = sys.modules.get("gmlx.serve.cb_phase")
@@ -199,8 +204,9 @@ def capture() -> dict:
         "set_wired_limit": mx.set_wired_limit,
         "device_info": mx.device_info,
         "cb_caps": cb_caps(),
-        # None before the module is imported, as its first flip finds it.
-        "cb_phase": (_cb_phase_state() or {}).get("phase"),
+        # Before the module is imported, the fields its first flip finds.
+        "cb_phase": {k: (_cb_phase_state() or _CB_PHASE_FRESH)[k]
+                     for k in _CB_PHASE_FRESH},
         "wired_limit": [
             (mod, getattr(mod, "wired_limit", _MISSING))
             for mod in map(sys.modules.get, _WIRED_LIMIT_MODULES) if mod],
@@ -275,9 +281,10 @@ def restore(state: dict) -> list:
         changed.append("cb_caps")
         _setters["set_cb_caps"](*caps)
     phase = _cb_phase_state()
-    if phase is not None and phase["phase"] != state["cb_phase"]:
+    fields = state["cb_phase"]
+    if phase is not None and any(phase[k] != v for k, v in fields.items()):
         changed.append("cb_phase")
-        phase["phase"] = state["cb_phase"]
+        phase.update(fields)
     for mod, fn in state["wired_limit"]:
         if getattr(mod, "wired_limit", _MISSING) is fn:
             continue

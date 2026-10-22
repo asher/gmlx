@@ -6,8 +6,8 @@ kernel sees that cache as wired. Metal allocations never swap and never
 enter the compressor, so a server that grows past the box's free pages
 livelocks macOS into a watchdog panic while every MLX-side number still
 reads healthy. This module reads the counters that actually predict
-the panic: free + purgeable + speculative + file-backed pages, the
-same reclaimable sum the lab's external wired-watchdog uses.
+the panic: free + purgeable + file-backed pages. Mach's free and
+file-backed counts both hold the speculative pages, which count once.
 
 Darwin only; ``reclaimable_bytes`` returns None elsewhere or when the
 struct layout fails its one-time self-check against sysctl.
@@ -95,14 +95,16 @@ def snapshot() -> dict | None:
 
 
 def reclaimable_bytes() -> int | None:
-    """free + purgeable + speculative + file-backed. File-backed pages
+    """free + purgeable + file-backed, the sum ``live_reclaimable_bytes``
+    reads. Mach's free and file-backed counts both hold the speculative
+    pages, so free gives them up and they count once. File-backed pages
     are included on purpose: a model load legitimately drains free
     memory into the page cache (clean pages, reclaimable), while at a
     real freeze file-backed has collapsed too."""
     s = snapshot()
     if s is None:
         return None
-    return s["free"] + s["purgeable"] + s["speculative"] + s["filebacked"]
+    return s["free"] - s["speculative"] + s["purgeable"] + s["filebacked"]
 
 
 # The sysctl page counts of live_reclaimable_bytes. vm.page_free_count

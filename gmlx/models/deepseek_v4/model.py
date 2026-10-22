@@ -203,7 +203,9 @@ def _fuse_kquant_pair(a, b, in_dims: int):
         from mlx_kquant.nn import KQuantLinear
     except Exception:
         return None
-    if not (isinstance(a, KQuantLinear) and isinstance(b, KQuantLinear)):
+    # Exact type: a subclass (HadamardKQuantLinear) transforms its input,
+    # which a plain fused KQuantLinear would drop.
+    if type(a) is not KQuantLinear or type(b) is not KQuantLinear:
         return None
     if (
         a.kquant_type != b.kquant_type
@@ -247,25 +249,33 @@ def install_gemv_row_fusion(model, max_float_rows: int = 1024) -> int:
     """Fuse same-input projection pairs into single GEMV dispatches.
 
     Each pair's weight rows are concatenated into one buffer post-load and
-    the originals rebound as slice views, so one matmul serves both outputs;
-    row results are exact (independent dot products per output row). Pairs:
+    the originals rebound as slice views, so one matmul serves both outputs.
+    Decode rows are exact (independent dot products per output row); at
+    other row counts the GPU kernel choice follows the fused row count, so
+    a codec can differ by one rounding step (q6_k at 4 rows). Pairs:
     attention wq_a+wkv on every layer, and compressor wkv+wgate when the
     concat stays within ``max_float_rows`` (wider float concats lose to two
     dispatches under MLX's gemv kernel selection, so the ratio-4 attention
     compressor stays split). The shared expert pair is skipped: fusing it
-    materializes its wire bytes for negligible return. Returns the number
-    of pairs fused. GMLX_GEMV_FUSE=0 disables."""
+    materializes its wire bytes for negligible return. Serves deepseek_v4
+    and deepseek_v41, whose ratio-1 compressor has no gate. The superseded
+    members' weight paths are recorded on ``model`` (FUSED_MEMBERS_ATTR), so
+    the streaming pin leaves their wire bytes unwired. Returns the number of
+    pairs fused. GMLX_GEMV_FUSE=0 disables."""
     if os.environ.get("GMLX_GEMV_FUSE", "1") == "0":
         return 0
     inner = getattr(model, "model", model)
     layers = getattr(inner, "layers", None)
     if layers is None:
         return 0
+    root = "model." if inner is not model else ""
+    members: set[str] = set()
     n = 0
-    for layer in layers:
+    for li, layer in enumerate(layers):
         attn = getattr(layer, "attn", None)
         if attn is None:
             continue
+        path = f"{root}layers.{li}.attn"
         wq_a = getattr(attn, "wq_a", None)
         wkv = getattr(attn, "wkv", None)
         if wq_a is not None and wkv is not None:
@@ -282,19 +292,28 @@ def install_gemv_row_fusion(model, max_float_rows: int = 1024) -> int:
             if fused is not None:
                 attn._qa_kv_fused = fused
                 attn._qa_rows = wq_a.weight.shape[0]
+                members |= {f"{path}.wq_a.weight", f"{path}.wkv.weight"}
                 n += 1
-        for comp in (
-            getattr(attn, "compressor", None),
-            getattr(getattr(attn, "indexer", None), "compressor", None),
+        for comp, cpath in (
+            (getattr(attn, "compressor", None), f"{path}.compressor"),
+            (getattr(getattr(attn, "indexer", None), "compressor", None),
+             f"{path}.indexer.compressor"),
         ):
-            if comp is None:
+            if comp is None or getattr(comp, "wgate", None) is None:
                 continue
-            if 2 * comp.out_dim > max_float_rows:
+            if (comp.wkv.weight.shape[0] + comp.wgate.weight.shape[0]
+                    > max_float_rows):
                 continue
             fused = _fuse_float_pair(comp.wkv, comp.wgate)
             if fused is not None:
                 comp._kv_gate_fused = fused
+                members |= {f"{cpath}.wkv.weight", f"{cpath}.wgate.weight"}
                 n += 1
+    if members:
+        from gmlx.stream.pin_weights import FUSED_MEMBERS_ATTR
+
+        prev = getattr(model, FUSED_MEMBERS_ATTR, None) or frozenset()
+        object.__setattr__(model, FUSED_MEMBERS_ATTR, prev | members)
     return n
 
 

@@ -47,6 +47,11 @@ def _observe() -> dict:
         "rng": mx.random.state[0].tolist(),
         "set_wired_limit": mx.set_wired_limit,
         "cb_caps": process_state.cb_caps(),
+        # cb_phase's record, read on the CPU leg too: the phase, the caps
+        # and the CLI's caps lift.
+        "cb_phase": {k: (process_state._cb_phase_state()
+                         or process_state._CB_PHASE_FRESH)[k]
+                     for k in process_state._CB_PHASE_FRESH},
     }
 
 
@@ -70,6 +75,8 @@ def test_a_cli_run_changes_the_process():
     # A streamed run lifts the command buffer caps before it parses.
     _run(["run", "--stream-cpu", "--no-such-flag"])
     assert os.environ["MLX_MAX_OPS_PER_BUFFER"] == "400"
+    # and records the lift, which a record an earlier test leaked would not
+    assert _observe()["cb_phase"] != _BEFORE["cb_phase"]
     # The setters library entry points call.
     mx.random.seed(5)
     _BEFORE["cache_limit"] = mx.set_cache_limit(123 << 20)
@@ -85,7 +92,7 @@ def test_b_the_next_test_finds_the_process_as_it_was():
     if not _BEFORE:
         pytest.skip("runs after test_a_cli_run_changes_the_process")
     now = _observe()
-    for key in ("env", "device", "stream", "rng", "cb_caps"):
+    for key in ("env", "device", "stream", "rng", "cb_caps", "cb_phase"):
         assert now[key] == _BEFORE[key], key
     assert now["formatwarning"] is _BEFORE["formatwarning"]
     assert now["set_wired_limit"] is _BEFORE["set_wired_limit"]
@@ -109,8 +116,8 @@ def test_c_a_serve_step_flips_the_phase():
 
 
 def test_d_the_next_decode_step_sets_the_decode_caps():
-    # The caps went back after the last test. cb_phase must not still name
-    # the decode phase, or this flip returns early and decode runs with the
+    # The caps went back after the last test. cb_phase must not still hold
+    # the decode caps, or this flip sets nothing and decode runs with the
     # caps the last test found.
     cb_phase = _phase_caps()
     cb_phase.flip("decode")

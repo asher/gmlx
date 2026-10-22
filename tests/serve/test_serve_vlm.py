@@ -343,3 +343,53 @@ def test_install_is_idempotent():
     first = gen.load_model_resources
     serving.install_gguf_server_bridge()
     assert gen.load_model_resources is first
+
+
+@pytest.mark.parametrize("make_error, raised, match", [
+    pytest.param(lambda: MemoryError("the load ran out of memory"),
+                 MemoryError, None, id="out of memory"),
+    pytest.param(lambda: ModuleNotFoundError(
+        "No module named 'gmlx.spec.mtp_load'", name="gmlx.spec.mtp_load"),
+                 RuntimeError, "gmlx restart", id="first-party module gone"),
+    pytest.param(lambda: ModuleNotFoundError(
+        "No module named 'numpy.linalg'", name="numpy.linalg"),
+                 ModuleNotFoundError, None, id="third-party module missing"),
+])
+def test_a_failed_load_ends_the_streaming_caps_lift(monkeypatch, make_error,
+                                                    raised, match):
+    """The server outlives a load that raises, so the caps lift of
+    `serve --stream-experts` ends with that load, as a streamed install
+    ends it: no later load or prompt runs on (400, 100000). A first-party
+    module missing after startup still names `gmlx restart`, and any
+    other error reaches the caller as it was raised."""
+    import importlib
+
+    import gmlx.serve.cb_phase as cb_phase
+
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    writes = []
+    monkeypatch.setitem(cb_phase._state, "kq", types.SimpleNamespace(
+        set_cb_caps=lambda ops, mb: writes.append((ops, mb)) or cb_phase.COARSE))
+    for key, value in (("phase", None), ("caps", None), ("lifted", False),
+                       ("pre_lift", None)):
+        monkeypatch.setitem(cb_phase._state, key, value)
+    cb_phase.note_lift()                # the argv lift, latched at init
+    error = make_error()
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(gen, serving._BRIDGE_FLAG, False, raising=False)
+    monkeypatch.setattr(gen, "load_model_resources",
+                        lambda model_path, adapter_path=None: None,
+                        raising=False)
+    monkeypatch.setattr(serving, "load_serveable_model", fail)
+    serving.install_gguf_server_bridge()
+    with pytest.raises(raised, match=match) as info:
+        gen.load_model_resources("/m/text.gguf")
+    if raised is RuntimeError:
+        assert info.value.__cause__ is error
+    else:
+        assert info.value is error
+    assert writes == [cb_phase.FINE]
+    assert cb_phase._state["pre_lift"] is None

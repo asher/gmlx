@@ -365,9 +365,12 @@ def test_a_step_leaves_rng_rope_state_and_buffer_caps_as_they_were(monkeypatch):
     from gmlx.serve import cb_phase
 
     install_engine_jobs()
-    flips = []
-    monkeypatch.setattr(cb_phase, "flip", lambda p: flips.append(p))
-    monkeypatch.setattr(cb_phase, "phase", lambda: "decode")
+    caps = []
+    monkeypatch.setitem(cb_phase._state, "kq", types.SimpleNamespace(
+        set_cb_caps=lambda ops, mb: caps.append((ops, mb))))
+    monkeypatch.setitem(cb_phase._state, "caps", None)
+    monkeypatch.setitem(cb_phase._state, "phase", None)
+    cb_phase.flip("decode", types.SimpleNamespace(_kq_streaming=False))
     lm = types.SimpleNamespace(_rope_deltas="chat")
     rg = object.__new__(_GEN.ResponseGenerator)
     rg._stop, rg.requests = False, queue.Queue()
@@ -391,7 +394,9 @@ def test_a_step_leaves_rng_rope_state_and_buffer_caps_as_they_were(monkeypatch):
     rg._collect_pending_requests(active=True)
     rg._collect_pending_requests(active=True)
     assert (lm._rope_deltas, rg.model._position_ids) == ("chat", "chat-ids")
-    assert flips == ["prefill", "decode"]
+    # The job prefills on the fine caps and hands back the chat's decode caps.
+    assert caps == [cb_phase.COARSE, cb_phase.FINE, cb_phase.COARSE]
+    assert cb_phase.snapshot() == ("decode", cb_phase.COARSE)
     assert mx.array_equal(mx.random.state[0], before).item()
 
 

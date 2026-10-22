@@ -31,7 +31,7 @@ from gmlx.envflags import env_bool, env_int
 
 _DEFAULT_CTX = 32768
 _LEGACY_RESERVE_GB = 8.0
-_MIN_POOL_BYTES = 2 << 30
+_POOL_BYTES = 2 << 30
 _UNPRICED_POOL_BYTES = 4 << 30
 _PROCESS_GB = 2.0
 _RESIDENT_CACHE_RAM_SHARE = 1 / 16
@@ -76,9 +76,9 @@ def ceiling_bytes() -> float | None:
 
 def reclaimable_ram_bytes() -> int | None:
     """RAM the kernel can hand back without swapping anyone: free,
-    purgeable, speculative and file-backed pages. The governor's floor
-    measure; the loader's vm_stat sum when the mach counters are
-    unavailable."""
+    purgeable and file-backed pages, the speculative pages counted once.
+    The governor's floor measure; the loader's read when the mach
+    counters are unavailable."""
     try:
         from gmlx.serve.kernel_vm import reclaimable_bytes
 
@@ -297,22 +297,35 @@ def prefill_activation_bytes(cfg, step: int | None = None) -> int:
     return per_row * prefill_rows(mt if isinstance(mt, str) else None, step)
 
 
-def pool_bytes(activation: int, fallback: int = _UNPRICED_POOL_BYTES) -> int:
-    """The MLX buffer pool a streamed install sets: one chunk's
-    activations, at least 2 GiB; ``fallback`` when the activations are
-    not priced. The pool holds the buffers one layer frees for the next,
-    and a pool smaller than that set slows prefill, so the pool is the
-    chunk price, the fp32 upper bound of a chunk's activations.
-    ``GMLX_STREAM_CACHE_GB`` sizes it."""
+def pool_override() -> int | None:
+    """``GMLX_STREAM_CACHE_GB`` in bytes, a negative value as 0 and a value
+    past physical RAM as physical RAM, so the allocator takes it. None
+    when it is unset or not a number."""
     raw = os.environ.get("GMLX_STREAM_CACHE_GB", "")
-    if raw:
-        try:
-            return max(0, int(float(raw) * (1 << 30)))
-        except (ValueError, OverflowError):
-            pass
+    if not raw:
+        return None
+    try:
+        n = max(0, int(float(raw) * (1 << 30)))
+    except (ValueError, OverflowError):
+        return None
+    ram = ram_bytes()
+    return n if ram is None else min(n, ram)
+
+
+def pool_bytes(activation: int, fallback: int = _UNPRICED_POOL_BYTES) -> int:
+    """The MLX buffer pool a streamed install sets: 2 GiB, or
+    ``fallback`` when the activations are not priced. The pool holds the
+    buffers one layer frees for the next. On DeepSeek V4.1 Flash a pool
+    of one chunk's activations (8.0 GB) prefilled a 32k prompt about 3%
+    faster than 2 GiB and an 8k prompt no faster, and the 6 GB it took
+    from the decode arena cost about 5.5% of the decode speed.
+    ``GMLX_STREAM_CACHE_GB`` sizes it."""
+    override = pool_override()
+    if override is not None:
+        return override
     if activation <= 0:
         return int(fallback)
-    return max(_MIN_POOL_BYTES, int(activation))
+    return _POOL_BYTES
 
 
 def price_room(costs, trained_ctx, ws: float, transient: float,
@@ -387,14 +400,27 @@ def _available_ram_bytes(include_inactive: bool = True) -> int | None:
     ``vm_stat`` without the ``File-backed pages`` line falls back to
     inactive + speculative.
 
-    ``include_inactive=False`` is the stricter set (free + purgeable +
-    speculative only) for a caller that must not take the page cache."""
+    The sum is read live (``kernel_vm.live_reclaimable_bytes``): the
+    mach snapshot can be a second old, and a sizing read right after a
+    wire of tens of GB would count the wired pages as free. The snapshot
+    is the fallback, then ``vm_stat``. Mach's free and file-backed counts
+    both hold the speculative pages, so they count once.
+
+    ``include_inactive=False`` is the stricter set (free + purgeable;
+    Mach's free holds the speculative pages) for a caller that must not
+    take the page cache."""
     from gmlx.serve import kernel_vm
 
+    if include_inactive:
+        live = kernel_vm.live_reclaimable_bytes()
+        if live is not None:
+            return int(live)
     s = kernel_vm.snapshot()
     if s is not None:
-        return s["free"] + s["purgeable"] + (
-            s["filebacked"] if include_inactive else s["speculative"])
+        if include_inactive:
+            return (s["free"] - s["speculative"] + s["purgeable"]
+                    + s["filebacked"])
+        return s["free"] + s["purgeable"]
     import subprocess
 
     try:

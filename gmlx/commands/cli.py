@@ -1527,8 +1527,6 @@ def _apply_placement(args, model) -> None:
             feeder_decode=getattr(args, "decode_feeder", None),
             prefill_step=getattr(args, "prefill_step_size", None),
             stats_verbose=bool(getattr(args, "verbose", False)))
-        if getattr(model, "_kq_streaming", False):
-            _lift_live_cb_caps()
         return
 
     gguf_path = getattr(args, "gguf", None)
@@ -2359,26 +2357,34 @@ def _lift_stream_cb_caps(argv: list[str]) -> None:
     """Lift MLX's command-buffer split caps for streaming placements.
 
     MLX latches the env caps once, at Metal device init, which the verb
-    imports trigger, so this must run at entry. The defaults (50 ops /
-    50 MB per buffer on the pinned mlx) shred a streamed decode token
-    into ~1450 command buffers whose turnaround gaps leave the GPU 18%
-    utilized; lifting them measured +40% streamed decode, output
-    bit-identical. In-RAM serving does NOT take the lifetime lift: a
-    coarse buffer holds every layer's prefill transients live at once
-    and exhausts GPU memory on deep prompts, so the serve engine flips
-    the caps per phase at runtime instead (cb_phase: coarse decode,
-    fine prefill). setdefault keeps explicit overrides in charge.
+    imports trigger, so this must run at entry. The MLX defaults of the
+    time (10 ops / 40 MB per buffer) split a streamed decode token into
+    about 1450 command buffers whose turnaround gaps left the GPU 18%
+    utilized; the lift measured +40% streamed decode, output
+    bit-identical. The device defaults are 50 ops / 50 MB now, and each
+    prefill and decode step of run, chat and serve sets its model's caps
+    (cb_phase.prefill_caps and decode_caps), so the lift holds the load
+    only: the streamed install ends it (cb_phase.end_lift), with
+    GMLX_CB_PHASE=0 too. No prefill wants the lift: a coarse buffer
+    keeps a finished layer's buffers in flight while the next layer
+    allocates, and can exhaust memory on deep prompts. setdefault keeps
+    explicit overrides in charge, and a cap set before the lift, either
+    one, is the user's pin, which cb_phase leaves alone in every phase.
     """
     if any(a in ("--stream-experts", "--stream-cpu") for a in argv):
+        from gmlx.serve.cb_phase import env_caps_set, note_lift
+
+        if not env_caps_set():
+            note_lift()
         os.environ.setdefault("MLX_MAX_OPS_PER_BUFFER", "400")
         os.environ.setdefault("MLX_MAX_MB_PER_BUFFER", "100000")
 
 
 def _ensure_stream_cb_caps(args) -> None:
-    """Same lift for a placement that came from config, not argv. The env is
-    latched by the time the overlay runs, so write the live device fields
-    instead (what the serve engine flips). A config model id decoded 40%
-    slower than the identical bare path without this. Also latches the
+    """Same lift for the load of a placement that came from config, not
+    argv. The env is latched by the time the overlay runs, so write the
+    live device fields instead (what the serve engine flips); the streamed
+    install sets back the caps it found. Also latches the
     stream flags before the load, for `run` and `chat` alike: the warm
     touch reads the latch to leave the streamable tables and the expert
     stacks untouched."""
@@ -2392,19 +2398,14 @@ def _ensure_stream_cb_caps(args) -> None:
 
 
 def _lift_live_cb_caps() -> None:
-    """The streaming command-buffer caps on the live device: for a
-    placement from config, or experts that stream for want of memory."""
-    if os.environ.get("MLX_MAX_OPS_PER_BUFFER"):
+    """The streaming command-buffer caps on the live device, for the load
+    of a placement from config."""
+    from gmlx.serve.cb_phase import env_caps_set, lift
+
+    if env_caps_set():
         return                       # argv path already latched it, or the
                                      # user pinned their own caps
-    try:
-        import mlx_kquant as kq
-
-        from gmlx.serve.cb_phase import COARSE
-
-        kq.set_cb_caps(*COARSE)
-    except (ImportError, AttributeError):
-        pass
+    lift()
 
 
 # Tokens a chat template adds around the prompt (roles, a reasoning
@@ -2628,11 +2629,9 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     _ensure_stream_cb_caps(args)
     from gmlx.serve.cb_phase import install_cb_phase_steps
 
-    # In-RAM placements: fine caps through each prefill, coarse from the
-    # first token (what serve does per phase). Streaming keeps its lift.
-    install_cb_phase_steps(
-        streaming=bool(getattr(args, "stream_experts", False)
-                       or getattr(args, "stream_cpu", False)))
+    # Each prefill on its model's prefill caps; from the first token, the
+    # model's decode caps.
+    install_cb_phase_steps()
     if args.draft_gguf:
         args.speculative = True  # same implication as `serve`
     if args.stochastic_mtp:
