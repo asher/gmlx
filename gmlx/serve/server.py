@@ -2840,14 +2840,17 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # (deep-context safety; see server_memory).
     from .memory import apply_cache_limit
     apply_cache_limit(cfg)
-    from .cb_phase import COARSE, FINE, STREAMED_DECODE, install_cb_phase_flips
+    from .cb_phase import (COARSE, FINE, STREAMED_DECODE, STREAMED_PREFILL,
+                           install_cb_phase_flips)
     if install_cb_phase_flips():
         print(f"[server] command buffer caps: per-phase (decode {COARSE}, "
-              f"streamed decode {STREAMED_DECODE}, prefill {FINE})")
+              f"prefill {FINE}; streamed decode {STREAMED_DECODE}, "
+              f"streamed prefill {STREAMED_PREFILL})")
     else:
         print("[server] command buffer caps: not installed "
-              "(GMLX_CB_PHASE=0 or mlx-kquant lacks set_cb_caps); streamed "
-              "models run uncapped")
+              "(GMLX_CB_PHASE=0, MLX_MAX_OPS_PER_BUFFER or "
+              "MLX_MAX_MB_PER_BUFFER set, or mlx-kquant lacks set_cb_caps); "
+              "every phase keeps the caps set at start")
     from .gpu_share import install_chat_ticks
     install_chat_ticks()
     # Single-model --hf-source override (niche): re-register the VLM with the

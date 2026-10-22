@@ -2364,19 +2364,18 @@ def _lift_stream_cb_caps(argv: list[str]) -> None:
     about 1450 command buffers whose turnaround gaps left the GPU 18%
     utilized; the lift measured +40% streamed decode, output
     bit-identical. The device defaults are 50 ops / 50 MB now, and each
-    decode step of run and chat sets its model's caps
-    (cb_phase.decode_caps), so the lift holds the streamed prefill of
-    run, its bench and chat. In-RAM serving does not take the lifetime
+    prefill and decode step of run, chat and serve sets its model's caps
+    (cb_phase.prefill_caps and decode_caps), so the lift holds the load
+    and a run with GMLX_CB_PHASE=0. A model in RAM does not take the
     lift: a coarse buffer holds every layer's prefill transients live at
-    once and exhausts GPU memory on deep prompts, so the serve engine
-    flips the caps per phase at runtime instead. setdefault keeps
-    explicit overrides in charge, and cb_phase leaves an override set
-    before the lift (the user's pin) alone.
+    once and exhausts GPU memory on deep prompts. setdefault keeps
+    explicit overrides in charge, and a cap set before the lift, either
+    one, is the user's pin, which cb_phase leaves alone in every phase.
     """
     if any(a in ("--stream-experts", "--stream-cpu") for a in argv):
-        if not os.environ.get("MLX_MAX_OPS_PER_BUFFER"):
-            from gmlx.serve.cb_phase import note_lift
+        from gmlx.serve.cb_phase import env_caps_set, note_lift
 
+        if not env_caps_set():
             note_lift()
         os.environ.setdefault("MLX_MAX_OPS_PER_BUFFER", "400")
         os.environ.setdefault("MLX_MAX_MB_PER_BUFFER", "100000")
@@ -2402,11 +2401,11 @@ def _ensure_stream_cb_caps(args) -> None:
 def _lift_live_cb_caps() -> None:
     """The streaming command-buffer caps on the live device: for a
     placement from config, or experts that stream for want of memory."""
-    if os.environ.get("MLX_MAX_OPS_PER_BUFFER"):
+    from gmlx.serve.cb_phase import env_caps_set, lift
+
+    if env_caps_set():
         return                       # argv path already latched it, or the
                                      # user pinned their own caps
-    from gmlx.serve.cb_phase import lift
-
     lift()
 
 
@@ -2631,11 +2630,9 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     _ensure_stream_cb_caps(args)
     from gmlx.serve.cb_phase import install_cb_phase_steps
 
-    # Fine caps through each prefill in RAM, the lift's through a streamed
-    # one; from the first token, the model's decode caps.
-    install_cb_phase_steps(
-        streaming=bool(getattr(args, "stream_experts", False)
-                       or getattr(args, "stream_cpu", False)))
+    # Each prefill on its model's prefill caps; from the first token, the
+    # model's decode caps.
+    install_cb_phase_steps()
     if args.draft_gguf:
         args.speculative = True  # same implication as `serve`
     if args.stochastic_mtp:

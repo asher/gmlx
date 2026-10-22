@@ -3336,9 +3336,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
 
         # The command-buffer caps of run, so a model decodes at the same
         # speed in chat as in run and serve.
-        install_cb_phase_steps(
-            streaming=bool(getattr(args, "stream_experts", False)
-                           or getattr(args, "stream_cpu", False)))
+        install_cb_phase_steps()
         gguf = os.path.expanduser(args.gguf)
         if not os.path.exists(gguf):
             if args.gguf.startswith(("hf:", "http://", "https://")):

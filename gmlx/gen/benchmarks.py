@@ -314,13 +314,17 @@ def bench(
 
 
 class _RawLogitsLM(nn.Module):
-    """mlx-lm-compatible view of an owned-engine MTP target: unwraps
-    ``LanguageModelOutput.logits`` so ``mlx_lm.stream_generate`` can drive
-    the same model for the plain (no-MTP) baseline in ``bench_tg_depth``."""
+    """mlx-lm-compatible view of an owned-engine MTP target's language
+    model: unwraps ``LanguageModelOutput.logits`` so
+    ``mlx_lm.stream_generate`` can drive the same model for the plain
+    (no-MTP) baseline in ``bench_tg_depth``. It carries the target's
+    streaming verdict, so the plain arm decodes on the command buffer caps
+    the speculative arm gets."""
 
-    def __init__(self, lm):
+    def __init__(self, target):
         super().__init__()
-        self.lm = lm
+        self.lm = target.language_model
+        self._kq_streaming = expert_streaming.experts_streamed(target)
 
     def make_cache(self):
         return self.lm.make_cache()
@@ -362,7 +366,8 @@ def _bench_ar_tps(
     chunk = prefill_chunk or _PREFILL_CHUNK
     feed, prompt_cache = input_ids, None
     if input_ids.shape[1] > chunk:
-        prompt_cache = _chunked_prefill_cache(model.language_model, input_ids, chunk)
+        prompt_cache = _chunked_prefill_cache(model.language_model, input_ids,
+                                              chunk, owner=model)
         feed = input_ids[:, -1:]
     for tok, _lp in generate_step(
         feed,
@@ -464,7 +469,7 @@ def bench_tg_depth(
             drafter=drafter)
     plain_lm = model
     if owned and hasattr(model, "language_model"):
-        plain_lm = _RawLogitsLM(model.language_model)
+        plain_lm = _RawLogitsLM(model)
 
     # Both arms must run the same KV config or the speedup is a biased
     # A/B. The non-owned plain arm runs through mlx-vlm's engine (no KV

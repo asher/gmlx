@@ -298,15 +298,18 @@ def prefill_activation_bytes(cfg, step: int | None = None) -> int:
 
 
 def pool_override() -> int | None:
-    """``GMLX_STREAM_CACHE_GB`` in bytes, a negative value as 0. None when
-    it is unset or not a number."""
+    """``GMLX_STREAM_CACHE_GB`` in bytes, a negative value as 0 and a value
+    past physical RAM as physical RAM, so the allocator takes it. None
+    when it is unset or not a number."""
     raw = os.environ.get("GMLX_STREAM_CACHE_GB", "")
     if not raw:
         return None
     try:
-        return max(0, int(float(raw) * (1 << 30)))
+        n = max(0, int(float(raw) * (1 << 30)))
     except (ValueError, OverflowError):
         return None
+    ram = ram_bytes()
+    return n if ram is None else min(n, ram)
 
 
 def pool_bytes(activation: int, fallback: int = _UNPRICED_POOL_BYTES) -> int:
