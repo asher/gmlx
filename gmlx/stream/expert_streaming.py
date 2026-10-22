@@ -673,17 +673,12 @@ def install_expert_streaming(
             object.__setattr__(model, "_kq_prefetcher", prefetcher)
         # Wire the every-token weights before the decode feeder sizes its
         # arena: pinned every-token pages come out of the same wired budget.
-        from gmlx.stream.pin_weights import cast_copies, maybe_pin_weights
-        from gmlx.stream.table_stream import streamable_tables_for
+        from gmlx.stream.pin_weights import maybe_pin_weights, pin_exclusions
 
         # Declared streamable components never enter the pin set, streamed
-        # or resident: mlocking them starves the expert page cache. Cast
-        # tensors go too - their wire bytes have no view left to keep.
-        casts = cast_copies(model, gguf_path)
-        cast_dead_bytes = casts.dead_bytes
-        pin_exclude = frozenset(
-            t.gguf_name for t, _ in streamable_tables_for(model)
-        ) | casts.names
+        # or resident, and neither do wire tensors the runtime reads from
+        # its own copy (casts, row-fused pairs).
+        pin_exclude, cast_dead_bytes = pin_exclusions(model, gguf_path)
         weights_pin = maybe_pin_weights(
             gguf_path, exclude_names=pin_exclude, reserved_bytes=held_wired)
         if weights_pin is not None:

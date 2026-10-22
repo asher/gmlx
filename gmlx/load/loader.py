@@ -716,6 +716,23 @@ def _verify_zero_copy_views(model, no_alias, log) -> None:
     log(f"[verify] zero-copy views OK ({len(named)} params)")
 
 
+# Text towers whose same-input projection pairs fuse post-load, and the
+# VL containers that hold one as language_model.
+_ROW_FUSION_TYPES = ("deepseek_v4", "deepseek_v41",
+                     "deepseek_v4_vl", "deepseek_v41_vl")
+
+
+def install_row_fusion(model, model_type: str | None) -> int:
+    """deepseek_v4.install_gemv_row_fusion on the text tower of a loaded
+    model, a VL container's language_model included. Returns the pairs
+    fused; 0 for any other model type."""
+    if model_type not in _ROW_FUSION_TYPES:
+        return 0
+    from gmlx.models.deepseek_v4.model import install_gemv_row_fusion
+
+    return install_gemv_row_fusion(getattr(model, "language_model", model))
+
+
 def materialize_module_arrays(*modules) -> None:
     """Evaluate every array in the module trees, including the non-parameter
     attributes ``parameters()`` skips (precomputed RoPE ``_freqs`` and the
@@ -1981,16 +1998,14 @@ def load_model(
             f"[patch] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
             f"layers, b/a matvecs concatenated on {counts['gdn_ba_cat']}")
 
+    n_fused_gemv = install_row_fusion(model, config.get("model_type"))
+    if n_fused_gemv:
+        _log(f"[install] gemv row fusion on {n_fused_gemv} projection pairs")
     if config.get("model_type") in ("deepseek_v4", "deepseek_v4_vl"):
-        from gmlx.models.deepseek_v4.model import (
-            install_gemv_row_fusion,
-            warm_kernel_pipelines,
-        )
+        # V4.1 runs other variants of these kernels (causal prefill, the
+        # candidate-set decode), so this warm set would not cover it.
+        from gmlx.models.deepseek_v4.model import warm_kernel_pipelines
 
-        n_fused_gemv = install_gemv_row_fusion(
-            getattr(model, "language_model", model))
-        if n_fused_gemv:
-            _log(f"[install] gemv row fusion on {n_fused_gemv} projection pairs")
         t_warm = time.perf_counter()
         n_warm = warm_kernel_pipelines()
         if n_warm:

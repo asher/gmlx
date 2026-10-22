@@ -82,6 +82,36 @@ def test_rearming_at_a_checkpoint_stays_exact():
         assert _same(a, b)
 
 
+def test_armed_chunks_on_a_row_fused_model_match_the_full_pass(monkeypatch):
+    """The tail's prep rows reach the fused attention projections: the
+    layers past the last kv source run them through a fused model, and the
+    result still matches the full pass."""
+    from gmlx.models.deepseek_v4.model import install_gemv_row_fusion
+    from gmlx.models.deepseek_v41 import model as v41
+
+    tm = _model_module()
+    mx.random.seed(0)
+    model = tm._randomized(tm.Model(tm._args()))
+    chunks = (8, 8, 8, 5)
+    full = _run(model, _PROMPT, chunks)
+    assert install_gemv_row_fusion(model) == 7
+    seen = []
+    orig = v41.DeepseekV41Attention.__call__
+
+    def spy(self, *a, **k):
+        seen.append(bool(k.get("n_prep", a[5] if len(a) > 5 else 0))
+                    and self._qa_kv_fused is not None)
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(v41.DeepseekV41Attention, "__call__", spy)
+    tail = _run(model, _PROMPT, chunks, ends={0: 30})
+    assert any(seen)
+    assert [o.shape[1] for o in tail[0]] == [0, 0, 0, 0]
+    assert _same(full[1][:, -1], tail[1][:, -1])
+    for a, b in zip(full[2], tail[2]):
+        assert _same(a, b)
+
+
 def test_tail_is_off_for_batches_and_by_env(monkeypatch):
     tm = _model_module()
     model = tm._randomized(tm.Model(tm._args()))

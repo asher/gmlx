@@ -36,6 +36,7 @@ from .loader import (
     _install_and_load,
     collect_after_load,
     float_dtype_rules,
+    install_row_fusion,
     materialize_module_arrays,
     weights_source_key,
 )
@@ -4365,6 +4366,9 @@ def load_vlm_model(
         _log(f"[vlm] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
              f"layers, verify on {counts['gdn_fused_verify']}, b/a cat on "
              f"{counts['gdn_ba_cat']}")
+    n_fused_gemv = install_row_fusion(model, model_type)
+    if n_fused_gemv:
+        _log(f"[vlm] gemv row fusion on {n_fused_gemv} projection pairs")
 
     # 5. processor (image preprocessing + tokenizer + chat template). Synthesized
     #    from the two GGUFs by default (the LLM GGUF carries the tokenizer + chat

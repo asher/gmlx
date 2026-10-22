@@ -411,14 +411,18 @@ class Compressor(nn.Module):
         self.wkv = nn.Linear(config.hidden_size, config.head_dim, bias=False)
         if compress_ratio > 1:
             self.wgate = nn.Linear(config.hidden_size, config.head_dim, bias=False)
+        self._kv_gate_fused = None  # wkv + wgate rows, install_gemv_row_fusion
         self.norm = nn.RMSNorm(config.head_dim, eps=config.rms_norm_eps)
 
     def __call__(self, x: mx.array, pool_cache: Optional[DS4PoolingCache], offset):
         B = x.shape[0]
-        kv = self.wkv(x)
-        # Ratio 1 has no gate; kv stands in for it so the cache keeps the
-        # window bookkeeping its trim path needs.
-        gate = self.wgate(x) if self.compress_ratio > 1 else kv
+        if self._kv_gate_fused is not None:
+            kv, gate = _v4._pair_split(self._kv_gate_fused, self.head_dim, x)
+        else:
+            kv = self.wkv(x)
+            # Ratio 1 has no gate; kv stands in for it so the cache keeps
+            # the window bookkeeping its trim path needs.
+            gate = self.wgate(x) if self.compress_ratio > 1 else kv
         if pool_cache is None:
             usable = (kv.shape[1] // self.compress_ratio) * self.compress_ratio
             ready_kv, ready_gate, pool_base = kv[:, :usable], gate[:, :usable], offset
@@ -1060,6 +1064,9 @@ class DeepseekV41Attention(nn.Module):
         )
         self.wkv = nn.Linear(config.hidden_size, self.head_dim, bias=False)
         self.kv_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        # wq_a + wkv rows in one projection (install_gemv_row_fusion).
+        self._qa_kv_fused = None
+        self._qa_rows = 0
         self.wo_a = MultiLinear(
             self.n_heads * self.head_dim // config.o_groups,
             config.o_lora_rank,
@@ -1149,15 +1156,23 @@ class DeepseekV41Attention(nn.Module):
         n_full = L - n_prep
         q0 = offset + n_prep
         xq = x[:, n_prep:] if n_prep else x
+        qa_out = kv_out = None
+        if n_full and not n_prep and self._qa_kv_fused is not None:
+            # One dispatch for both projections. A prefill tail (n_prep)
+            # projects q from fewer rows than kv, so it keeps two.
+            qa_out, kv_out = _v4._pair_split(self._qa_kv_fused, self._qa_rows, x)
         if n_full:
-            q_residual = self.q_norm(self.wq_a(xq))
+            q_residual = self.q_norm(
+                self.wq_a(xq) if qa_out is None else qa_out)
             q = self.wq_b(q_residual).reshape(B, n_full, self.n_heads, self.head_dim)
             q = q.transpose(0, 2, 1, 3)
             q = self.rope(q, q0)
             if prof:
                 t0 = _prof_mark("a.q", self.layer_idx, q, t0)
 
-        kv = self.kv_norm(self.wkv(x)).reshape(B, 1, L, self.head_dim)
+        kv = self.kv_norm(
+            self.wkv(x) if kv_out is None else kv_out
+        ).reshape(B, 1, L, self.head_dim)
         kv = self.rope(kv, offset)
         kv = _kv_qat(kv, self.training)
         if local_cache is not None:

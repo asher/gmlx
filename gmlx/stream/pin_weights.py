@@ -135,6 +135,60 @@ def cast_copies(model, gguf_path: str | None) -> CastCopies:
     return CastCopies(frozenset(out), dead)
 
 
+# Set by a post-load fusion on the module it ran on: the weight paths of
+# the members it superseded (deepseek_v4.install_gemv_row_fusion).
+FUSED_MEMBERS_ATTR = "_gmlx_fused_members"
+
+
+def fused_members(model, gguf_path: str | None) -> frozenset[str]:
+    """Wire tensors a post-load fusion replaced with a new buffer.
+
+    A row fusion copies each pair into one buffer and rebinds the members
+    as views of it, so nothing reads the members' wire bytes again. Pinned,
+    they stay wired beside the copy. Returns the GGUF names of the recorded
+    members, matched through the remap (the name each one loaded from);
+    empty when nothing was fused or the file cannot be read."""
+    if model is None or gguf_path is None:
+        return frozenset()
+    from gmlx.stream.installs import wrapper_chain
+
+    paths = next((getattr(m, FUSED_MEMBERS_ATTR) for m in wrapper_chain(model)
+                  if getattr(m, FUSED_MEMBERS_ATTR, None)), None)
+    if not paths:
+        return frozenset()
+    try:
+        from gmlx.load.headerscan import scan_gguf
+        from gmlx.load.preflight import find_split_shards
+        from gmlx.load.remap import parse_gguf_name
+
+        shards = find_split_shards(gguf_path)
+        arch = scan_gguf(shards[0], include_tensors=False,
+                         array_limit=0).kv.get("general.architecture")
+        out = set()
+        for path in shards:
+            for t in scan_gguf(path, array_limit=0).tensors:
+                if parse_gguf_name(arch, t.name).hf_name in paths:
+                    out.add(t.name)
+    except Exception:
+        return frozenset()
+    return frozenset(out)
+
+
+def pin_exclusions(model, gguf_path: str | None) -> CastCopies:
+    """The every-token tensors the streaming pin leaves unwired, and the
+    dead wire bytes the arena sizer stops charging. Declared streamable
+    tables stay evictable (mlocking them starves the expert page cache);
+    cast tensors and the members of a row-fused pair have no view left on
+    their wire bytes."""
+    from gmlx.stream.table_stream import streamable_tables_for
+
+    casts = cast_copies(model, gguf_path)
+    tables = frozenset(t.gguf_name for t, _ in streamable_tables_for(model))
+    return CastCopies(
+        tables | casts.names | fused_members(model, gguf_path),
+        casts.dead_bytes)
+
+
 def _libc():
     lc = ctypes.CDLL(None, use_errno=True)
     lc.mmap.restype = ctypes.c_void_p
