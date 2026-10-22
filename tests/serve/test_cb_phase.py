@@ -417,7 +417,6 @@ def test_a_streamed_prefill_runs_on_the_fine_caps(monkeypatch, fake_kq):
     assert fake_kq == [(400, 100000), (50, 50)] * len(prefills)
 
 
-
 def _caps_forward(seen):
     """A language model forward that records the caps each call runs on."""
     import gmlx.serve.cb_phase as cb_phase
@@ -546,6 +545,7 @@ def test_the_binding_stream_generate_calls_is_phased(monkeypatch, fake_kq,
     assert called is dispatch.generate_step
     assert wrapped_with(called, cb_phase._FLAG)
     assert wrapped_with(called, media_spans._GEN_FLAG)
+
 
 def test_a_placement_lift_goes_through_the_caps_record(monkeypatch, fake_kq):
     """A config placement lifts the live caps for its load (a chat model

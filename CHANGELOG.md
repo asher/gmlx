@@ -61,10 +61,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prefill chunk, and the arena gains 6 GB. A 32k prompt takes about 3% longer.
 - With `--stream-experts`, decoding runs on finer command buffers, about 2%
   faster on DeepSeek-V4.1-Flash in `gmlx run` and about 1% in `gmlx serve`.
-- With `--stream-experts`, the decode lookahead scores a layer's routing after
-  that layer's expert gather is dispatched.
-- DeepSeek-V4.1 fuses its query and KV input projections, and its compressor's
-  KV and gate projections, as DeepSeek-V4 does.
 - `gmlx chat` sets the command buffer caps per phase, as `run` does. A model in
   memory decodes about 2.6% faster near the start of a conversation.
 - `--thinking off` now turns thinking off on gpt-oss, Beam, Muse Glimmer, Muse
@@ -160,11 +156,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An `MLX_MAX_MB_PER_BUFFER` set without `MLX_MAX_OPS_PER_BUFFER` was
   overwritten at each prefill and decode step.
 - With `--stream-experts`, `run` and `chat` prefilled on coarse command
-  buffers, also with `--mmproj`. On DeepSeek-V4.1-Flash an 8k prompt left
+  buffers, and `run --mmproj` too. On DeepSeek-V4.1-Flash an 8k prompt left
   about 5 GB of memory free.
 - With `--stream-experts`, the coarse command buffers of the load stayed on
-  after it with `GMLX_CB_PHASE=0`, in `gmlx distill` and after a failed load
-  in `gmlx serve`, so prompts prefilled on them.
+  after it with `GMLX_CB_PHASE=0` and in `gmlx distill`, so prompts
+  prefilled on them.
 
 ## [0.5.1] - 2026-10-18
 
