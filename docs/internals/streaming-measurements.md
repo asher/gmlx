@@ -46,9 +46,12 @@ physical RAM. Four things share the ceiling, in this order:
    the chunk's activations, priced from the model's widths at the
    streamed chunk width (`--prefill-step-size` or the arch's own step
    switch when set), and the MLX buffer pool that keeps freed buffers
-   for the next layer, the chunk's size and at least 2 GiB. Under
-   prefill the pool fills to its limit and the live activations sit on
-   top of it, so the room counts both.
+   for the next layer, 2 GiB. Under prefill the pool fills to its limit
+   and the live activations sit on top of it, so the room counts both.
+   On DeepSeek-V4.1-Flash a pool of one chunk's activations (8.0 GB)
+   prefilled a 32k prompt about 3% faster than 2 GiB and an 8k prompt
+   no faster, and the 6 GB it took from the decode arena cost about
+   5.5% of the decode speed.
 3. The prefill ring holds two copies of the largest layer's expert stacks.
    When the ring does not fit, prefill reads through the page cache
    instead, and the load says so. Decoding is not affected.
@@ -545,3 +548,4 @@ A/B on the setting alone.
 | No background arena seeder | A seeder filling empty slots from a fast drive seeded 1295 slots over 1000 tokens and cost 0.1 tok/s. |
 | Demand reads land in a bounce buffer | A `pread` straight into the Metal-shared slot saved 7 ms per token of read wait and cost 18 ms per token of GPU time on the gathers. |
 | Expert stacks unmapped after install | With the GPU-visible total past physical RAM, each large command buffer paid 50 to 130 ms of driver time before it ran. |
+| Fine command buffers in every phase | On DeepSeek-V4.1-Flash UD-IQ2_XXS, M5 Max 128 GB, `gmlx run` decoded 2% faster on 50 ops and 50 MB per buffer than on 400 ops with no size cap (48.1 against 49.1 ms per token), output identical. An 8k prompt prefilled on the coarse buffers wired 13 GiB more within a quarter second and left 5.4 GB of pages free. |

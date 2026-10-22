@@ -150,7 +150,7 @@ fusions.
 | `GMLX_DS4_PREFILL_BLOCK=N` | Set the DeepSeek-V4.1 prefill query-block width for the window, sparse and indexer scores. `0` scores the whole chunk. |
 | `GMLX_DSA_INDEXER=0` | Compute DeepSeek-V4 and V4.1 indexer scores and top-k on the inline fp32 op chain instead of the mlx-kquant kernels. |
 | `GMLX_DSA_INDEXER_Q=0` | Keep the indexer GEMM on fp16 operands where tensor-op hardware would run the int8 kernel. Output is bit-identical. |
-| `GMLX_CB_PHASE=0` | Disable the per-phase MLX command-buffer caps. Output is unchanged, and decode runs slower. |
+| `GMLX_CB_PHASE=0` | Disable the per-phase MLX command-buffer caps. Output is unchanged, and decode runs slower. `MLX_MAX_OPS_PER_BUFFER` or `MLX_MAX_MB_PER_BUFFER` set by hand also keeps its caps in every phase. |
 | `GMLX_NATIVE_FP` | MXFP4 and NVFP4 layout. `wire` keeps the file bytes, `packed` repacks them, and `auto` picks wire when streaming or past 90% of the working set. |
 | `GMLX_BATCH_INVARIANT=1` | Run small float `nn.Linear` layers on a row-count-invariant kernel. Raw-array routers, router calls under 64 rows and training are not covered. |
 | `GMLX_BATCH_INVARIANT_MAX_OUT` | Most outputs of a float projection that the batch-invariant kernel takes. The default is `512`. |
@@ -203,7 +203,7 @@ other layer adds its delta on stock ops.
 | `GMLX_RELEASE_PAGECACHE=0` | Keep a released over-RAM model's pages in the page cache at exit or unload. |
 | `GMLX_STREAM_GPU_TOKENS` | On a fitting model with `stream` set, expert calls of this many tokens or more run on the GPU. The default is `1`, and `0` keeps them on the CPU. |
 | `GMLX_STREAM_PREFETCH=0` | Disable sequential expert prefetch, which reads the experts of the next two layers into the page cache on prefill-sized calls. |
-| `GMLX_STREAM_CACHE_GB` | MLX buffer cache of a streamed model in GiB, in the KV room. The default is the size of a prefill chunk, at least `2`; `4` without widths; a flat room's size. |
+| `GMLX_STREAM_CACHE_GB` | MLX buffer cache of a streamed model in GiB, in the KV room. The default is `2`; `4` without widths; a flat room's size. |
 | `GMLX_STREAM_ALLOC_LIMITS=0` | Keep the MLX allocator's default limits on a streamed model. With the file-backed weights past the MLX memory limit, each eval waits for the GPU work in flight. |
 | `GMLX_STREAM_KV_WIDTH` | Concurrent streams the KV room is sized for. The default is `1`, and each extra stream takes its KV room out of the arena. |
 | `GMLX_STREAM_UNMAP_STACKS=0` | Keep the expert stacks' Metal buffers after the feeders take a layer, instead of dropping them. |

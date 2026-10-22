@@ -56,6 +56,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   answering sooner on many follow-up turns and long prompts.
 - An explicit `GMLX_DECODE_ARENA_GB` is now cut to leave the memory a prefill
   needs, as the default arena is. `GMLX_DECODE_ARENA_FORCE=1` still keeps it.
+- With `--stream-experts`, DeepSeek-V4.1-Flash decodes about 5% faster and
+  answers short prompts about 4% sooner: the MLX buffer pool is 2 GiB, not one
+  prefill chunk, and the arena gains 6 GB. A 32k prompt takes about 3% longer.
+- With `--stream-experts`, decoding runs on finer command buffers, about 2%
+  faster on DeepSeek-V4.1-Flash in `gmlx run` and about 1% in `gmlx serve`.
+- With `--stream-experts`, the decode lookahead scores a layer's routing after
+  that layer's expert gather is dispatched.
+- DeepSeek-V4.1 fuses its query and KV input projections, and its compressor's
+  KV and gate projections, as DeepSeek-V4 does.
+- `gmlx chat` sets the command buffer caps per phase, as `run` does. A model in
+  memory decodes about 2.6% faster near the start of a conversation.
 - `--thinking off` now turns thinking off on gpt-oss, Beam, Muse Glimmer, Muse
   Spark and K2 Horizon, whose templates have no switch, by closing each
   thinking block as it opens. Thinking budgets now work for gpt-oss in
@@ -138,6 +149,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - With `--mmproj`, each reply printed a warning that the model was close to
   the maximum recommended size. It now prints once, and not with
   `--stream-experts`.
+- With `--stream-experts`, the decode arena's size could differ by up to 9 GB
+  from one load to the next: free memory counted speculative pages twice.
+- Qwen3.8-Flash-Next loaded with its `mmproj` failed its first request with
+  `There is no Stream(gpu, 1) in current thread`.
+- A `GMLX_STREAM_CACHE_GB` that was not a number, or larger than the RAM,
+  failed a streamed load.
+- `gmlx serve` with a model in memory and a streamed model ran each step on
+  the command buffer caps of the model that stepped last.
+- An `MLX_MAX_MB_PER_BUFFER` set without `MLX_MAX_OPS_PER_BUFFER` was
+  overwritten at each prefill and decode step.
+- With `--stream-experts`, `run` and `chat` prefilled on coarse command
+  buffers, also with `--mmproj`. On DeepSeek-V4.1-Flash an 8k prompt left
+  about 5 GB of memory free.
+- With `--stream-experts`, the coarse command buffers of the load stayed on
+  after it with `GMLX_CB_PHASE=0`, in `gmlx distill` and after a failed load
+  in `gmlx serve`, so prompts prefilled on them.
 
 ## [0.5.1] - 2026-10-18
 
