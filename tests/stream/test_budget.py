@@ -283,6 +283,36 @@ def test_reclaimable_ram_bytes_prefers_the_kernel_counters(monkeypatch):
     assert budget.reclaimable_ram_bytes() == 3
 
 
+# Mach's free and file-backed counts both hold the 4 GiB of speculative
+# pages: 6 GiB free, 1 GiB purgeable and 20 GiB of page cache.
+_MACH = {"free": 10 << 30, "inactive": 0, "purgeable": 1 << 30,
+         "speculative": 4 << 30, "filebacked": 20 << 30, "wired": 0,
+         "compressor": 0}
+
+
+def test_the_kernel_reclaimable_sum_counts_the_speculative_pages_once(
+        monkeypatch):
+    import gmlx.serve.kernel_vm as kv
+
+    monkeypatch.setattr(kv, "snapshot", lambda: dict(_MACH))
+    assert kv.reclaimable_bytes() == 27 << 30
+    assert budget.reclaimable_ram_bytes() == 27 << 30
+
+
+def test_the_arena_sizing_read_is_live(monkeypatch):
+    # The mach snapshot can be a second old, and a wire of tens of GB
+    # commits within one refresh.
+    import gmlx.serve.kernel_vm as kv
+
+    monkeypatch.setattr(kv, "snapshot", lambda: dict(_MACH))
+    monkeypatch.setattr(kv, "live_reclaimable_bytes", lambda: 9 << 30)
+    assert budget._available_ram_bytes() == 9 << 30
+    # The strict set leaves the page cache out, so it never reads live.
+    assert budget._available_ram_bytes(include_inactive=False) == 11 << 30
+    monkeypatch.setattr(kv, "live_reclaimable_bytes", lambda: None)
+    assert budget._available_ram_bytes() == 27 << 30
+
+
 def test_kernel_floor_bytes_is_the_governor_floor(monkeypatch):
     monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "2")
     assert budget.kernel_floor_bytes() == 2e9

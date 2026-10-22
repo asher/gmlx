@@ -76,9 +76,9 @@ def ceiling_bytes() -> float | None:
 
 def reclaimable_ram_bytes() -> int | None:
     """RAM the kernel can hand back without swapping anyone: free,
-    purgeable, speculative and file-backed pages. The governor's floor
-    measure; the loader's vm_stat sum when the mach counters are
-    unavailable."""
+    purgeable and file-backed pages, the speculative pages counted once.
+    The governor's floor measure; the loader's read when the mach
+    counters are unavailable."""
     try:
         from gmlx.serve.kernel_vm import reclaimable_bytes
 
@@ -387,14 +387,27 @@ def _available_ram_bytes(include_inactive: bool = True) -> int | None:
     ``vm_stat`` without the ``File-backed pages`` line falls back to
     inactive + speculative.
 
-    ``include_inactive=False`` is the stricter set (free + purgeable +
-    speculative only) for a caller that must not take the page cache."""
+    The sum is read live (``kernel_vm.live_reclaimable_bytes``): the
+    mach snapshot can be a second old, and a sizing read right after a
+    wire of tens of GB would count the wired pages as free. The snapshot
+    is the fallback, then ``vm_stat``. Mach's free and file-backed counts
+    both hold the speculative pages, so they count once.
+
+    ``include_inactive=False`` is the stricter set (free + purgeable;
+    Mach's free holds the speculative pages) for a caller that must not
+    take the page cache."""
     from gmlx.serve import kernel_vm
 
+    if include_inactive:
+        live = kernel_vm.live_reclaimable_bytes()
+        if live is not None:
+            return int(live)
     s = kernel_vm.snapshot()
     if s is not None:
-        return s["free"] + s["purgeable"] + (
-            s["filebacked"] if include_inactive else s["speculative"])
+        if include_inactive:
+            return (s["free"] - s["speculative"] + s["purgeable"]
+                    + s["filebacked"])
+        return s["free"] + s["purgeable"]
     import subprocess
 
     try:

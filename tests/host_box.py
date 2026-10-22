@@ -164,16 +164,17 @@ def install() -> None:
 
     kernel_vm.snapshot, kernel_vm.selfcheck = snapshot, selfcheck
 
-    # The sysctl counts of the same pages. The reported free count is
-    # Mach's, which holds the speculative pages, and the reported
-    # file-backed count leaves them out, so they count once.
+    # The sysctl counts of the same pages. The reported free and
+    # file-backed counts are Mach's, which both hold the speculative
+    # pages, so free gives them up and they count once.
     def live_reclaimable_bytes():
         if _current["real"]:
             return real_live()
         if kernel_vm._disabled is not None:
             return None
         vm = _current["vm"]
-        return int(vm["free"] + vm["purgeable"] + vm["filebacked"])
+        return int(vm["free"] - vm["speculative"] + vm["purgeable"]
+                   + vm["filebacked"])
 
     kernel_vm.live_reclaimable_bytes = live_reclaimable_bytes
 

@@ -1809,7 +1809,10 @@ def test_available_ram_counts_active_file_cache(monkeypatch):
         stdout = out
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _R())
-    monkeypatch.setattr(gmlx.serve.kernel_vm, "snapshot", lambda: None)  # vm_stat fallback
+    # vm_stat fallback
+    monkeypatch.setattr(gmlx.serve.kernel_vm, "snapshot", lambda: None)
+    monkeypatch.setattr(gmlx.serve.kernel_vm, "live_reclaimable_bytes",
+                        lambda: None)
     page = 16384
     assert gmlx.stream.budget._available_ram_bytes() == (1000 + 500 + 700000) * page
     # Strict no-victims set: free + purgeable + speculative only.
@@ -1831,7 +1834,10 @@ def test_available_ram_fallback_without_file_backed_line(monkeypatch):
         stdout = out
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _R())
-    monkeypatch.setattr(gmlx.serve.kernel_vm, "snapshot", lambda: None)  # vm_stat fallback
+    # vm_stat fallback
+    monkeypatch.setattr(gmlx.serve.kernel_vm, "snapshot", lambda: None)
+    monkeypatch.setattr(gmlx.serve.kernel_vm, "live_reclaimable_bytes",
+                        lambda: None)
     assert gmlx.stream.budget._available_ram_bytes() == \
         (1000 + 500 + 5000 + 200000) * 16384
 

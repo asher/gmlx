@@ -79,8 +79,9 @@ Knobs (all calib values are U5's to tighten):
                              bytes is min(WS x (1 - M), RAM - reserve)
                              (default max(8, 10% of RAM))
     GMLX_GOV_KERNEL_FLOOR_GB kernel reclaimable floor (free + purgeable
-                             + speculative + file-backed pages, read
-                             from host_statistics64 every tick): below
+                             + file-backed pages, the speculative pages
+                             counted once, read from host_statistics64
+                             every tick): below
                              it the band is red at once, whatever the
                              MLX-side rate math says (default: lower
                              of 4 and 10% of RAM; 0 disables). This is

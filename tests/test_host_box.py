@@ -73,6 +73,15 @@ def test_the_ci_runner_reports_its_free_ram_through_the_stock_read():
         assert host_box.free_ram_bytes() < 2 << 30
 
 
+@pytest.mark.parametrize("box", [
+    "runner", pytest.param("mac", marks=pytest.mark.host_gb(128))])
+def test_the_mach_and_sysctl_reclaimable_reads_agree(box):
+    # Both count the speculative pages once.
+    from gmlx.serve import kernel_vm
+
+    assert kernel_vm.reclaimable_bytes() == kernel_vm.live_reclaimable_bytes()
+
+
 @pytest.mark.host_gb(64)
 def test_a_declared_mac_reports_its_free_ram_through_every_read():
     import host_box

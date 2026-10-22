@@ -2111,12 +2111,13 @@ class DecodeFeeder:
 
     def _regrow_headroom_ok(self) -> bool:
         """Regrow only into RAM the kernel hands back without swapping
-        anyone: free, purgeable, speculative and file-backed pages, the
-        governor's own floor measure. The arena's expert reads fill the
-        file-backed queue, so a free-pages-only test never passes on a
-        streaming model and a shrink would be permanent. The step must
-        leave the loader's floor and the governor's kernel floor behind
-        it, so a regrow cannot trip the floor that shrank the arena."""
+        anyone: free, purgeable and file-backed pages, the speculative
+        pages counted once, the governor's own floor measure. The
+        arena's expert reads fill the file-backed queue, so a
+        free-pages-only test never passes on a streaming model and a
+        shrink would be permanent. The step must leave the loader's
+        floor and the governor's kernel floor behind it, so a regrow
+        cannot trip the floor that shrank the arena."""
         need = self._arena_bytes_at(self._pressure_steps - 1) - self.arena_bytes
         try:
             from gmlx.stream.budget import _ram_floor_bytes
