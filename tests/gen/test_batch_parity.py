@@ -63,6 +63,7 @@ CANDIDATE_ARCHES = [
     "kimi-k3",
     "muse-spark",
     "beam",
+    "flint",
 ]
 
 # Deliberately varying lengths -> a ragged batch -> exercises the left-padding /

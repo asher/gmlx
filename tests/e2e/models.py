@@ -94,6 +94,10 @@ _CANDIDATES = {
         "unsloth__Beam-1.0-501B-A23B-GGUF/UD-IQ2_XXS/"
         "Beam-1.0-501B-A23B-UD-IQ2_XXS-00001-of-00004.gguf",
     ],
+    # Flint INT4: 26 GB, all Q4_1, with GLM-style tool calls.
+    "flint_q4_1": [
+        "RecursiveSI__flint-int4-gguf/flint-int4-q4_1.gguf",
+    ],
     # DeepSeek-V4-Flash-Vision-Exp pair (103 GB, single-row image turns):
     # the block-expansion VLM path. Last vlm fallback, and the target of the
     # dsv4-vision scenarios when present.
@@ -145,6 +149,7 @@ _SOURCES = {
     "DeepSeek-V4.1-Flash-Vision.gguf",
     "beam_iq2xxs": "hf:unsloth/Beam-1.0-501B-A23B-GGUF/UD-IQ2_XXS/"
     "Beam-1.0-501B-A23B-UD-IQ2_XXS-00001-of-00004.gguf",
+    "flint_q4_1": "hf:RecursiveSI/flint-int4-gguf/flint-int4-q4_1.gguf",
 }
 
 # Preference order for the default LLM judge (a bigger, coherent model judges
@@ -168,7 +173,8 @@ _ROLES = {
     ],
     "mtp_native": [("qwen35_9b_mtp",), ("qwen36_27b",)],
     # An official model that calls tools, for an agent through the session socket.
-    "tools": [("qwen38_27b",), ("qwen35_9b_q4",), ("gemma4_12b",)],
+    "tools": [("qwen38_27b",), ("qwen35_9b_q4",), ("gemma4_12b",),
+              ("flint_q4_1",)],
     # A third small model, distinct from the two qwen3-0.6b quants.
     "lru_small": [("gemma3_1b",), ("falcon_h1_0_5b",)],
     # Over-RAM MoE models. The stream tier keeps the first one the planner

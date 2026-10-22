@@ -73,6 +73,7 @@ flags refuses.
 | `deepseek4`, `deepseek41` | Compressed layers scale. The other layers keep a plain rope, as in llama.cpp's `deepseek4`. |
 | `ernie4_5-moe` | |
 | `falcon-h1` | |
+| `flint` | Only the sliding window layers rotate, and the flags scale them, as in llama.cpp. |
 | `gemma` | |
 | `gemma2` | Sliding window layers keep the header's scale, as in llama.cpp. |
 | `gemma3`, `gemma4` | Sliding window layers keep a plain rope, as in llama.cpp. |

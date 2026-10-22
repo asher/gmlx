@@ -60,6 +60,7 @@ _TEMPLATES = {
     "mistral3": ("mistral3", "mistral3_template.jinja"),
     "muse-spark": ("muse_spark", "muse_spark_template.jinja"),
     "beam": ("beam", "beam_template.jinja"),
+    "flint": ("flint", "flint_template.jinja"),
 }
 # Templates the Messages cases above do not take: Mistral 7B v0.3 takes
 # nine-character call ids only.

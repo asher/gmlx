@@ -3014,6 +3014,119 @@ def test_beam_synth_refuses_softmax_gating_and_shared_experts():
         synthesize_config(m, tensor_shapes=_BEAM_SHAPES)
 
 
+# flint
+
+_FLINT_PATTERN = [False, False, True, True, True, False]
+
+
+def _flint_meta() -> dict:
+    arch = "flint"
+    m = _base_meta(arch)
+    m[f"{arch}.block_count"] = 6
+    m[f"{arch}.feed_forward_length"] = 96
+    m[f"{arch}.attention.value_length"] = 16
+    # The shipped schedule: two full dense layers, then three sliding layers
+    # for every full one.
+    m[f"{arch}.attention.sliding_window"] = 5
+    m[f"{arch}.attention.sliding_window_pattern"] = list(_FLINT_PATTERN)
+    m[f"{arch}.attention.rope_pattern"] = list(_FLINT_PATTERN)
+    m[f"{arch}.leading_dense_block_count"] = 2
+    m[f"{arch}.expert_count"] = 16
+    m[f"{arch}.expert_used_count"] = 3
+    m[f"{arch}.expert_feed_forward_length"] = 24
+    m[f"{arch}.expert_shared_count"] = 2
+    m[f"{arch}.expert_shared_feed_forward_length"] = 48
+    m[f"{arch}.expert_gating_func"] = 2
+    m[f"{arch}.expert_weights_scale"] = 1.0
+    m[f"{arch}.expert_weights_norm"] = True
+    return m
+
+
+_FLINT_SHAPES = {
+    "output.weight": [64, VOCAB],
+    "blk.0.attn_sinks.weight": [4],
+    "blk.2.ffn_gate_exps.weight": [64, 24, 16],
+}
+
+
+def test_flint_synth_fields():
+    c = synthesize_config(_flint_meta(), tensor_shapes=_FLINT_SHAPES)
+    assert c["model_type"] == "flint"
+    assert c["layer_types"] == [
+        "sliding_attention" if v else "full_attention" for v in _FLINT_PATTERN]
+    assert c["sliding_window"] == 5
+    assert c["rope_parameters"] == {"rope_theta": 10000.0,
+                                    "rope_type": "default"}
+    assert c["first_k_dense_replace"] == 2
+    assert c["intermediate_size"] == 96
+    assert (c["num_experts"], c["num_experts_per_tok"]) == (16, 3)
+    assert c["moe_intermediate_size"] == 24
+    assert c["shared_expert_intermediate_size"] == 48
+    assert c["routed_scaling_factor"] == 1.0
+    assert c["norm_topk_prob"] is True
+    assert c["router_bias"] is False
+    assert c["head_dim"] == 16
+    assert not c["tie_word_embeddings"]
+
+
+def test_flint_synth_instantiates():
+    from gmlx.models.flint.model import MLP, FlintMoE, Model, ModelArgs
+
+    c = synthesize_config(_flint_meta(), tensor_shapes=_FLINT_SHAPES)
+    model, args = _get_classes(c)
+    assert model is Model and args is ModelArgs
+    m = Model(ModelArgs.from_dict(c))
+    mx.eval(m.parameters())
+    assert m(mx.array([[1, 2, 3]])).shape == (1, 3, VOCAB)
+    assert [type(ly.mlp) for ly in m.layers[1:3]] == [MLP, FlintMoE]
+    assert [ly.self_attn.rope is not None for ly in m.layers] == _FLINT_PATTERN
+    assert m.layers[2].mlp.shared_experts.gate_proj.weight.shape == (48, 64)
+    assert "e_score_correction_bias" not in m.layers[2].mlp.gate
+
+
+def test_flint_synth_reads_the_optional_router_bias_and_shared_width():
+    shapes = dict(_FLINT_SHAPES)
+    shapes["blk.2.exp_probs_b.bias"] = [16]
+    m = _flint_meta()
+    del m["flint.expert_shared_feed_forward_length"]
+    del m["flint.expert_weights_scale"]
+    c = synthesize_config(m, tensor_shapes=shapes)
+    assert c["router_bias"] is True
+    # llama.cpp's default shared width is n_ff_exp times the shared count.
+    assert c["shared_expert_intermediate_size"] == 48
+    assert c["routed_scaling_factor"] == 0.0
+
+
+@pytest.mark.parametrize("key", [
+    "attention.sliding_window", "attention.sliding_window_pattern",
+    "attention.rope_pattern", "leading_dense_block_count",
+    "expert_feed_forward_length", "expert_shared_count",
+    "expert_weights_norm",
+])
+def test_flint_required_keys_fail_loud(key):
+    m = _flint_meta()
+    del m[f"flint.{key}"]
+    with pytest.raises(ValueError, match=f"flint.{key}"):
+        synthesize_config(m, tensor_shapes=_FLINT_SHAPES)
+
+
+@pytest.mark.parametrize("key,value,exc,match", [
+    ("attention.sliding_window", 0, ValueError, "must be positive"),
+    ("attention.sliding_window_pattern", [True, False], ValueError,
+     "entries for"),
+    ("attention.rope_pattern", [True] * 6, NotImplementedError,
+     "differs from"),
+    ("leading_dense_block_count", 7, ValueError, "exceeds"),
+    ("expert_gating_func", 1, NotImplementedError, "sigmoid"),
+    ("attention.value_length", 32, NotImplementedError, "value_length"),
+])
+def test_flint_synth_refuses_what_the_model_cannot_run(key, value, exc, match):
+    m = _flint_meta()
+    m[f"flint.{key}"] = value
+    with pytest.raises(exc, match=match):
+        synthesize_config(m, tensor_shapes=_FLINT_SHAPES)
+
+
 # k2-horizon
 
 

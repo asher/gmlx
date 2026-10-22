@@ -1,6 +1,6 @@
 # Supported architectures
 
-gmlx maps 46 GGUF architectures to model types, and 45 of them load end-to-end
+gmlx maps 47 GGUF architectures to model types, and 46 of them load end-to-end
 with no `hf_source`. `scripts/check-coverage.py` generates this page from the
 architecture table and the mlx-lm that gmlx carries, so do not edit it by hand.
 
@@ -31,6 +31,7 @@ family, backend, status and caveat:
 | `diffusion-gemma` | gemma | mlx-vlm | loadable |  |
 | `ernie4_5-moe` | ernie | mlx-lm | loadable |  |
 | `falcon-h1` | falcon | mlx-lm | loadable |  |
+| `flint` | flint | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. `--kv-bits` is refused. |
 | `gemma` | gemma | mlx-lm | loadable |  |
 | `gemma-embedding` | gemma | gmlx | loadable |  |
 | `gemma2` | gemma | mlx-lm | loadable | Pass hf_source for 27B. Output matches llama.cpp only up to 4096 tokens, the size of the model's sliding attention window. |

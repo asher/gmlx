@@ -74,6 +74,7 @@ def test_families_never_set_max_tokens():
     ("nemotron_h_moe", "nemotron"),
     ("hunyuan-moe", "hunyuan"),
     ("kimi-k3", "kimi"),
+    ("flint", "flint"),
     ("llama", "llama"), ("smollm3", "llama"),
     ("mistral3", "mistral"),
     ("phi3", "default"),          # no card entry -> generic

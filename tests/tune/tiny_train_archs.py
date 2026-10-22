@@ -69,6 +69,15 @@ CONFIGS = {
         moe_intermediate_size=256, routed_scaling_factor=2.5, norm_topk_prob=True,
         final_logit_softcapping=30.0, rms_norm_eps=1e-6, rope_parameters=_ROPE,
         rope_theta=10000.0, max_position_embeddings=4096, tie_word_embeddings=False),
+    "flint": dict(
+        model_type="flint", hidden_size=256, intermediate_size=512, num_hidden_layers=4,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=64, vocab_size=512,
+        layer_types=["full_attention", "sliding_attention", "sliding_attention",
+                     "full_attention"], sliding_window=512, first_k_dense_replace=1,
+        num_experts=16, num_experts_per_tok=4, moe_intermediate_size=128,
+        shared_expert_intermediate_size=256, routed_scaling_factor=0.0,
+        norm_topk_prob=True, rms_norm_eps=1e-6, rope_parameters=_ROPE,
+        rope_theta=10000.0, max_position_embeddings=4096, tie_word_embeddings=False),
     "k2_horizon": dict(
         model_type="k2_horizon", hidden_size=256, intermediate_size=512, num_hidden_layers=3,
         num_attention_heads=4, num_key_value_heads=2, head_dim=64, vocab_size=512,
@@ -177,6 +186,7 @@ CASES = {
     "muse_glimmer": Case("muse-glimmer"),
     "muse_spark": Case("muse-spark"),
     "beam": Case("beam"),
+    "flint": Case("flint"),
     "k2_horizon": Case("k2-horizon"),
     "hy_v3": Case("hy_v3", (r"router\.gate$",)),
     "glm5_next": Case("glm5next"),

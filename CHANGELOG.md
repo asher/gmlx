@@ -11,6 +11,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Beam-1.0 501B-A23B (GGUF arch `beam`), with `reasoning-low`, `-medium` and
   `-high` intents and tool calls. On a Mac with less memory than the file, it
   runs with `--stream-experts`.
+- RecursiveSI Flint (GGUF arch `flint`), with its `<think>` reasoning and
+  tool calls.
 - `GMLX_NORM_DTYPE` sets the width of a language model's norm weights:
   `fp32` keeps the F32 norm weights in float32 and `activation` casts them to
   the activation dtype, whatever the model's default.

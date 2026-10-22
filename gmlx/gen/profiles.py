@@ -324,6 +324,14 @@ FAMILIES: dict[str, dict] = {
             "reasoning-high": {"chat_template_kwargs": {"reasoning_effort": "high"}},
         },
     },
+    # RecursiveSI/flint generation_config.json, 2026-10: t=1.0, top_p 0.95,
+    # top_k 20. <think> reasoning; the template has no thinking switch.
+    "flint": {
+        "label": "Flint",
+        "arches": ("flint",),
+        "base": {"sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20}},
+        "intents": {},
+    },
     # Llama 3.x generation_config (t=0.6/top_p=0.9); SmolLM3 card matches
     # closely enough to share.
     "llama": {
