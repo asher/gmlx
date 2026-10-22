@@ -546,9 +546,13 @@ def test_float16_graph_survives_swiglu_past_float16_range(monkeypatch):
         for k, v in tree_flatten(model.parameters())]))
     got = model(mx.array(tokens)[None])
     assert got.dtype == mx.float16
-    with monkeypatch.context() as m:
-        m.setattr(FlintModel, "_WIDE_FROM", mx.bfloat16)
-        assert not np.isfinite(_np(model(mx.array(tokens)[None]))).all()
+    # The CPU gather_mm takes float32 only, so the float16 arm runs on the GPU.
+    if mx.default_device().type == mx.DeviceType.gpu:
+        with monkeypatch.context() as m:
+            m.setattr(FlintModel, "_WIDE_FROM", mx.bfloat16)
+            unwide = model(mx.array(tokens)[None])
+            mx.eval(unwide)
+            assert not np.isfinite(_np(unwide)).all()
     got = _np(got[0])
     assert np.isfinite(got).all()
     assert _rel(got, want) < 3e-2
