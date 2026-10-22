@@ -46,6 +46,19 @@ def _ph_li(ph, li, key, dt):
     d[key] = d.get(key, 0.0) + dt
 
 
+def _la_observe(ph, li, la_sync):
+    """Score a layer's actual routing (rank gate, probe), timed into the la
+    bucket. Host only, so it can run beside the layer's gather."""
+    if ph is None:
+        la_sync.observe()
+        return
+    t = time.perf_counter()
+    la_sync.observe()
+    dt = time.perf_counter() - t
+    ph["la"] += dt
+    _ph_li(ph, li, "la", dt)
+
+
 # Submit a staged layer's expert gather as soon as it is built, so the GPU
 # runs it while the host builds the next layer's graph. The next layer's
 # router eval is still the fence that orders it before any slot overwrite.
@@ -731,6 +744,7 @@ def install_expert_streaming(
                         dfr.forward_start(self._kq_li)
                     la = getattr(self, "_kq_lookahead", None)
                     la_pred = None
+                    la_sync = None
                     routed_ids = None
                     ph = _PHASE
                     if ph is not None:
@@ -858,18 +872,24 @@ def install_expert_streaming(
                             x_la = x
                         if ph is not None:
                             t_la = time.perf_counter()
-                            la_pred = la.on_call(x_la, indices)
+                            la_sync = la.sync(x_la, indices)
+                            la_pred = la_sync.predictions()
                             _dt = time.perf_counter() - t_la
                             ph["la"] += _dt
                             _ph_li(ph, self._kq_li, "la", _dt)
                         else:
-                            la_pred = la.on_call(x_la, indices)
-                    if (
+                            la_sync = la.sync(x_la, indices)
+                            la_pred = la_sync.predictions()
+                    arena = (
                         dfr is not None
                         and cpu_only
                         and small
                         and dfr.covers(self._kq_li)
-                    ):
+                    )
+                    if la_sync is not None and not arena:
+                        _la_observe(ph, self._kq_li, la_sync)
+                        la_sync = None
+                    if arena:
                         # Decode feeder: the routed experts are served from
                         # this layer's wired GPU arena; misses are pread from
                         # the GGUF into evicted slots first. Small prefill
@@ -995,6 +1015,9 @@ def install_expert_streaming(
                                     dfr.prestage(_dst, _ids)
                             if ph is not None:
                                 ph["prestage"] += time.perf_counter() - t2
+                        if slots is None and la_sync is not None:
+                            _la_observe(ph, self._kq_li, la_sync)
+                            la_sync = None
                         if slots is not None:
                             # arena call: weights are wired GPU views for
                             # this scope, so lift the streaming CPU pin
@@ -1043,12 +1066,16 @@ def install_expert_streaming(
                                             mx.async_eval(y)
                                 if ph is not None:
                                     ph["build"] += time.perf_counter() - t3
-                                return y
                             finally:
                                 self._kq_cpu_only = True
                                 if rows:
                                     object.__setattr__(
                                         self, "_kq_arena_rows", False)
+                            if la_sync is not None:
+                                # The gather is in flight: the routing is
+                                # scored beside it.
+                                _la_observe(ph, self._kq_li, la_sync)
+                            return y
                     split = (
                         dfr is not None
                         and cpu_only

@@ -280,9 +280,15 @@ class _LookaheadSpy:
     def __init__(self):
         self.calls = 0
 
-    def on_call(self, x, indices):
+    def sync(self, x, indices):
         self.calls += 1
-        return None
+        return self
+
+    def predictions(self):
+        return {}
+
+    def observe(self):
+        pass
 
 
 def test_lookahead_skips_one_token_split_pieces():

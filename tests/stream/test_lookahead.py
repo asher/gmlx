@@ -241,7 +241,7 @@ def test_install_and_probe_end_to_end(monkeypatch):
 
 def test_bf16_router_scores_reach_numpy(monkeypatch):
     """A bf16 router's scores have no numpy buffer format; the predictor
-    hands them over as float32 so on_call's host copy works."""
+    hands them over as float32 so the hook's host copy works."""
     model = _streaming_model(monkeypatch)
     monkeypatch.setenv("GMLX_DECODE_LOOKAHEAD_PROBE", "1")
     assert install_lookahead(model, model.layers, probe=True) == 1
@@ -292,7 +292,9 @@ def test_probe_report_smoke(capsys):
 def test_wrapper_prestages_next_layer(monkeypatch):
     """With prefetch enabled the offload wrapper hands the materialized
     prediction to the decode feeder's prestage for the NEXT MoE layer,
-    after this layer's stage() has returned."""
+    after this layer's stage() has returned and before its gather is
+    built. The rank gate scores the layer's routing after the gather is
+    dispatched."""
     from contextlib import contextmanager
 
     model = _streaming_model(monkeypatch)
@@ -328,15 +330,26 @@ def test_wrapper_prestages_next_layer(monkeypatch):
         @contextmanager
         def swapped(self, li):
             yield
+            self.calls.append(("gather", li, None))
 
     df = _FakeDF()
     object.__setattr__(glu0, "_kq_decode_feeder", df)
     object.__setattr__(glu0, "_kq_li", 0)
+    gate = glu0._kq_lookahead.gate
+    observe = gate.observe
+
+    def spy(li, actual):
+        df.calls.append(("observe", li, None))
+        observe(li, actual)
+
+    monkeypatch.setattr(gate, "observe", spy)
     x = mx.random.normal((1, 1, DIM))
     out = model.layers[0].mlp(x)
     mx.eval(out)
     kinds = [c[0] for c in df.calls]
-    assert kinds == ["stage", "prestage"]  # prestage after demand joined
+    # Demand joins, the speculative reads go out, the gather is built, and
+    # only then does the host score the routing, while the GPU computes.
+    assert kinds == ["stage", "prestage", "gather", "observe"]
     assert df.calls[1][1] == 1  # targets the NEXT MoE layer
     pred = df.calls[1][2]
     assert pred.shape[-1] == K and pred.min() >= 0 and pred.max() < NE
@@ -668,13 +681,13 @@ def test_wrapper_prefers_out_of_band_router_input(monkeypatch):
 
     seen = []
     hook = glu0._kq_lookahead
-    orig = hook.on_call
+    orig = hook.sync
 
     def spy(x, indices):
         seen.append(x)
         return orig(x, indices)
 
-    monkeypatch.setattr(hook, "on_call", spy)
+    monkeypatch.setattr(hook, "sync", spy)
 
     class _FakeDF:
         def forward_start(self, li):
