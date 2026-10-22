@@ -99,3 +99,49 @@ def mint_type43_gguf(path, tensors, *, pad_last=True, cut=0, tail=0,
     with open(path, "wb") as f:
         f.write(out)
     return out
+
+
+FLASH_NEXT = "Qwen3.8-Flash-Next-UD-Q4_K_XL.gguf"
+FLASH_NEXT_MTP = "mtp-Qwen3.8-Flash-Next-Q8_0.gguf"
+
+
+def flash_next_under_its_table(monkeypatch, lib) -> int:
+    """Qwen3.8-Flash-Next as minted headers in ``lib`` beside llama.cpp's
+    NextN sidecar, under a stream budget that its per-layer embedding
+    table alone brings it under: the table streams from the file and the
+    experts stay in memory. Returns the table's bytes."""
+    import numpy as np
+    from gguf import GGMLQuantizationType, GGUFWriter
+
+    import gmlx.device as device
+    import gmlx.load.discovery as discovery
+
+    w = GGUFWriter(str(lib / FLASH_NEXT), "qwen4exp")
+    w.add_uint32("qwen4exp.block_count", 2)
+    w.add_uint32("qwen4exp.expert_count", 4)
+    w.add_uint32("qwen4exp.embedding_length", 64)
+    table = np.ones((4096, 33), np.int8)
+    w.add_tensor("per_layer_token_embd.weight", table,
+                 raw_dtype=GGMLQuantizationType.I8)
+    w.add_tensor("blk.0.ffn_gate_exps.weight",
+                 np.zeros((4, 16, 64), np.float32))
+    w.add_tensor("blk.0.attn_q.weight", np.zeros((64, 64), np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    w = GGUFWriter(str(lib / FLASH_NEXT_MTP), "qwen4exp")
+    w.add_uint32("qwen4exp.block_count", 3)
+    w.add_uint32("qwen4exp.nextn_predict_layers", 1)
+    w.add_uint32("qwen4exp.expert_count", 4)
+    w.add_uint32("qwen4exp.embedding_length", 64)
+    w.add_tensor("blk.2.nextn.eh_proj.weight",
+                 np.zeros((64, 128), np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    rest = discovery.text_tensor_bytes(str(lib / FLASH_NEXT)) - table.nbytes
+    monkeypatch.setattr(discovery, "_stream_budget_bytes", lambda: rest)
+    monkeypatch.setattr(device, "stream_budget_bytes", lambda: rest)
+    return table.nbytes

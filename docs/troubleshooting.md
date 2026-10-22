@@ -217,6 +217,52 @@ The weights plus the KV cache need more memory than the GPU may use.
 To try anyway on `run` and `chat`, set
 [`GMLX_TOOL_PREFLIGHT=0`](env-vars.md#commands).
 
+### `the experts stream because the model is over its memory budget` or `the experts stream because they do not fit in the memory free now`
+
+A MoE model's experts did not fit in memory, so they stream from disk and
+decode slower. The line gives the memory the experts need and the memory
+they were judged against. Before a load, `gmlx validate` says what the
+load will do with the memory free now. To keep the experts in memory, set
+`GMLX_OVERCOMMIT=1`, with which the Mac may swap. When the line names the
+memory free now, quitting other apps and loading again also keeps them:
+
+```sh
+gmlx validate model.gguf
+GMLX_OVERCOMMIT=1 gmlx run model.gguf
+```
+
+[When a MoE streams its experts](streaming.md#when-a-moe-streams-its-experts)
+lists the ways to keep the experts in memory and what each costs.
+
+### `auto MTP is off: the experts stay in memory`
+
+The MTP drafter that `run` and `chat` turn on by themselves does not fit
+beside the experts, so the load decodes without speculation. To speculate,
+pass `--speculative`, which streams the experts to make room for the
+drafter:
+
+```sh
+gmlx run model.gguf --speculative
+```
+
+### `a folder scan set stream: experts, and the model now fits`
+
+`gmlx serve` logs this at its start, for each entry that an older folder
+scan marked `stream: experts` and that now keeps its experts in memory
+without the key. The key still streams the experts, so the model decodes
+slower:
+
+```text
+[server] warning: flash-next: a folder scan set stream: experts, and the model now fits with its table read from the file, so its experts stream. Run gmlx sync-models to keep them in memory.
+```
+
+`gmlx sync-models` drops the key and keeps a `stream` key that you wrote.
+`gmlx doctor` names the same entries on its `stream marks` row.
+
+```sh
+gmlx sync-models
+```
+
 ## Image generation
 
 ### `image request does not fit`

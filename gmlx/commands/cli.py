@@ -8,6 +8,7 @@ prints a load inventory (``--report-only``).
 from __future__ import annotations
 
 import argparse
+import enum
 import os
 import sys
 import time
@@ -1258,6 +1259,10 @@ def _report_only(args) -> int:
     return 0
 
 
+# The decode tokens a bench row runs without --bench-decode-tokens.
+_BENCH_DECODE = {"bench": 32, "bench_depths": 128}
+
+
 def _run_bench(args) -> int:
     import gmlx.load.loadlog as loadlog
     from gmlx.gen.benchmarks import bench
@@ -1283,7 +1288,7 @@ def _run_bench(args) -> int:
         )
     print_family_note(args)
     _apply_placement(args, model)
-    decode_tokens = args.bench_decode_tokens or 32
+    decode_tokens = args.bench_decode_tokens or _BENCH_DECODE["bench"]
     print(
         f"[bench] lengths={lengths} runs={args.bench_runs} "
         f"decode_tokens={decode_tokens}"
@@ -1308,6 +1313,19 @@ def _run_bench(args) -> int:
     return 0
 
 
+def _bench_depths_speculative(args) -> bool:
+    """Whether --bench-depths runs its MTP A/B: --speculative, --draft-gguf
+    or --native-mtp, unless --no-speculative. Never auto."""
+    if getattr(args, "no_speculative", False):
+        return False
+    if getattr(args, "native_mtp", False):
+        apply_native_mtp(args, args.gguf)
+    # bool(): --speculative defaults to the auto sentinel None, which would
+    # otherwise render as "speculative=None" in the bench banner.
+    return bool(getattr(args, "speculative", None)
+                or getattr(args, "draft_gguf", None))
+
+
 def _run_bench_depths(args) -> int:
     """``tg@depth`` benchmark: decode tok/s measured at each context depth,
     with an optional MTP speculative A/B (accept-rate + speedup) per depth."""
@@ -1325,12 +1343,8 @@ def _run_bench_depths(args) -> int:
     except argparse.ArgumentTypeError as e:
         print(str(e), file=sys.stderr)
         return 2
-    decode_tokens = args.bench_decode_tokens or 128
-    # bool(): --speculative defaults to the auto sentinel None, which would
-    # otherwise render as "speculative=None" in the banner below.
-    if getattr(args, "native_mtp", False) and not args.no_speculative:
-        apply_native_mtp(args, args.gguf)
-    speculative = bool(args.speculative) and not args.no_speculative
+    decode_tokens = args.bench_decode_tokens or _BENCH_DECODE["bench_depths"]
+    speculative = _bench_depths_speculative(args)
 
     import gmlx.load.loadlog as loadlog
 
@@ -1502,6 +1516,19 @@ def _apply_placement(args, model) -> None:
                 f"[stream] {'/'.join(used)} ignored: needs --stream-experts "
                 "or --stream-cpu (they only apply to streamed MoE layers)"
             )
+        from gmlx.stream.expert_streaming import install_unflagged_tables
+
+        # Tables that alone bring the model under the budget serve from the
+        # file; its experts stay in memory if they fit, else they stream.
+        # An MTP load installs this before its wire, and the call is a no-op.
+        install_unflagged_tables(
+            model, getattr(args, "gguf", None),
+            feeder_prefill=getattr(args, "prefill_feeder", None),
+            feeder_decode=getattr(args, "decode_feeder", None),
+            prefill_step=getattr(args, "prefill_step_size", None),
+            stats_verbose=bool(getattr(args, "verbose", False)))
+        if getattr(model, "_kq_streaming", False):
+            _lift_live_cb_caps()
         return
 
     gguf_path = getattr(args, "gguf", None)
@@ -1535,7 +1562,8 @@ def _apply_placement(args, model) -> None:
             model, gguf_path=gguf_path, explicit=True,
             stats_verbose=bool(getattr(args, "verbose", False)),
             feeder_prefill=prefill, feeder_decode=decode,
-            prefill_step=step)
+            prefill_step=step,
+            fallback=getattr(args, "stream_fallback", ""))
         if n == 0:
             print(
                 "[stream] warning: no MoE expert stacks found - "
@@ -2359,8 +2387,13 @@ def _ensure_stream_cb_caps(args) -> None:
     stream = bool(getattr(args, "stream_experts", False)
                   or getattr(args, "stream_cpu", False))
     force_table_stream(stream)
-    if not stream:
-        return
+    if stream:
+        _lift_live_cb_caps()
+
+
+def _lift_live_cb_caps() -> None:
+    """The streaming command-buffer caps on the live device: for a
+    placement from config, or experts that stream for want of memory."""
     if os.environ.get("MLX_MAX_OPS_PER_BUFFER"):
         return                       # argv path already latched it, or the
                                      # user pinned their own caps
@@ -2374,7 +2407,213 @@ def _ensure_stream_cb_caps(args) -> None:
         pass
 
 
+# Tokens a chat template adds around the prompt (roles, a reasoning
+# preamble), priced on top of the prompt text.
+_TEMPLATE_TOKENS = 256
+
+
+def run_room_depth(args, *, mtp: bool = True) -> int | None:
+    """The KV depth ``gmlx run`` prices its resident wire check at: the
+    prompt and the system prompt (two bytes of text a token or more), a
+    chat template allowance and the reply cap; or the deepest row of the
+    bench that runs (--bench-depths, else --bench) and its decode tokens.
+    None prices the serve context: an uncapped reply, an image or audio
+    input (their token counts are known only once the processor loads),
+    an unparsable bench list, or a run that loads an MTP drafter (with
+    ``mtp`` False, the depth of the run without one). None for a path
+    that is no file, which the run then names."""
+    path = os.path.expanduser(getattr(args, "gguf", None) or "")
+    if not os.path.isfile(path):
+        return None
+    if mtp and _mtp_loads(args, path):
+        return None
+    mode = _run_mode(args)
+    if mode in _BENCH_DECODE:
+        try:
+            deepest = max(int(x) for x in getattr(args, mode).split(",")
+                          if x.strip())
+        except ValueError:
+            return None
+        return deepest + (getattr(args, "bench_decode_tokens", None)
+                          or _BENCH_DECODE[mode])
+    if any(_media_inputs(args)):
+        return None
+    cap = getattr(args, "max_tokens", None)
+    if not cap or cap <= 0:
+        return None
+    prompt_file = getattr(args, "prompt_file", "")
+    try:
+        text = (os.path.getsize(os.path.expanduser(prompt_file))
+                if prompt_file
+                else len((getattr(args, "prompt", "") or "").encode()))
+    except OSError:
+        return None
+    text += len((getattr(args, "system_prompt", None) or "").encode())
+    template = (0 if getattr(args, "no_chat_template", False)
+                else _TEMPLATE_TOKENS)
+    return text // 2 + template + cap
+
+
+def _media_inputs(args) -> tuple[list[str], list[str]]:
+    """The --image and --audio paths of a run."""
+    return ([s for s in (getattr(args, "image", None) or "").split(",")
+             if s.strip()],
+            [s for s in (getattr(args, "audio", None) or "").split(",")
+             if s.strip()])
+
+
+def _run_mode(args) -> str:
+    """The path ``gmlx run`` dispatches to: ``vlm_mtp`` (a --mmproj load
+    with no image or audio when a drafter is available), ``vlm``,
+    ``bench_depths``, ``bench`` or ``generate``. ``gmlx chat`` without
+    --mmproj is ``generate``."""
+    if getattr(args, "mmproj", None):
+        images, audios = _media_inputs(args)
+        if not images and not audios and _vlm_mtp_drafter_available(args):
+            return "vlm_mtp"
+        return "vlm"
+    if getattr(args, "bench_depths", ""):
+        return "bench_depths"
+    if getattr(args, "bench", ""):
+        return "bench"
+    return "generate"
+
+
+def _mtp_loads(args, path: str) -> bool:
+    """Whether ``gmlx run`` or ``gmlx chat`` loads an MTP drafter beside
+    the model: the rule of the path it dispatches to (``_run_mode``)."""
+    mode = _run_mode(args)
+    if mode == "bench_depths":
+        return _bench_depths_speculative(args)
+    if mode == "generate":
+        return resolve_speculative(args, path)[0]
+    return mode == "vlm_mtp"
+
+
+def _drafter_bytes(args, path: str) -> int:
+    """Bytes of the MTP drafter a run or chat loads beside the model
+    (``_mtp_loads``): the --draft-gguf file, else the model's own NextN
+    blocks or the companion file the auto path finds. 0 when none
+    loads."""
+    if not _mtp_loads(args, path):
+        return 0
+    from gmlx.load.discovery import mtp_block_bytes
+
+    native = getattr(args, "native_mtp", False)
+    draft = None if native else getattr(args, "draft_gguf", None)
+    if not draft and (native or _has_native_mtp_head(path)):
+        return mtp_block_bytes(path)
+    if not draft:
+        draft = _companion_drafter(path)
+    draft = os.path.expanduser(draft) if draft else ""
+    return os.path.getsize(draft) if draft and os.path.isfile(draft) else 0
+
+
+def _mtp_auto(args) -> bool:
+    """Whether a drafter that loads (``_mtp_loads``) comes from the auto
+    path: no --speculative, --draft-gguf or --native-mtp asked for it."""
+    return (getattr(args, "speculative", None) is None
+            and not getattr(args, "draft_gguf", None)
+            and not getattr(args, "native_mtp", False))
+
+
+def bare_run_drafter_bytes(path: str) -> int:
+    """Bytes of the auto MTP drafter ``gmlx run <path>`` loads with no
+    flag (``_drafter_bytes``), which ``gmlx validate`` prices beside the
+    experts."""
+    return _drafter_bytes(_build_parser().parse_args([path]), path)
+
+
+class _Same(enum.Enum):
+    DEPTH = 0
+
+
+def preload_wire_check(args, *, depth: int | None,
+                       can_stream: bool = True,
+                       depth_without_mtp: int | None | _Same = _Same.DEPTH) -> None:
+    """Before the weights load, judge a MoE's resident set against live
+    memory (``budget.check_resident_wire``), with the KV room at
+    ``depth`` tokens (None: the serve context). One that does not fit,
+    or is past the stream budget, streams its experts:
+    ``args.stream_experts`` is set, so the latch and the warm touch leave
+    them alone. The set is the text tensors less the tables the load
+    reads from the file, with the mmproj and the MTP drafter that load
+    beside it. An auto drafter that tips it over is dropped
+    (``check_wire_beside_drafter``), and the set is judged alone at
+    ``depth_without_mtp`` (``depth`` unless given): the experts stay in
+    memory with auto MTP off, or they stream. A dense model, a streamed
+    placement and GMLX_OVERCOMMIT=1 load as asked. Every load prices its
+    install's own check at the depth of the load it makes."""
+    from gmlx.stream import budget as bmod
+
+    if depth_without_mtp is _Same.DEPTH:
+        depth_without_mtp = depth
+    bmod.set_wire_room_depth(depth)
+    if (not can_stream or getattr(args, "stream_experts", False)
+            or getattr(args, "stream_cpu", False)):
+        return
+    path = os.path.expanduser(getattr(args, "gguf", "") or "")
+    if not path or not os.path.isfile(path):
+        return
+    from gmlx.serve.capacity import streamed_expert_bytes
+
+    if not streamed_expert_bytes(path):
+        return
+    from gmlx.device import stream_budget_bytes
+    from gmlx.load.discovery import text_tensor_bytes
+    from gmlx.serve.capacity import deferred_table_bytes
+
+    text = text_tensor_bytes(path)
+    if not text:
+        return
+    mmproj = os.path.expanduser(getattr(args, "mmproj", None) or "")
+    extra = os.path.getsize(mmproj) if mmproj and os.path.isfile(mmproj) else 0
+    step = getattr(args, "prefill_step_size", None)
+    room = bmod.kv_room_bytes(path, step=step, depth=depth)
+    alone = (room if depth_without_mtp == depth
+             else bmod.kv_room_bytes(path, step=step, depth=depth_without_mtp))
+    # Before _drafter_bytes, whose --native-mtp sets --speculative (the
+    # native_mtp term covers that too).
+    auto = _mtp_auto(args)
+    check = bmod.check_wire_beside_drafter(
+        text - deferred_table_bytes(path) + extra, _drafter_bytes(args, path),
+        auto=auto, room_bytes=room.bytes, alone_room_bytes=alone.bytes,
+        kept_streamed=_run_mode(args) == "vlm_mtp",
+        budget=stream_budget_bytes())
+    from gmlx.load import loadlog
+
+    if check.mtp_off:
+        # No drafter loads: a resident load with auto MTP off, or a
+        # streamed one, which takes no auto drafter.
+        room, depth = alone, depth_without_mtp
+        bmod.set_wire_room_depth(depth)
+        if check.fits:
+            loadlog.warn(f"[mtp] {check.mtp_off_line()}")
+            args.no_speculative = True
+            return
+    if check.fits:
+        return
+    from gmlx.serve.capacity import gathered_table_bytes
+
+    # A load whose gathered tables bring it under wires in chunks.
+    loadlog.warn(f"[stream] "
+                 f"{check.line(room, depth, chunked=bool(gathered_table_bytes(path)))}")
+    args.stream_experts = True
+    # The install names this leg, not the flag.
+    args.stream_fallback = check.reason
+
+
 def main(argv: list[str] | None = None, prog: str | None = None) -> int:
+    from gmlx.stream import budget as bmod
+
+    try:
+        return _main(argv, prog)
+    finally:
+        # The run's KV depth prices only its own load.
+        bmod.set_wire_room_depth(None)
+
+
+def _main(argv: list[str] | None, prog: str | None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
     _lift_stream_cb_caps(argv)
     parser = _build_parser(prog or f"{_prog()} run")
@@ -2383,6 +2622,9 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     rc = maybe_load_from_config(args, parser, argv)
     if rc is not None:
         return rc
+    if not args.report_only:
+        preload_wire_check(args, depth=run_room_depth(args),
+                           depth_without_mtp=run_room_depth(args, mtp=False))
     _ensure_stream_cb_caps(args)
     from gmlx.serve.cb_phase import install_cb_phase_steps
 
@@ -2505,26 +2747,26 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
 
         apply_local_cache_limit((args.gguf, args.mmproj, args.draft_gguf),
                                 verbose=args.verbose)
-        if args.mmproj:
-            # A loaded VLM serves text-only requests in place: route a text-only
-            # request through the MTP path when a drafter is available
-            # (--draft-gguf companion, a native head, or an autodetected
-            # companion for a companion-only family), else plain VLM
-            # generation. Image/audio -> VLM (the drafter idles that request).
-            images = [s for s in (args.image or "").split(",") if s.strip()]
-            audios = [s for s in (args.audio or "").split(",") if s.strip()]
-            if not images and not audios and _vlm_mtp_drafter_available(args):
-                if (not getattr(args, "draft_gguf", None)
-                        and not _has_native_mtp_head(args.gguf)):
-                    companion = _companion_drafter(args.gguf)
-                    if companion:
-                        print(f"[mtp] companion MTP drafter detected: "
-                              f"{os.path.basename(companion)}")
-                return _run_vlm_mtp(args)
+        # A loaded VLM serves text-only requests in place: route a text-only
+        # request through the MTP path when a drafter is available
+        # (--draft-gguf companion, a native head, or an autodetected
+        # companion for a companion-only family), else plain VLM
+        # generation. Image/audio -> VLM (the drafter idles that request).
+        # The pre-load wire check prices the drafter by the same rule.
+        mode = _run_mode(args)
+        if mode == "vlm_mtp":
+            if (not getattr(args, "draft_gguf", None)
+                    and not _has_native_mtp_head(args.gguf)):
+                companion = _companion_drafter(args.gguf)
+                if companion:
+                    print(f"[mtp] companion MTP drafter detected: "
+                          f"{os.path.basename(companion)}")
+            return _run_vlm_mtp(args)
+        if mode == "vlm":
             return _run_vlm(args)
-        if args.bench_depths:
+        if mode == "bench_depths":
             return _run_bench_depths(args)
-        if args.bench:
+        if mode == "bench":
             return _run_bench(args)
         return _run_generate(args)
     except (UnsupportedCodecError, UnsupportedArchError) as e:

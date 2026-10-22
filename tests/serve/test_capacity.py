@@ -637,10 +637,10 @@ def test_preload_gate_names_every_token_weights_when_streaming(rig, monkeypatch)
 def test_discovery_preflight_and_serve_read_the_table_rule_alike(
         monkeypatch, row_bytes, max_buffer, budget):
     """Experts stream only when the model stays over the budget without
-    its table: discovery marks it, the run preflight and a plain serve
-    entry price the same resident bytes, and a stream build predicts the
-    experts streamed. Otherwise the table is read from the file, with no
-    mark, and a stream build keeps the experts resident too."""
+    its table: discovery marks it, and the run preflight and a plain
+    serve entry price the same resident bytes. Otherwise the table is
+    read from the file, with no mark. A stream build predicts the
+    experts streamed beside the table either way."""
     from types import SimpleNamespace
 
     import gmlx.device as dev
@@ -689,36 +689,56 @@ def test_discovery_preflight_and_serve_read_the_table_rule_alike(
     assert (disc._over_budget(entry) is not None) == must_stream
     assert (resident > budget) == must_stream
     assert _plain_footprint(path, text + 10**6) == resident + 10**6
-    assert cap.predicted_stream_bytes(path) == (
-        table, int(experts) if must_stream else 0)
+    assert cap.predicted_stream_bytes(path) == (table, int(experts))
+    # The loader reads the table ahead, so a load without a stream flag
+    # installs no table ladder.
+    assert cap.gathered_table_bytes(path) == 0
 
 
-def test_a_table_the_arch_does_not_read_ahead_keeps_the_mark(monkeypatch):
-    """A qwen3.8-flash-next quant on a 36 GB Mac: its 28.8 GB per-layer
-    embedding table is past the 24.4 GB buffer ceiling and is read from
-    the file, and the other 20 GB fit the 26.1 GB budget. The arch does
-    not read the table ahead of its layers, so the resident figure keeps
-    the table and discovery marks the model, as before."""
+# Qwen3.8-Flash-Next quants: a Q2_K on a 36 GB Mac, whose 28.8 GB
+# per-layer embedding table is past the 24.4 GB buffer ceiling, and the
+# UD-Q4_K_XL on a 128 GB M5 Max, whose table maps.
+@pytest.mark.parametrize("table_gb, rest_gb, budget_gb, held", [
+    (28.8, 20.0, 26.1, True),
+    (28.8, 82.5, 108.2, False),
+])
+def test_a_table_gathered_per_layer_that_brings_the_model_under_gets_no_mark(
+        monkeypatch, table_gb, rest_gb, budget_gb, held):
+    """The arch gathers its table per layer, so the load keeps it on the
+    CPU stream from the file, and the experts fit the budget beside the
+    every-token weights. Discovery writes no mark, and the run preflight
+    and a plain serve entry price the model without the table. Past the
+    budget without it, the mark stays and nothing is taken off. A model
+    that fits whole keeps its table: no mark, and nothing taken off."""
     from types import SimpleNamespace
 
+    import gmlx.device as dev
     import gmlx.load.discovery as disc
     import gmlx.load.headerscan as hs
     import gmlx.load.preflight as pre
     import gmlx.stream.table_pread as tpr
+    from gmlx.serve.residency import _plain_footprint
 
-    name, path = "per_layer_token_embd.weight", "/m/QN-Q2_K.gguf"
-    table, rest, budget = int(28.8 * GB), int(20 * GB), int(26.1 * GB)
+    name, path = "per_layer_token_embd.weight", "/m/QN-Q4.gguf"
+    table, rest = int(table_gb * GB), int(rest_gb * GB)
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
     monkeypatch.setattr(pre, "find_split_shards", lambda p: [path])
     monkeypatch.setattr(hs, "scan_gguf", lambda *a, **k: SimpleNamespace(
         kv={"general.architecture": "qwen4exp"}))
     monkeypatch.setattr(tpr, "_table_sources", lambda shards, arch, cap: (
-        {name: SimpleNamespace(nbytes=table)}, {name}))
+        {name: SimpleNamespace(nbytes=table)}, {name} if held else set()))
+    monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: table)
     monkeypatch.setattr(disc, "text_tensor_bytes", lambda p: rest + table)
     monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: rest + table)
-    monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: budget)
-    assert cap.deferred_table_bytes(path) == 0
-    assert cap.held_table_bytes(path) == table
-    entry = disc.ClassifiedGguf(path, "model", "qwen4_exp", False, "Q2_K",
+    entry = disc.ClassifiedGguf(path, "model", "qwen4_exp", False, "Q4",
                                 True)
-    assert disc._over_budget(entry) == (rest + table, budget)
+    for budget, off, marked in ((int(budget_gb * GB), table, False),
+                                (rest - 1, 0, True),
+                                (rest + table + 1, 0, False)):
+        monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: budget)
+        monkeypatch.setattr(dev, "stream_budget_bytes", lambda: budget)
+        assert cap.deferred_table_bytes(path) == off
+        assert cap.gathered_table_bytes(path) == off
+        assert _plain_footprint(path, rest + table) == rest + table - off
+        assert (disc._over_budget(entry) is not None) == marked
+    assert cap.held_table_bytes(path) == (table if held else 0)

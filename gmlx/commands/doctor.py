@@ -996,6 +996,36 @@ def check_memory(cfg) -> dict:
     return _check("memory", "PASS", f"{detail}; configured models fit{tail}")
 
 
+def check_stream_marks(cfg, path) -> dict | None:
+    """None unless a ``stream: experts`` key discovery wrote no longer
+    holds: the model fits in memory now, as when its tables alone bring
+    it under the budget. ``gmlx sync-models`` drops such a key and turns
+    speculative back on where the model has a drafter head."""
+    if cfg is None or path is None or not cfg.models:
+        return None
+    import gmlx.config as cfgmod
+    from gmlx.serve.server import stale_stream_marks
+
+    path_of = {}
+    for mid, m in cfg.models.items():
+        try:
+            path_of[mid] = cfgmod.resolve_path(m.path, cfg.model_dirs)
+        except Exception:                              # noqa: BLE001 - advisory
+            continue
+    try:
+        stale = sorted(stale_stream_marks(path, path_of))
+    except Exception:                                  # noqa: BLE001 - advisory
+        return None
+    if not stale:
+        return None
+    more = f" (+{len(stale) - 3} more)" if len(stale) > 3 else ""
+    return _check(
+        "stream marks", "WARN",
+        ", ".join(stale[:3]) + more + ": discovery set `stream: experts`, "
+        "and the model fits in memory now; run `gmlx sync-models` to drop "
+        "the key")
+
+
 def _deferred_table_bytes(path: str, model_dirs: list[str]) -> int:
     import gmlx.config as cfgmod
     from gmlx.serve.capacity import deferred_table_bytes
@@ -1051,7 +1081,11 @@ def _run_checks(config_path, *, deep: bool) -> list[dict]:
               check_mcp(cfg), check_assistant_exposure(cfg)):
         if c is not None:
             checks.append(c)
-    checks += [check_hf_token(), check_memory(cfg), check_disk(cfg)]
+    checks += [check_hf_token(), check_memory(cfg)]
+    marks = check_stream_marks(cfg, path)
+    if marks is not None:
+        checks.append(marks)
+    checks.append(check_disk(cfg))
     return checks
 
 

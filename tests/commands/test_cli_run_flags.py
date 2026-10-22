@@ -346,6 +346,43 @@ def test_stream_flags_price_the_prefill_step_the_run_asks_for(monkeypatch):
     assert seen == [16384, 16384, None]
 
 
+@pytest.mark.parametrize("mtp", [False, True])
+@pytest.mark.parametrize("tables,streams", [(0, False),
+                                           (28_800_000_000, False),
+                                           (28_800_000_000, True)])
+def test_without_the_flag_tables_that_bring_the_model_under_install_once(
+        monkeypatch, tables, streams, mtp):
+    """No stream flag, on an arch that gathers its tables per layer: tables
+    that alone bring the model under the budget serve from the file. An
+    MTP load installs before its wire, and the placement after it is then
+    a no-op. Experts that do not fit the memory free now stream, and the
+    streaming command-buffer caps go on."""
+    import types
+
+    import gmlx.serve.capacity as cap
+    import gmlx.stream.expert_streaming as es
+
+    seen, lifted = [], []
+
+    def install(model, **kw):
+        seen.append(kw.get("gguf_path"))
+        model._kq_streaming = streams
+        return 1, 0
+
+    monkeypatch.setattr(es, "install_expert_streaming", install)
+    monkeypatch.setattr(cap, "gathered_table_bytes",
+                        lambda p, *a, **k: tables)
+    monkeypatch.setattr(cli, "_lift_live_cb_caps", lambda: lifted.append(1))
+    model = types.SimpleNamespace()
+    args = types.SimpleNamespace(stream_experts=False, stream_cpu=False,
+                                 gguf="Qwen3.8-Flash-Next-UD-Q4_K_XL.gguf")
+    if mtp:
+        es.install_unflagged_tables(model, args.gguf)  # the MTP load's
+    cli._apply_placement(args, model)
+    assert seen == (["Qwen3.8-Flash-Next-UD-Q4_K_XL.gguf"] if tables else [])
+    assert lifted == ([1] if streams else [])
+
+
 def test_without_the_flag_a_model_under_the_budget_stays_resident(monkeypatch):
     from gmlx.stream.expert_streaming import install_expert_streaming
 

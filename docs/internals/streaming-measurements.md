@@ -149,9 +149,10 @@ Some architectures have large lookup tables that every token reads a few
 rows of, such as DeepSeek-V4.1-Flash's engram tables. gmlx streams these
 tables too, and the plan shows them as `streamed tables`, outside the
 every-token total. A table too large for a single GPU buffer is read from
-the file row by row, and so is a DeepSeek-V4.1-Flash table whose bytes
-alone bring the model back under the budget. The load names it on an
-`[install]` line.
+the file row by row, and so is a table whose bytes alone bring the model
+back under the budget, such as DeepSeek-V4.1-Flash's engram tables or
+Qwen3.8-Flash-Next's per-layer table, when no stream flag is set. The load
+names it on an `[install]` line.
 
 ## The lossless settings
 
@@ -169,7 +170,7 @@ gain of each setting on real models.
 | Lookahead prestage | Predicts the next layer's experts while the current layer computes, and reads missing ones early. Never changes the routing. | `GMLX_DECODE_LOOKAHEAD=0` |
 | Weight pin | Locks the every-token weights in memory, so that macOS cannot evict them between tokens. | `GMLX_PIN_WEIGHTS=0` |
 | GPU keep-warm | Runs a tiny kernel between layers, so that the GPU clock stays high through the disk reads. | `--no-gpu-keepwarm` |
-| Streamed lookup tables | Streams large lookup tables before the experts, on the architectures that have them. | `GMLX_STREAM_PLE=0` |
+| Streamed lookup tables | Streams large lookup tables before the experts, on the architectures that have them. Under `stream: experts` they stream with the experts. | `GMLX_STREAM_PLE=0` |
 | Stack unmap | Releases the expert stacks' GPU mapping once the feeders read them from the file. | `GMLX_STREAM_UNMAP_STACKS=0` |
 | Tail merge | Widens the prefill chunk by up to an eighth, so that a short last chunk joins the ones before it. | `GMLX_STREAM_PREFILL_TAIL_MERGE=0` |
 | Ring time-share | The arena uses the prefill ring's room while decoding, when it is at least twice the ring. Each prefill empties its coldest layers and the reply refills them. | `GMLX_RING_TIMESHARE=0` |

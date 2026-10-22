@@ -382,13 +382,14 @@ def test_ladder_streams_table_and_keeps_experts_resident(monkeypatch):
     assert not getattr(glu, "_kq_cpu_only", False)
 
 
-def test_the_stream_flag_keeps_the_ladder_over_budget(monkeypatch):
-    """--stream-experts over the budget: the table streams and the experts
-    stay resident, as without the flag."""
+def test_the_stream_flag_streams_the_experts_over_the_budget(monkeypatch):
+    """--stream-experts over the budget, on a model whose table alone
+    brings it under: the table and the experts stream (compose)."""
     from mlx.utils import tree_flatten
 
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
     monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    monkeypatch.setattr(mx, "set_wired_limit", mx.set_wired_limit)
     model, glu = _moe_table_model()
     total = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
     _fake_budget(monkeypatch, total - ts.table_bytes(model) // 2)
@@ -396,14 +397,14 @@ def test_the_stream_flag_keeps_the_ladder_over_budget(monkeypatch):
                         lambda n, key=None: None)
     install_expert_streaming(model, explicit=True)
     assert ts.table_streaming_active(model)
-    assert not getattr(glu, "_kq_cpu_only", False)
+    assert getattr(glu, "_kq_cpu_only", False)
+    assert model._kq_streaming is True
 
 
-def test_the_stream_flag_counts_a_table_read_from_the_file(monkeypatch):
-    """A table the load reads from the file has no array, but the model is
-    as large as its header says. Over the budget with the table and under
-    it without, --stream-experts keeps the experts resident, as the header
-    prediction does (the arena it would size is priced nowhere)."""
+def _file_table_model():
+    """A table model whose table the load reads from the file: no array,
+    a source of the header's size. Returns the model, its glu, the bytes
+    left in arrays and the table bytes."""
     from types import SimpleNamespace
     from typing import Any, cast
 
@@ -411,8 +412,6 @@ def test_the_stream_flag_counts_a_table_read_from_the_file(monkeypatch):
 
     from gmlx.stream.table_pread import _pread_class
 
-    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
-    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
     model, glu = cast("tuple[Any, Any]", _moe_table_model())
     table = model.model.ple_embed
     tbytes = ts.table_bytes(model)
@@ -424,12 +423,76 @@ def test_the_stream_flag_counts_a_table_read_from_the_file(monkeypatch):
     flat = cast("list[tuple[str, Any]]", tree_flatten(model.parameters()))
     rest = sum(a.nbytes for _, a in flat)
     assert ts.file_table_bytes(model) == tbytes
+    return model, glu, rest, tbytes
+
+
+def test_the_stream_flag_streams_the_experts_beside_a_table_read_from_the_file(
+        monkeypatch):
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    monkeypatch.setattr(mx, "set_wired_limit", mx.set_wired_limit)
+    model, glu, rest, tbytes = _file_table_model()
     _fake_budget(monkeypatch, rest + tbytes // 2)
     monkeypatch.setattr("gmlx.gen.prefill_decay.deduct_untracked_weights",
                         lambda n, key=None: None)
     install_expert_streaming(model, explicit=True)
-    assert not getattr(glu, "_kq_cpu_only", False)
-    assert not getattr(model, "_kq_streaming", True)
+    assert getattr(glu, "_kq_cpu_only", False)
+    assert model._kq_streaming is True
+
+
+@pytest.mark.parametrize("over_without_tables", [False, True])
+def test_the_stream_flag_s_arena_share_keys_on_the_tables_streaming(
+        monkeypatch, capsys, over_without_tables):
+    """A table read from the file has no array, but the model is as large
+    as its header says. With --stream-experts, a model the tables bring
+    under the budget gets the forced arena share, so the arena does not
+    wire every expert, and its -v line says the flag streams it; one
+    still over it gets the full arena, and its line names the budget."""
+    import types
+
+    import gmlx.gen.prefill_decay as decay
+    import gmlx.load.loadlog as loadlog
+    import gmlx.stream.budget as sbudget
+    import gmlx.stream.pin_weights as pins
+    import gmlx.stream.prefetch as prefetch
+
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    monkeypatch.setattr(mx, "set_wired_limit", mx.set_wired_limit)
+    model, _, rest, tbytes = _file_table_model()
+    _fake_budget(monkeypatch, rest - 1 if over_without_tables
+                 else rest + tbytes // 2)
+    monkeypatch.setattr(prefetch, "maybe_make_prefetcher",
+                        lambda path: types.SimpleNamespace(offsets={}))
+    monkeypatch.setattr(pins, "cast_copies", lambda m, p: types.SimpleNamespace(
+        dead_bytes=0, names=frozenset()))
+    monkeypatch.setattr(pins, "maybe_pin_weights", lambda *a, **kw: None)
+    monkeypatch.setattr(sbudget, "kv_room_bytes",
+                        lambda p, **kw: types.SimpleNamespace(bytes=0))
+    monkeypatch.setattr(decay, "note_streamed_tracked_bytes",
+                        lambda *a, **kw: None)
+    monkeypatch.setattr("gmlx.gen.prefill_decay.deduct_untracked_weights",
+                        lambda n, key=None: None)
+    seen = []
+
+    class Reached(Exception):
+        pass
+
+    def arena(*a, **kw):
+        seen.append(kw.get("forced"))
+        raise Reached
+
+    monkeypatch.setattr("gmlx.stream.expert_streaming._decode_arena_bytes",
+                        arena)
+    monkeypatch.setattr(loadlog, "_LAST_VERBOSE", True)
+    with pytest.raises(Reached):
+        install_expert_streaming(model, gguf_path="m.gguf", explicit=True,
+                                 feeder_prefill=False, feeder_decode=False)
+    assert seen == [not over_without_tables]
+    out, err = capsys.readouterr()
+    why = (" > ~0 GB wired budget" if over_without_tables
+           else ", streaming forced by --stream-experts or stream: experts")
+    assert f"[stream] streaming: model 0 GB{why} - 1 MoE layers' " in out + err
 
 
 def test_the_stream_flag_under_the_budget_streams_table_and_experts(monkeypatch):
@@ -450,8 +513,10 @@ def test_the_stream_plan_is_the_ladder(monkeypatch):
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
     monkeypatch.delenv("GMLX_STREAM_PLE_COMPOSE", raising=False)
     plan = ts.stream_plan
-    # Over the budget, the table alone brings it under: table-only.
-    assert plan(150, 30, 130, explicit=True, latched=True) == (True, False, False)
+    # Over the budget, the table alone brings it under: table-only
+    # without the flag, compose with it.
+    assert plan(150, 30, 130) == (True, False, False)
+    assert plan(150, 30, 130, explicit=True, latched=True) == (True, True, False)
     # Still over post-table: compose; no table: experts only.
     assert plan(150, 10, 130, explicit=True, latched=True) == (True, True, False)
     assert plan(150, 0, 130, explicit=True, latched=True) == (False, True, False)
@@ -614,7 +679,8 @@ def test_a_table_only_install_reads_the_real_free(monkeypatch, tracked_parts):
     table = ts.table_bytes(model)
     ws = int((total - table // 2) / 0.9) + 1       # over, but not post-table
     model, glu, size, box, pd = _serve_build(monkeypatch, tracked_parts, 8, ws)
-    install_expert_streaming(model, explicit=True)
+    # A plain build: the bridge's install takes the table-only ladder.
+    install_expert_streaming(model)
     assert ts.table_streaming_active(model)
     assert not getattr(glu, "_kq_cpu_only", False)
     assert pd.build_credit_bytes() == 0

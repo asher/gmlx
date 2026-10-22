@@ -63,6 +63,21 @@ def test_estimate_refuses_over_working_set(rig):
     assert "weights alone exceed" in tp.refusal_text(est)
 
 
+def test_overcommit_judges_the_fit_against_ram(rig, monkeypatch, capsys):
+    # A 128 GB Mac (120.3 GB working set): GMLX_OVERCOMMIT=1 lets a load
+    # past the working set through, and refuses one past RAM.
+    import gmlx.stream.budget as budget
+
+    monkeypatch.delenv("GMLX_TOOL_PREFLIGHT", raising=False)
+    monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
+    monkeypatch.setattr(budget, "ram_bytes", lambda: 128 << 30)
+    assert tp.check_or_exit(rig(weights_gb=125.0, ws_gb=120.3))["fits"]
+    with pytest.raises(SystemExit):
+        tp.check_or_exit(rig(weights_gb=300.5, ws_gb=120.3))
+    assert ("this box's RAM is 137.4 GB; the weights alone exceed RAM"
+            in capsys.readouterr().err)
+
+
 def test_largest_fit_ctx_is_the_boundary(rig):
     path = rig(weights_gb=10.0, ws_gb=20.0)
     est = tp.estimate(path, ctx_tokens=1024)

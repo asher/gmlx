@@ -2233,7 +2233,7 @@ def load_mtp_model(
 
     materialize_module_arrays(model, drafter)
     if wire:
-        _wire_big_model(model)
+        _wire_target(model, gguf_path)
     wait_for_populate(pf.shards, log=_log)
     collect_after_load()
 
@@ -2415,9 +2415,21 @@ def load_vlm_mtp_model(
     tokenizer = TokenizerWrapper(raw_tokenizer, eos_token_ids=eos_ids)
 
     materialize_module_arrays(model, drafter)
-    _wire_big_model(model)
+    _wire_target(model, gguf_path)
 
     return model, drafter, config, tokenizer, processor
+
+
+def _wire_target(model, gguf_path: str) -> None:
+    """The sticky wire of an MTP target (``_wire_big_model``), after the
+    install of tables that alone bring its trunk under the budget
+    (``install_unflagged_tables``): they serve from the file, so the wire
+    never takes them."""
+    from gmlx.stream.expert_streaming import install_unflagged_tables
+
+    install_unflagged_tables(getattr(model, "language_model", model),
+                             gguf_path)
+    _wire_big_model(model)
 
 
 def _wire_big_model(model) -> None:

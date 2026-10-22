@@ -17,6 +17,7 @@ external drive slows decoding in proportion to its latency.
 
 - [Check whether a model fits](#check-whether-a-model-fits)
 - [Run a streamed model](#run-a-streamed-model)
+- [When a MoE streams its experts](#when-a-moe-streams-its-experts)
 - [When a model cannot stream](#when-a-model-cannot-stream)
 - [The lossless settings](#the-lossless-settings)
 - [The lossy settings](#the-lossy-settings)
@@ -40,7 +41,7 @@ a streaming plan for this Mac. This plan is for Kimi-K3 UD-Q2_K_XL, an
     => streams with --stream-experts (server: stream: experts)
 ```
 
-The last line is the verdict:
+A verdict is a line that starts with `=>`. The plan's verdict is one of these:
 
 | Verdict | What to do |
 |---------|------------|
@@ -48,14 +49,24 @@ The last line is the verdict:
 | `=> streams, but no decode arena (...); expect slow decode` | Runs, slowly. [When a model cannot stream](#when-a-model-cannot-stream) lists ways to free memory for the arena. |
 | `=> cannot stream: every-token weights ... + KV room ... exceed the ... ceiling by ...` | Pick another quant, as [When a model cannot stream](#when-a-model-cannot-stream) describes. |
 | `=> the whole file fits in RAM; streaming is optional` | Run it without `--stream-experts`. |
-| `=> loads with its experts in memory, with or without --stream-experts` | Run it. Its lookup tables are read from the file, and the line above gives their size. |
 | `=> loads with its experts in memory; --stream-experts streams them` | Run it without `--stream-experts`. Its lookup tables are read from the file, and the line above gives their size. |
+
+When a load without `--stream-experts` could keep the experts in memory,
+the last line says what it does with the memory free now:
+
+| Line | What a load does |
+|------|------------------|
+| `=> with the memory free now, its experts stay in memory` | Keeps the experts in memory. |
+| `=> with the memory free now, auto MTP is off: ...` | Keeps the experts in memory and decodes without the MTP drafter. |
+| `=> the experts stream because ...` | Streams the experts. [When a MoE streams its experts](#when-a-moe-streams-its-experts) gives the ways to keep them in memory. |
 
 `run`, `chat` and `serve` do not check the plan. They try to load a model
 that cannot stream, so run `validate` first. A dense model larger than RAM
 has no experts to stream and needs a smaller quant.
 
-`gmlx validate --json` gives the same numbers under `stream`, and
+`gmlx validate --json` gives the same numbers under `stream`. There,
+`experts_in_memory_now` is false when the experts would stream, and
+`auto_mtp_off_now` is true when the load would leave out its MTP drafter.
 `gmlx doctor` names any `stream: experts` entry in your configuration file
 that cannot stream.
 
@@ -82,21 +93,71 @@ end of a run, gmlx prints how often a token found its experts there, on a
 `[stream] decode feeder arena hit rate:` line. `run` and `chat` print it
 with `-v`, and the server always logs it.
 
-`--stream-experts` and `stream: experts` stream the experts of a model
-that fits in memory, and its lookup tables, such as a per-layer embedding
-table, stream with them. A model that fits decodes faster without the
-flag. On such a model, the decode arena holds at most half of the experts,
-so the rest stay on disk. A model larger than 90% of the GPU working set
-has to stream, and there a large lookup table streams first. When the
-table alone brings the model under that budget, the experts stay in
-memory. DeepSeek-V4.1-Flash, which reads its engram tables ahead of its
-layers, loads that way without the flag too, with the tables read from
-the file, so a folder scan leaves its entry without `stream: experts`.
+`--stream-experts` and `stream: experts` always stream the experts, and
+a lookup table, such as a per-layer embedding table, streams with them. On
+a model that fits in memory, the decode arena holds at most half of the
+experts and the rest stay on disk, so such a model decodes faster without
+the flag.
 
 | Placement | What stays on the GPU | Use it for |
 |-----------|-----------------------|------------|
 | `--stream-experts`, `stream: experts` | Attention, routers, shared experts and the KV cache | Most cases, including long contexts, chat and a server with other models |
 | `--stream-cpu`, `stream: cpu` | Nothing. The whole model runs on the CPU from the page cache. | A model on its own server. The decode feeder and its settings do not apply. |
+
+## When a MoE streams its experts
+
+A MoE model streams its experts in three cases:
+
+- `--stream-experts` or `stream: experts` asks for it.
+- The model is larger than its memory budget, 90% of the GPU working set.
+  On a Mac with 16 GB the budget is 10.3 GB, so gpt-oss-20b, whose weights
+  take 12.1 GB, streams its experts without the flag.
+- The experts fit the budget but not the memory free at load, because
+  other apps hold it.
+
+In the last two cases, `run` and `chat` print why:
+
+```text
+[stream] the experts stream because the model is over its memory budget: holding them takes 12.1 GB, past the 10.3 GB budget. GMLX_OVERCOMMIT=1 keeps them in memory.
+```
+
+A model whose lookup tables alone bring it under the budget, such as
+Qwen3.8-Flash-Next UD-Q4_K_XL on a Mac with 128 GB, reads those tables from
+the file and keeps its experts in memory without the flag, and a folder
+scan leaves its entry without `stream: experts`. When the memory free at
+load does not hold those experts, they stream, and `serve` logs why. An
+entry that an older scan marked `stream: experts` streams them until
+`gmlx sync-models` drops the key, and `serve` warns about it at its start.
+
+To see which case applies before a load, and to keep the experts in memory
+anyway:
+
+```sh
+gmlx validate model.gguf
+GMLX_OVERCOMMIT=1 gmlx run model.gguf
+```
+
+Each way to keep the experts in memory has a cost:
+
+| Way | What it costs |
+|-----|---------------|
+| Quit other apps, then load again | Nothing. It does not help a model over its budget. |
+| `GMLX_OVERCOMMIT=1` | The Mac may swap, and a 16 GB Mac can stop responding. The `cannot fit:` check of `run` and `chat` then judges against RAM. |
+| Raise the GPU limit, as [The GPU memory limit](memory.md#the-gpu-memory-limit) describes | Less memory for macOS and other apps. It raises the budget, not the memory free now. |
+
+Under `GMLX_OVERCOMMIT=1`, a load that needs more than the Mac's RAM
+still streams or is refused: a MoE streams its experts, and `run`, `chat`
+and the upsampler of `image generate` refuse another model with
+`cannot fit:`. Experts beside a per-layer table, as on
+Qwen3.8-Flash-Next, also stream if memory runs out while they wire.
+
+When the experts fit in memory but the MTP drafter that `run` and `chat`
+turn on by themselves does not fit beside them, the load keeps the experts
+and decodes without the drafter:
+
+```text
+[mtp] auto MTP is off: the experts stay in memory, and the 2.8 GB MTP drafter does not fit beside them. --speculative streams the experts to keep it.
+```
 
 ## When a model cannot stream
 

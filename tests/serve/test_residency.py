@@ -415,11 +415,11 @@ def test_streaming_build_lowers_the_wired_limit_and_credits_the_walk(monkeypatch
 
 
 # DeepSeek-V4.1-Flash 1017 under stream: experts. On a 256 GB Studio an
-# MXFP8 engram table (202.8 GB) is past the 173.2 GB buffer ceiling and
-# the build streams the table alone; on this 128 GB M5 Max a Q5_K table
-# (135.2 GB) is past 86.6 GB and the experts stream beside it.
+# MXFP8 engram table (202.8 GB) is past the 173.2 GB buffer ceiling; on
+# a 128 GB M5 Max a Q5_K table (135.2 GB) is past 86.6 GB. On both,
+# the experts stream beside the table.
 @pytest.mark.parametrize("table, max_buffer, budget, credit", [
-    (202.8e9, 173.2e9, 185.6e9, 0.0),
+    (202.8e9, 173.2e9, 185.6e9, 156.9e9),
     (135.2e9, 86.6e9, 108.0e9, 156.9e9),
 ])
 def test_a_build_credits_no_table_it_reads_from_the_file(
@@ -1133,10 +1133,11 @@ def test_streaming_entry_is_priced_at_every_token_plus_arena(monkeypatch):
 
 
 def _table_only_header(monkeypatch, budget=130 * GB):
-    """A header the install's ladder sends table-only: 150 GB of text
-    tensors over a 130 GB budget, a 30 GB table that alone brings it
-    under, 100 GB of routed experts. Under a 110 GB budget it composes.
-    No decode arena or prefill ring is priced."""
+    """A qwen4exp header whose plain build the install's ladder sends
+    table-only: 150 GB of text tensors over a 130 GB budget, a 30 GB
+    table that alone brings it under, 100 GB of routed experts. Under a
+    110 GB budget it composes, as a stream build always does. No decode
+    arena or prefill ring is priced."""
     import gmlx.device as dev
     import gmlx.load.discovery as disc
     import gmlx.serve.capacity as cap
@@ -1145,6 +1146,7 @@ def _table_only_header(monkeypatch, budget=130 * GB):
 
     monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: 100 * GB)
     monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: 30 * GB)
+    monkeypatch.setattr(cap, "_table_shards", lambda p: ([p], "qwen4exp"))
     monkeypatch.setattr(disc, "text_tensor_bytes", lambda p: 150 * GB)
     monkeypatch.setattr(dev, "stream_budget_bytes", lambda: budget)
     monkeypatch.setattr(ts, "table_streaming_active",
@@ -1189,15 +1191,16 @@ def _table_only_pool(monkeypatch, streamed_model, evict=False):
     return pool, tables, credits, asked
 
 
-def test_a_table_only_stream_build_prices_the_resident_experts(monkeypatch):
+def test_a_plain_build_whose_table_brings_it_under_prices_the_resident_experts(
+        monkeypatch):
     """Over the budget, a table that alone brings the model under it
     streams and the experts stay resident: admission, the entry, the boot
     table and the build credit discount the table alone."""
     _table_only_header(monkeypatch)
     model = SimpleNamespace(_kq_streaming=False, tables=True)
     pool, tables, credits, asked = _table_only_pool(monkeypatch, model)
-    entry = pool.acquire("a", None, "auto",
-                         build_spec=SimpleNamespace(stream="experts"))
+    entry = pool.acquire("a.gguf", None, "auto",
+                         build_spec=SimpleNamespace(stream=None))
     pool.release(entry)
     assert asked == [120 * GB]                  # no arena or ring either
     assert entry.footprint == 120 * GB
@@ -1205,17 +1208,31 @@ def test_a_table_only_stream_build_prices_the_resident_experts(monkeypatch):
     assert [c[1] for c in credits[0].values()] == [30 * GB]
 
 
-def test_a_stream_build_reprices_what_the_install_streamed(monkeypatch, caplog):
+def test_a_plain_build_reprices_experts_that_stream_for_want_of_memory(
+        monkeypatch, caplog):
     _table_only_header(monkeypatch)
     model = SimpleNamespace(_kq_streaming=True, tables=True)   # it composed
     pool, tables, credits, asked = _table_only_pool(monkeypatch, model)
     with caplog.at_level("WARNING", logger="gmlx.serve.residency"):
-        entry = pool.acquire("a", None, "auto",
-                             build_spec=SimpleNamespace(stream="experts"))
+        entry = pool.acquire("a.gguf", None, "auto",
+                             build_spec=SimpleNamespace(stream=None))
     pool.release(entry)
     assert entry.footprint == 20 * GB
     assert tables == [120 * GB, 20 * GB]
     assert "re-pricing" in caplog.text
+
+
+def test_a_stream_build_streams_the_experts_beside_the_table(monkeypatch):
+    _table_only_header(monkeypatch)
+    model = SimpleNamespace(_kq_streaming=True, tables=True)
+    pool, tables, credits, asked = _table_only_pool(monkeypatch, model)
+    entry = pool.acquire("a.gguf", None, "auto",
+                         build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert asked == [20 * GB]
+    assert entry.footprint == 20 * GB
+    assert tables == [20 * GB]
+    assert [c[1] for c in credits[0].values()] == [130 * GB]
 
 
 def test_a_model_env_window_steers_the_predicted_stream(monkeypatch):
@@ -1225,9 +1242,11 @@ def test_a_model_env_window_steers_the_predicted_stream(monkeypatch):
     import gmlx.serve.capacity as cap
 
     _table_only_header(monkeypatch)
-    assert cap.predicted_stream_bytes("a") == (30 * GB, 0)
+    assert cap.predicted_stream_bytes("a") == (30 * GB, 100 * GB)
     off = {"GMLX_STREAM_PLE": "0"}
     assert cap.predicted_stream_bytes("a", off) == (0, 100 * GB)
+    assert cap.gathered_table_bytes("a.gguf") == 30 * GB
+    assert cap.gathered_table_bytes("a.gguf", env=off) == 0
     model = SimpleNamespace(_kq_streaming=True, tables=False)
     pool, tables, credits, asked = _table_only_pool(monkeypatch, model)
     entry = pool.acquire("a", None, "auto", env=off,
@@ -1245,16 +1264,17 @@ def test_a_model_env_window_steers_the_predicted_stream(monkeypatch):
 
 
 def _repriced_up(monkeypatch, busy):
-    """Predicted compose at 20 GB resident, installed table-only at 120 GB,
-    in a 200 GB pool beside a 100 GB resident that fit the prediction."""
+    """Predicted compose at 20 GB resident, installed with the experts
+    streamed and the table in memory at 50 GB, in a 200 GB pool beside a
+    160 GB resident that fit the prediction."""
     from gmlx.serve.residency import _Entry
 
     _table_only_header(monkeypatch, budget=110 * GB)
-    model = SimpleNamespace(_kq_streaming=False, tables=True)
+    model = SimpleNamespace(_kq_streaming=True, tables=False)
     pool, tables, _, _ = _table_only_pool(monkeypatch, model, evict=True)
     key = ("b", None, "auto")
     pool._entries[key] = _Entry(cache_key=key, model_path="b",
-                                footprint=100 * GB, busy=busy)
+                                footprint=160 * GB, busy=busy)
     torn = []
     monkeypatch.setattr(pool, "_teardown",
                         lambda e, released=None: torn.append(e.model_path))
@@ -1266,8 +1286,8 @@ def test_a_build_repriced_up_evicts_an_idle_model_for_room(monkeypatch):
     entry = pool.acquire("a", None, "auto",
                          build_spec=SimpleNamespace(stream="experts"))
     pool.release(entry)
-    assert tables == [20 * GB, 120 * GB]
-    assert entry.footprint == 120 * GB
+    assert tables == [20 * GB, 50 * GB]
+    assert entry.footprint == 50 * GB
     assert torn == ["b"]
     assert list(pool._entries) == [("a", None, "auto")]
 
@@ -1294,10 +1314,10 @@ def test_a_build_repriced_up_releases_an_evicted_image_off_the_lock(
     from gmlx.serve.residency import IMAGE_KIND, _Entry
 
     _table_only_header(monkeypatch, budget=110 * GB)
-    model = SimpleNamespace(_kq_streaming=False, tables=True)
+    model = SimpleNamespace(_kq_streaming=True, tables=False)
     pool, _, _, _ = _table_only_pool(monkeypatch, model, evict=True)
     key = ("img", None, IMAGE_KIND)
-    image = _Entry(cache_key=key, model_path="img", footprint=100 * GB,
+    image = _Entry(cache_key=key, model_path="img", footprint=160 * GB,
                    busy=1, kind=IMAGE_KIND, pipeline="P")
     pool._entries[key] = image
     stock_get = pool._stock_get
@@ -1373,12 +1393,12 @@ def test_a_build_takes_the_image_worker_to_evict_an_image_gone_idle(
         released.append((list(box), free or held))
 
     pool._image_fns = (None, None, release_on_worker)
-    entry = pool.acquire("a", None, "auto",
-                         build_spec=SimpleNamespace(stream="experts"))
+    entry = pool.acquire("a.gguf", None, "auto",
+                         build_spec=SimpleNamespace(stream=None))
     pool.release(entry)
     assert released == [(["P"], True)]
     assert forced == [False, True]
-    assert list(pool._entries) == [("a", None, "auto")]
+    assert list(pool._entries) == [("a.gguf", None, "auto")]
 
 
 def _image_gone_idle(monkeypatch, pool):

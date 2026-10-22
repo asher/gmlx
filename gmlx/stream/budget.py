@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from gmlx.device import metal_value
 from gmlx.envflags import env_bool, env_int
@@ -88,6 +88,23 @@ def reclaimable_ram_bytes() -> int | None:
     if v is not None:
         return int(v)
     return _available_ram_bytes()
+
+
+def live_reclaimable_ram_bytes() -> int | None:
+    """``reclaimable_ram_bytes`` read at the moment of the call
+    (``kernel_vm.live_reclaimable_bytes``), for the resident wire's check
+    and its chunk guard: the counters under ``reclaimable_ram_bytes``
+    can be a second old, longer than a wire takes. That reader when the
+    live one fails."""
+    try:
+        from gmlx.serve.kernel_vm import live_reclaimable_bytes
+
+        v = live_reclaimable_bytes()
+    except Exception:
+        v = None
+    if v is not None:
+        return int(v)
+    return reclaimable_ram_bytes()
 
 
 def kernel_floor_bytes() -> float:
@@ -299,18 +316,20 @@ def pool_bytes(activation: int, fallback: int = _UNPRICED_POOL_BYTES) -> int:
 
 
 def price_room(costs, trained_ctx, ws: float, transient: float,
-               activation: int = 0) -> KvRoom:
+               activation: int = 0, depth: int | None = None) -> KvRoom:
     """The KV room from priced per-layer costs, the prefill transients
     (the score cap, one chunk's ``activation`` bytes and the buffer pool
     that keeps them) and the admission reserve, priced from the same
     costs (``memory.priced_admit_reserve_bytes``). A flat legacy reserve
     when ``costs`` is None or ``GMLX_DECODE_KV_RESERVE_GB`` is set; the
-    pool then fills the flat room."""
+    pool then fills the flat room. ``depth`` prices that many tokens in
+    place of ``GMLX_STREAM_KV_CTX``."""
     from gmlx.serve.decode_batch import decode_batch
     from gmlx.serve.mem_preflight import prompt_kv_bytes
     from gmlx.serve.memory import priced_admit_reserve_bytes
 
-    depth = max(1, env_int("GMLX_STREAM_KV_CTX", _DEFAULT_CTX))
+    depth = max(1, int(depth) if depth else env_int(
+        "GMLX_STREAM_KV_CTX", _DEFAULT_CTX))
     width = max(1, env_int("GMLX_STREAM_KV_WIDTH", 1))
     legacy = legacy_room_bytes()
     flat = KvRoom(legacy, depth, width, 0, 0, 0, priced=False,
@@ -332,12 +351,14 @@ def price_room(costs, trained_ctx, ws: float, transient: float,
 
 
 def kv_room_bytes(gguf_path: str | None, env: dict | None = None,
-                  step: int | None = None) -> KvRoom:
+                  step: int | None = None,
+                  depth: int | None = None) -> KvRoom:
     """The KV room to leave outside the arena, its prefill chunk at the
-    requested ``step``. A flat legacy reserve when the header cannot be
-    priced or ``GMLX_DECODE_KV_RESERVE_GB`` is set."""
+    requested ``step`` and its KV at ``depth`` tokens (None:
+    ``GMLX_STREAM_KV_CTX``). A flat legacy reserve when the header cannot
+    be priced or ``GMLX_DECODE_KV_RESERVE_GB`` is set."""
     if os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "") or not gguf_path:
-        return price_room(None, None, 0, 0)
+        return price_room(None, None, 0, 0, depth=depth)
     try:
         from gmlx.gen.prefill_decay import _cap_bytes
         from gmlx.serve.capacity import boot_costs, working_set_bytes
@@ -345,12 +366,13 @@ def kv_room_bytes(gguf_path: str | None, env: dict | None = None,
         priced = boot_costs(gguf_path, env)
         ws = working_set_bytes()
         if priced is None or not ws:
-            return price_room(None, None, 0, 0)
+            return price_room(None, None, 0, 0, depth=depth)
         cfg, costs, _ = priced
         return price_room(costs, cfg.get("max_position_embeddings"), ws,
-                          _cap_bytes(), prefill_activation_bytes(cfg, step))
+                          _cap_bytes(), prefill_activation_bytes(cfg, step),
+                          depth=depth)
     except Exception:
-        return price_room(None, None, 0, 0)
+        return price_room(None, None, 0, 0, depth=depth)
 
 
 def _available_ram_bytes(include_inactive: bool = True) -> int | None:
@@ -554,3 +576,258 @@ def _prefill_ring_reason(offsets, left: int | None) -> str | None:
     return (f"ring {n} x {ring / n / 1e9:.1f} GB exceeds the "
             f"{left / 1e9:.1f} GB left under the memory ceiling after the "
             "every-token weights and the KV room")
+
+
+def keep_bytes(ram: int | None, room_bytes: int, host_bytes: int) -> int:
+    """RAM a resident wire leaves free beside it: the host floor, the
+    host overhead and the KV room. What other live installs hold wired
+    is out of reclaimable RAM already, so the keep does not count it."""
+    return (_ram_floor_bytes(ram) + max(0, int(host_bytes))
+            + max(0, int(room_bytes)))
+
+
+# The most a resident wire check keeps beside the wire, as a share of
+# RAM. The host floor and the host overhead have fixed parts (4 GiB,
+# 2.5 GiB of page cache, 2 GiB for the process) sized for the arena on a
+# large box. Uncapped, they keep 8.9 GiB of a 7 GiB box and 9.5 GiB of a
+# 16 GiB one, so a MoE of half the RAM would always stream there.
+_WIRE_KEEP_RAM_SHARE = 1 / 5
+
+
+def wire_keep_bytes(ram: int | None, room_bytes: int,
+                    host_bytes: int) -> tuple[int, bool]:
+    """``(keep, capped)``: ``keep_bytes`` for a resident wire check, at
+    most a fifth of RAM. ``capped`` says the cap applied."""
+    keep = keep_bytes(ram, room_bytes, host_bytes)
+    if ram and keep > ram * _WIRE_KEEP_RAM_SHARE:
+        return int(ram * _WIRE_KEEP_RAM_SHARE), True
+    return keep, False
+
+
+# A resident wire no larger is judged on the budget only, whatever the
+# chunk size, so a small MoE loads on a box with little reclaimable
+# memory, such as a CI runner.
+WIRE_EXEMPT_BYTES = 2 << 30
+
+
+def wire_chunk_bytes() -> int:
+    """GMLX_WIRE_CHUNK_GB: the bytes a resident expert wire commits
+    between reclaimable-memory reads (default 2). The exemption from the
+    reclaimable check stays ``WIRE_EXEMPT_BYTES`` whatever it says."""
+    raw = os.environ.get("GMLX_WIRE_CHUNK_GB", "")
+    try:
+        gb = float(raw) if raw else 2.0
+    except ValueError:
+        gb = 2.0
+    if gb <= 0:
+        gb = 2.0
+    return max(1, int(gb * (1 << 30)))
+
+
+def overcommit() -> bool:
+    """GMLX_OVERCOMMIT=1: a resident wire that fits in RAM skips the
+    pre-load check, and each chunk keeps only the kernel floor beside
+    it."""
+    return os.environ.get("GMLX_OVERCOMMIT", "0") == "1"
+
+
+# The KV depth the resident wire check prices, set by a caller that
+# knows its context (``gmlx run``: prompt and max tokens); None prices
+# the serve context.
+_WIRE_DEPTH: int | None = None
+
+
+def set_wire_room_depth(tokens: int | None) -> None:
+    """Price the resident wire check's KV room at ``tokens`` (None: the
+    serve context) for the loads that follow."""
+    global _WIRE_DEPTH
+    _WIRE_DEPTH = int(tokens) if tokens and tokens > 0 else None
+
+
+def wire_room_depth() -> int | None:
+    return _WIRE_DEPTH
+
+
+def wire_room_label(depth: int | None) -> str:
+    """How the check priced its KV room, for the lines that cite it."""
+    return ("the run's prompt and max tokens" if depth
+            else "the serve context")
+
+
+def ram_bytes() -> int | None:
+    """Physical RAM: the Metal device's, else the OS page count."""
+    try:
+        return int(metal_value("memory_size"))
+    except Exception:
+        try:
+            return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        except (ValueError, OSError, AttributeError):
+            return None
+
+
+# The sentences a MoE load prints when its experts stream for want of
+# memory. Fixed text: the troubleshooting docs are filed under them.
+STREAM_FREE_NOW = ("the experts stream because they do not fit in the "
+                   "memory free now")
+STREAM_OVER_BUDGET = ("the experts stream because the model is over its "
+                      "memory budget")
+# What GMLX_OVERCOMMIT=1 does for a MoE's experts, in the lines that
+# offer it: a load that wires them in chunks beside a streamed table
+# (``expert_streaming._wire_resident_experts``) still stops the wire,
+# and any other load holds them.
+OVERCOMMIT_LEVER = ("GMLX_OVERCOMMIT=1 keeps them in memory unless the "
+                    "memory the kernel can reclaim runs out while they wire.")
+OVERCOMMIT_KEEPS = "GMLX_OVERCOMMIT=1 keeps them in memory."
+
+
+def _gb(n: float) -> str:
+    return f"{n / 1e9:.1f} GB"
+
+
+def _kept(room: KvRoom | None, depth: int | None, capped: bool) -> str:
+    """What the keep holds, for the lines that cite it."""
+    kv = "" if room is None else f" of {_gb(room.bytes)}"
+    if room is not None and room.priced:
+        kv += f" at {room.depth} tokens ({wire_room_label(depth)})"
+    cap = ", capped at a fifth of RAM" if capped else ""
+    return f"kept for the system, this process and the KV room{kv}{cap}"
+
+
+@dataclass(frozen=True)
+class WireCheck:
+    """A resident wire judged against live memory. ``reason`` names the
+    first leg it fails: ``budget`` (past the resident budget) or
+    ``reclaimable`` (reclaimable RAM less ``keep`` is short); empty when
+    it fits, the memory cannot be read, or GMLX_OVERCOMMIT=1 on a set
+    that fits in RAM. ``ram_bytes`` is physical RAM, None when unread.
+    ``dropped_bytes`` is an auto MTP drafter the load leaves out
+    (``check_wire_beside_drafter``): to keep the experts in memory when
+    it fits, else because they stream."""
+    wire_bytes: int
+    reclaimable_bytes: int | None
+    keep_bytes: int
+    budget_bytes: int | None
+    reason: str = ""
+    capped: bool = False
+    dropped_bytes: int = 0
+    ram_bytes: int | None = None
+
+    @property
+    def past_ram(self) -> bool:
+        """The set is larger than physical RAM: no lever keeps it."""
+        return self.ram_bytes is not None and self.wire_bytes > self.ram_bytes
+
+    @property
+    def fits(self) -> bool:
+        return not self.reason
+
+    @property
+    def mtp_off(self) -> bool:
+        return self.dropped_bytes > 0
+
+    def mtp_off_line(self) -> str:
+        """The line of a check that fits with auto MTP off."""
+        return (f"auto MTP is off: the experts stay in memory, and the "
+                f"{_gb(self.dropped_bytes)} MTP drafter does not fit beside "
+                "them. --speculative streams the experts to keep it.")
+
+    def line(self, room: KvRoom | None = None,
+             depth: int | None = None, *, chunked: bool = False) -> str:
+        """The stream line of a failed check, in GB: its fixed sentence,
+        the leg that failed, and the ways to keep the experts in memory.
+        ``room`` is the KV room the keep holds, priced at ``depth``
+        (``wire_room_label``) unless it is flat. ``chunked`` is a load
+        that wires the experts in chunks, which GMLX_OVERCOMMIT=1 still
+        stops when reclaimable memory runs out. A set larger than RAM
+        gets the reason and the numbers, with no lever."""
+        if self.past_ram:
+            lever = ""
+        else:
+            lever = " " + (OVERCOMMIT_LEVER if chunked else OVERCOMMIT_KEEPS)
+        if self.reason == "budget":
+            past = " and more than RAM" if self.past_ram else ""
+            return (f"{STREAM_OVER_BUDGET}: holding them takes "
+                    f"{_gb(self.wire_bytes)}, past the "
+                    f"{_gb(self.budget_bytes or 0)} budget{past}.{lever}")
+        tail = ("They are more than RAM." if self.past_ram
+                else "To keep them in memory, close other apps.")
+        return (f"{STREAM_FREE_NOW}: holding them takes "
+                f"{_gb(self.wire_bytes)}, against "
+                f"{_gb(self.reclaimable_bytes)} of reclaimable memory less "
+                f"{_gb(self.keep_bytes)} {_kept(room, depth, self.capped)}. "
+                f"{tail}{lever}")
+
+    def stop_line(self, *, wired: int, reclaimable: int, need: int,
+                  room: KvRoom | None = None,
+                  depth: int | None = None) -> str:
+        """The stream line of a chunked wire that stopped: reclaimable
+        memory fell under the ``need`` of the next chunk with ``wired``
+        bytes of it wired, and did not rise. Under GMLX_OVERCOMMIT=1
+        each chunk kept only the kernel floor."""
+        if overcommit():
+            beside = f"beside the {_gb(kernel_floor_bytes())} kernel floor"
+            lever = ""
+        else:
+            beside = (f"beside the {_gb(self.keep_bytes)} "
+                      f"{_kept(room, depth, self.capped)}")
+            lever = f" {OVERCOMMIT_LEVER}"
+        return (f"{STREAM_FREE_NOW}: holding them takes "
+                f"{_gb(self.wire_bytes)}, and after {_gb(wired)} of it "
+                f"wired, reclaimable memory stopped at {_gb(reclaimable)}, "
+                f"under the {_gb(need)} the next chunk needs {beside}. To "
+                f"keep them in memory, close other apps.{lever}")
+
+
+def check_resident_wire(wire_bytes: int, *, room_bytes: int,
+                        budget: int | None = None,
+                        host_bytes: int | None = None) -> WireCheck:
+    """Whether wiring ``wire_bytes`` resident leaves the box room: under
+    ``budget``, and under reclaimable RAM less the kept bytes
+    (``wire_keep_bytes``), read live as the wire's chunk guard reads it
+    (``live_reclaimable_ram_bytes``). A wired page leaves the file-backed
+    count whether or not it was cached, so the model's own cached pages
+    earn no credit. A wire of at most ``WIRE_EXEMPT_BYTES`` is judged on the
+    budget only. GMLX_OVERCOMMIT=1 or an unreadable box admits, except a
+    set larger than RAM, which fails on the budget leg."""
+    ram = ram_bytes()
+    host = host_overhead_bytes(ram) if host_bytes is None else host_bytes
+    keep, capped = wire_keep_bytes(ram, room_bytes, host)
+    w = max(0, int(wire_bytes))
+    rec = live_reclaimable_ram_bytes() if w > WIRE_EXEMPT_BYTES else None
+    reason = ""
+    if not overcommit():
+        if budget is not None and w > budget:
+            reason = "budget"
+        elif rec is not None and w > rec - keep:
+            reason = "reclaimable"
+    elif ram is not None and w > ram:
+        # Overcommit keeps no set larger than RAM: it streams.
+        reason = "budget"
+    return WireCheck(w, rec, keep, budget, reason, capped, ram_bytes=ram)
+
+
+def check_wire_beside_drafter(set_bytes: int, drafter_bytes: int, *,
+                              auto: bool, room_bytes: int,
+                              alone_room_bytes: int | None = None,
+                              kept_streamed: bool = False,
+                              budget: int | None = None) -> WireCheck:
+    """``check_resident_wire`` for a resident set that an MTP drafter of
+    ``drafter_bytes`` loads beside. An ``auto`` drafter (no flag asked
+    for it) that tips the set over is dropped: the check of the set
+    without it, at ``alone_room_bytes`` (the KV room of the load without
+    the drafter, else ``room_bytes``), with ``dropped_bytes`` set. When
+    the set fits alone, the load keeps its experts in memory and turns
+    auto MTP off. When it does not, the experts stream, and a streamed
+    load takes no auto drafter, unless it is ``kept_streamed`` (a VLM's
+    text-only MTP), which the check then counts, as a drafter a flag
+    asked for."""
+    check = check_resident_wire(set_bytes + drafter_bytes,
+                                room_bytes=room_bytes, budget=budget)
+    if check.fits or not (auto and drafter_bytes):
+        return check
+    alone = check_resident_wire(
+        set_bytes, budget=budget,
+        room_bytes=room_bytes if alone_room_bytes is None else alone_room_bytes)
+    if alone.fits or not kept_streamed:
+        return replace(alone, dropped_bytes=drafter_bytes)
+    return check

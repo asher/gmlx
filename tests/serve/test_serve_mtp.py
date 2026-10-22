@@ -813,7 +813,9 @@ def test_load_vlm_mtp_model_applies_chat_template(monkeypatch):
     )
     monkeypatch.setattr(
         mtp_load, "_load_gemma4_assistant_drafter", lambda *a, **k: "drafter")
-    monkeypatch.setattr(mtp_load, "_wire_big_model", lambda m: None)
+    wired = []
+    monkeypatch.setattr(mtp_load, "_wire_target",
+                        lambda m, path: wired.append(path))
 
     model, drafter, config, tokenizer, processor = mtp_load.load_vlm_mtp_model(
         "/m/t.gguf", "/m/mmproj.gguf",
@@ -822,3 +824,54 @@ def test_load_vlm_mtp_model_applies_chat_template(monkeypatch):
     )
     assert tok.chat_template == "{{ override }}"
     assert processor.chat_template == "{{ override }}"
+    assert wired == ["/m/t.gguf"]
+
+
+@pytest.mark.parametrize("tables", [0, 28_800_000_000])
+def test_an_mtp_target_serves_its_tables_from_the_file_before_its_wire(
+        monkeypatch, tables):
+    # Tables that alone bring the trunk under the budget: the install
+    # wraps them first, so the sticky wire never takes them.
+    import types
+
+    import gmlx.serve.capacity as cap
+    import gmlx.spec.mtp_load as mtp_load
+    import gmlx.stream.expert_streaming as es
+
+    seen = []
+    monkeypatch.setattr(cap, "gathered_table_bytes",
+                        lambda p, *a, **k: tables)
+    monkeypatch.setattr(es, "install_expert_streaming",
+                        lambda m, **kw: seen.append(("install", m)))
+    monkeypatch.setattr(mtp_load, "_wire_big_model",
+                        lambda m: seen.append(("wire", m)))
+    trunk = types.SimpleNamespace()
+    model = types.SimpleNamespace(language_model=trunk)
+    mtp_load._wire_target(model, "Qwen3.8-Flash-Next-UD-Q4_K_XL.gguf")
+    assert seen == ([("install", trunk)] if tables else []) + [("wire", model)]
+
+
+def test_the_mtp_loaders_wire_their_target_only_after_the_table_install():
+    # A sticky wire that skips _wire_target takes the table the load
+    # serves from the file: 111.3 GB in place of 82.5 GB on Flash-Next.
+    import ast
+    from pathlib import Path
+
+    import gmlx
+
+    calls = {"_wire_big_model": set(), "_wire_target": set()}
+    for f in Path(gmlx.__file__).parent.rglob("*.py"):
+        text = f.read_text()
+        if not any(name in text for name in calls):
+            continue
+        for fn in ast.walk(ast.parse(text)):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Call):
+                    name = getattr(node.func, "id", getattr(node.func, "attr", None))
+                    if name in calls:
+                        calls[name].add((f.name, fn.name))
+    assert calls["_wire_big_model"] == {("mtp_load.py", "_wire_target")}
+    assert calls["_wire_target"] == {("mtp_load.py", "load_mtp_model"),
+                                     ("mtp_load.py", "load_vlm_mtp_model")}

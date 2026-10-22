@@ -1131,13 +1131,30 @@ def text_tensor_bytes(path: str) -> int | None:
     return total or None
 
 
+def mtp_block_bytes(path: str) -> int:
+    """Bytes of the NextN/MTP blocks of the split set at ``path``, the
+    tensors ``text_tensor_bytes`` leaves out, which an MTP drafter built
+    from the model's own head loads. 0 when there are none or a shard
+    cannot be scanned."""
+    from .headerscan import scan_gguf
+    from .preflight import find_split_shards
+
+    try:
+        tensors = [t for shard in find_split_shards(path)
+                   for t in scan_gguf(shard).tensors]
+    except Exception:
+        return 0
+    mtp = mtp_blocks(tensors)
+    return sum(int(t.nbytes) for t in tensors if block_of(t.name) in mtp)
+
+
 def _over_budget(c: ClassifiedGguf) -> tuple[int, int] | None:
     """``(resident bytes, budget)`` when the model is over the stream
     budget, else None. The resident bytes are the text bytes less the
-    lookup tables a load reads from the file, on an arch that reads them
-    ahead of its layers (``deferred_table_bytes``): a table no array
-    holds, or one whose bytes alone bring the model under the budget, so
-    that model loads with its experts resident. The file size bounds the
+    lookup tables a load serves from the file (``deferred_table_bytes``):
+    tables whose bytes alone bring the model under the budget, so that
+    it loads with its experts resident, and on an arch that reads them
+    ahead of its layers, a table no array holds. The file size bounds the
     text bytes, so only a file over the budget pays for the tensor-table
     scan."""
     total, budget = _gguf_set_bytes(c.path), _stream_budget_bytes()

@@ -434,11 +434,14 @@ lists.
 ### Streaming flags
 
 These flags run a model bigger than memory, as
-[Models larger than memory](streaming.md) describes.
+[Models larger than memory](streaming.md) describes. Without them, `run`
+and `chat` stream the experts of a MoE that does not fit in memory, as
+[When a MoE streams its experts](streaming.md#when-a-moe-streams-its-experts)
+describes.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--stream-experts` | Off | Stream the routed experts and lookup tables from disk, even on a model that fits. Over the memory budget, a table streams first. Attention and KV stay on GPU. |
+| `--stream-experts` | Off | Stream the routed experts and lookup tables from disk, even on a model that fits. Attention and KV stay on GPU. |
 | `--stream-cpu` | Off | Run the whole model on the CPU device from the page cache. |
 | `--stream-fast-disk {auto,on,off}` | `auto` | Set the prefetch policy under `--stream-experts`. `auto` measures the drive at load. |
 | `--prefill-feeder`, `--no-prefill-feeder` | On | Stage expert prefill directly from the GGUF. |
@@ -692,7 +695,8 @@ are in [Environment variables](env-vars.md).
 `gmlx validate` reports from the header alone whether a GGUF will load. A
 remote file is range-read, so the check downloads a few megabytes. The
 report names the architecture, the quant codecs, the total size, whether it
-fits this Mac's RAM and, for a MoE model, the streaming plan.
+fits this Mac's RAM and, for a MoE model, the streaming plan and whether
+its experts stay in memory with the memory free now.
 
 ```sh
 gmlx validate ~/models/Qwen3.8-27B-UD-Q6_K.gguf
@@ -786,9 +790,12 @@ line for each companion it would add. `gmlx pull` prints the same hint
 for a companion it leaves out.
 
 A scan writes `stream: experts` for a MoE model whose weights are larger
-than 90% of the GPU working set, with a comment that says so. Each sync
-checks that model again and drops the key once the model fits, such as
-after you raise the GPU wired limit. A `stream` key you wrote stays.
+than 90% of the GPU working set, with a comment that says so. A model whose
+lookup tables alone bring it under is not marked, since it keeps its
+experts in memory without the key. Each sync checks a marked model again
+and drops the key once the model fits, such as after you raise the GPU
+wired limit, and `gmlx doctor` warns about a key that a sync would drop. A
+`stream` key you wrote stays.
 
 ## gmlx ps
 
@@ -1239,7 +1246,9 @@ disk space. Its `image` check reads the headers of each image model's DiT,
 text encoder, vision tower and VAE, and fails one whose parts are not of
 one family. Once `gmlx comfyui install` has run, its `comfyui` check reads
 each ComfyUI folder's link to the gmlx nodes and its version against the
-range the nodes were tested on. No check uses the network.
+range the nodes were tested on. Its `stream marks` check warns about a
+`stream: experts` key that a folder scan wrote for a model that now fits
+in memory, which `gmlx sync-models` drops. No check uses the network.
 
 ```sh
 gmlx doctor

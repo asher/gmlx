@@ -40,6 +40,11 @@ drafter to its entry.
 Speculation works with some other features and stays off with others:
 
 - `--stream-experts`: off by default, and `--speculative` turns it on.
+- A MoE whose experts stay in memory: on `run` and `chat`, off with an
+  `[mtp]` line when the drafter does not fit beside them. `--speculative`
+  streams the experts to keep it, as
+  [When a MoE streams its experts](streaming.md#when-a-moe-streams-its-experts)
+  describes.
 - `--stream-cpu`: `run` and `chat` refuse `--speculative`.
 - The [lossy MoE settings](streaming.md#the-lossy-settings): off, and
   `chat` refuses `--speculative`.

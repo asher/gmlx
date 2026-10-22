@@ -126,7 +126,8 @@ def is_gate(fixture_function) -> bool:
 def install() -> None:
     """Report the current machine from the lowest reads: MLX's
     ``device_info``, ``os.sysconf("SC_PHYS_PAGES")``,
-    ``gmlx.serve.kernel_vm.snapshot`` and the free-RAM reads under it.
+    ``gmlx.serve.kernel_vm.snapshot``, its live sysctl read
+    (``live_reclaimable_bytes``) and the free-RAM reads under it.
     Starts on ``default()``."""
     if os.environ.get(REAL_HOST_ENV, "") == "1" or _real:
         return
@@ -137,8 +138,9 @@ def install() -> None:
     use(*default())
     real_info, real_sysconf = mx.device_info, os.sysconf
     real_snapshot, real_selfcheck = kernel_vm.snapshot, kernel_vm.selfcheck
+    real_live = kernel_vm.live_reclaimable_bytes
     _real.update(device_info=real_info, sysconf=real_sysconf,
-                 snapshot=real_snapshot)
+                 snapshot=real_snapshot, live_reclaimable=real_live)
 
     # A test turns the counters off with kernel_vm._disabled. The reported
     # counters are consistent, so the sysctl cross-check passes; run
@@ -161,6 +163,19 @@ def install() -> None:
             kernel_vm._disabled = before
 
     kernel_vm.snapshot, kernel_vm.selfcheck = snapshot, selfcheck
+
+    # The sysctl counts of the same pages. The reported free count is
+    # Mach's, which holds the speculative pages, and the reported
+    # file-backed count leaves them out, so they count once.
+    def live_reclaimable_bytes():
+        if _current["real"]:
+            return real_live()
+        if kernel_vm._disabled is not None:
+            return None
+        vm = _current["vm"]
+        return int(vm["free"] + vm["purgeable"] + vm["filebacked"])
+
+    kernel_vm.live_reclaimable_bytes = live_reclaimable_bytes
 
     def device_info(*args, **kwargs):
         info = dict(real_info(*args, **kwargs))
@@ -199,7 +214,8 @@ def free_ram_bytes() -> int:
 def real(name: str):
     """The real read ``install`` replaced: ``apc_free_ram`` (the copied
     mlx-vlm apc's stock read), ``vm_stat_free_ram`` (gmlx's
-    /usr/bin/vm_stat read), ``snapshot`` (the mach counters) or ``sysconf``.
+    /usr/bin/vm_stat read), ``snapshot`` (the mach counters),
+    ``live_reclaimable`` (their sysctl read) or ``sysconf``.
     Without the simulation, the bound one."""
     if name in _real:
         return _real[name]
@@ -209,10 +225,11 @@ def real(name: str):
         from gmlx._vendor.mlx_vlm import apc
 
         return apc._free_ram_bytes
-    if name == "snapshot":
+    if name in ("snapshot", "live_reclaimable"):
         from gmlx.serve import kernel_vm
 
-        return kernel_vm.snapshot
+        return (kernel_vm.snapshot if name == "snapshot"
+                else kernel_vm.live_reclaimable_bytes)
     from gmlx.cache import apc_manager
 
     return apc_manager._vm_stat_free_ram_bytes

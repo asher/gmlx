@@ -1239,6 +1239,104 @@ def test_the_scaffold_marks_the_stream_key_it_writes():
     assert f"stream: experts  # {srv.discovery.STREAM_MARK_NOTE}" in text
 
 
+def test_init_keeps_a_moe_resident_that_its_table_brings_under(
+        monkeypatch, tmp_path, capsys):
+    """Flash-Next over the budget by its per-layer embedding table alone:
+    the table streams from the file and the experts stay in memory, so
+    init writes no stream key and pairs the NextN sidecar beside it, and
+    the entry speculates."""
+    from gmlx.config import load_config, resolve_model
+    from helpers import FLASH_NEXT_MTP, flash_next_under_its_table
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    flash_next_under_its_table(monkeypatch, lib)
+    out = tmp_path / "cfg.yaml"
+    assert srv._cmd_init(["--out", str(out), "--models-dir", str(lib)]) == 0
+    assert "over-RAM" not in capsys.readouterr().err
+    text = out.read_text()
+    assert "stream:" not in text
+    assert f"    draft_gguf: {FLASH_NEXT_MTP}\n" in text
+    cfg = load_config(str(out))
+    ((mid, m),) = cfg.models.items()
+    assert m.stream is None and m.draft_gguf == FLASH_NEXT_MTP
+    assert resolve_model(mid, cfg).speculative is True
+
+
+def test_sync_drops_the_mark_of_a_moe_that_its_table_brings_under(
+        monkeypatch, tmp_path, capsys):
+    """An entry an earlier scan marked because its table counted against
+    the budget: sync drops the key, and --add-companions pairs the NextN
+    sidecar into it in the same pass."""
+    from gmlx.config import load_config
+    from helpers import (FLASH_NEXT, FLASH_NEXT_MTP,
+                         flash_next_under_its_table)
+
+    note = srv.discovery.STREAM_MARK_NOTE
+    cfg_path, lib = _sync_config(
+        tmp_path, f"models:\n  flash-next:\n    path: {FLASH_NEXT}\n"
+        f"    stream: experts  # {note}\n")
+    flash_next_under_its_table(monkeypatch, lib)
+    assert srv._cmd_sync(["--config", str(cfg_path), "--add-companions",
+                          "--no-reload"]) == 0
+    out = capsys.readouterr().out
+    assert ("update:  flash-next  (stream: experts dropped, the model fits "
+            "the memory budget now)") in out
+    assert f"update:  flash-next  (draft_gguf: {FLASH_NEXT_MTP})" in out
+    m = load_config(str(cfg_path)).models["flash-next"]
+    assert m.stream is None and m.draft_gguf == FLASH_NEXT_MTP
+    assert cfg_path.read_text().endswith(
+        f"  flash-next:\n    path: {FLASH_NEXT}\n    draft_gguf: "
+        f"{FLASH_NEXT_MTP}  # {srv.discovery.COMPANION_MARK_NOTE}\n")
+
+
+@pytest.mark.parametrize("marked,whole", [(True, False), (False, False),
+                                          (True, True)])
+def test_the_start_warns_of_a_mark_the_model_fits_without(monkeypatch,
+                                                          tmp_path, capsys,
+                                                          marked, whole):
+    """An old discovery mark streams Flash-Next's experts on every start
+    until sync-models drops it: the start says so once, in the server log.
+    ``whole``: the config moved to a Mac the whole model fits. A key the
+    user wrote is theirs, and the start says nothing of it."""
+    import ast
+    import inspect
+    import re
+    import textwrap
+    from pathlib import Path
+
+    import gmlx.device as device
+    from gmlx.config import load_config
+    from helpers import FLASH_NEXT, flash_next_under_its_table
+
+    note = f"  # {srv.discovery.STREAM_MARK_NOTE}" if marked else ""
+    cfg_path, lib = _sync_config(
+        tmp_path, f"models:\n  flash-next:\n    path: {FLASH_NEXT}\n"
+        f"    stream: experts{note}\n")
+    table = flash_next_under_its_table(monkeypatch, lib)
+    if whole:
+        big = device.stream_budget_bytes() + table
+        monkeypatch.setattr(srv.discovery, "_stream_budget_bytes", lambda: big)
+        monkeypatch.setattr(device, "stream_budget_bytes", lambda: big)
+    srv._warn_stale_stream_marks(load_config(str(cfg_path)), str(cfg_path))
+    fits = ("fits in memory" if whole
+            else "fits with its table read from the file")
+    line = ("[server] warning: flash-next: a folder scan set stream: "
+            f"experts, and the model now {fits}, so its experts stream. Run "
+            "gmlx sync-models to keep them in memory.\n")
+    assert capsys.readouterr().err == (line if marked else "")
+    # A search for the line's fixed opening finds its troubleshooting entry.
+    page = Path(__file__).parents[2] / "docs" / "troubleshooting.md"
+    spans = [s for h in page.read_text().splitlines() if h.startswith("### ")
+             for s in re.findall(r"`([^`]+)`", h)]
+    assert any(line.split(": ", 2)[2].startswith(s) for s in spans)
+    # The start makes the call once; a reload does not.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(srv._serve)))
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and ast.unparse(n.func) == "_warn_stale_stream_marks"]
+    assert len(calls) == 1
+
+
 def test_sync_dry_run_keeps_a_drafter_pairing_unwritten(monkeypatch, tmp_path,
                                                         capsys):
     from gmlx.config import load_config

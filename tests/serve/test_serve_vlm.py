@@ -131,6 +131,7 @@ def spy_placement(monkeypatch):
         monkeypatch.setattr(module, name, _fake, raising=True)
 
     _spy("install_expert_streaming")
+    _spy("install_unflagged_tables")
     _spy("configure_stream_cpu")
     _spy("install_moe_experts_override")
     _spy("install_moe_expert_mass", moe_experts)
@@ -153,6 +154,31 @@ def test_vlm_stream_experts_places_on_the_text_tower(
                       "feeder_prefill": True, "feeder_decode": False,
                       "fast_disk": None}
     assert "configure_stream_cpu" not in spy_placement
+
+
+@pytest.mark.parametrize("mmproj", [None, "/m/mmproj.gguf"])
+def test_a_build_with_no_placement_serves_its_tables_from_the_file(
+        fake_load_vlm_model, spy_placement, monkeypatch, mmproj):
+    # Tables that alone bring the model under the budget, as residency
+    # priced the build: the text tower's own install serves them.
+    tokenizer = types.SimpleNamespace(eos_token_id=1)
+    raw = _FakeVLMModel()
+    monkeypatch.setattr(serving, "load_model",
+                        lambda *a, **k: (raw, {}, tokenizer))
+    monkeypatch.setattr(serving, "TextOnlyModel",
+                        lambda raw, config=None: types.SimpleNamespace(config={}))
+    monkeypatch.setattr(serving, "_build_detokenizer", lambda backend: object())
+    monkeypatch.setattr(serving, "StoppingCriteria",
+                        lambda eos, backend: object())
+    model, _proc, _config = serving.load_serveable_model(
+        "/m/llm.gguf", mmproj_path=mmproj, feeder_prefill=True,
+        feeder_decode=False)
+    target, args, kwargs = spy_placement["install_unflagged_tables"]
+    assert target is (model.language_model if mmproj else raw)
+    assert args == ("/m/llm.gguf",)
+    assert kwargs == {"feeder_prefill": True, "feeder_decode": False,
+                      "fast_disk": None}
+    assert "install_expert_streaming" not in spy_placement
 
 
 def test_stream_fast_disk_reaches_the_placement(

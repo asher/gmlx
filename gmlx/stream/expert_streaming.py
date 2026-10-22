@@ -140,10 +140,97 @@ def configure_stream_cpu(
     )
 
 
+def install_unflagged_tables(model, gguf_path: str | None, *,
+                             feeder_prefill: bool | None = None,
+                             feeder_decode: bool | None = None,
+                             fast_disk: str | None = None,
+                             prefill_step: int | None = None,
+                             stats_verbose: bool | None = None) -> bool:
+    """The install of a load with no stream placement whose tables alone
+    bring it under the budget, on an arch that gathers them per layer
+    (``capacity.gathered_table_bytes``). Its own ladder serves the tables
+    from the file on the CPU stream and keeps the experts in memory when
+    the memory free now holds them; else the experts stream, with the
+    stream line. Call it after the load, before any GPU work on the model
+    and before a sticky wire. True when it installed. False, with nothing
+    changed, on any other load or on a model installed already."""
+    if not gguf_path or hasattr(model, "_kq_streaming"):
+        return False
+    from gmlx.serve.capacity import gathered_table_bytes
+
+    if not gathered_table_bytes(gguf_path):
+        return False
+    install_expert_streaming(
+        model, gguf_path=gguf_path, feeder_prefill=feeder_prefill,
+        feeder_decode=feeder_decode, fast_disk=fast_disk,
+        prefill_step=prefill_step, stats_verbose=stats_verbose)
+    return True
+
+
+# The chunked wire's wait for reclaimable memory under a chunk's line:
+# a rise smaller than _WIRE_MIN_RISE does not count, the wait stops once
+# no rise has counted for _WIRE_STALL_S, and the waits of one wire add
+# up to at most _WIRE_WAIT_S.
+_WIRE_STALL_S = 1.0
+_WIRE_MIN_RISE = 256 << 20
+_WIRE_WAIT_S = 10.0
+
+
+class _ChunkGuard:
+    """Before each chunk of a resident wire: True once reclaimable RAM,
+    read live (``budget.live_reclaimable_ram_bytes``), covers ``keep``
+    plus the chunk. With the pre-load check's keep, that check runs
+    again before each chunk: each chunk takes its bytes out of
+    reclaimable RAM, so a wire the check passed goes through, unless
+    another process grows or the wire costs more than its estimate.
+    Under the line it waits while the reading rises, and stops on a
+    stall or once the wire has waited ``wait_s`` in all. ``last``,
+    ``line`` and ``pending`` keep the final reading, the line it was
+    judged on and the chunk's bytes."""
+
+    def __init__(self, keep: float, *, stall_s: float | None = None,
+                 wait_s: float | None = None,
+                 min_rise: int | None = None, step_s: float = 0.05):
+        self.keep = int(keep)
+        self.stall_s = _WIRE_STALL_S if stall_s is None else stall_s
+        self.wait_s = _WIRE_WAIT_S if wait_s is None else wait_s
+        self.min_rise = _WIRE_MIN_RISE if min_rise is None else min_rise
+        self.step_s = step_s
+        self.waited = 0.0
+        self.last: int | None = None
+        self.line = 0
+        self.pending = 0
+
+    def __call__(self, nbytes: int) -> bool:
+        from gmlx.stream import budget
+
+        self.pending = int(nbytes)
+        self.line = self.keep + self.pending
+        start = since = time.monotonic()
+        best = None
+        try:
+            while True:
+                self.last = budget.live_reclaimable_ram_bytes()
+                if self.last is None or self.last >= self.line:
+                    return True
+                now = time.monotonic()
+                if best is None or self.last >= best + self.min_rise:
+                    best, since = self.last, now
+                elif now - since >= self.stall_s:
+                    return False
+                if self.waited + now - start >= self.wait_s:
+                    return False
+                time.sleep(self.step_s)
+        finally:
+            self.waited += time.monotonic() - start
+
+
 def _install_gpu_residency(model, moe_modules, *,
                            skip_ids=frozenset(),
                            include_expert_stacks: bool = False,
-                           room: int | None = None) -> None:
+                           room: int | None = None,
+                           chunk_bytes: int | None = None,
+                           guard=None) -> bool:
     """Wire every non-expert weight buffer into the Metal residency set,
     so command buffers stop re-wiring the every-token weights' pages on
     every use (the
@@ -164,13 +251,19 @@ def _install_gpu_residency(model, moe_modules, *,
     arena is charged from its computed size, before the decode feeder
     exists, so a run that builds no feeder caps tighter than it needs to.
     That costs speed, never correctness, which is why this clamps instead
-    of raising."""
+    of raising.
+
+    ``chunk_bytes`` commits the set that many bytes at a time, each
+    commit once ``guard`` passes on its bytes, the first and the last
+    partial one too. A refusal stops the wire before that commit, leaves
+    every array it inserted in ``model._kq_resident_arrays`` and returns
+    False (the caller unwires them). True otherwise."""
     import mlx_kquant as kq
 
     if not getattr(kq, "residency_insert", None):
         print("[stream] gpu-resident weights unavailable "
               "(mlx-kquant lacks residency ops)")
-        return
+        return True
     skip = set(skip_ids)
     for mods in moe_modules.values():
         for m in mods:
@@ -180,6 +273,7 @@ def _install_gpu_residency(model, moe_modules, *,
                     skip.add(id(w))
     inserted = []
     nbytes = 0
+    pending = 0
     left_out = left_out_bytes = 0
     for _, a in tree_flatten(model.parameters()):
         if id(a) in skip:
@@ -194,7 +288,18 @@ def _install_gpu_residency(model, moe_modules, *,
         if kq.residency_insert(a):
             inserted.append(a)
             nbytes += a.nbytes
-    kq.residency_commit()
+            pending += a.nbytes
+        if chunk_bytes and pending >= chunk_bytes:
+            if guard is not None and not guard(pending):
+                model._kq_resident_arrays = inserted
+                return False
+            kq.residency_commit()
+            pending = 0
+    if guard is not None and pending and not guard(pending):
+        model._kq_resident_arrays = inserted
+        return False
+    if pending or not chunk_bytes:
+        kq.residency_commit()
     model._kq_resident_arrays = inserted
     n = len(inserted)
     print(f"[stream] gpu-resident weights: {n} buffers "
@@ -204,6 +309,62 @@ def _install_gpu_residency(model, moe_modules, *,
         print(f"[stream] gpu-resident weights: {left_out} buffers "
               f"({left_out_bytes / 1e9:.1f} GB) left out, since the working set "
               f"has {room / 1e9:.1f} GB free of it")
+    return True
+
+
+def _unwire(model) -> int:
+    """Take the arrays a stopped wire inserted back out of the residency
+    set; the uncommitted ones never wire. The kernel unwires the rest
+    lazily, and can keep part of them wired until the process exits.
+    Returns the bytes taken out."""
+    import mlx_kquant as kq
+
+    arrays = getattr(model, "_kq_resident_arrays", None) or []
+    for a in arrays:
+        kq.residency_erase(a)
+    if arrays:
+        kq.residency_commit()
+    model._kq_resident_arrays = []
+    return sum(a.nbytes for a in arrays)
+
+
+def _wire_resident_experts(model, gguf_path, wire_bytes: int, *,
+                           budget, prefill_step, skip_ids) -> bool:
+    """The table-only install's resident set (every-token weights and the
+    experts) judged against live memory, then wired in chunks, each once
+    reclaimable memory covers it beside the check's keep (``_ChunkGuard``;
+    the kernel floor under GMLX_OVERCOMMIT=1). False when it does not fit
+    or the wire stopped, with the line saying why; a stopped wire leaves
+    the residency set (``_unwire``). The install then streams the
+    experts."""
+    from gmlx.stream import budget as bmod
+
+    depth = bmod.wire_room_depth()
+    room = bmod.kv_room_bytes(gguf_path, step=prefill_step, depth=depth)
+    check = bmod.check_resident_wire(wire_bytes, room_bytes=room.bytes,
+                                     budget=budget)
+    if not check.fits:
+        loadlog.warn(f"[stream] {check.line(room, depth, chunked=True)}")
+        return False
+    if not env_bool("GMLX_GPU_RESIDENT", True):
+        return True
+    chunk = bmod.wire_chunk_bytes()
+    # The check's exemption, judged on the budget, has no guard.
+    guard = None
+    if wire_bytes > bmod.WIRE_EXEMPT_BYTES:
+        guard = _ChunkGuard(bmod.kernel_floor_bytes() if bmod.overcommit()
+                            else check.keep_bytes)
+    if (_install_gpu_residency(model, {}, skip_ids=skip_ids,
+                               include_expert_stacks=True, room=budget,
+                               chunk_bytes=chunk, guard=guard) is not False
+            or guard is None):
+        return True
+    # The chunk the guard refused was inserted, never committed.
+    wired = _unwire(model) - guard.pending
+    loadlog.warn("[stream] " + check.stop_line(
+        wired=wired, reclaimable=guard.last or 0, need=guard.line,
+        room=room, depth=depth))
+    return False
 
 
 def _physical_ram() -> int:
@@ -308,6 +469,7 @@ def install_expert_streaming(
     fast_disk: str | None = None,
     explicit: bool = False,
     prefill_step: int | None = None,
+    fallback: str = "",
 ):
     """Run routed-expert stacks (SwitchGLU) on the CPU stream.
 
@@ -322,12 +484,15 @@ def install_expert_streaming(
     for streaming-mode models - see ``gmlx.stream.prefetch``. Without it,
     over-budget prefill demand-faults expert bytes at random-read bandwidth.
 
-    ``explicit`` is ``--stream-experts`` or ``stream: experts``: a model
-    under the budget streams as with ``force_stream``, and one over it
-    takes the budget-keyed ladder (table first) as without the flag.
+    ``explicit`` is ``--stream-experts`` or ``stream: experts``: the
+    experts stream as with ``force_stream``, whatever the model's size.
 
     ``prefill_step`` is the requested prefill chunk width
     (``--prefill-step-size``), which the KV room prices.
+
+    ``fallback`` is the leg of the run's check before the load that
+    streamed the experts with no flag asked (``WireCheck.reason``:
+    ``budget`` or ``reclaimable``), so the lines name it, not a flag.
     """
     from gmlx.load.modules import (
         glu_unsorted_call,
@@ -347,9 +512,9 @@ def install_expert_streaming(
     # Engaged when the model is over the wired budget (it must stream) or
     # when streaming is forced: --stream-cpu passes force_stream, and
     # --stream-experts and `stream: experts` pass explicit, which forces it
-    # under the budget, so the flag streams a model that fits too. Without
-    # either (the distill teacher's auto path, a direct call), a model under
-    # budget routes every expert call to the GPU stream
+    # on every model. Without either (a load the header plan streams the
+    # tables of, the distill teacher's auto path, a direct call), a model
+    # under budget routes every expert call to the GPU stream
     # (GMLX_STREAM_GPU_TOKENS), the fast path in-RAM.
     params = getattr(model, "parameters", None)
     total_bytes = sum(a.nbytes for _, a in tree_flatten(params())) if params else 0
@@ -363,7 +528,7 @@ def install_expert_streaming(
     file_tables = file_table_bytes(model)
     ladder_bytes = total_bytes + file_tables
     over_budget = budget is not None and ladder_bytes > budget
-    if explicit and not over_budget:
+    if explicit:
         force_stream = True
 
     # Streamed lookup tables (docs/internals/streaming-measurements.md): archs with a
@@ -388,8 +553,9 @@ def install_expert_streaming(
     # over budget even post-table streams both (compose); --stream-cpu and
     # a forced stream always compose; GMLX_STREAM_PLE_COMPOSE=0 keeps the
     # table resident.
-    plan = stream_plan(ladder_bytes, table_bytes(model) + file_tables,
-                       budget, force_stream=force_stream)
+    tables = table_bytes(model) + file_tables
+    plan = stream_plan(ladder_bytes, tables, budget,
+                       force_stream=force_stream)
     compose = plan.tables and plan.experts
     table_only = plan.tables and not plan.experts
     if plan.table_kept and table_bytes(model):
@@ -399,6 +565,22 @@ def install_expert_streaming(
         )
     if plan.tables:
         table_offloaded, table_names = install_table_streaming(model)
+    # A table-only plan keeps the experts resident: judge that set against
+    # live memory and wire it now, before anything is built on the plan,
+    # so a set that does not fit streams the experts instead (compose).
+    early_wired = False
+    fell_back = fallback == "reclaimable"
+    if table_only:
+        from gmlx.stream.table_stream import streamed_table_array_ids
+
+        early_wired = _wire_resident_experts(
+            model, gguf_path, total_bytes - table_offloaded, budget=budget,
+            prefill_step=prefill_step,
+            skip_ids=frozenset(streamed_table_array_ids(model)))
+        if not early_wired:
+            table_only = False
+            compose = bool(plan.tables)
+            force_stream = fell_back = True
     # The weights' untracked registration before any deduct: the table and
     # expert credits both split total into tracked and untracked from it.
     # Read after the table deduct, a compose install sees the table as
@@ -1116,12 +1298,20 @@ def install_expert_streaming(
     # --stream-experts.
     base_dev = "CPU" if "cpu" in str(mx.default_device()).lower() else "GPU"
     if streaming:
-        head = (
-            f"model {total_bytes / 1e9:.0f} GB > ~{budget / 1e9:.0f} GB "
-            "wired budget"
-            if over_budget
-            else f"model {total_bytes / 1e9:.0f} GB, streaming forced"
-        )
+        size = f"model {total_bytes / 1e9:.0f} GB"
+        if fell_back:
+            head = f"{size}, its experts do not fit the memory free now"
+        elif fallback:
+            head = f"{size}, its experts do not fit the memory budget"
+        elif explicit and (budget is None or ladder_bytes - tables <= budget):
+            # Over the budget only by tables that a load without the flag
+            # reads from the file, or not over it at all.
+            head = (f"{size}, streaming forced by --stream-experts or "
+                    "stream: experts")
+        elif over_budget:
+            head = f"{size} > ~{budget / 1e9:.0f} GB wired budget"
+        else:
+            head = f"{size}, streaming forced"
         loadlog.info(
             f"[stream] streaming: {head} - {n_wrapped} MoE layers' experts "
             f"({offloaded / 1e9:.1f} GB) stay file-backed; rest of the model "
@@ -1148,7 +1338,10 @@ def install_expert_streaming(
             pinned_bytes=getattr(pin, "pinned_bytes", 0),
             streamable_bytes=streamed_table_bytes(model),
             cast_dead_bytes=cast_dead_bytes,
-            forced=explicit and not over_budget)
+            # A flag on a model that fits once its tables stream: an arena
+            # of every expert would be the resident load it asks to avoid.
+            forced=explicit and (budget is None
+                                 or ladder_bytes - tables <= budget))
     ring = 0
     ring_share = 0
     held = None
@@ -1346,7 +1539,8 @@ def install_expert_streaming(
                     " (--stream-fast-disk on overrides,"
                     " GMLX_DECODE_FAST_DISK_GBPS sets the bar)"
                 )
-    if (streaming or table_only) and env_bool("GMLX_GPU_RESIDENT", True):
+    if (streaming or table_only) and not early_wired and env_bool(
+            "GMLX_GPU_RESIDENT", True):
         tskip = frozenset()
         if table_offloaded:
             from gmlx.stream.table_stream import streamed_table_array_ids
@@ -1469,9 +1663,9 @@ def install_expert_streaming(
         # The context line printed above and the feeder lines cover the
         # normal story; what remains is the fallback mechanics for
         # whatever the feeders don't handle.
-        fallback = []
+        mechanics = []
         if dfeeder is None:
-            fallback.append(
+            mechanics.append(
                 "decode streams expert bytes from disk through the page "
                 "cache (disk-bound)"
                 if over_budget
@@ -1479,14 +1673,14 @@ def install_expert_streaming(
                 "CPU stream"
             )
         if feeder is None:
-            fallback.append(
+            mechanics.append(
                 "prefill uses sequential page-cache prefetch"
                 if prefetcher is not None
                 else "prefill demand-faults (no gguf_path)"
             )
-        if fallback:
-            loadlog.info(f"[stream] {'; '.join(fallback)}")
-        if not over_budget:
+        if mechanics:
+            loadlog.info(f"[stream] {'; '.join(mechanics)}")
+        if not (over_budget or fell_back or fallback):
             b = f"~{budget / 1e9:.0f} GB" if budget else "unknown"
             flag = ("--stream-cpu (stream: cpu)" if base_dev == "CPU"
                     else "--stream-experts (stream: experts)")
