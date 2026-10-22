@@ -1301,7 +1301,9 @@ def test_the_start_warns_of_a_mark_the_model_fits_without(monkeypatch,
     user wrote is theirs, and the start says nothing of it."""
     import ast
     import inspect
+    import re
     import textwrap
+    from pathlib import Path
 
     import gmlx.device as device
     from gmlx.config import load_config
@@ -1323,6 +1325,11 @@ def test_the_start_warns_of_a_mark_the_model_fits_without(monkeypatch,
             f"experts, and the model now {fits}, so its experts stream. Run "
             "gmlx sync-models to keep them in memory.\n")
     assert capsys.readouterr().err == (line if marked else "")
+    # A search for the line's fixed opening finds its troubleshooting entry.
+    page = Path(__file__).parents[2] / "docs" / "troubleshooting.md"
+    spans = [s for h in page.read_text().splitlines() if h.startswith("### ")
+             for s in re.findall(r"`([^`]+)`", h)]
+    assert any(line.split(": ", 2)[2].startswith(s) for s in spans)
     # The start makes the call once; a reload does not.
     tree = ast.parse(textwrap.dedent(inspect.getsource(srv._serve)))
     calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)

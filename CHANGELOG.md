@@ -21,12 +21,28 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the model and its hidden size.
 - `gmlx sync-models --add-companions` adds a paired `mmproj` or drafter to
   a model already in the config, so a companion downloaded later is picked up.
+- `gmlx validate` says whether a MoE's experts stay in memory with the memory
+  free now, and `--json` adds `experts_in_memory_now` and `auto_mtp_off_now`.
+- `gmlx doctor` and the start of `gmlx serve` warn about a `stream: experts`
+  key that a folder scan wrote for a model that now fits in memory.
 
 ### Changed
 
 - `gmlx sync-models` adds a drafter to a model already in the config only
   with `--add-companions`. Without it, a sync or pull names each drafter
   or `mmproj` it leaves out.
+- `--stream-experts` and `stream: experts` now always stream the experts, also
+  on a Qwen3.8-Flash-Next that fits its memory budget without its table.
+- Without a stream flag, a MoE over its memory budget only by its lookup table,
+  such as Qwen3.8-Flash-Next, reads the table from the file to stay under it.
+- A folder scan no longer marks such a model `stream: experts`, and it keeps its
+  drafter. An old mark now streams its experts: `gmlx sync-models` drops it.
+- `run` and `chat` stream a MoE's experts when the model is over its memory
+  budget or they do not fit the memory free at load, with a line that says why.
+- `run` and `chat` keep a MoE's experts in memory and turn auto MTP off when its
+  drafter does not fit beside them, with an `[mtp]` line.
+- With `GMLX_OVERCOMMIT=1`, `run`, `chat` and `image generate` load a model
+  past the GPU limit that fits in RAM. A MoE past RAM still streams.
 - With `--stream-experts`, decoding is faster: between prefills the expert
   arena uses the prefill ring's memory. `GMLX_RING_TIMESHARE=0` turns it off.
 - With `--stream-experts`, replies start sooner and their first tokens come
@@ -70,9 +86,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - With `--stream-experts`, the expert arena came out smaller than the one
   `gmlx validate` plans, by 5% of RAM or more, when the GPU limit set its size.
 - On a Mac where DeepSeek-V4.1-Flash fits without its engram table, a folder
-  scan and `stream: experts` streamed its experts; they now stay in memory.
+  scan marked it `stream: experts`. It now keeps its experts in memory.
 - On that Mac, `gmlx validate` said DeepSeek-V4.1-Flash streams its experts
   and is larger than RAM, and `gmlx doctor` warned about it.
+- Qwen3.8-Flash-Next with its table read from the file wired its experts even
+  when other apps held the memory, and could leave the Mac with none free.
 - `gmlx validate` overstated the weights and expert bytes of a GGUF with
   NextN layers, which only a drafter loads.
 - While `serve` loaded a DeepSeek-V4.1-Flash whose engram table is read from

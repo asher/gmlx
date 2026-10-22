@@ -197,6 +197,16 @@ def test_the_room_is_kept():
     assert _check(w, room=8 * GiB).reason == "reclaimable"
 
 
+def test_the_troubleshooting_page_is_filed_under_the_lines_a_load_prints():
+    # A search for the line a load printed finds its entry.
+    page = Path(__file__).parents[2] / "docs" / "troubleshooting.md"
+    heads = [h for h in page.read_text().splitlines() if h.startswith("### ")]
+    mtp = budget.WireCheck(1, None, 0, None, dropped_bytes=GiB).mtp_off_line()
+    for sentence in (budget.STREAM_FREE_NOW, budget.STREAM_OVER_BUDGET,
+                     mtp.split(", and the ")[0]):
+        assert any(f"`{sentence}`" in h for h in heads), sentence
+
+
 # --- the chunked wire -----------------------------------------------------
 
 

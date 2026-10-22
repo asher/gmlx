@@ -208,7 +208,7 @@ other layer adds its delta on stock ops.
 | `GMLX_STREAM_KV_WIDTH` | Concurrent streams the KV room is sized for. The default is `1`, and each extra stream takes its KV room out of the arena. |
 | `GMLX_STREAM_UNMAP_STACKS=0` | Keep the expert stacks' Metal buffers after the feeders take a layer, instead of dropping them. |
 | `GMLX_STREAM_PREFILL_TAIL_MERGE=0` | Keep the streamed prefill chunk exact, instead of folding a tail under an eighth of the chunk into the chunks before it. |
-| `GMLX_STREAM_PLE=0` | Disable the streamable lookup-table tier. `1` forces the tables to stream even when the model fits, as `--stream-cpu` does. |
+| `GMLX_STREAM_PLE=0` | Disable the streamable lookup-table tier. `1` forces the tables to stream even when the model fits, as `--stream-experts` and `--stream-cpu` do. |
 | `GMLX_TABLE_MAX_BUFFER` | Bytes a lookup table may hold in one GPU buffer. The default is the device limit, and a larger table is read row by row. |
 | `GMLX_TABLE_PREAD_WORKERS` | Reader threads for each file-backed lookup table. The default is `32`. |
 | `GMLX_DECODE_FAST_DISK` | The `stream_fast_disk` policy, `auto`, `on` or `off`, as `--stream-fast-disk` sets. |
