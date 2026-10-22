@@ -721,8 +721,9 @@ def _make_fused_kquant(base_cls, caps):
             return b32
 
         def _fused_h(self, x, idx, scores=None):
-            """The gate/up gather: ``[t, k, I]`` activated hidden (``k + 1``
-            slots per token when the shexp fold rides along with scores).
+            """The gate/up gather: ``[t, k, I]`` activated hidden (``k`` plus
+            the shared expert's slots when the shexp fold rides along with
+            scores).
             ``idx`` is ``(t, k)``."""
             t, k = idx.shape
             d_in = x.shape[-1]
@@ -771,7 +772,8 @@ def _make_fused_kquant(base_cls, caps):
                 sc = scores.reshape(t, k)
                 if not _mix_implicit:
                     sc = mx.concatenate(
-                        [sc, mx.ones((t, 1), dtype=sc.dtype)], axis=-1)
+                        [sc, mx.ones((t, h.shape[1] - k), dtype=sc.dtype)],
+                        axis=-1)
                 sd = se[2]
                 skw = ({"shexp_kquant_type": sd.kquant_type}
                        if sd.kquant_type != down.kquant_type else {})
@@ -1316,7 +1318,7 @@ def _install_kq_block_fusion(model, caps) -> int:
 
 def _shexp_fold_ok(sw, se, caps):
     """Whether ``se`` (an ungated gate/up/down shared expert) can ride
-    ``sw``'s fused SwitchGLU gathers as one extra slot with mix weight 1
+    ``sw``'s fused SwitchGLU gathers as extra slots with mix weight 1
     (moe_glu_gather_shexp_kq + gather_qmv_mix_kq): K-quant projections
     shape-matched to the expert stacks (same codec, or a q5_k/q6_k/q8_0
     upcast), SwitchGLU already swapped to the scores-taking fused class."""
@@ -1348,18 +1350,46 @@ def _shexp_fold_ok(sw, se, caps):
     # the GLU gather runs both shexp slots with one codec
     if se.gate_proj.kquant_type != se.up_proj.kquant_type:
         return False
+    # A shared expert k routed experts wide (Flint: 1024 next to 512) rides
+    # the gathers as k slots, where the kq build has those kernels.
+    k = se.gate_proj.weight.shape[0] // inter
+    if k < 1 or se.gate_proj.weight.shape[0] != k * inter:
+        return False
     for proj, stack in ((se.gate_proj, sw.gate_proj),
                         (se.up_proj, sw.up_proj),
                         (se.down_proj, sw.down_proj)):
         if not _kq_dense(proj, (stack.kquant_type,) + _KQ_SHEXP_UPCAST):
             return False
-        # shape-matched in each side's own codec wire bytes
-        if proj.weight.shape[0] != stack.weight.shape[1]:
+    # shape-matched in each side's own codec wire bytes
+    for proj, stack in ((se.gate_proj, sw.gate_proj),
+                        (se.up_proj, sw.up_proj)):
+        if proj.weight.shape[0] != k * stack.weight.shape[1]:
             return False
         if (_kq_wire_k(proj.weight, proj.kquant_type)
                 != _kq_wire_k(stack.weight, stack.kquant_type)):
             return False
-    return True
+    if se.down_proj.weight.shape[0] != sw.down_proj.weight.shape[1]:
+        return False
+    if _kq_wire_k(se.down_proj.weight, se.down_proj.kquant_type) != k * inter:
+        return False
+    return k == 1 or _shexp_multi_ok(caps, sw, se, k, inter)
+
+
+def _shexp_multi_ok(caps, sw, se, k, inter):
+    """Whether the kq build folds a shared expert ``k`` routed experts
+    wide: kernels for the codecs, and each slot on whole blocks of the
+    shared down codec. Builds whose probes take no slot count say no."""
+    kq = caps.kq
+    try:
+        return bool(
+            kq.shexp_glu_combo_has_kernel(
+                sw.gate_proj.kquant_type, se.gate_proj.kquant_type,
+                se.up_proj.kquant_type, shared_slots=k)
+            and kq.shexp_mix_combo_has_kernel(
+                sw.down_proj.kquant_type, se.down_proj.kquant_type,
+                shared_slots=k, slot_width=inter))
+    except (AttributeError, TypeError):
+        return False
 
 
 def _eligible_hyv3_shexp(m, caps):
