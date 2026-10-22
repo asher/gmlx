@@ -180,6 +180,11 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # depth-scaled residuals, and a sigmoid MoE with grouped selection after
     # three dense layers. Model class owned by gmlx (no mlx-lm class).
     "beam": "beam",
+    # RecursiveSI Flint: GQA with per-head QK-norm and attention sinks on
+    # every layer, NeoX RoPE on the sliding-window layers and NoPE on the
+    # full ones, and a sigmoid MoE with an ungated shared expert after two
+    # dense layers. Model class owned by gmlx (no mlx-lm class).
+    "flint": "flint",
     # Moonshot Kimi-K3 (2.8T-A50B): hybrid KDA (linear, per-channel decay) +
     # nope-only MLA layers from the per-layer head_count_kv schedule, latent
     # 896-expert sigmoid MoE behind down/up projections, situ activation,
@@ -2094,6 +2099,88 @@ def _synth_beam(meta, shapes, config: dict) -> None:
     config["norm_topk_prob"] = req(_read_bool, "expert_weights_norm")
     config["final_logit_softcapping"] = (
         _read_float(meta, f"{arch}.final_logit_softcapping") or 0.0)
+
+
+# flint (RecursiveSI Flint)
+
+def _synth_flint(meta, shapes, config: dict) -> None:
+    """Synthesize a flint config from a 'flint'-arch GGUF.
+
+    The universal fields cover hidden/layers/heads/kv/ffn/ctx/eps/rope_theta/
+    tie/vocab. This adds the per-layer sliding/full schedule, the leading
+    dense layers and the sigmoid MoE with its shared expert. llama.cpp's
+    flint graph rotates the layers that ``rope_pattern`` marks with the main
+    ``rope.freq_base``. The model class rotates the sliding layers, so the
+    two patterns must agree. A shared width of 0 means
+    ``n_ff_exp * n_shared``, and an absent weight scale means none.
+    """
+    arch = "flint"
+    n_layers = config["num_hidden_layers"]
+
+    def req(read, key):
+        return _require(read(meta, f"{arch}.{key}"), arch=arch,
+                        gguf_field=f"{arch}.{key}")
+
+    _require(config.get("rms_norm_eps"), arch=arch,
+             gguf_field=f"{arch}.attention.layer_norm_rms_epsilon")
+    head_dim = req(_read_int, "attention.key_length")
+    value_length = _read_int(meta, f"{arch}.attention.value_length")
+    if value_length is not None and value_length != head_dim:
+        raise NotImplementedError(
+            f"flint synth: value_length {value_length} differs from "
+            f"key_length {head_dim}; llama.cpp asserts they match.")
+    config["head_dim"] = head_dim
+
+    window = req(_read_int, "attention.sliding_window")
+    if window <= 0:
+        raise ValueError("flint synth: attention.sliding_window must be positive")
+    config["sliding_window"] = window
+    swa = req(_read_bool_array, "attention.sliding_window_pattern")
+    rope = req(_read_bool_array, "attention.rope_pattern")
+    for key, pattern in (("attention.sliding_window_pattern", swa),
+                         ("attention.rope_pattern", rope)):
+        if len(pattern) != n_layers:
+            raise ValueError(
+                f"flint synth: {arch}.{key} has {len(pattern)} entries for "
+                f"{n_layers} layers")
+    if list(swa) != list(rope):
+        raise NotImplementedError(
+            "flint synth: attention.rope_pattern differs from "
+            "attention.sliding_window_pattern; the model class rotates "
+            "exactly the sliding layers.")
+    config["layer_types"] = [
+        "sliding_attention" if v else "full_attention" for v in swa]
+    theta = req(_read_float, "rope.freq_base")
+    config["rope_theta"] = theta
+    config["rope_parameters"] = {"rope_theta": theta, "rope_type": "default"}
+
+    n_dense = req(_read_int, "leading_dense_block_count")
+    if n_dense > n_layers:
+        raise ValueError(
+            f"flint synth: leading_dense_block_count {n_dense} exceeds the "
+            f"{n_layers} layers")
+    config["first_k_dense_replace"] = n_dense
+
+    gating = _read_int(meta, f"{arch}.expert_gating_func")
+    if gating != 2:
+        raise NotImplementedError(
+            f"flint synth: {arch}.expert_gating_func {gating} is not 2 "
+            "(sigmoid).")
+    n_ff_exp = req(_first_or_scalar, "expert_feed_forward_length")
+    n_shared = req(_read_int, "expert_shared_count")
+    n_ff_shexp = _read_int(
+        meta, f"{arch}.expert_shared_feed_forward_length") or 0
+    if n_shared and not n_ff_shexp:
+        n_ff_shexp = n_ff_exp * n_shared
+    config["num_experts"] = req(_read_int, "expert_count")
+    config["num_experts_per_tok"] = req(_read_int, "expert_used_count")
+    config["moe_intermediate_size"] = n_ff_exp
+    config["shared_expert_intermediate_size"] = n_ff_shexp if n_shared else 0
+    config["routed_scaling_factor"] = _read_float(
+        meta, f"{arch}.expert_weights_scale") or 0.0
+    config["norm_topk_prob"] = req(_read_bool, "expert_weights_norm")
+    config["router_bias"] = _has_tensor(
+        shapes, f"blk.{n_dense}.exp_probs_b.bias")
 
 
 # granitehybrid (IBM Granite 4.x hybrid: H-Micro / H-Tiny / H-Small)
@@ -4148,6 +4235,7 @@ _SYNTH = {
     "muse-spark": _synth_muse_spark,
     "k2-horizon": _synth_k2_horizon,
     "beam": _synth_beam,
+    "flint": _synth_flint,
     "granitehybrid": _synth_granite_hybrid,
     "falcon-h1": _synth_falcon_h1,
     "qwen3next": _synth_qwen3next,

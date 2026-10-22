@@ -955,6 +955,11 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # near-tie-heavy, and llama.cpp routes fp32. The gate bias is F32 on the
     # wire. Kept in step with the model class's cast_predicate.
     "beam": (".mlp.gate.weight", ".e_score_correction_bias", ".gate_bias"),
+    # flint: sigmoid top-6-of-256 routing, near-tie-heavy, and llama.cpp
+    # routes fp32. The sinks cast with the weights: mx.fast SDPA takes them
+    # in the output dtype. Kept in step with the model class's
+    # cast_predicate.
+    "flint": (".mlp.gate.weight", ".e_score_correction_bias"),
     # nemotron_h: llama.cpp routes in fp32 (F32 wire router and selection
     # bias; Bolt picks top-9 of up to 496), and A_log feeds the fp32 scan.
     # Kept in step with the model class's cast_predicate.

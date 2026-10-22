@@ -47,6 +47,9 @@ OWNED_LM_MODELS = {
     "k2_horizon": "gmlx.models.k2_horizon.model",
     # llama.cpp LLM_ARCH_BEAM; neither mlx-lm nor transformers has a class.
     "beam": "gmlx.models.beam.model",
+    # llama.cpp LLM_ARCH_FLINT; the converter subclasses qwen2moe, whose
+    # class has none of the sinks, the NoPE layers or the sigmoid router.
+    "flint": "gmlx.models.flint.model",
     # mlx-lm nemotron_h, with per-layer MoE sizes (Nemotron-3.5-Bolt) and
     # llama.cpp's fp32 routing.
     "nemotron_h": "gmlx.models.nemotron_h.model",

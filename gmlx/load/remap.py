@@ -223,6 +223,10 @@ ARCH_ALIAS = {
     # canonical map homes attn_gate on qwen3.5's linear_attn and ffn_norm on
     # a pre-feedforward norm Beam names differently.
     "beam": "BEAM",
+    # RecursiveSI Flint (llama.cpp 'flint'): NeoX rope on the sliding layers,
+    # so Q/K pass through un-permuted. The FLINT block claims every tensor,
+    # including the per-head sinks, which no canonical enum carries.
+    "flint": "FLINT",
     # DiffusionGemma (llama.cpp 'diffusion-gemma'): an encoder-decoder block-
     # diffusion model on the Gemma-4 MoE backbone. The decoder backbone uses the
     # exact Gemma-4 GGUF tensor names, but the mlx-vlm Model nests them under
@@ -707,6 +711,58 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.layers.{bid}.mlp.switch_mlp.up_proj.weight", "passthrough"),
         (re.compile(r"^blk\.(\d+)\.ffn_down_exps\.weight$"),
          "model.layers.{bid}.mlp.switch_mlp.down_proj.weight", "passthrough"),
+    ],
+    "FLINT": [
+        # Every tensor is claimed here. attn_sinks is one logit per head and
+        # exp_probs_b the optional selection-only router bias. Layers before
+        # leading_dense_block_count carry the dense ffn_* tensors, the rest
+        # the router, the experts and the shared expert.
+        (re.compile(r"^token_embd\.weight$"),
+         "model.embed_tokens.weight", "passthrough"),
+        (re.compile(r"^output_norm\.weight$"),
+         "model.norm.weight", "passthrough"),
+        (re.compile(r"^output\.weight$"),
+         "lm_head.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_norm\.weight$"),
+         "model.layers.{bid}.input_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q\.weight$"),
+         "model.layers.{bid}.self_attn.q_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k\.weight$"),
+         "model.layers.{bid}.self_attn.k_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_v\.weight$"),
+         "model.layers.{bid}.self_attn.v_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_output\.weight$"),
+         "model.layers.{bid}.self_attn.o_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q_norm\.weight$"),
+         "model.layers.{bid}.self_attn.q_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k_norm\.weight$"),
+         "model.layers.{bid}.self_attn.k_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_sinks\.weight$"),
+         "model.layers.{bid}.self_attn.sinks", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_norm\.weight$"),
+         "model.layers.{bid}.post_attention_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate\.weight$"),
+         "model.layers.{bid}.mlp.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up\.weight$"),
+         "model.layers.{bid}.mlp.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down\.weight$"),
+         "model.layers.{bid}.mlp.down_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_inp\.weight$"),
+         "model.layers.{bid}.mlp.gate.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.exp_probs_b\.bias$"),
+         "model.layers.{bid}.mlp.gate.e_score_correction_bias", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.down_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_experts.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_experts.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_experts.down_proj.weight", "passthrough"),
     ],
     "ERNIE4_5_MOE": [
         # Baidu ERNIE-4.5-MoE: shared-expert fine-grained MoE with leading dense

@@ -165,6 +165,24 @@ _DEEPSEEK3_PATTERNS = (
     r"""| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+""",
 )
 
+# Flint word-split, verbatim from the HF tokenizer.json (llama.cpp's
+# LLAMA_VOCAB_PRE_TYPE_FLINT spells the same regexes with explicit-case
+# contractions). Three regexes in sequence, like deepseek-v3: digit runs of
+# up to 3, the CJK run clause, then an o200k-shaped split whose punctuation
+# clause is \p{P}\p{S}. The HF tokenizer has no normalizer.
+_FLINT_PATTERNS = (
+    r"\p{N}{1,3}",
+    "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+",
+    r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*"
+    r"[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|"
+    r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+"
+    r"[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|"
+    r" ?[\p{P}\p{S}]+[\r\n]*|"
+    r"\s*[\r\n]+|"
+    r"\s+(?!\S)|"
+    r"\s+",
+)
+
 # Pres whose split regex is not a digit-clause variant of the generic
 # pattern (llama.cpp PRE_TYPE_GPT4O members, plus MiniMax: llama.cpp's
 # PRE_TYPE_MINIMAX_M2 regex is the o200k pattern verbatim - MiniMax-M2 and
@@ -190,7 +208,14 @@ _PATTERN_BY_PRE = {
     # gluing Han runs to Latin words.
     "kimi-k2": KIMI_K2_PATTERN,
     "k2-horizon": K2_HORIZON_PATTERN,
+    "flint": _FLINT_PATTERNS,
 }
+
+# Pres that split raw codepoints: their reference tokenizers apply no
+# unicode normalization, and NFC would merge decomposed combining marks
+# (e + U+0301 -> e-acute) and shift the split boundaries. kimi-k2 is
+# tiktoken-family; flint's tokenizer.json has a null normalizer.
+_NO_NFC_PRES = frozenset({"kimi-k2", "flint"})
 
 
 def _bytelevel_split_patterns(pre_id: str) -> tuple[str, ...]:
@@ -457,7 +482,8 @@ def load_tokenizer_from_gguf(
 
     template_eos = _infer_turn_end_eos(fast, eos_id, tokens, token_types)
     meta_eos = _metadata_stop_ids(meta, len(tokens))
-    name_eos = _named_eog_ids(tokens, token_types)
+    name_eos = (_named_eog_ids(tokens, token_types)
+                + _pre_eog_ids(pre_id, tokens))
     all_eos = _drop_text_close_eog(_drop_message_end_eog(_dedup_ids(
         ([eos_id] if eos_id is not None else [])
         + template_eos + meta_eos + name_eos), tokens), tokens)
@@ -555,11 +581,7 @@ def _build_bytelevel_bpe(tokens: list[str], raw_merges: list[str],
         vocab=vocab, merges=merges,
         byte_fallback=False, fuse_unk=False,
         ignore_merges=(pre_id == "glm4")))
-    # tiktoken-family pres (kimi-k2) split raw codepoints - llama.cpp's
-    # hand-coded splitter and the HF reference apply no unicode
-    # normalization, and NFC here would merge decomposed combining marks
-    # (e + U+0301 -> e-acute) and shift the split boundaries.
-    if pre_id != "kimi-k2":
+    if pre_id not in _NO_NFC_PRES:
         tok.normalizer = normalizers.NFC()
     tok.pre_tokenizer = pre_tokenizers.Sequence([
         pre_tokenizers.Split(Regex(p), behavior="isolated", invert=False)
@@ -750,6 +772,26 @@ _EOG_NAMES = (
     "<end_of_utterance>", "<eos>", "<turn|>", "<|tool_response>",
     "<｜end▁of▁sentence｜>", "[e~[", "<|ifm|im_end|>",
 )
+
+
+# Stop spellings that end a turn only under one pre. llama.cpp adds
+# <|user|> and <|observation|> for the flint pre. <|developer|> is in the
+# HF eos_token_id list but not llama.cpp's, which never reads the GGUF's
+# tokenizer.ggml.eog_token_ids, so every Flint file gets it here.
+_EOG_NAMES_BY_PRE = {
+    "flint": ("<|user|>", "<|observation|>", "<|developer|>"),
+}
+
+
+def _pre_eog_ids(pre_id: str | None, tokens: list[str]) -> list[int]:
+    """Stop ids that the ``pre_id`` family ends a turn with, by spelling."""
+    out = []
+    for name in _EOG_NAMES_BY_PRE.get(pre_id or "", ()):
+        try:
+            out.append(tokens.index(name))
+        except ValueError:
+            continue
+    return out
 
 
 def _named_eog_ids(tokens: list[str], token_types: list[int] | None) -> list[int]:

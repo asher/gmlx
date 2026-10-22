@@ -233,9 +233,10 @@ def _boot_pricing(geometry, env, model_id, cfg=None):
 
 
 # The header twin of kv_policy.attention_kv_decline, which needs the built
-# attention modules: gpt-oss attention has sinks, and an MLA attention
-# reads its latent cache directly unless its module reads a packed one.
-_SINKS_MODEL_TYPES = ("gpt_oss",)
+# attention modules: gpt-oss and flint attention have sinks, and an MLA
+# attention reads its latent cache directly unless its module reads a
+# packed one.
+_SINKS_MODEL_TYPES = ("gpt_oss", "flint")
 _MLA_READS_PACKED = ("glm5_next",)
 
 

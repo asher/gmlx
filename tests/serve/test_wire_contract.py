@@ -914,6 +914,90 @@ def test_beam_tool_calls_stream(beam, reply, cities):
         assert reasoning == "Need the weather."
 
 
+# 7d. Flint: <think> reasoning and GLM-style tool calls with one
+#     <arg_key>/<arg_value> pair per argument. The prompt stops at a bare
+#     "<|assistant|>", so the model opens <think> itself.
+_FLINT_PROMPT = "<|system|>Be brief.<|user|>hi<|assistant|>"
+_FLINT_REPLY = [("<think>Think", None), ("ing.</think>", None),
+                ("Hello!", "stop")]
+_FLINT_CALL_REPLY = [
+    ("<think>Need the weather.</think>", None),
+    ("<tool_call>get_weather<arg_key>city</arg_key>", None),
+    ("<arg_value>Paris</arg_value></tool_call>", "stop")]
+_FLINT_NOARG_REPLY = [("<think>Clock.</think>", None),
+                      ("<tool_call>get_time</tool_call>", "stop")]
+_CLOCK = [{"type": "function", "function": {
+    "name": "get_time", "parameters": {"type": "object", "properties": {}}}}]
+
+
+@pytest.fixture()
+def flint(wire, monkeypatch):
+    template = (Path(__file__).parents[1] / "fixtures"
+                / "flint_template.jinja").read_text()
+    monkeypatch.setattr(_WireTokenizer, "chat_template", template)
+    monkeypatch.setattr(_PKG, "apply_chat_template",
+                        lambda *a, **k: _FLINT_PROMPT)
+    return wire
+
+
+def test_flint_reasoning_and_answer_non_stream(flint):
+    flint.gen.script = _FLINT_REPLY
+    r = flint.client.post("/v1/chat/completions", json=_chat_body())
+    assert r.status_code == 200, r.text
+    msg = r.json()["choices"][0]["message"]
+    assert msg["content"] == "Hello!"
+    assert msg["reasoning"] == "Thinking."
+
+
+def test_flint_reasoning_and_answer_stream(flint):
+    flint.gen.script = _FLINT_REPLY
+    r = flint.client.post("/v1/chat/completions",
+                          json=_chat_body(stream=True))
+    assert r.status_code == 200, r.text
+    content, reasoning, calls, finish = _stream_parts(r.text)
+    assert content == "Hello!"
+    assert reasoning == "Thinking."
+    assert not calls and finish == "stop"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_flint_tool_call(flint, stream):
+    flint.gen.script = _FLINT_CALL_REPLY
+    r = flint.client.post("/v1/chat/completions",
+                          json=_chat_body(stream=stream, tools=_WEATHER))
+    assert r.status_code == 200, r.text
+    if stream:
+        content, reasoning, calls, finish = _stream_parts(r.text)
+    else:
+        choice = r.json()["choices"][0]
+        msg, finish = choice["message"], choice["finish_reason"]
+        content, reasoning, calls = (msg["content"], msg["reasoning"],
+                                     msg["tool_calls"])
+    assert not content
+    assert reasoning == "Need the weather."
+    assert finish == "tool_calls"
+    [call] = calls
+    assert call["function"]["name"] == "get_weather"
+    assert json.loads(call["function"]["arguments"]) == {"city": "Paris"}
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_flint_tool_call_without_arguments(flint, stream):
+    flint.gen.script = _FLINT_NOARG_REPLY
+    r = flint.client.post("/v1/chat/completions",
+                          json=_chat_body(stream=stream, tools=_CLOCK))
+    assert r.status_code == 200, r.text
+    if stream:
+        _, _, calls, finish = _stream_parts(r.text)
+    else:
+        choice = r.json()["choices"][0]
+        calls, finish = choice["message"]["tool_calls"], choice["finish_reason"]
+    assert finish == "tool_calls"
+    [call] = calls
+    assert call["function"]["name"] == "get_time"
+    assert json.loads(call["function"]["arguments"] or "{}") == {}
+
+
 _ANTHROPIC_WEATHER = [{"name": "get_weather", "input_schema": {
     "type": "object", "properties": {"city": {"type": "string"}}}}]
 

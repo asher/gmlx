@@ -846,6 +846,68 @@ def test_ds4_marker_leaves_reachable_tokens_alone():
     assert "He" not in tok.get_added_vocab()
 
 
+def test_flint_pre_splits_in_sequence():
+    # Three regexes in sequence, as the HF tokenizer.json and llama.cpp's
+    # FLINT pre spell them: digit runs of up to 3, CJK runs, then the
+    # o200k-shaped split with a \p{P}\p{S} punctuation clause.
+    from tokenizers import Regex
+    from gmlx.load.tokenizer import _FLINT_PATTERNS, _bytelevel_split_patterns
+
+    assert _bytelevel_split_patterns("flint") == _FLINT_PATTERNS
+    assert len(_FLINT_PATTERNS) == 3
+    seq = pre_tokenizers.Sequence([
+        pre_tokenizers.Split(Regex(p), behavior="isolated", invert=False)
+        for p in _FLINT_PATTERNS])
+    text = "Price 1234567 \u65e5\u672c\u8a9eabc DON'T it's!!\n\n  x"
+    pieces = [p for p, _ in seq.pre_tokenize_str(text)]
+    assert "".join(pieces) == text
+    assert ["123", "456", "7"] == [p for p in pieces if p.isdigit()]
+    assert "\u65e5\u672c\u8a9e" in pieces           # the CJK run stands alone
+    assert "abc" in pieces
+    assert " DON'T" in pieces                          # case-insensitive suffix
+    assert " it's" in pieces
+    assert "!!\n\n" in pieces
+
+
+def test_flint_pre_has_no_normalizer():
+    # The HF tokenizer.json has a null normalizer, so NFC would merge a
+    # decomposed accent the reference keeps.
+    from gmlx.load.tokenizer import _build_bytelevel_bpe
+
+    tok = _build_bytelevel_bpe(["a", "b"], [], pre_id="flint")
+    assert tok.normalizer is None
+
+
+_FLINT_SPECIALS = ["<|begin_of_text|>", "<|end_of_text|>", "<|system|>",
+                   "<|user|>", "<|assistant|>", "<|observation|>", "<think>",
+                   "</think>", "<|developer|>"]
+
+
+def test_flint_stop_set():
+    """Flint ends a turn on the user, observation and developer tags as
+    well as EOS. llama.cpp adds the first two for the flint pre; the HF
+    eos_token_id list adds <|developer|>. Another pre with the same vocab
+    keeps only EOS."""
+    from pathlib import Path
+
+    template = (Path(__file__).parents[1] / "fixtures"
+                / "flint_template.jinja").read_text()
+    meta = _control_meta(_FLINT_SPECIALS, 1, template, "flint")
+    meta["tokenizer.ggml.pre"] = "flint"
+    meta["tokenizer.ggml.add_bos_token"] = False
+    tok = load_tokenizer_from_gguf(meta, "flint")
+    names = [_FLINT_SPECIALS[t] for t in tok._gguf_eos_token_ids]
+    assert names[0] == "<|end_of_text|>"
+    assert set(names) == {"<|end_of_text|>", "<|user|>", "<|observation|>",
+                          "<|developer|>"}
+    assert tok.encode("ab", add_special_tokens=True)[0] != 0
+
+    meta["tokenizer.ggml.pre"] = "gpt-4o"
+    other = load_tokenizer_from_gguf(meta, "flint")
+    assert [_FLINT_SPECIALS[t] for t in other._gguf_eos_token_ids] == [
+        "<|end_of_text|>"]
+
+
 def test_k2_horizon_pre_full_pattern_override():
     # The llama3 split with marks, ZWNJ and ZWJ inside letter runs, as the
     # HF tokenizer.json and llama.cpp's K2_HORIZON pre spell it.

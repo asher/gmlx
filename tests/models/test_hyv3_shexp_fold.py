@@ -75,11 +75,16 @@ def test_install_stamps_shexp_module():
 
 
 @pytest.mark.parametrize("mut", ["none", "wide", "codec"])
-def test_ineligible_not_stamped(mut):
+def test_ineligible_not_stamped(mut, monkeypatch):
     if mut == "none":
         blk = _kq_moe(n_shared=0)  # no shared expert at all
     elif mut == "wide":
-        blk = _kq_moe(n_shared=2)  # shexp inter 512: not shape-matched
+        # shexp inter 512 rides as two slots only where kq has them
+        import mlx_kquant as kq
+
+        monkeypatch.setattr(kq, "shexp_mix_combo_has_kernel",
+                            lambda *a, **k: False, raising=False)
+        blk = _kq_moe(n_shared=2)
     else:
         blk = _kq_moe(shexp_codec="q4_0")  # not the codec nor an upcast
     _, n_fold = _installed(blk)

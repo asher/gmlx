@@ -41,6 +41,7 @@ a model ends up with.
 | `muse-spark` | `muse-spark` | temperature=1.0 top_p=1.0 top_k=64 thinking_start_token=&lt;\|start\|&gt;assistant to=self&lt;\|message\|&gt; thinking_end_token=&lt;\|eom\|&gt; | `@reasoning-high`: reasoning_effort=high; `@reasoning-low`: reasoning_effort=low; `@reasoning-medium`: reasoning_effort=medium; `@reasoning-xhigh`: reasoning_effort=xhigh |
 | `k2-horizon` | `k2-horizon` | temperature=1.0 top_p=0.95 | `@reasoning-high`: reasoning_effort=high; `@reasoning-low`: reasoning_effort=low; `@reasoning-medium`: reasoning_effort=medium |
 | `beam` | `beam` | temperature=0.7 top_p=0.99 thinking_start_token=&lt;\|start\|&gt;assistant&lt;\|channel\|&gt;analysis&lt;\|message\|&gt; thinking_end_token=&lt;\|end\|&gt; | `@reasoning-high`: reasoning_effort=high; `@reasoning-low`: reasoning_effort=low; `@reasoning-medium`: reasoning_effort=medium |
+| `flint` | `flint` | temperature=1.0 top_p=0.95 top_k=20 | - |
 | `llama` | `llama`, `smollm3` | temperature=0.6 top_p=0.9 | - |
 | `mistral` | `mistral3` | temperature=0.15 | - |
 | `default` | (anything else) | temperature=0.7 top_p=0.95 | `@coding`: temperature=0.3; `@creative`: temperature=1.0 min_p=0.05 |
