@@ -195,7 +195,7 @@ def _step_scope(model):
     holders = [model, getattr(model, "language_model", None)]
     saved = [(h, name, getattr(h, name)) for h in holders if h is not None
              for name in _ROPE_STATE if hasattr(h, name)]
-    before = cb_phase.phase()
+    before = cb_phase.snapshot()
     cb_phase.flip("prefill")
     wired: Any = contextlib.nullcontext()
     if model is not None and mx.default_device() == mx.gpu and mx.metal.is_available():
@@ -206,8 +206,7 @@ def _step_scope(model):
     finally:
         for holder, name, value in saved:
             setattr(holder, name, value)
-        if before is not None:
-            cb_phase.flip(before)
+        cb_phase.restore(before)
 
 
 def _start(rg, request) -> Optional[_StepJob]:

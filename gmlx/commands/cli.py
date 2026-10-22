@@ -2359,17 +2359,25 @@ def _lift_stream_cb_caps(argv: list[str]) -> None:
     """Lift MLX's command-buffer split caps for streaming placements.
 
     MLX latches the env caps once, at Metal device init, which the verb
-    imports trigger, so this must run at entry. The defaults (50 ops /
-    50 MB per buffer on the pinned mlx) shred a streamed decode token
-    into ~1450 command buffers whose turnaround gaps leave the GPU 18%
-    utilized; lifting them measured +40% streamed decode, output
-    bit-identical. In-RAM serving does NOT take the lifetime lift: a
-    coarse buffer holds every layer's prefill transients live at once
-    and exhausts GPU memory on deep prompts, so the serve engine flips
-    the caps per phase at runtime instead (cb_phase: coarse decode,
-    fine prefill). setdefault keeps explicit overrides in charge.
+    imports trigger, so this must run at entry. The MLX defaults of the
+    time (10 ops / 40 MB per buffer) split a streamed decode token into
+    about 1450 command buffers whose turnaround gaps left the GPU 18%
+    utilized; the lift measured +40% streamed decode, output
+    bit-identical. The device defaults are 50 ops / 50 MB now, and each
+    decode step of run sets its model's caps (cb_phase.decode_caps), so
+    the lift holds the streamed prefill of run and its bench, and all of
+    a streamed chat. In-RAM serving does not take the lifetime lift: a
+    coarse buffer holds every layer's prefill transients live at once and
+    exhausts GPU memory on deep prompts, so the serve engine flips the
+    caps per phase at runtime instead. setdefault keeps explicit
+    overrides in charge, and cb_phase leaves an override set before the
+    lift (the user's pin) alone.
     """
     if any(a in ("--stream-experts", "--stream-cpu") for a in argv):
+        if not os.environ.get("MLX_MAX_OPS_PER_BUFFER"):
+            from gmlx.serve.cb_phase import note_lift
+
+            note_lift()
         os.environ.setdefault("MLX_MAX_OPS_PER_BUFFER", "400")
         os.environ.setdefault("MLX_MAX_MB_PER_BUFFER", "100000")
 
@@ -2397,14 +2405,9 @@ def _lift_live_cb_caps() -> None:
     if os.environ.get("MLX_MAX_OPS_PER_BUFFER"):
         return                       # argv path already latched it, or the
                                      # user pinned their own caps
-    try:
-        import mlx_kquant as kq
+    from gmlx.serve.cb_phase import lift
 
-        from gmlx.serve.cb_phase import COARSE
-
-        kq.set_cb_caps(*COARSE)
-    except (ImportError, AttributeError):
-        pass
+    lift()
 
 
 # Tokens a chat template adds around the prompt (roles, a reasoning
@@ -2628,8 +2631,8 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     _ensure_stream_cb_caps(args)
     from gmlx.serve.cb_phase import install_cb_phase_steps
 
-    # In-RAM placements: fine caps through each prefill, coarse from the
-    # first token (what serve does per phase). Streaming keeps its lift.
+    # Fine caps through each prefill in RAM, the lift's through a streamed
+    # one; from the first token, the model's decode caps.
     install_cb_phase_steps(
         streaming=bool(getattr(args, "stream_experts", False)
                        or getattr(args, "stream_cpu", False)))

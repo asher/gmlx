@@ -1,4 +1,4 @@
-"""cb_phase flip dedupe and engine install marking."""
+"""cb_phase flip dedupe, per-model decode caps and engine install marking."""
 
 import importlib
 from types import SimpleNamespace
@@ -14,7 +14,28 @@ def fake_kq(monkeypatch):
     import gmlx.serve.cb_phase as cb_phase
     monkeypatch.setitem(cb_phase._state, "kq", fake)
     monkeypatch.setitem(cb_phase._state, "phase", None)
+    monkeypatch.setitem(cb_phase._state, "caps", None)
+    monkeypatch.setitem(cb_phase._state, "lifted", False)
     return calls
+
+
+def _model(streamed):
+    """A model the streaming install marked, in RAM or streamed."""
+    return SimpleNamespace(_kq_streaming=streamed)
+
+
+def _keep_step_targets(monkeypatch):
+    """Restore at teardown the generate_step functions an install wraps."""
+    for modname, name in (("gmlx._vendor.mlx_lm.generate", "generate_step"),
+                          ("gmlx._vendor.mlx_lm.generate",
+                           "speculative_generate_step"),
+                          ("gmlx._vendor.mlx_vlm.generate.ar", "generate_step"),
+                          ("gmlx.spec.speculative", "stream_speculative")):
+        try:
+            mod = importlib.import_module(modname)
+        except ImportError:
+            continue
+        monkeypatch.setattr(mod, name, getattr(mod, name))
 
 
 def test_flip_dedupes(fake_kq):
@@ -181,17 +202,106 @@ def test_install_steps_wraps_generate_step_once(monkeypatch, fake_kq):
         lmgen.generate_step, lmgen.speculative_generate_step = saved
 
 
-def test_install_steps_skips_streaming_and_env(monkeypatch, fake_kq):
+def test_install_steps_skips_a_user_pin_and_the_env_switch(monkeypatch,
+                                                          fake_kq):
+    """A user's MLX_MAX_OPS_PER_BUFFER keeps its caps for the whole run, as
+    does GMLX_CB_PHASE=0. The env the streaming lift wrote is no pin."""
+    from gmlx.commands.cli import _lift_stream_cb_caps
+
     lmgen = importlib.import_module("gmlx._vendor.mlx_lm.generate")
 
     import gmlx.serve.cb_phase as cb_phase
 
+    _keep_step_targets(monkeypatch)
     saved = lmgen.generate_step
-    monkeypatch.delenv("MLX_MAX_OPS_PER_BUFFER", raising=False)
+    monkeypatch.delenv("MLX_MAX_MB_PER_BUFFER", raising=False)
+    monkeypatch.setenv("MLX_MAX_OPS_PER_BUFFER", "100")
+    _lift_stream_cb_caps(["run", "m.gguf", "--stream-experts"])
     assert cb_phase.install_cb_phase_steps(streaming=True) is False
-    monkeypatch.setenv("MLX_MAX_OPS_PER_BUFFER", "400")
-    assert cb_phase.install_cb_phase_steps() is False
     monkeypatch.delenv("MLX_MAX_OPS_PER_BUFFER")
     monkeypatch.setenv("GMLX_CB_PHASE", "0")
     assert cb_phase.install_cb_phase_steps() is False
     assert lmgen.generate_step is saved
+    monkeypatch.delenv("GMLX_CB_PHASE")
+    monkeypatch.delenv("MLX_MAX_MB_PER_BUFFER")
+    _lift_stream_cb_caps(["run", "m.gguf", "--stream-experts"])
+    assert cb_phase.install_cb_phase_steps(streaming=True) is True
+    assert lmgen.generate_step._gmlx_cb_phase
+
+
+def test_decode_caps_follow_the_streaming_verdict():
+    """A streamed decode syncs on the host at every layer, so it decodes on
+    the streamed caps; a model in RAM keeps the coarse decode caps."""
+    import gmlx.serve.cb_phase as cb_phase
+
+    assert cb_phase.STREAMED_DECODE != cb_phase.COARSE
+    assert cb_phase.decode_caps(_model(True)) == cb_phase.STREAMED_DECODE
+    assert cb_phase.decode_caps(_model(False)) == cb_phase.COARSE
+    assert cb_phase.decode_caps(None) == cb_phase.COARSE
+
+
+def test_engine_steps_set_each_models_caps(monkeypatch, fake_kq):
+    """One server, a model in RAM and a streamed one: each decode step sets
+    its own model's caps, and a step that keeps the caps sets nothing."""
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    import gmlx.serve.cb_phase as cb_phase
+
+    for cls, name in ((ar.GenerationBatch, "_step"),
+                      (ar.SpeculativeGenerationBatch, "next"),
+                      (ar.PromptProcessingBatch, "prompt_step"),
+                      (ar.PromptProcessingBatch, "generate")):
+        monkeypatch.setattr(cls, name, lambda self, *a, **k: None)
+    assert cb_phase.install_cb_phase_flips() is True
+    resident = object.__new__(ar.GenerationBatch)
+    resident.model = _model(False)
+    streamed = object.__new__(ar.GenerationBatch)
+    streamed.model = _model(True)
+    prompt = object.__new__(ar.PromptProcessingBatch)
+    prompt.model = streamed.model
+    for batch in (resident, resident, streamed, resident):
+        ar.GenerationBatch._step(batch)
+    ar.PromptProcessingBatch.generate(prompt)
+    ar.GenerationBatch._step(streamed)
+    wanted = [cb_phase.COARSE, cb_phase.COARSE, cb_phase.STREAMED_DECODE,
+              cb_phase.COARSE, cb_phase.FINE, cb_phase.STREAMED_DECODE]
+    assert fake_kq == [c for i, c in enumerate(wanted)
+                       if i == 0 or c != wanted[i - 1]]
+
+
+def test_a_streamed_run_prefills_on_the_lift_and_decodes_on_the_streamed_caps(
+        monkeypatch, fake_kq):
+    """gmlx run --stream-experts keeps the lift's coarse caps through the
+    prefill and decodes on the streamed caps from the first token."""
+    import mlx.nn as nn
+
+    import gmlx.serve.cb_phase as cb_phase
+
+    lmgen = importlib.import_module("gmlx._vendor.mlx_lm.generate")
+    _keep_step_targets(monkeypatch)
+    monkeypatch.delenv("MLX_MAX_OPS_PER_BUFFER", raising=False)
+    monkeypatch.setattr(lmgen, "generate_step",
+                        lambda prompt, model, **kwargs: iter(["t0", "t1"]))
+    assert cb_phase.install_cb_phase_steps(streaming=True) is True
+    model = nn.Module()
+    model._kq_streaming = True
+    assert list(lmgen.generate_step([1, 2], model)) == ["t0", "t1"]
+    assert fake_kq == [cb_phase.COARSE, cb_phase.STREAMED_DECODE]
+
+
+def test_a_placement_lift_goes_through_the_caps_record(monkeypatch, fake_kq):
+    """A model that streams for want of memory lifts the live caps at its
+    placement (a chat model switch, say). The lift goes through cb_phase,
+    so that model's next decode step still sets its decode caps."""
+    from gmlx.commands.cli import _lift_live_cb_caps
+
+    import gmlx.serve.cb_phase as cb_phase
+
+    monkeypatch.delenv("MLX_MAX_OPS_PER_BUFFER", raising=False)
+    streamed = _model(True)
+    cb_phase.flip("decode", streamed)
+    _lift_live_cb_caps()
+    cb_phase.flip("decode", streamed)
+    assert fake_kq == [cb_phase.STREAMED_DECODE, cb_phase.COARSE,
+                       cb_phase.STREAMED_DECODE]

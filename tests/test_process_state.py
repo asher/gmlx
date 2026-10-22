@@ -109,8 +109,8 @@ def test_c_a_serve_step_flips_the_phase():
 
 
 def test_d_the_next_decode_step_sets_the_decode_caps():
-    # The caps went back after the last test. cb_phase must not still name
-    # the decode phase, or this flip returns early and decode runs with the
+    # The caps went back after the last test. cb_phase must not still hold
+    # the decode caps, or this flip sets nothing and decode runs with the
     # caps the last test found.
     cb_phase = _phase_caps()
     cb_phase.flip("decode")
