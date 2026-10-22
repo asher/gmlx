@@ -4359,7 +4359,6 @@ def load_vlm_model(
                       deferred_tables=deferred_tables(pf.shards, llm_arch),
                       hadamard=hadamard_targets_for(
                           llm_meta, llm_arch, llm_shapes))
-    materialize_module_arrays(model)
     if model_type == "qwen4_exp":
         from gmlx.models.qwen4_exp.model import prepare_runtime
         counts = prepare_runtime(model.language_model)
@@ -4369,6 +4368,10 @@ def load_vlm_model(
     n_fused_gemv = install_row_fusion(model, model_type)
     if n_fused_gemv:
         _log(f"[vlm] gemv row fusion on {n_fused_gemv} projection pairs")
+    # After the b/a cat and the row fusion, as in load_model: both rebind
+    # their members as lazy views on this thread's stream, and the server
+    # loads on one thread and generates on another.
+    materialize_module_arrays(model)
 
     # 5. processor (image preprocessing + tokenizer + chat template). Synthesized
     #    from the two GGUFs by default (the LLM GGUF carries the tokenizer + chat

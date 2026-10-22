@@ -236,6 +236,41 @@ def test_background_thread_load_generates_on_main_thread(tmp_path_factory):
     mx.eval(model(mx.array([[1, 2, 3]])))
 
 
+def _record_calls(monkeypatch, module, names) -> list:
+    """Wrap ``names`` in ``module`` so each call appends its name."""
+    calls: list = []
+    for name in names:
+        real = getattr(module, name)
+
+        def spy(*args, _real=real, _name=name, **kwargs):
+            calls.append(_name)
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, spy)
+    return calls
+
+
+def _fuses_before_the_last_materialize(calls: list) -> bool:
+    last = len(calls) - 1 - calls[::-1].index("materialize_module_arrays")
+    return "install_row_fusion" in calls[:last]
+
+
+def test_the_text_load_fuses_rows_before_its_last_materialize(
+        tmp_path, monkeypatch):
+    """The row fusion rebinds its members as lazy views on the loading
+    thread's stream, so load_model fuses before its last materialize (the
+    background load above)."""
+    import gmlx
+    import gmlx.load.loader as loader
+
+    calls = _record_calls(monkeypatch, loader,
+                          ("install_row_fusion", "materialize_module_arrays"))
+    p = str(tmp_path / "tiny.gguf")
+    _mint_tiny_llama(p)
+    gmlx.load_model(p)
+    assert _fuses_before_the_last_materialize(calls)
+
+
 def test_materialize_module_arrays_reaches_non_parameters():
     """The loader guard must materialize arrays parameters() skips. The
     hazard is pinned first: an unmaterialized lazy from a dead thread raises
@@ -335,3 +370,19 @@ def test_load_vlm_model_on_a_tiny_pixtral_pair(tmp_path, monkeypatch):
                    mask=None, image_sizes=inputs["image_sizes"]).logits
     mx.eval(logits)
     assert logits.shape == (1, ids.shape[1], len(_TOKENS) + 3)
+
+
+def test_the_vlm_load_fuses_rows_before_its_last_materialize(
+        tmp_path, monkeypatch):
+    """load_vlm_model fuses the text tower's rows before its last
+    materialize, as load_model does: the server loads a VL model on one
+    thread and generates on another."""
+    import gmlx.load.vlm as vlm
+
+    _keep_vlm_render_bindings(monkeypatch)
+    calls = _record_calls(monkeypatch, vlm,
+                          ("install_row_fusion", "materialize_module_arrays"))
+    text, mmproj = str(tmp_path / "t.gguf"), str(tmp_path / "mmproj.gguf")
+    _mint_tiny_pixtral(text, mmproj)
+    vlm.load_vlm_model(text, mmproj)
+    assert _fuses_before_the_last_materialize(calls)
