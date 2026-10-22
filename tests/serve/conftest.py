@@ -18,6 +18,7 @@ try:
     from gmlx.serve.patches import hardening as sp_hardening
     from gmlx.serve.patches import media_gate
     from gmlx.serve.patches import routes as sp_routes
+    from gmlx.serve import governor
     from gmlx.serve import media_sinks
     from gmlx.serve import server as srv
     _APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
@@ -96,12 +97,16 @@ def _snapshot_engine_seams() -> dict:
     # The media salt wraps three methods of the engine classes and two apc
     # functions, and keeps its flag on the apc module. Restore them
     # together for the same reason.
+    # The governor install arms the kernel floor that the APC stores check.
+    # A module fixture arms it before any test's capture, so the per-test
+    # restore would keep it armed for every later test in the process.
     apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     salt = ("hash_image_payload", "semantic_extra_hash",
             media_salt._INSTALLED_FLAG)
     return {"classes": [(cls, dict(vars(cls))) for cls in _engine_classes()],
             "lora_channel": lora_rows._channel_installed,
-            "media_salt": {n: vars(apc).get(n, _UNSET) for n in salt}}
+            "media_salt": {n: vars(apc).get(n, _UNSET) for n in salt},
+            "armed_floor": governor._ARMED_FLOOR}
 
 
 def _restore_engine_seams(saved: dict) -> None:
@@ -114,6 +119,7 @@ def _restore_engine_seams(saved: dict) -> None:
             vars(apc).pop(name, None)
         else:
             setattr(apc, name, value)
+    governor._ARMED_FLOOR = saved["armed_floor"]
 
 
 @pytest.fixture(scope="module")
