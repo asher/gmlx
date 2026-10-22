@@ -355,8 +355,8 @@ def test_without_the_flag_tables_that_bring_the_model_under_install_once(
     """No stream flag, on an arch that gathers its tables per layer: tables
     that alone bring the model under the budget serve from the file. An
     MTP load installs before its wire, and the placement after it is then
-    a no-op. Experts that do not fit the memory free now stream, and the
-    streaming command-buffer caps go on."""
+    a no-op. Experts that do not fit the memory free now stream, and no
+    lift of the command-buffer caps follows the load."""
     import types
 
     import gmlx.serve.capacity as cap
@@ -380,7 +380,7 @@ def test_without_the_flag_tables_that_bring_the_model_under_install_once(
         es.install_unflagged_tables(model, args.gguf)  # the MTP load's
     cli._apply_placement(args, model)
     assert seen == (["Qwen3.8-Flash-Next-UD-Q4_K_XL.gguf"] if tables else [])
-    assert lifted == ([1] if streams else [])
+    assert lifted == []
 
 
 def test_without_the_flag_a_model_under_the_budget_stays_resident(monkeypatch):

@@ -1527,8 +1527,6 @@ def _apply_placement(args, model) -> None:
             feeder_decode=getattr(args, "decode_feeder", None),
             prefill_step=getattr(args, "prefill_step_size", None),
             stats_verbose=bool(getattr(args, "verbose", False)))
-        if getattr(model, "_kq_streaming", False):
-            _lift_live_cb_caps()
         return
 
     gguf_path = getattr(args, "gguf", None)
@@ -2366,11 +2364,12 @@ def _lift_stream_cb_caps(argv: list[str]) -> None:
     bit-identical. The device defaults are 50 ops / 50 MB now, and each
     prefill and decode step of run, chat and serve sets its model's caps
     (cb_phase.prefill_caps and decode_caps), so the lift holds the load
-    and a run with GMLX_CB_PHASE=0. A model in RAM does not take the
-    lift: a coarse buffer holds every layer's prefill transients live at
-    once and exhausts GPU memory on deep prompts. setdefault keeps
-    explicit overrides in charge, and a cap set before the lift, either
-    one, is the user's pin, which cb_phase leaves alone in every phase.
+    and every phase of a run with GMLX_CB_PHASE=0. No prefill wants the
+    lift: a coarse buffer keeps a finished layer's buffers in flight
+    while the next layer allocates, and can exhaust memory on deep
+    prompts. setdefault keeps explicit overrides in charge, and a cap set
+    before the lift, either one, is the user's pin, which cb_phase leaves
+    alone in every phase.
     """
     if any(a in ("--stream-experts", "--stream-cpu") for a in argv):
         from gmlx.serve.cb_phase import env_caps_set, note_lift
@@ -2399,8 +2398,8 @@ def _ensure_stream_cb_caps(args) -> None:
 
 
 def _lift_live_cb_caps() -> None:
-    """The streaming command-buffer caps on the live device: for a
-    placement from config, or experts that stream for want of memory."""
+    """The streaming command-buffer caps on the live device, for a
+    placement from config."""
     from gmlx.serve.cb_phase import env_caps_set, lift
 
     if env_caps_set():

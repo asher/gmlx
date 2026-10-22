@@ -1471,13 +1471,18 @@ def generate_speculative_owned(
     }
 
 
-def _prefill_into_cache(lm, input_ids, cache, chunk):
+def _prefill_into_cache(lm, input_ids, cache, chunk, *, owner=None):
     """Prefill ``input_ids`` into an EXISTING prompt cache in ``chunk``-token steps
     (the cross-turn sibling of :func:`_chunked_prefill_cache`, which builds a fresh
     one). The chat REPL reuses one speculative cache across turns, so each turn's new
     tokens append here; bounding every expert-gather forward to the proven-safe width
     keeps the single-shot MoE gather correct. The caller leaves the trailing token for
-    the drafter-capture forward (``generate_step`` with the drafter attached)."""
+    the drafter-capture forward (``generate_step`` with the drafter attached).
+    ``owner`` is the model the caller drives (``lm`` when None); its streaming
+    verdict picks the prefill caps."""
+    from gmlx.serve.cb_phase import flip
+
+    flip("prefill", lm if owner is None else owner)
     for attr in ("_position_ids", "_rope_deltas"):
         if hasattr(lm, attr):
             setattr(lm, attr, None)
@@ -1762,8 +1767,8 @@ def _stream_generate_speculative(
     feed = input_ids
     if input_ids.shape[1] > _PREFILL_CHUNK:
         _prefill_into_cache(
-            model.language_model, input_ids[:, :-1], prompt_cache, _PREFILL_CHUNK
-        )
+            model.language_model, input_ids[:, :-1], prompt_cache, _PREFILL_CHUNK,
+            owner=model)
         feed = input_ids[:, -1:]
 
     n = 0

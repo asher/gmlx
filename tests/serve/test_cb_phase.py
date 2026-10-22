@@ -40,6 +40,16 @@ def _model(streamed):
     return SimpleNamespace(_kq_streaming=streamed)
 
 
+@pytest.fixture
+def distinct_prefill(monkeypatch):
+    """STREAMED_PREFILL as caps no other phase sets. The shipped value is
+    FINE, so a routing test sets its own to show which verdict a step
+    read."""
+    import gmlx.serve.cb_phase as cb_phase
+
+    monkeypatch.setattr(cb_phase, "STREAMED_PREFILL", (100, 100))
+
+
 def _stub_engine_steps(monkeypatch):
     """The engine's step entrypoints as no-ops, restored at teardown."""
     from gmlx._vendor.mlx_vlm.generate import ar
@@ -62,6 +72,8 @@ def _keep_step_targets(monkeypatch):
                           ("gmlx._vendor.mlx_lm.generate",
                            "speculative_generate_step"),
                           ("gmlx._vendor.mlx_vlm.generate.ar", "generate_step"),
+                          ("gmlx._vendor.mlx_vlm.generate.dispatch",
+                           "generate_step"),
                           ("gmlx.spec.speculative", "stream_speculative")):
         try:
             mod = importlib.import_module(modname)
@@ -292,7 +304,7 @@ def test_decode_caps_follow_the_streaming_verdict():
     assert cb_phase.decode_caps(None) == cb_phase.COARSE
 
 
-def test_prefill_caps_follow_the_streaming_verdict(fake_kq):
+def test_prefill_caps_follow_the_streaming_verdict(fake_kq, distinct_prefill):
     """A streamed model prefills on the streamed prefill caps and a model
     in RAM on the fine caps, in a chunked prefill as in a step."""
     import mlx.core as mx
@@ -300,7 +312,6 @@ def test_prefill_caps_follow_the_streaming_verdict(fake_kq):
     import gmlx.serve.cb_phase as cb_phase
     from gmlx.gen.generation import _chunked_prefill_cache
 
-    assert cb_phase.STREAMED_PREFILL != cb_phase.FINE
     assert cb_phase.prefill_caps(_model(True)) == cb_phase.STREAMED_PREFILL
     assert cb_phase.prefill_caps(_model(False)) == cb_phase.FINE
     assert cb_phase.prefill_caps(None) == cb_phase.FINE
@@ -310,7 +321,8 @@ def test_prefill_caps_follow_the_streaming_verdict(fake_kq):
     assert fake_kq == [cb_phase.STREAMED_PREFILL, cb_phase.FINE]
 
 
-def test_engine_steps_set_each_models_caps(monkeypatch, fake_kq):
+def test_engine_steps_set_each_models_caps(monkeypatch, fake_kq,
+                                           distinct_prefill):
     """One server, a model in RAM and a streamed one: each step sets its
     own model's caps for its phase, and a step that keeps the caps sets
     nothing."""
@@ -339,12 +351,11 @@ def test_engine_steps_set_each_models_caps(monkeypatch, fake_kq):
                        if i == 0 or c != wanted[i - 1]]
 
 
-def test_a_streamed_run_prefills_on_the_lift_and_decodes_on_the_streamed_caps(
-        monkeypatch, fake_kq):
-    """gmlx run on a streamed model keeps the coarse caps of the lift
-    through the prefill and decodes on the streamed caps from the first
-    token, with --stream-experts or with experts that stream for want of
-    memory."""
+def test_a_streamed_run_prefills_and_decodes_on_the_streamed_caps(
+        monkeypatch, fake_kq, distinct_prefill):
+    """gmlx run on a streamed model prefills on the streamed prefill caps
+    and decodes on the streamed decode caps from the first token, with
+    --stream-experts or with experts that stream for want of memory."""
     import mlx.nn as nn
 
     import gmlx.serve.cb_phase as cb_phase
@@ -358,13 +369,179 @@ def test_a_streamed_run_prefills_on_the_lift_and_decodes_on_the_streamed_caps(
     model._kq_streaming = True
     assert list(lmgen.generate_step([1, 2], model)) == ["t0", "t1"]
     assert fake_kq == [cb_phase.STREAMED_PREFILL, cb_phase.STREAMED_DECODE]
-    assert cb_phase.STREAMED_PREFILL == cb_phase.COARSE
 
+
+def test_a_streamed_prefill_runs_on_the_fine_caps(monkeypatch, fake_kq):
+    """A streamed model prefills on (50, 50) in a serve prompt step, the
+    last prompt columns, a run and a chunked prefill. A coarse buffer keeps
+    a finished layer's buffers in flight while the next layer allocates:
+    on DeepSeek V4.1 Flash served streamed, an 8k prompt on (400, 100000)
+    left 5.4 GB of pages free."""
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
+    import mlx.core as mx
+    import mlx.nn as nn
+
+    import gmlx.serve.cb_phase as cb_phase
+    from gmlx.gen.generation import _chunked_prefill_cache
+
+    ar = _stub_engine_steps(monkeypatch)
+    lmgen = importlib.import_module("gmlx._vendor.mlx_lm.generate")
+    _keep_step_targets(monkeypatch)
+    monkeypatch.setattr(lmgen, "generate_step",
+                        lambda prompt, model, **kwargs: iter(["t0"]))
+    assert cb_phase.install_cb_phase_flips() is True
+    assert cb_phase.install_cb_phase_steps() is True
+    model = nn.Module()
+    model._kq_streaming = True
+    prompt = object.__new__(ar.PromptProcessingBatch)
+    prompt.model = model
+    ids = mx.array([[1, 2, 3, 4]])
+    prefills = (
+        lambda: ar.PromptProcessingBatch.prompt_step(prompt),
+        lambda: ar.PromptProcessingBatch.generate(prompt),
+        lambda: list(lmgen.generate_step([1, 2], model)),
+        lambda: _chunked_prefill_cache(_lm, ids, 2, cache=[], owner=model))
+    for prefill in prefills:
+        # A model in RAM decodes in between, so each prefill writes its caps.
+        cb_phase.flip("decode", _model(False))
+        prefill()
+    assert fake_kq == [(400, 100000), (50, 50)] * len(prefills)
+
+
+
+def _caps_forward(seen):
+    """A language model forward that records the caps each call runs on."""
+    import gmlx.serve.cb_phase as cb_phase
+
+    def forward(ids, cache=None, n_to_process=0, **kwargs):
+        seen.append(cb_phase._state["caps"])
+
+    forward.make_cache = lambda: []
+    return forward
+
+
+def _tokenizer():
+    detok = SimpleNamespace(reset=lambda: None, finalize=lambda: None,
+                            add_token=lambda tok: None, text="",
+                            last_segment="")
+    return SimpleNamespace(eos_token_ids=[0], eos_token_id=0,
+                           detokenizer=detok)
+
+
+def _stock_round(monkeypatch):
+    """The stock MTP round on 2-token chunks, its generate_step a no-op.
+    Returns the drafter."""
+    import gmlx.gen.generation as generation
+
+    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
+    monkeypatch.setenv("GMLX_OWNED_ROUND", "0")
+    monkeypatch.setattr(generation, "_PREFILL_CHUNK", 2)
+    monkeypatch.setattr(ar, "generate_step", lambda *a, **k: iter(()))
+    return SimpleNamespace(config=SimpleNamespace(block_size=3))
+
+
+def _job_step(model, monkeypatch):
+    from gmlx.serve import engine_jobs
+
+    with engine_jobs._step_scope(model):
+        model.language_model(None)
+
+
+def _mtp_chunk(model, monkeypatch):
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch
+    from gmlx.spec.mtp_prefill import install_full_prompt_mtp_prefill
+    from gmlx.upstream.patching import _walk
+
+    install_full_prompt_mtp_prefill()
+    # The MTP body itself, under whatever wraps prompt_step in this process.
+    step = next(f for f in _walk(PromptProcessingBatch.prompt_step)
+                if getattr(f, "__name__", "") == "_mtp_prompt_step")
+    batch = object.__new__(PromptProcessingBatch)
+    batch.draft_kind = "mtp"
+    batch.model = model
+    batch.prefill_step_size = batch._gmlx_pinned_step = 2
+    batch._mtp_full_input_ids = None
+    # Called after the flip; None ends the chunk before any forward.
+    batch.needs_processing = lambda: model.language_model(None)
+    assert step(batch) == 0
+
+
+def _spec_round(model, monkeypatch):
+    import gmlx.gen.generation as generation
+
+    drafter = _stock_round(monkeypatch)
+    generation._generate_speculative(
+        model, drafter, _tokenizer(), [1, 2, 3, 4, 5], draft_block_size=3,
+        apply_chat_template=False)
+
+
+def _cross_turn(model, monkeypatch):
+    import gmlx.gen.generation as generation
+
+    drafter = _stock_round(monkeypatch)
+    list(generation._stream_generate_speculative(
+        model, drafter, _tokenizer(), [1, 2, 3, 4, 5], prompt_cache=[],
+        draft_block_size=3))
+
+
+def _ar_bench(model, monkeypatch):
+    from gmlx.gen import benchmarks
+
+    _stock_round(monkeypatch)
+    benchmarks._bench_ar_tps(model, _tokenizer(), [1, 2, 3, 4, 5],
+                             decode_tokens=1, prefill_chunk=2)
+
+
+@pytest.mark.parametrize("site", [_job_step, _mtp_chunk, _spec_round,
+                                  _cross_turn, _ar_bench],
+                         ids=["job step", "mtp chunk", "stock round",
+                              "stock round next turn", "depth bench plain arm"])
+def test_each_prefill_site_takes_the_caps_of_the_model_it_drives(
+        monkeypatch, fake_kq, distinct_prefill, site):
+    """A serve job step, an MTP prompt chunk, the chunked prefills of the
+    stock MTP round (a first turn and a chat's next turn) and the plain arm
+    of the depth bench each prefill on the caps of the model they drive.
+    The verdict sits on that model only, so a site that reads its language
+    model, or no model, runs on FINE."""
+    import gmlx.serve.cb_phase as cb_phase
+
+    seen = []
+    model = SimpleNamespace(_kq_streaming=True,
+                            language_model=_caps_forward(seen))
+    cb_phase.flip("decode", _model(False))
+    site(model, monkeypatch)
+    assert seen and set(seen) == {cb_phase.STREAMED_PREFILL}
+
+
+@pytest.mark.parametrize("media_first", [True, False],
+                         ids=["media_spans first", "cb_phase first"])
+def test_the_binding_stream_generate_calls_is_phased(monkeypatch, fake_kq,
+                                                     media_first):
+    """run --mmproj and chat's media turns drive mlx-vlm's stream_generate,
+    which calls the generate_step its module bound at import. That binding
+    runs in phased_steps, under or over media_spans' block-aware step."""
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
+    import gmlx.gen.media_spans as media_spans
+    import gmlx.serve.cb_phase as cb_phase
+    from gmlx.upstream.patching import root, wrapped_with
+
+    dispatch = importlib.import_module("gmlx._vendor.mlx_vlm.generate.dispatch")
+    _keep_step_targets(monkeypatch)
+    monkeypatch.setattr(dispatch, "generate_step", root(dispatch.generate_step))
+    if media_first:
+        media_spans.install_block_aware_generate_step()
+    assert cb_phase.install_cb_phase_steps() is True
+    media_spans.install_block_aware_generate_step()
+    called = dispatch.stream_generate.__globals__["generate_step"]
+    assert called is dispatch.generate_step
+    assert wrapped_with(called, cb_phase._FLAG)
+    assert wrapped_with(called, media_spans._GEN_FLAG)
 
 def test_a_placement_lift_goes_through_the_caps_record(monkeypatch, fake_kq):
-    """A model that streams for want of memory lifts the live caps at its
-    placement (a chat model switch, say). The lift goes through cb_phase,
-    so that model's next decode step still sets its decode caps."""
+    """A config placement lifts the live caps for its load (a chat model
+    switch, say). The lift goes through cb_phase, so a decode step after
+    it still sets the model's decode caps."""
     from gmlx.commands.cli import _lift_live_cb_caps
 
     import gmlx.serve.cb_phase as cb_phase

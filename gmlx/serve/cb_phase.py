@@ -5,11 +5,12 @@ step's encode splits into enough command buffers that submission blocks
 on in-flight drain, so the engine's async lookahead hides nothing. Deep
 prefill in RAM needs fine buffers: a giant buffer keeps every layer's
 transients live at once and can exhaust GPU memory on multi-thousand-token
-chunks. A streamed model is the other way round. Its decode syncs on the
-host at every layer to read the routing, so a layer's buffers all commit
-before the sync whatever the caps, and finer buffers let the GPU start
-each layer while the host still encodes it. It prefills on the coarse
-caps, as `gmlx run --stream-experts` always has.
+chunks. A streamed model decodes the other way round. Its decode syncs on
+the host at every layer to read the routing, so a layer's buffers all
+commit before the sync whatever the caps, and finer buffers let the GPU
+start each layer while the host still encodes it. It prefills on the fine
+caps too: a coarse buffer keeps a finished layer's buffers in flight
+while the next layer allocates.
 
 kq.set_cb_caps writes the live device fields, so the serve engine flips
 at prompt steps (prefill_caps of the batch's model) and decode steps
@@ -27,13 +28,15 @@ import os
 import threading
 
 COARSE = (400, 100000)
-FINE = (50, 50)  # mlx 0.31.2 device defaults, read back via get_cb_caps
+FINE = (50, 50)  # the MLX device defaults on a Max or Ultra chip
 # Decode caps of a model whose experts stream from the drive. On DeepSeek
 # V4.1 Flash served streamed, (50, 50) decoded 0.63 ms per token faster
 # than (400, 100000), output identical.
 STREAMED_DECODE = FINE
-# Prefill caps of a model whose experts stream from the drive.
-STREAMED_PREFILL = COARSE
+# Prefill caps of a model whose experts stream from the drive. On DeepSeek
+# V4.1 Flash served streamed, an 8k prompt on (400, 100000) wired 13 GiB
+# within a quarter second and left 5.4 GB of pages free.
+STREAMED_PREFILL = FINE
 
 _FLAG = "_gmlx_cb_phase"
 _STREAMED_ATTR = "_gmlx_cb_streamed"
@@ -136,8 +139,8 @@ def flip(phase: str, model=None) -> None:
 
 def lift() -> None:
     """Set the coarse caps on the live device for a streaming placement
-    the argv lift did not cover (a config placement, or experts that
-    stream for want of memory). Through _set, so the next flip sees them."""
+    from config, which the argv lift does not cover. Through _set, so the
+    next flip sees them."""
     _set(COARSE, None)
 
 
@@ -213,8 +216,9 @@ def _model_arg(args, kwargs):
 
 def install_cb_phase_steps() -> bool:
     """Wrap the generate_step functions the CLI generate path drives
-    (mlx-lm's plain and speculative loops, mlx-vlm's ar loop, and gmlx's
-    own speculative loop, stream_speculative) in phased_steps."""
+    (mlx-lm's plain and speculative loops, mlx-vlm's ar loop and the
+    binding of it that stream_generate calls, and gmlx's own speculative
+    loop, stream_speculative) in phased_steps."""
     if not _live():
         return False
     if not _kq():
@@ -226,6 +230,7 @@ def install_cb_phase_steps() -> bool:
     targets = [("gmlx._vendor.mlx_lm.generate", "generate_step"),
                ("gmlx._vendor.mlx_lm.generate", "speculative_generate_step"),
                ("gmlx._vendor.mlx_vlm.generate.ar", "generate_step"),
+               ("gmlx._vendor.mlx_vlm.generate.dispatch", "generate_step"),
                ("gmlx.spec.speculative", "stream_speculative")]
     for modname, name in targets:
         try:

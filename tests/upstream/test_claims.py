@@ -232,14 +232,16 @@ def test_an_installer_that_installs_nothing_fails_the_installed_check(
 
 def test_the_generate_step_stream_generate_calls_is_claimed():
     """media_spans wraps dispatch's binding, the one stream_generate calls,
-    so an installer that installs nothing leaves that row on the copy."""
+    so an installer that installs nothing leaves it out of that row's
+    chain. cb_phase's phased steps stay on the binding."""
     installer = "gmlx.gen.media_spans:install_block_aware_generate_step"
     r = subprocess.run([sys.executable, "-c", _NOOP_CHILD, installer],
                        capture_output=True, text=True, timeout=600,
                        env=dict(os.environ))
     assert r.returncode == 1, (r.stdout + r.stderr)[-4000:]
-    assert ("gmlx._vendor.mlx_vlm.generate.dispatch:generate_step: still "
-            "the copy's after install") in r.stdout, r.stdout[-4000:]
+    assert ("gmlx._vendor.mlx_vlm.generate.dispatch:generate_step: no "
+            "wrapper from gmlx.gen.media_spans in its chain after install"
+            ) in r.stdout, r.stdout[-4000:]
 
 
 def _gmlx_modules() -> set[str]:
