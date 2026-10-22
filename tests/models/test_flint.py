@@ -8,7 +8,7 @@ The reference covers the per-head attention sinks, NeoX rope on the
 sliding layers and NoPE on the full ones, the window, dense and MoE
 layers, sigmoid routing with an optional selection-only bias and the
 ungated shared expert. The loader-shaped tests check the fp32 router pins
-and that the residual stream stays in the activation dtype.
+and the residual stream's dtype.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from mlx.utils import tree_flatten, tree_unflatten
 from gmlx.models.flint.model import (
     DecoderLayer,
     FlintGate,
+    FlintModel,
     FlintMoE,
     Model,
     ModelArgs,
@@ -486,29 +487,68 @@ def _loader_shaped():
     return model, config
 
 
-def test_residual_stream_keeps_the_activation_dtype():
+@pytest.mark.parametrize("act", ["bfloat16", "float16"])
+def test_residual_stream_dtype(monkeypatch, act):
     """With the loader's dtypes (fp32 router, everything else in the
-    activation dtype) every layer returns the activation dtype."""
-    from gmlx.load.dtypes import activation_dtype
-
+    activation dtype) a bfloat16 graph keeps every layer in bfloat16. A
+    float16 graph holds the residual stream in float32, runs the MoE in
+    bfloat16 and returns float16 logits."""
+    monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", act)
     model, _ = _loader_shaped()
-    act = activation_dtype("flint")
+    dt = getattr(mx, act)
     layer = model.layers[1]
     assert layer.mlp.gate.weight.dtype == mx.float32
-    assert layer.self_attn.sinks.dtype == act
-    outs = []
-    call = DecoderLayer.__call__
+    assert layer.self_attn.sinks.dtype == dt
+    outs, moe_ins = [], []
+    call, moe_call = DecoderLayer.__call__, FlintMoE.__call__
 
     def spy(self, *a, **k):
         out = call(self, *a, **k)
         outs.append(out.dtype)
         return out
 
-    DecoderLayer.__call__ = spy
+    def moe_spy(self, x):
+        moe_ins.append(x.dtype)
+        return moe_call(self, x)
+
+    DecoderLayer.__call__, FlintMoE.__call__ = spy, moe_spy
     try:
         cache = model.make_cache()
-        mx.eval(model(mx.array([[1, 2, 3]]), cache=cache))
-        mx.eval(model(mx.array([[4]]), cache=cache))
+        logits = model(mx.array([[1, 2, 3]]), cache=cache)
+        mx.eval(logits, model(mx.array([[4]]), cache=cache))
     finally:
-        DecoderLayer.__call__ = call
-    assert outs and set(outs) == {act}
+        DecoderLayer.__call__, FlintMoE.__call__ = call, moe_call
+    assert logits.dtype == dt
+    wide = dt == mx.float16
+    assert outs and set(outs) == {mx.float32 if wide else dt}
+    assert moe_ins and set(moe_ins) == {mx.bfloat16}
+
+
+def test_float16_graph_survives_swiglu_past_float16_range(monkeypatch):
+    """Routed SwiGLU outputs past 65504, as the release's last layers give
+    on number tokens, stay finite in a float16 graph and match the
+    reference. A float16 residual stream turns them into inf."""
+    monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", "float16")
+    args = _tiny_args()
+    model = _randomize(Model(args), seed=11)
+    upd = []
+    for k, v in tree_flatten(model.parameters()):
+        if ".switch_mlp." in k:
+            v = v * (1e-4 if "down_proj" in k else 150.0)
+        upd.append((k, v))
+    model.update(tree_unflatten(upd))
+    tokens = np.array([3, 17, 5, 29, 8, 41])
+    want = _ref_model(model, tokens, args)
+
+    keep = model.cast_predicate
+    model.update(tree_unflatten([
+        (k, v.astype(mx.float16) if keep(k) else v)
+        for k, v in tree_flatten(model.parameters())]))
+    got = model(mx.array(tokens)[None])
+    assert got.dtype == mx.float16
+    with monkeypatch.context() as m:
+        m.setattr(FlintModel, "_WIDE_FROM", mx.bfloat16)
+        assert not np.isfinite(_np(model(mx.array(tokens)[None]))).all()
+    got = _np(got[0])
+    assert np.isfinite(got).all()
+    assert _rel(got, want) < 3e-2

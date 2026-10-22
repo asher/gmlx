@@ -248,11 +248,25 @@ class DecoderLayer(nn.Module):
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
     ) -> mx.array:
-        h = x + self.self_attn(self.input_layernorm(x), mask, cache)
-        return h + self.mlp(self.post_attention_layernorm(h))
+        # A float32 stream in a float16 graph (FlintModel._WIDE_FROM): the
+        # sublayers take float16, and the MoE takes bfloat16 for its range.
+        act = self.self_attn.sinks.dtype
+        if x.dtype == act or x.dtype != mx.float32:
+            h = x + self.self_attn(self.input_layernorm(x), mask, cache)
+            return h + self.mlp(self.post_attention_layernorm(h))
+        h = x + self.self_attn(
+            self.input_layernorm(x).astype(act), mask, cache)
+        y = self.post_attention_layernorm(h)
+        y = y.astype(mx.bfloat16 if isinstance(self.mlp, FlintMoE) else act)
+        return h + self.mlp(y)
 
 
 class FlintModel(nn.Module):
+    # A float16 graph holds the residual stream in float32. Number tokens
+    # push it past 40000 in the last layers, and their routed SwiGLU output
+    # past 300000, beyond float16's 65504.
+    _WIDE_FROM = mx.float16
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.args = args
@@ -289,11 +303,16 @@ class FlintModel(nn.Module):
             swa_mask = create_attention_mask(
                 h, cache[self.swa_idx], window_size=self.sliding_window
             )
+        # The sinks carry the graph's activation dtype.
+        wide = self.layers[0].self_attn.sinks.dtype == self._WIDE_FROM
+        if wide:
+            h = h.astype(mx.float32)
 
         for layer, c in zip(self.layers, cache):
             h = layer(h, swa_mask if layer.use_sliding else fa_mask, c)
 
-        return self.norm(h)
+        out = self.norm(h)
+        return out.astype(self._WIDE_FROM) if wide else out
 
 
 class Model(nn.Module):
