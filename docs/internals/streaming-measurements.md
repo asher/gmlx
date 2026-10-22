@@ -548,4 +548,5 @@ A/B on the setting alone.
 | No background arena seeder | A seeder filling empty slots from a fast drive seeded 1295 slots over 1000 tokens and cost 0.1 tok/s. |
 | Demand reads land in a bounce buffer | A `pread` straight into the Metal-shared slot saved 7 ms per token of read wait and cost 18 ms per token of GPU time on the gathers. |
 | Expert stacks unmapped after install | With the GPU-visible total past physical RAM, each large command buffer paid 50 to 130 ms of driver time before it ran. |
-| Fine command buffers in every phase | On DeepSeek-V4.1-Flash UD-IQ2_XXS, M5 Max 128 GB, `gmlx run` decoded 2% faster on 50 ops and 50 MB per buffer than on 400 ops with no size cap (48.1 against 49.1 ms per token), output identical. An 8k prompt prefilled on the coarse buffers wired 13 GiB more within a quarter second and left 5.4 GB of pages free. |
+| Fine command buffers for a streamed decode | On an M5 Max, DeepSeek-V4.1-Flash decoded at 48.1 ms per token on 50 ops and 50 MB per buffer, against 49.1 on 400 ops with no size cap, same text. |
+| Fine command buffers for a streamed prefill | On an M5 Max, an 8k DeepSeek-V4.1-Flash prompt prefilled on the coarse buffers wired 13 GiB more within a quarter second and left 5.4 GB free. |
