@@ -1739,6 +1739,10 @@ def install_expert_streaming(
                 f"layers ({offloaded / 1e9:.1f} GB stays file-backed; rest "
                 f"of the model + KV on {base_dev}; {staging})"
             )
+    # The coarse caps of the CLI's streaming lift hold the load only.
+    from gmlx.serve.cb_phase import end_lift
+
+    end_lift()
     return n_wrapped, offloaded
 
 

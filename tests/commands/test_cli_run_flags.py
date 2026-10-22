@@ -413,6 +413,73 @@ def test_a_forced_stream_under_the_budget_frees_the_expert_headroom(monkeypatch)
     assert pd.streamed_tracked_bytes() == offloaded
 
 
+def _caps_device(monkeypatch, init):
+    """cb_phase on a fake device that holds ``init``, with no caps in the
+    env and no lift, and the prefill decay records a forced stream writes
+    reset. Returns the device's caps, ``init`` first."""
+    import types
+
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.cb_phase as cb_phase
+
+    for name in ("_UNTRACKED_WEIGHTS", "_UNTRACKED_OWNERS", "_STREAMED_TRACKED",
+                 "_STREAMED_CAP", "_BUILD_CREDIT"):
+        monkeypatch.setattr(pd, name, {})
+    device = [init]
+
+    def set_cb_caps(ops, mb):
+        device.append((ops, mb))
+        return device[-2]
+
+    monkeypatch.setitem(cb_phase._state, "kq",
+                        types.SimpleNamespace(set_cb_caps=set_cb_caps))
+    for key, value in (("phase", None), ("caps", None), ("lifted", False),
+                       ("pre_lift", None)):
+        monkeypatch.setitem(cb_phase._state, key, value)
+    for key in ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER",
+                "GMLX_CB_PHASE"):
+        # setenv first, so teardown also drops a key the test sets.
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
+    return device
+
+
+def test_cb_phase_0_with_stream_experts_ends_the_lift_with_the_load(monkeypatch):
+    """GMLX_CB_PHASE=0 with --stream-experts: the argv lift holds the load
+    only. After the streamed install the device is back on the caps from
+    before the lift, and no prefill or decode runs on (400, 100000)."""
+    import os
+
+    import gmlx.serve.cb_phase as cb_phase
+    from gmlx.stream.expert_streaming import install_expert_streaming
+
+    # The device latches the env lift at init.
+    device = _caps_device(monkeypatch, cb_phase.COARSE)
+    monkeypatch.setenv("GMLX_CB_PHASE", "0")
+    cli._lift_stream_cb_caps(["run", "m.gguf", "--stream-experts"])
+    assert os.environ["MLX_MAX_OPS_PER_BUFFER"] == "400"
+    model, _ = _small_moe(monkeypatch, 1 << 40)
+    install_expert_streaming(model, explicit=True)
+    assert model._kq_streaming is True
+    cb_phase.flip("prefill", model)
+    cb_phase.flip("decode", model)
+    assert device == [cb_phase.COARSE, cb_phase.FINE]
+
+
+def test_a_config_stream_lift_ends_on_the_caps_found_before_it(monkeypatch):
+    """A config placement lifts the live device for its load, after the
+    device latched its own caps. The streamed install sets those back,
+    here (40, 40), the device defaults of a Pro chip."""
+    import gmlx.serve.cb_phase as cb_phase
+    from gmlx.stream.expert_streaming import install_expert_streaming
+
+    device = _caps_device(monkeypatch, (40, 40))
+    cli._lift_live_cb_caps()
+    model, _ = _small_moe(monkeypatch, 1 << 40)
+    install_expert_streaming(model, explicit=True)
+    assert device == [(40, 40), cb_phase.COARSE, (40, 40)]
+
+
 def test_a_forced_stream_under_the_budget_sizes_a_half_arena(monkeypatch):
     import types
 

@@ -168,7 +168,8 @@ def cb_caps():
 
 
 # The cb_phase fields this module hands back, as its import leaves them.
-_CB_PHASE_FRESH = {"phase": None, "caps": None, "lifted": False}
+_CB_PHASE_FRESH = {"phase": None, "caps": None, "lifted": False,
+                   "pre_lift": None}
 
 
 def _cb_phase_state():

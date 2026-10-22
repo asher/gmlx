@@ -13,16 +13,25 @@ _HOLDS = ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER", "GMLX_CB_PHASE")
 
 @pytest.fixture
 def fake_kq(monkeypatch):
+    """A device on (50, 50) at init. Returns its caps writes."""
     calls = []
-    fake = SimpleNamespace(
-        set_cb_caps=lambda ops, mb: calls.append((ops, mb)) or (50, 50))
+
+    def set_cb_caps(ops, mb):
+        held = calls[-1] if calls else (50, 50)
+        calls.append((ops, mb))
+        return held
+
     import gmlx.serve.cb_phase as cb_phase
     for k in _HOLDS:
-        monkeypatch.delenv(k, raising=False)
-    monkeypatch.setitem(cb_phase._state, "kq", fake)
+        # setenv first, so teardown also drops a key the test sets.
+        monkeypatch.setenv(k, "")
+        monkeypatch.delenv(k)
+    monkeypatch.setitem(cb_phase._state, "kq",
+                        SimpleNamespace(set_cb_caps=set_cb_caps))
     monkeypatch.setitem(cb_phase._state, "phase", None)
     monkeypatch.setitem(cb_phase._state, "caps", None)
     monkeypatch.setitem(cb_phase._state, "lifted", False)
+    monkeypatch.setitem(cb_phase._state, "pre_lift", None)
     return calls
 
 
@@ -637,7 +646,8 @@ def test_a_chunked_prefill_keeps_a_pin_or_the_switch(held):
 
 def test_a_buffer_size_pin_holds_with_stream_experts(monkeypatch, fake_kq):
     """MLX_MAX_MB_PER_BUFFER alone is the user's pin too: the streaming
-    lift fills in the ops cap beside it, and no phase writes over it."""
+    lift fills in the ops cap beside it, and neither the end of the
+    streamed install nor any phase writes over it."""
     from gmlx.commands.cli import _lift_live_cb_caps, _lift_stream_cb_caps
 
     import gmlx.serve.cb_phase as cb_phase
@@ -648,6 +658,7 @@ def test_a_buffer_size_pin_holds_with_stream_experts(monkeypatch, fake_kq):
     assert os.environ["MLX_MAX_MB_PER_BUFFER"] == "200"
     assert cb_phase.install_cb_phase_steps() is False
     _lift_live_cb_caps()
+    cb_phase.end_lift()
     cb_phase.flip("prefill", _model(True))
     cb_phase.flip("decode", _model(True))
     assert fake_kq == []

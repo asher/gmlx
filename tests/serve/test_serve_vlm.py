@@ -343,3 +343,35 @@ def test_install_is_idempotent():
     first = gen.load_model_resources
     serving.install_gguf_server_bridge()
     assert gen.load_model_resources is first
+
+
+def test_a_failed_load_ends_the_streaming_caps_lift(monkeypatch):
+    """The server outlives a load that raises, so the caps lift of
+    `serve --stream-experts` ends with that load, as a streamed install
+    ends it: no later load or prompt runs on (400, 100000)."""
+    import importlib
+
+    import gmlx.serve.cb_phase as cb_phase
+
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    writes = []
+    monkeypatch.setitem(cb_phase._state, "kq", types.SimpleNamespace(
+        set_cb_caps=lambda ops, mb: writes.append((ops, mb)) or cb_phase.COARSE))
+    for key, value in (("phase", None), ("caps", None), ("lifted", False),
+                       ("pre_lift", None)):
+        monkeypatch.setitem(cb_phase._state, key, value)
+    cb_phase.note_lift()                # the argv lift, latched at init
+
+    def fail(*args, **kwargs):
+        raise MemoryError("the load ran out of memory")
+
+    monkeypatch.setattr(gen, serving._BRIDGE_FLAG, False, raising=False)
+    monkeypatch.setattr(gen, "load_model_resources",
+                        lambda model_path, adapter_path=None: None,
+                        raising=False)
+    monkeypatch.setattr(serving, "load_serveable_model", fail)
+    serving.install_gguf_server_bridge()
+    with pytest.raises(MemoryError):
+        gen.load_model_resources("/m/text.gguf")
+    assert writes == [cb_phase.FINE]
+    assert cb_phase._state["pre_lift"] is None

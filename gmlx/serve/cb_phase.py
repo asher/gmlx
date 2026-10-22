@@ -20,6 +20,10 @@ MLX_MAX_OPS_PER_BUFFER or MLX_MAX_MB_PER_BUFFER, keeps the caps as they
 are in every phase. The engines of a residency pool share the device
 fields, so a model in RAM and a streamed one decoding at once switch the
 caps at each step.
+
+The CLI lifts the caps to COARSE for the load of a streamed model, and
+the streamed install ends the lift (end_lift), so no phase of a streamed
+model runs on the lift, with GMLX_CB_PHASE=0 too.
 """
 
 from __future__ import annotations
@@ -41,7 +45,9 @@ STREAMED_PREFILL = FINE
 _FLAG = "_gmlx_cb_phase"
 _STREAMED_ATTR = "_gmlx_cb_streamed"
 _ENV_CAPS = ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER")
-_state: dict = {"phase": None, "caps": None, "kq": None, "lifted": False}
+# pre_lift: the caps end_lift sets back, while a lift holds.
+_state: dict = {"phase": None, "caps": None, "kq": None, "lifted": False,
+                "pre_lift": None}
 # Engines on separate threads share the device fields: the compare, the
 # write and the record go together, so the record matches the device.
 _LOCK = threading.Lock()
@@ -98,18 +104,23 @@ def prefill_caps(model) -> tuple[int, int]:
     return STREAMED_PREFILL if _streamed(model) else FINE
 
 
-def _set(caps: tuple[int, int], ph: str | None) -> None:
+def _set(caps: tuple[int, int], ph: str | None) -> tuple[int, int] | None:
     """Set ``caps`` on the device. Dedupes on the caps set, so a phase
     change that keeps the caps costs nothing and a model change that
-    moves them under one phase still applies."""
+    moves them under one phase still applies. Returns the caps the device
+    held before, None when they are not known."""
     with _LOCK:
-        if _state["caps"] != caps:
+        prev = _state["caps"]
+        if prev != caps:
             kq = _kq()
             if not kq:
-                return
-            kq.set_cb_caps(*caps)
+                return None
+            held = kq.set_cb_caps(*caps)
+            if held is not None:
+                prev = (int(held[0]), int(held[1]))
             _state["caps"] = caps
         _state["phase"] = ph
+        return prev
 
 
 def env_caps_set() -> bool:
@@ -138,17 +149,31 @@ def flip(phase: str, model=None) -> None:
 
 
 def lift() -> None:
-    """Set the coarse caps on the live device for a streaming placement
-    from config, which the argv lift does not cover. Through _set, so the
-    next flip sees them."""
-    _set(COARSE, None)
+    """Set the coarse caps on the live device for the load of a streaming
+    placement from config, which the argv lift does not cover. Through
+    _set, so the next flip sees them. The caps the device held before are
+    the ones end_lift sets back."""
+    prev = _set(COARSE, None)
+    if _state["pre_lift"] is None:
+        _state["pre_lift"] = prev
 
 
 def note_lift() -> None:
     """The CLI entry lifted the env caps for a streaming placement, with
     neither cap set before it. A cap set before that lift is the user's
-    pin."""
+    pin. MLX latches the lift at device init, so no caps from before it
+    exist: end_lift sets FINE, the caps of every phase of a streamed model
+    and the device defaults on a Max or Ultra chip."""
     _state["lifted"] = True
+    _state["pre_lift"] = FINE
+
+
+def end_lift() -> None:
+    """End the lift at the end of a streamed install: set back the caps
+    from before it. Nothing when no lift holds, as under the user's pin."""
+    pre, _state["pre_lift"] = _state["pre_lift"], None
+    if pre is not None:
+        _set(pre, None)
 
 
 def install_cb_phase_flips() -> bool:

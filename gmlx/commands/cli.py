@@ -2364,12 +2364,12 @@ def _lift_stream_cb_caps(argv: list[str]) -> None:
     bit-identical. The device defaults are 50 ops / 50 MB now, and each
     prefill and decode step of run, chat and serve sets its model's caps
     (cb_phase.prefill_caps and decode_caps), so the lift holds the load
-    and every phase of a run with GMLX_CB_PHASE=0. No prefill wants the
-    lift: a coarse buffer keeps a finished layer's buffers in flight
-    while the next layer allocates, and can exhaust memory on deep
-    prompts. setdefault keeps explicit overrides in charge, and a cap set
-    before the lift, either one, is the user's pin, which cb_phase leaves
-    alone in every phase.
+    only: the streamed install ends it (cb_phase.end_lift), with
+    GMLX_CB_PHASE=0 too. No prefill wants the lift: a coarse buffer
+    keeps a finished layer's buffers in flight while the next layer
+    allocates, and can exhaust memory on deep prompts. setdefault keeps
+    explicit overrides in charge, and a cap set before the lift, either
+    one, is the user's pin, which cb_phase leaves alone in every phase.
     """
     if any(a in ("--stream-experts", "--stream-cpu") for a in argv):
         from gmlx.serve.cb_phase import env_caps_set, note_lift
@@ -2381,10 +2381,10 @@ def _lift_stream_cb_caps(argv: list[str]) -> None:
 
 
 def _ensure_stream_cb_caps(args) -> None:
-    """Same lift for a placement that came from config, not argv. The env is
-    latched by the time the overlay runs, so write the live device fields
-    instead (what the serve engine flips). A config model id decoded 40%
-    slower than the identical bare path without this. Also latches the
+    """Same lift for the load of a placement that came from config, not
+    argv. The env is latched by the time the overlay runs, so write the
+    live device fields instead (what the serve engine flips); the streamed
+    install sets back the caps it found. Also latches the
     stream flags before the load, for `run` and `chat` alike: the warm
     touch reads the latch to leave the streamable tables and the expert
     stacks untouched."""
@@ -2398,8 +2398,8 @@ def _ensure_stream_cb_caps(args) -> None:
 
 
 def _lift_live_cb_caps() -> None:
-    """The streaming command-buffer caps on the live device, for a
-    placement from config."""
+    """The streaming command-buffer caps on the live device, for the load
+    of a placement from config."""
     from gmlx.serve.cb_phase import env_caps_set, lift
 
     if env_caps_set():
