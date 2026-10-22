@@ -733,6 +733,20 @@ def install_row_fusion(model, model_type: str | None) -> int:
     return install_gemv_row_fusion(getattr(model, "language_model", model))
 
 
+def install_view_rebinds(model, model_type: str | None) -> tuple[dict | None, int]:
+    """The installs that rebind module members as lazy views on the
+    loading thread's stream: the qwen4_exp runtime prepare (its b/a
+    matvec cat) and the gemv row fusion. Both loaders call this before
+    their last materialize_module_arrays. Returns the qwen4_exp counts
+    (None for any other model type) and the row-fused pairs."""
+    counts = None
+    if model_type == "qwen4_exp":
+        from gmlx.models.qwen4_exp.model import prepare_runtime
+
+        counts = prepare_runtime(getattr(model, "language_model", model))
+    return counts, install_row_fusion(model, model_type)
+
+
 def materialize_module_arrays(*modules) -> None:
     """Evaluate every array in the module trees, including the non-parameter
     attributes ``parameters()`` skips (precomputed RoPE ``_freqs`` and the
@@ -1990,15 +2004,11 @@ def load_model(
     ):
         _patch_gated_delta_fused_decode(model)
 
-    if config.get("model_type") == "qwen4_exp":
-        from gmlx.models.qwen4_exp.model import prepare_runtime
-
-        counts = prepare_runtime(model)
+    counts, n_fused_gemv = install_view_rebinds(model, config.get("model_type"))
+    if counts is not None:
         loadlog.verbose_print(
             f"[patch] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
             f"layers, b/a matvecs concatenated on {counts['gdn_ba_cat']}")
-
-    n_fused_gemv = install_row_fusion(model, config.get("model_type"))
     if n_fused_gemv:
         _log(f"[install] gemv row fusion on {n_fused_gemv} projection pairs")
     if config.get("model_type") in ("deepseek_v4", "deepseek_v4_vl"):

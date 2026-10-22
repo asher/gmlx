@@ -40,3 +40,20 @@ def test_switch_keeps_the_defaults(limits, monkeypatch):
     monkeypatch.setenv("GMLX_STREAM_ALLOC_LIMITS", "0")
     es._set_allocator_limits(10**9)
     assert limits == {}
+
+
+@pytest.mark.skipif(not mx.metal.is_available(), reason="Metal allocator only")
+@pytest.mark.parametrize("raw", ["2g", "-1"])
+def test_a_bad_cache_env_sets_the_pool_the_room_reads(limits, monkeypatch, raw):
+    """The room and the allocator read GMLX_STREAM_CACHE_GB through one
+    parser: a value it cannot use leaves the install the pool the room
+    priced, not a traceback at load."""
+    from gmlx.stream import budget
+
+    monkeypatch.setenv("GMLX_STREAM_CACHE_GB", raw)
+    pool = budget.pool_bytes(8 << 30)
+    es._set_allocator_limits(10**9, pool_bytes=pool)
+    assert limits["cache"] == pool
+    limits.clear()
+    es._set_allocator_limits(10**9)   # no room
+    assert limits["cache"] == budget.pool_bytes(0)

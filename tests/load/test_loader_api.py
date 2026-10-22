@@ -250,25 +250,25 @@ def _record_calls(monkeypatch, module, names) -> list:
     return calls
 
 
-def _fuses_before_the_last_materialize(calls: list) -> bool:
+def _rebinds_before_the_last_materialize(calls: list) -> bool:
     last = len(calls) - 1 - calls[::-1].index("materialize_module_arrays")
-    return "install_row_fusion" in calls[:last]
+    return "install_view_rebinds" in calls[:last]
 
 
-def test_the_text_load_fuses_rows_before_its_last_materialize(
+def test_the_text_load_rebinds_before_its_last_materialize(
         tmp_path, monkeypatch):
-    """The row fusion rebinds its members as lazy views on the loading
-    thread's stream, so load_model fuses before its last materialize (the
-    background load above)."""
+    """The row fusion and the qwen4_exp b/a cat rebind their members as
+    lazy views on the loading thread's stream, so load_model installs them
+    before its last materialize (the background load above)."""
     import gmlx
     import gmlx.load.loader as loader
 
     calls = _record_calls(monkeypatch, loader,
-                          ("install_row_fusion", "materialize_module_arrays"))
+                          ("install_view_rebinds", "materialize_module_arrays"))
     p = str(tmp_path / "tiny.gguf")
     _mint_tiny_llama(p)
     gmlx.load_model(p)
-    assert _fuses_before_the_last_materialize(calls)
+    assert _rebinds_before_the_last_materialize(calls)
 
 
 def test_materialize_module_arrays_reaches_non_parameters():
@@ -372,17 +372,17 @@ def test_load_vlm_model_on_a_tiny_pixtral_pair(tmp_path, monkeypatch):
     assert logits.shape == (1, ids.shape[1], len(_TOKENS) + 3)
 
 
-def test_the_vlm_load_fuses_rows_before_its_last_materialize(
+def test_the_vlm_load_rebinds_before_its_last_materialize(
         tmp_path, monkeypatch):
-    """load_vlm_model fuses the text tower's rows before its last
+    """load_vlm_model installs the text tower's rebinds before its last
     materialize, as load_model does: the server loads a VL model on one
     thread and generates on another."""
     import gmlx.load.vlm as vlm
 
     _keep_vlm_render_bindings(monkeypatch)
     calls = _record_calls(monkeypatch, vlm,
-                          ("install_row_fusion", "materialize_module_arrays"))
+                          ("install_view_rebinds", "materialize_module_arrays"))
     text, mmproj = str(tmp_path / "t.gguf"), str(tmp_path / "mmproj.gguf")
     _mint_tiny_pixtral(text, mmproj)
     vlm.load_vlm_model(text, mmproj)
-    assert _fuses_before_the_last_materialize(calls)
+    assert _rebinds_before_the_last_materialize(calls)

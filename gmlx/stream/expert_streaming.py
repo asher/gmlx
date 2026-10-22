@@ -35,7 +35,8 @@ from gmlx.load.loader import (
 
 from .budget import (_decode_arena_bytes, _prefill_ring_reason,
                      _ram_floor_bytes, arena_ceiling_bytes,
-                     outside_ceiling_bytes)
+                     outside_ceiling_bytes, pool_override)
+from .budget import pool_bytes as _priced_pool_bytes
 from .stack_unmap import stacks_remapped, unmap_stacks
 from .wired_limit import _neutralize_wired_limit_sweep, configure_cpu_device
 
@@ -387,7 +388,7 @@ def _physical_ram() -> int:
     return ram
 
 
-def _set_allocator_limits(tracked_bytes: int, pool_bytes: int = 0) -> None:
+def _set_allocator_limits(tracked_bytes: int, pool_bytes: int | None = None) -> None:
     """MLX's allocator counts the file-backed weights as active memory,
     which on a streamed model sits past its default memory limit, so each
     eval waited for the GPU work in flight to finish. Raise the memory
@@ -397,20 +398,21 @@ def _set_allocator_limits(tracked_bytes: int, pool_bytes: int = 0) -> None:
     pool is the one the KV room prices (``pool_bytes``,
     ``budget.pool_bytes``): it fills to its limit under prefill, and the
     live activations sit on top of it, so the room holds both. Without a
-    priced pool it is 4 GiB. GMLX_STREAM_ALLOC_LIMITS=0 keeps the
-    defaults; GMLX_STREAM_CACHE_GB sizes the pool."""
+    room it is budget.pool_bytes(0), 4 GiB. GMLX_STREAM_ALLOC_LIMITS=0
+    keeps the defaults; GMLX_STREAM_CACHE_GB sizes the pool, read once,
+    by budget.pool_override, for the room and this limit alike."""
     if not env_bool("GMLX_STREAM_ALLOC_LIMITS", True) or not mx.metal.is_available():
         return
     limit = int(tracked_bytes + 2 * _physical_ram())
-    env = os.environ.get("GMLX_STREAM_CACHE_GB", "")
-    if env:
-        cache = int(float(env) * 2**30)
+    cache = _priced_pool_bytes(0) if pool_bytes is None else int(pool_bytes)
+    raw = os.environ.get("GMLX_STREAM_CACHE_GB", "")
+    if raw and pool_override() is None:
+        how = f"GMLX_STREAM_CACHE_GB={raw} is not a number of GB, ignored"
+    elif raw:
         how = "GMLX_STREAM_CACHE_GB"
-    elif pool_bytes > 0:
-        cache = int(pool_bytes)
+    elif pool_bytes is not None:
         how = "priced in the KV room; GMLX_STREAM_CACHE_GB overrides"
     else:
-        cache = 4 * 2**30
         how = "GMLX_STREAM_CACHE_GB sizes it"
     mx.set_memory_limit(limit)
     mx.set_cache_limit(cache)
@@ -1681,7 +1683,7 @@ def install_expert_streaming(
             )
     if streaming:
         _set_allocator_limits(
-            total_bytes, room.pool_bytes if room is not None else 0)
+            total_bytes, room.pool_bytes if room is not None else None)
         # The context line printed above and the feeder lines cover the
         # normal story; what remains is the fallback mechanics for
         # whatever the feeders don't handle.

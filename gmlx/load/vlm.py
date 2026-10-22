@@ -36,7 +36,7 @@ from .loader import (
     _install_and_load,
     collect_after_load,
     float_dtype_rules,
-    install_row_fusion,
+    install_view_rebinds,
     materialize_module_arrays,
     weights_source_key,
 )
@@ -4359,18 +4359,16 @@ def load_vlm_model(
                       deferred_tables=deferred_tables(pf.shards, llm_arch),
                       hadamard=hadamard_targets_for(
                           llm_meta, llm_arch, llm_shapes))
-    if model_type == "qwen4_exp":
-        from gmlx.models.qwen4_exp.model import prepare_runtime
-        counts = prepare_runtime(model.language_model)
+    counts, n_fused_gemv = install_view_rebinds(model, model_type)
+    if counts is not None:
         _log(f"[vlm] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
              f"layers, verify on {counts['gdn_fused_verify']}, b/a cat on "
              f"{counts['gdn_ba_cat']}")
-    n_fused_gemv = install_row_fusion(model, model_type)
     if n_fused_gemv:
         _log(f"[vlm] gemv row fusion on {n_fused_gemv} projection pairs")
-    # After the b/a cat and the row fusion, as in load_model: both rebind
-    # their members as lazy views on this thread's stream, and the server
-    # loads on one thread and generates on another.
+    # After the rebinds, as in load_model: they leave their members as lazy
+    # views on this thread's stream, and the server loads on one thread
+    # and generates on another.
     materialize_module_arrays(model)
 
     # 5. processor (image preprocessing + tokenizer + chat template). Synthesized

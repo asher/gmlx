@@ -5,6 +5,7 @@ they are no-ops when mlx-vlm is not installed."""
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 import types
 
@@ -86,6 +87,7 @@ def _restore_class(cls, attrs: dict) -> None:
 
 
 _UNSET = object()
+_FLOOR_ENV = "GMLX_GOV_KERNEL_FLOOR_GB"
 
 
 def _snapshot_engine_seams() -> dict:
@@ -97,16 +99,18 @@ def _snapshot_engine_seams() -> dict:
     # The media salt wraps three methods of the engine classes and two apc
     # functions, and keeps its flag on the apc module. Restore them
     # together for the same reason.
-    # The governor install arms the kernel floor that the APC stores check.
-    # A module fixture arms it before any test's capture, so the per-test
-    # restore would keep it armed for every later test in the process.
+    # The governor install arms the kernel floor that the APC stores check,
+    # or sets its env key to 0 when the sampler self-check fails. A module
+    # fixture does either before any test's capture, so the per-test
+    # restore would keep it for every later test in the process.
     apc = importlib.import_module("gmlx._vendor.mlx_vlm.apc")
     salt = ("hash_image_payload", "semantic_extra_hash",
             media_salt._INSTALLED_FLAG)
     return {"classes": [(cls, dict(vars(cls))) for cls in _engine_classes()],
             "lora_channel": lora_rows._channel_installed,
             "media_salt": {n: vars(apc).get(n, _UNSET) for n in salt},
-            "armed_floor": governor._ARMED_FLOOR}
+            "armed_floor": governor._ARMED_FLOOR,
+            "floor_env": os.environ.get(_FLOOR_ENV, _UNSET)}
 
 
 def _restore_engine_seams(saved: dict) -> None:
@@ -120,6 +124,10 @@ def _restore_engine_seams(saved: dict) -> None:
         else:
             setattr(apc, name, value)
     governor._ARMED_FLOOR = saved["armed_floor"]
+    if saved["floor_env"] is _UNSET:
+        os.environ.pop(_FLOOR_ENV, None)
+    else:
+        os.environ[_FLOOR_ENV] = saved["floor_env"]
 
 
 @pytest.fixture(scope="module")

@@ -297,6 +297,18 @@ def prefill_activation_bytes(cfg, step: int | None = None) -> int:
     return per_row * prefill_rows(mt if isinstance(mt, str) else None, step)
 
 
+def pool_override() -> int | None:
+    """``GMLX_STREAM_CACHE_GB`` in bytes, a negative value as 0. None when
+    it is unset or not a number."""
+    raw = os.environ.get("GMLX_STREAM_CACHE_GB", "")
+    if not raw:
+        return None
+    try:
+        return max(0, int(float(raw) * (1 << 30)))
+    except (ValueError, OverflowError):
+        return None
+
+
 def pool_bytes(activation: int, fallback: int = _UNPRICED_POOL_BYTES) -> int:
     """The MLX buffer pool a streamed install sets: 2 GiB, or
     ``fallback`` when the activations are not priced. The pool holds the
@@ -305,12 +317,9 @@ def pool_bytes(activation: int, fallback: int = _UNPRICED_POOL_BYTES) -> int:
     faster than 2 GiB and an 8k prompt no faster, and the 6 GB it took
     from the decode arena cost about 5.5% of the decode speed.
     ``GMLX_STREAM_CACHE_GB`` sizes it."""
-    raw = os.environ.get("GMLX_STREAM_CACHE_GB", "")
-    if raw:
-        try:
-            return max(0, int(float(raw) * (1 << 30)))
-        except (ValueError, OverflowError):
-            pass
+    override = pool_override()
+    if override is not None:
+        return override
     if activation <= 0:
         return int(fallback)
     return _POOL_BYTES
