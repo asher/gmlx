@@ -31,7 +31,7 @@ family, backend, status and caveat:
 | `diffusion-gemma` | gemma | mlx-vlm | loadable |  |
 | `ernie4_5-moe` | ernie | mlx-lm | loadable |  |
 | `falcon-h1` | falcon | mlx-lm | loadable |  |
-| `flint` | flint | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. `--kv-bits` is refused. |
+| `flint` | flint | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. `--kv-bits` has no effect, and the KV cache stays fp16. |
 | `gemma` | gemma | mlx-lm | loadable |  |
 | `gemma-embedding` | gemma | gmlx | loadable |  |
 | `gemma2` | gemma | mlx-lm | loadable | Pass hf_source for 27B. Output matches llama.cpp only up to 4096 tokens, the size of the model's sliding attention window. |
@@ -48,7 +48,7 @@ family, backend, status and caveat:
 | `granitehybrid` | granite | mlx-lm | loadable |  |
 | `hunyuan-moe` | hunyuan | mlx-lm | loadable |  |
 | `hy_v3` | hunyuan | mlx-lm | loadable | Early GGUFs whose arch is hy-v3 with a dash are not mapped. Reconvert them. |
-| `hyv4` | hunyuan | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. `--kv-bits` is refused. |
+| `hyv4` | hunyuan | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. `--kv-bits` has no effect, and the KV cache stays fp16. |
 | `k2-horizon` | k2-horizon | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. |
 | `kimi-k3` | kimi | mlx-lm | loadable | The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again with the next message. |
 | `llama` | llama | mlx-lm | loadable |  |
