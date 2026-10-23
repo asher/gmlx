@@ -37,6 +37,7 @@ from changed_paths import DOCS_TESTS, NUMERICS  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 LASTFAILED = ROOT / ".pytest_cache" / "v" / "cache" / "lastfailed"
+MESSAGE_LINES, MESSAGE_WIDTH = 12, 300     # of the failure an issue quotes
 GREEN_TO_CLOSE = 20
 ABSENT_TO_CLOSE = 5
 NOTICE_CASES = 100
@@ -76,6 +77,25 @@ def read_junit(path: Path) -> dict[tuple[str, str], tuple[str, float]]:
     return out
 
 
+def junit_messages(path: Path) -> dict[tuple[str, str], str]:
+    """Each failed test case's first failure message."""
+    out = {}
+    for case in ET.parse(path).iter("testcase"):
+        for child in case:
+            if child.tag in ("failure", "error"):
+                out[(case.get("classname", ""), case.get("name", ""))] = (
+                    child.get("message") or (child.text or "").strip())
+                break
+    return out
+
+
+def _quoted(message: str) -> str:
+    """A failure message as a short fenced block, or nothing."""
+    lines = message.strip().splitlines()[:MESSAGE_LINES]
+    text = "\n".join(line[:MESSAGE_WIDTH] for line in lines)
+    return f"\n\n```\n{text}\n```" if text else ""
+
+
 def _summary(text: str) -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
@@ -109,7 +129,12 @@ def run(a) -> int:
                      f"--junitxml={Path(a.junit).with_suffix('.rerun.xml')}", *picked])
     if rerun != 0:
         return rerun
-    Path(a.flaky_out).write_text(json.dumps({"flaky": failed}))
+    try:
+        messages = junit_messages(Path(a.junit))
+    except (OSError, ET.ParseError):
+        messages = {}
+    Path(a.flaky_out).write_text(json.dumps({"flaky": failed, "messages": {
+        n: messages[junit_key(n)] for n in failed if messages.get(junit_key(n))}}))
     rows = ["### Flaky tests", "", "Failed, then passed when rerun alone:", ""]
     for nodeid in failed:
         print(f"::warning title=Flaky test::{nodeid} failed, then passed when rerun alone")
@@ -155,7 +180,8 @@ def tally(state: dict, outcome: str | None, *, daily: bool) -> tuple[dict, str |
 
 
 def issues(a) -> int:
-    flaky = json.loads(Path(a.flaky).read_text())["flaky"] if Path(a.flaky).exists() else []
+    found = json.loads(Path(a.flaky).read_text()) if Path(a.flaky).exists() else {}
+    flaky, messages = found.get("flaky", []), found.get("messages", {})
     if not flaky and not a.count:
         return 0
     run_url = a.run_url or "this run"
@@ -170,14 +196,15 @@ def issues(a) -> int:
         _gh("label", "create", LABEL, "--color", "d93f0b", "--force",
             "--description", "A test that failed in CI, then passed when rerun alone")
     for nodeid in flaky:
-        note = f"Last seen: {run_url}."
+        quoted = _quoted(messages.get(nodeid, ""))
+        note = f"Last seen: {run_url}.{quoted}"
         fresh = {"green": 0, "absent": 0}
         if nodeid in known:
             number = str(known[nodeid][0]["number"])
             if known[nodeid][0]["state"] != "OPEN":
                 _gh("issue", "reopen", number)
             _gh("issue", "edit", number, "--body", issue_body(nodeid, fresh, note))
-            _gh("issue", "comment", number, "--body", f"Flaky again in {run_url}.")
+            _gh("issue", "comment", number, "--body", f"Flaky again in {run_url}.{quoted}")
         else:
             _gh("issue", "create", "--label", LABEL, "--title", f"flaky: {nodeid}"[:250],
                 "--body", issue_body(nodeid, fresh, note))

@@ -22,7 +22,8 @@ or types Ctrl-Z in its terminal, holds that lock while it does.
 A test that hangs fails at --timeout with every thread's stack. A failed
 round keeps its log, a `ps` listing of the tree and any FIFOs left in its
 temporary folders under --out. The failing test ids go to
-<out>/flaky.json, which `scripts/ci_tests.py issues` reads. A round whose
+<out>/flaky.json with their failure messages, which `scripts/ci_tests.py
+issues` reads. A round whose
 pytest exits nonzero with no failing test, as when a plugin is missing or
 nothing is collected, fails too.
 
@@ -191,13 +192,20 @@ def base_id(classname: str, name: str, count: int) -> str:
     return f"{classname}::{name}"
 
 
-def failures(junit: Path, count: int) -> list[str]:
+def failures(junit: Path, count: int) -> dict[str, str]:
+    """Each failed test id with its first failure message."""
     try:
         cases = ET.parse(junit).iter("testcase")
     except (OSError, ET.ParseError):
-        return []
-    return [base_id(c.get("classname", ""), c.get("name", ""), count)
-            for c in cases if any(child.tag in ("failure", "error") for child in c)]
+        return {}
+    out: dict[str, str] = {}
+    for c in cases:
+        for child in c:
+            if child.tag in ("failure", "error"):
+                out.setdefault(base_id(c.get("classname", ""), c.get("name", ""), count),
+                               child.get("message") or (child.text or "").strip())
+                break
+    return out
 
 
 def _leftovers(root: int, tmp: Path, log: Path) -> None:
@@ -208,7 +216,7 @@ def _leftovers(root: int, tmp: Path, log: Path) -> None:
         f.write("\n--- process tree\n" + ps.stdout + "\n--- FIFOs left\n" + (fifos.stdout or "none\n"))
 
 
-def one_round(n: int, a, out: Path) -> tuple[int, list[str], int]:
+def one_round(n: int, a, out: Path) -> tuple[int, dict[str, str], int]:
     # A short folder: tests put unix sockets under their tmp_path.
     tmp = Path(tempfile.mkdtemp(prefix=f"gst{n}-", dir="/tmp"))
     log = out / f"round-{n}.log"
@@ -236,11 +244,11 @@ def one_round(n: int, a, out: Path) -> tuple[int, list[str], int]:
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait()
             lock.unlink(missing_ok=True)
-            return -1, [f"round {n} hung past {a.round_timeout} s"], staller.stalls
+            return -1, {f"round {n} hung past {a.round_timeout} s": ""}, staller.stalls
         staller.stop()
     failed = failures(junit, a.count)
     if code != 0 and not failed:
-        failed = [f"round {n}: pytest exit {code}"]
+        failed = {f"round {n}: pytest exit {code}": ""}
     if code != 0:
         _leftovers(proc.pid, tmp, log)
     else:
@@ -271,13 +279,17 @@ def main(argv: list[str] | None = None) -> int:
         a.rounds = 1
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    start, n, bad = time.monotonic(), 0, Counter()
+    start, n, bad, messages = time.monotonic(), 0, Counter(), {}
     while (not a.rounds or n < a.rounds) and (not a.minutes or time.monotonic() - start < 60 * a.minutes):
         n += 1
         code, failed, stalls = one_round(n, a, out)
-        bad.update(failed)
+        bad.update(failed.keys())
+        for test, message in failed.items():
+            messages.setdefault(test, message)
         print(f"round {n}: exit {code}, {len(failed)} failed, {stalls} stalls", flush=True)
-    (out / "flaky.json").write_text(json.dumps({"flaky": sorted(t for t in bad if "::" in t)}))
+    flaky = sorted(t for t in bad if "::" in t)
+    (out / "flaky.json").write_text(json.dumps(
+        {"flaky": flaky, "messages": {t: messages[t] for t in flaky if messages[t]}}))
     for test, times in bad.most_common():
         print(f"FAILED {times}x {test}")
     print(f"{n} rounds, {sum(bad.values())} failures; logs of failed rounds in {out}")

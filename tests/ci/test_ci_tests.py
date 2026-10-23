@@ -58,7 +58,7 @@ def test_a_daily_leg_runs_the_nightly_tests():
     assert ct.selection("full", skip_numerics=False, nightly=True) == []
 
 
-def _run(tmp_path, monkeypatch, codes, failed):
+def _run(tmp_path, monkeypatch, codes, failed, junit=None):
     calls = []
     lastfailed = tmp_path / "lastfailed"
     monkeypatch.setattr(ct, "LASTFAILED", lastfailed)
@@ -67,6 +67,8 @@ def _run(tmp_path, monkeypatch, codes, failed):
         calls.append(args)
         if len(calls) == 1 and failed:
             lastfailed.write_text(json.dumps({n: True for n in failed}))
+        if len(calls) == 1 and junit:
+            (tmp_path / "junit.xml").write_text(junit)
         return codes[len(calls) - 1]
 
     monkeypatch.setattr(ct, "_pytest", fake)
@@ -74,25 +76,35 @@ def _run(tmp_path, monkeypatch, codes, failed):
     a = SimpleNamespace(select="full", skip_numerics=False, nightly=False,
                         junit=str(tmp_path / "junit.xml"), flaky_out=str(tmp_path / "flaky.json"))
     code = ct.run(a)
-    return code, calls, json.loads((tmp_path / "flaky.json").read_text())["flaky"]
+    return code, calls, json.loads((tmp_path / "flaky.json").read_text())
 
 
 def test_a_test_that_passes_alone_is_flaky(tmp_path, monkeypatch, capsys):
-    code, calls, flaky = _run(tmp_path, monkeypatch, [1, 0], ["tests/t.py::test_a"])
-    assert code == 0 and flaky == ["tests/t.py::test_a"]
+    code, calls, found = _run(tmp_path, monkeypatch, [1, 0], ["tests/t.py::test_a"])
+    assert code == 0 and found["flaky"] == ["tests/t.py::test_a"]
     assert "--lf" in calls[1] and "no:xdist" in calls[1] and "-n" not in calls[1]
     assert "::warning title=Flaky test::tests/t.py::test_a" in capsys.readouterr().out
 
 
 def test_a_test_that_fails_alone_fails_the_step(tmp_path, monkeypatch):
-    code, _, flaky = _run(tmp_path, monkeypatch, [1, 1], ["tests/t.py::test_a"])
-    assert code == 1 and flaky == []
+    code, _, found = _run(tmp_path, monkeypatch, [1, 1], ["tests/t.py::test_a"])
+    assert code == 1 and found["flaky"] == []
 
 
 @pytest.mark.parametrize("first, failed", [(2, ["tests/t.py::test_a"]), (1, [])])
 def test_no_rerun_without_failed_tests(tmp_path, monkeypatch, first, failed):
     code, calls, _ = _run(tmp_path, monkeypatch, [first], failed)
     assert code == first and len(calls) == 1
+
+
+_FAILED_JUNIT = ('<testsuites><testsuite><testcase classname="tests.t" name="test_a" time="1"'
+                 '><failure message="AssertionError: assert 0 == -9">long trace</failure></te'
+                 'stcase></testsuite></testsuites>')
+
+
+def test_the_flaky_record_carries_the_failure_message(tmp_path, monkeypatch, capsys):
+    _, _, found = _run(tmp_path, monkeypatch, [1, 0], ["tests/t.py::test_a"], junit=_FAILED_JUNIT)
+    assert found["messages"] == {"tests/t.py::test_a": "AssertionError: assert 0 == -9"}
 
 
 def test_counters_close_after_twenty_green_runs():
@@ -113,7 +125,7 @@ def test_a_missing_test_closes_after_five_daily_runs():
     assert "removed" in ct.tally(state, None, daily=True)[1]
 
 
-def _issues(tmp_path, monkeypatch, listed, flaky, *, junit=None, count=False):
+def _issues(tmp_path, monkeypatch, listed, flaky, *, junit=None, count=False, messages=None):
     calls = []
 
     def gh(*args):
@@ -121,7 +133,7 @@ def _issues(tmp_path, monkeypatch, listed, flaky, *, junit=None, count=False):
         return json.dumps(listed) if args[:2] == ("issue", "list") else ""
 
     monkeypatch.setattr(ct, "_gh", gh)
-    (tmp_path / "flaky.json").write_text(json.dumps({"flaky": flaky}))
+    (tmp_path / "flaky.json").write_text(json.dumps({"flaky": flaky, "messages": messages or {}}))
     junit_path = tmp_path / "junit.xml"
     junit_path.write_text(junit or "<testsuites/>")
     ct.issues(SimpleNamespace(flaky=str(tmp_path / "flaky.json"), junit=str(junit_path),
@@ -142,6 +154,25 @@ def test_a_known_flaky_test_reopens_its_issue(tmp_path, monkeypatch):
                     ["tests/t.py::test_a"])
     assert ("issue", "reopen", "4") in calls
     assert not any(c[:2] == ("issue", "create") for c in calls)
+
+
+def test_a_flaky_issue_quotes_the_failure(tmp_path, monkeypatch):
+    message = "AssertionError: assert 0 == -9\n" + "x" * 400 + "\n" + "more\n" * 20
+    calls = _issues(tmp_path, monkeypatch, [], ["tests/t.py::test_a"],
+                    messages={"tests/t.py::test_a": message})
+    body = next(c for c in calls if c[:2] == ("issue", "create"))[-1]
+    quoted = body.split("```")[1].splitlines()[1:]
+    assert quoted[0] == "AssertionError: assert 0 == -9"
+    assert len(quoted[1]) == ct.MESSAGE_WIDTH and len(quoted) == ct.MESSAGE_LINES
+    assert ct.parse_issue(body) == ("tests/t.py::test_a", {"green": 0, "absent": 0})
+
+
+def test_a_flaky_issue_without_a_message_has_no_quote(tmp_path, monkeypatch):
+    body = ct.issue_body("tests/t.py::test_a", {"green": 5, "absent": 0}, "")
+    calls = _issues(tmp_path, monkeypatch, [{"number": 4, "state": "OPEN", "body": body}],
+                    ["tests/t.py::test_a"])
+    comment = next(c for c in calls if c[:2] == ("issue", "comment"))[-1]
+    assert comment == "Flaky again in RUN."
 
 
 def test_a_green_run_closes_an_issue_at_the_count(tmp_path, monkeypatch):
