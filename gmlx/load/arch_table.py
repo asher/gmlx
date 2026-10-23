@@ -179,7 +179,8 @@ MTP_DRAFTER_ARCHES = {
     "muse_glimmer": ("dflash",),
     # DFlash 2 drafters (z-lab) for Qwen3.5/3.6/3.8 dense targets.
     "qwen3_5": ("dflash",),
-    "gemma4_text": ("gemma4_assistant", "gemma4-assistant", "gemma4_mtp"),
+    # Google's assistant drafters, and plain DFlash ones (Nemotron-3.5-Bolt-E4B).
+    "gemma4_text": ("gemma4_assistant", "gemma4-assistant", "gemma4_mtp", "dflash"),
     # Qwen3.8-Flash-Next MTP head: gmlx's qwen4exp-mtp companion built from
     # the HF mtp.* tensors, or the llama.cpp mtp-*.gguf NextN sidecar, which
     # keeps the target's arch.

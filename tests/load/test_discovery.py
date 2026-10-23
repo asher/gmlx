@@ -360,6 +360,17 @@ def test_scan_pairs_sibling_dflash_drafter(tmp_path, monkeypatch):
     assert models[0].speculative is True
 
 
+def test_scan_pairs_a_dflash_drafter_with_a_gemma4_target(tmp_path, monkeypatch):
+    _drafter_classify(monkeypatch, target_arch="gemma4", target_embd=2560,
+                      draft_embd=2560)
+    root = _write(tmp_path, "NVIDIA-Nemotron-3.5-Bolt-E4B-UD-Q4_K_XL.gguf",
+                  "dflash-NVIDIA-Nemotron-3.5-Bolt-E4B-Q8_0.gguf")
+    models = _scan(root)
+    assert len(models) == 1
+    assert models[0].draft_gguf.endswith("dflash-NVIDIA-Nemotron-3.5-Bolt-E4B-Q8_0.gguf")
+    assert models[0].speculative is True
+
+
 def test_drafter_pairs_into_every_quant_of_its_target(tmp_path, monkeypatch):
     # Two quants of one target share the drafter: each entry can serve.
     _drafter_classify(monkeypatch)
@@ -380,7 +391,7 @@ def test_drafter_unpaired_on_hidden_size_mismatch(tmp_path, monkeypatch, capsys)
     models = _scan(root)
     assert models[0].draft_gguf is None
     assert models[0].speculative is False
-    assert "assistant drafter (configure via" in capsys.readouterr().err
+    assert "drafter not paired (configure via" in capsys.readouterr().err
 
 
 def test_drafter_unpaired_when_speculative_false(tmp_path, monkeypatch):

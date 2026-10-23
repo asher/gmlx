@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The ``dflash`` GGUF container holds two unrelated drafters: DeepSeek-V4's
 DSpark (the unsloth release, normalized into the gmlx-native namespace) and
-Muse Glimmer's, which keeps its own Qwen3-shaped remap. Both are covered here,
+the plain DFlash one (Muse Glimmer, Gemma 4), which keeps its own Qwen3-shaped
+remap. Both are covered here,
 along with the tensor-presence test that tells them apart.
 Name/metadata logic only - synthetic arrays, no GGUF files, no model load."""
 from __future__ import annotations
@@ -14,7 +15,7 @@ from gmlx.spec.mtp_load import (  # noqa: E402
     dflash_container,
     normalize_dflash_arrays,
     remap_deepseek4_dspark_arrays,
-    remap_muse_glimmer_dflash_arrays,
+    remap_dflash_arrays,
 )
 
 # Tensor skeleton of the unsloth dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf:
@@ -149,7 +150,7 @@ def _muse_fixture(n_layers=5):
 def test_container_tells_the_two_drafters_apart():
     muse, _ = _muse_fixture()
     dspark, _, _ = _dflash_fixture()
-    assert dflash_container(muse) == "muse_glimmer"
+    assert dflash_container(muse) == "dflash"
     assert dflash_container(dspark) == "dspark"
 
 
@@ -160,7 +161,7 @@ def test_container_rejects_an_unrecognized_dflash():
 
 def test_muse_remap_produces_every_drafter_param():
     arrays, kquant = _muse_fixture()
-    hf, hf_kq, stats = remap_muse_glimmer_dflash_arrays(arrays, kquant)
+    hf, hf_kq, stats = remap_dflash_arrays(arrays, kquant, "dflash")
     for key in ("fc.weight", "hidden_norm.weight", "norm.weight",
                 "layers.0.input_layernorm.weight",
                 "layers.0.self_attn.q_proj.weight",
@@ -187,7 +188,7 @@ def test_muse_remap_keeps_the_two_norms_distinct():
     arrays, kquant = _muse_fixture()
     arrays["enc.output_norm.weight"] = mx.full((2, 2), 3.0)
     arrays["output_norm.weight"] = mx.full((2, 2), 7.0)
-    hf, _, _ = remap_muse_glimmer_dflash_arrays(arrays, kquant)
+    hf, _, _ = remap_dflash_arrays(arrays, kquant, "dflash")
     assert float(hf["hidden_norm.weight"][0, 0]) == 3.0
     assert float(hf["norm.weight"][0, 0]) == 7.0
 
@@ -196,7 +197,7 @@ def test_muse_remap_unknown_tensor_is_hard_error():
     arrays, kquant = _muse_fixture()
     arrays["blk.0.mystery.weight"] = mx.zeros((2, 2))
     with pytest.raises(Exception):
-        remap_muse_glimmer_dflash_arrays(arrays, kquant)
+        remap_dflash_arrays(arrays, kquant, "dflash")
 
 
 def test_dspark_path_is_unchanged_by_the_split():

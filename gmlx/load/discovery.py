@@ -1359,7 +1359,7 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
                   f"{', '.join(paired[dpath])}): {dpath}", file=sys.stderr)
     for dr in unpaired:
         if dr.path not in named:
-            print(f"[discover] assistant drafter (configure via "
+            print(f"[discover] drafter not paired (configure via "
                   f"draft_gguf: on its model): {dr.path}", file=sys.stderr)
 
 

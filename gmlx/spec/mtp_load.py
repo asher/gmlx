@@ -108,7 +108,7 @@ _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT = 16
 # Drafted depth per round by dflash container. None drafts the GGUF's trained
 # block (DFlash2: Qwen3.8 8, Muse 16); --draft-block-size moves it below that.
 _DFLASH_BLOCK_DEFAULT = {
-    "muse_glimmer": _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT,
+    "dflash": _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT,
     "dflash2": None,
     "dflash_dspark": None,
     "lilicorr": None,
@@ -1044,13 +1044,14 @@ def dflash_container(arrays: dict) -> str:
 
     The arch tag is shared: llama.cpp packages the DeepSeek-V4 DSpark drafter,
     the DSpark heads on a DFlash backbone (the Ternary Bonsai drafters), the
-    Muse Glimmer DFlash one and the DFlash 2 drafters under ``dflash``, and
+    plain DFlash ones (Muse Glimmer, Gemma 4) and the DFlash 2 drafters under
+    ``dflash``, and
     picks its graph on header keys. Tensor presence is the equivalent split
     here - the DeepSeek DSpark carries MLA's ``attn_q_a`` or the
     hyper-connection head, LiLiCorr its ``lilicorr.*`` lattice head, the
     DFlash-backbone DSpark the markov head on plain ``attn_q`` layers,
-    DFlash 2 the candidate selector, Muse Glimmer plain ``attn_q`` with
-    per-head QK-norms and no hyper-connections.
+    DFlash 2 the candidate selector, plain DFlash ``attn_q`` with per-head
+    QK-norms and no hyper-connections.
     """
     if any(n.startswith("output_hc_") or ".attn_q_a" in n for n in arrays):
         return "dspark"
@@ -1061,10 +1062,10 @@ def dflash_container(arrays: dict) -> str:
     if any(n.startswith("selector_hidden") for n in arrays):
         return "dflash2"
     if any(".attn_q_norm" in n for n in arrays):
-        return "muse_glimmer"
+        return "dflash"
     raise RuntimeError(
         "dflash GGUF matches no known drafter container (expected DSpark's "
-        "markov/confidence heads, DFlash 2's selector, or Muse Glimmer's "
+        "markov/confidence heads, DFlash 2's selector, or plain DFlash's "
         "attn_q_norm)"
     )
 
@@ -1146,7 +1147,7 @@ _LILICORR_ROOT = {
 }
 _LILICORR_HEAD_LAYER_RE = re.compile(r"^lilicorr\.layers\.(\d+)\.attn\.in_proj$")
 _DFLASH_CONTAINER_MAPS = {
-    "muse_glimmer": (_DFLASH_BLK, _DFLASH_ROOT),
+    "dflash": (_DFLASH_BLK, _DFLASH_ROOT),
     "dflash2": ({**_DFLASH_BLK, **_DFLASH2_BLK}, {**_DFLASH_ROOT, **_DFLASH2_ROOT}),
     "dflash_dspark": (_DFLASH_BLK, {**_DFLASH_ROOT, **_DFLASH_DSPARK_ROOT}),
     "lilicorr": (_LILICORR_BLK, _LILICORR_ROOT),
@@ -1156,7 +1157,7 @@ _DFLASH_CONTAINER_MAPS = {
 _DFLASH_CONTAINER_TARGETS = {
     "dflash2": ("qwen3_5", "qwen3_5_text", "muse_glimmer"),
     "dflash_dspark": ("qwen3_5", "qwen3_5_text"),
-    "muse_glimmer": ("muse_glimmer",),
+    "dflash": ("muse_glimmer", "gemma4_text"),
     "lilicorr": ("nemotron_h",),
 }
 
@@ -1233,10 +1234,6 @@ def remap_dflash_arrays(arrays: dict, kquant_meta: dict, container: str,
             hf_kquant_meta[target] = codec
         stats["mapped"] += 1
     return hf_weights, hf_kquant_meta, stats
-
-
-def remap_muse_glimmer_dflash_arrays(arrays: dict, kquant_meta: dict):
-    return remap_dflash_arrays(arrays, kquant_meta, "muse_glimmer")
 
 
 def _dflash_config_from_meta(
@@ -1442,12 +1439,12 @@ def _wire_dflash_capture(target, layer_ids) -> None:
     if not callable(getattr(lm, "set_dflash_capture", None)):
         raise RuntimeError(
             "DFlash drafters need a target carrying the _dflash_capture seam "
-            f"(muse_glimmer, owned qwen3_5); got {type(lm).__name__}"
+            f"(muse_glimmer, gemma4, owned qwen3_5); got {type(lm).__name__}"
         )
     lm.set_dflash_capture(layer_ids)
 
 
-def _load_muse_glimmer_dflash_drafter(
+def _load_plain_dflash_drafter(
     draft_gguf_path: str,
     target,
     target_config_dict: dict,
@@ -1459,23 +1456,27 @@ def _load_muse_glimmer_dflash_drafter(
     active_before: float | None = None,
     log=loadlog.verbose_print,
 ):
-    """Build + load + bind the Muse Glimmer DFlash drafter, and wire the
-    target's ``_dflash_capture`` so every engine-facing hidden carries the
-    five captured residuals."""
+    """Build + load + bind a plain DFlash drafter (Muse Glimmer, Gemma 4),
+    and wire the target's ``_dflash_capture`` so every engine-facing hidden
+    carries the captured residuals."""
     from gmlx.models.muse_glimmer.dflash import MuseGlimmerDFlashDrafter
 
+    from .dflash_drafter import DFlashDrafter
+
+    family = str(target_config_dict.get("model_type") or "dflash")
     config, layer_ids = _dflash_config_from_meta(
-        draft_gguf_path, meta, target_config_dict, "muse_glimmer",
+        draft_gguf_path, meta, target_config_dict, "dflash",
         arrays=arrays, shapes=shapes)
-    drafter = MuseGlimmerDFlashDrafter(config)
+    cls = MuseGlimmerDFlashDrafter if family == "muse_glimmer" else DFlashDrafter
+    drafter = cls(config)
     log(
-        f"[mtp] drafter: muse-glimmer dflash layers={config.num_hidden_layers} "
+        f"[mtp] drafter: {family} dflash layers={config.num_hidden_layers} "
         f"targets={layer_ids} block_total={config.block_size} "
         f"window={config.sliding_window} causal={bool(config.is_causal)}"
     )
 
     d_weights, d_meta, d_stats = remap_dflash_arrays(
-        arrays, kquant_meta, "muse_glimmer")
+        arrays, kquant_meta, "dflash")
     log(f"[mtp] drafter remap: {d_stats}")
     _install_and_load(
         drafter,
@@ -1492,10 +1493,9 @@ def _load_muse_glimmer_dflash_drafter(
     from .drafter_protocol import validate_drafter
 
     validate_drafter(drafter)
-    # No draft-side head quantization: Muse Glimmer GGUFs ship a quantized
-    # output.weight, which _patch_draft_head_quantized leaves alone anyway.
+    # No draft-side head quantization: the drafter borrows the target's head.
     log("[mtp] dflash drafter bound; target capture layers wired")
-    _stamp_mtp_width_cap(drafter, "muse_glimmer", target=target,
+    _stamp_mtp_width_cap(drafter, family, target=target,
                          hard_limit=1, log=log)
     return drafter
 
@@ -1672,7 +1672,7 @@ def _load_dflash_drafter(
     zero_copy: bool = True,
     log=loadlog.verbose_print,
 ):
-    """Load a ``dflash`` companion drafter: Muse Glimmer's DFlash, a DFlash
+    """Load a ``dflash`` companion drafter: a plain DFlash drafter, a DFlash
     2 drafter or a DSpark drafter on the DFlash backbone, by container. The
     DeepSeek DSpark ``dflash`` GGUFs load through the deepseek_v4 path."""
     active_before = _active_now()
@@ -1690,7 +1690,7 @@ def _load_dflash_drafter(
     loaders = {
         "dflash2": _load_dflash2_drafter,
         "dflash_dspark": _load_dflash_dspark_drafter,
-        "muse_glimmer": _load_muse_glimmer_dflash_drafter,
+        "dflash": _load_plain_dflash_drafter,
         "lilicorr": _load_lilicorr_drafter,
     }
     loader = loaders.get(container)

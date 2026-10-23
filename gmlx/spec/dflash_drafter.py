@@ -576,10 +576,10 @@ class DFlashDrafter(nn.Module):
             raise AttributeError(
                 f"cannot find embed_tokens in {type(target_model).__name__}")
         self.embed_tokens = inner.embed_tokens
-        self.embed_scale = (
-            getattr(self.embed_tokens, "embed_scale",
-                    getattr(inner, "embed_scale", 1.0))
-            * float(self.config.input_embedding_scale))
+        # The raw table times the drafter's own scale, as llama.cpp reads it.
+        # The converter writes a target's embed_scale (Gemma's sqrt(hidden))
+        # into that scale.
+        self.embed_scale = float(self.config.input_embedding_scale)
         lm = getattr(target_model, "language_model", target_model)
         self.lm_head = (getattr(target_model, "lm_head", None)
                         or getattr(lm, "lm_head", None)

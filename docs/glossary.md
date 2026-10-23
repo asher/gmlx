@@ -48,7 +48,7 @@ runs in a container. See [Custom agents](launch-agents.md).
 ## DFlash
 
 A drafter that proposes a whole block of tokens in one pass. See
-[DFlash 2 drafters](speculative-decoding.md#dflash-2-drafters).
+[DFlash drafters](speculative-decoding.md#dflash-drafters).
 
 ## Discovery
 
