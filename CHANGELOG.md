@@ -35,8 +35,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Decode writes each new KV cache row in place instead of copying the whole
-  cache every token, so decode at long context is faster and peaks lower.
+- Requires mlx-kquant 0.5.5. With it, decode writes each new KV cache row in
+  place instead of copying the whole cache every token, so decode at long
+  context is faster and peaks lower.
 - The KV cache grows by an eighth of its size, at most 8192 rows, instead of
   256 rows at a time, so long decodes no longer stall on frequent regrows.
 - Models in memory decode up to 5% faster: decode runs on 50 ops per command
