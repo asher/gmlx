@@ -5,10 +5,10 @@
    "mlx_lm": "0.31.3"
   },
   "mlx": "0.32.3",
-  "python": ["3.11", "3.12", "3.13", "3.14"],
+  "python": ["3.12"],
   "device": "cpu"
  },
- "script_sha256": "a1de621f0e143e9a193fb01fbbf305804ba1f9a8900940aa82bc9092bd4b6321",
+ "script_sha256": "78ffa735338478cdc599c35e8c82e78d9cbe38f0b40d9d0397f898935b1a3648",
  "vlm": {
   "loaded": ["mlx_vlm"],
   "cache_module": "mlx_vlm.models.cache",

@@ -472,7 +472,8 @@ def test_upstream_changes_to_owned_attention_and_cache_units_show(tmp_path):
         ("KVCache.update_and_fetch", "upstream", "gmlx/cache/kv_cache.py")}
     assert ("scaled_dot_product_attention", "both", None) in \
         rows("models/base.py", "extract")
-    assert ("KVCache.update_and_fetch", "upstream", None) in \
+    # gmlx edits both units in its copy too (the KV append routes in place).
+    assert ("KVCache.update_and_fetch", "both", None) in \
         rows("models/cache.py", "extract")
 
 

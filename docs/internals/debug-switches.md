@@ -105,6 +105,9 @@ log the attention route.
 | `GMLX_ROPE_FACTORS=0` | Disable the patch that rebuilds Llama-3.1-style per-dimension rope scaling from GGUF metadata. |
 | `GMLX_SPARSE_ARCHS` | Name extra architecture modules for the sparse attention route, comma separated, to quality-gate a new architecture. |
 | `GMLX_SDPA_DEBUG=1` | Log the attention route of the first long calls, so a wrong route on a new architecture shows in the log. |
+| `GMLX_KV_APPEND_INPLACE=0` | Append decode rows with a slice write, which copies the whole KV cache while a step still reads it, instead of writing them in place. |
+| `GMLX_KV_GROW_DIV` | The KV cache grows by this fraction of its size, rounded to 256 rows. The default is `8`, and `0` grows by 256 rows. |
+| `GMLX_KV_GROW_CAP` | The largest KV cache growth step, in rows. The default is `8192`, and `0` means no cap. |
 | `GMLX_ROUTE_LOG=1` | Print per-route attention call counts at process exit. |
 | `KV_KEY_BITS`, `KV_VALUE_BITS` | Upstream mlx-vlm widths for kvarn keys and values, for the whole server. They override [`GMLX_KVARN_BITS`](../env-vars.md#runtime). |
 | `GMLX_CASCADE_SDPA=0` | Disable the shared-prefix cascade decode route, which reads a shared prefix once per step for the whole batch. |

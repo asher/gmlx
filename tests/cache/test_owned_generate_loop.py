@@ -19,9 +19,11 @@ rows, so there the stock batch differs from single-stream and the owned
 batch differs from stock.
 
 The owned ArraysCache reads ``left_padding`` and ``lengths`` through an
-advance offset, which costs Python calls on the GDN decode path. A decode
-step on the qwen3_next model may make at most 2 more Python calls per GDN
-layer than stock, counted with ``sys.setprofile``. The stock counts are
+advance offset, which costs Python calls on the GDN decode path, and each
+attention layer's KV append runs one helper (gmlx/cache/kv_append.py). A
+decode step on the qwen3_next model may make at most 2 more Python calls
+per GDN layer and 1 more per attention layer than stock, counted with
+``sys.setprofile``. The stock counts are
 recorded per Python version.
 """
 
@@ -182,6 +184,7 @@ print(json.dumps({"stream": stream, "kv8": kv8, "batch": batch,
 '''
 
 _GDN_LAYERS = 2
+_ATTN_LAYERS = 2
 
 
 def _run(arch, device):
@@ -262,4 +265,4 @@ def test_gdn_decode_step_adds_at_most_two_calls_per_layer(runs, golden):
     calls = owned["cpu"]["calls"]
     assert len(set(stock_calls)) == 1 and len(set(calls)) == 1
     extra = calls[0] - stock_calls[0]
-    assert extra <= 2 * _GDN_LAYERS, (stock_calls, calls)
+    assert extra <= 2 * _GDN_LAYERS + _ATTN_LAYERS, (stock_calls, calls)
