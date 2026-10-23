@@ -12,9 +12,9 @@ gmlx chat model.gguf --resume          # continue this model's last chat
 Type `/help` in a chat for the commands. Esc or Ctrl-C stops a reply, and
 Ctrl-D quits. The flags are in the [CLI reference](cli.md#gmlx-chat).
 
-The optional `chat` extra adds a completion menu, a toolbar and styled
-markdown. [Optional features](installation.md#optional-features) shows how
-to install it.
+The optional `chat` extra adds styled markdown.
+[Optional features](installation.md#optional-features) shows how to
+install it.
 
 - [Where the model runs](#where-the-model-runs)
 - [Commands](#commands)
@@ -75,8 +75,8 @@ process.
 | `/memory` | Shows or edits the [assistant's memory](assistant.md#memory), with `--assistant` |
 
 The up arrow recalls earlier prompts, saved across sessions in
-`~/.cache/gmlx/chat_history` (`chat_history.ptk` with the `chat` extra).
-`--no-history` keeps a session out of it. With the `chat` extra,
+`~/.cache/gmlx/chat_history.ptk`. The first chat after an upgrade copies
+the old `chat_history` file over. `--no-history` keeps a session out of it.
 Alt-Enter inserts a newline, and a multi-line paste keeps its line breaks.
 
 Tab completes command names. After a command, it completes the argument:

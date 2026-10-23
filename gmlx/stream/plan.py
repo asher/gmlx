@@ -226,6 +226,31 @@ def ceiling_for(ram_bytes: float, ws_bytes: float) -> float:
     return min(ws_bytes * (1.0 - margin()), ram_bytes - reserve_bytes(ram_bytes))
 
 
+def weight_verdict(total_bytes: int, table_bytes: int, budget: int | None,
+                   ram_bytes: int, *,
+                   deferred_bytes: int | None = None) -> str | None:
+    """The fit of a model's weights alone on a box: ``tables_from_file``
+    when the tables a load reads from the file bring the rest under
+    ``budget``, ``resident`` when the whole file is under it and not over
+    by its share of RAM, else None (the streaming verdicts need the room
+    math). ``deferred_bytes`` is what a load reads from the file when the
+    caller priced it, as ``box_plan`` does; without it, the tables alone,
+    when they alone bring the load under. The catalog's rung state and
+    ``box_plan`` read this one rule."""
+    from gmlx.serve.capacity import classify_weight_share
+    from gmlx.stream.table_stream import tables_bring_under
+
+    if deferred_bytes is None:
+        deferred_bytes = (table_bytes if tables_bring_under(
+            total_bytes, table_bytes, budget) else 0)
+    if deferred_bytes and total_bytes - deferred_bytes <= budget:
+        return VERDICT_TABLES
+    if (classify_weight_share(total_bytes, ram_bytes) != "over"
+            and total_bytes <= budget):
+        return VERDICT_RESIDENT
+    return None
+
+
 def _deferred(model: ModelPlan, budget: int,
               max_buffer_bytes: int | None) -> int:
     """The table bytes a load of ``model`` without a stream flag reads
@@ -291,10 +316,10 @@ def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
         max_buffer_bytes = device_max_buffer()
     deferred = _deferred(model, budget, max_buffer_bytes)
     in_ram = classify_weight_share(model.total_bytes, ram_bytes) != "over"
-    if deferred and model.total_bytes - deferred <= budget:
-        verdict = VERDICT_TABLES
-    elif in_ram and model.total_bytes <= budget:
-        verdict = VERDICT_RESIDENT
+    verdict = weight_verdict(model.total_bytes, model.table_bytes, budget,
+                             ram_bytes, deferred_bytes=deferred)
+    if verdict is not None:
+        pass
     elif fit_left < 0:
         verdict = VERDICT_TOO_BIG
     elif arena < _MIN_ARENA:

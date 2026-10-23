@@ -80,8 +80,8 @@ def working_set_bytes() -> float | None:
 
 def reserve_bytes(mem_size: float) -> float:
     """Bytes left to the kernel and every other process on the box
-    (GMLX_GOV_RESERVE_GB, default max(8 GB, 10% of RAM))."""
-    default = max(8e9, 0.10 * mem_size)
+    (GMLX_GOV_RESERVE_GB, default max(2 GB, 10% of RAM))."""
+    default = max(2e9, 0.10 * mem_size)
     try:
         return float(os.environ.get("GMLX_GOV_RESERVE_GB",
                                     str(default / 1e9))) * 1e9
@@ -110,12 +110,18 @@ def working_budget_bytes() -> float | None:
     return None if ws is None else ceiling_bytes(ws)
 
 
+def working_set_for_ram(ram: float) -> float:
+    """Metal's recommended working set on a Mac with ``ram`` bytes of RAM,
+    as the planner assumes it without Metal: 2/3 of the RAM, and 3/4 from
+    64 GB."""
+    return ram * (3 / 4 if ram >= 64 << 30 else 2 / 3)
+
+
 def ram_budget_bytes(ram: float) -> float:
-    """The working budget of a Mac with ``ram`` bytes of RAM: Metal's
-    recommended working set there, 2/3 of the RAM and 3/4 from 64 GB, less
-    the margin, and never closer to the RAM than the reserve."""
-    ws = ram * (3 / 4 if ram >= 64 << 30 else 2 / 3)
-    return min(ws * (1.0 - margin()), ram - reserve_bytes(ram))
+    """The working budget of a Mac with ``ram`` bytes of RAM: its working
+    set less the margin, and never closer to the RAM than the reserve."""
+    return min(working_set_for_ram(ram) * (1.0 - margin()),
+               ram - reserve_bytes(ram))
 
 
 def classify_weight_share(size_bytes: int, ram_bytes: int) -> str:

@@ -141,7 +141,7 @@ def test_generate_runs_the_family_defaults(check6, generated):
     assert generated["meta"]["prompt"] == ins["prompt"]
 
 
-BUDGET_16 = 17_179_869_184 - 8e9    # the working budget of a 16 GiB Mac
+BUDGET_16 = 17_179_869_184 - 8e9    # a 16 GiB Mac's budget under an 8 GB reserve
 
 
 def test_a_16_gib_budget_stages_the_load_and_writes_the_same_latents(

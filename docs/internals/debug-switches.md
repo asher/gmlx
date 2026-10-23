@@ -20,6 +20,7 @@ default.
 - [Attention and KV cache](#attention-and-kv-cache)
 - [Model kernels](#model-kernels)
 - [Streaming](#streaming)
+- [Chat](#chat)
 - [Training](#training)
 - [Profiling](#profiling)
 
@@ -40,7 +41,7 @@ is already running does not see a variable you export later.
 | `GMLX_FAITHFUL_HISTORY=0` | Restore mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from plain assistant turns, and its stock `/v1/messages` conversion. |
 | `GMLX_IGNORE_EOS=1` | Never stop on end-of-sequence in `serve`, as `--ignore-eos` does. |
 | `GMLX_GOV_KERNEL_FLOOR_GB` | GB of memory not wired under which the governor goes red and reclaims caches. The default is the lower of `4` and 10% of RAM, and `0` disables it. |
-| `GMLX_GOV_RESERVE_GB` | RAM left to the kernel and other processes when the server computes its memory limit. The default is the larger of `8` and 10% of RAM. |
+| `GMLX_GOV_RESERVE_GB` | RAM left to the kernel and other processes when the server computes its memory limit. The default is the larger of `2` and 10% of RAM. |
 | `MLX_VLM_RESIDENT_TTL_DISABLE` | `1`, `true`, `yes` or `on` disables the idle-TTL reaper. LRU eviction under pressure still applies. |
 | `MLX_VLM_RESIDENT_TTL_TICK` | Interval in seconds at which the idle reaper wakes. The default is `30`. |
 
@@ -254,6 +255,12 @@ other layer adds its delta on stock ops.
 | `GMLX_DECODE_LOOKAHEAD_MIN_P` | Reliability floor under which a prediction rank stops being submitted. The default is `0.5`. |
 | `GMLX_DECODE_LOOKAHEAD_CANCEL=0` | Let unrouted predictions read to completion instead of cancelling the unstarted ones. |
 | `GMLX_DECODE_LOOKAHEAD_IOPOL=0` | Run the prestage pool at default disk priority instead of utility priority on a disk that is not fast. |
+
+## Chat
+
+| Variable | Meaning |
+|----------|---------|
+| `GMLX_CHAT_INPUT=readline` | `gmlx chat` reads prompts with readline and its `chat_history` file instead of prompt_toolkit. |
 
 ## Training
 

@@ -68,6 +68,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   256 rows at a time, so long decodes no longer stall on frequent regrows.
 - Models in memory decode up to 5% faster: decode runs on 50 ops per command
   buffer instead of 400. `GMLX_CB_COARSE_DECODE=1` restores the old caps.
+- `gmlx chat` has its completion menu, toolbar and multi-line paste without
+  the `chat` extra, which now adds only styled markdown. The first chat after
+  upgrading copies the old prompt history over.
 - `gmlx sync-models` adds a drafter to a model already in the config only
   with `--add-companions`. Without it, a sync or pull names each drafter
   or `mmproj` it leaves out.
@@ -141,6 +144,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Llama 4 requests batched from the prefix cache lost the cached prefix of
   their chunked attention layers, and a speculative restore past the chunk
   size landed at the wrong offset.
+- On Macs under 80 GB, gmlx keeps 2 GB or 10% of memory for the system
+  instead of 8 GB, so more of the memory is available to load models, serve
+  requests, stream experts and make images.
 - `gmlx chat` and `gmlx run` with images and `--kv-bits` on a gemma-4 model
   no longer stop at the first prefill chunk. The sliding-window layers stay
   at full precision and the other layers pack, as they do under `gmlx serve`.

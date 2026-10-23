@@ -31,7 +31,7 @@ import sys
 EXTRA_PACKAGES = {
     "vlm": [],
     "video": ["opencv-python>=4.12.0.88"],
-    "chat": ["prompt_toolkit", "rich"],
+    "chat": ["rich"],
     "stt": ["mlx-whisper", "python-multipart"],
     # Kokoro's misaki G2P is vendored (gmlx/_vendor); these are its
     # runtime deps - see the pyproject tts comment.
@@ -47,7 +47,7 @@ EXTRA_PACKAGES = {
     "assistant": ["mcp<2"],
     # Everything: chat TUI + full voice stack + MCP assistant. Mirrors
     # pyproject's `all = gmlx[chat,talk,assistant]`, flattened.
-    "all": ["prompt_toolkit", "rich", "sounddevice", "sherpa-onnx",
+    "all": ["rich", "sounddevice", "sherpa-onnx",
             "mlx-whisper", "python-multipart", "mlx-audio",
             "spacy<4", "num2words", "addict",
             "phonemizer-fork", "espeakng-loader", "mcp<2"],
@@ -62,7 +62,7 @@ _PROBE_MODULES = {
     # Vision support is part of gmlx (gmlx._vendor.mlx_vlm): nothing to probe.
     "vlm": (),
     "video": ("cv2",),
-    "chat": ("prompt_toolkit",),
+    "chat": ("rich",),
     "stt": ("mlx_whisper",),
     # spacy as well as mlx_audio: it backs the vendored misaki G2P that Kokoro
     # phonemizes through, so a stack missing it synthesizes nothing - probing
@@ -73,7 +73,7 @@ _PROBE_MODULES = {
     "embeddings": (),
     "talk": ("sounddevice", "sherpa_onnx", "mlx_whisper", "mlx_audio", "spacy"),
     "assistant": ("mcp",),
-    "all": ("prompt_toolkit", "sounddevice", "sherpa_onnx", "mlx_whisper",
+    "all": ("rich", "sounddevice", "sherpa_onnx", "mlx_whisper",
             "mlx_audio", "spacy", "mcp"),
 }
 

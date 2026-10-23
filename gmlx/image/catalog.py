@@ -313,11 +313,12 @@ DEFAULT_QUANTS = {
                      32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     "flux-2-klein-base": {16: ("Q4_K_M", "Q8_0"), 24: ("Q8_0", "Q8_0"),
                           32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
-    # No FLUX.2 klein 9B DiT these recipes pull makes an image in the 16 GB
-    # class: a Q4_K_M step at 256 pixels needs 8.91 GiB of its 8.55. The
-    # 16 GB row names the smallest, which a pull takes there only when the
-    # quant is given (NO_IMAGE), and the memory plan of a request there
-    # refuses it. On 24 GB a Q4_K_M DiT makes a 1024 pixel image from up to
+    # The 16 GB rows of the 9B recipes were set against an 8.55 GiB class
+    # budget, where a Q4_K_M step at 256 pixels needs 8.91 GiB. The budget
+    # is 10.13 GiB since the reserve change; the rows keep NO_IMAGE until
+    # the admits test in tests/serve/test_image_service_real.py has run on
+    # the files. The 16 GB row names the smallest, which a pull takes there
+    # only when the quant is given (NO_IMAGE). On 24 GB a Q4_K_M DiT makes a 1024 pixel image from up to
     # four 1024 pixel references with the encoder released, and Base runs
     # its two guided rows one at a time. A Q8_0 DiT fits there only with
     # the staged load and a tiled decode, and from one reference, so it
@@ -327,8 +328,9 @@ DEFAULT_QUANTS = {
     "flux-2-klein-base-9b": {16: ("Q4_K_M", "Q8_0"), 24: ("Q4_K_M", "Q8_0"),
                              32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     # KV keeps the keys and values of its references, so an edit takes more
-    # memory than on the 9B. As on the 9B, no DiT makes an image in the
-    # 16 GB class: a Q4_K_M request at 512 pixels needs 9.01 GiB of 8.55. On
+    # memory than on the 9B. As on the 9B, the 16 GB row keeps NO_IMAGE: a
+    # Q4_K_M request at 512 pixels needs 9.01 GiB of the 8.55 GiB budget
+    # before the reserve change (10.13 GiB now, untested on the files). On
     # 24 GB a Q4_K_M DiT makes a 1024 pixel image from up to two 1024 pixel
     # references with the encoder released, and a Q8_0 DiT makes no 1024
     # pixel edit. On 32 GB a Q8_0 DiT takes up to two of them, and a Q4_K_M
@@ -336,8 +338,9 @@ DEFAULT_QUANTS = {
     "flux-2-klein-9b-kv": {16: ("Q4_K_M", "Q8_0"), 24: ("Q4_K_M", "Q8_0"),
                            32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     # A MOSS-Image request at 1024 pixels with guidance on the longest
-    # prompt: on 16 GB the Q8_0 encoder alone needs 9.49 GiB of 8.55, so the
-    # class takes the Q4_K_M encoder, and a Q6_K DiT needs 8.10 GiB with the
+    # prompt: on 16 GB the Q8_0 encoder alone needs 9.49 GiB of the 8.55 GiB
+    # budget before the reserve change (10.13 GiB now; the row moves only
+    # after a measured run), so the class takes the Q4_K_M encoder, and a Q6_K DiT needs 8.10 GiB with the
     # staged load, the encoder released and a tiled decode. On 24 GB a Q8_0
     # DiT with the Q8_0 encoder needs 14.92 GiB of 15.2 with the encoder
     # released.
