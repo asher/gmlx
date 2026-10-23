@@ -115,7 +115,10 @@ def _quantized_ref(rows, group_size, bits):
 
 @pytest.mark.parametrize("make, parts", [
     (owned.KVCache, 1),
+    (lambda: owned.BatchKVCache([0]), 1),
     (lambda: owned.ChunkedKVCache(4096), 1),
+    (lambda: owned.QuantizedKVCache(64, 8), 3),
+    (lambda: owned.BatchQuantizedKVCache([0], 64, 8), 3),
 ])
 def test_decode_appends_in_place(make, parts, inplace):
     c = make()
@@ -255,6 +258,62 @@ def test_extract_then_append(inplace):
     assert len(inplace) == 2
 
 
+def _batch(lens, seed):
+    """A BatchKVCache over left-padded rows, and each row's rows."""
+    width = max(lens)
+    pads = [width - n for n in lens]
+    c = owned.BatchKVCache(pads)
+    k, v = _rows(width, seed, b=len(lens))
+    c.update_and_fetch(k, v)
+    mx.eval(c.keys, c.values)
+    rows = [(np.asarray(k[i:i + 1, :, p:]), np.asarray(v[i:i + 1, :, p:]))
+            for i, p in enumerate(pads)]
+    return c, rows
+
+
+def _batch_row(c, i):
+    p = int(c.left_padding[i].item())
+    return (np.asarray(c.keys[i:i + 1, :, p:c._idx]),
+            np.asarray(c.values[i:i + 1, :, p:c._idx]))
+
+
+@pytest.mark.parametrize("op", ["filter_shift", "filter", "extend"])
+def test_batch_reshape_then_append(op, inplace):
+    c, rows = _batch([20, 23], 0)
+    if op == "filter_shift":
+        c.filter([0])  # the shorter row: a left shift of 3
+        rows = rows[:1]
+    elif op == "filter":
+        c.filter([1])
+        rows = rows[1:]
+    else:
+        other, more = _batch([10], 1)
+        c.extend(other)
+        rows = rows + more
+    held = [(c.keys, c.values)]
+    mx.eval(held)
+    kept = [(np.asarray(a).copy(), np.asarray(b).copy()) for a, b in held]
+    inplace.clear()
+    for step in range(3):
+        k, v = _rows(1, 900 + step, b=len(rows))
+        c.update_and_fetch(k, v)
+        rows = [(np.concatenate([rk, np.asarray(k[i:i + 1])], 2),
+                 np.concatenate([rv, np.asarray(v[i:i + 1])], 2))
+                for i, (rk, rv) in enumerate(rows)]
+        if step == 0:
+            assert inplace == []
+    mx.eval(c.keys, c.values)
+    # One slice write, then in place.
+    assert len(inplace) == 4
+    for i, (rk, rv) in enumerate(rows):
+        gk, gv = _batch_row(c, i)
+        np.testing.assert_array_equal(gk, rk)
+        np.testing.assert_array_equal(gv, rv)
+    for (a, b), (ka, kb) in zip(held, kept):
+        np.testing.assert_array_equal(np.asarray(a), ka)
+        np.testing.assert_array_equal(np.asarray(b), kb)
+
+
 def test_disk_store_from_the_writer_thread(tmp_path, inplace):
     c, ref = _filled()
     saved = ref.copy()
@@ -281,7 +340,7 @@ def test_disk_store_from_the_writer_thread(tmp_path, inplace):
 
 # Restores and clones.
 
-@pytest.mark.parametrize("kind", ["fp16"])
+@pytest.mark.parametrize("kind", ["fp16", "q8"])
 def test_gated_round_restore_stays_in_place(kind, inplace):
     c = owned.KVCache() if kind == "fp16" else owned.QuantizedKVCache(64, 8)
     rows = [_rows(20, 0)] + [_rows(1, 1 + i) for i in range(3)]
@@ -391,6 +450,34 @@ def test_pipelined_kvcache_appends_allocate_nothing(route, monkeypatch):
         assert grown < 2 << 20
     else:
         assert grown >= size  # the control: today's slice write copies
+
+
+@metal
+def test_pipelined_batch_appends_allocate_nothing():
+    c = owned.BatchKVCache([0])
+    c.update_and_fetch(*_rows(7000, 0, h=8, d=128))
+    mx.eval(c.keys, c.values)
+    assert c.keys.shape[2] >= c._idx + 16
+    assert _pipelined(c, 16, 10) < 2 << 20
+
+
+@metal
+def test_pipelined_batch_after_a_left_shift_copies_at_most_once():
+    # The shift leaves an offset view. Its first append is a slice write,
+    # which donates the view when nothing holds it; every append after it
+    # is in place.
+    c = owned.BatchKVCache([3, 0])
+    k, v = _rows(7000, 0, b=2, h=8, d=128)
+    c.update_and_fetch(k, v)
+    mx.eval(c.keys, c.values)
+    c.filter([0])
+    mx.eval(c.keys, c.values)
+    assert c.keys.shape[2] >= c._idx + 17
+    size = c.keys.nbytes + c.values.nbytes
+    assert _pipelined(c, 1, 10) < size * 2
+    assert _pipelined(c, 16, 20) < 2 << 20
+    np.testing.assert_array_equal(np.asarray(c.keys[..., :6997, :]),
+                                  np.asarray(k[:1, :, 3:, :]))
 
 
 @metal

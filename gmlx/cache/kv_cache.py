@@ -404,6 +404,7 @@ def _quant_zeros(group_size, bits):
 
 class QuantizedKVCache(_BaseCache):
     step = 256
+    _kv_routed = True
 
     def __init__(self, group_size: int = 64, bits: int = 8):
         self.keys = None
@@ -1823,6 +1824,7 @@ def _cascade_filter(cache, keep) -> None:
 
 class BatchKVCache(_BaseCache):
     step = 256
+    _kv_routed = True
 
     def __init__(self, left_padding: List[int]):
         """
@@ -2648,6 +2650,7 @@ class BatchQuantizedKVCache(_BaseCache):
     """
 
     step = 256
+    _kv_routed = True
 
     def __init__(
         self,
