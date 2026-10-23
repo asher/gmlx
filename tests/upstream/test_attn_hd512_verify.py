@@ -311,6 +311,70 @@ def test_gqa_decode_hd128_routes_flint_from_the_floor(monkeypatch):
     assert not elig(32, 4, 65536, b=2)
 
 
+def test_fa_decode_hd128_gate(monkeypatch):
+    # Flint's decode shape takes the fa fold from GMLX_FA_DECODE_MINKV128 on
+    # a NAX GPU; KQ_FA_VERIFY_NAX=0, a batch and a group of 4 do not.
+    monkeypatch.setattr(attn_hd512, "_FA_DECODE_MIN_KV_128", 4096)
+    monkeypatch.setattr(attn_hd512, "_NAX_GPU", True)
+    monkeypatch.delenv("KQ_FA_VERIFY_NAX", raising=False)
+
+    def elig(hq, hkv, kL, b=1):
+        return attn_hd512._fa_decode_128_eligible(
+            mx.zeros((b, hq, 1, 128), dtype=mx.bfloat16),
+            mx.zeros((b, hkv, kL, 128), dtype=mx.bfloat16),
+            mx.zeros((b, hkv, kL, 128), dtype=mx.bfloat16), None)
+
+    assert elig(32, 4, 4096)
+    assert not elig(32, 4, 4095)
+    assert not elig(32, 8, 65536)
+    assert not elig(32, 4, 65536, b=2)
+    for flag in ("0", "false", "OFF"):
+        monkeypatch.setenv("KQ_FA_VERIFY_NAX", flag)
+        assert not elig(32, 4, 4096), flag
+    monkeypatch.setenv("KQ_FA_VERIFY_NAX", "1")
+    assert elig(32, 4, 4096)
+    monkeypatch.setattr(attn_hd512, "_NAX_GPU", False)
+    assert not elig(32, 4, 4096)
+
+
+@pytest.mark.skipif(
+    not attn_hd512._HAS_FA_VERIFY or not attn_hd512._HAS_GQA_DECODE
+    or bool(os.environ.get("KQUANT_FORCE_CPU")) or not attn_hd512._NAX_GPU,
+    reason="the fa decode fold needs NAX and both mlx_kquant ops")
+@pytest.mark.parametrize("sinks", [True, False])
+def test_fa_decode_hd128_routes_and_falls_back(sinks, monkeypatch):
+    # Through the installed wrapper: the fold at 4096 keys, gqa_decode with
+    # KQ_FA_VERIFY_NAX=0 or below the floor, both against an fp32 reference.
+    monkeypatch.setattr(attn_hd512, "_FA_DECODE_MIN_KV_128", 4096)
+    monkeypatch.setattr(attn_hd512, "_GQA_MIN_KV_128", 1024)
+    monkeypatch.delenv("KQ_FA_VERIFY_NAX", raising=False)
+    attn_hd512.install_hd512_sdpa()
+    stock = _stock_sdpa()
+    for kL, flag, route in ((4096, None, "fa_decode"), (4096, "0", "gqa_decode"),
+                            (4095, None, "gqa_decode")):
+        if flag is None:
+            monkeypatch.delenv("KQ_FA_VERIFY_NAX", raising=False)
+        else:
+            monkeypatch.setenv("KQ_FA_VERIFY_NAX", flag)
+        q, k, v = _rand(1, kL=kL, hq=32, hkv=4, d=128)
+        # Near the keys' log-sum-exp (about log(kL) here), so the sink takes
+        # a real share of each head's softmax.
+        sk = (mx.random.normal((32,), key=mx.random.key(kL)) + 8.5
+              ).astype(mx.bfloat16) if sinks else None
+        before = attn_hd512.route_counts()
+        out = mx.fast.scaled_dot_product_attention(
+            q, k, v, scale=128 ** -0.5, mask="causal", sinks=sk)
+        mx.eval(out)
+        after = attn_hd512.route_counts()
+        grew = [key[0] for key in after if after[key] > before.get(key, 0)]
+        assert grew == [route], (kL, flag, grew)
+        ref = stock(q.astype(mx.float32), k.astype(mx.float32),
+                    v.astype(mx.float32), scale=128 ** -0.5,
+                    sinks=None if sk is None else sk.astype(mx.float32))
+        err = mx.abs(out.astype(mx.float32) - ref).max().item()
+        assert err < 2e-2, (kL, flag, err)
+
+
 def test_gqa_decode_hd512_nax_eligibility(monkeypatch):
     # With it, every KV-head count with a group of 2 to 8 takes the op
     # once KV heads x batch x keys reaches 3072. A group of 16 stays on

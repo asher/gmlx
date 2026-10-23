@@ -214,6 +214,15 @@ _HAS_FA_VERIFY = mlx_kquant is not None and hasattr(mlx_kquant, "sdpa_fa_verify"
 # mlx-kquant op gate. Disable with GMLX_FA_DECODE=0.
 _FA_DECODE = env_bool("GMLX_FA_DECODE", True)
 _FA_DECODE_MIN_KV = env_int("GMLX_FA_DECODE_MINKV", 32768)
+# hd128 decode with a group of 8 at batch 1 (Flint, 32/4) on NAX GPUs: the
+# same 1-query fold on the fa kernel's tensor-op pass, ahead of the
+# gqa_decode route. Chained per call it passes that route from 4096 keys
+# (1.14x over stock there, 1.26-1.46x from 17k to 200k, against 1.10-1.13x
+# for gqa_decode). Sinks fold in from the returned log-sum-exp: the keys'
+# share of a softmax with the sink logit is sigmoid(lse - sink).
+# KQ_FA_VERIFY_NAX=0 (read per call, as kq does) or a GPU without NAX
+# leaves these calls to gqa_decode. GMLX_FA_DECODE=0 disables it too.
+_FA_DECODE_MIN_KV_128 = env_int("GMLX_FA_DECODE_MINKV128", 4096)
 
 
 def _probe_fa_max_rows():
@@ -477,6 +486,50 @@ def _fa_decode_eligible(q, k, v, mask):
     return _causal_str(mask)
 
 
+def _nax_gpu() -> bool:
+    try:
+        return bool(mlx_kquant.nax_available())
+    except Exception:
+        return False
+
+
+_NAX_GPU = _nax_gpu()
+
+
+def _fa_nax_decode() -> bool:
+    flag = os.environ.get("KQ_FA_VERIFY_NAX", "").strip().lower()
+    return _NAX_GPU and flag not in ("0", "false", "off", "no")
+
+
+def _fa_decode_128_eligible(q, k, v, mask):
+    # the hd128 gqa_decode shape (one row, a group of 8), from its own floor
+    if q.ndim != 4 or q.shape[0] != 1 or q.shape[2] != 1 or q.shape[-1] != 128:
+        return False
+    if v.shape[-1] != 128 or k.shape[-1] != 128:
+        return False
+    kv = k.shape[1]
+    if kv == 0 or q.shape[1] != 8 * kv:
+        return False
+    if k.shape[2] < _FA_DECODE_MIN_KV_128:
+        return False
+    return _causal_str(mask) and _fa_nax_decode()
+
+
+def _fa_decode_sinks(q, k, v, scale, sinks):
+    B, hq, _, hd = q.shape
+    kv = k.shape[1]
+    qf = mx.contiguous(q.reshape(B, kv, hq // kv, hd))
+    if sinks is None:
+        out = mlx_kquant.sdpa_fa_verify(qf, k, v, scale, 1)
+    else:
+        out, lse = mlx_kquant.sdpa_fa_verify(qf, k, v, scale, 1,
+                                             return_lse=True)
+        sink = sinks.astype(mx.float32).reshape(1, kv, hq // kv, 1)
+        w = mx.sigmoid(lse[..., None] - sink)
+        out = (out.astype(mx.float32) * w).astype(q.dtype)
+    return out.reshape(B, hq, 1, hd)
+
+
 def _fa_row_cap(hd):
     # hd512 runs the d-split kernel variant: fixed 32-row tile (no 64-row
     # instantiation), regardless of the probed hd256 cap.
@@ -603,6 +656,13 @@ def _sdpa_debug(route, q, k, mask):
 
 
 def _wrapped_sdpa(q, k, v, *, scale=1.0, mask=None, **kw):
+    if (_FA_DECODE and _HAS_FA_VERIFY
+            and _fa_decode_128_eligible(q, k, v, mask)):
+        try:
+            _route("fa_decode", q, k, mask)
+            return _fa_decode_sinks(q, k, v, float(scale), kw.get("sinks"))
+        except Exception as exc:  # unsupported shape -> gqa_decode, stock
+            _warn_fallback_once("fa_decode", exc)
     if (_HAS_GQA_DECODE and _GQA_DECODE
             and _gqa_decode_eligible(q, k, v, mask)):
         try:
