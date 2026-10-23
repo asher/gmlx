@@ -20,7 +20,7 @@ from typing import Any
 
 import mlx.core as mx
 
-from .kv_cache import ArraysCache, CacheList, RotatingKVCache
+from .kv_cache import ArraysCache, CacheList, ChunkedKVCache, RotatingKVCache
 from .media_salt import salt_at
 
 _log = logging.getLogger(__name__)
@@ -141,9 +141,10 @@ def _snapshot_entry(c: Any) -> Any:
         keys = tuple(mx.contiguous(a) for a in state[0])
         values = tuple(mx.contiguous(a) for a in state[1])
         return (_QUANT_TAG, keys, values, int(c.offset))
-    if len(state) > 2:
+    if len(state) > 2 or isinstance(c, ChunkedKVCache):
         # Multi-stream state contract (qwen4exp QSAKVCache: k/v/ik[/pos]):
-        # roundtrip the full state/meta_state, not just the k/v tail.
+        # roundtrip the full state/meta_state, not just the k/v tail. A
+        # chunked cache needs its meta_state too: the trimmed front.
         # contiguous decouples the lazy state views from the live, mutated
         # buffers.
         return (_STATE_TAG,

@@ -1551,6 +1551,13 @@ class ArraysCache(_BaseCache):
         return sum(array.nbytes for array in arrays.values())
 
 
+def _chunked_as_kv(c):
+    kv = KVCache()
+    if c.keys is not None:
+        kv.keys, kv.values, kv.offset = c.keys, c.values, c.offset
+    return kv
+
+
 class ChunkedKVCache(_BaseCache):
     step = 256
     _kv_routed = True
@@ -1669,8 +1676,12 @@ class ChunkedKVCache(_BaseCache):
         self.offset = snapshot["offset"]
 
     def prefix_cache_merge(self, rows, prefix_lens):
-        if all(isinstance(c, ChunkedKVCache) for c in rows):
-            return BatchKVCache.merge(rows)
+        # gmlx: serve batches a chunked layer as a BatchKVCache, which reads
+        # size(), 0 here. Merge the rows as plain KV caches; a row whose
+        # front was trimmed no longer holds its whole prefix.
+        if all(isinstance(c, ChunkedKVCache) and c.start_position == 0
+               for c in rows):
+            return BatchKVCache.merge([_chunked_as_kv(c) for c in rows])
         return None
 
     def empty(self):
