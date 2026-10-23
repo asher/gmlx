@@ -17,7 +17,6 @@ from gmlx.spec.mtp_load import (
     _stamp_mtp_width_cap,
     dflash_container,
     remap_dflash_arrays,
-    remap_muse_glimmer_dflash_arrays,
 )
 
 from test_vlm_mtp_gating import _cfg, _top
@@ -87,11 +86,11 @@ def _skeleton(n_layers=2, *, kquant=True):
 
 # --- container and remap -----------------------------------------------------
 
-def test_container_prefers_dflash2_over_muse():
+def test_container_prefers_dflash2_over_plain():
     arrays, _ = _skeleton()
     assert dflash_container(arrays) == "dflash2"
-    muse = {n: None for n in arrays if "selector" not in n and "conv" not in n}
-    assert dflash_container(muse) == "muse_glimmer"
+    plain = {n: None for n in arrays if "selector" not in n and "conv" not in n}
+    assert dflash_container(plain) == "dflash"
     assert dflash_container({"markov_w1.weight": None, **arrays}) == "dflash_dspark"
     assert dflash_container({"markov_w1.weight": None, "blk.0.attn_q_a.weight": None,
                              **arrays}) == "dspark"
@@ -118,10 +117,10 @@ def test_remap_is_closed_per_container():
     arrays, kq = _skeleton()
     with pytest.raises(RuntimeError, match="unknown tensor"):
         remap_dflash_arrays({**arrays, "blk.0.attn_gate.weight": None}, kq, "dflash2")
-    with pytest.raises(RuntimeError, match="muse_glimmer dflash remap: unknown tensor"):
-        remap_muse_glimmer_dflash_arrays(arrays, kq)
-    muse = {n: v for n, v in arrays.items() if "selector" not in n and "conv" not in n}
-    weights, _, _ = remap_muse_glimmer_dflash_arrays(muse, kq)
+    with pytest.raises(RuntimeError, match="dflash remap: unknown tensor"):
+        remap_dflash_arrays(arrays, kq, "dflash")
+    plain = {n: v for n, v in arrays.items() if "selector" not in n and "conv" not in n}
+    weights, _, _ = remap_dflash_arrays(plain, kq, "dflash")
     assert "layers.0.attention_conv.base_kernel" not in weights
 
 
@@ -162,11 +161,14 @@ def test_config_checks_hidden_vocab_and_family():
         _dflash_config_from_meta("d.gguf", _meta(), _target_dict(model_type="gemma4_text"),
                                  "dflash2", arrays=arrays)
     with pytest.raises(ValueError, match="serves"):
-        _dflash_config_from_meta("d.gguf", _meta(), _target_dict(), "muse_glimmer",
+        _dflash_config_from_meta("d.gguf", _meta(), _target_dict(), "dflash",
                                  arrays=arrays)
     for family in ("qwen3_5", "qwen3_5_text", "muse_glimmer"):
         _dflash_config_from_meta("d.gguf", _meta(), _target_dict(model_type=family),
                                  "dflash2", arrays=arrays)
+    for family in ("muse_glimmer", "gemma4_text"):
+        _dflash_config_from_meta("d.gguf", _meta(), _target_dict(model_type=family),
+                                 "dflash", arrays=arrays)
 
 
 def test_drafter_header_wins_the_logit_tail():
@@ -280,15 +282,15 @@ def test_rope_options_reach_the_drafter():
 @pytest.mark.parametrize("container,gguf_block,want", [
     ("dflash2", 8, (8, 8)),
     ("dflash2", 16, (16, 16)),
-    ("muse_glimmer", 16, (16, 16)),
-    ("muse_glimmer", 24, (16, 24)),
-    ("muse_glimmer", 6, (6, 6)),
+    ("dflash", 16, (16, 16)),
+    ("dflash", 24, (16, 24)),
+    ("dflash", 6, (6, 6)),
 ])
 def test_block_default_per_container(container, gguf_block, want):
     arrays, _ = _skeleton()
-    family = "muse_glimmer" if container == "muse_glimmer" else "qwen3_5"
+    family = "muse_glimmer" if container == "dflash" else "qwen3_5"
     meta = _meta(**{"dflash.block_size": gguf_block})
-    if container == "muse_glimmer":
+    if container == "dflash":
         meta = {k: v for k, v in meta.items() if "selector" not in k and "conv" not in k}
     config, _ = _dflash_config_from_meta("d.gguf", meta, _target_dict(model_type=family),
                                          container, arrays=arrays)
@@ -309,6 +311,7 @@ def test_assistant_routing_by_target_and_drafter_header(monkeypatch):
     assert _assistant_kind("qwen3_5", "g.gguf") == "gemma4"
     assert _assistant_kind("deepseek_v4", "d.gguf") == "deepseek4"
     assert _assistant_kind("muse_glimmer", "g.gguf") == "dflash"
+    assert _assistant_kind("gemma4_text", "d.gguf") == "dflash"
     assert _assistant_kind("qwen3_5", "missing.gguf") == "gemma4"
 
 

@@ -319,7 +319,7 @@ def _load_drafter_config(cfg, monkeypatch, block_size):
         "dflash.attention.sliding_window": 512,
     }
     with pytest.raises(_Stop):
-        mtp_load._load_muse_glimmer_dflash_drafter(
+        mtp_load._load_plain_dflash_drafter(
             "draft.gguf", None, cfg,
             arrays={"blk.0.attn_q.weight": None, "blk.1.attn_q.weight": None},
             kquant_meta={}, meta=meta, log=lambda *a, **k: None)

@@ -29,6 +29,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   key that a folder scan wrote for a model that now fits in memory.
 - `--no-mmproj` on `run` and `chat` loads the text model alone, without the
   `mmproj` that the config gives it.
+- Gemma 4 models run DFlash drafters, such as the one unsloth ships with
+  NVIDIA-Nemotron-3.5-Bolt-E4B, and `gmlx pull` pairs one with its model.
 
 ### Changed
 

@@ -503,8 +503,8 @@ def _print_report(v: dict) -> None:
         print("  => image VAE: `vae:` of an image_models entry, beside its DiT.")
     elif v.get("drafter") and v["codecs_loadable"]:
         print("  => draft-model companion: a speculative-decoding drafter, not a")
-        print("     standalone model - place it in the same directory as its")
-        print("     target GGUF (autodetected) or pass --draft-gguf.")
+        print("     standalone model - keep it in its target's folder, where")
+        print("     pull and sync-models pair it, or pass --draft-gguf.")
     else:
         reasons = []
         if not v["codecs_loadable"]:

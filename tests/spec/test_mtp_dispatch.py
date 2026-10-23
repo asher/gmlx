@@ -55,6 +55,7 @@ def _stub_loaders(monkeypatch, arches):
     ("qwen3_5", "dflash", "_load_dflash_drafter"),
     ("muse_glimmer", "dflash", "_load_dflash_drafter"),
     ("gemma4_text", "gemma4_assistant", "_load_gemma4_assistant_drafter"),
+    ("gemma4_text", "dflash", "_load_dflash_drafter"),
 ])
 def test_assistant_dispatch_routes_by_kind(monkeypatch, model_type,
                                            drafter_arch, want):

@@ -113,7 +113,7 @@ def test_markov_on_plain_layers_is_the_dflash_backbone():
     assert dflash_container({**arrays, "blk.0.attn_q_a.weight": None}) == "dspark"
     assert dflash_container({**arrays, "output_hc_fn.weight": None}) == "dspark"
     plain = {n: None for n in arrays if not n.startswith(("markov", "conf"))}
-    assert dflash_container(plain) == "muse_glimmer"
+    assert dflash_container(plain) == "dflash"
 
 
 @pytest.mark.parametrize("snr", [False, True])

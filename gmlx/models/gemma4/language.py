@@ -448,6 +448,9 @@ def _chunk_token_types(token_types, n, cache):
 
 
 class Gemma4TextModel(nn.Module):
+    # gmlx: set by LanguageModel.set_dflash_capture.
+    _dflash_capture: Optional[tuple] = None
+
     def __init__(self, config: TextConfig, kv_shared_only: bool = False):
         super().__init__()
         self.config = config
@@ -731,6 +734,16 @@ class Gemma4TextModel(nn.Module):
         capture_set = set(capture_layer_ids) if capture_layer_ids else set()
         keep = int(logits_to_keep) if logits_to_keep else 0
         trim_before_layer = self.first_kv_shared_layer_idx
+        # gmlx: an armed DFlash capture makes every hidden this call hands
+        # out [pre-norm final | captures], at full width.
+        skip_final_norm = kwargs.pop("skip_final_norm", False)
+        dflash_sink = None
+        if self._dflash_capture and not capture_set and (
+            skip_final_norm or hidden_sink is not None
+        ):
+            dflash_sink = []
+            dflash_ids = set(self._dflash_capture)
+            trim_before_layer = len(self.layers)
         if hidden_sink is not None:
             if capture_set:
                 trim_before_layer = max(trim_before_layer, max(capture_set) + 1)
@@ -749,7 +762,7 @@ class Gemma4TextModel(nn.Module):
         kept_from = None
         if keep_last and hidden_sink is not None:
             keep = keep or int(keep_last)
-        elif keep_last and not keep:
+        elif keep_last and not keep and dflash_sink is None:
             keep_last = int(keep_last)
             kept_from = self._kept_from(h, cache, keep_last)
         kept_shift = 0 if kept_from is None else h.shape[1] - keep_last
@@ -792,6 +805,8 @@ class Gemma4TextModel(nn.Module):
             intermediates[idx] = (kvs, offset)
             if hidden_sink is not None and idx in capture_set:
                 hidden_sink.append(h)
+            if dflash_sink is not None and idx in dflash_ids:
+                dflash_sink.append(h)
 
         if shared_kv_sink is not None:
             for idx, layer in enumerate(self.layers):
@@ -804,10 +819,21 @@ class Gemma4TextModel(nn.Module):
         # BEFORE the final RMSNorm. Speculative verification can reuse this
         # hidden for deferred logits; MTP drafters normalize it via
         # LanguageModel.speculative_draft_hidden before consuming it.
-        if hidden_sink is not None and not capture_set:
+        if dflash_sink is not None:
+            if len(dflash_sink) != len(self._dflash_capture):
+                raise RuntimeError(
+                    f"dflash capture collected {len(dflash_sink)} of "
+                    f"{len(self._dflash_capture)} layers"
+                )
+            packed = mx.concatenate([h, *dflash_sink], axis=-1)
+            if hidden_sink is not None:
+                hidden_sink.append(packed)
+            if skip_final_norm:
+                return packed
+        elif hidden_sink is not None and not capture_set:
             hidden_sink.append(h)
 
-        if kwargs.pop("skip_final_norm", False):
+        if skip_final_norm:
             return h
 
         h = self.norm(h)
@@ -833,6 +859,23 @@ class LanguageModel(nn.Module):
         self.model = Gemma4TextModel(config)
         self.final_logit_softcapping = getattr(config, "final_logit_softcapping", None)
 
+    # gmlx: the layer ids whose outputs a DFlash drafter reads. While set,
+    # a return_hidden call returns [pre-norm final | captures ...].
+    _dflash_capture: Optional[tuple] = None
+
+    def set_dflash_capture(self, layer_ids) -> None:
+        ids = tuple(int(i) for i in layer_ids) or None
+        # Around nn.Module.__setattr__, which would put the tuple in the
+        # parameter tree.
+        object.__setattr__(self, "_dflash_capture", ids)
+        object.__setattr__(self.model, "_dflash_capture", ids)
+
+    def _dflash_trunk(self, hidden: mx.array) -> mx.array:
+        if self._dflash_capture is None:
+            return hidden
+        # The quantized head reads the buffer, not the view's strides.
+        return mx.contiguous(hidden[..., : self.config.hidden_size])
+
     def logits_from_hidden(self, hidden: mx.array) -> mx.array:
         logits = self.model.embed_tokens.as_linear(hidden)
         if self.final_logit_softcapping is not None:
@@ -840,9 +883,12 @@ class LanguageModel(nn.Module):
         return logits
 
     def speculative_logits_from_hidden(self, hidden: mx.array) -> mx.array:
-        return self.logits_from_hidden(self.model.norm(hidden))
+        return self.logits_from_hidden(self.model.norm(self._dflash_trunk(hidden)))
 
     def speculative_draft_hidden(self, hidden: mx.array) -> mx.array:
+        # gmlx: a DFlash drafter reads the raw captures of the packed hidden.
+        if self._dflash_capture is not None:
+            return hidden
         return self.model.norm(hidden)
 
     # gmlx: the argmax of every verify position in one op, so the greedy

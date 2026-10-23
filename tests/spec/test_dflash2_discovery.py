@@ -113,10 +113,11 @@ def test_classification_carries_kind_and_declarations():
     assert disc._target_ids(meta_models) == {"muse-glimmer-hf"}
 
 
-def test_arch_table_lists_dflash_for_qwen3_5():
+def test_arch_table_lists_dflash_for_its_targets():
     assert arch_table.drafter_serves("dflash", "qwen35") is True
     assert arch_table.drafter_serves("dflash", "muse-glimmer") is True
-    assert arch_table.drafter_serves("dflash", "gemma4") is False
+    assert arch_table.drafter_serves("dflash", "gemma4") is True
+    assert arch_table.drafter_serves("dflash", "llama") is False
     assert "dflash" in arch_table.drafter_arches("qwen3_5")
 
 

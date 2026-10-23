@@ -118,7 +118,7 @@ cap for one model, and `0` removes it. `gmlx serve --speculative-width-cap N`
 sets it for every model and overrides each model's key. [Speculative batching](internals/speculative-batching.md)
 describes how the batch switches between these modes.
 
-## DFlash 2 drafters
+## DFlash drafters
 
 [DFlash 2](https://inco.ai/blog/dflash2/) is a block-diffusion drafter,
 with checkpoints for Qwen3.8-27B and Muse-Glimmer-30B. One drafter pass
@@ -145,6 +145,18 @@ which draft a block in one pass too. The loader reports them as
 most prompts, and the Bonsai-trained drafters lead only on long code
 output. Start with the Qwen3.8 drafter and measure the others on your own
 work.
+
+Gemma 4 models run plain DFlash drafters too. unsloth ships one beside its
+NVIDIA-Nemotron-3.5-Bolt-E4B quants, and `gmlx pull` pairs the two when you
+download both:
+
+```sh
+gmlx pull hf:unsloth/NVIDIA-Nemotron-3.5-Bolt-E4B-GGUF \
+  NVIDIA-Nemotron-3.5-Bolt-E4B-UD-Q4_K_XL.gguf \
+  dflash-NVIDIA-Nemotron-3.5-Bolt-E4B-Q8_0.gguf
+```
+
+Its block is 8, so a round drafts 7 tokens.
 
 ## Context copy
 
