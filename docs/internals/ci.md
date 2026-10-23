@@ -150,6 +150,9 @@ labelled `flaky` for the test, quoting the failure. The issue closes itself
 after 20 green runs in a row on main, or after 5 daily runs that no longer
 have the test.
 
+The daily stress run reports only through these issues. A test that fails
+under its stalls opens or reopens the issue and never fails the workflow.
+
 ## Nightly tests
 
 Mark a costly test that rarely breaks as `nightly`:
