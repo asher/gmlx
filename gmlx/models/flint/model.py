@@ -28,6 +28,7 @@ from gmlx.cache.attention import (
     scaled_dot_product_attention,
 )
 from gmlx.cache.kv_cache import KVCache, RotatingKVCache
+from gmlx.cache.window_sdpa import sliding_window_attention
 from gmlx.load.dtypes import (
     NORM_WEIGHT_KEY,
     activation_dtype,
@@ -173,6 +174,7 @@ class Attention(nn.Module):
         self.n_kv_heads = args.num_key_value_heads
         self.head_dim = args.head_dim
         self.use_sliding = use_sliding
+        self.window = args.sliding_window
         self.scale = self.head_dim**-0.5
 
         self.q_proj = nn.Linear(dim, self.n_heads * self.head_dim, bias=False)
@@ -221,10 +223,17 @@ class Attention(nn.Module):
         if cache is not None:
             keys, values = cache.update_and_fetch(keys, values)
 
-        output = scaled_dot_product_attention(
-            queries, keys, values, cache=cache, scale=self.scale, mask=mask,
-            sinks=self.sinks.astype(queries.dtype),
-        )
+        sinks = self.sinks.astype(queries.dtype)
+        if self.use_sliding:
+            output = sliding_window_attention(
+                queries, keys, values, cache, self.scale, mask, self.window,
+                sinks=sinks,
+            )
+        else:
+            output = scaled_dot_product_attention(
+                queries, keys, values, cache=cache, scale=self.scale,
+                mask=mask, sinks=sinks,
+            )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
         return self.o_proj(output)
 
