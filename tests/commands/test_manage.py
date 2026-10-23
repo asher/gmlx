@@ -1943,9 +1943,9 @@ def test_validate_says_the_experts_stay_in_memory_with_the_memory_free_now(
 @pytest.mark.parametrize("total,free_gib,line", [
     # 16 GiB reclaimable on a 64 GiB Mac: the reclaimable leg.
     (30_000_000_000, 10, "{free_now}: holding them takes 30.0 GB, against "
-     "17.2 GB of reclaimable memory less {keep} kept for the system, this "
-     "process and the KV room of 8.6 GB, capped at a fifth of RAM. To keep "
-     "them in memory, close other apps. {lever}"),
+     "17.2 GB of reclaimable memory less {keep} kept for the kernel floor "
+     "and the KV room of 8.6 GB. To keep them in memory, close other apps. "
+     "{lever}"),
     # In RAM, past the 43.2 GB budget of a 48 GB working set.
     (50_000_000_000, 200, "{over}: holding them takes 50.0 GB, past the "
      "43.2 GB budget. {lever}"),
@@ -1979,7 +1979,7 @@ def test_validate_prints_the_stream_line_a_load_would_print(
     _mint_moe_bytes(p)
     assert manage.cmd_validate([str(p)]) == 0
     out = capsys.readouterr().out
-    keep = f"{box['memory_size'] // 5 / 1e9:.1f} GB"
+    keep = "12.6 GB"         # the 4.0 GB kernel floor and the room
     want = "    => " + line.format(
         free_now=budget.STREAM_FREE_NOW, over=budget.STREAM_OVER_BUDGET,
         keep=keep, lever=budget.OVERCOMMIT_KEEPS) + "\n"
