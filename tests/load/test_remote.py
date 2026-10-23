@@ -96,6 +96,12 @@ def test_parse_ref_hf_too_short_raises():
         remote.parse_ref("hf:org")               # no repo component
 
 
+def test_parse_ref_hf_bad_repo_name_raises():
+    # A quoted "repo file" pair once reached the HF API as a URL with a space.
+    with pytest.raises(remote.RemoteError):
+        remote.parse_ref("hf:org/repo mmproj-Q8_0.gguf")
+
+
 # huggingface.co web/resolve URL normalization
 def test_hf_blob_url_normalized_to_file():
     r = remote.parse_ref(

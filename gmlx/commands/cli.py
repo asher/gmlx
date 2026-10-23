@@ -1030,15 +1030,22 @@ def _build_parser(prog: str = "gmlx run") -> argparse.ArgumentParser:
         "chat template) from this HF id / local dir instead of "
         "synthesizing it from GGUF metadata. Optional override.",
     )
-    ap.add_argument(
+    mmproj_group = ap.add_mutually_exclusive_group()
+    mmproj_group.add_argument(
         "--mmproj",
         default=None,
         metavar="PATH",
         help="Vision projector GGUF (general.architecture=clip). "
-        "Pairs a float vision tower with the K-quant LLM GGUF "
+        "Pairs a vision tower with the K-quant LLM GGUF "
         "to load a vision-language model. The image processor + "
         "chat template are synthesized from the GGUFs; "
         "--hf-source overrides that if needed.",
+    )
+    mmproj_group.add_argument(
+        "--no-mmproj",
+        action="store_true",
+        help="Load the text model only, without the mmproj that the "
+        "config gives this model.",
     )
     ap.add_argument(
         "--image",
@@ -1781,7 +1788,7 @@ def _run_generate(args) -> int:
 
 
 def _run_vlm(args) -> int:
-    """Image+text generation through a two-GGUF VLM (K-quant LLM + float mmproj).
+    """Image+text generation through a two-GGUF VLM (K-quant LLM + mmproj).
 
     Loads both GGUFs into a single mlx-vlm Model and hands the image request to
     mlx-vlm's own generate path (preprocessing + soft-token expansion + decode).
@@ -2147,7 +2154,8 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
     _set("thinking", getattr(rm, "thinking", None), "thinking")
     _set("reasoning_effort", getattr(rm, "reasoning_effort", None),
          "reasoning_effort")
-    _set("mmproj", rm.mmproj, "mmproj")
+    if not getattr(args, "no_mmproj", False):
+        _set("mmproj", rm.mmproj, "mmproj")
     _set("adapter", rm.adapter, "adapter")
     _set("draft_gguf", rm.draft_gguf, "draft_gguf")
     rope = getattr(rm, "rope_scaling", None)

@@ -24,7 +24,7 @@ import os
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
-from mlx.utils import tree_map_with_path
+from mlx.utils import tree_map, tree_map_with_path
 
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchLinear
 
@@ -2867,8 +2867,23 @@ def install_kquant_modules(model: nn.Module,
             f"codec {codec!r})")
         return module
 
+    # id -> (old, new); holding old keeps its id from being reused.
+    swapped: dict[int, tuple[nn.Module, nn.Module]] = {}
+
+    def _replace_once(path: str, module):
+        new = _replace(path, module)
+        if new is not module:
+            swapped[id(module)] = (module, new)
+        return new
+
     leaves = model.leaf_modules()
-    leaves = tree_map_with_path(_replace, leaves, is_leaf=nn.Module.is_module)
+    leaves = tree_map_with_path(_replace_once, leaves,
+                                is_leaf=nn.Module.is_module)
+    # A module held at two paths, such as gemma4 audio's _rel_pos.pos_proj
+    # beside relative_k_proj, has a codec at one path only. The other path
+    # takes the same swapped module, or it keeps its init weights.
+    leaves = tree_map(lambda m: swapped.get(id(m), (m, m))[1], leaves,
+                      is_leaf=nn.Module.is_module)
     if unmatched:
         head = ", ".join(unmatched[:3])
         more = f" (+{len(unmatched) - 3} more)" if len(unmatched) > 3 else ""

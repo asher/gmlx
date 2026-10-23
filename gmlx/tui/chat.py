@@ -189,7 +189,8 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
         "load - base stays K-quant, no merge (text path "
         "only, not --mmproj).",
     )
-    ap.add_argument(
+    mmproj_group = ap.add_mutually_exclusive_group()
+    mmproj_group.add_argument(
         "--mmproj",
         default=None,
         metavar="PATH",
@@ -197,6 +198,12 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
         "clip). Enables multimodal chat: /image and /audio "
         "stage media, dragging a file into the terminal "
         "stages it too.",
+    )
+    mmproj_group.add_argument(
+        "--no-mmproj",
+        action="store_true",
+        help="Load the text model only, without the mmproj that the "
+        "config gives this model.",
     )
     # MTP speculative decoding - the same group `gmlx run` exposes (shared builder,
     # so the two surfaces stay in sync and a config's `speculative: true` applies here).
@@ -2278,6 +2285,7 @@ _ASSISTANT_SAMPLING = {
 _ASSISTANT_REJECT = (
     ("adapter", "--adapter"),
     ("mmproj", "--mmproj"),
+    ("no_mmproj", "--no-mmproj"),
     ("chat_template", "--chat-template"),
     ("no_chat_template", "--no-chat-template"),
     ("chat_template_config", "--chat-template-config"),

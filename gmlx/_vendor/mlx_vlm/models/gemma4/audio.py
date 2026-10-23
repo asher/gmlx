@@ -210,7 +210,11 @@ class AudioRelativePositionEmbedding(nn.Module):
         max_span_plus_1 = pos_indices.shape[1]
 
         sin_emb = self._get_timing_signal(pos_indices, queries.dtype)
-        sin_emb = self.pos_proj(sin_emb.astype(self.pos_proj.weight.dtype))
+        # gmlx: a kquant pos_proj holds uint8 wire bytes and takes any float
+        # input, so only a float weight sets the input dtype.
+        if not hasattr(self.pos_proj, "kquant_type"):
+            sin_emb = sin_emb.astype(self.pos_proj.weight.dtype)
+        sin_emb = self.pos_proj(sin_emb)
         sin_emb = sin_emb.reshape(max_span_plus_1, self.num_heads, self.head_dim)
         sin_emb = sin_emb.astype(queries.dtype)
 

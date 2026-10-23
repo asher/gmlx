@@ -42,7 +42,7 @@ server:
 - `--local` always loads the model in the chat process.
 
 With a server model, the server owns the model and its chat template, so
-chat refuses `--adapter`, `--mmproj` and the chat template flags. The
+chat refuses `--adapter`, `--mmproj`, `--no-mmproj` and the chat template flags. The
 model's served [profile](config.md#profiles) sets the sampling. `/image`,
 `/audio`, `/thinking-budget` and Ctrl-T need a model loaded in the chat
 process.

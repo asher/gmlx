@@ -4,7 +4,7 @@ Composes the gmlx loader bridge (:func:`server_bridge_vlm.install_gguf_server_br
 the multi-model residency pool (:func:`residency.install_gguf_residency_pool`),
 the config-driven HTTP surface (:func:`gmlx.serve.patches.install_server_patches`),
 and mlx-vlm's FastAPI app + ``BatchGenerator`` continuous-batching engine into one
-GGUF-only HTTP server - **text**, **VLM** (LLM GGUF + float ``mmproj``), and
+GGUF-only HTTP server - **text**, **VLM** (LLM GGUF + ``mmproj``), and
 **speculative/MTP** models.
 
 Start modes (resolution order):
@@ -1512,7 +1512,7 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                     help="Resolve named hf repo ids from the LOCAL hf cache only "
                          "(never the network). Off => no HF access at all.")
     ap.add_argument("--mmproj", default=None,
-                    help="Float mmproj GGUF - makes a single positional model a VLM.")
+                    help="mmproj GGUF - makes a single positional model a VLM.")
     ap.add_argument("--hf-source", default=None,
                     help="Processor/config override for a single VLM model (rarely "
                          "needed; the processor is synthesized from the GGUFs).")

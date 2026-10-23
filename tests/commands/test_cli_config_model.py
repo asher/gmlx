@@ -6,6 +6,8 @@ path + merged sampling/template/load settings are overlaid onto the CLI args
 are pure."""
 from __future__ import annotations
 
+import pytest
+
 import gmlx.tui.chat as chat
 import gmlx.commands.cli as cli
 
@@ -474,3 +476,31 @@ def test_discovered_id_resolves(tmp_path, monkeypatch):
     rc, args = _resolve(["loose", "--config", str(cfg)])
     assert rc is None
     assert args.gguf == str(loose)
+
+
+def _mmproj_config(tmp_path):
+    gguf = tmp_path / "m-Q4_K_M.gguf"
+    gguf.write_bytes(b"GGUF")
+    (tmp_path / "mmproj-F16.gguf").write_bytes(b"GGUF")
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(
+        f"server:\n  model_dirs: [{tmp_path}]\n"
+        "models:\n"
+        "  m: {path: m-Q4_K_M.gguf, mmproj: mmproj-F16.gguf}\n")
+    return str(cfg)
+
+
+@pytest.mark.parametrize("resolve", [_resolve, _resolve_chat])
+def test_no_mmproj_drops_the_config_mmproj(tmp_path, resolve):
+    cfg = _mmproj_config(tmp_path)
+    _, args = resolve(["m", "--config", cfg])
+    assert args.mmproj == str(tmp_path / "mmproj-F16.gguf")
+    _, args = resolve(["m", "--config", cfg, "--no-mmproj"])
+    assert args.mmproj is None
+
+
+@pytest.mark.parametrize("build", [cli._build_parser, chat._build_parser])
+def test_no_mmproj_refuses_mmproj(build):
+    with pytest.raises(SystemExit) as exc:
+        build().parse_args(["m.gguf", "--mmproj", "mm.gguf", "--no-mmproj"])
+    assert exc.value.code == 2
