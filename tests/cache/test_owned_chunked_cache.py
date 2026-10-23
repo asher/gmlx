@@ -64,3 +64,30 @@ def test_state_round_trips_in_either_setter_order():
     for c in (a, b):
         assert (c.start_position, c.offset) == (4, 12)
         assert _cols(c.state[0]) == list(range(5, 13))
+
+
+def test_stored_entry_survives_live_decode_and_two_restores():
+    # 256 rows fill the buffer, so the stored state is the whole buffer.
+    mx.random.seed(0)
+    k = mx.random.normal((1, 8, 256, 64)).astype(mx.float16)
+    live = owned.ChunkedKVCache(4096)
+    live.update_and_fetch(k, k)
+    snap = _snapshot_entry(live)
+    mx.eval(snap[1])
+    want = np.asarray(k)
+    for i in range(3):
+        step = mx.random.normal((1, 8, 1, 64)).astype(mx.float16)
+        live.update_and_fetch(step, step)
+    live.trim(2)
+    live.update_and_fetch(step, step)
+    mx.eval(live.keys)
+    restored = []
+    for _ in range(2):
+        c = owned.ChunkedKVCache(4096)
+        _restore_entry(c, snap)
+        c.update_and_fetch(step * 2, step * 2)
+        restored.append(c)
+    mx.eval([c.keys for c in restored])
+    np.testing.assert_array_equal(np.asarray(snap[1][0]), want)
+    for c in restored:
+        np.testing.assert_array_equal(np.asarray(c.state[0][..., :256, :]), want)
