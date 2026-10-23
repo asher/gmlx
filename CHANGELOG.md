@@ -40,6 +40,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   256 rows at a time, so long decodes no longer stall on frequent regrows.
 - Flint decode is up to 11% faster at long context: its full-attention
   layers decode on the mlx-kquant kernel from 1024 keys.
+- Models in memory decode up to 5% faster: decode runs on 50 ops per command
+  buffer instead of 400. `GMLX_CB_COARSE_DECODE=1` restores the old caps.
 - `gmlx sync-models` adds a drafter to a model already in the config only
   with `--add-companions`. Without it, a sync or pull names each drafter
   or `mmproj` it leaves out.

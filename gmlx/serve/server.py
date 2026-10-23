@@ -2840,10 +2840,10 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # (deep-context safety; see server_memory).
     from .memory import apply_cache_limit
     apply_cache_limit(cfg)
-    from .cb_phase import (COARSE, FINE, STREAMED_DECODE, STREAMED_PREFILL,
+    from .cb_phase import (FINE, STREAMED_DECODE, STREAMED_PREFILL, decode_caps,
                            install_cb_phase_flips)
     if install_cb_phase_flips():
-        print(f"[server] command buffer caps: per-phase (decode {COARSE}, "
+        print(f"[server] command buffer caps: per-phase (decode {decode_caps(None)}, "
               f"prefill {FINE}; streamed decode {STREAMED_DECODE}, "
               f"streamed prefill {STREAMED_PREFILL})")
     else:

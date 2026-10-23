@@ -395,8 +395,8 @@ def test_a_step_leaves_rng_rope_state_and_buffer_caps_as_they_were(monkeypatch):
     rg._collect_pending_requests(active=True)
     assert (lm._rope_deltas, rg.model._position_ids) == ("chat", "chat-ids")
     # The job prefills on the fine caps and hands back the chat's decode caps.
-    assert caps == [cb_phase.COARSE, cb_phase.FINE, cb_phase.COARSE]
-    assert cb_phase.snapshot() == ("decode", cb_phase.COARSE)
+    assert caps == [cb_phase.RAM_DECODE, cb_phase.FINE, cb_phase.RAM_DECODE]
+    assert cb_phase.snapshot() == ("decode", cb_phase.RAM_DECODE)
     assert mx.array_equal(mx.random.state[0], before).item()
 
 
