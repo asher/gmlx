@@ -113,7 +113,6 @@ log the attention route.
 | `GMLX_CASCADE_SDPA=0` | Disable the shared-prefix cascade decode route, which reads a shared prefix once per step for the whole batch. |
 | `GMLX_CASCADE_MIN_P` | Shortest shared prefix, in tokens, that the cascade route handles. The default is `1024`. |
 | `GMLX_GQA_SDPA_MINKV128` | Fewest keys at which Flint decode leaves stock attention for the mlx-kquant decode kernel. The default is `1024`. |
-| `GMLX_FA_DECODE_MINKV128` | Fewest keys at which Flint decode on NAX GPUs (M5) moves to the matrix-unit kernel. The default is `4096`, and `KQ_FA_VERIFY_NAX=0` turns it off. |
 | `GMLX_GQA_SDPA_NAX512=0` | On NAX GPUs (M5), keep gemma-4 global-layer decode on the previous kernel instead of the faster one past 768 to 3072 keys. |
 
 ## Model kernels
