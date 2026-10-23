@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import fcntl
 import importlib.util
+import json
 import os
 import signal
 import subprocess
@@ -37,7 +38,22 @@ def test_a_round_that_runs_no_test_fails(tmp_path):
                       "--stall-ms", "1", "--out", str(out)])
     assert rc == 1
     assert (out / "round-1.log").exists()
-    assert (out / "flaky.json").read_text() == '{"flaky": []}'
+    assert json.loads((out / "flaky.json").read_text()) == {"flaky": [], "messages": {}}
+
+
+def test_failures_name_each_failed_test_once_with_its_first_message(tmp_path):
+    junit = tmp_path / "r.xml"
+    junit.write_text(
+        '<testsuites><testsuite>'
+        '<testcase classname="tests.ci.test_stress_tests" name="test_a[3-5]">'
+        '<failure message="IndexError: list index out of range">trace</failure></testcase>'
+        '<testcase classname="tests.ci.test_stress_tests" name="test_a[4-5]">'
+        '<failure message="AssertionError: assert 0 == -9">trace</failure></testcase>'
+        '<testcase classname="tests.ci.test_stress_tests" name="test_b[1-5]"/>'
+        '</testsuite></testsuites>')
+    assert stress.failures(junit, 5) == {
+        "tests/ci/test_stress_tests.py::test_a": "IndexError: list index out of range"}
+    assert stress.failures(tmp_path / "missing.xml", 5) == {}
 
 
 def test_a_round_gives_its_staller_and_its_tests_one_lock_and_removes_it(

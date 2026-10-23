@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import pytest
+from stalls import no_stall
 
 from gmlx.container import runtime, session, settings, terminal
 from gmlx.container.settings import ContainerPlan, Mount, SettingsError
@@ -2154,12 +2155,20 @@ def test_a_signal_another_thread_takes_wakes_the_wait():
     saved = signal.signal(signal.SIGUSR1, lambda signum, frame: child[0].kill())
     signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
     try:
-        child.append(subprocess.Popen(["sh", "-c", "kill -USR1 $PPID; exec sleep 30"]))
-        assert session._wait_child(child[0]) == -signal.SIGKILL
+        # The child signals once its stdin closes, so the handler finds it in
+        # ``child``. No stall meanwhile: macOS leaves a signal that only a
+        # thread asleep in the kernel can take pending on that thread across
+        # a stop and continue, until the thread next runs.
+        child.append(subprocess.Popen(["sh", "-c", "read go; kill -USR1 $PPID; exec sleep 30"],
+                                      stdin=subprocess.PIPE))
+        with no_stall():
+            child[0].stdin.close()
+            assert session._wait_child(child[0]) == -signal.SIGKILL
     finally:
+        idle.set()                        # a signal still pending there meets the handler
+        other.join()
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR1})
         signal.signal(signal.SIGUSR1, saved)
-        idle.set()
         for c in child:
             if c.poll() is None:
                 c.kill()

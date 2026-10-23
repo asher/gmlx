@@ -146,8 +146,12 @@ Docs are `docs/`, `overrides/`, `mkdocs.yml` and Markdown files outside
 
 When tests fail, CI reruns the failed ones alone. A test that passes on
 the rerun is flaky: the leg passes with a warning, and CI opens an issue
-labelled `flaky` for the test. The issue closes itself after 20 green runs
-in a row on main, or after 5 daily runs that no longer have the test.
+labelled `flaky` for the test, quoting the failure. The issue closes itself
+after 20 green runs in a row on main, or after 5 daily runs that no longer
+have the test.
+
+The daily stress run reports only through these issues. A test that fails
+under its stalls opens or reopens the issue and never fails the workflow.
 
 ## Nightly tests
 

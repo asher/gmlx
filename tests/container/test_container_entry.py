@@ -9,7 +9,6 @@ from gmlx and needs no conftest, so that job runs it with --noconftest.
 """
 from __future__ import annotations
 
-import contextlib
 import fcntl
 import os
 import shutil
@@ -23,6 +22,7 @@ import time
 from pathlib import Path
 
 import pytest
+from stalls import no_stall
 
 ROOT = Path(__file__).resolve().parents[2]
 NOT_FOUND, CANNOT_RUN, LISTEN, ENDING = 127, 126, 125, 75
@@ -635,27 +635,10 @@ def _state(pid: int) -> str:
     return done.stdout.strip()[:1]
 
 
-@contextlib.contextmanager
-def _no_stall():
-    """Holds the lock of scripts/stress_tests.py's staller, so no stall is
-    under way. The kernel drops a stop sent to a process that a stall holds
-    stopped, such as the SIGTSTP of a Ctrl-Z. A stall's SIGCONT undoes a
-    stop that has taken effect, and discards one still pending, as a
-    SIGTSTP is until its process runs or unblocks it. So a test holds the
-    lock from the stop until it sees what the stop did."""
-    path = os.environ.get("GMLX_STRESS_LOCK")
-    if not path:
-        yield
-        return
-    with open(path, "a") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        yield
-
-
 def _halt(proc) -> None:
     """Stops ``proc``, and returns once it has stopped. The staller leaves a
     stopped process alone, so it stays stopped."""
-    with _no_stall():
+    with no_stall():
         os.kill(proc.pid, signal.SIGSTOP)
         _, status = os.waitpid(proc.pid, os.WUNTRACED)
     assert os.WIFSTOPPED(status), status
@@ -692,7 +675,6 @@ def test_the_main_entry_waits_for_a_joined_copy_and_keeps_its_own_exit_code(entr
 
 
 def test_a_copy_cannot_join_a_session_that_is_ending(entry, session_dir):
-    import fcntl
 
     main = _start(entry, "--", "sh", "-c", "echo ready; read x")
     try:
@@ -852,7 +834,6 @@ def test_signals_reach_the_clients_process_group(entry, sig, code):
 def test_the_lock_never_reaches_the_client(entry, session_dir):
     """A copy whose entry is killed leaves its client running, and that
     client holds no lock, so the session ends when the main client does."""
-    import fcntl
 
     main = _start(entry, "--", "sh", "-c", "echo ready; read x; exit 6")
     copy = orphan = None
@@ -1235,7 +1216,7 @@ def test_ctrl_z_and_sigstop_cannot_suspend_the_client(entry):
     init, master, (client, main), out = _in_terminal(
         entry, INIT, "sh", "-c", "echo pid $$ $PPID; read x; kill -STOP $$; echo resumed; exit 5")
     try:
-        with _no_stall():
+        with no_stall():
             os.write(master, b"\x1a")             # Ctrl-Z
             out = _read_until(master, RESUMED + b"\r\n", seen=out)
             os.write(master, b"\n")
@@ -1255,7 +1236,7 @@ def test_ctrl_z_cannot_suspend_the_main_entry_while_it_waits_for_copies(entry):
         assert copy.stdout.readline() == b"joined\n"
         os.write(master, b"\n")
         _read_until(master, b"stays open")
-        with _no_stall():
+        with no_stall():
             os.write(master, b"\x1a")             # Ctrl-Z now reaches the entry's group
             _read_until(master, b"[launch] Ctrl-Z cannot suspend this session. Press Ctrl-C "
                                 b"twice to end it, which stops the other copy.\r\n")
@@ -1272,7 +1253,7 @@ def test_a_stop_of_the_entrys_own_group_stops_neither(entry):
     itself, and the entry resumes it."""
     if shutil.which("ps") is None:
         pytest.skip("needs ps")
-    with _no_stall():                             # the client stops as it starts
+    with no_stall():                             # the client stops as it starts
         init, master, (client, main, group), out = _in_terminal(
             entry, BACKGROUND, "sh", "-c",
             "echo pid $$ $PPID $(ps -o pgid= -p $$); kill -TSTP 0; echo resumed; exit 6")

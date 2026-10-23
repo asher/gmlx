@@ -297,7 +297,8 @@ jobs:
   stress:
     # Daily: the concurrency tests under random stalls, for the races a
     # loaded machine shows (scripts/stress_tests.py). A failing test opens
-    # or reopens its flaky issue. The job never gates a pull request.
+    # or reopens its flaky issue, which is the whole signal: the step never
+    # fails the job, so a flake does not paint the workflow badge red.
     if: github.event.schedule == '0 7 * * *'
     runs-on: macos-26
     timeout-minutes: 45
@@ -324,6 +325,8 @@ jobs:
       - name: Build the guest entry
         run: echo "GMLX_ENTRY_BIN=$(python scripts/build_guest_entry.py --native | tail -1)" >> "$GITHUB_ENV"
       - name: Stress
+        id: stress
+        continue-on-error: true
         env:
           KQUANT_FORCE_CPU: "1"
         run: python scripts/stress_tests.py --preset concurrency --count 3 --minutes 30 --out stress-out
@@ -335,7 +338,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python scripts/ci_tests.py issues --flaky stress-out/flaky.json --run-url "$RUN_URL"
       - uses: actions/upload-artifact@v7
-        if: failure()
+        if: steps.stress.outcome == 'failure'
         with:
           name: stress-out
           path: stress-out
