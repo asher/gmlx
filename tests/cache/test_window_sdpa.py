@@ -38,6 +38,12 @@ def spies(monkeypatch):
     return kernel, stock
 
 
+def _right_padded():
+    cache = BatchRotatingKVCache(_WINDOW, [0, 0])
+    cache.prepare(lengths=[2048, 1900], right_padding=[0, 148])
+    return cache
+
+
 @pytest.mark.parametrize(
     "cache,L,env,routed",
     [
@@ -45,10 +51,12 @@ def spies(monkeypatch):
         (RotatingKVCache(_WINDOW), 64, None, True),
         (RotatingKVCache(_WINDOW), 63, None, False),
         (RotatingKVCache(_WINDOW, keep=4), 2048, None, False),
-        (BatchRotatingKVCache(_WINDOW, [0]), 2048, None, False),
+        (BatchRotatingKVCache(_WINDOW, [0]), 2048, None, True),
+        (_right_padded(), 2048, None, False),
         (RotatingKVCache(_WINDOW), 2048, "0", False),
     ],
-    ids=["chunk", "one_block", "verify_width", "keep", "batch", "switch_off"],
+    ids=["chunk", "one_block", "verify_width", "keep", "batch",
+         "batch_right_padded", "switch_off"],
 )
 def test_route(spies, monkeypatch, cache, L, env, routed):
     kernel, stock = spies
@@ -62,7 +70,8 @@ def test_route(spies, monkeypatch, cache, L, env, routed):
     assert (len(kernel.calls), len(stock.calls)) == ((1, 0) if routed else (0, 1))
     if routed:
         args, kwargs = kernel.calls[0]
-        assert args[3:] == (0.5, _WINDOW) and kwargs == {"sinks": sinks}
+        assert args[3:] == (0.5, _WINDOW) and kwargs.pop("sinks") is sinks
+        assert set(kwargs) == ({"starts"} if type(cache) is BatchRotatingKVCache else set())
     else:
         assert stock.calls[0][1]["mask"] == "mask"
 
@@ -73,20 +82,57 @@ def test_window_kernel_matches_stock_over_a_rotating_cache():
     # mask the cache makes. The second chunk crosses the window.
     if window_sdpa._kq_window_kernel() is None:
         pytest.skip("needs an mlx_kquant build with sdpa_prefill_window on NAX")
-    D, scale = 128, 128**-0.5
-    sinks = mx.random.normal((32,), key=mx.random.key(1)).astype(mx.bfloat16)
     routed, stock = RotatingKVCache(_WINDOW), RotatingKVCache(_WINDOW)
-    for n, L in enumerate((1024, 1024, 452)):
-        keys = mx.random.split(mx.random.key(10 + n), 3)
-        q = mx.random.normal((1, 32, L, D), key=keys[0]).astype(mx.bfloat16)
-        k = mx.random.normal((1, 4, L, D), key=keys[1]).astype(mx.bfloat16)
-        v = mx.random.normal((1, 4, L, D), key=keys[2]).astype(mx.bfloat16)
-        mask = stock.make_mask(L, window_size=_WINDOW)
-        sk, sv = stock.update_and_fetch(k, v)
-        want = mx.fast.scaled_dot_product_attention(
-            q, sk, sv, scale=scale, mask=mask, sinks=sinks)
-        rk, rv = routed.update_and_fetch(k, v)
-        got = window_sdpa.sliding_window_attention(
-            q, rk, rv, routed, scale, None, _WINDOW, sinks=sinks)
-        err = mx.abs(got.astype(mx.float32) - want.astype(mx.float32)).max()
-        assert err.item() < 2e-2, f"chunk {n}: max abs err {err.item():.3e}"
+    for n, L in enumerate(_CHUNKS):
+        got, want = _chunk_pair(routed, stock, 1, L, seed=10 + n)
+        err = _max_err(got, want)
+        assert err < 2e-2, f"chunk {n}: max abs err {err:.3e}"
+
+
+def test_window_kernel_matches_stock_over_a_left_padded_batch():
+    # Prompts of 2500, 1900 and 700 tokens, left-padded into one batch and
+    # prefilled in the same three chunks. Over the chunks a row's padding is
+    # inside the buffer, trimmed past, or covers the whole chunk. Rows of
+    # padding are compared only for being finite.
+    if window_sdpa._kq_window_kernel() is None:
+        pytest.skip("needs an mlx_kquant build with sdpa_prefill_window on NAX")
+    pads = [0, 600, 1800]
+    routed = BatchRotatingKVCache(_WINDOW, pads)
+    stock = BatchRotatingKVCache(_WINDOW, pads)
+    col = 0
+    for n, L in enumerate(_CHUNKS):
+        got, want = _chunk_pair(routed, stock, len(pads), L, seed=20 + n)
+        assert mx.isfinite(got).all().item(), f"chunk {n}"
+        for b, pad in enumerate(pads):
+            first = max(0, pad - col)
+            if first < L:
+                err = _max_err(got[b, :, first:], want[b, :, first:])
+                assert err < 2e-2, f"chunk {n} row {b}: max abs err {err:.3e}"
+        col += L
+
+
+_CHUNKS = (1024, 1024, 452)
+_SINKS = mx.random.normal((32,), key=mx.random.key(1)).astype(mx.bfloat16)
+
+
+def _chunk_pair(routed, stock, B, L, seed, D=128):
+    """One prefill chunk at Flint's sliding-layer geometry through the
+    routed cache and through stock attention under the band mask the stock
+    cache makes."""
+    scale = D**-0.5
+    keys = mx.random.split(mx.random.key(seed), 3)
+    q = mx.random.normal((B, 32, L, D), key=keys[0]).astype(mx.bfloat16)
+    k = mx.random.normal((B, 4, L, D), key=keys[1]).astype(mx.bfloat16)
+    v = mx.random.normal((B, 4, L, D), key=keys[2]).astype(mx.bfloat16)
+    mask = stock.make_mask(L, window_size=_WINDOW)
+    sk, sv = stock.update_and_fetch(k, v)
+    want = mx.fast.scaled_dot_product_attention(
+        q, sk, sv, scale=scale, mask=mask, sinks=_SINKS)
+    rk, rv = routed.update_and_fetch(k, v)
+    got = window_sdpa.sliding_window_attention(
+        q, rk, rv, routed, scale, None, _WINDOW, sinks=_SINKS)
+    return got, want
+
+
+def _max_err(got, want) -> float:
+    return mx.abs(got.astype(mx.float32) - want.astype(mx.float32)).max().item()
