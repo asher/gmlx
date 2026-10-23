@@ -16,6 +16,7 @@ from ..mlp import DeepseekMLP as DeepseekV32MLP
 from ..rope_utils import initialize_rope
 from ..switch_layers import SwitchGLU
 from .config import ModelConfig
+from gmlx.cache.kv_append import depends_keys  # gmlx: keeps the in-place kv append
 
 
 class Indexer(nn.Module):
@@ -200,7 +201,7 @@ class DeepseekV32Attention(nn.Module):
                     sparse_mask = sparse_mask & mask
                 mask = sparse_mask
         if cache is not None and cache[0] is not None:
-            cache[0].keys = mx.depends(cache[0].keys, (cache[1].keys, cache[1].values))
+            depends_keys(cache[0], (cache[1].keys, cache[1].values))  # gmlx: keeps the in-place kv append
 
         pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
         if mask is not None:

@@ -27,7 +27,8 @@ from gmlx.cache.kv_policy import hold_fp16
 from gmlx.cache.snapshot import _truncate_kv_snapshot, row_snapshot
 from gmlx.serve.memtrace import _cache_report
 from gmlx.spec.helpers import _slice_shared_kv_after_reject
-from gmlx.spec.speculative import _cache_restore, _cache_snapshot
+from gmlx.spec.speculative import (_cache_restore, _cache_snapshot,
+                                   _filter_batch_rows_empty)
 
 pytestmark = pytest.mark.skipif(
     not kv_append.INPLACE, reason="mlx_kquant without kv_append")
@@ -315,6 +316,72 @@ def test_batch_reshape_then_append(op, inplace):
         np.testing.assert_array_equal(np.asarray(b), kb)
 
 
+def _quantized_filled():
+    c = owned.QuantizedKVCache(64, 8)
+    c.update_and_fetch(*_rows(20, 0))
+    snap = c.prefix_cache_snapshot()
+    for i in range(2):
+        c.update_and_fetch(*_rows(1, 10 + i))
+    return c, lambda: c.prefix_cache_restore(snap)
+
+
+def _batch_filled(make):
+    c = make()
+    c.update_and_fetch(*_rows(20, 0, b=2))
+    return c
+
+
+def _finalize_case():
+    c = owned.BatchKVCache([0, 0])
+    c.prepare(right_padding=[0, 3])
+    c.update_and_fetch(*_rows(20, 0, b=2))
+    return c, c.finalize
+
+
+def _quantized_batch_case(op):
+    c = _batch_filled(lambda: owned.BatchQuantizedKVCache([0, 0], 64, 8))
+    if op == "filter":
+        return c, lambda: c.filter(mx.array([1]))
+    other = _batch_filled(lambda: owned.BatchQuantizedKVCache([0, 0], 64, 8))
+    return c, lambda: c.extend(other)
+
+
+_REBINDS = {
+    "batch_filter": lambda: (lambda c: (c, lambda: c.filter([1])))(
+        _batch_filled(lambda: owned.BatchKVCache([0, 0]))),
+    "batch_extend": lambda: (lambda c, o: (c, lambda: c.extend(o)))(
+        _batch_filled(lambda: owned.BatchKVCache([0, 0])),
+        _batch_filled(lambda: owned.BatchKVCache([0, 0]))),
+    "batch_finalize": _finalize_case,
+    "quantized_batch_filter": lambda: _quantized_batch_case("filter"),
+    "quantized_batch_extend": lambda: _quantized_batch_case("extend"),
+    "quantized_restore": _quantized_filled,
+    "spec_empty_batch": lambda: (lambda c: (c, lambda: _filter_batch_rows_empty([c])))(
+        _batch_filled(lambda: owned.BatchKVCache([0, 0]))),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_REBINDS))
+def test_rebinds_drop_the_old_buffers(case):
+    c, op = _REBINDS[case]()
+    mx.eval(c.keys, c.values)
+    assert c._kv_own[1] is c.keys
+    op()
+    own = getattr(c, "_kv_own", None)
+    # The append's handles may only name the arrays the cache now holds.
+    assert own is None or own[1] is c.keys
+
+
+def test_indexer_depends_keeps_the_append_in_place(inplace):
+    c, ref = _filled()
+    idx, _ = _filled(seed=5)
+    kv_append.depends_keys(c, (idx.keys, idx.values))
+    inplace.clear()
+    _decode(c, ref, 2, 1200)
+    assert len(inplace) == 4
+    _same(c, ref)
+
+
 def test_disk_store_from_the_writer_thread(tmp_path, inplace):
     c, ref = _filled()
     saved = ref.copy()
@@ -572,3 +639,18 @@ def test_rotating_profile_keeps_step_rounding():
     assert p.grow_div == 0
     rows = (3000 + p.step - 1) // p.step * p.step
     assert p.footprint(3000) == ceil(rows * p.bytes_per_token)
+
+
+def test_prefill_reserve_predicts_the_grid():
+    # The store path sizes the prefill reserve from raw K/V slabs of caches
+    # that grow on the grid.
+    from gmlx._vendor.mlx_vlm.apc_coordinator import PrefillMemoryPlan
+
+    plan = PrefillMemoryPlan()
+    plan.prepare([5000])
+    k = mx.zeros((1, 1, 1000, 8), mx.float16)
+    per_token = 2 * k.nbytes / 1000
+    rows = kv_append.grid_capacity(5000, owned.KVCache.step)
+    assert rows > 5000
+    assert plan.observe_kv([k], [k], live_bytes=0) == 2 * ceil(rows * per_token)
+

@@ -17,6 +17,7 @@ from ..rope_utils import initialize_rope
 from ..switch_layers import SwitchGLU
 from .config import ModelConfig
 from .indexer_kernel import indexer_dense_scores, indexer_dense_scores_available
+from gmlx.cache.kv_append import depends_keys  # gmlx: keeps the in-place kv append
 
 
 class NgramEmbedding(nn.Module):
@@ -333,8 +334,8 @@ class LongcatFlashMLA(nn.Module):
                     sparse_mask = sparse_mask & mask
                 mask = sparse_mask
             if latent_cache is not None and index_cache is not None:
-                latent_cache.keys = mx.depends(
-                    latent_cache.keys, (index_cache.keys, index_cache.values)
+                depends_keys(  # gmlx: keeps the in-place kv append
+                    latent_cache, (index_cache.keys, index_cache.values)
                 )
 
         pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)

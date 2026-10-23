@@ -50,6 +50,7 @@ from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx.cache import refusals
 from gmlx.cache.attention import create_attention_mask
+from gmlx.cache.kv_append import depends_keys
 from gmlx.cache.kv_cache import CacheList, KVCache
 from gmlx.models.deepseek_v4.hyper_connection import HyperHead
 from gmlx.models.deepseek_v4.model import (
@@ -500,8 +501,7 @@ class HyV4Attention(nn.Module):
         # goes unused, so the graph does not grow across steps.
         if kv_cache is not None and idx_cache is not None \
                 and idx_cache.keys is not None:
-            kv_cache.keys = mx.depends(
-                kv_cache.keys, (idx_cache.keys, idx_cache.values))
+            depends_keys(kv_cache, (idx_cache.keys, idx_cache.values))
 
         S = latent.shape[2]
         if (L > 1 and not isinstance(mask, str)

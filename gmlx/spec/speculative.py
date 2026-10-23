@@ -31,6 +31,7 @@ from collections.abc import Callable, Iterator
 
 import mlx.core as mx
 import gmlx.lora_rows as lora_rows
+from gmlx.cache.kv_append import release as _release_kv
 from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_bool, env_float, env_int
 
@@ -2277,6 +2278,7 @@ def _filter_batch_rows_empty(prompt_cache: list) -> None:
             continue
         c.keys = None
         c.values = None
+        _release_kv(c)
         c.offset = c.offset[empty]
         c.left_padding = lp[empty]
         c._idx = 0

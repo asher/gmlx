@@ -50,6 +50,22 @@ def mark_fresh(cache, prev) -> None:
     cache._kv_hw = prev
 
 
+def release(cache) -> None:
+    """Drop the handles the append keeps, for a path that replaces the
+    cache's arrays, so the old buffers go with their last reader."""
+    cache.__dict__.pop("_kv_own", None)
+
+
+def depends_keys(cache, deps) -> None:
+    """``cache.keys = mx.depends(cache.keys, deps)``, keeping the append in
+    place: the result shares the buffer of the keys it wraps."""
+    own = getattr(cache, "_kv_own", None)
+    held = own is not None and own[1] is cache.keys
+    cache.keys = mx.depends(cache.keys, deps)
+    if held:
+        cache._kv_own = (own[0], cache.keys, own[2])
+
+
 def kv_write(cache, keys, values, prev, end, routed=True) -> None:
     """Write rows ``[prev, end)`` of ``cache.keys`` and ``cache.values`` and
     rebind both. ``keys`` and ``values`` are arrays, or sequences of arrays

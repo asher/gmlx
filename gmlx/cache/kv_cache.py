@@ -27,7 +27,8 @@ import mlx.nn as nn
 from mlx.utils import tree_map, tree_reduce
 
 # gmlx: in-place append and the capacity grid; see gmlx/cache/kv_append.py.
-from .kv_append import grid_capacity, grow, grow_levers, kv_write, mark_fresh
+from .kv_append import (grid_capacity, grow, grow_levers, kv_write, mark_fresh,
+                        release)
 
 
 def should_quantize_kv_layer(layer_idx: int, num_layers: int) -> bool:
@@ -478,6 +479,7 @@ class QuantizedKVCache(_BaseCache):
 
     def prefix_cache_restore(self, snapshot):
         """Restore a native packed snapshot into a fresh cache."""
+        release(self)
         self.__init__()
         self.state = snapshot["state"]
         self.meta_state = snapshot["meta_state"]
@@ -1884,6 +1886,7 @@ class BatchKVCache(_BaseCache):
 
     def finalize(self):
         if self._right_padding is not None:
+            release(self)
             if self.keys is None:
                 # Some sparse-attention side caches are prepared with the
                 # layer cache list but are not updated on single-token decode.
@@ -1930,6 +1933,7 @@ class BatchKVCache(_BaseCache):
         """
         In-place filter to keep just the given indices in the cache.
         """
+        release(self)
         if self.keys is not None:
             self.keys = self.keys[batch_indices]
             self.values = self.values[batch_indices]
@@ -1953,6 +1957,7 @@ class BatchKVCache(_BaseCache):
         """
         In-place extend this cache with the other cache.
         """
+        release(self)
         # gmlx: the cascade stamp covers both sides' rows.
         _cascade_extend(self, other)
         if self.keys is None and other.keys is None:
@@ -2690,6 +2695,7 @@ class BatchQuantizedKVCache(_BaseCache):
         """Roll right-padding into left-padding after multi-row prefill."""
         if self._right_padding is None:
             return
+        release(self)
         padding = self._right_padding
         if self.keys is not None:
             # Seq axis is 2 for packed/scales/biases (B, H, S, ...), as in BatchKVCache.
@@ -2764,6 +2770,7 @@ class BatchQuantizedKVCache(_BaseCache):
 
     def filter(self, batch_indices: mx.array):
         """Keep only the sequences at *batch_indices*."""
+        release(self)
         if self.keys is not None:
             self.keys = tuple(k[batch_indices] for k in self.keys)
             self.values = tuple(v[batch_indices] for v in self.values)
@@ -2784,6 +2791,7 @@ class BatchQuantizedKVCache(_BaseCache):
 
     def extend(self, other: "BatchQuantizedKVCache"):
         """Concatenate *other* batch into this cache along the batch dim."""
+        release(self)
         # gmlx: the cascade stamp covers both sides' rows.
         _cascade_extend(self, other)
         if self.keys is None and other.keys is None:
