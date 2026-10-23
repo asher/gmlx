@@ -12,7 +12,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `-high` intents and tool calls. On a Mac with less memory than the file, it
   runs with `--stream-experts`.
 - RecursiveSI Flint (GGUF arch `flint`), with its `<think>` reasoning and
-  tool calls.
+  tool calls. It decodes 1.4x to 1.9x as fast as llama.cpp. See
+  [Benchmarks](docs/benchmarks.md).
 - `GMLX_NORM_DTYPE` sets the width of a language model's norm weights:
   `fp32` keeps the F32 norm weights in float32 and `activation` casts them to
   the activation dtype, whatever the model's default.
@@ -38,8 +39,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cache every token, so decode at long context is faster and peaks lower.
 - The KV cache grows by an eighth of its size, at most 8192 rows, instead of
   256 rows at a time, so long decodes no longer stall on frequent regrows.
-- Flint decode is up to 11% faster at long context: its full-attention
-  layers decode on the mlx-kquant kernel from 1024 keys.
 - Models in memory decode up to 5% faster: decode runs on 50 ops per command
   buffer instead of 400. `GMLX_CB_COARSE_DECODE=1` restores the old caps.
 - `gmlx sync-models` adds a drafter to a model already in the config only

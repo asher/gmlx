@@ -55,11 +55,11 @@ settings and chat prompts on the setup in this table.
 | llama.cpp | `b9967` |
 | Build overrides | Models measured again on newer releases list their own builds under Model provenance. |
 | DeepSeek-V4 reference | The dwarfstar ds4-server by antirez with the ignore-eos patch, at `b030961` for DeepSeek-V4-Flash IQ2_XXS and `8db1d1d` for DeepSeek-V4.1-Flash Q2. |
-| Dates | 2026-07-05 to 2026-09-18. |
+| Dates | 2026-07-05 to 2026-10-23. |
 | Prompt corpus | `HuggingFaceH4/ultrachat_200k:train_sft`, with the chat template applied. |
 | Sampling | Temperature 0.6, top-p 0.95, top-k 20 and seed 1234, with the same random sequence on both engines. |
 | Speculative draft | Three draft tokens a round, two on Qwen3.8-Flash-Next, from the native MTP head or gemma-4's companion drafter. |
-| Aggregation | Four requests for each cell in two rounds that alternate the engines. A cell gives the median, then the lowest and highest sample in parentheses. |
+| Aggregation | Four requests a cell in two rounds that alternate the engines, unless a model's section says otherwise. Median, then lowest and highest sample in parentheses. |
 | Thermal protocol | A cooldown to 50 C or below between engines, 20 seconds of baseline cooldown and one warmup request. |
 | Decode metric | Median decode tokens per second over samples of at least 150 output tokens. |
 | Prefill metric | Median prefill tokens per second over all successful samples. |
@@ -96,6 +96,7 @@ one cell at a time.
 | DeepSeek-V4-Flash UD-IQ3_XXS | `DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf` | [HF](https://huggingface.co/unsloth/DeepSeek-V4-Flash-GGUF) | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-13 |
 | DeepSeek-V4-Flash IQ2_XXS | `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4-gguf) | - | gmlx 0.2.2 / kq 0.3.11 | 2026-08-09 |
 | DeepSeek-V4.1-Flash Q2 | `DeepSeek-V4.1-Flash-Q2.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4.1-flash-gguf) | - | gmlx 0.4.13+ds41 / kq 0.4.11 | 2026-09-18 |
+| Flint INT4 Q4_1 | `flint-int4-q4_1.gguf` | [HF](https://huggingface.co/RecursiveSI/flint-int4-gguf) | - | gmlx 0.5.1+flint-perf / kq 0.5.4+kv-append | 2026-10-23 |
 | Qwen3.8-Flash-Next UD-Q3_K_XL | `Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | Native | gmlx 0.4.5+#98 / kq 0.4.3 | 2026-08-29 |
 
 ## Per-model detail
@@ -299,6 +300,25 @@ one cell at a time.
 | 110k | 28.3 (28-28.9) | 9.9 (9.7-9.9) | 2.86x | 543.8 (492.2-569.6) | 116.5 (112-118.7) | 4.67x |
 | 200k | 24.9 (24.8-25.1) | - | - | 484.3 (450-493.2) | - | - |
 | 384k | 22.3 (20.7-22.9) | - | - | 411.1 (397.2-431.8) | - | - |
+
+### Flint INT4 Q4_1
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/flint-int4-q4_1-panels-dark.svg">
+  <img src="assets/perf/per-model/flint-int4-q4_1-panels.svg" alt="gmlx and llama.cpp prefill and decode throughput against KV depth for Flint INT4 Q4_1">
+</picture>
+
+| KV depth | gmlx decode | llama.cpp decode | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill | gmlx/llama.cpp prefill |
+|---|--:|--:|--:|--:|--:|--:|
+| 512 | 160 (156.6-161) | 115.8 (113.2-116.7) | 1.38x | 3698.7 (3238.4-4042.5) | 1811 (1618.6-2371.7) | 2.04x |
+| 4.3k | 157.4 (157.2-157.7) | 117 (115.9-117.2) | 1.35x | 4045.2 (3842.7-4093.4) | 2203.3 (2073.4-2337.2) | 1.84x |
+| 17k | 146.9 (146.4-147.5) | 104.1 (103.9-104.5) | 1.41x | 3787.8 (3746-3823) | 2021.2 (2004.1-2029.4) | 1.87x |
+| 67k | 107.3 (105.8-107.9) | 68.7 (67.3-70.6) | 1.56x | 2506.2 (2417.9-2543.4) | 1217.7 (1187.9-1219.1) | 2.06x |
+| 110k | 87.5 (86.9-88.2) | 46.3 (45.8-46.8) | 1.89x | 1877.6 (1838.3-1916.8) | 835.4 (812.9-858) | 2.25x |
+| 200k | 61.8 (61.6-61.9) | 32 (31.4-32.5) | 1.93x | 1167.7 (1165.5-1169.9) | 544.1 (520.7-567.5) | 2.15x |
+
+Flint was measured in one round, with three requests a cell up to 67K
+and two at 110K and 200K.
 
 ### Qwen3.8-Flash-Next UD-Q3_K_XL
 
