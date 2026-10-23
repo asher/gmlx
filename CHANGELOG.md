@@ -27,6 +27,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   free now, and `--json` adds `experts_in_memory_now` and `auto_mtp_off_now`.
 - `gmlx doctor` and the start of `gmlx serve` warn about a `stream: experts`
   key that a folder scan wrote for a model that now fits in memory.
+- `--no-mmproj` on `run` and `chat` loads the text model alone, without the
+  `mmproj` that the config gives it.
 
 ### Changed
 
@@ -72,6 +74,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A quantized `mmproj`, such as `mmproj-Q8_0.gguf`, failed to load for most
+  vision and audio models. It now loads and keeps its weights quantized.
 - Qwen-Image 2.1, FLUX.3 klein, Krea 2 and MOSS-Image failed every request
   when their `encoder` was a chat model served with its `mmproj`.
 - In a `discover:` setup, `gmlx rm` of a chat model that image models share

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import struct
 import urllib.error
 import urllib.parse
@@ -24,6 +25,8 @@ from dataclasses import dataclass, field
 from .preflight import loadable_type
 
 _HF_HOST = "https://huggingface.co"
+# The characters Hugging Face allows in an org or repo name.
+_HF_NAME_RE = re.compile(r"\w[\w.-]*")
 
 # GGUF metadata value types (for skipping KV we don't care about).
 _GGUF_SCALAR_SIZE = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1,
@@ -377,6 +380,10 @@ def parse_ref(ref: str) -> Ref:
         if any(p == ".." for p in parts):
             # `..` would survive into the local dest-path join on pull.
             raise RemoteError(f"hf ref must not contain '..': {ref!r}")
+        if not all(_HF_NAME_RE.fullmatch(p) for p in parts[:2]):
+            raise RemoteError(
+                f"hf ref names no valid repository {'/'.join(parts[:2])!r}: "
+                f"{ref!r}")
         return _make_hf_ref("/".join(parts[:2]), "/".join(parts[2:]), revision, ref)
     if ref.startswith(("http://", "https://")):
         hf = _hf_ref_from_url(ref)

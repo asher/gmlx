@@ -399,6 +399,7 @@ are refused:
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--mmproj PATH` | None | Load this projector GGUF. |
+| `--no-mmproj` | Off | Load the text model alone, without the `mmproj` that the config gives it. |
 | `--image PATH_OR_URL` | None | Prepend these comma-separated images. |
 | `--audio PATH_OR_URL` | None | Prepend these comma-separated audio files. The model needs an audio tower. |
 | `--resize-shape N_OR_WxH` | Model default | Resize images before encoding. |
@@ -538,7 +539,7 @@ These [`gmlx run`](#gmlx-run) flags mean the same as they do there:
 | Reasoning | `--reasoning`, `--thinking`, `--reasoning-effort`, `--thinking-budget`, `--thinking-start-token`, `--thinking-end-token` |
 | Loading | `--arch`, `--hf-source`, `--chat-template`, `--no-chat-template`, `--chat-template-config`, `--no-remap`, `--no-zero-copy`, `--adapter` |
 | Memory | `--max-kv-size`, `--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`, `--kv-tail-tokens`, `--quantized-kv-start`, `--prefill-step-size`, `--dtype` |
-| Multimodal | `--mmproj`, `--resize-shape` |
+| Multimodal | `--mmproj`, `--no-mmproj`, `--resize-shape` |
 | Speculation | `--speculative`, `--mtp`, `--no-speculative`, `--no-mtp`, `--draft-gguf`, `--native-mtp`, `--draft-block-size`, `--stochastic-mtp` |
 | Streaming | `--stream-experts`, `--stream-cpu`, `--stream-fast-disk` |
 | Streaming feeders | `--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`, `--gpu-keepwarm`, `--no-gpu-keepwarm` |
@@ -546,7 +547,7 @@ These [`gmlx run`](#gmlx-run) flags mean the same as they do there:
 | Rope scaling | `--rope-scaling`, `--rope-scale`, `--rope-freq-base`, `--rope-freq-scale` |
 | YaRN | `--yarn-orig-ctx`, `--yarn-ext-factor`, `--yarn-attn-factor`, `--yarn-beta-slow`, `--yarn-beta-fast` |
 
-A server client refuses `--adapter`, `--mmproj`, `--chat-template`,
+A server client refuses `--adapter`, `--mmproj`, `--no-mmproj`, `--chat-template`,
 `--no-chat-template`, `--chat-template-config` and the rope scaling flags,
 and ignores the other
 loading, memory, speculation and streaming flags. A base model with no

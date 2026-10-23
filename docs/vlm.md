@@ -18,6 +18,11 @@ file in the same repository:
 gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf mmproj-BF16.gguf
 ```
 
+Pick the `BF16` or `F16` companion when the repository has one, because it
+reads media most accurately. A quantized companion, such as
+`mmproj-Q8_0.gguf`, takes about half the memory. Use it only when the model
+does not fit otherwise.
+
 When both files land in a folder of
 [`server.model_dirs`](config.md#servermodel_dirs), `pull` registers the
 model with its companion and prints `(vlm)` after the id. For a model that
@@ -28,7 +33,8 @@ key to its entry, or run
 pairs the files that a folder scan finds, including a companion at the root
 of a repository whose quants each sit in their own folder.
 
-`--mmproj` pairs the two files for one command. `gmlx validate` recognizes
+`--mmproj` pairs the two files for one command, and `--no-mmproj` loads a
+registered model without its companion. `gmlx validate` recognizes
 a companion and says to pair it with its language model. The language
 model alone still runs as a text model, and media support needs no
 optional package.

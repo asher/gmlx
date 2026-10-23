@@ -502,7 +502,7 @@
   "mlx_vlm/models/gemma3n/processing_gemma3n.py": {"status": "verbatim", "upstream": "8d414aa59d4cfe4a8fee23ff641e310e6154060fa2853946f2517e0f42210670"},
   "mlx_vlm/models/gemma3n/vision.py": {"sha256": "6939bc0ef76dffd836307e506e70cb7b00c2fded397920dd12ba9ccf592b0551", "status": "codemod", "upstream": "1e53521111f2b085962ed4acb98bdef3d543c0a4f76ffbfe87dd8d56d8b4649e"},
   "mlx_vlm/models/gemma4/__init__.py": {"status": "verbatim", "upstream": "7fb45ed495ce70fd1c04c4e90ce893e09c77b5b3f99e644106ff7d55cc808bc9"},
-  "mlx_vlm/models/gemma4/audio.py": {"status": "verbatim", "upstream": "e684639864302aa797d3f049fa6b84aedca8704d0f28751622145cd923485542"},
+  "mlx_vlm/models/gemma4/audio.py": {"sha256": "fd5f38a6b42c4f9d892cebe64904a3f932d75269d92a2bb6186b30e902b7ba46", "status": "edited", "upstream": "e684639864302aa797d3f049fa6b84aedca8704d0f28751622145cd923485542"},
   "mlx_vlm/models/gemma4/audio_feature_extractor.py": {"status": "verbatim", "upstream": "6b337b74165a6167367eb68ed4c509f35025750ee7fe0c594ccf9b019d35769c"},
   "mlx_vlm/models/gemma4/config.py": {"status": "verbatim", "upstream": "f4d1194e9f8329a37a686c273e06d13a79f4e69efd0b5474197bdf9cc2c0b954"},
   "mlx_vlm/models/gemma4/gemma4.py": {"status": "verbatim", "upstream": "c841c07f2b236454b26d418a6e8d152fd4060c81f5df175f1a1c5d8213c76d62"},

@@ -1,15 +1,16 @@
 """Two-GGUF vision-language loading.
 
 A vision-language model ships as two GGUFs: a K-quant **LLM** GGUF (a normal
-text architecture) and a separate **float** ``mmproj`` GGUF
+text architecture) and a separate ``mmproj`` GGUF
 (``general.architecture = "clip"``) holding the vision encoder + cross-modal
 projector. They carry no cross-reference; the pair is associated by an explicit
 ``mmproj`` path, the same contract as llama.cpp ``mtmd``.
 
 This module loads both into a single ``mlx-vlm`` ``Model`` (``vision_tower`` /
 ``language_model`` / projector): the LLM tensors are remapped under the
-``language_model.`` prefix and K-quant-swapped as usual, while the float vision
-tensors are remapped onto the vision tower and left native. mlx-kquant owns the
+``language_model.`` prefix and K-quant-swapped as usual, while the vision
+tensors are remapped onto the vision tower. Float ones stay native, and
+quantized matmul weights are K-quant-swapped too. mlx-kquant owns the
 GGUF side (parse / remap / config synth / build); ``mlx-vlm`` is an optional
 dependency supplying the model classes + image processor.
 
@@ -993,7 +994,7 @@ def remap_vision_arrays(
     arrays: dict[str, mx.array], model_type: str, *, with_audio: bool = False,
     mm_codecs: dict[str, str] | None = None, mm_meta: dict | None = None,
 ) -> tuple[dict[str, mx.array], list[str], dict[str, str]]:
-    """Remap a float mmproj's tensors onto the mlx-vlm vision tower + projector.
+    """Remap an mmproj's tensors onto the mlx-vlm vision tower + projector.
 
     With ``with_audio`` (an omni mmproj carrying an audio encoder), the ``a.*`` /
     ``mm.a.*`` audio tensors are also remapped onto the audio tower + audio
@@ -1003,18 +1004,88 @@ def remap_vision_arrays(
     layout depends on a hyperparameter rather than on shape alone - Kimi-K2.5's
     Q/K RoPE de-permutation needs the vision head count.
 
-    Most mmproj GGUFs are pure float (vision/projector weights are never K-quant).
-    A few (Qwen3-Omni) ship K-quant (Q8_0) vision/audio matmul weights; pass
-    ``mm_codecs`` (the mmproj's GGUF tensor->codec map) so those tensors carry
-    their packed wire bytes + ``.scales`` placeholder through to the kquant module
-    swap. The returned ``vis_kqmeta`` (target-weight-name -> codec) is merged into
-    the LLM ``hf_kquant_meta`` so ``install_kquant_modules`` swaps them too.
+    ``mm_codecs`` is the mmproj's GGUF tensor->codec map. A quantized tensor
+    that its family maps to a target unchanged keeps its wire bytes and
+    ``.scales`` placeholder, and the returned ``vis_kqmeta`` (target weight
+    name -> codec) joins the LLM ``hf_kquant_meta`` so ``install_kquant_modules``
+    swaps its module. A tensor the family transforms (a conv reshape, a QKV
+    split), and every weight of a tower pinned to float by
+    ``float_dtype_rules``, is dequantized to float16 instead.
 
     Returns ``(hf_vision_weights, skipped_names, vis_kqmeta)``.
     """
+    codecs = mm_codecs or {}
+    if not codecs:
+        out, skipped = _remap_float_arrays(arrays, model_type,
+                                           with_audio=with_audio, mm_meta=mm_meta)
+        return out, skipped, {}
+    # The families map float arrays. Each quantized tensor goes in as a lazy
+    # dequant; one that comes out as the same object was not transformed, so
+    # its wire bytes can stand in for it. Dequants left unused never run.
+    floats = {k: v for k, v in arrays.items() if not k.endswith(".scales")}
+    src_of: dict[int, str] = {}
+    for name, codec in codecs.items():
+        deq = dequantize_wire(arrays[name], arrays[_scales_key(name)], codec)
+        floats[name] = deq
+        src_of[id(deq)] = name
+    out, skipped = _remap_float_arrays(floats, model_type,
+                                       with_audio=with_audio, mm_meta=mm_meta)
+    rules = float_dtype_rules(model_type)
+    pinned = rules["fp32_keep"] + rules["f16_keep"] + rules["fp32_cast"]
+    vis_kqmeta: dict[str, str] = {}
+    for tgt, arr in list(out.items()):
+        src = src_of.get(id(arr))
+        if (src is None or floats[src] is not arr
+                or not tgt.endswith(".weight")
+                or any(s in tgt for s in pinned)):
+            continue
+        out[tgt] = arrays[src]
+        out[_scales_key(tgt)] = arrays[_scales_key(src)]
+        vis_kqmeta[tgt] = codecs[src]
+    return out, skipped, vis_kqmeta
+
+
+def _scales_key(weight_name: str) -> str:
+    return weight_name[: -len(".weight")] + ".scales"
+
+
+def dequantize_wire(wire: mx.array, scales: mx.array, codec: str) -> mx.array:
+    """GGUF wire bytes as float16 of the tensor's logical shape (blocks run
+    along the last axis)."""
+    import mlx_kquant as kq
+
+    return kq.dequantize(wire, scales, codec, mx.float16).reshape(
+        *wire.shape[:-1], -1)
+
+
+def unpack_unswappable_tower_weights(model, weights: dict[str, mx.array],
+                                     vis_kqmeta: dict[str, str]) -> int:
+    """Dequantize, in ``weights``, each packed tower weight whose module is
+    not an ``nn.Linear``, and drop it from ``vis_kqmeta``. A tower Embedding,
+    conv or custom module reads its weight as a float array. Returns the
+    count."""
+    import mlx.nn as nn
+    from mlx.utils import tree_flatten
+
+    leaves = dict(tree_flatten(model.leaf_modules(), is_leaf=nn.Module.is_module))
+    n = 0
+    for tgt in list(vis_kqmeta):
+        if isinstance(leaves.get(tgt[: -len(".weight")]), nn.Linear):
+            continue
+        codec = vis_kqmeta.pop(tgt)
+        weights[tgt] = dequantize_wire(
+            weights[tgt], weights.pop(_scales_key(tgt)), codec)
+        n += 1
+    return n
+
+
+def _remap_float_arrays(
+    arrays: dict[str, mx.array], model_type: str, *, with_audio: bool,
+    mm_meta: dict | None,
+) -> tuple[dict[str, mx.array], list[str]]:
+    """The family remap of :func:`remap_vision_arrays`, on float arrays."""
     out: dict[str, mx.array] = {}
     skipped: list[str] = []
-    vis_kqmeta: dict[str, str] = {}
 
     if model_type == "llava":
         for name, arr in arrays.items():
@@ -1028,7 +1099,7 @@ def remap_vision_arrays(
             if name == "v.patch_embd.weight":
                 arr = mx.transpose(arr, (0, 2, 3, 1))
             out[hf] = arr
-        return out, skipped, vis_kqmeta
+        return out, skipped
 
     if model_type == "pixtral":
         for name, arr in arrays.items():
@@ -1041,7 +1112,7 @@ def remap_vision_arrays(
             hf, is_patch = res
             # patch conv: GGUF [out, in, kH, kW] (NCHW) -> nn.Conv2d [out, kH, kW, in].
             out[hf] = mx.transpose(arr, (0, 2, 3, 1)) if is_patch else arr
-        return out, skipped, vis_kqmeta
+        return out, skipped
 
     if model_type in ("muse_glimmer", "muse_spark"):
         for name, arr in arrays.items():
@@ -1064,7 +1135,7 @@ def remap_vision_arrays(
             hf, is_patch = res
             # patch conv: GGUF [out, in, kH, kW] (NCHW) -> nn.Conv2d [out, kH, kW, in].
             out[hf] = mx.transpose(arr, (0, 2, 3, 1)) if is_patch else arr
-        return out, skipped, vis_kqmeta
+        return out, skipped
 
     if model_type == "kimi_k25":
         n_head = _mm_int(mm_meta or {}, "clip.vision.attention.head_count")
@@ -1082,7 +1153,7 @@ def remap_vision_arrays(
             elif transform == "qkv":
                 arr = _kimi_k25_qkv_split_to_interleaved(arr, n_head)
             out[hf] = arr
-        return out, skipped, vis_kqmeta
+        return out, skipped
 
     if model_type == "gemma4":
         for name, arr in arrays.items():
@@ -1105,7 +1176,7 @@ def remap_vision_arrays(
                 continue
             hf, is_patch = res
             out[hf] = _patch_conv_to_linear(arr) if is_patch else arr
-        return out, skipped, vis_kqmeta
+        return out, skipped
 
     if model_type == "gemma4_unified":
         for name, arr in arrays.items():
@@ -1121,7 +1192,7 @@ def remap_vision_arrays(
             elif transform == "patchchw":  # [C, h, w] -> [h, w, C]
                 arr = _patchdim_chw_to_hwc(arr)
             out[tgt] = arr
-        return out, skipped, vis_kqmeta
+        return out, skipped
 
     if model_type == "glm5_next":
         for name, arr in arrays.items():
@@ -1154,21 +1225,9 @@ def remap_vision_arrays(
                 skipped.append(name)
                 continue
             out[f"vision_tower.blocks.{bid}.{tgt}.{leaf}"] = arr
-        return out, skipped, vis_kqmeta
+        return out, skipped
 
     if model_type == "nemotron_h_omni":
-        codecs = mm_codecs or {}
-
-        def _emit_omni(tgt: str, arr: mx.array, src: str) -> None:
-            codec = codecs.get(src)
-            if codec is not None:
-                import mlx_kquant as kq
-
-                scales = arrays[src[: -len(".weight")] + ".scales"]
-                arr = kq.dequantize(arr, scales, codec, mx.float16).reshape(
-                    arr.shape[0], -1)
-            out[tgt] = arr
-
         for name, arr in arrays.items():
             if name.endswith(".scales") or name.endswith(".biases"):
                 continue
@@ -1186,7 +1245,7 @@ def remap_vision_arrays(
                 continue
             hit = _NEMOTRON_OMNI_TOP_MAP.get(name)
             if hit is not None:
-                _emit_omni(hit, arr, name)
+                out[hit] = arr
                 continue
             m = _VISION_BLK_RE.match(name)
             if m is None:
@@ -1197,9 +1256,8 @@ def remap_vision_arrays(
             if tgt is None:
                 skipped.append(name)
                 continue
-            _emit_omni(f"vision_tower.blocks.{m.group(1)}.{tgt}.{leaf}",
-                       arr, name)
-        return out, skipped, vis_kqmeta
+            out[f"vision_tower.blocks.{m.group(1)}.{tgt}.{leaf}"] = arr
+        return out, skipped
 
     if model_type == "deepseek_v4_vl":
         for name, arr in arrays.items():
@@ -1226,12 +1284,12 @@ def remap_vision_arrays(
                 skipped.append(name)
                 continue
             out[f"vision_tower.blocks.{bid}.{tgt}.{leaf}"] = arr
-        return out, skipped, vis_kqmeta
+        return out, skipped
 
     if model_type == "deepseek_v41_vl" and any(
             name.startswith("v.") for name in arrays):
         _remap_deepseek41v_clip(arrays, out, skipped)
-        return out, skipped, vis_kqmeta
+        return out, skipped
 
     if model_type == "deepseek_v41_vl":
         for name, arr in arrays.items():
@@ -1265,7 +1323,7 @@ def remap_vision_arrays(
                 skipped.append(name)
                 continue
             out[f"{base}.{tgt}.{leaf}"] = arr
-        return out, skipped, vis_kqmeta
+        return out, skipped
 
     if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp", "qwen3_vl"):
         # Only the qwen3_vl container reads the deepstack features, so only
@@ -1310,23 +1368,11 @@ def remap_vision_arrays(
                 skipped.append(name)
                 continue
             out[f"vision_tower.blocks.{bid}.{tgt}.{leaf}"] = arr
-        return out, skipped, vis_kqmeta
+        return out, skipped
 
     if model_type == "qwen3_omni_moe":
-        codecs = mm_codecs or {}
-
-        def _emit(tgt: str, arr: mx.array, src: str) -> None:
-            """Emit ``thinker.<tgt>``; for a K-quant source weight also carry its
-            ``.scales`` placeholder and record the codec in ``vis_kqmeta``."""
-            full = "thinker." + tgt
-            codec = codecs.get(src)
-            if codec is not None and full.endswith(".weight"):
-                out[full] = arr
-                out[full[: -len(".weight")] + ".scales"] = arrays[
-                    src[: -len(".weight")] + ".scales"]
-                vis_kqmeta[full] = codec
-            else:
-                out[full] = arr
+        def _emit(tgt: str, arr: mx.array) -> None:
+            out["thinker." + tgt] = arr
 
         for name, arr in arrays.items():
             if name.endswith(".scales") or name.endswith(".biases"):
@@ -1347,11 +1393,11 @@ def remap_vision_arrays(
                         arr = mx.transpose(arr, (0, 2, 3, 1))
                     else:                  # bias [out,1,1] -> [out]
                         arr = arr.reshape(-1)
-                    _emit(f"audio_tower.conv2d{idx}.{leaf}", arr, name)
+                    _emit(f"audio_tower.conv2d{idx}.{leaf}", arr)
                     continue
                 hit = _QWEN3OMNI_A_TOP_MAP.get(name)
                 if hit is not None:
-                    _emit(hit, arr, name)
+                    _emit(hit, arr)
                     continue
                 m = _AUDIO_BLK_RE.match(name)
                 if m is None:
@@ -1363,7 +1409,7 @@ def remap_vision_arrays(
                 if tgt is None:
                     skipped.append(name)
                     continue
-                _emit(f"audio_tower.layers.{bid}.{tgt}.{leaf}", arr, name)
+                _emit(f"audio_tower.layers.{bid}.{tgt}.{leaf}", arr)
                 continue
 
             # - vision tower (v.* / mm.*) - qwen3.6's tower under thinker.
@@ -1372,11 +1418,11 @@ def remap_vision_arrays(
             if name == "v.patch_embd.weight":
                 _emit("vision_tower.patch_embed.proj.weight",
                       _qwen35_patch_embed_conv3d(
-                          arr, arrays["v.patch_embd.weight.1"]), name)
+                          arr, arrays["v.patch_embd.weight.1"]))
                 continue
             hit = _QWEN35V_TOP_MAP.get(name)
             if hit is not None:
-                _emit(hit, arr, name)
+                _emit(hit, arr)
                 continue
             m = _VISION_BLK_RE.match(name)
             if m is None:
@@ -1388,8 +1434,8 @@ def remap_vision_arrays(
             if tgt is None:
                 skipped.append(name)
                 continue
-            _emit(f"vision_tower.blocks.{bid}.{tgt}.{leaf}", arr, name)
-        return out, skipped, vis_kqmeta
+            _emit(f"vision_tower.blocks.{bid}.{tgt}.{leaf}", arr)
+        return out, skipped
 
     raise UnsupportedVLMError(
         f"vision remap not implemented for model_type {model_type!r}")
@@ -4210,7 +4256,7 @@ def load_vlm_model(
     spec_target: bool = False,
     rope_override: rope_scaling.RopeOverride | None = None,
 ):
-    """Load a K-quant LLM GGUF + a float mmproj GGUF into an mlx-vlm ``Model``.
+    """Load a K-quant LLM GGUF + an mmproj GGUF into an mlx-vlm ``Model``.
 
     Returns ``(model, config, processor)``. The processor (image preprocessing +
     tokenizer + chat template) is synthesized from the two GGUFs by default - no
@@ -4294,20 +4340,14 @@ def load_vlm_model(
         target_prefix=lm_prefix, n_head=n_head, n_head_kv=n_head_kv,
         owned_names=owned_names)
 
-    # 3. vision/audio remap. Pure-float mmproj weights map straight through; a
-    #    K-quant (Q8_0) omni mmproj also threads its codecs into hf_kquant_meta so
-    #    install_kquant_modules swaps those vision/audio leaves like LLM leaves.
+    # 3. vision/audio remap. Float mmproj weights map straight through. A
+    #    quantized mmproj keeps the wire bytes of each weight its family maps
+    #    unchanged, and its codecs join hf_kquant_meta below, so
+    #    install_kquant_modules swaps those tower leaves like LLM leaves.
     vis_weights, skipped, vis_kqmeta = remap_vision_arrays(
         mm_arrays, model_type, with_audio=with_audio, mm_codecs=mm_codecs,
         mm_meta=mm_meta)
-    _log(f"[vlm] mmproj: {len(vis_weights)} mapped, {len(skipped)} skipped, "
-         f"{len(vis_kqmeta)} kquant")
     hf_weights.update(vis_weights)
-    hf_kquant_meta.update(vis_kqmeta)
-
-    from collections import Counter
-
-    loadlog.fact("codecs", Counter(hf_kquant_meta.values()))
 
     # 4. synth config + build the mlx-vlm Model (no nn.quantize).
     loadlog.stage("building model")
@@ -4317,6 +4357,17 @@ def load_vlm_model(
     text_config = config.get("text_config", {})
     model, config = build_vlm_model(config)
     loadlog.fact("model_type", config.get("model_type"))
+    n_unpacked = unpack_unswappable_tower_weights(model, hf_weights, vis_kqmeta)
+    hf_kquant_meta.update(vis_kqmeta)
+    n_mapped = sum(1 for k in vis_weights if not k.endswith(".scales"))
+    _log(f"[vlm] mmproj: {n_mapped} mapped, {len(skipped)} skipped, "
+         f"{len(vis_kqmeta)} kquant"
+         + (f", {n_unpacked} dequantized for their modules"
+            if n_unpacked else ""))
+
+    from collections import Counter
+
+    loadlog.fact("codecs", Counter(hf_kquant_meta.values()))
 
     # 4a. spec-target seam: give the VLM the same hook-bearing language model
     #     the text MTP path builds. Runs before weight install, so the swap
@@ -4341,9 +4392,9 @@ def load_vlm_model(
     scale_text_rope(model, config)
 
     # 5. swap kquant leaves + load all weights. install_kquant swaps every leaf
-    #    whose <path>.weight carries a codec - the LLM text tower always, plus the
-    #    omni mmproj's Q8_0 vision/audio matmuls; pure-float mmproj weights have no
-    #    codec and stay native. The remap already produced final mlx-vlm names
+    #    whose <path>.weight carries a codec - the LLM text tower always, plus a
+    #    quantized mmproj's packed vision/audio matmuls; float mmproj weights have
+    #    no codec and stay native. The remap already produced final mlx-vlm names
     #    (text under [thinker.]language_model.model.*, vision/audio under their
     #    towers), so model.sanitize must not run - it would re-prefix text keys.
     # deepseek_v4_vl / deepseek_v41_vl: the container's sanitize applies the
