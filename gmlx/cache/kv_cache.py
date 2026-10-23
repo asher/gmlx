@@ -1619,18 +1619,22 @@ class ChunkedKVCache(_BaseCache):
 
     @property
     def state(self):
-        if self.offset == self.keys.shape[2]:
+        # gmlx: the buffer starts at start_position, so the live rows end at
+        # offset - start_position, not at offset.
+        end = self.offset - self.start_position
+        if end == self.keys.shape[2]:
             return self.keys, self.values
         else:
             return (
-                self.keys[..., : self.offset, :],
-                self.values[..., : self.offset, :],
+                self.keys[..., :end, :],
+                self.values[..., :end, :],
             )
 
     @state.setter
     def state(self, v):
         self.keys, self.values = v
-        self.offset = self.keys.shape[2]
+        # from_state builds the cache with __new__.
+        self.offset = getattr(self, "start_position", 0) + self.keys.shape[2]
 
     def is_trimmable(self):
         return True
@@ -1647,6 +1651,10 @@ class ChunkedKVCache(_BaseCache):
     @meta_state.setter
     def meta_state(self, v):
         self.chunk_size, self.start_position = map(int, v)
+        # gmlx: either setter may run first; the offset counts the trimmed
+        # front.
+        if getattr(self, "keys", None) is not None:
+            self.offset = self.start_position + self.keys.shape[2]
 
     def prefix_cache_snapshot(self):
         return {
