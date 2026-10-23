@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import os
 from collections import OrderedDict
+from math import ceil
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -496,3 +497,78 @@ def test_synchronous_trim_then_append_allocates_nothing():
     mx.eval(c.keys, c.values)
     mx.synchronize()
     assert mx.get_peak_memory() - base < 2 << 20
+
+
+# The capacity grid and the footprint prediction.
+
+LEVERS = [{}, {"GMLX_KV_GROW_CAP": "0"}, {"GMLX_KV_GROW_DIV": "0"}]
+
+
+_DECODE = [("append", 1)] * 3000
+
+# Each step is ("append", rows) or ("trim", rows).
+HISTORIES = {
+    "decode": _DECODE,
+    "prefill": [("append", 4096)] + _DECODE,
+    # The regrow after the trim starts mid-step.
+    "trim_mid_step": [("append", 512), ("trim", 7), ("append", 20)] + _DECODE,
+    "trim_below_peak": [("append", 1)] * 2600 + [("trim", 1500)]
+    + [("append", 1)] * 1200,
+}
+
+
+def _run(steps):
+    c = owned.KVCache()
+    profile = None
+    peak = 0
+    caps = []
+    for kind, n in steps:
+        if kind == "trim":
+            c.trim(n)
+            continue
+        before = None if c.keys is None else c.keys.shape[2]
+        c.update_and_fetch(mx.zeros((1, 1, n, 8), mx.float16),
+                           mx.zeros((1, 1, n, 8), mx.float16))
+        peak = max(peak, c.offset)
+        if c.keys.shape[2] != before:
+            if profile is None:
+                profile = c.memory_profile(c.offset)
+            caps.append((peak, c.keys.shape[2]))
+    caps.append((peak, c.keys.shape[2]))
+    return profile, caps
+
+
+@pytest.mark.parametrize("env", LEVERS, ids=["default", "no_cap", "no_div"])
+@pytest.mark.parametrize("name", list(HISTORIES))
+def test_footprint_bounds_the_grid(env, name, monkeypatch):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    profile, caps = _run(HISTORIES[name])
+    per = profile.bytes_per_token
+    for peak, cap in caps:
+        assert cap % owned.KVCache.step == 0
+        predicted = profile.footprint(peak)
+        if name == "decode":
+            assert ceil(cap * per) == predicted
+        else:
+            assert ceil(cap * per) <= predicted
+
+
+def test_grid_levers():
+    step = 256
+    assert kv_append.grid_capacity(300, step, 0, 0) == 512
+    points = kv_append._grid(step, 8, 8192)
+    assert points[:9] == (256, 512, 768, 1024, 1280, 1536, 1792, 2048, 2304)
+    assert all(b - a <= 8192 for a, b in zip(points, points[1:]))
+    uncapped = kv_append._grid(step, 8, 0)
+    assert max(b - a for a, b in zip(uncapped, uncapped[1:])) > 8192
+    assert kv_append.grid_capacity(200_000, step, 8, 8192) < 210_000
+
+
+def test_rotating_profile_keeps_step_rounding():
+    c = owned.RotatingKVCache(max_size=4096)
+    c.update_and_fetch(mx.zeros((1, 1, 300, 8)), mx.zeros((1, 1, 300, 8)))
+    p = c.memory_profile(300)
+    assert p.grow_div == 0
+    rows = (3000 + p.step - 1) // p.step * p.step
+    assert p.footprint(3000) == ceil(rows * p.bytes_per_token)

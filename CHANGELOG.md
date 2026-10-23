@@ -36,6 +36,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Decode writes each new KV cache row in place instead of copying the whole
   cache every token, so decode at long context is faster and peaks lower.
+- The KV cache grows by an eighth of its size, at most 8192 rows, instead of
+  256 rows at a time, so long decodes no longer stall on frequent regrows.
 - `gmlx sync-models` adds a drafter to a model already in the config only
   with `--add-companions`. Without it, a sync or pull names each drafter
   or `mmproj` it leaves out.

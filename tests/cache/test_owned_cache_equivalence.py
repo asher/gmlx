@@ -118,6 +118,11 @@ OWNED_FIXES = {
     | {"BatchRotatingKVCache/031 from_state"},
     "CacheList": {"CacheList/009 nbytes", "CacheList/013 deepcopy"}
     | {"CacheList/024 batch from_state"},
+    # The profile of a cache that grows on the capacity grid carries it.
+    "KVCache": {"KVCache/034 memory_profile"},
+    "QuantizedKVCache 4": {"QuantizedKVCache 4/034 memory_profile"},
+    "QuantizedKVCache 8": {"QuantizedKVCache 8/034 memory_profile"},
+    "functions": {"functions/018 CacheMemory.footprint"},
     # prepare(lengths=...) drops the left padding, so the mask reads lengths.
     "ArraysCache": {"ArraysCache/019 make_mask after prepare",
                     "ArraysCache/022 prefix_cache_snapshot",
