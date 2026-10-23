@@ -141,6 +141,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Llama 4 requests batched from the prefix cache lost the cached prefix of
   their chunked attention layers, and a speculative restore past the chunk
   size landed at the wrong offset.
+- `gmlx chat` and `gmlx run` with images and `--kv-bits` on a gemma-4 model
+  no longer stop at the first prefill chunk. The sliding-window layers stay
+  at full precision and the other layers pack, as they do under `gmlx serve`.
 - Qwen-Image 2.1, FLUX.3 klein, Krea 2 and MOSS-Image failed every request
   when their `encoder` was a chat model served with its `mmproj`.
 - In a `discover:` setup, `gmlx rm` of a chat model that image models share

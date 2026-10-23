@@ -3556,6 +3556,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     model, tok, config = backend.model, backend.tok, backend.config
     processor, drafter = backend.processor, backend.drafter
     model_type = backend.model_type
+    if args.mmproj and kv_kwargs.get("kv_bits") is not None:
+        # The attention decline reads the built model, so it runs here and
+        # not with the kvarn decline above. The image turn reads this dict.
+        from gmlx.commands.cli import vlm_kv_width
+        kv_kwargs["kv_bits"] = vlm_kv_width(args, model)
     cache = None
     if not backend.load_pending:
         cache = backend.new_text_cache()

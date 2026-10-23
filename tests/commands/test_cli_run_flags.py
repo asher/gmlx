@@ -266,6 +266,64 @@ def test_vlm_path_keeps_fp16_under_kvarn(capsys):
     assert not cli.vlm_declines_kvarn(types.SimpleNamespace())
 
 
+def test_vlm_kv_width_installs_the_rotating_safe_quantizer(monkeypatch, capsys):
+    # A gemma-4 stack has sliding-window layers. The stock mlx-vlm quantizer
+    # calls to_quantized on every cache and raises "RotatingKVCache
+    # Quantization NYI" on them, so an image turn with --kv-bits stopped at
+    # the first prefill chunk. The VLM width helper installs the
+    # rotating-safe quantizer serve uses before it hands the width on.
+    import types
+
+    import mlx.core as mx
+
+    import gmlx.cache.apc_pooling as apc_pooling
+    import gmlx.commands.cli as cli
+    from gmlx._vendor.mlx_vlm.generate import common
+    from gmlx._vendor.mlx_vlm.generate.ar import _generate_module_override
+    from gmlx.cache.kv_cache import KVCache, RotatingKVCache
+
+    installs = []
+    real = apc_pooling.install_safe_kv_quantization
+
+    def recording_install():
+        installs.append(True)
+        real()
+
+    monkeypatch.setattr(
+        apc_pooling, "install_safe_kv_quantization", recording_install)
+    model = types.SimpleNamespace(layers=[])
+    args = types.SimpleNamespace(kv_bits=8, kv_quant_scheme=None)
+
+    assert cli.vlm_kv_width(args, model) == 8
+    assert installs == [True]
+
+    mx.random.seed(5)
+    rot = RotatingKVCache(max_size=4)
+    for _ in range(6):  # rotated: the stock to_quantized raises NYI
+        rot.update_and_fetch(
+            mx.random.normal((1, 1, 1, 4)), mx.zeros((1, 1, 1, 0)))
+    kv = KVCache()
+    kv.update_and_fetch(
+        mx.random.normal((1, 1, 3, 32)), mx.random.normal((1, 1, 3, 32)))
+    pc = [rot, kv]
+    # The generate loop resolves the quantizer from the mlx_vlm.generate
+    # package at call time, which is where the installer publishes it.
+    quantize = _generate_module_override(
+        "maybe_quantize_kv_cache", common.maybe_quantize_kv_cache)
+    quantize(pc, quantized_kv_start=0, kv_group_size=32, kv_bits=8,
+             kv_quant_scheme=None, kv_key_bits=None, kv_value_bits=None)
+    assert pc[0] is rot  # the window layer stays fp16
+    assert type(pc[1]).__name__ == "QuantizedKVCache"  # the full layer packs
+
+    # No width, or a decline, hands no width on and installs nothing more.
+    assert cli.vlm_kv_width(
+        types.SimpleNamespace(kv_bits=None, kv_quant_scheme=None), model) is None
+    assert cli.vlm_kv_width(
+        types.SimpleNamespace(kv_bits=8, kv_quant_scheme="kvarn"), model) is None
+    assert "KV stays fp16" in capsys.readouterr().err
+    assert installs == [True]
+
+
 def test_auto_scheme_normalizes_to_unset():
     # Every cache builder picks per model on an unset scheme; the image
     # path hands the value to mlx-vlm, which has no "auto".

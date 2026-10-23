@@ -1888,10 +1888,10 @@ def _run_vlm(args) -> int:
         extra["thinking_start_token"] = args.thinking_start_token
     if args.thinking_end_token:
         extra["thinking_end_token"] = args.thinking_end_token
-    if (args.kv_bits is not None and not vlm_declines_kvarn(args)
-            and not vlm_declines_attention(model)):
+    kv_bits = vlm_kv_width(args, model)
+    if kv_bits is not None:
         extra.update(
-            kv_bits=args.kv_bits,
+            kv_bits=kv_bits,
             kv_group_size=args.kv_group_size,
             quantized_kv_start=args.quantized_kv_start,
         )
@@ -2327,6 +2327,23 @@ def vlm_declines_attention(model) -> bool:
     print(f"warning: --kv-bits dropped on the VLM path: {reason}",
           file=sys.stderr)
     return True
+
+
+def vlm_kv_width(args, model) -> int | None:
+    """The cache width the VLM stream packs at, or None when no width was
+    asked for or a decline keeps the cache fp16. Installs the rotating-safe
+    quantizer serve uses, so a sliding-window layer stays fp16 instead of
+    stopping the first prefill chunk with ``RotatingKVCache Quantization
+    NYI``."""
+    kv_bits = getattr(args, "kv_bits", None)
+    if kv_bits is None:
+        return None
+    if vlm_declines_kvarn(args) or vlm_declines_attention(model):
+        return None
+    from gmlx.cache.apc_pooling import install_safe_kv_quantization
+
+    install_safe_kv_quantization()
+    return kv_bits
 
 
 def maybe_load_from_config(args, parser, argv) -> int | None:
