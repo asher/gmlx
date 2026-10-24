@@ -267,11 +267,14 @@ def _media_safe(batch, ids) -> Callable[[int], bool]:
     return safe_prefix(ids, view._apc_media_token_ids())
 
 
-def _ckpt_run_step(batch) -> int:
+def _ckpt_run_step(batch, block_size: int = 16) -> int:
     """The step the grid follows. A resident model takes the batch's
     step, or without recurrent state the MoE wide step its loop runs from
     in place of the stock one (``prefill_decay.moe_base_step``), so no
-    boundary splits a chunk and a warm turn chunks as a cold one does. A
+    boundary splits a chunk and a warm turn chunks as a cold one does.
+    Recurrent state keeps the batch's grid, since its records snap to the
+    grid: a record there may split a wide chunk, and the gated-delta scan
+    carries its state across a cut on a 64-token multiple exactly. A
     streamed one, where a cut off the loop's chunk edges costs a full
     expert pass, takes the step the loop runs from: the batch's own (the
     decay wrapper swaps a chunk's width in around the MTP body and keeps
@@ -282,7 +285,7 @@ def _ckpt_run_step(batch) -> int:
     model = getattr(batch, "model", None)
     step = int(getattr(batch, "prefill_step_size", 0) or 0)
     if not experts_streamed(model):
-        return _resident_run_step(batch, model, step)
+        return _resident_run_step(batch, model, step, block_size)
     step = int(getattr(batch, "_gmlx_base_step", None) or step)
     if step <= 0:
         return step
@@ -298,7 +301,7 @@ def _ckpt_run_step(batch) -> int:
         return step
 
 
-def _resident_run_step(batch, model, step: int) -> int:
+def _resident_run_step(batch, model, step: int, block_size: int) -> int:
     """The batch's step, or the MoE wide step in place of the stock one.
     An arch profile's base step keeps the batch's grid, and so does
     recurrent state: its records snap to the grid, so a coarser grid drops
@@ -307,7 +310,7 @@ def _resident_run_step(batch, model, step: int) -> int:
 
     if step != pd._STOCK_BASE or not pd._default_base(model, step):
         return step
-    if "arr" in (_ckpt_layout_live(batch) or ()):
+    if "arr" in (_ckpt_layout_live(batch, block_size) or ()):
         return step
     try:
         profile = pd.resolve_score_profile(
@@ -326,7 +329,7 @@ def _lcm_unit(step: int, block_size: int) -> int:
 
 def _ckpt_unit(batch, block_size: int) -> int:
     """The natural chunk grid: lcm(the step the loop runs, block_size)."""
-    return _lcm_unit(_ckpt_run_step(batch), block_size)
+    return _lcm_unit(_ckpt_run_step(batch, block_size), block_size)
 
 
 def _ckpt_origin(batch, restored: int, block_size: int,
