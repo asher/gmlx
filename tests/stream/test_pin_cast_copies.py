@@ -113,7 +113,7 @@ def test_the_arena_gains_what_the_dead_wire_gave_up(monkeypatch):
     import gmlx.stream.budget as budget
 
     monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
-    monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: None)
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda *a, **k: None)
     monkeypatch.setattr(mx, "device_info",
                         lambda: {"memory_size": 137 * 10**9})
     offsets = {0: [(0, 0, 200 << 30)]}

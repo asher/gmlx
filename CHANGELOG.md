@@ -68,6 +68,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   budget or they do not fit the memory free at load, with a line that says why.
 - A MoE keeps its experts in memory beside other apps, which macOS compresses
   to make room. Memory another model holds wired still makes them stream.
+- While `serve` runs beside other apps, their memory no longer evicts the prefix
+  cache, stops its stores or shrinks a streamed model's expert arena.
+- The serve governor also reclaims when threads wait on macOS for free pages,
+  and `/v1/metrics` reports `kernel_unwired_bytes` and `kernel_free_page_waiters`.
 - `run` and `chat` keep a MoE's experts in memory and turn auto MTP off when its
   drafter does not fit beside them, with an `[mtp]` line.
 - With `GMLX_OVERCOMMIT=1`, `run`, `chat` and `image generate` load a model

@@ -128,7 +128,8 @@ def install() -> None:
     ``device_info``, ``os.sysconf("SC_PHYS_PAGES")``,
     ``gmlx.serve.kernel_vm.snapshot``, its live sysctl reads
     (``live_reclaimable_bytes``, ``unwired_bytes``,
-    ``free_page_waiters``) and the free-RAM reads under it.
+    ``free_page_waiters``, ``reclaim_marks``) and the free-RAM reads
+    under it.
     Starts on ``default()``."""
     if os.environ.get(REAL_HOST_ENV, "") == "1" or _real:
         return
@@ -142,9 +143,11 @@ def install() -> None:
     real_live = kernel_vm.live_reclaimable_bytes
     real_unwired = kernel_vm.unwired_bytes
     real_wanted = kernel_vm.free_page_waiters
+    real_marks = kernel_vm.reclaim_marks
     _real.update(device_info=real_info, sysconf=real_sysconf,
                  snapshot=real_snapshot, live_reclaimable=real_live,
-                 unwired=real_unwired, free_wanted=real_wanted)
+                 unwired=real_unwired, free_wanted=real_wanted,
+                 reclaim_marks=real_marks)
 
     # A test turns the counters off with kernel_vm._disabled. The reported
     # counters are consistent, so the sysctl cross-check passes; run
@@ -200,8 +203,17 @@ def install() -> None:
             return None
         return int(_current["vm"].get("free_wanted", 0))
 
+    # A case sets ``reclaim_marks`` for a kernel compressing or swapping.
+    def reclaim_marks():
+        if _current["real"]:
+            return real_marks()
+        if kernel_vm._disabled is not None:
+            return None
+        return tuple(_current["vm"].get("reclaim_marks", (0, 0)))
+
     kernel_vm.unwired_bytes = unwired_bytes
     kernel_vm.free_page_waiters = free_page_waiters
+    kernel_vm.reclaim_marks = reclaim_marks
 
     def device_info(*args, **kwargs):
         info = dict(real_info(*args, **kwargs))
@@ -241,8 +253,8 @@ def real(name: str):
     """The real read ``install`` replaced: ``apc_free_ram`` (the copied
     mlx-vlm apc's stock read), ``vm_stat_free_ram`` (gmlx's
     /usr/bin/vm_stat read), ``snapshot`` (the mach counters),
-    ``live_reclaimable``, ``unwired``, ``free_wanted`` (their sysctl
-    reads) or ``sysconf``.
+    ``live_reclaimable``, ``unwired``, ``free_wanted``, ``reclaim_marks``
+    (their sysctl reads) or ``sysconf``.
     Without the simulation, the bound one."""
     if name in _real:
         return _real[name]
@@ -252,13 +264,15 @@ def real(name: str):
         from gmlx._vendor.mlx_vlm import apc
 
         return apc._free_ram_bytes
-    if name in ("snapshot", "live_reclaimable", "unwired", "free_wanted"):
+    if name in ("snapshot", "live_reclaimable", "unwired", "free_wanted",
+                "reclaim_marks"):
         from gmlx.serve import kernel_vm
 
         return {"snapshot": kernel_vm.snapshot,
                 "live_reclaimable": kernel_vm.live_reclaimable_bytes,
                 "unwired": kernel_vm.unwired_bytes,
-                "free_wanted": kernel_vm.free_page_waiters}[name]
+                "free_wanted": kernel_vm.free_page_waiters,
+                "reclaim_marks": kernel_vm.reclaim_marks}[name]
     from gmlx.cache import apc_manager
 
     return apc_manager._vm_stat_free_ram_bytes

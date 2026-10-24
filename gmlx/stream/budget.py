@@ -125,6 +125,18 @@ def free_page_waiters() -> int:
         return 0
 
 
+def reclaim_marks() -> tuple | None:
+    """The kernel's live reclaim counts (``kernel_vm.reclaim_marks``): a
+    later reading that differs shows it compressed or swapped memory in
+    between. None when unread."""
+    try:
+        from gmlx.serve.kernel_vm import reclaim_marks as marks
+
+        return marks()
+    except Exception:
+        return None
+
+
 def kernel_floor_bytes() -> float:
     """The governor's kernel reclaimable floor."""
     from gmlx.serve.governor import _kernel_floor_bytes
@@ -492,13 +504,13 @@ def _decode_arena_bytes(
 ) -> int:
     """Arena budget for the decode feeder: what the memory ceiling leaves
     after the non-expert weights, the KV room and the prefill ring,
-    clamped to the RAM reclaimable right now less the same, the host
-    floor and the host overhead (``host_bytes``, ``host_overhead_bytes``),
-    and capped at the expert bytes themselves. The floor and the host
-    overhead are not MLX memory: the RAM the ceiling leaves outside it
-    holds them, so the ceiling leg charges only what they need past that
-    RAM (``outside_ceiling_bytes``, as the plan does), and the reclaimable
-    leg, which measures RAM, charges them whole. ``forced`` is a stream the
+    clamped to the memory not wired right now (``unwired_ram_bytes``)
+    less the same, the host floor and the host overhead (``host_bytes``,
+    ``host_overhead_bytes``), and capped at the expert bytes themselves.
+    The floor and the host overhead are not MLX memory: the RAM the
+    ceiling leaves outside it holds them, so the ceiling leg charges only
+    what they need past that RAM (``outside_ceiling_bytes``, as the plan
+    does), and the live leg, which measures RAM, charges them whole. ``forced`` is a stream the
     flag asked for on a model under the budget: its cap is
     ``FORCED_ARENA_SHARE`` of the expert bytes, so the experts stay
     streamed rather than all wired.
@@ -518,15 +530,14 @@ def _decode_arena_bytes(
     (``budget.kv_room_bytes``); None keeps the flat legacy reserve.
     ``GMLX_DECODE_ARENA_RAM_FRAC`` caps the ceiling at a fraction of
     physical RAM when set. ``GMLX_DECODE_ARENA_GB`` overrides the
-    ceilings but is still clamped to what is reclaimable minus the floor,
-    the ring, the KV room and the host overhead: an arena wired past that
-    leaves the next prefill's transients nowhere but swap and starves the
-    page cache every buffered read path depends on
+    ceilings but is still clamped to the memory not wired minus the
+    floor, the ring, the KV room and the host overhead: an arena wired
+    past that leaves the kernel no pages to reclaim
     (``GMLX_DECODE_ARENA_FORCE=1`` restores the unclamped behavior).
 
-    A second live streaming install needs no term here: mlock moves a page
-    out of the file-backed count and an arena is anonymous, so the
-    reclaimable snapshot already excludes both."""
+    A second live streaming install needs no term here: its weight pin
+    and its arena are mlocked, so the memory not wired already excludes
+    both."""
     env = os.environ.get("GMLX_DECODE_ARENA_GB")
     room = int(room_bytes) if room_bytes is not None else legacy_room_bytes()
     host = max(0, int(host_bytes))
@@ -534,7 +545,7 @@ def _decode_arena_bytes(
         want = int(float(env) * (1 << 30))
         if env_bool("GMLX_DECODE_ARENA_FORCE", False):
             return want
-        avail = (_available_ram_bytes() if avail_bytes is None
+        avail = (unwired_ram_bytes() if avail_bytes is None
                  else avail_bytes)
         if avail is None:
             return want
@@ -546,8 +557,8 @@ def _decode_arena_bytes(
                   - room - host)
         if want > cap:
             print(
-                f"[stream] GMLX_DECODE_ARENA_GB={env} exceeds reclaimable"
-                f" RAM minus the floor, the KV room, the host overhead"
+                f"[stream] GMLX_DECODE_ARENA_GB={env} exceeds the memory"
+                f" not wired minus the floor, the KV room, the host overhead"
                 f"{' and the prefill ring' if ring_bytes else ''};"
                 f" clamping the arena to"
                 f" {cap / (1 << 30):.1f}GB (GMLX_DECODE_ARENA_FORCE=1"
@@ -574,29 +585,29 @@ def _decode_arena_bytes(
     outside = (outside_ceiling_bytes(ram, ceiling, host) if ram
                else _ram_floor_bytes(None))
     arena = ceiling - non_expert_bytes - room - int(ring_bytes) - outside
-    # Second ceiling: what is reclaimable right now. The governor ceiling
-    # assumes an otherwise idle machine; co-resident workloads shrink the
-    # offer, and a wired arena sized past it would evict them to swap. The
-    # floor keeps a breathing margin for the system. This is a live
-    # post-pin snapshot: already-wired weights are out of it, so only the
-    # still-unwired share of the non-expert set is charged (charging all
-    # of it double-counted the pin and zeroed the arena on exactly the
-    # models that need it).
-    avail = _available_ram_bytes()
+    # Second ceiling: the memory not wired right now. The governor
+    # ceiling assumes an otherwise idle machine; memory another model
+    # holds wired shrinks the offer. Other apps' memory does not: the
+    # kernel compresses or swaps it for the arena. The floor keeps a
+    # breathing margin for the system. This is a live post-pin snapshot:
+    # already-wired weights are out of it, so only the still-unwired
+    # share of the non-expert set is charged (charging all of it
+    # double-counted the pin and zeroed the arena on exactly the models
+    # that need it).
+    avail = unwired_ram_bytes()
     if avail is not None:
         unpinned = max(0, non_expert_bytes - pinned_bytes)
-        reclaimable = (avail - _ram_floor_bytes(ram or avail) - room
-                       - unpinned - int(ring_bytes) - host)
-        if reclaimable < arena:
+        left = (avail - _ram_floor_bytes(ram or avail) - room
+                - unpinned - int(ring_bytes) - host)
+        if left < arena:
             from gmlx.load import loadlog
 
             loadlog.info(
-                f"[stream] arena clamped to reclaimable RAM: "
-                f"{max(0, reclaimable) / 1e9:.1f} GB, not the ceiling's "
-                f"{arena / 1e9:.1f} GB (reclaimable now {avail / 1e9:.1f} GB "
-                "of RAM; a co-resident workload or a cold page cache is the "
-                "usual cause)")
-        arena = min(arena, reclaimable)
+                f"[stream] arena clamped to the memory not wired: "
+                f"{max(0, left) / 1e9:.1f} GB, not the ceiling's "
+                f"{arena / 1e9:.1f} GB ({avail / 1e9:.1f} GB not wired "
+                "now; another model's wired memory is the usual cause)")
+        arena = min(arena, left)
     cap = int(FORCED_ARENA_SHARE * expert_bytes) if forced else expert_bytes
     return min(max(0, arena), cap)
 

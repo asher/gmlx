@@ -6,8 +6,10 @@ kernel sees that cache as wired. Metal allocations never swap and never
 enter the compressor, so a server that grows past the box's free pages
 livelocks macOS into a watchdog panic while every MLX-side number still
 reads healthy. This module reads the counters that actually predict
-the panic: free + purgeable + file-backed pages. Mach's free and
-file-backed counts both hold the speculative pages, which count once.
+the panic: the memory not wired (free + pageable anonymous + file-backed
+pages), and threads waiting on free pages while the kernel reclaims
+nothing. ``reclaimable_bytes`` (free + purgeable + file-backed) remains
+for the readers that must not count other apps' memory.
 
 Darwin only; ``reclaimable_bytes`` returns None elsewhere or when the
 struct layout fails its one-time self-check against sysctl.
@@ -20,6 +22,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 
 _log = logging.getLogger(__name__)
 
@@ -181,6 +184,53 @@ def free_page_waiters() -> int | None:
     if sys.platform != "darwin":
         return None
     return _sysctl_count("vm.page_free_wanted")
+
+
+# Cumulative live counts that move while the kernel reclaims anonymous
+# memory: bytes fed to the compressor, and compressor segments swapped out.
+_RECLAIM_COUNTS = ("vm.compressor_input_bytes",
+                   "vm.compressor.swapper.swapouts_total")
+
+
+def reclaim_marks() -> tuple | None:
+    """The reclaim counts, live. A later reading that differs shows the
+    kernel compressed or swapped memory in between. None off Darwin or
+    when a read fails."""
+    if sys.platform != "darwin":
+        return None
+    marks = tuple(_sysctl_count(n) for n in _RECLAIM_COUNTS)
+    return None if None in marks else marks
+
+
+class StarveWatch:
+    """Seconds threads have waited on the kernel for free pages while the
+    kernel shows no reclaim: nothing compressed or swapped out, and no
+    fewer threads waiting than at any reading of the streak. Waiters
+    while it compresses other apps' memory are the kernel at work, and
+    our own readers can be among them, so only a stall counts. 0 while
+    no thread waits or the counts cannot be read."""
+
+    def __init__(self):
+        self.since = None
+        self.marks = None
+        self.low = None
+
+    def reset(self) -> None:
+        self.since = self.marks = self.low = None
+
+    def __call__(self) -> float:
+        waiters = free_page_waiters()
+        if not waiters:
+            self.reset()
+            return 0.0
+        now = time.monotonic()
+        marks = reclaim_marks()
+        if (self.since is None or marks != self.marks
+                or (self.low is not None and waiters < self.low)):
+            self.since = now
+        self.marks = marks
+        self.low = waiters if self.low is None else min(self.low, waiters)
+        return now - self.since
 
 
 def available_bytes() -> int | None:

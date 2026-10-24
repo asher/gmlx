@@ -534,21 +534,26 @@ class GmlxAPCManager(_apc.APCManager):
             _ckpt_disk=bool(disk))
 
     @staticmethod
-    def _kernel_floor_hit() -> bool:
-        """True when the kernel's reclaimable pages sit below the
-        floor the installed governor armed (0 without a governor, so
-        CLI paths and tests never stop a store). A block store runs
-        as one uninterrupted call between governed ticks (~30 s for an
+    def _kernel_floor_hit(starve=None) -> bool:
+        """True when the memory not wired sits below the floor the
+        installed governor armed (0 without a governor, so CLI paths and
+        tests never stop a store), or the store's ``starve``
+        (``kernel_vm.StarveWatch``) has seen threads stalled on free
+        pages for the governor's reclaim time. A block store runs as one
+        uninterrupted call between governed ticks (~30 s for an
         80k-token row), so it checks the floor itself per block and
         stops storing rather than wiring the box past it."""
-        from gmlx.serve.governor import armed_kernel_floor_bytes
-        from gmlx.serve.kernel_vm import reclaimable_bytes
+        from gmlx.serve.governor import (_STARVE_RECLAIM_S,
+                                         armed_kernel_floor_bytes)
+        from gmlx.serve.kernel_vm import unwired_bytes
 
         floor = armed_kernel_floor_bytes()
         if floor <= 0:
             return False
-        recl = reclaimable_bytes()
-        return recl is not None and recl < floor
+        if starve is not None and starve() >= _STARVE_RECLAIM_S:
+            return True
+        unw = unwired_bytes()
+        return unw is not None and unw < floor
 
     def store_kv_blocks(self, token_ids, layer_keys, layer_values,
                         *, extra_hash=0, skip_first_n_tokens=0,
@@ -718,6 +723,9 @@ class GmlxAPCManager(_apc.APCManager):
                     mx.eval(pending)
                     pending.clear()
 
+            from gmlx.serve.kernel_vm import StarveWatch
+
+            starve = StarveWatch()
             for i in range(skip_full, n_full):
                 chunk = tuple(
                     int(t)
@@ -764,12 +772,12 @@ class GmlxAPCManager(_apc.APCManager):
                         break
                     parent = h2
                     continue
-                if self._kernel_floor_hit():
+                if self._kernel_floor_hit(starve):
                     self.stats.record_reject(
                         "kernel_floor", block=i, n_full=n_full)
                     _apc.logger.warning(
-                        "APC store stopped at block %d/%d: kernel "
-                        "reclaimable below the governor floor", i, n_full)
+                        "APC store stopped at block %d/%d: memory not "
+                        "wired below the governor floor", i, n_full)
                     if not allow_disk:
                         break
                     parent = h2

@@ -346,7 +346,7 @@ def test_a_forced_stream_under_the_budget_wires_half_the_experts(monkeypatch):
 
     monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
     monkeypatch.delenv("GMLX_DECODE_ARENA_RAM_FRAC", raising=False)
-    monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: None)
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda *a, **k: None)
     monkeypatch.setattr(budget, "ceiling_bytes", lambda: 100 << 30)
     monkeypatch.setattr(mx, "device_info", lambda *a: {"memory_size": 128 << 30})
     experts = 20 << 30
@@ -354,6 +354,33 @@ def test_a_forced_stream_under_the_budget_wires_half_the_experts(monkeypatch):
               budget=100 << 30, room_bytes=4 << 30)
     assert budget._decode_arena_bytes(**kw) == experts
     assert budget._decode_arena_bytes(**kw, forced=True) == experts // 2
+
+
+def test_the_arena_takes_other_apps_memory_but_not_another_models(
+        monkeypatch):
+    """Apps hold most of the RAM beside a streamed model: free and the page
+    cache read near empty, but the kernel compresses their memory, so the
+    arena keeps its full size. Memory another model holds wired shrinks
+    it."""
+    import mlx.core as mx
+
+    import gmlx.serve.kernel_vm as kv
+    import gmlx.stream.budget as budget
+
+    for k in ("GMLX_DECODE_ARENA_GB", "GMLX_DECODE_ARENA_RAM_FRAC",
+              "GMLX_DECODE_RAM_FLOOR_GB", "GMLX_DECODE_PAGECACHE_GB"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(budget, "ceiling_bytes", lambda: 100 << 30)
+    monkeypatch.setattr(mx, "device_info", lambda *a: {"memory_size": 128 << 30})
+    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 3 << 30)
+    monkeypatch.setattr(kv, "live_reclaimable_bytes", lambda: 3 << 30)
+    experts = 20 << 30
+    kw = dict(total_bytes=30 << 30, offsets={0: [(0, 0, experts)]},
+              budget=100 << 30, room_bytes=4 << 30)
+    monkeypatch.setattr(kv, "unwired_bytes", lambda: 110 << 30)
+    assert budget._decode_arena_bytes(**kw) == experts
+    monkeypatch.setattr(kv, "unwired_bytes", lambda: 30 << 30)
+    assert 0 < budget._decode_arena_bytes(**kw) < experts
 
 
 def test_host_overhead_is_priced_at_its_cap(monkeypatch):
@@ -389,7 +416,7 @@ def test_arena_charges_the_host_overhead_on_ram_not_the_ceiling(monkeypatch):
                         lambda *a: {"memory_size": 1000 << 30})
     monkeypatch.setattr(budget, "ceiling_bytes", lambda: 100 << 30)
     avail = {"v": None}
-    monkeypatch.setattr(budget, "_available_ram_bytes",
+    monkeypatch.setattr(budget, "unwired_ram_bytes",
                         lambda *a, **k: avail["v"])
     gib = 1 << 30
     kw = dict(total_bytes=210 * gib, offsets={0: [(0, 0, 200 * gib)]},
@@ -449,7 +476,7 @@ def test_deepseek41_default_arena_keeps_8_gib_free_at_the_prefill_peak(
     every, table, experts, ring = 8.4e9, 135.2e9, 156.9e9, 9.27e9
     monkeypatch.setattr(mx, "device_info", lambda *a: {"memory_size": ram})
     monkeypatch.setattr(budget, "ceiling_bytes", lambda: 0.95 * ws)
-    monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: avail)
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda *a, **k: avail)
     monkeypatch.setattr(mp, "prompt_kv_bytes", lambda costs, n: 10e6)
     room = budget.price_room(((1, 1),), 1 << 20, ws, 0.05 * ws,
                              budget.prefill_activation_bytes(DS41_CFG))
@@ -506,7 +533,7 @@ def test_loader_arena_matches_the_plan_where_the_ceiling_binds(
     monkeypatch.setattr(mx, "device_info", lambda *a: {"memory_size": ram})
     monkeypatch.setattr(budget, "ceiling_bytes",
                         lambda: sp.ceiling_for(ram, ws))
-    monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: avail)
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda *a, **k: avail)
 
     def loader(ring_bytes=0):
         return budget._decode_arena_bytes(

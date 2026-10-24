@@ -74,23 +74,28 @@ def test_maybe_pin_weights_env_off(tmp_path, monkeypatch, capsys):
 
 
 def _vm_stat():
+    from gmlx.serve import kernel_vm
+
     out = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
     page = int(re.search(r"page size of (\d+)", out).group(1))
+    filed = kernel_vm._sysctl_count("vm.page_pageable_external_count")
     return {
-        k: int(re.search(rf"{k}:\s+(\d+)\.", out).group(1)) * page
-        for k in ("File-backed pages", "Pages wired down")
+        "Pages wired down": int(re.search(
+            r"Pages wired down:\s+(\d+)\.", out).group(1)) * page,
+        "pageable file-backed": filed * kernel_vm._PAGE,
     }
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="vm_stat is macOS only")
-def test_a_pinned_page_leaves_the_reclaimable_snapshot(tmp_path):
-    """mlock must move a file-backed page out of the File-backed count.
+def test_a_pinned_page_leaves_the_memory_not_wired(tmp_path):
+    """mlock must move a file-backed page out of the pageable count.
 
-    ``_available_ram_bytes`` offers free + purgeable + file-backed, and
-    ``_decode_arena_bytes`` charges only the unpinned share of the
-    non-expert weights against it. If a release ever left mlocked pages
-    counted as file-backed, that offer would overstate by the whole pin.
-    A canary on the platform, not a test of our own code."""
+    ``unwired_ram_bytes`` offers free + pageable anonymous + pageable
+    file-backed pages, and ``_decode_arena_bytes`` charges only the
+    unpinned share of the non-expert weights against it. If a release
+    ever left mlocked pages counted as pageable, that offer would
+    overstate by the whole pin. A canary on the platform, not a test of
+    our own code."""
     p = tmp_path / "big.bin"
     n = 32 << 20
     p.write_bytes(b"\0" * n)
@@ -110,14 +115,16 @@ def test_a_pinned_page_leaves_the_reclaimable_snapshot(tmp_path):
         finally:
             pin.close()
         wired = after["Pages wired down"] - before["Pages wired down"]
-        filed = after["File-backed pages"] - before["File-backed pages"]
+        filed = (after["pageable file-backed"]
+                 - before["pageable file-backed"])
         if wired >= 0.5 * n and filed <= 0.5 * n:
             break
     assert wired >= 0.5 * n, f"pin did not wire: {wired} of {n}"
     assert filed <= 0.5 * n, (
-        "mlocked pages still count as file-backed; _available_ram_bytes now "
+        "mlocked pages still count as pageable; unwired_ram_bytes now "
         "overstates the offer by the whole weight pin and _decode_arena_bytes "
-        f"must charge it (file-backed moved {filed:+d} for a {n} pin)")
+        f"must charge it (pageable file-backed moved {filed:+d} for a {n} "
+        "pin)")
 
 
 def test_reserved_bytes_from_another_install_block_the_pin(

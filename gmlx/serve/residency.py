@@ -1570,8 +1570,8 @@ def _stamp_boot_kv_costs(rg, gguf_path: str) -> None:
 
 def _env_arena_cap(model, box, env, held_bytes: int) -> int | None:
     """The clamp the loader puts on an explicit ``GMLX_DECODE_ARENA_GB``
-    (``budget._decode_arena_bytes``): reclaimable RAM, counting what the
-    resident models hold as free to evict, less the incoming every-token
+    (``budget._decode_arena_bytes``): the memory not wired, counting what
+    the resident models hold as free to evict, less the incoming every-token
     weights (pinned before the arena is sized), the host floor, the ring,
     the KV room and the host overhead. None under
     ``GMLX_DECODE_ARENA_FORCE=1`` or without a priced box."""
@@ -1581,9 +1581,9 @@ def _env_arena_cap(model, box, env, held_bytes: int) -> int | None:
     if (str(force).strip().lower() in ("1", "true", "yes", "on")
             or room is None or not getattr(box, "ram_bytes", 0)):
         return None
-    from gmlx.stream.budget import _available_ram_bytes, host_floor_bytes
+    from gmlx.stream.budget import host_floor_bytes, unwired_ram_bytes
 
-    avail = _available_ram_bytes()
+    avail = unwired_ram_bytes()
     if avail is None:
         return None
     ring = int(model.ring_bytes) if box.ring_fits else 0

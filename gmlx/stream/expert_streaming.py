@@ -196,9 +196,9 @@ def install_unflagged_tables(model, gguf_path: str | None, *,
 
 # The chunked wire's wait under a chunk's line: a rise of unwired memory
 # smaller than _WIRE_MIN_RISE does not count, nor does a count of threads
-# waiting for free pages that does not fall to a new low, the wait stops
-# once nothing has counted for _WIRE_STALL_S, and the waits of one wire
-# add up to at most _WIRE_WAIT_S.
+# waiting for free pages that does not fall to a new low while the kernel
+# compresses or swaps nothing, the wait stops once nothing has counted for
+# _WIRE_STALL_S, and the waits of one wire add up to at most _WIRE_WAIT_S.
 _WIRE_STALL_S = 2.0
 _WIRE_MIN_RISE = 256 << 20
 _WIRE_WAIT_S = 60.0
@@ -215,8 +215,10 @@ class _ChunkGuard:
     past the free and file-backed pages has the kernel compress other
     apps' memory for it, and the free-page leg stops the wire if the
     kernel falls behind. Short on either leg, it waits while unwired
-    memory rises or fewer threads wait, and stops on a stall or once the
-    wire has waited ``wait_s`` in all. ``last``, ``line``, ``pending``,
+    memory rises, fewer threads wait, or, on the free-page leg alone, the
+    kernel compresses or swaps memory for them (the load's own readers
+    can be among the waiters), and stops on a stall or once the wire has
+    waited ``wait_s`` in all. ``last``, ``line``, ``pending``,
     ``short`` and ``starved`` keep the final reading, the line it was
     judged on, the chunk's bytes, and which legs were short."""
 
@@ -240,7 +242,7 @@ class _ChunkGuard:
         self.pending = int(nbytes)
         self.line = self.keep + self.pending
         start = since = time.monotonic()
-        best = low = None
+        best = low = marks = None
         try:
             while True:
                 self.last = budget.unwired_ram_bytes()
@@ -252,11 +254,14 @@ class _ChunkGuard:
                 now = time.monotonic()
                 rose = best is None or (self.last or 0) >= best + self.min_rise
                 eased = low is not None and wanted < low
+                prev, marks = marks, budget.reclaim_marks()
+                reclaimed = (not self.short and prev is not None
+                             and marks is not None and marks != prev)
                 if rose:
                     best = self.last or 0
                 if low is None or wanted < low:
                     low = wanted
-                if rose or eased:
+                if rose or eased or reclaimed:
                     since = now
                 elif now - since >= self.stall_s:
                     return False
@@ -1453,7 +1458,7 @@ def install_expert_streaming(
                      and os.environ.get("GMLX_DECODE_ARENA_GB"))
     avail0 = None
     if arena_kw and feeder_prefill:
-        from gmlx.stream.budget import _available_ram_bytes
+        from gmlx.stream.budget import unwired_ram_bytes
         from gmlx.stream.prefill_feeder import ring_bytes
 
         # Sized before the ring exists: its slots are wired at
@@ -1461,7 +1466,7 @@ def install_expert_streaming(
         # them twice.
         ring = ring_bytes(prefetcher.offsets)
         if env_arena:
-            avail0 = _available_ram_bytes()
+            avail0 = unwired_ram_bytes()
         else:
             held = _decode_arena_bytes(
                 total_bytes, prefetcher.offsets, budget, ring_bytes=ring,

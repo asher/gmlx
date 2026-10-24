@@ -214,22 +214,22 @@ def test_the_unwired_read_matches_this_mac_s_mach_counters():
     # Usable RAM (RAM less the firmware carve-outs) less the wired and
     # compressor pages, within the few kernel pages no pageable count
     # holds. A misnamed count would leave every wire on the fallback. The
-    # mach counters refresh about once a second, so the closest of a few
-    # pairs counts.
+    # mach counters refresh about once a second, so the first of a few
+    # pairs to agree counts.
     import time
 
     from gmlx.serve import kernel_vm
 
     usable = kernel_vm._sysctl_count("hw.memsize_usable")
-    gaps = []
     for _ in range(5):
         real = host_box.real("snapshot")()
         unwired = host_box.real("unwired")()
         assert unwired is not None
-        gaps.append(abs(unwired - (usable - real["wired"]
-                                   - real["compressor"])))
+        gap = abs(unwired - (usable - real["wired"] - real["compressor"]))
+        if gap <= 3 * GiB:
+            break
         time.sleep(0.3)
-    assert min(gaps) <= 3 * GiB
+    assert gap <= 3 * GiB
     assert host_box.real("free_wanted")() is not None
 
 
@@ -343,6 +343,7 @@ class _Vm:
         self.wired = (mem - self.free - self.file - self.apps
                       if wired is None else int(wired))
         self.wanted = 0
+        self.compressed_in = 0
         self.lowest_free = self.free
         self.publish()
 
@@ -351,7 +352,8 @@ class _Vm:
             "free": self.free, "inactive": 0, "purgeable": 0,
             "speculative": 0, "filebacked": self.file,
             "wired": self.wired, "compressor": self.compressor,
-            "free_wanted": self.wanted})
+            "free_wanted": self.wanted,
+            "reclaim_marks": (self.compressed_in, 0)})
 
     def take(self, nbytes):
         n = int(nbytes)
@@ -368,6 +370,7 @@ class _Vm:
                 packed = rest / (self.ratio - 1)
                 squeezed = min(self.apps, int(rest + packed))
             self.apps -= squeezed
+            self.compressed_in += squeezed
             self.compressor += int(squeezed / self.ratio)
             short = rest - (squeezed - int(squeezed / self.ratio))
             if short > 0:
@@ -542,6 +545,23 @@ def test_a_kernel_working_through_its_waiters_holds_the_chunk(monkeypatch):
     guard = es._ChunkGuard(4 * GiB)
     assert guard(2 * GiB)
     assert 4 * es._WIRE_STALL_S < guard.waited < es._WIRE_WAIT_S
+
+
+def test_own_readers_waiting_while_the_kernel_compresses_hold_the_chunk(
+        monkeypatch):
+    # The load's own readers wait on free pages for 5 s, two of them the
+    # whole time, while the kernel compresses other apps' memory for
+    # them: the chunk waits through it and commits once they finish.
+    _Vm(host_box.mac(128)[0], free=42.3 * GiB, file=54.6 * GiB)
+    clock = es.time
+    start = clock.now
+    monkeypatch.setattr(budget, "free_page_waiters",
+                        lambda: 2 if clock.now - start < 5 else 0)
+    monkeypatch.setattr(budget, "reclaim_marks",
+                        lambda: (int((clock.now - start) * 1e9), 0))
+    guard = es._ChunkGuard(4 * GiB)
+    assert guard(2 * GiB)
+    assert 2 * es._WIRE_STALL_S < guard.waited < es._WIRE_WAIT_S
 
 
 def test_memory_the_kernel_cannot_compress_stops_the_wire(monkeypatch,
