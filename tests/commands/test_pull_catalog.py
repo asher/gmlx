@@ -553,6 +553,19 @@ def test_recommendation_and_entry_text_are_plain(small_catalog):
     assert sizes == sorted(sizes, reverse=True)
     assert "Room for about" not in text and text.rstrip().endswith(catalog.LIST_FOOTER)
     assert lines[-1] == catalog.OTHER_MODELS_LINE and len(lines[-1]) <= 80
+    assert "extras:" not in text and "UD-Q4_K_M" not in text
+    # --verbose keeps every line and adds the rungs and extras under each model.
+    vtext = catalog.recommendation_text(groups, b, verbose=True)
+    assert all(ln in vtext.splitlines() for ln in lines) and not _banned(vtext)
+    vlines = vtext.splitlines()
+    dense_at = next(i for i, ln in enumerate(vlines) if ln.startswith("  dense "))
+    under = vlines[dense_at + 1:dense_at + 4]
+    assert all(ln.startswith("      ") for ln in under)
+    assert any(ln.strip().startswith("balanced  UD-Q4_K_M") and ln.rstrip().endswith("default")
+               for ln in under)
+    assert any(ln.strip().startswith("extras: image input") and "faster replies" in ln
+               for ln in vlines[dense_at:dense_at + 8])
+    assert len(vlines) > len(lines)
     assert "huggingface.co link" in lines[-1] and "hf:<org>/<repo>/<file.gguf>" in lines[-1]
     for m in small_catalog.values():
         entry = catalog.entry_text(m, b)

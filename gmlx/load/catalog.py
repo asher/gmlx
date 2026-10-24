@@ -310,10 +310,13 @@ RECOMMENDED = {
     48:  ("qwen3.8-27b", "ornith-1.5-35b-a3b", "k2-horizon-mova-36b-a4b"),
     64:  ("qwen3.8-27b", "ornith-1.5-35b-a3b", "k2-horizon-mova-36b-a4b"),
     96:  ("qwen3.8-27b", "ornith-1.5-122b", "qwen3.8-flash-next"),
-    128: ("qwen3.8-flash-next", "ornith-1.5-122b"),
-    192: ("qwen3.8-flash-next", "glm-5.3-flash"),
-    256: ("qwen3.8-flash-next", "glm-5.3-flash", "deepseek-v4.1-flash-1017"),
-    512: ("deepseek-v4.1-flash-1017", "glm-5.3"),
+    # From 128 GB the lists end with two picks for speed: the dense 27B and
+    # a MoE under 40B, both far under the bar on these Macs.
+    128: ("qwen3.8-flash-next", "ornith-1.5-122b", "qwen3.8-27b", "qwen3.6-35b-a3b"),
+    192: ("qwen3.8-flash-next", "glm-5.3-flash", "qwen3.8-27b", "qwen3.6-35b-a3b"),
+    256: ("qwen3.8-flash-next", "glm-5.3-flash", "deepseek-v4.1-flash-1017",
+          "qwen3.8-27b", "qwen3.6-35b-a3b"),
+    512: ("deepseek-v4.1-flash-1017", "glm-5.3", "qwen3.8-27b", "qwen3.6-35b-a3b"),
 }
 
 
@@ -939,6 +942,32 @@ def human_gb(n: int) -> str:
     return _human_gb(n)
 
 
+def rung_rows(m: Model, box: Box, dp: PullPlan | None, addon: int) -> list:
+    """One line per quality rung: tier, quant, the file's size, its state or
+    room for context here, and the default mark."""
+    dr = dp.drafter if dp else False
+    pool = m.rungs if not has_tiers(m) else tiers(m)
+    rows = []
+    for r in sorted(set(pool) | set(shown_rungs(m, box)), key=lambda r: r.bytes):
+        label, note = rung_label(m, r, box, addon, speculates(m, r, dr))
+        mark = "  default" if dp is not None and r == dp.rung else ""
+        name = r.tier or "compact" if has_tiers(m) else r.quant
+        quant = r.quant if has_tiers(m) else ""
+        rows.append(f"{name:<9} {quant:<16} {human_gb(r.bytes):>9}  {label}{mark}"
+                    + (f"  ({note})" if note else ""))
+    return rows
+
+
+def extras_text(m: Model) -> str:
+    """``image input 0.8 GB, faster replies 2.6 GB``, or "" for an entry with neither."""
+    extras = []
+    if m.mmproj:
+        extras.append(f"image input {human_gb(m.mmproj_bytes)}")
+    if m.drafter is not None:
+        extras.append(f"faster replies {human_gb(m.drafter.bytes)}")
+    return ", ".join(extras)
+
+
 def entry_text(m: Model, box: Box) -> str:
     """One entry for ``gmlx pull <name> --list``: its quality rungs with
     their state and room for context here, and its add-ons."""
@@ -951,22 +980,10 @@ def entry_text(m: Model, box: Box) -> str:
     dr = dp.drafter if dp else False
     addon = addon_bytes(m, mm, dr)
     lines.append("Quality")
-    pool = m.rungs if not has_tiers(m) else tiers(m)
-    shown = shown_rungs(m, box)
-    for r in sorted(set(pool) | set(shown), key=lambda r: r.bytes):
-        label, note = rung_label(m, r, box, addon, speculates(m, r, dr))
-        mark = "  default" if dp is not None and r == dp.rung else ""
-        name = r.tier or "compact" if has_tiers(m) else r.quant
-        quant = r.quant if has_tiers(m) else ""
-        lines.append(f"  {name:<9} {quant:<16} {human_gb(r.bytes):>9}  {label}{mark}"
-                     + (f"  ({note})" if note else ""))
-    extras = []
-    if m.mmproj:
-        extras.append(f"image input {human_gb(m.mmproj_bytes)}")
-    if m.drafter is not None:
-        extras.append(f"faster replies {human_gb(m.drafter.bytes)}")
+    lines += [f"  {row}" for row in rung_rows(m, box, dp, addon)]
+    extras = extras_text(m)
     if extras:
-        lines.append("Extras: " + ", ".join(extras))
+        lines.append("Extras: " + extras)
     if dp is not None:
         lines.append(context_text(m, dp.rung, box, addon, plan_speculates(dp)))
         lines.append(plan_command(dp, box))
@@ -998,10 +1015,11 @@ def images_cell(m: Model) -> str:
     return "yes" if m.mmproj else ""
 
 
-def recommendation_text(groups: tuple, box: Box) -> str:
+def recommendation_text(groups: tuple, box: Box, *, verbose: bool = False) -> str:
     """The recommendations as text: one table per group with a header row,
     one line per model: name, download at its default plan, whether it
-    reads images, and what it is good for."""
+    reads images, and what it is good for. ``verbose`` adds each model's
+    quality rungs and extras under its row, as ``entry_text`` lists them."""
     lines = [f"This Mac has {box.ram // GiB} GB of memory.", ""]
     listed = [m for group in groups for m in group]
     name_w = max([4, *(len(m.name) for m in listed)])
@@ -1016,13 +1034,20 @@ def recommendation_text(groups: tuple, box: Box) -> str:
                 size = f"{cls} GB Mac" if cls else "too big"
             else:
                 size = human_gb(plan_bytes(dp))
-            rows.append((m.name, size, images_cell(m), m.use))
+            detail = []
+            if verbose:
+                addon = addon_bytes(m, dp.mmproj if dp else False, dp.drafter if dp else False)
+                detail = [f"      {row}" for row in rung_rows(m, box, dp, addon)]
+                if extras_text(m):
+                    detail.append(f"      extras: {extras_text(m)}")
+            rows.append((m.name, size, images_cell(m), m.use, detail))
         size_head = "DOWNLOAD" if any(default_plan(m, box) for m in models) else "NEEDS"
         size_w = max([len(size_head), *(len(r[1]) for r in rows)])
         lines.append(title)
         lines.append(f"  {'NAME':<{name_w}}  {size_head:<{size_w}}  IMAGES  GOOD FOR")
-        for name, size, images, use in rows:
+        for name, size, images, use, detail in rows:
             lines.append(f"  {name:<{name_w}}  {size:>{size_w}}  {images:<6}  {use}".rstrip())
+            lines += detail
         lines.append("")
     lines.append(LIST_FOOTER)
     return "\n".join(lines).rstrip() + "\n"

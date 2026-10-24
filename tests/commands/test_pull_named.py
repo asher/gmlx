@@ -489,6 +489,14 @@ def test_a_bare_pull_off_a_terminal_lists_every_group(cat, capsys):
     assert banned_words(out) == []
     assert manage.cmd_pull(["--list"]) == 0
     assert capsys.readouterr().out == out
+    assert manage.cmd_pull(["--list", "-v"]) == 0
+    verbose = capsys.readouterr().out
+    assert len(verbose.splitlines()) > len(out.splitlines())
+    assert "balanced  UD-Q4_K_M" in verbose and "  default" in verbose and "extras:" in verbose
+    assert banned_words(verbose) == []
+    for argv in (["-v"], ["--verbose", "dense"], ["-v", "hf:org/x/m.gguf"]):
+        assert manage.cmd_pull(argv) == 2
+        assert capsys.readouterr().err == "error: --verbose goes with --list\n"
     assert downloads == []
 
 

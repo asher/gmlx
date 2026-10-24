@@ -657,9 +657,10 @@ Recommended for this Mac
   ornith-1.5-122b            75.1 GB  yes     coding
 ```
 
-`gmlx pull <name> --list` prints one model's tiers and how much context each
-leaves room for. Context is how much text the model can keep in view. 1K
-tokens is roughly 750 words.
+`gmlx pull --list -v` adds each model's tiers under its row, and `gmlx pull
+<name> --list` prints one model's tiers and how much context each leaves room
+for. Context is how much text the model can keep in view. 1K tokens is
+roughly 750 words.
 
 ```text
 Qwen3.8-27B  27B  Apache 2.0
@@ -754,6 +755,7 @@ names the encoder file and the vision tower that `pull` adds.
 |------|---------|---------|
 | `REF`, positional | None | Nothing opens the picker. Otherwise a model name, an image model name, or `hf:<org>/<repo>/<file.gguf>[@rev]` references and URLs. |
 | `--list` | Off | Print the recommended models for this Mac, or with a model name its quality tiers, and download nothing. |
+| `--verbose`, `-v` | Off | With `--list`, add each model's quality tiers, their sizes and room for context, and its extras. |
 | `--quant QUANT` | The tier for this Mac | A model name: a quality tier, `fastest`, `balanced`, `high` or `xhigh`, or a quant name such as `Q6_K`. An image model name: the DiT quant. |
 | `--vision`, `--no-vision` | On where it fits | Download the model's vision tower for image input, or leave it out. |
 | `--drafter`, `--no-drafter` | On where it fits | Download the model's companion file for faster replies, or leave it out. |

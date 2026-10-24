@@ -1268,6 +1268,8 @@ def _check_pull_flags(a, kind: str) -> str | None:
     if image_only and kind != "image":
         return (f"{join(image_only)} {verb(image_only)} with an image model name "
                 f"({', '.join(image_catalog.RECIPES)})")
+    if a.verbose and not a.list:
+        return "--verbose goes with --list"
     if kind in ("picker", "listing"):
         bad = quant + catalog_only
         if bad:
@@ -1886,7 +1888,7 @@ def _pull_recommended(a) -> int:
         if a.json:
             print(json.dumps(_groups_json(groups, box), indent=2))
         else:
-            print(pc.recommendation_text(groups, box), end="")
+            print(pc.recommendation_text(groups, box, verbose=a.verbose), end="")
         return 0
     dest = _destination(a)
     if dest is None:
@@ -1972,6 +1974,9 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                     help="Print the recommended models for this Mac as a table and "
                          "download nothing. With a model name, print its quality "
                          "tiers.")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="With --list, add each model's quality tiers, their sizes and "
+                         "room for context, and its extras.")
     ap.add_argument("--quant", default=None, metavar="QUANT",
                     help="For a model name, a quality tier (fastest, balanced, "
                          "high, xhigh) or a quant name such as Q6_K; for an image "
