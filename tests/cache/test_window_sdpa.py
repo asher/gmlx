@@ -76,7 +76,7 @@ def test_window_kernel_matches_stock_over_a_rotating_cache():
     # Three chunks of a 2500-token prompt through two caches at Flint's
     # sliding-layer geometry: the routed one and stock under the band
     # mask the cache makes. The second chunk crosses the window.
-    if window_sdpa._kq_window_kernel() is None:
+    if window_sdpa._kq_window_kernel() is None or not window_sdpa._on_gpu():
         pytest.skip("needs an mlx_kquant build with sdpa_prefill_window on NAX")
     routed, stock = RotatingKVCache(_WINDOW), RotatingKVCache(_WINDOW)
     for n, L in enumerate(_CHUNKS):
@@ -90,7 +90,7 @@ def test_window_kernel_matches_stock_over_a_left_padded_batch():
     # prefilled in the same three chunks. Over the chunks a row's padding is
     # inside the buffer, trimmed past, or covers the whole chunk. Rows of
     # padding are compared only for being finite.
-    if window_sdpa._kq_window_kernel() is None:
+    if window_sdpa._kq_window_kernel() is None or not window_sdpa._on_gpu():
         pytest.skip("needs an mlx_kquant build with sdpa_prefill_window on NAX")
     pads = [0, 600, 1800]
     routed = BatchRotatingKVCache(_WINDOW, pads)
