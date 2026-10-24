@@ -35,7 +35,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Requires mlx-kquant 0.5.5. With it, decode writes each new KV cache row in
+- Requires mlx-kquant 0.5.6. With it, decode writes each new KV cache row in
   place instead of copying the whole cache every token, so decode at long
   context is faster and peaks lower.
 - On M5 Macs, the sliding-window layers of Gemma 4, Muse Glimmer, Muse Spark

@@ -111,7 +111,7 @@ jobs:
           pip install "mlx==0.32.3"
           # Wheel, not sdist. Must satisfy the pyproject floor or the
           # editable install upgrades it; tests/test_ci_pins.py gates that.
-          pip install "mlx-kquant==0.5.5"
+          pip install "mlx-kquant==0.5.6"
           # `all` brings the chat, voice and assistant extras, so their tests
           # run instead of skipping themselves away.
           pip install -e ".[all]"
@@ -319,7 +319,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install "mlx==0.32.3"
-          pip install "mlx-kquant==0.5.5"
+          pip install "mlx-kquant==0.5.6"
           pip install -e ".[all]"
           pip install --group test
       - name: Build the guest entry
