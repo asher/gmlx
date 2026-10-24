@@ -279,7 +279,7 @@ def _zero_count_guard(fn):
 
 @_zero_count_guard
 def synthesize_config(meta, tensor_shapes=None, *,
-                      rope_override=None) -> dict[str, Any]:
+                      rope_override=None, report: bool = True) -> dict[str, Any]:
     """Build a config dict from GGUF metadata.
 
     Args:
@@ -295,6 +295,9 @@ def synthesize_config(meta, tensor_shapes=None, *,
     ``rope_override`` (a ``RopeOverride``) defaults to the options of the
     load in progress. The resolved rope scaling rides in the config
     (``rope_scaling.from_config``) when it changes the rope.
+
+    ``report`` prints the ``[config] synthesized`` line: a load's own
+    synthesis, not the header-only pricing before it.
     """
     if tensor_shapes is None:
         if not _is_reader(meta):
@@ -328,7 +331,8 @@ def synthesize_config(meta, tensor_shapes=None, *,
     synth(meta, shapes, config)
     _add_rope_scaling(meta, config, arch, rope_override)
 
-    _print_summary(config, arch)
+    if report:
+        _print_summary(config, arch)
     return config
 
 

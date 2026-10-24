@@ -2556,7 +2556,8 @@ def preload_wire_check(args, *, depth: int | None,
     ``depth_without_mtp`` (``depth`` unless given): the experts stay in
     memory with auto MTP off, or they stream. A dense model, a streamed
     placement and GMLX_OVERCOMMIT=1 load as asked. Every load prices its
-    install's own check at the depth of the load it makes."""
+    install's own check at the depth of the load it makes, and names the
+    tables it reads from the file (``say_tables_offloaded``)."""
     from gmlx.stream import budget as bmod
     from gmlx.stream.table_stream import stream_tables_for_memory
 
@@ -2566,8 +2567,11 @@ def preload_wire_check(args, *, depth: int | None,
     path = os.path.expanduser(getattr(args, "gguf", "") or "")
     if path:
         stream_tables_for_memory(path, False)
-    if (not can_stream or getattr(args, "stream_experts", False)
-            or getattr(args, "stream_cpu", False)):
+    if not can_stream or getattr(args, "stream_cpu", False):
+        return
+    if getattr(args, "stream_experts", False):
+        if path and os.path.isfile(path):
+            say_tables_offloaded(path, _streamed_tables(path))
         return
     if not path or not os.path.isfile(path):
         return
@@ -2577,8 +2581,7 @@ def preload_wire_check(args, *, depth: int | None,
         return
     from gmlx.device import stream_budget_bytes
     from gmlx.load.discovery import text_tensor_bytes
-    from gmlx.serve.capacity import (deferred_table_bytes,
-                                     streamed_table_bytes, table_label)
+    from gmlx.serve.capacity import deferred_table_bytes, streamed_table_bytes
     from gmlx.stream.table_stream import stream_ple_env
 
     text = text_tensor_bytes(path)
@@ -2612,22 +2615,43 @@ def preload_wire_check(args, *, depth: int | None,
         bmod.set_wire_room_depth(depth)
     if check.table_bytes:
         stream_tables_for_memory(path)
-        loadlog.warn("[stream] " + bmod.tables_offloaded(table_label(path),
-                                                         check.table_bytes))
-    if check.mtp_off and check.fits:
-        loadlog.warn(f"[mtp] {check.mtp_off_line()}")
-        args.no_speculative = True
-        return
     if check.fits:
+        say_tables_offloaded(path, deferred + check.table_bytes)
+        if check.mtp_off:
+            loadlog.warn(f"[mtp] {check.mtp_off_line()}")
+            args.no_speculative = True
         return
     from gmlx.serve.capacity import gathered_table_bytes
 
+    # The streamed load reads the tables from the file with the experts.
+    say_tables_offloaded(path, _streamed_tables(path))
     # A load whose gathered tables bring it under wires in chunks.
     loadlog.warn(f"[stream] "
                  f"{check.line(room, depth, chunked=bool(gathered_table_bytes(path)))}")
     args.stream_experts = True
     # The install names this leg, not the flag.
     args.stream_fallback = check.reason
+
+
+def _streamed_tables(path: str) -> int:
+    """Bytes of the tables a load that streams its experts reads from
+    the file: those its ladder streams, or at least those no array can
+    hold."""
+    from gmlx.serve.capacity import held_table_bytes, predicted_stream_bytes
+
+    return max(predicted_stream_bytes(path)[0], held_table_bytes(path))
+
+
+def say_tables_offloaded(path: str, table_bytes: int) -> None:
+    """The [stream] line of a load that reads ``table_bytes`` of the
+    streamable tables of ``path`` from the file. Nothing for 0."""
+    if not table_bytes:
+        return
+    from gmlx.load import loadlog
+    from gmlx.serve.capacity import table_label
+    from gmlx.stream.budget import tables_offloaded
+
+    loadlog.warn("[stream] " + tables_offloaded(table_label(path), table_bytes))
 
 
 def main(argv: list[str] | None = None, prog: str | None = None) -> int:

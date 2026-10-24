@@ -1222,19 +1222,33 @@ def test_a_plain_build_whose_table_brings_it_under_prices_the_resident_experts(
     assert entry.footprint == 120 * GB
     assert tables == [120 * GB]
     assert [c[1] for c in credits[0].values()] == [30 * GB]
+    assert ts.tables_for_memory("a.gguf") is whole
     line = ("[stream] a.gguf: per-layer embedding table of "
             f"{30 * GB / 1e9:.1f} GB offloaded to disk")
-    assert (line in caplog.text) is whole
+    assert caplog.text.count(line) == 1
+    # Unloaded, then deferred: a build the gate defers logs no line.
+    assert pool.evict("a.gguf")
+    assert not ts.tables_for_memory("a.gguf")
+
+    def defer(*a, **k):
+        raise cap.LoadDeferred("short of the memory free now")
+
+    monkeypatch.setattr(cap, "preload_gate", defer)
+    with caplog.at_level("WARNING", logger="gmlx.serve.residency"), \
+            pytest.raises(cap.LoadDeferred):
+        pool.acquire("a.gguf", None, "auto",
+                     build_spec=SimpleNamespace(stream=None))
+    assert caplog.text.count(line) == 1
     if whole:
-        # Unloaded, then built with the memory to hold it whole.
-        assert pool.evict("a.gguf")
-        assert not ts.tables_for_memory("a.gguf")
+        # Then built with the memory to hold it whole.
         monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
-        entry = pool.acquire("a.gguf", None, "auto",
-                             build_spec=SimpleNamespace(stream=None))
+        with caplog.at_level("WARNING", logger="gmlx.serve.residency"):
+            entry = pool.acquire("a.gguf", None, "auto",
+                                 build_spec=SimpleNamespace(stream=None))
         pool.release(entry)
-        assert asked[1:] == [150 * GB]
+        assert asked[1:] == [150 * GB] * 2
         assert entry.footprint == 150 * GB
+        assert caplog.text.count(line) == 1
 
 
 def test_a_plain_build_reprices_experts_that_stream_for_want_of_memory(

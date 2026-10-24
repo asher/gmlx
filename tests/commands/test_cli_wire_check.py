@@ -178,7 +178,10 @@ def test_overcommit_streams_a_set_larger_than_ram(header, monkeypatch,
     cli.preload_wire_check(args, depth=None)
     assert args.stream_experts is True
     assert not ts.tables_for_memory(path)
-    assert capsys.readouterr().err == (
+    # The table streams from the file with the experts.
+    head = (f"[stream] lookup tables of {tables / 1e9:.1f} GB offloaded to "
+            "disk\n" if tables else "")
+    assert capsys.readouterr().err == head + (
         f"[stream] {budget.STREAM_OVER_BUDGET}: holding them takes "
         f"{(text - deferred) / 1e9:.1f} GB, past the 108.2 GB budget and "
         "more than RAM.\n")
@@ -562,14 +565,14 @@ def test_a_table_gathered_per_layer_that_brings_the_model_under_is_not_wired(
     cli.preload_wire_check(args, depth=None)
     assert args.stream_experts is not fits
     err = capsys.readouterr().err
-    if whole:
-        assert err == ("[stream] per-layer embedding table of "
-                       f"{table / 1e9:.1f} GB offloaded to disk\n")
+    # Each load names the table it reads from the file.
+    line = ("[stream] per-layer embedding table of "
+            f"{table / 1e9:.1f} GB offloaded to disk\n")
+    if fits:
+        assert err == line
         assert cap.deferred_table_bytes(path) == table
-    elif fits:
-        assert err == ""
     else:
-        assert err.startswith(f"[stream] {budget.STREAM_FREE_NOW}: ")
+        assert err.startswith(line + f"[stream] {budget.STREAM_FREE_NOW}: ")
         assert err.rstrip().endswith(budget.OVERCOMMIT_LEVER)
 
 

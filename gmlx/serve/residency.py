@@ -1045,12 +1045,10 @@ class _ResidencyPool:
         the load (``table_stream.stream_tables_for_memory``): the tables
         serve from the file, and the install keeps the experts in memory
         if they fit."""
-        from gmlx.stream.budget import tables_offloaded
         from gmlx.stream.table_stream import (stream_ple_env,
                                               stream_tables_for_memory)
 
-        from .capacity import (deferred_table_bytes, streamed_table_bytes,
-                               table_label)
+        from .capacity import deferred_table_bytes, streamed_table_bytes
 
         if stream_ple_env(env) == "0":
             return False
@@ -1060,8 +1058,6 @@ class _ResidencyPool:
                 or not self._gate_fits(gate_bytes - tables, model_path)):
             return False
         stream_tables_for_memory(model_path)
-        _log.warning("[stream] %s: %s", model_path,
-                     tables_offloaded(table_label(model_path), tables))
         return True
 
     def _new_entry(self, cache_key, model_path, footprint, ttl,
@@ -1106,6 +1102,7 @@ class _ResidencyPool:
         gate_bytes = footprint
         streamed = 0
         shares = (0, 0)
+        offloaded = 0
         # Tables that alone bring a plain build under the budget, or under
         # the memory free now, on an arch that gathers them per layer: the
         # load maps them and the bridge's install serves them from the
@@ -1122,12 +1119,14 @@ class _ResidencyPool:
                 gathered = gathered_table_bytes(model_path, env=env)
                 shares = (gathered, 0)
                 streamed = gathered
+                offloaded = footprint - gate_bytes
         elif getattr(build_spec, "stream", None) == "experts":
             # What the install will stream, by its own ladder: the
             # experts, and the tables with them.
             shares = predicted_stream_bytes(str(model_path), env)
             streamed = sum(shares)
             gate_bytes = preload_gate_bytes(footprint, "experts", streamed)
+            offloaded = max(shares[0], held_table_bytes(str(model_path)))
             if streamed:
                 _log.info(
                     "preload gate: stream=experts discounts %.1f GB of "
@@ -1137,6 +1136,7 @@ class _ResidencyPool:
                     gate_bytes / 1e9)
         self._gate(gate_bytes, model_path,
                    streaming=getattr(build_spec, "stream", None) == "experts")
+        _say_tables_offloaded(model_path, offloaded)
         # What the entry holds resident. A streaming build adds its decode
         # arena below, once the loader has sized it.
         resident_bytes = gate_bytes
@@ -1589,6 +1589,19 @@ def _env_arena_cap(model, box, env, held_bytes: int) -> int | None:
                - int(model.every_token_bytes)
                - host_floor_bytes(int(box.ram_bytes)) - ring
                - int(room.bytes) - int(getattr(box, "host_bytes", 0)))
+
+
+def _say_tables_offloaded(model_path, table_bytes: int) -> None:
+    """The server log's [stream] line of a build that reads
+    ``table_bytes`` of its tables from the file. Nothing for 0."""
+    if table_bytes > 0:
+        from gmlx.stream.budget import tables_offloaded
+
+        from .capacity import table_label
+
+        _log.warning("[stream] %s: %s", model_path,
+                     tables_offloaded(table_label(str(model_path)),
+                                      table_bytes))
 
 
 def _clear_table_step(model_path) -> None:

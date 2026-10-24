@@ -129,7 +129,8 @@ Qwen3.8-Flash-Next UD-Q4_K_XL on a Mac with 128 GB, reads those tables from
 the file and keeps its experts in memory without the flag, and a folder
 scan leaves its entry without `stream: experts`. A model under the budget
 does the same when the memory free at load holds it only without its
-tables. With other apps open, UD-IQ4_XS on that Mac prints:
+tables, as UD-IQ4_XS on that Mac does with other apps open. Each load that
+reads its tables from the file says so:
 
 ```text
 [stream] per-layer embedding table of 28.8 GB offloaded to disk

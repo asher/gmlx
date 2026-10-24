@@ -3358,3 +3358,16 @@ def test_deepseek41_llamacpp_header_without_candidate_keys_has_none():
     assert c["candidate_source_layer"] == -1
     c = synthesize_config(_deepseek41_ple_meta(), tensor_shapes=_PLE_SHAPES)
     assert c["candidate_source_layer"] == 20
+
+
+def test_the_checks_before_a_load_print_no_synthesized_config(capsys):
+    # A chat with a drafter prices its config from the header twice before
+    # the load; the load itself prints the line, under --verbose.
+    from types import SimpleNamespace
+
+    from gmlx.commands.tool_preflight import synth_config_from_scans
+
+    cfg = synth_config_from_scans([SimpleNamespace(kv=_meta_for("llama"),
+                                                   tensors=[])])
+    assert cfg["model_type"] == "llama"
+    assert "[config] synthesized" not in capsys.readouterr().out
