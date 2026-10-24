@@ -8,6 +8,8 @@ scales, and the wire fusions skip a scaled projection."""
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pytest
 
@@ -130,3 +132,105 @@ def test_fused_moe_skips_a_scaled_expert_stack(proj):
     m = build()
     install_out_scales(m, {f"experts.{proj}.out_scale": mx.array([0.5])})
     assert modules.install_fused_moe_glu(m) == 0
+
+
+needs_gpu = pytest.mark.skipif(
+    bool(os.environ.get("KQUANT_FORCE_CPU")) or not mx.metal.is_available(),
+    reason="the fused MoE kernels need a real GPU")
+
+
+def _q8(leaf, shape, rng):
+    import mlx_kquant as kq
+
+    w = mx.array((rng.standard_normal(shape) * 0.05).astype(np.float32))
+    leaf.weight, leaf.scales = kq.quantize(w, "q8_0")
+    return leaf
+
+
+def _q8_glu(glu, e, d, inter, rng):
+    from mlx_kquant.nn import KQuantSwitchLinear
+
+    for name, (o, i) in (("gate_proj", (inter, d)), ("up_proj", (inter, d)),
+                         ("down_proj", (d, inter))):
+        setattr(glu, name, _q8(
+            KQuantSwitchLinear(e, o, i, False, "q8_0"), (e, o, i), rng))
+
+
+def _scaled_matches_stock(shell, path, call, monkeypatch):
+    """Scale ``path`` by 0.5, install the fused MoE paths, and compare the
+    block's output with the stock forward."""
+    from gmlx.load import modules
+
+    weights = {f"{path}.out_scale": mx.array([0.5])}
+    assert install_out_scales(shell, weights) == 1
+    shell.load_weights(list(weights.items()), strict=False)
+    modules.install_fused_moe_glu(shell)
+    mx.eval(shell.parameters())
+    y = call()
+    mx.eval(y)
+    with monkeypatch.context() as m:
+        m.setattr(modules, "_FUSED_MOE_ENABLED", False)
+        ref = call()
+        mx.eval(ref)
+    a, b = np.array(y.astype(mx.float32)), np.array(ref.astype(mx.float32))
+    assert np.linalg.norm(a - b) / np.linalg.norm(b) < 2e-2
+
+
+@needs_gpu
+@pytest.mark.parametrize("path", ["mlp.switch_mlp.down_proj",
+                                  "mlp.switch_mlp.gate_proj"])
+def test_fused_moe_block_applies_a_routed_stack_scale(path, monkeypatch):
+    from types import SimpleNamespace
+
+    from mlx_kquant.nn import KQuantLinear
+
+    from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
+
+    d, inter, e = 256, 256, 4
+    rng = np.random.default_rng(0)
+    blk = Qwen3NextSparseMoeBlock(SimpleNamespace(
+        hidden_size=d, moe_intermediate_size=inter,
+        shared_expert_intermediate_size=inter, norm_topk_prob=True,
+        num_experts=e, num_experts_per_tok=2))
+    _q8_glu(blk.switch_mlp, e, d, inter, rng)
+    for name, (o, i) in (("gate_proj", (inter, d)), ("up_proj", (inter, d)),
+                         ("down_proj", (d, inter))):
+        setattr(blk.shared_expert, name,
+                _q8(KQuantLinear(i, o, False, "q8_0"), (o, i), rng))
+    blk.eval()
+
+    class Shell(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mlp = blk
+
+    shell = Shell()
+    x = mx.array(rng.standard_normal((1, 1, d)).astype(np.float32)).astype(mx.bfloat16)
+    _scaled_matches_stock(shell, path, lambda: shell.mlp(x), monkeypatch)
+
+
+@needs_gpu
+@pytest.mark.parametrize("path", ["experts.switch_glu.down_proj",
+                                  "experts.switch_glu.gate_proj"])
+def test_fused_gemma_experts_apply_a_stack_scale(path, monkeypatch):
+    from types import SimpleNamespace
+
+    from gmlx.models.gemma4.language import Experts
+
+    d, inter, e, k = 512, 256, 8, 2
+    rng = np.random.default_rng(3)
+    ex = Experts(SimpleNamespace(hidden_size=d, moe_intermediate_size=inter,
+                                 num_experts=e))
+    _q8_glu(ex.switch_glu, e, d, inter, rng)
+    ex.eval()
+
+    class Shell(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.experts = ex
+
+    shell = Shell()
+    x = mx.array(rng.standard_normal((1, 1, d)).astype(np.float32)).astype(mx.bfloat16)
+    inds = mx.array(rng.integers(0, e, (1, 1, k)).astype(np.uint32))
+    w = mx.array(rng.random((1, 1, k)).astype(np.float32)).astype(mx.bfloat16)
+    _scaled_matches_stock(shell, path, lambda: shell.experts(x, inds, w), monkeypatch)

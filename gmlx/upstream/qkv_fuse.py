@@ -44,7 +44,8 @@ def _eligible(m) -> bool:
     projs = [getattr(m, p, None) for p in ("q_proj", "k_proj", "v_proj")]
     if not all(isinstance(p, KQuantLinear) for p in projs):
         return False
-    if any(p.kquant_type != "q8_0" or "bias" not in p for p in projs):
+    if any(p.kquant_type != "q8_0" or "bias" not in p or "out_scale" in p
+           for p in projs):
         return False
     if len({p.weight.shape[1] for p in projs}) != 1:
         return False
