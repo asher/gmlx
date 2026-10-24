@@ -668,12 +668,20 @@ Room for about 256K tokens of context.
 gmlx pull qwen3.8-27b
 ```
 
-The tiers are `fastest` (a Q4_0 file, or IQ4_XS for a mixture-of-experts
-model), `balanced` (Q4_K_M), `high` (Q6_K) and `xhigh` (Q8_0). A tier the
-repository does not ship is absent, and a smaller `compact` quant appears
-where no tier fits. A mixture-of-experts model larger than this Mac's
-memory is listed as running from the SSD, and `pull` says so before it
-downloads one, as [Models larger than memory](streaming.md) describes.
+Each tier is one file of the model's repository:
+
+| Tier | File |
+|------|------|
+| `fastest` | Q4_0, or IQ4_XS for a mixture-of-experts model |
+| `balanced` | Q4_K_M |
+| `high` | Q6_K |
+| `xhigh` | Q8_0 |
+
+A tier the repository does not ship is absent, and a smaller `compact`
+quant appears where no tier fits. A mixture-of-experts model larger than
+this Mac's memory is listed as running from the SSD, and `pull` says so
+before it downloads one, as [Models larger than memory](streaming.md)
+describes.
 
 A pull by name registers the model under its id and adds the name as an
 alias, marked `set by gmlx pull` in the config, so `gmlx chat <name>` and a

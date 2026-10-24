@@ -121,7 +121,9 @@ The first recommendation at each memory size:
 
 `gmlx pull --list` prints every recommended model with its license and a
 `gmlx pull` command, and the [pull reference](cli.md#gmlx-pull) lists them
-all. A model needs memory for about its file size, plus its KV cache, which
+all.
+
+A model needs memory for about its file size, plus its KV cache, which
 grows with the conversation. [Memory and the KV cache](memory.md) shows how
 to estimate and shrink it. A mixture-of-experts model larger than memory
 can still run from the SSD, as [Models larger than memory](streaming.md)

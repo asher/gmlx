@@ -39,8 +39,9 @@ The example below pulls Qwen3.8-27B at the quality tier that suits this
 Mac, with image input and faster replies, a 23 GB download on a 64 GB Mac.
 A model needs about its file size in memory, plus room for the
 conversation. `gmlx pull` with no name lists the models that fit this Mac
-and lets you pick one; see
-[Choosing a model](https://asher.github.io/gmlx/quickstart.html#choosing-a-model).
+and lets you pick one.
+[Choosing a model](https://asher.github.io/gmlx/quickstart.html#choosing-a-model)
+names the first pick at each memory size.
 
 ```sh
 gmlx init --models-dir ~/models

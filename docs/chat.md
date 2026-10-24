@@ -76,7 +76,7 @@ process.
 
 The up arrow recalls earlier prompts, saved across sessions in
 `~/.cache/gmlx/chat_history.ptk`. The first chat after an upgrade copies
-the old `chat_history` file over. `--no-history` keeps a session out of it.
+the old `chat_history` file over. `--no-history` keeps a chat out of it.
 Alt-Enter inserts a newline, and a multi-line paste keeps its line breaks.
 
 Tab completes command names. After a command, it completes the argument:
