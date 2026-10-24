@@ -1075,7 +1075,7 @@ def test_moe_wide_step_yields(monkeypatch, resident):
     import gmlx.stream.expert_streaming as es
 
     m = _moe(256, 8)
-    _headroom(monkeypatch, 21 * GB)  # under the 20 GiB floor
+    _headroom(monkeypatch, 21 * GB)  # 21e9 bytes, under the 20 GiB floor
     assert pd._run_base(m, None, None) == 2048
     _headroom(monkeypatch, 40 * GB)
     monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
@@ -1105,6 +1105,13 @@ def test_resident_ckpt_grid_follows_the_moe_wide_step(monkeypatch, resident):
     batch.uids = [0, 1, 2]
     assert ckpt._ckpt_run_step(batch) == 2048
     batch.uids = [0]
+    # recurrent state keeps the batch's grid
+    from gmlx.cache.kv_cache import ArraysCache, KVCache
+
+    batch.prompt_cache = [KVCache(), ArraysCache(size=2)]
+    assert ckpt._ckpt_run_step(batch) == 2048
+    batch.prompt_cache = [KVCache()]
+    assert ckpt._ckpt_run_step(batch) == 4096
     monkeypatch.setenv("PREFILL_STEP_SIZE", "2048")
     assert ckpt._ckpt_run_step(batch) == 2048
     monkeypatch.delenv("PREFILL_STEP_SIZE")

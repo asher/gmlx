@@ -269,14 +269,14 @@ def _media_safe(batch, ids) -> Callable[[int], bool]:
 
 def _ckpt_run_step(batch) -> int:
     """The step the grid follows. A resident model takes the batch's
-    step, or the MoE wide step its loop runs from in place of the stock
-    one (``prefill_decay.moe_base_step``), so no boundary splits a chunk
-    and a warm turn chunks as a cold one does. A streamed one, where a cut
-    off the loop's chunk edges costs a full expert pass, takes the step
-    the loop runs from: the batch's own (the decay wrapper swaps a chunk's
-    width in around the MTP body and keeps the base in
-    ``_gmlx_base_step``), or the arch profile's over a default one
-    (``prefill_decay._run_base``)."""
+    step, or without recurrent state the MoE wide step its loop runs from
+    in place of the stock one (``prefill_decay.moe_base_step``), so no
+    boundary splits a chunk and a warm turn chunks as a cold one does. A
+    streamed one, where a cut off the loop's chunk edges costs a full
+    expert pass, takes the step the loop runs from: the batch's own (the
+    decay wrapper swaps a chunk's width in around the MTP body and keeps
+    the base in ``_gmlx_base_step``), or the arch profile's over a default
+    one (``prefill_decay._run_base``)."""
     from gmlx.stream.expert_streaming import experts_streamed
 
     model = getattr(batch, "model", None)
@@ -300,17 +300,21 @@ def _ckpt_run_step(batch) -> int:
 
 def _resident_run_step(batch, model, step: int) -> int:
     """The batch's step, or the MoE wide step in place of the stock one.
-    An arch profile's base step keeps the batch's grid."""
+    An arch profile's base step keeps the batch's grid, and so does
+    recurrent state: its records snap to the grid, so a coarser grid drops
+    them."""
     from gmlx.gen import prefill_decay as pd
 
     if step != pd._STOCK_BASE or not pd._default_base(model, step):
+        return step
+    if "arr" in (_ckpt_layout_live(batch) or ()):
         return step
     try:
         profile = pd.resolve_score_profile(
             model, getattr(batch, "prompt_cache", None))
         if profile is not None and profile.base_step:
             return step
-        return pd.moe_base_step(model, pd.batch_rows(batch)) or step
+        return pd.moe_base_step(model, pd.prompt_rows(batch)) or step
     except Exception:
         return step
 
@@ -388,7 +392,7 @@ def _ckpt_chunks(batch, cuts, restored: int, n: int,
             return k if col is None else min(k, col - pos)
 
         return pd.size_chunk(model, profile, step, pos, lambda: cols,
-                             cut, pd.batch_rows(batch))[0]
+                             cut, pd.prompt_rows(batch))[0]
 
     while stop is None or pos < stop:
         col = pending[0] if pending else None

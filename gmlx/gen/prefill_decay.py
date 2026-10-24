@@ -947,7 +947,7 @@ def _moe_widths(model) -> tuple[int, int]:
     return 0, 0
 
 
-def batch_rows(batch) -> int:
+def prompt_rows(batch) -> int:
     """The prompts a prompt batch prefills together, at least 1."""
     return len(getattr(batch, "uids", None) or ()) or 1
 
@@ -1075,7 +1075,7 @@ def decayed_for_batch(batch) -> int | None:
         lambda: embeds.shape[1] - (0 if _folds(batch) else 1))
     step, run_base, ticked = size_chunk(
         batch.model, profile, base, depth, cols,
-        lambda s: _cut_chunk(batch, s), batch_rows(batch))
+        lambda s: _cut_chunk(batch, s), prompt_rows(batch))
     global _LAST_STEP
     _LAST_STEP = int(step or 0)
     if env_bool("GMLX_PREFILL_DECAY_LOG", False):
