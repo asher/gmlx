@@ -6,6 +6,7 @@ FACTS: dict = {
     'qwen3.5-4b': {
         'revision': 'e87f176479d0855a907a41277aca2f8ee7a09523',
         'params': '4B',
+        'n_params': 4205751296,
         'arch': 'qwen35',
         'moe': False,
         'native_mtp': False,
@@ -34,6 +35,7 @@ FACTS: dict = {
     'ternary-bonsai-2-9b': {
         'revision': '5b2abb02362efbed46bbe204014b02837778b2c2',
         'params': '9B',
+        'n_params': 9197093888,
         'arch': 'qwen35',
         'moe': False,
         'native_mtp': False,
@@ -55,6 +57,7 @@ FACTS: dict = {
     'nemotron-3.5-bolt-e4b': {
         'revision': 'b738967d6da3441a7d1c71fcec15e49e32e16ecd',
         'params': '7.5B',
+        'n_params': 7518069290,
         'arch': 'gemma4',
         'moe': False,
         'native_mtp': False,
@@ -78,6 +81,7 @@ FACTS: dict = {
     'ornith-1.5-9b': {
         'revision': 'abdd624b12ebf020b767fff532ff44fe552b28c3',
         'params': '9B',
+        'n_params': 9197093888,
         'arch': 'qwen35',
         'moe': False,
         'native_mtp': True,
@@ -98,6 +102,7 @@ FACTS: dict = {
     'qwen3.5-9b': {
         'revision': '9716a636ee4bddc3fed678220b7a33dd2a4160ae',
         'params': '9B',
+        'n_params': 9197093888,
         'arch': 'qwen35',
         'moe': False,
         'native_mtp': True,
@@ -125,6 +130,7 @@ FACTS: dict = {
     'gemma-4-12b': {
         'revision': 'fc034cfff751157913579611efad8462ac1be606',
         'params': '12B',
+        'n_params': 11907350576,
         'arch': 'gemma4',
         'moe': False,
         'native_mtp': False,
@@ -152,6 +158,7 @@ FACTS: dict = {
     'k2-horizon-7b': {
         'revision': '7a75dbda05e3d440351543131ff3f7fa5687e879',
         'params': '9.0B',
+        'n_params': 8999178240,
         'arch': 'k2-horizon',
         'moe': False,
         'native_mtp': False,
@@ -172,6 +179,7 @@ FACTS: dict = {
     'gemma-4-26b-a4b': {
         'revision': 'c099eb48e663fd284577b04978a94ffccb261841',
         'params': '26B-A4B',
+        'n_params': 25233142046,
         'arch': 'gemma4',
         'moe': True,
         'native_mtp': False,
@@ -200,6 +208,7 @@ FACTS: dict = {
     'qwen3.8-27b': {
         'revision': '4ca720788d1e01f1bff70c033e0d0028fd02e502',
         'params': '27B',
+        'n_params': 27320697856,
         'arch': 'qwen35',
         'moe': False,
         'native_mtp': False,
@@ -229,6 +238,7 @@ FACTS: dict = {
     'ternary-bonsai-2-27b': {
         'revision': 'b072e1d3b35a0a630cece372c2127528e0994386',
         'params': '27B',
+        'n_params': 26895998464,
         'arch': 'qwen35',
         'moe': False,
         'native_mtp': False,
@@ -248,6 +258,7 @@ FACTS: dict = {
     'qwen3.6-35b-a3b': {
         'revision': 'a483e9e6cbd595906af30beda3187c2663a1118c',
         'params': '35B-A3B',
+        'n_params': 34660610688,
         'arch': 'qwen35moe',
         'moe': True,
         'native_mtp': False,
@@ -278,6 +289,7 @@ FACTS: dict = {
     'ornith-1.5-35b-a3b': {
         'revision': '12393612fd4f730ff5aadc23e9b8f9648aa49ceb',
         'params': '35B',
+        'n_params': 35505251456,
         'arch': 'qwen35moe',
         'moe': True,
         'native_mtp': True,
@@ -298,6 +310,7 @@ FACTS: dict = {
     'k2-horizon-mova-36b-a4b': {
         'revision': '00cce3151bdce384661cb33603853ccfe6209de9',
         'params': '91x3.7B',
+        'n_params': 37444792020,
         'arch': 'k2-horizon',
         'moe': True,
         'native_mtp': False,
@@ -318,6 +331,7 @@ FACTS: dict = {
     'ornith-1.5-122b': {
         'revision': '745bd742473a6cdddb1c6f78fb9a3b3a9293bd41',
         'params': '122B',
+        'n_params': 124635206144,
         'arch': 'qwen35moe',
         'moe': True,
         'native_mtp': True,
@@ -343,6 +357,7 @@ FACTS: dict = {
     'nemotron-3.5-super-vl': {
         'revision': '75a5829055f69a0359085ae6bbd0a81b60bc05c6',
         'params': '512x8.3B',
+        'n_params': 123611033088,
         'arch': 'nemotron_h_moe',
         'moe': True,
         'native_mtp': True,
@@ -369,6 +384,7 @@ FACTS: dict = {
     'qwen3.8-flash-next': {
         'revision': '766911a6b7369840a91dbcd95f9f997acaab6cd6',
         'params': '512x56B',
+        'n_params': 176943899520,
         'arch': 'qwen4exp',
         'moe': True,
         'native_mtp': False,
@@ -395,6 +411,7 @@ FACTS: dict = {
     'glm-5.3-flash': {
         'revision': 'a38483c8cd5df544f53d70fb281afe97369d5ab6',
         'params': '288x10B',
+        'n_params': 320759404382,
         'arch': 'glm5-next',
         'moe': True,
         'native_mtp': True,
@@ -422,6 +439,7 @@ FACTS: dict = {
     'deepseek-v4-flash-0731': {
         'revision': 'fbbb5b93fb787c21338159b0af3318bb3f4d9768',
         'params': '256x8.4B',
+        'n_params': 284334567511,
         'arch': 'deepseek4',
         'moe': True,
         'native_mtp': False,
@@ -448,9 +466,10 @@ FACTS: dict = {
             ('UD-Q8_K_XL', 'xhigh', 'UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00001-of-00005.gguf', 161869615520, 161864270172, 0, 48, False),
         ),
     },
-    'deepseek-v4.1-flash': {
+    'deepseek-v4.1-flash-1017': {
         'revision': '60ad3651641b5c97679c807e064ab1d7a3ca1455',
         'params': '748B-A16B',
+        'n_params': 748494643824,
         'arch': 'deepseek41',
         'moe': True,
         'native_mtp': False,
@@ -477,6 +496,7 @@ FACTS: dict = {
     'glm-5.3': {
         'revision': '346b3591c7f28d1a23716f97a065ecf12ec14771',
         'params': '256x22B',
+        'n_params': 753864139008,
         'arch': 'glm-dsa',
         'moe': True,
         'native_mtp': False,

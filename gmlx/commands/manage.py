@@ -1138,12 +1138,27 @@ def _planned_download_bytes(ref: remote.Ref, dest_dir: str,
 
 
 _PULL_DESCRIPTION = """\
-Validate a remote GGUF's header, then download it (all shards) to your model
-dir - not the HF cache. By default it lands in the server config's first
-model_dirs root, under <dir>/<org>__<repo>/. Pass several files to fetch them
-together (extra bare names resolve in the first ref's repo - e.g. an mmproj or
-a second quant). Files landing under a model_dirs root are registered in the
-config and served immediately. Refuses an unloadable GGUF unless --force.
+Download a model. With no REF, pick one of the recommended models for this
+Mac. With a model name, pull it at the quality tier for this Mac's memory,
+with image input and faster replies where they fit, and register the name
+so `gmlx chat <name>` runs it:
+
+  gmlx pull                                  pick a recommended model for this Mac
+  gmlx pull qwen3.8-27b                      pull one by name
+  gmlx pull qwen3.8-27b --quant balanced --no-vision --no-drafter
+  gmlx pull --list                           the recommendations as text
+  gmlx chat qwen3.8-27b
+
+Each quality tier shows how much context it leaves room for. Context is how
+much text the model can keep in view. 1K tokens is roughly 750 words.
+
+An hf: ref or a URL pulls any GGUF: its header is checked, then it downloads
+(all shards) to your model dir - not the HF cache. By default it lands in the
+server config's first model_dirs root, under <dir>/<org>__<repo>/. Pass
+several files to fetch them together (extra bare names resolve in the first
+ref's repo - e.g. an mmproj or a second quant). Files landing under a
+model_dirs root are registered in the config and served immediately. Refuses
+an unloadable GGUF unless --force.
 
 An image model name (z-image-turbo, qwen-image, qwen-image-turbo,
 krea-2-turbo, flux-2-klein, flux-2-klein-base, flux-2-klein-9b,
@@ -1157,7 +1172,12 @@ non-commercial use only.
 """
 
 _PULL_EXAMPLES = """\
-examples (a ref names one file, a quant folder, or a whole repo):
+examples:
+
+  a recommended model, by name (gmlx pull --list shows them)
+    gmlx pull qwen3.8-27b
+    gmlx pull qwen3.8-27b --quant high --no-drafter
+    gmlx pull qwen3.8-27b --list
 
   one file - every shard of a split set comes with it
     gmlx pull hf:unsloth/DeepSeek-V4-Flash-0731-GGUF/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00006.gguf
@@ -1186,6 +1206,733 @@ examples (a ref names one file, a quant folder, or a whole repo):
     gmlx pull qwen-image --quant Q8_0 --encoder-quant Q8_0
 """
 
+# What a ref names, decided before dispatch and in this order.
+_LOCAL, _IMAGE, _CATALOG, _REMOTE, _UNKNOWN = "local", "image", "catalog", "remote", "unknown"
+
+CONTEXT_LINE = ("Context is how much text the model can keep in view. "
+                "1K tokens is roughly 750 words.")
+_SLOW_LINE = ("Larger than this Mac's memory. gmlx reads part of the model from "
+              "the SSD for every token, so replies are much slower than for a "
+              "model that fits.")
+_PAGE_CACHE_LINE = ("This Mac has little memory left to cache it, so replies are "
+                    "slower still.")
+_MAY_NOT_LOAD = "Larger than this Mac's memory. It may not load."
+_EMPTY_LINE = ("No catalog model fits this Mac. gmlx pull hf:<org>/<repo>/<file> "
+               "pulls any GGUF by name.")
+_SWAP_ROOM = 10 << 30
+
+
+def _classify_ref(raw: str) -> str:
+    """What ``raw`` names: a file on disk, an image model, a recommended
+    model, an hf: ref or URL, or none of these."""
+    if os.path.exists(os.path.expanduser(raw)):
+        return _LOCAL
+    from gmlx.image import catalog as image_catalog
+    if image_catalog.recipe(raw) is not None:
+        return _IMAGE
+    from gmlx.load import catalog
+    if catalog.model(raw) is not None:
+        return _CATALOG
+    if raw.startswith(("hf:", "http://", "https://", "~")) or "/" in raw:
+        return _REMOTE
+    return _UNKNOWN
+
+
+def _check_pull_flags(a, kind: str) -> str | None:
+    """The error for a flag that does not go with this form of pull, or
+    None. ``kind`` is picker (no refs), listing (no refs with --list or
+    --json), catalog, catalog-list, image or remote."""
+    from gmlx.image import catalog as image_catalog
+
+    def shown(attr, flag):
+        return f"--no-{flag[2:]}" if getattr(a, attr) is False else flag
+
+    image_only = [f for attr, f in (("encoder_quant", "--encoder-quant"),
+                                    ("only", "--only"), ("keep_source", "--keep-source"))
+                  if getattr(a, attr)]
+    catalog_only = [shown(attr, f) for attr, f in (("vision", "--vision"),
+                                                   ("drafter", "--drafter"))
+                    if getattr(a, attr) is not None]
+    remote_only = [f for attr, f in (("hf_source", "--hf-source"), ("max_mb", "--max-mb"))
+                   if getattr(a, attr) is not None]
+    downloads = [f for attr, f in (("to", "--to"), ("force", "--force"),
+                                   ("no_register", "--no-register")) if getattr(a, attr)]
+    quant = ["--quant"] if a.quant else []
+
+    def join(flags):
+        return ", ".join(flags)
+
+    def verb(flags):
+        return "goes" if len(flags) == 1 else "go"
+
+    if image_only and kind != "image":
+        return (f"{join(image_only)} {verb(image_only)} with an image model name "
+                f"({', '.join(image_catalog.RECIPES)})")
+    if kind in ("picker", "listing"):
+        bad = quant + catalog_only
+        if bad:
+            return f"{join(bad)} {verb(bad)} with a model name; gmlx pull --list shows the names"
+        if remote_only:
+            return f"{join(remote_only)} {verb(remote_only)} with an hf: ref or a URL"
+        if kind == "listing" and downloads:
+            return f"--list downloads nothing, so {join(downloads)} {'does' if len(downloads) == 1 else 'do'} not go with it"
+        return None
+    if kind == "catalog-list":
+        bad = quant + catalog_only + downloads
+        if bad:
+            return (f"--list prints the quality tiers and downloads nothing, so "
+                    f"{join(bad)} {'does' if len(bad) == 1 else 'do'} not go with it")
+        return None
+    if kind == "image":
+        if catalog_only:
+            return f"{join(catalog_only)} {verb(catalog_only)} with a model name, not an image model name"
+        if a.list:
+            return "--list goes alone or with a model name, not an image model name"
+        return None
+    if kind == "remote":
+        if a.list:
+            return "--list goes alone or with a model name, not an hf: ref"
+        if quant:
+            return "--quant goes with a model name or an image model name, not an hf: ref"
+        if catalog_only:
+            return f"{join(catalog_only)} {verb(catalog_only)} with a model name, not an hf: ref"
+    return None
+
+
+def _unknown_ref_error(raw: str) -> str:
+    from gmlx.load import catalog
+    lines = [f"error: {raw!r} is not a model name, an image model name, an hf: ref "
+             "or a URL; gmlx pull --list shows the names"]
+    near = catalog.closest_name(raw)
+    if near:
+        lines.append(f"Did you mean {near}?")
+    return "\n".join(lines)
+
+
+def _want_interactive() -> bool:
+    """Whether pull may ask or draw: stdin and stdout are terminals."""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:  # noqa: BLE001 - a closed stream is not a terminal
+        return False
+
+
+def _pick(*args, **kwargs):
+    """The picker widget; a seam for tests."""
+    from gmlx.tui.pick import pick
+    return pick(*args, **kwargs)
+
+
+def _on_startup_volume(path: str) -> bool:
+    """Whether ``path``, or its nearest existing ancestor, is on the volume
+    macOS swaps to."""
+    p = os.path.abspath(os.path.expanduser(path))
+    while not os.path.exists(p):
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    try:
+        return os.stat(p).st_dev == os.stat("/System/Volumes/Data").st_dev
+    except OSError:
+        return False
+
+
+def _existing_config(a) -> str | None:
+    """The config a pull registers into: ``--config`` when that file
+    exists, else the first default config that does; None when neither."""
+    import gmlx.config as cfgmod
+
+    if a.config:
+        p = os.path.expanduser(a.config)
+        return p if os.path.exists(p) else None
+    return next((str(c) for c in cfgmod.default_config_paths()
+                 if os.path.exists(c)), None)
+
+
+def _refusal(v: dict, force: bool) -> str | None:
+    """The lines that refuse a header verdict, or None when the download
+    proceeds: a usable file, or --force."""
+    if v["usable"] or force:
+        return None
+    reasons = []
+    if not v["codecs_loadable"] and v["unsupported_codecs"]:
+        reasons.append(
+            "no kernel for codec(s): " + ", ".join(v["unsupported_codecs"]))
+    if not v["arch_supported"] and not (v.get("mmproj") or v.get("adapter")
+                                        or v.get("drafter") or v.get("image")):
+        reasons.append(f"unsupported arch: {v['arch'] or '?'}")
+    if v.get("chip_error") and not reasons:
+        return f"\nerror: {v['chip_error']}. Pass --force to download it anyway"
+    if v.get("chip_error"):
+        reasons.append(v["chip_error"])
+    why = f" - {'; '.join(reasons)}" if reasons else ""
+    return (f"\nrefusing to download an unloadable GGUF{why}. Pass --force to "
+            "override, or pick a different quant.")
+
+
+def _pull_refs(refs: list, a, base_dir: str, nest: bool, *, prechecked=None,
+               report: bool = True, disk_checked: bool = False) -> tuple:
+    """Check each ref's header, then download it into its folder under
+    ``base_dir``. ``prechecked`` maps a ref's text to the ``(ref, report,
+    n_shards, scans)`` an earlier header read gave, which skips the read
+    and the report print; ``report=False`` prints no report (a refusal
+    still prints its verdict); ``disk_checked`` skips the per-file disk
+    check. Returns ``(all_ok, downloaded paths)``."""
+    all_ok = True
+    downloaded: list[str] = []
+    listing_cache: dict = {}
+    prechecked = prechecked or {}
+    for raw_ref in refs:
+        fresh = raw_ref.raw not in prechecked
+        try:
+            if fresh:
+                ref = _resolve_to_file(raw_ref)
+                hdr, n_shards, scans = _build_report(ref, max_mb=a.max_mb)
+            else:
+                ref, hdr, n_shards, scans = prechecked[raw_ref.raw]
+        except remote.RemoteError as e:
+            print(f"error: {e}", file=sys.stderr)
+            all_ok = False
+            continue
+        v = _verdict(ref, hdr, hf_source=a.hf_source, n_shards=n_shards,
+                     size_bytes=_ref_size_bytes(ref, hdr), scans=scans)
+        shown = fresh and (a.json or report)
+        if shown and a.json:
+            print(json.dumps(v, indent=2))
+        elif shown:
+            _print_report(v)
+            if v.get("fit") in ("tight", "over"):
+                # Advisory only - the file may be destined for another machine
+                # or a streaming setup, so the pull itself proceeds.
+                note = _fit_note(v)
+                if note:
+                    print(f"note: {note}", file=sys.stderr)
+        refusal = _refusal(v, a.force)
+        if refusal is not None:
+            if not shown:
+                _print_report(v)
+            print(refusal, file=sys.stderr)
+            all_ok = False
+            continue
+        dest_dir = _dest_for_ref(ref, base_dir, nest)
+        if not disk_checked and not a.force:
+            need = _planned_download_bytes(ref, dest_dir, listing_cache)
+            if need:
+                free = _disk_free(dest_dir)
+                if free < need:
+                    print(f"error: not enough disk space for {ref.filename}: need "
+                          f"{_human_gb(need)}, {_human_gb(free)} free at {dest_dir} "
+                          "(free space, pass --to DIR on another volume, or --force)",
+                          file=sys.stderr)
+                    all_ok = False
+                    continue
+        try:
+            downloaded += _download_ref(ref, dest_dir)
+        except (remote.RemoteError, OSError) as e:
+            print(f"error: download failed: {e}", file=sys.stderr)
+            all_ok = False
+            continue
+    return all_ok, downloaded
+
+
+def _finish_pull(downloaded: list, a, config_path: str | None, *, pairs=None):
+    """Print the downloaded files and register them in ``config_path``
+    (None registers nothing, as does --no-register). Returns what
+    registration did, a :class:`gmlx.serve.server.Registered`."""
+    from gmlx.serve.server import Registered, register_downloads
+
+    if not downloaded:
+        return Registered()
+    print(f"\ndownloaded {len(downloaded)} file{plural_s(len(downloaded))}:")
+    for p in downloaded:
+        print(f"  {p}")
+    if a.no_register or config_path is None:
+        return Registered()
+    # Close pull's own loop: a file that landed under a model_dirs root
+    # becomes a served model without a separate sync-models run.
+    return register_downloads(downloaded, config_path, pairs=pairs)
+
+
+class Destination:
+    """Where a pull lands and where it registers. ``pending`` is a model
+    folder the user named for a config that does not exist yet
+    (``new_config``) or has no ``model_dirs``; :func:`_commit_destination`
+    writes it once a plan is chosen, into ``config_path``."""
+
+    def __init__(self, base_dir: str, nest: bool, config_path: str | None, *,
+                 pending: str | None = None, new_config: bool = False):
+        self.base_dir = base_dir
+        self.nest = nest
+        self.config_path = config_path
+        self.pending = pending
+        self.new_config = new_config
+
+
+def _config_writable(path: str) -> bool:
+    """Print the error and give False when gmlx will not write ``path``."""
+    import gmlx.config as cfgmod
+
+    try:
+        cfgmod.config_write_target(path, "--config")
+        if os.path.exists(path) and not os.path.isfile(path):
+            raise cfgmod._not_a_file(path, "--config")
+    except cfgmod.ConfigWriteError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return False
+    return True
+
+
+def _destination(a) -> Destination | None:
+    """Settle where a pull lands before anything is chosen; None after an
+    error. --to sets the folder alone and nests nothing. Otherwise the
+    config's first model_dirs root. When there is no config, or it has no
+    model folder, an interactive pull asks for one and records it,
+    writing nothing yet; off a terminal the usual error stands."""
+    import gmlx.config as cfgmod
+
+    config = _existing_config(a)
+    if a.to:
+        return Destination(os.path.expanduser(os.path.expandvars(a.to)), False, config)
+    try:
+        return Destination(_model_dir_dest(a.config), True, config)
+    except remote.RemoteError as e:
+        can_ask = config is None
+        if config is not None:
+            try:
+                can_ask = not cfgmod.load_config(config).model_dirs
+            except cfgmod.ConfigError:
+                can_ask = False
+        if not can_ask or not _want_interactive():
+            print(f"error: {e}", file=sys.stderr)
+            return None
+    import gmlx.commands.wizard as wizard
+
+    target = (os.path.expanduser(a.config) if a.config
+              else str(cfgmod.default_config_write_path()))
+    if config is not None:
+        target = config
+    if not _config_writable(target):
+        return None
+    io = wizard.make_io()
+    folder = io.text("No model folder is set. Folder for your models?",
+                     default=wizard._suggested_dir())
+    folder = os.path.expanduser(os.path.expandvars(folder.strip() or wizard._suggested_dir()))
+    return Destination(folder, True, None if a.no_register else target,
+                       pending=folder, new_config=config is None)
+
+
+def _commit_destination(dest: Destination) -> bool:
+    """Write what a pending destination needs: a config with the folder as
+    its model_dirs, or ``server.model_dirs`` on a config that has none.
+    Nothing when nothing registers."""
+    if not dest.pending or dest.config_path is None:
+        return True
+    import gmlx.config as cfgmod
+    from gmlx.load import discovery
+
+    path = dest.config_path
+    try:
+        if dest.new_config:
+            text = discovery.scaffold_yaml([], model_dirs=[dest.pending])
+            real = cfgmod.config_write_target(path, "--config")
+            os.makedirs(os.path.dirname(real), exist_ok=True)
+            cfgmod.replace_config_text(real, text, "--config")
+            print(f"wrote {path}")
+        else:
+            def mutate(doc):
+                from ruamel.yaml.comments import CommentedMap
+                srv = doc.get("server")
+                if not isinstance(srv, dict):
+                    srv = CommentedMap()
+                    doc.insert(0, "server", srv)
+                srv["model_dirs"] = [dest.pending]
+            cfgmod.edit_config_yaml(path, mutate, "--config")
+            print(f"set server.model_dirs in {path}")
+    except (cfgmod.ConfigWriteError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return False
+    return True
+
+
+def _confirm_lines(plan, state: str, stream_verdict: str | None, box, *,
+                   remaining: int, on_disk: int, free: int, base_dir: str) -> list:
+    """What a named pull prints about the chosen file before it downloads."""
+    from gmlx.load import catalog as pc
+
+    m = plan.model
+    lines = []
+    if plan.streaming:
+        lines.append(_SLOW_LINE)
+        if stream_verdict == "page_cache":
+            lines.append(_PAGE_CACHE_LINE)
+    elif state == pc.OVER:
+        lines.append(_MAY_NOT_LOAD)
+    else:
+        ctx = pc.context_text(m, plan.rung, box, pc.plan_addon_bytes(plan),
+                              pc.plan_speculates(plan))
+        lines.append(f"Fits in memory. {ctx}".rstrip())
+    if plan.mmproj and m.mmproj:
+        lines.append(f"image input  {pc.human_gb(m.mmproj_bytes)}")
+    if plan.drafter and m.drafter is not None:
+        lines.append(f"faster replies  {pc.human_gb(m.drafter.bytes)}")
+    lines.append(_download_line(remaining, on_disk, free, base_dir))
+    return lines
+
+
+def _download_line(remaining: int, on_disk: int, free: int, base_dir: str) -> str:
+    from gmlx.load.catalog import human_gb
+
+    disk = f"Download {human_gb(remaining)}"
+    if on_disk:
+        disk += f" ({human_gb(on_disk)} already on disk)"
+    return f"{disk}   free disk {human_gb(free)} at {base_dir}"
+
+
+def _confirm_plan(plan, a, dest: Destination, box) -> tuple:
+    """Read the model file's header and decide: ``(None, prechecked)`` to
+    proceed, ``(1, ...)`` for a refusal, ``(130, ...)`` for a decline.
+    ``prechecked`` hands the header read to :func:`_pull_refs`. The lines
+    say what the user needs in plain words; --json prints the verdict
+    once, box lines included, and never asks."""
+    from gmlx.load import catalog as pc
+    from gmlx.spinner import Spinner
+    from gmlx.stream import plan as sp
+
+    m = plan.model
+    raw = pc.rung_ref(m, plan.rung)
+    try:
+        with Spinner(f"checking the header of {os.path.basename(plan.rung.path)}"):
+            ref = _resolve_to_file(remote.parse_ref(raw))
+            hdr, n_shards, scans = _build_report(ref, max_mb=a.max_mb)
+    except remote.RemoteError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1, {}
+    v = _verdict(ref, hdr, hf_source=a.hf_source, n_shards=n_shards,
+                 size_bytes=_ref_size_bytes(ref, hdr), scans=scans)
+    prechecked = {raw: (ref, hdr, n_shards, scans)}
+    stream = v.get("stream") or {}
+    sv = (stream.get("box") or {}).get("verdict")
+    state = pc.rung_state(m, plan.rung, box)
+    on_disk, remaining, _per = pc.local_state(plan, dest.base_dir, dest.nest)
+    free = _disk_free(dest.base_dir)
+    out = dict(v)
+    out["plan"] = {"name": m.name, "quant": plan.rung.quant,
+                   "tier": plan.rung.tier or None, "vision": plan.mmproj,
+                   "drafter": plan.drafter, "streaming": plan.streaming,
+                   "remaining_bytes": remaining, "on_disk_bytes": on_disk,
+                   "command": pc.plan_command(plan, box)}
+
+    def fail(msg: str, *, report: bool = False):
+        if a.json:
+            out["error"] = msg.strip()
+            print(json.dumps(out, indent=2))
+        else:
+            if report:
+                _print_report(v)
+            print(msg, file=sys.stderr)
+        return 1, prechecked
+
+    refusal = _refusal(v, a.force)
+    if refusal is not None:
+        return fail(refusal, report=True)
+    if plan.streaming and sv == sp.VERDICT_TOO_BIG and not a.force:
+        cannot = next((ln for ln in stream.get("lines", ()) if "cannot stream" in ln),
+                      "this Mac cannot stream this file")
+        return fail(f"error: {cannot}; pick a smaller quant")
+    if remaining > free and not a.force:
+        return fail(f"error: not enough disk space: need {_human_gb(remaining)}, "
+                    f"{_human_gb(free)} free at {dest.base_dir} (free space, pass "
+                    "--to DIR on another volume, or --force)")
+    question = None
+    if plan.streaming and sv == sp.VERDICT_PAGE_CACHE:
+        question, default, why = "Download anyway?", True, _PAGE_CACHE_LINE
+    elif not plan.streaming and state == pc.OVER:
+        question, default, why = "Download anyway?", False, _MAY_NOT_LOAD
+    if a.json:
+        if question and not a.force:
+            return fail(f"{why} Pass --force to download it anyway.")
+        print(json.dumps(out, indent=2))
+    else:
+        for line in _confirm_lines(plan, state, sv, box, remaining=remaining,
+                                   on_disk=on_disk, free=free, base_dir=dest.base_dir):
+            print(line)
+    left = free - remaining
+    if left < _SWAP_ROOM and _on_startup_volume(dest.base_dir):
+        print(f"Leaves {_human_gb(max(0, left))} free. macOS needs room for swap, "
+              "which a memory-tight model uses.")
+    if question and not a.json and not a.force:
+        if not _want_interactive():
+            print(f"error: {why} Pass --force to download it anyway.", file=sys.stderr)
+            return 1, prechecked
+        import gmlx.commands.wizard as wizard
+        if not wizard.make_io().yesno(question, default):
+            print("nothing downloaded", file=sys.stderr)
+            return 130, prechecked
+    return None, prechecked
+
+
+def _print_run_hint(plan, dest: Destination, reg, box) -> None:
+    """How to run what was pulled: the catalog name when registration wrote
+    it, else the id, else the file with the flags the plan needs. A dense
+    file over the memory bar gets no hint; its warning already printed."""
+    import shlex
+
+    from gmlx.load import catalog as pc
+    from gmlx.serve.lifecycle import pull_config_flag
+
+    m = plan.model
+    if not plan.streaming and pc.rung_state(m, plan.rung, box) == pc.OVER:
+        return
+    pairs = pc.plan_pairs(plan, dest.base_dir, dest.nest)
+    model_path = next(iter(pairs))
+    flag = pull_config_flag(os.path.abspath(dest.config_path)) if dest.config_path else ""
+    name = reg.alias or reg.ids.get(os.path.abspath(model_path))
+    if name:
+        if plan.streaming and plan.mmproj:
+            # chat refuses --mmproj with streamed experts; serve keeps the tower.
+            print(f"\nserve it:  gmlx serve{flag}")
+        else:
+            print(f"\nrun it:  gmlx chat {name}{flag}")
+        if reg.moved_from:
+            old_id, old_path = reg.moved_from
+            print(f"{old_path} stays on disk; gmlx rm {old_id} removes it.")
+        return
+    companions = pairs[model_path]
+    extra = ""
+    if companions.get("mmproj"):
+        extra += f" --mmproj {shlex.quote(companions['mmproj'])}"
+    if companions.get("draft_gguf"):
+        extra += f" --draft-gguf {shlex.quote(companions['draft_gguf'])}"
+    if plan.streaming:
+        extra += " --stream-experts"
+    verb = "run" if plan.streaming and plan.mmproj else "chat"
+    print(f"\nrun it:  gmlx {verb} {shlex.quote(model_path)}{extra}")
+
+
+def _run_plan(plan, a, dest: Destination, box) -> int:
+    """Confirm, download and register one catalog plan; shared by the
+    named and picker paths."""
+    from gmlx.load import catalog as pc
+
+    m = plan.model
+    if not a.json:
+        print(f"{m.title}  {m.params}  {pc.license_text(m)}")
+        if m.license_detail:
+            print(m.license_detail)
+        print(pc.plan_command(plan, box))
+    status, prechecked = _confirm_plan(plan, a, dest, box)
+    if status is not None:
+        return status
+    if not _commit_destination(dest):
+        return 1
+    try:
+        refs = _expand_refs(pc.plan_refs(plan))
+    except remote.RemoteError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    ok, downloaded = _pull_refs(refs, a, dest.base_dir, dest.nest, prechecked=prechecked,
+                                report=False, disk_checked=True)
+    reg = _finish_pull(downloaded, a, dest.config_path,
+                       pairs=pc.plan_pairs(plan, dest.base_dir, dest.nest))
+    if ok:
+        _print_run_hint(plan, dest, reg, box)
+    return 0 if ok else 1
+
+
+def _rung_json(m, r, box, addon: int, drafter_on: bool) -> dict:
+    from gmlx.load import catalog as pc
+
+    state = pc.rung_state(m, r, box)
+    ctx = (pc.context_estimate(m, r, box, addon, pc.speculates(m, r, drafter_on))
+           if state == pc.RESIDENT else None)
+    return {"quant": r.quant, "tier": r.tier or None, "bytes": r.bytes, "state": state,
+            "needs_gb": pc.needs_class(m, r) if state == pc.OVER else None,
+            "context_tokens": ctx}
+
+
+def _model_json(m, box, group: str | None = None) -> dict:
+    """One catalog entry for --json: its rungs with their state and room
+    for context here, and its default plan."""
+    from gmlx.load import catalog as pc
+
+    dp = pc.default_plan(m, box)
+    mm, dr = (dp.mmproj, dp.drafter) if dp is not None else (False, False)
+    addon = pc.addon_bytes(m, mm, dr)
+    out = {"name": m.name, "title": m.title, "params": m.params, "repo": m.repo,
+           "revision": m.revision, "license": m.license, "license_url": m.license_url,
+           "license_note": m.license_note, "tags": pc.tags(m), "blurb": m.blurb,
+           "speed": m.speed, "rungs": [_rung_json(m, r, box, addon, dr) for r in m.rungs]}
+    if group is not None:
+        out["group"] = group
+        out["recommended"] = group == "recommended"
+    if dp is None:
+        out["default"] = None
+        out["needs_gb"] = pc.needs_class_model(m)
+    else:
+        out["default"] = {
+            "quant": dp.rung.quant, "tier": dp.rung.tier or None, "vision": dp.mmproj,
+            "drafter": dp.drafter, "streaming": dp.streaming, "bytes": pc.plan_bytes(dp),
+            "command": pc.plan_command(dp, box),
+            "context_tokens": (None if dp.streaming else pc.context_estimate(
+                m, dp.rung, box, addon, pc.plan_speculates(dp)))}
+    return out
+
+
+def _groups_json(groups: tuple, box) -> dict:
+    models = []
+    for name, group in zip(("recommended", "fits", "streams", "too_big"), groups):
+        models += [_model_json(m, box, name) for m in group]
+    return {"ram_bytes": box.ram, "budget_bytes": box.budget,
+            "ceiling_bytes": box.ceiling, "models": models}
+
+
+def _complete_on_disk(plan, dest: Destination) -> dict:
+    """ref -> whether every shard of that file is at the destination."""
+    from gmlx.load import catalog as pc
+
+    _on, _rem, per_ref = pc.local_state(plan, dest.base_dir, dest.nest)
+    return {ref: complete for ref, (_have, _total, complete) in per_ref.items()}
+
+
+def _pick_row(m, dp, box, dest: Destination, free: int):
+    """One picker row from a catalog entry and its default plan."""
+    from gmlx.load import catalog as pc
+    from gmlx.tui import pick
+
+    tiered = pc.has_tiers(m)
+    rungs = []
+    for r in pc.shown_rungs(m, box):
+        resident = pc.rung_state(m, r, box) == pc.RESIDENT
+        done = _complete_on_disk(pc.PullPlan(m, r, False, False, not resident), dest)
+        rungs.append(pick.Rung(
+            id=r.quant, tier=(r.tier or "compact") if tiered else r.quant,
+            quant=r.quant if tiered else "", size_label=pc.human_gb(r.bytes),
+            state=pick.RESIDENT if resident else pick.STREAMS,
+            on_disk=done[pc.rung_ref(m, r)], default=r == dp.rung))
+    base = dp if not dp.streaming else None
+    toggles = []
+    if m.mmproj:
+        done = _complete_on_disk(pc.PullPlan(m, dp.rung, True, False, False), dest)
+        toggles.append(pick.Toggle(
+            id="vision", label="image input", size_label=pc.human_gb(m.mmproj_bytes),
+            on=bool(base and base.mmproj),
+            streaming_note="Images work only with gmlx serve when the model runs from the SSD.",
+            on_disk=done[f"hf:{m.repo}/{m.mmproj}@{m.revision}"]))
+    if m.drafter is not None:
+        d = m.drafter
+        done = _complete_on_disk(pc.PullPlan(m, dp.rung, False, True, False), dest)
+        toggles.append(pick.Toggle(
+            id="drafter", label="faster replies", size_label=pc.human_gb(d.bytes),
+            on=bool(base and base.drafter), hide_when_streaming=True,
+            on_disk=done[f"hf:{d.repo}/{d.file}@{d.revision}"]))
+    _on, remaining, _per = pc.local_state(dp, dest.base_dir, dest.nest)
+    return pick.Row(
+        id=m.name, title=m.title, params=m.params, tags=tuple(pc.tags(m)),
+        size_label=pc.human_gb(pc.plan_bytes(dp)), blurb=m.blurb, speed=m.speed,
+        note="", license=pc.license_text(m),
+        dim_note=f"needs {pc.human_gb(remaining)} free" if remaining > free else "",
+        rungs=tuple(rungs), default_rung=dp.rung.quant, toggles=tuple(toggles))
+
+
+def _pick_groups(groups: tuple, box, dest: Destination, free: int) -> list:
+    """The picker's groups: the first three catalog groups, rows built from
+    each entry's default plan."""
+    from gmlx.load import catalog as pc
+    from gmlx.tui import pick
+
+    out = []
+    for title, models in zip(pc.GROUP_TITLES[:3], groups[:3]):
+        rows = []
+        for m in models:
+            dp = pc.default_plan(m, box)
+            if dp is not None:
+                rows.append(_pick_row(m, dp, box, dest, free))
+        if rows:
+            out.append(pick.Group(title, tuple(rows)))
+    return out
+
+
+def _plan_from_pick(row, rung, on_ids, box):
+    """The catalog plan a picker state names."""
+    from gmlx.load import catalog as pc
+
+    m = pc.model(row.id)
+    on = set(on_ids)
+    return pc.plan_for(m, box, quant=rung.id,
+                       mmproj=("vision" in on) if m.mmproj else None,
+                       drafter=("drafter" in on) if m.drafter is not None else None)
+
+
+def _pull_recommended(a) -> int:
+    """``gmlx pull`` with no ref: the picker on a terminal, else the list."""
+    from gmlx.load import catalog as pc
+
+    box = pc.box_for_this_mac()
+    groups = pc.groups_for(box)
+    if a.list or a.json or not _want_interactive():
+        if a.json:
+            print(json.dumps(_groups_json(groups, box), indent=2))
+        else:
+            print(pc.recommendation_text(groups, box), end="")
+        return 0
+    dest = _destination(a)
+    if dest is None:
+        return 2
+    free = _disk_free(dest.base_dir)
+
+    def rung_label(row, rung, on_ids):
+        m = pc.model(row.id)
+        r = pc.find_rung(m, rung.id)
+        streaming = pc.rung_state(m, r, box) != pc.RESIDENT
+        mm, dr = "vision" in on_ids, "drafter" in on_ids and not streaming
+        return pc.rung_label(m, r, box, pc.addon_bytes(m, mm, dr),
+                             pc.speculates(m, r, dr, streaming))
+
+    def footer(row, rung, on_ids):
+        plan = _plan_from_pick(row, rung, on_ids, box)
+        on_disk, remaining, _per = pc.local_state(plan, dest.base_dir, dest.nest)
+        return [_download_line(remaining, on_disk, free, dest.base_dir),
+                pc.plan_command(plan, box)]
+
+    from gmlx.tui.pick import PickerUnavailable
+    try:
+        chosen = _pick(_pick_groups(groups, box, dest, free),
+                       ram_label=f"This Mac has {box.ram // (1 << 30)} GB of memory.",
+                       footer=footer, rung_label=rung_label, explain_line=CONTEXT_LINE,
+                       empty_line=_EMPTY_LINE, no_match_line="No model matches '{filter}'")
+    except PickerUnavailable as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if chosen is None:
+        print("nothing downloaded", file=sys.stderr)
+        return 130
+    plan = _plan_from_pick(chosen.row, chosen.rung, chosen.toggles, box)
+    return _run_plan(plan, a, dest, box)
+
+
+def _pull_named(a, m) -> int:
+    """``gmlx pull <name>``: the entry's plan for this Mac, or with --list
+    its quality tiers and nothing downloaded."""
+    from gmlx.load import catalog as pc
+
+    box = pc.box_for_this_mac()
+    if a.list:
+        if a.json:
+            print(json.dumps(_model_json(m, box), indent=2))
+        else:
+            print(pc.entry_text(m, box))
+        return 0
+    try:
+        plan = pc.plan_for(m, box, quant=a.quant, mmproj=a.vision, drafter=a.drafter)
+    except (pc.NoResidentRung, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    dest = _destination(a)
+    if dest is None:
+        return 2
+    return _run_plan(plan, a, dest, box)
+
 
 def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
     ap = argparse.ArgumentParser(
@@ -1193,20 +1940,35 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
         description=_PULL_DESCRIPTION,
         epilog=_PULL_EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("refs", nargs="+", metavar="REF",
-                    help="hf:<org>/<repo>[/<path>][@rev] naming a .gguf, a quant "
+    ap.add_argument("refs", nargs="*", metavar="REF",
+                    help="Nothing (pick a recommended model), a model name from "
+                         "`gmlx pull --list`, an image model name (z-image-turbo, "
+                         "qwen-image, qwen-image-turbo, krea-2-turbo, flux-2-klein, "
+                         "flux-2-klein-base, flux-2-klein-9b, flux-2-klein-base-9b, "
+                         "flux-2-klein-9b-kv, flux-3-klein, flux-3-klein-base, "
+                         "moss-image, moss-image-base), or "
+                         "hf:<org>/<repo>[/<path>][@rev] naming a .gguf, a quant "
                          "folder, or the bare repo (the last two resolve by "
                          "listing), or an http(s):// URL - a huggingface.co "
                          "/tree/ or /blob/ link resolves the same way. "
                          "Additional bare filenames are fetched from the first "
-                         "ref's repo. An image model name (z-image-turbo, "
-                         "qwen-image, qwen-image-turbo, krea-2-turbo, "
-                         "flux-2-klein, flux-2-klein-base, flux-2-klein-9b, "
-                         "flux-2-klein-base-9b, flux-2-klein-9b-kv, "
-                         "flux-3-klein, flux-3-klein-base, moss-image, "
-                         "moss-image-base) "
-                         "pulls the model with its text encoder and VAE. See "
-                         "the examples below.")
+                         "ref's repo. See the examples below.")
+    ap.add_argument("--list", action="store_true",
+                    help="Print the recommended models for this Mac as text, one "
+                         "gmlx pull command each, and download nothing. With a "
+                         "model name, print its quality tiers.")
+    ap.add_argument("--quant", default=None, metavar="QUANT",
+                    help="For a model name, a quality tier (fastest, balanced, "
+                         "high, xhigh) or a quant name such as Q6_K; for an image "
+                         "model name, the DiT quant such as Q4_K_M or Q8_0 "
+                         "(default: the one for this Mac's memory).")
+    ap.add_argument("--vision", action=argparse.BooleanOptionalAction, default=None,
+                    help="Download the model's vision tower for image input, or "
+                         "--no-vision to leave it out (default: on where it fits).")
+    ap.add_argument("--drafter", action=argparse.BooleanOptionalAction, default=None,
+                    help="Download the model's companion file for faster replies, "
+                         "or --no-drafter to leave it out (default: on where it "
+                         "fits).")
     ap.add_argument("--to", "--out", default=None, metavar="DIR",
                     help="Download into DIR exactly (default: the server config's "
                          "first model_dirs root, nesting hf files under "
@@ -1224,16 +1986,12 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
     ap.add_argument("--max-mb", type=int, default=None,
                     help="Cap the remote header range-read (MB; default 128).")
     ap.add_argument("--json", action="store_true",
-                    help="Emit each verdict as JSON before downloading.")
+                    help="Emit each verdict as JSON before downloading; with no "
+                         "ref, the recommendations as JSON.")
     ap.add_argument("--no-register", action="store_true",
                     help="Don't add the downloaded file(s) to the server "
                          "config's models.")
     img = ap.add_argument_group("image models")
-    img.add_argument("--quant", default=None, metavar="QUANT",
-                     help="The DiT quant, such as Q4_K_M or Q8_0 (default: "
-                          "the one for this Mac's memory). Without it, a "
-                          "pull on a Mac where no DiT of the model makes an "
-                          "image downloads nothing.")
     img.add_argument("--encoder-quant", default=None, metavar="QUANT",
                      help="The text encoder quant (default: the one for this "
                           "Mac's memory). A matching encoder on disk is used "
@@ -1246,17 +2004,36 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                           "GGUF.")
     a = ap.parse_args(argv)
 
-    from gmlx.image import catalog
-    recipe = catalog.recipe(a.refs[0]) if len(a.refs) == 1 else None
-    if recipe is not None and not os.path.exists(
-            os.path.expanduser(a.refs[0])):
-        from gmlx.commands.image_pull import pull_recipe
-        return pull_recipe(a, recipe)
-    if a.quant or a.encoder_quant or a.only or a.keep_source:
-        names = ", ".join(catalog.RECIPES)
-        print(f"error: --quant, --encoder-quant, --only and --keep-source go "
-              f"with an image model name ({names})", file=sys.stderr)
+    kinds = [(r, _classify_ref(r)) for r in a.refs]
+    if not kinds:
+        kind = "listing" if (a.list or a.json) else "picker"
+    elif len(kinds) == 1 and kinds[0][1] == _IMAGE:
+        kind = "image"
+    elif len(kinds) == 1 and kinds[0][1] == _CATALOG:
+        kind = "catalog-list" if a.list else "catalog"
+    elif any(k == _CATALOG for _r, k in kinds):
+        name = next(r for r, k in kinds if k == _CATALOG)
+        print(f"error: a model name goes alone; `gmlx pull {name}` pulls it with "
+              "its companions", file=sys.stderr)
         return 2
+    elif kinds[0][1] == _UNKNOWN and not kinds[0][0].endswith(".gguf"):
+        print(_unknown_ref_error(kinds[0][0]), file=sys.stderr)
+        return 2
+    else:
+        kind = "remote"
+    err = _check_pull_flags(a, kind)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+    if kind in ("picker", "listing"):
+        return _pull_recommended(a)
+    if kind == "image":
+        from gmlx.commands.image_pull import pull_recipe
+        from gmlx.image import catalog as image_catalog
+        return pull_recipe(a, image_catalog.recipe(a.refs[0]))
+    if kind in ("catalog", "catalog-list"):
+        from gmlx.load import catalog
+        return _pull_named(a, catalog.model(a.refs[0]))
 
     try:
         refs = _expand_refs(a.refs)
@@ -1282,83 +2059,8 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
     except remote.RemoteError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    nest = a.to is None
-
-    all_ok = True
-    downloaded: list[str] = []
-    listing_cache: dict = {}
-    for raw_ref in refs:
-        try:
-            ref = _resolve_to_file(raw_ref)
-            report, n_shards, scans = _build_report(ref, max_mb=a.max_mb)
-        except remote.RemoteError as e:
-            print(f"error: {e}", file=sys.stderr)
-            all_ok = False
-            continue
-
-        v = _verdict(ref, report, hf_source=a.hf_source, n_shards=n_shards,
-                     size_bytes=_ref_size_bytes(ref, report), scans=scans)
-        if a.json:
-            print(json.dumps(v, indent=2))
-        else:
-            _print_report(v)
-            if v.get("fit") in ("tight", "over"):
-                # Advisory only - the file may be destined for another machine
-                # or a streaming setup, so the pull itself proceeds.
-                note = _fit_note(v)
-                if note:
-                    print(f"note: {note}", file=sys.stderr)
-        if not v["usable"] and not a.force:
-            reasons = []
-            if not v["codecs_loadable"] and v["unsupported_codecs"]:
-                reasons.append(
-                    "no kernel for codec(s): " + ", ".join(v["unsupported_codecs"]))
-            if not v["arch_supported"] and not (v.get("mmproj") or v.get("adapter")
-                                                or v.get("drafter")
-                                                or v.get("image")):
-                reasons.append(f"unsupported arch: {v['arch'] or '?'}")
-            if v.get("chip_error") and not reasons:
-                print(f"\nerror: {v['chip_error']}. Pass --force to download "
-                      "it anyway", file=sys.stderr)
-                all_ok = False
-                continue
-            if v.get("chip_error"):
-                reasons.append(v["chip_error"])
-            why = f" - {'; '.join(reasons)}" if reasons else ""
-            print(f"\nrefusing to download an unloadable GGUF{why}. Pass --force to "
-                  "override, or pick a different quant.", file=sys.stderr)
-            all_ok = False
-            continue
-
-        dest_dir = _dest_for_ref(ref, base_dir, nest)
-        need = _planned_download_bytes(ref, dest_dir, listing_cache)
-        if need and not a.force:
-            free = _disk_free(dest_dir)
-            if free < need:
-                print(f"error: not enough disk space for {ref.filename}: need "
-                      f"{_human_gb(need)}, {_human_gb(free)} free at {dest_dir} "
-                      "(free space, pass --to DIR on another volume, or --force)",
-                      file=sys.stderr)
-                all_ok = False
-                continue
-
-        try:
-            downloaded += _download_ref(ref, dest_dir)
-        except (remote.RemoteError, OSError) as e:
-            print(f"error: download failed: {e}", file=sys.stderr)
-            all_ok = False
-            continue
-
-    if downloaded:
-        print(f"\ndownloaded {len(downloaded)} "
-              f"file{plural_s(len(downloaded))}:")
-        for p in downloaded:
-            print(f"  {p}")
-        if not a.no_register:
-            # Close pull's own loop: a file that landed under a model_dirs
-            # root becomes a served model without a separate sync-models run.
-            from gmlx.serve.server import register_downloads
-            register_downloads(downloaded, a.config)
+    all_ok, downloaded = _pull_refs(refs, a, base_dir, a.to is None)
+    _finish_pull(downloaded, a, _existing_config(a))
     return 0 if all_ok else 1
 
 

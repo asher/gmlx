@@ -35,7 +35,7 @@ _VERB_DESC = {
     "logs": "print or follow a backgrounded server's log",
     "service": "install/uninstall a launchd LaunchAgent",
     "validate": "check a local or remote GGUF will load",
-    "pull": "validate a remote GGUF, then download it",
+    "pull": "pick a recommended model, or download one by name or ref",
     "rm": "delete a model's files and config entry",
     "list": "list the models your server config defines",
     "ps": "show the models resident in a running server",
@@ -187,9 +187,35 @@ def _named_value_candidates(flag: str, words: list[str] = ()) -> list[str]:
             return [f"{i}\tbuilt-in intent" for i in sorted(builtin_intents())]
         if flag == "--dsh-profile":
             return _dsh_profile_candidates(_container_launch(words), words)
+        if flag == "--quant":
+            return _quant_candidates(list(words))
     except Exception:  # noqa: BLE001 - value candidates are best-effort
         return []
     return []
+
+
+def _pull_name_candidates() -> list[str]:
+    """The names ``gmlx pull`` takes: the recommended models and the image
+    models."""
+    try:
+        from gmlx.image import catalog as image_catalog
+        from gmlx.load import catalog
+
+        out = [f"{m.name}\t{m.title}, {m.params}" for m in catalog.MODELS.values()]
+        out += [f"{name}\timage model" for name in image_catalog.RECIPES]
+        return out
+    except Exception:  # noqa: BLE001 - candidates are best-effort
+        return []
+
+
+def _quant_candidates(words: list[str]) -> list[str]:
+    """After a recommended model's name, ``--quant`` takes its quality tiers."""
+    from gmlx.load import catalog
+
+    m = next((catalog.model(w) for w in words if catalog.model(w) is not None), None)
+    if m is None:
+        return []
+    return [f"{r.tier}\t{r.quant}" for r in catalog.tiers(m)]
 
 
 def _is_pathish(metavar: str) -> bool:
@@ -479,6 +505,8 @@ def _positional_candidates(verb: str, after_verb: list[str]) -> list[str]:
     if verb == "talk":
         # A served model id, never a path on disk - no ::files fallback.
         return [] if filled else _model_candidates(after_verb)
+    if verb == "pull":
+        return [] if filled else ["::files", *_pull_name_candidates()]
     if verb in _FILE_POSITIONAL_VERBS:
         return [] if filled else ["::files"]
     if verb == "launch":

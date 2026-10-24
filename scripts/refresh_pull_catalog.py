@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import re
 import sys
@@ -391,6 +392,7 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
         problems.append(f"{seed.name}: boot_costs priced nothing from the header")
     trained_ctx = int(read_int(scans[0].kv, f"{arch}.context_length") or 0)
     params = read_string(scans[0].kv, "general.size_label") or ""
+    n_params = sum(math.prod(t.shape) for s in scans for t in s.tensors)
     model_cls = _classify_meta(scans[0].kv, basename=os.path.basename(chosen[0][2]),
                                path=chosen[0][2])
     targets = _target_ids(model_cls)
@@ -461,7 +463,7 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
                                 f"list: {path}")
 
     facts = {
-        "revision": revision, "params": params, "arch": arch, "moe": moe,
+        "revision": revision, "params": params, "n_params": n_params, "arch": arch, "moe": moe,
         "native_mtp": native, "license": c["license"],
         "license_url": _license_url(seed.repo, revision, c, files),
         "license_name": c["license_name"] if c["license"] == "other" else "",
@@ -483,7 +485,7 @@ def facts_text(facts: dict) -> str:
              'hand; ``catalog._SEED`` holds the words."""', "", "FACTS: dict = {"]
     for name, f in facts.items():
         lines.append(f"    {name!r}: {{")
-        for key in ("revision", "params", "arch", "moe", "native_mtp", "license",
+        for key in ("revision", "params", "n_params", "arch", "moe", "native_mtp", "license",
                     "license_url", "license_name", "mmproj_bytes", "drafter", "heads",
                     "trained_ctx", "kv_cost"):
             lines.append(f"        {key!r}: {f[key]!r},")

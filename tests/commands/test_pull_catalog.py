@@ -3,6 +3,7 @@ ones, and the integrity of the seeded entries themselves."""
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import shlex
@@ -499,6 +500,11 @@ def test_plan_refs_pairs_bytes_and_local_state(tmp_path):
         "draft_gguf": str(tmp_path / "org__drafter" / "drafter-Q8_0.gguf")}}
     flat = catalog.plan_pairs(catalog.plan_for(DENSE, b, mmproj=False, drafter=False), str(tmp_path), False)
     assert flat == {str(tmp_path / "Model-UD-Q4_K_M.gguf"): {"alias": "dense"}}
+    # A file in a folder of its repo keeps that folder, as the download does.
+    assert catalog.dest_path("org/repo", "MTP/mtp-Q8_0.gguf", "/lib", True) == \
+        "/lib/org__repo/MTP/mtp-Q8_0.gguf"
+    assert catalog.dest_path("org/repo", "UD-IQ2_XXS/m-00001-of-00002.gguf", "/lib", False) == \
+        "/lib/UD-IQ2_XXS/m-00001-of-00002.gguf"
     # Nothing on disk yet.
     on, remaining, per_ref = catalog.local_state(plan, str(tmp_path), True)
     assert (on, remaining) == (0, catalog.plan_bytes(plan))
@@ -615,6 +621,19 @@ def test_seed_words_fit_the_detail_pane(m):
     assert len(m.speed) <= 76, m.name
     assert not _banned(m.blurb + "\n" + m.speed), m.name
     assert m.title and m.params, m.name
+    # The params column reads as a count, never as the header's expert label.
+    assert re.fullmatch(r"(E)?\d+(\.\d+)?B(-A\d+(\.\d+)?B)?", m.params), m.params
+
+
+def test_params_label_takes_the_seed_then_a_plain_header_then_the_count():
+    seed = catalog.Seed("x", "X", "org/x", "high", "B.", "Q.")
+    label = catalog._params_label
+    assert label(seed, {"params": "27B", "n_params": 27_300_000_000}) == "27B"
+    assert label(seed, {"params": "26B-A4B", "n_params": 1}) == "26B-A4B"
+    assert label(seed, {"params": "288x10B", "n_params": 321_400_000_000}) == "321B"
+    assert label(seed, {"params": "288x10B"}) == "288x10B"
+    assert label(seed, {"params": "", "n_params": 0}) == ""
+    assert label(dataclasses.replace(seed, params="E4B"), {"params": "7.5B"}) == "E4B"
 
 
 def test_seed_names_recommended_and_image_recipes():

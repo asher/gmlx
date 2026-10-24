@@ -494,8 +494,10 @@ def test_bad_image_flags_are_usage_errors(lib, monkeypatch, capsys, argv,
 
 
 def test_image_flags_need_an_image_model_name(capsys):
+    assert manage.cmd_pull(["hf:org/repo/x.gguf", "--encoder-quant", "Q8_0"]) == 2
+    assert "--encoder-quant goes with an image model name" in capsys.readouterr().err
     assert manage.cmd_pull(["hf:org/repo/x.gguf", "--quant", "Q4_K_M"]) == 2
-    assert "go with an image model name" in capsys.readouterr().err
+    assert "--quant goes with a model name" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("name, vae_license", [("z-image-turbo", None),

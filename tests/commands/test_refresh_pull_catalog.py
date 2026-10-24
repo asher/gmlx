@@ -146,6 +146,7 @@ def test_dense_entry_records_tiers_costs_and_the_tower(refresh, dense_repo, monk
     assert problems == []
     assert facts["revision"] == "abcdef1234567890" and facts["arch"] == "qwen2"
     assert facts["params"] == "4B" and facts["moe"] is False and facts["native_mtp"] is False
+    assert facts["n_params"] == VOCAB * 64   # the one tensor the fixture writes
     assert facts["license"] == "apache-2.0" and facts["license_url"] == f"{HOST}/org/dense"
     assert {q: t for q, t, *_ in facts["rungs"]} == {
         "Q4_0": "fastest", "Q4_K_M": "balanced", "Q6_K": "high", "Q8_0": "xhigh",
@@ -452,7 +453,8 @@ def test_compare_reports_each_changed_field(refresh):
 def test_walk_text_shows_each_name_with_and_without_add_ons(refresh, monkeypatch):
     seed = catalog.Seed("w", "W", "org/w", "high", "B.", "Q.", mmproj="mmproj-F16.gguf",
                         drafter_repo="org/w", drafter_file="d.gguf")
-    facts = {"revision": "r", "params": "7B", "arch": "qwen2", "moe": False, "native_mtp": False,
+    facts = {"revision": "r", "params": "7B", "n_params": 7 * 10**9, "arch": "qwen2",
+             "moe": False, "native_mtp": False,
              "license": "mit", "license_url": "", "license_name": "", "mmproj_bytes": 1 << 29,
              "drafter": ("dflash2", "r", 1 << 29), "heads": 32, "trained_ctx": 131072,
              "kv_cost": (("full", 0, 65536.0, 32),),

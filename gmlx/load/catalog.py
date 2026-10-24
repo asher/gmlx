@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import difflib
 import os
+import re
 from dataclasses import dataclass
 
 GiB = 1 << 30
@@ -143,6 +144,7 @@ class Seed:
     license_note: str = ""
     license_detail: str = ""
     quants: tuple = ()
+    params: str = ""          # over the header's size label when that is not plain
 
 
 _SEED = (
@@ -168,7 +170,8 @@ _SEED = (
          drafter_file="dflash-NVIDIA-Nemotron-3.5-Bolt-E4B-Q8_0.gguf",
          license_note="NVIDIA Open Model License",
          license_detail="Its faster-replies file is under NVIDIA's evaluation license.",
-         quants=("UD-IQ2_M", "UD-IQ3_XXS", "UD-Q3_K_XL")),
+         quants=("UD-IQ2_M", "UD-IQ3_XXS", "UD-Q3_K_XL"),
+         params="E4B"),
     Seed("ornith-1.5-9b", "Ornith-1.5-9B", "ornith-ai/Ornith-1.5-9B-GGUF", "high",
          "A coding model that also reads images.",
          "Brisk for a 9B: its own head gives faster replies.",
@@ -185,7 +188,8 @@ _SEED = (
          drafter_file="mtp-gemma-4-12b-it.gguf"),
     Seed("k2-horizon-7b", "K2-Horizon-7B", "IFM/K2-Horizon-7B-GGUF", "high",
          "A chat model that keeps 512K tokens in view.",
-         "Quick: a 7B dense model."),
+         "Quick: a 7B dense model.",
+         params="7B"),
     Seed("gemma-4-26b-a4b", "gemma-4-26B-A4B", "unsloth/gemma-4-26B-A4B-it-GGUF", "balanced",
          "Strong general chat with image input.",
          "Quick for its size: it reads 4B of its 26B weights per token.",
@@ -216,16 +220,19 @@ _SEED = (
          "balanced",
          "A coding model that also reads images.",
          "Quick: it reads 3B of its 35B weights per token, with faster replies.",
-         mmproj="mmproj-Ornith-1.5-35B-BF16.gguf"),
+         mmproj="mmproj-Ornith-1.5-35B-BF16.gguf",
+         params="35B-A3B"),
     Seed("k2-horizon-mova-36b-a4b", "K2-Horizon-MoVA-36B", "IFM/K2-Horizon-MoVA-36B-A4B-GGUF",
          "balanced",
          "A chat model that keeps 512K tokens in view.",
          "Quick for its size: it reads 4B of its 36B weights per token.",
-         aliases=("k2-horizon-mova",)),
+         aliases=("k2-horizon-mova",),
+         params="36B-A4B"),
     Seed("ornith-1.5-122b", "Ornith-1.5-122B", "unsloth/Ornith-1.5-122B-GGUF", "balanced",
          "A strong coding model that also reads images.",
          "Quick for its size: it reads 10B of its 122B weights per token.",
-         mmproj="mmproj-F16.gguf"),
+         mmproj="mmproj-F16.gguf",
+         params="122B-A10B"),
     Seed("nemotron-3.5-super-vl", "Nemotron 3.5 Super VL",
          "unsloth/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-GGUF", "balanced",
          "Reads long documents and images well.",
@@ -233,7 +240,8 @@ _SEED = (
          aliases=("nemotron-3.5-super-vl-120b-a12b",),
          mmproj="mmproj-BF16.gguf",
          ignored_files=("LiLiCorr/lilicorr-NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4.gguf",),
-         license_note="NVIDIA Open Model License"),
+         license_note="NVIDIA Open Model License",
+         params="120B-A12B"),
     Seed("qwen3.8-flash-next", "Qwen3.8-Flash-Next", "unsloth/Qwen3.8-Flash-Next-GGUF",
          "balanced",
          "Strong at long documents, code and tool calls.",
@@ -254,11 +262,11 @@ _SEED = (
          aliases=("deepseek-v4-flash",),
          ignored_files=("dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf",
                         "dspark/dspark-DeepSeek-V4-Flash-0731-BF16.gguf")),
-    Seed("deepseek-v4.1-flash", "DeepSeek-V4.1-Flash", "unsloth/DeepSeek-V4.1-Flash-1017-GGUF",
+    Seed("deepseek-v4.1-flash-1017", "DeepSeek-V4.1-Flash", "unsloth/DeepSeek-V4.1-Flash-1017-GGUF",
          "balanced",
          "Strong at code and agent work, with a 1M token context.",
          "Quick for its size: it reads a small part of its weights per token.",
-         aliases=("deepseek-v4.1-flash-1017",),
+         aliases=("deepseek-v4.1-flash",),
          mmproj="mmproj-F16.gguf",
          ignored_files=("dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf",
                         "dspark/dspark-DeepSeek-V4.1-Flash-1017-BF16.gguf")),
@@ -282,9 +290,23 @@ RECOMMENDED = {
     96:  ("qwen3.8-27b", "ornith-1.5-122b", "qwen3.8-flash-next"),
     128: ("qwen3.8-flash-next", "ornith-1.5-122b"),
     192: ("qwen3.8-flash-next", "glm-5.3-flash"),
-    256: ("qwen3.8-flash-next", "glm-5.3-flash", "deepseek-v4.1-flash"),
-    512: ("deepseek-v4.1-flash", "glm-5.3"),
+    256: ("qwen3.8-flash-next", "glm-5.3-flash", "deepseek-v4.1-flash-1017"),
+    512: ("deepseek-v4.1-flash-1017", "glm-5.3"),
 }
+
+
+def _params_label(seed: Seed, facts: dict) -> str:
+    """The parameter count as the user reads it: the seed's word, else the
+    header's size label when it is plain (``27B``, ``122B-A10B``), else
+    the counted total (a MoE label such as ``288x10B`` says nothing to a
+    user)."""
+    if seed.params:
+        return seed.params
+    label = facts.get("params", "")
+    if re.fullmatch(r"\d+(\.\d+)?[BM](-A\d+(\.\d+)?[BM])?", label):
+        return label
+    n = facts.get("n_params", 0)
+    return f"{n / 1e9:.0f}B" if n else label
 
 
 def _build(seed: Seed, facts: dict) -> Model:
@@ -301,7 +323,7 @@ def _build(seed: Seed, facts: dict) -> Model:
     return Model(
         name=seed.name, title=seed.title, repo=seed.repo,
         revision=facts.get("revision", "main"), rungs=rungs, preferred=seed.preferred,
-        params=facts.get("params", ""), blurb=seed.blurb, speed=seed.speed,
+        params=_params_label(seed, facts), blurb=seed.blurb, speed=seed.speed,
         license=facts.get("license", ""), license_url=facts.get("license_url", ""),
         license_note=seed.license_note or facts.get("license_name", ""),
         license_detail=seed.license_detail, aliases=seed.aliases, arch=facts.get("arch", ""), moe=facts.get("moe", False),
@@ -820,9 +842,10 @@ def plan_refs(plan: PullPlan) -> list:
 
 
 def dest_path(repo: str, path_in_repo: str, base_dir: str, nest: bool) -> str:
-    """Where a pull puts a repo file: under ``<org>__<repo>/`` when nested."""
+    """Where a pull puts a repo file: under ``<org>__<repo>/`` when nested,
+    keeping the file's folder inside the repo, as the download does."""
     sub = repo.replace("/", "__") if nest else ""
-    return os.path.join(base_dir, sub, os.path.basename(path_in_repo))
+    return os.path.join(base_dir, sub, path_in_repo)
 
 
 def plan_pairs(plan: PullPlan, base_dir: str, nest: bool) -> dict:
@@ -857,7 +880,7 @@ def local_state(plan: PullPlan, base_dir: str, nest: bool) -> tuple:
     per_ref, on_disk, remaining = {}, 0, 0
     for ref, repo, path, total in items:
         have, complete = 0, True
-        for name in shard_names(os.path.basename(path)):
+        for name in shard_names(path):
             p = dest_path(repo, name, base_dir, nest)
             if os.path.isfile(p):
                 have += os.path.getsize(p)
