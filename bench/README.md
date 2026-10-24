@@ -7,11 +7,13 @@ partial reruns. Pure stdlib besides `gmlx` itself and `requests`;
 
 | File | What it does |
 |---|---|
-| `serve-bench.py` | gmlx vs llama.cpp (or ds4-server) through each server's OpenAI API: prefill + decode at KV depth, baseline + speculative (MTP) arms. Writes a md report, a raw JSON, and the same SVG charts the docs publish. |
+| `serve-bench.py` | gmlx vs llama.cpp (or ds4-server or oMLX) through each server's OpenAI API: prefill + decode at KV depth, baseline + speculative (MTP) arms. Writes a md report, a raw JSON, and the same SVG charts the docs publish. |
 | `plot-bench.py` | Stdlib SVG renderer for the published chart grammars: `panels`, `fleet-ratio`, `mtp-lift`, `batch-scaling`. The first three are invoked automatically by `serve-bench.py` (`--no-svg` to skip); `batch-scaling` (aggregate decode vs concurrent streams, optional `--ref` overlay of a second run) is rendered by hand from a concurrency-sweep JSON. |
 | `merge.py` | Folds many `serve-bench-*.json` into per-model files, newest cell wins. Use after partial reruns, then re-render charts from the merged files. |
 | `example.json` | Config template (three models: native-MTP, drafter-MTP, no MTP). |
 | `patches/ds4-ignore-eos.patch` | Required on the ds4-server arm for forced-length decode. |
+| `omlx-serve.py` | Runs `omlx serve` with forced-length decode for the oMLX arm. |
+| `repack-rec-mlx.py` | Rewrites a RecursiveSI Rec checkpoint, such as Flint's, into the layout oMLX loads. |
 
 ## Quickstart
 
@@ -30,7 +32,8 @@ Outputs land in `results/`: `serve-bench-<stamp>.md` (report),
 grammar of the charts in `docs/benchmarks.md`.
 
 Binaries resolve from `PATH` (`gmlx`, `llama-server`, `ds4-server`); override
-with `--gmlx-bin` / `--llama-server-bin` / `--ds4-bin`.
+with `--gmlx-bin` / `--llama-server-bin` / `--ds4-bin`. The oMLX arm runs the
+python of the venv that has omlx, `--omlx-python`.
 
 ## Fairness guards (why these numbers are comparable)
 
@@ -84,6 +87,8 @@ All keys optional except `models`; defaults in `serve-bench.py --help` / the
       "tokenizer": "gguf",           // "gguf" = synthesized from the GGUF
                                      // metadata (recommended); or an HF id
       "kv_bits": null,               // quantized KV, symmetric both engines
+      "omlx_model": null,            // MLX checkpoint for --vs omlx; optional
+                                     // omlx_args append `omlx serve` flags
       "mtp": {                       // omit for baseline-only
         "gmlx":  { "speculative": true },        // native MTP head, or:
                                                  // { "draft_gguf": "..." }
@@ -140,3 +145,48 @@ of llama.cpp. Build ds4-server with `patches/ds4-ignore-eos.patch` applied
 docstring: sampling equalization interacts with ds4's thinking mode, ds4 MTP
 arms require greedy sampling, and concurrency > 1 measures queueing rather
 than batching there.
+
+## The oMLX arm
+
+`--vs omlx` benches gmlx against oMLX. oMLX loads MLX checkpoints, so each
+model names an MLX checkpoint of the same weights as `omlx_model`, and the
+gmlx arm still runs the GGUF.
+
+Install oMLX 0.7.2 or later into its own venv from a checkout of its source,
+with its custom kernels built:
+
+```sh
+uv venv -p 3.12 --seed ~/.venvs/omlx
+make -C path/to/omlx install PYTHON=~/.venvs/omlx/bin/python
+```
+
+Add `omlx_model` to each model in the config:
+
+```json
+{
+  "name": "flint-int4-q4_1-omlx",
+  "gguf": "~/models/flint-int4-q4_1.gguf",
+  "tokenizer": "gguf",
+  "omlx_model": "~/models/flint-int4-mlx"
+}
+```
+
+Then point `--omlx-python` at that venv:
+
+```sh
+./serve-bench.py --config flint-omlx.json --vs omlx \
+    --omlx-python ~/.venvs/omlx/bin/python --dry-run
+```
+
+`omlx-serve.py` makes every reply run to `max_tokens`, as on the other
+engines. The oMLX arm has no speculative arms.
+
+### Flint checkpoints
+
+RecursiveSI's [flint-int4](https://huggingface.co/RecursiveSI/flint-int4)
+is stored for their Rec runtime, which oMLX cannot load. `repack-rec-mlx.py`
+rewrites it into the stock MLX layout, with the tensor bytes unchanged:
+
+```sh
+./repack-rec-mlx.py ~/models/flint-int4 ~/models/flint-int4-mlx
+```
