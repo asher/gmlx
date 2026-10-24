@@ -156,6 +156,10 @@ def test_gemma4_chunk_with_image_tokens_stays_on_stock(calls, monkeypatch):
                          ids=["flint", "muse_glimmer", "muse_spark", "gemma4"])
 def test_declined_calls_reach_the_model_modules_sdpa(build, monkeypatch):
     model, types = _built(build)
+    if not window_sdpa._on_gpu():
+        # Stock mlx gathers experts only in float32 on the CPU, where the
+        # route declines at any width.
+        model.set_dtype(mx.float32)
     mod = sys.modules[type(model).__module__]
     seen = []
     base = mod.scaled_dot_product_attention
