@@ -134,7 +134,7 @@ def test_mirrored_layout_pairs_across_directories(tmp_path, fake_classify, capsy
     assert qwen.speculative is True
     bartowski = models["muse-glimmer-30b-q6"]
     assert _base(bartowski.draft_gguf) == "Muse-Glimmer-30B-DFlash2-Q8_0.gguf"
-    assert "superseded for muse-glimmer-30b-q6" in err
+    assert "faster-replies file replaced for muse-glimmer-30b-q6" in err
     assert "dflash-kquant.gguf -> " in err
     meta_models = models["muse-glimmer-30b-kquant-17gb-q4"]
     assert _base(meta_models.draft_gguf) == "dflash-Muse-Glimmer-30B-Q4_K_M.gguf"
