@@ -105,7 +105,7 @@ class Picker:
     """The picker's state and rendering, with no terminal attached."""
 
     def __init__(self, groups, *, ram_label: str, footer, rung_label, explain_line: str,
-                 empty_line: str, no_match_line: str):
+                 empty_line: str, no_match_line: str, other_line: str = ""):
         self.groups = tuple(groups)
         self.ram_label = ram_label
         self.footer = footer
@@ -113,6 +113,7 @@ class Picker:
         self.explain_line = explain_line
         self.empty_line = empty_line
         self.no_match_line = no_match_line
+        self.other_line = other_line      # a dim line above the list screen's key hints
         self.filter = ""
         self.cursor = 0
         self.screen = "list"
@@ -283,7 +284,7 @@ class Picker:
                     f"{_pad('IMAGES', col['images'])}  GOOD FOR")
             out.append(("class:pick.dim", _clip(head, width)))
         out.append(("", "\n"))
-        area = max(MIN_LIST_LINES, rows - 8)
+        area = max(MIN_LIST_LINES, rows - 8 - (1 if self.other_line else 0))
         groups = self.groups_visible()
         lines = []
         if not groups:
@@ -327,6 +328,9 @@ class Picker:
             out.append(("", _clip(line, width)))
             out.append(("", "\n"))
         out.append(("", "\n"))
+        if self.other_line:
+            out.append(("class:pick.dim", _clip(self.other_line, width)))
+            out.append(("", "\n"))
         out.append(("class:pick.dim", _clip(LIST_HINTS, width)))
         return out
 
@@ -400,7 +404,8 @@ def _style(color: bool):
 
 
 def pick(groups, *, ram_label: str, footer, rung_label, explain_line: str,
-         empty_line: str, no_match_line: str, color=None, input=None, output=None):
+         empty_line: str, no_match_line: str, other_line: str = "", color=None, input=None,
+         output=None):
     """Run the picker; the chosen ``Plan``, or None on quit. Raises
     PickerUnavailable off a terminal when no input and output are given."""
     if input is None and output is None:
@@ -420,7 +425,8 @@ def pick(groups, *, ram_label: str, footer, rung_label, explain_line: str,
         from gmlx.tui.reasoning import want_color
         color = want_color()
     state = Picker(groups, ram_label=ram_label, footer=footer, rung_label=rung_label,
-                   explain_line=explain_line, empty_line=empty_line, no_match_line=no_match_line)
+                   explain_line=explain_line, empty_line=empty_line, no_match_line=no_match_line,
+                   other_line=other_line)
     app_box: dict = {}
 
     def size():

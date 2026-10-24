@@ -485,7 +485,7 @@ def test_a_bare_pull_off_a_terminal_lists_every_group(cat, capsys):
     titles = catalog.group_titles(catalog.groups_for(catalog.box_for_this_mac()))
     assert [t for t in titles if t in out] == list(titles)
     assert out.index("Recommended") < out.index("  dense ") < out.index("Also runs in memory")
-    assert out.count("gmlx pull ") == 2 and " GB Mac" in out      # the footer's two commands
+    assert out.count("gmlx pull ") == 3 and " GB Mac" in out      # the footer's three commands
     assert banned_words(out) == []
     assert manage.cmd_pull(["--list"]) == 0
     assert capsys.readouterr().out == out
@@ -542,6 +542,7 @@ def test_the_picker_gets_three_groups_and_its_choice_runs_the_named_path(
     assert dense.default_rung == "UD-Q4_K_M" and all(t.on for t in dense.toggles)
     assert seen["kw"]["ram_label"] == "This Mac has 32 GB of memory."
     assert seen["kw"]["explain_line"] == manage.CONTEXT_LINE
+    assert seen["kw"]["other_line"] == catalog.OTHER_MODELS_LINE
     label, note = seen["kw"]["rung_label"](dense, dense.rungs[0], ("vision", "drafter"))
     assert label.startswith("room for ~") and note == ""
     flashy = groups[2].rows[0]

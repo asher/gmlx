@@ -1912,7 +1912,8 @@ def _pull_recommended(a) -> int:
         chosen = _pick(_pick_groups(groups, box, dest, free),
                        ram_label=f"This Mac has {box.ram // (1 << 30)} GB of memory.",
                        footer=footer, rung_label=rung_label, explain_line=CONTEXT_LINE,
-                       empty_line=_EMPTY_LINE, no_match_line="No model matches '{filter}'")
+                       empty_line=_EMPTY_LINE, no_match_line="No model matches '{filter}'",
+                       other_line=pc.OTHER_MODELS_LINE)
     except PickerUnavailable as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

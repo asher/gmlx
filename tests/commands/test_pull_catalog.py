@@ -552,6 +552,8 @@ def test_recommendation_and_entry_text_are_plain(small_catalog):
     sizes = [float(ln.split()[1]) for ln in fits]
     assert sizes == sorted(sizes, reverse=True)
     assert "Room for about" not in text and text.rstrip().endswith(catalog.LIST_FOOTER)
+    assert lines[-1] == catalog.OTHER_MODELS_LINE and len(lines[-1]) <= 80
+    assert "huggingface.co link" in lines[-1] and "hf:<org>/<repo>/<file.gguf>" in lines[-1]
     for m in small_catalog.values():
         entry = catalog.entry_text(m, b)
         assert entry.isascii() and not _banned(entry), entry

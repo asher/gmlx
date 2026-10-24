@@ -978,9 +978,11 @@ def entry_text(m: Model, box: Box) -> str:
 
 GROUP_TITLES = ("Recommended for this Mac", "Runs in memory",
                 "Runs from the SSD, much slower", "Too big for this Mac")
+OTHER_MODELS_LINE = "Other models: gmlx pull <huggingface.co link>, or hf:<org>/<repo>/<file.gguf>"
 LIST_FOOTER = ("Each download is the model's default quality tier for this Mac, with image\n"
                "input and faster replies where they fit. gmlx pull <name> --list shows its\n"
-               "other tiers, and gmlx pull <name> --quant <tier> picks one.")
+               "other tiers, and gmlx pull <name> --quant <tier> picks one.\n"
+               + OTHER_MODELS_LINE)
 
 
 def group_titles(groups: tuple) -> tuple:

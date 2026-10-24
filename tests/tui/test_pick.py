@@ -66,11 +66,11 @@ def _footer(row, rung, on_ids):
     return [f"Download {rung.size_label}", cmd]
 
 
-def _picker(groups=GROUPS):
+def _picker(groups=GROUPS, **kw):
     return Picker(groups, ram_label="This Mac has 128 GB of memory.", footer=_footer,
                   rung_label=_label, explain_line="Context is how much text the model keeps in view.",
                   empty_line="No catalog model fits this Mac.",
-                  no_match_line="No model matches '{filter}'")
+                  no_match_line="No model matches '{filter}'", **kw)
 
 
 def _lines(p, width=80, rows=24):
@@ -104,6 +104,20 @@ def test_list_columns_align_and_widen():
     styles = [s for s, t in p.render(80, 24) if " gemma " in t]
     assert styles == ["class:pick.dim"]
     assert [s for s, t in p.render(80, 24) if " dense " in t and t.startswith(">")] == ["class:pick.cursor"]
+
+
+def test_other_line_sits_dim_above_the_hints_and_keeps_the_height():
+    other = "Other models: gmlx pull <huggingface.co link>, or hf:<org>/<repo>/<file.gguf>"
+    p = _picker(other_line=other)
+    lines = _lines(p, 80, 24)
+    assert lines[-2:] == [other, pick.LIST_HINTS] and len(lines) <= 24
+    assert [s for s, t in p.render(80, 24) if t == other] == ["class:pick.dim"]
+    rows = tuple(Row(f"r{i}", f"Model {i}", "7B", (), "1 GB", "B.", "Q.", "", "MIT", "",
+                     (_rung(f"q{i}", "high", "Q6_K", "1 GB", default=True),), f"q{i}", ())
+                 for i in range(12))
+    tall = _picker((Group("Runs in memory", rows),), other_line=other)
+    assert len(_lines(tall, 80, 12)) <= 12 + 1                 # one list line fewer, same bound
+    assert _lines(_picker())[-1] == pick.LIST_HINTS           # no line when none is given
 
 
 def test_detail_pane_is_three_lines_for_the_cursor_row():
