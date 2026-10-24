@@ -38,6 +38,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Requires mlx-kquant 0.5.5. With it, decode writes each new KV cache row in
   place instead of copying the whole cache every token, so decode at long
   context is faster and peaks lower.
+- On M5 Macs, the sliding-window layers of Gemma 4, Muse Glimmer, Muse Spark
+  and Flint prefill on a kernel that reads only the keys inside the window.
+  A 32k prompt prefills about 7% faster on Gemma 4 26B-A4B and 4% on 31B.
+  `GMLX_SWA_KQ=0` turns it off.
 - The KV cache grows by an eighth of its size, at most 8192 rows, instead of
   256 rows at a time, so long decodes no longer stall on frequent regrows.
 - Models in memory decode up to 5% faster: decode runs on 50 ops per command

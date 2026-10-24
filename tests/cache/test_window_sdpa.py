@@ -1,6 +1,6 @@
-"""The sliding-window SDPA route: which calls take kq's window kernel, and
-that its output matches stock attention under the cache's band mask over a
-prompt that crosses the window."""
+"""The sliding-window SDPA route: which calls window_sdpa.claim takes onto
+kq's window kernel, and that its output matches stock attention under the
+cache's band mask over a prompt that crosses the window."""
 
 from __future__ import annotations
 
@@ -30,12 +30,11 @@ def _qkv(L, S, d=128, dtype=mx.bfloat16):
 
 
 @pytest.fixture
-def spies(monkeypatch):
-    kernel, stock = _Spy(), _Spy()
-    monkeypatch.setattr(window_sdpa, "_kq_window_kernel", lambda: kernel)
-    monkeypatch.setattr(window_sdpa, "scaled_dot_product_attention", stock)
+def kernel(monkeypatch):
+    spy = _Spy()
+    monkeypatch.setattr(window_sdpa, "_kq_window_kernel", lambda: spy)
     monkeypatch.setattr(window_sdpa, "_on_gpu", lambda: True)
-    return kernel, stock
+    return spy
 
 
 def _right_padded():
@@ -45,35 +44,32 @@ def _right_padded():
 
 
 @pytest.mark.parametrize(
-    "cache,L,env,routed",
+    "cache,L,window,env,routed",
     [
-        (RotatingKVCache(_WINDOW), 2048, None, True),
-        (RotatingKVCache(_WINDOW), 64, None, True),
-        (RotatingKVCache(_WINDOW), 63, None, False),
-        (RotatingKVCache(_WINDOW, keep=4), 2048, None, False),
-        (BatchRotatingKVCache(_WINDOW, [0]), 2048, None, True),
-        (_right_padded(), 2048, None, False),
-        (RotatingKVCache(_WINDOW), 2048, "0", False),
+        (RotatingKVCache(_WINDOW), 2048, _WINDOW, None, True),
+        (RotatingKVCache(_WINDOW), 64, _WINDOW, None, True),
+        (RotatingKVCache(_WINDOW), 63, _WINDOW, None, False),
+        (RotatingKVCache(_WINDOW, keep=4), 2048, _WINDOW, None, False),
+        (BatchRotatingKVCache(_WINDOW, [0]), 2048, _WINDOW, None, True),
+        (_right_padded(), 2048, _WINDOW, None, False),
+        (RotatingKVCache(_WINDOW), 2048, None, None, False),
+        (RotatingKVCache(_WINDOW), 2048, _WINDOW, "0", False),
     ],
     ids=["chunk", "one_block", "verify_width", "keep", "batch",
-         "batch_right_padded", "switch_off"],
+         "batch_right_padded", "no_window", "switch_off"],
 )
-def test_route(spies, monkeypatch, cache, L, env, routed):
-    kernel, stock = spies
+def test_route(kernel, monkeypatch, cache, L, window, env, routed):
     if env is not None:
         monkeypatch.setenv("GMLX_SWA_KQ", env)
     q, k, v = _qkv(L, L + _WINDOW - 1)
     sinks = mx.zeros((32,))
-    out = window_sdpa.sliding_window_attention(
-        q, k, v, cache, 0.5, "mask", _WINDOW, sinks=sinks)
-    assert out is _OUT
-    assert (len(kernel.calls), len(stock.calls)) == ((1, 0) if routed else (0, 1))
+    out = window_sdpa.claim(q, k, v, cache, 0.5, window, sinks)
+    assert out is (_OUT if routed else None)
+    assert len(kernel.calls) == int(routed)
     if routed:
         args, kwargs = kernel.calls[0]
         assert args[3:] == (0.5, _WINDOW) and kwargs.pop("sinks") is sinks
         assert set(kwargs) == ({"starts"} if type(cache) is BatchRotatingKVCache else set())
-    else:
-        assert stock.calls[0][1]["mask"] == "mask"
 
 
 def test_window_kernel_matches_stock_over_a_rotating_cache():
@@ -129,8 +125,8 @@ def _chunk_pair(routed, stock, B, L, seed, D=128):
     want = mx.fast.scaled_dot_product_attention(
         q, sk, sv, scale=scale, mask=mask, sinks=_SINKS)
     rk, rv = routed.update_and_fetch(k, v)
-    got = window_sdpa.sliding_window_attention(
-        q, rk, rv, routed, scale, None, _WINDOW, sinks=_SINKS)
+    got = window_sdpa.claim(q, rk, rv, routed, scale, _WINDOW, _SINKS)
+    assert got is not None
     return got, want
 
 

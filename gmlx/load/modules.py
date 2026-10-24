@@ -1766,9 +1766,12 @@ def _make_fused_gemma_layer(base_cls, caps):
 
         def __call__(self, x, mask=None, cache=None,
                      per_layer_input=None, shared_kv=None, offset=None,
-                     keep_last=None):
+                     keep_last=None, window=None):
             d = x.shape[-1]
             t = x.size // d
+            # Only the owned model's forward passes window, which the
+            # copied gemma4_text layer does not take.
+            wkw = {} if window is None else {"window": window}
             # Popped on every call, so no later call can use a stale pair.
             ho = self.__dict__.pop("_kq_handoff", None)
             glue = getattr(self, "_kq_glue", None)
@@ -1777,7 +1780,8 @@ def _make_fused_gemma_layer(base_cls, caps):
                 # body, which writes the cache from all of them.
                 return super().__call__(
                     x, mask, cache, per_layer_input=per_layer_input,
-                    shared_kv=shared_kv, offset=offset, keep_last=keep_last)
+                    shared_kv=shared_kv, offset=offset, keep_last=keep_last,
+                    **wkw)
             if (
                 glue is False
                 or not _FUSED_MOE_ENABLED
@@ -1790,21 +1794,21 @@ def _make_fused_gemma_layer(base_cls, caps):
             ):
                 return super().__call__(
                     x, mask, cache, per_layer_input=per_layer_input,
-                    shared_kv=shared_kv, offset=offset)
+                    shared_kv=shared_kv, offset=offset, **wkw)
             if glue is None:
                 glue = self._kq_glue_setup(x.dtype)
                 object.__setattr__(self, "_kq_glue", glue)
                 if glue is False:
                     return super().__call__(
                         x, mask, cache, per_layer_input=per_layer_input,
-                        shared_kv=shared_kv, offset=offset)
+                        shared_kv=shared_kv, offset=offset, **wkw)
 
             if ho is not None and ho[0] is x:
                 x_in = ho[1]
             else:
                 x_in = self.input_layernorm(x)
             h, shared_kv, offset = self.self_attn(
-                x_in, mask, cache, shared_kv=shared_kv, offset=offset)
+                x_in, mask, cache, shared_kv=shared_kv, offset=offset, **wkw)
             moe = getattr(self, "enable_moe", False)
             dt = glue["dt"]
             handoff = (_NORM_HANDOFF_ENABLED and glue["handoff"]
