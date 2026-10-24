@@ -24,21 +24,21 @@ DENSE = Row("dense", "Qwen3.8-27B", "27B", ("images", "faster replies"), "18.1 G
             (_rung("fast", "fastest", "Q4_0", "15.0 GB"),
              _rung("bal", "balanced", "Q4_K_M", "15.3 GB", default=True),
              _rung("high", "high", "Q6_K", "20.5 GB", state="streams", on_disk=True)),
-            "bal", (VISION, DRAFTER))
+            "bal", (VISION, DRAFTER), use="documents, code and tool calls")
 GEMMA = Row("gemma", "gemma-4-12B", "12B", ("images", "faster replies"), "7.2 GB",
             "Strong general chat with image input.", "Steady for a 12B.", "", "Apache 2.0",
             "needs 20 GB free",
             (_rung("g4", "balanced", "Q4_K_M", "6.6 GB", default=True),
              _rung("g6", "high", "Q6_K", "9.1 GB")),
-            "g4", (Toggle("vision", "image input", "0.2 GB", True),))
+            "g4", (Toggle("vision", "image input", "0.2 GB", True),), use="general chat")
 PLAIN = Row("plain", "K2-Horizon-7B", "7B", (), "6.9 GB", "A chat model with a 512K context.",
             "Quick: a 7B dense model.", "", "Apache 2.0", "",
-            (_rung("p6", "high", "Q6_K", "6.9 GB", default=True),), "p6", ())
+            (_rung("p6", "high", "Q6_K", "6.9 GB", default=True),), "p6", (), use="chat with a 512K context")
 MOE = Row("flashy", "Qwen3.8-Flash-Next", "Flash-Next", ("images", "faster replies"), "90.7 GB",
           "Strong at long documents.", "Quick for its size.", "", "Qwen Community License", "",
           (_rung("c", "compact", "UD-IQ3_XXS", "76.3 GB"),
            _rung("f", "fastest", "UD-IQ4_XS", "87.2 GB", default=True)),
-          "f", (VISION, DRAFTER))
+          "f", (VISION, DRAFTER), use="documents, code and tool calls")
 
 GROUPS = (Group("Recommended for this Mac", (DENSE, GEMMA)),
           Group("Runs in memory", (PLAIN,)),
@@ -83,23 +83,27 @@ def test_list_columns_align_and_widen():
     p = _picker()
     lines = _lines(p, 80)
     assert lines[0] == "This Mac has 128 GB of memory."
+    assert lines[1].split() == ["NAME", "DOWNLOAD", "IMAGES", "GOOD", "FOR"]
     rows = [ln for ln in lines if ln[1:4].strip().isdigit() or ln.startswith(">")]
-    assert rows[0].startswith(">  1 Qwen3.8-27B")
-    assert rows[1].startswith("   2 gemma-4-12B")
-    # Every row puts its size in the same column.
-    ends = {ln.rindex(" GB") for ln in rows}
-    assert len(ends) == 1
-    assert "images, faster replies" in rows[0] and "18.1 GB" in rows[0]
+    assert rows[0].startswith(">  1 dense")
+    assert rows[1].startswith("   2 gemma")
+    # Every row puts its size under DOWNLOAD and its images cell under IMAGES.
+    ends = {ln.index(" GB") + 3 for ln in rows}
+    assert ends == {lines[1].index("DOWNLOAD") + len("DOWNLOAD")}
+    assert rows[0].index("yes") == lines[1].index("IMAGES") and "18.1 GB" in rows[0]
+    assert rows[0].rstrip().endswith("documents, code and tool calls")
+    plain = [ln for ln in rows if " plain " in ln][0]
+    assert "yes" not in plain                                  # no vision tower
     wide = [ln for ln in _lines(p, 120) if ln.startswith(">")][0]
-    assert wide.index(" 27B") > rows[0].index(" 27B")
+    assert wide.index(" GB") > rows[0].index(" GB")
     assert "Recommended for this Mac" in lines and "Runs in memory" in lines
     assert lines[-1] == pick.LIST_HINTS
-    # The dim row carries its note in place of its tags.
-    assert "needs 20 GB free" in rows[1] and "images" not in rows[1]
+    # The dim row carries its note in place of its use.
+    assert rows[1].rstrip().endswith("needs 20 GB free") and "general chat" not in rows[1]
     assert all(len(ln) <= 80 for ln in lines)
-    styles = [s for s, t in p.render(80, 24) if "gemma-4-12B" in t]
+    styles = [s for s, t in p.render(80, 24) if " gemma " in t]
     assert styles == ["class:pick.dim"]
-    assert [s for s, t in p.render(80, 24) if "Qwen3.8-27B" in t and t.startswith(">")] == ["class:pick.cursor"]
+    assert [s for s, t in p.render(80, 24) if " dense " in t and t.startswith(">")] == ["class:pick.cursor"]
 
 
 def test_detail_pane_is_three_lines_for_the_cursor_row():
@@ -123,7 +127,8 @@ def test_filter_is_case_insensitive_and_drops_the_numbers():
     lines = _lines(p)
     assert lines[1] == "filter: GEMMA"
     rows = [ln for ln in lines if ln.startswith(">")]
-    assert len(rows) == 1 and "gemma-4-12B" in rows[0] and not rows[0][2:4].strip()
+    assert len(rows) == 1 and " gemma " in rows[0] and not rows[0][2:4].strip()
+    assert lines[1] == "filter: GEMMA"                        # the header gives way to the filter
     assert "Runs in memory" not in lines                       # empty groups collapse
     assert p.current() is GEMMA
     p.jump(1)                                                 # digits do nothing while filtering
@@ -169,7 +174,7 @@ def test_bounded_height_with_more_markers():
     p.move(11)
     lines = _lines(p, 80, 12)
     assert any(ln.startswith("  ...") and "more" in ln for ln in lines[:4])
-    assert any(ln.startswith("> ") and "Model 11" in ln for ln in lines)
+    assert any(ln.startswith("> ") and " r11 " in ln for ln in lines)
 
 
 # -- the configure screen -----------------------------------------------------------

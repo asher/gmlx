@@ -84,6 +84,7 @@ class Model:
     blurb: str                       # one sentence: what it is good at
     speed: str                       # one sentence: how quick it feels
     license: str
+    use: str = ""                    # a few words: what it is good for
     license_url: str = ""
     license_note: str = ""           # the license's name when it is not a common one
     license_detail: str = ""         # one sentence on a limit worth knowing before the pull
@@ -145,13 +146,15 @@ class Seed:
     license_detail: str = ""
     quants: tuple = ()
     params: str = ""          # over the header's size label when that is not plain
+    use: str = ""             # the "good for" column, under 35 characters
 
 
 _SEED = (
     Seed("qwen3.5-4b", "Qwen3.5-4B", "unsloth/Qwen3.5-4B-GGUF", "high",
          "A small all-rounder for chat and questions about images.",
          "Quick on any Mac: the smallest model here.",
-         mmproj="mmproj-F16.gguf"),
+         mmproj="mmproj-F16.gguf",
+         use="chat and questions about images"),
     Seed("ternary-bonsai-2-9b", "Ternary Bonsai 2 9B", "prism-ml/Ternary-Bonsai-2-9B-gguf",
          "PQ2_0-MTP-Q8_0",
          "A 9B chat model squeezed to under 2 bits, images included.",
@@ -159,7 +162,8 @@ _SEED = (
          aliases=("bonsai-2-9b",),
          mmproj="Ternary-Bonsai-2-9B-mmproj-Q8_0.gguf",
          ignored_files=("Ternary-Bonsai-2-9B-DFlash2-Q8_0.gguf",),
-         quants=("PTQ1_0", "PQ2_0", "Q2_0", "PQ2_0-MTP-Q8_0")),
+         quants=("PTQ1_0", "PQ2_0", "Q2_0", "PQ2_0-MTP-Q8_0"),
+         use="chat on a small Mac"),
     Seed("nemotron-3.5-bolt-e4b", "Nemotron 3.5 Bolt E4B",
          "unsloth/NVIDIA-Nemotron-3.5-Bolt-E4B-GGUF", "high",
          "Built for tool calls and voice assistants.",
@@ -171,37 +175,44 @@ _SEED = (
          license_note="NVIDIA Open Model License",
          license_detail="Its faster-replies file is under NVIDIA's evaluation license.",
          quants=("UD-IQ2_M", "UD-IQ3_XXS", "UD-Q3_K_XL"),
-         params="E4B"),
+         params="E4B",
+         use="tool calls and voice assistants"),
     Seed("ornith-1.5-9b", "Ornith-1.5-9B", "ornith-ai/Ornith-1.5-9B-GGUF", "high",
          "A coding model that also reads images.",
          "Brisk for a 9B: its own head gives faster replies.",
-         mmproj="mmproj-Ornith-1.5-9B-BF16.gguf"),
+         mmproj="mmproj-Ornith-1.5-9B-BF16.gguf",
+         use="coding"),
     Seed("qwen3.5-9b", "Qwen3.5-9B", "unsloth/Qwen3.5-9B-MTP-GGUF", "high",
          "Good at chat and questions about images, with a long context.",
          "Brisk for a 9B: its own head gives faster replies.",
-         mmproj="mmproj-F16.gguf"),
+         mmproj="mmproj-F16.gguf",
+         use="chat with a long context"),
     Seed("gemma-4-12b", "gemma-4-12B", "unsloth/gemma-4-12b-it-GGUF", "high",
          "Strong general chat with image input.",
          "Steady for a 12B, with faster replies on by default.",
          mmproj="mmproj-F16.gguf",
          drafter_repo="unsloth/gemma-4-12b-it-GGUF",
-         drafter_file="mtp-gemma-4-12b-it.gguf"),
+         drafter_file="mtp-gemma-4-12b-it.gguf",
+         use="general chat"),
     Seed("k2-horizon-7b", "K2-Horizon-7B", "IFM/K2-Horizon-7B-GGUF", "high",
          "A chat model that keeps 512K tokens in view.",
          "Quick: a 7B dense model.",
-         params="7B"),
+         params="7B",
+         use="chat with a 512K context"),
     Seed("gemma-4-26b-a4b", "gemma-4-26B-A4B", "unsloth/gemma-4-26B-A4B-it-GGUF", "balanced",
          "Strong general chat with image input.",
          "Quick for its size: it reads 4B of its 26B weights per token.",
          mmproj="mmproj-F16.gguf",
          drafter_repo="unsloth/gemma-4-26B-A4B-it-GGUF",
-         drafter_file="mtp-gemma-4-26B-A4B-it.gguf"),
+         drafter_file="mtp-gemma-4-26B-A4B-it.gguf",
+         use="general chat"),
     Seed("qwen3.8-27b", "Qwen3.8-27B", "unsloth/Qwen3.8-27B-GGUF", "high",
          "Strong at long documents, code and tool calls.",
          "Steady for a 27B, with faster replies on by default.",
          mmproj="mmproj-F16.gguf",
          drafter_repo="incoai/Qwen3.8-27B-DFlash2-GGUF",
-         drafter_file="Qwen3.8-27B-DFlash2-Q8_0.gguf"),
+         drafter_file="Qwen3.8-27B-DFlash2-Q8_0.gguf",
+         use="documents, code and tool calls"),
     Seed("ternary-bonsai-2-27b", "Ternary Bonsai 2 27B", "prism-ml/Ternary-Bonsai-2-27B-gguf",
          "PQ2_0",
          "A 27B chat model squeezed to under 2 bits, images included.",
@@ -211,28 +222,33 @@ _SEED = (
          drafter_repo="incoai/Qwen3.8-27B-DFlash2-GGUF",
          drafter_file="Qwen3.8-27B-DFlash2-Q8_0.gguf",
          cross_base=True,
-         quants=("PTQ1_0", "PQ2_0")),
+         quants=("PTQ1_0", "PQ2_0"),
+         use="27B-class chat on a small Mac"),
     Seed("qwen3.6-35b-a3b", "Qwen3.6-35B-A3B", "unsloth/Qwen3.6-35B-A3B-GGUF", "balanced",
          "Good general chat with image input.",
          "Quick for its size: it reads 3B of its 35B weights per token.",
-         mmproj="mmproj-F16.gguf"),
+         mmproj="mmproj-F16.gguf",
+         use="general chat"),
     Seed("ornith-1.5-35b-a3b", "Ornith-1.5-35B-A3B", "ornith-ai/Ornith-1.5-35B-A3B-GGUF",
          "balanced",
          "A coding model that also reads images.",
          "Quick: it reads 3B of its 35B weights per token, with faster replies.",
          mmproj="mmproj-Ornith-1.5-35B-BF16.gguf",
-         params="35B-A3B"),
+         params="35B-A3B",
+         use="coding"),
     Seed("k2-horizon-mova-36b-a4b", "K2-Horizon-MoVA-36B", "IFM/K2-Horizon-MoVA-36B-A4B-GGUF",
          "balanced",
          "A chat model that keeps 512K tokens in view.",
          "Quick for its size: it reads 4B of its 36B weights per token.",
          aliases=("k2-horizon-mova",),
-         params="36B-A4B"),
+         params="36B-A4B",
+         use="chat with a 512K context"),
     Seed("ornith-1.5-122b", "Ornith-1.5-122B", "unsloth/Ornith-1.5-122B-GGUF", "balanced",
          "A strong coding model that also reads images.",
          "Quick for its size: it reads 10B of its 122B weights per token.",
          mmproj="mmproj-F16.gguf",
-         params="122B-A10B"),
+         params="122B-A10B",
+         use="coding"),
     Seed("nemotron-3.5-super-vl", "Nemotron 3.5 Super VL",
          "unsloth/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-GGUF", "balanced",
          "Reads long documents and images well.",
@@ -241,7 +257,8 @@ _SEED = (
          mmproj="mmproj-BF16.gguf",
          ignored_files=("LiLiCorr/lilicorr-NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4.gguf",),
          license_note="NVIDIA Open Model License",
-         params="120B-A12B"),
+         params="120B-A12B",
+         use="long documents and images"),
     Seed("qwen3.8-flash-next", "Qwen3.8-Flash-Next", "unsloth/Qwen3.8-Flash-Next-GGUF",
          "balanced",
          "Strong at long documents, code and tool calls.",
@@ -250,18 +267,21 @@ _SEED = (
          mmproj="mmproj-F16.gguf",
          drafter_repo="unsloth/Qwen3.8-Flash-Next-GGUF",
          drafter_file="MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
-         license_note="Qwen Community License"),
+         license_note="Qwen Community License",
+         use="documents, code and tool calls"),
     Seed("glm-5.3-flash", "GLM-5.3-Flash", "unsloth/GLM-5.3-Flash-GGUF", "balanced",
          "A strong coding and agent model.",
          "Quick for its size: it reads a small part of its weights per token.",
-         mmproj="mmproj-F16.gguf"),
+         mmproj="mmproj-F16.gguf",
+         use="coding and agents"),
     Seed("deepseek-v4-flash-0731", "DeepSeek-V4-Flash", "unsloth/DeepSeek-V4-Flash-0731-GGUF",
          "balanced",
          "Strong general chat and code.",
          "Quick for its size: it reads a small part of its weights per token.",
          aliases=("deepseek-v4-flash",),
          ignored_files=("dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf",
-                        "dspark/dspark-DeepSeek-V4-Flash-0731-BF16.gguf")),
+                        "dspark/dspark-DeepSeek-V4-Flash-0731-BF16.gguf"),
+         use="chat and code"),
     Seed("deepseek-v4.1-flash-1017", "DeepSeek-V4.1-Flash", "unsloth/DeepSeek-V4.1-Flash-1017-GGUF",
          "balanced",
          "Strong at code and agent work, with a 1M token context.",
@@ -269,11 +289,13 @@ _SEED = (
          aliases=("deepseek-v4.1-flash",),
          mmproj="mmproj-F16.gguf",
          ignored_files=("dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf",
-                        "dspark/dspark-DeepSeek-V4.1-Flash-1017-BF16.gguf")),
+                        "dspark/dspark-DeepSeek-V4.1-Flash-1017-BF16.gguf"),
+         use="code and agents with a 1M context"),
     Seed("glm-5.3", "GLM-5.3", "unsloth/GLM-5.3-GGUF", "balanced",
          "The strongest coding and agent model here.",
          "Quick for its size: it reads a small part of its weights per token.",
-         license_note="GLM-5.3 License"),
+         license_note="GLM-5.3 License",
+         use="top coding and agents"),
 )
 
 # Memory class -> the entries to lead with, chat pick first, then coding,
@@ -323,7 +345,7 @@ def _build(seed: Seed, facts: dict) -> Model:
     return Model(
         name=seed.name, title=seed.title, repo=seed.repo,
         revision=facts.get("revision", "main"), rungs=rungs, preferred=seed.preferred,
-        params=_params_label(seed, facts), blurb=seed.blurb, speed=seed.speed,
+        params=_params_label(seed, facts), blurb=seed.blurb, speed=seed.speed, use=seed.use,
         license=facts.get("license", ""), license_url=facts.get("license_url", ""),
         license_note=seed.license_note or facts.get("license_name", ""),
         license_detail=seed.license_detail, aliases=seed.aliases, arch=facts.get("arch", ""), moe=facts.get("moe", False),
@@ -733,6 +755,13 @@ def groups_for(box: Box) -> tuple:
             streams.append(m)
         else:
             too_big.append(m)
+
+    def download(m):
+        dp = default_plan(m, box)
+        return -plan_bytes(dp) if dp else 0
+    fits.sort(key=download)
+    streams.sort(key=download)
+    too_big.sort(key=lambda m: (needs_class_model(m) or 0, m.name))
     return rec, fits, streams, too_big
 
 
@@ -910,10 +939,6 @@ def human_gb(n: int) -> str:
     return _human_gb(n)
 
 
-def _tag_text(m: Model) -> str:
-    return ", ".join(tags(m))
-
-
 def entry_text(m: Model, box: Box) -> str:
     """One entry for ``gmlx pull <name> --list``: its quality rungs with
     their state and room for context here, and its add-ons."""
@@ -952,34 +977,52 @@ def entry_text(m: Model, box: Box) -> str:
 
 
 GROUP_TITLES = ("Recommended for this Mac", "Runs in memory",
-                "Larger than memory: runs from the SSD, much slower",
-                "Too big for this Mac")
+                "Runs from the SSD, much slower", "Too big for this Mac")
+LIST_FOOTER = ("Each download is the model's default quality tier for this Mac, with image\n"
+               "input and faster replies where they fit. gmlx pull <name> --list shows its\n"
+               "other tiers, and gmlx pull <name> --quant <tier> picks one.")
+
+
+def group_titles(groups: tuple) -> tuple:
+    """The four group titles for ``groups``: the second says "Also" when a
+    recommended group comes before it."""
+    titles = list(GROUP_TITLES)
+    if groups[0]:
+        titles[1] = "Also runs in memory"
+    return tuple(titles)
+
+
+def images_cell(m: Model) -> str:
+    return "yes" if m.mmproj else ""
 
 
 def recommendation_text(groups: tuple, box: Box) -> str:
-    """The recommendations as text: four groups, one entry per block
-    with its size, license, room for context and pull command."""
+    """The recommendations as text: one table per group with a header row,
+    one line per model: name, download at its default plan, whether it
+    reads images, and what it is good for."""
     lines = [f"This Mac has {box.ram // GiB} GB of memory.", ""]
-    for title, models in zip(GROUP_TITLES, groups):
+    listed = [m for group in groups for m in group]
+    name_w = max([4, *(len(m.name) for m in listed)])
+    for title, models in zip(group_titles(groups), groups):
         if not models:
             continue
-        lines.append(title)
+        rows = []
         for m in models:
-            head = f"  {m.title}  {m.params}  {_tag_text(m)}".rstrip()
             dp = default_plan(m, box)
             if dp is None:
                 cls = needs_class_model(m)
-                lines.append(f"{head}  {'needs a ' + str(cls) + ' GB Mac' if cls else 'too big'}")
-                lines.append(f"    {m.blurb} {license_text(m)}")
-                continue
-            lines.append(f"{head}  {human_gb(plan_bytes(dp))}  {license_text(m)}")
-            lines.append(f"    {m.blurb} {m.speed}")
-            if dp.streaming:
-                lines.append("    Runs from the SSD here, so replies are much slower.")
+                size = f"{cls} GB Mac" if cls else "too big"
             else:
-                ctx = context_text(m, dp.rung, box, plan_addon_bytes(dp), plan_speculates(dp))
-                if ctx:
-                    lines.append(f"    {ctx}")
-            lines.append(f"    {plan_command(dp, box)}")
+                size = human_gb(plan_bytes(dp))
+            rows.append((m.name, size, images_cell(m), m.use))
+        size_head = "DOWNLOAD" if any(default_plan(m, box) for m in models) else "NEEDS"
+        size_w = max([len(size_head), *(len(r[1]) for r in rows)])
+        lines.append(title)
+        lines.append(f"  {'NAME':<{name_w}}  {size_head:<{size_w}}  IMAGES  GOOD FOR")
+        for name, size, images, use in rows:
+            lines.append(f"  {name:<{name_w}}  {size:>{size_w}}  {images:<6}  {use}".rstrip())
         lines.append("")
+    lines.append(LIST_FOOTER)
     return "\n".join(lines).rstrip() + "\n"
+
+

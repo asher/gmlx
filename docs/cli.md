@@ -647,11 +647,19 @@ gmlx pull hf:org/gemma-3-27b-GGUF/gemma-3-27b-Q4_K_M.gguf mmproj-F16.gguf
 gmlx pull z-image-turbo
 ```
 
-The picker shows each model's size at its tier for this Mac, puts the
-models that run from the SSD under their own heading, and shows how much
-context each quality tier leaves room for. Context is how much text the
-model can keep in view. 1K tokens is roughly 750 words. `gmlx pull <name>
---list` prints one model's tiers and downloads nothing:
+`gmlx pull --list` prints the same models as a table, the recommended ones
+first, each at its default quality tier for this Mac:
+
+```text
+Recommended for this Mac
+  NAME                      DOWNLOAD  IMAGES  GOOD FOR
+  qwen3.8-flash-next        107.1 GB  yes     documents, code and tool calls
+  ornith-1.5-122b            75.1 GB  yes     coding
+```
+
+`gmlx pull <name> --list` prints one model's tiers and how much context each
+leaves room for. Context is how much text the model can keep in view. 1K
+tokens is roughly 750 words.
 
 ```text
 Qwen3.8-27B  27B  Apache 2.0
@@ -692,26 +700,26 @@ The recommended models:
 
 | Name | Params | License | Good for |
 |------|--------|---------|----------|
-| `qwen3.5-4b` | 4B | Apache 2.0 | A small all-rounder for chat and questions about images. |
-| `ternary-bonsai-2-9b` | 9B | Apache 2.0 | A 9B chat model squeezed to under 2 bits, images included. |
-| `nemotron-3.5-bolt-e4b` | E4B | NVIDIA Open Model License | Built for tool calls and voice assistants. |
-| `ornith-1.5-9b` | 9B | MIT | A coding model that also reads images. |
-| `qwen3.5-9b` | 9B | Apache 2.0 | Good at chat and questions about images, with a long context. |
-| `gemma-4-12b` | 12B | Apache 2.0 | Strong general chat with image input. |
-| `k2-horizon-7b` | 7B | Apache 2.0 | A chat model that keeps 512K tokens in view. |
-| `gemma-4-26b-a4b` | 26B-A4B | Apache 2.0 | Strong general chat with image input. |
-| `qwen3.8-27b` | 27B | Apache 2.0 | Strong at long documents, code and tool calls. |
-| `ternary-bonsai-2-27b` | 27B | Apache 2.0 | A 27B chat model squeezed to under 2 bits, images included. |
-| `qwen3.6-35b-a3b` | 35B-A3B | Apache 2.0 | Good general chat with image input. |
-| `ornith-1.5-35b-a3b` | 35B-A3B | MIT | A coding model that also reads images. |
-| `k2-horizon-mova-36b-a4b` | 36B-A4B | Apache 2.0 | A chat model that keeps 512K tokens in view. |
-| `ornith-1.5-122b` | 122B-A10B | MIT | A strong coding model that also reads images. |
-| `nemotron-3.5-super-vl` | 120B-A12B | NVIDIA Open Model License | Reads long documents and images well. |
-| `qwen3.8-flash-next` | 177B | Qwen Community License | Strong at long documents, code and tool calls. |
-| `glm-5.3-flash` | 321B | MIT | A strong coding and agent model. |
-| `deepseek-v4-flash-0731` | 284B | MIT | Strong general chat and code. |
-| `deepseek-v4.1-flash-1017` | 748B-A16B | MIT | Strong at code and agent work, with a 1M token context. |
-| `glm-5.3` | 754B | GLM-5.3 License | The strongest coding and agent model here. |
+| `qwen3.5-4b` | 4B | Apache 2.0 | chat and questions about images |
+| `ternary-bonsai-2-9b` | 9B | Apache 2.0 | chat on a small Mac |
+| `nemotron-3.5-bolt-e4b` | E4B | NVIDIA Open Model License | tool calls and voice assistants |
+| `ornith-1.5-9b` | 9B | MIT | coding |
+| `qwen3.5-9b` | 9B | Apache 2.0 | chat with a long context |
+| `gemma-4-12b` | 12B | Apache 2.0 | general chat |
+| `k2-horizon-7b` | 7B | Apache 2.0 | chat with a 512K context |
+| `gemma-4-26b-a4b` | 26B-A4B | Apache 2.0 | general chat |
+| `qwen3.8-27b` | 27B | Apache 2.0 | documents, code and tool calls |
+| `ternary-bonsai-2-27b` | 27B | Apache 2.0 | 27B-class chat on a small Mac |
+| `qwen3.6-35b-a3b` | 35B-A3B | Apache 2.0 | general chat |
+| `ornith-1.5-35b-a3b` | 35B-A3B | MIT | coding |
+| `k2-horizon-mova-36b-a4b` | 36B-A4B | Apache 2.0 | chat with a 512K context |
+| `ornith-1.5-122b` | 122B-A10B | MIT | coding |
+| `nemotron-3.5-super-vl` | 120B-A12B | NVIDIA Open Model License | long documents and images |
+| `qwen3.8-flash-next` | 177B | Qwen Community License | documents, code and tool calls |
+| `glm-5.3-flash` | 321B | MIT | coding and agents |
+| `deepseek-v4-flash-0731` | 284B | MIT | chat and code |
+| `deepseek-v4.1-flash-1017` | 748B-A16B | MIT | code and agents with a 1M context |
+| `glm-5.3` | 754B | GLM-5.3 License | top coding and agents |
 
 An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo`,
 `krea-2-turbo`, `flux-2-klein`, `flux-2-klein-base`, `flux-2-klein-9b`,

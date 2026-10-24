@@ -1762,7 +1762,8 @@ def _model_json(m, box, group: str | None = None) -> dict:
     out = {"name": m.name, "title": m.title, "params": m.params, "repo": m.repo,
            "revision": m.revision, "license": m.license, "license_url": m.license_url,
            "license_note": m.license_note, "tags": pc.tags(m), "blurb": m.blurb,
-           "speed": m.speed, "rungs": [_rung_json(m, r, box, addon, dr) for r in m.rungs]}
+           "speed": m.speed, "use": m.use,
+           "rungs": [_rung_json(m, r, box, addon, dr) for r in m.rungs]}
     if group is not None:
         out["group"] = group
         out["recommended"] = group == "recommended"
@@ -1832,7 +1833,7 @@ def _pick_row(m, dp, box, dest: Destination, free: int):
         size_label=pc.human_gb(pc.plan_bytes(dp)), blurb=m.blurb, speed=m.speed,
         note="", license=pc.license_text(m),
         dim_note=f"needs {pc.human_gb(remaining)} free" if remaining > free else "",
-        rungs=tuple(rungs), default_rung=dp.rung.quant, toggles=tuple(toggles))
+        rungs=tuple(rungs), default_rung=dp.rung.quant, toggles=tuple(toggles), use=m.use)
 
 
 def _pick_groups(groups: tuple, box, dest: Destination, free: int) -> list:
@@ -1842,7 +1843,7 @@ def _pick_groups(groups: tuple, box, dest: Destination, free: int) -> list:
     from gmlx.tui import pick
 
     out = []
-    for title, models in zip(pc.GROUP_TITLES[:3], groups[:3]):
+    for title, models in zip(pc.group_titles(groups)[:3], groups[:3]):
         rows = []
         for m in models:
             dp = pc.default_plan(m, box)
@@ -1967,9 +1968,9 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                          "Additional bare filenames are fetched from the first "
                          "ref's repo. See the examples below.")
     ap.add_argument("--list", action="store_true",
-                    help="Print the recommended models for this Mac as text, one "
-                         "gmlx pull command each, and download nothing. With a "
-                         "model name, print its quality tiers.")
+                    help="Print the recommended models for this Mac as a table and "
+                         "download nothing. With a model name, print its quality "
+                         "tiers.")
     ap.add_argument("--quant", default=None, metavar="QUANT",
                     help="For a model name, a quality tier (fastest, balanced, "
                          "high, xhigh) or a quant name such as Q6_K; for an image "

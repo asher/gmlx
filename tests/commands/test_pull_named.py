@@ -482,10 +482,10 @@ def test_a_bare_pull_off_a_terminal_lists_every_group(cat, capsys):
     cfg, lib, downloads = cat
     assert manage.cmd_pull([]) == 0
     out = capsys.readouterr().out
-    titles = [t for t in catalog.GROUP_TITLES if t in out]
-    assert titles == list(catalog.GROUP_TITLES)
-    assert out.index("Recommended") < out.index("Dense") < out.index("Runs in memory")
-    assert out.count("gmlx pull ") == 4 and "needs a " in out
+    titles = catalog.group_titles(catalog.groups_for(catalog.box_for_this_mac()))
+    assert [t for t in titles if t in out] == list(titles)
+    assert out.index("Recommended") < out.index("  dense ") < out.index("Also runs in memory")
+    assert out.count("gmlx pull ") == 2 and " GB Mac" in out      # the footer's two commands
     assert banned_words(out) == []
     assert manage.cmd_pull(["--list"]) == 0
     assert capsys.readouterr().out == out
@@ -530,7 +530,8 @@ def test_the_picker_gets_three_groups_and_its_choice_runs_the_named_path(
     seen = _fake_pick(monkeypatch, lambda groups: _default_plan_of(groups[0].rows[0]))
     assert manage.cmd_pull(["--config", str(cfg)]) == 0
     groups = seen["groups"]
-    assert [g.title for g in groups] == list(catalog.GROUP_TITLES[:3])
+    assert [g.title for g in groups] == ["Recommended for this Mac", "Also runs in memory",
+                                         "Runs from the SSD, much slower"]
     assert [r.id for r in groups[0].rows] == ["dense", "plain"]
     assert [r.id for r in groups[1].rows] == ["tight"]
     assert [r.id for r in groups[2].rows] == ["flashy"]
@@ -740,7 +741,7 @@ def test_pull_ram_gb_reads_the_catalog_as_another_mac(cat, monkeypatch, capsys):
     sixteen = catalog.box_for_class(16)
     assert catalog.box_for_this_mac() == sixteen
     assert out.rstrip("\n") == catalog.recommendation_text(catalog.groups_for(sixteen), sixteen).rstrip("\n")
-    assert "needs a 32 GB Mac" in out          # not the fixture's 32 GB listing
+    assert "32 GB Mac" in out                  # not the fixture's 32 GB listing
     monkeypatch.setenv("GMLX_PULL_RAM_GB", "lots")
     assert manage.cmd_pull(["--list"]) == 2
     assert capsys.readouterr().err == "error: GMLX_PULL_RAM_GB='lots' is not a whole number of GB\n"

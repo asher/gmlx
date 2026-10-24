@@ -67,6 +67,7 @@ class Row:
     rungs: tuple
     default_rung: str         # the Rung id the default mark sits on
     toggles: tuple
+    use: str = ""             # a few words: what the model is good for
 
 
 @dataclass(frozen=True)
@@ -97,7 +98,7 @@ def _pad(text: str, width: int) -> str:
 def _columns(width: int) -> dict:
     """Column widths for the list screen at ``width``."""
     wide = width >= 100
-    return {"title": 36 if wide else 24, "params": 10, "tags": 30 if wide else 24, "size": 9}
+    return {"title": 36 if wide else 24, "size": 9, "images": 6}
 
 
 class Picker:
@@ -126,7 +127,7 @@ class Picker:
         f = self.filter.lower()
         if not f:
             return True
-        hay = " ".join([row.title, row.params, *row.tags]).lower()
+        hay = " ".join([row.id, row.title, row.params, row.use, *row.tags]).lower()
         return f in hay
 
     def groups_visible(self) -> list:
@@ -275,7 +276,12 @@ class Picker:
     def _render_list(self, width: int, rows: int) -> list:
         col = _columns(width)
         out = [("class:pick.header", _clip(self.ram_label, width)), ("", "\n")]
-        out.append(("class:pick.filter", _clip(f"filter: {self.filter}", width) if self.filter else ""))
+        if self.filter:
+            out.append(("class:pick.filter", _clip(f"filter: {self.filter}", width)))
+        else:
+            head = (f"     {_pad('NAME', col['title'])} {'DOWNLOAD':>{col['size']}}  "
+                    f"{_pad('IMAGES', col['images'])}  GOOD FOR")
+            out.append(("class:pick.dim", _clip(head, width)))
         out.append(("", "\n"))
         area = max(MIN_LIST_LINES, rows - 8)
         groups = self.groups_visible()
@@ -296,12 +302,12 @@ class Picker:
                     if here:
                         cursor_line = len(lines)
                     num = "  " if self.filter else f"{n + 1:>2}"
-                    # A row that cannot download here shows why in place of its tags.
-                    tags = row.dim_note or ", ".join(row.tags)
-                    text = (f"{'>' if here else ' '} {num} {_pad(row.title, col['title'])} "
-                            f"{_pad(row.params, col['params'])} "
-                            f"{_pad(tags, col['tags'])} "
-                            f"{row.size_label:>{col['size']}}")
+                    # A row that cannot download here shows why in place of its use.
+                    images = "yes" if "images" in row.tags else ""
+                    text = (f"{'>' if here else ' '} {num} {_pad(row.id, col['title'])} "
+                            f"{row.size_label:>{col['size']}}  "
+                            f"{_pad(images, col['images'])}  "
+                            f"{row.dim_note or row.use}")
                     style = ("class:pick.cursor" if here
                              else "class:pick.dim" if row.dim_note else "")
                     lines.append((style, _clip(text, width), True))

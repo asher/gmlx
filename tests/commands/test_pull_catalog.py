@@ -528,17 +528,30 @@ def test_recommendation_and_entry_text_are_plain(small_catalog):
     assert text.isascii() and not _banned(text)
     lines = text.splitlines()
     assert lines[0] == "This Mac has 32 GB of memory."
-    assert lines.index("Recommended for this Mac") < lines.index("Runs in memory")
-    assert lines.index("Runs in memory") < lines.index(catalog.GROUP_TITLES[2])
-    assert lines.index(catalog.GROUP_TITLES[2]) < lines.index("Too big for this Mac")
-    for m in small_catalog.values():
-        assert sum(1 for line in lines if line.strip() == f"gmlx pull {m.name}") == (
-            1 if catalog.default_plan(m, b) and catalog.plan_command(catalog.default_plan(m, b), b)
-            == f"gmlx pull {m.name}" else 0)
-        assert any(m.title in line for line in lines)
-    assert any("Room for about" in line for line in lines)
-    assert any("needs a 48 GB Mac" in line for line in lines)
-    assert any("Apache 2.0" in line for line in lines)
+    titles = catalog.group_titles(groups)
+    assert titles[1] == "Also runs in memory"
+    at = [lines.index(t) for t in titles]
+    assert at == sorted(at)
+    # One table per group: a header row, then one row per model, each model once.
+    header = ["NAME", "DOWNLOAD", "IMAGES", "GOOD", "FOR"]
+    assert lines[at[0] + 1].split() == header and lines[at[1] + 1].split() == header
+    assert lines[at[3] + 1].split() == ["NAME", "NEEDS", "IMAGES", "GOOD", "FOR"]
+    rows = [ln for ln in lines if ln.startswith("  ") and not ln.startswith("  NAME")]
+    assert sorted(ln.split()[0] for ln in rows) == sorted(small_catalog)
+    images_at = None                       # each table's IMAGES column, from its header
+    for ln in lines:
+        if ln.startswith("  NAME"):
+            images_at = ln.index("IMAGES")
+        elif ln in rows:
+            m = small_catalog[ln.split()[0]]
+            assert ln.rstrip().endswith(m.use), ln
+            assert ln.ljust(80)[images_at:images_at + 3] == ("yes" if m.mmproj else "   "), ln
+    assert any(ln.split()[1:4] == ["48", "GB", "Mac"] for ln in rows)
+    # Within a group the largest download comes first.
+    fits = [ln for ln in lines[at[1] + 2:at[2]] if ln.strip()]
+    sizes = [float(ln.split()[1]) for ln in fits]
+    assert sizes == sorted(sizes, reverse=True)
+    assert "Room for about" not in text and text.rstrip().endswith(catalog.LIST_FOOTER)
     for m in small_catalog.values():
         entry = catalog.entry_text(m, b)
         assert entry.isascii() and not _banned(entry), entry

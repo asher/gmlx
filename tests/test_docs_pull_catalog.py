@@ -28,7 +28,7 @@ def test_cli_doc_lists_every_catalog_model():
     got = {r[0].strip("`"): r[1:] for r in rows}
     assert list(got) == list(catalog.MODELS), "the table follows the catalog's order"
     for name, m in catalog.MODELS.items():
-        assert got[name] == [m.params, catalog.license_text(m), m.blurb], name
+        assert got[name] == [m.params, catalog.license_text(m), m.use], name
 
 
 def test_quickstart_names_the_first_pick_of_each_memory_class():

@@ -119,9 +119,9 @@ The first recommendation at each memory size:
 | 128, 192 or 256 GB | Qwen3.8-Flash-Next | `gmlx pull qwen3.8-flash-next` |
 | 512 GB | DeepSeek-V4.1-Flash | `gmlx pull deepseek-v4.1-flash-1017` |
 
-`gmlx pull --list` prints every recommended model with its license and a
-`gmlx pull` command, and the [pull reference](cli.md#gmlx-pull) lists them
-all.
+`gmlx pull --list` prints every recommended model with its download size
+and what it is good for, and the [pull reference](cli.md#gmlx-pull) lists
+them all.
 
 A model needs memory for about its file size, plus its KV cache, which
 grows with the conversation. [Memory and the KV cache](memory.md) shows how
