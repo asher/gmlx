@@ -49,6 +49,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - On M5 and later GPUs, MoE prefill reads the token rows in expert order where
   they are, instead of copying them. A 32k Flint prompt prefills about 2%
   faster, with the same output. `GMLX_MOE_ROW_MAP=0` restores the copy.
+- Flint, Qwen3.6-35B-A3B, Gemma 4 26B-A4B and similar MoE models prefill in
+  4096-token chunks when memory allows: a 32k prompt prefills 2 to 7% faster.
 - The KV cache grows by an eighth of its size, at most 8192 rows, instead of
   256 rows at a time, so long decodes no longer stall on frequent regrows.
 - Models in memory decode up to 5% faster: decode runs on 50 ops per command

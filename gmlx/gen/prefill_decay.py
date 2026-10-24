@@ -45,6 +45,12 @@ count, and the fit prices min(step, rows) rows instead of the chunk. A
 profile may also carry an arch-default base step, honored only when no
 explicit PREFILL_STEP_SIZE is in force.
 
+A MoE whose routed experts average at most 128 rows of a stock chunk reads
+each expert's weights for few rows, so with no arch base step its default
+base doubles to GMLX_MOE_WIDE_STEP (4096). The wider chunk's MoE rows are
+not in the score fit, so it holds only while the free working set keeps
+4 GiB, read per chunk, and never on a model that streams its experts.
+
 A second, concurrency-keyed term (prefill ticks) bounds the wall-clock
 stall a chunk inflicts on live decode streams. Decode-priority pacing
 (batch_sched) bounds the average GPU share between decode and prefill but
@@ -66,6 +72,9 @@ Knobs:
                                     (default 500; 0 disables the tick term)
     GMLX_PREFILL_SCORE_PROFILE=0  ignore arch score profiles (dense model
                                     everywhere, pre-profile behavior)
+    GMLX_MOE_WIDE_STEP          base step of a MoE with few rows per expert
+                                    (default 4096; 2048 or less keeps the
+                                    stock step)
     GMLX_PREFILL_FUSED_256=0    price head dim 256 as unfused, as on a GPU
                                     without NAX
     GMLX_PREFILL_HEADROOM_CAP=1 raise the body cap to min(half the live
@@ -830,13 +839,15 @@ def _run_base(model, profile, base: int | None) -> int:
     """The base step a prefill of ``model`` runs from: ``base`` (the
     generator's step) when given, else PREFILL_STEP_SIZE, the adopted
     streamed step or the stock one; then the arch profile's step over a
-    default."""
+    default, or else moe_base_step over the stock one."""
     step = int(base or env_int("PREFILL_STEP_SIZE", 0)
                or getattr(model, "_gmlx_adopted_prefill_step", None)
                or _STOCK_BASE)
     if (profile is not None and profile.base_step
             and _default_base(model, step)):
         step = int(profile.base_step)
+    elif step == _STOCK_BASE and _default_base(model, step):
+        step = moe_base_step(model) or step
     return step
 
 
@@ -906,6 +917,52 @@ def decayed_seed_step(base: int, depth: int, heads: int,
 # this with no PREFILL_STEP_SIZE env means "defaulted", the only state an
 # arch-default base_step may override.
 _STOCK_BASE = 2048
+
+# A MoE whose routed experts average at most this many rows of a stock chunk
+# takes the wider base step while the free working set keeps the floor.
+_MOE_WIDE_MAX_ROWS = 128
+_MOE_WIDE_FLOOR_BYTES = 4 << 30
+_EXPERTS = ("num_experts", "num_local_experts", "n_routed_experts",
+            "moe_num_experts")
+
+
+def _moe_widths(model) -> tuple[int, int]:
+    """(routed experts, experts per token) from the model's config or
+    args, else (0, 0)."""
+    from gmlx.serve.mem_preflight import _get
+    from gmlx.stream.budget import _TOP_K, _width
+
+    for root in (getattr(model, "config", None), getattr(model, "args", None)):
+        for c in (_get(root, "text_config"), root):
+            if c is None:
+                continue
+            e, k = _width(c, *_EXPERTS), _width(c, *_TOP_K)
+            if e and k:
+                return e, k
+    return 0, 0
+
+
+def moe_base_step(model) -> int | None:
+    """GMLX_MOE_WIDE_STEP for a MoE whose experts average at most
+    _MOE_WIDE_MAX_ROWS rows of a stock chunk, keep their weights resident,
+    and leave _MOE_WIDE_FLOOR_BYTES of free working set; else None."""
+    wide = env_int("GMLX_MOE_WIDE_STEP", 4096)
+    if wide <= _STOCK_BASE:
+        return None
+    e, k = _moe_widths(model)
+    if not e or _STOCK_BASE * k > _MOE_WIDE_MAX_ROWS * e:
+        return None
+    from gmlx.stream.expert_streaming import experts_streamed
+
+    try:
+        if experts_streamed(model):
+            return None
+    except Exception:
+        return None
+    room = _headroom_bytes()
+    if room is None or room < _MOE_WIDE_FLOOR_BYTES:
+        return None
+    return wide
 
 
 def _folds(batch) -> bool:
