@@ -269,17 +269,20 @@ def _media_safe(batch, ids) -> Callable[[int], bool]:
 
 def _ckpt_run_step(batch) -> int:
     """The step the grid follows. A resident model takes the batch's
-    step. A streamed one, where a cut off the loop's chunk edges costs a
-    full expert pass, takes the step the loop runs from: the batch's own
-    (the decay wrapper swaps a chunk's width in around the MTP body and
-    keeps the base in ``_gmlx_base_step``), or the arch profile's over a
-    default one (``prefill_decay._run_base``)."""
+    step, or the MoE wide step its loop runs from in place of the stock
+    one (``prefill_decay.moe_base_step``), so no boundary splits a chunk
+    and a warm turn chunks as a cold one does. A streamed one, where a cut
+    off the loop's chunk edges costs a full expert pass, takes the step
+    the loop runs from: the batch's own (the decay wrapper swaps a chunk's
+    width in around the MTP body and keeps the base in
+    ``_gmlx_base_step``), or the arch profile's over a default one
+    (``prefill_decay._run_base``)."""
     from gmlx.stream.expert_streaming import experts_streamed
 
     model = getattr(batch, "model", None)
     step = int(getattr(batch, "prefill_step_size", 0) or 0)
     if not experts_streamed(model):
-        return step
+        return _resident_run_step(batch, model, step)
     step = int(getattr(batch, "_gmlx_base_step", None) or step)
     if step <= 0:
         return step
@@ -291,6 +294,23 @@ def _ckpt_run_step(batch) -> int:
         profile = prefill_decay.resolve_score_profile(
             model, getattr(batch, "prompt_cache", None))
         return int(prefill_decay._run_base(model, profile, step))
+    except Exception:
+        return step
+
+
+def _resident_run_step(batch, model, step: int) -> int:
+    """The batch's step, or the MoE wide step in place of the stock one.
+    An arch profile's base step keeps the batch's grid."""
+    from gmlx.gen import prefill_decay as pd
+
+    if step != pd._STOCK_BASE or not pd._default_base(model, step):
+        return step
+    try:
+        profile = pd.resolve_score_profile(
+            model, getattr(batch, "prompt_cache", None))
+        if profile is not None and profile.base_step:
+            return step
+        return pd.moe_base_step(model, pd.batch_rows(batch)) or step
     except Exception:
         return step
 
@@ -368,7 +388,7 @@ def _ckpt_chunks(batch, cuts, restored: int, n: int,
             return k if col is None else min(k, col - pos)
 
         return pd.size_chunk(model, profile, step, pos, lambda: cols,
-                             cut)[0]
+                             cut, pd.batch_rows(batch))[0]
 
     while stop is None or pos < stop:
         col = pending[0] if pending else None
@@ -498,8 +518,9 @@ def _ckpt_grids(batch, restored: int, block_size: int, anchor: int | None,
     (``_ckpt_drop_tail_cuts``): on a streamed text prompt over a layout
     without recurrent state. The candidates there are the grid from the
     system prefix anchor, from the restored prefix, from 0 at the step
-    the loop runs, and from 0 at the batch's step, which a resident
-    model and a media prompt keep. The loop's cost is known at arm time
+    the loop runs, and from 0 at the batch's step, which a media prompt
+    keeps. A resident model keeps the grid from 0 at the step its loop
+    runs from (``_ckpt_run_step``). The loop's cost is known at arm time
     only while the score cap is fixed, not while it follows the live
     headroom. Without turn records (GMLX_APC_CKPT_TURN=0) the pick cannot
     see which record the next turn restores, so main's grid stays."""
@@ -509,7 +530,7 @@ def _ckpt_grids(batch, restored: int, block_size: int, anchor: int | None,
     batch_unit = _lcm_unit(int(getattr(batch, "prefill_step_size", 0) or 0),
                            block_size)
     if not experts_streamed(getattr(batch, "model", None)):
-        return [(0, batch_unit)], False
+        return [(0, _ckpt_unit(batch, block_size))], False
     run_unit = _ckpt_unit(batch, block_size)
     if "arr" in (_ckpt_layout_live(batch, block_size) or ()):
         return [(0, run_unit)], False
@@ -533,8 +554,8 @@ def _ckpt_cursor_init(batch, guard: int, restored: int, block_size: int,
     """Boundary schedule for the checkpoint cursor: an ordered
     ``[(position, kind), ...]`` list plus ``(terminal, interval)``.
 
-    Boundaries sit on the natural chunk grid, lcm(prefill_step_size,
-    block_size) -- an off-grid boundary truncates a chunk, and gated-delta
+    Boundaries sit on the natural chunk grid, lcm(the step the loop runs
+    from, block_size) -- an off-grid boundary truncates a chunk, and gated-delta
     state is chunk-shape sensitive (certified: any grid change drifts).
     Interval points above the restored prefix, then the terminal (the
     grid point at or below the stock guard column). GMLX_APC_CKPT_INTERVAL

@@ -45,11 +45,12 @@ count, and the fit prices min(step, rows) rows instead of the chunk. A
 profile may also carry an arch-default base step, honored only when no
 explicit PREFILL_STEP_SIZE is in force.
 
-A MoE whose routed experts average at most 128 rows of a stock chunk reads
-each expert's weights for few rows, so with no arch base step its default
-base doubles to GMLX_MOE_WIDE_STEP (4096). The wider chunk's MoE rows are
-not in the score fit, so it holds only while the free working set keeps
-4 GiB, read per chunk, and never on a model that streams its experts.
+A MoE whose routed experts average at most 128 rows of a stock chunk, over
+all of a batch's prompts, reads each expert's weights for few rows, so with
+no arch base step its default base doubles to GMLX_MOE_WIDE_STEP (4096).
+The wider chunk's MoE rows are not in the score fit, so it holds only while
+the free working set keeps 20 GiB, read per chunk, and never on a model
+that streams its experts.
 
 A second, concurrency-keyed term (prefill ticks) bounds the wall-clock
 stall a chunk inflicts on live decode streams. Decode-priority pacing
@@ -810,19 +811,21 @@ def score_transient_bytes(model, prompt_cache, depth: int,
         # profile, whose cut chunks can outgrow the dense price.
         from gmlx.cache.kv_cache import KVCache
 
+        rows = int(prefill_rows or 1)
         dense = _transient_price(
-            None, depth, heads, _run_base(model, None, base_step))
+            None, depth, heads, _run_base(model, None, base_step, rows))
         probe = resolve_score_profile(model, [KVCache()])
         if probe is None or not probe.fused_min_step:
             return dense
         probe = probe._replace(fused_mask_bytes=int(prefill_rows or 1) + 1)
         return max(dense, _transient_price(
-            probe, depth, heads, _run_base(model, probe, base_step)))
+            probe, depth, heads, _run_base(model, probe, base_step, rows)))
     profile = resolve_score_profile(model, prompt_cache)
     if profile is not None and profile.fused_min_step and prefill_rows:
         profile = profile._replace(fused_mask_bytes=int(prefill_rows) + 1)
     return _transient_price(
-        profile, depth, heads, _run_base(model, profile, base_step))
+        profile, depth, heads,
+        _run_base(model, profile, base_step, int(prefill_rows or 1)))
 
 
 def _default_base(model, base) -> bool:
@@ -835,11 +838,12 @@ def _default_base(model, base) -> bool:
                     getattr(model, "_gmlx_adopted_prefill_step", None))
 
 
-def _run_base(model, profile, base: int | None) -> int:
-    """The base step a prefill of ``model`` runs from: ``base`` (the
-    generator's step) when given, else PREFILL_STEP_SIZE, the adopted
-    streamed step or the stock one; then the arch profile's step over a
-    default, or else moe_base_step over the stock one."""
+def _run_base(model, profile, base: int | None, rows: int = 1) -> int:
+    """The base step a prefill of ``rows`` prompts on ``model`` runs
+    from: ``base`` (the generator's step) when given, else
+    PREFILL_STEP_SIZE, the adopted streamed step or the stock one; then the
+    arch profile's step over a default, or else moe_base_step over the
+    stock one."""
     step = int(base or env_int("PREFILL_STEP_SIZE", 0)
                or getattr(model, "_gmlx_adopted_prefill_step", None)
                or _STOCK_BASE)
@@ -847,7 +851,7 @@ def _run_base(model, profile, base: int | None) -> int:
             and _default_base(model, step)):
         step = int(profile.base_step)
     elif step == _STOCK_BASE and _default_base(model, step):
-        step = moe_base_step(model) or step
+        step = moe_base_step(model, rows) or step
     return step
 
 
@@ -919,9 +923,10 @@ def decayed_seed_step(base: int, depth: int, heads: int,
 _STOCK_BASE = 2048
 
 # A MoE whose routed experts average at most this many rows of a stock chunk
-# takes the wider base step while the free working set keeps the floor.
+# takes the wider base step while the free working set keeps the floor, which
+# keeps a wider chunk off a model near the wired ceiling.
 _MOE_WIDE_MAX_ROWS = 128
-_MOE_WIDE_FLOOR_BYTES = 4 << 30
+_MOE_WIDE_FLOOR_BYTES = 20 << 30
 _EXPERTS = ("num_experts", "num_local_experts", "n_routed_experts",
             "moe_num_experts")
 
@@ -942,15 +947,21 @@ def _moe_widths(model) -> tuple[int, int]:
     return 0, 0
 
 
-def moe_base_step(model) -> int | None:
+def batch_rows(batch) -> int:
+    """The prompts a prompt batch prefills together, at least 1."""
+    return len(getattr(batch, "uids", None) or ()) or 1
+
+
+def moe_base_step(model, rows: int = 1) -> int | None:
     """GMLX_MOE_WIDE_STEP for a MoE whose experts average at most
-    _MOE_WIDE_MAX_ROWS rows of a stock chunk, keep their weights resident,
-    and leave _MOE_WIDE_FLOOR_BYTES of free working set; else None."""
+    _MOE_WIDE_MAX_ROWS rows of a stock chunk of ``rows`` prompts, keep
+    their weights resident, and leave _MOE_WIDE_FLOOR_BYTES of free
+    working set; else None, and None with the decay off."""
     wide = env_int("GMLX_MOE_WIDE_STEP", 4096)
-    if wide <= _STOCK_BASE:
+    if wide <= _STOCK_BASE or not _enabled():
         return None
     e, k = _moe_widths(model)
-    if not e or _STOCK_BASE * k > _MOE_WIDE_MAX_ROWS * e:
+    if not e or max(1, rows) * _STOCK_BASE * k > _MOE_WIDE_MAX_ROWS * e:
         return None
     from gmlx.stream.expert_streaming import experts_streamed
 
@@ -1010,12 +1021,13 @@ def fit_cut(batch, n: int) -> int:
 
 
 def size_chunk(model, profile, base: int, depth: int, cols, cut,
-               ) -> tuple[int, int, bool]:
+               rows: int = 1) -> tuple[int, int, bool]:
     """``decayed_for_batch`` on explicit state: ``base`` the batch's step,
     ``depth`` the cached columns, ``cols()`` the columns the loop chunks
     (None: no tail merge), ``cut(step)`` the chunk the loop runs from a
-    step. Returns the step, the run base and whether the tick set it."""
-    base = _run_base(model, profile, base)
+    step, ``rows`` the batch's prompts. Returns the step, the run base and
+    whether the tick set it."""
+    base = _run_base(model, profile, base, rows)
     heads = score_heads(model)
     step = decayed_step(base, depth, heads, profile=profile)
     from gmlx.stream.expert_streaming import experts_streamed
@@ -1061,9 +1073,9 @@ def decayed_for_batch(batch) -> int | None:
     # when the last chunk and the last token run as one.
     cols = None if embeds is None else (
         lambda: embeds.shape[1] - (0 if _folds(batch) else 1))
-    step, base, ticked = size_chunk(
+    step, run_base, ticked = size_chunk(
         batch.model, profile, base, depth, cols,
-        lambda s: _cut_chunk(batch, s))
+        lambda s: _cut_chunk(batch, s), batch_rows(batch))
     global _LAST_STEP
     _LAST_STEP = int(step or 0)
     if env_bool("GMLX_PREFILL_DECAY_LOG", False):
@@ -1071,6 +1083,11 @@ def decayed_for_batch(batch) -> int | None:
             _PROFILE_LOGGED.add("profile")
             print(f"[prefill-decay] score profile active: {profile}",
                   flush=True)
+        if run_base != base and "base" not in _PROFILE_LOGGED:
+            _PROFILE_LOGGED.add("base")
+            print(f"[prefill-decay] base step {base} -> {run_base}",
+                  flush=True)
+        base = run_base
         if ticked:
             print(f"[prefill-decay] tick: step {base} -> {step} "
                   f"(rows {_LIVE_DECODE_ROWS})", flush=True)

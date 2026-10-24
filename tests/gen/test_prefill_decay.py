@@ -1030,7 +1030,7 @@ def resident(monkeypatch):
     monkeypatch.setattr(es, "experts_streamed", lambda m: False)
     monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
     monkeypatch.delenv("GMLX_MOE_WIDE_STEP", raising=False)
-    _headroom(monkeypatch, 20 * GB)
+    _headroom(monkeypatch, 40 * GB)
 
 
 def test_moe_with_few_rows_per_expert_takes_the_wide_step(resident):
@@ -1048,17 +1048,39 @@ def test_moe_with_few_rows_per_expert_takes_the_wide_step(resident):
 def test_moe_wide_step_runs_the_serve_chunk(monkeypatch, resident):
     _cap(monkeypatch, 100.0)
     batch = SimpleNamespace(prefill_step_size=2048, model=_moe(256, 8),
-                            prompt_cache=[SimpleNamespace(offset=0)])
+                            prompt_cache=[SimpleNamespace(offset=0)],
+                            uids=[0])
     assert pd.decayed_for_batch(batch) == 4096
+    # 2 prompts give 128 rows per expert, 3 give 192
+    batch.uids = [0, 1]
+    assert pd.decayed_for_batch(batch) == 4096
+    batch.uids = [0, 1, 2]
+    assert pd.decayed_for_batch(batch) == 2048
+    assert pd._run_base(_moe(256, 8), None, None, rows=3) == 2048
+
+
+def test_moe_wide_step_logs_its_base_once(monkeypatch, resident, capsys):
+    _cap(monkeypatch, 100.0)
+    monkeypatch.setenv("GMLX_PREFILL_DECAY_LOG", "1")
+    monkeypatch.setattr(pd, "_PROFILE_LOGGED", set())
+    batch = SimpleNamespace(prefill_step_size=2048, model=_moe(256, 8),
+                            prompt_cache=[SimpleNamespace(offset=0)])
+    pd.decayed_for_batch(batch)
+    pd.decayed_for_batch(batch)
+    out = capsys.readouterr().out
+    assert out.count("[prefill-decay] base step 2048 -> 4096") == 1
 
 
 def test_moe_wide_step_yields(monkeypatch, resident):
     import gmlx.stream.expert_streaming as es
 
     m = _moe(256, 8)
-    _headroom(monkeypatch, 3 * GB)  # under the 4 GiB floor
+    _headroom(monkeypatch, 21 * GB)  # under the 20 GiB floor
     assert pd._run_base(m, None, None) == 2048
-    _headroom(monkeypatch, 20 * GB)
+    _headroom(monkeypatch, 40 * GB)
+    monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
+    assert pd._run_base(m, None, None) == 2048
+    monkeypatch.delenv("GMLX_PREFILL_DECAY")
     monkeypatch.setenv("PREFILL_STEP_SIZE", "2048")
     assert pd._run_base(m, None, None) == 2048
     monkeypatch.delenv("PREFILL_STEP_SIZE")
@@ -1071,3 +1093,22 @@ def test_moe_wide_step_yields(monkeypatch, resident):
     # an arch profile's own step wins
     prof = pd.ScoreTransientProfile(base_step=8192)
     assert pd._run_base(m, prof, None) == 8192
+
+
+def test_resident_ckpt_grid_follows_the_moe_wide_step(monkeypatch, resident):
+    from gmlx.spec import ckpt
+
+    batch = SimpleNamespace(prefill_step_size=2048, model=_moe(256, 8),
+                            prompt_cache=[], uids=[0])
+    assert ckpt._ckpt_run_step(batch) == 4096
+    assert ckpt._ckpt_grids(batch, 0, 16, None, ())[0] == [(0, 4096)]
+    batch.uids = [0, 1, 2]
+    assert ckpt._ckpt_run_step(batch) == 2048
+    batch.uids = [0]
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "2048")
+    assert ckpt._ckpt_run_step(batch) == 2048
+    monkeypatch.delenv("PREFILL_STEP_SIZE")
+    # an arch profile's base step keeps the batch's grid
+    monkeypatch.setattr(pd, "resolve_score_profile", lambda m, c:
+                        pd.ScoreTransientProfile(base_step=8192))
+    assert ckpt._ckpt_run_step(batch) == 2048
