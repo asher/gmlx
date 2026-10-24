@@ -145,3 +145,27 @@ def flash_next_under_its_table(monkeypatch, lib) -> int:
     monkeypatch.setattr(discovery, "_stream_budget_bytes", lambda: rest)
     monkeypatch.setattr(device, "stream_budget_bytes", lambda: rest)
     return table.nbytes
+
+
+# The words a user of `gmlx pull` never reads: the catalog, the picker and
+# every line a catalog pull prints say "faster replies" and "image input".
+PULL_BANNED_WORDS = ("kv", "drafter", "mtp", "moe", "experts", "mmproj")
+
+
+def banned_words(text: str, *, skip_commands: bool = True) -> list:
+    """The banned words in ``text``, outside the tokens the user types or
+    finds in their own files: command lines (``gmlx ...``), ``.gguf`` file
+    names, quant names, and the config keys ``stream: experts``,
+    ``draft_gguf`` and ``mmproj`` named as keys."""
+    import re
+
+    hits = []
+    for line in text.splitlines():
+        if skip_commands and line.strip().startswith("gmlx "):
+            continue
+        probe = re.sub(r"\S+\.gguf", "", line)
+        probe = re.sub(r"\b[A-Z0-9_-]*Q\d[A-Z0-9_-]*\b", "", probe)
+        probe = re.sub(r"stream: experts|\bdraft_gguf\b|\bmmproj\b(?= key|:)", "", probe)
+        probe = probe.lower()
+        hits += [w for w in PULL_BANNED_WORDS if w in probe]
+    return hits

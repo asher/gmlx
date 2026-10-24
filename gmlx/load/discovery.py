@@ -1170,9 +1170,11 @@ def _over_budget(c: ClassifiedGguf) -> tuple[int, int] | None:
 
 def _fit_in_memory(mc: ModelCfg, c: ClassifiedGguf) -> None:
     """Wire the over-RAM placement for a model whose weights can't sit resident:
-    a MoE gets ``stream: experts`` (and loses ``speculative`` - MTP needs a plain
-    fully-resident base); a dense over-RAM model just gets a stderr hint (whole-
-    model CPU streaming is a big enough behavior change to leave opt-in)."""
+    a MoE gets ``stream: experts`` (and loses ``speculative``, since a
+    speculative head needs a fully-resident base); a dense over-RAM model just
+    gets a stderr hint (whole-model CPU streaming is a big enough behavior
+    change to leave opt-in). The lines say "faster replies" for speculative
+    decoding, as every line a catalog pull prints does."""
     over = _over_budget(c)
     if over is None:
         return
@@ -1183,9 +1185,9 @@ def _fit_in_memory(mc: ModelCfg, c: ClassifiedGguf) -> None:
         note = ""
         if mc.speculative:
             mc.speculative = False
-            note = ", speculative off (MTP needs a fully-resident base)"
-        print(f"[discover] over-RAM MoE ({size}): stream: experts{note}: "
-              f"{c.path}", file=sys.stderr)
+            note = ", faster replies off (they need the whole model in memory)"
+        print(f"[discover] larger than memory ({size}): runs from the SSD "
+              f"(stream: experts){note}: {c.path}", file=sys.stderr)
     else:
         print(f"[discover] over-RAM model ({size}): consider `stream: cpu` "
               f"on its entry: {c.path}", file=sys.stderr)
@@ -1197,6 +1199,10 @@ STREAM_MARK_NOTE = "set by discovery: over the memory budget"
 # The end-of-line comment on a companion key that ``sync-models
 # --add-companions`` added to an entry already in the config.
 COMPANION_MARK_NOTE = "added by sync-models"
+# The end-of-line comment on an alias that ``gmlx pull`` wrote for a
+# catalog name. A later pull repoints an alias that carries it; one
+# without it is the user's.
+PULL_ALIAS_NOTE = "set by gmlx pull"
 
 
 def rescan_entry(path: str) -> dict | None:
@@ -1266,7 +1272,7 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
             if spec_flag and not _arch_table.mtp_wired(c.arch):
                 # The GGUF carries an MTP head, but no target class is wired
                 # for the arch - `speculative: true` would fail at load.
-                print(f"[discover] MTP head present but no MTP target wired "
+                print(f"[discover] faster-replies head present but not wired "
                       f"for arch {c.arch!r}; speculative stays off: {c.path}",
                       file=sys.stderr)
                 spec_flag = False
@@ -1353,8 +1359,8 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
                 if mc.id in all_old_ids and loser != dr.path:
                     draft_pairs[mc.id] = dr.path
                 if loser and loser != dr.path:
-                    print(f"[discover] drafter superseded for {mc.id}: "
-                          f"{loser} -> {dr.path}", file=sys.stderr)
+                    print(f"[discover] faster-replies file replaced for "
+                          f"{mc.id}: {loser} -> {dr.path}", file=sys.stderr)
             if targets:
                 unpaired = [d for d in unpaired if d.path != dr.path]
     if spec.speculative == "auto":
@@ -1369,7 +1375,7 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
             paired.setdefault(mc.draft_gguf, []).append(mc.id)
     for dpath in drafter_kinds:
         if dpath in paired:
-            print(f"[discover] drafter paired (speculative on for "
+            print(f"[discover] faster replies paired (speculative on for "
                   f"{', '.join(paired[dpath])}): {dpath}", file=sys.stderr)
     for dr in unpaired:
         if dr.path not in named:

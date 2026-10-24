@@ -13,6 +13,7 @@ from gmlx.load import arch_table, catalog
 from gmlx.load import remote
 from gmlx.load.discovery import quant_tag
 from gmlx.load.preflight import strip_shard_suffix
+from helpers import banned_words
 
 GiB = 1 << 30
 K = 1024
@@ -118,15 +119,7 @@ def _fits(m, r, b, addon, speculative, t):
 
 
 def _banned(text: str, *, skip_commands: bool = True) -> list:
-    hits = []
-    for line in text.splitlines():
-        if skip_commands and line.strip().startswith("gmlx "):
-            continue
-        # File names and quant names are the vendor's tokens the user types.
-        probe = re.sub(r"\S+\.gguf", "", line)
-        probe = re.sub(r"\b[A-Z0-9_-]*Q\d[A-Z0-9_-]*\b", "", probe).lower()
-        hits += [w for w in BANNED if w in probe]
-    return hits
+    return banned_words(text, skip_commands=skip_commands)
 
 
 # -- state, bytes, fit ------------------------------------------------------

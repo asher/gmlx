@@ -808,6 +808,16 @@ def _warn_stale_stream_marks(cfg, path) -> None:
               "sync-models to keep them in memory.", file=sys.stderr)
 
 
+def _marked_key(node, key, note: str) -> bool:
+    """Whether ``key`` of the ruamel map ``node`` carries ``note`` in its
+    end-of-line comment: the mark that tells a key gmlx wrote from one
+    the user wrote."""
+    ca = getattr(node, "ca", None)
+    item = ca.items.get(key) if ca is not None else None
+    tok = item[2] if item and len(item) > 2 else None
+    return tok is not None and note in str(tok.value)
+
+
 def _marked_stream_ids(path) -> list:
     """The ids of ``path``'s model entries whose ``stream:`` key carries
     discovery's mark comment."""
@@ -820,15 +830,25 @@ def _marked_stream_ids(path) -> list:
     models = doc.get("models") if isinstance(doc, dict) else None
     if not isinstance(models, dict):
         return []
-    out = []
-    for mid, ent in models.items():
-        ca = getattr(ent, "ca", None)
-        item = ca.items.get("stream") if ca is not None else None
-        tok = item[2] if item and len(item) > 2 else None
-        if (tok is not None and discovery.STREAM_MARK_NOTE in str(tok.value)
-                and ent.get("stream") == "experts"):
-            out.append(str(mid))
-    return out
+    return [str(mid) for mid, ent in models.items()
+            if _marked_key(ent, "stream", discovery.STREAM_MARK_NOTE)
+            and ent.get("stream") == "experts"]
+
+
+def _marked_alias_names(path) -> set:
+    """The names in ``path``'s ``aliases:`` map that ``gmlx pull`` wrote,
+    by the mark comment on each."""
+    from ruamel.yaml import YAML
+
+    try:
+        doc = YAML().load(Path(path).read_text())
+    except Exception:
+        return set()
+    aliases = doc.get("aliases") if isinstance(doc, dict) else None
+    if not isinstance(aliases, dict):
+        return set()
+    return {str(name) for name in aliases
+            if _marked_key(aliases, name, discovery.PULL_ALIAS_NOTE)}
 
 
 def _resolved_drafter(mc, model_dirs):
@@ -1258,7 +1278,7 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
                 draft_pairs=None, images=(), restream=None,
                 mmproj_pairs=None,
                 companion_note: str | None = discovery.COMPANION_MARK_NOTE,
-                ) -> None:
+                aliases=None) -> None:
     """Rewrite ``path``'s ``models:`` block in place, preserving comments and
     hand-edits (ruamel round-trip): delete ``removed`` ids, splice in the newly
     ``discovered`` models. Untouched entries keep their exact formatting.
@@ -1271,7 +1291,11 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
     ``mmproj_pairs`` (configured id -> companion path) add a ``draft_gguf``
     or ``mmproj`` key to an entry that has none, with the end-of-line
     comment ``companion_note``; a drafter skips an entry set to
-    ``speculative: false``."""
+    ``speculative: false``. ``aliases`` (``{name: id}``) land in the
+    top-level ``aliases:`` map, made after ``models:`` when there is none,
+    each with :data:`discovery.PULL_ALIAS_NOTE` as its end-of-line comment.
+    An alias whose target is a removed id goes with it, with a
+    ``remove:`` line."""
     from ruamel.yaml.comments import CommentedMap
 
     def edit_models(doc, models):
@@ -1343,6 +1367,35 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
                 models = _open_models_block(doc)
         if isinstance(models, dict):
             edit_models(doc, models)
+        block = doc.get("aliases")
+        if removed and isinstance(block, dict):
+            for name in [n for n in block
+                         if str(block[n]).split("@", 1)[0] in removed]:
+                print(f"  remove:  alias {name} -> {block[name]}")
+                del block[name]
+                block.ca.items.pop(name, None)
+        if aliases:
+            if not isinstance(block, dict):
+                block = CommentedMap()
+                keys = list(doc)
+                at = keys.index("models") + 1 if "models" in keys else len(keys)
+                doc.insert(at, "aliases", block)
+                doc.yaml_set_comment_before_after_key("aliases", before="\n")
+            for name, target in aliases.items():
+                # A fresh mark at the new value's column; the lines that
+                # rode the old comment token stay below the key.
+                item = block.ca.items.pop(name, None)
+                tok = item[2] if item and len(item) > 2 else None
+                rest = (tok.value.split("\n", 1)[1]
+                        if tok is not None and "\n" in tok.value else "")
+                block[name] = target
+                block.yaml_add_eol_comment(discovery.PULL_ALIAS_NOTE, name,
+                                           column=2 + len(f"{name}: {target}") + 2)
+                new = block.ca.items[name]
+                if item and len(item) > 1:
+                    new[1] = item[1]
+                if rest:
+                    new[2].value = new[2].value.rstrip("\n") + "\n" + rest
         if images:
             block = doc.get("image_models")
             if not isinstance(block, dict):
@@ -1359,7 +1412,79 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
     edit_config_yaml(path, mutate)
 
 
-def register_downloads(paths: list, config_path=None) -> None:
+@dataclasses.dataclass
+class Registered:
+    """What :func:`register_downloads` did for a pull. ``ids`` maps each
+    downloaded model path to its configured id, new or already there.
+    ``alias`` is the catalog name ``gmlx chat`` can use, None when none
+    was written or kept. ``moved_from`` is ``(id, path)`` of the model
+    the alias named before this pull repointed it."""
+    ids: dict = dataclasses.field(default_factory=dict)
+    alias: str | None = None
+    moved_from: tuple | None = None
+
+
+# Why a drafter stays off an entry that streams its experts.
+_STREAMS_REASON = "it runs from the SSD (stream: experts)"
+
+
+def _names_file(value, path, model_dirs) -> bool:
+    """Whether a config entry's companion ``value`` resolves to ``path``."""
+    if not value:
+        return False
+    try:
+        return os.path.abspath(resolve_path(value, model_dirs)) == os.path.abspath(path)
+    except ConfigError:
+        return False
+
+
+def _alias_plan(cfg, path, pairs, ids) -> tuple:
+    """The alias a catalog pull asks for, as ``(to_write, alias,
+    moved_from)``. ``to_write`` is ``{name: id}`` for the config, empty
+    when the alias is in place already or is held back; ``alias`` is the
+    name ``gmlx chat`` can use after the write, None when it is held
+    back; ``moved_from`` is ``(id, path)`` of the model a repointed alias
+    named before. A name that is a model, image or assistant id, or an
+    alias without the pull mark, is the user's: the config would not
+    load with a second meaning for it, so the pull says which id runs
+    the model instead."""
+    for ap, pr in pairs.items():
+        name = pr.get("alias")
+        if not name or ap not in ids:
+            continue
+        target = ids[ap]
+        if name == target:
+            return {}, name, None
+        taken = next((what for what, keys in (
+            ("a model", cfg.models), ("an image model", cfg.image_models),
+            ("a served assistant", cfg.assistants)) if name in keys), None)
+        if taken:
+            print(f"{name} is already {taken} in {path}; run it as "
+                  f"gmlx chat {target}")
+            return {}, None, None
+        old = cfg.aliases.get(name)
+        if old is None:
+            return {name: target}, name, None
+        old_id = old.split("@", 1)[0]
+        if old_id == target:
+            return {}, name, None
+        if name not in _marked_alias_names(path):
+            print(f"{name} is already an alias in {path}; run it as "
+                  f"gmlx chat {target}")
+            return {}, None, None
+        moved = None
+        if old_id in cfg.models:
+            try:
+                moved = (old_id, resolve_path(cfg.models[old_id].path,
+                                              cfg.model_dirs))
+            except ConfigError:
+                moved = (old_id, cfg.models[old_id].path)
+        return {name: target}, name, moved
+    return {}, None, None
+
+
+def register_downloads(paths: list, config_path=None, *,
+                       pairs=None) -> Registered:
     """Fold freshly downloaded GGUF files into the server config - ``gmlx
     pull``'s auto-register, a mini sync-models scoped to exactly these paths.
 
@@ -1368,17 +1493,30 @@ def register_downloads(paths: list, config_path=None) -> None:
     never discover it), or when the file is already configured. Otherwise the
     same machinery as sync-models end to end: id derivation, mmproj pairing,
     drafter pairing, speculative detection, comment-preserving splice, and a
-    SIGHUP so a
-    running server serves the new entries immediately. Best-effort by
-    contract: the download already succeeded, so a registration problem warns
-    and returns instead of failing ``pull``."""
+    SIGHUP so a running server serves the new entries immediately.
+
+    ``pairs`` maps a downloaded model path to the companions a catalog pull
+    knows go with it, ``{"mmproj": path, "draft_gguf": path, "alias":
+    name}``, each key optional. A new entry takes them as they are, except
+    a drafter on an entry that streams. An entry already in the config
+    takes a companion only where its key is open (see :func:`_open_pairs`)
+    and it does not stream; a held-back one gets a line that says why. The
+    alias lands in the top-level ``aliases:`` map with the pull mark; see
+    :func:`_alias_plan` for the names it leaves alone. Every line a
+    catalog pull prints says "faster replies" and "image input", never the
+    file kinds.
+
+    Best-effort by contract: the download already succeeded, so a
+    registration problem warns and returns an empty result instead of
+    failing ``pull``."""
+    done = Registered()
     try:
         if config_path:
             path = Path(os.path.expanduser(str(config_path)))
         else:
             path = next((p for p in default_config_paths() if p.exists()), None)
         if path is None or not path.exists():
-            return
+            return done
         cfg = load_config(path)
         roots = [os.path.abspath(os.path.expanduser(os.path.expandvars(d)))
                  for d in cfg.model_dirs]
@@ -1388,9 +1526,11 @@ def register_downloads(paths: list, config_path=None) -> None:
             if any(ap == r or ap.startswith(r + os.sep) for r in roots):
                 wanted.add(ap)
         if not wanted:
-            return
-        known_paths, known_models = set(), {}
-        for mc in cfg.models.values():
+            return done
+        pairs = {os.path.abspath(str(p)): dict(v or {})
+                 for p, v in (pairs or {}).items()}
+        known_paths, known_models, id_of = set(), {}, {}
+        for mid, mc in cfg.models.items():
             try:
                 rp = resolve_path(mc.path, cfg.model_dirs)
             except ConfigError:
@@ -1398,56 +1538,107 @@ def register_downloads(paths: list, config_path=None) -> None:
             known_paths.add(rp)
             if rp:
                 known_models[rp] = _resolved_drafter(mc, cfg.model_dirs)
+                id_of[os.path.abspath(rp)] = mid
         # Scan the parent dirs (mmproj pairing needs the siblings), then keep
         # only models whose file is one we just downloaded - a neighbouring
-        # file the user left unregistered stays unregistered.
+        # file the user left unregistered stays unregistered. The drafter a
+        # catalog pull names is configured below, so the scan says nothing
+        # about configuring it.
         parents = sorted({os.path.dirname(p) for p in wanted})
         specs = [DiscoverSpec(dir=d, recursive=False) for d in parents]
         stats = {}
         images: list = []
+        named = {v["draft_gguf"] for v in pairs.values() if v.get("draft_gguf")}
         found = discovery.scan_dirs(specs, cfg.model_dirs,
                                     known_ids=set(cfg.models) | set(cfg.image_models),
                                     known_paths=known_paths | _image_paths(cfg),
                                     known_models=known_models, stats=stats,
                                     images=images,
-                                    encoder_ids=_encoder_ids(known_models))
+                                    encoder_ids=_encoder_ids(known_models),
+                                    named_drafters=named)
         newly = [m for m in found if os.path.abspath(m.path) in wanted]
         images = [im for im in images if os.path.abspath(im.path) in wanted]
+        # The companions a catalog pull names replace the scan's on a new
+        # entry.
+        for m in newly:
+            pr = pairs.get(os.path.abspath(m.path), {})
+            if pr.get("mmproj"):
+                m.mmproj = pr["mmproj"]
+            if pr.get("draft_gguf"):
+                if m.stream:
+                    print(f"{os.path.basename(pr['draft_gguf'])} is not set for "
+                          f"faster replies on {m.id}: {_STREAMS_REASON}")
+                else:
+                    m.draft_gguf = pr["draft_gguf"]
+                    m.speculative = True
         # Only a drafter from this download may change a configured entry: a
         # file the user left beside a model stays unregistered.
         pulled = {mid: dp for mid, dp in (stats.get("draft_pairs") or {}).items()
                   if os.path.abspath(dp) in wanted}
-        pairs = _open_pairs(path, "draft_gguf", pulled)
+        asked_mm: dict = {}
+        for ap, pr in pairs.items():
+            mid = id_of.get(ap)
+            if mid is None:
+                continue
+            # A companion the entry names already is in place: quiet.
+            cur = cfg.models[mid]
+            if pr.get("draft_gguf") and not _names_file(
+                    cur.draft_gguf, pr["draft_gguf"], cfg.model_dirs):
+                pulled[mid] = pr["draft_gguf"]
+            if pr.get("mmproj") and not _names_file(
+                    cur.mmproj, pr["mmproj"], cfg.model_dirs):
+                asked_mm[mid] = pr["mmproj"]
+        streams = {mid for mid, mc in cfg.models.items() if mc.stream}
+        drafts = {mid: dp for mid, dp in _open_pairs(path, "draft_gguf", pulled).items()
+                  if mid not in streams}
         for mid, dp in pulled.items():
-            if mid not in pairs:
-                print(f"{os.path.basename(dp)} is not registered as the "
-                      f"drafter of {mid}: its entry in {path} has a "
-                      "draft_gguf key or speculative: false")
+            if mid not in drafts:
+                why = (_STREAMS_REASON if mid in streams else
+                       f"its entry in {path} has a draft_gguf key or "
+                       "speculative: false")
+                print(f"{os.path.basename(dp)} is not set for faster replies "
+                      f"on {mid}: {why}")
+        mmprojs = _open_pairs(path, "mmproj", asked_mm)
+        for mid, mp in asked_mm.items():
+            if mid not in mmprojs:
+                print(f"{os.path.basename(mp)} is not set for image input on "
+                      f"{mid}: its entry in {path} has an mmproj key")
         # The companions beside a configured entry that a pull leaves out:
         # a drafter it did not download, and an mmproj.
         beside = {mid: dp for mid, dp in (stats.get("draft_pairs") or {}).items()
                   if mid not in pulled}
-        hints = _companion_hints(
-            _open_pairs(path, "draft_gguf", beside),
-            _open_pairs(path, "mmproj", stats.get("mmproj_pairs")))
+        scan_mm = {mid: mp for mid, mp in (stats.get("mmproj_pairs") or {}).items()
+                   if mid not in asked_mm}
+        hints = _companion_hints(_open_pairs(path, "draft_gguf", beside),
+                                 _open_pairs(path, "mmproj", scan_mm))
         for (mid, what), cp in hints.items():
-            print(f"{os.path.basename(cp)} pairs with {mid} as its {what}: "
+            gives = "faster replies" if what == "drafter" else "image input"
+            print(f"{os.path.basename(cp)} can give {mid} {gives}: "
                   "gmlx sync-models --add-companions adds it")
-        if not newly and not pairs and not images:
-            return                     # already configured (a re-pull) - quiet
-        _apply_sync(path, [], newly, cfg.model_dirs, draft_pairs=pairs,
-                    images=images, companion_note=None)
-        for mid, dp in pairs.items():
-            print(f"registered {os.path.basename(dp)} as the drafter of "
+        ids = {ap: id_of[ap] for ap in wanted if ap in id_of}
+        ids.update({os.path.abspath(m.path): m.id for m in newly})
+        to_write, alias, moved = _alias_plan(cfg, path, pairs, ids)
+        if not newly and not drafts and not mmprojs and not images \
+                and not to_write:
+            return Registered(ids, alias)   # already configured (a re-pull) - quiet
+        _apply_sync(path, [], newly, cfg.model_dirs, draft_pairs=drafts,
+                    mmproj_pairs=mmprojs, images=images, companion_note=None,
+                    aliases=to_write)
+        for mid, dp in drafts.items():
+            print(f"registered {os.path.basename(dp)} for faster replies on "
+                  f"{mid} in {path}")
+        for mid, mp in mmprojs.items():
+            print(f"registered {os.path.basename(mp)} for image input on "
                   f"{mid} in {path}")
         for m in newly:
-            extras = [w for w, on in (("vlm", m.mmproj),
-                                      ("mtp", m.speculative)) if on]
+            extras = [w for w, on in (("images", m.mmproj),
+                                      ("faster replies", m.speculative)) if on]
             note = f"  ({', '.join(extras)})" if extras else ""
             print(f"registered {m.id} in {path}{note}")
         for im in images:
             print(f"registered {im.id} in {path}  (image)")
         _reload_running(path, skip=False)
+        return Registered(ids, alias, moved)
     except ConfigWriteError as e:
         # sync-models would meet the same refusal, so the message gives its own step.
         print(f"warning: could not register the download(s) in the server "
@@ -1455,6 +1646,7 @@ def register_downloads(paths: list, config_path=None) -> None:
     except Exception as e:             # noqa: BLE001 - never fail a good pull
         print(f"warning: could not register the download(s) in the server "
               f"config: {e}; run `gmlx sync-models`", file=sys.stderr)
+    return done
 
 
 # serve
