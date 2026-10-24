@@ -1527,12 +1527,15 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                     help="Draft with the model's own MTP head even when "
                          "--draft-gguf is set. Same as the per-model config key "
                          "native_mtp.")
-    ap.add_argument("--stochastic-mtp", action="store_true",
+    ap.add_argument("--stochastic-mtp", action=argparse.BooleanOptionalAction,
+                    default=None,
                     help="Accept MTP drafts by p/q rejection sampling on sampled "
-                         "requests (server-wide): same output distribution as "
-                         "non-speculative sampling, not token-identical; higher "
-                         "acceptance at temp > 0. Same as config "
-                         "server.stochastic_mtp; greedy requests unaffected.")
+                         "requests, server-wide (the default): same output "
+                         "distribution as non-speculative sampling, not "
+                         "token-identical; higher acceptance at temp > 0. "
+                         "--no-stochastic-mtp accepts only exact matches. Same "
+                         "as config server.stochastic_mtp; greedy requests "
+                         "unaffected.")
     ap.add_argument("--gpu-keepwarm", action=argparse.BooleanOptionalAction,
                     default=None,
                     help="Hold GPU clocks up while a streamed model is decoding "
@@ -2868,14 +2871,18 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     if getattr(a, "draft_block_size", None):
         # Read lazily at drafter-load time (server_bridge_vlm.load_drafter).
         os.environ["GMLX_DRAFT_BLOCK_SIZE"] = str(a.draft_block_size)
-    if cfg.stochastic_mtp or getattr(a, "stochastic_mtp", False):
-        # Startup-only, like the timeout below; a config reload does not
-        # re-apply it.
-        from gmlx.spec.speculative import set_stoch_accept
+    # Startup-only, like the timeout below; a config reload does not
+    # re-apply it.
+    from gmlx.spec.speculative import set_stoch_accept, stoch_accept_enabled
 
-        set_stoch_accept(True)
-        print("[server] stochastic MTP acceptance: on (sampled requests keep "
-              "the sampling distribution but are not token-identical)")
+    stoch = getattr(a, "stochastic_mtp", None)
+    if stoch is None:
+        stoch = cfg.stochastic_mtp
+    if stoch is not None:
+        set_stoch_accept(stoch)
+    if not stoch_accept_enabled():
+        print("[server] stochastic MTP acceptance: off (sampled requests "
+              "accept only exact matches)")
     # Activation dtype: flag > config > exported env. Server-wide because the
     # reason to leave bfloat16 is a property of the GPU, not of a model. Read
     # at each model's load, so setting it here covers every model this server

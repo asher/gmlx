@@ -207,15 +207,19 @@ does not repeat the prompt.
 
 ## Stochastic acceptance
 
-By default, the model accepts a draft only when it matches the token that
-the model would choose, so the output is identical to a run without
-speculation. At a temperature above zero, this limits speed, because a
-draft cannot match a sampled token more often than the probabilities allow.
+On a request with a temperature above zero, gmlx accepts drafts by
+rejection sampling. The output is a true sample from the model's
+distribution, and more drafts pass than by exact match, so decoding is
+faster. The gain is largest on low-bit quants and on text where the model
+is unsure. Greedy requests always match a run without speculation.
 
-`--stochastic-mtp`, or
-[`server.stochastic_mtp: true`](config.md#serverstochastic_mtp), accepts
-drafts by rejection sampling instead. The output is still a true sample
-from the model's distribution, but no longer token-identical to a run
-without speculation. Greedy requests do not change. `--stochastic-mtp`
-works with DFlash 2 drafters too. The gain is largest on low-bit quants and on text where the model
-is unsure. Turn it on when you sample and want more speed.
+A seeded sampled run is not token-identical to the same run without
+speculation. To accept only drafts that match the token the model would
+sample, turn stochastic acceptance off:
+
+```sh
+gmlx run model.gguf --no-stochastic-mtp --temp 0.7 --seed 7 --prompt "Hello"
+```
+
+In a server config, set
+[`server.stochastic_mtp: false`](config.md#serverstochastic_mtp).

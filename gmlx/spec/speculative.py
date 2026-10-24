@@ -33,7 +33,7 @@ import mlx.core as mx
 import gmlx.lora_rows as lora_rows
 from gmlx.cache.kv_append import release as _release_kv
 from gmlx.cache.media_salt import as_salt
-from gmlx.envflags import env_bool, env_float, env_int
+from gmlx.envflags import env_bool, env_float, env_int, env_value
 
 # Speculative round helpers + the draft/target RNG coupler, owned here (see
 # spec_helpers) instead of mlx-vlm's private speculative API. The drafter model
@@ -227,13 +227,21 @@ _PQ_LOG = env_bool("GMLX_MTP_PQ_LOG", False)
 # B>1 keep exact-match. Requires a sampler whose effective distribution the
 # walk can reconstruct (the serve _FastPositionedSampler, or a make_sampler
 # closure annotated with gmlx_sampling_params); opaque samplers fall
-# back to exact-match with a one-time warning.
-# Off by default: default MTP stays token-identical to non-speculative
-# decoding. Opt in per process with run/chat --stochastic-mtp or the server
-# config `stochastic_mtp: true` (set_stoch_accept); GMLX_MTP_STOCH_ACCEPT
-# presets the default for A/B runs. Acceptance gains are measured in
-# docs/benchmarks.md.
-_STOCH_ACCEPT = env_bool("GMLX_MTP_STOCH_ACCEPT", False)
+# back to exact-match.
+# On by default for sampled rounds; greedy rounds stay token-identical to
+# non-speculative decoding. Opt out per process with run/chat
+# --no-stochastic-mtp or the server config `stochastic_mtp: false`
+# (set_stoch_accept); GMLX_MTP_STOCH_ACCEPT presets it for A/B runs. A
+# fallback to exact-match warns only when stochastic acceptance was asked
+# for (_STOCH_EXPLICIT). Acceptance gains are measured in docs/benchmarks.md.
+def _stoch_env() -> tuple[bool, bool]:
+    """(on, explicit) from GMLX_MTP_STOCH_ACCEPT: on unless it says off,
+    explicit when it says on."""
+    on = env_bool("GMLX_MTP_STOCH_ACCEPT", True)
+    return on, on and env_value("GMLX_MTP_STOCH_ACCEPT") is not None
+
+
+_STOCH_ACCEPT, _STOCH_EXPLICIT = _stoch_env()
 # Block size of a mixed round (plain rows present): 0 picks it from the
 # width (_mixed_block), N >= 2 fixes it.
 _MIXED_BLOCK = env_int("GMLX_MTP_MIXED_BLOCK", 0)
@@ -262,15 +270,22 @@ _GATE_PRIOR = 2.0
 _GATE_EMA = 0.2
 
 
-def set_stoch_accept(enabled: bool) -> None:
+def set_stoch_accept(enabled: bool, *, explicit: bool = True) -> None:
     """Process-wide switch for stochastic MTP acceptance (--stochastic-mtp /
-    server config `stochastic_mtp`). Overrides the env preset."""
-    global _STOCH_ACCEPT
+    --no-stochastic-mtp / server config `stochastic_mtp`). Overrides the
+    env preset. ``explicit`` marks a switch the user asked for."""
+    global _STOCH_ACCEPT, _STOCH_EXPLICIT
     _STOCH_ACCEPT = bool(enabled)
+    _STOCH_EXPLICIT = bool(enabled) and bool(explicit)
 
 
 def stoch_accept_enabled() -> bool:
     return _STOCH_ACCEPT
+
+
+def stoch_accept_explicit() -> bool:
+    """Whether stochastic acceptance is on because the user asked for it."""
+    return _STOCH_EXPLICIT
 
 
 def use_owned_engine(drafter, temp: float) -> bool:
@@ -1130,15 +1145,14 @@ def _owned_decode_rounds(
     drafter.reset(model)
 
     stoch = _STOCH_ACCEPT and not greedy and _stoch_supported_sampler(sampler)
+    say = _log.warning if _STOCH_EXPLICIT else _log.debug
     if stoch and not getattr(drafter, "stochastic_draft", True):
-        _log.warning(
-            "GMLX_MTP_STOCH_ACCEPT: %s drafts independent rows per block; "
+        say("stochastic MTP: %s drafts independent rows per block; "
             "using exact-match", getattr(drafter, "kind_label", "drafter"))
         stoch = False
     elif _STOCH_ACCEPT and not greedy and not stoch:
-        _log.warning(
-            "GMLX_MTP_STOCH_ACCEPT: sampler's effective distribution is "
-            "not reconstructable (opaque sampler); using exact-match")
+        say("stochastic MTP: sampler's effective distribution is not "
+            "reconstructable (opaque sampler); using exact-match")
 
     # Draft and target share a per-round RNG start state. (Gating on a
     # positioned-target sampler would decouple them and lower acceptance.)

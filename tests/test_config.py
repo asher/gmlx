@@ -1603,9 +1603,9 @@ def test_family_defaults_kill_switch():
 
 def test_stochastic_mtp_key():
     doc = _doc()
+    assert build_config(doc).stochastic_mtp is None
+    doc["server"]["stochastic_mtp"] = False
     assert build_config(doc).stochastic_mtp is False
-    doc["server"]["stochastic_mtp"] = True
-    assert build_config(doc).stochastic_mtp is True
 
 
 def test_gpu_keepwarm_key():

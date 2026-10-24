@@ -2311,7 +2311,6 @@ _ASSISTANT_NOOP = (
     ("no_speculative", "--no-speculative"),
     ("draft_gguf", "--draft-gguf"),
     ("native_mtp", "--native-mtp"),
-    ("stochastic_mtp", "--stochastic-mtp"),
     ("kv_bits", "--kv-bits"),
     ("prefill_step_size", "--prefill-step-size"),
     ("stream_experts", "--stream-experts"),
@@ -2342,7 +2341,8 @@ def _assistant_flag_gate(args, parser) -> int | None:
     for attr, flag in (("kv_group_size", "--kv-group-size"),
                        ("quantized_kv_start", "--quantized-kv-start"),
                        ("prefill_feeder", "--prefill-feeder"),
-                       ("decode_feeder", "--decode-feeder")):
+                       ("decode_feeder", "--decode-feeder"),
+                       ("stochastic_mtp", "--stochastic-mtp")):
         if getattr(args, attr, None) != parser.get_default(attr):
             noop.append(flag)
     if noop:
@@ -3245,10 +3245,10 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
     parser = _build_parser(prog)
     args = parser.parse_args(argv)
-    if args.stochastic_mtp:
+    if args.stochastic_mtp is not None:
         from gmlx.spec.speculative import set_stoch_accept
 
-        set_stoch_accept(True)
+        set_stoch_accept(args.stochastic_mtp)
     brain = None                  # --assistant: server-backed turn engine
     model_request = None
     base_url = None

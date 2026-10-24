@@ -48,17 +48,44 @@ def _fake_target(logits):
     return lm, verify
 
 
+@pytest.mark.parametrize("env,want", [
+    (None, (True, False)), ("1", (True, True)), ("0", (False, False))])
+def test_stochastic_acceptance_is_on_unless_turned_off(monkeypatch, env, want):
+    """On by default, but only an asked-for switch warns on a fallback and
+    takes the Nemotron-H fast verify."""
+    if env is None:
+        monkeypatch.delenv("GMLX_MTP_STOCH_ACCEPT", raising=False)
+    else:
+        monkeypatch.setenv("GMLX_MTP_STOCH_ACCEPT", env)
+    assert sp._stoch_env() == want
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_nemotron_greedy_stays_bit_exact_unless_stochastic_is_asked_for(
+        monkeypatch, explicit):
+    from gmlx.spec import mtp_load
+
+    env = {}
+    monkeypatch.setattr(sp, "_STOCH_ACCEPT", True)
+    monkeypatch.setattr(sp, "_STOCH_EXPLICIT", explicit)
+    mtp_load._nemotron_verify_route(env)
+    assert (env.get("KQ_VERIFY_EXT") == "0") is not explicit
+
+
 def test_set_stoch_accept_drives_owned_routing(monkeypatch):
     monkeypatch.setattr(sp, "_STOCH_ACCEPT", False)
+    monkeypatch.setattr(sp, "_STOCH_EXPLICIT", False)
     plain = SimpleNamespace(requires_owned_engine=False)
     owned = SimpleNamespace(requires_owned_engine=True)
-    assert not use_owned_engine(plain, 1.0)   # default off: stock round
+    assert not use_owned_engine(plain, 1.0)   # off: stock round
     assert use_owned_engine(owned, 0.0)       # drafter contract still routes
     set_stoch_accept(True)
-    assert use_owned_engine(plain, 1.0)       # opt-in routes sampled runs
+    assert use_owned_engine(plain, 1.0)       # on routes sampled runs
     assert not use_owned_engine(plain, 0.0)   # greedy stays on the stock round
+    assert sp.stoch_accept_explicit()
     set_stoch_accept(False)
     assert not use_owned_engine(plain, 1.0)
+    assert not sp.stoch_accept_explicit()
 
 
 def test_supported_sampler_detection():

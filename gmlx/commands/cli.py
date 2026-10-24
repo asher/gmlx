@@ -257,12 +257,15 @@ def add_speculative_args(parser: argparse.ArgumentParser) -> None:
     )
     ap.add_argument(
         "--stochastic-mtp",
-        action="store_true",
-        help="Accept MTP drafts by p/q rejection sampling instead of exact "
-        "match on sampled runs: output follows the same distribution as "
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Accept MTP drafts by p/q rejection sampling on sampled runs "
+        "(the default): output follows the same distribution as "
         "non-speculative sampling but is not token-identical to it, and "
-        "acceptance (so decode speed) rises at temp > 0. Greedy decoding "
-        "is unaffected and stays token-identical.",
+        "acceptance (so decode speed) rises at temp > 0. "
+        "--no-stochastic-mtp accepts only exact matches, so a seeded run "
+        "matches one without speculation. Greedy decoding stays "
+        "token-identical either way.",
     )
 
 
@@ -2685,10 +2688,10 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     install_cb_phase_steps()
     if args.draft_gguf:
         args.speculative = True  # same implication as `serve`
-    if args.stochastic_mtp:
+    if args.stochastic_mtp is not None:
         from gmlx.spec.speculative import set_stoch_accept
 
-        set_stoch_accept(True)
+        set_stoch_accept(args.stochastic_mtp)
     if args.adapter and args.mmproj:
         print(
             "error: --adapter (live GGUF LoRA) on a --mmproj base is not "

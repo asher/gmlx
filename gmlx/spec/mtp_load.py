@@ -220,6 +220,21 @@ def _stamp_draft_source(drafter, path: str | None) -> None:
         pass
 
 
+def _nemotron_verify_route(env=os.environ) -> None:
+    """kquant's mv_ext route (dense matmuls at M 2-12) is not bit-exact vs
+    the M=1 qmv path and fails the greedy A/B gate. KQ_VERIFY_EXT=0 falls
+    back to verify_qmv / per-row qmv, bit-exact for every codec at M <= 3,
+    at ~-20% decode. Stochastic acceptance asked for explicitly is already
+    distribution-level, so it keeps the fast route; that also leaves greedy
+    requests on such a server near-lossless rather than bitwise. The
+    default keeps greedy bitwise. kq reads it once per process, so this
+    must precede the first M>1 dense dispatch."""
+    from .speculative import stoch_accept_explicit
+
+    if not stoch_accept_explicit():
+        env.setdefault("KQ_VERIFY_EXT", "0")
+
+
 def _load_mtp_drafter(
     arrays: dict,
     kquant_meta: dict,
@@ -292,17 +307,7 @@ def _load_mtp_drafter(
             remap_nemotron_mtp_arrays,
         )
 
-        # kquant's mv_ext route (dense matmuls at M 2-12) is not bit-exact
-        # vs the M=1 qmv path and fails the greedy A/B gate. KQ_VERIFY_EXT=0
-        # falls back to verify_qmv / per-row qmv, bit-exact for every codec
-        # at M <= 3, at ~-20% decode. Stochastic acceptance is already
-        # distribution-level (never token-identical), so it keeps the fast
-        # route; that also leaves greedy requests on a stochastic_mtp server
-        # near-lossless rather than bitwise. Read once per process; must
-        # precede the first M>1 dense dispatch.
-        from .speculative import stoch_accept_enabled
-        if not stoch_accept_enabled():
-            os.environ.setdefault("KQ_VERIFY_EXT", "0")
+        _nemotron_verify_route()
 
         drafter = NemotronHMTPDrafter(
             NemotronHMTPConfig(

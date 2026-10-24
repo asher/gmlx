@@ -657,7 +657,7 @@ its GPU time. `0` runs one chunk per generation step.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | <a id="serverfamily_defaults"></a>`family_defaults` | `true` | Start each request from its [family defaults](family-defaults.md) and offer the intents. `false` turns off both. |
-| <a id="serverstochastic_mtp"></a>`stochastic_mtp` | `false` | Accept more speculative tokens by rejection sampling. The output is no longer token-identical. A reload does not apply it. |
+| <a id="serverstochastic_mtp"></a>`stochastic_mtp` | `true` | Accept more speculative tokens by rejection sampling. Sampled output is not token-identical. A reload does not apply it. |
 | <a id="servergpu_keepwarm"></a>`gpu_keepwarm` | on | Keep the GPU clock up between tokens of a streamed model with a decode feeder. `false` turns it off. |
 | <a id="servermenubar"></a>`menubar` | `true` | Let a server started in the background open the [menu bar app](menubar.md) |
 | <a id="servercache"></a>`cache` | off | [Prompt cache](#prompt-cache) settings for every model |

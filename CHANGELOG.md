@@ -35,6 +35,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Sampled requests accept speculative drafts by rejection sampling by
+  default and decode faster. `--no-stochastic-mtp` keeps seeded runs
+  token-identical to runs without speculation.
 - Requires mlx-kquant 0.5.6. With it, decode writes each new KV cache row in
   place instead of copying the whole cache every token, so decode at long
   context is faster and peaks lower.

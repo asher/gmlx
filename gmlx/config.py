@@ -1053,9 +1053,9 @@ class ServerCfg:
     # Stochastic MTP acceptance for sampled requests, process-wide: drafts are
     # accepted by p/q rejection sampling, so output follows the same
     # distribution as non-speculative sampling but is not token-identical to
-    # it; acceptance (and decode speed) rises at temp > 0. Off = default MTP,
-    # token-identical. Greedy requests are unaffected either way.
-    stochastic_mtp: bool = False
+    # it; acceptance (and decode speed) rises at temp > 0. Off = exact-match
+    # MTP, token-identical. Greedy requests are unaffected either way.
+    stochastic_mtp: bool | None = None   # None => on
     # Hold GPU clocks up while a streamed model is decoding (loader gate;
     # only acts on models with a decode feeder). The heartbeat parks when
     # no request is decoding, so an idle server pays nothing.
@@ -3535,7 +3535,8 @@ def build_config(doc: dict) -> ServerCfg:
         cache_limit_gb=_coerce_num(
             "cache_limit_gb", srv.get("cache_limit_gb"), float),
         family_defaults=bool(srv.get("family_defaults", True)),
-        stochastic_mtp=bool(srv.get("stochastic_mtp", False)),
+        stochastic_mtp=(None if srv.get("stochastic_mtp") is None
+                        else bool(srv.get("stochastic_mtp"))),
         gpu_keepwarm=(None if srv.get("gpu_keepwarm") is None
                       else bool(srv.get("gpu_keepwarm"))),
         defaults=ServerDefaults(
