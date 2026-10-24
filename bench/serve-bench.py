@@ -45,6 +45,13 @@ length needs the bundled ignore_eos patch (patches/ds4-ignore-eos.patch); config
 MTP arms (mtp.ds4 {gguf, margin?}) speculate only under greedy sampling, so
 run them separately with temperature 0; one Metal worker serializes requests
 (c>1 = queueing, not batching).
+
+--vs omlx swaps the comparison arm to oMLX (`omlx serve`), which loads MLX
+checkpoints: each model names one as "omlx_model" ("omlx_args" append serve
+flags), and the gmlx arm still runs the GGUF. omlx-serve.py next to this
+script forces the length (omlx 0.7.2 or later); --omlx-python is the python of
+the venv that has omlx. The paged SSD cache is off and settings stay under
+--outdir. Baseline arm only.
 """
 from __future__ import annotations
 
@@ -69,7 +76,8 @@ import requests
 GMLX_PORT = 8080
 LLAMA_PORT = 8081
 DS4_PORT = 8082
-RUNTIMES = ("gmlx", "llama")   # default pair; --vs ds4 swaps the comparison arm
+OMLX_PORT = 8083
+RUNTIMES = ("gmlx", "llama")   # default pair; --vs ds4/omlx swaps the comparison arm
 
 # Embedded fallback corpus (generic prose). Point --corpus at a real text file
 # (e.g. a fineweb-edu sample) for representative MTP acceptance; this fallback
@@ -109,6 +117,8 @@ class ModelSpec:
     mtp_llama: dict = field(default_factory=dict)      # {} | {draft_gguf} | {spec_type, draft_min_p}
     mtp_ds4: dict = field(default_factory=dict)        # {} | {gguf:path, margin?}
     kv_bits: int = None                                # quantized KV, symmetric: gmlx KV_BITS + llama -ctk/-ctv
+    omlx_model: str = None                             # MLX checkpoint folder for the omlx arm
+    omlx_args: list = field(default_factory=list)      # appended to `omlx serve`
 
     def arms(self, draft_depths) -> list:
         """List of (label, draft_n). Baseline is (label, None); each MTP draft
@@ -216,7 +226,9 @@ def load_specs(args) -> tuple:
                 mtp_gmlx=(m.get("mtp", {}) or {}).get("gmlx", {}) or {},
                 mtp_llama=(m.get("mtp", {}) or {}).get("llama", {}) or {},
                 mtp_ds4=(m.get("mtp", {}) or {}).get("ds4", {}) or {},
-                kv_bits=m.get("kv_bits")))
+                kv_bits=m.get("kv_bits"),
+                omlx_model=_expand(m.get("omlx_model")),
+                omlx_args=[str(a) for a in m.get("omlx_args") or []]))
     else:
         for g in args.gguf:
             g = _expand(g)
@@ -713,6 +725,18 @@ def llama_cmd(args, spec, draft_n, ctx):
     return cmd
 
 
+def _omlx_python():
+    """The python that runs `omlx` on PATH, read from its shebang."""
+    omlx = shutil.which("omlx")
+    try:
+        with open(os.path.realpath(omlx), "rb") as fh:
+            line = fh.readline().decode().strip()
+    except (TypeError, OSError, UnicodeDecodeError):
+        return "python3"
+    exe = line[2:].split()[0] if line.startswith("#!") and line[2:].strip() else ""
+    return exe if "python" in os.path.basename(exe) else "python3"
+
+
 def ds4_cmd(args, spec, draft_n, ctx):
     """ds4-server (dwarfstar) comparison arm. Cache fairness: the disk KV cache
     only exists behind --kv-disk-dir (not passed) and the in-RAM live-KV prefix
@@ -739,9 +763,43 @@ def ds4_cmd(args, spec, draft_n, ctx):
     return cmd
 
 
+def omlx_cmd(args, spec, draft_n, ctx):
+    """oMLX comparison arm: `omlx serve` through omlx-serve.py on the model's
+    omlx_model checkpoint. omlx serves every folder under --model-dir by its
+    folder name, so the arm gets a folder holding one link named after the
+    config model. Cache fairness: --no-cache turns off the paged SSD prefix
+    cache, the hot cache is off by default, and the unique-nonce prompts share
+    no prefix. --base-path keeps omlx settings and logs under --outdir, one
+    folder per model. ctx is unused (omlx sizes KV per request). No MTP arm."""
+    if not spec.omlx_model or draft_n is not None:
+        return None
+    models = os.path.join(os.path.abspath(args.outdir), "omlx-models")
+    link = os.path.join(models, spec.name)
+    if not args.dry_run:
+        os.makedirs(models, exist_ok=True)
+        for other in os.listdir(models):        # one model per server
+            path = os.path.join(models, other)
+            if other != spec.name or os.path.realpath(path) != \
+                    os.path.realpath(spec.omlx_model):
+                os.remove(path)
+        if not os.path.lexists(link):
+            os.symlink(spec.omlx_model, link)
+    # omlx saves CLI overrides to <base-path>/settings.json and loads them on
+    # the next launch: drop them so only this model's omlx_args apply.
+    base = os.path.join(os.path.abspath(args.outdir), "omlx-base", spec.name)
+    if not args.dry_run and os.path.exists(os.path.join(base, "settings.json")):
+        os.remove(os.path.join(base, "settings.json"))
+    serve = os.path.join(os.path.dirname(os.path.abspath(__file__)), "omlx-serve.py")
+    cmd = [args.omlx_python, serve, "serve", "--model-dir", models,
+           "--host", "127.0.0.1", "--port", str(OMLX_PORT), "--headless",
+           "--no-cache", "--no-hf-cache", "--base-path", base]
+    return cmd + spec.omlx_args
+
+
 # Runtime -> server command builder. A builder returns None to skip a cell
 # (e.g. no MTP config for that runtime); the skip is recorded in the report.
-BUILDERS = {"gmlx": gmlx_cmd, "llama": llama_cmd, "ds4": ds4_cmd}
+BUILDERS = {"gmlx": gmlx_cmd, "llama": llama_cmd, "ds4": ds4_cmd,
+            "omlx": omlx_cmd}
 
 
 def server_env(runtime):
@@ -753,6 +811,10 @@ def server_env(runtime):
                                            # stores pin KV+hidden across requests)
         env["PYTHONUNBUFFERED"] = "1"      # flush [req] log lines live (probe parses them)
         env["MLX_VLM_ENABLE_THINKING"] = "1"
+    if runtime == "omlx":
+        env["HF_HUB_OFFLINE"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+        env.pop("PYTHONPATH", None)        # a gmlx tree must not shadow omlx's deps
     return env
 
 
@@ -827,7 +889,8 @@ def _parse_ds4_spec_log(path):
 
 
 def _port(runtime):
-    return {"gmlx": GMLX_PORT, "llama": LLAMA_PORT, "ds4": DS4_PORT}[runtime]
+    return {"gmlx": GMLX_PORT, "llama": LLAMA_PORT, "ds4": DS4_PORT,
+            "omlx": OMLX_PORT}[runtime]
 
 
 def base_url(runtime):
@@ -836,10 +899,10 @@ def base_url(runtime):
 
 def wait_ready(runtime, proc, timeout):
     """Poll /v1/models until 200, then require one 1-token completion to
-    succeed. gmlx answers /v1/models while its model is still loading, so
-    the models poll alone declares ready before the weights are in. Returns
-    the first model id (the request `model` field). Fails fast if the
-    process dies during load."""
+    succeed. gmlx answers /v1/models while its model is still loading and omlx
+    loads on the first request, so the models poll alone declares ready before
+    the weights are in. Returns the first model id (the request `model`
+    field). Fails fast if the process dies during load."""
     url = base_url(runtime).rstrip("/") + "/models"
     deadline = time.time() + timeout
     model_id = None
@@ -891,7 +954,7 @@ def _assert_model_match(runtime, model_id, spec):
     to someone else's server (e.g. a leftover from a prior run) -> abort loudly
     rather than silently benchmark the wrong model."""
     mid = str(model_id)
-    base = os.path.basename(spec.gguf)
+    base = os.path.basename(spec.omlx_model if runtime == "omlx" else spec.gguf)
     stem = os.path.splitext(base)[0]
     # Normalize separators before comparing: a positionally-served GGUF reports
     # an id derived from general.name with separators folded to '-' (e.g.
@@ -1314,6 +1377,11 @@ def render_md(meta, specs, cfg, results):
                  "queueing, not batching); MTP arms run only under greedy sampling "
                  "(ds4 spec gate) with margin-based fast-accept (--mtp-margin, "
                  "default 3.0; DS4_MTP_STRICT=1 for exact verify).")
+    if "omlx" in (rt_a, rt_b):
+        L.append(f"- omlx: `{meta.get('omlx_python', '?')}` {meta.get('omlx_version', '?')} "
+                 f"@ {meta.get('omlx_commit', '?')} (+ omlx-serve.py forced length) | "
+                 "paged SSD cache off (--no-cache), hot cache off | MLX checkpoint "
+                 "on the omlx arm, the GGUF on the gmlx arm")
     L += [
         f"- corpus: `{meta.get('corpus', '?')}` (chat:* = real multi-turn instruct "
         "prompts, chat-templated => representative instruct MTP acceptance; corpus:* = "
@@ -1460,6 +1528,8 @@ def write_outputs(outdir, stamp, meta, cfg, specs, results):
     tmp = json_path + ".tmp"
     dump = {"meta": meta, "config": cfg,
             "models": [{"name": s.name, "gguf": s.gguf, "tokenizer": s.tokenizer,
+                        **({"omlx_model": s.omlx_model, "omlx_args": s.omlx_args}
+                           if s.omlx_model else {}),
                         "arms": [a for a, _ in arms_for(s, cfg)]} for s in specs],
             "results": {"|".join(map(str, k)): v for k, v in results.items()}}
     with open(md_path, "w") as fh:
@@ -1852,7 +1922,7 @@ def run_probe(args, specs, cfg, runtimes, toks, lock, rng):
 
 # ---------------------------------------------------------------------------
 def main():
-    global GMLX_PORT, LLAMA_PORT, DS4_PORT   # rebound from --*-port flags
+    global GMLX_PORT, LLAMA_PORT, DS4_PORT, OMLX_PORT   # rebound from --*-port flags
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("gguf", nargs="*", help="GGUF path(s) for a quick baseline-only "
@@ -1893,9 +1963,10 @@ def main():
     ap.add_argument("--startup-timeout", type=float, default=240.0,
                     help="seconds to wait for a server to load and answer its "
                          "first completion")
-    ap.add_argument("--vs", choices=("llama", "ds4"), default="llama",
+    ap.add_argument("--vs", choices=("llama", "ds4", "omlx"), default="llama",
                     help="comparison arm vs gmlx (default llama; ds4 = "
-                         "dwarfstar ds4-server)")
+                         "dwarfstar ds4-server; omlx = `omlx serve` on each "
+                         "model's omlx_model MLX checkpoint)")
     ap.add_argument("--gmlx-bin", default=shutil.which("gmlx") or "gmlx",
                     help="gmlx executable (default: from PATH)")
     ap.add_argument("--llama-server-bin",
@@ -1903,6 +1974,10 @@ def main():
                     help="llama-server executable (default: from PATH)")
     ap.add_argument("--ds4-bin", default=shutil.which("ds4-server") or "ds4-server",
                     help="ds4-server executable (default: from PATH)")
+    ap.add_argument("--omlx-python", default=_omlx_python(),
+                    help="python of the venv with omlx installed; runs "
+                         "omlx-serve.py (default: the python that runs `omlx` "
+                         "on PATH)")
     ap.add_argument("--gmlx-port", type=int, default=GMLX_PORT,
                     help="port for the gmlx server (override to dodge a "
                          "stale server already on the default)")
@@ -1910,7 +1985,9 @@ def main():
                     help="port for llama-server (override to dodge a stale server)")
     ap.add_argument("--ds4-port", type=int, default=DS4_PORT,
                     help="port for ds4-server (override to dodge a stale server)")
-    ap.add_argument("--only", help="comma subset of runtimes: gmlx,llama,ds4")
+    ap.add_argument("--omlx-port", type=int, default=OMLX_PORT,
+                    help="port for omlx serve (override to dodge a stale server)")
+    ap.add_argument("--only", help="comma subset of runtimes: gmlx,llama,ds4,omlx")
     ap.add_argument("--mtp-only", action="store_true",
                     help="skip the baseline arm; measure only the MTP arms")
     ap.add_argument("--outdir", default="results")
@@ -1930,6 +2007,7 @@ def main():
     GMLX_PORT = args.gmlx_port   # honor --*-port overrides everywhere
     LLAMA_PORT = args.llama_port
     DS4_PORT = args.ds4_port
+    OMLX_PORT = args.omlx_port
 
     try:
         sys.stdout.reconfigure(line_buffering=True)   # flush progress even when piped to a file
@@ -1954,9 +2032,9 @@ def main():
     for r in runtimes:
         if r not in BUILDERS:
             sys.exit(f"unknown runtime {r!r} in --only (choices: {sorted(BUILDERS)})")
-    if args.probe and "ds4" in runtimes:
+    if args.probe and {"ds4", "omlx"} & set(runtimes):
         sys.exit("--probe is llama-vs-gmlx only (it parses llama-server "
-                 "stdout rates); drop --vs ds4 / --only ds4")
+                 "stdout rates); drop --vs / --only ds4 or omlx")
     if "ds4" in runtimes:
         if cfg.get("thinking") is not False and \
                 cfg["sampling"].get("temperature") not in (None, 1.0):
@@ -1969,6 +2047,14 @@ def main():
             print("[warn] kv_bits has no ds4 mapping (fixed MLA latent cache); "
                   "the gmlx arm would quantize KV while ds4 does not -- "
                   "unset kv_bits for a fair A/B")
+    if "omlx" in runtimes:
+        for s in specs:
+            if not s.omlx_model:
+                sys.exit(f"model {s.name}: --vs omlx needs omlx_model (an MLX "
+                         f"checkpoint folder) in the config")
+        if any(s.kv_bits for s in specs):
+            print("[warn] kv_bits has no omlx mapping: the gmlx arm would "
+                  "quantize KV while omlx does not; unset kv_bits for a fair A/B")
     args._max_conc = max(cfg["concurrency"])
 
     for spec in specs:
@@ -2023,7 +2109,8 @@ def main():
         for spec in specs:
             arms = arms_for(spec, cfg)
             print(f"\n# {spec.name}  ({spec.gguf})  tok={spec.tokenizer}  "
-                  f"arms={[a for a, _ in arms]}")
+                  f"arms={[a for a, _ in arms]}"
+                  + (f"  omlx={spec.omlx_model}" if spec.omlx_model else ""))
             for rt in runtimes:
                 for arm_label, draft_n in arms:
                     cmd = BUILDERS[rt](args, spec, draft_n,
@@ -2047,6 +2134,34 @@ def main():
         sys.exit(f"ds4-server not found ({args.ds4_bin})\n"
                  f"  build ds4-server with patches/ds4-ignore-eos.patch "
                  f"applied, then pass --ds4-bin")
+    if "omlx" in runtimes and not shutil.which(args.omlx_python):
+        sys.exit(f"omlx python not found ({args.omlx_python})\n"
+                 f"  install omlx into its own venv, then pass --omlx-python")
+    omlx_version = omlx_commit = None
+    forced = False
+    if "omlx" in runtimes:
+        try:
+            out = subprocess.run(
+                [args.omlx_python, "-c", "import dataclasses, omlx, os; "
+                 "from omlx.request import SamplingParams as S; "
+                 "print(omlx.__version__); "
+                 "print(os.path.dirname(os.path.dirname(omlx.__file__))); "
+                 "print('ignore_eos' in {f.name for f in dataclasses.fields(S)})"],
+                capture_output=True, text=True, timeout=60).stdout.split("\n")
+            omlx_version = out[0].strip() or None
+            forced = out[2].strip() == "True"
+            omlx_commit = subprocess.run(
+                ["git", "-C", out[1].strip(), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=5).stdout.strip() or None
+        except Exception:  # noqa: S110 - unknown omlx build -> None
+            pass
+        if not omlx_version:
+            sys.exit(f"omlx does not import with {args.omlx_python}; pass the "
+                     f"python of the venv that has omlx as --omlx-python")
+        if not forced:
+            sys.exit(f"omlx {omlx_version} has no forced-length mode "
+                     f"(SamplingParams.ignore_eos); install omlx 0.7.2 or later")
+        print(f"[provenance] omlx {omlx_version} @ {omlx_commit} ({args.omlx_python})")
 
     # corpus: chat dataset (instruct MTP) > raw text file > embedded fallback
     if args.chat_dataset:
@@ -2099,6 +2214,8 @@ def main():
                 "requests": args.requests, "llama_server_bin": args.llama_server_bin,
                 "ds4_bin": args.ds4_bin if "ds4" in runtimes else None,
                 "ds4_commit": ds4_commit, "thinking": cfg.get("thinking"),
+                "omlx_python": args.omlx_python if "omlx" in runtimes else None,
+                "omlx_version": omlx_version, "omlx_commit": omlx_commit,
                 "runtime_pair": pair,
                 "runtimes": runtimes, "thermals": thermals, "corpus": corpus_label,
                 "cool_gate_timeouts": list(_COOL_TIMEOUTS),
