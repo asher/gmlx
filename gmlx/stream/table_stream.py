@@ -288,6 +288,31 @@ def resident_wire_guarded(path: str | None) -> bool:
     return bool(path) and _key(path) in _GUARDED
 
 
+# Real paths of the GGUFs whose next load streams its experts for want of
+# memory, with the leg of the check that found them short.
+_EXPERTS_FOR_MEMORY: dict[str, str] = {}
+
+
+def stream_experts_for_memory(path: str, reason: str = "") -> None:
+    """Latch the next load of ``path`` with no stream placement to stream
+    its experts: the serve check before the load found them short of the
+    memory free now or past the budget (``reason``: ``WireCheck.reason``).
+    Its install streams them without trying the wire
+    (``expert_streaming.install_unflagged_tables``), as a run streams them
+    with the check's line. An empty ``reason`` clears it; the install
+    clears it too."""
+    if reason:
+        _EXPERTS_FOR_MEMORY[_key(path)] = reason
+    else:
+        _EXPERTS_FOR_MEMORY.pop(_key(path), None)
+
+
+def experts_stream_for_memory(path: str | None) -> str:
+    """The leg ``stream_experts_for_memory`` latched for ``path``, or
+    empty."""
+    return _EXPERTS_FOR_MEMORY.get(_key(path), "") if path else ""
+
+
 def unflagged_tables_stream(path: str | None, total_bytes: int, tbytes: int,
                             budget: int | None, env=None) -> bool:
     """The table-only step of a load of ``path`` with no stream flag: its

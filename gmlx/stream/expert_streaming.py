@@ -169,19 +169,24 @@ def install_unflagged_tables(model, gguf_path: str | None, *,
     stream line. Any other MoE the check before the load kept in memory
     (``table_stream.guard_resident_wire``) wires in chunks here
     (``_wire_plain_resident``), and its experts stream if the wire stops.
-    Call it after the load, before any GPU work on the model and before
+    A load the serve check found short
+    (``table_stream.stream_experts_for_memory``) streams its experts
+    without the wire. Call it after the load, before any GPU work on the model and before
     a sticky wire. True when it installed. False, with nothing changed,
     on any other load or on a model installed already."""
     if not gguf_path or hasattr(model, "_kq_streaming"):
         return False
     from gmlx.serve.capacity import gathered_table_bytes
-    from gmlx.stream.table_stream import (guard_resident_wire,
-                                          resident_wire_guarded)
+    from gmlx.stream.table_stream import (experts_stream_for_memory,
+                                          guard_resident_wire,
+                                          resident_wire_guarded,
+                                          stream_experts_for_memory)
 
     guarded = resident_wire_guarded(gguf_path)
     guard_resident_wire(gguf_path, False)
-    fallback = ""
-    if not gathered_table_bytes(gguf_path):
+    fallback = experts_stream_for_memory(gguf_path)
+    stream_experts_for_memory(gguf_path)
+    if not fallback and not gathered_table_bytes(gguf_path):
         if not guarded or _wire_plain_resident(model, gguf_path,
                                                prefill_step=prefill_step):
             return False

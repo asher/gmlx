@@ -910,6 +910,21 @@ def test_a_plain_moe_whose_wire_stops_streams_its_experts(monkeypatch,
         "and after ")
 
 
+def test_a_load_the_serve_check_found_short_streams_without_the_wire(
+        monkeypatch):
+    # The check before the load latched the leg: the install streams the
+    # experts on it and wires nothing, and the latch is spent.
+    installs = _plain(monkeypatch, latched=False)
+    monkeypatch.setattr(ts, "_EXPERTS_FOR_MEMORY", {})
+    ts.stream_experts_for_memory("m.gguf", "unwired")
+    kq = _Residency(monkeypatch)
+    assert es.install_unflagged_tables(_leaves(60, 1 * GiB), "m.gguf") is True
+    assert kq.commits == []
+    assert [(i["force_stream"], i["fallback"]) for i in installs] == [
+        (True, "unwired")]
+    assert ts.experts_stream_for_memory("m.gguf") == ""
+
+
 def test_a_load_the_check_did_not_keep_in_memory_is_left_alone(monkeypatch):
     # A dense model, or a load no check judged: its install wires nothing.
     installs = _plain(monkeypatch, latched=False)

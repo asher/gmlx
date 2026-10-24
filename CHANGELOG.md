@@ -71,6 +71,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   budget or they do not fit the memory free at load, with a line that says why.
 - A MoE keeps its experts in memory beside other apps, which macOS compresses
   to make room. Memory another model holds wired still makes them stream.
+- `serve` judges a MoE's experts with their KV room before the load, as `run`
+  does, so a load no longer wires part of the model and then streams it.
 - While `serve` runs beside other apps, their memory no longer evicts the prefix
   cache, stops its stores or shrinks a streamed model's expert arena.
 - The serve governor also reclaims when threads wait on macOS for free pages,
