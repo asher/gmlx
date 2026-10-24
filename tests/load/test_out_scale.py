@@ -164,6 +164,7 @@ def _scaled_matches_stock(shell, path, call, monkeypatch):
     weights = {f"{path}.out_scale": mx.array([0.5])}
     assert install_out_scales(shell, weights) == 1
     shell.load_weights(list(weights.items()), strict=False)
+    assert dict(shell.named_modules())[path]["out_scale"].item() == 0.5
     modules.install_fused_moe_glu(shell)
     mx.eval(shell.parameters())
     y = call()
@@ -187,6 +188,7 @@ def test_fused_moe_block_applies_a_routed_stack_scale(path, monkeypatch):
     from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
 
     d, inter, e = 256, 256, 4
+    mx.random.seed(0)
     rng = np.random.default_rng(0)
     blk = Qwen3NextSparseMoeBlock(SimpleNamespace(
         hidden_size=d, moe_intermediate_size=inter,
@@ -211,7 +213,8 @@ def test_fused_moe_block_applies_a_routed_stack_scale(path, monkeypatch):
 
 @needs_gpu
 @pytest.mark.parametrize("path", ["experts.switch_glu.down_proj",
-                                  "experts.switch_glu.gate_proj"])
+                                  "experts.switch_glu.gate_proj",
+                                  "experts.switch_glu.up_proj"])
 def test_fused_gemma_experts_apply_a_stack_scale(path, monkeypatch):
     from types import SimpleNamespace
 
