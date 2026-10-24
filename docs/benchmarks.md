@@ -19,6 +19,7 @@ in [a JSON file](benchmarks.json), and the
 - [Model provenance](#model-provenance)
 - [Per-model detail](#per-model-detail)
 - [DeepSeek-V4 against ds4-server](#deepseek-v4-against-ds4-server)
+- [Flint against oMLX](#flint-against-omlx)
 - [Image generation](#image-generation)
 - [Serving measurements](#serving-measurements)
 - [KV cache fidelity](#kv-cache-fidelity)
@@ -45,7 +46,8 @@ decoding on the same server, for each model, against the context depth.
 
 Every number in the per-model tables is server throughput for one
 request at a time. Both engines ran the same GGUF weights, sampler
-settings and chat prompts on the setup in this table.
+settings and chat prompts on the setup in this table. oMLX loads MLX
+checkpoints, so it ran an MLX checkpoint of the same weights.
 
 | Item | Setting |
 |---|---|
@@ -55,11 +57,12 @@ settings and chat prompts on the setup in this table.
 | llama.cpp | `b9967` |
 | Build overrides | Models measured again on newer releases list their own builds under Model provenance. |
 | DeepSeek-V4 reference | The dwarfstar ds4-server by antirez with the ignore-eos patch, at `b030961` for DeepSeek-V4-Flash IQ2_XXS and `8db1d1d` for DeepSeek-V4.1-Flash Q2. |
-| Dates | 2026-07-05 to 2026-10-23. |
+| oMLX reference | oMLX `0.7.2` at `3df94603` with its custom kernels built, its prefix caches off and forced-length decode. |
+| Dates | 2026-07-05 to 2026-10-24. |
 | Prompt corpus | `HuggingFaceH4/ultrachat_200k:train_sft`, with the chat template applied. |
 | Sampling | Temperature 0.6, top-p 0.95, top-k 20 and seed 1234, with the same random sequence on both engines. |
 | Speculative draft | Three draft tokens a round, two on Qwen3.8-Flash-Next, from the native MTP head or gemma-4's companion drafter. |
-| Aggregation | Four requests a cell in two rounds that alternate the engines, unless a model's section says otherwise. Median, then lowest and highest sample in parentheses. |
+| Aggregation | Four requests a cell in two rounds that alternate the engines. Median, then lowest and highest sample in parentheses. |
 | Thermal protocol | A cooldown to 50 C or below between engines, 20 seconds of baseline cooldown and one warmup request. |
 | Decode metric | Median decode tokens per second over samples of at least 150 output tokens. |
 | Prefill metric | Median prefill tokens per second over all successful samples. |
@@ -96,7 +99,8 @@ one cell at a time.
 | DeepSeek-V4-Flash UD-IQ3_XXS | `DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf` | [HF](https://huggingface.co/unsloth/DeepSeek-V4-Flash-GGUF) | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-13 |
 | DeepSeek-V4-Flash IQ2_XXS | `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4-gguf) | - | gmlx 0.2.2 / kq 0.3.11 | 2026-08-09 |
 | DeepSeek-V4.1-Flash Q2 | `DeepSeek-V4.1-Flash-Q2.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4.1-flash-gguf) | - | gmlx 0.4.13+ds41 / kq 0.4.11 | 2026-09-18 |
-| Flint INT4 Q4_1 | `flint-int4-q4_1.gguf` | [HF](https://huggingface.co/RecursiveSI/flint-int4-gguf) | - | gmlx 0.5.1+flint-perf / kq 0.5.4+kv-append | 2026-10-23 |
+| Flint INT4 Q4_1 | `flint-int4-q4_1.gguf` | [HF](https://huggingface.co/RecursiveSI/flint-int4-gguf) | - | gmlx 0.5.1+flint-perf / kq 0.5.6 | 2026-10-24 |
+| Flint INT4 | `flint-int4-q4_1.gguf` | [HF](https://huggingface.co/RecursiveSI/flint-int4-gguf) | - | gmlx 0.5.1+flint-perf / kq 0.5.6 / oMLX 0.7.2 | 2026-10-24 |
 | Qwen3.8-Flash-Next UD-Q3_K_XL | `Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | Native | gmlx 0.4.5+#98 / kq 0.4.3 | 2026-08-29 |
 
 ## Per-model detail
@@ -310,15 +314,12 @@ one cell at a time.
 
 | KV depth | gmlx decode | llama.cpp decode | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill | gmlx/llama.cpp prefill |
 |---|--:|--:|--:|--:|--:|--:|
-| 512 | 160 (156.6-161) | 115.8 (113.2-116.7) | 1.38x | 3698.7 (3238.4-4042.5) | 1811 (1618.6-2371.7) | 2.04x |
-| 4.3k | 157.4 (157.2-157.7) | 117 (115.9-117.2) | 1.35x | 4045.2 (3842.7-4093.4) | 2203.3 (2073.4-2337.2) | 1.84x |
-| 17k | 146.9 (146.4-147.5) | 104.1 (103.9-104.5) | 1.41x | 3787.8 (3746-3823) | 2021.2 (2004.1-2029.4) | 1.87x |
-| 67k | 107.3 (105.8-107.9) | 68.7 (67.3-70.6) | 1.56x | 2506.2 (2417.9-2543.4) | 1217.7 (1187.9-1219.1) | 2.06x |
-| 110k | 87.5 (86.9-88.2) | 46.3 (45.8-46.8) | 1.89x | 1877.6 (1838.3-1916.8) | 835.4 (812.9-858) | 2.25x |
-| 200k | 61.8 (61.6-61.9) | 32 (31.4-32.5) | 1.93x | 1167.7 (1165.5-1169.9) | 544.1 (520.7-567.5) | 2.15x |
-
-Flint was measured in one round, with three requests a cell up to 67K
-and two at 110K and 200K.
+| 512 | 157.2 (150-163.4) | 120.2 (118.3-122.9) | 1.31x | 3227.1 (2711.2-3695.8) | 1743 (1517.9-2440) | 1.85x |
+| 4.3k | 153.4 (151.8-156.3) | 116 (115.9-117) | 1.32x | 5177.2 (4876-5539.7) | 2343.7 (2131.6-2387.6) | 2.21x |
+| 17k | 145.2 (142.2-148.3) | 101.5 (98.7-103) | 1.43x | 4708.7 (4410.1-4984) | 2001.1 (1986.6-2041.7) | 2.35x |
+| 67k | 107.7 (103.4-109.5) | 63.8 (62.9-64.5) | 1.69x | 2755.7 (2577.5-3030.6) | 1140.2 (1131.5-1152.5) | 2.42x |
+| 110k | 86.4 (85.5-87.6) | 48.7 (48.2-49.2) | 1.77x | 1963.1 (1902.7-2031.8) | 849.3 (838.9-852.4) | 2.31x |
+| 200k | 60.9 (60.9-61.2) | 31.8 (31.5-31.9) | 1.92x | 1242.8 (1238.2-1247.8) | 537.3 (535.8-538.3) | 2.31x |
 
 ### Qwen3.8-Flash-Next UD-Q3_K_XL
 
@@ -379,6 +380,30 @@ each model's ds4-server build.
 | 110k | 19.6 (18.9-20.5) | 14.8 (13.4-15.1) | 1.32x | 798.5 (759.8-835.1) | 626.8 (585.8-632) | 1.27x |
 | 200k | 18.7 (18.1-18.9) | 13.1 (12.9-13.4) | 1.43x | 807.9 (782.1-831.4) | 556.5 (536.1-564.9) | 1.45x |
 | 384k | 17.4 (12.9-18.2) | 12.2 (10.6-12.7) | 1.43x | 796.9 (790.7-807.7) | 612.5 (592.9-633.5) | 1.30x |
+
+## Flint against oMLX
+
+oMLX ran [RecursiveSI/flint-int4](https://huggingface.co/RecursiveSI/flint-int4),
+the MLX checkpoint of the same weights as the GGUF file gmlx ran. Its
+tensors were relabeled from U8 to uint32 storage and its 8-bit embedding
+declared in `config.json`, with the bytes unchanged. Each ratio is gmlx
+divided by oMLX, and [Methodology](#methodology) lists the oMLX build.
+
+### Flint INT4
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/flint-int4-q4_1-omlx-panels-dark.svg">
+  <img src="assets/perf/per-model/flint-int4-q4_1-omlx-panels.svg" alt="gmlx and oMLX prefill and decode throughput against KV depth for Flint INT4">
+</picture>
+
+| KV depth | gmlx decode | oMLX decode | gmlx/oMLX decode | gmlx prefill | oMLX prefill | gmlx/oMLX prefill |
+|---|--:|--:|--:|--:|--:|--:|
+| 512 | 160.2 (148.9-163.6) | 147.9 (142.9-149.7) | 1.08x | 3139.2 (2825.2-3354.5) | 2091.5 (1144.8-2546.3) | 1.50x |
+| 4.3k | 155.8 (154.9-156.5) | 141.9 (141.1-142.4) | 1.10x | 5497.3 (5198.9-5536) | 3721 (3428.9-3855.8) | 1.48x |
+| 17k | 148 (147.3-148.9) | 127.3 (124.1-127.8) | 1.16x | 4967.6 (4887.6-5006.6) | 3578.9 (3558.3-3605.7) | 1.39x |
+| 67k | 109.1 (108.3-109.3) | 87.7 (86.6-89.2) | 1.24x | 2945.2 (2853.1-3038.5) | 2338.9 (2269-2423.4) | 1.26x |
+| 110k | 87 (85.9-87.4) | 66.5 (66.1-67.3) | 1.31x | 1990.6 (1965.7-2052.6) | 1692 (1672.8-1704.2) | 1.18x |
+| 200k | 60.9 (60.6-61.3) | 45.4 (44.9-46.2) | 1.34x | 1243.2 (1213.3-1248.8) | 1113.7 (1108.3-1117.3) | 1.12x |
 
 ## Image generation
 

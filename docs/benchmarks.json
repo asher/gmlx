@@ -7,7 +7,8 @@
     "ds4-server": {
       "deepseek-v4-flash-antirez-iq2xxs": "b030961",
       "deepseek-v4.1-flash-antirez-q2": "8db1d1d"
-    }
+    },
+    "omlx": "0.7.2"
   },
   "order": [
     "qwen3.5-122b-a10b-ud-q5km",
@@ -26,6 +27,7 @@
     "deepseek-v4-flash-antirez-iq2xxs",
     "deepseek-v4.1-flash-antirez-q2",
     "flint-int4-q4_1",
+    "flint-int4-q4_1-omlx",
     "qwen38-flash-next-udq3kxl"
   ],
   "models": {
@@ -3046,186 +3048,380 @@
       "source": "https://huggingface.co/RecursiveSI/flint-int4-gguf",
       "builds": {
         "gmlx": "0.5.1+flint-perf",
-        "mlx-kquant": "0.5.4+kv-append",
+        "mlx-kquant": "0.5.6",
         "llama.cpp": "b11829"
       },
-      "measured": "2026-10-23",
+      "measured": "2026-10-24",
       "rows": [
         {
           "depth": 512,
-          "gmlx_decode_base": 160.0,
+          "gmlx_decode_base": 157.2,
           "gmlx_decode_mtp": null,
-          "llama_decode_base": 115.8,
+          "llama_decode_base": 120.2,
           "llama_decode_mtp": null,
-          "gmlx_prefill_base": 3698.7,
-          "llama_prefill_base": 1811.0,
+          "gmlx_prefill_base": 3227.1,
+          "llama_prefill_base": 1743.0,
           "range": {
             "gmlx_decode_base": [
-              156.6,
-              161.0
+              150.0,
+              163.4
             ],
             "gmlx_decode_mtp": null,
             "llama_decode_base": [
-              113.2,
-              116.7
+              118.3,
+              122.9
             ],
             "llama_decode_mtp": null,
             "gmlx_prefill_base": [
-              3238.4,
-              4042.5
+              2711.2,
+              3695.8
             ],
             "llama_prefill_base": [
-              1618.6,
-              2371.7
+              1517.9,
+              2440.0
             ]
           }
         },
         {
           "depth": 4300,
-          "gmlx_decode_base": 157.4,
+          "gmlx_decode_base": 153.4,
           "gmlx_decode_mtp": null,
-          "llama_decode_base": 117.0,
+          "llama_decode_base": 116.0,
           "llama_decode_mtp": null,
-          "gmlx_prefill_base": 4045.2,
-          "llama_prefill_base": 2203.3,
+          "gmlx_prefill_base": 5177.2,
+          "llama_prefill_base": 2343.7,
           "range": {
             "gmlx_decode_base": [
-              157.2,
-              157.7
+              151.8,
+              156.3
             ],
             "gmlx_decode_mtp": null,
             "llama_decode_base": [
               115.9,
-              117.2
+              117.0
             ],
             "llama_decode_mtp": null,
             "gmlx_prefill_base": [
-              3842.7,
-              4093.4
+              4876.0,
+              5539.7
             ],
             "llama_prefill_base": [
-              2073.4,
-              2337.2
+              2131.6,
+              2387.6
             ]
           }
         },
         {
           "depth": 17000,
-          "gmlx_decode_base": 146.9,
+          "gmlx_decode_base": 145.2,
           "gmlx_decode_mtp": null,
-          "llama_decode_base": 104.1,
+          "llama_decode_base": 101.5,
           "llama_decode_mtp": null,
-          "gmlx_prefill_base": 3787.8,
-          "llama_prefill_base": 2021.2,
+          "gmlx_prefill_base": 4708.7,
+          "llama_prefill_base": 2001.1,
           "range": {
             "gmlx_decode_base": [
-              146.4,
-              147.5
+              142.2,
+              148.3
             ],
             "gmlx_decode_mtp": null,
             "llama_decode_base": [
-              103.9,
-              104.5
+              98.7,
+              103.0
             ],
             "llama_decode_mtp": null,
             "gmlx_prefill_base": [
-              3746.0,
-              3823.0
+              4410.1,
+              4984.0
             ],
             "llama_prefill_base": [
-              2004.1,
-              2029.4
+              1986.6,
+              2041.7
             ]
           }
         },
         {
           "depth": 67000,
-          "gmlx_decode_base": 107.3,
+          "gmlx_decode_base": 107.7,
           "gmlx_decode_mtp": null,
-          "llama_decode_base": 68.7,
+          "llama_decode_base": 63.8,
           "llama_decode_mtp": null,
-          "gmlx_prefill_base": 2506.2,
-          "llama_prefill_base": 1217.7,
+          "gmlx_prefill_base": 2755.7,
+          "llama_prefill_base": 1140.2,
           "range": {
             "gmlx_decode_base": [
-              105.8,
-              107.9
+              103.4,
+              109.5
             ],
             "gmlx_decode_mtp": null,
             "llama_decode_base": [
-              67.3,
-              70.6
+              62.9,
+              64.5
             ],
             "llama_decode_mtp": null,
             "gmlx_prefill_base": [
-              2417.9,
-              2543.4
+              2577.5,
+              3030.6
             ],
             "llama_prefill_base": [
-              1187.9,
-              1219.1
+              1131.5,
+              1152.5
             ]
           }
         },
         {
           "depth": 110000,
-          "gmlx_decode_base": 87.5,
+          "gmlx_decode_base": 86.4,
           "gmlx_decode_mtp": null,
-          "llama_decode_base": 46.3,
+          "llama_decode_base": 48.7,
           "llama_decode_mtp": null,
-          "gmlx_prefill_base": 1877.6,
-          "llama_prefill_base": 835.4,
+          "gmlx_prefill_base": 1963.1,
+          "llama_prefill_base": 849.3,
           "range": {
             "gmlx_decode_base": [
-              86.9,
-              88.2
+              85.5,
+              87.6
             ],
             "gmlx_decode_mtp": null,
             "llama_decode_base": [
-              45.8,
-              46.8
+              48.2,
+              49.2
             ],
             "llama_decode_mtp": null,
             "gmlx_prefill_base": [
-              1838.3,
-              1916.8
+              1902.7,
+              2031.8
             ],
             "llama_prefill_base": [
-              812.9,
-              858.0
+              838.9,
+              852.4
             ]
           }
         },
         {
           "depth": 200000,
-          "gmlx_decode_base": 61.8,
+          "gmlx_decode_base": 60.9,
           "gmlx_decode_mtp": null,
-          "llama_decode_base": 32.0,
+          "llama_decode_base": 31.8,
           "llama_decode_mtp": null,
-          "gmlx_prefill_base": 1167.7,
-          "llama_prefill_base": 544.1,
+          "gmlx_prefill_base": 1242.8,
+          "llama_prefill_base": 537.3,
           "range": {
             "gmlx_decode_base": [
-              61.6,
-              61.9
+              60.9,
+              61.2
             ],
             "gmlx_decode_mtp": null,
             "llama_decode_base": [
-              31.4,
-              32.5
+              31.5,
+              31.9
             ],
             "llama_decode_mtp": null,
             "gmlx_prefill_base": [
-              1165.5,
-              1169.9
+              1238.2,
+              1247.8
             ],
             "llama_prefill_base": [
-              520.7,
-              567.5
+              535.8,
+              538.3
             ]
           }
         }
       ]
+    },
+    "flint-int4-q4_1-omlx": {
+      "label": "Flint INT4",
+      "comparison": "oMLX",
+      "mtp": false,
+      "mtp_kind": null,
+      "gguf": "flint-int4-q4_1.gguf",
+      "source": "https://huggingface.co/RecursiveSI/flint-int4-gguf",
+      "builds": {
+        "gmlx": "0.5.1+flint-perf",
+        "mlx-kquant": "0.5.6",
+        "omlx": "0.7.2"
+      },
+      "measured": "2026-10-24",
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 160.2,
+          "gmlx_decode_mtp": null,
+          "omlx_decode_base": 147.9,
+          "omlx_decode_mtp": null,
+          "gmlx_prefill_base": 3139.2,
+          "omlx_prefill_base": 2091.5,
+          "range": {
+            "gmlx_decode_base": [
+              148.9,
+              163.6
+            ],
+            "gmlx_decode_mtp": null,
+            "omlx_decode_base": [
+              142.9,
+              149.7
+            ],
+            "omlx_decode_mtp": null,
+            "gmlx_prefill_base": [
+              2825.2,
+              3354.5
+            ],
+            "omlx_prefill_base": [
+              1144.8,
+              2546.3
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 155.8,
+          "gmlx_decode_mtp": null,
+          "omlx_decode_base": 141.9,
+          "omlx_decode_mtp": null,
+          "gmlx_prefill_base": 5497.3,
+          "omlx_prefill_base": 3721.0,
+          "range": {
+            "gmlx_decode_base": [
+              154.9,
+              156.5
+            ],
+            "gmlx_decode_mtp": null,
+            "omlx_decode_base": [
+              141.1,
+              142.4
+            ],
+            "omlx_decode_mtp": null,
+            "gmlx_prefill_base": [
+              5198.9,
+              5536.0
+            ],
+            "omlx_prefill_base": [
+              3428.9,
+              3855.8
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 148.0,
+          "gmlx_decode_mtp": null,
+          "omlx_decode_base": 127.3,
+          "omlx_decode_mtp": null,
+          "gmlx_prefill_base": 4967.6,
+          "omlx_prefill_base": 3578.9,
+          "range": {
+            "gmlx_decode_base": [
+              147.3,
+              148.9
+            ],
+            "gmlx_decode_mtp": null,
+            "omlx_decode_base": [
+              124.1,
+              127.8
+            ],
+            "omlx_decode_mtp": null,
+            "gmlx_prefill_base": [
+              4887.6,
+              5006.6
+            ],
+            "omlx_prefill_base": [
+              3558.3,
+              3605.7
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 109.1,
+          "gmlx_decode_mtp": null,
+          "omlx_decode_base": 87.7,
+          "omlx_decode_mtp": null,
+          "gmlx_prefill_base": 2945.2,
+          "omlx_prefill_base": 2338.9,
+          "range": {
+            "gmlx_decode_base": [
+              108.3,
+              109.3
+            ],
+            "gmlx_decode_mtp": null,
+            "omlx_decode_base": [
+              86.6,
+              89.2
+            ],
+            "omlx_decode_mtp": null,
+            "gmlx_prefill_base": [
+              2853.1,
+              3038.5
+            ],
+            "omlx_prefill_base": [
+              2269.0,
+              2423.4
+            ]
+          }
+        },
+        {
+          "depth": 110000,
+          "gmlx_decode_base": 87.0,
+          "gmlx_decode_mtp": null,
+          "omlx_decode_base": 66.5,
+          "omlx_decode_mtp": null,
+          "gmlx_prefill_base": 1990.6,
+          "omlx_prefill_base": 1692.0,
+          "range": {
+            "gmlx_decode_base": [
+              85.9,
+              87.4
+            ],
+            "gmlx_decode_mtp": null,
+            "omlx_decode_base": [
+              66.1,
+              67.3
+            ],
+            "omlx_decode_mtp": null,
+            "gmlx_prefill_base": [
+              1965.7,
+              2052.6
+            ],
+            "omlx_prefill_base": [
+              1672.8,
+              1704.2
+            ]
+          }
+        },
+        {
+          "depth": 200000,
+          "gmlx_decode_base": 60.9,
+          "gmlx_decode_mtp": null,
+          "omlx_decode_base": 45.4,
+          "omlx_decode_mtp": null,
+          "gmlx_prefill_base": 1243.2,
+          "omlx_prefill_base": 1113.7,
+          "range": {
+            "gmlx_decode_base": [
+              60.6,
+              61.3
+            ],
+            "gmlx_decode_mtp": null,
+            "omlx_decode_base": [
+              44.9,
+              46.2
+            ],
+            "omlx_decode_mtp": null,
+            "gmlx_prefill_base": [
+              1213.3,
+              1248.8
+            ],
+            "omlx_prefill_base": [
+              1108.3,
+              1117.3
+            ]
+          }
+        }
+      ],
+      "omlx_weights": {
+        "source": "https://huggingface.co/RecursiveSI/flint-int4",
+        "note": "relabeled from U8 to uint32 storage with its 8-bit embedding declared in config.json, bytes unchanged"
+      }
     },
     "qwen38-flash-next-udq3kxl": {
       "label": "Qwen3.8-Flash-Next UD-Q3_K_XL",
