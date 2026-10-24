@@ -114,11 +114,11 @@ def unwired_ram_bytes() -> int | None:
     return reclaimable_ram_bytes()
 
 
-def free_wanted_pages() -> int:
-    """Outstanding requests for free pages
-    (``kernel_vm.free_wanted_pages``), 0 when unread."""
+def free_page_waiters() -> int:
+    """Threads waiting on the kernel for free pages
+    (``kernel_vm.free_page_waiters``), 0 when unread."""
     try:
-        from gmlx.serve.kernel_vm import free_wanted_pages as wanted
+        from gmlx.serve.kernel_vm import free_page_waiters as wanted
 
         return int(wanted() or 0)
     except Exception:
@@ -699,12 +699,14 @@ STREAM_FREE_NOW = ("the experts stream because they do not fit in the "
 STREAM_OVER_BUDGET = ("the experts stream because the model is over its "
                       "memory budget")
 # What GMLX_OVERCOMMIT=1 does for a MoE's experts, in the lines that
-# offer it: a load that wires them in chunks beside a streamed table
-# (``expert_streaming._wire_resident_experts``) still stops the wire,
-# and any other load holds them.
+# offer it: their wire in chunks keeps only the kernel floor, and still
+# stops (``expert_streaming._chunked_wire``).
 OVERCOMMIT_LEVER = ("GMLX_OVERCOMMIT=1 keeps them in memory unless the "
                     "memory the kernel can reclaim runs out while they wire.")
-OVERCOMMIT_KEEPS = "GMLX_OVERCOMMIT=1 keeps them in memory."
+# How to free memory for a MoE's experts: another model holds its
+# weights wired while it generates, and other apps' compressed memory
+# counts as taken.
+FREE_WIRED = "quit another model or close other apps"
 
 
 def _gb(n: float) -> str:
@@ -760,25 +762,20 @@ class WireCheck:
                 "them. --speculative streams the experts to keep it.")
 
     def line(self, room: KvRoom | None = None,
-             depth: int | None = None, *, chunked: bool = False) -> str:
+             depth: int | None = None) -> str:
         """The stream line of a failed check, in GB: its fixed sentence,
         the leg that failed, and the ways to keep the experts in memory.
         ``room`` is the KV room the keep holds, priced at ``depth``
-        (``wire_room_label``) unless it is flat. ``chunked`` is a load
-        that wires the experts in chunks, which GMLX_OVERCOMMIT=1 still
-        stops when unwired memory runs out. A set larger than RAM
+        (``wire_room_label``) unless it is flat. A set larger than RAM
         gets the reason and the numbers, with no lever."""
-        if self.past_ram:
-            lever = ""
-        else:
-            lever = " " + (OVERCOMMIT_LEVER if chunked else OVERCOMMIT_KEEPS)
+        lever = "" if self.past_ram else f" {OVERCOMMIT_LEVER}"
         if self.reason == "budget":
             past = " and more than RAM" if self.past_ram else ""
             return (f"{STREAM_OVER_BUDGET}: holding them takes "
                     f"{_gb(self.wire_bytes)}, past the "
                     f"{_gb(self.budget_bytes or 0)} budget{past}.{lever}")
         tail = ("They are more than RAM." if self.past_ram
-                else "To keep them in memory, close other apps.")
+                else f"To keep them in memory, {FREE_WIRED}.")
         return (f"{STREAM_FREE_NOW}: holding them takes "
                 f"{_gb(self.wire_bytes)}, against "
                 f"{_gb(self.unwired_bytes)} of memory not wired, less "
@@ -808,7 +805,7 @@ class WireCheck:
                       f"{_kept(room, depth)}")
         return (f"{head}memory not wired stopped at {_gb(unwired)}, under "
                 f"the {_gb(need)} the next chunk needs {beside}. To keep "
-                f"them in memory, close other apps.{lever}")
+                f"them in memory, {FREE_WIRED}.{lever}")
 
 
 def check_resident_wire(wire_bytes: int, *, room_bytes: int,

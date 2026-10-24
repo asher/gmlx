@@ -455,19 +455,8 @@ def live_check(m: ModelPlan, b: BoxPlan, drafter_bytes: int = 0):
                                   budget=b.budget_bytes or None)
 
 
-def wires_in_chunks(m: ModelPlan, b: BoxPlan) -> bool:
-    """Whether a load without a stream flag wires the experts in chunks:
-    its tables, gathered per layer, alone bring it under the budget, so
-    the install streams them and wires the rest."""
-    from gmlx.stream.table_stream import tables_read_ahead
-
-    return (b.verdict == VERDICT_TABLES and bool(b.deferred_bytes)
-            and not tables_read_ahead(m.arch))
-
-
-def live_line(check, b: BoxPlan, *, chunked: bool = False) -> str:
-    """The validate line under the plan for a ``live_check``, for a load
-    that wires in chunks or not (``wires_in_chunks``)."""
+def live_line(check, b: BoxPlan) -> str:
+    """The validate line under the plan for a ``live_check``."""
     if check.table_bytes and check.mtp_off:
         return ("=> with the memory free now, its tables are offloaded to "
                 "disk, and " + check.mtp_off_line())
@@ -476,7 +465,7 @@ def live_line(check, b: BoxPlan, *, chunked: bool = False) -> str:
     if check.mtp_off and check.fits:
         return "=> with the memory free now, " + check.mtp_off_line()
     return (LIVE_RESIDENT if check.fits
-            else "=> " + check.line(b.room, chunked=chunked))
+            else "=> " + check.line(b.room))
 
 
 def to_dict(m: ModelPlan, b: BoxPlan | None) -> dict:

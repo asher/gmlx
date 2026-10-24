@@ -128,7 +128,7 @@ def install() -> None:
     ``device_info``, ``os.sysconf("SC_PHYS_PAGES")``,
     ``gmlx.serve.kernel_vm.snapshot``, its live sysctl reads
     (``live_reclaimable_bytes``, ``unwired_bytes``,
-    ``free_wanted_pages``) and the free-RAM reads under it.
+    ``free_page_waiters``) and the free-RAM reads under it.
     Starts on ``default()``."""
     if os.environ.get(REAL_HOST_ENV, "") == "1" or _real:
         return
@@ -141,7 +141,7 @@ def install() -> None:
     real_snapshot, real_selfcheck = kernel_vm.snapshot, kernel_vm.selfcheck
     real_live = kernel_vm.live_reclaimable_bytes
     real_unwired = kernel_vm.unwired_bytes
-    real_wanted = kernel_vm.free_wanted_pages
+    real_wanted = kernel_vm.free_page_waiters
     _real.update(device_info=real_info, sysconf=real_sysconf,
                  snapshot=real_snapshot, live_reclaimable=real_live,
                  unwired=real_unwired, free_wanted=real_wanted)
@@ -193,7 +193,7 @@ def install() -> None:
         return int(_current["box"]["memory_size"] - vm["wired"]
                    - vm["compressor"])
 
-    def free_wanted_pages():
+    def free_page_waiters():
         if _current["real"]:
             return real_wanted()
         if kernel_vm._disabled is not None:
@@ -201,7 +201,7 @@ def install() -> None:
         return int(_current["vm"].get("free_wanted", 0))
 
     kernel_vm.unwired_bytes = unwired_bytes
-    kernel_vm.free_wanted_pages = free_wanted_pages
+    kernel_vm.free_page_waiters = free_page_waiters
 
     def device_info(*args, **kwargs):
         info = dict(real_info(*args, **kwargs))
@@ -258,7 +258,7 @@ def real(name: str):
         return {"snapshot": kernel_vm.snapshot,
                 "live_reclaimable": kernel_vm.live_reclaimable_bytes,
                 "unwired": kernel_vm.unwired_bytes,
-                "free_wanted": kernel_vm.free_wanted_pages}[name]
+                "free_wanted": kernel_vm.free_page_waiters}[name]
     from gmlx.cache import apc_manager
 
     return apc_manager._vm_stat_free_ram_bytes

@@ -1136,6 +1136,8 @@ class _ResidencyPool:
                     gate_bytes / 1e9)
         self._gate(gate_bytes, model_path,
                    streaming=getattr(build_spec, "stream", None) == "experts")
+        _latch_guarded_wire(model_path,
+                            getattr(build_spec, "stream", None) is None)
         _say_tables_offloaded(model_path, offloaded)
         # What the entry holds resident. A streaming build adds its decode
         # arena below, once the loader has sized it.
@@ -1613,6 +1615,19 @@ def _clear_table_step(model_path) -> None:
         from gmlx.stream.table_stream import stream_tables_for_memory
 
         stream_tables_for_memory(model_path, False)
+
+
+def _latch_guarded_wire(model_path, plain: bool) -> None:
+    """Latch the chunked wire for a plain build of a MoE the gate admitted
+    (``table_stream.guard_resident_wire``): its install wires it in
+    chunks under the chunk guard, and the warm touch leaves it alone.
+    Cleared for any other build of the path."""
+    if isinstance(model_path, str) and model_path.endswith(".gguf"):
+        from gmlx.serve.capacity import streamed_expert_bytes
+        from gmlx.stream.table_stream import guard_resident_wire
+
+        guard_resident_wire(
+            model_path, plain and bool(streamed_expert_bytes(model_path)))
 
 
 def _plain_footprint(model_path, file_bytes: int, env=None) -> int:

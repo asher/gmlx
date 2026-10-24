@@ -30,6 +30,7 @@ def _box(box, *, unwired):
 @pytest.fixture(autouse=True)
 def _fresh_table_latch(monkeypatch):
     monkeypatch.setattr(ts, "_FOR_MEMORY", set())
+    monkeypatch.setattr(ts, "_GUARDED", set())
 
 
 @pytest.fixture
@@ -90,8 +91,9 @@ def test_a_moe_that_does_not_fit_streams_its_experts(header, capsys):
     assert ("less 12.7 GB kept for the kernel floor and the KV room of "
             "8.7 GB at 4096 tokens (the run's prompt and max tokens)") in err
     assert err.rstrip().endswith(
-        f"close other apps. {budget.OVERCOMMIT_KEEPS}")
+        f"quit another model or close other apps. {budget.OVERCOMMIT_LEVER}")
     assert budget.wire_room_depth() == 4096
+    assert not ts.resident_wire_guarded(path)
 
 
 @pytest.mark.parametrize("drafter", [0, 4e9])
@@ -138,11 +140,13 @@ def test_a_128gb_box_keeps_flash_next_resident_at_the_run_room(header, capsys,
     cli.preload_wire_check(args, depth=4096)
     assert args.stream_experts is False
     assert capsys.readouterr() == ("", "")
+    # The warm touch leaves the experts to the install's chunked wire.
+    assert ts.resident_wire_guarded(path)
 
 
 @pytest.mark.parametrize("text,deferred,tail", [
     # Flash-Next with its table held: past the budget, within RAM.
-    (111.3e9, 0, f". {budget.OVERCOMMIT_KEEPS}"),
+    (111.3e9, 0, f". {budget.OVERCOMMIT_LEVER}"),
     # DS4.1's bare path on a 128 GB Mac: no lever holds 165.3 GB.
     (300.5e9, 135.2e9, " and more than RAM."),
 ])
@@ -201,10 +205,12 @@ def test_a_dense_model_loads_as_on_main(header, capsys):
     # line, no placement change.
     path = header(8.5e9, experts=0)
     _box(host_box.mac(16)[0], unwired=9 * GiB)
+    ts.guard_resident_wire(path)             # a MoE's load of this path
     args = _args(path)
     cli.preload_wire_check(args, depth=None)
     assert args.stream_experts is False
     assert capsys.readouterr() == ("", "")
+    assert not ts.resident_wire_guarded(path)
 
 
 def test_the_ci_runner_loads_a_tiny_moe(header):
@@ -220,9 +226,11 @@ def test_the_ci_runner_loads_a_tiny_moe(header):
 def test_a_streamed_placement_is_left_alone(header, asked):
     path = header(165.3e9, experts=156.9e9, budget_bytes=int(108.2e9))
     _box(host_box.mac(128)[0], unwired=10 * GiB)
+    ts.guard_resident_wire(path)             # a resident load of this path
     args = _args(path, **{asked: True})
     cli.preload_wire_check(args, depth=2048)
     assert args.stream_experts is (asked == "stream_experts")
+    assert not ts.resident_wire_guarded(path)
     # The install's own check prices the run's room too.
     assert budget.wire_room_depth() == 2048
 
@@ -265,7 +273,7 @@ def test_overcommit_gets_the_16gb_example_past_the_fit_check(header,
     args = _args(path)
     cli.preload_wire_check(args, depth=None)
     assert args.stream_experts is True
-    assert capsys.readouterr().err.rstrip().endswith(budget.OVERCOMMIT_KEEPS)
+    assert capsys.readouterr().err.rstrip().endswith(budget.OVERCOMMIT_LEVER)
     assert tp.check_or_exit(path, streaming=args.stream_experts) is None
     monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
     args = _args(path)

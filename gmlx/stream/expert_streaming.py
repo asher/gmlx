@@ -166,27 +166,39 @@ def install_unflagged_tables(model, gguf_path: str | None, *,
     own ladder serves the tables
     from the file on the CPU stream and keeps the experts in memory when
     the memory free now holds them; else the experts stream, with the
-    stream line. Call it after the load, before any GPU work on the model
-    and before a sticky wire. True when it installed. False, with nothing
-    changed, on any other load or on a model installed already."""
+    stream line. Any other MoE the check before the load kept in memory
+    (``table_stream.guard_resident_wire``) wires in chunks here
+    (``_wire_plain_resident``), and its experts stream if the wire stops.
+    Call it after the load, before any GPU work on the model and before
+    a sticky wire. True when it installed. False, with nothing changed,
+    on any other load or on a model installed already."""
     if not gguf_path or hasattr(model, "_kq_streaming"):
         return False
     from gmlx.serve.capacity import gathered_table_bytes
+    from gmlx.stream.table_stream import (guard_resident_wire,
+                                          resident_wire_guarded)
 
+    guarded = resident_wire_guarded(gguf_path)
+    guard_resident_wire(gguf_path, False)
+    fallback = ""
     if not gathered_table_bytes(gguf_path):
-        return False
+        if not guarded or _wire_plain_resident(model, gguf_path,
+                                               prefill_step=prefill_step):
+            return False
+        fallback = "unwired"
     install_expert_streaming(
         model, gguf_path=gguf_path, feeder_prefill=feeder_prefill,
         feeder_decode=feeder_decode, fast_disk=fast_disk,
-        prefill_step=prefill_step, stats_verbose=stats_verbose)
+        prefill_step=prefill_step, stats_verbose=stats_verbose,
+        force_stream=bool(fallback), fallback=fallback)
     return True
 
 
 # The chunked wire's wait under a chunk's line: a rise of unwired memory
-# smaller than _WIRE_MIN_RISE does not count, nor does a free-page
-# request count that does not fall, the wait stops once nothing has
-# counted for _WIRE_STALL_S, and the waits of one wire add up to at most
-# _WIRE_WAIT_S.
+# smaller than _WIRE_MIN_RISE does not count, nor does a count of threads
+# waiting for free pages that does not fall to a new low, the wait stops
+# once nothing has counted for _WIRE_STALL_S, and the waits of one wire
+# add up to at most _WIRE_WAIT_S.
 _WIRE_STALL_S = 2.0
 _WIRE_MIN_RISE = 256 << 20
 _WIRE_WAIT_S = 60.0
@@ -196,14 +208,14 @@ class _ChunkGuard:
     """Before each chunk of a resident wire: True once unwired RAM, read
     live (``budget.unwired_ram_bytes``), covers ``keep`` plus the chunk,
     and no thread waits on the kernel for free pages
-    (``budget.free_wanted_pages``). With the pre-load check's keep, that
+    (``budget.free_page_waiters``). With the pre-load check's keep, that
     check runs again before each chunk: each chunk takes its bytes out of
     unwired RAM, so a wire the check passed goes through, unless another
     process wires more or the wire costs more than its estimate. A chunk
     past the free and file-backed pages has the kernel compress other
     apps' memory for it, and the free-page leg stops the wire if the
     kernel falls behind. Short on either leg, it waits while unwired
-    memory rises or the requests fall, and stops on a stall or once the
+    memory rises or fewer threads wait, and stops on a stall or once the
     wire has waited ``wait_s`` in all. ``last``, ``line``, ``pending``,
     ``short`` and ``starved`` keep the final reading, the line it was
     judged on, the chunk's bytes, and which legs were short."""
@@ -232,7 +244,7 @@ class _ChunkGuard:
         try:
             while True:
                 self.last = budget.unwired_ram_bytes()
-                wanted = budget.free_wanted_pages()
+                wanted = budget.free_page_waiters()
                 self.short = self.last is not None and self.last < self.line
                 self.starved = wanted > 0
                 if not (self.short or self.starved):
@@ -260,7 +272,7 @@ def _install_gpu_residency(model, moe_modules, *,
                            include_expert_stacks: bool = False,
                            room: int | None = None,
                            chunk_bytes: int | None = None,
-                           guard=None) -> bool:
+                           guard=None, say: bool = True) -> bool:
     """Wire every non-expert weight buffer into the Metal residency set,
     so command buffers stop re-wiring the every-token weights' pages on
     every use (the
@@ -287,7 +299,8 @@ def _install_gpu_residency(model, moe_modules, *,
     commit once ``guard`` passes on its bytes, the first and the last
     partial one too. A refusal stops the wire before that commit, leaves
     every array it inserted in ``model._kq_resident_arrays`` and returns
-    False (the caller unwires them). True otherwise."""
+    False (the caller unwires them). True otherwise. ``say=False`` leaves
+    out the line of the set it wired."""
     import mlx_kquant as kq
 
     if not getattr(kq, "residency_insert", None):
@@ -331,6 +344,8 @@ def _install_gpu_residency(model, moe_modules, *,
     if pending or not chunk_bytes:
         kq.residency_commit()
     model._kq_resident_arrays = inserted
+    if not say:
+        return True
     n = len(inserted)
     print(f"[stream] gpu-resident weights: {n} buffers "
           f"({nbytes / 1e9:.1f} GB) in the Metal residency set "
@@ -343,8 +358,8 @@ def _install_gpu_residency(model, moe_modules, *,
 
 
 def _unwire(model) -> int:
-    """Take the arrays a stopped wire inserted back out of the residency
-    set; the uncommitted ones never wire. The kernel unwires the rest
+    """Take the arrays a wire inserted back out of the residency set; the
+    uncommitted ones of a stopped wire never wire. The kernel unwires the rest
     lazily, and can keep part of them wired until the process exits.
     Returns the bytes taken out."""
     import mlx_kquant as kq
@@ -374,19 +389,33 @@ def _wire_resident_experts(model, gguf_path, wire_bytes: int, *,
     check = bmod.check_resident_wire(wire_bytes, room_bytes=room.bytes,
                                      budget=budget)
     if not check.fits:
-        loadlog.warn(f"[stream] {check.line(room, depth, chunked=True)}")
+        loadlog.warn(f"[stream] {check.line(room, depth)}")
         return False
     if not env_bool("GMLX_GPU_RESIDENT", True):
         return True
-    chunk = bmod.wire_chunk_bytes()
-    # The check's exemption, judged on the budget, has no guard.
+    return _chunked_wire(model, check, room=room, depth=depth,
+                         skip_ids=skip_ids)
+
+
+def _chunked_wire(model, check, *, room, depth, skip_ids=frozenset(),
+                  say: bool = True) -> bool:
+    """Wire the model's weights but ``skip_ids`` in chunks, each once
+    unwired memory covers it beside ``check``'s keep (``_ChunkGuard``;
+    the kernel floor under GMLX_OVERCOMMIT=1), the set clamped to the
+    check's budget. A set no larger than ``WIRE_EXEMPT_BYTES`` has no
+    guard. False when the wire stopped, with the line saying why and
+    the set taken back out (``_unwire``)."""
+    from gmlx.stream import budget as bmod
+
     guard = None
-    if wire_bytes > bmod.WIRE_EXEMPT_BYTES:
+    if check.wire_bytes > bmod.WIRE_EXEMPT_BYTES:
         guard = _ChunkGuard(bmod.kernel_floor_bytes() if bmod.overcommit()
                             else check.keep_bytes)
     if (_install_gpu_residency(model, {}, skip_ids=skip_ids,
-                               include_expert_stacks=True, room=budget,
-                               chunk_bytes=chunk, guard=guard) is not False
+                               include_expert_stacks=True,
+                               room=check.budget_bytes,
+                               chunk_bytes=bmod.wire_chunk_bytes(),
+                               guard=guard, say=say) is not False
             or guard is None):
         return True
     # The chunk the guard refused was inserted, never committed.
@@ -395,6 +424,35 @@ def _wire_resident_experts(model, gguf_path, wire_bytes: int, *,
         wired=wired, unwired=guard.last or 0, need=guard.line,
         starved=guard.starved and not guard.short, room=room, depth=depth))
     return False
+
+
+def _wire_plain_resident(model, gguf_path, *, prefill_step) -> bool:
+    """The chunked wire of a plain MoE load that the check before the
+    load kept in memory (``table_stream.guard_resident_wire``), the
+    table-only install's wire for the whole model (``_chunked_wire``).
+    The wire leaves the pages in the page cache and hands the set back
+    to MLX's own residency, which wires it at the first generation.
+    That check judged the whole set, and only the chunk guard judges
+    it here: the weights the load materialized are wired by now, and a
+    second check would count them twice. False when the wire stopped;
+    the experts then stream."""
+    import mlx_kquant as kq
+
+    from gmlx.device import cpu_default_device
+    from gmlx.stream import budget as bmod
+
+    if (cpu_default_device() or not mx.metal.is_available()
+            or not getattr(kq, "residency_insert", None)):
+        return True
+    total = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
+    depth = bmod.wire_room_depth()
+    room = bmod.kv_room_bytes(gguf_path, step=prefill_step, depth=depth)
+    check = bmod.WireCheck(total, None, bmod.wire_keep_bytes(room.bytes),
+                           stream_budget_bytes(), ram_bytes=bmod.ram_bytes())
+    if not _chunked_wire(model, check, room=room, depth=depth, say=False):
+        return False
+    _unwire(model)
+    return True
 
 
 def _physical_ram() -> int:

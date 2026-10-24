@@ -2554,12 +2554,15 @@ def preload_wire_check(args, *, depth: int | None,
     memory. An auto drafter that tips it over is dropped
     (``check_wire_beside_drafter``), and the set is judged alone at
     ``depth_without_mtp`` (``depth`` unless given): the experts stay in
-    memory with auto MTP off, or they stream. A dense model, a streamed
-    placement and GMLX_OVERCOMMIT=1 load as asked. Every load prices its
-    install's own check at the depth of the load it makes, and names the
-    tables it reads from the file (``say_tables_offloaded``)."""
+    memory with auto MTP off, or they stream. A set that stays in memory
+    wires in chunks at its install (``table_stream.guard_resident_wire``).
+    A dense model, a streamed placement and GMLX_OVERCOMMIT=1 load as
+    asked. Every load prices its install's own check at the depth of the
+    load it makes, and names the tables it reads from the file
+    (``say_tables_offloaded``)."""
     from gmlx.stream import budget as bmod
-    from gmlx.stream.table_stream import stream_tables_for_memory
+    from gmlx.stream.table_stream import (guard_resident_wire,
+                                          stream_tables_for_memory)
 
     if depth_without_mtp is _Same.DEPTH:
         depth_without_mtp = depth
@@ -2567,6 +2570,7 @@ def preload_wire_check(args, *, depth: int | None,
     path = os.path.expanduser(getattr(args, "gguf", "") or "")
     if path:
         stream_tables_for_memory(path, False)
+        guard_resident_wire(path, False)
     if not can_stream or getattr(args, "stream_cpu", False):
         return
     if getattr(args, "stream_experts", False):
@@ -2616,18 +2620,15 @@ def preload_wire_check(args, *, depth: int | None,
     if check.table_bytes:
         stream_tables_for_memory(path)
     if check.fits:
+        guard_resident_wire(path)
         say_tables_offloaded(path, deferred + check.table_bytes)
         if check.mtp_off:
             loadlog.warn(f"[mtp] {check.mtp_off_line()}")
             args.no_speculative = True
         return
-    from gmlx.serve.capacity import gathered_table_bytes
-
     # The streamed load reads the tables from the file with the experts.
     say_tables_offloaded(path, _streamed_tables(path))
-    # A load whose gathered tables bring it under wires in chunks.
-    loadlog.warn(f"[stream] "
-                 f"{check.line(room, depth, chunked=bool(gathered_table_bytes(path)))}")
+    loadlog.warn(f"[stream] {check.line(room, depth)}")
     args.stream_experts = True
     # The install names this leg, not the flag.
     args.stream_fallback = check.reason

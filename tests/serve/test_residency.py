@@ -1251,6 +1251,38 @@ def test_a_plain_build_whose_table_brings_it_under_prices_the_resident_experts(
         assert caplog.text.count(line) == 1
 
 
+@pytest.mark.parametrize("experts,stream", [
+    (100 * GB, None), (0, None), (100 * GB, "experts")])
+def test_a_plain_moe_build_wires_in_chunks_at_its_install(
+        monkeypatch, experts, stream):
+    """The gate admits a plain build of a MoE on memory not wired, so its
+    load starts with the chunked wire latched: the warm touch leaves the
+    weights to the install's guard. A dense build and a stream build
+    clear a latch an earlier build left."""
+    import gmlx.serve.capacity as cap
+    import gmlx.stream.table_stream as ts
+
+    monkeypatch.setattr(ts, "_FOR_MEMORY", set())
+    monkeypatch.setattr(ts, "_GUARDED", set())
+    _table_only_header(monkeypatch, budget=200 * GB)
+    monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: experts)
+    model = SimpleNamespace(_kq_streaming=stream is not None, tables=False)
+    pool, _tables, _credits, _asked = _table_only_pool(monkeypatch, model)
+    stock = pool._stock_get
+    seen = []
+
+    def get(*a, **k):
+        seen.append(ts.resident_wire_guarded("a.gguf"))
+        return stock(*a, **k)
+
+    pool._stock_get = get
+    ts.guard_resident_wire("a.gguf", not (experts and stream is None))
+    entry = pool.acquire("a.gguf", None, "auto",
+                         build_spec=SimpleNamespace(stream=stream))
+    pool.release(entry)
+    assert seen == [bool(experts) and stream is None]
+
+
 def test_a_plain_build_reprices_experts_that_stream_for_want_of_memory(
         monkeypatch, caplog):
     _table_only_header(monkeypatch)

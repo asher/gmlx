@@ -696,7 +696,7 @@ def preload_gate(weight_bytes: float, model_id: str, *,
     charged); the measure reads it as free, the load may not take it.
     ``reserved_ram_bytes`` is the same model's room and host overhead in
     RAM and ``ram_floor_bytes`` the host floor its arena leaves free; the
-    kernel gate holds both back from the reclaimable sum.
+    kernel gate holds both back from the memory not wired.
     ``image`` names the bytes as an image model's weights and the memory
     of one image at its default size. ``quiet`` defers without the log
     line, for a caller that asks whether a build fits."""

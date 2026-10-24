@@ -224,7 +224,8 @@ decode slower. The line gives the memory the experts need and the memory
 they were judged against. Before a load, `gmlx validate` says what the
 load will do with the memory free now. To keep the experts in memory, set
 `GMLX_OVERCOMMIT=1`, with which the Mac may swap. When the line names the
-memory free now, quitting other apps and loading again also keeps them:
+memory free now, quitting another model or other apps and loading again
+also keeps them:
 
 ```sh
 gmlx validate model.gguf

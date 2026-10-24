@@ -115,13 +115,15 @@ A MoE model streams its experts in three cases:
 - The model is larger than its memory budget, 90% of the GPU working set.
   On a Mac with 16 GB the budget is 10.3 GB, so gpt-oss-20b, whose weights
   take 12.1 GB, streams its experts without the flag.
-- The experts fit the budget but not the memory free at load, because
-  other apps hold it.
+- The experts fit the budget but not the memory free at load. Other
+  apps' memory counts as free, since macOS compresses it to make room.
+  Memory held wired, such as another model's while it generates, does
+  not.
 
 In the last two cases, `run` and `chat` print why:
 
 ```text
-[stream] the experts stream because the model is over its memory budget: holding them takes 12.1 GB, past the 10.3 GB budget. GMLX_OVERCOMMIT=1 keeps them in memory.
+[stream] the experts stream because the model is over its memory budget: holding them takes 12.1 GB, past the 10.3 GB budget. GMLX_OVERCOMMIT=1 keeps them in memory unless the memory the kernel can reclaim runs out while they wire.
 ```
 
 A model whose lookup tables alone bring it under the budget, such as
@@ -129,8 +131,7 @@ Qwen3.8-Flash-Next UD-Q4_K_XL on a Mac with 128 GB, reads those tables from
 the file and keeps its experts in memory without the flag, and a folder
 scan leaves its entry without `stream: experts`. A model under the budget
 does the same when the memory free at load holds it only without its
-tables, as UD-IQ4_XS on that Mac does with other apps open. Each load that
-reads its tables from the file says so:
+tables. Each load that reads its tables from the file says so:
 
 ```text
 [stream] per-layer embedding table of 28.8 GB offloaded to disk
@@ -153,15 +154,15 @@ Each way to keep the experts in memory has a cost:
 
 | Way | What it costs |
 |-----|---------------|
-| Quit other apps, then load again | Nothing. It does not help a model over its budget. |
+| Quit another model or other apps, then load again | Nothing. It does not help a model over its budget. |
 | `GMLX_OVERCOMMIT=1` | The Mac may swap, and a 16 GB Mac can stop responding. The `cannot fit:` check of `run` and `chat` then judges against RAM. |
 | Raise the GPU limit, as [The GPU memory limit](memory.md#the-gpu-memory-limit) describes | Less memory for macOS and other apps. It raises the budget, not the memory free now. |
 
 Under `GMLX_OVERCOMMIT=1`, a load that needs more than the Mac's RAM
 still streams or is refused: a MoE streams its experts, and `run`, `chat`
 and the upsampler of `image generate` refuse another model with
-`cannot fit:`. Experts beside a per-layer table, as on
-Qwen3.8-Flash-Next, also stream if memory runs out while they wire.
+`cannot fit:`. Experts that stay in memory still stream if memory runs
+out while they wire.
 
 When the experts fit in memory but the MTP drafter that `run` and `chat`
 turn on by themselves does not fit beside them, the load keeps the experts

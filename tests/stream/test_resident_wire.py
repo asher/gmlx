@@ -59,6 +59,7 @@ def _env(monkeypatch):
               "GMLX_DECODE_RESIDENT_CACHE_GB"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(es, "time", _Clock())
+    monkeypatch.setattr(ts, "_GUARDED", set())
 
 
 def _check(w, room=0, **kw):
@@ -127,14 +128,12 @@ def test_the_keep_is_the_kernel_floor_and_the_room():
     assert _check(50 * GiB, room=8 * GiB).keep_bytes == 4e9 + 8 * GiB
 
 
-@pytest.mark.parametrize("chunked", [False, True])
-def test_flash_next_stays_in_memory_beside_apps_and_streams_beside_a_model(
-        chunked):
+def test_flash_next_stays_in_memory_beside_apps_and_streams_beside_a_model():
     # Flash-Next's resident set and MTP drafter (93.7 GB) at the serve
     # room. Beside 30 GiB of a test run's memory, which is unwired, it
     # stays in memory: 125.1 GB unwired. Beside another model's 40 GiB of
-    # wired weights it streams. GMLX_OVERCOMMIT=1 still stops a wire in
-    # chunks, and holds the experts of any other load.
+    # wired weights it streams. GMLX_OVERCOMMIT=1 still stops its wire in
+    # chunks.
     box, _ = host_box.mac(128)
     room = budget.KvRoom(int(14.4e9), 32768, 1, 0, 0, 0, priced=True)
     _box(box, unwired=125.1e9)
@@ -142,14 +141,12 @@ def test_flash_next_stays_in_memory_beside_apps_and_streams_beside_a_model(
     _box(box, unwired=125.1e9 - 40 * GiB)
     check = _check(93.7e9, room=room.bytes, budget=int(108.2e9))
     assert check.reason == "unwired"
-    lever = "GMLX_OVERCOMMIT=1 keeps them in memory" + (
-        " unless the memory the kernel can reclaim runs out while they wire."
-        if chunked else ".")
-    assert check.line(room, None, chunked=chunked) == (
+    assert check.line(room, None) == (
         f"{budget.STREAM_FREE_NOW}: holding them takes 93.7 GB, against "
         "82.2 GB of memory not wired, less 18.4 GB kept for the kernel "
         "floor and the KV room of 14.4 GB at 32768 tokens (the serve "
-        f"context). To keep them in memory, close other apps. {lever}")
+        f"context). To keep them in memory, quit another model or close "
+        f"other apps. {budget.OVERCOMMIT_LEVER}")
 
 
 def test_the_budget_leg_judges_every_wire():
@@ -214,16 +211,25 @@ def test_other_apps_memory_counts_as_unwired(monkeypatch):
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="the sysctl counts")
 def test_the_unwired_read_matches_this_mac_s_mach_counters():
-    # RAM less the wired and compressor pages, less the few reusable and
-    # kernel pages no pageable count holds. A misnamed count would leave
-    # every wire on the fallback.
-    real = host_box.real("snapshot")()
-    unwired = host_box.real("unwired")()
-    assert unwired is not None
-    sysconf = host_box.real("sysconf")
-    ram = sysconf("SC_PHYS_PAGES") * sysconf("SC_PAGE_SIZE")
-    want = ram - real["wired"] - real["compressor"]
-    assert abs(unwired - want) <= max(4 * GiB, want // 10)
+    # Usable RAM (RAM less the firmware carve-outs) less the wired and
+    # compressor pages, within the few kernel pages no pageable count
+    # holds. A misnamed count would leave every wire on the fallback. The
+    # mach counters refresh about once a second, so the closest of a few
+    # pairs counts.
+    import time
+
+    from gmlx.serve import kernel_vm
+
+    usable = kernel_vm._sysctl_count("hw.memsize_usable")
+    gaps = []
+    for _ in range(5):
+        real = host_box.real("snapshot")()
+        unwired = host_box.real("unwired")()
+        assert unwired is not None
+        gaps.append(abs(unwired - (usable - real["wired"]
+                                   - real["compressor"])))
+        time.sleep(0.3)
+    assert min(gaps) <= 3 * GiB
     assert host_box.real("free_wanted")() is not None
 
 
@@ -320,11 +326,13 @@ class _Vm:
     (vm_page_free_target, 62.5 MiB here), then reclaims file pages, and
     then compresses other apps' memory at ``ratio`` to 1. Compressed
     pages still take RAM, so past the file pages a wired byte costs
-    1 + 1 / (ratio - 1) unwired bytes. With nothing left to compress the
-    kernel is starved, and threads wait on it for free pages. ``wire``
-    is another process wiring memory the same way."""
+    1 + 1 / (ratio - 1) unwired bytes. With nothing left to compress, or
+    memory that does not compress (``ratio`` 1), the kernel is starved,
+    and ``WAITERS`` threads wait on it for free pages. ``wire`` is
+    another process wiring memory the same way."""
 
     TARGET = 4000 * 16384
+    WAITERS = 3
 
     def __init__(self, box, free, file, apps=0, ratio=2.0, wired=None):
         self.box = box
@@ -355,14 +363,16 @@ class _Vm:
         self.file -= dropped
         rest -= dropped
         if rest:
-            packed = rest / (self.ratio - 1)
-            squeezed = min(self.apps, int(rest + packed))
+            squeezed = 0
+            if self.ratio > 1:
+                packed = rest / (self.ratio - 1)
+                squeezed = min(self.apps, int(rest + packed))
             self.apps -= squeezed
             self.compressor += int(squeezed / self.ratio)
             short = rest - (squeezed - int(squeezed / self.ratio))
             if short > 0:
                 self.free = max(0, self.free - short)
-                self.wanted = short // 16384
+                self.wanted = self.WAITERS
         self.lowest_free = min(self.lowest_free, self.free)
         self.publish()
 
@@ -462,8 +472,9 @@ def test_another_model_wiring_mid_wire_stops_it(monkeypatch, capsys, stale):
         "and after ")
     assert ("GB the next chunk needs beside the 12.7 GB kept for the "
             "kernel floor and the KV room of 8.7 GB at 4096 tokens (the "
-            "run's prompt and max tokens). To keep them in memory, close "
-            f"other apps. {budget.OVERCOMMIT_LEVER}") in err
+            "run's prompt and max tokens). To keep them in memory, quit "
+            f"another model or close other apps. {budget.OVERCOMMIT_LEVER}"
+            ) in err
     assert "memory not wired stopped at" in err and "0.0 GB" not in err
 
 
@@ -486,13 +497,13 @@ def test_another_app_growing_mid_wire_does_not_stop_it(monkeypatch):
 
 def test_a_kernel_waiting_on_free_pages_holds_the_chunk(monkeypatch):
     # Threads wait on the kernel for free pages: the chunk waits while
-    # their requests fall, and commits once none is left.
+    # fewer of them wait, and commits once none is left.
     _Vm(host_box.mac(128)[0], free=42.3 * GiB, file=54.6 * GiB)
-    wanted = iter([4000, 2500, 900, 0])
+    wanted = iter([9, 6, 2, 0])
 
     def free_wanted():
         return next(wanted, 0)
-    monkeypatch.setattr(budget, "free_wanted_pages", free_wanted)
+    monkeypatch.setattr(budget, "free_page_waiters", free_wanted)
     guard = es._ChunkGuard(4 * GiB)
     assert guard(2 * GiB) and not guard.starved
     assert 0 < guard.waited < es._WIRE_STALL_S
@@ -506,7 +517,7 @@ def test_a_kernel_that_stays_starved_stops_the_wire(monkeypatch, capsys):
     def committed(nbytes):
         vm.committed(nbytes)
         if len(kq.commits) == 20:
-            vm.wanted = 3141
+            vm.wanted = 6
             vm.publish()
     kq = _Residency(monkeypatch, on_commit=committed)
     _room(monkeypatch, 8.1 * GiB)
@@ -516,6 +527,37 @@ def test_a_kernel_that_stays_starved_stops_the_wire(monkeypatch, capsys):
     assert ("after 42.9 GB of it wired, the kernel ran out of free pages "
             "and did not recover. To keep them in memory, close other "
             "apps.") in err
+
+
+def test_a_kernel_working_through_its_waiters_holds_the_chunk(monkeypatch):
+    # The kernel frees pages for one waiting thread every 1.5 s, slower
+    # than the stall: each new low keeps the chunk waiting, and it
+    # commits once none is left, so a set that fits stays in memory.
+    _Vm(host_box.mac(128)[0], free=42.3 * GiB, file=54.6 * GiB)
+    clock = es.time
+    start = clock.now
+    monkeypatch.setattr(
+        budget, "free_page_waiters",
+        lambda: max(0, 8 - int((clock.now - start) / 1.5)))
+    guard = es._ChunkGuard(4 * GiB)
+    assert guard(2 * GiB)
+    assert 4 * es._WIRE_STALL_S < guard.waited < es._WIRE_WAIT_S
+
+
+def test_memory_the_kernel_cannot_compress_stops_the_wire(monkeypatch,
+                                                          capsys):
+    # Flash-Next's 90 GiB beside 30 GiB of apps whose memory does not
+    # compress, with swap that cannot keep up: unwired memory covers the
+    # set, but past the page cache the kernel has no pages to give it.
+    # The wire stops and unwires instead of wiring into a stall.
+    vm = _Vm(host_box.mac(128)[0], free=6 * GiB, file=80.5 * GiB,
+             apps=30 * GiB, ratio=1.0)
+    kq = _Residency(monkeypatch, on_commit=vm.committed)
+    _room(monkeypatch, 14.4e9, depth=32768)
+    assert _wire(_leaves(90, 1 * GiB), 90 * GiB) is False
+    assert kq.members == {}
+    assert ("the kernel ran out of free pages and did not recover"
+            in capsys.readouterr().err)
 
 
 def test_a_live_install_s_wired_bytes_are_not_kept_again(monkeypatch):
@@ -783,4 +825,102 @@ def test_overcommit_keeps_the_guard_on_at_the_kernel_floor(
         err = capsys.readouterr().err
         assert err.rstrip().endswith(
             "the next chunk needs beside the 1.7 GB kernel floor. To keep "
-            "them in memory, close other apps.")
+            "them in memory, quit another model or close other apps.")
+
+
+# --- a plain MoE load ----------------------------------------------------
+
+
+def _plain(monkeypatch, *, latched=True):
+    """A MoE loaded with no stream placement and no gathered tables, on
+    the GPU, its chunked wire latched by the check before the load when
+    ``latched``. Returns the installs asked of install_expert_streaming."""
+    import mlx.core as mx
+
+    import gmlx.device as device
+    import gmlx.serve.capacity as cap
+
+    monkeypatch.setattr(cap, "gathered_table_bytes", lambda *a, **k: 0)
+    monkeypatch.setattr(device, "cpu_default_device", lambda: False)
+    monkeypatch.setattr(mx.metal, "is_available", lambda: True)
+    monkeypatch.setattr(es, "stream_budget_bytes", lambda: int(108.2e9))
+    ts.guard_resident_wire("m.gguf", latched)
+    installs = []
+    monkeypatch.setattr(es, "install_expert_streaming",
+                        lambda model, **kw: installs.append(kw))
+    return installs
+
+
+def test_a_plain_moe_beside_apps_wires_in_chunks_at_its_install(
+        monkeypatch, capsys):
+    # Flash-Next's 90 GiB with no table step, beside a test run's 30 GiB:
+    # the install wires it in chunks, compressing the test run's memory
+    # past the page cache, then hands the set to MLX's own residency.
+    installs = _plain(monkeypatch)
+    vm = _Vm(host_box.mac(128)[0], free=6 * GiB, file=80.5 * GiB,
+             apps=30 * GiB)
+    kq = _Residency(monkeypatch, on_commit=vm.committed)
+    _room(monkeypatch, 14.4e9, depth=32768)
+    assert es.install_unflagged_tables(_leaves(90, 1 * GiB), "m.gguf") is False
+    assert installs == [] and vm.compressor > 0
+    assert len(kq.commits) == 46 and kq.members == {}
+    assert not ts.resident_wire_guarded("m.gguf")
+    assert capsys.readouterr() == ("", "")
+
+
+def test_a_plain_moe_whose_wire_stops_streams_its_experts(monkeypatch,
+                                                          capsys):
+    # Another model wires 30 GiB ten chunks in: the set comes back out,
+    # and the experts stream on the check's leg, not a flag.
+    installs = _plain(monkeypatch)
+    vm = _Vm(host_box.mac(128)[0], free=42.3 * GiB, file=54.6 * GiB)
+
+    def committed(nbytes):
+        vm.committed(nbytes)
+        if len(kq.commits) == 10:
+            vm.wire(30 * GiB)
+    kq = _Residency(monkeypatch, on_commit=committed)
+    _room(monkeypatch, 8.1 * GiB)
+    assert es.install_unflagged_tables(_leaves(60, 1 * GiB), "m.gguf") is True
+    assert kq.members == {}
+    assert [(i["force_stream"], i["fallback"]) for i in installs] == [
+        (True, "unwired")]
+    assert capsys.readouterr().err.startswith(
+        f"[stream] {budget.STREAM_FREE_NOW}: holding them takes 64.4 GB, "
+        "and after ")
+
+
+def test_a_load_the_check_did_not_keep_in_memory_is_left_alone(monkeypatch):
+    # A dense model, or a load no check judged: its install wires nothing.
+    installs = _plain(monkeypatch, latched=False)
+    kq = _Residency(monkeypatch)
+    assert es.install_unflagged_tables(_leaves(60, 1 * GiB), "m.gguf") is False
+    assert kq.commits == [] and installs == []
+
+
+def test_the_warm_touch_leaves_a_latched_load_to_its_install(monkeypatch):
+    # The warm touch would wire the weights in one burst before the
+    # install's guard reads memory.
+    from mlx.utils import tree_flatten
+
+    import gmlx.load.loader as loader
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from test_table_stream import _moe_table_model
+
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    model, _ = _moe_table_model()
+    pairs = tree_flatten(model.parameters())
+    total = sum(a.nbytes for _, a in pairs)
+    assert ts.warm_touch_exclusions(model, total, 10 * total,
+                                    paths=["m.gguf"]) == set()
+    ts.guard_resident_wire("m.gguf")
+    assert ts.warm_touch_exclusions(model, total, 10 * total,
+                                    paths=["m.gguf"]) == {
+        id(a) for _, a in pairs}
+    # With every array left out, the touch does not say it wired them.
+    monkeypatch.setenv("GMLX_RESIDENCY_WARM", "1")
+    logs = []
+    loader._warm_touch_pass([], total, log=logs.append, paths=None,
+                            batch_bytes=4 << 30, threshold_bytes=None)
+    assert logs == []

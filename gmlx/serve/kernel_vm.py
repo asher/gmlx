@@ -159,10 +159,10 @@ def unwired_bytes() -> int | None:
     """Pages neither wired nor holding compressed data, read live from the
     sysctl counts: free, and the pageable anonymous and file-backed pages
     the kernel can compress or drop. A wire that stays under them leaves
-    the kernel pages to reclaim. A few reusable and kernel pages fall
-    outside all three counts, so this reads up to about 2 GB under RAM
-    less the wired and compressor pages. None off Darwin or when a read
-    fails."""
+    the kernel pages to reclaim. Firmware carve-outs (hw.memsize less
+    hw.memsize_usable) and a few kernel pages fall outside all three
+    counts, so this reads up to about 2 GB under RAM less the wired and
+    compressor pages. None off Darwin or when a read fails."""
     if sys.platform != "darwin":
         return None
     pages = 0
@@ -174,10 +174,10 @@ def unwired_bytes() -> int | None:
     return pages * _PAGE
 
 
-def free_wanted_pages() -> int | None:
-    """Threads' outstanding requests for free pages (vm.page_free_wanted),
-    live. Above zero, the kernel is waiting on reclaim. None off Darwin
-    or when the read fails."""
+def free_page_waiters() -> int | None:
+    """Threads waiting on the kernel for free pages
+    (vm.page_free_wanted), live. Above zero, they wait on reclaim. None
+    off Darwin or when the read fails."""
     if sys.platform != "darwin":
         return None
     return _sysctl_count("vm.page_free_wanted")
