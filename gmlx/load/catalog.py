@@ -99,6 +99,7 @@ class Model:
     kv_cost: KvCost | None = None
     heads: int = 0
     trained_ctx: int = 0
+    preferred_at: tuple = ()         # (memory class, tier) pairs, over preferred on that class
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,7 @@ class Seed:
     quants: tuple = ()
     params: str = ""          # over the header's size label when that is not plain
     use: str = ""             # the "good for" column, under 35 characters
+    preferred_at: tuple = ()  # (memory class, tier) pairs: where a bare pull starts there
 
 
 _SEED = (
@@ -268,6 +270,10 @@ _SEED = (
          drafter_repo="unsloth/Qwen3.8-Flash-Next-GGUF",
          drafter_file="MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
          license_note="Qwen Community License",
+         # At 128 GB the balanced file wires 80 GB and reads its 27 GB table
+         # through the page cache, 107 GB in all; the fastest tier holds the
+         # whole model in 91 GB and leaves room for other apps.
+         preferred_at=((128, "fastest"),),
          use="documents, code and tool calls"),
     Seed("glm-5.3-flash", "GLM-5.3-Flash", "unsloth/GLM-5.3-Flash-GGUF", "balanced",
          "A strong coding and agent model.",
@@ -356,7 +362,8 @@ def _build(seed: Seed, facts: dict) -> Model:
         mmproj=seed.mmproj, mmproj_bytes=facts.get("mmproj_bytes", 0) if seed.mmproj else 0,
         drafter=drafter, ignored_files=seed.ignored_files,
         kv_cost=KvCost(tuple(tuple(row) for row in kv)) if kv else None,
-        heads=facts.get("heads", 0), trained_ctx=facts.get("trained_ctx", 0))
+        heads=facts.get("heads", 0), trained_ctx=facts.get("trained_ctx", 0),
+        preferred_at=seed.preferred_at)
 
 
 def _models() -> dict:
@@ -466,9 +473,21 @@ def compact_candidates(m: Model) -> list:
     return [r for r in m.rungs if not r.tier]
 
 
-def preferred_rung(m: Model) -> Rung | None:
+def preferred_tier(m: Model, box: Box | None = None) -> str:
+    """The tier, or quant, a bare pull starts from: the seed's word for
+    the memory class of ``box`` when it names one, else ``preferred``."""
+    if box is not None:
+        cls = memory_class(box.ram)
+        for c, want in m.preferred_at:
+            if c == cls:
+                return want
+    return m.preferred
+
+
+def preferred_rung(m: Model, box: Box | None = None) -> Rung | None:
+    want = preferred_tier(m, box)
     for r in m.rungs:
-        if r.tier == m.preferred or (not r.tier and r.quant == m.preferred):
+        if r.tier == want or (not r.tier and r.quant == want):
             return r
     return None
 
@@ -635,9 +654,9 @@ def _addon_sets(m: Model) -> list:
     return out
 
 
-def _ladder(m: Model) -> list:
-    """The preferred rung, then each lower one, largest first."""
-    pref = preferred_rung(m)
+def _ladder(m: Model, box: Box | None = None) -> list:
+    """The preferred rung on ``box``, then each lower one, largest first."""
+    pref = preferred_rung(m, box)
     if pref is None:
         return []
     pool = tiers(m) if has_tiers(m) else list(m.rungs)
@@ -655,7 +674,7 @@ def default_plan(m: Model, box: Box) -> PullPlan | None:
     compacts = sorted(compact_candidates(m), key=lambda r: r.bytes, reverse=True)
     for mm, dr in _addon_sets(m):
         addon = addon_bytes(m, mm, dr)
-        for r in _ladder(m) + compacts:
+        for r in _ladder(m, box) + compacts:
             if (rung_state(m, r, box) == RESIDENT
                     and fits_with(m, r, box, addon, speculates(m, r, dr))):
                 return PullPlan(m, r, mm, dr, False)

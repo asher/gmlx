@@ -174,7 +174,7 @@ def _walk(m, b):
     compacts = sorted(catalog.compact_candidates(m), key=lambda r: r.bytes, reverse=True)
     for mm, dr in catalog._addon_sets(m):
         addon = catalog.addon_bytes(m, mm, dr)
-        for r in catalog._ladder(m) + compacts:
+        for r in catalog._ladder(m, b) + compacts:
             if (catalog.rung_state(m, r, b) == catalog.RESIDENT
                     and catalog.fits_with(m, r, b, addon, catalog.speculates(m, r, dr))):
                 return (r.quant, mm, dr, False)
@@ -195,6 +195,27 @@ def test_default_plan_is_the_walk(m, cls):
     assert got == want
     if dp is not None and not dp.streaming:
         assert catalog.fits_with(m, dp.rung, b, catalog.plan_addon_bytes(dp), catalog.plan_speculates(dp))
+
+
+def _shape(dp):
+    return None if dp is None else (dp.rung.quant, dp.mmproj, dp.drafter, dp.streaming)
+
+
+def test_preferred_at_starts_the_walk_at_that_class_only():
+    m = dataclasses.replace(MOE, preferred_at=((128, "fastest"),))
+    at128 = catalog.default_plan(m, box(128))
+    assert at128.rung.tier == "fastest" and at128.mmproj and at128.drafter and not at128.streaming
+    assert catalog.default_plan(MOE, box(128)).rung.tier == "balanced"
+    for cls in (64, 96, 192, 256):
+        assert _shape(catalog.default_plan(m, box(cls))) == _shape(catalog.default_plan(MOE, box(cls)))
+    # Without a box the seed's word stands; the command compares against
+    # the box's own default.
+    assert catalog.preferred_rung(m).tier == "balanced"
+    assert catalog.preferred_rung(m, box(128)).tier == "fastest"
+    assert catalog.plan_command(at128, box(128)) == f"gmlx pull {m.name}"
+    bal = catalog.plan_for(m, box(128), quant="balanced")
+    assert catalog.plan_command(bal, box(128)) == f"gmlx pull {m.name} --quant balanced"
+    assert catalog.plan_command(catalog.plan_for(m, box(192)), box(192)) == f"gmlx pull {m.name}"
 
 
 def test_default_plan_drops_quality_before_speed_before_images():
@@ -606,6 +627,10 @@ def test_seed_rungs_are_well_formed(m):
         assert m.preferred in TIERS_SET
     else:
         assert m.preferred == pref.quant
+    for cls, want in m.preferred_at:
+        assert cls in catalog.MEMORY_CLASSES and want != m.preferred
+        r = catalog.preferred_rung(m, box(cls))
+        assert r is not None and (r.tier or r.quant) == want, (m.name, cls, want)
     for r in m.rungs:
         base = strip_shard_suffix(os.path.basename(r.path))
         assert base.endswith(".gguf") and f"-{r.quant}.gguf" in base, (m.name, r.path)
@@ -699,6 +724,14 @@ def test_seed_figures_on_real_boxes():
     assert r.table_bytes > 0 and r.text_bytes > box(128).budget
     assert catalog.rung_state(fn, r, box(128)) == catalog.RESIDENT
     assert catalog.rung_state(fn, r, box(64)) == catalog.STREAMS
+    # Its 128 GB default is the fastest tier: the whole model with its table
+    # leaves at least 32 GB of the Mac, where the balanced file, its table
+    # read through the page cache, would leave under 24 GB.
+    dp = catalog.default_plan(fn, box(128))
+    assert dp.rung.tier == "fastest" and dp.mmproj and dp.drafter and not dp.streaming
+    assert dp.rung.bytes + catalog.plan_addon_bytes(dp) <= box(128).ram - 32 * GiB
+    assert r.bytes + catalog.plan_addon_bytes(dp) > box(128).ram - 24 * GiB
+    assert catalog.default_plan(fn, box(192)).rung.tier == "balanced"
     # GLM-5.3-Flash on a 128 GiB Mac on macOS 26: a compact rung in memory.
     glm = catalog.model("glm-5.3-flash")
     ws = int(96.8 * GiB / 0.9)

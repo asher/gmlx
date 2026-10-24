@@ -353,6 +353,9 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
                 chosen.append((quant, "", first))
         if seed.preferred not in seed.quants:
             problems.append(f"{seed.name}: preferred quant {seed.preferred} is not listed")
+    for cls, want in seed.preferred_at:
+        if not any((t or q) == want for q, t, _f in chosen):
+            problems.append(f"{seed.name}: preferred {want} at {cls} GB has no file")
 
     rungs: list = []
     scans_by_quant: dict = {}

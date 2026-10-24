@@ -653,7 +653,7 @@ first, each at its default quality tier for this Mac:
 ```text
 Recommended for this Mac
   NAME                      DOWNLOAD  IMAGES  GOOD FOR
-  qwen3.8-flash-next        107.1 GB  yes     documents, code and tool calls
+  qwen3.8-flash-next         90.7 GB  yes     documents, code and tool calls
   ornith-1.5-122b            75.1 GB  yes     coding
 ```
 
