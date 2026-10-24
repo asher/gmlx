@@ -35,26 +35,27 @@ Homebrew:
 brew install asher/gmlx/gmlx
 ```
 
-The example model below, Qwen3.8-27B UD-Q6_K, is a 20.5 GB download and
-suits a Mac with 64 GB of memory. A model needs about its file size in
-memory, plus room for the conversation. On a smaller Mac, pick a model from
-[Choosing a model](https://asher.github.io/gmlx/quickstart.html#choosing-a-model)
-first.
+The example below pulls Qwen3.8-27B at the quality tier that suits this
+Mac, with image input and faster replies, a 23 GB download on a 64 GB Mac.
+A model needs about its file size in memory, plus room for the
+conversation. `gmlx pull` with no name lists the models that fit this Mac
+and lets you pick one; see
+[Choosing a model](https://asher.github.io/gmlx/quickstart.html#choosing-a-model).
 
 ```sh
 gmlx init --models-dir ~/models
-gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
-gmlx run  qwen3.8-27b-ud-q6 --prompt "Explain entropy in one paragraph."
-gmlx chat qwen3.8-27b-ud-q6
+gmlx pull qwen3.8-27b
+gmlx run  qwen3.8-27b --prompt "Explain entropy in one paragraph."
+gmlx chat qwen3.8-27b
 gmlx serve
 
 curl localhost:8080/v1/chat/completions -d \
-  '{"model": "qwen3.8-27b-ud-q6", "messages": [{"role": "user", "content": "hi"}]}'
-gmlx launch pi --model qwen3.8-27b-ud-q6
+  '{"model": "qwen3.8-27b", "messages": [{"role": "user", "content": "hi"}]}'
+gmlx launch pi --model qwen3.8-27b
 ```
 
 `gmlx init` writes the configuration file, and `pull` downloads the model
-and adds it under the id `qwen3.8-27b-ud-q6`. `serve` starts the server in
+and registers it under the name `qwen3.8-27b`. `serve` starts the server in
 the background on port 8080, and `launch` connects the pi coding agent to
 it. Install pi first with `npm install -g @earendil-works/pi-coding-agent`,
 or add `--container` to run it in an Apple container with pi installed.

@@ -3370,7 +3370,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 "  gmlx chat ~/models/model.gguf          a local GGUF\n"
                 "  gmlx chat <id>                         from your config "
                 "(gmlx list shows ids)\n"
-                "  gmlx pull hf:org/repo/file.gguf        download one first\n"
+                "  gmlx pull                              download one first\n"
                 "  gmlx chat --assistant NAME             talk to a running "
                 "server instead", file=sys.stderr)
             raise SystemExit(2)

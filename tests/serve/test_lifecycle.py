@@ -722,7 +722,7 @@ def test_a_login_start_after_a_retarget_compares_the_models_of_the_file_it_reads
     lc._remove_run("127.0.0.1", 8080)
     assert mb.start_from_record(record, None, "S") == 0
     out, err = capsys.readouterr()
-    assert f"add a model: gmlx pull <hf:ref> --config {dots / 'b.yaml'}" in out
+    assert f"add a model: gmlx pull --config {dots / 'b.yaml'}" in out
     assert "is gone" not in out + err
 
 
@@ -754,7 +754,7 @@ def test_a_background_start_keeps_the_config_file_the_server_records(
     assert run["status"] == "running"
     assert run["config_abspath"] == os.path.realpath(conf)
     out = capsys.readouterr().out
-    assert "add a model: gmlx pull <hf:ref>\n" in out
+    assert "add a model: gmlx pull\n" in out
 
 
 def test_after_a_reload_through_a_retargeted_link_launch_reads_its_profiles(
@@ -939,7 +939,7 @@ def test_zero_models_hint_points_at_the_log_when_configured_models_were_skipped(
         "0 of 2 configured models loaded - see `gmlx logs` for what was skipped")
     conf.write_text("models: {}\n")
     assert lc._zero_models_hint(str(conf)) == (
-        f"add a model: gmlx pull <hf:ref> --config {conf}")
+        f"add a model: gmlx pull --config {conf}")
 
 
 def test_restart_keeps_a_server_whose_config_does_not_load(monkeypatch, capsys,
@@ -2223,8 +2223,8 @@ def test_status_notes_stale_source(monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("config, hint", [
-    ("default", "add a model: gmlx pull <hf:ref>"),
-    ("my gmlx.yaml", "add a model: gmlx pull <hf:ref> --config '{tmp}/my gmlx.yaml'"),
+    ("default", "add a model: gmlx pull"),
+    ("my gmlx.yaml", "add a model: gmlx pull --config '{tmp}/my gmlx.yaml'"),
     ("gone.yaml", "the config it started with, {tmp}/gone.yaml, is gone, so run gmlx "
                   "restart for the steps"),
     (None, "add a GGUF to a --models-dir folder, then run gmlx restart")])

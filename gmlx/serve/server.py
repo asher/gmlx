@@ -342,17 +342,45 @@ def _init_interactive(a, ap) -> int:
     if _out_refused(default_out):
         return 1
     seeds = _init_seeds(a, ap)
+    io = wizard.make_io()
     try:
         outcome = wizard.run_wizard(
             default_out=default_out, seeds=seeds,
-            allow_install=not a.no_install)
+            allow_install=not a.no_install, io=io)
+        if outcome is None:
+            return 1
+        rc = _finish_write(outcome.out, outcome.text, outcome.models,
+                           no_reload=a.no_reload)
+        if rc != 0:
+            return rc
+        models = outcome.models
+        if not models and _offer_pull(io, outcome.out):
+            from gmlx.commands import manage
+            print()
+            rc = manage.cmd_pull(["--config", str(outcome.out)])
+            # A cancel in the picker (130) leaves init at 0 with the pull hint.
+            if rc not in (0, 130):
+                return rc
+            models = list(load_config(outcome.out).models.values())
     except KeyboardInterrupt:
         print("\naborted.", file=sys.stderr)
         return 1
-    if outcome is None:
-        return 1
-    return _finish_write(outcome.out, outcome.text, outcome.models,
-                         no_reload=a.no_reload)
+    _print_next_steps(outcome.out, models)
+    return 0
+
+
+def _offer_pull(io, out: Path) -> bool:
+    """After a zero-model init on a terminal, ask whether to pull a recommended
+    model now. A config with no model_dirs has nowhere to put one."""
+    from gmlx.commands import manage
+    if not manage._want_interactive():
+        return False
+    try:
+        if not load_config(out).model_dirs:
+            return False
+    except Exception:
+        return False
+    return io.yesno("Download a recommended model now?", default=True)
 
 
 def _resolve_services(a):
@@ -452,9 +480,12 @@ def _init_scaffold(a, ap) -> int:
 
     rc = _finish_write(out, text, models, no_reload=a.no_reload,
                        skipped=scan_stats.get("skipped", 0))
-    if a.install and rc == 0:
+    if rc != 0:
+        return rc
+    _print_next_steps(out, models)
+    if a.install:
         _install_for_services(stt_v, tts_v)
-    return rc
+    return 0
 
 
 def _finish_write(out: Path, text: str, models, *, no_reload: bool,
@@ -487,28 +518,32 @@ def _finish_write(out: Path, text: str, models, *, no_reload: bool,
                   f"downloads?). Fix or re-pull them, then run "
                   f"`gmlx sync-models`.")
         else:
-            print("\nno GGUFs found yet. `gmlx pull <hf:ref>` downloads one into "
-                  "your model dir and adds it. For GGUFs you copy in, run "
-                  "`gmlx sync-models`.")
+            print("\nno GGUFs found yet. `gmlx pull` downloads one into your model "
+                  "dir and adds it. For GGUFs you copy in, run `gmlx sync-models`.")
     else:
         print("\nsampling: every model starts from its family's model-card "
               "defaults; request\n`<id>@coding` (or @instruct / @creative / "
               "@reasoning-*) to switch intent.\n`gmlx profiles` prints the "
               "full table.")
     _reload_running(out, skip=no_reload)
+    return 0
+
+
+def _print_next_steps(out: Path, models) -> None:
+    """The next commands after init wrote ``out``: a pull first when it holds
+    no model, then serve."""
     # When the config lands where a bare `serve` would find it first, the `--config`
     # flag is redundant - show the shorter command.
     # No ./gmlx.yaml line here: the next step names --out with --config.
     first = next((p for p in default_config_paths(note_local=False) if p.exists()), None)
     bare = first is not None and os.path.realpath(first) == os.path.realpath(out)
     cfg_arg = "" if bare else f" --config {out}"
-    pull = "" if models else f"gmlx pull <hf:ref>{cfg_arg}  ->  "
+    pull = "" if models else f"gmlx pull{cfg_arg}  ->  "
     print(f"\nnext: {pull}gmlx serve{cfg_arg}")
     # On macOS, point at the launchd agent for a server that starts at every login
     # (service is macOS-only; the hint would be a dead end elsewhere).
     if sys.platform == "darwin":
         print(f"  to start it now and at every login: gmlx service install{cfg_arg}")
-    return 0
 
 
 # sync - reconcile an existing config's models with what's on disk

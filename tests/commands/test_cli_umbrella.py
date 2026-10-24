@@ -140,7 +140,7 @@ def test_help_links_the_docs_site(routes, capsys):
 
 def test_help_first_run_line_includes_pull(routes, capsys):
     assert cli.umbrella_main(["--help"]) == 0
-    assert ("first run:  gmlx init   (scaffold a config) ->  gmlx pull <hf:ref>   "
+    assert ("first run:  gmlx init   (scaffold a config) ->  gmlx pull   "
             "(download a model)\n        ->  gmlx serve   (start the server) ->  "
             "gmlx launch <client>\n") in capsys.readouterr().out
 

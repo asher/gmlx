@@ -2960,7 +2960,7 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
         "  image        generate images from GGUF diffusion models\n"
         "  comfyui      put the gmlx node pack into ComfyUI (install, uninstall, status)\n"
         "  completion   print a shell completion script (zsh, bash, fish)\n\n"
-        f"first run:  {prog} init   (scaffold a config) ->  {prog} pull <hf:ref>   "
+        f"first run:  {prog} init   (scaffold a config) ->  {prog} pull   "
         f"(download a model)\n"
         f"        ->  {prog} serve   (start the server) ->  {prog} launch <client>\n"
         f"or one-shot:  {prog} run <model.gguf | id> --prompt \"...\"\n\n"

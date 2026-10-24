@@ -9,6 +9,7 @@ the chat REPL uses for its loop tests)."""
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -722,3 +723,124 @@ def test_wizard_talk_skipped_without_both_services(monkeypatch, tmp_path):
     assert "talk:" not in outcome.text
     cfg = config.build_config(yaml.safe_load(outcome.text))
     assert cfg.talk.voice is None
+
+
+# After a zero-model wizard run, init offers to pull a recommended model
+def _zero_model_init(monkeypatch, tmp_path, answers, *, tty=True, pull=0, make_io=None):
+    """Run ``gmlx init -i`` over an empty models folder with scripted answers.
+    ``pull`` is the fake ``manage.cmd_pull``'s return code, or a callable that
+    takes its argv. Returns the exit code, the pull calls, the IO and the config."""
+    from gmlx.commands import manage
+    from gmlx.serve import server
+
+    (tmp_path / "models").mkdir()
+    monkeypatch.setattr(discovery, "scan_dirs", _fake_scan([]))
+    monkeypatch.setattr(wizard, "_hf_cache_has_gguf", lambda: False)
+    monkeypatch.setattr(server, "_reload_running", lambda *a, **k: None)
+    monkeypatch.setattr(manage, "_want_interactive", lambda: tty)
+    calls = []
+
+    def fake_pull(argv):
+        calls.append(list(argv))
+        return pull(argv) if callable(pull) else pull
+    monkeypatch.setattr(manage, "cmd_pull", fake_pull)
+    io = _ScriptIO([str(tmp_path / "models"), "", "n", "n", "n", "n", "n", "", "", "",
+                    *answers])
+    monkeypatch.setattr(wizard, "make_io", make_io or (lambda: io))
+    out = tmp_path / "cfg.yaml"
+    rc = server._cmd_init(["-i", "--out", str(out)])
+    return rc, calls, io, out
+
+
+def test_init_offers_a_pull_after_a_zero_model_wizard_run(monkeypatch, tmp_path, capsys):
+    asked = []
+    orig = _ScriptIO.yesno
+
+    def yesno(self, prompt, default=False):
+        asked.append((prompt, default))
+        return orig(self, prompt, default)
+    monkeypatch.setattr(_ScriptIO, "yesno", yesno)
+    rc, calls, io, out = _zero_model_init(monkeypatch, tmp_path, [""])
+    assert rc == 0 and out.exists()
+    assert asked[-1] == ("Download a recommended model now?", True)
+    assert calls == [["--config", str(out)]]
+    text = capsys.readouterr().out
+    assert text.index(f"wrote {out}") < text.index("\nnext: ")
+    # The pull registered nothing, so the next step is still a pull.
+    assert f"\nnext: gmlx pull --config {out}  ->  gmlx serve --config {out}\n" in text
+
+
+def test_init_says_serve_next_after_the_pull_registered_a_model(monkeypatch, tmp_path, capsys):
+    def pull(argv):
+        out = Path(argv[1])
+        model = tmp_path / "models" / "m-Q4_K_M.gguf"
+        model.write_bytes(b"GGUF")
+        out.write_text(discovery.scaffold_yaml(
+            [ModelCfg(id="m", path=str(model))], model_dirs=[str(tmp_path / "models")]))
+        return 0
+    rc, calls, io, out = _zero_model_init(monkeypatch, tmp_path, ["y"], pull=pull)
+    assert rc == 0 and len(calls) == 1
+    text = capsys.readouterr().out
+    assert f"\nnext: gmlx serve --config {out}\n" in text and "next: gmlx pull" not in text
+
+
+@pytest.mark.parametrize("answers, pull, calls_made, rc", [
+    (["n"], 0, 0, 0),        # declined: no pull, init still succeeds
+    ([""], 130, 1, 0),       # the picker was cancelled: init still succeeds
+    ([""], 1, 1, 1),         # a failed pull is init's exit code
+])
+def test_init_exit_code_after_the_offer(monkeypatch, tmp_path, capsys, answers, pull,
+                                        calls_made, rc):
+    got, calls, io, out = _zero_model_init(monkeypatch, tmp_path, answers, pull=pull)
+    assert got == rc and len(calls) == calls_made and out.exists()
+    text = capsys.readouterr().out
+    assert ("\nnext: gmlx pull --config" in text) == (rc == 0)
+
+
+def test_a_ctrl_c_at_the_offer_ends_init_like_its_other_questions(monkeypatch, tmp_path,
+                                                                 capsys):
+    orig = _ScriptIO.yesno
+
+    def yesno(self, prompt, default=False):
+        if prompt.startswith("Download a recommended"):
+            raise KeyboardInterrupt
+        return orig(self, prompt, default)
+    monkeypatch.setattr(_ScriptIO, "yesno", yesno)
+    rc, calls, io, out = _zero_model_init(monkeypatch, tmp_path, [])
+    assert rc == 1 and calls == [] and out.exists()
+    got = capsys.readouterr()
+    assert got.err == "\naborted.\n" and "next:" not in got.out
+
+
+def test_init_offers_no_pull_off_a_terminal(monkeypatch, tmp_path, capsys):
+    rc, calls, io, out = _zero_model_init(monkeypatch, tmp_path, [], tty=False)
+    assert rc == 0 and calls == [] and io.answers == []
+    assert "\nnext: gmlx pull --config" in capsys.readouterr().out
+
+
+def test_init_offers_no_pull_for_a_config_without_model_dirs(monkeypatch, tmp_path):
+    from gmlx.commands import manage
+    from gmlx.serve import server
+
+    monkeypatch.setattr(manage, "_want_interactive", lambda: True)
+    conf = tmp_path / "c.yaml"
+    conf.write_text("models: {}\n")
+    io = _ScriptIO(["y"])
+    assert server._offer_pull(io, conf) is False and io.answers == ["y"]
+    conf.write_text(f"server:\n  model_dirs: [{tmp_path}]\nmodels: {{}}\n")
+    assert server._offer_pull(io, conf) is True and io.answers == []
+
+
+def test_the_scaffold_path_never_offers_a_pull(monkeypatch, tmp_path, capsys):
+    from gmlx.commands import manage
+    from gmlx.serve import server
+
+    monkeypatch.setattr(discovery, "scan_dirs", _fake_scan([]))
+    monkeypatch.setattr(server, "_reload_running", lambda *a, **k: None)
+    monkeypatch.setattr(manage, "_want_interactive", lambda: True)
+    monkeypatch.setattr(manage, "cmd_pull", lambda argv: pytest.fail("pull was run"))
+    monkeypatch.setattr(wizard, "make_io", lambda: pytest.fail("an IO was made"))
+    out = tmp_path / "cfg.yaml"
+    assert server._cmd_init(["--models-dir", str(tmp_path), "--out", str(out)]) == 0
+    assert f"\nnext: gmlx pull --config {out}  ->  gmlx serve --config {out}\n" in (
+        capsys.readouterr().out)
