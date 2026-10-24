@@ -58,6 +58,7 @@ the last line says what it does with the memory free now:
 |------|------------------|
 | `=> with the memory free now, its experts stay in memory` | Keeps the experts in memory. |
 | `=> with the memory free now, auto MTP is off: ...` | Keeps the experts in memory and decodes without the MTP drafter. |
+| `=> with the memory free now, its tables are offloaded to disk ...` | Reads its lookup tables from the file to keep the experts in memory. |
 | `=> the experts stream because ...` | Streams the experts. [When a MoE streams its experts](#when-a-moe-streams-its-experts) gives the ways to keep them in memory. |
 
 `run`, `chat` and `serve` do not check the plan. They try to load a model
@@ -65,8 +66,10 @@ that cannot stream, so run `validate` first. A dense model larger than RAM
 has no experts to stream and needs a smaller quant.
 
 `gmlx validate --json` gives the same numbers under `stream`. There,
-`experts_in_memory_now` is false when the experts would stream, and
-`auto_mtp_off_now` is true when the load would leave out its MTP drafter.
+`experts_in_memory_now` is false when the experts would stream,
+`auto_mtp_off_now` is true when the load would leave out its MTP drafter,
+and `tables_from_file_now` is true when it would read its lookup tables
+from the file to keep the experts in memory.
 `gmlx doctor` names any `stream: experts` entry in your configuration file
 that cannot stream.
 
@@ -124,10 +127,18 @@ In the last two cases, `run` and `chat` print why:
 A model whose lookup tables alone bring it under the budget, such as
 Qwen3.8-Flash-Next UD-Q4_K_XL on a Mac with 128 GB, reads those tables from
 the file and keeps its experts in memory without the flag, and a folder
-scan leaves its entry without `stream: experts`. When the memory free at
-load does not hold those experts, they stream, and `serve` logs why. An
-entry that an older scan marked `stream: experts` streams them until
-`gmlx sync-models` drops the key, and `serve` warns about it at its start.
+scan leaves its entry without `stream: experts`. A model under the budget
+does the same when the memory free at load holds it only without its
+tables. With other apps open, UD-IQ4_XS on that Mac prints:
+
+```text
+[stream] per-layer embedding table of 28.8 GB offloaded to disk
+```
+
+When the memory free at load does not hold the experts even without the
+tables, they stream, and `serve` logs why. An entry that an older scan
+marked `stream: experts` streams them until `gmlx sync-models` drops the
+key, and `serve` warns about it at its start.
 
 To see which case applies before a load, and to keep the experts in memory
 anyway:

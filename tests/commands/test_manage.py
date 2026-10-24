@@ -1995,20 +1995,24 @@ def test_validate_prints_the_stream_line_a_load_would_print(
         "experts_in_memory_now"] is False
 
 
-@pytest.mark.parametrize("free_gib,line,mtp_off", [
-    (40, "with the memory free now, its experts stay in memory", False),
-    (36, "with the memory free now, auto MTP is off: the experts stay in "
+@pytest.mark.parametrize("free_gib,table,line,mtp_off", [
+    (40, 0, "with the memory free now, its experts stay in memory", False),
+    (36, 0, "with the memory free now, auto MTP is off: the experts stay in "
      "memory, and the 3.0 GB MTP drafter does not fit beside them. "
      "--speculative streams the experts to keep it.", True),
+    # Its tables read from the file keep the experts and the drafter.
+    (36, 10_000_000_000, "with the memory free now, its tables are "
+     "offloaded to disk and its experts stay in memory", False),
     # Streaming turns auto MTP off, so the line counts the model alone.
-    (10, "{free_now}: holding them takes 30.0 GB, against 17.2 GB of "
+    (10, 0, "{free_now}: holding them takes 30.0 GB, against 17.2 GB of "
      "reclaimable memory less", True),
 ])
 def test_validate_prices_the_auto_mtp_head_a_run_loads(
-        tmp_path, monkeypatch, capsys, free_gib, line, mtp_off):
+        tmp_path, monkeypatch, capsys, free_gib, table, line, mtp_off):
     # A 30 GB MoE with its own 3 GB MTP head, which `gmlx run` loads by
     # default, on a 64 GiB Mac with 13.7 GB kept: validate says what the
-    # run decides, through the run's own rule.
+    # run decides, through the run's own rule. ``table``: streamable
+    # tables in its 30 GB.
     import host_box
     import gmlx.commands.cli as cli
     import gmlx.load.discovery as discovery
@@ -2026,9 +2030,10 @@ def test_validate_prices_the_auto_mtp_head_a_run_loads(
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(sp, "model_plan", lambda scans: sp.ModelPlan(
         arch="qwen3moe", total_bytes=30_000_000_000,
-        expert_bytes=27_000_000_000, groups={}, moe_layers=48,
+        expert_bytes=27_000_000_000 - table, groups={}, moe_layers=48,
         n_experts=128, experts_per_token=8, ring_bytes=1_200_000_000,
-        kv_costs=None, trained_ctx=None))
+        kv_costs=None, trained_ctx=None, table_bytes=table,
+        tables=((table, "Q4_K"),) if table else ()))
     monkeypatch.setattr(manage, "_ref_size_bytes",
                         lambda ref, report: 30_000_000_000)
     monkeypatch.setattr(cli, "_has_native_mtp_head", lambda p: True)
@@ -2046,6 +2051,7 @@ def test_validate_prices_the_auto_mtp_head_a_run_loads(
     stream = json.loads(capsys.readouterr().out)["stream"]
     assert stream["experts_in_memory_now"] is (free_gib > 10)
     assert stream["auto_mtp_off_now"] is mtp_off
+    assert stream["tables_from_file_now"] is bool(table)
 
 
 @pytest.mark.parametrize("arch,chunked", [("qwen4exp", True),

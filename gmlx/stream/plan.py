@@ -430,23 +430,29 @@ def box_lines(m: ModelPlan, b: BoxPlan) -> list[str]:
 
 
 LIVE_RESIDENT = "=> with the memory free now, its experts stay in memory"
+LIVE_TABLES = ("=> with the memory free now, its tables are offloaded to "
+               "disk and its experts stay in memory")
 
 
 def live_check(m: ModelPlan, b: BoxPlan, drafter_bytes: int = 0):
     """What a load without a stream flag decides on this Mac's memory
     free now, for a plan that keeps the experts in memory or one past
     the budget in RAM: the check the load runs
-    (``budget.check_wire_beside_drafter``) on the bytes it would wire,
-    beside the auto MTP drafter of ``drafter_bytes`` it loads, with the
-    plan's KV room. None for a plan that streams them anyway."""
+    (``budget.check_wire_with_tables``) on the bytes it would wire, with
+    the tables the plan holds, beside the auto MTP drafter of
+    ``drafter_bytes`` it loads, with the plan's KV room. None for a plan
+    that streams them anyway."""
     if b.verdict not in (VERDICT_RESIDENT, VERDICT_TABLES) and not b.past_budget:
         return None
-    from gmlx.stream.budget import check_wire_beside_drafter
+    from gmlx.stream.budget import check_wire_with_tables
+    from gmlx.stream.table_stream import stream_ple_env
 
-    return check_wire_beside_drafter(m.total_bytes - b.deferred_bytes,
-                                     drafter_bytes, auto=True,
-                                     room_bytes=b.room.bytes,
-                                     budget=b.budget_bytes or None)
+    tables = (0 if stream_ple_env() == "0"
+              else max(0, m.table_bytes - b.deferred_bytes))
+    return check_wire_with_tables(m.total_bytes - b.deferred_bytes, tables,
+                                  drafter_bytes, auto=True,
+                                  room_bytes=b.room.bytes,
+                                  budget=b.budget_bytes or None)
 
 
 def wires_in_chunks(m: ModelPlan, b: BoxPlan) -> bool:
@@ -462,6 +468,11 @@ def wires_in_chunks(m: ModelPlan, b: BoxPlan) -> bool:
 def live_line(check, b: BoxPlan, *, chunked: bool = False) -> str:
     """The validate line under the plan for a ``live_check``, for a load
     that wires in chunks or not (``wires_in_chunks``)."""
+    if check.table_bytes and check.mtp_off:
+        return ("=> with the memory free now, its tables are offloaded to "
+                "disk, and " + check.mtp_off_line())
+    if check.table_bytes:
+        return LIVE_TABLES
     if check.mtp_off and check.fits:
         return "=> with the memory free now, " + check.mtp_off_line()
     return (LIVE_RESIDENT if check.fits

@@ -2547,21 +2547,28 @@ def preload_wire_check(args, *, depth: int | None,
     ``args.stream_experts`` is set, so the latch and the warm touch leave
     them alone. The set is the text tensors less the tables the load
     reads from the file, with the mmproj and the MTP drafter that load
-    beside it. An auto drafter that tips it over is dropped
+    beside it. A set short of the memory free now that its streamable
+    tables keep out first reads them from the file
+    (``check_wire_with_tables``): the step is latched for the load
+    (``table_stream.stream_tables_for_memory``), and the experts stay in
+    memory. An auto drafter that tips it over is dropped
     (``check_wire_beside_drafter``), and the set is judged alone at
     ``depth_without_mtp`` (``depth`` unless given): the experts stay in
     memory with auto MTP off, or they stream. A dense model, a streamed
     placement and GMLX_OVERCOMMIT=1 load as asked. Every load prices its
     install's own check at the depth of the load it makes."""
     from gmlx.stream import budget as bmod
+    from gmlx.stream.table_stream import stream_tables_for_memory
 
     if depth_without_mtp is _Same.DEPTH:
         depth_without_mtp = depth
     bmod.set_wire_room_depth(depth)
+    path = os.path.expanduser(getattr(args, "gguf", "") or "")
+    if path:
+        stream_tables_for_memory(path, False)
     if (not can_stream or getattr(args, "stream_experts", False)
             or getattr(args, "stream_cpu", False)):
         return
-    path = os.path.expanduser(getattr(args, "gguf", "") or "")
     if not path or not os.path.isfile(path):
         return
     from gmlx.serve.capacity import streamed_expert_bytes
@@ -2570,7 +2577,9 @@ def preload_wire_check(args, *, depth: int | None,
         return
     from gmlx.device import stream_budget_bytes
     from gmlx.load.discovery import text_tensor_bytes
-    from gmlx.serve.capacity import deferred_table_bytes
+    from gmlx.serve.capacity import (deferred_table_bytes,
+                                     streamed_table_bytes, table_label)
+    from gmlx.stream.table_stream import stream_ple_env
 
     text = text_tensor_bytes(path)
     if not text:
@@ -2584,8 +2593,13 @@ def preload_wire_check(args, *, depth: int | None,
     # Before _drafter_bytes, whose --native-mtp sets --speculative (the
     # native_mtp term covers that too).
     auto = _mtp_auto(args)
-    check = bmod.check_wire_beside_drafter(
-        text - deferred_table_bytes(path) + extra, _drafter_bytes(args, path),
+    deferred = deferred_table_bytes(path)
+    # The tables the budget step leaves in the set, which the step for
+    # the memory free now may read from the file.
+    tables = (0 if stream_ple_env() == "0"
+              else max(0, streamed_table_bytes(path) - deferred))
+    check = bmod.check_wire_with_tables(
+        text - deferred + extra, tables, _drafter_bytes(args, path),
         auto=auto, room_bytes=room.bytes, alone_room_bytes=alone.bytes,
         kept_streamed=_run_mode(args) == "vlm_mtp",
         budget=stream_budget_bytes())
@@ -2596,10 +2610,14 @@ def preload_wire_check(args, *, depth: int | None,
         # streamed one, which takes no auto drafter.
         room, depth = alone, depth_without_mtp
         bmod.set_wire_room_depth(depth)
-        if check.fits:
-            loadlog.warn(f"[mtp] {check.mtp_off_line()}")
-            args.no_speculative = True
-            return
+    if check.table_bytes:
+        stream_tables_for_memory(path)
+        loadlog.warn("[stream] " + bmod.tables_offloaded(table_label(path),
+                                                         check.table_bytes))
+    if check.mtp_off and check.fits:
+        loadlog.warn(f"[mtp] {check.mtp_off_line()}")
+        args.no_speculative = True
+        return
     if check.fits:
         return
     from gmlx.serve.capacity import gathered_table_bytes

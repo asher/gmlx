@@ -14,6 +14,7 @@ import pytest
 import host_box
 import gmlx.commands.cli as cli
 import gmlx.stream.budget as budget
+import gmlx.stream.table_stream as ts
 
 GiB = 1 << 30
 
@@ -26,11 +27,17 @@ def _box(box, *, rec, fast=None):
         "compressor": 0})
 
 
+@pytest.fixture(autouse=True)
+def _fresh_table_latch(monkeypatch):
+    monkeypatch.setattr(ts, "_FOR_MEMORY", set())
+
+
 @pytest.fixture
 def header(monkeypatch, tmp_path):
     """A GGUF path whose header reports ``text`` bytes, ``experts`` of
-    them routed experts, ``deferred`` read from the file, under a stream
-    budget of ``budget_bytes``, with a KV room of ``room`` bytes."""
+    them routed experts, ``tables`` of streamable tables, ``deferred``
+    read from the file, under a stream budget of ``budget_bytes``, with a
+    KV room of ``room`` bytes."""
     f = tmp_path / "m.gguf"
     f.write_bytes(b"x")
     for k in ("GMLX_OVERCOMMIT", "GMLX_WIRE_CHUNK_GB"):
@@ -38,7 +45,7 @@ def header(monkeypatch, tmp_path):
     monkeypatch.setattr(budget, "_WIRE_DEPTH", None)
 
     def set_header(text, experts=0, deferred=0, budget_bytes=None,
-                   room=1 * GiB):
+                   room=1 * GiB, tables=0):
         import gmlx.device as device
         import gmlx.load.discovery as discovery
         import gmlx.serve.capacity as cap
@@ -49,6 +56,8 @@ def header(monkeypatch, tmp_path):
                             lambda p: int(experts))
         monkeypatch.setattr(cap, "deferred_table_bytes",
                             lambda p, *a, **k: int(deferred))
+        monkeypatch.setattr(cap, "streamed_table_bytes",
+                            lambda p: int(tables))
         monkeypatch.setattr(device, "stream_budget_bytes",
                             lambda: budget_bytes)
         monkeypatch.setattr(
@@ -85,6 +94,39 @@ def test_a_moe_that_does_not_fit_streams_its_experts(header, capsys):
     assert budget.wire_room_depth() == 4096
 
 
+@pytest.mark.parametrize("drafter", [0, 4e9])
+def test_a_smaller_file_of_a_moe_never_keeps_less_in_memory(
+        header, monkeypatch, drafter):
+    # Flash-Next's quants on a 128 GB Mac with 104.3 GB reclaimable, at
+    # the serve room, alone or beside an auto MTP drafter. Each holds the
+    # same 28.8 GB per-layer table, which reads from the file before the
+    # experts or the drafter of a smaller file go. 93.7 GB is UD-IQ4_XS,
+    # 111.3 GB UD-Q4_K_XL.
+    import gmlx.load.discovery as discovery
+
+    monkeypatch.setattr(cli, "_has_native_mtp_head", lambda p: bool(drafter))
+    monkeypatch.setattr(cli, "_sibling_drafter", lambda p: None)
+    monkeypatch.setattr(discovery, "mtp_block_bytes", lambda p: int(drafter))
+    table, limit = 28.8e9, 108.2e9
+    sizes = (60e9, 80e9, 90e9, 93.7e9, 100e9, 105e9, 111.3e9, 120e9, 130e9,
+             140e9)
+    kept, latched = [], []
+    for text in sizes:
+        deferred = table if text > limit >= text - table else 0
+        path = header(text, experts=0.64 * text, deferred=deferred,
+                      tables=table, budget_bytes=int(limit), room=14.4e9)
+        _box(host_box.mac(128)[0], rec=104.3e9)
+        args = _args(path)
+        cli.preload_wire_check(args, depth=None)
+        # 2: the experts and any drafter in memory; 1: the experts.
+        kept.append(0 if args.stream_experts
+                    else 1 if getattr(args, "no_speculative", False) else 2)
+        latched.append(ts.tables_for_memory(path))
+    assert kept == [2] * (7 if not drafter else 6) + [1] * bool(drafter) + [0] * 3
+    # The table step of 90 to 105 GB; UD-Q4_K_XL's budget step needs none.
+    assert latched == [text in (90e9, 93.7e9, 100e9, 105e9) for text in sizes]
+
+
 # 110 GiB: an idle box. 94.7 GiB: 22 GiB of other apps' memory.
 @pytest.mark.parametrize("rec", [110, 94.7])
 def test_a_128gb_box_keeps_flash_next_resident_at_the_run_room(header, capsys,
@@ -118,20 +160,28 @@ def test_a_moe_past_the_stream_budget_streams(header, capsys, text,
         f"{(text - deferred) / 1e9:.1f} GB, past the 108.2 GB budget{tail}\n")
 
 
+@pytest.mark.parametrize("text,experts,deferred,tables", [
+    (300.5e9, 156.9e9, 135.2e9, 0),
+    # A 150 GB Flash-Next quant, over the budget without its table too.
+    (150e9, 100e9, 0, 28.8e9),
+])
 def test_overcommit_streams_a_set_larger_than_ram(header, monkeypatch,
-                                                  capsys):
+                                                  capsys, text, experts,
+                                                  deferred, tables):
     # DS4.1's bare path on a 128 GB Mac: GMLX_OVERCOMMIT=1 keeps no set
     # larger than RAM, so its experts stream as without it.
-    path = header(300.5e9, experts=156.9e9, deferred=135.2e9,
+    path = header(text, experts=experts, deferred=deferred, tables=tables,
                   budget_bytes=int(108.2e9))
     _box(host_box.mac(128)[0], rec=120 * GiB)
     monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
     args = _args(path)
     cli.preload_wire_check(args, depth=None)
     assert args.stream_experts is True
+    assert not ts.tables_for_memory(path)
     assert capsys.readouterr().err == (
-        f"[stream] {budget.STREAM_OVER_BUDGET}: holding them takes 165.3 GB, "
-        "past the 108.2 GB budget and more than RAM.\n")
+        f"[stream] {budget.STREAM_OVER_BUDGET}: holding them takes "
+        f"{(text - deferred) / 1e9:.1f} GB, past the 108.2 GB budget and "
+        "more than RAM.\n")
 
 
 def test_the_tables_a_load_reads_from_the_file_are_not_wired(header):
@@ -474,14 +524,20 @@ def test_a_bench_depths_drafter_counts_in_the_wire(header, tmp_path):
     assert args.stream_experts is True       # 72 > 71.3
 
 
-@pytest.mark.parametrize("fits", [True, False])
+@pytest.mark.parametrize("fits,whole", [(True, False), (False, False),
+                                        (True, True)])
 def test_a_table_gathered_per_layer_that_brings_the_model_under_is_not_wired(
-        monkeypatch, tmp_path, capsys, fits):
+        monkeypatch, tmp_path, capsys, fits, whole):
     # Flash-Next over the budget by its per-layer embedding table alone:
     # the load serves the table from the file and judges the rest, where
     # its text bytes are past the budget. Its install wires the experts in
     # chunks, which GMLX_OVERCOMMIT=1 still stops. The minted headers are
-    # small, so the exemption is off.
+    # small, so the exemption is off. ``whole``: the whole file under the
+    # budget, short of the memory free now with its table: the table reads
+    # from the file all the same, and the load prices it so.
+    import gmlx.device as device
+    import gmlx.load.discovery as discovery
+    import gmlx.serve.capacity as cap
     from helpers import FLASH_NEXT, flash_next_under_its_table
 
     for k in ("GMLX_OVERCOMMIT", "GMLX_WIRE_CHUNK_GB", "GMLX_STREAM_PLE"):
@@ -492,13 +548,25 @@ def test_a_table_gathered_per_layer_that_brings_the_model_under_is_not_wired(
         budget, "kv_room_bytes",
         lambda p, env=None, step=None, depth=None: budget.KvRoom(
             0, 32768, 1, 0, 0, 0, priced=True))
-    flash_next_under_its_table(monkeypatch, tmp_path)
+    table = flash_next_under_its_table(monkeypatch, tmp_path)
+    path = str(tmp_path / FLASH_NEXT)
     _box(host_box.mac(128)[0], rec=90 * GiB if fits else GiB // 1024)
-    args = _args(str(tmp_path / FLASH_NEXT), no_speculative=True)
+    if whole:
+        text = discovery.text_tensor_bytes(path)
+        monkeypatch.setattr(discovery, "_stream_budget_bytes", lambda: text)
+        monkeypatch.setattr(device, "stream_budget_bytes", lambda: text)
+        assert cap.deferred_table_bytes(path) == 0
+        _box(host_box.mac(128)[0],
+             rec=budget.kernel_floor_bytes() + text - table // 2)
+    args = _args(path, no_speculative=True)
     cli.preload_wire_check(args, depth=None)
     assert args.stream_experts is not fits
     err = capsys.readouterr().err
-    if fits:
+    if whole:
+        assert err == ("[stream] per-layer embedding table of "
+                       f"{table / 1e9:.1f} GB offloaded to disk\n")
+        assert cap.deferred_table_bytes(path) == table
+    elif fits:
         assert err == ""
     else:
         assert err.startswith(f"[stream] {budget.STREAM_FREE_NOW}: ")

@@ -569,6 +569,7 @@ class _ResidencyPool:
                         # Free the failed build before the lock drops: a waiting
                         # acquire gates on live memory next.
                         _collect_failed_build()
+                        _clear_table_step(model_path)
                         raise
                     if entry.priced_up:
                         self._fit_repriced(entry, model_path, late)
@@ -1014,10 +1015,11 @@ class _ResidencyPool:
                                 build_spec=build_spec)
 
     def _gate(self, gate_bytes, model_path, *, streaming: bool = False,
-              image: bool = False) -> None:
+              image: bool = False, quiet: bool = False) -> None:
         """U4: a model load and swap take the same headroom check a
         request takes, beside the room the resident streamed models keep.
-        Raises with the numbers; GMLX_OVERCOMMIT=1 skips."""
+        Raises with the numbers; GMLX_OVERCOMMIT=1 skips. ``quiet`` raises
+        without the log line."""
         from .capacity import preload_gate
 
         extra = {"image": True} if image else {}
@@ -1025,7 +1027,42 @@ class _ResidencyPool:
         preload_gate(gate_bytes, str(model_path), streaming=streaming,
                      reserved_bytes=room + ceiling,
                      reserved_ram_bytes=room + host, ram_floor_bytes=floor,
-                     **extra)
+                     quiet=quiet, **extra)
+
+    def _gate_fits(self, gate_bytes, model_path) -> bool:
+        """The plain build's gate as a question, with nothing logged."""
+        try:
+            self._gate(gate_bytes, model_path, quiet=True)
+        except RuntimeError:
+            return False
+        return True
+
+    def _tables_for_memory(self, model_path: str, gate_bytes: int,
+                           env=None) -> bool:
+        """The table-only step of a plain build for the memory free now:
+        the gate defers the build, and passes it without the streamable
+        tables the budget step leaves in it. The step is then latched for
+        the load (``table_stream.stream_tables_for_memory``): the tables
+        serve from the file, and the install keeps the experts in memory
+        if they fit."""
+        from gmlx.stream.budget import tables_offloaded
+        from gmlx.stream.table_stream import (stream_ple_env,
+                                              stream_tables_for_memory)
+
+        from .capacity import (deferred_table_bytes, streamed_table_bytes,
+                               table_label)
+
+        if stream_ple_env(env) == "0":
+            return False
+        tables = (streamed_table_bytes(model_path)
+                  - deferred_table_bytes(model_path, env=env))
+        if (tables <= 0 or self._gate_fits(gate_bytes, model_path)
+                or not self._gate_fits(gate_bytes - tables, model_path)):
+            return False
+        stream_tables_for_memory(model_path)
+        _log.warning("[stream] %s: %s", model_path,
+                     tables_offloaded(table_label(model_path), tables))
+        return True
 
     def _new_entry(self, cache_key, model_path, footprint, ttl,
                    **fields) -> _Entry:
@@ -1069,14 +1106,19 @@ class _ResidencyPool:
         gate_bytes = footprint
         streamed = 0
         shares = (0, 0)
-        # Tables that alone bring a plain build under the budget, on an
-        # arch that gathers them per layer: the load maps them and the
-        # bridge's install serves them from the file, as a stream build's
-        # table share. The experts stay in memory if they fit.
+        # Tables that alone bring a plain build under the budget, or under
+        # the memory free now, on an arch that gathers them per layer: the
+        # load maps them and the bridge's install serves them from the
+        # file, as a stream build's table share. The experts stay in
+        # memory if they fit.
         gathered = 0
         if getattr(build_spec, "stream", None) is None:
+            # Each build judges the memory free now afresh.
+            _clear_table_step(model_path)
             gate_bytes = _plain_footprint(model_path, footprint, env)
             if isinstance(model_path, str) and model_path.endswith(".gguf"):
+                if self._tables_for_memory(model_path, gate_bytes, env):
+                    gate_bytes = _plain_footprint(model_path, footprint, env)
                 gathered = gathered_table_bytes(model_path, env=env)
                 shares = (gathered, 0)
                 streamed = gathered
@@ -1383,6 +1425,7 @@ class _ResidencyPool:
         # Drop any stashed in-memory MTP drafter for this path, or its weights
         # stay referenced after the model is gone.
         _serving.drop_mtp_stash(entry.model_path)
+        _clear_table_step(entry.model_path)
         # Capture the expert prefetcher before the stock unload empties
         # model_cache; it holds one open fd per GGUF shard and nothing else
         # closes it (repeated load/unload cycles would creep toward EMFILE).
@@ -1546,6 +1589,17 @@ def _env_arena_cap(model, box, env, held_bytes: int) -> int | None:
                - int(model.every_token_bytes)
                - host_floor_bytes(int(box.ram_bytes)) - ring
                - int(room.bytes) - int(getattr(box, "host_bytes", 0)))
+
+
+def _clear_table_step(model_path) -> None:
+    """Drop the table-only step a plain build latched for ``model_path``
+    (``_ResidencyPool._tables_for_memory``). It holds while the model it
+    judged is resident, so admission prices a later build of the path
+    from its file."""
+    if isinstance(model_path, str) and model_path.endswith(".gguf"):
+        from gmlx.stream.table_stream import stream_tables_for_memory
+
+        stream_tables_for_memory(model_path, False)
 
 
 def _plain_footprint(model_path, file_bytes: int, env=None) -> int:
