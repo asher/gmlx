@@ -671,9 +671,10 @@ def _make_fused_kquant(base_cls, caps):
 
         With `scores` and a `_kq_shexp_mod` stamp (install_hyv3_shexp_fold),
         the shared expert rides the gathers as one extra slot with mix
-        weight 1. Contract with the stamping caller: a mixed return
-        consumed the shared expert; the stamped fallback returns unmixed
-        (skipping the epilogue below) and the caller mixes + adds it.
+        weight 1, and the sorted-prefill mix adds it after the sum.
+        Contract with the stamping caller: a mixed return consumed the
+        shared expert; the stamped fallback returns unmixed (skipping the
+        epilogue below) and the caller mixes + adds it.
 
         ``_kq_arena_rows`` (set by the streaming wrapper on multi-token
         arena calls) selects the per-row kernels at every width, see
@@ -848,7 +849,7 @@ def _make_fused_kquant(base_cls, caps):
             back to the stock two-gather path. With `scores` and
             GMLX_MOE_MIX_PREFILL the unsort and the score-weighted sum
             run as one dispatch (kq.gather_mix) and the result comes back
-            mixed, [..., N]; the shexp-fold stamp keeps it unmixed."""
+            mixed, [..., N]."""
             if (not _GATEUP_CONCAT_ENABLED or indices.size < 64
                     or self.training
                     or getattr(self, "_kq_weights_swapped", False)):
@@ -870,38 +871,46 @@ def _make_fused_kquant(base_cls, caps):
                 object.__setattr__(self, "_kq_gate_up_pending", False)
             from gmlx._vendor.mlx_lm.models.switch_layers import (
                 _gather_sort, _scatter_unsort)
-            x = mx.expand_dims(x, (-2, -3))
-            x, idx, inv_order = _gather_sort(x, indices)
-            h = gu(x, idx, sorted_indices=True)
+            xs = mx.expand_dims(x, (-2, -3))
+            xs, idx, inv_order = _gather_sort(xs, indices)
+            h = gu(xs, idx, sorted_indices=True)
             half = h.shape[-1] // 2
             x_gate, x_up = h[..., :half], h[..., half:]
             y = self.down_proj(
                 self.activation(x_up, x_gate), idx, sorted_indices=True)
             if self._kq_mix_prefill_ok(indices, scores):
-                return self._kq_mix_sorted(y, inv_order, indices, scores)
+                return self._kq_mix_sorted(x, y, inv_order, indices, scores)
             y = _scatter_unsort(y, inv_order, indices.shape)
             return y.squeeze(-2)
 
         def _kq_mix_prefill_ok(self, indices, scores) -> bool:
             """Whether a sorted-prefill call returns mixed through
             kq.gather_mix: scores given, the route on, the op present,
-            sorting widths, no shexp-fold stamp (that caller mixes)."""
-            return (
-                scores is not None and _MIX_PREFILL_ENABLED
-                and hasattr(kq, "gather_mix") and indices.size >= 64
-                and not self.training
-                and getattr(self, "_kq_shexp_mod", None) is None)
+            sorting widths. A shexp-fold stamp also needs the GPU, where
+            its caller runs the shared expert, and no streaming wrapper,
+            whose token split joins leaves that must all be unmixed."""
+            if (scores is None or not _MIX_PREFILL_ENABLED
+                    or not hasattr(kq, "gather_mix") or indices.size < 64
+                    or self.training):
+                return False
+            if getattr(self, "_kq_shexp_mod", None) is None:
+                return True
+            return (not getattr(self, "_kq_scores_sink", False)
+                    and mx.default_device() == mx.gpu)
 
-        def _kq_mix_sorted(self, y, inv_order, indices, scores):
+        def _kq_mix_sorted(self, x, y, inv_order, indices, scores):
             """The unsort and the score-weighted sum over the routed
             slots as one dispatch: y is the sorted down output
             [rows, 1, N], inv_order the sorted row of each (token, slot)
-            pair; returns [..., N] in the batched layout."""
+            pair; returns [..., N] in the batched layout, with a stamped
+            shared expert of x added."""
             k = indices.shape[-1]
             rows = y.shape[0]
             y = kq.gather_mix(
                 y.reshape(rows, -1), inv_order, scores.reshape(rows // k, k))
-            return y.reshape(*indices.shape[:-1], -1)
+            y = y.reshape(*indices.shape[:-1], -1)
+            se = getattr(self, "_kq_shexp_mod", None)
+            return y if se is None else y + se(x)
 
         def _kq_prefill_sorted(self, x, indices, scores):
             """The stock two-gather sorted prefill (mlx-lm
@@ -911,13 +920,13 @@ def _make_fused_kquant(base_cls, caps):
             if not self._kq_mix_prefill_ok(indices, scores):
                 return None
             from gmlx._vendor.mlx_lm.models.switch_layers import _gather_sort
-            x = mx.expand_dims(x, (-2, -3))
-            x, idx, inv_order = _gather_sort(x, indices)
-            x_up = self.up_proj(x, idx, sorted_indices=True)
-            x_gate = self.gate_proj(x, idx, sorted_indices=True)
+            xs = mx.expand_dims(x, (-2, -3))
+            xs, idx, inv_order = _gather_sort(xs, indices)
+            x_up = self.up_proj(xs, idx, sorted_indices=True)
+            x_gate = self.gate_proj(xs, idx, sorted_indices=True)
             y = self.down_proj(
                 self.activation(x_up, x_gate), idx, sorted_indices=True)
-            return self._kq_mix_sorted(y, inv_order, indices, scores)
+            return self._kq_mix_sorted(x, y, inv_order, indices, scores)
 
     _FusedKQuantSwitchGLU.__name__ = "_FusedKQuantSwitchGLU"
     return _FusedKQuantSwitchGLU

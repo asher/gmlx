@@ -175,3 +175,60 @@ def test_folded_two_wide_shared_expert_matches_the_block(t):
     assert seen == [(t, 5, INTER)]
     err = float(mx.abs(got - want).max() / mx.abs(want).max())
     assert err < 2e-2, err
+
+
+needs_mix = pytest.mark.skipif(
+    not hasattr(kq, "gather_mix"), reason="installed mlx-kquant has no gather_mix")
+
+
+@needs_fused
+@needs_mix
+@pytest.mark.skipif(not _real_apple_gpu(), reason="GPU kernels")
+@pytest.mark.skipif(not _multi_kernels(),
+                    reason="installed mlx-kquant has no multi-slot shared expert")
+@pytest.mark.parametrize("concat", [True, False])
+def test_stamped_prefill_mixes_in_one_dispatch(monkeypatch, concat):
+    """At sorting widths the stamped block mixes through gather_mix and
+    adds the shared expert itself, so its output is the unstamped
+    block's, bit for bit."""
+    monkeypatch.setattr(modules, "_GATEUP_CONCAT_ENABLED", concat)
+    blk = _kq_moe(weights=True)
+    assert _installed(blk) == (1, 1)
+    x = mx.array(np.random.default_rng(3).standard_normal((1, 64, D))
+                 .astype(np.float32)).astype(mx.bfloat16)
+    calls = []
+    real = kq.gather_mix
+    monkeypatch.setattr(
+        kq, "gather_mix", lambda *a, **k: calls.append(1) or real(*a, **k))
+    got = blk(x)
+    mx.eval(got)
+    assert calls == [1]
+    object.__setattr__(blk.switch_mlp, "_kq_shexp_mod", None)
+    want = blk(x)
+    mx.eval(want)
+    assert got.shape == want.shape == (1, 64, D)
+    assert mx.array_equal(got, want).item()
+
+
+@needs_fused
+@needs_mix
+def test_stamped_prefill_stays_unmixed_off_the_gpu_and_when_streamed():
+    """The stream wrapper's token split joins unmixed leaves, and a CPU
+    stream would pull the shared expert off the GPU: both keep the
+    stamped return unmixed for the block to mix."""
+    blk = _kq_moe()
+    assert _installed(blk)[0] == 1
+    glu = blk.switch_mlp
+    object.__setattr__(glu, "_kq_shexp_mod", blk.shared_experts)
+    inds = mx.zeros((1, 64, 3), dtype=mx.uint32)
+    scores = mx.ones((1, 64, 3), dtype=mx.bfloat16)
+    with mx.stream(mx.gpu):
+        assert glu._kq_mix_prefill_ok(inds, scores)
+    with mx.stream(mx.cpu):
+        assert not glu._kq_mix_prefill_ok(inds, scores)
+    object.__setattr__(glu, "_kq_scores_sink", True)
+    with mx.stream(mx.gpu):
+        assert not glu._kq_mix_prefill_ok(inds, scores)
+    object.__setattr__(glu, "_kq_shexp_mod", None)
+    with mx.stream(mx.gpu):
+        assert glu._kq_mix_prefill_ok(inds, scores)
