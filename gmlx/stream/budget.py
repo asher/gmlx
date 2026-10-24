@@ -90,21 +90,39 @@ def reclaimable_ram_bytes() -> int | None:
     return _available_ram_bytes()
 
 
-def live_reclaimable_ram_bytes() -> int | None:
-    """``reclaimable_ram_bytes`` read at the moment of the call
-    (``kernel_vm.live_reclaimable_bytes``), for the resident wire's check
-    and its chunk guard: the counters under ``reclaimable_ram_bytes``
-    can be a second old, longer than a wire takes. That reader when the
-    live one fails."""
+def unwired_ram_bytes() -> int | None:
+    """RAM a wire can take: every page that is neither wired nor holding
+    compressed data (``kernel_vm.unwired_bytes``), read at the moment of
+    the call, since a wire of tens of GB commits within one refresh of
+    the mach counters. Other apps' memory counts: the kernel compresses
+    or swaps it. Wired memory, such as another model's weights and KV
+    cache, does not. Falls back to RAM less the mach counters' wired and
+    compressor pages, then to ``reclaimable_ram_bytes``."""
     try:
-        from gmlx.serve.kernel_vm import live_reclaimable_bytes
+        from gmlx.serve import kernel_vm
 
-        v = live_reclaimable_bytes()
+        v = kernel_vm.unwired_bytes()
+        if v is None:
+            s = kernel_vm.snapshot()
+            ram = ram_bytes()
+            if s is not None and ram:
+                v = ram - s["wired"] - s["compressor"]
     except Exception:
         v = None
     if v is not None:
-        return int(v)
+        return max(0, int(v))
     return reclaimable_ram_bytes()
+
+
+def free_wanted_pages() -> int:
+    """Outstanding requests for free pages
+    (``kernel_vm.free_wanted_pages``), 0 when unread."""
+    try:
+        from gmlx.serve.kernel_vm import free_wanted_pages as wanted
+
+        return int(wanted() or 0)
+    except Exception:
+        return 0
 
 
 def kernel_floor_bytes() -> float:
@@ -605,25 +623,24 @@ def _prefill_ring_reason(offsets, left: int | None) -> str | None:
 
 
 def wire_keep_bytes(room_bytes: int) -> int:
-    """RAM a resident wire leaves free beside it: the governor's kernel
-    floor and the KV room. The check reads reclaimable RAM after the
-    load, so the system, other apps, this process and what other live
-    installs hold wired are out of it already. The arena's host floor
-    and host overhead price those for a sizing made before the load,
-    and would count them twice here."""
+    """RAM a resident wire leaves unwired beside it: the governor's kernel
+    floor and the KV room. The check reads unwired RAM, so what the
+    system and other processes hold wired is out of it already. The
+    arena's host floor and host overhead price those for a sizing made
+    before the load, and would count them twice here."""
     return int(kernel_floor_bytes()) + max(0, int(room_bytes))
 
 
 # A resident wire no larger is judged on the budget only, whatever the
-# chunk size, so a small MoE loads on a box with little reclaimable
-# memory, such as a CI runner.
+# chunk size, so a small MoE loads on a box with little memory, such as
+# a CI runner.
 WIRE_EXEMPT_BYTES = 2 << 30
 
 
 def wire_chunk_bytes() -> int:
     """GMLX_WIRE_CHUNK_GB: the bytes a resident expert wire commits
-    between reclaimable-memory reads (default 2). The exemption from the
-    reclaimable check stays ``WIRE_EXEMPT_BYTES`` whatever it says."""
+    between memory reads (default 2). The exemption from the live check
+    stays ``WIRE_EXEMPT_BYTES`` whatever it says."""
     raw = os.environ.get("GMLX_WIRE_CHUNK_GB", "")
     try:
         gb = float(raw) if raw else 2.0
@@ -706,7 +723,7 @@ def _kept(room: KvRoom | None, depth: int | None) -> str:
 class WireCheck:
     """A resident wire judged against live memory. ``reason`` names the
     first leg it fails: ``budget`` (past the resident budget) or
-    ``reclaimable`` (reclaimable RAM less ``keep`` is short); empty when
+    ``unwired`` (unwired RAM less ``keep`` is short); empty when
     it fits, the memory cannot be read, or GMLX_OVERCOMMIT=1 on a set
     that fits in RAM. ``ram_bytes`` is physical RAM, None when unread.
     ``dropped_bytes`` is an auto MTP drafter the load leaves out
@@ -715,7 +732,7 @@ class WireCheck:
     tables the load reads from the file to get under live memory
     (``check_wire_with_tables``), out of ``wire_bytes``."""
     wire_bytes: int
-    reclaimable_bytes: int | None
+    unwired_bytes: int | None
     keep_bytes: int
     budget_bytes: int | None
     reason: str = ""
@@ -749,7 +766,7 @@ class WireCheck:
         ``room`` is the KV room the keep holds, priced at ``depth``
         (``wire_room_label``) unless it is flat. ``chunked`` is a load
         that wires the experts in chunks, which GMLX_OVERCOMMIT=1 still
-        stops when reclaimable memory runs out. A set larger than RAM
+        stops when unwired memory runs out. A set larger than RAM
         gets the reason and the numbers, with no lever."""
         if self.past_ram:
             lever = ""
@@ -764,55 +781,62 @@ class WireCheck:
                 else "To keep them in memory, close other apps.")
         return (f"{STREAM_FREE_NOW}: holding them takes "
                 f"{_gb(self.wire_bytes)}, against "
-                f"{_gb(self.reclaimable_bytes)} of reclaimable memory less "
+                f"{_gb(self.unwired_bytes)} of memory not wired, less "
                 f"{_gb(self.keep_bytes)} {_kept(room, depth)}. "
                 f"{tail}{lever}")
 
-    def stop_line(self, *, wired: int, reclaimable: int, need: int,
-                  room: KvRoom | None = None,
+    def stop_line(self, *, wired: int, unwired: int, need: int,
+                  starved: bool = False, room: KvRoom | None = None,
                   depth: int | None = None) -> str:
-        """The stream line of a chunked wire that stopped: reclaimable
-        memory fell under the ``need`` of the next chunk with ``wired``
-        bytes of it wired, and did not rise. Under GMLX_OVERCOMMIT=1
-        each chunk kept only the kernel floor."""
+        """The stream line of a chunked wire that stopped with ``wired``
+        bytes of it wired: unwired memory fell under the ``need`` of the
+        next chunk and did not rise, or the kernel was ``starved`` of
+        free pages and did not recover. Under GMLX_OVERCOMMIT=1 each
+        chunk kept only the kernel floor."""
+        lever = "" if overcommit() else f" {OVERCOMMIT_LEVER}"
+        head = (f"{STREAM_FREE_NOW}: holding them takes "
+                f"{_gb(self.wire_bytes)}, and after {_gb(wired)} of it "
+                "wired, ")
+        if starved:
+            return (f"{head}the kernel ran out of free pages and did not "
+                    "recover. To keep them in memory, close other "
+                    f"apps.{lever}")
         if overcommit():
             beside = f"beside the {_gb(kernel_floor_bytes())} kernel floor"
-            lever = ""
         else:
             beside = (f"beside the {_gb(self.keep_bytes)} "
                       f"{_kept(room, depth)}")
-            lever = f" {OVERCOMMIT_LEVER}"
-        return (f"{STREAM_FREE_NOW}: holding them takes "
-                f"{_gb(self.wire_bytes)}, and after {_gb(wired)} of it "
-                f"wired, reclaimable memory stopped at {_gb(reclaimable)}, "
-                f"under the {_gb(need)} the next chunk needs {beside}. To "
-                f"keep them in memory, close other apps.{lever}")
+        return (f"{head}memory not wired stopped at {_gb(unwired)}, under "
+                f"the {_gb(need)} the next chunk needs {beside}. To keep "
+                f"them in memory, close other apps.{lever}")
 
 
 def check_resident_wire(wire_bytes: int, *, room_bytes: int,
                         budget: int | None = None) -> WireCheck:
     """Whether wiring ``wire_bytes`` resident leaves the box room: under
-    ``budget``, and under reclaimable RAM less the kept bytes
+    ``budget``, and under unwired RAM less the kept bytes
     (``wire_keep_bytes``), read live as the wire's chunk guard reads it
-    (``live_reclaimable_ram_bytes``). A wired page leaves the file-backed
-    count whether or not it was cached, so the model's own cached pages
-    earn no credit. A wire of at most ``WIRE_EXEMPT_BYTES`` is judged on the
-    budget only. GMLX_OVERCOMMIT=1 or an unreadable box admits, except a
-    set larger than RAM, which fails on the budget leg."""
+    (``unwired_ram_bytes``). Only wired memory is out of reach: the kernel
+    compresses or swaps other apps' memory, and drops file pages, to make
+    room. The model's own cached pages are unwired until the wire takes
+    them, so they count once. A wire of at most ``WIRE_EXEMPT_BYTES`` is
+    judged on the budget only. GMLX_OVERCOMMIT=1 or an unreadable box
+    admits, except a set larger than RAM, which fails on the budget
+    leg."""
     ram = ram_bytes()
     keep = wire_keep_bytes(room_bytes)
     w = max(0, int(wire_bytes))
-    rec = live_reclaimable_ram_bytes() if w > WIRE_EXEMPT_BYTES else None
+    free = unwired_ram_bytes() if w > WIRE_EXEMPT_BYTES else None
     reason = ""
     if not overcommit():
         if budget is not None and w > budget:
             reason = "budget"
-        elif rec is not None and w > rec - keep:
-            reason = "reclaimable"
+        elif free is not None and w > free - keep:
+            reason = "unwired"
     elif ram is not None and w > ram:
         # Overcommit keeps no set larger than RAM: it streams.
         reason = "budget"
-    return WireCheck(w, rec, keep, budget, reason, ram_bytes=ram)
+    return WireCheck(w, free, keep, budget, reason, ram_bytes=ram)
 
 
 def check_wire_beside_drafter(set_bytes: int, drafter_bytes: int, *,

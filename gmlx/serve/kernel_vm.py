@@ -149,6 +149,40 @@ def live_reclaimable_bytes() -> int | None:
     return pages * _PAGE
 
 
+# The sysctl page counts of unwired_bytes: every page a wire can take,
+# by dropping file pages or compressing other apps' memory.
+_UNWIRED_COUNTS = ("vm.page_free_count", "vm.page_pageable_internal_count",
+                   "vm.page_pageable_external_count")
+
+
+def unwired_bytes() -> int | None:
+    """Pages neither wired nor holding compressed data, read live from the
+    sysctl counts: free, and the pageable anonymous and file-backed pages
+    the kernel can compress or drop. A wire that stays under them leaves
+    the kernel pages to reclaim. A few reusable and kernel pages fall
+    outside all three counts, so this reads up to about 2 GB under RAM
+    less the wired and compressor pages. None off Darwin or when a read
+    fails."""
+    if sys.platform != "darwin":
+        return None
+    pages = 0
+    for name in _UNWIRED_COUNTS:
+        n = _sysctl_count(name)
+        if n is None:
+            return None
+        pages += n
+    return pages * _PAGE
+
+
+def free_wanted_pages() -> int | None:
+    """Threads' outstanding requests for free pages (vm.page_free_wanted),
+    live. Above zero, the kernel is waiting on reclaim. None off Darwin
+    or when the read fails."""
+    if sys.platform != "darwin":
+        return None
+    return _sysctl_count("vm.page_free_wanted")
+
+
 def available_bytes() -> int | None:
     """free + inactive, what mlx-vlm's ``_free_ram_bytes`` parses out of
     ``vm_stat``, read in process. A fork beside a Metal-mapped buffer

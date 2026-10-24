@@ -126,8 +126,9 @@ def is_gate(fixture_function) -> bool:
 def install() -> None:
     """Report the current machine from the lowest reads: MLX's
     ``device_info``, ``os.sysconf("SC_PHYS_PAGES")``,
-    ``gmlx.serve.kernel_vm.snapshot``, its live sysctl read
-    (``live_reclaimable_bytes``) and the free-RAM reads under it.
+    ``gmlx.serve.kernel_vm.snapshot``, its live sysctl reads
+    (``live_reclaimable_bytes``, ``unwired_bytes``,
+    ``free_wanted_pages``) and the free-RAM reads under it.
     Starts on ``default()``."""
     if os.environ.get(REAL_HOST_ENV, "") == "1" or _real:
         return
@@ -139,8 +140,11 @@ def install() -> None:
     real_info, real_sysconf = mx.device_info, os.sysconf
     real_snapshot, real_selfcheck = kernel_vm.snapshot, kernel_vm.selfcheck
     real_live = kernel_vm.live_reclaimable_bytes
+    real_unwired = kernel_vm.unwired_bytes
+    real_wanted = kernel_vm.free_wanted_pages
     _real.update(device_info=real_info, sysconf=real_sysconf,
-                 snapshot=real_snapshot, live_reclaimable=real_live)
+                 snapshot=real_snapshot, live_reclaimable=real_live,
+                 unwired=real_unwired, free_wanted=real_wanted)
 
     # A test turns the counters off with kernel_vm._disabled. The reported
     # counters are consistent, so the sysctl cross-check passes; run
@@ -177,6 +181,27 @@ def install() -> None:
                    + vm["filebacked"])
 
     kernel_vm.live_reclaimable_bytes = live_reclaimable_bytes
+
+    # RAM less the wired and compressor pages. A case sets ``free_wanted``
+    # in its counters for a kernel waiting on reclaim.
+    def unwired_bytes():
+        if _current["real"]:
+            return real_unwired()
+        if kernel_vm._disabled is not None:
+            return None
+        vm = _current["vm"]
+        return int(_current["box"]["memory_size"] - vm["wired"]
+                   - vm["compressor"])
+
+    def free_wanted_pages():
+        if _current["real"]:
+            return real_wanted()
+        if kernel_vm._disabled is not None:
+            return None
+        return int(_current["vm"].get("free_wanted", 0))
+
+    kernel_vm.unwired_bytes = unwired_bytes
+    kernel_vm.free_wanted_pages = free_wanted_pages
 
     def device_info(*args, **kwargs):
         info = dict(real_info(*args, **kwargs))
@@ -216,7 +241,8 @@ def real(name: str):
     """The real read ``install`` replaced: ``apc_free_ram`` (the copied
     mlx-vlm apc's stock read), ``vm_stat_free_ram`` (gmlx's
     /usr/bin/vm_stat read), ``snapshot`` (the mach counters),
-    ``live_reclaimable`` (their sysctl read) or ``sysconf``.
+    ``live_reclaimable``, ``unwired``, ``free_wanted`` (their sysctl
+    reads) or ``sysconf``.
     Without the simulation, the bound one."""
     if name in _real:
         return _real[name]
@@ -226,11 +252,13 @@ def real(name: str):
         from gmlx._vendor.mlx_vlm import apc
 
         return apc._free_ram_bytes
-    if name in ("snapshot", "live_reclaimable"):
+    if name in ("snapshot", "live_reclaimable", "unwired", "free_wanted"):
         from gmlx.serve import kernel_vm
 
-        return (kernel_vm.snapshot if name == "snapshot"
-                else kernel_vm.live_reclaimable_bytes)
+        return {"snapshot": kernel_vm.snapshot,
+                "live_reclaimable": kernel_vm.live_reclaimable_bytes,
+                "unwired": kernel_vm.unwired_bytes,
+                "free_wanted": kernel_vm.free_wanted_pages}[name]
     from gmlx.cache import apc_manager
 
     return apc_manager._vm_stat_free_ram_bytes

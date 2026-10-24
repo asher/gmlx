@@ -1895,11 +1895,10 @@ def test_validate_reports_the_table_read_from_the_file(tmp_path, monkeypatch,
         trained_ctx=None, table_bytes=135_172_021_600))
     monkeypatch.setattr(manage, "_ref_size_bytes",
                         lambda ref, report: 300_469_616_416)
-    # The load's check on the box, idle: 220 GiB reclaimable.
+    # The load's check on the box, idle: 220 GiB unwired.
     import gmlx.stream.budget as budget
     monkeypatch.setattr(budget, "ram_bytes", lambda: ram)
-    monkeypatch.setattr(budget, "live_reclaimable_ram_bytes",
-                        lambda: 220 << 30)
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda: 220 << 30)
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
     p = tmp_path / "moe.gguf"
     _mint_moe_bytes(p)
@@ -1941,9 +1940,9 @@ def test_validate_says_the_experts_stay_in_memory_with_the_memory_free_now(
 
 
 @pytest.mark.parametrize("total,free_gib,line", [
-    # 16 GiB reclaimable on a 64 GiB Mac: the reclaimable leg.
+    # 16 GiB unwired on a 64 GiB Mac: the unwired leg.
     (30_000_000_000, 10, "{free_now}: holding them takes 30.0 GB, against "
-     "17.2 GB of reclaimable memory less {keep} kept for the kernel floor "
+     "17.2 GB of memory not wired, less {keep} kept for the kernel floor "
      "and the KV room of 8.6 GB. To keep them in memory, close other apps. "
      "{lever}"),
     # In RAM, past the 43.2 GB budget of a 48 GB working set.
@@ -1964,7 +1963,9 @@ def test_validate_prints_the_stream_line_a_load_would_print(
     host_box.use(box, {"free": free_gib << 30, "inactive": 0,
                        "purgeable": 0, "speculative": 0,
                        "filebacked": 6 << 30,
-                       "wired": box["memory_size"] // 20, "compressor": 0})
+                       "wired": max(0, box["memory_size"]
+                                    - ((free_gib + 6) << 30)),
+                       "compressor": 0})
     _box(monkeypatch, ram_gb=64, ws_gb=48)
     for k in ("GMLX_OVERCOMMIT", "GMLX_WIRE_CHUNK_GB",
               "GMLX_DECODE_KV_RESERVE_GB"):
@@ -2005,7 +2006,7 @@ def test_validate_prints_the_stream_line_a_load_would_print(
      "offloaded to disk and its experts stay in memory", False),
     # Streaming turns auto MTP off, so the line counts the model alone.
     (10, 0, "{free_now}: holding them takes 30.0 GB, against 17.2 GB of "
-     "reclaimable memory less", True),
+     "memory not wired, less", True),
 ])
 def test_validate_prices_the_auto_mtp_head_a_run_loads(
         tmp_path, monkeypatch, capsys, free_gib, table, line, mtp_off):
@@ -2023,7 +2024,9 @@ def test_validate_prices_the_auto_mtp_head_a_run_loads(
     host_box.use(box, {"free": free_gib << 30, "inactive": 0,
                        "purgeable": 0, "speculative": 0,
                        "filebacked": 6 << 30,
-                       "wired": box["memory_size"] // 20, "compressor": 0})
+                       "wired": max(0, box["memory_size"]
+                                    - ((free_gib + 6) << 30)),
+                       "compressor": 0})
     _box(monkeypatch, ram_gb=64, ws_gb=48)
     for k in ("GMLX_OVERCOMMIT", "GMLX_WIRE_CHUNK_GB",
               "GMLX_DECODE_KV_RESERVE_GB"):
@@ -2059,7 +2062,7 @@ def test_validate_prices_the_auto_mtp_head_a_run_loads(
 def test_validate_offers_the_lever_of_the_load_it_models(
         tmp_path, monkeypatch, capsys, arch, chunked):
     # A 50 GB MoE whose 10 GB of tables alone bring it under the 43.2 GB
-    # budget, on a 64 GiB Mac with 16 GiB reclaimable. A table gathered
+    # budget, on a 64 GiB Mac with 16 GiB unwired. A table gathered
     # per layer streams beside experts that wire in chunks; one read
     # ahead is read from the file by a load that holds the rest.
     import host_box
@@ -2069,7 +2072,8 @@ def test_validate_offers_the_lever_of_the_load_it_models(
     box, _ = host_box.mac(64)
     host_box.use(box, {"free": 10 << 30, "inactive": 0, "purgeable": 0,
                        "speculative": 0, "filebacked": 6 << 30,
-                       "wired": box["memory_size"] // 20, "compressor": 0})
+                       "wired": box["memory_size"] - (16 << 30),
+                       "compressor": 0})
     _box(monkeypatch, ram_gb=64, ws_gb=48)
     for k in ("GMLX_OVERCOMMIT", "GMLX_WIRE_CHUNK_GB",
               "GMLX_DECODE_KV_RESERVE_GB", "GMLX_STREAM_PLE"):

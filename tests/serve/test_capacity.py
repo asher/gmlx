@@ -353,56 +353,49 @@ def test_preload_gate_keeps_a_streamed_residents_room(rig, monkeypatch):
 
 
 def test_preload_gate_kernel_floor(rig, monkeypatch):
-    # The kernel's view: other processes' pages are invisible to MLX
-    # accounting, so a load must also leave the governor's reclaimable
-    # floor standing. No armed floor (no governor) = no kernel check.
+    # The kernel's view: other processes' wired pages are invisible to MLX
+    # accounting, so a load must also leave the governor's floor unwired.
+    # No armed floor (no governor) = no kernel check.
     rig(weights_gb=10.0, ws_gb=20.0)
     import gmlx.serve.governor as gov
     import gmlx.serve.kernel_vm as kv
     import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 50.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 20.0 * GB)
-    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 6.0 * GB)
+    monkeypatch.setattr(kv, "unwired_bytes", lambda: 6.0 * GB)
     monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 0.0)
     cap.preload_gate(4.0 * GB, "unarmed")               # no governor: MLX only
     monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 3.0 * GB)
     cap.preload_gate(3.0 * GB, "fits")                   # 6 - 3 floor = 3
-    with pytest.raises(cap.LoadDeferred, match="reclaimable memory 6.0 GB"):
+    with pytest.raises(cap.LoadDeferred,
+                       match="the 6.0 GB of memory not wired less the 3.0 GB"):
         cap.preload_gate(4.0 * GB, "squeezed")
-    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: None)
+    monkeypatch.setattr(kv, "unwired_bytes", lambda: None)
     cap.preload_gate(4.0 * GB, "no-probe")               # probe unavailable admits
 
 
-def test_kernel_gate_credits_page_cache_resident_bytes(rig, monkeypatch):
-    # 2026-08-26 ladder stall: a fully-cached 90 GB model was refused
-    # because raw reclaimable (91 GB, mostly the model's OWN cached
-    # bytes) sat under weights + floor (98 GB). Wiring cached pages
-    # converts them, it does not allocate: the gate must judge only the
-    # not-yet-resident bytes.
+def test_kernel_gate_judges_the_whole_model_against_unwired_memory(
+        rig, monkeypatch):
+    # A 90 GB model on a 128 GiB Mac. Its cached pages are unwired until
+    # it runs, so they count once, in the reading: an idle box admits it,
+    # and 40 GB that another model holds wired defers it.
     rig(weights_gb=90.0, ws_gb=200.0)
     import gmlx.serve.governor as gov
     import gmlx.serve.kernel_vm as kv
     import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 500.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 200.0 * GB)
-    monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 8.0 * GB)
-    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 91.0 * GB)
-    monkeypatch.setattr(cap, "_resident_shard_bytes", lambda m: 87.0 * GB)
-    cap.preload_gate(90.0 * GB, "cached")           # need 3 GB <= 91 - 8
-    monkeypatch.setattr(cap, "_resident_shard_bytes", lambda m: 92.0 * GB)
-    cap.preload_gate(90.0 * GB, "fully-cached")     # need <= 0: admit outright
-    monkeypatch.setattr(cap, "_resident_shard_bytes", lambda m: 0.0)
-    with pytest.raises(cap.LoadDeferred, match="90.0 GB not yet page-cached"):
-        cap.preload_gate(90.0 * GB, "cold")
-    monkeypatch.setattr(cap, "_resident_shard_bytes", lambda m: 5.0 * GB)
-    with pytest.raises(cap.LoadDeferred, match="85.0 GB not yet page-cached"):
-        cap.preload_gate(90.0 * GB, "barely-cached")
+    monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 4.0 * GB)
+    monkeypatch.setattr(kv, "unwired_bytes", lambda: 125.0 * GB)
+    cap.preload_gate(90.0 * GB, "idle")
+    monkeypatch.setattr(kv, "unwired_bytes", lambda: 85.0 * GB)
+    with pytest.raises(cap.LoadDeferred, match="hold the rest wired"):
+        cap.preload_gate(90.0 * GB, "beside-another-model")
 
 
-def test_kernel_gate_judges_a_load_beside_a_stream_in_full(rig, monkeypatch):
-    # GPU work wires the pages it reads, so a fully cached model loaded
-    # beside a streamed model takes its whole size out of the RAM the
-    # stream holds. A streamed load mlocks its every-token weights.
+def test_kernel_gate_holds_a_resident_stream_s_room(rig, monkeypatch):
+    # The RAM a resident streamed model keeps is held back from the
+    # reading too, and a streamed load names its every-token weights.
     rig(weights_gb=30.0, ws_gb=200.0)
     import gmlx.serve.governor as gov
     import gmlx.serve.kernel_vm as kv
@@ -410,14 +403,13 @@ def test_kernel_gate_judges_a_load_beside_a_stream_in_full(rig, monkeypatch):
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 500.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 200.0 * GB)
     monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 4.0 * GB)
-    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 32.0 * GB)
-    monkeypatch.setattr(cap, "_resident_shard_bytes", lambda m: 30.0 * GB)
-    cap.preload_gate(30.0 * GB, "alone")            # cached: need 0
-    with pytest.raises(cap.LoadDeferred, match="wired once it runs"):
+    monkeypatch.setattr(kv, "unwired_bytes", lambda: 40.0 * GB)
+    cap.preload_gate(30.0 * GB, "alone")
+    with pytest.raises(cap.LoadDeferred, match="a resident streamed model"):
         cap.preload_gate(30.0 * GB, "beside", reserved_ram_bytes=10.0 * GB)
-    with pytest.raises(cap.LoadDeferred, match="wired once it runs"):
-        cap.preload_gate(30.0 * GB, "streamed", streaming=True)
-    cap.preload_gate(18.0 * GB, "fits-beside", reserved_ram_bytes=10.0 * GB)
+    cap.preload_gate(26.0 * GB, "fits-beside", reserved_ram_bytes=10.0 * GB)
+    with pytest.raises(cap.LoadDeferred, match="every-token weights 40.0 GB"):
+        cap.preload_gate(40.0 * GB, "streamed", streaming=True)
 
 
 def test_memfit_delegates_to_capacity(monkeypatch):
@@ -434,7 +426,7 @@ if __name__ == "__main__":
 
 def test_kernel_gate_waits_for_memory_still_being_freed(rig, monkeypatch):
     """A reload right after an unload reads the kernel before the torn-down
-    model's pages are back: the gate re-samples while reclaimable rises
+    model's pages are unwired: the gate re-samples while the reading rises
     and admits once it clears, and only defers once it stops rising."""
     rig(weights_gb=10.0, ws_gb=200.0)
     import gmlx.serve.governor as gov
@@ -448,14 +440,14 @@ def test_kernel_gate_waits_for_memory_still_being_freed(rig, monkeypatch):
     monkeypatch.setattr(_time, "sleep", lambda s: slept.append(s))
     # rising: 20 -> 60 -> 100 -> 120 GB; 104 + 8 needs 112
     readings = iter([60.0 * GB, 100.0 * GB, 120.0 * GB, 120.0 * GB])
-    monkeypatch.setattr(kv, "reclaimable_bytes",
+    monkeypatch.setattr(kv, "unwired_bytes",
                         lambda: next(readings, 120.0 * GB))
     cap.preload_gate(104.0 * GB, "reload")             # first read 60: waits, admits
     assert len(slept) == 2                              # 100, then 120 cleared it
     # flat: 20 -> 20 -> 20: two non-rising samples end the wait, deferred
     slept.clear()
-    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 20.0 * GB)
-    with pytest.raises(cap.LoadDeferred, match="reclaimable memory 20.0 GB"):
+    monkeypatch.setattr(kv, "unwired_bytes", lambda: 20.0 * GB)
+    with pytest.raises(cap.LoadDeferred, match="20.0 GB of memory not wired"):
         cap.preload_gate(104.0 * GB, "other-process")
     assert len(slept) == 2
     # rising but never enough: the deadline ends it
@@ -466,7 +458,7 @@ def test_kernel_gate_waits_for_memory_still_being_freed(rig, monkeypatch):
     def creeping():
         clock[0] += 1.0
         return 20.0 * GB + clock[0] * GB
-    monkeypatch.setattr(kv, "reclaimable_bytes", creeping)
+    monkeypatch.setattr(kv, "unwired_bytes", creeping)
     with pytest.raises(cap.LoadDeferred):
         cap.preload_gate(104.0 * GB, "creeping")
     assert 0 < len(slept) <= 4

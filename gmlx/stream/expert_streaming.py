@@ -182,26 +182,31 @@ def install_unflagged_tables(model, gguf_path: str | None, *,
     return True
 
 
-# The chunked wire's wait for reclaimable memory under a chunk's line:
-# a rise smaller than _WIRE_MIN_RISE does not count, the wait stops once
-# no rise has counted for _WIRE_STALL_S, and the waits of one wire add
-# up to at most _WIRE_WAIT_S.
-_WIRE_STALL_S = 1.0
+# The chunked wire's wait under a chunk's line: a rise of unwired memory
+# smaller than _WIRE_MIN_RISE does not count, nor does a free-page
+# request count that does not fall, the wait stops once nothing has
+# counted for _WIRE_STALL_S, and the waits of one wire add up to at most
+# _WIRE_WAIT_S.
+_WIRE_STALL_S = 2.0
 _WIRE_MIN_RISE = 256 << 20
-_WIRE_WAIT_S = 10.0
+_WIRE_WAIT_S = 60.0
 
 
 class _ChunkGuard:
-    """Before each chunk of a resident wire: True once reclaimable RAM,
-    read live (``budget.live_reclaimable_ram_bytes``), covers ``keep``
-    plus the chunk. With the pre-load check's keep, that check runs
-    again before each chunk: each chunk takes its bytes out of
-    reclaimable RAM, so a wire the check passed goes through, unless
-    another process grows or the wire costs more than its estimate.
-    Under the line it waits while the reading rises, and stops on a
-    stall or once the wire has waited ``wait_s`` in all. ``last``,
-    ``line`` and ``pending`` keep the final reading, the line it was
-    judged on and the chunk's bytes."""
+    """Before each chunk of a resident wire: True once unwired RAM, read
+    live (``budget.unwired_ram_bytes``), covers ``keep`` plus the chunk,
+    and no thread waits on the kernel for free pages
+    (``budget.free_wanted_pages``). With the pre-load check's keep, that
+    check runs again before each chunk: each chunk takes its bytes out of
+    unwired RAM, so a wire the check passed goes through, unless another
+    process wires more or the wire costs more than its estimate. A chunk
+    past the free and file-backed pages has the kernel compress other
+    apps' memory for it, and the free-page leg stops the wire if the
+    kernel falls behind. Short on either leg, it waits while unwired
+    memory rises or the requests fall, and stops on a stall or once the
+    wire has waited ``wait_s`` in all. ``last``, ``line``, ``pending``,
+    ``short`` and ``starved`` keep the final reading, the line it was
+    judged on, the chunk's bytes, and which legs were short."""
 
     def __init__(self, keep: float, *, stall_s: float | None = None,
                  wait_s: float | None = None,
@@ -215,6 +220,7 @@ class _ChunkGuard:
         self.last: int | None = None
         self.line = 0
         self.pending = 0
+        self.short = self.starved = False
 
     def __call__(self, nbytes: int) -> bool:
         from gmlx.stream import budget
@@ -222,15 +228,24 @@ class _ChunkGuard:
         self.pending = int(nbytes)
         self.line = self.keep + self.pending
         start = since = time.monotonic()
-        best = None
+        best = low = None
         try:
             while True:
-                self.last = budget.live_reclaimable_ram_bytes()
-                if self.last is None or self.last >= self.line:
+                self.last = budget.unwired_ram_bytes()
+                wanted = budget.free_wanted_pages()
+                self.short = self.last is not None and self.last < self.line
+                self.starved = wanted > 0
+                if not (self.short or self.starved):
                     return True
                 now = time.monotonic()
-                if best is None or self.last >= best + self.min_rise:
-                    best, since = self.last, now
+                rose = best is None or (self.last or 0) >= best + self.min_rise
+                eased = low is not None and wanted < low
+                if rose:
+                    best = self.last or 0
+                if low is None or wanted < low:
+                    low = wanted
+                if rose or eased:
+                    since = now
                 elif now - since >= self.stall_s:
                     return False
                 if self.waited + now - start >= self.wait_s:
@@ -347,7 +362,7 @@ def _wire_resident_experts(model, gguf_path, wire_bytes: int, *,
                            budget, prefill_step, skip_ids) -> bool:
     """The table-only install's resident set (every-token weights and the
     experts) judged against live memory, then wired in chunks, each once
-    reclaimable memory covers it beside the check's keep (``_ChunkGuard``;
+    unwired memory covers it beside the check's keep (``_ChunkGuard``;
     the kernel floor under GMLX_OVERCOMMIT=1). False when it does not fit
     or the wire stopped, with the line saying why; a stopped wire leaves
     the residency set (``_unwire``). The install then streams the
@@ -377,8 +392,8 @@ def _wire_resident_experts(model, gguf_path, wire_bytes: int, *,
     # The chunk the guard refused was inserted, never committed.
     wired = _unwire(model) - guard.pending
     loadlog.warn("[stream] " + check.stop_line(
-        wired=wired, reclaimable=guard.last or 0, need=guard.line,
-        room=room, depth=depth))
+        wired=wired, unwired=guard.last or 0, need=guard.line,
+        starved=guard.starved and not guard.short, room=room, depth=depth))
     return False
 
 
@@ -508,7 +523,7 @@ def install_expert_streaming(
 
     ``fallback`` is the leg of the run's check before the load that
     streamed the experts with no flag asked (``WireCheck.reason``:
-    ``budget`` or ``reclaimable``), so the lines name it, not a flag.
+    ``budget`` or ``unwired``), so the lines name it, not a flag.
     """
     from gmlx.load.modules import (
         glu_unsorted_call,
@@ -589,7 +604,7 @@ def install_expert_streaming(
     # live memory and wire it now, before anything is built on the plan,
     # so a set that does not fit streams the experts instead (compose).
     early_wired = False
-    fell_back = fallback == "reclaimable"
+    fell_back = fallback == "unwired"
     if table_only:
         from gmlx.stream.table_stream import streamed_table_array_ids
 

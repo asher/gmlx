@@ -952,12 +952,12 @@ def test_load_gate_keeps_the_resident_streams_ring_and_kv_room(monkeypatch):
     assert held.busy == 0
 
 
-def _ds41_beside(monkeypatch, *, ws, budget, headroom, reclaimable,
+def _ds41_beside(monkeypatch, *, ws, budget, headroom, unwired,
                  feeder, ring=None):
     """A pool with DeepSeek V4.1 Flash streamed and idle, and the two gates
     reading the given measures: ``headroom`` against the full working set
-    and ``reclaimable`` RAM after the arena was wired. The governor's
-    kernel floor is armed at 4 GB."""
+    and ``unwired`` RAM after the arena was wired. The governor's kernel
+    floor is armed at 4 GB."""
     import gmlx.gen.prefill_decay as pd
     import gmlx.serve.capacity as cap
     import gmlx.serve.governor as gov
@@ -968,8 +968,8 @@ def _ds41_beside(monkeypatch, *, ws, budget, headroom, reclaimable,
     monkeypatch.setattr(cap, "working_set_bytes", lambda: ws)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: budget)
     monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 4e9)
-    monkeypatch.setattr(kvm, "reclaimable_bytes", lambda: reclaimable)
-    monkeypatch.setattr(cap, "_settle_reclaimable", lambda f, rec, n: rec)
+    monkeypatch.setattr(kvm, "unwired_bytes", lambda: unwired)
+    monkeypatch.setattr(cap, "_settle_unwired", lambda f, free, n: free)
     monkeypatch.setattr(cap, "install_boot_table",
                         lambda path, b, label, env=None: None)
     proxy = _RuntimeProxy(_FakeOriginal())
@@ -1003,7 +1003,7 @@ def test_load_gate_holds_the_host_margins_in_ram_not_under_the_ceiling(
         monkeypatch):
     """DeepSeek V4.1 Flash on a stock 128 GB Mac with a 30 GiB arena, the
     documented way to keep a second model loaded. Loaded at 102 GB
-    reclaimable: 8.4 GB every-token, 32.2 GB arena, a 16.3 GB KV room
+    unwired: 8.4 GB every-token, 32.2 GB arena, a 16.3 GB KV room
     and a 9.3 GB ring held apart and released between prefills. The RAM
     outside the 97.9 GB ceiling holds the 9.6 GB floor and the 10.7 GB
     host overhead, so under the ceiling the stream keeps only its room
@@ -1016,7 +1016,7 @@ def test_load_gate_holds_the_host_margins_in_ram_not_under_the_ceiling(
     ring = SimpleNamespace(_slots=None, n_slots=2, slot_bytes=4.635e9)
     pool = _ds41_beside(
         monkeypatch, ws=ws, budget=0.95 * ws,
-        headroom=ws - 8.4e9 - 32.21e9, reclaimable=102e9 - 32.21e9,
+        headroom=ws - 8.4e9 - 32.21e9, unwired=102e9 - 32.21e9,
         feeder=dict(nominal_bytes=32.21e9, _room_bytes=16.33e9,
                     _floor_bytes=9.56e9, _host_bytes=10.74e9,
                     _outside_bytes=0, _ring_share=0),
@@ -1034,7 +1034,7 @@ def test_load_gate_holds_the_host_margins_in_ram_not_under_the_ceiling(
 def test_load_gate_defers_a_model_the_ram_beside_a_default_stream_lacks(
         monkeypatch):
     """DeepSeek V4.1 Flash served by default on a 128 GB M5 Max, loaded at
-    102 GB reclaimable: the arena took the RAM less the 9.6 GB floor, the
+    102 GB unwired: the arena took the RAM less the 9.6 GB floor, the
     17.2 GB room and the 10.7 GB host overhead (64.5 GB), and lends the
     ring's room at prefill. Under the 114.2 GB ceiling 24.1 GB look
     free, and the old ceiling-side margins left 3.8 GB, so a 3.5 GB model
@@ -1045,13 +1045,13 @@ def test_load_gate_defers_a_model_the_ram_beside_a_default_stream_lacks(
     ring = SimpleNamespace(_slots=None, n_slots=2, slot_bytes=4.635e9)
     pool = _ds41_beside(
         monkeypatch, ws=ws, budget=114.19e9,
-        headroom=ws - 8.4e9 - 64.51e9, reclaimable=102e9 - 64.51e9,
+        headroom=ws - 8.4e9 - 64.51e9, unwired=102e9 - 64.51e9,
         feeder=dict(nominal_bytes=64.51e9, _room_bytes=17.19e9,
                     _floor_bytes=9.56e9, _host_bytes=10.74e9,
                     _outside_bytes=0, _ring_share=9.27e9),
         ring=ring)
     assert pool._reserved_room_bytes() == pytest.approx(17.19e9)
-    with pytest.raises(cap.LoadDeferred, match="reclaimable memory"):
+    with pytest.raises(cap.LoadDeferred, match="memory not wired"):
         acquire(pool, "small")
 
 

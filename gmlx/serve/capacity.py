@@ -773,32 +773,32 @@ _SETTLE_STEP_S = 0.25
 _SETTLE_RISE = 256 * 1024 * 1024   # a sample must gain this much to count as rising
 
 
-def _settle_reclaimable(sample, rec, need: float):
-    """Re-sample the kernel's reclaimable memory while it is still rising,
-    for at most ``_SETTLE_S``. The kernel returns a torn-down model's
-    pages asynchronously: a request that arrives right after an unload
-    (a reload, or the switch that caused the eviction) would otherwise
-    read the pre-release number and be deferred for memory that lands a
-    moment later (2026-08-25: a 104 GB reload deferred straight after its
-    own unload). Two consecutive samples that do not rise, or ``need``
+def _settle_unwired(sample, free, need: float):
+    """Re-sample the memory not wired while it is still rising, for at
+    most ``_SETTLE_S``. The kernel unwires a torn-down model's pages
+    asynchronously: a request that arrives right after an unload (a
+    reload, or the switch that caused the eviction) would otherwise read
+    the pre-release number and be deferred for memory that lands a moment
+    later (2026-08-25: a 104 GB reload deferred straight after its own
+    unload). Two consecutive samples that do not rise, or ``need``
     reached, end the wait; the caller re-judges the returned reading."""
     import time
 
     deadline = time.monotonic() + _SETTLE_S
     flat = 0
-    while rec is not None and rec < need and time.monotonic() < deadline:
+    while free is not None and free < need and time.monotonic() < deadline:
         time.sleep(_SETTLE_STEP_S)
         new = sample()
         if new is None:
-            return rec
-        if new < rec + _SETTLE_RISE:
+            return free
+        if new < free + _SETTLE_RISE:
             flat += 1
             if flat >= 2:
-                return max(rec, new)
+                return max(free, new)
         else:
             flat = 0
-        rec = max(rec, new)
-    return rec
+        free = max(free, new)
+    return free
 
 
 def _kernel_gate(weight_bytes: float, model_id: str,
@@ -806,79 +806,46 @@ def _kernel_gate(weight_bytes: float, model_id: str,
                  floor_bytes: float = 0.0, *,
                  streaming: bool = False, quiet: bool = False) -> None:
     """The kernel's side of the same question: MLX accounting cannot see
-    other processes' pages (2026-08-25: ~16 GB of another app's pages in
-    the compressor let an 81 GB load through and Metal OOM'd). Below the
-    governor's kernel floor the serve loop sheds anyway, so a load that
-    would land there is deferred, not started. Reads the armed floor (0
-    without a governor: CLI paths, tests) and the same reclaimable sum
-    the governor samples. ``reserved_bytes`` is the RAM a resident
-    streamed model keeps (``preload_gate``), held back too, and
-    ``floor_bytes`` the host floor its arena leaves free. Both floors are
-    free RAM kept for the system, so the larger one applies.
-    ``streaming`` marks a load whose every-token weights are mlocked."""
+    other processes' pages (2026-08-25: another process's wired memory
+    let an 81 GB load through and Metal OOM'd). The weights wire once
+    they run, so a load that would leave less than the governor's kernel
+    floor unwired is deferred, not started. Reads the armed floor (0
+    without a governor: CLI paths, tests) and the memory not wired
+    (``kernel_vm.unwired_bytes``): other apps' memory counts, since the
+    kernel compresses or swaps it, and so do the model's own cached
+    pages, once. ``reserved_bytes`` is the RAM a resident streamed model
+    keeps (``preload_gate``), held back too, and ``floor_bytes`` the host
+    floor its arena leaves free. Both floors are free RAM kept for the
+    system, so the larger one applies. ``streaming`` marks a load whose
+    every-token weights are mlocked."""
     try:
         from .governor import armed_kernel_floor_bytes
-        from .kernel_vm import reclaimable_bytes
+        from .kernel_vm import unwired_bytes
 
         floor = max(float(armed_kernel_floor_bytes() or 0.0),
                     float(floor_bytes))
         if floor <= 0 and reserved_bytes <= 0:
             return
-        rec = reclaimable_bytes()
+        free = unwired_bytes()
     except Exception:
         return
-    # Credit the model's own page-cache-resident bytes: they are counted
-    # in the reclaimable sum, and wiring them converts pages instead of
-    # allocating new memory. Judged raw, a fully-cached 90 GB model
-    # needed reclaimable >= 98 GB -- ~11 GB of NON-model free memory --
-    # and deferred forever whenever day-to-day noise sat a few GB under
-    # that (2026-08-26: reclaimable steady at 91 GB, refused for 240 s).
-    # The credit stands only while no hold needs those pages to stay
-    # reclaimable. GPU work wires the pages it reads, so beside a
-    # streamed model's hold the load is judged in full. A streamed load
-    # mlocks its every-token weights, and its shard bytes count its
-    # experts too, so it takes no credit either.
-    held = streaming or reserved_bytes > 0
-    need = weight_bytes - (0.0 if held else _resident_shard_bytes(model_id))
+    need = float(weight_bytes)
     hold = floor + max(0.0, float(reserved_bytes))
-    if need <= 0 or rec is None or need <= rec - hold:
+    if need <= 0 or free is None or need <= free - hold:
         return
-    rec = _settle_reclaimable(reclaimable_bytes, rec, need + hold)
-    if rec is None or need <= rec - hold:
+    free = _settle_unwired(unwired_bytes, free, need + hold)
+    if free is None or need <= free - hold:
         return
     kept = (f" and the {reserved_bytes / GB:.1f} GB of KV room, ring and "
             "host overhead a resident streamed model keeps"
             if reserved_bytes > 0 else "")
-    cached = ("cached pages included: they are wired once it runs" if held
-              else f"{need / GB:.1f} GB not yet page-cached")
+    what = "every-token weights" if streaming else "weights"
     _defer(
-        f"model load deferred: {model_id} weights {weight_bytes / GB:.1f} GB "
-        f"({cached}) exceed the kernel's "
-        f"reclaimable memory {rec / GB:.1f} GB less the {floor / GB:.1f} GB "
-        f"floor{kept} (other processes hold the rest). Retry when memory "
-        f"frees, or GMLX_OVERCOMMIT=1 overrides.", quiet=quiet)
-
-
-def _resident_shard_bytes(model_id) -> float:
-    """Bytes of the model's shard files already in the page cache
-    (sampled mincore), when ``model_id`` is a GGUF path. 0.0 when it is
-    not a path or residency cannot be read -- the gate then judges the
-    full weight bytes, the conservative side."""
-    try:
-        from gmlx.load.populate import resident_fraction
-        from gmlx.load.preflight import find_split_shards
-
-        path = str(model_id)
-        if not os.path.exists(path):
-            return 0.0
-        total = 0.0
-        for p in find_split_shards(path):
-            frac = resident_fraction(p)
-            if frac:
-                total += os.path.getsize(p) * frac
-        return total
-    except Exception:
-        return 0.0
+        f"model load deferred: {model_id} {what} {weight_bytes / GB:.1f} GB "
+        f"exceed the {free / GB:.1f} GB of memory not wired less the "
+        f"{floor / GB:.1f} GB floor{kept} (other processes hold the rest "
+        f"wired). Retry when memory frees, or GMLX_OVERCOMMIT=1 "
+        f"overrides.", quiet=quiet)
 
 
 def install_boot_table(gguf_path: str, weight_bytes: float | None,
