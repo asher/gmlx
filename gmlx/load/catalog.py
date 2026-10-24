@@ -397,7 +397,14 @@ def box_for_class(cls: int) -> Box:
 
 
 def box_for_this_mac() -> Box:
-    """This Mac, from Metal when it answers, else from its RAM alone."""
+    """This Mac, from Metal when it answers, else from its RAM alone.
+    ``GMLX_PULL_RAM_GB=N`` answers for a stock N GB Mac instead, so the
+    picker can be read at another memory size."""
+    pretend = os.environ.get("GMLX_PULL_RAM_GB", "")
+    if pretend:
+        if not pretend.isdecimal() or int(pretend) == 0:
+            raise ValueError(f"GMLX_PULL_RAM_GB={pretend!r} is not a whole number of GB")
+        return box_for_class(int(pretend))
     from gmlx.gen.prefill_decay import cap_bytes_for
     from gmlx.load.memfit import total_ram_bytes
     from gmlx.serve.capacity import working_set_bytes, working_set_for_ram

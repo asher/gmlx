@@ -20,6 +20,7 @@ default.
 - [Attention and KV cache](#attention-and-kv-cache)
 - [Model kernels](#model-kernels)
 - [Streaming](#streaming)
+- [Pull](#pull)
 - [Chat](#chat)
 - [Training](#training)
 - [Profiling](#profiling)
@@ -255,6 +256,12 @@ other layer adds its delta on stock ops.
 | `GMLX_DECODE_LOOKAHEAD_MIN_P` | Reliability floor under which a prediction rank stops being submitted. The default is `0.5`. |
 | `GMLX_DECODE_LOOKAHEAD_CANCEL=0` | Let unrouted predictions read to completion instead of cancelling the unstarted ones. |
 | `GMLX_DECODE_LOOKAHEAD_IOPOL=0` | Run the prestage pool at default disk priority instead of utility priority on a disk that is not fast. |
+
+## Pull
+
+| Variable | Meaning |
+|----------|---------|
+| `GMLX_PULL_RAM_GB` | `gmlx pull` recommends for a stock Mac with this much memory instead of this one, so the picker and `--list` can be read at another size. |
 
 ## Chat
 

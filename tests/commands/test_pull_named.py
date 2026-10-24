@@ -101,6 +101,9 @@ _HEADERS = {
 }
 
 
+_REAL_BOX = catalog.box_for_this_mac   # the fixture below replaces it
+
+
 @pytest.fixture
 def cat(monkeypatch, tmp_path):
     """The fixture catalog on a 32 GiB Mac, offline, with a config whose
@@ -726,3 +729,21 @@ def test_a_refused_config_path_stops_before_the_picker(cat, tmp_path, monkeypatc
     folder.mkdir()
     assert manage.cmd_pull(["--config", str(folder)]) == 2
     assert "error:" in capsys.readouterr().err
+
+
+def test_pull_ram_gb_reads_the_catalog_as_another_mac(cat, monkeypatch, capsys):
+    monkeypatch.setattr(catalog, "box_for_this_mac", _REAL_BOX)
+    monkeypatch.setenv("GMLX_PULL_RAM_GB", "16")
+    assert manage.cmd_pull(["--list"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("This Mac has 16 GB of memory.")
+    sixteen = catalog.box_for_class(16)
+    assert catalog.box_for_this_mac() == sixteen
+    assert out.rstrip("\n") == catalog.recommendation_text(catalog.groups_for(sixteen), sixteen).rstrip("\n")
+    assert "needs a 32 GB Mac" in out          # not the fixture's 32 GB listing
+    monkeypatch.setenv("GMLX_PULL_RAM_GB", "lots")
+    assert manage.cmd_pull(["--list"]) == 2
+    assert capsys.readouterr().err == "error: GMLX_PULL_RAM_GB='lots' is not a whole number of GB\n"
+    monkeypatch.setenv("GMLX_PULL_RAM_GB", "0")
+    assert manage.cmd_pull(["dense", "--list"]) == 2
+    assert "not a whole number" in capsys.readouterr().err

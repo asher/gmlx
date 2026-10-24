@@ -1864,11 +1864,22 @@ def _plan_from_pick(row, rung, on_ids, box):
                        drafter=("drafter" in on) if m.drafter is not None else None)
 
 
+def _this_box(pc):
+    """This Mac's Box, or None after the error when GMLX_PULL_RAM_GB is garbage."""
+    try:
+        return pc.box_for_this_mac()
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return None
+
+
 def _pull_recommended(a) -> int:
     """``gmlx pull`` with no ref: the picker on a terminal, else the list."""
     from gmlx.load import catalog as pc
 
-    box = pc.box_for_this_mac()
+    box = _this_box(pc)
+    if box is None:
+        return 2
     groups = pc.groups_for(box)
     if a.list or a.json or not _want_interactive():
         if a.json:
@@ -1916,7 +1927,9 @@ def _pull_named(a, m) -> int:
     its quality tiers and nothing downloaded."""
     from gmlx.load import catalog as pc
 
-    box = pc.box_for_this_mac()
+    box = _this_box(pc)
+    if box is None:
+        return 2
     if a.list:
         if a.json:
             print(json.dumps(_model_json(m, box), indent=2))
