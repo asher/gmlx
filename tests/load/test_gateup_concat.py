@@ -218,8 +218,9 @@ def test_prefill_mix_matches_eager(tokens, concat, monkeypatch):
     assert np.linalg.norm(a - b) / (np.linalg.norm(b) + 1e-9) < 5e-3
 
 
+@pytest.mark.parametrize("batch", [1, 2])
 @pytest.mark.parametrize("concat", [True, False])
-def test_prefill_row_map_matches_the_sorted_copy(concat, monkeypatch):
+def test_prefill_row_map_matches_the_sorted_copy(concat, batch, monkeypatch):
     """Where mlx-kquant reads the rows through the sort's row map, the
     sorted prefill writes the bits of the path that builds the sorted copy
     of the activations, on the gate+up concat and on the two gathers."""
@@ -229,8 +230,9 @@ def test_prefill_row_map_matches_the_sorted_copy(concat, monkeypatch):
     monkeypatch.setattr(modules, "_GATEUP_CONCAT_ENABLED", concat)
     rng = np.random.default_rng(13)
     model = _build(rng)
-    x, inds = _prefill_inputs(rng, 150)
-    scores = mx.array(rng.random((1, 150, 4)).astype(np.float16))
+    x = mx.array(rng.standard_normal((batch, 150, DIM)).astype(np.float16))
+    inds = mx.array(rng.integers(0, E, (batch, 150, 4)).astype(np.uint32))
+    scores = mx.array(rng.random((batch, 150, 4)).astype(np.float16))
     mapped = []
     real = KQuantSwitchLinear._sorted_expert_gemm
 
@@ -249,5 +251,5 @@ def test_prefill_row_map_matches_the_sorted_copy(concat, monkeypatch):
     y_copy = model.experts(x, inds, scores)
     mx.eval(y_copy)
     assert not any(mapped)
-    assert y_map.shape == y_copy.shape == (1, 150, DIM)
+    assert y_map.shape == y_copy.shape == (batch, 150, DIM)
     assert mx.array_equal(y_map, y_copy).item()
