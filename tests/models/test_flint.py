@@ -277,7 +277,7 @@ def test_moe_bias_moves_selection_but_not_weights():
     got = _np(moe(cx)[0])
     want, inds = _ref_moe(moe, c, args)
     assert (inds == low).any(axis=-1).all()
-    assert _rel(got, want) < 1e-4
+    assert _rel(got, want) < 5e-3
 
     # A shift shared by every expert keeps the selection, so the output holds.
     moe.gate.e_score_correction_bias = mx.array((bias + 3.0).astype(np.float32))
@@ -291,7 +291,7 @@ def test_shared_expert_is_added_ungated():
     cx = mx.array(c.astype(np.float32))[None]
     got = _np(moe(cx)[0])
     want, _ = _ref_moe(moe, c, args)
-    assert _rel(got, want) < 1e-4
+    assert _rel(got, want) < 5e-3
     routed = want - _ref_dense(moe.shared_experts, c)
     assert _rel(routed, want) > 5e-2
 

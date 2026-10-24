@@ -26,6 +26,7 @@ def fake_kq(monkeypatch):
         # setenv first, so teardown also drops a key the test sets.
         monkeypatch.setenv(k, "")
         monkeypatch.delenv(k)
+    monkeypatch.delenv("GMLX_CB_COARSE_DECODE", raising=False)
     monkeypatch.setitem(cb_phase._state, "kq",
                         SimpleNamespace(set_cb_caps=set_cb_caps))
     monkeypatch.setitem(cb_phase._state, "phase", None)
@@ -98,7 +99,7 @@ def test_flip_dedupes(fake_kq):
     cb_phase.flip("decode")
     cb_phase.flip("prefill")
     cb_phase.flip("decode")
-    assert fake_kq == [cb_phase.COARSE, cb_phase.FINE, cb_phase.COARSE]
+    assert fake_kq == [cb_phase.RAM_DECODE, cb_phase.FINE, cb_phase.RAM_DECODE]
 
 
 def test_flip_noop_without_kq(monkeypatch):
@@ -202,12 +203,12 @@ def test_phased_steps_flips_at_first_token(fake_kq):
     gen = cb_phase.phased_steps(steps())
     assert fake_kq == []  # nothing until iteration starts
     assert next(gen) == "t0"
-    assert fake_kq == [cb_phase.FINE, cb_phase.COARSE]
+    assert fake_kq == [cb_phase.FINE, cb_phase.RAM_DECODE]
     assert list(gen) == ["t1", "t2"]
-    assert fake_kq == [cb_phase.FINE, cb_phase.COARSE]
+    assert fake_kq == [cb_phase.FINE, cb_phase.RAM_DECODE]
     # the next prompt's prefill flips fine again
     list(cb_phase.phased_steps(steps()))
-    assert fake_kq == [cb_phase.FINE, cb_phase.COARSE] * 2
+    assert fake_kq == [cb_phase.FINE, cb_phase.RAM_DECODE] * 2
 
 
 def test_phased_steps_close_closes_wrapped_generator(fake_kq):
@@ -243,7 +244,7 @@ def test_install_steps_wraps_generate_step_once(monkeypatch, fake_kq):
         assert cb_phase.install_cb_phase_steps() is True
         assert lmgen.generate_step._gmlx_cb_phase
         assert lmgen.speculative_generate_step._gmlx_cb_phase
-        # gmlx run's own speculative loop decodes on coarse caps too
+        # gmlx run's own speculative loop decodes on the decode caps too
         assert spec.stream_speculative._gmlx_cb_phase
         first = lmgen.generate_step
         assert cb_phase.install_cb_phase_steps() is True
@@ -302,15 +303,34 @@ def test_chat_installs_the_phased_steps_as_run_does(monkeypatch, tmp_path,
     assert seen == ["installed"]
 
 
-def test_decode_caps_follow_the_streaming_verdict():
+def test_decode_caps_follow_the_streaming_verdict(monkeypatch):
     """A streamed decode syncs on the host at every layer, so it decodes on
-    the streamed caps; a model in RAM keeps the coarse decode caps."""
+    the streamed caps; a model in RAM decodes on RAM_DECODE."""
     import gmlx.serve.cb_phase as cb_phase
 
-    assert cb_phase.STREAMED_DECODE != cb_phase.COARSE
+    monkeypatch.delenv("GMLX_CB_COARSE_DECODE", raising=False)
+    assert cb_phase.STREAMED_DECODE != cb_phase.RAM_DECODE
     assert cb_phase.decode_caps(_model(True)) == cb_phase.STREAMED_DECODE
-    assert cb_phase.decode_caps(_model(False)) == cb_phase.COARSE
-    assert cb_phase.decode_caps(None) == cb_phase.COARSE
+    assert cb_phase.decode_caps(_model(False)) == cb_phase.RAM_DECODE
+    assert cb_phase.decode_caps(None) == cb_phase.RAM_DECODE
+
+
+@pytest.mark.parametrize("value", ["1", "0"])
+def test_the_coarse_decode_switch_moves_decode_only(monkeypatch, fake_kq, value):
+    """GMLX_CB_COARSE_DECODE=1 decodes a model in RAM on COARSE. A streamed
+    decode and every prefill keep their caps, and any other value keeps
+    RAM_DECODE."""
+    import gmlx.serve.cb_phase as cb_phase
+
+    monkeypatch.setenv("GMLX_CB_COARSE_DECODE", value)
+    want = cb_phase.COARSE if value == "1" else cb_phase.RAM_DECODE
+    assert cb_phase.RAM_DECODE != cb_phase.COARSE
+    assert cb_phase.decode_caps(_model(False)) == want
+    assert cb_phase.decode_caps(_model(True)) == cb_phase.STREAMED_DECODE
+    assert cb_phase.prefill_caps(_model(False)) == cb_phase.FINE
+    cb_phase.flip("prefill", _model(False))
+    cb_phase.flip("decode", _model(False))
+    assert fake_kq == [cb_phase.FINE, want]
 
 
 def test_prefill_caps_follow_the_streaming_verdict(fake_kq, distinct_prefill):
@@ -353,8 +373,8 @@ def test_engine_steps_set_each_models_caps(monkeypatch, fake_kq,
     ar.PromptProcessingBatch.generate(prompt_ram)
     ar.PromptProcessingBatch.prompt_step(prompt)
     ar.GenerationBatch._step(streamed)
-    wanted = [cb_phase.COARSE, cb_phase.COARSE, cb_phase.STREAMED_DECODE,
-              cb_phase.COARSE, cb_phase.FINE, cb_phase.STREAMED_PREFILL,
+    wanted = [cb_phase.RAM_DECODE, cb_phase.RAM_DECODE, cb_phase.STREAMED_DECODE,
+              cb_phase.RAM_DECODE, cb_phase.FINE, cb_phase.STREAMED_PREFILL,
               cb_phase.STREAMED_DECODE]
     assert fake_kq == [c for i, c in enumerate(wanted)
                        if i == 0 or c != wanted[i - 1]]
@@ -414,7 +434,7 @@ def test_a_streamed_prefill_runs_on_the_fine_caps(monkeypatch, fake_kq):
         # A model in RAM decodes in between, so each prefill writes its caps.
         cb_phase.flip("decode", _model(False))
         prefill()
-    assert fake_kq == [(400, 100000), (50, 50)] * len(prefills)
+    assert fake_kq == [cb_phase.RAM_DECODE, (50, 50)] * len(prefills)
 
 
 def _caps_forward(seen):
@@ -677,7 +697,7 @@ def test_engine_threads_leave_the_record_on_the_device_caps(monkeypatch,
 
     def set_cb_caps(ops, mb):
         device.append((ops, mb))
-        if (ops, mb) == cb_phase.COARSE and not go.is_set():
+        if (ops, mb) == cb_phase.RAM_DECODE and not go.is_set():
             entered.set()
             go.wait(5)
         return ops, mb
@@ -695,5 +715,5 @@ def test_engine_threads_leave_the_record_on_the_device_caps(monkeypatch,
     go.set()
     resident.join(5)
     streamed.join(5)
-    assert device == [cb_phase.COARSE, cb_phase.STREAMED_DECODE]
+    assert device == [cb_phase.RAM_DECODE, cb_phase.STREAMED_DECODE]
     assert cb_phase._state["caps"] == device[-1]

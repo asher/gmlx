@@ -294,6 +294,23 @@ def test_gqa_decode_hd512_eligibility(monkeypatch):
     assert not _gqa_elig(16, 1, 65536)
 
 
+def test_gqa_decode_hd128_routes_flint_from_the_floor(monkeypatch):
+    # One row with a group of 8 at head_dim 128 takes kq.sdpa_decode_gqa at
+    # and above GMLX_GQA_SDPA_MINKV128; a group of 4 and a batch stay stock.
+    monkeypatch.setattr(attn_hd512, "_GQA_MIN_KV_128", 1024)
+
+    def elig(hq, hkv, kL, b=1):
+        return attn_hd512._gqa_decode_eligible(
+            mx.zeros((b, hq, 1, 128), dtype=mx.bfloat16),
+            mx.zeros((b, hkv, kL, 128), dtype=mx.bfloat16),
+            mx.zeros((b, hkv, kL, 128), dtype=mx.bfloat16), None)
+
+    assert elig(32, 4, 1024)
+    assert not elig(32, 4, 1023)
+    assert not elig(32, 8, 65536)
+    assert not elig(32, 4, 65536, b=2)
+
+
 def test_gqa_decode_hd512_nax_eligibility(monkeypatch):
     # With it, every KV-head count with a group of 2 to 8 takes the op
     # once KV heads x batch x keys reaches 3072. A group of 16 stays on

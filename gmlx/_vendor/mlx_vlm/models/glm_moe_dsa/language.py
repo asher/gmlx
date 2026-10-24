@@ -19,6 +19,7 @@ from ..deepseek_v32.language import Model as DSV32Model
 from ..mla import latent_length, max_absorbed_queries
 from .config import ModelConfig
 from .speculative_verifier import GlmMoeDsaExactSpeculativeVerifier, verify_logits
+from gmlx.cache.kv_append import depends_keys  # gmlx: keeps the in-place kv append
 
 _SPECULATIVE_VERIFIER = GlmMoeDsaExactSpeculativeVerifier()
 
@@ -100,7 +101,7 @@ class GlmMoeDsaAttention(DeepseekV32Attention):
                 mask = sparse_mask
 
         if self.indexer is not None and cache is not None and cache[0] is not None:
-            cache[0].keys = mx.depends(cache[0].keys, (cache[1].keys, cache[1].values))
+            depends_keys(cache[0], (cache[1].keys, cache[1].values))  # gmlx: keeps the in-place kv append
 
         pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
         if mask is not None:

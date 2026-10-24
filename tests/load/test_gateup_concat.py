@@ -216,3 +216,40 @@ def test_prefill_mix_matches_eager(tokens, concat, monkeypatch):
     a = np.array(y_fused, np.float32)
     b = np.array(y_eager, np.float32)
     assert np.linalg.norm(a - b) / (np.linalg.norm(b) + 1e-9) < 5e-3
+
+
+@pytest.mark.parametrize("batch", [1, 2])
+@pytest.mark.parametrize("concat", [True, False])
+def test_prefill_row_map_matches_the_sorted_copy(concat, batch, monkeypatch):
+    """Where mlx-kquant reads the rows through the sort's row map, the
+    sorted prefill writes the bits of the path that builds the sorted copy
+    of the activations, on the gate+up concat and on the two gathers."""
+    from mlx_kquant.nn import KQuantSwitchLinear
+    if not getattr(KQuantSwitchLinear, "takes_x_rows", False):
+        pytest.skip("mlx_kquant without x_rows")
+    monkeypatch.setattr(modules, "_GATEUP_CONCAT_ENABLED", concat)
+    rng = np.random.default_rng(13)
+    model = _build(rng)
+    x = mx.array(rng.standard_normal((batch, 150, DIM)).astype(np.float16))
+    inds = mx.array(rng.integers(0, E, (batch, 150, 4)).astype(np.uint32))
+    scores = mx.array(rng.random((batch, 150, 4)).astype(np.float16))
+    mapped = []
+    real = KQuantSwitchLinear._sorted_expert_gemm
+
+    def spy(self, x, indices, x_rows=None):
+        mapped.append(x_rows is not None)
+        return real(self, x, indices, x_rows)
+
+    monkeypatch.setattr(KQuantSwitchLinear, "_sorted_expert_gemm", spy)
+    y_map = model.experts(x, inds, scores)
+    mx.eval(y_map)
+    # gate and up read through the map (one concat gather or two); the down
+    # gather's input is already sorted
+    assert mapped == ([True, False] if concat else [True, True, False])
+    monkeypatch.setattr(modules, "_ROW_MAP_ENABLED", False)
+    mapped.clear()
+    y_copy = model.experts(x, inds, scores)
+    mx.eval(y_copy)
+    assert not any(mapped)
+    assert y_map.shape == y_copy.shape == (batch, 150, DIM)
+    assert mx.array_equal(y_map, y_copy).item()

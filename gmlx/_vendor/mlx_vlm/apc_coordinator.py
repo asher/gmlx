@@ -16,7 +16,7 @@ from .apc_adapters import (
     build_prefix_cache_plan,
     cache_memory_components,
 )
-from .models.cache import CacheMemory
+from .models.cache import CacheMemory, KVCache
 
 
 class PrefillMemoryPlan:
@@ -80,11 +80,19 @@ class PrefillMemoryPlan:
 
     def observe_kv(self, keys, values, *, live_bytes: int) -> int:
         # Raw float KV slabs expose growth through their token axis.
+        # gmlx: the slabs come from caches that grow on the capacity grid
+        # (gmlx/cache/kv_append.py), so the prediction rounds up to it.
+        from gmlx.cache.kv_append import grow_levers
+
+        div, cap = grow_levers()
         return self.observe(
             (
                 CacheMemory(
                     source_bytes=k.nbytes + v.nbytes,
                     bytes_per_token=(k.nbytes + v.nbytes) / k.shape[2],
+                    step=KVCache.step,
+                    grow_div=div,
+                    grow_cap=cap,
                 )
                 for k, v in zip(keys, values)
                 if k.shape[2]

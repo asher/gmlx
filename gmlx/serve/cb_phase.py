@@ -1,8 +1,10 @@
 """Per-phase MLX command-buffer split caps.
 
-Decode on a model in RAM wants coarse buffers: at the device defaults a
-step's encode splits into enough command buffers that submission blocks
-on in-flight drain, so the engine's async lookahead hides nothing. Deep
+Decode on a model in RAM runs on RAM_DECODE, 50 ops per buffer with no
+size cap: at the device's 50 MB cap a step's encode splits into enough
+command buffers that submission blocks on in-flight drain, so the engine's
+async lookahead hides nothing. GMLX_CB_COARSE_DECODE=1 decodes on COARSE
+instead. Deep
 prefill in RAM needs fine buffers: a giant buffer keeps every layer's
 transients live at once and can exhaust GPU memory on multi-thousand-token
 chunks. A streamed model decodes the other way round. Its decode syncs on
@@ -33,6 +35,10 @@ import threading
 
 COARSE = (400, 100000)
 FINE = (50, 50)  # the MLX device defaults on a Max or Ultra chip
+# Decode caps of a model in RAM. Across seven models at 512 to 67k keys,
+# (50, 100000) decoded up to 4.6% faster than COARSE, and slower on none
+# outside the run's spread.
+RAM_DECODE = (50, 100000)
 # Decode caps of a model whose experts stream from the drive. On DeepSeek
 # V4.1 Flash served streamed, (50, 50) decoded 0.63 ms per token faster
 # than (400, 100000), output identical.
@@ -94,8 +100,11 @@ def _streamed(model) -> bool:
 
 def decode_caps(model) -> tuple[int, int]:
     """The decode caps for ``model``: STREAMED_DECODE when its experts
-    stream from the drive, COARSE otherwise."""
-    return STREAMED_DECODE if _streamed(model) else COARSE
+    stream from the drive, RAM_DECODE otherwise (COARSE under
+    GMLX_CB_COARSE_DECODE=1)."""
+    if _streamed(model):
+        return STREAMED_DECODE
+    return COARSE if os.environ.get("GMLX_CB_COARSE_DECODE") == "1" else RAM_DECODE
 
 
 def prefill_caps(model) -> tuple[int, int]:

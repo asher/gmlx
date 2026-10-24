@@ -28,6 +28,7 @@ from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig
 from gmlx._vendor.mlx_vlm.models.rope_utils import initialize_rope
 
+from gmlx.cache import window_sdpa
 from gmlx.cache.attention import create_attention_mask
 from gmlx.cache.kv_cache import KVCache, RotatingKVCache, create_causal_mask
 
@@ -227,10 +228,13 @@ class Attention(nn.Module):
         shared_kv: Optional[tuple] = None,
         offset: Optional[Any] = None,
         keep_last: Optional[int] = None,
+        window: Optional[int] = None,
     ) -> mx.array:
         B, L, _ = x.shape
         # gmlx: keep_last runs the queries, and so the output, on the last
-        # keep_last columns. Keys and values still come from all L.
+        # keep_last columns. Keys and values still come from all L. A
+        # sliding layer given ``window`` has a plain band mask, which the
+        # window kernel can stand in for.
         xq = x if keep_last is None else x[:, -keep_last:, :]
         Lq = xq.shape[1]
 
@@ -270,9 +274,14 @@ class Attention(nn.Module):
             queries, offset=offset if Lq == L else offset + (L - Lq)
         )
 
-        output = scaled_dot_product_attention(
-            queries, keys, values, cache=cache, scale=self.scale, mask=mask
+        output = window_sdpa.claim(
+            queries, keys, values, cache, self.scale,
+            window if self.is_sliding else None,
         )
+        if output is None:
+            output = scaled_dot_product_attention(
+                queries, keys, values, cache=cache, scale=self.scale, mask=mask
+            )
         output = output.transpose(0, 2, 1, 3).reshape(B, Lq, -1)
 
         return self.o_proj(output), (keys, values), offset
@@ -348,6 +357,7 @@ class DecoderLayer(nn.Module):
         shared_kv: Optional[tuple] = None,
         offset: Optional[Any] = None,
         keep_last: Optional[int] = None,
+        window: Optional[int] = None,
     ) -> mx.array:
         # gmlx: keep_last writes the cache from all columns and runs the
         # rest of the layer on the last keep_last.
@@ -360,7 +370,8 @@ class DecoderLayer(nn.Module):
 
         h = self.input_layernorm(x)
         h, shared_kv, offset = self.self_attn(
-            h, mask, cache, shared_kv=shared_kv, offset=offset, **kept
+            h, mask, cache, shared_kv=shared_kv, offset=offset, window=window,
+            **kept
         )
         h = self.post_attention_layernorm(h)
         h = residual + h
@@ -450,6 +461,8 @@ def _chunk_token_types(token_types, n, cache):
 class Gemma4TextModel(nn.Module):
     # gmlx: set by LanguageModel.set_dflash_capture.
     _dflash_capture: Optional[tuple] = None
+    # gmlx: set by _make_masks.
+    _sliding_band: bool = False
 
     def __init__(self, config: TextConfig, kv_shared_only: bool = False):
         super().__init__()
@@ -664,6 +677,9 @@ class Gemma4TextModel(nn.Module):
                         mm_token_type_ids,
                     )
             masks.append(mask[l.layer_type])
+        # gmlx: whether the sliding mask is a plain band, which the window
+        # kernel can stand in for. The forward reads it right after the call.
+        self._sliding_band = not use_bidirectional_vision
         return masks
 
     def __call__(
@@ -720,8 +736,10 @@ class Gemma4TextModel(nn.Module):
             if mm_token_type_ids is None:
                 mm_token_type_ids = token_type_ids
             masks = self._make_masks(h, cache, mm_token_type_ids)
+            window = self.window_size if self._sliding_band else None
         else:
             masks = [mask] * len(self.layers)
+            window = None
 
         # Forward through layers
         if per_layer_inputs is not None:
@@ -800,7 +818,8 @@ class Gemma4TextModel(nn.Module):
             if trimmed_prefix:
                 offset = offset + trimmed_prefix
             h, kvs, offset = layer(
-                h, m, c, per_layer_input=pli, shared_kv=kvs, offset=offset, **kept
+                h, m, c, per_layer_input=pli, shared_kv=kvs, offset=offset,
+                window=window, **kept
             )
             intermediates[idx] = (kvs, offset)
             if hidden_sink is not None and idx in capture_set:

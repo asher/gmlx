@@ -343,6 +343,25 @@ def test_every_scan_pairs_heads_in_the_order_it_is_given(
                               use_kernel=use_kernel), atol=1e-2)
 
 
+@pytest.mark.parametrize("use_kernel", (True, False), ids=("kernel", "chunked"))
+def test_a_prefill_cut_on_a_64_token_multiple_leaves_the_scan_unchanged(
+        on_device, use_kernel):
+    """The checkpoint grid of a recurrent layout can cut a wide prefill
+    chunk at a 2048-token multiple (``ckpt._resident_run_step``). One
+    update over all the rows equals two updates split on a multiple of
+    the chunked scan's 64 rows, output and state, to the bit."""
+    kw = _inputs(192)
+    y, state = _update(kw, False, use_kernel=use_kernel)
+    seq = ("q", "k", "v", "a", "b")
+    head = dict(kw, **{n: kw[n][:, :128] for n in seq})
+    y1, s1 = _update(head, False, use_kernel=use_kernel)
+    tail = dict(kw, state=s1, **{n: kw[n][:, 128:] for n in seq})
+    y2, s2 = _update(tail, False, use_kernel=use_kernel)
+    mx.eval(y, state, y1, y2, s2)
+    assert mx.array_equal(mx.concatenate([y1, y2], axis=1), y).item()
+    assert mx.array_equal(s2, state).item()
+
+
 @pytest.mark.parametrize("tiled", (False, True), ids=("grouped", "tiled"))
 def test_chunked_prefill_scan_pairs_heads_in_the_order_it_is_given(
         on_device, tiled, monkeypatch):

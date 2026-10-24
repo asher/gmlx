@@ -259,10 +259,15 @@ class GmlxAPCManager(_apc.APCManager):
             # local + pools per layer); walking the wrapper's vars sees
             # cache objects, not arrays, and counts zero.
             total = 0
+            seen = set()
             for c in _leaf_caches(e.prompt_cache):
                 for v in vars(c).values():
                     for a in _arrays(v):
-                        total += a.nbytes
+                        # One count per array (the append's ``_kv_own``
+                        # holds a second handle on a cache's buffers).
+                        if id(a) not in seen:
+                            seen.add(id(a))
+                            total += a.nbytes
             return total
 
         with self.lock:

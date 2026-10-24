@@ -116,40 +116,52 @@ def test_a_big_wire_chunk_still_takes_both_live_legs(monkeypatch):
     assert isinstance(seen["guard"], es._ChunkGuard)
 
 
-def test_a_16gb_box_keeps_its_moe_resident_under_the_capped_keep():
-    # A 7 GB MoE at a small run room on a mostly idle 16 GB Mac. Uncapped,
-    # the 9.5 GiB of fixed floor and overhead would stream it.
+def test_a_16gb_box_keeps_its_moe_resident():
+    # A 7 GB MoE at a small run room on a mostly idle 16 GB Mac. The arena's
+    # 9.5 GiB of fixed floor and overhead would stream it.
     box, _ = host_box.mac(16)
-    ram = box["memory_size"]
     _box(box, rec=12 * GiB, fast=10 * GiB)
     check = _check(7e9, room=1 * GiB)
-    assert check.fits and check.capped
-    assert check.keep_bytes == ram // 5
-    uncapped = budget.keep_bytes(ram, 1 * GiB, budget.host_overhead_bytes(ram))
-    assert 7e9 > 12 * GiB - uncapped
+    assert check.fits
+    assert check.keep_bytes == int(budget.kernel_floor_bytes()) + GiB
+
+
+def test_the_keep_is_the_kernel_floor_and_the_room():
+    # The check reads reclaimable memory after the load: the arena's host
+    # floor and host overhead are out of it already.
+    box, _ = host_box.mac(128)
+    _box(box, rec=100 * GiB, fast=100 * GiB)
+    assert budget.kernel_floor_bytes() == 4e9
+    assert _check(50 * GiB, room=8 * GiB).keep_bytes == 4e9 + 8 * GiB
+
+
+def test_a_128gb_box_with_22gib_of_apps_keeps_flash_next_resident():
+    # Flash-Next's resident set (every-token weights and experts, 82.5 GB)
+    # beside 22 GiB of other processes' anonymous memory: 101.7 GB
+    # reclaimable, 89.0 GB once the floor and the run room are kept.
+    box, _ = host_box.mac(128)
+    _box(box, rec=94.7 * GiB, fast=76.2 * GiB)
+    assert _check(82.5e9, room=8.1 * GiB, budget=int(108.2e9)).fits
 
 
 @pytest.mark.parametrize("chunked", [False, True])
-def test_the_1409_numbers_stream_the_experts(chunked):
-    # Flash-Next's resident set (every-token weights and experts, 82.5 GB)
-    # beside 22 GiB of other processes' anonymous memory. GMLX_OVERCOMMIT=1
-    # still stops a wire in chunks, and holds the experts of any other
-    # load.
+def test_flash_next_streams_when_apps_hold_32gib(chunked):
+    # The same set beside 32 GiB of other processes' memory.
+    # GMLX_OVERCOMMIT=1 still stops a wire in chunks, and holds the
+    # experts of any other load.
     box, _ = host_box.mac(128)
-    _box(box, rec=94.7 * GiB, fast=76.2 * GiB)
+    _box(box, rec=85 * GiB, fast=66.5 * GiB)
     check = _check(82.5e9, room=8.1 * GiB, budget=int(108.2e9))
     assert check.reason == "reclaimable"
-    assert check.capped
     room = budget.KvRoom(int(8.1 * GiB), 4096, 1, 0, 0, 0, priced=True)
     lever = "GMLX_OVERCOMMIT=1 keeps them in memory" + (
         " unless the memory the kernel can reclaim runs out while they wire."
         if chunked else ".")
     assert check.line(room, 4096, chunked=chunked) == (
         f"{budget.STREAM_FREE_NOW}: holding them takes 82.5 GB, against "
-        "101.7 GB of reclaimable memory less 27.5 GB kept for the system, "
-        "this process and the KV room of 8.7 GB at 4096 tokens (the run's "
-        "prompt and max tokens), capped at a fifth of RAM. To keep them in "
-        f"memory, close other apps. {lever}")
+        "91.3 GB of reclaimable memory less 12.7 GB kept for the kernel "
+        "floor and the KV room of 8.7 GB at 4096 tokens (the run's prompt "
+        f"and max tokens). To keep them in memory, close other apps. {lever}")
 
 
 def test_an_idle_128gb_box_keeps_the_experts_resident_at_the_run_room():
@@ -182,17 +194,17 @@ def test_overcommit_admits(monkeypatch):
 
 def test_the_model_s_cached_pages_earn_no_credit():
     # A wired page leaves the file-backed count whether or not it was
-    # cached, so an 80 GiB model fully cached in 60 GiB of file pages
-    # still takes 80 out of the reclaimable sum.
+    # cached, so an 87 GiB model fully cached in 80 GiB of file pages
+    # still takes 87 out of the reclaimable sum.
     box, _ = host_box.mac(128)
     _box(box, rec=90 * GiB, fast=10 * GiB)
-    assert _check(80 * GiB).reason == "reclaimable"
+    assert _check(87 * GiB).reason == "reclaimable"
 
 
 def test_the_room_is_kept():
     box, _ = host_box.mac(128)
     _box(box, rec=100 * GiB, fast=100 * GiB)
-    w = 75 * GiB              # fits beside the floor and the overhead
+    w = 92 * GiB              # fits beside the kernel floor
     assert _check(w).fits
     assert _check(w, room=8 * GiB).reason == "reclaimable"
 
@@ -357,18 +369,17 @@ def test_another_process_growing_mid_wire_stops_it(monkeypatch, capsys,
     assert err.startswith(
         f"[stream] {budget.STREAM_FREE_NOW}: holding them takes 64.4 GB, "
         "and after ")
-    assert ("GB the next chunk needs beside the 27.5 GB kept for the "
-            "system, this process and the KV room of 8.7 GB at 4096 tokens "
-            "(the run's prompt and max tokens), capped at a fifth of RAM. To "
-            f"keep them in memory, close other apps. {budget.OVERCOMMIT_LEVER}"
-            ) in err
+    assert ("GB the next chunk needs beside the 12.7 GB kept for the "
+            "kernel floor and the KV room of 8.7 GB at 4096 tokens (the "
+            "run's prompt and max tokens). To keep them in memory, close "
+            f"other apps. {budget.OVERCOMMIT_LEVER}") in err
     assert "0.0 GB" not in err
 
 
 def test_a_live_install_s_wired_bytes_are_not_kept_again(monkeypatch):
     # A 512 GiB Studio serving a second model: the first one's 20 GiB
     # arena is wired, so reclaimable memory leaves it out already, and the
-    # wire keeps its uncapped 46.2 GiB beside it, not 20 GiB more.
+    # wire keeps the floor and the room beside it, not 20 GiB more.
     import gmlx.stream.installs as installs
 
     monkeypatch.setattr(installs, "live_wired_bytes", lambda: 20 * GiB)
@@ -402,8 +413,7 @@ def test_the_wire_stops_where_validate_s_check_does(monkeypatch, over,
         moe_layers=48, n_experts=128, experts_per_token=8, ring_bytes=0,
         kv_costs=None, trained_ctx=None), ram_bytes=ram,
         ws_bytes=box["max_recommended_working_set_size"]).room
-    keep, _ = budget.wire_keep_bytes(ram, room.bytes,
-                                     budget.host_overhead_bytes(ram))
+    keep = budget.wire_keep_bytes(room.bytes)
     w = vm.read() - keep + over
     model = sp.ModelPlan(
         arch="qwen3moe", total_bytes=w, expert_bytes=w * 9 // 10, groups={},

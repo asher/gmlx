@@ -180,6 +180,10 @@ _GATEUP_CONCAT_ENABLED = env_bool("GMLX_MOE_GATEUP_CONCAT", True)
 # (gather_mix) after the down gather. GMLX_MOE_MIX_PREFILL=0 keeps the
 # eager unsort and mix.
 _MIX_PREFILL_ENABLED = env_bool("GMLX_MOE_MIX_PREFILL", True)
+# Sorted-prefill MoE: the gate and up gathers read each token's row through
+# the sort's row map instead of a sorted copy of the activations, where the
+# installed mlx-kquant takes x_rows. GMLX_MOE_ROW_MAP=0 builds the copy.
+_ROW_MAP_ENABLED = env_bool("GMLX_MOE_ROW_MAP", True)
 _GATEUP_CONCAT_MAX_MB = env_int("GMLX_MOE_GATEUP_CONCAT_MAX_MB", 2048)
 # The copy is built at the first sorted-prefill call, when the weights are
 # resident and the live memory is known. It must leave this much room under
@@ -461,6 +465,8 @@ def _eligible_nativefp(m, caps):
             return False
         if proj.mode != "mxfp4" or "bias" not in proj:
             return False
+        if "out_scale" in proj:
+            return False
     return True
 
 
@@ -536,6 +542,8 @@ def _eligible_gptoss_mlp(m, caps):
         if not isinstance(proj, NativeFPSwitchLinear):
             return False
         if proj.mode != "mxfp4" or "bias" not in proj:
+            return False
+        if "out_scale" in proj:
             return False
     if not isinstance(getattr(m, "router", None), nn.Linear):
         return False
@@ -634,7 +642,7 @@ def _eligible_kquant_glu(m, caps):
             return False
         if proj.kquant_type not in _KQ_FUSED_CODECS:
             return False
-        if ("bias" in proj) != want_bias:
+        if ("bias" in proj) != want_bias or "out_scale" in proj:
             return False
         if want_bias and proj.kquant_type not in ("mxfp4", "nvfp4"):
             return False  # biased kernels exist for the fp4 codecs only
@@ -671,9 +679,10 @@ def _make_fused_kquant(base_cls, caps):
 
         With `scores` and a `_kq_shexp_mod` stamp (install_hyv3_shexp_fold),
         the shared expert rides the gathers as one extra slot with mix
-        weight 1. Contract with the stamping caller: a mixed return
-        consumed the shared expert; the stamped fallback returns unmixed
-        (skipping the epilogue below) and the caller mixes + adds it.
+        weight 1, and the sorted-prefill mix adds it after the sum.
+        Contract with the stamping caller: a mixed return consumed the
+        shared expert; the stamped fallback returns unmixed (skipping the
+        epilogue below) and the caller mixes + adds it.
 
         ``_kq_arena_rows`` (set by the streaming wrapper on multi-token
         arena calls) selects the per-row kernels at every width, see
@@ -848,7 +857,7 @@ def _make_fused_kquant(base_cls, caps):
             back to the stock two-gather path. With `scores` and
             GMLX_MOE_MIX_PREFILL the unsort and the score-weighted sum
             run as one dispatch (kq.gather_mix) and the result comes back
-            mixed, [..., N]; the shexp-fold stamp keeps it unmixed."""
+            mixed, [..., N]."""
             if (not _GATEUP_CONCAT_ENABLED or indices.size < 64
                     or self.training
                     or getattr(self, "_kq_weights_swapped", False)):
@@ -869,39 +878,46 @@ def _make_fused_kquant(base_cls, caps):
                 object.__setattr__(self, "_kq_gate_up", gu)
                 object.__setattr__(self, "_kq_gate_up_pending", False)
             from gmlx._vendor.mlx_lm.models.switch_layers import (
-                _gather_sort, _scatter_unsort)
-            x = mx.expand_dims(x, (-2, -3))
-            x, idx, inv_order = _gather_sort(x, indices)
-            h = gu(x, idx, sorted_indices=True)
+                _scatter_unsort)
+            xs, idx, inv_order, rkw = _sorted_rows(x, indices, (gu,))
+            h = gu(xs, idx, sorted_indices=True, **rkw)
             half = h.shape[-1] // 2
             x_gate, x_up = h[..., :half], h[..., half:]
             y = self.down_proj(
                 self.activation(x_up, x_gate), idx, sorted_indices=True)
             if self._kq_mix_prefill_ok(indices, scores):
-                return self._kq_mix_sorted(y, inv_order, indices, scores)
+                return self._kq_mix_sorted(x, y, inv_order, indices, scores)
             y = _scatter_unsort(y, inv_order, indices.shape)
             return y.squeeze(-2)
 
         def _kq_mix_prefill_ok(self, indices, scores) -> bool:
             """Whether a sorted-prefill call returns mixed through
             kq.gather_mix: scores given, the route on, the op present,
-            sorting widths, no shexp-fold stamp (that caller mixes)."""
-            return (
-                scores is not None and _MIX_PREFILL_ENABLED
-                and hasattr(kq, "gather_mix") and indices.size >= 64
-                and not self.training
-                and getattr(self, "_kq_shexp_mod", None) is None)
+            sorting widths. A shexp-fold stamp also needs the GPU, where
+            its caller runs the shared expert, and no streaming wrapper,
+            whose token split joins leaves that must all be unmixed."""
+            if (scores is None or not _MIX_PREFILL_ENABLED
+                    or not hasattr(kq, "gather_mix") or indices.size < 64
+                    or self.training):
+                return False
+            if getattr(self, "_kq_shexp_mod", None) is None:
+                return True
+            return (not getattr(self, "_kq_scores_sink", False)
+                    and mx.default_device() == mx.gpu)
 
-        def _kq_mix_sorted(self, y, inv_order, indices, scores):
+        def _kq_mix_sorted(self, x, y, inv_order, indices, scores):
             """The unsort and the score-weighted sum over the routed
             slots as one dispatch: y is the sorted down output
             [rows, 1, N], inv_order the sorted row of each (token, slot)
-            pair; returns [..., N] in the batched layout."""
+            pair; returns [..., N] in the batched layout, with a stamped
+            shared expert of x added."""
             k = indices.shape[-1]
             rows = y.shape[0]
             y = kq.gather_mix(
                 y.reshape(rows, -1), inv_order, scores.reshape(rows // k, k))
-            return y.reshape(*indices.shape[:-1], -1)
+            y = y.reshape(*indices.shape[:-1], -1)
+            se = getattr(self, "_kq_shexp_mod", None)
+            return y if se is None else y + se(x)
 
         def _kq_prefill_sorted(self, x, indices, scores):
             """The stock two-gather sorted prefill (mlx-lm
@@ -910,17 +926,32 @@ def _make_fused_kquant(base_cls, caps):
             off or does not fit. None when ineligible."""
             if not self._kq_mix_prefill_ok(indices, scores):
                 return None
-            from gmlx._vendor.mlx_lm.models.switch_layers import _gather_sort
-            x = mx.expand_dims(x, (-2, -3))
-            x, idx, inv_order = _gather_sort(x, indices)
-            x_up = self.up_proj(x, idx, sorted_indices=True)
-            x_gate = self.gate_proj(x, idx, sorted_indices=True)
+            xs, idx, inv_order, rkw = _sorted_rows(
+                x, indices, (self.up_proj, self.gate_proj))
+            x_up = self.up_proj(xs, idx, sorted_indices=True, **rkw)
+            x_gate = self.gate_proj(xs, idx, sorted_indices=True, **rkw)
             y = self.down_proj(
                 self.activation(x_up, x_gate), idx, sorted_indices=True)
-            return self._kq_mix_sorted(y, inv_order, indices, scores)
+            return self._kq_mix_sorted(x, y, inv_order, indices, scores)
 
     _FusedKQuantSwitchGLU.__name__ = "_FusedKQuantSwitchGLU"
     return _FusedKQuantSwitchGLU
+
+
+def _sorted_rows(x, indices, projs):
+    """mlx-lm's _gather_sort for sorted-prefill expert gathers: (input,
+    sorted ids, inverse order, call kwargs). Where every one of ``projs``
+    takes x_rows, the input is x unsorted and the kwargs carry the row map;
+    else it is the sorted copy of x."""
+    k = indices.shape[-1]
+    flat = indices.flatten()
+    order = mx.argsort(flat)
+    inv_order = mx.argsort(order)
+    if _ROW_MAP_ENABLED and all(
+            getattr(p, "takes_x_rows", False) for p in projs):
+        return x, flat[order], inv_order, {"x_rows": order // k}
+    xs = mx.expand_dims(x, (-2, -3)).flatten(0, -3)[order // k]
+    return xs, flat[order], inv_order, {}
 
 
 def _install_kquant_glu_fusion(model, caps) -> int:
@@ -1105,7 +1136,8 @@ def _eligible_kq_block(m, caps):
     for proj in (sw.gate_proj, sw.up_proj, sw.down_proj):
         if not isinstance(proj, KQuantSwitchLinear):
             return False
-        if proj.kquant_type not in _KQ_FUSED_CODECS or "bias" in proj:
+        if (proj.kquant_type not in _KQ_FUSED_CODECS or "bias" in proj
+                or "out_scale" in proj):
             return False
     if sw.gate_proj.kquant_type != sw.up_proj.kquant_type:
         return False
@@ -1485,7 +1517,8 @@ def _eligible_gemma_experts(m, caps):
     down = sw.down_proj
     if not isinstance(down, KQuantSwitchLinear):
         return False
-    if down.kquant_type not in _KQ_FUSED_CODECS or "bias" in down:
+    if (down.kquant_type not in _KQ_FUSED_CODECS or "bias" in down
+            or "out_scale" in down):
         return False
     if _kq_wire_k(down.weight, down.kquant_type) <= 0:
         return False
@@ -1529,6 +1562,7 @@ def _make_fused_gemma_experts(base_cls, caps):
                     and g.kquant_type == u.kquant_type
                     and g.kquant_type in _KQ_FUSED_CODECS
                     and "bias" not in g and "bias" not in u
+                    and "out_scale" not in g and "out_scale" not in u
                     and g.weight.shape[1] % 8 == 0
                     and d >= 512  # wide kernels want K/16 >= 32 chunks
                     and _kq_wire_k(g.weight, g.kquant_type) == d
@@ -1766,9 +1800,12 @@ def _make_fused_gemma_layer(base_cls, caps):
 
         def __call__(self, x, mask=None, cache=None,
                      per_layer_input=None, shared_kv=None, offset=None,
-                     keep_last=None):
+                     keep_last=None, window=None):
             d = x.shape[-1]
             t = x.size // d
+            # Only the owned model's forward passes window, which the
+            # copied gemma4_text layer does not take.
+            wkw = {} if window is None else {"window": window}
             # Popped on every call, so no later call can use a stale pair.
             ho = self.__dict__.pop("_kq_handoff", None)
             glue = getattr(self, "_kq_glue", None)
@@ -1777,7 +1814,8 @@ def _make_fused_gemma_layer(base_cls, caps):
                 # body, which writes the cache from all of them.
                 return super().__call__(
                     x, mask, cache, per_layer_input=per_layer_input,
-                    shared_kv=shared_kv, offset=offset, keep_last=keep_last)
+                    shared_kv=shared_kv, offset=offset, keep_last=keep_last,
+                    **wkw)
             if (
                 glue is False
                 or not _FUSED_MOE_ENABLED
@@ -1790,21 +1828,21 @@ def _make_fused_gemma_layer(base_cls, caps):
             ):
                 return super().__call__(
                     x, mask, cache, per_layer_input=per_layer_input,
-                    shared_kv=shared_kv, offset=offset)
+                    shared_kv=shared_kv, offset=offset, **wkw)
             if glue is None:
                 glue = self._kq_glue_setup(x.dtype)
                 object.__setattr__(self, "_kq_glue", glue)
                 if glue is False:
                     return super().__call__(
                         x, mask, cache, per_layer_input=per_layer_input,
-                        shared_kv=shared_kv, offset=offset)
+                        shared_kv=shared_kv, offset=offset, **wkw)
 
             if ho is not None and ho[0] is x:
                 x_in = ho[1]
             else:
                 x_in = self.input_layernorm(x)
             h, shared_kv, offset = self.self_attn(
-                x_in, mask, cache, shared_kv=shared_kv, offset=offset)
+                x_in, mask, cache, shared_kv=shared_kv, offset=offset, **wkw)
             moe = getattr(self, "enable_moe", False)
             dt = glue["dt"]
             handoff = (_NORM_HANDOFF_ENABLED and glue["handoff"]

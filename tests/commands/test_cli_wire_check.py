@@ -68,27 +68,30 @@ def _args(path, **kw):
 
 def test_a_moe_that_does_not_fit_streams_its_experts(header, capsys):
     # Flash-Next's 82.5 GB resident set on a 128 GB Mac whose other
-    # processes leave 94.7 GiB reclaimable, priced at a run's small room.
+    # processes leave 85 GiB reclaimable, priced at a run's small room.
     path = header(82.5e9, experts=77.0e9, budget_bytes=int(108.2e9),
                   room=8.1 * GiB)
-    _box(host_box.mac(128)[0], rec=94.7 * GiB, fast=76.2 * GiB)
+    _box(host_box.mac(128)[0], rec=85 * GiB, fast=66.5 * GiB)
     args = _args(path)
     cli.preload_wire_check(args, depth=4096)
     assert args.stream_experts is True
     err = capsys.readouterr().err
     assert err.startswith(f"[stream] {budget.STREAM_FREE_NOW}: holding them "
-                          "takes 82.5 GB, against 101.7 GB of reclaimable ")
-    assert "capped at a fifth of RAM" in err
-    assert "at 4096 tokens (the run's prompt and max tokens)" in err
+                          "takes 82.5 GB, against 91.3 GB of reclaimable ")
+    assert ("less 12.7 GB kept for the kernel floor and the KV room of "
+            "8.7 GB at 4096 tokens (the run's prompt and max tokens)") in err
     assert err.rstrip().endswith(
         f"close other apps. {budget.OVERCOMMIT_KEEPS}")
     assert budget.wire_room_depth() == 4096
 
 
-def test_an_idle_box_keeps_the_moe_resident_at_the_run_room(header, capsys):
+# 110 GiB: an idle box. 94.7 GiB: 22 GiB of other apps' memory.
+@pytest.mark.parametrize("rec", [110, 94.7])
+def test_a_128gb_box_keeps_flash_next_resident_at_the_run_room(header, capsys,
+                                                               rec):
     path = header(82.5e9, experts=77.0e9, budget_bytes=int(108.2e9),
                   room=8.1 * GiB)
-    _box(host_box.mac(128)[0], rec=110 * GiB)
+    _box(host_box.mac(128)[0], rec=rec * GiB)
     args = _args(path)
     cli.preload_wire_check(args, depth=4096)
     assert args.stream_experts is False
@@ -283,7 +286,7 @@ def _build_feeders(monkeypatch):
 def test_a_run_its_check_streams_names_the_check_not_a_flag(
         header, monkeypatch, capsys, tmp_path, leg, feeders):
     # The run's check streams the experts of a MoE under the stream
-    # budget: on a busy Mac (94.7 GiB reclaimable), or with a 2.8 GB drafter
+    # budget: on a busy Mac (85 GiB reclaimable), or with a 2.8 GB drafter
     # that takes the set past the budget. The install's lines say why, and
     # none says that the flag streams a model that fits, with its feeders
     # built or not.
@@ -296,7 +299,7 @@ def test_a_run_its_check_streams_names_the_check_not_a_flag(
     if leg == "reclaimable":
         path = header(82.5e9, experts=77.0e9, budget_bytes=int(108.2e9),
                       room=8.1 * GiB)
-        _box(host_box.mac(128)[0], rec=94.7 * GiB, fast=76.2 * GiB)
+        _box(host_box.mac(128)[0], rec=85 * GiB, fast=66.5 * GiB)
         args = _args(path)
     else:
         path = header(106e9, experts=95e9, budget_bytes=int(108.2e9))
@@ -342,8 +345,7 @@ def test_a_chat_on_a_vlm_has_no_streamed_placement(header):
 @pytest.fixture
 def glm_head(header, monkeypatch):
     """A 70 GiB trunk whose own 2.79 GB NextN block auto-MTP loads beside
-    it (GLM-5.3), with no KV room: 8.9 GiB host floor and 10 GiB host
-    overhead kept."""
+    it (GLM-5.3), with no KV room: the 4 GB kernel floor kept."""
     import gmlx.load.discovery as discovery
 
     monkeypatch.setattr(cli, "_has_native_mtp_head", lambda p: True)
@@ -354,10 +356,10 @@ def glm_head(header, monkeypatch):
 
 
 def test_an_auto_head_that_fits_beside_the_experts_loads(glm_head, capsys):
-    _box(host_box.mac(128)[0], rec=95 * GiB)
+    _box(host_box.mac(128)[0], rec=80 * GiB)
     args = _args(glm_head)
     cli.preload_wire_check(args, depth=None)
-    assert args.stream_experts is False      # 72.6 <= 76.1
+    assert args.stream_experts is False      # 72.6 <= 76.3
     assert not getattr(args, "no_speculative", False)
     assert capsys.readouterr() == ("", "")
 
@@ -366,10 +368,10 @@ def test_an_auto_head_that_tips_the_experts_over_is_dropped(glm_head,
                                                              capsys):
     # Resident with no MTP decodes faster than streamed with no MTP, and
     # a streamed load takes no auto drafter.
-    _box(host_box.mac(128)[0], rec=90 * GiB)
+    _box(host_box.mac(128)[0], rec=75 * GiB)
     args = _args(glm_head)
     cli.preload_wire_check(args, depth=None)
-    assert args.stream_experts is False      # 72.6 > 71.1, 70 <= 71.1
+    assert args.stream_experts is False      # 72.6 > 71.3, 70 <= 71.3
     assert args.no_speculative is True
     assert cli.resolve_speculative(args, glm_head) == (False, "")
     assert capsys.readouterr().err == (
@@ -380,17 +382,17 @@ def test_an_auto_head_that_tips_the_experts_over_is_dropped(glm_head,
 
 def test_experts_that_do_not_fit_without_the_auto_head_stream(glm_head,
                                                               capsys):
-    _box(host_box.mac(128)[0], rec=85 * GiB)
+    _box(host_box.mac(128)[0], rec=69 * GiB)
     args = _args(glm_head)
     cli.preload_wire_check(args, depth=None)
-    assert args.stream_experts is True       # 70 > 66.1
+    assert args.stream_experts is True       # 70 > 65.3
     assert not getattr(args, "no_speculative", False)
     assert cli.resolve_speculative(args, glm_head) == (False, "")
     # The streamed run takes no auto head, and the line counts the model
     # alone.
     err = capsys.readouterr().err
     assert err.startswith(f"[stream] {budget.STREAM_FREE_NOW}: holding them "
-                          "takes 75.2 GB, against 91.3 GB of reclaimable ")
+                          "takes 75.2 GB, against 74.1 GB of reclaimable ")
 
 
 def test_a_vlm_that_streams_counts_the_head_it_keeps(glm_head, tmp_path,
@@ -399,34 +401,34 @@ def test_a_vlm_that_streams_counts_the_head_it_keeps(glm_head, tmp_path,
     mmproj = tmp_path / "mmproj.gguf"
     with open(mmproj, "wb") as f:
         f.truncate(GiB // 2)
-    _box(host_box.mac(128)[0], rec=85 * GiB)
+    _box(host_box.mac(128)[0], rec=69 * GiB)
     args = _args(glm_head, mmproj=str(mmproj), image=None, audio=None)
     cli.preload_wire_check(args, depth=None)
-    assert args.stream_experts is True       # 70.5 > 66.1
+    assert args.stream_experts is True       # 70.5 > 65.3
     assert not getattr(args, "no_speculative", False)
     assert cli._run_mode(args) == "vlm_mtp"
     err = capsys.readouterr().err
     assert err.startswith(f"[stream] {budget.STREAM_FREE_NOW}: holding them "
-                          "takes 78.5 GB, against 91.3 GB of reclaimable ")
+                          "takes 78.5 GB, against 74.1 GB of reclaimable ")
 
 
 def test_a_dropped_head_prices_the_room_of_the_run_without_it(
         glm_head, monkeypatch, capsys):
     # A capped run that would load the auto head prices the serve context
     # (6 GiB of KV here); without the head it prices its own 4096 tokens
-    # (1 GiB). Uncapped keeps of 24.9 and 19.9 GiB against 92 GiB: the set
-    # fits only at the run's room.
+    # (1 GiB). Keeps of 9.7 and 4.7 GiB against 77 GiB: the set fits only
+    # at the run's room.
     rooms = {None: 6 * GiB, 4096: 1 * GiB}
     monkeypatch.setattr(
         budget, "kv_room_bytes",
         lambda p, env=None, step=None, depth=None: budget.KvRoom(
             rooms[depth], depth or 32768, 1, rooms[depth], 0, 0, priced=True))
-    _box(host_box.mac(128)[0], rec=92 * GiB)
+    _box(host_box.mac(128)[0], rec=77 * GiB)
     serve = budget.check_resident_wire(70 * GiB, room_bytes=6 * GiB)
-    assert not serve.fits and not serve.capped
+    assert not serve.fits
     args = _args(glm_head)
     cli.preload_wire_check(args, depth=None, depth_without_mtp=4096)
-    assert args.stream_experts is False      # 70 <= 92 - 19.9
+    assert args.stream_experts is False      # 70 <= 77 - 4.7
     assert args.no_speculative is True
     assert budget.wire_room_depth() == 4096
     assert capsys.readouterr().err.startswith("[mtp] auto MTP is off")
@@ -436,10 +438,10 @@ def test_a_dropped_head_prices_the_room_of_the_run_without_it(
                                   dict(native_mtp=True)])
 def test_a_head_a_flag_asks_for_streams_the_experts_beside_it(
         glm_head, flag):
-    _box(host_box.mac(128)[0], rec=90 * GiB)
+    _box(host_box.mac(128)[0], rec=75 * GiB)
     args = _args(glm_head, **flag)
     cli.preload_wire_check(args, depth=None)
-    assert args.stream_experts is True       # 72.6 > 71.1
+    assert args.stream_experts is True       # 72.6 > 71.3
     assert not getattr(args, "no_speculative", False)
     assert cli.resolve_speculative(args, glm_head)[0] is True
 
@@ -451,10 +453,10 @@ def test_a_vlm_run_counts_the_head_only_for_a_text_only_run(glm_head,
     mmproj = tmp_path / "mmproj.gguf"
     with open(mmproj, "wb") as f:
         f.truncate(GiB // 2)
-    _box(host_box.mac(128)[0], rec=90 * GiB)
+    _box(host_box.mac(128)[0], rec=75 * GiB)
     args = _args(glm_head, mmproj=str(mmproj), image=image, audio=None)
     cli.preload_wire_check(args, depth=None)
-    assert args.stream_experts is False      # 70.5 <= 71.1
+    assert args.stream_experts is False      # 70.5 <= 71.3
     assert getattr(args, "no_speculative", False) is (not image)
 
 
@@ -463,13 +465,13 @@ def test_a_bench_depths_drafter_counts_in_the_wire(header, tmp_path):
     # --speculative from it only after this check.
     path = header(70 * GiB, experts=60 * GiB, budget_bytes=200 * GiB,
                   room=0)
-    _box(host_box.mac(128)[0], rec=90 * GiB)
+    _box(host_box.mac(128)[0], rec=75 * GiB)
     draft = tmp_path / "draft.gguf"
     with open(draft, "wb") as f:
         f.truncate(2 * GiB)
     args = _args(path, draft_gguf=str(draft), bench_depths="0,8192")
     cli.preload_wire_check(args, depth=None)
-    assert args.stream_experts is True       # 72 > 71.1
+    assert args.stream_experts is True       # 72 > 71.3
 
 
 @pytest.mark.parametrize("fits", [True, False])
@@ -504,7 +506,7 @@ def test_a_table_gathered_per_layer_that_brings_the_model_under_is_not_wired(
 
 
 def test_no_mtp_leaves_the_head_out(glm_head):
-    _box(host_box.mac(128)[0], rec=90 * GiB)
+    _box(host_box.mac(128)[0], rec=75 * GiB)
     args = _args(glm_head, no_speculative=True)
     cli.preload_wire_check(args, depth=None)
     assert args.stream_experts is False
@@ -513,17 +515,17 @@ def test_no_mtp_leaves_the_head_out(glm_head):
 def test_the_companion_files_count_in_the_wire(header, tmp_path):
     path = header(70 * GiB, experts=60 * GiB, budget_bytes=200 * GiB,
                   room=0)
-    # Kept: the 8.9 GiB host floor and the 10 GiB host overhead.
-    _box(host_box.mac(128)[0], rec=90 * GiB)
+    # Kept: the 4 GB kernel floor.
+    _box(host_box.mac(128)[0], rec=75 * GiB)
     args = _args(path)
     cli.preload_wire_check(args, depth=None)
-    assert args.stream_experts is False      # 70 <= 90 - 18.9
+    assert args.stream_experts is False      # 70 <= 75 - 3.7
     big = tmp_path / "mmproj.gguf"
     with open(big, "wb") as f:
         f.truncate(2 * GiB)
     args = _args(path, mmproj=str(big))
     cli.preload_wire_check(args, depth=None)
-    assert args.stream_experts is True       # 72 > 71.1
+    assert args.stream_experts is True       # 72 > 71.3
 
 
 # --- the run's room depth ---------------------------------------------------

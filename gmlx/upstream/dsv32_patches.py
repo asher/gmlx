@@ -12,6 +12,7 @@ import mlx.core as mx
 import mlx_kquant as kq
 
 import gmlx.load.loadlog as loadlog
+from gmlx.cache.kv_append import depends_keys
 from gmlx.envflags import env_bool, env_int
 from .patching import ClassPatch
 
@@ -85,7 +86,7 @@ def _dsv32_mask_decode_call(self, x, mask=None, cache=None):
     # Ensure the indexer cache is evaluated even if topk_indices is unused, to
     # keep the graph from getting too large.
     if cache is not None and cache[0] is not None:
-        cache[0].keys = mx.depends(cache[0].keys, (cache[1].keys, cache[1].values))
+        depends_keys(cache[0], (cache[1].keys, cache[1].values))
 
     pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
     if mask is not None:

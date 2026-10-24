@@ -743,6 +743,9 @@ def hold_fp16(c):
     if held is None:
         held = type("Fp16Held" + cls.__name__, (cls,),
                     {"to_quantized": property(_held_to_quantized),
+                     # The base class's append, so its route with it.
+                     "_kv_routed": getattr(cls, "_kv_routed", False),
+                     "_kv_grid": getattr(cls, "_kv_grid", False),
                      **refusals.MEMBERS})
         _HELD_CLASSES[cls] = held
     out = held.__new__(held)

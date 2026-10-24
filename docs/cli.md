@@ -141,7 +141,7 @@ config:
 | `--pin ID_OR_PATH` | None | Load this model at start and never evict it. Repeat the flag for more models. |
 | `--max-tokens N` | Until the model stops | Cap a completion at this many tokens when the request sets no cap. |
 | `--no-family-defaults` | Off | Do not seed each family's model-card sampling under profiles and requests. |
-| `--prefill-step-size N` | `2048`, `8192` when streaming, `4096` for HY4 when streaming | Prefill in chunks of this many tokens. A lower value caps peak memory. |
+| `--prefill-step-size N` | `2048`, `4096` for a sparse MoE when memory allows, `8192` when streaming, `4096` for HY4 when streaming | Prefill in chunks of this many tokens. A lower value caps peak memory. |
 | `--dtype {auto,bfloat16,float16}` | `auto` | Set the activation width. `auto` picks float16 on M1 and M2. |
 | `--decode-prefill-ratio R` | `auto` | Make each prefill chunk wait until decoding streams have had this multiple of its GPU time. `0` restores stock scheduling. |
 | `--prefill-tick-ms MS` | `500` | Give each prefill chunk this wall-clock budget while streams decode, except on a streamed model. `0` never halves a chunk. |

@@ -20,7 +20,7 @@ from typing import Any
 
 import mlx.core as mx
 
-from .kv_cache import ArraysCache, CacheList, RotatingKVCache
+from .kv_cache import ArraysCache, CacheList, ChunkedKVCache, RotatingKVCache
 from .media_salt import salt_at
 
 _log = logging.getLogger(__name__)
@@ -105,11 +105,12 @@ def _owned_pair(keys: mx.array, values: mx.array):
     assigned object, so snapshot and live cache must never hold the same
     array. K-eq-V layers keep their single shared array.
 
-    ``mx.contiguous`` allocates an owned buffer even for already-contiguous
-    input; that is an mlx implementation detail, not API contract, so the
-    ownership invariant is pinned by test_restore_does_not_alias_stored_entry
-    and test_stored_entry_survives_continued_live_decode - if an mlx upgrade
-    makes contiguous() alias, those fail and this needs a true copy op."""
+    ``mx.contiguous`` can share the buffer of an input that is already
+    contiguous. That stays safe: an mlx in-place write donates only a
+    buffer nothing else shares, so a shared one is copied first, and the
+    in-place KV append (gmlx/cache/kv_append.py) writes only rows past
+    every stored view. test_restore_does_not_alias_stored_entry and
+    test_stored_entry_survives_continued_live_decode pin it."""
     k = mx.contiguous(keys)
     v = k if values is keys else mx.contiguous(values)
     return k, v
@@ -141,11 +142,11 @@ def _snapshot_entry(c: Any) -> Any:
         keys = tuple(mx.contiguous(a) for a in state[0])
         values = tuple(mx.contiguous(a) for a in state[1])
         return (_QUANT_TAG, keys, values, int(c.offset))
-    if len(state) > 2:
+    if len(state) > 2 or isinstance(c, ChunkedKVCache):
         # Multi-stream state contract (qwen4exp QSAKVCache: k/v/ik[/pos]):
-        # roundtrip the full state/meta_state, not just the k/v tail.
-        # contiguous decouples the lazy state views from the live, mutated
-        # buffers.
+        # roundtrip the full state/meta_state, not just the k/v tail. A
+        # chunked cache needs its meta_state too: the trimmed front.
+        # contiguous may share a whole-buffer state; see _owned_pair.
         return (_STATE_TAG,
                 tuple(mx.contiguous(a) for a in state),
                 getattr(c, "meta_state", None))

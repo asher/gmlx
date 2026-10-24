@@ -36,7 +36,9 @@ from gmlx.serve.tick_guard import is_gpu_fault, is_memory_error
 _log = logging.getLogger(__name__)
 
 GB = 1e9
-_SCORE_CHUNK = 2048  # stock prefill step; decay only shrinks it
+# Stock prefill step. The decay only shrinks it, and the MoE wide step runs
+# only with 20 GiB of working set to spare.
+_SCORE_CHUNK = 2048
 
 
 def _enabled() -> bool:

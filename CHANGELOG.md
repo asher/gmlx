@@ -12,7 +12,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `-high` intents and tool calls. On a Mac with less memory than the file, it
   runs with `--stream-experts`.
 - RecursiveSI Flint (GGUF arch `flint`), with its `<think>` reasoning and
-  tool calls.
+  tool calls. It decodes 1.3x to 1.9x as fast as llama.cpp and 1.1x to 1.3x
+  as fast as oMLX. See [Benchmarks](docs/benchmarks.md).
 - `GMLX_NORM_DTYPE` sets the width of a language model's norm weights:
   `fp32` keeps the F32 norm weights in float32 and `activation` casts them to
   the activation dtype, whatever the model's default.
@@ -34,6 +35,26 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Requires mlx-kquant 0.5.6. With it, decode writes each new KV cache row in
+  place instead of copying the whole cache every token, so decode at long
+  context is faster and peaks lower.
+- On M5 Macs, the sliding-window layers of Gemma 4, Muse Glimmer, Muse Spark
+  and Flint prefill on a kernel that reads only the keys inside the window.
+  A 32k prompt prefills about 7% faster on Gemma 4 26B-A4B and 4% on 31B.
+  `GMLX_SWA_KQ=0` turns it off.
+- At prefill, Flint, K2 Horizon, Hunyuan 3 and DeepSeek-V4 sum their routed
+  experts in one float32 dispatch instead of separate bf16 ops. A 32k Flint
+  prompt prefills about 3% faster. `GMLX_MOE_MIX_PREFILL=0` restores the old
+  sum.
+- On M5 and later GPUs, MoE prefill reads the token rows in expert order where
+  they are, instead of copying them. A 32k Flint prompt prefills about 2%
+  faster, with the same output. `GMLX_MOE_ROW_MAP=0` restores the copy.
+- Flint, Qwen3.6-35B-A3B, Gemma 4 26B-A4B and similar MoE models prefill in
+  4096-token chunks when memory allows: a 32k prompt prefills 2 to 7% faster.
+- The KV cache grows by an eighth of its size, at most 8192 rows, instead of
+  256 rows at a time, so long decodes no longer stall on frequent regrows.
+- Models in memory decode up to 5% faster: decode runs on 50 ops per command
+  buffer instead of 400. `GMLX_CB_COARSE_DECODE=1` restores the old caps.
 - `gmlx sync-models` adds a drafter to a model already in the config only
   with `--add-companions`. Without it, a sync or pull names each drafter
   or `mmproj` it leaves out.
@@ -76,8 +97,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A MoE GGUF with scale tensors on its expert weights, as NVFP4 exports have,
+  gave wrong output. Those experts now run unfused, with the scale applied.
 - A quantized `mmproj`, such as `mmproj-Q8_0.gguf`, failed to load for most
   vision and audio models. It now loads and keeps its weights quantized.
+- A saved prompt cache of a Llama 4 conversation longer than its attention
+  chunk held padding rows past the live ones and restored at the wrong offset.
+- Llama 4 requests batched from the prefix cache lost the cached prefix of
+  their chunked attention layers, and a speculative restore past the chunk
+  size landed at the wrong offset.
 - Qwen-Image 2.1, FLUX.3 klein, Krea 2 and MOSS-Image failed every request
   when their `encoder` was a chat model served with its `mmproj`.
 - In a `discover:` setup, `gmlx rm` of a chat model that image models share

@@ -604,30 +604,14 @@ def _prefill_ring_reason(offsets, left: int | None) -> str | None:
             "every-token weights and the KV room")
 
 
-def keep_bytes(ram: int | None, room_bytes: int, host_bytes: int) -> int:
-    """RAM a resident wire leaves free beside it: the host floor, the
-    host overhead and the KV room. What other live installs hold wired
-    is out of reclaimable RAM already, so the keep does not count it."""
-    return (_ram_floor_bytes(ram) + max(0, int(host_bytes))
-            + max(0, int(room_bytes)))
-
-
-# The most a resident wire check keeps beside the wire, as a share of
-# RAM. The host floor and the host overhead have fixed parts (4 GiB,
-# 2.5 GiB of page cache, 2 GiB for the process) sized for the arena on a
-# large box. Uncapped, they keep 8.9 GiB of a 7 GiB box and 9.5 GiB of a
-# 16 GiB one, so a MoE of half the RAM would always stream there.
-_WIRE_KEEP_RAM_SHARE = 1 / 5
-
-
-def wire_keep_bytes(ram: int | None, room_bytes: int,
-                    host_bytes: int) -> tuple[int, bool]:
-    """``(keep, capped)``: ``keep_bytes`` for a resident wire check, at
-    most a fifth of RAM. ``capped`` says the cap applied."""
-    keep = keep_bytes(ram, room_bytes, host_bytes)
-    if ram and keep > ram * _WIRE_KEEP_RAM_SHARE:
-        return int(ram * _WIRE_KEEP_RAM_SHARE), True
-    return keep, False
+def wire_keep_bytes(room_bytes: int) -> int:
+    """RAM a resident wire leaves free beside it: the governor's kernel
+    floor and the KV room. The check reads reclaimable RAM after the
+    load, so the system, other apps, this process and what other live
+    installs hold wired are out of it already. The arena's host floor
+    and host overhead price those for a sizing made before the load,
+    and would count them twice here."""
+    return int(kernel_floor_bytes()) + max(0, int(room_bytes))
 
 
 # A resident wire no larger is judged on the budget only, whatever the
@@ -710,13 +694,12 @@ def _gb(n: float) -> str:
     return f"{n / 1e9:.1f} GB"
 
 
-def _kept(room: KvRoom | None, depth: int | None, capped: bool) -> str:
+def _kept(room: KvRoom | None, depth: int | None) -> str:
     """What the keep holds, for the lines that cite it."""
     kv = "" if room is None else f" of {_gb(room.bytes)}"
     if room is not None and room.priced:
         kv += f" at {room.depth} tokens ({wire_room_label(depth)})"
-    cap = ", capped at a fifth of RAM" if capped else ""
-    return f"kept for the system, this process and the KV room{kv}{cap}"
+    return f"kept for the kernel floor and the KV room{kv}"
 
 
 @dataclass(frozen=True)
@@ -734,7 +717,6 @@ class WireCheck:
     keep_bytes: int
     budget_bytes: int | None
     reason: str = ""
-    capped: bool = False
     dropped_bytes: int = 0
     ram_bytes: int | None = None
 
@@ -780,7 +762,7 @@ class WireCheck:
         return (f"{STREAM_FREE_NOW}: holding them takes "
                 f"{_gb(self.wire_bytes)}, against "
                 f"{_gb(self.reclaimable_bytes)} of reclaimable memory less "
-                f"{_gb(self.keep_bytes)} {_kept(room, depth, self.capped)}. "
+                f"{_gb(self.keep_bytes)} {_kept(room, depth)}. "
                 f"{tail}{lever}")
 
     def stop_line(self, *, wired: int, reclaimable: int, need: int,
@@ -795,7 +777,7 @@ class WireCheck:
             lever = ""
         else:
             beside = (f"beside the {_gb(self.keep_bytes)} "
-                      f"{_kept(room, depth, self.capped)}")
+                      f"{_kept(room, depth)}")
             lever = f" {OVERCOMMIT_LEVER}"
         return (f"{STREAM_FREE_NOW}: holding them takes "
                 f"{_gb(self.wire_bytes)}, and after {_gb(wired)} of it "
@@ -805,8 +787,7 @@ class WireCheck:
 
 
 def check_resident_wire(wire_bytes: int, *, room_bytes: int,
-                        budget: int | None = None,
-                        host_bytes: int | None = None) -> WireCheck:
+                        budget: int | None = None) -> WireCheck:
     """Whether wiring ``wire_bytes`` resident leaves the box room: under
     ``budget``, and under reclaimable RAM less the kept bytes
     (``wire_keep_bytes``), read live as the wire's chunk guard reads it
@@ -816,8 +797,7 @@ def check_resident_wire(wire_bytes: int, *, room_bytes: int,
     budget only. GMLX_OVERCOMMIT=1 or an unreadable box admits, except a
     set larger than RAM, which fails on the budget leg."""
     ram = ram_bytes()
-    host = host_overhead_bytes(ram) if host_bytes is None else host_bytes
-    keep, capped = wire_keep_bytes(ram, room_bytes, host)
+    keep = wire_keep_bytes(room_bytes)
     w = max(0, int(wire_bytes))
     rec = live_reclaimable_ram_bytes() if w > WIRE_EXEMPT_BYTES else None
     reason = ""
@@ -829,7 +809,7 @@ def check_resident_wire(wire_bytes: int, *, room_bytes: int,
     elif ram is not None and w > ram:
         # Overcommit keeps no set larger than RAM: it streams.
         reason = "budget"
-    return WireCheck(w, rec, keep, budget, reason, capped, ram_bytes=ram)
+    return WireCheck(w, rec, keep, budget, reason, ram_bytes=ram)
 
 
 def check_wire_beside_drafter(set_bytes: int, drafter_bytes: int, *,

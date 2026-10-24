@@ -66,6 +66,16 @@ FORMATS = {"mlx.core.float16": (10, -14), "mlx.core.bfloat16": (7, -126),
            "mlx.core.float32": (23, -126)}
 
 
+# Fields only the owned classes carry: the in-place append's bookkeeping,
+# and the capacity grid of a memory profile, which predicts as stock at 0.
+OWNED_ONLY = ("_kv_own", "_kv_hw")
+OWNED_GRID = ("grow_div", "grow_cap")
+
+
+def _owned_only(name, value):
+    return name in OWNED_ONLY or (name in OWNED_GRID and value == 0)
+
+
 def flat(v, full=True, depth=0, values=False):
     if isinstance(v, mx.array):
         if values and str(v.dtype) in FORMATS:
@@ -89,7 +99,7 @@ def flat(v, full=True, depth=0, values=False):
     if isinstance(v, type):
         return {"type": v.__name__}
     if hasattr(v, "__dict__") and depth < 4:
-        attrs = dict(vars(v))
+        attrs = {k: x for k, x in vars(v).items() if not _owned_only(k, x)}
         if not full:
             # Read through getattr: a field can be a property in one package
             # and a plain attribute in the other.

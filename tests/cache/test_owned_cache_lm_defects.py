@@ -7,6 +7,9 @@ in golden/lm_defects.json (stock_golden.py), must still show the defect.
 
 - ChunkedKVCache.maybe_trim_front trims on the padded buffer width and
   drops valid tokens.
+- ChunkedKVCache.state ends at the absolute offset after a front trim, so
+  it returns padding rows past the live ones, and its setters lose the
+  trimmed front.
 - ConcatenateKVCache.trim leaves the trimmed keys in the buffer.
 - BatchRotatingKVCache takes a one-token update in place while prepare
   lengths are set, and raises.
@@ -69,6 +72,20 @@ def chunked():
     return [c.start_position, cols(c.keys[..., :max(live, 0), :])]
 
 
+def chunked_state():
+    # The rows a correct front trim leaves, then a regrow pads the buffer.
+    c = C.ChunkedKVCache(chunk_size=4)
+    c.update_and_fetch(*kv(list(range(6))))
+    c.keys, c.values = c.keys[..., 2:6, :], c.values[..., 2:6, :]
+    c.start_position = 2
+    c.update_and_fetch(*kv([9]))
+    d = C.ChunkedKVCache(chunk_size=4)
+    d.state = c.state
+    d.meta_state = c.meta_state
+    k, _ = d.update_and_fetch(*kv([10]))
+    return [cols(c.state[0]), cols(k)]
+
+
 def concat_trim():
     c = C.ConcatenateKVCache()
     c.update_and_fetch(*kv(list(range(5))))
@@ -124,6 +141,7 @@ def qsdpa(nkv):
 
 
 out["chunked"] = run(chunked)
+out["chunked_state"] = run(chunked_state)
 out["concat_trim"] = run(concat_trim)
 out["rotating_lengths"] = run(rotating_lengths)
 out["none_state"] = {
@@ -154,6 +172,12 @@ def owned():
 def test_chunked_trim_front_keeps_the_last_chunk_of_valid_tokens(stock, owned):
     assert stock["chunked"]["ok"][0] != 2
     assert owned["chunked"] == {"ok": [2, [2, 3, 4, 5]]}
+
+
+def test_chunked_state_ends_at_the_live_rows_after_a_front_trim(stock, owned):
+    assert len(stock["chunked_state"]["ok"][0]) > 5
+    assert owned["chunked_state"] == {"ok": [[2, 3, 4, 5, 9],
+                                             [2, 3, 4, 5, 9, 10]]}
 
 
 def test_concatenate_trim_drops_the_trimmed_keys(stock, owned):

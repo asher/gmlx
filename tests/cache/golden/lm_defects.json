@@ -8,12 +8,15 @@
   "python": ["3.11", "3.12", "3.13", "3.14"],
   "device": "cpu"
  },
- "script_sha256": "b75c684f4fad0b70d39a8c667479b17c8eaa75f4b070da90758116b17f1c4c62",
+ "script_sha256": "91c387f137f715f6f4f688a85a8786ccfd6e44e0d2c2e14687e055ded497befa",
  "run": {
   "module": "mlx_lm.models.cache",
   "gmlx": false,
   "chunked": {
    "ok": [252, []]
+  },
+  "chunked_state": {
+   "ok": [[2, 3, 4, 5, 9, -1, -1], [2, 3, 4, 5, 9, 10]]
   },
   "concat_trim": {
    "ok": [0, 1, 2, 3, 4, 9]

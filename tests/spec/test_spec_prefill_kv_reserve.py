@@ -13,6 +13,7 @@ import types
 import mlx.core as mx
 import pytest
 
+from gmlx.cache.kv_append import grid_capacity
 from gmlx.cache.kv_cache import KVCache
 from gmlx.spec.speculative import stream_speculative
 
@@ -104,11 +105,13 @@ def test_reserve_allocates_one_full_buffer():
     c.update_and_fetch(k, k)
     mx.eval(c.keys, c.values)
     del k
-    full = 1 * 4 * 4096 * 64 * 2
+    # The reserve rounds up to the capacity grid.
+    rows = grid_capacity(4096, KVCache.step)
+    full = 1 * 4 * rows * 64 * 2
     mx.reset_peak_memory()
     start = mx.get_active_memory()
     mx.eval(*c.prefix_cache_reserve(4096))
-    assert c.keys.shape[2] == 4096 and c.offset == 256
+    assert c.keys.shape[2] == rows and c.offset == 256
     assert mx.array_equal(c.state[0], mx.ones((1, 4, 256, 64), mx.bfloat16))
     # Two new full buffers (keys and values), no pad buffers beside them.
     assert mx.get_peak_memory() - start <= 2 * full + full // 4

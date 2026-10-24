@@ -18,6 +18,7 @@ or to the owned ``*args`` or ``**kwargs``. CPU.
 from __future__ import annotations
 
 import inspect
+import types
 
 import pytest
 
@@ -168,12 +169,20 @@ def _departures(stock_fn, owned_fn) -> list[str]:
     return out
 
 
+def _member(cls, n):
+    """The callable a call through ``cls`` reaches. A classmethod is bound,
+    since no caller passes its class: object's ``__init_subclass__`` reads
+    ``(type, /)`` unbound from Python 3.14 on."""
+    f = inspect.getattr_static(cls, n, None)
+    if isinstance(f, (classmethod, types.ClassMethodDescriptorType)):
+        return getattr(cls, n)
+    return getattr(f, "__func__", f)
+
+
 def _methods(old, new):
     """(name, stock callable, owned callable) for each method of ``old``."""
     for n in sorted(dir(old)):
-        so = inspect.getattr_static(old, n, None)
-        sn = inspect.getattr_static(new, n, None)
-        so, sn = getattr(so, "__func__", so), getattr(sn, "__func__", sn)
+        so, sn = _member(old, n), _member(new, n)
         if isinstance(so, type) or not (callable(so) and callable(sn)):
             continue
         yield n, so, sn

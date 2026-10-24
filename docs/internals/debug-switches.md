@@ -34,6 +34,7 @@ is already running does not see a variable you export later.
 | `GMLX_DECODE_PREFILL_FLOOR` | Decode-rate floor that `auto` pacing protects, as a share of a stream's batched rate. The default is `0.5`. |
 | `GMLX_PREFILL_TICK_MS` | Same as `server.prefill_tick_ms`. |
 | `GMLX_PREFILL_MIN_STEP` | Smallest chunk, in tokens, that the tick budget may halve a chunk down to. The default is `256`. |
+| `GMLX_MOE_WIDE_STEP` | Prompt chunk of a sparse MoE with 20 GiB free: 128 tokens or fewer per expert in a 2048-token chunk. The default is `4096`, and `2048` keeps the stock chunk. |
 | `GMLX_DECODE_BATCH` | Requests that decode together in a step. The default is `8`, or the capacity table's widest fit when smaller. `0` restores the upstream 32. |
 | `GMLX_SSE_KEEPALIVE_S` | Interval in seconds of the SSE keepalive comment while a stream is silent. The default is `15`, and `0` disables it. |
 | `GMLX_FAITHFUL_HISTORY=0` | Restore mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from plain assistant turns, and its stock `/v1/messages` conversion. |
@@ -105,10 +106,15 @@ log the attention route.
 | `GMLX_ROPE_FACTORS=0` | Disable the patch that rebuilds Llama-3.1-style per-dimension rope scaling from GGUF metadata. |
 | `GMLX_SPARSE_ARCHS` | Name extra architecture modules for the sparse attention route, comma separated, to quality-gate a new architecture. |
 | `GMLX_SDPA_DEBUG=1` | Log the attention route of the first long calls, so a wrong route on a new architecture shows in the log. |
+| `GMLX_KV_APPEND_INPLACE=0` | Append decode rows with a slice write, which copies the whole KV cache while a step still reads it, instead of writing them in place. |
+| `GMLX_KV_GROW_DIV` | The KV cache grows by this fraction of its size, rounded to 256 rows. The default is `8`, and `0` grows by 256 rows. |
+| `GMLX_KV_GROW_CAP` | The largest KV cache growth step, in rows. The default is `8192`, and `0` means no cap. |
 | `GMLX_ROUTE_LOG=1` | Print per-route attention call counts at process exit. |
 | `KV_KEY_BITS`, `KV_VALUE_BITS` | Upstream mlx-vlm widths for kvarn keys and values, for the whole server. They override [`GMLX_KVARN_BITS`](../env-vars.md#runtime). |
 | `GMLX_CASCADE_SDPA=0` | Disable the shared-prefix cascade decode route, which reads a shared prefix once per step for the whole batch. |
 | `GMLX_CASCADE_MIN_P` | Shortest shared prefix, in tokens, that the cascade route handles. The default is `1024`. |
+| `GMLX_GQA_SDPA_MINKV128` | Fewest keys at which Flint decode leaves stock attention for the mlx-kquant decode kernel. The default is `1024`. |
+| `GMLX_SWA_KQ=0` | On NAX GPUs (M5), keep sliding-window prefill (Flint, Gemma 4, Muse Glimmer, Muse Spark) on stock attention instead of the mlx-kquant window kernel. |
 | `GMLX_GQA_SDPA_NAX512=0` | On NAX GPUs (M5), keep gemma-4 global-layer decode on the previous kernel instead of the faster one past 768 to 3072 keys. |
 
 ## Model kernels
@@ -128,6 +134,7 @@ fusions.
 | `GMLX_MOE_GATEUP_CONCAT_MAX_MB` | Cap the concat copies at this many MB, stamping layers in order until the cap is reached. |
 | `GMLX_MOE_GATEUP_CONCAT_HEADROOM_GB` | Skip a concat copy that would leave less than this many GB under the memory ceiling. `0` turns the check off. |
 | `GMLX_MOE_MIX_PREFILL=0` | Keep the eager unsort and score mix after the sorted-prefill down gather instead of one `gather_mix` dispatch. |
+| `GMLX_MOE_ROW_MAP=0` | Build the sorted copy of the activations before the sorted-prefill gate and up gathers, where mlx-kquant would read the rows through the sort's row map. |
 | `GMLX_GLM5_ABSORBED_MAX_L` | Run GLM-5.3-Flash MLA layers in the absorbed MQA form up to this many queries. `0` expands the latent per head everywhere. |
 | `GMLX_GLM5_INDEXER_DECODE=0` | Score the GLM-5.3-Flash indexer inline instead of through the fused scorer and radix top-k. |
 | `GMLX_GLM5_SPARSE_INDEXED=0` | Disable index-gathered attention for GLM-5.3-Flash sparse decode and verify. |
@@ -151,6 +158,7 @@ fusions.
 | `GMLX_DSA_INDEXER=0` | Compute DeepSeek-V4 and V4.1 indexer scores and top-k on the inline fp32 op chain instead of the mlx-kquant kernels. |
 | `GMLX_DSA_INDEXER_Q=0` | Keep the indexer GEMM on fp16 operands where tensor-op hardware would run the int8 kernel. Output is bit-identical. |
 | `GMLX_CB_PHASE=0` | Disable the per-phase command-buffer caps (same output, slower decode). `MLX_MAX_OPS_PER_BUFFER` or `MLX_MAX_MB_PER_BUFFER` set by hand holds in every phase. |
+| `GMLX_CB_COARSE_DECODE=1` | Decode a model in memory on 400 ops per command buffer instead of 50, both with no size cap. Prefill and streamed models keep their caps. |
 | `GMLX_NATIVE_FP` | MXFP4 and NVFP4 layout. `wire` keeps the file bytes, `packed` repacks them, and `auto` picks wire when streaming or past 90% of the working set. |
 | `GMLX_BATCH_INVARIANT=1` | Run small float `nn.Linear` layers on a row-count-invariant kernel. Raw-array routers, router calls under 64 rows and training are not covered. |
 | `GMLX_BATCH_INVARIANT_MAX_OUT` | Most outputs of a float projection that the batch-invariant kernel takes. The default is `512`. |

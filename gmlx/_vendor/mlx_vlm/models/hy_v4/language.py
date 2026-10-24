@@ -20,6 +20,7 @@ from .fused_switch_glu import FusedSwitchGLU
 from .hyper_connection import IdentityHyperConnection, IdentityHyperHead, hc_expand
 from .indexer import HyV4Indexer
 from .moe import HyV4MoE
+from gmlx.cache.kv_append import depends_keys  # gmlx: keeps the in-place kv append
 
 
 def make_quantization_config(model):
@@ -112,7 +113,7 @@ class HyV4Attention(DeepseekV32Attention):
                 mask = sparse_mask
 
         if self.indexer is not None and cache is not None and cache[0] is not None:
-            cache[0].keys = mx.depends(cache[0].keys, (cache[1].keys, cache[1].values))
+            depends_keys(cache[0], (cache[1].keys, cache[1].values))  # gmlx: keeps the in-place kv append
 
         pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
         if mask is not None:

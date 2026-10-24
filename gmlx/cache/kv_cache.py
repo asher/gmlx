@@ -10,8 +10,9 @@
 
 All of ``mlx_vlm/models/cache.py``: every cache class, ``_BaseCache``,
 ``CacheMemory`` and the module helpers. It imports nothing beyond mlx,
-the standard library and, to record decode mask starts, its sibling
-``attention``. Edits to the upstream file: comments are ASCII, and each
+the standard library, its sibling ``attention`` to record decode mask
+starts, and its sibling ``kv_append`` for the append and regrow of the
+growing caches. Edits to the upstream file: comments are ASCII, and each
 gmlx change carries a comment where it sits.
 """
 
@@ -24,6 +25,10 @@ from typing import Any, List, Optional, Tuple
 import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_map, tree_reduce
+
+# gmlx: in-place append and the capacity grid; see gmlx/cache/kv_append.py.
+from .kv_append import (grid_capacity, grow, grow_levers, kv_write, mark_fresh,
+                        release)
 
 
 def should_quantize_kv_layer(layer_idx: int, num_layers: int) -> bool:
@@ -115,6 +120,10 @@ class CacheMemory:
     window_size: Optional[int] = None
     fallback: bool = False
     min_capacity: int = 0
+    # gmlx: the capacity grid of gmlx/cache/kv_append.py, for the caches
+    # that grow on it. 0 predicts step rounding.
+    grow_div: int = 0
+    grow_cap: int = 0
 
     def footprint(self, tokens: int, chunk_size: Optional[int] = None) -> int:
         if tokens <= 0:
@@ -123,7 +132,10 @@ class CacheMemory:
             tokens = min(tokens, self.window_size - 1 + chunk_size)
         tokens = max(tokens, self.min_capacity)
         step = max(1, self.step)
-        capacity = ((tokens + step - 1) // step) * step
+        if self.grow_div:
+            capacity = grid_capacity(tokens, step, self.grow_div, self.grow_cap)
+        else:
+            capacity = ((tokens + step - 1) // step) * step
         return self.fixed_bytes + ceil(capacity * self.bytes_per_token)
 
 
@@ -156,10 +168,13 @@ def _kv_memory_profile(c, token_count):
     keys = c.keys[0] if isinstance(c.keys, tuple) else c.keys
     capacity = keys.shape[2]
     size = cache_nbytes(c.keys) + cache_nbytes(c.values)
+    div, cap = grow_levers() if getattr(c, "_kv_grid", False) else (0, 0)
     return CacheMemory(
         source_bytes=size,
         bytes_per_token=size / capacity if capacity else 0,
         step=getattr(c, "step", 1),
+        grow_div=div,
+        grow_cap=cap,
     )
 
 
@@ -180,6 +195,20 @@ def _pooling_memory_profile(c, token_count):
 
 
 class _BaseCache:
+    # gmlx: whether the class's own append writes in place
+    # (``_kv_routed``) and grows on the capacity grid (``_kv_grid``); see
+    # gmlx/cache/kv_append.py. A subclass does not inherit them: a
+    # model-owned cache that runs the base append keeps the slice write
+    # and the step regrow, unless it sets them itself.
+    _kv_routed = False
+    _kv_grid = False
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        for name in ("_kv_routed", "_kv_grid"):
+            if name not in cls.__dict__:
+                setattr(cls, name, False)
+
     def memory_profile(self, token_count):
         """Describe standard KV buffers; other layouts override this method."""
         if not hasattr(self, "keys") or not hasattr(self, "values"):
@@ -354,8 +383,30 @@ def _packed_words(dim: int, bits: int) -> int:
     return dim * bits // 32
 
 
+def _zeros_rows(x, rows):
+    """Zeros shaped like the update ``x`` [B, H, n, D] with ``rows`` rows."""
+    return mx.zeros((*x.shape[:2], rows, x.shape[3]), x.dtype)
+
+
+def _quant_zeros(group_size, bits):
+    """Packed zeros (wire, scales, biases) for a float update ``x``."""
+
+    def make(x, rows):
+        shape = (*x.shape[:2], rows)
+        dim = x.shape[3]
+        return (
+            mx.zeros((*shape, _packed_words(dim, bits)), dtype=mx.uint32),
+            mx.zeros((*shape, dim // group_size), dtype=x.dtype),
+            mx.zeros((*shape, dim // group_size), dtype=x.dtype),
+        )
+
+    return make
+
+
 class QuantizedKVCache(_BaseCache):
     step = 256
+    _kv_routed = True
+    _kv_grid = True
 
     def __init__(self, group_size: int = 64, bits: int = 8):
         self.keys = None
@@ -365,46 +416,21 @@ class QuantizedKVCache(_BaseCache):
         self.bits = bits
 
     def update_and_fetch(self, keys, values):
-        B, n_kv_heads, num_steps, k_head_dim = keys.shape
-        v_head_dim = values.shape[-1]
+        # gmlx: grid regrow and in-place append (gmlx/cache/kv_append.py).
         prev = self.offset
-
-        if self.keys is None or (prev + num_steps) > self.keys[0].shape[-2]:
-            new_steps = (self.step + num_steps - 1) // self.step * self.step
-            shape = (B, n_kv_heads, new_steps)
-
-            def init_quant(dim):
-                return (
-                    mx.zeros((*shape, _packed_words(dim, self.bits)), dtype=mx.uint32),
-                    mx.zeros((*shape, dim // self.group_size), dtype=keys.dtype),
-                    mx.zeros((*shape, dim // self.group_size), dtype=keys.dtype),
-                )
-
-            def expand_quant(x):
-                new_x = mx.zeros((*shape, x.shape[-1]), dtype=x.dtype)
-                return mx.concatenate([x, new_x], axis=-2)
-
-            if self.keys is not None:
-                if prev % self.step != 0:
-                    self.keys, self.values = tree_map(
-                        lambda x: x[..., :prev, :], (self.keys, self.values)
-                    )
-
-                self.keys, self.values = tree_map(
-                    expand_quant, (self.keys, self.values)
-                )
-            else:
-                self.keys, self.values = init_quant(k_head_dim), init_quant(v_head_dim)
-
-        self.offset += num_steps
+        end = prev + keys.shape[2]
+        routed = self._kv_routed
+        if self.keys is None or end > self.keys[0].shape[-2]:
+            grow(self, keys, values, prev, end,
+                 _quant_zeros(self.group_size, self.bits),
+                 grid=self._kv_grid, routed=routed)
+        self.offset = end
 
         keys = mx.quantize(keys, group_size=self.group_size, bits=self.bits)
         values = mx.quantize(values, group_size=self.group_size, bits=self.bits)
-        for i in range(len(self.keys)):
-            self.keys[i][..., prev : self.offset, :] = keys[i]
-            self.values[i][..., prev : self.offset, :] = values[i]
+        kv_write(self, tuple(keys), tuple(values), prev, end, routed=routed)
 
-        return tree_map(lambda x: x[..., : self.offset, :], (self.keys, self.values))
+        return tree_map(lambda x: x[..., :end, :], (self.keys, self.values))
 
     @property
     def state(self):
@@ -453,6 +479,7 @@ class QuantizedKVCache(_BaseCache):
 
     def prefix_cache_restore(self, snapshot):
         """Restore a native packed snapshot into a fresh cache."""
+        release(self)
         self.__init__()
         self.state = snapshot["state"]
         self.meta_state = snapshot["meta_state"]
@@ -465,11 +492,16 @@ class QuantizedKVCache(_BaseCache):
         capacity = int(self.keys[0].shape[2])
         if needed <= capacity:
             return self.keys, self.values
-        capacity = ((needed + self.step - 1) // self.step) * self.step
+        if self._kv_grid:
+            capacity = grid_capacity(needed, self.step)
+        else:
+            capacity = ((needed + self.step - 1) // self.step) * self.step
         pad_tokens = capacity - int(self.keys[0].shape[2])
         pad = [(0, 0), (0, 0), (0, pad_tokens), (0, 0)]
         self.keys = tuple(mx.pad(part, pad) for part in self.keys)
         self.values = tuple(mx.pad(part, pad) for part in self.values)
+        if self._kv_routed:
+            mark_fresh(self, self.offset)
         return self.keys, self.values
 
     def prefix_cache_merge(self, rows, prefix_lens):
@@ -529,6 +561,8 @@ class QuantizedKVCache(_BaseCache):
 
 class KVCache(_BaseCache):
     step = 256
+    _kv_routed = True
+    _kv_grid = True
 
     def __init__(self):
         self.keys = None
@@ -536,28 +570,18 @@ class KVCache(_BaseCache):
         self.offset = 0
 
     def update_and_fetch(self, keys, values):
+        # gmlx: grid regrow and in-place append (gmlx/cache/kv_append.py).
+        # Subclasses that run this append keep the step regrow and the
+        # slice write.
         prev = self.offset
-        if self.keys is None or (prev + keys.shape[2]) > self.keys.shape[2]:
-            B, n_kv_heads, _, k_head_dim = keys.shape
-            v_head_dim = values.shape[3]
-            n_steps = (self.step + keys.shape[2] - 1) // self.step
-            k_shape = (B, n_kv_heads, n_steps * self.step, k_head_dim)
-            v_shape = (B, n_kv_heads, n_steps * self.step, v_head_dim)
-            new_k = mx.zeros(k_shape, keys.dtype)
-            new_v = mx.zeros(v_shape, values.dtype)
-            if self.keys is not None:
-                if prev % self.step != 0:
-                    self.keys = self.keys[..., :prev, :]
-                    self.values = self.values[..., :prev, :]
-                self.keys = mx.concatenate([self.keys, new_k], axis=2)
-                self.values = mx.concatenate([self.values, new_v], axis=2)
-            else:
-                self.keys, self.values = new_k, new_v
-
-        self.offset += keys.shape[2]
-        self.keys[..., prev : self.offset, :] = keys
-        self.values[..., prev : self.offset, :] = values
-        return self.keys[..., : self.offset, :], self.values[..., : self.offset, :]
+        end = prev + keys.shape[2]
+        routed = self._kv_routed
+        if self.keys is None or end > self.keys.shape[2]:
+            grow(self, keys, values, prev, end, _zeros_rows,
+                 grid=self._kv_grid, routed=routed)
+        self.offset = end
+        kv_write(self, keys, values, prev, end, routed=routed)
+        return self.keys[..., :end, :], self.values[..., :end, :]
 
     def size(self):
         return self.offset
@@ -581,7 +605,9 @@ class KVCache(_BaseCache):
         if self.keys is None or self.values is None:
             return ()
         capacity = max(self.offset, int(min_capacity_tokens))
-        if self.step > 0:
+        if self._kv_grid:
+            capacity = grid_capacity(capacity, self.step)
+        elif self.step > 0:
             capacity = ((capacity + self.step - 1) // self.step) * self.step
         if capacity <= self.keys.shape[2]:
             return ()
@@ -595,6 +621,8 @@ class KVCache(_BaseCache):
 
         self.keys = grown(self.keys)
         self.values = grown(self.values)
+        if self._kv_routed:
+            mark_fresh(self, self.offset)
         return self.keys, self.values
 
     def is_trimmable(self):
@@ -1523,8 +1551,16 @@ class ArraysCache(_BaseCache):
         return sum(array.nbytes for array in arrays.values())
 
 
+def _chunked_as_kv(c):
+    kv = KVCache()
+    if c.keys is not None:
+        kv.keys, kv.values, kv.offset = c.keys, c.values, c.offset
+    return kv
+
+
 class ChunkedKVCache(_BaseCache):
     step = 256
+    _kv_routed = True
 
     def memory_profile(self, token_count):
         profile = _kv_memory_profile(self, token_count)
@@ -1578,27 +1614,34 @@ class ChunkedKVCache(_BaseCache):
                 self.values = mx.concatenate([self.values, new_v], axis=2)
             else:
                 self.keys, self.values = new_k, new_v
+            if self._kv_routed:
+                mark_fresh(self, prev)
 
         self.offset += keys.shape[2]
         end = self.offset - self.start_position
-        self.keys[..., prev:end, :] = keys
-        self.values[..., prev:end, :] = values
+        # gmlx: in-place append (gmlx/cache/kv_append.py). The regrow keeps
+        # its step: the chunk window bounds the buffer.
+        kv_write(self, keys, values, prev, end, routed=self._kv_routed)
         return self.keys[..., :end, :], self.values[..., :end, :]
 
     @property
     def state(self):
-        if self.offset == self.keys.shape[2]:
+        # gmlx: the buffer starts at start_position, so the live rows end at
+        # offset - start_position, not at offset.
+        end = self.offset - self.start_position
+        if end == self.keys.shape[2]:
             return self.keys, self.values
         else:
             return (
-                self.keys[..., : self.offset, :],
-                self.values[..., : self.offset, :],
+                self.keys[..., :end, :],
+                self.values[..., :end, :],
             )
 
     @state.setter
     def state(self, v):
         self.keys, self.values = v
-        self.offset = self.keys.shape[2]
+        # from_state builds the cache with __new__.
+        self.offset = getattr(self, "start_position", 0) + self.keys.shape[2]
 
     def is_trimmable(self):
         return True
@@ -1615,6 +1658,10 @@ class ChunkedKVCache(_BaseCache):
     @meta_state.setter
     def meta_state(self, v):
         self.chunk_size, self.start_position = map(int, v)
+        # gmlx: either setter may run first; the offset counts the trimmed
+        # front.
+        if getattr(self, "keys", None) is not None:
+            self.offset = self.start_position + self.keys.shape[2]
 
     def prefix_cache_snapshot(self):
         return {
@@ -1629,8 +1676,12 @@ class ChunkedKVCache(_BaseCache):
         self.offset = snapshot["offset"]
 
     def prefix_cache_merge(self, rows, prefix_lens):
-        if all(isinstance(c, ChunkedKVCache) for c in rows):
-            return BatchKVCache.merge(rows)
+        # gmlx: serve batches a chunked layer as a BatchKVCache, which reads
+        # size(), 0 here. Merge the rows as plain KV caches; a row whose
+        # front was trimmed no longer holds its whole prefix.
+        if all(isinstance(c, ChunkedKVCache) and c.start_position == 0
+               for c in rows):
+            return BatchKVCache.merge([_chunked_as_kv(c) for c in rows])
         return None
 
     def empty(self):
@@ -1796,6 +1847,8 @@ def _cascade_filter(cache, keep) -> None:
 
 class BatchKVCache(_BaseCache):
     step = 256
+    _kv_routed = True
+    _kv_grid = True
 
     def __init__(self, left_padding: List[int]):
         """
@@ -1825,29 +1878,17 @@ class BatchKVCache(_BaseCache):
         self._right_padding = None
 
     def update_and_fetch(self, keys, values):
+        # gmlx: grid regrow and in-place append (gmlx/cache/kv_append.py).
         prev = self._idx
-        if self.keys is None or (prev + keys.shape[2]) > self.keys.shape[2]:
-            B, n_kv_heads, _, k_head_dim = keys.shape
-            v_head_dim = values.shape[3]
-            n_steps = (self.step + keys.shape[2] - 1) // self.step
-            k_shape = (B, n_kv_heads, n_steps * self.step, k_head_dim)
-            v_shape = (B, n_kv_heads, n_steps * self.step, v_head_dim)
-            new_k = mx.zeros(k_shape, keys.dtype)
-            new_v = mx.zeros(v_shape, values.dtype)
-            if self.keys is not None:
-                if prev % self.step != 0:
-                    self.keys = self.keys[..., :prev, :]
-                    self.values = self.values[..., :prev, :]
-                self.keys = mx.concatenate([self.keys, new_k], axis=2)
-                self.values = mx.concatenate([self.values, new_v], axis=2)
-            else:
-                self.keys, self.values = new_k, new_v
-
+        end = prev + keys.shape[2]
+        routed = self._kv_routed
+        if self.keys is None or end > self.keys.shape[2]:
+            grow(self, keys, values, prev, end, _zeros_rows,
+                 grid=self._kv_grid, routed=routed)
         self.offset += keys.shape[2]
-        self._idx += keys.shape[2]
-        self.keys[..., prev : self._idx, :] = keys
-        self.values[..., prev : self._idx, :] = values
-        return self.keys[..., : self._idx, :], self.values[..., : self._idx, :]
+        self._idx = end
+        kv_write(self, keys, values, prev, end, routed=routed)
+        return self.keys[..., :end, :], self.values[..., :end, :]
 
     def prepare(self, *, left_padding=None, lengths=None, right_padding=None):
         if left_padding is not None:
@@ -1864,6 +1905,7 @@ class BatchKVCache(_BaseCache):
 
     def finalize(self):
         if self._right_padding is not None:
+            release(self)
             if self.keys is None:
                 # Some sparse-attention side caches are prepared with the
                 # layer cache list but are not updated on single-token decode.
@@ -1910,6 +1952,7 @@ class BatchKVCache(_BaseCache):
         """
         In-place filter to keep just the given indices in the cache.
         """
+        release(self)
         if self.keys is not None:
             self.keys = self.keys[batch_indices]
             self.values = self.values[batch_indices]
@@ -1933,6 +1976,7 @@ class BatchKVCache(_BaseCache):
         """
         In-place extend this cache with the other cache.
         """
+        release(self)
         # gmlx: the cascade stamp covers both sides' rows.
         _cascade_extend(self, other)
         if self.keys is None and other.keys is None:
@@ -2633,6 +2677,8 @@ class BatchQuantizedKVCache(_BaseCache):
     """
 
     step = 256
+    _kv_routed = True
+    _kv_grid = True
 
     def __init__(
         self,
@@ -2668,6 +2714,7 @@ class BatchQuantizedKVCache(_BaseCache):
         """Roll right-padding into left-padding after multi-row prefill."""
         if self._right_padding is None:
             return
+        release(self)
         padding = self._right_padding
         if self.keys is not None:
             # Seq axis is 2 for packed/scales/biases (B, H, S, ...), as in BatchKVCache.
@@ -2693,47 +2740,24 @@ class BatchQuantizedKVCache(_BaseCache):
         Returns:
             Quantized (keys_tuple, values_tuple) sliced to ``_idx``.
         """
-        B, n_kv_heads, num_steps, k_head_dim = keys.shape
-        v_head_dim = values.shape[-1]
+        # gmlx: grid regrow and in-place append (gmlx/cache/kv_append.py).
         prev = self._idx
-
-        if self.keys is None or (prev + num_steps) > self.keys[0].shape[-2]:
-            new_steps = (self.step + num_steps - 1) // self.step * self.step
-            shape = (B, n_kv_heads, new_steps)
-
-            def _init(dim):
-                return (
-                    mx.zeros((*shape, _packed_words(dim, self.bits)), dtype=mx.uint32),
-                    mx.zeros((*shape, dim // self.group_size), dtype=keys.dtype),
-                    mx.zeros((*shape, dim // self.group_size), dtype=keys.dtype),
-                )
-
-            def _expand(x):
-                new_x = mx.zeros((*shape, x.shape[-1]), dtype=x.dtype)
-                return mx.concatenate([x, new_x], axis=-2)
-
-            if self.keys is not None:
-                if prev % self.step != 0:
-                    self.keys = tuple(k[..., :prev, :] for k in self.keys)
-                    self.values = tuple(v[..., :prev, :] for v in self.values)
-                self.keys = tuple(_expand(k) for k in self.keys)
-                self.values = tuple(_expand(v) for v in self.values)
-            else:
-                self.keys = _init(k_head_dim)
-                self.values = _init(v_head_dim)
-
-        self.offset += num_steps
-        self._idx += num_steps
+        end = prev + keys.shape[2]
+        routed = self._kv_routed
+        if self.keys is None or end > self.keys[0].shape[-2]:
+            grow(self, keys, values, prev, end,
+                 _quant_zeros(self.group_size, self.bits),
+                 grid=self._kv_grid, routed=routed)
+        self.offset += keys.shape[2]
+        self._idx = end
 
         q_keys = mx.quantize(keys, group_size=self.group_size, bits=self.bits)
         q_values = mx.quantize(values, group_size=self.group_size, bits=self.bits)
-        for i in range(len(self.keys)):
-            self.keys[i][..., prev : self._idx, :] = q_keys[i]
-            self.values[i][..., prev : self._idx, :] = q_values[i]
+        kv_write(self, tuple(q_keys), tuple(q_values), prev, end, routed=routed)
 
         return (
-            tuple(k[..., : self._idx, :] for k in self.keys),
-            tuple(v[..., : self._idx, :] for v in self.values),
+            tuple(k[..., :end, :] for k in self.keys),
+            tuple(v[..., :end, :] for v in self.values),
         )
 
     def dequantize_for_apc(self):
@@ -2765,6 +2789,7 @@ class BatchQuantizedKVCache(_BaseCache):
 
     def filter(self, batch_indices: mx.array):
         """Keep only the sequences at *batch_indices*."""
+        release(self)
         if self.keys is not None:
             self.keys = tuple(k[batch_indices] for k in self.keys)
             self.values = tuple(v[batch_indices] for v in self.values)
@@ -2785,6 +2810,7 @@ class BatchQuantizedKVCache(_BaseCache):
 
     def extend(self, other: "BatchQuantizedKVCache"):
         """Concatenate *other* batch into this cache along the batch dim."""
+        release(self)
         # gmlx: the cascade stamp covers both sides' rows.
         _cascade_extend(self, other)
         if self.keys is None and other.keys is None:

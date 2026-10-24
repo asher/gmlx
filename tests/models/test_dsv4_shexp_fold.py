@@ -164,23 +164,34 @@ def test_fused_branch_passes_limit(monkeypatch):
 
 
 @needs_fold
-def test_stamped_fallback_single_shexp_add(monkeypatch):
+@pytest.mark.parametrize("mix", [True, False])
+def test_stamped_prefill_adds_the_shared_expert_once(monkeypatch, mix):
+    import mlx_kquant as kq
+
+    monkeypatch.setattr(modules, "_MIX_PREFILL_ENABLED", mix)
     blk = _kq_moe()
     _installed(blk)
 
-    calls = []
+    calls, mixes = [], []
     orig = v4.DeepseekV4MLP.__call__
     monkeypatch.setattr(
         v4.DeepseekV4MLP, "__call__",
         lambda self, x: calls.append(1) or orig(self, x))
+    real = getattr(kq, "gather_mix", None)
+    if real is not None:
+        monkeypatch.setattr(
+            kq, "gather_mix", lambda *a, **k: mixes.append(1) or real(*a, **k))
 
-    # idx.size 64 fails the fused branch's < 64 gate: stock fallback
+    # 64 routed rows take the sorted prefill: on the GPU the module mixes
+    # and adds the shared expert; with the mix off the block adds it
     mx.random.seed(4)
     x = mx.random.normal((1, 32, D)).astype(mx.bfloat16)
     y = blk(x, None)
     mx.eval(y)
     assert y.shape == (1, 32, D)
     assert len(calls) == 1
+    mixed = mix and real is not None and mx.default_device() == mx.gpu
+    assert len(mixes) == int(mixed)
 
 
 # MoE return-shape contract (stub GLU: no kernels at all)

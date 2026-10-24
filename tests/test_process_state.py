@@ -104,7 +104,7 @@ def _phase_caps():
     from gmlx.serve import cb_phase
 
     caps = process_state.cb_caps()
-    if caps is None or caps == cb_phase.COARSE:
+    if caps is None or caps == cb_phase.decode_caps(None):
         pytest.skip("needs command buffer caps apart from the decode caps")
     return cb_phase
 
@@ -112,7 +112,7 @@ def _phase_caps():
 def test_c_a_serve_step_flips_the_phase():
     cb_phase = _phase_caps()
     cb_phase.flip("decode")
-    assert process_state.cb_caps() == cb_phase.COARSE
+    assert process_state.cb_caps() == cb_phase.decode_caps(None)
 
 
 def test_d_the_next_decode_step_sets_the_decode_caps():
@@ -121,7 +121,7 @@ def test_d_the_next_decode_step_sets_the_decode_caps():
     # caps the last test found.
     cb_phase = _phase_caps()
     cb_phase.flip("decode")
-    assert process_state.cb_caps() == cb_phase.COARSE
+    assert process_state.cb_caps() == cb_phase.decode_caps(None)
 
 
 # The Python-side copies of the MLX settings. Each pair changes one group

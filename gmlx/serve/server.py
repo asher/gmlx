@@ -1747,7 +1747,8 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "`server.family_defaults: false`, which a config "
                          "reload restores).")
     ap.add_argument("--prefill-step-size", type=int, default=None, metavar="N",
-                    help="Prefill chunk size in tokens (default 2048, 8192 for a streamed model) - lower "
+                    help="Prefill chunk size in tokens (default 2048, 4096 for a sparse MoE "
+                         "when memory allows, 8192 for a streamed model) - lower "
                          "it to cap peak memory on long prompts, at some "
                          "prefill-throughput cost. Also via PREFILL_STEP_SIZE; "
                          "config mode: server.prefill_step_size.")
@@ -2840,10 +2841,10 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # (deep-context safety; see server_memory).
     from .memory import apply_cache_limit
     apply_cache_limit(cfg)
-    from .cb_phase import (COARSE, FINE, STREAMED_DECODE, STREAMED_PREFILL,
+    from .cb_phase import (FINE, STREAMED_DECODE, STREAMED_PREFILL, decode_caps,
                            install_cb_phase_flips)
     if install_cb_phase_flips():
-        print(f"[server] command buffer caps: per-phase (decode {COARSE}, "
+        print(f"[server] command buffer caps: per-phase (decode {decode_caps(None)}, "
               f"prefill {FINE}; streamed decode {STREAMED_DECODE}, "
               f"streamed prefill {STREAMED_PREFILL})")
     else:

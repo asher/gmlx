@@ -33,11 +33,12 @@ once the KV is deep enough. head_dim 64 (e.g. gpt-oss full-attn layers) engages
 at GMLX_GQA_SDPA_MINKV (default 4096): stock MLX's fused vector path
 plateaus near 37% of read-once bandwidth at long KV; the kq kernel's coarse
 contiguous splits + GQA-shared K/V tile staging reach ~55-60% (1.3-1.6x per
-call from 16k up). head_dim 512 (gemma-4 global layers) engages from
-GMLX_GQA_SDPA_MINKV512 keys. On NAX GPUs with mlx-kquant 0.4.15 or later
-the op runs its hd512 pass on the matrix units, and every layout with a
-group of 2 to 8 takes it once KV heads x batch x keys reaches 3072 (768
-keys at 4 KV heads, 3072 at 1). Elsewhere layouts with 4 or more KV heads,
+call from 16k up). head_dim 128 with a group of 8 at batch 1 (Flint) engages
+from GMLX_GQA_SDPA_MINKV128 keys (default 1024). head_dim 512 (gemma-4
+global layers) engages from GMLX_GQA_SDPA_MINKV512 keys. On NAX GPUs with
+mlx-kquant 0.4.15 or later the op runs its hd512 pass on the matrix units,
+and every layout with a group of 2 to 8 takes it once KV heads x batch x
+keys reaches 3072 (768 keys at 4 KV heads, 3072 at 1). Elsewhere layouts with 4 or more KV heads,
 or a group of 4 or less, take it from 32768 keys, where it overtakes the
 kq.sdpa_vector route below (1.02x-1.28x per call on gemma-4-31b from 32k to
 131k, token-exact +1.7% whole-step at 49k).
@@ -117,10 +118,13 @@ _HD256_VERIFY = env_bool("GMLX_HD256_VERIFY", True)
 # probe pipelined independent calls (throughput) where the decode step
 # serializes the two-pass dispatch (latency). Opt back in with
 # GMLX_GQA_SDPA_HD256=1 (e.g. to re-measure under batch/verify). hd128
-# is instantiated in mlx-kquant but unrouted: no resident model decodes
-# hd128 GQA; measure before routing (llama3-class).
+# routes one row with a group of 8 (Flint, 32 query and 4 KV heads) from
+# GMLX_GQA_SDPA_MINKV128 keys: chained per call, 1.07-1.13x over stock from
+# 1k keys. A group of 4 (llama3-class, 32/8) stays on stock, which matches
+# or beats the kernel from 2k to 110k.
 _GQA_DECODE = env_bool("GMLX_GQA_SDPA", True)
 _GQA_MIN_KV = env_int("GMLX_GQA_SDPA_MINKV", 4096)
+_GQA_MIN_KV_128 = env_int("GMLX_GQA_SDPA_MINKV128", 1024)
 _GQA_HD256 = env_bool("GMLX_GQA_SDPA_HD256", False)
 _GQA_MIN_KV_256 = env_int("GMLX_GQA_SDPA_MINKV256", 49152)
 # hd512 GQA decode (gemma-4 global layers). On NAX GPUs, mlx-kquant 0.4.15
@@ -393,6 +397,9 @@ def _gqa_decode_eligible(q, k, v, mask):
     hd = q.shape[-1]
     if hd == 64:
         min_kv = _GQA_MIN_KV
+    elif (hd == 128 and q.shape[0] == 1 and k.shape[1]
+          and q.shape[1] // k.shape[1] == 8):
+        min_kv = _GQA_MIN_KV_128
     elif hd == 256 and _GQA_HD256:
         min_kv = _GQA_MIN_KV_256
     elif hd == 512 and (_GQA_NAX512 or (k.shape[1] >= 2 and (

@@ -12,7 +12,9 @@ from here. A call meets three claims, then the base, in this order:
 4. ``gmlx.cache.attention.scaled_dot_product_attention``: TurboQuant,
    KVarN, the quantized routes and the fp path.
 
-The first claim that answers wins. ``configure()`` reads the gates once
+The first claim that answers wins. Before the dispatch, a sliding layer
+whose chunk has a plain band mask offers the call to
+``gmlx.cache.window_sdpa.claim``. ``configure()`` reads the gates once
 per load; until it runs, every call goes to the base. On a load of the
 owned model it names the open routes in one log line. A KVarN view
 passes the three claims untouched and reaches the KVarN branch of the

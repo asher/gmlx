@@ -87,8 +87,12 @@ def _cache_report(prompt_cache):
         cbytes = 0
         cshapes = {}
         alens = []
+        seen = set()
         for name, v in sorted(vars(c).items()):
-            arrs = list(_arrays(v))
+            # One count per array: a cache may keep a second handle on its
+            # buffers (the in-place append's ``_kv_own``).
+            arrs = [a for a in _arrays(v) if id(a) not in seen]
+            seen.update(id(a) for a in arrs)
             if not arrs:
                 continue
             cbytes += sum(a.nbytes for a in arrs)
