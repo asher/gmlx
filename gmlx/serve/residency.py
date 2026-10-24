@@ -1263,7 +1263,13 @@ class _ResidencyPool:
             note_build_credit(cache_key, streamed - min(
                 shares[0], held_table_bytes(str(model_path))))
         try:
-            self._stock_get(model_path, adapter_path, model_kind=model_kind)
+            # A raised wired limit would wire the walk's buffers in one
+            # burst, ahead of the install's chunk guard.
+            from gmlx.stream.wired_limit import wired_limit_held
+
+            with wired_limit_held() if guarded else contextlib.nullcontext():
+                self._stock_get(model_path, adapter_path,
+                                model_kind=model_kind)
             # One policy resolve per load, inside the env window. An
             # error verdict fails residency. Runs before the APC salt
             # below, which reads the stamp it leaves on the model.

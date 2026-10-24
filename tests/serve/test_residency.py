@@ -1315,7 +1315,12 @@ def test_a_plain_moe_build_is_judged_with_its_kv_room_before_the_load(
     """As a run judges it: the 150 GB set with a 20 GB KV room keeps its
     experts in memory, or keeps them without its 30 GB table, or streams
     them, decided before the load so its install never starts a wire the
-    chunk guard stops for want of that room."""
+    chunk guard stops for want of that room. A build kept in memory loads
+    with another model's raised wired limit held at 0, so its walk wires
+    nothing ahead of the guard, and gets the limit back after, unless
+    something of it streams."""
+    import mlx.core as mx
+
     import gmlx.stream.table_stream as ts
     from gmlx.stream.budget import STREAM_FREE_NOW
 
@@ -1330,12 +1335,20 @@ def test_a_plain_moe_build_is_judged_with_its_kv_room_before_the_load(
     seen = []
 
     def get(*a, **k):
+        assert limit == [0]
         seen.append((ts.resident_wire_guarded("a.gguf"),
                      ts.tables_for_memory("a.gguf"),
                      ts.experts_stream_for_memory("a.gguf")))
         return stock(*a, **k)
 
     pool._stock_get = get
+    limit = [90 * GB]
+
+    def set_limit(n):
+        prev, limit[0] = limit[0], n
+        return prev
+
+    monkeypatch.setattr(mx, "set_wired_limit", set_limit)
     with caplog.at_level("WARNING", logger="gmlx.serve.residency"):
         entry = pool.acquire("a.gguf", None, "auto",
                              build_spec=SimpleNamespace(stream=None))
@@ -1343,6 +1356,8 @@ def test_a_plain_moe_build_is_judged_with_its_kv_room_before_the_load(
     assert seen == [{"experts": (True, False, ""),
                      "tables": (True, True, ""),
                      "nothing": (False, False, "unwired")}[kept]]
+    # A streamed table or experts keep the sweep off for the process.
+    assert limit == [90 * GB if kept == "experts" else 0]
     want = {"experts": 150, "tables": 120, "nothing": 20}[kept] * GB
     assert entry.footprint == want and tables == [want]
     assert "re-pricing" not in caplog.text
