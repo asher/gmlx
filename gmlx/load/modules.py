@@ -465,6 +465,8 @@ def _eligible_nativefp(m, caps):
             return False
         if proj.mode != "mxfp4" or "bias" not in proj:
             return False
+        if "out_scale" in proj:
+            return False
     return True
 
 
@@ -540,6 +542,8 @@ def _eligible_gptoss_mlp(m, caps):
         if not isinstance(proj, NativeFPSwitchLinear):
             return False
         if proj.mode != "mxfp4" or "bias" not in proj:
+            return False
+        if "out_scale" in proj:
             return False
     if not isinstance(getattr(m, "router", None), nn.Linear):
         return False
@@ -638,7 +642,7 @@ def _eligible_kquant_glu(m, caps):
             return False
         if proj.kquant_type not in _KQ_FUSED_CODECS:
             return False
-        if ("bias" in proj) != want_bias:
+        if ("bias" in proj) != want_bias or "out_scale" in proj:
             return False
         if want_bias and proj.kquant_type not in ("mxfp4", "nvfp4"):
             return False  # biased kernels exist for the fp4 codecs only
@@ -1130,7 +1134,8 @@ def _eligible_kq_block(m, caps):
     for proj in (sw.gate_proj, sw.up_proj, sw.down_proj):
         if not isinstance(proj, KQuantSwitchLinear):
             return False
-        if proj.kquant_type not in _KQ_FUSED_CODECS or "bias" in proj:
+        if (proj.kquant_type not in _KQ_FUSED_CODECS or "bias" in proj
+                or "out_scale" in proj):
             return False
     if sw.gate_proj.kquant_type != sw.up_proj.kquant_type:
         return False
@@ -1510,7 +1515,8 @@ def _eligible_gemma_experts(m, caps):
     down = sw.down_proj
     if not isinstance(down, KQuantSwitchLinear):
         return False
-    if down.kquant_type not in _KQ_FUSED_CODECS or "bias" in down:
+    if (down.kquant_type not in _KQ_FUSED_CODECS or "bias" in down
+            or "out_scale" in down):
         return False
     if _kq_wire_k(down.weight, down.kquant_type) <= 0:
         return False
@@ -1554,6 +1560,7 @@ def _make_fused_gemma_experts(base_cls, caps):
                     and g.kquant_type == u.kquant_type
                     and g.kquant_type in _KQ_FUSED_CODECS
                     and "bias" not in g and "bias" not in u
+                    and "out_scale" not in g and "out_scale" not in u
                     and g.weight.shape[1] % 8 == 0
                     and d >= 512  # wide kernels want K/16 >= 32 chunks
                     and _kq_wire_k(g.weight, g.kquant_type) == d

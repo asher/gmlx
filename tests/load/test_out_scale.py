@@ -96,3 +96,37 @@ def test_wire_fusions_skip_a_scaled_projection():
     assert isinstance(m.gate_proj, KQuantLinear)
     assert not _kq_dense(m.gate_proj, {"q8_0"})
     assert not _same_codec_kquant([m.gate_proj, m.up_proj])
+
+
+class _Moe(nn.Module):
+    def __init__(self):
+        super().__init__()
+        from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
+
+        self.experts = SwitchGLU(256, 256, 8)
+
+
+@pytest.mark.parametrize("proj", ["gate_proj", "up_proj", "down_proj"])
+def test_fused_moe_skips_a_scaled_expert_stack(proj):
+    """The fused MoE gathers read the expert stacks' wire bytes, so a
+    stack with a weight scale keeps the stock gathers, which run the
+    module's own call and apply the scale."""
+    import mlx_kquant as kq
+
+    from gmlx.load import modules
+
+    if not hasattr(kq, "moe_glu_gather_kq"):
+        pytest.skip("mlx_kquant without fused MoE kernels")
+
+    def build():
+        m = _Moe()
+        m.eval()
+        modules.install_kquant_modules(m, {
+            f"experts.{p}.weight": "q8_0"
+            for p in ("gate_proj", "up_proj", "down_proj")})
+        return m
+
+    assert modules.install_fused_moe_glu(build()) == 1
+    m = build()
+    install_out_scales(m, {f"experts.{proj}.out_scale": mx.array([0.5])})
+    assert modules.install_fused_moe_glu(m) == 0

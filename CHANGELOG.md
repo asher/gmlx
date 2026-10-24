@@ -95,6 +95,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A MoE GGUF whose expert weights carry a scale tensor, as NVFP4 exports do,
+  gave wrong output: the fused expert kernels dropped the scale. Those
+  experts now run unfused, with the scale applied.
 - A quantized `mmproj`, such as `mmproj-Q8_0.gguf`, failed to load for most
   vision and audio models. It now loads and keeps its weights quantized.
 - A saved prompt cache of a Llama 4 conversation longer than its attention
