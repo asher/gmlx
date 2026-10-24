@@ -427,7 +427,7 @@ def draw_marker(svg, cx, cy, r, shape, color, stroke, sw=2):
 
 # ------------------------------------------------------- chart grammar
 
-REF_NAME = {"llama": "llama.cpp", "ds4": "ds4-server"}
+REF_NAME = {"llama": "llama.cpp", "ds4": "ds4-server", "omlx": "oMLX"}
 
 
 def _is_dark(t):
@@ -563,7 +563,8 @@ def chart_panels(args):
         die("panels expects exactly one model, got %s (pick with --model)"
             % (models or "no cells"))
     model = models[0]
-    ref_rt = "ds4" if any(c["runtime"] == "ds4" for c in cells) else "llama"
+    ref_rt = next((r for r in ("ds4", "omlx")
+                   if any(c["runtime"] == r for c in cells)), "llama")
     t = THEMES[args.theme]
     # arm owns style GLOBALLY: solid = baseline, dashed = speculative, on
     # every engine -- baselines compare like-for-like across engines even
