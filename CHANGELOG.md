@@ -97,6 +97,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A drafter in a repository's `MTP` folder, as unsloth ships them, now pairs
+  with the quants in the other folders of that repository on `gmlx pull` and
+  `gmlx sync-models --add-companions`.
 - A MoE GGUF with scale tensors on its expert weights, as NVFP4 exports have,
   gave wrong output. Those experts now run unfused, with the scale applied.
 - A quantized `mmproj`, such as `mmproj-Q8_0.gguf`, failed to load for most
