@@ -443,6 +443,47 @@ def test_drafter_pairs_into_a_model_already_in_the_config(tmp_path, monkeypatch)
     assert mc.draft_gguf and mc.speculative is True
 
 
+def _repo_with_mtp_folder(root):
+    """The Hugging Face layout: each quant in its own folder, the drafter
+    in MTP/."""
+    for d in ("UD-IQ4_XS", "Q8_0", "MTP"):
+        (root / d).mkdir()
+    _write(root / "UD-IQ4_XS", "Muse-Glimmer-30B-UD-IQ4_XS-00001-of-00002.gguf")
+    _write(root / "Q8_0", "Muse-Glimmer-30B-Q8_0.gguf")
+    _write(root / "MTP", "dflash-Muse-Glimmer-30B-Q4_K_M.gguf")
+    return str(root / "MTP" / "dflash-Muse-Glimmer-30B-Q4_K_M.gguf")
+
+
+def test_repo_mtp_folder_drafter_pairs_with_every_quant(tmp_path, monkeypatch):
+    _drafter_classify(monkeypatch)
+    drafter = _repo_with_mtp_folder(tmp_path)
+    models = _scan(tmp_path, recursive=True)
+    assert len(models) == 2
+    assert all(m.draft_gguf == drafter and m.speculative for m in models)
+
+
+def test_pulled_repo_mtp_folder_drafter_pairs_into_a_configured_quant(
+        tmp_path, monkeypatch):
+    # `gmlx pull` of the drafter scans only MTP/; the quant beside it is
+    # configured already, and a model of another repo is not a candidate.
+    _drafter_classify(monkeypatch)
+    repo, other = tmp_path / "repo", tmp_path / "other"
+    repo.mkdir()
+    other.mkdir()
+    drafter = _repo_with_mtp_folder(repo)
+    target = str(repo / "UD-IQ4_XS" / "Muse-Glimmer-30B-UD-IQ4_XS-00001-of-00002.gguf")
+    stranger = str(_write(other, "Muse-Glimmer-30B-Q4_K_M.gguf")
+                   / "Muse-Glimmer-30B-Q4_K_M.gguf")
+    known = {target: ModelCfg(id="muse-iq4", path=target),
+             stranger: ModelCfg(id="muse-other", path=stranger)}
+    spec = DiscoverSpec(dir=str(repo / "MTP"), recursive=False,
+                        pair_mmproj=True, speculative="auto")
+    stats = {}
+    disc.scan_dirs([spec], [str(tmp_path)], known_paths=set(known),
+                   known_models=known, stats=stats)
+    assert stats["draft_pairs"] == {"muse-iq4": drafter}
+
+
 def test_a_drafter_a_configured_model_names_already_is_no_pair(
         tmp_path, monkeypatch):
     # A DFlash 2 drafter may replace a drafter of another kind, so only the

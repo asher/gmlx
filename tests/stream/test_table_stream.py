@@ -39,6 +39,7 @@ class _Node:
 def _clear_force_latch():
     yield
     ts.force_table_stream(False)
+    ts._FOR_MEMORY.clear()
 
 
 def _table_model(model_type="qwen4_exp", rows=8, dims=32):
@@ -264,6 +265,12 @@ def test_warm_touch_excludes_table_iff_it_will_stream(monkeypatch):
     assert id(emb.weight) in skip and id(emb.scales) in skip
     ts.force_table_stream(False)
     assert ts.warm_touch_exclusions(model, tbytes + 100, tbytes + 200) == set()
+    # under the budget, latched for the memory free now: must also skip
+    ts.stream_tables_for_memory("m.gguf")
+    skip = ts.warm_touch_exclusions(model, tbytes + 100, tbytes + 200,
+                                    paths=["m.gguf"])
+    assert id(emb.weight) in skip and id(emb.scales) in skip
+    ts.stream_tables_for_memory("m.gguf", False)
     # forced on a fits model (the P1 overhead A/B): must also skip
     monkeypatch.setenv("GMLX_STREAM_PLE", "1")
     skip = ts.warm_touch_exclusions(model, tbytes + 100, tbytes + 200)
@@ -364,7 +371,11 @@ def _fake_budget(monkeypatch, budget_bytes):
         lambda: {"max_recommended_working_set_size": budget_bytes / 0.9})
 
 
-def test_ladder_streams_table_and_keeps_experts_resident(monkeypatch):
+@pytest.mark.parametrize("for_memory", [False, True])
+def test_ladder_streams_table_and_keeps_experts_resident(monkeypatch,
+                                                         for_memory):
+    # ``for_memory``: under the budget, with the step latched by the
+    # check before the load for the memory free now.
     from mlx.utils import tree_flatten
 
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
@@ -373,9 +384,12 @@ def test_ladder_streams_table_and_keeps_experts_resident(monkeypatch):
     total = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
     tbytes = ts.table_bytes(model)
     # over budget; experts + rest fit once the table streams
-    _fake_budget(monkeypatch, total - tbytes // 2)
+    _fake_budget(monkeypatch, 2 * total if for_memory else total - tbytes // 2)
+    if for_memory:
+        ts.stream_tables_for_memory("/nonexistent.gguf")
 
-    n, offloaded = install_expert_streaming(model)
+    n, offloaded = install_expert_streaming(model,
+                                            gguf_path="/nonexistent.gguf")
     assert n == 1
     assert ts.table_streaming_active(model)
     # experts wrapped but NOT streaming (resident fast path)

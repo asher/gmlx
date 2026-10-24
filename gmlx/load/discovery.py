@@ -1302,9 +1302,12 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
         # `made` and only this lookup can pair it.
         old = _configured_in_dir(_dir, configured) if drafters else []
         old_ids = {mc.id for mc, _c in old}
+        root = _mtp_folder_root(_dir) if drafters else None
         all_made.extend(made)
-        all_old.extend(e for e in old if e[0].id not in all_old_ids)
-        all_old_ids.update(old_ids)
+        for e in old + (_configured_in_repo(root, configured) if root else []):
+            if e[0].id not in all_old_ids:
+                all_old.append(e)
+                all_old_ids.add(e[0].id)
         for dr in drafters:
             drafter_kinds[dr.path] = dr.drafter_kind
             targets = ([] if spec.speculative is False
@@ -1317,7 +1320,7 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
                     draft_pairs[mc.id] = dr.path
             if not targets:
                 unpaired.append(dr)
-            if (dr.declared or _sibling_drafter_repo(dr.path)) and (
+            if (dr.declared or _sibling_drafter_repo(dr.path) or root) and (
                     not targets or dr.drafter_kind == "dflash2"):
                 cross.append(dr)
 
@@ -1329,12 +1332,20 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
     # with that model wherever the scan found it, and a
     # DFlash 2 drafter takes over a target its same-directory DFlash v1
     # sibling claimed above. Declared hits only; the filename rule stays
-    # same-directory.
+    # same-directory. A drafter in a repo's MTP/ folder is the exception: it
+    # pairs on the full rule with the models of its repo, the folders
+    # find_mtp_companion searches from the target's side.
     if spec.speculative is not False:
         pool = all_made + all_old
         for dr in cross:
-            targets = _drafter_targets(dr, pool, declared_only=True,
-                                       drafter_kinds=drafter_kinds)
+            root = _mtp_folder_root(os.path.dirname(dr.path))
+            if root is None:
+                targets = _drafter_targets(dr, pool, declared_only=True,
+                                           drafter_kinds=drafter_kinds)
+            else:
+                targets = _drafter_targets(
+                    dr, [e for e in pool if _in_repo(e[1].path, root)],
+                    drafter_kinds=drafter_kinds)
             for mc in targets:
                 loser = mc.draft_gguf
                 mc.draft_gguf = dr.path
@@ -1576,6 +1587,27 @@ def _configured_in_dir(dirpath: str, configured) -> list:
         if c is not None and c.kind == "model" and c.loadable:
             out.append((mc, c))
     return out
+
+
+def _mtp_folder_root(dirpath: str) -> str | None:
+    """The repo folder above ``dirpath`` when ``dirpath`` is its ``MTP/``
+    folder, else None."""
+    if os.path.basename(dirpath).lower() != "mtp":
+        return None
+    return os.path.dirname(dirpath)
+
+
+def _in_repo(path: str, root: str) -> bool:
+    """Whether ``path`` sits in ``root`` or in a folder directly under it."""
+    parent = os.path.dirname(path)
+    return parent == root or os.path.dirname(parent) == root
+
+
+def _configured_in_repo(root: str, configured) -> list:
+    """:func:`_configured_in_dir` over ``root`` and its direct subfolders."""
+    dirs = {os.path.dirname(ap) for ap in configured
+            if _in_repo(ap, root)}
+    return [e for d in sorted(dirs) for e in _configured_in_dir(d, configured)]
 
 
 # A drafter repo named for its target's repo plus one of these markers

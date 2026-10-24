@@ -97,6 +97,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Qwen3.8-Flash-Next UD-IQ4_XS streamed its experts where the larger UD-Q4_K_XL
+  kept them in memory. A MoE short of the memory free at load now reads its
+  lookup tables from the file first, and keeps its experts in memory. A load
+  that reads its tables from the file now prints a line that says so.
+- `gmlx run` and `gmlx chat` printed the `[config] synthesized` line without
+  `--verbose`, twice with a drafter. It now prints once, under `--verbose`.
+- A drafter in a repository's `MTP` folder, as unsloth ships them, now pairs
+  with the quants in the other folders of that repository on `gmlx pull` and
+  `gmlx sync-models --add-companions`.
 - A MoE GGUF with scale tensors on its expert weights, as NVFP4 exports have,
   gave wrong output. Those experts now run unfused, with the scale applied.
 - A quantized `mmproj`, such as `mmproj-Q8_0.gguf`, failed to load for most

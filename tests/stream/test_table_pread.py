@@ -71,9 +71,12 @@ def test_a_table_that_brings_the_load_under_the_budget_is_read_from_the_file(
         table_gguf, monkeypatch):
     """A load over the stream budget whose tables alone bring it under
     reads them from the file, so its experts stay resident. A load that
-    fits, or that stays over without them, holds them as before; a stream
-    flag leaves them to the install's ladder, and GMLX_STREAM_PLE=0 keeps
-    them."""
+    fits, or that stays over without them, holds them as before, unless
+    the check before the load latched the step for the memory free now; a
+    stream flag leaves them to the install's ladder, and
+    GMLX_STREAM_PLE=0 keeps them."""
+    import gmlx.stream.table_stream as ts
+
     path, _raw = table_gguf
     monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", str(1 << 40))
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
@@ -86,6 +89,10 @@ def test_a_table_that_brings_the_load_under_the_budget_is_read_from_the_file(
     assert list(defer(table + rest - 1)) == ["blk.1.engram_embd.weight"]
     assert list(defer(rest)) == ["blk.1.engram_embd.weight"]
     assert defer(table + rest) == {}
+    monkeypatch.setattr(ts, "_FOR_MEMORY", set())
+    ts.stream_tables_for_memory(path)
+    assert list(defer(table + rest)) == ["blk.1.engram_embd.weight"]
+    ts.stream_tables_for_memory(path, False)
     assert defer(rest - 1) == {}
     assert defer(rest, latched=True) == {}
     monkeypatch.setenv("GMLX_STREAM_PLE", "0")

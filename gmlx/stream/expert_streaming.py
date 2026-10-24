@@ -161,8 +161,9 @@ def install_unflagged_tables(model, gguf_path: str | None, *,
                              prefill_step: int | None = None,
                              stats_verbose: bool | None = None) -> bool:
     """The install of a load with no stream placement whose tables alone
-    bring it under the budget, on an arch that gathers them per layer
-    (``capacity.gathered_table_bytes``). Its own ladder serves the tables
+    bring it under the budget, or under the memory free now, on an arch
+    that gathers them per layer (``capacity.gathered_table_bytes``). Its
+    own ladder serves the tables
     from the file on the CPU stream and keeps the experts in memory when
     the memory free now holds them; else the experts stream, with the
     stream line. Call it after the load, before any GPU work on the model
@@ -562,6 +563,7 @@ def install_expert_streaming(
         install_table_streaming,
         stream_plan,
         table_bytes,
+        tables_for_memory,
     )
 
     # One rule with the serve build's header prediction (stream_plan):
@@ -569,8 +571,11 @@ def install_expert_streaming(
     # a forced stream always compose; GMLX_STREAM_PLE_COMPOSE=0 keeps the
     # table resident.
     tables = table_bytes(model) + file_tables
+    # A table-only step the check before the load latched for the memory
+    # free now selects the tables as the budget step does.
     plan = stream_plan(ladder_bytes, tables, budget,
-                       force_stream=force_stream)
+                       force_stream=force_stream,
+                       latched=tables_for_memory(gguf_path))
     compose = plan.tables and plan.experts
     table_only = plan.tables and not plan.experts
     if plan.table_kept and table_bytes(model):

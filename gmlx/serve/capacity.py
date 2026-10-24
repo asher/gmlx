@@ -543,7 +543,9 @@ def deferred_table_bytes(gguf_path: str, budget: int | None = None,
     """Bytes of the arch's streamable tables a load without a stream flag
     serves from the file instead of holding. All of them when they alone
     bring the text tensors under the stream budget (``budget``, the
-    device's when None), on any arch that declares tables. On an arch
+    device's when None), or the check before the load latched the step
+    for the memory free now (``table_stream.unflagged_tables_stream``),
+    on any arch that declares tables. On an arch
     that reads its tables ahead (``table_stream.tables_read_ahead``),
     also those no array can hold. The figure discovery, the run
     preflight and the serve footprint take off the file bytes of a model
@@ -572,17 +574,18 @@ def gathered_table_bytes(gguf_path: str, budget: int | None = None,
     """Bytes of the streamable tables a load without a stream flag serves
     from the file on the CPU stream, on an arch that gathers its tables
     per layer (not ``table_stream.tables_read_ahead``): all of them when
-    they alone bring the text tensors under the stream budget
-    (``table_stream.tables_bring_under``; ``budget`` the device's when
-    None). Such a load maps the table, and its install
+    they alone bring the text tensors under the stream budget (``budget``
+    the device's when None), or the step is latched for the memory free
+    now (``table_stream.unflagged_tables_stream``). Such a load maps the
+    table, and its install
     (``expert_streaming.install_unflagged_tables``) wraps it before any
     GPU work, so the experts stay in memory. 0 otherwise, or when the
     header cannot be read."""
     try:
         from gmlx.device import stream_budget_bytes
         from gmlx.load.discovery import text_tensor_bytes
-        from gmlx.stream.table_stream import (tables_bring_under,
-                                              tables_read_ahead)
+        from gmlx.stream.table_stream import (tables_read_ahead,
+                                              unflagged_tables_stream)
 
         shards, arch = _table_shards(gguf_path)
         if not shards or tables_read_ahead(arch):
@@ -593,11 +596,23 @@ def gathered_table_bytes(gguf_path: str, budget: int | None = None,
         text = text_tensor_bytes(gguf_path)
         if budget is None:
             budget = stream_budget_bytes()
-        if text and tables_bring_under(text, tables, budget, env):
+        if text and unflagged_tables_stream(gguf_path, text, tables, budget,
+                                            env):
             return tables
         return 0
     except Exception:
         return 0
+
+
+def table_label(gguf_path: str) -> str:
+    """What a stream line calls the streamable tables of the GGUF at
+    ``gguf_path`` (``table_stream.table_label``)."""
+    from gmlx.stream.table_stream import table_label as label
+
+    try:
+        return label(_table_shards(gguf_path)[1])
+    except Exception:
+        return label(None)
 
 
 def held_table_bytes(gguf_path: str) -> int:
@@ -667,7 +682,8 @@ def preload_gate(weight_bytes: float, model_id: str, *,
                  streaming: bool = False, image: bool = False,
                  reserved_bytes: float = 0.0,
                  reserved_ram_bytes: float = 0.0,
-                 ram_floor_bytes: float = 0.0) -> None:
+                 ram_floor_bytes: float = 0.0,
+                 quiet: bool = False) -> None:
     """The same headroom check a request takes, at model load and swap:
     a build whose weights cannot fit the measured free working set (the
     pool has already evicted what it may) refuses with numbers instead
@@ -682,7 +698,8 @@ def preload_gate(weight_bytes: float, model_id: str, *,
     RAM and ``ram_floor_bytes`` the host floor its arena leaves free; the
     kernel gate holds both back from the reclaimable sum.
     ``image`` names the bytes as an image model's weights and the memory
-    of one image at its default size."""
+    of one image at its default size. ``quiet`` defers without the log
+    line, for a caller that asks whether a build fits."""
     if overcommit() or weight_bytes <= 0:
         return
     if image:
@@ -726,26 +743,26 @@ def preload_gate(weight_bytes: float, model_id: str, *,
             f"{weight_bytes / GB:.1f} GB exceed the measured free "
             f"working set {head / GB:.1f} GB{kept} (resident models are "
             f"pinned or busy). Retry when a slot frees, or "
-            f"GMLX_OVERCOMMIT=1 overrides.")
+            f"GMLX_OVERCOMMIT=1 overrides.", quiet=quiet)
     _kernel_gate(weight_bytes, model_id, reserved_ram_bytes,
-                 ram_floor_bytes, streaming=streaming)
+                 ram_floor_bytes, streaming=streaming, quiet=quiet)
 
 
 _DEFER_WARN_S = 10.0
 _defer_warned_at = 0.0
 
 
-def _defer(msg: str) -> NoReturn:
+def _defer(msg: str, *, quiet: bool = False) -> NoReturn:
     """Log and raise a LoadDeferred. The 503 body reaches only the client,
     so without this line a refusing gate leaves no server-side trace at
     all (2026-08-26: two bench arms deferred for their whole 240 s startup
     window with an empty log). Rate-limited so a client retry loop cannot
-    flood."""
+    flood. ``quiet`` raises without the line."""
     global _defer_warned_at
     import time
 
     now = time.monotonic()
-    if now - _defer_warned_at >= _DEFER_WARN_S:
+    if not quiet and now - _defer_warned_at >= _DEFER_WARN_S:
         _defer_warned_at = now
         _log.warning("[capacity] %s", msg)
     raise LoadDeferred(msg)
@@ -787,7 +804,7 @@ def _settle_reclaimable(sample, rec, need: float):
 def _kernel_gate(weight_bytes: float, model_id: str,
                  reserved_bytes: float = 0.0,
                  floor_bytes: float = 0.0, *,
-                 streaming: bool = False) -> None:
+                 streaming: bool = False, quiet: bool = False) -> None:
     """The kernel's side of the same question: MLX accounting cannot see
     other processes' pages (2026-08-25: ~16 GB of another app's pages in
     the compressor let an 81 GB load through and Metal OOM'd). Below the
@@ -839,7 +856,7 @@ def _kernel_gate(weight_bytes: float, model_id: str,
         f"({cached}) exceed the kernel's "
         f"reclaimable memory {rec / GB:.1f} GB less the {floor / GB:.1f} GB "
         f"floor{kept} (other processes hold the rest). Retry when memory "
-        f"frees, or GMLX_OVERCOMMIT=1 overrides.")
+        f"frees, or GMLX_OVERCOMMIT=1 overrides.", quiet=quiet)
 
 
 def _resident_shard_bytes(model_id) -> float:

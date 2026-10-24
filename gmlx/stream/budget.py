@@ -711,7 +711,9 @@ class WireCheck:
     that fits in RAM. ``ram_bytes`` is physical RAM, None when unread.
     ``dropped_bytes`` is an auto MTP drafter the load leaves out
     (``check_wire_beside_drafter``): to keep the experts in memory when
-    it fits, else because they stream."""
+    it fits, else because they stream. ``table_bytes`` are streamable
+    tables the load reads from the file to get under live memory
+    (``check_wire_with_tables``), out of ``wire_bytes``."""
     wire_bytes: int
     reclaimable_bytes: int | None
     keep_bytes: int
@@ -719,6 +721,7 @@ class WireCheck:
     reason: str = ""
     dropped_bytes: int = 0
     ram_bytes: int | None = None
+    table_bytes: int = 0
 
     @property
     def past_ram(self) -> bool:
@@ -837,3 +840,45 @@ def check_wire_beside_drafter(set_bytes: int, drafter_bytes: int, *,
     if alone.fits or not kept_streamed:
         return replace(alone, dropped_bytes=drafter_bytes)
     return check
+
+
+def tables_offloaded(label: str, table_bytes: int) -> str:
+    """The stream line of a load that reads ``table_bytes`` of tables
+    from the file to keep its experts in memory
+    (``check_wire_with_tables``). ``label``: ``table_stream.table_label``."""
+    return f"{label} of {_gb(table_bytes)} offloaded to disk"
+
+
+def check_wire_with_tables(set_bytes: int, table_bytes: int,
+                           drafter_bytes: int, *, auto: bool,
+                           room_bytes: int,
+                           alone_room_bytes: int | None = None,
+                           kept_streamed: bool = False,
+                           budget: int | None = None) -> WireCheck:
+    """``check_wire_beside_drafter`` with the table-only step first. A set
+    that does not keep its experts and its auto drafter in memory, and
+    holds ``table_bytes`` of streamable tables, is judged again without
+    them when that brings it under ``budget``, as the install's ladder
+    requires for a table-only plan. That check stands, with
+    ``table_bytes`` set, when it keeps more in memory: the experts, then
+    the auto drafter. A table serves a few KB a token from the file;
+    streamed experts or no drafter cost decode speed."""
+    def judge(n: int) -> WireCheck:
+        return check_wire_beside_drafter(
+            n, drafter_bytes, auto=auto, room_bytes=room_bytes,
+            alone_room_bytes=alone_room_bytes, kept_streamed=kept_streamed,
+            budget=budget)
+
+    check = judge(set_bytes)
+    if (not table_bytes or (check.fits and not check.mtp_off)
+            or (budget is not None and set_bytes - table_bytes > budget)):
+        return check
+    lean = judge(set_bytes - table_bytes)
+    if _kept_in_memory(lean) > _kept_in_memory(check):
+        return replace(lean, table_bytes=table_bytes)
+    return check
+
+
+def _kept_in_memory(check: WireCheck) -> int:
+    """2: the experts and the auto drafter; 1: the experts; 0: neither."""
+    return 0 if not check.fits else 1 if check.mtp_off else 2
