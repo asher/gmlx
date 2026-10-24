@@ -33,7 +33,9 @@ as gemma-4 with its assistant drafter, need `--draft-gguf`.
 On the server, a model speculates when its `speculative` key is `true` or
 `auto`. `gmlx init` sets `auto` for models with a head, and `gmlx pull` and
 a [discover](config.md#model-discovery) scan pair a drafter that they find
-with its model. For a model already in the config,
+with its model. A model pulled by name, as in `gmlx pull qwen3.8-27b`,
+comes with its drafter and registers it, unless you pass `--no-drafter`.
+For a model already in the config,
 [`gmlx sync-models --add-companions`](cli.md#gmlx-sync-models) adds the
 drafter to its entry.
 
@@ -154,8 +156,9 @@ output. Start with the Qwen3.8 drafter and measure the others on your own
 work.
 
 Gemma 4 models run plain DFlash drafters too. unsloth ships one beside its
-NVIDIA-Nemotron-3.5-Bolt-E4B quants, and `gmlx pull` pairs the two when you
-download both:
+NVIDIA-Nemotron-3.5-Bolt-E4B quants. `gmlx pull nemotron-3.5-bolt-e4b`
+downloads and pairs the two, and a pull by reference pairs them when you
+name both files:
 
 ```sh
 gmlx pull hf:unsloth/NVIDIA-Nemotron-3.5-Bolt-E4B-GGUF \

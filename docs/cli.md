@@ -23,7 +23,7 @@ gmlx help serve       # the same as gmlx serve --help
 | [`gmlx run`](#gmlx-run) | Generate from, benchmark or inspect one GGUF. |
 | [`gmlx chat`](#gmlx-chat) | Chat with a model in the terminal. |
 | [`gmlx launch`](#gmlx-launch) | Configure a coding agent or chat app to use the server. |
-| [`gmlx pull`](#gmlx-pull) | Check a remote GGUF and download it. |
+| [`gmlx pull`](#gmlx-pull) | Download a recommended model, or any GGUF by reference. |
 | [`gmlx validate`](#gmlx-validate) | Check that a local or remote GGUF will load. |
 | [`gmlx rm`](#gmlx-rm) | Delete a model's files and config entry. |
 | [`gmlx sync-models`](#gmlx-sync-models) | Reconcile a config with the files on disk. |
@@ -629,19 +629,81 @@ background `serve` starts it automatically. What it shows is in
 
 ## gmlx pull
 
-`gmlx pull` checks a remote GGUF's header and, when it will load, downloads
-all its shards into your model directory. A file saved under a
-`model_dirs` root is added to the config, and a running server reloads it:
-one started from that config, or one in the foreground at the config's
-address.
+`gmlx pull` downloads a model. With no name it opens a picker of the
+recommended models for this Mac. With a name it pulls that model at the
+quality tier for this Mac's memory, with image input and faster replies
+where they fit, and registers the name so `gmlx chat <name>` runs it. An
+`hf:` reference or a URL pulls any GGUF, and an image model name pulls an
+image model.
 
 ```sh
+gmlx pull                                  # pick a recommended model for this Mac
+gmlx pull qwen3.8-27b                      # pull one by name
+gmlx pull qwen3.8-27b --quant balanced --no-vision --no-drafter
+gmlx pull --list                           # the recommendations as text
+gmlx chat qwen3.8-27b
 gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
-gmlx pull hf:org/repo/model.gguf --to ~/models
 gmlx pull hf:org/gemma-3-27b-GGUF/gemma-3-27b-Q4_K_M.gguf mmproj-F16.gguf
 gmlx pull z-image-turbo
-gmlx pull qwen-image --quant Q5_K_M
 ```
+
+The picker shows each model's size at its tier for this Mac, puts the
+models that run from the SSD under their own heading, and shows how much
+context each quality tier leaves room for. Context is how much text the
+model can keep in view. 1K tokens is roughly 750 words. `gmlx pull <name>
+--list` prints one model's tiers and downloads nothing:
+
+```text
+Qwen3.8-27B  27B  Apache 2.0
+Strong at long documents, code and tool calls.
+Steady for a 27B, with faster replies on by default.
+
+Quality
+  fastest   Q4_0               15.0 GB  room for ~256K
+  balanced  UD-Q4_K_M          15.3 GB  room for ~256K
+  high      UD-Q6_K            20.5 GB  room for ~256K  default
+  xhigh     Q8_0               27.1 GB  room for ~256K
+Extras: image input 0.9 GB, faster replies 1.9 GB
+Room for about 256K tokens of context.
+gmlx pull qwen3.8-27b
+```
+
+The tiers are `fastest` (a Q4_0 file, or IQ4_XS for a mixture-of-experts
+model), `balanced` (Q4_K_M), `high` (Q6_K) and `xhigh` (Q8_0). A tier the
+repository does not ship is absent, and a smaller `compact` quant appears
+where no tier fits. A mixture-of-experts model larger than this Mac's
+memory is listed as running from the SSD, and `pull` says so before it
+downloads one, as [Models larger than memory](streaming.md) describes.
+
+A pull by name registers the model under its id and adds the name as an
+alias, marked `set by gmlx pull` in the config, so `gmlx chat <name>` and a
+request with `"model": "<name>"` find it. A later pull of the same name at
+another tier moves the alias and leaves the earlier file on disk.
+
+The recommended models:
+
+| Name | Params | License | Good for |
+|------|--------|---------|----------|
+| `qwen3.5-4b` | 4B | Apache 2.0 | A small all-rounder for chat and questions about images. |
+| `ternary-bonsai-2-9b` | 9B | Apache 2.0 | A 9B chat model squeezed to under 2 bits, images included. |
+| `nemotron-3.5-bolt-e4b` | E4B | NVIDIA Open Model License | Built for tool calls and voice assistants. |
+| `ornith-1.5-9b` | 9B | MIT | A coding model that also reads images. |
+| `qwen3.5-9b` | 9B | Apache 2.0 | Good at chat and questions about images, with a long context. |
+| `gemma-4-12b` | 12B | Apache 2.0 | Strong general chat with image input. |
+| `k2-horizon-7b` | 7B | Apache 2.0 | A chat model that keeps 512K tokens in view. |
+| `gemma-4-26b-a4b` | 26B-A4B | Apache 2.0 | Strong general chat with image input. |
+| `qwen3.8-27b` | 27B | Apache 2.0 | Strong at long documents, code and tool calls. |
+| `ternary-bonsai-2-27b` | 27B | Apache 2.0 | A 27B chat model squeezed to under 2 bits, images included. |
+| `qwen3.6-35b-a3b` | 35B-A3B | Apache 2.0 | Good general chat with image input. |
+| `ornith-1.5-35b-a3b` | 35B-A3B | MIT | A coding model that also reads images. |
+| `k2-horizon-mova-36b-a4b` | 36B-A4B | Apache 2.0 | A chat model that keeps 512K tokens in view. |
+| `ornith-1.5-122b` | 122B-A10B | MIT | A strong coding model that also reads images. |
+| `nemotron-3.5-super-vl` | 120B-A12B | NVIDIA Open Model License | Reads long documents and images well. |
+| `qwen3.8-flash-next` | 177B | Qwen Community License | Strong at long documents, code and tool calls. |
+| `glm-5.3-flash` | 321B | MIT | A strong coding and agent model. |
+| `deepseek-v4-flash-0731` | 284B | MIT | Strong general chat and code. |
+| `deepseek-v4.1-flash-1017` | 748B-A16B | MIT | Strong at code and agent work, with a 1M token context. |
+| `glm-5.3` | 754B | GLM-5.3 License | The strongest coding and agent model here. |
 
 An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo`,
 `krea-2-turbo`, `flux-2-klein`, `flux-2-klein-base`, `flux-2-klein-9b`,
@@ -674,15 +736,18 @@ names the encoder file and the vision tower that `pull` adds.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `REF`, positional | Required | Download these `hf:<org>/<repo>/<file.gguf>[@rev]` references or URLs, or one image model name. Later bare filenames resolve in the first ref's repo. |
+| `REF`, positional | None | Nothing opens the picker. Otherwise a model name, an image model name, or `hf:<org>/<repo>/<file.gguf>[@rev]` references and URLs. |
+| `--list` | Off | Print the recommended models for this Mac, or with a model name its quality tiers, and download nothing. |
+| `--quant QUANT` | The tier for this Mac | A model name: a quality tier, `fastest`, `balanced`, `high` or `xhigh`, or a quant name such as `Q6_K`. An image model name: the DiT quant. |
+| `--vision`, `--no-vision` | On where it fits | Download the model's vision tower for image input, or leave it out. |
+| `--drafter`, `--no-drafter` | On where it fits | Download the model's companion file for faster replies, or leave it out. |
 | `--to DIR`, `--out DIR` | The first `model_dirs` root | Download into this directory instead, with no repo subfolder. A file outside every `model_dirs` root is not added to the config. |
-| `--config FILE` | The first default location | Read `model_dirs` from this config. |
+| `--config FILE` | The first default location | Read `model_dirs` from this config. With no config at all, a pull by name or from the picker asks for a model folder and writes one. |
 | `--force` | Off | Download even when the header check, the disk-space check or the chip check of an image model fails. |
 | `--no-register` | Off | Do not add the file to the config. |
 | `--hf-source ID` | None | Treat the architecture as loadable with this config override. |
 | `--max-mb N` | `128` | Cap the header range read. |
-| `--json` | Off | Emit each verdict as JSON before downloading. |
-| `--quant QUANT` | The one for this Mac's memory | Image models: download the DiT at this quant. Without it, a pull on a Mac where no DiT of the model makes an image downloads nothing. |
+| `--json` | Off | Emit each verdict as JSON before downloading. With no name, or with `--list`, the recommendations as JSON. |
 | `--encoder-quant QUANT` | The one for this Mac's memory | Image models: download the text encoder at this quant. Without it, a matching encoder on disk is used at any quant. |
 | `--only PARTS` | All three | Image models: pull only these parts, a comma list of `dit`, `encoder` and `vae`. |
 | `--keep-source` | Off | Image models: keep the safetensors VAE after packing it. |

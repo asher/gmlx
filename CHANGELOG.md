@@ -8,6 +8,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `gmlx pull <name>` pulls a recommended model at the quality tier for this
+  Mac, with image input and a faster-replies drafter where they fit, and
+  registers the name so `gmlx chat <name>` runs it. `gmlx pull` alone picks
+  one interactively, and `gmlx pull --list` prints the recommendations with
+  how much context each leaves room for.
+- `gmlx init` offers to pull a recommended model when it finds none.
+- `GMLX_PULL_RAM_GB=N` makes `gmlx pull` recommend for a Mac with N GB of
+  memory.
 - Beam-1.0 501B-A23B (GGUF arch `beam`), with `reasoning-low`, `-medium` and
   `-high` intents and tool calls. On a Mac with less memory than the file, it
   runs with `--stream-experts`.
