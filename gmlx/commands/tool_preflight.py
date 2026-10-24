@@ -69,7 +69,8 @@ def _synth_config(gguf_path: str) -> dict | None:
 
 def synth_config_from_scans(scans) -> dict | None:
     """``_synth_config`` over header scans already in hand (one per
-    shard, the metadata shard first)."""
+    shard, the metadata shard first). Header-only pricing, not a load,
+    so the synthesis prints no summary line."""
     from gmlx.load.config_synth import synthesize_config
 
     kv = None
@@ -78,7 +79,7 @@ def synth_config_from_scans(scans) -> dict | None:
         if kv is None:
             kv = scan.kv
         shapes.update({t.name: list(t.shape) for t in scan.tensors})
-    return synthesize_config(kv, shapes)
+    return synthesize_config(kv, shapes, report=False)
 
 
 def working_set_bytes() -> float | None:

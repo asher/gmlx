@@ -258,7 +258,8 @@ def deferred_tables(shards: list[str], arch: str | None,
     the file, as wire name -> source: the oversize ones, and, on an arch
     that reads its tables ahead (``table_stream.tables_read_ahead``), all
     of them when they alone bring the text tensors under the stream
-    budget (``table_stream.tables_bring_under``), so that an over-budget
+    budget, or the check before the load latched the step for the memory
+    free now (``table_stream.unflagged_tables_stream``), so that the
     model loads with its experts resident. Under a stream flag
     (``latched``, read from the latch when None) the install's ladder
     streams the tables instead. ``budget`` defaults to the device stream
@@ -266,7 +267,7 @@ def deferred_tables(shards: list[str], arch: str | None,
     load calls it for the skip list, the model install for the
     sources."""
     from .table_stream import latched as table_latch
-    from .table_stream import tables_bring_under, tables_read_ahead
+    from .table_stream import tables_read_ahead, unflagged_tables_stream
 
     sources, held = _table_sources(shards, arch, cap)
     if not sources:
@@ -283,7 +284,8 @@ def deferred_tables(shards: list[str], arch: str | None,
 
         text = text_tensor_bytes(shards[0]) if shards else None
         tbytes = sum(s.nbytes for s in sources.values())
-        if text and tables_bring_under(text, tbytes, budget, env):
+        if text and unflagged_tables_stream(shards[0], text, tbytes, budget,
+                                            env):
             return sources
     return {n: s for n, s in sources.items() if n in held}
 

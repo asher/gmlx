@@ -848,7 +848,8 @@ def _warm_mmap_residency(
         _tbudget = None
     from gmlx.stream.table_stream import warm_touch_exclusions
 
-    _tskip = warm_touch_exclusions(model, total, _tbudget)
+    _tskip = warm_touch_exclusions(model, total, _tbudget,
+                                   paths=list(paths or source_key or ()))
     arrays = [v for _, v in pairs if id(v) not in _tskip]
     try:
         _warm_touch_pass(arrays, total, log=log, paths=paths,

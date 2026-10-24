@@ -535,10 +535,11 @@ name wins.
 
 A drafter GGUF becomes a model's `draft_gguf` when all of these hold:
 
-- It is in the same folder as the model.
+- It is in the same folder as the model, or in an `MTP` folder beside the
+  model's folder or inside it.
 - Its architecture can draft for the model, and their hidden sizes match.
-- Its file name matches the model's, or the model is the only one in the
-  folder that qualifies.
+- Its file name matches the model's, or the model is the only one in
+  those folders that qualifies.
 
 A drafter whose header names its base model pairs with that model in any
 scanned folder. A model with `stream` set gets no drafter.

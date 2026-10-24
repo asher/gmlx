@@ -157,7 +157,7 @@ def test_synth_config_merges_shard_tensor_shapes(monkeypatch):
         tensors=[SimpleNamespace(name=n, shape=s) for n, s in shards[p]]))
     seen = {}
 
-    def synth(kv, shapes):
+    def synth(kv, shapes, **kw):
         seen.update(kv=kv, shapes=shapes)
         return {"ok": 1}
 

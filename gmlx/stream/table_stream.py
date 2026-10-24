@@ -30,6 +30,7 @@ the tables resident and streams only the experts.
 """
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Callable, NamedTuple, Union
 
@@ -64,6 +65,8 @@ class ArchTables(NamedTuple):
     # a stream flag no decode time: such a load reads it from the file
     # when that alone brings the model under the budget.
     reads_ahead: bool = False
+    # What the load's stream line calls the tables.
+    label: str = "lookup tables"
 
 
 def _deepseek_v41_tiers(model, prefix: str = "") -> tuple[StreamableTable, ...]:
@@ -97,18 +100,21 @@ STREAMABLE_TABLES: dict[str, ArchTables] = {
         name_pattern=r"per_layer_token_embd\.weight",
         tiers=(StreamableTable("model.ple_embed",
                                "per_layer_token_embd.weight"),),
+        label="per-layer embedding table",
     ),
     "deepseek_v41": ArchTables(
         arch="deepseek41",
         name_pattern=_DEEPSEEK_V41_TABLES,
         tiers=_deepseek_v41_tiers,
         reads_ahead=True,
+        label="engram tables",
     ),
     "deepseek_v41_vl": ArchTables(
         arch="deepseek41",
         name_pattern=_DEEPSEEK_V41_TABLES,
         tiers=_deepseek_v41_vl_tiers,
         reads_ahead=True,
+        label="engram tables",
     ),
 }
 
@@ -121,6 +127,12 @@ def tables_read_ahead(arch: str | None) -> bool:
     stream flag (``ArchTables.reads_ahead``)."""
     return any(spec.arch == arch and spec.reads_ahead
                for spec in STREAMABLE_TABLES.values())
+
+
+def table_label(arch: str | None) -> str:
+    """What a stream line calls ``arch``'s streamable tables."""
+    return next((spec.label for spec in STREAMABLE_TABLES.values()
+                 if spec.arch == arch), "lookup tables")
 
 
 def streamable_table_names(arch: str | None) -> re.Pattern | None:
@@ -228,6 +240,44 @@ def force_table_stream(on: bool = True) -> None:
     streams."""
     global _FORCED
     _FORCED = bool(on)
+
+
+# Real paths of the GGUFs whose next load streams its tables because the
+# memory free now holds the model only without them.
+_FOR_MEMORY: set[str] = set()
+
+
+def _key(path: str) -> str:
+    return os.path.realpath(os.path.expanduser(path))
+
+
+def stream_tables_for_memory(path: str, on: bool = True) -> None:
+    """Latch the table-only step for the loads of ``path``: the check
+    before the load found the model short of the memory free now, and
+    within it with its tables read from the file. The tables then stream
+    and the experts stay in memory if they fit, as for a model its
+    tables bring under the budget. Each load of the path sets or clears
+    it before the weights load."""
+    (_FOR_MEMORY.add if on else _FOR_MEMORY.discard)(_key(path))
+
+
+def tables_for_memory(path: str | None) -> bool:
+    """Whether the check before the load latched the table-only step for
+    ``path`` (``stream_tables_for_memory``)."""
+    return bool(path) and _key(path) in _FOR_MEMORY
+
+
+def unflagged_tables_stream(path: str | None, total_bytes: int, tbytes: int,
+                            budget: int | None, env=None) -> bool:
+    """The table-only step of a load of ``path`` with no stream flag: its
+    tables bring it under ``budget`` (``tables_bring_under``), or the
+    check before the load latched the step for the memory free now
+    (``tables_for_memory``). ``GMLX_STREAM_PLE=0`` keeps the tables
+    resident."""
+    if stream_ple_env(env) == "0" or not tbytes:
+        return False
+    return (tables_for_memory(path)
+            or tables_bring_under(total_bytes, tbytes, budget, env))
 
 
 def table_stream_selected(model, total_bytes: int, budget: int | None,
@@ -437,17 +487,19 @@ def streamed_table_array_ids(model) -> set[int]:
     return out
 
 
-def warm_touch_exclusions(model, total_bytes: int,
-                          budget: int | None) -> set[int]:
+def warm_touch_exclusions(model, total_bytes: int, budget: int | None,
+                          paths: list[str] | None = None) -> set[int]:
     """``id()``s of arrays the load-time GPU warm touch must skip: the
     declared tables, whenever the selection ladder will stream them, and
     the expert stacks under a stream flag latch. The warm touch runs
     before ``install_expert_streaming``, so this re-runs the same ladder
     test; without it, a fits-in-RAM load under ``GMLX_STREAM_PLE=1`` or a
     stream flag would GPU-touch the table and the experts and wire them
-    before streaming ever installs."""
+    before streaming ever installs. ``paths`` are the load's GGUF files,
+    for the table-only step latched for the memory free now."""
     out: set[int] = set()
-    if table_stream_selected(model, total_bytes, budget):
+    latched = any(tables_for_memory(p) for p in paths or ())
+    if table_stream_selected(model, total_bytes, budget, force_stream=latched):
         for _, mod in streamable_tables_for(model):
             for attr in ("weight", "scales"):
                 a = getattr(mod, attr, None)
