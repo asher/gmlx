@@ -133,6 +133,7 @@ fusions.
 | `GMLX_MOE_GATEUP_CONCAT_MAX_MB` | Cap the concat copies at this many MB, stamping layers in order until the cap is reached. |
 | `GMLX_MOE_GATEUP_CONCAT_HEADROOM_GB` | Skip a concat copy that would leave less than this many GB under the memory ceiling. `0` turns the check off. |
 | `GMLX_MOE_MIX_PREFILL=0` | Keep the eager unsort and score mix after the sorted-prefill down gather instead of one `gather_mix` dispatch. |
+| `GMLX_MOE_ROW_MAP=0` | Build the sorted copy of the activations before the sorted-prefill gate and up gathers, where mlx-kquant would read the rows through the sort's row map. |
 | `GMLX_GLM5_ABSORBED_MAX_L` | Run GLM-5.3-Flash MLA layers in the absorbed MQA form up to this many queries. `0` expands the latent per head everywhere. |
 | `GMLX_GLM5_INDEXER_DECODE=0` | Score the GLM-5.3-Flash indexer inline instead of through the fused scorer and radix top-k. |
 | `GMLX_GLM5_SPARSE_INDEXED=0` | Disable index-gathered attention for GLM-5.3-Flash sparse decode and verify. |

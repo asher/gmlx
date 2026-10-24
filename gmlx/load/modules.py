@@ -180,6 +180,10 @@ _GATEUP_CONCAT_ENABLED = env_bool("GMLX_MOE_GATEUP_CONCAT", True)
 # (gather_mix) after the down gather. GMLX_MOE_MIX_PREFILL=0 keeps the
 # eager unsort and mix.
 _MIX_PREFILL_ENABLED = env_bool("GMLX_MOE_MIX_PREFILL", True)
+# Sorted-prefill MoE: the gate and up gathers read each token's row through
+# the sort's row map instead of a sorted copy of the activations, where the
+# installed mlx-kquant takes x_rows. GMLX_MOE_ROW_MAP=0 builds the copy.
+_ROW_MAP_ENABLED = env_bool("GMLX_MOE_ROW_MAP", True)
 _GATEUP_CONCAT_MAX_MB = env_int("GMLX_MOE_GATEUP_CONCAT_MAX_MB", 2048)
 # The copy is built at the first sorted-prefill call, when the weights are
 # resident and the live memory is known. It must leave this much room under
@@ -870,10 +874,9 @@ def _make_fused_kquant(base_cls, caps):
                 object.__setattr__(self, "_kq_gate_up", gu)
                 object.__setattr__(self, "_kq_gate_up_pending", False)
             from gmlx._vendor.mlx_lm.models.switch_layers import (
-                _gather_sort, _scatter_unsort)
-            xs = mx.expand_dims(x, (-2, -3))
-            xs, idx, inv_order = _gather_sort(xs, indices)
-            h = gu(xs, idx, sorted_indices=True)
+                _scatter_unsort)
+            xs, idx, inv_order, rkw = _sorted_rows(x, indices, gu)
+            h = gu(xs, idx, sorted_indices=True, **rkw)
             half = h.shape[-1] // 2
             x_gate, x_up = h[..., :half], h[..., half:]
             y = self.down_proj(
@@ -919,17 +922,30 @@ def _make_fused_kquant(base_cls, caps):
             off or does not fit. None when ineligible."""
             if not self._kq_mix_prefill_ok(indices, scores):
                 return None
-            from gmlx._vendor.mlx_lm.models.switch_layers import _gather_sort
-            xs = mx.expand_dims(x, (-2, -3))
-            xs, idx, inv_order = _gather_sort(xs, indices)
-            x_up = self.up_proj(xs, idx, sorted_indices=True)
-            x_gate = self.gate_proj(xs, idx, sorted_indices=True)
+            xs, idx, inv_order, rkw = _sorted_rows(x, indices, self.up_proj)
+            x_up = self.up_proj(xs, idx, sorted_indices=True, **rkw)
+            x_gate = self.gate_proj(xs, idx, sorted_indices=True, **rkw)
             y = self.down_proj(
                 self.activation(x_up, x_gate), idx, sorted_indices=True)
             return self._kq_mix_sorted(x, y, inv_order, indices, scores)
 
     _FusedKQuantSwitchGLU.__name__ = "_FusedKQuantSwitchGLU"
     return _FusedKQuantSwitchGLU
+
+
+def _sorted_rows(x, indices, proj):
+    """mlx-lm's _gather_sort for a sorted-prefill expert gather: (input,
+    sorted ids, inverse order, call kwargs). Where ``proj`` takes x_rows,
+    the input is x unsorted and the kwargs carry the row map; else it is
+    the sorted copy of x."""
+    k = indices.shape[-1]
+    flat = indices.flatten()
+    order = mx.argsort(flat)
+    inv_order = mx.argsort(order)
+    if _ROW_MAP_ENABLED and getattr(proj, "takes_x_rows", False):
+        return x, flat[order], inv_order, {"x_rows": order // k}
+    xs = mx.expand_dims(x, (-2, -3)).flatten(0, -3)[order // k]
+    return xs, flat[order], inv_order, {}
 
 
 def _install_kquant_glu_fusion(model, caps) -> int:

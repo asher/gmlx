@@ -46,6 +46,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   experts in one float32 dispatch instead of separate bf16 ops. A 32k Flint
   prompt prefills about 3% faster. `GMLX_MOE_MIX_PREFILL=0` restores the old
   sum.
+- On M5 and later GPUs, MoE prefill reads the token rows in expert order where
+  they are, instead of copying them. A 32k Flint prompt prefills about 2%
+  faster, with the same output. `GMLX_MOE_ROW_MAP=0` restores the copy.
 - The KV cache grows by an eighth of its size, at most 8192 rows, instead of
   256 rows at a time, so long decodes no longer stall on frequent regrows.
 - Models in memory decode up to 5% faster: decode runs on 50 ops per command
