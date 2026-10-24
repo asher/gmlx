@@ -835,10 +835,14 @@ def base_url(runtime):
 
 
 def wait_ready(runtime, proc, timeout):
-    """Poll /v1/models until 200; return the first model id (the request `model`
-    field). Fails fast if the process dies during load."""
+    """Poll /v1/models until 200, then require one 1-token completion to
+    succeed. gmlx answers /v1/models while its model is still loading, so
+    the models poll alone declares ready before the weights are in. Returns
+    the first model id (the request `model` field). Fails fast if the
+    process dies during load."""
     url = base_url(runtime).rstrip("/") + "/models"
     deadline = time.time() + timeout
+    model_id = None
     while time.time() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(f"{runtime} server exited (code {proc.returncode}) "
@@ -847,11 +851,30 @@ def wait_ready(runtime, proc, timeout):
             r = requests.get(url, timeout=3)
             if r.status_code == 200:
                 data = (r.json() or {}).get("data") or []
-                return data[0]["id"] if data else "model"
+                model_id = data[0]["id"] if data else "model"
+                break
         except Exception:  # noqa: S110 - not ready yet; the poll loop retries
             pass
         time.sleep(1.0)
-    raise TimeoutError(f"{runtime} server not ready within {timeout}s")
+    if model_id is None:
+        raise TimeoutError(f"{runtime} server not ready within {timeout}s")
+    curl = base_url(runtime).rstrip("/") + "/chat/completions"
+    body = build_body(model_id, "ready", 1, {"temperature": 0.0}, stream=False)
+    last_err = ""
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(f"{runtime} server exited (code {proc.returncode}) "
+                               f"before serving its first completion")
+        try:
+            r = requests.post(curl, json=body, timeout=60)
+            if r.status_code == 200:
+                return model_id
+            last_err = f"HTTP {r.status_code}: {r.text[:300]}"
+        except Exception as e:  # noqa: BLE001 - still loading; the loop retries
+            last_err = f"{type(e).__name__}: {e}"
+        time.sleep(2.0)
+    raise TimeoutError(f"{runtime} completions not ready within {timeout}s"
+                       + (f" (last: {last_err})" if last_err else ""))
 
 
 def _port_free(port):
@@ -1868,7 +1891,8 @@ def main():
                     "SSE keepalives that reset it; llama-server does not, so "
                     "deep dense prefills need the full headroom")
     ap.add_argument("--startup-timeout", type=float, default=240.0,
-                    help="seconds to wait for a server to load + answer /v1/models")
+                    help="seconds to wait for a server to load and answer its "
+                         "first completion")
     ap.add_argument("--vs", choices=("llama", "ds4"), default="llama",
                     help="comparison arm vs gmlx (default llama; ds4 = "
                          "dwarfstar ds4-server)")
