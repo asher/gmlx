@@ -2557,8 +2557,10 @@ def preload_wire_check(args, *, depth: int | None,
     memory. An auto drafter that tips it over is dropped
     (``check_wire_beside_drafter``), and the set is judged alone at
     ``depth_without_mtp`` (``depth`` unless given): the experts stay in
-    memory with auto MTP off, or they stream. A set that stays in memory
-    wires in chunks at its install (``table_stream.guard_resident_wire``).
+    memory with auto MTP off, or they stream. A set short of the memory
+    not wired is judged again once that memory stops rising
+    (``budget.settled_wire_check``). A set that stays in memory wires in
+    chunks at its install (``table_stream.guard_resident_wire``).
     A dense model, a streamed placement and GMLX_OVERCOMMIT=1 load as
     asked. Every load prices its install's own check at the depth of the
     load it makes, and names the tables it reads from the file
@@ -2609,11 +2611,12 @@ def preload_wire_check(args, *, depth: int | None,
     # the memory free now may read from the file.
     tables = (0 if stream_ple_env() == "0"
               else max(0, streamed_table_bytes(path) - deferred))
-    check = bmod.check_wire_with_tables(
-        text - deferred + extra, tables, _drafter_bytes(args, path),
+    drafter = _drafter_bytes(args, path)
+    check = bmod.settled_wire_check(lambda: bmod.check_wire_with_tables(
+        text - deferred + extra, tables, drafter,
         auto=auto, room_bytes=room.bytes, alone_room_bytes=alone.bytes,
         kept_streamed=_run_mode(args) == "vlm_mtp",
-        budget=stream_budget_bytes())
+        budget=stream_budget_bytes()))
     from gmlx.load import loadlog
 
     if check.mtp_off:

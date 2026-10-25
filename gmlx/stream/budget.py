@@ -932,6 +932,24 @@ def check_wire_with_tables(set_bytes: int, table_bytes: int,
     return check
 
 
+def settled_wire_check(judge) -> WireCheck:
+    """``judge()``, made again once unwired memory stops rising when its
+    unwired leg is short. A model torn down a moment before, by an unload
+    in this process or a process that just exited, unwires its pages over
+    a few seconds, and a check that reads them as wired streams a load
+    that fits (``capacity._settle_unwired``)."""
+    from gmlx.serve.capacity import _settle_unwired
+
+    check = judge()
+    if check.reason != "unwired" or check.unwired_bytes is None:
+        return check
+    after = _settle_unwired(lambda: unwired_ram_bytes(), check.unwired_bytes,
+                            check.wire_bytes + check.keep_bytes)
+    if after is None or after <= check.unwired_bytes:
+        return check
+    return judge()
+
+
 def _kept_in_memory(check: WireCheck) -> int:
     """2: the experts and the auto drafter; 1: the experts; 0: neither."""
     return 0 if not check.fits else 1 if check.mtp_off else 2

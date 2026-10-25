@@ -433,6 +433,56 @@ def test_a_full_page_cache_wires_all_of_it(monkeypatch, capsys):
     assert capsys.readouterr().err == ""
 
 
+def test_the_wire_waits_for_the_load_s_page_cache_readers(monkeypatch):
+    # The same wire, with the load's populate 20 GiB short of the end of
+    # its file: the readers finish before the first chunk commits.
+    import gmlx.load.populate as populate
+
+    st = populate._Stream("m.gguf", 100 * GiB)
+    st.done = 80 * GiB
+    reader = SimpleNamespace(alive=True, is_alive=lambda: reader.alive)
+    st.threads = [reader]
+    monkeypatch.setattr(populate, "_streams", {"m.gguf": st})
+
+    def read_on(s):
+        st.done, reader.alive = st.size, False
+
+    monkeypatch.setattr(populate, "time",
+                        SimpleNamespace(perf_counter=lambda: 0.0,
+                                        sleep=read_on))
+    vm = _Vm(host_box.mac(128)[0], free=42.3 * GiB, file=54.6 * GiB)
+    reading = []
+
+    def committed(n):
+        reading.append(reader.alive)
+        vm.committed(n)
+
+    _Residency(monkeypatch, on_commit=committed)
+    _room(monkeypatch, 8.1 * GiB)
+    assert _wire(_leaves(70, 1 * GiB), 70 * GiB)
+    assert reading and not any(reading)
+
+
+def test_an_interrupted_wire_takes_its_set_back_out(monkeypatch):
+    # Ctrl-C while the guard waits before the 11th chunk: the 10 chunks
+    # it committed leave the residency set.
+    kq = _Residency(monkeypatch)
+    judged = []
+
+    def guard(n):
+        judged.append(n)
+        if len(judged) > 10:
+            raise KeyboardInterrupt
+        return True
+
+    m = _leaves(30, 1 * GiB)
+    with pytest.raises(KeyboardInterrupt):
+        es._install_gpu_residency(m, {}, include_expert_stacks=True,
+                                  chunk_bytes=2 * GiB, guard=guard)
+    assert len(kq.commits) == 11
+    assert kq.members == {} and m._kq_resident_arrays == []
+
+
 def test_a_wire_past_the_page_cache_compresses_other_apps(monkeypatch,
                                                           capsys):
     # Flash-Next's 90 GiB resident set at the serve room on a 128 GiB Mac

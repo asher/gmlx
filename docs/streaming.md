@@ -120,6 +120,11 @@ A MoE model streams its experts in three cases:
   Memory held wired, such as another model's while it generates, does
   not.
 
+A model idle in another process, such as a second `gmlx serve` or
+`llama-server`, holds no wired memory, so a load beside it counts that
+memory as free. When both models generate, they can run the Mac out of
+memory. One `gmlx serve` that serves both models counts each of them.
+
 In the last two cases, `run` and `chat` print why:
 
 ```text

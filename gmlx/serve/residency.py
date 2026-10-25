@@ -1043,8 +1043,10 @@ class _ResidencyPool:
         resident set beside the mmproj and the MTP drafter that load with
         it, against the memory not wired less the kernel floor, the KV
         room at the serve context and the room the resident streamed
-        models keep, with the table-only step first. Returns the check,
-        the KV room and the bytes it kept beside the room, which the
+        models keep, with the table-only step first, and again once the
+        memory not wired stops rising when it is short
+        (``budget.settled_wire_check``). Returns the check, the KV room
+        and the bytes it kept beside the room, which the
         install's chunk guard keeps too (``_latch_guarded_wire``). None for
         a dense model or an unreadable header. A check that fails logs its
         line."""
@@ -1068,11 +1070,11 @@ class _ResidencyPool:
         extra = os.path.getsize(mmproj) if os.path.isfile(mmproj) else 0
         room = bmod.kv_room_bytes(model_path, env=env, resident=True)
         held, _ceiling, host, _floor = self._stream_reservations()
-        check = bmod.check_wire_with_tables(
-            text - deferred + extra, tables,
-            _drafter_bytes(model_path, build_spec), auto=False,
+        drafter = _drafter_bytes(model_path, build_spec)
+        check = bmod.settled_wire_check(lambda: bmod.check_wire_with_tables(
+            text - deferred + extra, tables, drafter, auto=False,
             room_bytes=room.bytes + held + host,
-            budget=stream_budget_bytes())
+            budget=stream_budget_bytes()))
         if not check.fits:
             _log.warning("[stream] %s: %s", model_path, check.line(room))
         return check, room, held + host

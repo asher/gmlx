@@ -29,8 +29,12 @@ def _box(box, *, unwired):
 
 @pytest.fixture(autouse=True)
 def _fresh_table_latch(monkeypatch):
+    import gmlx.serve.capacity as cap
+
     monkeypatch.setattr(ts, "_FOR_MEMORY", set())
     monkeypatch.setattr(ts, "_GUARDED", {})
+    # A short check settles on scripted counters without a wait.
+    monkeypatch.setattr(cap, "_SETTLE_STEP_S", 0)
 
 
 @pytest.fixture
@@ -94,6 +98,28 @@ def test_a_moe_that_does_not_fit_streams_its_experts(header, capsys):
         f"quit another model or close other apps. {budget.OVERCOMMIT_LEVER}")
     assert budget.wire_room_depth() == 4096
     assert not ts.resident_wire_guarded(path)
+
+
+def test_a_run_started_as_the_last_one_exits_keeps_its_experts(
+        header, monkeypatch):
+    # The same set and box, read while the run before it exits: its pages
+    # unwire over a few seconds, to 105 GiB not wired.
+    import gmlx.serve.capacity as cap
+
+    path = header(82.5e9, experts=77.0e9, budget_bytes=int(108.2e9),
+                  room=8.1 * GiB)
+    box = host_box.mac(128)[0]
+    _box(box, unwired=85 * GiB)
+
+    def settle(sample, free, need):
+        _box(box, unwired=105 * GiB)
+        return sample()
+
+    monkeypatch.setattr(cap, "_settle_unwired", settle)
+    args = _args(path)
+    cli.preload_wire_check(args, depth=4096)
+    assert not args.stream_experts
+    assert ts.resident_wire_guarded(path)
 
 
 @pytest.mark.parametrize("drafter", [0, 4e9])

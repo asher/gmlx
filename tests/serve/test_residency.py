@@ -1140,7 +1140,7 @@ def _table_only_header(monkeypatch, budget=130 * GB, unwired=1000 * GB,
     110 GB budget it composes, as a stream build always does. No decode
     arena or prefill ring is priced. The check before a plain build reads
     ``unwired`` bytes of memory not wired and a KV room of ``room``, with
-    no kernel floor."""
+    no kernel floor, or from ``unwired()`` when it is callable."""
     import gmlx.device as dev
     import gmlx.load.discovery as disc
     import gmlx.serve.capacity as cap
@@ -1148,8 +1148,10 @@ def _table_only_header(monkeypatch, budget=130 * GB, unwired=1000 * GB,
     import gmlx.stream.plan as plan
     import gmlx.stream.table_stream as ts
 
-    monkeypatch.setattr(bmod, "unwired_ram_bytes", lambda: unwired)
+    monkeypatch.setattr(bmod, "unwired_ram_bytes",
+                        unwired if callable(unwired) else lambda: unwired)
     monkeypatch.setattr(bmod, "kernel_floor_bytes", lambda: 0.0)
+    monkeypatch.setattr(cap, "_SETTLE_STEP_S", 0)
     # A streamed chunk's room would be 50 GB larger.
     monkeypatch.setattr(
         bmod, "kv_room_bytes", lambda *a, resident=False, **k: SimpleNamespace(
@@ -1369,6 +1371,34 @@ def test_a_plain_moe_build_is_judged_with_its_kv_room_before_the_load(
     assert entry.footprint == want and tables == [want]
     assert "re-pricing" not in caplog.text
     assert (STREAM_FREE_NOW in caplog.text) is (kept == "nothing")
+
+
+def test_a_build_right_after_an_unload_keeps_its_experts_in_memory(
+        monkeypatch):
+    """The check reads 130 GB not wired while the model unloaded for the
+    build unwires its pages, and 200 GB once they land: the set is judged
+    on the memory that landed, and its experts stay in memory."""
+    import gmlx.serve.capacity as cap
+    import gmlx.stream.table_stream as ts
+
+    monkeypatch.setattr(ts, "_FOR_MEMORY", set())
+    monkeypatch.setattr(ts, "_GUARDED", {})
+    landed = []
+    _table_only_header(monkeypatch, budget=200 * GB, room=20 * GB,
+                       unwired=lambda: (200 if landed else 130) * GB)
+
+    def settle(sample, free, need):
+        landed.append(True)
+        return sample()
+
+    monkeypatch.setattr(cap, "_settle_unwired", settle)
+    pool, tables, _credits, _asked = _table_only_pool(monkeypatch,
+                                                      SimpleNamespace())
+    entry = pool.acquire("a.gguf", None, "auto",
+                         build_spec=SimpleNamespace(stream=None))
+    pool.release(entry)
+    assert landed
+    assert entry.footprint == 150 * GB and tables == [150 * GB]
 
 
 @pytest.mark.parametrize("streamed", [True, False])

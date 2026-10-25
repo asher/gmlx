@@ -313,8 +313,9 @@ def _install_gpu_residency(model, moe_modules, *,
     commit once ``guard`` passes on its bytes, the first and the last
     partial one too. A refusal stops the wire before that commit, leaves
     every array it inserted in ``model._kq_resident_arrays`` and returns
-    False (the caller unwires them). True otherwise. ``say=False`` leaves
-    out the line of the set it wired."""
+    False (the caller unwires them). True otherwise. An exception or an
+    interrupt takes them back out of the set. ``say=False`` leaves out
+    the line of the set it wired."""
     import mlx_kquant as kq
 
     if not getattr(kq, "residency_insert", None):
@@ -329,35 +330,37 @@ def _install_gpu_residency(model, moe_modules, *,
                 if w is not None:
                     skip.add(id(w))
     inserted = []
+    model._kq_resident_arrays = inserted
     nbytes = 0
     pending = 0
     left_out = left_out_bytes = 0
-    for _, a in tree_flatten(model.parameters()):
-        if id(a) in skip:
-            continue
-        if (not include_expert_stacks
-                and a.ndim == 3 and a.nbytes > (1 << 30)):
-            continue  # belt: any GB-scale stack is an expert container
-        if room is not None and nbytes + a.nbytes > room:
-            left_out += 1
-            left_out_bytes += a.nbytes
-            continue
-        if kq.residency_insert(a):
-            inserted.append(a)
-            nbytes += a.nbytes
-            pending += a.nbytes
-        if chunk_bytes and pending >= chunk_bytes:
-            if guard is not None and not guard(pending):
-                model._kq_resident_arrays = inserted
-                return False
+    try:
+        for _, a in tree_flatten(model.parameters()):
+            if id(a) in skip:
+                continue
+            if (not include_expert_stacks
+                    and a.ndim == 3 and a.nbytes > (1 << 30)):
+                continue  # belt: any GB-scale stack is an expert container
+            if room is not None and nbytes + a.nbytes > room:
+                left_out += 1
+                left_out_bytes += a.nbytes
+                continue
+            if kq.residency_insert(a):
+                inserted.append(a)
+                nbytes += a.nbytes
+                pending += a.nbytes
+            if chunk_bytes and pending >= chunk_bytes:
+                if guard is not None and not guard(pending):
+                    return False
+                kq.residency_commit()
+                pending = 0
+        if guard is not None and pending and not guard(pending):
+            return False
+        if pending or not chunk_bytes:
             kq.residency_commit()
-            pending = 0
-    if guard is not None and pending and not guard(pending):
-        model._kq_resident_arrays = inserted
-        return False
-    if pending or not chunk_bytes:
-        kq.residency_commit()
-    model._kq_resident_arrays = inserted
+    except BaseException:
+        _unwire(model)
+        raise
     if not say:
         return True
     n = len(inserted)
@@ -425,13 +428,16 @@ def _chunked_wire(model, check, *, room, depth, skip_ids=frozenset(),
     the kernel floor under GMLX_OVERCOMMIT=1), the set clamped to the
     check's budget. A set no larger than ``WIRE_EXEMPT_BYTES`` has no
     guard. False when the wire stopped, with the line saying why and
-    the set taken back out (``_unwire``)."""
+    the set taken back out (``_unwire``). A guarded wire waits for the
+    load's page-cache populate to finish first."""
+    from gmlx.load.populate import finish_all
     from gmlx.stream import budget as bmod
 
     guard = None
     if check.wire_bytes > bmod.WIRE_EXEMPT_BYTES:
         guard = _ChunkGuard(bmod.kernel_floor_bytes() if bmod.overcommit()
                             else check.keep_bytes)
+        finish_all(log=loadlog.info)
     if (_install_gpu_residency(model, {}, skip_ids=skip_ids,
                                include_expert_stacks=True,
                                room=check.budget_bytes,
@@ -455,18 +461,19 @@ def _wire_plain_resident(model, gguf_path, *, prefill_step,
     The wire leaves the pages in the page cache and hands the set back
     to MLX's own residency, which wires it at the first generation.
     That check judged the whole set, and only the chunk guard judges
-    it here: the weights the load materialized are wired by now, and a
-    second check would count them twice. ``keep`` is the KV room and
+    it here: the load leaves the weights in the page cache, so a second
+    check would read about the same memory. ``keep`` is the KV room and
     extra bytes that check kept (``table_stream.guarded_wire_keep``);
     with no room it is priced here. False when the wire stopped; the
-    experts then stream."""
+    experts then stream. GMLX_GPU_RESIDENT=0 skips the wire."""
     import mlx_kquant as kq
 
     from gmlx.device import cpu_default_device
     from gmlx.stream import budget as bmod
 
     if (cpu_default_device() or not mx.metal.is_available()
-            or not getattr(kq, "residency_insert", None)):
+            or not getattr(kq, "residency_insert", None)
+            or not env_bool("GMLX_GPU_RESIDENT", True)):
         return True
     total = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
     depth = bmod.wire_room_depth()

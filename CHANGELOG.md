@@ -70,7 +70,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `run` and `chat` stream a MoE's experts when the model is over its memory
   budget or they do not fit the memory free at load, with a line that says why.
 - A MoE keeps its experts in memory beside other apps, which macOS compresses
-  to make room. Memory another model holds wired still makes them stream.
+  to make room. Another model makes them stream while it generates.
 - `serve` judges a MoE's experts with their KV room before the load, as `run`
   does, so a load no longer wires part of the model and then streams it.
 - A MoE keeps its experts in memory when they fit beside the prefill of a
