@@ -1441,15 +1441,24 @@ def _pull_refs(refs: list, a, base_dir: str, nest: bool, *, prechecked=None,
     return all_ok, downloaded
 
 
-def _finish_pull(downloaded: list, a, config_path: str | None, *, pairs=None):
+def _finish_pull(downloaded: list, a, config_path: str | None, *, pairs=None, present=frozenset()):
     """Print the downloaded files and register them in ``config_path``
-    (None registers nothing, as does --no-register). Returns what
-    registration did, a :class:`gmlx.serve.server.Registered`."""
+    (None registers nothing, as does --no-register). ``present`` names the
+    files that were whole on disk before the pull, so the summary does not
+    call them downloaded. Returns what registration did, a
+    :class:`gmlx.serve.server.Registered`."""
     from gmlx.serve.server import Registered, register_downloads
 
     if not downloaded:
         return Registered()
-    print(f"\ndownloaded {len(downloaded)} file{plural_s(len(downloaded))}:")
+    n_old = sum(p in present for p in downloaded)
+    n_new = len(downloaded) - n_old
+    if n_new == 0:
+        print(f"\n{n_old} file{plural_s(n_old)} already on disk:")
+    elif n_old:
+        print(f"\ndownloaded {n_new} file{plural_s(n_new)} ({n_old} already on disk):")
+    else:
+        print(f"\ndownloaded {n_new} file{plural_s(n_new)}:")
     for p in downloaded:
         print(f"  {p}")
     if a.no_register or config_path is None:
@@ -1739,10 +1748,12 @@ def _run_plan(plan, a, dest: Destination, box) -> int:
     except remote.RemoteError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    pairs = pc.plan_pairs(plan, dest.base_dir, dest.nest)
+    wanted = [p for p in pairs] + [v for d in pairs.values() for k, v in d.items() if k != "alias"]
+    present = frozenset(p for p in wanted if os.path.isfile(p))
     ok, downloaded = _pull_refs(refs, a, dest.base_dir, dest.nest, prechecked=prechecked,
                                 report=False, disk_checked=True)
-    reg = _finish_pull(downloaded, a, dest.config_path,
-                       pairs=pc.plan_pairs(plan, dest.base_dir, dest.nest))
+    reg = _finish_pull(downloaded, a, dest.config_path, pairs=pairs, present=present)
     if ok:
         _print_run_hint(plan, dest, reg, box)
     return 0 if ok else 1

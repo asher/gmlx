@@ -660,7 +660,7 @@ Recommended for this Mac
 Image models
   NAME                      DOWNLOAD  IMAGES  GOOD FOR
   z-image-turbo              15.6 GB          fast images, edits one picture
-  flux-3-klein                9.8 GB          fast images, edits from pictures
+  flux-3-klein                9.8 GB          fast images, edits from photos
 ```
 
 `gmlx pull --list -v` adds each model's tiers under its row, and `gmlx pull
@@ -725,7 +725,7 @@ The recommended models:
 | `qwen3.8-flash-next` | 177B | Qwen Community License | documents, code and tool calls |
 | `glm-5.3-flash` | 321B | MIT | coding and agents |
 | `deepseek-v4-flash-0731` | 284B | MIT | chat and code |
-| `deepseek-v4.1-flash-1017` | 748B-A16B | MIT | code and agents with a 1M context |
+| `deepseek-v4.1-flash-1017` | 748B-A16B | MIT | code and agents, 1M context |
 | `glm-5.3` | 754B | GLM-5.3 License | top coding and agents |
 
 An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo`,

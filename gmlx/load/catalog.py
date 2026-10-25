@@ -169,7 +169,7 @@ class Seed:
     license_detail: str = ""
     quants: tuple = ()
     params: str = ""          # over the header's size label when that is not plain
-    use: str = ""             # the "good for" column, under 35 characters
+    use: str = ""             # the "good for" column: 31 characters at most, its width at 80 columns
     preferred_at: tuple = ()  # (memory class, tier) pairs: where a bare pull starts there
 
 
@@ -318,7 +318,7 @@ _SEED = (
          mmproj="mmproj-F16.gguf",
          ignored_files=("dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf",
                         "dspark/dspark-DeepSeek-V4.1-Flash-1017-BF16.gguf"),
-         use="code and agents with a 1M context"),
+         use="code and agents, 1M context"),
     Seed("glm-5.3", "GLM-5.3", "unsloth/GLM-5.3-GGUF", "balanced",
          "The strongest coding and agent model here.",
          "Quick for its size: it reads a small part of its weights per token.",

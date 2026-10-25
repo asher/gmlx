@@ -239,10 +239,13 @@ def test_a_re_pull_that_adds_only_the_drafter_writes_it_and_hints_short(cat, cap
     out = capsys.readouterr().out
     assert "registered drafter-Q8_0.gguf for faster replies on model-ud-q4" in out
     assert "run it:  gmlx chat dense" in out
-    # Every file on disk: the pull still ends with the name.
+    assert "\ndownloaded 1 file (2 already on disk):\n" in out
+    # Every file on disk: the summary says so and the pull still ends with the name.
     capsys.readouterr()
     assert manage.cmd_pull(["dense", "--config", str(cfg)]) == 0
-    assert "run it:  gmlx chat dense" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "\n3 files already on disk:\n" in out and "downloaded" not in out
+    assert "run it:  gmlx chat dense" in out
 
 
 def test_speculative_false_keeps_the_drafter_out_with_a_note(cat, capsys):

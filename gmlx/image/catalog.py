@@ -50,7 +50,7 @@ class Recipe:
     vae_bytes: int = 0                # the packed VAE's size, for a fit
     aliases: tuple = ()
     license_note: str = ""            # what the license allows, if limited
-    use: str = ""                     # gmlx pull's GOOD FOR cell, under 35 characters
+    use: str = ""                     # gmlx pull's GOOD FOR cell: 31 characters at most
     blurb: str = ""                   # one sentence: what it makes
     speed: str = ""                   # one sentence: how quick it is, by its steps
     vae_license: str = ""             # the VAE's license, when it has its
@@ -180,7 +180,7 @@ _WORDS = {
     "qwen-image": ("images and edits from pictures",
                    "Makes an image from text, or edits up to 10 pictures.",
                    "Slow: 40 steps per image."),
-    "qwen-image-turbo": ("fast images, edits from pictures",
+    "qwen-image-turbo": ("fast images, edits from photos",
                          "Makes an image from text, or edits up to 10 pictures.",
                          "Fast: 8 steps per image."),
     "krea-2-turbo": ("fast images, edits one picture",
@@ -192,22 +192,22 @@ _WORDS = {
     "moss-image-base": ("images with guidance, edits",
                         "MOSS-Image before distillation, with a guidance setting.",
                         "Slow: 50 steps per image."),
-    "flux-2-klein": ("fast images, edits from pictures",
+    "flux-2-klein": ("fast images, edits from photos",
                      "Makes an image from text, or edits up to 10 pictures.",
                      "Fastest: 4 steps per image."),
     "flux-2-klein-base": ("images with guidance, edits",
                           "FLUX.2 klein before distillation, with a guidance setting.",
                           "Slow: 50 steps per image."),
-    "flux-2-klein-9b": ("fast images and edits, more detail",
+    "flux-2-klein-9b": ("fast images, more detail",
                         "The 9B FLUX.2 klein: more detail than the 4B.",
                         "Fastest: 4 steps per image."),
-    "flux-2-klein-base-9b": ("images with guidance, more detail",
+    "flux-2-klein-base-9b": ("guided images, more detail",
                              "The 9B FLUX.2 klein before distillation, with guidance.",
                              "Slow: 50 steps per image."),
-    "flux-2-klein-9b-kv": ("fast edits faithful to the picture",
+    "flux-2-klein-9b-kv": ("edits faithful to the picture",
                            "A 9B FLUX.2 klein whose edits keep more of each picture.",
                            "Fastest: 4 steps per image."),
-    "flux-3-klein": ("fast images, edits from pictures",
+    "flux-3-klein": ("fast images, edits from photos",
                      "Makes an image from text, or edits up to 10 pictures.",
                      "Fast: 16 steps per image."),
     "flux-3-klein-base": ("images with guidance, edits",

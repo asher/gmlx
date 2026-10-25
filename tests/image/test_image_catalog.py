@@ -21,7 +21,7 @@ def test_every_recipe_has_its_words_and_dit_sizes():
 
     assert set(DIT_BYTES) == set(catalog.RECIPES)
     for r in catalog.RECIPES.values():
-        assert r.use and len(r.use) < 35, r.name
+        assert r.use and len(r.use) <= 31, r.name   # the GOOD FOR column at 80 columns
         assert r.blurb.endswith('.') and r.speed.endswith('.'), r.name
         assert len(f'  {r.blurb} Apache 2.0') <= 76 and len(f'  {r.speed}') <= 76, r.name
         assert set(DIT_BYTES[r.name]) == set(r.dit_quants), r.name
