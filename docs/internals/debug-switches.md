@@ -54,7 +54,7 @@ is already running does not see a variable you export later.
 | `GMLX_MTP_DEBUG=1` | Log the MTP notices, including the verify branch the first time each branch runs. |
 | `GMLX_DRAFT_HEAD` | `q8` or `q4` drafts an MTP or DFlash 2 round through a `q8_0` or `q4_0` copy of a float target head, and `f16` uses the head as is. The default is `q8`. |
 | `GMLX_DRAFT_BLOCK_SIZE` | Block size of each speculative round for `serve`, as `--draft-block-size` sets. A round drafts one token fewer. |
-| `GMLX_Q4_MTP_LADDER` | Drafts per Qwen3.8-Flash-Next round by the head's confidence in the first, as `conf:drafts` steps. Default `0.9:5,0.5:3,0:1`; `0` drafts a fixed three. |
+| `GMLX_Q4_MTP_LADDER` | Drafts per Flash-Next round by the confidence in the first, as `conf:drafts` steps under the block size. Default `0.9:5,0.5:3,0:1`; `0` drafts a fixed three. |
 | `GMLX_Q4_MTP_STREAK_CAP=N` | After a Qwen3.8-Flash-Next round where the model rejected a draft, draft at most N tokens. The default is 3, and `0` lifts the cap. |
 | `GMLX_MTP_PREEMPT=0` | Make queued requests wait for a lone speculating request to finish, instead of moving it onto the batch loop so they can join. |
 | `GMLX_MTP_RESUME=0` | Keep speculation off on a batch that grew past the width cap, instead of turning it back on when the batch shrinks within the cap. |

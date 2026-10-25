@@ -200,6 +200,15 @@ def test_draft_ladder_sets_the_round_length(monkeypatch):
     _, fixed = drafted("0")
     assert fixed.shape == (1, 5)
     ladder = "0.9:5,0.5:3,0:1"
+    # The confidence is the seed's argmax probability; a malformed ladder
+    # keeps the default one.
+    logits = mx.random.normal((2, 1, args.vocab_size)) * 4
+    probs = mx.softmax(logits.astype(mx.float32), axis=-1).max(axis=-1).reshape(-1)
+    assert mx.allclose(Qwen4ExpMTPDrafter._conf(logits), probs, atol=1e-6)
+    drafter, _ = drafted(ladder)
+    assert drafter._ladder == ((0.9, 5), (0.5, 3), (0.0, 1))
+    drafter, _ = drafted("0.9:5;0.5:3")
+    assert drafter._ladder == ((0.9, 5), (0.5, 3), (0.0, 1))
     drafter, sure = drafted(ladder, conf=0.95)
     assert sure.shape == (1, 5) and drafter._round_appended == 4
     assert mx.array_equal(sure, fixed)

@@ -77,6 +77,13 @@ def draft_ladder() -> tuple:
     spec = os.environ.get("GMLX_Q4_MTP_LADDER", DRAFT_LADDER_DEFAULT).strip()
     if not spec or spec == "0":
         return ()
+    try:
+        return _parse_ladder(spec)
+    except ValueError:  # a malformed value keeps the default, like env_int
+        return _parse_ladder(DRAFT_LADDER_DEFAULT)
+
+
+def _parse_ladder(spec: str) -> tuple:
     steps = []
     for part in spec.split(","):
         conf, drafts = part.split(":")
@@ -365,7 +372,9 @@ class Qwen4ExpMTPDrafter(QwenMTPDrafter):
         self._seed_conf = self._conf(logits) if self._ladder else None
 
     def draft_eval_state(self) -> list:
-        # The seed's confidence rides the engine's async eval of the seed.
+        # The seed's confidence shares the seed's graph, so the engine's
+        # async eval of the seed covers it and the ladder read waits on
+        # nothing more.
         state = super().draft_eval_state()
         if self._seed_conf is not None:
             state.append(self._seed_conf)
