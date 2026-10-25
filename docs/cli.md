@@ -785,8 +785,10 @@ An entry on an unmounted drive is kept and reported, not dropped.
 drafter that a scan pairs with it, such as one downloaded after the
 model. It never changes an `mmproj` or `draft_gguf` key that the entry
 has, and it leaves an entry alone when the key is there but commented
-out. It adds no drafter to an entry set to `speculative: false`. Each
-line it adds carries a comment that says so. Without the flag, a sync
+out. It adds no drafter to an entry set to `speculative: false`, and a
+drafter it adds is marked `speculative: auto`, as a scan marks one, so
+a load leaves it out when it does not fit beside the experts. Each
+companion line it adds carries a comment that says so. Without the flag, a sync
 adds no companion to an entry it keeps, and its plan prints a `hint:`
 line for each companion it would add. `gmlx pull` prints the same hint
 for a companion it leaves out.

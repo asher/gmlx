@@ -455,6 +455,11 @@ def _wire_plain_resident(model, gguf_path, *, prefill_step,
     if (cpu_default_device() or not mx.metal.is_available()
             or not getattr(kq, "residency_insert", None)
             or not env_bool("GMLX_GPU_RESIDENT", True)):
+        # The warm touch skipped a guarded load's arrays, and with them
+        # its populate wait: the first prefill must not race the readers.
+        from gmlx.load.populate import finish_all
+
+        finish_all(log=loadlog.info)
         return True
     total = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
     depth = bmod.wire_room_depth()

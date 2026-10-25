@@ -110,6 +110,21 @@ def test_bg_serve_args_forwards_thinking_flags():
     assert "--thinking" not in bare and "--thinking-budget" not in bare
 
 
+def test_bg_serve_args_forwards_the_stochastic_mtp_choice():
+    """--no-stochastic-mtp (exact decode) and --stochastic-mtp survive the
+    background re-exec; the default forwards nothing, so the config's
+    server.stochastic_mtp still decides."""
+    import argparse
+    ap = argparse.ArgumentParser()
+    srv._add_serve_args(ap)
+    off = srv._bg_serve_args(ap.parse_args(["m.gguf", "--no-stochastic-mtp"]), None)
+    assert "--no-stochastic-mtp" in off and "--stochastic-mtp" not in off
+    on = srv._bg_serve_args(ap.parse_args(["m.gguf", "--stochastic-mtp"]), None)
+    assert "--stochastic-mtp" in on and "--no-stochastic-mtp" not in on
+    bare = srv._bg_serve_args(ap.parse_args(["m.gguf"]), None)
+    assert not any(f.endswith("stochastic-mtp") for f in bare)
+
+
 def test_single_model_cfg_kv_flags_ride_overrides_load(tmp_path):
     """The KV flags land under overrides.load keyed like a config file, so a
     positional model resolves, prices and prints like a config model."""
@@ -1168,13 +1183,18 @@ def test_sync_add_companions_adds_a_drafter_to_an_entry(monkeypatch, tmp_path,
     cfg = load_config(cfg_path)
     assert cfg.models["muse"].draft_gguf == "dflash-muse.gguf"
     assert cfg.models["muse"].pin is True         # the hand-edit survives
+    # The drafter is auto, as a scan pairs it: a load that cannot hold it
+    # beside the experts leaves it out.
+    assert cfg.models["muse"].speculative_auto is True
     note = srv.discovery.COMPANION_MARK_NOTE
     assert cfg_path.read_text().endswith(
         "  muse:\n    path: muse.gguf\n"
-        f"    draft_gguf: dflash-muse.gguf  # {note}\n    pin: true\n"
+        f"    draft_gguf: dflash-muse.gguf  # {note}\n"
+        "    speculative: auto\n    pin: true\n"
         "\n  # sampling (qwen3.6): t=1\n  qwen:\n    path: qwen.gguf\n"
         "    mmproj: mmproj-qwen.gguf\n"
-        f"    draft_gguf: dflash-qwen.gguf  # {note}\n")
+        f"    draft_gguf: dflash-qwen.gguf  # {note}\n"
+        "    speculative: auto\n")
 
 
 @pytest.mark.parametrize("held", [
@@ -1303,7 +1323,8 @@ def test_sync_drops_the_mark_of_a_moe_that_its_table_brings_under(
     assert m.stream is None and m.draft_gguf == FLASH_NEXT_MTP
     assert cfg_path.read_text().endswith(
         f"  flash-next:\n    path: {FLASH_NEXT}\n    draft_gguf: "
-        f"{FLASH_NEXT_MTP}  # {srv.discovery.COMPANION_MARK_NOTE}\n")
+        f"{FLASH_NEXT_MTP}  # {srv.discovery.COMPANION_MARK_NOTE}\n"
+        "    speculative: auto\n")
 
 
 @pytest.mark.parametrize("marked,whole", [(True, False), (False, False),
@@ -3032,8 +3053,11 @@ def test_register_downloads_adds_a_pulled_drafter_after_the_path(
         "\n  # sampling (gguf): t=0.6\n  old:\n    path: old.gguf\n")
     drafter = _qwen_drafters(monkeypatch, lib)
     srv.register_downloads([str(drafter)], str(cfg_path))
+    # A pulled drafter is auto too: the model loads without it when it
+    # does not fit beside the experts.
     assert (f"    path: {_QWEN_REPO}/Qwen3.8-27B-UD-Q6_K_XL.gguf\n"
             f"    draft_gguf: {_QWEN_REPO}/Qwen3.8-27B-DFlash2-Q8_0.gguf\n"
+            "    speculative: auto\n"
             "\n  # sampling (gguf): t=0.6\n  old:\n") in cfg_path.read_text()
     out = capsys.readouterr().out
     assert "registered Qwen3.8-27B-DFlash2-Q8_0.gguf as the drafter of qwen" in out

@@ -849,6 +849,25 @@ def test_a_plain_moe_beside_apps_wires_in_chunks_at_its_install(
     assert capsys.readouterr() == ("", "")
 
 
+def test_a_guarded_load_waits_for_its_populate_with_the_wire_off(
+        monkeypatch):
+    # GMLX_GPU_RESIDENT=0 skips the chunked wire. The warm touch skipped
+    # the guarded load's arrays, and with them the only other populate
+    # wait, so the install waits here, or the first prefill races the
+    # page-cache readers.
+    import gmlx.load.populate as populate
+
+    installs = _plain(monkeypatch)
+    _Residency(monkeypatch)
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    waited = []
+    monkeypatch.setattr(populate, "finish_all",
+                        lambda log=print: waited.append(True))
+    assert es.install_unflagged_tables(_leaves(90, 1 * GiB), "m.gguf") is False
+    assert waited == [True] and installs == []
+    assert not ts.resident_wire_guarded("m.gguf")
+
+
 def test_a_plain_moe_whose_wire_stops_streams_its_experts(monkeypatch,
                                                           capsys):
     # Another model wires 30 GiB ten chunks in: the set comes back out,

@@ -1307,6 +1307,11 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
                 _insert_key_keep_trailing(
                     ent, "mmproj" if "mmproj" in ent else "path",
                     "draft_gguf", discovery._rel(dpath, dirs), companion_note)
+                # As a scan writes a paired drafter: a load leaves it out
+                # when it does not fit beside the experts.
+                if "speculative" not in ent:
+                    _insert_key_keep_trailing(ent, "draft_gguf",
+                                              "speculative", "auto")
         for mid, mpath in (mmproj_pairs or {}).items():
             ent = models.get(mid)
             if (isinstance(ent, dict) and "path" in ent
@@ -1892,6 +1897,9 @@ def _bg_serve_args(a, cfg_path) -> list:
         out.append("--native-mtp")
     if getattr(a, "draft_block_size", None):
         out += ["--draft-block-size", str(a.draft_block_size)]
+    if getattr(a, "stochastic_mtp", None) is not None:
+        out.append("--stochastic-mtp" if a.stochastic_mtp
+                   else "--no-stochastic-mtp")
     if getattr(a, "chat_template", None):
         ct = a.chat_template
         out += ["--chat-template",
