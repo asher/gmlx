@@ -138,7 +138,9 @@ def header(repo: str, path: str, revision: str, cache: str | None):
     key = None
     if cache:
         os.makedirs(cache, exist_ok=True)
-        key = os.path.join(cache, (repo + "__" + path).replace("/", "__"))
+        # One entry per file and revision: a repo that re-uploads a file
+        # under the same name must not answer from the older header.
+        key = os.path.join(cache, (repo + "__" + path + "@" + revision).replace("/", "__"))
         if os.path.exists(key + ".bin"):
             with open(key + ".bin", "rb") as f:
                 buf = f.read()
@@ -630,7 +632,8 @@ def main(argv=None) -> int:
     ap.add_argument("--only", action="append", default=[], help="an entry name; repeatable")
     ap.add_argument("--check", action="store_true",
                     help="exit 1 when a recorded fact disagrees or a check fails")
-    ap.add_argument("--cache", default=None, help="a folder that keeps header reads")
+    ap.add_argument("--cache", default=None,
+                    help="a folder that keeps header reads, one per file and revision")
     a = ap.parse_args(argv)
     strip_env()
     from gmlx.load.catalog_facts import FACTS

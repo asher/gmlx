@@ -73,7 +73,7 @@ FACTS: dict = {
             ('UD-IQ2_M', '', 'NVIDIA-Nemotron-3.5-Bolt-E4B-UD-IQ2_M.gguf', 3531578560, 3515748520, 0, None, False),
             ('UD-IQ3_XXS', '', 'NVIDIA-Nemotron-3.5-Bolt-E4B-UD-IQ3_XXS.gguf', 3703968960, 3688138920, 0, None, False),
             ('UD-Q3_K_XL', '', 'NVIDIA-Nemotron-3.5-Bolt-E4B-UD-Q3_K_XL.gguf', 4219133120, 4203303080, 0, None, False),
-            ('UD-Q4_K_XL', 'balanced', 'NVIDIA-Nemotron-3.5-Bolt-E4B-UD-Q4_K_XL.gguf', 5060482240, 4742295720, 0, None, False),
+            ('UD-Q4_K_XL', 'balanced', 'NVIDIA-Nemotron-3.5-Bolt-E4B-UD-Q4_K_XL.gguf', 5060482240, 5044652200, 0, None, False),
             ('UD-Q6_K_XL', 'high', 'NVIDIA-Nemotron-3.5-Bolt-E4B-UD-Q6_K_XL.gguf', 7258879168, 7243049128, 0, None, False),
             ('UD-Q8_K_XL', 'xhigh', 'NVIDIA-Nemotron-3.5-Bolt-E4B-UD-Q8_K_XL.gguf', 8192955584, 8177125544, 0, None, False),
         ),

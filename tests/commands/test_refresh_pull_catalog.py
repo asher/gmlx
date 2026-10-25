@@ -180,6 +180,22 @@ def test_dense_entry_records_tiers_costs_and_the_tower(refresh, dense_repo, monk
         sorted(r.quant for r in catalog.compact_candidates(m)) == ["UD-IQ2_M", "UD-IQ3_XXS"]
 
 
+def test_the_header_cache_is_per_revision(refresh, dense_repo, tmp_path):
+    cache = str(tmp_path / "cache")
+    a = refresh.header("org/dense", "Model-Q4_0.gguf", "aaaa", cache)
+    assert dense_repo.fetched == [("org/dense", "Model-Q4_0.gguf")]
+    # The same file at the same revision reads from the cache.
+    b = refresh.header("org/dense", "Model-Q4_0.gguf", "aaaa", cache)
+    assert len(dense_repo.fetched) == 1 and b.kv == a.kv
+    # Another revision of the same name is another read: a re-uploaded file
+    # must not answer from the older header.
+    refresh.header("org/dense", "Model-Q4_0.gguf", "bbbb", cache)
+    assert len(dense_repo.fetched) == 2
+    assert sorted(p.name for p in (tmp_path / "cache").iterdir()) == [
+        "org__dense__Model-Q4_0.gguf@aaaa.bin", "org__dense__Model-Q4_0.gguf@aaaa.total",
+        "org__dense__Model-Q4_0.gguf@bbbb.bin", "org__dense__Model-Q4_0.gguf@bbbb.total"]
+
+
 def test_rope_scaling_leaves_the_trained_context(refresh, monkeypatch, tmp_path):
     hub = Hub(refresh, monkeypatch)
     meta = _meta(**{"qwen2.rope.scaling.type": "yarn", "qwen2.rope.scaling.factor": 4.0,
