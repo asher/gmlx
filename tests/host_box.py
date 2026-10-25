@@ -203,13 +203,14 @@ def install() -> None:
             return None
         return int(_current["vm"].get("free_wanted", 0))
 
-    # A case sets ``reclaim_marks`` for a kernel compressing or swapping.
+    # A case sets ``reclaim_marks``, in kernel_vm.reclaim_marks's order,
+    # for a kernel compressing, swapping or paging out.
     def reclaim_marks():
         if _current["real"]:
             return real_marks()
         if kernel_vm._disabled is not None:
             return None
-        return tuple(_current["vm"].get("reclaim_marks", (0, 0)))
+        return tuple(_current["vm"].get("reclaim_marks", (0, 0, 0, 0)))
 
     kernel_vm.unwired_bytes = unwired_bytes
     kernel_vm.free_page_waiters = free_page_waiters

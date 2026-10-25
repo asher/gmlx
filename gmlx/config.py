@@ -578,6 +578,10 @@ class ModelCfg:
     # Streamed-decode prefetch recipe: auto (probe the drive), on, off.
     stream_fast_disk: str | None = None
     speculative: bool = False
+    # A folder scan turned speculative on for the model's MTP head or
+    # drafter, with no speculative key asking for it: a load that holds
+    # the experts only without the drafter drops it.
+    speculative_auto: bool = False
     # Batch-width cap for speculative decode: MTP runs only while the live
     # decode batch is this wide, wider batches decode plain (drafter stays
     # loaded). None = the drafter family's measured default; 0 = uncapped;
@@ -1142,6 +1146,8 @@ class ResolvedModel:
     # N = speculate only while the live decode batch is <= N wide.
     # Load-affecting - it is stamped onto the drafter at load.
     speculative_width_cap: int | None = None
+    # ModelCfg.speculative_auto: not load-affecting.
+    speculative_auto: bool = False
     # Context copy on this id's drafter. Load-affecting the same way.
     context_copy: bool = False
     # Rope scaling options (a RopeOverride, None = the header's). Load-
@@ -1998,6 +2004,7 @@ def resolve_model(
         reasoning_effort=reasoning_effort,
         speculative=bool(model.speculative or model.draft_gguf or model.native_mtp),
         speculative_width_cap=model.speculative_width_cap,
+        speculative_auto=bool(model.speculative_auto),
         context_copy=bool(model.context_copy),
         mmproj=resolve_path(model.mmproj, cfg.model_dirs),
         draft_gguf=(None if model.native_mtp

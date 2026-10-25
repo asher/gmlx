@@ -343,7 +343,7 @@ class _Vm:
         self.wired = (mem - self.free - self.file - self.apps
                       if wired is None else int(wired))
         self.wanted = 0
-        self.compressed_in = 0
+        self.compressed_in = self.compressed_out = 0
         self.lowest_free = self.free
         self.publish()
 
@@ -353,7 +353,8 @@ class _Vm:
             "speculative": 0, "filebacked": self.file,
             "wired": self.wired, "compressor": self.compressor,
             "free_wanted": self.wanted,
-            "reclaim_marks": (self.compressed_in, 0)})
+            "reclaim_marks": (self.compressed_in, self.compressed_out, 0,
+                              0)})
 
     def take(self, nbytes):
         n = int(nbytes)
@@ -371,6 +372,7 @@ class _Vm:
                 squeezed = min(self.apps, int(rest + packed))
             self.apps -= squeezed
             self.compressed_in += squeezed
+            self.compressed_out += int(squeezed / self.ratio)
             self.compressor += int(squeezed / self.ratio)
             short = rest - (squeezed - int(squeezed / self.ratio))
             if short > 0:
@@ -583,35 +585,60 @@ def test_a_kernel_that_stays_starved_stops_the_wire(monkeypatch, capsys):
 
 
 def test_a_kernel_working_through_its_waiters_holds_the_chunk(monkeypatch):
-    # The kernel frees pages for one waiting thread every 1.5 s, slower
-    # than the stall: each new low keeps the chunk waiting, and it
+    # The kernel frees pages for one waiting thread every 0.6 s, slower
+    # than a reading: each new low keeps the chunk waiting, and it
     # commits once none is left, so a set that fits stays in memory.
     _Vm(host_box.mac(128)[0], free=42.3 * GiB, file=54.6 * GiB)
     clock = es.time
     start = clock.now
     monkeypatch.setattr(
         budget, "free_page_waiters",
-        lambda: max(0, 8 - int((clock.now - start) / 1.5)))
+        lambda: max(0, 8 - int((clock.now - start) / 0.6)))
     guard = es._ChunkGuard(4 * GiB)
     assert guard(2 * GiB)
-    assert 4 * es._WIRE_STALL_S < guard.waited < es._WIRE_WAIT_S
+    assert es._WIRE_STALL_S < guard.waited < es._WIRE_WAIT_S
 
 
-def test_own_readers_waiting_while_the_kernel_compresses_hold_the_chunk(
-        monkeypatch):
-    # The load's own readers wait on free pages for 5 s, two of them the
-    # whole time, while the kernel compresses other apps' memory for
-    # them: the chunk waits through it and commits once they finish.
-    _Vm(host_box.mac(128)[0], free=42.3 * GiB, file=54.6 * GiB)
+def _compressing(monkeypatch, saved, waiting_s):
+    """Threads wait on free pages for ``waiting_s`` while the compressor
+    takes 1 GB a second and keeps ``saved`` of it out of RAM."""
     clock = es.time
     start = clock.now
     monkeypatch.setattr(budget, "free_page_waiters",
-                        lambda: 2 if clock.now - start < 5 else 0)
-    monkeypatch.setattr(budget, "reclaim_marks",
-                        lambda: (int((clock.now - start) * 1e9), 0))
+                        lambda: 2 if clock.now - start < waiting_s else 0)
+
+    def marks():
+        fed = int((clock.now - start) * GiB)
+        return (fed, int(fed * (1 - saved)), 0, 0)
+
+    monkeypatch.setattr(budget, "reclaim_marks", marks)
+
+
+def test_threads_waiting_while_the_kernel_compresses_hold_the_chunk(
+        monkeypatch):
+    # Other apps' threads wait on free pages for 4 s while the kernel
+    # compresses their memory 2 to 1: the chunk waits through it and
+    # commits once they finish.
+    _Vm(host_box.mac(128)[0], free=42.3 * GiB, file=54.6 * GiB)
+    _compressing(monkeypatch, saved=0.5, waiting_s=4)
     guard = es._ChunkGuard(4 * GiB)
     assert guard(2 * GiB)
     assert 2 * es._WIRE_STALL_S < guard.waited < es._WIRE_WAIT_S
+
+
+@pytest.mark.parametrize("saved,stop_s", [(0.0, 2.0), (0.5, 7.0)])
+def test_a_kernel_that_falls_behind_while_it_compresses_stops_the_chunk(
+        monkeypatch, saved, stop_s):
+    # Threads wait the whole time with unwired memory over the line. A
+    # compressor storing what it takes, as with quantized weights, frees
+    # nothing, and the chunk stops at the stall. One that saves memory
+    # holds it for 5 s of waiting and no more.
+    _Vm(host_box.mac(128)[0], free=42.3 * GiB, file=54.6 * GiB)
+    _compressing(monkeypatch, saved=saved, waiting_s=1e9)
+    guard = es._ChunkGuard(4 * GiB)
+    assert guard(2 * GiB) is False
+    assert guard.starved and not guard.short
+    assert stop_s - 0.1 <= guard.waited <= stop_s + 0.1
 
 
 def test_memory_the_kernel_cannot_compress_stops_the_wire(monkeypatch,

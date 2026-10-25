@@ -204,10 +204,10 @@ def install_unflagged_tables(model, gguf_path: str | None, *,
 
 
 # The chunked wire's wait under a chunk's line: a rise of unwired memory
-# smaller than _WIRE_MIN_RISE does not count, nor does a count of threads
-# waiting for free pages that does not fall to a new low while the kernel
-# compresses or swaps nothing, the wait stops once nothing has counted for
-# _WIRE_STALL_S, and the waits of one wire add up to at most _WIRE_WAIT_S.
+# smaller than _WIRE_MIN_RISE does not count, the wait stops once unwired
+# memory has not risen for _WIRE_STALL_S or threads have waited on the
+# kernel for free pages that long while it frees no memory, and the waits
+# of one wire add up to at most _WIRE_WAIT_S.
 _WIRE_STALL_S = 2.0
 _WIRE_MIN_RISE = 256 << 20
 _WIRE_WAIT_S = 60.0
@@ -223,13 +223,12 @@ class _ChunkGuard:
     process wires more or the wire costs more than its estimate. A chunk
     past the free and file-backed pages has the kernel compress other
     apps' memory for it, and the free-page leg stops the wire if the
-    kernel falls behind. Short on either leg, it waits while unwired
-    memory rises, fewer threads wait, or, on the free-page leg alone, the
-    kernel compresses or swaps memory for them (the load's own readers
-    can be among the waiters), and stops on a stall or once the wire has
-    waited ``wait_s`` in all. ``last``, ``line``, ``pending``,
-    ``short`` and ``starved`` keep the final reading, the line it was
-    judged on, the chunk's bytes, and which legs were short."""
+    kernel falls behind. Short of the line, it waits while unwired memory
+    rises; with threads waiting, while the kernel frees memory for them
+    (``kernel_vm.StarveWatch``). It stops on a stall or once the wire has
+    waited ``wait_s`` in all. ``last``, ``line``, ``pending``, ``short``
+    and ``starved`` keep the final reading, the line it was judged on,
+    the chunk's bytes, and which legs were short."""
 
     def __init__(self, keep: float, *, stall_s: float | None = None,
                  wait_s: float | None = None,
@@ -246,35 +245,30 @@ class _ChunkGuard:
         self.short = self.starved = False
 
     def __call__(self, nbytes: int) -> bool:
+        from gmlx.serve.kernel_vm import StarveWatch
         from gmlx.stream import budget
 
         self.pending = int(nbytes)
         self.line = self.keep + self.pending
         start = since = time.monotonic()
-        best = low = marks = None
+        best = None
+        watch = StarveWatch(clock=lambda: time.monotonic(),
+                            waiting=lambda: budget.free_page_waiters(),
+                            marks=lambda: budget.reclaim_marks())
         try:
             while True:
                 self.last = budget.unwired_ram_bytes()
-                wanted = budget.free_page_waiters()
+                stalled = watch()
                 self.short = self.last is not None and self.last < self.line
-                self.starved = wanted > 0
+                self.starved = watch.waiters > 0
                 if not (self.short or self.starved):
                     return True
                 now = time.monotonic()
-                rose = best is None or (self.last or 0) >= best + self.min_rise
-                eased = low is not None and wanted < low
-                prev, marks = marks, budget.reclaim_marks()
-                reclaimed = (not self.short and prev is not None
-                             and marks is not None and marks != prev)
-                if rose:
-                    best = self.last or 0
-                if low is None or wanted < low:
-                    low = wanted
-                if rose or eased or reclaimed:
-                    since = now
-                elif now - since >= self.stall_s:
-                    return False
-                if self.waited + now - start >= self.wait_s:
+                if best is None or (self.last or 0) >= best + self.min_rise:
+                    best, since = self.last or 0, now
+                if ((self.short and now - since >= self.stall_s)
+                        or stalled >= self.stall_s
+                        or self.waited + now - start >= self.wait_s):
                     return False
                 time.sleep(self.step_s)
         finally:

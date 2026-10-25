@@ -2562,10 +2562,12 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
                "defaults", "cache", "assistants", "assistant_allow_remote",
                "image")}
     # Profile/model names double as dict keys; drop the redundant fields so the
-    # entries match the file schema (which has no `name`/`id` keys).
+    # entries match the file schema (which has no `name`/`id` keys), and a
+    # folder scan's in-memory `speculative_auto` mark.
     profiles = {n: {k: v for k, v in p.items() if k != "name"}
                 for n, p in d.pop("profiles").items()}
-    models = {mid: {k: v for k, v in m.items() if k != "id"}
+    models = {mid: {k: v for k, v in m.items()
+                    if k not in ("id", "speculative_auto")}
               for mid, m in d.pop("models").items()}
     images = {}
     for iid, m in d.pop("image_models").items():

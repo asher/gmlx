@@ -134,7 +134,7 @@ keeps running. `gmlx sync-models` removes such entries.
 | <a id="modelsoverrides"></a>`overrides` | none | Settings that win over every profile, for this model only. Takes every profile key except `extends`. |
 | <a id="modelsfamily"></a>`family` | detected | The [family defaults](family-defaults.md) to start from. Set it only when detection picks the wrong family. |
 | <a id="modelsmmproj"></a>`mmproj` | none | Vision or audio projector GGUF that makes the model [multimodal](vlm.md) |
-| <a id="modelsspeculative"></a>`speculative` | `false` | Speculative decoding with the GGUF's MTP head, or with `draft_gguf`. The output stays token-identical. |
+| <a id="modelsspeculative"></a>`speculative` | `false` | Speculative decoding with the GGUF's MTP head, or with `draft_gguf`. Greedy output stays token-identical. |
 | <a id="modelsdraft_gguf"></a>`draft_gguf` | none | A separate [drafter](glossary.md#drafter) GGUF. Setting it turns on `speculative`. |
 | <a id="modelsnative_mtp"></a>`native_mtp` | `false` | Draft with the GGUF's own MTP head even when `draft_gguf` is set |
 | <a id="modelsspeculative_width_cap"></a>`speculative_width_cap` | `null` | Speculate on at most this many requests at a time. `null` takes the drafter's default, `0` removes the cap. |

@@ -361,11 +361,22 @@ def _kernel_waiters():
 # reclaim (``kernel_vm.StarveWatch``) take a reclaim, and this long a shed.
 _STARVE_RECLAIM_S = 0.5
 _STARVE_SHED_S = 2.0
+# A stall long enough to act on is read again this many times, this far
+# apart, and acts only if it holds: ticks can come seconds apart, and
+# threads waiting at two of them need not have waited in between.
+_STARVE_CONFIRM = 4
+_STARVE_CONFIRM_S = 0.1
 
 
 def _starved_for(st) -> float:
     """Seconds of the current free-page stall, 0 without one."""
     stalled = st.starve()
+    if stalled >= _STARVE_RECLAIM_S:
+        for _ in range(_STARVE_CONFIRM):
+            time.sleep(_STARVE_CONFIRM_S)
+            stalled = st.starve()
+            if stalled < _STARVE_RECLAIM_S:
+                break
     if stalled < _STARVE_RECLAIM_S:
         st.starve_reclaimed = False
     return stalled

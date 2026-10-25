@@ -211,7 +211,9 @@ On a request with a temperature above zero, gmlx accepts drafts by
 rejection sampling. The output is a true sample from the model's
 distribution, and more drafts pass than by exact match, so decoding is
 faster. The gain is largest on low-bit quants and on text where the model
-is unsure. Greedy requests always match a run without speculation.
+is unsure. Greedy requests match a run without speculation. On
+Nemotron-H, an explicit `--stochastic-mtp` or `stochastic_mtp: true` takes
+a faster verify, and a greedy request can then differ on a near tie.
 
 A seeded sampled run is not token-identical to the same run without
 speculation. To accept only drafts that match the token the model would

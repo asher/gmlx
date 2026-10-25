@@ -1357,6 +1357,9 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
                           f"{loser} -> {dr.path}", file=sys.stderr)
             if targets:
                 unpaired = [d for d in unpaired if d.path != dr.path]
+    if spec.speculative == "auto":
+        for mc, _c in all_made:
+            mc.speculative_auto = bool(mc.speculative)
     # One line per drafter, for the scanned models it ends up with. A
     # configured model is the caller's to report: a sync writes its
     # drafter only with --add-companions.

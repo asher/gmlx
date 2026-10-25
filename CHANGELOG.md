@@ -76,7 +76,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A MoE keeps its experts in memory when they fit beside the prefill of a
   model held in memory, which takes several GB less than a streamed prefill.
 - While `serve` runs beside other apps, their memory no longer evicts the prefix
-  cache, stops its stores or shrinks a streamed model's expert arena.
+  cache or stops its stores, and it shrinks a streamed model's expert arena
+  half as much.
+- `serve` leaves out an MTP drafter that a folder scan turned on when it does
+  not fit beside the experts, as `run` does, so the experts stay in memory.
 - The serve governor also reclaims when threads wait on macOS for free pages,
   and `/v1/metrics` reports `kernel_unwired_bytes` and `kernel_free_page_waiters`.
 - `run` and `chat` keep a MoE's experts in memory and turn auto MTP off when its

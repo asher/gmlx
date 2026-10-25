@@ -122,6 +122,33 @@ def test_a_run_started_as_the_last_one_exits_keeps_its_experts(
     assert ts.resident_wire_guarded(path)
 
 
+def test_a_run_started_as_the_last_one_exits_keeps_its_auto_drafter(
+        header, monkeypatch):
+    # The same set beside its 4 GB auto drafter, read at 89 GiB not
+    # wired, which holds the set alone, and at 105 GiB once the run
+    # before it has exited.
+    import gmlx.load.discovery as discovery
+    import gmlx.serve.capacity as cap
+
+    monkeypatch.setattr(cli, "_has_native_mtp_head", lambda p: True)
+    monkeypatch.setattr(cli, "_sibling_drafter", lambda p: None)
+    monkeypatch.setattr(discovery, "mtp_block_bytes", lambda p: int(4e9))
+    path = header(82.5e9, experts=77.0e9, budget_bytes=int(108.2e9),
+                  room=8.1 * GiB)
+    box = host_box.mac(128)[0]
+    _box(box, unwired=89 * GiB)
+
+    def settle(sample, free, need):
+        _box(box, unwired=105 * GiB)
+        return sample()
+
+    monkeypatch.setattr(cap, "_settle_unwired", settle)
+    args = _args(path)
+    cli.preload_wire_check(args, depth=4096)
+    assert not args.stream_experts
+    assert not getattr(args, "no_speculative", False)
+
+
 @pytest.mark.parametrize("drafter", [0, 4e9])
 def test_a_smaller_file_of_a_moe_never_keeps_less_in_memory(
         header, monkeypatch, drafter):

@@ -368,10 +368,13 @@ def test_arena_budget_math(monkeypatch):
     got = _decode_arena_bytes(100 << 30, offsets, budget=90 << 30)
     assert got == int(0.8 * (100 << 30)) - (20 << 30) - (8 << 30)
     # Live-RAM ceiling binds when memory is wired: 40 GB not
-    # wired minus the floor beats the fraction of a 100 GB machine.
+    # wired, all free or file pages, minus the floor beats the fraction
+    # of a 100 GB machine.
     monkeypatch.setattr(
         gmlx.stream.budget, "unwired_ram_bytes", lambda: 40 << 30
     )
+    monkeypatch.setattr(gmlx.stream.budget, "_available_ram_bytes",
+                        lambda: 40 << 30)
     monkeypatch.setenv("GMLX_DECODE_RAM_FLOOR_GB", "5")
     monkeypatch.delenv("GMLX_DECODE_PAGECACHE_GB", raising=False)
     # The floor is the base margin plus the page-cache reserve (2.5 GB

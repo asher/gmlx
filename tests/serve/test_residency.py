@@ -7,6 +7,8 @@ from __future__ import annotations
 from contextvars import copy_context
 from types import SimpleNamespace
 
+import os
+
 import pytest
 
 from gmlx.serve.residency import (  # noqa: E402
@@ -1266,14 +1268,16 @@ def test_a_plain_build_whose_table_brings_it_under_prices_the_resident_experts(
         assert caplog.text.count(line) == 1
 
 
-@pytest.mark.parametrize("experts,stream", [
-    (100 * GB, None), (0, None), (100 * GB, "experts")])
+@pytest.mark.parametrize("experts,stream,arch", [
+    (100 * GB, None, "qwen4exp"), (0, None, "qwen4exp"),
+    (100 * GB, "experts", "qwen4exp"), (100 * GB, None, "diffusion-gemma")])
 def test_a_plain_moe_build_wires_in_chunks_at_its_install(
-        monkeypatch, experts, stream):
+        monkeypatch, experts, stream, arch):
     """The gate admits a plain build of a MoE on memory not wired, so its
     load starts with the chunked wire latched: the warm touch leaves the
-    weights to the install's guard. A dense build and a stream build
-    clear a latch an earlier build left."""
+    weights to the install's guard. A dense build, a stream build and a
+    diffusion model, which has no install, clear a latch an earlier build
+    left."""
     import gmlx.serve.capacity as cap
     import gmlx.stream.table_stream as ts
 
@@ -1281,6 +1285,7 @@ def test_a_plain_moe_build_wires_in_chunks_at_its_install(
     monkeypatch.setattr(ts, "_GUARDED", {})
     _table_only_header(monkeypatch, budget=200 * GB)
     monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: experts)
+    monkeypatch.setattr(cap, "_table_shards", lambda p: ([p], arch))
     model = SimpleNamespace(_kq_streaming=stream is not None, tables=False)
     pool, _tables, _credits, _asked = _table_only_pool(monkeypatch, model)
     stock = pool._stock_get
@@ -1291,11 +1296,12 @@ def test_a_plain_moe_build_wires_in_chunks_at_its_install(
         return stock(*a, **k)
 
     pool._stock_get = get
-    ts.guard_resident_wire("a.gguf", not (experts and stream is None))
+    plain = bool(experts) and stream is None and arch == "qwen4exp"
+    ts.guard_resident_wire("a.gguf", not plain)
     entry = pool.acquire("a.gguf", None, "auto",
                          build_spec=SimpleNamespace(stream=stream))
     pool.release(entry)
-    assert seen == [bool(experts) and stream is None]
+    assert seen == [plain]
 
 
 def test_a_plain_build_reprices_experts_that_stream_for_want_of_memory(
@@ -1399,6 +1405,47 @@ def test_a_build_right_after_an_unload_keeps_its_experts_in_memory(
     pool.release(entry)
     assert landed
     assert entry.footprint == 150 * GB and tables == [150 * GB]
+
+
+@pytest.mark.parametrize("auto", [True, False])
+def test_a_build_whose_auto_drafter_does_not_fit_leaves_it_out(
+        monkeypatch, caplog, auto):
+    """The 150 GB set with a 10 GB MTP head and a 20 GB KV room, beside
+    175 GB not wired: the experts fit alone. A folder scan's drafter is
+    left out of the load, as a run leaves it, and the experts stay in
+    memory. A drafter the config asks for keeps them streaming."""
+    import gmlx.load.discovery as disc
+    import gmlx.stream.table_stream as ts
+
+    monkeypatch.setattr(ts, "_FOR_MEMORY", set())
+    monkeypatch.setattr(ts, "_GUARDED", {})
+    _table_only_header(monkeypatch, budget=200 * GB, unwired=175 * GB,
+                       room=20 * GB)
+    import gmlx.serve.capacity as cap
+
+    monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: 0)
+    monkeypatch.setattr(disc, "mtp_block_bytes", lambda p: 10 * GB)
+    model = (SimpleNamespace() if auto
+             else SimpleNamespace(_kq_streaming=True))
+    pool, _tables, _credits, _asked = _table_only_pool(monkeypatch, model)
+    stock = pool._stock_get
+    speculative = []
+
+    def get(*a, **k):
+        speculative.append(os.environ.get("MLX_VLM_GGUF_SPECULATIVE"))
+        return stock(*a, **k)
+
+    pool._stock_get = get
+    spec = SimpleNamespace(stream=None, speculative=True, draft_gguf=None,
+                           mmproj=None, speculative_auto=auto)
+    with caplog.at_level("WARNING", logger="gmlx.serve.residency"):
+        entry = pool.acquire("a.gguf", None, "auto", build_spec=spec)
+    pool.release(entry)
+    assert speculative == ["0" if auto else None]
+    assert ("auto MTP is off" in caplog.text) is auto
+    assert ts.experts_stream_for_memory("a.gguf") == ("" if auto
+                                                     else "unwired")
+    assert (entry.footprint == 150 * GB) is auto
 
 
 @pytest.mark.parametrize("streamed", [True, False])

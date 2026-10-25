@@ -77,9 +77,12 @@ def rig(monkeypatch):
     monkeypatch.setattr(gov, "_kernel_unwired", lambda: box["kernel"])
     import gmlx.serve.kernel_vm as kv
 
-    box["waiters"], box["marks"] = 0, (0, 0)
+    box["waiters"], box["marks"], box["now"] = 0, (0, 0, 0, 0), 1000.0
     monkeypatch.setattr(kv, "free_page_waiters", lambda: box["waiters"])
     monkeypatch.setattr(kv, "reclaim_marks", lambda: box["marks"])
+    monkeypatch.setattr(kv, "time", types.SimpleNamespace(
+        monotonic=lambda: box["now"]))
+    monkeypatch.setattr(gov, "_STARVE_CONFIRM_S", 0.0)
     monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "8")
     monkeypatch.delenv("GMLX_GOV_RESERVE_GB", raising=False)
     import gmlx.serve.memory as sm
@@ -845,13 +848,22 @@ def test_other_apps_memory_beside_a_model_leaves_its_caches_alone(
     assert gov._STATS["kernel_floor_reds"] == 0
 
 
-def _starve(rig, gen, seconds):
-    # One tick with threads waiting, the stall already ``seconds`` old.
+GB = 1 << 30
+
+
+def _waiting(rig, gen, seconds, every=0.25, compressed=None, saved=0.5):
+    """Ticks ``every`` s apart for ``seconds`` with threads waiting on free
+    pages. ``compressed`` GB a second go into the compressor, which keeps
+    ``saved`` of them out of RAM."""
     rig["waiters"] = 3
-    watch = gov._state(gen).starve
-    if watch.since is not None:
-        watch.since = gov.time.monotonic() - seconds
-    gov._governor_tick(gen)
+    end = rig["now"] + seconds
+    while rig["now"] <= end + 1e-9:
+        if compressed:
+            t = rig["now"] - 1000.0
+            fed = int(compressed * t * GB)
+            rig["marks"] = (fed, int(fed * (1 - saved)), 0, 0)
+        gov._governor_tick(gen)
+        rig["now"] += every
 
 
 def test_a_blip_of_free_page_waiters_is_left_to_the_kernel(rig, monkeypatch):
@@ -862,57 +874,99 @@ def test_a_blip_of_free_page_waiters_is_left_to_the_kernel(rig, monkeypatch):
     gov.register_cache("apc", lambda: 20e9,
                        lambda f: (evicted.append(f), 0)[1])
     gen = FakeGen(rows=2, rate=1e6)
-    _starve(rig, gen, 0)
-    _starve(rig, gen, 0.3)
+    _waiting(rig, gen, 0.3)
     rig["waiters"] = 0
     gov._governor_tick(gen)
-    _starve(rig, gen, 0)
+    _waiting(rig, gen, 0.3)
     assert evicted == []
     assert gov._state(gen).band != gov.RED
     assert gov._STATS["kernel_starved_reds"] == 0
 
 
 def test_waiters_while_the_kernel_compresses_are_left_alone(rig):
-    # Threads wait on free pages for seconds while macOS compresses other
-    # apps' memory for them: the kernel at work, not a freeze. No
+    # Threads wait on free pages for 4 s while macOS compresses other
+    # apps' memory 2 to 1 for them: the kernel at work, not a freeze. No
     # eviction, no red.
     evicted = []
     gov.register_cache("apc", lambda: 20e9,
                        lambda f: (evicted.append(f), 0)[1])
     gen = FakeGen(rows=2, rate=1e6)
-    for t in range(6):
-        rig["marks"] = (t << 30, 0)
-        _starve(rig, gen, 3.0)
+    _waiting(rig, gen, 4.0, compressed=1.0)
     assert evicted == []
     assert gov._state(gen).band != gov.RED
 
 
-def test_threads_starved_of_free_pages_reclaim_then_shed(rig, monkeypatch):
-    # The July freeze shape: little wired, the memory not wired well
-    # above the floor, and threads waiting on free pages without a
-    # break. Half a second takes half a floor of the caches once; two
-    # seconds take them all and fail the largest row.
+def _starved_rows(monkeypatch, gen):
     failed = []
     monkeypatch.setattr(tg, "_row_failed_callbacks",
                         [lambda uid, info: failed.append((uid, info))])
+    tg_st = tg._state(gen)
+    tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    tg_st.ledger[1] = tg._Row([1] * 4, 64, {}, None, None)
+    return failed
+
+
+@pytest.mark.parametrize("compressed", [None, 1.0])
+def test_threads_starved_of_free_pages_reclaim_then_shed(rig, monkeypatch,
+                                                         compressed):
+    # The freeze shapes on record: little wired, the memory not wired well
+    # above the floor, threads waiting on free pages without a break, and
+    # the compressor idle or taking in weights that do not compress.
+    # Half a second takes half a floor of the caches once; two seconds
+    # take them all and fail the largest row.
     evicted = []
     gov.register_cache("apc", lambda: 40e9,
                        lambda f: (evicted.append(f), f * 40e9)[1])
     gen = FakeGen(rows=2, rate=1e6, live=8e9)
-    tg_st = tg._state(gen)
-    tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
-    tg_st.ledger[1] = tg._Row([1] * 4, 64, {}, None, None)
-    _starve(rig, gen, 0)
+    failed = _starved_rows(monkeypatch, gen)
+    _waiting(rig, gen, 0.25, compressed=compressed, saved=0.0)
     assert evicted == []
-    _starve(rig, gen, 0.6)
-    _starve(rig, gen, 0.9)
+    _waiting(rig, gen, 0.5, compressed=compressed, saved=0.0)
     assert evicted == [0.5 * 8e9 / 40e9]
     assert gov._state(gen).band == gov.RED
     assert failed == []
-    _starve(rig, gen, 2.1)
+    _waiting(rig, gen, 1.25, compressed=compressed, saved=0.0)
     assert evicted[-1] == 1.0
     assert failed and "free pages" in failed[0][1]["error"]
 
+
+def test_threads_waiting_past_the_kernel_s_reclaim_shed(rig, monkeypatch):
+    # The compressor saves memory, but threads still wait past 5 s: the
+    # kernel is not keeping up, and the governor sheds.
+    evicted = []
+    gov.register_cache("apc", lambda: 40e9,
+                       lambda f: (evicted.append(f), f * 40e9)[1])
+    gen = FakeGen(rows=2, rate=1e6, live=8e9)
+    failed = _starved_rows(monkeypatch, gen)
+    _waiting(rig, gen, 4.5, compressed=1.0)
+    assert evicted == [] and failed == []
+    _waiting(rig, gen, 3.0, compressed=1.0)
+    assert failed and "free pages" in failed[0][1]["error"]
+
+
+def test_waiters_at_two_ticks_far_apart_are_read_again(rig, monkeypatch):
+    # A long prefill chunk between two ticks, each of which sees threads
+    # waiting for a moment: the tick reads again before it acts, finds
+    # none, and leaves the caches alone.
+    evicted = []
+    gov.register_cache("apc", lambda: 40e9,
+                       lambda f: (evicted.append(f), f * 40e9)[1])
+    gen = FakeGen(rows=2, rate=1e6, live=8e9)
+
+    class _Blip:
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+        def sleep(self, s):
+            rig["waiters"] = 0
+
+    monkeypatch.setattr(gov, "time", _Blip())
+    for _ in range(8):
+        rig["waiters"] = 3
+        gov._governor_tick(gen)
+        rig["now"] += 3.0
+    assert evicted == []
+    assert gov._STATS["kernel_starved_reds"] == 0
 
 
 def test_a_stable_breach_with_starved_threads_sheds(rig, monkeypatch):
@@ -926,9 +980,9 @@ def test_a_stable_breach_with_starved_threads_sheds(rig, monkeypatch):
     tg._state(gen).ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
     rig["kernel"] = 7.5e9
     gov._governor_tick(gen)
-    _starve(rig, gen, 0)
+    _waiting(rig, gen, 0.0)
     assert failed == []
-    _starve(rig, gen, 2.1)
+    _waiting(rig, gen, 2.25)
     assert failed and "collapsing" in failed[0][1]["error"]
 
 

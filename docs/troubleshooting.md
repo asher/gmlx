@@ -246,6 +246,10 @@ drafter:
 gmlx run model.gguf --speculative
 ```
 
+`gmlx serve` logs the same line for a drafter that a `discover` scan turned
+on. Set `speculative: true` in the `discover` block to stream the experts
+and keep the drafter.
+
 ### `a folder scan set stream: experts, and the model now fits`
 
 `gmlx serve` logs this at its start, for each entry that an older folder

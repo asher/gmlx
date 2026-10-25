@@ -1047,9 +1047,11 @@ class _ResidencyPool:
         memory not wired stops rising when it is short
         (``budget.settled_wire_check``). Returns the check, the KV room
         and the bytes it kept beside the room, which the
-        install's chunk guard keeps too (``_latch_guarded_wire``). None for
-        a dense model or an unreadable header. A check that fails logs its
-        line."""
+        install's chunk guard keeps too (``_latch_guarded_wire``). A
+        drafter a folder scan turned on (``speculative_auto``) is left out
+        when the experts fit only without it, as run leaves its auto
+        drafter. None for a dense model or an unreadable header. A check
+        that fails logs its line."""
         from gmlx.device import stream_budget_bytes
         from gmlx.load.discovery import text_tensor_bytes
         from gmlx.stream import budget as bmod
@@ -1071,8 +1073,9 @@ class _ResidencyPool:
         room = bmod.kv_room_bytes(model_path, env=env, resident=True)
         held, _ceiling, host, _floor = self._stream_reservations()
         drafter = _drafter_bytes(model_path, build_spec)
+        auto = bool(getattr(build_spec, "speculative_auto", False))
         check = bmod.settled_wire_check(lambda: bmod.check_wire_with_tables(
-            text - deferred + extra, tables, drafter, auto=False,
+            text - deferred + extra, tables, drafter, auto=auto,
             room_bytes=room.bytes + held + host,
             budget=stream_budget_bytes()))
         if not check.fits:
@@ -1166,6 +1169,12 @@ class _ResidencyPool:
                 judged = self._keep_check(model_path, env, build_spec)
                 keep, kept = ((None, (None, 0)) if judged is None
                               else (judged[0], judged[1:]))
+                if keep is not None and keep.fits and keep.mtp_off:
+                    # As a run does: the experts stay in memory, and the
+                    # load leaves the auto drafter out.
+                    _log.warning("[mtp] %s: %s", model_path, keep.mtp_off_line(
+                        "speculative: true in the discover block"))
+                    env = dict(env or {}, MLX_VLM_GGUF_SPECULATIVE="0")
                 if keep is not None and not keep.fits:
                     for_memory = keep.reason
                 elif keep is not None and keep.table_bytes:
@@ -1714,12 +1723,16 @@ def _latch_guarded_wire(model_path, plain: bool, room=None,
     (``table_stream.guard_resident_wire``): its install wires it in
     chunks under the chunk guard, keeping the ``room`` and ``extra``
     bytes the check before the load kept, and the warm touch leaves it
-    alone. Cleared for any other build of the path. True when latched."""
+    alone. Cleared for any other build of the path, and for a diffusion
+    model, which the bridge hands back with no install. True when
+    latched."""
     if isinstance(model_path, str) and model_path.endswith(".gguf"):
-        from gmlx.serve.capacity import streamed_expert_bytes
+        from gmlx.gen.diffusion import DIFFUSION_ARCHES
+        from gmlx.serve.capacity import _table_shards, streamed_expert_bytes
         from gmlx.stream.table_stream import guard_resident_wire
 
-        on = plain and bool(streamed_expert_bytes(model_path))
+        on = (plain and bool(streamed_expert_bytes(model_path))
+              and _table_shards(model_path)[1] not in DIFFUSION_ARCHES)
         guard_resident_wire(model_path, on, room, extra)
         return on
     return False

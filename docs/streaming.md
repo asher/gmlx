@@ -120,10 +120,11 @@ A MoE model streams its experts in three cases:
   Memory held wired, such as another model's while it generates, does
   not.
 
-A model idle in another process, such as a second `gmlx serve` or
-`llama-server`, holds no wired memory, so a load beside it counts that
-memory as free. When both models generate, they can run the Mac out of
-memory. One `gmlx serve` that serves both models counts each of them.
+A model idle in another process, such as a second `gmlx serve`, holds no
+wired memory, so a load beside it counts that memory as free.
+`llama-server` keeps its model wired for 3 minutes after its last request.
+When both models generate, they can run the Mac out of memory. One
+`gmlx serve` that serves both models counts each of them.
 
 In the last two cases, `run` and `chat` print why:
 
@@ -169,9 +170,9 @@ and the upsampler of `image generate` refuse another model with
 `cannot fit:`. Experts that stay in memory still stream if memory runs
 out while they wire.
 
-When the experts fit in memory but the MTP drafter that `run` and `chat`
-turn on by themselves does not fit beside them, the load keeps the experts
-and decodes without the drafter:
+When the experts fit in memory but the MTP drafter that `run`, `chat` and
+a `discover` scan turn on by themselves does not fit beside them, the load
+keeps the experts and decodes without the drafter:
 
 ```text
 [mtp] auto MTP is off: the experts stay in memory, and the 2.8 GB MTP drafter does not fit beside them. --speculative streams the experts to keep it.

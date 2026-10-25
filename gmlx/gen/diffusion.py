@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import mlx.core as mx
 
+# The GGUF architectures of the diffusion family.
+DIFFUSION_ARCHES = frozenset({"diffusion-gemma"})
+
 
 def is_diffusion_model(model) -> bool:
     """True if ``model`` denoises a canvas (mlx-vlm diffusion family) rather than

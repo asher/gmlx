@@ -126,9 +126,9 @@ def free_page_waiters() -> int:
 
 
 def reclaim_marks() -> tuple | None:
-    """The kernel's live reclaim counts (``kernel_vm.reclaim_marks``): a
-    later reading that differs shows it compressed or swapped memory in
-    between. None when unread."""
+    """The kernel's live reclaim counts (``kernel_vm.reclaim_marks``): two
+    readings give the memory it freed in between (``kernel_vm.reclaimed``).
+    None when unread."""
     try:
         from gmlx.serve.kernel_vm import reclaim_marks as marks
 
@@ -274,17 +274,41 @@ def prefill_rows(model_type: str | None, step: int | None = None) -> int:
     return step
 
 
-def resident_prefill_rows(step: int | None = None) -> int:
+# The prefill step of an arch whose score profile sets one for a model
+# that keeps its experts in memory: qwen4_exp's _Q4_BASE_STEP,
+# deepseek_v4's _V4_BASE_STEP and deepseek_v41's _DS41_BASE_STEP.
+_ARCH_RESIDENT_STEP = {"qwen4_exp": 8192, "deepseek_v4": 4096,
+                       "deepseek_v41": 4096}
+
+
+def resident_prefill_rows(step: int | None = None,
+                          model_type: str | None = None,
+                          experts: int = 0, used: int = 0) -> int:
     """Rows of the widest prefill chunk of a model whose experts stay in
-    memory: the requested ``step`` or ``PREFILL_STEP_SIZE`` when set, else
-    the wide MoE step (``GMLX_MOE_WIDE_STEP``,
-    ``prefill_decay.moe_base_step``), at least the stock 2048. A resident
-    prefill merges no tail."""
+    memory, as ``prefill_decay._run_base`` takes it: the requested
+    ``step`` or ``PREFILL_STEP_SIZE`` when set, else the arch's step (its
+    step env, else ``_ARCH_RESIDENT_STEP``), else the wide MoE step
+    (``GMLX_MOE_WIDE_STEP``) for a MoE of ``experts`` routed experts, ``used``
+    a token, that ``prefill_decay.moe_base_step`` widens, else the stock
+    2048. A resident prefill merges no tail."""
+    from gmlx.gen.prefill_decay import _MOE_WIDE_MAX_ROWS, _STOCK_BASE
+
     if not (isinstance(step, int) and step > 0):
         step = env_int("PREFILL_STEP_SIZE", 0)
-    if step <= 0:
-        step = max(2048, env_int("GMLX_MOE_WIDE_STEP", 4096))
-    return step
+    if step > 0:
+        return step
+    if model_type in _ARCH_RESIDENT_STEP:
+        raw = os.environ.get(_ARCH_STEP_ENV[model_type], "")
+        if not raw:
+            return _ARCH_RESIDENT_STEP[model_type]
+        step = env_int(_ARCH_STEP_ENV[model_type], 0)
+        if step > 0:
+            return step
+    wide = env_int("GMLX_MOE_WIDE_STEP", 4096)
+    if (wide > _STOCK_BASE and experts and used
+            and _STOCK_BASE * used <= _MOE_WIDE_MAX_ROWS * experts):
+        return wide
+    return _STOCK_BASE
 
 
 def _width(c, *names) -> int:
@@ -338,10 +362,14 @@ def prefill_activation_bytes(cfg, step: int | None = None,
     streams = max(1, _width(c, *_STREAMS))
     per_row = 4 * (4 * hidden * streams + heads * head_dim
                    + k * (2 * expert_in + 3 * ff))
-    if resident:
-        return per_row * resident_prefill_rows(step)
     mt = _get(c, "model_type") or _get(cfg, "model_type")
-    return per_row * prefill_rows(mt if isinstance(mt, str) else None, step)
+    mt = mt if isinstance(mt, str) else None
+    if resident:
+        from gmlx.gen.prefill_decay import _EXPERTS
+
+        return per_row * resident_prefill_rows(step, mt, _width(c, *_EXPERTS),
+                                               k)
+    return per_row * prefill_rows(mt, step)
 
 
 def pool_override() -> int | None:
@@ -609,7 +637,8 @@ def _decode_arena_bytes(
     # Second ceiling: the memory not wired right now. The governor
     # ceiling assumes an otherwise idle machine; memory another model
     # holds wired shrinks the offer. Other apps' memory does not: the
-    # kernel compresses or swaps it for the arena. The floor keeps a
+    # kernel compresses or swaps it for the arena, at half
+    # (``_arena_offer``). The floor keeps a
     # breathing margin for the system. This is a live post-pin snapshot:
     # already-wired weights are out of it, so only the still-unwired
     # share of the non-expert set is charged (charging all of it
@@ -618,8 +647,8 @@ def _decode_arena_bytes(
     avail = unwired_ram_bytes()
     if avail is not None:
         unpinned = max(0, non_expert_bytes - pinned_bytes)
-        left = (avail - _ram_floor_bytes(ram or avail) - room
-                - unpinned - int(ring_bytes) - host)
+        left = _arena_offer(avail, _ram_floor_bytes(ram or avail) + room
+                            + unpinned + int(ring_bytes) + host)
         if left < arena:
             from gmlx.load import loadlog
 
@@ -631,6 +660,20 @@ def _decode_arena_bytes(
         arena = min(arena, left)
     cap = int(FORCED_ARENA_SHARE * expert_bytes) if forced else expert_bytes
     return min(max(0, arena), cap)
+
+
+def _arena_offer(avail: int, kept: int) -> int:
+    """The bytes an arena can wire out of ``avail`` bytes not wired, beside
+    ``kept`` bytes it leaves: free and file-backed pages one for one
+    (``_available_ram_bytes``), and other apps' memory at half. The
+    kernel keeps what it compresses in RAM, about half of it on mixed app
+    memory, and nothing guards the arena while it fills, as the chunk
+    guard guards a resident wire."""
+    easy = _available_ram_bytes()
+    if easy is None:
+        return avail - kept
+    easy = min(int(easy), avail)
+    return (avail - kept + max(0, easy - kept)) // 2
 
 
 def _prefill_ring_reason(offsets, left: int | None) -> str | None:
@@ -787,11 +830,12 @@ class WireCheck:
     def mtp_off(self) -> bool:
         return self.dropped_bytes > 0
 
-    def mtp_off_line(self) -> str:
-        """The line of a check that fits with auto MTP off."""
+    def mtp_off_line(self, lever: str = "--speculative") -> str:
+        """The line of a check that fits with auto MTP off; ``lever``
+        keeps the drafter."""
         return (f"auto MTP is off: the experts stay in memory, and the "
                 f"{_gb(self.dropped_bytes)} MTP drafter does not fit beside "
-                "them. --speculative streams the experts to keep it.")
+                f"them. {lever} streams the experts to keep it.")
 
     def line(self, room: KvRoom | None = None,
              depth: int | None = None) -> str:
@@ -933,18 +977,26 @@ def check_wire_with_tables(set_bytes: int, table_bytes: int,
 
 
 def settled_wire_check(judge) -> WireCheck:
-    """``judge()``, made again once unwired memory stops rising when its
-    unwired leg is short. A model torn down a moment before, by an unload
-    in this process or a process that just exited, unwires its pages over
-    a few seconds, and a check that reads them as wired streams a load
-    that fits (``capacity._settle_unwired``)."""
+    """``judge()``, made again once unwired memory stops rising when it
+    is short of the whole set: the experts, the auto drafter and the
+    tables (``check_wire_with_tables``), under the budget. A model torn
+    down a moment before, by an unload in this process or a process that
+    just exited, unwires its pages over a few seconds, and a check that
+    reads them as wired streams the experts, drops the drafter or reads
+    the tables from the file of a load that fits
+    (``capacity._settle_unwired``)."""
     from gmlx.serve.capacity import _settle_unwired
 
     check = judge()
-    if check.reason != "unwired" or check.unwired_bytes is None:
+    whole = check.wire_bytes + check.dropped_bytes + check.table_bytes
+    if (check.unwired_bytes is None
+            or not (check.reason == "unwired" or check.mtp_off
+                    or check.table_bytes)
+            or (check.budget_bytes is not None
+                and whole > check.budget_bytes)):
         return check
     after = _settle_unwired(lambda: unwired_ram_bytes(), check.unwired_bytes,
-                            check.wire_bytes + check.keep_bytes)
+                            whole + check.keep_bytes)
     if after is None or after <= check.unwired_bytes:
         return check
     return judge()
