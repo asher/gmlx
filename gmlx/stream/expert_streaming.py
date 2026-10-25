@@ -207,9 +207,9 @@ def install_unflagged_tables(model, gguf_path: str | None, *,
 # smaller than _WIRE_MIN_RISE does not count, the wait stops once unwired
 # memory has not risen for _WIRE_STALL_S, and the waits of one wire add
 # up to at most _WIRE_WAIT_S.
-_WIRE_STALL_S = 2.0
+_WIRE_STALL_S = 1.0
 _WIRE_MIN_RISE = 256 << 20
-_WIRE_WAIT_S = 60.0
+_WIRE_WAIT_S = 10.0
 
 
 class _ChunkGuard:

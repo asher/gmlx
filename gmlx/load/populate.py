@@ -205,8 +205,8 @@ def wait_for(paths: list[str], log=print) -> None:
 
 def finish_all(log=print) -> None:
     """Block until every in-flight populate has read its whole file. A
-    chunked resident wire runs this first: the readers wait on the kernel
-    for free pages beside it, and the wire reads the same pages anyway.
+    chunked resident wire runs this first: the readers fill the page cache
+    the wire's guard reads, and the wire reads the same pages anyway.
     GMLX_POPULATE_WAIT=0 does not skip it."""
     with _lock:
         pending = list(_streams.values())

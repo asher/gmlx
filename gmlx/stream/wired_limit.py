@@ -7,7 +7,7 @@ import os
 
 import mlx.core as mx
 
-from gmlx.upstream.patching import wrapped_with
+from gmlx.upstream.patching import link, wrapped_with
 
 
 @contextlib.contextmanager
@@ -49,7 +49,7 @@ def wired_limit_held():
         prev, want[0] = want[0], int(limit)
         return prev
 
-    mx.set_wired_limit = _held
+    mx.set_wired_limit = link(_held, real)
     try:
         yield
     finally:

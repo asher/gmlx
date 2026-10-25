@@ -178,9 +178,10 @@ sends its own temperature.
 
 `--speculative` turns on speculative decoding for a positional model, with
 the model's own MTP head or `--draft-gguf`. A config `discover` scan turns
-it on by itself. `--draft-gguf`, `--native-mtp`, `--draft-block-size` and
-`--no-stochastic-mtp` work as under [run](#speculative-decoding-flags), and
-the first two imply `--speculative`. Under serve, `--draft-block-size` and
+it on by itself. `--draft-gguf`, `--native-mtp`, `--draft-block-size`, `--stochastic-mtp`
+and `--no-stochastic-mtp` work as under
+[run](#speculative-decoding-flags), and the first two imply
+`--speculative`. Under serve, `--draft-block-size`, `--stochastic-mtp` and
 `--no-stochastic-mtp` apply to every model the server loads.
 
 `--stream-experts`, `--stream-cpu`, `--stream-fast-disk`,

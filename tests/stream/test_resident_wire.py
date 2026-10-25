@@ -230,6 +230,8 @@ def test_the_unwired_read_matches_this_mac_s_mach_counters():
             break
         time.sleep(0.3)
     assert gap <= 3 * GiB
+    # The /v1/metrics reading beside it reads on this mac too.
+    assert kernel_vm.free_page_waiters() is not None
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="the sysctl counts")
