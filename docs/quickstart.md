@@ -13,8 +13,7 @@ and the folders that hold them. Run it with no flags for a wizard that scans
 the folders where you already keep models. `gmlx pull` downloads Qwen3.8-27B
 at the quality tier that suits this Mac, with image input and faster
 replies, a 23 GB download on a 64 GB Mac. It registers the model under the
-name `qwen3.8-27b`, which every command accepts in place of a path. On a
-smaller Mac, [Choosing a model](#choosing-a-model) names a better fit.
+name `qwen3.8-27b`, which every command accepts in place of a path.
 
 - [Running a model](#running-a-model)
 - [Serving models](#serving-models)
@@ -97,10 +96,9 @@ the [HTTP API](api.md) describes.
 
 ## Choosing a model
 
-`gmlx pull` with no name opens a picker of the models that fit this Mac,
-with the recommended ones first. Each shows its size, whether it reads
-images, and how much context it leaves room for. Pick one, or pull it by
-name and chat with it:
+`gmlx pull` with no name opens a picker of recommended models that fit
+this Mac. Each shows its size, whether it reads images, and how much
+context it leaves room for. Pick one, or pull it by name and chat with it:
 
 ```sh
 gmlx pull
