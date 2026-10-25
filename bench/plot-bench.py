@@ -427,7 +427,8 @@ def draw_marker(svg, cx, cy, r, shape, color, stroke, sw=2):
 
 # ------------------------------------------------------- chart grammar
 
-REF_NAME = {"llama": "llama.cpp", "ds4": "ds4-server", "omlx": "oMLX"}
+REF_NAME = {"llama": "llama.cpp", "ds4": "ds4-server", "omlx": "oMLX",
+            "mtplx": "MTPLX"}
 
 
 def _is_dark(t):
@@ -563,7 +564,7 @@ def chart_panels(args):
         die("panels expects exactly one model, got %s (pick with --model)"
             % (models or "no cells"))
     model = models[0]
-    ref_rt = next((r for r in ("ds4", "omlx")
+    ref_rt = next((r for r in ("ds4", "omlx", "mtplx")
                    if any(c["runtime"] == r for c in cells)), "llama")
     t = THEMES[args.theme]
     # arm owns style GLOBALLY: solid = baseline, dashed = speculative, on
@@ -571,6 +572,13 @@ def chart_panels(args):
     # when the reference has no speculative arm.
     spec_rt = {rt: any(c["runtime"] == rt and c["arm"] != "baseline"
                        for c in cells) for rt in ("gmlx", ref_rt)}
+    # a second speculative arm on one engine (two drafters) gets its own
+    # marker shape and its arm in the legend
+    spec_arms = {rt: sorted({c["arm"] for c in cells if c["runtime"] == rt
+                             and c["arm"] != "baseline"}, reverse=True)
+                 for rt in ("gmlx", ref_rt)}
+    arm_labels = dict(args.arm_labels)
+    has_base = any(c["arm"] == "baseline" for c in cells)
 
     def build(metric, arms=None):
         by = {}                            # (rt,arm) -> {depth:(v,cv)}
@@ -586,10 +594,13 @@ def chart_panels(args):
             out.append({"rt": rt, "arm": arm, "pts": pts,
                         "color": gmlx_accent(t) if rt == "gmlx"
                         else ref_gray(t), "_gmlx": rt == "gmlx",
-                        "dash": arm != "baseline"})
+                        "dash": arm != "baseline",
+                        "shape": ("triangle" if arm in spec_arms[rt][1:2]
+                                  else "circle")})
         return out
 
-    pre = build("prefill_tps", arms={"baseline"})   # prefill: base-vs-base
+    # prefill: base-vs-base, or every arm when no engine ran a baseline
+    pre = build("prefill_tps", arms={"baseline"} if has_base else None)
     dec = build("decode_tps")                        # decode: base + speculative
     depths = sorted({d for s in pre + dec for d in s["pts"]})
     if not depths:
@@ -604,14 +615,18 @@ def chart_panels(args):
             continue
         seen.add(key)
         eng = "gmlx" if s["rt"] == "gmlx" else REF_NAME.get(ref_rt, ref_rt)
-        if not spec_rt[s["rt"]]:
+        if "%s:%s" % key in arm_labels:
+            lbl = arm_labels["%s:%s" % key]
+        elif not spec_rt[s["rt"]]:
             lbl = eng
         elif s["arm"] == "baseline":
             lbl = "%s baseline" % eng
+        elif len(spec_arms[s["rt"]]) > 1:
+            lbl = "%s speculative (%s)" % (eng, s["arm"].upper())
         else:
             lbl = "%s speculative (MTP)" % eng
         items.append((lbl, s["color"], "dash" if s["dash"] else "line",
-                      "circle"))
+                      s["shape"]))
     fig = Fig(args, "%s: prefill & decode vs KV depth"
               % relabel(model, args.labels))
     pleft, top, pright, pbottom = fig.layout(items, left=fig.fs * 3.6)
@@ -619,8 +634,9 @@ def chart_panels(args):
     r_top, r_bot, xlab_y = _panel_split(fig, top, pbottom, pleft, pright)
     # "(baseline)" on the prefill axis: prefill is base-vs-base only; the
     # qualifier says the panel has no speculative arm to look for.
-    _lines_panel(fig, r_top, pre, "prefill tok/s (baseline)", depths, fx,
-                 draw_x=False, label_best_gmlx=True)
+    _lines_panel(fig, r_top, pre,
+                 "prefill tok/s (baseline)" if has_base else "prefill tok/s",
+                 depths, fx, draw_x=False, label_best_gmlx=True)
     _lines_panel(fig, r_bot, dec, "decode tok/s", depths, fx, draw_x=True,
                  label_best_gmlx=True)
     fig.svg.text((pleft + pright) / 2, xlab_y, "KV depth (tokens, log scale)",
@@ -909,6 +925,10 @@ def main():
                        help="per-model: prefill panel over decode panel, "
                             "shared log-x (engine=color, arm=style)")
     add_common(p)
+    p.add_argument("--arm-label", dest="arm_labels", action="append",
+                   default=[], type=lbl_pair, metavar="RUNTIME:ARM=TEXT",
+                   help="legend text for one arm, e.g. "
+                        "'gmlx:mtp@7=gmlx DFlash 2 drafter' (repeatable)")
     p.add_argument("--model", help="model name filter (required when the "
                                    "JSON holds several models)")
     p.set_defaults(fn=chart_panels)
