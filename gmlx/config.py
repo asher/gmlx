@@ -2300,6 +2300,21 @@ def _normalize_optional_bool(value, key: str, where: str = "model"):
     return None
 
 
+def _normalize_speculative(value, where: str = "model") -> dict:
+    """A model's ``speculative`` value as its ModelCfg fields: true, false
+    or auto, which is on with a drafter a load may drop. Absent is off."""
+    if value is None or isinstance(value, bool):
+        return {"speculative": bool(value), "speculative_auto": False}
+    s = str(value).strip().lower()
+    if s == "auto":
+        return {"speculative": True, "speculative_auto": True}
+    if s in ("true", "yes", "on", "1", "false", "no", "off", "0"):
+        return {"speculative": s in ("true", "yes", "on", "1"),
+                "speculative_auto": False}
+    raise ConfigError(
+        f"{where}.speculative: expected true, false or auto, got {value!r}")
+
+
 def _normalize_speculative_width_cap(value, where: str = "model"):
     """Validate a ``speculative_width_cap``: None (family default), 0
     (uncapped), or a positive batch width. Bad values raise rather than
@@ -2677,8 +2692,7 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
             raw.get("decode_feeder"), "decode_feeder", f"model {model_id!r}"),
         stream_fast_disk=_normalize_fast_disk(
             raw.get("stream_fast_disk"), f"model {model_id!r}"),
-        speculative=bool(raw.get("speculative", False)),
-        speculative_auto=raw.get("speculative") == "auto",
+        **_normalize_speculative(raw.get("speculative"), f"model {model_id!r}"),
         speculative_width_cap=_normalize_speculative_width_cap(
             raw.get("speculative_width_cap"), f"model {model_id!r}"),
         context_copy=bool(_normalize_optional_bool(

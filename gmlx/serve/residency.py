@@ -1046,12 +1046,11 @@ class _ResidencyPool:
         models keep, with the table-only step first, and again once the
         memory not wired stops rising when it is short
         (``budget.settled_wire_check``). Returns the check, the KV room
-        and the bytes it kept beside the room, which the
-        install's chunk guard keeps too (``_latch_guarded_wire``). A
-        drafter a folder scan turned on (``speculative_auto``) is left out
-        when the experts fit only without it, as run leaves its auto
-        drafter. None for a dense model or an unreadable header. A check
-        that fails logs its line."""
+        and the bytes it kept beside the room, which the install's chunk
+        guard keeps too (``_latch_guarded_wire``). An auto drafter
+        (``speculative_auto``) loads only when the experts fit in memory
+        beside it, as run's auto drafter does. None for a dense model or
+        an unreadable header. A check that fails logs its line."""
         from gmlx.device import stream_budget_bytes
         from gmlx.load.discovery import text_tensor_bytes
         from gmlx.stream import budget as bmod

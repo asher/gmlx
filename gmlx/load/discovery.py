@@ -1738,10 +1738,12 @@ def model_to_entry(mc: ModelCfg, model_dirs) -> dict:
         entry["mmproj"] = _rel(mc.mmproj, model_dirs)
     if mc.draft_gguf:
         entry["draft_gguf"] = _rel(mc.draft_gguf, model_dirs)
-    # A `draft_gguf` turns speculative decoding on at config load, thus a
-    # second `speculative` key adds nothing.
-    if mc.speculative and not mc.draft_gguf:
-        entry["speculative"] = "auto" if mc.speculative_auto else True
+    # A `draft_gguf` turns speculative decoding on at config load, so only
+    # `auto` adds to it.
+    if mc.speculative_auto:
+        entry["speculative"] = "auto"
+    elif mc.speculative and not mc.draft_gguf:
+        entry["speculative"] = True
     if mc.stream:
         entry["stream"] = mc.stream
     return entry
@@ -1891,9 +1893,10 @@ def _scaffold_models_block(models, dirs) -> list[str]:
         if mc.draft_gguf:
             # The drafter key turns speculative decoding on at load.
             lines.append(f"    draft_gguf: {_rel(mc.draft_gguf, dirs)}")
-        elif mc.speculative:
-            lines.append("    speculative: "
-                         + ("auto" if mc.speculative_auto else "true"))
+        if mc.speculative_auto:
+            lines.append("    speculative: auto")
+        elif mc.speculative and not mc.draft_gguf:
+            lines.append("    speculative: true")
         if mc.stream:
             lines.append(f"    stream: {mc.stream}  # {STREAM_MARK_NOTE}")
     lines.append("")

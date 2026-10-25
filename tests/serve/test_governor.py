@@ -944,29 +944,43 @@ def test_threads_waiting_past_the_kernel_s_reclaim_shed(rig, monkeypatch):
     assert failed and "free pages" in failed[0][1]["error"]
 
 
-def test_waiters_at_two_ticks_far_apart_are_read_again(rig, monkeypatch):
+@pytest.mark.parametrize("start", ["calm", "under the floor", "after a stall"])
+def test_waiters_at_two_ticks_far_apart_are_read_again(rig, monkeypatch,
+                                                       start):
     # A long prefill chunk between two ticks, each of which sees threads
-    # waiting for a moment: the tick reads again before it acts, finds
-    # none, and leaves the caches alone.
+    # waiting for a moment: the tick reads again before it acts and finds
+    # none. Nothing sheds, under the floor as above it, nor after a real
+    # stall took its reclaim.
     evicted = []
     gov.register_cache("apc", lambda: 40e9,
                        lambda f: (evicted.append(f), f * 40e9)[1])
     gen = FakeGen(rows=2, rate=1e6, live=8e9)
+    failed = _starved_rows(monkeypatch, gen)
+    blip = []
 
     class _Blip:
         def __getattr__(self, name):
             return getattr(time, name)
 
         def sleep(self, s):
-            rig["waiters"] = 0
+            if blip:
+                rig["waiters"] = 0
 
     monkeypatch.setattr(gov, "time", _Blip())
+    if start == "under the floor":
+        rig["kernel"] = 7.5e9
+    elif start == "after a stall":
+        _waiting(rig, gen, 0.75)
+        assert evicted
+    blip.append(True)
     for _ in range(8):
         rig["waiters"] = 3
         gov._governor_tick(gen)
         rig["now"] += 3.0
-    assert evicted == []
-    assert gov._STATS["kernel_starved_reds"] == 0
+    assert failed == [] and 1.0 not in evicted
+    if start == "calm":
+        assert evicted == []
+        assert gov._STATS["kernel_starved_reds"] == 0
 
 
 def test_a_server_gone_idle_ends_the_stall(rig, monkeypatch):
@@ -986,11 +1000,10 @@ def test_a_server_gone_idle_ends_the_stall(rig, monkeypatch):
     assert failed == []
 
 
-def test_a_tick_reads_a_stall_again_once_and_never_under_the_floor(
-        rig, monkeypatch):
-    # Reading a stall again holds the generation worker. A stall that held
-    # once is not read again at each tick, and under the floor the floor
-    # leg judges a collapse on its own.
+def test_ticks_close_together_read_no_stall_again(rig, monkeypatch):
+    # Reading a stall again holds the generation worker. Ticks a quarter
+    # second apart watch the wait themselves, and under the floor a stall
+    # far apart is read again only once it reaches a collapse.
     slept = []
 
     class _Clock:
@@ -1004,13 +1017,26 @@ def test_a_tick_reads_a_stall_again_once_and_never_under_the_floor(
     gen = FakeGen(rows=2, rate=1e6, live=8e9)
     _starved_rows(monkeypatch, gen)
     _waiting(rig, gen, 1.5)
-    assert len(slept) == gov._STARVE_CONFIRM
+    assert slept == []
     rig["waiters"] = 0
     gov._governor_tick(gen)
-    slept.clear()
     rig["kernel"] = 7.5e9
-    _waiting(rig, gen, 1.0)
+    _waiting(rig, gen, 3.0, every=1.0)
     assert slept == []
+    gov._governor_tick(gen)
+    assert len(slept) == gov._STARVE_CONFIRM
+
+
+def test_a_row_buffered_for_the_spec_batch_keeps_the_stall(rig):
+    # The last row finishes as a new one waits in the spec batch's buffer:
+    # work remains, and the stall clock runs on.
+    gov.register_cache("apc", lambda: 40e9, lambda f: f * 40e9)
+    gen = FakeGen(rows=2, rate=1e6, live=8e9)
+    _waiting(rig, gen, 1.5)
+    batch = gen._generation_batch
+    batch.uids, batch._pending_injections = [], [object()]
+    gov._harvest_tick(gen, gov._state(gen), (None, []))
+    assert gov._state(gen).starve.stalled == 1.5
 
 
 def test_a_stable_breach_with_starved_threads_sheds(rig, monkeypatch):

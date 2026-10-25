@@ -2176,8 +2176,10 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
         # opt-out. `speculative: auto` and a discover scan's MTP model stay on the
         # auto path, as a bare file path does, which drops a drafter that does not
         # fit beside the experts.
-        args.speculative = (None if getattr(rm, "speculative_auto", False)
-                            else bool(rm.speculative))
+        auto = getattr(rm, "speculative_auto", False)
+        args.speculative = None if auto else bool(rm.speculative)
+        # The entry's drafter file is an auto drafter too.
+        args.draft_gguf_auto = auto and "draft_gguf" not in explicit
         if args.speculative:
             applied.append("speculative")
     if (rm.stream and "stream_cpu" not in explicit
@@ -2525,9 +2527,11 @@ def _drafter_bytes(args, path: str) -> int:
 
 def _mtp_auto(args) -> bool:
     """Whether a drafter that loads (``_mtp_loads``) comes from the auto
-    path: no --speculative, --draft-gguf or --native-mtp asked for it."""
+    path: no --speculative, --draft-gguf or --native-mtp asked for it. A
+    config entry's draft_gguf with ``speculative: auto`` is auto too."""
     return (getattr(args, "speculative", None) is None
-            and not getattr(args, "draft_gguf", None)
+            and (not getattr(args, "draft_gguf", None)
+                 or getattr(args, "draft_gguf_auto", False))
             and not getattr(args, "native_mtp", False))
 
 
@@ -2632,6 +2636,7 @@ def preload_wire_check(args, *, depth: int | None,
         # streamed one, which takes no auto drafter.
         room, depth = alone, depth_without_mtp
         bmod.set_wire_room_depth(depth)
+        args.draft_gguf = None
     if check.table_bytes:
         stream_tables_for_memory(path)
     if check.fits:

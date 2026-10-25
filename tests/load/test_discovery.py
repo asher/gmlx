@@ -1112,17 +1112,23 @@ def test_scaffold_round_trips_through_build_config():
     assert cfg.models["qwen3.6-27b"].path == "qwen3.6-27b/m-Q4_K_S.gguf"
 
 
-def test_scaffold_writes_a_paired_drafter():
+@pytest.mark.parametrize("auto", [False, True])
+def test_scaffold_writes_a_paired_drafter(auto):
+    # A drafter that a scan paired with no key asking for it (auto) is one
+    # a load may leave out, and the entry it writes keeps it so.
     import yaml
     models = [ModelCfg(id="muse-glimmer-30b-q4",
                        path="/models/muse/m-Q4_K_M.gguf",
                        draft_gguf="/models/muse/dflash-m-Q4_K_M.gguf",
-                       speculative=True)]
+                       speculative=True, speculative_auto=auto)]
     text = disc.scaffold_yaml(models, model_dirs=["/models"])
     cfg = build_config(yaml.safe_load(text))
     mc = cfg.models["muse-glimmer-30b-q4"]
     assert mc.draft_gguf == "muse/dflash-m-Q4_K_M.gguf"
-    assert mc.speculative is False        # the drafter key turns it on at load
+    # The drafter key turns it on at load.
+    assert mc.speculative is mc.speculative_auto is auto
+    entry = disc.model_to_entry(models[0], ["/models"])
+    assert entry.get("speculative") == ("auto" if auto else None)
     # no live `speculative` key: the drafter key alone turns it on
     assert not [ln for ln in text.splitlines() if ln.strip() == "speculative: true"]
 

@@ -794,6 +794,21 @@ def test_speculative_auto_turns_it_on_with_a_drafter_a_load_may_drop():
     assert a.load_signature() != t.load_signature()
 
 
+@pytest.mark.parametrize("value,want", [("Auto", (True, True)),
+                                        ("false", (False, False)),
+                                        ("maybe", None)])
+def test_a_quoted_speculative_word_reads_as_the_word(value, want):
+    # YAML hands a quoted value over as a string: "false" is off, case does
+    # not matter, and a word the key does not take is an error.
+    raw = {"models": {"a": {"path": "/a.gguf", "speculative": value}}}
+    if want is None:
+        with pytest.raises(cfgmod.ConfigError, match="speculative"):
+            cfgmod.build_config(raw)
+        return
+    a = cfgmod.resolve_model("a", cfgmod.build_config(raw))
+    assert (a.speculative, a.speculative_auto) == want
+
+
 def test_context_copy_key_parses_and_reaches_the_load_env():
     def resolved(value):
         raw = {"path": "/p.gguf", "speculative": True}

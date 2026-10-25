@@ -242,7 +242,8 @@ class StarveWatch:
     while the kernel frees memory are the kernel at work, for up to
     ``_STARVE_CAP_S`` of waiting. Each reading counts for at most
     ``_STARVE_STEP_S`` since the one before. ``waiters`` holds the last
-    count. 0 while no thread waits or the waiter count cannot be read;
+    count, and ``gap`` the seconds since the reading before it. 0 while
+    no thread waits or the waiter count cannot be read;
     reclaim counts that cannot be read count as no reclaim.
     ``clock``, ``waiting`` and ``marks`` replace the time, waiter and
     reclaim reads."""
@@ -255,7 +256,7 @@ class StarveWatch:
 
     def reset(self) -> None:
         self.last = self.marks = self.low = None
-        self.waited = self.stalled = 0.0
+        self.waited = self.stalled = self.gap = 0.0
         self.waiters = 0
 
     def __call__(self) -> float:
@@ -266,7 +267,8 @@ class StarveWatch:
         now = self.clock()
         marks = self.read_marks()
         if self.last is not None:
-            dt = min(now - self.last, _STARVE_STEP_S)
+            self.gap = now - self.last
+            dt = min(self.gap, _STARVE_STEP_S)
             self.waited += dt
             working = (waiters < self.low
                        or reclaimed(self.marks, marks, now - self.last))

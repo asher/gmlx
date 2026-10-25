@@ -585,6 +585,22 @@ def test_experts_that_do_not_fit_without_the_auto_head_stream(glm_head,
                           "takes 75.2 GB, against 74.1 GB of memory not wired")
 
 
+@pytest.mark.parametrize("unwired,streams", [(75, False), (69, True)])
+def test_a_config_drafter_file_marked_auto_goes_as_a_head_does(
+        header, tmp_path, unwired, streams):
+    # An entry's draft_gguf under `speculative: auto` loads only when the
+    # experts fit in memory beside it.
+    path = header(70 * GiB, experts=60 * GiB, budget_bytes=200 * GiB, room=0)
+    drafter = tmp_path / "dflash-m.gguf"
+    with open(drafter, "wb") as f:
+        f.truncate(int(2.79e9))
+    _box(host_box.mac(128)[0], unwired=unwired * GiB)
+    args = _args(path, draft_gguf=str(drafter), draft_gguf_auto=True)
+    cli.preload_wire_check(args, depth=None)
+    assert args.stream_experts is streams and args.draft_gguf is None
+    assert cli.resolve_speculative(args, path) == (False, "")
+
+
 def test_a_vlm_that_streams_counts_the_head_it_keeps(glm_head, tmp_path,
                                                      capsys):
     # A text-only VLM run keeps its MTP drafter when its experts stream.

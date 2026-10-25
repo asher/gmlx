@@ -166,6 +166,28 @@ def test_run_speculative_config_applies(tmp_path, value, want):
     assert rc is None and args.gguf == gguf and args.speculative is want
 
 
+@pytest.mark.parametrize("flag", [False, True])
+def test_a_config_drafter_file_marked_auto_stays_on_the_auto_path(tmp_path,
+                                                                  flag):
+    # The entry's drafter file under `speculative: auto` is one the run may
+    # leave out, as it leaves out a head. --draft-gguf asks for it.
+    gguf = tmp_path / "m-Q6_K.gguf"
+    gguf.write_bytes(b"GGUF")
+    (tmp_path / "dflash-m-Q6_K.gguf").write_bytes(b"GGUF")
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(
+        f"server:\n  model_dirs: [{tmp_path}]\n"
+        "models:\n"
+        "  m: {path: m-Q6_K.gguf, draft_gguf: dflash-m-Q6_K.gguf, "
+        "speculative: auto}\n")
+    argv = ["m", "--config", str(cfg)]
+    if flag:
+        argv += ["--draft-gguf", str(tmp_path / "dflash-m-Q6_K.gguf")]
+    rc, args = _resolve(argv)
+    assert rc is None and args.draft_gguf
+    assert cli._mtp_auto(args) is not flag
+
+
 def test_run_chat_share_speculative_surface():
     # Both parsers compose the same speculative group, so they can't drift again.
     need = {"speculative", "no_speculative", "draft_gguf", "draft_block_size"}
