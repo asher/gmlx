@@ -92,7 +92,7 @@ OMLX_PORT = 8083
 MTPLX_PORT = 8084
 RUNTIMES = ("gmlx", "llama")   # default pair; --vs ds4/omlx/mtplx swaps the comparison arm
 # Env switch the forced-length patch adds to mtplx (patches/mtplx-ignore-eos.patch).
-MTPLX_IGNORE_EOS = "MTPLX_LAB_IGNORE_EOS"
+MTPLX_IGNORE_EOS = "MTPLX_IGNORE_EOS"
 
 # Embedded fallback corpus (generic prose). Point --corpus at a real text file
 # (e.g. a fineweb-edu sample) for representative MTP acceptance; this fallback
@@ -326,10 +326,11 @@ def count_prompt_tokens(tok, prompt):
 
 def _build_tokenizer(spec):
     """Tokenizer used to size prompts to a token depth and to re-count output
-    tokens (never the server's self-reported usage). tokenizer="gguf" (or a
-    .gguf path) synthesizes the exact tokenizer gmlx serves from the GGUF
-    metadata -- no gated HF download, identical to what the runtime tokenizes
-    with. Otherwise tokenizer is an HF id or local dir loaded via AutoTokenizer."""
+    tokens (a forced-length reply takes the server's count, see score_sample).
+    tokenizer="gguf" (or a .gguf path) synthesizes the exact tokenizer gmlx
+    serves from the GGUF metadata -- no gated HF download, identical to what
+    the runtime tokenizes with. Otherwise tokenizer is an HF id or local dir
+    loaded via AutoTokenizer."""
     t = spec.tokenizer
     if t and t.lower() != "gguf" and not t.endswith(".gguf"):
         from transformers import AutoTokenizer
@@ -839,7 +840,7 @@ def llama_cmd(args, spec, draft_n, ctx):
 def _script_python(script):
     """The python a console script runs under, read from its shebang."""
     try:
-        with open(os.path.realpath(script), "rb") as fh:
+        with open(os.path.realpath(shutil.which(script) or script), "rb") as fh:
             line = fh.readline().decode().strip()
     except (TypeError, OSError, UnicodeDecodeError):
         return "python3"
@@ -939,7 +940,7 @@ def mtplx_install(mtplx_bin):
     without importing it; (None, None) if its python cannot find mtplx."""
     try:
         out = subprocess.run(
-            [_script_python(mtplx_bin), "-c",
+            [_script_python(mtplx_bin), "-P", "-c",
              "import importlib.metadata as m, importlib.util as u; "
              "print(m.version('mtplx')); "
              "print(list(u.find_spec('mtplx').submodule_search_locations)[0])"],
@@ -1163,8 +1164,11 @@ def _assert_model_match(runtime, model_id, spec):
     ok = bool(mids & tgts) or any(
         len(m) >= 8 and any(t.startswith(m) or m.startswith(t) for t in tgts)
         for m in mids)
-    # ds4-server reports a fixed alias id regardless of the loaded GGUF filename.
+    # ds4-server reports a fixed alias id regardless of the loaded GGUF filename,
+    # mtplx an "mtplx-" alias of its own regardless of the pack folder.
     if runtime == "ds4" and _n(mid).startswith("deepseek-v4"):
+        ok = True
+    if runtime == "mtplx" and _n(mid).startswith("mtplx-"):
         ok = True
     if not ok:
         # spawn() already asserted the port was free before we launched, so this

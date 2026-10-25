@@ -3620,10 +3620,12 @@
           }
         }
       ],
+      "gguf_note": "Q6_K output tensor requantized to Q4_0",
       "mtplx_weights": {
         "source": "https://huggingface.co/Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed",
         "note": "MLX 4-bit affine weights in groups of 64 and a 4-bit MTP head"
       },
+      "mtplx_measured": "2026-10-14",
       "arms": {
         "gmlx_mtp": {
           "runtime": "gmlx",

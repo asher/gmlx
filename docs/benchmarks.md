@@ -439,8 +439,8 @@ This comparison has its own settings in place of those under
   Each was the fastest length tried at 4.3K tokens.
 - gmlx prefill is from its native-head arm.
 - MTPLX was measured on 2026-10-14 and gmlx on 2026-10-25. MTPLX
-  repeated its 17K cell on 2026-10-25 with the same tokens and
-  acceptance, about 3% slower.
+  repeated four of its 17K requests on 2026-10-25 with the same tokens
+  and acceptance, about 3% slower.
 
 ### Qwen3.8-27B 4-bit
 
