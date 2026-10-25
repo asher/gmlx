@@ -722,7 +722,7 @@ def _make_fused_kquant(base_cls, caps):
                 _FUSED_MOE_ENABLED
                 and (indices.size < 64
                      or getattr(self, "_kq_arena_rows", False))
-                and x.dtype in (mx.bfloat16, mx.float16)
+                and x.dtype in (mx.bfloat16, mx.float16, mx.float32)
                 and not self.training
                 and _kq_fused_device_ok(self)
             )
@@ -848,6 +848,8 @@ def _make_fused_kquant(base_cls, caps):
         def __call__(self, x, indices, scores=None):
             rows = getattr(self, "_kq_arena_rows", False)
             if self._fused_ok(x, indices):
+                if x.dtype == mx.float32:  # the hc models' residual dtype
+                    x = x.astype(_FUSED_MOE_F32_ACT)
                 k = indices.shape[-1]
                 idx = indices.reshape(indices.size // k, k)
                 if rows:
@@ -2450,6 +2452,8 @@ def _make_lora_switch_glu(base_cls, caps=None):
             extra = getattr(self.down_proj, "_kq_lora_extra", None) or ()
             fused = hasattr(self, "_fused_ok") and self._fused_ok(x, indices)
             if fused:
+                if x.dtype == mx.float32:
+                    x = x.astype(_FUSED_MOE_F32_ACT)
                 idx = indices.reshape(indices.size // k, k)
                 t = idx.shape[0]
                 h = self._fused_h(x, idx, scores)              # (t, k, I)

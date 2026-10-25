@@ -67,7 +67,9 @@ def test_fused_ok_predicate(monkeypatch):
     x = mx.zeros((1, 1, 256), mx.bfloat16)
     assert glu._fused_ok(x, mx.zeros((1, 1, 2), mx.uint32))
     assert not glu._fused_ok(x, mx.zeros((1, 32, 2), mx.uint32))     # >= 64
-    assert not glu._fused_ok(x.astype(mx.float32), mx.zeros((1, 1, 2), mx.uint32))
+    # float32 (the hyper-connection residual) is cast to bf16 inside
+    assert glu._fused_ok(x.astype(mx.float32), mx.zeros((1, 1, 2), mx.uint32))
+    assert not glu._fused_ok(x.astype(mx.int32), mx.zeros((1, 1, 2), mx.uint32))
     glu.train()
     assert not glu._fused_ok(x, mx.zeros((1, 1, 2), mx.uint32))
     glu.eval()

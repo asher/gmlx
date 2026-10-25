@@ -149,14 +149,16 @@ def test_router_skinny_env_off_keeps_the_matmul(calls, skinny_calls, monkeypatch
 
 
 @pytest.mark.parametrize("t", [1, 4])
-def test_float32_input_takes_the_fused_block(calls, t):
+def test_float32_input_takes_the_fused_block(calls, t, monkeypatch):
     """A float32 residual (the hyper-connection models) runs the fused
     block on bf16 and returns bf16, within a bf16 rounding of the stock
     float32 forward, with the same experts picked."""
     block, stock = _block()
     x = _x(t).astype(mx.float32)
     got = block(x)
-    want = stock.__call__(block, x)
+    with monkeypatch.context() as m:  # the stock forward, unfused experts
+        m.setattr(modules, "_FUSED_MOE_ENABLED", False)
+        want = stock.__call__(block, x)
     mx.eval(got, want)
     assert len(calls) == 1
     assert got.dtype == mx.bfloat16 and got.shape == x.shape
@@ -165,6 +167,29 @@ def test_float32_input_takes_the_fused_block(calls, t):
     assert np.array_equal(picked, _stock_picks(block, x))
     g = np.array(got.astype(mx.float32))
     w = np.array(want)
+    assert np.abs(g - w).max() <= 2e-2 * np.abs(w).max()
+
+
+@pytest.mark.parametrize("t", [1, 4])
+def test_float32_input_takes_the_fused_experts(t, monkeypatch):
+    """The expert member alone (the path of a block the router-only or
+    stock forward calls) takes float32 input through the fused gathers
+    on bf16, within a bf16 rounding of the stock gathers' result (also
+    bf16: the kq gathers round their output to the weights' half)."""
+    block, _ = _block()
+    glu = block.switch_mlp
+    assert type(glu).__name__ == "_FusedKQuantSwitchGLU"
+    x = _x(t).astype(mx.float32)
+    gates = mx.softmax(block.gate(x), axis=-1, precise=True)
+    inds = mx.argpartition(gates, kth=-K, axis=-1)[..., -K:]
+    got = glu(x, inds)
+    with monkeypatch.context() as m:
+        m.setattr(modules, "_FUSED_MOE_ENABLED", False)
+        want = glu(x, inds)
+    mx.eval(got, want)
+    assert got.dtype == mx.bfloat16 and got.shape == want.shape
+    g = np.array(got.astype(mx.float32))
+    w = np.array(want.astype(mx.float32))
     assert np.abs(g - w).max() <= 2e-2 * np.abs(w).max()
 
 
