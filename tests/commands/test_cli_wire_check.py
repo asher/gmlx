@@ -122,21 +122,24 @@ def test_a_run_started_as_the_last_one_exits_keeps_its_experts(
     assert ts.resident_wire_guarded(path)
 
 
-def test_a_run_started_as_the_last_one_exits_keeps_its_auto_drafter(
-        header, monkeypatch):
-    # The same set beside its 4 GB auto drafter, read at 89 GiB not
-    # wired, which holds the set alone, and at 105 GiB once the run
-    # before it has exited.
+@pytest.mark.parametrize("budget_bytes,unwired,mtp_off", [
+    (108.2e9, 89 * GiB, False), (85e9, 85 * GiB, True)])
+def test_a_run_started_as_the_last_one_exits_keeps_what_fits(
+        header, monkeypatch, budget_bytes, unwired, mtp_off):
+    # The same set beside its 4 GB auto drafter, read while the run
+    # before it exits and at 105 GiB once it has. Under the 108.2 GB
+    # budget the drafter fits beside the experts. Under 85 GB only the
+    # experts do, and at 85 GiB not wired they did not yet.
     import gmlx.load.discovery as discovery
     import gmlx.serve.capacity as cap
 
     monkeypatch.setattr(cli, "_has_native_mtp_head", lambda p: True)
     monkeypatch.setattr(cli, "_sibling_drafter", lambda p: None)
     monkeypatch.setattr(discovery, "mtp_block_bytes", lambda p: int(4e9))
-    path = header(82.5e9, experts=77.0e9, budget_bytes=int(108.2e9),
+    path = header(82.5e9, experts=77.0e9, budget_bytes=int(budget_bytes),
                   room=8.1 * GiB)
     box = host_box.mac(128)[0]
-    _box(box, unwired=89 * GiB)
+    _box(box, unwired=unwired)
 
     def settle(sample, free, need):
         _box(box, unwired=105 * GiB)
@@ -146,7 +149,58 @@ def test_a_run_started_as_the_last_one_exits_keeps_its_auto_drafter(
     args = _args(path)
     cli.preload_wire_check(args, depth=4096)
     assert not args.stream_experts
-    assert not getattr(args, "no_speculative", False)
+    assert bool(getattr(args, "no_speculative", False)) is mtp_off
+
+
+@pytest.mark.parametrize("drafter,asked,steps", [
+    (0, None, {2048}), (0, 1024, {1024}), (4e9, None, {4096, 2048})])
+def test_a_run_prices_the_prefill_chunk_it_takes(
+        header, monkeypatch, drafter, asked, steps):
+    # A run prefills a model kept in memory in chunks of the asked step or
+    # 2048 rows, and of 4096 beside an MTP drafter, whatever step serve
+    # takes for the arch.
+    import gmlx.load.discovery as discovery
+
+    if drafter:
+        monkeypatch.setattr(cli, "_has_native_mtp_head", lambda p: True)
+        monkeypatch.setattr(cli, "_sibling_drafter", lambda p: None)
+        monkeypatch.setattr(discovery, "mtp_block_bytes",
+                            lambda p: int(drafter))
+    path = header(82.5e9, experts=77.0e9, budget_bytes=int(108.2e9),
+                  room=8.1 * GiB)
+    seen = set()
+    priced = budget.kv_room_bytes
+
+    def kv_room_bytes(p, step=None, **k):
+        seen.add(step)
+        return priced(p, step=step, **k)
+
+    monkeypatch.setattr(budget, "kv_room_bytes", kv_room_bytes)
+    _box(host_box.mac(128)[0], unwired=120 * GiB)
+    cli.preload_wire_check(_args(path, prefill_step_size=asked), depth=4096)
+    assert seen == steps
+
+
+def test_a_run_whose_tables_must_go_to_the_file_settles_too(
+        header, monkeypatch):
+    # A 100 GB set over its 85 GB budget, which its 20 GB of tables read
+    # from the file bring under, read while the run before it exits.
+    import gmlx.serve.capacity as cap
+
+    path = header(100e9, experts=77.0e9, tables=20e9, budget_bytes=int(85e9),
+                  room=8.1 * GiB)
+    box = host_box.mac(128)[0]
+    _box(box, unwired=85 * GiB)
+
+    def settle(sample, free, need):
+        _box(box, unwired=105 * GiB)
+        return sample()
+
+    monkeypatch.setattr(cap, "_settle_unwired", settle)
+    args = _args(path)
+    cli.preload_wire_check(args, depth=4096)
+    assert not args.stream_experts
+    assert ts.tables_for_memory(path)
 
 
 @pytest.mark.parametrize("drafter", [0, 4e9])

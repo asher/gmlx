@@ -134,14 +134,14 @@ def _resolve_chat(argv):
     return rc, args
 
 
-def _spec_config(tmp_path):
+def _spec_config(tmp_path, value="true"):
     gguf = tmp_path / "m-Q6_K.gguf"
     gguf.write_bytes(b"GGUF")
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text(
         f"server:\n  model_dirs: [{tmp_path}]\n"
         "models:\n"
-        "  m: {path: m-Q6_K.gguf, speculative: true}\n")
+        f"  m: {{path: m-Q6_K.gguf, speculative: {value}}}\n")
     return str(cfg), str(gguf)
 
 
@@ -156,11 +156,14 @@ def test_chat_speculative_config_applies(tmp_path):
     assert args.speculative is True
 
 
-def test_run_speculative_config_applies(tmp_path):
-    # The same config must keep applying on `run` (unchanged behavior, shared surface).
-    cfg, gguf = _spec_config(tmp_path)
+@pytest.mark.parametrize("value,want", [("true", True), ("auto", None)])
+def test_run_speculative_config_applies(tmp_path, value, want):
+    # The same config must keep applying on `run` (unchanged behavior, shared
+    # surface). `speculative: auto` takes run's own auto path, which leaves
+    # out a drafter that does not fit beside the experts.
+    cfg, gguf = _spec_config(tmp_path, value)
     rc, args = _resolve(["m", "--config", cfg])
-    assert rc is None and args.gguf == gguf and args.speculative is True
+    assert rc is None and args.gguf == gguf and args.speculative is want
 
 
 def test_run_chat_share_speculative_surface():

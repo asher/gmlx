@@ -189,11 +189,13 @@ def free_page_waiters() -> int | None:
 # Cumulative live counts that move while the kernel frees memory: the
 # bytes fed to the compressor and the bytes it stored them in (their
 # difference is what compression freed), the compressor segments swapped
-# out, and the file-backed pages paged out.
+# out, and the file-backed, read-ahead and cleaned pages paged out.
 _RECLAIM_COUNTS = ("vm.compressor_input_bytes",
                    "vm.compressor_compressed_bytes",
                    "vm.compressor.swapper.swapouts_total",
-                   "vm.pageout_freed_external")
+                   "vm.pageout_freed_external",
+                   "vm.pageout_freed_speculative",
+                   "vm.pageout_freed_cleaned")
 
 # The rate of freed memory that counts as reclaim at work: compression
 # that saves less, as for quantized weights, which do not compress, is
@@ -215,13 +217,13 @@ def reclaimed(before: tuple | None, after: tuple | None,
               seconds: float) -> bool:
     """Whether the kernel freed memory between two ``reclaim_marks``
     readings ``seconds`` apart: it swapped out, or compression and paged
-    out file pages freed at least ``_MIN_RECLAIM_RATE``."""
+    out pages freed at least ``_MIN_RECLAIM_RATE``."""
     if before is None or after is None:
         return False
     saved = (after[0] - after[1]) - (before[0] - before[1])
     if after[2] > before[2]:
         return True
-    freed = saved + (after[3] - before[3]) * _PAGE
+    freed = saved + (sum(after[3:]) - sum(before[3:])) * _PAGE
     return freed >= _MIN_RECLAIM_RATE * max(seconds, 0.0) and freed > 0
 
 
@@ -240,7 +242,8 @@ class StarveWatch:
     while the kernel frees memory are the kernel at work, for up to
     ``_STARVE_CAP_S`` of waiting. Each reading counts for at most
     ``_STARVE_STEP_S`` since the one before. ``waiters`` holds the last
-    count. 0 while no thread waits or the counts cannot be read.
+    count. 0 while no thread waits or the waiter count cannot be read;
+    reclaim counts that cannot be read count as no reclaim.
     ``clock``, ``waiting`` and ``marks`` replace the time, waiter and
     reclaim reads."""
 

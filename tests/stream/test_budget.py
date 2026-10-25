@@ -134,6 +134,10 @@ def test_the_resident_arch_steps_are_the_archs_own(monkeypatch):
     monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
     monkeypatch.setenv("GMLX_Q4_PREFILL_STEP", "2048")
     assert budget.resident_prefill_rows(None, "qwen4_exp") == 2048
+    # A batch the arch's profile is off for takes the wide MoE step.
+    monkeypatch.setenv("GMLX_MOE_WIDE_STEP", "16384")
+    assert budget.resident_prefill_rows(
+        None, "deepseek_v41", experts=256, used=6) == 16384
 
 
 def test_chunk_activations_cover_the_measured_deepseek41_prefill(

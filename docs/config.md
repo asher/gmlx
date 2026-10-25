@@ -134,7 +134,7 @@ keeps running. `gmlx sync-models` removes such entries.
 | <a id="modelsoverrides"></a>`overrides` | none | Settings that win over every profile, for this model only. Takes every profile key except `extends`. |
 | <a id="modelsfamily"></a>`family` | detected | The [family defaults](family-defaults.md) to start from. Set it only when detection picks the wrong family. |
 | <a id="modelsmmproj"></a>`mmproj` | none | Vision or audio projector GGUF that makes the model [multimodal](vlm.md) |
-| <a id="modelsspeculative"></a>`speculative` | `false` | Speculative decoding with the GGUF's MTP head, or with `draft_gguf`. Greedy output stays token-identical. |
+| <a id="modelsspeculative"></a>`speculative` | `false` | Speculative decoding with the GGUF's MTP head, or with `draft_gguf`. `auto` leaves the drafter out of a load whose experts fit in memory only without it. |
 | <a id="modelsdraft_gguf"></a>`draft_gguf` | none | A separate [drafter](glossary.md#drafter) GGUF. Setting it turns on `speculative`. |
 | <a id="modelsnative_mtp"></a>`native_mtp` | `false` | Draft with the GGUF's own MTP head even when `draft_gguf` is set |
 | <a id="modelsspeculative_width_cap"></a>`speculative_width_cap` | `null` | Speculate on at most this many requests at a time. `null` takes the drafter's default, `0` removes the cap. |
@@ -519,7 +519,7 @@ already has. `gmlx list` shows the names.
 | <a id="discoverdir"></a>`dir` | `null` | The folder to scan. `null` scans every folder in `server.model_dirs`. |
 | <a id="discoverrecursive"></a>`recursive` | `false` | Also scan subfolders |
 | <a id="discoverpair_mmproj"></a>`pair_mmproj` | `true` | Pair each `mmproj*.gguf` with the quants of the model in the same folder that it matches, or with the quant folders below it |
-| <a id="discoverspeculative"></a>`speculative` | `auto` | `auto` and `true` turn on speculative decoding for models with an MTP head, and pair drafters. `false` never does. |
+| <a id="discoverspeculative"></a>`speculative` | `auto` | `auto` and `true` turn on speculative decoding for MTP models and pair drafters, as the model's [`speculative`](#modelsspeculative) does. `false` never does. |
 
 A companion pairs with each quant of its model in the same folder. With
 no model beside it, it pairs with every model in the folders one level

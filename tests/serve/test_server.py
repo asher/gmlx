@@ -128,6 +128,20 @@ def test_single_model_cfg_kv_flags_ride_overrides_load(tmp_path):
     assert "kv_quant_scheme: kvarn" in srv._dump_cfg_yaml(cfg)
 
 
+def test_print_config_keeps_speculative_auto():
+    import yaml
+
+    from gmlx.config import build_config
+
+    cfg = build_config({"models": {
+        "a": {"path": "/a.gguf", "speculative": "auto"},
+        "t": {"path": "/a.gguf", "speculative": True}}})
+    models = yaml.safe_load(srv._dump_cfg_yaml(cfg))["models"]
+    assert models["a"]["speculative"] == "auto"
+    assert models["t"]["speculative"] is True
+    assert build_config({"models": models}).models["a"].speculative_auto
+
+
 def test_single_model_cfg_auto_scheme_reaches_the_window(tmp_path):
     # The window carries auto, so the load picks per model even when the
     # process env names a scheme.
@@ -1222,7 +1236,7 @@ def test_sync_judges_a_discovery_stream_mark_again(monkeypatch, tmp_path, capsys
     assert cfg.models["mine"].stream == "experts"
     assert cfg.models["cpu"].stream == "cpu"      # only an experts mark drops
     text = cfg_path.read_text()
-    assert "    pin: true\n    speculative: true\n\n  # mine: hand-tuned\n  mine:" in text
+    assert "    pin: true\n    speculative: auto\n\n  # mine: hand-tuned\n  mine:" in text
     assert text.count(note) == 1
     # A model the scan adds over the budget carries the mark.
     monkeypatch.setattr(srv.discovery, "scan_dirs", lambda specs, dirs, **kw: [

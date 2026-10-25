@@ -170,9 +170,9 @@ and the upsampler of `image generate` refuse another model with
 `cannot fit:`. Experts that stay in memory still stream if memory runs
 out while they wire.
 
-When the experts fit in memory but the MTP drafter that `run`, `chat` and
-a `discover` scan turn on by themselves does not fit beside them, the load
-keeps the experts and decodes without the drafter:
+When the experts fit in memory but an MTP drafter that no flag and no
+`speculative: true` asked for does not fit beside them, the load keeps the
+experts and decodes without the drafter:
 
 ```text
 [mtp] auto MTP is off: the experts stay in memory, and the 2.8 GB MTP drafter does not fit beside them. --speculative streams the experts to keep it.

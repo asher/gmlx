@@ -273,11 +273,11 @@ class _GovState:
         self.floor_prev = None
         self.floor_warned_at = 0.0
         # free-page starvation: the stall clock, and whether this
-        # stall's first reclaim ran
+        # stall was read again and its first reclaim ran
         from .kernel_vm import StarveWatch
 
         self.starve = StarveWatch()
-        self.starve_reclaimed = False
+        self.starve_confirmed = self.starve_reclaimed = False
         # U5 fault injection: (kind, tick) directives already fired
         self.injected: set = set()
 
@@ -362,23 +362,27 @@ def _kernel_waiters():
 _STARVE_RECLAIM_S = 0.5
 _STARVE_SHED_S = 2.0
 # A stall long enough to act on is read again this many times, this far
-# apart, and acts only if it holds: ticks can come seconds apart, and
-# threads waiting at two of them need not have waited in between.
+# apart, once per stall, and acts only if it holds: ticks can come seconds
+# apart, and threads waiting at two of them need not have waited in
+# between.
 _STARVE_CONFIRM = 4
 _STARVE_CONFIRM_S = 0.1
 
 
-def _starved_for(st) -> float:
-    """Seconds of the current free-page stall, 0 without one."""
+def _starved_for(st, confirm: bool = True) -> float:
+    """Seconds of the current free-page stall, 0 without one. ``confirm``
+    reads a stall long enough to act on again first, unless this stall
+    already held."""
     stalled = st.starve()
-    if stalled >= _STARVE_RECLAIM_S:
+    if confirm and stalled >= _STARVE_RECLAIM_S and not st.starve_confirmed:
         for _ in range(_STARVE_CONFIRM):
             time.sleep(_STARVE_CONFIRM_S)
             stalled = st.starve()
             if stalled < _STARVE_RECLAIM_S:
                 break
+        st.starve_confirmed = stalled >= _STARVE_RECLAIM_S
     if stalled < _STARVE_RECLAIM_S:
-        st.starve_reclaimed = False
+        st.starve_confirmed = st.starve_reclaimed = False
     return stalled
 
 
@@ -821,7 +825,10 @@ def _governor_tick(gen) -> None:
     # on a 128 GB box, governor green throughout).
     floor = _kernel_floor_bytes()
     unw = _kernel_unwired() if floor > 0 else None
-    starved = _starved_for(st) if floor > 0 else 0.0
+    # Under the floor, the floor leg confirms a collapse itself, and the
+    # tick acts on this reading of the memory not wired.
+    starved = (_starved_for(st, confirm=unw is None or unw >= floor)
+               if floor > 0 else 0.0)
     _STATS["kernel_unwired_bytes"] = None if unw is None else int(unw)
     if unw is not None and unw < floor:
         _STATS["kernel_floor_reds"] += 1
@@ -978,7 +985,11 @@ def _governor_tick(gen) -> None:
 
 def _harvest_tick(gen, st: _GovState, out) -> None:
     """Post-tick: fold emitted tokens per row into the tokens/tick EMA
-    the demand model uses."""
+    the demand model uses. A step that leaves nothing to run ends the
+    free-page stall clock: no tick reads it until work comes back."""
+    if (not batch_rows(gen) and getattr(gen, "_prompt_batch", None) is None
+            and not getattr(gen, "_unprocessed_sequences", None)):
+        st.starve.reset()
     try:
         responses = out[1]
     except Exception:

@@ -1169,11 +1169,12 @@ class _ResidencyPool:
                 judged = self._keep_check(model_path, env, build_spec)
                 keep, kept = ((None, (None, 0)) if judged is None
                               else (judged[0], judged[1:]))
-                if keep is not None and keep.fits and keep.mtp_off:
-                    # As a run does: the experts stay in memory, and the
-                    # load leaves the auto drafter out.
-                    _log.warning("[mtp] %s: %s", model_path, keep.mtp_off_line(
-                        "speculative: true in the discover block"))
+                if keep is not None and keep.mtp_off:
+                    # As a run does: the load leaves the auto drafter out,
+                    # beside experts kept in memory or streamed.
+                    if keep.fits:
+                        _log.warning("[mtp] %s: %s", model_path,
+                                     keep.mtp_off_line("speculative: true"))
                     env = dict(env or {}, MLX_VLM_GGUF_SPECULATIVE="0")
                 if keep is not None and not keep.fits:
                     for_memory = keep.reason

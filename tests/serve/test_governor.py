@@ -969,6 +969,50 @@ def test_waiters_at_two_ticks_far_apart_are_read_again(rig, monkeypatch):
     assert gov._STATS["kernel_starved_reds"] == 0
 
 
+def test_a_server_gone_idle_ends_the_stall(rig, monkeypatch):
+    # Threads wait 1.5 s with no reclaim, the last request ends, and the
+    # server idles for five minutes. The next request's ticks see threads
+    # waiting again: the clock starts over, and half a second of it fails
+    # no row.
+    gov.register_cache("apc", lambda: 40e9, lambda f: f * 40e9)
+    gen = FakeGen(rows=2, rate=1e6, live=8e9)
+    failed = _starved_rows(monkeypatch, gen)
+    _waiting(rig, gen, 1.5)
+    uids, gen._generation_batch.uids = gen._generation_batch.uids, []
+    gov._harvest_tick(gen, gov._state(gen), (None, []))
+    gen._generation_batch.uids = uids
+    rig["now"] += 300.0
+    _waiting(rig, gen, 0.5)
+    assert failed == []
+
+
+def test_a_tick_reads_a_stall_again_once_and_never_under_the_floor(
+        rig, monkeypatch):
+    # Reading a stall again holds the generation worker. A stall that held
+    # once is not read again at each tick, and under the floor the floor
+    # leg judges a collapse on its own.
+    slept = []
+
+    class _Clock:
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+        def sleep(self, s):
+            slept.append(s)
+
+    monkeypatch.setattr(gov, "time", _Clock())
+    gen = FakeGen(rows=2, rate=1e6, live=8e9)
+    _starved_rows(monkeypatch, gen)
+    _waiting(rig, gen, 1.5)
+    assert len(slept) == gov._STARVE_CONFIRM
+    rig["waiters"] = 0
+    gov._governor_tick(gen)
+    slept.clear()
+    rig["kernel"] = 7.5e9
+    _waiting(rig, gen, 1.0)
+    assert slept == []
+
+
 def test_a_stable_breach_with_starved_threads_sheds(rig, monkeypatch):
     # A near-RAM model parks the memory not wired just under the floor,
     # which alone holds; threads starved of free pages past two seconds

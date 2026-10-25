@@ -284,31 +284,31 @@ _ARCH_RESIDENT_STEP = {"qwen4_exp": 8192, "deepseek_v4": 4096,
 def resident_prefill_rows(step: int | None = None,
                           model_type: str | None = None,
                           experts: int = 0, used: int = 0) -> int:
-    """Rows of the widest prefill chunk of a model whose experts stay in
-    memory, as ``prefill_decay._run_base`` takes it: the requested
-    ``step`` or ``PREFILL_STEP_SIZE`` when set, else the arch's step (its
-    step env, else ``_ARCH_RESIDENT_STEP``), else the wide MoE step
-    (``GMLX_MOE_WIDE_STEP``) for a MoE of ``experts`` routed experts, ``used``
-    a token, that ``prefill_decay.moe_base_step`` widens, else the stock
-    2048. A resident prefill merges no tail."""
+    """Rows of the widest prefill chunk serve takes for a model whose
+    experts stay in memory, as ``prefill_decay._run_base`` takes it: the
+    requested ``step`` or ``PREFILL_STEP_SIZE`` when set, else the wide
+    MoE step (``GMLX_MOE_WIDE_STEP``) for a MoE of ``experts`` routed
+    experts, ``used`` a token, that ``prefill_decay.moe_base_step``
+    widens, else the stock 2048. An arch with its own step (its step env,
+    else ``_ARCH_RESIDENT_STEP``) takes the wider of that and the rest,
+    since a batch its profile is off for takes the rest. A resident
+    prefill merges no tail."""
     from gmlx.gen.prefill_decay import _MOE_WIDE_MAX_ROWS, _STOCK_BASE
 
     if not (isinstance(step, int) and step > 0):
         step = env_int("PREFILL_STEP_SIZE", 0)
     if step > 0:
         return step
+    wide = env_int("GMLX_MOE_WIDE_STEP", 4096)
+    rest = (wide if wide > _STOCK_BASE and experts and used
+            and _STOCK_BASE * used <= _MOE_WIDE_MAX_ROWS * experts
+            else _STOCK_BASE)
     if model_type in _ARCH_RESIDENT_STEP:
         raw = os.environ.get(_ARCH_STEP_ENV[model_type], "")
-        if not raw:
-            return _ARCH_RESIDENT_STEP[model_type]
-        step = env_int(_ARCH_STEP_ENV[model_type], 0)
-        if step > 0:
-            return step
-    wide = env_int("GMLX_MOE_WIDE_STEP", 4096)
-    if (wide > _STOCK_BASE and experts and used
-            and _STOCK_BASE * used <= _MOE_WIDE_MAX_ROWS * experts):
-        return wide
-    return _STOCK_BASE
+        arch = (_ARCH_RESIDENT_STEP[model_type] if not raw
+                else env_int(_ARCH_STEP_ENV[model_type], 0))
+        return max(arch, rest)
+    return rest
 
 
 def _width(c, *names) -> int:
@@ -636,9 +636,9 @@ def _decode_arena_bytes(
     arena = ceiling - non_expert_bytes - room - int(ring_bytes) - outside
     # Second ceiling: the memory not wired right now. The governor
     # ceiling assumes an otherwise idle machine; memory another model
-    # holds wired shrinks the offer. Other apps' memory does not: the
-    # kernel compresses or swaps it for the arena, at half
-    # (``_arena_offer``). The floor keeps a
+    # holds wired shrinks the offer, and other apps' memory shrinks it by
+    # half: the kernel compresses it for the arena and keeps the
+    # compressed copy in RAM (``_arena_offer``). The floor keeps a
     # breathing margin for the system. This is a live post-pin snapshot:
     # already-wired weights are out of it, so only the still-unwired
     # share of the non-expert set is charged (charging all of it
@@ -656,7 +656,8 @@ def _decode_arena_bytes(
                 f"[stream] arena clamped to the memory not wired: "
                 f"{max(0, left) / 1e9:.1f} GB, not the ceiling's "
                 f"{arena / 1e9:.1f} GB ({avail / 1e9:.1f} GB not wired "
-                "now; another model's wired memory is the usual cause)")
+                "now; another model's wired memory or other apps' memory "
+                "is the usual cause)")
         arena = min(arena, left)
     cap = int(FORCED_ARENA_SHARE * expert_bytes) if forced else expert_bytes
     return min(max(0, arena), cap)
@@ -807,7 +808,10 @@ class WireCheck:
     (``check_wire_beside_drafter``): to keep the experts in memory when
     it fits, else because they stream. ``table_bytes`` are streamable
     tables the load reads from the file to get under live memory
-    (``check_wire_with_tables``), out of ``wire_bytes``."""
+    (``check_wire_with_tables``), out of ``wire_bytes``. ``settle_bytes``
+    is the memory not wired a set under the budget that keeps more in
+    memory than this check needs beside its keep, 0 when none does
+    (``settled_wire_check``)."""
     wire_bytes: int
     unwired_bytes: int | None
     keep_bytes: int
@@ -816,6 +820,7 @@ class WireCheck:
     dropped_bytes: int = 0
     ram_bytes: int | None = None
     table_bytes: int = 0
+    settle_bytes: int = 0
 
     @property
     def past_ram(self) -> bool:
@@ -909,7 +914,8 @@ def check_resident_wire(wire_bytes: int, *, room_bytes: int,
     elif ram is not None and w > ram:
         # Overcommit keeps no set larger than RAM: it streams.
         reason = "budget"
-    return WireCheck(w, free, keep, budget, reason, ram_bytes=ram)
+    return WireCheck(w, free, keep, budget, reason, ram_bytes=ram,
+                     settle_bytes=w + keep if reason == "unwired" else 0)
 
 
 def check_wire_beside_drafter(set_bytes: int, drafter_bytes: int, *,
@@ -934,9 +940,10 @@ def check_wire_beside_drafter(set_bytes: int, drafter_bytes: int, *,
     alone = check_resident_wire(
         set_bytes, budget=budget,
         room_bytes=room_bytes if alone_room_bytes is None else alone_room_bytes)
+    settle = max(check.settle_bytes, alone.settle_bytes)
     if alone.fits or not kept_streamed:
-        return replace(alone, dropped_bytes=drafter_bytes)
-    return check
+        return replace(alone, dropped_bytes=drafter_bytes, settle_bytes=settle)
+    return replace(check, settle_bytes=settle)
 
 
 def tables_offloaded(label: str, table_bytes: int) -> str:
@@ -971,32 +978,29 @@ def check_wire_with_tables(set_bytes: int, table_bytes: int,
             or (budget is not None and set_bytes - table_bytes > budget)):
         return check
     lean = judge(set_bytes - table_bytes)
+    settle = max(check.settle_bytes, lean.settle_bytes)
     if _kept_in_memory(lean) > _kept_in_memory(check):
-        return replace(lean, table_bytes=table_bytes)
-    return check
+        return replace(lean, table_bytes=table_bytes, settle_bytes=settle)
+    return replace(check, settle_bytes=settle)
 
 
 def settled_wire_check(judge) -> WireCheck:
     """``judge()``, made again once unwired memory stops rising when it
-    is short of the whole set: the experts, the auto drafter and the
-    tables (``check_wire_with_tables``), under the budget. A model torn
-    down a moment before, by an unload in this process or a process that
-    just exited, unwires its pages over a few seconds, and a check that
-    reads them as wired streams the experts, drops the drafter or reads
-    the tables from the file of a load that fits
-    (``capacity._settle_unwired``)."""
+    is short of a set under the budget that keeps more in memory
+    (``WireCheck.settle_bytes``): the experts, the auto drafter, the
+    tables. A model torn down a moment before, by an unload in this
+    process or a process that just exited, unwires its pages over a few
+    seconds, and a check that reads them as wired streams the experts,
+    drops the drafter or reads the tables from the file of a load that
+    fits (``capacity._settle_unwired``)."""
     from gmlx.serve.capacity import _settle_unwired
 
     check = judge()
-    whole = check.wire_bytes + check.dropped_bytes + check.table_bytes
     if (check.unwired_bytes is None
-            or not (check.reason == "unwired" or check.mtp_off
-                    or check.table_bytes)
-            or (check.budget_bytes is not None
-                and whole > check.budget_bytes)):
+            or check.settle_bytes <= check.unwired_bytes):
         return check
     after = _settle_unwired(lambda: unwired_ram_bytes(), check.unwired_bytes,
-                            whole + check.keep_bytes)
+                            check.settle_bytes)
     if after is None or after <= check.unwired_bytes:
         return check
     return judge()

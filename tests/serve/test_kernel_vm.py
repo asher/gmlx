@@ -74,6 +74,7 @@ def test_reclaim_holds_the_clock_for_five_seconds_of_waiting(box):
 @pytest.mark.parametrize("marks,freed", [
     ((0, 0, 1, 0), True),                     # a swap out
     ((0, 0, 0, (256 << 20) // kv._PAGE), True),   # file pages paged out
+    ((0, 0, 0, 0, (256 << 20) // kv._PAGE, 0), True),   # read-ahead pages
     ((1 << 30, 1 << 30, 0, 0), False),        # nothing compressed away
     ((1 << 20, 0, 0, 0), False),              # under the rate
 ])

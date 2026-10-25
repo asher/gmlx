@@ -2173,10 +2173,12 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
     if hasattr(args, "speculative") and "speculative" not in explicit:
         # Config is authoritative for a configured model id: write the resolved bool
         # (True or False) so the native-head auto never second-guesses a config
-        # opt-out. discovery already turns 'auto' -> True for MTP models; a bare file
-        # path skips this overlay entirely and stays auto-eligible.
-        args.speculative = bool(rm.speculative)
-        if rm.speculative:
+        # opt-out. `speculative: auto` and a discover scan's MTP model stay on the
+        # auto path, as a bare file path does, which drops a drafter that does not
+        # fit beside the experts.
+        args.speculative = (None if getattr(rm, "speculative_auto", False)
+                            else bool(rm.speculative))
+        if args.speculative:
             applied.append("speculative")
     if (rm.stream and "stream_cpu" not in explicit
             and "stream_experts" not in explicit):
@@ -2598,11 +2600,6 @@ def preload_wire_check(args, *, depth: int | None,
         return
     mmproj = os.path.expanduser(getattr(args, "mmproj", None) or "")
     extra = os.path.getsize(mmproj) if mmproj and os.path.isfile(mmproj) else 0
-    step = getattr(args, "prefill_step_size", None)
-    room = bmod.kv_room_bytes(path, step=step, depth=depth, resident=True)
-    alone = (room if depth_without_mtp == depth
-             else bmod.kv_room_bytes(path, step=step, depth=depth_without_mtp,
-                                     resident=True))
     # Before _drafter_bytes, whose --native-mtp sets --speculative (the
     # native_mtp term covers that too).
     auto = _mtp_auto(args)
@@ -2612,6 +2609,17 @@ def preload_wire_check(args, *, depth: int | None,
     tables = (0 if stream_ple_env() == "0"
               else max(0, streamed_table_bytes(path) - deferred))
     drafter = _drafter_bytes(args, path)
+    # A run prefills a model kept in memory in chunks of the asked step,
+    # else 2048 rows, and of _PREFILL_CHUNK rows beside a drafter.
+    from gmlx.gen.generation import _PREFILL_CHUNK
+    from gmlx.gen.prefill_decay import _STOCK_BASE
+
+    plain = getattr(args, "prefill_step_size", None) or _STOCK_BASE
+    room = bmod.kv_room_bytes(path, step=_PREFILL_CHUNK if drafter else plain,
+                              depth=depth, resident=True)
+    alone = (room if depth_without_mtp == depth and not drafter
+             else bmod.kv_room_bytes(path, step=plain, depth=depth_without_mtp,
+                                     resident=True))
     check = bmod.settled_wire_check(lambda: bmod.check_wire_with_tables(
         text - deferred + extra, tables, drafter,
         auto=auto, room_bytes=room.bytes, alone_room_bytes=alone.bytes,

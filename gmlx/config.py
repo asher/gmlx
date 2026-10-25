@@ -578,9 +578,9 @@ class ModelCfg:
     # Streamed-decode prefetch recipe: auto (probe the drive), on, off.
     stream_fast_disk: str | None = None
     speculative: bool = False
-    # A folder scan turned speculative on for the model's MTP head or
-    # drafter, with no speculative key asking for it: a load that holds
-    # the experts only without the drafter drops it.
+    # speculative: auto, or a folder scan that turned speculative on for
+    # the model's MTP head or drafter: a load that holds the experts only
+    # without the drafter drops it.
     speculative_auto: bool = False
     # Batch-width cap for speculative decode: MTP runs only while the live
     # decode batch is this wide, wider batches decode plain (drafter stays
@@ -1146,7 +1146,8 @@ class ResolvedModel:
     # N = speculate only while the live decode batch is <= N wide.
     # Load-affecting - it is stamped onto the drafter at load.
     speculative_width_cap: int | None = None
-    # ModelCfg.speculative_auto: not load-affecting.
+    # ModelCfg.speculative_auto. Load-affecting: a build may drop the
+    # drafter.
     speculative_auto: bool = False
     # Context copy on this id's drafter. Load-affecting the same way.
     context_copy: bool = False
@@ -1210,6 +1211,7 @@ class ResolvedModel:
             self.mmproj,
             self.draft_gguf,
             bool(self.speculative),
+            bool(self.speculative_auto),
             str(self.speculative_width_cap),
             bool(self.context_copy),
             self.chat_template,
@@ -2676,6 +2678,7 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
         stream_fast_disk=_normalize_fast_disk(
             raw.get("stream_fast_disk"), f"model {model_id!r}"),
         speculative=bool(raw.get("speculative", False)),
+        speculative_auto=raw.get("speculative") == "auto",
         speculative_width_cap=_normalize_speculative_width_cap(
             raw.get("speculative_width_cap"), f"model {model_id!r}"),
         context_copy=bool(_normalize_optional_bool(

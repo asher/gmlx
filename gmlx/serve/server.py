@@ -1283,7 +1283,7 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
                 continue
             if (fresh["speculative"] and "speculative" not in ent
                     and not ent.get("draft_gguf")):
-                ent.insert(list(ent).index("stream"), "speculative", True)
+                ent.insert(list(ent).index("stream"), "speculative", "auto")
             _drop_key_keep_trailing(ent, "stream")
         for mc in discovered:
             entry = CommentedMap(discovery.model_to_entry(mc, dirs))
@@ -2562,13 +2562,16 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
                "defaults", "cache", "assistants", "assistant_allow_remote",
                "image")}
     # Profile/model names double as dict keys; drop the redundant fields so the
-    # entries match the file schema (which has no `name`/`id` keys), and a
-    # folder scan's in-memory `speculative_auto` mark.
+    # entries match the file schema (which has no `name`/`id` keys). An
+    # auto drafter writes back as `speculative: auto`.
     profiles = {n: {k: v for k, v in p.items() if k != "name"}
                 for n, p in d.pop("profiles").items()}
-    models = {mid: {k: v for k, v in m.items()
-                    if k not in ("id", "speculative_auto")}
-              for mid, m in d.pop("models").items()}
+    models = {}
+    for mid, m in d.pop("models").items():
+        m.pop("id")
+        if m.pop("speculative_auto") and m.get("speculative"):
+            m["speculative"] = "auto"
+        models[mid] = m
     images = {}
     for iid, m in d.pop("image_models").items():
         m.pop("id")

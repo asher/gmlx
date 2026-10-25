@@ -298,8 +298,12 @@ def test_scan_emits_model_with_speculative(tmp_path, fake_classify):
     assert len(models) == 1
     assert models[0].id == "qwen3.6-27b-q4"        # quant codec always in the id
     assert models[0].speculative is True          # native-head MTP, speculative=auto
-    # No key asked for it, so a load short of memory may leave it out.
+    # No key asked for it, so a load short of memory may leave it out, and
+    # the config gmlx init writes says so.
     assert models[0].speculative_auto is True
+    assert "    speculative: auto\n" in disc.scaffold_yaml(
+        models, model_dirs=[str(root)])
+    assert disc.model_to_entry(models[0], [str(root)])["speculative"] == "auto"
     assert _scan(root, speculative=True)[0].speculative_auto is False
 
 
