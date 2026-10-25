@@ -61,6 +61,7 @@ from gmlx.config import (
     replace_config_text,
     resolve_model,
     resolve_path,
+    speculative_off,
 )
 from gmlx.envflags import env_bool
 
@@ -864,7 +865,8 @@ def _open_pairs(path, key, pairs) -> dict:
 
 
 def _ids_speculative_off(path) -> set:
-    """The ids of ``path``'s model entries set to ``speculative: false``."""
+    """The ids of ``path``'s model entries set to ``speculative: false``,
+    in any spelling the loader reads (``speculative_off``)."""
     from ruamel.yaml import YAML
 
     try:
@@ -875,7 +877,7 @@ def _ids_speculative_off(path) -> set:
     if not isinstance(models, dict):
         return set()
     return {str(mid) for mid, ent in models.items()
-            if isinstance(ent, dict) and ent.get("speculative") is False}
+            if isinstance(ent, dict) and speculative_off(ent.get("speculative"))}
 
 
 def _ids_with_key(path, key) -> set:
@@ -1301,7 +1303,7 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
             ent = models.get(mid)
             if (isinstance(ent, dict) and "path" in ent
                     and "draft_gguf" not in ent
-                    and ent.get("speculative") is not False):
+                    and not speculative_off(ent.get("speculative"))):
                 _insert_key_keep_trailing(
                     ent, "mmproj" if "mmproj" in ent else "path",
                     "draft_gguf", discovery._rel(dpath, dirs), companion_note)

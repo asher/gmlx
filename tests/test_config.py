@@ -1101,6 +1101,18 @@ def test_discover_spec_defaults():
     assert spec.speculative == "auto"
 
 
+@pytest.mark.parametrize("value,want", [("Auto", "auto"), ("off", False),
+                                        ("maybe", None)])
+def test_a_discover_block_reads_speculative_as_a_model_entry_does(value,
+                                                                  want):
+    raw = {"discover": [{"dir": "/d", "speculative": value}]}
+    if want is None:
+        with pytest.raises(ConfigError, match="speculative"):
+            build_config(raw)
+        return
+    assert build_config(raw).discover[0].speculative == want
+
+
 # load_config - file IO + error surfaces
 def test_load_config_roundtrip(tmp_path):
     import yaml

@@ -766,7 +766,8 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
 
     Precedence: --no-speculative/--no-mtp (off) > --native-mtp (the head; drops a
     configured draft_gguf) > explicit --speculative/--mtp or --draft-gguf (on) >
-    auto. Auto enables MTP iff the GGUF has a native head, or a companion
+    auto, which a config entry's draft_gguf under ``speculative: auto`` takes
+    too. Auto enables MTP iff the GGUF has a native head, or a companion
     drafter for a companion-only family, and no hard-incompatible flag
     (--mmproj/--adapter/--stream-cpu/--moe-*) is set; sampler flags the MTP
     walk can't honor are dropped with a warning at generation (--no-mtp honors
@@ -778,7 +779,9 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
         apply_native_mtp(args, gguf_path)
         return True, ""
     spec = getattr(args, "speculative", None)
-    if spec or getattr(args, "draft_gguf", None):
+    draft = getattr(args, "draft_gguf", None)
+    auto_draft = bool(draft) and getattr(args, "draft_gguf_auto", False)
+    if spec or (draft and not auto_draft):
         return True, ""
     if spec is False:
         # Explicit opt-out from a config model ('speculative: false'); not auto.
@@ -788,13 +791,15 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
     # (set --no-mtp to honor them via plain decoding) -- not deferred, so a
     # habitual penalty never silently disables MTP. Only the hard-incompatible
     # flags above (--mmproj/--adapter/--stream-cpu/...) force plain decoding.
-    if _mtp_hard_incompatible(args):
-        return False, ""
-    if getattr(args, "stream_experts", False):
+    if _mtp_hard_incompatible(args) or getattr(args, "stream_experts", False):
         # Streaming decode: auto-MTP stays off (measured wash at typical
         # no-think acceptance, and verify widths add miss IO); explicit
-        # --speculative/--mtp above still opts in.
+        # --speculative/--mtp above still opts in. An auto drafter file
+        # goes too.
+        args.draft_gguf = None
         return False, ""
+    if auto_draft:
+        return True, ""
     if not _has_native_mtp_head(gguf_path):
         companion = _companion_drafter(gguf_path)
         if companion is None:

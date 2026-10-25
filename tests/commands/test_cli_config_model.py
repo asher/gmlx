@@ -166,13 +166,8 @@ def test_run_speculative_config_applies(tmp_path, value, want):
     assert rc is None and args.gguf == gguf and args.speculative is want
 
 
-@pytest.mark.parametrize("flag", [False, True])
-def test_a_config_drafter_file_marked_auto_stays_on_the_auto_path(tmp_path,
-                                                                  flag):
-    # The entry's drafter file under `speculative: auto` is one the run may
-    # leave out, as it leaves out a head. --draft-gguf asks for it.
-    gguf = tmp_path / "m-Q6_K.gguf"
-    gguf.write_bytes(b"GGUF")
+def _auto_drafter_config(tmp_path):
+    (tmp_path / "m-Q6_K.gguf").write_bytes(b"GGUF")
     (tmp_path / "dflash-m-Q6_K.gguf").write_bytes(b"GGUF")
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text(
@@ -180,12 +175,38 @@ def test_a_config_drafter_file_marked_auto_stays_on_the_auto_path(tmp_path,
         "models:\n"
         "  m: {path: m-Q6_K.gguf, draft_gguf: dflash-m-Q6_K.gguf, "
         "speculative: auto}\n")
-    argv = ["m", "--config", str(cfg)]
+    return str(cfg)
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_a_config_drafter_file_marked_auto_stays_on_the_auto_path(tmp_path,
+                                                                  flag):
+    # The entry's drafter file under `speculative: auto` is one the run may
+    # leave out, as it leaves out a head. --draft-gguf asks for it.
+    argv = ["m", "--config", _auto_drafter_config(tmp_path)]
     if flag:
         argv += ["--draft-gguf", str(tmp_path / "dflash-m-Q6_K.gguf")]
     rc, args = _resolve(argv)
     assert rc is None and args.draft_gguf
     assert cli._mtp_auto(args) is not flag
+
+
+@pytest.mark.parametrize("flag", ["--stream-cpu", "--stream-experts"])
+def test_a_streamed_run_leaves_out_a_config_drafter_file_marked_auto(
+        tmp_path, monkeypatch, flag):
+    # As a run under a stream flag leaves out the model's own head.
+    monkeypatch.setattr(cli, "_has_native_mtp_head", lambda p: False)
+    seen = {}
+
+    def generate(args):
+        seen["mtp"] = cli.resolve_speculative(args, args.gguf)[0]
+        seen["draft"] = args.draft_gguf
+        return 0
+
+    monkeypatch.setattr(cli, "_run_generate", generate)
+    assert cli.main(["m", "--config", _auto_drafter_config(tmp_path),
+                     flag]) == 0
+    assert seen == {"mtp": False, "draft": None}
 
 
 def test_run_chat_share_speculative_surface():

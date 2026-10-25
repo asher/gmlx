@@ -2315,6 +2315,17 @@ def _normalize_speculative(value, where: str = "model") -> dict:
         f"{where}.speculative: expected true, false or auto, got {value!r}")
 
 
+def speculative_off(value) -> bool:
+    """Whether a raw ``speculative`` value turns speculative decoding off,
+    in any spelling the loader reads. Absent and null are not off."""
+    if value is None:
+        return False
+    try:
+        return not _normalize_speculative(value)["speculative"]
+    except ConfigError:
+        return False
+
+
 def _normalize_speculative_width_cap(value, where: str = "model"):
     """Validate a ``speculative_width_cap``: None (family default), 0
     (uncapped), or a positive batch width. Bad values raise rather than
@@ -2889,8 +2900,17 @@ def _parse_discover(raw: dict) -> DiscoverSpec:
         dir=raw.get("dir"),
         recursive=bool(raw.get("recursive", False)),
         pair_mmproj=bool(raw.get("pair_mmproj", True)),
-        speculative=raw.get("speculative", "auto"),
+        speculative=_discover_speculative(raw.get("speculative")),
     )
+
+
+def _discover_speculative(value):
+    """A discover entry's ``speculative``: "auto" when absent, else true,
+    false or auto as a model entry reads them."""
+    if value is None:
+        return "auto"
+    n = _normalize_speculative(value, "discover entry")
+    return "auto" if n["speculative_auto"] else n["speculative"]
 
 
 def _parse_mcp_list(mcp_raw, where: str) -> list:

@@ -1000,10 +1000,42 @@ def test_a_server_gone_idle_ends_the_stall(rig, monkeypatch):
     assert failed == []
 
 
+@pytest.mark.parametrize("after", [7.5e9, 40e9])
+def test_waiters_far_apart_never_add_to_a_real_wait(rig, monkeypatch, after):
+    # Under the floor, ticks 3 s apart each see threads waiting for a
+    # moment. Then threads really wait, read by ticks a quarter second
+    # apart, under the floor still or with the memory back above it. The
+    # moments never count toward the real wait, which sheds no row.
+    evicted = []
+    gov.register_cache("apc", lambda: 40e9,
+                       lambda f: (evicted.append(f), f * 40e9)[1])
+    gen = FakeGen(rows=2, rate=1e6, live=8e9)
+    failed = _starved_rows(monkeypatch, gen)
+    blip = [True]
+
+    class _Blip:
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+        def sleep(self, s):
+            if blip:
+                rig["waiters"] = 0
+
+    monkeypatch.setattr(gov, "time", _Blip())
+    rig["kernel"] = 7.5e9
+    for i in range(4):
+        rig["waiters"] = 3
+        gov._governor_tick(gen)
+        rig["now"] += 3.0 if i < 3 else 0.25
+    rig["kernel"] = after
+    blip.clear()
+    _waiting(rig, gen, 0.5)
+    assert failed == [] and 1.0 not in evicted
+
+
 def test_ticks_close_together_read_no_stall_again(rig, monkeypatch):
     # Reading a stall again holds the generation worker. Ticks a quarter
-    # second apart watch the wait themselves, and under the floor a stall
-    # far apart is read again only once it reaches a collapse.
+    # second apart watch the wait themselves.
     slept = []
 
     class _Clock:
@@ -1018,13 +1050,6 @@ def test_ticks_close_together_read_no_stall_again(rig, monkeypatch):
     _starved_rows(monkeypatch, gen)
     _waiting(rig, gen, 1.5)
     assert slept == []
-    rig["waiters"] = 0
-    gov._governor_tick(gen)
-    rig["kernel"] = 7.5e9
-    _waiting(rig, gen, 3.0, every=1.0)
-    assert slept == []
-    gov._governor_tick(gen)
-    assert len(slept) == gov._STARVE_CONFIRM
 
 
 def test_a_row_buffered_for_the_spec_batch_keeps_the_stall(rig):

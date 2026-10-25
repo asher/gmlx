@@ -366,22 +366,22 @@ _STARVE_SHED_S = 2.0
 # times, this far apart, and acts only if it holds: ticks can come seconds
 # apart, and threads waiting at two of them need not have waited in
 # between.
-_STARVE_CONFIRM = 4
-_STARVE_CONFIRM_S = 0.1
+_STARVE_CONFIRM = 2
+_STARVE_CONFIRM_S = 0.05
 
 
-def _starved_for(st, act_at: float) -> float:
-    """Seconds of the current free-page stall, 0 without one. A stall of
-    ``act_at`` or more is read again first when its reading came long
-    after the one before."""
+def _starved_for(st) -> float:
+    """Seconds of the current free-page stall, 0 without one. A stall long
+    enough to act on is read again first when its reading came long after
+    the one before."""
     from .kernel_vm import _STARVE_STEP_S
 
     stalled = st.starve()
-    if stalled >= act_at and st.starve.gap > _STARVE_STEP_S:
+    if stalled >= _STARVE_RECLAIM_S and st.starve.gap > _STARVE_STEP_S:
         for _ in range(_STARVE_CONFIRM):
             time.sleep(_STARVE_CONFIRM_S)
             stalled = st.starve()
-            if stalled < act_at:
+            if stalled < _STARVE_RECLAIM_S:
                 break
     if stalled < _STARVE_RECLAIM_S:
         st.starve_reclaimed = False
@@ -827,10 +827,7 @@ def _governor_tick(gen) -> None:
     # on a 128 GB box, governor green throughout).
     floor = _kernel_floor_bytes()
     unw = _kernel_unwired() if floor > 0 else None
-    # Under the floor, a stall acts only as a collapse.
-    act_at = (_STARVE_RECLAIM_S if unw is None or unw >= floor
-              else _STARVE_SHED_S)
-    starved = _starved_for(st, act_at) if floor > 0 else 0.0
+    starved = _starved_for(st) if floor > 0 else 0.0
     _STATS["kernel_unwired_bytes"] = None if unw is None else int(unw)
     if unw is not None and unw < floor:
         _STATS["kernel_floor_reds"] += 1

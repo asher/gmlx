@@ -1181,6 +1181,8 @@ def test_sync_add_companions_adds_a_drafter_to_an_entry(monkeypatch, tmp_path,
     "    draft_gguf: dflash-v1-muse.gguf\n",
     "    #draft_gguf: dflash-muse.gguf\n",
     "    speculative: false\n",
+    "    speculative: off\n",
+    '    speculative: "false"\n',
 ])
 def test_sync_add_companions_leaves_a_drafter_out_of_a_held_entry(
         monkeypatch, tmp_path, capsys, held):
