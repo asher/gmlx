@@ -114,29 +114,6 @@ def unwired_ram_bytes() -> int | None:
     return reclaimable_ram_bytes()
 
 
-def free_page_waiters() -> int:
-    """Threads waiting on the kernel for free pages
-    (``kernel_vm.free_page_waiters``), 0 when unread."""
-    try:
-        from gmlx.serve.kernel_vm import free_page_waiters as wanted
-
-        return int(wanted() or 0)
-    except Exception:
-        return 0
-
-
-def reclaim_marks() -> tuple | None:
-    """The kernel's live reclaim counts (``kernel_vm.reclaim_marks``): two
-    readings give the memory it freed in between (``kernel_vm.reclaimed``).
-    None when unread."""
-    try:
-        from gmlx.serve.kernel_vm import reclaim_marks as marks
-
-        return marks()
-    except Exception:
-        return None
-
-
 def kernel_floor_bytes() -> float:
     """The governor's kernel reclaimable floor."""
     from gmlx.serve.governor import _kernel_floor_bytes
@@ -864,21 +841,16 @@ class WireCheck:
                 f"{tail}{lever}")
 
     def stop_line(self, *, wired: int, unwired: int, need: int,
-                  starved: bool = False, room: KvRoom | None = None,
+                  room: KvRoom | None = None,
                   depth: int | None = None) -> str:
         """The stream line of a chunked wire that stopped with ``wired``
         bytes of it wired: unwired memory fell under the ``need`` of the
-        next chunk and did not rise, or the kernel was ``starved`` of
-        free pages and did not recover. Under GMLX_OVERCOMMIT=1 each
-        chunk kept only the kernel floor."""
+        next chunk and did not rise. Under GMLX_OVERCOMMIT=1 each chunk
+        kept only the kernel floor."""
         lever = "" if overcommit() else f" {OVERCOMMIT_LEVER}"
         head = (f"{STREAM_FREE_NOW}: holding them takes "
                 f"{_gb(self.wire_bytes)}, and after {_gb(wired)} of it "
                 "wired, ")
-        if starved:
-            return (f"{head}the kernel ran out of free pages and did not "
-                    "recover. To keep them in memory, close other "
-                    f"apps.{lever}")
         if overcommit():
             beside = f"beside the {_gb(kernel_floor_bytes())} kernel floor"
         else:

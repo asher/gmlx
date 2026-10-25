@@ -230,7 +230,6 @@ def test_the_unwired_read_matches_this_mac_s_mach_counters():
             break
         time.sleep(0.3)
     assert gap <= 3 * GiB
-    assert host_box.real("free_wanted")() is not None
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="the sysctl counts")
@@ -327,12 +326,10 @@ class _Vm:
     then compresses other apps' memory at ``ratio`` to 1. Compressed
     pages still take RAM, so past the file pages a wired byte costs
     1 + 1 / (ratio - 1) unwired bytes. With nothing left to compress, or
-    memory that does not compress (``ratio`` 1), the kernel is starved,
-    and ``WAITERS`` threads wait on it for free pages. ``wire`` is
-    another process wiring memory the same way."""
+    memory that does not compress (``ratio`` 1), the free pages run out.
+    ``wire`` is another process wiring memory the same way."""
 
     TARGET = 4000 * 16384
-    WAITERS = 3
 
     def __init__(self, box, free, file, apps=0, ratio=2.0, wired=None):
         self.box = box
@@ -342,8 +339,6 @@ class _Vm:
         self.compressor = 0
         self.wired = (mem - self.free - self.file - self.apps
                       if wired is None else int(wired))
-        self.wanted = 0
-        self.compressed_in = self.compressed_out = 0
         self.lowest_free = self.free
         self.publish()
 
@@ -351,10 +346,7 @@ class _Vm:
         host_box.use(self.box, {
             "free": self.free, "inactive": 0, "purgeable": 0,
             "speculative": 0, "filebacked": self.file,
-            "wired": self.wired, "compressor": self.compressor,
-            "free_wanted": self.wanted,
-            "reclaim_marks": (self.compressed_in, self.compressed_out, 0,
-                              0)})
+            "wired": self.wired, "compressor": self.compressor})
 
     def take(self, nbytes):
         n = int(nbytes)
@@ -371,13 +363,10 @@ class _Vm:
                 packed = rest / (self.ratio - 1)
                 squeezed = min(self.apps, int(rest + packed))
             self.apps -= squeezed
-            self.compressed_in += squeezed
-            self.compressed_out += int(squeezed / self.ratio)
             self.compressor += int(squeezed / self.ratio)
             short = rest - (squeezed - int(squeezed / self.ratio))
             if short > 0:
                 self.free = max(0, self.free - short)
-                self.wanted = self.WAITERS
         self.lowest_free = min(self.lowest_free, self.free)
         self.publish()
 
@@ -498,7 +487,7 @@ def test_a_wire_past_the_page_cache_compresses_other_apps(monkeypatch,
     m = _leaves(90, 1 * GiB)
     assert _wire(m, 90 * GiB)
     assert len(kq.members) == 90
-    assert vm.compressor > 0 and vm.wanted == 0
+    assert vm.compressor > 0
     assert capsys.readouterr().err == ""
 
 
@@ -548,113 +537,6 @@ def test_another_app_growing_mid_wire_does_not_stop_it(monkeypatch):
     _room(monkeypatch, 8.1 * GiB)
     assert _wire(_leaves(60, 1 * GiB), 60 * GiB)
     assert len(kq.members) == 60 and vm.compressor > 0
-
-
-def test_a_kernel_waiting_on_free_pages_holds_the_chunk(monkeypatch):
-    # Threads wait on the kernel for free pages: the chunk waits while
-    # fewer of them wait, and commits once none is left.
-    _Vm(host_box.mac(128)[0], free=42.3 * GiB, file=54.6 * GiB)
-    wanted = iter([9, 6, 2, 0])
-
-    def free_wanted():
-        return next(wanted, 0)
-    monkeypatch.setattr(budget, "free_page_waiters", free_wanted)
-    guard = es._ChunkGuard(4 * GiB)
-    assert guard(2 * GiB) and not guard.starved
-    assert 0 < guard.waited < es._WIRE_STALL_S
-
-
-def test_a_kernel_that_stays_starved_stops_the_wire(monkeypatch, capsys):
-    # The kernel stops reclaiming 20 chunks in, with unwired memory over
-    # the line: the wire stops, unwires and streams.
-    vm = _Vm(host_box.mac(128)[0], free=42.3 * GiB, file=54.6 * GiB)
-
-    def committed(nbytes):
-        vm.committed(nbytes)
-        if len(kq.commits) == 20:
-            vm.wanted = 6
-            vm.publish()
-    kq = _Residency(monkeypatch, on_commit=committed)
-    _room(monkeypatch, 8.1 * GiB)
-    assert _wire(_leaves(60, 1 * GiB), 60 * GiB) is False
-    assert kq.members == {}
-    err = capsys.readouterr().err
-    assert ("after 42.9 GB of it wired, the kernel ran out of free pages "
-            "and did not recover. To keep them in memory, close other "
-            "apps.") in err
-
-
-def test_a_kernel_working_through_its_waiters_holds_the_chunk(monkeypatch):
-    # The kernel frees pages for one waiting thread every 0.6 s, slower
-    # than a reading: each new low keeps the chunk waiting, and it
-    # commits once none is left, so a set that fits stays in memory.
-    _Vm(host_box.mac(128)[0], free=42.3 * GiB, file=54.6 * GiB)
-    clock = es.time
-    start = clock.now
-    monkeypatch.setattr(
-        budget, "free_page_waiters",
-        lambda: max(0, 8 - int((clock.now - start) / 0.6)))
-    guard = es._ChunkGuard(4 * GiB)
-    assert guard(2 * GiB)
-    assert es._WIRE_STALL_S < guard.waited < es._WIRE_WAIT_S
-
-
-def _compressing(monkeypatch, saved, waiting_s):
-    """Threads wait on free pages for ``waiting_s`` while the compressor
-    takes 1 GB a second and keeps ``saved`` of it out of RAM."""
-    clock = es.time
-    start = clock.now
-    monkeypatch.setattr(budget, "free_page_waiters",
-                        lambda: 2 if clock.now - start < waiting_s else 0)
-
-    def marks():
-        fed = int((clock.now - start) * GiB)
-        return (fed, int(fed * (1 - saved)), 0, 0)
-
-    monkeypatch.setattr(budget, "reclaim_marks", marks)
-
-
-def test_threads_waiting_while_the_kernel_compresses_hold_the_chunk(
-        monkeypatch):
-    # Other apps' threads wait on free pages for 4 s while the kernel
-    # compresses their memory 2 to 1: the chunk waits through it and
-    # commits once they finish.
-    _Vm(host_box.mac(128)[0], free=42.3 * GiB, file=54.6 * GiB)
-    _compressing(monkeypatch, saved=0.5, waiting_s=4)
-    guard = es._ChunkGuard(4 * GiB)
-    assert guard(2 * GiB)
-    assert 2 * es._WIRE_STALL_S < guard.waited < es._WIRE_WAIT_S
-
-
-@pytest.mark.parametrize("saved,stop_s", [(0.0, 2.0), (0.5, 7.0)])
-def test_a_kernel_that_falls_behind_while_it_compresses_stops_the_chunk(
-        monkeypatch, saved, stop_s):
-    # Threads wait the whole time with unwired memory over the line. A
-    # compressor storing what it takes, as with quantized weights, frees
-    # nothing, and the chunk stops at the stall. One that saves memory
-    # holds it for 5 s of waiting and no more.
-    _Vm(host_box.mac(128)[0], free=42.3 * GiB, file=54.6 * GiB)
-    _compressing(monkeypatch, saved=saved, waiting_s=1e9)
-    guard = es._ChunkGuard(4 * GiB)
-    assert guard(2 * GiB) is False
-    assert guard.starved and not guard.short
-    assert stop_s - 0.1 <= guard.waited <= stop_s + 0.1
-
-
-def test_memory_the_kernel_cannot_compress_stops_the_wire(monkeypatch,
-                                                          capsys):
-    # Flash-Next's 90 GiB beside 30 GiB of apps whose memory does not
-    # compress, with swap that cannot keep up: unwired memory covers the
-    # set, but past the page cache the kernel has no pages to give it.
-    # The wire stops and unwires instead of wiring into a stall.
-    vm = _Vm(host_box.mac(128)[0], free=6 * GiB, file=80.5 * GiB,
-             apps=30 * GiB, ratio=1.0)
-    kq = _Residency(monkeypatch, on_commit=vm.committed)
-    _room(monkeypatch, 14.4e9, depth=32768)
-    assert _wire(_leaves(90, 1 * GiB), 90 * GiB) is False
-    assert kq.members == {}
-    assert ("the kernel ran out of free pages and did not recover"
-            in capsys.readouterr().err)
 
 
 def test_a_live_install_s_wired_bytes_are_not_kept_again(monkeypatch):

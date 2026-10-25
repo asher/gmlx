@@ -80,8 +80,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   half as much.
 - `speculative: auto` on a model entry, which `gmlx init` and `sync-models`
   now write, leaves out an MTP drafter that does not fit beside the experts.
-- The serve governor also reclaims when threads wait on macOS for free pages,
-  and `/v1/metrics` reports `kernel_unwired_bytes` and `kernel_free_page_waiters`.
+- `/v1/metrics` reports `kernel_unwired_bytes` and `kernel_free_page_waiters`.
 - `run` and `chat` keep a MoE's experts in memory and turn auto MTP off when its
   drafter does not fit beside them, with an `[mtp]` line.
 - With `GMLX_OVERCOMMIT=1`, `run`, `chat` and `image generate` load a model

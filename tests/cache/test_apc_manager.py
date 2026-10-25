@@ -780,7 +780,6 @@ def test_store_stops_at_kernel_floor(monkeypatch):
         return 100e9 if len(calls) <= 2 else 1e9   # floor hit at block 3
 
     monkeypatch.setattr(kv, "unwired_bytes", scripted)
-    monkeypatch.setattr(kv, "free_page_waiters", lambda: 0)
     blocks = man.store_kv_blocks(ids, lk, lv, extra_hash=0)
     man.release(blocks)
     assert len(blocks) == 2
@@ -794,12 +793,10 @@ def test_store_stops_at_kernel_floor(monkeypatch):
     assert "kernel_floor" not in man2.stats.rejects_by_reason
 
 
-@pytest.mark.parametrize("stalled", [0.0, 0.6])
-def test_store_beside_other_apps_memory_stops_only_on_starved_pages(
-        monkeypatch, stalled):
+def test_store_beside_other_apps_memory_stores_every_block(monkeypatch):
     # Apps hold the RAM the model leaves: free and the page cache read
     # near empty, but their memory is the kernel's to compress, so every
-    # block stores. A free-page stall stops the store.
+    # block stores.
     import mlx.core as mx
     import gmlx.serve.kernel_vm as kv
     from gmlx.cache.apc_manager import GmlxAPCManager
@@ -810,13 +807,12 @@ def test_store_beside_other_apps_memory_stops_only_on_starved_pages(
     monkeypatch.setattr(gov, "_ARMED_FLOOR", 8e9)
     monkeypatch.setattr(kv, "unwired_bytes", lambda: 40e9)
     monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 1e9)
-    monkeypatch.setattr(kv, "StarveWatch", lambda: (lambda: stalled))
     man = GmlxAPCManager(num_blocks=16, block_size=16)
     lk = [mx.random.normal((1, 2, 96, 8)).astype(mx.float16)]
     lv = [mx.random.normal((1, 2, 96, 8)).astype(mx.float16)]
     blocks = man.store_kv_blocks(list(range(96)), lk, lv, extra_hash=0)
     man.release(blocks)
-    assert len(blocks) == (0 if stalled else 6)
+    assert len(blocks) == 6
 
 
 def test_kvarn_salt_applied_from_the_stamped_model(monkeypatch):

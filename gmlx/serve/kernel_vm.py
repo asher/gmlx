@@ -7,9 +7,10 @@ enter the compressor, so a server that grows past the box's free pages
 livelocks macOS into a watchdog panic while every MLX-side number still
 reads healthy. This module reads the counters that actually predict
 the panic: the memory not wired (free + pageable anonymous + file-backed
-pages), and threads waiting on free pages while the kernel reclaims
-nothing. ``reclaimable_bytes`` (free + purgeable + file-backed) remains
-for the readers that must not count other apps' memory.
+pages). ``reclaimable_bytes`` (free + purgeable + file-backed) remains
+for the readers that must not count other apps' memory, and
+``free_page_waiters`` reports the threads waiting on free pages for
+``/v1/metrics``.
 
 Darwin only; ``reclaimable_bytes`` returns None elsewhere or when the
 struct layout fails its one-time self-check against sysctl.
@@ -22,7 +23,6 @@ import logging
 import os
 import subprocess
 import sys
-import time
 
 _log = logging.getLogger(__name__)
 
@@ -184,100 +184,6 @@ def free_page_waiters() -> int | None:
     if sys.platform != "darwin":
         return None
     return _sysctl_count("vm.page_free_wanted")
-
-
-# Cumulative live counts that move while the kernel frees memory: the
-# bytes fed to the compressor and the bytes it stored them in (their
-# difference is what compression freed), the compressor segments swapped
-# out, and the file-backed, read-ahead and cleaned pages paged out.
-_RECLAIM_COUNTS = ("vm.compressor_input_bytes",
-                   "vm.compressor_compressed_bytes",
-                   "vm.compressor.swapper.swapouts_total",
-                   "vm.pageout_freed_external",
-                   "vm.pageout_freed_speculative",
-                   "vm.pageout_freed_cleaned")
-
-# The rate of freed memory that counts as reclaim at work: compression
-# that saves less, as for quantized weights, which do not compress, is
-# the kernel losing the race.
-_MIN_RECLAIM_RATE = 128 << 20
-
-
-def reclaim_marks() -> tuple | None:
-    """The reclaim counts, live. Two readings give the memory the kernel
-    freed in between (``reclaimed``). None off Darwin or when a read
-    fails."""
-    if sys.platform != "darwin":
-        return None
-    marks = tuple(_sysctl_count(n) for n in _RECLAIM_COUNTS)
-    return None if None in marks else marks
-
-
-def reclaimed(before: tuple | None, after: tuple | None,
-              seconds: float) -> bool:
-    """Whether the kernel freed memory between two ``reclaim_marks``
-    readings ``seconds`` apart: it swapped out, or compression and paged
-    out pages freed at least ``_MIN_RECLAIM_RATE``."""
-    if before is None or after is None:
-        return False
-    saved = (after[0] - after[1]) - (before[0] - before[1])
-    if after[2] > before[2]:
-        return True
-    freed = saved + (sum(after[3:]) - sum(before[3:])) * _PAGE
-    return freed >= _MIN_RECLAIM_RATE * max(seconds, 0.0) and freed > 0
-
-
-# A reading counts for at most _STARVE_STEP_S of waiting, so two readings
-# far apart are not one long wait. Past _STARVE_CAP_S of waiting, reclaim
-# no longer holds the clock: the kernel is not keeping up.
-_STARVE_STEP_S = 0.5
-_STARVE_CAP_S = 5.0
-
-
-class StarveWatch:
-    """Seconds threads have waited on the kernel for free pages while it
-    frees no memory: no swap out, no compression that saves memory or
-    page out of file pages at ``_MIN_RECLAIM_RATE`` (``reclaimed``), and
-    no fewer threads waiting than at any reading of the streak. Waiters
-    while the kernel frees memory are the kernel at work, for up to
-    ``_STARVE_CAP_S`` of waiting. Each reading counts for at most
-    ``_STARVE_STEP_S`` since the one before. ``waiters`` holds the last
-    count, and ``gap`` the seconds since the reading before it. 0 while
-    no thread waits or the waiter count cannot be read;
-    reclaim counts that cannot be read count as no reclaim.
-    ``clock``, ``waiting`` and ``marks`` replace the time, waiter and
-    reclaim reads."""
-
-    def __init__(self, clock=None, waiting=None, marks=None):
-        self.clock = clock or (lambda: time.monotonic())
-        self.waiting = waiting or (lambda: free_page_waiters())
-        self.read_marks = marks or (lambda: reclaim_marks())
-        self.reset()
-
-    def reset(self) -> None:
-        self.last = self.marks = self.low = None
-        self.waited = self.stalled = self.gap = 0.0
-        self.waiters = 0
-
-    def __call__(self) -> float:
-        waiters = self.waiting()
-        if not waiters:
-            self.reset()
-            return 0.0
-        now = self.clock()
-        marks = self.read_marks()
-        if self.last is not None:
-            self.gap = now - self.last
-            dt = min(self.gap, _STARVE_STEP_S)
-            self.waited += dt
-            working = (waiters < self.low
-                       or reclaimed(self.marks, marks, now - self.last))
-            self.stalled = (0.0 if working and self.waited < _STARVE_CAP_S
-                            else self.stalled + dt)
-        self.last, self.marks = now, marks
-        self.low = waiters if self.low is None else min(self.low, waiters)
-        self.waiters = waiters
-        return self.stalled
 
 
 def available_bytes() -> int | None:

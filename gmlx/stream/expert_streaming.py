@@ -205,9 +205,8 @@ def install_unflagged_tables(model, gguf_path: str | None, *,
 
 # The chunked wire's wait under a chunk's line: a rise of unwired memory
 # smaller than _WIRE_MIN_RISE does not count, the wait stops once unwired
-# memory has not risen for _WIRE_STALL_S or threads have waited on the
-# kernel for free pages that long while it frees no memory, and the waits
-# of one wire add up to at most _WIRE_WAIT_S.
+# memory has not risen for _WIRE_STALL_S, and the waits of one wire add
+# up to at most _WIRE_WAIT_S.
 _WIRE_STALL_S = 2.0
 _WIRE_MIN_RISE = 256 << 20
 _WIRE_WAIT_S = 60.0
@@ -215,20 +214,16 @@ _WIRE_WAIT_S = 60.0
 
 class _ChunkGuard:
     """Before each chunk of a resident wire: True once unwired RAM, read
-    live (``budget.unwired_ram_bytes``), covers ``keep`` plus the chunk,
-    and no thread waits on the kernel for free pages
-    (``budget.free_page_waiters``). With the pre-load check's keep, that
-    check runs again before each chunk: each chunk takes its bytes out of
-    unwired RAM, so a wire the check passed goes through, unless another
-    process wires more or the wire costs more than its estimate. A chunk
-    past the free and file-backed pages has the kernel compress other
-    apps' memory for it, and the free-page leg stops the wire if the
-    kernel falls behind. Short of the line, it waits while unwired memory
-    rises; with threads waiting, while the kernel frees memory for them
-    (``kernel_vm.StarveWatch``). It stops on a stall or once the wire has
-    waited ``wait_s`` in all. ``last``, ``line``, ``pending``, ``short``
-    and ``starved`` keep the final reading, the line it was judged on,
-    the chunk's bytes, and which legs were short."""
+    live (``budget.unwired_ram_bytes``), covers ``keep`` plus the chunk.
+    With the pre-load check's keep, that check runs again before each
+    chunk: each chunk takes its bytes out of unwired RAM, so a wire the
+    check passed goes through, unless another process wires more or the
+    wire costs more than its estimate. A chunk past the free and
+    file-backed pages has the kernel compress other apps' memory for it.
+    Short of the line, it waits while unwired memory rises, and stops on
+    a stall or once the wire has waited ``wait_s`` in all. ``last``,
+    ``line`` and ``pending`` keep the final reading, the line it was
+    judged on and the chunk's bytes."""
 
     def __init__(self, keep: float, *, stall_s: float | None = None,
                  wait_s: float | None = None,
@@ -242,33 +237,25 @@ class _ChunkGuard:
         self.last: int | None = None
         self.line = 0
         self.pending = 0
-        self.short = self.starved = False
 
     def __call__(self, nbytes: int) -> bool:
-        from gmlx.serve.kernel_vm import StarveWatch
         from gmlx.stream import budget
 
         self.pending = int(nbytes)
         self.line = self.keep + self.pending
         start = since = time.monotonic()
         best = None
-        watch = StarveWatch(clock=lambda: time.monotonic(),
-                            waiting=lambda: budget.free_page_waiters(),
-                            marks=lambda: budget.reclaim_marks())
         try:
             while True:
                 self.last = budget.unwired_ram_bytes()
-                stalled = watch()
-                self.short = self.last is not None and self.last < self.line
-                self.starved = watch.waiters > 0
-                if not (self.short or self.starved):
+                if self.last is None or self.last >= self.line:
                     return True
                 now = time.monotonic()
-                if best is None or (self.last or 0) >= best + self.min_rise:
-                    best, since = self.last or 0, now
-                if ((self.short and now - since >= self.stall_s)
-                        or stalled >= self.stall_s
-                        or self.waited + now - start >= self.wait_s):
+                if best is None or self.last >= best + self.min_rise:
+                    best, since = self.last, now
+                elif now - since >= self.stall_s:
+                    return False
+                if self.waited + now - start >= self.wait_s:
                     return False
                 time.sleep(self.step_s)
         finally:
@@ -443,7 +430,7 @@ def _chunked_wire(model, check, *, room, depth, skip_ids=frozenset(),
     wired = _unwire(model) - guard.pending
     loadlog.warn("[stream] " + check.stop_line(
         wired=wired, unwired=guard.last or 0, need=guard.line,
-        starved=guard.starved and not guard.short, room=room, depth=depth))
+        room=room, depth=depth))
     return False
 
 

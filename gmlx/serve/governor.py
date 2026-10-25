@@ -82,16 +82,14 @@ Knobs (all calib values are U5's to tighten):
                              + pageable anonymous + file-backed pages,
                              read live every tick; other apps' memory
                              counts, since the kernel compresses or
-                             swaps it): below it, or with threads
-                             waiting on the kernel for free pages, the
-                             band is red at once, whatever the
-                             MLX-side rate math says (default: lower
-                             of 4 and 10% of RAM; 0 disables). These
-                             are the counters that predict the
-                             free-page livelock panic; MLX cannot see
-                             them because its buffer cache reads as
-                             free inside the process and wired to the
-                             kernel
+                             swaps it): below it, the band is red at
+                             once, whatever the MLX-side rate math
+                             says (default: lower of 4 and 10% of RAM;
+                             0 disables). These are the counters that
+                             predict the free-page livelock panic; MLX
+                             cannot see them because its buffer cache
+                             reads as free inside the process and wired
+                             to the kernel
     GMLX_GOV_THROTTLE_CACHE_GB
                              MLX cache limit while a throttle band
                              (yellow and up) is armed (default 2; 0 =
@@ -148,7 +146,6 @@ _STATS = {
     "kernel_unwired_bytes": None,
     "kernel_free_page_waiters": None,
     "kernel_floor_reds": 0,
-    "kernel_starved_reds": 0,
     "kernel_floor": None,
 }
 
@@ -272,12 +269,6 @@ class _GovState:
         # was logged
         self.floor_prev = None
         self.floor_warned_at = 0.0
-        # free-page starvation: the stall clock, and whether this
-        # stall was read again and its first reclaim ran
-        from .kernel_vm import StarveWatch
-
-        self.starve = StarveWatch()
-        self.starve_reclaimed = False
         # U5 fault injection: (kind, tick) directives already fired
         self.injected: set = set()
 
@@ -355,37 +346,6 @@ def _kernel_waiters():
     from .kernel_vm import free_page_waiters
 
     return free_page_waiters()
-
-
-# Free-page stall: threads waiting on the kernel this long with no
-# reclaim (``kernel_vm.StarveWatch``) take a reclaim, and this long a shed.
-_STARVE_RECLAIM_S = 0.5
-_STARVE_SHED_S = 2.0
-# A stall long enough to act on, from a reading that came over
-# kernel_vm._STARVE_STEP_S after the one before, is read again this many
-# times, this far apart, and acts only if it holds: ticks can come seconds
-# apart, and threads waiting at two of them need not have waited in
-# between.
-_STARVE_CONFIRM = 2
-_STARVE_CONFIRM_S = 0.05
-
-
-def _starved_for(st) -> float:
-    """Seconds of the current free-page stall, 0 without one. A stall long
-    enough to act on is read again first when its reading came long after
-    the one before."""
-    from .kernel_vm import _STARVE_STEP_S
-
-    stalled = st.starve()
-    if stalled >= _STARVE_RECLAIM_S and st.starve.gap > _STARVE_STEP_S:
-        for _ in range(_STARVE_CONFIRM):
-            time.sleep(_STARVE_CONFIRM_S)
-            stalled = st.starve()
-            if stalled < _STARVE_RECLAIM_S:
-                break
-    if stalled < _STARVE_RECLAIM_S:
-        st.starve_reclaimed = False
-    return stalled
 
 
 def _kernel_floor_bytes() -> float:
@@ -612,38 +572,6 @@ def _evict_registered(fraction: float) -> float:
     return freed
 
 
-def _starved_tick(gen, st: _GovState, ws: float, margin: float,
-                  floor: float, starved: float) -> None:
-    """Threads have waited ``starved`` seconds for free pages, with the
-    memory not wired above the floor and the kernel reclaiming nothing.
-    The stall's first reclaim takes half a floor of the registered
-    caches; past ``_STARVE_SHED_S`` it takes them all and fails the
-    largest row."""
-    _STATS["kernel_starved_reds"] += 1
-    _enter(gen, st, RED, ws, margin)
-    if starved < _STARVE_SHED_S:
-        if not st.starve_reclaimed:
-            st.starve_reclaimed = True
-            freed = _evict_registered(_floor_evict_fraction(floor, floor))
-            mx.clear_cache()
-            _log.warning("[governor] kernel starved: threads waiting on "
-                         "free pages for %.1f s; evicted %.2f GB, cache "
-                         "cleared", starved, freed / 1e9)
-            _STATS["last_action"] = (
-                f"kernel starved reclaim freed {freed / 1e9:.2f} GB")
-        return
-    freed = _evict_registered(1.0)
-    mx.clear_cache()
-    st.orange_failed = False
-    if batch_rows(gen) > 0 and _shed_allowed(st):
-        _log.warning("[governor] kernel starved: threads waiting on free "
-                     "pages for %.1f s; evicted %.2f GB", starved,
-                     freed / 1e9)
-        _fail_largest(gen, st, (
-            f"governor red: threads waiting on the kernel for free pages "
-            f"for {starved:.1f} s"))
-
-
 def _apc_disk_armed(gen) -> bool:
     mgr = getattr(gen, "apc_manager", None)
     return mgr is not None and getattr(mgr, "disk", None) is not None
@@ -818,16 +746,14 @@ def _governor_tick(gen) -> None:
     else:
         st.green_streak = 0
 
-    # Kernel floor: the box's memory not wired, not the process's view,
-    # and the threads waiting on the kernel for free pages. Other apps'
-    # memory counts as not wired, since the kernel compresses or swaps
-    # it. Below the floor, or starved, nothing else in this tick
+    # Kernel floor: the box's memory not wired, not the process's view.
+    # Other apps' memory counts as not wired, since the kernel
+    # compresses or swaps it. Below the floor nothing else in this tick
     # matters: the rate math can read green while the kernel is a few
     # hundred MB from a livelock (2026-08-24: active 87 GB + cache 27 GB
     # on a 128 GB box, governor green throughout).
     floor = _kernel_floor_bytes()
     unw = _kernel_unwired() if floor > 0 else None
-    starved = _starved_for(st) if floor > 0 else 0.0
     _STATS["kernel_unwired_bytes"] = None if unw is None else int(unw)
     if unw is not None and unw < floor:
         _STATS["kernel_floor_reds"] += 1
@@ -835,8 +761,7 @@ def _governor_tick(gen) -> None:
         # stable breach holds; evicting every tick would only walk the
         # decode arena to its floor for nothing.
         prev = st.floor_prev
-        collapsing = (_floor_collapsing(unw, prev, floor)
-                      or starved >= _STARVE_SHED_S)
+        collapsing = _floor_collapsing(unw, prev, floor)
         if prev is None or collapsing:
             # A collapse takes everything; a first dip takes the deficit.
             frac = (1.0 if collapsing
@@ -863,17 +788,15 @@ def _governor_tick(gen) -> None:
         # rows cannot raise it (the pressure is wired weights) -- so a
         # STABLE breach only observes and logs. The full RED + shed
         # response is reserved for the livelock signature (2026-08-24
-        # freeze): the memory not wired in active collapse, through half
-        # the floor, or threads starved of free pages past
-        # _STARVE_SHED_S. Half-floor needs a second sub-floor sample to
+        # freeze): the memory not wired in active collapse, or through
+        # half the floor. Half-floor needs a second sub-floor sample to
         # confirm: a neighbor teardown transient reads deep-but-recovering
         # on its first sample (2026-08-26: 3.6 GB false shed 10 s after an
         # 84 GB exit). Quarter-floor is last-pages territory and reds
         # immediately (2026-08-24 freeze read 0.5 GB).
         cur = (unw2 or 0)
         st.floor_prev = cur
-        if not (_floor_collapsing(cur, prev, floor)
-                or starved >= _STARVE_SHED_S):
+        if not _floor_collapsing(cur, prev, floor):
             now = time.perf_counter()
             if now - st.floor_warned_at >= 30.0:
                 st.floor_warned_at = now
@@ -896,9 +819,6 @@ def _governor_tick(gen) -> None:
         st.orange_failed = False
         return
     st.floor_prev = None
-    if starved >= _STARVE_RECLAIM_S:
-        _starved_tick(gen, st, ws, margin, floor, starved)
-        return
 
     if red_now and batch_rows(gen) > 0:
         _enter(gen, st, RED, ws, margin)
@@ -984,13 +904,7 @@ def _governor_tick(gen) -> None:
 
 def _harvest_tick(gen, st: _GovState, out) -> None:
     """Post-tick: fold emitted tokens per row into the tokens/tick EMA
-    the demand model uses. A step that leaves nothing to run ends the
-    free-page stall clock: no tick reads it until work comes back."""
-    if (not batch_rows(gen) and getattr(gen, "_prompt_batch", None) is None
-            and not getattr(gen, "_unprocessed_sequences", None)
-            and not getattr(getattr(gen, "_generation_batch", None),
-                            "_pending_injections", None)):
-        st.starve.reset()
+    the demand model uses."""
     try:
         responses = out[1]
     except Exception:
