@@ -54,6 +54,8 @@ is already running does not see a variable you export later.
 | `GMLX_MTP_DEBUG=1` | Log the MTP notices, including the verify branch the first time each branch runs. |
 | `GMLX_DRAFT_HEAD` | `q8` or `q4` drafts an MTP or DFlash 2 round through a `q8_0` or `q4_0` copy of a float target head, and `f16` uses the head as is. The default is `q8`. |
 | `GMLX_DRAFT_BLOCK_SIZE` | Block size of each speculative round for `serve`, as `--draft-block-size` sets. A round drafts one token fewer. |
+| `GMLX_Q4_MTP_LADDER` | Drafts per Qwen3.8-Flash-Next round by the head's confidence in the first, as `conf:drafts` steps. Default `0.9:5,0.5:3,0:1`; `0` drafts a fixed three. |
+| `GMLX_Q4_MTP_STREAK_CAP=N` | After a Qwen3.8-Flash-Next round where the model rejected a draft, draft at most N tokens. The default is 3, and `0` lifts the cap. |
 | `GMLX_MTP_PREEMPT=0` | Make queued requests wait for a lone speculating request to finish, instead of moving it onto the batch loop so they can join. |
 | `GMLX_MTP_RESUME=0` | Keep speculation off on a batch that grew past the width cap, instead of turning it back on when the batch shrinks within the cap. |
 | `GMLX_MTP_MIXED` | `0` decodes a batch past the width cap plain, not as a [mixed batch](speculative-batching.md#mixed-batches). `1` forces mixed batches on MoE targets too. |
@@ -130,6 +132,7 @@ fusions.
 | `GMLX_HADAMARD_FUSE=0` | Rotate the input of a folded down or output projection in its own dispatch instead of inside the gate kernel. |
 | `GMLX_HADAMARD_TRACE=1` | Count the rotations on a folded file since the last `hadamard_modules.reset_rotation_count` call, read back through `hadamard_modules.rotation_count`. |
 | `GMLX_HADAMARD_ROTATE=0` | Skip the Hadamard-fold rotation. The model produces garbage, and a benchmark measures the whole cost of the rotation. |
+| `GMLX_KQ_SKINNY=0` | Run a fused MoE block's router and the DeepSeek-V4 dense projections on the stock matmul at verify widths 2 to 16, instead of the mlx-kquant skinny matmul. |
 | `GMLX_MOE_GATEUP_CONCAT=0` | Disable the prefill gate and up expert concat, which trades a second resident copy of the wire bytes for one gather. |
 | `GMLX_MOE_GATEUP_CONCAT_MAX_MB` | Cap the concat copies at this many MB, stamping layers in order until the cap is reached. |
 | `GMLX_MOE_GATEUP_CONCAT_HEADROOM_GB` | Skip a concat copy that would leave less than this many GB under the memory ceiling. `0` turns the check off. |

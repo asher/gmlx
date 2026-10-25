@@ -38,6 +38,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Qwen3.8-Flash-Next drafts one, three or five tokens a round by how sure
   its head is of the first, instead of a fixed three. Code decodes up to
   a fifth faster, prose about as fast.
+- A fused MoE block's router runs on the mlx-kquant skinny matmul when a
+  speculative round checks two to sixteen tokens, exact in float32 where
+  the stock matmul ran as TF32, and about three times as fast at four.
+  `GMLX_KQ_SKINNY=0` keeps the matmul.
+- Qwen3.8-Flash-Next decodes faster, plain and speculative: its MoE
+  blocks now take the fused mlx-kquant path, which skipped the float32
+  activations its hyper-connection residual hands every layer.
 - Sampled requests accept speculative drafts by rejection sampling by
   default and decode faster. `--no-stochastic-mtp` keeps seeded runs
   token-identical to runs without speculation.

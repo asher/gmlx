@@ -108,6 +108,66 @@ def test_router_only_matches_the_stock_forward(calls, t):
     assert np.abs(g - w).max() <= 2e-2 * np.abs(w).max()
 
 
+@pytest.fixture
+def skinny_calls(monkeypatch):
+    """Counts kq.skinny_matmul calls."""
+    import mlx_kquant as kq
+
+    seen = []
+    real = kq.skinny_matmul
+
+    def spy(*a, **kw):
+        seen.append(a[0].shape)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(kq, "skinny_matmul", spy)
+    return seen
+
+
+@pytest.mark.parametrize("t", [1, 2, 4])
+def test_router_matvec_takes_the_skinny_kernel_past_width_one(calls, skinny_calls, t):
+    """Widths 2..16 route the f32 router through kq.skinny_matmul and pick
+    the same experts as the stock forward; width 1 keeps the matvec.
+    GMLX_KQ_SKINNY=0 keeps the matmul at every width."""
+    block, _stock = _block()
+    x = _x(t)
+    mx.eval(block(x))
+    assert len(calls) == 1
+    assert skinny_calls == ([(t, D)] if t > 1 else [])
+    picked = np.sort(np.array(calls[0]).reshape(1, t, K), -1)
+    assert np.array_equal(picked, _stock_picks(block, x))
+
+
+def test_router_skinny_env_off_keeps_the_matmul(calls, skinny_calls, monkeypatch):
+    monkeypatch.setattr(modules, "_FUSED_MOE_SKINNY_ROUTER", False)
+    block, _stock = _block()
+    x = _x(4)
+    mx.eval(block(x))
+    assert len(calls) == 1 and skinny_calls == []
+    picked = np.sort(np.array(calls[0]).reshape(1, 4, K), -1)
+    assert np.array_equal(picked, _stock_picks(block, x))
+
+
+@pytest.mark.parametrize("t", [1, 4])
+def test_float32_input_takes_the_fused_block(calls, t):
+    """A float32 residual (the hyper-connection models) runs the fused
+    block on bf16 and returns bf16, within a bf16 rounding of the stock
+    float32 forward, with the same experts picked."""
+    block, stock = _block()
+    x = _x(t).astype(mx.float32)
+    got = block(x)
+    want = stock.__call__(block, x)
+    mx.eval(got, want)
+    assert len(calls) == 1
+    assert got.dtype == mx.bfloat16 and got.shape == x.shape
+    assert want.dtype == mx.float32
+    picked = np.sort(np.array(calls[0]).reshape(1, t, K), -1)
+    assert np.array_equal(picked, _stock_picks(block, x))
+    g = np.array(got.astype(mx.float32))
+    w = np.array(want)
+    assert np.abs(g - w).max() <= 2e-2 * np.abs(w).max()
+
+
 def test_wide_call_takes_the_stock_forward(calls):
     block, stock = _block()
     x = _x(11)  # 11 * K >= 64: the prefill width
