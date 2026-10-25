@@ -78,6 +78,12 @@ easier to predict. [Benchmarks](benchmarks.md) has each model's speedup
 curves, and `--bench-depths` measures your own model, as in the example
 above.
 
+Qwen3.8-Flash-Next sizes each round by how sure its head is of the first
+draft: five drafts when it is sure, three when it is fairly sure, and one
+when it is not, with at most three after a round where the model rejected
+a draft. Code decodes up to a fifth faster this way than with a fixed
+three drafts, and prose about as fast.
+
 A [quantized KV cache](kv-quantization.md#speed-and-speculative-decoding)
 lowers the share of accepted drafts, and 4 bits costs the most. With
 speculation on, keep the KV cache at full precision if you can, and use 8

@@ -35,6 +35,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Qwen3.8-Flash-Next drafts one, three or five tokens a round by how sure
+  its head is of the first, instead of a fixed three. Code decodes up to
+  a fifth faster, prose about as fast.
 - Sampled requests accept speculative drafts by rejection sampling by
   default and decode faster. `--no-stochastic-mtp` keeps seeded runs
   token-identical to runs without speculation.
