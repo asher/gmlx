@@ -32,7 +32,7 @@ embeddings and the output head.
 
 The memory [governor](../glossary.md#governor) keeps tracked memory under a
 ceiling, which is the GPU working set that macOS recommends, less 5%. It
-also keeps a reserve of 8 GB or 10% of RAM, whichever is larger, below
+also keeps a reserve of 2 GB or 10% of RAM, whichever is larger, below
 physical RAM. Four things share the ceiling, in this order:
 
 1. The every-token weights come first.

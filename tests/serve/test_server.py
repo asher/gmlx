@@ -972,7 +972,7 @@ def test_init_next_hint_omits_config_for_default_location(monkeypatch, tmp_path,
     rc = srv._cmd_init(["--models-dir", str(tmp_path), "--out", str(out)])
     assert rc == 0
     hint = capsys.readouterr().out
-    assert "next: gmlx pull <hf:ref>  ->  gmlx serve\n" in hint and "--config" not in hint
+    assert "next: gmlx pull  ->  gmlx serve\n" in hint and "--config" not in hint
     if sys.platform == "darwin":   # the launchd start-at-login hint, bare here too
         assert "gmlx service install" in hint
 
@@ -1027,7 +1027,7 @@ def test_init_next_hint_keeps_config_for_nondefault_location(monkeypatch, tmp_pa
     rc = srv._cmd_init(["--models-dir", str(tmp_path), "--out", str(out)])
     assert rc == 0
     hint = capsys.readouterr().out
-    assert f"next: gmlx pull <hf:ref> --config {out}  ->  gmlx serve --config {out}" in hint
+    assert f"next: gmlx pull --config {out}  ->  gmlx serve --config {out}" in hint
     if sys.platform == "darwin":   # the service-install hint carries --config too
         assert f"gmlx service install --config {out}" in hint
 
@@ -1289,7 +1289,7 @@ def test_init_keeps_a_moe_resident_that_its_table_brings_under(
     flash_next_under_its_table(monkeypatch, lib)
     out = tmp_path / "cfg.yaml"
     assert srv._cmd_init(["--out", str(out), "--models-dir", str(lib)]) == 0
-    assert "over-RAM" not in capsys.readouterr().err
+    assert "larger than memory" not in capsys.readouterr().err
     text = out.read_text()
     assert "stream:" not in text
     assert f"    draft_gguf: {FLASH_NEXT_MTP}\n" in text
@@ -3060,14 +3060,14 @@ def test_register_downloads_adds_a_pulled_drafter_after_the_path(
             "    speculative: auto\n"
             "\n  # sampling (gguf): t=0.6\n  old:\n") in cfg_path.read_text()
     out = capsys.readouterr().out
-    assert "registered Qwen3.8-27B-DFlash2-Q8_0.gguf as the drafter of qwen" in out
+    assert "registered Qwen3.8-27B-DFlash2-Q8_0.gguf for faster replies on qwen" in out
     assert "--add-companions" not in out
 
 
 @pytest.mark.parametrize("drafter, out", [
     ("Qwen3.8-27B-DFlash2-Q8_0.gguf", ""),        # a re-pull
     ("Qwen3.8-27B-DFlash-Q8_0.gguf",
-     "Qwen3.8-27B-DFlash2-Q8_0.gguf is not registered as the drafter of qwen"),
+     "Qwen3.8-27B-DFlash2-Q8_0.gguf is not set for faster replies on qwen"),
 ])
 def test_register_downloads_keeps_the_drafter_an_entry_names(
         monkeypatch, tmp_path, capsys, drafter, out):
@@ -3092,14 +3092,15 @@ def test_a_drafter_pairing_prints_once_and_only_for_a_scanned_model(
     drafter = _qwen_drafters(monkeypatch, lib)
     assert srv._cmd_sync(["--config", str(cfg_path), "--dry-run"]) == 0
     err = capsys.readouterr().err
-    assert err.count("drafter paired") == 1
-    assert f"drafter paired (speculative on for qwen3.8-27b-ud-q6): {drafter}" in err
+    assert err.count("faster replies paired") == 1
+    assert (f"faster replies paired (speculative on for qwen3.8-27b-ud-q6): "
+            f"{drafter}") in err
     cfg_path.write_text(
         f"server:\n  model_dirs:\n    - {lib}\n"
         f"models:\n  qwen:\n    path: {_QWEN_REPO}/Qwen3.8-27B-UD-Q6_K_XL.gguf\n")
     assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
     got = capsys.readouterr()
-    assert "drafter paired" not in got.err
+    assert "faster replies paired" not in got.err
     assert got.out.count("hint:") == 1
     assert (f"  hint:    qwen  (drafter {_QWEN_REPO}/Qwen3.8-27B-DFlash2-Q8_0.gguf "
             "pairs with it; --add-companions adds it)") in got.out
@@ -3140,8 +3141,8 @@ def test_register_downloads_names_an_mmproj_it_leaves_out(monkeypatch, tmp_path,
     assert cfg_path.read_text() == before
     out = capsys.readouterr().out
     assert out == ("" if held else
-                   "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf pairs with "
-                   "ternary-bonsai-2-27b-pq2 as its mmproj: gmlx sync-models "
+                   "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf can give "
+                   "ternary-bonsai-2-27b-pq2 image input: gmlx sync-models "
                    "--add-companions adds it\n")
 
 
@@ -3180,6 +3181,293 @@ def test_register_downloads_never_fails_pull(monkeypatch, tmp_path, capsys):
     srv.register_downloads([str(lib / "old.gguf")], str(cfg_path))  # no raise
     err = capsys.readouterr().err
     assert "could not register" in err and "sync-models" in err
+
+
+_BONSAI_REPO = "prism-ml__Ternary-Bonsai-2-27B-gguf"
+_INCO_REPO = "incoai__Qwen3.8-27B-DFlash2-GGUF"
+_BONSAI_MODEL = f"{_BONSAI_REPO}/Ternary-Bonsai-2-27B-PQ2_0.gguf"
+_BONSAI_MMPROJ = f"{_BONSAI_REPO}/Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf"
+_BONSAI_DRAFTER = f"{_INCO_REPO}/Qwen3.8-27B-DFlash2-Q8_0.gguf"
+_BONSAI_HEADERS = {
+    "Ternary-Bonsai-2-27B-PQ2_0.gguf": {
+        "general.architecture": "qwen35", "general.basename": "Ternary-Bonsai-2-27B"},
+    "Ternary-Bonsai-2-27B-PTQ1_0.gguf": {
+        "general.architecture": "qwen35", "general.basename": "Ternary-Bonsai-2-27B"},
+    "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf": {"general.architecture": "clip"},
+    "mmproj-F16.gguf": {"general.architecture": "clip"},
+    "mmproj-BF16.gguf": {"general.architecture": "clip"},
+    "Qwen3.8-27B-DFlash2-Q8_0.gguf": {
+        "general.architecture": "dflash", "general.basename": "Qwen3.8-27B",
+        "general.base_model.0.name": "Qwen3.8 27B", "dflash.selector_top_k": 16},
+    "Flashy-MoE-UD-IQ4_XS.gguf": {
+        "general.architecture": "qwen35moe", "general.basename": "Flashy-MoE",
+        "qwen35moe.expert_count": 64},
+}
+
+
+def _bonsai_library(monkeypatch, lib, *extra):
+    """A catalog pull's files as pull lays them out: Ternary-Bonsai-2-27B
+    with its named tower, and the Qwen3.8-27B DFlash 2 drafter in the
+    other publisher's folder, which declares a base the scan never pairs
+    it with (the `cross_base` row). ``extra`` names more files under the
+    Bonsai folder. Returns ``(model, mmproj, drafter)`` paths."""
+    for name in (_BONSAI_MODEL, _BONSAI_MMPROJ, _BONSAI_DRAFTER,
+                 *(f"{_BONSAI_REPO}/{e}" for e in extra)):
+        (lib / name).parent.mkdir(exist_ok=True)
+        (lib / name).write_bytes(b"GGUF")
+
+    def classify(path):
+        name = os.path.basename(path)
+        return srv.discovery._classify_meta(dict(_BONSAI_HEADERS[name]),
+                                            basename=name, path=path)
+
+    monkeypatch.setattr(srv.discovery, "classify_gguf", classify)
+    monkeypatch.setattr(srv, "_reload_running", lambda path, skip: None)
+    return lib / _BONSAI_MODEL, lib / _BONSAI_MMPROJ, lib / _BONSAI_DRAFTER
+
+
+def _bonsai_pairs(model, mmproj, drafter, alias="ternary-bonsai-2-27b"):
+    return {str(model): {"mmproj": str(mmproj), "draft_gguf": str(drafter),
+                         "alias": alias}}
+
+
+def test_register_downloads_writes_the_pairs_onto_a_new_entry(
+        monkeypatch, tmp_path, capsys):
+    """A catalog pull states its companions: the drafter from the other
+    folder, which no scan rule pairs, lands on the new entry with the
+    tower, and the catalog name becomes a marked alias in a new block
+    after `models:`. Every line says faster replies and image input."""
+    from gmlx.config import load_config
+    from helpers import banned_words
+    cfg_path, lib = _reg_config(tmp_path)
+    model, mmproj, drafter = _bonsai_library(monkeypatch, lib)
+    got = srv.register_downloads([str(model), str(mmproj), str(drafter)],
+                                 str(cfg_path),
+                                 pairs=_bonsai_pairs(model, mmproj, drafter))
+    assert got == srv.Registered({str(model): "ternary-bonsai-2-27b-pq2"},
+                                 "ternary-bonsai-2-27b", None)
+    text = cfg_path.read_text()
+    assert (f"    path: {_BONSAI_MODEL}\n    mmproj: {_BONSAI_MMPROJ}\n"
+            f"    draft_gguf: {_BONSAI_DRAFTER}\n") in text
+    assert ("\n\naliases:\n  ternary-bonsai-2-27b: ternary-bonsai-2-27b-pq2"
+            f"  # {srv.discovery.PULL_ALIAS_NOTE}\n") in text
+    assert "speculative:" not in text          # draft_gguf turns it on
+    cfg = load_config(cfg_path)
+    assert cfg.aliases == {"ternary-bonsai-2-27b": "ternary-bonsai-2-27b-pq2"}
+    out = capsys.readouterr()
+    assert ("registered ternary-bonsai-2-27b-pq2 in "
+            f"{cfg_path}  (images, faster replies)\n") in out.out
+    assert "configure via draft_gguf" not in out.err      # named_drafters
+    assert banned_words(out.out + out.err) == []
+
+
+def test_register_downloads_takes_the_catalogs_tower_over_the_scans(
+        monkeypatch, tmp_path):
+    """Two generic towers beside the model: the scan takes the first by
+    name, the catalog names the other, and the entry gets the catalog's."""
+    from gmlx.config import load_config
+    cfg_path, lib = _reg_config(tmp_path)
+    model, _mm, drafter = _bonsai_library(monkeypatch, lib, "mmproj-F16.gguf",
+                                          "mmproj-BF16.gguf")
+    f16 = lib / _BONSAI_REPO / "mmproj-F16.gguf"
+    srv.register_downloads([str(model), str(f16)], str(cfg_path),
+                           pairs={str(model): {"mmproj": str(f16)}})
+    cfg = load_config(cfg_path)
+    assert cfg.models["ternary-bonsai-2-27b-pq2"].mmproj == f"{_BONSAI_REPO}/mmproj-F16.gguf"
+
+
+def test_register_downloads_writes_the_pairs_onto_an_open_entry(
+        monkeypatch, tmp_path, capsys):
+    """A re-pull of a configured model adds the companions its entry
+    has no key for, leaves the user's other keys alone, and reports the
+    configured id with the alias."""
+    from gmlx.config import load_config
+    cfg_path, lib = _reg_config(
+        tmp_path,
+        f"models:\n  bonsai:\n    path: {_BONSAI_MODEL}\n"
+        "    overrides:\n      load:\n        kv_bits: 4\n")
+    model, mmproj, drafter = _bonsai_library(monkeypatch, lib)
+    got = srv.register_downloads([str(model), str(mmproj), str(drafter)],
+                                 str(cfg_path),
+                                 pairs=_bonsai_pairs(model, mmproj, drafter))
+    assert got == srv.Registered({str(model): "bonsai"}, "ternary-bonsai-2-27b", None)
+    text = cfg_path.read_text()
+    # A paired drafter turns speculation on as `auto`, the value main writes.
+    assert (f"  bonsai:\n    path: {_BONSAI_MODEL}\n    mmproj: {_BONSAI_MMPROJ}\n"
+            f"    draft_gguf: {_BONSAI_DRAFTER}\n    speculative: auto\n"
+            "    overrides:\n      load:\n        kv_bits: 4\n") in text
+    cfg = load_config(cfg_path)
+    assert cfg.models["bonsai"].overrides == {"load": {"kv_bits": 4}}
+    assert cfg.aliases == {"ternary-bonsai-2-27b": "bonsai"}
+    out = capsys.readouterr().out
+    assert ("registered Qwen3.8-27B-DFlash2-Q8_0.gguf for faster replies on "
+            f"bonsai in {cfg_path}\n") in out
+    assert ("registered Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf for image input "
+            f"on bonsai in {cfg_path}\n") in out
+    # The same pull again changes nothing and says nothing.
+    before = cfg_path.read_text()
+    got = srv.register_downloads([str(model), str(mmproj), str(drafter)],
+                                 str(cfg_path),
+                                 pairs=_bonsai_pairs(model, mmproj, drafter))
+    assert got == srv.Registered({str(model): "bonsai"}, "ternary-bonsai-2-27b", None)
+    assert cfg_path.read_text() == before and capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("extra, note", [
+    (f"    draft_gguf: {_BONSAI_REPO}/other.gguf\n",
+     "Qwen3.8-27B-DFlash2-Q8_0.gguf is not set for faster replies on bonsai: "
+     "its entry in {cfg} has a draft_gguf key or speculative: false"),
+    ("    speculative: false\n",
+     "Qwen3.8-27B-DFlash2-Q8_0.gguf is not set for faster replies on bonsai: "
+     "its entry in {cfg} has a draft_gguf key or speculative: false"),
+    (f"    mmproj: {_BONSAI_REPO}/other-mmproj.gguf\n",
+     "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf is not set for image input on "
+     "bonsai: its entry in {cfg} has an mmproj key"),
+    (f"    #mmproj: {_BONSAI_MMPROJ}\n",
+     "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf is not set for image input on "
+     "bonsai: its entry in {cfg} has an mmproj key"),
+])
+def test_register_downloads_holds_a_pair_the_entry_settled(
+        monkeypatch, tmp_path, capsys, extra, note):
+    """A key the user set, commented out, or turned off stays as it is,
+    and the pull says so in plain words."""
+    cfg_path, lib = _reg_config(
+        tmp_path, f"models:\n  bonsai:\n    path: {_BONSAI_MODEL}\n{extra}")
+    model, mmproj, drafter = _bonsai_library(monkeypatch, lib)
+    srv.register_downloads([str(model), str(mmproj), str(drafter)], str(cfg_path),
+                           pairs=_bonsai_pairs(model, mmproj, drafter))
+    text = cfg_path.read_text()
+    assert extra in text
+    held = _BONSAI_DRAFTER if "faster replies" in note else _BONSAI_MMPROJ
+    assert text.count(held) == (1 if held in extra else 0)
+    assert note.format(cfg=cfg_path) in capsys.readouterr().out
+
+
+def test_register_downloads_keeps_a_drafter_off_an_entry_that_streams(
+        monkeypatch, tmp_path, capsys):
+    """A MoE over the memory budget registers as `stream: experts`, which
+    cannot speculate: the drafter stays off a new entry and off a
+    configured one, with the reason."""
+    from gmlx.config import load_config
+    cfg_path, lib = _reg_config(
+        tmp_path,
+        f"models:\n  old-moe:\n    path: {_BONSAI_REPO}/Flashy-MoE-UD-IQ4_XS.gguf\n"
+        "    stream: experts\n")
+    _model, _mm, drafter = _bonsai_library(monkeypatch, lib,
+                                           "Flashy-MoE-UD-IQ4_XS.gguf")
+    monkeypatch.setattr(srv.discovery, "_over_budget",
+                        lambda c: (200 * 10**9, 100 * 10**9) if c.moe else None)
+    moe = lib / _BONSAI_REPO / "Flashy-MoE-UD-IQ4_XS.gguf"
+    # Configured and streaming: held back.
+    got = srv.register_downloads([str(moe), str(drafter)], str(cfg_path),
+                                 pairs={str(moe): {"draft_gguf": str(drafter)}})
+    assert got.ids == {str(moe): "old-moe"}
+    assert "draft_gguf" not in cfg_path.read_text()
+    assert ("Qwen3.8-27B-DFlash2-Q8_0.gguf is not set for faster replies on "
+            "old-moe: it runs from the SSD (stream: experts)\n") in capsys.readouterr().out
+    # New and streaming: the scan marks it, the drafter stays off.
+    cfg_path.write_text(f"server:\n  model_dirs:\n    - {lib}\nmodels: {{}}\n")
+    got = srv.register_downloads([str(moe), str(drafter)], str(cfg_path),
+                                 pairs={str(moe): {"draft_gguf": str(drafter)}})
+    cfg = load_config(cfg_path)
+    (mid,) = cfg.models
+    assert got.ids == {str(moe): mid}
+    assert cfg.models[mid].stream == "experts" and not cfg.models[mid].draft_gguf
+    assert (f"Qwen3.8-27B-DFlash2-Q8_0.gguf is not set for faster replies on "
+            f"{mid}: it runs from the SSD (stream: experts)\n") in capsys.readouterr().out
+
+
+def test_register_downloads_repoints_its_own_alias_only(monkeypatch, tmp_path,
+                                                        capsys):
+    """A pull at another tier moves the alias it wrote and names the
+    model it left; an alias the user wrote stays, with the id to run."""
+    from gmlx.config import load_config
+    note = srv.discovery.PULL_ALIAS_NOTE
+    cfg_path, lib = _reg_config(
+        tmp_path,
+        f"models:\n  bonsai:\n    path: {_BONSAI_MODEL}\n"
+        f"aliases:\n  ternary-bonsai-2-27b: bonsai  # {note}\n  mine: bonsai\n")
+    model, mmproj, drafter = _bonsai_library(monkeypatch, lib,
+                                             "Ternary-Bonsai-2-27B-PTQ1_0.gguf")
+    other = lib / _BONSAI_REPO / "Ternary-Bonsai-2-27B-PTQ1_0.gguf"
+    got = srv.register_downloads([str(other)], str(cfg_path),
+                                 pairs={str(other): {"alias": "ternary-bonsai-2-27b"}})
+    assert got == srv.Registered({str(other): "ternary-bonsai-2-27b-ptq1"},
+                                 "ternary-bonsai-2-27b", ("bonsai", str(model)))
+    text = cfg_path.read_text()
+    assert (f"aliases:\n  ternary-bonsai-2-27b: ternary-bonsai-2-27b-ptq1  # {note}\n"
+            "  mine: bonsai\n") in text
+    assert text.count(note) == 1
+    # The user's alias of the catalog name is theirs.
+    got = srv.register_downloads([str(other)], str(cfg_path),
+                                 pairs={str(other): {"alias": "mine"}})
+    assert got == srv.Registered({str(other): "ternary-bonsai-2-27b-ptq1"}, None, None)
+    assert (f"mine is already an alias in {cfg_path}; run it as gmlx chat "
+            "ternary-bonsai-2-27b-ptq1\n") in capsys.readouterr().out
+    assert load_config(cfg_path).aliases["mine"] == "bonsai"
+    # An alias of theirs that names this very model is the name to run.
+    got = srv.register_downloads([str(model)], str(cfg_path),
+                                 pairs={str(model): {"alias": "mine"}})
+    assert got == srv.Registered({str(model): "bonsai"}, "mine", None)
+    assert "already" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("body, what", [
+    ("models:\n  ternary-bonsai-2-27b:\n    path: old.gguf\n", "a model"),
+    ("models:\n  old:\n    path: old.gguf\nimage_models:\n  ternary-bonsai-2-27b:\n"
+     "    path: z.gguf\n    encoder: old\n    vae: v.gguf\n", "an image model"),
+    ("server:\n  assistants:\n    ternary-bonsai-2-27b:\n      model: old\n"
+     "models:\n  old:\n    path: old.gguf\n", "a served assistant"),
+])
+def test_register_downloads_holds_an_alias_that_is_an_id(
+        monkeypatch, tmp_path, capsys, body, what):
+    """A catalog name that is already an id in the config would make the
+    config refuse to load as an alias too, so the pull leaves it and
+    says which id runs the model."""
+    from gmlx.config import load_config
+    cfg_path, lib = _reg_config(tmp_path, body)
+    if "assistants" in body:
+        cfg_path.write_text(cfg_path.read_text().replace(
+            f"server:\n  model_dirs:\n    - {lib}\nserver:\n",
+            f"server:\n  model_dirs:\n    - {lib}\n"))
+    model, mmproj, drafter = _bonsai_library(monkeypatch, lib)
+    got = srv.register_downloads([str(model)], str(cfg_path),
+                                 pairs={str(model): {"alias": "ternary-bonsai-2-27b"}})
+    assert got == srv.Registered({str(model): "ternary-bonsai-2-27b-pq2"}, None, None)
+    assert "aliases" not in cfg_path.read_text()
+    assert (f"ternary-bonsai-2-27b is already {what} in {cfg_path}; run it as "
+            "gmlx chat ternary-bonsai-2-27b-pq2\n") in capsys.readouterr().out
+    assert "ternary-bonsai-2-27b-pq2" in load_config(cfg_path).models
+
+
+def test_register_downloads_returns_the_id_of_a_configured_file(monkeypatch,
+                                                                tmp_path, capsys):
+    cfg_path, lib = _reg_config(tmp_path)
+    monkeypatch.setattr(srv.discovery, "scan_dirs", lambda *a, **kw: [])
+    before = cfg_path.read_text()
+    got = srv.register_downloads([str(lib / "old.gguf")], str(cfg_path))
+    assert got == srv.Registered({str(lib / "old.gguf"): "old"}, None, None)
+    assert cfg_path.read_text() == before and capsys.readouterr().out == ""
+
+
+def test_sync_drops_the_aliases_of_a_model_whose_file_is_gone(
+        monkeypatch, tmp_path, capsys):
+    """An alias of a dropped id would fail the next load, so the sync
+    drops it with the entry and keeps the others."""
+    from gmlx.config import load_config
+    cfg_path, lib = _sync_config(
+        tmp_path,
+        "models:\n  keep:\n    path: keep.gguf\n  gone:\n    path: gone.gguf\n"
+        f"aliases:\n  name: gone  # {srv.discovery.PULL_ALIAS_NOTE}\n"
+        "  prof: gone@coding\n  other: keep\n")
+    (lib / "keep.gguf").write_bytes(b"x")
+    monkeypatch.setattr(srv.discovery, "scan_dirs", lambda specs, dirs, **kw: [])
+    assert srv._cmd_sync(["--config", str(cfg_path), "--no-reload"]) == 0
+    out = capsys.readouterr().out
+    assert "  remove:  alias name -> gone\n" in out
+    assert "  remove:  alias prof -> gone@coding\n" in out
+    cfg = load_config(cfg_path)
+    assert set(cfg.models) == {"keep"} and cfg.aliases == {"other": "keep"}
 
 
 def test_sync_models_dir_override_lands_in_model_dirs(monkeypatch, tmp_path):

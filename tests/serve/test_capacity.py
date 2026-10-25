@@ -48,6 +48,29 @@ def rig(monkeypatch, tmp_path):
     cap.clear_table()
 
 
+def test_working_set_for_ram_and_the_reserve(monkeypatch):
+    """The planner's working set is 2/3 of RAM under 64 GiB and 3/4 from
+    it, and the budget still reads it. The reserve is 2 GB up to 20 GB of
+    RAM and 10% past it; GMLX_GOV_RESERVE_GB overrides."""
+    monkeypatch.delenv("GMLX_GOV_RESERVE_GB", raising=False)
+    monkeypatch.delenv("GMLX_GOV_MARGIN", raising=False)
+    GiB = 1 << 30
+    assert cap.working_set_for_ram(8 * GiB) == pytest.approx(8 * GiB * 2 / 3)
+    assert cap.working_set_for_ram(32 * GiB) == pytest.approx(32 * GiB * 2 / 3)
+    assert cap.working_set_for_ram(64 * GiB) == pytest.approx(64 * GiB * 3 / 4)
+    assert cap.working_set_for_ram(128 * GiB) == pytest.approx(128 * GiB * 3 / 4)
+    for ram in (16 * GiB, 128 * GiB):
+        assert cap.ram_budget_bytes(ram) == pytest.approx(min(
+            cap.working_set_for_ram(ram) * (1 - cap.margin()),
+            ram - cap.reserve_bytes(ram)))
+    assert cap.reserve_bytes(8 * GiB) == 2e9
+    assert cap.reserve_bytes(16 * GiB) == 2e9
+    assert cap.reserve_bytes(32 * GiB) == pytest.approx(0.1 * 32 * GiB)
+    assert cap.reserve_bytes(128 * GiB) == pytest.approx(0.1 * 128 * GiB)
+    monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "5")
+    assert cap.reserve_bytes(128 * GiB) == 5e9
+
+
 def test_table_math_and_monotone_frontier(rig):
     path = rig(weights_gb=10.0, ws_gb=20.0)
     t = cap.derive_table(path)

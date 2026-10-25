@@ -8,6 +8,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `gmlx pull <name>` pulls a recommended model at the quality tier for this
+  Mac, with image input and a faster-replies drafter where they fit, and
+  registers the name so `gmlx chat <name>` runs it. `gmlx pull` alone picks
+  one interactively, and `gmlx pull --list` prints the recommendations, with
+  `-v` for each model's quality tiers and how much context each leaves room
+  for. The image models are listed and picked beside them, with their
+  download for this Mac, and `gmlx pull <image model> --list` prints their
+  quants.
+- `gmlx init` offers to pull a recommended model when it finds none.
+- `GMLX_PULL_RAM_GB=N` makes `gmlx pull` recommend for a Mac with N GB of
+  memory.
 - Beam-1.0 501B-A23B (GGUF arch `beam`), with `reasoning-low`, `-medium` and
   `-high` intents and tool calls. On a Mac with less memory than the file, it
   runs with `--stream-experts`.
@@ -68,6 +79,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   256 rows at a time, so long decodes no longer stall on frequent regrows.
 - Models in memory decode up to 5% faster: decode runs on 50 ops per command
   buffer instead of 400. `GMLX_CB_COARSE_DECODE=1` restores the old caps.
+- `gmlx chat` has its completion menu, toolbar and multi-line paste without
+  the `chat` extra, which now adds only styled markdown. The first chat after
+  upgrading copies the old prompt history over.
 - `gmlx sync-models` adds a drafter to a model already in the config only
   with `--add-companions`. Without it, a sync or pull names each drafter
   or `mmproj` it leaves out.
@@ -141,6 +155,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Llama 4 requests batched from the prefix cache lost the cached prefix of
   their chunked attention layers, and a speculative restore past the chunk
   size landed at the wrong offset.
+- On Macs under 80 GB, gmlx keeps 2 GB or 10% of memory for the system
+  instead of 8 GB, so more of the memory is available to load models, serve
+  requests, stream experts and make images.
+- `gmlx chat` and `gmlx run` with images and `--kv-bits` on a gemma-4 model
+  no longer stop at the first prefill chunk. The sliding-window layers stay
+  at full precision and the other layers pack, as they do under `gmlx serve`.
 - Qwen-Image 2.1, FLUX.3 klein, Krea 2 and MOSS-Image failed every request
   when their `encoder` was a chat model served with its `mmproj`.
 - In a `discover:` setup, `gmlx rm` of a chat model that image models share

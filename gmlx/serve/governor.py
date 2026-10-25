@@ -77,7 +77,7 @@ Knobs (all calib values are U5's to tighten):
     GMLX_GOV_RESERVE_GB      absolute bytes left to the kernel and every
                              other process: the ceiling on tracked
                              bytes is min(WS x (1 - M), RAM - reserve)
-                             (default max(8, 10% of RAM))
+                             (default max(2, 10% of RAM))
     GMLX_GOV_KERNEL_FLOOR_GB kernel floor on the memory not wired (free
                              + pageable anonymous + file-backed pages,
                              read live every tick; other apps' memory

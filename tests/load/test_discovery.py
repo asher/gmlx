@@ -1492,7 +1492,7 @@ def test_scan_mtp_head_on_unwired_arch_stays_plain(tmp_path, monkeypatch, capsys
     root = _write(tmp_path, "GLM-5.2-UD-IQ3_XXS.gguf")
     models = _scan(root)
     assert models[0].speculative is False
-    assert "no MTP target wired" in capsys.readouterr().err
+    assert "faster-replies head present but not wired" in capsys.readouterr().err
 
 
 def test_scan_wired_mtp_arch_keeps_speculative(tmp_path, monkeypatch):
@@ -1515,7 +1515,7 @@ def test_scan_overram_moe_streams_experts_and_drops_mtp(
     assert m.stream == "experts"
     assert m.speculative is False                 # MTP needs a resident base
     err = capsys.readouterr().err
-    assert "over-RAM MoE" in err and "speculative off" in err
+    assert "larger than memory" in err and "faster replies off" in err
 
 
 def test_the_stream_mark_is_keyed_on_the_resident_budget(tmp_path, monkeypatch):

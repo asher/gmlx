@@ -150,8 +150,9 @@ class WizardIO:
 
 
 def make_io() -> WizardIO:
-    """A :class:`WizardIO` upgraded to prompt_toolkit line editing when the
-    ``[chat]`` extra is installed and stdin is a real terminal, else plain input."""
+    """A :class:`WizardIO` with prompt_toolkit line editing when stdin is a
+    real terminal, else plain input. prompt_toolkit is a core dependency;
+    the ImportError arm keeps init working in a damaged venv."""
     import sys
     if sys.stdin.isatty():
         try:

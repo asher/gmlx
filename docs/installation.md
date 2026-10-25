@@ -56,12 +56,13 @@ terminal cannot find it, see
 
 ## Optional features
 
-The core install serves models, loads vision models, computes embeddings and
-runs the menu bar app. The extras add the rest:
+The core install serves models, loads vision models, computes embeddings,
+runs the menu bar app and has the prompts of `gmlx chat`, `gmlx init` and
+`gmlx pull`. The extras add the rest:
 
 | Extra | Adds |
 |-------|------|
-| `chat` | Completion menu, toolbar and rich markdown rendering in `gmlx chat` |
+| `chat` | Rich markdown rendering in `gmlx chat` |
 | `stt` | Speech-to-text on the server, with mlx-whisper |
 | `tts` | Text-to-speech on the server, with mlx-audio, for Kokoro, Qwen3-TTS and other speech models |
 | `talk` | The voice client [`gmlx talk`](talk.md), with `stt` and `tts` |

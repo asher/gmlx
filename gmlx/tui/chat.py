@@ -5,16 +5,19 @@ a persistent mlx-lm prompt cache, so each turn prefills only the new message.
 The basic loop mirrors ``mlx_lm.chat`` (``/exit`` quits, ``/reset`` restarts), and
 the terminal it runs in is upgraded:
 
-* with ``prompt_toolkit`` installed (``pip install gmlx[chat]``) the
-  prompt gets zsh/fish-grade editing: completion menus that pop **as you
+* the ``prompt_toolkit`` prompt (a core dependency) gives zsh/fish-grade
+  editing: completion menus that pop **as you
   type** a ``/command``, fish-style ghost suggestions from history (accept
   with the right arrow), a bottom toolbar showing the live sampling settings,
   staged-block count and last reply's tok/s, clean multi-line bracketed
   paste, and Alt-Enter (or Shift-Enter in terminals that send ESC CR for it)
-  to insert a newline without submitting. Without it, :mod:`readline` provides line editing and Tab completion
-  (the fallback shim);
+  to insert a newline without submitting. With ``GMLX_CHAT_INPUT=readline``,
+  or without the package, :mod:`readline` provides line editing and Tab
+  completion (the fallback shim);
 * up-arrow history is persisted across sessions
-  (``$XDG_CACHE_HOME/gmlx/chat_history[.ptk]``); ``--no-history`` keeps
+  (``$XDG_CACHE_HOME/gmlx/chat_history.ptk``; the readline shim keeps
+  ``chat_history`` beside it, which the first prompt_toolkit start copies
+  over); ``--no-history`` keeps
   the session ephemeral (no file read or written; in-session recall still
   works);
 * lines starting with ``/`` are commands: ``/history [on|off|clear]`` controls
@@ -1740,17 +1743,66 @@ def _ptk_key_bindings():
     return kb
 
 
+def _copy_readline_history(src, dst) -> None:
+    """One-time copy of readline's history file into prompt_toolkit's
+    format, written beside ``dst`` and moved into place, so a crash leaves
+    no partial file. Parsed here, not through readline: its history is
+    process-global and already loaded. A libedit file opens with a
+    ``_HiStOrY_V2_`` line and escapes spaces, tabs and backslashes as
+    ``\\NNN`` octal; a GNU file is plain lines. Any OSError skips the copy."""
+    import datetime
+    import logging
+    import re
+
+    try:
+        text = src.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        logging.getLogger(__name__).debug("history copy skipped: %s", e)
+        return
+    lines = text.split("\n")
+    libedit = bool(lines) and lines[0].startswith("_HiStOrY_V2_")
+    if libedit:
+        lines = lines[1:]
+    entries = []
+    for line in lines:
+        if not line:
+            continue
+        if libedit:
+            line = re.sub(r"\\([0-7]{3})",
+                          lambda m: chr(int(m.group(1), 8)), line)
+        entries.append(line)
+    tmp = dst.with_name(dst.name + ".tmp")
+    stamp = datetime.datetime.now()
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            for entry in entries:
+                f.write(f"\n# {stamp}\n")
+                for part in entry.split("\n"):
+                    f.write(f"+{part}\n")
+        os.replace(tmp, dst)
+    except OSError as e:
+        logging.getLogger(__name__).debug("history copy failed: %s", e)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def _wire_ptk(state: ChatState) -> bool:
-    """Upgrade the prompt to a prompt_toolkit session when the package is
-    installed (the ``[chat]`` extra). Returns False to fall back to readline.
+    """Upgrade the prompt to a prompt_toolkit session. Returns False to fall
+    back to readline: with ``GMLX_CHAT_INPUT=readline``, or when the package
+    is missing from a damaged venv (it is a core dependency).
 
     Adds over the readline shim: completion menus while typing a /command,
     fish-style ghost suggestions from history, a bottom toolbar (live
     sampling settings, staged-block count, last reply tok/s), and proper
     bracketed paste. History persists to ``chat_history.ptk`` (prompt_toolkit
-    format) next to readline's file; ``state.history_enabled`` gates both loading
-    and storing, so ``/history on|off`` works mid-session.
+    format) next to readline's file, which the first start copies over;
+    ``state.history_enabled`` gates both loading and storing, so
+    ``/history on|off`` works mid-session.
     """
+    if os.environ.get("GMLX_CHAT_INPUT") == "readline":
+        return False
     try:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
@@ -1764,6 +1816,8 @@ def _wire_ptk(state: ChatState) -> bool:
         hist_file.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         return False
+    if not hist_file.exists() and _history_path().exists():
+        _copy_readline_history(_history_path(), hist_file)
 
     class _ToggleableFileHistory(FileHistory):
         def load_history_strings(self):
@@ -3316,7 +3370,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 "  gmlx chat ~/models/model.gguf          a local GGUF\n"
                 "  gmlx chat <id>                         from your config "
                 "(gmlx list shows ids)\n"
-                "  gmlx pull hf:org/repo/file.gguf        download one first\n"
+                "  gmlx pull                              download one first\n"
                 "  gmlx chat --assistant NAME             talk to a running "
                 "server instead", file=sys.stderr)
             raise SystemExit(2)
@@ -3556,6 +3610,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     model, tok, config = backend.model, backend.tok, backend.config
     processor, drafter = backend.processor, backend.drafter
     model_type = backend.model_type
+    if args.mmproj and kv_kwargs.get("kv_bits") is not None:
+        # The attention decline reads the built model, so it runs here and
+        # not with the kvarn decline above. The image turn reads this dict.
+        from gmlx.commands.cli import vlm_kv_width
+        kv_kwargs["kv_bits"] = vlm_kv_width(args, model)
     cache = None
     if not backend.load_pending:
         cache = backend.new_text_cache()

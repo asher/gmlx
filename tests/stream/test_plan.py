@@ -165,9 +165,82 @@ def test_ceiling_for_margin_and_reserve(monkeypatch):
     # 128 GiB box, 3/4 working set: the margin binds.
     ram = 128 * GiB
     assert sp.ceiling_for(ram, ram * 0.75) == pytest.approx(ram * 0.75 * 0.95)
-    # 16 GiB box, 2/3 working set: the 8 GB reserve binds.
-    ram = 16 * GiB
-    assert sp.ceiling_for(ram, ram * 2 / 3) == pytest.approx(ram - 8e9)
+    # 16 and 8 GiB boxes, 2/3 working set: the margin binds, since the
+    # reserve is 2 GB or 10% of RAM.
+    for ram in (16 * GiB, 8 * GiB):
+        assert sp.ceiling_for(ram, ram * 2 / 3) == pytest.approx(
+            ram * 2 / 3 * 0.95)
+    # At the 0.84 working set macOS 26 reports, the margin binds on 32 GiB
+    # (25.54 GiB against a 28.8 GiB reserve arm) and the reserve on 8 GiB
+    # (6.14 GiB against a 6.38 GiB margin arm).
+    ram = 32 * GiB
+    assert sp.ceiling_for(ram, ram * 0.84) == pytest.approx(ram * 0.84 * 0.95)
+    ram = 8 * GiB
+    assert sp.ceiling_for(ram, ram * 0.84) == pytest.approx(ram - 2e9)
+
+
+def test_weight_verdict_is_the_rule_box_plan_reads(flat_room, monkeypatch):
+    """The fit of the weights alone: tables that bring the rest under the
+    budget, the whole file under it, or neither. The catalog's rung state
+    reads it with the file's table bytes; box_plan with what the load
+    defers, and the two agree on the same model."""
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    ram, ws = 128 * GiB, 96 * GiB
+    budget = int(ws * 0.9)
+    table = 28_800_000_000
+    total = 82_500_000_000 + table
+    # Flash-Next-shaped: over the budget, under it without its table.
+    assert sp.weight_verdict(total, table, budget, ram) == sp.VERDICT_TABLES
+    assert sp.weight_verdict(total - table, 0, budget, ram) == sp.VERDICT_RESIDENT
+    assert sp.weight_verdict(total, 0, budget, ram) is None
+    # Under the budget with a table: the table is not read from the file.
+    assert sp.weight_verdict(50e9, 10e9, budget, ram) == sp.VERDICT_RESIDENT
+    # Under the budget but over by share of RAM: not resident.
+    assert sp.weight_verdict(budget, 0, budget, int(budget / 0.99)) is None
+    # The same answers through box_plan on the same inputs.
+    for tb, verdict in ((table, sp.VERDICT_TABLES), (0, sp.VERDICT_STREAMS)):
+        m = sp.ModelPlan(arch="qwen4exp", total_bytes=total,
+                         expert_bytes=77_000_000_000, groups={}, moe_layers=48,
+                         n_experts=512, experts_per_token=10,
+                         ring_bytes=4_100_000_000, kv_costs=None,
+                         trained_ctx=None, table_bytes=tb,
+                         tables=((tb, "Q4_K"),) if tb else ())
+        b = sp.box_plan(m, ram_bytes=ram, ws_bytes=ws,
+                        max_buffer_bytes=int(0.63 * ram))
+        assert b is not None and b.verdict == verdict
+
+
+def test_flash_next_streams_from_32_gib_and_is_resident_from_192(monkeypatch):
+    """Qwen3.8-Flash-Next UD-Q4_K_XL across the memory classes at the
+    planner's working set and the default room: page_cache at 24 GiB,
+    streams from 32 to 96, tables_from_file at 128 and resident from 192.
+    A walk that counted only resident and streams would call it a 192 GB
+    model. The refresh script records this ladder as streams_from_gib."""
+    from gmlx.serve.capacity import working_set_for_ram
+
+    for var in ("GMLX_STREAM_PLE", "GMLX_GOV_MARGIN", "GMLX_GOV_RESERVE_GB",
+                "GMLX_DECODE_KV_RESERVE_GB", "GMLX_DECODE_PROCESS_GB",
+                "GMLX_DECODE_RESIDENT_CACHE_GB", "GMLX_STREAM_CACHE_GB"):
+        monkeypatch.delenv(var, raising=False)
+    table = 28_800_000_000
+    m = sp.ModelPlan(arch="qwen4exp", total_bytes=82_500_000_000 + table,
+                     expert_bytes=77_000_000_000, groups={}, moe_layers=48,
+                     n_experts=512, experts_per_token=10,
+                     ring_bytes=4_100_000_000, kv_costs=None,
+                     trained_ctx=None, table_bytes=table,
+                     tables=((table, "Q4_K"),))
+    ladder = {}
+    for cls in (16, 24, 32, 48, 64, 96, 128, 192, 256):
+        ram = cls * GiB
+        b = sp.box_plan(m, ram_bytes=ram, ws_bytes=working_set_for_ram(ram),
+                        max_buffer_bytes=int(0.63 * ram))
+        assert b is not None
+        ladder[cls] = b.verdict
+    assert ladder == {16: sp.VERDICT_TOO_BIG, 24: sp.VERDICT_PAGE_CACHE,
+                      32: sp.VERDICT_STREAMS, 48: sp.VERDICT_STREAMS,
+                      64: sp.VERDICT_STREAMS, 96: sp.VERDICT_STREAMS,
+                      128: sp.VERDICT_TABLES, 192: sp.VERDICT_RESIDENT,
+                      256: sp.VERDICT_RESIDENT}
 
 
 def _model(*, total, expert, ring=0):

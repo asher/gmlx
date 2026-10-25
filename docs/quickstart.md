@@ -1,20 +1,19 @@
 # Quickstart
 
 With gmlx [installed](installation.md), create a configuration file and
-download a model. This model is 20.5 GB and suits a Mac with 64 GB of
-memory. On a smaller Mac, pick one from
-[Choosing a model](#choosing-a-model) first.
+download a model:
 
 ```sh
 gmlx init --models-dir ~/models
-gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
+gmlx pull qwen3.8-27b
 ```
 
 `gmlx init` writes a [configuration file](config.md) that lists your models
 and the folders that hold them. Run it with no flags for a wizard that scans
-the folders where you already keep models. `gmlx pull` downloads into the
-first folder and adds the model under the id `qwen3.8-27b-ud-q6`, which every
-command accepts in place of a path.
+the folders where you already keep models. `gmlx pull` downloads Qwen3.8-27B
+at the quality tier that suits this Mac, with image input and faster
+replies, a 23 GB download on a 64 GB Mac. It registers the model under the
+name `qwen3.8-27b`, which every command accepts in place of a path.
 
 - [Running a model](#running-a-model)
 - [Serving models](#serving-models)
@@ -28,8 +27,8 @@ command accepts in place of a path.
 Give the model a prompt, or chat with it in the terminal:
 
 ```sh
-gmlx run qwen3.8-27b-ud-q6 --prompt "Explain entropy in one paragraph."
-gmlx chat qwen3.8-27b-ud-q6
+gmlx run qwen3.8-27b --prompt "Explain entropy in one paragraph."
+gmlx chat qwen3.8-27b
 ```
 
 In the chat, type `/help` for the commands, press Esc to stop a reply, and
@@ -40,7 +39,7 @@ Both start from the sampling values that the model's publisher recommends.
 An intent after the id picks the values for one kind of task:
 
 ```sh
-gmlx chat qwen3.8-27b-ud-q6@instruct
+gmlx chat qwen3.8-27b@instruct
 ```
 
 `gmlx profiles` lists the intents of each family.
@@ -72,13 +71,13 @@ Anthropic Messages APIs on one port. A request names its model by id:
 
 ```sh
 curl localhost:8080/v1/chat/completions -d '{
-  "model": "qwen3.8-27b-ud-q6",
+  "model": "qwen3.8-27b",
   "messages": [{"role": "user", "content": "Explain entropy in one paragraph."}]
 }'
 ```
 
 Add `"stream": true` to stream the reply. Intents work here too, as in
-`"model": "qwen3.8-27b-ud-q6@coding"`. The OpenAI Python client works
+`"model": "qwen3.8-27b@coding"`. The OpenAI Python client works
 unchanged:
 
 ```python
@@ -86,7 +85,7 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="none")
 reply = client.chat.completions.create(
-    model="qwen3.8-27b-ud-q6",
+    model="qwen3.8-27b",
     messages=[{"role": "user", "content": "Explain entropy in one paragraph."}],
 )
 print(reply.choices[0].message.content)
@@ -97,34 +96,39 @@ the [HTTP API](api.md) describes.
 
 ## Choosing a model
 
-The suffix of a GGUF file name, such as `Q6_K`, is its
-[quant](glossary.md#quant), which trades file size against accuracy. These
-instruct models fit each memory size with room for a long conversation:
-
-| Mac memory | Model | Notes |
-|------------|-------|-------|
-| 16 GB | Qwen3-4B, Q4_K_M, 2.3 GB | Fast and capable for its size |
-| 32 GB | Qwen3.5-9B, Q6_K, 7.2 GB | MTP head turns on speculative decoding by itself |
-| 64 GB | Qwen3.8-27B, UD-Q6_K, 20.5 GB | Strong at chat, code and tool calls |
-| 96 GB or more | Qwen3.6-35B-A3B, UD-Q6_K, 27 GB, or gpt-oss-120b, MXFP4, 59 GB | Mixture-of-experts: large-model quality at small-model speed |
-
-To download one, pull its file:
+`gmlx pull` with no name opens a picker of recommended models that fit
+this Mac. Each shows its size, whether it reads images, and how much
+context it leaves room for. Pick one, or pull it by name and chat with it:
 
 ```sh
-gmlx pull hf:unsloth/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf
-gmlx pull hf:unsloth/Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q6_K.gguf
-gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
-gmlx pull hf:unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q6_K.gguf
-gmlx pull hf:ggml-org/gpt-oss-120b-GGUF/gpt-oss-120b-MXFP4.gguf
+gmlx pull
+gmlx pull gemma-4-12b
+gmlx chat gemma-4-12b
 ```
 
-A model needs memory for about its file size, plus its KV cache, which
-grows with the conversation and can reach the size of the weights.
-[Memory and the KV cache](memory.md) shows how to estimate and shrink it. A
-mixture-of-experts model larger than memory can still run, as
-[Models larger than memory](streaming.md) describes.
+The first recommendation at each memory size:
 
-To see which files of a repository fit your Mac before you download one:
+| Mac memory | Model | Command |
+|------------|-------|---------|
+| 8 GB | Ternary Bonsai 2 9B | `gmlx pull ternary-bonsai-2-9b` |
+| 16 GB | gemma-4-12B | `gmlx pull gemma-4-12b` |
+| 24 GB | gemma-4-26B-A4B | `gmlx pull gemma-4-26b-a4b` |
+| 32, 48, 64 or 96 GB | Qwen3.8-27B | `gmlx pull qwen3.8-27b` |
+| 128, 192 or 256 GB | Qwen3.8-Flash-Next | `gmlx pull qwen3.8-flash-next` |
+| 512 GB | DeepSeek-V4.1-Flash | `gmlx pull deepseek-v4.1-flash-1017` |
+
+`gmlx pull --list` prints every recommended model with its download size
+and what it is good for, and the [pull reference](cli.md#gmlx-pull) lists
+them all.
+
+A model needs memory for about its file size, plus its KV cache, which
+grows with the conversation. [Memory and the KV cache](memory.md) shows how
+to estimate and shrink it. A mixture-of-experts model larger than memory
+can still run from the SSD, as [Models larger than memory](streaming.md)
+describes.
+
+Any GGUF on Hugging Face pulls by reference. To see which files of a
+repository fit your Mac before you download one:
 
 ```sh
 gmlx validate hf:unsloth/Qwen3-4B-GGUF
@@ -143,7 +147,7 @@ install separately. These commands install it and connect it:
 
 ```sh
 npm install -g @earendil-works/pi-coding-agent
-gmlx launch pi --model qwen3.8-27b-ud-q6
+gmlx launch pi --model qwen3.8-27b
 ```
 
 `launch` starts the server if it is not running, adds the server to pi's
@@ -153,7 +157,7 @@ and chat apps, as [Agents and chat apps](launch.md) describes.
 To run pi in an Apple container instead, add `--container`:
 
 ```sh
-gmlx launch pi --container --model qwen3.8-27b-ud-q6
+gmlx launch pi --container --model qwen3.8-27b
 ```
 
 The container sees only the current folder, and gmlx installs pi in it for

@@ -1448,7 +1448,7 @@ def _zero_models_hint(config_abspath: str | None) -> str:
         return (f"the config it started with, {config_abspath}, is gone, so run "
                 "gmlx restart for the steps")
     if config_abspath:
-        return f"add a model: gmlx pull <hf:ref>{pull_config_flag(config_abspath)}"
+        return f"add a model: gmlx pull{pull_config_flag(config_abspath)}"
     return "add a GGUF to a --models-dir folder, then run gmlx restart"
 
 

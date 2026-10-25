@@ -422,6 +422,83 @@ def test_ptk_history_clear_unlinks_both(monkeypatch, tmp_path):
     assert not (tmp_path / "gmlx" / "chat_history.ptk").exists()
 
 
+def test_chat_input_readline_keeps_the_readline_editor(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setenv("GMLX_CHAT_INPUT", "readline")
+    state = chat.ChatState(history_enabled=True)
+    assert not chat._wire_ptk(state)
+    assert state.ptk_session is None
+
+
+def _ptk_entries(state):
+    return list(state.ptk_session.history.load_history_strings())
+
+
+def test_ptk_copies_a_libedit_history_once(monkeypatch, tmp_path):
+    """The venv's readline is libedit: a header line and octal escapes
+    for spaces, tabs and backslashes. The first prompt_toolkit start
+    copies the file into FileHistory format with them undone; a second
+    start finds the .ptk file and copies nothing, so no entry doubles."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.delenv("GMLX_CHAT_INPUT", raising=False)
+    hist = tmp_path / "gmlx" / "chat_history"
+    hist.parent.mkdir(parents=True)
+    hist.write_bytes(b"_HiStOrY_V2_\nhello\\040world\nback\\134slash"
+                     b"\\040and\\011tab\nunicode\\040caf\xc3\xa9\n")
+    state = chat.ChatState(history_enabled=True)
+    assert chat._wire_ptk(state)
+    ptk = tmp_path / "gmlx" / "chat_history.ptk"
+    assert ptk.exists() and not ptk.with_name("chat_history.ptk.tmp").exists()
+    assert "\n+hello world\n" in ptk.read_text(encoding="utf-8")
+    # Newest first, as FileHistory loads.
+    assert _ptk_entries(state) == [
+        "unicode caf\u00e9", "back\\slash and\ttab", "hello world"]
+    assert hist.exists()  # the readline file stays
+    state.ptk_session.history.append_string("new line")
+    state2 = chat.ChatState(history_enabled=True)
+    assert chat._wire_ptk(state2)
+    assert _ptk_entries(state2) == [
+        "new line", "unicode caf\u00e9", "back\\slash and\ttab",
+        "hello world"]
+
+
+def test_ptk_copies_a_gnu_readline_history(monkeypatch, tmp_path):
+    """A GNU readline file has no header and plain lines: a backslash
+    stays literal and blank lines are skipped."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.delenv("GMLX_CHAT_INPUT", raising=False)
+    hist = tmp_path / "gmlx" / "chat_history"
+    hist.parent.mkdir(parents=True)
+    hist.write_text("plain line\n\nback\\040slash\n", encoding="utf-8")
+    state = chat.ChatState(history_enabled=True)
+    assert chat._wire_ptk(state)
+    assert _ptk_entries(state) == ["back\\040slash", "plain line"]
+
+
+def test_ptk_history_copy_skips_what_it_cannot_read_or_write(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.delenv("GMLX_CHAT_INPUT", raising=False)
+    hist = tmp_path / "gmlx" / "chat_history"
+    hist.parent.mkdir(parents=True)
+    hist.mkdir()  # unreadable as a file
+    state = chat.ChatState(history_enabled=True)
+    assert chat._wire_ptk(state)
+    assert _ptk_entries(state) == []
+    # A failing move leaves no partial .ptk and no .tmp behind.
+    hist.rmdir()
+    hist.write_text("kept\n", encoding="utf-8")
+
+    def no_replace(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(chat.os, "replace", no_replace)
+    state = chat.ChatState(history_enabled=True)
+    assert chat._wire_ptk(state)
+    assert not (tmp_path / "gmlx" / "chat_history.ptk").exists()
+    assert not (tmp_path / "gmlx" / "chat_history.ptk.tmp").exists()
+
+
 # parser + pre-load validation (no model load)
 def test_chat_parser_defaults():
     args = chat._build_parser().parse_args(["m.gguf"])

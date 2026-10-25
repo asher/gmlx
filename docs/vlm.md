@@ -18,6 +18,10 @@ file in the same repository:
 gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf mmproj-BF16.gguf
 ```
 
+A model pulled by name, as in `gmlx pull qwen3.8-27b`, comes with its
+companion unless you pass `--no-vision`. A model that runs from the SSD
+takes its companion in `run` and `serve`, not in `chat`.
+
 Pick the `BF16` or `F16` companion when the repository has one, because it
 reads media most accurately. A quantized companion, such as
 `mmproj-Q8_0.gguf`, takes about half the memory. Use it only when the model

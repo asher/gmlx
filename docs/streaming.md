@@ -61,8 +61,10 @@ the last line says what it does with the memory free now:
 | `=> with the memory free now, its tables are offloaded to disk ...` | Reads its lookup tables from the file to keep the experts in memory. |
 | `=> the experts stream because ...` | Streams the experts. [When a MoE streams its experts](#when-a-moe-streams-its-experts) gives the ways to keep them in memory. |
 
-`run`, `chat` and `serve` do not check the plan. They try to load a model
-that cannot stream, so run `validate` first. A dense model larger than RAM
+`gmlx pull --list` puts the recommended models that run from the SSD on
+this Mac under their own heading, and a pull of one says so before it
+downloads. `run`, `chat` and `serve` do not check the plan. They try to
+load a model that cannot stream, so run `validate` first. A dense model larger than RAM
 has no experts to stream and needs a smaller quant.
 
 `gmlx validate --json` gives the same numbers under `stream`. There,

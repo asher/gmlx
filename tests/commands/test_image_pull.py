@@ -385,7 +385,7 @@ def test_the_fit_line_says_when_the_parts_fit_in_stages(lib, monkeypatch,
     out = capsys.readouterr().out
     assert "which are more than this Mac's 16 GB RAM" in out
     assert ("in stages, the encoder alone and then the DiT and the VAE, a "
-            "1024x1024 image needs 8.2 GB at its peak, which fits the 8.5 GB "
+            "1024x1024 image needs 8.2 GB at its peak, which fits the 10.1 GB "
             "working budget of this Mac's 16 GB RAM") in out
 
 
@@ -494,8 +494,10 @@ def test_bad_image_flags_are_usage_errors(lib, monkeypatch, capsys, argv,
 
 
 def test_image_flags_need_an_image_model_name(capsys):
+    assert manage.cmd_pull(["hf:org/repo/x.gguf", "--encoder-quant", "Q8_0"]) == 2
+    assert "--encoder-quant goes with an image model name" in capsys.readouterr().err
     assert manage.cmd_pull(["hf:org/repo/x.gguf", "--quant", "Q4_K_M"]) == 2
-    assert "go with an image model name" in capsys.readouterr().err
+    assert "--quant goes with a model name" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("name, vae_license", [("z-image-turbo", None),
@@ -1106,15 +1108,22 @@ def test_a_moss_image_base_pull_after_sft_takes_only_its_dit(lib,
     assert base.encoder == sft.encoder and base.vae == sft.vae
 
 
-@pytest.mark.parametrize("held, ram_gb, args, takes", [
-    ("Q8_0", 16, (), "Q4_K_M"), ("Q8_0", 16, ("--encoder-quant", "Q8_0"), "Q8_0"),
-    ("Q4_K_M", 32, (), "Q4_K_M")])
+@pytest.mark.parametrize("held, ram_gb, reserve_gb, args, takes", [
+    ("Q8_0", 16, None, (), "Q8_0"),
+    ("Q8_0", 16, 8, (), "Q4_K_M"),
+    ("Q8_0", 16, 8, ("--encoder-quant", "Q8_0"), "Q8_0"),
+    ("Q4_K_M", 32, None, (), "Q4_K_M")])
 def test_a_held_encoder_serves_a_moss_image_pull_where_it_fits(
-        lib, monkeypatch, capsys, held, ram_gb, args, takes):
+        lib, monkeypatch, capsys, held, ram_gb, reserve_gb, args, takes):
     """Another quant on disk serves the pull when an image fits with it.
-    Qwen3.5-9B Q8_0 does not fit a 16 GB Mac, so the pull takes the class's
-    Q4_K_M and says so, unless --encoder-quant asks for the held one."""
+    Qwen3.5-9B Q8_0 fits a 16 GB Mac's 10.1 GB budget, so a held one
+    serves. Under an 8 GB reserve the budget is 8.5 GB, where it does not
+    fit, so the pull takes the class's Q4_K_M and says so, unless
+    --encoder-quant asks for the held one."""
     root, _ = lib
+    monkeypatch.delenv("GMLX_GOV_RESERVE_GB", raising=False)
+    if reserve_gb is not None:
+        monkeypatch.setenv("GMLX_GOV_RESERVE_GB", str(reserve_gb))
     d = root / "unsloth__Qwen3.5-9B-GGUF"
     d.mkdir()
     with open(d / f"Qwen3.5-9B-{held}.gguf", "wb") as f:

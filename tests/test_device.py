@@ -322,8 +322,8 @@ def test_capacity_working_set_and_ceiling(on_cpu, monkeypatch):
     monkeypatch.delenv("GMLX_GOV_RESERVE_GB", raising=False)
     assert capacity.working_set_bytes() == on_cpu[WS]
     _metal(monkeypatch, memory_size=64 * GB)
-    # The RAM reserve clamps Metal's recommendation: 64 GB less 8 GB.
-    assert capacity.ceiling_bytes(100 * GB, 0.05) == 56 * GB
+    # The RAM reserve clamps Metal's recommendation: 64 GB less 10%.
+    assert capacity.ceiling_bytes(100 * GB, 0.05) == pytest.approx(57.6 * GB)
 
 
 def test_tool_preflight_working_set(on_cpu):

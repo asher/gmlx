@@ -523,8 +523,8 @@ def test_a_pass_of_more_pixels_than_a_measured_whole_one_is_in_tiles(
 
 def test_a_16_gb_mac_decodes_1024_pixels_in_tiles_and_a_128_gb_one_whole(
         q_view):
-    """The working budget of a 16 GB Mac with the Q4_K_M DiT and the bf16
-    VAE resident and the encoder released: a whole decode at 1024 pixels
+    """A 16 GB Mac's budget under an 8 GB reserve, with the Q4_K_M DiT and
+    the bf16 VAE resident and the encoder released: a whole decode at 1024 pixels
     does not fit and a tiled one does. The plan releases the encoder
     before it takes tiles."""
     budget = 17_179_869_184 - 8e9

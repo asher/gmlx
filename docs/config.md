@@ -222,7 +222,9 @@ aliases:
   coder: qwen3.8-27b-ud-q6@coding
 ```
 
-An alias cannot contain `@` or match a model id.
+An alias cannot contain `@` or match a model id. `gmlx pull <name>` adds
+the name as an alias with the comment `set by gmlx pull`, and a later pull
+of the same name moves it to the new file.
 
 ## Image models
 

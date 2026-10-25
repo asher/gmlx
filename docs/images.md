@@ -32,6 +32,9 @@ get when you ask for none.
 | `flux-3-klein` | 7.3 GB | 9.8 GB | 1024x1024 | Non-commercial, and commercial use of the images under $5M of yearly revenue |
 | `flux-3-klein-base` | 7.3 GB | 9.8 GB | 1024x1024 | Non-commercial, and commercial use of the images under $5M of yearly revenue |
 
+`gmlx pull --list` prints the same models under Image models with the
+download for this Mac, and a bare `gmlx pull` picks one from a list.
+
 Start with Z-Image-Turbo: it is the fastest, as
 [Benchmarks](benchmarks.md#image-generation) shows, and its license allows
 any use. [Models and quants](#models-and-quants) lists the
