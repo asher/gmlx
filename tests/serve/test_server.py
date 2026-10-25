@@ -3292,8 +3292,9 @@ def test_register_downloads_writes_the_pairs_onto_an_open_entry(
                                  pairs=_bonsai_pairs(model, mmproj, drafter))
     assert got == srv.Registered({str(model): "bonsai"}, "ternary-bonsai-2-27b", None)
     text = cfg_path.read_text()
+    # A paired drafter turns speculation on as `auto`, the value main writes.
     assert (f"  bonsai:\n    path: {_BONSAI_MODEL}\n    mmproj: {_BONSAI_MMPROJ}\n"
-            f"    draft_gguf: {_BONSAI_DRAFTER}\n"
+            f"    draft_gguf: {_BONSAI_DRAFTER}\n    speculative: auto\n"
             "    overrides:\n      load:\n        kv_bits: 4\n") in text
     cfg = load_config(cfg_path)
     assert cfg.models["bonsai"].overrides == {"load": {"kv_bits": 4}}
