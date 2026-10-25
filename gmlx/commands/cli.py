@@ -2597,9 +2597,10 @@ def preload_wire_check(args, *, depth: int | None,
     mmproj = os.path.expanduser(getattr(args, "mmproj", None) or "")
     extra = os.path.getsize(mmproj) if mmproj and os.path.isfile(mmproj) else 0
     step = getattr(args, "prefill_step_size", None)
-    room = bmod.kv_room_bytes(path, step=step, depth=depth)
+    room = bmod.kv_room_bytes(path, step=step, depth=depth, resident=True)
     alone = (room if depth_without_mtp == depth
-             else bmod.kv_room_bytes(path, step=step, depth=depth_without_mtp))
+             else bmod.kv_room_bytes(path, step=step, depth=depth_without_mtp,
+                                     resident=True))
     # Before _drafter_bytes, whose --native-mtp sets --speculative (the
     # native_mtp term covers that too).
     auto = _mtp_auto(args)
@@ -2623,7 +2624,7 @@ def preload_wire_check(args, *, depth: int | None,
     if check.table_bytes:
         stream_tables_for_memory(path)
     if check.fits:
-        guard_resident_wire(path)
+        guard_resident_wire(path, room=room)
         say_tables_offloaded(path, deferred + check.table_bytes)
         if check.mtp_off:
             loadlog.warn(f"[mtp] {check.mtp_off_line()}")

@@ -1150,8 +1150,10 @@ def _table_only_header(monkeypatch, budget=130 * GB, unwired=1000 * GB,
 
     monkeypatch.setattr(bmod, "unwired_ram_bytes", lambda: unwired)
     monkeypatch.setattr(bmod, "kernel_floor_bytes", lambda: 0.0)
-    monkeypatch.setattr(bmod, "kv_room_bytes", lambda *a, **k: SimpleNamespace(
-        bytes=room, priced=False, depth=0))
+    # A streamed chunk's room would be 50 GB larger.
+    monkeypatch.setattr(
+        bmod, "kv_room_bytes", lambda *a, resident=False, **k: SimpleNamespace(
+            bytes=room if resident else room + 50 * GB, priced=False, depth=0))
     monkeypatch.setattr(ts, "_EXPERTS_FOR_MEMORY", {})
 
     monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: 100 * GB)
@@ -1274,7 +1276,7 @@ def test_a_plain_moe_build_wires_in_chunks_at_its_install(
     import gmlx.stream.table_stream as ts
 
     monkeypatch.setattr(ts, "_FOR_MEMORY", set())
-    monkeypatch.setattr(ts, "_GUARDED", set())
+    monkeypatch.setattr(ts, "_GUARDED", {})
     _table_only_header(monkeypatch, budget=200 * GB)
     monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: experts)
     model = SimpleNamespace(_kq_streaming=stream is not None, tables=False)
@@ -1325,7 +1327,7 @@ def test_a_plain_moe_build_is_judged_with_its_kv_room_before_the_load(
     from gmlx.stream.budget import STREAM_FREE_NOW
 
     monkeypatch.setattr(ts, "_FOR_MEMORY", set())
-    monkeypatch.setattr(ts, "_GUARDED", set())
+    monkeypatch.setattr(ts, "_GUARDED", {})
     _table_only_header(monkeypatch, budget=200 * GB, unwired=unwired,
                        room=20 * GB)
     model = (SimpleNamespace() if kept == "experts" else SimpleNamespace(
@@ -1336,12 +1338,15 @@ def test_a_plain_moe_build_is_judged_with_its_kv_room_before_the_load(
 
     def get(*a, **k):
         assert limit == [0]
+        room, extra = ts.guarded_wire_keep("a.gguf")
+        kept_rooms.append((room and room.bytes, extra))
         seen.append((ts.resident_wire_guarded("a.gguf"),
                      ts.tables_for_memory("a.gguf"),
                      ts.experts_stream_for_memory("a.gguf")))
         return stock(*a, **k)
 
     pool._stock_get = get
+    kept_rooms = []
     limit = [90 * GB]
 
     def set_limit(n):
@@ -1356,6 +1361,8 @@ def test_a_plain_moe_build_is_judged_with_its_kv_room_before_the_load(
     assert seen == [{"experts": (True, False, ""),
                      "tables": (True, True, ""),
                      "nothing": (False, False, "unwired")}[kept]]
+    # The install's guard keeps the room the check kept.
+    assert kept_rooms == [(None if kept == "nothing" else 20 * GB, 0)]
     # A streamed table or experts keep the sweep off for the process.
     assert limit == [90 * GB if kept == "experts" else 0]
     want = {"experts": 150, "tables": 120, "nothing": 20}[kept] * GB
@@ -1374,7 +1381,7 @@ def test_a_plain_moe_build_is_repriced_on_what_its_install_did(
     import gmlx.stream.table_stream as ts
 
     monkeypatch.setattr(ts, "_FOR_MEMORY", set())
-    monkeypatch.setattr(ts, "_GUARDED", set())
+    monkeypatch.setattr(ts, "_GUARDED", {})
     _table_only_header(monkeypatch, budget=200 * GB,
                        unwired=(200 if streamed else 130) * GB, room=20 * GB)
     model = (SimpleNamespace(_kq_streaming=True, tables=True) if streamed

@@ -30,7 +30,7 @@ def _box(box, *, unwired):
 @pytest.fixture(autouse=True)
 def _fresh_table_latch(monkeypatch):
     monkeypatch.setattr(ts, "_FOR_MEMORY", set())
-    monkeypatch.setattr(ts, "_GUARDED", set())
+    monkeypatch.setattr(ts, "_GUARDED", {})
 
 
 @pytest.fixture
@@ -63,7 +63,7 @@ def header(monkeypatch, tmp_path):
                             lambda: budget_bytes)
         monkeypatch.setattr(
             budget, "kv_room_bytes",
-            lambda p, env=None, step=None, depth=None: budget.KvRoom(
+            lambda p, env=None, step=None, depth=None, resident=False: budget.KvRoom(
                 int(room), depth or 32768, 1, int(room), 0, 0, priced=True))
         return str(f)
     return set_header
@@ -142,6 +142,28 @@ def test_a_128gb_box_keeps_flash_next_resident_at_the_run_room(header, capsys,
     assert capsys.readouterr() == ("", "")
     # The warm touch leaves the experts to the install's chunked wire.
     assert ts.resident_wire_guarded(path)
+
+
+def test_a_run_keeps_the_room_of_its_own_prefill_beside_the_experts(
+        header, monkeypatch):
+    # Flash-Next kept in memory prefills at its resident step, so the run
+    # keeps 4 GiB of KV room, not the 14 GiB of a streamed chunk, and its
+    # install's guard keeps the same room.
+    path = header(82.5e9, experts=77.0e9, budget_bytes=int(108.2e9))
+    rooms = {True: 4 * GiB, False: 14 * GiB}
+    monkeypatch.setattr(
+        budget, "kv_room_bytes",
+        lambda p, env=None, step=None, depth=None, resident=False:
+        budget.KvRoom(rooms[resident], depth or 32768, 1, rooms[resident], 0,
+                      0, priced=True))
+    box = host_box.mac(128)[0]
+    _box(box, unwired=0)
+    keep = budget.wire_keep_bytes(4 * GiB)
+    _box(box, unwired=82.5e9 + keep + GiB)
+    args = _args(path)
+    cli.preload_wire_check(args, depth=4096)
+    assert args.stream_experts is False
+    assert ts.guarded_wire_keep(path)[0].bytes == 4 * GiB
 
 
 @pytest.mark.parametrize("text,deferred,tail", [
@@ -482,7 +504,7 @@ def test_a_dropped_head_prices_the_room_of_the_run_without_it(
     rooms = {None: 6 * GiB, 4096: 1 * GiB}
     monkeypatch.setattr(
         budget, "kv_room_bytes",
-        lambda p, env=None, step=None, depth=None: budget.KvRoom(
+        lambda p, env=None, step=None, depth=None, resident=False: budget.KvRoom(
             rooms[depth], depth or 32768, 1, rooms[depth], 0, 0, priced=True))
     _box(host_box.mac(128)[0], unwired=77 * GiB)
     serve = budget.check_resident_wire(70 * GiB, room_bytes=6 * GiB)
@@ -557,7 +579,7 @@ def test_a_table_gathered_per_layer_that_brings_the_model_under_is_not_wired(
     monkeypatch.setattr(budget, "WIRE_EXEMPT_BYTES", 0)
     monkeypatch.setattr(
         budget, "kv_room_bytes",
-        lambda p, env=None, step=None, depth=None: budget.KvRoom(
+        lambda p, env=None, step=None, depth=None, resident=False: budget.KvRoom(
             0, 32768, 1, 0, 0, 0, priced=True))
     table = flash_next_under_its_table(monkeypatch, tmp_path)
     path = str(tmp_path / FLASH_NEXT)

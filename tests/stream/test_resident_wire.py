@@ -59,7 +59,7 @@ def _env(monkeypatch):
               "GMLX_DECODE_RESIDENT_CACHE_GB"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(es, "time", _Clock())
-    monkeypatch.setattr(ts, "_GUARDED", set())
+    monkeypatch.setattr(ts, "_GUARDED", {})
 
 
 def _check(w, room=0, **kw):
@@ -923,6 +923,23 @@ def test_a_load_the_serve_check_found_short_streams_without_the_wire(
     assert [(i["force_stream"], i["fallback"]) for i in installs] == [
         (True, "unwired")]
     assert ts.experts_stream_for_memory("m.gguf") == ""
+
+
+def test_the_install_keeps_the_room_the_check_before_the_load_kept(
+        monkeypatch):
+    # The check priced a 40 GiB KV room at the run's own step and depth.
+    # The install of an MTP target knows neither, and keeps that room, not
+    # one it prices again (0 here), so it stops the wire the check would
+    # not have passed.
+    installs = _plain(monkeypatch, latched=False)
+    vm = _Vm(host_box.mac(128)[0], free=42.3 * GiB, file=54.6 * GiB)
+    _Residency(monkeypatch, on_commit=vm.committed)
+    _room(monkeypatch, 0)
+    ts.guard_resident_wire("m.gguf", room=budget.KvRoom(
+        int(40 * GiB), 32768, 1, 0, 0, 0, priced=True))
+    assert es.install_unflagged_tables(_leaves(60, 1 * GiB), "m.gguf") is True
+    assert [(i["force_stream"], i["fallback"]) for i in installs] == [
+        (True, "unwired")]
 
 
 def test_a_load_the_check_did_not_keep_in_memory_is_left_alone(monkeypatch):

@@ -274,6 +274,19 @@ def prefill_rows(model_type: str | None, step: int | None = None) -> int:
     return step
 
 
+def resident_prefill_rows(step: int | None = None) -> int:
+    """Rows of the widest prefill chunk of a model whose experts stay in
+    memory: the requested ``step`` or ``PREFILL_STEP_SIZE`` when set, else
+    the wide MoE step (``GMLX_MOE_WIDE_STEP``,
+    ``prefill_decay.moe_base_step``), at least the stock 2048. A resident
+    prefill merges no tail."""
+    if not (isinstance(step, int) and step > 0):
+        step = env_int("PREFILL_STEP_SIZE", 0)
+    if step <= 0:
+        step = max(2048, env_int("GMLX_MOE_WIDE_STEP", 4096))
+    return step
+
+
 def _width(c, *names) -> int:
     """The widest positive int under any of ``names``: a per-layer list
     gives its widest layer."""
@@ -295,7 +308,8 @@ _STREAMS = ("hc_mult", "hc_count")
 _HEAD_DIM = ("head_dim", "v_head_dim", "global_head_dim")
 
 
-def prefill_activation_bytes(cfg, step: int | None = None) -> int:
+def prefill_activation_bytes(cfg, step: int | None = None,
+                             resident: bool = False) -> int:
     """Live activations of one streamed prefill chunk: one layer's
     working set at fp32 for ``prefill_rows`` rows (``step`` the requested
     chunk width). Per row: four
@@ -304,8 +318,9 @@ def prefill_activation_bytes(cfg, step: int | None = None) -> int:
     head_dim), and per routed expert the row takes its input and output
     (2 x the expert's input width: ``routed_expert_hidden_size`` behind a
     latent projection, else hidden) and its gate, up and GLU product
-    (3 x the expert width). Per-layer widths price the widest layer. 0
-    when the config lacks the widths."""
+    (3 x the expert width). Per-layer widths price the widest layer.
+    ``resident`` prices a load that keeps its experts in memory, at
+    ``resident_prefill_rows``. 0 when the config lacks the widths."""
     from gmlx.serve.mem_preflight import _get
 
     if not cfg:
@@ -323,6 +338,8 @@ def prefill_activation_bytes(cfg, step: int | None = None) -> int:
     streams = max(1, _width(c, *_STREAMS))
     per_row = 4 * (4 * hidden * streams + heads * head_dim
                    + k * (2 * expert_in + 3 * ff))
+    if resident:
+        return per_row * resident_prefill_rows(step)
     mt = _get(c, "model_type") or _get(cfg, "model_type")
     return per_row * prefill_rows(mt if isinstance(mt, str) else None, step)
 
@@ -395,11 +412,14 @@ def price_room(costs, trained_ctx, ws: float, transient: float,
 
 def kv_room_bytes(gguf_path: str | None, env: dict | None = None,
                   step: int | None = None,
-                  depth: int | None = None) -> KvRoom:
+                  depth: int | None = None,
+                  resident: bool = False) -> KvRoom:
     """The KV room to leave outside the arena, its prefill chunk at the
     requested ``step`` and its KV at ``depth`` tokens (None:
-    ``GMLX_STREAM_KV_CTX``). A flat legacy reserve when the header cannot
-    be priced or ``GMLX_DECODE_KV_RESERVE_GB`` is set."""
+    ``GMLX_STREAM_KV_CTX``). ``resident`` prices the chunk of a load that
+    keeps its experts in memory (``resident_prefill_rows``), the room a
+    resident wire keeps. A flat legacy reserve when the header cannot be
+    priced or ``GMLX_DECODE_KV_RESERVE_GB`` is set."""
     if os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "") or not gguf_path:
         return price_room(None, None, 0, 0, depth=depth)
     try:
@@ -412,7 +432,8 @@ def kv_room_bytes(gguf_path: str | None, env: dict | None = None,
             return price_room(None, None, 0, 0, depth=depth)
         cfg, costs, _ = priced
         return price_room(costs, cfg.get("max_position_embeddings"), ws,
-                          _cap_bytes(), prefill_activation_bytes(cfg, step),
+                          _cap_bytes(),
+                          prefill_activation_bytes(cfg, step, resident),
                           depth=depth)
     except Exception:
         return price_room(None, None, 0, 0, depth=depth)

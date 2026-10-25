@@ -1043,10 +1043,11 @@ class _ResidencyPool:
         resident set beside the mmproj and the MTP drafter that load with
         it, against the memory not wired less the kernel floor, the KV
         room at the serve context and the room the resident streamed
-        models keep, with the table-only step first. The install's chunk
-        guard keeps the same floor and room, so a set this passes wires.
-        None for a dense model or an unreadable header. A check that fails
-        logs its line."""
+        models keep, with the table-only step first. Returns the check,
+        the KV room and the bytes it kept beside the room, which the
+        install's chunk guard keeps too (``_latch_guarded_wire``). None for
+        a dense model or an unreadable header. A check that fails logs its
+        line."""
         from gmlx.device import stream_budget_bytes
         from gmlx.load.discovery import text_tensor_bytes
         from gmlx.stream import budget as bmod
@@ -1065,7 +1066,7 @@ class _ResidencyPool:
                   else max(0, streamed_table_bytes(model_path) - deferred))
         mmproj = getattr(build_spec, "mmproj", None) or ""
         extra = os.path.getsize(mmproj) if os.path.isfile(mmproj) else 0
-        room = bmod.kv_room_bytes(model_path, env=env)
+        room = bmod.kv_room_bytes(model_path, env=env, resident=True)
         held, _ceiling, host, _floor = self._stream_reservations()
         check = bmod.check_wire_with_tables(
             text - deferred + extra, tables,
@@ -1074,7 +1075,7 @@ class _ResidencyPool:
             budget=stream_budget_bytes())
         if not check.fits:
             _log.warning("[stream] %s: %s", model_path, check.line(room))
-        return check
+        return check, room, held + host
 
     def _tables_for_memory(self, model_path: str, gate_bytes: int,
                            env=None) -> bool:
@@ -1151,14 +1152,18 @@ class _ResidencyPool:
         # memory if they fit.
         gathered = 0
         # The leg of the check before the load that streams a plain MoE's
-        # experts, as the CLI streams them (``_keep_check``).
+        # experts, as the CLI streams them (``_keep_check``), and the room
+        # and bytes it kept beside a set it keeps.
         for_memory = ""
+        kept = (None, 0)
         if getattr(build_spec, "stream", None) is None:
             # Each build judges the memory free now afresh.
             _clear_table_step(model_path)
             gate_bytes = _plain_footprint(model_path, footprint, env)
             if isinstance(model_path, str) and model_path.endswith(".gguf"):
-                keep = self._keep_check(model_path, env, build_spec)
+                judged = self._keep_check(model_path, env, build_spec)
+                keep, kept = ((None, (None, 0)) if judged is None
+                              else (judged[0], judged[1:]))
                 if keep is not None and not keep.fits:
                     for_memory = keep.reason
                 elif keep is not None and keep.table_bytes:
@@ -1201,7 +1206,8 @@ class _ResidencyPool:
                               or bool(for_memory)))
         guarded = _latch_guarded_wire(
             model_path,
-            getattr(build_spec, "stream", None) is None and not for_memory)
+            getattr(build_spec, "stream", None) is None and not for_memory,
+            *kept)
         _say_tables_offloaded(model_path, offloaded)
         # What the entry holds resident. A streaming build adds its decode
         # arena below, once the loader has sized it.
@@ -1700,17 +1706,19 @@ def _clear_table_step(model_path) -> None:
         stream_experts_for_memory(model_path)
 
 
-def _latch_guarded_wire(model_path, plain: bool) -> bool:
+def _latch_guarded_wire(model_path, plain: bool, room=None,
+                        extra: int = 0) -> bool:
     """Latch the chunked wire for a plain build of a MoE the gate admitted
     (``table_stream.guard_resident_wire``): its install wires it in
-    chunks under the chunk guard, and the warm touch leaves it alone.
-    Cleared for any other build of the path. True when latched."""
+    chunks under the chunk guard, keeping the ``room`` and ``extra``
+    bytes the check before the load kept, and the warm touch leaves it
+    alone. Cleared for any other build of the path. True when latched."""
     if isinstance(model_path, str) and model_path.endswith(".gguf"):
         from gmlx.serve.capacity import streamed_expert_bytes
         from gmlx.stream.table_stream import guard_resident_wire
 
         on = plain and bool(streamed_expert_bytes(model_path))
-        guard_resident_wire(model_path, on)
+        guard_resident_wire(model_path, on, room, extra)
         return on
     return False
 

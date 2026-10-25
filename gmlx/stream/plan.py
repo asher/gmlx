@@ -83,8 +83,10 @@ class ModelPlan:
     trained_ctx: int | None
     table_bytes: int = 0
     # One streamed prefill chunk's live activations
-    # (budget.prefill_activation_bytes), priced into the KV room.
+    # (budget.prefill_activation_bytes), priced into the KV room, and one
+    # chunk's of a load that keeps the experts in memory.
     activation_bytes: int = 0
+    resident_activation_bytes: int = 0
     # Each streamable table as (bytes, GGUF type name), so a box can tell
     # the ones no array holds (table_pread.no_array_holds).
     tables: tuple = ()
@@ -192,7 +194,7 @@ def model_plan(scans, env: dict | None = None) -> ModelPlan:
     if n_experts is None and exps_shape and len(exps_shape) == 3:
         n_experts = _int(exps_shape[-1])
     costs = trained = None
-    activation = 0
+    activation = resident_activation = 0
     if expert:
         from gmlx.load import loadlog
         from gmlx.serve.capacity import boot_costs
@@ -205,13 +207,16 @@ def model_plan(scans, env: dict | None = None) -> ModelPlan:
             costs = tuple(costs)
             trained = _int(cfg.get("max_position_embeddings"))
             activation = prefill_activation_bytes(cfg)
+            resident_activation = prefill_activation_bytes(cfg,
+                                                           resident=True)
     return ModelPlan(
         arch=arch, total_bytes=total, expert_bytes=expert, groups=groups,
         moe_layers=len(stacks), n_experts=n_experts,
         experts_per_token=_int(kv.get(f"{arch}.expert_used_count")),
         ring_bytes=ring_bytes(stacks),
         kv_costs=costs, trained_ctx=trained, table_bytes=table,
-        activation_bytes=activation, tables=tuple(tables))
+        activation_bytes=activation,
+        resident_activation_bytes=resident_activation, tables=tuple(tables))
 
 
 def ceiling_for(ram_bytes: float, ws_bytes: float) -> float:
@@ -434,14 +439,24 @@ LIVE_TABLES = ("=> with the memory free now, its tables are offloaded to "
                "disk and its experts stay in memory")
 
 
+def resident_room(m: ModelPlan, b: BoxPlan):
+    """The KV room a load that keeps the experts in memory keeps beside
+    them: the plan's, with a resident prefill chunk."""
+    from gmlx.stream.budget import price_room, transient_bytes
+
+    return price_room(m.kv_costs, m.trained_ctx, b.working_set_bytes,
+                      transient_bytes(b.working_set_bytes),
+                      m.resident_activation_bytes)
+
+
 def live_check(m: ModelPlan, b: BoxPlan, drafter_bytes: int = 0):
     """What a load without a stream flag decides on this Mac's memory
     free now, for a plan that keeps the experts in memory or one past
     the budget in RAM: the check the load runs
     (``budget.check_wire_with_tables``) on the bytes it would wire, with
     the tables the plan holds, beside the auto MTP drafter of
-    ``drafter_bytes`` it loads, with the plan's KV room. None for a plan
-    that streams them anyway."""
+    ``drafter_bytes`` it loads, with the KV room it keeps
+    (``resident_room``). None for a plan that streams them anyway."""
     if b.verdict not in (VERDICT_RESIDENT, VERDICT_TABLES) and not b.past_budget:
         return None
     from gmlx.stream.budget import check_wire_with_tables
@@ -451,12 +466,12 @@ def live_check(m: ModelPlan, b: BoxPlan, drafter_bytes: int = 0):
               else max(0, m.table_bytes - b.deferred_bytes))
     return check_wire_with_tables(m.total_bytes - b.deferred_bytes, tables,
                                   drafter_bytes, auto=True,
-                                  room_bytes=b.room.bytes,
+                                  room_bytes=resident_room(m, b).bytes,
                                   budget=b.budget_bytes or None)
 
 
-def live_line(check, b: BoxPlan) -> str:
-    """The validate line under the plan for a ``live_check``."""
+def live_line(check, b: BoxPlan, m: ModelPlan | None = None) -> str:
+    """The validate line under the plan for a ``live_check`` of ``m``."""
     if check.table_bytes and check.mtp_off:
         return ("=> with the memory free now, its tables are offloaded to "
                 "disk, and " + check.mtp_off_line())
@@ -464,8 +479,8 @@ def live_line(check, b: BoxPlan) -> str:
         return LIVE_TABLES
     if check.mtp_off and check.fits:
         return "=> with the memory free now, " + check.mtp_off_line()
-    return (LIVE_RESIDENT if check.fits
-            else "=> " + check.line(b.room))
+    return (LIVE_RESIDENT if check.fits else "=> " + check.line(
+        b.room if m is None else resident_room(m, b)))
 
 
 def to_dict(m: ModelPlan, b: BoxPlan | None) -> dict:

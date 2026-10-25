@@ -89,6 +89,21 @@ def test_chunk_rows_follow_the_streamed_chunk_width(chunk_env, monkeypatch):
     assert budget.prefill_rows("deepseek_v41") == 2048
 
 
+def test_a_moe_kept_in_memory_prices_its_own_prefill_chunk(chunk_env,
+                                                           monkeypatch):
+    """A load that keeps the experts in memory prefills at the wide MoE
+    step with no merged tail, so its keep prices 4096 rows of Qwen4-Exp,
+    not the 9216 of a streamed chunk. A requested step wins."""
+    monkeypatch.delenv("GMLX_MOE_WIDE_STEP", raising=False)
+    per_row = budget.prefill_activation_bytes(QWEN4EXP_CFG) // 9216
+    assert budget.prefill_activation_bytes(
+        QWEN4EXP_CFG, resident=True) == per_row * 4096
+    assert budget.prefill_activation_bytes(
+        QWEN4EXP_CFG, 1024, resident=True) == per_row * 1024
+    monkeypatch.setenv("GMLX_MOE_WIDE_STEP", "0")
+    assert budget.resident_prefill_rows() == 2048
+
+
 def test_chunk_activations_cover_the_measured_deepseek41_prefill(
         chunk_env, monkeypatch):
     """DeepSeek V4.1 Flash UD-IQ2_XXS held 5.4 GiB of live activations

@@ -267,19 +267,33 @@ def tables_for_memory(path: str | None) -> bool:
     return bool(path) and _key(path) in _FOR_MEMORY
 
 
-# Real paths of the GGUFs whose next load its install wires in chunks.
-_GUARDED: set[str] = set()
+# Real paths of the GGUFs whose next load its install wires in chunks,
+# with the KV room and the other bytes the check before the load kept.
+_GUARDED: dict[str, tuple] = {}
 
 
-def guard_resident_wire(path: str, on: bool = True) -> None:
+def guard_resident_wire(path: str, on: bool = True, room=None,
+                        extra: int = 0) -> None:
     """Latch the chunked wire for the loads of ``path``: a MoE that the
     check before the load keeps in memory, whose install wires it in
     chunks under the chunk guard
     (``expert_streaming.install_unflagged_tables``). The warm touch then
     leaves its weights alone, since a touch wires them in one burst
-    before the guard reads memory. Each load of the path sets or clears
-    it before the weights load, and the install clears it."""
-    (_GUARDED.add if on else _GUARDED.discard)(_key(path))
+    before the guard reads memory. ``room`` (``budget.KvRoom``) and
+    ``extra`` bytes are what that check kept beside the set, and the
+    guard keeps the same; with no ``room`` the install prices it again.
+    Each load of the path sets or clears it before the weights load, and
+    the install clears it."""
+    if on:
+        _GUARDED[_key(path)] = (room, int(extra))
+    else:
+        _GUARDED.pop(_key(path), None)
+
+
+def guarded_wire_keep(path: str | None) -> tuple:
+    """``(room, extra)`` latched for ``path`` (``guard_resident_wire``),
+    else ``(None, 0)``."""
+    return _GUARDED.get(_key(path), (None, 0)) if path else (None, 0)
 
 
 def resident_wire_guarded(path: str | None) -> bool:

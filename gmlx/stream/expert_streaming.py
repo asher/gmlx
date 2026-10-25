@@ -179,23 +179,27 @@ def install_unflagged_tables(model, gguf_path: str | None, *,
     from gmlx.serve.capacity import gathered_table_bytes
     from gmlx.stream.table_stream import (experts_stream_for_memory,
                                           guard_resident_wire,
+                                          guarded_wire_keep,
                                           resident_wire_guarded,
                                           stream_experts_for_memory)
 
     guarded = resident_wire_guarded(gguf_path)
+    keep = guarded_wire_keep(gguf_path)
     guard_resident_wire(gguf_path, False)
     fallback = experts_stream_for_memory(gguf_path)
     stream_experts_for_memory(gguf_path)
     if not fallback and not gathered_table_bytes(gguf_path):
         if not guarded or _wire_plain_resident(model, gguf_path,
-                                               prefill_step=prefill_step):
+                                               prefill_step=prefill_step,
+                                               keep=keep):
             return False
         fallback = "unwired"
     install_expert_streaming(
         model, gguf_path=gguf_path, feeder_prefill=feeder_prefill,
         feeder_decode=feeder_decode, fast_disk=fast_disk,
         prefill_step=prefill_step, stats_verbose=stats_verbose,
-        force_stream=bool(fallback), fallback=fallback)
+        force_stream=bool(fallback), fallback=fallback,
+        wire_keep=keep if guarded else (None, 0))
     return True
 
 
@@ -384,19 +388,26 @@ def _unwire(model) -> int:
 
 
 def _wire_resident_experts(model, gguf_path, wire_bytes: int, *,
-                           budget, prefill_step, skip_ids) -> bool:
+                           budget, prefill_step, skip_ids,
+                           keep=(None, 0)) -> bool:
     """The table-only install's resident set (every-token weights and the
     experts) judged against live memory, then wired in chunks, each once
     unwired memory covers it beside the check's keep (``_ChunkGuard``;
-    the kernel floor under GMLX_OVERCOMMIT=1). False when it does not fit
-    or the wire stopped, with the line saying why; a stopped wire leaves
-    the residency set (``_unwire``). The install then streams the
-    experts."""
+    the kernel floor under GMLX_OVERCOMMIT=1). ``keep`` is the KV room
+    and extra bytes the check before the load kept
+    (``table_stream.guarded_wire_keep``); with no room it is priced here.
+    False when it does not fit or the wire stopped, with the line saying
+    why; a stopped wire leaves the residency set (``_unwire``). The
+    install then streams the experts."""
     from gmlx.stream import budget as bmod
 
     depth = bmod.wire_room_depth()
-    room = bmod.kv_room_bytes(gguf_path, step=prefill_step, depth=depth)
-    check = bmod.check_resident_wire(wire_bytes, room_bytes=room.bytes,
+    room, extra = keep
+    if room is None:
+        room = bmod.kv_room_bytes(gguf_path, step=prefill_step, depth=depth,
+                                  resident=True)
+    check = bmod.check_resident_wire(wire_bytes,
+                                     room_bytes=room.bytes + extra,
                                      budget=budget)
     if not check.fits:
         loadlog.warn(f"[stream] {check.line(room, depth)}")
@@ -436,7 +447,8 @@ def _chunked_wire(model, check, *, room, depth, skip_ids=frozenset(),
     return False
 
 
-def _wire_plain_resident(model, gguf_path, *, prefill_step) -> bool:
+def _wire_plain_resident(model, gguf_path, *, prefill_step,
+                         keep=(None, 0)) -> bool:
     """The chunked wire of a plain MoE load that the check before the
     load kept in memory (``table_stream.guard_resident_wire``), the
     table-only install's wire for the whole model (``_chunked_wire``).
@@ -444,8 +456,10 @@ def _wire_plain_resident(model, gguf_path, *, prefill_step) -> bool:
     to MLX's own residency, which wires it at the first generation.
     That check judged the whole set, and only the chunk guard judges
     it here: the weights the load materialized are wired by now, and a
-    second check would count them twice. False when the wire stopped;
-    the experts then stream."""
+    second check would count them twice. ``keep`` is the KV room and
+    extra bytes that check kept (``table_stream.guarded_wire_keep``);
+    with no room it is priced here. False when the wire stopped; the
+    experts then stream."""
     import mlx_kquant as kq
 
     from gmlx.device import cpu_default_device
@@ -456,8 +470,12 @@ def _wire_plain_resident(model, gguf_path, *, prefill_step) -> bool:
         return True
     total = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
     depth = bmod.wire_room_depth()
-    room = bmod.kv_room_bytes(gguf_path, step=prefill_step, depth=depth)
-    check = bmod.WireCheck(total, None, bmod.wire_keep_bytes(room.bytes),
+    room, extra = keep
+    if room is None:
+        room = bmod.kv_room_bytes(gguf_path, step=prefill_step, depth=depth,
+                                  resident=True)
+    check = bmod.WireCheck(total, None,
+                           bmod.wire_keep_bytes(room.bytes + extra),
                            stream_budget_bytes(), ram_bytes=bmod.ram_bytes())
     if not _chunked_wire(model, check, room=room, depth=depth, say=False):
         return False
@@ -569,6 +587,7 @@ def install_expert_streaming(
     explicit: bool = False,
     prefill_step: int | None = None,
     fallback: str = "",
+    wire_keep: tuple = (None, 0),
 ):
     """Run routed-expert stacks (SwitchGLU) on the CPU stream.
 
@@ -592,6 +611,9 @@ def install_expert_streaming(
     ``fallback`` is the leg of the run's check before the load that
     streamed the experts with no flag asked (``WireCheck.reason``:
     ``budget`` or ``unwired``), so the lines name it, not a flag.
+
+    ``wire_keep`` is what that check kept beside a table-only plan's
+    resident set (``_wire_resident_experts``).
     """
     from gmlx.load.modules import (
         glu_unsorted_call,
@@ -679,7 +701,8 @@ def install_expert_streaming(
         early_wired = _wire_resident_experts(
             model, gguf_path, total_bytes - table_offloaded, budget=budget,
             prefill_step=prefill_step,
-            skip_ids=frozenset(streamed_table_array_ids(model)))
+            skip_ids=frozenset(streamed_table_array_ids(model)),
+            keep=wire_keep)
         if not early_wired:
             table_only = False
             compose = bool(plan.tables)
