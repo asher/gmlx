@@ -1411,7 +1411,7 @@ def _install_sized(monkeypatch, *, timeshare="0", env_gb=None, built=True,
     monkeypatch.setattr(es, "stream_budget_bytes", lambda: 100 * GB)
     monkeypatch.setattr(budget, "ceiling_bytes", lambda: 100 * GB)
     monkeypatch.setattr(budget, "_ram_floor_bytes", lambda ram: 0)
-    monkeypatch.setattr(budget, "_available_ram_bytes",
+    monkeypatch.setattr(budget, "unwired_ram_bytes",
                         lambda *a, **k: free["bytes"])
     monkeypatch.setattr(
         budget, "kv_room_bytes", lambda path, **kw: budget.KvRoom(

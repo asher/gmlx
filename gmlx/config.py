@@ -578,6 +578,10 @@ class ModelCfg:
     # Streamed-decode prefetch recipe: auto (probe the drive), on, off.
     stream_fast_disk: str | None = None
     speculative: bool = False
+    # speculative: auto, or a folder scan that turned speculative on for
+    # the model's MTP head or drafter: a load that holds the experts only
+    # without the drafter drops it.
+    speculative_auto: bool = False
     # Batch-width cap for speculative decode: MTP runs only while the live
     # decode batch is this wide, wider batches decode plain (drafter stays
     # loaded). None = the drafter family's measured default; 0 = uncapped;
@@ -1053,9 +1057,9 @@ class ServerCfg:
     # Stochastic MTP acceptance for sampled requests, process-wide: drafts are
     # accepted by p/q rejection sampling, so output follows the same
     # distribution as non-speculative sampling but is not token-identical to
-    # it; acceptance (and decode speed) rises at temp > 0. Off = default MTP,
-    # token-identical. Greedy requests are unaffected either way.
-    stochastic_mtp: bool = False
+    # it; acceptance (and decode speed) rises at temp > 0. Off = exact-match
+    # MTP, token-identical. Greedy requests are unaffected either way.
+    stochastic_mtp: bool | None = None   # None => on
     # Hold GPU clocks up while a streamed model is decoding (loader gate;
     # only acts on models with a decode feeder). The heartbeat parks when
     # no request is decoding, so an idle server pays nothing.
@@ -1142,6 +1146,9 @@ class ResolvedModel:
     # N = speculate only while the live decode batch is <= N wide.
     # Load-affecting - it is stamped onto the drafter at load.
     speculative_width_cap: int | None = None
+    # ModelCfg.speculative_auto. Load-affecting: a build may drop the
+    # drafter.
+    speculative_auto: bool = False
     # Context copy on this id's drafter. Load-affecting the same way.
     context_copy: bool = False
     # Rope scaling options (a RopeOverride, None = the header's). Load-
@@ -1204,6 +1211,7 @@ class ResolvedModel:
             self.mmproj,
             self.draft_gguf,
             bool(self.speculative),
+            bool(self.speculative_auto),
             str(self.speculative_width_cap),
             bool(self.context_copy),
             self.chat_template,
@@ -1998,6 +2006,7 @@ def resolve_model(
         reasoning_effort=reasoning_effort,
         speculative=bool(model.speculative or model.draft_gguf or model.native_mtp),
         speculative_width_cap=model.speculative_width_cap,
+        speculative_auto=bool(model.speculative_auto),
         context_copy=bool(model.context_copy),
         mmproj=resolve_path(model.mmproj, cfg.model_dirs),
         draft_gguf=(None if model.native_mtp
@@ -2289,6 +2298,32 @@ def _normalize_optional_bool(value, key: str, where: str = "model"):
         stacklevel=3,
     )
     return None
+
+
+def _normalize_speculative(value, where: str = "model") -> dict:
+    """A model's ``speculative`` value as its ModelCfg fields: true, false
+    or auto, which is on with a drafter a load may drop. Absent is off."""
+    if value is None or isinstance(value, bool):
+        return {"speculative": bool(value), "speculative_auto": False}
+    s = str(value).strip().lower()
+    if s == "auto":
+        return {"speculative": True, "speculative_auto": True}
+    if s in ("true", "yes", "on", "1", "false", "no", "off", "0"):
+        return {"speculative": s in ("true", "yes", "on", "1"),
+                "speculative_auto": False}
+    raise ConfigError(
+        f"{where}.speculative: expected true, false or auto, got {value!r}")
+
+
+def speculative_off(value) -> bool:
+    """Whether a raw ``speculative`` value turns speculative decoding off,
+    in any spelling the loader reads. Absent and null are not off."""
+    if value is None:
+        return False
+    try:
+        return not _normalize_speculative(value)["speculative"]
+    except ConfigError:
+        return False
 
 
 def _normalize_speculative_width_cap(value, where: str = "model"):
@@ -2668,7 +2703,7 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
             raw.get("decode_feeder"), "decode_feeder", f"model {model_id!r}"),
         stream_fast_disk=_normalize_fast_disk(
             raw.get("stream_fast_disk"), f"model {model_id!r}"),
-        speculative=bool(raw.get("speculative", False)),
+        **_normalize_speculative(raw.get("speculative"), f"model {model_id!r}"),
         speculative_width_cap=_normalize_speculative_width_cap(
             raw.get("speculative_width_cap"), f"model {model_id!r}"),
         context_copy=bool(_normalize_optional_bool(
@@ -2865,8 +2900,17 @@ def _parse_discover(raw: dict) -> DiscoverSpec:
         dir=raw.get("dir"),
         recursive=bool(raw.get("recursive", False)),
         pair_mmproj=bool(raw.get("pair_mmproj", True)),
-        speculative=raw.get("speculative", "auto"),
+        speculative=_discover_speculative(raw.get("speculative")),
     )
+
+
+def _discover_speculative(value):
+    """A discover entry's ``speculative``: "auto" when absent, else true,
+    false or auto as a model entry reads them."""
+    if value is None:
+        return "auto"
+    n = _normalize_speculative(value, "discover entry")
+    return "auto" if n["speculative_auto"] else n["speculative"]
 
 
 def _parse_mcp_list(mcp_raw, where: str) -> list:
@@ -3535,7 +3579,8 @@ def build_config(doc: dict) -> ServerCfg:
         cache_limit_gb=_coerce_num(
             "cache_limit_gb", srv.get("cache_limit_gb"), float),
         family_defaults=bool(srv.get("family_defaults", True)),
-        stochastic_mtp=bool(srv.get("stochastic_mtp", False)),
+        stochastic_mtp=(None if srv.get("stochastic_mtp") is None
+                        else bool(srv.get("stochastic_mtp"))),
         gpu_keepwarm=(None if srv.get("gpu_keepwarm") is None
                       else bool(srv.get("gpu_keepwarm"))),
         defaults=ServerDefaults(

@@ -267,6 +267,66 @@ def tables_for_memory(path: str | None) -> bool:
     return bool(path) and _key(path) in _FOR_MEMORY
 
 
+# Real paths of the GGUFs whose next load its install wires in chunks,
+# with the KV room and the other bytes the check before the load kept.
+_GUARDED: dict[str, tuple] = {}
+
+
+def guard_resident_wire(path: str, on: bool = True, room=None,
+                        extra: int = 0) -> None:
+    """Latch the chunked wire for the loads of ``path``: a MoE that the
+    check before the load keeps in memory, whose install wires it in
+    chunks under the chunk guard
+    (``expert_streaming.install_unflagged_tables``). The warm touch then
+    leaves its weights alone, since a touch wires them in one burst
+    before the guard reads memory. ``room`` (``budget.KvRoom``) and
+    ``extra`` bytes are what that check kept beside the set, and the
+    guard keeps the same; with no ``room`` the install prices it again.
+    Each load of the path sets or clears it before the weights load, and
+    the install clears it."""
+    if on:
+        _GUARDED[_key(path)] = (room, int(extra))
+    else:
+        _GUARDED.pop(_key(path), None)
+
+
+def guarded_wire_keep(path: str | None) -> tuple:
+    """``(room, extra)`` latched for ``path`` (``guard_resident_wire``),
+    else ``(None, 0)``."""
+    return _GUARDED.get(_key(path), (None, 0)) if path else (None, 0)
+
+
+def resident_wire_guarded(path: str | None) -> bool:
+    """Whether the next load of ``path`` wires in chunks at its install
+    (``guard_resident_wire``)."""
+    return bool(path) and _key(path) in _GUARDED
+
+
+# Real paths of the GGUFs whose next load streams its experts for want of
+# memory, with the leg of the check that found them short.
+_EXPERTS_FOR_MEMORY: dict[str, str] = {}
+
+
+def stream_experts_for_memory(path: str, reason: str = "") -> None:
+    """Latch the next load of ``path`` with no stream placement to stream
+    its experts: the serve check before the load found them short of the
+    memory free now or past the budget (``reason``: ``WireCheck.reason``).
+    Its install streams them without trying the wire
+    (``expert_streaming.install_unflagged_tables``), as a run streams them
+    with the check's line. An empty ``reason`` clears it; the install
+    clears it too."""
+    if reason:
+        _EXPERTS_FOR_MEMORY[_key(path)] = reason
+    else:
+        _EXPERTS_FOR_MEMORY.pop(_key(path), None)
+
+
+def experts_stream_for_memory(path: str | None) -> str:
+    """The leg ``stream_experts_for_memory`` latched for ``path``, or
+    empty."""
+    return _EXPERTS_FOR_MEMORY.get(_key(path), "") if path else ""
+
+
 def unflagged_tables_stream(path: str | None, total_bytes: int, tbytes: int,
                             budget: int | None, env=None) -> bool:
     """The table-only step of a load of ``path`` with no stream flag: its
@@ -490,13 +550,18 @@ def streamed_table_array_ids(model) -> set[int]:
 def warm_touch_exclusions(model, total_bytes: int, budget: int | None,
                           paths: list[str] | None = None) -> set[int]:
     """``id()``s of arrays the load-time GPU warm touch must skip: the
-    declared tables, whenever the selection ladder will stream them, and
-    the expert stacks under a stream flag latch. The warm touch runs
-    before ``install_expert_streaming``, so this re-runs the same ladder
-    test; without it, a fits-in-RAM load under ``GMLX_STREAM_PLE=1`` or a
-    stream flag would GPU-touch the table and the experts and wire them
-    before streaming ever installs. ``paths`` are the load's GGUF files,
-    for the table-only step latched for the memory free now."""
+    declared tables, whenever the selection ladder will stream them, the
+    expert stacks under a stream flag latch, and every array of a load
+    its install wires in chunks (``guard_resident_wire``). The warm touch
+    runs before ``install_expert_streaming``, so this re-runs the same
+    ladder test; without it, a fits-in-RAM load under
+    ``GMLX_STREAM_PLE=1`` or a stream flag would GPU-touch the table and
+    the experts and wire them before streaming ever installs. ``paths``
+    are the load's GGUF files, for the latches set per path."""
+    if any(resident_wire_guarded(p) for p in paths or ()):
+        from mlx.utils import tree_flatten
+
+        return {id(a) for _, a in tree_flatten(model.parameters())}
     out: set[int] = set()
     latched = any(tables_for_memory(p) for p in paths or ())
     if table_stream_selected(model, total_bytes, budget, force_stream=latched):

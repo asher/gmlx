@@ -61,6 +61,7 @@ from gmlx.config import (
     replace_config_text,
     resolve_model,
     resolve_path,
+    speculative_off,
 )
 from gmlx.envflags import env_bool
 
@@ -864,7 +865,8 @@ def _open_pairs(path, key, pairs) -> dict:
 
 
 def _ids_speculative_off(path) -> set:
-    """The ids of ``path``'s model entries set to ``speculative: false``."""
+    """The ids of ``path``'s model entries set to ``speculative: false``,
+    in any spelling the loader reads (``speculative_off``)."""
     from ruamel.yaml import YAML
 
     try:
@@ -875,7 +877,7 @@ def _ids_speculative_off(path) -> set:
     if not isinstance(models, dict):
         return set()
     return {str(mid) for mid, ent in models.items()
-            if isinstance(ent, dict) and ent.get("speculative") is False}
+            if isinstance(ent, dict) and speculative_off(ent.get("speculative"))}
 
 
 def _ids_with_key(path, key) -> set:
@@ -1283,7 +1285,7 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
                 continue
             if (fresh["speculative"] and "speculative" not in ent
                     and not ent.get("draft_gguf")):
-                ent.insert(list(ent).index("stream"), "speculative", True)
+                ent.insert(list(ent).index("stream"), "speculative", "auto")
             _drop_key_keep_trailing(ent, "stream")
         for mc in discovered:
             entry = CommentedMap(discovery.model_to_entry(mc, dirs))
@@ -1301,10 +1303,15 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
             ent = models.get(mid)
             if (isinstance(ent, dict) and "path" in ent
                     and "draft_gguf" not in ent
-                    and ent.get("speculative") is not False):
+                    and not speculative_off(ent.get("speculative"))):
                 _insert_key_keep_trailing(
                     ent, "mmproj" if "mmproj" in ent else "path",
                     "draft_gguf", discovery._rel(dpath, dirs), companion_note)
+                # As a scan writes a paired drafter: a load leaves it out
+                # when it does not fit beside the experts.
+                if "speculative" not in ent:
+                    _insert_key_keep_trailing(ent, "draft_gguf",
+                                              "speculative", "auto")
         for mid, mpath in (mmproj_pairs or {}).items():
             ent = models.get(mid)
             if (isinstance(ent, dict) and "path" in ent
@@ -1527,12 +1534,15 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                     help="Draft with the model's own MTP head even when "
                          "--draft-gguf is set. Same as the per-model config key "
                          "native_mtp.")
-    ap.add_argument("--stochastic-mtp", action="store_true",
+    ap.add_argument("--stochastic-mtp", action=argparse.BooleanOptionalAction,
+                    default=None,
                     help="Accept MTP drafts by p/q rejection sampling on sampled "
-                         "requests (server-wide): same output distribution as "
-                         "non-speculative sampling, not token-identical; higher "
-                         "acceptance at temp > 0. Same as config "
-                         "server.stochastic_mtp; greedy requests unaffected.")
+                         "requests, server-wide (the default): same output "
+                         "distribution as non-speculative sampling, not "
+                         "token-identical; higher acceptance at temp > 0. "
+                         "--no-stochastic-mtp accepts only exact matches. Same "
+                         "as config server.stochastic_mtp; greedy requests "
+                         "unaffected.")
     ap.add_argument("--gpu-keepwarm", action=argparse.BooleanOptionalAction,
                     default=None,
                     help="Hold GPU clocks up while a streamed model is decoding "
@@ -1887,6 +1897,9 @@ def _bg_serve_args(a, cfg_path) -> list:
         out.append("--native-mtp")
     if getattr(a, "draft_block_size", None):
         out += ["--draft-block-size", str(a.draft_block_size)]
+    if getattr(a, "stochastic_mtp", None) is not None:
+        out.append("--stochastic-mtp" if a.stochastic_mtp
+                   else "--no-stochastic-mtp")
     if getattr(a, "chat_template", None):
         ct = a.chat_template
         out += ["--chat-template",
@@ -2559,11 +2572,16 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
                "defaults", "cache", "assistants", "assistant_allow_remote",
                "image")}
     # Profile/model names double as dict keys; drop the redundant fields so the
-    # entries match the file schema (which has no `name`/`id` keys).
+    # entries match the file schema (which has no `name`/`id` keys). An
+    # auto drafter writes back as `speculative: auto`.
     profiles = {n: {k: v for k, v in p.items() if k != "name"}
                 for n, p in d.pop("profiles").items()}
-    models = {mid: {k: v for k, v in m.items() if k != "id"}
-              for mid, m in d.pop("models").items()}
+    models = {}
+    for mid, m in d.pop("models").items():
+        m.pop("id")
+        if m.pop("speculative_auto") and m.get("speculative"):
+            m["speculative"] = "auto"
+        models[mid] = m
     images = {}
     for iid, m in d.pop("image_models").items():
         m.pop("id")
@@ -2868,14 +2886,18 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     if getattr(a, "draft_block_size", None):
         # Read lazily at drafter-load time (server_bridge_vlm.load_drafter).
         os.environ["GMLX_DRAFT_BLOCK_SIZE"] = str(a.draft_block_size)
-    if cfg.stochastic_mtp or getattr(a, "stochastic_mtp", False):
-        # Startup-only, like the timeout below; a config reload does not
-        # re-apply it.
-        from gmlx.spec.speculative import set_stoch_accept
+    # Startup-only, like the timeout below; a config reload does not
+    # re-apply it.
+    from gmlx.spec.speculative import set_stoch_accept, stoch_accept_enabled
 
-        set_stoch_accept(True)
-        print("[server] stochastic MTP acceptance: on (sampled requests keep "
-              "the sampling distribution but are not token-identical)")
+    stoch = getattr(a, "stochastic_mtp", None)
+    if stoch is None:
+        stoch = cfg.stochastic_mtp
+    if stoch is not None:
+        set_stoch_accept(stoch)
+    if not stoch_accept_enabled():
+        print("[server] stochastic MTP acceptance: off (sampled requests "
+              "accept only exact matches)")
     # Activation dtype: flag > config > exported env. Server-wide because the
     # reason to leave bfloat16 is a property of the GPU, not of a model. Read
     # at each model's load, so setting it here covers every model this server

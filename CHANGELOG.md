@@ -35,6 +35,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Sampled requests accept speculative drafts by rejection sampling by
+  default and decode faster. `--no-stochastic-mtp` keeps seeded runs
+  token-identical to runs without speculation.
 - Requires mlx-kquant 0.5.6. With it, decode writes each new KV cache row in
   place instead of copying the whole cache every token, so decode at long
   context is faster and peaks lower.
@@ -66,6 +69,19 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drafter. An old mark now streams its experts: `gmlx sync-models` drops it.
 - `run` and `chat` stream a MoE's experts when the model is over its memory
   budget or they do not fit the memory free at load, with a line that says why.
+- A MoE keeps its experts in memory beside other apps, which macOS compresses
+  to make room. Another model makes them stream while it generates.
+- `serve` judges a MoE's experts with their KV room before the load, as `run`
+  does, so a load no longer wires part of the model and then streams it.
+- A MoE keeps its experts in memory when they fit beside the prefill of a
+  model held in memory, which takes several GB less than a streamed prefill.
+- While `serve` runs beside other apps, their memory no longer evicts the prefix
+  cache or stops its stores, and it shrinks a streamed model's expert arena
+  half as much.
+- `speculative: auto` on a model entry, which `gmlx init` and `sync-models`
+  now write, leaves out an MTP drafter that does not fit beside the experts.
+- `/v1/metrics` reports `kernel_unwired_bytes` and `kernel_free_page_waiters`
+  in place of `kernel_reclaimable_bytes`.
 - `run` and `chat` keep a MoE's experts in memory and turn auto MTP off when its
   drafter does not fit beside them, with an `[mtp]` line.
 - With `GMLX_OVERCOMMIT=1`, `run`, `chat` and `image generate` load a model

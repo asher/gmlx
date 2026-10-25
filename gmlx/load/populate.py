@@ -29,7 +29,8 @@ decode arena for RAM. ``maybe_populate_for_load`` applies the same
 
 ``GMLX_RESIDENCY_WARM=0`` disables populate along with the GPU touch;
 ``GMLX_POPULATE_EARLY=0`` restores the old phase-7 kickoff point;
-``GMLX_POPULATE_WAIT=0`` restores the prefill/stream race.
+``GMLX_POPULATE_WAIT=0`` restores the prefill/stream race; a chunked
+resident wire still waits (``finish_all``).
 """
 
 from __future__ import annotations
@@ -194,12 +195,25 @@ def wait_for(paths: list[str], log=print) -> None:
     """
     if not env_bool("GMLX_POPULATE_WAIT", True):
         return
-    tail = env_float("GMLX_POPULATE_WAIT_TAIL", 0.25)
     with _lock:
         pending = [
             st for p in paths
             if (st := _streams.get(os.path.realpath(p))) is not None
         ]
+    _wait(pending, env_float("GMLX_POPULATE_WAIT_TAIL", 0.25), log)
+
+
+def finish_all(log=print) -> None:
+    """Block until every in-flight populate has read its whole file. A
+    chunked resident wire runs this first: the readers fill the page cache
+    the wire's guard reads, and the wire reads the same pages anyway.
+    GMLX_POPULATE_WAIT=0 does not skip it."""
+    with _lock:
+        pending = list(_streams.values())
+    _wait(pending, 0.0, log)
+
+
+def _wait(pending: list[_Stream], tail: float, log) -> None:
     t0 = time.perf_counter()
     waited = False
     # A reader wedged on a dying disk/network volume would spin this loop

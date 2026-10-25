@@ -30,9 +30,9 @@ as gemma-4 with its assistant drafter, need `--draft-gguf`.
 | `--native-mtp` | [`native_mtp: true`](config.md#modelsnative_mtp) | Drafts with the native head even when a drafter file is set. |
 | `--no-mtp` | `speculative: false` | Turns it off. |
 
-On the server, a model speculates when its `speculative` key is true.
-`gmlx init` sets it for models with a head, and `gmlx pull` and a
-[discover](config.md#model-discovery) scan pair a drafter that they find
+On the server, a model speculates when its `speculative` key is `true` or
+`auto`. `gmlx init` sets `auto` for models with a head, and `gmlx pull` and
+a [discover](config.md#model-discovery) scan pair a drafter that they find
 with its model. For a model already in the config,
 [`gmlx sync-models --add-companions`](cli.md#gmlx-sync-models) adds the
 drafter to its entry.
@@ -40,9 +40,10 @@ drafter to its entry.
 Speculation works with some other features and stays off with others:
 
 - `--stream-experts`: off by default, and `--speculative` turns it on.
-- A MoE whose experts stay in memory: on `run` and `chat`, off with an
-  `[mtp]` line when the drafter does not fit beside them. `--speculative`
-  streams the experts to keep it, as
+- A MoE whose experts stay in memory: on in `run` and `chat` and for
+  `speculative: auto`, off with an `[mtp]` line when the drafter does not
+  fit beside them. `--speculative` or `speculative: true` streams the
+  experts to keep it, as
   [When a MoE streams its experts](streaming.md#when-a-moe-streams-its-experts)
   describes.
 - `--stream-cpu`: `run` and `chat` refuse `--speculative`.
@@ -207,15 +208,21 @@ does not repeat the prompt.
 
 ## Stochastic acceptance
 
-By default, the model accepts a draft only when it matches the token that
-the model would choose, so the output is identical to a run without
-speculation. At a temperature above zero, this limits speed, because a
-draft cannot match a sampled token more often than the probabilities allow.
+On a request with a temperature above zero, gmlx accepts drafts by
+rejection sampling. The output is a true sample from the model's
+distribution, and more drafts pass than by exact match, so decoding is
+faster. The gain is largest on low-bit quants and on text where the model
+is unsure. Greedy requests match a run without speculation. On
+Nemotron-H, an explicit `--stochastic-mtp` or `stochastic_mtp: true` takes
+a faster verify, and a greedy request can then differ on a near tie.
 
-`--stochastic-mtp`, or
-[`server.stochastic_mtp: true`](config.md#serverstochastic_mtp), accepts
-drafts by rejection sampling instead. The output is still a true sample
-from the model's distribution, but no longer token-identical to a run
-without speculation. Greedy requests do not change. `--stochastic-mtp`
-works with DFlash 2 drafters too. The gain is largest on low-bit quants and on text where the model
-is unsure. Turn it on when you sample and want more speed.
+A seeded sampled run is not token-identical to the same run without
+speculation. To accept only drafts that match the token the model would
+sample, turn stochastic acceptance off:
+
+```sh
+gmlx run model.gguf --no-stochastic-mtp --temp 0.7 --seed 7 --prompt "Hello"
+```
+
+In a server config, set
+[`server.stochastic_mtp: false`](config.md#serverstochastic_mtp).

@@ -159,12 +159,12 @@ def ram_bytes() -> int:
         return 128 * GIB
 
 
-def kernel_reclaimable() -> int | None:
-    """The box's reclaimable pages now. The governor's field only moves
+def kernel_unwired() -> int | None:
+    """The box's memory not wired now. The governor's field only moves
     on a decode tick, so an idle read of it is stale."""
-    from gmlx.serve.kernel_vm import reclaimable_bytes
+    from gmlx.serve.kernel_vm import unwired_bytes
 
-    return reclaimable_bytes()
+    return unwired_bytes()
 
 
 def floor_bytes(gov: dict) -> float | None:
@@ -447,7 +447,7 @@ def phase_warmth(a) -> None:
         mem0, g0 = s0.get("memory") or {}, s0.get("governor") or {}
         nominal = mem0.get("arena_nominal_bytes") or 0
         arena0 = mem0.get("arena_bytes") or 0
-        recl0 = kernel_reclaimable()
+        recl0 = kernel_unwired()
         floor = floor_bytes(g0)
         red0 = g0.get("red_failures") or 0
         if recl0 is None or floor is None:
@@ -455,7 +455,7 @@ def phase_warmth(a) -> None:
         else:
             hog_gb = min(a.hog_max_gb, max(4.0, (recl0 - floor + 2e9) / GIB))
         print(f"warmth: transient of {hog_gb:.1f} GiB; arena {gb(arena0)} of {gb(nominal)}, "
-              f"reclaimable {gb(recl0)}, floor {gb(floor)}")
+              f"not wired {gb(recl0)}, floor {gb(floor)}")
         first_tok = threading.Event()
         out: list = []
         t = threading.Thread(
@@ -476,7 +476,7 @@ def phase_warmth(a) -> None:
         r_hold = out[0] if out else {"status": 0, "tokens": 0, "decode_tok_s": 0}
         arenas = [x["memory"].get("arena_bytes") for x in hold if x.get("memory")]
         arenas = [v for v in arenas if v]
-        recls = [(x.get("governor") or {}).get("kernel_reclaimable_bytes") for x in hold]
+        recls = [(x.get("governor") or {}).get("kernel_unwired_bytes") for x in hold]
         recls = [v for v in recls if v is not None]
         min_arena = min(arenas) if arenas else None
         min_recl = min(recls) if recls else None
@@ -487,9 +487,9 @@ def phase_warmth(a) -> None:
               r_hold["status"] == 200 and r_hold["tokens"] >= a.transient_tokens // 2,
               f"{r_hold['tokens']} tokens, decode {r_hold['decode_tok_s']} tok/s")
         if floor is not None:
-            check("transient: reclaimable fell under the kernel floor",
+            check("transient: memory not wired fell under the kernel floor",
                   min_recl is not None and min_recl < floor,
-                  f"min reclaimable {gb(min_recl)} floor {gb(floor)}")
+                  f"min not wired {gb(min_recl)} floor {gb(floor)}")
         check("transient: arena stepped down",
               min_arena is not None and min_arena < arena0 - 0.1 * nominal,
               f"arena {gb(arena0)} -> min {gb(min_arena)} (nominal {gb(nominal)}); "
@@ -515,14 +515,14 @@ def phase_warmth(a) -> None:
         # release: regrow on the next decode when the box has the room
         time.sleep(10)
         s2 = state(c)
-        recl1 = kernel_reclaimable()
+        recl1 = kernel_unwired()
         arena1 = (s2.get("memory") or {}).get("arena_bytes") or 0
         need = 0.25 * nominal
         from gmlx.stream.budget import _ram_floor_bytes
         gate = need + _ram_floor_bytes(ram_bytes()) + (floor or 0)
         expected = recl1 is not None and recl1 >= gate
         print(f"warmth: released at +{time.monotonic() - t_rel:.0f}s; arena {gb(arena1)}, "
-              f"reclaimable {gb(recl1)}, regrow gate {gb(gate)} -> "
+              f"not wired {gb(recl1)}, regrow gate {gb(gate)} -> "
               f"{'regrow expected' if expected else 'regrow gated'}")
         with Sampler(base) as smp:
             t_re = time.monotonic()
@@ -539,9 +539,9 @@ def phase_warmth(a) -> None:
                   regrow_lines >= 1 and max_arena > arena1 + 0.1 * nominal,
                   f"{regrow_lines} regrow lines; arena {gb(arena1)} -> max {gb(max_arena)}")
         else:
-            check("release: regrow gated by the reclaimable rule (no room for a step)",
+            check("release: regrow gated by the memory not wired (no room for a step)",
                   regrow_lines == 0,
-                  f"reclaimable {gb(recl1)} < gate {gb(gate)}; {regrow_lines} regrow lines")
+                  f"not wired {gb(recl1)} < gate {gb(gate)}; {regrow_lines} regrow lines")
         check("release: decode continues at 60% of warm speed or better",
               r_re["decode_tok_s"] >= 0.6 * warm_tok_s,
               f"{r_re['decode_tok_s']} vs warm {warm_tok_s} tok/s")
@@ -715,7 +715,7 @@ def main() -> int:
     ap.add_argument("--hog-gb", type=float, default=30.0,
                     help="GiB another process wires for the occupied phase")
     ap.add_argument("--hog-max-gb", type=float, default=60.0,
-                    help="cap on the warmth transient (sized from the live reclaimable)")
+                    help="cap on the warmth transient (sized from the live memory not wired)")
     ap.add_argument("--hold-s", type=float, default=90.0, help="transient hold, seconds")
     ap.add_argument("--max-tokens", type=int, default=48)
     ap.add_argument("--warm-requests", type=int, default=4)

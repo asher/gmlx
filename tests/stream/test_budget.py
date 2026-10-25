@@ -62,6 +62,11 @@ DS41_CFG = {"model_type": "deepseek_v41", "hidden_size": 5120,
             "num_experts_per_tok": 6, "moe_intermediate_size": 2304}
 
 
+QWEN4EXP_CFG = {"model_type": "qwen4_exp", "hidden_size": 2560,
+                "num_attention_heads": 24, "head_dim": 256, "hc_count": 4,
+                "num_experts_per_tok": 10, "moe_intermediate_size": 640}
+
+
 @pytest.fixture
 def chunk_env(monkeypatch):
     for k in ("PREFILL_STEP_SIZE", "GMLX_STREAM_PREFILL_TAIL_MERGE"):
@@ -87,6 +92,52 @@ def test_chunk_rows_follow_the_streamed_chunk_width(chunk_env, monkeypatch):
     assert budget.prefill_rows("deepseek_v41", 4096) == 4608
     monkeypatch.setenv("GMLX_STREAM_PREFILL_TAIL_MERGE", "0")
     assert budget.prefill_rows("deepseek_v41") == 2048
+
+
+@pytest.mark.parametrize("cfg,rows", [
+    # Qwen3.8-Flash-Next: its arch prefills 8192 rows, with no merged tail.
+    (dict(QWEN4EXP_CFG, num_experts=512), 8192),
+    # DeepSeek V4.1 Flash: its arch's 4096.
+    (dict(DS41_CFG, n_routed_experts=256), 4096),
+    # Qwen3.6-35B-A3B, 256 experts at 8 a token: the wide MoE step.
+    (dict(model_type="qwen3_5_moe", hidden_size=2048,
+          num_attention_heads=16, head_dim=256, num_experts=256,
+          num_experts_per_tok=8, moe_intermediate_size=512), 4096),
+    # gpt-oss-20b, 32 experts at 4 a token: the stock 2048.
+    (dict(model_type="gpt_oss", hidden_size=2880, num_attention_heads=64,
+          head_dim=64, num_local_experts=32, num_experts_per_tok=4,
+          intermediate_size=2880), 2048),
+])
+def test_a_moe_kept_in_memory_prices_the_chunk_it_prefills(
+        chunk_env, monkeypatch, cfg, rows):
+    """A load that keeps the experts in memory prefills at the step its
+    arch or its expert count takes, so its keep prices those rows, not
+    the streamed chunk's. A requested step wins."""
+    for k in ("GMLX_MOE_WIDE_STEP", *budget._ARCH_STEP_ENV.values()):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("GMLX_STREAM_PREFILL_TAIL_MERGE", "0")
+    mt = cfg["model_type"]
+    per_row = budget.prefill_activation_bytes(cfg) // budget.prefill_rows(mt)
+    assert budget.prefill_activation_bytes(cfg, resident=True) == per_row * rows
+    assert budget.prefill_activation_bytes(
+        cfg, 1024, resident=True) == per_row * 1024
+
+
+def test_the_resident_arch_steps_are_the_archs_own(monkeypatch):
+    import gmlx.models.deepseek_v4.model as v4
+    import gmlx.models.deepseek_v41.model as v41
+    import gmlx.models.qwen4_exp.model as q4
+
+    assert budget._ARCH_RESIDENT_STEP == {
+        "qwen4_exp": q4._Q4_BASE_STEP, "deepseek_v4": v4._V4_BASE_STEP,
+        "deepseek_v41": v41._DS41_BASE_STEP}
+    monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
+    monkeypatch.setenv("GMLX_Q4_PREFILL_STEP", "2048")
+    assert budget.resident_prefill_rows(None, "qwen4_exp") == 2048
+    # A batch the arch's profile is off for takes the wide MoE step.
+    monkeypatch.setenv("GMLX_MOE_WIDE_STEP", "16384")
+    assert budget.resident_prefill_rows(
+        None, "deepseek_v41", experts=256, used=6) == 16384
 
 
 def test_chunk_activations_cover_the_measured_deepseek41_prefill(
@@ -136,11 +187,6 @@ def test_chunk_activations_read_each_archs_width_names(chunk_env):
 
 
 # Qwen3.8-Flash-Next's header widths: 4 residual streams.
-QWEN4EXP_CFG = {"model_type": "qwen4_exp", "hidden_size": 2560,
-                "num_attention_heads": 24, "head_dim": 256, "hc_count": 4,
-                "num_experts_per_tok": 10, "moe_intermediate_size": 640}
-
-
 def test_room_holds_the_chunk_and_a_2_gib_pool(header, monkeypatch):
     """The room holds one chunk's activations (8.0 GB on DeepSeek V4.1
     Flash and 4.3 GB on Qwen3.8-Flash-Next at the streamed chunk width)
@@ -346,7 +392,7 @@ def test_a_forced_stream_under_the_budget_wires_half_the_experts(monkeypatch):
 
     monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
     monkeypatch.delenv("GMLX_DECODE_ARENA_RAM_FRAC", raising=False)
-    monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: None)
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda *a, **k: None)
     monkeypatch.setattr(budget, "ceiling_bytes", lambda: 100 << 30)
     monkeypatch.setattr(mx, "device_info", lambda *a: {"memory_size": 128 << 30})
     experts = 20 << 30
@@ -354,6 +400,33 @@ def test_a_forced_stream_under_the_budget_wires_half_the_experts(monkeypatch):
               budget=100 << 30, room_bytes=4 << 30)
     assert budget._decode_arena_bytes(**kw) == experts
     assert budget._decode_arena_bytes(**kw, forced=True) == experts // 2
+
+
+def test_the_arena_takes_other_apps_memory_but_not_another_models(
+        monkeypatch):
+    """Apps hold most of the RAM beside a streamed model: free and the page
+    cache read near empty, but the kernel compresses their memory, so the
+    arena keeps its full size. Memory another model holds wired shrinks
+    it."""
+    import mlx.core as mx
+
+    import gmlx.serve.kernel_vm as kv
+    import gmlx.stream.budget as budget
+
+    for k in ("GMLX_DECODE_ARENA_GB", "GMLX_DECODE_ARENA_RAM_FRAC",
+              "GMLX_DECODE_RAM_FLOOR_GB", "GMLX_DECODE_PAGECACHE_GB"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(budget, "ceiling_bytes", lambda: 100 << 30)
+    monkeypatch.setattr(mx, "device_info", lambda *a: {"memory_size": 128 << 30})
+    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 3 << 30)
+    monkeypatch.setattr(kv, "live_reclaimable_bytes", lambda: 3 << 30)
+    experts = 20 << 30
+    kw = dict(total_bytes=30 << 30, offsets={0: [(0, 0, experts)]},
+              budget=100 << 30, room_bytes=4 << 30)
+    monkeypatch.setattr(kv, "unwired_bytes", lambda: 110 << 30)
+    assert budget._decode_arena_bytes(**kw) == experts
+    monkeypatch.setattr(kv, "unwired_bytes", lambda: 30 << 30)
+    assert 0 < budget._decode_arena_bytes(**kw) < experts
 
 
 def test_host_overhead_is_priced_at_its_cap(monkeypatch):
@@ -388,9 +461,11 @@ def test_arena_charges_the_host_overhead_on_ram_not_the_ceiling(monkeypatch):
     monkeypatch.setattr(mx, "device_info",
                         lambda *a: {"memory_size": 1000 << 30})
     monkeypatch.setattr(budget, "ceiling_bytes", lambda: 100 << 30)
-    avail = {"v": None}
-    monkeypatch.setattr(budget, "_available_ram_bytes",
+    avail = {"v": None, "easy": None}
+    monkeypatch.setattr(budget, "unwired_ram_bytes",
                         lambda *a, **k: avail["v"])
+    monkeypatch.setattr(budget, "_available_ram_bytes",
+                        lambda *a, **k: avail["easy"] or avail["v"])
     gib = 1 << 30
     kw = dict(total_bytes=210 * gib, offsets={0: [(0, 0, 200 * gib)]},
               budget=100 * gib, room_bytes=10 * gib, pinned_bytes=10 * gib)
@@ -402,6 +477,11 @@ def test_arena_charges_the_host_overhead_on_ram_not_the_ceiling(monkeypatch):
     avail["v"] = 60 * gib
     kw["host_bytes"] = 3 * gib
     assert budget._decode_arena_bytes(**kw) == 47 * gib
+    # With 30 GiB of it other apps' memory, those count at half: the
+    # kernel keeps what it compresses in RAM.
+    avail["easy"] = 30 * gib
+    assert budget._decode_arena_bytes(**kw) == (47 + 17) // 2 * gib
+    avail["easy"] = None
     # An explicit arena clamps to the same: the next prefill's transients
     # and the resident pages need the room it would take.
     monkeypatch.setenv("GMLX_DECODE_ARENA_GB", "50")
@@ -449,6 +529,7 @@ def test_deepseek41_default_arena_keeps_8_gib_free_at_the_prefill_peak(
     every, table, experts, ring = 8.4e9, 135.2e9, 156.9e9, 9.27e9
     monkeypatch.setattr(mx, "device_info", lambda *a: {"memory_size": ram})
     monkeypatch.setattr(budget, "ceiling_bytes", lambda: 0.95 * ws)
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda *a, **k: avail)
     monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: avail)
     monkeypatch.setattr(mp, "prompt_kv_bytes", lambda costs, n: 10e6)
     room = budget.price_room(((1, 1),), 1 << 20, ws, 0.05 * ws,
@@ -506,6 +587,7 @@ def test_loader_arena_matches_the_plan_where_the_ceiling_binds(
     monkeypatch.setattr(mx, "device_info", lambda *a: {"memory_size": ram})
     monkeypatch.setattr(budget, "ceiling_bytes",
                         lambda: sp.ceiling_for(ram, ws))
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda *a, **k: avail)
     monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: avail)
 
     def loader(ring_bytes=0):

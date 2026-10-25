@@ -257,12 +257,15 @@ def add_speculative_args(parser: argparse.ArgumentParser) -> None:
     )
     ap.add_argument(
         "--stochastic-mtp",
-        action="store_true",
-        help="Accept MTP drafts by p/q rejection sampling instead of exact "
-        "match on sampled runs: output follows the same distribution as "
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Accept MTP drafts by p/q rejection sampling on sampled runs "
+        "(the default): output follows the same distribution as "
         "non-speculative sampling but is not token-identical to it, and "
-        "acceptance (so decode speed) rises at temp > 0. Greedy decoding "
-        "is unaffected and stays token-identical.",
+        "acceptance (so decode speed) rises at temp > 0. "
+        "--no-stochastic-mtp accepts only exact matches, so a seeded run "
+        "matches one without speculation. Greedy decoding stays "
+        "token-identical either way.",
     )
 
 
@@ -763,7 +766,8 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
 
     Precedence: --no-speculative/--no-mtp (off) > --native-mtp (the head; drops a
     configured draft_gguf) > explicit --speculative/--mtp or --draft-gguf (on) >
-    auto. Auto enables MTP iff the GGUF has a native head, or a companion
+    auto, which a config entry's draft_gguf under ``speculative: auto`` takes
+    too. Auto enables MTP iff the GGUF has a native head, or a companion
     drafter for a companion-only family, and no hard-incompatible flag
     (--mmproj/--adapter/--stream-cpu/--moe-*) is set; sampler flags the MTP
     walk can't honor are dropped with a warning at generation (--no-mtp honors
@@ -775,7 +779,9 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
         apply_native_mtp(args, gguf_path)
         return True, ""
     spec = getattr(args, "speculative", None)
-    if spec or getattr(args, "draft_gguf", None):
+    draft = getattr(args, "draft_gguf", None)
+    auto_draft = bool(draft) and getattr(args, "draft_gguf_auto", False)
+    if spec or (draft and not auto_draft):
         return True, ""
     if spec is False:
         # Explicit opt-out from a config model ('speculative: false'); not auto.
@@ -785,13 +791,17 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
     # (set --no-mtp to honor them via plain decoding) -- not deferred, so a
     # habitual penalty never silently disables MTP. Only the hard-incompatible
     # flags above (--mmproj/--adapter/--stream-cpu/...) force plain decoding.
-    if _mtp_hard_incompatible(args):
-        return False, ""
-    if getattr(args, "stream_experts", False):
+    if _mtp_hard_incompatible(args) or getattr(args, "stream_experts", False):
         # Streaming decode: auto-MTP stays off (measured wash at typical
         # no-think acceptance, and verify widths add miss IO); explicit
-        # --speculative/--mtp above still opts in.
+        # --speculative/--mtp above still opts in. An auto drafter file
+        # goes too, unless a VLM's text turns may take it
+        # (_vlm_mtp_drafter_available).
+        if getattr(args, "mmproj", None) is None:
+            args.draft_gguf = None
         return False, ""
+    if auto_draft:
+        return True, ""
     if not _has_native_mtp_head(gguf_path):
         companion = _companion_drafter(gguf_path)
         if companion is None:
@@ -1330,7 +1340,8 @@ def _bench_depths_speculative(args) -> bool:
     # bool(): --speculative defaults to the auto sentinel None, which would
     # otherwise render as "speculative=None" in the bench banner.
     return bool(getattr(args, "speculative", None)
-                or getattr(args, "draft_gguf", None))
+                or (getattr(args, "draft_gguf", None)
+                    and not getattr(args, "draft_gguf_auto", False)))
 
 
 def _run_bench_depths(args) -> int:
@@ -2170,10 +2181,14 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
     if hasattr(args, "speculative") and "speculative" not in explicit:
         # Config is authoritative for a configured model id: write the resolved bool
         # (True or False) so the native-head auto never second-guesses a config
-        # opt-out. discovery already turns 'auto' -> True for MTP models; a bare file
-        # path skips this overlay entirely and stays auto-eligible.
-        args.speculative = bool(rm.speculative)
-        if rm.speculative:
+        # opt-out. `speculative: auto` and a discover scan's MTP model stay on the
+        # auto path, as a bare file path does, which drops a drafter that does not
+        # fit beside the experts.
+        auto = getattr(rm, "speculative_auto", False)
+        args.speculative = None if auto else bool(rm.speculative)
+        # The entry's drafter file is an auto drafter too.
+        args.draft_gguf_auto = auto and "draft_gguf" not in explicit
+        if args.speculative:
             applied.append("speculative")
     if (rm.stream and "stream_cpu" not in explicit
             and "stream_experts" not in explicit):
@@ -2520,9 +2535,11 @@ def _drafter_bytes(args, path: str) -> int:
 
 def _mtp_auto(args) -> bool:
     """Whether a drafter that loads (``_mtp_loads``) comes from the auto
-    path: no --speculative, --draft-gguf or --native-mtp asked for it."""
+    path: no --speculative, --draft-gguf or --native-mtp asked for it. A
+    config entry's draft_gguf with ``speculative: auto`` is auto too."""
     return (getattr(args, "speculative", None) is None
-            and not getattr(args, "draft_gguf", None)
+            and (not getattr(args, "draft_gguf", None)
+                 or getattr(args, "draft_gguf_auto", False))
             and not getattr(args, "native_mtp", False))
 
 
@@ -2554,12 +2571,17 @@ def preload_wire_check(args, *, depth: int | None,
     memory. An auto drafter that tips it over is dropped
     (``check_wire_beside_drafter``), and the set is judged alone at
     ``depth_without_mtp`` (``depth`` unless given): the experts stay in
-    memory with auto MTP off, or they stream. A dense model, a streamed
-    placement and GMLX_OVERCOMMIT=1 load as asked. Every load prices its
-    install's own check at the depth of the load it makes, and names the
-    tables it reads from the file (``say_tables_offloaded``)."""
+    memory with auto MTP off, or they stream. A set short of the memory
+    not wired is judged again once that memory stops rising
+    (``budget.settled_wire_check``). A set that stays in memory wires in
+    chunks at its install (``table_stream.guard_resident_wire``).
+    A dense model, a streamed placement and GMLX_OVERCOMMIT=1 load as
+    asked. Every load prices its install's own check at the depth of the
+    load it makes, and names the tables it reads from the file
+    (``say_tables_offloaded``)."""
     from gmlx.stream import budget as bmod
-    from gmlx.stream.table_stream import stream_tables_for_memory
+    from gmlx.stream.table_stream import (guard_resident_wire,
+                                          stream_tables_for_memory)
 
     if depth_without_mtp is _Same.DEPTH:
         depth_without_mtp = depth
@@ -2567,6 +2589,7 @@ def preload_wire_check(args, *, depth: int | None,
     path = os.path.expanduser(getattr(args, "gguf", "") or "")
     if path:
         stream_tables_for_memory(path, False)
+        guard_resident_wire(path, False)
     if not can_stream or getattr(args, "stream_cpu", False):
         return
     if getattr(args, "stream_experts", False):
@@ -2589,10 +2612,6 @@ def preload_wire_check(args, *, depth: int | None,
         return
     mmproj = os.path.expanduser(getattr(args, "mmproj", None) or "")
     extra = os.path.getsize(mmproj) if mmproj and os.path.isfile(mmproj) else 0
-    step = getattr(args, "prefill_step_size", None)
-    room = bmod.kv_room_bytes(path, step=step, depth=depth)
-    alone = (room if depth_without_mtp == depth
-             else bmod.kv_room_bytes(path, step=step, depth=depth_without_mtp))
     # Before _drafter_bytes, whose --native-mtp sets --speculative (the
     # native_mtp term covers that too).
     auto = _mtp_auto(args)
@@ -2601,11 +2620,23 @@ def preload_wire_check(args, *, depth: int | None,
     # the memory free now may read from the file.
     tables = (0 if stream_ple_env() == "0"
               else max(0, streamed_table_bytes(path) - deferred))
-    check = bmod.check_wire_with_tables(
-        text - deferred + extra, tables, _drafter_bytes(args, path),
+    drafter = _drafter_bytes(args, path)
+    # A run prefills a model kept in memory in chunks of the asked step,
+    # else 2048 rows, and of _PREFILL_CHUNK rows beside a drafter.
+    from gmlx.gen.generation import _PREFILL_CHUNK
+    from gmlx.gen.prefill_decay import _STOCK_BASE
+
+    plain = getattr(args, "prefill_step_size", None) or _STOCK_BASE
+    room = bmod.kv_room_bytes(path, step=_PREFILL_CHUNK if drafter else plain,
+                              depth=depth, resident=True)
+    alone = (room if depth_without_mtp == depth and not drafter
+             else bmod.kv_room_bytes(path, step=plain, depth=depth_without_mtp,
+                                     resident=True))
+    check = bmod.settled_wire_check(lambda: bmod.check_wire_with_tables(
+        text - deferred + extra, tables, drafter,
         auto=auto, room_bytes=room.bytes, alone_room_bytes=alone.bytes,
         kept_streamed=_run_mode(args) == "vlm_mtp",
-        budget=stream_budget_bytes())
+        budget=stream_budget_bytes()))
     from gmlx.load import loadlog
 
     if check.mtp_off:
@@ -2613,21 +2644,19 @@ def preload_wire_check(args, *, depth: int | None,
         # streamed one, which takes no auto drafter.
         room, depth = alone, depth_without_mtp
         bmod.set_wire_room_depth(depth)
+        args.draft_gguf = None
     if check.table_bytes:
         stream_tables_for_memory(path)
     if check.fits:
+        guard_resident_wire(path, room=room)
         say_tables_offloaded(path, deferred + check.table_bytes)
         if check.mtp_off:
             loadlog.warn(f"[mtp] {check.mtp_off_line()}")
             args.no_speculative = True
         return
-    from gmlx.serve.capacity import gathered_table_bytes
-
     # The streamed load reads the tables from the file with the experts.
     say_tables_offloaded(path, _streamed_tables(path))
-    # A load whose gathered tables bring it under wires in chunks.
-    loadlog.warn(f"[stream] "
-                 f"{check.line(room, depth, chunked=bool(gathered_table_bytes(path)))}")
+    loadlog.warn(f"[stream] {check.line(room, depth)}")
     args.stream_experts = True
     # The install names this leg, not the flag.
     args.stream_fallback = check.reason
@@ -2682,12 +2711,12 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     # Each prefill on its model's prefill caps; from the first token, the
     # model's decode caps.
     install_cb_phase_steps()
-    if args.draft_gguf:
+    if args.draft_gguf and not getattr(args, "draft_gguf_auto", False):
         args.speculative = True  # same implication as `serve`
-    if args.stochastic_mtp:
+    if args.stochastic_mtp is not None:
         from gmlx.spec.speculative import set_stoch_accept
 
-        set_stoch_accept(True)
+        set_stoch_accept(args.stochastic_mtp)
     if args.adapter and args.mmproj:
         print(
             "error: --adapter (live GGUF LoRA) on a --mmproj base is not "

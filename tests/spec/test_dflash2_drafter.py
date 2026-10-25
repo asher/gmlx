@@ -871,10 +871,13 @@ def test_plain_rounds_pass_no_stash(monkeypatch, sampled):
     assert seen and all(s is None for s in seen)
 
 
-def test_v1_rows_keep_exact_match_under_stochastic(monkeypatch, caplog):
+@pytest.mark.parametrize("explicit", [True, False])
+def test_v1_rows_keep_exact_match_under_stochastic(monkeypatch, caplog,
+                                                   explicit):
     """Independent block rows are not a conditional proposal; the engine
     keeps exact-match for such drafters (measured on Muse v1: 6.7 -> 1.7
-    accepted per round when forced)."""
+    accepted per round when forced). It warns only when stochastic
+    acceptance was asked for, not under the default."""
     import gmlx.spec.speculative as sp
     from gmlx.models.muse_glimmer.dflash import MuseGlimmerDFlashDrafter
 
@@ -883,6 +886,7 @@ def test_v1_rows_keep_exact_match_under_stochastic(monkeypatch, caplog):
     for name in ("_PQ_LOG", "_TOP2_LOG"):
         monkeypatch.setattr(sp, name, False)
     monkeypatch.setattr(sp, "_STOCH_ACCEPT", True)
+    monkeypatch.setattr(sp, "_STOCH_EXPLICIT", explicit)
     lm = _target()
     drafter = _drafter(lm)
     monkeypatch.setattr(type(drafter), "stochastic_draft", False)
@@ -891,7 +895,8 @@ def test_v1_rows_keep_exact_match_under_stochastic(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         _engine_walk(lm, drafter, mx.array([[1, 2, 3, 4, 5]]), 8, sampler=_annotated())
     assert seen and all(s is None for s in seen)
-    assert "independent rows" in caplog.text and "opaque" not in caplog.text
+    assert ("independent rows" in caplog.text) is explicit
+    assert "opaque" not in caplog.text
 
 
 @pytest.mark.parametrize("switch", ["_PQ_LOG", "_TOP2_LOG", "_STOCH_ACCEPT"])

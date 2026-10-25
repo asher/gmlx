@@ -224,7 +224,8 @@ decode slower. The line gives the memory the experts need and the memory
 they were judged against. Before a load, `gmlx validate` says what the
 load will do with the memory free now. To keep the experts in memory, set
 `GMLX_OVERCOMMIT=1`, with which the Mac may swap. When the line names the
-memory free now, quitting other apps and loading again also keeps them:
+memory free now, quitting another model or other apps and loading again
+also keeps them:
 
 ```sh
 gmlx validate model.gguf
@@ -244,6 +245,11 @@ drafter:
 ```sh
 gmlx run model.gguf --speculative
 ```
+
+`gmlx serve` logs the same line for a model with `speculative: auto`, which
+`gmlx init` and `gmlx sync-models` write, or one that a `discover` scan found.
+Set `speculative: true` on its entry, or in the `discover` block, to stream
+the experts and keep the drafter.
 
 ### `a folder scan set stream: experts, and the model now fits`
 

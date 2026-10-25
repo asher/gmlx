@@ -12,6 +12,9 @@ import gmlx.serve.governor as gov
 import gmlx.serve.tick_guard as tg
 from gmlx.serve.patches.row_failed import RowShedError
 
+# The kernel readers the rig scripts, kept to run against kernel_vm.
+_READERS = (gov._kernel_unwired,)
+
 
 class FakeGB:
     def __init__(self, uids, num_tokens):
@@ -71,7 +74,7 @@ def rig(monkeypatch):
         lambda v: (box["cache_limits"].append(v), 7)[1])
     monkeypatch.setattr(gov, "_maybe_register_apc", lambda gen: None)
     box["kernel"] = 40e9
-    monkeypatch.setattr(gov, "_kernel_reclaimable", lambda: box["kernel"])
+    monkeypatch.setattr(gov, "_kernel_unwired", lambda: box["kernel"])
     monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "8")
     monkeypatch.delenv("GMLX_GOV_RESERVE_GB", raising=False)
     import gmlx.serve.memory as sm
@@ -608,13 +611,13 @@ def test_kernel_floor_reds_while_rate_math_is_green(rig, monkeypatch):
     assert st.band == gov.RED
     assert evicted == [1.0]
     assert failed and failed[0][0] == 0
-    assert "kernel reclaimable" in failed[0][1]["error"]
+    assert "memory not wired" in failed[0][1]["error"]
     assert gov._STATS["kernel_floor_reds"] == 1
-    assert gov._STATS["kernel_reclaimable_bytes"] == int(0.5e9)
+    assert gov._STATS["kernel_unwired_bytes"] == int(0.5e9)
 
 
 def test_kernel_floor_stable_breach_holds_no_shed(rig, monkeypatch):
-    # A near-RAM-sized model parks reclaimable just under the floor for
+    # A near-RAM-sized model parks the memory not wired just under the floor for
     # the whole serve (2026-08-26 ladder: 6.8-7.9 GB under an 8 GB
     # floor for minutes, evict freeing 0.00 GB every tick). Stable
     # sub-floor must observe only: no shed, no red band, admissions
@@ -642,7 +645,7 @@ def test_kernel_floor_stable_breach_holds_no_shed(rig, monkeypatch):
 
 
 def test_kernel_floor_collapse_trend_sheds(rig, monkeypatch):
-    # Same sub-floor band, but reclaimable dropping >1 GB/tick: the
+    # Same sub-floor band, but the memory not wired dropping >1 GB/tick: the
     # livelock signature. The trend (not the absolute level) must
     # escalate to red + shed.
     failed = []
@@ -728,7 +731,7 @@ def test_kernel_floor_reclaim_alone_can_clear(rig, monkeypatch):
     monkeypatch.setattr(tg, "_row_failed_callbacks",
                         [lambda uid, info: failed.append((uid, info))])
     samples = iter([2e9, 20e9])
-    monkeypatch.setattr(gov, "_kernel_reclaimable", lambda: next(samples))
+    monkeypatch.setattr(gov, "_kernel_unwired", lambda: next(samples))
     gen = FakeGen(rows=2)
     tg_st = tg._state(gen)
     tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
@@ -746,7 +749,7 @@ def test_kernel_floor_first_dip_reclaims_the_deficit(rig, monkeypatch):
     gov.register_cache("arena", lambda: 60e9,
                        lambda f: (evicted.append(f), f * 60e9)[1])
     samples = iter([7.95e9, 20e9])
-    monkeypatch.setattr(gov, "_kernel_reclaimable", lambda: next(samples))
+    monkeypatch.setattr(gov, "_kernel_unwired", lambda: next(samples))
     gen = FakeGen(rows=2)
     gov._governor_tick(gen)
     assert len(evicted) == 1
@@ -761,20 +764,20 @@ def test_kernel_floor_quarter_floor_reclaims_everything(rig, monkeypatch):
     gov.register_cache("arena", lambda: 60e9,
                        lambda f: (evicted.append(f), f * 60e9)[1])
     samples = iter([1.5e9, 20e9])
-    monkeypatch.setattr(gov, "_kernel_reclaimable", lambda: next(samples))
+    monkeypatch.setattr(gov, "_kernel_unwired", lambda: next(samples))
     gov._governor_tick(FakeGen(rows=2))
     assert evicted == [1.0]
 
 
 def test_governor_stats_samples_the_kernel_live(monkeypatch):
     # /v1/metrics at idle must not show the last decode tick's sample.
-    monkeypatch.setitem(gov._STATS, "kernel_reclaimable_bytes", int(2e9))
+    monkeypatch.setitem(gov._STATS, "kernel_unwired_bytes", int(2e9))
     monkeypatch.setattr(gov, "_ARMED_FLOOR", 4e9)
-    monkeypatch.setattr(gov, "_kernel_reclaimable", lambda: 31e9)
-    assert gov.governor_stats()["kernel_reclaimable_bytes"] == int(31e9)
-    assert gov._STATS["kernel_reclaimable_bytes"] == int(2e9)
+    monkeypatch.setattr(gov, "_kernel_unwired", lambda: 31e9)
+    assert gov.governor_stats()["kernel_unwired_bytes"] == int(31e9)
+    assert gov._STATS["kernel_unwired_bytes"] == int(2e9)
     monkeypatch.setattr(gov, "_ARMED_FLOOR", 0.0)
-    assert gov.governor_stats()["kernel_reclaimable_bytes"] == int(2e9)
+    assert gov.governor_stats()["kernel_unwired_bytes"] == int(2e9)
 
 
 def test_floor_evict_fraction_without_registrants_is_full():
@@ -785,13 +788,13 @@ def test_floor_evict_fraction_without_registrants_is_full():
 def test_kernel_floor_off_never_samples(rig, monkeypatch):
     monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "0")
     calls = []
-    monkeypatch.setattr(gov, "_kernel_reclaimable",
+    monkeypatch.setattr(gov, "_kernel_unwired",
                         lambda: (calls.append(1), 0)[1])
     gen = FakeGen(rows=2)
     gov._governor_tick(gen)
     assert calls == []
     assert gov._state(gen).band == gov.GREEN
-    assert gov._STATS["kernel_reclaimable_bytes"] is None
+    assert gov._STATS["kernel_unwired_bytes"] is None
 
 
 def test_kernel_floor_healthy_is_inert(rig):
@@ -814,6 +817,27 @@ def test_kernel_floor_wins_over_no_rows(rig, monkeypatch):
     assert gov._state(gen).band == gov.RED
     assert evicted == [1.0]
     assert gov.admission_hold_reason(gen) == "governor red"
+
+
+def test_other_apps_memory_beside_a_model_leaves_its_caches_alone(
+        rig, monkeypatch):
+    # Apps fill the RAM the model leaves: free and the page cache are
+    # near empty, but their memory is the kernel's to compress, and
+    # little is wired. The prefix cache and the arena stay; no red.
+    from gmlx.serve import kernel_vm
+
+    monkeypatch.setattr(gov, "_kernel_unwired", _READERS[0])
+    monkeypatch.setattr(kernel_vm, "unwired_bytes", lambda: 48e9)
+    monkeypatch.setattr(kernel_vm, "reclaimable_bytes", lambda: 1.2e9)
+    evicted = []
+    gov.register_cache("apc", lambda: 20e9,
+                       lambda f: (evicted.append(f), 0)[1])
+    gen = FakeGen(rows=2, rate=1e6)
+    for _ in range(3):
+        gov._governor_tick(gen)
+    assert evicted == []
+    assert gov._state(gen).band == gov.GREEN
+    assert gov._STATS["kernel_floor_reds"] == 0
 
 
 # ---------------------------------------------------------------- ceiling

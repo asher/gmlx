@@ -6,8 +6,11 @@ kernel sees that cache as wired. Metal allocations never swap and never
 enter the compressor, so a server that grows past the box's free pages
 livelocks macOS into a watchdog panic while every MLX-side number still
 reads healthy. This module reads the counters that actually predict
-the panic: free + purgeable + file-backed pages. Mach's free and
-file-backed counts both hold the speculative pages, which count once.
+the panic: the memory not wired (free + pageable anonymous + file-backed
+pages). ``reclaimable_bytes`` (free + purgeable + file-backed) remains
+for the readers that must not count other apps' memory, and
+``free_page_waiters`` reports the threads waiting on free pages for
+``/v1/metrics``.
 
 Darwin only; ``reclaimable_bytes`` returns None elsewhere or when the
 struct layout fails its one-time self-check against sysctl.
@@ -147,6 +150,40 @@ def live_reclaimable_bytes() -> int | None:
             return None
         pages += n
     return pages * _PAGE
+
+
+# The sysctl page counts of unwired_bytes: every page a wire can take,
+# by dropping file pages or compressing other apps' memory.
+_UNWIRED_COUNTS = ("vm.page_free_count", "vm.page_pageable_internal_count",
+                   "vm.page_pageable_external_count")
+
+
+def unwired_bytes() -> int | None:
+    """Pages neither wired nor holding compressed data, read live from the
+    sysctl counts: free, and the pageable anonymous and file-backed pages
+    the kernel can compress or drop. A wire that stays under them leaves
+    the kernel pages to reclaim. Firmware carve-outs (hw.memsize less
+    hw.memsize_usable) and a few kernel pages fall outside all three
+    counts, so this reads up to about 2 GB under RAM less the wired and
+    compressor pages. None off Darwin or when a read fails."""
+    if sys.platform != "darwin":
+        return None
+    pages = 0
+    for name in _UNWIRED_COUNTS:
+        n = _sysctl_count(name)
+        if n is None:
+            return None
+        pages += n
+    return pages * _PAGE
+
+
+def free_page_waiters() -> int | None:
+    """Threads waiting on the kernel for free pages
+    (vm.page_free_wanted), live. Above zero, they wait on reclaim. None
+    off Darwin or when the read fails."""
+    if sys.platform != "darwin":
+        return None
+    return _sysctl_count("vm.page_free_wanted")
 
 
 def available_bytes() -> int | None:

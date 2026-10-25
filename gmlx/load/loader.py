@@ -900,8 +900,8 @@ def _warm_touch_pass(
         start_populate(paths, log=log)
     if mode != "1" and total < threshold_bytes:
         return
-    if cpu_default_device():
-        return  # nothing is wired on the CPU device
+    if cpu_default_device() or not arrays:
+        return  # nothing is wired on the CPU device, or nothing to touch
     t0 = time.time()
     pending, acc = [], 0
     for a in arrays:

@@ -981,7 +981,7 @@ def test_arena_sizing_excludes_streamable_bytes(monkeypatch):
     import gmlx.stream.budget as budget
 
     monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
-    monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: None)
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda *a, **k: None)
     monkeypatch.setattr(
         mx, "device_info",
         lambda: {"memory_size": 137 * 10**9,

@@ -245,7 +245,7 @@ def test_regrow_leaves_both_floors_behind(monkeypatch, tmp_path):
     monkeypatch.setattr(gmlx.stream.budget, "_ram_floor_bytes", lambda ram: 10 << 30)
     monkeypatch.setattr(budget, "kernel_floor_bytes", lambda: float(4 << 30))
     avail = {"v": 0}
-    monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: avail["v"])
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda: avail["v"])
     feeder, _ = _make_feeder(
         monkeypatch, tmp_path, slots_per_layer=4, pressure=True)
     feeder.ensure_wired()
@@ -264,14 +264,14 @@ def test_regrow_leaves_both_floors_behind(monkeypatch, tmp_path):
 def test_pressure_regrow_after_sustained_normal(monkeypatch, tmp_path):
     level = {"v": 2}
     _pressure_setup(monkeypatch, level, regrow_polls=2)
-    avail = {"v": 0}  # no reclaimable RAM: regrow must wait
+    avail = {"v": 0}  # no memory left unwired: regrow must wait
     import gmlx.stream.budget as budget
 
-    # The regrow reads the governor's reclaimable measure (file-backed
-    # pages included), never the free-pages-only set.
+    # The regrow reads the governor's floor measure, the memory not
+    # wired, never the old reclaimable or free-pages-only sets.
     monkeypatch.setattr(gmlx.stream.budget, "_available_ram_bytes",
                         lambda include_inactive=True: 0)
-    monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: avail["v"])
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda: avail["v"])
     monkeypatch.setattr(budget, "kernel_floor_bytes", lambda: 4e9)
     feeder, _ = _make_feeder(
         monkeypatch, tmp_path, slots_per_layer=4, pressure=True)
@@ -322,7 +322,7 @@ def test_arena_budget_math(monkeypatch):
     monkeypatch.delenv("GMLX_DECODE_PAGECACHE_GB", raising=False)
     monkeypatch.delenv("GMLX_DECODE_ARENA_FORCE", raising=False)
     monkeypatch.setattr(
-        gmlx.stream.budget, "_available_ram_bytes", lambda: None
+        gmlx.stream.budget, "unwired_ram_bytes", lambda: None
     )  # available-RAM ceiling out of the way for the deterministic cases
     monkeypatch.setattr(
         mx, "device_info", lambda: {"memory_size": 1000 << 30}
@@ -367,11 +367,14 @@ def test_arena_budget_math(monkeypatch):
     monkeypatch.setenv("GMLX_DECODE_ARENA_RAM_FRAC", "0.8")
     got = _decode_arena_bytes(100 << 30, offsets, budget=90 << 30)
     assert got == int(0.8 * (100 << 30)) - (20 << 30) - (8 << 30)
-    # Available-RAM ceiling binds when the machine is busy: 40 GB
-    # reclaimable minus the floor beats the fraction of a 100 GB machine.
+    # Live-RAM ceiling binds when memory is wired: 40 GB not
+    # wired, all free or file pages, minus the floor beats the fraction
+    # of a 100 GB machine.
     monkeypatch.setattr(
-        gmlx.stream.budget, "_available_ram_bytes", lambda: 40 << 30
+        gmlx.stream.budget, "unwired_ram_bytes", lambda: 40 << 30
     )
+    monkeypatch.setattr(gmlx.stream.budget, "_available_ram_bytes",
+                        lambda: 40 << 30)
     monkeypatch.setenv("GMLX_DECODE_RAM_FLOOR_GB", "5")
     monkeypatch.delenv("GMLX_DECODE_PAGECACHE_GB", raising=False)
     # The floor is the base margin plus the page-cache reserve (2.5 GB
@@ -402,7 +405,7 @@ def test_arena_budget_math(monkeypatch):
     monkeypatch.setenv("GMLX_DECODE_ARENA_FORCE", "1")
     assert _decode_arena_bytes(60 << 30, offsets, budget=None) == 200 << 30
     monkeypatch.delenv("GMLX_DECODE_ARENA_FORCE", raising=False)
-    monkeypatch.setattr(gmlx.stream.budget, "_available_ram_bytes", lambda: None)
+    monkeypatch.setattr(gmlx.stream.budget, "unwired_ram_bytes", lambda: None)
     assert _decode_arena_bytes(60 << 30, offsets, budget=None) == 200 << 30
 
 
@@ -2574,16 +2577,34 @@ def test_regrow_after_a_quarantined_ring_asks_for_its_step(
     for li in (0, 1):
         feeder.stage(li, np.array([0, 1]))
     assert feeder.arena_bytes == 4 * per_expert
-    monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: 1 << 40)
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda: 1 << 40)
     feeder.governor_evict(1 / 3)
     assert feeder._pressure_steps == 1
     assert feeder.arena_bytes == 2 * per_expert
     monkeypatch.setattr(budget, "_ram_floor_bytes", lambda ram: 0)
     monkeypatch.setattr(budget, "kernel_floor_bytes", lambda: 0)
-    monkeypatch.setattr(budget, "reclaimable_ram_bytes",
+    monkeypatch.setattr(budget, "unwired_ram_bytes",
                         lambda: 2 * per_expert)
     monkeypatch.setattr(feeder, "_governor_room_ok", lambda need: True)
     assert feeder._regrow_headroom_ok()
+
+
+def test_the_ring_lend_counts_other_apps_memory_as_room(monkeypatch):
+    # Apps hold the RAM beside a streamed model: free and the page cache
+    # read near empty, but the kernel compresses their memory for the
+    # ring, so the arena keeps its layers at prefill.
+    import gmlx.serve.kernel_vm as kv
+    import gmlx.stream.budget as budget
+
+    monkeypatch.setattr(budget, "kernel_floor_bytes", lambda: 4e9)
+    monkeypatch.setattr(kv, "unwired_bytes", lambda: 40e9)
+    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 1e9)
+    monkeypatch.setattr(kv, "live_reclaimable_bytes", lambda: 1e9)
+    from gmlx.stream.decode_feeder import DecodeFeeder
+
+    assert DecodeFeeder._kernel_has_room(10 << 30)
+    monkeypatch.setattr(kv, "unwired_bytes", lambda: 12e9)
+    assert not DecodeFeeder._kernel_has_room(10 << 30)
 
 
 def test_ring_back_before_a_refill_lends_the_same_layers(
@@ -2814,7 +2835,7 @@ def test_regrow_waits_for_governor_room(monkeypatch, tmp_path):
     # The regrow gate reads the mach counters first; the loader's vm_stat
     # sum is only the fallback. Patch the read the gate takes, or the test
     # follows the runner's free RAM.
-    monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: 1 << 40)
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda: 1 << 40)
     feeder.governor_evict(1 / 3)
     assert feeder._pressure_steps == 1
     need = feeder._arena_bytes_at(0) - feeder.arena_bytes
@@ -2833,7 +2854,7 @@ def test_governor_shrink_regrows_with_pressure_polling_off(monkeypatch, tmp_path
 
     level = {"v": 4}  # would shrink further if the level were read
     _pressure_setup(monkeypatch, level, regrow_polls=2)
-    monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: 1 << 40)
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda: 1 << 40)
     monkeypatch.setattr(budget, "governor_headroom_bytes", lambda: None)
     feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
     assert not feeder._pressure_on

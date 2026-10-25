@@ -172,3 +172,42 @@ def test_the_vlm_context_does_not_warn_with_the_sweep_off(fake_mx, monkeypatch,
             pass
     out = capsys.readouterr().out
     assert out.count("close to the maximum recommended size") == 1
+
+
+def _recorded_limit(monkeypatch, start):
+    calls = []
+
+    def set_limit(n):
+        prev = calls[-1] if calls else start
+        calls.append(n)
+        return prev
+
+    monkeypatch.setattr(mx, "set_wired_limit", set_limit)
+    return calls
+
+
+def test_a_held_load_gets_the_limit_last_asked_for_at_its_end(monkeypatch):
+    # Another model's generation raised the limit; it ends and a new one
+    # starts while the load builds its buffers.
+    from gmlx.stream.wired_limit import wired_limit_held
+
+    calls = _recorded_limit(monkeypatch, 90)
+    real = mx.set_wired_limit
+    with wired_limit_held():
+        assert calls == [0]
+        assert mx.set_wired_limit(0) == 90
+        assert mx.set_wired_limit(90) == 0
+    assert calls == [0, 90] and mx.set_wired_limit is real
+
+
+def test_a_held_load_that_streams_keeps_the_limit_at_0(monkeypatch,
+                                                      restore_wired_limit):
+    from gmlx.stream.wired_limit import (_neutralize_wired_limit_sweep,
+                                         wired_limit_held)
+
+    calls = _recorded_limit(monkeypatch, 90)
+    with wired_limit_held():
+        _neutralize_wired_limit_sweep()
+    assert calls == [0]
+    assert getattr(mx.set_wired_limit, "_kq_no_sweep", False)
+

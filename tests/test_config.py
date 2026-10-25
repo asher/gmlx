@@ -780,6 +780,35 @@ def test_env_for_always_emits_width_cap():
     assert env_cap(3) == "3"
 
 
+def test_speculative_auto_turns_it_on_with_a_drafter_a_load_may_drop():
+    # `speculative: auto`, which gmlx init writes for a model with an MTP
+    # head, turns speculative decoding on as `true` does, with a drafter a
+    # load leaves out when the experts fit in memory only without it. A
+    # switch between the two loads the model again.
+    cfg = cfgmod.build_config({"models": {
+        "a": {"path": "/a.gguf", "speculative": "auto"},
+        "t": {"path": "/a.gguf", "speculative": True}}})
+    a, t = (cfgmod.resolve_model(m, cfg) for m in ("a", "t"))
+    assert a.speculative and a.speculative_auto
+    assert t.speculative and not t.speculative_auto
+    assert a.load_signature() != t.load_signature()
+
+
+@pytest.mark.parametrize("value,want", [("Auto", (True, True)),
+                                        ("false", (False, False)),
+                                        ("maybe", None)])
+def test_a_quoted_speculative_word_reads_as_the_word(value, want):
+    # YAML hands a quoted value over as a string: "false" is off, case does
+    # not matter, and a word the key does not take is an error.
+    raw = {"models": {"a": {"path": "/a.gguf", "speculative": value}}}
+    if want is None:
+        with pytest.raises(cfgmod.ConfigError, match="speculative"):
+            cfgmod.build_config(raw)
+        return
+    a = cfgmod.resolve_model("a", cfgmod.build_config(raw))
+    assert (a.speculative, a.speculative_auto) == want
+
+
 def test_context_copy_key_parses_and_reaches_the_load_env():
     def resolved(value):
         raw = {"path": "/p.gguf", "speculative": True}
@@ -1070,6 +1099,18 @@ def test_discover_spec_defaults():
     assert spec.recursive is False
     assert spec.pair_mmproj is True
     assert spec.speculative == "auto"
+
+
+@pytest.mark.parametrize("value,want", [("Auto", "auto"), ("off", False),
+                                        ("maybe", None)])
+def test_a_discover_block_reads_speculative_as_a_model_entry_does(value,
+                                                                  want):
+    raw = {"discover": [{"dir": "/d", "speculative": value}]}
+    if want is None:
+        with pytest.raises(ConfigError, match="speculative"):
+            build_config(raw)
+        return
+    assert build_config(raw).discover[0].speculative == want
 
 
 # load_config - file IO + error surfaces
@@ -1603,9 +1644,9 @@ def test_family_defaults_kill_switch():
 
 def test_stochastic_mtp_key():
     doc = _doc()
+    assert build_config(doc).stochastic_mtp is None
+    doc["server"]["stochastic_mtp"] = False
     assert build_config(doc).stochastic_mtp is False
-    doc["server"]["stochastic_mtp"] = True
-    assert build_config(doc).stochastic_mtp is True
 
 
 def test_gpu_keepwarm_key():

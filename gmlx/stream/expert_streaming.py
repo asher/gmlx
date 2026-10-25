@@ -166,25 +166,46 @@ def install_unflagged_tables(model, gguf_path: str | None, *,
     own ladder serves the tables
     from the file on the CPU stream and keeps the experts in memory when
     the memory free now holds them; else the experts stream, with the
-    stream line. Call it after the load, before any GPU work on the model
-    and before a sticky wire. True when it installed. False, with nothing
-    changed, on any other load or on a model installed already."""
+    stream line. Any other MoE the check before the load kept in memory
+    (``table_stream.guard_resident_wire``) wires in chunks here
+    (``_wire_plain_resident``), and its experts stream if the wire stops.
+    A load the serve check found short
+    (``table_stream.stream_experts_for_memory``) streams its experts
+    without the wire. Call it after the load, before any GPU work on the model and before
+    a sticky wire. True when it installed. False, with nothing changed,
+    on any other load or on a model installed already."""
     if not gguf_path or hasattr(model, "_kq_streaming"):
         return False
     from gmlx.serve.capacity import gathered_table_bytes
+    from gmlx.stream.table_stream import (experts_stream_for_memory,
+                                          guard_resident_wire,
+                                          guarded_wire_keep,
+                                          resident_wire_guarded,
+                                          stream_experts_for_memory)
 
-    if not gathered_table_bytes(gguf_path):
-        return False
+    guarded = resident_wire_guarded(gguf_path)
+    keep = guarded_wire_keep(gguf_path)
+    guard_resident_wire(gguf_path, False)
+    fallback = experts_stream_for_memory(gguf_path)
+    stream_experts_for_memory(gguf_path)
+    if not fallback and not gathered_table_bytes(gguf_path):
+        if not guarded or _wire_plain_resident(model, gguf_path,
+                                               prefill_step=prefill_step,
+                                               keep=keep):
+            return False
+        fallback = "unwired"
     install_expert_streaming(
         model, gguf_path=gguf_path, feeder_prefill=feeder_prefill,
         feeder_decode=feeder_decode, fast_disk=fast_disk,
-        prefill_step=prefill_step, stats_verbose=stats_verbose)
+        prefill_step=prefill_step, stats_verbose=stats_verbose,
+        force_stream=bool(fallback), fallback=fallback,
+        wire_keep=keep if guarded else (None, 0))
     return True
 
 
-# The chunked wire's wait for reclaimable memory under a chunk's line:
-# a rise smaller than _WIRE_MIN_RISE does not count, the wait stops once
-# no rise has counted for _WIRE_STALL_S, and the waits of one wire add
+# The chunked wire's wait under a chunk's line: a rise of unwired memory
+# smaller than _WIRE_MIN_RISE does not count, the wait stops once unwired
+# memory has not risen for _WIRE_STALL_S, and the waits of one wire add
 # up to at most _WIRE_WAIT_S.
 _WIRE_STALL_S = 1.0
 _WIRE_MIN_RISE = 256 << 20
@@ -192,14 +213,15 @@ _WIRE_WAIT_S = 10.0
 
 
 class _ChunkGuard:
-    """Before each chunk of a resident wire: True once reclaimable RAM,
-    read live (``budget.live_reclaimable_ram_bytes``), covers ``keep``
-    plus the chunk. With the pre-load check's keep, that check runs
-    again before each chunk: each chunk takes its bytes out of
-    reclaimable RAM, so a wire the check passed goes through, unless
-    another process grows or the wire costs more than its estimate.
-    Under the line it waits while the reading rises, and stops on a
-    stall or once the wire has waited ``wait_s`` in all. ``last``,
+    """Before each chunk of a resident wire: True once unwired RAM, read
+    live (``budget.unwired_ram_bytes``), covers ``keep`` plus the chunk.
+    With the pre-load check's keep, that check runs again before each
+    chunk: each chunk takes its bytes out of unwired RAM, so a wire the
+    check passed goes through, unless another process wires more or the
+    wire costs more than its estimate. A chunk past the free and
+    file-backed pages has the kernel compress other apps' memory for it.
+    Short of the line, it waits while unwired memory rises, and stops on
+    a stall or once the wire has waited ``wait_s`` in all. ``last``,
     ``line`` and ``pending`` keep the final reading, the line it was
     judged on and the chunk's bytes."""
 
@@ -225,7 +247,7 @@ class _ChunkGuard:
         best = None
         try:
             while True:
-                self.last = budget.live_reclaimable_ram_bytes()
+                self.last = budget.unwired_ram_bytes()
                 if self.last is None or self.last >= self.line:
                     return True
                 now = time.monotonic()
@@ -245,7 +267,7 @@ def _install_gpu_residency(model, moe_modules, *,
                            include_expert_stacks: bool = False,
                            room: int | None = None,
                            chunk_bytes: int | None = None,
-                           guard=None) -> bool:
+                           guard=None, say: bool = True) -> bool:
     """Wire every non-expert weight buffer into the Metal residency set,
     so command buffers stop re-wiring the every-token weights' pages on
     every use (the
@@ -272,7 +294,9 @@ def _install_gpu_residency(model, moe_modules, *,
     commit once ``guard`` passes on its bytes, the first and the last
     partial one too. A refusal stops the wire before that commit, leaves
     every array it inserted in ``model._kq_resident_arrays`` and returns
-    False (the caller unwires them). True otherwise."""
+    False (the caller unwires them). True otherwise. An exception or an
+    interrupt takes them back out of the set. ``say=False`` leaves out
+    the line of the set it wired."""
     import mlx_kquant as kq
 
     if not getattr(kq, "residency_insert", None):
@@ -287,35 +311,39 @@ def _install_gpu_residency(model, moe_modules, *,
                 if w is not None:
                     skip.add(id(w))
     inserted = []
+    model._kq_resident_arrays = inserted
     nbytes = 0
     pending = 0
     left_out = left_out_bytes = 0
-    for _, a in tree_flatten(model.parameters()):
-        if id(a) in skip:
-            continue
-        if (not include_expert_stacks
-                and a.ndim == 3 and a.nbytes > (1 << 30)):
-            continue  # belt: any GB-scale stack is an expert container
-        if room is not None and nbytes + a.nbytes > room:
-            left_out += 1
-            left_out_bytes += a.nbytes
-            continue
-        if kq.residency_insert(a):
-            inserted.append(a)
-            nbytes += a.nbytes
-            pending += a.nbytes
-        if chunk_bytes and pending >= chunk_bytes:
-            if guard is not None and not guard(pending):
-                model._kq_resident_arrays = inserted
-                return False
+    try:
+        for _, a in tree_flatten(model.parameters()):
+            if id(a) in skip:
+                continue
+            if (not include_expert_stacks
+                    and a.ndim == 3 and a.nbytes > (1 << 30)):
+                continue  # belt: any GB-scale stack is an expert container
+            if room is not None and nbytes + a.nbytes > room:
+                left_out += 1
+                left_out_bytes += a.nbytes
+                continue
+            if kq.residency_insert(a):
+                inserted.append(a)
+                nbytes += a.nbytes
+                pending += a.nbytes
+            if chunk_bytes and pending >= chunk_bytes:
+                if guard is not None and not guard(pending):
+                    return False
+                kq.residency_commit()
+                pending = 0
+        if guard is not None and pending and not guard(pending):
+            return False
+        if pending or not chunk_bytes:
             kq.residency_commit()
-            pending = 0
-    if guard is not None and pending and not guard(pending):
-        model._kq_resident_arrays = inserted
-        return False
-    if pending or not chunk_bytes:
-        kq.residency_commit()
-    model._kq_resident_arrays = inserted
+    except BaseException:
+        _unwire(model)
+        raise
+    if not say:
+        return True
     n = len(inserted)
     print(f"[stream] gpu-resident weights: {n} buffers "
           f"({nbytes / 1e9:.1f} GB) in the Metal residency set "
@@ -328,8 +356,8 @@ def _install_gpu_residency(model, moe_modules, *,
 
 
 def _unwire(model) -> int:
-    """Take the arrays a stopped wire inserted back out of the residency
-    set; the uncommitted ones never wire. The kernel unwires the rest
+    """Take the arrays a wire inserted back out of the residency set; the
+    uncommitted ones of a stopped wire never wire. The kernel unwires the rest
     lazily, and can keep part of them wired until the process exits.
     Returns the bytes taken out."""
     import mlx_kquant as kq
@@ -344,42 +372,108 @@ def _unwire(model) -> int:
 
 
 def _wire_resident_experts(model, gguf_path, wire_bytes: int, *,
-                           budget, prefill_step, skip_ids) -> bool:
+                           budget, prefill_step, skip_ids,
+                           keep=(None, 0)) -> bool:
     """The table-only install's resident set (every-token weights and the
     experts) judged against live memory, then wired in chunks, each once
-    reclaimable memory covers it beside the check's keep (``_ChunkGuard``;
-    the kernel floor under GMLX_OVERCOMMIT=1). False when it does not fit
-    or the wire stopped, with the line saying why; a stopped wire leaves
-    the residency set (``_unwire``). The install then streams the
-    experts."""
+    unwired memory covers it beside the check's keep (``_ChunkGuard``;
+    the kernel floor under GMLX_OVERCOMMIT=1). ``keep`` is the KV room
+    and extra bytes the check before the load kept
+    (``table_stream.guarded_wire_keep``); with no room it is priced here.
+    False when it does not fit or the wire stopped, with the line saying
+    why; a stopped wire leaves the residency set (``_unwire``). The
+    install then streams the experts."""
     from gmlx.stream import budget as bmod
 
     depth = bmod.wire_room_depth()
-    room = bmod.kv_room_bytes(gguf_path, step=prefill_step, depth=depth)
-    check = bmod.check_resident_wire(wire_bytes, room_bytes=room.bytes,
+    room, extra = keep
+    if room is None:
+        room = bmod.kv_room_bytes(gguf_path, step=prefill_step, depth=depth,
+                                  resident=True)
+    check = bmod.check_resident_wire(wire_bytes,
+                                     room_bytes=room.bytes + extra,
                                      budget=budget)
     if not check.fits:
-        loadlog.warn(f"[stream] {check.line(room, depth, chunked=True)}")
+        loadlog.warn(f"[stream] {check.line(room, depth)}")
         return False
     if not env_bool("GMLX_GPU_RESIDENT", True):
         return True
-    chunk = bmod.wire_chunk_bytes()
-    # The check's exemption, judged on the budget, has no guard.
+    return _chunked_wire(model, check, room=room, depth=depth,
+                         skip_ids=skip_ids)
+
+
+def _chunked_wire(model, check, *, room, depth, skip_ids=frozenset(),
+                  say: bool = True) -> bool:
+    """Wire the model's weights but ``skip_ids`` in chunks, each once
+    unwired memory covers it beside ``check``'s keep (``_ChunkGuard``;
+    the kernel floor under GMLX_OVERCOMMIT=1), the set clamped to the
+    check's budget. A set no larger than ``WIRE_EXEMPT_BYTES`` has no
+    guard. False when the wire stopped, with the line saying why and
+    the set taken back out (``_unwire``). A guarded wire waits for the
+    load's page-cache populate to finish first."""
+    from gmlx.load.populate import finish_all
+    from gmlx.stream import budget as bmod
+
     guard = None
-    if wire_bytes > bmod.WIRE_EXEMPT_BYTES:
+    if check.wire_bytes > bmod.WIRE_EXEMPT_BYTES:
         guard = _ChunkGuard(bmod.kernel_floor_bytes() if bmod.overcommit()
                             else check.keep_bytes)
+        finish_all(log=loadlog.info)
     if (_install_gpu_residency(model, {}, skip_ids=skip_ids,
-                               include_expert_stacks=True, room=budget,
-                               chunk_bytes=chunk, guard=guard) is not False
+                               include_expert_stacks=True,
+                               room=check.budget_bytes,
+                               chunk_bytes=bmod.wire_chunk_bytes(),
+                               guard=guard, say=say) is not False
             or guard is None):
         return True
     # The chunk the guard refused was inserted, never committed.
     wired = _unwire(model) - guard.pending
     loadlog.warn("[stream] " + check.stop_line(
-        wired=wired, reclaimable=guard.last or 0, need=guard.line,
+        wired=wired, unwired=guard.last or 0, need=guard.line,
         room=room, depth=depth))
     return False
+
+
+def _wire_plain_resident(model, gguf_path, *, prefill_step,
+                         keep=(None, 0)) -> bool:
+    """The chunked wire of a plain MoE load that the check before the
+    load kept in memory (``table_stream.guard_resident_wire``), the
+    table-only install's wire for the whole model (``_chunked_wire``).
+    The wire leaves the pages in the page cache and hands the set back
+    to MLX's own residency, which wires it at the first generation.
+    That check judged the whole set, and only the chunk guard judges
+    it here: the load leaves the weights in the page cache, so a second
+    check would read about the same memory. ``keep`` is the KV room and
+    extra bytes that check kept (``table_stream.guarded_wire_keep``);
+    with no room it is priced here. False when the wire stopped; the
+    experts then stream. GMLX_GPU_RESIDENT=0 skips the wire."""
+    import mlx_kquant as kq
+
+    from gmlx.device import cpu_default_device
+    from gmlx.stream import budget as bmod
+
+    if (cpu_default_device() or not mx.metal.is_available()
+            or not getattr(kq, "residency_insert", None)
+            or not env_bool("GMLX_GPU_RESIDENT", True)):
+        # The warm touch skipped a guarded load's arrays, and with them
+        # its populate wait: the first prefill must not race the readers.
+        from gmlx.load.populate import finish_all
+
+        finish_all(log=loadlog.info)
+        return True
+    total = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
+    depth = bmod.wire_room_depth()
+    room, extra = keep
+    if room is None:
+        room = bmod.kv_room_bytes(gguf_path, step=prefill_step, depth=depth,
+                                  resident=True)
+    check = bmod.WireCheck(total, None,
+                           bmod.wire_keep_bytes(room.bytes + extra),
+                           stream_budget_bytes(), ram_bytes=bmod.ram_bytes())
+    if not _chunked_wire(model, check, room=room, depth=depth, say=False):
+        return False
+    _unwire(model)
+    return True
 
 
 def _physical_ram() -> int:
@@ -486,6 +580,7 @@ def install_expert_streaming(
     explicit: bool = False,
     prefill_step: int | None = None,
     fallback: str = "",
+    wire_keep: tuple = (None, 0),
 ):
     """Run routed-expert stacks (SwitchGLU) on the CPU stream.
 
@@ -508,7 +603,10 @@ def install_expert_streaming(
 
     ``fallback`` is the leg of the run's check before the load that
     streamed the experts with no flag asked (``WireCheck.reason``:
-    ``budget`` or ``reclaimable``), so the lines name it, not a flag.
+    ``budget`` or ``unwired``), so the lines name it, not a flag.
+
+    ``wire_keep`` is what that check kept beside a table-only plan's
+    resident set (``_wire_resident_experts``).
     """
     from gmlx.load.modules import (
         glu_unsorted_call,
@@ -589,14 +687,15 @@ def install_expert_streaming(
     # live memory and wire it now, before anything is built on the plan,
     # so a set that does not fit streams the experts instead (compose).
     early_wired = False
-    fell_back = fallback == "reclaimable"
+    fell_back = fallback == "unwired"
     if table_only:
         from gmlx.stream.table_stream import streamed_table_array_ids
 
         early_wired = _wire_resident_experts(
             model, gguf_path, total_bytes - table_offloaded, budget=budget,
             prefill_step=prefill_step,
-            skip_ids=frozenset(streamed_table_array_ids(model)))
+            skip_ids=frozenset(streamed_table_array_ids(model)),
+            keep=wire_keep)
         if not early_wired:
             table_only = False
             compose = bool(plan.tables)
@@ -1380,7 +1479,7 @@ def install_expert_streaming(
                      and os.environ.get("GMLX_DECODE_ARENA_GB"))
     avail0 = None
     if arena_kw and feeder_prefill:
-        from gmlx.stream.budget import _available_ram_bytes
+        from gmlx.stream.budget import unwired_ram_bytes
         from gmlx.stream.prefill_feeder import ring_bytes
 
         # Sized before the ring exists: its slots are wired at
@@ -1388,7 +1487,7 @@ def install_expert_streaming(
         # them twice.
         ring = ring_bytes(prefetcher.offsets)
         if env_arena:
-            avail0 = _available_ram_bytes()
+            avail0 = unwired_ram_bytes()
         else:
             held = _decode_arena_bytes(
                 total_bytes, prefetcher.offsets, budget, ring_bytes=ring,

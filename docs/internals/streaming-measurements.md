@@ -56,7 +56,7 @@ physical RAM. Four things share the ceiling, in this order:
    When the ring does not fit, prefill reads through the page cache
    instead, and the load says so. Decoding is not affected.
 4. The decode arena takes what is left under the ceiling, and no more
-   than the reclaimable RAM less a host floor and the host overhead. It
+   than the memory not wired less a host floor and the host overhead. It
    also uses the ring's room while decoding, as
    [the lossless settings](#the-lossless-settings) describe. The floor is
    5% of RAM, at least 4 GiB, plus 2.5 GiB for the page cache, and it
@@ -142,7 +142,7 @@ only the RAM that is free at that moment, so its arena can be smaller than
 the one in the plan.
 
 `GMLX_DECODE_ARENA_GB` sets the arena size. The arena is never larger than
-the experts, and a value past the reclaimable RAM less the floor, the KV
+the experts, and a value past the memory not wired less the floor, the KV
 room and the host overhead is reduced unless `GMLX_DECODE_ARENA_FORCE=1`
 is set. When a streamed model does not fit
 beside pinned or busy models, the server defers the load with a message

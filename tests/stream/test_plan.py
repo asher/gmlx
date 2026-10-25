@@ -376,6 +376,29 @@ def _chunked(activation, **kw):
                                activation_bytes=activation)
 
 
+def test_validate_judges_a_resident_moe_beside_its_own_prefill_chunk(
+        priced_room, monkeypatch):
+    """A MoE kept in memory prefills at its resident step: validate's live
+    check keeps that chunk's room, 8 GiB under the streamed chunk's, so a
+    set that fits beside it reads as kept."""
+    import dataclasses
+
+    from gmlx.stream import budget
+
+    ram, ws = priced_room
+    m = dataclasses.replace(_chunked(10 * GiB, total=80e9, expert=60e9),
+                            resident_activation_bytes=2 * GiB)
+    b = sp.box_plan(m, ram_bytes=ram, ws_bytes=ws)
+    assert b.verdict == sp.VERDICT_RESIDENT
+    room = sp.resident_room(m, b)
+    assert room.bytes == b.room.bytes - 8 * GiB
+    keep = budget.wire_keep_bytes(room.bytes)
+    monkeypatch.setattr(budget, "unwired_ram_bytes",
+                        lambda: int(80e9 + keep + GiB))
+    check = sp.live_check(m, b)
+    assert check.fits and sp.live_line(check, b, m) == sp.LIVE_RESIDENT
+
+
 def test_box_plan_prices_the_chunk_the_pool_and_the_host(priced_room,
                                                          monkeypatch):
     """The room holds one chunk's activations and the pool beside it.

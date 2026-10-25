@@ -78,18 +78,18 @@ Knobs (all calib values are U5's to tighten):
                              other process: the ceiling on tracked
                              bytes is min(WS x (1 - M), RAM - reserve)
                              (default max(8, 10% of RAM))
-    GMLX_GOV_KERNEL_FLOOR_GB kernel reclaimable floor (free + purgeable
-                             + file-backed pages, the speculative pages
-                             counted once, read from host_statistics64
-                             every tick): below
-                             it the band is red at once, whatever the
-                             MLX-side rate math says (default: lower
-                             of 4 and 10% of RAM; 0 disables). This is
-                             the counter that
-                             predicts the free-page livelock panic;
-                             MLX cannot see it because its buffer
-                             cache reads as free inside the process
-                             and wired to the kernel
+    GMLX_GOV_KERNEL_FLOOR_GB kernel floor on the memory not wired (free
+                             + pageable anonymous + file-backed pages,
+                             read live every tick; other apps' memory
+                             counts, since the kernel compresses or
+                             swaps it): below it, the band is red at
+                             once, whatever the MLX-side rate math
+                             says (default: lower of 4 and 10% of RAM;
+                             0 disables). These are the counters that
+                             predict the free-page livelock panic; MLX
+                             cannot see them because its buffer cache
+                             reads as free inside the process and wired
+                             to the kernel
     GMLX_GOV_THROTTLE_CACHE_GB
                              MLX cache limit while a throttle band
                              (yellow and up) is armed (default 2; 0 =
@@ -143,7 +143,8 @@ _STATS = {
     "sheds_suppressed": 0,
     "last_action": None,
     "last_recovered_bytes": 0,
-    "kernel_reclaimable_bytes": None,
+    "kernel_unwired_bytes": None,
+    "kernel_free_page_waiters": None,
     "kernel_floor_reds": 0,
     "kernel_floor": None,
 }
@@ -222,11 +223,13 @@ def governor_stats() -> dict:
     # idle gets a live sample, not the last tick's.
     if _ARMED_FLOOR > 0:
         try:
-            recl = _kernel_reclaimable()
+            unw, waiters = _kernel_unwired(), _kernel_waiters()
         except Exception:
-            recl = None
-        if recl is not None:
-            out["kernel_reclaimable_bytes"] = int(recl)
+            unw = waiters = None
+        if unw is not None:
+            out["kernel_unwired_bytes"] = int(unw)
+        if waiters is not None:
+            out["kernel_free_page_waiters"] = int(waiters)
     return out
 
 
@@ -261,9 +264,10 @@ class _GovState:
         self.reg_bytes = 0.0
         self.reg_sampled_tick = -999
         self.last_victim_uid = None
-        # kernel-floor trend: last sub-floor reclaimable sample, and the
-        # last wall time a stable (non-collapsing) breach was logged
-        self.floor_recl_prev = None
+        # kernel-floor trend: last sub-floor sample of the memory not
+        # wired, and the last wall time a stable (non-collapsing) breach
+        # was logged
+        self.floor_prev = None
         self.floor_warned_at = 0.0
         # U5 fault injection: (kind, tick) directives already fired
         self.injected: set = set()
@@ -332,18 +336,24 @@ def _floor_collapsing(cur: float, prev, floor: float) -> bool:
                     and (cur < 0.5 * floor or prev - cur > 1e9)))
 
 
-def _kernel_reclaimable():
-    from .kernel_vm import reclaimable_bytes
+def _kernel_unwired():
+    from .kernel_vm import unwired_bytes
 
-    return reclaimable_bytes()
+    return unwired_bytes()
+
+
+def _kernel_waiters():
+    from .kernel_vm import free_page_waiters
+
+    return free_page_waiters()
 
 
 def _kernel_floor_bytes() -> float:
-    """Kernel reclaimable floor in bytes. Env override, else the lower
-    of 4 GB and 10% of physical RAM so a small box is not always below
-    it. Collapse signatures key off fractions of the floor (quarter and
-    half), which at 4 GB still sit well above the 2026-08-24 freeze
-    reading (0.5 GB)."""
+    """Kernel floor on the memory not wired, in bytes. Env override, else
+    the lower of 4 GB and 10% of physical RAM so a small box is not
+    always below it. Collapse signatures key off fractions of the floor
+    (quarter and half), which at 4 GB still sit well above the
+    2026-08-24 freeze reading (0.5 GB)."""
     raw = os.environ.get("GMLX_GOV_KERNEL_FLOOR_GB")
     if raw not in (None, ""):
         return _env_f("GMLX_GOV_KERNEL_FLOOR_GB", 4.0) * 1e9
@@ -736,40 +746,41 @@ def _governor_tick(gen) -> None:
     else:
         st.green_streak = 0
 
-    # Kernel floor: the box's reclaimable pages, not the process's
-    # view. Below the floor nothing else in this tick matters: the
-    # rate math can read green while the kernel is a few hundred MB
-    # from a livelock (2026-08-24: active 87 GB + cache 27 GB on a
-    # 128 GB box, governor green throughout).
+    # Kernel floor: the box's memory not wired, not the process's view.
+    # Other apps' memory counts as not wired, since the kernel
+    # compresses or swaps it. Below the floor nothing else in this tick
+    # matters: the rate math can read green while the kernel is a few
+    # hundred MB from a livelock (2026-08-24: active 87 GB + cache 27 GB
+    # on a 128 GB box, governor green throughout).
     floor = _kernel_floor_bytes()
-    recl = _kernel_reclaimable() if floor > 0 else None
-    _STATS["kernel_reclaimable_bytes"] = (
-        None if recl is None else int(recl))
-    if recl is not None and recl < floor:
+    unw = _kernel_unwired() if floor > 0 else None
+    _STATS["kernel_unwired_bytes"] = None if unw is None else int(unw)
+    if unw is not None and unw < floor:
         _STATS["kernel_floor_reds"] += 1
         # Reclaim on the first sub-floor sample and while collapsing. A
         # stable breach holds; evicting every tick would only walk the
         # decode arena to its floor for nothing.
-        prev = st.floor_recl_prev
-        if prev is None or _floor_collapsing(recl, prev, floor):
+        prev = st.floor_prev
+        collapsing = _floor_collapsing(unw, prev, floor)
+        if prev is None or collapsing:
             # A collapse takes everything; a first dip takes the deficit.
-            frac = (1.0 if _floor_collapsing(recl, prev, floor)
-                    else _floor_evict_fraction(recl, floor))
+            frac = (1.0 if collapsing
+                    else _floor_evict_fraction(unw, floor))
             freed = _evict_registered(frac)
             mx.clear_cache()
-            recl2 = _kernel_reclaimable()
+            unw2 = _kernel_unwired()
         else:
             freed = 0.0
-            recl2 = recl
-        if recl2 is not None and recl2 >= floor:
+            unw2 = unw
+        if unw2 is not None and unw2 >= floor:
             _enter(gen, st, RED, ws, margin)
-            _log.warning("[governor] kernel floor: reclaimable %.2f GB < "
-                         "%.2f GB; evicted %.2f GB, cache cleared, now "
-                         "%.2f GB", recl / 1e9, floor / 1e9, freed / 1e9,
-                         recl2 / 1e9)
+            _log.warning("[governor] kernel floor: memory not wired "
+                         "%.2f GB < %.2f GB; evicted %.2f GB, cache "
+                         "cleared, now %.2f GB", unw / 1e9, floor / 1e9,
+                         freed / 1e9, unw2 / 1e9)
             _STATS["last_action"] = (
                 f"kernel floor reclaim freed {freed / 1e9:.2f} GB")
-            st.floor_recl_prev = None
+            st.floor_prev = None
             st.orange_failed = False
             return
         # Still below floor with nothing left to reclaim. A near-RAM-
@@ -777,37 +788,37 @@ def _governor_tick(gen) -> None:
         # rows cannot raise it (the pressure is wired weights) -- so a
         # STABLE breach only observes and logs. The full RED + shed
         # response is reserved for the livelock signature (2026-08-24
-        # freeze): reclaimable in active collapse, or through half the
-        # floor. Half-floor needs a second sub-floor sample to confirm:
-        # a neighbor teardown transient reads deep-but-recovering on its
-        # first sample (2026-08-26: 3.6 GB false shed 10 s after an
+        # freeze): the memory not wired in active collapse, or through
+        # half the floor. Half-floor needs a second sub-floor sample to
+        # confirm: a neighbor teardown transient reads deep-but-recovering
+        # on its first sample (2026-08-26: 3.6 GB false shed 10 s after an
         # 84 GB exit). Quarter-floor is last-pages territory and reds
         # immediately (2026-08-24 freeze read 0.5 GB).
-        cur = (recl2 or 0)
-        st.floor_recl_prev = cur
+        cur = (unw2 or 0)
+        st.floor_prev = cur
         if not _floor_collapsing(cur, prev, floor):
             now = time.perf_counter()
             if now - st.floor_warned_at >= 30.0:
                 st.floor_warned_at = now
-                _log.warning("[governor] kernel floor: reclaimable "
+                _log.warning("[governor] kernel floor: memory not wired "
                              "%.2f GB < %.2f GB but stable; nothing to "
                              "reclaim (evicted %.2f GB); holding, no "
                              "shed", cur / 1e9, floor / 1e9, freed / 1e9)
             _STATS["last_action"] = "kernel floor stable; no shed"
             return
         _enter(gen, st, RED, ws, margin)
-        _log.warning("[governor] kernel floor: reclaimable %.2f GB < "
-                     "%.2f GB and collapsing (prev %.2f GB); evicted "
+        _log.warning("[governor] kernel floor: memory not wired %.2f GB "
+                     "< %.2f GB and collapsing (prev %.2f GB); evicted "
                      "%.2f GB", cur / 1e9, floor / 1e9,
                      (prev or 0) / 1e9, freed / 1e9)
         if batch_rows(gen) > 0 and _shed_allowed(st):
             _fail_largest(gen, st, (
-                f"governor red: kernel reclaimable "
+                f"governor red: memory not wired "
                 f"{cur / 1e9:.2f} GB below floor "
                 f"{floor / 1e9:.2f} GB and collapsing"))
         st.orange_failed = False
         return
-    st.floor_recl_prev = None
+    st.floor_prev = None
 
     if red_now and batch_rows(gen) > 0:
         _enter(gen, st, RED, ws, margin)

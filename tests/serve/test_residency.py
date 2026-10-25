@@ -7,6 +7,8 @@ from __future__ import annotations
 from contextvars import copy_context
 from types import SimpleNamespace
 
+import os
+
 import pytest
 
 from gmlx.serve.residency import (  # noqa: E402
@@ -952,12 +954,12 @@ def test_load_gate_keeps_the_resident_streams_ring_and_kv_room(monkeypatch):
     assert held.busy == 0
 
 
-def _ds41_beside(monkeypatch, *, ws, budget, headroom, reclaimable,
+def _ds41_beside(monkeypatch, *, ws, budget, headroom, unwired,
                  feeder, ring=None):
     """A pool with DeepSeek V4.1 Flash streamed and idle, and the two gates
     reading the given measures: ``headroom`` against the full working set
-    and ``reclaimable`` RAM after the arena was wired. The governor's
-    kernel floor is armed at 4 GB."""
+    and ``unwired`` RAM after the arena was wired. The governor's kernel
+    floor is armed at 4 GB."""
     import gmlx.gen.prefill_decay as pd
     import gmlx.serve.capacity as cap
     import gmlx.serve.governor as gov
@@ -968,8 +970,8 @@ def _ds41_beside(monkeypatch, *, ws, budget, headroom, reclaimable,
     monkeypatch.setattr(cap, "working_set_bytes", lambda: ws)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: budget)
     monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 4e9)
-    monkeypatch.setattr(kvm, "reclaimable_bytes", lambda: reclaimable)
-    monkeypatch.setattr(cap, "_settle_reclaimable", lambda f, rec, n: rec)
+    monkeypatch.setattr(kvm, "unwired_bytes", lambda: unwired)
+    monkeypatch.setattr(cap, "_settle_unwired", lambda f, free, n: free)
     monkeypatch.setattr(cap, "install_boot_table",
                         lambda path, b, label, env=None: None)
     proxy = _RuntimeProxy(_FakeOriginal())
@@ -1003,7 +1005,7 @@ def test_load_gate_holds_the_host_margins_in_ram_not_under_the_ceiling(
         monkeypatch):
     """DeepSeek V4.1 Flash on a stock 128 GB Mac with a 30 GiB arena, the
     documented way to keep a second model loaded. Loaded at 102 GB
-    reclaimable: 8.4 GB every-token, 32.2 GB arena, a 16.3 GB KV room
+    unwired: 8.4 GB every-token, 32.2 GB arena, a 16.3 GB KV room
     and a 9.3 GB ring held apart and released between prefills. The RAM
     outside the 97.9 GB ceiling holds the 9.6 GB floor and the 10.7 GB
     host overhead, so under the ceiling the stream keeps only its room
@@ -1016,7 +1018,7 @@ def test_load_gate_holds_the_host_margins_in_ram_not_under_the_ceiling(
     ring = SimpleNamespace(_slots=None, n_slots=2, slot_bytes=4.635e9)
     pool = _ds41_beside(
         monkeypatch, ws=ws, budget=0.95 * ws,
-        headroom=ws - 8.4e9 - 32.21e9, reclaimable=102e9 - 32.21e9,
+        headroom=ws - 8.4e9 - 32.21e9, unwired=102e9 - 32.21e9,
         feeder=dict(nominal_bytes=32.21e9, _room_bytes=16.33e9,
                     _floor_bytes=9.56e9, _host_bytes=10.74e9,
                     _outside_bytes=0, _ring_share=0),
@@ -1034,7 +1036,7 @@ def test_load_gate_holds_the_host_margins_in_ram_not_under_the_ceiling(
 def test_load_gate_defers_a_model_the_ram_beside_a_default_stream_lacks(
         monkeypatch):
     """DeepSeek V4.1 Flash served by default on a 128 GB M5 Max, loaded at
-    102 GB reclaimable: the arena took the RAM less the 9.6 GB floor, the
+    102 GB unwired: the arena took the RAM less the 9.6 GB floor, the
     17.2 GB room and the 10.7 GB host overhead (64.5 GB), and lends the
     ring's room at prefill. Under the 114.2 GB ceiling 24.1 GB look
     free, and the old ceiling-side margins left 3.8 GB, so a 3.5 GB model
@@ -1045,13 +1047,13 @@ def test_load_gate_defers_a_model_the_ram_beside_a_default_stream_lacks(
     ring = SimpleNamespace(_slots=None, n_slots=2, slot_bytes=4.635e9)
     pool = _ds41_beside(
         monkeypatch, ws=ws, budget=114.19e9,
-        headroom=ws - 8.4e9 - 64.51e9, reclaimable=102e9 - 64.51e9,
+        headroom=ws - 8.4e9 - 64.51e9, unwired=102e9 - 64.51e9,
         feeder=dict(nominal_bytes=64.51e9, _room_bytes=17.19e9,
                     _floor_bytes=9.56e9, _host_bytes=10.74e9,
                     _outside_bytes=0, _ring_share=9.27e9),
         ring=ring)
     assert pool._reserved_room_bytes() == pytest.approx(17.19e9)
-    with pytest.raises(cap.LoadDeferred, match="reclaimable memory"):
+    with pytest.raises(cap.LoadDeferred, match="memory not wired"):
         acquire(pool, "small")
 
 
@@ -1132,17 +1134,31 @@ def test_streaming_entry_is_priced_at_every_token_plus_arena(monkeypatch):
     assert dense.footprint == 340 * GB
 
 
-def _table_only_header(monkeypatch, budget=130 * GB):
+def _table_only_header(monkeypatch, budget=130 * GB, unwired=1000 * GB,
+                       room=0):
     """A qwen4exp header whose plain build the install's ladder sends
     table-only: 150 GB of text tensors over a 130 GB budget, a 30 GB
     table that alone brings it under, 100 GB of routed experts. Under a
     110 GB budget it composes, as a stream build always does. No decode
-    arena or prefill ring is priced."""
+    arena or prefill ring is priced. The check before a plain build reads
+    ``unwired`` bytes of memory not wired and a KV room of ``room``, with
+    no kernel floor, or from ``unwired()`` when it is callable."""
     import gmlx.device as dev
     import gmlx.load.discovery as disc
     import gmlx.serve.capacity as cap
+    import gmlx.stream.budget as bmod
     import gmlx.stream.plan as plan
     import gmlx.stream.table_stream as ts
+
+    monkeypatch.setattr(bmod, "unwired_ram_bytes",
+                        unwired if callable(unwired) else lambda: unwired)
+    monkeypatch.setattr(bmod, "kernel_floor_bytes", lambda: 0.0)
+    monkeypatch.setattr(cap, "_SETTLE_STEP_S", 0)
+    # A streamed chunk's room would be 50 GB larger.
+    monkeypatch.setattr(
+        bmod, "kv_room_bytes", lambda *a, resident=False, **k: SimpleNamespace(
+            bytes=room if resident else room + 50 * GB, priced=False, depth=0))
+    monkeypatch.setattr(ts, "_EXPERTS_FOR_MEMORY", {})
 
     monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: 100 * GB)
     monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: 30 * GB)
@@ -1240,7 +1256,8 @@ def test_a_plain_build_whose_table_brings_it_under_prices_the_resident_experts(
                      build_spec=SimpleNamespace(stream=None))
     assert caplog.text.count(line) == 1
     if whole:
-        # Then built with the memory to hold it whole.
+        # Then built with the memory to hold it whole: nothing streams.
+        model.tables = False
         monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
         with caplog.at_level("WARNING", logger="gmlx.serve.residency"):
             entry = pool.acquire("a.gguf", None, "auto",
@@ -1249,6 +1266,42 @@ def test_a_plain_build_whose_table_brings_it_under_prices_the_resident_experts(
         assert asked[1:] == [150 * GB] * 2
         assert entry.footprint == 150 * GB
         assert caplog.text.count(line) == 1
+
+
+@pytest.mark.parametrize("experts,stream,arch", [
+    (100 * GB, None, "qwen4exp"), (0, None, "qwen4exp"),
+    (100 * GB, "experts", "qwen4exp"), (100 * GB, None, "diffusion-gemma")])
+def test_a_plain_moe_build_wires_in_chunks_at_its_install(
+        monkeypatch, experts, stream, arch):
+    """The gate admits a plain build of a MoE on memory not wired, so its
+    load starts with the chunked wire latched: the warm touch leaves the
+    weights to the install's guard. A dense build, a stream build and a
+    diffusion model, which has no install, clear a latch an earlier build
+    left."""
+    import gmlx.serve.capacity as cap
+    import gmlx.stream.table_stream as ts
+
+    monkeypatch.setattr(ts, "_FOR_MEMORY", set())
+    monkeypatch.setattr(ts, "_GUARDED", {})
+    _table_only_header(monkeypatch, budget=200 * GB)
+    monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: experts)
+    monkeypatch.setattr(cap, "_table_shards", lambda p: ([p], arch))
+    model = SimpleNamespace(_kq_streaming=stream is not None, tables=False)
+    pool, _tables, _credits, _asked = _table_only_pool(monkeypatch, model)
+    stock = pool._stock_get
+    seen = []
+
+    def get(*a, **k):
+        seen.append(ts.resident_wire_guarded("a.gguf"))
+        return stock(*a, **k)
+
+    pool._stock_get = get
+    plain = bool(experts) and stream is None and arch == "qwen4exp"
+    ts.guard_resident_wire("a.gguf", not plain)
+    entry = pool.acquire("a.gguf", None, "auto",
+                         build_spec=SimpleNamespace(stream=stream))
+    pool.release(entry)
+    assert seen == [plain]
 
 
 def test_a_plain_build_reprices_experts_that_stream_for_want_of_memory(
@@ -1263,6 +1316,170 @@ def test_a_plain_build_reprices_experts_that_stream_for_want_of_memory(
     assert entry.footprint == 20 * GB
     assert tables == [120 * GB, 20 * GB]
     assert "re-pricing" in caplog.text
+
+
+@pytest.mark.parametrize("unwired,kept", [
+    (200 * GB, "experts"), (160 * GB, "tables"), (130 * GB, "nothing")])
+def test_a_plain_moe_build_is_judged_with_its_kv_room_before_the_load(
+        monkeypatch, caplog, unwired, kept):
+    """As a run judges it: the 150 GB set with a 20 GB KV room keeps its
+    experts in memory, or keeps them without its 30 GB table, or streams
+    them, decided before the load so its install never starts a wire the
+    chunk guard stops for want of that room. A build kept in memory loads
+    with another model's raised wired limit held at 0, so its walk wires
+    nothing ahead of the guard, and gets the limit back after, unless
+    something of it streams."""
+    import mlx.core as mx
+
+    import gmlx.stream.table_stream as ts
+    from gmlx.stream.budget import STREAM_FREE_NOW
+
+    monkeypatch.setattr(ts, "_FOR_MEMORY", set())
+    monkeypatch.setattr(ts, "_GUARDED", {})
+    _table_only_header(monkeypatch, budget=200 * GB, unwired=unwired,
+                       room=20 * GB)
+    model = (SimpleNamespace() if kept == "experts" else SimpleNamespace(
+        _kq_streaming=kept == "nothing", tables=True))
+    pool, tables, _credits, asked = _table_only_pool(monkeypatch, model)
+    stock = pool._stock_get
+    seen = []
+
+    def get(*a, **k):
+        assert limit == [0]
+        room, extra = ts.guarded_wire_keep("a.gguf")
+        kept_rooms.append((room and room.bytes, extra))
+        seen.append((ts.resident_wire_guarded("a.gguf"),
+                     ts.tables_for_memory("a.gguf"),
+                     ts.experts_stream_for_memory("a.gguf")))
+        return stock(*a, **k)
+
+    pool._stock_get = get
+    kept_rooms = []
+    limit = [90 * GB]
+
+    def set_limit(n):
+        prev, limit[0] = limit[0], n
+        return prev
+
+    monkeypatch.setattr(mx, "set_wired_limit", set_limit)
+    with caplog.at_level("WARNING", logger="gmlx.serve.residency"):
+        entry = pool.acquire("a.gguf", None, "auto",
+                             build_spec=SimpleNamespace(stream=None))
+    pool.release(entry)
+    assert seen == [{"experts": (True, False, ""),
+                     "tables": (True, True, ""),
+                     "nothing": (False, False, "unwired")}[kept]]
+    # The install's guard keeps the room the check kept.
+    assert kept_rooms == [(None if kept == "nothing" else 20 * GB, 0)]
+    # A streamed table or experts keep the sweep off for the process.
+    assert limit == [90 * GB if kept == "experts" else 0]
+    want = {"experts": 150, "tables": 120, "nothing": 20}[kept] * GB
+    assert entry.footprint == want and tables == [want]
+    assert "re-pricing" not in caplog.text
+    assert (STREAM_FREE_NOW in caplog.text) is (kept == "nothing")
+
+
+def test_a_build_right_after_an_unload_keeps_its_experts_in_memory(
+        monkeypatch):
+    """The check reads 130 GB not wired while the model unloaded for the
+    build unwires its pages, and 200 GB once they land: the set is judged
+    on the memory that landed, and its experts stay in memory."""
+    import gmlx.serve.capacity as cap
+    import gmlx.stream.table_stream as ts
+
+    monkeypatch.setattr(ts, "_FOR_MEMORY", set())
+    monkeypatch.setattr(ts, "_GUARDED", {})
+    landed = []
+    _table_only_header(monkeypatch, budget=200 * GB, room=20 * GB,
+                       unwired=lambda: (200 if landed else 130) * GB)
+
+    def settle(sample, free, need):
+        landed.append(True)
+        return sample()
+
+    monkeypatch.setattr(cap, "_settle_unwired", settle)
+    pool, tables, _credits, _asked = _table_only_pool(monkeypatch,
+                                                      SimpleNamespace())
+    entry = pool.acquire("a.gguf", None, "auto",
+                         build_spec=SimpleNamespace(stream=None))
+    pool.release(entry)
+    assert landed
+    assert entry.footprint == 150 * GB and tables == [150 * GB]
+
+
+@pytest.mark.parametrize("auto,unwired,kept", [
+    (True, 175 * GB, True), (False, 175 * GB, False), (True, 160 * GB, False)])
+def test_a_build_whose_auto_drafter_does_not_fit_leaves_it_out(
+        monkeypatch, caplog, auto, unwired, kept):
+    """The 150 GB set with a 10 GB MTP head and a 20 GB KV room, beside
+    175 GB not wired: the experts fit alone. An auto drafter is left out
+    of the load, as a run leaves it, and the experts stay in memory. A
+    drafter the config asks for keeps them streaming. At 160 GB the
+    experts stream, and the auto drafter stays out, as in a run."""
+    import gmlx.load.discovery as disc
+    import gmlx.stream.table_stream as ts
+
+    monkeypatch.setattr(ts, "_FOR_MEMORY", set())
+    monkeypatch.setattr(ts, "_GUARDED", {})
+    _table_only_header(monkeypatch, budget=200 * GB, unwired=unwired,
+                       room=20 * GB)
+    import gmlx.serve.capacity as cap
+
+    monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: 0)
+    monkeypatch.setattr(disc, "mtp_block_bytes", lambda p: 10 * GB)
+    model = (SimpleNamespace() if kept
+             else SimpleNamespace(_kq_streaming=True))
+    pool, _tables, _credits, _asked = _table_only_pool(monkeypatch, model)
+    stock = pool._stock_get
+    speculative = []
+
+    def get(*a, **k):
+        speculative.append(os.environ.get("MLX_VLM_GGUF_SPECULATIVE"))
+        return stock(*a, **k)
+
+    pool._stock_get = get
+    spec = SimpleNamespace(stream=None, speculative=True, draft_gguf=None,
+                           mmproj=None, speculative_auto=auto)
+    before = os.environ.get("MLX_VLM_GGUF_SPECULATIVE")
+    with caplog.at_level("WARNING", logger="gmlx.serve.residency"):
+        entry = pool.acquire("a.gguf", None, "auto", build_spec=spec)
+    pool.release(entry)
+    assert speculative == ["0" if auto else None]
+    assert os.environ.get("MLX_VLM_GGUF_SPECULATIVE") == before
+    assert ("auto MTP is off" in caplog.text) is kept
+    assert ts.experts_stream_for_memory("a.gguf") == ("" if kept
+                                                     else "unwired")
+    assert (entry.footprint == 150 * GB) is kept
+
+
+@pytest.mark.parametrize("streamed", [True, False])
+def test_a_plain_moe_build_is_repriced_on_what_its_install_did(
+        monkeypatch, caplog, streamed):
+    """A kept build whose chunked wire stopped streams its experts: the
+    entry is priced as streaming. A build latched to stream whose load has
+    no streaming install keeps them: the entry is priced up to the whole
+    set."""
+    import gmlx.stream.table_stream as ts
+
+    monkeypatch.setattr(ts, "_FOR_MEMORY", set())
+    monkeypatch.setattr(ts, "_GUARDED", {})
+    _table_only_header(monkeypatch, budget=200 * GB,
+                       unwired=(200 if streamed else 130) * GB, room=20 * GB)
+    model = (SimpleNamespace(_kq_streaming=True, tables=True) if streamed
+             else SimpleNamespace())
+    pool, tables, _credits, _asked = _table_only_pool(monkeypatch, model)
+    with caplog.at_level("WARNING", logger="gmlx.serve.residency"):
+        entry = pool.acquire("a.gguf", None, "auto",
+                             build_spec=SimpleNamespace(stream=None))
+    pool.release(entry)
+    assert "re-pricing" in caplog.text
+    if streamed:
+        assert entry.footprint == 20 * GB and tables == [150 * GB, 20 * GB]
+        assert not entry.priced_up
+    else:
+        assert entry.footprint == 150 * GB and tables == [20 * GB, 150 * GB]
+        assert entry.priced_up
+        assert ts.experts_stream_for_memory("a.gguf") == ""
 
 
 def test_a_stream_build_streams_the_experts_beside_the_table(monkeypatch):
@@ -1509,7 +1726,7 @@ def test_a_teardown_releases_an_image_gone_idle_off_the_lock(
 
 def test_streaming_footprint_prices_the_clamped_explicit_arena(monkeypatch):
     """The loader clamps an explicit GMLX_DECODE_ARENA_GB to the
-    reclaimable RAM less the floor, the ring, the KV room and the host
+    memory not wired less the floor, the ring, the KV room and the host
     overhead, so the entry is priced at the clamped arena: priced at the
     raw value, the pre-load eviction freed more than the load took.
     GMLX_DECODE_ARENA_FORCE=1 keeps the raw value, as the loader does."""
@@ -1531,7 +1748,7 @@ def test_streaming_footprint_prices_the_clamped_explicit_arena(monkeypatch):
                           room=SimpleNamespace(bytes=20 * GB),
                           host_bytes=10 * GB)
     monkeypatch.setattr(plan, "plan_path", lambda p: (model, box))
-    monkeypatch.setattr(budget, "_available_ram_bytes",
+    monkeypatch.setattr(budget, "unwired_ram_bytes",
                         lambda *a, **k: 110 * GB)
     floor = budget.host_floor_bytes(128 * GB)
     env = {"GMLX_DECODE_ARENA_GB": "70"}

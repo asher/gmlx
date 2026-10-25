@@ -178,10 +178,11 @@ sends its own temperature.
 
 `--speculative` turns on speculative decoding for a positional model, with
 the model's own MTP head or `--draft-gguf`. A config `discover` scan turns
-it on by itself. `--draft-gguf`, `--native-mtp`, `--draft-block-size` and
-`--stochastic-mtp` work as under [run](#speculative-decoding-flags), and the
-first two imply `--speculative`. Under serve, `--draft-block-size` and
-`--stochastic-mtp` apply to every model the server loads.
+it on by itself. `--draft-gguf`, `--native-mtp`, `--draft-block-size`, `--stochastic-mtp`
+and `--no-stochastic-mtp` work as under
+[run](#speculative-decoding-flags), and the first two imply
+`--speculative`. Under serve, `--draft-block-size`, `--stochastic-mtp` and
+`--no-stochastic-mtp` apply to every model the server loads.
 
 `--stream-experts`, `--stream-cpu`, `--stream-fast-disk`,
 `--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`,
@@ -430,7 +431,7 @@ lists.
 | `--draft-gguf PATH` | None, or the companion beside a DeepSeek-V4 file | Draft with this separate [drafter](glossary.md#drafter) GGUF, which implies `--speculative`. |
 | `--native-mtp` | Off | Draft with the model's own head, even when a drafter is set. Forces speculation on. |
 | `--draft-block-size N` | Drafter default | Set the block size of each round, which drafts N-1 tokens and checks them in one N-token target pass. |
-| `--stochastic-mtp` | Off | Accept sampled drafts by rejection sampling, which accepts more but is not token-identical. |
+| `--stochastic-mtp`, `--no-stochastic-mtp` | On | Accept sampled drafts by rejection sampling, which accepts more but is not token-identical. `--no-stochastic-mtp` accepts exact matches only. |
 
 ### Streaming flags
 
@@ -540,7 +541,7 @@ These [`gmlx run`](#gmlx-run) flags mean the same as they do there:
 | Loading | `--arch`, `--hf-source`, `--chat-template`, `--no-chat-template`, `--chat-template-config`, `--no-remap`, `--no-zero-copy`, `--adapter` |
 | Memory | `--max-kv-size`, `--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`, `--kv-tail-tokens`, `--quantized-kv-start`, `--prefill-step-size`, `--dtype` |
 | Multimodal | `--mmproj`, `--no-mmproj`, `--resize-shape` |
-| Speculation | `--speculative`, `--mtp`, `--no-speculative`, `--no-mtp`, `--draft-gguf`, `--native-mtp`, `--draft-block-size`, `--stochastic-mtp` |
+| Speculation | `--speculative`, `--mtp`, `--no-speculative`, `--no-mtp`, `--draft-gguf`, `--native-mtp`, `--draft-block-size`, `--stochastic-mtp`, `--no-stochastic-mtp` |
 | Streaming | `--stream-experts`, `--stream-cpu`, `--stream-fast-disk` |
 | Streaming feeders | `--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`, `--gpu-keepwarm`, `--no-gpu-keepwarm` |
 | Lossy streaming | `--moe-experts`, `--moe-expert-mass`, `--moe-expert-probe`, `--moe-miss-shed`, `--moe-layer-shed`, `--moe-prestage` |
@@ -784,8 +785,10 @@ An entry on an unmounted drive is kept and reported, not dropped.
 drafter that a scan pairs with it, such as one downloaded after the
 model. It never changes an `mmproj` or `draft_gguf` key that the entry
 has, and it leaves an entry alone when the key is there but commented
-out. It adds no drafter to an entry set to `speculative: false`. Each
-line it adds carries a comment that says so. Without the flag, a sync
+out. It adds no drafter to an entry set to `speculative: false`, and a
+drafter it adds is marked `speculative: auto`, as a scan marks one, so
+a load leaves it out when it does not fit beside the experts. Each
+companion line it adds carries a comment that says so. Without the flag, a sync
 adds no companion to an entry it keeps, and its plan prints a `hint:`
 line for each companion it would add. `gmlx pull` prints the same hint
 for a companion it leaves out.

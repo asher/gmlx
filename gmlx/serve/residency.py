@@ -1037,6 +1037,50 @@ class _ResidencyPool:
             return False
         return True
 
+    def _keep_check(self, model_path: str, env=None, build_spec=None):
+        """The check a run makes before it loads a MoE
+        (``budget.check_wire_with_tables``), for a plain build: its
+        resident set beside the mmproj and the MTP drafter that load with
+        it, against the memory not wired less the kernel floor, the KV
+        room at the serve context and the room the resident streamed
+        models keep, with the table-only step first, and again once the
+        memory not wired stops rising when it is short
+        (``budget.settled_wire_check``). Returns the check, the KV room
+        and the bytes it kept beside the room, which the install's chunk
+        guard keeps too (``_latch_guarded_wire``). An auto drafter
+        (``speculative_auto``) loads only when the experts fit in memory
+        beside it, as run's auto drafter does. None for a dense model or
+        an unreadable header. A check that fails logs its line."""
+        from gmlx.device import stream_budget_bytes
+        from gmlx.load.discovery import text_tensor_bytes
+        from gmlx.stream import budget as bmod
+        from gmlx.stream.table_stream import stream_ple_env
+
+        from .capacity import (deferred_table_bytes, streamed_expert_bytes,
+                               streamed_table_bytes)
+
+        if not streamed_expert_bytes(model_path):
+            return None
+        text = text_tensor_bytes(model_path)
+        if not text:
+            return None
+        deferred = deferred_table_bytes(model_path, env=env)
+        tables = (0 if stream_ple_env(env) == "0"
+                  else max(0, streamed_table_bytes(model_path) - deferred))
+        mmproj = getattr(build_spec, "mmproj", None) or ""
+        extra = os.path.getsize(mmproj) if os.path.isfile(mmproj) else 0
+        room = bmod.kv_room_bytes(model_path, env=env, resident=True)
+        held, _ceiling, host, _floor = self._stream_reservations()
+        drafter = _drafter_bytes(model_path, build_spec)
+        auto = bool(getattr(build_spec, "speculative_auto", False))
+        check = bmod.settled_wire_check(lambda: bmod.check_wire_with_tables(
+            text - deferred + extra, tables, drafter, auto=auto,
+            room_bytes=room.bytes + held + host,
+            budget=stream_budget_bytes()))
+        if not check.fits:
+            _log.warning("[stream] %s: %s", model_path, check.line(room))
+        return check, room, held + host
+
     def _tables_for_memory(self, model_path: str, gate_bytes: int,
                            env=None) -> bool:
         """The table-only step of a plain build for the memory free now:
@@ -1095,7 +1139,9 @@ class _ResidencyPool:
         # Before the load, as in the CLI: both stream placements stream
         # the tables and the experts, and the warm touch must not wire
         # them first. Set per build, so a later resident model is touched.
-        from gmlx.stream.table_stream import force_table_stream
+        from gmlx.stream.table_stream import (force_table_stream,
+                                              stream_experts_for_memory,
+                                              stream_tables_for_memory)
 
         force_table_stream(
             getattr(build_spec, "stream", None) in ("cpu", "experts"))
@@ -1109,13 +1155,45 @@ class _ResidencyPool:
         # file, as a stream build's table share. The experts stay in
         # memory if they fit.
         gathered = 0
+        # The leg of the check before the load that streams a plain MoE's
+        # experts, as the CLI streams them (``_keep_check``), and the room
+        # and bytes it kept beside a set it keeps.
+        for_memory = ""
+        kept = (None, 0)
         if getattr(build_spec, "stream", None) is None:
             # Each build judges the memory free now afresh.
             _clear_table_step(model_path)
             gate_bytes = _plain_footprint(model_path, footprint, env)
             if isinstance(model_path, str) and model_path.endswith(".gguf"):
-                if self._tables_for_memory(model_path, gate_bytes, env):
+                judged = self._keep_check(model_path, env, build_spec)
+                keep, kept = ((None, (None, 0)) if judged is None
+                              else (judged[0], judged[1:]))
+                if keep is not None and keep.mtp_off:
+                    # As a run does: the load leaves the auto drafter out,
+                    # beside experts kept in memory or streamed.
+                    if keep.fits:
+                        _log.warning("[mtp] %s: %s", model_path,
+                                     keep.mtp_off_line("speculative: true"))
+                    env = dict(env or {}, MLX_VLM_GGUF_SPECULATIVE="0")
+                if keep is not None and not keep.fits:
+                    for_memory = keep.reason
+                elif keep is not None and keep.table_bytes:
+                    if not gathered_table_bytes(model_path, env=env):
+                        stream_tables_for_memory(model_path)
+                        gate_bytes = _plain_footprint(model_path, footprint,
+                                                      env)
+                elif self._tables_for_memory(model_path, gate_bytes, env):
                     gate_bytes = _plain_footprint(model_path, footprint, env)
+            if for_memory:
+                # Priced and gated as a stream build; the install streams
+                # the experts without trying the wire.
+                stream_experts_for_memory(model_path, for_memory)
+                force_table_stream(True)
+                shares = predicted_stream_bytes(str(model_path), env)
+                streamed = sum(shares)
+                gate_bytes = preload_gate_bytes(footprint, "experts", streamed)
+                offloaded = max(shares[0], held_table_bytes(str(model_path)))
+            elif isinstance(model_path, str) and model_path.endswith(".gguf"):
                 gathered = gathered_table_bytes(model_path, env=env)
                 shares = (gathered, 0)
                 streamed = gathered
@@ -1135,7 +1213,12 @@ class _ResidencyPool:
                     streamed / 1e9, shares[0] / 1e9, shares[1] / 1e9,
                     gate_bytes / 1e9)
         self._gate(gate_bytes, model_path,
-                   streaming=getattr(build_spec, "stream", None) == "experts")
+                   streaming=(getattr(build_spec, "stream", None) == "experts"
+                              or bool(for_memory)))
+        guarded = _latch_guarded_wire(
+            model_path,
+            getattr(build_spec, "stream", None) is None and not for_memory,
+            *kept)
         _say_tables_offloaded(model_path, offloaded)
         # What the entry holds resident. A streaming build adds its decode
         # arena below, once the loader has sized it.
@@ -1197,7 +1280,13 @@ class _ResidencyPool:
             note_build_credit(cache_key, streamed - min(
                 shares[0], held_table_bytes(str(model_path))))
         try:
-            self._stock_get(model_path, adapter_path, model_kind=model_kind)
+            # A raised wired limit would wire the walk's buffers in one
+            # burst, ahead of the install's chunk guard.
+            from gmlx.stream.wired_limit import wired_limit_held
+
+            with wired_limit_held() if guarded else contextlib.nullcontext():
+                self._stock_get(model_path, adapter_path,
+                                model_kind=model_kind)
             # One policy resolve per load, inside the env window. An
             # error verdict fails residency. Runs before the APC salt
             # below, which reads the stamp it leaves on the model.
@@ -1252,10 +1341,21 @@ class _ResidencyPool:
             # The install decided on the loaded model; price what it
             # really streamed if the header prediction differed.
             repriced = priced_up = False
-            if getattr(build_spec, "stream", None) == "experts" or gathered:
+            if (getattr(build_spec, "stream", None) == "experts" or gathered
+                    or for_memory or guarded):
                 done = _streamed_shares(getattr(rg, "model", None), shares,
                                         str(model_path))
-                if done is not None and sum(done) != streamed:
+                if done is None and for_memory:
+                    # No install read the latch: the experts are in memory.
+                    stream_experts_for_memory(model_path)
+                    _log.warning(
+                        "[capacity] %s holds its experts in memory, since "
+                        "this load has no streaming install; re-pricing "
+                        "the resident weights", model_path)
+                    gate_bytes = _plain_footprint(model_path, footprint, env)
+                    resident_bytes = gate_bytes
+                    repriced = priced_up = True
+                elif done is not None and sum(done) != streamed:
                     _log.warning(
                         "[capacity] %s streams %.1f GB (tables %.1f GB, "
                         "experts %.1f GB), not the %.1f GB the header "
@@ -1568,8 +1668,8 @@ def _stamp_boot_kv_costs(rg, gguf_path: str) -> None:
 
 def _env_arena_cap(model, box, env, held_bytes: int) -> int | None:
     """The clamp the loader puts on an explicit ``GMLX_DECODE_ARENA_GB``
-    (``budget._decode_arena_bytes``): reclaimable RAM, counting what the
-    resident models hold as free to evict, less the incoming every-token
+    (``budget._decode_arena_bytes``): the memory not wired, counting what
+    the resident models hold as free to evict, less the incoming every-token
     weights (pinned before the arena is sized), the host floor, the ring,
     the KV room and the host overhead. None under
     ``GMLX_DECODE_ARENA_FORCE=1`` or without a priced box."""
@@ -1579,9 +1679,9 @@ def _env_arena_cap(model, box, env, held_bytes: int) -> int | None:
     if (str(force).strip().lower() in ("1", "true", "yes", "on")
             or room is None or not getattr(box, "ram_bytes", 0)):
         return None
-    from gmlx.stream.budget import _available_ram_bytes, host_floor_bytes
+    from gmlx.stream.budget import host_floor_bytes, unwired_ram_bytes
 
-    avail = _available_ram_bytes()
+    avail = unwired_ram_bytes()
     if avail is None:
         return None
     ring = int(model.ring_bytes) if box.ring_fits else 0
@@ -1610,9 +1710,46 @@ def _clear_table_step(model_path) -> None:
     judged is resident, so admission prices a later build of the path
     from its file."""
     if isinstance(model_path, str) and model_path.endswith(".gguf"):
-        from gmlx.stream.table_stream import stream_tables_for_memory
+        from gmlx.stream.table_stream import (stream_experts_for_memory,
+                                              stream_tables_for_memory)
 
         stream_tables_for_memory(model_path, False)
+        stream_experts_for_memory(model_path)
+
+
+def _latch_guarded_wire(model_path, plain: bool, room=None,
+                        extra: int = 0) -> bool:
+    """Latch the chunked wire for a plain build of a MoE the gate admitted
+    (``table_stream.guard_resident_wire``): its install wires it in
+    chunks under the chunk guard, keeping the ``room`` and ``extra``
+    bytes the check before the load kept, and the warm touch leaves it
+    alone. Cleared for any other build of the path, and for a diffusion
+    model, which the bridge hands back with no install. True when
+    latched."""
+    if isinstance(model_path, str) and model_path.endswith(".gguf"):
+        from gmlx.gen.diffusion import DIFFUSION_ARCHES
+        from gmlx.serve.capacity import _table_shards, streamed_expert_bytes
+        from gmlx.stream.table_stream import guard_resident_wire
+
+        on = (plain and bool(streamed_expert_bytes(model_path))
+              and _table_shards(model_path)[1] not in DIFFUSION_ARCHES)
+        guard_resident_wire(model_path, on, room, extra)
+        return on
+    return False
+
+
+def _drafter_bytes(model_path: str, build_spec) -> int:
+    """Bytes of the MTP drafter a serve build loads beside the model: its
+    ``draft_gguf`` file, else the model's own NextN blocks. 0 without
+    speculation."""
+    if not getattr(build_spec, "speculative", False):
+        return 0
+    draft = getattr(build_spec, "draft_gguf", None) or ""
+    if draft:
+        return os.path.getsize(draft) if os.path.isfile(draft) else 0
+    from gmlx.load.discovery import mtp_block_bytes
+
+    return mtp_block_bytes(model_path)
 
 
 def _plain_footprint(model_path, file_bytes: int, env=None) -> int:

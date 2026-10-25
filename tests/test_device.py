@@ -369,7 +369,7 @@ def test_decode_arena_ram_fraction(on_cpu, monkeypatch):
                 "GMLX_DECODE_PAGECACHE_GB"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("GMLX_DECODE_ARENA_RAM_FRAC", "0.25")
-    monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: None)
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda *a, **k: None)
     ram = 128 * GB
     _metal(monkeypatch, **{WS: 100 * GB, "memory_size": ram})
     arena = budget._decode_arena_bytes(

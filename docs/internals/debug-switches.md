@@ -39,7 +39,7 @@ is already running does not see a variable you export later.
 | `GMLX_SSE_KEEPALIVE_S` | Interval in seconds of the SSE keepalive comment while a stream is silent. The default is `15`, and `0` disables it. |
 | `GMLX_FAITHFUL_HISTORY=0` | Restore mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from plain assistant turns, and its stock `/v1/messages` conversion. |
 | `GMLX_IGNORE_EOS=1` | Never stop on end-of-sequence in `serve`, as `--ignore-eos` does. |
-| `GMLX_GOV_KERNEL_FLOOR_GB` | Reclaimable GB under which the governor goes red and reclaims caches. The default is the lower of `4` and 10% of RAM, and `0` disables it. |
+| `GMLX_GOV_KERNEL_FLOOR_GB` | GB of memory not wired under which the governor goes red and reclaims caches. The default is the lower of `4` and 10% of RAM, and `0` disables it. |
 | `GMLX_GOV_RESERVE_GB` | RAM left to the kernel and other processes when the server computes its memory limit. The default is the larger of `8` and 10% of RAM. |
 | `MLX_VLM_RESIDENT_TTL_DISABLE` | `1`, `true`, `yes` or `on` disables the idle-TTL reaper. LRU eviction under pressure still applies. |
 | `MLX_VLM_RESIDENT_TTL_TICK` | Interval in seconds at which the idle reaper wakes. The default is `30`. |
@@ -223,7 +223,7 @@ other layer adds its delta on stock ops.
 | `GMLX_DECODE_SEED=0` | Start the decode arena empty instead of seeding it with the prompt's most routed experts. |
 | `GMLX_DECODE_ASYNC_GATHER=0` | Keep each streamed layer's expert gather in the next layer's eval instead of submitting it as soon as it is built. |
 | `GMLX_DECODE_ARENA_RAM_FRAC` | Cap on the arena size as a fraction of physical RAM. Unset by default. |
-| `GMLX_DECODE_ARENA_FORCE=1` | Honor an oversized `GMLX_DECODE_ARENA_GB` instead of clamping it to the reclaimable RAM less the host floor, the KV room and the host overhead. |
+| `GMLX_DECODE_ARENA_FORCE=1` | Honor an oversized `GMLX_DECODE_ARENA_GB` instead of clamping it to the memory not wired less the host floor, the KV room and the host overhead. |
 | `GMLX_DECODE_KV_RESERVE_GB` | Flat KV reserve in GiB in place of the estimated KV room. The fallback is `8` when the header cannot size the KV cache. |
 | `GMLX_DECODE_RAM_FLOOR_GB` | GiB that arena sizing keeps free for the rest of the machine. The default is 5% of RAM, at least `4`. |
 | `GMLX_DECODE_PAGECACHE_GB` | Page-cache reserve in GiB that arena sizing adds to the host floor. The default is `2.5`. |
@@ -240,7 +240,7 @@ other layer adds its delta on stock ops.
 | `GMLX_ARENA_ROW_KERNELS=0` | Let multi-token arena calls pick expert kernels by width. The output then depends on the arena size. |
 | `GMLX_PIN_WEIGHTS=0` | Do not lock the every-token weights of a streamed model in memory. |
 | `GMLX_GPU_RESIDENT=0` | Skip wiring the every-token weights and the decode arena into the Metal residency set. |
-| `GMLX_WIRE_CHUNK_GB` | GiB a resident expert wire commits at a time, each once reclaimable memory has room. The default is `2`. A wire of at most 2 GiB is judged on the budget only. |
+| `GMLX_WIRE_CHUNK_GB` | GiB a MoE's resident wire commits at a time, each once the memory not wired has room. The default is `2`. A wire of at most 2 GiB is judged on the budget only. |
 | `GMLX_RESIDENCY_ASYNC=0` | Commit decode arena residency changes and lock regrown arena memory on the decode thread, not on a background thread. |
 | `GMLX_GPU_KEEPWARM=0` | Disable GPU keep-warm, which is on by default for streamed models with the decode feeder. |
 | `GMLX_KEEPWARM_IDLE_S` | Seconds without streamed decode before the keep-warm heartbeat pauses. The default is `1`, and `0` runs it continuously. |

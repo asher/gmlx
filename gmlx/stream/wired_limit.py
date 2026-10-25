@@ -7,7 +7,7 @@ import os
 
 import mlx.core as mx
 
-from gmlx.upstream.patching import wrapped_with
+from gmlx.upstream.patching import link, wrapped_with
 
 
 @contextlib.contextmanager
@@ -22,6 +22,41 @@ def cpu_wired_limit(streams=None):
                 mx.synchronize(s)
         else:
             mx.synchronize()
+
+
+@contextlib.contextmanager
+def wired_limit_held():
+    """Hold the MLX wired limit at 0 for the block, then apply the limit
+    the process last asked for. Under a raised limit MLX wires every
+    buffer a load creates, so a load beside another model's generation, or
+    an MTP model's sticky wire, would wire its weights in one burst, before
+    the chunked wire's guard reads memory. Inside the block, calls to
+    ``mx.set_wired_limit`` (a generation starting or ending) are recorded
+    and return the limit last asked for. A sweep neutralized inside the
+    block (``_neutralize_wired_limit_sweep``, a load that streams) keeps
+    the limit at 0. A no-op once the sweep is neutralized."""
+    if wrapped_with(mx.set_wired_limit, "_kq_no_sweep"):
+        yield
+        return
+    real = mx.set_wired_limit
+    try:
+        want = [int(real(0) or 0)]
+    except Exception:
+        yield
+        return
+
+    def _held(limit, *_a, **_k):
+        prev, want[0] = want[0], int(limit)
+        return prev
+
+    mx.set_wired_limit = link(_held, real)
+    try:
+        yield
+    finally:
+        if mx.set_wired_limit is _held:
+            mx.set_wired_limit = real
+            if want[0]:
+                real(want[0])
 
 
 def _neutralize_wired_limit_sweep():
