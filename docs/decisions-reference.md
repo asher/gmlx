@@ -19,7 +19,9 @@ send a first request.
 DiffusionGemma reads every question of a request in one pass. OpenJev, and
 any other text chat model, answers through the
 [letter readout](glossary.md#letter-readout): each question is a prompt of
-its own. Both readouts take the same request and return the same answer shapes. The
+its own, with the options lettered `A)`, `B)` and so on. A model whose file
+name or id contains `OpenJev` gets the `[A]` form it was trained on. Both
+readouts take the same request and return the same answer shapes. The
 letter readout skips the fields it does not use and names them in an
 `ignoring unsupported parameter(s)` warning in the server log.
 

@@ -136,6 +136,7 @@ class _LetterReader:
     ids and the letter."""
 
     built = []
+    seen_tails = []
     mode = "ok"
 
     def __init__(self, model, letter_ids):
@@ -160,6 +161,7 @@ class _LetterReader:
         while _LetterReader.mode == "slow":
             yield
         self.forwards += 1
+        _LetterReader.seen_tails.extend(list(t) for t in tails)
         yield
         return [[zlib.crc32(repr((prefix_ids + t, i)).encode()) / 2**32 * 6
                  for i in range(52)] for t in tails]
@@ -219,6 +221,7 @@ def app(monkeypatch):
     _Reader.built.clear()
     _Reader.mode = "ok"
     _LetterReader.built.clear()
+    _LetterReader.seen_tails.clear()
     _LetterReader.mode = "ok"
     engines = []
     state = types.SimpleNamespace(loaded=[], engines=engines)
@@ -613,6 +616,21 @@ def test_a_text_model_answers_with_the_letter_readout(app, caplog):
     lines = [rec.getMessage() for rec in caplog.records
              if rec.getMessage().startswith("systemone: ")]
     assert len(lines) == 1 and "team=" in lines[0]
+
+
+def test_options_are_lettered_plainly_except_on_openjev(app):
+    client = app.use(diffusion_model=False)
+    assert client.post("/v1/systemone", json=_letter_ticket()).status_code == 200
+    texts = [app.rg.processor.decode(t) for t in _LetterReader.seen_tails]
+    assert texts and any("A) billing: money" in t for t in texts)
+    assert all("[A]" not in t for t in texts)
+    _LetterReader.seen_tails.clear()
+    client = app.use(diffusion_model=False)
+    r = client.post("/v1/systemone", json=_letter_ticket(model="openjev"))
+    assert r.status_code == 200, r.text
+    texts = [app.rg.processor.decode(t) for t in _LetterReader.seen_tails]
+    assert texts and any("[A] billing: money" in t for t in texts)
+    assert all("A) " not in t for t in texts)
 
 
 def test_the_letter_reader_is_built_once_per_model(app):

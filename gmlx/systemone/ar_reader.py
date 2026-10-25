@@ -440,11 +440,13 @@ class LetterReader:
 def decide_letters(reader: LetterReader, tokens: LetterTokens, schema, state: str,
                    *, prefixes=None,
                    should_stop: Optional[Callable[[], bool]] = None,
-                   rows_scope: Optional[Callable[[int], Any]] = None) -> Step:
+                   rows_scope: Optional[Callable[[int], Any]] = None,
+                   style: str = letters.BRACKET) -> Step:
     """One letter decision, as a generator that yields after each forward.
     ``prefixes`` (a ``prefixes.Prefixes``) finds and keeps the state prefix
     between requests. ``rows_scope(rows)`` publishes the request's adapter
-    scales around each forward. Returns the decision body: answers and
+    scales around each forward. ``style`` is how the option lines open
+    (``letters.option_style``). Returns the decision body: answers and
     diagnostics."""
     from .prefixes import Prefixes
 
@@ -452,7 +454,7 @@ def decide_letters(reader: LetterReader, tokens: LetterTokens, schema, state: st
     started = time.time()
     reader.check(rows_scope)
     reader = reader.bind(rows_scope)
-    read = letters.decision(schema, state)
+    read = letters.decision(schema, state, style)
     out: dict[str, Any] = {}
     try:
         batch = next(read)

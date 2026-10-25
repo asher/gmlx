@@ -383,8 +383,10 @@ def make_systemone_endpoint(installed):
             if letters.has_image(body.get("state")):
                 raise HTTPException(status_code=400, detail=_NO_IMAGES)
             lrt, tokens = _letter_setup(rg, state, resolved)
+            style = letters.option_style(getattr(spec, "path", None), resolved)
             ar_reader.split_point(tokens, state)
-            texts = letters.pass_texts(schema, state) + letters.winner_bounds(schema, state)
+            texts = (letters.pass_texts(schema, state, style)
+                     + letters.winner_bounds(schema, state, style))
             admitted = _admit_letters(rg, tokens, texts, ar_reader.FORWARD_TOKENS)
             scales = lora_rows.request_scales(spec)
 
@@ -393,7 +395,8 @@ def make_systemone_endpoint(installed):
                 return ar_reader.decide_letters(
                     reader, tokens, schema, state,
                     prefixes=_prefixes(engine_rg, reader, scales, tenant),
-                    should_stop=should_stop, rows_scope=_rows_scope(scales))
+                    should_stop=should_stop, rows_scope=_rows_scope(scales),
+                    style=style)
 
             return schema, job, admitted
 

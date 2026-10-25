@@ -32,7 +32,7 @@ Two models are recommended, and any other text chat model also works:
 |-------|------------|----------------|
 | DiffusionGemma | `unsloth/diffusiongemma-26B-A4B-it-GGUF` | Speed matters. Three to five times as fast as OpenJev, but misses about one question in eight. |
 | OpenJev | `openjev/openjev-GGUF` | Accuracy matters, or a question has more than 26 options. Licensed CC BY-NC 4.0, non-commercial only. |
-| Any other text chat model | Your own | You already serve it. Test it on known states first, since its probabilities can be too sure or too unsure. |
+| Any other text chat model | Your own | You already serve it. The answers are usable, the confidence is not calibrated. |
 
 Name a decision model in your config and start the server. This file,
 saved as `decisions.yaml`, serves both recommended models:
@@ -51,6 +51,13 @@ server:
 ```sh
 gmlx serve --config decisions.yaml
 ```
+
+On a chat model that is not one of the two, the answers are the model's
+own picks and hold up on clear questions. The `confidence` does not: a stock
+model reports 0.99 or more on nearly every answer, the ones it gets wrong
+included, because its readout has not been calibrated as OpenJev's and
+DiffusionGemma's have. Use its confidence to rank answers, not as a
+probability.
 
 [`server.systemone.model`](config.md#serversystemonemodel) answers a request
 whose `model` is absent or unknown, such as a Jev client's `jev-latest`. A
