@@ -399,15 +399,27 @@ def test_main_prints_facts_and_the_walk_and_check_compares(refresh, dense_repo, 
     monkeypatch.setattr(catalog, "RECOMMENDED", {8: ("dense",), 16: ("dense",)})
     import gmlx.load.catalog_facts as cf
     monkeypatch.setattr(cf, "FACTS", {})
+    # One image recipe rides along: its DiT sizes print as the image facts file.
+    from gmlx.image import catalog as ic
+    import gmlx.image.catalog_facts as icf
+    monkeypatch.setattr(ic, "RECIPES", {"pic": _image_recipe(ic)})
+    monkeypatch.setattr(ic, "ENCODER_BYTES", {})
+    monkeypatch.setattr(icf, "DIT_BYTES", {})
+    dense_repo.add("org/pic", {"pic-Q4_K_M.gguf": b"x" * 40, "pic-Q8_0.gguf": b"x" * 80})
+    dense_repo.add("org/enc", {"enc-Q4_K_M.gguf": b"e" * 500, "enc-Q8_0.gguf": b"e" * 1000,
+                               "mmproj.gguf": b"m" * 10})
     assert refresh.main([]) == 0
     out = capsys.readouterr().out
     assert out.startswith('"""The measured facts') and "FACTS: dict = {" in out
+    assert "# ---- gmlx/image/catalog_facts.py ----" in out and "DIT_BYTES: dict = {" in out
     assert "'dense': {" in out and "('Q6_K', 'high', 'Model-Q6_K.gguf'" in out
     # The printed block is the facts file: it parses to the same dict.
     ns: dict = {}
     exec(out.split("Default plans")[0], ns)
     facts = ns["FACTS"]["dense"]
     assert facts["heads"] == 4
+    assert ns["DIT_BYTES"] == {"pic": {"Q4_K_M": 40, "Q8_0": 80}}
+    monkeypatch.setattr(icf, "DIT_BYTES", ns["DIT_BYTES"])
     walk = out.split("Default plans", 1)[1]
     assert re.search(r"^ +8 GB  dense +high +Q6_K +\S+ [KMG]B  images +resident +\d+K / \d+K$",
                      walk, re.M), walk
@@ -425,6 +437,11 @@ def test_main_prints_facts_and_the_walk_and_check_compares(refresh, dense_repo, 
     err = capsys.readouterr().err
     assert "FAIL: dense: rung now" in err and "FAIL: dense: rung gone" in err
     monkeypatch.setattr(cf, "FACTS", {"dense": facts})
+    # A changed DiT size fails --check too.
+    monkeypatch.setattr(icf, "DIT_BYTES", {"pic": {"Q4_K_M": 40, "Q8_0": 81}})
+    assert refresh.main(["--check"]) == 1
+    assert "FAIL: pic: Q8_0 DiT 81 -> 80" in capsys.readouterr().err
+    monkeypatch.setattr(icf, "DIT_BYTES", ns["DIT_BYTES"])
     monkeypatch.setattr(refresh, "_url_ok", lambda url: False)
     assert refresh.main(["--check"]) == 1
     assert "license page" in capsys.readouterr().err
@@ -437,6 +454,48 @@ def test_main_prints_facts_and_the_walk_and_check_compares(refresh, dense_repo, 
     # --only limits the run; an unknown name runs nothing.
     assert refresh.main(["--only", "nothing"]) == 0
     assert "'dense'" in capsys.readouterr().out   # the recorded facts still print
+
+
+def _image_recipe(ic, **kw):
+    base = ic.recipe("z-image-turbo")
+    import dataclasses
+    return dataclasses.replace(base, name="pic", dit_repo="org/pic", dit_file="pic-{quant}.gguf",
+                               dit_quants=("Q4_K_M", "Q8_0"), encoder_repo="org/enc",
+                               encoder_file="enc-{quant}.gguf", encoder_quants=("Q4_K_M", "Q8_0"),
+                               mmproj_file="mmproj.gguf", encoder_bytes=1000 + 10, **kw)
+
+
+def test_record_images_reads_the_dit_sizes_and_checks_the_encoders(refresh, monkeypatch):
+    from gmlx.image import catalog as ic
+
+    hub = Hub(refresh, monkeypatch)
+    r = _image_recipe(ic)
+    monkeypatch.setattr(ic, "RECIPES", {"pic": r})
+    monkeypatch.setattr(ic, "ENCODER_BYTES", {"enc-Q4_K_M.gguf": 500 + 10})
+    hub.add("org/pic", {"pic-Q4_K_M.gguf": b"x" * 40, "pic-Q8_0.gguf": b"x" * 80, "README.md": b"r"})
+    hub.add("org/enc", {"enc-Q4_K_M.gguf": b"e" * 500, "enc-Q8_0.gguf": b"e" * 1000,
+                        "mmproj.gguf": b"m" * 10})
+    dit, problems = refresh.record_images()
+    assert dit == {"pic": {"Q4_K_M": 40, "Q8_0": 80}} and problems == []
+    # The printed block parses to the same dict.
+    text = refresh.image_facts_text(dit)
+    ns: dict = {}
+    exec(text, ns)
+    assert ns["DIT_BYTES"] == dit
+    # A missing DiT file and an encoder whose size drifted are problems.
+    del hub.repos["org/pic"]["pic-Q8_0.gguf"]
+    hub.repos["org/enc"]["enc-Q8_0.gguf"] = b"e" * 999
+    dit, problems = refresh.record_images()
+    assert dit == {"pic": {"Q4_K_M": 40}}
+    assert problems == ["pic: pic-Q8_0.gguf is not in org/pic",
+                        "pic: enc-Q8_0.gguf with its tower is 1009 bytes; the image catalog records 1010"]
+
+
+def test_compare_images_reports_each_changed_size(refresh):
+    old = {"pic": {"Q4_K_M": 40, "Q8_0": 80}}
+    assert refresh.compare_images(old, {"pic": {"Q4_K_M": 40, "Q8_0": 80}}) == []
+    diffs = refresh.compare_images(old, {"pic": {"Q4_K_M": 41}, "new": {"Q8_0": 1}})
+    assert diffs == ["pic: Q4_K_M DiT 40 -> 41", "pic: Q8_0 DiT gone", "new: no recorded DiT sizes"]
 
 
 def test_compare_reports_each_changed_field(refresh):

@@ -648,13 +648,19 @@ gmlx pull z-image-turbo
 ```
 
 `gmlx pull --list` prints the same models as a table, the recommended ones
-first, each at its default quality tier for this Mac:
+first, each at its default quality tier for this Mac, and the image models
+after them with the quants for this Mac:
 
 ```text
 Recommended for this Mac
   NAME                      DOWNLOAD  IMAGES  GOOD FOR
   qwen3.8-flash-next         90.7 GB  yes     documents, code and tool calls
   ornith-1.5-122b            75.1 GB  yes     coding
+
+Image models
+  NAME                      DOWNLOAD  IMAGES  GOOD FOR
+  z-image-turbo              15.6 GB          fast images, edits one picture
+  flux-3-klein                9.8 GB          fast images, edits from pictures
 ```
 
 `gmlx pull --list -v` adds each model's tiers under its row, and `gmlx pull
@@ -729,7 +735,8 @@ An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo`,
 against its published sha256, packs it to GGUF, and adds an
 `image_models` entry. The quants default to
 the ones for this Mac's memory, and an encoder already on disk is used
-again when its weights match. On a Mac where no DiT of the model makes an
+again when its weights match. `gmlx pull <image model name> --list`
+prints its quants with their downloads for this Mac and downloads nothing. On a Mac where no DiT of the model makes an
 image, such as a 9B model on 16 GB, `pull` downloads nothing, names the
 smallest Mac that runs one, and takes a DiT only when `--quant` names it.
 When the three parts do not fit the Mac's memory together, or an image
@@ -754,7 +761,7 @@ names the encoder file and the vision tower that `pull` adds.
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `REF`, positional | None | Nothing opens the picker. Otherwise a model name, an image model name, or `hf:<org>/<repo>/<file.gguf>[@rev]` references and URLs. |
-| `--list` | Off | Print the recommended models for this Mac, or with a model name its quality tiers, and download nothing. |
+| `--list` | Off | Print the recommended models and the image models for this Mac, or one model's quality tiers or quants, and download nothing. |
 | `--verbose`, `-v` | Off | With `--list`, add each model's quality tiers, their sizes and room for context, and its extras. |
 | `--quant QUANT` | The tier for this Mac | A model name: a quality tier, `fastest`, `balanced`, `high` or `xhigh`, or a quant name such as `Q6_K`. An image model name: the DiT quant. |
 | `--vision`, `--no-vision` | On where it fits | Download the model's vision tower for image input, or leave it out. |

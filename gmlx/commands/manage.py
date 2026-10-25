@@ -1289,7 +1289,10 @@ def _check_pull_flags(a, kind: str) -> str | None:
         if catalog_only:
             return f"{join(catalog_only)} {verb(catalog_only)} with a model name, not an image model name"
         if a.list:
-            return "--list goes alone or with a model name, not an image model name"
+            bad = quant + image_only + downloads
+            if bad:
+                return (f"--list prints the quants and downloads nothing, so "
+                        f"{join(bad)} {'does' if len(bad) == 1 else 'do'} not go with it")
         return None
     if kind == "remote":
         if a.list:
@@ -1782,12 +1785,28 @@ def _model_json(m, box, group: str | None = None) -> dict:
     return out
 
 
-def _groups_json(groups: tuple, box) -> dict:
+def _image_json(e, group: str) -> dict:
+    """One image model for --json: its DiT quants with their downloads
+    here and its default."""
+    from gmlx.load import catalog as pc
+
+    return {"name": e.name, "title": e.title, "use": e.use, "blurb": e.blurb,
+            "speed": e.speed, "license": e.license, "license_detail": e.license_detail,
+            "image_size": e.size, "group": group, "needs_gb": e.needs_class,
+            "default": None if e.needs_class is not None else {
+                "quant": e.default_quant, "bytes": e.download, "command": pc.image_command(e)},
+            "quants": [{"quant": q, "bytes": n} for q, n in e.quants]}
+
+
+def _groups_json(groups: tuple, box, images=((), ())) -> dict:
     models = []
     for name, group in zip(("recommended", "fits", "streams", "too_big"), groups):
         models += [_model_json(m, box, name) for m in group]
+    runs, big = images
     return {"ram_bytes": box.ram, "budget_bytes": box.budget,
-            "ceiling_bytes": box.ceiling, "models": models}
+            "ceiling_bytes": box.ceiling, "models": models,
+            "image_models": [_image_json(e, "image") for e in runs]
+            + [_image_json(e, "too_big") for e in big]}
 
 
 def _complete_on_disk(plan, dest: Destination) -> dict:
@@ -1838,9 +1857,30 @@ def _pick_row(m, dp, box, dest: Destination, free: int):
         rungs=tuple(rungs), default_rung=dp.rung.quant, toggles=tuple(toggles), use=m.use)
 
 
-def _pick_groups(groups: tuple, box, dest: Destination, free: int) -> list:
+def _image_pick_row(e, dest: Destination, free: int):
+    """One picker row from an image model: its DiT quants are the quality
+    list, with no extras and no context line."""
+    from gmlx.commands.image_pull import _dest
+    from gmlx.image import catalog as ic
+    from gmlx.load import catalog as pc
+    from gmlx.tui import pick
+
+    r = ic.recipe(e.name)
+    folder = _dest(r.dit_repo, dest.base_dir, dest.nest)
+    rungs = tuple(pick.Rung(
+        id=q, tier=q, quant="", size_label=pc.human_gb(n), state=pick.RESIDENT,
+        on_disk=os.path.isfile(os.path.join(folder, r.dit_name(q))),
+        default=q == e.default_quant) for q, n in e.quants)
+    return pick.Row(
+        id=e.name, title=e.title, params=e.size, tags=(), size_label=pc.human_gb(e.download),
+        blurb=e.blurb, speed=e.speed, note="", license=e.license,
+        dim_note=f"needs {pc.human_gb(e.download)} free" if e.download > free else "",
+        rungs=rungs, default_rung=e.default_quant, toggles=(), use=e.use, explain="")
+
+
+def _pick_groups(groups: tuple, box, dest: Destination, free: int, images=()) -> list:
     """The picker's groups: the first three catalog groups, rows built from
-    each entry's default plan."""
+    each entry's default plan, then the image models that run here."""
     from gmlx.load import catalog as pc
     from gmlx.tui import pick
 
@@ -1853,6 +1893,9 @@ def _pick_groups(groups: tuple, box, dest: Destination, free: int) -> list:
                 rows.append(_pick_row(m, dp, box, dest, free))
         if rows:
             out.append(pick.Group(title, tuple(rows)))
+    if images:
+        out.append(pick.Group(pc.IMAGE_GROUP_TITLE,
+                              tuple(_image_pick_row(e, dest, free) for e in images)))
     return out
 
 
@@ -1884,11 +1927,13 @@ def _pull_recommended(a) -> int:
     if box is None:
         return 2
     groups = pc.groups_for(box)
+    images = pc.image_entries(box)
     if a.list or a.json or not _want_interactive():
         if a.json:
-            print(json.dumps(_groups_json(groups, box), indent=2))
+            print(json.dumps(_groups_json(groups, box, images), indent=2))
         else:
-            print(pc.recommendation_text(groups, box, verbose=a.verbose), end="")
+            print(pc.recommendation_text(groups, box, images=images, verbose=a.verbose),
+                  end="")
         return 0
     dest = _destination(a)
     if dest is None:
@@ -1897,6 +1942,8 @@ def _pull_recommended(a) -> int:
 
     def rung_label(row, rung, on_ids):
         m = pc.model(row.id)
+        if m is None:                      # an image model: the pull checks the fit
+            return "", ""
         r = pc.find_rung(m, rung.id)
         streaming = pc.rung_state(m, r, box) != pc.RESIDENT
         mm, dr = "vision" in on_ids, "drafter" in on_ids and not streaming
@@ -1904,6 +1951,13 @@ def _pull_recommended(a) -> int:
                              pc.speculates(m, r, dr, streaming))
 
     def footer(row, rung, on_ids):
+        if pc.model(row.id) is None:
+            from gmlx.image import catalog as ic
+            e = next(x for x in images[0] if x.name == row.id)
+            total = dict(e.quants)[rung.id]
+            have = ic.dit_bytes(ic.recipe(row.id), rung.id) if rung.on_disk else 0
+            return [_download_line(total - have, have, free, dest.base_dir),
+                    pc.image_command(e, rung.id)]
         plan = _plan_from_pick(row, rung, on_ids, box)
         on_disk, remaining, _per = pc.local_state(plan, dest.base_dir, dest.nest)
         return [_download_line(remaining, on_disk, free, dest.base_dir),
@@ -1911,7 +1965,7 @@ def _pull_recommended(a) -> int:
 
     from gmlx.tui.pick import PickerUnavailable
     try:
-        chosen = _pick(_pick_groups(groups, box, dest, free),
+        chosen = _pick(_pick_groups(groups, box, dest, free, images[0]),
                        ram_label=f"This Mac has {box.ram // (1 << 30)} GB of memory.",
                        footer=footer, rung_label=rung_label, explain_line=CONTEXT_LINE,
                        empty_line=_EMPTY_LINE, no_match_line="No model matches '{filter}'",
@@ -1922,8 +1976,56 @@ def _pull_recommended(a) -> int:
     if chosen is None:
         print("nothing downloaded", file=sys.stderr)
         return 130
+    if pc.model(chosen.row.id) is None:
+        return _run_image_pick(chosen.row.id, chosen.rung.id, a, dest, box)
     plan = _plan_from_pick(chosen.row, chosen.rung, chosen.toggles, box)
     return _run_plan(plan, a, dest, box)
+
+
+def _pull_recipe(a, r) -> int:
+    """The image pull path; a seam for tests."""
+    from gmlx.commands.image_pull import pull_recipe
+
+    return pull_recipe(a, r)
+
+
+def _image_entry(name: str, box):
+    from gmlx.load import catalog as pc
+
+    runs, big = pc.image_entries(box)
+    return next(e for e in runs + big if e.name == name)
+
+
+def _image_list(a, r) -> int:
+    """``gmlx pull <image name> --list``: its DiT quants with their
+    downloads here, and nothing downloaded."""
+    from gmlx.load import catalog as pc
+
+    box = _this_box(pc)
+    if box is None:
+        return 2
+    e = _image_entry(r.name, box)
+    if a.json:
+        print(json.dumps(_image_json(e, "image" if e.needs_class is None else "too_big"),
+                         indent=2))
+    else:
+        print(pc.image_entry_text(e))
+    return 0
+
+
+def _run_image_pick(name: str, quant: str, a, dest: Destination, box) -> int:
+    """The image pull path for a picked image model. The destination is
+    committed first; ``--quant`` is passed only off this Mac's default,
+    so the pull plans, checks the fit and registers as a named image
+    pull does."""
+    from gmlx.image import catalog as ic
+
+    r = ic.recipe(name)
+    if not _commit_destination(dest):
+        return 1
+    a.refs = [name]
+    a.quant = None if quant == ic.default_quants(r, box.ram)[0] else quant
+    return _pull_recipe(a, r)
 
 
 def _pull_named(a, m) -> int:
@@ -1971,9 +2073,10 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                          "Additional bare filenames are fetched from the first "
                          "ref's repo. See the examples below.")
     ap.add_argument("--list", action="store_true",
-                    help="Print the recommended models for this Mac as a table and "
-                         "download nothing. With a model name, print its quality "
-                         "tiers.")
+                    help="Print the recommended models and the image models for "
+                         "this Mac as a table and download nothing. With a model "
+                         "name, print its quality tiers; with an image model name, "
+                         "its quants.")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="With --list, add each model's quality tiers, their sizes and "
                          "room for context, and its extras.")
@@ -2048,9 +2151,9 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
     if kind in ("picker", "listing"):
         return _pull_recommended(a)
     if kind == "image":
-        from gmlx.commands.image_pull import pull_recipe
         from gmlx.image import catalog as image_catalog
-        return pull_recipe(a, image_catalog.recipe(a.refs[0]))
+        r = image_catalog.recipe(a.refs[0])
+        return _image_list(a, r) if a.list else _pull_recipe(a, r)
     if kind in ("catalog", "catalog-list"):
         from gmlx.load import catalog
         return _pull_named(a, catalog.model(a.refs[0]))

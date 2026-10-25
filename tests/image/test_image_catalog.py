@@ -15,6 +15,34 @@ from gmlx.image import text_encoder as te
 from gmlx.load import discovery
 
 
+def test_every_recipe_has_its_words_and_dit_sizes():
+    from gmlx.image.catalog_facts import DIT_BYTES
+    from helpers import banned_words
+
+    assert set(DIT_BYTES) == set(catalog.RECIPES)
+    for r in catalog.RECIPES.values():
+        assert r.use and len(r.use) < 35, r.name
+        assert r.blurb.endswith('.') and r.speed.endswith('.'), r.name
+        assert len(f'  {r.blurb} Apache 2.0') <= 76 and len(f'  {r.speed}') <= 76, r.name
+        assert set(DIT_BYTES[r.name]) == set(r.dit_quants), r.name
+        assert all(DIT_BYTES[r.name].values()), r.name
+        assert banned_words('\n'.join([r.use, r.blurb, r.speed])) == [], r.name
+
+
+def test_download_bytes_sums_the_dit_the_encoder_and_the_vae():
+    r = catalog.recipe('z-image-turbo')
+    ram = 16 << 30
+    dq, _eq = catalog.default_quants(r, ram)
+    assert catalog.dit_bytes(r, dq) > 0 and catalog.dit_bytes(r, 'nope') == 0
+    assert catalog.download_bytes(r, ram) == catalog.dit_bytes(r, dq) + catalog.companion_bytes(r, ram)
+    assert catalog.download_bytes(r, ram, 'Q8_0') == (catalog.dit_bytes(r, 'Q8_0')
+                                                     + catalog.companion_bytes(r, ram))
+    krea = catalog.recipe('krea-2-turbo')
+    assert catalog.image_size(krea, ram) == '512x512'
+    assert catalog.image_size(krea, 24 << 30) == '1024x1024'
+    assert catalog.image_size(r, ram) == catalog.IMAGE_SIZE == '1024x1024'
+
+
 def test_a_recipe_resolves_by_name_or_alias():
     assert catalog.recipe("z-image-turbo").family == "z_image"
     assert catalog.recipe("Qwen-Image-2.1").name == "qwen-image"

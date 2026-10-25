@@ -16,7 +16,9 @@ license and the revision. It also verifies what registration would
 check (a supported arch, a head on a wired arch, a drafter that serves
 the base and declares it) and flags a vision tower or drafter the repo
 ships that the entry leaves out. Then it prints, per memory class, the
-default plan each RECOMMENDED name gets.
+default plan each RECOMMENDED name gets, and the image models' DiT sizes
+for gmlx/image/catalog_facts.py, with the encoder sizes the image catalog
+records checked against their listings.
 
 It prints; it never rewrites code. It runs at release prep, never in CI.
 """
@@ -522,6 +524,74 @@ def compare(name: str, recorded: dict | None, fresh: dict) -> list:
     return diffs
 
 
+def record_images() -> tuple:
+    """``(dit_bytes, problems)``: every image recipe's DiT file size per
+    quant from its repo listing at main, for ``gmlx/image/catalog_facts
+    .DIT_BYTES``, and the encoder sizes the image catalog records checked
+    against their listings."""
+    from gmlx.image import catalog as ic
+
+    out, problems, lists = {}, [], {}
+
+    def files(repo: str) -> dict:
+        if repo not in lists:
+            lists[repo] = listing(repo, "main")
+        return lists[repo]
+
+    for r in ic.RECIPES.values():
+        row = {}
+        for q in r.dit_quants:
+            name = r.dit_name(q)
+            if name in files(r.dit_repo):
+                row[q] = files(r.dit_repo)[name]
+            else:
+                problems.append(f"{r.name}: {name} is not in {r.dit_repo}")
+        out[r.name] = row
+        enc = files(r.encoder_repo)
+        tower = enc.get(r.mmproj_file, 0) if r.mmproj_file else 0
+        for q in r.encoder_quants:
+            name = r.encoder_name(q)
+            if name not in enc:
+                problems.append(f"{r.name}: {name} is not in {r.encoder_repo}")
+                continue
+            recorded = ic.ENCODER_BYTES.get(name, r.encoder_bytes if q == "Q8_0" else None)
+            if recorded is not None and recorded != enc[name] + tower:
+                problems.append(f"{r.name}: {name} with its tower is {enc[name] + tower} "
+                                f"bytes; the image catalog records {recorded}")
+    return out, problems
+
+
+def image_facts_text(dit: dict) -> str:
+    lines = ['"""The measured facts of the image catalog, printed whole by',
+             '``scripts/refresh_pull_catalog.py`` and pasted here. Edit nothing by',
+             'hand; ``catalog.RECIPES`` holds the words."""', "",
+             "# Each recipe's DiT file size per quant, from its repo listing at main.",
+             "DIT_BYTES: dict = {"]
+    for name, row in dit.items():
+        lines.append(f"    {name!r}: {{")
+        for q, n in row.items():
+            lines.append(f"        {q!r}: {n},")
+        lines.append("    },")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def compare_images(recorded: dict, fresh: dict) -> list:
+    """What differs between the recorded DiT sizes and the fresh ones."""
+    diffs = []
+    for name, row in fresh.items():
+        old = recorded.get(name)
+        if old is None:
+            diffs.append(f"{name}: no recorded DiT sizes")
+            continue
+        for q, n in row.items():
+            if old.get(q) != n:
+                diffs.append(f"{name}: {q} DiT {old.get(q)!r} -> {n!r}")
+        for q in set(old) - set(row):
+            diffs.append(f"{name}: {q} DiT gone")
+    return diffs
+
+
 def walk_text(models: dict) -> str:
     """Per memory class, the default plan of each RECOMMENDED name."""
     lines = ["Default plans per memory class (rung, add-ons, state, room with the "
@@ -582,6 +652,18 @@ def main(argv=None) -> int:
             failures.extend(compare(seed.name, FACTS.get(seed.name), facts))
             if not _url_ok(facts["license_url"]):
                 failures.append(f"{seed.name}: license page {facts['license_url']} does not answer")
+    image_dit = None
+    if not a.only:
+        from gmlx.image.catalog_facts import DIT_BYTES
+
+        print("== image models", file=sys.stderr)
+        try:
+            image_dit, problems = record_images()
+            failures.extend(problems)
+            if a.check:
+                failures.extend(compare_images(DIT_BYTES, image_dit))
+        except remote.RemoteError as e:
+            failures.append(f"image models: {e}")
     for line in notes:
         print("note: " + line, file=sys.stderr)
     for line in failures:
@@ -590,6 +672,9 @@ def main(argv=None) -> int:
         merged = dict(FACTS)
         merged.update(fresh)
         print(facts_text({s.name: merged[s.name] for s in catalog._SEED if s.name in merged}))
+        if image_dit is not None:
+            print("# ---- gmlx/image/catalog_facts.py ----")
+            print(image_facts_text(image_dit))
     models = {name: catalog._build(catalog.SEEDS[name], f)
               for name, f in {**FACTS, **fresh}.items() if name in catalog.SEEDS}
     print(walk_text(models))

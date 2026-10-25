@@ -122,6 +122,28 @@ class PullPlan:
     streaming: bool
 
 
+@dataclass(frozen=True)
+class ImageEntry:
+    """One image model as the list and the picker show it: its download per
+    DiT quant on this Mac, the class default, and the Mac it needs when
+    this one makes no image with it."""
+    name: str
+    title: str
+    use: str
+    blurb: str
+    speed: str
+    license: str                     # as the user reads it
+    license_detail: str              # what the license limits, or ""
+    size: str                        # the image size a default pull makes here
+    default_quant: str
+    quants: tuple                    # (DiT quant, download bytes), ascending
+    needs_class: int | None = None   # None when this Mac makes an image
+
+    @property
+    def download(self) -> int:
+        return dict(self.quants)[self.default_quant]
+
+
 class NoResidentRung(Exception):
     """The entry has no quant that runs on this Mac."""
 
@@ -789,6 +811,67 @@ def groups_for(box: Box) -> tuple:
 
 # -- plans -----------------------------------------------------------------
 
+IMAGE_GROUP_TITLE = "Image models"
+_IMAGE_LICENSES = {"apache-2.0": "Apache 2.0", "qwen-research": "Qwen Research License",
+                   "krea-2-community": "Krea 2 Community License",
+                   "flux-non-commercial-license": "FLUX Non-Commercial License",
+                   "flux-kommunity": "FLUX Kommunity License"}
+
+
+def image_entries(box: Box) -> tuple:
+    """``(runs, too_big)``: the image models that make an image on this
+    Mac, in catalog order, and those that need a larger one. A Mac under
+    the smallest image memory class runs none."""
+    from gmlx.image import catalog as ic
+
+    ram = box.ram
+    cls = ic.memory_class(ram)
+    small = ram / GiB + 0.5 < ic.MEMORY_CLASSES[0]
+    runs, too_big = [], []
+    for r in ic.RECIPES.values():
+        ok = not small and ic.makes_image(r, cls)
+        quants = tuple(sorted(((q, ic.download_bytes(r, ram, q)) for q in r.dit_quants),
+                              key=lambda qb: qb[1]))
+        entry = ImageEntry(
+            name=r.name, title=r.title, use=r.use, blurb=r.blurb, speed=r.speed,
+            license=_IMAGE_LICENSES.get(r.license, r.license), license_detail=r.license_note,
+            size=ic.image_size(r, ram), default_quant=ic.default_quants(r, ram)[0],
+            quants=quants,
+            needs_class=None if ok else (ic.MEMORY_CLASSES[0] if small else ic.least_class(r)))
+        (runs if ok else too_big).append(entry)
+    return runs, too_big
+
+
+def image_command(e: ImageEntry, quant: str | None = None) -> str:
+    """``gmlx pull <name>``, with ``--quant`` off the default."""
+    cmd = f"gmlx pull {e.name}"
+    if quant and quant != e.default_quant:
+        cmd += f" --quant {quant}"
+    return cmd
+
+
+def image_rows(e: ImageEntry) -> list:
+    """One line per DiT quant: the quant, its download here and the default mark."""
+    return [(f"{q:<9} {'':<16} {human_gb(n):>9}  "
+             + ("  default" if q == e.default_quant else "")).rstrip()
+            for q, n in e.quants]
+
+
+def image_entry_text(e: ImageEntry) -> str:
+    """One image model for ``gmlx pull <name> --list``: its DiT quants with
+    their downloads here, and the command."""
+    lines = [f"{e.title}  {e.size}  {e.license}".rstrip(), e.blurb, e.speed]
+    if e.license_detail:
+        detail = e.license_detail[0].upper() + e.license_detail[1:]
+        lines.append(detail if detail.endswith(".") else detail + ".")
+    lines += ["", "Quality"] + [f"  {row}" for row in image_rows(e)]
+    if e.needs_class is None:
+        lines.append(image_command(e))
+    else:
+        lines.append(f"Needs a {e.needs_class} GB Mac.")
+    return "\n".join(lines)
+
+
 def _norm_quant(q: str) -> str:
     q = (q or "").strip().upper()
     return q[3:] if q.startswith("UD-") else q
@@ -1034,38 +1117,56 @@ def images_cell(m: Model) -> str:
     return "yes" if m.mmproj else ""
 
 
-def recommendation_text(groups: tuple, box: Box, *, verbose: bool = False) -> str:
+def _chat_row(m: Model, box: Box, verbose: bool) -> tuple:
+    """(name, size cell, images cell, use, detail lines, is a download)."""
+    dp = default_plan(m, box)
+    if dp is None:
+        cls = needs_class_model(m)
+        size = f"{cls} GB Mac" if cls else "too big"
+    else:
+        size = human_gb(plan_bytes(dp))
+    detail = []
+    if verbose:
+        addon = addon_bytes(m, dp.mmproj if dp else False, dp.drafter if dp else False)
+        detail = [f"      {row}" for row in rung_rows(m, box, dp, addon)]
+        if extras_text(m):
+            detail.append(f"      extras: {extras_text(m)}")
+    return (m.name, size, images_cell(m), m.use, detail, dp is not None)
+
+
+def _image_row(e: ImageEntry, verbose: bool) -> tuple:
+    """An image model's row: its download here, or the Mac it needs; the
+    IMAGES cell stays blank, since every image model edits from a picture."""
+    size = human_gb(e.download) if e.needs_class is None else f"{e.needs_class} GB Mac"
+    detail = [f"      {row}" for row in image_rows(e)] if verbose else []
+    return (e.name, size, "", e.use, detail, e.needs_class is None)
+
+
+def recommendation_text(groups: tuple, box: Box, *, images=None, verbose: bool = False) -> str:
     """The recommendations as text: one table per group with a header row,
     one line per model: name, download at its default plan, whether it
-    reads images, and what it is good for. ``verbose`` adds each model's
-    quality rungs and extras under its row, as ``entry_text`` lists them."""
+    reads images, and what it is good for. ``images`` is
+    ``image_entries(box)``: the models that make an image here print as an
+    "Image models" table after the chat models that run, and the others
+    join the too-big table. ``verbose`` adds each model's quality rungs
+    and extras under its row, as ``entry_text`` lists them."""
     lines = [f"This Mac has {box.ram // GiB} GB of memory.", ""]
-    listed = [m for group in groups for m in group]
-    name_w = max([4, *(len(m.name) for m in listed)])
-    for title, models in zip(group_titles(groups), groups):
-        if not models:
+    runs, big = images if images is not None else ((), ())
+    titles = group_titles(groups)
+    tables = [(titles[i], [_chat_row(m, box, verbose) for m in groups[i]]) for i in range(3)]
+    tables.append((IMAGE_GROUP_TITLE, [_image_row(e, verbose) for e in runs]))
+    tables.append((titles[3], [_chat_row(m, box, verbose) for m in groups[3]]
+                   + [_image_row(e, verbose) for e in big]))
+    name_w = max([4, *(len(row[0]) for _t, rows in tables for row in rows)])
+    for title, rows in tables:
+        if not rows:
             continue
-        rows = []
-        for m in models:
-            dp = default_plan(m, box)
-            if dp is None:
-                cls = needs_class_model(m)
-                size = f"{cls} GB Mac" if cls else "too big"
-            else:
-                size = human_gb(plan_bytes(dp))
-            detail = []
-            if verbose:
-                addon = addon_bytes(m, dp.mmproj if dp else False, dp.drafter if dp else False)
-                detail = [f"      {row}" for row in rung_rows(m, box, dp, addon)]
-                if extras_text(m):
-                    detail.append(f"      extras: {extras_text(m)}")
-            rows.append((m.name, size, images_cell(m), m.use, detail))
-        size_head = "DOWNLOAD" if any(default_plan(m, box) for m in models) else "NEEDS"
-        size_w = max([len(size_head), *(len(r[1]) for r in rows)])
+        size_head = "DOWNLOAD" if any(row[5] for row in rows) else "NEEDS"
+        size_w = max([len(size_head), *(len(row[1]) for row in rows)])
         lines.append(title)
         lines.append(f"  {'NAME':<{name_w}}  {size_head:<{size_w}}  IMAGES  GOOD FOR")
-        for name, size, images, use, detail in rows:
-            lines.append(f"  {name:<{name_w}}  {size:>{size_w}}  {images:<6}  {use}".rstrip())
+        for name, size, imgs, use, detail, _download in rows:
+            lines.append(f"  {name:<{name_w}}  {size:>{size_w}}  {imgs:<6}  {use}".rstrip())
             lines += detail
         lines.append("")
     lines.append(LIST_FOOTER)

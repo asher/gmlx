@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # The memory classes a default quant is chosen for, in GB of RAM. A Mac
 # takes the largest class at or under its RAM, and the smallest below it.
@@ -50,6 +50,9 @@ class Recipe:
     vae_bytes: int = 0                # the packed VAE's size, for a fit
     aliases: tuple = ()
     license_note: str = ""            # what the license allows, if limited
+    use: str = ""                     # gmlx pull's GOOD FOR cell, under 35 characters
+    blurb: str = ""                   # one sentence: what it makes
+    speed: str = ""                   # one sentence: how quick it is, by its steps
     vae_license: str = ""             # the VAE's license, when it has its
                                       # own
     # The upsampler's system prompt of a family that ships none, which the
@@ -168,7 +171,57 @@ _MOSS = dict(
     license="apache-2.0", encoder_license="apache-2.0",
     encoder_bytes=9_527_502_048, vae_bytes=249_514_688)
 
-RECIPES = {r.name: r for r in (
+# What gmlx pull says about each recipe: the GOOD FOR cell, one sentence
+# on what it makes and one on how quick it is.
+_WORDS = {
+    "z-image-turbo": ("fast images, edits one picture",
+                      "Makes an image from text, or edits one picture.",
+                      "Fast: 8 steps per image."),
+    "qwen-image": ("images and edits from pictures",
+                   "Makes an image from text, or edits up to 10 pictures.",
+                   "Slow: 40 steps per image."),
+    "qwen-image-turbo": ("fast images, edits from pictures",
+                         "Makes an image from text, or edits up to 10 pictures.",
+                         "Fast: 8 steps per image."),
+    "krea-2-turbo": ("fast images, edits one picture",
+                     "Makes an image from text, or edits one picture.",
+                     "Fast: 8 steps per image."),
+    "moss-image": ("images, edits one picture",
+                   "Makes an image from text, or edits one picture.",
+                   "Slow: 50 steps per image."),
+    "moss-image-base": ("images with guidance, edits",
+                        "MOSS-Image before distillation, with a guidance setting.",
+                        "Slow: 50 steps per image."),
+    "flux-2-klein": ("fast images, edits from pictures",
+                     "Makes an image from text, or edits up to 10 pictures.",
+                     "Fastest: 4 steps per image."),
+    "flux-2-klein-base": ("images with guidance, edits",
+                          "FLUX.2 klein before distillation, with a guidance setting.",
+                          "Slow: 50 steps per image."),
+    "flux-2-klein-9b": ("fast images and edits, more detail",
+                        "The 9B FLUX.2 klein: more detail than the 4B.",
+                        "Fastest: 4 steps per image."),
+    "flux-2-klein-base-9b": ("images with guidance, more detail",
+                             "The 9B FLUX.2 klein before distillation, with guidance.",
+                             "Slow: 50 steps per image."),
+    "flux-2-klein-9b-kv": ("fast edits faithful to the picture",
+                           "A 9B FLUX.2 klein whose edits keep more of each picture.",
+                           "Fastest: 4 steps per image."),
+    "flux-3-klein": ("fast images, edits from pictures",
+                     "Makes an image from text, or edits up to 10 pictures.",
+                     "Fast: 16 steps per image."),
+    "flux-3-klein-base": ("images with guidance, edits",
+                          "FLUX.3 klein before distillation, with a guidance setting.",
+                          "Slow: 50 steps per image."),
+}
+
+
+def _worded(r: Recipe) -> Recipe:
+    use, blurb, speed = _WORDS[r.name]
+    return replace(r, use=use, blurb=blurb, speed=speed)
+
+
+RECIPES = {r.name: _worded(r) for r in (
     Recipe(
         name="z-image-turbo", title="Z-Image-Turbo", family="z_image",
         variant="turbo",
@@ -397,6 +450,29 @@ def companion_bytes(r: Recipe, ram_bytes: int | None) -> int:
 # The image size an entry pulled with the class default DiT gets in its
 # defaults, where that DiT makes images smaller than the family's size.
 DEFAULT_SIZES = {"krea-2-turbo": {16: "512x512"}}
+# Every family's image size when a request names none.
+IMAGE_SIZE = "1024x1024"
+
+
+def image_size(r: Recipe, ram_bytes: int | None) -> str:
+    """The image size a pull of ``r`` at its class default makes here."""
+    return DEFAULT_SIZES.get(r.name, {}).get(memory_class(ram_bytes), IMAGE_SIZE)
+
+
+def dit_bytes(r: Recipe, quant: str) -> int:
+    """The recorded size of the DiT file of ``r`` at ``quant``
+    (``catalog_facts.DIT_BYTES``); 0 when none is recorded."""
+    from gmlx.image.catalog_facts import DIT_BYTES
+
+    return DIT_BYTES.get(r.name, {}).get(quant, 0)
+
+
+def download_bytes(r: Recipe, ram_bytes: int | None, dit_quant: str | None = None) -> int:
+    """Bytes a pull of ``r`` downloads on this Mac with nothing on disk:
+    the DiT at ``dit_quant`` (the class default when None), the encoder
+    at the class's quant with its tower, and the VAE."""
+    quant = dit_quant or default_quants(r, ram_bytes)[0]
+    return dit_bytes(r, quant) + companion_bytes(r, ram_bytes)
 
 
 def recipe(name: str) -> Recipe | None:

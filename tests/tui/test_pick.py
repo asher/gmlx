@@ -40,6 +40,12 @@ MOE = Row("flashy", "Qwen3.8-Flash-Next", "Flash-Next", ("images", "faster repli
            _rung("f", "fastest", "UD-IQ4_XS", "87.2 GB", default=True)),
           "f", (VISION, DRAFTER), use="documents, code and tool calls")
 
+IMAGE = Row("z-image-turbo", "Z-Image-Turbo", "1024x1024", (), "8.8 GB",
+            "Makes an image from text, or edits one picture.", "Fast: 8 steps per image.", "",
+            "Apache 2.0", "",
+            (_rung("q4", "Q4_K_M", "", "8.8 GB", default=True), _rung("q8", "Q8_0", "", "10.9 GB")),
+            "q4", (), use="fast images, edits one picture", explain="")
+
 GROUPS = (Group("Recommended for this Mac", (DENSE, GEMMA)),
           Group("Runs in memory", (PLAIN,)),
           Group("Larger than memory: runs from the SSD, much slower", (MOE,)))
@@ -47,6 +53,8 @@ GROUPS = (Group("Recommended for this Mac", (DENSE, GEMMA)),
 
 def _label(row, rung, on_ids):
     room = 100 - 10 * len(on_ids)
+    if not rung.quant:              # an image quant: the pull checks the fit, no label
+        return "", ""
     if rung.state == "streams":
         return "from SSD, slow", ""
     if rung.tier == "compact":
@@ -310,6 +318,30 @@ def test_configure_clips_with_markers_and_back_keeps_state():
     assert p.ccursor == 0
     p.toggle()                       # nothing to toggle
     assert p.plan().toggles == ()
+
+
+def test_an_image_row_has_quants_and_no_extras_or_explain_line():
+    # explain="" shows no line under Quality; explain=None keeps the picker's.
+    p = _picker((Group("Image models", (IMAGE,)),))
+    row = [ln for ln in _lines(p) if "z-image-turbo" in ln][0]
+    assert row.startswith(">  1 z-image-turbo") and "8.8 GB" in row and row.endswith("fast images, edits one picture")
+    assert "IMAGES" in _lines(p)[1]
+    p.select()
+    lines = _lines(p)
+    assert lines[0] == "Z-Image-Turbo   1024x1024   Apache 2.0"
+    assert "Quality" in lines and "Extras" not in lines
+    assert not any("Context is how much" in ln for ln in lines)
+    q4 = [ln for ln in lines if "Q4_K_M" in ln][0]
+    assert q4.startswith("> (*) Q4_K_M") and "8.8 GB" in q4 and q4.rstrip().endswith("default")
+    assert "room for" not in "\n".join(lines)
+    assert "gmlx pull z-image-turbo" in lines
+    p.cmove(1)
+    p.toggle()
+    assert p.rung().id == "q8" and p.plan() == pick.Plan(IMAGE, IMAGE.rungs[1], ())
+    assert "gmlx pull z-image-turbo --quant Q8_0" in _lines(p)
+    plain = _picker((Group("Runs in memory", (PLAIN,)),))
+    plain.select()
+    assert "  Context is how much text the model keeps in view." in _lines(plain)
 
 
 # -- through the terminal ---------------------------------------------------------------

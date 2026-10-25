@@ -68,6 +68,7 @@ class Row:
     default_rung: str         # the Rung id the default mark sits on
     toggles: tuple
     use: str = ""             # a few words: what the model is good for
+    explain: str | None = None   # replaces the picker's explain line under Quality; "" shows none
 
 
 @dataclass(frozen=True)
@@ -359,7 +360,9 @@ class Picker:
                     text += f"  ({note})"
                 lines.append((style, _clip(text, width), True))
                 if i == len(row.rungs) - 1:
-                    lines.append(("class:pick.dim", _clip("  " + self.explain_line, width), False))
+                    explain = row.explain if row.explain is not None else self.explain_line
+                    if explain:
+                        lines.append(("class:pick.dim", _clip("  " + explain, width), False))
                     lines.append(("class:pick.group", "Extras", False))
             else:
                 on = item.id in on_ids

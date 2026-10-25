@@ -708,6 +708,80 @@ def test_seed_names_recommended_and_image_recipes():
     assert len(catalog.MODELS) == len(catalog._SEED)
 
 
+def test_image_entries_follow_the_image_catalog():
+    from gmlx.image import catalog as ic
+
+    for cls in (8, 16, 24, 32, 64, 128):
+        b = box(cls)
+        runs, big = catalog.image_entries(b)
+        assert sorted(e.name for e in runs + big) == sorted(ic.RECIPES)
+        kept = {e.name for e in runs}
+        assert [e.name for e in runs] == [n for n in ic.RECIPES if n in kept]
+        for e in runs + big:
+            r = ic.recipe(e.name)
+            assert e.default_quant == ic.default_quants(r, b.ram)[0]
+            assert dict(e.quants) == {q: ic.download_bytes(r, b.ram, q) for q in r.dit_quants}
+            assert [n for _q, n in e.quants] == sorted(n for _q, n in e.quants)
+            assert e.download == ic.download_bytes(r, b.ram) and e.size == ic.image_size(r, b.ram)
+            assert e.license and e.use == r.use and e.license_detail == r.license_note
+            if cls < 16:
+                assert e.needs_class == 16 and e in big
+            elif ic.makes_image(r, ic.memory_class(b.ram)):
+                assert e.needs_class is None and e in runs
+            else:
+                assert e.needs_class == ic.least_class(r) and e in big
+    _runs, big16 = catalog.image_entries(box(16))
+    assert {e.name for e in big16} == {'flux-2-klein-9b', 'flux-2-klein-base-9b', 'flux-2-klein-9b-kv'}
+    assert all(e.needs_class == 24 for e in big16)
+    assert catalog.image_entries(box(24))[1] == []
+    assert catalog.image_entries(box(8))[0] == []
+
+
+def test_image_entry_text_and_commands():
+    runs, big = catalog.image_entries(box(16))
+    z = next(e for e in runs if e.name == 'z-image-turbo')
+    assert catalog.image_command(z) == 'gmlx pull z-image-turbo'
+    assert catalog.image_command(z, z.default_quant) == 'gmlx pull z-image-turbo'
+    assert catalog.image_command(z, 'Q8_0') == 'gmlx pull z-image-turbo --quant Q8_0'
+    text = catalog.image_entry_text(z)
+    assert text.startswith('Z-Image-Turbo  1024x1024  Apache 2.0\n')
+    assert '\nQuality\n' in text and text.endswith('gmlx pull z-image-turbo')
+    rows = catalog.image_rows(z)
+    quants = [q for q, _n in z.quants]
+    assert len(rows) == len(quants) and sum(r.endswith('default') for r in rows) == 1
+    assert rows[quants.index(z.default_quant)].endswith('default')
+    assert all(catalog.human_gb(n) in row for row, (_q, n) in zip(rows, z.quants))
+    nine = next(e for e in big if e.name == 'flux-2-klein-9b')
+    ntext = catalog.image_entry_text(nine)
+    assert ntext.endswith('Needs a 24 GB Mac.') and 'gmlx pull' not in ntext
+    assert '\nNon-commercial use only' in ntext
+    assert _banned(text) == [] and _banned(ntext) == []
+
+
+def test_recommendation_text_lists_the_image_models_after_the_chat_models():
+    b = box(16)
+    groups = catalog.groups_for(b)
+    images = catalog.image_entries(b)
+    assert 'Image models' not in catalog.recommendation_text(groups, b)
+    text = catalog.recommendation_text(groups, b, images=images)
+    assert _banned(text) == []
+    assert text.index('Image models\n  NAME') < text.index('Too big for this Mac\n')
+    assert text.index('Image models\n') > text.index('Recommended for this Mac\n')
+    for e in images[0]:
+        pat = rf'^  {re.escape(e.name)} +{re.escape(catalog.human_gb(e.download))} +{re.escape(e.use)}$'
+        assert re.search(pat, text, re.M), e.name
+    for e in images[1]:
+        assert re.search(rf'^  {re.escape(e.name)} +24 GB Mac +{re.escape(e.use)}$', text, re.M), e.name
+    vtext = catalog.recommendation_text(groups, b, images=images, verbose=True)
+    for e in images[0]:
+        for row in catalog.image_rows(e):
+            assert f'      {row}\n' in vtext
+    eight = catalog.recommendation_text(catalog.groups_for(box(8)), box(8),
+                                        images=catalog.image_entries(box(8)))
+    assert 'Image models' not in eight
+    assert len(re.findall(r'^  \S+ +16 GB Mac +', eight, re.M)) >= len(images[0]) + len(images[1])
+
+
 def test_seed_figures_on_real_boxes():
     # The smallest Mac has a recommended entry in memory with a context figure.
     b8 = box(8)

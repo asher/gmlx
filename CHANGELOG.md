@@ -13,7 +13,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   registers the name so `gmlx chat <name>` runs it. `gmlx pull` alone picks
   one interactively, and `gmlx pull --list` prints the recommendations, with
   `-v` for each model's quality tiers and how much context each leaves room
-  for.
+  for. The image models are listed and picked beside them, with their
+  download for this Mac, and `gmlx pull <image model> --list` prints their
+  quants.
 - `gmlx init` offers to pull a recommended model when it finds none.
 - `GMLX_PULL_RAM_GB=N` makes `gmlx pull` recommend for a Mac with N GB of
   memory.

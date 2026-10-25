@@ -447,7 +447,7 @@ def test_list_prints_the_tiers_and_downloads_nothing(cat, capsys):
     (["dense", "--list", "--to", "/tmp"], "--to does not go with it"),
     (["dense", "--only", "dit"], "--only goes with an image model name"),
     (["z-image-turbo", "--vision"], "--vision goes with a model name, not an image model name"),
-    (["z-image-turbo", "--list"], "--list goes alone or with a model name"),
+    (["z-image-turbo", "--list", "--quant", "Q8_0"], "--list prints the quants and downloads nothing, so --quant does not go with it"),
     (["hf:org/repo/x.gguf", "--list"], "--list goes alone or with a model name, not an hf: ref"),
     (["hf:org/repo/x.gguf", "--quant", "Q4_0"], "--quant goes with a model name or an image"),
     (["hf:org/repo/x.gguf", "--drafter"], "--drafter goes with a model name, not an hf: ref"),
@@ -510,6 +510,35 @@ def test_a_bare_pull_with_json_lists_every_entry_with_its_group(cat, capsys):
     assert by["flashy"]["group"] == "streams" and by["huge"]["group"] == "too_big"
     assert by["huge"]["default"] is None and by["huge"]["needs_gb"]
     assert by["dense"]["default"]["context_tokens"] > 0
+    from gmlx.image import catalog as ic
+    im = {e["name"]: e for e in d["image_models"]}
+    assert set(im) == set(ic.RECIPES)
+    z = im["z-image-turbo"]
+    assert z["group"] == "image" and z["needs_gb"] is None and z["image_size"] == "1024x1024"
+    assert z["default"]["command"] == "gmlx pull z-image-turbo"
+    assert z["default"]["quant"] == ic.default_quants(ic.recipe("z-image-turbo"), 32 * GiB)[0]
+    assert {q["quant"] for q in z["quants"]} == set(ic.recipe("z-image-turbo").dit_quants)
+    assert all(q["bytes"] > 0 for q in z["quants"])
+
+
+def test_an_image_name_with_list_prints_its_quants_and_downloads_nothing(cat, capsys):
+    _cfg, _lib, downloads = cat
+    assert manage.cmd_pull(["z-image-turbo", "--list"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("Z-Image-Turbo  1024x1024  Apache 2.0\n")
+    assert "\nQuality\n" in out and out.rstrip().endswith("gmlx pull z-image-turbo")
+    assert "default" in out and downloads == []
+    assert manage.cmd_pull(["z-image-turbo", "--list", "--json"]) == 0
+    d = json.loads(capsys.readouterr().out)
+    assert d["name"] == "z-image-turbo" and d["group"] == "image"
+    assert d["default"]["command"] == "gmlx pull z-image-turbo" and downloads == []
+
+
+def test_the_list_shows_the_image_models_after_the_chat_models(cat, capsys):
+    assert manage.cmd_pull(["--list"]) == 0
+    out = capsys.readouterr().out
+    assert out.index("Image models\n") > out.index("Recommended for this Mac\n")
+    assert "\n  z-image-turbo " in out and banned_words(out) == []
 
 
 def _fake_pick(monkeypatch, choose):
@@ -531,7 +560,7 @@ def _default_plan_of(row):
     return Plan(row, rung, tuple(t.id for t in row.toggles if t.on))
 
 
-def test_the_picker_gets_three_groups_and_its_choice_runs_the_named_path(
+def test_the_picker_gets_the_chat_groups_then_the_image_group_and_its_choice_runs_the_named_path(
         cat, monkeypatch, capsys):
     cfg, lib, downloads = cat
     _tty(monkeypatch)
@@ -539,7 +568,7 @@ def test_the_picker_gets_three_groups_and_its_choice_runs_the_named_path(
     assert manage.cmd_pull(["--config", str(cfg)]) == 0
     groups = seen["groups"]
     assert [g.title for g in groups] == ["Recommended for this Mac", "Also runs in memory",
-                                         "Runs from the SSD, much slower"]
+                                         "Runs from the SSD, much slower", "Image models"]
     assert [r.id for r in groups[0].rows] == ["dense", "plain"]
     assert [r.id for r in groups[1].rows] == ["tight"]
     assert [r.id for r in groups[2].rows] == ["flashy"]
@@ -560,6 +589,47 @@ def test_the_picker_gets_three_groups_and_its_choice_runs_the_named_path(
     assert footer[0].startswith("Download 16.2 GB (8 B already on disk)   free disk")
     assert footer[1] == "gmlx pull dense --no-drafter"
     assert len(downloads) == 3 and "run it:  gmlx chat dense" in capsys.readouterr().out
+
+
+def _pick_image(groups, name, quant):
+    from gmlx.tui.pick import Plan
+    row = next(r for r in groups[-1].rows if r.id == name)
+    return Plan(row, next(r for r in row.rungs if r.id == quant), ())
+
+
+def test_the_picker_offers_the_image_models_and_runs_the_image_pull(cat, monkeypatch, capsys):
+    from gmlx.image import catalog as ic
+
+    cfg, lib, downloads = cat
+    _tty(monkeypatch)
+    calls = []
+    monkeypatch.setattr(manage, "_pull_recipe",
+                        lambda a, r: calls.append((r.name, list(a.refs), a.quant)) or 0)
+    seen = _fake_pick(monkeypatch, lambda groups: _pick_image(groups, "z-image-turbo", "Q8_0"))
+    assert manage.cmd_pull(["--config", str(cfg)]) == 0
+    imgs = seen["groups"][-1]
+    assert imgs.title == "Image models"
+    assert [r.id for r in imgs.rows] == list(ic.RECIPES)     # a 32 GiB Mac makes every image
+    z = imgs.rows[0]
+    entry = catalog.image_entries(catalog.box_for_class(32))[0][0]
+    assert z.params == "1024x1024" and z.toggles == () and z.explain == "" and z.tags == ()
+    assert z.use == entry.use and z.license == "Apache 2.0" and z.size_label == catalog.human_gb(entry.download)
+    assert [r.tier for r in z.rungs] == [q for q, _n in entry.quants]
+    assert all(r.quant == "" and r.state == "resident" and not r.on_disk for r in z.rungs)
+    assert z.default_rung == ic.default_quants(ic.recipe("z-image-turbo"), 32 * GiB)[0] == "BF16"
+    assert [r.id for r in z.rungs if r.default] == ["BF16"]
+    assert seen["kw"]["rung_label"](z, z.rungs[0], ()) == ("", "")
+    q8 = next(r for r in z.rungs if r.id == "Q8_0")
+    footer = seen["kw"]["footer"](z, q8, ())
+    assert footer[0].startswith(f"Download {q8.size_label}   free disk")
+    assert footer[1] == "gmlx pull z-image-turbo --quant Q8_0"
+    assert seen["kw"]["footer"](z, next(r for r in z.rungs if r.default), ())[1] == "gmlx pull z-image-turbo"
+    # The choice ran the image pull path with --quant, and nothing else downloaded.
+    assert calls == [("z-image-turbo", ["z-image-turbo"], "Q8_0")] and downloads == []
+    # The default quant passes no --quant, so the pull plans as a bare named pull does.
+    _fake_pick(monkeypatch, lambda groups: _pick_image(groups, "flux-3-klein", "Q8_0"))
+    assert manage.cmd_pull(["--config", str(cfg)]) == 0
+    assert calls[-1] == ("flux-3-klein", ["flux-3-klein"], None)
 
 
 def test_a_picker_cancel_downloads_nothing_and_writes_no_config(cat, monkeypatch, capsys):
@@ -749,7 +819,8 @@ def test_pull_ram_gb_reads_the_catalog_as_another_mac(cat, monkeypatch, capsys):
     assert out.startswith("This Mac has 16 GB of memory.")
     sixteen = catalog.box_for_class(16)
     assert catalog.box_for_this_mac() == sixteen
-    assert out.rstrip("\n") == catalog.recommendation_text(catalog.groups_for(sixteen), sixteen).rstrip("\n")
+    assert out.rstrip("\n") == catalog.recommendation_text(
+        catalog.groups_for(sixteen), sixteen, images=catalog.image_entries(sixteen)).rstrip("\n")
     assert "32 GB Mac" in out                  # not the fixture's 32 GB listing
     monkeypatch.setenv("GMLX_PULL_RAM_GB", "lots")
     assert manage.cmd_pull(["--list"]) == 2

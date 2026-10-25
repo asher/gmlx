@@ -152,6 +152,15 @@ def flash_next_under_its_table(monkeypatch, lib) -> int:
 PULL_BANNED_WORDS = ("kv", "drafter", "mtp", "moe", "experts", "mmproj")
 
 
+def _image_model_names() -> list:
+    """The image models' names and titles, longest first: tokens the user
+    types or the publisher chose (FLUX.2 klein 9B KV)."""
+    from gmlx.image.catalog import RECIPES
+
+    names = {r.name for r in RECIPES.values()} | {r.title.lower() for r in RECIPES.values()}
+    return sorted(names, key=len, reverse=True)
+
+
 def banned_words(text: str, *, skip_commands: bool = True) -> list:
     """The banned words in ``text``, outside the tokens the user types or
     finds in their own files: command lines (``gmlx ...``), ``.gguf`` file
@@ -167,5 +176,7 @@ def banned_words(text: str, *, skip_commands: bool = True) -> list:
         probe = re.sub(r"\b[A-Z0-9_-]*Q\d[A-Z0-9_-]*\b", "", probe)
         probe = re.sub(r"stream: experts|\bdraft_gguf\b|\bmmproj\b(?= key|:)", "", probe)
         probe = probe.lower()
+        for name in _image_model_names():
+            probe = probe.replace(name, "")
         hits += [w for w in PULL_BANNED_WORDS if w in probe]
     return hits
