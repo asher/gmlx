@@ -97,6 +97,7 @@ projector and architecture that it found. gmlx supports these families:
 | gemma-4 unified | `gemma4uv`, `gemma4ua` | gemma-4-12B | It reads images, and audio when the companion has an audio encoder. |
 | GLM-5.3-Flash | `glm5v` with `glm5-next` | GLM-5.3-Flash | The first uploads name both files `glm5next`, and those load too. |
 | Muse Glimmer | `muse-glimmer` | Muse-Glimmer-30B | |
+| MiniCPM-V 4.6 and 4.7 | `minicpmv4_6` or `minicpmv4_7` with `qwen35` or `qwen35moe` | MiniCPM-V-4.6, MiniCPM-V-4.7-35B-A3B, MiniCPM-V-4.7-1B | Video input is refused. |
 | Nemotron 3.5 Bolt and Super VL | `nemotron_omni` with `nemotron_h_moe` | NVIDIA-Nemotron-3.5-Bolt-74B-A9B, NVIDIA-Nemotron-3.5-Super-VL-120B-A12B | Each image becomes 256 to 3328 tokens. Video input is refused. |
 | Muse Spark | `muse-glimmer` and `muse-spark-audio` with `muse-spark` | Muse-Spark-Open-816B-A42B | It reads images and audio. It is larger than RAM on most Macs, so it needs `--stream-experts`. |
 | Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | It is larger than RAM on most Macs, so it needs `--stream-experts`. |
@@ -107,6 +108,21 @@ Qwen2-VL and Qwen2.5-VL companions, with the projector `qwen2vl_merger`,
 are not supported, and the load fails with a message that names the
 family. On LLaVA, the loader reports two unfilled `post_layernorm`
 parameters, which is expected, because LLaVA does not use them.
+
+MiniCPM-V repositories ship `mmproj-model-f16.gguf`, which pairs on its
+own. The 4.7 repositories also ship `mmproj-model-f16-4x.gguf`, which turns
+each image into four times as many tokens for finer detail. Pass it with
+`--mmproj` to use it. A 4.7 repository holds the model, the companion and a
+[DSpark drafter](speculative-decoding.md#dflash-drafters), and one pull
+fetches all three:
+
+```sh
+gmlx pull hf:openbmb/MiniCPM-V-4.7-35B-A3B-gguf \
+  MiniCPM-V-4_7-35B-A3B-Q4_K_M.gguf mmproj-model-f16.gguf \
+  dspark-MiniCPM-V-4_7-35B-A3B-F16.gguf
+```
+
+The 1B repository, `openbmb/MiniCPM-V-4.7-1B-gguf`, has the same three files.
 
 On DeepSeek-V4-Flash-Vision-Exp, image turns need a KV cache without
 quantization, so `--kv-bits` applies to text turns only, and the server

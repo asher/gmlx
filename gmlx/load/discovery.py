@@ -72,7 +72,7 @@ _QUANT_TRAILING = re.compile(
 # that's quant provenance, not part of the model name, and leaving it in splits
 # one model's quants across two id prefixes (`...instruct.i1-*` vs `...instruct-*`).
 _ID_MARKERS = ("mmproj", "assistant", "draft", "mtp", "dflash2", "dflash",
-               "gguf", "imatrix", "imat", "i1")
+               "dspark", "gguf", "imatrix", "imat", "i1")
 # A trailing parameter-count token (``-27B``, ``_30B-A3B``, `` 1.9B``): a
 # basename carrying one needs no ``general.size_label`` appended.
 _SIZE_TOKEN_RE = re.compile(r"(?i)[-_ ]\d+(\.\d+)?[bm](-a\d+(\.\d+)?[bm])?$")
@@ -117,6 +117,9 @@ class ClassifiedGguf:
     # is deliberately not one (it names the file, not the base model).
     # On an mmproj, the model it was converted from.
     declared: tuple = ()
+    # On a ``dflash`` drafter, the container its tensors name
+    # (arch_table.dflash_container), or None when unknown.
+    container: str | None = None
 
 
 # Classification
@@ -205,12 +208,15 @@ def embedding_kind(meta, basename: str, arch: str | None) -> str | None:
 
 
 def _classify_meta(
-    meta, *, basename: str, path: str, mtp_only: bool = False
+    meta, *, basename: str, path: str, mtp_only: bool = False,
+    container: str | None = None,
 ) -> ClassifiedGguf:
     """Classify from already-read metadata (a live ``GGUFReader`` or a plain dict).
     Split out so the verdict logic is exercised without a real GGUF on disk.
     ``mtp_only``: the caller probed the tensor table and found a NextN/MTP
-    sidecar (nextn blocks without a trunk) - classified as a drafter."""
+    sidecar (nextn blocks without a trunk) - classified as a drafter.
+    ``container``: the ``dflash`` container the caller read off the tensor
+    table."""
     arch = read_string(meta, "general.architecture")
     quant = quant_tag(basename)
     ap = os.path.abspath(path)
@@ -233,7 +239,8 @@ def _classify_meta(
         return ClassifiedGguf(ap, "drafter", arch, False, quant, False,
                               n_embd=_drafter_hidden_size(meta, arch),
                               drafter_kind=_drafter_kind(meta, arch),
-                              declared=_declared_base_ids(meta))
+                              declared=_declared_base_ids(meta),
+                              container=container)
     if read_string(meta, "general.type") == "vae" or arch == "autoencoder":
         return ClassifiedGguf(ap, "image-vae", arch, False, quant, False)
     emb = embedding_kind(meta, basename, arch)
@@ -283,6 +290,19 @@ def _probe_mtp_only(path: str, kv) -> bool:
             and not any(n.startswith("blk.0.") for n in names))
 
 
+def _probe_dflash_container(path: str, kv) -> str | None:
+    """The container of a ``dflash`` drafter, read off its tensor table.
+    Other files keep a header-only read."""
+    if read_string(kv, "general.architecture") != "dflash":
+        return None
+    from .headerscan import scan_gguf
+    try:
+        names = [t.name for t in scan_gguf(path, include_tensors=True).tensors]
+    except Exception:
+        return None
+    return _arch_table.dflash_container(names)
+
+
 def classify_gguf(path: str) -> ClassifiedGguf | None:
     """Read ``path``'s header and classify it. ``None`` if it can't be opened/read
     as a GGUF (skipped by the scanner). Cheap on multi-GB files - header only."""
@@ -293,7 +313,8 @@ def classify_gguf(path: str) -> ClassifiedGguf | None:
         print(f"[discover] skipping {path}: {e}", file=sys.stderr)
         return None
     c = _classify_meta(kv, basename=os.path.basename(path), path=path,
-                       mtp_only=_probe_mtp_only(path, kv))
+                       mtp_only=_probe_mtp_only(path, kv),
+                       container=_probe_dflash_container(path, kv))
     if c.kind == "model" and c.arch is None:
         # Some DiT GGUFs carry no arch; their tensors tell.
         from gmlx.image.preflight import classify as image_kind
@@ -1620,9 +1641,10 @@ def _configured_in_repo(root: str, configured) -> list:
 
 
 # A drafter repo named for its target's repo plus one of these markers
-# (NVIDIA's ``<repo>-LiLiCorr-GGUF`` beside ``<repo>-GGUF``) pairs with the
-# models of that repo wherever the scan found them.
-_SIBLING_DRAFTER_MARKERS = ("LiLiCorr",)
+# (NVIDIA's ``<repo>-LiLiCorr-GGUF`` beside ``<repo>-GGUF``, OpenBMB's
+# ``<repo>-DSpark-gguf``) pairs with the models of that repo wherever the
+# scan found them.
+_SIBLING_DRAFTER_MARKERS = ("LiLiCorr", "DSpark")
 _SIBLING_DRAFTER_MARKER_RE = re.compile(
     "-(?:" + "|".join(_SIBLING_DRAFTER_MARKERS) + ")(?=-gguf$|$)", re.IGNORECASE)
 
@@ -1660,9 +1682,9 @@ def _drafter_targets(dr: ClassifiedGguf, made, *, declared_only: bool = False,
 
     A candidate must have a wired MTP class, a resident placement (MTP needs a
     resident base), an arch that :data:`arch_table.MTP_DRAFTER_ARCHES` lists
-    for this drafter, and an equal hidden size where both files declare one.
-    The size is the only test that separates the two ``dflash`` drafters, the
-    DSpark sidecar and the Muse Glimmer one. A paired candidate is off the
+    for this drafter, a ``dflash`` container that serves its arch
+    (:func:`arch_table.container_serves`), and an equal hidden size where
+    both files declare one. A paired candidate is off the
     table unless a DFlash 2 drafter is replacing an incumbent of another kind
     (``drafter_kinds``: drafter path -> kind).
 
@@ -1683,6 +1705,7 @@ def _drafter_targets(dr: ClassifiedGguf, made, *, declared_only: bool = False,
              if _arch_table.mtp_wired(c.arch) and not mc.stream
              and _open(mc)
              and _arch_table.drafter_serves(dr.arch, c.arch) is not False
+             and _arch_table.container_serves(dr.container, c.arch)
              and not (dr.n_embd and c.n_embd and dr.n_embd != c.n_embd)]
     if not cands:
         return []

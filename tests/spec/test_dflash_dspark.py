@@ -160,6 +160,23 @@ def test_config_reads_the_dspark_keys_and_adds_the_anchor_row():
     assert (no_anchor.block_size, no_anchor.sample_from_anchor) == (4, False)
 
 
+@pytest.mark.parametrize("family", ["qwen3_5", "qwen3_5_text",
+                                    "qwen3_5_moe", "qwen3_5_moe_text"])
+def test_the_dspark_backbone_drives_dense_and_moe_qwen35(family):
+    # MiniCPM-V 4.7 35B-A3B ships its DSpark drafter for a qwen3_5_moe tower.
+    arrays, _ = _skeleton()
+    _dflash_config_from_meta("d.gguf", _meta(), _target_dict(model_type=family),
+                             "dflash_dspark", arrays=arrays)
+
+
+def test_the_dspark_backbone_refuses_another_family():
+    arrays, _ = _skeleton()
+    with pytest.raises(ValueError, match="not gemma4_text"):
+        _dflash_config_from_meta(
+            "d.gguf", _meta(), _target_dict(model_type="gemma4_text"),
+            "dflash_dspark", arrays=arrays)
+
+
 def test_config_takes_the_rank_from_the_table_and_checks_the_heads():
     arrays, _ = _skeleton(snr=True)
     arrays["markov_w1.weight"] = mx.zeros((VOCAB, RANK))

@@ -54,6 +54,7 @@ from gmlx.load.wire import (
     remap_mtp_arrays,
 )
 from gmlx.load.native_fp import _strip_weight
+import gmlx.load.arch_table as _arch_table
 from gmlx.load.populate import maybe_populate_for_load
 from gmlx.load.populate import wait_for as wait_for_populate
 from gmlx.load.preflight import preflight
@@ -1048,34 +1049,16 @@ def _dflash_rename(name: str, last_stage: int) -> str:
 
 
 def dflash_container(arrays: dict) -> str:
-    """Which drafter a llama.cpp ``dflash`` GGUF actually holds.
-
-    The arch tag is shared: llama.cpp packages the DeepSeek-V4 DSpark drafter,
-    the DSpark heads on a DFlash backbone (the Ternary Bonsai drafters), the
-    plain DFlash ones (Muse Glimmer, Gemma 4) and the DFlash 2 drafters under
-    ``dflash``, and
-    picks its graph on header keys. Tensor presence is the equivalent split
-    here - the DeepSeek DSpark carries MLA's ``attn_q_a`` or the
-    hyper-connection head, LiLiCorr its ``lilicorr.*`` lattice head, the
-    DFlash-backbone DSpark the markov head on plain ``attn_q`` layers,
-    DFlash 2 the candidate selector, plain DFlash ``attn_q`` with per-head
-    QK-norms and no hyper-connections.
-    """
-    if any(n.startswith("output_hc_") or ".attn_q_a" in n for n in arrays):
-        return "dspark"
-    if any(n.startswith("lilicorr.") for n in arrays):
-        return "lilicorr"
-    if any(n.startswith("markov_w1") for n in arrays):
-        return "dflash_dspark"
-    if any(n.startswith("selector_hidden") for n in arrays):
-        return "dflash2"
-    if any(".attn_q_norm" in n for n in arrays):
-        return "dflash"
-    raise RuntimeError(
-        "dflash GGUF matches no known drafter container (expected DSpark's "
-        "markov/confidence heads, DFlash 2's selector, or plain DFlash's "
-        "attn_q_norm)"
-    )
+    """Which drafter a llama.cpp ``dflash`` GGUF actually holds
+    (:func:`gmlx.load.arch_table.dflash_container`)."""
+    container = _arch_table.dflash_container(arrays)
+    if container is None:
+        raise RuntimeError(
+            "dflash GGUF matches no known drafter container (expected DSpark's "
+            "markov/confidence heads, DFlash 2's selector, or plain DFlash's "
+            "attn_q_norm)"
+        )
+    return container
 
 
 # The closed tensor set of a DFlash drafter, onto gmlx's DFlashDrafter tree.
@@ -1159,14 +1142,6 @@ _DFLASH_CONTAINER_MAPS = {
     "dflash2": ({**_DFLASH_BLK, **_DFLASH2_BLK}, {**_DFLASH_ROOT, **_DFLASH2_ROOT}),
     "dflash_dspark": (_DFLASH_BLK, {**_DFLASH_ROOT, **_DFLASH_DSPARK_ROOT}),
     "lilicorr": (_LILICORR_BLK, _LILICORR_ROOT),
-}
-# Which target families a container can drive. A load-time check; the
-# arch-tag filter (arch_table.drafter_serves) is discovery's pairing-time one.
-_DFLASH_CONTAINER_TARGETS = {
-    "dflash2": ("qwen3_5", "qwen3_5_text", "muse_glimmer"),
-    "dflash_dspark": ("qwen3_5", "qwen3_5_text"),
-    "dflash": ("muse_glimmer", "gemma4_text"),
-    "lilicorr": ("nemotron_h",),
 }
 
 
@@ -1260,7 +1235,7 @@ def _dflash_config_from_meta(
     from .dflash_drafter import DFlashConfig
 
     family = target_config_dict.get("model_type")
-    allowed = _DFLASH_CONTAINER_TARGETS[container]
+    allowed = _arch_table.DFLASH_CONTAINER_TARGETS[container]
     if family is not None and family not in allowed:
         raise ValueError(
             f"{draft_gguf_path}: the {container} drafter serves "

@@ -220,7 +220,7 @@ def test_no_row_for_vendored_and_unwired_model_types():
     # archs fail loud at the per-arch hook check downstream.
     for mt in ("muse_glimmer", "glm5_next", "qwen4_exp", "deepseek_v4_vl",
                "gemma4", "gemma4_unified", "pixtral", "llava",
-               "qwen3_omni_moe", "kimi_k25"):
+               "qwen3_omni_moe", "kimi_k25", "minicpmv4_6", "minicpmv4_7"):
         assert _vlm_spec_language_model(mt) is None, mt
 
 

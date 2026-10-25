@@ -386,3 +386,41 @@ def test_the_vlm_load_rebinds_before_its_last_materialize(
     _mint_tiny_pixtral(text, mmproj)
     vlm.load_vlm_model(text, mmproj)
     assert _rebinds_before_the_last_materialize(calls)
+
+
+def _mint_header_only_mmproj(path: str, **kv) -> None:
+    w = GGUFWriter(path, "clip")
+    w.add_string("general.type", "mmproj")
+    w.add_bool("clip.has_vision_encoder", True)
+    for key, value in kv.items():
+        if isinstance(value, str):
+            w.add_string(key, value)
+        else:
+            w.add_uint32(key, value)
+    w.add_tensor("v.post_ln.weight", np.zeros(4, dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+
+@pytest.mark.parametrize("kv,match", [
+    ({"clip.projector_type": "minicpmv4_7"}, "minicpmv4_7"),
+    ({"clip.projector_type": "pixtral",
+      "clip.vision.projection_dim": 5120}, "5120"),
+])
+def test_a_pair_that_cannot_work_is_refused_before_the_weights_load(
+        tmp_path, monkeypatch, kv, match):
+    """No mapping for the pair, or an mmproj of another width: both are
+    refused from the headers, before the text weights are read."""
+    import gmlx.load.vlm as vlm
+
+    def no_load(*a, **k):
+        raise AssertionError("weights loaded before the pair was checked")
+
+    monkeypatch.setattr(vlm, "load_gguf_wire_bytes", no_load)
+    text, mmproj = str(tmp_path / "t.gguf"), str(tmp_path / "mmproj.gguf")
+    _mint_tiny_llama(text)
+    _mint_header_only_mmproj(mmproj, **kv)
+    with pytest.raises(vlm.UnsupportedVLMError, match=match):
+        vlm.load_vlm_model(text, mmproj)

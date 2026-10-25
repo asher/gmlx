@@ -18,8 +18,8 @@ from gmlx._vendor.mlx_vlm.models.gemma4.config import AudioConfig
 from gmlx.load.modules import install_kquant_modules
 
 
-def _q8(shape, seed):
-    w = mx.random.normal(shape, key=mx.random.key(seed))
+def _q8(shape, seed, scale=1.0):
+    w = mx.random.normal(shape, key=mx.random.key(seed)) * scale
     wire, scales = kq.quantize(w, "q8_0")
     deq = kq.dequantize(wire, scales, "q8_0", mx.float32).reshape(shape)
     return wire, scales, deq
@@ -95,5 +95,80 @@ def test_gemma4_audio_relative_positions_run_on_kquant_weights():
     k = mx.random.normal((b, u, c, n, h), key=mx.random.key(7))
     want = ref._rel_pos(q, k)
     got = packed._rel_pos(q, k)
+    rel = float(mx.linalg.norm(got - want) / mx.linalg.norm(want))
+    assert rel < 1e-2
+
+
+def _minicpm_tower_arrays():
+    """A Q8_0 MiniCPM-V mmproj for a 64-wide two-block tower: every matmul
+    and the position table quantized, norms, biases and the patch conv in
+    float, as the mixed-quant uploads ship them."""
+    d, ff, wi, out = 64, 128, 64, 64
+    shapes = {"v.patch_embd.weight": (d, 3, 14, 14), "v.patch_embd.bias": (d,),
+              "v.position_embd.weight": (64, d), "v.post_ln.weight": (d,),
+              "v.post_ln.bias": (d,), "mm.input_norm.weight": (4 * d,),
+              "mm.input_norm.bias": (4 * d,), "mm.up.weight": (4 * d, 4 * d),
+              "mm.up.bias": (4 * d,), "mm.down.weight": (out, 4 * d),
+              "mm.down.bias": (out,)}
+    for i in range(2):
+        for n, s in (("attn_q", (d, d)), ("attn_k", (d, d)),
+                     ("attn_v", (d, d)), ("attn_out", (d, d)),
+                     ("ffn_up", (ff, d)), ("ffn_down", (d, ff))):
+            shapes[f"v.blk.{i}.{n}.weight"] = s
+            shapes[f"v.blk.{i}.{n}.bias"] = (s[0],)
+        for n in ("ln1", "ln2"):
+            shapes[f"v.blk.{i}.{n}.weight"] = (d,)
+            shapes[f"v.blk.{i}.{n}.bias"] = (d,)
+    for n, s in (("attn_q", (d, d)), ("attn_k", (d, d)), ("attn_v", (d, d)),
+                 ("attn_out", (d, d)), ("ds_ffn_up", (wi, 4 * d)),
+                 ("ds_ffn_down", (d, wi))):
+        shapes[f"v.vit_merger.{n}.weight"] = s
+        shapes[f"v.vit_merger.{n}.bias"] = (s[0],)
+    for n, w in (("ln1", d), ("ds_ln", 4 * d)):
+        shapes[f"v.vit_merger.{n}.weight"] = (w,)
+        shapes[f"v.vit_merger.{n}.bias"] = (w,)
+    wire, floats, codecs = {}, {}, {}
+    for seed, (name, shape) in enumerate(sorted(shapes.items())):
+        if len(shape) == 2:
+            w, s, deq = _q8(shape, seed, scale=0.05)
+            wire[name], wire[name[:-len(".weight")] + ".scales"] = w, s
+            floats[name], codecs[name] = deq, "q8_0"
+        else:
+            arr = mx.random.normal(shape, key=mx.random.key(seed)) * 0.05
+            if name.endswith(("ln1.weight", "ln2.weight", "ln.weight",
+                              "norm.weight", "post_ln.weight")):
+                arr = arr + 1.0
+            wire[name] = floats[name] = arr
+    return wire, floats, codecs
+
+
+def test_a_q8_0_minicpm_v_mmproj_runs_on_kquant_modules():
+    from gmlx.models.minicpmv.vision import VisionConfig, VisionModel
+
+    cfg = VisionConfig(hidden_size=64, intermediate_size=128,
+                       num_hidden_layers=2, num_attention_heads=2,
+                       insert_layer_id=0, window_intermediate_size=64,
+                       out_hidden_size=64, position_grid=8)
+    wire, floats, codecs = _minicpm_tower_arrays()
+    prefix = "vision_tower."
+
+    def tower(arrays, mm_codecs):
+        out, skipped, meta = vlm.remap_vision_arrays(
+            arrays, "minicpmv4_7", mm_codecs=mm_codecs)
+        assert skipped == []
+        model = nn.Module()
+        model.vision_tower = VisionModel(cfg)
+        vlm.unpack_unswappable_tower_weights(model, out, meta)
+        install_kquant_modules(model, meta)
+        model.update(tree_unflatten(list(out.items())))
+        return model.vision_tower, meta
+
+    packed, meta = tower(wire, codecs)
+    ref, _ = tower(floats, {})
+    assert f"{prefix}encoder.layers.0.self_attn.q_proj.weight" in meta
+    assert f"{prefix}embeddings.position_embedding.weight" not in meta
+    pv = mx.random.normal((2 * 64, 14 * 14 * 3), key=mx.random.key(9))
+    sizes = [[8, 8], [8, 8]]
+    want, got = ref(pv, sizes), packed(pv, sizes)
     rel = float(mx.linalg.norm(got - want) / mx.linalg.norm(want))
     assert rel < 1e-2

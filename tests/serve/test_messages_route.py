@@ -59,6 +59,8 @@ _TEMPLATES = {
     "kimi-k3": ("kimi_k3", "kimi_k3_template.jinja"),
     "mistral3": ("mistral3", "mistral3_template.jinja"),
     "muse-spark": ("muse_spark", "muse_spark_template.jinja"),
+    "minicpm-v-4.6": ("minicpmv4_6", "minicpmv46_template.jinja"),
+    "minicpm-v-4.7": ("minicpmv4_7", "minicpmv47_template.jinja"),
     "beam": ("beam", "beam_template.jinja"),
     "flint": ("flint", "flint_template.jinja"),
 }
@@ -274,10 +276,13 @@ _VISION = {
     "muse-spark": ("muse_spark", "muse_spark_template.jinja", "<|patch|>"),
     "nemotron-bolt": ("nemotron_h_omni", "nemotron_bolt_template.jinja",
                       "<image>"),
+    "minicpm-v-4.6": ("minicpmv4_6", "minicpmv46_template.jinja", _QWEN),
+    "minicpm-v-4.7": ("minicpmv4_7", "minicpmv47_template.jinja", _QWEN),
 }
 # The templates that show an image in a tool turn.
-_IN_TOOL_TURN = ("gemma4-12b", "glm-5.3", "kimi-k2.5", "muse", "muse-spark",
-                 "nemotron-bolt", "qwen3.5", "qwen3.6", "qwen3.8")
+_IN_TOOL_TURN = ("gemma4-12b", "glm-5.3", "kimi-k2.5", "minicpm-v-4.6",
+                 "minicpm-v-4.7", "muse", "muse-spark", "nemotron-bolt",
+                 "qwen3.5", "qwen3.6", "qwen3.8")
 
 
 def test_the_tool_image_types_are_the_checked_ones():

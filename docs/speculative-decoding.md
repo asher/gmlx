@@ -19,8 +19,9 @@ extra layer that drafts tokens, as the Qwen3.5, Qwen3.6 and Qwen3.8 models
 do. `run` and `chat` turn speculation on for these without a flag. DeepSeek-V4,
 Qwen3.8-Flash-Next, Muse Glimmer and Nemotron 3.5 Super VL turn it on the
 same way when their companion drafter sits in the model's folder, or in an
-`MTP` folder inside or beside it. Nemotron 3.5 Bolt turns it on when its LiLiCorr drafter repo,
-`<repo>-LiLiCorr-GGUF`, sits beside the model's repo. Other families, such
+`MTP` folder inside or beside it. Nemotron 3.5 Bolt and MiniCPM-V 4.7 turn it on
+when their drafter repo, `<repo>-LiLiCorr-GGUF` or `<repo>-DSpark-gguf`, sits
+beside the model's repo. Other families, such
 as gemma-4 with its assistant drafter, need `--draft-gguf`.
 
 | Flag | Config key | Effect |
@@ -167,6 +168,11 @@ gmlx pull hf:unsloth/NVIDIA-Nemotron-3.5-Bolt-E4B-GGUF \
 ```
 
 Its block is 8, so a round drafts 7 tokens.
+
+MiniCPM-V 4.7 ships a DSpark drafter beside each model, for both the 35B-A3B
+and the 1B. A pull that names the drafter pairs it, as
+[Supported families](vlm.md#supported-families) shows, and `gmlx chat` then
+speculates on text turns.
 
 ## Context copy
 

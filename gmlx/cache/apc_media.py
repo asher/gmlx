@@ -48,7 +48,7 @@ from gmlx.upstream.patching import wrapped_with
 _FLAG = "_kq_media_token_ids"
 _CAUSAL_FLAG = "_kq_causal_serve_media"
 _WHOLE_BLOCK_TYPES = ("gemma4_text", "gemma4_unified_text")
-_CAUSAL_SERVE_TYPES = ("qwen3_5", "qwen3_5_moe")
+_CAUSAL_SERVE_TYPES = ("qwen3_5", "qwen3_5_moe", "minicpmv4_6", "minicpmv4_7")
 
 
 class WholeMediaBlocks(set):
@@ -156,7 +156,7 @@ def install_media_token_ids() -> bool:
 
 def install_causal_serve_media() -> bool:
     """Give the serve engine's media guard ``CausalMedia`` for a Qwen3.5
-    model (``_CAUSAL_SERVE_TYPES``), so a turn that adds an image restores
+    or MiniCPM-V model (``_CAUSAL_SERVE_TYPES``), so a turn that adds an image restores
     the earlier turns. Wraps ``BatchGenerator._apc_media_token_ids``,
     which the owned MTP path reads through ``_L1View``. Run and chat read
     the config directly and keep the stock floor. Idempotent."""

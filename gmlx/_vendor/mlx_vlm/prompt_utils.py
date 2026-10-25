@@ -55,7 +55,9 @@ MODEL_CONFIG = {
     "qwen4_exp": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "qwen3_omni_moe": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "minicpmo": MessageFormat.IMAGE_TOKEN,
-    "minicpmv4_6": MessageFormat.IMAGE_TOKEN_WRAPPED,
+    # gmlx: the owned MiniCPM-V templates render {"type": "image"}.
+    "minicpmv4_6": MessageFormat.LIST_WITH_IMAGE_FIRST,
+    "minicpmv4_7": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "mistral3": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "glm4v": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "glm4v_moe": MessageFormat.LIST_WITH_IMAGE_FIRST,
@@ -315,7 +317,6 @@ class MessageFormatter:
             "gemma4",
             "gemma4_unified",
             "diffusion_gemma",
-            "minicpmv4_6",
             "minimax_m3_vl",
             "llava_onevision",
             "glm5_next",

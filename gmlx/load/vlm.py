@@ -21,6 +21,7 @@ only through :func:`load_vlm_model` (CLI ``--mmproj``).
 from __future__ import annotations
 
 import importlib
+import math
 import re
 from typing import Any, ClassVar
 
@@ -136,6 +137,16 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
                 "not supported (only DeepSeek-V4.1 text GGUFs, arch "
                 "'deepseek41')")
         return "deepseek_v41_vl"
+    if proj in ("minicpmv4_6", "minicpmv4_7"):
+        # OpenBMB MiniCPM-V 4.6 / 4.7: a SigLIP ViT with a window-attention
+        # merger and a 2x2 downsample MLP onto the qwen3.5 dense or MoE text
+        # tower (gmlx.models.minicpmv.vlm_model). 4.7 adds canvas positions.
+        if llm_arch not in ("qwen35", "qwen35moe"):
+            raise UnsupportedVLMError(
+                f"mmproj projector {proj!r} on LLM arch {llm_arch!r} is not "
+                "supported (only qwen3.5 text GGUFs, arch 'qwen35' or "
+                "'qwen35moe')")
+        return proj
     if proj == "kimik25":
         # Moonshot Kimi-K2.5/K2.7: a MoonViT tower (SigLIP-so400m shape, 2-D
         # RoPE + a learned position grid that interpolates to the image) and
@@ -193,6 +204,29 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
     raise UnsupportedVLMError(
         f"no VLM model mapping for LLM arch {llm_arch!r} + mmproj projector "
         f"{proj!r} (has_llava_projector={mm_meta.get('clip.has_llava_projector')})")
+
+
+def check_mmproj_width(llm_meta: dict, llm_arch: str, mm_meta: dict) -> None:
+    """Refuse an mmproj whose projection width is not the text model's
+    hidden size: it belongs to another model, and its image features
+    could never replace the placeholder embeddings.
+
+    Only llama.cpp's mmproj converter (``general.type == "mmproj"``)
+    writes the text width as ``projection_dim``; the older LLaVA
+    converter writes CLIP's own width there. A file without the key
+    (``deepseek4-vision``) is not checked."""
+    if mm_meta.get("general.type") != "mmproj":
+        return
+    width = llm_meta.get(f"{llm_arch}.embedding_length")
+    if width is None:
+        return
+    for tower in ("vision", "audio"):
+        proj = _mm(mm_meta, f"clip.{tower}.projection_dim")
+        if proj is not None and int(proj) != int(width):
+            raise UnsupportedVLMError(
+                f"the mmproj {tower} projector outputs width {int(proj)}, but "
+                f"the text model is {int(width)} wide: this mmproj belongs to "
+                "a different model")
 
 
 # Vision / projector remap  (mmproj clip names -> mlx-vlm module paths)
@@ -860,6 +894,69 @@ _NEMOTRON_OMNI_TOP_MAP = {
 _NEMOTRON_OMNI_VIDEO_ONLY = frozenset({"v.patch_embd.weight.1"})
 
 
+# MiniCPM-V 4.6 / 4.7 (minicpmv4_6 / minicpmv4_7): the SigLIP ViT, the
+# window-attention vit_merger and the 2x2 downsample MLP, mapped onto
+# gmlx.models.minicpmv.vision. The patch conv is stored [out, C, kH, kW] and
+# becomes nn.Conv2d's [out, kH, kW, C]. A 4x mmproj has no vit_merger.
+# ``v.tok_embd_sep`` holds the F32 text embeddings of the four separators.
+_MINICPMV_BLK_SUBMAP = {
+    "attn_q": "self_attn.q_proj",
+    "attn_k": "self_attn.k_proj",
+    "attn_v": "self_attn.v_proj",
+    "attn_out": "self_attn.out_proj",
+    "ln1": "layer_norm1",
+    "ln2": "layer_norm2",
+    "ffn_up": "mlp.fc1",
+    "ffn_down": "mlp.fc2",
+}
+_MINICPMV_VIT_MERGER_SUBMAP = {
+    "ln1": "layer_norm1",
+    "attn_q": "self_attn.q_proj",
+    "attn_k": "self_attn.k_proj",
+    "attn_v": "self_attn.v_proj",
+    "attn_out": "self_attn.out_proj",
+    "ds_ln": "pre_norm",
+    "ds_ffn_up": "linear_1",
+    "ds_ffn_down": "linear_2",
+}
+_MINICPMV_TOP_MAP = {
+    "v.patch_embd.bias": "vision_tower.embeddings.patch_embedding.bias",
+    "v.position_embd.weight": "vision_tower.embeddings.position_embedding.weight",
+    "v.post_ln.weight": "vision_tower.post_layernorm.weight",
+    "v.post_ln.bias": "vision_tower.post_layernorm.bias",
+    "mm.input_norm.weight": "vision_tower.merger.mlp.0.pre_norm.weight",
+    "mm.input_norm.bias": "vision_tower.merger.mlp.0.pre_norm.bias",
+    "mm.up.weight": "vision_tower.merger.mlp.0.linear_1.weight",
+    "mm.up.bias": "vision_tower.merger.mlp.0.linear_1.bias",
+    "mm.down.weight": "vision_tower.merger.mlp.0.linear_2.weight",
+    "mm.down.bias": "vision_tower.merger.mlp.0.linear_2.bias",
+    "v.tok_embd_sep": "sep_embeds",
+}
+_MINICPMV_VIT_MERGER_RE = re.compile(r"^v\.vit_merger\.(.+)$")
+
+
+def _minicpmv_vision_name(name: str) -> str | None:
+    hit = _MINICPMV_TOP_MAP.get(name)
+    if hit is not None:
+        return hit
+    for regex, submap, prefix in (
+            (_VISION_BLK_RE, _MINICPMV_BLK_SUBMAP, None),
+            (_MINICPMV_VIT_MERGER_RE, _MINICPMV_VIT_MERGER_SUBMAP,
+             "vision_tower.vit_merger")):
+        m = regex.match(name)
+        if m is None:
+            continue
+        rest = m.group(m.lastindex or 1)
+        sub, _, leaf = rest.rpartition(".")
+        tgt = submap.get(sub)
+        if tgt is None:
+            return None
+        if prefix is None:
+            prefix = f"vision_tower.encoder.layers.{m.group(1)}"
+        return f"{prefix}.{tgt}.{leaf}"
+    return None
+
+
 # DeepSeek-V4-Flash-Vision-Exp (deepseek4v): the DeepSeek ViT + 3x3 unfold
 # aligner, mapped onto the vendored gmlx.models.deepseek_v4.vision tower. The
 # converter split the fused wqkv and w1 (llama.cpp PR 28133), so q/k/v and
@@ -1225,6 +1322,21 @@ def _remap_float_arrays(
                 skipped.append(name)
                 continue
             out[f"vision_tower.blocks.{bid}.{tgt}.{leaf}"] = arr
+        return out, skipped
+
+    if model_type in ("minicpmv4_6", "minicpmv4_7"):
+        for name, arr in arrays.items():
+            if name.endswith(".scales") or name.endswith(".biases"):
+                continue
+            if name == "v.patch_embd.weight":
+                out["vision_tower.embeddings.patch_embedding.weight"] = (
+                    mx.transpose(arr, (0, 2, 3, 1)))
+                continue
+            hf = _minicpmv_vision_name(name)
+            if hf is None:
+                skipped.append(name)
+                continue
+            out[hf] = arr
         return out, skipped
 
     if model_type == "nemotron_h_omni":
@@ -1998,6 +2110,107 @@ def _synthesize_glm5next_vlm_config(
     return config
 
 
+# The markers a MiniCPM-V image block is built from. The vocab stores the
+# newline as its byte-level form "\u010a".
+_MINICPMV_TOKENS = (
+    ("image_token_id", "<|image_pad|>"),
+    ("image_start_id", "<image>"),
+    ("image_end_id", "</image>"),
+    ("slice_start_id", "<slice>"),
+    ("slice_end_id", "</slice>"),
+    ("image_id_start_id", "<image_id>"),
+    ("image_id_end_id", "</image_id>"),
+    ("newline_id", "\u010a"),
+)
+
+
+def minicpmv_downsample_mode(mm_meta: dict) -> str:
+    """``"16x"`` (window merger plus 2x2 merger) or ``"4x"`` (2x2 merger
+    only), from ``clip.vision.projector.scale_factor``."""
+    scale = _mm(mm_meta, "clip.vision.projector.scale_factor")
+    if scale is None or int(scale) == 4:
+        return "16x"
+    if int(scale) == 2:
+        return "4x"
+    raise UnsupportedVLMError(
+        f"MiniCPM-V mmproj scale_factor {scale!r} is not supported (4 or 2)")
+
+
+def _synthesize_minicpmv_vlm_config(
+    text_config: dict, mm_meta: dict, model_type: str, llm_meta: dict,
+    mm_shapes: dict | None = None, mm_tensor_names: set[str] | None = None,
+) -> dict:
+    """MiniCPM-V 4.6 / 4.7 config: the qwen3.5 text synth plus the SigLIP
+    tower read from ``clip.vision.*`` and the tensor shapes.
+
+    A 4x mmproj (scale_factor 2) has no vit_merger, whatever
+    ``wa_layer_indexes`` says. 4.7 lays image tokens on a 2-D canvas, and
+    every marker id must resolve, or the image block would not be found
+    and the text after it would take wrong positions."""
+    shapes = mm_shapes or {}
+    llm_arch = llm_meta.get("general.architecture")
+    order = llm_meta.get(f"{llm_arch}.rope.section_order")
+    if order is not None and order != "zyxt":
+        raise UnsupportedVLMError(
+            f"MiniCPM-V text GGUF has rope.section_order {order!r}; only "
+            "'zyxt' is supported")
+    mode = minicpmv_downsample_mode(mm_meta)
+    hidden = _mm_int(mm_meta, "clip.vision.embedding_length")
+    vision_config: dict = {
+        "model_type": f"{model_type}_vision",
+        "hidden_size": hidden,
+        "intermediate_size": _mm_int(mm_meta, "clip.vision.feed_forward_length"),
+        "num_hidden_layers": _mm_int(mm_meta, "clip.vision.block_count"),
+        "num_attention_heads": _mm_int(mm_meta, "clip.vision.attention.head_count"),
+        "image_size": _mm_int(mm_meta, "clip.vision.image_size"),
+        "patch_size": _mm_int(mm_meta, "clip.vision.patch_size"),
+        "out_hidden_size": _mm_int(mm_meta, "clip.vision.projection_dim"),
+        "downsample_mode": mode,
+    }
+    eps = _mm(mm_meta, "clip.vision.attention.layer_norm_epsilon")
+    if eps is not None:
+        vision_config["layer_norm_eps"] = float(eps)
+    pos = shapes.get("v.position_embd.weight")
+    if pos:
+        side = math.isqrt(_other_dim(pos, hidden))
+        vision_config["position_grid"] = side
+    if mode == "16x":
+        wa = mm_meta.get("clip.vision.wa_layer_indexes")
+        if wa:
+            vision_config["insert_layer_id"] = int(
+                wa[0] if isinstance(wa, list) else wa)
+        up = shapes.get("v.vit_merger.ds_ffn_up.weight")
+        if up:
+            vision_config["window_intermediate_size"] = _other_dim(
+                up, 4 * hidden)
+
+    config: dict = {
+        "model_type": model_type,
+        "text_config": text_config,
+        "vision_config": vision_config,
+        "vocab_size": int(text_config.get("vocab_size", 248320)),
+        "sep_embeds": "v.tok_embd_sep" in (mm_tensor_names or set()),
+    }
+    if model_type == "minicpmv4_7":
+        config["mrope_mode"] = "canvas"
+    missing = []
+    for key, tok in _MINICPMV_TOKENS:
+        tid = _gguf_token_id(llm_meta, tok)
+        if tid is None:
+            missing.append(tok)
+        else:
+            config[key] = tid
+    if missing:
+        raise UnsupportedVLMError(
+            "MiniCPM-V text GGUF vocab is missing the image marker token(s) "
+            f"{', '.join(repr(t) for t in missing)}")
+    config["image_token_index"] = config["image_token_id"]
+    video = _gguf_token_id(llm_meta, "<|video_pad|>")
+    if video is not None:
+        config["video_token_id"] = video
+    return config
+
+
 def _synthesize_nemotron_omni_vlm_config(
     text_config: dict, mm_meta: dict, llm_meta: dict,
     mm_shapes: dict | None = None,
@@ -2264,6 +2477,10 @@ def synthesize_vlm_config(
     if model_type == "glm5_next":
         return _synthesize_glm5next_vlm_config(
             text_config, mm_meta, llm_meta, mm_shapes)
+
+    if model_type in ("minicpmv4_6", "minicpmv4_7"):
+        return _synthesize_minicpmv_vlm_config(
+            text_config, mm_meta, model_type, llm_meta, mm_shapes, names)
 
     if model_type == "nemotron_h_omni":
         return _synthesize_nemotron_omni_vlm_config(
@@ -2579,6 +2796,8 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
             tokenizer, mm_meta, audio=bool(mm_meta.get("clip.has_audio_encoder")))
     if model_type == "glm5_next":
         return _synthesize_glm5next_processor(tokenizer, mm_meta)
+    if model_type in ("minicpmv4_6", "minicpmv4_7"):
+        return _synthesize_minicpmv_processor(tokenizer, mm_meta)
     if model_type == "nemotron_h_omni":
         return _synthesize_nemotron_omni_processor(tokenizer, mm_meta)
     if model_type == "deepseek_v4_vl":
@@ -3694,6 +3913,27 @@ class _NemotronOmniGgufImageProcessor(ImageProcessingMixin):
         }
 
 
+def _synthesize_minicpmv_processor(tokenizer, mm_meta: dict):
+    """MiniCPM-V 4.6 / 4.7 processor (gmlx.models.minicpmv.processing).
+    The 4.6 mmproj carries no ``max_slice_nums``; the reference default
+    is 9."""
+    from gmlx.models.minicpmv.processing import (
+        MiniCPMVImageProcessor, build_processor,
+    )
+
+    slices = _mm(mm_meta, "clip.vision.max_slice_nums")
+    image_processor = MiniCPMVImageProcessor(
+        image_mean=_mm_floats(mm_meta, "clip.vision.image_mean") or [0.5] * 3,
+        image_std=_mm_floats(mm_meta, "clip.vision.image_std") or [0.5] * 3,
+        patch_size=_mm_int(mm_meta, "clip.vision.patch_size"),
+        scale_resolution=_mm_int(mm_meta, "clip.vision.image_size"),
+        max_slice_nums=9 if slices is None else int(slices),
+        downsample_mode=minicpmv_downsample_mode(mm_meta),
+    )
+    return _attach_streaming_helpers(
+        build_processor(tokenizer, image_processor), tokenizer)
+
+
 def _nemotron_omni_image_processor(
         mm_meta: dict) -> _NemotronOmniGgufImageProcessor:
     """The Nemotron-3.5-Bolt image processor from the mmproj's
@@ -4297,6 +4537,13 @@ def load_vlm_model(
     loadlog.fact("arch", llm_arch)
     loadlog.fact_file_size(pf.shards)
     _log(f"[vlm] llm arch={llm_arch}")
+    # The pair must fit before the LLM weights load: a family with no
+    # mapping, or an mmproj made for a text model of another width.
+    from .headerscan import scan_gguf
+    mm_head = scan_gguf(mmproj_path, include_tensors=False).kv
+    model_type = resolve_vlm_model_type(llm_arch, mm_head)
+    check_mmproj_width(
+        scan_gguf(pf.shards[0], include_tensors=False).kv, llm_arch, mm_head)
     loadlog.stage("reading tensors")
     active_before = _active_now()
     arrays, kquant_meta, _arch, llm_meta, llm_shapes = load_gguf_wire_bytes(
@@ -4310,16 +4557,14 @@ def load_vlm_model(
         llm_meta, f"{llm_arch}.attention.head_count_kv")
 
     # 2. mmproj GGUF - plain float metadata, no arch gate (general.architecture=
-    #    "clip" is not a buildable text arch). Load it first to resolve the VLM
-    #    model_type, which fixes where the text tower nests.
+    #    "clip" is not a buildable text arch).
     loadlog.stage("reading mmproj")
     loadlog.fact("mmproj", True)
     mm_arrays, mm_codecs, _mm_arch, mm_meta, mm_shapes = load_gguf_wire_bytes(
         mmproj_path, zero_copy=zero_copy, expect_quant=False)
-    model_type = resolve_vlm_model_type(llm_arch, mm_meta)
     with_audio = bool(mm_meta.get("clip.has_audio_encoder"))
     _log(f"[vlm] model_type={model_type} audio={with_audio}")
-    if model_type in ("qwen3_5", "qwen3_5_moe"):
+    if model_type in ("qwen3_5", "qwen3_5_moe", "minicpmv4_6", "minicpmv4_7"):
         # Pre-M3 launch-ceiling guard for the vendored base ragged decode
         # (ungated 1024-thread kernels) on batched mixed-depth streams.
         # Unconditional: plain VLM builds and the spec_target base fallback

@@ -20,7 +20,8 @@ lengths that share one salt, longest first (``salt_windows``).
 An image hash covers its pixel rows and the rows the processor emits for
 it beside them (``image_grid_thw``, ``image_grid_hws``, ``image_meta``,
 ``image_position_ids``, ``image_sizes``, ``pixel_attention_mask``). A
-grid also splits flattened patches into images. The model and processor
+grid also splits flattened patches into images. A MiniCPM-V image spans
+several runs, one per crop, which ``target_sizes`` sizes. The model and processor
 key dependencies, audio, video and the tenant stay in the text salt.
 """
 
@@ -397,6 +398,47 @@ def _runs_hold_one_image_each(row: Any, runs: list[tuple[int, int]],
     return True
 
 
+def _crop_spans(row: Any, runs: list[tuple[int, int]], raw: dict,
+                config: Any) -> tuple[tuple[int, int], ...] | None:
+    """MiniCPM-V spans: an image is an overview crop after ``<image>``
+    and slice crops after ``<slice>``, one run each, with one
+    ``target_sizes`` row per crop. None when the prompt does not take
+    that shape."""
+    import numpy as np
+
+    config = _id_config(config)
+    start_id = _cfg(config, "image_start_id")
+    sizes = raw.get("target_sizes")
+    pv = raw.get("pixel_values")
+    if start_id is None or sizes is None or not _is_array(pv):
+        return None
+    sizes = np.asarray(sizes).astype(np.int64).reshape(-1, 2)
+    if len(sizes) != len(runs) or int(sizes.prod(axis=1).sum()) != int(
+            pv.shape[0]):
+        return None
+    merge = int(_first(_cfg(_cfg(config, "vision_config"), "merge_factor"),
+                       4))
+    groups: list[list[int]] = []
+    for i, (a, b) in enumerate(runs):
+        if int(sizes[i].prod()) // (merge * merge) != b - a:
+            return None
+        if a > 0 and int(row[a - 1]) == int(start_id):
+            groups.append([i])
+        elif groups:
+            groups[-1].append(i)
+        else:
+            return None
+    ends = np.cumsum(sizes.prod(axis=1))
+    spans = []
+    for crops in groups:
+        lo = int(ends[crops[0]] - sizes[crops[0]].prod())
+        hi = int(ends[crops[-1]])
+        spans.append((runs[crops[0]][0], _mix(
+            _content_hash(pv[lo:hi]),
+            _content_hash(sizes[crops[0]:crops[-1] + 1]))))
+    return tuple(spans)
+
+
 def image_spans(input_ids: Any, raw: dict, config: Any, processor: Any = None
                 ) -> tuple[tuple[int, int], ...] | None:
     """``(start, image hash)`` per image run of a prompt, or None when the
@@ -411,6 +453,9 @@ def image_spans(input_ids: Any, raw: dict, config: Any, processor: Any = None
     runs = _runs(row, image_token_ids(config))
     if not runs or raw.get("pixel_values") is None:
         return None
+    crops = _crop_spans(row, runs, raw, config)
+    if crops is not None:
+        return crops
     rows = _image_rows(raw, len(runs))
     if rows is None or not _runs_hold_one_image_each(row, runs, raw, config,
                                                      processor):
