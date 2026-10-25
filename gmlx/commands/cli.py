@@ -795,8 +795,10 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
         # Streaming decode: auto-MTP stays off (measured wash at typical
         # no-think acceptance, and verify widths add miss IO); explicit
         # --speculative/--mtp above still opts in. An auto drafter file
-        # goes too.
-        args.draft_gguf = None
+        # goes too, unless a VLM's text turns may take it
+        # (_vlm_mtp_drafter_available).
+        if getattr(args, "mmproj", None) is None:
+            args.draft_gguf = None
         return False, ""
     if auto_draft:
         return True, ""
@@ -1338,7 +1340,8 @@ def _bench_depths_speculative(args) -> bool:
     # bool(): --speculative defaults to the auto sentinel None, which would
     # otherwise render as "speculative=None" in the bench banner.
     return bool(getattr(args, "speculative", None)
-                or getattr(args, "draft_gguf", None))
+                or (getattr(args, "draft_gguf", None)
+                    and not getattr(args, "draft_gguf_auto", False)))
 
 
 def _run_bench_depths(args) -> int:
@@ -2708,7 +2711,7 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     # Each prefill on its model's prefill caps; from the first token, the
     # model's decode caps.
     install_cb_phase_steps()
-    if args.draft_gguf:
+    if args.draft_gguf and not getattr(args, "draft_gguf_auto", False):
         args.speculative = True  # same implication as `serve`
     if args.stochastic_mtp is not None:
         from gmlx.spec.speculative import set_stoch_accept

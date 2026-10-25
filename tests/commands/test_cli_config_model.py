@@ -166,15 +166,16 @@ def test_run_speculative_config_applies(tmp_path, value, want):
     assert rc is None and args.gguf == gguf and args.speculative is want
 
 
-def _auto_drafter_config(tmp_path):
-    (tmp_path / "m-Q6_K.gguf").write_bytes(b"GGUF")
-    (tmp_path / "dflash-m-Q6_K.gguf").write_bytes(b"GGUF")
+def _auto_drafter_config(tmp_path, mmproj=False):
+    for name in ("m-Q6_K.gguf", "dflash-m-Q6_K.gguf", "mmproj-m.gguf"):
+        (tmp_path / name).write_bytes(b"GGUF")
+    extra = ", mmproj: mmproj-m.gguf" if mmproj else ""
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text(
         f"server:\n  model_dirs: [{tmp_path}]\n"
         "models:\n"
         "  m: {path: m-Q6_K.gguf, draft_gguf: dflash-m-Q6_K.gguf, "
-        "speculative: auto}\n")
+        f"speculative: auto{extra}}}\n")
     return str(cfg)
 
 
@@ -207,6 +208,37 @@ def test_a_streamed_run_leaves_out_a_config_drafter_file_marked_auto(
     assert cli.main(["m", "--config", _auto_drafter_config(tmp_path),
                      flag]) == 0
     assert seen == {"mtp": False, "draft": None}
+
+
+@pytest.mark.parametrize("argv", [["--bench", "512", "--stream-cpu"],
+                                  ["--report-only", "--stream-cpu"],
+                                  ["--bench-depths", "512"]])
+def test_a_bench_takes_a_config_drafter_file_marked_auto_as_a_head(
+        tmp_path, monkeypatch, argv):
+    # No MTP A/B, and no refusal under --stream-cpu.
+    monkeypatch.setattr(cli, "_has_native_mtp_head", lambda p: False)
+    seen = {}
+    for name, mtp in (("_run_bench", lambda a: bool(a.speculative)),
+                      ("_report_only", lambda a: bool(a.speculative)),
+                      ("_run_bench_depths", cli._bench_depths_speculative)):
+        monkeypatch.setattr(cli, name, lambda a, mtp=mtp: (
+            seen.setdefault("mtp", mtp(a)), 0)[1])
+    assert cli.main(["m", "--config", _auto_drafter_config(tmp_path)]
+                    + argv) == 0
+    assert seen == {"mtp": False}
+
+
+def test_a_vlm_chat_keeps_a_config_drafter_file_marked_auto_for_text(
+        tmp_path, monkeypatch):
+    # chat turns its text path off for --mmproj, then lets text turns
+    # speculate with the drafter the VLM finds.
+    monkeypatch.setattr(cli, "_has_native_mtp_head", lambda p: False)
+    monkeypatch.setattr(cli, "_companion_drafter", lambda p: None)
+    rc, args = _resolve_chat(
+        ["m", "--config", _auto_drafter_config(tmp_path, mmproj=True)])
+    assert rc is None
+    assert cli.resolve_speculative(args, args.gguf) == (False, "")
+    assert cli._vlm_mtp_drafter_available(args)
 
 
 def test_run_chat_share_speculative_surface():
