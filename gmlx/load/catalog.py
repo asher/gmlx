@@ -317,12 +317,12 @@ RECOMMENDED = {
     64:  ("qwen3.8-27b", "ornith-1.5-35b-a3b", "k2-horizon-mova-36b-a4b"),
     96:  ("qwen3.8-27b", "ornith-1.5-122b", "qwen3.8-flash-next"),
     # From 128 GB the lists end with two picks for speed: the dense 27B and
-    # a MoE under 40B, both far under the bar on these Macs.
-    128: ("qwen3.8-flash-next", "ornith-1.5-122b", "qwen3.8-27b", "qwen3.6-35b-a3b"),
-    192: ("qwen3.8-flash-next", "glm-5.3-flash", "qwen3.8-27b", "qwen3.6-35b-a3b"),
+    # a MoE under 40B with a native head, both far under the bar there.
+    128: ("qwen3.8-flash-next", "ornith-1.5-122b", "qwen3.8-27b", "ornith-1.5-35b-a3b"),
+    192: ("qwen3.8-flash-next", "glm-5.3-flash", "qwen3.8-27b", "ornith-1.5-35b-a3b"),
     256: ("qwen3.8-flash-next", "glm-5.3-flash", "deepseek-v4.1-flash-1017",
-          "qwen3.8-27b", "qwen3.6-35b-a3b"),
-    512: ("deepseek-v4.1-flash-1017", "glm-5.3", "qwen3.8-27b", "qwen3.6-35b-a3b"),
+          "qwen3.8-27b", "ornith-1.5-35b-a3b"),
+    512: ("deepseek-v4.1-flash-1017", "glm-5.3", "qwen3.8-27b", "ornith-1.5-35b-a3b"),
 }
 
 
