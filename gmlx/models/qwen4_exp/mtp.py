@@ -42,6 +42,7 @@ greedy/sampled tokens, so the drafter sets acceptance (speed), never output.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field, replace
 from typing import Any, List, Optional
 
@@ -54,6 +55,52 @@ from gmlx.envflags import env_bool, env_int
 from gmlx.spec.mtp_drafter import QwenMTPDrafter
 
 MTP_ARCH = "qwen4exp-mtp"
+
+# Draft length policy. The round's draft count follows the seed's argmax
+# probability, which the engine evaluates with the seed itself, so the
+# read waits on nothing and the rollouts stay lazy like a fixed block's.
+# GMLX_Q4_MTP_LADDER lists "conf:drafts" steps, highest first; the first
+# step whose conf the seed reaches gives the draft count. Measured on
+# Flash-Next UD-IQ4_XS, a seed picked at 0.95 or above is accepted 95 to
+# 98 percent of the time and one picked under 0.5 about 25 to 55 percent.
+# The long steps pay only when the head is on a run: unless the previous
+# round accepted every draft, the count is capped at GMLX_Q4_MTP_STREAK_CAP
+# (0 lifts the cap). An empty ladder drafts the fixed block.
+DRAFT_LADDER_DEFAULT = "0.9:5,0.5:3,0:1"
+STREAK_CAP_DEFAULT = 3
+BLOCK_LADDER = 6
+BLOCK_FIXED = 4
+
+
+def draft_ladder() -> tuple:
+    """((conf, drafts), ...) highest conf first; () for the fixed block."""
+    spec = os.environ.get("GMLX_Q4_MTP_LADDER", DRAFT_LADDER_DEFAULT).strip()
+    if not spec or spec == "0":
+        return ()
+    try:
+        return _parse_ladder(spec)
+    except ValueError:  # a malformed value keeps the default, like env_int
+        return _parse_ladder(DRAFT_LADDER_DEFAULT)
+
+
+def _parse_ladder(spec: str) -> tuple:
+    steps = []
+    for part in spec.split(","):
+        conf, drafts = part.split(":")
+        steps.append((float(conf), max(1, int(drafts))))
+    return tuple(sorted(steps, reverse=True))
+
+
+def draft_streak_cap() -> int:
+    return max(0, env_int("GMLX_Q4_MTP_STREAK_CAP", STREAK_CAP_DEFAULT))
+
+
+def default_block_size() -> int:
+    """The block total (drafts + bonus) the drafter requests by default."""
+    ladder = draft_ladder()
+    if not ladder:
+        return BLOCK_FIXED
+    return max(BLOCK_FIXED, 1 + max(d for _, d in ladder))
 
 # The llama.cpp sidecar's nextn.* extras on the drafter tree. Its block
 # tensors ride the text remap (parse_gguf_name) like a native head's.
@@ -238,6 +285,10 @@ class Qwen4ExpMTPDrafter(QwenMTPDrafter):
         self._cache: list = []
         self._seed_token = None
         self._seed_hidden = None
+        self._seed_conf = None
+        self._ladder = draft_ladder()
+        self._streak_cap = draft_streak_cap()
+        self._last_round: tuple = ()
         self._round_appended = 0
         self.accept_lens: list = []
         self.draft_lens: list = []
@@ -299,6 +350,88 @@ class Qwen4ExpMTPDrafter(QwenMTPDrafter):
         mask = create_attention_mask(x[:, :, 0, :], c)
         return self.layers[0](x, tokens, mask=mask, cache=c,
                               positions=self._draft_positions(tokens, c))
+
+    # --- draft length policy ----------------------------------------------
+
+    @staticmethod
+    def _conf(logits: mx.array) -> mx.array:
+        """The argmax probability of each row, [B]."""
+        lp = logits.astype(mx.float32)
+        lp = lp - mx.logsumexp(lp, axis=-1, keepdims=True)
+        return mx.exp(lp.max(axis=-1)).reshape(-1)
+
+    def reset(self, target_model, left_padding=None):
+        self._seed_conf = None
+        self._last_round = ()
+        return super().reset(target_model, left_padding)
+
+    def _set_seed(self, h_prenorm: mx.array, sampler, greedy: bool) -> None:
+        logits = self._logits(h_prenorm)
+        self._seed_token = self._pick(logits, sampler, greedy)
+        self._seed_hidden = self._next_hidden(h_prenorm)
+        self._seed_conf = self._conf(logits) if self._ladder else None
+
+    def draft_eval_state(self) -> list:
+        # The seed's confidence shares the seed's graph, so the engine's
+        # async eval of the seed covers it and the ladder read waits on
+        # nothing more.
+        state = super().draft_eval_state()
+        if self._seed_conf is not None:
+            state.append(self._seed_conf)
+        return state
+
+    def accept_verified_tokens(self, verify_hidden, draft_tokens, accepted,
+                               new_tokens, sampler, token_dtype=mx.int32,
+                               greedy=False):
+        self._last_round = (int(draft_tokens.shape[1]), int(accepted))
+        return super().accept_verified_tokens(
+            verify_hidden, draft_tokens, accepted, new_tokens, sampler,
+            token_dtype, greedy)
+
+    def _draft_count(self, conf: Optional[mx.array], block_size: int) -> int:
+        """Drafts this round, seed included, at most block_size - 1."""
+        n = block_size - 1
+        if self._ladder and conf is not None:
+            c = float(conf[0].item())
+            for step_conf, drafts in self._ladder:
+                if c >= step_conf:
+                    n = min(n, drafts)
+                    break
+        if self._streak_cap and self._last_round:
+            drafted, accepted = self._last_round
+            if accepted < drafted:
+                n = min(n, self._streak_cap)
+        return max(1, n)
+
+    def draft_block(self, last_bonus, hidden: mx.array, cache, block_size: int,
+                    sampler, token_dtype: mx.Dtype = mx.int32,
+                    greedy: bool = False) -> mx.array:
+        """The seed, then the rollouts the policy allows, all left lazy for
+        the engine's async eval."""
+        if not self._ladder or self._seed_token is None \
+                or self._seed_hidden is None:
+            return super().draft_block(last_bonus, hidden, cache, block_size,
+                                       sampler, token_dtype, greedy)
+        del cache
+        tok = self._seed_token.astype(token_dtype)
+        h_prev = self._seed_hidden
+        conf = self._seed_conf
+        self._seed_token = None
+        self._seed_hidden = None
+        self._seed_conf = None
+        self._round_appended = 0
+        # Wait for the seed (see QwenMTPDrafter.draft_block); the seed's
+        # confidence was evaluated with it.
+        mx.eval(tok, h_prev)
+        n = self._draft_count(conf, block_size)
+        tokens = [tok]
+        while len(tokens) < n:
+            h = self._forward(tok, h_prev)
+            self._round_appended += 1
+            tok = self._pick(self._logits(h), sampler, greedy)
+            h_prev = self._next_hidden(h)
+            tokens.append(tok)
+        return mx.concatenate(tokens, axis=1)
 
     def _draft_positions(self, tokens: mx.array, cache):
         """None (flat cache-offset rope, the default arm) unless the mrope

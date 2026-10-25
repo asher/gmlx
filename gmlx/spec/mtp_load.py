@@ -844,6 +844,7 @@ def _load_qwen4exp_mtp_drafter(
         QWEN4EXP_NEXTN_MAP,
         Qwen4ExpMTPConfig,
         Qwen4ExpMTPDrafter,
+        default_block_size,
         remap_qwen4exp_mtp_arrays,
     )
 
@@ -874,10 +875,12 @@ def _load_qwen4exp_mtp_drafter(
     else:
         ratio = int(meta.get(f"{MTP_ARCH}.attention.compress_ratio", 4) or 0)
     drafter = Qwen4ExpMTPDrafter(Qwen4ExpMTPConfig(
-        text=args, block_size=env_int("GMLX_Q4_MTP_BLOCK", 4),
+        text=args, block_size=env_int("GMLX_Q4_MTP_BLOCK", default_block_size()),
         compress_ratio=ratio, fused_eh_proj=sidecar))
     log(f"[mtp] drafter: qwen4exp MTP layer, QSA ratio={ratio} "
-        f"block_size={drafter.config.block_size}")
+        f"block_size={drafter.config.block_size} "
+        f"ladder={','.join(f'{c:g}:{d}' for c, d in drafter._ladder) or 'off'} "
+        f"streak_cap={drafter._streak_cap}")
 
     if sidecar:
         d_weights, d_meta, d_stats = remap_mtp_arrays(

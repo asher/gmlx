@@ -120,7 +120,8 @@ def test_skip_logits_still_returns_the_streams():
     assert mx.abs(got - lm(ids).logits).max() < 1e-5
 
 
-def test_drafter_forward_and_seed_cycle():
+def test_drafter_forward_and_seed_cycle(monkeypatch):
+    monkeypatch.setenv("GMLX_Q4_MTP_LADDER", "0")  # the fixed block's cycle
     args = _args()
     target = Qwen4ExpSpecLM(args)
     _randomize(target, seed=2)
@@ -160,6 +161,90 @@ def test_drafter_forward_and_seed_cycle():
                                    None, greedy=True)
     assert drafter._cache[0].offset == 6 + 2
     assert drafter._seed_token is not None
+
+
+def test_draft_ladder_sets_the_round_length(monkeypatch):
+    """The seed's confidence picks the draft count from the ladder, the
+    accept cap trims it after a short round, and a shorter round is a
+    prefix of the fixed block (the same picks, cut short)."""
+    args = _args()
+    target = Qwen4ExpSpecLM(args)
+    _randomize(target, seed=2)
+    prompt = mx.random.randint(0, args.vocab_size, (1, 6))
+    cache = target.make_cache()
+    out = target(prompt, cache=cache, return_hidden=True)
+    first = int(mx.argmax(out.logits[:, -1, :], axis=-1).item())
+
+    class _Wrap(nn.Module):
+        def __init__(self, lm):
+            super().__init__()
+            self.language_model = lm
+
+    def drafted(ladder, conf=None, last_round=(), streak_cap="0"):
+        monkeypatch.setenv("GMLX_Q4_MTP_LADDER", ladder)
+        monkeypatch.setenv("GMLX_Q4_MTP_STREAK_CAP", streak_cap)
+        drafter = Qwen4ExpMTPDrafter(Qwen4ExpMTPConfig(text=args, block_size=6))
+        _randomize(drafter, seed=3)
+        drafter.reset(_Wrap(target))
+        drafter.prefill_from_target_hidden(
+            prompt, out.hidden_states[-1], first, None, greedy=True)
+        assert (drafter._seed_conf is not None) == bool(ladder != "0")
+        if conf is not None:
+            drafter._seed_conf = mx.array([conf], dtype=mx.float32)
+        drafter._last_round = last_round
+        draft = drafter.draft_block(first, out.hidden_states[-1][:, -1:], None, 6,
+                                    None, greedy=True)
+        mx.eval(draft)
+        return drafter, draft
+
+    _, fixed = drafted("0")
+    assert fixed.shape == (1, 5)
+    ladder = "0.9:5,0.5:3,0:1"
+    # The confidence is the seed's argmax probability; a malformed ladder
+    # keeps the default one.
+    logits = mx.random.normal((2, 1, args.vocab_size)) * 4
+    probs = mx.softmax(logits.astype(mx.float32), axis=-1).max(axis=-1).reshape(-1)
+    assert mx.allclose(Qwen4ExpMTPDrafter._conf(logits), probs, atol=1e-6)
+    drafter, _ = drafted(ladder)
+    assert drafter._ladder == ((0.9, 5), (0.5, 3), (0.0, 1))
+    drafter, _ = drafted("0.9:5;0.5:3")
+    assert drafter._ladder == ((0.9, 5), (0.5, 3), (0.0, 1))
+    drafter, sure = drafted(ladder, conf=0.95)
+    assert sure.shape == (1, 5) and drafter._round_appended == 4
+    assert mx.array_equal(sure, fixed)
+    drafter, mid = drafted(ladder, conf=0.7)
+    assert mid.shape == (1, 3) and drafter._round_appended == 2
+    assert mx.array_equal(mid, fixed[:, :3])
+    drafter, doubt = drafted(ladder, conf=0.2)
+    assert doubt.shape == (1, 1) and drafter._round_appended == 0
+    assert mx.array_equal(doubt, fixed[:, :1])
+    # The streak cap holds the long step back after a rejection.
+    _, capped = drafted(ladder, conf=0.95, last_round=(5, 1), streak_cap="3")
+    assert capped.shape == (1, 3)
+    _, uncapped = drafted(ladder, conf=0.95, last_round=(5, 5), streak_cap="3")
+    assert uncapped.shape == (1, 5)
+    _, first = drafted(ladder, conf=0.95, last_round=(), streak_cap="3")
+    assert first.shape == (1, 5)
+    # The accept after a short round trims nothing, records the round and
+    # re-seeds with a confidence.
+    verify_h = mx.random.normal((1, 2, args.hc_count, args.hidden_size))
+    drafter.accept_verified_tokens(verify_h, doubt, 0, [7], None, greedy=True)
+    assert drafter._cache[0].offset == 6 + 1
+    assert drafter._last_round == (1, 0)
+    assert drafter._seed_conf is not None
+
+
+def test_default_block_follows_the_ladder(monkeypatch):
+    from gmlx.models.qwen4_exp import mtp
+
+    monkeypatch.delenv("GMLX_Q4_MTP_LADDER", raising=False)
+    assert mtp.default_block_size() == mtp.BLOCK_LADDER
+    monkeypatch.setenv("GMLX_Q4_MTP_LADDER", "0")
+    assert mtp.default_block_size() == mtp.BLOCK_FIXED
+    assert mtp.draft_ladder() == ()
+    monkeypatch.setenv("GMLX_Q4_MTP_LADDER", "0:2,0.8:4")
+    assert mtp.draft_ladder() == ((0.8, 4), (0.0, 2))
+    assert mtp.default_block_size() == 5
 
 
 class _Wrap(nn.Module):

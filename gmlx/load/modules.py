@@ -156,6 +156,31 @@ _FUSED_MOE_BLOCK_ENABLED = True
 # top of _FUSED_MOE_BLOCK_ENABLED; separate for A/B attribution.
 _FUSED_MOE_ROUTER_ENABLED = True
 
+# The router matvec at token widths 2..16 takes kq.skinny_matmul: MLX's
+# f32 GEMM leaves the exact GEMV path at width 2 and runs the router
+# weight 3-5x under its bytes as TF32, so a speculative verify spent
+# more on the router than on the experts' bytes per token. The kernel
+# accumulates in f32, like width 1. GMLX_KQ_SKINNY=0 keeps the matmul.
+_FUSED_MOE_SKINNY_ROUTER = env_bool("GMLX_KQ_SKINNY", True)
+
+# The half dtype the fused block computes in when its input is float32.
+_FUSED_MOE_F32_ACT = mx.bfloat16
+
+
+def _router_logits(kq, xf: mx.array, rc: mx.array) -> mx.array:
+    """``xf @ rc.T`` in float32 for the fused router, ``xf`` [t, D]."""
+    t = xf.shape[0]
+    if (
+        _FUSED_MOE_SKINNY_ROUTER
+        and 2 <= t <= 16
+        and xf.shape[-1] % 4 == 0
+        and rc.dtype == mx.float32
+        and xf.dtype in (mx.float16, mx.bfloat16, mx.float32)
+        and hasattr(kq, "skinny_matmul")
+    ):
+        return kq.skinny_matmul(xf, rc)
+    return xf.astype(rc.dtype) @ rc.T
+
 # Decoder-layer glue fusion (fused residual+rmsnorm dispatch cuts around the
 # gemma-4 layer body) on top of _FUSED_MOE_ENABLED; separate for A/B
 # attribution.
@@ -697,7 +722,7 @@ def _make_fused_kquant(base_cls, caps):
                 _FUSED_MOE_ENABLED
                 and (indices.size < 64
                      or getattr(self, "_kq_arena_rows", False))
-                and x.dtype in (mx.bfloat16, mx.float16)
+                and x.dtype in (mx.bfloat16, mx.float16, mx.float32)
                 and not self.training
                 and _kq_fused_device_ok(self)
             )
@@ -823,6 +848,8 @@ def _make_fused_kquant(base_cls, caps):
         def __call__(self, x, indices, scores=None):
             rows = getattr(self, "_kq_arena_rows", False)
             if self._fused_ok(x, indices):
+                if x.dtype == mx.float32:  # the hc models' residual dtype
+                    x = x.astype(_FUSED_MOE_F32_ACT)
                 k = indices.shape[-1]
                 idx = indices.reshape(indices.size // k, k)
                 if rows:
@@ -1246,7 +1273,7 @@ def _make_fused_block(base_cls, caps):
                 _FUSED_MOE_ENABLED
                 and _FUSED_MOE_BLOCK_ENABLED
                 and t * self.top_k < 64
-                and x.dtype in (mx.bfloat16, mx.float16)
+                and x.dtype in (mx.bfloat16, mx.float16, mx.float32)
                 and not self.training
                 and getattr(self, "sharding_group", None) is None
                 and _kq_fused_device_ok(self, self.switch_mlp)
@@ -1265,10 +1292,18 @@ def _make_fused_block(base_cls, caps):
 
                     return qwen3_next_moe_forward(self, x)
                 return super().__call__(x)
+            if x.dtype == mx.float32:
+                # A float32 residual stream (the hyper-connection models)
+                # hands the block float32; the kernels take the model's
+                # half activations and give back half, which the combine
+                # after the block promotes exactly. The stock path ran
+                # these decode widths as prefill gathers, at about twice
+                # the time.
+                x = x.astype(_FUSED_MOE_F32_ACT)
             xf = x.reshape(t, d)
             rc = self._kq_router()
             if rc is not None:
-                logits = xf.astype(rc.dtype) @ rc.T
+                logits = _router_logits(kq, xf, rc)
                 inds, sc = kq.moe_router_topk(
                     logits, self.top_k, bool(self.norm_topk_prob))
             else:
@@ -2417,6 +2452,8 @@ def _make_lora_switch_glu(base_cls, caps=None):
             extra = getattr(self.down_proj, "_kq_lora_extra", None) or ()
             fused = hasattr(self, "_fused_ok") and self._fused_ok(x, indices)
             if fused:
+                if x.dtype == mx.float32:
+                    x = x.astype(_FUSED_MOE_F32_ACT)
                 idx = indices.reshape(indices.size // k, k)
                 t = idx.shape[0]
                 h = self._fused_h(x, idx, scores)              # (t, k, I)
