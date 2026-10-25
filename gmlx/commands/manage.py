@@ -1209,8 +1209,8 @@ examples:
 # What a ref names, decided before dispatch and in this order.
 _LOCAL, _IMAGE, _CATALOG, _REMOTE, _UNKNOWN = "local", "image", "catalog", "remote", "unknown"
 
-CONTEXT_LINE = ("Context is how much text the model can keep in view. "
-                "1K tokens is roughly 750 words.")
+# Under the Quality list, indented two: it has to fit an 80-column terminal.
+CONTEXT_LINE = "Context is the text the model keeps in view. 1K tokens is about 750 words."
 _SLOW_LINE = ("Larger than this Mac's memory. gmlx reads part of the model from "
               "the SSD for every token, so replies are much slower than for a "
               "model that fits.")
@@ -1591,6 +1591,9 @@ def _download_line(remaining: int, on_disk: int, free: int, base_dir: str) -> st
     disk = f"Download {human_gb(remaining)}"
     if on_disk:
         disk += f" ({human_gb(on_disk)} already on disk)"
+    home = os.path.expanduser("~")
+    if base_dir == home or base_dir.startswith(home + os.sep):
+        base_dir = "~" + base_dir[len(home):]
     return f"{disk}   free disk {human_gb(free)} at {base_dir}"
 
 

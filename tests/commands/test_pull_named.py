@@ -597,6 +597,15 @@ def _pick_image(groups, name, quant):
     return Plan(row, next(r for r in row.rungs if r.id == quant), ())
 
 
+def test_the_footer_fits_80_columns_and_names_the_folder_from_home():
+    assert len("  " + manage.CONTEXT_LINE) <= 80
+    home = os.path.expanduser("~")
+    line = manage._download_line(1 << 30, 0, 100 << 30, os.path.join(home, "models"))
+    assert line == "Download 1.0 GB   free disk 100.0 GB at ~/models"
+    assert manage._download_line(1 << 30, 1 << 20, 100 << 30, "/Volumes/ext").endswith(
+        "(1 MB already on disk)   free disk 100.0 GB at /Volumes/ext")
+
+
 def test_the_picker_offers_the_image_models_and_runs_the_image_pull(cat, monkeypatch, capsys):
     from gmlx.image import catalog as ic
 
