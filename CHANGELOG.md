@@ -137,6 +137,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `/v1/systemone` on a text model other than OpenJev lettered its options
+  as `[A]`, which made gemma-4 answer with `[` first and left the letters a
+  sliver of the probability. Those models now see `A)`, and OpenJev keeps
+  the `[A]` form it was trained on.
 - Qwen3.8-Flash-Next UD-IQ4_XS streamed its experts where the larger UD-Q4_K_XL
   kept them in memory. A MoE short of the memory free at load now reads its
   lookup tables from the file first, and keeps its experts in memory. A load

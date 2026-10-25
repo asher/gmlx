@@ -234,3 +234,54 @@ def test_a_non_finite_score_fails_the_read():
     next(read)
     with pytest.raises(letters.ReadoutIncomplete):
         read.send([[0.0, float("nan")]])
+
+
+# the option form: OpenJev's brackets, plain letters for every other model
+
+def test_the_plain_style_letters_options_without_brackets():
+    options = [("billing", "charges"), ("shipping", "delivery")]
+    plain = letters.prompt_text("s", "Which?", options, letters.PLAIN)
+    assert "\nA) billing: charges\nB) shipping: delivery\n" in plain
+    assert "[" not in plain
+    bracket = letters.prompt_text("s", "Which?", options, letters.BRACKET)
+    assert "\n[A] billing: charges\n[B] shipping: delivery\n" in bracket
+    assert letters.prompt_text("s", "Which?", options) == bracket
+    assert plain.endswith(letters.ANSWER_LINE) and bracket.endswith(letters.ANSWER_LINE)
+
+
+@pytest.mark.parametrize("names,style", [
+    (("/models/OpenJev-Q4_K_M.gguf",), letters.BRACKET),
+    (("/models/openjev__openjev-GGUF/OpenJev-Flash-9B-Q6_K.gguf",), letters.BRACKET),
+    (("/models/decider.gguf", "openjev"), letters.BRACKET),
+    (("/models/gemma-4-12b-it-Q4_K_M.gguf", "gemma"), letters.PLAIN),
+    (("/models/Qwen3.8-27B-UD-Q6_K_XL.gguf", None), letters.PLAIN),
+    ((None, ""), letters.PLAIN),
+])
+def test_only_openjev_keeps_its_bracket_form(names, style):
+    assert letters.option_style(*names) == style
+
+
+def test_the_style_reaches_every_pass_of_a_decision():
+    body = {"state": TICKET, "questions": {
+        "q": {"type": "choice", "instructions": "Which one?", "criteria": _options(60)},
+        "angry": SERVE_EXAMPLE["angry"],
+        "urgency": SERVE_EXAMPLE["urgency"]}, "samples": 2}
+    schema = letters.parse(body, Limits(max_samples=8))
+    state = letters.state_text(body)
+    read = letters.decision(schema, state, letters.PLAIN)
+    texts = []
+    try:
+        batch = next(read)
+        while True:
+            texts += [p.text for p in batch]
+            batch = read.send([[score(p.text, i) for i in range(p.letters)]
+                               for p in batch])
+    except StopIteration:
+        pass
+    assert texts and all("[" not in t.split("Options:\n", 1)[1] for t in texts)
+    assert all("\nA) " in t for t in texts)
+    planned = letters.pass_texts(schema, state, letters.PLAIN)
+    assert set(planned) <= set(texts)
+    bounds = letters.winner_bounds(schema, state, letters.PLAIN)
+    assert len(bounds) == 1 and "\nA) " in bounds[0] and "[" not in bounds[0].split("Options:\n", 1)[1]
+    assert all("\n[A] " in t for t in letters.pass_texts(schema, state))

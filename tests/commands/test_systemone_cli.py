@@ -153,6 +153,8 @@ class _CharTok:
 
 
 class _LetterReader:
+    seen_tails = []
+
     def __init__(self, model, letter_ids):
         self.forwards = 0
         self.path = "rows"
@@ -170,6 +172,7 @@ class _LetterReader:
 
     def tails(self, prefix, prefix_ids, tails):
         self.forwards += 1
+        _LetterReader.seen_tails.extend(list(t) for t in tails)
         yield
         return [[zlib.crc32(repr((t, i)).encode()) / 2**32 for i in range(52)]
                 for t in tails]
@@ -191,10 +194,11 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(ar_reader, "LetterReader", _LetterReader)
     monkeypatch.setattr(importlib.import_module("gmlx._vendor.mlx_lm.generate"), "wired_limit",
                         lambda m: contextlib.nullcontext())
-    gguf = tmp_path / "text.gguf"
-    gguf.write_bytes(b"")
+    _LetterReader.seen_tails.clear()
 
-    def run(body, *flags):
+    def run(body, *flags, name="text.gguf"):
+        gguf = tmp_path / name
+        gguf.write_bytes(b"")
         req = tmp_path / "letters.json"
         req.write_text(json.dumps(body))
         return so.cmd_systemone([str(req), "--model", str(gguf), *flags])
@@ -216,6 +220,18 @@ def test_offline_a_text_model_answers_with_the_letter_readout(offline, capsys):
     assert set(body["answers"]) == {"urgent", "team"}
     assert body["usage"]["output_tokens"] == 0
     assert "forwards in" in out.err
+
+
+def test_offline_options_are_plain_except_on_openjev(offline):
+    assert offline(_LETTER_BODY, "--json") == 0
+    texts = ["".join(chr(i) for i in t) for t in _LetterReader.seen_tails]
+    assert texts and any("A) billing" in t for t in texts)
+    assert all("[A]" not in t for t in texts)
+    _LetterReader.seen_tails.clear()
+    assert offline(_LETTER_BODY, "--json", name="OpenJev-Q4_K_M.gguf") == 0
+    texts = ["".join(chr(i) for i in t) for t in _LetterReader.seen_tails]
+    assert texts and any("[A] billing" in t for t in texts)
+    assert all("A) " not in t for t in texts)
 
 
 def test_offline_letter_errors_name_the_request(offline, capsys):

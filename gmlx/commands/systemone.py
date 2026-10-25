@@ -97,8 +97,9 @@ def _model_path(name: str, cfg) -> str:
     raise SystemExit(f"error: {name}: no such GGUF file or configured model")
 
 
-def _run_letters(model, processor, parsed, path: str) -> dict:
-    """The letter readout on a text model, to completion on this thread."""
+def _run_letters(model, processor, parsed, path: str, name: str = "") -> dict:
+    """The letter readout on a text model, to completion on this thread.
+    ``name`` is what ``--model`` said, a path or a configured id."""
     import contextlib
     from typing import Any
 
@@ -121,7 +122,8 @@ def _run_letters(model, processor, parsed, path: str) -> dict:
     started = time.perf_counter()
     with wired:
         result = run_to_end(decide_letters(
-            LetterReader(model, letter_ids), tokens, schema, state))
+            LetterReader(model, letter_ids), tokens, schema, state,
+            style=letters.option_style(path, name)))
     print(f"[systemone] {result['diagnostics']['timing']['reads']} forwards in "
           f"{(time.perf_counter() - started) * 1e3:.0f} ms", file=sys.stderr)
     return jev_response(schema, result, 0, os.path.basename(path))
@@ -146,7 +148,7 @@ def _run_offline(a, body: dict) -> dict:
     model, _config, tokenizer = load_model(path, verbose=False)
     processor = _make_text_processor(tokenizer)
     if not is_diffusion_model(model):
-        return _run_letters(model, processor, parsed, path)
+        return _run_letters(model, processor, parsed, path, a.model or "")
     schema, state, seed = parsed.get("diffusion")
     from gmlx.systemone.engine import (
         BoundReader,
