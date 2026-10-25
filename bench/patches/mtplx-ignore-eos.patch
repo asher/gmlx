@@ -1,0 +1,26 @@
+mtplx ignore-eos patch (for the serve-bench.py --vs mtplx arm)
+
+Adds an MTPLX_IGNORE_EOS environment switch to the default stop tokens of
+mtplx. When it is "1", a reply stops only at max_tokens, so serve-bench.py
+measures decode over the same fixed token window as on the gmlx and
+llama-server arms, which run with --ignore-eos. serve-bench.py sets the switch
+on the mtplx server and refuses an mtplx without the patch.
+
+MTPLX is Apache-2.0, Copyright 2026 Youssof Altoukhi
+(https://github.com/youssofal/mtplx). This patch changes mtplx/generation.py.
+
+Baseline: mtplx 2.12.2. Apply it to the mtplx installed in its venv:
+  site=$(~/.venvs/mtplx/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+  patch -p1 -d "$site" < /path/to/bench/patches/mtplx-ignore-eos.patch
+
+--- a/mtplx/generation.py	2026-10-13 10:39:43
++++ b/mtplx/generation.py	2026-10-13 10:39:43
+@@ -7280,6 +7280,8 @@
+ 
+ def _default_stop_tokens(tokenizer) -> set[int]:
+     ids: set[int] = set()
++    if os.environ.get("MTPLX_IGNORE_EOS") == "1":
++        return ids
+     for attr in ("eos_token_id", "pad_token_id"):
+         value = getattr(tokenizer, attr, None)
+         if isinstance(value, int):

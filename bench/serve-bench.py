@@ -26,12 +26,15 @@ Fairness guards baked in:
     chained to any depth). BASE/continuation targets: --corpus (raw text sliced to
     depth). Neither => an embedded tiled passage (unrepresentative; MTP runs only).
     The corpus used is stamped into the report (md header + JSON meta).
-  * Thermal fairness: alternate which runtime runs first each round, cooldown
-    between server blocks, and report the MEDIAN across rounds (alternation makes
-    that order-unbiased). "Both throttled" stays fair because the throttle is
-    shared symmetrically. pmset -g therm is snapshotted into the JSON per round.
-  * Token counts re-tokenized with each model's own tokenizer (never the server's
-    self-reported usage).
+  * Thermal fairness: every server block runs in a fixed order and odd rounds
+    reverse the whole order, cooldown between server blocks, and report the
+    MEDIAN across rounds (the mirrored order cancels linear drift). "Both
+    throttled" stays fair because the throttle is shared symmetrically. The die
+    temperature is snapshotted into the JSON per round.
+  * Prompt and output tokens are counted with each model's own tokenizer. A
+    reply that ends on "length" counts the server's completion_tokens, or
+    max_tokens when the server reports none: some servers drop think tags and
+    special tokens from the streamed text.
 
 Run in a venv with gmlx installed (`pip install gmlx`; --chat-dataset also
 needs `datasets`):
@@ -52,6 +55,15 @@ flags), and the gmlx arm still runs the GGUF. omlx-serve.py next to this
 script forces the length (omlx 0.7.2 or later); --omlx-python is the python of
 the venv that has omlx. The paged SSD cache is off and settings stay under
 --outdir. Baseline arm only.
+
+--vs mtplx swaps the comparison arm to MTPLX (`mtplx serve`), which loads an
+MLX pack named per model as "mtplx_model" ("mtplx_args" append serve flags).
+mtp.mtplx {"enabled": true} enables its MTP arms; draft depth N runs
+`--depth N`. Forced length needs patches/mtplx-ignore-eos.patch in the mtplx
+venv; --mtplx-bin is that venv's mtplx. Per-model keys "runtimes",
+"draft_depths", "concurrency" and "mtp_only" let one config hold differently
+shaped arms per runtime. "shared_prompts": true gives every model and arm the
+same prompts and adds an all-arms table to the report.
 """
 from __future__ import annotations
 
@@ -77,7 +89,10 @@ GMLX_PORT = 8080
 LLAMA_PORT = 8081
 DS4_PORT = 8082
 OMLX_PORT = 8083
-RUNTIMES = ("gmlx", "llama")   # default pair; --vs ds4/omlx swaps the comparison arm
+MTPLX_PORT = 8084
+RUNTIMES = ("gmlx", "llama")   # default pair; --vs ds4/omlx/mtplx swaps the comparison arm
+# Env switch the forced-length patch adds to mtplx (patches/mtplx-ignore-eos.patch).
+MTPLX_IGNORE_EOS = "MTPLX_IGNORE_EOS"
 
 # Embedded fallback corpus (generic prose). Point --corpus at a real text file
 # (e.g. a fineweb-edu sample) for representative MTP acceptance; this fallback
@@ -119,22 +134,39 @@ class ModelSpec:
     kv_bits: int = None                                # quantized KV, symmetric: gmlx KV_BITS + llama -ctk/-ctv
     omlx_model: str = None                             # MLX checkpoint folder for the omlx arm
     omlx_args: list = field(default_factory=list)      # appended to `omlx serve`
+    mtplx_model: str | None = None                     # MLX pack folder for the mtplx arm
+    mtp_mtplx: dict = field(default_factory=dict)      # {} | {enabled: true}: mtplx MTP arms
+    mtplx_args: list = field(default_factory=list)     # appended to `mtplx serve`
+    # Per-model overrides: the runtimes this model runs on (None = all), its
+    # own draft depths and concurrency list, and MTP arms only.
+    runtimes: list | None = None
+    draft_depths: list | None = None
+    concurrency: list | None = None
+    mtp_only: bool = False
 
     def arms(self, draft_depths) -> list:
         """List of (label, draft_n). Baseline is (label, None); each MTP draft
         depth N gets its own arm so the speculation depth is swept and equalized
         with llama's --spec-draft-n-max."""
         out = [("baseline", None)]
-        if self.mtp_gmlx or self.mtp_llama or self.mtp_ds4:
-            out += [(f"mtp@{n}", n) for n in draft_depths]
+        if self.mtp_gmlx or self.mtp_llama or self.mtp_ds4 or self.mtp_mtplx:
+            out += [(f"mtp@{n}", n) for n in (self.draft_depths or draft_depths)]
         return out
 
 
 def arms_for(spec, cfg):
     out = spec.arms(cfg["draft_depths"])
-    if cfg.get("mtp_only"):
+    if cfg.get("mtp_only") or spec.mtp_only:
         out = [(lbl, n) for lbl, n in out if n is not None]   # drop baseline arm
     return out
+
+
+def spec_runs_on(spec, runtime):
+    return spec.runtimes is None or runtime in spec.runtimes
+
+
+def concs_for(spec, cfg):
+    return spec.concurrency or cfg["concurrency"]
 
 
 def runtime_ctx(runtime, max_conc, cfg):
@@ -216,19 +248,25 @@ def load_specs(args) -> tuple:
             args.chat_max_convs = raw.get("chat_max_convs")
         for k in ("depths", "concurrency", "draft_depths", "max_tokens", "rounds",
                   "cooldown", "cool_to_c", "cool_max_wait", "llama_ctx_cap",
-                  "warmup", "sampling", "thinking"):
+                  "warmup", "sampling", "thinking", "shared_prompts"):
             if k in raw:
                 cfg[k] = raw[k]
         for m in raw["models"]:
             specs.append(ModelSpec(
-                name=m["name"], gguf=_expand(m["gguf"]),
+                name=m["name"], gguf=_expand(m.get("gguf")),
                 tokenizer=m.get("tokenizer") or args.tokenizer,
                 mtp_gmlx=(m.get("mtp", {}) or {}).get("gmlx", {}) or {},
                 mtp_llama=(m.get("mtp", {}) or {}).get("llama", {}) or {},
                 mtp_ds4=(m.get("mtp", {}) or {}).get("ds4", {}) or {},
                 kv_bits=m.get("kv_bits"),
                 omlx_model=_expand(m.get("omlx_model")),
-                omlx_args=[str(a) for a in m.get("omlx_args") or []]))
+                omlx_args=[str(a) for a in m.get("omlx_args") or []],
+                mtplx_model=_expand(m.get("mtplx_model")),
+                mtp_mtplx=(m.get("mtp", {}) or {}).get("mtplx", {}) or {},
+                mtplx_args=[str(a) for a in m.get("mtplx_args") or []],
+                runtimes=m.get("runtimes"), draft_depths=m.get("draft_depths"),
+                concurrency=m.get("concurrency"),
+                mtp_only=bool(m.get("mtp_only"))))
     else:
         for g in args.gguf:
             g = _expand(g)
@@ -288,20 +326,22 @@ def count_prompt_tokens(tok, prompt):
 
 def _build_tokenizer(spec):
     """Tokenizer used to size prompts to a token depth and to re-count output
-    tokens (never the server's self-reported usage). tokenizer="gguf" (or a
-    .gguf path) synthesizes the exact tokenizer gmlx serves from the GGUF
-    metadata -- no gated HF download, identical to what the runtime tokenizes
-    with. Otherwise tokenizer is an HF id or local dir loaded via AutoTokenizer."""
+    tokens (a forced-length reply takes the server's count, see score_sample).
+    tokenizer="gguf" (or a .gguf path) synthesizes the exact tokenizer gmlx
+    serves from the GGUF metadata -- no gated HF download, identical to what
+    the runtime tokenizes with. Otherwise tokenizer is an HF id or local dir
+    loaded via AutoTokenizer."""
     t = spec.tokenizer
     if t and t.lower() != "gguf" and not t.endswith(".gguf"):
         from transformers import AutoTokenizer
         return AutoTokenizer.from_pretrained(t)
     src = spec.gguf if (not t or t.lower() == "gguf") else _expand(t)
-    from gmlx.load.wire import load_gguf_wire_bytes
+    # Header only: a tensor load would stay mapped in this process for the
+    # whole run, beside the server under test.
+    from gmlx.load.headerscan import scan_gguf
     from gmlx.load.tokenizer import load_tokenizer_from_gguf
-    arrays, kquant_meta, arch_meta, meta, _shapes = load_gguf_wire_bytes(src, zero_copy=True)
-    del arrays, kquant_meta            # release mmap views; only meta+arch needed
-    return load_tokenizer_from_gguf(meta, arch_meta)
+    meta = scan_gguf(src, include_tensors=False, array_limit=1 << 62).kv
+    return load_tokenizer_from_gguf(meta, meta.get("general.architecture"))
 
 
 # ---------------------------------------------------------------------------
@@ -422,8 +462,10 @@ def make_chat_prompt(tok, target_tokens, chat, rng, lock):
 def load_chat_corpus(name, split, max_convs):
     """Load a multi-turn chat dataset into normalized ChatCorpus conversations.
     Accepts the OpenAI `messages` schema (HuggingFaceH4/ultrachat_200k, smoltalk,
-    tulu-3, ...) and the ShareGPT `conversations` schema ({from, value}). Forces
-    offline use of the local HF cache."""
+    tulu-3, ...), the ShareGPT `conversations` schema ({from, value}) and the
+    single-turn instruction schema ({instruction, response}, such as
+    ise-uiuc/Magicoder-Evol-Instruct-110K for code prompts). Forces offline use
+    of the local HF cache."""
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
     from datasets import load_dataset
@@ -438,6 +480,9 @@ def load_chat_corpus(name, split, max_convs):
         if not turns and row.get("conversations"):
             turns = [{"role": role_map.get((t.get("from") or "").lower()),
                       "content": t.get("value") or ""} for t in row["conversations"]]
+        if not turns and row.get("instruction") and row.get("response"):
+            turns = [{"role": "user", "content": row["instruction"]},
+                     {"role": "assistant", "content": row["response"]}]
         if not turns:
             continue
         norm = []
@@ -521,7 +566,7 @@ def build_body(model_id, prompt, max_tokens, sampling, stream, extra=None):
     # Equalized extras: sent IDENTICALLY to both runtimes. ignore_eos is NOT here
     # -- it is a server launch flag on both sides (forced-length), so no body field
     # can be silently honored by one runtime and dropped by the other.
-    for k in ("top_k", "min_p", "repetition_penalty", "seed"):
+    for k in ("top_k", "min_p", "repetition_penalty", "seed", "reasoning_effort"):
         v = sampling.get(k)
         if v is not None:
             body[k] = v
@@ -539,6 +584,8 @@ def run_one(base_url, model_id, prompt, max_tokens, sampling, timeout, extra=Non
     body = build_body(model_id, prompt, max_tokens, sampling, stream=True, extra=extra)
     text_parts, chunk_times = [], []
     t_first = None
+    finish_reason = None
+    server = {}
     t0 = time.perf_counter()
     try:
         with requests.post(url, json=body, stream=True, timeout=timeout) as r:
@@ -556,7 +603,18 @@ def run_one(base_url, model_id, prompt, max_tokens, sampling, timeout, extra=Non
                     obj = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                err = obj.get("error")
+                if err:
+                    msg = err.get("message", err) if isinstance(err, dict) else err
+                    return {"ok": False, "error": f"stream error event: {msg}",
+                            "t0": t0}
+                for k in ("usage", "timings", "mtplx_stats"):
+                    if obj.get(k):
+                        server[k] = obj[k]
                 try:
+                    fr = obj["choices"][0].get("finish_reason")
+                    if fr:
+                        finish_reason = fr
                     d = obj["choices"][0].get("delta") or {}
                     # Count reasoning_content too: gemma-4 (and other thinking
                     # templates) stream generated tokens under reasoning_content
@@ -574,10 +632,13 @@ def run_one(base_url, model_id, prompt, max_tokens, sampling, timeout, extra=Non
                     text_parts.append(delta)
     except Exception as e:  # noqa: BLE001 - network/HTTP failures are reported
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "t0": t0}
-    t_end = time.perf_counter()
     if t_first is None:
         return {"ok": False, "error": "no content tokens streamed", "t0": t0}
-    return {"ok": True, "t0": t0, "t_first": t_first, "t_end": t_end,
+    # Decode ends at the last content token, not at stream close: a serial
+    # server (mtplx) can hold a finished stream open until the next request
+    # in its queue completes.
+    return {"ok": True, "t0": t0, "t_first": t_first, "t_end": chunk_times[-1],
+            "finish_reason": finish_reason, "server": server,
             "text": "".join(text_parts)}
 
 
@@ -598,22 +659,73 @@ def llama_timings(base_url, model_id, prompt, max_tokens, sampling, timeout):
 # ---------------------------------------------------------------------------
 # metrics
 # ---------------------------------------------------------------------------
-def score_sample(s, prompt_tokens, tok, lock):
+def score_sample(s, prompt_tokens, tok, lock, max_tokens=None):
     with lock:
-        out_tok = len(tok.encode(s["text"])) if s["text"] else 0
+        text_tok = len(tok.encode(s["text"])) if s["text"] else 0
+    # A forced-length stream that finished on "length" generated exactly the
+    # server's completion count (or max_tokens when the server reports no
+    # usage). Re-tokenizing the streamed text undercounts runtimes that strip
+    # special tokens and think tags from it (mtplx: 220 of 256).
+    out_tok = text_tok
+    if s.get("finish_reason") == "length" and max_tokens:
+        srv_n = ((s.get("server") or {}).get("usage") or {}).get("completion_tokens")
+        out_tok = int(srv_n) if srv_n else max_tokens
     ttft = s["t_first"] - s["t0"]
     decode_time = s["t_end"] - s["t_first"]
     return {
         "ok": True,
+        "finish_reason": s.get("finish_reason"),
         "prompt_tokens": prompt_tokens,
         "output_tokens": out_tok,
+        "output_tokens_text": text_tok,
         "ttft_ms": ttft * 1e3,
         "prefill_tps": prompt_tokens / ttft if ttft > 0 else None,
         # decode rate excludes the first token (it lands at TTFT):
         "decode_tps": (out_tok - 1) / decode_time if out_tok > 1 and decode_time > 0 else None,
         "tpot_ms": (decode_time / (out_tok - 1)) * 1e3 if out_tok > 1 and decode_time > 0 else None,
         "t0": s["t0"], "t_end": s["t_end"],
+        "server": _server_digest(s.get("server")),
     }
+
+
+_MTPLX_STAT_KEYS = ("decode_tok_s", "prefill_tok_s", "ttft_s", "accepted_drafts",
+                    "rejected_drafts", "drafted_tokens", "verify_calls",
+                    "accepted_by_depth", "drafted_by_depth", "bonus_tokens",
+                    "correction_tokens", "cached_tokens", "ssd_cache_hit")
+
+
+def _server_digest(srv):
+    """Server-reported usage, llama-style timings and the acceptance part of
+    mtplx_stats (with its context_copy_* counters). Attribution only: every
+    scored rate is measured client-side."""
+    if not srv:
+        return None
+    out = {}
+    u = srv.get("usage") or {}
+    if u:
+        out["prompt_tokens"] = u.get("prompt_tokens")
+        out["completion_tokens"] = u.get("completion_tokens")
+        out["cached_tokens"] = (u.get("prompt_tokens_details") or {}).get("cached_tokens")
+    tm = srv.get("timings") or {}
+    for k in ("draft_n", "draft_n_accepted"):
+        if tm.get(k) is not None:
+            out[k] = tm[k]
+    ms = srv.get("mtplx_stats") or {}
+    for k, v in ms.items():
+        if k in _MTPLX_STAT_KEYS or k.startswith("context_copy"):
+            out["mtplx_" + k] = v
+    return out or None
+
+
+def timings_accept(scored):
+    """(draft_n, draft_n_accepted) summed over the samples' server timings.
+    mtplx reports both per response; its context-copy drafts are included."""
+    dn = da = 0
+    for s in scored:
+        srv = s.get("server") or {}
+        dn += srv.get("draft_n") or 0
+        da += srv.get("draft_n_accepted") or 0
+    return dn, da
 
 
 def _med(xs):
@@ -632,7 +744,7 @@ def run_batch(base_url, model_id, prompts, max_tokens, sampling, concurrency,
             pt = futs[fut]
             s = fut.result()
             if s.get("ok"):
-                m = score_sample(s, pt, tok, lock)
+                m = score_sample(s, pt, tok, lock, max_tokens=max_tokens)
                 scored.append(m)
                 raw.append((s["t0"], s["t_end"], m["output_tokens"]))
             else:
@@ -725,16 +837,20 @@ def llama_cmd(args, spec, draft_n, ctx):
     return cmd
 
 
-def _omlx_python():
-    """The python that runs `omlx` on PATH, read from its shebang."""
-    omlx = shutil.which("omlx")
+def _script_python(script):
+    """The python a console script runs under, read from its shebang."""
     try:
-        with open(os.path.realpath(omlx), "rb") as fh:
+        with open(os.path.realpath(shutil.which(script) or script), "rb") as fh:
             line = fh.readline().decode().strip()
     except (TypeError, OSError, UnicodeDecodeError):
         return "python3"
     exe = line[2:].split()[0] if line.startswith("#!") and line[2:].strip() else ""
     return exe if "python" in os.path.basename(exe) else "python3"
+
+
+def _omlx_python():
+    """The python that runs `omlx` on PATH, read from its shebang."""
+    return _script_python(shutil.which("omlx"))
 
 
 def ds4_cmd(args, spec, draft_n, ctx):
@@ -796,10 +912,69 @@ def omlx_cmd(args, spec, draft_n, ctx):
     return cmd + spec.omlx_args
 
 
+def mtplx_cmd(args, spec, draft_n, ctx):
+    """MTPLX comparison arm: `mtplx serve` on the model's mtplx_model pack.
+    Cache fairness: the SSD session cache is off by flag. The RAM SessionBank
+    cannot be turned off, so server_env shrinks it to one entry with prefix
+    restore off, and the unique-nonce prompts give it no shared prefix. Forced
+    length comes from patches/mtplx-ignore-eos.patch, switched on in
+    server_env. Thinking follows the config: --reasoning off only for
+    "thinking": false. ctx is unused (mtplx sizes KV per request)."""
+    if not spec.mtplx_model:
+        return None
+    cmd = [args.mtplx_bin, "serve", "--model", spec.mtplx_model,
+           "--host", "127.0.0.1", "--port", str(MTPLX_PORT), "--no-auth",
+           "--ssd-session-cache", "off", "--no-stats-footer",
+           "--reasoning", "off" if args._thinking is False else "on"]
+    if draft_n is None:
+        cmd += ["--no-mtp"]
+    else:
+        if not spec.mtp_mtplx:
+            return None
+        cmd += ["--mtp", "--depth", str(draft_n)]
+    return cmd + spec.mtplx_args
+
+
+def mtplx_install(mtplx_bin):
+    """(version, package folder) of the mtplx that mtplx_bin runs, found
+    without importing it; (None, None) if its python cannot find mtplx."""
+    try:
+        out = subprocess.run(
+            [_script_python(mtplx_bin), "-P", "-c",
+             "import importlib.metadata as m, importlib.util as u; "
+             "print(m.version('mtplx')); "
+             "print(list(u.find_spec('mtplx').submodule_search_locations)[0])"],
+            capture_output=True, text=True, timeout=60,
+            env=server_env("mtplx")).stdout.split("\n")
+    except Exception:  # noqa: BLE001 - no python or no mtplx -> None
+        return None, None
+    if len(out) < 2 or not out[0].strip():
+        return None, None
+    return out[0].strip(), out[1].strip()
+
+
+def mtplx_preflight(mtplx_bin):
+    """Refuse an mtplx without the forced-length patch, whose replies would
+    stop at EOS and shorten the decode window. Returns the mtplx version."""
+    version, pkg = mtplx_install(mtplx_bin)
+    if not version or not pkg:
+        sys.exit(f"mtplx does not import with the python of {mtplx_bin}; pass "
+                 f"the mtplx of the venv that has it as --mtplx-bin")
+    try:
+        with open(os.path.join(pkg, "generation.py")) as fh:
+            patched = MTPLX_IGNORE_EOS in fh.read()
+    except OSError:
+        patched = False
+    if not patched:
+        sys.exit(f"mtplx {version} at {pkg} has no forced-length mode; apply "
+                 f"patches/mtplx-ignore-eos.patch to it")
+    return version
+
+
 # Runtime -> server command builder. A builder returns None to skip a cell
 # (e.g. no MTP config for that runtime); the skip is recorded in the report.
 BUILDERS = {"gmlx": gmlx_cmd, "llama": llama_cmd, "ds4": ds4_cmd,
-            "omlx": omlx_cmd}
+            "omlx": omlx_cmd, "mtplx": mtplx_cmd}
 
 
 def server_env(runtime):
@@ -815,6 +990,17 @@ def server_env(runtime):
         env["HF_HUB_OFFLINE"] = "1"
         env["PYTHONUNBUFFERED"] = "1"
         env.pop("PYTHONPATH", None)        # a gmlx tree must not shadow omlx's deps
+    if runtime == "mtplx":
+        env[MTPLX_IGNORE_EOS] = "1"                # forced length (bundled patch)
+        env["MTPLX_SSD_SESSION_CACHE"] = "off"
+        env["MTPLX_SESSION_BANK_MAX_ENTRIES"] = "1"
+        env["MTPLX_SESSION_BLOCK_PREFIX_RESTORE"] = "0"
+        env["MTPLX_SESSION_NEAR_PREFIX_RESTORE"] = "0"
+        env["MTPLX_STREAM_PACER"] = "0"            # client timing sees real token times
+        env["MTPLX_WARMUP_BACKGROUND"] = "0"       # warm at boot, not mid-cell
+        env["HF_HUB_OFFLINE"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+        env.pop("PYTHONPATH", None)        # a gmlx tree must not shadow mtplx's deps
     return env
 
 
@@ -890,7 +1076,7 @@ def _parse_ds4_spec_log(path):
 
 def _port(runtime):
     return {"gmlx": GMLX_PORT, "llama": LLAMA_PORT, "ds4": DS4_PORT,
-            "omlx": OMLX_PORT}[runtime]
+            "omlx": OMLX_PORT, "mtplx": MTPLX_PORT}[runtime]
 
 
 def base_url(runtime):
@@ -954,7 +1140,8 @@ def _assert_model_match(runtime, model_id, spec):
     to someone else's server (e.g. a leftover from a prior run) -> abort loudly
     rather than silently benchmark the wrong model."""
     mid = str(model_id)
-    base = os.path.basename(spec.omlx_model if runtime == "omlx" else spec.gguf)
+    base = os.path.basename({"omlx": spec.omlx_model,
+                             "mtplx": spec.mtplx_model}.get(runtime, spec.gguf) or "")
     stem = os.path.splitext(base)[0]
     # Normalize separators before comparing: a positionally-served GGUF reports
     # an id derived from general.name with separators folded to '-' (e.g.
@@ -977,8 +1164,11 @@ def _assert_model_match(runtime, model_id, spec):
     ok = bool(mids & tgts) or any(
         len(m) >= 8 and any(t.startswith(m) or m.startswith(t) for t in tgts)
         for m in mids)
-    # ds4-server reports a fixed alias id regardless of the loaded GGUF filename.
+    # ds4-server reports a fixed alias id regardless of the loaded GGUF filename,
+    # mtplx an "mtplx-" alias of its own regardless of the pack folder.
     if runtime == "ds4" and _n(mid).startswith("deepseek-v4"):
+        ok = True
+    if runtime == "mtplx" and _n(mid).startswith("mtplx-"):
         ok = True
     if not ok:
         # spawn() already asserted the port was free before we launched, so this
@@ -1152,6 +1342,15 @@ def diagnose_failure(outdir, name, runtime, arm_label):
 # ---------------------------------------------------------------------------
 # one server block: bring up a (runtime, model, arm), sweep, tear down
 # ---------------------------------------------------------------------------
+def cell_key(seed, round_idx, spec_name, arm_label, depth, c, shared=False):
+    """Seed string of a cell's prompt RNG. shared_prompts drops the model and
+    the arm from it, so every model and arm of one tokenizer family gets the
+    same prompts."""
+    if shared:
+        return f"{seed}:{round_idx}:{depth}:{c}"
+    return f"{seed}:{round_idx}:{spec_name}:{arm_label}:{depth}:{c}"
+
+
 def measure_block(args, cfg, spec, runtime, arm_label, draft_n, tok, lock, rng,
                   results, outdir, flush_cb=None, round_idx=0):
     if runtime == "ds4" and draft_n is not None and \
@@ -1197,6 +1396,8 @@ def measure_block(args, cfg, spec, runtime, arm_label, draft_n, tok, lock, rng,
     # ds4 request-body extras: forced length (bundled ignore_eos patch) always;
     # thinking off per protocol (its env-free lever is the body key).
     body_extra = None
+    if runtime == "mtplx" and cfg.get("thinking") is False:
+        body_extra = {"chat_template_kwargs": {"enable_thinking": False}}
     if runtime == "ds4":
         body_extra = {"ignore_eos": True}
         if cfg.get("thinking") is False:
@@ -1230,19 +1431,24 @@ def measure_block(args, cfg, spec, runtime, arm_label, draft_n, tok, lock, rng,
                       cfg["sampling"], 1, args.timeout, tok, lock,
                       extra=body_extra)
 
+        blk_dn = blk_da = 0
         for depth in cfg["depths"]:
-            for c in cfg["concurrency"]:
+            for c in concs_for(spec, cfg):
                 # Deterministic per-cell RNG: same (round, spec, arm, depth, c)
                 # yields the same prompts for BOTH runtimes, eliminating
                 # prompt-selection bias in acceptance comparisons.
-                cell_key = f"{args.seed}:{round_idx}:{spec.name}:{arm_label}:{depth}:{c}"
-                cell_seed = int(hashlib.md5(cell_key.encode()).hexdigest()[:8], 16)
+                key_str = cell_key(args.seed, round_idx, spec.name, arm_label,
+                                   depth, c, cfg.get("shared_prompts"))
+                cell_seed = int(hashlib.md5(key_str.encode()).hexdigest()[:8], 16)
                 cell_rng = random.Random(cell_seed)
                 prompts = [make_prompt(tok, depth, args._corpus, cell_rng, lock)
                            for _ in range(c * args.requests)]
                 scored, agg = run_batch(base_url(runtime), model_id, prompts,
                                         cfg["max_tokens"], cfg["sampling"], c,
                                         args.timeout, tok, lock, extra=body_extra)
+                dn, da = timings_accept(scored)
+                blk_dn += dn
+                blk_da += da
                 key = (spec.name, runtime, arm_label, depth, c)
                 results.setdefault(key, {"samples": [], "agg": []})
                 results[key]["samples"].extend(s for s in scored if s.get("ok"))
@@ -1280,6 +1486,16 @@ def measure_block(args, cfg, spec, runtime, arm_label, draft_n, tok, lock, rng,
                       f"({100.0 * da / dn:.0f}%)")
                 if flush_cb:
                     flush_cb()
+
+        # mtplx MTP acceptance from each response's timings
+        if runtime == "mtplx" and draft_n is not None and blk_dn:
+            acc = results.setdefault((spec.name, runtime, arm_label), {})
+            acc.setdefault("round_log_accept", []).append(
+                {"draft_n": blk_dn, "draft_n_accepted": blk_da})
+            print(f"      [mtplx timings] accept={blk_da}/{blk_dn} "
+                  f"({100.0 * blk_da / blk_dn:.0f}%)")
+            if flush_cb:
+                flush_cb()
 
         # ds4 MTP acceptance from the server's DS4_MTP_SPEC_LOG stderr lines
         if runtime == "ds4" and draft_n is not None:
@@ -1344,6 +1560,39 @@ def ratio(a, b):
     return f"{a / b:.2f}x" if (a and b) else "-"
 
 
+def _render_all_arms(specs, cfg, results, meta):
+    """One table per metric with every (model, runtime, arm) as a row: the
+    cross-model view when shared_prompts gives all arms the same prompts."""
+    runtimes = meta.get("runtimes") or []
+    rows = [(sp, rt, al) for sp in specs for rt in runtimes if spec_runs_on(sp, rt)
+            for al, _n in arms_for(sp, cfg)]
+    out = ["## All arms (shared prompts)", ""]
+    concs = sorted({c for sp in specs for c in concs_for(sp, cfg)})
+    tables = [("decode_tps median, c=1", "decode_tps", 1, 1),
+              ("prefill_tps median, c=1", "prefill_tps", 1, 0)]
+    tables += [(f"aggregate tok/s, c={c}", "agg_tps", c, 0) for c in concs if c > 1]
+    for title, key, c, nd in tables:
+        hdr = ["model", "runtime", "arm"] + [f"d{d}" for d in cfg["depths"]]
+        if key == "decode_tps":
+            hdr.append("accept")
+        body = []
+        for sp, rt, al in rows:
+            cells = [cell(results, sp.name, rt, al, d, c) for d in cfg["depths"]]
+            if all(x is None for x in cells):
+                continue
+            row = [sp.name, rt, al] + [f((x or {}).get(key), nd) for x in cells]
+            if key == "decode_tps":
+                ent = (results.get((sp.name, rt, al)) or {}).get("round_log_accept") or []
+                dn = sum(e["draft_n"] for e in ent)
+                da = sum(e["draft_n_accepted"] for e in ent)
+                row.append(f"{100.0 * da / dn:.0f}%" if dn else "-")
+            body.append("| " + " | ".join(row) + " |")
+        if body:
+            out += [f"### {title}", "", "| " + " | ".join(hdr) + " |",
+                    "|" + "|".join(["---"] * len(hdr)) + "|"] + body + [""]
+    return out
+
+
 def render_md(meta, specs, cfg, results):
     rt_a, rt_b = meta.get("runtime_pair") or list(RUNTIMES)
     L = [f"# Serve-path benchmark: {rt_a} vs {rt_b} - {meta['timestamp']}", ""]
@@ -1355,7 +1604,9 @@ def render_md(meta, specs, cfg, results):
         f"| requests/cell={meta['requests']} x {cfg['rounds']} rounds (alternating order) "
         f"| warmup={cfg['warmup']}",
         "- prefill_tps = prompt_tokens / TTFT ; decode_tps = (out-1)/(end-TTFT) ; "
-        "agg_tps = sum(out)/batch_wall. Token counts re-tokenized per model.",
+        "agg_tps = sum(out)/batch_wall. Token counts re-tokenized per model; a "
+        "reply that ends on length counts the server's completion_tokens or "
+        "max_tokens.",
         "- decode_tps shown as median (+-CV%): the CV is the spread across all pooled "
         "samples (requests x rounds), i.e. run-to-run + thermal variance. High CV => "
         "treat the median with caution; raise rounds. Full per-sample data in the JSON.",
@@ -1382,6 +1633,14 @@ def render_md(meta, specs, cfg, results):
                  f"@ {meta.get('omlx_commit', '?')} (+ omlx-serve.py forced length) | "
                  "paged SSD cache off (--no-cache), hot cache off | MLX checkpoint "
                  "on the omlx arm, the GGUF on the gmlx arm")
+    if "mtplx" in (rt_a, rt_b):
+        # the MTPLX NOTICE asks public benchmarks for this credit
+        L.append("- mtplx: MTPLX by Youssof Altoukhi, https://github.com/youssofal/mtplx | "
+                 f"`{meta.get('mtplx_bin', '?')}` "
+                 f"{meta.get('mtplx_version', '?')} (+ ignore-EOS patch) | "
+                 "SSD session cache off, RAM SessionBank 1 entry, stream pacer off | "
+                 "MLX pack on the mtplx arm | acceptance from response timings "
+                 "(context-copy drafts included)")
     L += [
         f"- corpus: `{meta.get('corpus', '?')}` (chat:* = real multi-turn instruct "
         "prompts, chat-templated => representative instruct MTP acceptance; corpus:* = "
@@ -1389,9 +1648,11 @@ def render_md(meta, specs, cfg, results):
         "fallback)",
         "",
     ]
+    if cfg.get("shared_prompts"):
+        L += _render_all_arms(specs, cfg, results, meta)
     for spec in specs:
         L.append(f"## {spec.name}")
-        L.append(f"`{spec.gguf}`  tokenizer=`{spec.tokenizer}`")
+        L.append(f"`{spec.gguf or spec.mtplx_model}`  tokenizer=`{spec.tokenizer}`")
         L.append("")
         # decode + prefill at c=1, per arm, with A/B (runtime pair)
         L.append("### single-stream (c=1): prefill_tps / decode_tps / TPOT ms")
@@ -1461,7 +1722,7 @@ def render_md(meta, specs, cfg, results):
                              f"({100.0 * da / dn:.0f}%)._")
             L.append("")
         # concurrent aggregate throughput
-        concs = [c for c in cfg["concurrency"] if c > 1]
+        concs = [c for c in concs_for(spec, cfg) if c > 1]
         if concs:
             L.append("### concurrent aggregate throughput (agg_tps)")
             hdr = ["depth", "arm", "runtime"] + [f"c={c}" for c in concs]
@@ -1530,6 +1791,10 @@ def write_outputs(outdir, stamp, meta, cfg, specs, results):
             "models": [{"name": s.name, "gguf": s.gguf, "tokenizer": s.tokenizer,
                         **({"omlx_model": s.omlx_model, "omlx_args": s.omlx_args}
                            if s.omlx_model else {}),
+                        **({"mtplx_model": s.mtplx_model, "mtplx_args": s.mtplx_args}
+                           if s.mtplx_model else {}),
+                        **({"runtimes": s.runtimes} if s.runtimes else {}),
+                        "concurrency": concs_for(s, cfg),
                         "arms": [a for a, _ in arms_for(s, cfg)]} for s in specs],
             "results": {"|".join(map(str, k)): v for k, v in results.items()}}
     with open(md_path, "w") as fh:
@@ -1922,7 +2187,7 @@ def run_probe(args, specs, cfg, runtimes, toks, lock, rng):
 
 # ---------------------------------------------------------------------------
 def main():
-    global GMLX_PORT, LLAMA_PORT, DS4_PORT, OMLX_PORT   # rebound from --*-port flags
+    global GMLX_PORT, LLAMA_PORT, DS4_PORT, OMLX_PORT, MTPLX_PORT   # rebound from --*-port flags
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("gguf", nargs="*", help="GGUF path(s) for a quick baseline-only "
@@ -1963,10 +2228,11 @@ def main():
     ap.add_argument("--startup-timeout", type=float, default=240.0,
                     help="seconds to wait for a server to load and answer its "
                          "first completion")
-    ap.add_argument("--vs", choices=("llama", "ds4", "omlx"), default="llama",
+    ap.add_argument("--vs", choices=("llama", "ds4", "omlx", "mtplx"), default="llama",
                     help="comparison arm vs gmlx (default llama; ds4 = "
                          "dwarfstar ds4-server; omlx = `omlx serve` on each "
-                         "model's omlx_model MLX checkpoint)")
+                         "model's omlx_model MLX checkpoint; mtplx = `mtplx "
+                         "serve` on each model's mtplx_model MLX pack)")
     ap.add_argument("--gmlx-bin", default=shutil.which("gmlx") or "gmlx",
                     help="gmlx executable (default: from PATH)")
     ap.add_argument("--llama-server-bin",
@@ -1978,6 +2244,10 @@ def main():
                     help="python of the venv with omlx installed; runs "
                          "omlx-serve.py (default: the python that runs `omlx` "
                          "on PATH)")
+    ap.add_argument("--mtplx-bin", default=shutil.which("mtplx") or "mtplx",
+                    help="mtplx executable of a venv with "
+                         "patches/mtplx-ignore-eos.patch applied (default: "
+                         "from PATH)")
     ap.add_argument("--gmlx-port", type=int, default=GMLX_PORT,
                     help="port for the gmlx server (override to dodge a "
                          "stale server already on the default)")
@@ -1987,7 +2257,9 @@ def main():
                     help="port for ds4-server (override to dodge a stale server)")
     ap.add_argument("--omlx-port", type=int, default=OMLX_PORT,
                     help="port for omlx serve (override to dodge a stale server)")
-    ap.add_argument("--only", help="comma subset of runtimes: gmlx,llama,ds4,omlx")
+    ap.add_argument("--mtplx-port", type=int, default=MTPLX_PORT,
+                    help="port for mtplx serve (override to dodge a stale server)")
+    ap.add_argument("--only", help="comma subset of runtimes: gmlx,llama,ds4,omlx,mtplx")
     ap.add_argument("--mtp-only", action="store_true",
                     help="skip the baseline arm; measure only the MTP arms")
     ap.add_argument("--outdir", default="results")
@@ -2008,6 +2280,7 @@ def main():
     LLAMA_PORT = args.llama_port
     DS4_PORT = args.ds4_port
     OMLX_PORT = args.omlx_port
+    MTPLX_PORT = args.mtplx_port
 
     try:
         sys.stdout.reconfigure(line_buffering=True)   # flush progress even when piped to a file
@@ -2032,9 +2305,9 @@ def main():
     for r in runtimes:
         if r not in BUILDERS:
             sys.exit(f"unknown runtime {r!r} in --only (choices: {sorted(BUILDERS)})")
-    if args.probe and {"ds4", "omlx"} & set(runtimes):
+    if args.probe and {"ds4", "omlx", "mtplx"} & set(runtimes):
         sys.exit("--probe is llama-vs-gmlx only (it parses llama-server "
-                 "stdout rates); drop --vs / --only ds4 or omlx")
+                 "stdout rates); drop --vs / --only ds4, omlx or mtplx")
     if "ds4" in runtimes:
         if cfg.get("thinking") is not False and \
                 cfg["sampling"].get("temperature") not in (None, 1.0):
@@ -2049,17 +2322,32 @@ def main():
                   "unset kv_bits for a fair A/B")
     if "omlx" in runtimes:
         for s in specs:
-            if not s.omlx_model:
+            if spec_runs_on(s, "omlx") and not s.omlx_model:
                 sys.exit(f"model {s.name}: --vs omlx needs omlx_model (an MLX "
                          f"checkpoint folder) in the config")
         if any(s.kv_bits for s in specs):
             print("[warn] kv_bits has no omlx mapping: the gmlx arm would "
                   "quantize KV while omlx does not; unset kv_bits for a fair A/B")
-    args._max_conc = max(cfg["concurrency"])
+    if "mtplx" in runtimes:
+        for s in specs:
+            if spec_runs_on(s, "mtplx") and not s.mtplx_model:
+                sys.exit(f"model {s.name}: --vs mtplx needs mtplx_model (an MLX "
+                         f"pack folder), or runtimes without mtplx")
+    for s in specs:
+        if not s.gguf and any(spec_runs_on(s, r) for r in runtimes
+                              if r in ("gmlx", "llama", "ds4")):
+            sys.exit(f"model {s.name}: no gguf; give it one, or runtimes "
+                     f"without gmlx, llama and ds4")
+    args._max_conc = max([max(cfg["concurrency"])]
+                         + [max(s.concurrency) for s in specs if s.concurrency])
+    args._thinking = cfg.get("thinking")
 
     for spec in specs:
         if not spec.tokenizer:
             sys.exit(f"model {spec.name}: no tokenizer (set per-model or --tokenizer)")
+        if spec.tokenizer.lower() == "gguf" and not spec.gguf:
+            sys.exit(f"model {spec.name}: tokenizer \"gguf\" needs the model's "
+                     f"gguf; name a GGUF path or an HF id as its tokenizer")
 
     if args.dry_run and args.probe:
         print("=== COLD-PREFILL PROBE PLAN (dry-run, nothing launched) ===")
@@ -2108,10 +2396,13 @@ def main():
                       f"thinking={cfg.get('thinking')}")
         for spec in specs:
             arms = arms_for(spec, cfg)
-            print(f"\n# {spec.name}  ({spec.gguf})  tok={spec.tokenizer}  "
-                  f"arms={[a for a, _ in arms]}"
-                  + (f"  omlx={spec.omlx_model}" if spec.omlx_model else ""))
-            for rt in runtimes:
+            print(f"\n# {spec.name}  ({spec.gguf or spec.mtplx_model})  "
+                  f"tok={spec.tokenizer}  arms={[a for a, _ in arms]}  "
+                  f"c={concs_for(spec, cfg)}"
+                  + (f"  omlx={spec.omlx_model}" if spec.omlx_model else "")
+                  + (f"  mtplx={spec.mtplx_model}"
+                     if spec.mtplx_model and spec.gguf else ""))
+            for rt in [r for r in runtimes if spec_runs_on(spec, r)]:
                 for arm_label, draft_n in arms:
                     cmd = BUILDERS[rt](args, spec, draft_n,
                                        runtime_ctx(rt, args._max_conc, cfg))
@@ -2162,6 +2453,14 @@ def main():
             sys.exit(f"omlx {omlx_version} has no forced-length mode "
                      f"(SamplingParams.ignore_eos); install omlx 0.7.2 or later")
         print(f"[provenance] omlx {omlx_version} @ {omlx_commit} ({args.omlx_python})")
+    mtplx_version = None
+    if "mtplx" in runtimes:
+        if not shutil.which(args.mtplx_bin):
+            sys.exit(f"mtplx not found ({args.mtplx_bin})\n  install mtplx into "
+                     f"its own venv, apply patches/mtplx-ignore-eos.patch, then "
+                     f"pass that venv's mtplx as --mtplx-bin")
+        mtplx_version = mtplx_preflight(args.mtplx_bin)
+        print(f"[provenance] mtplx {mtplx_version} ({args.mtplx_bin})")
 
     # corpus: chat dataset (instruct MTP) > raw text file > embedded fallback
     if args.chat_dataset:
@@ -2216,6 +2515,8 @@ def main():
                 "ds4_commit": ds4_commit, "thinking": cfg.get("thinking"),
                 "omlx_python": args.omlx_python if "omlx" in runtimes else None,
                 "omlx_version": omlx_version, "omlx_commit": omlx_commit,
+                "mtplx_bin": args.mtplx_bin if "mtplx" in runtimes else None,
+                "mtplx_version": mtplx_version,
                 "runtime_pair": pair,
                 "runtimes": runtimes, "thermals": thermals, "corpus": corpus_label,
                 "cool_gate_timeouts": list(_COOL_TIMEOUTS),
@@ -2231,27 +2532,38 @@ def main():
         write_outputs(args.outdir, stamp, _meta(True), cfg, specs, results)
 
     for rnd in range(cfg["rounds"]):
+        if rnd == 0 and cfg.get("cool_to_c"):
+            # The first block gets the same thermal floor as every later one.
+            print(f"    [cool] first block gate <= {cfg['cool_to_c']:.0f}C")
+            _cooldown({**cfg, "cooldown": 0.0})
         order = list(runtimes)
         if rnd % 2 == 1:
             order = order[::-1]                 # alternate runtime order per round
         therm = thermal_snapshot()
         thermals.append({"round": rnd + 1, "order": order, "therm": therm})
         print(f"\n=== round {rnd + 1}/{cfg['rounds']} | order {order} | {therm} ===")
-        for runtime in order:
-            for spec in specs:
-                for arm_label, draft_n in arms_for(spec, cfg):
-                    print(f"  -- {spec.name} / {runtime} / {arm_label}")
-                    try:
-                        measure_block(args, cfg, spec, runtime, arm_label, draft_n,
-                                      toks[spec.name], lock, rng, results, args.outdir,
-                                      flush_cb=_flush, round_idx=rnd)
-                    except Exception as e:  # noqa: BLE001 - one bad cell shouldn't kill the run
-                        reason = diagnose_failure(args.outdir, spec.name, runtime,
-                                                  arm_label) or str(e)
-                        print(f"    [error] {spec.name}/{runtime}/{arm_label}: {reason}")
-                        results.setdefault((spec.name, runtime, arm_label), {})["_failed"] = reason
-                        results.setdefault((spec.name, runtime, arm_label), {})["_error"] = str(e)
-                    _flush()                    # persist after every arm too
+        # Every block in a fixed order, the whole list reversed on odd rounds,
+        # so each arm sits in mirrored positions and linear drift cancels.
+        blocks = [(runtime, spec, arm_label, draft_n)
+                  for runtime in runtimes
+                  for spec in specs if spec_runs_on(spec, runtime)
+                  for arm_label, draft_n in arms_for(spec, cfg)]
+        if rnd % 2 == 1:
+            blocks = blocks[::-1]
+        thermals[-1]["blocks"] = [f"{s.name}/{rt}/{a}" for rt, s, a, _ in blocks]
+        for runtime, spec, arm_label, draft_n in blocks:
+            print(f"  -- {spec.name} / {runtime} / {arm_label}")
+            try:
+                measure_block(args, cfg, spec, runtime, arm_label, draft_n,
+                              toks[spec.name], lock, rng, results, args.outdir,
+                              flush_cb=_flush, round_idx=rnd)
+            except Exception as e:  # noqa: BLE001 - one bad cell shouldn't kill the run
+                reason = diagnose_failure(args.outdir, spec.name, runtime,
+                                          arm_label) or str(e)
+                print(f"    [error] {spec.name}/{runtime}/{arm_label}: {reason}")
+                results.setdefault((spec.name, runtime, arm_label), {})["_failed"] = reason
+                results.setdefault((spec.name, runtime, arm_label), {})["_error"] = str(e)
+            _flush()                    # persist after every arm too
 
     md_path, json_path, md = write_outputs(
         args.outdir, stamp, _meta(False), cfg, specs, results)

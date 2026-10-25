@@ -8,7 +8,8 @@
       "deepseek-v4-flash-antirez-iq2xxs": "b030961",
       "deepseek-v4.1-flash-antirez-q2": "8db1d1d"
     },
-    "omlx": "0.7.2"
+    "omlx": "0.7.2",
+    "mtplx": "2.12.2"
   },
   "order": [
     "qwen3.5-122b-a10b-ud-q5km",
@@ -28,6 +29,7 @@
     "deepseek-v4.1-flash-antirez-q2",
     "flint-int4-q4_1",
     "flint-int4-q4_1-omlx",
+    "qwen3.8-27b-q4_0-mtplx",
     "qwen38-flash-next-udq3kxl"
   ],
   "models": {
@@ -3421,6 +3423,227 @@
       "omlx_weights": {
         "source": "https://huggingface.co/RecursiveSI/flint-int4",
         "note": "relabeled from U8 to uint32 storage with its 8-bit embedding declared in config.json, bytes unchanged"
+      }
+    },
+    "qwen3.8-27b-q4_0-mtplx": {
+      "label": "Qwen3.8-27B 4-bit",
+      "comparison": "MTPLX",
+      "mtp": true,
+      "mtp_kind": "native, drafter",
+      "gguf": "Qwen3.8-27B-Q4_0.gguf",
+      "source": "https://huggingface.co/quark75/Qwen3.8-27B-Q4_0.gguf",
+      "builds": {
+        "gmlx": "0.5.1+#225",
+        "mlx-kquant": "0.5.6",
+        "mtplx": "2.12.2"
+      },
+      "measured": "2026-10-25",
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_mtp_decode": 66.2,
+          "gmlx_dflash_decode": 80.9,
+          "mtplx_mtp_decode": 61.7,
+          "gmlx_prefill": 577.1,
+          "mtplx_prefill": 490.0,
+          "range": {
+            "gmlx_mtp_decode": [
+              53.9,
+              84.8
+            ],
+            "gmlx_dflash_decode": [
+              63.9,
+              140.0
+            ],
+            "mtplx_mtp_decode": [
+              54.9,
+              90.9
+            ],
+            "gmlx_prefill": [
+              547.5,
+              618.8
+            ],
+            "mtplx_prefill": [
+              418.6,
+              556.9
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_mtp_decode": 69.8,
+          "gmlx_dflash_decode": 76.3,
+          "mtplx_mtp_decode": 54.5,
+          "gmlx_prefill": 737.0,
+          "mtplx_prefill": 670.6,
+          "range": {
+            "gmlx_mtp_decode": [
+              58.4,
+              89.7
+            ],
+            "gmlx_dflash_decode": [
+              45.1,
+              113.2
+            ],
+            "mtplx_mtp_decode": [
+              46.5,
+              60.9
+            ],
+            "gmlx_prefill": [
+              726.9,
+              748.4
+            ],
+            "mtplx_prefill": [
+              660.3,
+              684.1
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_mtp_decode": 59.0,
+          "gmlx_dflash_decode": 71.8,
+          "mtplx_mtp_decode": 52.6,
+          "gmlx_prefill": 712.6,
+          "mtplx_prefill": 659.6,
+          "range": {
+            "gmlx_mtp_decode": [
+              51.8,
+              83.9
+            ],
+            "gmlx_dflash_decode": [
+              38.5,
+              124.8
+            ],
+            "mtplx_mtp_decode": [
+              43.8,
+              61.7
+            ],
+            "gmlx_prefill": [
+              687.6,
+              726.5
+            ],
+            "mtplx_prefill": [
+              643.5,
+              679.9
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_mtp_decode": 48.8,
+          "gmlx_dflash_decode": 63.8,
+          "mtplx_mtp_decode": 38.0,
+          "gmlx_prefill": 548.2,
+          "mtplx_prefill": 534.3,
+          "range": {
+            "gmlx_mtp_decode": [
+              42.0,
+              61.0
+            ],
+            "gmlx_dflash_decode": [
+              52.8,
+              85.1
+            ],
+            "mtplx_mtp_decode": [
+              37.3,
+              53.1
+            ],
+            "gmlx_prefill": [
+              542.2,
+              551.3
+            ],
+            "mtplx_prefill": [
+              526.5,
+              536.5
+            ]
+          }
+        },
+        {
+          "depth": 110000,
+          "gmlx_mtp_decode": 44.5,
+          "gmlx_dflash_decode": 58.9,
+          "mtplx_mtp_decode": 35.5,
+          "gmlx_prefill": 472.2,
+          "mtplx_prefill": 460.4,
+          "range": {
+            "gmlx_mtp_decode": [
+              40.6,
+              46.3
+            ],
+            "gmlx_dflash_decode": [
+              40.7,
+              61.0
+            ],
+            "mtplx_mtp_decode": [
+              33.8,
+              37.7
+            ],
+            "gmlx_prefill": [
+              471.0,
+              480.5
+            ],
+            "mtplx_prefill": [
+              436.8,
+              463.1
+            ]
+          }
+        },
+        {
+          "depth": 200000,
+          "gmlx_mtp_decode": 37.3,
+          "gmlx_dflash_decode": 47.3,
+          "mtplx_mtp_decode": 23.7,
+          "gmlx_prefill": 358.7,
+          "mtplx_prefill": 318.5,
+          "range": {
+            "gmlx_mtp_decode": [
+              33.2,
+              38.2
+            ],
+            "gmlx_dflash_decode": [
+              41.9,
+              55.4
+            ],
+            "mtplx_mtp_decode": [
+              21.3,
+              26.1
+            ],
+            "gmlx_prefill": [
+              355.9,
+              361.2
+            ],
+            "mtplx_prefill": [
+              313.0,
+              353.9
+            ]
+          }
+        }
+      ],
+      "gguf_note": "Q6_K output tensor requantized to Q4_0",
+      "mtplx_weights": {
+        "source": "https://huggingface.co/Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed",
+        "note": "MLX 4-bit affine weights in groups of 64 and a 4-bit MTP head"
+      },
+      "mtplx_measured": "2026-10-14",
+      "arms": {
+        "gmlx_mtp": {
+          "runtime": "gmlx",
+          "method": "native MTP head",
+          "draft_tokens": 5
+        },
+        "gmlx_dflash": {
+          "runtime": "gmlx",
+          "method": "DFlash 2 drafter",
+          "draft_tokens": 7,
+          "drafter": "Qwen3.8-27B-DFlash2-Q4_0.gguf",
+          "source": "https://huggingface.co/incoai/Qwen3.8-27B-DFlash2-GGUF"
+        },
+        "mtplx_mtp": {
+          "runtime": "mtplx",
+          "method": "native MTP head",
+          "draft_tokens": 3
+        }
       }
     },
     "qwen38-flash-next-udq3kxl": {

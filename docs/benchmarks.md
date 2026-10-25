@@ -1,10 +1,9 @@
 # Benchmarks
 
-gmlx serves the same GGUF files faster than llama.cpp, one request at a
-time, at context depths from 512 to more than 200K tokens. Its prefill is
-faster on every model at every measured depth. Above a depth of about 4K
-tokens its decoding is faster too, and the gap grows as the context
-deepens.
+gmlx serves the same GGUF files faster than llama.cpp at context depths
+from 512 to more than 200K tokens. Its prefill is faster on every model
+at every measured depth. Above a depth of about 4K tokens its decoding
+is faster too, and the gap grows as the context deepens.
 
 Speculative decoding is measured where the model has a
 [native head](glossary.md#native-head) or a companion drafter. The
@@ -20,6 +19,7 @@ in [a JSON file](benchmarks.json), and the
 - [Per-model detail](#per-model-detail)
 - [DeepSeek-V4 against ds4-server](#deepseek-v4-against-ds4-server)
 - [Flint against oMLX](#flint-against-omlx)
+- [Qwen3.8-27B against MTPLX](#qwen38-27b-against-mtplx)
 - [Image generation](#image-generation)
 - [Serving measurements](#serving-measurements)
 - [KV cache fidelity](#kv-cache-fidelity)
@@ -44,10 +44,12 @@ decoding on the same server, for each model, against the context depth.
 
 ## Methodology
 
-Every number in the per-model tables is server throughput for one
-request at a time. Both engines ran the same GGUF weights, sampler
-settings and chat prompts on the setup in this table. oMLX loads MLX
-checkpoints, so it ran an MLX checkpoint of the same weights.
+Every number in the per-model tables is server throughput. Both engines
+ran the same GGUF weights, sampler settings and chat prompts on the
+setup in this table. oMLX loads MLX checkpoints, so it ran an MLX
+checkpoint of the same weights. MTPLX ran its own checkpoint of the
+model, with the prompts and sampler settings listed under [Qwen3.8-27B
+against MTPLX](#qwen38-27b-against-mtplx).
 
 | Item | Setting |
 |---|---|
@@ -58,7 +60,8 @@ checkpoints, so it ran an MLX checkpoint of the same weights.
 | Build overrides | Models measured again on newer releases list their own builds under Model provenance. |
 | DeepSeek-V4 reference | The dwarfstar ds4-server by antirez with the ignore-eos patch, at `b030961` for DeepSeek-V4-Flash IQ2_XXS and `8db1d1d` for DeepSeek-V4.1-Flash Q2. |
 | oMLX reference | oMLX `0.7.2` at `3df94603` with its custom kernels built, its prefix caches off and forced-length decode. |
-| Dates | 2026-07-05 to 2026-10-24. |
+| MTPLX reference | MTPLX `2.12.2` with the ignore-eos patch, for forced-length decode. |
+| Dates | 2026-07-05 to 2026-10-25. |
 | Prompt corpus | `HuggingFaceH4/ultrachat_200k:train_sft`, with the chat template applied. |
 | Sampling | Temperature 0.6, top-p 0.95, top-k 20 and seed 1234, with the same random sequence on both engines. |
 | Speculative draft | Three draft tokens a round, two on Qwen3.8-Flash-Next, from the native MTP head or gemma-4's companion drafter. |
@@ -101,6 +104,7 @@ one cell at a time.
 | DeepSeek-V4.1-Flash Q2 | `DeepSeek-V4.1-Flash-Q2.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4.1-flash-gguf) | - | gmlx 0.4.13+ds41 / kq 0.4.11 | 2026-09-18 |
 | Flint INT4 Q4_1 | `flint-int4-q4_1.gguf` | [HF](https://huggingface.co/RecursiveSI/flint-int4-gguf) | - | gmlx 0.5.1+flint-perf / kq 0.5.6 | 2026-10-24 |
 | Flint INT4 | `flint-int4-q4_1.gguf` | [HF](https://huggingface.co/RecursiveSI/flint-int4-gguf) | - | gmlx 0.5.1+flint-perf / kq 0.5.6 / oMLX 0.7.2 | 2026-10-24 |
+| Qwen3.8-27B 4-bit | `Qwen3.8-27B-Q4_0.gguf` | [HF](https://huggingface.co/quark75/Qwen3.8-27B-Q4_0.gguf) | Native, drafter | gmlx 0.5.1+#225 / kq 0.5.6 / MTPLX 2.12.2 | 2026-10-25 |
 | Qwen3.8-Flash-Next UD-Q3_K_XL | `Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | Native | gmlx 0.4.5+#98 / kq 0.4.3 | 2026-08-29 |
 
 ## Per-model detail
@@ -404,6 +408,55 @@ divided by oMLX, and [Methodology](#methodology) lists the oMLX build.
 | 67k | 109.1 (108.3-109.3) | 87.7 (86.6-89.2) | 1.24x | 2945.2 (2853.1-3038.5) | 2338.9 (2269-2423.4) | 1.26x |
 | 110k | 87 (85.9-87.4) | 66.5 (66.1-67.3) | 1.31x | 1990.6 (1965.7-2052.6) | 1692 (1672.8-1704.2) | 1.18x |
 | 200k | 60.9 (60.6-61.3) | 45.4 (44.9-46.2) | 1.34x | 1243.2 (1213.3-1248.8) | 1113.7 (1108.3-1117.3) | 1.12x |
+
+## Qwen3.8-27B against MTPLX
+
+[MTPLX by Youssof Altoukhi](https://github.com/youssofal/mtplx) serves
+MLX checkpoints with speculative decoding from the model's native MTP
+head. It ran its Bare Speed checkpoint,
+[Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed](https://huggingface.co/Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed),
+with MLX 4-bit affine weights in groups of 64 and a 4-bit MTP head. gmlx
+ran the Q4_0 GGUF file under [Model provenance](#model-provenance) with
+its Q6_K output tensor requantized to Q4_0, so both engines store 4.5
+bits per weight.
+
+gmlx ran two speculative arms: the native MTP head, as MTPLX does, and
+the [DFlash 2
+drafter](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2-GGUF)
+`Qwen3.8-27B-DFlash2-Q4_0.gguf`. Each ratio is gmlx divided by MTPLX.
+This comparison has its own settings in place of those under
+[Methodology](#methodology):
+
+- Prompts are code requests from
+  `ise-uiuc/Magicoder-Evol-Instruct-110K`, the same ones on every arm,
+  with thinking on at medium effort.
+- Sampling is temperature 1.0, top-p 0.95, top-k 20 and seed 1234, with
+  256 output tokens a request.
+- Eight requests a cell up to 17K tokens and two from 67K, each in two
+  rounds.
+- Draft tokens a round are 5 for gmlx's native head, 7 for the DFlash 2
+  drafter and 3 for MTPLX, the most MTPLX allows for this checkpoint.
+  Each was the fastest length tried at 4.3K tokens.
+- gmlx prefill is from its native-head arm.
+- MTPLX was measured on 2026-10-14 and gmlx on 2026-10-25. MTPLX
+  repeated four of its 17K requests on 2026-10-25 with the same tokens
+  and acceptance, about 3% slower.
+
+### Qwen3.8-27B 4-bit
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/qwen3.8-27b-q4_0-mtplx-panels-dark.svg">
+  <img src="assets/perf/per-model/qwen3.8-27b-q4_0-mtplx-panels.svg" alt="gmlx and MTPLX prefill and decode throughput against KV depth for Qwen3.8-27B 4-bit">
+</picture>
+
+| KV depth | gmlx decode (MTP) | gmlx decode (DFlash 2) | MTPLX decode (MTP) | gmlx/MTPLX decode (MTP) | gmlx/MTPLX decode (DFlash 2) | gmlx prefill | MTPLX prefill | gmlx/MTPLX prefill |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| 512 | 66.2 (53.9-84.8) | 80.9 (63.9-140) | 61.7 (54.9-90.9) | 1.07x | 1.31x | 577.1 (547.5-618.8) | 490 (418.6-556.9) | 1.18x |
+| 4.3k | 69.8 (58.4-89.7) | 76.3 (45.1-113.2) | 54.5 (46.5-60.9) | 1.28x | 1.40x | 737 (726.9-748.4) | 670.6 (660.3-684.1) | 1.10x |
+| 17k | 59 (51.8-83.9) | 71.8 (38.5-124.8) | 52.6 (43.8-61.7) | 1.12x | 1.37x | 712.6 (687.6-726.5) | 659.6 (643.5-679.9) | 1.08x |
+| 67k | 48.8 (42-61) | 63.8 (52.8-85.1) | 38 (37.3-53.1) | 1.28x | 1.68x | 548.2 (542.2-551.3) | 534.3 (526.5-536.5) | 1.03x |
+| 110k | 44.5 (40.6-46.3) | 58.9 (40.7-61) | 35.5 (33.8-37.7) | 1.25x | 1.66x | 472.2 (471-480.5) | 460.4 (436.8-463.1) | 1.03x |
+| 200k | 37.3 (33.2-38.2) | 47.3 (41.9-55.4) | 23.7 (21.3-26.1) | 1.57x | 2.00x | 358.7 (355.9-361.2) | 318.5 (313-353.9) | 1.13x |
 
 ## Image generation
 
