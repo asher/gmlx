@@ -47,7 +47,8 @@ explicit PREFILL_STEP_SIZE is in force.
 
 A MoE whose routed experts average at most 128 rows of a stock chunk, over
 all of a batch's prompts, reads each expert's weights for few rows, so with
-no arch base step its default base doubles to GMLX_MOE_WIDE_STEP (4096).
+no arch base step its default base doubles to 4096 from the M5 on
+(GMLX_MOE_WIDE_STEP names a chunk on any chip).
 The wider chunk's MoE rows are not in the score fit, so it holds only while
 the free working set keeps 20 GiB, read per chunk, and never on a model
 that streams its experts.
@@ -74,8 +75,8 @@ Knobs:
     GMLX_PREFILL_SCORE_PROFILE=0  ignore arch score profiles (dense model
                                     everywhere, pre-profile behavior)
     GMLX_MOE_WIDE_STEP          base step of a MoE with few rows per expert
-                                    (default 4096; 2048 or less keeps the
-                                    stock step)
+                                    (4096 from the M5 on, 2048 before; 2048
+                                    or less keeps the stock step)
     GMLX_PREFILL_FUSED_256=0    price head dim 256 as unfused, as on a GPU
                                     without NAX
     GMLX_PREFILL_HEADROOM_CAP=1 raise the body cap to min(half the live
@@ -956,10 +957,15 @@ def prompt_rows(batch) -> int:
 
 
 def _wide_step() -> int:
-    """GMLX_MOE_WIDE_STEP when set; else 4096 from _MOE_WIDE_MIN_GEN on
-    (an unknown generation counts as new) and the stock chunk before."""
-    if os.environ.get("GMLX_MOE_WIDE_STEP"):
-        return env_int("GMLX_MOE_WIDE_STEP", 4096)
+    """GMLX_MOE_WIDE_STEP when it names a number; else 4096 from
+    _MOE_WIDE_MIN_GEN on (an unknown generation counts as new) and the
+    stock chunk before."""
+    raw = os.environ.get("GMLX_MOE_WIDE_STEP", "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
     from gmlx.load.dtypes import gpu_arch_gen
 
     gen = gpu_arch_gen()

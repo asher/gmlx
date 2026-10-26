@@ -18,9 +18,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Decode spends less host time per token: the memory governor and the
   command-buffer phase flip no longer repeat their per-step reads while
   nothing changed.
-- A sparse MoE on M1 through M4 prefills long prompts in the 0.5.1 chunk
-  again; the wider 0.5.2 chunk, which pays off from the M5 on, cost
-  a few percent of prefill there. `GMLX_MOE_WIDE_STEP=4096` keeps it.
+- A sparse MoE on M1 through M4 prefills in the 0.5.1 chunk again, a few
+  percent faster than 0.5.2. `GMLX_MOE_WIDE_STEP=4096` keeps the wider chunk.
 
 ## [0.5.2] - 2026-10-25
 

@@ -264,19 +264,21 @@ def resident_prefill_rows(step: int | None = None,
     """Rows of the widest prefill chunk serve takes for a model whose
     experts stay in memory, as ``prefill_decay._run_base`` takes it: the
     requested ``step`` or ``PREFILL_STEP_SIZE`` when set, else the wide
-    MoE step (``GMLX_MOE_WIDE_STEP``) for a MoE of ``experts`` routed
-    experts, ``used`` a token, that ``prefill_decay.moe_base_step``
-    widens, else the stock 2048. An arch with its own step (its step env,
+    MoE step (``prefill_decay._wide_step``: ``GMLX_MOE_WIDE_STEP``, else
+    4096 from the M5 on) for a MoE of ``experts`` routed experts, ``used``
+    a token, that ``prefill_decay.moe_base_step`` widens, else the stock
+    2048. An arch with its own step (its step env,
     else ``_ARCH_RESIDENT_STEP``) takes the wider of that and the rest,
     since a batch its profile is off for takes the rest. A resident
     prefill merges no tail."""
-    from gmlx.gen.prefill_decay import _MOE_WIDE_MAX_ROWS, _STOCK_BASE
+    from gmlx.gen.prefill_decay import (_MOE_WIDE_MAX_ROWS, _STOCK_BASE,
+                                        _wide_step)
 
     if not (isinstance(step, int) and step > 0):
         step = env_int("PREFILL_STEP_SIZE", 0)
     if step > 0:
         return step
-    wide = env_int("GMLX_MOE_WIDE_STEP", 4096)
+    wide = _wide_step()
     rest = (wide if wide > _STOCK_BASE and experts and used
             and _STOCK_BASE * used <= _MOE_WIDE_MAX_ROWS * experts
             else _STOCK_BASE)

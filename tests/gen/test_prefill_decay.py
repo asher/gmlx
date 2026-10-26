@@ -1048,6 +1048,10 @@ def test_moe_wide_step_waits_for_a_new_enough_gpu(monkeypatch, resident):
     # an unknown generation counts as new
     monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda: 0)
     assert pd._run_base(_moe(256, 8), None, None) == 4096
+    # a value that is not a number counts as unset
+    monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda: 16)
+    monkeypatch.setenv("GMLX_MOE_WIDE_STEP", "yes")
+    assert pd._run_base(_moe(256, 8), None, None) == 2048
 
 
 def test_moe_with_few_rows_per_expert_takes_the_wide_step(resident):

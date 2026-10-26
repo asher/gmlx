@@ -69,8 +69,25 @@ QWEN4EXP_CFG = {"model_type": "qwen4_exp", "hidden_size": 2560,
 
 @pytest.fixture
 def chunk_env(monkeypatch):
-    for k in ("PREFILL_STEP_SIZE", "GMLX_STREAM_PREFILL_TAIL_MERGE"):
+    import gmlx.load.dtypes as dtypes
+
+    for k in ("PREFILL_STEP_SIZE", "GMLX_STREAM_PREFILL_TAIL_MERGE",
+              "GMLX_MOE_WIDE_STEP"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda: 17)
+
+
+def test_a_moe_kept_in_memory_prices_the_chunk_of_its_gpu(chunk_env, monkeypatch):
+    import gmlx.load.dtypes as dtypes
+
+    # one generation under the wide step's line: the stock chunk, as
+    # prefill_decay runs it there
+    monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda: 16)
+    assert budget.resident_prefill_rows(model_type="qwen3_5_moe",
+                                        experts=256, used=8) == 2048
+    monkeypatch.setenv("GMLX_MOE_WIDE_STEP", "4096")
+    assert budget.resident_prefill_rows(model_type="qwen3_5_moe",
+                                        experts=256, used=8) == 4096
 
 
 def test_chunk_rows_follow_the_streamed_chunk_width(chunk_env, monkeypatch):
