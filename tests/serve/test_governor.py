@@ -678,6 +678,8 @@ def test_kernel_floor_trend_resets_above_floor(rig, monkeypatch):
     gov._governor_tick(gen)
     rig["kernel"] = 30e9                           # recovered
     gov._governor_tick(gen)
+    st = gov._state(gen)
+    st.kernel_sampled_tick = st.tick_no - 16       # the next tick reads live
     rig["kernel"] = 6.5e9                          # new breach, stable level
     gov._governor_tick(gen)
     assert failed == []
@@ -983,7 +985,7 @@ def test_kernel_floor_reads_every_tick_under_the_floor(rig, monkeypatch):
     assert len(reads) == 1
     st = gov._state(gen)
     st.kernel_sampled_tick = st.tick_no - 16     # the next tick is due
-    rig["kernel"] = 2e9
+    rig["kernel"] = 7e9
     gov._governor_tick(gen)                      # breach: sample, reclaim re-read
     n = len(reads)
     assert n >= 2
@@ -999,3 +1001,30 @@ def test_kernel_floor_reads_every_tick_under_the_floor(rig, monkeypatch):
     assert len(reads) == n
     gov._governor_tick(gen)
     assert len(reads) == n + 1
+
+
+def test_kernel_floor_reads_live_near_the_floor_and_under_a_prompt(rig, monkeypatch):
+    # Within twice the floor every tick reads; so does a tick with a
+    # prompt in flight, since a prompt chunk can wire GBs at once.
+    reads = []
+    monkeypatch.setattr(gov, "_kernel_unwired",
+                        lambda: (reads.append(1), rig["kernel"])[1])
+    gen = FakeGen(rows=2)
+    rig["kernel"] = 15e9                         # under 2 x the 8 GB floor
+    for _ in range(5):
+        gov._governor_tick(gen)
+    assert len(reads) == 5
+    rig["kernel"] = 40e9
+    gov._governor_tick(gen)                      # the read that lifts it
+    n = len(reads)
+    for _ in range(5):
+        gov._governor_tick(gen)
+    assert len(reads) == n
+    gen._prompt_batch = object()
+    for _ in range(3):
+        gov._governor_tick(gen)
+    assert len(reads) == n + 3
+    gen._prompt_batch = None
+    gen._unprocessed_sequences = [object()]
+    gov._governor_tick(gen)
+    assert len(reads) == n + 4

@@ -15,10 +15,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pick visited every module of every layer on each request.
 - A client that disconnects before the server has read its request body
   no longer leaves an error traceback in the server log.
-- Less host work per decode token: the memory governor reads the kernel's
-  unwired count every 16 steps while it sits above the floor, instead of
-  three sysctl calls on every step, and the command-buffer phase flip
-  returns at once on a repeat of the last phase for the last model.
+- Decode spends less host time per token: the memory governor and the
+  command-buffer phase flip no longer repeat their per-step reads while
+  nothing changed.
 
 ## [0.5.2] - 2026-10-25
 

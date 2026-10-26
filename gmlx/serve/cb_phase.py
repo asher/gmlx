@@ -147,7 +147,6 @@ def _set(caps: tuple[int, int], ph: str | None,
     model it was set for. Returns the caps the device held before, None
     when they are not known."""
     with _LOCK:
-        _state["model"] = _UNSET if model is _UNSET else _ref(model)
         prev = _state["caps"]
         if prev != caps:
             kq = _kq()
@@ -158,6 +157,7 @@ def _set(caps: tuple[int, int], ph: str | None,
                 prev = (int(held[0]), int(held[1]))
             _state["caps"] = caps
         _state["phase"] = ph
+        _state["model"] = _UNSET if model is _UNSET else _ref(model)
         return prev
 
 
