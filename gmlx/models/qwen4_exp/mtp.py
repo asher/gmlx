@@ -483,9 +483,10 @@ def remap_qwen4exp_mtp_arrays(arrays: dict, kquant_meta: dict):
             stats["skipped"] += 1
             continue
         if hf.endswith(".scale"):
-            # A weight scale goes to the quantized projection it scales.
-            # Converters write one only beside a quantized weight.
-            if kquant_meta.get(name[: -len("scale")] + "weight") is None:
+            # A weight scale goes to the projection it scales, quantized or
+            # float; a norm has none.
+            w = arrays.get(name[: -len("scale")] + "weight")
+            if w is None or w.ndim < 2:
                 stats["skipped"] += 1
             else:
                 weights[hf[: -len("scale")] + "out_scale"] = arr.reshape(-1)

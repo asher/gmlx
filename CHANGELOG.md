@@ -164,10 +164,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Spark and K2 Horizon, whose templates have no switch, by closing each
   thinking block as it opens. Thinking budgets now work for gpt-oss in
   `gmlx serve`.
-- With mlx-kquant 0.5.7 or later, NVFP4 weight scales apply inside the
-  mlx-kquant kernels, so output is closer to full precision and the scaled
-  projections join the fused attention, MLP and MoE paths. Older releases,
-  and `GMLX_KQ_OUT_SCALE=0`, keep the separate multiply.
+- With mlx-kquant 0.5.7 or later, NVFP4 files decode closer to full
+  precision, and their scaled projections join the fused attention, MLP and
+  MoE paths. `GMLX_KQ_OUT_SCALE=0` turns this off.
 
 ### Fixed
 
