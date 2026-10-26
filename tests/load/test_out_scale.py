@@ -5,7 +5,8 @@
 an nvfp4 kq module its scale for the kernels and wraps every other module,
 the result is ``s * (W x) + b`` either way, an lm_head scale applies only
 to an NVFP4 head, the fusions that read wire bytes pass an nvfp4 scale to
-their ops, and they skip a wrapped module."""
+their ops, and they skip a wrapped module. Also the head readers, adapter
+deltas, the decode arena's refusal and the MTP remaps."""
 
 from __future__ import annotations
 
@@ -55,7 +56,7 @@ def test_float16_product_past_range_stays_finite():
     # A 1e-4 scale with weights 1e4 larger: the unscaled product overflows
     # float16, the scaled one does not.
     model = _Tiny()
-    model.proj.weight = mx.full((8, 16), 1e4)
+    model.proj.weight = mx.full((8, 16), 1e4, dtype=mx.float16)
     weights = {"proj.out_scale": mx.array([1e-4])}
     install_out_scales(model, weights)
     model.load_weights(list(weights.items()), strict=False)
@@ -308,6 +309,15 @@ def _needs_kq_scales():
         pytest.skip("mlx_kquant without in-kernel weight scales")
 
 
+def _scale_path(native, monkeypatch):
+    """The kernels apply the scales, or the wrapper does, as with a released
+    mlx_kquant."""
+    if native:
+        _needs_kq_scales()
+    else:
+        monkeypatch.setenv("GMLX_KQ_OUT_SCALE", "0")
+
+
 def _install_and_load(shell, weights):
     n = install_out_scales(shell, weights)
     shell.load_weights(list(weights.items()), strict=False)
@@ -377,12 +387,16 @@ def test_scale_lever_off_keeps_the_wrapper(monkeypatch):
     assert _rel(shell.proj(x), ref) < 1e-2
 
 
+@pytest.mark.parametrize("native", [True, False])
 @pytest.mark.parametrize("n_tok", [3, 300])
-def test_nvfp4_stack_takes_one_scale_per_expert(n_tok):
-    """Decode gathers, and the sorted segment GEMM at prefill widths."""
+def test_nvfp4_stack_takes_one_scale_per_expert(n_tok, native, monkeypatch):
+    """Decode gathers, and the sorted segment GEMM at prefill widths, with
+    the scales in the kernels or in the wrapper."""
     from mlx_kquant.nn import KQuantSwitchLinear
 
-    _needs_kq_scales()
+    from gmlx.load.out_scale import wrapped_scale
+
+    _scale_path(native, monkeypatch)
     rng = np.random.default_rng(3)
     e, k = 4, 2
 
@@ -395,8 +409,12 @@ def test_nvfp4_stack_takes_one_scale_per_expert(n_tok):
     shell.proj.weight = _nvfp4_wire(rng, (e, 64, 256))
     scale = np.array([0.5, 0.125, 2.0, 0.03125], np.float32)
     _install_and_load(shell, {"proj.out_scale": mx.array(scale)})
-    assert type(shell.proj) is KQuantSwitchLinear
-    assert shell.proj["out_scale"].shape == (e, 1)
+    if native:
+        assert type(shell.proj) is KQuantSwitchLinear
+        assert shell.proj["out_scale"].shape == (e, 1)
+    else:
+        assert wrapped_scale(shell.proj)
+        assert shell.proj["post_scale"].shape == (e, 1)
     x = rng.standard_normal((n_tok, 1, 1, 256)).astype(np.float32)
     idx = rng.integers(0, e, (n_tok, k)).astype(np.uint32)
     deq = _deq(shell.proj)
@@ -601,11 +619,16 @@ def test_row_concat_fusions_keep_each_member_scale(site):
     assert _rel(got, np.array(want.astype(mx.float32), np.float64)) < 1e-2
 
 
+@pytest.mark.parametrize("down", ["nvfp4", "q8_0"])
 @pytest.mark.parametrize("batch", [2, 12])
-def test_occupancy_fused_mlp_keeps_each_projection_scale(batch, monkeypatch):
+def test_occupancy_fused_mlp_keeps_each_projection_scale(batch, down,
+                                                         monkeypatch):
     """gate and up joined in one wire, and down split in two K halves at
-    the wider batch."""
+    the wider batch. A scaled q8_0 down, as in an --fp8-as-q8 file, keeps
+    its wrapper and its own call."""
     from types import SimpleNamespace
+
+    from mlx_kquant.nn import KQuantLinear
 
     from gmlx._vendor.mlx_lm.models.llama import MLP
     import gmlx.upstream.occupancy_fuse as of
@@ -621,7 +644,10 @@ def test_occupancy_fused_mlp_keeps_each_projection_scale(batch, monkeypatch):
 
     shell = Shell()
     g, u = _nvfp4_linears(rng, (512, 512), (None, None))
-    (dn,) = _nvfp4_linears(rng, (256,), (None,), k=512)
+    if down == "nvfp4":
+        (dn,) = _nvfp4_linears(rng, (256,), (None,), k=512)
+    else:
+        dn = _q8(KQuantLinear(512, 256, False, "q8_0"), (256, 512), rng)
     shell.mlp.gate_proj, shell.mlp.up_proj, shell.mlp.down_proj = g, u, dn
     _install_and_load(shell, {"mlp.gate_proj.out_scale": mx.array([0.02]),
                               "mlp.up_proj.out_scale": mx.array([0.1]),
@@ -632,7 +658,153 @@ def test_occupancy_fused_mlp_keeps_each_projection_scale(batch, monkeypatch):
     got = shell.mlp(x)
     assert shell.mlp._kq_os
     if batch >= 12:
-        assert shell.mlp._kq_wdn is not None
+        assert (shell.mlp._kq_wdn is not None) == (down == "nvfp4")
     monkeypatch.setenv("GMLX_OCCUPANCY_FUSE", "0")
     want = shell.mlp(x)
     assert _rel(got, np.array(want.astype(mx.float32), np.float64)) < 2e-2
+
+
+@pytest.mark.parametrize("native", [True, False])
+def test_streamed_experts_refuse_a_scale_per_expert(native, monkeypatch):
+    """The decode arena calls an expert stack with slot ids, which would
+    read a scale per expert at the wrong expert."""
+    from mlx_kquant.nn import KQuantSwitchLinear
+
+    from gmlx.stream.decode_feeder import _refuse_expert_scales
+
+    _scale_path(native, monkeypatch)
+    rng = np.random.default_rng(10)
+
+    class Shell(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.one = KQuantSwitchLinear(4, 64, 256, False, "nvfp4")
+            self.per = KQuantSwitchLinear(4, 64, 256, False, "nvfp4")
+
+    shell = Shell()
+    shell.one.weight = _nvfp4_wire(rng, (4, 64, 256))
+    shell.per.weight = _nvfp4_wire(rng, (4, 64, 256))
+    _install_and_load(shell, {"one.out_scale": mx.array([0.5]),
+                              "per.out_scale": mx.array([0.5, 0.25, 2, 4])})
+    _refuse_expert_scales(shell.one, "one")
+    with pytest.raises(NotImplementedError, match="per-expert"):
+        _refuse_expert_scales(shell.per, "per")
+
+
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
+@pytest.mark.parametrize("base", ["q8_0", "nvfp4", "nvfp4-native"])
+def test_adapter_delta_adds_after_the_weight_scale(base, dtype, monkeypatch):
+    """An adapter's delta is not multiplied by the weight scale, on the
+    in-op LoRA epilogue that decode takes."""
+    from mlx_kquant.nn import KQuantLinear
+
+    from gmlx import lora_rows
+    from gmlx.load import modules
+
+    _scale_path(base == "nvfp4-native", monkeypatch)
+    if not modules._KQ_LORA_EPILOGUE:
+        pytest.skip("mlx_kquant without the LoRA epilogue")
+    monkeypatch.setattr(modules, "_LORA_EPILOGUE_MODE", "always")
+    lora_rows.configure("static", 1)
+    rng = np.random.default_rng(11)
+    codec = base.split("-")[0]
+
+    class Shell(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = KQuantLinear(256, 64, False, codec)
+
+    shell = Shell()
+    if codec == "q8_0":
+        _q8(shell.proj, (64, 256), rng)
+    else:
+        shell.proj.weight = _nvfp4_wire(rng, (64, 256))
+    _install_and_load(shell, {"proj.out_scale": mx.array([2e-3])})
+    a = rng.standard_normal((8, 256)) * 0.05
+    b = rng.standard_normal((64, 8)) * 0.05
+    x = mx.array(rng.standard_normal((1, 1, 256)).astype(np.float32)
+                 ).astype(dtype)
+    xd = np.array(x.astype(mx.float32), np.float64)[0]
+    base_part = 2e-3 * xd @ _deq(shell.proj).T
+    delta = (xd @ a.T) @ b.T
+    # Both terms the same size, so a delta lost to the scale shows.
+    lscale = float(np.linalg.norm(base_part) / np.linalg.norm(delta))
+    lora = modules.LoRAKQuantLinear(
+        shell.proj, mx.array(a.astype(np.float32)),
+        mx.array(b.astype(np.float32)), lscale)
+    y = lora(x)
+    assert y.dtype == dtype
+    assert _rel(y[0], base_part + lscale * delta) < 2e-2
+
+
+@pytest.mark.parametrize("native", [True, False])
+def test_head_readers_apply_the_weight_scale(native, monkeypatch):
+    """The head weights of gmlx distill and the letter rows of
+    /v1/systemone carry an NVFP4 head's scale."""
+    from mlx_kquant.nn import KQuantLinear
+
+    from gmlx.distill.head import head_weight_fn
+    from gmlx.systemone.ar_reader import _letter_rows
+
+    _scale_path(native, monkeypatch)
+    rng = np.random.default_rng(12)
+
+    class Shell(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lm_head = KQuantLinear(256, 64, False, "nvfp4")
+
+    shell = Shell()
+    shell.lm_head.weight = _nvfp4_wire(rng, (64, 256))
+    weights = {"lm_head.out_scale": mx.array([0.03])}
+    assert install_out_scales(shell, weights,
+                              {"lm_head.weight": "nvfp4"}) == 1
+    shell.load_weights(list(weights.items()), strict=False)
+    want = 0.03 * _deq(shell.lm_head)
+    assert _rel(head_weight_fn(shell.lm_head)(), want) < 1e-2
+    rows, bias = _letter_rows(shell.lm_head, [3, 7])
+    assert bias is None and _rel(rows, want[[3, 7]]) < 1e-6
+
+
+def test_scaled_shared_expert_halves_refuse_the_gate_up_fuse():
+    from gmlx.load.transforms import fuse_shexp_gate_up
+
+    w = mx.zeros((8, 36), dtype=mx.uint8)
+    arrays = {"blk.0.ffn_gate_shexp.weight": w, "blk.0.ffn_up_shexp.weight": w,
+              "blk.0.ffn_up_shexp.scale": mx.array([0.5])}
+    with pytest.raises(NotImplementedError, match="weight scale"):
+        fuse_shexp_gate_up(arrays, {"blk.0.ffn_gate_shexp.weight": "nvfp4",
+                                    "blk.0.ffn_up_shexp.weight": "nvfp4"})
+
+
+def test_mtp_remaps_keep_the_weight_scales():
+    """A quantized MTP projection's scale reaches the drafter, an
+    input_scale or a scale on a float weight does not."""
+    from gmlx.load.wire import remap_mtp_arrays
+    from gmlx.models.nemotron_h.mtp import remap_nemotron_mtp_arrays
+    from gmlx.models.qwen4_exp.mtp import remap_qwen4exp_mtp_arrays
+
+    w, sc = mx.zeros((8, 36), dtype=mx.uint8), mx.zeros((1,), dtype=mx.uint8)
+
+    def tensors(prefix, quant, norm):
+        return {f"{prefix}{quant}.weight": w, f"{prefix}{quant}.scales": sc,
+                f"{prefix}{quant}.scale": mx.array([0.25]),
+                f"{prefix}{quant}.input_scale": mx.array([0.5]),
+                f"{prefix}{norm}.weight": mx.ones((64,)),
+                f"{prefix}{norm}.scale": mx.array([3.0])}
+
+    out, _, _ = remap_mtp_arrays(
+        tensors("blk.4.nextn.", "eh_proj", "enorm"),
+        {"blk.4.nextn.eh_proj.weight": "nvfp4"}, "qwen35", first_mtp_block=4)
+    out2, _, _ = remap_nemotron_mtp_arrays(
+        tensors("blk.2.", "ffn_up_shexp", "attn_norm"),
+        {"blk.2.ffn_up_shexp.weight": "nvfp4"}, first_mtp_block=2,
+        n_head=4, n_head_kv=2)
+    out3, _, _ = remap_qwen4exp_mtp_arrays(
+        tensors("mtp.layers.0.", "mlp.gate_proj", "input_layernorm"),
+        {"mtp.layers.0.mlp.gate_proj.weight": "nvfp4"})
+    for got, proj in ((out, "fc"),
+                      (out2, "layers.0.mlp.shared_experts.up_proj"),
+                      (out3, "layers.0.mlp.gate_proj")):
+        assert got[f"{proj}.out_scale"].tolist() == [0.25]
+        assert [k for k in got if k.endswith("scale")] == [f"{proj}.out_scale"]

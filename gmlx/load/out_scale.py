@@ -112,8 +112,8 @@ def _scaled_class(cls: type) -> type:
 def weight_scale(module):
     """The module's weight scale, applied in the kernels or by the
     subclass, or None."""
-    s = module.get("out_scale")
-    return module.get("post_scale") if s is None else s
+    s = getattr(module, "out_scale", None)
+    return getattr(module, "post_scale", None) if s is None else s
 
 
 def has_out_scale(module) -> bool:

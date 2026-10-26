@@ -457,6 +457,22 @@ def remap_nemotron_mtp_arrays(
                 stats["skipped"] += 1
             continue
         rest = name[len(prefix):]
+        if rest.endswith(".input_scale"):
+            stats["skipped"] += 1
+            continue
+        if rest.endswith(".scale"):
+            # A weight scale goes to the quantized projection it scales.
+            if kquant_meta.get(name[: -len("scale")] + "weight") is None:
+                stats["skipped"] += 1
+                continue
+            target = _NEMOTRON_MTP_MAP.get(rest[: -len(".scale")])
+            if target is None:
+                raise RuntimeError(
+                    f"nemotron MTP remap: unknown tensor {name!r} "
+                    f"(converter drift?)")
+            hf_weights[_strip_weight(target) + ".out_scale"] = arr.reshape(-1)
+            stats["mapped"] += 1
+            continue
         raw_target = _NEMOTRON_MTP_RAW.get(rest)
         if raw_target is not None:
             hf_weights[raw_target] = arr

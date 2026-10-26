@@ -436,8 +436,10 @@ def _iopol_utility() -> None:
 
 def _refuse_expert_scales(proj, path: str) -> None:
     # The arena binds experts by slot, so a scale per expert would be read
-    # at the slot id.
-    s = getattr(proj, "out_scale", None)
+    # at the slot id, by the kernels or by the wrapper alike.
+    from gmlx.load.out_scale import weight_scale
+
+    s = weight_scale(proj)
     if s is not None and s.size > 1:
         raise NotImplementedError(
             f"{path}: expert streaming does not support per-expert weight "

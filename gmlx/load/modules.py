@@ -2262,6 +2262,9 @@ class LoRAKQuantLinear(nn.Module):
         if (_KQ_LORA_EPILOGUE and not args and not kwargs
                 and x.dtype in (mx.float16, mx.bfloat16)
                 and isinstance(self.base, KQuantLinear)
+                # A wrapped base scales its whole output, so the delta
+                # stays outside it.
+                and not wrapped_scale(self.base)
                 # A folded base rotates x before its matmul; the delta
                 # multiplies the unrotated x, so it stays outside the op.
                 and getattr(self.base, "_hadamard", None) is None

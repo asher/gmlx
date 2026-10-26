@@ -552,6 +552,16 @@ def remap_mtp_arrays(
         codec = kquant_meta.get(name)
         if rest.startswith("nextn."):
             key = rest[len("nextn.") :]
+            if key.endswith(".scale"):
+                # A weight scale goes to the quantized projection it scales.
+                target = nextn_map.get(key[: -len(".scale")], "")
+                if (not target.endswith(".weight") or kquant_meta.get(
+                        name[: -len("scale")] + "weight") is None):
+                    stats["skipped"] += 1
+                    continue
+                _emit(target[: -len("weight")] + "out_scale", "flatten", arr,
+                      None, name)
+                continue
             base = key[: -len(".weight")] if key.endswith(".weight") else key
             target = nextn_map.get(base)
             if target is None:

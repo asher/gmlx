@@ -164,9 +164,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Spark and K2 Horizon, whose templates have no switch, by closing each
   thinking block as it opens. Thinking budgets now work for gpt-oss in
   `gmlx serve`.
-- On NVFP4 files, mlx-kquant applies each weight's `.scale` inside its
-  kernels, so the scaled projections join the fused attention, MLP and
-  MoE paths. `GMLX_KQ_OUT_SCALE=0` keeps the separate multiply.
+- Requires mlx-kquant 0.5.7. With it, NVFP4 weight scales apply inside the
+  mlx-kquant kernels, so output is closer to full precision and the scaled
+  projections join the fused attention, MLP and MoE paths.
+  `GMLX_KQ_OUT_SCALE=0` keeps the separate multiply.
 
 ### Fixed
 
@@ -298,8 +299,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prefilled on them.
 - A weight scale on a projection with a bias scaled the bias too. The bias
   now adds after the scale, as in llama.cpp.
-- The DeepSeek-V3.2 indexer, `/v1/systemone` and `gmlx distill` read
-  NVFP4 weights without their `.scale`.
+- `/v1/systemone` and `gmlx distill` read an NVFP4 output head without its
+  `.scale`.
+- An adapter on an NVFP4 projection with a `.scale` lost most of its effect
+  at decode, and decode failed with float16 activations.
+- On NVFP4 files with `.scale` tensors in the MTP block, the MTP drafter
+  dropped some of them, which lowered its acceptance, and a Nemotron-H
+  drafter failed to load.
 
 ## [0.5.1] - 2026-10-18
 

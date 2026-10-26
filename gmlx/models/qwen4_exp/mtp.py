@@ -479,6 +479,17 @@ def remap_qwen4exp_mtp_arrays(arrays: dict, kquant_meta: dict):
             stats["skipped"] += 1
             continue
         hf = name[len("mtp."):]
+        if hf.endswith(".input_scale"):
+            stats["skipped"] += 1
+            continue
+        if hf.endswith(".scale"):
+            # A weight scale goes to the quantized projection it scales.
+            if kquant_meta.get(name[: -len("scale")] + "weight") is None:
+                stats["skipped"] += 1
+            else:
+                weights[hf[: -len("scale")] + "out_scale"] = arr.reshape(-1)
+                stats["mapped"] += 1
+            continue
         weights[hf] = arr
         stats["mapped"] += 1
         codec = kquant_meta.get(name)
