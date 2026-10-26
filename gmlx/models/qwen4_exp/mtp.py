@@ -149,7 +149,8 @@ class Qwen4ExpSpecHooks:
         # chunked prefill is always safe for this target.
         return True
 
-    def _spec_verify_positions(self, verify_input: mx.array, prompt_cache):
+    def _spec_verify_positions(self, verify_input: mx.array, prompt_cache,
+                               rope_deltas=None):
         # Verify-forward position seam. None keeps the scalar-offset fast
         # rope (text targets); the VLM wrapper overrides with its resolved
         # mrope block so verify after an image turn matches plain decode.
@@ -162,13 +163,16 @@ class Qwen4ExpSpecHooks:
     def speculative_argmax_from_hidden(self, hidden: mx.array) -> mx.array:
         return mx.argmax(self.speculative_logits_from_hidden(hidden), axis=-1)
 
-    def speculative_verify_hidden(self, verify_input: mx.array, prompt_cache):
+    def speculative_verify_hidden(self, verify_input: mx.array, prompt_cache,
+                                  rope_deltas=None):
         """The single verify forward (qL = drafts + 1). Returns the streams
-        plus the rollback sink in the ``gdn_states`` slot."""
+        plus the rollback sink in the ``gdn_states`` slot. ``rope_deltas`` is
+        the rounds loop's per-row mrope delta."""
         sink: list = []
         _, streams = self.model(
             verify_input, prompt_cache, return_streams=True, gdn_sink=sink,
-            position_ids=self._spec_verify_positions(verify_input, prompt_cache))
+            position_ids=self._spec_verify_positions(
+                verify_input, prompt_cache, rope_deltas))
         return streams, {}, sink
 
     def rollback_speculative_cache(

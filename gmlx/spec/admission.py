@@ -215,7 +215,8 @@ def install_continuous_batch_admission() -> None:
         self.prompt_cache = [_lift_host_cache(c) for c in self.prompt_cache]
         for c in self.prompt_cache:
             c.filter(idx)
-        for name in ("hidden", "prompt_tokens", "first_tokens"):
+        for name in ("hidden", "prompt_tokens", "first_tokens",
+                     "_rope_deltas"):
             arr = getattr(self, name, None)
             if arr is not None:
                 setattr(self, name, arr[idx])
@@ -435,6 +436,8 @@ def install_continuous_batch_admission() -> None:
                         "max_tokens": list(other.max_tokens),
                         # Per-row logits processors, or None.
                         "row_procs": getattr(other, "_kq_row_procs", None),
+                        # The rows' mrope deltas from their own prefill.
+                        "rope_deltas": getattr(other, "_rope_deltas", None),
                     }
                 )
 

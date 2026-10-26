@@ -97,6 +97,9 @@ class DFlashConfig:
     # The checkpoint's trained diffusion block: the deepest block the drafter
     # can produce. None leaves block_size as the ceiling.
     native_block_size: Optional[int] = None
+    # The block total to draft when the run asks for none; None drafts
+    # block_size.
+    runtime_block_size: Optional[int] = None
     layer_types: List[str] = field(default_factory=list)
     sliding_window: Optional[int] = None
     # None = non-causal block (llama.cpp); the converter's attention.causal

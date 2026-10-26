@@ -2903,13 +2903,14 @@ class LanguageModel(nn.Module):
             raise RuntimeError("masked fused greedy decode became unsupported")
         return mx.argmax(self.speculative_logits_from_hidden(hidden), axis=-1)
 
-    def speculative_verify_logits(self, inputs: mx.array, cache, sampler):
+    def speculative_verify_logits(self, inputs: mx.array, cache, sampler, **kwargs):
         out = self(
             inputs,
             cache=cache,
             capture_layer_ids=[],
             return_hidden=True,
             return_shared_kv=True,
+            **kwargs,
         )
         return (
             out.hidden_states[-1],
@@ -2918,7 +2919,7 @@ class LanguageModel(nn.Module):
             sampler(out.logits),
         )
 
-    def speculative_verify_hidden(self, inputs: mx.array, cache):
+    def speculative_verify_hidden(self, inputs: mx.array, cache, **kwargs):
         out = self(
             inputs,
             cache=cache,
@@ -2926,6 +2927,7 @@ class LanguageModel(nn.Module):
             return_hidden=True,
             return_shared_kv=True,
             skip_logits=True,
+            **kwargs,
         )
         return out.hidden_states[-1], out.shared_kv_states, out.gdn_states
 

@@ -113,8 +113,8 @@ MiniCPM-V repositories ship `mmproj-model-f16.gguf`, which pairs on its
 own. The 4.7 repositories also ship `mmproj-model-f16-4x.gguf`, which turns
 each image into four times as many tokens for finer detail. Pass it with
 `--mmproj` to use it. A 4.7 repository holds the model, the companion and a
-[DSpark drafter](speculative-decoding.md#dflash-drafters), and one pull
-fetches all three:
+[DSpark drafter](speculative-decoding.md#dflash-drafters). For the 35B-A3B,
+one pull fetches all three:
 
 ```sh
 gmlx pull hf:openbmb/MiniCPM-V-4.7-35B-A3B-gguf \
@@ -122,7 +122,15 @@ gmlx pull hf:openbmb/MiniCPM-V-4.7-35B-A3B-gguf \
   dspark-MiniCPM-V-4_7-35B-A3B-F16.gguf
 ```
 
-The 1B repository, `openbmb/MiniCPM-V-4.7-1B-gguf`, has the same three files.
+For the 1B, pull the model and the companion:
+
+```sh
+gmlx pull hf:openbmb/MiniCPM-V-4.7-1B-gguf \
+  MiniCPM-V-4_7-1B-Q4_K_M.gguf mmproj-model-f16.gguf
+```
+
+The 1B's DSpark drafter decodes slower than the model alone on Apple
+silicon, so gmlx leaves it off, and `--draft-gguf` still loads it.
 
 On DeepSeek-V4-Flash-Vision-Exp, image turns need a KV cache without
 quantization, so `--kv-bits` applies to text turns only, and the server

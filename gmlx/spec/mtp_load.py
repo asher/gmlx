@@ -116,6 +116,15 @@ _DFLASH_BLOCK_DEFAULT = {
 }
 
 
+# Block total per round of a measured drafter, by declared base id; the
+# block it was trained with is still the ceiling for --draft-block-size.
+_DRAFTER_BLOCK_BY_ID = {
+    # MiniCPM-V 4.7 35B-A3B DSpark drafts 3 tokens a round. M3 Max, IQ3_M,
+    # greedy: 90 tok/s plain, 43 at its block of 16, 100 at 4 (57% accepted).
+    "minicpm-v-4.7-a3b": 4,
+}
+
+
 def _drafter_block_depths(native_total, preferred_total=None) -> tuple[int, int]:
     """Return (deepest block the drafter can produce, depth drafted per round).
 
@@ -1308,13 +1317,15 @@ def _dflash_config_from_meta(
     softcap = meta.get("dflash.final_logit_softcapping",
                        target_config_dict.get("final_logit_softcapping"))
     markov_rank, confidence, snr_range, anchor = 0, False, None, True
+    runtime_block = None
     if container == "dflash_dspark":
         markov_rank, confidence, snr_range, anchor = _dspark_head_keys(
-            draft_gguf_path, meta, arrays)
+            draft_gguf_path, meta, arrays, shapes)
         # The anchor row proposes a token too, so the engine's block total
         # (verify rows) is one more than the drafter's row count.
         native_total, block_total = _drafter_block_depths(
             int(block_size) + int(anchor), None)
+        runtime_block = _measured_block(meta, block_total)
     config = DFlashConfig(
         hidden_size=hidden,
         intermediate_size=int(meta["dflash.feed_forward_length"]),
@@ -1332,6 +1343,7 @@ def _dflash_config_from_meta(
         tie_word_embeddings=False,
         block_size=block_total,
         native_block_size=native_total,
+        runtime_block_size=runtime_block,
         mask_token_id=int(mask_token_id),
         target_layer_ids=list(layer_ids),
         num_target_layers=n_target_layers,
@@ -1384,22 +1396,42 @@ def _lilicorr_head_keys(draft_gguf_path: str, meta: dict) -> dict:
     return out
 
 
-def _dspark_head_keys(draft_gguf_path: str, meta: dict, arrays: dict):
+def _measured_block(meta: dict, block_total: int) -> int | None:
+    """The measured block total of a drafter in :data:`_DRAFTER_BLOCK_BY_ID`,
+    by its declared base id, or None."""
+    from gmlx.load.discovery import declared_base_ids
+
+    for base_id in declared_base_ids(meta):
+        if base_id in _DRAFTER_BLOCK_BY_ID:
+            return min(_DRAFTER_BLOCK_BY_ID[base_id], block_total)
+    return None
+
+
+def _dspark_head_keys(draft_gguf_path: str, meta: dict, arrays: dict,
+                      shapes: dict | None = None):
     """The DSpark head facts of a DFlash-backbone drafter, read the way
-    llama.cpp's dflash loader reads them: the rank from the markov table,
-    the confidence head from its key, log-SNR conditioning from its key
-    with both bounds required, the anchor convention from its key."""
+    llama.cpp's dflash loader reads them: the rank from the markov table's
+    logical row width, the confidence head from its tensor, log-SNR
+    conditioning from its key with both bounds required, the anchor
+    convention from its key."""
     w1 = arrays.get("markov_w1.weight")
     rank = int(meta.get("dflash.markov_rank") or 0)
-    if rank <= 0 and w1 is not None:
+    ne = (shapes or {}).get("markov_w1.weight")
+    if rank <= 0 and ne:
+        rank = int(ne[0])
+    elif rank <= 0 and w1 is not None:
+        # Float tables only: a quantized table's last axis counts bytes.
         rank = int(w1.shape[-1])
     if rank <= 0:
         raise ValueError(f"{draft_gguf_path}: dflash.markov_rank missing")
-    confidence = bool(meta.get("dflash.confidence_head", False))
-    if confidence and "conf_proj.weight" not in arrays:
-        raise ValueError(
-            f"{draft_gguf_path}: dflash.confidence_head is set but "
-            "conf_proj.weight is missing")
+    # llama.cpp builds the head when the tensor is present. Converters
+    # write the key as has_confidence_head (llama.cpp) or confidence_head.
+    confidence = "conf_proj.weight" in arrays
+    for key in ("dflash.has_confidence_head", "dflash.confidence_head"):
+        if meta.get(key) and not confidence:
+            raise ValueError(
+                f"{draft_gguf_path}: {key} is set but conf_proj.weight is "
+                "missing")
     snr_range = None
     if bool(meta.get("dflash.log_snr_conditioning", False)):
         lo, hi = meta.get("dflash.min_log_snr"), meta.get("dflash.max_log_snr")

@@ -91,10 +91,10 @@ def _base(path):
 
 def test_dflash2_marker_and_declared_ids():
     assert disc.derive_id("Qwen3.8-27B-DFlash2-Q8_0.gguf") == ("qwen3.8-27b", "Q8_0")
-    assert disc._declared_base_ids(HEADERS["Qwen3.8-27B-DFlash2-Q8_0"]) == ("qwen3.8-27b",)
-    assert disc._declared_base_ids(HEADERS["Muse-Glimmer-30B-Q6_K_L"]) == ("muse-glimmer-30b",)
-    assert disc._declared_base_ids(HEADERS["Muse-Glimmer-30B-KQuant-17GB-Q4_K_M"]) == ()
-    assert disc._declared_base_ids(HEADERS["dflash-kquant"]) == ()
+    assert disc.declared_base_ids(HEADERS["Qwen3.8-27B-DFlash2-Q8_0"]) == ("qwen3.8-27b",)
+    assert disc.declared_base_ids(HEADERS["Muse-Glimmer-30B-Q6_K_L"]) == ("muse-glimmer-30b",)
+    assert disc.declared_base_ids(HEADERS["Muse-Glimmer-30B-KQuant-17GB-Q4_K_M"]) == ()
+    assert disc.declared_base_ids(HEADERS["dflash-kquant"]) == ()
     assert disc._SIZE_TOKEN_RE.search("Qwen3.8-27B")
     assert disc._SIZE_TOKEN_RE.search("Qwen3.6-35B-A3B")
     assert not disc._SIZE_TOKEN_RE.search("Muse-Glimmer")

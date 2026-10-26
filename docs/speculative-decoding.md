@@ -19,10 +19,10 @@ extra layer that drafts tokens, as the Qwen3.5, Qwen3.6 and Qwen3.8 models
 do. `run` and `chat` turn speculation on for these without a flag. DeepSeek-V4,
 Qwen3.8-Flash-Next, Muse Glimmer and Nemotron 3.5 Super VL turn it on the
 same way when their companion drafter sits in the model's folder, or in an
-`MTP` folder inside or beside it. Nemotron 3.5 Bolt and MiniCPM-V 4.7 turn it on
-when their drafter repo, `<repo>-LiLiCorr-GGUF` or `<repo>-DSpark-gguf`, sits
-beside the model's repo. Other families, such
-as gemma-4 with its assistant drafter, need `--draft-gguf`.
+`MTP` folder inside or beside it. Nemotron 3.5 Bolt and MiniCPM-V 4.7 35B-A3B
+turn it on when their drafter repo, `<repo>-LiLiCorr-GGUF` or
+`<repo>-DSpark-gguf`, sits beside the model's repo. Other families, such as
+gemma-4 with its assistant drafter, need `--draft-gguf`.
 
 | Flag | Config key | Effect |
 |------|------------|--------|
@@ -169,10 +169,13 @@ gmlx pull hf:unsloth/NVIDIA-Nemotron-3.5-Bolt-E4B-GGUF \
 
 Its block is 8, so a round drafts 7 tokens.
 
-MiniCPM-V 4.7 ships a DSpark drafter beside each model, for both the 35B-A3B
-and the 1B. A pull that names the drafter pairs it, as
+MiniCPM-V 4.7 ships a DSpark drafter beside each model. For the 35B-A3B, a
+pull that names the drafter pairs it, as
 [Supported families](vlm.md#supported-families) shows, and `gmlx chat` then
-speculates on text turns.
+speculates on text turns. Its block is 16, but a round drafts 3 tokens,
+because longer drafts cost more than they gain. `--draft-block-size` sets
+another size. The 1B's drafter decodes slower than the 1B alone, so gmlx
+never pairs it. Pass it with `--draft-gguf` to try it.
 
 ## Context copy
 

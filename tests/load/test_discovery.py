@@ -1399,7 +1399,7 @@ def test_header_meta_reads_and_memoizes(_hm, tmp_path):
     meta = disc.header_meta(str(f))
     assert meta == {"arch": "gemma4", "name": "Gemma 4 12B It",
                     "kind": "model", "mtp": False, "sampling": {},
-                    "drafter_kind": None}
+                    "drafter_kind": None, "declared": []}
     disc.header_meta(str(f))
     assert _hm["n"] == 1                         # second hit is the memo
 
@@ -1870,7 +1870,11 @@ def _minicpm_meta(name, arch, width):
         return {"general.architecture": "clip", "general.type": "mmproj",
                 "clip.vision.projection_dim": width}, None
     if low.startswith("dspark"):
+        # The official headers name the drafter's own size, not the target's.
+        size = "214M" if width == 1024 else "A3B"
         return {"general.architecture": "dflash",
+                "general.basename": "MiniCPM-V-4.7",
+                "general.size_label": size,
                 "dflash.embedding_length": width}, "dflash_dspark"
     if low.startswith("dflash2"):
         return {"general.architecture": "dflash",
@@ -1907,8 +1911,12 @@ def test_minicpm_v_official_folder_pairs_the_16x_mmproj_and_the_dspark(
     for m in models:
         # The 4x file sorts first; its name is not generic, so it stays out.
         assert os.path.basename(m.mmproj) == "mmproj-model-f16.gguf"
-        assert os.path.basename(m.draft_gguf) == f"dspark-{stem}-F16.gguf"
-        assert m.speculative is True
+        if size == "1B":
+            # Its DSpark decodes slower than the 1B alone.
+            assert m.draft_gguf is None and not m.speculative
+        else:
+            assert os.path.basename(m.draft_gguf) == f"dspark-{stem}-F16.gguf"
+            assert m.speculative is True
 
 
 def test_dspark_is_an_id_marker():
@@ -1983,22 +1991,64 @@ def test_the_dflash_container_is_read_off_the_tensor_table(tmp_path):
                                                2048)
 
 
+@pytest.mark.parametrize("size,arch,declared,paired", [
+    ("35B-A3B", "qwen35moe", ["minicpm-v-4.7-a3b"], True),
+    ("1B", "qwen35", ["minicpm-v-4.7-214m"], False),
+])
 def test_dspark_sibling_repo_turns_on_the_quantized_drafter(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, size, arch, declared, paired):
     from gmlx.commands import cli
 
+    repo = f"openbmb__MiniCPM-V-4.7-{size}"
+    target_dir = tmp_path / f"{repo}-gguf"
+    drafter_dir = tmp_path / f"{repo}-DSpark-gguf"
+    target_dir.mkdir()
+    drafter_dir.mkdir()
+    target = target_dir / f"MiniCPM-V-4_7-{size}-Q4_K_M.gguf"
+    drafter = drafter_dir / f"dspark-MiniCPM-V-4_7-{size}-Q8_0.gguf"
+    for p in (target, drafter):
+        p.write_bytes(b"GGUF")
+    metas = {str(target): {"arch": arch, "kind": "model", "mtp": False},
+             str(drafter): {"arch": "dflash", "kind": "drafter",
+                            "declared": declared}}
+    monkeypatch.setattr(disc, "header_meta", lambda p: metas.get(str(p)))
+    want = str(drafter) if paired else None
+    assert cli._companion_drafter(str(target)) == want
+    assert disc.find_headless_drafter(str(target), ("dflash",)) == want
+
+
+def test_minicpm_v_1b_dspark_sibling_repo_stays_off_in_the_scan(
+        tmp_path, monkeypatch):
+    _minicpm_classify(monkeypatch, "qwen35", 1024)
     repo = "openbmb__MiniCPM-V-4.7-1B"
     target_dir = tmp_path / f"{repo}-gguf"
     drafter_dir = tmp_path / f"{repo}-DSpark-gguf"
     target_dir.mkdir()
     drafter_dir.mkdir()
-    target = target_dir / "MiniCPM-V-4_7-1B-Q4_K_M.gguf"
-    drafter = drafter_dir / "dspark-MiniCPM-V-4_7-1B-Q8_0.gguf"
-    for p in (target, drafter):
-        p.write_bytes(b"GGUF")
-    metas = {str(target): {"arch": "qwen35", "kind": "model", "mtp": False},
-             str(drafter): {"arch": "dflash", "kind": "drafter"}}
-    monkeypatch.setattr(disc, "header_meta", lambda p: metas.get(str(p)))
-    assert cli._companion_drafter(str(target)) == str(drafter)
-    metas[str(target)]["arch"] = "qwen35moe"
-    assert cli._companion_drafter(str(target)) == str(drafter)
+    (target_dir / "MiniCPM-V-4_7-1B-Q4_K_M.gguf").write_bytes(b"GGUF")
+    (drafter_dir / "dspark-MiniCPM-V-4_7-1B-Q8_0.gguf").write_bytes(b"GGUF")
+    models = _scan(str(tmp_path), recursive=True)
+    assert [m.draft_gguf for m in models] == [None]
+
+
+def test_header_meta_keeps_the_declared_base_ids(tmp_path, monkeypatch):
+    from gguf import GGUFWriter
+    import numpy as np
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setattr(disc, "_HEADER_MEMO", {})
+    monkeypatch.setattr(disc, "_HEADER_DISK", None)
+    path = str(tmp_path / "dspark-MiniCPM-V-4_7-1B-F16.gguf")
+    w = GGUFWriter(path, "dflash")
+    w.add_string("general.basename", "MiniCPM-V-4.7")
+    w.add_string("general.size_label", "214M")
+    w.add_uint32("dflash.embedding_length", 1024)
+    w.add_tensor("markov_w1.weight", np.zeros(4, dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    assert disc.header_meta(path)["declared"] == ["minicpm-v-4.7-214m"]
+    disc._HEADER_MEMO.clear()
+    disc._HEADER_DISK = None                    # read back from the file
+    assert disc.header_meta(path)["declared"] == ["minicpm-v-4.7-214m"]

@@ -175,6 +175,7 @@ def run_speculative_server_rounds(
     eos_token_ids: Optional[set] = None,
     prompt_tokens: Optional[mx.array] = None,
     row_ids: Optional[List[int]] = None,
+    rope_deltas: Optional[mx.array] = None,  # gmlx: read by the owned engine only
 ) -> Generator[Tuple[List[Optional[int]], None], None, None]:
     batch_size = int(first_bonus.shape[0]) if first_bonus.ndim > 0 else 1
     _validate_speculative_sampling(draft_model, greedy_sampling)

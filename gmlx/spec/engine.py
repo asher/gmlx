@@ -446,6 +446,7 @@ def install_owned_spec_engine() -> None:
         eos_token_ids=None,
         prompt_tokens=None,
         row_ids=None,
+        rope_deltas=None,
         **_extra,
     ):
         batch_size = int(first_bonus.shape[0]) if first_bonus.ndim > 0 else 1
@@ -471,6 +472,7 @@ def install_owned_spec_engine() -> None:
                     greedy_sampling=greedy_sampling,
                     stop_check=stop_check,
                     eos_token_ids=eos_token_ids,
+                    rope_deltas=rope_deltas,
                 )
                 # This delegation frame outlives the request (the server
                 # abandons finished generators suspended at their last
@@ -500,6 +502,7 @@ def install_owned_spec_engine() -> None:
                 stop_check=stop_check,
                 eos_token_ids=eos_token_ids,
                 row_ids=row_ids,
+                rope_deltas=rope_deltas,
             )
             del prompt_cache, hidden, shared_kv_states, prompt_tokens
             del first_bonus, _extra
@@ -524,6 +527,7 @@ def install_owned_spec_engine() -> None:
             eos_token_ids=eos_token_ids,
             prompt_tokens=prompt_tokens,
             row_ids=row_ids,
+            rope_deltas=rope_deltas,
             **_extra,
         )
 

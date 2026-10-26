@@ -134,10 +134,12 @@ class LanguageModel(Qwen4ExpSpecHooks, nn.Module):
             + mx.arange(L, dtype=mx.int32)[None]
         return mx.broadcast_to(pos[None], (3, B, L))
 
-    def _spec_verify_positions(self, verify_input: mx.array, prompt_cache):
+    def _spec_verify_positions(self, verify_input: mx.array, prompt_cache,
+                               rope_deltas=None):
         # Verify runs at the same positions plain decode would: the resolved
         # mrope block after an image turn, None (scalar-offset rope) before.
-        return self._resolve_positions(verify_input, prompt_cache, None, None)
+        return self._resolve_positions(
+            verify_input, prompt_cache, None, rope_deltas)
 
     def __call__(
         self,
