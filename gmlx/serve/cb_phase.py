@@ -4,10 +4,10 @@ Decode on a model in RAM runs on RAM_DECODE, 400 ops per buffer with no
 size cap: at the device's 50 MB cap a step's encode splits into enough
 command buffers that submission blocks on in-flight drain, so the engine's
 async lookahead hides nothing. GMLX_CB_FINE_DECODE=1 decodes on
-FINE_DECODE, 50 ops with no size cap, instead. Deep
-prefill in RAM needs fine buffers: a giant buffer keeps every layer's
-transients live at once and can exhaust GPU memory on multi-thousand-token
-chunks. A streamed model decodes the other way round. Its decode syncs on
+FINE_DECODE, 50 ops with no size cap, instead. Deep prefill in RAM needs
+fine buffers: a giant buffer keeps every layer's transients live at once
+and can exhaust GPU memory on multi-thousand-token chunks. A streamed
+model decodes the other way round. Its decode syncs on
 the host at every layer to read the routing, so a layer's buffers all
 commit before the sync whatever the caps, and finer buffers let the GPU
 start each layer while the host still encodes it. It prefills on the fine
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import threading
+import weakref
 
 COARSE = (400, 100000)
 FINE = (50, 50)  # the MLX device defaults on a Max or Ultra chip
@@ -53,8 +54,11 @@ _FLAG = "_gmlx_cb_phase"
 _STREAMED_ATTR = "_gmlx_cb_streamed"
 _ENV_CAPS = ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER")
 # pre_lift: the caps end_lift sets back, while a lift holds.
+_UNSET = object()
+# model: a weak reference to the model the caps were last set for, None
+# for a flip without a model, _UNSET when the last set had no model.
 _state: dict = {"phase": None, "caps": None, "kq": None, "lifted": False,
-                "pre_lift": None}
+                "pre_lift": None, "model": _UNSET}
 # Engines on separate threads share the device fields: the compare, the
 # write and the record go together, so the record matches the device.
 _LOCK = threading.Lock()
@@ -114,12 +118,36 @@ def prefill_caps(model) -> tuple[int, int]:
     return STREAMED_PREFILL if _streamed(model) else FINE
 
 
-def _set(caps: tuple[int, int], ph: str | None) -> tuple[int, int] | None:
+def _ref(model):
+    """A weak reference to ``model``, None for no model, _UNSET for an
+    object that takes no weak reference (no repeat shortcut for it)."""
+    if model is None:
+        return None
+    try:
+        return weakref.ref(model)
+    except TypeError:
+        return _UNSET
+
+
+def _same_model(model) -> bool:
+    """``model`` is the model the caps were last set for."""
+    ref = _state["model"]
+    if ref is _UNSET:
+        return False
+    if ref is None:
+        return model is None
+    return model is not None and ref() is model
+
+
+def _set(caps: tuple[int, int], ph: str | None,
+         model=_UNSET) -> tuple[int, int] | None:
     """Set ``caps`` on the device. Dedupes on the caps set, so a phase
     change that keeps the caps costs nothing and a model change that
-    moves them under one phase still applies. Returns the caps the device
-    held before, None when they are not known."""
+    moves them under one phase still applies. Records the phase and the
+    model it was set for. Returns the caps the device held before, None
+    when they are not known."""
     with _LOCK:
+        _state["model"] = _UNSET if model is _UNSET else _ref(model)
         prev = _state["caps"]
         if prev != caps:
             kq = _kq()
@@ -151,11 +179,14 @@ def _live() -> bool:
 
 def flip(phase: str, model=None) -> None:
     """Set the caps for ``phase``: prefill_caps(model) for prefill,
-    decode_caps(model) for decode."""
+    decode_caps(model) for decode. A repeat of the last phase for the
+    last model returns at once: the engine flips at every step."""
+    if _state["phase"] == phase and _same_model(model):
+        return
     if not _live():
         return
     caps = decode_caps(model) if phase == "decode" else prefill_caps(model)
-    _set(caps, phase)
+    _set(caps, phase, model)
 
 
 def lift() -> None:

@@ -8,14 +8,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- A model in memory decodes on 400 ops per command buffer again, the 0.5.1
-  caps. The 50-op caps of 0.5.2 decoded 4 to 8 percent slower on an M1
-  Ultra and no faster on an M3 Max or M5 Max. `GMLX_CB_FINE_DECODE=1`
-  keeps the 50-op caps.
-- Short prompts to a MoE model in memory prefill about 10 percent faster:
-  the prefill chunk pick walked every expert module on each request.
+- A model in memory decodes on the 0.5.1 command-buffer caps again; the
+  0.5.2 caps decoded 4 to 8 percent slower on an M1 Ultra.
+  `GMLX_CB_FINE_DECODE=1` keeps the 0.5.2 caps.
+- Short prompts to a MoE model in memory prefill faster: the prefill chunk
+  pick visited every module of every layer on each request.
 - A client that disconnects before the server has read its request body
   no longer leaves an error traceback in the server log.
+- Less host work per decode token: the memory governor reads the kernel's
+  unwired count every 16 steps while it sits above the floor, instead of
+  three sysctl calls on every step, and the command-buffer phase flip
+  returns at once on a repeat of the last phase for the last model.
 
 ## [0.5.2] - 2026-10-25
 

@@ -33,6 +33,7 @@ def fake_kq(monkeypatch):
     monkeypatch.setitem(cb_phase._state, "caps", None)
     monkeypatch.setitem(cb_phase._state, "lifted", False)
     monkeypatch.setitem(cb_phase._state, "pre_lift", None)
+    monkeypatch.setitem(cb_phase._state, "model", cb_phase._UNSET)
     return calls
 
 
@@ -45,9 +46,16 @@ def held(request, monkeypatch, fake_kq):
     return key, fake_kq
 
 
+class _Marked:
+    """A model the streaming install marked, in RAM or streamed. A class,
+    not a SimpleNamespace: the flip keeps a weak reference to the model."""
+
+    def __init__(self, streamed):
+        self._kq_streaming = streamed
+
+
 def _model(streamed):
-    """A model the streaming install marked, in RAM or streamed."""
-    return SimpleNamespace(_kq_streaming=streamed)
+    return _Marked(streamed)
 
 
 @pytest.fixture
@@ -719,3 +727,36 @@ def test_engine_threads_leave_the_record_on_the_device_caps(monkeypatch,
     streamed.join(5)
     assert device == [cb_phase.RAM_DECODE, cb_phase.STREAMED_DECODE]
     assert cb_phase._state["caps"] == device[-1]
+
+
+def test_a_repeat_flip_for_the_same_model_reads_nothing(monkeypatch, fake_kq):
+    """The engine flips at every step. A repeat of the last phase for the
+    last model returns before the caps are recomputed; a phase change or
+    another model recomputes them."""
+    import gmlx.serve.cb_phase as cb_phase
+
+    picks = []
+    monkeypatch.setattr(cb_phase, "decode_caps",
+                        lambda m: (picks.append(("decode", id(m))), cb_phase.RAM_DECODE)[1])
+    monkeypatch.setattr(cb_phase, "prefill_caps",
+                        lambda m: (picks.append(("prefill", id(m))), cb_phase.FINE)[1])
+    a, b = _model(False), _model(False)
+    cb_phase.flip("decode", a)
+    cb_phase.flip("decode", a)
+    cb_phase.flip("decode", a)
+    assert picks == [("decode", id(a))]
+    cb_phase.flip("decode", b)
+    assert picks == [("decode", id(a)), ("decode", id(b))]
+    cb_phase.flip("prefill", b)
+    cb_phase.flip("prefill", b)
+    assert picks[-1] == ("prefill", id(b)) and len(picks) == 3
+    cb_phase.lift()
+    cb_phase.flip("prefill", b)
+    assert len(picks) == 4
+    # A model that died and a new one at its address are not the same.
+    cb_phase.flip("decode", _model(False))
+    cb_phase.flip("decode", _model(False))
+    assert len(picks) == 6
+    cb_phase.flip("decode", None)
+    cb_phase.flip("decode", None)
+    assert len(picks) == 7

@@ -63,7 +63,8 @@ governed tick, and so does a streaming model's decode arena
 it regrows only into headroom the governor is not using), so orange
 and red reclaim decode speed before they fail a row. Registered
 bytes are sampled on a slow cadence (every 16 ticks and at band
-transitions); the per-tick trajectory rides the free counters and
+transitions), and so is the kernel's unwired count while it sits above
+the floor; the per-tick trajectory rides the free counters and
 the admission-path rate stash, never a vars() walk.
 
 Threading: everything here runs on the engine thread inside the
@@ -268,6 +269,8 @@ class _GovState:
         # wired, and the last wall time a stable (non-collapsing) breach
         # was logged
         self.floor_prev = None
+        self.kernel_sampled_tick = None
+        self.kernel_last = None
         self.floor_warned_at = 0.0
         # U5 fault injection: (kind, tick) directives already fired
         self.injected: set = set()
@@ -675,6 +678,23 @@ def _measure_rung(gen, st: _GovState) -> None:
     st.rung_rate_before = rate
 
 
+def _kernel_sample(st, floor: float):
+    """The kernel's unwired bytes for this tick. Read live on the first
+    tick, every 16 ticks after, and on every tick while the last read sat
+    under the floor; the ticks between reuse the last read. The read is
+    three sysctl calls, and a decode step moves memory by a few MB. A
+    floor of 0 reads nothing."""
+    if floor <= 0:
+        return None
+    due = (st.kernel_sampled_tick is None
+           or st.tick_no - st.kernel_sampled_tick >= 16
+           or (st.kernel_last is not None and st.kernel_last < floor))
+    if due:
+        st.kernel_last = _kernel_unwired()
+        st.kernel_sampled_tick = st.tick_no
+    return st.kernel_last
+
+
 def _governor_tick(gen) -> None:
     st = _state(gen)
     st.tick_no += 1
@@ -753,7 +773,7 @@ def _governor_tick(gen) -> None:
     # hundred MB from a livelock (2026-08-24: active 87 GB + cache 27 GB
     # on a 128 GB box, governor green throughout).
     floor = _kernel_floor_bytes()
-    unw = _kernel_unwired() if floor > 0 else None
+    unw = _kernel_sample(st, floor)
     _STATS["kernel_unwired_bytes"] = None if unw is None else int(unw)
     if unw is not None and unw < floor:
         _STATS["kernel_floor_reds"] += 1
@@ -769,6 +789,7 @@ def _governor_tick(gen) -> None:
             freed = _evict_registered(frac)
             mx.clear_cache()
             unw2 = _kernel_unwired()
+            st.kernel_last = unw2
         else:
             freed = 0.0
             unw2 = unw

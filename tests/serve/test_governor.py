@@ -956,3 +956,46 @@ def test_dead_arena_entry_is_replaced(rig, monkeypatch):
     assert gov._ARENA_REFS["arena:fixed"]() is arena
     gov.unregister_arena(arena)
     assert "arena:fixed" not in gov._REG and "arena:fixed" not in gov._ARENA_REFS
+
+
+def test_kernel_floor_reads_every_16_ticks_above_the_floor(rig, monkeypatch):
+    # The read is three sysctl calls on the decode step. Above the floor
+    # it runs on the first tick and every 16th after; a tick in between
+    # reuses the last read.
+    reads = []
+    monkeypatch.setattr(gov, "_kernel_unwired",
+                        lambda: (reads.append(1), rig["kernel"])[1])
+    gen = FakeGen(rows=2)
+    for _ in range(33):
+        gov._governor_tick(gen)
+    assert len(reads) == 3
+    assert gov._STATS["kernel_unwired_bytes"] == int(rig["kernel"])
+
+
+def test_kernel_floor_reads_every_tick_under_the_floor(rig, monkeypatch):
+    # A breach is watched tick by tick until a read comes back above the
+    # floor; then the slow cadence resumes.
+    reads = []
+    monkeypatch.setattr(gov, "_kernel_unwired",
+                        lambda: (reads.append(1), rig["kernel"])[1])
+    gen = FakeGen(rows=2)
+    gov._governor_tick(gen)
+    assert len(reads) == 1
+    st = gov._state(gen)
+    st.kernel_sampled_tick = st.tick_no - 16     # the next tick is due
+    rig["kernel"] = 2e9
+    gov._governor_tick(gen)                      # breach: sample, reclaim re-read
+    n = len(reads)
+    assert n >= 2
+    gov._governor_tick(gen)                      # still under: read again
+    assert len(reads) > n
+    n = len(reads)
+    rig["kernel"] = 40e9
+    gov._governor_tick(gen)                      # the read that clears it
+    assert len(reads) > n
+    n = len(reads)
+    for _ in range(15):
+        gov._governor_tick(gen)
+    assert len(reads) == n
+    gov._governor_tick(gen)
+    assert len(reads) == n + 1

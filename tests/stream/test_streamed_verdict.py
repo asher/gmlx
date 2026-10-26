@@ -46,7 +46,7 @@ def test_the_installs_verdict_wins_over_the_kept_walk():
     assert len(walks) == 3
 
 
-def test_the_walk_is_kept_on_the_outer_model_of_a_wrapper_chain():
+def test_a_wrapper_chain_is_walked_once_and_gets_no_install_verdict():
     walks = []
     inner = _model(walks)
     outer = SimpleNamespace(language_model=inner)

@@ -676,3 +676,36 @@ def test_a_client_that_leaves_before_its_body_is_no_error(caplog):
     assert not ran
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert sent and sent[0]["status"] == 400
+
+
+def test_a_disconnect_inside_a_route_still_raises():
+    """The gate answers only a client that left while it read the body. A
+    ClientDisconnect raised by route code is not its to catch."""
+    import asyncio
+
+    from starlette.requests import ClientDisconnect
+
+    app = FastAPI()
+    mg.install_media_gate(app=app)
+
+    @app.post("/v1/chat/completions")
+    async def chat(request: Request):
+        raise ClientDisconnect()
+
+    body = b"{}"
+    scope = {"type": "http", "http_version": "1.1", "method": "POST",
+             "scheme": "http", "path": "/v1/chat/completions",
+             "raw_path": b"/v1/chat/completions", "query_string": b"",
+             "root_path": "", "headers": [(b"content-type", b"application/json"),
+                                          (b"content-length", str(len(body)).encode())],
+             "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 80)}
+    messages = iter([{"type": "http.request", "body": body, "more_body": False}])
+
+    async def receive():
+        return next(messages)
+
+    async def send(message):
+        pass
+
+    with pytest.raises(ClientDisconnect):
+        asyncio.run(app(scope, receive, send))
