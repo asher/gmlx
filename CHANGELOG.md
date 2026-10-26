@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-25
+
 ### Added
 
 - `gmlx pull <name>` pulls a recommended model at the quality tier for this
