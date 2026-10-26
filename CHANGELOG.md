@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-26
+
 ### Fixed
 
 - A model in memory decodes on the 0.5.1 command-buffer caps again; the
