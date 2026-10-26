@@ -61,6 +61,8 @@ _state: dict = {"phase": None, "caps": None, "kq": None, "lifted": False,
                 "pre_lift": None, "model": _UNSET}
 # Engines on separate threads share the device fields: the compare, the
 # write and the record go together, so the record matches the device.
+# flip's repeat check reads phase and model without the lock: a torn
+# pair at worst skips one flip the other engine is overriding anyway.
 _LOCK = threading.Lock()
 
 

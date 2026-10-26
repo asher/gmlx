@@ -64,7 +64,8 @@ it regrows only into headroom the governor is not using), so orange
 and red reclaim decode speed before they fail a row. Registered
 bytes are sampled on a slow cadence (every 16 ticks and at band
 transitions), and so is the kernel's unwired count while it sits above
-the floor; the per-tick trajectory rides the free counters and
+twice the floor with no prompt step near; the per-tick trajectory rides
+the free counters and
 the admission-path rate stash, never a vars() walk.
 
 Threading: everything here runs on the engine thread inside the
@@ -271,6 +272,7 @@ class _GovState:
         self.floor_prev = None
         self.kernel_sampled_tick = None
         self.kernel_last = None
+        self.kernel_prompt_prev = False
         self.floor_warned_at = 0.0
         # U5 fault injection: (kind, tick) directives already fired
         self.injected: set = set()
@@ -678,23 +680,42 @@ def _measure_rung(gen, st: _GovState) -> None:
     st.rung_rate_before = rate
 
 
+def _prompt_may_step(gen) -> bool:
+    """A prompt chunk can run on this tick: one is in flight, or the queue
+    holds a prompt and the batch has room to admit it (ar.py admits when
+    completion_batch_size minus the active rows is at least
+    prefill_batch_size)."""
+    if getattr(gen, "_prompt_batch", None) is not None:
+        return True
+    if not getattr(gen, "_unprocessed_sequences", None):
+        return False
+    gb = getattr(gen, "_generation_batch", None)
+    room = getattr(gen, "completion_batch_size", None)
+    if gb is None or room is None:
+        return True
+    return room - len(gb) >= getattr(gen, "prefill_batch_size", 1)
+
+
 def _kernel_sample(gen, st: "_GovState", floor: float):
     """The kernel's unwired bytes for this tick. Read live on the first
-    tick, every 16 ticks after, on a tick with a prompt in flight (a
-    prompt chunk can wire GBs), and on every tick while the last read sat
-    under twice the floor; a plain decode tick between reuses the last
-    read, since a decode step moves memory by a few MB and the read is
-    three sysctl calls. A read that failed is retried next tick. A floor
-    of 0 reads nothing."""
+    tick, every 16 ticks after, on a tick where a prompt chunk can run
+    and on the tick after it (the tick runs before the step, and a chunk
+    can wire GBs), and on every tick while the last read sat under twice
+    the floor; a plain decode tick between reuses the last read, since a
+    decode step moves memory by a few MB and the read is three sysctl
+    calls. A read that failed is retried next tick. A floor of 0 reads
+    nothing."""
     if floor <= 0:
         return None
     last = st.kernel_last
+    prompt_now = _prompt_may_step(gen)
     due = (st.kernel_sampled_tick is None
            or last is None
            or st.tick_no - st.kernel_sampled_tick >= 16
            or last < 2 * floor
-           or getattr(gen, "_prompt_batch", None) is not None
-           or bool(getattr(gen, "_unprocessed_sequences", None)))
+           or prompt_now
+           or st.kernel_prompt_prev)
+    st.kernel_prompt_prev = prompt_now
     if due:
         st.kernel_last = _kernel_unwired()
         st.kernel_sampled_tick = st.tick_no

@@ -37,6 +37,8 @@ class FakeGen:
         self._kq_admit_live_bytes = live
         self._kq_admit_n_caches = 2
         self.prefill_step_size = 2048
+        self.completion_batch_size = 8
+        self.prefill_batch_size = 1
         self.removed = []
 
     def remove(self, uid):
@@ -1028,3 +1030,28 @@ def test_kernel_floor_reads_live_near_the_floor_and_under_a_prompt(rig, monkeypa
     gen._unprocessed_sequences = [object()]
     gov._governor_tick(gen)
     assert len(reads) == n + 4
+    # The tick runs before the step: a one-chunk prompt admitted on the
+    # last tick has wired its KV by now, so this tick reads too.
+    gen._unprocessed_sequences = []
+    gov._governor_tick(gen)
+    assert len(reads) == n + 5
+    gov._governor_tick(gen)
+    assert len(reads) == n + 5
+    # A queued prompt the full batch cannot admit runs no chunk: no read.
+    gen._unprocessed_sequences = [object()]
+    gen.completion_batch_size = len(gen._generation_batch)
+    for _ in range(3):
+        gov._governor_tick(gen)
+    assert len(reads) == n + 5
+
+
+def test_kernel_floor_retries_a_failed_read_next_tick(rig, monkeypatch):
+    samples = iter([None, 40e9])          # a third read would raise
+    monkeypatch.setattr(gov, "_kernel_unwired", lambda: next(samples))
+    gen = FakeGen(rows=2)
+    gov._governor_tick(gen)                      # sysctl failed: None
+    assert gen._kq_governor.kernel_last is None
+    gov._governor_tick(gen)                      # retried, not reused
+    assert gen._kq_governor.kernel_last == 40e9
+    gov._governor_tick(gen)                      # above 2 x floor: reused
+    assert gen._kq_governor.kernel_last == 40e9
