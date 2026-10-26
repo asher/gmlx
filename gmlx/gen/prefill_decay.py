@@ -926,6 +926,9 @@ _STOCK_BASE = 2048
 # takes the wider base step while the free working set keeps the floor, which
 # keeps a wider chunk off a model near the wired ceiling.
 _MOE_WIDE_MAX_ROWS = 128
+# The wide step pays off from this GPU generation on; older chips keep the
+# stock chunk unless GMLX_MOE_WIDE_STEP names one.
+_MOE_WIDE_MIN_GEN = 17
 _MOE_WIDE_FLOOR_BYTES = 20 << 30
 _EXPERTS = ("num_experts", "num_local_experts", "n_routed_experts",
             "moe_num_experts")
@@ -952,12 +955,23 @@ def prompt_rows(batch) -> int:
     return len(getattr(batch, "uids", None) or ()) or 1
 
 
+def _wide_step() -> int:
+    """GMLX_MOE_WIDE_STEP when set; else 4096 from _MOE_WIDE_MIN_GEN on
+    (an unknown generation counts as new) and the stock chunk before."""
+    if os.environ.get("GMLX_MOE_WIDE_STEP"):
+        return env_int("GMLX_MOE_WIDE_STEP", 4096)
+    from gmlx.load.dtypes import gpu_arch_gen
+
+    gen = gpu_arch_gen()
+    return 4096 if gen == 0 or gen >= _MOE_WIDE_MIN_GEN else _STOCK_BASE
+
+
 def moe_base_step(model, rows: int = 1) -> int | None:
-    """GMLX_MOE_WIDE_STEP for a MoE whose experts average at most
+    """The wide step (_wide_step) for a MoE whose experts average at most
     _MOE_WIDE_MAX_ROWS rows of a stock chunk of ``rows`` prompts, keep
     their weights resident, and leave _MOE_WIDE_FLOOR_BYTES of free
     working set; else None, and None with the decay off."""
-    wide = env_int("GMLX_MOE_WIDE_STEP", 4096)
+    wide = _wide_step()
     if wide <= _STOCK_BASE or not _enabled():
         return None
     e, k = _moe_widths(model)

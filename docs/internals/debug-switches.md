@@ -36,7 +36,7 @@ is already running does not see a variable you export later.
 | `GMLX_DECODE_PREFILL_FLOOR` | Decode-rate floor that `auto` pacing protects, as a share of a stream's batched rate. The default is `0.5`. |
 | `GMLX_PREFILL_TICK_MS` | Same as `server.prefill_tick_ms`. |
 | `GMLX_PREFILL_MIN_STEP` | Smallest chunk, in tokens, that the tick budget may halve a chunk down to. The default is `256`. |
-| `GMLX_MOE_WIDE_STEP` | Prompt chunk of a sparse MoE with 20 GiB free: 128 tokens or fewer per expert in a 2048-token chunk. The default is `4096`, and `2048` keeps the stock chunk. |
+| `GMLX_MOE_WIDE_STEP` | Prompt chunk of a sparse MoE with 20 GiB free and few tokens per expert: `4096` from the M5 on, `2048` before. Set it to use either chunk on any chip. |
 | `GMLX_DECODE_BATCH` | Requests that decode together in a step. The default is `8`, or the capacity table's widest fit when smaller. `0` restores the upstream 32. |
 | `GMLX_SSE_KEEPALIVE_S` | Interval in seconds of the SSE keepalive comment while a stream is silent. The default is `15`, and `0` disables it. |
 | `GMLX_FAITHFUL_HISTORY=0` | Restore mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from plain assistant turns, and its stock `/v1/messages` conversion. |

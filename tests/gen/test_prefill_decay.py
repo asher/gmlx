@@ -1025,12 +1025,29 @@ def _moe(e, k, nested=False):
 
 @pytest.fixture
 def resident(monkeypatch):
+    import gmlx.load.dtypes as dtypes
     import gmlx.stream.expert_streaming as es
 
     monkeypatch.setattr(es, "experts_streamed", lambda m: False)
+    monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda: 17)
     monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
     monkeypatch.delenv("GMLX_MOE_WIDE_STEP", raising=False)
     _headroom(monkeypatch, 40 * GB)
+
+
+def test_moe_wide_step_waits_for_a_new_enough_gpu(monkeypatch, resident):
+    import gmlx.load.dtypes as dtypes
+
+    # one generation under the line keeps the stock chunk by default
+    monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda: 16)
+    assert pd._run_base(_moe(256, 8), None, None) == 2048
+    # an explicit GMLX_MOE_WIDE_STEP applies on any chip
+    monkeypatch.setenv("GMLX_MOE_WIDE_STEP", "4096")
+    assert pd._run_base(_moe(256, 8), None, None) == 4096
+    monkeypatch.delenv("GMLX_MOE_WIDE_STEP")
+    # an unknown generation counts as new
+    monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda: 0)
+    assert pd._run_base(_moe(256, 8), None, None) == 4096
 
 
 def test_moe_with_few_rows_per_expert_takes_the_wide_step(resident):
