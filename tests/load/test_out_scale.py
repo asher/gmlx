@@ -802,13 +802,19 @@ def test_mtp_remaps_keep_the_weight_scales():
         n_head=4, n_head_kv=2)
     out3, _, _ = remap_qwen4exp_mtp_arrays(
         tensors("mtp.", "fc_hidden", "pre_fc_norm_hidden", "fc_embedding",
-                "hyper_connection_mixer.down"),
-        {"mtp.fc_hidden.weight": "nvfp4"})
+                "hyper_connection_mixer.down")
+        | tensors("mtp.", "layers.0.mlp.switch_mlp.down_proj",
+                  "layers.0.input_layernorm", "layers.0.self_attn.q_proj",
+                  "layers.0.mlp.gate"),
+        {"mtp.fc_hidden.weight": "nvfp4",
+         "mtp.layers.0.mlp.switch_mlp.down_proj.weight": "nvfp4"})
     for got, want in (
             (out, {"fc": 0.25}), (out_fp, {"eh_proj": 0.5}),
             (out2, {"layers.0.mlp.shared_experts.up_proj": 0.25,
                     "layers.0.self_attn.o_proj": 0.5}),
-            (out3, {"fc_hidden": 0.25, "fc_embedding": 0.5})):
+            (out3, {"fc_hidden": 0.25, "fc_embedding": 0.5,
+                    "layers.0.mlp.switch_mlp.down_proj": 0.25,
+                    "layers.0.self_attn.q_proj": 0.5})):
         scales = {k: v.tolist() for k, v in got.items()
                   if k.endswith("scale")}
         assert scales == {f"{p}.out_scale": [s] for p, s in want.items()}

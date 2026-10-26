@@ -2276,7 +2276,7 @@ _WEIGHT_SCALE_RE = re.compile(
 
 
 def is_weight_scale(gguf_name: str) -> bool:
-    """Whether ``gguf_name`` is a weight scale that llama.cpp applies."""
+    """Whether ``gguf_name`` is a weight scale that llama.cpp loads."""
     return _WEIGHT_SCALE_RE.match(gguf_name) is not None
 
 
