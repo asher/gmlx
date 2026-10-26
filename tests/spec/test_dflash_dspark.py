@@ -70,7 +70,7 @@ def _meta(**over):
         "dflash.context_length": 4096,
         "dflash.block_size": 4,
         "dflash.markov_rank": RANK,
-        "dflash.confidence_head": True,
+        "dflash.has_confidence_head": True,
         "dflash.confidence_head_with_markov": True,
         "dflash.target_layers": [1, 3],
         "tokenizer.ggml.mask_token_id": MASK,
@@ -158,6 +158,78 @@ def test_config_reads_the_dspark_keys_and_adds_the_anchor_row():
         "d.gguf", _meta(**{"dflash.sample_from_anchor": False}), _target_dict(),
         "dflash_dspark", arrays=arrays)
     assert (no_anchor.block_size, no_anchor.sample_from_anchor) == (4, False)
+
+
+@pytest.mark.parametrize("family", ["qwen3_5", "qwen3_5_text",
+                                    "qwen3_5_moe", "qwen3_5_moe_text"])
+def test_the_dspark_backbone_drives_dense_and_moe_qwen35(family):
+    # MiniCPM-V 4.7 35B-A3B ships its DSpark drafter for a qwen3_5_moe tower.
+    arrays, _ = _skeleton()
+    _dflash_config_from_meta("d.gguf", _meta(), _target_dict(model_type=family),
+                             "dflash_dspark", arrays=arrays)
+
+
+def test_the_dspark_backbone_refuses_another_family():
+    arrays, _ = _skeleton()
+    with pytest.raises(ValueError, match="not gemma4_text"):
+        _dflash_config_from_meta(
+            "d.gguf", _meta(), _target_dict(model_type="gemma4_text"),
+            "dflash_dspark", arrays=arrays)
+
+
+def test_quantized_table_rank_is_its_logical_row_width():
+    """A Q4_K markov table packs 256 weights into 144 bytes; the rank is
+    the table's logical row width (its GGUF ne0), as llama.cpp reads it."""
+    arrays, _ = _skeleton()
+    arrays["markov_w1.weight"] = mx.zeros((VOCAB, 144), dtype=mx.uint8)
+    config, _ = _dflash_config_from_meta(
+        "d.gguf", _meta(**{"dflash.markov_rank": None}), _target_dict(),
+        "dflash_dspark", arrays=arrays,
+        shapes={"markov_w1.weight": (256, VOCAB)})
+    assert config.markov_rank == 256
+
+
+@pytest.mark.parametrize("key", ["dflash.has_confidence_head",
+                                 "dflash.confidence_head"])
+def test_the_confidence_head_is_its_tensor(key):
+    """llama.cpp builds the head when conf_proj is present. MiniCPM-V's
+    converter writes has_confidence_head, the Bonsai one confidence_head."""
+    arrays, _ = _skeleton()
+    bare = {n: v for n, v in arrays.items() if "conf_proj" not in n}
+    meta = {k: v for k, v in _meta().items()
+            if k != "dflash.has_confidence_head"}
+    on, _ = _dflash_config_from_meta("d.gguf", {**meta, key: True},
+                                     _target_dict(), "dflash_dspark",
+                                     arrays=arrays)
+    unkeyed, _ = _dflash_config_from_meta("d.gguf", meta, _target_dict(),
+                                          "dflash_dspark", arrays=arrays)
+    off, _ = _dflash_config_from_meta("d.gguf", meta, _target_dict(),
+                                      "dflash_dspark", arrays=bare)
+    assert (on.confidence_head, unkeyed.confidence_head,
+            off.confidence_head) == (True, True, False)
+    with pytest.raises(ValueError, match=f"{key} is set"):
+        _dflash_config_from_meta("d.gguf", {**meta, key: True},
+                                 _target_dict(), "dflash_dspark", arrays=bare)
+
+
+@pytest.mark.parametrize("size,block", [("A3B", 4), ("214M", 16)])
+def test_the_minicpm_v_35b_drafter_drafts_three_tokens_a_round(size, block):
+    """The measured MiniCPM-V 4.7 35B-A3B drafter (declared MiniCPM-V-4.7
+    A3B) runs a block of 4 by default, and --draft-block-size still moves
+    it up to the trained block. Every other DSpark drafter keeps its own."""
+    from gmlx.spec.drafter_protocol import default_block_size
+    from gmlx.spec.helpers import _resolve_block_total
+
+    arrays, _ = _skeleton()
+    config, _ = _dflash_config_from_meta(
+        "d.gguf", _meta(**{"dflash.block_size": 15,
+                           "general.basename": "MiniCPM-V-4.7",
+                           "general.size_label": size}),
+        _target_dict(), "dflash_dspark", arrays=arrays)
+    assert config.block_size == 16 and default_block_size(config) == block
+    drafter = SimpleNamespace(config=config)
+    assert _resolve_block_total(drafter, None) == block
+    assert _resolve_block_total(drafter, 8) == 8
 
 
 def test_config_takes_the_rank_from_the_table_and_checks_the_heads():

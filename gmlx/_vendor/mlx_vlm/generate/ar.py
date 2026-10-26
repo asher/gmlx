@@ -1659,6 +1659,10 @@ class SpeculativeGenerationBatch:
             eos_token_ids=None,
             prompt_tokens=self.prompt_tokens,
             row_ids=[0] * len(self._all_uids),
+            # gmlx: the rows' mrope deltas from their own prefill. The owned
+            # rounds loop carries them per row and passes them on every
+            # target forward, so another request's prefill cannot reach it.
+            rope_deltas=getattr(self, "_rope_deltas", None),
         )
 
     def next(self) -> List[GenerationBatch.Response]:

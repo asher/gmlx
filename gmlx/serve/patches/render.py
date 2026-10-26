@@ -77,6 +77,7 @@ _IN_PLACE_IMAGES = frozenset((
     "qwen3_omni_moe",
     "kimi_k25", "deepseek_v4_vl", "deepseek_v41_vl", "muse_glimmer",
     "muse_spark", "glm5_next", "mistral3", "pixtral", "nemotron_h_omni",
+    "minicpmv4_6", "minicpmv4_7",
 ))
 # Image items as the client and the stock rebuild write them.
 _IMAGE_ITEMS = ("image", "image_url", "input_image")
@@ -84,7 +85,8 @@ _IMAGE_ITEMS = ("image", "image_url", "input_image")
 # message in that tool turn.
 _TOOL_IMAGES = frozenset((
     "qwen3_5", "qwen3_5_moe", "kimi_k25", "muse_glimmer", "muse_spark",
-    "glm5_next", "gemma4_unified", "nemotron_h_omni",
+    "glm5_next", "gemma4_unified", "nemotron_h_omni", "minicpmv4_6",
+    "minicpmv4_7",
 ))
 # The model types whose chat template raises on a JSON-string
 # ``tool_calls[*].function.arguments``.

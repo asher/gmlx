@@ -543,17 +543,31 @@ def test_trip_on_injection_gates_and_keeps_streaming():
     assert len(out[0][0]) == 4
 
 
-def test_trip_widens_rope_deltas():
-    """The gated plain step is the same lm(x, cache) call verify makes, so
-    qwen-VL targets still need their cached mrope deltas at the live width."""
+def test_trip_passes_deltas_at_the_live_width():
+    """The gated plain step after a tripping admission passes the rows'
+    mrope deltas at the new width: the hosts' own, then the injected row's
+    (none in the entry, so delta 0)."""
     d = _StrictDrafter(cap=3)
     model = SimpleNamespace()
-    lm = _FakeLM()
-    lm._rope_deltas = mx.zeros((3, 1), dtype=mx.int32)
+    seen = []
+
+    class _LM(_FakeLM):
+        def __call__(self, x, cache=None, **kw):
+            seen.append(kw.get("rope_deltas"))
+            return super().__call__(x, cache=cache, **kw)
+
+    lm = _LM()
     _queue_injection(model, lm)
-    _drive(d, B=3, max_tokens=2, model=model, lm=lm,
-           prompt_cache=[_FakeCache(width=3)])
-    assert lm._rope_deltas.shape[0] == 4
+    gen = _owned_decode_rounds_batch(
+        model, d, lm, [_FakeCache(width=3)], hidden=mx.zeros((3, 1, 8)),
+        b=[1, 2, 3],
+        shared_kv={"full": (mx.zeros((3, 2, 4, 4)), mx.zeros((3, 2, 4, 4)))},
+        seed_tokens=None, emitted=[1] * 3, max_tokens=2, sampler=None,
+        draft_block_size=None,
+        rope_deltas=mx.array([[-1], [-2], [-3]], dtype=mx.int32))
+    list(gen)
+    assert seen and all(rd is not None for rd in seen)
+    assert seen[0].reshape(-1).tolist() == [-1, -2, -3, 0]
 
 
 def test_injection_bookkeeping_runs_while_gated():

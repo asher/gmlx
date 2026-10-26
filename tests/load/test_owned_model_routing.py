@@ -76,8 +76,30 @@ def _configs() -> dict:
     muse_spark = gvlm.synthesize_vlm_config(
         "muse_spark", _muse_spark_meta(), _MUSE_SPARK_SHAPES,
         {**_CLIP, "clip.vision.projection_dim": s_text["hidden_size"]})
+    minicpmv = {
+        f"minicpmv4_{v}": {
+            "model_type": f"minicpmv4_{v}",
+            "text_config": dict(_MINICPM_TEXT, model_type=text),
+            "vision_config": {"hidden_size": 32, "intermediate_size": 48,
+                              "num_hidden_layers": 2,
+                              "num_attention_heads": 2, "insert_layer_id": 0,
+                              "window_intermediate_size": 40,
+                              "position_grid": 8, "out_hidden_size": 64},
+            "vocab_size": 600, "image_token_id": 500,
+        } for v, text in ((6, "qwen3_5"), (7, "qwen3_5_moe"))}
     return {"qwen4_exp": qwen4_exp, "glm5_next": glm5_next,
-            "muse_glimmer": muse_glimmer, "muse_spark": muse_spark}
+            "muse_glimmer": muse_glimmer, "muse_spark": muse_spark,
+            **minicpmv}
+
+
+_MINICPM_TEXT = dict(
+    hidden_size=64, intermediate_size=128, linear_num_value_heads=4,
+    linear_num_key_heads=2, linear_key_head_dim=16, linear_value_head_dim=16,
+    linear_conv_kernel_dim=4, num_hidden_layers=2, num_attention_heads=4,
+    rms_norm_eps=1e-6, vocab_size=600, num_key_value_heads=2,
+    max_position_embeddings=2048, head_dim=16, full_attention_interval=2,
+    num_experts=4, num_experts_per_tok=2, shared_expert_intermediate_size=32,
+    moe_intermediate_size=32)
 
 
 def _flat_caches(model):
@@ -130,7 +152,8 @@ def test_every_mtp_splitter_row_names_a_module_of_the_copy():
         DRAFTER_KIND_BY_MODEL_TYPE)
 
 
-@pytest.mark.parametrize("model_type", ["glm5_next", "muse_glimmer",
+@pytest.mark.parametrize("model_type", ["glm5_next", "minicpmv4_6",
+                                        "minicpmv4_7", "muse_glimmer",
                                         "muse_spark", "qwen4_exp"])
 def test_build_vlm_model_builds_the_gmlx_class(model_type):
     model, _ = gvlm.build_vlm_model(_configs()[model_type])

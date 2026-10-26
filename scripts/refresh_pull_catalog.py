@@ -52,7 +52,7 @@ strip_env()
 
 from gmlx.load import arch_table, catalog, remote  # noqa: E402
 from gmlx.load.catalog import MEMORY_CLASSES, TIERS, Seed  # noqa: E402
-from gmlx.load.discovery import (_classify_meta, _declared_base_ids,  # noqa: E402
+from gmlx.load.discovery import (_classify_meta, declared_base_ids,  # noqa: E402
                                  _drafter_kind, _looks_like_drafter,
                                  _target_ids, quant_tag)
 from gmlx.load.config_synth import supported_arches  # noqa: E402
@@ -453,7 +453,7 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
             if arch_table.drafter_serves(darch, arch) is False:
                 problems.append(f"{seed.name}: a {darch} drafter does not serve {arch}")
             if seed.drafter_repo != seed.repo and not seed.cross_base:
-                declared = set(_declared_base_ids(d.kv))
+                declared = set(declared_base_ids(d.kv))
                 if not declared & targets:
                     problems.append(f"{seed.name}: drafter declares {sorted(declared)}, the "
                                     f"model answers to {sorted(targets)}; set cross_base")

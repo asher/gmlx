@@ -68,8 +68,8 @@ _FAMILY_NOTES = {
     "qwen2":          ("qwen2",    "Qwen2 / Qwen2.5 dense; QKV biases, tied embeddings on 0.5B/1.5B"),
     "qwen2moe":       ("qwen2",    "Qwen1.5-MoE-A2.7B; routed switch_mlp experts + shared expert + sigmoid shared gate; QKV biases; moe_intermediate from ffn_gate_exps shape (GGUF omits the KV key)"),
     "qwen3":          ("qwen3",    "Qwen3 dense (0.6B-32B); per-head qk-norm, NEOX rope (no qk-permute)"),
-    "qwen35":         ("qwen3",    "Qwen3.5/3.6/3.8 dense hybrid: gated-DeltaNet linear attention with a full-attention layer every full_attention_interval; fused-GDN Metal kernels at runtime (GMLX_FUSED_GDN=0 disables); native-head MTP (nextn) -> --speculative needs no companion GGUF; a DFlash 2 drafter GGUF (--draft-gguf, z-lab Qwen3.8-27B-DFlash2) wins over the head when configured; Hadamard-folded files (PrismML Ternary Bonsai, PTQ1_0/PQ2_0) rotate activations at run time"),
-    "qwen35moe":      ("qwen3",    "Qwen3.5/3.6 MoE (e.g. Qwen3.6-27B): the qwen35 gated-DeltaNet hybrid + fine-grained MoE with shared expert; fused-GDN kernels + native-head MTP as on qwen35"),
+    "qwen35":         ("qwen3",    "Qwen3.5/3.6/3.8 dense hybrid: gated-DeltaNet linear attention with a full-attention layer every full_attention_interval; fused-GDN Metal kernels at runtime (GMLX_FUSED_GDN=0 disables); native-head MTP (nextn) -> --speculative needs no companion GGUF; a DFlash 2 drafter GGUF (--draft-gguf, z-lab Qwen3.8-27B-DFlash2) wins over the head when configured; Hadamard-folded files (PrismML Ternary Bonsai, PTQ1_0/PQ2_0) rotate activations at run time; the MiniCPM-V 4.6/4.7 text tower (minicpmv mmprojs, DSpark drafter)"),
+    "qwen35moe":      ("qwen3",    "Qwen3.5/3.6 MoE (e.g. Qwen3.6-27B): the qwen35 gated-DeltaNet hybrid + fine-grained MoE with shared expert; fused-GDN kernels + native-head MTP as on qwen35; the MiniCPM-V 4.7 35B-A3B text tower (minicpmv4_7 mmproj, DSpark drafter via dflash_dspark)"),
     "qwen3moe":       ("qwen3",    "Qwen3-MoE (30B-A3B / 235B-A22B); all-MoE switch_mlp, no shared expert"),
     "qwen4exp":       ("qwen3",    "Qwen3.8-Flash-Next (llama.cpp PR 27742): the qwen35 gated-DeltaNet hybrid (sigmoid output gate, tiled V heads) + every-layer 512-expert MoE with shared expert, plus hyper-connections (4 residual streams, low-rank sigmoid mixers replacing every norm), QSA sparse attention (4-head indexer over mean-pooled blocks of 4 keys, top 512 blocks + the incomplete tail; dense below 2052 cached tokens) and PLE n-gram hash embeddings on layer 1 (320M-row IQ4_NL table kept as wire bytes, rows gathered per token). Vendored gmlx.models.qwen4_exp.model; all norms arrive +1 baked (passthrough). The MTP head is not in the model shards: speculative decoding reads a companion GGUF, either the qwen4exp-mtp one built from the HF mtp.* tensors or the llama.cpp mtp-*.gguf NextN sidecar (arch qwen4exp, block num_hidden_layers, one joined eh_proj), autodetected beside the target or in an MTP/ folder, or named by --draft-gguf. Pairs with the Qwen3-VL mmproj (--mmproj) via a vendored wrapper on the qwen3_5 vision tower; mmproj and the companion MTP compose, so a --mmproj load speculates on text turns"),
     "qwen3vlmoe":     ("qwen3",    "Qwen3-Omni thinker text tower (MoE, qwen3moe layout); pairs with the Qwen3-Omni mmproj (--mmproj) for vision + audio input"),
@@ -179,6 +179,8 @@ MTP_DRAFTER_ARCHES = {
     "muse_glimmer": ("dflash",),
     # DFlash 2 drafters (z-lab) for Qwen3.5/3.6/3.8 dense targets.
     "qwen3_5": ("dflash",),
+    # DSpark drafters on the DFlash backbone (MiniCPM-V 4.7 35B-A3B).
+    "qwen3_5_moe": ("dflash",),
     # Google's assistant drafters, and plain DFlash ones (Nemotron-3.5-Bolt-E4B).
     "gemma4_text": ("gemma4_assistant", "gemma4-assistant", "gemma4_mtp", "dflash"),
     # Qwen3.8-Flash-Next MTP head: gmlx's qwen4exp-mtp companion built from
@@ -198,6 +200,52 @@ MTP_DRAFTER_ARCHES = {
 # because its native in-GGUF head must win over a sidecar - a DFlash2
 # companion stays explicit --draft-gguf, matching the text path's auto.
 MTP_COMPANION_AUTO_MODEL_TYPES = ("deepseek_v4", "qwen4_exp", "muse_glimmer")
+
+
+# llama.cpp packs five drafters under the ``dflash`` arch and tells them
+# apart by tensor names. The container decides which targets a drafter
+# can drive. The loader refuses any other target, and discovery does not
+# pair one.
+DFLASH_CONTAINER_TARGETS = {
+    "dflash2": ("qwen3_5", "qwen3_5_text", "muse_glimmer"),
+    "dflash_dspark": ("qwen3_5", "qwen3_5_text", "qwen3_5_moe",
+                      "qwen3_5_moe_text"),
+    "dflash": ("muse_glimmer", "gemma4_text"),
+    "lilicorr": ("nemotron_h",),
+    "dspark": ("deepseek_v4",),
+}
+
+
+def dflash_container(names) -> str | None:
+    """Which drafter a ``dflash`` GGUF holds, from its tensor names, or
+    None when they match no known container.
+
+    The DeepSeek-V4 DSpark carries MLA's ``attn_q_a`` or the
+    hyper-connection head, LiLiCorr its ``lilicorr.*`` lattice head, the
+    DFlash-backbone DSpark the markov head on plain ``attn_q`` layers,
+    DFlash 2 the candidate selector, plain DFlash ``attn_q`` with per-head
+    QK-norms and no hyper-connections."""
+    names = list(names)
+    if any(n.startswith("output_hc_") or ".attn_q_a" in n for n in names):
+        return "dspark"
+    if any(n.startswith("lilicorr.") for n in names):
+        return "lilicorr"
+    if any(n.startswith("markov_w1") for n in names):
+        return "dflash_dspark"
+    if any(n.startswith("selector_hidden") for n in names):
+        return "dflash2"
+    if any(".attn_q_norm" in n for n in names):
+        return "dflash"
+    return None
+
+
+def container_serves(container: str | None, gguf_arch: str | None) -> bool:
+    """Whether a ``dflash`` drafter of ``container`` can drive a
+    ``gguf_arch`` target. An unknown container has no opinion."""
+    allowed = DFLASH_CONTAINER_TARGETS.get(container or "")
+    if allowed is None:
+        return True
+    return config_synth.GGUF_ARCH_TO_MODEL_TYPE.get(gguf_arch or "") in allowed
 
 
 def mtp_wired(gguf_arch: str | None) -> bool:

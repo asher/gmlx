@@ -24,6 +24,23 @@ transformers release 5.15.1 (Apache-2.0), with modifications:
   in MLX as one additive mask. The transformer blocks are mlx-lm's qwen3
   blocks.
 
+The MiniCPM-V model in gmlx/models/minicpmv/ ports model code from
+transformers commit 674c0e3 (Apache-2.0), with modifications:
+
+- gmlx/models/minicpmv/vision.py: the SigLIP vision tower, the
+  window-attention vit_merger and the downsample MLP merger of
+  src/transformers/models/minicpmv4_6/modeling_minicpmv4_6.py and the
+  position bucketing of src/transformers/vision_utils.py, restated in MLX
+  by way of the mlx-vlm 0.7.3 minicpmv4_6 port (MIT).
+- gmlx/models/minicpmv/rope.py: the canvas M-RoPE positions of
+  src/transformers/models/minicpmv4_7/modular_minicpmv4_7.py, restated in
+  numpy with the float32 rounding of torch.linspace.
+- gmlx/models/minicpmv/processing.py: the slicing, resizing and
+  placeholder expansion of
+  src/transformers/models/minicpmv4_6/image_processing_pil_minicpmv4_6.py
+  and processing_minicpmv4_6.py, without torch, and the 4.7 image count
+  check.
+
 transformers is Copyright The Hugging Face team and licensed under the
 Apache License, Version 2.0, reproduced below. transformers ships no NOTICE
 file.

@@ -236,6 +236,48 @@ def test_muse_glimmer_runs_pair_by_the_image_sizes():
     assert len(image_spans(ids(10, 6), raw, cfg, processor)) == 1
 
 
+def _minicpm_cfg():
+    return SimpleNamespace(image_token_id=9, image_token_index=9,
+                           image_start_id=5, vision_config=SimpleNamespace(
+                               merge_factor=2))
+
+
+def _minicpm_prompt(slices):
+    """``<image>`` overview ``</image>``, then ``<slice>`` crop
+    ``</slice>`` per slice, each crop a 4 x 4 patch grid (4 tokens)."""
+    ids = [5] + [9] * 4 + [6]
+    for _ in range(slices):
+        ids += [7] + [9] * 4 + [8]
+    return ids
+
+
+def test_minicpm_v_images_span_their_slice_runs():
+    """A MiniCPM-V image is one run per crop, sized by target_sizes; the
+    spans start at each image's overview and hash all of its crops."""
+    ids = mx.array([[1] + _minicpm_prompt(2) + [2] + _minicpm_prompt(0)
+                    + [3]])
+    pv = mx.arange(4 * 16 * 3, dtype=mx.float32).reshape(64, 3)
+    raw = {"pixel_values": pv, "target_sizes": mx.array([[4, 4]] * 4)}
+    spans = image_spans(ids, raw, _minicpm_cfg())
+    assert _starts(spans) == [2, 21]
+    # The second image keys on its own crop: changing it leaves the first.
+    other = {**raw, "pixel_values": mx.concatenate([pv[:48], pv[48:] + 1])}
+    changed = image_spans(ids, other, _minicpm_cfg())
+    assert changed[0] == spans[0] and changed[1][1] != spans[1][1]
+    # A slice of the first image changes the first image's hash only.
+    other = {**raw, "pixel_values": mx.concatenate(
+        [pv[:16], pv[16:32] + 1, pv[32:]])}
+    changed = image_spans(ids, other, _minicpm_cfg())
+    assert changed[0][1] != spans[0][1] and changed[1] == spans[1]
+
+
+def test_minicpm_v_runs_that_do_not_fit_the_sizes_key_every_image():
+    ids = mx.array([[1] + _minicpm_prompt(1) + [3]])
+    pv = mx.zeros((32, 3))
+    raw = {"pixel_values": pv, "target_sizes": mx.array([[4, 4], [4, 8]])}
+    assert len(image_spans(ids, raw, _minicpm_cfg())) == 1
+
+
 def test_deepseek_v41_blocks_pair_by_the_image_meta():
     """Each image's block, START (IMAGE * n_llm_w + NEWLINE) * n_llm_h END,
     is one run of media ids."""

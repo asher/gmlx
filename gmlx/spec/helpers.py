@@ -410,12 +410,13 @@ def _mtp_verify_without_logits(
     lm: nn.Module,
     verify_input: mx.array,
     prompt_cache: list[Any],
+    **fwd_kw: Any,
 ) -> _MTPVerifyResult | None:
     verify_hidden: Callable[..., Any] | None = getattr(
         lm, "speculative_verify_hidden", None)
     if callable(verify_hidden):
         _note_verify_branch("hook:speculative_verify_hidden", lm)
-        result = verify_hidden(verify_input, prompt_cache)
+        result = verify_hidden(verify_input, prompt_cache, **fwd_kw)
         if isinstance(result, tuple):
             if len(result) == 3:
                 hidden, shared_kv_states, gdn_states = result
@@ -463,13 +464,14 @@ def _mtp_verify_with_model_method(
     verify_input: mx.array,
     prompt_cache: list[Any],
     sampler: Callable[[mx.array], mx.array],
+    **fwd_kw: Any,
 ) -> _MTPVerifyResult | None:
     verify_logits = getattr(lm, "speculative_verify_logits", None)
     if not callable(verify_logits):
         return None
 
     _note_verify_branch("hook:speculative_verify_logits", lm)
-    result = verify_logits(verify_input, prompt_cache, sampler)
+    result = verify_logits(verify_input, prompt_cache, sampler, **fwd_kw)
     if not isinstance(result, tuple) or len(result) != 4:
         raise ValueError(
             "speculative_verify_logits() must return "
@@ -492,24 +494,31 @@ def _mtp_verify_target(
     sampler: Callable[[mx.array], mx.array],
     *,
     sample_target_tokens: bool = True,
+    rope_deltas: mx.array | None = None,
 ) -> _MTPVerifyResult:
+    # The rounds loop owns each row's mrope delta. Targets without deltas
+    # never get the kwarg, so their hooks keep the two-argument form.
+    fwd_kw = {} if rope_deltas is None else {"rope_deltas": rope_deltas}
     if sample_target_tokens:
         argmax_from_hidden: Callable[..., Any] | None = getattr(
             lm, "speculative_argmax_from_hidden", None)
         if callable(argmax_from_hidden):
-            result = _mtp_verify_without_logits(lm, verify_input, prompt_cache)
+            result = _mtp_verify_without_logits(
+                lm, verify_input, prompt_cache, **fwd_kw)
             if result is not None:
                 target_tokens = argmax_from_hidden(result.hidden)
                 if target_tokens is not None:
                     result.target_tokens = target_tokens
                     return result
 
-        result = _mtp_verify_with_model_method(lm, verify_input, prompt_cache, sampler)
+        result = _mtp_verify_with_model_method(
+            lm, verify_input, prompt_cache, sampler, **fwd_kw)
         if result is not None:
             return result
 
     if hasattr(lm, "speculative_logits_from_hidden"):
-        result = _mtp_verify_without_logits(lm, verify_input, prompt_cache)
+        result = _mtp_verify_without_logits(
+            lm, verify_input, prompt_cache, **fwd_kw)
         if result is not None:
             return result
 
@@ -519,6 +528,7 @@ def _mtp_verify_target(
         cache=prompt_cache,
         return_hidden=True,
         return_shared_kv=True,
+        **fwd_kw,
     )
     return _MTPVerifyResult(
         hidden=verify_out.hidden_states[-1],

@@ -17,6 +17,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   download for this Mac, and `gmlx pull <image model> --list` prints their
   quants.
 - `gmlx init` offers to pull a recommended model when it finds none.
+- MiniCPM-V 4.6 and 4.7 read images, on both the 35B-A3B and the 1B. The
+  35B-A3B's DSpark drafter speculates on text turns, and its
+  `<repo>-DSpark-gguf` repo pairs with the model's repo.
 - `GMLX_PULL_RAM_GB=N` makes `gmlx pull` recommend for a Mac with N GB of
   memory.
 - Beam-1.0 501B-A23B (GGUF arch `beam`), with `reasoning-low`, `-medium` and
@@ -137,6 +140,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An mmproj made for a text model of another width is refused at load,
+  before the weights load, in place of failing on the first image. A pair
+  with no vision support also fails before the weights load.
+- With speculative decoding on the server, an image request that joined or
+  left a batch of other requests, or decoded while another request
+  prefilled, could continue at text positions and lose track of the image.
+  Each request now keeps its own image positions.
 - `/v1/systemone` on a text model other than OpenJev lettered its options
   as `[A]`, which made gemma-4 answer with `[` first and left the letters a
   sliver of the probability. Those models now see `A)`, and OpenJev keeps
