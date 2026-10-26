@@ -36,7 +36,7 @@ is already running does not see a variable you export later.
 | `GMLX_DECODE_PREFILL_FLOOR` | Decode-rate floor that `auto` pacing protects, as a share of a stream's batched rate. The default is `0.5`. |
 | `GMLX_PREFILL_TICK_MS` | Same as `server.prefill_tick_ms`. |
 | `GMLX_PREFILL_MIN_STEP` | Smallest chunk, in tokens, that the tick budget may halve a chunk down to. The default is `256`. |
-| `GMLX_MOE_WIDE_STEP` | Prompt chunk of a sparse MoE with 20 GiB free: 128 tokens or fewer per expert in a 2048-token chunk. The default is `4096`, and `2048` keeps the stock chunk. |
+| `GMLX_MOE_WIDE_STEP` | Chunk of a sparse MoE with 20 GiB free and at most 128 tokens per expert per 2048 rows: `4096` from the M5 on, `2048` before. Set it to force a chunk. |
 | `GMLX_DECODE_BATCH` | Requests that decode together in a step. The default is `8`, or the capacity table's widest fit when smaller. `0` restores the upstream 32. |
 | `GMLX_SSE_KEEPALIVE_S` | Interval in seconds of the SSE keepalive comment while a stream is silent. The default is `15`, and `0` disables it. |
 | `GMLX_FAITHFUL_HISTORY=0` | Restore mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from plain assistant turns, and its stock `/v1/messages` conversion. |
@@ -163,7 +163,7 @@ fusions.
 | `GMLX_DSA_INDEXER=0` | Compute DeepSeek-V4 and V4.1 indexer scores and top-k on the inline fp32 op chain instead of the mlx-kquant kernels. |
 | `GMLX_DSA_INDEXER_Q=0` | Keep the indexer GEMM on fp16 operands where tensor-op hardware would run the int8 kernel. Output is bit-identical. |
 | `GMLX_CB_PHASE=0` | Disable the per-phase command-buffer caps (same output, slower decode). `MLX_MAX_OPS_PER_BUFFER` or `MLX_MAX_MB_PER_BUFFER` set by hand holds in every phase. |
-| `GMLX_CB_COARSE_DECODE=1` | Decode a model in memory on 400 ops per command buffer instead of 50, both with no size cap. Prefill and streamed models keep their caps. |
+| `GMLX_CB_FINE_DECODE=1` | Decode a model in memory on 50 ops per command buffer instead of 400, both with no size cap. Prefill and streamed models keep their caps. |
 | `GMLX_NATIVE_FP` | MXFP4 and NVFP4 layout. `wire` keeps the file bytes, `packed` repacks them, and `auto` picks wire when streaming or past 90% of the working set. |
 | `GMLX_BATCH_INVARIANT=1` | Run small float `nn.Linear` layers on a row-count-invariant kernel. Raw-array routers, router calls under 64 rows and training are not covered. |
 | `GMLX_BATCH_INVARIANT_MAX_OUT` | Most outputs of a float projection that the batch-invariant kernel takes. The default is `512`. |

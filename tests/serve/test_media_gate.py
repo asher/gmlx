@@ -639,3 +639,73 @@ def test_a_body_that_is_not_json_is_refused():
     asyncio.run(mg.check_request("POST", "/v1/chat/completions",
                                  {"content-type": "application/x-www-form-urlencoded"},
                                  b'{"model": "m"}'))
+
+
+def test_a_client_that_leaves_before_its_body_is_no_error(caplog):
+    """A client that disconnects before the gate has read its body gets no
+    traceback in the log: the gate answers the dead connection and stops."""
+    import asyncio
+    import logging
+
+    app = FastAPI()
+    mg.install_media_gate(app=app)
+    ran = []
+
+    @app.post("/v1/chat/completions")
+    async def chat(request: Request):
+        ran.append(await request.body())
+        return {}
+
+    scope = {"type": "http", "http_version": "1.1", "method": "POST",
+             "scheme": "http", "path": "/v1/chat/completions",
+             "raw_path": b"/v1/chat/completions", "query_string": b"",
+             "root_path": "", "headers": [(b"content-type", b"application/json"),
+                                          (b"content-length", b"2")],
+             "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 80)}
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(app(scope, receive, send))
+    assert not ran
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert sent and sent[0]["status"] == 400
+
+
+def test_a_disconnect_inside_a_route_still_raises():
+    """The gate answers only a client that left while it read the body. A
+    ClientDisconnect raised by route code is not its to catch."""
+    import asyncio
+
+    from starlette.requests import ClientDisconnect
+
+    app = FastAPI()
+    mg.install_media_gate(app=app)
+
+    @app.post("/v1/chat/completions")
+    async def chat(request: Request):
+        raise ClientDisconnect()
+
+    body = b"{}"
+    scope = {"type": "http", "http_version": "1.1", "method": "POST",
+             "scheme": "http", "path": "/v1/chat/completions",
+             "raw_path": b"/v1/chat/completions", "query_string": b"",
+             "root_path": "", "headers": [(b"content-type", b"application/json"),
+                                          (b"content-length", str(len(body)).encode())],
+             "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 80)}
+    messages = iter([{"type": "http.request", "body": body, "more_body": False}])
+
+    async def receive():
+        return next(messages)
+
+    async def send(message):
+        pass
+
+    with pytest.raises(ClientDisconnect):
+        asyncio.run(app(scope, receive, send))

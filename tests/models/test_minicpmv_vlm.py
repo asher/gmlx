@@ -500,6 +500,9 @@ def test_gelu_kinds_match_the_reference():
 
 
 def test_window_merger_folds_each_2x2_window_in_row_major_order():
+    # The merger folds all windows in one f32 GEMM, which M5 runs at TF32
+    # (about 1e-3 here), while each reference window is a 1-row GEMV at
+    # f32. A wrong window or position order moves the output far more.
     mx.random.seed(0)
     vc = _vision()
     vm = VitMerger(vc)
@@ -516,7 +519,7 @@ def test_window_merger_folds_each_2x2_window_in_row_major_order():
             want = vm.linear_2(vm.act(vm.linear_1(
                 vm.pre_norm(win.reshape(1, -1)))))[0] + win.mean(axis=0)
             np.testing.assert_allclose(np.asarray(got[r * (w // 2) + c]),
-                                       np.asarray(want), atol=1e-5)
+                                       np.asarray(want), atol=5e-3)
 
 
 def test_tower_returns_one_token_per_4x4_patches_in_crop_order():

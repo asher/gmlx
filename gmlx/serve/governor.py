@@ -63,7 +63,9 @@ governed tick, and so does a streaming model's decode arena
 it regrows only into headroom the governor is not using), so orange
 and red reclaim decode speed before they fail a row. Registered
 bytes are sampled on a slow cadence (every 16 ticks and at band
-transitions); the per-tick trajectory rides the free counters and
+transitions), and so is the kernel's unwired count while it sits above
+twice the floor with no prompt step near; the per-tick trajectory rides
+the free counters and
 the admission-path rate stash, never a vars() walk.
 
 Threading: everything here runs on the engine thread inside the
@@ -268,6 +270,10 @@ class _GovState:
         # wired, and the last wall time a stable (non-collapsing) breach
         # was logged
         self.floor_prev = None
+        self.kernel_sampled_tick = None
+        self.kernel_last = None
+        self.kernel_prompt_prev = False
+        self.prompt_time_seen = None
         self.floor_warned_at = 0.0
         # U5 fault injection: (kind, tick) directives already fired
         self.injected: set = set()
@@ -675,6 +681,51 @@ def _measure_rung(gen, st: _GovState) -> None:
     st.rung_rate_before = rate
 
 
+def _prompt_may_step(gen) -> bool:
+    """A prompt chunk can run on this tick: one is in flight, or the queue
+    holds a prompt the gate is not holding and the batch has room to admit
+    it (ar.py admits when completion_batch_size minus the active rows is
+    at least prefill_batch_size)."""
+    if getattr(gen, "_prompt_batch", None) is not None:
+        return True
+    if not getattr(gen, "_unprocessed_sequences", None):
+        return False
+    if admission_hold_reason(gen) is not None:
+        return False
+    room = getattr(gen, "completion_batch_size", None)
+    if room is None:
+        return True
+    return room - batch_rows(gen) >= getattr(gen, "prefill_batch_size", 1)
+
+
+def _kernel_sample(gen, st: "_GovState", floor: float):
+    """The kernel's unwired bytes for this tick. Read live on the first
+    tick, every 16 ticks after, on a tick where a prompt chunk can run
+    and on the tick after any step that ran one (the tick runs before the
+    step, a chunk can wire GBs, and a request inserted mid-step is
+    admitted at the end of the same step), and on every tick while the
+    last read sat under twice the floor; a plain decode tick between
+    reuses the last read, since a decode step moves memory by a few MB
+    and the read is three sysctl calls. A read that failed is retried
+    next tick. A floor of 0 reads nothing."""
+    if floor <= 0:
+        return None
+    last = st.kernel_last
+    prompt_now = _prompt_may_step(gen)
+    st.prompt_time_seen = getattr(gen, "_prompt_time_counter", None)
+    due = (st.kernel_sampled_tick is None
+           or last is None
+           or st.tick_no - st.kernel_sampled_tick >= 16
+           or last < 2 * floor
+           or prompt_now
+           or st.kernel_prompt_prev)
+    st.kernel_prompt_prev = prompt_now
+    if due:
+        st.kernel_last = _kernel_unwired()
+        st.kernel_sampled_tick = st.tick_no
+    return st.kernel_last
+
+
 def _governor_tick(gen) -> None:
     st = _state(gen)
     st.tick_no += 1
@@ -753,7 +804,7 @@ def _governor_tick(gen) -> None:
     # hundred MB from a livelock (2026-08-24: active 87 GB + cache 27 GB
     # on a 128 GB box, governor green throughout).
     floor = _kernel_floor_bytes()
-    unw = _kernel_unwired() if floor > 0 else None
+    unw = _kernel_sample(gen, st, floor)
     _STATS["kernel_unwired_bytes"] = None if unw is None else int(unw)
     if unw is not None and unw < floor:
         _STATS["kernel_floor_reds"] += 1
@@ -769,6 +820,7 @@ def _governor_tick(gen) -> None:
             freed = _evict_registered(frac)
             mx.clear_cache()
             unw2 = _kernel_unwired()
+            st.kernel_last = unw2
         else:
             freed = 0.0
             unw2 = unw
@@ -904,7 +956,11 @@ def _governor_tick(gen) -> None:
 
 def _harvest_tick(gen, st: _GovState, out) -> None:
     """Post-tick: fold emitted tokens per row into the tokens/tick EMA
-    the demand model uses."""
+    the demand model uses, and mark a step that ran a prompt chunk so the
+    next tick reads the kernel live."""
+    seen = st.prompt_time_seen
+    if seen is not None and getattr(gen, "_prompt_time_counter", seen) != seen:
+        st.kernel_prompt_prev = True
     try:
         responses = out[1]
     except Exception:

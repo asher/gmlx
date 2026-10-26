@@ -26,13 +26,14 @@ def fake_kq(monkeypatch):
         # setenv first, so teardown also drops a key the test sets.
         monkeypatch.setenv(k, "")
         monkeypatch.delenv(k)
-    monkeypatch.delenv("GMLX_CB_COARSE_DECODE", raising=False)
+    monkeypatch.delenv("GMLX_CB_FINE_DECODE", raising=False)
     monkeypatch.setitem(cb_phase._state, "kq",
                         SimpleNamespace(set_cb_caps=set_cb_caps))
     monkeypatch.setitem(cb_phase._state, "phase", None)
     monkeypatch.setitem(cb_phase._state, "caps", None)
     monkeypatch.setitem(cb_phase._state, "lifted", False)
     monkeypatch.setitem(cb_phase._state, "pre_lift", None)
+    monkeypatch.setitem(cb_phase._state, "model", cb_phase._UNSET)
     return calls
 
 
@@ -45,9 +46,16 @@ def held(request, monkeypatch, fake_kq):
     return key, fake_kq
 
 
+class _Marked:
+    """A model the streaming install marked, in RAM or streamed. A class,
+    not a SimpleNamespace: the flip keeps a weak reference to the model."""
+
+    def __init__(self, streamed):
+        self._kq_streaming = streamed
+
+
 def _model(streamed):
-    """A model the streaming install marked, in RAM or streamed."""
-    return SimpleNamespace(_kq_streaming=streamed)
+    return _Marked(streamed)
 
 
 @pytest.fixture
@@ -305,26 +313,28 @@ def test_chat_installs_the_phased_steps_as_run_does(monkeypatch, tmp_path,
 
 def test_decode_caps_follow_the_streaming_verdict(monkeypatch):
     """A streamed decode syncs on the host at every layer, so it decodes on
-    the streamed caps; a model in RAM decodes on RAM_DECODE."""
+    the streamed caps; a model in RAM decodes on RAM_DECODE, the coarse
+    caps on every chip."""
     import gmlx.serve.cb_phase as cb_phase
 
-    monkeypatch.delenv("GMLX_CB_COARSE_DECODE", raising=False)
+    monkeypatch.delenv("GMLX_CB_FINE_DECODE", raising=False)
     assert cb_phase.STREAMED_DECODE != cb_phase.RAM_DECODE
+    assert cb_phase.RAM_DECODE == cb_phase.COARSE
     assert cb_phase.decode_caps(_model(True)) == cb_phase.STREAMED_DECODE
     assert cb_phase.decode_caps(_model(False)) == cb_phase.RAM_DECODE
     assert cb_phase.decode_caps(None) == cb_phase.RAM_DECODE
 
 
 @pytest.mark.parametrize("value", ["1", "0"])
-def test_the_coarse_decode_switch_moves_decode_only(monkeypatch, fake_kq, value):
-    """GMLX_CB_COARSE_DECODE=1 decodes a model in RAM on COARSE. A streamed
-    decode and every prefill keep their caps, and any other value keeps
-    RAM_DECODE."""
+def test_the_fine_decode_switch_moves_decode_only(monkeypatch, fake_kq, value):
+    """GMLX_CB_FINE_DECODE=1 decodes a model in RAM on FINE_DECODE. A
+    streamed decode and every prefill keep their caps, and any other value
+    keeps RAM_DECODE."""
     import gmlx.serve.cb_phase as cb_phase
 
-    monkeypatch.setenv("GMLX_CB_COARSE_DECODE", value)
-    want = cb_phase.COARSE if value == "1" else cb_phase.RAM_DECODE
-    assert cb_phase.RAM_DECODE != cb_phase.COARSE
+    monkeypatch.setenv("GMLX_CB_FINE_DECODE", value)
+    want = cb_phase.FINE_DECODE if value == "1" else cb_phase.RAM_DECODE
+    assert cb_phase.FINE_DECODE != cb_phase.RAM_DECODE
     assert cb_phase.decode_caps(_model(False)) == want
     assert cb_phase.decode_caps(_model(True)) == cb_phase.STREAMED_DECODE
     assert cb_phase.prefill_caps(_model(False)) == cb_phase.FINE
@@ -717,3 +727,36 @@ def test_engine_threads_leave_the_record_on_the_device_caps(monkeypatch,
     streamed.join(5)
     assert device == [cb_phase.RAM_DECODE, cb_phase.STREAMED_DECODE]
     assert cb_phase._state["caps"] == device[-1]
+
+
+def test_a_repeat_flip_for_the_same_model_reads_nothing(monkeypatch, fake_kq):
+    """The engine flips at every step. A repeat of the last phase for the
+    last model returns before the caps are recomputed; a phase change or
+    another model recomputes them."""
+    import gmlx.serve.cb_phase as cb_phase
+
+    picks = []
+    monkeypatch.setattr(cb_phase, "decode_caps",
+                        lambda m: (picks.append(("decode", id(m))), cb_phase.RAM_DECODE)[1])
+    monkeypatch.setattr(cb_phase, "prefill_caps",
+                        lambda m: (picks.append(("prefill", id(m))), cb_phase.FINE)[1])
+    a, b = _model(False), _model(False)
+    cb_phase.flip("decode", a)
+    cb_phase.flip("decode", a)
+    cb_phase.flip("decode", a)
+    assert picks == [("decode", id(a))]
+    cb_phase.flip("decode", b)
+    assert picks == [("decode", id(a)), ("decode", id(b))]
+    cb_phase.flip("prefill", b)
+    cb_phase.flip("prefill", b)
+    assert picks[-1] == ("prefill", id(b)) and len(picks) == 3
+    cb_phase.lift()
+    cb_phase.flip("prefill", b)
+    assert len(picks) == 4
+    # A model that died and a new one at its address are not the same.
+    cb_phase.flip("decode", _model(False))
+    cb_phase.flip("decode", _model(False))
+    assert len(picks) == 6
+    cb_phase.flip("decode", None)
+    cb_phase.flip("decode", None)
+    assert len(picks) == 7

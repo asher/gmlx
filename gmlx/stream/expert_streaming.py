@@ -1850,10 +1850,16 @@ def install_expert_streaming(
     return n_wrapped, offloaded
 
 
+_WALK_ATTR = "_kq_streamed_walk"
+
+
 def experts_streamed(model) -> bool:
     """True when the install streams this model's experts from the drive.
     Reads the install's verdict on the model or a module it wraps, since a
-    CPU-only expert codec marks its modules the way streaming does."""
+    CPU-only expert codec marks its modules the way streaming does. A
+    model with no verdict is walked once and the answer kept on it: the
+    walk visits every module of every layer, and the serve path asks at
+    each request. A verdict the install sets later still wins."""
     from .installs import wrapper_chain
 
     chain = list(wrapper_chain(model))
@@ -1861,7 +1867,16 @@ def experts_streamed(model) -> bool:
         flag = getattr(m, "_kq_streaming", None)
         if flag is not None:
             return bool(flag)
-    return any(moe_streaming_active(m) for m in chain)
+    if not chain:
+        return False
+    walked = getattr(chain[0], _WALK_ATTR, None)
+    if walked is None:
+        walked = any(moe_streaming_active(m) for m in chain)
+        try:
+            object.__setattr__(chain[0], _WALK_ATTR, walked)
+        except (AttributeError, TypeError):
+            pass
+    return walked
 
 
 def _resolve_prefill_step(model, requested: int | None) -> tuple[int | None, bool]:
