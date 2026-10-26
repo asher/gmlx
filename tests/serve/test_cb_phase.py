@@ -26,7 +26,7 @@ def fake_kq(monkeypatch):
         # setenv first, so teardown also drops a key the test sets.
         monkeypatch.setenv(k, "")
         monkeypatch.delenv(k)
-    monkeypatch.delenv("GMLX_CB_COARSE_DECODE", raising=False)
+    monkeypatch.delenv("GMLX_CB_FINE_DECODE", raising=False)
     monkeypatch.setitem(cb_phase._state, "kq",
                         SimpleNamespace(set_cb_caps=set_cb_caps))
     monkeypatch.setitem(cb_phase._state, "phase", None)
@@ -305,26 +305,28 @@ def test_chat_installs_the_phased_steps_as_run_does(monkeypatch, tmp_path,
 
 def test_decode_caps_follow_the_streaming_verdict(monkeypatch):
     """A streamed decode syncs on the host at every layer, so it decodes on
-    the streamed caps; a model in RAM decodes on RAM_DECODE."""
+    the streamed caps; a model in RAM decodes on RAM_DECODE, the coarse
+    caps on every chip."""
     import gmlx.serve.cb_phase as cb_phase
 
-    monkeypatch.delenv("GMLX_CB_COARSE_DECODE", raising=False)
+    monkeypatch.delenv("GMLX_CB_FINE_DECODE", raising=False)
     assert cb_phase.STREAMED_DECODE != cb_phase.RAM_DECODE
+    assert cb_phase.RAM_DECODE == cb_phase.COARSE
     assert cb_phase.decode_caps(_model(True)) == cb_phase.STREAMED_DECODE
     assert cb_phase.decode_caps(_model(False)) == cb_phase.RAM_DECODE
     assert cb_phase.decode_caps(None) == cb_phase.RAM_DECODE
 
 
 @pytest.mark.parametrize("value", ["1", "0"])
-def test_the_coarse_decode_switch_moves_decode_only(monkeypatch, fake_kq, value):
-    """GMLX_CB_COARSE_DECODE=1 decodes a model in RAM on COARSE. A streamed
-    decode and every prefill keep their caps, and any other value keeps
-    RAM_DECODE."""
+def test_the_fine_decode_switch_moves_decode_only(monkeypatch, fake_kq, value):
+    """GMLX_CB_FINE_DECODE=1 decodes a model in RAM on FINE_DECODE. A
+    streamed decode and every prefill keep their caps, and any other value
+    keeps RAM_DECODE."""
     import gmlx.serve.cb_phase as cb_phase
 
-    monkeypatch.setenv("GMLX_CB_COARSE_DECODE", value)
-    want = cb_phase.COARSE if value == "1" else cb_phase.RAM_DECODE
-    assert cb_phase.RAM_DECODE != cb_phase.COARSE
+    monkeypatch.setenv("GMLX_CB_FINE_DECODE", value)
+    want = cb_phase.FINE_DECODE if value == "1" else cb_phase.RAM_DECODE
+    assert cb_phase.FINE_DECODE != cb_phase.RAM_DECODE
     assert cb_phase.decode_caps(_model(False)) == want
     assert cb_phase.decode_caps(_model(True)) == cb_phase.STREAMED_DECODE
     assert cb_phase.prefill_caps(_model(False)) == cb_phase.FINE

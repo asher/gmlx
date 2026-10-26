@@ -163,7 +163,7 @@ fusions.
 | `GMLX_DSA_INDEXER=0` | Compute DeepSeek-V4 and V4.1 indexer scores and top-k on the inline fp32 op chain instead of the mlx-kquant kernels. |
 | `GMLX_DSA_INDEXER_Q=0` | Keep the indexer GEMM on fp16 operands where tensor-op hardware would run the int8 kernel. Output is bit-identical. |
 | `GMLX_CB_PHASE=0` | Disable the per-phase command-buffer caps (same output, slower decode). `MLX_MAX_OPS_PER_BUFFER` or `MLX_MAX_MB_PER_BUFFER` set by hand holds in every phase. |
-| `GMLX_CB_COARSE_DECODE=1` | Decode a model in memory on 400 ops per command buffer instead of 50, both with no size cap. Prefill and streamed models keep their caps. |
+| `GMLX_CB_FINE_DECODE=1` | Decode a model in memory on 50 ops per command buffer instead of 400, both with no size cap. Prefill and streamed models keep their caps. |
 | `GMLX_NATIVE_FP` | MXFP4 and NVFP4 layout. `wire` keeps the file bytes, `packed` repacks them, and `auto` picks wire when streaming or past 90% of the working set. |
 | `GMLX_BATCH_INVARIANT=1` | Run small float `nn.Linear` layers on a row-count-invariant kernel. Raw-array routers, router calls under 64 rows and training are not covered. |
 | `GMLX_BATCH_INVARIANT_MAX_OUT` | Most outputs of a float projection that the batch-invariant kernel takes. The default is `512`. |

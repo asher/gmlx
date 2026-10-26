@@ -890,6 +890,9 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
     a URL unless ``allow_urls``, or that sends a form to a route that takes
     JSON. Install it before the API-key middleware, so an unauthenticated
     request gets 401 and learns nothing from the gate. Idempotent."""
+    from fastapi.responses import Response
+    from starlette.requests import ClientDisconnect
+
     global _allow_urls
     _allow_urls = bool(allow_urls)
     stock = app is None
@@ -906,6 +909,16 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
     app.add_middleware(_RefuseWebSockets)
 
     async def _media_gate(request, call_next):
+        try:
+            verdict = await _gate(request)
+        except ClientDisconnect:
+            # The client left before its body arrived. Nothing reads the
+            # answer, and a traceback would say nothing.
+            return Response(status_code=400)
+        return verdict if verdict is not None else await call_next(request)
+
+    async def _gate(request):
+        """The refusal for ``request``, or None when the route may run."""
         # Every method: a route reads a body whatever the method is.
         upload = _is_upload(request)
         session = request.scope.get(SESSION_SCOPE_KEY) is not None
@@ -921,7 +934,7 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
                 return _refusal(request.url.path, 413,
                                 f"the tensor body is larger than the "
                                 f"{limit >> 20} MiB limit")
-            return await call_next(request)
+            return None
         raw = await _read_body(request, body_limit(upload, session))
         if raw is None:
             return _refusal(request.url.path, 413,
@@ -933,7 +946,7 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
             del parsed
         except MediaRefused as e:
             return _refusal(request.url.path, 400, str(e))
-        return await call_next(request)
+        return None
 
     app.middleware_stack = None          # allow install after a stack build
     app.middleware("http")(_media_gate)
