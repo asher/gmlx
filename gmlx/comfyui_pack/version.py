@@ -6,7 +6,7 @@ only. The pack's version is gmlx's version; a gmlx test fails when they
 differ.
 """
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 # The oldest ComfyUI the pack loads on. `gmlx comfyui install` refuses an
 # older one.
