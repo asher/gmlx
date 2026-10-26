@@ -26,6 +26,8 @@ import os
 
 import mlx.core as mx
 
+from gmlx.load.out_scale import has_out_scale
+
 try:
     import mlx_kquant as kq
     from mlx_kquant.nn import KQuantLinear
@@ -44,7 +46,7 @@ def _eligible(m) -> bool:
     projs = [getattr(m, p, None) for p in ("q_proj", "k_proj", "v_proj")]
     if not all(isinstance(p, KQuantLinear) for p in projs):
         return False
-    if any(p.kquant_type != "q8_0" or "bias" not in p or "out_scale" in p
+    if any(p.kquant_type != "q8_0" or "bias" not in p or has_out_scale(p)
            for p in projs):
         return False
     if len({p.weight.shape[1] for p in projs}) != 1:

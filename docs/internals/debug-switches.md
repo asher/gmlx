@@ -134,6 +134,7 @@ fusions.
 | `GMLX_HADAMARD_FUSE=0` | Rotate the input of a folded down or output projection in its own dispatch instead of inside the gate kernel. |
 | `GMLX_HADAMARD_TRACE=1` | Count the rotations on a folded file since the last `hadamard_modules.reset_rotation_count` call, read back through `hadamard_modules.rotation_count`. |
 | `GMLX_HADAMARD_ROTATE=0` | Skip the Hadamard-fold rotation. The model produces garbage, and a benchmark measures the whole cost of the rotation. |
+| `GMLX_KQ_OUT_SCALE=0` | Apply NVFP4 weight scales in a multiply after each projection instead of inside the mlx-kquant kernels. The fusions then skip the scaled projections. |
 | `GMLX_KQ_SKINNY=0` | Run a fused MoE block's router and the DeepSeek-V4 dense projections on the stock matmul at verify widths 2 to 16, instead of the mlx-kquant skinny matmul. |
 | `GMLX_MOE_GATEUP_CONCAT=0` | Disable the prefill gate and up expert concat, which trades a second resident copy of the wire bytes for one gather. |
 | `GMLX_MOE_GATEUP_CONCAT_MAX_MB` | Cap the concat copies at this many MB, stamping layers in order until the cap is reached. |

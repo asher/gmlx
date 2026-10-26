@@ -20,6 +20,7 @@ from typing import Callable, NamedTuple, cast
 import gmlx.load.loadlog as loadlog
 from gmlx.envflags import env_bool, env_int
 from gmlx.load.hadamard_modules import is_folded, shared_linears
+from gmlx.load.out_scale import cat_out_scale, set_out_scale
 from .patching import ClassPatch, link
 
 
@@ -823,7 +824,8 @@ def _gdn_try_cat_ba_kq(gdn, mods) -> bool:
         return False
     cat.weight = mx.concatenate([b.weight, a.weight], axis=0)
     cat.scales = b.scales
-    mx.eval(cat.weight)
+    set_out_scale(cat, cat_out_scale((b, a)))
+    mx.eval(cat.parameters())
     b.weight = cat.weight[:h]
     a.weight = cat.weight[h:]
     # Kept out of the parameter tree like the float cat: its weight is
@@ -869,7 +871,10 @@ def kquant_multi(linears, x: mx.array):
     for codec, idx in groups.items():
         if len(idx) < 2:
             continue
-        res = multi(x, [linears[i]["weight"] for i in idx], codec)
+        skw = {}
+        if any("out_scale" in linears[i] for i in idx):
+            skw["out_scales"] = [linears[i].get("out_scale") for i in idx]
+        res = multi(x, [linears[i]["weight"] for i in idx], codec, **skw)
         for i, r in zip(idx, res):
             out[i] = r
         ran = True

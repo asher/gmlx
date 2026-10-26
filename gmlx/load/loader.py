@@ -1454,7 +1454,7 @@ def _install_and_load(
                 n_fp32 += 1
             continue
         if v.dtype in (mx.float32, mx.float16) and k not in hf_kquant_meta:
-            if k.endswith(".out_scale") or (
+            if k.endswith((".out_scale", ".post_scale")) or (
                     fp32_keep and any(s in k for s in fp32_keep)):
                 if v.dtype != mx.float32:      # e.g. F16 ape tables
                     loadable[k] = v.astype(mx.float32)
@@ -1959,7 +1959,7 @@ def load_model(
     for k in list(loadable):
         v = loadable[k]
         if v.dtype in (mx.float32, mx.float16) and k not in hf_kquant_meta:
-            if k.endswith(".out_scale") or (
+            if k.endswith((".out_scale", ".post_scale")) or (
                     fp32_keep and any(s in k for s in fp32_keep)):
                 if v.dtype != mx.float32:      # e.g. F16 ape tables
                     loadable[k] = v.astype(mx.float32)

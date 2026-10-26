@@ -41,6 +41,7 @@ from mlx_kquant.nn import (
 )
 
 from .native_fp import NATIVE_FP_CODECS, NATIVE_FP_GEOMETRY
+from .out_scale import wrapped_scale
 import gmlx.lora_rows as lora_rows
 from gmlx import mlx_guards
 from .dtypes import activation_dtype
@@ -404,7 +405,7 @@ def _kq_wire_k(w, codec):
 def _kq_dense(proj, codecs):
     return (isinstance(proj, KQuantLinear)
             and proj.kquant_type in codecs and "bias" not in proj
-            and "out_scale" not in proj)
+            and not wrapped_scale(proj))
 
 
 def _kq_act_kind(m, caps):
@@ -460,6 +461,63 @@ def _build_router_cat(m):
     return cat
 
 
+def _kq_cached(owner, slot, srcs, build):
+    """``build()``, kept on ``owner`` while ``srcs`` are the same arrays, so
+    a load that replaces one of them rebuilds it."""
+    hit = owner.__dict__.get(slot)
+    if hit is not None and all(a is b for a, b in zip(hit[0], srcs)):
+        return hit[1]
+    val = build()
+    object.__setattr__(owner, slot, (srcs, val))
+    return val
+
+
+def _pair_scales(owner, slot, a, b):
+    """The weight scales of ``a`` and ``b`` in one shape, for a kq op that
+    takes both or neither: None when neither has one, ones for a missing
+    one."""
+    sa, sb = getattr(a, "out_scale", None), getattr(b, "out_scale", None)
+    if sa is None and sb is None:
+        return None
+    if sa is not None and sb is not None and sa.shape == sb.shape:
+        return sa, sb
+
+    def build():
+        shape = max((s.shape for s in (sa, sb) if s is not None), key=len)
+        return tuple(mx.ones(shape, dtype=mx.float32) if s is None
+                     else mx.contiguous(mx.broadcast_to(s, shape))
+                     for s in (sa, sb))
+    return _kq_cached(owner, slot, (sa, sb), build)
+
+
+def _glu_scale_kw(owner, gate, up, shexp=None):
+    """The scale kwargs of a fused GLU gather over ``gate`` and ``up`` and,
+    with ``shexp`` (its gate and up), a shared expert."""
+    kw = {}
+    p = _pair_scales(owner, "_kq_os_gu", gate, up)
+    if p is not None:
+        kw["gate_scale"], kw["up_scale"] = p
+    if shexp is not None:
+        p = _pair_scales(owner, "_kq_os_sgu", *shexp)
+        if p is not None:
+            kw["shexp_gate_scale"], kw["shexp_up_scale"] = p
+    return kw
+
+
+def _down_scale_kw(down, shexp_down=None):
+    """The scale kwargs of a down gather over ``down`` and, with
+    ``shexp_down``, a shared expert."""
+    kw = {}
+    s = getattr(down, "out_scale", None)
+    if s is not None:
+        kw["out_scale"] = s
+    if shexp_down is not None:
+        s = getattr(shexp_down, "out_scale", None)
+        if s is not None:
+            kw["shexp_scale"] = s
+    return kw
+
+
 def _kq_member_projs(*owners):
     """The gate, up and down projections of ``owners`` that a fused path
     reads in place of calling them, or None when any is not a quantized
@@ -490,7 +548,7 @@ def _eligible_nativefp(m, caps):
             return False
         if proj.mode != "mxfp4" or "bias" not in proj:
             return False
-        if "out_scale" in proj:
+        if wrapped_scale(proj):
             return False
     return True
 
@@ -568,7 +626,7 @@ def _eligible_gptoss_mlp(m, caps):
             return False
         if proj.mode != "mxfp4" or "bias" not in proj:
             return False
-        if "out_scale" in proj:
+        if wrapped_scale(proj):
             return False
     if not isinstance(getattr(m, "router", None), nn.Linear):
         return False
@@ -667,7 +725,7 @@ def _eligible_kquant_glu(m, caps):
             return False
         if proj.kquant_type not in _KQ_FUSED_CODECS:
             return False
-        if ("bias" in proj) != want_bias or "out_scale" in proj:
+        if ("bias" in proj) != want_bias or wrapped_scale(proj):
             return False
         if want_bias and proj.kquant_type not in ("mxfp4", "nvfp4"):
             return False  # biased kernels exist for the fp4 codecs only
@@ -781,11 +839,13 @@ def _make_fused_kquant(base_cls, caps):
                 return kq.moe_glu_gather_shexp_kq(
                     x.reshape(t, d_in), gate.weight, up.weight,
                     sg.weight, su.weight,
-                    gate.kquant_type, idx, **akw, **skw)
+                    gate.kquant_type, idx, **akw, **skw,
+                    **_glu_scale_kw(self, gate, up, (sg, su)))
             return kq.moe_glu_gather_kq(
                 x.reshape(t, d_in),
                 gate.weight, up.weight,
-                gate.kquant_type, idx, **akw)
+                gate.kquant_type, idx, **akw,
+                **_glu_scale_kw(self, gate, up))
 
         def _fused_down(self, h, idx, scores=None, lora=None):
             """The down gather, three exits, all flat: shexp fold (mixed,
@@ -813,18 +873,20 @@ def _make_fused_kquant(base_cls, caps):
                        if sd.kquant_type != down.kquant_type else {})
                 y = kq.gather_qmv_mix_kq(
                     h, down.weight, sd.weight,
-                    down.kquant_type, idx, sc, **skw)
+                    down.kquant_type, idx, sc, **skw,
+                    **_down_scale_kw(down, sd))
                 return y.reshape(t, y.shape[-1])
             if (scores is not None and _has_mix_ns
                     and "bias" not in down):
                 y = kq.gather_qmv_mix_ns_kq(
                     h, down.weight, down.kquant_type, idx,
-                    scores.reshape(t, k), **lkw)
+                    scores.reshape(t, k), **lkw, **_down_scale_kw(down))
                 return y.reshape(t, y.shape[-1])
             dkw = ({"bias": self._kq_bias32("_kq_db32", down)}
                    if "bias" in down else {})
             y = kq.gather_qmv_kq(
-                h, down.weight, down.kquant_type, idx, **dkw, **lkw)
+                h, down.weight, down.kquant_type, idx, **dkw, **lkw,
+                **_down_scale_kw(down))
             return y.reshape(t, k, y.shape[-1])
 
         def _fused_rows(self, x, idx):
@@ -1078,9 +1140,18 @@ def _build_gateup_concat(m):
     gu.weight = mx.concatenate([gate.weight, up.weight], axis=1)
     if "bias" in gate:
         gu.bias = mx.concatenate([gate.bias, up.bias], axis=1)
-        mx.eval(gu.weight, gu.bias)
-    else:
-        mx.eval(gu.weight)
+    p = _pair_scales(m, "_kq_os_gu", gate, up)
+    if p is not None:
+        # Each half's scale over its columns: (E, 2N) when per expert,
+        # else (2N,).
+        rows = p[0].shape[0] if p[0].ndim == 2 else 1
+        gu.out_scale = mx.concatenate(
+            [mx.broadcast_to(s.reshape(rows, 1), (rows, out)) for s in p],
+            axis=1)
+        if rows == 1:
+            gu.out_scale = gu.out_scale.reshape(-1)
+        gu.freeze(recurse=False, keys=["out_scale"])
+    mx.eval(gu.parameters())
     return gu
 
 
@@ -1164,7 +1235,7 @@ def _eligible_kq_block(m, caps):
         if not isinstance(proj, KQuantSwitchLinear):
             return False
         if (proj.kquant_type not in _KQ_FUSED_CODECS or "bias" in proj
-                or "out_scale" in proj):
+                or wrapped_scale(proj)):
             return False
     if sw.gate_proj.kquant_type != sw.up_proj.kquant_type:
         return False
@@ -1347,12 +1418,14 @@ def _make_fused_block(base_cls, caps):
                        "shexp_up_kquant_type": su.kquant_type}
             h = kq.moe_glu_gather_shexp_kq(
                 xf, wg.weight, wu.weight, sg.weight, su.weight,
-                wg.kquant_type, inds, act="silu", **skw)
+                wg.kquant_type, inds, act="silu", **skw,
+                **_glu_scale_kw(self, wg, wu, (sg, su)))
             skw = {}
             if sd.kquant_type != wd.kquant_type:
                 skw = {"shexp_kquant_type": sd.kquant_type}
             y = kq.gather_qmv_mix_kq(
-                h, wd.weight, sd.weight, wd.kquant_type, inds, sc, **skw)
+                h, wd.weight, sd.weight, wd.kquant_type, inds, sc, **skw,
+                **_down_scale_kw(wd, sd))
             return y.reshape(x.shape)
 
     _FusedKQuantMoeBlock.__name__ = "_FusedKQuantMoeBlock"
@@ -1553,7 +1626,7 @@ def _eligible_gemma_experts(m, caps):
     if not isinstance(down, KQuantSwitchLinear):
         return False
     if (down.kquant_type not in _KQ_FUSED_CODECS or "bias" in down
-            or "out_scale" in down):
+            or wrapped_scale(down)):
         return False
     if _kq_wire_k(down.weight, down.kquant_type) <= 0:
         return False
@@ -1597,7 +1670,7 @@ def _make_fused_gemma_experts(base_cls, caps):
                     and g.kquant_type == u.kquant_type
                     and g.kquant_type in _KQ_FUSED_CODECS
                     and "bias" not in g and "bias" not in u
-                    and "out_scale" not in g and "out_scale" not in u
+                    and not wrapped_scale(g) and not wrapped_scale(u)
                     and g.weight.shape[1] % 8 == 0
                     and d >= 512  # wide kernels want K/16 >= 32 chunks
                     and _kq_wire_k(g.weight, g.kquant_type) == d
@@ -1631,7 +1704,8 @@ def _make_fused_gemma_experts(base_cls, caps):
                 h = kq.moe_glu_gather_kq(
                     x.reshape(t, d),
                     sw.gate_proj.weight, sw.up_proj.weight,
-                    sw.gate_proj.kquant_type, idx, act="gelu")
+                    sw.gate_proj.kquant_type, idx, act="gelu",
+                    **_glu_scale_kw(self, sw.gate_proj, sw.up_proj))
             else:
                 xe = mx.expand_dims(x.reshape(t, d), (-2, -3))
                 up = sw.up_proj(xe, idx)
@@ -1639,7 +1713,8 @@ def _make_fused_gemma_experts(base_cls, caps):
                 h = sw.activation(up, gate).squeeze(-2)
             y = kq.gather_qmv_mix_ns_kq(
                 h, sw.down_proj.weight, sw.down_proj.kquant_type,
-                idx, top_k_weights.reshape(t, k))
+                idx, top_k_weights.reshape(t, k),
+                **_down_scale_kw(sw.down_proj))
             return y.reshape(*x.shape[:-1], y.shape[-1])
 
     _FusedKQuantGemmaExperts.__name__ = "_FusedKQuantGemmaExperts"

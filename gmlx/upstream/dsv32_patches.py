@@ -225,12 +225,16 @@ def _dsv32_dense_f32(linear, x):
     KQuantLinear weight to fp32 (kq.quantized_matmul forces bf16 output, which
     rounds the top-k scores) or upcasting a float nn.Linear. ``x`` must be fp32."""
     from gmlx.load.modules import KQuantLinear
+    from gmlx.load.out_scale import weight_scale
 
     if isinstance(linear, KQuantLinear):
         w = kq.dequantize(linear["weight"], linear["scales"], linear.kquant_type)
     else:
         w = linear["weight"]
     y = x @ w.astype(mx.float32).T
+    s = weight_scale(linear)
+    if s is not None:
+        y = y * s.astype(mx.float32)
     if "bias" in linear:
         y = y + linear["bias"].astype(mx.float32)
     return y

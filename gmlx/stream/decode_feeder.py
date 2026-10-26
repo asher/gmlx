@@ -434,6 +434,16 @@ def _iopol_utility() -> None:
     libc.setiopolicy_np(0, 1, 4)
 
 
+def _refuse_expert_scales(proj, path: str) -> None:
+    # The arena binds experts by slot, so a scale per expert would be read
+    # at the slot id.
+    s = getattr(proj, "out_scale", None)
+    if s is not None and s.size > 1:
+        raise NotImplementedError(
+            f"{path}: expert streaming does not support per-expert weight "
+            f"scales yet")
+
+
 class DecodeFeeder:
     """Per-layer wired expert arenas with popularity-driven replacement."""
 
@@ -478,6 +488,7 @@ class DecodeFeeder:
                         and w.shape[0] == n_exp
                         and getattr(proj, "bias", None) is None
                     ):
+                        _refuse_expert_scales(proj, path)
                         mod = m
                         break
                 if mod is None:

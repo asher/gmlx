@@ -71,6 +71,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mmproj` that the config gives it.
 - Gemma 4 models run DFlash drafters, such as the one unsloth ships with
   NVIDIA-Nemotron-3.5-Bolt-E4B, and `gmlx pull` pairs one with its model.
+- NVFP4 MoE files with one weight scale per expert load, in place of
+  failing as unsupported.
 
 ### Changed
 
@@ -162,6 +164,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Spark and K2 Horizon, whose templates have no switch, by closing each
   thinking block as it opens. Thinking budgets now work for gpt-oss in
   `gmlx serve`.
+- On NVFP4 files, mlx-kquant applies each weight's `.scale` inside its
+  kernels, so the scaled projections join the fused attention, MLP and
+  MoE paths. `GMLX_KQ_OUT_SCALE=0` keeps the separate multiply.
 
 ### Fixed
 
@@ -291,6 +296,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - With `--stream-experts`, the coarse command buffers of the load stayed on
   after it with `GMLX_CB_PHASE=0` and in `gmlx distill`, so prompts
   prefilled on them.
+- A weight scale on a projection with a bias scaled the bias too. The bias
+  now adds after the scale, as in llama.cpp.
+- The DeepSeek-V3.2 indexer, `/v1/systemone` and `gmlx distill` read
+  NVFP4 weights without their `.scale`.
 
 ## [0.5.1] - 2026-10-18
 

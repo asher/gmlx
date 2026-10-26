@@ -108,6 +108,13 @@ def fuse_shexp_gate_up(
                 f"fuse_shexp_gate_up: layer {bid} has {sorted(by_proj)} but "
                 f"needs both gate and up shared-expert tensors")
         gate_n, up_n = by_proj["gate"], by_proj["up"]
+        scaled = [n[: -len(".weight")] + ".scale" for n in (gate_n, up_n)
+                  if n[: -len(".weight")] + ".scale" in arrays]
+        if scaled:
+            raise NotImplementedError(
+                f"fuse_shexp_gate_up: {scaled[0]} is a weight scale on a "
+                f"shared-expert half, which the fused projection cannot "
+                f"carry yet")
         gate, up = arrays[gate_n], arrays[up_n]
         codec_g, codec_u = kquant_meta.get(gate_n), kquant_meta.get(up_n)
         if codec_g != codec_u or gate.shape[1:] != up.shape[1:]:
