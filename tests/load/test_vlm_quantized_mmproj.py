@@ -171,4 +171,7 @@ def test_a_q8_0_minicpm_v_mmproj_runs_on_kquant_modules():
     sizes = [[8, 8], [8, 8]]
     want, got = ref(pv, sizes), packed(pv, sizes)
     rel = float(mx.linalg.norm(got - want) / mx.linalg.norm(want))
-    assert rel < 1e-2
+    # kquant computes float32 activations in bfloat16, about 0.3% per
+    # linear. Over this tower that is 0.5% on the GPU and 1.0% on the CPU;
+    # a wrong remap or layout is tens of percent.
+    assert rel < 2e-2
