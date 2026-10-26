@@ -764,40 +764,48 @@ def test_scaled_shared_expert_halves_refuse_the_gate_up_fuse():
 def test_mtp_remaps_keep_the_weight_scales():
     """An MTP projection's scale reaches the drafter, quantized or float,
     as llama-quantize keeps it when requantizing an NVFP4 file to F16. An
-    input_scale or a scale beside a norm does not."""
+    input_scale, or a scale on a norm, a router or a hyper-connection
+    mixer, which llama.cpp does not apply, does not."""
     from gmlx.load.wire import remap_mtp_arrays
     from gmlx.models.nemotron_h.mtp import remap_nemotron_mtp_arrays
-    from gmlx.models.qwen4_exp.mtp import remap_qwen4exp_mtp_arrays
+    from gmlx.models.qwen4_exp.mtp import (QWEN4EXP_NEXTN_MAP,
+                                           remap_qwen4exp_mtp_arrays)
 
     w, sc = mx.zeros((8, 36), dtype=mx.uint8), mx.zeros((1,), dtype=mx.uint8)
 
-    def tensors(prefix, quant, norm, fp=None):
+    def tensors(prefix, quant, norm, fp=None, other=None):
         t = {f"{prefix}{quant}.weight": w, f"{prefix}{quant}.scales": sc,
              f"{prefix}{quant}.scale": mx.array([0.25]),
              f"{prefix}{quant}.input_scale": mx.array([0.5]),
              f"{prefix}{norm}.weight": mx.ones((64,)),
              f"{prefix}{norm}.scale": mx.array([3.0])}
-        if fp is not None:
-            t |= {f"{prefix}{fp}.weight": mx.ones((8, 64), mx.float16),
-                  f"{prefix}{fp}.scale": mx.array([0.5])}
+        for name, s in ((fp, 0.5), (other, 4.0)):
+            if name is not None:
+                t |= {f"{prefix}{name}.weight": mx.ones((8, 64), mx.float16),
+                      f"{prefix}{name}.scale": mx.array([s])}
         return t
 
     out, _, _ = remap_mtp_arrays(
         tensors("blk.4.nextn.", "eh_proj", "enorm"),
         {"blk.4.nextn.eh_proj.weight": "nvfp4"}, "qwen35", first_mtp_block=4)
+    f16 = mx.ones((8, 64), mx.float16)
     out_fp, _, _ = remap_mtp_arrays(
-        {"blk.4.nextn.eh_proj.weight": mx.ones((8, 64), mx.float16),
-         "blk.4.nextn.eh_proj.scale": mx.array([0.5])},
-        {}, "qwen35", first_mtp_block=4)
+        {"blk.4.nextn.eh_proj.weight": f16,
+         "blk.4.nextn.eh_proj.scale": mx.array([0.5]),
+         "blk.4.nextn.hc_head_down.weight": f16,
+         "blk.4.nextn.hc_head_down.scale": mx.array([4.0])},
+        {}, "qwen4exp", first_mtp_block=4, nextn_map=QWEN4EXP_NEXTN_MAP)
     out2, _, _ = remap_nemotron_mtp_arrays(
-        tensors("blk.2.", "ffn_up_shexp", "attn_norm", "attn_output"),
+        tensors("blk.2.", "ffn_up_shexp", "attn_norm", "attn_output",
+                "ffn_gate_inp"),
         {"blk.2.ffn_up_shexp.weight": "nvfp4"}, first_mtp_block=2,
         n_head=4, n_head_kv=2)
     out3, _, _ = remap_qwen4exp_mtp_arrays(
-        tensors("mtp.", "fc_hidden", "pre_fc_norm_hidden", "fc_embedding"),
+        tensors("mtp.", "fc_hidden", "pre_fc_norm_hidden", "fc_embedding",
+                "hyper_connection_mixer.down"),
         {"mtp.fc_hidden.weight": "nvfp4"})
     for got, want in (
-            (out, {"fc": 0.25}), (out_fp, {"fc": 0.5}),
+            (out, {"fc": 0.25}), (out_fp, {"eh_proj": 0.5}),
             (out2, {"layers.0.mlp.shared_experts.up_proj": 0.25,
                     "layers.0.self_attn.o_proj": 0.5}),
             (out3, {"fc_hidden": 0.25, "fc_embedding": 0.5})):

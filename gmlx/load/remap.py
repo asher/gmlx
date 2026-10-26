@@ -2275,6 +2275,11 @@ _WEIGHT_SCALE_RE = re.compile(
     r"|nextn\.eh_proj|nextn\.shared_head_head)|output)\.scale$")
 
 
+def is_weight_scale(gguf_name: str) -> bool:
+    """Whether ``gguf_name`` is a weight scale that llama.cpp applies."""
+    return _WEIGHT_SCALE_RE.match(gguf_name) is not None
+
+
 # Other `.scale` tensors (Unsloth UD recipe metadata, `.input_scale`) have no
 # counterpart in llama.cpp's graph; skip with warning.
 def _is_unsloth_ud_scale(name: str) -> bool:

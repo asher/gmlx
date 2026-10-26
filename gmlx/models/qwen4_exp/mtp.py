@@ -43,6 +43,7 @@ greedy/sampled tokens, so the drafter sets acceptance (speed), never output.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field, replace
 from typing import Any, List, Optional
 
@@ -112,6 +113,12 @@ QWEN4EXP_NEXTN_MAP = {
     "hc_head_down": "hyper_connection_mixer.down.weight",
     "hc_head_up": "hyper_connection_mixer.up.weight",
 }
+
+# The companion projections whose llama.cpp counterparts take a weight scale:
+# the eh_proj halves, attention, and the routed and shared experts.
+_COMPANION_SCALED = re.compile(
+    r"^(fc_embedding|fc_hidden|layers\.\d+\.self_attn\.[qkvo]_proj"
+    r"|layers\.\d+\.mlp\.(switch_mlp|shared_expert)\.(gate|up|down)_proj)$")
 
 
 @dataclass
@@ -483,10 +490,9 @@ def remap_qwen4exp_mtp_arrays(arrays: dict, kquant_meta: dict):
             stats["skipped"] += 1
             continue
         if hf.endswith(".scale"):
-            # A weight scale goes to the projection it scales, quantized or
-            # float; a norm has none.
-            w = arrays.get(name[: -len("scale")] + "weight")
-            if w is None or w.ndim < 2:
+            # A weight scale goes to the projection it scales, on the
+            # projections llama.cpp scales.
+            if _COMPANION_SCALED.match(hf[: -len(".scale")]) is None:
                 stats["skipped"] += 1
             else:
                 weights[hf[: -len("scale")] + "out_scale"] = arr.reshape(-1)
