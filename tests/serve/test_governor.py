@@ -39,6 +39,7 @@ class FakeGen:
         self.prefill_step_size = 2048
         self.completion_batch_size = 8
         self.prefill_batch_size = 1
+        self._prompt_time_counter = 0.0
         self.removed = []
 
     def remove(self, uid):
@@ -1043,6 +1044,17 @@ def test_kernel_floor_reads_live_near_the_floor_and_under_a_prompt(rig, monkeypa
     for _ in range(3):
         gov._governor_tick(gen)
     assert len(reads) == n + 5
+    gen._unprocessed_sequences = []
+    # A request inserted during the step is admitted and, when it fits
+    # one chunk, fully prefilled before the step returns: the harvest
+    # sees the prompt-time counter move and the next tick reads.
+    gov._governor_tick(gen)
+    gen._prompt_time_counter += 0.05
+    gov._harvest_tick(gen, gen._kq_governor, ([], []))
+    gov._governor_tick(gen)
+    assert len(reads) == n + 6
+    gov._governor_tick(gen)
+    assert len(reads) == n + 6
 
 
 def test_kernel_floor_retries_a_failed_read_next_tick(rig, monkeypatch):

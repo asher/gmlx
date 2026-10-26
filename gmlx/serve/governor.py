@@ -273,6 +273,7 @@ class _GovState:
         self.kernel_sampled_tick = None
         self.kernel_last = None
         self.kernel_prompt_prev = False
+        self.prompt_time_seen = None
         self.floor_warned_at = 0.0
         # U5 fault injection: (kind, tick) directives already fired
         self.injected: set = set()
@@ -682,33 +683,36 @@ def _measure_rung(gen, st: _GovState) -> None:
 
 def _prompt_may_step(gen) -> bool:
     """A prompt chunk can run on this tick: one is in flight, or the queue
-    holds a prompt and the batch has room to admit it (ar.py admits when
-    completion_batch_size minus the active rows is at least
-    prefill_batch_size)."""
+    holds a prompt the gate is not holding and the batch has room to admit
+    it (ar.py admits when completion_batch_size minus the active rows is
+    at least prefill_batch_size)."""
     if getattr(gen, "_prompt_batch", None) is not None:
         return True
     if not getattr(gen, "_unprocessed_sequences", None):
         return False
-    gb = getattr(gen, "_generation_batch", None)
+    if admission_hold_reason(gen) is not None:
+        return False
     room = getattr(gen, "completion_batch_size", None)
-    if gb is None or room is None:
+    if room is None:
         return True
-    return room - len(gb) >= getattr(gen, "prefill_batch_size", 1)
+    return room - batch_rows(gen) >= getattr(gen, "prefill_batch_size", 1)
 
 
 def _kernel_sample(gen, st: "_GovState", floor: float):
     """The kernel's unwired bytes for this tick. Read live on the first
     tick, every 16 ticks after, on a tick where a prompt chunk can run
-    and on the tick after it (the tick runs before the step, and a chunk
-    can wire GBs), and on every tick while the last read sat under twice
-    the floor; a plain decode tick between reuses the last read, since a
-    decode step moves memory by a few MB and the read is three sysctl
-    calls. A read that failed is retried next tick. A floor of 0 reads
-    nothing."""
+    and on the tick after any step that ran one (the tick runs before the
+    step, a chunk can wire GBs, and a request inserted mid-step is
+    admitted at the end of the same step), and on every tick while the
+    last read sat under twice the floor; a plain decode tick between
+    reuses the last read, since a decode step moves memory by a few MB
+    and the read is three sysctl calls. A read that failed is retried
+    next tick. A floor of 0 reads nothing."""
     if floor <= 0:
         return None
     last = st.kernel_last
     prompt_now = _prompt_may_step(gen)
+    st.prompt_time_seen = getattr(gen, "_prompt_time_counter", None)
     due = (st.kernel_sampled_tick is None
            or last is None
            or st.tick_no - st.kernel_sampled_tick >= 16
@@ -952,7 +956,11 @@ def _governor_tick(gen) -> None:
 
 def _harvest_tick(gen, st: _GovState, out) -> None:
     """Post-tick: fold emitted tokens per row into the tokens/tick EMA
-    the demand model uses."""
+    the demand model uses, and mark a step that ran a prompt chunk so the
+    next tick reads the kernel live."""
+    seen = st.prompt_time_seen
+    if seen is not None and getattr(gen, "_prompt_time_counter", seen) != seen:
+        st.kernel_prompt_prev = True
     try:
         responses = out[1]
     except Exception:
