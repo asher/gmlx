@@ -554,6 +554,7 @@ def remap_mtp_arrays(
             key = rest[len("nextn.") :]
             if key.endswith(".scale"):
                 # A weight scale goes to the quantized projection it scales.
+                # Converters write one only beside a quantized weight.
                 target = nextn_map.get(key[: -len(".scale")], "")
                 if (not target.endswith(".weight") or kquant_meta.get(
                         name[: -len("scale")] + "weight") is None):

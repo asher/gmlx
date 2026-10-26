@@ -30,7 +30,8 @@ _HID, _LAYERS, _HEADS, _KV, _FFN, _HD = 64, 2, 4, 2, 128, 16
 
 def _mint_tiny_llama(path: str, *, yarn: bool = False,
                      q8_0: bool = False, extra_tokens: tuple = (),
-                     untied: bool = False) -> None:
+                     untied: bool = False,
+                     nvfp4_down_scale: float | None = None) -> None:
     """A complete, loadable llama-arch GGUF: full KV metadata + every tensor
     the 2-layer model needs (tied embeddings; F32 so no quant kernels).
     ``yarn`` adds rope-scaling KVs so the built model carries a YarnRoPE with
@@ -38,7 +39,9 @@ def _mint_tiny_llama(path: str, *, yarn: bool = False,
     the background-load test needs. ``q8_0`` writes the seven projections of
     each layer as Q8_0, so they load as K-quant modules. ``extra_tokens``
     appends control tokens to the vocab, and ``untied`` writes an
-    ``output.weight`` for a text tower that does not tie its embeddings."""
+    ``output.weight`` for a text tower that does not tie its embeddings.
+    ``nvfp4_down_scale`` writes each ffn_down as NVFP4 with that F32
+    ``.scale``, as the llama.cpp converter does for a ModelOpt checkpoint."""
     tokens = _TOKENS + list(extra_tokens)
     vocab = len(tokens)
     w = GGUFWriter(path, "llama")
@@ -70,6 +73,15 @@ def _mint_tiny_llama(path: str, *, yarn: bool = False,
     rng = np.random.default_rng(0)
 
     def t(name, *shape):
+        if nvfp4_down_scale is not None and name.endswith("ffn_down.weight"):
+            rows, k = shape
+            raw = rng.integers(0, 256, (rows, k // 64, 36), dtype=np.uint8)
+            raw[..., :4] = rng.integers(0x30, 0x41, (rows, k // 64, 4))
+            w.add_tensor(name, raw.reshape(rows, -1),
+                         raw_dtype=GGMLQuantizationType.NVFP4)
+            w.add_tensor(name[: -len("weight")] + "scale",
+                         np.array([nvfp4_down_scale], np.float32))
+            return
         a = rng.standard_normal(shape).astype(np.float32) * 0.02
         if q8_0 and len(shape) == 2 and name.startswith("blk."):
             w.add_tensor(name, quants.quantize(a, GGMLQuantizationType.Q8_0),

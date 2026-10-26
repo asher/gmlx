@@ -45,9 +45,11 @@ def _expert_bytes(li: int, kind: str, e: int) -> bytes:
     return bytes((start + i) % 251 for i in range(_STRIDE[kind]))
 
 
-def _make_fixture(tmp_path, n_layers=2):
+def _make_fixture(tmp_path, n_layers=2, down_scale=None):
     """Temp 'GGUF' + offsets map + fake modules whose weights are numpy
-    copies of the file bytes (so the zero-copy verification passes)."""
+    copies of the file bytes (so the zero-copy verification passes).
+    ``down_scale`` is an (attribute, value) weight scale for each down
+    stack."""
     blob = bytearray()
     offsets: dict[int, list] = {}
     modules: dict[int, list] = {}
@@ -62,6 +64,8 @@ def _make_fixture(tmp_path, n_layers=2):
             w = np.frombuffer(stack, dtype=np.uint8).reshape(
                 (_E, 2, _STRIDE[kind] // 2)).copy()
             setattr(mod, f"{kind}_proj", _Proj(w))
+        if down_scale is not None:
+            setattr(mod.down_proj, *down_scale)
         modules[li] = [mod]
     path = tmp_path / "fake.gguf"
     path.write_bytes(bytes(blob))
@@ -79,7 +83,7 @@ def _fake_arena_alloc(shape):
 
 def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
                  pressure=False, fast_disk="off", lend_bytes=0,
-                 ring_share=0):
+                 ring_share=0, down_scale=None):
     import mlx_kquant as kq
     from gmlx.stream.decode_feeder import DecodeFeeder
 
@@ -96,7 +100,7 @@ def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
         # Keep residency tests deterministic: never read the host's real
         # memory-pressure level.
         monkeypatch.setenv("GMLX_DECODE_PRESSURE", "0")
-    offsets, modules = _make_fixture(tmp_path, n_layers)
+    offsets, modules = _make_fixture(tmp_path, n_layers, down_scale)
     per_expert = sum(_STRIDE.values())
     return DecodeFeeder(
         offsets, modules, arena_bytes=slots_per_layer * per_expert * n_layers,
@@ -154,6 +158,17 @@ def test_layers_are_independent(monkeypatch, tmp_path):
     for kind in _KINDS:
         assert _arena_slot(feeder, 1, kind, s) == _expert_bytes(1, kind, 3)
     assert feeder._slot_of[0][3] >= 0 and feeder._slot_of[1][3] >= 0
+
+
+@pytest.mark.parametrize("name", ["out_scale", "post_scale"])
+def test_arena_refuses_a_scale_per_expert(name, monkeypatch, tmp_path):
+    """The arena calls a stack with slot ids, so a scale per expert, in the
+    kernel or in the wrapper, would be read at the wrong expert."""
+    one = np.full((1,), 0.5, np.float32)
+    _make_feeder(monkeypatch, tmp_path, down_scale=(name, one))
+    per = np.full((_E, 1), 0.5, np.float32)
+    with pytest.raises(NotImplementedError, match="per-expert"):
+        _make_feeder(monkeypatch, tmp_path, down_scale=(name, per))
 
 
 def test_swapped_installs_views_and_restores(monkeypatch, tmp_path):

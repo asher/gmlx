@@ -462,6 +462,7 @@ def remap_nemotron_mtp_arrays(
             continue
         if rest.endswith(".scale"):
             # A weight scale goes to the quantized projection it scales.
+            # Converters write one only beside a quantized weight.
             if kquant_meta.get(name[: -len("scale")] + "weight") is None:
                 stats["skipped"] += 1
                 continue

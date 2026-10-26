@@ -484,6 +484,7 @@ def remap_qwen4exp_mtp_arrays(arrays: dict, kquant_meta: dict):
             continue
         if hf.endswith(".scale"):
             # A weight scale goes to the quantized projection it scales.
+            # Converters write one only beside a quantized weight.
             if kquant_meta.get(name[: -len("scale")] + "weight") is None:
                 stats["skipped"] += 1
             else:
