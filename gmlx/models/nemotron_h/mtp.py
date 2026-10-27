@@ -440,6 +440,7 @@ def remap_nemotron_mtp_arrays(
     an unfilled param). Q/K undo the llama.cpp rope permute exactly like the
     trunk remap (the converter permutes every attention block, the MTP block
     included, even though the model is NoPE)."""
+    from gmlx.load.remap import is_weight_scale
     from gmlx.load.transforms import qk_permute_wire
 
     def _strip_weight(name: str) -> str:
@@ -457,6 +458,23 @@ def remap_nemotron_mtp_arrays(
                 stats["skipped"] += 1
             continue
         rest = name[len(prefix):]
+        if rest.endswith(".input_scale"):
+            stats["skipped"] += 1
+            continue
+        if rest.endswith(".scale"):
+            # A weight scale goes to the projection it scales, on the names
+            # llama.cpp scales.
+            if not is_weight_scale(name):
+                stats["skipped"] += 1
+                continue
+            target = _NEMOTRON_MTP_MAP.get(rest[: -len(".scale")])
+            if target is None:
+                raise RuntimeError(
+                    f"nemotron MTP remap: unknown tensor {name!r} "
+                    f"(converter drift?)")
+            hf_weights[_strip_weight(target) + ".out_scale"] = arr.reshape(-1)
+            stats["mapped"] += 1
+            continue
         raw_target = _NEMOTRON_MTP_RAW.get(rest)
         if raw_target is not None:
             hf_weights[raw_target] = arr

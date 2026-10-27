@@ -18,7 +18,7 @@ from . import loadlog
 from .gguf_meta import read_int
 from .native_fp import _strip_weight
 from .preflight import find_split_shards
-from .remap import RemapDecision, parse_gguf_name
+from .remap import RemapDecision, is_weight_scale, parse_gguf_name
 from .transforms import qk_permute_wire, retarget, split_fused_gate_up_kquant
 
 
@@ -552,6 +552,16 @@ def remap_mtp_arrays(
         codec = kquant_meta.get(name)
         if rest.startswith("nextn."):
             key = rest[len("nextn.") :]
+            if key.endswith(".scale"):
+                # A weight scale goes to the projection it scales, on the
+                # names llama.cpp scales, as in the layer branch below.
+                target = nextn_map.get(key[: -len(".scale")], "")
+                if not (target.endswith(".weight") and is_weight_scale(name)):
+                    stats["skipped"] += 1
+                    continue
+                _emit(target[: -len("weight")] + "out_scale", "flatten", arr,
+                      None, name)
+                continue
             base = key[: -len(".weight")] if key.endswith(".weight") else key
             target = nextn_map.get(base)
             if target is None:

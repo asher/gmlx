@@ -88,7 +88,12 @@ def head_weight_fn(mod) -> Callable:
         for r in range(0, rows, step):
             if mode == "kquant":
                 import mlx_kquant as kq
+
+                from gmlx.load.out_scale import weight_scale
                 block = kq.dequantize(w[r:r + step], mod["scales"], mod.kquant_type)
+                s = weight_scale(mod)   # an nvfp4 head's weight scale
+                if s is not None:
+                    block = block * s
             else:
                 block = mx.dequantize(w[r:r + step], mod.scales[r:r + step],
                                       mod.biases[r:r + step] if getattr(mod, "biases", None) is not None else None,

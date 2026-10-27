@@ -203,6 +203,8 @@ def _fuse_kquant_pair(a, b, in_dims: int):
         from mlx_kquant.nn import KQuantLinear
     except Exception:
         return None
+    from gmlx.load.out_scale import cat_out_scale, set_out_scale
+
     # Exact type: a subclass (HadamardKQuantLinear) transforms its input,
     # which a plain fused KQuantLinear would drop.
     if type(a) is not KQuantLinear or type(b) is not KQuantLinear:
@@ -220,7 +222,8 @@ def _fuse_kquant_pair(a, b, in_dims: int):
     fused = KQuantLinear(in_dims, n_a + n_b, bias=False, codec=a.kquant_type)
     fused.weight = mx.concatenate([a.weight, b.weight], axis=0)
     fused.scales = a.scales
-    mx.eval(fused.weight)
+    set_out_scale(fused, cat_out_scale((a, b)))
+    mx.eval(fused.parameters())
     # Rebind the pair as views of the fused buffer; the originals release.
     a.weight = fused.weight[:n_a]
     b.weight = fused.weight[n_a:]

@@ -56,6 +56,8 @@ except ImportError:  # pragma: no cover - kq is a hard dep of the loader
     kq = None
     KQuantLinear = ()
 
+from gmlx.load.out_scale import cat_out_scale, wrapped_scale
+
 
 def _on() -> bool:
     return os.environ.get("GMLX_OCCUPANCY_FUSE", "1") != "0"
@@ -79,7 +81,7 @@ def _same_codec_kquant(projs) -> bool:
     # fused wire would bypass that rotation.
     if any(getattr(p, "_hadamard", None) is not None for p in projs):
         return False
-    if any("bias" in p or "out_scale" in p for p in projs):
+    if any("bias" in p or wrapped_scale(p) for p in projs):
         return False
     return len({p.kquant_type for p in projs}) == 1
 
@@ -90,9 +92,13 @@ def _unwrapped(projs) -> bool:
     return all(isinstance(p, KQuantLinear) for p in projs)
 
 
-def _fuse_wires(projs):
+def _fuse_wires(owner, projs):
+    """The row-concatenated wire of ``projs``. Their weight scales, if any,
+    go to ``owner._kq_os`` as one vector over the same rows."""
     w = mx.concatenate([p["weight"] for p in projs], axis=0)
-    mx.eval(w)
+    s = cat_out_scale(projs)
+    mx.eval(w, *(() if s is None else (s,)))
+    object.__setattr__(owner, "_kq_os", {} if s is None else {"out_scale": s})
     return w
 
 
@@ -173,7 +179,7 @@ def _make_fused_attention(base_cls):
             D = self.head_dim
             qkv = kq.quantized_matmul(
                 x, w, self.q_proj["scales"], self.q_proj.kquant_type,
-                transpose=True,
+                transpose=True, **self._kq_os,
             )
             queries = qkv[..., : n_q * D]
             queries = queries.reshape(B, L, n_q, D).transpose(0, 2, 1, 3)
@@ -208,7 +214,7 @@ def _make_fused_attention(base_cls):
             ):
                 object.__setattr__(self, "_kq_fuse_off", True)
                 return None
-            w = _fuse_wires(projs)
+            w = _fuse_wires(self, projs)
             object.__setattr__(self, "_kq_wqkv", w)
             return w
 
@@ -242,7 +248,7 @@ def _make_fused_qwen35_attention(base_cls):
             qr, kr = self._kq_q_rows, self._kq_k_rows
             qkv = kq.quantized_matmul(
                 x, w, self.q_proj["scales"], self.q_proj.kquant_type,
-                transpose=True,
+                transpose=True, **self._kq_os,
             )
             queries, gate = mx.split(
                 qkv[..., :qr].reshape(B, L, n_q, -1), 2, axis=-1)
@@ -283,7 +289,7 @@ def _make_fused_qwen35_attention(base_cls):
             ):
                 object.__setattr__(self, "_kq_fuse_off", True)
                 return None
-            w = _fuse_wires(projs)
+            w = _fuse_wires(self, projs)
             object.__setattr__(self, "_kq_q_rows", qr)
             object.__setattr__(self, "_kq_k_rows", kr)
             object.__setattr__(self, "_kq_wqkv", w)
@@ -315,7 +321,7 @@ def _make_fused_mlp(base_cls):
                 return super().__call__(x)
             gu = kq.quantized_matmul(
                 x, w, self.gate_proj["scales"], self.gate_proj.kquant_type,
-                transpose=True,
+                transpose=True, **self._kq_os,
             )
             n = self.gate_proj.weight.shape[0]
             h = swiglu(gu[..., :n], gu[..., n:])
@@ -336,10 +342,11 @@ def _make_fused_mlp(base_cls):
             d = self.down_proj
             h_lo = mx.contiguous(h[..., :k_half])
             h_hi = mx.contiguous(h[..., k_half:])
+            okw = {"out_scale": d["out_scale"]} if "out_scale" in d else {}
             lo = kq.quantized_matmul(
-                h_lo, w_lo, d["scales"], d.kquant_type, transpose=True)
+                h_lo, w_lo, d["scales"], d.kquant_type, transpose=True, **okw)
             hi = kq.quantized_matmul(
-                h_hi, w_hi, d["scales"], d.kquant_type, transpose=True)
+                h_hi, w_hi, d["scales"], d.kquant_type, transpose=True, **okw)
             return lo + hi
 
         def _kq_build_fused(self):
@@ -352,7 +359,7 @@ def _make_fused_mlp(base_cls):
             if projs[0].weight.shape != projs[1].weight.shape:
                 object.__setattr__(self, "_kq_fuse_off", True)
                 return None
-            w = _fuse_wires(projs)
+            w = _fuse_wires(self, projs)
             object.__setattr__(self, "_kq_wgu", w)
             d = self.down_proj
             k = projs[0].weight.shape[0]
@@ -361,7 +368,7 @@ def _make_fused_mlp(base_cls):
             if (
                 isinstance(d, KQuantLinear)
                 and "bias" not in d
-                and "out_scale" not in d
+                and not wrapped_scale(d)
                 and wire_cols % 2 == 0
                 and k % 512 == 0
             ):

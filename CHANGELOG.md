@@ -6,11 +6,31 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- NVFP4 MoE files with one weight scale per expert load, in place of
+  failing as unsupported.
+
+### Changed
+
+- With mlx-kquant 0.5.7 or later, NVFP4 projections decode closer to full
+  precision and join the fused attention and MLP paths.
+  `GMLX_KQ_OUT_SCALE=0` turns this off.
+
 ### Fixed
 
 - A Qwen3.5-family text model (Qwen3.5 and 3.6 MoE, MiniCPM-V 4.7 without
   `--mmproj`) decodes with `--kv-bits 8` within a tenth of its fp16 KV
   speed instead of a quarter slower.
+- A weight scale on a projection with a bias scaled the bias too. The bias
+  now adds after the scale, as in llama.cpp.
+- `/v1/systemone` and `gmlx distill` read an NVFP4 output head without its
+  `.scale`.
+- An adapter on an NVFP4 projection with a `.scale` lost most of its effect
+  at decode, and decode failed with float16 activations.
+- On NVFP4 files with `.scale` tensors in the MTP block, the MTP drafter
+  dropped some of them, so its drafts were rarely accepted, and a
+  Nemotron-H drafter failed to load.
 
 ## [0.5.3] - 2026-10-26
 

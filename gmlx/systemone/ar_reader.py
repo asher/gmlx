@@ -70,6 +70,7 @@ def _letter_rows(head, ids: list[int]):
     """The head's rows for ``ids`` as float32 ``(len(ids), hidden)`` plus a
     float32 bias or None, or None for a head this cannot read exactly."""
     from gmlx.load.hadamard_modules import fold_of
+    from gmlx.load.out_scale import weight_scale
 
     module = getattr(head, "__self__", head)   # a tied head's embedding
     if fold_of(module) is not None:
@@ -92,7 +93,11 @@ def _letter_rows(head, ids: list[int]):
         rows = module["weight"][idx]
     else:
         return None
-    return rows.astype(mx.float32), bias
+    rows = rows.astype(mx.float32)
+    s = weight_scale(module)
+    if s is not None:
+        rows = rows * s.astype(mx.float32)
+    return rows, bias
 
 
 class _KVView:
