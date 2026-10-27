@@ -531,6 +531,8 @@ def test_template_decisions_match_full_forwards():
         reader, tokens, schema, state, style=fmt))
     assert out["diagnostics"]["readout"] == "template"
     assert out["diagnostics"]["prefix"]["tokens"] == split
+    # The head's letter rows serve, with the logit scale applied after them.
+    assert out["diagnostics"]["path"] == "rows"
     for q in schema["questions"]:
         opts = fmt.options(q)
         logits = model(mx.array([tokens.ids(fmt.prompt(state, q, opts))]))[0, -1]
@@ -540,6 +542,15 @@ def test_template_decisions_match_full_forwards():
             assert a["noul"] == pytest.approx(p[0], abs=1e-5)
         else:
             assert list(a["probabilities"].values()) == pytest.approx(p, abs=1e-5)
+
+
+def test_a_logit_scale_the_forward_does_not_apply_reads_full_logits():
+    from gmlx.systemone import ar_reader
+
+    model = _model()
+    model.args.logits_scaling = 8.0         # the forward still divides by 4
+    reader = ar_reader.LetterReader(model, list(range(8)))
+    assert reader.check() == "logits" and reader.step is None
 
 
 def test_decision_prefixes_take_views_and_the_exact_tier():

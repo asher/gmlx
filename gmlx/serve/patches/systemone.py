@@ -405,7 +405,7 @@ def make_systemone_endpoint(installed):
             ar_reader.split_point(tokens, state, style)
             texts = (letters.pass_texts(schema, state, style)
                      + letters.winner_bounds(schema, state, style))
-            admitted = _admit_letters(rg, tokens, texts, ar_reader.FORWARD_TOKENS)
+            admitted = _admit_letters(rg, tokens, texts, ar_reader.TAIL_TOKENS)
             scales = lora_rows.request_scales(spec)
 
             def job(engine_rg, should_stop):

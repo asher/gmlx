@@ -19,6 +19,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - With mlx-kquant 0.5.7 or later, NVFP4 projections decode closer to full
   precision and join the fused attention and MLP paths.
   `GMLX_KQ_OUT_SCALE=0` turns this off.
+- Decisions run every pass of a small request in one forward, and Granite
+  models read answer scores in float32, so a Granite Switch decision takes
+  about a quarter less time. Probabilities shift once in the third or fourth
+  decimal, and a chat on the same model can pause for one longer forward.
+- A hot-swapped GGUF adapter adds no work to a step where no request in the
+  batch uses it.
 
 ### Fixed
 

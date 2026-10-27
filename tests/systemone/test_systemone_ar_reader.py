@@ -136,7 +136,7 @@ def test_a_tail_longer_than_a_forward_runs_on_its_own_copy():
     reader = LetterReader(model, LETTER_IDS)
     reader.check()
     prefix = _ids(30, 4)
-    long_tail = _ids(ar_reader.FORWARD_TOKENS + 40, 5)
+    long_tail = _ids(ar_reader.TAIL_TOKENS + 40, 5)
     cache = run_to_end(reader.prefill(prefix))
     before = [mx.array(s) for c in cache for s in c.state if s is not None]
     got = run_to_end(reader.tails(cache, prefix, [long_tail, _ids(5, 6)]))
@@ -144,6 +144,24 @@ def test_a_tail_longer_than_a_forward_runs_on_its_own_copy():
     assert mx.max(mx.abs(mx.array(got[0]) - want)).item() < TOL
     after = [s for c in cache for s in c.state if s is not None]
     assert all(mx.array_equal(a, b).item() for a, b in zip(before, after))
+
+
+@_NEEDS_GPU
+def test_tails_share_one_forward_up_to_the_tail_size():
+    """The prefix runs in chunks of FORWARD_TOKENS; tails that fit
+    TAIL_TOKENS together run in one forward."""
+    model = _model()
+    reader = LetterReader(model, LETTER_IDS)
+    reader.check()
+    prefix = _ids(ar_reader.FORWARD_TOKENS + 10, 11)
+    cache = run_to_end(reader.prefill(prefix))
+    assert reader.forwards == 2
+    width = ar_reader.TAIL_TOKENS // 5
+    tails = [_ids(width, 30 + i) for i in range(5)]
+    got = run_to_end(reader.tails(cache, prefix, tails))
+    assert reader.forwards == 3
+    want = _reference(model, prefix + tails[4])
+    assert mx.max(mx.abs(mx.array(got[4]) - want)).item() < TOL
 
 
 @_NEEDS_GPU
@@ -214,7 +232,7 @@ def test_a_decision_reuses_a_given_prefix():
 
 @_NEEDS_GPU
 def test_every_forward_runs_inside_the_rows_scope(monkeypatch):
-    monkeypatch.setattr(ar_reader, "FORWARD_TOKENS", 512)   # both tails in one forward
+    monkeypatch.setattr(ar_reader, "TAIL_TOKENS", 512)      # both tails in one forward
     seen = []
 
     @contextlib.contextmanager
