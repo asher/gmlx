@@ -123,6 +123,21 @@ def test_sorted_path_with_nonuniform_rows():
     assert mx.array_equal(y[0], base[0])
 
 
+def test_all_off_rows_take_the_stock_expert_path(monkeypatch):
+    lora_rows.configure("rows", 1)
+    glu, ref_glu = _glu(), _glu()
+    model = _Holder(glu)
+    _install(model, mx.random.normal((4, 2, 16)), mx.random.normal((4, 8, 2)), 0.5)
+    monkeypatch.setattr(modules, "expert_delta",
+                        lambda *a, **k: pytest.fail("adapter delta computed"))
+    lora_rows.register_uid(1, (0.0,))
+    x = mx.random.normal((2, 3, 8))
+    idx = mx.random.randint(0, 4, (2, 3, 2)).astype(mx.uint32)
+    with lora_rows.published([1, 1]):
+        y = model.switch_mlp(x, idx)
+    assert mx.array_equal(y, ref_glu(x, idx))
+
+
 def test_rows_mode_unpublished_raises_in_expert_path():
     lora_rows.configure("rows", 1)
     model = _Holder(_glu())

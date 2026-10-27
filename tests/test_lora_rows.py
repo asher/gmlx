@@ -207,6 +207,37 @@ def test_bare_request_registers_zero_row(engine):
     assert lora_rows.vector_for_uids(uids).tolist() == [[0.0]]
 
 
+def test_all_off_rows_run_the_base_alone(monkeypatch):
+    lora_rows.configure("rows", 2)
+    wrap, base, _a, _b = _wrap(dtype=mx.float16)
+    wrap.add_slot(mx.ones((2, 4), mx.float16), mx.ones((3, 2), mx.float16), 1.0, 1)
+    lora_rows.register_uid(1, (0.0, 0.0))
+    lora_rows.register_uid(2, (0.0, 1.0))
+    x = mx.random.normal((2, 3, 4)).astype(mx.float16)
+    called = []
+    real = lora_rows.dense_row_factor
+    monkeypatch.setattr(lora_rows, "dense_row_factor",
+                        lambda slot, *a: called.append(slot) or real(slot, *a))
+    monkeypatch.setattr(lora_rows, "dense_input_rows",
+                        lambda slot, *a: pytest.fail("epilogue rows read"))
+    with lora_rows.published([1, 1]):
+        assert lora_rows.all_off((0, 1))
+        assert mx.array_equal(wrap(x), base(x))
+    assert called == []
+    with lora_rows.published([1, 2]):
+        assert lora_rows.slot_off(0) and not lora_rows.slot_off(1)
+        y = wrap(x)
+    assert called == [1]
+    assert mx.array_equal(y[0], base(x[0:1])[0])
+    assert not mx.array_equal(y[1], base(x[1:2])[0])
+
+
+def test_a_direct_publish_never_counts_as_off():
+    lora_rows.configure("rows", 1)
+    lora_rows.set_rows([0.0])
+    assert not lora_rows.slot_off(0)
+
+
 # chat /adapter rides the static-mode channel for the single chat row
 
 def test_chat_adapter_command_publishes_single_row_scale(capsys):

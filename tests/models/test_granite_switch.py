@@ -3,13 +3,13 @@ switched LoRA delta, substitute embeddings, batching, the KV layer policy
 around the router cache, and the template's adapter placement.
 
 References: llama.cpp a37cc4610 ``src/models/granite-switch.cpp`` for the
-forward, and the chat template of ibm-granite/granite-switch-4.1-8b at
+forward, IBM's granite-switch 43ccd29 ``src/granite_switch/hf/switch/multi.py``
+for the slot rule, and the chat template of ibm-granite/granite-switch-4.1-8b at
 0d1625d (``tests/fixtures/granite_switch_template.jinja``).
 """
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import numpy as np
@@ -100,13 +100,12 @@ def _model(seed=0, **over) -> Model:
 
 
 def _ref_slots(ids) -> list[int]:
-    """llama.cpp's rule: the mean of the slots of the control tokens at or
-    before each position, rounded half away from zero, or 0 with none."""
-    seen, out = [], []
+    """IBM's MultiSwitch rule: the slot of the latest control token at or
+    before each position, or 0 with none."""
+    slot, out = 0, []
     for t in ids:
-        if t in SLOT:
-            seen.append(SLOT[t])
-        out.append(math.floor(sum(seen) / len(seen) + 0.5) if seen else 0)
+        slot = SLOT.get(t, slot)
+        out.append(slot)
     return out
 
 
@@ -119,22 +118,26 @@ def _np(a):
 @pytest.mark.parametrize("ids", [
     [1, 2, 3, 4],                              # no control token
     [1, GUARD, 2, 3],                          # one
-    [1, GUARD, 2, DECIDE, 3],                  # two adapters: 1.5 rounds to 2
-    [DECIDE, 1, GUARD, 2, GUARD, 3],           # 4/3 rounds to 1
-    [GUARD, DECIDE, DECIDE, 4],                # 5/3 rounds to 2
-], ids=["none", "one", "half-up", "third-down", "two-thirds-up"])
-def test_slots_follow_the_llamacpp_rule(ids):
+    [1, GUARD, 2, DECIDE, 3],                  # multi.py's [T,A,T,B,T]
+    [DECIDE, 1, GUARD, 2, GUARD, 3],           # back to the first adapter
+    [GUARD, DECIDE, DECIDE, 4],                # a repeat changes nothing
+], ids=["none", "one", "switch", "switch-back", "repeat"])
+def test_slots_follow_ibms_rule(ids):
     inner = _model().model
     got = inner.slots(mx.array([ids]), None)
     assert got.dtype == mx.uint32
     assert got[0].tolist() == _ref_slots(ids)
 
 
+def test_slots_match_multi_py_example():
+    assert _ref_slots([1, GUARD, 2, DECIDE, 3]) == [0, 1, 1, 2, 2]
+
+
 def test_slots_carry_across_a_cached_prefix():
     """A control token in an earlier chunk, or in an extracted and merged
     prefix, still sets the slot of later tokens."""
     inner = _model().model
-    ids = [1, GUARD, 2, 3, DECIDE, 4, 5]
+    ids = [1, GUARD, 2, 3, DECIDE, 4, GUARD, 5]
     for cut in range(1, len(ids)):
         router = SwitchRouterCache()
         a = inner.slots(mx.array([ids[:cut]]), router)
@@ -143,11 +146,12 @@ def test_slots_carry_across_a_cached_prefix():
 
     rows = [SwitchRouterCache(), SwitchRouterCache()]
     inner.slots(mx.array([[1, GUARD, 2]]), rows[0])
-    inner.slots(mx.array([[3, 4, 5, 6]]), rows[1])
+    inner.slots(mx.array([[3, DECIDE, 5, 6]]), rows[1])
     batch = SwitchRouterCache.merge(rows)
     assert type(batch) is SwitchRouterBatchCache
-    step = inner.slots(mx.array([[DECIDE], [7]]), batch)
-    assert step[:, 0].tolist() == [2, 0]
+    assert inner.slots(mx.array([[7], [7]]), batch)[:, 0].tolist() == [1, 2]
+    step = inner.slots(mx.array([[DECIDE], [GUARD]]), batch)
+    assert step[:, 0].tolist() == [2, 1]
     back = batch.extract(0)
     assert type(back) is SwitchRouterCache
     assert inner.slots(mx.array([[8]]), back)[0].tolist() == [2]
@@ -196,19 +200,42 @@ def test_router_stays_float32_under_float16_activations():
 def test_packed_deltas_match_the_wire_math(shape, count_live):
     """Each projection adds B_s (A_s x) of its targets for the token's slot
     s, from the wire stacks, with slot 0 adding nothing."""
-    import mlx.nn as nn
-
     args = _args()
     rng = np.random.default_rng(3)
     wire = _wire_lora(args, rng)
+    slots = rng.integers(0, 3, shape).astype(np.uint32)
+    slots.flat[0] = 1
+    slots.flat[1] = 2
+    route = SlotRoute(mx.array(slots), count_live=count_live)
+    assert route.uniform is None
+    assert (route.order is not None) == (slots.size >= SlotRoute.SORT_MIN_ROWS)
+    assert route.n_live == (int((slots > 0).sum()) if count_live else None)
+    _check_deltas(args, wire, slots, route, rng)
+
+
+@pytest.mark.parametrize("slots", [
+    [[1] * 20],
+    [[0] * 7 + [2] * 13, [0] * 20],
+    [[0, 0, 1], [1, 0, 1]],
+], ids=["all-live", "with-plain-rows", "few-rows"])
+def test_one_slot_chunks_take_the_dense_delta(slots):
+    """When every adapted row shares a slot, the delta is two dense matmuls
+    on that slot's pair, masked on the plain rows."""
+    args = _args()
+    rng = np.random.default_rng(9)
+    wire = _wire_lora(args, rng)
+    slots = np.array(slots, dtype=np.uint32)
+    route = SlotRoute(mx.array(slots), count_live=True)
+    assert route.uniform == int(slots.max()) and route.order is None
+    _check_deltas(args, wire, slots, route, rng)
+
+
+def _check_deltas(args, wire, slots, route, rng):
+    import mlx.nn as nn
+
     lora = SwitchLoRA(args)
     lora.load_weights(list(pack_lora(
         {k: mx.array(v) for k, v in wire.items()}).items()))
-    slots = rng.integers(0, 3, shape).astype(np.uint32)
-    slots.flat[0] = 1
-    route = SlotRoute(mx.array(slots), count_live=count_live)
-    assert (route.order is not None) == (slots.size >= SlotRoute.SORT_MIN_ROWS)
-    assert route.n_live == (int((slots > 0).sum()) if count_live else None)
 
     def oracle(targets, x):
         parts = [np.einsum("bloi,bli->blo", wire[f"{t}_b"][slots],
@@ -219,7 +246,7 @@ def test_packed_deltas_match_the_wire_math(shape, count_live):
     for p, targets in (("qkv", ("q", "k", "v")), ("o", ("o",)),
                        ("down", ("down",))):
         n_in = wire[f"{targets[0]}_a"].shape[-1]
-        x = rng.standard_normal((*shape, n_in)).astype(np.float32)
+        x = rng.standard_normal((*slots.shape, n_in)).astype(np.float32)
         zero = nn.Linear(n_in, oracle(targets, x).shape[-1], bias=False)
         zero.weight = mx.zeros_like(zero.weight)
         got = _np(lora.project(p, zero, mx.array(x), route))
@@ -253,7 +280,7 @@ def test_a_wide_adapted_chunk_counts_its_live_rows(monkeypatch):
     ids = [11] * 30 + [GUARD] + [12] * 9
     want = _np(model(mx.array([ids])))
     mx.eval(model(mx.array([ids]), cache=model.make_cache()))
-    assert {r.n_live for r in seen} == {10}
+    assert {(r.n_live, r.uniform) for r in seen} == {(10, 1)}
     monkeypatch.setattr(SlotRoute, "__init__", _uncounted(SlotRoute.__init__))
     np.testing.assert_allclose(_np(model(mx.array([ids]))), want,
                                rtol=1e-5, atol=1e-5)

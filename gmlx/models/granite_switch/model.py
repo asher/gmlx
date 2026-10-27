@@ -11,16 +11,16 @@ with its four runtime multipliers. These parts differ:
      layout.
   2. Every projection carries a stack of LoRA pairs, one slot per
      adapter plus an all-zero slot 0. Each token adds the delta of its
-     own slot: the mean of the slots of the control tokens at or before
-     it, rounded half up, or 0 with none. The deltas reach the cached
-     K and V.
+     own slot: the slot of the latest control token at or before it, or
+     0 with none. The deltas reach the cached K and V.
   3. A control token embeds as its substitute token.
 
-The slot rule is llama.cpp's router head without the softmax: its K lane
-is +gain on a control token and -gain elsewhere, so the attended V is the
-mean of the visible control slots to within e^-30. Here the router cache
-keeps a 0/1 control lane and the slot lane per position, and the slot is
-that mean exactly.
+The slot rule is IBM's MultiSwitch (granite-switch 43ccd29,
+src/granite_switch/hf/switch/multi.py), which the checkpoint was trained
+with. llama.cpp's router head takes the mean of the visible control slots
+instead; the two agree unless a sequence holds two different control
+tokens. The router cache keeps a 0/1 control lane and the slot lane per
+position.
 """
 
 from dataclasses import dataclass
@@ -176,6 +176,12 @@ class SwitchLoRA(nn.Module):
         if a.dtype != dt:
             a, b = a.astype(dt), b.astype(dt)
         *lead, n_in = x.shape
+        if route.uniform is not None:
+            rows = x.reshape(-1, n_in).astype(dt)
+            d = (rows @ a[route.uniform - 1]) @ b[route.uniform - 1]
+            if route.n_live < rows.shape[0]:
+                d = d * route.live.reshape(-1, 1)
+            return d.reshape(*lead, -1).astype(x.dtype)
         rows = x.reshape(-1, 1, n_in)
         if rows.dtype != dt:
             rows = rows.astype(dt)
@@ -236,8 +242,10 @@ class SlotRoute:
     GatherMM runs one segmented GEMM per entry.
 
     With ``count_live`` the adapted row count is read back to the host
-    (``n_live``), so the GatherMM path runs on those rows alone. Under
-    ``mx.compile`` the read is not allowed and ``n_live`` stays None."""
+    (``n_live``), so the GatherMM path runs on those rows alone. The same
+    read sets ``uniform`` when every adapted row shares one slot, and the
+    delta is then two dense matmuls. Under ``mx.compile`` the read is not
+    allowed and both stay None."""
 
     SORT_MIN_ROWS = 16
 
@@ -245,14 +253,21 @@ class SlotRoute:
         self.slots = slots.reshape(-1)
         entry = mx.maximum(self.slots.astype(mx.int32) - 1, 0).astype(mx.uint32)
         live = self.slots > 0
-        self.n_live = None
+        self.n_live = self.uniform = None
         if count_live:
+            s = self.slots.astype(mx.int32)
+            stats = mx.stack([live.sum().astype(mx.int32),
+                              mx.where(live, s, 1 << 30).min(), s.max()])
             try:
-                self.n_live = int(live.sum().item())
+                n, lo, hi = stats.tolist()
             except ValueError:
                 pass
+            else:
+                self.n_live = n
+                if n and lo == hi:
+                    self.uniform = hi
         self.order = self.inv = None
-        if entry.size >= self.SORT_MIN_ROWS:
+        if self.uniform is None and entry.size >= self.SORT_MIN_ROWS:
             self.order = mx.argsort(self.slots)
             self.inv = mx.argsort(self.order)
             entry, live = entry[self.order], live[self.order]
@@ -350,7 +365,6 @@ class GraniteSwitchModel(nn.Module):
             slot[tok] = float(i + 1)
         self._substitute = mx.array(sub, dtype=mx.int32)
         self._control_slot = mx.array(slot, dtype=mx.float32)
-        self._n_adapters = args.num_adapters
 
     def embed(self, inputs: mx.array) -> mx.array:
         """Token embeddings, a control token taking its substitute's row,
@@ -363,18 +377,17 @@ class GraniteSwitchModel(nn.Module):
         v = self._control_slot[inputs]
         k = (v > 0).astype(mx.float32)
         L = inputs.shape[1]
-        cnt = mx.cumsum(k, axis=-1)
-        tot = mx.cumsum(v, axis=-1)
         if router is not None:
             keys, values = router.update_and_fetch(
                 k[:, None, :, None], v[:, None, :, None])
-            T = keys.shape[2]
-            if T > L:
-                cnt = cnt + keys[:, 0, : T - L, 0].sum(axis=-1, keepdims=True)
-                tot = tot + values[:, 0, : T - L, 0].sum(axis=-1, keepdims=True)
-        mean = tot / mx.maximum(cnt, 1.0)
-        s = mx.floor(mx.clip(mean, 0.0, float(self._n_adapters)) + 0.5)
-        return mx.where(cnt > 0, s, 0.0).astype(mx.uint32)
+            k, v = keys[:, 0, :, 0], values[:, 0, :, 0]
+        T = k.shape[1]
+        at = mx.where(k > 0, mx.arange(T, dtype=mx.int32), -1)
+        last = mx.cummax(at[:, T - L:], axis=-1)
+        if T > L:
+            last = mx.maximum(last, at[:, : T - L].max(axis=-1, keepdims=True))
+        s = mx.take_along_axis(v, mx.maximum(last, 0), axis=-1)
+        return mx.where(last >= 0, s, 0.0).astype(mx.uint32)
 
     def __call__(self, inputs: mx.array, cache=None):
         h = self.embed(inputs)

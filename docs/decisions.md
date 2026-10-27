@@ -14,7 +14,8 @@ The request follows the
 [Jev decision API](https://huggingface.co/blog/liliruli/how-to-use-the-jev-api-a-complete-guide),
 so a Jev client that sends text states works unchanged. The route is also
 served at `/systemone`. Every field is in the
-[decisions reference](decisions-reference.md).
+[decisions reference](decisions-reference.md). The
+[assistant](assistant.md#decisions-as-a-tool) can also ask it as a tool.
 
 - [Serving a decision model](#serving-a-decision-model)
 - [A first decision](#a-first-decision)
