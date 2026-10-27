@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "brew_formula.py"
 
 
@@ -129,6 +131,24 @@ def test_the_keg_resolves_and_installs_the_video_extra(monkeypatch):
     source = {"name": "gmlx", "url": "https://files/gmlx-1.tar.gz",
               "sha256": "0" * 64}
     assert '"#{buildpath}[all,video]"' in bf.render(source, [], "3.13")
+
+
+def test_a_failed_resolve_shows_uv_stderr(monkeypatch, capsys):
+    """uv runs quiet with its output captured, so a failed resolve used to
+    leave only the exit code in the release log. Its stderr names the
+    cause, such as a version the index does not serve yet."""
+    import subprocess
+
+    def run(cmd, **kw):
+        raise subprocess.CalledProcessError(
+            1, cmd, output="",
+            stderr="error: No solution found: gmlx==9 has no versions\n")
+
+    monkeypatch.setattr(bf.subprocess, "run", run)
+    with pytest.raises(SystemExit) as exc:
+        bf.resolve("9", "3.13")
+    assert "No solution found" in capsys.readouterr().err
+    assert "gmlx[all,video]==9" in str(exc.value)
 
 
 def test_the_smoke_imports_a_module_that_pulls_in_pil_and_requests():
