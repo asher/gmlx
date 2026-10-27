@@ -1,6 +1,6 @@
 # Supported architectures
 
-gmlx maps 47 GGUF architectures to model types, and 46 of them load end-to-end
+gmlx maps 48 GGUF architectures to model types, and 47 of them load end-to-end
 with no `hf_source`. `scripts/check-coverage.py` generates this page from the
 architecture table and the mlx-lm that gmlx carries, so do not edit it by hand.
 
@@ -46,6 +46,7 @@ family, backend, status and caveat:
 | `gpt-oss` | gpt-oss | mlx-lm | loadable |  |
 | `granite` | granite | mlx-lm | loadable |  |
 | `granitehybrid` | granite | mlx-lm | loadable |  |
+| `graniteswitch` | granite | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. |
 | `hunyuan-moe` | hunyuan | mlx-lm | loadable |  |
 | `hy_v3` | hunyuan | mlx-lm | loadable | Early GGUFs whose arch is hy-v3 with a dash are not mapped. Reconvert them. |
 | `hyv4` | hunyuan | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. `--kv-bits` has no effect, and the KV cache stays fp16. |

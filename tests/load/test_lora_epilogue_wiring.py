@@ -152,6 +152,7 @@ def test_dense_wrapper_hands_tables_and_rows_to_base(monkeypatch):
 
     monkeypatch.setattr(KQuantLinear, "__call__", fake_call)
     monkeypatch.setattr(modules, "_KQ_LORA_EPILOGUE", True)
+    monkeypatch.setattr(modules, "_LORA_EPILOGUE_MODE", "always")
     a = mx.ones((3, D), dtype=mx.float32)     # lora_a (r, in) as stored
     b = mx.ones((D, 3), dtype=mx.float32)     # lora_b (out, r)
     wrap = modules.LoRAKQuantLinear(base, a, b, scale=0.5, slot=0)

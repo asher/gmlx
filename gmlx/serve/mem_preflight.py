@@ -308,12 +308,22 @@ def stack_geometry(model, stack):
     cfg = _lm_config(model)
     state = recurrent_state_bytes(cfg)
     layers = _get(cfg, "num_hidden_layers")
+    # A kv_policy_exempt side cache (Granite Switch's router lanes) is not
+    # a config layer. It grows at the few bytes per token it declares.
+    exempt = [bool(getattr(c, "kv_policy_exempt", False)) for c in stack]
     # Pool prices are per config layer, so they apply only to a stack
     # with one entry per layer.
-    pools = (pool_bytes_per_token(cfg, layers) if layers == len(stack)
-             else [0.0] * len(stack))
+    real = len(stack) - sum(exempt)
+    pools = (pool_bytes_per_token(cfg, layers) if layers == real
+             else [0.0] * real)
     geo = []
-    for i, c in enumerate(stack):
+    i = -1
+    for c, side in zip(stack, exempt):
+        if side:
+            side_bpt = float(getattr(c, "side_bytes_per_token", 0.0))
+            geo.append(LayerGeometry(False, None, 0.0, side_bpt))
+            continue
+        i += 1
         kind = _classify(c, types)
         members = getattr(c, "caches", None)
         members = list(members) if members is not None else [c]

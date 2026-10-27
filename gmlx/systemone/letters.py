@@ -15,7 +15,10 @@ A question with more than 52 options reads each chunk of at most 52, then
 the chunk winners, and composes one distribution over all options.
 
 This module is pure Python: the request fields, the prompt text of every
-pass, and the answers. Each question is a generator that yields the passes
+pass, and the answers. A format object (``LetterFormat`` here,
+``model_template.TemplateFormat`` for a model's own decision template)
+writes the passes and turns their scores into probabilities; the
+chunking, orderings and stages are shared. Each question is a generator that yields the passes
 it needs and receives their candidate scores, so a reader can batch the
 passes of many questions into one forward. ``ar_reader`` runs the passes."""
 
@@ -113,6 +116,62 @@ def prompt_text(state: str, instructions: str, options, style: str = BRACKET) ->
             + f"\n\nQuestion: {instructions}\nOptions:\n{lines}\n\n{ANSWER_LINE}")
 
 
+def asked_text(q) -> str:
+    """A question's instructions as a letter pass words them."""
+    return q["instructions"] + (SCORE_SUFFIX if q["type"] == "score" else "")
+
+
+class LetterFormat:
+    """The letter prompt: options under letters in ``style``, scores at
+    ``T``, and the noul answer recalibrated."""
+
+    name = "letters"
+    max_options = 52
+
+    def __init__(self, style: str = BRACKET):
+        self.style = style
+
+    def options(self, q):
+        return q["options"]
+
+    def prompt(self, state: str, q, options) -> str:
+        return prompt_text(state, asked_text(q), options, self.style)
+
+    def size(self, option) -> int:
+        return len(option[0]) + len(option[1])
+
+    def probs(self, scores: list[float], q, n: int) -> list[float]:
+        return _probs(scores)
+
+    def noul(self, p: list[float]) -> float:
+        py = min(max(p[0], 1e-4), 1 - 1e-4)
+        z = math.log(py / (1 - py)) / NOUL_T + NOUL_BIAS
+        return 1 / (1 + math.exp(-z))
+
+    def prefix_text(self, state: str) -> str:
+        return prefix_text(state)
+
+    def split(self, tokens, state: str) -> tuple[list[int], int]:
+        """The prefix ids every pass on ``state`` shares, and their length:
+        the common start of the prompt that ends at the state and of a pass
+        prompt. Every pass continues the state with the same text, so any
+        pass gives the same split. Tokens that merge across the state's end
+        stay in the tails."""
+        head = tokens.ids(prefix_text(state))
+        full = tokens.ids(prompt_text(state, "", [], self.style))
+        n = 0
+        for a, b in zip(head, full):
+            if a != b:
+                break
+            n += 1
+        return full[:n], n
+
+
+def as_format(style):
+    """``style`` as a format: a letter style string, or a format as is."""
+    return LetterFormat(style) if isinstance(style, str) else style
+
+
 def _instructions(q) -> str:
     i = q.get("instructions")
     return i if isinstance(i, str) else str(i)
@@ -127,7 +186,8 @@ def _desc(v) -> str:
 def parse(body, limits: Limits = Limits()) -> dict:
     """The letter schema of a Jev request body. The structural rules are the
     Jev ones, without a cap on options. Each question needs ``instructions``.
-    ``samples`` is the number of option orders to average."""
+    ``samples`` is the number of option orders to average. Each question
+    keeps its request form as ``raw``."""
     raw = body.get("questions")
     trimmed = {}
     if isinstance(raw, dict):
@@ -150,12 +210,12 @@ def parse(body, limits: Limits = Limits()) -> dict:
             options = [(k, _desc(v)) for k, v in crit.items()]
         elif q["type"] == "score":
             options = [(str(i), _desc(level)) for i, level in enumerate(crit)]
-            instructions += SCORE_SUFFIX
         else:
             crit = crit or {}
             options = [("yes", _desc(crit.get("true")) or NOUL_TRUE),
                        ("no", _desc(crit.get("false")) or NOUL_FALSE)]
-        questions.append({**q, "instructions": instructions, "options": options})
+        questions.append({**q, "instructions": instructions, "options": options,
+                          "raw": src})
     samples = body.get("samples", "auto")
     if samples == "auto":
         orderings = 1
@@ -175,20 +235,24 @@ def ignored(body) -> set:
     return out
 
 
-def _softmax(z: list[float]) -> list[float]:
+def softmax(z: list[float]) -> list[float]:
     m = max(z)
     e = [math.exp(v - m) for v in z]
     s = sum(e)
     return [v / s for v in e]
 
 
-def _probs(scores: list[float]) -> list[float]:
-    """Letter scores to probabilities: divided by ``T``, then normalized.
-    Log-probabilities and raw logits give the same result."""
+def check_finite(scores: list[float]) -> None:
     if any(not math.isfinite(v) for v in scores):
         bad = sum(not math.isfinite(v) for v in scores)
         raise ReadoutIncomplete(f"{bad} of {len(scores)} candidate scores not finite")
-    return _softmax([v / T for v in scores])
+
+
+def _probs(scores: list[float]) -> list[float]:
+    """Letter scores to probabilities: divided by ``T``, then normalized.
+    Log-probabilities and raw logits give the same result."""
+    check_finite(scores)
+    return softmax([v / T for v in scores])
 
 
 def _orders(n: int, orderings: int) -> list[list[int]]:
@@ -204,27 +268,26 @@ def _orders(n: int, orderings: int) -> list[list[int]]:
     return out
 
 
-def _chunks(options) -> list:
-    """The options in near-equal chunks of at most 52."""
-    if len(options) <= 52:
+def _chunks(options, most: int = 52) -> list:
+    """The options in near-equal chunks of at most ``most``."""
+    if len(options) <= most:
         return [options]
-    k = -(-len(options) // 52)
+    k = -(-len(options) // most)
     size = -(-len(options) // k)
     return [options[i:i + size] for i in range(0, len(options), size)]
 
 
-def _readout(state: str, instructions: str, options, orderings: int,
-             style: str = BRACKET) -> Read:
+def _readout(state: str, q, options, orderings: int, fmt, n: int) -> Read:
     """Probabilities aligned with ``options``, averaged over ``orderings``
-    letterings."""
+    letterings. ``n`` is the question's whole option count."""
     orders = _orders(len(options), orderings)
-    got = yield [Pass(prompt_text(state, instructions, [options[i] for i in order], style),
-                      len(options)) for order in orders]
+    got = yield [Pass(fmt.prompt(state, q, [options[i] for i in order]), len(options))
+                 for order in orders]
     if len(orders) == 1:
-        return _probs(got[0])
+        return fmt.probs(got[0], q, n)
     acc = [0.0] * len(options)
     for order, scores in zip(orders, got):
-        p = _probs(scores)
+        p = fmt.probs(scores, q, n)
         for pos, i in enumerate(order):
             acc[i] += p[pos] / orderings
     return acc
@@ -255,34 +318,36 @@ def gather(reads: list[Read]) -> Read:
     return values
 
 
-def distribution(state: str, instructions: str, options, orderings: int,
-                 style: str = BRACKET) -> Read:
-    """The option distribution. Above 52 options each near-equal chunk of at
-    most 52 is read, then the chunk winners, and the two compose as
+def distribution(state: str, q, orderings: int, style=BRACKET) -> Read:
+    """The option distribution. Above the format's option limit (52 letters)
+    each near-equal chunk within it is read, then the chunk winners, and the
+    two compose as
     p(i) ~ p_final(chunk of i) * p_chunk(i) / p_chunk(winner of that chunk)."""
-    if len(options) <= 52:
-        return (yield from _readout(state, instructions, options, orderings, style))
-    chunks = _chunks(options)
+    fmt = as_format(style)
+    options = fmt.options(q)
+    n = len(options)
+    if n <= fmt.max_options:
+        return (yield from _readout(state, q, options, orderings, fmt, n))
+    chunks = _chunks(options, fmt.max_options)
     parts = yield from gather(
-        [_readout(state, instructions, c, orderings, style) for c in chunks])
+        [_readout(state, q, c, orderings, fmt, n) for c in chunks])
     wins = [max(range(len(p)), key=p.__getitem__) for p in parts]
     final = yield from _readout(
-        state, instructions, [c[w] for c, w in zip(chunks, wins)], orderings, style)
+        state, q, [c[w] for c, w in zip(chunks, wins)], orderings, fmt, n)
     raw = [final[c] * pi / p[w] for c, (p, w) in enumerate(zip(parts, wins))
            for pi in p]
     s = sum(raw)
     return [v / s for v in raw]
 
 
-def answer(state: str, q, orderings: int, style: str = BRACKET) -> Read:
+def answer(state: str, q, orderings: int, style=BRACKET) -> Read:
     """One question's internal answer: the chosen label, the probabilities by
     option name and the chosen probability."""
-    p = yield from distribution(state, q["instructions"], q["options"], orderings, style)
+    fmt = as_format(style)
+    p = yield from distribution(state, q, orderings, fmt)
     names = [c[0] for c in q["choices"]]
     if q["type"] == "noul":
-        py = min(max(p[0], 1e-4), 1 - 1e-4)
-        z = math.log(py / (1 - py)) / NOUL_T + NOUL_BIAS
-        yes = 1 / (1 + math.exp(-z))
+        yes = fmt.noul(p)
         return {"type": "noul", "label": "yes" if yes >= 0.5 else "no",
                 "noul": yes, "probabilities": {"yes": yes, "no": 1 - yes},
                 "chosen_probability": max(yes, 1 - yes)}
@@ -298,30 +363,32 @@ def _asked(schema) -> list:
             if not schema.get("ask") or q["id"] in schema["ask"]]
 
 
-def pass_texts(schema, state: str, style: str = BRACKET) -> list[str]:
+def pass_texts(schema, state: str, style=BRACKET) -> list[str]:
     """The text of every pass the decision can send before any answer is
     known: each ordering of each chunk of each asked question."""
+    fmt = as_format(style)
     out = []
     for q in _asked(schema):
-        for c in _chunks(q["options"]):
-            out += [prompt_text(state, q["instructions"], [c[i] for i in order], style)
+        for c in _chunks(fmt.options(q), fmt.max_options):
+            out += [fmt.prompt(state, q, [c[i] for i in order])
                     for order in _orders(len(c), schema["orderings"])]
     return out
 
 
-def winner_bounds(schema, state: str, style: str = BRACKET) -> list[str]:
-    """For each asked question past 52 options, a text at least as long as
-    its winners pass: the longest option of each chunk."""
-    return [prompt_text(state, q["instructions"],
-                        [max(c, key=lambda o: len(o[0]) + len(o[1]))
-                         for c in _chunks(q["options"])], style)
-            for q in _asked(schema) if len(q["options"]) > 52]
+def winner_bounds(schema, state: str, style=BRACKET) -> list[str]:
+    """For each asked question past the option limit, a text at least as
+    long as its winners pass: the longest option of each chunk."""
+    fmt = as_format(style)
+    return [fmt.prompt(state, q, [max(c, key=fmt.size)
+                                  for c in _chunks(fmt.options(q), fmt.max_options)])
+            for q in _asked(schema) if len(fmt.options(q)) > fmt.max_options]
 
 
-def decision(schema, state: str, style: str = BRACKET) -> Read:
+def decision(schema, state: str, style=BRACKET) -> Read:
     """The whole request: the questions in stages by their ``ask_if``
     dependencies, every question of a stage read side by side. Returns the
     answers, the stages and the skipped questions."""
+    fmt = as_format(style)
     qs = _asked(schema)
     by_id = {q["id"]: q for q in qs}
     answered: dict[str, Any] = {}
@@ -344,6 +411,6 @@ def decision(schema, state: str, style: str = BRACKET) -> Read:
         if not asked:
             continue
         stages.append([q["id"] for q in asked])
-        got = yield from gather([answer(state, q, schema["orderings"], style) for q in asked])
+        got = yield from gather([answer(state, q, schema["orderings"], fmt) for q in asked])
         answered.update({q["id"]: a for q, a in zip(asked, got)})
     return {"answers": answered, "stages": stages, "skipped": skipped}

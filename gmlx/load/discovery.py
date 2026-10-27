@@ -243,6 +243,8 @@ def _classify_meta(
                               container=container)
     if read_string(meta, "general.type") == "vae" or arch == "autoencoder":
         return ClassifiedGguf(ap, "image-vae", arch, False, quant, False)
+    if arch in _arch_table.ASR_ARCHES:
+        return ClassifiedGguf(ap, "asr", arch, False, quant, False)
     emb = embedding_kind(meta, basename, arch)
     if emb:
         return ClassifiedGguf(ap, emb, arch, False, quant, False)
@@ -439,9 +441,9 @@ def header_meta(path: str) -> dict | None:
         return None                              # not memoized: it may appear later
     disk = _load_header_cache()
     ent = disk.get(ap)
-    # v3 adds the declared base ids; older cached verdicts lack them.
+    # v3 adds the declared base ids; v4 the speech companion kind.
     if (isinstance(ent, dict) and ent.get("mtime") == int(st.st_mtime)
-            and ent.get("size") == st.st_size and ent.get("v") == 3):
+            and ent.get("size") == st.st_size and ent.get("v") == 4):
         meta = {k: ent.get(k) for k in _HEADER_META_KEYS}
         _HEADER_MEMO[ap] = meta
         return meta
@@ -454,7 +456,7 @@ def header_meta(path: str) -> dict | None:
             "sampling": sampling, "drafter_kind": c.drafter_kind,
             "declared": list(c.declared)}
     _HEADER_MEMO[ap] = meta
-    disk[ap] = {"mtime": int(st.st_mtime), "size": st.st_size, "v": 3, **meta}
+    disk[ap] = {"mtime": int(st.st_mtime), "size": st.st_size, "v": 4, **meta}
     _save_header_cache(disk)
     return meta
 
@@ -566,6 +568,59 @@ def find_headless_drafter(
         if hit is not None:
             return hit
     return find_sibling_drafter(path, arches)
+
+
+def find_asr_companion(path: str) -> str | None:
+    """The speech companion GGUF of the text model at ``path``, or None: one
+    in the model's own folder, else one in a sibling repo folder named for
+    the model's arch in :data:`arch_table.ASR_COMPANION_REPOS` (any org),
+    locally as ``<org>__<repo>`` or in the Hugging Face cache."""
+    meta = header_meta(path)
+    repo = _arch_table.ASR_COMPANION_REPOS.get(meta.get("arch")) if meta else None
+    if repo is None:
+        return None
+    ap = os.path.abspath(os.path.expanduser(path))
+    for folder in [os.path.dirname(ap)] + _asr_repo_folders(ap, repo):
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        for name in names:
+            p = os.path.join(folder, name)
+            if name.endswith(".gguf") and p != ap:
+                m = header_meta(p)
+                if m and m.get("arch") in _arch_table.ASR_ARCHES:
+                    return p
+    return None
+
+
+def _asr_repo_folders(ap: str, repo: str) -> list:
+    """Folders of ``repo`` under any org beside the repo folder holding
+    ``ap``: HF cache snapshots, or ``<org>__<repo>`` (or ``<repo>``)."""
+    parts = os.path.normpath(ap).split(os.sep)
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i].startswith("models--"):
+            root = os.sep.join(parts[:i])
+            out = []
+            try:
+                dirs = sorted(os.listdir(root))
+            except OSError:
+                return []
+            for d in dirs:
+                if d.startswith("models--") and d.lower().endswith("--" + repo.lower()):
+                    snaps = os.path.join(root, d, "snapshots")
+                    try:
+                        out += [os.path.join(snaps, r) for r in sorted(os.listdir(snaps))]
+                    except OSError:
+                        continue
+            return out
+    base = os.path.dirname(os.path.dirname(ap))
+    try:
+        dirs = sorted(os.listdir(base))
+    except OSError:
+        return []
+    return [os.path.join(base, d) for d in dirs
+            if d.lower() == repo.lower() or d.lower().endswith("__" + repo.lower())]
 
 
 def _sibling_drafter_folders(ap: str) -> list:
@@ -1290,6 +1345,10 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
                 print(f"[discover] LoRA adapter - not a chat model (attach via "
                       f"`adapter:` per model, or run/chat/serve --adapter): "
                       f"{c.path}", file=sys.stderr)
+            if c.kind == "asr":
+                print(f"[discover] speech companion - not a chat model (pairs "
+                      f"with its text model, or run/chat/serve --asr): {c.path}",
+                      file=sys.stderr)
 
         made: list[tuple[ModelCfg, ClassifiedGguf]] = []
         for c in models:

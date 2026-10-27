@@ -161,7 +161,7 @@ def _view_kinds(cache) -> Optional[list[str]]:
 
     kinds = []
     for c in cache:
-        if type(c) is KVCache:
+        if type(c) is KVCache or getattr(c, "plain_kv", False):
             kinds.append("kv")
         elif type(c) is ArraysCache:
             kinds.append("arr")
@@ -244,20 +244,10 @@ class LetterTokens:
         return [i[0] for i in ids]
 
 
-def split_point(tokens: LetterTokens, state: str) -> tuple[list[int], int]:
-    """The prefix ids every pass on ``state`` shares, and their length: the
-    common start of the prompt that ends at the state and of a pass prompt.
-    Every pass continues the state with the same text, so any pass gives
-    the same split. Tokens that merge across the state's end stay in the
-    tails."""
-    head = tokens.ids(letters.prefix_text(state))
-    full = tokens.ids(letters.prompt_text(state, "", []))
-    n = 0
-    for a, b in zip(head, full):
-        if a != b:
-            break
-        n += 1
-    return full[:n], n
+def split_point(tokens, state: str, style=letters.BRACKET) -> tuple[list[int], int]:
+    """The prefix ids every pass on ``state`` shares, and their length, as
+    the format (``style``) splits them."""
+    return letters.as_format(style).split(tokens, state)
 
 
 def _no_rows(rows: int):
@@ -442,30 +432,32 @@ class LetterReader:
         return [s.tolist() for s in out]
 
 
-def decide_letters(reader: LetterReader, tokens: LetterTokens, schema, state: str,
+def decide_letters(reader: LetterReader, tokens, schema, state: str,
                    *, prefixes=None,
                    should_stop: Optional[Callable[[], bool]] = None,
                    rows_scope: Optional[Callable[[int], Any]] = None,
-                   style: str = letters.BRACKET) -> Step:
+                   style=letters.BRACKET) -> Step:
     """One letter decision, as a generator that yields after each forward.
     ``prefixes`` (a ``prefixes.Prefixes``) finds and keeps the state prefix
     between requests. ``rows_scope(rows)`` publishes the request's adapter
     scales around each forward. ``style`` is how the option lines open
-    (``letters.option_style``). Returns the decision body: answers and
-    diagnostics."""
+    (``letters.option_style``), or a format such as
+    ``model_template.TemplateFormat``. Returns the decision body: answers
+    and diagnostics."""
     from .prefixes import Prefixes
 
     prefixes = prefixes if prefixes is not None else Prefixes()
     started = time.time()
     reader.check(rows_scope)
     reader = reader.bind(rows_scope)
-    read = letters.decision(schema, state, style)
+    fmt = letters.as_format(style)
+    read = letters.decision(schema, state, fmt)
     out: dict[str, Any] = {}
     try:
         batch = next(read)
     except StopIteration as stop:
         batch, out = [], stop.value
-    ids, split = split_point(tokens, state)
+    ids, split = split_point(tokens, state, fmt)
     cache, reused, stored = yield from _prefix(reader, prefixes, ids)
     computed = 0 if reused else split
     passes, prompt_tokens = 0, 0
@@ -495,7 +487,7 @@ def decide_letters(reader: LetterReader, tokens: LetterTokens, schema, state: st
         "answers": out["answers"],
         "diagnostics": {
             "engine": "gmlx",
-            "readout": "letters",
+            "readout": fmt.name,
             "stages": out["stages"],
             "skipped": out["skipped"],
             "orderings": schema["orderings"],
@@ -521,14 +513,15 @@ def _prefix(reader: LetterReader, prefixes, ids: list[int]) -> Step:
     return cache, False, prefixes.store(ids, cache)
 
 
-def prewarm(reader: LetterReader, tokens: LetterTokens, state: str, *, prefixes=None,
-            rows_scope: Optional[Callable[[int], Any]] = None) -> Step:
+def prewarm(reader: LetterReader, tokens, state: str, *, prefixes=None,
+            rows_scope: Optional[Callable[[int], Any]] = None,
+            style=letters.BRACKET) -> Step:
     """Prefill the prefix of ``state`` and keep it, so the next decision on
     the state reads only its tails. Returns the prefix diagnostics."""
     from .prefixes import Prefixes
 
     prefixes = prefixes if prefixes is not None else Prefixes()
-    ids, split = split_point(tokens, state)
+    ids, split = split_point(tokens, state, style)
     if prefixes.tier in ("off", "unsupported"):
         return {"tokens": split, "reused": False, "stored": False, "tier": prefixes.tier}
     reader.check(rows_scope)

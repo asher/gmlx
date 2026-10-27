@@ -41,6 +41,17 @@ transformers commit 674c0e3 (Apache-2.0), with modifications:
   and processing_minicpmv4_6.py, without torch, and the 4.7 image count
   check.
 
+The Granite Speech TurboCTC companion in gmlx/models/granite_speech5/ ports
+model code from transformers release 5.16.1 (Apache-2.0), with
+modifications:
+
+- gmlx/models/granite_speech5/model.py: the log-mel and delta features of
+  src/transformers/models/granite_speech5/feature_extraction_granite_speech5.py,
+  restated in MLX with the filterbank and window read from the GGUF, and the
+  conformer CTC encoder of modeling_granite_speech5.py (block attention with
+  a relative position bias, the convolution module with its batch norm
+  folded at load, subsampling and self-conditioning), restated in MLX.
+
 transformers is Copyright The Hugging Face team and licensed under the
 Apache License, Version 2.0, reproduced below. transformers ships no NOTICE
 file.

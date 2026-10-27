@@ -66,6 +66,22 @@ def test_single_model_cfg_vlm_mmproj(tmp_path):
     assert m.mmproj and m.mmproj.endswith("mmproj-gemma-4-E4B-it-bf16.gguf")
 
 
+def test_single_model_cfg_asr_flags(tmp_path):
+    g = tmp_path / "granite-switch-4.1-8b-Q4_K_M.gguf"
+    c = tmp_path / "speech" / "granite-speech-5.0-470m-turboctc.gguf"
+    g.write_text("x")
+    c.parent.mkdir()
+    c.write_text("x")
+    (_, m), = srv._single_model_cfg(_ns(model=str(g), asr=str(c))).models.items()
+    assert m.asr == str(c)
+    (_, m), = srv._single_model_cfg(_ns(model=str(g), no_asr=True)).models.items()
+    assert m.asr is False
+    (_, m), = srv._single_model_cfg(_ns(model=str(g))).models.items()
+    assert m.asr is None
+    flags = srv._bg_serve_args(_ns(model=str(g), asr=str(c)), None)
+    assert flags[flags.index("--asr") + 1] == str(c)
+
+
 def test_single_model_cfg_chat_template_rides_overrides(tmp_path):
     """--chat-template lands in the model's overrides and survives resolution onto
     the ResolvedModel (the same slot a config `overrides: {chat_template}` uses)."""

@@ -11,6 +11,11 @@ loaded model process-wide, so repeat requests don't reload.
 This module is import-safe without mlx-whisper installed: the import is lazy
 and only :func:`import_mlx_whisper` (called at server startup when STT is
 configured, and per-request) touches it.
+
+A second backend serves a speech companion GGUF (Granite Speech TurboCTC,
+:mod:`gmlx.serve.asr_service`): ``--stt`` names its path, or the alias
+``granite-speech`` for the companion a configured model pairs with. It needs
+no mlx-whisper, and gives the ``json`` and ``text`` formats only.
 """
 
 from __future__ import annotations
@@ -37,12 +42,15 @@ STT_ALIASES = {
     "whisper-tiny":     "mlx-community/whisper-tiny",
 }
 DEFAULT_STT_ALIAS = "whisper-turbo"
+ALIAS_COMPANION = "granite-speech"
 
 # Request `model` values that mean "whatever this server has configured".
 # OpenAI clients conventionally send "whisper-1".
 _CONFIGURED_NAMES = frozenset({"", "whisper-1", "default"})
 
 RESPONSE_FORMATS = ("json", "text", "verbose_json", "srt", "vtt")
+# A CTC transcript has no segments, timestamps or language.
+COMPANION_FORMATS = ("json", "text")
 
 # The sample rate of Whisper's input, mlx_whisper.audio.SAMPLE_RATE.
 WHISPER_SAMPLE_RATE = 16000
@@ -72,6 +80,55 @@ def import_mlx_whisper():
     return mlx_whisper
 
 
+def is_companion(model: str | None) -> bool:
+    """True when ``model`` is a speech companion GGUF."""
+    if not model or not str(model).endswith(".gguf"):
+        return False
+    from gmlx.load import arch_table
+    from gmlx.load.discovery import header_meta
+
+    meta = header_meta(model)
+    return bool(meta) and meta.get("arch") in arch_table.ASR_ARCHES
+
+
+def check_backend(model: str) -> None:
+    """Import what serving ``model`` needs, with install guidance when it
+    is missing. A companion needs only the form parser."""
+    if not is_companion(model):
+        import_mlx_whisper()
+        return
+    try:
+        import python_multipart  # noqa: F401
+    except ImportError:
+        try:
+            import multipart  # noqa: F401
+        except ImportError as exc:
+            from gmlx.commands.extras import install_hint
+            raise ImportError(
+                "speech-to-text requires the optional stt extra:\n"
+                f"    {install_hint('stt')}") from exc
+
+
+def paired_companion(cfg) -> str:
+    """The companion GGUF a model of ``cfg`` pairs with, for the
+    ``granite-speech`` alias. Raises ConfigError when none does."""
+    from gmlx import asr
+    from gmlx.config import ConfigError, resolve_model
+
+    for mid in (getattr(cfg, "models", None) or {}):
+        try:
+            rm = resolve_model(mid, cfg)
+        except Exception:  # noqa: BLE001  a skipped model pairs nothing
+            continue
+        path = asr.companion_path(rm.path, rm.asr, rm.no_asr)
+        if path:
+            return path
+    raise ConfigError(
+        f"server.stt: {ALIAS_COMPANION!r} names the speech companion of a "
+        "configured model, and no model pairs with one. Name the companion "
+        "GGUF path instead.")
+
+
 def _load_stt_model(model_path: str) -> None:
     """Populate mlx-whisper's process-wide model cache for ``model_path``.
 
@@ -93,6 +150,10 @@ def _load_stt_model(model_path: str) -> None:
 def prewarm(model_path: str) -> concurrent.futures.Future:
     """Background-load the configured Whisper model at server startup
     (best-effort; see :func:`subservice.prewarm`)."""
+    if is_companion(model_path):
+        from . import asr_service
+        return asr_service.prewarm(model_path)
+
     def _load():
         import_mlx_whisper()              # install guidance if the extra is gone
         _load_stt_model(model_path)
@@ -101,20 +162,32 @@ def prewarm(model_path: str) -> concurrent.futures.Future:
 
 
 def release() -> concurrent.futures.Future:
-    """Drop the cached Whisper model (see :func:`subservice.release`)."""
+    """Drop the cached Whisper model (see :func:`subservice.release`) and
+    any loaded speech companion."""
+    from . import asr_service
+    asr_service.release()
     transcribe = sys.modules.get("mlx_whisper.transcribe")
     holders = (transcribe.ModelHolder,) if transcribe is not None else ()
     return subservice.release(_STT_WORKER, *holders)
 
 
-def resolve_stt_model(value) -> str:
+def resolve_stt_model(value, cfg=None) -> str:
     """Normalize a configured STT model value to an HF repo id or local path.
 
     Accepts a friendly alias (``whisper-turbo``), an HF repo id
     (``mlx-community/whisper-large-v3-turbo`` - e.g. the fp16 repo when you
     don't want a q4), a local model directory, or ``True``/``"default"`` (YAML
-    ``stt: true`` / bare ``--stt``) for the default alias.
+    ``stt: true`` / bare ``--stt``) for the default alias. A speech companion
+    GGUF path resolves to its absolute path, and ``granite-speech`` to the
+    companion a model of ``cfg`` pairs with.
     """
+    if isinstance(value, str):
+        v = value.strip()
+        if v.lower() == ALIAS_COMPANION:
+            return paired_companion(cfg)
+        expanded = os.path.abspath(os.path.expanduser(v))
+        if is_companion(expanded):
+            return expanded
     return subservice.resolve_alias_or_path(
         value, aliases=STT_ALIASES, default_alias=DEFAULT_STT_ALIAS,
         default_names=("default", "true", "whisper-1"))
@@ -123,8 +196,11 @@ def resolve_stt_model(value) -> str:
 def effective_model(requested: str, configured: str) -> str:
     """Map a request's ``model`` field onto the configured STT model
     (conventional names pass; anything else is a 400)."""
+    accepted = _CONFIGURED_NAMES
+    if is_companion(configured):
+        accepted = accepted | {ALIAS_COMPANION}
     return subservice.effective_model(
-        requested, configured, accepted_names=_CONFIGURED_NAMES,
+        requested, configured, accepted_names=accepted,
         resolver=resolve_stt_model, error_cls=STTRequestError,
         kind="STT", hint="whisper-1")
 
@@ -202,6 +278,8 @@ def run_transcription(audio_bytes: bytes, *, filename: str, configured_model: st
         raise STTRequestError(400, "multipart field 'file' is required")
     target = effective_model(model, configured_model)
     fmt = (response_format or "json").strip().lower()
+    if is_companion(target):
+        return _run_companion(audio_bytes, target, fmt, task)
     if fmt not in RESPONSE_FORMATS:
         raise STTRequestError(
             400, f"unsupported response_format {fmt!r} "
@@ -258,3 +336,26 @@ def run_transcription(audio_bytes: bytes, *, filename: str, configured_model: st
         except OSError:
             pass
     return format_result(result, fmt, task=task)
+
+
+def _run_companion(audio_bytes: bytes, target: str, fmt: str, task: str):
+    """Transcribe with the speech companion. It has no translate task and
+    no segments, and ignores ``language``, ``prompt`` and ``temperature``."""
+    from . import asr_service
+
+    name = os.path.basename(target)
+    if task != "transcribe":
+        raise STTRequestError(
+            400, f"the speech-to-text model {name} transcribes only; it has no "
+                 "translations")
+    if fmt not in COMPANION_FORMATS:
+        raise STTRequestError(
+            400, f"response_format {fmt!r} is not available with {name}, which "
+                 f"gives text only (supported: {', '.join(COMPANION_FORMATS)})")
+    try:
+        text = asr_service.transcribe(target, audio_bytes, field="the uploaded file")
+    except asr_service.ASRRequestError as exc:
+        raise STTRequestError(exc.status_code, str(exc)) from None
+    except Exception as exc:
+        raise RuntimeError(f"transcription failed: {exc}") from exc
+    return format_result({"text": text}, fmt, task=task)

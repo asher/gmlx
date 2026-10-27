@@ -452,7 +452,7 @@ SWAP_ARCHES = frozenset({
     "mistral3", "gpt-oss", "seed_oss", "smollm3", "granite", "qwen3next",
     "minimax-m2", "qwen35", "qwen35moe", "qwen3vl", "qwen3vlmoe",
     "hy_v3", "hyv4", "muse-glimmer", "muse-spark", "minimax-m3", "falcon-h1",
-    "k2-horizon", "beam", "flint",
+    "k2-horizon", "beam", "flint", "graniteswitch",
     "granitehybrid", "ernie4_5-moe", "gemma", "gemma2", "gemma3", "gemma4",
 })
 

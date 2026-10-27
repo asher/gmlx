@@ -428,6 +428,10 @@ class ChatState:
     staged: list = dataclasses.field(default_factory=list)         # /! blocks
     staged_images: list = dataclasses.field(default_factory=list)
     staged_audio: list = dataclasses.field(default_factory=list)
+    # Speech companion of a text model that reads audio through one, and
+    # whether the model wants one at all.
+    asr: str | None = None
+    asr_wanted: bool = False
     pending_send: str | None = None      # /retry auto-resend
     pending_insert: str | None = None    # /load prompt prefill
 
@@ -611,6 +615,57 @@ def _handle_shell(command: str, state: ChatState) -> None:
     )
 
 
+def _pairs_with_companion(args) -> bool:
+    from gmlx import asr
+
+    return asr.pairs_with_companion(args.gguf)
+
+
+def _chat_companion(args) -> str | None:
+    """The speech companion of a text model that reads audio through one,
+    or None."""
+    from gmlx import asr
+
+    if not asr.pairs_with_companion(args.gguf):
+        return None
+    path = asr.companion_path(args.gguf, getattr(args, "asr", None),
+                              getattr(args, "no_asr", False))
+    return path
+
+
+def _audio_turn(state: ChatState, tok, messages: list, template_kwargs: dict,
+                starts_cache: bool) -> tuple[list[int], str] | None:
+    """The prompt ids and rendered text of a turn with staged audio on a
+    text model with a speech companion, or None without staged audio. The
+    clips become audio parts before the typed text and the markers take the
+    transcripts. The turn's checkpoint keeps the transcripts as text, so a
+    replay renders the same message without the audio."""
+    from gmlx import asr
+    from gmlx.serve.media_programs import decode_mono
+
+    clips = state.take_list("staged_audio")
+    if not clips or state.asr is None:
+        return None
+    speech = asr.companion(state.asr)
+    print(f"[chat] transcribing {len(clips)} clip(s)")
+    texts = [speech.transcribe(decode_mono(c, speech.sample_rate)) for c in clips]
+    user = messages[-1]
+    line = user["content"]
+    user["content"] = [{"type": "audio"}] * len(clips) + [{"type": "text", "text": line}]
+    prompt_text = tok.apply_chat_template(messages, tokenize=False,
+                                          add_generation_prompt=True, **template_kwargs)
+    ids = _encode_turn(tok, prompt_text, starts_cache)
+    marker = asr.marker_id(tok)
+    if marker is None:
+        raise ValueError("the model's tokenizer has no audio marker token")
+    ids = asr.splice(list(ids), marker, texts,
+                     lambda t: tok.encode(t, add_special_tokens=False))
+    cp = state.turn_checkpoint
+    if cp is not None:
+        cp["user_content"] = "\n".join([t or asr.EMPTY_TRANSCRIPT for t in texts] + [line])
+    return ids, prompt_text
+
+
 def _compose_user_content(state: ChatState, line: str) -> str:
     """Prepend any staged /! blocks to the typed message (or send them alone
     on an empty line). Also records the composed text in the current turn
@@ -673,6 +728,17 @@ def _detect_dropped_media(line: str) -> tuple[list[str], list[str]] | None:
 
 
 def _stage_media(state: ChatState, images: list[str], audios: list[str]) -> None:
+    if state.asr and audios and not images:
+        state.staged_audio.extend(audios)
+        n = len(state.staged_audio)
+        print(f"[chat] staged {n} audio - transcribed and attached to your "
+              f"next message ('/drop' discards)")
+        return
+    if state.asr_wanted and audios and not state.asr:
+        from gmlx import asr
+
+        print(f"[chat] audio is off: {asr.NO_COMPANION}")
+        return
     if not state.vlm:
         print(
             "[chat] this looks like media, but the session is text-only - "
@@ -2340,6 +2406,8 @@ _ASSISTANT_REJECT = (
     ("adapter", "--adapter"),
     ("mmproj", "--mmproj"),
     ("no_mmproj", "--no-mmproj"),
+    ("asr", "--asr"),
+    ("no_asr", "--no-asr"),
     ("chat_template", "--chat-template"),
     ("no_chat_template", "--no-chat-template"),
     ("chat_template_config", "--chat-template-config"),
@@ -3511,6 +3579,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
 
     state = _wire_input(no_history=args.no_history)
     state.vlm = args.mmproj is not None
+    state.asr = None if state.vlm else _chat_companion(args)
+    state.asr_wanted = state.asr is not None or (
+        not state.vlm and _pairs_with_companion(args))
     state.reasoning = args.reasoning
     state.template_kwargs = template_kwargs
     if brain is None:
@@ -4267,7 +4338,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         if first_turn and state.system_prompt:
             messages.append({"role": "system", "content": state.system_prompt})
         messages.append({"role": "user", "content": _compose_user_content(state, line)})
-        if args.no_chat_template:
+        audio = (_audio_turn(state, tok, messages, template_kwargs, starts_cache)
+                 if state.asr and not args.no_chat_template else None)
+        if audio is not None:
+            prompt, prompt_text = audio
+        elif args.no_chat_template:
             # Base / non-instruct model: no template, just the raw turn(s).
             prompt = "\n".join(
                 m["content"] for m in messages if isinstance(m.get("content"), str)

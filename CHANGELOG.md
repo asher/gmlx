@@ -10,6 +10,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - NVFP4 MoE files with one weight scale per expert load, in place of
   failing as unsupported.
+- Granite Switch 4.1 (`graniteswitch`) with its `guardian-core` and `decision`
+  adapters, decisions through `/v1/systemone`, and audio through the Granite
+  Speech companion, which also serves `/v1/audio/transcriptions`.
 
 ### Changed
 
@@ -19,6 +22,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `/v1/responses` refuses audio that it would drop with a 400 that points to
+  `/v1/chat/completions`. It answered as if the clip were not there before.
 - A Qwen3.5-family text model (Qwen3.5 and 3.6 MoE, MiniCPM-V 4.7 without
   `--mmproj`) decodes with `--kv-bits 8` within a tenth of its fp16 KV
   speed instead of a quarter slower.
@@ -31,6 +36,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - On NVFP4 files with `.scale` tensors in the MTP block, the MTP drafter
   dropped some of them, so its drafts were rarely accepted, and a
   Nemotron-H drafter failed to load.
+- Granite 4.x models group digits in threes when they tokenize, as llama.cpp
+  does. They split every digit apart before, so numbers took more tokens.
 
 ## [0.5.3] - 2026-10-26
 

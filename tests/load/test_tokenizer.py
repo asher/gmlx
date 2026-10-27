@@ -124,6 +124,16 @@ def test_llama3_groups_multidigit_numbers():
     assert tok.decode(ids, skip_special_tokens=False) == "10"
 
 
+def test_dbrx_groups_multidigit_numbers():
+    # Granite 4.x ships pre='dbrx', which llama.cpp splits with the llama3
+    # regex.
+    meta = _digit_meta("dbrx")
+    meta["general.architecture"] = "granite"
+    tok = load_tokenizer_from_gguf(meta, "granite")
+    assert tok.encode("10", add_special_tokens=False) == [
+        tok.convert_tokens_to_ids("10")]
+
+
 def test_qwen_isolates_each_digit():
     # Qwen's \p{N} keeps each digit its own pretoken, so "1 0" never merges
     # -> two ids. Qwen's deliberate arithmetic tokenization, preserved.
@@ -138,7 +148,7 @@ def test_digit_clause_selected_by_pre():
     # The selector picks the family-correct digit clause from the GGUF pre hint;
     # unlisted pres keep the historical single-digit default (no regression).
     from gmlx.load.tokenizer import _bytelevel_split_patterns
-    for pre in ("llama-bpe", "llama3"):
+    for pre in ("llama-bpe", "llama3", "dbrx", "smaug-bpe"):
         assert r"\p{N}{1,3}" in _bytelevel_split_patterns(pre)[0]
     assert r"\p{N}+" in _bytelevel_split_patterns("gpt-2")[0]
     for pre in ("qwen2", "qwen3", "qwen35", "some-future-pre"):

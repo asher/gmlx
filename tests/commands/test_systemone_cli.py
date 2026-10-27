@@ -11,6 +11,7 @@ import json
 import types
 import urllib.error
 import zlib
+from pathlib import Path
 
 import pytest
 
@@ -232,6 +233,21 @@ def test_offline_options_are_plain_except_on_openjev(offline):
     texts = ["".join(chr(i) for i in t) for t in _LetterReader.seen_tails]
     assert texts and any("[A] billing" in t for t in texts)
     assert all("A) " not in t for t in texts)
+
+
+def test_offline_a_model_with_a_systemone_template_reads_through_it(
+        offline, monkeypatch, capsys):
+    source = (Path(__file__).parents[1] / "fixtures"
+              / "granite_switch_systemone.jinja").read_text()
+    monkeypatch.setattr(_CharTok, "gguf_named_templates", {"systemone": source},
+                        raising=False)
+    monkeypatch.setattr(_CharTok, "gguf_decision", {"type": "granite-switch"},
+                        raising=False)
+    assert offline(_LETTER_BODY, "--json") == 0
+    body = json.loads(capsys.readouterr().out)
+    assert body["diagnostics"]["readout"] == "template"
+    texts = ["".join(chr(i) for i in t) for t in _LetterReader.seen_tails]
+    assert any("A: billing\nB: infra\n" in t for t in texts)
 
 
 def test_offline_letter_errors_name_the_request(offline, capsys):

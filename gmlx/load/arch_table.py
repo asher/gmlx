@@ -100,6 +100,7 @@ _FAMILY_NOTES = {
     "k2-horizon":     ("k2-horizon", "IFM K2 Horizon (llama.cpp 'k2-horizon'), dense 7B and MoVA 36B-A4B; GQA with NeoX rope at theta 1e7 and 512K native context. Every norm is a group RMSNorm: one RMS statistic per equal slice of the width (attention.group_norm_groups, 4 on the 7B, 2 on MoVA) and one full-width gain. MoVA adds an output gate on every layer (log2(1 + 2^g) of a projection of the normed input, applied before o_proj), 3 leading dense layers, then a sigmoid MoE (100 experts top-8, selection-only bias, renorm x 2.5, 1 shared expert) and mixture-of-value-attention: V is the weighted sum of silu(W_k x) over the top-4 of 64 value experts, routed with the FFN router's gating, renorm and scale and a selection-only bias. The value router weight is quantized on the wire. The value experts stay resident under expert streaming. Optional per-head Q/K norm before rope, absent in the public files. gpt2 byte-level BPE on the k2-horizon pre (llama3 split with marks, ZWNJ and ZWJ in letter runs); <|ifm|im_end|> ends a turn. Reasoning effort high/medium/low selects <ifm|think>, <ifm|think_fast> or <ifm|think_faster>; tool calls ride <ifm|tool_calls>."),
     "beam":           ("beam",     "Reflection Beam-1.0 501B-A23B (llama.cpp 'beam'); 52 layers at d=5120, GQA 48/8 at head_dim 128 with per-head qk-norm and a sigmoid output gate (W_g over every head plus one bias per head, from the normed input) before o_proj. Five sliding-window layers (512) with NeoX rope at theta 1e4 for every full layer; the full layers are NoPE and scale q by (1 + (pos + 1) / 2048)^0.1. Sandwich norms (post-attention and post-FFN) and depth-scaled residuals: h/sqrt(i) + r*sqrt((i-1)/i) with i = 2(l+1) after attention and 2(l+1)+1 after the FFN. Three dense SwiGLU layers, then a sigmoid MoE (256 experts top-8, 8 groups top-4 by the sum of each group's top-2 biased scores, selection-only exp_probs_b, renorm x 2.5, no shared expert). Router and gate bias fp32. Tanh softcap 30 on the head. Modified Harmony chat format (analysis and final channels) with XML tool-call bodies. The 134 GB UD-IQ2_XXS file streams its experts on a 128 GB Mac. Model class owned by gmlx (no mlx-lm class)"),
     "flint":          ("flint",    "RecursiveSI Flint (llama.cpp 'flint'); 49 layers at d=2048, GQA 32/4 at head_dim 128 with per-head qk-norm and per-head attention sinks on every layer. 35 sliding-window layers (513 tokens including the query) with NeoX rope at theta 1e4, and 14 full-attention layers with NoPE, from attention.sliding_window_pattern, which must equal attention.rope_pattern. Two dense SwiGLU layers (ff 6144), then a sigmoid MoE (256 experts top-6 at ff 512, optional selection-only exp_probs_b, renormalized, no scale) plus one ungated shared expert at ff 1024 (two experts merged at conversion). Router fp32. A float16 graph holds the residual stream in float32 and runs the MoE in bfloat16, because number tokens drive the last layers past 65504. gpt2 byte-level BPE on the flint pre (three sequential splits, no normalizer); <|user|>, <|observation|> and <|developer|> also end a turn. GLM-style <think> reasoning and <arg_key>/<arg_value> tool calls. The release is all Q4_1. Model class owned by gmlx (no mlx-lm class)"),
+    "graniteswitch":  ("granite",  "IBM Granite Switch 4.1 (llama.cpp 'graniteswitch'); Granite 4.x dense (runtime embedding/residual/attention/logit multipliers, tied embeddings) with a fused attn_qkv whose Q/K rows are permuted for NORM rope, so rope runs traditional on the wire layout. Every layer carries stacked BF16 LoRA pairs on q/k/v/o/gate/up/down, one slot per embedded adapter plus an all-zero slot 0, rank padded to adapters.lora_rank. A control token (adapters.token_ids_activate) embeds as its substitute token and switches every later token of its sequence to its adapter: the slot is the rounded mean of the visible control slots, llama.cpp's router head without the softmax, kept per position in a float32 router cache after the trunk caches. The LoRA deltas reach the cached K/V. The router cache puts the prompt cache on whole-prefix snapshots (exact mode), not KV blocks, and the KV policy skips it, so --kv-bits keeps the last trunk layer fp16. The GGUF also carries tokenizer.chat_template.systemone for the decision adapter. Model class owned by gmlx (the HF class has separate projections and a learned switch layer)"),
     "granitehybrid":  ("granite",  "IBM Granite 4.x hybrid (H-Micro/H-Tiny/H-Small); alternating Mamba2 + attention (layer_types from per-layer head_count_kv==0), softmax MoE + fused-input shared MLP (loader pre-fuses ffn_{gate,up}_shexp -> input_linear), granite runtime multipliers, NoPE via rope.scaling.finetuned=false. NORM rope => qk_permute on attention layers"),
     "falcon-h1":      ("falcon",   "TII Falcon-H1 (0.5B-34B); parallel attention + Mamba2 in every layer (one input_layernorm feeds both, outputs summed), dense gated MLP under feed_forward.*, explicit head_dim from key_length. NEOX rope (no qk-permute). The muP multiplier zoo is folded into the wire weights at convert => synth pins every multiplier neutral; ffn_norm/ssm_a/ssm_d stored with no .weight suffix"),
     "qwen3next":      ("qwen",     "Qwen3-Next-80B-A3B; gated-DeltaNet linear attention (3 of every 4 layers) + gated full attention (gate fused in attn_q), every-layer 512-expert MoE + shared expert. NEOX rope (no qk-permute, not qwen35's packing). Both GDN wire layouts load: legacy fused ssm_in -> in_proj_qkvz; the newer split attn_qkv/attn_gate via a load-time module split (loader swaps in_proj_qkvz for in_proj_qkv/in_proj_z, skipping the runtime de-interleave). V heads HF-grouped (kv_head_layout grouped, not qwen3.5's tiled order); +1 norm bake is what mlx-lm expects (passthrough)"),
@@ -123,6 +124,7 @@ _CAVEATS = {
     "muse-spark": "The GGUF has no MTP head, so speculative decoding is not available.",
     "k2-horizon": "The GGUF has no MTP head, so speculative decoding is not available.",
     "flint": "The GGUF has no MTP head, so speculative decoding is not available. `--kv-bits` has no effect, and the KV cache stays fp16.",
+    "graniteswitch": "The GGUF has no MTP head, so speculative decoding is not available.",
     "beam": "Speculative decoding is not available: the DFlash2 drafter ships only as safetensors.",
     "qwen4exp": "Speculative decoding needs a companion MTP GGUF beside the model or in an `MTP` folder, or named with `--draft-gguf`.",
     "kimi-k3": "The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again with the next message.",
@@ -200,6 +202,16 @@ MTP_DRAFTER_ARCHES = {
 # because its native in-GGUF head must win over a sidecar - a DFlash2
 # companion stays explicit --draft-gguf, matching the text path's auto.
 MTP_COMPANION_AUTO_MODEL_TYPES = ("deepseek_v4", "qwen4_exp", "muse_glimmer")
+
+
+# Speech companions: GGUF arches that transcribe audio for a text model, and
+# the text arches that pair with one, by the repo name of the companion's
+# Hugging Face repo (any org). Discovery pairs a companion found in the model's
+# own folder or in a sibling repo folder of that name.
+ASR_ARCHES = frozenset({"granite-speech5-ctc"})
+ASR_COMPANION_REPOS = {
+    "graniteswitch": "granite-speech-5.0-470m-turboctc-GGUF",
+}
 
 
 # llama.cpp packs five drafters under the ``dflash`` arch and tells them
@@ -348,6 +360,11 @@ def gate(gguf_arch: str, *, hf_source: str | None = None) -> ArchEntry:
     (``config_synth.DISABLED_ARCHES``) - unconditional, since the defect is in
     the weights and an ``hf_source`` config override can't fix it."""
     entry = ARCH_TABLE.get(gguf_arch)
+    if entry is None and gguf_arch in ASR_ARCHES:
+        raise UnsupportedArchError(
+            f"this GGUF ({gguf_arch!r}) is a speech companion, not a chat "
+            f"model. Pass it to the text model it pairs with: --asr PATH on "
+            f"run, chat or serve, or `asr:` in the model's config entry.")
     if entry is None:
         from gmlx.image.preflight import arch_hint
 

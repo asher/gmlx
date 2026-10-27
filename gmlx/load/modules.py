@@ -2355,9 +2355,12 @@ _LORA_EPILOGUE_MODE = env_choice("GMLX_LORA_EPILOGUE", "auto",
 # rule with the smallest worst loss over the three swept layer shapes
 # (3840 to 11520, 4096 to 4096, 10240 to 3840): the row bound that suits a
 # narrow output is higher than the one that suits a wide output, and one
-# bound per rank serves both.
+# bound per rank serves both. The non-NAX row comes from the same sweep on
+# an M3 Max, ranks 8 to 64 and 1 to 64 rows; ranks up to 8 lose at 2 to 16
+# rows on the square shape, so they take the epilogue at one row only.
 _LORA_EPILOGUE_GATE = {
     True: ((8, 32), (16, 16), (32, 8)),
+    False: ((8, 1), (64, 16)),
 }
 _NAX: bool | None = None
 

@@ -92,6 +92,10 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     "smollm3": "smollm3",
     # IBM Granite 3.x/4.x dense: Llama backbone + runtime scalar multipliers.
     "granite": "granite",
+    # IBM Granite Switch 4.1: Granite dense with fused QKV and stacked
+    # activated-LoRA adapters that control tokens switch on per token.
+    # Model class owned by gmlx (no mlx-lm class).
+    "graniteswitch": "granite_switch",
     # llama.cpp 'mistral3' arch covers both Mistral-Small-3.1 and Ministral-3.
     # In mlx_lm both deserialize as model_type='ministral3' (LlamaModel with
     # yarn rope + llama-4-style attention temperature scaling).
@@ -1386,6 +1390,68 @@ def _synth_granite(meta, shapes, config: dict) -> None:
         arch=arch, gguf_field=f"{arch}.logit_scale")
     config["attention_bias"] = _has_tensor(shapes, "blk.0.attn_q.bias")
     config["mlp_bias"] = _has_tensor(shapes, "blk.0.ffn_gate.bias")
+
+    scaling_type = _read_string(meta, f"{arch}.rope.scaling.type")
+    if scaling_type and scaling_type != "none":
+        rp: dict[str, Any] = {"type": scaling_type, "rope_type": scaling_type}
+        factor = _read_float(meta, f"{arch}.rope.scaling.factor")
+        if factor is not None:
+            rp["factor"] = factor
+        config["rope_scaling"] = rp
+
+
+# graniteswitch (IBM Granite Switch 4.1)
+
+def _synth_graniteswitch(meta, shapes, config: dict) -> None:
+    """Synthesize a granite_switch config from a 'graniteswitch'-arch GGUF.
+
+    The base is Granite dense: the four runtime multipliers are required
+    as in ``_synth_granite``. The adapter keys give the stacked LoRA slot
+    count (adapters + the zero slot 0), the padded rank, the control token
+    of each adapter, the token whose embedding it takes, and the router
+    gain (llama.cpp's default 15 when absent). The vocab is the
+    ``token_embd`` row count, which the substitute ids index.
+    """
+    arch = "graniteswitch"
+
+    def req(read, key):
+        return _require(read(meta, f"{arch}.{key}"), arch=arch,
+                        gguf_field=f"{arch}.{key}")
+
+    config["embedding_multiplier"] = req(_read_float, "embedding_scale")
+    config["residual_multiplier"] = req(_read_float, "residual_scale")
+    config["attention_multiplier"] = req(_read_float, "attention.scale")
+    config["logits_scaling"] = req(_read_float, "logit_scale")
+    if _has_tensor(shapes, "blk.0.attn_qkv.bias") or _has_tensor(
+            shapes, "blk.0.ffn_gate.bias"):
+        raise NotImplementedError(
+            "graniteswitch synth: biased projections are not supported; "
+            "llama.cpp's graph has none.")
+
+    n_adapters = req(_read_int, "adapters.count")
+    rank = req(_read_int, "adapters.lora_rank")
+    activate = req(_read_int_array, "adapters.token_ids_activate")
+    substitute = req(_read_int_array, "adapters.token_ids_substitute")
+    if len(activate) != n_adapters or len(substitute) != n_adapters:
+        raise ValueError(
+            f"graniteswitch synth: {len(activate)} activate and "
+            f"{len(substitute)} substitute ids for {n_adapters} adapters")
+    embd = shapes.get("token_embd.weight")
+    if embd is None or len(embd) != 2:
+        raise ValueError("graniteswitch synth: token_embd.weight is missing")
+    vocab = int(embd[1])
+    for tid in (*activate, *substitute):
+        if not 0 <= int(tid) < vocab:
+            raise ValueError(
+                f"graniteswitch synth: adapter token id {tid} is outside the "
+                f"{vocab}-row embedding")
+    config["vocab_size"] = vocab
+    config["num_adapters"] = n_adapters
+    config["max_lora_rank"] = rank
+    config["adapter_token_ids"] = [int(t) for t in activate]
+    config["adapter_substitute_ids"] = [int(t) for t in substitute]
+    gain = _read_float(meta, f"{arch}.adapters.router_gain")
+    config["router_gain"] = 15.0 if gain is None else gain
 
     scaling_type = _read_string(meta, f"{arch}.rope.scaling.type")
     if scaling_type and scaling_type != "none":
@@ -4240,6 +4306,7 @@ _SYNTH = {
     "k2-horizon": _synth_k2_horizon,
     "beam": _synth_beam,
     "flint": _synth_flint,
+    "graniteswitch": _synth_graniteswitch,
     "granitehybrid": _synth_granite_hybrid,
     "falcon-h1": _synth_falcon_h1,
     "qwen3next": _synth_qwen3next,

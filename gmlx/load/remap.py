@@ -227,6 +227,11 @@ ARCH_ALIAS = {
     # so Q/K pass through un-permuted. The FLINT block claims every tensor,
     # including the per-head sinks, which no canonical enum carries.
     "flint": "FLINT",
+    # IBM Granite Switch (llama.cpp 'graniteswitch'): NORM rope with Q/K rows
+    # permuted inside the fused attn_qkv at conversion, so the class runs
+    # traditional rope on the wire layout. The GRANITESWITCH block claims
+    # every tensor, including the stacked per-slot LoRA pairs.
+    "graniteswitch": "GRANITESWITCH",
     # DiffusionGemma (llama.cpp 'diffusion-gemma'): an encoder-decoder block-
     # diffusion model on the Gemma-4 MoE backbone. The decoder backbone uses the
     # exact Gemma-4 GGUF tensor names, but the mlx-vlm Model nests them under
@@ -763,6 +768,59 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.layers.{bid}.mlp.shared_experts.up_proj.weight", "passthrough"),
         (re.compile(r"^blk\.(\d+)\.ffn_down_shexp\.weight$"),
          "model.layers.{bid}.mlp.shared_experts.down_proj.weight", "passthrough"),
+    ],
+    "GRANITESWITCH": [
+        # Every tensor is claimed here. attn_qkv stays fused (rows q|k|v,
+        # Q/K permuted for NORM rope). Each lora_a/lora_b is a stack over
+        # adapter slots, slot 0 all zeros, rank padded to adapters.lora_rank.
+        (re.compile(r"^token_embd\.weight$"),
+         "model.embed_tokens.weight", "passthrough"),
+        (re.compile(r"^output_norm\.weight$"),
+         "model.norm.weight", "passthrough"),
+        (re.compile(r"^output\.weight$"),
+         "lm_head.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_norm\.weight$"),
+         "model.layers.{bid}.input_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_qkv\.weight$"),
+         "model.layers.{bid}.self_attn.qkv_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_output\.weight$"),
+         "model.layers.{bid}.self_attn.o_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_norm\.weight$"),
+         "model.layers.{bid}.post_attention_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate\.weight$"),
+         "model.layers.{bid}.mlp.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up\.weight$"),
+         "model.layers.{bid}.mlp.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down\.weight$"),
+         "model.layers.{bid}.mlp.down_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q\.lora_a$"),
+         "model.layers.{bid}.switch_lora.q_a", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q\.lora_b$"),
+         "model.layers.{bid}.switch_lora.q_b", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k\.lora_a$"),
+         "model.layers.{bid}.switch_lora.k_a", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k\.lora_b$"),
+         "model.layers.{bid}.switch_lora.k_b", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_v\.lora_a$"),
+         "model.layers.{bid}.switch_lora.v_a", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_v\.lora_b$"),
+         "model.layers.{bid}.switch_lora.v_b", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_output\.lora_a$"),
+         "model.layers.{bid}.switch_lora.o_a", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_output\.lora_b$"),
+         "model.layers.{bid}.switch_lora.o_b", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate\.lora_a$"),
+         "model.layers.{bid}.switch_lora.gate_a", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate\.lora_b$"),
+         "model.layers.{bid}.switch_lora.gate_b", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up\.lora_a$"),
+         "model.layers.{bid}.switch_lora.up_a", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up\.lora_b$"),
+         "model.layers.{bid}.switch_lora.up_b", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down\.lora_a$"),
+         "model.layers.{bid}.switch_lora.down_a", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down\.lora_b$"),
+         "model.layers.{bid}.switch_lora.down_b", "passthrough"),
     ],
     "ERNIE4_5_MOE": [
         # Baidu ERNIE-4.5-MoE: shared-expert fine-grained MoE with leading dense

@@ -79,6 +79,8 @@ These pages are the starting points:
 - [Supported architectures](arch-coverage.md): The GGUF architectures gmlx
   loads, with their caveats.
 - [Vision and audio](vlm.md): Multimodal models and their `mmproj` files.
+- [Granite Switch](granite-switch.md): IBM's chat model with built-in
+  safety and decision adapters, and audio through its speech companion.
 - [Models larger than memory](streaming.md): Mixture-of-experts models that
   stream their experts from disk.
 - [Long context](long-context.md): Running a model past its trained

@@ -329,8 +329,10 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_vlm.server.openai", "chat_completions_endpoint",
           "render.install_chat_image_placement (route wrap: a user "
           "message's content with an image part passes through the "
-          "route's text extraction call, which keeps it); the route stack "
-          "of patches and the assistant aliases",
+          "route's text extraction call, which keeps it); "
+          "audio_cascade.install_audio_cascade (route wrap: a message with "
+          "audio for a model with a speech companion becomes marked text); "
+          "the route stack of patches and the assistant aliases",
           how="route", paths=("/chat/completions", "/v1/chat/completions")),
     Claim("gmlx._vendor.mlx_vlm.server.openai", "extract_text_from_content",
           "render.install_chat_image_placement (wrapped: marked content "
@@ -366,9 +368,21 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_vlm.server.openai", "responses_endpoint",
           "render.install_faithful_history (renders the messages and "
           "image list _response_items_to_chat builds, in the order it "
-          "builds them); the route stack of patches and the "
-          "assistant aliases",
+          "builds them); audio_cascade.install_audio_cascade (route wrap: "
+          "transcribes the clips of the input and the stored chain); the "
+          "route stack of patches and the assistant aliases",
           how="route", paths=("/responses", "/v1/responses")),
+    Claim("gmlx._vendor.mlx_vlm.server.responses_state",
+          "_append_response_item_to_prompt",
+          "audio_cascade.install_audio_cascade (a message with audio, in a "
+          "cascade request, converts as marked text and queues its "
+          "transcripts)",
+          wrappers=("gmlx.serve.patches.audio_cascade",)),
+    Claim("gmlx._vendor.mlx_vlm.server.generation",
+          "ResponseGenerator._cpu_preprocess",
+          "audio_cascade.install_audio_cascade (splices the request's "
+          "transcripts in place of its audio markers)",
+          wrappers=("gmlx.serve.patches.audio_cascade",)),
     Claim("gmlx._vendor.mlx_vlm.server.app", "_protocol_deps.apply_chat_template",
           "patches.render, patches.apc and patches.chat_behavior (gmlx wraps "
           "the member beside both route-module copies)",

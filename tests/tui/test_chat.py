@@ -1153,3 +1153,93 @@ def test_slash_thinking_rejects_bad_value(capsys):
     _slash_thinking("/thinking", "sideways", state)
     assert "on, off, adaptive, or default" in capsys.readouterr().out
     assert state.template_kwargs == {"enable_thinking": True}  # untouched
+
+
+# Audio through a speech companion (Granite Switch)
+class _SwitchTok:
+    """Renders the Granite Switch template; one id per character, and one
+    per special token."""
+
+    SPECIAL = {"<|start_of_role|>": 901, "<|end_of_role|>": 902,
+               "<|end_of_text|>": 903, "<|audio|>": 900}
+    unk_token_id = 0
+
+    def __init__(self):
+        from pathlib import Path
+
+        self.template = (Path(__file__).parents[1] / "fixtures"
+                         / "granite_switch_template.jinja").read_text()
+
+    def apply_chat_template(self, messages, tokenize=False,
+                            add_generation_prompt=True, **kw):
+        from transformers.utils.chat_template_utils import render_jinja_template
+
+        out = render_jinja_template([messages], chat_template=self.template,
+                                    add_generation_prompt=add_generation_prompt)
+        out = out[0] if isinstance(out, tuple) else out
+        return out[0] if isinstance(out, list) else out
+
+    def encode(self, text, add_special_tokens=True):
+        import re
+
+        out = []
+        for p in re.findall(r"<\|[a-z_-]+\|>|.", text, flags=re.S):
+            out += [self.SPECIAL[p]] if p in self.SPECIAL else [ord(c) for c in p]
+        return out
+
+    def convert_tokens_to_ids(self, token):
+        return self.SPECIAL.get(token, 0)
+
+
+def test_an_audio_turn_splices_transcripts_and_keeps_them_as_text(state, monkeypatch):
+    import types
+
+    from gmlx import asr
+    from gmlx.serve import media_programs
+
+    speech = types.SimpleNamespace(sample_rate=16000,
+                                   transcribe=lambda wave: f"heard {wave}")
+    monkeypatch.setattr(asr, "companion", lambda path: speech)
+    monkeypatch.setattr(media_programs, "decode_mono", lambda p, rate: p[-5])
+    state.asr = "/m/speech.gguf"
+    state.staged_audio = ["/a/one1.wav", "/a/two2.wav"]
+    state.turn_checkpoint = {}
+    tok = _SwitchTok()
+    messages = [{"role": "user", "content": "Compare them."}]
+    ids, text = chat._audio_turn(state, tok, messages, {}, starts_cache=False)
+    assert text.count(asr.MARKER) == 2 and 900 not in ids
+    want = asr.splice(tok.encode(text), 900, ["heard 1", "heard 2"], tok.encode)
+    assert ids == want
+    assert state.turn_checkpoint["user_content"] == "heard 1\nheard 2\nCompare them."
+    assert state.staged_audio == []
+
+
+def test_audio_on_a_model_without_its_companion_is_refused(state, capsys):
+    from gmlx import asr
+
+    state.asr, state.asr_wanted = None, True
+    chat._stage_media(state, [], ["/a/clip.wav"])
+    assert asr.NO_COMPANION in capsys.readouterr().out
+    assert state.staged_audio == []
+
+
+def test_run_audio_puts_clips_before_the_prompt_and_splices(monkeypatch):
+    import types
+
+    from gmlx import asr
+    from gmlx.serve import media_programs
+
+    speech = types.SimpleNamespace(sample_rate=16000,
+                                   transcribe=lambda wave: f"said {wave}")
+    monkeypatch.setattr(asr, "companion", lambda path: speech)
+    monkeypatch.setattr(media_programs, "decode_mono", lambda p, rate: p[-5])
+    monkeypatch.setattr(cli, "_media_inputs",
+                        lambda a: ([], ["/a/x1.wav", "/a/y2.wav"], []))
+    args = types.SimpleNamespace(prompt="Which is louder?", system_prompt="Be brief.")
+    tok = _SwitchTok()
+    ids = cli._audio_prompt_ids(args, tok, "/m/speech.gguf", {})
+    text = tok.apply_chat_template([
+        {"role": "system", "content": "Be brief."},
+        {"role": "user", "content": [{"type": "audio"}, {"type": "audio"},
+                                     {"type": "text", "text": "Which is louder?"}]}])
+    assert ids == asr.splice(tok.encode(text), 900, ["said 1", "said 2"], tok.encode)

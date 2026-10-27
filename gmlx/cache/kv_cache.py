@@ -47,6 +47,23 @@ def should_quantize_kv_layer(layer_idx: int, num_layers: int) -> bool:
     return layer_idx < num_layers - 1
 
 
+def kv_policy_flags(caches) -> list[bool]:
+    """``should_quantize_kv_layer`` for each entry of a cache stack. An
+    entry that sets ``kv_policy_exempt`` (a side cache past the trunk, such
+    as Granite Switch's router lanes) never quantizes and does not count,
+    so the last real layer keeps the policy's plain slot."""
+    exempt = [bool(getattr(c, "kv_policy_exempt", False)) for c in caches]
+    n = len(exempt) - sum(exempt)
+    out, i = [], 0
+    for e in exempt:
+        if e:
+            out.append(False)
+            continue
+        out.append(should_quantize_kv_layer(i, n))
+        i += 1
+    return out
+
+
 def create_causal_mask(
     N: int,
     offset: int = 0,

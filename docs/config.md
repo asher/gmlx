@@ -134,6 +134,7 @@ keeps running. `gmlx sync-models` removes such entries.
 | <a id="modelsoverrides"></a>`overrides` | none | Settings that win over every profile, for this model only. Takes every profile key except `extends`. |
 | <a id="modelsfamily"></a>`family` | detected | The [family defaults](family-defaults.md) to start from. Set it only when detection picks the wrong family. |
 | <a id="modelsmmproj"></a>`mmproj` | none | Vision or audio projector GGUF that makes the model [multimodal](vlm.md) |
+| <a id="modelsasr"></a>`asr` | found beside the model | Speech companion GGUF for a model that reads audio through one, such as [Granite Switch](granite-switch.md). `false` pairs none. |
 | <a id="modelsspeculative"></a>`speculative` | `false` | Speculative decoding with the GGUF's MTP head, or with `draft_gguf`. On a MoE, `auto` loads the drafter only when the experts fit in memory beside it. |
 | <a id="modelsdraft_gguf"></a>`draft_gguf` | none | A separate [drafter](glossary.md#drafter) GGUF. Setting it turns on `speculative`. |
 | <a id="modelsnative_mtp"></a>`native_mtp` | `false` | Draft with the GGUF's own MTP head even when `draft_gguf` is set |
@@ -599,7 +600,7 @@ which run on the Mac, so prefer one extension's own origin to a wildcard.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| <a id="servermodel_dirs"></a>`model_dirs` | none | Folders searched in order for a relative `path`, `mmproj`, `draft_gguf` or `adapter`. `gmlx pull` downloads into the first. |
+| <a id="servermodel_dirs"></a>`model_dirs` | none | Folders searched in order for a relative `path`, `mmproj`, `asr`, `draft_gguf` or `adapter`. `gmlx pull` downloads into the first. |
 | <a id="serverhf_cache"></a>`hf_cache` | `false` | Run the Hugging Face libraries offline, so the server never downloads. `gmlx init --from-hf-cache` sets it. |
 
 ### Services

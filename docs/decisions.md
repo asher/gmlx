@@ -59,6 +59,10 @@ included, because its readout has not been calibrated as OpenJev's and
 DiffusionGemma's have. Use its confidence to rank answers, not as a
 probability.
 
+Granite Switch (`ibm-granite/granite-switch-4.1-8b-GGUF`) answers through
+its own decision prompt and its `decision` adapter, which IBM trained to
+pick among options. One served model then handles both chat and decisions.
+
 [`server.systemone.model`](config.md#serversystemonemodel) answers a request
 whose `model` is absent or unknown, such as a Jev client's `jev-latest`. A
 request with `"model": "openjev"` reaches OpenJev. A file with one model,

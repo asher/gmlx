@@ -294,6 +294,7 @@ def _later_arches():
         "minimax-m3": (t._minimax_m3_meta, t._MINIMAX_M3_SHAPES),
         "falcon-h1": (t._falcon_h1_meta, t._FALCON_H1_SHAPES),
         "granitehybrid": (t._granitehybrid_meta, {}),
+        "graniteswitch": (t._graniteswitch_meta, t._GRANITESWITCH_SHAPES),
         "ernie4_5-moe": (t._ernie_meta, {}),
     }
 
@@ -301,7 +302,8 @@ def _later_arches():
 @pytest.mark.parametrize("arch", ["hy_v3", "hyv4", "muse-glimmer",
                                   "muse-spark", "k2-horizon", "beam", "flint",
                                   "minimax-m3",
-                                  "falcon-h1", "granitehybrid", "ernie4_5-moe"])
+                                  "falcon-h1", "granitehybrid", "graniteswitch",
+                                  "ernie4_5-moe"])
 def test_later_class_built_arches_take_the_options(arch):
     assert arch in rs.SWAP_ARCHES and arch in rs.WIRED_ARCHES
     meta_fn, shapes = _later_arches()[arch]
@@ -323,6 +325,19 @@ def test_later_class_built_arches_take_the_options(arch):
         i = int(layer[1].split(".")[0]) if len(layer) > 1 else -1
         base = bases.get(name) or meta.get(f"{arch}.rope.freq_base", 10000.0)
         _check_rope(r, s.for_sliding() if i in sliding else s, base)
+
+
+def test_graniteswitch_swap_keeps_the_wire_layout_rope():
+    """Its Q and K rows are permuted for NORM rope, so the swapped rope
+    stays traditional."""
+    import test_config_synth as t
+
+    meta = t._graniteswitch_meta()
+    cfg = synthesize_config(meta, dict(t._GRANITESWITCH_SHAPES),
+                            rope_override=YARN4)
+    model, cfg = build_model(cfg)
+    assert rope_swap.apply(model, cfg) > 0
+    assert all(r.traditional for _, r in _ropes(model))
 
 
 # Gemma families. llama.cpp lays sliding layers out with load_swa_pattern:
