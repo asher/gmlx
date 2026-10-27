@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Asher Feldman
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["numpy", "gguf>=0.19", "huggingface_hub"]
+# ///
 """Convert IBM's Granite Speech 5.0 TurboCTC checkpoint to a GGUF that gmlx
 pairs with Granite Switch as its speech companion.
 
@@ -11,8 +15,7 @@ prefix, adds the audio frontend (mel filterbank and STFT window) as tensors,
 and stores the CTC vocabulary under ``tokenizer.ggml.*``.
 
 Usage:
-  python scripts/convert_granite_speech5_ctc.py --hf-dir <snapshot dir> \\
-      --out granite-speech-5.0-470m-turboctc.gguf
+  uv run convert_granite_speech5_ctc.py --out granite-speech-5.0-470m-turboctc.gguf
 
 Without ``--hf-dir`` the script downloads the pinned revision with
 huggingface_hub. ``--outtype`` is bf16 (lossless, the default), f16 or q8_0
@@ -22,6 +25,7 @@ huggingface_hub. ``--outtype`` is bf16 (lossless, the default), f16 or q8_0
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import struct
 import sys
@@ -35,6 +39,7 @@ from gguf import GGMLQuantizationType, GGUFWriter
 ARCH = "granite-speech5-ctc"
 REPO = "ibm-granite/granite-speech-5.0-470m-turboctc"
 REVISION = "1dd23f46f6d4e6eae2531982ba2e33220086dd97"
+GGUF_REPO = "ashbash/granite-speech-5.0-470m-turboctc-GGUF"
 Q = GGMLQuantizationType
 
 # torchaudio.transforms.MelSpectrogram as the feature extractor builds it.
@@ -219,20 +224,64 @@ tags:
 
 # Granite Speech 5.0 470M TurboCTC (GGUF)
 
-A GGUF of [{repo}](https://huggingface.co/{repo}) at revision `{revision}`, for
-[gmlx](https://github.com/asher/gmlx). gmlx pairs it with Granite Switch to
-read audio, and serves it as a speech-to-text backend.
+IBM's [Granite Speech 5.0 TurboCTC](https://huggingface.co/{repo}) speech
+recognizer as a GGUF, for use with [gmlx](https://asher.github.io/gmlx/) on
+macOS with Apple silicon. gmlx pairs it with Granite Switch, so the chat model
+can read audio, and serves it for speech to text. Other GGUF runtimes, such as
+llama.cpp, do not load this file.
 
-- Source: IBM, Apache 2.0. The weights are unchanged ({outtype}).
-- The file adds the audio frontend (mel filterbank and STFT window) as tensors
-  and the CTC vocabulary as tokenizer metadata.
+## Use it with gmlx
 
-Rebuild it with:
+Download it with the Hugging Face CLI:
 
 ```sh
-python scripts/convert_granite_speech5_ctc.py --out {name} --outtype {outtype}
+hf download {gguf_repo}
 ```
+
+gmlx pairs it with a Granite Switch model that also came from the Hugging Face
+cache. For a model in a folder of your own, put the file in the model's folder,
+or pass its path:
+
+```sh
+gmlx serve granite-switch-4.1-8b-Q4_K_M.gguf --asr {name}
+```
+
+To serve `/v1/audio/transcriptions` with it, set `server.stt: granite-speech`
+in the gmlx config. [Granite Switch audio](https://asher.github.io/gmlx/granite-switch.html#audio)
+in the gmlx docs covers pairing and audio in chat requests.
+
+## Files
+
+| File | Type | SHA-256 |
+|------|------|---------|
+| `{name}` | {outtype} | `{sha256}` |
+
+The weights are IBM's, unchanged. The file adds the audio frontend (mel
+filterbank and STFT window) as tensors and the CTC vocabulary as tokenizer
+metadata.
+
+## Rebuild it
+
+`convert_granite_speech5_ctc.py` in this repo downloads IBM's checkpoint at
+revision `{revision}` and writes the same file:
+
+```sh
+uv run convert_granite_speech5_ctc.py --out {name} --outtype {outtype}
+```
+
+## License
+
+The weights are Apache 2.0, from
+[{repo}](https://huggingface.co/{repo}). The conversion script is MIT.
 """
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1 << 24), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def main(argv=None) -> int:
@@ -252,8 +301,10 @@ def main(argv=None) -> int:
         hf_dir = Path(snapshot_download(a.repo, revision=a.revision))
     convert(hf_dir.expanduser(), a.out.expanduser(), a.outtype, a.repo, a.revision)
     if a.readme:
-        (a.out.expanduser().parent / "README.md").write_text(README.format(
-            repo=a.repo, revision=a.revision, outtype=a.outtype, name=a.out.name))
+        out = a.out.expanduser()
+        (out.parent / "README.md").write_text(README.format(
+            repo=a.repo, revision=a.revision, outtype=a.outtype, name=out.name,
+            gguf_repo=GGUF_REPO, sha256=_sha256(out)))
     print(f"wrote {a.out}")
     return 0
 

@@ -72,17 +72,23 @@ Granite Switch reads audio through a speech companion: Granite Speech 5.0
 TurboCTC, a 470M model that turns each clip into text. gmlx puts the
 transcript where the clip was in the message, as IBM's own server does.
 
-Build the companion GGUF from IBM's checkpoint in a gmlx checkout:
+Download the companion GGUF:
 
 ```sh
-python scripts/convert_granite_speech5_ctc.py --out granite-speech-5.0-470m-turboctc.gguf
+hf download ashbash/granite-speech-5.0-470m-turboctc-GGUF
 ```
 
-Put the file beside the model GGUF, or in a folder named
-`<org>__granite-speech-5.0-470m-turboctc-GGUF` beside the model's folder.
-gmlx then pairs it with the model in `run`, `chat` and `serve`.
-`--asr PATH` or the [`asr`](config.md#modelsasr) config key names it
-instead, and `--no-asr` or `asr: false` turns pairing off.
+gmlx pairs it with a Granite Switch model in `run`, `chat` and `serve` when
+the two are in the same place:
+
+- both in the Hugging Face cache, as `hf download` leaves them;
+- the companion in the model's own folder;
+- the companion in a folder named
+  `<org>__granite-speech-5.0-470m-turboctc-GGUF` beside the model's folder.
+
+`--asr PATH` or the [`asr`](config.md#modelsasr) config key names the file
+instead, and `--no-asr` or `asr: false` turns pairing off. The repo also
+holds the script that builds the file from IBM's checkpoint.
 
 Send a clip as an `input_audio` part:
 
