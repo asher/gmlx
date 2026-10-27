@@ -55,12 +55,19 @@ def resolve(version: str, python: str) -> list[tuple[str, str]]:
                                   *BUILD_REQUIREMENTS]) + "\n")
         env = dict(os.environ,
                    MACOSX_DEPLOYMENT_TARGET="%d.%d" % MACOS_FLOOR)
-        out = subprocess.run(
-            ["uv", "pip", "compile", str(req), "--quiet", "--refresh",
-             "--no-header", "--no-annotate",
-             "--python-version", python,
-             "--python-platform", "aarch64-apple-darwin"],
-            env=env, check=True, capture_output=True, text=True).stdout
+        try:
+            out = subprocess.run(
+                ["uv", "pip", "compile", str(req), "--quiet", "--refresh",
+                 "--no-header", "--no-annotate",
+                 "--python-version", python,
+                 "--python-platform", "aarch64-apple-darwin"],
+                env=env, check=True, capture_output=True, text=True).stdout
+        except subprocess.CalledProcessError as exc:
+            # The captured stderr holds uv's reason. Without it the log
+            # shows only the exit code.
+            sys.stderr.write(exc.stderr or "")
+            sys.exit(f"uv pip compile failed (exit {exc.returncode}) "
+                     f"resolving {DIST}[{EXTRAS}]=={version}")
     return parse_pins(out)
 
 

@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A Qwen3.5-family text model (Qwen3.5 and 3.6 MoE, MiniCPM-V 4.7 without
+  `--mmproj`) decodes with `--kv-bits 8` within a tenth of its fp16 KV
+  speed instead of a quarter slower.
+
 ## [0.5.3] - 2026-10-26
 
 ### Fixed
