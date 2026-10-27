@@ -1212,6 +1212,7 @@ class ArraysCache(_BaseCache):
                 self._lengths,
                 self._lengths_advance,
             ),
+            "settled": {},
             "records": {},
         }
         return self._speculation_generation
@@ -1322,6 +1323,7 @@ class ArraysCache(_BaseCache):
 
     def _restore_speculative_metadata(self, lengths, initial_metadata):
         left_padding, left_advance, valid_lengths, lengths_advance = initial_metadata
+        pad_bound, len_bound = self._block_bounds()
         if len(set(lengths)) == 1:
             keep = lengths[0]
             self._left_padding = left_padding
@@ -1344,7 +1346,20 @@ class ArraysCache(_BaseCache):
                 else valid_lengths - lengths_advance - keep
             )
             self._lengths_advance = 0
-
+            # The host bounds follow the ragged restore as bounds: the
+            # largest padding drops by at least the smallest accept and the
+            # smallest length by at most the largest one. A verdict from
+            # them can only keep the stock path longer, never admit a
+            # padded row, and the next step reads nothing. The slack
+            # uneven accepts leave stays across advances and adds up
+            # across ragged commits, at most the spread of a block's
+            # accepts each; a setter (filter, extend, prepare, finalize)
+            # rebinds the array and the next read is fresh.
+            if pad_bound is not None:
+                pad_bound -= left_advance + min(lengths)
+            if len_bound is not None:
+                len_bound -= lengths_advance + max(lengths)
+        self._bind_host_bounds(pad_bound, len_bound)
         self._invalidate_derived_metadata()
 
     def validate_speculation(self, lengths, generation: Optional[int] = None):
@@ -1402,12 +1417,14 @@ class ArraysCache(_BaseCache):
         if generation is not None and generation != transaction["generation"]:
             raise RuntimeError("Attempted to abort a stale cache transaction.")
         self.cache = transaction["initial_state"]
+        pad_bound, len_bound = self._block_bounds()
         (
             self._left_padding,
             self._left_padding_advance,
             self._lengths,
             self._lengths_advance,
         ) = transaction["initial_metadata"]
+        self._bind_host_bounds(pad_bound, len_bound)
         self._invalidate_derived_metadata()
         self._speculation = None
 
@@ -1509,6 +1526,70 @@ class ArraysCache(_BaseCache):
             return pos < self.lengths[:, None]
         else:
             return None
+
+    def mask_excludes_nothing(self, N: int) -> bool:
+        """Whether ``make_mask(N)`` admits every entry, decided on the host.
+
+        A left padding mask admits everything when no row's padding is
+        still ahead, a lengths mask when every row has at least N tokens
+        left. The bound of an array is read when it is first asked about
+        and advanced as an integer after that; the end of a speculative
+        block and a subclass that settles its advance carry it to the
+        arrays they bind. So asking on every decode step never waits for
+        the GPU. The memo attrs are set on first use, like the
+        model-level memos the recurrent layers keep here."""
+        if self._left_padding is not None:
+            base = self._left_padding
+            if not base.size:
+                return True
+            memo = getattr(self, "_left_padding_max", None)
+            if memo is None or memo[0] is not base:
+                memo = (base, int(mx.max(base)))
+                self._left_padding_max = memo
+            return memo[1] - self._left_padding_advance <= 0
+        if self._lengths is not None:
+            base = self._lengths
+            if not base.size:
+                return True
+            memo = getattr(self, "_lengths_min", None)
+            if memo is None or memo[0] is not base:
+                memo = (base, int(mx.min(base)))
+                self._lengths_min = memo
+            return memo[1] - self._lengths_advance >= N
+        return True
+
+    def _block_bounds(self):
+        """The host bounds of the arrays the active speculative block
+        saved, from the memos as they stand when it ends: one keyed on the
+        saved array itself, or on a rebinding of it that a subclass
+        settled and recorded with its distance in steps. None for an
+        array with neither."""
+        block = self._speculation
+        saved = block["initial_metadata"]
+        settled = block["settled"]
+        bounds = []
+        for slot, array, attr in (
+            (0, self._left_padding, "_left_padding_max"),
+            (2, self._lengths, "_lengths_min"),
+        ):
+            memo = getattr(self, attr, None)
+            bound = None
+            if memo is not None and memo[0] is array:
+                if saved[slot] is array:
+                    bound = memo[1]
+                elif slot in settled and settled[slot][0] is array:
+                    bound = memo[1] + settled[slot][1]
+            bounds.append(bound)
+        return bounds
+
+    def _bind_host_bounds(self, pad_bound, len_bound):
+        """Key the bounds of the arrays a speculative block saved on the
+        arrays its end bound. A subclass that rebinds the arrays on advance
+        moves them along from here."""
+        if pad_bound is not None:
+            self._left_padding_max = (self._left_padding, pad_bound)
+        if len_bound is not None:
+            self._lengths_min = (self._lengths, len_bound)
 
     @classmethod
     def merge(cls, caches):

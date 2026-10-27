@@ -91,21 +91,28 @@ def _log_gdn_route_once(which, S, B, sink, mask, taken):
 
 
 # Single-slot memo for "does this mask exclude anything". Every GDN layer in a
-# step is handed the SAME mask object, so one host sync per step covers all of
+# step is handed the same mask object, so one verdict per step covers all of
 # them; holding the reference keeps the identity check honest against id reuse.
 _noop_mask_memo: tuple = (None, False)
 
 
-def _mask_excludes_nothing(mask) -> bool:
+def _mask_excludes_nothing(mask, cache=None) -> bool:
     """True when `mask` admits every entry, so a kernel that ignores masks is
     still correct. At S=1 the recurrent ssm mask is all-true by construction
     (each live row contributes one real token; left padding is history, not
-    input), but this is verified rather than assumed -- a row that is fully
-    padded would make it false and must keep the stock path."""
+    input), but a row that is fully padded would make it false and must keep
+    the stock path. The model builds the mask from the batch's padding, which
+    every recurrent cache of the batch carries, so an ``ArraysCache`` answers
+    from its host-side bounds and the decode loop never reads the mask back
+    (a read waits behind the step in flight). A mask from anywhere else is
+    read once per array."""
     global _noop_mask_memo
     if _noop_mask_memo[0] is mask:
         return _noop_mask_memo[1]
-    if mask.dtype == mx.bool_:
+    probe = getattr(cache, "mask_excludes_nothing", None)
+    if probe is not None:
+        verdict = bool(probe(mask.shape[-1] if mask.ndim > 1 else 1))
+    elif mask.dtype == mx.bool_:
         verdict = bool(mx.all(mask).item())
     else:
         verdict = bool(mx.all(mask >= 0).item())
@@ -667,7 +674,8 @@ def _gdn_fused_decode_call(self, inputs, mask=None, cache=None):
         not getattr(self, "_gdn_fused", False)
         or S != 1
         or (mask is not None
-            and not (isinstance(mask, mx.array) and _mask_excludes_nothing(mask)))
+            and not (isinstance(mask, mx.array)
+                     and _mask_excludes_nothing(mask, cache)))
         or state is None
         or _gdn_fused_decode_kernel is None
         or Dv % SG != 0
