@@ -1584,9 +1584,12 @@ def register_downloads(paths: list, config_path=None, *,
         stats = {}
         images: list = []
         named = {v["draft_gguf"] for v in pairs.values() if v.get("draft_gguf")}
+        # A speech companion pairs from where the pull left it; the scan
+        # has nothing to say about it.
+        asr = {os.path.abspath(v["asr"]) for v in pairs.values() if v.get("asr")}
         found = discovery.scan_dirs(specs, cfg.model_dirs,
                                     known_ids=set(cfg.models) | set(cfg.image_models),
-                                    known_paths=known_paths | _image_paths(cfg),
+                                    known_paths=known_paths | _image_paths(cfg) | asr,
                                     known_models=known_models, stats=stats,
                                     images=images,
                                     encoder_ids=_encoder_ids(known_models),

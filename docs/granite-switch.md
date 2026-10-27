@@ -7,16 +7,20 @@ runs the plain chat model. With its speech companion, the model also reads
 audio.
 
 ```sh
-gmlx serve ~/llm/gguf/ibm-granite__granite-switch-4.1-8b-GGUF/granite-switch-4.1-8b-Q4_K_M.gguf
+gmlx pull granite-switch-4.1-8b
+gmlx serve
 ```
+
+`gmlx pull` downloads the model and its speech companion, and registers
+the model under the name `granite-switch-4.1-8b`.
 
 It comes in two sizes, and the 30B runs at about a third of the 8B's
 speed:
 
-| Model | Repository | Q4_K_M file |
-|-------|------------|-------------|
-| Granite Switch 4.1 8B | `ibm-granite/granite-switch-4.1-8b-GGUF` | 6.4 GB |
-| Granite Switch 4.1 30B | `ibm-granite/granite-switch-4.1-30b-GGUF` | 21 GB |
+| Model | Name | Repository | Q4_K_M file |
+|-------|------|------------|-------------|
+| Granite Switch 4.1 8B | `granite-switch-4.1-8b` | `ibm-granite/granite-switch-4.1-8b-GGUF` | 6.4 GB |
+| Granite Switch 4.1 30B | `granite-switch-4.1-30b` | `ibm-granite/granite-switch-4.1-30b-GGUF` | 21 GB |
 
 The speech companion adds 0.9 GB to either.
 
@@ -72,7 +76,8 @@ Granite Switch reads audio through a speech companion: Granite Speech 5.0
 TurboCTC, a 470M model that turns each clip into text. gmlx puts the
 transcript where the clip was in the message, as IBM's own server does.
 
-Download the companion GGUF:
+`gmlx pull` downloads the companion with the model. For a model you
+downloaded another way, download the companion too:
 
 ```sh
 hf download ashbash/granite-speech-5.0-470m-turboctc-GGUF
@@ -81,6 +86,7 @@ hf download ashbash/granite-speech-5.0-470m-turboctc-GGUF
 gmlx pairs it with a Granite Switch model in `run`, `chat` and `serve` when
 the two are in the same place:
 
+- in the folders that `gmlx pull` makes;
 - both in the Hugging Face cache, as `hf download` leaves them;
 - the companion in the model's own folder;
 - the companion in a folder named

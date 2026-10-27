@@ -2996,6 +2996,31 @@ def test_register_downloads_adds_entry_and_reloads(monkeypatch, tmp_path, capsys
     assert "registered new-q4" in capsys.readouterr().out
 
 
+def test_register_downloads_leaves_a_pulled_speech_companion_out_of_the_scan(
+        monkeypatch, tmp_path):
+    cfg_path, lib = _reg_config(tmp_path)
+    model = lib / "ibm__chat-GGUF" / "chat.gguf"
+    speech = lib / "me__speech-GGUF" / "speech.gguf"
+    for f in (model, speech):
+        f.parent.mkdir()
+        f.write_bytes(b"x")
+    from gmlx.config import ModelCfg as MC
+    seen = {}
+
+    def scan(specs, dirs, *, known_paths, **kw):
+        seen["known"] = set(known_paths)
+        return [MC(id="chat-q4", path=str(model))]
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
+    monkeypatch.setattr(srv, "_reload_running", lambda path, skip: None)
+    srv.register_downloads([str(model), str(speech)], str(cfg_path),
+                           pairs={str(model): {"asr": str(speech), "alias": "chat"}})
+    from gmlx.config import load_config
+    cfg = load_config(cfg_path)
+    assert str(speech) in seen["known"]
+    assert cfg.models["chat-q4"].asr is None
+
+
 def test_register_downloads_never_edits_the_file_that_a_swapped_link_leads_to(
         monkeypatch, tmp_path, capsys):
     """The config is a link in a read-write share. The client points it at

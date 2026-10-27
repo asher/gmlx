@@ -369,6 +369,34 @@ def test_drafter_gates(refresh, dense_repo, monkeypatch, tmp_path):
     assert any("drafter nope.gguf is not in org/dense" in p for p in problems)
 
 
+def test_speech_companion_gates(refresh, dense_repo, monkeypatch, tmp_path):
+    speech = _gguf(tmp_path, "speech.gguf", {"general.architecture": "granite-speech5-ctc",
+                                             "general.name": "s"}, {"s.weight": (4, 4)})
+    dense_repo.add("me/speech-GGUF", {"speech.gguf": speech, "chat.gguf": dense_repo.repos[
+        "org/dense"]["Model-Q6_K.gguf"]}, sha="5555555555")
+    monkeypatch.setattr(refresh.arch_table, "ASR_COMPANION_REPOS", {"qwen2": "speech-GGUF"})
+    seed = _seed(mmproj="mmproj-F16.gguf", asr_repo="me/speech-GGUF", asr_file="speech.gguf")
+    facts, problems, _ = refresh.record_entry(seed, None, None)
+    assert problems == [] and facts["asr"] == ("5555555555", len(speech))
+    assert f"'asr': ('5555555555', {len(speech)})," in refresh.facts_text({"dense": facts})
+    # A recorded revision stays pinned.
+    facts, _p, notes = refresh.record_entry(seed, {"asr": ("4444444444", 1)}, None)
+    assert facts["asr"][0] == "4444444444" and any("newer than the pinned 44444444" in n for n in notes)
+    # A file that is no speech companion, one that is missing, and an arch that pairs elsewhere.
+    _f, problems, _ = refresh.record_entry(
+        catalog.Seed(**{**seed.__dict__, "asr_file": "chat.gguf"}), None, None)
+    assert any("not a speech companion" in p for p in problems)
+    _f, problems, _ = refresh.record_entry(
+        catalog.Seed(**{**seed.__dict__, "asr_file": "nope.gguf"}), None, None)
+    assert any("speech companion nope.gguf is not in me/speech-GGUF" in p for p in problems)
+    monkeypatch.setattr(refresh.arch_table, "ASR_COMPANION_REPOS", {})
+    _f, problems, _ = refresh.record_entry(seed, None, None)
+    assert any("qwen2 does not pair with me/speech-GGUF" in p for p in problems)
+    # An entry with no companion records and prints no asr key.
+    facts, _p, _n = refresh.record_entry(_seed(mmproj="mmproj-F16.gguf"), None, None)
+    assert "asr" not in facts and "'asr'" not in refresh.facts_text({"dense": facts})
+
+
 # -- licenses ---------------------------------------------------------------------------------
 
 def test_other_license_records_its_name_and_a_resolved_link(refresh, monkeypatch, tmp_path):

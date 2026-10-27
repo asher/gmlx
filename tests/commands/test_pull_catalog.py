@@ -540,6 +540,21 @@ def test_plan_refs_pairs_bytes_and_local_state(tmp_path):
     assert per_ref[refs[0]] == (500, G(15.33), False)
 
 
+def test_a_speech_companion_rides_every_plan(tmp_path):
+    asr = catalog.Asr("me/speech-GGUF", "fed9876", "speech.gguf", G(0.88))
+    m = dataclasses.replace(MID, asr=asr)
+    plan = catalog.plan_for(m, box(16), mmproj=False, drafter=False)
+    refs = catalog.plan_refs(plan)
+    assert refs[-1] == "hf:me/speech-GGUF/speech.gguf@fed9876" and len(refs) == 2
+    assert catalog.plan_bytes(plan) == plan.rung.bytes + G(0.88)
+    assert "audio" in catalog.tags(m)
+    assert catalog.extras_text(m).endswith("audio input 0.9 GB")
+    pairs = catalog.plan_pairs(plan, str(tmp_path), True)
+    assert next(iter(pairs.values()))["asr"] == str(tmp_path / "me__speech-GGUF" / "speech.gguf")
+    _on, remaining, per_ref = catalog.local_state(plan, str(tmp_path), True)
+    assert per_ref[refs[-1]] == (0, G(0.88), False) and remaining == catalog.plan_bytes(plan)
+
+
 # -- text ----------------------------------------------------------------------------
 
 def test_recommendation_and_entry_text_are_plain(small_catalog):
@@ -652,6 +667,10 @@ def test_seed_rungs_are_well_formed(m):
         assert d.kind == "dflash2" or arch_table.drafter_serves(d.kind, m.arch) is not False, d
     if m.mmproj:
         assert m.mmproj.endswith(".gguf") and m.mmproj_bytes > 0
+    if m.asr is not None:
+        a = m.asr
+        assert a.revision != "main" and a.file.endswith(".gguf") and a.bytes > 0
+        assert arch_table.ASR_COMPANION_REPOS.get(m.arch) == a.repo.split("/")[-1], m.name
     for f in m.ignored_files:
         assert f.endswith(".gguf")
         assert f not in {r.path for r in m.rungs} | {m.mmproj} | {m.drafter.file if m.drafter else None}

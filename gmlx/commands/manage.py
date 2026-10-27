@@ -1596,6 +1596,8 @@ def _confirm_lines(plan, state: str, stream_verdict: str | None, box, *,
         lines.append(f"image input  {pc.human_gb(m.mmproj_bytes)}")
     if plan.drafter and m.drafter is not None:
         lines.append(f"faster replies  {pc.human_gb(m.drafter.bytes)}")
+    if m.asr is not None:
+        lines.append(f"audio input  {pc.human_gb(m.asr.bytes)}")
     lines.append(_download_line(remaining, on_disk, free, base_dir))
     return lines
 

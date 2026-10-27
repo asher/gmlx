@@ -64,6 +64,16 @@ class Drafter:
 
 
 @dataclass(frozen=True)
+class Asr:
+    """A speech companion: every pull of the entry downloads it, and the
+    model pairs with it from the folder the pull leaves it in."""
+    repo: str
+    revision: str
+    file: str
+    bytes: int
+
+
+@dataclass(frozen=True)
 class KvCost:
     """The entry's full-precision cache cost per token: rows of
     ``(kind, n, bytes_per_token, count)`` with kind ``full`` (grows with
@@ -95,6 +105,7 @@ class Model:
     mmproj: str | None = None
     mmproj_bytes: int = 0
     drafter: Drafter | None = None
+    asr: Asr | None = None
     ignored_files: tuple = ()        # repo companions the seed leaves out on purpose
     kv_cost: KvCost | None = None
     heads: int = 0
@@ -164,6 +175,8 @@ class Seed:
     drafter_repo: str = ""
     drafter_file: str = ""
     cross_base: bool = False
+    asr_repo: str = ""
+    asr_file: str = ""
     ignored_files: tuple = ()
     license_note: str = ""
     license_detail: str = ""
@@ -223,6 +236,13 @@ _SEED = (
          "Quick: a 7B dense model.",
          params="7B",
          use="chat with a 512K context"),
+    Seed("granite-switch-4.1-8b", "Granite Switch 4.1 8B", "ibm-granite/granite-switch-4.1-8b-GGUF",
+         "balanced",
+         "Chat with a safety judge, a decision adapter and audio input.",
+         "Quick: an 8B dense model.",
+         asr_repo="ashbash/granite-speech-5.0-470m-turboctc-GGUF",
+         asr_file="granite-speech-5.0-470m-turboctc.gguf",
+         use="chat, decisions and audio"),
     Seed("gemma-4-26b-a4b", "gemma-4-26B-A4B", "unsloth/gemma-4-26B-A4B-it-GGUF", "balanced",
          "Strong general chat with image input.",
          "Quick for its size: it reads 4B of its 26B weights per token.",
@@ -248,6 +268,13 @@ _SEED = (
          cross_base=True,
          quants=("PTQ1_0", "PQ2_0"),
          use="27B-class chat on a small Mac"),
+    Seed("granite-switch-4.1-30b", "Granite Switch 4.1 30B", "ibm-granite/granite-switch-4.1-30b-GGUF",
+         "balanced",
+         "Chat with a safety judge, a decision adapter and audio input.",
+         "Steady: a 30B dense model.",
+         asr_repo="ashbash/granite-speech-5.0-470m-turboctc-GGUF",
+         asr_file="granite-speech-5.0-470m-turboctc.gguf",
+         use="chat, decisions and audio"),
     Seed("qwen3.6-35b-a3b", "Qwen3.6-35B-A3B", "unsloth/Qwen3.6-35B-A3B-GGUF", "balanced",
          "Good general chat with image input.",
          "Quick for its size: it reads 3B of its 35B weights per token.",
@@ -376,6 +403,10 @@ def _build(seed: Seed, facts: dict) -> Model:
         kind, revision, nbytes = facts.get("drafter") or ("", "", 0)
         drafter = Drafter(kind=kind, repo=seed.drafter_repo, revision=revision,
                           file=seed.drafter_file, bytes=nbytes, cross_base=seed.cross_base)
+    asr = None
+    if seed.asr_file:
+        revision, nbytes = facts.get("asr") or ("main", 0)
+        asr = Asr(repo=seed.asr_repo, revision=revision, file=seed.asr_file, bytes=nbytes)
     kv = facts.get("kv_cost")
     return Model(
         name=seed.name, title=seed.title, repo=seed.repo,
@@ -386,7 +417,7 @@ def _build(seed: Seed, facts: dict) -> Model:
         license_detail=seed.license_detail, aliases=seed.aliases, arch=facts.get("arch", ""), moe=facts.get("moe", False),
         native_mtp=facts.get("native_mtp", False),
         mmproj=seed.mmproj, mmproj_bytes=facts.get("mmproj_bytes", 0) if seed.mmproj else 0,
-        drafter=drafter, ignored_files=seed.ignored_files,
+        drafter=drafter, asr=asr, ignored_files=seed.ignored_files,
         kv_cost=KvCost(tuple(tuple(row) for row in kv)) if kv else None,
         heads=facts.get("heads", 0), trained_ctx=facts.get("trained_ctx", 0),
         preferred_at=seed.preferred_at)
@@ -546,6 +577,8 @@ def addon_bytes(m: Model, mmproj: bool, drafter: bool) -> int:
         n += m.mmproj_bytes
     if drafter and m.drafter is not None:
         n += m.drafter.bytes
+    if m.asr is not None:
+        n += m.asr.bytes
     return n
 
 
@@ -765,6 +798,8 @@ def tags(m: Model) -> list:
         out.append("images")
     if m.drafter is not None or m.native_mtp or any(r.head for r in m.rungs):
         out.append("faster replies")
+    if m.asr is not None:
+        out.append("audio")
     return out
 
 
@@ -983,6 +1018,8 @@ def plan_refs(plan: PullPlan) -> list:
     if plan.drafter and m.drafter is not None:
         d = m.drafter
         refs.append(f"hf:{d.repo}/{d.file}@{d.revision}")
+    if m.asr is not None:
+        refs.append(f"hf:{m.asr.repo}/{m.asr.file}@{m.asr.revision}")
     return refs
 
 
@@ -995,7 +1032,9 @@ def dest_path(repo: str, path_in_repo: str, base_dir: str, nest: bool) -> str:
 
 def plan_pairs(plan: PullPlan, base_dir: str, nest: bool) -> dict:
     """What registration pairs with the model file: ``{model path:
-    {"mmproj": path, "draft_gguf": path, "alias": name}}``."""
+    {"mmproj": path, "draft_gguf": path, "asr": path, "alias": name}}``.
+    Registration writes no ``asr`` key: the model pairs with the file from
+    the folder the pull leaves it in."""
     m = plan.model
     from gmlx.load.preflight import shard_names
 
@@ -1006,6 +1045,8 @@ def plan_pairs(plan: PullPlan, base_dir: str, nest: bool) -> dict:
         pairs["mmproj"] = dest_path(m.repo, m.mmproj, base_dir, nest)
     if plan.drafter and m.drafter is not None:
         pairs["draft_gguf"] = dest_path(m.drafter.repo, m.drafter.file, base_dir, nest)
+    if m.asr is not None:
+        pairs["asr"] = dest_path(m.asr.repo, m.asr.file, base_dir, nest)
     return {model_path: pairs}
 
 
@@ -1022,6 +1063,9 @@ def local_state(plan: PullPlan, base_dir: str, nest: bool) -> tuple:
     if plan.drafter and m.drafter is not None:
         d = m.drafter
         items.append((f"hf:{d.repo}/{d.file}@{d.revision}", d.repo, d.file, d.bytes))
+    if m.asr is not None:
+        a = m.asr
+        items.append((f"hf:{a.repo}/{a.file}@{a.revision}", a.repo, a.file, a.bytes))
     per_ref, on_disk, remaining = {}, 0, 0
     for ref, repo, path, total in items:
         have, complete = 0, True
@@ -1065,12 +1109,14 @@ def rung_rows(m: Model, box: Box, dp: PullPlan | None, addon: int) -> list:
 
 
 def extras_text(m: Model) -> str:
-    """``image input 0.8 GB, faster replies 2.6 GB``, or "" for an entry with neither."""
+    """``image input 0.8 GB, faster replies 2.6 GB``, or "" for an entry with no add-on."""
     extras = []
     if m.mmproj:
         extras.append(f"image input {human_gb(m.mmproj_bytes)}")
     if m.drafter is not None:
         extras.append(f"faster replies {human_gb(m.drafter.bytes)}")
+    if m.asr is not None:
+        extras.append(f"audio input {human_gb(m.asr.bytes)}")
     return ", ".join(extras)
 
 

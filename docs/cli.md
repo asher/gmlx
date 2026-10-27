@@ -718,9 +718,11 @@ The recommended models:
 | `qwen3.5-9b` | 9B | Apache 2.0 | chat with a long context |
 | `gemma-4-12b` | 12B | Apache 2.0 | general chat |
 | `k2-horizon-7b` | 7B | Apache 2.0 | chat with a 512K context |
+| `granite-switch-4.1-8b` | 8B | Apache 2.0 | chat, decisions and audio |
 | `gemma-4-26b-a4b` | 26B-A4B | Apache 2.0 | general chat |
 | `qwen3.8-27b` | 27B | Apache 2.0 | documents, code and tool calls |
 | `ternary-bonsai-2-27b` | 27B | Apache 2.0 | 27B-class chat on a small Mac |
+| `granite-switch-4.1-30b` | 30B | Apache 2.0 | chat, decisions and audio |
 | `qwen3.6-35b-a3b` | 35B-A3B | Apache 2.0 | general chat |
 | `ornith-1.5-35b-a3b` | 35B-A3B | MIT | coding |
 | `k2-horizon-mova-36b-a4b` | 36B-A4B | Apache 2.0 | chat with a 512K context |

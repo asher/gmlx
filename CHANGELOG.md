@@ -13,6 +13,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Granite Switch 4.1 (`graniteswitch`) with its `guardian-core` and `decision`
   adapters, decisions through `/v1/systemone`, and audio through the Granite
   Speech companion, which also serves `/v1/audio/transcriptions`.
+  `gmlx pull granite-switch-4.1-8b` and `granite-switch-4.1-30b` download a
+  model with its companion.
 
 ### Changed
 
