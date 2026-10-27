@@ -246,6 +246,19 @@ def test_install_marks_the_engine_steps():
         assert not getattr(fn.__wrapped__, "_gmlx_chat_tick", False)
 
 
+def test_a_step_put_back_unwrapped_is_wrapped_again():
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ar.GenerationBatch, "_step", lambda self: None)
+        gpu_share.install_chat_ticks()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ar.GenerationBatch, "_step", lambda self: None)
+        gpu_share.install_chat_ticks()
+        assert ar.GenerationBatch._step._gmlx_chat_tick
+
+
 def test_a_marked_step_counts_even_when_it_raises():
     chat = ChatActivity()
     orig = gpu_share.CHAT
@@ -270,8 +283,6 @@ def test_a_marked_step_counts_even_when_it_raises():
             setattr(fake, k, getattr(Mod, k))
         pkg = sys.modules.get("gmlx._vendor.mlx_vlm.generate")
         saved = sys.modules.get("gmlx._vendor.mlx_vlm.generate.ar")
-        done = dict(gpu_share._installed)
-        gpu_share._installed["done"] = False
         sys.modules["gmlx._vendor.mlx_vlm.generate.ar"] = fake
         if pkg is not None:
             saved_attr = getattr(pkg, "ar", None)
@@ -282,7 +293,6 @@ def test_a_marked_step_counts_even_when_it_raises():
                 Batch()._step()
             assert Mod.PromptProcessingBatch().generate() == 3
         finally:
-            gpu_share._installed.update(done)
             if saved is not None:
                 sys.modules["gmlx._vendor.mlx_vlm.generate.ar"] = saved
             else:

@@ -89,6 +89,11 @@ class TemplateFormat:
         return [{"key": "true", "description": _raw(crit.get("true"))},
                 {"key": "false", "description": _raw(crit.get("false"))}]
 
+    def orderings(self, q, orderings: int) -> int:
+        """One order for a yes or no question: the template labels true A
+        and false B whatever the order, so another order reads the same."""
+        return 1 if q["type"] == "noul" else orderings
+
     def prompt(self, state: str, q, options) -> str:
         instructions = q["raw"].get("instructions")
         return self.template.render(

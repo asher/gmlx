@@ -115,6 +115,28 @@ def test_answers_are_a_softmax_at_temperature_one_by_default():
     assert n["label"] == "yes"
 
 
+def test_noul_reads_one_order_when_samples_ask_for_more():
+    # The template labels true A whatever the order, so a reversed order
+    # would read true as false.
+    body = {**_body(n={"type": "noul", "instructions": "Is it urgent?"},
+                    team={"type": "choice", "instructions": QUESTION,
+                          "criteria": OPTIONS}), "samples": 4}
+    schema = letters.parse(body)
+    seen = []
+
+    def scores(p):
+        seen.append(p.text)
+        return [2.0, 0.0, -1.0][:p.letters]
+
+    out = _run(letters.decision(schema, STATE, _fmt()), scores)
+    assert out["answers"]["n"]["noul"] == pytest.approx(letters.softmax([2.0, 0.0])[0])
+    noul = [t for t in seen if "Is it urgent?" in t]
+    assert len(set(noul)) == 1
+    assert len(set(t for t in seen if QUESTION in t)) > 1
+    texts = letters.pass_texts(schema, STATE, _fmt())
+    assert sum("Is it urgent?" in t for t in texts) == 1
+
+
 def test_the_gguf_temperature_and_score_bias_apply():
     meta = {"type": "granite-switch", "temperature": {"choice.3_5": 2.0, "score": 0.5},
             "score_bias": {3: [1.0, 0.0, -1.0]}}

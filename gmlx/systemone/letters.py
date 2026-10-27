@@ -134,6 +134,10 @@ class LetterFormat:
     def options(self, q):
         return q["options"]
 
+    def orderings(self, q, orderings: int) -> int:
+        """How many option orders a question reads."""
+        return orderings
+
     def prompt(self, state: str, q, options) -> str:
         return prompt_text(state, asked_text(q), options, self.style)
 
@@ -325,6 +329,7 @@ def distribution(state: str, q, orderings: int, style=BRACKET) -> Read:
     p(i) ~ p_final(chunk of i) * p_chunk(i) / p_chunk(winner of that chunk)."""
     fmt = as_format(style)
     options = fmt.options(q)
+    orderings = fmt.orderings(q, orderings)
     n = len(options)
     if n <= fmt.max_options:
         return (yield from _readout(state, q, options, orderings, fmt, n))
@@ -371,7 +376,7 @@ def pass_texts(schema, state: str, style=BRACKET) -> list[str]:
     for q in _asked(schema):
         for c in _chunks(fmt.options(q), fmt.max_options):
             out += [fmt.prompt(state, q, [c[i] for i in order])
-                    for order in _orders(len(c), schema["orderings"])]
+                    for order in _orders(len(c), fmt.orderings(q, schema["orderings"]))]
     return out
 
 

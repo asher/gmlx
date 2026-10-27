@@ -15,6 +15,7 @@ The Q4_K_M file is 6.4 GB, and the speech companion adds 0.9 GB.
 - [Use an adapter](#use-an-adapter)
 - [Decisions](#decisions)
 - [Audio](#audio)
+- [A voice assistant that decides](#a-voice-assistant-that-decides)
 
 ## Use an adapter
 
@@ -93,3 +94,100 @@ overlapping windows.
 
 The companion can also serve `/v1/audio/transcriptions`, as
 [Granite Speech](services.md#granite-speech) shows.
+
+## A voice assistant that decides
+
+Granite Switch can run a whole [voice session](talk.md): it hears you
+through its speech companion, answers as the chat model, and makes
+decisions through its `decision` adapter. With the setup below, a question
+that has options goes to `/v1/systemone`, and the assistant speaks the top
+answer and its score.
+
+Save this [MCP](glossary.md#mcp) tool as `/Users/me/decide-tool.py`. It
+sends one question to `/v1/systemone` and returns the top answer:
+
+```python
+# /// script
+# dependencies = ["mcp<2"]
+# ///
+"""A decide tool for the gmlx assistant: asks /v1/systemone and returns the
+top answer with its score."""
+import json
+import os
+import urllib.request
+
+from mcp.server.fastmcp import FastMCP
+
+URL = os.environ.get("GMLX_URL", "http://127.0.0.1:8080") + "/v1/systemone"
+mcp = FastMCP("decide")
+
+
+@mcp.tool()
+def decide(question: str, options: list[str], context: str = "") -> str:
+    """Pick the best of a fixed set of options with the decision model. For a
+    yes or no question, pass the options ["yes", "no"]. Put any facts the
+    user gave in context."""
+    if sorted(o.lower() for o in options) == ["no", "yes"]:
+        q = {"type": "noul", "instructions": question}
+    else:
+        q = {"type": "choice", "instructions": question,
+             "criteria": {o: None for o in options}}
+    body = {"state": context or question, "questions": {"q": q}}
+    req = urllib.request.Request(URL, json.dumps(body).encode(),
+                                 {"content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        a = json.load(r)["answers"]["q"]
+    if a["type"] == "noul":
+        top, score = ("yes", a["noul"]) if a["noul"] >= 0.5 else ("no", 1 - a["noul"])
+    else:
+        top, score = a["choice"], a["probabilities"][a["choice"]]
+    return f"{top}, score {score:.2f}"
+
+
+mcp.run()
+```
+
+Then name Granite Switch as the talk model, the decision model and the
+source of speech recognition. Put the speech companion beside the model
+GGUF, as [Audio](#audio) shows:
+
+```yaml
+server:
+  stt: granite-speech              # The model's speech companion.
+  tts: kokoro
+  systemone:
+    model: granite-switch
+
+models:
+  granite-switch:
+    path: ~/llm/gguf/ibm-granite__granite-switch-4.1-8b-GGUF/granite-switch-4.1-8b-Q4_K_M.gguf
+
+talk:
+  model: granite-switch
+  brain: assistant
+  system: >-
+    You are a helpful voice assistant. Your output is synthesized as
+    speech, so avoid using markdown or any special characters. When the
+    user asks you to choose between options, or asks a yes or no question,
+    call the decide tool. Then say its answer and its score in one short
+    sentence.
+
+assistant:
+  mcp:
+    - name: decide
+      command: [uv, run, --script, /Users/me/decide-tool.py]
+```
+
+```sh
+gmlx talk
+```
+
+Ask "Should I take the train or drive to the airport at rush hour?", and
+the assistant answers "You should take the train. The decision model
+scores taking the train at 0.88, indicating it is the better choice during
+rush hour." Other questions get a plain spoken reply.
+
+The score is the decision model's probability for the top answer. The tool
+needs [uv](https://docs.astral.sh/uv/), and it reaches the server at
+`http://127.0.0.1:8080`. For another port, add
+`env: {GMLX_URL: "http://127.0.0.1:PORT"}` to the tool's entry.
