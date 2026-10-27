@@ -495,7 +495,8 @@ def test_runtime_copy_and_cleanup(fake_container, tmp_path):
     for tool in ("xclip", "xsel", "wl-paste"):
         assert os.readlink(folder / "bin" / tool) == "../gmlx-entry"
         assert (folder / "bin" / tool).resolve() == (folder / "gmlx-entry").resolve()
-    old, old_lock = runtime.acquire_runtime(_entry(tmp_path / "..", b"older"))
+    (tmp_path / "older").mkdir()
+    old, old_lock = runtime.acquire_runtime(_entry(tmp_path / "older", b"older"))
     old_lock.release()
     assert runtime.cleanup_runtime(keep=folder.name) == [old]
     assert folder.exists()
