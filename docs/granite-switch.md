@@ -1,6 +1,6 @@
 # Granite Switch
 
-IBM's Granite Switch 4.1 8B is a Granite 4.1 chat model with two task
+IBM's Granite Switch 4.1 is a Granite 4.1 chat model with two task
 adapters built in: `guardian-core`, a safety judge, and `decision`, which
 picks among options. A request turns an adapter on, and every other request
 runs the plain chat model. With its speech companion, the model also reads
@@ -10,7 +10,15 @@ audio.
 gmlx serve ~/llm/gguf/ibm-granite__granite-switch-4.1-8b-GGUF/granite-switch-4.1-8b-Q4_K_M.gguf
 ```
 
-The Q4_K_M file is 6.4 GB, and the speech companion adds 0.9 GB.
+It comes in two sizes, and the 30B runs at about a third of the 8B's
+speed:
+
+| Model | Repository | Q4_K_M file |
+|-------|------------|-------------|
+| Granite Switch 4.1 8B | `ibm-granite/granite-switch-4.1-8b-GGUF` | 6.4 GB |
+| Granite Switch 4.1 30B | `ibm-granite/granite-switch-4.1-30b-GGUF` | 21 GB |
+
+The speech companion adds 0.9 GB to either.
 
 - [Use an adapter](#use-an-adapter)
 - [Decisions](#decisions)
@@ -42,7 +50,7 @@ On the command line, `--chat-template-config` passes the same field:
 
 ```sh
 gmlx run granite-switch-4.1-8b-Q4_K_M.gguf \
-  --chat-template-config '{"adapter_name": "guardian-core"}' -p "<guardian>..."
+  --chat-template-config '{"adapter_name": "guardian-core"}' --prompt "<guardian>..."
 ```
 
 ## Decisions
@@ -87,8 +95,8 @@ curl localhost:8080/v1/chat/completions -d '{
 }'
 ```
 
-From the command line, `gmlx run model.gguf --audio clip.wav -p "Summarize
-this."` does the same, and in `gmlx chat`, `/audio clip.wav` attaches a clip
+From the command line, `gmlx run model.gguf --audio clip.wav --prompt
+"Summarize this."` does the same, and in `gmlx chat`, `/audio clip.wav` attaches a clip
 to your next message. Clips longer than two minutes are transcribed in
 overlapping windows.
 
