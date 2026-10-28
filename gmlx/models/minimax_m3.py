@@ -248,9 +248,11 @@ def _skinny_f32() -> bool:
         try:
             import mlx_kquant as kq
 
+            from gmlx.eval_guard import guard
+
             out = kq.skinny_matmul(mx.zeros((1, 4, 1, 128), mx.float32),
                                    mx.zeros((8, 128), mx.float16))
-            mx.eval(out)
+            guard.eval(out, site="msa-skinny-probe", owner="scratch")
             ok = out.dtype == mx.float32
         except Exception:  # noqa: BLE001
             # Any refusal means an older kq: fall back to the cast matmul.
