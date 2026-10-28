@@ -368,6 +368,34 @@ def test_prefill_tile_capped_under_element_limit(monkeypatch):
     assert mx.allclose(got, ref, atol=1e-5).item()
 
 
+def test_gathered_prefill_matches_dense_masked_prefill(monkeypatch):
+    # Past GMLX_MSA_GATHER_MIN, prefill attends over each query's gathered
+    # rows instead of the masked full cache. Same selection, so the logits
+    # agree up to SDPA reduction order. 60 tokens leave a partial tail block;
+    # 5-query chunks leave a ragged last chunk.
+    from gmlx.models.minimax_m3 import MiniMaxM3Attention
+
+    m = _model(seed=7)
+    toks = _tokens(60)
+    ref_one, _ = _logits(m, toks)
+    ref_two, _ = _logits(m, toks, chunks=[23, 37])
+    calls = []
+    real = MiniMaxM3Attention._msa_prefill_gather
+
+    def spy(self, *a):
+        calls.append(a[-2])
+        return real(self, *a)
+
+    monkeypatch.setattr(MiniMaxM3Attention, "_msa_prefill_gather", spy)
+    monkeypatch.setenv("GMLX_MSA_GATHER_MIN", "0")
+    monkeypatch.setenv("GMLX_MSA_GATHER_CHUNK", "5")
+    one, _ = _logits(m, toks)
+    two, _ = _logits(m, toks, chunks=[23, 37])
+    assert 60 in calls and 23 in calls
+    assert mx.allclose(one, ref_one, atol=1e-3, rtol=1e-3).item()
+    assert mx.allclose(two, ref_two, atol=1e-3, rtol=1e-3).item()
+
+
 def test_input_embeddings_replace_token_lookup():
     # The VLM container passes merged image embeddings; MSA prefill must run
     # on them and match the token path when the embeddings are the lookup.

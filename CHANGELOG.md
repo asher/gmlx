@@ -22,6 +22,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - MiniMax-M3 and M3.1-Flash decode faster at long context, and their
   sparse-attention key cache takes half the memory.
+- MiniMax-M3 and M3.1-Flash prefill long prompts faster: past 16K tokens of
+  context, attention reads only the blocks each token selects.
 - Requires mlx-kquant 0.5.7. With it, NVFP4 projections decode closer to
   full precision and join the fused attention and MLP paths.
   `GMLX_KQ_OUT_SCALE=0` turns this off.

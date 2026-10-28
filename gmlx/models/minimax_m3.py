@@ -452,6 +452,11 @@ class MiniMaxM3Attention(nn.Module):
         cache with non-selected blocks -inf'd out (correctness-first, mirrors
         llama.cpp's batch regime). Queries are tiled to bound the transient
         f32 score/mask buffers at depth."""
+        # Past this depth, gathering each query's selected rows beats dense
+        # masked attention over the whole cache (6x per tile at 128k).
+        if S > int(os.environ.get("GMLX_MSA_GATHER_MIN", "16384")):
+            return self._msa_prefill_gather(
+                queries, K, V, IK, iq, offset, L, S, nblk)
         B = queries.shape[0]
         blk = self.block_size
         Hkv = self.num_key_value_heads
@@ -496,6 +501,67 @@ class MiniMaxM3Attention(nn.Module):
                 )
                 group_outs.append(o)
             outs.append(mx.concatenate(group_outs, axis=1))
+        return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
+
+    def _msa_prefill_gather(self, queries, K, V, IK, iq, offset, L, S, nblk):
+        """Chunk of L queries: per query, gather its topk*blk selected K/V
+        rows and attend over those alone. Each (query, group) is one SDPA
+        batch whose gq heads are query rows, so a gathered row is read once.
+
+        Selection needs no token causal mask: blocks before the query's own
+        are fully visible, its own block is force-included and later blocks
+        are excluded at block level. The token mask applies to the gathered
+        rows only."""
+        B, H, _, D = queries.shape
+        blk, k = self.block_size, self.topk_blocks
+        Hkv = self.num_key_value_heads
+        gq = H // Hkv
+        R = k * blk
+        nfull = S // blk
+        chunk = int(os.environ.get("GMLX_MSA_GATHER_CHUNK", "256"))
+        max_elems = int(os.environ.get("GMLX_MSA_MAX_ELEMS", str(2**31 - 1)))
+        chunk = max(1, min(chunk, max_elems // (B * Hkv * nblk * blk)))
+        blk_idx = mx.arange(nblk)
+        Kf = K.reshape(B * Hkv * S, D)
+        Vf = V.reshape(B * Hkv * S, D)
+        row0 = (mx.arange(B * Hkv) * S).reshape(B, 1, Hkv, 1)
+        IKt = IK.swapaxes(-1, -2)
+
+        outs = []
+        for c0 in range(0, L, chunk):
+            c1 = min(c0 + chunk, L)
+            C = c1 - c0
+            q_pos = mx.arange(offset + c0, offset + c1)
+            sc = mx.matmul(iq[:, :, c0:c1], IKt)            # [B, Hkv, C, S]
+            bs = sc[..., : nfull * blk].reshape(B, Hkv, C, nfull, blk)
+            bs = bs.max(axis=-1)
+            if nfull < nblk:
+                # The partial tail block is some query's own block (forced)
+                # or a later block (excluded): its score is never read.
+                bs = mx.pad(bs, [(0, 0)] * 3 + [(0, 1)])
+            bs = bs.astype(mx.float32)
+            own = (q_pos // blk)[:, None]
+            later = blk_idx[None] > own
+            local = (blk_idx[None] <= own) & (
+                blk_idx[None] > own - self.local_blocks)
+            bs = mx.where(local, 1e30, mx.where(later, -float("inf"), bs))
+            idx = mx.argpartition(-bs, kth=k - 1, axis=-1)[..., :k]
+            tok = (idx * blk)[..., None] + mx.arange(blk)
+            tok = tok.reshape(B, Hkv, C, R).swapaxes(1, 2)  # [B, C, Hkv, R]
+            tmask = mx.where(tok <= q_pos[:, None, None], 0.0, -float("inf"))
+            rows = mx.minimum(tok, S - 1) + row0
+            Kg = Kf[rows].reshape(B * C * Hkv, 1, R, D)
+            Vg = Vf[rows].reshape(B * C * Hkv, 1, R, D)
+            qc = queries[:, :, c0:c1].swapaxes(1, 2)        # [B, C, H, D]
+            qc = qc.reshape(B * C * Hkv, 1, gq, D)
+            mask = tmask.reshape(B * C * Hkv, 1, 1, R).astype(queries.dtype)
+            o = mx.fast.scaled_dot_product_attention(
+                qc, Kg, Vg, scale=self.scale, mask=mask)
+            o = o.reshape(B, C, H, D).swapaxes(1, 2)        # [B, H, C, D]
+            # Gathered rows stay live until their command buffer completes,
+            # so evaluate per chunk to bound them.
+            mx.eval(o)
+            outs.append(o)
         return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
 
 
