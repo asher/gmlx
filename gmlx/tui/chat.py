@@ -1002,6 +1002,7 @@ def _end_turn(state: ChatState, reply: str, canceled: bool, cache=None) -> None:
         },
         "cache_before": cp.get("cache_before", 0),
         "first_turn_before": cp.get("first_turn_before", True),
+        "render_kwargs": cp.get("render_kwargs"),
         "vlm_lens": cp.get("vlm_lens", (0, 0, 0)),
     }
     if "brain_before" in cp:      # assistant turns rewind by brain checkpoint
@@ -1394,7 +1395,11 @@ def _slash_thinking(cmd, arg, state):
         warn=lambda msg: print(f"[thinking] {msg}"), prefill=True)
     tkw.update(mapped)
     state.thinking_prefill = thinking_prefill(arg, state.template_text)
-    if state.thinking_budget is None and off_by_budget(arg, state.template_text):
+    if off_by_budget(arg, state.template_text):
+        if state.thinking_budget is not None:
+            print(f"[chat] thinking-budget = {state.thinking_budget} still "
+                  "applies; '/thinking-budget 0' turns thinking off")
+            return None
         # No switch to flip: close each thinking block as it opens.
         state.thinking_budget = 0
         state.thinking_off_budget = True
@@ -2364,7 +2369,8 @@ def _continuation(render, history: list, new: list) -> str | None:
     try:
         prev = render(history, False)
         full = render(history + list(new), True)
-    except Exception:  # noqa: BLE001 - a template that refuses: per turn
+    except Exception:  # noqa: BLE001
+        # The template refuses one of the lists; the caller renders the turn alone.
         return None
     if isinstance(prev, str) and isinstance(full, str) and prev \
             and full.startswith(prev):
@@ -2377,17 +2383,24 @@ def _render_turn(tok, state, messages, starts_cache: bool, template_kwargs) -> s
     included. A turn that starts the cache renders ``messages`` whole. A
     later turn renders the whole conversation and keeps the text past the
     render of the cached history, so a header the template writes on every
-    render (a system block, a BOS) is not repeated. A template that renders
-    earlier turns differently once a turn follows renders the turn on its
-    own, as before."""
+    render (a system block, a BOS) is not repeated. The turn renders on its
+    own, as before, when the template renders earlier turns differently
+    once a turn follows, and when the template kwargs differ from the last
+    turn's (a /thinking switch the template writes into its header)."""
     from .reasoning import with_thinking_prefill
+
+    kwargs = dict(template_kwargs)
+    cp = state.turn_checkpoint
+    if cp is not None:
+        cp["render_kwargs"] = kwargs
 
     def render(msgs, gen):
         return tok.apply_chat_template(
-            msgs, tokenize=False, add_generation_prompt=gen, **template_kwargs)
+            msgs, tokenize=False, add_generation_prompt=gen, **kwargs)
 
     text = None
-    if not starts_cache and state.transcript:
+    if (not starts_cache and state.transcript
+            and state.transcript[-1].get("render_kwargs") == kwargs):
         text = _continuation(render, _conversation(state), messages)
         if text is None and not state.render_fallback_logged:
             state.render_fallback_logged = True

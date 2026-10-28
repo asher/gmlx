@@ -880,6 +880,45 @@ def test_tool_result_turn_renders_once():
         _M31_TURN.format("thanks")
 
 
+_GEMMA4 = _FIXTURES / "gemma4_template.jinja"
+
+
+def test_slash_thinking_mid_chat_reaches_the_gemma4_header(monkeypatch, tmp_path):
+    """Gemma 4 writes enable_thinking into its first system turn. A turn
+    whose kwargs differ from the last turn's renders on its own, header
+    included, so the switch reaches the model; the turn after it is the
+    render past the history again."""
+    tok = _template_tok(_GEMMA4.read_text(), ("<|turn>", "<turn|>", "<|think|>"),
+                        "<bos>")
+    _ids, texts = _turn_texts(
+        monkeypatch, tmp_path, tok, ("hi", "/thinking on", "again", "more"),
+        extra_argv=["--chat-template", str(_GEMMA4)])
+    alone = tok.apply_chat_template([{"role": "user", "content": "again"}],
+                                    tokenize=False, add_generation_prompt=True,
+                                    enable_thinking=True)
+    assert "<|think|>" in alone
+    assert texts[1] == alone
+    assert texts[2] == "<|turn>user\nmore<turn|>\n<|turn>model\n"
+
+
+def test_changed_effort_reaches_the_minimax_m31_header():
+    """M3.1 writes reasoning_effort into its system header, so a turn
+    rendered under a different effort than the last one carries the
+    header with the new effort."""
+    tok = _template_tok(_M31.read_text(), _M31_SPECIALS)
+    state = chat.ChatState(transcript=[{
+        "user": {"content": "hi"}, "assistant": {"content": "Hello there"},
+        "render_kwargs": {"reasoning_effort": "low"}}])
+    turn = [{"role": "user", "content": "again"}]
+    same = chat._render_turn(tok, state, turn, False,
+                             {"reasoning_effort": "low"})
+    assert same == _M31_TURN.format("again")
+    changed = chat._render_turn(tok, state, turn, False,
+                                {"reasoning_effort": "high"})
+    assert changed.startswith("]~!b[]~b]system")
+    assert "<effort>high</effort>" in changed
+
+
 def _spy_stream_reply(monkeypatch):
     seen = []
     real = chat._stream_reply

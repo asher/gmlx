@@ -660,6 +660,21 @@ def test_slash_thinking_on_adaptive_minimax_sets_the_prefill():
     assert state.template_kwargs == {}
 
 
+def test_slash_thinking_off_names_a_budget_the_user_set(capsys):
+    """With a budget the user set, off cannot take effect, and says so."""
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(
+        assistant_brain=None, template_kwargs={}, thinking_budget=256,
+        thinking_off_budget=False, thinking_prefill="",
+        template_text=_M31_THINKING)
+    chat._slash_thinking("/thinking", "off", state)
+    out = capsys.readouterr().out
+    assert "thinking-budget = 256 still applies" in out
+    assert "next reply" not in out
+    assert state.thinking_budget == 256
+
+
 _R1_TEMPLATE = (
     "{% for m in messages %}{{ m['content'] }}{% endfor %}"
     "{% if add_generation_prompt %}<|Assistant|><think>\n{% endif %}")
