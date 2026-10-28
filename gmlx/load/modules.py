@@ -344,9 +344,13 @@ class _FusedMoeCaps:
         self.has_swiglu_clamp = (
             self.has_kq_fused and "swiglu_clamp" in glu_doc)
         # the shared-expert fold learned silu_limit later; same sniff
-        self.has_shexp_limit = self.has_silu_limit and "silu_limit" in (
-            getattr(getattr(kq, "moe_glu_gather_shexp_kq", None), "__doc__", "")
-            or "")
+        shexp_doc = (getattr(getattr(kq, "moe_glu_gather_shexp_kq", None),
+                             "__doc__", "") or "")
+        self.has_shexp_limit = self.has_silu_limit and "silu_limit" in shexp_doc
+        # swiglu_oai (minimax-m3 clamped SwiGLU, no biases) on the routed
+        # gathers and on the shared-expert fold; same sniff
+        self.has_swiglu_oai = self.has_kq_fused and "swiglu_oai" in glu_doc
+        self.has_shexp_oai = self.has_swiglu_oai and "swiglu_oai" in shexp_doc
         self.router_ok = (
             os.environ.get("GMLX_FUSED_MOE_ROUTER", "1") != "0"
             and hasattr(kq, "moe_router_topk")
@@ -428,6 +432,15 @@ def _kq_act_kind(m, caps):
         return None
     if name == "GeGLU" and "gemma4" in mod:
         return "gelu"  # nn.gelu_approx == the kernel's tanh-approx gelu
+    if name == "SwiGLUOAI" and "minimax_m3" in mod:
+        # clamped SwiGLU without biases; the kernel needs limit and alpha
+        # both positive. Off by default until timed (lever =1 turns it on).
+        alpha = float(getattr(act, "alpha", 0.0) or 0.0)
+        limit = float(getattr(act, "limit", 0.0) or 0.0)
+        if (caps.has_swiglu_oai and alpha > 0.0 and limit > 0.0
+                and os.environ.get("GMLX_FUSED_MOE_SWIGLU_OAI", "0") == "1"):
+            return "swiglu_oai"
+        return None
     if name == "LimitedSwiGLU" and "deepseek_v4" in mod:
         limit = float(getattr(act, "limit", 0.0) or 0.0)
         if limit <= 0.0:
@@ -826,6 +839,9 @@ def _make_fused_kquant(base_cls, caps):
             akw = {"act": act}
             if act == "silu_limit":
                 akw["limit"] = self._kq_glu_limit
+            elif act == "swiglu_oai":
+                akw["limit"] = self._kq_glu_limit
+                akw["alpha"] = self._kq_glu_alpha
             elif act == "swiglu_clamp":
                 akw["limit"] = self._kq_glu_limit
                 akw["alpha"] = self._kq_glu_alpha
@@ -1055,6 +1071,11 @@ def _install_kquant_glu_fusion(model, caps) -> int:
         if act_kind == "silu_limit":
             object.__setattr__(
                 m, "_kq_glu_limit", float(m.activation.limit))
+        elif act_kind == "swiglu_oai":
+            object.__setattr__(
+                m, "_kq_glu_limit", float(m.activation.limit))
+            object.__setattr__(
+                m, "_kq_glu_alpha", float(m.activation.alpha))
         elif act_kind == "swiglu_clamp":
             # gpt-oss constants (swiglu() defaults in mlx-lm). The float32
             # bias copies are made on the first fused call, after the
@@ -1573,11 +1594,37 @@ def _eligible_dsv4_shexp(m, caps):
     return _shexp_fold_ok(sw, se, caps)
 
 
+def _eligible_m3_shexp(m, caps):
+    """minimax-m3 MoE: the ungated SwiGLU-OAI shared expert rides the
+    stack's ``swiglu_oai`` gathers (one limit and alpha for every slot), so
+    its constants must equal the stack's. GMLX_FUSED_MOE_SHEXP_OAI=1 turns
+    it on (off until timed)."""
+    if os.environ.get("GMLX_FUSED_MOE_SHEXP_OAI", "0") != "1":
+        return False
+    if "minimax_m3" not in type(m).__module__:
+        return False
+    for attr in ("gate", "switch_mlp", "shared_experts"):
+        if not hasattr(m, attr):
+            return False
+    se, sw = m.shared_experts, m.switch_mlp
+    if se is None or not caps.has_shexp_oai:
+        return False
+    if getattr(sw, "_kq_glu_act", None) != "swiglu_oai":
+        return False
+    if (float(getattr(se, "alpha", 0.0)) != getattr(sw, "_kq_glu_alpha", None)
+            or float(getattr(se, "limit", 0.0))
+            != getattr(sw, "_kq_glu_limit", None)):
+        return False
+    return _shexp_fold_ok(sw, se, caps)
+
+
 def _shexp_fold_target(m, caps):
     """The shared-expert module an eligible MoE block folds, else None."""
     if _eligible_hyv3_shexp(m, caps):
         return m.shared_mlp
     if _eligible_dsv4_shexp(m, caps):
+        return m.shared_experts
+    if _eligible_m3_shexp(m, caps):
         return m.shared_experts
     return None
 
@@ -1585,8 +1632,8 @@ def _shexp_fold_target(m, caps):
 def install_hyv3_shexp_fold(model) -> int:
     """Stamp eligible MoE blocks' fused SwitchGLUs with their shared
     expert (``_kq_shexp_mod``, a module ref: install runs before
-    load_weights): hy_v3's plain SwiGLU one and deepseek-v4's LimitedSwiGLU
-    one. Call after install_fused_moe_glu. Disable with
+    load_weights): hy_v3's plain SwiGLU one, deepseek-v4's LimitedSwiGLU
+    one and minimax-m3's SwiGLU-OAI one. Call after install_fused_moe_glu. Disable with
     GMLX_FUSED_MOE_BLOCK=0. Returns the number of blocks stamped."""
     caps = _FusedMoeCaps()
     if not caps.enabled or not caps.has_base or not caps.block_env_on:

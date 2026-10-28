@@ -656,6 +656,10 @@ class MiniMaxM3SparseMoeBlock(nn.Module):
             y = self.switch_mlp(x, inds)
         if y.ndim == weights.ndim + 1:
             y = (y * weights[..., None]).sum(axis=-2)
+        elif getattr(self.switch_mlp, "_kq_shexp_mod", None) is not None:
+            # mixed return of the shared-expert fold: it already holds the
+            # shared expert
+            return y
         return y + self.shared_experts(x)
 
 
