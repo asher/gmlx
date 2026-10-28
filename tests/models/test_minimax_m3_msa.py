@@ -368,6 +368,19 @@ def test_prefill_tile_capped_under_element_limit(monkeypatch):
     assert mx.allclose(got, ref, atol=1e-5).item()
 
 
+def test_input_embeddings_replace_token_lookup():
+    # The VLM container passes merged image embeddings; MSA prefill must run
+    # on them and match the token path when the embeddings are the lookup.
+    m = _model(seed=7, **_M31)
+    toks = _tokens(60)
+    ref, _ = _logits(m, toks)
+    emb = m.model.embed_tokens(toks)
+    got = m(toks, cache=m.make_cache(), input_embeddings=emb)
+    assert mx.allclose(got, ref, atol=1e-5).item()
+    other = m(toks, cache=m.make_cache(), input_embeddings=emb * 0.5)
+    assert not mx.allclose(other, ref, atol=1e-3).item()
+
+
 # -- sanitize / config -------------------------------------------------------
 
 def test_sanitize_keeps_indexer_only_when_armed():

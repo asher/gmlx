@@ -580,8 +580,9 @@ class MiniMaxM3Model(nn.Module):
         ]
         self.norm = GemmaRMSNorm(args.hidden_size, eps=args.rms_norm_eps)
 
-    def __call__(self, inputs, mask=None, cache=None):
-        h = self.embed_tokens(inputs)
+    def __call__(self, inputs, mask=None, cache=None, input_embeddings=None):
+        h = (input_embeddings if input_embeddings is not None
+             else self.embed_tokens(inputs))
         if cache is None:
             cache = [None] * len(self.layers)
         if mask is None:
@@ -600,8 +601,8 @@ class Model(nn.Module):
         if not args.tie_word_embeddings:
             self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
-    def __call__(self, inputs, mask=None, cache=None):
-        out = self.model(inputs, mask, cache)
+    def __call__(self, inputs, mask=None, cache=None, input_embeddings=None):
+        out = self.model(inputs, mask, cache, input_embeddings=input_embeddings)
         if self.args.tie_word_embeddings:
             return self.model.embed_tokens.as_linear(out)
         return self.lm_head(out)
