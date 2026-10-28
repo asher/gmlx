@@ -880,6 +880,80 @@ def test_tool_result_turn_renders_once():
         _M31_TURN.format("thanks")
 
 
+def _spy_stream_reply(monkeypatch):
+    seen = []
+    real = chat._stream_reply
+
+    def spy(gen, state, **kw):
+        seen.append(kw)
+        return real(gen, state, **kw)
+
+    monkeypatch.setattr(chat, "_stream_reply", spy)
+    return seen
+
+
+def test_thinking_on_opens_the_block_on_adaptive_minimax(monkeypatch, tmp_path):
+    """--thinking on with M3.1: each turn's prompt ends in the bare
+    <mm:think> token, and the display filter starts in reasoning."""
+    tok = _template_tok(_M31.read_text(), _M31_SPECIALS)
+    seen = _spy_stream_reply(monkeypatch)
+    ids, texts = _turn_texts(
+        monkeypatch, tmp_path, tok, ("hi", "again"),
+        reply="weighing it</mm:think>Hello there",
+        extra_argv=["--thinking", "on", "--chat-template", str(_M31)])
+    (opener,) = tok.encode("<mm:think>", add_special_tokens=False)
+    assert ids[0][-1] == opener
+    assert texts[0].endswith("]~b]ai\n<mm:think>")
+    assert texts[1] == _M31_TURN.format("again") + "<mm:think>"
+    assert [kw["start_in_thinking"] for kw in seen] == [True, True]
+
+
+def test_image_turn_appends_the_prefill_before_the_thinking_check(
+        monkeypatch, tmp_path):
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
+    import gmlx.gen.thinking_budget as tb
+
+    rendered = "]~b]user\n]<]image[>[what[e~[\n]~b]ai\n"
+    checked = []
+    real_check = tb.prompt_opens_thinking
+
+    def check(prompt, *a, **k):
+        checked.append(prompt)
+        return real_check(prompt, *a, **k)
+
+    vstream = _FakeVlmStream()
+    seen = _spy_stream_reply(monkeypatch)
+    monkeypatch.setattr(chat, "_wire_input", lambda no_history: chat.ChatState(
+        history_enabled=True, history_loaded=True,
+        input_fn=_Scripted([f"/image {tmp_path / 'pic.png'}", "what"])))
+    monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config",
+                        lambda *a, **k: None)
+    monkeypatch.setattr("gmlx.load.vlm.load_vlm_model",
+                        lambda *a, **k: (object(), {"model_type": "fake"},
+                                         object()))
+    monkeypatch.setattr(chat, "_vlm_message",
+                        lambda model_type, content, role="user", n_images=0,
+                        n_audios=0: {"role": role, "content": content})
+    monkeypatch.setattr("gmlx._vendor.mlx_vlm.prompt_utils.get_chat_template",
+                        lambda processor, msgs, add_generation_prompt=True,
+                        **kw: rendered)
+    monkeypatch.setattr(tb, "prompt_opens_thinking", check)
+    monkeypatch.setattr(
+        importlib.import_module("gmlx._vendor.mlx_vlm.generate"),
+        "stream_generate", vstream)
+    (tmp_path / "pic.png").write_bytes(b"\x89PNG")
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"GGUF")
+    proj = tmp_path / "mmproj.gguf"
+    proj.write_bytes(b"GGUF")
+    rc = chat.cmd_chat([str(gguf), "--mmproj", str(proj), "--thinking", "on",
+                        "--chat-template", str(_M31)])
+    assert rc == 0
+    assert vstream.turns[0]["prompt"] == rendered + "<mm:think>"
+    assert rendered + "<mm:think>" in checked
+    assert seen[0]["start_in_thinking"] is True
+
+
 # ------------------ Tier 2 - prompt_toolkit session harness ------------------
 #
 # These drive the REAL session that `_wire_ptk` builds, over a pipe input + dummy
@@ -1333,14 +1407,18 @@ def test_text_mtp_turns_apply_sampling_settings(monkeypatch, tmp_path, capsys):
 @pytest.mark.parametrize("vlm", [False, True], ids=["draft", "vlm-mtp"])
 def test_mtp_turns_render_past_the_history(monkeypatch, tmp_path, vlm):
     """The MTP text paths render later turns like the plain path: the M3.1
-    header once."""
+    header once, and the --thinking on opener on every turn."""
     tok = _template_tok(_M31.read_text(), _M31_SPECIALS)
+    argv = ["--thinking", "on", "--chat-template", str(_M31)]
     lines = ["hi", "again", "more"]
     if vlm:
         _rc, _s, _v, sstream, _m = _run_vlm_mtp_chat(
-            monkeypatch, tmp_path, lines, native=True, tok=tok)
+            monkeypatch, tmp_path, lines, native=True, extra_argv=argv, tok=tok)
     else:
-        _rc, sstream = _run_text_mtp_chat(monkeypatch, tmp_path, lines, tok=tok)
+        _rc, sstream = _run_text_mtp_chat(
+            monkeypatch, tmp_path, lines, extra_argv=argv, tok=tok)
     texts = [tok.decode(list(t["prompt"])) for t in sstream.turns]
     assert texts[0].count("]~!b[") == 1
-    assert texts[1:] == [_M31_TURN.format(u) for u in ("again", "more")]
+    assert texts[0].endswith("]~b]ai\n<mm:think>")
+    assert texts[1:] == [_M31_TURN.format(u) + "<mm:think>"
+                         for u in ("again", "more")]

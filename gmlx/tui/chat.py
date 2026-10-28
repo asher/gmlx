@@ -349,28 +349,33 @@ def _template_text(args) -> str:
     return t if isinstance(t, str) else bytes(t).decode(errors="replace")
 
 
-def fold_thinking_flag(args, tkw: dict) -> dict:
+def fold_thinking_flag(args, tkw: dict, *, prefill: bool = False) -> dict:
     """Fold ``--thinking on|off|adaptive`` and ``--reasoning-effort LEVEL``
     into the template kwargs, spelled as the variables this model's chat
     template actually reads. ``tkw`` (the ``--chat-template-config`` blob)
     passes through verbatim; the dedicated flags overlay it. See
     :func:`gmlx.tui.reasoning.map_thinking_controls` for the spelling table.
     On a template with no thinking switch, ``--thinking off`` sets a
-    thinking budget of 0 unless ``--thinking-budget`` is set."""
+    thinking budget of 0 unless ``--thinking-budget`` is set. ``prefill``
+    (chat) records the text each rendered prompt gets appended as
+    ``args.thinking_prefill``."""
     t = getattr(args, "thinking", None)
     effort = getattr(args, "reasoning_effort", None)
     if t is None and effort is None:
         return tkw
-    from .reasoning import map_thinking_controls, off_by_budget
+    from .reasoning import map_thinking_controls, off_by_budget, thinking_prefill
 
     template = _template_text(args)
     if (getattr(args, "thinking_budget", None) is None
             and off_by_budget(t, template)):
         args.thinking_budget = 0
         args.thinking_off_budget = True
+    if prefill:
+        args.thinking_prefill = thinking_prefill(t, template)
     return map_thinking_controls(
         tkw, t, effort, template,
-        warn=lambda msg: print(f"[thinking] {msg}", file=sys.stderr))
+        warn=lambda msg: print(f"[thinking] {msg}", file=sys.stderr),
+        prefill=prefill)
 
 
 def parse_logit_bias(raw: str | None) -> dict | None:
@@ -450,6 +455,7 @@ class ChatState:
     thinking_end_token: str | None = None
     template_kwargs: dict | None = None  # live per-turn render kwargs (/thinking)
     template_text: str = ""              # template source, for switch mapping
+    thinking_prefill: str = ""           # appended to each turn's render
     render_fallback_logged: bool = False
     sampling: dict = dataclasses.field(default_factory=dict)
     transcript: list = dataclasses.field(default_factory=list)
@@ -1364,29 +1370,36 @@ def _slash_thinking(cmd, arg, state):
         return None
     if not arg:
         current = next((f"{k}={tkw[k]}" for k in _THINKING_SWITCH_KEYS
-                        if k in tkw), "default")
+                        if k in tkw), "on" if state.thinking_prefill else "default")
         print(f"[chat] thinking = {current}")
         return None
     for k in _THINKING_SWITCH_KEYS:
         tkw.pop(k, None)
+    state.thinking_prefill = ""
     if state.thinking_off_budget:
         state.thinking_budget = None
         state.thinking_off_budget = False
     if arg == "default":
         print("[chat] thinking = default (next reply)")
         return None
-    from .reasoning import map_thinking_controls, off_by_budget
+    from .reasoning import (
+        adaptive_minimax,
+        map_thinking_controls,
+        off_by_budget,
+        thinking_prefill,
+    )
 
     mapped = map_thinking_controls(
         {}, arg, None, state.template_text,
-        warn=lambda msg: print(f"[thinking] {msg}"))
+        warn=lambda msg: print(f"[thinking] {msg}"), prefill=True)
     tkw.update(mapped)
+    state.thinking_prefill = thinking_prefill(arg, state.template_text)
     if state.thinking_budget is None and off_by_budget(arg, state.template_text):
         # No switch to flip: close each thinking block as it opens.
         state.thinking_budget = 0
         state.thinking_off_budget = True
         mapped = True
-    if mapped:
+    if mapped or adaptive_minimax(state.template_text):
         print(f"[chat] thinking = {arg} (next reply)")
     return None
 
@@ -2360,12 +2373,15 @@ def _continuation(render, history: list, new: list) -> str | None:
 
 
 def _render_turn(tok, state, messages, starts_cache: bool, template_kwargs) -> str:
-    """The text one turn appends to the cache. A turn that starts the cache renders ``messages`` whole. A
+    """The text one turn appends to the cache, the thinking prefill
+    included. A turn that starts the cache renders ``messages`` whole. A
     later turn renders the whole conversation and keeps the text past the
     render of the cached history, so a header the template writes on every
     render (a system block, a BOS) is not repeated. A template that renders
     earlier turns differently once a turn follows renders the turn on its
     own, as before."""
+    from .reasoning import with_thinking_prefill
+
     def render(msgs, gen):
         return tok.apply_chat_template(
             msgs, tokenize=False, add_generation_prompt=gen, **template_kwargs)
@@ -2382,7 +2398,7 @@ def _render_turn(tok, state, messages, starts_cache: bool, template_kwargs) -> s
                 "turn follows; later turns render on their own")
     if text is None:
         text = render(messages, True)
-    return text
+    return with_thinking_prefill(text, state.thinking_prefill)
 
 
 def _prompt_opens_thinking_cfg(state, prompt_text) -> bool:
@@ -3630,7 +3646,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     file=sys.stderr,
                 )
         template_kwargs = fold_thinking_flag(
-            args, parse_template_config(args.chat_template_config))
+            args, parse_template_config(args.chat_template_config),
+            prefill=True)
         logit_bias = parse_logit_bias(args.logit_bias)
         resize_shape = parse_resize_shape(args.resize_shape)
 
@@ -3643,6 +3660,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     state.template_kwargs = template_kwargs
     if brain is None:
         state.template_text = _template_text(args)
+        state.thinking_prefill = getattr(args, "thinking_prefill", "")
     from .reasoning import want_color as _want_color
     from .render import resolve_render_mode
     from .theme import register_user_themes, resolve_theme
@@ -4211,9 +4229,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             vlm_images.extend(imgs)
             vlm_audios.extend(auds)
             first_turn = False
-            prompt = get_chat_template(
+            from .reasoning import with_thinking_prefill
+
+            prompt = with_thinking_prefill(get_chat_template(
                 processor, vlm_msgs, add_generation_prompt=True, **template_kwargs
-            )
+            ), state.thinking_prefill)
             # No cross-turn KV cache on the VLM path yet: each turn
             # re-prefills the whole conversation (and re-encodes media).
             # mlx-vlm's own criteria enforces thinking_budget here; the

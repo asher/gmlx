@@ -1,0 +1,12 @@
+{#- MiniMax-M3.1-Flash chat template excerpt: the think pair, the thinking instructions and the effort line. -#}
+{%- set think_begin_token      = '<mm:think>'                     -%}
+{%- set think_end_token        = '</mm:think>'                    -%}
+    {{- '\n\n<thinking_instructions>\n' }}
+    {{- 'You have a thinking capability that allows you to reason step by step before responding. When thinking is enabled, wrap your reasoning in ' ~ think_begin_token ~ think_end_token ~ ' tags before your response. When thinking is disabled, begin your response directly after the ' ~ think_end_token ~ ' prefix. When thinking is adaptive, decide on your own whether to think for the current turn.\n' }}
+    {{- 'Current thinking mode: adaptive. You are encouraged to think for complex decision-making, multi-step reasoning, or when analyzing function/tool results.\n' }}
+    {{- '</thinking_instructions>' }}
+    {%- if reasoning_effort is defined and reasoning_effort is not none -%}
+        {{- '\n\n<effort>' ~ reasoning_effort ~ '</effort>' }}
+    {%- elif effort is defined and effort is not none -%}
+        {{- '\n\n<effort>' ~ effort ~ '</effort>' }}
+    {%- endif -%}

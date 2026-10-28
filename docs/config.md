@@ -363,12 +363,14 @@ template reads, so one profile works across families:
 |--------|-------------------|--------|
 | Qwen3.x, GLM | `enable_thinking` | `true` or `false` |
 | MiniMax-M3 | `thinking_mode` | Three states, so `adaptive` works |
+| MiniMax-M3.1 | None | Thinking is adaptive. In `gmlx chat`, `on` ends the prompt inside the thinking block |
 | Kimi K2.x | `thinking` | `true` or `false` |
 | Hy3 | `reasoning_effort` | Levels that include `no_think` |
 | gpt-oss, Beam | `reasoning_effort` | `low`, `medium` or `high` |
 
-Some templates have no thinking switch, such as gpt-oss, Beam, Muse and K2
-Horizon. On these, `off` closes each thinking block as soon as it opens. A
+Some templates have no thinking switch, such as gpt-oss, Beam, Muse, K2
+Horizon and MiniMax-M3.1. On these, `off` closes each thinking block as soon
+as it opens. A
 [`thinking_budget`](#samplingthinking_budget) you set wins over it.
 
 A request's `enable_thinking`, `thinking` or `reasoning_effort` field wins

@@ -749,6 +749,42 @@ def _has_thinking_switch(template: str) -> bool:
             or ("no_think" in template and _reads(template, "reasoning_effort")))
 
 
+# MiniMax-M3.1's think pair. Its template has no thinking switch: thinking
+# is adaptive, the model deciding each turn whether to open the block.
+_MM_THINK_PAIR = ("<mm:think>", "</mm:think>")
+
+
+def adaptive_minimax(template: str) -> bool:
+    """True for a MiniMax template whose thinking is adaptive only: it names
+    the ``<mm:think>`` pair and reads no ``thinking_mode`` (MiniMax-M3
+    reads one). Keyed on the pair: M3.1 reads only ``reasoning_effort``,
+    the same shape as gpt-oss, where reasoning always runs."""
+    return (bool(template) and all(t in template for t in _MM_THINK_PAIR)
+            and not _reads(template, "thinking_mode"))
+
+
+def thinking_prefill(thinking, template: str) -> str:
+    """The text appended after the rendered prompt for ``thinking``: the
+    bare ``<mm:think>`` opener for on with an adaptive MiniMax template,
+    else "". No newline follows the opener, as in llama.cpp's M3 parser and
+    the template's own render of past reasoning."""
+    if _thinking_mode(thinking) == "on" and adaptive_minimax(template):
+        return _MM_THINK_PAIR[0]
+    return ""
+
+
+def with_thinking_prefill(prompt, prefill: str):
+    """``prompt`` with ``prefill`` appended, unless the prompt already ends
+    inside a thinking block or is not text."""
+    if not prefill or not isinstance(prompt, str):
+        return prompt
+    from gmlx.gen.thinking_budget import prompt_opens_thinking
+
+    if prompt_opens_thinking(prompt):
+        return prompt
+    return prompt + prefill
+
+
 def off_by_budget(thinking, template: str) -> bool:
     """Whether ``thinking`` asks for off on a template that has no thinking
     switch but names a think pair. A thinking budget of 0 serves that off:
@@ -763,7 +799,8 @@ def off_by_budget(thinking, template: str) -> bool:
 
 
 def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
-                          template: str = "", warn=None) -> dict:
+                          template: str = "", warn=None,
+                          prefill: bool = False) -> dict:
     """Overlay the dedicated thinking controls onto ``base`` template kwargs,
     spelled as the variables ``template`` actually reads. ``base`` (an
     explicitly passed ``chat_template_kwargs`` dict) is never reinterpreted -
@@ -784,7 +821,10 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
     there is a thinking budget of 0, which the caller sets (see
     :func:`off_by_budget`). ``warn`` (an optional callable taking a message)
     hears about unmappable controls. With no template text available the
-    switch defaults to the ``enable_thinking`` spelling."""
+    switch defaults to the ``enable_thinking`` spelling. An adaptive
+    MiniMax template (:func:`adaptive_minimax`) takes no variable: adaptive
+    is its own mode, off is a budget of 0, and on is the
+    :func:`thinking_prefill` a caller passing ``prefill`` appends."""
     _warn = warn or (lambda msg: None)
     out = dict(base)
     if reasoning_effort is not None:
@@ -808,6 +848,10 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
     if _reads(template, "thinking_mode"):
         out["thinking_mode"] = {"on": "enabled", "off": "disabled",
                                 "adaptive": "adaptive"}[mode]
+    elif adaptive_minimax(template):
+        if mode == "on" and not prefill:
+            _warn("this model's thinking is adaptive (the model decides "
+                  "each turn); only gmlx chat can turn it on")
     elif mode == "adaptive":
         _warn("adaptive is a MiniMax-style thinking_mode level; this model's "
               "chat template has no such variable - ignored")

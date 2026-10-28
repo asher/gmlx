@@ -613,6 +613,105 @@ def test_map_thinking_controls_value_spellings(capsys):
     assert warns and "unrecognized" in warns[0]
 
 
+_M31_THINKING = (_FIXTURES / "minimax_m31_thinking.jinja").read_text()
+
+
+def test_adaptive_minimax_thinking_flags(monkeypatch, capsys):
+    """MiniMax-M3.1 has no thinking switch, and its thinking is adaptive.
+    adaptive is the template's own mode, on opens the thinking block at the
+    end of the prompt, and off is a budget of 0. None of them warns, and no
+    template variable is set."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(chat, "_template_text", lambda a: _M31_THINKING)
+    for mode, prefill, budget in (("adaptive", "", None),
+                                  ("on", "<mm:think>", None),
+                                  ("off", "", 0)):
+        args = SimpleNamespace(thinking=mode, reasoning_effort=None,
+                               gguf="/m/x.gguf", thinking_budget=None)
+        assert chat.fold_thinking_flag(args, {}, prefill=True) == {}
+        assert (args.thinking_prefill, args.thinking_budget) == (prefill, budget)
+    assert capsys.readouterr().err == ""
+    args = SimpleNamespace(thinking="on", reasoning_effort="high",
+                           gguf="/m/x.gguf", thinking_budget=None)
+    assert chat.fold_thinking_flag(args, {}, prefill=True) == \
+        {"reasoning_effort": "high"}
+    # A caller that appends no prefill (run, serve) hears that on is chat's.
+    args = SimpleNamespace(thinking="on", reasoning_effort=None,
+                           gguf="/m/x.gguf", thinking_budget=None)
+    assert chat.fold_thinking_flag(args, {}) == {}
+    assert "only gmlx chat" in capsys.readouterr().err
+
+
+def test_slash_thinking_on_adaptive_minimax_sets_the_prefill():
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(
+        assistant_brain=None, template_kwargs={}, thinking_budget=None,
+        thinking_off_budget=False, thinking_prefill="",
+        template_text=_M31_THINKING)
+    chat._slash_thinking("/thinking", "on", state)
+    assert state.thinking_prefill == "<mm:think>"
+    chat._slash_thinking("/thinking", "off", state)
+    assert (state.thinking_prefill, state.thinking_budget) == ("", 0)
+    chat._slash_thinking("/thinking", "on", state)
+    chat._slash_thinking("/thinking", "default", state)
+    assert (state.thinking_prefill, state.thinking_budget) == ("", None)
+    assert state.template_kwargs == {}
+
+
+_R1_TEMPLATE = (
+    "{% for m in messages %}{{ m['content'] }}{% endfor %}"
+    "{% if add_generation_prompt %}<|Assistant|><think>\n{% endif %}")
+
+
+_ALWAYS_RUNS = ("this model has no thinking switch (reasoning always runs); "
+                "use reasoning_effort low|medium|high to size it")
+_NO_SWITCH = ("this model's chat template has no thinking switch; the "
+              "thinking control is likely a no-op")
+_NO_ADAPTIVE = ("adaptive is a MiniMax-style thinking_mode level; this model's "
+                "chat template has no such variable - ignored")
+
+
+@pytest.mark.parametrize("template, on_out, on_warn", [
+    ((_FIXTURES / "gptoss_template.jinja").read_text(), {}, _ALWAYS_RUNS),
+    (_R1_TEMPLATE, {"enable_thinking": True}, _NO_SWITCH),
+], ids=["gptoss", "r1"])
+def test_thinking_flags_off_minimax_are_unchanged(template, on_out, on_warn):
+    """gpt-oss reads only reasoning_effort, like M3.1, and an R1-style
+    template opens <think> in the prompt. Neither gets a prefill, and both
+    map as before."""
+    from gmlx.tui.reasoning import (
+        map_thinking_controls,
+        off_by_budget,
+        thinking_prefill,
+    )
+
+    got = {}
+    for mode in ("on", "off", "adaptive"):
+        warns: list = []
+        out = map_thinking_controls({}, mode, None, template,
+                                    warn=warns.append, prefill=True)
+        got[mode] = (out, warns, off_by_budget(mode, template),
+                     thinking_prefill(mode, template))
+    assert got == {
+        "on": (on_out, [on_warn], False, ""),
+        "off": ({}, [], True, ""),
+        "adaptive": ({}, [_NO_ADAPTIVE], False, ""),
+    }
+
+
+def test_thinking_prefill_skips_a_prompt_already_inside_the_block():
+    from gmlx.tui.reasoning import with_thinking_prefill
+
+    prompt = "]~b]user\nhi[e~[\n]~b]ai\n"
+    assert with_thinking_prefill(prompt, "<mm:think>") == prompt + "<mm:think>"
+    opened = prompt + "<mm:think>"
+    assert with_thinking_prefill(opened, "<mm:think>") == opened
+    assert with_thinking_prefill(opened + "x</mm:think>y", "<mm:think>") == \
+        opened + "x</mm:think>y<mm:think>"
+
+
 @pytest.mark.parametrize("chunk", [0, 1, 3, 7])
 def test_harmony_annotated_commentary_tool_header(chunk):
     # Tool preludes annotate the header; everything up to <|message|> is
