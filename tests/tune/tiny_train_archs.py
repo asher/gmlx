@@ -78,6 +78,13 @@ CONFIGS = {
         shared_expert_intermediate_size=256, routed_scaling_factor=0.0,
         norm_topk_prob=True, rms_norm_eps=1e-6, rope_parameters=_ROPE,
         rope_theta=10000.0, max_position_embeddings=4096, tie_word_embeddings=False),
+    "granite_switch": dict(
+        model_type="granite_switch", hidden_size=256, intermediate_size=512,
+        num_hidden_layers=3, num_attention_heads=4, num_key_value_heads=2, vocab_size=512,
+        rms_norm_eps=1e-6, logits_scaling=4.0, attention_multiplier=0.125,
+        embedding_multiplier=1.0, residual_multiplier=0.9, num_adapters=2,
+        max_lora_rank=16, adapter_token_ids=[509, 510], adapter_substitute_ids=[27, 41],
+        rope_theta=10000.0, max_position_embeddings=4096, tie_word_embeddings=True),
     "k2_horizon": dict(
         model_type="k2_horizon", hidden_size=256, intermediate_size=512, num_hidden_layers=3,
         num_attention_heads=4, num_key_value_heads=2, head_dim=64, vocab_size=512,
@@ -187,6 +194,7 @@ CASES = {
     "muse_spark": Case("muse-spark"),
     "beam": Case("beam"),
     "flint": Case("flint"),
+    "granite_switch": Case("graniteswitch"),
     "k2_horizon": Case("k2-horizon"),
     "hy_v3": Case("hy_v3", (r"router\.gate$",)),
     "glm5_next": Case("glm5next"),

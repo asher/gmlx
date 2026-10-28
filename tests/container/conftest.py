@@ -92,10 +92,21 @@ def _in_process(binary: str):
 
 def _remove_tree(path: str) -> None:
     """Remove ``path``, making a folder a test left unreadable readable first."""
+    # The autouse fixtures set monkeypatch up first, so it undoes a test's
+    # chdir into ``path`` only after this teardown. A removal from inside
+    # the folder fails partway on macOS and leaves it behind.
+    with contextlib.suppress(OSError):
+        cwd = os.path.realpath(os.getcwd())
+        if cwd == path or cwd.startswith(path + os.sep):
+            os.chdir(os.path.dirname(path))
+
     def fix(func, p, _exc):
         with contextlib.suppress(OSError):
             os.chmod(os.path.dirname(p), 0o700)
-            os.chmod(p, 0o700)
+            # chmod follows a link, and a link whose target is gone would
+            # raise here and stay.
+            if not os.path.islink(p):
+                os.chmod(p, 0o700)
             func(p)
     if sys.version_info >= (3, 12):
         shutil.rmtree(path, onexc=fix)

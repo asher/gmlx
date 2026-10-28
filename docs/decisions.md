@@ -14,7 +14,8 @@ The request follows the
 [Jev decision API](https://huggingface.co/blog/liliruli/how-to-use-the-jev-api-a-complete-guide),
 so a Jev client that sends text states works unchanged. The route is also
 served at `/systemone`. Every field is in the
-[decisions reference](decisions-reference.md).
+[decisions reference](decisions-reference.md). The
+[assistant](assistant.md#decisions-as-a-tool) can also ask it as a tool.
 
 - [Serving a decision model](#serving-a-decision-model)
 - [A first decision](#a-first-decision)
@@ -58,6 +59,10 @@ model reports 0.99 or more on nearly every answer, the ones it gets wrong
 included, because its readout has not been calibrated as OpenJev's and
 DiffusionGemma's have. Use its confidence to rank answers, not as a
 probability.
+
+[Granite Switch](granite-switch.md), in 8B or 30B, answers through
+its own decision prompt and its `decision` adapter, which IBM trained to
+pick among options. One served model then handles both chat and decisions.
 
 [`server.systemone.model`](config.md#serversystemonemodel) answers a request
 whose `model` is absent or unknown, such as a Jev client's `jev-latest`. A

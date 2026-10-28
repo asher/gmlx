@@ -3127,6 +3127,92 @@ def test_flint_synth_refuses_what_the_model_cannot_run(key, value, exc, match):
         synthesize_config(m, tensor_shapes=_FLINT_SHAPES)
 
 
+# graniteswitch
+
+# The embedding has three rows past the tokenizer's list, as in IBM's
+# GGUF: two control tokens and <|audio|>.
+_GRANITESWITCH_ROWS = VOCAB + 3
+
+
+def _graniteswitch_meta() -> dict:
+    arch = "graniteswitch"
+    m = _base_meta(arch)
+    m[f"{arch}.embedding_scale"] = 12.0
+    m[f"{arch}.residual_scale"] = 0.22
+    m[f"{arch}.attention.scale"] = 0.0078125
+    m[f"{arch}.logit_scale"] = 16.0
+    m[f"{arch}.adapters.count"] = 2
+    m[f"{arch}.adapters.lora_rank"] = 8
+    m[f"{arch}.adapters.token_ids_activate"] = [VOCAB, VOCAB + 1]
+    m[f"{arch}.adapters.token_ids_substitute"] = [3, 7]
+    return m
+
+
+_GRANITESWITCH_SHAPES = {"token_embd.weight": [64, _GRANITESWITCH_ROWS]}
+
+
+def test_graniteswitch_synth_fields():
+    c = synthesize_config(_graniteswitch_meta(),
+                          tensor_shapes=_GRANITESWITCH_SHAPES)
+    assert c["model_type"] == "granite_switch"
+    assert c["vocab_size"] == _GRANITESWITCH_ROWS
+    assert (c["embedding_multiplier"], c["residual_multiplier"]) == (12.0, 0.22)
+    assert (c["attention_multiplier"], c["logits_scaling"]) == (0.0078125, 16.0)
+    assert (c["num_adapters"], c["max_lora_rank"]) == (2, 8)
+    assert c["adapter_token_ids"] == [VOCAB, VOCAB + 1]
+    assert c["adapter_substitute_ids"] == [3, 7]
+    assert c["router_gain"] == 15.0
+
+
+def test_graniteswitch_synth_instantiates():
+    from gmlx.models.granite_switch.model import (Model, ModelArgs,
+                                                   SwitchRouterCache)
+
+    c = synthesize_config(_graniteswitch_meta(),
+                          tensor_shapes=_GRANITESWITCH_SHAPES)
+    model, args = _get_classes(c)
+    assert model is Model and args is ModelArgs
+    m = Model(ModelArgs.from_dict(c))
+    mx.eval(m.parameters())
+    assert m(mx.array([[1, VOCAB, 3]])).shape == (1, 3, _GRANITESWITCH_ROWS)
+    # Packed stacks: slot 0 dropped, q/k/v ranks joined on qkv.
+    assert m.layers[0].switch_lora.qkv_a.shape == (2, 64, 24)
+    assert m.layers[0].switch_lora.qkv_b.shape == (2, 24, 128)
+    cache = m.make_cache()
+    assert len(cache) == 3 and type(cache[-1]) is SwitchRouterCache
+
+
+@pytest.mark.parametrize("key", [
+    "embedding_scale", "residual_scale", "attention.scale", "logit_scale",
+    "adapters.count", "adapters.lora_rank", "adapters.token_ids_activate",
+    "adapters.token_ids_substitute",
+])
+def test_graniteswitch_required_keys_fail_loud(key):
+    m = _graniteswitch_meta()
+    del m[f"graniteswitch.{key}"]
+    with pytest.raises(ValueError, match=f"graniteswitch.{key}"):
+        synthesize_config(m, tensor_shapes=_GRANITESWITCH_SHAPES)
+
+
+@pytest.mark.parametrize("key,value,match", [
+    ("adapters.count", 3, "for 3 adapters"),
+    ("adapters.token_ids_activate", [VOCAB, _GRANITESWITCH_ROWS],
+     "outside the"),
+])
+def test_graniteswitch_synth_refuses_bad_adapter_keys(key, value, match):
+    m = _graniteswitch_meta()
+    m[f"graniteswitch.{key}"] = value
+    with pytest.raises(ValueError, match=match):
+        synthesize_config(m, tensor_shapes=_GRANITESWITCH_SHAPES)
+
+
+def test_graniteswitch_synth_refuses_biases():
+    shapes = dict(_GRANITESWITCH_SHAPES)
+    shapes["blk.0.attn_qkv.bias"] = [128]
+    with pytest.raises(NotImplementedError, match="biased"):
+        synthesize_config(_graniteswitch_meta(), tensor_shapes=shapes)
+
+
 # k2-horizon
 
 

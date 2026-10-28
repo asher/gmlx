@@ -147,14 +147,10 @@ def pacer() -> ImagePacer | None:
     return None if share is None else ImagePacer(share=share)
 
 
-_installed = {"done": False}
-
-
 def install_chat_ticks() -> bool:
     """Mark each prefill and decode step of the mlx-vlm engine on
-    ``CHAT``. Idempotent."""
-    if _installed["done"]:
-        return True
+    ``CHAT``. Idempotent: a step that already carries the mark is kept, and
+    a step put back unwrapped is wrapped again."""
     from gmlx._vendor.mlx_vlm.generate import ar
 
     def _wrap(cls, name):
@@ -177,5 +173,4 @@ def install_chat_ticks() -> bool:
     _wrap(ar.SpeculativeGenerationBatch, "next")
     _wrap(ar.PromptProcessingBatch, "prompt_step")
     _wrap(ar.PromptProcessingBatch, "generate")
-    _installed["done"] = True
     return True

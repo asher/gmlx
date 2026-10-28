@@ -314,10 +314,13 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
     # rides a target model, so the standalone arch gate doesn't apply.
     from gmlx.load.discovery import is_drafter_arch
     drafter = not (mmproj or adapter) and is_drafter_arch(report.arch)
+    # A speech companion transcribes audio for a text model (Granite Switch).
+    from gmlx.load.arch_table import ASR_ARCHES
+    speech = report.arch in ASR_ARCHES
     # An image DiT or VAE loads through gmlx image, beside its companions,
     # so the chat arch gate does not apply; a DiT's fit counts its text
     # encoder and VAE too.
-    image, image_family = ((None, None) if mmproj or adapter or drafter
+    image, image_family = ((None, None) if mmproj or adapter or drafter or speech
                            else _image_role(report, scans))
     # A DiT this chip does not run is refused like an unloadable file; its
     # cast below then counts 0.
@@ -339,7 +342,7 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
             from .image_preflight import cast_of
             cast = cast_of(view_from_scans(scans), image_family)
         combined = size_bytes + cast + extra if extra else None
-    if mmproj or adapter or drafter or image:
+    if mmproj or adapter or drafter or speech or image:
         arch_ok, arch_err = False, None
     else:
         arch_ok, arch_err = _arch_status(report.arch, hf_source=hf_source)
@@ -351,7 +354,7 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
     stream = (_stream_plan(scans,
                            os.path.expanduser(ref.raw)
                            if ref.kind == "local" else None)
-              if not (mmproj or adapter or drafter or image) else None)
+              if not (mmproj or adapter or drafter or speech or image) else None)
     # A load that reads its tables from the file holds the rest.
     resident = None
     if size_bytes and stream and _tables_from_file(stream):
@@ -365,7 +368,7 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         # unknown); companions (mmproj/adapter) ride a base model, so their
         # standalone fit is not judged.
         "fit": (classify_fit(combined or resident or size_bytes, ram)
-                if size_bytes and not (mmproj or adapter or drafter
+                if size_bytes and not (mmproj or adapter or drafter or speech
                                        or image == "vae")
                 else None),
         # The bytes a load keeps in memory when it reads the tables from
@@ -377,6 +380,7 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         "mmproj": mmproj,
         "adapter": adapter,
         "drafter": drafter,
+        "speech": speech,
         # "dit" or "vae" for an image GGUF, with its image family, and for
         # a DiT the bytes of the DiT, its text encoder and its VAE.
         "image": image,
@@ -398,7 +402,7 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         # loadable = runs standalone; usable also admits a healthy companion
         # (mmproj / LoRA adapter).
         "usable": runs
-                  or (bool(mmproj or adapter or drafter or image)
+                  or (bool(mmproj or adapter or drafter or speech or image)
                       and report.loadable_codecs and chip_error is None),
     }
 
@@ -447,6 +451,8 @@ def _print_report(v: dict) -> None:
         print(f"  architecture: {arch}  [LoRA adapter]")
     elif v.get("drafter"):
         print(f"  architecture: {arch}  [draft-model companion]")
+    elif v.get("speech"):
+        print(f"  architecture: {arch}  [speech companion]")
     elif v.get("image"):
         what = "image DiT" if v["image"] == "dit" else "image VAE"
         fam = f", {v['image_family']}" if v.get("image_family") else ""
@@ -1590,6 +1596,8 @@ def _confirm_lines(plan, state: str, stream_verdict: str | None, box, *,
         lines.append(f"image input  {pc.human_gb(m.mmproj_bytes)}")
     if plan.drafter and m.drafter is not None:
         lines.append(f"faster replies  {pc.human_gb(m.drafter.bytes)}")
+    if m.asr is not None:
+        lines.append(f"audio input  {pc.human_gb(m.asr.bytes)}")
     lines.append(_download_line(remaining, on_disk, free, base_dir))
     return lines
 

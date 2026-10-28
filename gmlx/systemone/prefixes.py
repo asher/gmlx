@@ -58,7 +58,8 @@ class ApcPrefixes(Prefixes):
         self.layout = ckpt_layout(probe, int(manager.block_size))
         if self.layout is not None:
             self.tier = "ckpt"
-        elif probe and all(type(c) is KVCache for c in probe):
+        elif probe and all(type(c) is KVCache or getattr(c, "plain_kv", False)
+                           for c in probe):
             self.tier = "exact"
         else:
             self.tier = "unsupported"

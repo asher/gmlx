@@ -65,6 +65,22 @@ MLX-Whisper format, or a local folder with a converted model:
 | `whisper-base` | `mlx-community/whisper-base-mlx` | Smaller and faster than small |
 | `whisper-tiny` | `mlx-community/whisper-tiny` | Smallest and fastest |
 
+### Granite Speech
+
+The Granite Speech companion of [Granite Switch](granite-switch.md) can
+serve this route too, without mlx-whisper. Name its GGUF, or use the alias
+`granite-speech` for the companion a configured model pairs with:
+
+```yaml
+server:
+  stt: granite-speech
+```
+
+It transcribes only. It gives the `json` and `text` formats, and it
+ignores `language`, `prompt` and `temperature`. The other formats and
+`/v1/audio/translations` get a 400. The chat models and this route share
+one loaded copy of the companion.
+
 ## Text-to-speech
 
 Text-to-speech reads text aloud with

@@ -6779,7 +6779,11 @@ def test_a_launch_writes_its_record_before_the_server_check(env, monkeypatch):
 @pytest.mark.parametrize("fd", [0, 1, 2])
 def test_a_detach_pipe_on_stdio_is_not_taken(monkeypatch, fd):
     monkeypatch.setenv(lc.DETACH_FD_ENV, str(fd))
-    monkeypatch.setattr(lc.os, "fstat", lambda n: os.stat_result((stat.S_IFIFO,) + (0,) * 9))
+    # lc.os is the os module, so only the detach fd reads as a pipe: the
+    # teardown's rmtree checks its own folders with fstat.
+    real = os.fstat
+    monkeypatch.setattr(lc.os, "fstat", lambda n: os.stat_result((stat.S_IFIFO,) + (0,) * 9)
+                        if n == fd else real(n))
     assert lc._DetachEvents.from_env() is None
     assert lc.DETACH_FD_ENV not in os.environ
 

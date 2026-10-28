@@ -140,7 +140,7 @@ back.
 - DeepSeek V3, R1, V4-Flash and V4.1-Flash
 - GLM 4 through 5.3, Kimi-K3, MiniMax M2 and M3, and gpt-oss
 - Hunyuan, Hy3, HY4, Muse Glimmer and Muse Spark
-- Granite, Nemotron-H and Falcon-H1
+- Granite, Granite Switch, Nemotron-H and Falcon-H1
 - K2 Horizon, dense and MoVA
 - Beam-1.0
 - Flint

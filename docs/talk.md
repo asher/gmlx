@@ -174,6 +174,10 @@ assistant:
 The filesystem server needs Node, and the fetch server needs uv.
 [Assistant](assistant.md) covers choosing a model, the tools and the
 memory store.
+[Decisions as a tool](assistant.md#decisions-as-a-tool) adds a tool that
+answers questions through `/v1/systemone`, and
+[Granite Switch](granite-switch.md#a-voice-assistant-that-decides) can
+hear, answer and decide in one model.
 
 During a turn, the status line names each tool as the assistant uses it,
 and only the answer is spoken. After the turn, the assistant stores what it

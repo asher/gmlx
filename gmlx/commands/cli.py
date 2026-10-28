@@ -1080,6 +1080,18 @@ def _build_parser(prog: str = "gmlx run") -> argparse.ArgumentParser:
     add_load_args(ap)
     add_placement_args(ap)
     ap.add_argument(
+        "--asr",
+        default=None,
+        metavar="PATH",
+        help="Speech companion GGUF for a model that reads audio through "
+        "one (Granite Switch). Found beside the model when not given.",
+    )
+    ap.add_argument(
+        "--no-asr",
+        action="store_true",
+        help="Pair no speech companion, even one found beside the model.",
+    )
+    ap.add_argument(
         "--adapter",
         default=None,
         metavar="PATH",
@@ -1636,6 +1648,7 @@ def _run_generate(args) -> int:
     check_or_exit(args.gguf,
                   streaming=getattr(args, "stream_experts", False))
     preset_native_fp_wire_env(args)
+    companion = _audio_companion(args)
 
     from gmlx.gen.thinking_budget import install_finish_thinking_key
 
@@ -1749,13 +1762,15 @@ def _run_generate(args) -> int:
         args.max_tokens = _DIFFUSION_MAX_TOKENS
         args._max_tokens_capped = True
 
+    prompt = (args.prompt if companion is None
+              else _audio_prompt_ids(args, tok, companion, template_kwargs))
     # Cap-vs-EOS is not reported back on this path (generate returns text), so
     # no cap-hit note here; the MTP/VLM paths and chat print one.
     print(f"[generate] max_tokens={max_tokens_label(args)} temp={args.temp}\n")
     generate(
         model,
         tok,
-        args.prompt,
+        prompt,
         max_tokens=args.max_tokens,
         temp=args.temp,
         top_p=args.top_p,
@@ -2169,6 +2184,10 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
         _set("mmproj", rm.mmproj, "mmproj")
     _set("adapter", rm.adapter, "adapter")
     _set("draft_gguf", rm.draft_gguf, "draft_gguf")
+    if not getattr(args, "no_asr", False):
+        _set("asr", getattr(rm, "asr", None), "asr")
+        if getattr(rm, "no_asr", False):
+            _set("no_asr", True, "asr")
     rope = getattr(rm, "rope_scaling", None)
     if rope is not None:
         # The config's rope_scaling block, one flag at a time, so an explicit
@@ -2501,6 +2520,50 @@ def _media_inputs(args) -> tuple[list[str], list[str]]:
              if s.strip()],
             [s for s in (getattr(args, "audio", None) or "").split(",")
              if s.strip()])
+
+
+def _audio_companion(args) -> str | None:
+    """The speech companion that reads this run's --audio, or None when the
+    model takes audio another way or no audio is given. Raises ValueError
+    for a model that reads audio through a companion when none is paired."""
+    from gmlx import asr
+
+    if not _media_inputs(args)[1] or not asr.pairs_with_companion(args.gguf):
+        return None
+    path = asr.companion_path(args.gguf, getattr(args, "asr", None),
+                              getattr(args, "no_asr", False))
+    if path is None:
+        raise ValueError(asr.NO_COMPANION)
+    return path
+
+
+def _audio_prompt_ids(args, tok, companion: str, template_kwargs) -> list[int]:
+    """The prompt ids of a run with --audio on a model that reads audio
+    through ``companion``: each clip an audio part before the prompt, the
+    template's markers replaced by the transcripts."""
+    from gmlx import asr
+    from gmlx.gen.generation import encode_prompt
+    from gmlx.serve.media_programs import decode_mono
+
+    speech = asr.companion(companion)
+    clips = _media_inputs(args)[1]
+    print(f"[asr] transcribing {len(clips)} clip(s) with "
+          f"{os.path.basename(companion)}", file=sys.stderr)
+    texts = [speech.transcribe(decode_mono(os.path.expanduser(c), speech.sample_rate))
+             for c in clips]
+    messages = []
+    if args.system_prompt:
+        messages.append({"role": "system", "content": args.system_prompt})
+    messages.append({"role": "user", "content": [{"type": "audio"}] * len(clips)
+                     + [{"type": "text", "text": args.prompt}]})
+    rendered = tok.apply_chat_template(messages, tokenize=False,
+                                       add_generation_prompt=True,
+                                       **(template_kwargs or {}))
+    marker = asr.marker_id(tok)
+    if marker is None:
+        raise ValueError("the model's tokenizer has no audio marker token")
+    return asr.splice(encode_prompt(tok, rendered), marker, texts,
+                      lambda t: tok.encode(t, add_special_tokens=False))
 
 
 def _run_mode(args) -> str:

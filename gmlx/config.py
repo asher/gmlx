@@ -11,7 +11,7 @@ Shape (see ``docs/config.md`` for the full reference)::
     server:    {host, port, api_key, no_auth, media_urls, cors_origins, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
-    models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, context_copy, rope_scaling, overrides, pin, ttl_s}}
+    models:    {<id>: {path, profile, family, profiles, mmproj, asr, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, context_copy, rope_scaling, overrides, pin, ttl_s}}
     aliases:   {<name>: <id> | <id>@<profile>}    # friendly name / profile preset
     discover:  [{dir, recursive, pair_mmproj, speculative}]
     talk:      {model, voice, speed, system, language, max_tokens, mode, wake_word, wake_threshold, vad, input_device, output_device, chime, brain, push_to_talk_modifier}
@@ -181,7 +181,7 @@ TEMPLATE_CALL_KEYS = frozenset({
     "tokenizer_kwargs", "sanitize_control_tokens", "return_messages",
     "num_images", "num_audios", "video", "max_pixels", "fps", "audio_token",
     "processor_kwargs", "load_audio_from_video"})
-_MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj",
+_MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj", "asr",
                          "draft_gguf", "native_mtp", "adapter", "stream",
                          "cpu_moe",  # deprecated alias for `stream:`
                          "moe_experts", "moe_expert_mass",
@@ -551,6 +551,9 @@ class ModelCfg:
     # `@coding` means for this one model.
     profiles: dict = field(default_factory=dict)
     mmproj: str | None = None
+    # Speech companion GGUF for a model that reads audio through one; False
+    # turns off the one discovery would pair.
+    asr: str | bool | None = None
     draft_gguf: str | None = None
     # Draft with the GGUF's own MTP head even when draft_gguf is set (an
     # external drafter otherwise wins).
@@ -1123,6 +1126,10 @@ class ResolvedModel:
     # the row channel holds adapters[i]) and is what enters load_signature.
     adapter: str | None = None
     adapters: tuple = ()
+    # Speech companion: a resolved abspath, or None to let discovery pair one;
+    # no_asr turns pairing off. Loaded on first audio, not load-affecting.
+    asr: str | None = None
+    no_asr: bool = False
     # Execution placement ("experts" = routed experts stream, rest of the model
     # + KV on GPU; "cpu" = whole model on CPU); load-affecting - it restructures
     # which device/stream the model runs on (and what gets wired).
@@ -2009,6 +2016,9 @@ def resolve_model(
         speculative_auto=bool(model.speculative_auto),
         context_copy=bool(model.context_copy),
         mmproj=resolve_path(model.mmproj, cfg.model_dirs),
+        asr=(resolve_path(model.asr, cfg.model_dirs)
+             if isinstance(model.asr, str) else None),
+        no_asr=model.asr is False,
         draft_gguf=(None if model.native_mtp
                     else resolve_path(model.draft_gguf, cfg.model_dirs)),
         adapter=resolve_path(model.adapter, cfg.model_dirs),
@@ -2416,6 +2426,13 @@ def _normalize_fast_disk(value, where: str = "model"):
     return mode
 
 
+def _normalize_asr(value, where: str = "model"):
+    """``asr:``: a companion GGUF path, ``false`` to pair none, or unset."""
+    if value is None or value is False or (isinstance(value, str) and value):
+        return value
+    raise ConfigError(f"{where}.asr: expected a GGUF path or false, got {value!r}")
+
+
 def _normalize_stream(value, where: str = "model", legacy=None):
     """Normalize a ``stream:`` value to one of None / "experts" / "cpu".
 
@@ -2681,6 +2698,7 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
         family=raw.get("family"),
         profiles=norm_tweaks,
         mmproj=raw.get("mmproj"),
+        asr=_normalize_asr(raw.get("asr"), f"model {model_id!r}"),
         draft_gguf=raw.get("draft_gguf"),
         native_mtp=bool(raw.get("native_mtp", False)),
         adapter=raw.get("adapter"),

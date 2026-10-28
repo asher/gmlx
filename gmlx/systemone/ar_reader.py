@@ -26,9 +26,14 @@ from gmlx.gen.generation import encode_prompt
 
 from . import letters
 
-# Tokens one forward may carry: a prefix chunk, or a bucket of padded tails.
-# One forward is the longest a chat stream waits for a decision.
+# Tokens one prefix forward carries. The chunks set the prefix's bits, so
+# kept prefixes are keyed on this size.
 FORWARD_TOKENS = 128
+# Tokens one forward of padded tails may carry. Every pass of a small
+# decision fits one forward, and one forward is the longest a chat stream
+# waits for a decision. Grouping changes a score's last bits, so the size
+# is fixed and never taken from load.
+TAIL_TOKENS = 256
 # Cap on the per-layer copy the views make: rows x (prefix + tail) keys and
 # values, plus rows x the recurrent state.
 VIEW_BYTES = 512 << 20
@@ -64,6 +69,22 @@ def _trunk_and_head(model) -> tuple[Any, Any]:
         embed = getattr(trunk, "embed_tokens", None)
         head = getattr(embed, "as_linear", None)
     return trunk, head
+
+
+def _head_steps(model) -> list:
+    """The scalar steps a model may apply to its logits after the head, to
+    try in the read path check: none, Granite's division by
+    ``logits_scaling`` and Cohere's product with ``logit_scale``."""
+    m = text_model(model)
+    args = getattr(getattr(m, "language_model", m), "args", None)
+    steps: list = [None]
+    ls = getattr(args, "logits_scaling", None)
+    if ls:
+        steps.append(lambda z, s=float(ls): z / s)
+    lg = getattr(args, "logit_scale", None)
+    if lg is not None:
+        steps.append(lambda z, s=float(lg): z * s)
+    return steps
 
 
 def _letter_rows(head, ids: list[int]):
@@ -161,7 +182,7 @@ def _view_kinds(cache) -> Optional[list[str]]:
 
     kinds = []
     for c in cache:
-        if type(c) is KVCache:
+        if type(c) is KVCache or getattr(c, "plain_kv", False):
             kinds.append("kv")
         elif type(c) is ArraysCache:
             kinds.append("arr")
@@ -244,20 +265,10 @@ class LetterTokens:
         return [i[0] for i in ids]
 
 
-def split_point(tokens: LetterTokens, state: str) -> tuple[list[int], int]:
-    """The prefix ids every pass on ``state`` shares, and their length: the
-    common start of the prompt that ends at the state and of a pass prompt.
-    Every pass continues the state with the same text, so any pass gives
-    the same split. Tokens that merge across the state's end stay in the
-    tails."""
-    head = tokens.ids(letters.prefix_text(state))
-    full = tokens.ids(letters.prompt_text(state, "", []))
-    n = 0
-    for a, b in zip(head, full):
-        if a != b:
-            break
-        n += 1
-    return full[:n], n
+def split_point(tokens, state: str, style=letters.BRACKET) -> tuple[list[int], int]:
+    """The prefix ids every pass on ``state`` shares, and their length, as
+    the format (``style``) splits them."""
+    return letters.as_format(style).split(tokens, state)
 
 
 def _no_rows(rows: int):
@@ -278,6 +289,7 @@ class LetterReader:
         self.head: Any
         self.trunk, self.head = _trunk_and_head(model)
         self.rows: Optional[tuple[Any, Any]] = None
+        self.step: Optional[Callable[[Any], Any]] = None   # after the head
         self.path = None          # "rows" or "logits", set by the self-check
         self.forwards = 0
 
@@ -322,18 +334,21 @@ class LetterReader:
             h = self._hidden(x, cache)[rows, pick].astype(mx.float32)
             weights, bias = self.rows
             out = h @ weights.T
-            return out + bias if bias is not None else out
+            out = out + bias if bias is not None else out
+            return self.step(out) if self.step is not None else out
         logits = self._full(x, cache)[rows, pick]
         return logits[:, mx.array(self.letter_ids)].astype(mx.float32)
 
     def check(self, rows_scope: Optional[Callable[[int], Any]] = None) -> str:
         """Choose how letter scores are read. The float32 head rows serve
-        when the model's logits are exactly the head of its trunk and the
-        rows reproduce the head's letter scores; otherwise the full logits
-        do. Runs on a short probe, again after an adapter replaces the head."""
+        when the model's logits are exactly the head of its trunk, or the
+        head and one of the scalar steps of ``_head_steps``, and the rows
+        reproduce the head's letter scores; otherwise the full logits do.
+        Runs on a short probe, again after an adapter replaces the head."""
         trunk, head = _trunk_and_head(self.model)
         if getattr(head, "__self__", head) is not getattr(self.head, "__self__", self.head):
             self.trunk, self.head, self.path, self.rows = trunk, head, None, None
+            self.step = None
         if self.path is not None:
             return self.path
         self.path = "logits"
@@ -355,11 +370,15 @@ class LetterReader:
         exact = h[0, -1].astype(mx.float32) @ weights.T
         if bias is not None:
             exact = exact + bias
-        same = mx.array_equal(full, split)
-        close = mx.max(mx.abs(exact - split[letter].astype(mx.float32))) <= 0.25
-        mx.eval(same, close)
-        if bool(same) and bool(close):
-            self.rows, self.path = rows, "rows"
+        for step in _head_steps(self.model):
+            got = split if step is None else step(split)
+            if not mx.array_equal(full, got).item():
+                continue
+            ref = exact if step is None else step(exact)
+            close = mx.max(mx.abs(ref - got[letter].astype(mx.float32))) <= 0.25
+            if close.item():
+                self.rows, self.step, self.path = rows, step, "rows"
+            break
         return self.path
 
     # -- prefix --------------------------------------------------------------
@@ -395,7 +414,7 @@ class LetterReader:
                 state = max(state, sum(a.nbytes for a in c.state if a is not None))
 
         def fits(rows: int, width: int) -> bool:
-            if rows * width > FORWARD_TOKENS:
+            if rows * width > TAIL_TOKENS:
                 return False
             return rows * ((offset + width) * per_token + state) <= VIEW_BYTES
         return fits
@@ -428,7 +447,7 @@ class LetterReader:
         fits = self._fits(prefix, kinds, offset)
         for group in plan_buckets([len(t) for t in tails], fits):
             width = max(len(tails[i]) for i in group)
-            if len(group) == 1 and width > FORWARD_TOKENS:
+            if len(group) == 1 and width > TAIL_TOKENS:
                 out[group[0]] = yield from self._one(prefix, prefix_ids, tails[group[0]])
                 continue
             pad = [tails[i] + [0] * (width - len(tails[i])) for i in group]
@@ -442,30 +461,32 @@ class LetterReader:
         return [s.tolist() for s in out]
 
 
-def decide_letters(reader: LetterReader, tokens: LetterTokens, schema, state: str,
+def decide_letters(reader: LetterReader, tokens, schema, state: str,
                    *, prefixes=None,
                    should_stop: Optional[Callable[[], bool]] = None,
                    rows_scope: Optional[Callable[[int], Any]] = None,
-                   style: str = letters.BRACKET) -> Step:
+                   style=letters.BRACKET) -> Step:
     """One letter decision, as a generator that yields after each forward.
     ``prefixes`` (a ``prefixes.Prefixes``) finds and keeps the state prefix
     between requests. ``rows_scope(rows)`` publishes the request's adapter
     scales around each forward. ``style`` is how the option lines open
-    (``letters.option_style``). Returns the decision body: answers and
-    diagnostics."""
+    (``letters.option_style``), or a format such as
+    ``model_template.TemplateFormat``. Returns the decision body: answers
+    and diagnostics."""
     from .prefixes import Prefixes
 
     prefixes = prefixes if prefixes is not None else Prefixes()
     started = time.time()
     reader.check(rows_scope)
     reader = reader.bind(rows_scope)
-    read = letters.decision(schema, state, style)
+    fmt = letters.as_format(style)
+    read = letters.decision(schema, state, fmt)
     out: dict[str, Any] = {}
     try:
         batch = next(read)
     except StopIteration as stop:
         batch, out = [], stop.value
-    ids, split = split_point(tokens, state)
+    ids, split = split_point(tokens, state, fmt)
     cache, reused, stored = yield from _prefix(reader, prefixes, ids)
     computed = 0 if reused else split
     passes, prompt_tokens = 0, 0
@@ -495,7 +516,7 @@ def decide_letters(reader: LetterReader, tokens: LetterTokens, schema, state: st
         "answers": out["answers"],
         "diagnostics": {
             "engine": "gmlx",
-            "readout": "letters",
+            "readout": fmt.name,
             "stages": out["stages"],
             "skipped": out["skipped"],
             "orderings": schema["orderings"],
@@ -521,14 +542,15 @@ def _prefix(reader: LetterReader, prefixes, ids: list[int]) -> Step:
     return cache, False, prefixes.store(ids, cache)
 
 
-def prewarm(reader: LetterReader, tokens: LetterTokens, state: str, *, prefixes=None,
-            rows_scope: Optional[Callable[[int], Any]] = None) -> Step:
+def prewarm(reader: LetterReader, tokens, state: str, *, prefixes=None,
+            rows_scope: Optional[Callable[[int], Any]] = None,
+            style=letters.BRACKET) -> Step:
     """Prefill the prefix of ``state`` and keep it, so the next decision on
     the state reads only its tails. Returns the prefix diagnostics."""
     from .prefixes import Prefixes
 
     prefixes = prefixes if prefixes is not None else Prefixes()
-    ids, split = split_point(tokens, state)
+    ids, split = split_point(tokens, state, style)
     if prefixes.tier in ("off", "unsupported"):
         return {"tokens": split, "reused": False, "stored": False, "tier": prefixes.tier}
     reader.check(rows_scope)

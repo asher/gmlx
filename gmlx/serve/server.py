@@ -1584,9 +1584,12 @@ def register_downloads(paths: list, config_path=None, *,
         stats = {}
         images: list = []
         named = {v["draft_gguf"] for v in pairs.values() if v.get("draft_gguf")}
+        # A speech companion pairs from where the pull left it; the scan
+        # has nothing to say about it.
+        asr = {os.path.abspath(v["asr"]) for v in pairs.values() if v.get("asr")}
         found = discovery.scan_dirs(specs, cfg.model_dirs,
                                     known_ids=set(cfg.models) | set(cfg.image_models),
-                                    known_paths=known_paths | _image_paths(cfg),
+                                    known_paths=known_paths | _image_paths(cfg) | asr,
                                     known_models=known_models, stats=stats,
                                     images=images,
                                     encoder_ids=_encoder_ids(known_models),
@@ -1747,6 +1750,12 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "(never the network). Off => no HF access at all.")
     ap.add_argument("--mmproj", default=None,
                     help="mmproj GGUF - makes a single positional model a VLM.")
+    asr = ap.add_mutually_exclusive_group()
+    asr.add_argument("--asr", default=None, metavar="PATH",
+                     help="Speech companion GGUF for a single positional model that "
+                          "reads audio through one (Granite Switch).")
+    asr.add_argument("--no-asr", action="store_true",
+                     help="Do not pair a speech companion with the single model.")
     ap.add_argument("--hf-source", default=None,
                     help="Processor/config override for a single VLM model (rarely "
                          "needed; the processor is synthesized from the GGUFs).")
@@ -2115,6 +2124,10 @@ def _bg_serve_args(a, cfg_path) -> list:
         out.append("--hf-cache")
     if a.mmproj:
         out += ["--mmproj", _abs(a.mmproj)]
+    if getattr(a, "asr", None):
+        out += ["--asr", _abs(a.asr)]
+    if getattr(a, "no_asr", False):
+        out.append("--no-asr")
     if a.hf_source:
         out += ["--hf-source", a.hf_source]
     if a.speculative:
@@ -2454,6 +2467,7 @@ def _cmd_service(argv: list, prog: str = "gmlx service") -> int:
                          help="--headless: don't auto-restart on crash.")
         a = ap.parse_args(rest)
         for flag, value in (("model", a.model), ("--mmproj", a.mmproj),
+                            ("--asr", a.asr),
                             ("--draft-gguf", a.draft_gguf), ("--adapter", a.adapter),
                             ("--config", a.config)):
             if value and not os.path.exists(os.path.expanduser(value)):
@@ -2539,6 +2553,7 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
     # the port bind, so a path typo gets one clear line instead of a half-up
     # server failing inside the uvicorn worker.
     for flag, value in (("model", a.model), ("--mmproj", a.mmproj),
+                        ("--asr", a.asr),
                         ("--draft-gguf", a.draft_gguf), ("--adapter", a.adapter),
                         ("--config", a.config)):
         if value and not os.path.exists(os.path.expanduser(value)):
@@ -2887,6 +2902,9 @@ def _single_model_cfg(a) -> ServerCfg:
         path=mp,
         profile=getattr(a, "profile", None),
         mmproj=os.path.abspath(os.path.expanduser(a.mmproj)) if a.mmproj else None,
+        asr=(False if getattr(a, "no_asr", False)
+             else os.path.abspath(os.path.expanduser(a.asr))
+             if getattr(a, "asr", None) else None),
         draft_gguf=(os.path.abspath(os.path.expanduser(a.draft_gguf))
                     if a.draft_gguf and not native_mtp else None),
         native_mtp=native_mtp,
@@ -3001,7 +3019,7 @@ def _speech_service(key: str, flag, cfg, resolve, check_extra):
         return None
     model = resolve(value)
     try:
-        check_extra()
+        check_extra(model)
     except ImportError as e:
         if flag or not _extra_missing(key, e):
             raise
@@ -3029,9 +3047,14 @@ def _resolve_service_models(cfg, a) -> None:
     from . import tts as tts_mod
 
     cfg.stt = _speech_service("stt", getattr(a, "stt", None), cfg,
-                              stt_mod.resolve_stt_model, stt_mod.import_mlx_whisper)
+                              lambda v: (stt_mod.paired_companion(cfg)
+                                         if str(v).strip().lower()
+                                         == stt_mod.ALIAS_COMPANION
+                                         else stt_mod.resolve_stt_model(v)),
+                              stt_mod.check_backend)
     cfg.tts = _speech_service("tts", getattr(a, "tts", None), cfg,
-                              tts_mod.resolve_tts_model, tts_mod.import_mlx_audio)
+                              tts_mod.resolve_tts_model,
+                              lambda _model: tts_mod.import_mlx_audio())
 
     # Relative GGUF paths search server.model_dirs, as a models: entry does.
     model_dirs = getattr(cfg, "model_dirs", None) or []

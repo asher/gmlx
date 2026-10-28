@@ -64,6 +64,7 @@ CANDIDATE_ARCHES = [
     "muse-spark",
     "beam",
     "flint",
+    "graniteswitch",
 ]
 
 # Deliberately varying lengths -> a ragged batch -> exercises the left-padding /

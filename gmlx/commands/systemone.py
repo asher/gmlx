@@ -105,15 +105,20 @@ def _run_letters(model, processor, parsed, path: str, name: str = "") -> dict:
 
     import mlx.core as mx
 
-    from gmlx.systemone import jev_response, letters
+    from gmlx.systemone import jev_response, letters, model_template
     from gmlx.systemone.ar_reader import LetterReader, LetterTokens, decide_letters, run_to_end
 
     schema, state = parsed.get("letters")
     if letters.has_image(parsed.body.get("state")):
         raise SystemExit("error: images are not supported: the model is text-only")
-    tokens = LetterTokens(processor)
     try:
-        letter_ids = tokens.letter_ids()
+        got = model_template.setup(processor, model)
+        if got is not None:
+            style, tokens = got
+            letter_ids = tokens.letter_ids(style.labels)
+        else:
+            style, tokens = letters.option_style(path, name), LetterTokens(processor)
+            letter_ids = tokens.letter_ids()
     except ValueError as e:
         raise SystemExit(f"error: {path} cannot answer letter reads: {e}") from e
     wired: Any = contextlib.nullcontext()
@@ -122,8 +127,7 @@ def _run_letters(model, processor, parsed, path: str, name: str = "") -> dict:
     started = time.perf_counter()
     with wired:
         result = run_to_end(decide_letters(
-            LetterReader(model, letter_ids), tokens, schema, state,
-            style=letters.option_style(path, name)))
+            LetterReader(model, letter_ids), tokens, schema, state, style=style))
     print(f"[systemone] {result['diagnostics']['timing']['reads']} forwards in "
           f"{(time.perf_counter() - started) * 1e3:.0f} ms", file=sys.stderr)
     return jev_response(schema, result, 0, os.path.basename(path))

@@ -79,7 +79,7 @@ flags refuses.
 | `gemma3`, `gemma4` | Sliding window layers keep a plain rope, as in llama.cpp. |
 | `glm4`, `glm4moe` | |
 | `gpt-oss` | Sliding window layers keep the header's factor 32. |
-| `granite`, `granitehybrid` | |
+| `granite`, `granitehybrid`, `graniteswitch` | |
 | `hy_v3`, `hyv4` | |
 | `k2-horizon` | |
 | `llama` | |

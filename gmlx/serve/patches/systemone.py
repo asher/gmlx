@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse, Response
 
 import gmlx.serve.bridge_vlm as serving
 from gmlx import lora_rows
-from gmlx.systemone import ar_reader, letters
+from gmlx.systemone import ar_reader, letters, model_template
 from gmlx.systemone import (
     Limits,
     SchemaError,
@@ -98,12 +98,30 @@ def _runtime_for(rg, canvas: int) -> _ModelRuntime:
 
 class _LetterRuntime:
     """Per-model letter state kept on the model's ResponseGenerator: the
-    letter ids and the reader, built on the engine thread by the first job."""
+    letter ids, the model's own decision template format when it ships one
+    (``fmt``), and the reader, built on the engine thread by the first
+    job."""
 
     def __init__(self, rg):
-        self.letter_ids = ar_reader.LetterTokens(
-            rg.processor, lock=rg._tokenizer_lock).letter_ids()
+        got = model_template.setup(rg.processor, rg.model, lock=rg._tokenizer_lock)
+        self.fmt = got[0] if got is not None else None
+        if got is not None:
+            self.letter_ids = got[1].letter_ids(self.fmt.labels)
+        else:
+            self.letter_ids = ar_reader.LetterTokens(
+                rg.processor, lock=rg._tokenizer_lock).letter_ids()
         self.reader: Optional[ar_reader.LetterReader] = None
+
+    def tokens(self, rg):
+        cls = (model_template.TemplateTokens if self.fmt is not None
+               else ar_reader.LetterTokens)
+        return cls(rg.processor, lock=rg._tokenizer_lock)
+
+    def style(self, spec, resolved):
+        """The template format, else the letter style for the model."""
+        if self.fmt is not None:
+            return self.fmt
+        return letters.option_style(getattr(spec, "path", None), resolved)
 
 
 def _letters_for(rg) -> _LetterRuntime:
@@ -121,8 +139,8 @@ def _letter_setup(rg, state: str, resolved: str):
     the prompt is a 400."""
     try:
         lrt = _letters_for(rg)
-        tokens = ar_reader.LetterTokens(rg.processor, lock=rg._tokenizer_lock)
-        tokens.render(letters.prefix_text(state))
+        tokens = lrt.tokens(rg)
+        tokens.render(letters.as_format(lrt.style(None, resolved)).prefix_text(state))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=(
             f"model {resolved!r} cannot answer letter reads: {e}")) from e
@@ -383,11 +401,11 @@ def make_systemone_endpoint(installed):
             if letters.has_image(body.get("state")):
                 raise HTTPException(status_code=400, detail=_NO_IMAGES)
             lrt, tokens = _letter_setup(rg, state, resolved)
-            style = letters.option_style(getattr(spec, "path", None), resolved)
-            ar_reader.split_point(tokens, state)
+            style = lrt.style(spec, resolved)
+            ar_reader.split_point(tokens, state, style)
             texts = (letters.pass_texts(schema, state, style)
                      + letters.winner_bounds(schema, state, style))
-            admitted = _admit_letters(rg, tokens, texts, ar_reader.FORWARD_TOKENS)
+            admitted = _admit_letters(rg, tokens, texts, ar_reader.TAIL_TOKENS)
             scales = lora_rows.request_scales(spec)
 
             def job(engine_rg, should_stop):
@@ -529,8 +547,10 @@ def make_prewarm_endpoint(installed):
                         f"model {resolved!r} reads decisions without a kept "
                         "prefix; prewarm applies to the letter readout"))
                 lrt, tokens = _letter_setup(rg, state, resolved)
-                ids, _split = ar_reader.split_point(tokens, state)
-                _admit_letters(rg, tokens, [letters.prefix_text(state)], 1)
+                style = lrt.style(spec, resolved)
+                ids, _split = ar_reader.split_point(tokens, state, style)
+                _admit_letters(rg, tokens,
+                               [letters.as_format(style).prefix_text(state)], 1)
                 scales = lora_rows.request_scales(spec)
 
                 def job(engine_rg, should_stop):
@@ -538,7 +558,7 @@ def make_prewarm_endpoint(installed):
                     return ar_reader.prewarm(
                         reader, tokens, state,
                         prefixes=_prefixes(engine_rg, reader, scales, tenant),
-                        rows_scope=_rows_scope(scales))
+                        rows_scope=_rows_scope(scales), style=style)
 
                 prefix = run_on_engine(
                     rg, job, request_id=f"pw-{uuid.uuid4().hex[:12]}",

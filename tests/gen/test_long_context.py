@@ -46,7 +46,7 @@ CANDIDATE_ARCHES = [
     "seed_oss", "smollm3", "granite", "ernie4_5-moe", "minimax-m2", "minimax-m3",
     "hunyuan-moe", "granitehybrid", "falcon-h1", "qwen3next", "hy_v3",
     "kimi-k3", "muse-glimmer", "muse-spark", "qwen4exp", "glm5-next", "glm5next", "hyv4",
-    "k2-horizon", "beam", "flint",
+    "k2-horizon", "beam", "flint", "graniteswitch",
     "qwen3vl",
 ]
 

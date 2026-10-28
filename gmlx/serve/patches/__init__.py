@@ -109,6 +109,7 @@ from .observability import (
     install_request_timing_log,
     uvicorn_log_config,
 )
+from .audio_cascade import install_audio_cascade
 from .render import install_chat_image_placement, install_faithful_history
 from .request_flow import (
     install_chat_load_offload,
@@ -157,6 +158,7 @@ __all__ = [
     "install_audio_translation_route",
     "install_audio_voices_route",
     "install_auto_docs_removal",
+    "install_audio_cascade",
     "install_chat_image_placement",
     "install_chat_load_offload",
     "install_chat_template_kwargs",
@@ -358,6 +360,9 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # Chat completions and Messages render each image in the message
     # that sent it.
     install_chat_image_placement()
+    # Outside the placement wrap: a model that reads audio through a speech
+    # companion gets each audio message as marked text first.
+    install_audio_cascade()
     install_messages_route()
     install_apc_lone_harvest()
     install_retire_render_capture()

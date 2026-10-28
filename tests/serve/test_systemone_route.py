@@ -16,6 +16,7 @@ import re
 import threading
 import types
 import zlib
+from pathlib import Path
 
 import pytest
 
@@ -631,6 +632,38 @@ def test_options_are_lettered_plainly_except_on_openjev(app):
     texts = [app.rg.processor.decode(t) for t in _LetterReader.seen_tails]
     assert texts and any("[A] billing: money" in t for t in texts)
     assert all("A) " not in t for t in texts)
+
+
+_SYSTEMONE = (Path(__file__).parents[1] / "fixtures"
+              / "granite_switch_systemone.jinja").read_text()
+
+
+def _with_systemone_template(rg):
+    rg.processor.gguf_named_templates = {"systemone": _SYSTEMONE}
+    rg.processor.gguf_decision = {"type": "granite-switch", "temperature": {},
+                                  "score_bias": {}}
+
+
+def test_a_model_with_a_systemone_template_reads_through_it(app, monkeypatch):
+    kept = _Kept()
+    monkeypatch.setattr(route, "_prefixes", lambda rg, reader, scales, tenant: kept)
+    client = app.use(diffusion_model=False)
+    _with_systemone_template(app.rg)
+    state = _letter_ticket()["state"]
+    r = client.post("/v1/prewarm", json={"model": "jev-latest", "state": state})
+    assert r.status_code == 200, r.text
+    warm = r.json()
+    r = client.post("/v1/systemone", json=_letter_ticket())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    diagnostics = body["diagnostics"]
+    assert diagnostics["readout"] == "template" and diagnostics["passes"] == 3
+    assert diagnostics["prefix"]["reused"] is True
+    assert diagnostics["prefix"]["tokens"] == warm["prompt_tokens"]
+    texts = [app.rg.processor.decode(t) for t in _LetterReader.seen_tails]
+    assert any("A: money\nB: outages\n" in t for t in texts)
+    assert all("A) " not in t for t in texts)
+    assert set(body["answers"]["urgent"]) == {"type", "noul"}
 
 
 def test_the_letter_reader_is_built_once_per_model(app):

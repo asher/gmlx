@@ -292,3 +292,73 @@ def test_transcription_runs_on_dedicated_worker(monkeypatch):
     stt.run_transcription(b"RIFFfake", filename="a.wav", configured_model=TURBO)
     assert where["transcribe"].startswith("stt-worker")       # off the caller
     assert where["transcribe"] != threading.current_thread().name
+
+
+# The speech companion backend
+def _gguf(path, arch):
+    import numpy as np
+    from gguf import GGUFWriter
+
+    w = GGUFWriter(str(path), arch)
+    w.add_tensor("x", np.zeros(4, np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return str(path)
+
+
+@pytest.fixture
+def companion(tmp_path, monkeypatch):
+    """A Granite Switch GGUF with a speech companion beside it, and a fake
+    companion transcript. mlx-whisper is forced missing."""
+    from gmlx.serve import asr_service
+
+    monkeypatch.setitem(sys.modules, "mlx_whisper", None)
+    model = _gguf(tmp_path / "granite-switch.gguf", "graniteswitch")
+    path = _gguf(tmp_path / "granite-speech.gguf", "granite-speech5-ctc")
+    heard = []
+
+    def transcribe(p, data, key=None, field="audio"):
+        heard.append((p, data))
+        return "hello there"
+    monkeypatch.setattr(asr_service, "transcribe", transcribe)
+    return types.SimpleNamespace(model=model, path=path, heard=heard)
+
+
+def test_a_companion_resolves_by_path_or_by_alias(companion):
+    assert stt.resolve_stt_model(companion.path) == companion.path
+    cfg = build_config({"models": {"gs": {"path": companion.model}}})
+    assert stt.resolve_stt_model("granite-speech", cfg) == companion.path
+    from gmlx.config import ConfigError
+
+    with pytest.raises(ConfigError, match="no model pairs"):
+        stt.resolve_stt_model("granite-speech", build_config({"models": {}}))
+    stt.check_backend(companion.path)             # needs no mlx-whisper
+
+
+def test_a_companion_transcribes_to_json_and_text(companion, decoded):
+    content, media = stt.run_transcription(
+        b"RIFFfake", filename="clip.wav", configured_model=companion.path,
+        model="granite-speech", language="fr", prompt="ignored")
+    assert (content, media) == ({"text": "hello there"}, "application/json")
+    content, media = stt.run_transcription(
+        b"RIFFfake", filename="clip.wav", configured_model=companion.path,
+        model="whisper-1", response_format="text")
+    assert (content, media) == ("hello there\n", "text/plain")
+    assert companion.heard == [(companion.path, b"RIFFfake")] * 2
+    assert decoded == []                          # the service decodes itself
+
+
+@pytest.mark.parametrize("fmt", ["verbose_json", "srt", "vtt"])
+def test_a_companion_refuses_timed_formats(companion, fmt):
+    with pytest.raises(stt.STTRequestError, match="text only"):
+        stt.run_transcription(b"x", filename="a.wav",
+                              configured_model=companion.path, response_format=fmt)
+    assert companion.heard == []
+
+
+def test_a_companion_refuses_translation(companion):
+    with pytest.raises(stt.STTRequestError, match="no translations"):
+        stt.run_transcription(b"x", filename="a.wav",
+                              configured_model=companion.path, task="translate")

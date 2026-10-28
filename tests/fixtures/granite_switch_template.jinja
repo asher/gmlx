@@ -1,0 +1,190 @@
+{%- set adapter_map = {
+    'guardian-core': {'token': '<|guardian-core|>', 'type': 'alora', 'invocation_text': '<guardian>', 'invocation_drop_chars': 1},
+    'decision': {'token': '<|decision|>', 'type': 'alora', 'invocation_text': '### DECISION', 'invocation_drop_chars': 3}
+} %}
+{#- Look up adapter token, type, and invocation text from adapter_name -#}
+{%- set adapter_token = '' %}
+{%- set adapter_type = '' %}
+{%- set adapter_invocation_text = '' %}
+{%- set adapter_invocation_drop_chars = 1 %}
+{%- if adapter_name is defined and adapter_name in adapter_map %}
+{%- set adapter_token = adapter_map[adapter_name]['token'] %}
+{%- set adapter_type = adapter_map[adapter_name]['type'] %}
+{%- if adapter_map[adapter_name]['type'] == 'alora' %}
+{%- set adapter_invocation_text = adapter_map[adapter_name]['invocation_text'] %}
+{%- set adapter_invocation_drop_chars = adapter_map[adapter_name]['invocation_drop_chars'] %}
+{%- endif %}
+{%- endif %}
+
+{%- set tools_system_message_prefix = 'You are a helpful assistant with access to the following tools. You may call one or more tools to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>'  %}
+{%- set tools_system_message_suffix = '\n</tools>\n\nFor each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>. If a tool does not exist in the provided list of tools, notify the user that you do not have the ability to fulfill the request.' %}
+{%- set documents_system_message_prefix = 'You are a helpful assistant with access to the following documents. You may use one or more documents to assist with the user query.\n\nYou are given a list of documents within <documents></documents> XML tags:\n<documents>' %}
+{%- set documents_system_message_suffix = '\n</documents>\n\nWrite the response to the user\'s input by strictly aligning with the facts in the provided documents. If the information needed to answer the question is not available in the documents, inform the user that the question cannot be answered based on the available data.' %}
+{%- if available_tools is defined and available_tools %}
+    {%- set tools = available_tools %}
+{%- endif %}
+{%- set ns = namespace(tools_system_message=tools_system_message_prefix,
+                       documents_system_message=documents_system_message_prefix,
+                       system_message=''
+                       ,
+                       adapter_token=adapter_token,
+                       adapter_type=adapter_type,
+                       adapter_invocation_text=adapter_invocation_text,
+                       adapter_invocation_drop_chars=adapter_invocation_drop_chars,
+                       alora_target_idx=-1,
+                       skip_next_role_marker=false
+                       ) %}
+{%- if tools %}
+    {%- for tool in tools %}
+        {%- set ns.tools_system_message = ns.tools_system_message + '\n' + (tool | tojson) %}
+    {%- endfor %}
+    {%- set ns.tools_system_message = ns.tools_system_message + tools_system_message_suffix %}
+{%- else %}
+    {%- set ns.tools_system_message = '' %}
+{%- endif %}
+{%- if documents %}
+    {%- for document in documents %}
+        {%- set ns.documents_system_message = ns.documents_system_message + '\n' + (document | tojson) %}
+    {%- endfor %}
+    {%- set ns.documents_system_message = ns.documents_system_message + documents_system_message_suffix %}
+{%- else %}
+    {%- set ns.documents_system_message = '' %}
+{%- endif %}
+{#- For lora adapters: insert activation token at the very beginning -#}
+{%- if ns.adapter_token and ns.adapter_type == 'lora' %}
+{{- ns.adapter_token }}
+{%- set ns.skip_next_role_marker = true %}
+{%- endif %}
+
+{%- if messages[0].role == 'system' %}
+    {%- if messages[0].content is string %}
+        {%- set ns.system_message = messages[0].content %}
+    {%- elif messages[0].content is iterable %}
+        {%- for entry in messages[0].content %}
+            {%- if entry.type== 'text' %}
+                {%- if ns.system_message != '' %}
+                    {%- set ns.system_message = ns.system_message + '\n' %}
+                {%- endif %}
+                {%- set ns.system_message = ns.system_message + entry.text %}
+            {%- endif %}
+        {%- endfor %}
+    {%- endif %}
+    {%- if tools and documents %}
+        {%- set ns.system_message = ns.system_message + '\n\n' +  ns.tools_system_message + '\n\n' + ns.documents_system_message %}
+    {%- elif tools %}
+        {%- set ns.system_message = ns.system_message + '\n\n' + ns.tools_system_message %}
+    {%- elif documents %}
+        {%- set ns.system_message = ns.system_message + '\n\n' + ns.documents_system_message %}
+    {%- endif %}
+{%- else %}
+    {%- if tools and documents %}
+        {%- set ns.system_message = ns.tools_system_message + '\n\n' + ns.documents_system_message  %}
+    {%- elif tools %}
+        {%- set ns.system_message = ns.tools_system_message %}
+    {%- elif documents %}
+        {%- set ns.system_message = ns.documents_system_message %}
+    {%- endif %}
+{%- endif %}
+{%- if ns.system_message %}
+    {%- if ns.skip_next_role_marker %}{%- set ns.skip_next_role_marker = false %}{%- else %}{{- '<|start_of_role|>' }}{%- endif %}
+        {{- 'system<|end_of_role|>' + ns.system_message + '<|end_of_text|>\n' }}
+{%- endif %}
+{#- ALoRA Pass 1: find the last user message containing the invocation text.
+     ns.alora_target_idx stays -1 when the invocation sequence is the assistant role
+     token sequence (not present in any user message); the fallback insertion below
+     handles that case. -#}
+{%- if ns.adapter_type == 'alora' and ns.adapter_invocation_text %}
+    {%- for _msg in messages %}
+        {%- if _msg.role == 'user' %}
+            {%- if _msg.content is string and ns.adapter_invocation_text in _msg.content %}
+                {%- set ns.alora_target_idx = loop.index0 %}
+            {%- elif _msg.content is not string and _msg.content is iterable %}
+                {%- set _msg_idx = loop.index0 %}
+                {%- for _entry in _msg.content %}
+                    {%- if _entry.type == 'text' and ns.adapter_invocation_text in _entry.text %}
+                        {%- set ns.alora_target_idx = _msg_idx %}
+                    {%- endif %}
+                {%- endfor %}
+            {%- endif %}
+        {%- endif %}
+    {%- endfor %}
+{%- endif %}
+{%- for message in messages %}
+    {%- set content = namespace(val='') %}
+    {%- if message.content is string %}
+        {%- set content.val = message.content %}
+    {%- else %}
+        {%- if message.content is iterable %}
+            {%- for entry in message.content %}
+                {%- if entry.type== 'text' %}
+                    {%- if content.val != '' %}
+                        {%- set content.val = content.val + '\n' %}
+                    {%- endif %}
+                    {%- set content.val = content.val + entry.text %}
+                {%- elif 'audio' in entry.type %}
+                    {%- set content.val = content.val + '<|audio|>' %}
+                {%- endif %}
+            {%- endfor %}
+        {%- endif %}
+    {%- endif %}
+        {#- ALoRA Pass 2: inject activation token AND drop the first token's
+         chars of the invocation text so the runtime-swapped embedding doesn't duplicate. -#}
+    {%- if loop.index0 == ns.alora_target_idx %}
+        {%- set _parts = content.val.rsplit(ns.adapter_invocation_text, 1) %}
+        {%- if _parts | length > 1 %}
+            {%- set content.val = _parts[0] + ns.adapter_token + ns.adapter_invocation_text[ns.adapter_invocation_drop_chars:] + _parts[1] %}
+        {%- endif %}
+    {%- endif %}
+{%- if (message.role == 'user') or (message.role == 'system' and not loop.first) %}
+        {%- if ns.skip_next_role_marker %}{%- set ns.skip_next_role_marker = false %}{%- else %}{%- if ns.skip_next_role_marker %}{%- set ns.skip_next_role_marker = false %}{%- else %}{{- '<|start_of_role|>' }}{%- endif %}
+        {{- '' }}{%- endif %}
+        {{- message.role + '<|end_of_role|>' + content.val + '<|end_of_text|>\n' }}
+    {%- elif message.role == 'assistant' %}
+        {%- if ns.skip_next_role_marker %}{%- set ns.skip_next_role_marker = false %}{%- else %}{%- if ns.skip_next_role_marker %}{%- set ns.skip_next_role_marker = false %}{%- else %}{{- '<|start_of_role|>' }}{%- endif %}
+        {{- '' }}{%- endif %}
+        {{- message.role + '<|end_of_role|>' + content.val }}
+        {%- if message.tool_calls %}
+            {%- for tool_call in message.tool_calls %}
+                {%- if (loop.first and content.val) or (not loop.first) %}
+                    {{- '\n' }}
+                {%- endif %}
+                {%- if tool_call.function %}
+                    {%- set tool_call = tool_call.function %}
+                {%- endif %}
+                {{- '<tool_call>\n{"name": "' }}
+                {{- tool_call.name }}
+                {{- '", "arguments": ' }}
+                {%- if tool_call.arguments is string %}
+                    {{- tool_call.arguments }}
+                {%- else %}
+                    {{- tool_call.arguments | tojson }}
+                {%- endif %}
+                {{- '}\n</tool_call>' }}
+            {%- endfor %}
+        {%- endif %}
+        {{- '<|end_of_text|>\n' }}
+    {%- elif message.role == 'tool' %}
+        {%- if loop.first or (messages[loop.index0 - 1].role != 'tool') %}
+            {%- if ns.skip_next_role_marker %}{%- set ns.skip_next_role_marker = false %}{%- else %}{{- '<|start_of_role|>' }}{%- endif %}
+        {{- 'user<|end_of_role|>' }}
+        {%- endif %}
+        {{- '\n<tool_response>\n' }}
+        {{- content.val }}
+        {{- '\n</tool_response>' }}
+        {%- if loop.last or (messages[loop.index0 + 1].role != 'tool') %}
+            {{- '<|end_of_text|>\n' }}
+        {%- endif %}
+    {%- endif %}
+{%- endfor %}
+{#- ALoRA fallback: insert activation token right before generation prompt.
+     Only fires when Pass 1 found no user message with the invocation text
+     (alora_target_idx == -1), meaning the adapter activates at the assistant
+     role token boundary rather than inside a user message. -#}
+{%- if ns.adapter_token and ns.adapter_type == 'alora' and ns.alora_target_idx == -1 %}
+{{- ns.adapter_token }}
+{%- set ns.skip_next_role_marker = true %}
+{%- endif %}
+{%- if add_generation_prompt %}
+    {%- if ns.skip_next_role_marker %}{%- set ns.skip_next_role_marker = false %}{%- else %}{{- '<|start_of_role|>' }}{%- endif %}
+        {{- 'assistant<|end_of_role|>' }}
+{%- endif %}

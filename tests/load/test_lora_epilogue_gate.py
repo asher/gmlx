@@ -98,40 +98,63 @@ ACCEPTED = {
     (10240, 3840, 32, 16): 0.044,
     (10240, 3840, 64, 4): 0.036,
 }
+# The same for the non-NAX rule. Ranks up to 8 take the epilogue at one row
+# only, so the wide and narrow outputs pay the stock path at 2 to 16 rows;
+# ranks 9 to 16 pay the square layer's epilogue at 4 and 8 rows.
+ACCEPTED_NON_NAX = {
+    (3840, 11520, 2, 8): 0.116,
+    (3840, 11520, 4, 8): 0.114,
+    (3840, 11520, 8, 8): 0.068,
+    (3840, 11520, 16, 8): 0.038,
+    (4096, 4096, 4, 16): 0.103,
+    (4096, 4096, 8, 16): 0.075,
+    (10240, 3840, 2, 8): 0.037,
+    (10240, 3840, 4, 8): 0.110,
+    (10240, 3840, 8, 8): 0.079,
+    (10240, 3840, 16, 8): 0.052,
+    (10240, 3840, 32, 8): 0.016,
+}
+# NAX flag -> (fixture, cell count, accepted losses, worst loss bound).
+SWEEPS = {
+    True: ("epilogue_gate_sweep_nax.json", 252, ACCEPTED, 0.22),
+    False: ("epilogue_gate_sweep_non_nax.json", 84, ACCEPTED_NON_NAX, 0.12),
+}
 
 
-def _sweep() -> dict:
+def _sweep(nax: bool) -> dict:
     path = (Path(__file__).resolve().parents[1] / "fixtures" / "lora"
-            / "epilogue_gate_sweep_nax.json")
+            / SWEEPS[nax][0])
     return json.loads(path.read_text())
 
 
-def test_the_nax_rule_routes_every_swept_cell_to_its_faster_path(
-        monkeypatch):
+@pytest.mark.parametrize("nax", [True, False])
+def test_the_rule_routes_every_swept_cell_to_its_faster_path(monkeypatch, nax):
     """Every cell where one path wins by more than the band goes to that
     path, or is an accepted exception at its measured cost."""
     monkeypatch.setattr(modules, "_LORA_EPILOGUE_MODE", "auto")
-    monkeypatch.setattr(modules, "_NAX", True)
-    sweep = _sweep()
-    assert sweep["head"]["nax"] is True and len(sweep["cells"]) == 252
+    monkeypatch.setattr(modules, "_NAX", nax)
+    sweep = _sweep(nax)
+    _, n_cells, accepted, bound = SWEEPS[nax]
+    assert sweep["head"]["nax"] is nax and len(sweep["cells"]) == n_cells
     band, lost = sweep["band"], {}
     for inp, out, rows, rank, ratio in sweep["cells"]:
         epilogue = modules.lora_epilogue_wins(rows, rank)
         cost = ratio - 1 if epilogue else 1 / ratio - 1
         if cost > band:
             lost[(inp, out, rows, rank)] = cost
-    assert set(lost) == set(ACCEPTED), sorted(set(lost) ^ set(ACCEPTED))
+    assert set(lost) == set(accepted), sorted(set(lost) ^ set(accepted))
     for cell, cost in lost.items():
-        assert abs(cost - ACCEPTED[cell]) < 1e-3, (cell, cost)
-    assert max(lost.values()) < 0.22
+        assert abs(cost - accepted[cell]) < 1e-3, (cell, cost)
+    assert max(lost.values()) < bound
 
 
-def test_no_rule_of_one_row_bound_per_rank_has_a_smaller_worst_loss():
+@pytest.mark.parametrize("nax", [True, False])
+def test_no_rule_of_one_row_bound_per_rank_has_a_smaller_worst_loss(nax):
     """The table is the minimax rule over the swept shapes: per rank, no
     other row bound loses less in its worst cell."""
-    sweep = _sweep()
+    sweep = _sweep(nax)
     rows_swept = sorted({c[2] for c in sweep["cells"]})
-    table = dict(modules._LORA_EPILOGUE_GATE[True])
+    table = dict(modules._LORA_EPILOGUE_GATE[nax])
 
     def worst(rank: int, bound: int) -> float:
         return max((r - 1 if rows <= bound else 1 / r - 1)
@@ -145,8 +168,19 @@ def test_no_rule_of_one_row_bound_per_rank_has_a_smaller_worst_loss():
         assert worst(rank, bound_of(rank)) <= best + 1e-9, rank
 
 
-def test_a_gpu_class_with_no_sweep_keeps_the_epilogue(routed):
-    assert False not in modules._LORA_EPILOGUE_GATE
+def test_a_decode_row_rides_the_epilogue_on_either_gpu_class(routed):
+    for nax in (True, False):
+        for rank in (4, 8, 16, 32):
+            assert routed("auto", nax, 1, rank) is True
+    assert routed("auto", False, 16, 64) is True
+    assert routed("auto", False, 2, 8) is False
+    assert routed("auto", False, 17, 16) is False
+    assert routed("auto", False, 1, 65) is False
+
+
+def test_a_gpu_class_with_no_sweep_keeps_the_epilogue(routed, monkeypatch):
+    monkeypatch.setattr(modules, "_LORA_EPILOGUE_GATE",
+                        {True: modules._LORA_EPILOGUE_GATE[True]})
     for rows, rank in ((1, 4), (64, 16), (4608, 128), (16896, 256)):
         assert routed("auto", False, rows, rank) is True
 

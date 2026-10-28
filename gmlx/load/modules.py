@@ -2247,6 +2247,8 @@ class LoRAKQuantLinear(nn.Module):
 
     def _add_extra(self, x, y):
         for i, (_a, _b, _scale, slot) in enumerate(self._kq_extra):
+            if lora_rows.slot_off(slot):
+                continue
             a_t, b_t = self._extra_tables(i, x.dtype)
             z = x @ a_t
             f = lora_rows.dense_row_factor(slot, z.shape[:-1], z.dtype)
@@ -2259,6 +2261,10 @@ class LoRAKQuantLinear(nn.Module):
         return y
 
     def __call__(self, x, *args, **kwargs):
+        if lora_rows.slot_off(self.slot):
+            # Every row of this forward has scale 0 here.
+            y = self.base(x, *args, **kwargs)
+            return self._add_extra(x, y) if self._kq_extra else y
         if (_KQ_LORA_EPILOGUE and not args and not kwargs
                 and x.dtype in (mx.float16, mx.bfloat16)
                 and isinstance(self.base, KQuantLinear)
@@ -2355,9 +2361,12 @@ _LORA_EPILOGUE_MODE = env_choice("GMLX_LORA_EPILOGUE", "auto",
 # rule with the smallest worst loss over the three swept layer shapes
 # (3840 to 11520, 4096 to 4096, 10240 to 3840): the row bound that suits a
 # narrow output is higher than the one that suits a wide output, and one
-# bound per rank serves both.
+# bound per rank serves both. The non-NAX row comes from the same sweep on
+# an M3 Max, ranks 8 to 64 and 1 to 64 rows; ranks up to 8 lose at 2 to 16
+# rows on the square shape, so they take the epilogue at one row only.
 _LORA_EPILOGUE_GATE = {
     True: ((8, 32), (16, 16), (32, 8)),
+    False: ((8, 1), (64, 16)),
 }
 _NAX: bool | None = None
 
@@ -2522,12 +2531,15 @@ def _make_lora_switch_glu(base_cls, caps=None):
 
         def __call__(self, x, indices, scores=None):
             lo = getattr(self.down_proj, "_kq_lora", None)
-            if lo is None:      # stamp removed: plain base behaviour
+            extra = getattr(self.down_proj, "_kq_lora_extra", None) or ()
+            # Stamp removed, or every row of this forward at scale 0 in
+            # every slot: plain base behaviour.
+            if lo is None or lora_rows.all_off(
+                    (lo.slot,) + tuple(e.slot for e in extra)):
                 return super().__call__(x, indices, scores) \
                     if scores is not None and hasattr(self, "_fused_ok") \
                     else super().__call__(x, indices)
             k = indices.shape[-1]
-            extra = getattr(self.down_proj, "_kq_lora_extra", None) or ()
             fused = hasattr(self, "_fused_ok") and self._fused_ok(x, indices)
             if fused:
                 if x.dtype == mx.float32:

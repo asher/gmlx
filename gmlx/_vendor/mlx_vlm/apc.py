@@ -4356,12 +4356,13 @@ def _align_exact_batch_caches_to_kv_policy(
     and pass through unchanged. Older float snapshots still need conversion
     so continuous-batching joins use the same per-layer types as cold rows.
     """
-    from .models.cache import BatchKVCache, should_quantize_kv_layer
+    from .models.cache import BatchKVCache, kv_policy_flags
 
-    n = len(caches)
+    # gmlx: a kv_policy_exempt side cache neither quantizes nor counts.
+    flags = kv_policy_flags(caches)
     out: List[Any] = []
     for layer_idx, c in enumerate(caches):
-        quantize = should_quantize_kv_layer(layer_idx, n)
+        quantize = flags[layer_idx]
         if not quantize or not isinstance(c, BatchKVCache):
             out.append(c)
             continue

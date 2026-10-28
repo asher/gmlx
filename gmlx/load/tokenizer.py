@@ -47,6 +47,7 @@ from tokenizers import (
 )
 from transformers import PreTrainedTokenizerFast
 
+from . import gguf_meta as _gguf_meta
 from . import loadlog
 
 # The dual-mode GGUF KV readers (decoded KV dict or gguf-py GGUFReader) live
@@ -96,6 +97,9 @@ _DIGIT_CLAUSE_BY_PRE = {
     # llama.cpp CHATGLM4 (glm4/glm4moe/glm-dsa/glm5-next GGUFs) is the generic
     # pattern with cl100k digit grouping.
     "glm4": r"\p{N}{1,3}", "chatglm-bpe": r"\p{N}{1,3}",
+    # llama.cpp DBRX and SMAUG share the llama3 regex. Granite 4.x GGUFs
+    # (granite, granitehybrid, graniteswitch) ship pre='dbrx'.
+    "dbrx": r"\p{N}{1,3}", "smaug-bpe": r"\p{N}{1,3}",
 }
 _DEFAULT_DIGIT_CLAUSE = r"\p{N}"
 
@@ -478,6 +482,8 @@ def load_tokenizer_from_gguf(
     # generate sites (the wrapper routes _-prefixed attrs back to itself).
     fast.gguf_suppress_tokens = _read_int_array(
         meta, "tokenizer.ggml.suppress_tokens") or []
+    fast.gguf_named_templates = _named_templates(meta)
+    fast.gguf_decision = _decision_meta(meta, arch)
     _attach_vlm_token_attrs(fast, tokens)
 
     template_eos = _infer_turn_end_eos(fast, eos_id, tokens, token_types)
@@ -503,6 +509,54 @@ def load_tokenizer_from_gguf(
         f"chat_template={'yes' if chat_template else 'no'}"
         + (f" ({len(chat_template)} chars)" if chat_template else ""))
     return fast
+
+
+def _meta_keys(meta) -> list[str]:
+    return list(meta.fields) if _gguf_meta.is_reader(meta) else list(meta)
+
+
+def _named_templates(meta) -> dict[str, str]:
+    """The extra chat templates (``tokenizer.chat_template.<name>``) by name."""
+    head = "tokenizer.chat_template."
+    out = {}
+    for key in _meta_keys(meta):
+        if key.startswith(head) and len(key) > len(head):
+            text = _read_string(meta, key)
+            if text:
+                out[key[len(head):]] = text
+    return out
+
+
+def _decision_meta(meta, arch: str) -> dict | None:
+    """``<arch>.decision.*``: the decision type, and the temperatures and
+    score biases the decision readout applies, as llama.cpp reads them.
+    None when the GGUF names no decision type."""
+    prefix = f"{arch}.decision."
+    kind = _read_string(meta, prefix + "type")
+    if not kind:
+        return None
+    temps: dict[str, float] = {}
+    bias: dict[int, list[float]] = {}
+    for key in _meta_keys(meta):
+        if key.startswith(prefix + "temperature."):
+            t = _gguf_meta.read_float(meta, key)
+            if t is None or not t > 0:
+                loadlog.verbose_print(f"[tokenizer] ignored {key}: not positive")
+                continue
+            temps[key[len(prefix + "temperature."):]] = t
+        elif key.startswith(prefix + "score_bias."):
+            parts = key[len(prefix + "score_bias."):].split(".")
+            try:
+                n, level = int(parts[0]), int(parts[1])
+                ok = len(parts) == 2 and 2 <= n <= 255 and 0 <= level < n
+            except (ValueError, IndexError):
+                ok = False
+            if not ok:
+                loadlog.verbose_print(f"[tokenizer] ignored {key}")
+                continue
+            bias.setdefault(n, [0.0] * n)[level] = float(
+                _gguf_meta.read_float(meta, key) or 0.0)
+    return {"type": kind, "temperature": temps, "score_bias": bias}
 
 
 # Style classification

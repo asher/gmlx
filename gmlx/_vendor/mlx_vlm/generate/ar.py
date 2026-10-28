@@ -985,10 +985,11 @@ def _make_cache(
 
     if hasattr(model, "make_cache"):
         model_cache = model.make_cache()
-        n = len(model_cache)
+        # gmlx: a kv_policy_exempt side cache neither quantizes nor counts.
+        quantize = cache.kv_policy_flags(model_cache)
         return [
-            to_batch_cache(c, quantize=cache.should_quantize_kv_layer(i, n))
-            for i, c in enumerate(model_cache)
+            to_batch_cache(c, quantize=q)
+            for c, q in zip(model_cache, quantize)
         ]
     else:
         if kv_bits is not None:

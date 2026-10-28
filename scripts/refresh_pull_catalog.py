@@ -8,7 +8,8 @@
 
 For each entry of gmlx/load/catalog.py it reads the model card, lists the
 repo at its pinned revision (main before one is recorded), range-reads
-every shard header of each rung, the vision tower and the drafter, and
+every shard header of each rung, the vision tower, the drafter and the
+speech companion, and
 prints what gmlx/load/catalog_facts.py should hold: the files each
 quality tier maps to, their sizes, text and lookup-table bytes, the
 memory class a MoE streams from, the full-precision cache cost, the
@@ -469,6 +470,29 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
                 problems.append(f"{seed.name}: the repo ships a drafter the entry does not "
                                 f"list: {path}")
 
+    # The speech companion.
+    asr = None
+    if seed.asr_file:
+        a_card = card(seed.asr_repo)
+        a_rec = (recorded or {}).get("asr")
+        a_rev = a_rec[0] if a_rec else a_card["sha"]
+        if a_rec and a_card["sha"] != a_rev:
+            notes.append(f"{seed.asr_repo}: main is at {a_card['sha'][:8]}, newer "
+                         f"than the pinned {a_rev[:8]}")
+        a_files = listing(seed.asr_repo, a_rev)
+        if seed.asr_file not in a_files:
+            problems.append(f"{seed.name}: speech companion {seed.asr_file} is not in "
+                            f"{seed.asr_repo}")
+        else:
+            a = header(seed.asr_repo, seed.asr_file, a_rev, cache)
+            aarch = read_string(a.kv, "general.architecture")
+            if aarch not in arch_table.ASR_ARCHES:
+                problems.append(f"{seed.name}: {seed.asr_file} is arch {aarch!r}, not a "
+                                "speech companion")
+            if arch_table.ASR_COMPANION_REPOS.get(arch) != seed.asr_repo.split("/")[-1]:
+                problems.append(f"{seed.name}: {arch} does not pair with {seed.asr_repo}")
+            asr = (a_rev, int(a_files[seed.asr_file]))
+
     facts = {
         "revision": revision, "params": params, "n_params": n_params, "arch": arch, "moe": moe,
         "native_mtp": native, "license": c["license"],
@@ -478,6 +502,8 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
         "heads": int(heads or 0), "trained_ctx": trained_ctx,
         "kv_cost": tuple(kv_cost), "rungs": tuple(rungs),
     }
+    if asr is not None:
+        facts["asr"] = asr
     if c["license"] == "other" and not seed.license_note:
         problems.append(f"{seed.name}: license is other ({c['license_name']}); the seed "
                         "needs a license_note")
@@ -496,6 +522,8 @@ def facts_text(facts: dict) -> str:
                     "license_url", "license_name", "mmproj_bytes", "drafter", "heads",
                     "trained_ctx", "kv_cost"):
             lines.append(f"        {key!r}: {f[key]!r},")
+        if f.get("asr"):
+            lines.append(f"        'asr': {f['asr']!r},")
         lines.append("        'rungs': (")
         for r in f["rungs"]:
             lines.append(f"            {tuple(r)!r},")

@@ -226,6 +226,17 @@ URLs from public hosts. Each item holds at most 32 MiB. Images can be PNG,
 JPEG, WebP, GIF, BMP or TIFF, and videos MP4, QuickTime, Matroska, WebM or
 AVI.
 
+A text model that reads audio through a speech companion, such as
+[Granite Switch](granite-switch.md), takes `input_audio` parts on
+`/v1/chat/completions` and `/v1/responses`. The server transcribes each
+clip and puts the transcript where the clip was in the message. Without a
+companion, a request with audio gets a 400. `/v1/estimate` reports such a
+request as `media: true`, because the transcript length is unknown until
+the clip is transcribed.
+
+Other models with an audio tower take audio on `/v1/chat/completions`
+only. `/v1/responses` answers a request with audio for them with a 400.
+
 ## Limits and back-pressure
 
 A model's context window comes from its GGUF.

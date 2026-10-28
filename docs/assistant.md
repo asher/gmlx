@@ -132,6 +132,71 @@ Unlike memory, which recalls facts about you on every turn, a search tool
 works on documents you load, and the model decides when to use it. For
 document search in a chat app, see [RAG pipelines](rag.md).
 
+### Decisions as a tool
+
+This tool sends a question with fixed options to
+[`/v1/systemone`](decisions.md) and returns the top answer with its
+probability, such as `train, score 0.88`. The model calls it when you ask
+it to choose between options or ask a yes or no question. Save the script
+as `/Users/me/decide-tool.py`. A gmlx checkout has the same file at
+[`examples/assistant-tools/decide-tool.py`](https://github.com/asher/gmlx/blob/main/examples/assistant-tools/decide-tool.py):
+
+```python
+# /// script
+# dependencies = ["mcp<2"]
+# ///
+"""A decide tool for the gmlx assistant: asks /v1/systemone and returns the
+top answer with its score."""
+import json
+import os
+import urllib.request
+
+from mcp.server.fastmcp import FastMCP
+
+URL = os.environ.get("GMLX_URL", "http://127.0.0.1:8080") + "/v1/systemone"
+mcp = FastMCP("decide")
+
+
+@mcp.tool()
+def decide(question: str, options: list[str], context: str = "") -> str:
+    """Pick the best of a fixed set of options with the decision model. For a
+    yes or no question, pass the options ["yes", "no"]. Put any facts the
+    user gave in context."""
+    if sorted(o.lower() for o in options) == ["no", "yes"]:
+        q = {"type": "noul", "instructions": question}
+    else:
+        q = {"type": "choice", "instructions": question,
+             "criteria": {o: None for o in options}}
+    body = {"state": context or question, "questions": {"q": q}}
+    req = urllib.request.Request(URL, json.dumps(body).encode(),
+                                 {"content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        a = json.load(r)["answers"]["q"]
+    if a["type"] == "noul":
+        top, score = ("yes", a["noul"]) if a["noul"] >= 0.5 else ("no", 1 - a["noul"])
+    else:
+        top, score = a["choice"], a["probabilities"][a["choice"]]
+    return f"{top}, score {score:.2f}"
+
+
+mcp.run()
+```
+
+```yaml
+assistant:
+  mcp:
+    - name: decide
+      command: [uv, run, --script, /Users/me/decide-tool.py]
+```
+
+The server's decision model answers: the model in
+[`server.systemone.model`](config.md#serversystemonemodel), or the
+default model when that is not set.
+[Serving a decision model](decisions.md#serving-a-decision-model) compares
+the choices. The tool needs [uv](https://docs.astral.sh/uv/) and reaches
+the server at `http://127.0.0.1:8080`. For another port, add
+`env: {GMLX_URL: "http://127.0.0.1:PORT"}` to its entry.
+
 ## Memory
 
 The assistant remembers facts across conversations. After each turn, it

@@ -156,6 +156,8 @@ the [`sampling` keys](config.md#sampling):
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--mmproj PATH` | None | Load this projector GGUF to make the model multimodal. |
+| `--asr PATH` | Found beside the model | Speech companion GGUF for a model that reads audio through one, such as [Granite Switch](granite-switch.md). |
+| `--no-asr` | Off | Pair no speech companion. |
 | `--adapter PATH` | None | Apply this GGUF LoRA adapter at load, for text only. |
 | `--profile NAME` | None | Apply a built-in intent such as `coding` or `reasoning-high`, resolved for the model's family. |
 | `--system-prompt STR` | None | Use this system prompt when the request has none. |
@@ -402,7 +404,9 @@ are refused:
 | `--mmproj PATH` | None | Load this projector GGUF. |
 | `--no-mmproj` | Off | Load the text model alone, without the `mmproj` that the config gives it. |
 | `--image PATH_OR_URL` | None | Prepend these comma-separated images. |
-| `--audio PATH_OR_URL` | None | Prepend these comma-separated audio files. The model needs an audio tower. |
+| `--audio PATH_OR_URL` | None | Prepend these comma-separated audio files. The model needs an audio tower or a speech companion. |
+| `--asr PATH` | Found beside the model | Speech companion GGUF that transcribes `--audio` for a model that reads audio through one, such as [Granite Switch](granite-switch.md). |
+| `--no-asr` | Off | Pair no speech companion. |
 | `--resize-shape N_OR_WxH` | Model default | Resize images before encoding. |
 
 These flags inspect and benchmark:
@@ -540,7 +544,7 @@ These [`gmlx run`](#gmlx-run) flags mean the same as they do there:
 | Reasoning | `--reasoning`, `--thinking`, `--reasoning-effort`, `--thinking-budget`, `--thinking-start-token`, `--thinking-end-token` |
 | Loading | `--arch`, `--hf-source`, `--chat-template`, `--no-chat-template`, `--chat-template-config`, `--no-remap`, `--no-zero-copy`, `--adapter` |
 | Memory | `--max-kv-size`, `--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`, `--kv-tail-tokens`, `--quantized-kv-start`, `--prefill-step-size`, `--dtype` |
-| Multimodal | `--mmproj`, `--no-mmproj`, `--resize-shape` |
+| Multimodal | `--mmproj`, `--no-mmproj`, `--asr`, `--no-asr`, `--resize-shape` |
 | Speculation | `--speculative`, `--mtp`, `--no-speculative`, `--no-mtp`, `--draft-gguf`, `--native-mtp`, `--draft-block-size`, `--stochastic-mtp`, `--no-stochastic-mtp` |
 | Streaming | `--stream-experts`, `--stream-cpu`, `--stream-fast-disk` |
 | Streaming feeders | `--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`, `--gpu-keepwarm`, `--no-gpu-keepwarm` |
@@ -548,7 +552,7 @@ These [`gmlx run`](#gmlx-run) flags mean the same as they do there:
 | Rope scaling | `--rope-scaling`, `--rope-scale`, `--rope-freq-base`, `--rope-freq-scale` |
 | YaRN | `--yarn-orig-ctx`, `--yarn-ext-factor`, `--yarn-attn-factor`, `--yarn-beta-slow`, `--yarn-beta-fast` |
 
-A server client refuses `--adapter`, `--mmproj`, `--no-mmproj`, `--chat-template`,
+A server client refuses `--adapter`, `--mmproj`, `--no-mmproj`, `--asr`, `--no-asr`, `--chat-template`,
 `--no-chat-template`, `--chat-template-config` and the rope scaling flags,
 and ignores the other
 loading, memory, speculation and streaming flags. A base model with no
@@ -714,9 +718,11 @@ The recommended models:
 | `qwen3.5-9b` | 9B | Apache 2.0 | chat with a long context |
 | `gemma-4-12b` | 12B | Apache 2.0 | general chat |
 | `k2-horizon-7b` | 7B | Apache 2.0 | chat with a 512K context |
+| `granite-switch-4.1-8b` | 8B | Apache 2.0 | chat, decisions and audio |
 | `gemma-4-26b-a4b` | 26B-A4B | Apache 2.0 | general chat |
 | `qwen3.8-27b` | 27B | Apache 2.0 | documents, code and tool calls |
 | `ternary-bonsai-2-27b` | 27B | Apache 2.0 | 27B-class chat on a small Mac |
+| `granite-switch-4.1-30b` | 30B | Apache 2.0 | chat, decisions and audio |
 | `qwen3.6-35b-a3b` | 35B-A3B | Apache 2.0 | general chat |
 | `ornith-1.5-35b-a3b` | 35B-A3B | MIT | coding |
 | `k2-horizon-mova-36b-a4b` | 36B-A4B | Apache 2.0 | chat with a 512K context |

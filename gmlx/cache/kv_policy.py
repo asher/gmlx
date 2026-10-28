@@ -356,7 +356,6 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
             "MTP batch rollback cannot trim packed KV; fp16 when batched",
             bits, group, mode, stack, kinds)
 
-    n = len(kinds)
     quantizable = [k for k in kinds
                    if (k == "kv" and can_quantize_kv) or k == "pool"]
     if not quantizable:
@@ -370,14 +369,14 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
             else "cache stack has no quantizable layers",
             bits, group, mode, stack, kinds)
 
-    from gmlx.cache.kv_cache import should_quantize_kv_layer
+    from gmlx.cache.kv_cache import kv_policy_flags
 
+    flags = kv_policy_flags(stack)
     packed = packed_bytes_per_element(bits, group)
     per = []
     for i, kind in enumerate(kinds):
         pools = sum(1 for _ in _quantizable_pools(stack[i]))
-        if (kind == "kv" and can_quantize_kv
-                and should_quantize_kv_layer(i, n)):
+        if kind == "kv" and can_quantize_kv and flags[i]:
             per.append(KvLayerPlan("kv", True, packed, pools))
         elif kind == "pool":
             per.append(KvLayerPlan("pool", False, packed, pools))
@@ -483,8 +482,9 @@ def _resolve_kvarn(stack, *, kv_bits, value_bits, mode, mtp, head_dim,
             no_kv_reason if (not can_quantize_kv and no_kv_reason)
             else "cache stack has no kvarn-convertible layers", kinds)
 
-    from gmlx.cache.kv_cache import should_quantize_kv_layer
+    from gmlx.cache.kv_cache import kv_policy_flags
 
+    flags = kv_policy_flags(stack)
     record = kvarn_bytes_per_element(k_bits, v_bits)
     regions = ((kvarn_fixed_tokens(tail), FP16_BPE),)
     step = kvarn_step_tokens()
@@ -492,7 +492,7 @@ def _resolve_kvarn(stack, *, kv_bits, value_bits, mode, mtp, head_dim,
     for i, kind in enumerate(kinds):
         pools = (sum(1 for _ in _quantizable_pools(stack[i]))
                  if pool_bits else 0)
-        if owns[i] and should_quantize_kv_layer(i, n):
+        if owns[i] and flags[i]:
             # A converted window is a kvarn record like any other; the
             # summary counts it as quantized, not as held fp16.
             per.append(KvLayerPlan("kv", True, record, pools, regions, step))
@@ -735,8 +735,11 @@ def hold_fp16(c):
     """Rebind a fresh cache to a subclass that hides to_quantized, so
     hasattr-gated converters leave the layer fp16. The subclass also
     carries the refusals in gmlx.cache.refusals, so the isinstance-gated
-    arms of mlx-vlm's KV quantizer and batch constructor leave it alone."""
-    if not hasattr(c, "to_quantized"):
+    arms of mlx-vlm's KV quantizer and batch constructor leave it alone.
+    A kv_policy_exempt side cache already refuses conversion and keeps its
+    own batch and extract members, so it is returned as is."""
+    if (not hasattr(c, "to_quantized")
+            or getattr(c, "kv_policy_exempt", False)):
         return c
     cls = type(c)
     held = _HELD_CLASSES.get(cls)

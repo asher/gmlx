@@ -131,6 +131,15 @@ def test_rates_survive_missing_metrics(monkeypatch):
 
 
 # --- dry run
+def test_an_audio_part_counts_as_media():
+    """A clip's transcript length is unknown before the clip is
+    transcribed, so a request with audio is not priced."""
+    msgs, media = est._normalize_messages([{"role": "user", "content": [
+        {"type": "input_audio", "input_audio": {"data": "UklGRg==", "format": "wav"}},
+        {"type": "text", "text": "what is said?"}]}])
+    assert media == 1 and msgs[0]["content"] == "what is said?"
+
+
 def test_normalize_messages_text_and_media():
     msgs, media = est._normalize_messages([
         {"role": "system", "content": "be brief"},

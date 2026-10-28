@@ -25,6 +25,11 @@ readouts take the same request and return the same answer shapes. The
 letter readout skips the fields it does not use and names them in an
 `ignoring unsupported parameter(s)` warning in the server log.
 
+A model whose file ships its own decision prompt, such as Granite Switch,
+answers through that prompt instead, as
+[How a decision is read](#how-a-decision-is-read) describes. It takes the
+same fields as the letter readout.
+
 | Field | DiffusionGemma | Letter readout |
 |-------|----------------|----------------|
 | `instructions` in a question | Optional | Required |
@@ -75,7 +80,9 @@ lowered to it.
 Describe each option so that no two overlap, since the probability splits
 between options that both fit. The letter readout lists up to 52 options in
 one prompt and reads a longer list in chunks, then once more over the chunk
-winners. A question id may not contain a colon or a newline.
+winners. A model's own decision prompt does the same, with as many options
+in one prompt as it has labels: `A` to `Z`, then the two-letter labels that
+are one token. A question id may not contain a colon or a newline.
 
 An `ask_if` list holds answers of the question named by its key: `"yes"` or
 `"no"` for a `noul`, option names for a `choice`, and level names for a
@@ -144,7 +151,8 @@ reports.
 `chunks`, the `thought`, the `samples`, each question's entropies and the
 settings it used. The letter readout adds `"readout": "letters"`, the option
 `orderings` and the `prefix` that [Repeated states](#repeated-states)
-describes.
+describes. A model's own decision prompt reports the same fields, with
+`"readout": "template"`.
 
 | Field | Readout | Meaning |
 |-------|---------|---------|
@@ -220,3 +228,10 @@ state, the question and its options under the letters `A`, `B` and so on.
 The model's probability for each letter at the start of its reply is the
 answer. [Letter readout](internals/letter-readout.md) describes the
 mechanism.
+
+A model can ship its own decision prompt as the chat template
+`tokenizer.chat_template.systemone`. Granite Switch does: its prompt puts
+the state in a user turn of its own, which runs on the base model, and
+opens the question turn with the `decision` adapter. That state turn is the
+part [Repeated states](#repeated-states) keeps. The answer is the model's
+probability for each option label at the start of its reply.

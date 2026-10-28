@@ -27,6 +27,9 @@ hands the tuple to the latter through a thread-keyed slot that asserts
 on every pop. Rows carry their tuple in a uid registry; the batch's
 step/prefill/round hooks publish the physical row vector from the uid
 list of that call.
+
+A uid publish also records, per adapter slot, whether every row of the
+forward has scale 0 (``slot_off``); the wrappers then run the base alone.
 """
 from __future__ import annotations
 
@@ -51,6 +54,7 @@ _current: mx.array | None = None       # (B, S) float32 for the forward in fligh
 _registry: dict = {}                    # uid -> tuple[float, ...] (len S)
 _derived: dict = {}                     # per-publish cache of cast/expanded factors
 _pending = threading.local()            # per-thread handoff between hooks
+_off: tuple | None = None               # per slot: every published row has scale 0
 
 
 class LoraRowsError(RuntimeError):
@@ -60,12 +64,12 @@ class LoraRowsError(RuntimeError):
 
 def configure(mode: str, n_slots: int = 1) -> None:
     """Set the channel mode (``static`` / ``rows``) and the adapter slot count."""
-    global _mode, _n_slots, _current
+    global _mode, _n_slots, _current, _off
     if mode not in ("static", "rows"):
         raise ValueError(f"lora_rows mode {mode!r} (expected 'static' or 'rows')")
     if n_slots < 1:
         raise ValueError(f"lora_rows n_slots {n_slots} (expected >= 1)")
-    _mode, _n_slots, _current = mode, int(n_slots), None
+    _mode, _n_slots, _current, _off = mode, int(n_slots), None, None
     _registry.clear()
 
 
@@ -100,8 +104,9 @@ def set_rows(scales) -> None:
     slot) or ``(B, S)`` float32, or ``None`` to clear. Published as float32
     deliberately (masking and logging read it); wrappers cast the factor to
     the delta dtype before multiplying, never the other way round."""
-    global _current
+    global _current, _off
     _derived.clear()
+    _off = None
     if scales is None:
         _current = None
         return
@@ -248,6 +253,16 @@ def _flat_rows(slot, tokens, k, shape):
     return arr
 
 
+def slot_off(slot: int) -> bool:
+    """True when every row of the published forward has scale 0 in
+    ``slot``. Known only for a uid publish; otherwise False."""
+    return _off is not None and slot < len(_off) and _off[slot]
+
+
+def all_off(slots) -> bool:
+    return all(slot_off(s) for s in slots)
+
+
 def check_rows(batch_rows: int) -> None:
     """Assert the published vector covers ``batch_rows`` rows (wrappers call
     this with their input's leading dim)."""
@@ -298,7 +313,13 @@ def vector_for_uids(uids) -> mx.array:
 
 def publish_uids(uids) -> None:
     """Publish the row vector for a forward over ``uids`` (physical order)."""
-    set_rows(vector_for_uids(list(uids)))
+    global _off
+    uids = list(uids)
+    set_rows(vector_for_uids(uids))
+    if uids:
+        rows = [_registry.get(u) for u in uids]
+        _off = tuple(all(r is None or r[s] == 0.0 for r in rows)
+                     for s in range(_n_slots))
 
 
 class published:

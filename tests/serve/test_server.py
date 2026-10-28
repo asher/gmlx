@@ -66,6 +66,22 @@ def test_single_model_cfg_vlm_mmproj(tmp_path):
     assert m.mmproj and m.mmproj.endswith("mmproj-gemma-4-E4B-it-bf16.gguf")
 
 
+def test_single_model_cfg_asr_flags(tmp_path):
+    g = tmp_path / "granite-switch-4.1-8b-Q4_K_M.gguf"
+    c = tmp_path / "speech" / "granite-speech-5.0-470m-turboctc.gguf"
+    g.write_text("x")
+    c.parent.mkdir()
+    c.write_text("x")
+    (_, m), = srv._single_model_cfg(_ns(model=str(g), asr=str(c))).models.items()
+    assert m.asr == str(c)
+    (_, m), = srv._single_model_cfg(_ns(model=str(g), no_asr=True)).models.items()
+    assert m.asr is False
+    (_, m), = srv._single_model_cfg(_ns(model=str(g))).models.items()
+    assert m.asr is None
+    flags = srv._bg_serve_args(_ns(model=str(g), asr=str(c)), None)
+    assert flags[flags.index("--asr") + 1] == str(c)
+
+
 def test_single_model_cfg_chat_template_rides_overrides(tmp_path):
     """--chat-template lands in the model's overrides and survives resolution onto
     the ResolvedModel (the same slot a config `overrides: {chat_template}` uses)."""
@@ -2978,6 +2994,31 @@ def test_register_downloads_adds_entry_and_reloads(monkeypatch, tmp_path, capsys
     assert cfg.models["new-q4"].path == "org__repo-GGUF/new.gguf"  # relative
     assert reloaded == [cfg_path]
     assert "registered new-q4" in capsys.readouterr().out
+
+
+def test_register_downloads_leaves_a_pulled_speech_companion_out_of_the_scan(
+        monkeypatch, tmp_path):
+    cfg_path, lib = _reg_config(tmp_path)
+    model = lib / "ibm__chat-GGUF" / "chat.gguf"
+    speech = lib / "me__speech-GGUF" / "speech.gguf"
+    for f in (model, speech):
+        f.parent.mkdir()
+        f.write_bytes(b"x")
+    from gmlx.config import ModelCfg as MC
+    seen = {}
+
+    def scan(specs, dirs, *, known_paths, **kw):
+        seen["known"] = set(known_paths)
+        return [MC(id="chat-q4", path=str(model))]
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", scan)
+    monkeypatch.setattr(srv, "_reload_running", lambda path, skip: None)
+    srv.register_downloads([str(model), str(speech)], str(cfg_path),
+                           pairs={str(model): {"asr": str(speech), "alias": "chat"}})
+    from gmlx.config import load_config
+    cfg = load_config(cfg_path)
+    assert str(speech) in seen["known"]
+    assert cfg.models["chat-q4"].asr is None
 
 
 def test_register_downloads_never_edits_the_file_that_a_swapped_link_leads_to(
