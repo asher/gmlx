@@ -56,7 +56,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - In `gmlx chat`, `/undo` or `/retry` of the first turn after `--resume` no
   longer makes the model forget the restored conversation.
 - An `--adapter` LoRA on the routed experts' down projection loads on Flint,
-  K2 Horizon, Hunyuan 3, DeepSeek-V4 and MiniMax-M3 instead of failing.
+  K2 Horizon, Hunyuan 3 and DeepSeek-V4 instead of failing.
 - A Qwen3.5-family text model (Qwen3.5 and 3.6 MoE, MiniCPM-V 4.7 without
   `--mmproj`) decodes with `--kv-bits 8` within a tenth of its fp16 KV
   speed instead of a quarter slower.
