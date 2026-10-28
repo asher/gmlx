@@ -4820,6 +4820,10 @@ def load_vlm_model(
     active_before = _active_now()
     arrays, kquant_meta, _arch, llm_meta, llm_shapes = load_gguf_wire_bytes(
         gguf_path, zero_copy=zero_copy, shards=pf.shards, arch=llm_arch)
+    from .loader import merge_indexer_sidecar
+
+    merge_indexer_sidecar(gguf_path, llm_arch, arrays, kquant_meta, llm_meta,
+                          llm_shapes, zero_copy=zero_copy, log=_log)
     arrays, kquant_meta, n_coalesced = coalesce_split_experts(arrays, kquant_meta)
     if n_coalesced:
         _log(f"[vlm] coalesced {n_coalesced} split-expert groups -> stacked _exps")

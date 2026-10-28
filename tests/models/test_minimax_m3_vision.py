@@ -412,3 +412,32 @@ def test_the_tower_loads_in_float32():
     from gmlx.load.loader import float_dtype_rules
 
     assert float_dtype_rules("minimax_m3_vision")["fp32_cast"] == ("vision_tower.",)
+
+
+REAL_GGUF = os.path.expanduser(
+    "~/llm/gguf/unsloth__MiniMax-M3.1-Flash-GGUF/UD-Q2_K_XL/"
+    "MiniMax-M3.1-Flash-UD-Q2_K_XL-00001-of-00004.gguf")
+
+
+@pytest.mark.skipif(not (os.path.exists(REAL_MMPROJ) and os.path.exists(REAL_GGUF)),
+                    reason="needs the MiniMax-M3.1-Flash GGUF and its mmproj")
+def test_vlm_load_merges_the_indexer_sidecar(monkeypatch):
+    # An M3 GGUF without indexer tensors gets them from a sidecar on the
+    # text load; the --mmproj load must merge it too, or it runs dense.
+    from gmlx.load import loader
+
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def merge(gguf_path, arch, arrays, kquant_meta, meta, shapes, **kw):
+        seen.update(path=gguf_path, arch=arch, shapes=shapes)
+        raise Stop
+
+    monkeypatch.setattr(vlm, "load_gguf_wire_bytes",
+                        lambda *a, **k: ({}, {}, None, {}, {"x": (1,)}))
+    monkeypatch.setattr(loader, "merge_indexer_sidecar", merge)
+    with pytest.raises(Stop):
+        vlm.load_vlm_model(REAL_GGUF, REAL_MMPROJ)
+    assert seen == {"path": REAL_GGUF, "arch": "minimax-m3", "shapes": {"x": (1,)}}

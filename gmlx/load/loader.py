@@ -1581,6 +1581,27 @@ def _resolve_indexer_sidecar(
     return cand[0]
 
 
+def merge_indexer_sidecar(gguf_path, arch, arrays, kquant_meta, meta,
+                          tensor_shapes, *, zero_copy=True, log=None) -> None:
+    """Merge the indexer sidecar that ``_resolve_indexer_sidecar`` finds
+    into the wire set in place, ahead of remap and config synthesis, so its
+    tensors flow like a native MSA GGUF's. The text and VLM loads share it."""
+    sidecar = _resolve_indexer_sidecar(gguf_path, arch, tensor_shapes)
+    if not sidecar:
+        return
+    s_arrays, s_kmeta, _s_arch, s_meta, s_shapes = load_gguf_wire_bytes(
+        sidecar, zero_copy=zero_copy, expect_quant=False
+    )
+    arrays.update(s_arrays)
+    kquant_meta.update(s_kmeta)
+    tensor_shapes.update(s_shapes)
+    meta.update({k: v for k, v in s_meta.items() if ".attention.indexer." in k})
+    loadlog.fact("indexer-sidecar", os.path.basename(sidecar))
+    if log is not None:
+        log(f"[sidecar] merged {len(s_arrays)} indexer tensors from "
+            f"{os.path.basename(sidecar)}")
+
+
 # Public load entry point
 
 
@@ -1672,22 +1693,8 @@ def load_model(
     #     tensors (+ the attention.indexer.* KVs) can sit next to the model;
     #     its contents merge into the wire set ahead of remap/synth so they
     #     flow exactly like a native MSA GGUF's.
-    sidecar = _resolve_indexer_sidecar(gguf_path, arch, tensor_shapes)
-    if sidecar:
-        s_arrays, s_kmeta, _s_arch, s_meta, s_shapes = load_gguf_wire_bytes(
-            sidecar, zero_copy=zero_copy, expect_quant=False
-        )
-        arrays.update(s_arrays)
-        kquant_meta.update(s_kmeta)
-        tensor_shapes.update(s_shapes)
-        meta.update(
-            {k: v for k, v in s_meta.items() if ".attention.indexer." in k}
-        )
-        loadlog.fact("indexer-sidecar", os.path.basename(sidecar))
-        _log(
-            f"[sidecar] merged {len(s_arrays)} indexer tensors from "
-            f"{os.path.basename(sidecar)}"
-        )
+    merge_indexer_sidecar(gguf_path, arch, arrays, kquant_meta, meta,
+                          tensor_shapes, zero_copy=zero_copy, log=_log)
 
     # 1b. coalesce legacy per-expert MoE weights (old Mixtral split format) into
     #     the stacked `_exps` form the remap + SwitchGLU expect. No-op otherwise.
