@@ -370,8 +370,8 @@ template reads, so one profile works across families:
 
 Some templates have no thinking switch, such as gpt-oss, Beam, Muse, K2
 Horizon and MiniMax-M3.1. On these, `off` closes each thinking block as soon
-as it opens. A
-[`thinking_budget`](#samplingthinking_budget) you set wins over it.
+as it opens. A [`thinking_budget`](#samplingthinking_budget) you set wins
+over it.
 
 A request's `enable_thinking`, `thinking` or `reasoning_effort` field wins
 over the profile. `gmlx run` and `gmlx chat` take `--thinking` and
