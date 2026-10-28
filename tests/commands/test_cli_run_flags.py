@@ -631,3 +631,40 @@ def test_vlm_run_takes_the_streamed_prefill_chunk(gguf, vlm_gen, extra, step):
         "deepseek_v4", loader._STREAMING_PREFILL_STEP)
         if step == "streamed" else step)
     assert seen.get("prefill_step_size") == want
+
+
+# --mmproj run: what mlx-vlm's budget criteria gets
+
+_M3_TEMPLATE = ("{%- set think_begin_token = '<mm:think>' -%}"
+                "{%- set think_end_token = '</mm:think>' -%}")
+
+
+class _Proc:
+    def __init__(self, template):
+        self.tokenizer = type("Tok", (), {"chat_template": template})()
+
+
+def _vlm_args(budget=None, start=None, end=None):
+    import types
+    return types.SimpleNamespace(thinking_budget=budget,
+                                 thinking_start_token=start,
+                                 thinking_end_token=end)
+
+
+def test_vlm_budget_takes_the_template_markers_and_enables_the_criteria():
+    # MiniMax-M3 --thinking off sets budget 0. The criteria acts only with
+    # enable_thinking, and on <think> by default, so the model reasoned.
+    got = cli._vlm_budget_kwargs(_vlm_args(budget=0), _Proc(_M3_TEMPLATE), {})
+    assert got == {"enable_thinking": True,
+                   "thinking_start_token": "<mm:think>",
+                   "thinking_end_token": "</mm:think>"}
+
+
+def test_vlm_budget_kwargs_keep_the_flags_and_the_template_switch():
+    proc = _Proc(_M3_TEMPLATE)
+    assert cli._vlm_budget_kwargs(_vlm_args(), proc, {}) == {}
+    got = cli._vlm_budget_kwargs(
+        _vlm_args(budget=8, start="<a>", end="</a>"), proc,
+        {"enable_thinking": False})
+    assert got == {"enable_thinking": False, "thinking_start_token": "<a>",
+                   "thinking_end_token": "</a>"}

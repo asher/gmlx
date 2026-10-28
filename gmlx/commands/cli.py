@@ -1813,6 +1813,33 @@ def _run_generate(args) -> int:
     return 0
 
 
+def _vlm_budget_kwargs(args, processor, template_kwargs) -> dict:
+    """What mlx-vlm's thinking-budget criteria needs from ``generate``: the
+    think markers (the flags, else the chat template's pair once a budget is
+    set; the criteria defaults to ``<think>``, which MiniMax-M3's
+    ``<mm:think>`` never matches) and ``enable_thinking``, without which
+    the criteria never acts."""
+    out = {}
+    start, end = args.thinking_start_token, args.thinking_end_token
+    if args.thinking_budget is not None:
+        if not (start or end):
+            from gmlx.gen.thinking_budget import think_pairs_in
+
+            tok = getattr(processor, "tokenizer", processor)
+            template = (getattr(processor, "chat_template", None)
+                        or getattr(tok, "chat_template", None))
+            pairs = think_pairs_in(template)
+            if pairs:
+                start, end = pairs[0]
+        out["enable_thinking"] = bool(
+            template_kwargs.get("enable_thinking", True))
+    if start:
+        out["thinking_start_token"] = start
+    if end:
+        out["thinking_end_token"] = end
+    return out
+
+
 def _run_vlm(args) -> int:
     """Image+text generation through a two-GGUF VLM (K-quant LLM + mmproj).
 
@@ -1899,10 +1926,7 @@ def _run_vlm(args) -> int:
         extra["thinking_budget"] = args.thinking_budget
     # mlx-vlm's own criteria enforces the budget here, so it needs the markers
     # as well; it defaults them to <think> / </think>.
-    if args.thinking_start_token:
-        extra["thinking_start_token"] = args.thinking_start_token
-    if args.thinking_end_token:
-        extra["thinking_end_token"] = args.thinking_end_token
+    extra.update(_vlm_budget_kwargs(args, processor, template_kwargs))
     kv_bits = vlm_kv_width(args, model)
     if kv_bits is not None:
         extra.update(

@@ -49,6 +49,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   overruns a GPU index limit.
 - `gmlx serve` returns MiniMax-M3 reasoning in `reasoning_content`, not
   inside the reply text.
+- `gmlx run --mmproj` applies `--thinking-budget`, and `--thinking off` on
+  templates without a thinking switch such as MiniMax-M3.1's.
 - In `gmlx chat`, `/undo` or `/retry` of the first turn after `--resume` no
   longer makes the model forget the restored conversation.
 - A Qwen3.5-family text model (Qwen3.5 and 3.6 MoE, MiniCPM-V 4.7 without
