@@ -566,12 +566,13 @@ class _FakeVlmStream:
         self.turns = []
 
     def __call__(self, model, processor, prompt, *, image=None, audio=None, **kw):
-        self.turns.append({"image": image, "audio": audio, "prompt": prompt})
+        self.turns.append({"image": image, "audio": audio, "prompt": prompt,
+                           "kw": kw})
         for i, w in enumerate(self.reply.split(" ")):
             yield _Chunk(w if i == 0 else " " + w, i + 1, 30.0)
 
 
-def _run_vlm_chat(monkeypatch, tmp_path, lines):
+def _run_vlm_chat(monkeypatch, tmp_path, lines, extra=()):
     pytest.importorskip("gmlx._vendor.mlx_vlm")
     scripted = _Scripted(lines)
     vstream = _FakeVlmStream()
@@ -598,7 +599,7 @@ def _run_vlm_chat(monkeypatch, tmp_path, lines):
     gguf.write_bytes(b"GGUF")
     proj = tmp_path / "mmproj.gguf"
     proj.write_bytes(b"GGUF")
-    rc = chat.cmd_chat([str(gguf), "--mmproj", str(proj)])
+    rc = chat.cmd_chat([str(gguf), "--mmproj", str(proj), *extra])
     return rc, scripted, vstream, msg_calls
 
 
@@ -622,6 +623,17 @@ def test_vlm_pins_media_markers_per_turn(monkeypatch, tmp_path):
     users = [m for m in msgs if m["role"] == "user"]
     assert (users[0]["n_images"], users[0]["n_audios"]) == (1, 0)
     assert (users[1]["n_images"], users[1]["n_audios"]) == (0, 1)
+
+
+def test_vlm_turn_arms_the_thinking_budget(monkeypatch, tmp_path):
+    # mlx-vlm's budget criteria acts only with enable_thinking.
+    _rc, _s, vstream, _m = _run_vlm_chat(
+        monkeypatch, tmp_path, ["hi", "/exit"],
+        extra=["--thinking-budget", "0", "--thinking-start-token", "<mm:think>",
+               "--thinking-end-token", "</mm:think>"])
+    kw = vstream.turns[0]["kw"]
+    assert kw["thinking_budget"] == 0 and kw["enable_thinking"] is True
+    assert kw["thinking_start_token"] == "<mm:think>"
 
 
 def test_vlm_dragged_in_path_stages_without_a_turn(monkeypatch, tmp_path):

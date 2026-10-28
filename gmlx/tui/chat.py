@@ -2423,16 +2423,6 @@ def _prompt_opens_thinking_cfg(state, prompt_text) -> bool:
         prompt_text, state.thinking_start_token, state.thinking_end_token)
 
 
-def _vlm_thinking_tokens(state) -> dict:
-    """The configured reasoning markers as mlx-vlm generate kwargs, omitting
-    the ones left unset - mlx-vlm defaults them to ``<think>`` / ``</think>``
-    and encodes whatever it is given, so an explicit None would fail there."""
-    return {k: v for k, v in (
-        ("thinking_start_token", state.thinking_start_token),
-        ("thinking_end_token", state.thinking_end_token),
-    ) if v}
-
-
 def _opens_header(prompt) -> bool:
     """Whether a rendered ``prompt`` stops inside a harmony/ATEM message header
     (see ``reasoning.prompt_opens_header``)."""
@@ -4268,6 +4258,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 prompt_opens_thinking,
                 set_finish_key_target,
                 think_tokenizer_for,
+                vlm_budget_kwargs,
             )
 
             vtok = think_tokenizer_for(processor)
@@ -4305,7 +4296,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                         # mlx-vlm types it as a pair but also takes one int.
                         resize_shape=cast(Any, resize_shape),
                         thinking_budget=state.thinking_budget,
-                        **_vlm_thinking_tokens(state),
+                        **vlm_budget_kwargs(
+                            state.thinking_budget,
+                            state.thinking_start_token,
+                            state.thinking_end_token, processor,
+                            prompt if isinstance(prompt, str) else None),
                         logits_processors=[tbp] if tbp is not None else None,
                         **kv_kwargs,
                     ),

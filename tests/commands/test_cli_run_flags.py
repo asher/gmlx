@@ -633,10 +633,12 @@ def test_vlm_run_takes_the_streamed_prefill_chunk(gguf, vlm_gen, extra, step):
     assert seen.get("prefill_step_size") == want
 
 
-# --mmproj run: what mlx-vlm's budget criteria gets
+# --mmproj: what mlx-vlm's budget criteria gets
 
 _M3_TEMPLATE = ("{%- set think_begin_token = '<mm:think>' -%}"
                 "{%- set think_end_token = '</mm:think>' -%}")
+_M3_PAIR = {"thinking_start_token": "<mm:think>",
+            "thinking_end_token": "</mm:think>"}
 
 
 class _Proc:
@@ -644,27 +646,38 @@ class _Proc:
         self.tokenizer = type("Tok", (), {"chat_template": template})()
 
 
-def _vlm_args(budget=None, start=None, end=None):
-    import types
-    return types.SimpleNamespace(thinking_budget=budget,
-                                 thinking_start_token=start,
-                                 thinking_end_token=end)
-
-
 def test_vlm_budget_takes_the_template_markers_and_enables_the_criteria():
     # MiniMax-M3 --thinking off sets budget 0. The criteria acts only with
     # enable_thinking, and on <think> by default, so the model reasoned.
-    got = cli._vlm_budget_kwargs(_vlm_args(budget=0), _Proc(_M3_TEMPLATE), {})
-    assert got == {"enable_thinking": True,
-                   "thinking_start_token": "<mm:think>",
-                   "thinking_end_token": "</mm:think>"}
+    from gmlx.gen.thinking_budget import vlm_budget_kwargs
+
+    got = vlm_budget_kwargs(0, None, None, _Proc(_M3_TEMPLATE))
+    assert got == {"enable_thinking": True, **_M3_PAIR}
 
 
-def test_vlm_budget_kwargs_keep_the_flags_and_the_template_switch():
+def test_vlm_budget_kwargs_without_a_budget_or_known_markers():
+    from gmlx.gen.thinking_budget import vlm_budget_kwargs
+
     proc = _Proc(_M3_TEMPLATE)
-    assert cli._vlm_budget_kwargs(_vlm_args(), proc, {}) == {}
-    got = cli._vlm_budget_kwargs(
-        _vlm_args(budget=8, start="<a>", end="</a>"), proc,
-        {"enable_thinking": False})
-    assert got == {"enable_thinking": False, "thinking_start_token": "<a>",
-                   "thinking_end_token": "</a>"}
+    assert vlm_budget_kwargs(None, None, None, proc) == {}
+    assert vlm_budget_kwargs(None, "<a>", "</a>", proc) == {
+        "thinking_start_token": "<a>", "thinking_end_token": "</a>"}
+    # gemma-4's channel tags are no known pair: stay unarmed.
+    assert vlm_budget_kwargs(8, None, None, _Proc("<|channel>thought")) == {}
+
+
+def test_vlm_run_hands_the_budget_kwargs_to_generate(gguf, vlm_gen, monkeypatch):
+    import types
+
+    import gmlx.load.vlm as vlm
+
+    seen, mmproj = vlm_gen
+    tower = types.SimpleNamespace(model_type="minimax_m3")
+    model = types.SimpleNamespace(language_model=tower)
+    monkeypatch.setattr(vlm, "load_vlm_model", lambda *a, **k: (
+        model, {}, _Proc(_M3_TEMPLATE), None))
+    assert cli.main([gguf, "--mmproj", mmproj, "--prompt", "hi",
+                     "--thinking-budget", "0"]) == 0
+    assert seen["thinking_budget"] == 0
+    assert seen["enable_thinking"] is True
+    assert {k: seen[k] for k in _M3_PAIR} == _M3_PAIR
