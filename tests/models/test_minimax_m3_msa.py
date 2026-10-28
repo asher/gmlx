@@ -312,9 +312,13 @@ def test_f32_scores_lever_matches_llama_form(monkeypatch, L):
     monkeypatch.setenv("GMLX_MSA_F32_SCORES", "1")
     got = attn._scores(iq, IK, IKt32)
     assert got.dtype == mx.float32
-    # f32 GEMMs run at TF32 on M5 GPUs (about 4e-4 relative here).
+    # The kq skinny decode runs full f32, well under fp16 rounding (4e-4
+    # here); f32 GEMMs run at TF32 on M5 GPUs and get the loose bound.
+    from gmlx.models import minimax_m3 as m3
+
+    tight = L == 1 and m3._skinny_f32()
     err = np.abs(np.asarray(got, dtype=np.float64) - ref).max()
-    assert err / np.abs(ref).max() < 2e-3
+    assert err / np.abs(ref).max() < (1e-5 if tight else 2e-3)
 
 
 def test_short_context_causal_kernel_matches_explicit_mask():

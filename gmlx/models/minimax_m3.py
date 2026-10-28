@@ -447,7 +447,8 @@ class MiniMaxM3Attention(nn.Module):
         fp16. GMLX_MSA_F32_SCORES=1 keeps them f32, as llama.cpp does: decode
         through kq.skinny_matmul when it takes an f32 query against fp16
         keys, else against an f32 copy of the keys made every step; prefill
-        against ``IKt32``, the keys cast to f32 once per call."""
+        against ``IKt32``, the keys cast to f32 once per call (a GEMM, so
+        TF32 precision on M5 GPUs)."""
         if not _f32_scores():
             return mx.matmul(iq.astype(IK.dtype), IK.swapaxes(-1, -2))
         if IKt32 is not None:
