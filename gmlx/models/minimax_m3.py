@@ -234,6 +234,31 @@ def _msa_disabled() -> bool:
     return os.environ.get("GMLX_MSA_DISABLE", "") == "1"
 
 
+def _f32_scores() -> bool:
+    return os.environ.get("GMLX_MSA_F32_SCORES", "0") == "1"
+
+
+_SKINNY: dict = {}
+
+
+def _skinny_f32() -> bool:
+    """Whether kq.skinny_matmul takes an f32 query against fp16 keys."""
+    ok = _SKINNY.get("f32_f16")
+    if ok is None:
+        try:
+            import mlx_kquant as kq
+
+            out = kq.skinny_matmul(mx.zeros((1, 4, 1, 128), mx.float32),
+                                   mx.zeros((8, 128), mx.float16))
+            mx.eval(out)
+            ok = out.dtype == mx.float32
+        except Exception:  # noqa: BLE001
+            # Any refusal means an older kq: fall back to the cast matmul.
+            ok = False
+        _SKINNY["f32_f16"] = ok
+    return ok
+
+
 def _is_msa_layer(args: "ModelArgs", layer_idx: int, is_sparse: bool) -> bool:
     """Whether layer ``layer_idx`` carries the MSA indexer."""
     if not args.use_sparse_attention:
@@ -343,14 +368,13 @@ class MiniMaxM3Attention(nn.Module):
         offset = cache.offset  # before this chunk lands
 
         # Indexer branch: project, per-head norm and partial RoPE in f32,
-        # then fp16 for the key cache and the score matmul, as llama.cpp
-        # stores its indexer cache. Both operands share one dtype: a mixed
-        # matmul would copy the whole key cache to f32 each step.
+        # then fp16 for the key cache, as llama.cpp stores its indexer cache.
+        # The query stays f32; _scores picks the score precision.
         iq = self.index_q_proj(x).reshape(B, L, self.n_idx_heads, self.idx_dim)
         ik = self.index_k_proj(x).reshape(B, L, 1, self.idx_dim)
         iq = self.index_q_norm(iq).transpose(0, 2, 1, 3).astype(mx.float32)
         ik = self.index_k_norm(ik).transpose(0, 2, 1, 3).astype(mx.float32)
-        iq = self.rope(iq, offset=offset).astype(mx.float16)
+        iq = self.rope(iq, offset=offset)
         ik = self.rope(ik, offset=offset).astype(mx.float16)
 
         queries = self.rope(queries, offset=offset)
@@ -415,6 +439,23 @@ class MiniMaxM3Attention(nn.Module):
         k = self.topk_blocks
         return mx.argpartition(-bs, kth=k - 1, axis=-1)[..., :k]
 
+    def _scores(self, iq, IK, IKt32=None):
+        """Indexer scores ``iq @ IK^T`` for an f32 query and the fp16 key
+        cache. By default both operands are fp16 and the scores round to
+        fp16. GMLX_MSA_F32_SCORES=1 keeps them f32, as llama.cpp does: decode
+        through kq.skinny_matmul (fp16 keys read once), prefill against
+        ``IKt32``, the keys cast to f32 once per call."""
+        if not _f32_scores():
+            return mx.matmul(iq.astype(IK.dtype), IK.swapaxes(-1, -2))
+        if IKt32 is not None:
+            return mx.matmul(iq, IKt32)
+        B, H, L, d = iq.shape
+        if B == 1 and L <= 16 and _skinny_f32():
+            import mlx_kquant as kq
+
+            return kq.skinny_matmul(iq, IK.reshape(-1, d))
+        return mx.matmul(iq, IK.swapaxes(-1, -2).astype(mx.float32))
+
     def _msa_decode(self, queries, K, V, IK, iq, S, nblk):
         """Single-token step: batched top-k + gather, one grouped-GQA SDPA."""
         B = queries.shape[0]
@@ -423,7 +464,7 @@ class MiniMaxM3Attention(nn.Module):
         gq = self.num_attention_heads // Hkv
 
         # Scores [B, Hkv, 1, S]: every cached key is visible at decode.
-        sc = mx.matmul(iq, IK.swapaxes(-1, -2))
+        sc = self._scores(iq, IK)
         idx = self._block_select(sc, mx.array([S - 1]), nblk)  # [B, Hkv, 1, k]
 
         # Expand blocks to token rows; rows past S are gathered clipped and
@@ -465,6 +506,7 @@ class MiniMaxM3Attention(nn.Module):
         # int32, so keep them under 2^31 elements (llama.cpp PR #31192).
         max_elems = int(os.environ.get("GMLX_MSA_MAX_ELEMS", str(2**31 - 1)))
         tile = max(1, min(tile, max_elems // (nblk * blk)))
+        IKt32 = IK.swapaxes(-1, -2).astype(mx.float32) if _f32_scores() else None
 
         outs = []
         for t0 in range(0, L, tile):
@@ -476,7 +518,7 @@ class MiniMaxM3Attention(nn.Module):
             group_outs = []
             for g in range(Hkv):
                 # Scores for this group [B, 1, Lt, S] f32 (+ causal).
-                sc = mx.matmul(iq[:, g : g + 1, t0:t1], IK.swapaxes(-1, -2))
+                sc = self._scores(iq[:, g : g + 1, t0:t1], IK, IKt32)
                 sc = sc + causal[None, None]
                 idx = self._block_select(sc, q_pos, nblk)  # [B, 1, Lt, k]
 
@@ -528,14 +570,14 @@ class MiniMaxM3Attention(nn.Module):
         Kf = K.reshape(B * Hkv * S, D)
         Vf = V.reshape(B * Hkv * S, D)
         row0 = (mx.arange(B * Hkv) * S).reshape(B, 1, Hkv, 1)
-        IKt = IK.swapaxes(-1, -2)
+        IKt32 = IK.swapaxes(-1, -2).astype(mx.float32) if _f32_scores() else None
 
         outs = []
         for c0 in range(0, L, chunk):
             c1 = min(c0 + chunk, L)
             C = c1 - c0
             q_pos = mx.arange(offset + c0, offset + c1)
-            sc = mx.matmul(iq[:, :, c0:c1], IKt)            # [B, Hkv, C, S]
+            sc = self._scores(iq[:, :, c0:c1], IK, IKt32)   # [B, Hkv, C, S]
             bs = sc[..., : nfull * blk].reshape(B, Hkv, C, nfull, blk)
             bs = bs.max(axis=-1)
             if nfull < nblk:

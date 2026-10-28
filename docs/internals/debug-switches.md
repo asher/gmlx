@@ -120,6 +120,10 @@ log the attention route.
 | `GMLX_GQA_SDPA_MINKV128` | Fewest keys at which Flint decode leaves stock attention for the mlx-kquant decode kernel. The default is `1024`. |
 | `GMLX_SWA_KQ=0` | On NAX GPUs (M5), keep sliding-window prefill (Flint, Gemma 4, Muse Glimmer, Muse Spark) on stock attention instead of the mlx-kquant window kernel. |
 | `GMLX_GQA_SDPA_NAX512=0` | On NAX GPUs (M5), keep gemma-4 global-layer decode on the previous kernel instead of the faster one past 768 to 3072 keys. |
+| `GMLX_MSA_GATHER_MIN` | Context length past which MiniMax-M3 prefill attends over each token's selected blocks instead of the masked full cache. The default is `16384`. |
+| `GMLX_MSA_GATHER_CHUNK` | Queries per gather step in MiniMax-M3 long prefill. The default is `256`. |
+| `GMLX_MSA_MAX_ELEMS` | Largest MiniMax-M3 prefill score or gather tensor, in elements. The default is `2147483647`, the GPU index limit. |
+| `GMLX_MSA_F32_SCORES=1` | Keep MiniMax-M3 block-selection scores in f32, as llama.cpp does, instead of fp16. Prefill at 128K runs about 25 percent slower per layer. |
 
 ## Model kernels
 

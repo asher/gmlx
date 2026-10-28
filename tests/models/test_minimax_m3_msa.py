@@ -13,6 +13,7 @@ arming, sanitize gating, cache construction, and the mm:think tag fixes.
 from __future__ import annotations
 
 import mlx.core as mx
+import pytest
 from mlx.utils import tree_flatten, tree_unflatten
 
 from gmlx.models.minimax_m3 import MSAKVCache, ModelArgs, Model
@@ -267,22 +268,29 @@ def test_dense_fallback_on_plain_cache_warns_not_crashes():
 
 # -- fp16 indexer keys, causal kernel, int32 tile cap -------------------------
 
-def test_indexer_cache_and_score_operands_are_fp16(monkeypatch):
+def test_indexer_key_cache_is_fp16():
     m = _model(seed=5)
-    attn = m.layers[1].self_attn
-    seen = []
-    real = attn._msa_decode
-
-    def spy(queries, K, V, IK, iq, S, nblk):
-        seen.append((IK.dtype, iq.dtype))
-        return real(queries, K, V, IK, iq, S, nblk)
-
-    monkeypatch.setattr(attn, "_msa_decode", spy)
-    toks = _tokens(65)
-    _, cache = _logits(m, toks[:, :64])
+    _, cache = _logits(m, _tokens(64))
     assert cache[1].ik.dtype == mx.float16
-    m(toks[:, 64:65], cache=cache)
-    assert seen == [(mx.float16, mx.float16)]
+
+
+@pytest.mark.parametrize("L", [1, 24])
+def test_f32_scores_lever_matches_llama_form(monkeypatch, L):
+    # Default: fp16 x fp16 scores (no cast of the key cache). With
+    # GMLX_MSA_F32_SCORES=1 the scores are f32 values of the f32 query
+    # against the fp16 keys, as llama.cpp computes them.
+    monkeypatch.delenv("GMLX_MSA_F32_SCORES", raising=False)
+    attn = _model().layers[1].self_attn
+    mx.random.seed(4)
+    iq = 8 * mx.random.normal((1, 2, L, 8))
+    IK = (8 * mx.random.normal((1, 1, 200, 8))).astype(mx.float16)
+    ref = iq @ IK.astype(mx.float32).swapaxes(-1, -2)
+    IKt32 = IK.swapaxes(-1, -2).astype(mx.float32) if L > 1 else None
+    assert attn._scores(iq, IK, IKt32).dtype == mx.float16
+    monkeypatch.setenv("GMLX_MSA_F32_SCORES", "1")
+    got = attn._scores(iq, IK, IKt32)
+    assert got.dtype == mx.float32
+    assert mx.allclose(got, ref, atol=1e-4, rtol=1e-6).item()
 
 
 def test_short_context_causal_kernel_matches_explicit_mask():
