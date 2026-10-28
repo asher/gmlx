@@ -5,7 +5,7 @@ defines ``FAMILY``. ``families()`` imports them all and sorts by order and
 name. A family carries its own values for the shared mechanisms: the
 segment order and clock of the packed sequence (``timeline``, read by
 ``layout.pack``), each stream's schedule shift (``shifts``) and anchor
-rule (``anchor_rules``).
+rule (``anchor_rules``), and its text encoder (``encoder``).
 """
 
 from __future__ import annotations
@@ -70,6 +70,9 @@ class VideoFamily:
     timeline: Timeline | None = None
     shifts: dict = field(default_factory=dict)
     anchor_rules: dict[str, AnchorRule] = field(default_factory=dict)
+    # () -> EncoderSpec of the text encoder, built on call so this module
+    # loads no mlx.
+    encoder: Callable | None = None
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in self.variants.values()}))

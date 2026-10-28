@@ -379,6 +379,88 @@ def test_an_empty_prompt_is_rendered_as_the_spec_says():
     assert te.render(te.Z_IMAGE, "") == te.Z_IMAGE.template.replace("{}", "")
 
 
+def test_an_owned_encoder_drops_the_layers_past_its_tap(monkeypatch):
+    """With ``drop_untapped`` the owned encoder keeps the layers up to its
+    tap and the tap is what it was. ``drop_layers_after`` returns the
+    bytes of the layers it drops. Without the flag every layer stays."""
+    from mlx.utils import tree_flatten
+
+    from gmlx.load import loader
+
+    m, cfg = _tiny_qwen3(layers=4, tied=False)
+    ids = [3, 17, 42, 5]
+    (before,) = te.tap(m, ids, layers=(2,))
+    mx.eval(before)
+    monkeypatch.setattr(te, "_header_view", lambda path: None)
+    monkeypatch.setattr(te, "check_encoder_file", lambda *a, **k: None)
+    monkeypatch.setattr(loader, "load_model",
+                        lambda path: (m, cfg, _CharTokenizer()))
+    h = te.load_encoder("enc.gguf", _spec(tap=(2,), drop_untapped=True),
+                        log=lambda *_: None)
+    assert len(h.model.model.layers) == 2
+    assert mx.array_equal(h.encode_ids(ids).hidden[0], before).item()
+
+    m2, cfg2 = _tiny_qwen3(layers=4, tied=False)
+    tail = sum(int(v.nbytes) for layer in m2.model.layers[3:]
+               for _, v in tree_flatten(layer.parameters()))
+    assert te.drop_layers_after(m2, 3) == tail
+    assert len(m2.model.layers) == 3
+    with pytest.raises(ValueError, match="keep 4 of 3"):
+        te.drop_layers_after(m2, 4)
+
+    m3, cfg3 = _tiny_qwen3(layers=4, tied=False)
+    monkeypatch.setattr(loader, "load_model",
+                        lambda path: (m3, cfg3, _CharTokenizer()))
+    te.load_encoder("enc.gguf", _spec(tap=(2,)), log=lambda *_: None)
+    assert len(m3.model.layers) == 4
+    with pytest.raises(ValueError, match="runs every layer"):
+        _spec(tap=(4,), final_norm=True, max_tokens=None,
+              drop_untapped=True)
+
+
+def test_the_dropped_layers_leave_the_free_memory_reading(monkeypatch):
+    """An owned encoder that drops the layers past its tap takes their
+    mapped bytes out of the free-memory reading, beside the output
+    matrix's."""
+    from mlx.utils import tree_flatten
+
+    from gmlx.gen import prefill_decay as pd
+    from gmlx.load import loader
+
+    key = ("enc.gguf",)
+    head = 128 * 64 * 4
+    tail = sum(int(v.nbytes)
+               for layer in _tiny_qwen3(tied=False)[0].model.layers[2:]
+               for _, v in tree_flatten(layer.parameters()))
+    mapped = 10 * head + tail
+
+    def load(path):
+        m, cfg = _tiny_qwen3(tied=False)
+        pd.note_untracked_weights(mapped, key=key)
+        object.__setattr__(m, "_kq_weights_key", key)
+        return m, cfg, _CharTokenizer()
+
+    monkeypatch.setattr(te, "_header_view", lambda path: None)
+    monkeypatch.setattr(te, "check_encoder_file", lambda *a, **k: None)
+    monkeypatch.setattr(loader, "load_model", load)
+    monkeypatch.setattr(te.mx, "get_active_memory", lambda: 0)
+    h = te.load_encoder("enc.gguf", _spec(tap=(2,), drop_untapped=True),
+                        log=lambda *_: None)
+    assert pd.untracked_weight_bytes_for(key) == mapped - head - tail
+    h.release()
+    assert pd.untracked_weight_bytes_for(key) == 0
+
+
+def test_an_encode_of_no_token_ids_is_refused():
+    m, cfg = _tiny_qwen3()
+    h = te.borrow_encoder(m, _CharTokenizer(), cfg, _spec())
+    with pytest.raises(ValueError, match="no token ids to encode"):
+        h.encode_ids([])
+    d = te.borrow_encoder(m, _CharTokenizer(), cfg, _spec(drop=2))
+    with pytest.raises(ValueError, match="first 2 are dropped"):
+        d.encode_ids([3, 4])
+
+
 def test_an_owned_encoder_holds_no_output_matrix(monkeypatch):
     """``load_encoder`` drops the output matrix of a model that has its
     own, and the tap of the model is what it was. A model with tied

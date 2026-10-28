@@ -398,6 +398,29 @@ def test_f32_norms_that_are_not_the_models_are_refused(tmp_path, monkeypatch):
         te.read_norms(str(p), m, _spec())
 
 
+def test_an_encoder_that_drops_layers_reads_only_their_norms(
+        tmp_path, monkeypatch):
+    """A spec that drops the layers past its tap reads the F32 norms of
+    the layers it keeps and the final norm, and none of the dropped
+    layers'."""
+    import dataclasses
+
+    m = _tiny_text()
+    m.set_dtype(mx.bfloat16)
+    norms = _f32_of(m)
+    rows = tuple((k, np.array(v)) for k, v in norms.items())
+    monkeypatch.setattr(te, "_gguf_norms", lambda *a: rows)
+    p = tmp_path / "enc.gguf"
+    p.write_bytes(b"x")
+    spec = dataclasses.replace(_spec(), final_norm=False, tap_layers=(2,),
+                               drop_untapped=True)
+    te.drop_layers_after(m, 2)
+    got = te.read_norms(str(p), m, spec)
+    assert set(got) == {k for k in norms if not k.startswith(
+        ("layers.2.", "layers.3."))}
+    assert any(k.startswith("layers.1.") for k in got)
+
+
 @pytest.mark.integration
 @pytest.mark.parametrize("name", _FILES)
 def test_the_encoder_reads_105_f32_norms_and_a_chat_load_keeps_bf16(

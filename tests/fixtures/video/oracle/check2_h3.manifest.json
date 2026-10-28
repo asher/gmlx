@@ -1,0 +1,654 @@
+{
+ "schema": 1,
+ "name": "check2_h3",
+ "check": 2,
+ "family": "h3",
+ "script": "scripts/video_oracle/check2_h3.py",
+ "argv": [
+  "check2_h3.py",
+  "--encoder",
+  "Qwen3-VL-32B-Instruct-Q4_K_M.gguf"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.0"
+   },
+   "diffusers": null,
+   "transformers": {
+    "version": "5.17.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": null,
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   },
+   "comfy-kitchen": {
+    "version": "0.2.35"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "encoder": {
+   "name": "Qwen3-VL-32B-Instruct-Q4_K_M.gguf",
+   "size": 19762151200,
+   "sha256": "92d605566f8661b296251c535ed028ecf81c32e14e06948a3d8bef829e96a804"
+  }
+ },
+ "inputs": {
+  "prompts": {
+   "plain": "A red bicycle leaning against a weathered brick wall at sunset, a cat asleep in its basket, warm light, 35mm photograph",
+   "empty": "",
+   "non_ascii": "Un caf\u00e9 \u00e0 Montr\u00e9al en hiver, \u7a93\u8fba\u3067\u5bdd\u3066\u3044\u308b\u732b, \u4e00\u676f\u62ff\u94c1\u548c\u4e00\u672c\u4e66, \u0441\u043d\u0435\u0433 \u0437\u0430 \u043e\u043a\u043d\u043e\u043c, \ud83d\udc31\u2615",
+   "long": "A narrow cobblestone street in an old harbor town at dusk, lined with three story houses painted ochre, teal and faded red. Laundry hangs on lines strung between the balconies, and a bicycle with a wicker basket leans against a green door. A fishmonger closes the shutters of a small shop while gulls circle above the masts in the harbor. Warm lamplight spills from a cafe where two old men play chess at a marble table, and a cat watches them from a windowsill full of geraniums. Puddles from an afternoon rain reflect the lamps and the violet sky, and the far end of the street opens onto the sea, where a lighthouse is just switching on. In the foreground a girl in a yellow raincoat crouches to inspect a snail on the curb, her boots splashed with mud. Behind her a baker carries a tray of round loaves dusted with flour toward a delivery van whose rear doors stand open. A hand painted sign above the bakery reads Panificio in chipped gold letters. Strings of small bulbs zigzag overhead, some of them dark, and a pigeon sits on the wire between two of them. On the left, a stone staircase climbs toward a chapel with a bell tower, its steps worn into shallow bowls by centuries of feet. Moss grows in the cracks, and someone has left a bunch of wildflowers on the third step. A scooter with a dented fender is parked at an angle beside a bollard shaped like a lion. The sky shades from deep indigo at the top of the frame to a band of apricot just above the horizon, with a thin crescent moon and a single bright planet. Fishing boats with blue and white hulls rock at their moorings, nets heaped on their decks, and a man in a wool cap coils rope on the quay. Far out on the water the running lights of a ferry move slowly toward an island whose hills are already black. The air looks cool and damp, with a faint haze that softens the distant lights into halos. Shot on medium format film with a normal lens at eye level, shallow depth of field on the girl and the snail, gentle grain, muted greens and warm highlights, no text other than the bakery sign, no watermark. The composition follows the curve of the street from the lower left corner to the lighthouse at the upper right, leading the eye past each small story along the way. Every window tells something: a family eating soup under a hanging lamp, a tailor pinning the hem of a coat on a wooden dummy, an empty room with a piano and a vase of dry roses, a boy practicing the violin with his music stand turned toward the glass. Rainwater still drips from the gutters, catching the light in bright beads, and the cobbles shine like the backs of beetles. A black dog trots out of an alley with a paper bag in its mouth, looking over its shoulder as if someone might follow.",
+   "dialogue": "A man in a grey raincoat stops under a streetlight and says <d>[English] We should have left an hour ago.</d> The woman beside him laughs and answers <d>[English] Then we run.</d> Rain hisses on the pavement as they hurry off.",
+   "markup": "A street singer tunes a guitar under a bridge. <|caption_start|>Warm dusk light, a slow push in.<|caption_end|> She sings <|lyrics_start|><d>[English] Hold on to the light.</d><|lyrics_end|> and stops.<|cutoff|>"
+  },
+  "lengths": {
+   "plain": 28,
+   "empty": 1,
+   "non_ascii": 37,
+   "long": 617,
+   "dialogue": 56,
+   "markup": 42
+  },
+  "comfyui_commit": "8d534945ebd53cff61e8def81757c6a6c1b9cf2d",
+  "tap": "output of decoder layer 50 of 64, before the final norm, every row",
+  "tokenizer": "comfy.text_encoders.minimax.MiniMaxH3Tokenizer: raw prompt ids, no template, the seven MiniMax tokens at their fixed ids, an empty prompt the pad token 151643",
+  "encoder": "transformers Qwen3VLTextDecoderLayer, one resident at a time, weights from the text GGUF by gguf-py float32 dequantization; SDPA attention, causal, batch 1, no padding",
+  "config": {
+   "hidden_size": 5120,
+   "intermediate_size": 25600,
+   "num_attention_heads": 64,
+   "num_key_value_heads": 8,
+   "head_dim": 128,
+   "rms_norm_eps": 9.999999974752427e-07,
+   "rope_parameters": {
+    "rope_type": "default",
+    "rope_theta": 5000000.0,
+    "mrope_section": [
+     24,
+     20,
+     20
+    ],
+    "mrope_interleaved": true
+   }
+  },
+  "gguf_codecs": {
+   "Q6_K": 65,
+   "F32": 257,
+   "Q4_K": 385
+  }
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "bf16_matmul": "bf16 operands, float32 GEMM, one bf16 rounding"
+  },
+  "name_map_check": {
+   "prompt": "The capital of France is",
+   "token_id": 12095,
+   "token": " Paris",
+   "logit": 19.171100616455078
+  },
+  "bf16_vs_fp32": {
+   "plain": {
+    "rel_l2": 0.008344952530119212,
+    "cosine": 0.9999829121666998,
+    "max_abs": 104.1826171875,
+    "token_cosine_min": 0.9999253661613227,
+    "token_cosine_min_row": 2,
+    "token_cosine_min_token_id": 34986,
+    "rel_l2_by_layer": [
+     0.0037424662949455474,
+     0.003897926816041305,
+     0.003986382853359519,
+     0.005146874586856185,
+     0.005376736821034036,
+     0.005917924442849268,
+     0.002759349178789756,
+     0.0034179688988979187,
+     0.0021746865523168987,
+     0.0018744095412564746,
+     0.0009035767327559756,
+     0.0007166772925030322,
+     0.0015981021984657984,
+     0.002257667879398874,
+     0.002928607087396557,
+     0.0033529405036057825,
+     0.004061240029143745,
+     0.004576343466183861,
+     0.004953988895256206,
+     0.006196669434690537,
+     0.006860856031760376,
+     0.007240597093659239,
+     0.007650945912473311,
+     0.008444721110000277,
+     0.008603102952425256,
+     0.008868176697890974,
+     0.009088146991065261,
+     0.009619307145613735,
+     0.009906276141641652,
+     0.010823495900456321,
+     0.01226653737320531,
+     0.010243891864160857,
+     0.011257304561192888,
+     0.012241105798221229,
+     0.012846066646615494,
+     0.013750905426223885,
+     0.014356070422217095,
+     0.01449386312582468,
+     0.014399815465730133,
+     0.014212434121526129,
+     0.01377352600925493,
+     0.013911001542984731,
+     0.013736315574340498,
+     0.010199373882286415,
+     0.007868714618202686,
+     0.007892661556755694,
+     0.008471899885324586,
+     0.00887915881169339,
+     0.008453584261528901,
+     0.008344952530119212
+    ],
+    "rel_l2_after_first": 0.009937017865075877
+   },
+   "empty": {
+    "rel_l2": 0.019410235917198024,
+    "cosine": 0.9998147515237203,
+    "max_abs": 6.4229736328125,
+    "token_cosine_min": 0.9998147515237203,
+    "token_cosine_min_row": 0,
+    "token_cosine_min_token_id": 151643,
+    "rel_l2_by_layer": [
+     0.0036015350933463527,
+     0.0053412846733569335,
+     0.0040471740365499,
+     0.0038685317000489794,
+     0.004930229435688952,
+     0.004030749943232002,
+     0.004643039616535166,
+     0.004588866994357098,
+     0.005977005882096246,
+     0.006398652406340765,
+     0.0066013723080398864,
+     0.007267711342998877,
+     0.006258126129267289,
+     0.00627066777570162,
+     0.005826709207456858,
+     0.006352425496821865,
+     0.006253632753884001,
+     0.006421272743441551,
+     0.006866754088054471,
+     0.007245227100262802,
+     0.007906573047489688,
+     0.008118335359223204,
+     0.007912904028423106,
+     0.00909522421911406,
+     0.010231817081749842,
+     0.010131812509612197,
+     0.010217722593940303,
+     0.010153437495090076,
+     0.010260263821145157,
+     0.01155068900392894,
+     0.01141762303159597,
+     0.01121931751934108,
+     0.010163097488077349,
+     0.011474066614029808,
+     0.012989288841692323,
+     0.012502957774299994,
+     0.013739267093399439,
+     0.012595436022830924,
+     0.01432993190743086,
+     0.013808785327982664,
+     0.014269186821707285,
+     0.015317263660665808,
+     0.014965538773785047,
+     0.015637870978228857,
+     0.016524847626320262,
+     0.01862441425317368,
+     0.018736508426683077,
+     0.018030692730233316,
+     0.01917804133068583,
+     0.019410235917198024
+    ]
+   },
+   "non_ascii": {
+    "rel_l2": 0.011960089166827717,
+    "cosine": 0.9999866481275784,
+    "max_abs": 179.7783203125,
+    "token_cosine_min": 0.9998762344748201,
+    "token_cosine_min_row": 12,
+    "token_cosine_min_token_id": 15827,
+    "rel_l2_by_layer": [
+     0.0035360331912359143,
+     0.004122209435459161,
+     0.00461749779866346,
+     0.005121008904681404,
+     0.005547488101726805,
+     0.006001978495578577,
+     0.0023854922430683926,
+     0.001942784936403004,
+     0.0030757984940603697,
+     0.0033751587564044994,
+     0.0044044402496060805,
+     0.005383603639827157,
+     0.006458554498485799,
+     0.007111889297750135,
+     0.007777608450809817,
+     0.008192959555624648,
+     0.008892609340366928,
+     0.009393010823220761,
+     0.009759493261126092,
+     0.010994328171599854,
+     0.011643673862309046,
+     0.012014101704910357,
+     0.012410906165566586,
+     0.013186740865539913,
+     0.013333918756346656,
+     0.013580509025107696,
+     0.013785482020579677,
+     0.014300933712037882,
+     0.014572321126716277,
+     0.015472955502540789,
+     0.016903076879045912,
+     0.014931717134343298,
+     0.015903143189538973,
+     0.016855259357493883,
+     0.01743457291555405,
+     0.01830996114858989,
+     0.018880271323780413,
+     0.01899405576437967,
+     0.018868506702682124,
+     0.01865442864113296,
+     0.018187446271304076,
+     0.018308474460134342,
+     0.018116935464738942,
+     0.014358323557999163,
+     0.011827005367511214,
+     0.011754019934842168,
+     0.01233105511921628,
+     0.012706284589031938,
+     0.012143087509457397,
+     0.011960089166827717
+    ],
+    "rel_l2_after_first": 0.01135668886292146
+   },
+   "long": {
+    "rel_l2": 0.008495418780843634,
+    "cosine": 0.9999739001682952,
+    "max_abs": 104.1826171875,
+    "token_cosine_min": 0.9992815375509161,
+    "token_cosine_min_row": 563,
+    "token_cosine_min_token_id": 49411,
+    "rel_l2_by_layer": [
+     0.00340395945854229,
+     0.00404833985005691,
+     0.004524101892432263,
+     0.005124781585703748,
+     0.005405903129192232,
+     0.005769107003345331,
+     0.0028234927858660193,
+     0.0034803943220212134,
+     0.002312580225826007,
+     0.0020685340260425938,
+     0.0013608636506666765,
+     0.0013523761807548208,
+     0.0020067111357385445,
+     0.0025781954668450467,
+     0.003196215178161898,
+     0.0036120280505068858,
+     0.004282414801198409,
+     0.004781220905085659,
+     0.005151383677887808,
+     0.006330940851135435,
+     0.006964361125677517,
+     0.007330913142207836,
+     0.007728005585238974,
+     0.008472412594291968,
+     0.008624279159796931,
+     0.008865919588159831,
+     0.009061383030572885,
+     0.009542394810904733,
+     0.009806985671906951,
+     0.01062725838321754,
+     0.011965371658548319,
+     0.010152064395538857,
+     0.011088704008110503,
+     0.011967437746565637,
+     0.012542155403892917,
+     0.013424073539651596,
+     0.014044316393027957,
+     0.01420655187800056,
+     0.014077920574464374,
+     0.013915552215520984,
+     0.013478226137776585,
+     0.013580743980006362,
+     0.013390074875270146,
+     0.010159480577275323,
+     0.008058729928877162,
+     0.008078371430749598,
+     0.008575646138095198,
+     0.008930932409171167,
+     0.008604587083735116,
+     0.008495418780843634
+    ],
+    "rel_l2_after_first": 0.009207570227708886
+   },
+   "dialogue": {
+    "rel_l2": 0.008383044146324799,
+    "cosine": 0.9999821830716537,
+    "max_abs": 104.1826171875,
+    "token_cosine_min": 0.999880277658864,
+    "token_cosine_min_row": 27,
+    "token_cosine_min_token_id": 151670,
+    "rel_l2_by_layer": [
+     0.0036673828183340675,
+     0.0042421006240827225,
+     0.004370532069082441,
+     0.005247040478243837,
+     0.005440132131312334,
+     0.005736279726340541,
+     0.0027613850440741457,
+     0.0034199575658702196,
+     0.002179307935366404,
+     0.0018811235534457094,
+     0.0009242075921630446,
+     0.0007528652470715911,
+     0.0016176373244083742,
+     0.0022721034051643983,
+     0.0029415211745838854,
+     0.003365558281266668,
+     0.004072642171436572,
+     0.004586078992429002,
+     0.0049640990961434634,
+     0.006204621479829039,
+     0.0068683723441238485,
+     0.007248800361459216,
+     0.007659219810637584,
+     0.008451333710726597,
+     0.008610183072105676,
+     0.008874575763868513,
+     0.009094133509426429,
+     0.009621800713297822,
+     0.00990831325039061,
+     0.010820201550624542,
+     0.012258852292534508,
+     0.010244358025532257,
+     0.01125437419044711,
+     0.012234001398869482,
+     0.012839058232870803,
+     0.013745200493448,
+     0.014352711472428056,
+     0.014490220539054828,
+     0.014394412580159633,
+     0.014208499067492148,
+     0.013771959595837907,
+     0.013907983685955454,
+     0.013735905309190102,
+     0.010212676967968674,
+     0.007898584152105908,
+     0.007921978074349361,
+     0.008499907100426113,
+     0.0089066422140856,
+     0.00848834568436042,
+     0.008383044146324799
+    ],
+    "rel_l2_after_first": 0.010912422481063562
+   },
+   "markup": {
+    "rel_l2": 0.008387967775959647,
+    "cosine": 0.9999823460643421,
+    "max_abs": 104.1826171875,
+    "token_cosine_min": 0.9998578328011841,
+    "token_cosine_min_row": 26,
+    "token_cosine_min_token_id": 151669,
+    "rel_l2_by_layer": [
+     0.003851941955765472,
+     0.004191766601902844,
+     0.004326791754518774,
+     0.00538765230603813,
+     0.006068275361363711,
+     0.006735393136265085,
+     0.0027629127922620227,
+     0.003421193172713523,
+     0.0021828191592891733,
+     0.00188556554441832,
+     0.0009305060861646008,
+     0.0007596818212178113,
+     0.0016210265839677169,
+     0.0022746770805995237,
+     0.002943291074148235,
+     0.0033660250421194775,
+     0.004072967826716645,
+     0.004586726182449768,
+     0.004963913526203637,
+     0.006203771646967476,
+     0.006866488397509326,
+     0.007246366525452818,
+     0.007655890429148282,
+     0.008448210007014956,
+     0.008606798795284554,
+     0.008871761248254693,
+     0.009091635423445498,
+     0.009622201392829295,
+     0.009910541961908482,
+     0.010826257727139193,
+     0.012268085464881595,
+     0.010251677323591979,
+     0.01126357355183198,
+     0.012245391872796791,
+     0.012850708920801562,
+     0.013754626638212687,
+     0.014360828116215047,
+     0.014498102233747466,
+     0.014403096612435636,
+     0.01421693723755469,
+     0.013779684061911403,
+     0.01391663661713462,
+     0.013742521095166669,
+     0.010215833303222935,
+     0.007899898983284945,
+     0.007923425596265144,
+     0.008503538755196903,
+     0.008912331449920475,
+     0.008491846426374558,
+     0.008387967775959647
+    ],
+    "rel_l2_after_first": 0.011833614860908205
+   }
+  },
+  "seconds": {
+   "layers_s": 132.1
+  }
+ },
+ "tolerances": {
+  "rule": "relative L2 = 2 x the oracle's own bf16 against fp32 relative L2 of the same prompt, over every row and over the rows after the first; per-token cosine at least 1 - 4 (1 - c), c the oracle's own smallest per-token cosine of the same prompt, and at most the starting value",
+  "starting": {
+   "rel_l2": 0.02,
+   "token_cosine_min": 0.999
+  },
+  "rel_l2": {
+   "plain": 0.016689905060238423,
+   "empty": 0.03882047183439605,
+   "non_ascii": 0.023920178333655433,
+   "long": 0.016990837561687268,
+   "dialogue": 0.016766088292649597,
+   "markup": 0.016775935551919294
+  },
+  "rel_l2_after_first": {
+   "plain": 0.019874035730151753,
+   "non_ascii": 0.02271337772584292,
+   "long": 0.018415140455417773,
+   "dialogue": 0.021824844962127124,
+   "markup": 0.02366722972181641
+  },
+  "token_cosine_min": {
+   "plain": 0.999,
+   "empty": 0.999,
+   "non_ascii": 0.999,
+   "long": 0.9971261502036644,
+   "dialogue": 0.999,
+   "markup": 0.999
+  }
+ },
+ "notes": [],
+ "created": "2026-10-28T04:35:37Z",
+ "npz": "check2_h3.npz",
+ "tensors": {
+  "ids_dialogue": {
+   "shape": [
+    56
+   ],
+   "dtype": "int32",
+   "sha256": "690793da56915b257a3e066e6f4bd69b7b91d0bbb3a2804e689b25016c75d9f2"
+  },
+  "ids_empty": {
+   "shape": [
+    1
+   ],
+   "dtype": "int32",
+   "sha256": "760b68531cab7e8a5007dde42c3f91a8a1954193e80d93908cff50c00938b72b"
+  },
+  "ids_long": {
+   "shape": [
+    617
+   ],
+   "dtype": "int32",
+   "sha256": "b65de1dfda175dddeb93dc0bc77d62de64ffa7b730df14d4c27535f826185b12"
+  },
+  "ids_markup": {
+   "shape": [
+    42
+   ],
+   "dtype": "int32",
+   "sha256": "d1de3433fe12cdb673dcef343ea615d4b71c1d0018daae1cfdf279f00b81001f"
+  },
+  "ids_non_ascii": {
+   "shape": [
+    37
+   ],
+   "dtype": "int32",
+   "sha256": "fc04cb5c056c141eb7de4e23ee920ace7299449ff50d0ece13c723025be32537"
+  },
+  "ids_plain": {
+   "shape": [
+    28
+   ],
+   "dtype": "int32",
+   "sha256": "9d48f6ce15004d4551a3dffecf10004d97774918917d9cb991e3b8de17c51670"
+  },
+  "tap_bf16_dialogue": {
+   "shape": [
+    56,
+    5120
+   ],
+   "dtype": "float32",
+   "sha256": "31876fdedda2cab31fe5051c563900cafbe4743fc2241a9d944a59cfead9dbc1"
+  },
+  "tap_bf16_empty": {
+   "shape": [
+    1,
+    5120
+   ],
+   "dtype": "float32",
+   "sha256": "f82999512841b11c587cfc185a7a0ed358f12886b53ba08f43be5225702cc922"
+  },
+  "tap_bf16_long": {
+   "shape": [
+    617,
+    5120
+   ],
+   "dtype": "float32",
+   "sha256": "df9a0a18a7ef20d34454664dece70fe0e059e10d7a07a403adf31d93f6c9e1a4"
+  },
+  "tap_bf16_markup": {
+   "shape": [
+    42,
+    5120
+   ],
+   "dtype": "float32",
+   "sha256": "560211353c18254c0580a8980aeab016abc02784cd6959fcf17b5509263a4a48"
+  },
+  "tap_bf16_non_ascii": {
+   "shape": [
+    37,
+    5120
+   ],
+   "dtype": "float32",
+   "sha256": "42925e19dbb69faa220c3d99aadd5736b51550637098e8a20074c13b29b9fbc2"
+  },
+  "tap_bf16_plain": {
+   "shape": [
+    28,
+    5120
+   ],
+   "dtype": "float32",
+   "sha256": "872fb244cd5ba172cfb47cce3fd9465e3344601fee6ddf1fe0457a27389fda24"
+  },
+  "tap_dialogue": {
+   "shape": [
+    56,
+    5120
+   ],
+   "dtype": "float32",
+   "sha256": "bb52a95f87e76ac52ac9a32ec48f9c7712dc16dfe12d464cf68cc9d658717283"
+  },
+  "tap_empty": {
+   "shape": [
+    1,
+    5120
+   ],
+   "dtype": "float32",
+   "sha256": "7b6a227ff84d193004b2e43fd64872b41fe79eae6751a771958324c34c431aa7"
+  },
+  "tap_long": {
+   "shape": [
+    617,
+    5120
+   ],
+   "dtype": "float32",
+   "sha256": "d465596ad69f0d06de63091e072f583ef2fa51d0f57ec08543e1730095997854"
+  },
+  "tap_markup": {
+   "shape": [
+    42,
+    5120
+   ],
+   "dtype": "float32",
+   "sha256": "c60bd0b656234e96a2394f44918b5dd2c8c5fd93fde7fd69678ee71699222cfc"
+  },
+  "tap_non_ascii": {
+   "shape": [
+    37,
+    5120
+   ],
+   "dtype": "float32",
+   "sha256": "fceaf60994bed18ca9a4f453cf0a241b3d6394af00cdf8fa40530f403af37545"
+  },
+  "tap_plain": {
+   "shape": [
+    28,
+    5120
+   ],
+   "dtype": "float32",
+   "sha256": "5b6a80b80b0afc63049168b46716b91cbfe1e66df7cf3c698368216fb1a02a00"
+  }
+ }
+}

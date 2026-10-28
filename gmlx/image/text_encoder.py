@@ -54,6 +54,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import threading
 import unicodedata
 from dataclasses import dataclass
@@ -126,8 +127,20 @@ class EncoderSpec:
                                      # weights, each norm's output in its
                                      # input dtype; the loaded model keeps
                                      # its own weights
+    drop_untapped: bool = False      # an owned encoder drops the decoder
+                                     # layers past its last tap after the
+                                     # load
+    added_tokens: tuple = ()         # (text, id) pairs the reference's
+                                     # tokenizer adds at fixed ids, split
+                                     # out of the prompt before the GGUF
+                                     # tokenizer reads the rest
+    empty_ids: tuple = ()            # ids of a prompt that has no tokens,
+                                     # which is refused when this is empty
 
     def __post_init__(self):
+        if self.drop_untapped and self.final_norm:
+            raise ValueError(f"{self.name} reads after the final norm, so "
+                             "it runs every layer")
         if self.fp32_norms and self.arch not in _NORMS:
             raise ValueError(f"{self.name}: no F32 norm map for arch "
                              f"{self.arch!r}")
@@ -237,11 +250,28 @@ def render(spec: EncoderSpec, prompt: str) -> str:
     return head + (prompt or spec.empty) + tail
 
 
+def _encode(spec: EncoderSpec, tokenizer, text: str) -> list[int]:
+    """The ids of ``text``, with the spec's added tokens at their fixed
+    ids between the encoded pieces. As a tokenizer with added tokens, the
+    longer token texts match first."""
+    if not spec.added_tokens:
+        return list(tokenizer.encode(text, add_special_tokens=False))
+    fixed = dict(spec.added_tokens)
+    alt = "|".join(re.escape(t) for t in sorted(fixed, key=len, reverse=True))
+    ids: list[int] = []
+    for i, part in enumerate(re.split(f"({alt})", text)):
+        if i % 2:
+            ids.append(fixed[part])
+        elif part:
+            ids.extend(tokenizer.encode(part, add_special_tokens=False))
+    return ids
+
+
 def token_ids(spec: EncoderSpec, tokenizer, prompt: str) -> list[int]:
     """Token ids of the rendered prompt, cut at the family's token cap. The
     cap applies to the whole rendered text, as in the reference, and a
     spec that keeps a tail cuts the ids before its last ``keep_tail``."""
-    ids = list(tokenizer.encode(render(spec, prompt), add_special_tokens=False))
+    ids = _encode(spec, tokenizer, render(spec, prompt)) or list(spec.empty_ids)
     if spec.max_tokens is not None and len(ids) > spec.max_tokens:
         n = spec.keep_tail
         ids = (ids[: spec.max_tokens - n] + ids[len(ids) - n:] if n
@@ -272,10 +302,12 @@ def rows_at_most(spec: EncoderSpec, prompt: str) -> int:
     """The most rows the features of ``prompt`` hold, from its text alone,
     before a tokenizer loads: the encoders here tokenize the NFC form of
     the rendered text by byte-level BPE, so each token id holds at least
-    one byte of it. The NFC form of some characters holds more bytes."""
+    one byte of it. The NFC form of some characters holds more bytes. A
+    prompt with no ids holds the spec's ids of an empty prompt."""
     text = render(spec, prompt)
     n = max(len(t.encode("utf-8"))
             for t in (text, unicodedata.normalize("NFC", text)))
+    n = max(n, len(spec.empty_ids))
     if spec.max_tokens is not None:
         n = min(n, spec.max_tokens)
     return max(0, n - spec.drop) + pad_rows(spec, n)
@@ -460,12 +492,17 @@ def _module(inner, where: str):
 def read_norms(path: str, model, spec: EncoderSpec) -> dict:
     """The F32 norm weights of the encoder GGUF at ``path`` by module path
     under the decoder stack of ``model``. Each must round to the weight
-    the model holds, so they are the model's own norms."""
+    the model holds, so they are the model's own norms. A spec that drops
+    the layers past its tap reads none of theirs."""
     st = os.stat(path)
     inner = _inner(model)
+    kept = len(inner.layers) if spec.drop_untapped else None
     out = {}
     for where, a in _gguf_norms(os.path.abspath(path), spec.arch,
                                 (st.st_size, st.st_mtime_ns)):
+        parts = where.split(".")
+        if kept is not None and parts[0] == "layers" and int(parts[1]) >= kept:
+            continue
         mod = _module(inner, where)
         held = getattr(mod, "weight", None)
         w = mx.array(a)
@@ -885,11 +922,18 @@ class EncoderHandle:
         return sum(int(v.nbytes) for _, v in tree_flatten(tower.parameters()))
 
     def encode(self, prompt: str) -> TextTap:
+        return self.encode_ids(token_ids(self.spec, self.tokenizer, prompt))
+
+    def encode_ids(self, ids: list[int]) -> TextTap:
+        """``encode`` of token ids a family built itself."""
         if self.model is None:
             raise RuntimeError(
                 f"the {self.spec.name} text encoder was released")
         spec = self.spec
-        ids = token_ids(spec, self.tokenizer, prompt)
+        if len(ids) <= spec.drop:
+            raise ValueError(f"no token ids to encode: {len(ids)} ids, and "
+                             f"the first {spec.drop} are dropped" if spec.drop
+                             else "no token ids to encode")
         pads = pad_rows(spec, len(ids))
         norms = (float32_norms(self.model, self.norms) if self.norms
                  else contextlib.nullcontext())
@@ -946,6 +990,23 @@ def drop_output_head(model) -> int:
     held = sum(int(v.nbytes)
                for _, v in tree_flatten(model["lm_head"].parameters()))
     del model["lm_head"]
+    return held
+
+
+def drop_layers_after(model, n: int) -> int:
+    """Keep the first ``n`` decoder layers of a text model and return the
+    bytes the others held. A tap after layer ``n`` never runs them."""
+    from mlx.utils import tree_flatten
+
+    inner = _inner(model)
+    layers = getattr(inner, "layers", None)
+    if layers is None:
+        raise TypeError(f"{type(model).__name__} has no decoder layers")
+    if not 1 <= n <= len(layers):
+        raise ValueError(f"cannot keep {n} of {len(layers)} layers")
+    held = sum(int(v.nbytes) for layer in layers[n:]
+               for _, v in tree_flatten(layer.parameters()))
+    inner.layers = layers[:n]
     return held
 
 
@@ -1013,15 +1074,16 @@ def resident_config(model, spec: EncoderSpec) -> dict:
          else dict(vars(text))}, spec)
 
 
-def _drop_head(model) -> None:
-    """``drop_output_head`` on a loaded encoder, with the mapped bytes of
-    the matrix taken out of the free-memory reading. Bytes the drop
-    returned to MLX were never part of that registration."""
+def _drop_head(model, drop=drop_output_head) -> None:
+    """``drop_output_head``, or another ``drop`` that returns the bytes it
+    freed, on a loaded encoder, with the mapped bytes taken out of the
+    free-memory reading. Bytes the drop returned to MLX were never part of
+    that registration."""
     from gmlx.gen.prefill_decay import deduct_untracked_weights
     from gmlx.load.loader import collect_after_load
 
     before = mx.get_active_memory()
-    held = drop_output_head(model)
+    held = drop(model)
     if not held:
         return
     collect_after_load()
@@ -1031,11 +1093,13 @@ def _drop_head(model) -> None:
 
 
 def load_encoder(path: str, spec: EncoderSpec, *, override: bool = False,
-                 mmproj: str | None = None, log=print) -> EncoderHandle:
+                 mmproj: str | None = None, log=print,
+                 tag: str = "image") -> EncoderHandle:
     """Load an owned text encoder GGUF through the text loader, without
     its output matrix. The header is checked against the spec before any
     weights load. With ``mmproj`` the encoder loads with its vision tower,
-    for a family that conditions on reference images."""
+    for a family that conditions on reference images. ``tag`` heads the
+    log line."""
     from gmlx.load.loader import weights_source_key
     from gmlx.load.preflight import find_split_shards
 
@@ -1051,11 +1115,14 @@ def load_encoder(path: str, spec: EncoderSpec, *, override: bool = False,
         config = _vision_config(config, spec)
     check_encoder(model, config, spec, override=True)
     _drop_head(model)
+    if spec.drop_untapped:
+        last = max(spec.tap_layers)
+        _drop_head(model, lambda m: drop_layers_after(m, last))
     tower = " with its vision tower" if mmproj is not None else ""
     read = ("read after the final norm" if spec.final_norm else
             "tap after layer " + ", ".join(str(n) for n in spec.tap_layers)
             + f" of {spec.layers}")
-    log(f"[image] text encoder {spec.name}{tower}, {read}")
+    log(f"[{tag}] text encoder {spec.name}{tower}, {read}")
     shards = find_split_shards(path)
     key = (weights_source_key(*shards) if mmproj is None
            else weights_source_key(*shards, mmproj))
