@@ -450,6 +450,7 @@ class ChatState:
     thinking_end_token: str | None = None
     template_kwargs: dict | None = None  # live per-turn render kwargs (/thinking)
     template_text: str = ""              # template source, for switch mapping
+    render_fallback_logged: bool = False
     sampling: dict = dataclasses.field(default_factory=dict)
     transcript: list = dataclasses.field(default_factory=list)
     replay_messages: list | None = None  # deferred history prefill (--resume)
@@ -2328,6 +2329,62 @@ def _encode_turn(tok, prompt_text, starts_cache: bool) -> list:
     return tok.encode(prompt_text, add_special_tokens=False)
 
 
+def _conversation(state) -> list:
+    """The conversation the cache holds, as template messages: the system
+    prompt, then each recorded turn (a canceled one with its partial
+    reply). The deferred replay (--resume, a rebuilt cache) prefills the
+    same list."""
+    msgs = []
+    if state.system_prompt:
+        msgs.append({"role": "system", "content": state.system_prompt})
+    for e in state.transcript:
+        msgs.append({"role": "user", "content": e["user"].get("content", "")})
+        msgs.append({"role": "assistant",
+                     "content": e["assistant"].get("content", "")})
+    return msgs
+
+
+def _continuation(render, history: list, new: list) -> str | None:
+    """The render of ``history + new`` (with the generation prompt) past
+    the render of ``history`` (without), or None when the history render
+    is not a prefix of it or the template refuses either list."""
+    try:
+        prev = render(history, False)
+        full = render(history + list(new), True)
+    except Exception:  # noqa: BLE001 - a template that refuses: per turn
+        return None
+    if isinstance(prev, str) and isinstance(full, str) and prev \
+            and full.startswith(prev):
+        return full[len(prev):]
+    return None
+
+
+def _render_turn(tok, state, messages, starts_cache: bool, template_kwargs) -> str:
+    """The text one turn appends to the cache. A turn that starts the cache renders ``messages`` whole. A
+    later turn renders the whole conversation and keeps the text past the
+    render of the cached history, so a header the template writes on every
+    render (a system block, a BOS) is not repeated. A template that renders
+    earlier turns differently once a turn follows renders the turn on its
+    own, as before."""
+    def render(msgs, gen):
+        return tok.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=gen, **template_kwargs)
+
+    text = None
+    if not starts_cache and state.transcript:
+        text = _continuation(render, _conversation(state), messages)
+        if text is None and not state.render_fallback_logged:
+            state.render_fallback_logged = True
+            import logging
+
+            logging.getLogger(__name__).info(
+                "the chat template renders earlier turns differently once a "
+                "turn follows; later turns render on their own")
+    if text is None:
+        text = render(messages, True)
+    return text
+
+
 def _prompt_opens_thinking_cfg(state, prompt_text) -> bool:
     """:func:`_opens_thinking` with the session's configured markers applied
     (the seed for the MTP path's ^T finish-thinking hook)."""
@@ -3874,23 +3931,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 e["cache_before"] = None
             state.take("replay_messages")  # stale pre-pop history
             if transcript:
-                replay = []
-                if state.system_prompt:
-                    replay.append(
-                        {"role": "system", "content": state.system_prompt}
-                    )
-                for e in transcript:
-                    replay.append(
-                        {"role": "user", "content": e["user"].get("content", "")}
-                    )
-                    replay.append(
-                        {
-                            "role": "assistant",
-                            "content": e["assistant"].get("content", ""),
-                        }
-                    )
                 if not state.vlm or vlm_mtp:
-                    state.replay_messages = replay
+                    state.replay_messages = _conversation(state)
                 first_turn = False
                 print(
                     "[chat] this model's cache can't rewind in place - rebuilt; "
@@ -4113,10 +4155,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 messages.append({"role": "user", "content": user_text})
                 vlm_msgs.append(_vlm_message(model_type, user_text, "user", 0, 0))
                 first_turn = False
-                prompt_text = tok.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True,
-                    **template_kwargs,
-                )
+                prompt_text = _render_turn(
+                    tok, state, messages, starts_cache, template_kwargs)
                 prompt = _encode_turn(tok, prompt_text, starts_cache)
                 reply, _canceled = _stream_reply(
                     stream_generate_speculative(
@@ -4254,10 +4294,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             messages.append(
                 {"role": "user", "content": _compose_user_content(state, line)}
             )
-            prompt_text = tok.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True,
-                **template_kwargs,
-            )
+            prompt_text = _render_turn(
+                tok, state, messages, starts_cache, template_kwargs)
             prompt = _encode_turn(tok, prompt_text, starts_cache)
             first_turn = False
             reply, canceled = _stream_reply(
@@ -4351,10 +4389,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         else:
             # Render once, encode the render (``_encode_turn``); the string is
             # reused for thinking-budget seeding + reasoning detection.
-            prompt_text = tok.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True,
-                **template_kwargs,
-            )
+            prompt_text = _render_turn(
+                tok, state, messages, starts_cache, template_kwargs)
             prompt = _encode_turn(tok, prompt_text, starts_cache)
 
         xtc_kwargs = {}

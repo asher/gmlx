@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import collections
 import importlib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -249,9 +250,11 @@ def test_a_turn_that_starts_the_cache_encodes_as_run(monkeypatch, tmp_path):
     assert rc == 0
     first, second = (list(t["prompt"]) for t in stream.turns)
     assert first == encode_prompt(tok, "<s>Hello")
-    # One BOS, and none of the EOS the tokenizer adds.
+    # One BOS, and none of the EOS the tokenizer adds. The later turn is
+    # the conversation's render past the cached history, so its BOS does
+    # not repeat.
     assert first == tok.encode("<s>Hello", add_special_tokens=False)
-    assert second == tok.encode("<s>wo", add_special_tokens=False)
+    assert second == tok.encode("wo", add_special_tokens=False)
 
 
 def test_retry_trims_kv_and_resends_same_content(monkeypatch, tmp_path, capsys):
@@ -650,7 +653,7 @@ class _FakeSpecStream:
 
 
 def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False,
-                      extra_argv=()):
+                      extra_argv=(), tok=None):
     """A --mmproj base with a drafter: text-only turns route through MTP, media
     turns through the plain VLM stream - all in one scripted session.
 
@@ -682,8 +685,8 @@ def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False,
     monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config", lambda *a, **k: None)
     monkeypatch.setattr(
         "gmlx.spec.mtp_load.load_vlm_mtp_model",
-        lambda *a, **k: (_Model(), object(), {"model_type": "fake"}, _FakeTok(),
-                         object()))
+        lambda *a, **k: (_Model(), object(), {"model_type": "fake"},
+                         tok or _FakeTok(), object()))
     monkeypatch.setattr("gmlx.gen.generation.stream_generate_speculative", sstream)
     monkeypatch.setattr(chat, "_vlm_message", fake_vlm_message)
     monkeypatch.setattr("gmlx._vendor.mlx_vlm.prompt_utils.get_chat_template",
@@ -746,6 +749,135 @@ def test_vlm_mtp_native_head_text_turns_use_mtp(monkeypatch, tmp_path):
     assert len(sstream.turns) == 2
     assert sstream.turns[0]["cache_id"] == sstream.turns[1]["cache_id"]
     assert len(vstream.turns) == 0
+
+
+# ------------- Tier 1 - loop driver (multi-turn render, thinking) -------------
+
+_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+_M31 = _FIXTURES / "minimax_m31_turns.jinja"
+_M31_SPECIALS = ("]~!b[", "]~b]", "[e~[", "<mm:think>", "</mm:think>",
+                 "]<]minimax[>[")
+_M31_TURN = "]~b]user\n{}[e~[\n]~b]ai\n"
+# Qwen2.5's shape: a system block the template writes when the
+# conversation has none.
+_CHATML_DEFAULT_SYSTEM = (
+    "{%- if messages[0]['role'] == 'system' %}"
+    "{{- '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' }}"
+    "{%- else %}"
+    "{{- '<|im_start|>system\\nYou are a helpful assistant.<|im_end|>\\n' }}"
+    "{%- endif %}"
+    "{%- for m in messages %}{%- if m['role'] != 'system' %}"
+    "{{- '<|im_start|>' + m['role'] + '\\n' + m['content'] + '<|im_end|>\\n' }}"
+    "{%- endif %}{%- endfor %}"
+    "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\\n' }}{%- endif %}")
+
+
+def _template_tok(template: str, specials=(), bos="<s>"):
+    """A byte-level GGUF tokenizer whose chat template is ``template``, with
+    the template's control strings as single tokens."""
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
+    from tokenizers import pre_tokenizers
+
+    from gmlx.load.tokenizer import load_tokenizer_from_gguf
+
+    head = [bos, "</s>", "<pad>", *specials]
+    tokens = head + sorted(pre_tokenizers.ByteLevel.alphabet()) + ["He"]
+    backend = load_tokenizer_from_gguf({
+        "general.architecture": "qwen2",
+        "tokenizer.ggml.model": "gpt2",
+        "tokenizer.ggml.pre": "qwen2",
+        "tokenizer.ggml.tokens": tokens,
+        "tokenizer.ggml.merges": ["H e"],
+        "tokenizer.ggml.token_type": [3] * len(head)
+        + [1] * (len(tokens) - len(head)),
+        "tokenizer.ggml.bos_token_id": 0,
+        "tokenizer.ggml.eos_token_id": 1,
+        "tokenizer.ggml.padding_token_id": 2,
+        "tokenizer.ggml.add_bos_token": False,
+    }, "qwen2")
+    backend.chat_template = template
+    return TokenizerWrapper(backend)
+
+
+def _turn_texts(monkeypatch, tmp_path, tok, lines=("hi", "again", "more"),
+                **kw):
+    """Run the scripted chat on ``tok``; each turn's prompt ids and text."""
+    rc, _s, stream = _run_text_chat(
+        monkeypatch, tmp_path, list(lines),
+        load_model=lambda *a, **k: (object(), {}, tok), **kw)
+    assert rc == 0
+    ids = [list(t["prompt"]) for t in stream.turns]
+    return ids, [tok.decode(i) for i in ids]
+
+
+@pytest.mark.parametrize("template, specials, bos, header, turn", [
+    (_M31.read_text(), _M31_SPECIALS, "<s>", "]~!b[]~b]system", _M31_TURN),
+    ((_FIXTURES / "gemma4_template.jinja").read_text(),
+     ("<|turn>", "<turn|>"), "<bos>", "<bos>",
+     "<|turn>user\n{}<turn|>\n<|turn>model\n"),
+    (_CHATML_DEFAULT_SYSTEM, ("<|im_start|>", "<|im_end|>"), "<s>",
+     "You are a helpful assistant.",
+     "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"),
+], ids=["minimax-m31", "gemma4", "chatml-default-system"])
+def test_later_turns_do_not_repeat_the_template_header(
+        monkeypatch, tmp_path, template, specials, bos, header, turn):
+    """A template that writes a header on every render (M3.1's system and
+    developer blocks, Gemma 4's BOS, a built-in system prompt) renders it
+    once: each later turn is the conversation's render past the cached
+    history."""
+    tok = _template_tok(template, specials, bos)
+    _ids, texts = _turn_texts(monkeypatch, tmp_path, tok)
+    assert texts[0].count(header) == 1
+    assert texts[1:] == [turn.format("again"), turn.format("more")]
+
+
+@pytest.mark.parametrize("name", ["qwen3_template.jinja",
+                                  "qwen35_template.jinja",
+                                  "gptoss_template.jinja"])
+def test_templates_that_rerender_history_keep_the_per_turn_render(
+        monkeypatch, tmp_path, caplog, name):
+    """Qwen3 and Qwen3.5 drop the empty think block from the last reply,
+    and gpt-oss turns its <|return|> into <|end|>, once a turn follows. The
+    history render is then no prefix, so each later turn renders alone, as
+    before, and the fallback is logged once."""
+    import logging
+
+    tok = _template_tok((_FIXTURES / name).read_text())
+    with caplog.at_level(logging.INFO, logger="gmlx.tui.chat"):
+        ids, _texts = _turn_texts(monkeypatch, tmp_path, tok)
+    for user, got in zip(("again", "more"), ids[1:]):
+        alone = tok.apply_chat_template([{"role": "user", "content": user}],
+                                        tokenize=False,
+                                        add_generation_prompt=True)
+        assert got == tok.encode(alone, add_special_tokens=False)
+    assert sum("render on their own" in r.getMessage()
+               for r in caplog.records) == 1
+
+
+def test_tool_result_turn_renders_once():
+    """An M3.1 tool call, its result, then a user turn: each step is the
+    render past the history, so the tool result renders once and the
+    header never repeats. The result alone does not render at all: the
+    template refuses a tool message with no call before it."""
+    tok = _template_tok(_M31.read_text(), _M31_SPECIALS)
+
+    def render(msgs, gen):
+        return tok.apply_chat_template(msgs, tokenize=False,
+                                       add_generation_prompt=gen)
+
+    call = {"role": "assistant", "content": "", "tool_calls": [{
+        "type": "function",
+        "function": {"name": "weather", "arguments": {"city": "Paris"}}}]}
+    result = {"role": "tool", "content": "sunny"}
+    history = [{"role": "user", "content": "Paris?"}, call]
+    assert chat._continuation(render, history, [result]) == \
+        "]~b]tool\n<response>sunny</response>[e~[\n]~b]ai\n"
+    with pytest.raises(Exception, match="no previous assistant"):
+        render([result], True)
+    history += [result, {"role": "assistant", "content": "It is sunny."}]
+    assert chat._continuation(
+        render, history, [{"role": "user", "content": "thanks"}]) == \
+        _M31_TURN.format("thanks")
 
 
 # ------------------ Tier 2 - prompt_toolkit session harness ------------------
@@ -1149,7 +1281,8 @@ def test_vlm_mtp_text_turns_apply_penalties_and_bias(monkeypatch, tmp_path):
     assert "xtc_probability" not in first      # ignored in VLM mode
 
 
-def _run_text_mtp_chat(monkeypatch, tmp_path, lines, *, extra_argv=()):
+def _run_text_mtp_chat(monkeypatch, tmp_path, lines, *, extra_argv=(),
+                       tok=None):
     scripted = _Scripted(lines)
     sstream = _FakeSpecStream()
 
@@ -1169,7 +1302,8 @@ def _run_text_mtp_chat(monkeypatch, tmp_path, lines, *, extra_argv=()):
                         lambda args, model, config: None)
     monkeypatch.setattr(
         "gmlx.spec.mtp_load.load_mtp_model",
-        lambda *a, **k: (_Model(), drafter, {"model_type": "fake"}, _FakeTok()))
+        lambda *a, **k: (_Model(), drafter, {"model_type": "fake"},
+                         tok or _FakeTok()))
     monkeypatch.setattr("gmlx.cache.kv_cache.make_prompt_cache",
                         lambda lm: ["mtp-cache"])
     monkeypatch.setattr("gmlx.gen.generation.stream_generate_speculative",
@@ -1194,3 +1328,19 @@ def test_text_mtp_turns_apply_sampling_settings(monkeypatch, tmp_path, capsys):
     assert first["logit_bias"] == {7: -5}
     assert first["xtc_probability"] == 0.0
     assert second["xtc_probability"] == 0.5
+
+
+@pytest.mark.parametrize("vlm", [False, True], ids=["draft", "vlm-mtp"])
+def test_mtp_turns_render_past_the_history(monkeypatch, tmp_path, vlm):
+    """The MTP text paths render later turns like the plain path: the M3.1
+    header once."""
+    tok = _template_tok(_M31.read_text(), _M31_SPECIALS)
+    lines = ["hi", "again", "more"]
+    if vlm:
+        _rc, _s, _v, sstream, _m = _run_vlm_mtp_chat(
+            monkeypatch, tmp_path, lines, native=True, tok=tok)
+    else:
+        _rc, sstream = _run_text_mtp_chat(monkeypatch, tmp_path, lines, tok=tok)
+    texts = [tok.decode(list(t["prompt"])) for t in sstream.turns]
+    assert texts[0].count("]~!b[") == 1
+    assert texts[1:] == [_M31_TURN.format(u) for u in ("again", "more")]
