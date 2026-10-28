@@ -42,7 +42,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   such as MiniMax-M3.1's system block, Gemma 4's `<bos>` or a built-in
   default system prompt.
 - On MiniMax-M3.1, `gmlx chat --thinking on` makes the model reason, and
-  `--thinking adaptive` and `off` no longer print false warnings.
+  `--thinking adaptive` no longer prints a false warning.
 - MiniMax-M3 prefill of prompts near its 1M-token context no longer
   overruns a GPU index limit.
 - A Qwen3.5-family text model (Qwen3.5 and 3.6 MoE, MiniCPM-V 4.7 without

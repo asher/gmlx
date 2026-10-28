@@ -356,7 +356,6 @@ class MiniMaxM3Attention(nn.Module):
         queries = self.rope(queries, offset=offset)
         keys = self.rope(keys, offset=offset)
         K, V, IK = cache.update_and_fetch_msa(keys, values, ik)
-        iq = iq.astype(IK.dtype)  # a cache restored with f32 keys
         S = K.shape[2]
 
         blk = self.block_size
@@ -520,8 +519,12 @@ class MiniMaxM3Attention(nn.Module):
         nfull = S // blk
         chunk = int(os.environ.get("GMLX_MSA_GATHER_CHUNK", "256"))
         max_elems = int(os.environ.get("GMLX_MSA_MAX_ELEMS", str(2**31 - 1)))
-        chunk = max(1, min(chunk, max_elems // (B * Hkv * nblk * blk)))
+        # Both the scores and the gathered rows stay under int32 indexing.
+        chunk = max(1, min(chunk, max_elems // (B * Hkv * nblk * blk),
+                           max_elems // (B * Hkv * R * D)))
         blk_idx = mx.arange(nblk)
+        # A flat row index gathers fastest, even with the copy the reshape
+        # makes of a cache slice past its fill.
         Kf = K.reshape(B * Hkv * S, D)
         Vf = V.reshape(B * Hkv * S, D)
         row0 = (mx.arange(B * Hkv) * S).reshape(B, 1, Hkv, 1)
@@ -550,11 +553,12 @@ class MiniMaxM3Attention(nn.Module):
             tok = tok.reshape(B, Hkv, C, R).swapaxes(1, 2)  # [B, C, Hkv, R]
             tmask = mx.where(tok <= q_pos[:, None, None], 0.0, -float("inf"))
             rows = mx.minimum(tok, S - 1) + row0
-            Kg = Kf[rows].reshape(B * C * Hkv, 1, R, D)
-            Vg = Vf[rows].reshape(B * C * Hkv, 1, R, D)
+            N = B * C * Hkv
+            Kg = Kf[rows].reshape(N, 1, R, D)
+            Vg = Vf[rows].reshape(N, 1, R, D)
             qc = queries[:, :, c0:c1].swapaxes(1, 2)        # [B, C, H, D]
-            qc = qc.reshape(B * C * Hkv, 1, gq, D)
-            mask = tmask.reshape(B * C * Hkv, 1, 1, R).astype(queries.dtype)
+            qc = qc.reshape(N, 1, gq, D)
+            mask = tmask.reshape(N, 1, 1, R).astype(queries.dtype)
             o = mx.fast.scaled_dot_product_attention(
                 qc, Kg, Vg, scale=self.scale, mask=mask)
             o = o.reshape(B, C, H, D).swapaxes(1, 2)        # [B, H, C, D]

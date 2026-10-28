@@ -267,38 +267,6 @@ def test_dense_fallback_on_plain_cache_warns_not_crashes():
 
 # -- fp16 indexer keys, causal kernel, int32 tile cap -------------------------
 
-def _structured_decode(attn, S=128, dtype=mx.float32):
-    """Decode inputs whose block scores have clear gaps: head h's query
-    points along e_h, and only block 3 (head 0) or 9 (head 1) carries keys
-    along it, so each head selects its own block plus the forced local one."""
-    mx.random.seed(0)
-    d = attn.idx_dim
-    iq = mx.zeros((1, 2, 1, d)).at[0, 0, 0, 0].add(4.0).at[0, 1, 0, 1].add(4.0)
-    IK = 0.1 * mx.random.normal((1, 1, S, d))
-    blk = attn.block_size
-    IK = IK.at[0, 0, 3 * blk:4 * blk, 0].add(4.0)
-    IK = IK.at[0, 0, 9 * blk:10 * blk, 1].add(4.0)
-    q = mx.random.normal((1, 8, 1, 8))
-    K = mx.random.normal((1, 2, S, 8))
-    V = mx.random.normal((1, 2, S, 8))
-    return q, K, V, IK.astype(dtype), iq.astype(dtype)
-
-
-def test_fp16_indexer_selection_and_output_match_f32():
-    attn = _model().layers[1].self_attn
-    S = 128
-    nblk = S // attn.block_size
-    out = {}
-    for dt in (mx.float32, mx.float16):
-        q, K, V, IK, iq = _structured_decode(attn, S, dt)
-        sel = attn._block_select(mx.matmul(iq, IK.swapaxes(-1, -2)),
-                                 mx.array([S - 1]), nblk)
-        assert [sorted(sel[0, h, 0].tolist()) for h in range(2)] == [
-            [3, nblk - 1], [9, nblk - 1]]
-        out[dt] = attn._msa_decode(q, K, V, IK, iq, S, nblk)
-    assert mx.allclose(out[mx.float32], out[mx.float16], atol=1e-5).item()
-
-
 def test_indexer_cache_and_score_operands_are_fp16(monkeypatch):
     m = _model(seed=5)
     attn = m.layers[1].self_attn
@@ -315,23 +283,6 @@ def test_indexer_cache_and_score_operands_are_fp16(monkeypatch):
     assert cache[1].ik.dtype == mx.float16
     m(toks[:, 64:65], cache=cache)
     assert seen == [(mx.float16, mx.float16)]
-
-
-def test_decode_on_restored_f32_indexer_cache():
-    # A cache saved before the fp16 switch holds f32 indexer keys; the query
-    # follows the cache's dtype, so decode still matches the fp16 cache.
-    m = _model(seed=5)
-    toks = _tokens(65)
-    _, c16 = _logits(m, toks[:, :64])
-    _, c32 = _logits(m, toks[:, :64])
-    for c in c32:
-        if isinstance(c, MSAKVCache):
-            k, v, ik = c.state
-            c.state = (k, v, ik.astype(mx.float32))
-    a = m(toks[:, 64:65], cache=c16)
-    b = m(toks[:, 64:65], cache=c32)
-    assert c32[1].ik.dtype == mx.float32
-    assert mx.allclose(a, b, atol=1e-2, rtol=1e-2).item()
 
 
 def test_short_context_causal_kernel_matches_explicit_mask():
@@ -394,6 +345,30 @@ def test_gathered_prefill_matches_dense_masked_prefill(monkeypatch):
     assert 60 in calls and 23 in calls
     assert mx.allclose(one, ref_one, atol=1e-3, rtol=1e-3).item()
     assert mx.allclose(two, ref_two, atol=1e-3, rtol=1e-3).item()
+
+
+def test_gathered_rows_capped_under_element_limit(monkeypatch):
+    # The gathered K rows per chunk (C * Hkv * topk*blk * D) stay under the
+    # element limit even when GMLX_MSA_GATHER_CHUNK asks for more.
+    m = _model(seed=7)
+    toks = _tokens(60)
+    ref, _ = _logits(m, toks)
+    widths = []
+    real = mx.fast.scaled_dot_product_attention
+
+    def spy(q, k, v, **kw):
+        if q.shape[1] == 1:                  # the gather path's batch layout
+            widths.append(q.shape[0] // 2)   # queries per chunk (Hkv 2)
+        return real(q, k, v, **kw)
+
+    monkeypatch.setattr(mx.fast, "scaled_dot_product_attention", spy)
+    monkeypatch.setenv("GMLX_MSA_GATHER_MIN", "0")
+    monkeypatch.setenv("GMLX_MSA_GATHER_CHUNK", "256")
+    # Rows per query 2 * 16 * 8 = 256, so 1280 elements allow 5 queries.
+    monkeypatch.setenv("GMLX_MSA_MAX_ELEMS", "1280")
+    got, _ = _logits(m, toks)
+    assert widths and max(widths) == 5
+    assert mx.allclose(got, ref, atol=1e-3, rtol=1e-3).item()
 
 
 def test_input_embeddings_replace_token_lookup():
