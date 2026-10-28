@@ -27,7 +27,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - MiniMax-M3 and M3.1-Flash prefill long prompts faster: past 16K tokens of
   context, attention reads only the blocks each token selects.
 - With mlx-kquant 0.5.8 or later, MiniMax-M3 and M3.1-Flash decode faster on
-  IQ1 to IQ3, Q5_K, Q6_K and Q8_0 expert quants, such as UD-Q2_K_XL.
+  IQ1 to IQ3, STQ1_0, Q5_K, Q6_K and Q8_0 expert quants, such as UD-Q2_K_XL.
 - Requires mlx-kquant 0.5.7. With it, NVFP4 projections decode closer to
   full precision and join the fused attention and MLP paths.
   `GMLX_KQ_OUT_SCALE=0` turns this off.
@@ -55,6 +55,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--thinking off` on templates without a thinking switch, such as MiniMax-M3.1's.
 - In `gmlx chat`, `/undo` or `/retry` of the first turn after `--resume` no
   longer makes the model forget the restored conversation.
+- An `--adapter` LoRA on the routed experts' down projection loads on Flint,
+  K2 Horizon, Hunyuan 3, DeepSeek-V4 and MiniMax-M3 instead of failing.
 - A Qwen3.5-family text model (Qwen3.5 and 3.6 MoE, MiniCPM-V 4.7 without
   `--mmproj`) decodes with `--kv-bits 8` within a tenth of its fp16 KV
   speed instead of a quarter slower.

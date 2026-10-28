@@ -412,9 +412,9 @@ def _kq_dense(proj, codecs):
             and not wrapped_scale(proj))
 
 
-# Gate/up codecs where the swiglu_oai fused gathers beat the stock path at
-# every decode width and at streamed prefill, at the MiniMax-M3 shape on an
-# M5 Max. On the others they lose (q4_k up to 1.27x, q4_0 at T >= 8).
+# Gate/up codecs where the swiglu_oai fused gathers beat or tie the stock
+# path at every decode width and at streamed prefill, at the MiniMax-M3 shape
+# on an M5 Max. On the others they lose (q4_k up to 1.27x, q4_0 at T >= 8).
 _SWIGLU_OAI_FAST_CODECS = frozenset((
     "iq1_s", "iq1_m", "iq2_xxs", "iq2_xs", "iq2_s", "iq3_xxs", "iq3_s",
     "stq1_0", "q5_k", "q6_k", "q8_0"))
@@ -443,14 +443,15 @@ def _kq_act_kind(m, caps):
     if name == "SwiGLUOAI" and "minimax_m3" in mod:
         # clamped SwiGLU without biases; the kernel needs limit and alpha
         # both positive. Unset: fused on the fast gate/up codecs only.
-        # GMLX_FUSED_MOE_SWIGLU_OAI=0 keeps the stock path, =1 fuses any.
+        # GMLX_FUSED_MOE_SWIGLU_OAI=0 keeps the stock path, any other value
+        # fuses every codec.
         lever = os.environ.get("GMLX_FUSED_MOE_SWIGLU_OAI", "")
         alpha = float(getattr(act, "alpha", 0.0) or 0.0)
         limit = float(getattr(act, "limit", 0.0) or 0.0)
         codec = getattr(getattr(m, "gate_proj", None), "kquant_type", None)
         if (caps.has_swiglu_oai and alpha > 0.0 and limit > 0.0
                 and lever != "0"
-                and (lever == "1" or codec in _SWIGLU_OAI_FAST_CODECS)):
+                and (lever != "" or codec in _SWIGLU_OAI_FAST_CODECS)):
             return "swiglu_oai"
         return None
     if name == "LimitedSwiGLU" and "deepseek_v4" in mod:
