@@ -38,6 +38,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `/v1/responses` refuses audio that it would drop with a 400 that points to
   `/v1/chat/completions`. It answered as if the clip were not there before.
+- `gmlx chat` no longer repeats a template's fixed header on later turns,
+  such as MiniMax-M3.1's system block, Gemma 4's `<bos>` or a built-in
+  default system prompt.
+- On MiniMax-M3.1, `gmlx chat --thinking on` makes the model reason, and
+  `--thinking adaptive` and `off` no longer print false warnings.
 - MiniMax-M3 prefill of prompts near its 1M-token context no longer
   overruns a GPU index limit.
 - A Qwen3.5-family text model (Qwen3.5 and 3.6 MoE, MiniCPM-V 4.7 without
