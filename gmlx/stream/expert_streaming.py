@@ -795,8 +795,8 @@ def install_expert_streaming(
         sub = _CPU_OFFLOAD_CLASS_CACHE.get(cls)
         if sub is None:
             # A fused base consumes routing scores itself (mix seam); a
-            # stock base (unrecognized activation, e.g. minimax-m3's
-            # SwiGLUOAI) takes (x, indices) only. The wrapper still
+            # stock base (an activation the installed kq cannot fuse)
+            # takes (x, indices) only. The wrapper still
             # advertises _kq_scores_sink so blocks hand scores over for
             # miss-shed; it strips them before forwarding and applies
             # the shed mix python-side.

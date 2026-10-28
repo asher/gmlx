@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """minimax-m3 fused MoE: SwiGLUOAI maps to the kq act swiglu_oai behind a
-caps check and GMLX_FUSED_MOE_SWIGLU_OAI, and the ungated shared expert
-folds into the same gathers behind GMLX_FUSED_MOE_SHEXP_OAI. The block
+caps check, and the ungated shared expert folds into the same gathers. Both
+are on by default; GMLX_FUSED_MOE_SWIGLU_OAI=0 and GMLX_FUSED_MOE_SHEXP_OAI=0
+turn them off. The block
 adds the shared expert once on every path. The output tests run the real
 kernels on q4_k experts with a q5_k shared expert."""
 
@@ -99,6 +100,16 @@ def levers(monkeypatch):
 
 
 # install: act kind and stamping
+
+
+@needs_shexp_oai
+def test_unset_levers_fuse_the_stack_and_fold_the_shared_expert(monkeypatch):
+    monkeypatch.delenv("GMLX_FUSED_MOE_SWIGLU_OAI", raising=False)
+    monkeypatch.delenv("GMLX_FUSED_MOE_SHEXP_OAI", raising=False)
+    blk = _block()
+    assert _installed(blk) == (1, 1)
+    assert blk.switch_mlp._kq_glu_act == "swiglu_oai"
+    assert blk.switch_mlp._kq_shexp_mod is blk.shared_experts
 
 
 @needs_oai

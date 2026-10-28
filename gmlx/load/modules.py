@@ -434,11 +434,11 @@ def _kq_act_kind(m, caps):
         return "gelu"  # nn.gelu_approx == the kernel's tanh-approx gelu
     if name == "SwiGLUOAI" and "minimax_m3" in mod:
         # clamped SwiGLU without biases; the kernel needs limit and alpha
-        # both positive. Off by default until timed (lever =1 turns it on).
+        # both positive. GMLX_FUSED_MOE_SWIGLU_OAI=0 keeps the stock path.
         alpha = float(getattr(act, "alpha", 0.0) or 0.0)
         limit = float(getattr(act, "limit", 0.0) or 0.0)
         if (caps.has_swiglu_oai and alpha > 0.0 and limit > 0.0
-                and os.environ.get("GMLX_FUSED_MOE_SWIGLU_OAI", "0") == "1"):
+                and os.environ.get("GMLX_FUSED_MOE_SWIGLU_OAI", "1") != "0"):
             return "swiglu_oai"
         return None
     if name == "LimitedSwiGLU" and "deepseek_v4" in mod:
@@ -1597,9 +1597,9 @@ def _eligible_dsv4_shexp(m, caps):
 def _eligible_m3_shexp(m, caps):
     """minimax-m3 MoE: the ungated SwiGLU-OAI shared expert rides the
     stack's ``swiglu_oai`` gathers (one limit and alpha for every slot), so
-    its constants must equal the stack's. GMLX_FUSED_MOE_SHEXP_OAI=1 turns
-    it on (off until timed)."""
-    if os.environ.get("GMLX_FUSED_MOE_SHEXP_OAI", "0") != "1":
+    its constants must equal the stack's. GMLX_FUSED_MOE_SHEXP_OAI=0 turns
+    it off."""
+    if os.environ.get("GMLX_FUSED_MOE_SHEXP_OAI", "1") == "0":
         return False
     if "minimax_m3" not in type(m).__module__:
         return False
