@@ -221,3 +221,27 @@ def test_folded_shared_expert_is_added_once(levers, monkeypatch, t):
     assert mlp_calls == []
     assert _rel(got, want) < 2e-2
     assert _rel(got + shared, want) > 0.2
+
+
+@needs_shexp_oai
+@gpu
+def test_folded_shared_expert_is_added_once_at_prefill_width(levers, monkeypatch):
+    """At 64 or more index rows the sorted prefill mixes the routed slots
+    and adds the stamped shared expert itself; the block must not add it
+    again."""
+    levers(oai="1", shexp="1")
+    blk = _block(weights=True)
+    x = _x(40)  # 80 index rows at top-2
+    want = blk(x).astype(mx.float32)
+    shared = blk.shared_experts(x).astype(mx.float32)
+    assert _installed(blk) == (1, 1)
+    sorted_calls = []
+    cls = type(blk.switch_mlp)
+    real = cls._kq_mix_sorted
+    monkeypatch.setattr(
+        cls, "_kq_mix_sorted",
+        lambda self, *a: sorted_calls.append(1) or real(self, *a))
+    got = blk(x).astype(mx.float32)
+    assert sorted_calls
+    assert _rel(got, want) < 2e-2
+    assert _rel(got + shared, want) > 0.2
