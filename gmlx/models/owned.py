@@ -70,4 +70,7 @@ OWNED_VLM_MODELS = {
     "muse_spark": "gmlx.models.muse_spark.vlm_model",
     "qwen4_exp": "gmlx.models.qwen4_exp.vlm_model",
     "nemotron_h_omni": "gmlx.models.nemotron_h.vlm_model",
+    # The copy's minimax_m3_vl package packs the shared expert into the
+    # routed bank; this container keeps the gmlx text class.
+    "minimax_m3_vision": "gmlx.models.minimax_m3_vl",
 }

@@ -85,6 +85,16 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
                 "is not supported (only Nemotron-H text GGUFs, arch "
                 "'nemotron_h_moe')")
         return "nemotron_h_omni"
+    if proj == "minimax_m3":
+        # MiniMax-M3.1-Flash: a 2-D rope CLIP ViT, a per-patch GELU MLP and
+        # a 2x2 merge MLP onto the minimax-m3 text tower
+        # (gmlx.models.minimax_m3_vl).
+        if llm_arch != "minimax-m3":
+            raise UnsupportedVLMError(
+                f"mmproj projector 'minimax_m3' on LLM arch {llm_arch!r} is "
+                "not supported (only MiniMax-M3 text GGUFs, arch "
+                "'minimax-m3')")
+        return MINIMAX_M3_VISION
     if proj == "pixtral":
         # Mistral Pixtral: a plain-float Pixtral ViT (2-D RoPE, RMSNorm, SiLU MLP)
         # + a 2-layer GELU projector onto a Mistral-Nemo (llama-arch) text tower.
@@ -894,6 +904,66 @@ _NEMOTRON_OMNI_TOP_MAP = {
 _NEMOTRON_OMNI_VIDEO_ONLY = frozenset({"v.patch_embd.weight.1"})
 
 
+# MiniMax-M3.1-Flash (projector minimax_m3), onto the vendored mlx-vlm
+# minimax_m3_vl ViT and projectors under gmlx.models.minimax_m3_vl. The
+# Conv3d patch embed is stored as its two temporal slices
+# (v.patch_embd.weight, .weight.1), each [out, C, kH, kW], and stacks back
+# on axis 2. The converter reorders each head's q/k rows for llama.cpp's
+# rope (_minimax_m3_vit_qk_perm); the HF-layout tower needs them undone.
+MINIMAX_M3_VISION = "minimax_m3_vision"
+_MINIMAX_M3_VM = "vision_tower.vision_model"
+_MINIMAX_M3_BLK_SUBMAP = {
+    "attn_q": "self_attn.q_proj",
+    "attn_k": "self_attn.k_proj",
+    "attn_v": "self_attn.v_proj",
+    "attn_out": "self_attn.out_proj",
+    "ln1": "layer_norm1",
+    "ln2": "layer_norm2",
+    "ffn_up": "mlp.fc1",
+    "ffn_down": "mlp.fc2",
+}
+_MINIMAX_M3_TOP_MAP = {
+    "v.pre_ln.weight": f"{_MINIMAX_M3_VM}.pre_layrnorm.weight",
+    "v.pre_ln.bias": f"{_MINIMAX_M3_VM}.pre_layrnorm.bias",
+    "mm.1.weight": "multi_modal_projector.linear_1.weight",
+    "mm.1.bias": "multi_modal_projector.linear_1.bias",
+    "mm.2.weight": "multi_modal_projector.linear_2.weight",
+    "mm.2.bias": "multi_modal_projector.linear_2.bias",
+    "mm.merger.fc1.weight": "patch_merge_mlp.linear_1.weight",
+    "mm.merger.fc1.bias": "patch_merge_mlp.linear_1.bias",
+    "mm.merger.fc2.weight": "patch_merge_mlp.linear_2.weight",
+    "mm.merger.fc2.bias": "patch_merge_mlp.linear_2.bias",
+}
+
+
+def _minimax_m3_vit_qk_perm(d_head: int) -> list[int]:
+    """The converter's per-head q/k row order (llama.cpp
+    ``conversion/minimax.py`` ``_permute_vit_qk``): row ``i`` of a converted
+    head is row ``perm[i]`` of the HF head. HF rotates each axis in halves
+    over the first 3 * axis_dim dims, ``[Ta Ha Wa | Tb Hb Wb | pad]``;
+    llama.cpp's NEOX rope wants ``[Ta Tb | Ha Hb | Wa Wb | pad]``."""
+    axis_dim = 2 * ((2 * (d_head // 2) // 3) // 2)
+    ah = axis_dim // 2
+    half = 3 * ah
+    perm: list[int] = []
+    for a in range(3):
+        perm += list(range(a * ah, (a + 1) * ah))
+        perm += list(range(half + a * ah, half + (a + 1) * ah))
+    perm += list(range(2 * half, d_head))
+    return perm
+
+
+def _minimax_m3_unpermute_qk(arr: mx.array, n_head: int) -> mx.array:
+    """Undo ``_minimax_m3_vit_qk_perm`` on a q/k weight ``[n_head*d, in]``
+    or bias ``[n_head*d]``, giving the HF row order. Without it the tower
+    rotates the wrong dims of each head by each position."""
+    d_head = arr.shape[0] // n_head
+    perm = _minimax_m3_vit_qk_perm(d_head)
+    inv = mx.array(sorted(range(d_head), key=perm.__getitem__))
+    w = arr.reshape(n_head, d_head, *arr.shape[1:])
+    return mx.take(w, inv, axis=1).reshape(arr.shape)
+
+
 # MiniCPM-V 4.6 / 4.7 (minicpmv4_6 / minicpmv4_7): the SigLIP ViT, the
 # window-attention vit_merger and the 2x2 downsample MLP, mapped onto
 # gmlx.models.minicpmv.vision. The patch conv is stored [out, C, kH, kW] and
@@ -1369,6 +1439,36 @@ def _remap_float_arrays(
                 skipped.append(name)
                 continue
             out[f"vision_tower.blocks.{m.group(1)}.{tgt}.{leaf}"] = arr
+        return out, skipped
+
+    if model_type == MINIMAX_M3_VISION:
+        n_head = _mm_int(mm_meta or {}, "clip.vision.attention.head_count")
+        patch = ("v.patch_embd.weight", "v.patch_embd.weight.1")
+        for name, arr in arrays.items():
+            if name.endswith(".scales") or name.endswith(".biases"):
+                continue
+            if name in patch:
+                continue
+            hit = _MINIMAX_M3_TOP_MAP.get(name)
+            if hit is not None:
+                out[hit] = arr
+                continue
+            m = _VISION_BLK_RE.match(name)
+            sub, _, leaf = m.group(2).rpartition(".") if m else ("", "", "")
+            tgt = _MINIMAX_M3_BLK_SUBMAP.get(sub)
+            if tgt is None:
+                skipped.append(name)
+                continue
+            if sub in ("attn_q", "attn_k"):
+                arr = _minimax_m3_unpermute_qk(arr, n_head)
+            out[f"{_MINIMAX_M3_VM}.encoder.layers.{m.group(1)}.{tgt}.{leaf}"] = arr
+        if all(p in arrays for p in patch):
+            # Two [out, C, kH, kW] slices -> Conv3d [out, C, t, kH, kW], the
+            # (C, t, kH, kW) order the processor flattens each patch in.
+            out[f"{_MINIMAX_M3_VM}.embeddings.patch_embedding.weight"] = \
+                mx.stack([arrays[p] for p in patch], axis=2)
+        else:
+            skipped.extend(p for p in patch if p in arrays)
         return out, skipped
 
     if model_type == "deepseek_v4_vl":
@@ -2276,6 +2376,75 @@ def _synthesize_nemotron_omni_vlm_config(
     return config
 
 
+# MiniMax-M3.1-Flash: the chat template writes ]<]image[>[ per image; mtmd
+# brackets the embeddings with the start and end markers.
+MINIMAX_M3_IMAGE_TOKEN = "]<]image[>["
+MINIMAX_M3_VIDEO_TOKEN = "]<]video[>["
+MINIMAX_M3_IMAGE_START = "]<]start of image[>["
+MINIMAX_M3_IMAGE_END = "]<]end of image[>["
+# llama.cpp clip.cpp PROJECTOR_TYPE_MINIMAX_M3: set_limit_image_tokens(8,
+# 576), i.e. HF max_pixels 451584 (672^2); the mmproj has no pixel keys.
+MINIMAX_M3_MIN_IMAGE_TOKENS = 8
+MINIMAX_M3_MAX_IMAGE_TOKENS = 576
+
+
+def _synthesize_minimax_m3_vlm_config(
+    text_config: dict, mm_meta: dict, llm_meta: dict,
+    mm_shapes: dict | None = None,
+) -> dict:
+    """MiniMax-M3.1-Flash config: the minimax-m3 text synth plus the ViT
+    read from ``clip.vision.*``. The mmproj carries no vision rope theta
+    (llama.cpp pins 10000, the HF vision_config value) and no temporal
+    patch size (two slices of ``v.patch_embd``); the projector width comes
+    off ``mm.1.weight`` and the marker ids from the text vocab."""
+    shapes = mm_shapes or {}
+    hidden = _mm_int(mm_meta, "clip.vision.embedding_length")
+    merge = _mm(mm_meta, "clip.vision.spatial_merge_size")
+    vision_config: dict = {
+        "model_type": "clip_vision_model",
+        "hidden_size": hidden,
+        "intermediate_size": _mm_int(mm_meta, "clip.vision.feed_forward_length"),
+        "num_hidden_layers": _mm_int(mm_meta, "clip.vision.block_count"),
+        "num_attention_heads": _mm_int(
+            mm_meta, "clip.vision.attention.head_count"),
+        "patch_size": _mm_int(mm_meta, "clip.vision.patch_size"),
+        "image_size": _mm_int(mm_meta, "clip.vision.image_size"),
+        "projection_dim": _mm_int(mm_meta, "clip.vision.projection_dim"),
+        "rope_theta": 10000.0,
+        "img_token_compression_config": {
+            "spatial_merge_size": 2 if merge is None else int(merge),
+            "temporal_patch_size": 2,
+        },
+    }
+    eps = _mm(mm_meta, "clip.vision.attention.layer_norm_epsilon")
+    if eps is not None:
+        vision_config["layer_norm_eps"] = float(eps)
+    text_hidden = int(text_config["hidden_size"])
+    if vision_config["projection_dim"] != text_hidden:
+        raise ValueError(
+            f"mmproj projection width {vision_config['projection_dim']} does "
+            f"not match the minimax-m3 hidden size {text_hidden}")
+    up = shapes.get("mm.1.weight")
+    config: dict = {
+        "model_type": MINIMAX_M3_VISION,
+        "text_config": text_config,
+        "vision_config": vision_config,
+        "projector_hidden_size": (_other_dim(up, hidden) if up
+                                  else text_hidden),
+        "vocab_size": int(text_config.get("vocab_size", 200064)),
+    }
+    for key, token in (("image_token_id", MINIMAX_M3_IMAGE_TOKEN),
+                       ("video_token_id", MINIMAX_M3_VIDEO_TOKEN),
+                       ("vision_start_token_id", MINIMAX_M3_IMAGE_START),
+                       ("vision_end_token_id", MINIMAX_M3_IMAGE_END)):
+        tid = _gguf_token_id(llm_meta, token)
+        if tid is None:
+            raise ValueError(f"the text GGUF has no {token} token")
+        config[key] = tid
+    config["image_token_index"] = config["image_token_id"]
+    return config
+
+
 # Nemotron-3.5-Bolt: the chat template writes <image> per image; mtmd
 # brackets the embeddings with <img> and </img>.
 NEMOTRON_OMNI_IMAGE_TOKEN = "<image>"
@@ -2484,6 +2653,10 @@ def synthesize_vlm_config(
 
     if model_type == "nemotron_h_omni":
         return _synthesize_nemotron_omni_vlm_config(
+            text_config, mm_meta, llm_meta, mm_shapes)
+
+    if model_type == MINIMAX_M3_VISION:
+        return _synthesize_minimax_m3_vlm_config(
             text_config, mm_meta, llm_meta, mm_shapes)
 
     if model_type == "deepseek_v4_vl":
@@ -2699,6 +2872,7 @@ _OWNED_VLM_REGISTRARS = {
     "glm5_next": ("gmlx.models.glm5_next.vlm_model",),
     "deepseek_v4_vl": ("gmlx.models.deepseek_v4.vlm_model",),
     "deepseek_v41_vl": ("gmlx.models.deepseek_v41.vlm_model",),
+    MINIMAX_M3_VISION: ("gmlx.models.minimax_m3",),
 }
 
 
@@ -2800,6 +2974,8 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
         return _synthesize_minicpmv_processor(tokenizer, mm_meta)
     if model_type == "nemotron_h_omni":
         return _synthesize_nemotron_omni_processor(tokenizer, mm_meta)
+    if model_type == MINIMAX_M3_VISION:
+        return _synthesize_minimax_m3_processor(tokenizer, mm_meta)
     if model_type == "deepseek_v4_vl":
         return _synthesize_deepseek4v_processor(tokenizer, mm_meta, config or {})
     if model_type == "deepseek_v41_vl":
@@ -3820,17 +3996,16 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
     return _attach_streaming_helpers(processor, tokenizer)
 
 
-class _NemotronOmniGgufImageProcessor(ImageProcessingMixin):
-    """Torch-free Nemotron-3.5-Bolt image preprocessing (numpy + PIL only).
-
-    Ports llama.cpp's ``mtmd_image_preprocessor_dyn_size`` with
-    ``img_tool::calc_size_preserved_ratio`` (``tools/mtmd/mtmd-image.cpp``):
-    round each edge to a multiple of ``patch_size * merge`` (32), then, past
-    the pixel budget, scale both edges by the sqrt area ratio and floor them
-    to the multiple, or below it, scale up and ceil them. The image is
-    stretched to that size BICUBIC with no padding, scaled to [0, 1] and
-    normalized with the mmproj's mean and std. Patches flatten channel-major
-    in row-major patch order, as the tower's patch embed reads them.
+class _DynSizeGgufImageProcessor(ImageProcessingMixin):
+    """Torch-free llama.cpp ``mtmd_image_preprocessor_dyn_size`` (numpy +
+    PIL only), with ``img_tool::calc_size_preserved_ratio``
+    (``tools/mtmd/mtmd-image.cpp``): round each edge to a multiple of
+    ``patch_size * merge``, then, past the pixel budget, scale both edges by
+    the sqrt area ratio and floor them to the multiple, or below it, scale
+    up and ceil them. The image is stretched to that size BICUBIC with no
+    padding (an image already that size is not resampled), scaled to [0, 1]
+    and normalized with the mmproj's mean and std. Subclasses flatten the
+    patches in the order their tower reads them.
     """
 
     model_input_names = ["pixel_values", "image_grid_thw"]
@@ -3879,7 +4054,8 @@ class _NemotronOmniGgufImageProcessor(ImageProcessingMixin):
             w_bar = ceil_by(f32(width) * beta)
         return h_bar, w_bar
 
-    def _one(self, img):
+    def _pixels(self, img):
+        """The resized, normalized image as float32 [C, H, W]."""
         import numpy as np
         from PIL import Image
         if not isinstance(img, Image.Image):
@@ -3892,12 +4068,10 @@ class _NemotronOmniGgufImageProcessor(ImageProcessingMixin):
         arr = np.asarray(img, dtype=np.float32) / np.float32(255.0)
         mean = np.array(self.image_mean, dtype=np.float32)
         std = np.array(self.image_std, dtype=np.float32)
-        arr = np.transpose((arr - mean) / std, (2, 0, 1))       # [C, H, W]
-        ps = self.patch_size
-        c = arr.shape[0]
-        gh, gw = h // ps, w // ps
-        patches = arr.reshape(c, gh, ps, gw, ps).transpose(1, 3, 0, 2, 4)
-        return patches.reshape(gh * gw, c * ps * ps), (1, gh, gw)
+        return np.transpose((arr - mean) / std, (2, 0, 1))
+
+    def _one(self, img):
+        raise NotImplementedError
 
     def __call__(self, images, **kwargs):
         import numpy as np
@@ -3911,6 +4085,104 @@ class _NemotronOmniGgufImageProcessor(ImageProcessingMixin):
             "pixel_values": np.concatenate(vecs, axis=0),
             "image_grid_thw": np.array(grids, dtype=np.int64),
         }
+
+
+class _NemotronOmniGgufImageProcessor(_DynSizeGgufImageProcessor):
+    """Nemotron-3.5-Bolt image preprocessing. Patches flatten
+    channel-major in row-major patch order, as the tower's patch embed
+    reads them."""
+
+    def _one(self, img):
+        arr = self._pixels(img)                                 # [C, H, W]
+        _, h, w = arr.shape
+        ps = self.patch_size
+        c = arr.shape[0]
+        gh, gw = h // ps, w // ps
+        patches = arr.reshape(c, gh, ps, gw, ps).transpose(1, 3, 0, 2, 4)
+        return patches.reshape(gh * gw, c * ps * ps), (1, gh, gw)
+
+
+class _MiniMaxM3GgufImageProcessor(_DynSizeGgufImageProcessor):
+    """MiniMax-M3.1-Flash image preprocessing. llama.cpp resizes M3 images
+    with its port of Pillow's bicubic and no padding (clip.cpp
+    PROJECTOR_TYPE_MINIMAX_M3), which PIL's BICUBIC matches. Patches flatten
+    as the vendored processor's ``_patchify`` writes them: the image
+    repeated over the two temporal slices, each patch ``(C, t, kH, kW)``,
+    the four patches of each 2x2 window next to each other."""
+
+    temporal_patch_size = 2
+
+    @property
+    def merge_size(self) -> int:
+        return self.merge
+
+    def _one(self, img):
+        import numpy as np
+
+        from gmlx._vendor.mlx_vlm.models.minimax_m3_vl.processing_minimax_m3_vl import (
+            _patchify,
+        )
+        arr = self._pixels(img)
+        frames = np.repeat(arr[None], self.temporal_patch_size, axis=0)
+        flat, grid = _patchify(frames, self.patch_size,
+                               self.temporal_patch_size, self.merge)
+        return flat, tuple(grid)
+
+    def get_number_of_image_patches(self, height: int, width: int,
+                                    images_kwargs=None) -> int:
+        h, w = self.target_size(height, width)
+        return (h // self.patch_size) * (w // self.patch_size)
+
+
+def _minimax_m3_image_processor(mm_meta: dict) -> _MiniMaxM3GgufImageProcessor:
+    """The MiniMax-M3.1 image processor from the mmproj's ``clip.vision.*``
+    keys, with llama.cpp's 8 to 576 merged-token budget."""
+    patch = _mm_int(mm_meta, "clip.vision.patch_size")
+    merge = _mm(mm_meta, "clip.vision.spatial_merge_size")
+    merge = 2 if merge is None else int(merge)
+    area = (patch * merge) ** 2
+    return _MiniMaxM3GgufImageProcessor(
+        image_mean=_mm_floats(mm_meta, "clip.vision.image_mean"),
+        image_std=_mm_floats(mm_meta, "clip.vision.image_std"),
+        patch_size=patch, merge=merge,
+        min_pixels=MINIMAX_M3_MIN_IMAGE_TOKENS * area,
+        max_pixels=MINIMAX_M3_MAX_IMAGE_TOKENS * area)
+
+
+def _synthesize_minimax_m3_processor(tokenizer, mm_meta: dict):
+    """Build the MiniMax-M3.1 processor from the GGUFs alone: the vendored
+    processor, which expands each ``]<]image[>[`` into the start marker, one
+    ``]<]image[>[`` per merged token and the end marker, over the
+    llama.cpp-parity image processor. Video input is refused."""
+    from gmlx._vendor.mlx_vlm.models.minimax_m3_vl.processing_minimax_m3_vl import (
+        MiniMaxM3VLProcessor,
+    )
+
+    class MiniMaxM3Processor(MiniMaxM3VLProcessor):
+        def __call__(self, images=None, text=None, videos=None,  # pyright: ignore[reportIncompatibleMethodOverride]
+                     padding=True, padding_side=None,
+                     add_special_tokens=False, return_tensors="mlx",
+                     **kwargs):
+            if videos is not None:
+                raise ValueError(
+                    "MiniMax-M3.1 video input is not supported yet; pass "
+                    "still images")
+            if kwargs.get("audio") is not None:
+                raise ValueError("MiniMax-M3.1 takes no audio input")
+            kwargs.pop("audio", None)
+            if images is not None and not isinstance(images, (list, tuple)):
+                images = [images]
+            return super().__call__(
+                images=images, text=text, padding=padding,
+                padding_side=padding_side,
+                add_special_tokens=add_special_tokens,
+                return_tensors=return_tensors, **kwargs)
+
+    processor = MiniMaxM3Processor(
+        image_processor=_minimax_m3_image_processor(mm_meta),
+        tokenizer=tokenizer,
+        chat_template=getattr(tokenizer, "chat_template", None))
+    return _attach_streaming_helpers(processor, tokenizer)
 
 
 def _synthesize_minicpmv_processor(tokenizer, mm_meta: dict):
@@ -4645,9 +4917,11 @@ def load_vlm_model(
     # deepseek_v4_vl / deepseek_v41_vl: the container's sanitize applies the
     # text tower's transforms (kquant scale placeholders, wo_a 2D->3D) under
     # language_model.*, which the text path gets from sanitize=True.
+    # minimax_m3_vision: the same, for the indexer gating and narrowing.
     _install_and_load(model, hf_weights, hf_kquant_meta, log=_log,
                       sanitize=(model_type in ("deepseek_v4_vl",
-                                                 "deepseek_v41_vl")),
+                                                 "deepseek_v41_vl",
+                                                 MINIMAX_M3_VISION)),
                       no_alias=owned_names,
                       **float_dtype_rules(model_type),
                       source_key=weights_source_key(*pf.shards, mmproj_path),

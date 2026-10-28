@@ -392,8 +392,10 @@ def estimate_request(body: dict, *, tenant_id=None) -> tuple:
 # START, grid rows, pads, END) is at most 384 tokens by construction; the
 # reference's safe_resize reserves the 3 lead pads inside that cap.
 # deepseek_v41_vl: the whole block (START, grid rows, END) is inside the
-# 1024-token budget, so there is nothing to reserve.
-_MEDIA_TOKENS_PER_IMAGE = {"deepseek_v4_vl": 384, "deepseek_v41_vl": 1024}
+# 1024-token budget, so there is nothing to reserve. minimax_m3_vision: at
+# most 576 merged tokens plus the start and end markers.
+_MEDIA_TOKENS_PER_IMAGE = {"deepseek_v4_vl": 384, "deepseek_v41_vl": 1024,
+                           "minimax_m3_vision": 578}
 
 
 def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
