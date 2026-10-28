@@ -274,6 +274,26 @@ def test_indexer_key_cache_is_fp16():
     assert cache[1].ik.dtype == mx.float16
 
 
+def test_decode_scores_do_not_promote_the_key_cache(monkeypatch):
+    # A mixed f32 x fp16 score matmul copies the whole key cache to f32
+    # every decode step.
+    monkeypatch.delenv("GMLX_MSA_F32_SCORES", raising=False)
+    m = _model(seed=5)
+    _, cache = _logits(m, _tokens(64))
+    calls = []
+    real = mx.matmul
+
+    def spy(a, b, *rest, **kw):
+        calls.append((a.dtype, b.dtype, b.ndim))
+        return real(a, b, *rest, **kw)
+
+    monkeypatch.setattr(mx, "matmul", spy)
+    m(_tokens(1, seed=2), cache=cache)
+    scores = [c for c in calls if c[2] == 4]
+    assert scores
+    assert all(a == b == mx.float16 for a, b, _ in scores), scores
+
+
 @pytest.mark.parametrize("L", [1, 24])
 def test_f32_scores_lever_matches_llama_form(monkeypatch, L):
     # Default: fp16 x fp16 scores (no cast of the key cache). With

@@ -123,7 +123,9 @@ log the attention route.
 | `GMLX_MSA_GATHER_MIN` | Context length past which MiniMax-M3 prefill attends over each token's selected blocks instead of the masked full cache. The default is `16384`. |
 | `GMLX_MSA_GATHER_CHUNK` | Queries per gather step in MiniMax-M3 long prefill. The default is `256`. |
 | `GMLX_MSA_MAX_ELEMS` | Largest MiniMax-M3 prefill score or gather tensor, in elements. The default is `2147483647`, the GPU index limit. |
-| `GMLX_MSA_F32_SCORES=1` | Keep MiniMax-M3 block-selection scores in f32, as llama.cpp does, instead of fp16. Prefill at 128K runs about 25 percent slower per layer. |
+| `GMLX_MSA_F32_SCORES=1` | Keep MiniMax-M3 block-selection scores in f32, as llama.cpp does. Prefill at 128K is about 25 percent slower per layer, and decode copies the keys each step. |
+| `GMLX_MSA_PREFILL_TILE` | Query rows per MiniMax-M3 masked prefill tile. The default is `2048`. |
+| `GMLX_MSA_DISABLE=1` | Run MiniMax-M3 with dense attention on every layer, for A/B against sparse attention. |
 
 ## Model kernels
 

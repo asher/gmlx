@@ -443,8 +443,9 @@ class MiniMaxM3Attention(nn.Module):
         """Indexer scores ``iq @ IK^T`` for an f32 query and the fp16 key
         cache. By default both operands are fp16 and the scores round to
         fp16. GMLX_MSA_F32_SCORES=1 keeps them f32, as llama.cpp does: decode
-        through kq.skinny_matmul (fp16 keys read once), prefill against
-        ``IKt32``, the keys cast to f32 once per call."""
+        through kq.skinny_matmul when it takes an f32 query against fp16
+        keys, else against an f32 copy of the keys made every step; prefill
+        against ``IKt32``, the keys cast to f32 once per call."""
         if not _f32_scores():
             return mx.matmul(iq.astype(IK.dtype), IK.swapaxes(-1, -2))
         if IKt32 is not None:
