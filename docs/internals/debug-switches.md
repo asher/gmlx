@@ -123,7 +123,7 @@ log the attention route.
 | `GMLX_MSA_GATHER_MIN` | Context length past which MiniMax-M3 prefill attends over each token's selected blocks instead of the masked full cache. The default is `16384`. |
 | `GMLX_MSA_GATHER_CHUNK` | Queries per gather step in MiniMax-M3 long prefill. The default is `256`. |
 | `GMLX_MSA_MAX_ELEMS` | Largest MiniMax-M3 prefill score or gather tensor, in elements. The default is `2147483647`, the GPU index limit. |
-| `GMLX_MSA_F32_SCORES=1` | Keep MiniMax-M3 block-selection scores in f32, as llama.cpp does. Prefill at 128K is about 25 percent slower per layer, and decode copies the keys each step. |
+| `GMLX_MSA_F32_SCORES=1` | Keep MiniMax-M3 block-selection scores in f32, as llama.cpp does. At 128K each layer's attention runs 25 to 45 percent slower. |
 | `GMLX_MSA_PREFILL_TILE` | Query rows per MiniMax-M3 masked prefill tile. The default is `2048`. |
 | `GMLX_MSA_DISABLE=1` | Run MiniMax-M3 with dense attention on every layer, for A/B against sparse attention. |
 
@@ -135,6 +135,8 @@ fusions.
 | Variable | Meaning |
 |----------|---------|
 | `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels of the Qwen3.5 and 3.6 hybrids. The fusion affects numerics. |
+| `GMLX_FUSED_MOE_SWIGLU_OAI=1` | Run resident MiniMax-M3 MoE layers on the fused mlx-kquant expert kernels. Needs mlx-kquant with `swiglu_oai`. |
+| `GMLX_FUSED_MOE_SHEXP_OAI=1` | With `GMLX_FUSED_MOE_SWIGLU_OAI=1`, also fold the MiniMax-M3 shared expert into those kernels. |
 | `GMLX_GDN_BA_CAT=0` | Run the gated-delta b and a projections as two matmuls instead of one over their joined weight. Output is bit-identical. |
 | `GMLX_HADAMARD_KERNEL=0` | Run the Hadamard-fold rotation as MLX ops instead of the mlx-kquant kernel. Numerics match to one rounding. |
 | `GMLX_HADAMARD_FUSE=0` | Rotate the input of a folded down or output projection in its own dispatch instead of inside the gate kernel. |
