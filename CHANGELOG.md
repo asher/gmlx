@@ -20,6 +20,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- MiniMax-M3 and M3.1-Flash decode faster at long context, and their
+  sparse-attention key cache takes half the memory.
 - Requires mlx-kquant 0.5.7. With it, NVFP4 projections decode closer to
   full precision and join the fused attention and MLP paths.
   `GMLX_KQ_OUT_SCALE=0` turns this off.
@@ -34,6 +36,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `/v1/responses` refuses audio that it would drop with a 400 that points to
   `/v1/chat/completions`. It answered as if the clip were not there before.
+- MiniMax-M3 prefill of prompts near its 1M-token context no longer
+  overruns a GPU index limit.
 - A Qwen3.5-family text model (Qwen3.5 and 3.6 MoE, MiniCPM-V 4.7 without
   `--mmproj`) decodes with `--kv-bits 8` within a tenth of its fp16 KV
   speed instead of a quarter slower.

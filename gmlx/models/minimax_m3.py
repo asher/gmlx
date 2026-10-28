@@ -162,7 +162,7 @@ class MiniMaxM3MLP(nn.Module):
 class MSAKVCache(KVCache):
     """KVCache extended with the MSA indexer key stream.
 
-    ``ik`` holds one f32 vector of ``sparse_index_dim`` per cached token
+    ``ik`` holds one fp16 vector of ``sparse_index_dim`` per cached token
     (single indexer key head, shared by all groups), appended in lockstep with
     K/V through ``update_and_fetch_msa`` so ``offset`` covers all three
     streams; ``trim`` therefore trims them together. Quantizing would drop the
@@ -342,18 +342,21 @@ class MiniMaxM3Attention(nn.Module):
         B, _, L, D = queries.shape
         offset = cache.offset  # before this chunk lands
 
-        # Indexer branch: project, per-head norm, partial RoPE, cache. The
-        # whole branch runs f32 (matching the reference's F32 indexer ops).
+        # Indexer branch: project, per-head norm and partial RoPE in f32,
+        # then fp16 for the key cache and the score matmul, as llama.cpp
+        # stores its indexer cache. Both operands share one dtype: a mixed
+        # matmul would copy the whole key cache to f32 each step.
         iq = self.index_q_proj(x).reshape(B, L, self.n_idx_heads, self.idx_dim)
         ik = self.index_k_proj(x).reshape(B, L, 1, self.idx_dim)
         iq = self.index_q_norm(iq).transpose(0, 2, 1, 3).astype(mx.float32)
         ik = self.index_k_norm(ik).transpose(0, 2, 1, 3).astype(mx.float32)
-        iq = self.rope(iq, offset=offset)
-        ik = self.rope(ik, offset=offset)
+        iq = self.rope(iq, offset=offset).astype(mx.float16)
+        ik = self.rope(ik, offset=offset).astype(mx.float16)
 
         queries = self.rope(queries, offset=offset)
         keys = self.rope(keys, offset=offset)
         K, V, IK = cache.update_and_fetch_msa(keys, values, ik)
+        iq = iq.astype(IK.dtype)  # a cache restored with f32 keys
         S = K.shape[2]
 
         blk = self.block_size
@@ -371,11 +374,10 @@ class MiniMaxM3Attention(nn.Module):
         return self.o_proj(out)
 
     def _dense_sdpa(self, queries, K, V, offset, L, S):
-        mask = None
-        if L > 1:
-            mask = self._causal(offset, L, S).astype(queries.dtype)[None, None]
+        # S == offset + L, so the kernel's bottom-right causal alignment is
+        # the offset alignment.
         return mx.fast.scaled_dot_product_attention(
-            queries, K, V, scale=self.scale, mask=mask
+            queries, K, V, scale=self.scale, mask="causal" if L > 1 else None
         )
 
     @staticmethod
@@ -455,6 +457,10 @@ class MiniMaxM3Attention(nn.Module):
         Hkv = self.num_key_value_heads
         gq = self.num_attention_heads // Hkv
         tile = int(os.environ.get("GMLX_MSA_PREFILL_TILE", "2048"))
+        # Each tile holds [tile, nblk * blk] masks; Metal kernels index with
+        # int32, so keep them under 2^31 elements (llama.cpp PR #31192).
+        max_elems = int(os.environ.get("GMLX_MSA_MAX_ELEMS", str(2**31 - 1)))
+        tile = max(1, min(tile, max_elems // (nblk * blk)))
 
         outs = []
         for t0 in range(0, L, tile):
