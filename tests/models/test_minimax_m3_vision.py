@@ -405,3 +405,10 @@ def test_real_mmproj_header_maps_onto_the_tower():
     ip = vlm._minimax_m3_image_processor(kv)
     assert ip.target_size(672, 672) == (672, 672)
     assert ip.target_size(1344, 1344) == (672, 672)
+
+
+def test_the_tower_loads_in_float32():
+    # The bfloat16 tower drifts far from llama.cpp on low-norm image tokens.
+    from gmlx.load.loader import float_dtype_rules
+
+    assert float_dtype_rules("minimax_m3_vision")["fp32_cast"] == ("vision_tower.",)

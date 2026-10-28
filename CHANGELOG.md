@@ -10,6 +10,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - MiniMax-M3.1-Flash GGUFs run with sparse attention on every layer,
   including the three leading dense layers, as the model was trained.
+- MiniMax-M3.1-Flash takes image input through its mmproj file
+  (`--mmproj`), with sparse attention and expert streaming as for text.
 - NVFP4 MoE files with one weight scale per expert load, in place of
   failing as unsupported.
 - Granite Switch 4.1 (`graniteswitch`) with its `guardian-core` and `decision`

@@ -1080,6 +1080,10 @@ _FP32_CAST_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # weights are cast once here. A BF16 mmproj's tower is 1.06 GiB mapped
     # from the file as stored and 2.13 GiB owned after this cast.
     "qwen3_vl": ("vision_tower.",),
+    # minimax_m3_vision: the same residual growth (absmax about 170 in the
+    # last ten blocks). Against llama.cpp's float32 tower, the worst image
+    # token cosine is 0.40 for bfloat16 and 0.98 for float32.
+    "minimax_m3_vision": ("vision_tower.",),
 }
 
 # The same cast behind an environment switch that is off by default: model
