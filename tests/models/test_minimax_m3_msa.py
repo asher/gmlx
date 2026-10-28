@@ -113,6 +113,71 @@ def test_msa_cache_refuses_quantization():
         raise AssertionError("MSAKVCache.to_quantized must refuse")
 
 
+# -- M3.1 layout: MSA on every layer that carries the indexer -----------------
+
+_M31 = dict(msa_layers=[0, 1, 2])   # indexer on the dense-lead layer too
+
+
+def test_m31_dense_lead_layer_gets_msa():
+    m = _model(**_M31)
+    assert all(type(c) is MSAKVCache for c in m.make_cache())
+    names = {k for k, _ in tree_flatten(m.parameters())}
+    assert "model.layers.0.self_attn.index_q_proj.weight" in names
+    assert "model.layers.0.self_attn.index_k_norm.weight" in names
+
+
+def test_m3_layout_keeps_dense_lead_layer_dense():
+    # msa_layers from an M3 GGUF (MoE layers only) and None (older configs)
+    # both leave the dense-lead layer on a plain cache.
+    for over in ({"msa_layers": [1, 2]}, {}):
+        caches = _model(**over).make_cache()
+        assert type(caches[0]) is KVCache
+        assert type(caches[1]) is MSAKVCache
+
+
+def test_sanitize_drops_indexer_outside_msa_layers():
+    w = {
+        "model.layers.0.self_attn.index_q_proj.weight": mx.zeros((16, 64)),
+        "model.layers.1.self_attn.index_q_proj.weight": mx.zeros((16, 64)),
+        "language_model.model.layers.0.self_attn.index_k_proj.weight":
+            mx.zeros((8, 64)),
+    }
+    m3 = _model(msa_layers=[1, 2]).sanitize(dict(w))
+    assert set(m3) == {"model.layers.1.self_attn.index_q_proj.weight"}
+    m31 = _model(**_M31).sanitize(dict(w))
+    assert set(m31) == {
+        "model.layers.0.self_attn.index_q_proj.weight",
+        "model.layers.1.self_attn.index_q_proj.weight",
+        "model.layers.0.self_attn.index_k_proj.weight",
+    }
+
+
+def test_m31_dense_lead_layer_runs_sparse_attention():
+    # Same weights, with and without the layer-0 indexer armed. Below
+    # topk*block keys both are dense-exact; past it layer 0's selection
+    # must change the output.
+    toks = _tokens(64)
+    m31 = _model(seed=3, **_M31)
+    mx.random.seed(3)
+    m3 = Model(_args(msa_layers=[1, 2]))
+    flat = [(k, v) for k, v in tree_flatten(m31.parameters())
+            if not k.startswith("model.layers.0.self_attn.index_")]
+    m3.update(tree_unflatten(flat))
+    l31, _ = _logits(m31, toks)
+    l3, _ = _logits(m3, toks)
+    assert mx.abs(l31[:, :16] - l3[:, :16]).max().item() < 1e-5
+    assert mx.abs(l31[:, 16:] - l3[:, 16:]).max().item() > 1e-2
+
+
+def test_m31_decode_gather_matches_prefill_mask_path():
+    m = _model(seed=5, **_M31)
+    toks = _tokens(65)
+    full, _ = _logits(m, toks)
+    _, cache = _logits(m, toks[:, :64])
+    step = m(toks[:, 64:65], cache=cache)
+    assert mx.allclose(step[:, 0], full[:, 64], atol=1e-2, rtol=1e-2).item()
+
+
 # -- numerics ----------------------------------------------------------------
 
 def test_short_context_msa_equals_dense():
@@ -364,6 +429,16 @@ def test_synth_defaults_when_tensors_present_without_kvs():
     assert cfg["use_sparse_attention"] is True
     assert cfg["sparse_topk_blocks"] == 16
     assert cfg["sparse_block_size"] == 128
+
+
+def test_synth_msa_layers_from_indexer_tensor_presence():
+    from gmlx.load.config_synth import synthesize_config
+
+    meta, shapes = _m3_meta_and_shapes(True, True)
+    assert synthesize_config(meta, shapes)["msa_layers"] == [1]
+    for i in (0, 2):  # M3.1: the dense-lead layer carries one too
+        shapes[f"blk.{i}.indexer.q_proj.weight"] = [64, 16]
+    assert synthesize_config(meta, shapes)["msa_layers"] == [0, 1, 2]
 
 
 def test_synth_dense_when_no_indexer_tensors():

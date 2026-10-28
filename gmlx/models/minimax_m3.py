@@ -17,7 +17,8 @@ per-head QK-norm, partial RoPE (rotary_dim < head_dim), SwiGLU-OAI activation
 (clamped gate/up with an (up+1) term), a shared expert + routed_scaling_factor
 in the MoE, and the first few layers being dense MLPs instead of MoE.
 
-MiniMax Sparse Attention (MSA): on every non-dense-lead layer a lightweight
+MiniMax Sparse Attention (MSA): on every layer that carries indexer tensors
+(the MoE layers on M3, every layer on M3.1, llama.cpp PR #31192) a lightweight
 indexer (one head per GQA group) scores the visible causal context, the
 scores are max-pooled into ``sparse_block_size`` (128) token key blocks, and
 the top ``sparse_topk_blocks`` (16) blocks - the query's local block always
@@ -39,6 +40,7 @@ fallback. ``GMLX_MSA_DISABLE=1`` forces dense for A/B comparison.
 """
 
 import os
+import re
 import sys
 from dataclasses import dataclass
 from typing import List, Optional
@@ -92,9 +94,10 @@ class ModelArgs(BaseModelArgs):
     # Per-layer MLP dispatch: "sparse" -> MoE block, "dense" -> dense MLP.
     mlp_layer_types: Optional[List[str]] = None
     # MiniMax Sparse Attention. Enabled by config synth when the GGUF (or a
-    # sidecar) carries the indexer tensors; the MoE layers then build the
-    # indexer branch (dense-lead layers never carry one).
+    # sidecar) carries the indexer tensors. msa_layers lists the layers that
+    # carry them (every layer on M3.1); None means the MoE layers (M3).
     use_sparse_attention: bool = False
+    msa_layers: Optional[List[int]] = None
     sparse_index_dim: int = 128
     sparse_num_index_heads: int = 4
     sparse_topk_blocks: int = 16
@@ -231,8 +234,17 @@ def _msa_disabled() -> bool:
     return os.environ.get("GMLX_MSA_DISABLE", "") == "1"
 
 
+def _is_msa_layer(args: "ModelArgs", layer_idx: int, is_sparse: bool) -> bool:
+    """Whether layer ``layer_idx`` carries the MSA indexer."""
+    if not args.use_sparse_attention:
+        return False
+    if args.msa_layers is None:
+        return is_sparse
+    return layer_idx in args.msa_layers
+
+
 class MiniMaxM3Attention(nn.Module):
-    def __init__(self, args: ModelArgs, is_sparse: bool = False):
+    def __init__(self, args: ModelArgs, is_sparse: bool = False, layer_idx: int = 0):
         super().__init__()
         self.num_attention_heads = args.num_attention_heads
         self.num_key_value_heads = args.num_key_value_heads
@@ -258,8 +270,8 @@ class MiniMaxM3Attention(nn.Module):
 
         self.rope = nn.RoPE(args.rotary_dim, traditional=False, base=args.rope_theta)
 
-        # MSA indexer branch (MoE layers only; dense-lead layers carry none).
-        self.msa = args.use_sparse_attention and is_sparse and not _msa_disabled()
+        # MSA indexer branch, on the layers that carry indexer tensors.
+        self.msa = _is_msa_layer(args, layer_idx, is_sparse) and not _msa_disabled()
         if self.msa:
             self.idx_dim = args.sparse_index_dim
             self.n_idx_heads = args.sparse_num_index_heads
@@ -481,6 +493,8 @@ class MiniMaxM3Attention(nn.Module):
         return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
 
 
+_LAYER_IDX = re.compile(r"layers\.(\d+)\.self_attn\.index_")
+
 _MOE_MIX_SCORES = os.environ.get("GMLX_M3_MOE_MIX", "1") != "0"
 
 
@@ -533,7 +547,9 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.is_sparse = (args.mlp_layer_types or ["sparse"] * args.num_hidden_layers)[
             layer_idx
         ] == "sparse"
-        self.self_attn = MiniMaxM3Attention(args, is_sparse=self.is_sparse)
+        self.self_attn = MiniMaxM3Attention(
+            args, is_sparse=self.is_sparse, layer_idx=layer_idx
+        )
         if self.is_sparse:
             self.block_sparse_moe = MiniMaxM3SparseMoeBlock(args)
         else:
@@ -601,12 +617,18 @@ class Model(nn.Module):
         # Must track the attention modules' gate: under GMLX_MSA_DISABLE the
         # indexer submodules are never built, so their weights must drop too.
         keep_indexer = self.args.use_sparse_attention and not _msa_disabled()
+        msa_layers = self.args.msa_layers
 
         def keep(k):
             if k.startswith(skip_prefixes):
                 return False
             if ".self_attn.index_" in k:  # MSA indexer - kept only when armed
-                return keep_indexer
+                if not keep_indexer:
+                    return False
+                if msa_layers is None:
+                    return True
+                m = _LAYER_IDX.search(k)
+                return m is not None and int(m.group(1)) in msa_layers
             if ".mtp." in k or k.startswith("mtp.") or "model.mtp" in k:
                 return False
             return True
