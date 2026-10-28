@@ -412,6 +412,14 @@ def _kq_dense(proj, codecs):
             and not wrapped_scale(proj))
 
 
+# Gate/up codecs where the swiglu_oai fused gathers beat the stock path at
+# every decode width and at streamed prefill, at the MiniMax-M3 shape on an
+# M5 Max. On the others they lose (q4_k up to 1.27x, q4_0 at T >= 8).
+_SWIGLU_OAI_FAST_CODECS = frozenset((
+    "iq1_s", "iq1_m", "iq2_xxs", "iq2_xs", "iq2_s", "iq3_xxs", "iq3_s",
+    "stq1_0", "q5_k", "q6_k", "q8_0"))
+
+
 def _kq_act_kind(m, caps):
     """Fused-kernel act string for a SwitchGLU's activation, else None.
     Only plain act(gate) * up semantics map onto the kernel epilogue."""
@@ -434,11 +442,15 @@ def _kq_act_kind(m, caps):
         return "gelu"  # nn.gelu_approx == the kernel's tanh-approx gelu
     if name == "SwiGLUOAI" and "minimax_m3" in mod:
         # clamped SwiGLU without biases; the kernel needs limit and alpha
-        # both positive. GMLX_FUSED_MOE_SWIGLU_OAI=0 keeps the stock path.
+        # both positive. Unset: fused on the fast gate/up codecs only.
+        # GMLX_FUSED_MOE_SWIGLU_OAI=0 keeps the stock path, =1 fuses any.
+        lever = os.environ.get("GMLX_FUSED_MOE_SWIGLU_OAI", "")
         alpha = float(getattr(act, "alpha", 0.0) or 0.0)
         limit = float(getattr(act, "limit", 0.0) or 0.0)
+        codec = getattr(getattr(m, "gate_proj", None), "kquant_type", None)
         if (caps.has_swiglu_oai and alpha > 0.0 and limit > 0.0
-                and os.environ.get("GMLX_FUSED_MOE_SWIGLU_OAI", "1") != "0"):
+                and lever != "0"
+                and (lever == "1" or codec in _SWIGLU_OAI_FAST_CODECS)):
             return "swiglu_oai"
         return None
     if name == "LimitedSwiGLU" and "deepseek_v4" in mod:
@@ -933,8 +945,13 @@ def _make_fused_kquant(base_cls, caps):
                 if rows:
                     y = self._fused_rows(x, idx)
                 else:
-                    y = self._fused_down(
-                        self._fused_h(x, idx, scores), idx, scores)
+                    # A token-split leaf of a folded stack returns unmixed,
+                    # as its stock-path sibling leaves do, so they concatenate.
+                    sc = scores
+                    if (getattr(self, "_kq_in_split", False)
+                            and getattr(self, "_kq_shexp_mod", None) is not None):
+                        sc = None
+                    y = self._fused_down(self._fused_h(x, idx, sc), idx, sc)
                 if y.ndim == 2:      # mixed in the kernel: (t, N)
                     return y.reshape(*indices.shape[:-1], y.shape[-1])
                 y = y.reshape(*indices.shape, y.shape[-1])
@@ -2713,14 +2730,14 @@ def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
                 f"{blocked}, which bypasses the SwitchGLU forward (apply the "
                 f"adapter before placement; block/gemma/gpt-oss fusions are "
                 f"not supported)")
-        if getattr(container, "_kq_shexp_mod", None) is not None:
-            raise NotImplementedError(
-                f"expert LoRA target {path!r}: shared-expert fold stamp on the "
-                f"owner is not supported")
         if lm.transform != "passthrough":
             raise NotImplementedError(
                 f"expert LoRA target {path!r} has unsupported transform "
                 f"{lm.transform!r}")
+        if getattr(container, "_kq_shexp_mod", None) is not None:
+            # The fold exit has no LoRA epilogue. Without the stamp the
+            # block runs its shared expert itself.
+            object.__setattr__(container, "_kq_shexp_mod", None)
         a_t = mx.contiguous(mx.swapaxes(lm.a, 1, 2))     # (E, in, r)
         b_t = mx.contiguous(mx.swapaxes(lm.b, 1, 2))     # (E, r, out)
         mx.eval(a_t, b_t)

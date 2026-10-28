@@ -135,7 +135,7 @@ fusions.
 | Variable | Meaning |
 |----------|---------|
 | `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels of the Qwen3.5 and 3.6 hybrids. The fusion affects numerics. |
-| `GMLX_FUSED_MOE_SWIGLU_OAI=0` | Run MiniMax-M3 MoE layers on the stock expert gathers instead of the fused mlx-kquant kernels. Slower. |
+| `GMLX_FUSED_MOE_SWIGLU_OAI=0` | Run MiniMax-M3 MoE layers and their shared expert on the stock expert gathers. `=1` fuses every codec, even where that is slower. |
 | `GMLX_FUSED_MOE_SHEXP_OAI=0` | Run the MiniMax-M3 shared expert as its own MLP instead of inside the fused expert kernels. Slower. |
 | `GMLX_GDN_BA_CAT=0` | Run the gated-delta b and a projections as two matmuls instead of one over their joined weight. Output is bit-identical. |
 | `GMLX_HADAMARD_KERNEL=0` | Run the Hadamard-fold rotation as MLX ops instead of the mlx-kquant kernel. Numerics match to one rounding. |

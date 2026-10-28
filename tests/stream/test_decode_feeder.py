@@ -1587,8 +1587,8 @@ def test_wrapper_miss_shed_stages_survivors(monkeypatch):
 
 
 def test_wrapper_scores_sink_on_stock_base(monkeypatch):
-    """A base without the mix seam (e.g. minimax-m3's SwiGLUOAI stack)
-    takes (x, indices) only: the wrapper advertises _kq_scores_sink so
+    """A base without the mix seam (an activation the installed kq cannot
+    fuse) takes (x, indices) only: the wrapper advertises _kq_scores_sink so
     the block still hands over its routing weights, consumes them for
     miss-shed, strips them from every forwarded call and mixes shed
     survivors python-side (the block's weights cover the full routed

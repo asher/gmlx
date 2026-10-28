@@ -276,12 +276,15 @@ def test_offload_class_in_mro_raises():
         _install(model, mx.zeros((4, 1, 16)), mx.zeros((4, 8, 1)), 1.0)
 
 
-def test_shexp_stamp_raises():
+def test_expert_lora_drops_the_shexp_fold_stamp():
+    """The fold exit takes no LoRA epilogue, so the install drops the stamp
+    and the block runs its shared expert itself."""
     glu = _glu()
     object.__setattr__(glu, "_kq_shexp_mod", object())
     model = _Holder(glu)
-    with pytest.raises(NotImplementedError, match="shared-expert"):
-        _install(model, mx.zeros((4, 1, 16)), mx.zeros((4, 8, 1)), 1.0)
+    assert _install(model, mx.zeros((4, 1, 16)), mx.zeros((4, 8, 1)), 1.0) == 1
+    assert model.switch_mlp._kq_shexp_mod is None
+    assert type(model.switch_mlp).__name__ == "_LoRASwitchGLU"
 
 
 def test_missing_expert_target_raises():

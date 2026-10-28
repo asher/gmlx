@@ -26,8 +26,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sparse-attention key cache takes half the memory.
 - MiniMax-M3 and M3.1-Flash prefill long prompts faster: past 16K tokens of
   context, attention reads only the blocks each token selects.
-- With mlx-kquant 0.5.8 or later, MiniMax-M3 and M3.1-Flash decode faster:
-  the routed and shared experts run in fused expert kernels.
+- With mlx-kquant 0.5.8 or later, MiniMax-M3 and M3.1-Flash decode faster on
+  IQ1 to IQ3, Q5_K, Q6_K and Q8_0 expert quants, such as UD-Q2_K_XL.
 - Requires mlx-kquant 0.5.7. With it, NVFP4 projections decode closer to
   full precision and join the fused attention and MLP paths.
   `GMLX_KQ_OUT_SCALE=0` turns this off.

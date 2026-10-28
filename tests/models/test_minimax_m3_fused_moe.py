@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """minimax-m3 fused MoE: SwiGLUOAI maps to the kq act swiglu_oai behind a
 caps check, and the ungated shared expert folds into the same gathers. Both
-are on by default; GMLX_FUSED_MOE_SWIGLU_OAI=0 and GMLX_FUSED_MOE_SHEXP_OAI=0
-turn them off. The block
+are on by default for the gate/up codecs where the fused kernels are faster;
+GMLX_FUSED_MOE_SWIGLU_OAI=1 fuses every codec, and GMLX_FUSED_MOE_SWIGLU_OAI=0
+and GMLX_FUSED_MOE_SHEXP_OAI=0 turn them off. The block
 adds the shared expert once on every path. The output tests run the real
 kernels on q4_k experts with a q5_k shared expert."""
 
@@ -103,13 +104,24 @@ def levers(monkeypatch):
 
 
 @needs_shexp_oai
-def test_unset_levers_fuse_the_stack_and_fold_the_shared_expert(monkeypatch):
+def test_unset_levers_fuse_a_fast_codec_and_fold_the_shared_expert(monkeypatch):
     monkeypatch.delenv("GMLX_FUSED_MOE_SWIGLU_OAI", raising=False)
     monkeypatch.delenv("GMLX_FUSED_MOE_SHEXP_OAI", raising=False)
-    blk = _block()
+    blk = _block(codec="iq2_xs")  # M3.1 UD-Q2_K_XL's routed gate/up
     assert _installed(blk) == (1, 1)
     assert blk.switch_mlp._kq_glu_act == "swiglu_oai"
     assert blk.switch_mlp._kq_shexp_mod is blk.shared_experts
+
+
+@needs_oai
+def test_unset_lever_keeps_a_slow_codec_on_the_stock_path(monkeypatch):
+    """q4_k gate/up runs slower fused at the M3 shape; =1 still forces it
+    (test_lever_on_maps_swiglu_oai_with_its_constants)."""
+    monkeypatch.delenv("GMLX_FUSED_MOE_SWIGLU_OAI", raising=False)
+    monkeypatch.delenv("GMLX_FUSED_MOE_SHEXP_OAI", raising=False)
+    blk = _block(codec="q4_k")
+    assert _installed(blk) == (0, 0)
+    assert getattr(blk.switch_mlp, "_kq_glu_act", None) is None
 
 
 @needs_oai
@@ -256,3 +268,62 @@ def test_folded_shared_expert_is_added_once_at_prefill_width(levers, monkeypatch
     assert sorted_calls
     assert _rel(got, want) < 2e-2
     assert _rel(got + shared, want) > 0.2
+
+
+@needs_shexp_oai
+@gpu
+def test_split_leaf_of_a_folded_stack_returns_unmixed(levers, monkeypatch):
+    """A token-split leaf under the streaming wrapper must come back unmixed
+    whatever path it takes, so the leaves concatenate; the block then mixes
+    and adds the shared expert once."""
+    levers(oai="1", shexp="1")
+    blk = _block(weights=True)
+    x = _x(3)
+    want = blk(x).astype(mx.float32)
+    assert _installed(blk) == (1, 1)
+    object.__setattr__(blk.switch_mlp, "_kq_in_split", True)
+    cls = type(blk.switch_mlp)
+    real, outs = cls.__call__, []
+    monkeypatch.setattr(
+        cls, "__call__",
+        lambda self, *a, **k: outs.append(real(self, *a, **k)) or outs[-1])
+    got = blk(x).astype(mx.float32)
+    assert outs[0].ndim == 4  # [B, L, k, D]: unmixed
+    assert _rel(got, want) < 2e-2
+
+
+@needs_shexp_oai
+@gpu
+@pytest.mark.parametrize("t", [1, 3])
+def test_expert_lora_on_a_folded_block_matches_the_stock_block(levers, t):
+    """An expert-stack LoRA drops the fold stamp: the fused routed path
+    takes the adapter and the block adds the shared expert itself."""
+    from gmlx.load import adapter
+
+    e, r = 8, 4
+    rng = np.random.default_rng(3)
+    a = mx.array(rng.standard_normal((e, r, INTER)).astype(np.float32) * 0.2)
+    b = mx.array(rng.standard_normal((e, D, r)).astype(np.float32) * 0.2)
+
+    def lora(blk):
+        path = "mlp.switch_mlp.down_proj"
+        plan = adapter.LoraAdapter(alpha=float(r), arch="minimax-m3", modules={
+            path: adapter.LoraModule(module_path=path, a=a, b=b, rank=r,
+                                     scale=1.0, experts=True)})
+        assert modules.install_lora_adapter(_Shell(blk), plan) == 1
+
+    x = _x(t)
+    levers(oai="0", shexp="0")
+    ref = _block(weights=True)
+    plain = ref(x).astype(mx.float32)
+    lora(ref)
+    want = ref(x).astype(mx.float32)
+    assert _rel(plain, want) > 0.1  # the adapter moves the output
+
+    levers(oai="1", shexp="1")
+    blk = _block(weights=True)
+    assert _installed(blk) == (1, 1)
+    lora(blk)
+    assert blk.switch_mlp._kq_shexp_mod is None
+    got = blk(x).astype(mx.float32)
+    assert _rel(got, want) < 2e-2
