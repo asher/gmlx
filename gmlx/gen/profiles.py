@@ -145,8 +145,20 @@ FAMILIES: dict[str, dict] = {
     # https://huggingface.co/MiniMaxAI/MiniMax-M2.7, 2026-07.
     "minimax": {
         "label": "MiniMax",
-        "arches": ("minimax-m2", "minimax-m3"),
+        "arches": ("minimax-m2",),
         "base": {"sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 40}},
+        "intents": {},
+    },
+    # M2's sampling. M3 thinks in <mm:think> tags; the server's stream
+    # splitter and budget criteria read them from here.
+    "minimax-m3": {
+        "label": "MiniMax-M3",
+        "arches": ("minimax-m3",),
+        "base": {"sampling": {
+            "temperature": 1.0, "top_p": 0.95, "top_k": 40,
+            "thinking_start_token": "<mm:think>",
+            "thinking_end_token": "</mm:think>",
+        }},
         "intents": {},
     },
     # https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16, 2026-07.

@@ -47,6 +47,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--thinking adaptive` no longer prints a false warning.
 - MiniMax-M3 prefill of prompts near its 1M-token context no longer
   overruns a GPU index limit.
+- `gmlx serve` returns MiniMax-M3 reasoning in `reasoning_content`, not
+  inside the reply text.
 - In `gmlx chat`, `/undo` or `/retry` of the first turn after `--resume` no
   longer makes the model forget the restored conversation.
 - A Qwen3.5-family text model (Qwen3.5 and 3.6 MoE, MiniCPM-V 4.7 without
