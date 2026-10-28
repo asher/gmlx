@@ -112,11 +112,11 @@ def _strip_any(name: str) -> str:
     return name
 
 
-def _refuse_reshaped(keys: list) -> None:
+def _refuse_reshaped(keys: list, kind: str = "image") -> None:
     if keys:
         raise ImageModelError(
             f"{len(keys)} tensors were reshaped by the converter "
-            f"({keys[0][len(_ORIG_SHAPE_KEY):]} first). gmlx image "
+            f"({keys[0][len(_ORIG_SHAPE_KEY):]} first). gmlx {kind} "
             "loads DiT files whose tensors keep their original shapes")
 
 
@@ -162,11 +162,12 @@ def identify_dit(path: str, *, family: str | None = None,
 def load_dit(path: str, *, family: str | None = None,
              variant: str | None = None, act_dtype: mx.Dtype | None = None,
              identified: Identified | None = None,
-             log=print) -> tuple[nn.Module, DitInfo]:
+             log=print, kind: str = "image") -> tuple[nn.Module, DitInfo]:
     """Load a DiT GGUF. Raises ``ImageModelError`` for a file gmlx image
     refuses and ``UnsupportedCodecError`` for a codec it cannot run.
     ``identified`` is what ``identify_dit`` gave for this file, which then
-    is not identified again."""
+    is not identified again. ``kind`` names the command in the log and in
+    refusals."""
     from mlx_kquant.nn import KQuantLinear
 
     from gmlx.load.loader import (
@@ -200,7 +201,7 @@ def load_dit(path: str, *, family: str | None = None,
     restorable = {n for f in _all_families() for n in f.reshaped}
     _refuse_reshaped([k for k in reshaped
                       if _strip_any(k[len(_ORIG_SHAPE_KEY):])
-                      not in restorable])
+                      not in restorable], kind)
 
     ident = identified
     if ident is None:
@@ -212,7 +213,7 @@ def load_dit(path: str, *, family: str | None = None,
         name = k[len(_ORIG_SHAPE_KEY):]
         bare = name[len(p):] if p and name.startswith(p) else name
         if bare not in fam.reshaped:
-            _refuse_reshaped([k])
+            _refuse_reshaped([k], kind)
         restore[bare] = tuple(int(v) for v in _kv_value(scans, k))
     if fam.build is None:
         raise ImageModelError(
@@ -223,7 +224,7 @@ def load_dit(path: str, *, family: str | None = None,
     shown = ident.variant
     if fam.unknown_variant and ident.variant not in fam.sampling:
         shown += f", sampling as {fam.unknown_variant}"
-    log(f"[image] {fam.title} ({shown}), layout {ident.layout}, "
+    log(f"[{kind}] {fam.title} ({shown}), layout {ident.layout}, "
         f"{len(view.tensors)} tensors")
     # The tensors cast to the activation dtype are held twice until the
     # load ends.

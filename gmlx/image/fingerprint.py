@@ -195,7 +195,7 @@ def _text_arch(arch: str | None) -> bool:
     return arch in ARCH_TABLE or arch in ARCH_ALIAS
 
 
-def describe_unknown(view: HeaderView) -> str:
+def describe_unknown(view: HeaderView, kind: str = "image") -> str:
     """The refusal text for a file no rule recognizes."""
     arch = view.arch or "none"
     codecs = " ".join(f"{c} x{n}" for c, n in view.codecs().most_common())
@@ -215,7 +215,7 @@ def describe_unknown(view: HeaderView) -> str:
     rank2 = [(n, t.shape) for n, t in view.tensors.items()
              if len(t.shape) == 2][:8]
     shapes = ", ".join(f"{n} {s}" for n, s in rank2)
-    return (f"unrecognized image GGUF: arch={arch}, {len(view.tensors)} "
+    return (f"unrecognized {kind} GGUF: arch={arch}, {len(view.tensors)} "
             f"tensors, codecs {codecs}, groups {group_txt}, shapes {shapes}")
 
 
@@ -262,11 +262,23 @@ def _families(name: str | None):
     return (get_family(name),) if name else families()
 
 
+def _refuse_video(view: HeaderView) -> None:
+    """Refuse a video DiT by name. Some converters label H3 files with a
+    text arch, so this runs before the text-arch refusal too."""
+    from gmlx.video.fingerprint import video_family_of
+
+    video = video_family_of(view)
+    if video is not None:
+        raise ImageModelError(
+            f"this is a {video.title} video GGUF, run it with gmlx video")
+
+
 def identify(view: HeaderView, *, family: str | None = None,
              variant: str | None = None) -> Identified:
     """Classify an unstripped header view. Raises ``ImageModelError``."""
     arch = view.arch
     if _text_arch(arch):
+        _refuse_video(view)
         raise ImageModelError(
             f"arch {arch!r} is a text model, use gmlx.load_model")
     for fam in _families(family):
@@ -284,6 +296,7 @@ def identify(view: HeaderView, *, family: str | None = None,
             family=fam, config=fam.synth_config(v), prefix=v.prefix,
             layout=res.layout, **_variant(fam, v, variant, res.variant),
             view=v)
+    _refuse_video(view)
     v = strip_prefix(view, _GENERIC_PREFIXES)
     if family:
         raise ImageModelError(

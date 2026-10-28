@@ -1,0 +1,127 @@
+{
+ "_note": "The identity tensors and the layout rows of the layout tensor of every MiniMax-H3 DiT GGUF of the repository, by HTTP range reads: the sha256 of the identity tensors' bf16 bits as gmlx.image.fingerprint.weight_identity forms it, and the sha256 of the layout rows as gmlx.video.fingerprint.layout_identity reads them",
+ "repo": "unsloth/MiniMax-H3-GGUF",
+ "revision": "babc040eff0084465460ead58fdb8ec44296f8dd",
+ "identity_tensors": [
+  "adaln_t_table",
+  "rope.inv_freq",
+  "final_layer.norm.weight",
+  "token_refiner.final_norm.weight"
+ ],
+ "layout_tensor": "blocks.0.attn.qkv_proj.weight",
+ "layout_rows": 4,
+ "files": {
+  "minimax_h3_fl2va_pruned-Q2_K.gguf": {
+   "variant_hash": "6f575c5d2a38a3f69ec31f42aabc6438008497a2032d720a80666e7e549e0414",
+   "layout_hash": "a4f7c235ae2415d7526937b1b91bb8a2b4ea7cef3a72103bee800b210f10364e",
+   "layout_codec": "Q2_K",
+   "n_tensors": 532,
+   "size": 6724190304,
+   "sha256": "696866a3c98ea0bb7e96b8a273aafb7c588ca8e6fb669303956eb270cedb68aa"
+  },
+  "minimax_h3_fl2va_pruned-Q3_K.gguf": {
+   "variant_hash": "6f575c5d2a38a3f69ec31f42aabc6438008497a2032d720a80666e7e549e0414",
+   "layout_hash": "0eca77848e4e8c23bca389a40de1a64810c5f7d2560a9b9fb8c589c6ab29bad3",
+   "layout_codec": "Q3_K",
+   "n_tensors": 532,
+   "size": 8759328864,
+   "sha256": "2c3cadbcc87ce2ed550b9be1e3b099198ba31a33a83f051411254c5149f6f59f"
+  },
+  "minimax_h3_fl2va_pruned-Q4_K.gguf": {
+   "variant_hash": "6f575c5d2a38a3f69ec31f42aabc6438008497a2032d720a80666e7e549e0414",
+   "layout_hash": "5a8e5ef72a9b1df01835139b24ed7bd402680512cef79292340f75d89fcc338f",
+   "layout_codec": "Q4_K",
+   "n_tensors": 532,
+   "size": 11420663904,
+   "sha256": "dd948e08ad0ba3c71bd42f368e283dd82e790f5122a63b276e22a3e0283d0c10"
+  },
+  "minimax_h3_fl2va_pruned-Q5_0.gguf": {
+   "variant_hash": "6f575c5d2a38a3f69ec31f42aabc6438008497a2032d720a80666e7e549e0414",
+   "layout_hash": "9df69106f6570217dba54fc74d8ddee9463d94fe0dd7c6b1effa5d37d6180b9b",
+   "layout_codec": "Q5_0",
+   "n_tensors": 532,
+   "size": 13923170400,
+   "sha256": "e7e7d16af6fe7cbb832441ce8b517155fa32c7ba03d8d1aab086ea64e82104dc"
+  },
+  "minimax_h3_fl2va_pruned-Q6_K.gguf": {
+   "variant_hash": "6f575c5d2a38a3f69ec31f42aabc6438008497a2032d720a80666e7e549e0414",
+   "layout_hash": "e2e104e213f7f8c1b1678a023274bef782643e6e77a07a74602c2dbe1149107a",
+   "layout_codec": "Q6_K",
+   "n_tensors": 532,
+   "size": 16586784864,
+   "sha256": "cf9453a5654833fbf4e432d71ae53ad2f58ff8f735aa64d4770f1e182c0a5868"
+  },
+  "minimax_h3_fl2va_pruned-Q8_0.gguf": {
+   "variant_hash": "6f575c5d2a38a3f69ec31f42aabc6438008497a2032d720a80666e7e549e0414",
+   "layout_hash": "94b5fa969e849d160f296a0b948a232ea270af02f8d2a6460b3110e9bdf79258",
+   "layout_codec": "Q8_0",
+   "n_tensors": 532,
+   "size": 21437786208,
+   "sha256": "1c77759fd30e4b41dd4fb341d684518177f544428c6186fd9f5fd96f8ebf55d4"
+  },
+  "minimax_h3_fl2va_pruned-UD-Q2_K_XL.gguf": {
+   "variant_hash": "6f575c5d2a38a3f69ec31f42aabc6438008497a2032d720a80666e7e549e0414",
+   "layout_hash": "a4f7c235ae2415d7526937b1b91bb8a2b4ea7cef3a72103bee800b210f10364e",
+   "layout_codec": "Q2_K",
+   "n_tensors": 532,
+   "size": 8063029344,
+   "sha256": "cfe0795c00ab6e6ebf8c64fe4574f45a828e8a93e0876bca704e055662a9d7b8"
+  },
+  "minimax_h3_fl2va_pruned-UD-Q3_K_XL.gguf": {
+   "variant_hash": "6f575c5d2a38a3f69ec31f42aabc6438008497a2032d720a80666e7e549e0414",
+   "layout_hash": "139b825085b348330837ba19d3cf02726c9cd7679c52f8f4975a4a05a672408d",
+   "layout_codec": "Q5_K",
+   "n_tensors": 532,
+   "size": 9558675552,
+   "sha256": "aee15137d31131b35448fad820ff757b6c137df44fdc0758b4a4636792d2b913"
+  },
+  "minimax_h3_ref2va_pruned-Q2_K.gguf": {
+   "variant_hash": "247d976f868cf75afaa2aacee59150489afbc7006da79dec9adfb15d81b580bb",
+   "layout_hash": "2efdfed1b1ecda4880824ca51ed373d8681c31af2cba76f3ae85aae279992099",
+   "layout_codec": "Q2_K",
+   "n_tensors": 532,
+   "size": 6678171744,
+   "sha256": "12089d0a9935b3616c19e430a2e9e0e14e4b391f773363a167619ad245c1ab6f"
+  },
+  "minimax_h3_ref2va_pruned-Q3_K.gguf": {
+   "variant_hash": "247d976f868cf75afaa2aacee59150489afbc7006da79dec9adfb15d81b580bb",
+   "layout_hash": "531dd4bfd511b434160585124be27e71ce8ebcf9a0d169d27456e813bf4d3edb",
+   "layout_codec": "Q3_K",
+   "n_tensors": 532,
+   "size": 8716105824,
+   "sha256": "1e93dbb3b88177c2ea459bcc86bed45c98e60dd39447306ce65680b590045559"
+  },
+  "minimax_h3_ref2va_pruned-Q4_K.gguf": {
+   "variant_hash": "247d976f868cf75afaa2aacee59150489afbc7006da79dec9adfb15d81b580bb",
+   "layout_hash": "d1579449cd6d245353fcad860f4d1f9d0dd61d00eb64abff8c4e74e798b721e0",
+   "layout_codec": "Q4_K",
+   "n_tensors": 532,
+   "size": 11381096544,
+   "sha256": "2fa5840021cf6967843eaeefde9aaa277e540de02986d5ee3d5b0e6a7a8c9dec"
+  },
+  "minimax_h3_ref2va_pruned-Q5_0.gguf": {
+   "variant_hash": "247d976f868cf75afaa2aacee59150489afbc7006da79dec9adfb15d81b580bb",
+   "layout_hash": "5d639c8272a6f40c86cd253b28816fcc9fb2d0a96fd5a87aba8f984303e86d0a",
+   "layout_codec": "Q5_0",
+   "n_tensors": 532,
+   "size": 13889323104,
+   "sha256": "b91ca85cecff15371d4dadcb10c98fa0735e3e493fdd9534bef1ed764b1f5fa5"
+  },
+  "minimax_h3_ref2va_pruned-Q6_K.gguf": {
+   "variant_hash": "247d976f868cf75afaa2aacee59150489afbc7006da79dec9adfb15d81b580bb",
+   "layout_hash": "716dad33922d0378b9f8042803f93bfda41003991b768354696d874a0484b2af",
+   "layout_codec": "Q6_K",
+   "n_tensors": 532,
+   "size": 16554313824,
+   "sha256": "4a7a3b9103844ceec6d1d47c9c099f896770130201ea41d9f5d53bbbf274d0d4"
+  },
+  "minimax_h3_ref2va_pruned-Q8_0.gguf": {
+   "variant_hash": "247d976f868cf75afaa2aacee59150489afbc7006da79dec9adfb15d81b580bb",
+   "layout_hash": "71a538408bf18c1dd9b8eb78623c923092af69e173272fde40a8c2af4e8fcc24",
+   "layout_codec": "Q8_0",
+   "n_tensors": 532,
+   "size": 21414002784,
+   "sha256": "60f8a47434ec9a925f0aea41d9e0db9cb78ebc46791b7488d621dbd6905e5d89"
+  }
+ }
+}

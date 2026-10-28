@@ -1,0 +1,47 @@
+{
+ "_note": "The identity tensors and the layout rows of the layout tensor of every MiniMax-H3 DiT GGUF of the repository, by HTTP range reads: the sha256 of the identity tensors' bf16 bits as gmlx.image.fingerprint.weight_identity forms it, and the sha256 of the layout rows as gmlx.video.fingerprint.layout_identity reads them",
+ "repo": "molbal/MiniMax-H3-GGUF",
+ "revision": "b45874371c61c49bf04096602f5527aac71b360b",
+ "identity_tensors": [
+  "adaln_t_table",
+  "rope.inv_freq",
+  "final_layer.norm.weight",
+  "token_refiner.final_norm.weight"
+ ],
+ "layout_tensor": "blocks.0.attn.qkv_proj.weight",
+ "layout_rows": 4,
+ "files": {
+  "minimax_h3_fl2va_pruned_fp8_Q4_0.gguf": {
+   "variant_hash": "6f575c5d2a38a3f69ec31f42aabc6438008497a2032d720a80666e7e549e0414",
+   "layout_hash": "0e0c97063045a8edb507f584bab3b2b6489669f521065719d36bece1f2052133",
+   "layout_codec": "Q4_0",
+   "n_tensors": 532,
+   "size": 11377542880,
+   "sha256": "50891b806d6d700f4f20931791ca42a083dd9148609838268ccdc782bf899c1c"
+  },
+  "minimax_h3_fl2va_pruned_fp8_Q8_0.gguf": {
+   "variant_hash": "6f575c5d2a38a3f69ec31f42aabc6438008497a2032d720a80666e7e549e0414",
+   "layout_hash": "e18dc8780ba2d834d30bd594178bc18d628db107d1513d921b83dae081523901",
+   "layout_codec": "Q8_0",
+   "n_tensors": 532,
+   "size": 21411137248,
+   "sha256": "93a64471b7cb6f5f910f8a44acf564a3e12328bc022081dd76f6b1f08c92d9e8"
+  },
+  "minimax_h3_fl2va_pruned_fp8_Q8_CR.gguf": {
+   "variant_hash": "6f575c5d2a38a3f69ec31f42aabc6438008497a2032d720a80666e7e549e0414",
+   "layout_hash": "6167b471c2bb2f3995e64586088b04598e446d94a1fb30f7f4b540a09dd4380d",
+   "layout_codec": "I8",
+   "n_tensors": 796,
+   "size": 20160044352,
+   "sha256": "eb556e76fc75394cadfa0e7674ac2381cbada9a8b0bb34099db35989e663f5e7"
+  },
+  "minimax_h3_fl2va_pruned_fp8_U16G.gguf": {
+   "variant_hash": "6f575c5d2a38a3f69ec31f42aabc6438008497a2032d720a80666e7e549e0414",
+   "layout_hash": "6167b471c2bb2f3995e64586088b04598e446d94a1fb30f7f4b540a09dd4380d",
+   "layout_codec": "I8",
+   "n_tensors": 674,
+   "size": 15027417664,
+   "sha256": "424ed56bd4ce71ecf9cfdabb74428970bdd1359f5f5e128e6ea66d529ad1301b"
+  }
+ }
+}

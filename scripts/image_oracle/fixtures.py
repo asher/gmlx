@@ -57,7 +57,7 @@ def fixture_root(path: str | os.PathLike | None = None, *,
     """The fixture directory: ``path``, else GMLX_IMAGE_FIXTURES."""
     raw = path if path is not None else os.environ.get(ENV)
     if not raw:
-        raise FixtureError(f"set {ENV} to the image fixture directory")
+        raise FixtureError(f"set {ENV} to the fixture directory")
     root = Path(raw).expanduser()
     if create:
         root.mkdir(parents=True, exist_ok=True)

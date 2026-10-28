@@ -829,15 +829,18 @@ def worst_by_op(sites: dict) -> dict:
     return out
 
 
-def qk_reading(sites: dict, routed: dict, heads: dict) -> str:
+def qk_reading(sites: dict, routed: dict, heads: dict,
+               stock_n: int | None = None) -> str:
     """The q and k sites in one line: how many ran on a kernel and at
     which count, the largest reading over its gate of each call, and the
-    worst head row with its place."""
+    worst head row with its place. ``stock_n`` is the stock op's count
+    where it differs from ``OP_ROUNDINGS``."""
     qk = {k: v for k, v in op_sites(sites).items() if k[2] == "qk"}
     by_head = head_sites(sites)
+    stock = OP_ROUNDINGS["qk"] if stock_n is None else stock_n
     parts = [f"{len(qk)} qk sites, {sum(k in routed for k in qk)} on an "
              f"mlx-kquant kernel at n {bg.KERNEL_ROUNDINGS['qk']}, the "
-             f"others on the stock op at n {OP_ROUNDINGS['qk']}"]
+             f"others on the stock op at n {stock}"]
     for call in sorted({k[1] for k in qk}):
         share = {k: r / g for k, (r, g) in qk.items() if k[1] == call}
         vals = sorted(share.values())

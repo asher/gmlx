@@ -1,0 +1,28 @@
+{
+  "h3_fl2va_q4_k.header.json": {
+    "repo": "unsloth/MiniMax-H3-GGUF",
+    "revision": "babc040eff0084465460ead58fdb8ec44296f8dd",
+    "file": "minimax_h3_fl2va_pruned-Q4_K.gguf",
+    "size": 11420663904,
+    "sha256": "dd948e08ad0ba3c71bd42f368e283dd82e790f5122a63b276e22a3e0283d0c10"
+  },
+  "h3_transformer_config.json": {
+    "repo": "MiniMaxAI/MiniMax-H3",
+    "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+    "file": "transformer/config.json",
+    "size": 546,
+    "sha256": "74c11bff524336576096993cbfcdcdc2ef4fa2fa4409df693bdcbc6c666282ae"
+  },
+  "h3_identity.json": {
+    "repo": "unsloth/MiniMax-H3-GGUF",
+    "revision": "babc040eff0084465460ead58fdb8ec44296f8dd",
+    "file": "the identity tensors and the layout rows of every MiniMax-H3 DiT .gguf, by HTTP range reads",
+    "note": "each file size and sha256 is from the hub listing at the revision"
+  },
+  "h3_identity_molbal.json": {
+    "repo": "molbal/MiniMax-H3-GGUF",
+    "revision": "b45874371c61c49bf04096602f5527aac71b360b",
+    "file": "the identity tensors and the layout rows of every MiniMax-H3 DiT .gguf, by HTTP range reads",
+    "note": "each file size and sha256 is from the hub listing at the revision"
+  }
+}

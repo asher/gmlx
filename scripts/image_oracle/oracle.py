@@ -28,7 +28,7 @@ DEQUANT = ("exact", "stock")
 def require_offline() -> None:
     if os.environ.get("HF_HUB_OFFLINE") != "1":
         raise SystemExit("error: oracle runs need HF_HUB_OFFLINE=1. Start "
-                         "them with scripts/image_oracle/run.py")
+                         "them with the run.py beside the script")
 
 
 def setup(threads: int | None = None):
