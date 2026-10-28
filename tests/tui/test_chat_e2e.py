@@ -1276,6 +1276,34 @@ def test_resume_flag_picks_latest_for_model(monkeypatch, tmp_path, capsys):
     assert msgs[0]["content"] == "before" and msgs[-1]["content"] == "follow up"
 
 
+@pytest.mark.parametrize("kv_cls", [_KV, _FrozenKV], ids=["trimmable", "frozen"])
+@pytest.mark.parametrize("verb", ["/undo", "/retry"])
+def test_rewinding_the_first_turn_after_resume_replays_the_history(
+        monkeypatch, tmp_path, kv_cls, verb):
+    """The first turn after --resume prefills the restored history with it.
+    Rewinding that turn empties the cache, so the history replays again
+    with the next message instead of being lost."""
+    import gmlx.tui.sessions as ss
+
+    gguf = tmp_path / "model.gguf"
+    ss.save_session({
+        "model": {"path": str(gguf)},
+        "messages": [{"role": "user", "content": "old question"},
+                     {"role": "assistant", "content": "old answer"}],
+    }, "prior")
+    lines = ["new q", verb] + (["next q"] if verb == "/undo" else [])
+    rc, _s, stream, _caches = _run_text_chat_kv(
+        monkeypatch, tmp_path, lines,
+        extra_argv=["--resume", "prior", "--no-autosave"], kv_cls=kv_cls)
+    assert rc == 0
+    history = [{"role": "user", "content": "old question"},
+               {"role": "assistant", "content": "old answer"}]
+    sent = "next q" if verb == "/undo" else "new q"
+    assert len(stream.turns) == 2
+    assert stream.turns[1]["prompt"]["messages"] == [
+        *history, {"role": "user", "content": sent}]
+
+
 def test_resume_model_mismatch_refuses(monkeypatch, tmp_path, capsys):
     import gmlx.tui.sessions as ss
 

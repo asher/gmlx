@@ -3933,7 +3933,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         entry = transcript[-1]
         rebuilt = False
         cp = entry.get("cache_before")
-        if cache is not None and (cp is None or _cache_tokens(cache) > cp):
+        held = _cache_tokens(cache)
+        if cache is not None and (cp is None or held > cp):
             lm = getattr(model, "language_model", model)
             if cp is None or not _trim_to(cache, cp, lm=lm):
                 cache = backend.new_text_cache()
@@ -3971,6 +3972,14 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 )
             else:
                 first_turn = True
+        elif transcript and held and not _cache_tokens(cache):
+            # The popped turn prefilled the deferred replay (--resume, an
+            # earlier rebuild), so the trim emptied the cache under the
+            # history that remains: replay it with the next message.
+            state.take("replay_messages")
+            if not state.vlm or vlm_mtp:
+                state.replay_messages = _conversation(state)
+            first_turn = False
         hook = state.autosave
         if hook is not None:
             hook()
