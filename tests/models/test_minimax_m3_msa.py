@@ -13,6 +13,7 @@ arming, sanitize gating, cache construction, and the mm:think tag fixes.
 from __future__ import annotations
 
 import mlx.core as mx
+import numpy as np
 import pytest
 from mlx.utils import tree_flatten, tree_unflatten
 
@@ -304,13 +305,16 @@ def test_f32_scores_lever_matches_llama_form(monkeypatch, L):
     mx.random.seed(4)
     iq = 8 * mx.random.normal((1, 2, L, 8))
     IK = (8 * mx.random.normal((1, 1, 200, 8))).astype(mx.float16)
-    ref = iq @ IK.astype(mx.float32).swapaxes(-1, -2)
+    ref = (np.asarray(iq, dtype=np.float64)
+           @ np.asarray(IK.astype(mx.float32), dtype=np.float64).swapaxes(-1, -2))
     IKt32 = IK.swapaxes(-1, -2).astype(mx.float32) if L > 1 else None
     assert attn._scores(iq, IK, IKt32).dtype == mx.float16
     monkeypatch.setenv("GMLX_MSA_F32_SCORES", "1")
     got = attn._scores(iq, IK, IKt32)
     assert got.dtype == mx.float32
-    assert mx.allclose(got, ref, atol=1e-4, rtol=1e-6).item()
+    # f32 GEMMs run at TF32 on M5 GPUs (about 4e-4 relative here).
+    err = np.abs(np.asarray(got, dtype=np.float64) - ref).max()
+    assert err / np.abs(ref).max() < 2e-3
 
 
 def test_short_context_causal_kernel_matches_explicit_mask():
