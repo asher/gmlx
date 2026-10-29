@@ -28,6 +28,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   context, attention reads only the blocks each token selects.
 - With mlx-kquant 0.5.8 or later, MiniMax-M3 and M3.1-Flash decode faster on
   GGUF expert quants, such as UD-Q2_K_XL.
+- MXFP4 and NVFP4 MoE models that fit in memory load without copying their
+  experts and use the fused MoE kernels. `GMLX_NATIVE_FP=packed` copies them.
 - Requires mlx-kquant 0.5.7. With it, NVFP4 projections decode closer to
   full precision and join the fused attention and MLP paths.
   `GMLX_KQ_OUT_SCALE=0` turns this off.
@@ -55,8 +57,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--thinking off` on templates without a thinking switch, such as MiniMax-M3.1's.
 - `gmlx chat --mmproj` takes `--stream-experts`, and streams a model too big
   for memory by itself, as `gmlx run --mmproj` does.
-- In `gmlx run` and `gmlx chat` with `--mmproj --stream-experts`, MXFP4 and NVFP4
-  experts stream from the file, and an MTP drafter no longer raises the wired limit.
+- With `--mmproj --stream-experts`, an MTP drafter in `gmlx run` and
+  `gmlx chat` no longer raises the wired limit.
 - In `gmlx chat`, `/undo` or `/retry` of the first turn after `--resume` no
   longer makes the model forget the restored conversation.
 - An `--adapter` LoRA on the routed experts' down projection loads on Flint,

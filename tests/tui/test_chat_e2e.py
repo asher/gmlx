@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import collections
 import importlib
-import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -673,13 +672,10 @@ def test_vlm_chat_streams_the_text_tower(monkeypatch, tmp_path):
 
     img = tmp_path / "pic.png"
     img.write_bytes(b"\x89PNG")
-    monkeypatch.delenv("GMLX_NATIVE_FP", raising=False)
     rc, _s, vstream, _m = _run_vlm_chat(
         monkeypatch, tmp_path, [f"/image {img}", "what is this", "/exit"],
         extra=["--stream-experts"])
     assert rc == 0
-    # mxfp4 and nvfp4 experts keep their wire bytes, which stream.
-    assert os.environ.get("GMLX_NATIVE_FP") == "wire"
     # The text tower streams, and the vision tower is never placed.
     assert vstream.placed == [(vstream.model.language_model, True)]
     assert vstream.turns[0]["image"] == [str(img)]
@@ -800,12 +796,10 @@ def test_vlm_mtp_chat_streams_the_text_tower(monkeypatch, tmp_path):
 
     img = tmp_path / "pic.png"
     img.write_bytes(b"\x89PNG")
-    monkeypatch.delenv("GMLX_NATIVE_FP", raising=False)
     rc, _s, vstream, sstream, _m = _run_vlm_mtp_chat(
         monkeypatch, tmp_path, ["hello", f"/image {img}", "what is this", "/exit"],
         extra_argv=["--stream-experts"])
     assert rc == 0
-    assert os.environ.get("GMLX_NATIVE_FP") == "wire"
     # The streaming install manages the wire, so the load sets none.
     assert vstream.load_kw["wire"] is False
     assert vstream.placed == [(vstream.model.language_model, True)]

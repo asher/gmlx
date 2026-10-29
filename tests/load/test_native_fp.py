@@ -12,7 +12,7 @@ validate the UE4M3 scale against yet) the shuffle + scale passthrough are
 proven directly.
 
 The second section covers ``GMLX_NATIVE_FP`` wire mode: the resolver,
-the CLI env preset, ``install_kquant_modules`` dispatch, and numeric parity
+``install_kquant_modules`` dispatch, and numeric parity
 of the wire ``KQuantSwitchLinear`` (CPU stream) and packed
 ``NativeFPSwitchLinear`` (GPU) against a ggml-order dequant reference.
 
@@ -130,7 +130,7 @@ def test_nvfp4_packed_geometry():
 
 
 # ---------------------------------------------------------------------------
-# Wire mode (GMLX_NATIVE_FP): resolver, env preset, install dispatch, and
+# Wire mode (GMLX_NATIVE_FP): resolver, install dispatch, and
 # numeric parity through the installed modules. These need mlx (and, where
 # marked, an mlx-kquant build carrying the fp4 codecs / a Metal device).
 # ---------------------------------------------------------------------------
@@ -155,28 +155,6 @@ def _tiny_switch_model(n_experts=4, out_dims=64, in_dims=128, bias=False):
     return Tiny()
 
 
-def test_preset_native_fp_wire_env():
-    from gmlx.load.loader import preset_native_fp_wire_env
-
-    with mock.patch.dict(os.environ):
-        os.environ.pop("GMLX_NATIVE_FP", None)
-        # no streaming placement -> untouched (auto stays in charge)
-        preset_native_fp_wire_env(
-            SimpleNamespace(stream_cpu=False, stream_experts=False))
-        assert "GMLX_NATIVE_FP" not in os.environ
-        # args without the flags at all (bridge surfaces) -> untouched
-        preset_native_fp_wire_env(SimpleNamespace())
-        assert "GMLX_NATIVE_FP" not in os.environ
-        preset_native_fp_wire_env(
-            SimpleNamespace(stream_cpu=True, stream_experts=False))
-        assert os.environ["GMLX_NATIVE_FP"] == "wire"
-    with mock.patch.dict(os.environ, {"GMLX_NATIVE_FP": "packed"}):
-        # an explicit user override always wins over the placement preset
-        preset_native_fp_wire_env(
-            SimpleNamespace(stream_cpu=False, stream_experts=True))
-        assert os.environ["GMLX_NATIVE_FP"] == "packed"
-
-
 def test_lift_stream_cb_caps():
     from gmlx.commands.cli import _lift_stream_cb_caps
 
@@ -197,12 +175,9 @@ def test_lift_stream_cb_caps():
 
 
 def test_resolve_native_fp_wire_modes(monkeypatch):
-    import mlx.core as mx
-
     import gmlx.load.loader as loader
 
     meta = {"blk.0.ffn_gate_exps.weight": "mxfp4"}
-    weights = {"blk.0.ffn_gate_exps.weight": np.zeros(64, np.uint8)}
     log = lambda *_: None  # noqa: E731
     kq_fp4 = SimpleNamespace(codecs=lambda: ["q4_k", "mxfp4", "nvfp4"])
     kq_old = SimpleNamespace(codecs=lambda: ["q4_k"])
@@ -210,35 +185,28 @@ def test_resolve_native_fp_wire_modes(monkeypatch):
     # no native-fp tensors -> False regardless of mode
     monkeypatch.setenv("GMLX_NATIVE_FP", "wire")
     monkeypatch.setattr(loader, "kq", kq_fp4)
-    assert not loader._resolve_native_fp_wire(
-        weights, {"a.weight": "q4_k"}, log)
+    assert not loader._resolve_native_fp_wire({"a.weight": "q4_k"}, log)
 
     # explicit wire
-    assert loader._resolve_native_fp_wire(weights, meta, log)
+    assert loader._resolve_native_fp_wire(meta, log)
 
     # explicit wire on a build without the codecs: loud, never a silent repack
     monkeypatch.setattr(loader, "kq", kq_old)
     with pytest.raises(RuntimeError, match="mxfp4"):
-        loader._resolve_native_fp_wire(weights, meta, log)
+        loader._resolve_native_fp_wire(meta, log)
 
     # explicit packed
     monkeypatch.setenv("GMLX_NATIVE_FP", "packed")
     monkeypatch.setattr(loader, "kq", kq_fp4)
-    assert not loader._resolve_native_fp_wire(weights, meta, log)
+    assert not loader._resolve_native_fp_wire(meta, log)
 
-    # auto: fits the wired budget -> packed kernels; over budget -> wire
+    # auto: wire whenever the build has the codecs, whatever the model size
     monkeypatch.setenv("GMLX_NATIVE_FP", "auto")
-    monkeypatch.setattr(
-        mx, "device_info",
-        lambda: {"max_recommended_working_set_size": 10 ** 12})
-    assert not loader._resolve_native_fp_wire(weights, meta, log)
-    monkeypatch.setattr(
-        mx, "device_info", lambda: {"max_recommended_working_set_size": 50})
-    assert loader._resolve_native_fp_wire(weights, meta, log)
+    assert loader._resolve_native_fp_wire(meta, log)
 
     # auto on a build without the codecs degrades to packed
     monkeypatch.setattr(loader, "kq", kq_old)
-    assert not loader._resolve_native_fp_wire(weights, meta, log)
+    assert not loader._resolve_native_fp_wire(meta, log)
 
 
 def test_install_packed_default_unchanged():

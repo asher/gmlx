@@ -242,9 +242,8 @@ def test_batch_divergence_only_at_ties(gguf_index, arch):
 @pytest.mark.parametrize("arch", CANDIDATE_ARCHES)
 def test_batch_divergence_only_at_ties_native_fp(gguf_index, arch, layout,
                                                  monkeypatch):
-    """The ragged row with the MXFP4 or NVFP4 layout pinned. Auto picks wire
-    only on a Mac the model does not fit, so a host runs one layout and
-    this row runs both."""
+    """The ragged row with the MXFP4 or NVFP4 layout pinned. Auto picks wire,
+    so this row is what runs the packed opt-out."""
     import mlx_kquant as kq
 
     from gmlx import load_model

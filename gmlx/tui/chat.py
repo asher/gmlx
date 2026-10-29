@@ -3099,10 +3099,7 @@ def _backend_vlm_mtp(args, kv_kwargs) -> _ChatBackend:
     import gmlx.load.loadlog as loadlog
     from gmlx.spec.mtp_load import load_vlm_mtp_model
 
-    from gmlx.load.loader import preset_native_fp_wire_env
-
     b = _ChatBackend()
-    preset_native_fp_wire_env(args)
     with loadlog.load_ui(args.verbose, args.gguf):
         b.model, b.drafter, b.config, b.tok, b.processor = load_vlm_mtp_model(
             args.gguf,
@@ -3124,11 +3121,9 @@ def _backend_vlm_mtp(args, kv_kwargs) -> _ChatBackend:
 
 def _backend_vlm(args, kv_kwargs) -> _ChatBackend:
     import gmlx.load.loadlog as loadlog
-    from gmlx.load.loader import preset_native_fp_wire_env
     from gmlx.load.vlm import load_vlm_model
 
     b = _ChatBackend()
-    preset_native_fp_wire_env(args)
     with loadlog.load_ui(args.verbose, args.gguf):
         b.model, b.config, b.processor, *_ = load_vlm_model(
             args.gguf,
@@ -3152,11 +3147,9 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     from gmlx.cache.kv_cache import make_prompt_cache as _mtp_make_cache
     import gmlx.load.loadlog as loadlog
     from gmlx.commands.cli import _apply_placement
-    from gmlx.load.loader import preset_native_fp_wire_env
     from gmlx.spec.mtp_load import load_mtp_model
 
     b = _ChatBackend()
-    preset_native_fp_wire_env(args)
     with loadlog.load_ui(args.verbose, args.gguf):
         b.model, b.drafter, b.config, b.tok = load_mtp_model(
             args.gguf,
@@ -3254,11 +3247,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
     from gmlx.cache.kv_cache import make_prompt_cache
     import gmlx.load.loadlog as loadlog
     from gmlx.envflags import env_bool
-    from gmlx.load.loader import load_model, preset_native_fp_wire_env
-
-    # Sets GMLX_NATIVE_FP before the load reads it - on the background
-    # path load_model runs off-thread, so the env must be in place here.
-    preset_native_fp_wire_env(args)
+    from gmlx.load.loader import load_model
 
     b = _ChatBackend()
 

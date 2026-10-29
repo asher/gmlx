@@ -36,7 +36,7 @@ from .dtypes import (
     fp32_norms,
     wider_float,
 )
-from gmlx.device import cpu_default_device, metal_info, metal_value
+from gmlx.device import cpu_default_device, metal_value
 from gmlx.envflags import env_bool, env_choice, env_float, env_int
 from gmlx.upstream.attn_hd512 import install_hd512_sdpa
 from gmlx.gen.prefill_decay import install_prefill_decay, note_untracked_weights
@@ -1121,20 +1121,7 @@ def float_dtype_rules(model_type: str) -> FloatDtypeRules:
     }
 
 
-def preset_native_fp_wire_env(args) -> None:
-    """Pre-set wire mode when a streaming placement is coming.
-
-    Placement (``_apply_placement``) runs only after ``load_model`` returns,
-    but the native-fp repack-vs-wire decision happens inside the load - so
-    the CLI surfaces call this before loading. ``setdefault`` keeps an
-    explicit ``GMLX_NATIVE_FP`` override in charge.
-    """
-    if (getattr(args, "stream_cpu", False)
-            or getattr(args, "stream_experts", False)):
-        os.environ.setdefault("GMLX_NATIVE_FP", "wire")
-
-
-def _resolve_native_fp_wire(hf_weights, hf_kquant_meta, log) -> bool:
+def _resolve_native_fp_wire(hf_kquant_meta, log) -> bool:
     """Decide wire vs packed handling for native-fp (mxfp4/nvfp4) tensors.
 
     Wire mode keeps them as zero-copy GGUF wire bytes dispatched through the
@@ -1143,10 +1130,7 @@ def _resolve_native_fp_wire(hf_weights, hf_kquant_meta, log) -> bool:
     ``mx.gather_qmm(mode=...)`` kernels (materializes every native-fp tensor).
 
     ``GMLX_NATIVE_FP`` = ``wire`` | ``packed`` | ``auto`` (default). Auto
-    picks wire when the kq build carries the codecs and the model does not
-    fit the wired working set (a fitting model keeps today's packed kernels
-    until the wire path passes the perf gate); the CLI pre-sets ``wire`` for
-    CPU/hybrid placements via ``preset_native_fp_wire_env``.
+    picks wire when the kq build carries the codecs, else packed.
     """
     from .native_fp import NATIVE_FP_CODECS
 
@@ -1163,18 +1147,8 @@ def _resolve_native_fp_wire(hf_weights, hf_kquant_meta, log) -> bool:
                 f"codec(s) {missing}; upgrade mlx-kquant or use packed")
         log("[native-fp] wire mode (env): mxfp4/nvfp4 stay zero-copy wire bytes")
         return True
-    if mode == "packed":
-        return False
-    if not supported:
-        return False
-    total = sum(v.nbytes for v in hf_weights.values())
-    info = metal_info() or {}
-    wss = int(info.get("max_recommended_working_set_size", 0))
-    if wss and total > 0.9 * wss:
-        log(
-            f"[native-fp] wire mode (auto): {total / 2**30:.0f} GiB exceeds "
-            f"the wired budget ({0.9 * wss / 2**30:.0f} GiB) - native-fp "
-            f"tensors stay zero-copy wire bytes")
+    if mode == "auto" and supported:
+        log("[native-fp] wire mode (auto): mxfp4/nvfp4 stay zero-copy wire bytes")
         return True
     return False
 
@@ -1394,7 +1368,7 @@ def _install_and_load(
 
     # 5b. native-fp codecs (mxfp4/nvfp4): keep as zero-copy wire bytes (wire
     # mode) or de-interleave into MLX's packed layout (packed mode).
-    native_fp_wire = _resolve_native_fp_wire(hf_weights, hf_kquant_meta, log)
+    native_fp_wire = _resolve_native_fp_wire(hf_kquant_meta, log)
     if not native_fp_wire:
         from .native_fp import repack_native_fp_weights
 
@@ -1861,7 +1835,7 @@ def load_model(
     #     + uint8 scales) layout, in place - a pure byte/nibble shuffle (no
     #     dequant) that drives mx.gather_qmm(mode=<codec>) but materializes
     #     every native-fp tensor.
-    native_fp_wire = _resolve_native_fp_wire(hf_weights, hf_kquant_meta, _log)
+    native_fp_wire = _resolve_native_fp_wire(hf_kquant_meta, _log)
     if not native_fp_wire:
         from .native_fp import repack_native_fp_weights
 
