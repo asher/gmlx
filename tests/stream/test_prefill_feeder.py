@@ -17,6 +17,7 @@ import pytest
 import mlx.core as mx
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
+from gmlx.load.modules import glu_unsorted_call
 from gmlx.stream.expert_streaming import install_expert_streaming
 
 from test_decode_feeder import (
@@ -162,10 +163,6 @@ def test_wrapper_partial_branch_and_ordering(monkeypatch):
             def covers(self, li):
                 return True
 
-            def slot_count(self, li):
-                return 1 << 16
-
-
             def stage(self, li, ids):
                 self.stage_calls.append(li)
                 return ids.astype(np.uint32) if self.fits else None
@@ -189,8 +186,11 @@ def test_wrapper_partial_branch_and_ordering(monkeypatch):
         df = _FakeDF()
         object.__setattr__(glu, "_kq_decode_feeder", df)
         out = mx.array(glu(x40, i40))
-        mx.eval(out)
-        assert mx.allclose(ref40, out, atol=1e-6, rtol=1e-6)
+        # The arena serves 80 routed rows with the unsorted per-row body.
+        with mx.stream(mx.gpu):
+            ref_rows = glu_unsorted_call(glu, x40, i40)
+        mx.eval(out, ref_rows)
+        assert mx.allclose(ref_rows, out, atol=1e-6, rtol=1e-6)
         assert df.stage_calls == [3]  # arena won
         assert fdr.partial_calls == [(3, [0, 2])]  # partial not re-entered
 

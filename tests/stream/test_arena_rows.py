@@ -67,9 +67,6 @@ class _Arena:
     def covers(self, li):
         return True
 
-    def slot_count(self, li):
-        return self.slots
-
     def can_stage_smaller(self, li):
         return True
 
@@ -115,18 +112,18 @@ def _routing(seed=7):
     return mx.array(ids[None].astype(np.uint32))
 
 
-def _fused(codec="q4_k"):
+def _fused(codec="q4_k", e=E):
     import mlx_kquant as kq
     from mlx_kquant.nn import KQuantSwitchLinear
 
-    glu = SwitchGLU(D, INTER, E)
+    glu = SwitchGLU(D, INTER, e)
     for i, (name, (o, k)) in enumerate((
             ("gate_proj", (INTER, D)), ("up_proj", (INTER, D)),
             ("down_proj", (D, INTER)))):
-        p = KQuantSwitchLinear(E, o, k, False, codec)
+        p = KQuantSwitchLinear(e, o, k, False, codec)
         mx.random.seed(11 + i)
-        w = kq.quantize(mx.random.normal((E * o, k)) * 0.05, codec)[0]
-        p.weight = w.reshape(E, o, w.shape[-1])
+        w = kq.quantize(mx.random.normal((e * o, k)) * 0.05, codec)[0]
+        p.weight = w.reshape(e, o, w.shape[-1])
         mx.eval(p.weight)
         setattr(glu, name, p)
     glu.eval()
@@ -172,6 +169,26 @@ def test_arena_result_independent_of_slot_count(codec, mixed):
     assert all(a12.rows_seen) and all(a24.rows_seen)
     assert a12.wired == 0  # one-token pieces are prefill work
     assert np.array_equal(y12, y24)
+
+
+@pytest.mark.skipif(not _real_apple_gpu(),
+                    reason="fused kq MoE kernels need a real Apple GPU")
+def test_sorted_width_arena_call_independent_of_slot_count():
+    """9 tokens at top 8 route 72 rows to 32 of 64 experts, so neither
+    arena splits the call. kq picks a sorted call's kernel by rows per
+    slot, which differ between 32 and 48 slots; the per-row kernels give
+    one result."""
+    glu = _fused(e=64)
+    rng = np.random.default_rng(3)
+    x = mx.array(rng.standard_normal((1, 9, D)).astype(np.float32)).astype(
+        mx.bfloat16)
+    ids = np.stack([rng.permutation(32)[:TOPK] for _ in range(9)])
+    inds = mx.array(ids[None].astype(np.uint32))
+    y32, a32 = _run(glu, 32, x, inds)
+    y48, a48 = _run(glu, 48, x, inds)
+    assert a32.leaves == [9] and a48.leaves == [9]
+    assert all(a32.rows_seen) and all(a48.rows_seen)
+    assert np.array_equal(y32, y48)
 
 
 @pytest.mark.skipif(not _real_apple_gpu(),
@@ -231,9 +248,9 @@ class _Recording(SwitchGLU):
         return SwitchGLU.__call__(self, x, indices)
 
 
-def _cpu_glu(cls=SwitchGLU):
+def _cpu_glu(cls=SwitchGLU, e=8):
     mx.random.seed(4)
-    glu = cls(16, 32, 8)
+    glu = cls(16, 32, e)
     mx.eval(glu.parameters())
     if cls is _Recording:
         object.__setattr__(glu, "flags", [])
@@ -247,18 +264,19 @@ def _cpu_inds(t, seed=1):
 
 
 def test_row_flag_on_multi_token_arena_calls_not_on_decode():
-    glu = _cpu_glu(_Recording)
-    arena = _Arena(glu, slots=8)
+    glu = _cpu_glu(_Recording, e=32)
+    arena = _Arena(glu, slots=32)
     object.__setattr__(glu, "_kq_decode_feeder", arena)
     glu(mx.random.normal((1, 1, 16)), _cpu_inds(1))
     assert glu.flags == [False]
     assert arena.wired == 1
-    # 8 routed rows on 8 slots: no GEMM at any arena size, so a verify
-    # batch this wide keeps the width-picked kernels.
-    glu(mx.random.normal((1, 4, 16)), _cpu_inds(4))
+    # 62 routed rows are never sorted, so a verify batch this wide keeps
+    # the width-picked kernels.
+    glu(mx.random.normal((1, 31, 16)), _cpu_inds(31))
     assert glu.flags[-1] is False
-    # 32 routed rows reach the GEMM gate of 4 rows per slot.
-    glu(mx.random.normal((1, 16, 16)), _cpu_inds(16))
+    # 64 routed rows are sorted, and a sorted call's kernel depends on the
+    # slot count, even at 2 rows per slot.
+    glu(mx.random.normal((1, 32, 16)), _cpu_inds(32))
     assert glu.flags[-1] is True
     assert glu._kq_arena_rows is False  # reset after the call
 

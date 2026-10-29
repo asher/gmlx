@@ -101,6 +101,31 @@ def test_stock_layouts_match_per_expert_reference(B, L, k):
     assert mx.allclose(y, ref, rtol=tol, atol=tol), float(mx.abs(y - ref).max())
 
 
+def test_arena_row_flag_keeps_wide_calls_unsorted(monkeypatch):
+    """The streaming wrapper flags arena calls (_kq_arena_rows), where the
+    expert count is the arena's slot count and a sorted call's kernel
+    depends on it. A flagged 64-row call stays on the unsorted body."""
+    glu, ref_glu = _glu(), _glu()
+    model = _Holder(glu)
+    E, d, inter, r = 4, 8, 16, 2
+    mx.random.seed(1)
+    a = mx.random.normal((E, r, inter))
+    b = mx.random.normal((E, d, r))
+    assert _install(model, a, b, 0.5) == 1
+    x = mx.random.normal((2, 8, d))
+    idx = mx.random.randint(0, E, (2, 8, 4)).astype(mx.uint32)
+
+    def no_sort(*args, **kwargs):
+        raise AssertionError("a flagged arena call sorted its rows")
+
+    monkeypatch.setattr(modules, "_lora_gather_sort", no_sort)
+    object.__setattr__(model.switch_mlp, "_kq_arena_rows", True)
+    y = model.switch_mlp(x, idx)
+    ref = (modules.glu_unsorted_call(ref_glu, x, idx)
+           + _ref_delta(ref_glu, x, idx, a, b, 0.5))
+    assert mx.allclose(y, ref, rtol=1e-4, atol=1e-4), float(mx.abs(y - ref).max())
+
+
 def test_sorted_path_with_nonuniform_rows():
     lora_rows.configure("rows", 1)
     glu, ref_glu = _glu(), _glu()

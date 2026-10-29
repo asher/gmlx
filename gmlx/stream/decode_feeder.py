@@ -831,11 +831,6 @@ class DecodeFeeder:
     def covers(self, li: int) -> bool:
         return li in self._layers
 
-    def slot_count(self, li: int) -> int:
-        """Slots in the layer's arena buffer now: the expert axis that the
-        kernels see on an arena call."""
-        return self._slots.get(li, 0)
-
     def note_split_rule(self, split: bool, ahead: bool = False) -> None:
         """Count one split-rule decision for the -v summary. ``ahead``:
         the ring had already started the layer's read."""

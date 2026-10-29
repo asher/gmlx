@@ -65,6 +65,10 @@ def _la_observe(ph, li, la_sync):
 # router eval is still the fence that orders it before any slot overwrite.
 _ASYNC_GATHER = env_bool("GMLX_DECODE_ASYNC_GATHER", True)
 
+# SwitchGLU sorts a call from this many routed rows, and kq picks the
+# kernel of a sorted call by the expert count.
+_SORTED_ROWS = 64
+
 
 # MoE expert CPU offload (hybrid GPU+CPU inference)
 #
@@ -1125,15 +1129,17 @@ def install_expert_streaming(
                             # and let the fused kq kernels run
                             if shed_args is not None:
                                 args = shed_args
-                            # kq takes a GEMM when rows / experts >= 4,
-                            # and the experts here are the arena's slots.
-                            # Narrower calls, such as verify batches, pick
-                            # the same kernel at any arena size.
+                            # A sorted call's kernel depends on the expert
+                            # count, which here is the arena's slot count.
+                            # Narrower calls, such as verify batches, are
+                            # never sorted. One the arena splits still runs
+                            # per-row pieces, and one it serves whole keeps
+                            # the width-picked kernels.
                             rows = _arena_row_kernels() and (
                                 in_split
                                 or n_tokens > 1
                                 and n_tokens * indices.shape[-1]
-                                >= 4 * dfr.slot_count(self._kq_li))
+                                >= _SORTED_ROWS)
                             self._kq_cpu_only = False
                             if rows:
                                 object.__setattr__(

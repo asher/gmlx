@@ -2667,7 +2667,10 @@ def _make_lora_switch_glu(base_cls, caps=None):
                 y = (y + d.astype(y.dtype)).reshape(*indices.shape, N)
             else:
                 xe = mx.expand_dims(x, (-2, -3))
-                do_sort = indices.size >= 64
+                # A sorted call's kernel depends on the expert count, so
+                # arena calls (_kq_arena_rows) stay unsorted.
+                do_sort = (indices.size >= 64
+                           and not getattr(self, "_kq_arena_rows", False))
                 idx, inv_order, order = indices, None, None
                 if do_sort:
                     xe, idx, inv_order, order = _lora_gather_sort(xe, indices)
