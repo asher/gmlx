@@ -1714,11 +1714,7 @@ def _print_run_hint(plan, dest: Destination, reg, box) -> None:
     flag = pull_config_flag(os.path.abspath(dest.config_path)) if dest.config_path else ""
     name = reg.alias or reg.ids.get(os.path.abspath(model_path))
     if name:
-        if plan.streaming and plan.mmproj:
-            # chat refuses --mmproj with streamed experts; serve keeps the tower.
-            print(f"\nserve it:  gmlx serve{flag}")
-        else:
-            print(f"\nrun it:  gmlx chat {name}{flag}")
+        print(f"\nrun it:  gmlx chat {name}{flag}")
         if reg.moved_from:
             old_id, old_path = reg.moved_from
             print(f"{old_path} stays on disk; gmlx rm {old_id} removes it.")
@@ -1731,8 +1727,7 @@ def _print_run_hint(plan, dest: Destination, reg, box) -> None:
         extra += f" --draft-gguf {shlex.quote(companions['draft_gguf'])}"
     if plan.streaming:
         extra += " --stream-experts"
-    verb = "run" if plan.streaming and plan.mmproj else "chat"
-    print(f"\nrun it:  gmlx {verb} {shlex.quote(model_path)}{extra}")
+    print(f"\nrun it:  gmlx chat {shlex.quote(model_path)}{extra}")
 
 
 def _run_plan(plan, a, dest: Destination, box) -> int:

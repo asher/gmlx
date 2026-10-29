@@ -2303,6 +2303,7 @@ def load_vlm_mtp_model(
     zero_copy: bool = True,
     verbose: bool = False,
     rope_override: rope_mod.RopeOverride | None = None,
+    wire: bool = True,
 ):
     """Load a VLM target + MTP drafter for TEXT-ONLY speculative decoding.
 
@@ -2430,7 +2431,9 @@ def load_vlm_mtp_model(
     tokenizer = TokenizerWrapper(raw_tokenizer, eos_token_ids=eos_ids)
 
     materialize_module_arrays(model, drafter)
-    _wire_target(model, gguf_path)
+    # wire=False: as for load_mtp_model, a caller that installs streaming.
+    if wire:
+        _wire_target(model, gguf_path)
 
     return model, drafter, config, tokenizer, processor
 

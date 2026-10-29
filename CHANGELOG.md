@@ -53,6 +53,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inside the reply text.
 - `gmlx run --mmproj` and `gmlx chat --mmproj` honor `--thinking-budget`, and
   `--thinking off` on templates without a thinking switch, such as MiniMax-M3.1's.
+- `gmlx chat --mmproj` takes `--stream-experts`, and streams a model too big
+  for memory by itself, as `gmlx run --mmproj` does.
+- In `gmlx run` and `gmlx chat` with `--mmproj --stream-experts`, MXFP4 and NVFP4
+  experts stream from the file, and an MTP drafter no longer raises the wired limit.
 - In `gmlx chat`, `/undo` or `/retry` of the first turn after `--resume` no
   longer makes the model forget the restored conversation.
 - An `--adapter` LoRA on the routed experts' down projection loads on Flint,

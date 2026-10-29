@@ -524,14 +524,6 @@ def test_a_run_its_check_streams_names_the_check_not_a_flag(
             in out + err) is feeders
 
 
-def test_a_chat_on_a_vlm_has_no_streamed_placement(header):
-    path = header(82.5e9, experts=77.0e9, budget_bytes=int(108.2e9))
-    _box(host_box.mac(128)[0], unwired=50 * GiB)
-    args = _args(path)
-    cli.preload_wire_check(args, depth=None, can_stream=False)
-    assert args.stream_experts is False
-
-
 @pytest.fixture
 def glm_head(header, monkeypatch):
     """A 70 GiB trunk whose own 2.79 GB NextN block auto-MTP loads beside

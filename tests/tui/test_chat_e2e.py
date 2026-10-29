@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import collections
 import importlib
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -572,10 +573,27 @@ class _FakeVlmStream:
             yield _Chunk(w if i == 0 else " " + w, i + 1, 30.0)
 
 
+class _FakeVlm:
+    """A VLM container whose text tower takes the placement."""
+
+    def __init__(self):
+        self.language_model = SimpleNamespace(model_type="fake")
+
+
+def _fake_placement(placed):
+    def place(args, model):
+        # The install's verdict, as install_expert_streaming leaves it.
+        model._kq_streaming = bool(args.stream_experts)
+        placed.append((model, args.stream_experts))
+    return place
+
+
 def _run_vlm_chat(monkeypatch, tmp_path, lines, extra=()):
     pytest.importorskip("gmlx._vendor.mlx_vlm")
     scripted = _Scripted(lines)
     vstream = _FakeVlmStream()
+    vstream.model = _FakeVlm()
+    vstream.placed = []
     msg_calls = []
 
     def fake_vlm_message(model_type, content, role="user", n_images=0, n_audios=0):
@@ -587,8 +605,11 @@ def _run_vlm_chat(monkeypatch, tmp_path, lines, extra=()):
     monkeypatch.setattr(chat, "_wire_input", lambda no_history: chat.ChatState(
         history_enabled=True, history_loaded=True, input_fn=scripted))
     monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config", lambda *a, **k: None)
-    monkeypatch.setattr("gmlx.load.vlm.load_vlm_model",
-                        lambda *a, **k: (object(), {"model_type": "fake"}, object()))
+    monkeypatch.setattr(
+        "gmlx.load.vlm.load_vlm_model",
+        lambda *a, **k: (vstream.model, {"model_type": "fake"}, object()))
+    monkeypatch.setattr("gmlx.commands.cli._apply_placement",
+                        _fake_placement(vstream.placed))
     monkeypatch.setattr(chat, "_vlm_message", fake_vlm_message)
     monkeypatch.setattr("gmlx._vendor.mlx_vlm.prompt_utils.get_chat_template",
                         lambda processor, msgs, add_generation_prompt=True, **kw: msgs)
@@ -647,6 +668,24 @@ def test_vlm_dragged_in_path_stages_without_a_turn(monkeypatch, tmp_path):
     assert [m for m in msgs if m["role"] == "user"][0]["n_images"] == 1
 
 
+def test_vlm_chat_streams_the_text_tower(monkeypatch, tmp_path):
+    from gmlx.stream.expert_streaming import _STREAMING_PREFILL_STEP
+
+    img = tmp_path / "pic.png"
+    img.write_bytes(b"\x89PNG")
+    monkeypatch.delenv("GMLX_NATIVE_FP", raising=False)
+    rc, _s, vstream, _m = _run_vlm_chat(
+        monkeypatch, tmp_path, [f"/image {img}", "what is this", "/exit"],
+        extra=["--stream-experts"])
+    assert rc == 0
+    # mxfp4 and nvfp4 experts keep their wire bytes, which stream.
+    assert os.environ.get("GMLX_NATIVE_FP") == "wire"
+    # The text tower streams, and the vision tower is never placed.
+    assert vstream.placed == [(vstream.model.language_model, True)]
+    assert vstream.turns[0]["image"] == [str(img)]
+    assert vstream.turns[0]["kw"]["prefill_step_size"] == _STREAMING_PREFILL_STEP
+
+
 # -------------- Tier 1 - loop driver (VLM x MTP: text-only turns) --------------
 
 class _FakeSpecStream:
@@ -674,6 +713,9 @@ def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False,
     pytest.importorskip("gmlx._vendor.mlx_vlm")
     scripted = _Scripted(lines)
     vstream = _FakeVlmStream()
+    vstream.model = _FakeVlm()
+    vstream.placed = []
+    vstream.load_kw = {}
     sstream = _FakeSpecStream()
     msg_calls = []
     caches = []
@@ -689,16 +731,17 @@ def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False,
         caches.append(c)
         return c
 
-    class _Model:
-        language_model = object()
+    def fake_load(*a, **k):
+        vstream.load_kw.update(k)
+        return (vstream.model, object(), {"model_type": "fake"},
+                tok or _FakeTok(), object())
 
     monkeypatch.setattr(chat, "_wire_input", lambda no_history: chat.ChatState(
         history_enabled=True, history_loaded=True, input_fn=scripted))
     monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config", lambda *a, **k: None)
-    monkeypatch.setattr(
-        "gmlx.spec.mtp_load.load_vlm_mtp_model",
-        lambda *a, **k: (_Model(), object(), {"model_type": "fake"},
-                         tok or _FakeTok(), object()))
+    monkeypatch.setattr("gmlx.spec.mtp_load.load_vlm_mtp_model", fake_load)
+    monkeypatch.setattr("gmlx.commands.cli._apply_placement",
+                        _fake_placement(vstream.placed))
     monkeypatch.setattr("gmlx.gen.generation.stream_generate_speculative", sstream)
     monkeypatch.setattr(chat, "_vlm_message", fake_vlm_message)
     monkeypatch.setattr("gmlx._vendor.mlx_vlm.prompt_utils.get_chat_template",
@@ -750,6 +793,24 @@ def test_vlm_mtp_text_turns_use_mtp_then_image_falls_back(monkeypatch, tmp_path)
     users = [m for m in msgs if m["role"] == "user"]
     assert (users[0]["n_images"], users[1]["n_images"]) == (0, 0)
     assert users[2]["n_images"] == 1                  # the image turn
+
+
+def test_vlm_mtp_chat_streams_the_text_tower(monkeypatch, tmp_path):
+    from gmlx.stream.expert_streaming import _STREAMING_PREFILL_STEP
+
+    img = tmp_path / "pic.png"
+    img.write_bytes(b"\x89PNG")
+    monkeypatch.delenv("GMLX_NATIVE_FP", raising=False)
+    rc, _s, vstream, sstream, _m = _run_vlm_mtp_chat(
+        monkeypatch, tmp_path, ["hello", f"/image {img}", "what is this", "/exit"],
+        extra_argv=["--stream-experts"])
+    assert rc == 0
+    assert os.environ.get("GMLX_NATIVE_FP") == "wire"
+    # The streaming install manages the wire, so the load sets none.
+    assert vstream.load_kw["wire"] is False
+    assert vstream.placed == [(vstream.model.language_model, True)]
+    assert len(sstream.turns) == 1
+    assert vstream.turns[0]["kw"]["prefill_step_size"] == _STREAMING_PREFILL_STEP
 
 
 def test_vlm_mtp_native_head_text_turns_use_mtp(monkeypatch, tmp_path):
@@ -980,8 +1041,10 @@ def test_image_turn_appends_the_prefill_before_the_thinking_check(
     monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config",
                         lambda *a, **k: None)
     monkeypatch.setattr("gmlx.load.vlm.load_vlm_model",
-                        lambda *a, **k: (object(), {"model_type": "fake"},
+                        lambda *a, **k: (_FakeVlm(), {"model_type": "fake"},
                                          object()))
+    monkeypatch.setattr("gmlx.commands.cli._apply_placement",
+                        _fake_placement([]))
     monkeypatch.setattr(chat, "_vlm_message",
                         lambda model_type, content, role="user", n_images=0,
                         n_audios=0: {"role": role, "content": content})

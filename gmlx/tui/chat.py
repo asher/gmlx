@@ -67,8 +67,8 @@ the terminal it runs in is upgraded:
 With ``--speculative`` the session runs MTP speculative decoding (native-head
 qwen3.5/3.6, or a ``--draft-gguf`` assistant for gemma4): replies stream through
 mlx-vlm's MTP engine over the same persistent cache, for a decode speedup. It's
-the text-only path (no ``--mmproj`` / ``--adapter`` / ``--stream-*``) and samples on
-temperature/top-p/top-k/min-p only.
+for text turns only (with ``--mmproj``, media turns decode without it) and samples
+on temperature/top-p/top-k/min-p only.
 
 Each completed reply prints a one-line ``N tok @ X tok/s`` stat.
 """
@@ -3069,7 +3069,28 @@ def rope_override_from_args(args):
     return from_args(args)
 
 
-def _backend_vlm_mtp(args) -> _ChatBackend:
+def _place_vlm_text_tower(args, model, kv_kwargs) -> None:
+    """The placement of ``gmlx run``: it streams the text tower, and the
+    vision tower stays resident. A streamed tower takes the wider
+    streamed prefill chunk."""
+    import gmlx.load.loadlog as loadlog
+    from gmlx.commands.cli import _apply_placement
+    from gmlx.stream.expert_streaming import _resolve_prefill_step
+
+    lm = getattr(model, "language_model", model)
+    _apply_placement(args, lm)
+    step, defaulted = _resolve_prefill_step(
+        lm, kv_kwargs.get("prefill_step_size"))
+    if defaulted:
+        loadlog.info(
+            f"[prefill] streaming model: chunk size defaults to {step} "
+            "(--prefill-step-size overrides)"
+        )
+    if step is not None:
+        kv_kwargs["prefill_step_size"] = step
+
+
+def _backend_vlm_mtp(args, kv_kwargs) -> _ChatBackend:
     # VLM loaded on mlx-vlm classes + an assistant drafter: text-only turns
     # run through the MTP engine over a persistent text KV cache
     # (model.language_model), while image/audio turns use the plain VLM
@@ -3078,7 +3099,10 @@ def _backend_vlm_mtp(args) -> _ChatBackend:
     import gmlx.load.loadlog as loadlog
     from gmlx.spec.mtp_load import load_vlm_mtp_model
 
+    from gmlx.load.loader import preset_native_fp_wire_env
+
     b = _ChatBackend()
+    preset_native_fp_wire_env(args)
     with loadlog.load_ui(args.verbose, args.gguf):
         b.model, b.drafter, b.config, b.tok, b.processor = load_vlm_mtp_model(
             args.gguf,
@@ -3089,18 +3113,22 @@ def _backend_vlm_mtp(args) -> _ChatBackend:
             zero_copy=not args.no_zero_copy,
             rope_override=rope_override_from_args(args),
             verbose=args.verbose,
+            wire=not getattr(args, "stream_experts", False),
         )
+    _place_vlm_text_tower(args, b.model, kv_kwargs)
     b.model_type = _model_type(b.config)
     _require_chat_template(b.tok)
     b.new_text_cache = lambda: _mtp_make_cache(b.model.language_model)
     return b
 
 
-def _backend_vlm(args) -> _ChatBackend:
+def _backend_vlm(args, kv_kwargs) -> _ChatBackend:
     import gmlx.load.loadlog as loadlog
+    from gmlx.load.loader import preset_native_fp_wire_env
     from gmlx.load.vlm import load_vlm_model
 
     b = _ChatBackend()
+    preset_native_fp_wire_env(args)
     with loadlog.load_ui(args.verbose, args.gguf):
         b.model, b.config, b.processor, *_ = load_vlm_model(
             args.gguf,
@@ -3111,6 +3139,7 @@ def _backend_vlm(args) -> _ChatBackend:
             rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
+    _place_vlm_text_tower(args, b.model, kv_kwargs)
     b.model_type = _model_type(b.config)
     return b
 
@@ -3431,9 +3460,9 @@ def _load_chat_backend(args, kv_kwargs, *, speculative: bool,
         (args.gguf, args.mmproj, getattr(args, "draft_gguf", None)),
         verbose=getattr(args, "verbose", False))
     if vlm_mtp:
-        return _backend_vlm_mtp(args)
+        return _backend_vlm_mtp(args, kv_kwargs)
     if args.mmproj is not None:
-        return _backend_vlm(args)
+        return _backend_vlm(args, kv_kwargs)
     if speculative:
         return _backend_mtp_text(args, kv_kwargs)
     return _backend_plain_text(args, kv_kwargs)
@@ -3535,8 +3564,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         if rc is not None:
             return rc
         # Chat holds the conversation, so its KV room is the serve
-        # context's. The VLM chat has no streamed placement.
-        preload_wire_check(args, depth=None, can_stream=not args.mmproj)
+        # context's.
+        preload_wire_check(args, depth=None)
         _ensure_stream_cb_caps(args)
         from gmlx.serve.cb_phase import install_cb_phase_steps
 
@@ -3574,8 +3603,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             )
             return 2
         if args.mmproj and (
-            args.stream_experts
-            or args.stream_cpu
+            args.stream_cpu
             or args.moe_experts is not None
             or args.moe_expert_mass is not None
             or args.moe_expert_probe
@@ -3583,10 +3611,10 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             or args.moe_layer_shed is not None
         ):
             print(
-                "error: --stream-experts/--stream-cpu/--moe-experts/"
-                "--moe-expert-mass/--moe-expert-probe/--moe-miss-shed/"
-                "--moe-layer-shed are text-only (no VLM "
-                "offload plumbing); drop --mmproj or the offload flags.",
+                "error: --stream-cpu/--moe-experts/--moe-expert-mass/"
+                "--moe-expert-probe/--moe-miss-shed/--moe-layer-shed are "
+                "text-only; drop --mmproj or the offload flags "
+                "(--stream-experts works with --mmproj).",
                 file=sys.stderr,
             )
             return 2

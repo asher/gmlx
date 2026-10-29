@@ -148,7 +148,7 @@ have limits:
 | Combination | Result |
 |-------------|--------|
 | [Speculative decoding](speculative-decoding.md) | Text turns use speculation. Media turns use it on the server, and decode without it in `run` and `chat`. |
-| [`--stream-experts`](streaming.md) | `run` and `serve` stream the language model and keep the vision encoder on the GPU. Chat refuses it, and a served model cannot combine it with speculation. |
+| [`--stream-experts`](streaming.md) | `run`, `chat` and `serve` stream the language model and keep the vision encoder on the GPU. Text turns keep speculation, except on a server. |
 | `--stream-cpu` | The command refuses it, because it would move the vision encoder to the CPU too. |
 | The lossy MoE settings, such as `--moe-experts` | Chat refuses them with `--mmproj`. |
 | `--adapter` | The command refuses it, because a LoRA adapter applies only to text models. |

@@ -1841,6 +1841,9 @@ def _run_vlm(args) -> int:
     audios = [s for s in (args.audio or "").split(",") if s.strip()]
     import gmlx.load.loadlog as loadlog
 
+    from gmlx.load.loader import preset_native_fp_wire_env
+
+    preset_native_fp_wire_env(args)
     with loadlog.load_ui(args.verbose, args.gguf):
         model, config, processor, *_ = load_vlm_model(
             args.gguf,
@@ -2007,6 +2010,9 @@ def _run_vlm_mtp(args) -> int:
         )
     import gmlx.load.loadlog as loadlog
 
+    from gmlx.load.loader import preset_native_fp_wire_env
+
+    preset_native_fp_wire_env(args)
     with loadlog.load_ui(args.verbose, args.gguf):
         model, drafter, _config, tok, _processor = load_vlm_mtp_model(
             args.gguf,
@@ -2017,6 +2023,7 @@ def _run_vlm_mtp(args) -> int:
             zero_copy=not args.no_zero_copy,
             rope_override=rope_override_from_args(args),
             verbose=args.verbose,
+            wire=not getattr(args, "stream_experts", False),
         )
     _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
@@ -2636,7 +2643,6 @@ class _Same(enum.Enum):
 
 
 def preload_wire_check(args, *, depth: int | None,
-                       can_stream: bool = True,
                        depth_without_mtp: int | None | _Same = _Same.DEPTH) -> None:
     """Before the weights load, judge a MoE's resident set against live
     memory (``budget.check_resident_wire``), with the KV room at
@@ -2671,7 +2677,7 @@ def preload_wire_check(args, *, depth: int | None,
     if path:
         stream_tables_for_memory(path, False)
         guard_resident_wire(path, False)
-    if not can_stream or getattr(args, "stream_cpu", False):
+    if getattr(args, "stream_cpu", False):
         return
     if getattr(args, "stream_experts", False):
         if path and os.path.isfile(path):
