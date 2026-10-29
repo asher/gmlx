@@ -62,10 +62,11 @@ dependencies = [
     # The copy's server imports mlx_audio at module top on every serve. It
     # also brings miniaudio and tqdm, which the copy imports.
     "mlx-audio>=0.5.2",
-    # The release the copied mlx-vlm was qualified with; it also excludes
-    # 5.13.0. The old <5.13 ceiling (AutoTokenizer.register() vs mlx-lm's
-    # NewlineTokenizer) no longer reproduces on 5.15.1.
-    "transformers>=5.14.0",
+    # The first release with granite_speech5, which the Granite Speech
+    # companion is ported from and tested against. The old <5.13 ceiling
+    # (AutoTokenizer.register() vs mlx-lm's NewlineTokenizer) no longer
+    # reproduces on 5.15.1.
+    "transformers>=5.16.0",
     "tokenizers",
     "gguf",
     # comment-preserving YAML round-trip for `gmlx sync-models`.

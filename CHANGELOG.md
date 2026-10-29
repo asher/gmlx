@@ -33,6 +33,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Requires mlx-kquant 0.5.7. With it, NVFP4 projections decode closer to
   full precision and join the fused attention and MLP paths.
   `GMLX_KQ_OUT_SCALE=0` turns this off.
+- Requires transformers 5.16.0.
 - Decisions run every pass of a small request in one forward, and Granite
   models read answer scores in float32, so a Granite Switch decision takes
   about a quarter less time. Probabilities shift once in the third or fourth
