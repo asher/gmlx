@@ -1587,8 +1587,8 @@ def test_wrapper_miss_shed_stages_survivors(monkeypatch):
 
 
 def test_wrapper_scores_sink_on_stock_base(monkeypatch):
-    """A base without the mix seam (e.g. minimax-m3's SwiGLUOAI stack)
-    takes (x, indices) only: the wrapper advertises _kq_scores_sink so
+    """A base without the mix seam (an activation the installed kq cannot
+    fuse) takes (x, indices) only: the wrapper advertises _kq_scores_sink so
     the block still hands over its routing weights, consumes them for
     miss-shed, strips them from every forwarded call and mixes shed
     survivors python-side (the block's weights cover the full routed
@@ -1790,7 +1790,6 @@ def test_wrapper_layer_shed_never_sheds_a_split_leaf(monkeypatch, top1):
         return None if np.unique(ids).size > 2 else staged(li, ids)
 
     df.stage = stage
-    df.slot_count = lambda li: 2
     df.can_stage_smaller = lambda li: True
     df.note_split_rule = lambda split, ahead=False: None
     df.has_dead = lambda li: False

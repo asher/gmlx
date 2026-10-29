@@ -391,14 +391,14 @@ def test_a_too_big_verdict_refuses_with_the_cannot_stream_line(cat, monkeypatch,
     assert manage.cmd_pull(["flashy", "--config", str(cfg), "--force"]) == 0
 
 
-def test_vision_on_a_streaming_plan_hints_serve(cat, monkeypatch, capsys):
+def test_vision_on_a_streaming_plan_hints_chat(cat, monkeypatch, capsys):
     cfg, lib, downloads = cat
     _stream_verdict(monkeypatch, "streams")
     assert manage.cmd_pull(["flashy", "--config", str(cfg), "--vision"]) == 0
     out = capsys.readouterr().out
     assert "gmlx pull flashy --vision\n" in out
     assert [d[1] for d in downloads] == ["Model-UD-IQ4_XS.gguf", "mmproj-F16.gguf"]
-    assert f"serve it:  gmlx serve --config {cfg}" in out
+    assert f"run it:  gmlx chat flashy --config {cfg}" in out
 
 
 def test_json_prints_the_verdict_once_with_the_plan_and_never_asks(cat, monkeypatch,

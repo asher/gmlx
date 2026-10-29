@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import collections
 import importlib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -249,9 +250,11 @@ def test_a_turn_that_starts_the_cache_encodes_as_run(monkeypatch, tmp_path):
     assert rc == 0
     first, second = (list(t["prompt"]) for t in stream.turns)
     assert first == encode_prompt(tok, "<s>Hello")
-    # One BOS, and none of the EOS the tokenizer adds.
+    # One BOS, and none of the EOS the tokenizer adds. The later turn is
+    # the conversation's render past the cached history, so its BOS does
+    # not repeat.
     assert first == tok.encode("<s>Hello", add_special_tokens=False)
-    assert second == tok.encode("<s>wo", add_special_tokens=False)
+    assert second == tok.encode("wo", add_special_tokens=False)
 
 
 def test_retry_trims_kv_and_resends_same_content(monkeypatch, tmp_path, capsys):
@@ -563,15 +566,33 @@ class _FakeVlmStream:
         self.turns = []
 
     def __call__(self, model, processor, prompt, *, image=None, audio=None, **kw):
-        self.turns.append({"image": image, "audio": audio, "prompt": prompt})
+        self.turns.append({"image": image, "audio": audio, "prompt": prompt,
+                           "kw": kw})
         for i, w in enumerate(self.reply.split(" ")):
             yield _Chunk(w if i == 0 else " " + w, i + 1, 30.0)
 
 
-def _run_vlm_chat(monkeypatch, tmp_path, lines):
+class _FakeVlm:
+    """A VLM container whose text tower takes the placement."""
+
+    def __init__(self):
+        self.language_model = SimpleNamespace(model_type="fake")
+
+
+def _fake_placement(placed):
+    def place(args, model):
+        # The install's verdict, as install_expert_streaming leaves it.
+        model._kq_streaming = bool(args.stream_experts)
+        placed.append((model, args.stream_experts))
+    return place
+
+
+def _run_vlm_chat(monkeypatch, tmp_path, lines, extra=()):
     pytest.importorskip("gmlx._vendor.mlx_vlm")
     scripted = _Scripted(lines)
     vstream = _FakeVlmStream()
+    vstream.model = _FakeVlm()
+    vstream.placed = []
     msg_calls = []
 
     def fake_vlm_message(model_type, content, role="user", n_images=0, n_audios=0):
@@ -583,8 +604,11 @@ def _run_vlm_chat(monkeypatch, tmp_path, lines):
     monkeypatch.setattr(chat, "_wire_input", lambda no_history: chat.ChatState(
         history_enabled=True, history_loaded=True, input_fn=scripted))
     monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config", lambda *a, **k: None)
-    monkeypatch.setattr("gmlx.load.vlm.load_vlm_model",
-                        lambda *a, **k: (object(), {"model_type": "fake"}, object()))
+    monkeypatch.setattr(
+        "gmlx.load.vlm.load_vlm_model",
+        lambda *a, **k: (vstream.model, {"model_type": "fake"}, object()))
+    monkeypatch.setattr("gmlx.commands.cli._apply_placement",
+                        _fake_placement(vstream.placed))
     monkeypatch.setattr(chat, "_vlm_message", fake_vlm_message)
     monkeypatch.setattr("gmlx._vendor.mlx_vlm.prompt_utils.get_chat_template",
                         lambda processor, msgs, add_generation_prompt=True, **kw: msgs)
@@ -595,7 +619,7 @@ def _run_vlm_chat(monkeypatch, tmp_path, lines):
     gguf.write_bytes(b"GGUF")
     proj = tmp_path / "mmproj.gguf"
     proj.write_bytes(b"GGUF")
-    rc = chat.cmd_chat([str(gguf), "--mmproj", str(proj)])
+    rc = chat.cmd_chat([str(gguf), "--mmproj", str(proj), *extra])
     return rc, scripted, vstream, msg_calls
 
 
@@ -621,6 +645,17 @@ def test_vlm_pins_media_markers_per_turn(monkeypatch, tmp_path):
     assert (users[1]["n_images"], users[1]["n_audios"]) == (0, 1)
 
 
+def test_vlm_turn_arms_the_thinking_budget(monkeypatch, tmp_path):
+    # mlx-vlm's budget criteria acts only with enable_thinking.
+    _rc, _s, vstream, _m = _run_vlm_chat(
+        monkeypatch, tmp_path, ["hi", "/exit"],
+        extra=["--thinking-budget", "0", "--thinking-start-token", "<mm:think>",
+               "--thinking-end-token", "</mm:think>"])
+    kw = vstream.turns[0]["kw"]
+    assert kw["thinking_budget"] == 0 and kw["enable_thinking"] is True
+    assert kw["thinking_start_token"] == "<mm:think>"
+
+
 def test_vlm_dragged_in_path_stages_without_a_turn(monkeypatch, tmp_path):
     img = tmp_path / "drag.png"
     img.write_bytes(b"\x89PNG")
@@ -630,6 +665,21 @@ def test_vlm_dragged_in_path_stages_without_a_turn(monkeypatch, tmp_path):
     assert len(vstream.turns) == 1                        # the drag line isn't a turn
     assert vstream.turns[0]["image"] == [str(img)]
     assert [m for m in msgs if m["role"] == "user"][0]["n_images"] == 1
+
+
+def test_vlm_chat_streams_the_text_tower(monkeypatch, tmp_path):
+    from gmlx.stream.expert_streaming import _STREAMING_PREFILL_STEP
+
+    img = tmp_path / "pic.png"
+    img.write_bytes(b"\x89PNG")
+    rc, _s, vstream, _m = _run_vlm_chat(
+        monkeypatch, tmp_path, [f"/image {img}", "what is this", "/exit"],
+        extra=["--stream-experts"])
+    assert rc == 0
+    # The text tower streams, and the vision tower is never placed.
+    assert vstream.placed == [(vstream.model.language_model, True)]
+    assert vstream.turns[0]["image"] == [str(img)]
+    assert vstream.turns[0]["kw"]["prefill_step_size"] == _STREAMING_PREFILL_STEP
 
 
 # -------------- Tier 1 - loop driver (VLM x MTP: text-only turns) --------------
@@ -650,7 +700,7 @@ class _FakeSpecStream:
 
 
 def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False,
-                      extra_argv=()):
+                      extra_argv=(), tok=None):
     """A --mmproj base with a drafter: text-only turns route through MTP, media
     turns through the plain VLM stream - all in one scripted session.
 
@@ -659,6 +709,9 @@ def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False,
     pytest.importorskip("gmlx._vendor.mlx_vlm")
     scripted = _Scripted(lines)
     vstream = _FakeVlmStream()
+    vstream.model = _FakeVlm()
+    vstream.placed = []
+    vstream.load_kw = {}
     sstream = _FakeSpecStream()
     msg_calls = []
     caches = []
@@ -674,16 +727,17 @@ def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False,
         caches.append(c)
         return c
 
-    class _Model:
-        language_model = object()
+    def fake_load(*a, **k):
+        vstream.load_kw.update(k)
+        return (vstream.model, object(), {"model_type": "fake"},
+                tok or _FakeTok(), object())
 
     monkeypatch.setattr(chat, "_wire_input", lambda no_history: chat.ChatState(
         history_enabled=True, history_loaded=True, input_fn=scripted))
     monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config", lambda *a, **k: None)
-    monkeypatch.setattr(
-        "gmlx.spec.mtp_load.load_vlm_mtp_model",
-        lambda *a, **k: (_Model(), object(), {"model_type": "fake"}, _FakeTok(),
-                         object()))
+    monkeypatch.setattr("gmlx.spec.mtp_load.load_vlm_mtp_model", fake_load)
+    monkeypatch.setattr("gmlx.commands.cli._apply_placement",
+                        _fake_placement(vstream.placed))
     monkeypatch.setattr("gmlx.gen.generation.stream_generate_speculative", sstream)
     monkeypatch.setattr(chat, "_vlm_message", fake_vlm_message)
     monkeypatch.setattr("gmlx._vendor.mlx_vlm.prompt_utils.get_chat_template",
@@ -737,6 +791,22 @@ def test_vlm_mtp_text_turns_use_mtp_then_image_falls_back(monkeypatch, tmp_path)
     assert users[2]["n_images"] == 1                  # the image turn
 
 
+def test_vlm_mtp_chat_streams_the_text_tower(monkeypatch, tmp_path):
+    from gmlx.stream.expert_streaming import _STREAMING_PREFILL_STEP
+
+    img = tmp_path / "pic.png"
+    img.write_bytes(b"\x89PNG")
+    rc, _s, vstream, sstream, _m = _run_vlm_mtp_chat(
+        monkeypatch, tmp_path, ["hello", f"/image {img}", "what is this", "/exit"],
+        extra_argv=["--stream-experts"])
+    assert rc == 0
+    # The streaming install manages the wire, so the load sets none.
+    assert vstream.load_kw["wire"] is False
+    assert vstream.placed == [(vstream.model.language_model, True)]
+    assert len(sstream.turns) == 1
+    assert vstream.turns[0]["kw"]["prefill_step_size"] == _STREAMING_PREFILL_STEP
+
+
 def test_vlm_mtp_native_head_text_turns_use_mtp(monkeypatch, tmp_path):
     # A qwen3.5/3.6 VLM (native head, no --draft-gguf): text-only turns still take
     # the MTP engine; with no media the plain VLM stream is never touched.
@@ -746,6 +816,250 @@ def test_vlm_mtp_native_head_text_turns_use_mtp(monkeypatch, tmp_path):
     assert len(sstream.turns) == 2
     assert sstream.turns[0]["cache_id"] == sstream.turns[1]["cache_id"]
     assert len(vstream.turns) == 0
+
+
+# ------------- Tier 1 - loop driver (multi-turn render, thinking) -------------
+
+_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+_M31 = _FIXTURES / "minimax_m31_turns.jinja"
+_M31_SPECIALS = ("]~!b[", "]~b]", "[e~[", "<mm:think>", "</mm:think>",
+                 "]<]minimax[>[")
+_M31_TURN = "]~b]user\n{}[e~[\n]~b]ai\n"
+# Qwen2.5's shape: a system block the template writes when the
+# conversation has none.
+_CHATML_DEFAULT_SYSTEM = (
+    "{%- if messages[0]['role'] == 'system' %}"
+    "{{- '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' }}"
+    "{%- else %}"
+    "{{- '<|im_start|>system\\nYou are a helpful assistant.<|im_end|>\\n' }}"
+    "{%- endif %}"
+    "{%- for m in messages %}{%- if m['role'] != 'system' %}"
+    "{{- '<|im_start|>' + m['role'] + '\\n' + m['content'] + '<|im_end|>\\n' }}"
+    "{%- endif %}{%- endfor %}"
+    "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\\n' }}{%- endif %}")
+
+
+def _template_tok(template: str, specials=(), bos="<s>"):
+    """A byte-level GGUF tokenizer whose chat template is ``template``, with
+    the template's control strings as single tokens."""
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
+    from tokenizers import pre_tokenizers
+
+    from gmlx.load.tokenizer import load_tokenizer_from_gguf
+
+    head = [bos, "</s>", "<pad>", *specials]
+    tokens = head + sorted(pre_tokenizers.ByteLevel.alphabet()) + ["He"]
+    backend = load_tokenizer_from_gguf({
+        "general.architecture": "qwen2",
+        "tokenizer.ggml.model": "gpt2",
+        "tokenizer.ggml.pre": "qwen2",
+        "tokenizer.ggml.tokens": tokens,
+        "tokenizer.ggml.merges": ["H e"],
+        "tokenizer.ggml.token_type": [3] * len(head)
+        + [1] * (len(tokens) - len(head)),
+        "tokenizer.ggml.bos_token_id": 0,
+        "tokenizer.ggml.eos_token_id": 1,
+        "tokenizer.ggml.padding_token_id": 2,
+        "tokenizer.ggml.add_bos_token": False,
+    }, "qwen2")
+    backend.chat_template = template
+    return TokenizerWrapper(backend)
+
+
+def _turn_texts(monkeypatch, tmp_path, tok, lines=("hi", "again", "more"),
+                **kw):
+    """Run the scripted chat on ``tok``; each turn's prompt ids and text."""
+    rc, _s, stream = _run_text_chat(
+        monkeypatch, tmp_path, list(lines),
+        load_model=lambda *a, **k: (object(), {}, tok), **kw)
+    assert rc == 0
+    ids = [list(t["prompt"]) for t in stream.turns]
+    return ids, [tok.decode(i) for i in ids]
+
+
+@pytest.mark.parametrize("template, specials, bos, header, turn", [
+    (_M31.read_text(), _M31_SPECIALS, "<s>", "]~!b[]~b]system", _M31_TURN),
+    ((_FIXTURES / "gemma4_template.jinja").read_text(),
+     ("<|turn>", "<turn|>"), "<bos>", "<bos>",
+     "<|turn>user\n{}<turn|>\n<|turn>model\n"),
+    (_CHATML_DEFAULT_SYSTEM, ("<|im_start|>", "<|im_end|>"), "<s>",
+     "You are a helpful assistant.",
+     "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"),
+], ids=["minimax-m31", "gemma4", "chatml-default-system"])
+def test_later_turns_do_not_repeat_the_template_header(
+        monkeypatch, tmp_path, template, specials, bos, header, turn):
+    """A template that writes a header on every render (M3.1's system and
+    developer blocks, Gemma 4's BOS, a built-in system prompt) renders it
+    once: each later turn is the conversation's render past the cached
+    history."""
+    tok = _template_tok(template, specials, bos)
+    _ids, texts = _turn_texts(monkeypatch, tmp_path, tok)
+    assert texts[0].count(header) == 1
+    assert texts[1:] == [turn.format("again"), turn.format("more")]
+
+
+@pytest.mark.parametrize("name", ["qwen3_template.jinja",
+                                  "qwen35_template.jinja",
+                                  "gptoss_template.jinja"])
+def test_templates_that_rerender_history_keep_the_per_turn_render(
+        monkeypatch, tmp_path, caplog, name):
+    """Qwen3 and Qwen3.5 drop the empty think block from the last reply,
+    and gpt-oss turns its <|return|> into <|end|>, once a turn follows. The
+    history render is then no prefix, so each later turn renders alone, as
+    before, and the fallback is logged once."""
+    import logging
+
+    tok = _template_tok((_FIXTURES / name).read_text())
+    with caplog.at_level(logging.INFO, logger="gmlx.tui.chat"):
+        ids, _texts = _turn_texts(monkeypatch, tmp_path, tok)
+    for user, got in zip(("again", "more"), ids[1:]):
+        alone = tok.apply_chat_template([{"role": "user", "content": user}],
+                                        tokenize=False,
+                                        add_generation_prompt=True)
+        assert got == tok.encode(alone, add_special_tokens=False)
+    assert sum("render on their own" in r.getMessage()
+               for r in caplog.records) == 1
+
+
+def test_tool_result_turn_renders_once():
+    """An M3.1 tool call, its result, then a user turn: each step is the
+    render past the history, so the tool result renders once and the
+    header never repeats. The result alone does not render at all: the
+    template refuses a tool message with no call before it."""
+    tok = _template_tok(_M31.read_text(), _M31_SPECIALS)
+
+    def render(msgs, gen):
+        return tok.apply_chat_template(msgs, tokenize=False,
+                                       add_generation_prompt=gen)
+
+    call = {"role": "assistant", "content": "", "tool_calls": [{
+        "type": "function",
+        "function": {"name": "weather", "arguments": {"city": "Paris"}}}]}
+    result = {"role": "tool", "content": "sunny"}
+    history = [{"role": "user", "content": "Paris?"}, call]
+    assert chat._continuation(render, history, [result]) == \
+        "]~b]tool\n<response>sunny</response>[e~[\n]~b]ai\n"
+    with pytest.raises(Exception, match="no previous assistant"):
+        render([result], True)
+    history += [result, {"role": "assistant", "content": "It is sunny."}]
+    assert chat._continuation(
+        render, history, [{"role": "user", "content": "thanks"}]) == \
+        _M31_TURN.format("thanks")
+
+
+_GEMMA4 = _FIXTURES / "gemma4_template.jinja"
+
+
+def test_slash_thinking_mid_chat_reaches_the_gemma4_header(monkeypatch, tmp_path):
+    """Gemma 4 writes enable_thinking into its first system turn. A turn
+    whose kwargs differ from the last turn's renders on its own, header
+    included, so the switch reaches the model; the turn after it is the
+    render past the history again."""
+    tok = _template_tok(_GEMMA4.read_text(), ("<|turn>", "<turn|>", "<|think|>"),
+                        "<bos>")
+    _ids, texts = _turn_texts(
+        monkeypatch, tmp_path, tok, ("hi", "/thinking on", "again", "more"),
+        extra_argv=["--chat-template", str(_GEMMA4)])
+    alone = tok.apply_chat_template([{"role": "user", "content": "again"}],
+                                    tokenize=False, add_generation_prompt=True,
+                                    enable_thinking=True)
+    assert "<|think|>" in alone
+    assert texts[1] == alone
+    assert texts[2] == "<|turn>user\nmore<turn|>\n<|turn>model\n"
+
+
+def test_changed_effort_reaches_the_minimax_m31_header():
+    """M3.1 writes reasoning_effort into its system header, so a turn
+    rendered under a different effort than the last one carries the
+    header with the new effort."""
+    tok = _template_tok(_M31.read_text(), _M31_SPECIALS)
+    state = chat.ChatState(transcript=[{
+        "user": {"content": "hi"}, "assistant": {"content": "Hello there"},
+        "render_kwargs": {"reasoning_effort": "low"}}])
+    turn = [{"role": "user", "content": "again"}]
+    same = chat._render_turn(tok, state, turn, False,
+                             {"reasoning_effort": "low"})
+    assert same == _M31_TURN.format("again")
+    changed = chat._render_turn(tok, state, turn, False,
+                                {"reasoning_effort": "high"})
+    assert changed.startswith("]~!b[]~b]system")
+    assert "<effort>high</effort>" in changed
+
+
+def _spy_stream_reply(monkeypatch):
+    seen = []
+    real = chat._stream_reply
+
+    def spy(gen, state, **kw):
+        seen.append(kw)
+        return real(gen, state, **kw)
+
+    monkeypatch.setattr(chat, "_stream_reply", spy)
+    return seen
+
+
+def test_thinking_on_opens_the_block_on_adaptive_minimax(monkeypatch, tmp_path):
+    """--thinking on with M3.1: each turn's prompt ends in the bare
+    <mm:think> token, and the display filter starts in reasoning."""
+    tok = _template_tok(_M31.read_text(), _M31_SPECIALS)
+    seen = _spy_stream_reply(monkeypatch)
+    ids, texts = _turn_texts(
+        monkeypatch, tmp_path, tok, ("hi", "again"),
+        reply="weighing it</mm:think>Hello there",
+        extra_argv=["--thinking", "on", "--chat-template", str(_M31)])
+    (opener,) = tok.encode("<mm:think>", add_special_tokens=False)
+    assert ids[0][-1] == opener
+    assert texts[0].endswith("]~b]ai\n<mm:think>")
+    assert texts[1] == _M31_TURN.format("again") + "<mm:think>"
+    assert [kw["start_in_thinking"] for kw in seen] == [True, True]
+
+
+def test_image_turn_appends_the_prefill_before_the_thinking_check(
+        monkeypatch, tmp_path):
+    pytest.importorskip("gmlx._vendor.mlx_vlm")
+    import gmlx.gen.thinking_budget as tb
+
+    rendered = "]~b]user\n]<]image[>[what[e~[\n]~b]ai\n"
+    checked = []
+    real_check = tb.prompt_opens_thinking
+
+    def check(prompt, *a, **k):
+        checked.append(prompt)
+        return real_check(prompt, *a, **k)
+
+    vstream = _FakeVlmStream()
+    seen = _spy_stream_reply(monkeypatch)
+    monkeypatch.setattr(chat, "_wire_input", lambda no_history: chat.ChatState(
+        history_enabled=True, history_loaded=True,
+        input_fn=_Scripted([f"/image {tmp_path / 'pic.png'}", "what"])))
+    monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config",
+                        lambda *a, **k: None)
+    monkeypatch.setattr("gmlx.load.vlm.load_vlm_model",
+                        lambda *a, **k: (_FakeVlm(), {"model_type": "fake"},
+                                         object()))
+    monkeypatch.setattr("gmlx.commands.cli._apply_placement",
+                        _fake_placement([]))
+    monkeypatch.setattr(chat, "_vlm_message",
+                        lambda model_type, content, role="user", n_images=0,
+                        n_audios=0: {"role": role, "content": content})
+    monkeypatch.setattr("gmlx._vendor.mlx_vlm.prompt_utils.get_chat_template",
+                        lambda processor, msgs, add_generation_prompt=True,
+                        **kw: rendered)
+    monkeypatch.setattr(tb, "prompt_opens_thinking", check)
+    monkeypatch.setattr(
+        importlib.import_module("gmlx._vendor.mlx_vlm.generate"),
+        "stream_generate", vstream)
+    (tmp_path / "pic.png").write_bytes(b"\x89PNG")
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"GGUF")
+    proj = tmp_path / "mmproj.gguf"
+    proj.write_bytes(b"GGUF")
+    rc = chat.cmd_chat([str(gguf), "--mmproj", str(proj), "--thinking", "on",
+                        "--chat-template", str(_M31)])
+    assert rc == 0
+    assert vstream.turns[0]["prompt"] == rendered + "<mm:think>"
+    assert rendered + "<mm:think>" in checked
+    assert seen[0]["start_in_thinking"] is True
 
 
 # ------------------ Tier 2 - prompt_toolkit session harness ------------------
@@ -1031,6 +1345,34 @@ def test_resume_flag_picks_latest_for_model(monkeypatch, tmp_path, capsys):
     assert msgs[0]["content"] == "before" and msgs[-1]["content"] == "follow up"
 
 
+@pytest.mark.parametrize("kv_cls", [_KV, _FrozenKV], ids=["trimmable", "frozen"])
+@pytest.mark.parametrize("verb", ["/undo", "/retry"])
+def test_rewinding_the_first_turn_after_resume_replays_the_history(
+        monkeypatch, tmp_path, kv_cls, verb):
+    """The first turn after --resume prefills the restored history with it.
+    Rewinding that turn empties the cache, so the history replays again
+    with the next message instead of being lost."""
+    import gmlx.tui.sessions as ss
+
+    gguf = tmp_path / "model.gguf"
+    ss.save_session({
+        "model": {"path": str(gguf)},
+        "messages": [{"role": "user", "content": "old question"},
+                     {"role": "assistant", "content": "old answer"}],
+    }, "prior")
+    lines = ["new q", verb] + (["next q"] if verb == "/undo" else [])
+    rc, _s, stream, _caches = _run_text_chat_kv(
+        monkeypatch, tmp_path, lines,
+        extra_argv=["--resume", "prior", "--no-autosave"], kv_cls=kv_cls)
+    assert rc == 0
+    history = [{"role": "user", "content": "old question"},
+               {"role": "assistant", "content": "old answer"}]
+    sent = "next q" if verb == "/undo" else "new q"
+    assert len(stream.turns) == 2
+    assert stream.turns[1]["prompt"]["messages"] == [
+        *history, {"role": "user", "content": sent}]
+
+
 def test_resume_model_mismatch_refuses(monkeypatch, tmp_path, capsys):
     import gmlx.tui.sessions as ss
 
@@ -1149,7 +1491,8 @@ def test_vlm_mtp_text_turns_apply_penalties_and_bias(monkeypatch, tmp_path):
     assert "xtc_probability" not in first      # ignored in VLM mode
 
 
-def _run_text_mtp_chat(monkeypatch, tmp_path, lines, *, extra_argv=()):
+def _run_text_mtp_chat(monkeypatch, tmp_path, lines, *, extra_argv=(),
+                       tok=None):
     scripted = _Scripted(lines)
     sstream = _FakeSpecStream()
 
@@ -1169,7 +1512,8 @@ def _run_text_mtp_chat(monkeypatch, tmp_path, lines, *, extra_argv=()):
                         lambda args, model, config: None)
     monkeypatch.setattr(
         "gmlx.spec.mtp_load.load_mtp_model",
-        lambda *a, **k: (_Model(), drafter, {"model_type": "fake"}, _FakeTok()))
+        lambda *a, **k: (_Model(), drafter, {"model_type": "fake"},
+                         tok or _FakeTok()))
     monkeypatch.setattr("gmlx.cache.kv_cache.make_prompt_cache",
                         lambda lm: ["mtp-cache"])
     monkeypatch.setattr("gmlx.gen.generation.stream_generate_speculative",
@@ -1194,3 +1538,23 @@ def test_text_mtp_turns_apply_sampling_settings(monkeypatch, tmp_path, capsys):
     assert first["logit_bias"] == {7: -5}
     assert first["xtc_probability"] == 0.0
     assert second["xtc_probability"] == 0.5
+
+
+@pytest.mark.parametrize("vlm", [False, True], ids=["draft", "vlm-mtp"])
+def test_mtp_turns_render_past_the_history(monkeypatch, tmp_path, vlm):
+    """The MTP text paths render later turns like the plain path: the M3.1
+    header once, and the --thinking on opener on every turn."""
+    tok = _template_tok(_M31.read_text(), _M31_SPECIALS)
+    argv = ["--thinking", "on", "--chat-template", str(_M31)]
+    lines = ["hi", "again", "more"]
+    if vlm:
+        _rc, _s, _v, sstream, _m = _run_vlm_mtp_chat(
+            monkeypatch, tmp_path, lines, native=True, extra_argv=argv, tok=tok)
+    else:
+        _rc, sstream = _run_text_mtp_chat(
+            monkeypatch, tmp_path, lines, extra_argv=argv, tok=tok)
+    texts = [tok.decode(list(t["prompt"])) for t in sstream.turns]
+    assert texts[0].count("]~!b[") == 1
+    assert texts[0].endswith("]~b]ai\n<mm:think>")
+    assert texts[1:] == [_M31_TURN.format(u) + "<mm:think>"
+                         for u in ("again", "more")]

@@ -17,7 +17,8 @@ per-head QK-norm, partial RoPE (rotary_dim < head_dim), SwiGLU-OAI activation
 (clamped gate/up with an (up+1) term), a shared expert + routed_scaling_factor
 in the MoE, and the first few layers being dense MLPs instead of MoE.
 
-MiniMax Sparse Attention (MSA): on every non-dense-lead layer a lightweight
+MiniMax Sparse Attention (MSA): on every layer that carries indexer tensors
+(the MoE layers on M3, every layer on M3.1, llama.cpp PR #31192) a lightweight
 indexer (one head per GQA group) scores the visible causal context, the
 scores are max-pooled into ``sparse_block_size`` (128) token key blocks, and
 the top ``sparse_topk_blocks`` (16) blocks - the query's local block always
@@ -39,6 +40,7 @@ fallback. ``GMLX_MSA_DISABLE=1`` forces dense for A/B comparison.
 """
 
 import os
+import re
 import sys
 from dataclasses import dataclass
 from typing import List, Optional
@@ -92,9 +94,10 @@ class ModelArgs(BaseModelArgs):
     # Per-layer MLP dispatch: "sparse" -> MoE block, "dense" -> dense MLP.
     mlp_layer_types: Optional[List[str]] = None
     # MiniMax Sparse Attention. Enabled by config synth when the GGUF (or a
-    # sidecar) carries the indexer tensors; the MoE layers then build the
-    # indexer branch (dense-lead layers never carry one).
+    # sidecar) carries the indexer tensors. msa_layers lists the layers that
+    # carry them (every layer on M3.1); None means the MoE layers (M3).
     use_sparse_attention: bool = False
+    msa_layers: Optional[List[int]] = None
     sparse_index_dim: int = 128
     sparse_num_index_heads: int = 4
     sparse_topk_blocks: int = 16
@@ -159,7 +162,7 @@ class MiniMaxM3MLP(nn.Module):
 class MSAKVCache(KVCache):
     """KVCache extended with the MSA indexer key stream.
 
-    ``ik`` holds one f32 vector of ``sparse_index_dim`` per cached token
+    ``ik`` holds one fp16 vector of ``sparse_index_dim`` per cached token
     (single indexer key head, shared by all groups), appended in lockstep with
     K/V through ``update_and_fetch_msa`` so ``offset`` covers all three
     streams; ``trim`` therefore trims them together. Quantizing would drop the
@@ -231,8 +234,44 @@ def _msa_disabled() -> bool:
     return os.environ.get("GMLX_MSA_DISABLE", "") == "1"
 
 
+def _f32_scores() -> bool:
+    return os.environ.get("GMLX_MSA_F32_SCORES", "0") == "1"
+
+
+_SKINNY: dict = {}
+
+
+def _skinny_f32() -> bool:
+    """Whether kq.skinny_matmul takes an f32 query against fp16 keys."""
+    ok = _SKINNY.get("f32_f16")
+    if ok is None:
+        try:
+            import mlx_kquant as kq
+
+            from gmlx.eval_guard import guard
+
+            out = kq.skinny_matmul(mx.zeros((1, 4, 1, 128), mx.float32),
+                                   mx.zeros((8, 128), mx.float16))
+            guard.eval(out, site="msa-skinny-probe", owner="scratch")
+            ok = out.dtype == mx.float32
+        except Exception:  # noqa: BLE001
+            # Any refusal means an older kq: fall back to the cast matmul.
+            ok = False
+        _SKINNY["f32_f16"] = ok
+    return ok
+
+
+def _is_msa_layer(args: "ModelArgs", layer_idx: int, is_sparse: bool) -> bool:
+    """Whether layer ``layer_idx`` carries the MSA indexer."""
+    if not args.use_sparse_attention:
+        return False
+    if args.msa_layers is None:
+        return is_sparse
+    return layer_idx in args.msa_layers
+
+
 class MiniMaxM3Attention(nn.Module):
-    def __init__(self, args: ModelArgs, is_sparse: bool = False):
+    def __init__(self, args: ModelArgs, is_sparse: bool = False, layer_idx: int = 0):
         super().__init__()
         self.num_attention_heads = args.num_attention_heads
         self.num_key_value_heads = args.num_key_value_heads
@@ -258,8 +297,8 @@ class MiniMaxM3Attention(nn.Module):
 
         self.rope = nn.RoPE(args.rotary_dim, traditional=False, base=args.rope_theta)
 
-        # MSA indexer branch (MoE layers only; dense-lead layers carry none).
-        self.msa = args.use_sparse_attention and is_sparse and not _msa_disabled()
+        # MSA indexer branch, on the layers that carry indexer tensors.
+        self.msa = _is_msa_layer(args, layer_idx, is_sparse) and not _msa_disabled()
         if self.msa:
             self.idx_dim = args.sparse_index_dim
             self.n_idx_heads = args.sparse_num_index_heads
@@ -330,14 +369,15 @@ class MiniMaxM3Attention(nn.Module):
         B, _, L, D = queries.shape
         offset = cache.offset  # before this chunk lands
 
-        # Indexer branch: project, per-head norm, partial RoPE, cache. The
-        # whole branch runs f32 (matching the reference's F32 indexer ops).
+        # Indexer branch: project, per-head norm and partial RoPE in f32,
+        # then fp16 for the key cache, as llama.cpp stores its indexer cache.
+        # The query stays f32; _scores picks the score precision.
         iq = self.index_q_proj(x).reshape(B, L, self.n_idx_heads, self.idx_dim)
         ik = self.index_k_proj(x).reshape(B, L, 1, self.idx_dim)
         iq = self.index_q_norm(iq).transpose(0, 2, 1, 3).astype(mx.float32)
         ik = self.index_k_norm(ik).transpose(0, 2, 1, 3).astype(mx.float32)
         iq = self.rope(iq, offset=offset)
-        ik = self.rope(ik, offset=offset)
+        ik = self.rope(ik, offset=offset).astype(mx.float16)
 
         queries = self.rope(queries, offset=offset)
         keys = self.rope(keys, offset=offset)
@@ -359,11 +399,10 @@ class MiniMaxM3Attention(nn.Module):
         return self.o_proj(out)
 
     def _dense_sdpa(self, queries, K, V, offset, L, S):
-        mask = None
-        if L > 1:
-            mask = self._causal(offset, L, S).astype(queries.dtype)[None, None]
+        # S == offset + L, so the kernel's bottom-right causal alignment is
+        # the offset alignment.
         return mx.fast.scaled_dot_product_attention(
-            queries, K, V, scale=self.scale, mask=mask
+            queries, K, V, scale=self.scale, mask="causal" if L > 1 else None
         )
 
     @staticmethod
@@ -402,6 +441,25 @@ class MiniMaxM3Attention(nn.Module):
         k = self.topk_blocks
         return mx.argpartition(-bs, kth=k - 1, axis=-1)[..., :k]
 
+    def _scores(self, iq, IK, IKt32=None):
+        """Indexer scores ``iq @ IK^T`` for an f32 query and the fp16 key
+        cache. By default both operands are fp16 and the scores round to
+        fp16. GMLX_MSA_F32_SCORES=1 keeps them f32, as llama.cpp does: decode
+        through kq.skinny_matmul when it takes an f32 query against fp16
+        keys, else against an f32 copy of the keys made every step; prefill
+        against ``IKt32``, the keys cast to f32 once per call (a GEMM, so
+        TF32 precision on M5 GPUs)."""
+        if not _f32_scores():
+            return mx.matmul(iq.astype(IK.dtype), IK.swapaxes(-1, -2))
+        if IKt32 is not None:
+            return mx.matmul(iq, IKt32)
+        B, H, L, d = iq.shape
+        if B == 1 and L <= 16 and _skinny_f32():
+            import mlx_kquant as kq
+
+            return kq.skinny_matmul(iq, IK.reshape(-1, d))
+        return mx.matmul(iq, IK.swapaxes(-1, -2).astype(mx.float32))
+
     def _msa_decode(self, queries, K, V, IK, iq, S, nblk):
         """Single-token step: batched top-k + gather, one grouped-GQA SDPA."""
         B = queries.shape[0]
@@ -410,7 +468,7 @@ class MiniMaxM3Attention(nn.Module):
         gq = self.num_attention_heads // Hkv
 
         # Scores [B, Hkv, 1, S]: every cached key is visible at decode.
-        sc = mx.matmul(iq, IK.swapaxes(-1, -2))
+        sc = self._scores(iq, IK)
         idx = self._block_select(sc, mx.array([S - 1]), nblk)  # [B, Hkv, 1, k]
 
         # Expand blocks to token rows; rows past S are gathered clipped and
@@ -438,11 +496,21 @@ class MiniMaxM3Attention(nn.Module):
         cache with non-selected blocks -inf'd out (correctness-first, mirrors
         llama.cpp's batch regime). Queries are tiled to bound the transient
         f32 score/mask buffers at depth."""
+        # Past this depth, gathering each query's selected rows beats dense
+        # masked attention over the whole cache (6x per tile at 128k).
+        if S > int(os.environ.get("GMLX_MSA_GATHER_MIN", "16384")):
+            return self._msa_prefill_gather(
+                queries, K, V, IK, iq, offset, L, S, nblk)
         B = queries.shape[0]
         blk = self.block_size
         Hkv = self.num_key_value_heads
         gq = self.num_attention_heads // Hkv
         tile = int(os.environ.get("GMLX_MSA_PREFILL_TILE", "2048"))
+        # Each tile holds [tile, nblk * blk] masks; Metal kernels index with
+        # int32, so keep them under 2^31 elements (llama.cpp PR #31192).
+        max_elems = int(os.environ.get("GMLX_MSA_MAX_ELEMS", str(2**31 - 1)))
+        tile = max(1, min(tile, max_elems // (nblk * blk)))
+        IKt32 = IK.swapaxes(-1, -2).astype(mx.float32) if _f32_scores() else None
 
         outs = []
         for t0 in range(0, L, tile):
@@ -454,7 +522,7 @@ class MiniMaxM3Attention(nn.Module):
             group_outs = []
             for g in range(Hkv):
                 # Scores for this group [B, 1, Lt, S] f32 (+ causal).
-                sc = mx.matmul(iq[:, g : g + 1, t0:t1], IK.swapaxes(-1, -2))
+                sc = self._scores(iq[:, g : g + 1, t0:t1], IK, IKt32)
                 sc = sc + causal[None, None]
                 idx = self._block_select(sc, q_pos, nblk)  # [B, 1, Lt, k]
 
@@ -480,6 +548,74 @@ class MiniMaxM3Attention(nn.Module):
             outs.append(mx.concatenate(group_outs, axis=1))
         return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
 
+    def _msa_prefill_gather(self, queries, K, V, IK, iq, offset, L, S, nblk):
+        """Chunk of L queries: per query, gather its topk*blk selected K/V
+        rows and attend over those alone. Each (query, group) is one SDPA
+        batch whose gq heads are query rows, so a gathered row is read once.
+
+        Selection needs no token causal mask: blocks before the query's own
+        are fully visible, its own block is force-included and later blocks
+        are excluded at block level. The token mask applies to the gathered
+        rows only."""
+        B, H, _, D = queries.shape
+        blk, k = self.block_size, self.topk_blocks
+        Hkv = self.num_key_value_heads
+        gq = H // Hkv
+        R = k * blk
+        nfull = S // blk
+        chunk = int(os.environ.get("GMLX_MSA_GATHER_CHUNK", "256"))
+        max_elems = int(os.environ.get("GMLX_MSA_MAX_ELEMS", str(2**31 - 1)))
+        # Both the scores and the gathered rows stay under int32 indexing.
+        chunk = max(1, min(chunk, max_elems // (B * Hkv * nblk * blk),
+                           max_elems // (B * Hkv * R * D)))
+        blk_idx = mx.arange(nblk)
+        # A flat row index gathers fastest, even with the copy the reshape
+        # makes of a cache slice past its fill.
+        Kf = K.reshape(B * Hkv * S, D)
+        Vf = V.reshape(B * Hkv * S, D)
+        row0 = (mx.arange(B * Hkv) * S).reshape(B, 1, Hkv, 1)
+        IKt32 = IK.swapaxes(-1, -2).astype(mx.float32) if _f32_scores() else None
+
+        outs = []
+        for c0 in range(0, L, chunk):
+            c1 = min(c0 + chunk, L)
+            C = c1 - c0
+            q_pos = mx.arange(offset + c0, offset + c1)
+            sc = self._scores(iq[:, :, c0:c1], IK, IKt32)   # [B, Hkv, C, S]
+            bs = sc[..., : nfull * blk].reshape(B, Hkv, C, nfull, blk)
+            bs = bs.max(axis=-1)
+            if nfull < nblk:
+                # The partial tail block is some query's own block (forced)
+                # or a later block (excluded): its score is never read.
+                bs = mx.pad(bs, [(0, 0)] * 3 + [(0, 1)])
+            bs = bs.astype(mx.float32)
+            own = (q_pos // blk)[:, None]
+            later = blk_idx[None] > own
+            local = (blk_idx[None] <= own) & (
+                blk_idx[None] > own - self.local_blocks)
+            bs = mx.where(local, 1e30, mx.where(later, -float("inf"), bs))
+            idx = mx.argpartition(-bs, kth=k - 1, axis=-1)[..., :k]
+            tok = (idx * blk)[..., None] + mx.arange(blk)
+            tok = tok.reshape(B, Hkv, C, R).swapaxes(1, 2)  # [B, C, Hkv, R]
+            tmask = mx.where(tok <= q_pos[:, None, None], 0.0, -float("inf"))
+            rows = mx.minimum(tok, S - 1) + row0
+            N = B * C * Hkv
+            Kg = Kf[rows].reshape(N, 1, R, D)
+            Vg = Vf[rows].reshape(N, 1, R, D)
+            qc = queries[:, :, c0:c1].swapaxes(1, 2)        # [B, C, H, D]
+            qc = qc.reshape(N, 1, gq, D)
+            mask = tmask.reshape(N, 1, 1, R).astype(queries.dtype)
+            o = mx.fast.scaled_dot_product_attention(
+                qc, Kg, Vg, scale=self.scale, mask=mask)
+            o = o.reshape(B, C, H, D).swapaxes(1, 2)        # [B, H, C, D]
+            # Gathered rows stay live until their command buffer completes,
+            # so evaluate per chunk to bound them.
+            mx.eval(o)
+            outs.append(o)
+        return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
+
+
+_LAYER_IDX = re.compile(r"layers\.(\d+)\.self_attn\.index_")
 
 _MOE_MIX_SCORES = os.environ.get("GMLX_M3_MOE_MIX", "1") != "0"
 
@@ -524,6 +660,10 @@ class MiniMaxM3SparseMoeBlock(nn.Module):
             y = self.switch_mlp(x, inds)
         if y.ndim == weights.ndim + 1:
             y = (y * weights[..., None]).sum(axis=-2)
+        elif getattr(self.switch_mlp, "_kq_shexp_mod", None) is not None:
+            # mixed return of the shared-expert fold: it already holds the
+            # shared expert
+            return y
         return y + self.shared_experts(x)
 
 
@@ -533,7 +673,9 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.is_sparse = (args.mlp_layer_types or ["sparse"] * args.num_hidden_layers)[
             layer_idx
         ] == "sparse"
-        self.self_attn = MiniMaxM3Attention(args, is_sparse=self.is_sparse)
+        self.self_attn = MiniMaxM3Attention(
+            args, is_sparse=self.is_sparse, layer_idx=layer_idx
+        )
         if self.is_sparse:
             self.block_sparse_moe = MiniMaxM3SparseMoeBlock(args)
         else:
@@ -558,8 +700,9 @@ class MiniMaxM3Model(nn.Module):
         ]
         self.norm = GemmaRMSNorm(args.hidden_size, eps=args.rms_norm_eps)
 
-    def __call__(self, inputs, mask=None, cache=None):
-        h = self.embed_tokens(inputs)
+    def __call__(self, inputs, mask=None, cache=None, input_embeddings=None):
+        h = (input_embeddings if input_embeddings is not None
+             else self.embed_tokens(inputs))
         if cache is None:
             cache = [None] * len(self.layers)
         if mask is None:
@@ -578,8 +721,8 @@ class Model(nn.Module):
         if not args.tie_word_embeddings:
             self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
-    def __call__(self, inputs, mask=None, cache=None):
-        out = self.model(inputs, mask, cache)
+    def __call__(self, inputs, mask=None, cache=None, input_embeddings=None):
+        out = self.model(inputs, mask, cache, input_embeddings=input_embeddings)
         if self.args.tie_word_embeddings:
             return self.model.embed_tokens.as_linear(out)
         return self.lm_head(out)
@@ -601,12 +744,18 @@ class Model(nn.Module):
         # Must track the attention modules' gate: under GMLX_MSA_DISABLE the
         # indexer submodules are never built, so their weights must drop too.
         keep_indexer = self.args.use_sparse_attention and not _msa_disabled()
+        msa_layers = self.args.msa_layers
 
         def keep(k):
             if k.startswith(skip_prefixes):
                 return False
             if ".self_attn.index_" in k:  # MSA indexer - kept only when armed
-                return keep_indexer
+                if not keep_indexer:
+                    return False
+                if msa_layers is None:
+                    return True
+                m = _LAYER_IDX.search(k)
+                return m is not None and int(m.group(1)) in msa_layers
             if ".mtp." in k or k.startswith("mtp.") or "model.mtp" in k:
                 return False
             return True

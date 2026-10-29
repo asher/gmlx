@@ -8,6 +8,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- MiniMax-M3.1-Flash GGUFs run with sparse attention on every layer,
+  including the three leading dense layers, as the model was trained.
+- MiniMax-M3.1-Flash takes image input through its mmproj file
+  (`--mmproj`), with sparse attention and expert streaming as for text.
 - NVFP4 MoE files with one weight scale per expert load, in place of
   failing as unsupported.
 - Granite Switch 4.1 (`graniteswitch`) with its `guardian-core` and `decision`
@@ -18,9 +22,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- MiniMax-M3 and M3.1-Flash decode faster at long context, and their
+  sparse-attention key cache takes half the memory.
+- MiniMax-M3 and M3.1-Flash prefill long prompts faster: past 16K tokens of
+  context, attention reads only the blocks each token selects.
+- With mlx-kquant 0.5.8 or later, MiniMax-M3 and M3.1-Flash decode faster on
+  GGUF expert quants, such as UD-Q2_K_XL.
+- MXFP4 and NVFP4 MoE models that fit in memory load without copying their
+  experts and use the fused MoE kernels. `GMLX_NATIVE_FP=packed` copies them.
 - Requires mlx-kquant 0.5.7. With it, NVFP4 projections decode closer to
   full precision and join the fused attention and MLP paths.
   `GMLX_KQ_OUT_SCALE=0` turns this off.
+- Requires transformers 5.16.0.
 - Decisions run every pass of a small request in one forward, and Granite
   models read answer scores in float32, so a Granite Switch decision takes
   about a quarter less time. Probabilities shift once in the third or fourth
@@ -32,6 +45,25 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `/v1/responses` refuses audio that it would drop with a 400 that points to
   `/v1/chat/completions`. It answered as if the clip were not there before.
+- `gmlx chat` no longer repeats a template's fixed header on later turns,
+  such as MiniMax-M3.1's system block, Gemma 4's `<bos>` or a built-in
+  default system prompt.
+- On MiniMax-M3.1, `gmlx chat --thinking on` makes the model reason, and
+  `--thinking adaptive` no longer prints a false warning.
+- MiniMax-M3 prefill of prompts near its 1M-token context no longer
+  overruns a GPU index limit.
+- `gmlx serve` returns MiniMax-M3 reasoning in `reasoning_content`, not
+  inside the reply text.
+- `gmlx run --mmproj` and `gmlx chat --mmproj` honor `--thinking-budget`, and
+  `--thinking off` on templates without a thinking switch, such as MiniMax-M3.1's.
+- `gmlx chat --mmproj` takes `--stream-experts`, and streams a model too big
+  for memory by itself, as `gmlx run --mmproj` does.
+- With `--mmproj --stream-experts`, an MTP drafter in `gmlx run` and
+  `gmlx chat` no longer raises the wired limit.
+- In `gmlx chat`, `/undo` or `/retry` of the first turn after `--resume` no
+  longer makes the model forget the restored conversation.
+- An `--adapter` LoRA on the routed experts' down projection loads on Flint,
+  K2 Horizon, Hunyuan 3 and DeepSeek-V4 instead of failing.
 - A Qwen3.5-family text model (Qwen3.5 and 3.6 MoE, MiniCPM-V 4.7 without
   `--mmproj`) decodes with `--kv-bits 8` within a tenth of its fp16 KV
   speed instead of a quarter slower.

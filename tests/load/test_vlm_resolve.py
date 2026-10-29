@@ -44,6 +44,7 @@ from gmlx.load.vlm import (
     ("qwen35moe", {"clip.projector_type": "minicpmv4_6"}, "minicpmv4_6"),
     ("qwen35", {"clip.projector_type": "minicpmv4_7"}, "minicpmv4_7"),
     ("qwen35moe", {"clip.projector_type": "minicpmv4_7"}, "minicpmv4_7"),
+    ("minimax-m3", {"clip.projector_type": "minimax_m3"}, "minimax_m3_vision"),
 ])
 def test_supported_families_resolve(llm_arch, mm_meta, expected):
     assert resolve_vlm_model_type(llm_arch, mm_meta) == expected
@@ -104,6 +105,12 @@ def test_muse_spark_with_a_foreign_projector_is_refused():
 def test_minicpmv_on_a_foreign_text_arch_is_refused():
     with pytest.raises(UnsupportedVLMError, match="minicpmv4_7.*qwen3vl"):
         resolve_vlm_model_type("qwen3vl", {"clip.projector_type": "minicpmv4_7"})
+
+
+def test_minimax_m3_on_a_foreign_text_arch_is_refused():
+    """The merged tokens feed the minimax-m3 text tower only."""
+    with pytest.raises(UnsupportedVLMError, match="minimax_m3.*minimax2"):
+        resolve_vlm_model_type("minimax2", {"clip.projector_type": "minimax_m3"})
 
 
 _LLM = {"qwen35moe.embedding_length": 2048}

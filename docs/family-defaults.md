@@ -30,7 +30,8 @@ a model ends up with.
 | `glm` | `glm4`, `glm4moe`, `glm-dsa`, `glm5-next`, `glm5next` | temperature=1.0 top_p=0.95 | - |
 | `deepseek` | `deepseek2`, `deepseek4` | temperature=0.6 top_p=0.95 | - |
 | `deepseek41` | `deepseek41` | temperature=1.0 top_p=0.95 | `@reasoning-high`: reasoning_effort=high; `@reasoning-low`: reasoning_effort=low; `@reasoning-max`: reasoning_effort=max |
-| `minimax` | `minimax-m2`, `minimax-m3` | temperature=1.0 top_p=0.95 top_k=40 | - |
+| `minimax` | `minimax-m2` | temperature=1.0 top_p=0.95 top_k=40 | - |
+| `minimax-m3` | `minimax-m3` | temperature=1.0 top_p=0.95 top_k=40 thinking_start_token=&lt;mm:think&gt; thinking_end_token=&lt;/mm:think&gt; | - |
 | `nemotron` | `nemotron_h_moe` | temperature=1.0 top_p=0.95 | `@instruct`: enable_thinking=False; `@reasoning-medium`: medium_effort=True |
 | `hunyuan` | `hunyuan-moe` | temperature=0.7 top_p=0.8 top_k=20 repetition_penalty=1.05 | - |
 | `hy3` | `hy_v3` | temperature=0.9 thinking_start_token=&lt;think:opensource&gt; thinking_end_token=&lt;/think:opensource&gt; | `@reasoning-high`: reasoning_effort=high; `@reasoning-low`: reasoning_effort=low |

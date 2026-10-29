@@ -278,11 +278,13 @@ _VISION = {
                       "<image>"),
     "minicpm-v-4.6": ("minicpmv4_6", "minicpmv46_template.jinja", _QWEN),
     "minicpm-v-4.7": ("minicpmv4_7", "minicpmv47_template.jinja", _QWEN),
+    "minimax-m3.1": ("minimax_m3_vision", "minimax_m31_template.jinja",
+                     "]<]image[>["),
 }
 # The templates that show an image in a tool turn.
 _IN_TOOL_TURN = ("gemma4-12b", "glm-5.3", "kimi-k2.5", "minicpm-v-4.6",
-                 "minicpm-v-4.7", "muse", "muse-spark", "nemotron-bolt",
-                 "qwen3.5", "qwen3.6", "qwen3.8")
+                 "minicpm-v-4.7", "minimax-m3.1", "muse", "muse-spark",
+                 "nemotron-bolt", "qwen3.5", "qwen3.6", "qwen3.8")
 
 
 def test_the_tool_image_types_are_the_checked_ones():

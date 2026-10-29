@@ -1,0 +1,85 @@
+{#- MiniMax-M3.1-Flash chat template, cut down: the system and developer header it writes on every render, user, assistant (reasoning, tool calls) and tool turns, and the adaptive generation prompt. -#}
+{%- set ns_token               = ']<]minimax[>['                  -%}
+{%- set bod_token              = ']~!b['                          -%}
+{%- set bos_token              = ']~b]'                           -%}
+{%- set eos_token              = '[e~['                           -%}
+{%- set toolcall_begin_token   = ns_token ~ '<tool_call>'         -%}
+{%- set toolcall_end_token     = ns_token ~ '</tool_call>'        -%}
+{%- set think_begin_token      = '<mm:think>'                     -%}
+{%- set think_end_token        = '</mm:think>'                    -%}
+{%- set developer_message = none -%}
+{%- set conversation_messages = messages -%}
+{%- if messages and messages[0].role in ["system", "developer"] -%}
+    {%- set developer_message = messages[0] -%}
+    {%- set conversation_messages = messages[1:] -%}
+{%- endif -%}
+{{- bod_token ~ bos_token ~ 'system' ~ '\n' }}
+{{- 'Your model version is MiniMax-M3.1.' }}
+{{- '\n\n<thinking_instructions>\n' }}
+{{- 'Current thinking mode: adaptive.\n' }}
+{{- '</thinking_instructions>' }}
+{%- if reasoning_effort is defined and reasoning_effort is not none -%}
+    {{- '\n\n<effort>' ~ reasoning_effort ~ '</effort>' }}
+{%- endif -%}
+{{- eos_token ~ '\n' }}
+{{- bos_token ~ 'developer' ~ '\n' }}
+{%- if developer_message and developer_message.content -%}
+    {{- developer_message.content }}
+{%- else -%}
+    {{- 'You are a helpful assistant.' }}
+{%- endif -%}
+{{- eos_token ~ '\n' }}
+{%- set last_tool_call = namespace(name=none) -%}
+{%- for message in conversation_messages -%}
+    {%- if message.role == 'assistant' -%}
+        {{- bos_token ~ 'ai' ~ '\n' }}
+        {%- set reasoning_content = '' %}
+        {%- set content = message.content or '' %}
+        {%- if think_end_token in content %}
+            {%- set reasoning_content = content.split(think_end_token)[0].strip('\n').split(think_begin_token)[-1].strip('\n') %}
+            {%- set content = content.split(think_end_token)[-1].strip('\n') %}
+        {%- endif %}
+        {%- if reasoning_content -%}
+            {{- think_begin_token ~ reasoning_content ~ think_end_token }}
+        {%- else -%}
+            {{- think_end_token }}
+        {%- endif -%}
+        {%- if content -%}
+            {{- content }}
+        {%- endif -%}
+        {%- if message.tool_calls -%}
+            {{- toolcall_begin_token ~ '\n' }}
+            {%- for tool_call in message.tool_calls -%}
+                {%- set tool_call = tool_call.function -%}
+{{- ns_token + '<invoke name="' + tool_call.name + '">' }}
+{%- for k, v in tool_call.arguments.items() if v is not none %}
+{{- ns_token + '<' + k + '>' ~ v ~ ns_token + '</' + k + '>' }}
+{%- endfor -%}
+{{- ns_token + '</invoke>' ~ '\n' }}
+            {%- endfor -%}
+            {{- toolcall_end_token }}
+            {%- set last_tool_call.name = message.tool_calls[-1].function.name -%}
+        {%- else -%}
+            {%- set last_tool_call.name = none -%}
+        {%- endif -%}
+        {{- eos_token ~ '\n' }}
+    {%- elif message.role == 'tool' -%}
+        {%- if last_tool_call.name is none -%}
+            {{- raise_exception("Message has tool role, but there was no previous assistant message with a tool call!") }}
+        {%- endif -%}
+        {%- if loop.first or (conversation_messages[loop.index0 - 1].role != 'tool') -%}
+            {{- bos_token ~ 'tool' }}
+        {%- endif -%}
+        {{- '\n<response>' ~ message.content ~ '</response>' }}
+        {%- if loop.last or (conversation_messages[loop.index0 + 1].role != 'tool') -%}
+            {{- eos_token ~ '\n' -}}
+        {%- endif -%}
+    {%- elif message.role == 'user' -%}
+        {{- bos_token ~ 'user' ~ '\n' }}
+        {{- message.content }}
+        {{- eos_token ~ '\n' }}
+    {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+{{- bos_token ~ 'ai' ~ '\n' }}
+{%- endif -%}

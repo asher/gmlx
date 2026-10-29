@@ -120,6 +120,12 @@ log the attention route.
 | `GMLX_GQA_SDPA_MINKV128` | Fewest keys at which Flint decode leaves stock attention for the mlx-kquant decode kernel. The default is `1024`. |
 | `GMLX_SWA_KQ=0` | On NAX GPUs (M5), keep sliding-window prefill (Flint, Gemma 4, Muse Glimmer, Muse Spark) on stock attention instead of the mlx-kquant window kernel. |
 | `GMLX_GQA_SDPA_NAX512=0` | On NAX GPUs (M5), keep gemma-4 global-layer decode on the previous kernel instead of the faster one past 768 to 3072 keys. |
+| `GMLX_MSA_GATHER_MIN` | Context length past which MiniMax-M3 prefill attends over each token's selected blocks instead of the masked full cache. The default is `16384`. |
+| `GMLX_MSA_GATHER_CHUNK` | Queries per gather step in MiniMax-M3 long prefill. The default is `256`. |
+| `GMLX_MSA_MAX_ELEMS` | Largest MiniMax-M3 prefill score or gather tensor, in elements. The default is `2147483647`, the GPU index limit. |
+| `GMLX_MSA_F32_SCORES=1` | Keep MiniMax-M3 block-selection scores in f32, as llama.cpp does. At 128K each layer's attention runs 25 to 45 percent slower. |
+| `GMLX_MSA_PREFILL_TILE` | Query rows per MiniMax-M3 masked prefill tile. The default is `2048`. |
+| `GMLX_MSA_DISABLE=1` | Run MiniMax-M3 with dense attention on every layer, for A/B against sparse attention. |
 
 ## Model kernels
 
@@ -129,6 +135,8 @@ fusions.
 | Variable | Meaning |
 |----------|---------|
 | `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels of the Qwen3.5 and 3.6 hybrids. The fusion affects numerics. |
+| `GMLX_FUSED_MOE_SWIGLU_OAI=0` | Run MiniMax-M3 MoE layers on the stock expert gathers, with the shared expert as its own MLP. `=1` fuses every codec, even where that is slower. |
+| `GMLX_FUSED_MOE_SHEXP_OAI=0` | Run the MiniMax-M3 shared expert as its own MLP instead of inside the fused expert kernels. Slower. |
 | `GMLX_GDN_BA_CAT=0` | Run the gated-delta b and a projections as two matmuls instead of one over their joined weight. Output is bit-identical. |
 | `GMLX_HADAMARD_KERNEL=0` | Run the Hadamard-fold rotation as MLX ops instead of the mlx-kquant kernel. Numerics match to one rounding. |
 | `GMLX_HADAMARD_FUSE=0` | Rotate the input of a folded down or output projection in its own dispatch instead of inside the gate kernel. |
@@ -165,7 +173,7 @@ fusions.
 | `GMLX_DSA_INDEXER_Q=0` | Keep the indexer GEMM on fp16 operands where tensor-op hardware would run the int8 kernel. Output is bit-identical. |
 | `GMLX_CB_PHASE=0` | Disable the per-phase command-buffer caps (same output, slower decode). `MLX_MAX_OPS_PER_BUFFER` or `MLX_MAX_MB_PER_BUFFER` set by hand holds in every phase. |
 | `GMLX_CB_FINE_DECODE=1` | Decode a model in memory on 50 ops per command buffer instead of 400, both with no size cap. Prefill and streamed models keep their caps. |
-| `GMLX_NATIVE_FP` | MXFP4 and NVFP4 layout. `wire` keeps the file bytes, `packed` repacks them, and `auto` picks wire when streaming or past 90% of the working set. |
+| `GMLX_NATIVE_FP` | MXFP4 and NVFP4 layout. `auto`, the default, keeps the file bytes as `wire` does, and `packed` copies MoE experts into MLX's layout. |
 | `GMLX_BATCH_INVARIANT=1` | Run small float `nn.Linear` layers on a row-count-invariant kernel. Raw-array routers, router calls under 64 rows and training are not covered. |
 | `GMLX_BATCH_INVARIANT_MAX_OUT` | Most outputs of a float projection that the batch-invariant kernel takes. The default is `512`. |
 | `GMLX_LORA_EPILOGUE` | Where a dense LoRA layer on a K-quant base adds its delta. `auto` picks the in-kernel path by GPU class, rank and row count. `always` and `never` force a path. |

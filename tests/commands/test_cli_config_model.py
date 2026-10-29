@@ -251,8 +251,8 @@ def test_run_chat_share_speculative_surface():
 
 
 def test_chat_speculative_rejects_mmproj(tmp_path, capsys):
-    # MTP in chat is the text-only mlx-vlm path; --mmproj (and --adapter/--stream-*)
-    # are refused before any model load, mirroring `run`.
+    # MTP in chat is the text-only mlx-vlm path; --mmproj is refused before
+    # any model load, mirroring `run`.
     gguf = tmp_path / "m-Q6_K.gguf"
     gguf.write_bytes(b"GGUF")
     rc = chat.cmd_chat(

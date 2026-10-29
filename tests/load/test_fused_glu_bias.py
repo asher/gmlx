@@ -2,8 +2,8 @@
 """The gpt-oss fused GLU (swiglu_clamp over biased mxfp4 wire stacks) runs
 with the biases the weights load, not the zeros the modules are built with:
 the fusion installs before the weights load. The CPU row fakes the kq
-kernels and reads the biases each call hands them. The GPU row compares the
-fused forward with the stock one."""
+kernels and reads the biases each call hands them. The GPU rows compare the
+fused forward with the stock one, without and with a down-projection LoRA."""
 from __future__ import annotations
 
 import mlx.core as mx
@@ -87,11 +87,7 @@ def test_each_fused_call_takes_the_biases_of_the_last_load(handed):
                 np.array(want[f"{name}.bias"].astype(mx.float32)))
 
 
-@pytest.mark.skipif(not _real_apple_gpu(),
-                    reason="the fused kq kernels are Metal-only")
-def test_the_fused_forward_matches_the_stock_forward():
-    glu = _fused()
-    rng = np.random.default_rng(0)
+def _load_wire(glu, rng):
     weights = []
     for name in PROJS:
         # mxfp4 blocks of 17 bytes: an E8M0 scale of 2^-6, then 32 fp4 values.
@@ -100,6 +96,14 @@ def test_the_fused_forward_matches_the_stock_forward():
         weights.append((f"{name}.weight", mx.array(w)))
     glu.load_weights(weights, strict=False)
     _load_biases(glu, 1)
+
+
+@pytest.mark.skipif(not _real_apple_gpu(),
+                    reason="the fused kq kernels are Metal-only")
+def test_the_fused_forward_matches_the_stock_forward():
+    glu = _fused()
+    rng = np.random.default_rng(0)
+    _load_wire(glu, rng)
     x = mx.array(0.5 * rng.standard_normal((1, 3, D)), mx.bfloat16)
     idx = mx.array(rng.integers(0, E, (1, 3, K)), mx.uint32)
 
@@ -108,3 +112,51 @@ def test_the_fused_forward_matches_the_stock_forward():
     assert fused.shape == stock.shape == (1, 3, K, D)
     scale = float(np.abs(stock).max())
     np.testing.assert_allclose(fused, stock, rtol=0, atol=0.03 * scale)
+
+
+@pytest.mark.skipif(not _real_apple_gpu(),
+                    reason="the fused kq kernels are Metal-only")
+def test_a_down_lora_adds_its_delta_on_the_fused_forward():
+    """An --adapter LoRA on the routed down projection of a gpt-oss expert
+    stack takes the fused exit, which adds the expert bias and the delta."""
+    import gmlx.load.adapter as adapter
+    from gmlx import lora_rows
+
+    glu = _fused()
+    rng = np.random.default_rng(0)
+    _load_wire(glu, rng)
+    x = mx.array(0.5 * rng.standard_normal((1, 3, D)), mx.bfloat16)
+    idx = mx.array(rng.integers(0, E, (1, 3, K)), mx.uint32)
+    base = np.array(SwitchGLU.__call__(glu, x, idx).astype(mx.float32))
+    xe = mx.expand_dims(x, (-2, -3))
+    h = np.array(glu.activation(glu.up_proj(xe, idx), glu.gate_proj(xe, idx))
+                 .astype(mx.float32))[0, :, :, 0]                # [3, K, I]
+    r = 4
+    a = rng.standard_normal((E, r, INTER)).astype(np.float32)
+    b = rng.standard_normal((E, D, r)).astype(np.float32)
+    delta = np.zeros_like(base)
+    for t in range(3):
+        for j in range(K):
+            e = int(np.array(idx)[0, t, j])
+            delta[0, t, j] = (h[t, j] @ a[e].T) @ b[e].T
+    # Delta as large as the base output, so a dropped delta fails.
+    c = float(np.abs(base).max() / np.abs(delta).max())
+    b, delta = b * c, delta * c
+    path = "experts.down_proj"
+    plan = adapter.LoraAdapter(alpha=float(r), arch="gpt-oss", modules={
+        path: adapter.LoraModule(module_path=path,
+                                 a=mx.array(a).astype(mx.float16),
+                                 b=mx.array(b).astype(mx.float16), rank=r,
+                                 scale=1.0, experts=True)})
+    lora_rows.configure("static", 1)
+    try:
+        modules.install_lora_adapter(_Holder(glu), plan)
+        assert type(glu).__name__ == "_LoRASwitchGLU"
+        assert glu._fused_ok(x, idx)
+        y = np.array(glu(x, idx).astype(mx.float32))
+    finally:
+        lora_rows.configure("static", 1)
+    want = base + delta
+    assert y.shape == want.shape == (1, 3, K, D)
+    np.testing.assert_allclose(y, want, rtol=0,
+                               atol=0.03 * float(np.abs(want).max()))

@@ -13,6 +13,8 @@ arming, sanitize gating, cache construction, and the mm:think tag fixes.
 from __future__ import annotations
 
 import mlx.core as mx
+import numpy as np
+import pytest
 from mlx.utils import tree_flatten, tree_unflatten
 
 from gmlx.models.minimax_m3 import MSAKVCache, ModelArgs, Model
@@ -113,6 +115,71 @@ def test_msa_cache_refuses_quantization():
         raise AssertionError("MSAKVCache.to_quantized must refuse")
 
 
+# -- M3.1 layout: MSA on every layer that carries the indexer -----------------
+
+_M31 = dict(msa_layers=[0, 1, 2])   # indexer on the dense-lead layer too
+
+
+def test_m31_dense_lead_layer_gets_msa():
+    m = _model(**_M31)
+    assert all(type(c) is MSAKVCache for c in m.make_cache())
+    names = {k for k, _ in tree_flatten(m.parameters())}
+    assert "model.layers.0.self_attn.index_q_proj.weight" in names
+    assert "model.layers.0.self_attn.index_k_norm.weight" in names
+
+
+def test_m3_layout_keeps_dense_lead_layer_dense():
+    # msa_layers from an M3 GGUF (MoE layers only) and None (older configs)
+    # both leave the dense-lead layer on a plain cache.
+    for over in ({"msa_layers": [1, 2]}, {}):
+        caches = _model(**over).make_cache()
+        assert type(caches[0]) is KVCache
+        assert type(caches[1]) is MSAKVCache
+
+
+def test_sanitize_drops_indexer_outside_msa_layers():
+    w = {
+        "model.layers.0.self_attn.index_q_proj.weight": mx.zeros((16, 64)),
+        "model.layers.1.self_attn.index_q_proj.weight": mx.zeros((16, 64)),
+        "language_model.model.layers.0.self_attn.index_k_proj.weight":
+            mx.zeros((8, 64)),
+    }
+    m3 = _model(msa_layers=[1, 2]).sanitize(dict(w))
+    assert set(m3) == {"model.layers.1.self_attn.index_q_proj.weight"}
+    m31 = _model(**_M31).sanitize(dict(w))
+    assert set(m31) == {
+        "model.layers.0.self_attn.index_q_proj.weight",
+        "model.layers.1.self_attn.index_q_proj.weight",
+        "model.layers.0.self_attn.index_k_proj.weight",
+    }
+
+
+def test_m31_dense_lead_layer_runs_sparse_attention():
+    # Same weights, with and without the layer-0 indexer armed. Below
+    # topk*block keys both are dense-exact; past it layer 0's selection
+    # must change the output.
+    toks = _tokens(64)
+    m31 = _model(seed=3, **_M31)
+    mx.random.seed(3)
+    m3 = Model(_args(msa_layers=[1, 2]))
+    flat = [(k, v) for k, v in tree_flatten(m31.parameters())
+            if not k.startswith("model.layers.0.self_attn.index_")]
+    m3.update(tree_unflatten(flat))
+    l31, _ = _logits(m31, toks)
+    l3, _ = _logits(m3, toks)
+    assert mx.abs(l31[:, :16] - l3[:, :16]).max().item() < 1e-5
+    assert mx.abs(l31[:, 16:] - l3[:, 16:]).max().item() > 1e-2
+
+
+def test_m31_decode_gather_matches_prefill_mask_path():
+    m = _model(seed=5, **_M31)
+    toks = _tokens(65)
+    full, _ = _logits(m, toks)
+    _, cache = _logits(m, toks[:, :64])
+    step = m(toks[:, 64:65], cache=cache)
+    assert mx.allclose(step[:, 0], full[:, 64], atol=1e-2, rtol=1e-2).item()
+
+
 # -- numerics ----------------------------------------------------------------
 
 def test_short_context_msa_equals_dense():
@@ -198,6 +265,159 @@ def test_dense_fallback_on_plain_cache_warns_not_crashes():
     caches = [KVCache() for _ in range(3)]
     out = m(_tokens(20), cache=caches)
     assert out.shape == (1, 20, 100)
+
+
+# -- fp16 indexer keys, causal kernel, int32 tile cap -------------------------
+
+def test_indexer_key_cache_is_fp16():
+    m = _model(seed=5)
+    _, cache = _logits(m, _tokens(64))
+    assert cache[1].ik.dtype == mx.float16
+
+
+def test_decode_scores_do_not_promote_the_key_cache(monkeypatch):
+    # A mixed f32 x fp16 score matmul copies the whole key cache to f32
+    # every decode step.
+    monkeypatch.delenv("GMLX_MSA_F32_SCORES", raising=False)
+    m = _model(seed=5)
+    _, cache = _logits(m, _tokens(64))
+    calls = []
+    real = mx.matmul
+
+    def spy(a, b, *rest, **kw):
+        calls.append((a.dtype, b.dtype, b.ndim))
+        return real(a, b, *rest, **kw)
+
+    monkeypatch.setattr(mx, "matmul", spy)
+    m(_tokens(1, seed=2), cache=cache)
+    scores = [c for c in calls if c[2] == 4]
+    assert scores
+    assert all(a == b == mx.float16 for a, b, _ in scores), scores
+
+
+@pytest.mark.parametrize("L", [1, 24])
+def test_f32_scores_lever_matches_llama_form(monkeypatch, L):
+    # Default: fp16 x fp16 scores (no cast of the key cache). With
+    # GMLX_MSA_F32_SCORES=1 the scores are f32 values of the f32 query
+    # against the fp16 keys, as llama.cpp computes them.
+    monkeypatch.delenv("GMLX_MSA_F32_SCORES", raising=False)
+    attn = _model().layers[1].self_attn
+    mx.random.seed(4)
+    iq = 8 * mx.random.normal((1, 2, L, 8))
+    IK = (8 * mx.random.normal((1, 1, 200, 8))).astype(mx.float16)
+    ref = (np.asarray(iq, dtype=np.float64)
+           @ np.asarray(IK.astype(mx.float32), dtype=np.float64).swapaxes(-1, -2))
+    IKt32 = IK.swapaxes(-1, -2).astype(mx.float32) if L > 1 else None
+    assert attn._scores(iq, IK, IKt32).dtype == mx.float16
+    monkeypatch.setenv("GMLX_MSA_F32_SCORES", "1")
+    got = attn._scores(iq, IK, IKt32)
+    assert got.dtype == mx.float32
+    # The kq skinny decode runs full f32, well under fp16 rounding (4e-4
+    # here); f32 GEMMs run at TF32 on M5 GPUs and get the loose bound.
+    from gmlx.models import minimax_m3 as m3
+
+    tight = L == 1 and m3._skinny_f32()
+    err = np.abs(np.asarray(got, dtype=np.float64) - ref).max()
+    assert err / np.abs(ref).max() < (1e-5 if tight else 2e-3)
+
+
+def test_short_context_causal_kernel_matches_explicit_mask():
+    attn = _model().layers[1].self_attn
+    mx.random.seed(2)
+    offset, L = 5, 7
+    S = offset + L
+    q = mx.random.normal((1, 8, L, 8))
+    K = mx.random.normal((1, 2, S, 8))
+    V = mx.random.normal((1, 2, S, 8))
+    ref = mx.fast.scaled_dot_product_attention(
+        q, K, V, scale=attn.scale, mask=attn._causal(offset, L, S)[None, None])
+    got = attn._dense_sdpa(q, K, V, offset, L, S)
+    assert mx.allclose(got, ref, atol=1e-5).item()
+
+
+def test_prefill_tile_capped_under_element_limit(monkeypatch):
+    from gmlx.models.minimax_m3 import MiniMaxM3Attention
+
+    m = _model(seed=7)
+    toks = _tokens(60)
+    ref, _ = _logits(m, toks)
+    calls = []
+    real = MiniMaxM3Attention._causal
+
+    def counting(offset, L, S):
+        calls.append(L)
+        return real(offset, L, S)
+
+    monkeypatch.setattr(MiniMaxM3Attention, "_causal", staticmethod(counting))
+    monkeypatch.setenv("GMLX_MSA_MAX_ELEMS", str(64 * 16))  # 16-row tiles
+    got, _ = _logits(m, toks)
+    assert calls and max(calls) == 16
+    assert mx.allclose(got, ref, atol=1e-5).item()
+
+
+def test_gathered_prefill_matches_dense_masked_prefill(monkeypatch):
+    # Past GMLX_MSA_GATHER_MIN, prefill attends over each query's gathered
+    # rows instead of the masked full cache. Same selection, so the logits
+    # agree up to SDPA reduction order. 60 tokens leave a partial tail block;
+    # 5-query chunks leave a ragged last chunk.
+    from gmlx.models.minimax_m3 import MiniMaxM3Attention
+
+    m = _model(seed=7)
+    toks = _tokens(60)
+    ref_one, _ = _logits(m, toks)
+    ref_two, _ = _logits(m, toks, chunks=[23, 37])
+    calls = []
+    real = MiniMaxM3Attention._msa_prefill_gather
+
+    def spy(self, *a):
+        calls.append(a[-2])
+        return real(self, *a)
+
+    monkeypatch.setattr(MiniMaxM3Attention, "_msa_prefill_gather", spy)
+    monkeypatch.setenv("GMLX_MSA_GATHER_MIN", "0")
+    monkeypatch.setenv("GMLX_MSA_GATHER_CHUNK", "5")
+    one, _ = _logits(m, toks)
+    two, _ = _logits(m, toks, chunks=[23, 37])
+    assert 60 in calls and 23 in calls
+    assert mx.allclose(one, ref_one, atol=1e-3, rtol=1e-3).item()
+    assert mx.allclose(two, ref_two, atol=1e-3, rtol=1e-3).item()
+
+
+def test_gathered_rows_capped_under_element_limit(monkeypatch):
+    # The gathered K rows per chunk (C * Hkv * topk*blk * D) stay under the
+    # element limit even when GMLX_MSA_GATHER_CHUNK asks for more.
+    m = _model(seed=7)
+    toks = _tokens(60)
+    ref, _ = _logits(m, toks)
+    widths = []
+    real = mx.fast.scaled_dot_product_attention
+
+    def spy(q, k, v, **kw):
+        if q.shape[1] == 1:                  # the gather path's batch layout
+            widths.append(q.shape[0] // 2)   # queries per chunk (Hkv 2)
+        return real(q, k, v, **kw)
+
+    monkeypatch.setattr(mx.fast, "scaled_dot_product_attention", spy)
+    monkeypatch.setenv("GMLX_MSA_GATHER_MIN", "0")
+    monkeypatch.setenv("GMLX_MSA_GATHER_CHUNK", "256")
+    # Rows per query 2 * 16 * 8 = 256, so 1280 elements allow 5 queries.
+    monkeypatch.setenv("GMLX_MSA_MAX_ELEMS", "1280")
+    got, _ = _logits(m, toks)
+    assert widths and max(widths) == 5
+    assert mx.allclose(got, ref, atol=1e-3, rtol=1e-3).item()
+
+
+def test_input_embeddings_replace_token_lookup():
+    # The VLM container passes merged image embeddings; MSA prefill must run
+    # on them and match the token path when the embeddings are the lookup.
+    m = _model(seed=7, **_M31)
+    toks = _tokens(60)
+    ref, _ = _logits(m, toks)
+    emb = m.model.embed_tokens(toks)
+    got = m(toks, cache=m.make_cache(), input_embeddings=emb)
+    assert mx.allclose(got, ref, atol=1e-5).item()
+    other = m(toks, cache=m.make_cache(), input_embeddings=emb * 0.5)
+    assert not mx.allclose(other, ref, atol=1e-3).item()
 
 
 # -- sanitize / config -------------------------------------------------------
@@ -364,6 +584,16 @@ def test_synth_defaults_when_tensors_present_without_kvs():
     assert cfg["use_sparse_attention"] is True
     assert cfg["sparse_topk_blocks"] == 16
     assert cfg["sparse_block_size"] == 128
+
+
+def test_synth_msa_layers_from_indexer_tensor_presence():
+    from gmlx.load.config_synth import synthesize_config
+
+    meta, shapes = _m3_meta_and_shapes(True, True)
+    assert synthesize_config(meta, shapes)["msa_layers"] == [1]
+    for i in (0, 2):  # M3.1: the dense-lead layer carries one too
+        shapes[f"blk.{i}.indexer.q_proj.weight"] = [64, 16]
+    assert synthesize_config(meta, shapes)["msa_layers"] == [0, 1, 2]
 
 
 def test_synth_dense_when_no_indexer_tensors():

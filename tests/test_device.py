@@ -272,18 +272,6 @@ def test_warm_touch_runs_on_the_gpu_device_only(on_cpu, monkeypatch):
     assert len(warm()) == 1 and len(populated) == 2
 
 
-def test_native_fp_auto_picks_wire_past_the_working_set(on_cpu, monkeypatch):
-    import gmlx.load.loader as loader
-
-    monkeypatch.setenv("GMLX_NATIVE_FP", "auto")
-    monkeypatch.setattr(loader, "kq", SimpleNamespace(
-        codecs=lambda: ["q4_k", "mxfp4", "nvfp4"]))
-    _metal(monkeypatch, **{WS: 50})
-    assert loader._resolve_native_fp_wire(
-        {"blk.0.ffn_gate_exps.weight": np.zeros(64, np.uint8)},
-        {"blk.0.ffn_gate_exps.weight": "mxfp4"}, lambda *_: None)
-
-
 def test_early_populate(on_cpu, monkeypatch, tmp_path):
     import gmlx.load.populate as populate
 

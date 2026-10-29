@@ -99,6 +99,7 @@ projector and architecture that it found. gmlx supports these families:
 | Muse Glimmer | `muse-glimmer` | Muse-Glimmer-30B | |
 | MiniCPM-V 4.6 and 4.7 | `minicpmv4_6` or `minicpmv4_7` with `qwen35` or `qwen35moe` | MiniCPM-V-4.6, MiniCPM-V-4.7-35B-A3B, MiniCPM-V-4.7-1B | Video input is refused. |
 | Nemotron 3.5 Bolt and Super VL | `nemotron_omni` with `nemotron_h_moe` | NVIDIA-Nemotron-3.5-Bolt-74B-A9B, NVIDIA-Nemotron-3.5-Super-VL-120B-A12B | Each image becomes 256 to 3328 tokens. Video input is refused. |
+| MiniMax-M3.1-Flash | `minimax_m3` with `minimax-m3` | MiniMax-M3.1-Flash | Each image becomes 8 to 576 tokens. Video input is refused. It is larger than RAM on most Macs, so it needs `--stream-experts`. |
 | Muse Spark | `muse-glimmer` and `muse-spark-audio` with `muse-spark` | Muse-Spark-Open-816B-A42B | It reads images and audio. It is larger than RAM on most Macs, so it needs `--stream-experts`. |
 | Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | It is larger than RAM on most Macs, so it needs `--stream-experts`. |
 | DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` with `deepseek4` | The unsloth UD builds | |
@@ -147,7 +148,7 @@ have limits:
 | Combination | Result |
 |-------------|--------|
 | [Speculative decoding](speculative-decoding.md) | Text turns use speculation. Media turns use it on the server, and decode without it in `run` and `chat`. |
-| [`--stream-experts`](streaming.md) | `run` and `serve` stream the language model and keep the vision encoder on the GPU. Chat refuses it, and a served model cannot combine it with speculation. |
+| [`--stream-experts`](streaming.md) | `run`, `chat` and `serve` stream the language model and keep the vision encoder on the GPU. Text turns keep speculation, except on a server. |
 | `--stream-cpu` | The command refuses it, because it would move the vision encoder to the CPU too. |
 | The lossy MoE settings, such as `--moe-experts` | Chat refuses them with `--mmproj`. |
 | `--adapter` | The command refuses it, because a LoRA adapter applies only to text models. |

@@ -101,6 +101,31 @@ def test_stock_layouts_match_per_expert_reference(B, L, k):
     assert mx.allclose(y, ref, rtol=tol, atol=tol), float(mx.abs(y - ref).max())
 
 
+def test_arena_row_flag_keeps_wide_calls_unsorted(monkeypatch):
+    """The streaming wrapper flags arena calls (_kq_arena_rows), where the
+    expert count is the arena's slot count and a sorted call's kernel
+    depends on it. A flagged 64-row call stays on the unsorted body."""
+    glu, ref_glu = _glu(), _glu()
+    model = _Holder(glu)
+    E, d, inter, r = 4, 8, 16, 2
+    mx.random.seed(1)
+    a = mx.random.normal((E, r, inter))
+    b = mx.random.normal((E, d, r))
+    assert _install(model, a, b, 0.5) == 1
+    x = mx.random.normal((2, 8, d))
+    idx = mx.random.randint(0, E, (2, 8, 4)).astype(mx.uint32)
+
+    def no_sort(*args, **kwargs):
+        raise AssertionError("a flagged arena call sorted its rows")
+
+    monkeypatch.setattr(modules, "_lora_gather_sort", no_sort)
+    object.__setattr__(model.switch_mlp, "_kq_arena_rows", True)
+    y = model.switch_mlp(x, idx)
+    ref = (modules.glu_unsorted_call(ref_glu, x, idx)
+           + _ref_delta(ref_glu, x, idx, a, b, 0.5))
+    assert mx.allclose(y, ref, rtol=1e-4, atol=1e-4), float(mx.abs(y - ref).max())
+
+
 def test_sorted_path_with_nonuniform_rows():
     lora_rows.configure("rows", 1)
     glu, ref_glu = _glu(), _glu()
@@ -276,12 +301,15 @@ def test_offload_class_in_mro_raises():
         _install(model, mx.zeros((4, 1, 16)), mx.zeros((4, 8, 1)), 1.0)
 
 
-def test_shexp_stamp_raises():
+def test_expert_lora_drops_the_shexp_fold_stamp():
+    """The fold exit takes no LoRA epilogue, so the install drops the stamp
+    and the block runs its shared expert itself."""
     glu = _glu()
     object.__setattr__(glu, "_kq_shexp_mod", object())
     model = _Holder(glu)
-    with pytest.raises(NotImplementedError, match="shared-expert"):
-        _install(model, mx.zeros((4, 1, 16)), mx.zeros((4, 8, 1)), 1.0)
+    assert _install(model, mx.zeros((4, 1, 16)), mx.zeros((4, 8, 1)), 1.0) == 1
+    assert model.switch_mlp._kq_shexp_mod is None
+    assert type(model.switch_mlp).__name__ == "_LoRASwitchGLU"
 
 
 def test_missing_expert_target_raises():

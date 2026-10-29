@@ -247,14 +247,19 @@ _KQ_DEDUP_MAX_T = 8
 _KQ_TUNED_CODECS = ("q6_k", "q8_0")
 
 
-def _kq_row_floor(glu, k: int, d_in: int) -> int:
-    """Fewest rows at which the fused GLU gather of ``glu`` runs the same
-    kernel as at every larger width."""
+def _kq_row_floor(glu, k: int, d_in: int, caps=None) -> int:
+    """Fewest rows at which the fused GLU and down gathers of ``glu`` run
+    the same kernels as at every larger width. A gate codec on kq's qf
+    kernels gives each row the same GLU bits at every width, and one row is
+    enough when the down codec is on them too."""
+    gate = glu.gate_proj.kquant_type
+    if caps is not None and caps.qf_codec(gate):
+        return 1 if caps.qf_codec(glu.down_proj.kquant_type) else 2
     floor = 2
     n = glu.gate_proj.weight.shape[1]
     if d_in >= _KQ_GLU_WIDE_MIN_K:
         floor = max(floor, -(-_KQ_GLU_WIDE_ROWS // (n * k)))
-    if glu.gate_proj.kquant_type in _KQ_TUNED_CODECS:
+    if gate in _KQ_TUNED_CODECS:
         floor = max(floor, _KQ_DEDUP_MAX_T + 1)
     return floor
 
@@ -292,6 +297,9 @@ class _FusedMoeCaps:
                 c for c in ("mxfp4", "nvfp4", "stq1_0", "q2_0")
                 if kq_has_glu(c))
         self.kq_fused_codecs = codecs
+        # Codecs whose fused gathers run on kq's qf kernels, which give each
+        # row the same bits at every call width; absent on older kq builds.
+        self._moe_qf = getattr(kq, "moe_qf_kernels", None)
         # Shared-expert codecs allowed to differ from the expert stacks (the
         # only mixed combos with kernels); needs the shexp_kquant_type-aware
         # ops.
@@ -344,9 +352,13 @@ class _FusedMoeCaps:
         self.has_swiglu_clamp = (
             self.has_kq_fused and "swiglu_clamp" in glu_doc)
         # the shared-expert fold learned silu_limit later; same sniff
-        self.has_shexp_limit = self.has_silu_limit and "silu_limit" in (
-            getattr(getattr(kq, "moe_glu_gather_shexp_kq", None), "__doc__", "")
-            or "")
+        shexp_doc = (getattr(getattr(kq, "moe_glu_gather_shexp_kq", None),
+                             "__doc__", "") or "")
+        self.has_shexp_limit = self.has_silu_limit and "silu_limit" in shexp_doc
+        # swiglu_oai (minimax-m3 clamped SwiGLU, no biases) on the routed
+        # gathers and on the shared-expert fold; same sniff
+        self.has_swiglu_oai = self.has_kq_fused and "swiglu_oai" in glu_doc
+        self.has_shexp_oai = self.has_swiglu_oai and "swiglu_oai" in shexp_doc
         self.router_ok = (
             os.environ.get("GMLX_FUSED_MOE_ROUTER", "1") != "0"
             and hasattr(kq, "moe_router_topk")
@@ -369,6 +381,12 @@ class _FusedMoeCaps:
         self.glue_parts = env_int("GMLX_FUSED_MOE_GLUE_PARTS", 0)
         # Bit-identical add + two norms in one dispatch (norm handoff).
         self.has_norm_handoff = hasattr(kq, "add_rmsnorm_norm")
+
+    def qf_codec(self, codec) -> bool:
+        """Whether kq runs ``codec``'s fused gathers on its qf kernels;
+        False for a projection with no codec (float experts)."""
+        return (self._moe_qf is not None and isinstance(codec, str)
+                and bool(self._moe_qf(codec)))
 
 
 def _swap_class(m, cache, factory, caps) -> None:
@@ -408,6 +426,15 @@ def _kq_dense(proj, codecs):
             and not wrapped_scale(proj))
 
 
+# Gate/up codecs where the swiglu_oai fused gathers beat or tie the stock
+# path at every decode width and at streamed prefill, at the MiniMax-M3 shape
+# on an M5 Max. The others fuse where kq runs them on its qf kernels, which
+# beat the stock path there too; on older kq they lose (q4_k up to 1.27x).
+_SWIGLU_OAI_FAST_CODECS = frozenset((
+    "iq1_s", "iq1_m", "iq2_xxs", "iq2_xs", "iq2_s", "iq3_xxs", "iq3_s",
+    "stq1_0", "q5_k", "q6_k", "q8_0"))
+
+
 def _kq_act_kind(m, caps):
     """Fused-kernel act string for a SwitchGLU's activation, else None.
     Only plain act(gate) * up semantics map onto the kernel epilogue."""
@@ -428,6 +455,22 @@ def _kq_act_kind(m, caps):
         return None
     if name == "GeGLU" and "gemma4" in mod:
         return "gelu"  # nn.gelu_approx == the kernel's tanh-approx gelu
+    if name == "SwiGLUOAI" and "minimax_m3" in mod:
+        # clamped SwiGLU without biases; the kernel needs limit and alpha
+        # both positive. Unset: fused on the fast gate/up codecs and on
+        # kq's qf codecs.
+        # GMLX_FUSED_MOE_SWIGLU_OAI=0 keeps the stock path, any other value
+        # fuses every codec.
+        lever = os.environ.get("GMLX_FUSED_MOE_SWIGLU_OAI", "")
+        alpha = float(getattr(act, "alpha", 0.0) or 0.0)
+        limit = float(getattr(act, "limit", 0.0) or 0.0)
+        codec = getattr(getattr(m, "gate_proj", None), "kquant_type", None)
+        if (caps.has_swiglu_oai and alpha > 0.0 and limit > 0.0
+                and lever != "0"
+                and (lever != "" or codec in _SWIGLU_OAI_FAST_CODECS
+                     or caps.qf_codec(codec))):
+            return "swiglu_oai"
+        return None
     if name == "LimitedSwiGLU" and "deepseek_v4" in mod:
         limit = float(getattr(act, "limit", 0.0) or 0.0)
         if limit <= 0.0:
@@ -826,6 +869,9 @@ def _make_fused_kquant(base_cls, caps):
             akw = {"act": act}
             if act == "silu_limit":
                 akw["limit"] = self._kq_glu_limit
+            elif act == "swiglu_oai":
+                akw["limit"] = self._kq_glu_limit
+                akw["alpha"] = self._kq_glu_alpha
             elif act == "swiglu_clamp":
                 akw["limit"] = self._kq_glu_limit
                 akw["alpha"] = self._kq_glu_alpha
@@ -891,14 +937,14 @@ def _make_fused_kquant(base_cls, caps):
 
         def _fused_rows(self, x, idx):
             """Unmixed ``(t, k, N)`` through kernels that give each row
-            the same result at every call width. The GLU gather changes
-            its kernel below a row count, so short calls get copies of
-            row 0 up to that count. The down gather has one kernel at
-            every width. The score-mixed down gather does not, so the mix
-            stays outside."""
+            the same result at every call width. The GLU and down gathers
+            change their kernels below a row count (_kq_row_floor), so
+            short calls get copies of row 0 up to that count. The
+            score-mixed down gather has no such count, so the mix stays
+            outside."""
             t, k = idx.shape
             xf = x.reshape(t, x.shape[-1])
-            pad = _kq_row_floor(self, k, xf.shape[-1]) - t
+            pad = _kq_row_floor(self, k, xf.shape[-1], caps) - t
             if pad > 0:
                 xf = mx.concatenate(
                     [xf, mx.broadcast_to(xf[:1], (pad, xf.shape[-1]))])
@@ -917,8 +963,13 @@ def _make_fused_kquant(base_cls, caps):
                 if rows:
                     y = self._fused_rows(x, idx)
                 else:
-                    y = self._fused_down(
-                        self._fused_h(x, idx, scores), idx, scores)
+                    # A token-split leaf of a folded stack returns unmixed,
+                    # as its stock-path sibling leaves do, so they concatenate.
+                    sc = scores
+                    if (getattr(self, "_kq_in_split", False)
+                            and getattr(self, "_kq_shexp_mod", None) is not None):
+                        sc = None
+                    y = self._fused_down(self._fused_h(x, idx, sc), idx, sc)
                 if y.ndim == 2:      # mixed in the kernel: (t, N)
                     return y.reshape(*indices.shape[:-1], y.shape[-1])
                 y = y.reshape(*indices.shape, y.shape[-1])
@@ -1055,6 +1106,11 @@ def _install_kquant_glu_fusion(model, caps) -> int:
         if act_kind == "silu_limit":
             object.__setattr__(
                 m, "_kq_glu_limit", float(m.activation.limit))
+        elif act_kind == "swiglu_oai":
+            object.__setattr__(
+                m, "_kq_glu_limit", float(m.activation.limit))
+            object.__setattr__(
+                m, "_kq_glu_alpha", float(m.activation.alpha))
         elif act_kind == "swiglu_clamp":
             # gpt-oss constants (swiglu() defaults in mlx-lm). The float32
             # bias copies are made on the first fused call, after the
@@ -1573,11 +1629,37 @@ def _eligible_dsv4_shexp(m, caps):
     return _shexp_fold_ok(sw, se, caps)
 
 
+def _eligible_m3_shexp(m, caps):
+    """minimax-m3 MoE: the ungated SwiGLU-OAI shared expert rides the
+    stack's ``swiglu_oai`` gathers (one limit and alpha for every slot), so
+    its constants must equal the stack's. GMLX_FUSED_MOE_SHEXP_OAI=0 turns
+    it off."""
+    if os.environ.get("GMLX_FUSED_MOE_SHEXP_OAI", "1") == "0":
+        return False
+    if "minimax_m3" not in type(m).__module__:
+        return False
+    for attr in ("gate", "switch_mlp", "shared_experts"):
+        if not hasattr(m, attr):
+            return False
+    se, sw = m.shared_experts, m.switch_mlp
+    if se is None or not caps.has_shexp_oai:
+        return False
+    if getattr(sw, "_kq_glu_act", None) != "swiglu_oai":
+        return False
+    if (float(getattr(se, "alpha", 0.0)) != getattr(sw, "_kq_glu_alpha", None)
+            or float(getattr(se, "limit", 0.0))
+            != getattr(sw, "_kq_glu_limit", None)):
+        return False
+    return _shexp_fold_ok(sw, se, caps)
+
+
 def _shexp_fold_target(m, caps):
     """The shared-expert module an eligible MoE block folds, else None."""
     if _eligible_hyv3_shexp(m, caps):
         return m.shared_mlp
     if _eligible_dsv4_shexp(m, caps):
+        return m.shared_experts
+    if _eligible_m3_shexp(m, caps):
         return m.shared_experts
     return None
 
@@ -1585,8 +1667,8 @@ def _shexp_fold_target(m, caps):
 def install_hyv3_shexp_fold(model) -> int:
     """Stamp eligible MoE blocks' fused SwitchGLUs with their shared
     expert (``_kq_shexp_mod``, a module ref: install runs before
-    load_weights): hy_v3's plain SwiGLU one and deepseek-v4's LimitedSwiGLU
-    one. Call after install_fused_moe_glu. Disable with
+    load_weights): hy_v3's plain SwiGLU one, deepseek-v4's LimitedSwiGLU
+    one and minimax-m3's SwiGLU-OAI one. Call after install_fused_moe_glu. Disable with
     GMLX_FUSED_MOE_BLOCK=0. Returns the number of blocks stamped."""
     caps = _FusedMoeCaps()
     if not caps.enabled or not caps.has_base or not caps.block_env_on:
@@ -2585,7 +2667,10 @@ def _make_lora_switch_glu(base_cls, caps=None):
                 y = (y + d.astype(y.dtype)).reshape(*indices.shape, N)
             else:
                 xe = mx.expand_dims(x, (-2, -3))
-                do_sort = indices.size >= 64
+                # A sorted call's kernel depends on the expert count, so
+                # arena calls (_kq_arena_rows) stay unsorted.
+                do_sort = (indices.size >= 64
+                           and not getattr(self, "_kq_arena_rows", False))
                 idx, inv_order, order = indices, None, None
                 if do_sort:
                     xe, idx, inv_order, order = _lora_gather_sort(xe, indices)
@@ -2666,14 +2751,14 @@ def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
                 f"{blocked}, which bypasses the SwitchGLU forward (apply the "
                 f"adapter before placement; block/gemma/gpt-oss fusions are "
                 f"not supported)")
-        if getattr(container, "_kq_shexp_mod", None) is not None:
-            raise NotImplementedError(
-                f"expert LoRA target {path!r}: shared-expert fold stamp on the "
-                f"owner is not supported")
         if lm.transform != "passthrough":
             raise NotImplementedError(
                 f"expert LoRA target {path!r} has unsupported transform "
                 f"{lm.transform!r}")
+        if getattr(container, "_kq_shexp_mod", None) is not None:
+            # The fold exit has no LoRA epilogue. Without the stamp the
+            # block runs its shared expert itself.
+            object.__setattr__(container, "_kq_shexp_mod", None)
         a_t = mx.contiguous(mx.swapaxes(lm.a, 1, 2))     # (E, in, r)
         b_t = mx.contiguous(mx.swapaxes(lm.b, 1, 2))     # (E, r, out)
         mx.eval(a_t, b_t)

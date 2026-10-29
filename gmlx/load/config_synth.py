@@ -1682,10 +1682,16 @@ def _synth_minimax_m3(meta, shapes, config: dict) -> None:
     # a GGUF with inline indexer tensors but no KVs falls back to the
     # released model's constants (4 heads, dim 128, top-16 of 128-blocks,
     # 1 local block).
-    has_indexer = any(
-        ".indexer.q_proj." in n or ".index_q_proj." in n for n in shapes)
+    idx_layers = sorted({
+        int(n.split(".")[1]) for n in shapes
+        if n.startswith("blk.")
+        and (".indexer.q_proj." in n or ".index_q_proj." in n)})
+    has_indexer = bool(idx_layers)
     config["use_sparse_attention"] = has_indexer
     if has_indexer:
+        # A layer runs MSA iff it carries the indexer (llama.cpp PR #31192):
+        # the MoE layers on M3, every layer on M3.1.
+        config["msa_layers"] = idx_layers
         idx = f"{arch}.attention.indexer"
         config["sparse_num_index_heads"] = (
             _read_int(meta, f"{idx}.head_count") or 4)

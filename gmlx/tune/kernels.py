@@ -1,12 +1,13 @@
 """Kernel choices for a training run.
 
-kq sends a sorted expert call of at least ``KQ_SWITCH_GEMM_MIN_ROWS``
-routed rows (512 by default) to a per-expert segment GEMM on the GPU,
-which has no backward. A MoE training step routes more rows than that,
-so its backward fails. ``install_training_switch_gemm`` sets the
-threshold to 0 for the length of a training run, so every expert call
-takes kq's gather matmul, whose backward gives the gradient with respect
-to the input. kq reads the variable on every call.
+kq sends a wide sorted expert call (from 1.75 rows per expert on NAX
+GPUs, 512 rows elsewhere, or ``KQ_SWITCH_GEMM_MIN_ROWS`` when set) to a
+per-expert segment GEMM on the GPU, which has no backward. A MoE
+training step routes more rows than that, so its backward fails.
+``install_training_switch_gemm`` sets the threshold to 0 for the length
+of a training run, so every expert call takes kq's gather matmul, whose
+backward gives the gradient with respect to the input. kq reads the
+variable on every call.
 """
 from __future__ import annotations
 

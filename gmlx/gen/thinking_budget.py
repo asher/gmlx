@@ -225,6 +225,30 @@ def open_think_pair(text, pairs):
     return None
 
 
+def vlm_budget_kwargs(budget, start, end, processor, prompt=None) -> dict:
+    """The thinking kwargs for mlx-vlm's ``generate`` / ``stream_generate``.
+    Its budget criteria acts only with ``enable_thinking`` and watches
+    ``<think>`` by default. With a budget: the given markers, else the chat
+    template's pair (the one ``prompt`` opens, else the first), and
+    ``enable_thinking=True``, so an explicit budget holds whatever the
+    template's switch says, as on the text path and serve. A template with
+    no known pair (gemma-4's channel tags) leaves the criteria unarmed."""
+    if budget is not None and not (start or end):
+        tok = getattr(processor, "tokenizer", processor)
+        pairs = think_pairs_in(getattr(processor, "chat_template", None)
+                               or getattr(tok, "chat_template", None))
+        if pairs:
+            start, end = open_think_pair(prompt, pairs) or pairs[0]
+    out = {}
+    if budget is not None and (start or end):
+        out["enable_thinking"] = True
+    if start:
+        out["thinking_start_token"] = start
+    if end:
+        out["thinking_end_token"] = end
+    return out
+
+
 def prompt_think_pair(prompt, tokenizer):
     """The template pair a rendered ``prompt`` ends inside, or None.
     ``prompt`` is the rendered text or its token ids, whose tail is decoded.

@@ -70,7 +70,7 @@ def test_families_never_set_max_tokens():
     ("glm5-next", "glm"), ("glm5next", "glm"),
     ("deepseek2", "deepseek"), ("deepseek4", "deepseek"),
     ("minimax-m2", "minimax"),
-    ("minimax-m3", "minimax"),
+    ("minimax-m3", "minimax-m3"),
     ("nemotron_h_moe", "nemotron"),
     ("hunyuan-moe", "hunyuan"),
     ("kimi-k3", "kimi"),
@@ -124,6 +124,13 @@ def test_gpt_oss_reasoning_intents():
     hi = profiles.groups_for("gpt-oss", "reasoning-high")
     assert hi["chat_template_kwargs"] == {"reasoning_effort": "high"}
     assert hi["sampling"] == base["sampling"]
+
+
+def test_minimax_m3_thinking_tokens():
+    s = profiles.groups_for("minimax-m3")["sampling"]
+    assert (s["thinking_start_token"], s["thinking_end_token"]) == (
+        "<mm:think>", "</mm:think>")
+    assert "thinking_start_token" not in profiles.groups_for("minimax")["sampling"]
 
 
 def test_nemotron_intents():

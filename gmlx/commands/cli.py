@@ -1295,7 +1295,7 @@ _BENCH_DECODE = {"bench": 32, "bench_depths": 128}
 def _run_bench(args) -> int:
     import gmlx.load.loadlog as loadlog
     from gmlx.gen.benchmarks import bench
-    from gmlx.load.loader import load_model, preset_native_fp_wire_env
+    from gmlx.load.loader import load_model
 
     # Fail fast on a malformed length list - before the multi-GB load.
     try:
@@ -1303,7 +1303,6 @@ def _run_bench(args) -> int:
     except argparse.ArgumentTypeError as e:
         print(str(e), file=sys.stderr)
         return 2
-    preset_native_fp_wire_env(args)
     with loadlog.load_ui(args.verbose, args.gguf):
         model, _config, tok = load_model(
             args.gguf,
@@ -1365,7 +1364,7 @@ def _run_bench_depths(args) -> int:
         bench_tg_depth,
     )
     from gmlx.tui.chat import parse_template_config
-    from gmlx.load.loader import load_model, preset_native_fp_wire_env
+    from gmlx.load.loader import load_model
     from gmlx.spec.mtp_load import load_mtp_model
 
     try:
@@ -1395,7 +1394,6 @@ def _run_bench_depths(args) -> int:
 
     check_or_exit(args.gguf, ctx_tokens=max(depths) + decode_tokens,
                   streaming=getattr(args, "stream_experts", False))
-    preset_native_fp_wire_env(args)
     drafter = None
     if speculative:
         with loadlog.load_ui(args.verbose, args.gguf):
@@ -1638,7 +1636,7 @@ def _run_generate(args) -> int:
         parse_template_config,
     )
     from gmlx.gen.generation import generate
-    from gmlx.load.loader import load_model, preset_native_fp_wire_env
+    from gmlx.load.loader import load_model
     from .tool_preflight import check_or_exit
 
     # Parse before the model load so a JSON typo fails fast.
@@ -1647,7 +1645,6 @@ def _run_generate(args) -> int:
     logit_bias = parse_logit_bias(args.logit_bias)
     check_or_exit(args.gguf,
                   streaming=getattr(args, "stream_experts", False))
-    preset_native_fp_wire_env(args)
     companion = _audio_companion(args)
 
     from gmlx.gen.thinking_budget import install_finish_thinking_key
@@ -1899,10 +1896,11 @@ def _run_vlm(args) -> int:
         extra["thinking_budget"] = args.thinking_budget
     # mlx-vlm's own criteria enforces the budget here, so it needs the markers
     # as well; it defaults them to <think> / </think>.
-    if args.thinking_start_token:
-        extra["thinking_start_token"] = args.thinking_start_token
-    if args.thinking_end_token:
-        extra["thinking_end_token"] = args.thinking_end_token
+    from gmlx.gen.thinking_budget import vlm_budget_kwargs
+
+    extra.update(vlm_budget_kwargs(
+        args.thinking_budget, args.thinking_start_token,
+        args.thinking_end_token, processor, prompt))
     kv_bits = vlm_kv_width(args, model)
     if kv_bits is not None:
         extra.update(
@@ -2016,6 +2014,7 @@ def _run_vlm_mtp(args) -> int:
             zero_copy=not args.no_zero_copy,
             rope_override=rope_override_from_args(args),
             verbose=args.verbose,
+            wire=not getattr(args, "stream_experts", False),
         )
     _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
@@ -2635,7 +2634,6 @@ class _Same(enum.Enum):
 
 
 def preload_wire_check(args, *, depth: int | None,
-                       can_stream: bool = True,
                        depth_without_mtp: int | None | _Same = _Same.DEPTH) -> None:
     """Before the weights load, judge a MoE's resident set against live
     memory (``budget.check_resident_wire``), with the KV room at
@@ -2670,7 +2668,7 @@ def preload_wire_check(args, *, depth: int | None,
     if path:
         stream_tables_for_memory(path, False)
         guard_resident_wire(path, False)
-    if not can_stream or getattr(args, "stream_cpu", False):
+    if getattr(args, "stream_cpu", False):
         return
     if getattr(args, "stream_experts", False):
         if path and os.path.isfile(path):

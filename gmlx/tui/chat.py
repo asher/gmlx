@@ -67,8 +67,8 @@ the terminal it runs in is upgraded:
 With ``--speculative`` the session runs MTP speculative decoding (native-head
 qwen3.5/3.6, or a ``--draft-gguf`` assistant for gemma4): replies stream through
 mlx-vlm's MTP engine over the same persistent cache, for a decode speedup. It's
-the text-only path (no ``--mmproj`` / ``--adapter`` / ``--stream-*``) and samples on
-temperature/top-p/top-k/min-p only.
+for text turns only (with ``--mmproj``, media turns decode without it) and samples
+on temperature/top-p/top-k/min-p only.
 
 Each completed reply prints a one-line ``N tok @ X tok/s`` stat.
 """
@@ -349,28 +349,33 @@ def _template_text(args) -> str:
     return t if isinstance(t, str) else bytes(t).decode(errors="replace")
 
 
-def fold_thinking_flag(args, tkw: dict) -> dict:
+def fold_thinking_flag(args, tkw: dict, *, prefill: bool = False) -> dict:
     """Fold ``--thinking on|off|adaptive`` and ``--reasoning-effort LEVEL``
     into the template kwargs, spelled as the variables this model's chat
     template actually reads. ``tkw`` (the ``--chat-template-config`` blob)
     passes through verbatim; the dedicated flags overlay it. See
     :func:`gmlx.tui.reasoning.map_thinking_controls` for the spelling table.
     On a template with no thinking switch, ``--thinking off`` sets a
-    thinking budget of 0 unless ``--thinking-budget`` is set."""
+    thinking budget of 0 unless ``--thinking-budget`` is set. ``prefill``
+    (chat) records the text each rendered prompt gets appended as
+    ``args.thinking_prefill``."""
     t = getattr(args, "thinking", None)
     effort = getattr(args, "reasoning_effort", None)
     if t is None and effort is None:
         return tkw
-    from .reasoning import map_thinking_controls, off_by_budget
+    from .reasoning import map_thinking_controls, off_by_budget, thinking_prefill
 
     template = _template_text(args)
     if (getattr(args, "thinking_budget", None) is None
             and off_by_budget(t, template)):
         args.thinking_budget = 0
         args.thinking_off_budget = True
+    if prefill:
+        args.thinking_prefill = thinking_prefill(t, template)
     return map_thinking_controls(
         tkw, t, effort, template,
-        warn=lambda msg: print(f"[thinking] {msg}", file=sys.stderr))
+        warn=lambda msg: print(f"[thinking] {msg}", file=sys.stderr),
+        prefill=prefill)
 
 
 def parse_logit_bias(raw: str | None) -> dict | None:
@@ -450,6 +455,8 @@ class ChatState:
     thinking_end_token: str | None = None
     template_kwargs: dict | None = None  # live per-turn render kwargs (/thinking)
     template_text: str = ""              # template source, for switch mapping
+    thinking_prefill: str = ""           # appended to each turn's render
+    render_fallback_logged: bool = False
     sampling: dict = dataclasses.field(default_factory=dict)
     transcript: list = dataclasses.field(default_factory=list)
     replay_messages: list | None = None  # deferred history prefill (--resume)
@@ -995,6 +1002,7 @@ def _end_turn(state: ChatState, reply: str, canceled: bool, cache=None) -> None:
         },
         "cache_before": cp.get("cache_before", 0),
         "first_turn_before": cp.get("first_turn_before", True),
+        "render_kwargs": cp.get("render_kwargs"),
         "vlm_lens": cp.get("vlm_lens", (0, 0, 0)),
     }
     if "brain_before" in cp:      # assistant turns rewind by brain checkpoint
@@ -1363,29 +1371,40 @@ def _slash_thinking(cmd, arg, state):
         return None
     if not arg:
         current = next((f"{k}={tkw[k]}" for k in _THINKING_SWITCH_KEYS
-                        if k in tkw), "default")
+                        if k in tkw), "on" if state.thinking_prefill else "default")
         print(f"[chat] thinking = {current}")
         return None
     for k in _THINKING_SWITCH_KEYS:
         tkw.pop(k, None)
+    state.thinking_prefill = ""
     if state.thinking_off_budget:
         state.thinking_budget = None
         state.thinking_off_budget = False
     if arg == "default":
         print("[chat] thinking = default (next reply)")
         return None
-    from .reasoning import map_thinking_controls, off_by_budget
+    from .reasoning import (
+        adaptive_minimax,
+        map_thinking_controls,
+        off_by_budget,
+        thinking_prefill,
+    )
 
     mapped = map_thinking_controls(
         {}, arg, None, state.template_text,
-        warn=lambda msg: print(f"[thinking] {msg}"))
+        warn=lambda msg: print(f"[thinking] {msg}"), prefill=True)
     tkw.update(mapped)
-    if state.thinking_budget is None and off_by_budget(arg, state.template_text):
+    state.thinking_prefill = thinking_prefill(arg, state.template_text)
+    if off_by_budget(arg, state.template_text):
+        if state.thinking_budget is not None:
+            print(f"[chat] thinking-budget = {state.thinking_budget} still "
+                  "applies; '/thinking-budget 0' turns thinking off")
+            return None
         # No switch to flip: close each thinking block as it opens.
         state.thinking_budget = 0
         state.thinking_off_budget = True
         mapped = True
-    if mapped:
+    if mapped or adaptive_minimax(state.template_text):
         print(f"[chat] thinking = {arg} (next reply)")
     return None
 
@@ -2328,6 +2347,73 @@ def _encode_turn(tok, prompt_text, starts_cache: bool) -> list:
     return tok.encode(prompt_text, add_special_tokens=False)
 
 
+def _conversation(state) -> list:
+    """The conversation the cache holds, as template messages: the system
+    prompt, then each recorded turn (a canceled one with its partial
+    reply). The deferred replay (--resume, a rebuilt cache) prefills the
+    same list."""
+    msgs = []
+    if state.system_prompt:
+        msgs.append({"role": "system", "content": state.system_prompt})
+    for e in state.transcript:
+        msgs.append({"role": "user", "content": e["user"].get("content", "")})
+        msgs.append({"role": "assistant",
+                     "content": e["assistant"].get("content", "")})
+    return msgs
+
+
+def _continuation(render, history: list, new: list) -> str | None:
+    """The render of ``history + new`` (with the generation prompt) past
+    the render of ``history`` (without), or None when the history render
+    is not a prefix of it or the template refuses either list."""
+    try:
+        prev = render(history, False)
+        full = render(history + list(new), True)
+    except Exception:  # noqa: BLE001
+        # The template refuses one of the lists; the caller renders the turn alone.
+        return None
+    if isinstance(prev, str) and isinstance(full, str) and prev \
+            and full.startswith(prev):
+        return full[len(prev):]
+    return None
+
+
+def _render_turn(tok, state, messages, starts_cache: bool, template_kwargs) -> str:
+    """The text one turn appends to the cache, the thinking prefill
+    included. A turn that starts the cache renders ``messages`` whole. A
+    later turn renders the whole conversation and keeps the text past the
+    render of the cached history, so a header the template writes on every
+    render (a system block, a BOS) is not repeated. The turn renders on its
+    own, as before, when the template renders earlier turns differently
+    once a turn follows, and when the template kwargs differ from the last
+    turn's (a /thinking switch the template writes into its header)."""
+    from .reasoning import with_thinking_prefill
+
+    kwargs = dict(template_kwargs)
+    cp = state.turn_checkpoint
+    if cp is not None:
+        cp["render_kwargs"] = kwargs
+
+    def render(msgs, gen):
+        return tok.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=gen, **kwargs)
+
+    text = None
+    if (not starts_cache and state.transcript
+            and state.transcript[-1].get("render_kwargs") == kwargs):
+        text = _continuation(render, _conversation(state), messages)
+        if text is None and not state.render_fallback_logged:
+            state.render_fallback_logged = True
+            import logging
+
+            logging.getLogger(__name__).info(
+                "the chat template renders earlier turns differently once a "
+                "turn follows; later turns render on their own")
+    if text is None:
+        text = render(messages, True)
+    return with_thinking_prefill(text, state.thinking_prefill)
+
+
 def _prompt_opens_thinking_cfg(state, prompt_text) -> bool:
     """:func:`_opens_thinking` with the session's configured markers applied
     (the seed for the MTP path's ^T finish-thinking hook)."""
@@ -2335,16 +2421,6 @@ def _prompt_opens_thinking_cfg(state, prompt_text) -> bool:
 
     return prompt_opens_thinking(
         prompt_text, state.thinking_start_token, state.thinking_end_token)
-
-
-def _vlm_thinking_tokens(state) -> dict:
-    """The configured reasoning markers as mlx-vlm generate kwargs, omitting
-    the ones left unset - mlx-vlm defaults them to ``<think>`` / ``</think>``
-    and encodes whatever it is given, so an explicit None would fail there."""
-    return {k: v for k, v in (
-        ("thinking_start_token", state.thinking_start_token),
-        ("thinking_end_token", state.thinking_end_token),
-    ) if v}
 
 
 def _opens_header(prompt) -> bool:
@@ -2993,7 +3069,28 @@ def rope_override_from_args(args):
     return from_args(args)
 
 
-def _backend_vlm_mtp(args) -> _ChatBackend:
+def _place_vlm_text_tower(args, model, kv_kwargs) -> None:
+    """The placement of ``gmlx run``: it streams the text tower, and the
+    vision tower stays resident. A streamed tower takes the wider
+    streamed prefill chunk."""
+    import gmlx.load.loadlog as loadlog
+    from gmlx.commands.cli import _apply_placement
+    from gmlx.stream.expert_streaming import _resolve_prefill_step
+
+    lm = getattr(model, "language_model", model)
+    _apply_placement(args, lm)
+    step, defaulted = _resolve_prefill_step(
+        lm, kv_kwargs.get("prefill_step_size"))
+    if defaulted:
+        loadlog.info(
+            f"[prefill] streaming model: chunk size defaults to {step} "
+            "(--prefill-step-size overrides)"
+        )
+    if step is not None:
+        kv_kwargs["prefill_step_size"] = step
+
+
+def _backend_vlm_mtp(args, kv_kwargs) -> _ChatBackend:
     # VLM loaded on mlx-vlm classes + an assistant drafter: text-only turns
     # run through the MTP engine over a persistent text KV cache
     # (model.language_model), while image/audio turns use the plain VLM
@@ -3013,14 +3110,16 @@ def _backend_vlm_mtp(args) -> _ChatBackend:
             zero_copy=not args.no_zero_copy,
             rope_override=rope_override_from_args(args),
             verbose=args.verbose,
+            wire=not getattr(args, "stream_experts", False),
         )
+    _place_vlm_text_tower(args, b.model, kv_kwargs)
     b.model_type = _model_type(b.config)
     _require_chat_template(b.tok)
     b.new_text_cache = lambda: _mtp_make_cache(b.model.language_model)
     return b
 
 
-def _backend_vlm(args) -> _ChatBackend:
+def _backend_vlm(args, kv_kwargs) -> _ChatBackend:
     import gmlx.load.loadlog as loadlog
     from gmlx.load.vlm import load_vlm_model
 
@@ -3035,6 +3134,7 @@ def _backend_vlm(args) -> _ChatBackend:
             rope_override=rope_override_from_args(args),
             verbose=args.verbose,
         )
+    _place_vlm_text_tower(args, b.model, kv_kwargs)
     b.model_type = _model_type(b.config)
     return b
 
@@ -3047,11 +3147,9 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     from gmlx.cache.kv_cache import make_prompt_cache as _mtp_make_cache
     import gmlx.load.loadlog as loadlog
     from gmlx.commands.cli import _apply_placement
-    from gmlx.load.loader import preset_native_fp_wire_env
     from gmlx.spec.mtp_load import load_mtp_model
 
     b = _ChatBackend()
-    preset_native_fp_wire_env(args)
     with loadlog.load_ui(args.verbose, args.gguf):
         b.model, b.drafter, b.config, b.tok = load_mtp_model(
             args.gguf,
@@ -3149,11 +3247,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
     from gmlx.cache.kv_cache import make_prompt_cache
     import gmlx.load.loadlog as loadlog
     from gmlx.envflags import env_bool
-    from gmlx.load.loader import load_model, preset_native_fp_wire_env
-
-    # Sets GMLX_NATIVE_FP before the load reads it - on the background
-    # path load_model runs off-thread, so the env must be in place here.
-    preset_native_fp_wire_env(args)
+    from gmlx.load.loader import load_model
 
     b = _ChatBackend()
 
@@ -3355,9 +3449,9 @@ def _load_chat_backend(args, kv_kwargs, *, speculative: bool,
         (args.gguf, args.mmproj, getattr(args, "draft_gguf", None)),
         verbose=getattr(args, "verbose", False))
     if vlm_mtp:
-        return _backend_vlm_mtp(args)
+        return _backend_vlm_mtp(args, kv_kwargs)
     if args.mmproj is not None:
-        return _backend_vlm(args)
+        return _backend_vlm(args, kv_kwargs)
     if speculative:
         return _backend_mtp_text(args, kv_kwargs)
     return _backend_plain_text(args, kv_kwargs)
@@ -3459,8 +3553,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         if rc is not None:
             return rc
         # Chat holds the conversation, so its KV room is the serve
-        # context's. The VLM chat has no streamed placement.
-        preload_wire_check(args, depth=None, can_stream=not args.mmproj)
+        # context's.
+        preload_wire_check(args, depth=None)
         _ensure_stream_cb_caps(args)
         from gmlx.serve.cb_phase import install_cb_phase_steps
 
@@ -3498,8 +3592,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             )
             return 2
         if args.mmproj and (
-            args.stream_experts
-            or args.stream_cpu
+            args.stream_cpu
             or args.moe_experts is not None
             or args.moe_expert_mass is not None
             or args.moe_expert_probe
@@ -3507,10 +3600,10 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             or args.moe_layer_shed is not None
         ):
             print(
-                "error: --stream-experts/--stream-cpu/--moe-experts/"
-                "--moe-expert-mass/--moe-expert-probe/--moe-miss-shed/"
-                "--moe-layer-shed are text-only (no VLM "
-                "offload plumbing); drop --mmproj or the offload flags.",
+                "error: --stream-cpu/--moe-experts/--moe-expert-mass/"
+                "--moe-expert-probe/--moe-miss-shed/--moe-layer-shed are "
+                "text-only; drop --mmproj or the offload flags "
+                "(--stream-experts works with --mmproj).",
                 file=sys.stderr,
             )
             return 2
@@ -3573,7 +3666,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     file=sys.stderr,
                 )
         template_kwargs = fold_thinking_flag(
-            args, parse_template_config(args.chat_template_config))
+            args, parse_template_config(args.chat_template_config),
+            prefill=True)
         logit_bias = parse_logit_bias(args.logit_bias)
         resize_shape = parse_resize_shape(args.resize_shape)
 
@@ -3586,6 +3680,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     state.template_kwargs = template_kwargs
     if brain is None:
         state.template_text = _template_text(args)
+        state.thinking_prefill = getattr(args, "thinking_prefill", "")
     from .reasoning import want_color as _want_color
     from .render import resolve_render_mode
     from .theme import register_user_themes, resolve_theme
@@ -3845,7 +3940,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         entry = transcript[-1]
         rebuilt = False
         cp = entry.get("cache_before")
-        if cache is not None and (cp is None or _cache_tokens(cache) > cp):
+        held = _cache_tokens(cache)
+        if cache is not None and (cp is None or held > cp):
             lm = getattr(model, "language_model", model)
             if cp is None or not _trim_to(cache, cp, lm=lm):
                 cache = backend.new_text_cache()
@@ -3874,23 +3970,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 e["cache_before"] = None
             state.take("replay_messages")  # stale pre-pop history
             if transcript:
-                replay = []
-                if state.system_prompt:
-                    replay.append(
-                        {"role": "system", "content": state.system_prompt}
-                    )
-                for e in transcript:
-                    replay.append(
-                        {"role": "user", "content": e["user"].get("content", "")}
-                    )
-                    replay.append(
-                        {
-                            "role": "assistant",
-                            "content": e["assistant"].get("content", ""),
-                        }
-                    )
                 if not state.vlm or vlm_mtp:
-                    state.replay_messages = replay
+                    state.replay_messages = _conversation(state)
                 first_turn = False
                 print(
                     "[chat] this model's cache can't rewind in place - rebuilt; "
@@ -3898,6 +3979,14 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 )
             else:
                 first_turn = True
+        elif transcript and held and not _cache_tokens(cache):
+            # The popped turn prefilled the deferred replay (--resume, an
+            # earlier rebuild), so the trim emptied the cache under the
+            # history that remains: replay it with the next message.
+            state.take("replay_messages")
+            if not state.vlm or vlm_mtp:
+                state.replay_messages = _conversation(state)
+            first_turn = False
         hook = state.autosave
         if hook is not None:
             hook()
@@ -4113,10 +4202,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 messages.append({"role": "user", "content": user_text})
                 vlm_msgs.append(_vlm_message(model_type, user_text, "user", 0, 0))
                 first_turn = False
-                prompt_text = tok.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True,
-                    **template_kwargs,
-                )
+                prompt_text = _render_turn(
+                    tok, state, messages, starts_cache, template_kwargs)
                 prompt = _encode_turn(tok, prompt_text, starts_cache)
                 reply, _canceled = _stream_reply(
                     stream_generate_speculative(
@@ -4171,9 +4258,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             vlm_images.extend(imgs)
             vlm_audios.extend(auds)
             first_turn = False
-            prompt = get_chat_template(
+            from .reasoning import with_thinking_prefill
+
+            prompt = with_thinking_prefill(get_chat_template(
                 processor, vlm_msgs, add_generation_prompt=True, **template_kwargs
-            )
+            ), state.thinking_prefill)
             # No cross-turn KV cache on the VLM path yet: each turn
             # re-prefills the whole conversation (and re-encodes media).
             # mlx-vlm's own criteria enforces thinking_budget here; the
@@ -4186,6 +4275,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 prompt_opens_thinking,
                 set_finish_key_target,
                 think_tokenizer_for,
+                vlm_budget_kwargs,
             )
 
             vtok = think_tokenizer_for(processor)
@@ -4223,7 +4313,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                         # mlx-vlm types it as a pair but also takes one int.
                         resize_shape=cast(Any, resize_shape),
                         thinking_budget=state.thinking_budget,
-                        **_vlm_thinking_tokens(state),
+                        **vlm_budget_kwargs(
+                            state.thinking_budget,
+                            state.thinking_start_token,
+                            state.thinking_end_token, processor,
+                            prompt if isinstance(prompt, str) else None),
                         logits_processors=[tbp] if tbp is not None else None,
                         **kv_kwargs,
                     ),
@@ -4254,10 +4348,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             messages.append(
                 {"role": "user", "content": _compose_user_content(state, line)}
             )
-            prompt_text = tok.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True,
-                **template_kwargs,
-            )
+            prompt_text = _render_turn(
+                tok, state, messages, starts_cache, template_kwargs)
             prompt = _encode_turn(tok, prompt_text, starts_cache)
             first_turn = False
             reply, canceled = _stream_reply(
@@ -4351,10 +4443,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         else:
             # Render once, encode the render (``_encode_turn``); the string is
             # reused for thinking-budget seeding + reasoning detection.
-            prompt_text = tok.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True,
-                **template_kwargs,
-            )
+            prompt_text = _render_turn(
+                tok, state, messages, starts_cache, template_kwargs)
             prompt = _encode_turn(tok, prompt_text, starts_cache)
 
         xtc_kwargs = {}
