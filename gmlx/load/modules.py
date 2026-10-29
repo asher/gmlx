@@ -247,14 +247,19 @@ _KQ_DEDUP_MAX_T = 8
 _KQ_TUNED_CODECS = ("q6_k", "q8_0")
 
 
-def _kq_row_floor(glu, k: int, d_in: int) -> int:
-    """Fewest rows at which the fused GLU gather of ``glu`` runs the same
-    kernel as at every larger width."""
+def _kq_row_floor(glu, k: int, d_in: int, caps=None) -> int:
+    """Fewest rows at which the fused GLU and down gathers of ``glu`` run
+    the same kernels as at every larger width. A gate codec on kq's qf
+    kernels gives each row the same GLU bits at every width, and one row is
+    enough when the down codec is on them too."""
+    gate = glu.gate_proj.kquant_type
+    if caps is not None and caps.qf_codec(gate):
+        return 1 if caps.qf_codec(glu.down_proj.kquant_type) else 2
     floor = 2
     n = glu.gate_proj.weight.shape[1]
     if d_in >= _KQ_GLU_WIDE_MIN_K:
         floor = max(floor, -(-_KQ_GLU_WIDE_ROWS // (n * k)))
-    if glu.gate_proj.kquant_type in _KQ_TUNED_CODECS:
+    if gate in _KQ_TUNED_CODECS:
         floor = max(floor, _KQ_DEDUP_MAX_T + 1)
     return floor
 
@@ -292,6 +297,9 @@ class _FusedMoeCaps:
                 c for c in ("mxfp4", "nvfp4", "stq1_0", "q2_0")
                 if kq_has_glu(c))
         self.kq_fused_codecs = codecs
+        # Codecs whose fused gathers run on kq's qf kernels, which give each
+        # row the same bits at every call width; absent on older kq builds.
+        self._moe_qf = getattr(kq, "moe_qf_kernels", None)
         # Shared-expert codecs allowed to differ from the expert stacks (the
         # only mixed combos with kernels); needs the shexp_kquant_type-aware
         # ops.
@@ -374,6 +382,12 @@ class _FusedMoeCaps:
         # Bit-identical add + two norms in one dispatch (norm handoff).
         self.has_norm_handoff = hasattr(kq, "add_rmsnorm_norm")
 
+    def qf_codec(self, codec) -> bool:
+        """Whether kq runs ``codec``'s fused gathers on its qf kernels;
+        False for a projection with no codec (float experts)."""
+        return (self._moe_qf is not None and isinstance(codec, str)
+                and bool(self._moe_qf(codec)))
+
 
 def _swap_class(m, cache, factory, caps) -> None:
     """Swap ``m`` onto the fused subclass of its class, creating it on first
@@ -414,7 +428,8 @@ def _kq_dense(proj, codecs):
 
 # Gate/up codecs where the swiglu_oai fused gathers beat or tie the stock
 # path at every decode width and at streamed prefill, at the MiniMax-M3 shape
-# on an M5 Max. On the others they lose (q4_k up to 1.27x, q4_0 at T >= 8).
+# on an M5 Max. The others fuse where kq runs them on its qf kernels, which
+# beat the stock path there too; on older kq they lose (q4_k up to 1.27x).
 _SWIGLU_OAI_FAST_CODECS = frozenset((
     "iq1_s", "iq1_m", "iq2_xxs", "iq2_xs", "iq2_s", "iq3_xxs", "iq3_s",
     "stq1_0", "q5_k", "q6_k", "q8_0"))
@@ -442,7 +457,8 @@ def _kq_act_kind(m, caps):
         return "gelu"  # nn.gelu_approx == the kernel's tanh-approx gelu
     if name == "SwiGLUOAI" and "minimax_m3" in mod:
         # clamped SwiGLU without biases; the kernel needs limit and alpha
-        # both positive. Unset: fused on the fast gate/up codecs only.
+        # both positive. Unset: fused on the fast gate/up codecs and on
+        # kq's qf codecs.
         # GMLX_FUSED_MOE_SWIGLU_OAI=0 keeps the stock path, any other value
         # fuses every codec.
         lever = os.environ.get("GMLX_FUSED_MOE_SWIGLU_OAI", "")
@@ -451,7 +467,8 @@ def _kq_act_kind(m, caps):
         codec = getattr(getattr(m, "gate_proj", None), "kquant_type", None)
         if (caps.has_swiglu_oai and alpha > 0.0 and limit > 0.0
                 and lever != "0"
-                and (lever != "" or codec in _SWIGLU_OAI_FAST_CODECS)):
+                and (lever != "" or codec in _SWIGLU_OAI_FAST_CODECS
+                     or caps.qf_codec(codec))):
             return "swiglu_oai"
         return None
     if name == "LimitedSwiGLU" and "deepseek_v4" in mod:
@@ -920,14 +937,14 @@ def _make_fused_kquant(base_cls, caps):
 
         def _fused_rows(self, x, idx):
             """Unmixed ``(t, k, N)`` through kernels that give each row
-            the same result at every call width. The GLU gather changes
-            its kernel below a row count, so short calls get copies of
-            row 0 up to that count. The down gather has one kernel at
-            every width. The score-mixed down gather does not, so the mix
-            stays outside."""
+            the same result at every call width. The GLU and down gathers
+            change their kernels below a row count (_kq_row_floor), so
+            short calls get copies of row 0 up to that count. The
+            score-mixed down gather has no such count, so the mix stays
+            outside."""
             t, k = idx.shape
             xf = x.reshape(t, x.shape[-1])
-            pad = _kq_row_floor(self, k, xf.shape[-1]) - t
+            pad = _kq_row_floor(self, k, xf.shape[-1], caps) - t
             if pad > 0:
                 xf = mx.concatenate(
                     [xf, mx.broadcast_to(xf[:1], (pad, xf.shape[-1]))])

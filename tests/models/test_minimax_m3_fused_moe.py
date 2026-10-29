@@ -113,12 +113,48 @@ def test_unset_levers_fuse_a_fast_codec_and_fold_the_shared_expert(monkeypatch):
     assert blk.switch_mlp._kq_shexp_mod is blk.shared_experts
 
 
+@needs_shexp_oai
+def test_unset_levers_fuse_a_qf_codec(monkeypatch):
+    """q4_k gate/up runs on kq's qf kernels, which beat the stock path at
+    the M3 shape."""
+    if not hasattr(kq, "moe_qf_kernels"):
+        pytest.skip("installed mlx-kquant has no qf kernels")
+    monkeypatch.delenv("GMLX_FUSED_MOE_SWIGLU_OAI", raising=False)
+    monkeypatch.delenv("GMLX_FUSED_MOE_SHEXP_OAI", raising=False)
+    monkeypatch.setattr(kq, "moe_qf_kernels", _qf_q4_k)
+    blk = _block(codec="q4_k")
+    assert _installed(blk) == (1, 1)
+    assert blk.switch_mlp._kq_glu_act == "swiglu_oai"
+
+
+def _qf_q4_k(codec):
+    """kq.moe_qf_kernels on q4_k only; like the binding, a non-str raises."""
+    if not isinstance(codec, str):
+        raise TypeError(f"moe_qf_kernels(): incompatible argument {codec!r}")
+    return codec == "q4_k"
+
+
+@needs_oai
+def test_unset_lever_skips_float_experts(monkeypatch):
+    """Float experts have no codec for the qf check; they stay on the stock
+    path."""
+    monkeypatch.delenv("GMLX_FUSED_MOE_SWIGLU_OAI", raising=False)
+    monkeypatch.delenv("GMLX_FUSED_MOE_SHEXP_OAI", raising=False)
+    monkeypatch.setattr(kq, "moe_qf_kernels", _qf_q4_k, raising=False)
+    blk = m3.MiniMaxM3SparseMoeBlock(_args())
+    blk.eval()
+    assert _installed(blk) == (0, 0)
+    assert getattr(blk.switch_mlp, "_kq_glu_act", None) is None
+
+
 @needs_oai
 def test_unset_lever_keeps_a_slow_codec_on_the_stock_path(monkeypatch):
-    """q4_k gate/up runs slower fused at the M3 shape; =1 still forces it
+    """Off kq's qf kernels (an older kq, or KQ_MOE_QF=0), q4_k gate/up runs
+    slower fused at the M3 shape; =1 still forces it
     (test_lever_on_maps_swiglu_oai_with_its_constants)."""
     monkeypatch.delenv("GMLX_FUSED_MOE_SWIGLU_OAI", raising=False)
     monkeypatch.delenv("GMLX_FUSED_MOE_SHEXP_OAI", raising=False)
+    monkeypatch.setattr(kq, "moe_qf_kernels", lambda c: False, raising=False)
     blk = _block(codec="q4_k")
     assert _installed(blk) == (0, 0)
     assert getattr(blk.switch_mlp, "_kq_glu_act", None) is None
