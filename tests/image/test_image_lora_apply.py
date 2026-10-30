@@ -111,8 +111,9 @@ def test_a_step_under_an_adapter_equals_the_step_on_merged_weights(
 
 def test_a_dit_loaded_again_runs_the_table_the_pipeline_holds(tmp_path):
     """A staged serve entry lets its DiT go for each encode and loads it
-    again. The built tables, which hold the old leaves, go with it, and
-    the leaves of the new DiT read the pipeline's table."""
+    again. The built tables, which hold the old leaves, go with it by
+    reference counts alone, since a release runs no collector, and the
+    leaves of the new DiT read the pipeline's table."""
     import gc
     import weakref
 
@@ -121,11 +122,19 @@ def test_a_dit_loaded_again_runs_the_table_the_pipeline_holds(tmp_path):
     tid = _table(pipe, [(lora.load_adapter(pipe, write_adapter(
         tmp_path / "one.safetensors", "kohya", one)), 1.0)])
     want = _step(pipe, tid)
+    table = pipe.lora._cur[(tid, mx.float32, install.form())]
+    # One module reads its cached pair, the factor that once held a cycle.
+    assert type(table.get("layers.0.feed_forward.w1")).__name__ == "_Own"
+    del table
     old = weakref.ref(install.linear_leaves(pipe.dit)[QKV])
-    install.drop_built(pipe)
-    pipe.dit = None
     gc.collect()
-    assert old() is None
+    gc.disable()
+    try:
+        install.drop_built(pipe)
+        pipe.dit = None
+        assert old() is None
+    finally:
+        gc.enable()
     pipe.dit, _ = tiny_z_model()
     install.rewrap(pipe)
     assert np.array_equal(_step(pipe, tid), want)
@@ -308,7 +317,7 @@ def test_the_table_id_is_in_every_weight_dependent_cache_key(tmp_path):
     assert len(pipe.modulations) == 3 and len(pipe.captions) == 3
     assert {k[0] for k in pipe.tables._items} == {t1, t2}
     assert all(k[1] == mx.float32 for k in pipe.tables._items)
-    assert pipe.tables.bytes > 0
+    assert pipe.adapters.bytes > 0
     plan = api.plan_request(pipe, height=64, width=64, budget=float(1 << 40))
     assert plan.terms["adapters"] == pipe.adapters.bytes + pipe.tables.bytes
     # A family whose step is one forward has no step parts, and the plan
@@ -507,15 +516,56 @@ def test_each_placement_gives_the_step_on_merged_weights(tmp_path,
     assert rel_l2(got, _step(_merged([(adapter, 0.8)]))) <= STEP_TOL
     assert install.form() in (how, install.KERNEL)
     built = pipe.lora._cur[(tid, mx.float32, install.form())]
-    # q, k and v bands take the placement, and a whole weight is a block.
+    # q, k and v bands take the placement, and one pair over a whole
+    # weight reads the cached pair.
     assert type(built.get(QKV)).__name__ == kind
     assert type(built.get("noise_refiner.0.attention.qkv")).__name__ == kind
-    assert type(built.get("layers.0.feed_forward.w1")).__name__ == "_Block"
+    assert type(built.get("layers.0.feed_forward.w1")).__name__ == "_Own"
     if how != "block":
         spans = [s[:2] for s in built.get(
             "noise_refiner.0.attention.qkv").spans]
         assert spans == ([(128, 192)] if how == "slice"
                          else [(0, 128), (128, 192)])
+
+
+def test_one_pair_over_a_whole_weight_runs_on_the_cached_pair(tmp_path):
+    """A module with one pair over its whole weight in the activation
+    dtype reads the cached pair, at a strength whose scale is no power of
+    two, so a LoRA costs its file once. The table holds no copy while the
+    cache keeps the pair, and counts the pair once the cache sheds it."""
+    adapter = tiny_z_adapter(1, 4.0, wide=True)
+    pipe = _pipe()
+    ad = lora.load_adapter(pipe, write_adapter(
+        tmp_path / "a.safetensors", "kohya", adapter))
+    tid = _table(pipe, [(ad, 0.7)])
+    got = _step(pipe, tid)
+    assert rel_l2(got, _step(_merged([(adapter, 0.7)]))) <= STEP_TOL
+    path = "layers.0.feed_forward.w1"
+    (key,) = [k for p, _, patches in pipe.patch_tables[tid]["entries"]
+              if p == path for k, _ in patches]
+    pair = pipe.adapters.peek(key)
+    f = pipe.lora._cur[(tid, mx.float32, install.form())].get(path)
+    assert f.down is pair.down and f.up is pair.up
+    assert f.arrays() == []
+    pipe.adapters.clear()
+    assert [a.shape for a in f.arrays()] == [pair.down.shape, pair.up.shape]
+
+
+def test_the_cache_keeps_a_pair_without_a_copy():
+    """A LoRA's pairs reach the cache as the reader made them, so a load
+    never holds the file twice."""
+    pipe = _pipe()
+    down = mx.random.normal((256, 8192)).astype(mx.bfloat16)
+    up = mx.random.normal((8192, 256)).astype(mx.bfloat16)
+    mx.eval(down, up)
+    mx.synchronize()
+    before = mx.get_active_memory()
+    mx.reset_peak_memory()
+    key = install.register_pair(pipe, down, up, 16.0)
+    assert mx.get_peak_memory() - before < down.nbytes
+    pair = pipe.adapters.peek(key)
+    assert np.array_equal(np.array(pair.down.astype(mx.float32)),
+                          np.array(down.astype(mx.float32)))
 
 
 def test_the_placements_agree_on_a_kquant_base():

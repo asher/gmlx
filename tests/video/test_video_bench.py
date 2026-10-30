@@ -8,6 +8,7 @@ import gc
 import json
 import os
 import re
+import struct
 
 import numpy as np
 import pytest
@@ -357,11 +358,11 @@ SIZE_HINT = "Try a smaller size or a shorter clip"
      "the encode and the denoise", ENCODER_HINT),
     (24, False, "512x512x22", "this bench", "the encode", ENCODER_HINT),
     # The shape with the larger peak has the smaller decode.
-    (32, True, "1024x768x124,1344x768x56", "the 1024x768x124 shape",
+    (32, True, "1024x768x192,1344x768x56", "the 1024x768x192 shape",
      "the denoise", SIZE_HINT),
-    (32, True, "1344x768x56,1024x768x124", "the 1024x768x124 shape",
+    (32, True, "1344x768x56,1024x768x192", "the 1024x768x192 shape",
      "the denoise", SIZE_HINT),
-    (32, True, "1024x768x107,768x768x124", "the 1024x768x107 shape",
+    (32, True, "960x768x209,768x768x124", "the 960x768x209 shape",
      "the denoise", SIZE_HINT),
 ])
 def test_the_largest_phases_name_the_refused_shape(
@@ -374,8 +375,16 @@ def test_the_largest_phases_name_the_refused_shape(
         os.truncate(bench.files[k], n)
     argv = ["--shapes", shapes] if shapes else []
     if lora:
+        # lightx2v's file size behind a bf16 LoRA header.
         path = tmp_path / "lora.safetensors"
+        key = "diffusion_model.blocks.0.attn.out_proj"
+        head = json.dumps({
+            f"{key}.lora_down.weight": {"dtype": "BF16", "shape": [128, 7168],
+                                        "data_offsets": [0, 0]},
+            f"{key}.lora_up.weight": {"dtype": "BF16", "shape": [5376, 128],
+                                      "data_offsets": [0, 0]}}).encode()
         with open(path, "wb") as f:
+            f.write(struct.pack("<Q", len(head)) + head)
             f.truncate(LORA)
         argv += ["--adapter", str(path)]
     monkeypatch.delenv("GMLX_GOV_MARGIN", raising=False)
@@ -388,6 +397,25 @@ def test_the_largest_phases_name_the_refused_shape(
     assert f"error: {named} does not fit in memory: encode " in err
     assert f", with {over} over it. {hint}" in err
     assert _kinds(bench.ev, "load_encoder") == []
+
+
+def test_the_bench_prices_a_lone_bf16_lora_at_its_file(tmp_path):
+    names = {"model": "h3.gguf", "encoder": "enc.gguf",
+             "vae": "v.safetensors", "audio_vae": "a.safetensors"}
+    for name in names.values():
+        with open(tmp_path / name, "wb") as f:
+            f.truncate(1 << 20)
+    lora = tmp_path / "lora.safetensors"
+    head = json.dumps({"x.lora_down.weight": {
+        "dtype": "BF16", "shape": [4, 64], "data_offsets": [0, 0]}}).encode()
+    with open(lora, "wb") as f:
+        f.write(struct.pack("<Q", len(head)) + head)
+        f.truncate(LORA)
+    a = argparse.Namespace(no_decode=False,
+                           **{k: str(tmp_path / v) for k, v in names.items()})
+    files = vb._files(a, [(str(lora), 1.0)])
+    plan = vb._plan(hf.FAMILY, files, (1344, 768, 124), 25, True)
+    assert plan.terms["denoise"]["lora"] == LORA
 
 
 def test_a_long_prompt_can_stop_the_bench_alone(bench, monkeypatch,

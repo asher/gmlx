@@ -6,7 +6,9 @@ each call it asks the pipeline's ``PatchState`` for the factors of its
 module path under the active patch table. With none it calls the base
 leaf and returns that result. With factors it adds
 ``(x @ A^T) @ B^T`` to the base output on stock ops, where strength and
-``alpha / rank`` are folded into B.
+``alpha / rank`` are folded into B. A module with one pair over its whole
+weight in the activation dtype applies them to ``x @ A^T`` instead and
+reads the cached pair as it is, so its table holds no copy.
 
 The class is separate from the text adapter wrap in ``gmlx.load.modules``
 and reads nothing from ``gmlx.lora_rows``. That channel is global to the
@@ -113,8 +115,10 @@ def pair_hash(down: mx.array, up: mx.array, alpha: float | None) -> str:
 def register_pair(pipe, down, up, alpha: float | None = None) -> str:
     """Keep a pair in the pipeline's cache and return its content hash,
     which names it in patch table entries. A pair already held is not
-    stored again."""
-    down, up = mx.array(down), mx.array(up)
+    stored again. An MLX array is kept as it is, since a copy would hold
+    the pair twice while the reader still holds it."""
+    down, up = (a if isinstance(a, mx.array) else mx.array(a)
+                for a in (down, up))
     if down.ndim != 2 or up.ndim != 2 or up.shape[1] != down.shape[0]:
         raise AdapterError(
             f"a LoRA pair is down (rank, in) and up (out, rank), not "
@@ -222,6 +226,28 @@ class _Block:
 
     def __call__(self, base, x: mx.array) -> mx.array:
         return _add(base(x), x @ self.a_t, self.b_t)
+
+
+class _Own:
+    """One pair over the whole weight in the activation dtype, on the
+    cached pair's own arrays: ``x @ A^T`` times the part's strength and
+    ``alpha / rank``, then through B. The table holds no copy of the
+    pair while the cache keeps it."""
+
+    def __init__(self, part, kept):
+        self.down, self.up = part.down, part.up
+        f = part.strength * plan.pair_scale(part.alpha,
+                                            int(part.down.shape[0]))
+        self.scale = mx.array(f, part.down.dtype)
+        self._kept = kept
+
+    def arrays(self) -> list:
+        """The pair's arrays once the cache that kept them has shed
+        them."""
+        return [] if self._kept() else [self.down, self.up]
+
+    def __call__(self, base, x: mx.array) -> mx.array:
+        return _add(base(x), (x @ self.down.T) * self.scale, self.up.T)
 
 
 class _Slice:
@@ -350,7 +376,7 @@ def _strengths(parts: list) -> mx.array:
 
 
 def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base,
-             pair=None):
+             pair=None, kept=lambda: False):
     if how == KERNEL:
         how = "block"
         ranks = sum(int(p.down.shape[0]) for p in parts)
@@ -387,6 +413,10 @@ def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base,
             if all(fn is not None for fn in fns):
                 return _Split(full, dims[0], [fn for fn, _ in fns],
                               [w for _, w in fns])
+    one = parts[0]
+    if (len(parts) == 1 and one.band is None and one.down.dtype == dtype
+            and one.up.dtype == dtype):
+        return _Own(one, kept)
     return _Block(*_transposed(plan.block_diagonal(path, parts, dims),
                                dtype))
 
@@ -418,11 +448,12 @@ class BuiltTable:
     and a dtype that few leaves run in costs only their factors."""
 
     def __init__(self, parts: dict, leaves: dict, dtype, how: str,
-                 pairs=None):
+                 pairs=None, kept=None):
         self._parts = parts            # path -> [Part]
         self._leaves = leaves          # path -> base leaf
         self._dtype, self._how = dtype, how
         self._pairs = pairs            # (path, parts, dims) -> kernel pair
+        self._kept = kept              # path -> its pairs still cached
         self._built: dict = {}
 
     def __contains__(self, path: str) -> bool:
@@ -444,8 +475,12 @@ class BuiltTable:
             dims = linear_dims(leaf)
             pair = None if self._pairs is None else \
                 (lambda: self._pairs(path, parts, dims))
+            # Bound to the function, not the table: a factor that held
+            # the table would keep its leaves past drop_built.
+            held = self._kept
+            kept = (lambda: False) if held is None else (lambda: held(path))
             f = _factors(path, parts, dims, self._dtype, self._how, leaf,
-                         pair)
+                         pair, kept)
             mx.eval(f.arrays())
             self._built[path] = f
         return f
@@ -458,6 +493,8 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
     leaves = linear_leaves(pipe.dit)
     by_module: dict = {}
     named: dict = {}
+    held: dict = {}
+    owner = weakref.ref(pipe)
     for path, band, patches in table["entries"]:
         for key, strength in patches:
             if strength == 0.0:
@@ -470,10 +507,15 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
             by_module.setdefault(path, []).append(
                 plan.Part(pair.down, pair.up, pair.alpha, band, strength))
             named.setdefault(path, []).append((key, band))
+            held.setdefault(path, []).append((key, pair))
+
+    def kept(path: str) -> bool:
+        p = owner()
+        return p is not None and all(p.adapters.peek(k) is v
+                                     for k, v in held[path])
+
     pairs = None
     if how == KERNEL:
-        owner = weakref.ref(pipe)
-
         def pairs(path: str, parts: list, dims: tuple) -> tuple:
             # The pair of a module is named by its parts without their
             # strengths, so every table of those parts shares it. It is
@@ -495,7 +537,7 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
 
             return hit, kept
     return BuiltTable(by_module, {p: leaves[p] for p in by_module}, dtype,
-                      how, pairs)
+                      how, pairs, kept)
 
 
 class PatchState:

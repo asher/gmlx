@@ -201,7 +201,9 @@ class _Block(nn.Module):
 
     def hidden(self, h: mx.array) -> mx.array:
         """``silu(a) * b`` of the halves a, b of ``fc1(h)``: the rows that
-        ``fc2`` takes. The stock path runs ``MLP_ROWS`` rows a product."""
+        ``fc2`` takes. The stock path runs ``MLP_ROWS`` rows a product,
+        with a pause point after each, so a paced forward holds one
+        product at a time."""
         fc1 = self.mlp.fc1
         pair = ops.glu_halves(fc1, h)
         if pair is not None:
@@ -211,6 +213,7 @@ class _Block(nn.Module):
         for i in range(0, n, MLP_ROWS):
             a, b = mx.split(fc1(h[:, i:i + MLP_ROWS]), 2, axis=-1)
             out.append(ops.swiglu(a, b))
+            pacing.point(out[-1])
         return out[0] if len(out) == 1 else mx.concatenate(out, axis=1)
 
 
@@ -253,9 +256,12 @@ class DiTBlock(_Block):
 
     def attention(self, h: mx.array, cos: mx.array, sin: mx.array,
                   chunk: int | None = None) -> mx.array:
-        """The attention rows (B, L, inner) that ``out_proj`` takes."""
+        """The attention rows (B, L, inner) that ``out_proj`` takes. A
+        pause point after qkv keeps a LoRA delta's second product out of
+        the RoPE step's peak."""
         b, n, _ = h.shape
         q, k, v = self.qkv(h)
+        pacing.point(q, k, v)
         a, r = self.attn, self.rot
         q, k = ops.qk_norm_rope(
             rope.pair_halves(q, r), rope.pair_halves(k, r),

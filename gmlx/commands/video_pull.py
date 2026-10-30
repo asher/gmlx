@@ -164,13 +164,17 @@ def _smallest_run(plan: Plan):
     fam = get_family(plan.recipe.family)
     size = {p.role: memfit.file_bytes(p.path) if p.found else p.pin.size
             for p in plan.parts}
+    lora = plan.part("lora")
+    loras = [] if lora is None else [size["lora"]]
+    dtypes = [] if lora is None else [
+        memfit.lora_dtype(lora.path) if lora.found else None]
     side = 32
     rows, audio = memfit.clip_rows(fam, frames=hf.MIN_FRAMES, width=side,
                                    height=side, text=1)
     return memfit.plan_memory(
         fam.name, dit=size["dit"], encoder=size["encoder"], vae=size["tiny"],
         tiny=True, audio_vae=size["audio_vae"],
-        loras=[size["lora"]] if "lora" in size else [], rows=rows, text=1,
+        loras=loras, lora_dtypes=dtypes, rows=rows, text=1,
         audio_latents=audio, pixels=side * side)
 
 

@@ -8,9 +8,11 @@ a line fit of what the run adds, both read as MLX's active peak.
 - encode: the larger of the load, which maps the text encoder's file
   whole, and the run, which keeps part of the file once the layers past
   the tap drop and adds the prompt's activations by text row.
-- denoise: the DiT's file, each LoRA at ``lora_k`` times its file (its
-  factors and the table built from them), and one step's activations by
-  row of the packed sequence.
+- denoise: the DiT's file, its LoRAs, and one step's activations by row
+  of the packed sequence. A lone LoRA in the DiT's activation dtype runs
+  on its file's arrays and costs its file once. Any other LoRA costs
+  ``lora_k`` times its file: its arrays and the copies the patch table
+  builds from them.
 - audio: the audio VAE's file and its decode by audio latent.
 - decode: the video VAE's file, or TAEH3's for a preview, and one chunk
   of frames by output pixel. A chunk does not grow with the clip.
@@ -50,6 +52,7 @@ class VideoPeaks:
     audio: Line                     # per audio latent
     decode: Line                    # per output pixel
     tiny_decode: Line               # per output pixel, TAEH3
+    lora_dtype: str = "BF16"        # the DiT's activation dtype
     lora_k: float = 2.0
 
 
@@ -65,11 +68,11 @@ class VideoPeaks:
 # 1.61 GiB over that, through the 1001 and 5001 token cells. A plan
 # counts the prompt's rows by the encoder's own tokenizer.
 #
-# A step reads 0.88 to 21.41 GiB over the DiT and twice each LoRA from
-# 1891 to 109087 rows (15 s at 1344x768), and 0.69 to 6.35 GiB over the
-# DiT with no LoRA up to 37735 rows. A second LoRA adds 0.03 GiB to the
-# step. Both lines run through the 21751 and 37735 row cells, which puts
-# the LoRA line 2.91 GiB over the 109087 row cell.
+# A step reads 0.74 to 16.67 GiB over the DiT and its LoRA from 1891 to
+# 109087 rows (15 s at 1344x768), and 0.57 to 5.31 GiB over the DiT with
+# no LoRA up to 37735 rows. A second LoRA, at twice each file, adds 0.02
+# GiB to the step. Both lines run through the 21751 and 37735 row cells,
+# which puts the LoRA line 2.35 GiB over the 109087 row cell.
 #
 # The audio decode reads 1.30 to 3.59 GiB over its file from 37 to 603
 # latents (a 15 s clip has 603), through the 150 and 603 latent cells.
@@ -81,9 +84,9 @@ PEAKS = {
         encoder_load=0.26 * GiB,
         encoder_keep=0.76,
         encode=Line(0.80 * GiB, 255_000),
-        step=Line(0.73 * GiB, 232_200),
-        plain_step=Line(0.60 * GiB, 195_800),
-        audio=Line(1.97 * GiB, 3_980_000),
+        step=Line(0.69 * GiB, 180_400),
+        plain_step=Line(0.54 * GiB, 163_500),
+        audio=Line(2.01 * GiB, 3_980_000),
         decode=Line(1.24 * GiB, 530),
         tiny_decode=Line(0.43 * GiB, 3_200)),
 }
@@ -168,26 +171,28 @@ class VideoPlan:
 
 
 def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
-                audio_vae: int, loras=(), rows: int, text: int,
-                audio_latents: int, pixels: int, tiny: bool = False,
-                decode: bool = True,
+                audio_vae: int, loras=(), lora_dtypes=(), rows: int,
+                text: int, audio_latents: int, pixels: int,
+                tiny: bool = False, decode: bool = True,
                 budget: float | None = None) -> VideoPlan:
-    """The plan of one run. File sizes in bytes; ``rows`` is the packed
-    sequence's length, ``text`` the prompt's rows, ``audio_latents`` the
-    audio stream's length and ``pixels`` a frame's width times height.
-    ``vae`` is TAEH3's file when ``tiny``. With ``decode`` False the plan
-    has no audio or decode phase. ``budget`` defaults to
-    ``capacity.working_budget_bytes()``."""
+    """The plan of one run. File sizes in bytes; ``lora_dtypes`` holds
+    each LoRA's ``lora_dtype`` result, and a LoRA with none is priced
+    with copies. ``rows`` is the packed sequence's length, ``text`` the
+    prompt's rows, ``audio_latents`` the audio stream's length and
+    ``pixels`` a frame's width times height. ``vae`` is TAEH3's file
+    when ``tiny``. With ``decode`` False the plan has no audio or decode
+    phase. ``budget`` defaults to ``capacity.working_budget_bytes()``."""
     p = PEAKS[family]
     load = encoder + p.encoder_load
     kept, prompt = p.encoder_keep * encoder, p.encode.bytes(text)
     lora = sum(int(b) for b in loras)
+    alone = len(loras) == 1 and list(lora_dtypes) == [p.lora_dtype]
     step = p.step if lora else p.plain_step
     terms = {
         "encode": ({"encoder": encoder, "load": p.encoder_load}
                    if load >= kept + prompt
                    else {"encoder": kept, "prompt": prompt}),
-        "denoise": {"dit": dit, "lora": p.lora_k * lora,
+        "denoise": {"dit": dit, "lora": lora if alone else p.lora_k * lora,
                     "step": step.bytes(rows)},
     }
     if decode:
@@ -236,6 +241,21 @@ def file_bytes(path: str) -> int:
     return os.path.getsize(path)
 
 
+def lora_dtype(path: str) -> str | None:
+    """The one dtype of a safetensors LoRA's matrices, as its header
+    names it, or None for a file of mixed dtypes or of another form."""
+    from gmlx.image.vae.reader import VAEError, safetensors_header
+
+    try:
+        header, _ = safetensors_header(os.path.expanduser(path))
+    except (OSError, VAEError):
+        return None
+    kinds = {v.get("dtype") for k, v in header.items()
+             if k != "__metadata__" and isinstance(v, dict)
+             and len(v.get("shape", ())) == 2}
+    return kinds.pop() if len(kinds) == 1 else None
+
+
 def plan_run(fam, *, dit: str, encoder: str, vae: str, audio_vae: str,
              loras=(), frames: int, width: int, height: int, text: int,
              tiny: bool = False, budget: float | None = None) -> VideoPlan:
@@ -245,7 +265,8 @@ def plan_run(fam, *, dit: str, encoder: str, vae: str, audio_vae: str,
     return plan_memory(fam.name, dit=file_bytes(dit),
                        encoder=file_bytes(encoder), vae=file_bytes(vae),
                        audio_vae=file_bytes(audio_vae),
-                       loras=[file_bytes(p) for p in loras], rows=rows,
+                       loras=[file_bytes(p) for p in loras],
+                       lora_dtypes=[lora_dtype(p) for p in loras], rows=rows,
                        text=text, audio_latents=audio,
                        pixels=width * height, tiny=tiny, budget=budget)
 

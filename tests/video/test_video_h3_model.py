@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from mlx.utils import tree_map
 
+from gmlx.image import ops, pacing
 from gmlx.video import api, layout, schedule
 from gmlx.video.families.h3 import family as hf
 from gmlx.video.families.h3 import model as hm
@@ -178,6 +179,43 @@ def test_chunked_attention_matches_one_call(tiny):
     for x, y in zip(one, many):
         np.testing.assert_allclose(np.array(x), np.array(y), rtol=1e-4,
                                    atol=1e-5)
+
+
+def test_the_stock_feed_forward_pauses_after_each_row_chunk(tiny,
+                                                            monkeypatch):
+    """Off the fused kernel, as under a live LoRA, the feed-forward runs
+    ``MLP_ROWS`` rows a product with a pause point after each, so a
+    paced forward holds one product at a time."""
+    monkeypatch.setattr(hm, "MLP_ROWS", 16)
+    blk = tiny.blocks[0]
+    h = mx.random.normal((1, 40, TINY["hidden_size"]))
+    seen = []
+
+    def pacer(arrays):
+        seen.append(tuple(arrays[0].shape))
+        mx.eval(*arrays)
+
+    with pacing.paced(pacer):
+        got = blk.hidden(h)
+    ffn = TINY["ffn_dim"]
+    assert seen == [(1, 16, ffn), (1, 16, ffn), (1, 8, ffn)]
+    a, b = mx.split(blk.mlp.fc1(h), 2, axis=-1)
+    np.testing.assert_allclose(np.array(got), np.array(ops.swiglu(a, b)),
+                               rtol=1e-6, atol=1e-7)
+
+
+def test_a_block_pauses_after_qkv_before_rope(tiny):
+    """A paced forward evaluates q, k and v before RoPE, so a LoRA
+    delta's second qkv product is gone before RoPE's copies exist."""
+    blk = tiny.blocks[0]
+    vs, aus = hf.latent_shapes(22, 128, 128)
+    lay = layout.pack(hf.TIMELINE, 8, *vs[2:], aus[3])
+    plan = tiny.plan(lay, 0.25, 0.6)
+    h = mx.random.normal((1, lay.rows, TINY["hidden_size"]))
+    seen = []
+    with pacing.paced(lambda arrays: seen.append(len(arrays))):
+        blk.attention(h, plan.cos, plan.sin, chunk=None)
+    assert seen == [3]
 
 
 @pytest.mark.parametrize("given", [False, True])

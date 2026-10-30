@@ -70,9 +70,6 @@ decoded 124 of 124 frames
 wrote musician.mp4 in 427 s
 ```
 
-On a 32 or 36 GB Mac, keep `--size 768x768` in every command on this
-page. The default size, 1344x768, needs 48 GB with `h3`.
-
 Without `--output`, the clip goes to `gmlx-<time>-<seed>.mp4` in the
 current folder. Without `--seed`, each run picks a seed and prints it.
 Pass it back with `--seed` to make the same clip again.
@@ -114,10 +111,10 @@ height, in multiples of 32. A clip is 1344x768 for 5 seconds when you set
 neither:
 
 ```sh
-gmlx video generate h3 --size 768x768 --seconds 10 --prompt "..."
+gmlx video generate h3 --size 768x1344 --seconds 10 --prompt "..."
 ```
 
-This clip needs 48 GB with `h3`. A 32 GB Mac makes it with `h3-base`.
+This portrait clip needs 48 GB with `h3`, or 36 GB with `h3-base`.
 
 The Turbo LoRAs were made for a short side of 768, as in 1344x768,
 768x1344 and 768x768. A longer or larger clip takes more memory, and its
@@ -128,13 +125,13 @@ The largest clip each Mac makes:
 
 | Mac memory | `h3` and `h3-fast` | `h3-base` |
 |------------|--------------------|-----------|
-| 32 GB, 36 GB | 768x768, 5 s | 1344x768, 5 s, or 768x768 up to 10 s |
-| 48 GB | 1344x768, 5 s, or 768x768 up to 15 s | 1344x768 up to 10 s, or 768x768 up to 15 s |
+| 32 GB | 1344x768, 5 s | 1344x768, 5 s, or 768x768 up to 10 s |
+| 36 GB | 1344x768, 5 s, or 768x768 up to 10 s | 1344x768 up to 10 s, or 768x768 up to 15 s |
+| 48 GB | 1344x768 up to 10 s, or 768x768 up to 15 s | 1344x768 up to 15 s |
 | 64 GB or more | 1344x768 up to 15 s | 1344x768 up to 15 s |
 
 [`gmlx video bench`](cli.md#video-bench) measures the time and memory of
-a few clip shapes on your Mac. On a 32 or 36 GB Mac, pass
-`--shapes 512x512x22,768x768x124`.
+a few clip shapes on your Mac.
 
 ## Dialogue
 
@@ -178,10 +175,12 @@ optional strength after a colon:
 gmlx video generate h3 --adapter ~/models/loras/style.safetensors:0.8 --prompt "..."
 ```
 
-Repeat the flag to stack LoRAs. Each one takes memory, about twice the
-size of its file. On a 32 GB Mac, a 5 second clip at 768x768 has room
-for a LoRA file of up to 2 GB beside `h3-base`, and up to 250 MB beside
-`h3`. The
+Repeat the flag to stack LoRAs. A LoRA takes memory about the size of
+its file when it runs alone and its file is bf16, as the recipes' LoRAs
+are, and about twice its size otherwise. An `--adapter` on `h3` or
+`h3-fast` stacks on the recipe's LoRA, so both take twice. On a 32 GB
+Mac, a 5 second clip at 768x768 has room for a bf16 LoRA file of up to
+5 GB beside `h3-base`, and up to 800 MB beside `h3`. The
 [`adapters`](config.md#video_modelsadapters) key of the model's entry
 applies LoRAs to every clip.
 

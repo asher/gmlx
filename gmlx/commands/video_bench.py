@@ -141,13 +141,14 @@ def _rows(lay, text: int) -> dict:
 
 def _files(a, adapters) -> dict:
     """The name and bytes of each file the bench reads."""
-    from gmlx.video.memfit import file_bytes
+    from gmlx.video.memfit import file_bytes, lora_dtype
 
     def one(path):
         p = os.path.expanduser(path)
         return {"file": os.path.basename(p), "bytes": file_bytes(p)}
     out = {"dit": one(a.model), "encoder": one(a.encoder),
-           "adapters": [one(p) for p, _ in adapters]}
+           "adapters": [dict(one(p), dtype=lora_dtype(p))
+                        for p, _ in adapters]}
     if not a.no_decode:
         out.update(vae=one(a.vae), audio_vae=one(a.audio_vae))
     return out
@@ -164,7 +165,9 @@ def _plan(fam, files, shape, text: int, decode: bool):
         encoder=files["encoder"]["bytes"],
         vae=files["vae"]["bytes"] if decode else 0,
         audio_vae=files["audio_vae"]["bytes"] if decode else 0,
-        loras=[f["bytes"] for f in files["adapters"]], rows=rows, text=text,
+        loras=[f["bytes"] for f in files["adapters"]],
+        lora_dtypes=[f["dtype"] for f in files["adapters"]], rows=rows,
+        text=text,
         audio_latents=audio, pixels=w * h, decode=decode)
 
 

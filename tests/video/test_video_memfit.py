@@ -5,7 +5,10 @@ rows of a clip; what each file costs; the refusal and its message. CPU,
 no weights."""
 from __future__ import annotations
 
+import json
+import os
 import re
+import struct
 
 import pytest
 from video_fixtures import load_json
@@ -27,7 +30,8 @@ def _plan(cell, files):
     return memfit.plan_memory(
         "h3", dit=files["dit"], encoder=files["encoder"], vae=files["vae"],
         audio_vae=files["audio_vae"],
-        loras=[files["lora"]] * cell["loras"], rows=rows["total"],
+        loras=[files["lora"]] * cell["loras"],
+        lora_dtypes=["BF16"] * cell["loras"], rows=rows["total"],
         text=rows["text"], audio_latents=rows["audio"] // 2, pixels=w * h,
         budget=None)
 
@@ -139,18 +143,47 @@ def test_the_rows_are_the_layouts():
             c["rows"]["total"], c["rows"]["audio"] // 2)
 
 
-def test_each_lora_costs_twice_its_file_and_its_own_step():
+def test_a_lone_lora_in_the_dit_dtype_costs_its_file_and_others_twice():
     kw = dict(dit=10 * GiB, encoder=18 * GiB, vae=5 * GiB, audio_vae=GiB,
               rows=20_000, text=25, audio_latents=200, pixels=1 << 20,
               budget=None)
+
+    def lora(loras, dtypes):
+        return memfit.plan_memory("h3", loras=loras, lora_dtypes=dtypes,
+                                  **kw).terms["denoise"]["lora"]
+    assert lora([2 * GiB], ["BF16"]) == 2 * GiB
+    assert lora([2 * GiB], ["F32"]) == 4 * GiB
+    assert lora([2 * GiB], [None]) == 4 * GiB
+    assert lora([2 * GiB, GiB], ["BF16", "BF16"]) == 6 * GiB
     plain = memfit.plan_memory("h3", **kw)
-    one = memfit.plan_memory("h3", loras=[2 * GiB], **kw)
-    two = memfit.plan_memory("h3", loras=[2 * GiB, GiB], **kw)
-    assert one.terms["denoise"]["lora"] == 4 * GiB
-    assert two.terms["denoise"]["lora"] == 6 * GiB
+    one = memfit.plan_memory("h3", loras=[2 * GiB], lora_dtypes=["BF16"],
+                             **kw)
     assert one.terms["denoise"]["step"] == ROW.step.bytes(20_000)
     assert plain.terms["denoise"]["step"] == ROW.plain_step.bytes(20_000)
     assert plain.phases["encode"] == one.phases["encode"]
+
+
+def _safetensors(path, tensors: dict) -> None:
+    head = json.dumps({k: {"dtype": d, "shape": s, "data_offsets": [0, 0]}
+                       for k, (d, s) in tensors.items()}).encode()
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(head)) + head)
+
+
+def test_a_lora_file_names_its_matrices_dtype(tmp_path):
+    """lightx2v's files hold BF16 matrices and an F32 alpha per module."""
+    key = "diffusion_model.blocks.0.attn.out_proj"
+    _safetensors(tmp_path / "turbo.safetensors", {
+        f"{key}.lora_down.weight": ("BF16", [128, 7168]),
+        f"{key}.lora_up.weight": ("BF16", [5376, 128]),
+        f"{key}.alpha": ("F32", [])})
+    assert memfit.lora_dtype(str(tmp_path / "turbo.safetensors")) == "BF16"
+    _safetensors(tmp_path / "mixed.safetensors", {
+        f"{key}.lora_down.weight": ("F32", [128, 7168]),
+        f"{key}.lora_up.weight": ("BF16", [5376, 128])})
+    assert memfit.lora_dtype(str(tmp_path / "mixed.safetensors")) is None
+    (tmp_path / "lora.gguf").write_bytes(b"GGUF" + bytes(60))
+    assert memfit.lora_dtype(str(tmp_path / "lora.gguf")) is None
 
 
 def test_a_preview_prices_taeh3():
@@ -192,6 +225,15 @@ def test_a_run_plan_reads_every_file_and_shard(tmp_path, monkeypatch):
                                     "chunk": ROW.decode.bytes(512 * 320)}
     assert plan.rows == memfit.clip_rows(hf.FAMILY, frames=22, width=512,
                                          height=320, text=25)[0]
+    # A lone bf16 LoRA, as the recipes pull, costs its file once.
+    _safetensors(tmp_path / "l1.safetensors", {
+        "x.lora_down.weight": ("BF16", [4, 64]),
+        "x.lora_up.weight": ("BF16", [64, 4])})
+    os.truncate(tmp_path / "l1.safetensors", 17 << 20)
+    kw["loras"] = ["~/l1.safetensors"]
+    plan = memfit.plan_run(hf.FAMILY, vae="~/v.safetensors",
+                           audio_vae="~/a.safetensors", **kw)
+    assert plan.terms["denoise"]["lora"] == 17 << 20
 
 
 # Refusals, on the measured files with the LoRA.
@@ -202,7 +244,8 @@ def _h3(w, h, f, text=25, budget=None):
                                    text=text)
     return memfit.plan_memory(
         "h3", dit=FILES["dit"], encoder=FILES["encoder"], vae=FILES["vae"],
-        audio_vae=FILES["audio_vae"], loras=[FILES["lora"]], rows=rows,
+        audio_vae=FILES["audio_vae"], loras=[FILES["lora"]],
+        lora_dtypes=["BF16"], rows=rows,
         text=text, audio_latents=audio, pixels=w * h, budget=budget)
 
 
@@ -233,13 +276,14 @@ def test_on_24_gb_every_clip_names_the_encoder(no_overcommit):
         _h3(1344, 768, 124, budget=budget))
 
 
-def test_on_32_gb_768_fits_and_a_prompt_can_be_too_long(no_overcommit):
+def test_on_32_gb_the_default_clip_fits_and_a_prompt_can_be_too_long(
+        no_overcommit):
     budget = capacity.ram_budget_bytes(32 * GiB)
-    assert _h3(768, 768, 124, budget=budget).fits
+    assert _h3(1344, 768, 124, budget=budget).fits
     # About 2.6 KB of English, priced by its tokens.
-    assert _h3(768, 768, 124, text=600, budget=budget).fits
+    assert _h3(1344, 768, 124, text=600, budget=budget).fits
     assert _h3(512, 512, 22, text=7000, budget=budget).fits
-    msg = _refusal(_h3(1344, 768, 124, budget=budget))
+    msg = _refusal(_h3(1344, 768, 243, budget=budget))
     assert "with the denoise over it. Try a smaller size or a shorter clip" \
         in msg
     msg = _refusal(_h3(512, 512, 22, text=30_000, budget=budget))

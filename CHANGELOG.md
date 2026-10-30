@@ -12,6 +12,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prompt with MiniMax-H3, as a preview. See [Video generation](docs/video.md)
   and its [licenses](docs/video.md#licenses).
 
+### Changed
+
+- An image LoRA takes less memory: loading one no longer holds its file
+  twice, and a single bf16 LoRA no longer copies its weights.
+
 ## [0.5.4] - 2026-10-29
 
 ### Added
