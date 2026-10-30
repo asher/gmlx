@@ -45,7 +45,7 @@
     "version": "2.5.3"
    },
    "comfy-kitchen": {
-    "version": "0.2.35"
+    "version": "0.2.40"
    }
   },
   "hf_hub_offline": "1"
@@ -85,7 +85,7 @@
   "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
   "timestep": "sigma x 1000 in float32 in both modes",
   "attention": "attention_pytorch",
-  "comfy": "8d534945ebd53cff61e8def81757c6a6c1b9cf2d",
+  "comfy": "426f5eea52a7ece1dd599fff4cb6cd1f352ddd24",
   "comfy_gguf": "373048b8403a7820620065210a691263d4da0a61",
   "sigma_v": 0.8999999761581421,
   "t_video": 0.10000002384185791,
@@ -1187,9 +1187,9 @@
   }
  },
  "notes": [
-  "oracle: ComfyUI 8d534945ebd53cff61e8def81757c6a6c1b9cf2d, ComfyUI-GGUF 373048b8403a7820620065210a691263d4da0a61, UnetLoaderGGUF with dequant_dtype float32"
+  "oracle: ComfyUI 426f5eea52a7ece1dd599fff4cb6cd1f352ddd24, ComfyUI-GGUF 373048b8403a7820620065210a691263d4da0a61, UnetLoaderGGUF with dequant_dtype float32"
  ],
- "created": "2026-10-28T00:44:14Z",
+ "created": "2026-10-30T01:38:51Z",
  "npz": "check3_h3_64x64x5.npz",
  "tensors": {
   "audio": {

@@ -351,7 +351,7 @@ CHILD = "GMLX_BLOCK_GATES_CHILD"
 def test_the_exact_path_reads_the_process_not_the_variable(monkeypatch):
     """A variable set after the first product, as a command run in this
     process once set it, does not make the process exact."""
-    from gmlx.image.families.qwen_image21.edit import f32_products_exact
+    from gmlx.image.float32 import f32_products_exact
 
     want = not f32_products_exact()
     for value in ("0", "1"):

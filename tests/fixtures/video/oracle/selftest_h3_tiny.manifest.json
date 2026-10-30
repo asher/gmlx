@@ -39,7 +39,7 @@
     "version": "2.5.3"
    },
    "comfy-kitchen": {
-    "version": "0.2.35"
+    "version": "0.2.40"
    }
   },
   "hf_hub_offline": "1"
@@ -104,7 +104,7 @@
   "text_rows": 8,
   "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
   "attention": "attention_pytorch",
-  "comfy": "8d534945ebd53cff61e8def81757c6a6c1b9cf2d",
+  "comfy": "426f5eea52a7ece1dd599fff4cb6cd1f352ddd24",
   "sigma_v": 0.6875,
   "t_video": 0.3125,
   "t_audio": 0.6451612710952759,
@@ -303,7 +303,7 @@
  "notes": [
   "the weights are in selftest_h3_tiny_weights by name in torch order"
  ],
- "created": "2026-10-28T00:43:53Z",
+ "created": "2026-10-30T01:38:04Z",
  "npz": "selftest_h3_tiny.npz",
  "tensors": {
   "audio": {

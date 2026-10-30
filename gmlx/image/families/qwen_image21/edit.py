@@ -51,67 +51,12 @@ import mlx.nn as nn
 import numpy as np
 
 from gmlx.image.conditioning import Reference
+from gmlx.image.float32 import (exact_matmul, f32_products_exact,
+                                tf32_exact)
 
 from .family import PROMPT, REFERENCES
 
 MAX_ASPECT = 200            # the image processor refuses a longer image
-
-_F32_EXACT: dict[str, bool] = {}    # by default device
-
-
-def f32_products_exact() -> bool:
-    """Whether the default device multiplies float32 matrices at float32
-    precision. MLX runs float32 matrix products at TF32 precision on
-    M5-class GPUs unless ``MLX_ENABLE_TF32=0`` is set before the first
-    product of the process, and it reads the switch once. Each device is
-    measured once against a product on the CPU."""
-    key = str(mx.default_device())
-    hit = _F32_EXACT.get(key)
-    if hit is None:
-        a = mx.random.normal((64, 64), key=mx.random.key(0))
-        b = mx.random.normal((64, 64), key=mx.random.key(1))
-        gap = mx.abs(mx.matmul(a, b) - mx.matmul(a, b, stream=mx.cpu)).max()
-        hit = _F32_EXACT[key] = float(gap) < 1e-3
-    return hit
-
-
-# A TF32 operand keeps 10 of the 23 mantissa bits of a float32.
-_TF32_HIGH = 0xFFFFE000
-
-
-def _split(a: mx.array) -> tuple[mx.array, mx.array]:
-    """``a`` as the part a TF32 product reads exactly, the low 13 mantissa
-    bits cleared, and the rest, which is exact in float32."""
-    high = mx.view(mx.bitwise_and(mx.view(a, mx.uint32),
-                                  mx.array(_TF32_HIGH, mx.uint32)),
-                   mx.float32)
-    return high, a - high
-
-
-def tf32_exact(a: mx.array) -> mx.array:
-    """Whether every value of float32 ``a`` is its own high part, as the
-    values of a bfloat16 tensor read as float32 are."""
-    low = mx.bitwise_and(mx.view(a, mx.uint32),
-                         mx.array(~_TF32_HIGH & 0xFFFFFFFF, mx.uint32))
-    return mx.all(low == 0)
-
-
-def exact_matmul(a: mx.array, b: mx.array, *, b_t: bool = False,
-                 b_exact: bool = False) -> mx.array:
-    """``a @ b`` in float32, or ``a @ b.T`` with ``b_t``, at float32
-    precision on a device that multiplies float32 at TF32: the product of
-    the high parts and the two cross products. The product of the two low
-    parts is under the rounding of a float32. With ``b_exact``, ``b`` is
-    its own high part and its cross product is zero, so ``b`` is not
-    split."""
-    ah, al = _split(a)
-    if b_exact:
-        bh = b.T if b_t else b
-        return ah @ bh + al @ bh
-    bh, bl = _split(b)
-    if b_t:
-        bh, bl = bh.T, bl.T
-    return ah @ bh + (ah @ bl + al @ bh)
 
 
 class ExactLinear(nn.Module):

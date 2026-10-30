@@ -263,7 +263,7 @@ def tf32() -> bool:
     """Whether this process multiplies float32 at TF32 precision, as
     measured: MLX reads MLX_ENABLE_TF32 once, so the variable set after
     the first product says nothing of the process."""
-    from gmlx.image.families.qwen_image21.edit import f32_products_exact
+    from gmlx.image.float32 import f32_products_exact
 
     return not f32_products_exact()
 

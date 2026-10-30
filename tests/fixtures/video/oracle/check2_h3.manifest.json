@@ -38,7 +38,7 @@
     "version": "2.5.3"
    },
    "comfy-kitchen": {
-    "version": "0.2.35"
+    "version": "0.2.40"
    }
   },
   "hf_hub_offline": "1"
@@ -67,7 +67,7 @@
    "dialogue": 56,
    "markup": 42
   },
-  "comfyui_commit": "8d534945ebd53cff61e8def81757c6a6c1b9cf2d",
+  "comfyui_commit": "426f5eea52a7ece1dd599fff4cb6cd1f352ddd24",
   "tap": "output of decoder layer 50 of 64, before the final norm, every row",
   "tokenizer": "comfy.text_encoders.minimax.MiniMaxH3Tokenizer: raw prompt ids, no template, the seven MiniMax tokens at their fixed ids, an empty prompt the pad token 151643",
   "encoder": "transformers Qwen3VLTextDecoderLayer, one resident at a time, weights from the text GGUF by gguf-py float32 dequantization; SDPA attention, causal, batch 1, no padding",
@@ -475,7 +475,7 @@
    }
   },
   "seconds": {
-   "layers_s": 132.1
+   "layers_s": 138.4
   }
  },
  "tolerances": {
@@ -509,7 +509,7 @@
   }
  },
  "notes": [],
- "created": "2026-10-28T04:35:37Z",
+ "created": "2026-10-30T01:48:14Z",
  "npz": "check2_h3.npz",
  "tensors": {
   "ids_dialogue": {

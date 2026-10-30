@@ -1,0 +1,9145 @@
+{
+ "schema": 1,
+ "name": "selftest_h3_vae",
+ "check": 5,
+ "family": "h3",
+ "script": "scripts/video_oracle/check5_h3.py",
+ "argv": [
+  "check5_h3.py",
+  "--comfy-dir",
+  "ComfyUI-h3",
+  "--self-test"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.0"
+   },
+   "diffusers": null,
+   "transformers": {
+    "version": "5.17.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": null,
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   },
+   "comfy-kitchen": {
+    "version": "0.2.40"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "vae": {
+   "name": "vae.safetensors",
+   "size": 12957968,
+   "sha256": "d3c56ecadea409f3bb9add69a668fd588bb9895a9e76cb6d4d67d0ffacc78039"
+  },
+  "tiny": {
+   "name": "tiny.safetensors",
+   "size": 45407704,
+   "sha256": "385a717f2f1314aed5d4a052160b08e26e85841708dd985d4956ba283146a704"
+  },
+  "audio_vae": {
+   "name": "audio_vae.safetensors",
+   "size": 14323128,
+   "sha256": "ee12a115d0bc8029b6a2b2739478e059aa13b239caa70b23962b04e264989218"
+  }
+ },
+ "inputs": {
+  "cases": {
+   "clips": {
+    "32x32x22": [
+     22,
+     32,
+     32
+    ]
+   },
+   "images": {
+    "464x32": [
+     32,
+     464
+    ]
+   },
+   "latents": {
+    "12x1x1": [
+     12,
+     1,
+     1
+    ],
+    "11x1x1": [
+     11,
+     1,
+     1
+    ],
+    "5x1x1": [
+     5,
+     1,
+     1
+    ],
+    "1x17x17": [
+     1,
+     17,
+     17
+    ]
+   },
+   "audio_samples": 8123
+  },
+  "seed": 5,
+  "plans": {
+   "32x32x22": {
+    "latents": 7,
+    "tiles_y": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      32
+     ],
+     "overlaps": []
+    },
+    "tiles_x": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      32
+     ],
+     "overlaps": []
+    },
+    "encode_pieces": 2,
+    "decode_pad_latents": 0,
+    "decode_runs": 1,
+    "tokens_chunk_size": 5,
+    "token_overlap": 2,
+    "token_drop": 3,
+    "frame_pre_padding": 3,
+    "frame_overlap": 5
+   },
+   "464x32": {
+    "latents": 1,
+    "tiles_y": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      32
+     ],
+     "overlaps": []
+    },
+    "tiles_x": {
+     "starts": [
+      0,
+      96,
+      208
+     ],
+     "lengths": [
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      160,
+      144
+     ]
+    }
+   },
+   "12x1x1": {
+    "latents": 12,
+    "seeded": true
+   },
+   "11x1x1": {
+    "latents": 11,
+    "seeded": true
+   },
+   "5x1x1": {
+    "latents": 5,
+    "seeded": true
+   },
+   "1x17x17": {
+    "latents": 1,
+    "seeded": true
+   }
+  },
+  "clip": "h3_vae_tiny.clip(frames, height, width, seed): (1, 3, T, H, W) in [-1, 1]; an image is clip(1, height, width, seed)",
+  "wave": "h3_vae_tiny.wave(samples, seed): (1, 2, n) in [-1, 1]",
+  "seeded_latents": "numpy default_rng(seed).standard_normal((1, 24, T, H, W)) in float32, drawn in the order of cases['latents']",
+  "latents": "the class's encode: (mean - latents_mean) / latents_std, (1, 24, T, H, W)",
+  "decoded": "the class's decode: (1, 3, T, H, W) float32 in [0, 1]",
+  "tiny": "TAEHV(latent_channels=24).decode of each fp32 latent: (1, 3, T, H, W) in [0, 1]",
+  "wave_latents": "(1, 32, 2, T)",
+  "wave_decoded": "(1, 2, T * 800)",
+  "models": {
+   "video": {
+    "ch": 32,
+    "ch_mult": [
+     1,
+     1,
+     2,
+     2,
+     2,
+     2
+    ],
+    "num_res_blocks": 2,
+    "decoder": {
+     "num_layers": 2,
+     "heads": 2,
+     "dim_head": 64
+    }
+   },
+   "audio": {
+    "encoder_dim": 4,
+    "latent_dim": 64,
+    "decoder_dim": 256
+   },
+   "tiny": "TAEHV(latent_channels=24)"
+  },
+  "weights_seed": 55,
+  "shapes": {
+   "vae": {
+    "latents_mean": [
+     24
+    ],
+    "latents_std": [
+     24
+    ],
+    "encoder.conv_in.weight": [
+     32,
+     3,
+     3,
+     3,
+     3
+    ],
+    "encoder.conv_in.bias": [
+     32
+    ],
+    "encoder.down.0.block.0.norm1.weight": [
+     32
+    ],
+    "encoder.down.0.block.0.norm1.bias": [
+     32
+    ],
+    "encoder.down.0.block.0.norm2.weight": [
+     32
+    ],
+    "encoder.down.0.block.0.norm2.bias": [
+     32
+    ],
+    "encoder.down.0.block.0.conv1.weight": [
+     32,
+     32,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.0.block.0.conv1.bias": [
+     32
+    ],
+    "encoder.down.0.block.0.conv2.weight": [
+     32,
+     32,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.0.block.0.conv2.bias": [
+     32
+    ],
+    "encoder.down.0.block.1.norm1.weight": [
+     32
+    ],
+    "encoder.down.0.block.1.norm1.bias": [
+     32
+    ],
+    "encoder.down.0.block.1.norm2.weight": [
+     32
+    ],
+    "encoder.down.0.block.1.norm2.bias": [
+     32
+    ],
+    "encoder.down.0.block.1.conv1.weight": [
+     32,
+     32,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.0.block.1.conv1.bias": [
+     32
+    ],
+    "encoder.down.0.block.1.conv2.weight": [
+     32,
+     32,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.0.block.1.conv2.bias": [
+     32
+    ],
+    "encoder.down.0.downsample.conv.weight": [
+     32,
+     32,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.0.downsample.conv.bias": [
+     32
+    ],
+    "encoder.down.1.block.0.norm1.weight": [
+     32
+    ],
+    "encoder.down.1.block.0.norm1.bias": [
+     32
+    ],
+    "encoder.down.1.block.0.norm2.weight": [
+     32
+    ],
+    "encoder.down.1.block.0.norm2.bias": [
+     32
+    ],
+    "encoder.down.1.block.0.conv1.weight": [
+     32,
+     32,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.1.block.0.conv1.bias": [
+     32
+    ],
+    "encoder.down.1.block.0.conv2.weight": [
+     32,
+     32,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.1.block.0.conv2.bias": [
+     32
+    ],
+    "encoder.down.1.block.1.norm1.weight": [
+     32
+    ],
+    "encoder.down.1.block.1.norm1.bias": [
+     32
+    ],
+    "encoder.down.1.block.1.norm2.weight": [
+     32
+    ],
+    "encoder.down.1.block.1.norm2.bias": [
+     32
+    ],
+    "encoder.down.1.block.1.conv1.weight": [
+     32,
+     32,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.1.block.1.conv1.bias": [
+     32
+    ],
+    "encoder.down.1.block.1.conv2.weight": [
+     32,
+     32,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.1.block.1.conv2.bias": [
+     32
+    ],
+    "encoder.down.1.downsample.conv.weight": [
+     32,
+     32,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.1.downsample.conv.bias": [
+     32
+    ],
+    "encoder.down.2.block.0.norm1.weight": [
+     32
+    ],
+    "encoder.down.2.block.0.norm1.bias": [
+     32
+    ],
+    "encoder.down.2.block.0.norm2.weight": [
+     64
+    ],
+    "encoder.down.2.block.0.norm2.bias": [
+     64
+    ],
+    "encoder.down.2.block.0.conv1.weight": [
+     64,
+     32,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.2.block.0.conv1.bias": [
+     64
+    ],
+    "encoder.down.2.block.0.conv2.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.2.block.0.conv2.bias": [
+     64
+    ],
+    "encoder.down.2.block.0.nin_shortcut.weight": [
+     64,
+     32,
+     1,
+     1,
+     1
+    ],
+    "encoder.down.2.block.0.nin_shortcut.bias": [
+     64
+    ],
+    "encoder.down.2.block.1.norm1.weight": [
+     64
+    ],
+    "encoder.down.2.block.1.norm1.bias": [
+     64
+    ],
+    "encoder.down.2.block.1.norm2.weight": [
+     64
+    ],
+    "encoder.down.2.block.1.norm2.bias": [
+     64
+    ],
+    "encoder.down.2.block.1.conv1.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.2.block.1.conv1.bias": [
+     64
+    ],
+    "encoder.down.2.block.1.conv2.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.2.block.1.conv2.bias": [
+     64
+    ],
+    "encoder.down.2.downsample.conv.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.2.downsample.conv.bias": [
+     64
+    ],
+    "encoder.down.3.block.0.norm1.weight": [
+     64
+    ],
+    "encoder.down.3.block.0.norm1.bias": [
+     64
+    ],
+    "encoder.down.3.block.0.norm2.weight": [
+     64
+    ],
+    "encoder.down.3.block.0.norm2.bias": [
+     64
+    ],
+    "encoder.down.3.block.0.conv1.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.3.block.0.conv1.bias": [
+     64
+    ],
+    "encoder.down.3.block.0.conv2.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.3.block.0.conv2.bias": [
+     64
+    ],
+    "encoder.down.3.block.1.norm1.weight": [
+     64
+    ],
+    "encoder.down.3.block.1.norm1.bias": [
+     64
+    ],
+    "encoder.down.3.block.1.norm2.weight": [
+     64
+    ],
+    "encoder.down.3.block.1.norm2.bias": [
+     64
+    ],
+    "encoder.down.3.block.1.conv1.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.3.block.1.conv1.bias": [
+     64
+    ],
+    "encoder.down.3.block.1.conv2.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.3.block.1.conv2.bias": [
+     64
+    ],
+    "encoder.down.3.downsample.conv.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.3.downsample.conv.bias": [
+     64
+    ],
+    "encoder.down.4.block.0.norm1.weight": [
+     64
+    ],
+    "encoder.down.4.block.0.norm1.bias": [
+     64
+    ],
+    "encoder.down.4.block.0.norm2.weight": [
+     64
+    ],
+    "encoder.down.4.block.0.norm2.bias": [
+     64
+    ],
+    "encoder.down.4.block.0.conv1.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.4.block.0.conv1.bias": [
+     64
+    ],
+    "encoder.down.4.block.0.conv2.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.4.block.0.conv2.bias": [
+     64
+    ],
+    "encoder.down.4.block.1.norm1.weight": [
+     64
+    ],
+    "encoder.down.4.block.1.norm1.bias": [
+     64
+    ],
+    "encoder.down.4.block.1.norm2.weight": [
+     64
+    ],
+    "encoder.down.4.block.1.norm2.bias": [
+     64
+    ],
+    "encoder.down.4.block.1.conv1.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.4.block.1.conv1.bias": [
+     64
+    ],
+    "encoder.down.4.block.1.conv2.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.4.block.1.conv2.bias": [
+     64
+    ],
+    "encoder.down.5.block.0.norm1.weight": [
+     64
+    ],
+    "encoder.down.5.block.0.norm1.bias": [
+     64
+    ],
+    "encoder.down.5.block.0.norm2.weight": [
+     64
+    ],
+    "encoder.down.5.block.0.norm2.bias": [
+     64
+    ],
+    "encoder.down.5.block.0.conv1.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.5.block.0.conv1.bias": [
+     64
+    ],
+    "encoder.down.5.block.0.conv2.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.5.block.0.conv2.bias": [
+     64
+    ],
+    "encoder.down.5.block.1.norm1.weight": [
+     64
+    ],
+    "encoder.down.5.block.1.norm1.bias": [
+     64
+    ],
+    "encoder.down.5.block.1.norm2.weight": [
+     64
+    ],
+    "encoder.down.5.block.1.norm2.bias": [
+     64
+    ],
+    "encoder.down.5.block.1.conv1.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.5.block.1.conv1.bias": [
+     64
+    ],
+    "encoder.down.5.block.1.conv2.weight": [
+     64,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.down.5.block.1.conv2.bias": [
+     64
+    ],
+    "encoder.norm_out.weight": [
+     64
+    ],
+    "encoder.norm_out.bias": [
+     64
+    ],
+    "encoder.conv_out.weight": [
+     48,
+     64,
+     3,
+     3,
+     3
+    ],
+    "encoder.conv_out.bias": [
+     48
+    ],
+    "quant_conv.weight": [
+     48,
+     48,
+     1,
+     1,
+     1
+    ],
+    "quant_conv.bias": [
+     48
+    ],
+    "post_quant_conv.weight": [
+     24,
+     24,
+     1,
+     1,
+     1
+    ],
+    "post_quant_conv.bias": [
+     24
+    ],
+    "decoder.register_tokens": [
+     1,
+     4,
+     128
+    ],
+    "decoder.mask_token": [
+     1,
+     1,
+     128
+    ],
+    "decoder.x_embedder.weight": [
+     128,
+     24
+    ],
+    "decoder.x_embedder.bias": [
+     128
+    ],
+    "decoder.transformer_blocks.0.scale1": [
+     128
+    ],
+    "decoder.transformer_blocks.0.scale2": [
+     128
+    ],
+    "decoder.transformer_blocks.0.norm1.weight": [
+     128
+    ],
+    "decoder.transformer_blocks.0.attn.to_qkv.weight": [
+     384,
+     128
+    ],
+    "decoder.transformer_blocks.0.attn.to_qkv.bias": [
+     384
+    ],
+    "decoder.transformer_blocks.0.attn.to_out.weight": [
+     128,
+     128
+    ],
+    "decoder.transformer_blocks.0.attn.to_out.bias": [
+     128
+    ],
+    "decoder.transformer_blocks.0.norm2.weight": [
+     128
+    ],
+    "decoder.transformer_blocks.0.ff.w1.weight": [
+     1024,
+     128
+    ],
+    "decoder.transformer_blocks.0.ff.w1.bias": [
+     1024
+    ],
+    "decoder.transformer_blocks.0.ff.w2.weight": [
+     128,
+     512
+    ],
+    "decoder.transformer_blocks.0.ff.w2.bias": [
+     128
+    ],
+    "decoder.transformer_blocks.1.scale1": [
+     128
+    ],
+    "decoder.transformer_blocks.1.scale2": [
+     128
+    ],
+    "decoder.transformer_blocks.1.norm1.weight": [
+     128
+    ],
+    "decoder.transformer_blocks.1.attn.to_qkv.weight": [
+     384,
+     128
+    ],
+    "decoder.transformer_blocks.1.attn.to_qkv.bias": [
+     384
+    ],
+    "decoder.transformer_blocks.1.attn.to_out.weight": [
+     128,
+     128
+    ],
+    "decoder.transformer_blocks.1.attn.to_out.bias": [
+     128
+    ],
+    "decoder.transformer_blocks.1.norm2.weight": [
+     128
+    ],
+    "decoder.transformer_blocks.1.ff.w1.weight": [
+     1024,
+     128
+    ],
+    "decoder.transformer_blocks.1.ff.w1.bias": [
+     1024
+    ],
+    "decoder.transformer_blocks.1.ff.w2.weight": [
+     128,
+     512
+    ],
+    "decoder.transformer_blocks.1.ff.w2.bias": [
+     128
+    ],
+    "decoder.norm_out.weight": [
+     128
+    ],
+    "decoder.norm_out.bias": [
+     128
+    ],
+    "decoder.proj_out.weight": [
+     3072,
+     128
+    ],
+    "decoder.proj_out.bias": [
+     3072
+    ]
+   },
+   "tiny": {
+    "encoder.0.weight": [
+     64,
+     12,
+     3,
+     3
+    ],
+    "encoder.0.bias": [
+     64
+    ],
+    "encoder.2.conv.weight": [
+     64,
+     128,
+     1,
+     1
+    ],
+    "encoder.3.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.4.conv.0.weight": [
+     64,
+     128,
+     3,
+     3
+    ],
+    "encoder.4.conv.0.bias": [
+     64
+    ],
+    "encoder.4.conv.2.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.4.conv.2.bias": [
+     64
+    ],
+    "encoder.4.conv.4.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.4.conv.4.bias": [
+     64
+    ],
+    "encoder.5.conv.0.weight": [
+     64,
+     128,
+     3,
+     3
+    ],
+    "encoder.5.conv.0.bias": [
+     64
+    ],
+    "encoder.5.conv.2.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.5.conv.2.bias": [
+     64
+    ],
+    "encoder.5.conv.4.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.5.conv.4.bias": [
+     64
+    ],
+    "encoder.6.conv.0.weight": [
+     64,
+     128,
+     3,
+     3
+    ],
+    "encoder.6.conv.0.bias": [
+     64
+    ],
+    "encoder.6.conv.2.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.6.conv.2.bias": [
+     64
+    ],
+    "encoder.6.conv.4.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.6.conv.4.bias": [
+     64
+    ],
+    "encoder.7.conv.weight": [
+     64,
+     128,
+     1,
+     1
+    ],
+    "encoder.8.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.9.conv.0.weight": [
+     64,
+     128,
+     3,
+     3
+    ],
+    "encoder.9.conv.0.bias": [
+     64
+    ],
+    "encoder.9.conv.2.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.9.conv.2.bias": [
+     64
+    ],
+    "encoder.9.conv.4.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.9.conv.4.bias": [
+     64
+    ],
+    "encoder.10.conv.0.weight": [
+     64,
+     128,
+     3,
+     3
+    ],
+    "encoder.10.conv.0.bias": [
+     64
+    ],
+    "encoder.10.conv.2.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.10.conv.2.bias": [
+     64
+    ],
+    "encoder.10.conv.4.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.10.conv.4.bias": [
+     64
+    ],
+    "encoder.11.conv.0.weight": [
+     64,
+     128,
+     3,
+     3
+    ],
+    "encoder.11.conv.0.bias": [
+     64
+    ],
+    "encoder.11.conv.2.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.11.conv.2.bias": [
+     64
+    ],
+    "encoder.11.conv.4.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.11.conv.4.bias": [
+     64
+    ],
+    "encoder.12.conv.weight": [
+     64,
+     64,
+     1,
+     1
+    ],
+    "encoder.13.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.14.conv.0.weight": [
+     64,
+     128,
+     3,
+     3
+    ],
+    "encoder.14.conv.0.bias": [
+     64
+    ],
+    "encoder.14.conv.2.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.14.conv.2.bias": [
+     64
+    ],
+    "encoder.14.conv.4.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.14.conv.4.bias": [
+     64
+    ],
+    "encoder.15.conv.0.weight": [
+     64,
+     128,
+     3,
+     3
+    ],
+    "encoder.15.conv.0.bias": [
+     64
+    ],
+    "encoder.15.conv.2.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.15.conv.2.bias": [
+     64
+    ],
+    "encoder.15.conv.4.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.15.conv.4.bias": [
+     64
+    ],
+    "encoder.16.conv.0.weight": [
+     64,
+     128,
+     3,
+     3
+    ],
+    "encoder.16.conv.0.bias": [
+     64
+    ],
+    "encoder.16.conv.2.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.16.conv.2.bias": [
+     64
+    ],
+    "encoder.16.conv.4.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "encoder.16.conv.4.bias": [
+     64
+    ],
+    "encoder.17.weight": [
+     24,
+     64,
+     3,
+     3
+    ],
+    "encoder.17.bias": [
+     24
+    ],
+    "decoder.1.weight": [
+     256,
+     24,
+     3,
+     3
+    ],
+    "decoder.1.bias": [
+     256
+    ],
+    "decoder.3.conv.0.weight": [
+     256,
+     512,
+     3,
+     3
+    ],
+    "decoder.3.conv.0.bias": [
+     256
+    ],
+    "decoder.3.conv.2.weight": [
+     256,
+     256,
+     3,
+     3
+    ],
+    "decoder.3.conv.2.bias": [
+     256
+    ],
+    "decoder.3.conv.4.weight": [
+     256,
+     256,
+     3,
+     3
+    ],
+    "decoder.3.conv.4.bias": [
+     256
+    ],
+    "decoder.4.conv.0.weight": [
+     256,
+     512,
+     3,
+     3
+    ],
+    "decoder.4.conv.0.bias": [
+     256
+    ],
+    "decoder.4.conv.2.weight": [
+     256,
+     256,
+     3,
+     3
+    ],
+    "decoder.4.conv.2.bias": [
+     256
+    ],
+    "decoder.4.conv.4.weight": [
+     256,
+     256,
+     3,
+     3
+    ],
+    "decoder.4.conv.4.bias": [
+     256
+    ],
+    "decoder.5.conv.0.weight": [
+     256,
+     512,
+     3,
+     3
+    ],
+    "decoder.5.conv.0.bias": [
+     256
+    ],
+    "decoder.5.conv.2.weight": [
+     256,
+     256,
+     3,
+     3
+    ],
+    "decoder.5.conv.2.bias": [
+     256
+    ],
+    "decoder.5.conv.4.weight": [
+     256,
+     256,
+     3,
+     3
+    ],
+    "decoder.5.conv.4.bias": [
+     256
+    ],
+    "decoder.7.conv.weight": [
+     256,
+     256,
+     1,
+     1
+    ],
+    "decoder.8.weight": [
+     128,
+     256,
+     3,
+     3
+    ],
+    "decoder.9.conv.0.weight": [
+     128,
+     256,
+     3,
+     3
+    ],
+    "decoder.9.conv.0.bias": [
+     128
+    ],
+    "decoder.9.conv.2.weight": [
+     128,
+     128,
+     3,
+     3
+    ],
+    "decoder.9.conv.2.bias": [
+     128
+    ],
+    "decoder.9.conv.4.weight": [
+     128,
+     128,
+     3,
+     3
+    ],
+    "decoder.9.conv.4.bias": [
+     128
+    ],
+    "decoder.10.conv.0.weight": [
+     128,
+     256,
+     3,
+     3
+    ],
+    "decoder.10.conv.0.bias": [
+     128
+    ],
+    "decoder.10.conv.2.weight": [
+     128,
+     128,
+     3,
+     3
+    ],
+    "decoder.10.conv.2.bias": [
+     128
+    ],
+    "decoder.10.conv.4.weight": [
+     128,
+     128,
+     3,
+     3
+    ],
+    "decoder.10.conv.4.bias": [
+     128
+    ],
+    "decoder.11.conv.0.weight": [
+     128,
+     256,
+     3,
+     3
+    ],
+    "decoder.11.conv.0.bias": [
+     128
+    ],
+    "decoder.11.conv.2.weight": [
+     128,
+     128,
+     3,
+     3
+    ],
+    "decoder.11.conv.2.bias": [
+     128
+    ],
+    "decoder.11.conv.4.weight": [
+     128,
+     128,
+     3,
+     3
+    ],
+    "decoder.11.conv.4.bias": [
+     128
+    ],
+    "decoder.13.conv.weight": [
+     256,
+     128,
+     1,
+     1
+    ],
+    "decoder.14.weight": [
+     64,
+     128,
+     3,
+     3
+    ],
+    "decoder.15.conv.0.weight": [
+     64,
+     128,
+     3,
+     3
+    ],
+    "decoder.15.conv.0.bias": [
+     64
+    ],
+    "decoder.15.conv.2.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "decoder.15.conv.2.bias": [
+     64
+    ],
+    "decoder.15.conv.4.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "decoder.15.conv.4.bias": [
+     64
+    ],
+    "decoder.16.conv.0.weight": [
+     64,
+     128,
+     3,
+     3
+    ],
+    "decoder.16.conv.0.bias": [
+     64
+    ],
+    "decoder.16.conv.2.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "decoder.16.conv.2.bias": [
+     64
+    ],
+    "decoder.16.conv.4.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "decoder.16.conv.4.bias": [
+     64
+    ],
+    "decoder.17.conv.0.weight": [
+     64,
+     128,
+     3,
+     3
+    ],
+    "decoder.17.conv.0.bias": [
+     64
+    ],
+    "decoder.17.conv.2.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "decoder.17.conv.2.bias": [
+     64
+    ],
+    "decoder.17.conv.4.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "decoder.17.conv.4.bias": [
+     64
+    ],
+    "decoder.19.conv.weight": [
+     128,
+     64,
+     1,
+     1
+    ],
+    "decoder.20.weight": [
+     64,
+     64,
+     3,
+     3
+    ],
+    "decoder.22.weight": [
+     12,
+     64,
+     3,
+     3
+    ],
+    "decoder.22.bias": [
+     12
+    ]
+   },
+   "audio_vae": {
+    "latents_mean": [
+     32
+    ],
+    "latents_std": [
+     32
+    ],
+    "encoder.block.0.weight": [
+     4,
+     1,
+     7
+    ],
+    "encoder.block.0.bias": [
+     4
+    ],
+    "encoder.block.1.block.0.block.0.alpha": [
+     1,
+     4,
+     1
+    ],
+    "encoder.block.1.block.0.block.1.weight": [
+     4,
+     4,
+     7
+    ],
+    "encoder.block.1.block.0.block.1.bias": [
+     4
+    ],
+    "encoder.block.1.block.0.block.2.alpha": [
+     1,
+     4,
+     1
+    ],
+    "encoder.block.1.block.0.block.3.weight": [
+     4,
+     4,
+     1
+    ],
+    "encoder.block.1.block.0.block.3.bias": [
+     4
+    ],
+    "encoder.block.1.block.1.block.0.alpha": [
+     1,
+     4,
+     1
+    ],
+    "encoder.block.1.block.1.block.1.weight": [
+     4,
+     4,
+     7
+    ],
+    "encoder.block.1.block.1.block.1.bias": [
+     4
+    ],
+    "encoder.block.1.block.1.block.2.alpha": [
+     1,
+     4,
+     1
+    ],
+    "encoder.block.1.block.1.block.3.weight": [
+     4,
+     4,
+     1
+    ],
+    "encoder.block.1.block.1.block.3.bias": [
+     4
+    ],
+    "encoder.block.1.block.2.block.0.alpha": [
+     1,
+     4,
+     1
+    ],
+    "encoder.block.1.block.2.block.1.weight": [
+     4,
+     4,
+     7
+    ],
+    "encoder.block.1.block.2.block.1.bias": [
+     4
+    ],
+    "encoder.block.1.block.2.block.2.alpha": [
+     1,
+     4,
+     1
+    ],
+    "encoder.block.1.block.2.block.3.weight": [
+     4,
+     4,
+     1
+    ],
+    "encoder.block.1.block.2.block.3.bias": [
+     4
+    ],
+    "encoder.block.1.block.3.alpha": [
+     1,
+     4,
+     1
+    ],
+    "encoder.block.1.block.4.weight": [
+     8,
+     4,
+     4
+    ],
+    "encoder.block.1.block.4.bias": [
+     8
+    ],
+    "encoder.block.2.block.0.block.0.alpha": [
+     1,
+     8,
+     1
+    ],
+    "encoder.block.2.block.0.block.1.weight": [
+     8,
+     8,
+     7
+    ],
+    "encoder.block.2.block.0.block.1.bias": [
+     8
+    ],
+    "encoder.block.2.block.0.block.2.alpha": [
+     1,
+     8,
+     1
+    ],
+    "encoder.block.2.block.0.block.3.weight": [
+     8,
+     8,
+     1
+    ],
+    "encoder.block.2.block.0.block.3.bias": [
+     8
+    ],
+    "encoder.block.2.block.1.block.0.alpha": [
+     1,
+     8,
+     1
+    ],
+    "encoder.block.2.block.1.block.1.weight": [
+     8,
+     8,
+     7
+    ],
+    "encoder.block.2.block.1.block.1.bias": [
+     8
+    ],
+    "encoder.block.2.block.1.block.2.alpha": [
+     1,
+     8,
+     1
+    ],
+    "encoder.block.2.block.1.block.3.weight": [
+     8,
+     8,
+     1
+    ],
+    "encoder.block.2.block.1.block.3.bias": [
+     8
+    ],
+    "encoder.block.2.block.2.block.0.alpha": [
+     1,
+     8,
+     1
+    ],
+    "encoder.block.2.block.2.block.1.weight": [
+     8,
+     8,
+     7
+    ],
+    "encoder.block.2.block.2.block.1.bias": [
+     8
+    ],
+    "encoder.block.2.block.2.block.2.alpha": [
+     1,
+     8,
+     1
+    ],
+    "encoder.block.2.block.2.block.3.weight": [
+     8,
+     8,
+     1
+    ],
+    "encoder.block.2.block.2.block.3.bias": [
+     8
+    ],
+    "encoder.block.2.block.3.alpha": [
+     1,
+     8,
+     1
+    ],
+    "encoder.block.2.block.4.weight": [
+     16,
+     8,
+     8
+    ],
+    "encoder.block.2.block.4.bias": [
+     16
+    ],
+    "encoder.block.3.block.0.block.0.alpha": [
+     1,
+     16,
+     1
+    ],
+    "encoder.block.3.block.0.block.1.weight": [
+     16,
+     16,
+     7
+    ],
+    "encoder.block.3.block.0.block.1.bias": [
+     16
+    ],
+    "encoder.block.3.block.0.block.2.alpha": [
+     1,
+     16,
+     1
+    ],
+    "encoder.block.3.block.0.block.3.weight": [
+     16,
+     16,
+     1
+    ],
+    "encoder.block.3.block.0.block.3.bias": [
+     16
+    ],
+    "encoder.block.3.block.1.block.0.alpha": [
+     1,
+     16,
+     1
+    ],
+    "encoder.block.3.block.1.block.1.weight": [
+     16,
+     16,
+     7
+    ],
+    "encoder.block.3.block.1.block.1.bias": [
+     16
+    ],
+    "encoder.block.3.block.1.block.2.alpha": [
+     1,
+     16,
+     1
+    ],
+    "encoder.block.3.block.1.block.3.weight": [
+     16,
+     16,
+     1
+    ],
+    "encoder.block.3.block.1.block.3.bias": [
+     16
+    ],
+    "encoder.block.3.block.2.block.0.alpha": [
+     1,
+     16,
+     1
+    ],
+    "encoder.block.3.block.2.block.1.weight": [
+     16,
+     16,
+     7
+    ],
+    "encoder.block.3.block.2.block.1.bias": [
+     16
+    ],
+    "encoder.block.3.block.2.block.2.alpha": [
+     1,
+     16,
+     1
+    ],
+    "encoder.block.3.block.2.block.3.weight": [
+     16,
+     16,
+     1
+    ],
+    "encoder.block.3.block.2.block.3.bias": [
+     16
+    ],
+    "encoder.block.3.block.3.alpha": [
+     1,
+     16,
+     1
+    ],
+    "encoder.block.3.block.4.weight": [
+     32,
+     16,
+     8
+    ],
+    "encoder.block.3.block.4.bias": [
+     32
+    ],
+    "encoder.block.4.block.0.block.0.alpha": [
+     1,
+     32,
+     1
+    ],
+    "encoder.block.4.block.0.block.1.weight": [
+     32,
+     32,
+     7
+    ],
+    "encoder.block.4.block.0.block.1.bias": [
+     32
+    ],
+    "encoder.block.4.block.0.block.2.alpha": [
+     1,
+     32,
+     1
+    ],
+    "encoder.block.4.block.0.block.3.weight": [
+     32,
+     32,
+     1
+    ],
+    "encoder.block.4.block.0.block.3.bias": [
+     32
+    ],
+    "encoder.block.4.block.1.block.0.alpha": [
+     1,
+     32,
+     1
+    ],
+    "encoder.block.4.block.1.block.1.weight": [
+     32,
+     32,
+     7
+    ],
+    "encoder.block.4.block.1.block.1.bias": [
+     32
+    ],
+    "encoder.block.4.block.1.block.2.alpha": [
+     1,
+     32,
+     1
+    ],
+    "encoder.block.4.block.1.block.3.weight": [
+     32,
+     32,
+     1
+    ],
+    "encoder.block.4.block.1.block.3.bias": [
+     32
+    ],
+    "encoder.block.4.block.2.block.0.alpha": [
+     1,
+     32,
+     1
+    ],
+    "encoder.block.4.block.2.block.1.weight": [
+     32,
+     32,
+     7
+    ],
+    "encoder.block.4.block.2.block.1.bias": [
+     32
+    ],
+    "encoder.block.4.block.2.block.2.alpha": [
+     1,
+     32,
+     1
+    ],
+    "encoder.block.4.block.2.block.3.weight": [
+     32,
+     32,
+     1
+    ],
+    "encoder.block.4.block.2.block.3.bias": [
+     32
+    ],
+    "encoder.block.4.block.3.alpha": [
+     1,
+     32,
+     1
+    ],
+    "encoder.block.4.block.4.weight": [
+     64,
+     32,
+     10
+    ],
+    "encoder.block.4.block.4.bias": [
+     64
+    ],
+    "encoder.block.5.block.0.block.0.alpha": [
+     1,
+     64,
+     1
+    ],
+    "encoder.block.5.block.0.block.1.weight": [
+     64,
+     64,
+     7
+    ],
+    "encoder.block.5.block.0.block.1.bias": [
+     64
+    ],
+    "encoder.block.5.block.0.block.2.alpha": [
+     1,
+     64,
+     1
+    ],
+    "encoder.block.5.block.0.block.3.weight": [
+     64,
+     64,
+     1
+    ],
+    "encoder.block.5.block.0.block.3.bias": [
+     64
+    ],
+    "encoder.block.5.block.1.block.0.alpha": [
+     1,
+     64,
+     1
+    ],
+    "encoder.block.5.block.1.block.1.weight": [
+     64,
+     64,
+     7
+    ],
+    "encoder.block.5.block.1.block.1.bias": [
+     64
+    ],
+    "encoder.block.5.block.1.block.2.alpha": [
+     1,
+     64,
+     1
+    ],
+    "encoder.block.5.block.1.block.3.weight": [
+     64,
+     64,
+     1
+    ],
+    "encoder.block.5.block.1.block.3.bias": [
+     64
+    ],
+    "encoder.block.5.block.2.block.0.alpha": [
+     1,
+     64,
+     1
+    ],
+    "encoder.block.5.block.2.block.1.weight": [
+     64,
+     64,
+     7
+    ],
+    "encoder.block.5.block.2.block.1.bias": [
+     64
+    ],
+    "encoder.block.5.block.2.block.2.alpha": [
+     1,
+     64,
+     1
+    ],
+    "encoder.block.5.block.2.block.3.weight": [
+     64,
+     64,
+     1
+    ],
+    "encoder.block.5.block.2.block.3.bias": [
+     64
+    ],
+    "encoder.block.5.block.3.alpha": [
+     1,
+     64,
+     1
+    ],
+    "encoder.block.5.block.4.weight": [
+     128,
+     64,
+     10
+    ],
+    "encoder.block.5.block.4.bias": [
+     128
+    ],
+    "encoder.block.6.alpha": [
+     1,
+     128,
+     1
+    ],
+    "encoder.block.7.weight": [
+     64,
+     128,
+     3
+    ],
+    "encoder.block.7.bias": [
+     64
+    ],
+    "pre_block.norm1.weight": [
+     64
+    ],
+    "pre_block.norm1.bias": [
+     64
+    ],
+    "pre_block.attn.q_bias": [
+     64
+    ],
+    "pre_block.attn.v_bias": [
+     64
+    ],
+    "pre_block.attn.zero_k_bias": [
+     64
+    ],
+    "pre_block.attn.qkv.weight": [
+     192,
+     64
+    ],
+    "pre_block.attn.proj.weight": [
+     32,
+     32
+    ],
+    "pre_block.attn.proj.bias": [
+     32
+    ],
+    "pre_block.proj.weight": [
+     32,
+     64
+    ],
+    "pre_block.proj.bias": [
+     32
+    ],
+    "pre_block.norm3.weight": [
+     64
+    ],
+    "pre_block.norm3.bias": [
+     64
+    ],
+    "pre_block.norm2.weight": [
+     32
+    ],
+    "pre_block.norm2.bias": [
+     32
+    ],
+    "pre_block.mlp.norm.weight": [
+     32
+    ],
+    "pre_block.mlp.norm.bias": [
+     32
+    ],
+    "pre_block.mlp.w0.weight": [
+     64,
+     32
+    ],
+    "pre_block.mlp.w0.bias": [
+     64
+    ],
+    "pre_block.mlp.w1.weight": [
+     64,
+     32
+    ],
+    "pre_block.mlp.w1.bias": [
+     64
+    ],
+    "pre_block.mlp.w2.weight": [
+     32,
+     64
+    ],
+    "pre_block.mlp.w2.bias": [
+     32
+    ],
+    "mean_proj.weight": [
+     32,
+     32,
+     1
+    ],
+    "mean_proj.bias": [
+     32
+    ],
+    "logs_proj.weight": [
+     32,
+     32,
+     1
+    ],
+    "logs_proj.bias": [
+     32
+    ],
+    "dec_in_proj.weight": [
+     64,
+     32,
+     1
+    ],
+    "dec_in_proj.bias": [
+     64
+    ],
+    "decoder.conv_pre.weight": [
+     256,
+     64,
+     7
+    ],
+    "decoder.conv_pre.bias": [
+     256
+    ],
+    "decoder.ups.0.0.weight": [
+     256,
+     128,
+     9
+    ],
+    "decoder.ups.0.0.bias": [
+     128
+    ],
+    "decoder.ups.1.0.weight": [
+     128,
+     64,
+     9
+    ],
+    "decoder.ups.1.0.bias": [
+     64
+    ],
+    "decoder.ups.2.0.weight": [
+     64,
+     32,
+     4
+    ],
+    "decoder.ups.2.0.bias": [
+     32
+    ],
+    "decoder.ups.3.0.weight": [
+     32,
+     16,
+     4
+    ],
+    "decoder.ups.3.0.bias": [
+     16
+    ],
+    "decoder.ups.4.0.weight": [
+     16,
+     8,
+     4
+    ],
+    "decoder.ups.4.0.bias": [
+     8
+    ],
+    "decoder.ups.5.0.weight": [
+     8,
+     4,
+     4
+    ],
+    "decoder.ups.5.0.bias": [
+     4
+    ],
+    "decoder.ups.6.0.weight": [
+     4,
+     2,
+     4
+    ],
+    "decoder.ups.6.0.bias": [
+     2
+    ],
+    "decoder.resblocks.0.convs1.0.weight": [
+     128,
+     128,
+     3
+    ],
+    "decoder.resblocks.0.convs1.0.bias": [
+     128
+    ],
+    "decoder.resblocks.0.convs1.1.weight": [
+     128,
+     128,
+     3
+    ],
+    "decoder.resblocks.0.convs1.1.bias": [
+     128
+    ],
+    "decoder.resblocks.0.convs1.2.weight": [
+     128,
+     128,
+     3
+    ],
+    "decoder.resblocks.0.convs1.2.bias": [
+     128
+    ],
+    "decoder.resblocks.0.convs2.0.weight": [
+     128,
+     128,
+     3
+    ],
+    "decoder.resblocks.0.convs2.0.bias": [
+     128
+    ],
+    "decoder.resblocks.0.convs2.1.weight": [
+     128,
+     128,
+     3
+    ],
+    "decoder.resblocks.0.convs2.1.bias": [
+     128
+    ],
+    "decoder.resblocks.0.convs2.2.weight": [
+     128,
+     128,
+     3
+    ],
+    "decoder.resblocks.0.convs2.2.bias": [
+     128
+    ],
+    "decoder.resblocks.0.activations.0.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.0.activations.0.act.beta": [
+     128
+    ],
+    "decoder.resblocks.0.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.0.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.0.activations.1.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.0.activations.1.act.beta": [
+     128
+    ],
+    "decoder.resblocks.0.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.0.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.0.activations.2.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.0.activations.2.act.beta": [
+     128
+    ],
+    "decoder.resblocks.0.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.0.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.0.activations.3.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.0.activations.3.act.beta": [
+     128
+    ],
+    "decoder.resblocks.0.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.0.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.0.activations.4.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.0.activations.4.act.beta": [
+     128
+    ],
+    "decoder.resblocks.0.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.0.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.0.activations.5.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.0.activations.5.act.beta": [
+     128
+    ],
+    "decoder.resblocks.0.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.0.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.1.convs1.0.weight": [
+     128,
+     128,
+     7
+    ],
+    "decoder.resblocks.1.convs1.0.bias": [
+     128
+    ],
+    "decoder.resblocks.1.convs1.1.weight": [
+     128,
+     128,
+     7
+    ],
+    "decoder.resblocks.1.convs1.1.bias": [
+     128
+    ],
+    "decoder.resblocks.1.convs1.2.weight": [
+     128,
+     128,
+     7
+    ],
+    "decoder.resblocks.1.convs1.2.bias": [
+     128
+    ],
+    "decoder.resblocks.1.convs2.0.weight": [
+     128,
+     128,
+     7
+    ],
+    "decoder.resblocks.1.convs2.0.bias": [
+     128
+    ],
+    "decoder.resblocks.1.convs2.1.weight": [
+     128,
+     128,
+     7
+    ],
+    "decoder.resblocks.1.convs2.1.bias": [
+     128
+    ],
+    "decoder.resblocks.1.convs2.2.weight": [
+     128,
+     128,
+     7
+    ],
+    "decoder.resblocks.1.convs2.2.bias": [
+     128
+    ],
+    "decoder.resblocks.1.activations.0.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.1.activations.0.act.beta": [
+     128
+    ],
+    "decoder.resblocks.1.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.1.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.1.activations.1.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.1.activations.1.act.beta": [
+     128
+    ],
+    "decoder.resblocks.1.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.1.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.1.activations.2.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.1.activations.2.act.beta": [
+     128
+    ],
+    "decoder.resblocks.1.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.1.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.1.activations.3.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.1.activations.3.act.beta": [
+     128
+    ],
+    "decoder.resblocks.1.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.1.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.1.activations.4.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.1.activations.4.act.beta": [
+     128
+    ],
+    "decoder.resblocks.1.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.1.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.1.activations.5.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.1.activations.5.act.beta": [
+     128
+    ],
+    "decoder.resblocks.1.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.1.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.2.convs1.0.weight": [
+     128,
+     128,
+     11
+    ],
+    "decoder.resblocks.2.convs1.0.bias": [
+     128
+    ],
+    "decoder.resblocks.2.convs1.1.weight": [
+     128,
+     128,
+     11
+    ],
+    "decoder.resblocks.2.convs1.1.bias": [
+     128
+    ],
+    "decoder.resblocks.2.convs1.2.weight": [
+     128,
+     128,
+     11
+    ],
+    "decoder.resblocks.2.convs1.2.bias": [
+     128
+    ],
+    "decoder.resblocks.2.convs2.0.weight": [
+     128,
+     128,
+     11
+    ],
+    "decoder.resblocks.2.convs2.0.bias": [
+     128
+    ],
+    "decoder.resblocks.2.convs2.1.weight": [
+     128,
+     128,
+     11
+    ],
+    "decoder.resblocks.2.convs2.1.bias": [
+     128
+    ],
+    "decoder.resblocks.2.convs2.2.weight": [
+     128,
+     128,
+     11
+    ],
+    "decoder.resblocks.2.convs2.2.bias": [
+     128
+    ],
+    "decoder.resblocks.2.activations.0.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.2.activations.0.act.beta": [
+     128
+    ],
+    "decoder.resblocks.2.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.2.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.2.activations.1.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.2.activations.1.act.beta": [
+     128
+    ],
+    "decoder.resblocks.2.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.2.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.2.activations.2.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.2.activations.2.act.beta": [
+     128
+    ],
+    "decoder.resblocks.2.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.2.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.2.activations.3.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.2.activations.3.act.beta": [
+     128
+    ],
+    "decoder.resblocks.2.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.2.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.2.activations.4.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.2.activations.4.act.beta": [
+     128
+    ],
+    "decoder.resblocks.2.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.2.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.2.activations.5.act.alpha": [
+     128
+    ],
+    "decoder.resblocks.2.activations.5.act.beta": [
+     128
+    ],
+    "decoder.resblocks.2.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.2.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.3.convs1.0.weight": [
+     64,
+     64,
+     3
+    ],
+    "decoder.resblocks.3.convs1.0.bias": [
+     64
+    ],
+    "decoder.resblocks.3.convs1.1.weight": [
+     64,
+     64,
+     3
+    ],
+    "decoder.resblocks.3.convs1.1.bias": [
+     64
+    ],
+    "decoder.resblocks.3.convs1.2.weight": [
+     64,
+     64,
+     3
+    ],
+    "decoder.resblocks.3.convs1.2.bias": [
+     64
+    ],
+    "decoder.resblocks.3.convs2.0.weight": [
+     64,
+     64,
+     3
+    ],
+    "decoder.resblocks.3.convs2.0.bias": [
+     64
+    ],
+    "decoder.resblocks.3.convs2.1.weight": [
+     64,
+     64,
+     3
+    ],
+    "decoder.resblocks.3.convs2.1.bias": [
+     64
+    ],
+    "decoder.resblocks.3.convs2.2.weight": [
+     64,
+     64,
+     3
+    ],
+    "decoder.resblocks.3.convs2.2.bias": [
+     64
+    ],
+    "decoder.resblocks.3.activations.0.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.3.activations.0.act.beta": [
+     64
+    ],
+    "decoder.resblocks.3.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.3.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.3.activations.1.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.3.activations.1.act.beta": [
+     64
+    ],
+    "decoder.resblocks.3.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.3.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.3.activations.2.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.3.activations.2.act.beta": [
+     64
+    ],
+    "decoder.resblocks.3.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.3.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.3.activations.3.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.3.activations.3.act.beta": [
+     64
+    ],
+    "decoder.resblocks.3.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.3.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.3.activations.4.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.3.activations.4.act.beta": [
+     64
+    ],
+    "decoder.resblocks.3.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.3.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.3.activations.5.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.3.activations.5.act.beta": [
+     64
+    ],
+    "decoder.resblocks.3.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.3.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.4.convs1.0.weight": [
+     64,
+     64,
+     7
+    ],
+    "decoder.resblocks.4.convs1.0.bias": [
+     64
+    ],
+    "decoder.resblocks.4.convs1.1.weight": [
+     64,
+     64,
+     7
+    ],
+    "decoder.resblocks.4.convs1.1.bias": [
+     64
+    ],
+    "decoder.resblocks.4.convs1.2.weight": [
+     64,
+     64,
+     7
+    ],
+    "decoder.resblocks.4.convs1.2.bias": [
+     64
+    ],
+    "decoder.resblocks.4.convs2.0.weight": [
+     64,
+     64,
+     7
+    ],
+    "decoder.resblocks.4.convs2.0.bias": [
+     64
+    ],
+    "decoder.resblocks.4.convs2.1.weight": [
+     64,
+     64,
+     7
+    ],
+    "decoder.resblocks.4.convs2.1.bias": [
+     64
+    ],
+    "decoder.resblocks.4.convs2.2.weight": [
+     64,
+     64,
+     7
+    ],
+    "decoder.resblocks.4.convs2.2.bias": [
+     64
+    ],
+    "decoder.resblocks.4.activations.0.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.4.activations.0.act.beta": [
+     64
+    ],
+    "decoder.resblocks.4.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.4.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.4.activations.1.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.4.activations.1.act.beta": [
+     64
+    ],
+    "decoder.resblocks.4.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.4.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.4.activations.2.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.4.activations.2.act.beta": [
+     64
+    ],
+    "decoder.resblocks.4.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.4.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.4.activations.3.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.4.activations.3.act.beta": [
+     64
+    ],
+    "decoder.resblocks.4.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.4.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.4.activations.4.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.4.activations.4.act.beta": [
+     64
+    ],
+    "decoder.resblocks.4.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.4.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.4.activations.5.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.4.activations.5.act.beta": [
+     64
+    ],
+    "decoder.resblocks.4.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.4.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.5.convs1.0.weight": [
+     64,
+     64,
+     11
+    ],
+    "decoder.resblocks.5.convs1.0.bias": [
+     64
+    ],
+    "decoder.resblocks.5.convs1.1.weight": [
+     64,
+     64,
+     11
+    ],
+    "decoder.resblocks.5.convs1.1.bias": [
+     64
+    ],
+    "decoder.resblocks.5.convs1.2.weight": [
+     64,
+     64,
+     11
+    ],
+    "decoder.resblocks.5.convs1.2.bias": [
+     64
+    ],
+    "decoder.resblocks.5.convs2.0.weight": [
+     64,
+     64,
+     11
+    ],
+    "decoder.resblocks.5.convs2.0.bias": [
+     64
+    ],
+    "decoder.resblocks.5.convs2.1.weight": [
+     64,
+     64,
+     11
+    ],
+    "decoder.resblocks.5.convs2.1.bias": [
+     64
+    ],
+    "decoder.resblocks.5.convs2.2.weight": [
+     64,
+     64,
+     11
+    ],
+    "decoder.resblocks.5.convs2.2.bias": [
+     64
+    ],
+    "decoder.resblocks.5.activations.0.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.5.activations.0.act.beta": [
+     64
+    ],
+    "decoder.resblocks.5.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.5.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.5.activations.1.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.5.activations.1.act.beta": [
+     64
+    ],
+    "decoder.resblocks.5.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.5.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.5.activations.2.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.5.activations.2.act.beta": [
+     64
+    ],
+    "decoder.resblocks.5.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.5.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.5.activations.3.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.5.activations.3.act.beta": [
+     64
+    ],
+    "decoder.resblocks.5.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.5.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.5.activations.4.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.5.activations.4.act.beta": [
+     64
+    ],
+    "decoder.resblocks.5.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.5.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.5.activations.5.act.alpha": [
+     64
+    ],
+    "decoder.resblocks.5.activations.5.act.beta": [
+     64
+    ],
+    "decoder.resblocks.5.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.5.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.6.convs1.0.weight": [
+     32,
+     32,
+     3
+    ],
+    "decoder.resblocks.6.convs1.0.bias": [
+     32
+    ],
+    "decoder.resblocks.6.convs1.1.weight": [
+     32,
+     32,
+     3
+    ],
+    "decoder.resblocks.6.convs1.1.bias": [
+     32
+    ],
+    "decoder.resblocks.6.convs1.2.weight": [
+     32,
+     32,
+     3
+    ],
+    "decoder.resblocks.6.convs1.2.bias": [
+     32
+    ],
+    "decoder.resblocks.6.convs2.0.weight": [
+     32,
+     32,
+     3
+    ],
+    "decoder.resblocks.6.convs2.0.bias": [
+     32
+    ],
+    "decoder.resblocks.6.convs2.1.weight": [
+     32,
+     32,
+     3
+    ],
+    "decoder.resblocks.6.convs2.1.bias": [
+     32
+    ],
+    "decoder.resblocks.6.convs2.2.weight": [
+     32,
+     32,
+     3
+    ],
+    "decoder.resblocks.6.convs2.2.bias": [
+     32
+    ],
+    "decoder.resblocks.6.activations.0.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.6.activations.0.act.beta": [
+     32
+    ],
+    "decoder.resblocks.6.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.6.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.6.activations.1.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.6.activations.1.act.beta": [
+     32
+    ],
+    "decoder.resblocks.6.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.6.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.6.activations.2.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.6.activations.2.act.beta": [
+     32
+    ],
+    "decoder.resblocks.6.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.6.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.6.activations.3.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.6.activations.3.act.beta": [
+     32
+    ],
+    "decoder.resblocks.6.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.6.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.6.activations.4.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.6.activations.4.act.beta": [
+     32
+    ],
+    "decoder.resblocks.6.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.6.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.6.activations.5.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.6.activations.5.act.beta": [
+     32
+    ],
+    "decoder.resblocks.6.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.6.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.7.convs1.0.weight": [
+     32,
+     32,
+     7
+    ],
+    "decoder.resblocks.7.convs1.0.bias": [
+     32
+    ],
+    "decoder.resblocks.7.convs1.1.weight": [
+     32,
+     32,
+     7
+    ],
+    "decoder.resblocks.7.convs1.1.bias": [
+     32
+    ],
+    "decoder.resblocks.7.convs1.2.weight": [
+     32,
+     32,
+     7
+    ],
+    "decoder.resblocks.7.convs1.2.bias": [
+     32
+    ],
+    "decoder.resblocks.7.convs2.0.weight": [
+     32,
+     32,
+     7
+    ],
+    "decoder.resblocks.7.convs2.0.bias": [
+     32
+    ],
+    "decoder.resblocks.7.convs2.1.weight": [
+     32,
+     32,
+     7
+    ],
+    "decoder.resblocks.7.convs2.1.bias": [
+     32
+    ],
+    "decoder.resblocks.7.convs2.2.weight": [
+     32,
+     32,
+     7
+    ],
+    "decoder.resblocks.7.convs2.2.bias": [
+     32
+    ],
+    "decoder.resblocks.7.activations.0.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.7.activations.0.act.beta": [
+     32
+    ],
+    "decoder.resblocks.7.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.7.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.7.activations.1.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.7.activations.1.act.beta": [
+     32
+    ],
+    "decoder.resblocks.7.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.7.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.7.activations.2.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.7.activations.2.act.beta": [
+     32
+    ],
+    "decoder.resblocks.7.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.7.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.7.activations.3.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.7.activations.3.act.beta": [
+     32
+    ],
+    "decoder.resblocks.7.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.7.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.7.activations.4.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.7.activations.4.act.beta": [
+     32
+    ],
+    "decoder.resblocks.7.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.7.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.7.activations.5.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.7.activations.5.act.beta": [
+     32
+    ],
+    "decoder.resblocks.7.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.7.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.8.convs1.0.weight": [
+     32,
+     32,
+     11
+    ],
+    "decoder.resblocks.8.convs1.0.bias": [
+     32
+    ],
+    "decoder.resblocks.8.convs1.1.weight": [
+     32,
+     32,
+     11
+    ],
+    "decoder.resblocks.8.convs1.1.bias": [
+     32
+    ],
+    "decoder.resblocks.8.convs1.2.weight": [
+     32,
+     32,
+     11
+    ],
+    "decoder.resblocks.8.convs1.2.bias": [
+     32
+    ],
+    "decoder.resblocks.8.convs2.0.weight": [
+     32,
+     32,
+     11
+    ],
+    "decoder.resblocks.8.convs2.0.bias": [
+     32
+    ],
+    "decoder.resblocks.8.convs2.1.weight": [
+     32,
+     32,
+     11
+    ],
+    "decoder.resblocks.8.convs2.1.bias": [
+     32
+    ],
+    "decoder.resblocks.8.convs2.2.weight": [
+     32,
+     32,
+     11
+    ],
+    "decoder.resblocks.8.convs2.2.bias": [
+     32
+    ],
+    "decoder.resblocks.8.activations.0.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.8.activations.0.act.beta": [
+     32
+    ],
+    "decoder.resblocks.8.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.8.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.8.activations.1.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.8.activations.1.act.beta": [
+     32
+    ],
+    "decoder.resblocks.8.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.8.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.8.activations.2.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.8.activations.2.act.beta": [
+     32
+    ],
+    "decoder.resblocks.8.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.8.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.8.activations.3.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.8.activations.3.act.beta": [
+     32
+    ],
+    "decoder.resblocks.8.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.8.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.8.activations.4.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.8.activations.4.act.beta": [
+     32
+    ],
+    "decoder.resblocks.8.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.8.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.8.activations.5.act.alpha": [
+     32
+    ],
+    "decoder.resblocks.8.activations.5.act.beta": [
+     32
+    ],
+    "decoder.resblocks.8.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.8.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.9.convs1.0.weight": [
+     16,
+     16,
+     3
+    ],
+    "decoder.resblocks.9.convs1.0.bias": [
+     16
+    ],
+    "decoder.resblocks.9.convs1.1.weight": [
+     16,
+     16,
+     3
+    ],
+    "decoder.resblocks.9.convs1.1.bias": [
+     16
+    ],
+    "decoder.resblocks.9.convs1.2.weight": [
+     16,
+     16,
+     3
+    ],
+    "decoder.resblocks.9.convs1.2.bias": [
+     16
+    ],
+    "decoder.resblocks.9.convs2.0.weight": [
+     16,
+     16,
+     3
+    ],
+    "decoder.resblocks.9.convs2.0.bias": [
+     16
+    ],
+    "decoder.resblocks.9.convs2.1.weight": [
+     16,
+     16,
+     3
+    ],
+    "decoder.resblocks.9.convs2.1.bias": [
+     16
+    ],
+    "decoder.resblocks.9.convs2.2.weight": [
+     16,
+     16,
+     3
+    ],
+    "decoder.resblocks.9.convs2.2.bias": [
+     16
+    ],
+    "decoder.resblocks.9.activations.0.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.9.activations.0.act.beta": [
+     16
+    ],
+    "decoder.resblocks.9.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.9.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.9.activations.1.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.9.activations.1.act.beta": [
+     16
+    ],
+    "decoder.resblocks.9.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.9.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.9.activations.2.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.9.activations.2.act.beta": [
+     16
+    ],
+    "decoder.resblocks.9.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.9.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.9.activations.3.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.9.activations.3.act.beta": [
+     16
+    ],
+    "decoder.resblocks.9.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.9.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.9.activations.4.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.9.activations.4.act.beta": [
+     16
+    ],
+    "decoder.resblocks.9.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.9.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.9.activations.5.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.9.activations.5.act.beta": [
+     16
+    ],
+    "decoder.resblocks.9.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.9.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.10.convs1.0.weight": [
+     16,
+     16,
+     7
+    ],
+    "decoder.resblocks.10.convs1.0.bias": [
+     16
+    ],
+    "decoder.resblocks.10.convs1.1.weight": [
+     16,
+     16,
+     7
+    ],
+    "decoder.resblocks.10.convs1.1.bias": [
+     16
+    ],
+    "decoder.resblocks.10.convs1.2.weight": [
+     16,
+     16,
+     7
+    ],
+    "decoder.resblocks.10.convs1.2.bias": [
+     16
+    ],
+    "decoder.resblocks.10.convs2.0.weight": [
+     16,
+     16,
+     7
+    ],
+    "decoder.resblocks.10.convs2.0.bias": [
+     16
+    ],
+    "decoder.resblocks.10.convs2.1.weight": [
+     16,
+     16,
+     7
+    ],
+    "decoder.resblocks.10.convs2.1.bias": [
+     16
+    ],
+    "decoder.resblocks.10.convs2.2.weight": [
+     16,
+     16,
+     7
+    ],
+    "decoder.resblocks.10.convs2.2.bias": [
+     16
+    ],
+    "decoder.resblocks.10.activations.0.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.10.activations.0.act.beta": [
+     16
+    ],
+    "decoder.resblocks.10.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.10.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.10.activations.1.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.10.activations.1.act.beta": [
+     16
+    ],
+    "decoder.resblocks.10.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.10.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.10.activations.2.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.10.activations.2.act.beta": [
+     16
+    ],
+    "decoder.resblocks.10.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.10.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.10.activations.3.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.10.activations.3.act.beta": [
+     16
+    ],
+    "decoder.resblocks.10.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.10.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.10.activations.4.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.10.activations.4.act.beta": [
+     16
+    ],
+    "decoder.resblocks.10.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.10.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.10.activations.5.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.10.activations.5.act.beta": [
+     16
+    ],
+    "decoder.resblocks.10.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.10.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.11.convs1.0.weight": [
+     16,
+     16,
+     11
+    ],
+    "decoder.resblocks.11.convs1.0.bias": [
+     16
+    ],
+    "decoder.resblocks.11.convs1.1.weight": [
+     16,
+     16,
+     11
+    ],
+    "decoder.resblocks.11.convs1.1.bias": [
+     16
+    ],
+    "decoder.resblocks.11.convs1.2.weight": [
+     16,
+     16,
+     11
+    ],
+    "decoder.resblocks.11.convs1.2.bias": [
+     16
+    ],
+    "decoder.resblocks.11.convs2.0.weight": [
+     16,
+     16,
+     11
+    ],
+    "decoder.resblocks.11.convs2.0.bias": [
+     16
+    ],
+    "decoder.resblocks.11.convs2.1.weight": [
+     16,
+     16,
+     11
+    ],
+    "decoder.resblocks.11.convs2.1.bias": [
+     16
+    ],
+    "decoder.resblocks.11.convs2.2.weight": [
+     16,
+     16,
+     11
+    ],
+    "decoder.resblocks.11.convs2.2.bias": [
+     16
+    ],
+    "decoder.resblocks.11.activations.0.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.11.activations.0.act.beta": [
+     16
+    ],
+    "decoder.resblocks.11.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.11.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.11.activations.1.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.11.activations.1.act.beta": [
+     16
+    ],
+    "decoder.resblocks.11.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.11.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.11.activations.2.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.11.activations.2.act.beta": [
+     16
+    ],
+    "decoder.resblocks.11.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.11.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.11.activations.3.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.11.activations.3.act.beta": [
+     16
+    ],
+    "decoder.resblocks.11.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.11.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.11.activations.4.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.11.activations.4.act.beta": [
+     16
+    ],
+    "decoder.resblocks.11.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.11.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.11.activations.5.act.alpha": [
+     16
+    ],
+    "decoder.resblocks.11.activations.5.act.beta": [
+     16
+    ],
+    "decoder.resblocks.11.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.11.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.12.convs1.0.weight": [
+     8,
+     8,
+     3
+    ],
+    "decoder.resblocks.12.convs1.0.bias": [
+     8
+    ],
+    "decoder.resblocks.12.convs1.1.weight": [
+     8,
+     8,
+     3
+    ],
+    "decoder.resblocks.12.convs1.1.bias": [
+     8
+    ],
+    "decoder.resblocks.12.convs1.2.weight": [
+     8,
+     8,
+     3
+    ],
+    "decoder.resblocks.12.convs1.2.bias": [
+     8
+    ],
+    "decoder.resblocks.12.convs2.0.weight": [
+     8,
+     8,
+     3
+    ],
+    "decoder.resblocks.12.convs2.0.bias": [
+     8
+    ],
+    "decoder.resblocks.12.convs2.1.weight": [
+     8,
+     8,
+     3
+    ],
+    "decoder.resblocks.12.convs2.1.bias": [
+     8
+    ],
+    "decoder.resblocks.12.convs2.2.weight": [
+     8,
+     8,
+     3
+    ],
+    "decoder.resblocks.12.convs2.2.bias": [
+     8
+    ],
+    "decoder.resblocks.12.activations.0.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.12.activations.0.act.beta": [
+     8
+    ],
+    "decoder.resblocks.12.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.12.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.12.activations.1.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.12.activations.1.act.beta": [
+     8
+    ],
+    "decoder.resblocks.12.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.12.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.12.activations.2.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.12.activations.2.act.beta": [
+     8
+    ],
+    "decoder.resblocks.12.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.12.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.12.activations.3.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.12.activations.3.act.beta": [
+     8
+    ],
+    "decoder.resblocks.12.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.12.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.12.activations.4.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.12.activations.4.act.beta": [
+     8
+    ],
+    "decoder.resblocks.12.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.12.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.12.activations.5.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.12.activations.5.act.beta": [
+     8
+    ],
+    "decoder.resblocks.12.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.12.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.13.convs1.0.weight": [
+     8,
+     8,
+     7
+    ],
+    "decoder.resblocks.13.convs1.0.bias": [
+     8
+    ],
+    "decoder.resblocks.13.convs1.1.weight": [
+     8,
+     8,
+     7
+    ],
+    "decoder.resblocks.13.convs1.1.bias": [
+     8
+    ],
+    "decoder.resblocks.13.convs1.2.weight": [
+     8,
+     8,
+     7
+    ],
+    "decoder.resblocks.13.convs1.2.bias": [
+     8
+    ],
+    "decoder.resblocks.13.convs2.0.weight": [
+     8,
+     8,
+     7
+    ],
+    "decoder.resblocks.13.convs2.0.bias": [
+     8
+    ],
+    "decoder.resblocks.13.convs2.1.weight": [
+     8,
+     8,
+     7
+    ],
+    "decoder.resblocks.13.convs2.1.bias": [
+     8
+    ],
+    "decoder.resblocks.13.convs2.2.weight": [
+     8,
+     8,
+     7
+    ],
+    "decoder.resblocks.13.convs2.2.bias": [
+     8
+    ],
+    "decoder.resblocks.13.activations.0.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.13.activations.0.act.beta": [
+     8
+    ],
+    "decoder.resblocks.13.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.13.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.13.activations.1.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.13.activations.1.act.beta": [
+     8
+    ],
+    "decoder.resblocks.13.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.13.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.13.activations.2.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.13.activations.2.act.beta": [
+     8
+    ],
+    "decoder.resblocks.13.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.13.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.13.activations.3.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.13.activations.3.act.beta": [
+     8
+    ],
+    "decoder.resblocks.13.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.13.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.13.activations.4.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.13.activations.4.act.beta": [
+     8
+    ],
+    "decoder.resblocks.13.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.13.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.13.activations.5.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.13.activations.5.act.beta": [
+     8
+    ],
+    "decoder.resblocks.13.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.13.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.14.convs1.0.weight": [
+     8,
+     8,
+     11
+    ],
+    "decoder.resblocks.14.convs1.0.bias": [
+     8
+    ],
+    "decoder.resblocks.14.convs1.1.weight": [
+     8,
+     8,
+     11
+    ],
+    "decoder.resblocks.14.convs1.1.bias": [
+     8
+    ],
+    "decoder.resblocks.14.convs1.2.weight": [
+     8,
+     8,
+     11
+    ],
+    "decoder.resblocks.14.convs1.2.bias": [
+     8
+    ],
+    "decoder.resblocks.14.convs2.0.weight": [
+     8,
+     8,
+     11
+    ],
+    "decoder.resblocks.14.convs2.0.bias": [
+     8
+    ],
+    "decoder.resblocks.14.convs2.1.weight": [
+     8,
+     8,
+     11
+    ],
+    "decoder.resblocks.14.convs2.1.bias": [
+     8
+    ],
+    "decoder.resblocks.14.convs2.2.weight": [
+     8,
+     8,
+     11
+    ],
+    "decoder.resblocks.14.convs2.2.bias": [
+     8
+    ],
+    "decoder.resblocks.14.activations.0.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.14.activations.0.act.beta": [
+     8
+    ],
+    "decoder.resblocks.14.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.14.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.14.activations.1.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.14.activations.1.act.beta": [
+     8
+    ],
+    "decoder.resblocks.14.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.14.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.14.activations.2.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.14.activations.2.act.beta": [
+     8
+    ],
+    "decoder.resblocks.14.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.14.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.14.activations.3.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.14.activations.3.act.beta": [
+     8
+    ],
+    "decoder.resblocks.14.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.14.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.14.activations.4.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.14.activations.4.act.beta": [
+     8
+    ],
+    "decoder.resblocks.14.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.14.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.14.activations.5.act.alpha": [
+     8
+    ],
+    "decoder.resblocks.14.activations.5.act.beta": [
+     8
+    ],
+    "decoder.resblocks.14.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.14.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.15.convs1.0.weight": [
+     4,
+     4,
+     3
+    ],
+    "decoder.resblocks.15.convs1.0.bias": [
+     4
+    ],
+    "decoder.resblocks.15.convs1.1.weight": [
+     4,
+     4,
+     3
+    ],
+    "decoder.resblocks.15.convs1.1.bias": [
+     4
+    ],
+    "decoder.resblocks.15.convs1.2.weight": [
+     4,
+     4,
+     3
+    ],
+    "decoder.resblocks.15.convs1.2.bias": [
+     4
+    ],
+    "decoder.resblocks.15.convs2.0.weight": [
+     4,
+     4,
+     3
+    ],
+    "decoder.resblocks.15.convs2.0.bias": [
+     4
+    ],
+    "decoder.resblocks.15.convs2.1.weight": [
+     4,
+     4,
+     3
+    ],
+    "decoder.resblocks.15.convs2.1.bias": [
+     4
+    ],
+    "decoder.resblocks.15.convs2.2.weight": [
+     4,
+     4,
+     3
+    ],
+    "decoder.resblocks.15.convs2.2.bias": [
+     4
+    ],
+    "decoder.resblocks.15.activations.0.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.15.activations.0.act.beta": [
+     4
+    ],
+    "decoder.resblocks.15.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.15.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.15.activations.1.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.15.activations.1.act.beta": [
+     4
+    ],
+    "decoder.resblocks.15.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.15.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.15.activations.2.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.15.activations.2.act.beta": [
+     4
+    ],
+    "decoder.resblocks.15.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.15.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.15.activations.3.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.15.activations.3.act.beta": [
+     4
+    ],
+    "decoder.resblocks.15.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.15.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.15.activations.4.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.15.activations.4.act.beta": [
+     4
+    ],
+    "decoder.resblocks.15.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.15.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.15.activations.5.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.15.activations.5.act.beta": [
+     4
+    ],
+    "decoder.resblocks.15.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.15.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.16.convs1.0.weight": [
+     4,
+     4,
+     7
+    ],
+    "decoder.resblocks.16.convs1.0.bias": [
+     4
+    ],
+    "decoder.resblocks.16.convs1.1.weight": [
+     4,
+     4,
+     7
+    ],
+    "decoder.resblocks.16.convs1.1.bias": [
+     4
+    ],
+    "decoder.resblocks.16.convs1.2.weight": [
+     4,
+     4,
+     7
+    ],
+    "decoder.resblocks.16.convs1.2.bias": [
+     4
+    ],
+    "decoder.resblocks.16.convs2.0.weight": [
+     4,
+     4,
+     7
+    ],
+    "decoder.resblocks.16.convs2.0.bias": [
+     4
+    ],
+    "decoder.resblocks.16.convs2.1.weight": [
+     4,
+     4,
+     7
+    ],
+    "decoder.resblocks.16.convs2.1.bias": [
+     4
+    ],
+    "decoder.resblocks.16.convs2.2.weight": [
+     4,
+     4,
+     7
+    ],
+    "decoder.resblocks.16.convs2.2.bias": [
+     4
+    ],
+    "decoder.resblocks.16.activations.0.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.16.activations.0.act.beta": [
+     4
+    ],
+    "decoder.resblocks.16.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.16.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.16.activations.1.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.16.activations.1.act.beta": [
+     4
+    ],
+    "decoder.resblocks.16.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.16.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.16.activations.2.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.16.activations.2.act.beta": [
+     4
+    ],
+    "decoder.resblocks.16.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.16.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.16.activations.3.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.16.activations.3.act.beta": [
+     4
+    ],
+    "decoder.resblocks.16.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.16.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.16.activations.4.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.16.activations.4.act.beta": [
+     4
+    ],
+    "decoder.resblocks.16.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.16.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.16.activations.5.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.16.activations.5.act.beta": [
+     4
+    ],
+    "decoder.resblocks.16.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.16.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.17.convs1.0.weight": [
+     4,
+     4,
+     11
+    ],
+    "decoder.resblocks.17.convs1.0.bias": [
+     4
+    ],
+    "decoder.resblocks.17.convs1.1.weight": [
+     4,
+     4,
+     11
+    ],
+    "decoder.resblocks.17.convs1.1.bias": [
+     4
+    ],
+    "decoder.resblocks.17.convs1.2.weight": [
+     4,
+     4,
+     11
+    ],
+    "decoder.resblocks.17.convs1.2.bias": [
+     4
+    ],
+    "decoder.resblocks.17.convs2.0.weight": [
+     4,
+     4,
+     11
+    ],
+    "decoder.resblocks.17.convs2.0.bias": [
+     4
+    ],
+    "decoder.resblocks.17.convs2.1.weight": [
+     4,
+     4,
+     11
+    ],
+    "decoder.resblocks.17.convs2.1.bias": [
+     4
+    ],
+    "decoder.resblocks.17.convs2.2.weight": [
+     4,
+     4,
+     11
+    ],
+    "decoder.resblocks.17.convs2.2.bias": [
+     4
+    ],
+    "decoder.resblocks.17.activations.0.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.17.activations.0.act.beta": [
+     4
+    ],
+    "decoder.resblocks.17.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.17.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.17.activations.1.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.17.activations.1.act.beta": [
+     4
+    ],
+    "decoder.resblocks.17.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.17.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.17.activations.2.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.17.activations.2.act.beta": [
+     4
+    ],
+    "decoder.resblocks.17.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.17.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.17.activations.3.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.17.activations.3.act.beta": [
+     4
+    ],
+    "decoder.resblocks.17.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.17.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.17.activations.4.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.17.activations.4.act.beta": [
+     4
+    ],
+    "decoder.resblocks.17.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.17.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.17.activations.5.act.alpha": [
+     4
+    ],
+    "decoder.resblocks.17.activations.5.act.beta": [
+     4
+    ],
+    "decoder.resblocks.17.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.17.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.18.convs1.0.weight": [
+     2,
+     2,
+     3
+    ],
+    "decoder.resblocks.18.convs1.0.bias": [
+     2
+    ],
+    "decoder.resblocks.18.convs1.1.weight": [
+     2,
+     2,
+     3
+    ],
+    "decoder.resblocks.18.convs1.1.bias": [
+     2
+    ],
+    "decoder.resblocks.18.convs1.2.weight": [
+     2,
+     2,
+     3
+    ],
+    "decoder.resblocks.18.convs1.2.bias": [
+     2
+    ],
+    "decoder.resblocks.18.convs2.0.weight": [
+     2,
+     2,
+     3
+    ],
+    "decoder.resblocks.18.convs2.0.bias": [
+     2
+    ],
+    "decoder.resblocks.18.convs2.1.weight": [
+     2,
+     2,
+     3
+    ],
+    "decoder.resblocks.18.convs2.1.bias": [
+     2
+    ],
+    "decoder.resblocks.18.convs2.2.weight": [
+     2,
+     2,
+     3
+    ],
+    "decoder.resblocks.18.convs2.2.bias": [
+     2
+    ],
+    "decoder.resblocks.18.activations.0.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.18.activations.0.act.beta": [
+     2
+    ],
+    "decoder.resblocks.18.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.18.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.18.activations.1.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.18.activations.1.act.beta": [
+     2
+    ],
+    "decoder.resblocks.18.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.18.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.18.activations.2.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.18.activations.2.act.beta": [
+     2
+    ],
+    "decoder.resblocks.18.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.18.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.18.activations.3.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.18.activations.3.act.beta": [
+     2
+    ],
+    "decoder.resblocks.18.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.18.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.18.activations.4.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.18.activations.4.act.beta": [
+     2
+    ],
+    "decoder.resblocks.18.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.18.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.18.activations.5.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.18.activations.5.act.beta": [
+     2
+    ],
+    "decoder.resblocks.18.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.18.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.19.convs1.0.weight": [
+     2,
+     2,
+     7
+    ],
+    "decoder.resblocks.19.convs1.0.bias": [
+     2
+    ],
+    "decoder.resblocks.19.convs1.1.weight": [
+     2,
+     2,
+     7
+    ],
+    "decoder.resblocks.19.convs1.1.bias": [
+     2
+    ],
+    "decoder.resblocks.19.convs1.2.weight": [
+     2,
+     2,
+     7
+    ],
+    "decoder.resblocks.19.convs1.2.bias": [
+     2
+    ],
+    "decoder.resblocks.19.convs2.0.weight": [
+     2,
+     2,
+     7
+    ],
+    "decoder.resblocks.19.convs2.0.bias": [
+     2
+    ],
+    "decoder.resblocks.19.convs2.1.weight": [
+     2,
+     2,
+     7
+    ],
+    "decoder.resblocks.19.convs2.1.bias": [
+     2
+    ],
+    "decoder.resblocks.19.convs2.2.weight": [
+     2,
+     2,
+     7
+    ],
+    "decoder.resblocks.19.convs2.2.bias": [
+     2
+    ],
+    "decoder.resblocks.19.activations.0.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.19.activations.0.act.beta": [
+     2
+    ],
+    "decoder.resblocks.19.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.19.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.19.activations.1.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.19.activations.1.act.beta": [
+     2
+    ],
+    "decoder.resblocks.19.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.19.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.19.activations.2.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.19.activations.2.act.beta": [
+     2
+    ],
+    "decoder.resblocks.19.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.19.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.19.activations.3.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.19.activations.3.act.beta": [
+     2
+    ],
+    "decoder.resblocks.19.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.19.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.19.activations.4.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.19.activations.4.act.beta": [
+     2
+    ],
+    "decoder.resblocks.19.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.19.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.19.activations.5.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.19.activations.5.act.beta": [
+     2
+    ],
+    "decoder.resblocks.19.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.19.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.20.convs1.0.weight": [
+     2,
+     2,
+     11
+    ],
+    "decoder.resblocks.20.convs1.0.bias": [
+     2
+    ],
+    "decoder.resblocks.20.convs1.1.weight": [
+     2,
+     2,
+     11
+    ],
+    "decoder.resblocks.20.convs1.1.bias": [
+     2
+    ],
+    "decoder.resblocks.20.convs1.2.weight": [
+     2,
+     2,
+     11
+    ],
+    "decoder.resblocks.20.convs1.2.bias": [
+     2
+    ],
+    "decoder.resblocks.20.convs2.0.weight": [
+     2,
+     2,
+     11
+    ],
+    "decoder.resblocks.20.convs2.0.bias": [
+     2
+    ],
+    "decoder.resblocks.20.convs2.1.weight": [
+     2,
+     2,
+     11
+    ],
+    "decoder.resblocks.20.convs2.1.bias": [
+     2
+    ],
+    "decoder.resblocks.20.convs2.2.weight": [
+     2,
+     2,
+     11
+    ],
+    "decoder.resblocks.20.convs2.2.bias": [
+     2
+    ],
+    "decoder.resblocks.20.activations.0.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.20.activations.0.act.beta": [
+     2
+    ],
+    "decoder.resblocks.20.activations.0.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.20.activations.0.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.20.activations.1.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.20.activations.1.act.beta": [
+     2
+    ],
+    "decoder.resblocks.20.activations.1.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.20.activations.1.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.20.activations.2.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.20.activations.2.act.beta": [
+     2
+    ],
+    "decoder.resblocks.20.activations.2.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.20.activations.2.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.20.activations.3.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.20.activations.3.act.beta": [
+     2
+    ],
+    "decoder.resblocks.20.activations.3.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.20.activations.3.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.20.activations.4.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.20.activations.4.act.beta": [
+     2
+    ],
+    "decoder.resblocks.20.activations.4.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.20.activations.4.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.20.activations.5.act.alpha": [
+     2
+    ],
+    "decoder.resblocks.20.activations.5.act.beta": [
+     2
+    ],
+    "decoder.resblocks.20.activations.5.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.resblocks.20.activations.5.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.activation_post.act.alpha": [
+     2
+    ],
+    "decoder.activation_post.act.beta": [
+     2
+    ],
+    "decoder.activation_post.upsample.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.activation_post.downsample.lowpass.filter": [
+     1,
+     1,
+     12
+    ],
+    "decoder.conv_post.weight": [
+     1,
+     2,
+     7
+    ]
+   }
+  },
+  "plan_tables": {
+   "tiles": {
+    "16": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      16
+     ],
+     "overlaps": []
+    },
+    "32": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      32
+     ],
+     "overlaps": []
+    },
+    "48": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      48
+     ],
+     "overlaps": []
+    },
+    "64": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      64
+     ],
+     "overlaps": []
+    },
+    "80": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      80
+     ],
+     "overlaps": []
+    },
+    "96": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      96
+     ],
+     "overlaps": []
+    },
+    "112": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      112
+     ],
+     "overlaps": []
+    },
+    "128": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      128
+     ],
+     "overlaps": []
+    },
+    "144": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      144
+     ],
+     "overlaps": []
+    },
+    "160": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      160
+     ],
+     "overlaps": []
+    },
+    "176": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      176
+     ],
+     "overlaps": []
+    },
+    "192": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      192
+     ],
+     "overlaps": []
+    },
+    "208": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      208
+     ],
+     "overlaps": []
+    },
+    "224": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      224
+     ],
+     "overlaps": []
+    },
+    "240": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      240
+     ],
+     "overlaps": []
+    },
+    "256": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      256
+     ],
+     "overlaps": []
+    },
+    "272": {
+     "starts": [
+      0,
+      16
+     ],
+     "lengths": [
+      256,
+      256
+     ],
+     "overlaps": [
+      240
+     ]
+    },
+    "288": {
+     "starts": [
+      0,
+      32
+     ],
+     "lengths": [
+      256,
+      256
+     ],
+     "overlaps": [
+      224
+     ]
+    },
+    "304": {
+     "starts": [
+      0,
+      48
+     ],
+     "lengths": [
+      256,
+      256
+     ],
+     "overlaps": [
+      208
+     ]
+    },
+    "320": {
+     "starts": [
+      0,
+      64
+     ],
+     "lengths": [
+      256,
+      256
+     ],
+     "overlaps": [
+      192
+     ]
+    },
+    "336": {
+     "starts": [
+      0,
+      80
+     ],
+     "lengths": [
+      256,
+      256
+     ],
+     "overlaps": [
+      176
+     ]
+    },
+    "352": {
+     "starts": [
+      0,
+      96
+     ],
+     "lengths": [
+      256,
+      256
+     ],
+     "overlaps": [
+      160
+     ]
+    },
+    "368": {
+     "starts": [
+      0,
+      112
+     ],
+     "lengths": [
+      256,
+      256
+     ],
+     "overlaps": [
+      144
+     ]
+    },
+    "384": {
+     "starts": [
+      0,
+      128
+     ],
+     "lengths": [
+      256,
+      256
+     ],
+     "overlaps": [
+      128
+     ]
+    },
+    "400": {
+     "starts": [
+      0,
+      144
+     ],
+     "lengths": [
+      256,
+      256
+     ],
+     "overlaps": [
+      112
+     ]
+    },
+    "416": {
+     "starts": [
+      0,
+      160
+     ],
+     "lengths": [
+      256,
+      256
+     ],
+     "overlaps": [
+      96
+     ]
+    },
+    "432": {
+     "starts": [
+      0,
+      176
+     ],
+     "lengths": [
+      256,
+      256
+     ],
+     "overlaps": [
+      80
+     ]
+    },
+    "448": {
+     "starts": [
+      0,
+      192
+     ],
+     "lengths": [
+      256,
+      256
+     ],
+     "overlaps": [
+      64
+     ]
+    },
+    "464": {
+     "starts": [
+      0,
+      96,
+      208
+     ],
+     "lengths": [
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      160,
+      144
+     ]
+    },
+    "480": {
+     "starts": [
+      0,
+      112,
+      224
+     ],
+     "lengths": [
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      144,
+      144
+     ]
+    },
+    "496": {
+     "starts": [
+      0,
+      112,
+      240
+     ],
+     "lengths": [
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      144,
+      128
+     ]
+    },
+    "512": {
+     "starts": [
+      0,
+      128,
+      256
+     ],
+     "lengths": [
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      128,
+      128
+     ]
+    },
+    "528": {
+     "starts": [
+      0,
+      128,
+      272
+     ],
+     "lengths": [
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      128,
+      112
+     ]
+    },
+    "544": {
+     "starts": [
+      0,
+      144,
+      288
+     ],
+     "lengths": [
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      112,
+      112
+     ]
+    },
+    "560": {
+     "starts": [
+      0,
+      144,
+      304
+     ],
+     "lengths": [
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      112,
+      96
+     ]
+    },
+    "576": {
+     "starts": [
+      0,
+      160,
+      320
+     ],
+     "lengths": [
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96
+     ]
+    },
+    "592": {
+     "starts": [
+      0,
+      160,
+      336
+     ],
+     "lengths": [
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      80
+     ]
+    },
+    "608": {
+     "starts": [
+      0,
+      176,
+      352
+     ],
+     "lengths": [
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80
+     ]
+    },
+    "624": {
+     "starts": [
+      0,
+      176,
+      368
+     ],
+     "lengths": [
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      64
+     ]
+    },
+    "640": {
+     "starts": [
+      0,
+      192,
+      384
+     ],
+     "lengths": [
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      64,
+      64
+     ]
+    },
+    "656": {
+     "starts": [
+      0,
+      128,
+      256,
+      400
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      128,
+      128,
+      112
+     ]
+    },
+    "672": {
+     "starts": [
+      0,
+      128,
+      272,
+      416
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      128,
+      112,
+      112
+     ]
+    },
+    "688": {
+     "starts": [
+      0,
+      144,
+      288,
+      432
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      112,
+      112,
+      112
+     ]
+    },
+    "704": {
+     "starts": [
+      0,
+      144,
+      288,
+      448
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      112,
+      112,
+      96
+     ]
+    },
+    "720": {
+     "starts": [
+      0,
+      144,
+      304,
+      464
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      112,
+      96,
+      96
+     ]
+    },
+    "736": {
+     "starts": [
+      0,
+      160,
+      320,
+      480
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      96
+     ]
+    },
+    "752": {
+     "starts": [
+      0,
+      160,
+      320,
+      496
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      80
+     ]
+    },
+    "768": {
+     "starts": [
+      0,
+      160,
+      336,
+      512
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      80,
+      80
+     ]
+    },
+    "784": {
+     "starts": [
+      0,
+      176,
+      352,
+      528
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80
+     ]
+    },
+    "800": {
+     "starts": [
+      0,
+      176,
+      352,
+      544
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      64
+     ]
+    },
+    "816": {
+     "starts": [
+      0,
+      176,
+      368,
+      560
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      64,
+      64
+     ]
+    },
+    "832": {
+     "starts": [
+      0,
+      192,
+      384,
+      576
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      64,
+      64,
+      64
+     ]
+    },
+    "848": {
+     "starts": [
+      0,
+      144,
+      288,
+      432,
+      592
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      112,
+      112,
+      112,
+      96
+     ]
+    },
+    "864": {
+     "starts": [
+      0,
+      144,
+      288,
+      448,
+      608
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      112,
+      112,
+      96,
+      96
+     ]
+    },
+    "880": {
+     "starts": [
+      0,
+      144,
+      304,
+      464,
+      624
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      112,
+      96,
+      96,
+      96
+     ]
+    },
+    "896": {
+     "starts": [
+      0,
+      160,
+      320,
+      480,
+      640
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      96,
+      96
+     ]
+    },
+    "912": {
+     "starts": [
+      0,
+      160,
+      320,
+      480,
+      656
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      96,
+      80
+     ]
+    },
+    "928": {
+     "starts": [
+      0,
+      160,
+      320,
+      496,
+      672
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      80,
+      80
+     ]
+    },
+    "944": {
+     "starts": [
+      0,
+      160,
+      336,
+      512,
+      688
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      80,
+      80,
+      80
+     ]
+    },
+    "960": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "976": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      720
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      64
+     ]
+    },
+    "992": {
+     "starts": [
+      0,
+      176,
+      352,
+      544,
+      736
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      64,
+      64
+     ]
+    },
+    "1008": {
+     "starts": [
+      0,
+      176,
+      368,
+      560,
+      752
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      64,
+      64,
+      64
+     ]
+    },
+    "1024": {
+     "starts": [
+      0,
+      192,
+      384,
+      576,
+      768
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1040": {
+     "starts": [
+      0,
+      144,
+      304,
+      464,
+      624,
+      784
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      112,
+      96,
+      96,
+      96,
+      96
+     ]
+    },
+    "1056": {
+     "starts": [
+      0,
+      160,
+      320,
+      480,
+      640,
+      800
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      96,
+      96,
+      96
+     ]
+    },
+    "1072": {
+     "starts": [
+      0,
+      160,
+      320,
+      480,
+      640,
+      816
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      96,
+      96,
+      80
+     ]
+    },
+    "1088": {
+     "starts": [
+      0,
+      160,
+      320,
+      480,
+      656,
+      832
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      96,
+      80,
+      80
+     ]
+    },
+    "1104": {
+     "starts": [
+      0,
+      160,
+      320,
+      496,
+      672,
+      848
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      80,
+      80,
+      80
+     ]
+    },
+    "1120": {
+     "starts": [
+      0,
+      160,
+      336,
+      512,
+      688,
+      864
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1136": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1152": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      896
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      64
+     ]
+    },
+    "1168": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      720,
+      912
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      64,
+      64
+     ]
+    },
+    "1184": {
+     "starts": [
+      0,
+      176,
+      352,
+      544,
+      736,
+      928
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      64,
+      64,
+      64
+     ]
+    },
+    "1200": {
+     "starts": [
+      0,
+      176,
+      368,
+      560,
+      752,
+      944
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1216": {
+     "starts": [
+      0,
+      192,
+      384,
+      576,
+      768,
+      960
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      64,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1232": {
+     "starts": [
+      0,
+      160,
+      320,
+      480,
+      640,
+      800,
+      976
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      96,
+      96,
+      96,
+      80
+     ]
+    },
+    "1248": {
+     "starts": [
+      0,
+      160,
+      320,
+      480,
+      640,
+      816,
+      992
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      96,
+      96,
+      80,
+      80
+     ]
+    },
+    "1264": {
+     "starts": [
+      0,
+      160,
+      320,
+      480,
+      656,
+      832,
+      1008
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      96,
+      80,
+      80,
+      80
+     ]
+    },
+    "1280": {
+     "starts": [
+      0,
+      160,
+      320,
+      496,
+      672,
+      848,
+      1024
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1296": {
+     "starts": [
+      0,
+      160,
+      336,
+      512,
+      688,
+      864,
+      1040
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      80,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1312": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1056
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1328": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1072
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      64
+     ]
+    },
+    "1344": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      896,
+      1088
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      64,
+      64
+     ]
+    },
+    "1360": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      720,
+      912,
+      1104
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      64,
+      64,
+      64
+     ]
+    },
+    "1376": {
+     "starts": [
+      0,
+      176,
+      352,
+      544,
+      736,
+      928,
+      1120
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1392": {
+     "starts": [
+      0,
+      176,
+      368,
+      560,
+      752,
+      944,
+      1136
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      64,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1408": {
+     "starts": [
+      0,
+      192,
+      384,
+      576,
+      768,
+      960,
+      1152
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      64,
+      64,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1424": {
+     "starts": [
+      0,
+      160,
+      320,
+      480,
+      640,
+      816,
+      992,
+      1168
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      96,
+      96,
+      80,
+      80,
+      80
+     ]
+    },
+    "1440": {
+     "starts": [
+      0,
+      160,
+      320,
+      480,
+      656,
+      832,
+      1008,
+      1184
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      96,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1456": {
+     "starts": [
+      0,
+      160,
+      320,
+      496,
+      672,
+      848,
+      1024,
+      1200
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      80,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1472": {
+     "starts": [
+      0,
+      160,
+      336,
+      512,
+      688,
+      864,
+      1040,
+      1216
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1488": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1056,
+      1232
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1504": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1056,
+      1248
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      64
+     ]
+    },
+    "1520": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1072,
+      1264
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      64,
+      64
+     ]
+    },
+    "1536": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      896,
+      1088,
+      1280
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      64,
+      64,
+      64
+     ]
+    },
+    "1552": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      720,
+      912,
+      1104,
+      1296
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1568": {
+     "starts": [
+      0,
+      176,
+      352,
+      544,
+      736,
+      928,
+      1120,
+      1312
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      64,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1584": {
+     "starts": [
+      0,
+      176,
+      368,
+      560,
+      752,
+      944,
+      1136,
+      1328
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1600": {
+     "starts": [
+      0,
+      192,
+      384,
+      576,
+      768,
+      960,
+      1152,
+      1344
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      64,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1616": {
+     "starts": [
+      0,
+      160,
+      320,
+      480,
+      656,
+      832,
+      1008,
+      1184,
+      1360
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      96,
+      80,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1632": {
+     "starts": [
+      0,
+      160,
+      320,
+      496,
+      672,
+      848,
+      1024,
+      1200,
+      1376
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1648": {
+     "starts": [
+      0,
+      160,
+      336,
+      512,
+      688,
+      864,
+      1040,
+      1216,
+      1392
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1664": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1056,
+      1232,
+      1408
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1680": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1056,
+      1232,
+      1424
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      64
+     ]
+    },
+    "1696": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1056,
+      1248,
+      1440
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      64,
+      64
+     ]
+    },
+    "1712": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1072,
+      1264,
+      1456
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      64,
+      64,
+      64
+     ]
+    },
+    "1728": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      896,
+      1088,
+      1280,
+      1472
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1744": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      720,
+      912,
+      1104,
+      1296,
+      1488
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      64,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1760": {
+     "starts": [
+      0,
+      176,
+      352,
+      544,
+      736,
+      928,
+      1120,
+      1312,
+      1504
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1776": {
+     "starts": [
+      0,
+      176,
+      368,
+      560,
+      752,
+      944,
+      1136,
+      1328,
+      1520
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1792": {
+     "starts": [
+      0,
+      192,
+      384,
+      576,
+      768,
+      960,
+      1152,
+      1344,
+      1536
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      64,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1808": {
+     "starts": [
+      0,
+      160,
+      320,
+      496,
+      672,
+      848,
+      1024,
+      1200,
+      1376,
+      1552
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      96,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1824": {
+     "starts": [
+      0,
+      160,
+      336,
+      512,
+      688,
+      864,
+      1040,
+      1216,
+      1392,
+      1568
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1840": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1056,
+      1232,
+      1408,
+      1584
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "1856": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1056,
+      1232,
+      1408,
+      1600
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      64
+     ]
+    },
+    "1872": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1056,
+      1232,
+      1424,
+      1616
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      64,
+      64
+     ]
+    },
+    "1888": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1056,
+      1248,
+      1440,
+      1632
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      64,
+      64,
+      64
+     ]
+    },
+    "1904": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1072,
+      1264,
+      1456,
+      1648
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1920": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      896,
+      1088,
+      1280,
+      1472,
+      1664
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      64,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1936": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      720,
+      912,
+      1104,
+      1296,
+      1488,
+      1680
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1952": {
+     "starts": [
+      0,
+      176,
+      352,
+      544,
+      736,
+      928,
+      1120,
+      1312,
+      1504,
+      1696
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1968": {
+     "starts": [
+      0,
+      176,
+      368,
+      560,
+      752,
+      944,
+      1136,
+      1328,
+      1520,
+      1712
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "1984": {
+     "starts": [
+      0,
+      192,
+      384,
+      576,
+      768,
+      960,
+      1152,
+      1344,
+      1536,
+      1728
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      64,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64
+     ]
+    },
+    "2000": {
+     "starts": [
+      0,
+      160,
+      336,
+      512,
+      688,
+      864,
+      1040,
+      1216,
+      1392,
+      1568,
+      1744
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      96,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "2016": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1056,
+      1232,
+      1408,
+      1584,
+      1760
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80
+     ]
+    },
+    "2032": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1056,
+      1232,
+      1408,
+      1584,
+      1776
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      64
+     ]
+    },
+    "2048": {
+     "starts": [
+      0,
+      176,
+      352,
+      528,
+      704,
+      880,
+      1056,
+      1232,
+      1408,
+      1600,
+      1792
+     ],
+     "lengths": [
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      80,
+      64,
+      64
+     ]
+    }
+   },
+   "chunks": {
+    "1": {
+     "pad": 0,
+     "runs": 1,
+     "frames": 1
+    },
+    "2": {
+     "pad": 5,
+     "runs": 1,
+     "frames": 5
+    },
+    "3": {
+     "pad": 4,
+     "runs": 1,
+     "frames": 9
+    },
+    "4": {
+     "pad": 3,
+     "runs": 1,
+     "frames": 13
+    },
+    "5": {
+     "pad": 2,
+     "runs": 1,
+     "frames": 17
+    },
+    "6": {
+     "pad": 1,
+     "runs": 1,
+     "frames": 18
+    },
+    "7": {
+     "pad": 0,
+     "runs": 1,
+     "frames": 22
+    },
+    "8": {
+     "pad": 4,
+     "runs": 2,
+     "frames": 26
+    },
+    "9": {
+     "pad": 3,
+     "runs": 2,
+     "frames": 30
+    },
+    "10": {
+     "pad": 2,
+     "runs": 2,
+     "frames": 34
+    },
+    "11": {
+     "pad": 1,
+     "runs": 2,
+     "frames": 35
+    },
+    "12": {
+     "pad": 0,
+     "runs": 2,
+     "frames": 39
+    },
+    "13": {
+     "pad": 4,
+     "runs": 3,
+     "frames": 43
+    },
+    "14": {
+     "pad": 3,
+     "runs": 3,
+     "frames": 47
+    },
+    "15": {
+     "pad": 2,
+     "runs": 3,
+     "frames": 51
+    },
+    "16": {
+     "pad": 1,
+     "runs": 3,
+     "frames": 52
+    },
+    "17": {
+     "pad": 0,
+     "runs": 3,
+     "frames": 56
+    },
+    "18": {
+     "pad": 4,
+     "runs": 4,
+     "frames": 60
+    },
+    "19": {
+     "pad": 3,
+     "runs": 4,
+     "frames": 64
+    },
+    "20": {
+     "pad": 2,
+     "runs": 4,
+     "frames": 68
+    },
+    "21": {
+     "pad": 1,
+     "runs": 4,
+     "frames": 69
+    },
+    "22": {
+     "pad": 0,
+     "runs": 4,
+     "frames": 73
+    },
+    "23": {
+     "pad": 4,
+     "runs": 5,
+     "frames": 77
+    },
+    "24": {
+     "pad": 3,
+     "runs": 5,
+     "frames": 81
+    },
+    "25": {
+     "pad": 2,
+     "runs": 5,
+     "frames": 85
+    },
+    "26": {
+     "pad": 1,
+     "runs": 5,
+     "frames": 86
+    },
+    "27": {
+     "pad": 0,
+     "runs": 5,
+     "frames": 90
+    },
+    "28": {
+     "pad": 4,
+     "runs": 6,
+     "frames": 94
+    },
+    "29": {
+     "pad": 3,
+     "runs": 6,
+     "frames": 98
+    },
+    "30": {
+     "pad": 2,
+     "runs": 6,
+     "frames": 102
+    },
+    "31": {
+     "pad": 1,
+     "runs": 6,
+     "frames": 103
+    },
+    "32": {
+     "pad": 0,
+     "runs": 6,
+     "frames": 107
+    },
+    "33": {
+     "pad": 4,
+     "runs": 7,
+     "frames": 111
+    },
+    "34": {
+     "pad": 3,
+     "runs": 7,
+     "frames": 115
+    },
+    "35": {
+     "pad": 2,
+     "runs": 7,
+     "frames": 119
+    },
+    "36": {
+     "pad": 1,
+     "runs": 7,
+     "frames": 120
+    },
+    "37": {
+     "pad": 0,
+     "runs": 7,
+     "frames": 124
+    },
+    "38": {
+     "pad": 4,
+     "runs": 8,
+     "frames": 128
+    },
+    "39": {
+     "pad": 3,
+     "runs": 8,
+     "frames": 132
+    },
+    "40": {
+     "pad": 2,
+     "runs": 8,
+     "frames": 136
+    },
+    "41": {
+     "pad": 1,
+     "runs": 8,
+     "frames": 137
+    },
+    "42": {
+     "pad": 0,
+     "runs": 8,
+     "frames": 141
+    },
+    "43": {
+     "pad": 4,
+     "runs": 9,
+     "frames": 145
+    },
+    "44": {
+     "pad": 3,
+     "runs": 9,
+     "frames": 149
+    },
+    "45": {
+     "pad": 2,
+     "runs": 9,
+     "frames": 153
+    },
+    "46": {
+     "pad": 1,
+     "runs": 9,
+     "frames": 154
+    },
+    "47": {
+     "pad": 0,
+     "runs": 9,
+     "frames": 158
+    },
+    "48": {
+     "pad": 4,
+     "runs": 10,
+     "frames": 162
+    },
+    "49": {
+     "pad": 3,
+     "runs": 10,
+     "frames": 166
+    },
+    "50": {
+     "pad": 2,
+     "runs": 10,
+     "frames": 170
+    },
+    "51": {
+     "pad": 1,
+     "runs": 10,
+     "frames": 171
+    },
+    "52": {
+     "pad": 0,
+     "runs": 10,
+     "frames": 175
+    },
+    "53": {
+     "pad": 4,
+     "runs": 11,
+     "frames": 179
+    },
+    "54": {
+     "pad": 3,
+     "runs": 11,
+     "frames": 183
+    },
+    "55": {
+     "pad": 2,
+     "runs": 11,
+     "frames": 187
+    },
+    "56": {
+     "pad": 1,
+     "runs": 11,
+     "frames": 188
+    },
+    "57": {
+     "pad": 0,
+     "runs": 11,
+     "frames": 192
+    },
+    "58": {
+     "pad": 4,
+     "runs": 12,
+     "frames": 196
+    },
+    "59": {
+     "pad": 3,
+     "runs": 12,
+     "frames": 200
+    },
+    "60": {
+     "pad": 2,
+     "runs": 12,
+     "frames": 204
+    },
+    "61": {
+     "pad": 1,
+     "runs": 12,
+     "frames": 205
+    },
+    "62": {
+     "pad": 0,
+     "runs": 12,
+     "frames": 209
+    },
+    "63": {
+     "pad": 4,
+     "runs": 13,
+     "frames": 213
+    },
+    "64": {
+     "pad": 3,
+     "runs": 13,
+     "frames": 217
+    },
+    "65": {
+     "pad": 2,
+     "runs": 13,
+     "frames": 221
+    },
+    "66": {
+     "pad": 1,
+     "runs": 13,
+     "frames": 222
+    },
+    "67": {
+     "pad": 0,
+     "runs": 13,
+     "frames": 226
+    },
+    "68": {
+     "pad": 4,
+     "runs": 14,
+     "frames": 230
+    },
+    "69": {
+     "pad": 3,
+     "runs": 14,
+     "frames": 234
+    },
+    "70": {
+     "pad": 2,
+     "runs": 14,
+     "frames": 238
+    },
+    "71": {
+     "pad": 1,
+     "runs": 14,
+     "frames": 239
+    },
+    "72": {
+     "pad": 0,
+     "runs": 14,
+     "frames": 243
+    },
+    "73": {
+     "pad": 4,
+     "runs": 15,
+     "frames": 247
+    },
+    "74": {
+     "pad": 3,
+     "runs": 15,
+     "frames": 251
+    },
+    "75": {
+     "pad": 2,
+     "runs": 15,
+     "frames": 255
+    },
+    "76": {
+     "pad": 1,
+     "runs": 15,
+     "frames": 256
+    },
+    "77": {
+     "pad": 0,
+     "runs": 15,
+     "frames": 260
+    },
+    "78": {
+     "pad": 4,
+     "runs": 16,
+     "frames": 264
+    },
+    "79": {
+     "pad": 3,
+     "runs": 16,
+     "frames": 268
+    },
+    "80": {
+     "pad": 2,
+     "runs": 16,
+     "frames": 272
+    },
+    "81": {
+     "pad": 1,
+     "runs": 16,
+     "frames": 273
+    },
+    "82": {
+     "pad": 0,
+     "runs": 16,
+     "frames": 277
+    },
+    "83": {
+     "pad": 4,
+     "runs": 17,
+     "frames": 281
+    },
+    "84": {
+     "pad": 3,
+     "runs": 17,
+     "frames": 285
+    },
+    "85": {
+     "pad": 2,
+     "runs": 17,
+     "frames": 289
+    },
+    "86": {
+     "pad": 1,
+     "runs": 17,
+     "frames": 290
+    },
+    "87": {
+     "pad": 0,
+     "runs": 17,
+     "frames": 294
+    },
+    "88": {
+     "pad": 4,
+     "runs": 18,
+     "frames": 298
+    },
+    "89": {
+     "pad": 3,
+     "runs": 18,
+     "frames": 302
+    },
+    "90": {
+     "pad": 2,
+     "runs": 18,
+     "frames": 306
+    },
+    "91": {
+     "pad": 1,
+     "runs": 18,
+     "frames": 307
+    },
+    "92": {
+     "pad": 0,
+     "runs": 18,
+     "frames": 311
+    }
+   }
+  },
+  "files_sha256": {
+   "vae": "d3c56ecadea409f3bb9add69a668fd588bb9895a9e76cb6d4d67d0ffacc78039",
+   "tiny": "385a717f2f1314aed5d4a052160b08e26e85841708dd985d4956ba283146a704",
+   "audio_vae": "ee12a115d0bc8029b6a2b2739478e059aa13b239caa70b23962b04e264989218"
+  },
+  "weights": "h3_vae_tiny.weights(shapes[role]) written by h3_vae_tiny.write_safetensors as F32"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "comfyui": "426f5eea52a7ece1dd599fff4cb6cd1f352ddd24",
+   "f16_math": "each linear, convolution, norm and attention in float32 over float16 operands, one float16 rounding"
+  },
+  "gaps": {
+   "encode 32x32x22": {
+    "fp32_vs_f64": {
+     "rel_l2": 4.2179240675947375e-06,
+     "cosine": 0.9999999999911062,
+     "max_abs": 9.2238187789917e-06
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.004073264872289079,
+     "cosine": 0.9999917049183973,
+     "max_abs": 0.010522842407226562
+    }
+   },
+   "encode 464x32": {
+    "fp32_vs_f64": {
+     "rel_l2": 3.2476005041281618e-06,
+     "cosine": 0.99999999999474,
+     "max_abs": 5.508773028850555e-06
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.005081227384841906,
+     "cosine": 0.9999870976989681,
+     "max_abs": 0.008379518985748291
+    }
+   },
+   "decode 32x32x22": {
+    "fp32_vs_f64": {
+     "rel_l2": 1.8022593145747818e-07,
+     "cosine": 0.9999999999999853,
+     "max_abs": 5.885958671569824e-07
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0004785548358663162,
+     "cosine": 0.9999998910622016,
+     "max_abs": 0.0011661946773529053,
+     "psnr_db": 72.36661751720588
+    }
+   },
+   "decode 464x32": {
+    "fp32_vs_f64": {
+     "rel_l2": 2.0083059919191115e-07,
+     "cosine": 0.9999999999999805,
+     "max_abs": 5.210607667560652e-07
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0005483559908377749,
+     "cosine": 0.9999998553348342,
+     "max_abs": 0.0014831323533135432,
+     "psnr_db": 71.19449002953999
+    }
+   },
+   "decode 12x1x1": {
+    "fp32_vs_f64": {
+     "rel_l2": 1.33630160329103e-07,
+     "cosine": 0.9999999999999915,
+     "max_abs": 3.725290298461914e-07
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0004101759898974042,
+     "cosine": 0.9999999213001738,
+     "max_abs": 0.0008924007415771484,
+     "psnr_db": 73.74238552892255
+    }
+   },
+   "decode 11x1x1": {
+    "fp32_vs_f64": {
+     "rel_l2": 1.3457877911035854e-07,
+     "cosine": 0.9999999999999913,
+     "max_abs": 4.76837158203125e-07
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.00039520142891520796,
+     "cosine": 0.9999999274430509,
+     "max_abs": 0.001014411449432373,
+     "psnr_db": 73.99972998677987
+    }
+   },
+   "decode 5x1x1": {
+    "fp32_vs_f64": {
+     "rel_l2": 1.2250598276477314e-07,
+     "cosine": 0.9999999999999929,
+     "max_abs": 2.980232238769531e-07
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.00040759845392040756,
+     "cosine": 0.9999999229401525,
+     "max_abs": 0.0008729696273803711,
+     "psnr_db": 73.76207826608733
+    }
+   },
+   "decode 1x17x17": {
+    "fp32_vs_f64": {
+     "rel_l2": 1.0873850394929329e-07,
+     "cosine": 0.9999999999999956,
+     "max_abs": 3.8230556365093094e-07
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0004035246213178247,
+     "cosine": 0.9999999243773181,
+     "max_abs": 0.001545137616908443,
+     "psnr_db": 73.85313382598088
+    }
+   },
+   "tiny 32x32x22": {
+    "fp32_vs_f64": {
+     "rel_l2": 1.304179124531543e-06,
+     "cosine": 0.99999999999915,
+     "max_abs": 8.652761360116931e-07
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0011436903486113912,
+     "cosine": 0.9999993529399777,
+     "max_abs": 0.0006561925071760632,
+     "psnr_db": 81.67242404318499
+    }
+   },
+   "tiny 464x32": {
+    "fp32_vs_f64": {
+     "rel_l2": 1.6886726930097366e-06,
+     "cosine": 0.9999999999985747,
+     "max_abs": 7.419008326708942e-07
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0014128015036447004,
+     "cosine": 0.9999990024483076,
+     "max_abs": 0.0005176112468731047,
+     "psnr_db": 81.83136162413459
+    }
+   },
+   "tiny 12x1x1": {
+    "fp32_vs_f64": {
+     "rel_l2": 8.769250658196053e-07,
+     "cosine": 0.9999999999996156,
+     "max_abs": 3.492409436645083e-07
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0008654361412251567,
+     "cosine": 0.9999996263078699,
+     "max_abs": 0.0003349915355687072,
+     "psnr_db": 86.5598586907992
+    }
+   },
+   "tiny 11x1x1": {
+    "fp32_vs_f64": {
+     "rel_l2": 8.954858406637421e-07,
+     "cosine": 0.9999999999995993,
+     "max_abs": 3.251599050291265e-07
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0008411473340471878,
+     "cosine": 0.9999996484767851,
+     "max_abs": 0.0003449004372874792,
+     "psnr_db": 87.25473128395477
+    }
+   },
+   "tiny 5x1x1": {
+    "fp32_vs_f64": {
+     "rel_l2": 8.7118486101908e-07,
+     "cosine": 0.9999999999996212,
+     "max_abs": 2.3098123701909001e-07
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0008496944231765211,
+     "cosine": 0.9999996503812016,
+     "max_abs": 0.00023187685999029317,
+     "psnr_db": 87.23424407455477
+    }
+   },
+   "audio encode": {
+    "fp32_vs_f64": {
+     "rel_l2": 1.3624243035325274e-05,
+     "cosine": 0.999999999907204,
+     "max_abs": 8.39826216325612e-05
+    }
+   },
+   "audio decode": {
+    "fp32_vs_f64": {
+     "rel_l2": 4.854985349863335e-06,
+     "cosine": 0.9999999999882154,
+     "max_abs": 3.5478698222346505e-05
+    }
+   }
+  },
+  "times": {
+   "fp32 video loaded rss gib": 0.35,
+   "fp32 encode 32x32x22": 0.1,
+   "fp32 encode 464x32": 0.0,
+   "fp32 video encoded rss gib": 0.44,
+   "fp32 decode 32x32x22": 0.0,
+   "fp32 decode 464x32": 0.0,
+   "fp32 decode 12x1x1": 0.0,
+   "fp32 decode 11x1x1": 0.0,
+   "fp32 decode 5x1x1": 0.0,
+   "fp32 decode 1x17x17": 0.0,
+   "fp32 video peak rss gib": 0.53,
+   "f16 video loaded rss gib": 0.37,
+   "f16 encode 32x32x22": 0.1,
+   "f16 encode 464x32": 0.0,
+   "f16 video encoded rss gib": 0.45,
+   "f16 decode 32x32x22": 0.0,
+   "f16 decode 464x32": 0.0,
+   "f16 decode 12x1x1": 0.0,
+   "f16 decode 11x1x1": 0.0,
+   "f16 decode 5x1x1": 0.0,
+   "f16 decode 1x17x17": 0.0,
+   "f16 video peak rss gib": 0.53,
+   "f64 video loaded rss gib": 0.42,
+   "f64 encode 32x32x22": 0.1,
+   "f64 encode 464x32": 0.1,
+   "f64 video encoded rss gib": 0.6,
+   "f64 decode 32x32x22": 0.0,
+   "f64 decode 464x32": 0.0,
+   "f64 decode 12x1x1": 0.0,
+   "f64 decode 11x1x1": 0.0,
+   "f64 decode 5x1x1": 0.0,
+   "f64 decode 1x17x17": 0.1,
+   "f64 video peak rss gib": 0.69,
+   "fp32 tiny decodes": 0.2,
+   "f16 tiny decodes": 0.3,
+   "f64 tiny decodes": 0.2,
+   "fp32 audio": 0.9,
+   "f64 audio": 0.9
+  }
+ },
+ "tolerances": {
+  "rule": "against the float64 result: fp32 relative L2 at twice the oracle's own fp32 relative L2; float16 decode PSNR at the oracle's own float16 PSNR less 20 log10(2) dB; float16 encode relative L2 at twice the oracle's own float16 relative L2",
+  "items": {
+   "encode 32x32x22": {
+    "fp32_rel_l2": 8.435848135189475e-06,
+    "f16_rel_l2": 0.008146529744578157
+   },
+   "encode 464x32": {
+    "fp32_rel_l2": 6.4952010082563235e-06,
+    "f16_rel_l2": 0.010162454769683813
+   },
+   "decode 32x32x22": {
+    "fp32_rel_l2": 3.6045186291495637e-07,
+    "f16_psnr_db": 66.34601760392626
+   },
+   "decode 464x32": {
+    "fp32_rel_l2": 4.016611983838223e-07,
+    "f16_psnr_db": 65.17389011626037
+   },
+   "decode 12x1x1": {
+    "fp32_rel_l2": 2.67260320658206e-07,
+    "f16_psnr_db": 67.72178561564293
+   },
+   "decode 11x1x1": {
+    "fp32_rel_l2": 2.691575582207171e-07,
+    "f16_psnr_db": 67.97913007350024
+   },
+   "decode 5x1x1": {
+    "fp32_rel_l2": 2.450119655295463e-07,
+    "f16_psnr_db": 67.7414783528077
+   },
+   "decode 1x17x17": {
+    "fp32_rel_l2": 2.1747700789858658e-07,
+    "f16_psnr_db": 67.83253391270125
+   },
+   "tiny 32x32x22": {
+    "fp32_rel_l2": 2.608358249063086e-06,
+    "f16_psnr_db": 75.65182412990536
+   },
+   "tiny 464x32": {
+    "fp32_rel_l2": 3.3773453860194732e-06,
+    "f16_psnr_db": 75.81076171085496
+   },
+   "tiny 12x1x1": {
+    "fp32_rel_l2": 1.7538501316392106e-06,
+    "f16_psnr_db": 80.53925877751958
+   },
+   "tiny 11x1x1": {
+    "fp32_rel_l2": 1.7909716813274843e-06,
+    "f16_psnr_db": 81.23413137067514
+   },
+   "tiny 5x1x1": {
+    "fp32_rel_l2": 1.74236972203816e-06,
+    "f16_psnr_db": 81.21364416127514
+   },
+   "audio encode": {
+    "fp32_rel_l2": 2.7248486070650547e-05
+   },
+   "audio decode": {
+    "fp32_rel_l2": 9.70997069972667e-06
+   }
+  }
+ },
+ "notes": [
+  "Each model is a ComfyUI class at a tiny size with seeded weights, so the numbers say nothing about image or audio quality."
+ ],
+ "created": "2026-10-30T01:26:14Z",
+ "npz": "selftest_h3_vae.npz",
+ "tensors": {
+  "decoded_f64_11x1x1": {
+   "shape": [
+    1,
+    3,
+    35,
+    16,
+    16
+   ],
+   "dtype": "float64",
+   "sha256": "504296a6ee4f44d307a024632c6410ea0e3f9a498e15f50b587c21680829b654"
+  },
+  "decoded_f64_12x1x1": {
+   "shape": [
+    1,
+    3,
+    39,
+    16,
+    16
+   ],
+   "dtype": "float64",
+   "sha256": "3657841a68a72b99ac3fea3e3c646005a2482c080e92fe3cb9815fd9c69eb248"
+  },
+  "decoded_f64_1x17x17": {
+   "shape": [
+    1,
+    3,
+    1,
+    272,
+    272
+   ],
+   "dtype": "float64",
+   "sha256": "2dc0ef4f489777208b1e97b84ae9cf73921e7819423bcb4c43819a39a2a1eca8"
+  },
+  "decoded_f64_32x32x22": {
+   "shape": [
+    1,
+    3,
+    22,
+    32,
+    32
+   ],
+   "dtype": "float64",
+   "sha256": "973df07fa0baf9e19b3634d6456a7c7af6bfa0fc281e50d1cbcf44277b67e6ce"
+  },
+  "decoded_f64_464x32": {
+   "shape": [
+    1,
+    3,
+    1,
+    32,
+    464
+   ],
+   "dtype": "float64",
+   "sha256": "7f57113b7b7311bd422a4af0452f60ddf662aa6e81db159c7e5530e5a973d166"
+  },
+  "decoded_f64_5x1x1": {
+   "shape": [
+    1,
+    3,
+    17,
+    16,
+    16
+   ],
+   "dtype": "float64",
+   "sha256": "16402c5357126bf6dfa3b3981bdfc277d38fc33c25bf59b61aedea313c0947bb"
+  },
+  "input_32x32x22": {
+   "shape": [
+    1,
+    3,
+    22,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "cb846c127a16198897b348c0310a984857767645e22fc7104570db8a574e0421"
+  },
+  "input_464x32": {
+   "shape": [
+    1,
+    3,
+    1,
+    32,
+    464
+   ],
+   "dtype": "float32",
+   "sha256": "8bf4c33b75a12ed793b1f06424d38e50c20fa7aae654fcbba900d79c4d18a807"
+  },
+  "latents_f64_32x32x22": {
+   "shape": [
+    1,
+    24,
+    7,
+    2,
+    2
+   ],
+   "dtype": "float64",
+   "sha256": "7949226db7d093b95c135df88b1598aa6b904cb9d1bc25b926fcc1df3493a2b0"
+  },
+  "latents_f64_464x32": {
+   "shape": [
+    1,
+    24,
+    1,
+    2,
+    29
+   ],
+   "dtype": "float64",
+   "sha256": "ed4e4d82385c1e698f1ad26da5393bea13076667dc5762cae3e43bfcfe3ae8e4"
+  },
+  "latents_fp32_11x1x1": {
+   "shape": [
+    1,
+    24,
+    11,
+    1,
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "50aad7aadd1d8229438fb55ad6024cdf16579af24bd93dd5ef204092360beaae"
+  },
+  "latents_fp32_12x1x1": {
+   "shape": [
+    1,
+    24,
+    12,
+    1,
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "d4bb9c5590c0eb2f6562f437c8ff00863e8e34c4ce59f3e46af0af1ace30d7b9"
+  },
+  "latents_fp32_1x17x17": {
+   "shape": [
+    1,
+    24,
+    1,
+    17,
+    17
+   ],
+   "dtype": "float32",
+   "sha256": "7b7277f1f99272989a4567240514e79c78583f93191cf20612cc1f1a4aaa222f"
+  },
+  "latents_fp32_32x32x22": {
+   "shape": [
+    1,
+    24,
+    7,
+    2,
+    2
+   ],
+   "dtype": "float32",
+   "sha256": "e0f423570cb52edce373fa5a98a197530e3845e8a83fb0d701f6270e6fd5a234"
+  },
+  "latents_fp32_464x32": {
+   "shape": [
+    1,
+    24,
+    1,
+    2,
+    29
+   ],
+   "dtype": "float32",
+   "sha256": "c1a9c364f0ea069d0b66fa38dc940a7e898ab2c62a45cb2ec0d15133ba9608e4"
+  },
+  "latents_fp32_5x1x1": {
+   "shape": [
+    1,
+    24,
+    5,
+    1,
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "4eab76f3e5f3e7e2003db97fb7458288e4146672168b4c1fc39d06b315a7df7e"
+  },
+  "tiny_f64_11x1x1": {
+   "shape": [
+    1,
+    3,
+    39,
+    16,
+    16
+   ],
+   "dtype": "float64",
+   "sha256": "7a955b28e20f5bb363e0b05141123ff0420d6f6c98995518cc05f431bfcb550d"
+  },
+  "tiny_f64_12x1x1": {
+   "shape": [
+    1,
+    3,
+    39,
+    16,
+    16
+   ],
+   "dtype": "float64",
+   "sha256": "dd110822e53f87732ae56da547b50c98833459c3bf6feb4bf5423929ff7b4089"
+  },
+  "tiny_f64_32x32x22": {
+   "shape": [
+    1,
+    3,
+    22,
+    32,
+    32
+   ],
+   "dtype": "float64",
+   "sha256": "79834b66925ed7a1f7fb29a0740fa57cd7669c2b9d1dbf8843caf8b3d0f740df"
+  },
+  "tiny_f64_464x32": {
+   "shape": [
+    1,
+    3,
+    1,
+    32,
+    464
+   ],
+   "dtype": "float64",
+   "sha256": "9b8a7a50f321b9f54758cd3cc1ff11ad41f355314ab0a9fbdddfcc04acc57c25"
+  },
+  "tiny_f64_5x1x1": {
+   "shape": [
+    1,
+    3,
+    5,
+    16,
+    16
+   ],
+   "dtype": "float64",
+   "sha256": "efbc73846700432c7d477d526007e29d8762b2fdf039996d2bf6e486bca66dbf"
+  },
+  "wave": {
+   "shape": [
+    1,
+    2,
+    8123
+   ],
+   "dtype": "float32",
+   "sha256": "6bb584031b7006e48119aba1e24d5031526ef6d78be0d1daf44db209ea66a929"
+  },
+  "wave_decoded_f64": {
+   "shape": [
+    1,
+    2,
+    8800
+   ],
+   "dtype": "float64",
+   "sha256": "6de425a751200d9c8e16c0dcddc7c76404cf6e0607b81d357bd86c0c1f6b498c"
+  },
+  "wave_latents_f64": {
+   "shape": [
+    1,
+    32,
+    2,
+    11
+   ],
+   "dtype": "float64",
+   "sha256": "3bcc39b7f289e5c78bcd365cf7bd06613cb601c79d50ab2f5aa7525f22e1ea3c"
+  },
+  "wave_latents_fp32": {
+   "shape": [
+    1,
+    32,
+    2,
+    11
+   ],
+   "dtype": "float32",
+   "sha256": "f9aeb9630e0abcccde1648e870dfb8cee1e99300e66d79a7a9355f2157db2cb0"
+  }
+ }
+}
