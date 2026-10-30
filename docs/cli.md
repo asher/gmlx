@@ -1344,8 +1344,8 @@ id, or `h3-2` when another entry has that id.
 
 | Recipe | Steps | Meaning |
 |--------|-------|---------|
-| `h3` | 8 | MiniMax-H3 with lightx2v's Turbo 8-step LoRA. The default. |
-| `h3-fast` | 4 | The Turbo 4-step LoRA: faster, with softer motion. |
+| `h3` | 8 | MiniMax-H3 with lightx2v's Turbo 8-step [LoRA](video.md#licenses). The default. |
+| `h3-fast` | 4 | The Turbo 4-step [LoRA](video.md#licenses): faster, with softer motion. |
 | `h3-base` | 20 | The base model at video shift 12, with no LoRA. |
 
 | Flag | Default | Meaning |

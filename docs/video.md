@@ -85,8 +85,8 @@ pulling a second one downloads at most one more LoRA.
 
 | Recipe | Steps | Use |
 |--------|-------|-----|
-| `h3` | 8 | The default, with lightx2v's Turbo 8-step LoRA. |
-| `h3-fast` | 4 | Drafts in about half the time, with softer motion. |
+| `h3` | 8 | The default, with lightx2v's Turbo 8-step [LoRA](#licenses). |
+| `h3-fast` | 4 | Drafts in about half the time on the Turbo 4-step [LoRA](#licenses), with softer motion. |
 | `h3-base` | 20 | The model with no LoRA. Slower, and it fits larger clips. |
 
 The recipe's name is the model's name in your configuration:
@@ -195,7 +195,7 @@ H3 license before you use the clips.
 | MiniMax-H3, its video and audio VAEs | [MiniMax H3 Community License Agreement](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) | On the terms below |
 | Qwen3-VL-32B-Instruct, the text encoder | Apache 2.0 | Any, under the license's terms |
 | TAEH3, the preview decoder | MIT | Any, under the license's terms |
-| lightx2v's Turbo LoRAs | No license stated | The [model card](https://huggingface.co/lightx2v/Minimax-h3-Turbo) states none |
+| lightx2v's Turbo LoRAs | None stated on the [model card](https://huggingface.co/lightx2v/Minimax-h3-Turbo) | See below |
 
 Under the MiniMax H3 Community License Agreement:
 
@@ -206,5 +206,11 @@ Under the MiniMax H3 Community License Agreement:
 - A commercial user interface must show MiniMax H3.
 - A hosted service needs terms of use and safeguards for its users.
 - Clips you post publicly must be marked as made by a machine.
+
+gmlx downloads a Turbo LoRA from its model card's repository only when
+you pull `h3` or `h3-fast`, verifies the file against the revision the
+recipe pins, and redistributes none of it. How you use the file is your
+responsibility. `h3-base`, the 20-step recipe, runs with no LoRA, so you
+can make clips without it.
 
 gmlx has no content filter of its own.
