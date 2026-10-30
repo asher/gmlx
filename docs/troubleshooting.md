@@ -11,6 +11,7 @@ agent or chat app that does not connect, read its entry under
 - [Requests](#requests)
 - [Memory](#memory)
 - [Image generation](#image-generation)
+- [Video generation](#video-generation)
 - [ComfyUI](#comfyui)
 - [Container mode](#container-mode)
 - [Custom agents](#custom-agents)
@@ -412,6 +413,32 @@ A LoRA in a request is named by a path inside one of your model folders,
 such as `loras/watercolor.safetensors`, or by the file name of one in the
 entry's `adapters`. Move the file into a model folder and use its path
 there.
+
+## Video generation
+
+### `the smallest MiniMax-H3 clip does not fit in memory`
+
+MiniMax-H3 needs 32 GB of memory or more. On a smaller Mac,
+`gmlx video pull` refuses before it downloads anything, since the text
+encoder alone needs more memory than gmlx may use there. `--force`
+downloads the files anyway, and `gmlx video generate` then refuses every
+clip.
+
+### `this clip does not fit in memory`
+
+`gmlx video generate` checks the clip against the Mac's memory before it
+loads anything, and the message names the setting to change.
+[Clip length, size and memory](video.md#clip-length-size-and-memory)
+lists the largest clip each Mac makes. `GMLX_OVERCOMMIT=1` skips the
+check, and the Mac then swaps, as
+[`image request does not fit`](#image-request-does-not-fit) describes.
+
+### `MiniMax-H3 needs an M3 or newer`
+
+The model runs in bfloat16, which M1 and M2 chips lack. `gmlx video pull`
+refuses it on those Macs before it downloads anything, and `--force`
+downloads it anyway. `gmlx video generate` and `gmlx video bench` refuse
+to run it.
 
 ## ComfyUI
 

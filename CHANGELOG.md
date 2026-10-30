@@ -6,6 +6,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `gmlx video` makes clips of up to 15 seconds with sound from a text
+  prompt with MiniMax-H3, as a preview. See [Video generation](docs/video.md).
+
 ## [0.5.4] - 2026-10-29
 
 ### Added

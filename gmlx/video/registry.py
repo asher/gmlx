@@ -123,6 +123,19 @@ def families() -> tuple[VideoFamily, ...]:
     return tuple(sorted(found, key=lambda f: (f.order, f.name)))
 
 
+def chip_refusal(fam: VideoFamily) -> str | None:
+    """Why this Mac does not run ``fam``, or None. A video DiT runs in
+    bfloat16, which an M1 or M2 has only in software."""
+    from gmlx.load.dtypes import has_native_bfloat16
+
+    if has_native_bfloat16():
+        return None
+    from gmlx.image.dtypes import chip_name
+
+    return (f"{fam.title} needs an M3 or newer, and this Mac has an "
+            f"{chip_name()} chip")
+
+
 def get_family(name: str) -> VideoFamily:
     for fam in families():
         if fam.name == name:

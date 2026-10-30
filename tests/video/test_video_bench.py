@@ -11,7 +11,7 @@ import re
 
 import numpy as np
 import pytest
-from video_fixtures import H3_HEADER, fixture_view
+from video_fixtures import H3_HEADER, fixture_view, gguf_tokenizer
 
 from gmlx.commands import video as cmd
 from gmlx.commands import video_bench as vb
@@ -47,9 +47,19 @@ def _cache_limit() -> int:
 
 @pytest.fixture(autouse=True)
 def _room(monkeypatch):
+    """An M3 with room for every shape here, and the stub tokenizer in
+    place of the encoder file's. Returns the family and path each
+    tokenizer was built for."""
+    from gmlx.load import dtypes
     from gmlx.serve import capacity
+    from gmlx.video import encoder
 
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 100 << 30)
+    monkeypatch.setattr(dtypes, "_arch_gen", 15)
+    asked: list = []
+    monkeypatch.setattr(encoder, "header_tokenizer", lambda fam, path: (
+        asked.append((fam.name, path)) or gguf_tokenizer()))
+    return asked
 
 
 class _Handle:
@@ -122,8 +132,8 @@ def bench(monkeypatch, tmp_path):
             vid = dataclasses.replace(vid, variant=cfg["variant"])
         return vid
 
-    def load_encoder(*a, **k):
-        ev.append(("load_encoder",))
+    def load_encoder(fam, path, **k):
+        ev.append(("load_encoder", path))
         return _Handle()
 
     def load(path, **kw):
@@ -188,7 +198,7 @@ def test_shapes_and_shift():
 
 
 def test_one_record_per_shape_from_one_load_of_each_model(bench, tmp_path,
-                                                          capsys):
+                                                          capsys, _room):
     out = tmp_path / "b.jsonl"
     assert bench("--shapes", "64x64x5,96x64x22", "--steps", "3", "--json",
                  "--json-out", str(out), "--label", "L", "--seed", "4") == 0
@@ -215,6 +225,10 @@ def test_one_record_per_shape_from_one_load_of_each_model(bench, tmp_path,
         assert "error" not in r
     ev = bench.ev
     assert len(_kinds(ev, "load_encoder")) == len(_kinds(ev, "load")) == 1
+    # The prompt is priced by the tokenizer of the encoder the run loads.
+    assert _room == [("h3", bench.files["--encoder"])]
+    assert _kinds(ev, "load_encoder") == [("load_encoder",
+                                           bench.files["--encoder"])]
     assert [e[1] for e in _kinds(ev, "load_vae")] == ["h3_audio", "h3"]
     assert len(_kinds(ev, "generate")) == 2
 
@@ -289,6 +303,16 @@ def test_a_json_out_folder_is_refused_before_any_load(bench, tmp_path,
     assert bench.ev == []
 
 
+def test_an_m1_is_refused_before_any_load(bench, monkeypatch, capsys):
+    from gmlx.load import dtypes
+
+    monkeypatch.setattr(dtypes, "_arch_gen", 13)
+    assert bench("--steps", "1") == 1
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        "error: MiniMax-H3 needs an M3 or newer, and this Mac has an M1 chip")
+    assert _kinds(bench.ev, "identify") and len(bench.ev) == 1
+
+
 @pytest.mark.parametrize("shapes", ["1344x768x124,64x64x5",
                                     "64x64x5,1344x768x124",
                                     "64x64x5,1344x768x124,96x64x22"])
@@ -301,7 +325,7 @@ def test_a_shape_over_the_budget_is_refused_before_any_load(
     files = {k: {"bytes": 1} for k in ("dit", "encoder", "vae",
                                        "audio_vae")}
     files["adapters"] = []
-    text = memfit.prompt_rows(hf.FAMILY, vb.BENCH_PROMPT)
+    text = memfit.prompt_rows(hf.FAMILY, vb.BENCH_PROMPT, gguf_tokenizer())
     small = max(vb._plan(hf.FAMILY, files, s, text, False).peak
                 for s in ((64, 64, 5), (96, 64, 22)))
     big = vb._plan(hf.FAMILY, files, (1344, 768, 124), text, False).peak
@@ -378,7 +402,8 @@ def test_a_long_prompt_can_stop_the_bench_alone(bench, monkeypatch,
                                        "audio_vae")}
     files["adapters"] = []
     plan = vb._plan(hf.FAMILY, files, (64, 64, 5),
-                    memfit.prompt_rows(hf.FAMILY, prompt), False)
+                    memfit.prompt_rows(hf.FAMILY, prompt, gguf_tokenizer()),
+                    False)
     budget = (plan.phases["denoise"] + plan.phases["encode"]) / 2
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
     monkeypatch.setenv("GMLX_OVERCOMMIT", "0")

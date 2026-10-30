@@ -11,10 +11,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-# The memory classes of the video recipes, in GB of RAM. A Mac takes the
-# largest class at or under its RAM.
-VIDEO_MEMORY_CLASSES = (24, 32, 64, 128)
-
 
 @dataclass(frozen=True)
 class Pin:
@@ -144,12 +140,3 @@ def recipe(name: str) -> VideoRecipe | None:
     if r is not None:
         return r
     return next((r for r in RECIPES.values() if name in r.aliases), None)
-
-
-def memory_class(ram_bytes: int | None) -> int:
-    """The video memory class of a Mac with ``ram_bytes`` of RAM."""
-    if not ram_bytes:
-        return VIDEO_MEMORY_CLASSES[0]
-    gb = ram_bytes / (1 << 30)
-    fit = [c for c in VIDEO_MEMORY_CLASSES if c <= gb + 0.5]
-    return fit[-1] if fit else VIDEO_MEMORY_CLASSES[0]

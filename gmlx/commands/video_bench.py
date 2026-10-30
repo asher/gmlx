@@ -183,8 +183,10 @@ def _bench(a) -> int:
     import mlx.core as mx
 
     from gmlx import __version__
+    from gmlx.video import encoder as video_encoder
     from gmlx.video import memfit, pipeline
     from gmlx.video.loader import identify_dit
+    from gmlx.video.registry import chip_refusal
 
     from .image import _machine
 
@@ -202,6 +204,9 @@ def _bench(a) -> int:
 
     vid = identify_dit(os.path.expanduser(a.model), variant=a.variant)
     fam = vid.family
+    why = chip_refusal(fam)
+    if why:
+        raise RuntimeError(why)
     adapters = list(a.entry_adapters) + list(a.adapter or ())
     for path, _ in adapters:
         pipeline.vet_adapter(fam, dict(vid.config), path)
@@ -220,7 +225,8 @@ def _bench(a) -> int:
     # its phases largest first. The encode is the same at every shape, so
     # on a tie there the next phase decides, and the bench is named only
     # when no shape has another phase over.
-    text = memfit.prompt_rows(fam, a.prompt)
+    text = memfit.prompt_rows(fam, a.prompt,
+                              video_encoder.header_tokenizer(fam, a.encoder))
     plan, (w, h, f) = max(
         ((_plan(fam, files, s, text, decode), s) for s in shapes),
         key=lambda x: sorted(x[0].phases.values(), reverse=True))

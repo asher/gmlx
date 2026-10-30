@@ -11,7 +11,7 @@ import re
 
 import numpy as np
 import pytest
-from video_fixtures import H3_HEADER, fixture_view, wait_for
+from video_fixtures import H3_HEADER, fixture_view, gguf_tokenizer, wait_for
 
 from gmlx.commands import video as cmd
 from gmlx.video import fingerprint as vfp
@@ -20,11 +20,19 @@ from gmlx.video.families.h3 import family as hf
 
 @pytest.fixture(autouse=True)
 def _room(monkeypatch):
-    """A Mac with room for every clip here; the memory tests set their own
-    budget."""
+    """An M3 with room for every clip here, and the stub tokenizer in
+    place of the encoder file's. Returns the family and path each
+    tokenizer was built for. The memory and chip tests set their own."""
+    from gmlx.load import dtypes
     from gmlx.serve import capacity
+    from gmlx.video import encoder
 
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 100 << 30)
+    monkeypatch.setattr(dtypes, "_arch_gen", 15)
+    asked: list = []
+    monkeypatch.setattr(encoder, "header_tokenizer", lambda fam, path: (
+        asked.append((fam.name, path)) or gguf_tokenizer()))
+    return asked
 
 
 class _Stop(BaseException):
@@ -175,6 +183,22 @@ def test_a_bad_adapter_is_refused_before_the_encoder_loads(run, tmp_path,
     assert run("--adapter", str(bad)) == 1
     assert run.loads == []
     assert "lora.safetensors" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("gen, chip", [(13, "M1"), (14, "M2"), (15, None)])
+def test_an_m1_or_m2_is_refused_before_the_encoder_loads(run, monkeypatch,
+                                                         capsys, gen, chip):
+    from gmlx.load import dtypes
+
+    monkeypatch.setattr(dtypes, "_arch_gen", gen)
+    if chip is None:
+        assert run() == "encoder"
+        return
+    assert run() == 1
+    assert run.loads == []
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        f"error: MiniMax-H3 needs an M3 or newer, and this Mac has an "
+        f"{chip} chip")
 
 
 def test_an_adapter_on_a_merged_file_warns(run, monkeypatch, tmp_path,
@@ -333,13 +357,14 @@ class _Handle:
 
 
 class _VAE:
-    def __init__(self, fail_after=None, wait=None):
+    def __init__(self, fail_after=None, wait=None, samples=800):
         self.fail_after, self.wait = fail_after, wait
+        self.samples = samples
 
     def decode(self, xa):
         import mlx.core as mx
 
-        return mx.zeros((1, 2, 800))
+        return mx.zeros((1, 2, self.samples))
 
     def decode_frames(self, xv):
         import mlx.core as mx
@@ -379,9 +404,9 @@ def stubbed(monkeypatch, files, tmp_path):
     monkeypatch.setattr(pipeline, "adapter_table", lambda *a, **k: None)
     monkeypatch.setattr(pipeline, "generate", lambda *a, **k: (
         mx.zeros((1, 24, 2, 2, 2)), mx.zeros((1, 32, 2, 1))))
-    state = {"vae": _VAE()}
+    state = {"vae": _VAE(), "audio": _VAE()}
     monkeypatch.setattr(reader, "load_vae", lambda path, family, dtype: (
-        _VAE() if family == "h3_audio" else state["vae"]))
+        state["audio"] if family == "h3_audio" else state["vae"]))
 
     def go(*argv):
         return cmd.cmd_generate([
@@ -408,6 +433,32 @@ def test_a_run_writes_the_mp4_and_the_frames(stubbed, tmp_path, capsys):
     rec = json.loads(capsys.readouterr().out)
     assert (rec["output"], rec["variant"], rec["frames"]) == (
         str(out), "fl2va", 5)
+
+
+@pytest.mark.parametrize("decoded", [7200, 6000])
+def test_the_mp4_and_the_frames_get_audio_of_the_clips_length(
+        stubbed, monkeypatch, tmp_path, decoded):
+    """Audio decoded past the last frame or short of it: both WAVs hold 5
+    frames at 24 fps, 6667 samples."""
+    import wave
+
+    from gmlx.video import io
+
+    lengths = []
+    write_wav = io.write_wav
+
+    def spy(path, waveform, rate):
+        lengths.append(waveform.shape)
+        return write_wav(path, waveform, rate)
+
+    monkeypatch.setattr(io, "write_wav", spy)
+    stubbed.state["audio"] = _VAE(samples=decoded)
+    frames = tmp_path / "frames"
+    assert stubbed("--output", str(tmp_path / "a.mp4"), "--frames-dir",
+                   str(frames)) == 0
+    assert lengths == [(2, 6667), (2, 6667)]
+    with wave.open(str(frames / "audio.wav"), "rb") as w:
+        assert w.getnframes() == 6667
 
 
 def test_a_decode_error_leaves_no_clip(stubbed, tmp_path, capsys):
@@ -475,8 +526,9 @@ def planned(monkeypatch, tmp_path):
         seen["order"].append("writable")
         return writable(a, out)
 
-    def load_encoder(*a, **k):
+    def load_encoder(fam, path, **k):
         seen["order"].append("encoder")
+        seen["encoder"] = path
         seen["cache_limit"] = _cache_limit()
         if seen["raise"] is not None:
             raise seen["raise"]
@@ -512,9 +564,8 @@ def planned(monkeypatch, tmp_path):
     return go
 
 
-def test_the_memory_plan_prices_the_files_the_run_loads(planned, tmp_path):
-    from gmlx.video import memfit
-
+def test_the_memory_plan_prices_the_files_the_run_loads(planned, tmp_path,
+                                                        _room):
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text(f"""server:
   model_dirs: [{tmp_path}]
@@ -527,7 +578,9 @@ video_models:
     tiny_vae: tiny.safetensors
     adapters: [entry.safetensors]
 """)
-    assert planned("clip", "--config", str(cfg), "--prompt", "a cat on a mat",
+    # 22 tokens, 23 characters and 24 bytes.
+    prompt = "He met Hera at the caf\u00e9"
+    assert planned("clip", "--config", str(cfg), "--prompt", prompt,
                    "--frames-dir", str(tmp_path / "out"), "--preview",
                    "--adapter", "~/flag.safetensors:0.5", "--frames", "22",
                    "--size", "512x320") == "encoder"
@@ -535,7 +588,9 @@ video_models:
     assert (k["dit"], k["encoder"], k["vae"], k["audio_vae"]) == (
         11 << 20, 19 << 20, 1 << 20, 3 << 20)
     assert k["tiny"] is True and k["loras"] == [2 << 20, 7 << 20]
-    assert k["text"] == memfit.prompt_rows(hf.FAMILY, "a cat on a mat")
+    assert k["text"] == 22
+    assert planned.seen["encoder"] == str(tmp_path / "enc.gguf")
+    assert _room == [("h3", planned.seen["encoder"])]
     assert k["pixels"] == 512 * 320
     assert planned.seen["order"] == ["writable", "check", "encoder"]
 

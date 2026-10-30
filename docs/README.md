@@ -26,6 +26,8 @@ These pages are the starting points:
   connected client.
 - [Image generation](images.md): Choosing an image model, a first image on
   the command line, the API, and LoRAs.
+- [Video generation](video.md): Clips with sound from a prompt, on the
+  command line.
 - [Migrating from other tools](migrating.md): What carries over from
   llama.cpp, Ollama and LM Studio.
 

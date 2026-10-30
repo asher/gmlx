@@ -16,6 +16,44 @@ H3_IDENTITY_MOLBAL = "h3_identity_molbal.json"
 H3_IDENTITY_MOLBAL_TURBO = "h3_identity_molbal_turbo.json"
 
 
+# The size of the stock Qwen3-VL-32B GGUF's vocabulary as the stub lays it
+# out: past MiniMax's seven ids.
+N_VOCAB = 151676
+
+
+def tokenizer_kv() -> dict:
+    """GGUF tokenizer metadata laid out as the stock Qwen3-VL-32B file's:
+    byte-level BPE with the one merge "H e", and filler entries at the
+    seven ids MiniMax's tokenizer adds."""
+    from tokenizers import pre_tokenizers
+
+    alphabet = sorted(pre_tokenizers.ByteLevel.alphabet())
+    tokens = alphabet + ["He"]
+    tokens += [f"[PAD{i}]" for i in range(len(tokens), N_VOCAB)]
+    tokens[151643] = "<|endoftext|>"
+    types = [1] * (len(alphabet) + 1) + [5] * (N_VOCAB - len(alphabet) - 1)
+    types[151643] = 3
+    return {"general.architecture": "qwen3vl",
+            "tokenizer.ggml.model": "gpt2",
+            "tokenizer.ggml.pre": "qwen2",
+            "tokenizer.ggml.tokens": tokens,
+            "tokenizer.ggml.merges": ["H e"],
+            "tokenizer.ggml.token_type": types,
+            "tokenizer.ggml.eos_token_id": 151643,
+            "tokenizer.ggml.padding_token_id": 151643}
+
+
+@functools.cache
+def gguf_tokenizer():
+    """The tokenizer gmlx builds from ``tokenizer_kv``, built quietly as
+    the header tokenizer is."""
+    from gmlx.load import loadlog
+    from gmlx.load.tokenizer import load_tokenizer_from_gguf
+
+    with loadlog.quiet():
+        return load_tokenizer_from_gguf(tokenizer_kv(), "qwen3vl")
+
+
 def load_json(name: str) -> dict:
     return json.loads((FIXTURES / name).read_text())
 

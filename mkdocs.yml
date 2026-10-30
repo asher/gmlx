@@ -102,6 +102,7 @@ nav:
           - installation.md
           - quickstart.md
           - images.md
+          - video.md
           - migrating.md
       - Serving:
           - config.md

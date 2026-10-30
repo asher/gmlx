@@ -33,7 +33,7 @@ from video_oracle_fixture import committed, fixture, fx
 import mlx.core as mx
 
 from gmlx.image import text_encoder as te
-from gmlx.video import encoder
+from gmlx.video import encoder, memfit
 from gmlx.video.families.h3 import family as hf
 
 NAME = "check2_h3"
@@ -248,6 +248,18 @@ def test_token_ids_equal_comfyuis(handle, check2):
     markup = _ids(handle, m["inputs"]["prompts"]["markup"])
     assert all(markup.count(i) == 1 for i in FIXED.values())
     assert _ids(handle, "") == list(hf.EMPTY_IDS)
+
+
+@pytest.mark.integration
+def test_the_memory_check_counts_comfyuis_rows(encoder_path, check2):
+    """The tokenizer the memory check builds from the encoder's header
+    gives ComfyUI's ids, with no encoder loaded."""
+    arrays, m = check2
+    tok = encoder.header_tokenizer(hf.FAMILY, encoder_path)
+    for key, prompt in m["inputs"]["prompts"].items():
+        want = arrays[f"ids_{key}"].tolist()
+        assert te.token_ids(hf.FAMILY.encoder(), tok, prompt) == want, key
+        assert memfit.prompt_rows(hf.FAMILY, prompt, tok) == len(want), key
 
 
 @pytest.mark.integration

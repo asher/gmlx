@@ -22,6 +22,8 @@ from gmlx.video import catalog
 _ROLE = {"dit": "DiT", "encoder": "text encoder", "mmproj": "vision tower",
          "vae": "video VAE", "audio_vae": "audio VAE",
          "tiny": "preview decoder", "lora": "LoRA"}
+# The files the smallest run prices (_smallest_run).
+_PRICED = frozenset({"dit", "encoder", "tiny", "audio_vae", "lora"})
 
 
 @dataclass
@@ -38,6 +40,9 @@ class Plan:
     recipe: catalog.VideoRecipe
     parts: list = field(default_factory=list)
     blocked: list = field(default_factory=list)
+    notes: list = field(default_factory=list)
+    # Each role's parts to choose from: the files found, then the download.
+    choices: dict = field(default_factory=dict, repr=False)
 
     def part(self, role: str) -> Part | None:
         return next((p for p in self.parts if p.role == role), None)
@@ -67,18 +72,27 @@ def _remaining(dest: str, pin: catalog.Pin) -> int:
     return pin.size
 
 
-def plan_pull(r: catalog.VideoRecipe, *, roots: list,
-              base_dir: str) -> Plan:
-    """What the pull uses from disk and what it downloads."""
+def _plan(r: catalog.VideoRecipe, pick: dict, choices: dict) -> Plan:
+    parts = list(pick.values())
+    return Plan(r, parts, [p for p in parts
+                           if not p.found and os.path.lexists(p.path)],
+                choices=choices)
+
+
+def plan_pull(r: catalog.VideoRecipe, *, roots: list, base_dir: str) -> Plan:
+    """What the pull uses from disk and what it downloads: for each file,
+    the recipe's file found on disk, or else another file of its weights,
+    or else the download."""
     from gmlx.video import files
     from gmlx.video.registry import get_family
 
     fam = get_family(r.family)
     found = files.scan(roots, fam)
-    plan = Plan(r)
+    choices = {}
     for role, pin in r.pins().items():
         if role == "lora":
             path = files.find_pinned(roots, pin)
+            paths = [] if path is None else [path]
         else:
             # A DiT of unverified qkv layout is not taken for the recipe.
             hits = [f for f in found if f.role == role and (
@@ -88,16 +102,11 @@ def plan_pull(r: catalog.VideoRecipe, *, roots: list,
             hits.sort(key=lambda f: (os.path.basename(f.path) != pin.name,
                                      os.path.getsize(f.path) != pin.size,
                                      f.path))
-            path = hits[0].path if hits else None
-        if path is not None:
-            plan.parts.append(Part(role, pin, path, True))
-            continue
+            paths = [f.path for f in hits]
         dest = _dest(pin, base_dir)
-        part = Part(role, pin, dest, False, _remaining(dest, pin))
-        if os.path.lexists(dest):
-            plan.blocked.append(part)
-        plan.parts.append(part)
-    return plan
+        choices[role] = [Part(role, pin, p, True) for p in paths] + [
+            Part(role, pin, dest, False, _remaining(dest, pin))]
+    return _plan(r, {role: c[0] for role, c in choices.items()}, choices)
 
 
 def _gb(n: int) -> str:
@@ -141,6 +150,77 @@ def _plan_json(plan: Plan, free: int | None) -> dict:
             "parts": [{"role": p.role, "file": p.pin.name, "path": p.path,
                        "found": p.found, "need": p.need}
                       for p in plan.parts]}
+
+
+def _smallest_run(plan: Plan):
+    """The memory plan of the smallest run, 5 frames at 32x32 from a
+    one-token prompt with the preview decoder, on the files the pull
+    registers: a file found on disk at its own size, a download at its
+    pin's."""
+    from gmlx.video import memfit
+    from gmlx.video.families.h3 import family as hf
+    from gmlx.video.registry import get_family
+
+    fam = get_family(plan.recipe.family)
+    size = {p.role: memfit.file_bytes(p.path) if p.found else p.pin.size
+            for p in plan.parts}
+    side = 32
+    rows, audio = memfit.clip_rows(fam, frames=hf.MIN_FRAMES, width=side,
+                                   height=side, text=1)
+    return memfit.plan_memory(
+        fam.name, dit=size["dit"], encoder=size["encoder"], vae=size["tiny"],
+        tiny=True, audio_vae=size["audio_vae"],
+        loras=[size["lora"]] if "lora" in size else [], rows=rows, text=1,
+        audio_latents=audio, pixels=side * side)
+
+
+def memory_refusal(plan: Plan) -> str | None:
+    """Why no clip of the recipe fits this Mac's memory, or None."""
+    from gmlx.serve import capacity
+    from gmlx.video.registry import get_family
+
+    priced = _smallest_run(plan)
+    if priced.fits or capacity.overcommit():
+        return None
+    return (f"the smallest {get_family(plan.recipe.family).title} clip does "
+            f"not fit in memory: {priced.describe()}")
+
+
+def fit_plan(plan: Plan) -> Plan:
+    """``plan``, or when no clip fits this Mac's memory with its files,
+    a plan one fits with, its notes naming each file it leaves.
+
+    Each file the check prices, in turn, takes the first of its choices a
+    clip fits with: the file ``plan`` took, the other files found from
+    the largest down, then the download. The files not yet chosen count at
+    their smallest choice."""
+    from gmlx.video import memfit
+
+    if memory_refusal(plan) is None:
+        return plan
+    r, choices = plan.recipe, plan.choices
+
+    def size(p: Part) -> int:
+        return memfit.file_bytes(p.path) if p.found else p.pin.size
+
+    def fits(pick: dict) -> bool:
+        return memory_refusal(_plan(r, pick, choices)) is None
+
+    pick = {role: min(c, key=size) if role in _PRICED else c[0]
+            for role, c in choices.items()}
+    if not fits(pick):
+        return plan
+    for role, c in choices.items():
+        if role in _PRICED:
+            tries = [c[0], *sorted(c[1:-1], key=size, reverse=True), c[-1]]
+            pick[role] = next(t for t in tries if fits({**pick, role: t}))
+    out = _plan(r, pick, choices)
+    for p, q in zip(plan.parts, out.parts):
+        if p.path != q.path:
+            how = f"uses {q.path}" if q.found else f"downloads {q.pin.name}"
+            out.notes.append(f"{p.path} does not fit this Mac's memory, so "
+                             f"the pull {how}")
+    return out
 
 
 def _made_dirs(path: str) -> list:
@@ -303,7 +383,8 @@ def _parser(prog: str) -> argparse.ArgumentParser:
                    help="Download without asking.")
     p.add_argument("--force", action="store_true",
                    help="Download even when the free disk space looks too "
-                        "small.")
+                        "small, or this Mac's chip or memory does not run "
+                        "the model.")
     p.add_argument("--dry-run", action="store_true",
                    help="Print what the pull finds and downloads, and stop.")
     p.add_argument("--json", action="store_true",
@@ -333,7 +414,16 @@ def cmd_pull(argv: list[str], prog: str = "gmlx video pull") -> int:
         return 2
     if a.dir and a.dir not in roots:
         roots.append(a.dir)
+    from gmlx.video.registry import chip_refusal, get_family
+
+    chip = chip_refusal(get_family(r.family))
     plan = plan_pull(r, roots=roots, base_dir=base)
+    # On a chip it refuses, or with an entry on this DiT and LoRA
+    # already, the pull keeps the files it finds.
+    if (a.force or not chip) and not (cfg and _registered(plan, cfg)):
+        plan = fit_plan(plan)
+        for n in plan.notes:
+            print(f"note: {n}", file=sys.stderr)
     from gmlx.commands import manage
 
     free = manage._disk_free(base)
@@ -344,6 +434,11 @@ def cmd_pull(argv: list[str], prog: str = "gmlx video pull") -> int:
     else:
         _print_plan(plan, free)
     sys.stdout.flush()
+    why = chip or memory_refusal(plan)
+    if why and not a.force:
+        print(f"error: {why}; pass --force to download anyway",
+              file=sys.stderr)
+        return 1
     if plan.blocked:
         for p in plan.blocked:
             print(f"error: {p.path} is there and is not the {r.title} "

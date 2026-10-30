@@ -132,6 +132,24 @@ def test_a_wav_holds_stereo_16_bit_samples(tmp_path):
     assert not os.path.exists(path + ".part")
 
 
+@pytest.mark.parametrize("frames, latents, samples", [
+    (124, 207, 165333), (243, 405, 324000), (362, 603, 482667)])
+def test_the_audio_is_cut_or_padded_to_the_clips_length(frames, latents,
+                                                        samples):
+    """The decode gives 800 samples a latent: 267 past the last frame at
+    124 frames, exact at 243, and 267 short at 362, padded with zeros."""
+    from gmlx.video.families.h3 import family as hf
+
+    assert hf.latent_shapes(frames, 32, 32)[1][3] == latents
+    wave = np.arange(1, 2 * latents * 800 + 1,
+                     dtype=np.float32).reshape(2, -1)
+    got = io.fit_audio(wave, frames=frames, fps=hf.FPS, rate=32000)
+    assert got.shape == (2, samples) and got.dtype == np.float32
+    kept = min(samples, wave.shape[1])
+    assert (got[:, :kept] == wave[:, :kept]).all()
+    assert (got[:, kept:] == 0).all()
+
+
 def test_frames_are_numbered_pngs(tmp_path):
     pytest.importorskip("PIL")
     nxt = io.write_frames(str(tmp_path), _frames(2), 0)

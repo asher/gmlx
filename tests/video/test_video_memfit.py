@@ -1,8 +1,8 @@
 """The video memory plan against measured peaks: each fit leaves at
 least 0.25 GiB over every measured cell, its closest cell within 0.35
-GiB and none more than 1.5 GiB over; the rows of a clip and of a
-prompt; what each file costs; the refusal and its message. CPU, no
-weights."""
+GiB and none more than 1.5 GiB over past its slope's 10 percent; the
+rows of a clip; what each file costs; the refusal and its message. CPU,
+no weights."""
 from __future__ import annotations
 
 import re
@@ -10,7 +10,6 @@ import re
 import pytest
 from video_fixtures import load_json
 
-from gmlx.image import text_encoder as te
 from gmlx.serve import capacity
 from gmlx.video import memfit
 from gmlx.video.families.h3 import family as hf
@@ -28,43 +27,53 @@ def _plan(cell, files):
     return memfit.plan_memory(
         "h3", dit=files["dit"], encoder=files["encoder"], vae=files["vae"],
         audio_vae=files["audio_vae"],
-        loras=[files["lora"]] if cell["lora"] else (), rows=rows["total"],
+        loras=[files["lora"]] * cell["loras"], rows=rows["total"],
         text=rows["text"], audio_latents=rows["audio"] // 2, pixels=w * h,
         budget=None)
 
 
 def _rooms() -> dict:
-    """Bytes each fit leaves over each of its cells, by fit."""
+    """Bytes each fit leaves over each of its cells, by fit, with the
+    part of it that is the slope's 10 percent at that cell."""
     out: dict = {k: [] for k in ("encode", "step", "plain_step", "audio",
                                  "decode", "tiny_decode")}
+
+    def add(fit, room, units):
+        out[fit].append((room, getattr(ROW, fit).k / 11 * units))
     for c in DOC["cells"]:
         plan = _plan(c, FILES)
+        w, h, _ = c["shape"]
+        units = {"encode": 0, "denoise": c["rows"]["total"],
+                 "audio": c["rows"]["audio"] // 2, "decode": w * h}
         for phase, measured in c["peak"].items():
-            fit = ("step" if c["lora"] else "plain_step") \
+            fit = ("step" if c["loras"] else "plain_step") \
                 if phase == "denoise" else phase
-            out[fit].append(plan.phases[phase] - measured)
+            add(fit, plan.phases[phase] - measured, units[phase])
     enc = DOC["encode"]
-    out["encode"].append(enc["file"] + ROW.encoder_load - enc["load_peak"])
+    add("encode", enc["file"] + ROW.encoder_load - enc["load_peak"], 0)
     for r in enc["rows"]:
-        out["encode"].append(ROW.encoder_keep * enc["file"]
-                             + ROW.encode.bytes(r["tokens"]) - r["peak"])
+        add("encode", ROW.encoder_keep * enc["file"]
+            + ROW.encode.bytes(r["tokens"]) - r["peak"], r["tokens"])
     aud = DOC["audio"]
     for r in aud["rows"]:
-        out["audio"].append(aud["file"] + ROW.audio.bytes(r["latents"])
-                            - r["peak"])
+        add("audio", aud["file"] + ROW.audio.bytes(r["latents"])
+            - r["peak"], r["latents"])
     tiny = DOC["tiny"]
     for r in tiny["rows"]:
         w, h, _ = r["shape"]
-        out["tiny_decode"].append(tiny["file"] + ROW.tiny_decode.bytes(w * h)
-                                  - r["peak"])
+        add("tiny_decode", tiny["file"] + ROW.tiny_decode.bytes(w * h)
+            - r["peak"], w * h)
     return out
 
 
 def test_the_cells_cover_the_shapes_and_both_recipes():
-    shapes = {(tuple(c["shape"]), c["lora"]) for c in DOC["cells"]}
+    shapes = {(tuple(c["shape"]), c["loras"]) for c in DOC["cells"]}
     for s in ((512, 512, 22), (768, 768, 56), (768, 768, 124),
               (1344, 768, 124)):
-        assert (s, True) in shapes and (s, False) in shapes
+        assert (s, 1) in shapes and (s, 0) in shapes
+    # Two stacked LoRAs, and a 15 s clip at the default size.
+    assert ((1344, 768, 124), 2) in shapes
+    assert ((1344, 768, 362), 1) in shapes
     assert max(r["latents"] for r in DOC["audio"]["rows"]) == 603
     assert max(r["tokens"] for r in DOC["encode"]["rows"]) == 5001
 
@@ -72,12 +81,13 @@ def test_the_cells_cover_the_shapes_and_both_recipes():
 @pytest.mark.parametrize("fit", ["encode", "step", "plain_step", "audio",
                                  "decode", "tiny_decode"])
 def test_each_fit_covers_its_cells_and_stays_close(fit):
-    rooms = _rooms()[fit]
+    cells = _rooms()[fit]
+    rooms = [r for r, _ in cells]
     assert len(rooms) >= 3
     assert min(rooms) >= ROOM, [r / GiB for r in rooms]
     # A fit, not a ceiling far above the readings.
     assert min(rooms) <= 0.35 * GiB
-    assert max(rooms) <= 1.5 * GiB
+    assert max(r - slope for r, slope in cells) <= 1.5 * GiB
 
 
 def test_the_encoder_run_keeps_less_than_the_plan_counts():
@@ -88,16 +98,22 @@ def test_the_encoder_run_keeps_less_than_the_plan_counts():
 
 
 def test_a_long_prompt_is_priced_near_what_it_measured():
-    """A plan counts a prompt's bytes as its rows, about 4 per token in
-    English. At the measured prompts the encode stays within 1.5 GiB of
-    the larger of the load and the run."""
+    """A plan counts a prompt's tokens as its rows. At the measured
+    prompts the encode stays within 1.5 GiB of the larger of the load and
+    the run."""
     enc = DOC["encode"]
     for r in enc["rows"]:
         plan = memfit.plan_memory(
             "h3", dit=0, encoder=enc["file"], vae=0, audio_vae=0, rows=1,
-            text=r["bytes"], audio_latents=1, pixels=1, budget=None)
+            text=r["tokens"], audio_latents=1, pixels=1, budget=None)
         measured = max(enc["load_peak"], r["peak"])
         assert ROOM <= plan.phases["encode"] - measured <= 1.5 * GiB
+
+
+def test_the_encoder_load_is_priced_close():
+    enc = DOC["encode"]
+    room = enc["file"] + ROW.encoder_load - enc["load_peak"]
+    assert ROOM <= room <= 0.35 * GiB
 
 
 def test_the_encode_is_the_load_or_the_kept_part_and_the_prompt():
@@ -121,18 +137,6 @@ def test_the_rows_are_the_layouts():
         assert memfit.clip_rows(hf.FAMILY, frames=f, width=w, height=h,
                                 text=c["rows"]["text"]) == (
             c["rows"]["total"], c["rows"]["audio"] // 2)
-
-
-def test_a_prompt_counts_its_nfc_bytes():
-    """The encoder tokenizes the NFC form, where U+FB2C takes 6 bytes
-    against its own 3; each byte can be a token."""
-    p = "\ufb2c" * 40
-    assert len(p.encode("utf-8")) == 120
-    assert memfit.prompt_rows(hf.FAMILY, p) == 240
-    assert memfit.prompt_rows(hf.FAMILY, p) == te.rows_at_most(
-        hf.FAMILY.encoder(), p)
-    assert memfit.prompt_rows(hf.FAMILY, "") == 1
-    assert memfit.prompt_rows(hf.FAMILY, "<d>[English] hi</d>") == 19
 
 
 def test_each_lora_costs_twice_its_file_and_its_own_step():
@@ -192,8 +196,8 @@ def test_a_run_plan_reads_every_file_and_shard(tmp_path, monkeypatch):
 
 # Refusals, on the measured files with the LoRA.
 
-def _h3(w, h, f, prompt="x" * 105, budget=None):
-    text = memfit.prompt_rows(hf.FAMILY, prompt)
+def _h3(w, h, f, text=25, budget=None):
+    """A plan with ``text`` prompt rows; the cells' prompt has 25."""
     rows, audio = memfit.clip_rows(hf.FAMILY, frames=f, width=w, height=h,
                                    text=text)
     return memfit.plan_memory(
@@ -232,11 +236,13 @@ def test_on_24_gb_every_clip_names_the_encoder(no_overcommit):
 def test_on_32_gb_768_fits_and_a_prompt_can_be_too_long(no_overcommit):
     budget = capacity.ram_budget_bytes(32 * GiB)
     assert _h3(768, 768, 124, budget=budget).fits
-    assert _h3(512, 512, 22, prompt="x" * 7000, budget=budget).fits
+    # About 2.6 KB of English, priced by its tokens.
+    assert _h3(768, 768, 124, text=600, budget=budget).fits
+    assert _h3(512, 512, 22, text=7000, budget=budget).fits
     msg = _refusal(_h3(1344, 768, 124, budget=budget))
     assert "with the denoise over it. Try a smaller size or a shorter clip" \
         in msg
-    msg = _refusal(_h3(512, 512, 22, prompt="x" * 30_000, budget=budget))
+    msg = _refusal(_h3(512, 512, 22, text=30_000, budget=budget))
     assert "Try a shorter prompt." in msg
 
 

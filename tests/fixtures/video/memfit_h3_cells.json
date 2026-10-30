@@ -1,5 +1,5 @@
 {
- "what": "MLX active peaks per phase of MiniMax-H3 video runs on an M5 Max under bounded_cache, one shape per process, 2 steps, with and without lightx2v's 8-step LoRA; the denoise peak includes the DiT load. Then the encoder load, what the run keeps of it, and the peaks of prompts of 26 to 5001 tokens over that, the audio decode of 37 to 603 latents, and the TAEH3 decode at four sizes.",
+ "what": "MLX active peaks per phase of MiniMax-H3 video runs on an M5 Max under bounded_cache, one shape per process, 2 steps (1 at 1344x768x362), with no LoRA, lightx2v's 8-step LoRA, or it and the 4-step LoRA stacked; the denoise peak includes the DiT load. Then the encoder load, what the run keeps of it, and the peaks of prompts of 26 to 5001 tokens over that, the audio decode of 37 to 603 latents, and the TAEH3 decode at four sizes.",
  "mlx": "0.32.3",
  "files": {
   "dit": 11420663904,
@@ -15,7 +15,8 @@
     512,
     22
    ],
-   "lora": true,
+   "loras": 1,
+   "steps": 2,
    "rows": {
     "text": 25,
     "total": 1891,
@@ -35,7 +36,8 @@
     768,
     56
    ],
-   "lora": true,
+   "loras": 1,
+   "steps": 2,
    "rows": {
     "text": 25,
     "total": 10003,
@@ -55,7 +57,8 @@
     768,
     124
    ],
-   "lora": true,
+   "loras": 1,
+   "steps": 2,
    "rows": {
     "text": 25,
     "total": 21751,
@@ -75,7 +78,8 @@
     768,
     124
    ],
-   "lora": true,
+   "loras": 1,
+   "steps": 2,
    "rows": {
     "text": 25,
     "total": 37735,
@@ -95,7 +99,8 @@
     512,
     22
    ],
-   "lora": false,
+   "loras": 0,
+   "steps": 2,
    "rows": {
     "text": 25,
     "total": 1891,
@@ -115,7 +120,8 @@
     768,
     56
    ],
-   "lora": false,
+   "loras": 0,
+   "steps": 2,
    "rows": {
     "text": 25,
     "total": 10003,
@@ -135,7 +141,8 @@
     768,
     124
    ],
-   "lora": false,
+   "loras": 0,
+   "steps": 2,
    "rows": {
     "text": 25,
     "total": 21751,
@@ -155,7 +162,8 @@
     768,
     124
    ],
-   "lora": false,
+   "loras": 0,
+   "steps": 2,
    "rows": {
     "text": 25,
     "total": 37735,
@@ -167,6 +175,48 @@
     "denoise": 18238819070,
     "audio": 2966427788,
     "decode": 6757333840
+   }
+  },
+  {
+   "shape": [
+    1344,
+    768,
+    124
+   ],
+   "loras": 2,
+   "steps": 2,
+   "rows": {
+    "text": 25,
+    "total": 37735,
+    "video": 37296,
+    "audio": 414
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 27388502240,
+    "audio": 3008917796,
+    "decode": 6757333840
+   }
+  },
+  {
+   "shape": [
+    1344,
+    768,
+    362
+   ],
+   "loras": 1,
+   "steps": 1,
+   "rows": {
+    "text": 25,
+    "total": 109087,
+    "video": 107856,
+    "audio": 1206
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 38324592824,
+    "audio": 4455325780,
+    "decode": 6811597648
    }
   }
  ],

@@ -218,7 +218,7 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                         "not needed.")
     p.add_argument("--preview", nargs="?", const="", default=None,
                    metavar="TAEH3",
-                   help="Decode with TAEH3, the fast preview decoder, in "
+                   help="Decode with TAEH3, the small preview decoder, in "
                         "place of the full video VAE: the entry's file, or "
                         "this one.")
     p.add_argument("--save-latent", default=None, metavar="PATH",
@@ -381,6 +381,7 @@ def _generate(a) -> int:
     from gmlx.video import encoder as video_encoder
     from gmlx.video import io, memfit, pipeline
     from gmlx.video.loader import identify_dit
+    from gmlx.video.registry import chip_refusal
     from gmlx.video.vae.h3_audio import SAMPLE_RATE
     from gmlx.video.vae.reader import load_vae
 
@@ -400,6 +401,9 @@ def _generate(a) -> int:
         ffmpeg = io.probe()
     vid = identify_dit(os.path.expanduser(a.model), variant=a.variant)
     fam = vid.family
+    why = chip_refusal(fam)
+    if why:
+        raise RuntimeError(why)
     adapters = list(a.entry_adapters) + list(a.adapter or ())
     # Refused from the headers before the encoder loads.
     for path, _ in adapters:
@@ -416,7 +420,8 @@ def _generate(a) -> int:
         tiny=bool(preview), audio_vae=a.audio_vae,
         loras=[p for p, _ in adapters], frames=s["frames"],
         width=s["width"], height=s["height"],
-        text=memfit.prompt_rows(fam, prompt))
+        text=memfit.prompt_rows(
+            fam, prompt, video_encoder.header_tokenizer(fam, a.encoder)))
     memfit.check(plan)
     log(f"[video] {fam.title} {s['width']}x{s['height']}, {s['frames']} "
         f"frames, {s['steps']} steps at shift {s['shifts']['video']:g}, "
@@ -455,11 +460,13 @@ def _generate(a) -> int:
     t0 = time.perf_counter()
     avae = load_vae(os.path.expanduser(a.audio_vae), family="h3_audio",
                     dtype=mx.float32)
-    wave = np.array(avae.decode(xa)[0])
-    del avae
-    _release()
     hf = _family()
     rate = SAMPLE_RATE
+    # One length for the MP4 and the frames' audio.wav.
+    wave = io.fit_audio(np.array(avae.decode(xa)[0]), frames=s["frames"],
+                        fps=hf.FPS, rate=rate)
+    del avae
+    _release()
     times["audio_s"] = round(time.perf_counter() - t0, 2)
 
     t0 = time.perf_counter()

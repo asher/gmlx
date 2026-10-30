@@ -1312,7 +1312,8 @@ and a `--source-config` that is not one is refused.
 ## gmlx video
 
 `gmlx video` makes short clips with sound from a text prompt, on
-MiniMax-H3. Its actions follow.
+MiniMax-H3, as [Video generation](video.md) introduces. Its actions
+follow.
 
 - `pull` fetches a recipe's files, or finds them in your model folders,
   and adds the model to your config.
@@ -1333,7 +1334,10 @@ a usage error and 130 on an interrupt.
 
 `pull` lists each file of the recipe, where it found it or where it will
 download it, the total to download and the licenses, then asks before it
-downloads. A file already in a `model_dirs` folder is used where it is.
+downloads. A file already in a `model_dirs` folder is used where it is,
+unless it is a larger copy that keeps every clip out of this Mac's memory,
+such as a Q8_0 text encoder on a 32 GB Mac. `pull` then uses another
+copy it finds that fits, or downloads the recipe's file.
 An interrupted download resumes on the next pull. The recipe is then
 added under `video_models:` in the config, with the recipe's name as its
 id, or `h3-2` when another entry has that id.
@@ -1350,7 +1354,7 @@ id, or `h3-2` when another entry has that id.
 | `--config FILE` | The first default location | Add the entry to this config, and search its `model_dirs`. |
 | `--dir DIR` | The first `model_dirs` folder | Download into this folder. |
 | `--yes`, `-y` | Off | Download without asking. |
-| `--force` | Off | Download even when the free disk space looks too small. |
+| `--force` | Off | Download even when the free disk space looks too small, or this Mac's chip or memory does not run the model. |
 | `--dry-run` | Off | Print what the pull finds and would download, and stop. |
 | `--json` | Off | Print the plan as JSON on stdout. |
 
@@ -1389,7 +1393,7 @@ shift come from the entry, else from the DiT's variant.
 | `--adapter PATH[:STRENGTH]` | The entry's | Apply this LoRA safetensors file after the entry's. Repeat the flag to stack adapters. |
 | `--output PATH` | `./gmlx-<time>-<seed>.mp4`, or none with `--frames-dir` alone | Write the MP4 here. |
 | `--frames-dir DIR` | None | Write PNG frames and `audio.wav` to this folder. Alone, it writes no MP4 and needs no ffmpeg. |
-| `--preview [TAEH3]` | Off | Decode with TAEH3, the fast preview decoder: the entry's file, or this one. |
+| `--preview [TAEH3]` | Off | Decode with TAEH3, the small preview decoder: the entry's file, or this one. |
 | `--save-latent PATH` | None | Also write the final latents to this `.npz` file. |
 | `--encoder GGUF` | The entry's | Encode the prompt with this text encoder. |
 | `--vae PATH` | The entry's | Decode the frames with this video VAE. |

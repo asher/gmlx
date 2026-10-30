@@ -54,27 +54,28 @@ class VideoPeaks:
 
 
 # MiniMax-H3 Q4_K, the stock Qwen3-VL-32B Q4_K_M encoder, Comfy-Org's
-# VAEs and lightx2v's 8-step LoRA on an M5 Max under bounded_cache, one
-# shape per process. The cells are in
-# tests/fixtures/video/memfit_h3_cells.json. Each line runs through two
-# of its cells, named below, with the slope raised 10 percent and the
-# base at least 0.25 GiB above every cell.
+# VAEs and lightx2v's 8-step LoRA, with its 4-step LoRA stacked on it in
+# one cell, on an M5 Max under bounded_cache, one shape per process. The
+# cells are in tests/fixtures/video/memfit_h3_cells.json. Each line runs
+# through two of its cells, named below, with the slope raised 10 percent
+# and the base at least 0.25 GiB above every cell.
 #
 # The encoder's load peaks 1.2 MB over its file. The run then keeps 75.5
 # percent of the file, and a prompt of 26 to 5001 tokens reads 0.13 to
 # 1.61 GiB over that, through the 1001 and 5001 token cells. A plan
-# counts the prompt's bytes, at least its tokens, as its rows.
+# counts the prompt's rows by the encoder's own tokenizer.
 #
-# A step reads 0.88 to 7.56 GiB over the DiT and twice the LoRA from
-# 1891 to 37735 rows, and 0.69 to 6.35 GiB over the DiT with no LoRA,
-# each slightly faster than linear. Both lines run through the 21751 and
-# 37735 row cells.
+# A step reads 0.88 to 21.41 GiB over the DiT and twice each LoRA from
+# 1891 to 109087 rows (15 s at 1344x768), and 0.69 to 6.35 GiB over the
+# DiT with no LoRA up to 37735 rows. A second LoRA adds 0.03 GiB to the
+# step. Both lines run through the 21751 and 37735 row cells, which puts
+# the LoRA line 2.91 GiB over the 109087 row cell.
 #
-# The audio decode reads 1.30 to 3.55 GiB over its file from 37 to 603
+# The audio decode reads 1.30 to 3.59 GiB over its file from 37 to 603
 # latents (a 15 s clip has 603), through the 150 and 603 latent cells.
-# The video decode reads 1.10 to 1.44 GiB over its file from 512x512 to
-# 1344x768 at any frame count, and TAEH3 0.90 to 3.00 GiB, each through
-# its 512x512 and 1344x768 cells.
+# The video decode reads 1.10 to 1.49 GiB over its file from 512x512 to
+# 1344x768, 0.05 GiB more at 362 frames than at 124, and TAEH3 0.90 to
+# 3.00 GiB, each through its 512x512 and 1344x768 cells.
 PEAKS = {
     "h3": VideoPeaks(
         encoder_load=0.26 * GiB,
@@ -83,7 +84,7 @@ PEAKS = {
         step=Line(0.73 * GiB, 232_200),
         plain_step=Line(0.60 * GiB, 195_800),
         audio=Line(1.97 * GiB, 3_980_000),
-        decode=Line(1.23 * GiB, 530),
+        decode=Line(1.24 * GiB, 530),
         tiny_decode=Line(0.43 * GiB, 3_200)),
 }
 
@@ -203,11 +204,14 @@ def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
                      encoder_load=int(load))
 
 
-def prompt_rows(fam, prompt: str) -> int:
-    """The most text rows ``prompt`` encodes to, from its text alone."""
-    from gmlx.image.text_encoder import rows_at_most
+def prompt_rows(fam, prompt: str, tokenizer) -> int:
+    """The text rows ``prompt`` encodes to: its token ids by the
+    encoder's ``tokenizer``, less the dropped ones, plus the pads."""
+    from gmlx.image.text_encoder import pad_rows, token_ids
 
-    return rows_at_most(fam.encoder(), prompt)
+    spec = fam.encoder()
+    n = len(token_ids(spec, tokenizer, prompt))
+    return n - spec.drop + pad_rows(spec, n)
 
 
 def clip_rows(fam, *, frames: int, width: int, height: int,

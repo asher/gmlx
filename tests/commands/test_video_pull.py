@@ -30,6 +30,19 @@ SMALL = dataclasses.replace(REAL, **{
     role: _pin(p) for role, p in REAL.pins().items()})
 
 
+@pytest.fixture(autouse=True)
+def _mac(monkeypatch):
+    """An M3 with room for every recipe. The chip and memory tests set
+    their own."""
+    from gmlx.load import dtypes
+    from gmlx.serve import capacity
+
+    monkeypatch.setattr(dtypes, "_arch_gen", 15)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 100 << 30)
+    for var in ("GMLX_OVERCOMMIT", "GMLX_GOV_MARGIN", "GMLX_GOV_RESERVE_GB"):
+        monkeypatch.delenv(var, raising=False)
+
+
 def _classify(path: str):
     name = os.path.basename(path)
     for role, key in (("dit", "minimax_h3_fl2va"), ("encoder", "Qwen3-VL-32B"),
@@ -312,6 +325,165 @@ def test_too_little_free_disk_is_refused_unless_forced(lib, monkeypatch,
     assert _pull(cfg, "--yes") == 1
     assert "not enough disk space" in capsys.readouterr().err and got == []
     assert _pull(cfg, "--yes", "--force") == 0 and len(got) == 7
+
+
+def test_an_m2_is_refused_unless_forced(lib, monkeypatch, capsys):
+    from gmlx.load import dtypes
+
+    _, cfg, got = lib
+    monkeypatch.setattr(dtypes, "_arch_gen", 14)
+    assert _pull(cfg, "--yes") == 1
+    assert capsys.readouterr().err == (
+        "error: MiniMax-H3 needs an M3 or newer, and this Mac has an M2 "
+        "chip; pass --force to download anyway\n") and got == []
+    assert _pull(cfg, "--yes", "--force") == 0 and len(got) == 7
+
+
+def test_a_mac_too_small_for_any_clip_is_refused_unless_forced(
+        lib, monkeypatch, capsys):
+    from gmlx.serve import capacity
+
+    _, cfg, got = lib
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 1 << 20)
+    assert _pull(cfg, "--yes") == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: the smallest MiniMax-H3 clip does not fit "
+                          "in memory: encode ")
+    assert err.endswith(" against a working budget of 0.00 GiB, with the "
+                        "encode, the denoise, the audio and the decode over "
+                        "it; pass --force to download anyway\n")
+    assert got == []
+    assert _pull(cfg, "--dry-run") == 1
+    monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
+    assert _pull(cfg, "--dry-run") == 0
+    monkeypatch.delenv("GMLX_OVERCOMMIT")
+    assert _pull(cfg, "--yes", "--force") == 0 and len(got) == 7
+
+
+def test_the_checks_run_chip_then_memory_then_files(lib, monkeypatch,
+                                                    capsys):
+    """On a small M2 the chip refusal shows. On a small M3 the memory
+    refusal shows before a file in the way, under --dry-run too."""
+    from gmlx.load import dtypes
+    from gmlx.serve import capacity
+
+    root, cfg, got = lib
+    dest = root / "lightx2v__Minimax-h3-Turbo" / REAL.lora.file
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"something else")
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 1 << 20)
+    monkeypatch.setattr(dtypes, "_arch_gen", 14)
+    assert _pull(cfg, "--dry-run") == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: MiniMax-H3 needs an M3 or newer")
+    assert "smallest" not in err
+    monkeypatch.setattr(dtypes, "_arch_gen", 15)
+    assert _pull(cfg, "--dry-run") == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: the smallest MiniMax-H3 clip")
+    assert "is there" not in err and got == []
+
+
+def _sparse(path, size: int):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        f.truncate(size)
+    return path
+
+
+@pytest.mark.parametrize("found, takes, pinned", [
+    (["Q8_0"], None, False), (["Q6_K", "Q8_0"], None, False),
+    (["a/Q8_0", "b/Q2_K", "c/Q3_K_M"], "c/Q3_K_M", False),
+    (["Q8_0"], None, True)])
+def test_found_files_too_large_for_this_mac_give_way(
+        lib, monkeypatch, capsys, found, takes, pinned):
+    """Larger quants of the encoder in a model folder keep every clip out
+    of memory where the recipe's file fits: the pull takes the largest
+    other quant it finds that fits, or downloads the recipe's. The DiT it
+    takes stays, the recipe's own before a larger one, and so does a large
+    vision tower, which the check does not price."""
+    from gmlx.config import load_config, resolve_video_model
+    from gmlx.serve import capacity
+
+    root, cfg, got = lib
+    mine = root / "mine"
+    enc = {}
+    for i, q in enumerate(found):
+        d, _, quant = q.rpartition("/")
+        enc[q] = _sparse(mine / d / f"Qwen3-VL-32B-Instruct-{quant}.gguf",
+                         {"Q2_K": 1 << 20, "Q3_K_M": 2 << 20}.get(
+                             quant, (3 + i) << 30))
+    dit = mine / "minimax_h3_fl2va_pruned-Q8_0.gguf"
+    dit.write_bytes(SMALL.dit.file.encode() * 4)
+    if pinned:
+        dit = mine / SMALL.dit.name
+        dit.write_bytes(SMALL.dit.file.encode())
+    tower = _sparse(mine / "mmproj-F32.gguf", 2 << 30)
+    # With no room for the recipe's file either, the pull refuses.
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 1 << 20)
+    assert _pull(cfg, "--dry-run") == 1
+    err = capsys.readouterr().err
+    assert "note:" not in err and "the smallest MiniMax-H3 clip" in err
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 3 << 30)
+    assert _pull(cfg, "--yes") == 0
+    how = (f"uses {enc[takes]}" if takes
+           else f"downloads {SMALL.encoder.name}")
+    err = capsys.readouterr().err.splitlines()
+    assert [n for n in err if n.startswith("note:")] == [
+        f"note: {enc[found[0]]} does not fit this Mac's memory, so the "
+        f"pull {how}"]
+    assert (SMALL.encoder.file in got) is (takes is None)
+    assert len(got) == (4 if takes else 5)
+    rm = resolve_video_model("h3", load_config(cfg))
+    assert rm.path == str(dit)
+    assert rm.encoder_mmproj == str(tower)
+    assert rm.encoder == str(enc[takes] if takes else (
+        root / "unsloth__Qwen3-VL-32B-Instruct-GGUF" / REAL.encoder.file))
+
+
+def test_a_pull_that_adds_no_entry_keeps_the_files_it_finds(
+        lib, monkeypatch, capsys):
+    """On a chip the pull refuses, or with an entry on this DiT and LoRA
+    already, the pull registers nothing, so it downloads nothing in place
+    of a found file too large for this Mac."""
+    from gmlx.load import dtypes
+    from gmlx.serve import capacity
+
+    root, cfg, got = lib
+    _sparse(root / "mine" / "Qwen3-VL-32B-Instruct-Q8_0.gguf", 3 << 30)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 3 << 30)
+    monkeypatch.setattr(dtypes, "_arch_gen", 14)
+    assert _pull(cfg, "--dry-run") == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: MiniMax-H3 needs an M3")
+    assert "note:" not in err
+    monkeypatch.setattr(dtypes, "_arch_gen", 15)
+    monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
+    assert _pull(cfg, "--yes") == 0 and len(got) == 6
+    monkeypatch.delenv("GMLX_OVERCOMMIT")
+    capsys.readouterr()
+    assert _pull(cfg, "--yes") == 1 and len(got) == 6
+    err = capsys.readouterr().err
+    assert err.startswith("error: the smallest MiniMax-H3 clip")
+    assert "note:" not in err
+
+
+@pytest.mark.parametrize("name", sorted(catalog.RECIPES))
+def test_every_recipe_needs_more_than_24_gb(name, monkeypatch):
+    """Priced from the real pins: on a 24 GB Mac the text encoder alone
+    is over the budget, and a 32 GB Mac runs the smallest clip."""
+    from gmlx.serve import capacity
+
+    r = catalog.RECIPES[name]
+    plan = video_pull.Plan(r, [video_pull.Part(role, pin, "", False)
+                               for role, pin in r.pins().items()])
+    monkeypatch.setattr(capacity, "working_budget_bytes",
+                        lambda: capacity.ram_budget_bytes(24 << 30))
+    why = video_pull.memory_refusal(plan)
+    assert why is not None and why.endswith(", with the encode over it")
+    monkeypatch.setattr(capacity, "working_budget_bytes",
+                        lambda: capacity.ram_budget_bytes(32 << 30))
+    assert video_pull.memory_refusal(plan) is None
 
 
 def test_json_carries_the_licenses_and_stays_json(lib, capsys):

@@ -59,6 +59,21 @@ def to_uint8(frames) -> np.ndarray:
     return np.clip(np.round(x * 255.0), 0, 255).astype(np.uint8)
 
 
+def fit_audio(waveform, *, frames: int, fps: int, rate: int):
+    """The waveform (channels, samples) cut or zero-padded to
+    round(frames / fps x rate) samples, the length of the video.
+
+    The audio decode gives whole 25 ms latents, so it lands up to 12.5 ms
+    either side of the video. At 124 frames, 207 latents give 165600
+    samples, cut to 165333. At 362 frames, 603 latents give 482400
+    samples, padded to 482667 with 8 ms of silence."""
+    n = round(frames * rate / fps)
+    out = waveform[:, :n]
+    if out.shape[1] < n:
+        out = np.pad(out, ((0, 0), (0, n - out.shape[1])))
+    return out
+
+
 def write_wav(path: str, waveform, rate: int) -> str:
     """A 16-bit PCM WAV of a waveform (channels, samples) in [-1, 1]."""
     x = np.asarray(waveform, np.float32)
