@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-10-29
+
 ### Added
 
 - MiniMax-M3.1-Flash GGUFs run with sparse attention on every layer,
