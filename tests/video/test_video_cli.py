@@ -18,6 +18,15 @@ from gmlx.video import fingerprint as vfp
 from gmlx.video.families.h3 import family as hf
 
 
+@pytest.fixture(autouse=True)
+def _room(monkeypatch):
+    """A Mac with room for every clip here; the memory tests set their own
+    budget."""
+    from gmlx.serve import capacity
+
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 100 << 30)
+
+
 class _Stop(BaseException):
     """Raised by the replaced encoder load: the run got that far. Not an
     Exception, so the command's error handler lets it through."""
@@ -421,3 +430,150 @@ def test_completion_offers_recipes_and_video_ids(tmp_path):
 """)
     assert _complete(["video", "generate", "--config", str(cfg), ""]) == [
         "::files", "clip\th3.gguf"]
+
+
+def test_a_clip_over_the_memory_budget_is_refused_first(run, monkeypatch,
+                                                        capsys):
+    from gmlx.serve import capacity
+
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 1 << 20)
+    monkeypatch.setattr(capacity, "overcommit", lambda: False)
+    assert run() == 1
+    assert "this clip does not fit in memory" in capsys.readouterr().err
+    assert run.loads == []
+
+
+def _cache_limit() -> int:
+    import mlx.core as mx
+
+    prev = mx.set_cache_limit(0)
+    mx.set_cache_limit(prev)
+    return prev
+
+
+@pytest.fixture
+def planned(monkeypatch, tmp_path):
+    """``cmd_generate`` with ``~`` at ``tmp_path``, the memory plan's
+    arguments and the order of the write check, the memory check and the
+    encoder load recorded, and the encoder load replaced by a stop."""
+    from gmlx.video import encoder, loader, memfit, pipeline
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    seen: dict = {"order": [], "raise": None}
+    plan, check, writable = memfit.plan_memory, memfit.check, cmd._writable
+
+    def spy_plan(*a, **k):
+        seen["plan"] = k
+        return plan(*a, **k)
+
+    def spy_check(p, **k):
+        seen["order"].append("check")
+        return check(p, **k)
+
+    def spy_writable(a, out):
+        seen["order"].append("writable")
+        return writable(a, out)
+
+    def load_encoder(*a, **k):
+        seen["order"].append("encoder")
+        seen["cache_limit"] = _cache_limit()
+        if seen["raise"] is not None:
+            raise seen["raise"]
+        raise _Stop
+
+    monkeypatch.setattr(memfit, "plan_memory", spy_plan)
+    monkeypatch.setattr(memfit, "check", spy_check)
+    monkeypatch.setattr(cmd, "_writable", spy_writable)
+    monkeypatch.setattr(encoder, "load_encoder", load_encoder)
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **kw: (
+        vfp.identify(fixture_view(H3_HEADER), **kw)))
+    monkeypatch.setattr(pipeline, "vet_adapter", lambda *a, **k: None)
+    sizes = {"h3.gguf": 11, "enc.gguf": 19, "v.safetensors": 5,
+             "a.safetensors": 3, "tiny.safetensors": 1,
+             "entry.safetensors": 2, "flag.safetensors": 7}
+    for name, mib in sizes.items():
+        with open(tmp_path / name, "wb") as f:
+            f.truncate(mib << 20)
+    files = ["~/h3.gguf", "--encoder", "~/enc.gguf", "--vae",
+             "~/v.safetensors", "--audio-vae", "~/a.safetensors",
+             "--frames-dir", str(tmp_path / "out")]
+
+    def go(*argv, budget=100 << 30):
+        from gmlx.serve import capacity
+
+        monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
+        seen["order"].clear()
+        try:
+            return cmd.cmd_generate(list(argv))
+        except _Stop:
+            return "encoder"
+    go.seen, go.files = seen, files
+    return go
+
+
+def test_the_memory_plan_prices_the_files_the_run_loads(planned, tmp_path):
+    from gmlx.video import memfit
+
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(f"""server:
+  model_dirs: [{tmp_path}]
+video_models:
+  clip:
+    path: h3.gguf
+    encoder: enc.gguf
+    vae: v.safetensors
+    audio_vae: a.safetensors
+    tiny_vae: tiny.safetensors
+    adapters: [entry.safetensors]
+""")
+    assert planned("clip", "--config", str(cfg), "--prompt", "a cat on a mat",
+                   "--frames-dir", str(tmp_path / "out"), "--preview",
+                   "--adapter", "~/flag.safetensors:0.5", "--frames", "22",
+                   "--size", "512x320") == "encoder"
+    k = planned.seen["plan"]
+    assert (k["dit"], k["encoder"], k["vae"], k["audio_vae"]) == (
+        11 << 20, 19 << 20, 1 << 20, 3 << 20)
+    assert k["tiny"] is True and k["loras"] == [2 << 20, 7 << 20]
+    assert k["text"] == memfit.prompt_rows(hf.FAMILY, "a cat on a mat")
+    assert k["pixels"] == 512 * 320
+    assert planned.seen["order"] == ["writable", "check", "encoder"]
+
+
+def test_a_write_refusal_comes_before_the_memory_refusal(planned, tmp_path,
+                                                         capsys):
+    (tmp_path / "afile").write_text("x")
+    assert planned(*planned.files, "--prompt", "a cat", "--frames-dir",
+                   str(tmp_path / "afile"), budget=1 << 20) == 1
+    assert "it is a file" in capsys.readouterr().err
+    assert planned.seen["order"] == ["writable"]
+
+
+def test_overcommit_or_no_budget_lets_the_run_through(planned, monkeypatch):
+    run = [*planned.files, "--prompt", "a cat"]
+    assert planned(*run, budget=None) == "encoder"
+    monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
+    assert planned(*run, budget=1 << 20) == "encoder"
+
+
+def test_the_cache_bound_holds_for_the_run_and_is_restored(planned):
+    import mlx.core as mx
+
+    from gmlx.image.memfit import CACHE_BOUND
+
+    prior = 50 << 30
+    first = mx.set_cache_limit(prior)
+    run = [*planned.files, "--prompt", "a cat"]
+    try:
+        assert planned(*run, budget=1 << 20) == 1       # refused
+        assert _cache_limit() == prior
+        assert planned(*run) == "encoder"               # stopped
+        assert planned.seen["cache_limit"] == CACHE_BOUND
+        assert _cache_limit() == prior
+        planned.seen["raise"] = RuntimeError("the load failed")
+        assert planned(*run) == 1
+        assert _cache_limit() == prior
+        assert planned(*planned.files) == 2             # no prompt
+        assert _cache_limit() == prior
+    finally:
+        mx.set_cache_limit(first)

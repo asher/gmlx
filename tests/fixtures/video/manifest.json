@@ -30,5 +30,10 @@
     "revision": "0d2775ed26fc79ed6acc92a3511a8e85190e4ee4",
     "file": "the identity tensors and the layout rows of every MiniMax-H3 DiT .gguf, by HTTP range reads",
     "note": "each file size and sha256 is from the hub listing at the revision"
+  },
+  "memfit_h3_cells.json": {
+    "source": "measured",
+    "file": "MLX active peaks per phase of runs of the h3 recipe's pinned files on an M5 Max, mlx 0.32.3",
+    "note": "the video memory plan's fits are tested against these cells"
   }
 }

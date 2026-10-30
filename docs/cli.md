@@ -1317,6 +1317,8 @@ MiniMax-H3. Its actions follow.
 - `pull` fetches a recipe's files, or finds them in your model folders,
   and adds the model to your config.
 - `generate` writes an MP4 from a prompt.
+- `bench` times the steps at a few clip shapes and takes their peak
+  memory.
 
 ```sh
 gmlx video pull h3
@@ -1393,6 +1395,48 @@ shift come from the entry, else from the DiT's variant.
 | `--vae PATH` | The entry's | Decode the frames with this video VAE. |
 | `--audio-vae PATH` | The entry's | Decode the sound with this audio VAE. |
 | `--json` | Off | Print a JSON record of the run on stdout. |
+
+### video bench
+
+`bench` runs what `generate` runs at a few clip shapes, loading each model
+once. It prints the step time of each shape and the peak memory of each
+phase beside what gmlx planned for it.
+
+```sh
+gmlx video bench h3
+gmlx video bench h3 --shapes 768x768x124 --steps 2 --json-out bench.jsonl
+```
+
+Each shape gets a JSON record of schema `gmlx.video.bench/1`. It holds
+the time of every step, with the first apart from the median and mean of
+the rest, and the peak memory of the encode, the denoise, the audio
+decode and the video decode, each with its model's load. `predicted`
+holds the memory plan of each phase beside them.
+
+A shape that does not fit in memory stops the bench before anything
+loads. Drop it from `--shapes`, or set `GMLX_OVERCOMMIT=1` to measure it
+anyway. A refusal that points to the text encoder or the prompt holds at
+every shape, so dropping shapes does not help. When a shape fails, the
+shapes that ran still get their records, each with an `error` field.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `MODEL`, positional | Required | Bench the `video_models` entry of this id, or this DiT GGUF. |
+| `--config FILE` | The first default location | Read the `video_models` entry that `MODEL` names from this config. |
+| `--variant NAME` | The entry's `variant`, else from the weights | Run the DiT as this variant. |
+| `--shapes LIST` | `512x512x22,768x768x124,1344x768x124` | Bench these shapes, each `WxHxF` with F frames. |
+| `--steps N` | `3` | Sample each shape for N steps. |
+| `--seed N` | `0` | Seed every shape. |
+| `--shift S` | The entry's, else the variant's | Set the video flow shift. |
+| `--adapter PATH[:STRENGTH]` | The entry's | Apply this LoRA after the entry's. Repeat the flag to stack adapters. |
+| `--prompt TEXT` | A fixed bench prompt | Encode this prompt. |
+| `--no-decode` | Off | Skip the sound and frame decodes, so no VAE loads. |
+| `--encoder GGUF` | The entry's | Encode the prompt with this text encoder. |
+| `--vae PATH` | The entry's | Decode the frames with this video VAE. |
+| `--audio-vae PATH` | The entry's | Decode the sound with this audio VAE. |
+| `--label TEXT` | None | Record this label with the results. |
+| `--json` | Off | Print one JSON record per shape on stdout. |
+| `--json-out FILE` | None | Write one JSON record per shape to this file. |
 
 ## gmlx comfyui
 

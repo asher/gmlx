@@ -602,6 +602,14 @@ def test_an_interrupt_exits_130_and_leaves_no_partial_image(
         "dit.gguf", "enc.gguf", "vae.gguf"]
 
 
+def test_bench_writes_its_records_into_a_new_folder(env, tmp_path):
+    out = tmp_path / "new" / "sub" / "bench.jsonl"
+    assert umbrella_main(["image", "bench"] + env.base[2:] + [
+        "--sizes", "32x32", "--steps", "1", "--runs", "1", "--warmup", "0",
+        "--json-out", str(out)]) == 0
+    assert json.loads(out.read_text())["schema"] == "gmlx.image.bench/1"
+
+
 def test_bench_records_each_size_from_empty_caches(env, tmp_path, capsys):
     out = tmp_path / "bench.jsonl"
     rc = umbrella_main(["image", "bench"] + env.base[2:] + [

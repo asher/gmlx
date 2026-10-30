@@ -57,7 +57,7 @@ _FILE_POSITIONAL_VERBS = frozenset({"validate", "pull", "systemone"})
 _SERVICE_ACTIONS = ("install", "uninstall", "status")
 _DISTILL_ACTIONS = ("gen", "filter", "cache", "align", "train", "eval", "census")
 _IMAGE_ACTIONS = ("generate", "bench", "pack-vae")
-_VIDEO_ACTIONS = ("generate", "pull")
+_VIDEO_ACTIONS = ("generate", "bench", "pull")
 _COMFYUI_ACTIONS = ("install", "uninstall", "status")
 
 
@@ -535,7 +535,7 @@ def _positional_candidates(verb: str, after_verb: list[str]) -> list[str]:
     if verb.startswith("image "):
         # pack-vae takes a safetensors VAE
         return [] if filled else ["::files"]
-    if verb == "video generate":
+    if verb in ("video generate", "video bench"):
         # a video_models id of the config, or a DiT GGUF
         return [] if filled else ["::files",
                                   *_entry_candidates(after_verb, "video")]

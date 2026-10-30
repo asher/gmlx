@@ -1,0 +1,275 @@
+{
+ "what": "MLX active peaks per phase of MiniMax-H3 video runs on an M5 Max under bounded_cache, one shape per process, 2 steps, with and without lightx2v's 8-step LoRA; the denoise peak includes the DiT load. Then the encoder load, what the run keeps of it, and the peaks of prompts of 26 to 5001 tokens over that, the audio decode of 37 to 603 latents, and the TAEH3 decode at four sizes.",
+ "mlx": "0.32.3",
+ "files": {
+  "dit": 11420663904,
+  "encoder": 19762151200,
+  "vae": 5207808496,
+  "audio_vae": 605254808,
+  "lora": 1956193000
+ },
+ "cells": [
+  {
+   "shape": [
+    512,
+    512,
+    22
+   ],
+   "lora": true,
+   "rows": {
+    "text": 25,
+    "total": 1891,
+    "video": 1792,
+    "audio": 74
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 16276137226,
+    "audio": 2001610660,
+    "decode": 6387983696
+   }
+  },
+  {
+   "shape": [
+    768,
+    768,
+    56
+   ],
+   "lora": true,
+   "rows": {
+    "text": 25,
+    "total": 10003,
+    "video": 9792,
+    "audio": 186
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 17811342692,
+    "audio": 2813266720,
+    "decode": 6542408528
+   }
+  },
+  {
+   "shape": [
+    768,
+    768,
+    124
+   ],
+   "lora": true,
+   "rows": {
+    "text": 25,
+    "total": 21751,
+    "video": 21312,
+    "audio": 414
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 20074291424,
+    "audio": 2960224420,
+    "decode": 6551288656
+   }
+  },
+  {
+   "shape": [
+    1344,
+    768,
+    124
+   ],
+   "lora": true,
+   "rows": {
+    "text": 25,
+    "total": 37735,
+    "video": 37296,
+    "audio": 414
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 23447281888,
+    "audio": 2966428164,
+    "decode": 6757333840
+   }
+  },
+  {
+   "shape": [
+    512,
+    512,
+    22
+   ],
+   "lora": false,
+   "rows": {
+    "text": 25,
+    "total": 1891,
+    "video": 1792,
+    "audio": 74
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 12156248714,
+    "audio": 2001610564,
+    "decode": 6387983696
+   }
+  },
+  {
+   "shape": [
+    768,
+    768,
+    56
+   ],
+   "lora": false,
+   "rows": {
+    "text": 25,
+    "total": 10003,
+    "video": 9792,
+    "audio": 186
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 13297879806,
+    "audio": 2803681824,
+    "decode": 6542408528
+   }
+  },
+  {
+   "shape": [
+    768,
+    768,
+    124
+   ],
+   "lora": false,
+   "rows": {
+    "text": 25,
+    "total": 21751,
+    "video": 21312,
+    "audio": 414
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 15393688318,
+    "audio": 2992153892,
+    "decode": 6551288656
+   }
+  },
+  {
+   "shape": [
+    1344,
+    768,
+    124
+   ],
+   "lora": false,
+   "rows": {
+    "text": 25,
+    "total": 37735,
+    "video": 37296,
+    "audio": 414
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 18238819070,
+    "audio": 2966427788,
+    "decode": 6757333840
+   }
+  }
+ ],
+ "encode": {
+  "file": 19762151200,
+  "load_peak": 19763393322,
+  "resident": 14928142919,
+  "rows": [
+   {
+    "bytes": 105,
+    "tokens": 26,
+    "peak": 15072195927
+   },
+   {
+    "bytes": 1050,
+    "tokens": 251,
+    "peak": 15222769919
+   },
+   {
+    "bytes": 4200,
+    "tokens": 1001,
+    "peak": 15734495799
+   },
+   {
+    "bytes": 10500,
+    "tokens": 2501,
+    "peak": 16152752751
+   },
+   {
+    "bytes": 21000,
+    "tokens": 5001,
+    "peak": 16659604551
+   }
+  ]
+ },
+ "audio": {
+  "file": 605254808,
+  "rows": [
+   {
+    "latents": 37,
+    "peak": 2000395940
+   },
+   {
+    "latents": 93,
+    "peak": 2799447004
+   },
+   {
+    "latents": 150,
+    "peak": 2774701076
+   },
+   {
+    "latents": 207,
+    "peak": 2951499308
+   },
+   {
+    "latents": 300,
+    "peak": 3483372724
+   },
+   {
+    "latents": 450,
+    "peak": 3885122764
+   },
+   {
+    "latents": 603,
+    "peak": 4413439412
+   }
+  ]
+ },
+ "tiny": {
+  "file": 22709752,
+  "rows": [
+   {
+    "shape": [
+     512,
+     512,
+     22
+    ],
+    "peak": 989253040
+   },
+   {
+    "shape": [
+     768,
+     768,
+     124
+    ],
+    "peak": 2086882736
+   },
+   {
+    "shape": [
+     1344,
+     768,
+     124
+    ],
+    "peak": 3215445422
+   },
+   {
+    "shape": [
+     1344,
+     768,
+     362
+    ],
+    "peak": 3242528174
+   }
+  ]
+ }
+}

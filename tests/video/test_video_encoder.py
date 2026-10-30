@@ -73,3 +73,11 @@ def test_the_row_bound_holds_every_prompt_and_the_empty_one(tok):
     for p in prompts:
         assert te.rows_at_most(SPEC, p) >= len(te.token_ids(SPEC, tok, p))
     assert te.rows_at_most(SPEC, "") == 1
+
+
+def test_the_row_bound_counts_the_nfc_form(tok):
+    """U+FB2C takes 3 bytes and 6 in its NFC form, which the tokenizer
+    reads, so its raw bytes undercount the ids."""
+    p = "a cat " + "\ufb2c" * 12
+    n = len(te.token_ids(SPEC, tok, p))
+    assert len(p.encode("utf-8")) < n <= te.rows_at_most(SPEC, p)

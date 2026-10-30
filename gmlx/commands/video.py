@@ -3,6 +3,7 @@
 ``generate`` writes a clip with sound from a prompt: the text encoder,
 then the DiT under the recipe's LoRA, then the audio and video VAEs, one
 model resident at a time, the frames streamed to ffmpeg as they decode.
+``bench`` times the steps of a few shapes and takes their peak memory.
 ``pull`` fetches a recipe's files, or finds them in the model folders.
 
 Exit codes follow ``gmlx image``: 0 on success, 1 for a refusal or a
@@ -21,9 +22,10 @@ import time
 
 from .image import _adapter
 
-_ACTIONS = ("generate", "pull")
+_ACTIONS = ("generate", "bench", "pull")
 _ACTION_DESC = {
     "generate": "write a clip with sound from a prompt",
+    "bench": "time the steps and take the peak memory at a few shapes",
     "pull": "fetch a video recipe's files, or find them on disk",
 }
 DEFAULT_SIZE = (1344, 768)
@@ -377,7 +379,7 @@ def _generate(a) -> int:
     import numpy as np
 
     from gmlx.video import encoder as video_encoder
-    from gmlx.video import io, pipeline
+    from gmlx.video import io, memfit, pipeline
     from gmlx.video.loader import identify_dit
     from gmlx.video.vae.h3_audio import SAMPLE_RATE
     from gmlx.video.vae.reader import load_vae
@@ -409,6 +411,13 @@ def _generate(a) -> int:
     s = _settings(a, fam, vid.variant)
     out = _output(a, s["seed"]) if ffmpeg is not None else None
     _writable(a, out)
+    plan = memfit.plan_run(
+        fam, dit=a.model, encoder=a.encoder, vae=preview or a.vae,
+        tiny=bool(preview), audio_vae=a.audio_vae,
+        loras=[p for p, _ in adapters], frames=s["frames"],
+        width=s["width"], height=s["height"],
+        text=memfit.prompt_rows(fam, prompt))
+    memfit.check(plan)
     log(f"[video] {fam.title} {s['width']}x{s['height']}, {s['frames']} "
         f"frames, {s['steps']} steps at shift {s['shifts']['video']:g}, "
         f"seed {s['seed']}")
@@ -500,7 +509,10 @@ def _generate(a) -> int:
 def cmd_generate(argv: list[str], prog: str = "gmlx video generate") -> int:
     a = _generate_parser(prog).parse_args(argv)
     try:
-        return _generate(a)
+        from gmlx.image.memfit import bounded_cache
+
+        with bounded_cache():
+            return _generate(a)
     except _Usage as e:
         print(f"{prog}: error: {e}", file=sys.stderr)
         return 2
@@ -512,13 +524,20 @@ def cmd_generate(argv: list[str], prog: str = "gmlx video generate") -> int:
         return 1
 
 
+def cmd_bench(argv: list[str], prog: str = "gmlx video bench") -> int:
+    from .video_bench import cmd_bench as run
+
+    return run(argv, prog=prog)
+
+
 def cmd_pull(argv: list[str], prog: str = "gmlx video pull") -> int:
     from .video_pull import cmd_pull as run
 
     return run(argv, prog=prog)
 
 
-HANDLERS = {"generate": cmd_generate, "pull": cmd_pull}
+HANDLERS = {"generate": cmd_generate, "bench": cmd_bench,
+            "pull": cmd_pull}
 
 
 def cmd_video(argv: list[str], prog: str = "gmlx video") -> int:
