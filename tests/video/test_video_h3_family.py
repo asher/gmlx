@@ -10,8 +10,8 @@ import hashlib
 
 import pytest
 from video_fixtures import (FIXTURES, H3_CONFIG, H3_HEADER, H3_IDENTITY,
-                            H3_IDENTITY_MOLBAL, fixture_view, load_json,
-                            official_config)
+                            H3_IDENTITY_MOLBAL, H3_IDENTITY_MOLBAL_TURBO,
+                            fixture_view, load_json, official_config)
 
 from gmlx.image import fingerprint as ifp
 from gmlx.video import fingerprint as vfp
@@ -40,7 +40,7 @@ def test_the_fixtures_are_pinned():
     assert manifest[H3_HEADER]["revision"] == ident["revision"]
     assert ident["files"][manifest[H3_HEADER]["file"]]["sha256"] == \
         manifest[H3_HEADER]["sha256"]
-    for name in (H3_IDENTITY, H3_IDENTITY_MOLBAL):
+    for name in (H3_IDENTITY, H3_IDENTITY_MOLBAL, H3_IDENTITY_MOLBAL_TURBO):
         assert (manifest[name]["repo"], manifest[name]["revision"]) == (
             load_json(name)["repo"], load_json(name)["revision"])
 
@@ -69,11 +69,13 @@ def test_every_published_quant_is_named_by_its_identity():
     """The variant hash of each file of unsloth's and molbal's repositories,
     read by range, names FL2VA or refuses Ref2VA, and each FL2VA layout
     hash names its file and repository with the [q; k; v] layout. molbal's
-    scaled int8 files have no layout row: gmlx refuses them by their
-    weight_scale tensors."""
+    merged Turbo files keep the FL2VA identity tensors. molbal's scaled
+    int8 files have no layout row: gmlx refuses them by their weight_scale
+    tensors."""
     fam = get_family("h3")
     named = set()
-    for fixture in (H3_IDENTITY, H3_IDENTITY_MOLBAL):
+    for fixture in (H3_IDENTITY, H3_IDENTITY_MOLBAL,
+                    H3_IDENTITY_MOLBAL_TURBO):
         ident = load_json(fixture)
         assert tuple(ident["identity_tensors"]) == fam.identity_tensors
         assert (ident["layout_tensor"], ident["layout_rows"]) == (
@@ -142,6 +144,53 @@ def test_a_ref2va_file_is_refused_by_name(monkeypatch):
     msg = _refused(fixture_view(H3_HEADER))
     assert "Ref2VA checkpoint" in msg and "follow-up" in msg
 
+
+
+def _named(monkeypatch, ident, layout):
+    monkeypatch.setattr(vfp, "weight_identity", lambda view, names: ident)
+    monkeypatch.setattr(vfp, "layout_identity", lambda view, fam: layout)
+    return fixture_view(H3_HEADER)
+
+
+def test_a_merged_turbo_file_is_its_own_variant(monkeypatch):
+    """molbal's merged Turbo files share FL2VA's identity tensors, so the
+    layout row names them, with their own sampling defaults."""
+    files = load_json(H3_IDENTITY_MOLBAL_TURBO)["files"]
+    row = files["minimax_h3_fl2v_turbo_4step_v1.0_768p_Q4_0.gguf"]
+    view = _named(monkeypatch, row["variant_hash"], row["layout_hash"])
+    got = vfp.identify(view)
+    assert (got.variant, got.layout) == (hf.TURBO4, "qkv")
+    lay = hf.FAMILY.variant_row(hf.TURBO4)
+    assert (lay.base, lay.merged) == ("fl2va", "lightx2v's Turbo 4-step "
+                                      "v1.0 768p LoRA")
+    s = hf.FAMILY.sampling[hf.TURBO4]
+    assert (s.steps, s.shifts) == (4, {"video": 6.0, "audio": 3.0})
+    assert hf.FAMILY.sampling["fl2va"].shifts == {"video": 12.0,
+                                                  "audio": 3.0}
+    assert set(hf.FAMILY.sampling) == set(hf.FAMILY.variant_names())
+    assert vfp.identify(view, variant=hf.TURBO4).variant == hf.TURBO4
+    assert _refused(view, variant="fl2va") == (
+        "variant='fl2va' contradicts the weights, which match MiniMax-H3 "
+        "fl2va-turbo4")
+
+
+def test_a_given_variant_must_fit_the_weights(monkeypatch):
+    """With no layout row, the identity tensors name only the base, so
+    the base or a merge of it may be given; a name gmlx does not know is
+    refused with the known ones."""
+    base = load_json(H3_IDENTITY)["files"][
+        "minimax_h3_fl2va_pruned-Q4_K.gguf"]["variant_hash"]
+    view = _named(monkeypatch, base, None)
+    assert vfp.identify(view).variant == "fl2va"
+    assert vfp.identify(view, variant=hf.TURBO4).variant == hf.TURBO4
+    assert _refused(view, variant="turbo") == (
+        "variant 'turbo' is not a MiniMax-H3 variant; known: fl2va, "
+        "fl2va-turbo4")
+    unsloth = next(h for h, r in hf.LAYOUTS.items() if r.name == "fl2va")
+    view = _named(monkeypatch, base, unsloth)
+    assert _refused(view, variant=hf.TURBO4) == (
+        "variant='fl2va-turbo4' contradicts the weights, which match "
+        "MiniMax-H3 fl2va")
 
 @pytest.mark.parametrize("change,reason", [
     ({"drop": ("blocks.49.",)}, "blocks has 49 blocks, MiniMax-H3 has 50"),
@@ -234,5 +283,29 @@ def test_gmlx_video_takes_no_image_file():
     for name in (image_fixtures.Z_HEADER, image_fixtures.Q_HEADER):
         view = image_fixtures.fixture_view(name)
         assert vfp.video_family_of(view) is None
-        ifp.identify(view)
-        assert "unrecognized video GGUF" in _refused(view)
+        title = ifp.identify(view).family.title
+        assert _refused(view) == (f"this is a {title} image GGUF, run it "
+                                  "with gmlx image")
+
+
+def test_an_image_file_gmlx_image_refuses_is_named_as_it_names_it(
+        monkeypatch):
+    import image_fixtures
+
+    # FLUX.1, which the FLUX.2 klein row refuses by name.
+    flux1 = ifp.HeaderView(kv={}, tensors={
+        n: ifp.Tensor(sh, c) for n, sh, c in (
+            ("double_blocks.0.img_attn.proj.weight", (3072, 3072), "Q4_K"),
+            ("double_blocks.0.img_mod.lin.weight", (3072, 18432), "Q4_K"),
+            ("single_blocks.0.linear1.weight", (3072, 21504), "Q4_K"),
+            ("txt_in.weight", (4096, 3072), "Q4_K"),
+            ("img_in.weight", (64, 3072), "BF16"))})
+    # Krea 2 Raw, whose tensors match and whose weights gmlx image refuses.
+    monkeypatch.setattr(ifp, "weight_identity", lambda view, names: (
+        "284b54edd003f36239b1d30e62b64fba898dc0598d4434eb7985639fcaa6112c"))
+    raw = image_fixtures.fixture_view("krea2_raw_q4_k_m.header.json")
+    for view in (flux1, raw):
+        with pytest.raises(ifp.ImageModelError) as ei:
+            ifp.identify(view)
+        assert _refused(view) == ("this is an image GGUF gmlx does not "
+                                  f"load: {ei.value}")

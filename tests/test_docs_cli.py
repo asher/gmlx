@@ -159,6 +159,11 @@ def test_verb_flags_documented(verb, capture):
         flags = set()
         for action in HANDLERS:
             flags |= _long_options(capture(cmd_image, [action]))
+    elif verb == "video":
+        from gmlx.commands.video import HANDLERS, cmd_video
+        flags = set()
+        for action in HANDLERS:
+            flags |= _long_options(capture(cmd_video, [action]))
     elif verb == "comfyui":
         from gmlx.commands.comfyui import HANDLERS, cmd_comfyui
         flags = set()

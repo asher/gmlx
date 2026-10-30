@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import time
 from pathlib import Path
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "video"
@@ -12,6 +13,7 @@ H3_HEADER = "h3_fl2va_q4_k.header.json"
 H3_CONFIG = "h3_transformer_config.json"
 H3_IDENTITY = "h3_identity.json"
 H3_IDENTITY_MOLBAL = "h3_identity_molbal.json"
+H3_IDENTITY_MOLBAL_TURBO = "h3_identity_molbal_turbo.json"
 
 
 def load_json(name: str) -> dict:
@@ -67,3 +69,12 @@ def video_dits(root, family: str) -> list[str]:
     by fingerprint as the loader finds them. A file the video rules
     refuse is left out; any other failure of the scan raises."""
     return list(_video_dits(str(root), family))
+
+
+def wait_for(path: str, limit: float = 5.0) -> bool:
+    """Whether ``path`` exists within ``limit`` seconds: a stand-in
+    ffmpeg opens its output a few ms after it starts."""
+    t = time.monotonic()
+    while not os.path.exists(path) and time.monotonic() - t < limit:
+        time.sleep(0.01)
+    return os.path.exists(path)

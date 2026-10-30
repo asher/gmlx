@@ -130,7 +130,8 @@ CACHE_DISK_ENV = {
 # leaves a model unpinned) - so we warn loudly instead. Structural breakage (missing
 # path, unknown profile reference, extends cycle) is what *raises*; see _validate.
 _TOP_KEYS = frozenset({"server", "profiles", "rules", "models", "aliases",
-                       "image_models", "discover", "talk", "assistant",
+                       "image_models", "video_models", "discover", "talk",
+                       "assistant",
                        "theme", "themes", "launch"})
 _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "media_urls",
                           "cors_origins", "model_dirs",
@@ -158,6 +159,12 @@ _SERVER_IMAGE_KEYS = frozenset({"url_ttl_s", "url_max_bytes", "max_queue",
                                 "embed_metadata", "tensor_cache_mb",
                                 "adapter_cache_mb", "steps_api",
                                 "steps_remote"})
+# A video model entry: the DiT and its companions, a sibling block as
+# image_models is.
+_VIDEO_MODEL_KEYS = frozenset({"path", "variant", "encoder", "encoder_mmproj",
+                               "vae", "audio_vae", "tiny_vae", "adapters",
+                               "defaults"})
+_VIDEO_DEFAULTS_KEYS = frozenset({"steps", "shift", "size", "seconds"})
 IMAGE_SAMPLERS = ("euler", "uni_pc_bh2")
 IMAGE_ENCODER_RELEASE = ("auto", "always", "never")
 _SYSTEMONE_KEYS = frozenset({"model", "canvas", "constrained", "max_questions",
@@ -644,6 +651,24 @@ class ImageModelCfg:
     upsample_prompt: str | None = None
 
 
+@dataclass
+class VideoModelCfg:
+    """One ``video_models:`` entry: a video DiT GGUF with its text
+    encoder, vision tower, video and audio VAEs and preview decoder.
+    ``adapters`` holds ``(path, strength)`` pairs applied to every clip,
+    and ``defaults`` the steps, shift, size and seconds it runs at."""
+    id: str
+    path: str
+    encoder: str
+    vae: str
+    audio_vae: str
+    encoder_mmproj: str | None = None
+    tiny_vae: str | None = None
+    adapters: tuple = ()
+    defaults: dict = field(default_factory=dict)
+    variant: str | None = None
+
+
 @dataclass(frozen=True)
 class ImageServerCfg:
     """``server.image``: the serve settings of the image routes."""
@@ -1074,6 +1099,8 @@ class ServerCfg:
     aliases: dict[str, str] = field(default_factory=dict)   # name -> id | id@profile
     # Image models: their own block, one id namespace with `models`.
     image_models: dict[str, ImageModelCfg] = field(default_factory=dict)
+    # Video models: their own block, in the same id namespace.
+    video_models: dict[str, VideoModelCfg] = field(default_factory=dict)
     image: ImageServerCfg = field(default_factory=ImageServerCfg)
     discover: list[DiscoverSpec] = field(default_factory=list)
     talk: TalkCfg = field(default_factory=TalkCfg)
@@ -1268,6 +1295,21 @@ class ResolvedImageModel:
                 self.encoder_model, self.encoder_mmproj, self.vae,
                 tuple(self.adapters), self.encoder_release, d.get("size"),
                 d.get("guidance"))
+
+
+@dataclass
+class ResolvedVideoModel:
+    """A ``video_models:`` entry with its files resolved."""
+    id: str
+    path: str
+    encoder: str
+    vae: str
+    audio_vae: str
+    encoder_mmproj: str | None
+    tiny_vae: str | None
+    adapters: tuple                 # ((abspath, strength), ...)
+    defaults: dict
+    variant: str | None = None
 
 
 # Path resolution
@@ -2116,6 +2158,24 @@ def resolve_image_model(image_id: str, cfg: ServerCfg) -> ResolvedImageModel:
         upsample_prompt=_prompt_path(m.upsample_prompt, dirs))
 
 
+def resolve_video_model(video_id: str, cfg) -> ResolvedVideoModel:
+    """The ``video_models:`` entry ``video_id`` with its files resolved
+    as a model ``path`` is. Raises :class:`KeyError` for an unknown id
+    and :class:`MissingModelFile` for a file that is not there."""
+    m = cfg.video_models[video_id]
+    dirs = cfg.model_dirs
+    return ResolvedVideoModel(
+        id=video_id, path=resolve_path(m.path, dirs),
+        encoder=resolve_path(m.encoder, dirs),
+        vae=resolve_path(m.vae, dirs),
+        audio_vae=resolve_path(m.audio_vae, dirs),
+        encoder_mmproj=resolve_path(m.encoder_mmproj, dirs),
+        tiny_vae=resolve_path(m.tiny_vae, dirs),
+        adapters=tuple((resolve_path(a, dirs), float(st))
+                       for a, st in m.adapters),
+        defaults=dict(m.defaults), variant=m.variant)
+
+
 def _prompt_path(p: str | None, dirs: list[str]) -> str | None:
     """An entry's ``upsample_prompt``: the file under ``model_dirs`` as a
     model path resolves, or the expanded path when there is none."""
@@ -2835,6 +2895,63 @@ def _parse_image_model(image_id: str, raw) -> ImageModelCfg:
         ttl_s=(0.0 if "ttl_s" in raw and raw["ttl_s"] is None
                else _coerce_num("ttl_s", raw.get("ttl_s"), float,
                                 where=where)))
+
+
+def _parse_video_defaults(where: str, raw) -> dict:
+    raw = _section_mapping(where, raw)
+    _warn_unknown_keys(where, raw, _VIDEO_DEFAULTS_KEYS, strict=True)
+    out: dict = {}
+    if raw.get("size") is not None:
+        out["size"] = _video_size(f"{where}.size", raw["size"])
+    for key in ("steps", "seconds", "shift"):
+        v = _coerce_num(key, raw.get(key), float, where=where)
+        if v is None:
+            continue
+        if not (v > 0 and math.isfinite(v)):
+            raise ConfigError(f"{where}.{key}: expected a positive number, "
+                              f"got {raw.get(key)!r}")
+        if key == "steps":
+            if not v.is_integer():
+                raise ConfigError(f"{where}.steps: expected a whole number, "
+                                  f"got {raw.get(key)!r}")
+            v = int(v)
+        out[key] = v
+    return out
+
+
+def _video_size(where: str, raw) -> str:
+    w, sep, h = str(raw).lower().partition("x")
+    if not (sep and w.isdigit() and h.isdigit() and int(w) > 0
+            and int(h) > 0 and int(w) % 32 == 0 and int(h) % 32 == 0):
+        raise ConfigError(f"{where}: expected WxH in multiples of 32, got "
+                          f"{raw!r}")
+    return f"{int(w)}x{int(h)}"
+
+
+def _parse_video_model(video_id: str, raw) -> VideoModelCfg:
+    where = f"video model {video_id!r}"
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"{where} must be a mapping with `path`, `encoder`, `vae` and "
+            f"`audio_vae` (got {type(raw).__name__}: {raw!r})")
+    _warn_unknown_keys(where, raw, _VIDEO_MODEL_KEYS, strict=True)
+    for key in ("path", "encoder", "vae", "audio_vae"):
+        if not isinstance(raw.get(key), str) or not raw[key]:
+            raise ConfigError(f"{where} needs `{key}` (keys present: "
+                              f"{sorted(raw)})")
+    for key in ("variant", "encoder_mmproj", "tiny_vae"):
+        if raw.get(key) is not None and not isinstance(raw[key], str):
+            raise ConfigError(f"{where}.{key}: expected a string, got "
+                              f"{raw[key]!r}")
+    return VideoModelCfg(
+        id=video_id, path=raw["path"], encoder=raw["encoder"],
+        vae=raw["vae"], audio_vae=raw["audio_vae"],
+        encoder_mmproj=raw.get("encoder_mmproj"),
+        tiny_vae=raw.get("tiny_vae"), variant=raw.get("variant"),
+        adapters=_parse_image_adapters(f"{where}.adapters",
+                                       raw.get("adapters")),
+        defaults=_parse_video_defaults(f"{where}.defaults",
+                                       raw.get("defaults")))
 
 
 def _parse_server_image(raw) -> ImageServerCfg:
@@ -3619,6 +3736,9 @@ def build_config(doc: dict) -> ServerCfg:
         image_models={str(iid): _parse_image_model(str(iid), r) for iid, r in
                       _section_mapping("image_models",
                                        doc.get("image_models")).items()},
+        video_models={str(v): _parse_video_model(str(v), r) for v, r in
+                      _section_mapping("video_models",
+                                       doc.get("video_models")).items()},
         image=_parse_server_image(srv.get("image")),
         discover=[_parse_discover(d) for d in
                   _section_list("discover", doc.get("discover"))],
@@ -3671,6 +3791,21 @@ def _validate_image_models(cfg: ServerCfg) -> None:
         raise ConfigError(
             f"server.defaults.image_model {name!r} is not a configured image "
             f"model; known: {sorted(cfg.image_models)}")
+
+
+def _validate_video_models(cfg) -> None:
+    """Video ids share one namespace with model ids, image ids, aliases
+    and served assistants."""
+    for vid in cfg.video_models:
+        if "@" in vid:
+            raise ConfigError(f"video model id {vid!r} must not contain '@'")
+        for what, names in (("a model id", cfg.models),
+                            ("an image model id", cfg.image_models),
+                            ("an alias name", cfg.aliases),
+                            ("a served assistant", cfg.assistants)):
+            if vid in names:
+                raise ConfigError(f"video model {vid!r} collides with "
+                                  f"{what}; rename one")
 
 
 def load_config(path) -> ServerCfg:
@@ -3770,6 +3905,7 @@ def _validate(cfg: ServerCfg) -> None:
             f"model; known: {sorted(cfg.models)}")
 
     _validate_image_models(cfg)
+    _validate_video_models(cfg)
 
     # The systemone fallback model, if named, must be a model id or an alias,
     # with an optional known profile, so the fallback can always resolve.

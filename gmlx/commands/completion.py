@@ -45,6 +45,7 @@ _VERB_DESC = {
     "train": "finetune a LoRA adapter on a GGUF base",
     "distill": "offline distillation: gen, filter, cache, align, train, eval, census",
     "image": "generate images from GGUF diffusion models",
+    "video": "generate clips with sound from GGUF diffusion models",
     "comfyui": "put the gmlx node pack into ComfyUI",
     "completion": "print a shell completion script",
 }
@@ -56,6 +57,7 @@ _FILE_POSITIONAL_VERBS = frozenset({"validate", "pull", "systemone"})
 _SERVICE_ACTIONS = ("install", "uninstall", "status")
 _DISTILL_ACTIONS = ("gen", "filter", "cache", "align", "train", "eval", "census")
 _IMAGE_ACTIONS = ("generate", "bench", "pack-vae")
+_VIDEO_ACTIONS = ("generate", "pull")
 _COMFYUI_ACTIONS = ("install", "uninstall", "status")
 
 
@@ -111,7 +113,7 @@ def _verb_options(verb: str) -> tuple[tuple[str, str, str], ...]:
     if verb == "service":
         verb = "serve"
     text = _capture_help(verb)
-    if verb.startswith(("distill ", "image ", "comfyui ")) and not text.strip():
+    if verb.startswith(("distill ", "image ", "video ", "comfyui ")) and not text.strip():
         return ()
     out: list[list[str]] = []
     current: list[int] = []                  # out indices whose help is still wrapping
@@ -274,6 +276,12 @@ def _model_candidates(words: list[str]) -> list[str]:
 def _image_model_candidates(words: list[str]) -> list[str]:
     """``id<TAB>dit file`` lines for every ``image_models`` entry in the
     resolved config."""
+    return _entry_candidates(words, "image")
+
+
+def _entry_candidates(words: list[str], kind: str) -> list[str]:
+    """``id<TAB>dit file`` lines for every ``image_models`` or
+    ``video_models`` entry in the resolved config."""
     path = _config_path_from(words)
     if not path or not os.path.exists(os.path.expanduser(path)):
         return []
@@ -284,7 +292,7 @@ def _image_model_candidates(words: list[str]) -> list[str]:
     except Exception:  # noqa: BLE001 - a malformed config just yields no model names
         return []
     out: list[str] = []
-    for mid, m in cfg.image_models.items():
+    for mid, m in getattr(cfg, f"{kind}_models").items():
         base = os.path.basename(getattr(m, "path", "") or "")
         out.append(f"{mid}\t{base}" if base else mid)
     return out
@@ -517,6 +525,8 @@ def _positional_candidates(verb: str, after_verb: list[str]) -> list[str]:
         return [] if filled else [f"{a}\tdistill action" for a in _DISTILL_ACTIONS]
     if verb == "image":
         return [] if filled else [f"{a}\timage action" for a in _IMAGE_ACTIONS]
+    if verb == "video":
+        return [] if filled else [f"{a}\tvideo action" for a in _VIDEO_ACTIONS]
     if verb == "comfyui":
         return [] if filled else [f"{a}\tcomfyui action" for a in _COMFYUI_ACTIONS]
     if verb in ("image generate", "image bench"):
@@ -525,6 +535,15 @@ def _positional_candidates(verb: str, after_verb: list[str]) -> list[str]:
     if verb.startswith("image "):
         # pack-vae takes a safetensors VAE
         return [] if filled else ["::files"]
+    if verb == "video generate":
+        # a video_models id of the config, or a DiT GGUF
+        return [] if filled else ["::files",
+                                  *_entry_candidates(after_verb, "video")]
+    if verb == "video pull":
+        from gmlx.video import catalog as video_catalog
+
+        return [] if filled else [f"{n}\t{r.title}" for n, r in
+                                  video_catalog.RECIPES.items()]
     return []
 
 
@@ -556,6 +575,9 @@ def _complete(argv: list[str]) -> list[str]:
         pre = [verb, *pre[2:]]
     elif verb == "image" and len(pre) > 1 and pre[1] in _IMAGE_ACTIONS:
         verb = f"image {pre[1]}"
+        pre = [verb, *pre[2:]]
+    elif verb == "video" and len(pre) > 1 and pre[1] in _VIDEO_ACTIONS:
+        verb = f"video {pre[1]}"
         pre = [verb, *pre[2:]]
     elif verb == "comfyui" and len(pre) > 1 and pre[1] in _COMFYUI_ACTIONS:
         verb = f"comfyui {pre[1]}"

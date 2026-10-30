@@ -676,7 +676,8 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
         stats = {}
         discovered += discovery.scan_dirs(
             specs, dirs,
-            known_ids=set(cfg.models) | set(cfg.image_models),
+            known_ids=(set(cfg.models) | set(cfg.image_models)
+                       | set(cfg.video_models)),
             known_paths=known_paths | _image_paths(cfg),
             known_models=known_models, progress=True, stats=stats,
             images=images, encoder_ids=_encoder_ids(known_models))
@@ -692,6 +693,7 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
                       if str(mc.path).startswith("hf:")}
         discovered += discovery.scan_hf_cache(
             known_ids=(set(cfg.models) | set(cfg.image_models)
+                       | set(cfg.video_models)
                        | {m.id for m in discovered}),
             known_refs=known_refs, progress=True)
 
@@ -1492,6 +1494,7 @@ def _alias_plan(cfg, path, pairs, ids) -> tuple:
             return {}, name, None
         taken = next((what for what, keys in (
             ("a model", cfg.models), ("an image model", cfg.image_models),
+            ("a video model", cfg.video_models),
             ("a served assistant", cfg.assistants)) if name in keys), None)
         if taken:
             print(f"{name} is already {taken} in {path}; run it as "
@@ -1588,7 +1591,9 @@ def register_downloads(paths: list, config_path=None, *,
         # has nothing to say about it.
         asr = {os.path.abspath(v["asr"]) for v in pairs.values() if v.get("asr")}
         found = discovery.scan_dirs(specs, cfg.model_dirs,
-                                    known_ids=set(cfg.models) | set(cfg.image_models),
+                                    known_ids=(set(cfg.models)
+                                               | set(cfg.image_models)
+                                               | set(cfg.video_models)),
                                     known_paths=known_paths | _image_paths(cfg) | asr,
                                     known_models=known_models, stats=stats,
                                     images=images,
@@ -2833,11 +2838,16 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
             # An absent key inherits the server's; a written null never unloads.
             m.pop("ttl_s")
         images[iid] = m
+    videos = {}
+    for vid, m in d.pop("video_models").items():
+        m.pop("id")
+        m["adapters"] = [{"path": p, "strength": st} for p, st in m["adapters"]]
+        videos[vid] = m
     talk = d.pop("talk")
     talk.pop("assistant", None)     # attached shared object, not a talk: key
     doc = {"server": server, "profiles": profiles, "rules": d.pop("rules"),
            "models": models, "aliases": d.pop("aliases"),
-           "image_models": images,
+           "image_models": images, "video_models": videos,
            "discover": d.pop("discover"), "talk": talk,
            "launch": d.pop("launch"),
            "assistant": d.pop("assistant"),

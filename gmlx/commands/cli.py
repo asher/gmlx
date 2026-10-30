@@ -2978,6 +2978,7 @@ _VERBS = (
     "train",
     "distill",
     "image",
+    "video",
     "comfyui",
     "completion",
 )
@@ -3019,6 +3020,7 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
         "  train        finetune a LoRA adapter on a GGUF base (writes a GGUF adapter)\n"
         "  distill      offline distillation: cache a teacher, align, train, eval\n"
         "  image        generate images from GGUF diffusion models\n"
+        "  video        generate clips with sound from GGUF diffusion models\n"
         "  comfyui      put the gmlx node pack into ComfyUI (install, uninstall, status)\n"
         "  completion   print a shell completion script (zsh, bash, fish)\n\n"
         f"first run:  {prog} init   (scaffold a config) ->  {prog} pull   "
@@ -3128,11 +3130,11 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             break
         if tok in ("-h", "--help") or (
                 tok == "--help-all" and verb in ("run", "chat")):
-            # distill's and image's actions own their parsers: `distill cache
+            # distill's, image's and video's actions own their parsers: `distill cache
             # --help` keeps the action so the action's help prints, not the
             # umbrella's. `launch pi --help` keeps the client, which the help
             # describes.
-            keep = ([rest[0]] if verb in ("distill", "image", "launch", "comfyui") and rest
+            keep = ([rest[0]] if verb in ("distill", "image", "video", "launch", "comfyui") and rest
                     and not rest[0].startswith("-") else [])
             rest = [*keep, tok]
             break
@@ -3182,6 +3184,10 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             from .image import cmd_image
 
             return cmd_image(rest, prog=f"{prog} image")
+        if verb == "video":
+            from .video import cmd_video
+
+            return cmd_video(rest, prog=f"{prog} video")
         if verb == "comfyui":
             from .comfyui import cmd_comfyui
 

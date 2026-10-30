@@ -3453,3 +3453,95 @@ def test_discovery_never_takes_an_image_id(monkeypatch):
     doc["discover"] = [{"dir": "/m"}]
     discovery.discovered_models(build_config(doc))
     assert {"chat", "zit"} <= seen["ids"]
+
+
+# --- video_models: a sibling block with its own keys, in the same namespace ---
+
+def _video_doc(**entry):
+    base = {"path": "/m/h3.gguf", "encoder": "/m/qwen3vl-32b.gguf",
+            "vae": "/m/video_vae.safetensors",
+            "audio_vae": "/m/audio_vae.safetensors"}
+    base.update(entry)
+    return {"models": {"chat": {"path": "/m/chat.gguf"}},
+            "video_models": {"h3": base}}
+
+
+def test_video_models_parse_and_normalize():
+    cfg = build_config(_video_doc(
+        adapters=["/turbo.safetensors", {"path": "/b.safetensors",
+                                         "strength": 0.5}],
+        defaults={"steps": "8", "shift": 6, "size": "1344X768",
+                  "seconds": 10}))
+    m = cfg.video_models["h3"]
+    assert (m.path, m.encoder, m.vae, m.audio_vae) == (
+        "/m/h3.gguf", "/m/qwen3vl-32b.gguf", "/m/video_vae.safetensors",
+        "/m/audio_vae.safetensors")
+    assert (m.encoder_mmproj, m.tiny_vae, m.variant) == (None, None, None)
+    assert m.adapters == (("/turbo.safetensors", 1.0), ("/b.safetensors", 0.5))
+    assert m.defaults == {"steps": 8, "shift": 6.0, "size": "1344x768",
+                          "seconds": 10.0}
+    assert "h3" not in cfg.models and "h3" not in cfg.image_models
+
+
+@pytest.mark.parametrize("entry,match", [
+    ({"pin": True}, "pin"),
+    ({"defaults": {"guidance": 4}}, "guidance"),
+    ({"defaults": {"size": "1000x768"}}, "multiples of 32"),
+    ({"defaults": {"steps": 0}}, "positive"),
+    ({"defaults": {"steps": 4.9}}, "whole number"),
+    ({"defaults": {"shift": float("nan")}}, "positive"),
+    ({"variant": 1}, "variant: expected a string"),
+    ({"adapters": [{"path": "/a", "strength": "x"}]}, "strength"),
+])
+def test_video_model_keys_and_defaults_are_strict(entry, match):
+    with pytest.raises(ConfigError, match=match):
+        build_config(_video_doc(**entry))
+
+
+def test_a_video_model_needs_its_four_files():
+    doc = _video_doc()
+    del doc["video_models"]["h3"]["audio_vae"]
+    with pytest.raises(ConfigError, match="needs `audio_vae`"):
+        build_config(doc)
+
+
+@pytest.mark.parametrize("where", ["models", "image_models", "aliases"])
+def test_video_id_collision_is_a_config_error(where):
+    doc = _video_doc()
+    if where == "aliases":
+        doc["aliases"] = {"h3": "chat"}
+    elif where == "models":
+        doc["models"]["h3"] = {"path": "/m/other.gguf"}
+    else:
+        doc["image_models"] = {"h3": {
+            "path": "/m/z.gguf", "encoder": "/m/e.gguf", "vae": "/m/v.gguf"}}
+    with pytest.raises(ConfigError, match="collides"):
+        build_config(doc)
+
+
+def test_a_video_model_resolves_under_model_dirs(tmp_path):
+    for name in ("h3.gguf", "enc.gguf", "v.safetensors", "a.safetensors",
+                 "lora.safetensors"):
+        (tmp_path / name).write_bytes(b"x")
+    doc = {"server": {"model_dirs": [str(tmp_path)]},
+           "video_models": {"h3": {
+               "path": "h3.gguf", "encoder": "enc.gguf",
+               "vae": "v.safetensors", "audio_vae": "a.safetensors",
+               "adapters": [{"path": "lora.safetensors", "strength": 0.8}],
+               "variant": "fl2va"}}}
+    rm = cfgmod.resolve_video_model("h3", build_config(doc))
+    assert rm.path == str(tmp_path / "h3.gguf")
+    assert rm.audio_vae == str(tmp_path / "a.safetensors")
+    assert rm.adapters == ((str(tmp_path / "lora.safetensors"), 0.8),)
+    assert (rm.tiny_vae, rm.variant) == (None, "fl2va")
+
+
+def test_video_models_round_trip_through_print_config():
+    import yaml
+
+    from gmlx.serve import server as srv
+    cfg = build_config(_video_doc(
+        adapters=[{"path": "/a.safetensors", "strength": 0.5}],
+        defaults={"steps": 8}, tiny_vae="/m/taeh3.safetensors"))
+    again = build_config(yaml.safe_load(srv._dump_cfg_yaml(cfg)))
+    assert again.video_models == cfg.video_models

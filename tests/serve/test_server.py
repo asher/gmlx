@@ -3457,6 +3457,10 @@ def test_register_downloads_repoints_its_own_alias_only(monkeypatch, tmp_path,
     ("models:\n  ternary-bonsai-2-27b:\n    path: old.gguf\n", "a model"),
     ("models:\n  old:\n    path: old.gguf\nimage_models:\n  ternary-bonsai-2-27b:\n"
      "    path: z.gguf\n    encoder: old\n    vae: v.gguf\n", "an image model"),
+    ("models:\n  old:\n    path: old.gguf\nvideo_models:\n"
+     "  ternary-bonsai-2-27b:\n    path: h3.gguf\n    encoder: e.gguf\n"
+     "    vae: v.safetensors\n    audio_vae: a.safetensors\n",
+     "a video model"),
     ("server:\n  assistants:\n    ternary-bonsai-2-27b:\n      model: old\n"
      "models:\n  old:\n    path: old.gguf\n", "a served assistant"),
 ])

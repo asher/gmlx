@@ -92,6 +92,7 @@ Every block is optional. A server needs models, from `models` or from a
 | [`models`](#models) | The models gmlx can run, each with its GGUF file and settings |
 | [`aliases`](#aliases) | Extra model names, such as `coder` for `qwen3.8-27b-ud-q6@coding` |
 | [`image_models`](#image-models) | Image generation models, each with its DiT, text encoder and VAE files |
+| [`video_models`](#video-models) | Video generation models, each with its DiT, text encoder, VAEs and LoRA |
 | [`profiles`](#profiles) | Named sets of sampling, loading and prompt settings that any model can use |
 | [`rules`](#rules) | A profile for every model whose id matches a pattern |
 | [`discover`](#model-discovery) | Folders scanned at each start for GGUFs that have no entry |
@@ -285,6 +286,38 @@ entries.
 A shared encoder must be a model without an `adapter`. A quantized chat
 GGUF used as the encoder gives slightly different images than a full
 precision encoder file.
+
+## Video models
+
+Each entry under `video_models` is one video generation model for
+[`gmlx video generate`](cli.md#gmlx-video): a DiT GGUF with its text
+encoder, its video and audio VAEs and its LoRA. `gmlx video pull` writes
+one for each recipe it pulls. Video ids share one set of names with model
+ids, image ids, aliases and served assistants.
+
+```yaml
+# doctest: build
+video_models:
+  h3:
+    path: unsloth__MiniMax-H3-GGUF/minimax_h3_fl2va_pruned-Q4_K.gguf
+    encoder: unsloth__Qwen3-VL-32B-Instruct-GGUF/Qwen3-VL-32B-Instruct-Q4_K_M.gguf
+    vae: Comfy-Org__MiniMax-H3/vae/minimax_h3_video_vae_fp16.safetensors
+    audio_vae: Comfy-Org__MiniMax-H3/vae/minimax_h3_audio_vae_fp32.safetensors
+    adapters: [lightx2v__Minimax-h3-Turbo/minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors]
+    defaults: {steps: 8, shift: 6, size: 1344x768, seconds: 5}
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| <a id="video_modelspath"></a>`path` | required | The DiT GGUF, found as a model [`path`](#modelspath) is |
+| <a id="video_modelsencoder"></a>`encoder` | required | The text encoder GGUF |
+| <a id="video_modelsencoder_mmproj"></a>`encoder_mmproj` | none | The encoder's vision tower GGUF |
+| <a id="video_modelsvae"></a>`vae` | required | The video VAE safetensors file |
+| <a id="video_modelsaudio_vae"></a>`audio_vae` | required | The audio VAE safetensors file |
+| <a id="video_modelstiny_vae"></a>`tiny_vae` | none | The TAEH3 file that `--preview` decodes with |
+| <a id="video_modelsadapters"></a>`adapters` | none | LoRA files applied to every clip, each a path or `{path, strength}` with strength 1 by default |
+| <a id="video_modelsvariant"></a>`variant` | detected | The DiT's variant, such as `fl2va-turbo4` for a merged Turbo file gmlx does not know |
+| <a id="video_modelsdefaults"></a>`defaults` | none | Clip defaults: `steps`, `shift`, `size` as `WxH` and `seconds`. Unset, steps and shift come from the variant, and a clip is 1344x768 for 5 s |
 
 ## Profiles
 

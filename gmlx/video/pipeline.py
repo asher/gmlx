@@ -40,10 +40,12 @@ class VideoPipeline(ImagePipeline):
         return cast("VideoFamily", self.family)
 
 
-def load(path: str, *, act_dtype: mx.Dtype | None = None,
-         log=print) -> VideoPipeline:
-    """A pipeline over the video DiT GGUF at ``path``."""
-    model, vid = video_loader.load_dit(path, act_dtype=act_dtype, log=log)
+def load(path: str, *, variant: str | None = None,
+         act_dtype: mx.Dtype | None = None, log=print) -> VideoPipeline:
+    """A pipeline over the video DiT GGUF at ``path``, as ``variant`` when
+    given and the weights allow it."""
+    model, vid = video_loader.load_dit(path, variant=variant,
+                                       act_dtype=act_dtype, log=log)
     return VideoPipeline(dit=model, family=cast("Family", vid.family),
                          variant=vid.variant, log=log, identified=vid)
 

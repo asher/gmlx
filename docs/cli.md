@@ -1309,6 +1309,91 @@ and a `--source-config` that is not one is refused.
 | `--force` | Off | Replace `--out` when it exists. |
 | `--json` | Off | Print a JSON record of the packed file. |
 
+## gmlx video
+
+`gmlx video` makes short clips with sound from a text prompt, on
+MiniMax-H3. Its actions follow.
+
+- `pull` fetches a recipe's files, or finds them in your model folders,
+  and adds the model to your config.
+- `generate` writes an MP4 from a prompt.
+
+```sh
+gmlx video pull h3
+gmlx video generate h3 --prompt "a red bicycle rolls down a wet street, rain on the roofs" --output bicycle.mp4
+gmlx video generate h3 --prompt "waves on a pebble beach" --seconds 10 --size 768x768 --seed 1
+```
+
+Every action exits 0 on success, 1 on a refusal or a runtime failure, 2 on
+a usage error and 130 on an interrupt.
+
+### video pull
+
+`pull` lists each file of the recipe, where it found it or where it will
+download it, the total to download and the licenses, then asks before it
+downloads. A file already in a `model_dirs` folder is used where it is.
+An interrupted download resumes on the next pull. The recipe is then
+added under `video_models:` in the config, with the recipe's name as its
+id, or `h3-2` when another entry has that id.
+
+| Recipe | Steps | Meaning |
+|--------|-------|---------|
+| `h3` | 8 | MiniMax-H3 with lightx2v's Turbo 8-step LoRA. The default. |
+| `h3-fast` | 4 | The Turbo 4-step LoRA: faster, with softer motion. |
+| `h3-base` | 20 | The base model at video shift 12, with no LoRA. |
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `RECIPE`, positional | Required | Pull this recipe. |
+| `--config FILE` | The first default location | Add the entry to this config, and search its `model_dirs`. |
+| `--dir DIR` | The first `model_dirs` folder | Download into this folder. |
+| `--yes`, `-y` | Off | Download without asking. |
+| `--force` | Off | Download even when the free disk space looks too small. |
+| `--dry-run` | Off | Print what the pull finds and would download, and stop. |
+| `--json` | Off | Print the plan as JSON on stdout. |
+
+### video generate
+
+`generate` encodes the prompt, samples the clip with the DiT, decodes the
+sound and the frames, and writes the MP4 through ffmpeg. Only one model is
+in memory at a time.
+
+The MP4 needs ffmpeg with the `h264_videotoolbox` encoder, which
+Homebrew's build has:
+
+```sh
+brew install ffmpeg
+```
+
+Without ffmpeg, pass `--frames-dir` to get PNG frames and `audio.wav`.
+
+A clip runs at 24 fps and has 17 k + 5 frames, so `--seconds` rounds up:
+5 seconds is 124 frames, 10 is 243 and 15 is 362. The step count and the
+shift come from the entry, else from the DiT's variant.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `MODEL`, positional | Required | Generate with the `video_models` entry of this id, or this DiT GGUF. |
+| `--config FILE` | The first default location | Read the `video_models` entry that `MODEL` names from this config. |
+| `--variant NAME` | The entry's `variant`, else from the weights | Run the DiT as this variant, such as `fl2va-turbo4` for a merged Turbo file gmlx does not know. |
+| `--prompt TEXT` | Required, or `--prompt-file` | Generate from this prompt. |
+| `--prompt-file FILE` | None | Read the prompt from this file. |
+| `--seconds S` | The entry's, else `5` | Make a clip this long, rounded up to whole frames as above. |
+| `--frames N` | None | Make a clip of exactly N frames, 17 k + 5 from 5 to 362. |
+| `--size WxH` | The entry's, else `1344x768` | Set the width and height, multiples of 32. |
+| `--steps N` | The entry's, else the variant's | Sample for N steps. |
+| `--seed N` | Random, and printed | Seed the noise. |
+| `--shift S` | The entry's, else the variant's | Set the video flow shift. |
+| `--adapter PATH[:STRENGTH]` | The entry's | Apply this LoRA safetensors file after the entry's. Repeat the flag to stack adapters. |
+| `--output PATH` | `./gmlx-<time>-<seed>.mp4`, or none with `--frames-dir` alone | Write the MP4 here. |
+| `--frames-dir DIR` | None | Write PNG frames and `audio.wav` to this folder. Alone, it writes no MP4 and needs no ffmpeg. |
+| `--preview [TAEH3]` | Off | Decode with TAEH3, the fast preview decoder: the entry's file, or this one. |
+| `--save-latent PATH` | None | Also write the final latents to this `.npz` file. |
+| `--encoder GGUF` | The entry's | Encode the prompt with this text encoder. |
+| `--vae PATH` | The entry's | Decode the frames with this video VAE. |
+| `--audio-vae PATH` | The entry's | Decode the sound with this audio VAE. |
+| `--json` | Off | Print a JSON record of the run on stdout. |
+
 ## gmlx comfyui
 
 `gmlx comfyui` puts the gmlx node pack into ComfyUI, as

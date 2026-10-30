@@ -24,5 +24,11 @@
     "revision": "b45874371c61c49bf04096602f5527aac71b360b",
     "file": "the identity tensors and the layout rows of every MiniMax-H3 DiT .gguf, by HTTP range reads",
     "note": "each file size and sha256 is from the hub listing at the revision"
+  },
+  "h3_identity_molbal_turbo.json": {
+    "repo": "molbal/MiniMax-H3-Turbo-GGUF",
+    "revision": "0d2775ed26fc79ed6acc92a3511a8e85190e4ee4",
+    "file": "the identity tensors and the layout rows of every MiniMax-H3 DiT .gguf, by HTTP range reads",
+    "note": "each file size and sha256 is from the hub listing at the revision"
   }
 }

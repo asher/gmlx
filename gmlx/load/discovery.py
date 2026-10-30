@@ -741,7 +741,9 @@ def _iter_gguf_files(root: str, recursive: bool):
         return
     found = []
     if recursive:
-        for dirpath, _dirs, files in os.walk(root):
+        for dirpath, dirs, files in os.walk(root):
+            # A video pull's staging folders hold unchecked downloads.
+            dirs[:] = [d for d in dirs if not d.startswith(".gmlx-pull-")]
             found += [os.path.join(dirpath, f) for f in files]
     else:
         try:
@@ -802,10 +804,11 @@ def discovered_models(cfg, *, progress=False, images=None) -> list[ModelCfg]:
         if rp:
             known_paths.add(rp)
     try:
-        # An image model id is taken too: a discovered GGUF must not take
-        # a name that the image routes answer to.
+        # Image and video model ids are taken too: a discovered GGUF must
+        # not take a name that the image or video entries answer to.
         return scan_dirs(cfg.discover, cfg.model_dirs,
-                         known_ids=set(cfg.models) | set(cfg.image_models),
+                         known_ids=(set(cfg.models) | set(cfg.image_models)
+                                    | set(cfg.video_models)),
                          known_paths=known_paths, progress=progress,
                          images=images, encoder_ids=encoder_ids,
                          tower_ids=tower_ids, named_drafters=named)

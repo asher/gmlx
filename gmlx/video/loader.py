@@ -21,8 +21,10 @@ if TYPE_CHECKING:
     from gmlx.image.registry import Family
 
 
-def identify_dit(path: str, *, family: str | None = None) -> VideoIdentified:
-    """The family, variant and qkv layout of a DiT GGUF from its header."""
+def identify_dit(path: str, *, family: str | None = None,
+                 variant: str | None = None) -> VideoIdentified:
+    """The family, variant and qkv layout of a DiT GGUF from its header,
+    as ``variant`` when given and the weights allow it."""
     from gmlx.image.loader import _scan_shard
     from gmlx.load.preflight import find_split_shards
 
@@ -31,21 +33,21 @@ def identify_dit(path: str, *, family: str | None = None) -> VideoIdentified:
                                 for s in find_split_shards(path)])
     except ValueError as e:
         raise VideoModelError(str(e)) from e
-    return identify(view, family=family)
+    return identify(view, family=family, variant=variant)
 
 
 def load_dit(path: str, *, family: str | None = None,
-             act_dtype: mx.Dtype | None = None, log=print
-             ) -> tuple[nn.Module, VideoIdentified]:
+             variant: str | None = None, act_dtype: mx.Dtype | None = None,
+             log=print) -> tuple[nn.Module, VideoIdentified]:
     """Load a video DiT GGUF. Raises ``VideoModelError`` for a file gmlx
     video refuses."""
     from gmlx.image.loader import load_dit as load_image_dit
 
-    vid = identify_dit(path, family=family)
+    vid = identify_dit(path, family=family, variant=variant)
     fam = vid.family
     if vid.variant == "unknown":
         log(f"[video] warning: this {fam.title} GGUF matches no known "
-            f"{fam.title} weights; it runs as {fam.variant_names()[0]}")
+            f"{fam.title} weights; it runs as {fam.unknown_variant}")
     if vid.layout == "unverified":
         log(f"[video] warning: this {fam.title} GGUF is not a known file, so "
             f"its qkv row order is unverified; it runs as [q; k; v]")

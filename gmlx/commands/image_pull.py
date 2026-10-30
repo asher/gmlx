@@ -604,7 +604,8 @@ def _unnamed(cfg, path: str) -> str:
 
 
 def _entry_id(r: catalog.Recipe, plan: Plan, cfg) -> str:
-    taken = set(cfg.models) | set(cfg.aliases) | set(cfg.assistants)
+    taken = (set(cfg.models) | set(cfg.aliases) | set(cfg.assistants)
+             | set(cfg.video_models))
     if r.name not in taken and r.name not in cfg.image_models:
         return r.name
     from gmlx.load.discovery import _slug

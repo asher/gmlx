@@ -2157,6 +2157,11 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
               "its companions", file=sys.stderr)
         return 2
     elif kinds[0][1] == _UNKNOWN and not kinds[0][0].endswith(".gguf"):
+        from gmlx.video import catalog as video_catalog
+        if video_catalog.recipe(kinds[0][0]) is not None:
+            print(f"error: {kinds[0][0]} is a video recipe; run `gmlx video "
+                  f"pull {kinds[0][0]}`", file=sys.stderr)
+            return 2
         print(_unknown_ref_error(kinds[0][0]), file=sys.stderr)
         return 2
     else:
@@ -2268,6 +2273,7 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
                 ref_paths.add(os.path.realpath(rp))
+    ref_paths |= _video_refs(cfg)
 
     to_delete: list[str] = []
     if not keep_files:
@@ -2575,6 +2581,19 @@ def _image_refs(cfg, disc, skip: str, images=()) -> set:
             continue
         for p in (im.path, im.vae, im.encoder, im.encoder_mmproj,
                   *(a for a, _st in im.adapters)):
+            rp = _try_resolve(p, cfg.model_dirs)
+            if rp:
+                refs.add(os.path.realpath(rp))
+    return refs | _video_refs(cfg)
+
+
+def _video_refs(cfg) -> set:
+    """Real paths the ``video_models:`` entries load, through any
+    symlink."""
+    refs: set = set()
+    for v in cfg.video_models.values():
+        for p in (v.path, v.encoder, v.encoder_mmproj, v.vae, v.audio_vae,
+                  v.tiny_vae, *(a for a, _st in v.adapters)):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
                 refs.add(os.path.realpath(rp))

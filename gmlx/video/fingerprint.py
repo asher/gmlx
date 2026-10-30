@@ -90,8 +90,57 @@ def _arch_list(fam: VideoFamily) -> str:
                               for a in fam.arch_strings))
 
 
-def identify(view: HeaderView, *, family: str | None = None) -> VideoIdentified:
-    """Classify an unstripped header view. Raises ``VideoModelError``."""
+def _variant(fam: VideoFamily, row: VideoVariantRow | None,
+             lrow: VideoVariantRow | None, given: str | None) -> str:
+    """The variant of a file whose identity row is ``row`` and layout row
+    ``lrow``. The layout row names a file outright; the identity tensors
+    name only a base, which a merged variant of it shares, so a variant
+    given for a file with no layout row may be that base or a merge of
+    it."""
+    named = lrow.name if lrow else row.name if row else "unknown"
+    if given is None:
+        return named
+    names = fam.variant_names()
+    if given not in names:
+        raise VideoModelError(f"variant {given!r} is not a {fam.title} "
+                              f"variant; known: {', '.join(names)}")
+    if lrow is not None and given != lrow.name:
+        raise VideoModelError(f"variant={given!r} contradicts the weights, "
+                              f"which match {fam.title} {lrow.name}")
+    if lrow is None and row is not None and given != row.name:
+        g = fam.variant_row(given)
+        if g is None or g.base != row.name:
+            raise VideoModelError(f"variant={given!r} contradicts the "
+                                  f"weights, which match {fam.title} "
+                                  f"{row.name}")
+    return given
+
+
+def _refuse_image(view: HeaderView) -> None:
+    """Refuse an image DiT by name, as gmlx image refuses a video one."""
+    from gmlx.image.fingerprint import identify as image_identify
+    from gmlx.image.registry import families as image_families
+
+    for fam in image_families():
+        try:
+            v = strip_prefix(view, fam.strip_prefixes)
+        except ImageModelError:
+            continue
+        if fam.fingerprint(v) is None:
+            continue
+        try:
+            got = image_identify(view)
+        except ImageModelError as e:
+            raise VideoModelError(
+                f"this is an image GGUF gmlx does not load: {e}") from None
+        raise VideoModelError(f"this is a {got.family.title} image GGUF, "
+                              "run it with gmlx image")
+
+
+def identify(view: HeaderView, *, family: str | None = None,
+             variant: str | None = None) -> VideoIdentified:
+    """Classify an unstripped header view, as ``variant`` when given and
+    the weights allow it. Raises ``VideoModelError``."""
     arch = view.arch
     for fam in (get_family(family),) if family else families():
         try:
@@ -116,12 +165,13 @@ def identify(view: HeaderView, *, family: str | None = None) -> VideoIdentified:
         return VideoIdentified(
             family=fam, config=fam.synth_config(v), prefix=v.prefix,
             layout=lrow.layout if lrow else "unverified",
-            variant=row.name if row else "unknown", identity_hash=ident,
+            variant=_variant(fam, row, lrow, variant), identity_hash=ident,
             layout_hash=lhash, view=v)
     if family:
         raise VideoModelError(
             f"not a {get_family(family).title} file. "
             f"{describe_unknown(view, 'video')}")
+    _refuse_image(view)
     if _text_arch(arch):
         raise VideoModelError(
             f"arch {arch!r} is a text model, use gmlx.load_model")

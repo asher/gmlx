@@ -25,17 +25,22 @@ from .layout import Timeline
 @dataclass(frozen=True)
 class VideoVariantRow:
     """A known weight identity: the variant, where its hash came from, and
-    the order of the fused qkv rows in its files (``layout``)."""
+    the order of the fused qkv rows in its files (``layout``). A variant
+    with a LoRA merged into another's weights names that variant
+    (``base``), whose identity tensors it keeps, and the LoRA
+    (``merged``)."""
     name: str
     repo: str
     revision: str
     files: tuple
     layout: str = "qkv"
+    base: str = ""
+    merged: str = ""
 
 
 @dataclass(frozen=True)
 class VideoSampling:
-    """A recipe's sampling defaults, with their source. ``steps`` counts
+    """A variant's sampling defaults, with their source. ``steps`` counts
     DiT forwards. ``shifts`` maps each stream to its static flow shift."""
     steps: int
     shifts: dict
@@ -62,7 +67,7 @@ class VideoFamily:
     layouts: dict = field(default_factory=dict)
     layout_tensor: str = ""          # the fused qkv tensor the hash reads
     layout_rows: int = 0             # rows hashed at each of q, k and v
-    sampling: dict = field(default_factory=dict)   # recipe -> VideoSampling
+    sampling: dict = field(default_factory=dict)   # variant -> VideoSampling
     unknown_variant: str | None = None
     reshaped: tuple = ()
     # The shared mechanisms' values: the clock of the packed sequence,
@@ -81,10 +86,27 @@ class VideoFamily:
     lora_refusal: Callable | None = None
 
     def variant_names(self) -> tuple[str, ...]:
-        return tuple(sorted({v.name for v in self.variants.values()}))
+        return tuple(sorted({v.name for v in (*self.variants.values(),
+                                              *self.layouts.values())}))
+
+    def variant_row(self, name: str) -> VideoVariantRow | None:
+        return next((v for v in (*self.variants.values(),
+                                 *self.layouts.values()) if v.name == name),
+                    None)
 
     def variant_needed(self, variant: str) -> str | None:
         return None
+
+    def sampling_row(self, variant: str) -> VideoSampling | None:
+        """The defaults a variant samples with: its own, else its base's,
+        else the unknown variant's."""
+        row = self.sampling.get(variant)
+        v = self.variant_row(variant)
+        if row is None and v is not None and v.base:
+            row = self.sampling.get(v.base)
+        if row is None and self.unknown_variant is not None:
+            row = self.sampling.get(self.unknown_variant)
+        return row
 
 
 @functools.lru_cache(maxsize=1)

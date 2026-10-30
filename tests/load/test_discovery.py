@@ -2052,3 +2052,25 @@ def test_header_meta_keeps_the_declared_base_ids(tmp_path, monkeypatch):
     disc._HEADER_MEMO.clear()
     disc._HEADER_DISK = None                    # read back from the file
     assert disc.header_meta(path)["declared"] == ["minicpm-v-4.7-214m"]
+
+
+def test_a_scan_skips_pull_stages_and_takes_video_ids(tmp_path, monkeypatch):
+    from gmlx.config import load_config
+
+    stage = tmp_path / "unsloth__X" / ".gmlx-pull-0123456789abcdef"
+    stage.mkdir(parents=True)
+    (stage / "x.gguf").write_bytes(b"x")
+    (tmp_path / "y.gguf").write_bytes(b"x")
+    (tmp_path / ".cache").mkdir()
+    (tmp_path / ".cache" / "z.gguf").write_bytes(b"x")
+    assert list(disc._iter_gguf_files(str(tmp_path), True)) == [
+        str(tmp_path / ".cache" / "z.gguf"), str(tmp_path / "y.gguf")]
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(f"discover:\n  - {{dir: {tmp_path}}}\nvideo_models:\n"
+                   "  h3:\n    path: h3.gguf\n    encoder: e.gguf\n"
+                   "    vae: v.safetensors\n    audio_vae: a.safetensors\n")
+    seen = {}
+    monkeypatch.setattr(disc, "scan_dirs",
+                        lambda *a, **kw: seen.update(kw) or [])
+    disc.discovered_models(load_config(str(cfg)))
+    assert "h3" in seen["known_ids"]

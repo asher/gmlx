@@ -79,3 +79,19 @@ def test_the_reshape_refusal_names_the_command():
     key = image_loader._ORIG_SHAPE_KEY + "blocks.0.mlp.fc1.weight"
     with pytest.raises(ifp.ImageModelError, match="gmlx video loads DiT"):
         image_loader._refuse_reshaped([key], "video")
+
+
+def test_the_variant_reaches_the_weights_check(monkeypatch):
+    from gmlx.video import pipeline
+
+    seen = []
+
+    def identify(path, **kw):
+        seen.append(kw.get("variant"))
+        return vfp.identify(fixture_view(H3_HEADER), **kw)
+
+    monkeypatch.setattr(video_loader, "identify_dit", identify)
+    monkeypatch.setattr(image_loader, "load_dit",
+                        lambda path, **kw: ("model", None))
+    pipe = pipeline.load("h3.gguf", variant="fl2va-turbo4", log=lambda *_: 0)
+    assert seen == ["fl2va-turbo4"] and pipe.variant == "fl2va-turbo4"

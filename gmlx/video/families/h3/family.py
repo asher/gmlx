@@ -19,7 +19,7 @@ from gmlx.image.fingerprint import HeaderView, Match, Refusal
 from gmlx.image.registry import ConstantsRow
 from gmlx.video.anchors import AnchorRule
 from gmlx.video.layout import Timeline
-from gmlx.video.registry import VideoFamily, VideoVariantRow
+from gmlx.video.registry import VideoFamily, VideoSampling, VideoVariantRow
 
 TITLE = "MiniMax-H3"
 
@@ -108,6 +108,8 @@ AUDIO_LATENT_FPS = 40
 VAE_SCALE = 16
 CANVAS_MULTIPLE = 32
 VIDEO_CHANNELS, AUDIO_CHANNELS = _C, _CA
+# Clip lengths: 5 frames up to 15 s (362 frames).
+MIN_FRAMES, MAX_FRAMES = 5, 362
 
 
 def align_frames(n: int) -> int:
@@ -198,6 +200,31 @@ LAYOUTS = {
     "e18dc8780ba2d834d30bd594178bc18d628db107d1513d921b83dae081523901":
         _rung("minimax_h3_fl2va_pruned_fp8_Q8_0.gguf", repo=_MOLBAL[0],
               revision=_MOLBAL[1]),
+}
+# molbal's files with lightx2v's Turbo 4-step v1.0 768p LoRA merged in.
+# They keep the FL2VA identity tensors, so only the qkv bytes tell them
+# apart; their q, k and v rows match unsloth's Q4_K rows at the same places,
+# and their qkv minus molbal's base Q8_0 holds that LoRA's delta.
+TURBO4 = "fl2va-turbo4"
+_MOLBAL_TURBO = ("molbal/MiniMax-H3-Turbo-GGUF",
+                 "0d2775ed26fc79ed6acc92a3511a8e85190e4ee4")
+_TURBO4_MERGED = "lightx2v's Turbo 4-step v1.0 768p LoRA"
+for _hash, _file in (
+        ("42fa5234f0b9973ad0ae8f52ab254fba61d8f5ae2e931cbb0d22595a407e1e47",
+         "minimax_h3_fl2v_turbo_4step_v1.0_768p_Q4_0.gguf"),
+        ("f390cb4d174178f6c5d59bfeeb0471a632f0da35ecff7ccd94ed73680ddeef48",
+         "minimax_h3_fl2v_turbo_4step_v1.0_768p_Q8_0.gguf")):
+    LAYOUTS[_hash] = VideoVariantRow(TURBO4, *_MOLBAL_TURBO, (_file,),
+                                     base="fl2va", merged=_TURBO4_MERGED)
+# Each variant's sampling defaults. FL2VA takes MiniMaxAI's scheduler
+# shifts and 20 forwards, as ComfyUI's blueprint runs (the card names no
+# count); the merged Turbo file runs as its card says, 4 forwards at
+# video shift 6.
+SAMPLING = {
+    "fl2va": VideoSampling(20, dict(SHIFTS), "MiniMaxAI/MiniMax-H3",
+                           "42ed227ee7df40d41602854ae760620d6eb651fe"),
+    TURBO4: VideoSampling(4, {"video": TURBO_768_SHIFT,
+                              "audio": SHIFTS["audio"]}, *_MOLBAL_TURBO),
 }
 REFUSED = {
     "247d976f868cf75afaa2aacee59150489afbc7006da79dec9adfb15d81b580bb": (
@@ -393,6 +420,8 @@ FAMILY = VideoFamily(
     layouts=LAYOUTS,
     layout_tensor=LAYOUT_TENSOR,
     layout_rows=LAYOUT_ROWS,
+    sampling=SAMPLING,
+    unknown_variant="fl2va",
     timeline=TIMELINE,
     shifts=SHIFTS,
     anchor_rules=ANCHOR_RULES,
