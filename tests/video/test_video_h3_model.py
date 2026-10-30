@@ -180,11 +180,14 @@ def test_chunked_attention_matches_one_call(tiny):
                                    atol=1e-5)
 
 
-def test_a_run_steps_each_stream_on_its_own_schedule(tiny, monkeypatch):
+@pytest.mark.parametrize("given", [False, True])
+def test_a_run_steps_each_stream_on_its_own_schedule(tiny, monkeypatch,
+                                                     given):
     """Three forwards with a different velocity each: each stream moves by
     its own sigma drops, so another table or shift lands elsewhere, and
     each forward's plan, which the model reads in place of the times
-    passed beside it, puts each head at its stream's time."""
+    passed beside it, puts each head at its stream's time. Tables passed
+    in, such as an oracle's, replace the shifts' tables."""
     vel = {"video": (1.0, 3.0, 7.0), "audio": (2.0, 5.0, 11.0)}
     seen = []
 
@@ -198,9 +201,11 @@ def test_a_run_steps_each_stream_on_its_own_schedule(tiny, monkeypatch):
     monkeypatch.setattr(hm.H3Transformer, "__call__", fake)
     vs, aus = hf.latent_shapes(5, 64, 64)
     lay = layout.pack(hf.TIMELINE, 8, *vs[2:], aus[3])
+    shifts = {"video": 6.0, "audio": 2.0} if given else hf.SHIFTS
+    sig = {k: schedule.sigmas(3, shifts[k]) for k in vel}
     got = api.sample(tiny, mx.zeros(vs), mx.zeros(aus),
-                     mx.zeros((1, 8, 64)), lay, steps=3, shifts=hf.SHIFTS)
-    sig = {k: schedule.sigmas(3, hf.SHIFTS[k]) for k in vel}
+                     mx.zeros((1, 8, 64)), lay, steps=3, shifts=hf.SHIFTS,
+                     sigmas=sig if given else None)
     for x, k in zip(got, ("video", "audio")):
         s = sig[k]
         want = sum(float(s[i + 1] - s[i]) * vel[k][i] for i in range(3))

@@ -337,6 +337,18 @@ ADDED_TOKENS = (("<d>", 151669), ("</d>", 151670), ("<|cutoff|>", 151671),
 EMPTY_IDS = (151643,)
 
 
+def _lora_map(config: dict):
+    from .lora_map import lora_map
+
+    return lora_map(config)
+
+
+def _lora_refusal(header: dict, config: dict):
+    from .lora_map import refusal
+
+    return refusal(header, config)
+
+
 def _encoder():
     from gmlx.image.text_encoder import EncoderSpec, IdentityTensor
 
@@ -385,4 +397,7 @@ FAMILY = VideoFamily(
     shifts=SHIFTS,
     anchor_rules=ANCHOR_RULES,
     encoder=_encoder,
+    latent_shapes=latent_shapes,
+    lora_map=_lora_map,
+    lora_refusal=_lora_refusal,
 )

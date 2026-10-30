@@ -73,6 +73,12 @@ class VideoFamily:
     # () -> EncoderSpec of the text encoder, built on call so this module
     # loads no mlx.
     encoder: Callable | None = None
+    # (frames, width, height) -> the video and audio latent shapes.
+    latent_shapes: Callable | None = None
+    # config -> LoraKeyMap, and (safetensors header, config) -> (why,
+    # kind) for a LoRA file gmlx refuses, or None.
+    lora_map: Callable | None = None
+    lora_refusal: Callable | None = None
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in self.variants.values()}))

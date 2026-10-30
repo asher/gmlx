@@ -40,15 +40,23 @@ def _eval_point(arrays) -> None:
 
 
 def sample(model, video: mx.array, audio: mx.array, text: mx.array, layout,
-           *, steps: int, shifts: dict, cond_video=(), cond_audio=(),
+           *, steps: int, shifts: dict, sigmas: dict | None = None,
+           cond_video=(), cond_audio=(),
            on_step: Callable | None = None,
            pacer: Callable | None = _eval_point) -> tuple:
     """Video and audio latents after ``steps`` forwards from the noise
-    ``video`` and ``audio``. ``on_step(i, n)`` runs after each forward.
-    ``pacer`` runs at each pause point inside a forward; the default
-    evaluates there, which bounds the graph to one block."""
-    sig = schedule.stream_sigmas(steps, shifts)
+    ``video`` and ``audio``. ``sigmas`` {"video", "audio"}, float32 tables
+    of ``steps`` + 1 entries each, replaces the schedule of ``shifts``.
+    ``on_step(i, n)`` runs after each forward. ``pacer`` runs at each
+    pause point inside a forward; the default evaluates there, which
+    bounds the graph to one block."""
+    sig = (schedule.stream_sigmas(steps, shifts) if sigmas is None
+           else sigmas)
     sv, sa = sig["video"], sig["audio"]
+    if sigmas is not None and not len(sv) == len(sa) == steps + 1:
+        raise ValueError(f"{steps} steps take sigma tables of {steps + 1} "
+                         f"entries, not {len(sv)} video and {len(sa)} "
+                         f"audio")
     xv, xa = video.astype(mx.float32), audio.astype(mx.float32)
     n = len(sv) - 1
     with pacing.paced(pacer):
