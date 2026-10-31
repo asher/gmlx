@@ -359,6 +359,55 @@ def test_without_ffmpeg_the_mux_is_not_timed(bench, monkeypatch, capsys):
     assert "the mux is not timed" in err and "mux not timed" in err
 
 
+def test_each_mux_step_runs_under_the_mux_clock(bench, monkeypatch, capsys):
+    from gmlx.commands import video_bench as vb
+    from gmlx.video import io
+
+    made, running, seen = [], [], []
+
+    class Clock(vb._Clock):
+        def __init__(self):
+            super().__init__()
+            made.append(self)
+
+        def __enter__(self):
+            running.append(self)
+            return super().__enter__()
+
+        def __exit__(self, *exc):
+            running.remove(self)
+            return super().__exit__(*exc)
+
+    class Mux(io.Mux):
+        def __init__(self, output, **kw):
+            seen.append(("init", list(running)))
+            super().__init__(output, **kw)
+
+        def write(self, frames):
+            seen.append(("write", list(running)))
+            return super().write(frames)
+
+        def close(self):
+            seen.append(("close", list(running)))
+            return super().close()
+
+    write_wav = io.write_wav
+
+    def wav(path, waveform, rate):
+        seen.append(("wav", list(running)))
+        return write_wav(path, waveform, rate)
+
+    monkeypatch.setattr(vb, "_Clock", Clock)
+    monkeypatch.setattr(io, "Mux", Mux)
+    monkeypatch.setattr(io, "write_wav", wav)
+    assert bench("--shapes", "64x64x5", "--steps", "1", "--json") == 0
+    (r,) = _records(capsys.readouterr().out)
+    dec, mux = made
+    assert [k for k, _ in seen] == ["wav", "init", "write", "write", "close"]
+    assert all(c == [mux] for _, c in seen), seen
+    assert r["mux_s"] == mux.s and r["decode_s"] == dec.s
+
+
 def test_a_split_dit_counts_every_shard(bench, tmp_path, capsys):
     first = tmp_path / "h3-00001-of-00002.gguf"
     first.write_bytes(b"x" * 3)
