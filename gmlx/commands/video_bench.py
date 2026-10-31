@@ -327,6 +327,7 @@ def _run(a, fam, shapes, shifts, adapters, ffmpeg, load_s, runs, done,
     import mlx.core as mx
     import numpy as np
 
+    from gmlx.eval_guard import guard
     from gmlx.image.memfit import bounded_cache
     from gmlx.video import encoder as video_encoder
     from gmlx.video import io, layout, pipeline
@@ -432,7 +433,8 @@ def _run(a, fam, shapes, shifts, adapters, ffmpeg, load_s, runs, done,
                         with dec:
                             chunk = next(chunks, None)
                             if chunk is not None:
-                                mx.eval(chunk)
+                                guard.eval(chunk, site="video-bench-decode",
+                                           owner="scratch")
                         if chunk is None:
                             break
                         if mux is not None:
