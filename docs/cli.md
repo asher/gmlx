@@ -1403,19 +1403,26 @@ shift come from the entry, else from the DiT's variant.
 ### video bench
 
 `bench` runs what `generate` runs at a few clip shapes, loading each model
-once. It prints the step time of each shape and the peak memory of each
-phase beside what gmlx planned for it.
+once. It prints the step time and the seconds of each phase for each
+shape, and the peak memory of each phase beside what gmlx planned for it.
 
 ```sh
 gmlx video bench h3
 gmlx video bench h3 --shapes 768x768x124 --steps 2 --json-out bench.jsonl
 ```
 
-Each shape gets a JSON record of schema `gmlx.video.bench/1`. It holds
-the time of every step, with the first apart from the median and mean of
-the rest, and the peak memory of the encode, the denoise, the audio
-decode and the video decode, each with its model's load. `predicted`
-holds the memory plan of each phase beside them.
+Each shape gets a JSON record of schema `gmlx.video.bench/1`. It holds:
+
+- the time of every step, with the first apart from the median and mean
+  of the rest
+- `summary.phases_s`, the seconds of the encode, the denoise, the audio
+  decode, the video decode and the mux into an MP4
+- the peak memory of the encode, the denoise, the audio decode and the
+  video decode, each with its model's load, and `predicted`, the memory
+  plan of each phase beside them
+
+The bench writes each MP4 to a temporary folder and deletes it. Without
+ffmpeg it skips the mux and records its time as `null`.
 
 A shape that does not fit in memory stops the bench before anything
 loads. Drop it from `--shapes`, or set `GMLX_OVERCOMMIT=1` to measure it
@@ -1434,7 +1441,7 @@ shapes that ran still get their records, each with an `error` field.
 | `--shift S` | The entry's, else the variant's | Set the video flow shift. |
 | `--adapter PATH[:STRENGTH]` | The entry's | Apply this LoRA after the entry's. Repeat the flag to stack adapters. |
 | `--prompt TEXT` | A fixed bench prompt | Encode this prompt. |
-| `--no-decode` | Off | Skip the sound and frame decodes, so no VAE loads. |
+| `--no-decode` | Off | Skip the sound and frame decodes and the mux, so no VAE loads. |
 | `--encoder GGUF` | The entry's | Encode the prompt with this text encoder. |
 | `--vae PATH` | The entry's | Decode the frames with this video VAE. |
 | `--audio-vae PATH` | The entry's | Decode the sound with this audio VAE. |

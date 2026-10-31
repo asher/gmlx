@@ -2,10 +2,10 @@
 
 The bench runs what ``generate`` runs, one model at a time: it encodes
 the prompt and releases the encoder, loads the DiT once and samples each
-shape, then decodes each shape's sound and frames. It times every step,
-takes MLX's peak memory over each phase of each shape beside what the
-memory plan predicts, and writes records of schema
-``gmlx.video.bench/1``.
+shape, then decodes each shape's sound and frames and muxes them into a
+temporary MP4. It times every step and phase, takes MLX's peak memory
+over each phase of each shape beside what the memory plan predicts, and
+writes records of schema ``gmlx.video.bench/1``.
 """
 from __future__ import annotations
 
@@ -13,9 +13,10 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 
-from .video import (_adapter, _from_config, _positive, _release,
+from .video import (_adapter, _family, _from_config, _positive, _release,
                     _schedules, _seed, _shift, _size, _Usage)
 
 BENCH_SCHEMA = "gmlx.video.bench/1"
@@ -74,8 +75,8 @@ def _parser(prog: str) -> argparse.ArgumentParser:
                    help="Encode this prompt (default: a fixed bench "
                         "prompt).")
     p.add_argument("--no-decode", action="store_true",
-                   help="Skip the sound and frame decodes, so no VAE "
-                        "loads.")
+                   help="Skip the sound and frame decodes and the mux, so "
+                        "no VAE loads.")
     p.add_argument("--encoder", default=None, metavar="GGUF",
                    help="The text encoder GGUF.")
     p.add_argument("--vae", default=None, metavar="PATH",
@@ -121,6 +122,21 @@ class _Peak:
         import mlx.core as mx
 
         self.bytes = int(mx.get_peak_memory())
+        return False
+
+
+class _Clock:
+    """The seconds spent inside its ``with`` blocks, summed."""
+
+    def __init__(self):
+        self.s = 0.0
+
+    def __enter__(self):
+        self._t = time.perf_counter()
+        return self
+
+    def __exit__(self, *exc):
+        self.s += time.perf_counter() - self._t
         return False
 
 
@@ -187,7 +203,7 @@ def _bench(a) -> int:
 
     from gmlx import __version__
     from gmlx.video import encoder as video_encoder
-    from gmlx.video import memfit, pipeline
+    from gmlx.video import io, memfit, pipeline
     from gmlx.video.loader import identify_dit
     from gmlx.video.registry import chip_refusal
 
@@ -205,6 +221,13 @@ def _bench(a) -> int:
     def log(*x):
         print(*x, file=sys.stderr, flush=True)
 
+    ffmpeg = None
+    if not a.no_decode:
+        try:
+            ffmpeg = io.probe()
+        except io.FfmpegError:
+            log("[bench] no ffmpeg with the h264_videotoolbox and aac "
+                "encoders: the mux is not timed")
     vid = identify_dit(os.path.expanduser(a.model), variant=a.variant)
     fam = vid.family
     why = chip_refusal(fam)
@@ -261,6 +284,12 @@ def _bench(a) -> int:
                "summary": {"s_per_step": {"first": r["step_s"][0],
                                           "median": _median(rest),
                                           "mean": sum(rest) / len(rest)},
+                           "phases_s": {
+                               "encode": done["encode_s"],
+                               "denoise": sum(r["step_s"]),
+                               **{k: r[f"{k}_s"] for k in
+                                  ("audio", "decode", "mux")
+                                  if f"{k}_s" in r}},
                            "peak_bytes": max(r["peak"].values()),
                            "predicted_peak_bytes": max(predicted.values())}}
         if error is not None:
@@ -268,7 +297,8 @@ def _bench(a) -> int:
         return rec
 
     try:
-        _run(a, fam, shapes, shifts, adapters, load_s, runs, done, log)
+        _run(a, fam, shapes, shifts, adapters, ffmpeg, load_s, runs, done,
+             log)
     except BaseException as e:
         # The shapes that ran keep their records, with what they measured.
         if runs:
@@ -282,18 +312,25 @@ def _bench(a) -> int:
             "against the plan, GiB: " + ", ".join(
                 f"{k} {v / GiB:.2f} of {r['predicted'][k] / GiB:.2f}"
                 for k, v in r["peak"].items()))
+        log(f"[bench] {s['width']}x{s['height']}x{s['frames']}: seconds "
+            "per phase: " + ", ".join(
+                f"{k} {v:.1f}" if v is not None else f"{k} not timed"
+                for k, v in r["summary"]["phases_s"].items()))
     _emit(a, records)
     return 0
 
 
-def _run(a, fam, shapes, shifts, adapters, load_s, runs, done, log) -> None:
+def _run(a, fam, shapes, shifts, adapters, ffmpeg, load_s, runs, done,
+         log) -> None:
     """Run every phase of every shape, appending to ``runs`` as each
     shape's denoise ends."""
     import mlx.core as mx
+    import numpy as np
 
     from gmlx.image.memfit import bounded_cache
     from gmlx.video import encoder as video_encoder
-    from gmlx.video import layout, pipeline
+    from gmlx.video import io, layout, pipeline
+    from gmlx.video.vae.h3_audio import SAMPLE_RATE
     from gmlx.video.vae.reader import load_vae
 
     with bounded_cache():
@@ -355,12 +392,18 @@ def _run(a, fam, shapes, shifts, adapters, load_s, runs, done, log) -> None:
             avae = load_vae(os.path.expanduser(a.audio_vae),
                             family="h3_audio", dtype=mx.float32)
         load_s["audio_vae"] = time.perf_counter() - t0
+        hf = _family()
+        waves = []
         for r in runs:
             with _Peak() as peak:
                 t1 = time.perf_counter()
-                mx.eval(avae.decode(r["latents"][1]))
+                wave = avae.decode(r["latents"][1])
+                mx.eval(wave)
                 r["audio_s"] = time.perf_counter() - t1
             r["peak"]["audio"] = max(peak.bytes, vae_peak.bytes)
+            waves.append(io.fit_audio(np.array(wave[0]), frames=r["shape"][2],
+                                      fps=hf.FPS, rate=SAMPLE_RATE))
+            del wave
         del avae
         _release()
         t0 = time.perf_counter()
@@ -368,13 +411,43 @@ def _run(a, fam, shapes, shifts, adapters, load_s, runs, done, log) -> None:
             vae = load_vae(os.path.expanduser(a.vae), family="h3",
                            dtype=mx.float16)
         load_s["vae"] = time.perf_counter() - t0
-        for r in runs:
-            with _Peak() as peak:
-                t1 = time.perf_counter()
-                for chunk in vae.decode_frames(r["latents"][0]):
-                    mx.eval(chunk)
-                    del chunk
-                r["decode_s"] = time.perf_counter() - t1
+        for r, wave in zip(runs, waves):
+            # The frames stream into ffmpeg as generate streams them, so
+            # the mux time is what the writes and ffmpeg's finish add.
+            dec, mux_clock = _Clock(), _Clock()
+            with _Peak() as peak, tempfile.TemporaryDirectory(
+                    prefix=".gmlx-video-bench-") as tmp:
+                mux = None
+                if ffmpeg is not None:
+                    with mux_clock:
+                        wav = io.write_wav(os.path.join(tmp, "audio.wav"),
+                                           wave, SAMPLE_RATE)
+                        w, h, _ = r["shape"]
+                        mux = io.Mux(os.path.join(tmp, "clip.mp4"), width=w,
+                                     height=h, fps=hf.FPS, wav=wav,
+                                     ffmpeg=ffmpeg)
+                try:
+                    chunks = iter(vae.decode_frames(r["latents"][0]))
+                    while True:
+                        with dec:
+                            chunk = next(chunks, None)
+                            if chunk is not None:
+                                mx.eval(chunk)
+                        if chunk is None:
+                            break
+                        if mux is not None:
+                            with mux_clock:
+                                mux.write(np.array(chunk[0]))
+                        del chunk
+                    if mux is not None:
+                        with mux_clock:
+                            mux.close()
+                except BaseException:
+                    if mux is not None:
+                        mux.abort()
+                    raise
+            r["decode_s"] = dec.s
+            r["mux_s"] = mux_clock.s if mux is not None else None
             r["peak"]["decode"] = max(peak.bytes, vae_peak.bytes)
         del vae
         _release()

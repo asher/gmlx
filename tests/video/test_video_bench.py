@@ -104,10 +104,13 @@ class _VAE:
 
 @pytest.fixture
 def bench(monkeypatch, tmp_path):
-    """``gmlx video bench`` on stub files, recording each load and run."""
+    """``gmlx video bench`` on stub files, recording each load and run,
+    with an ffmpeg that writes the raw frames it reads as the clip."""
+    import stat
+
     import mlx.core as mx
 
-    from gmlx.video import encoder, loader, pipeline
+    from gmlx.video import encoder, io, loader, pipeline
     from gmlx.video.vae import reader
 
     # A failed run's exception keeps its stubs in a cycle, and MLX would
@@ -168,11 +171,33 @@ def bench(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "generate", generate)
     monkeypatch.setattr(reader, "load_vae", load_vae)
 
+    ff = tmp_path / "ffmpeg"
+    ff.write_text('#!/bin/sh\nfor last; do :; done\ncat > "$last"\n')
+    ff.chmod(ff.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setattr(io, "probe", lambda *a: str(ff))
+    # Each clip's bytes and the length of each WAV it was muxed with.
+    clips, waves = [], []
+    write_wav = io.write_wav
+
+    def spy_wav(path, waveform, rate):
+        waves.append(waveform.shape)
+        return write_wav(path, waveform, rate)
+
+    class Mux(io.Mux):
+        def close(self):
+            out = super().close()
+            clips.append(os.path.getsize(out))
+            return out
+
+    monkeypatch.setattr(io, "write_wav", spy_wav)
+    monkeypatch.setattr(io, "Mux", Mux)
+
     def go(*argv, model=None, flags=True):
         f = [x for k in ("--encoder", "--vae", "--audio-vae")
              for x in (k, files[k])] if flags else []
         return cmd.cmd_video(["bench", model or files["model"], *f, *argv])
     go.ev, go.cfg, go.files = ev, cfg, files
+    go.clips, go.waves = clips, waves
     return go
 
 
@@ -266,7 +291,12 @@ def test_a_step_peak_holds_the_dit_not_the_encoder(bench, capsys):
 
 def test_no_decode_reads_no_vae(bench, monkeypatch, tmp_path, capsys):
     from gmlx.serve import capacity
+    from gmlx.video import io
 
+    def never(*a):
+        raise AssertionError("probed ffmpeg")
+
+    monkeypatch.setattr(io, "probe", never)
     # Under the audio decode's plan, over the encode's and the denoise's.
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 1 << 30)
     monkeypatch.setenv("GMLX_OVERCOMMIT", "0")
@@ -276,8 +306,44 @@ def test_no_decode_reads_no_vae(bench, monkeypatch, tmp_path, capsys):
                  flags=False) == 0
     r = _records(capsys.readouterr().out)[0]
     assert set(r["peak"]) == set(r["predicted"]) == {"encode", "denoise"}
+    assert list(r["summary"]["phases_s"]) == ["encode", "denoise"]
     assert "vae" not in r["model"] and "audio_vae" not in r["model"]
     assert _kinds(bench.ev, "load_vae") == []
+
+
+def test_each_shape_times_its_phases_and_muxes_its_own_clip(bench, capsys):
+    assert bench("--shapes", "64x64x5,96x64x22", "--steps", "2",
+                 "--json") == 0
+    out, err = capsys.readouterr()
+    recs = _records(out)
+    for r in recs:
+        ph = r["summary"]["phases_s"]
+        assert list(ph) == ["encode", "denoise", "audio", "decode", "mux"]
+        assert ph["denoise"] == sum(r["step_s"])
+        assert (ph["encode"], ph["audio"], ph["decode"], ph["mux"]) == (
+            r["encode_s"], r["audio_s"], r["decode_s"], r["mux_s"])
+        assert r["mux_s"] > 0
+    # Every decoded frame of each shape, with audio of that shape's length.
+    assert bench.clips == [5 * 32 * 32 * 3] * 2
+    assert bench.waves == [(2, round(f * 32000 / 24)) for f in (5, 22)]
+    assert len(re.findall(r"seconds per phase: encode [\d.]+, denoise "
+                          r"[\d.]+, audio [\d.]+, decode [\d.]+, mux "
+                          r"[\d.]+", err)) == 2
+
+
+def test_without_ffmpeg_the_mux_is_not_timed(bench, monkeypatch, capsys):
+    from gmlx.video import io
+
+    def missing(*a):
+        raise io.FfmpegError("ffmpeg is not on PATH")
+
+    monkeypatch.setattr(io, "probe", missing)
+    assert bench("--shapes", "64x64x5", "--steps", "1", "--json") == 0
+    out, err = capsys.readouterr()
+    (r,) = _records(out)
+    assert r["mux_s"] is None and r["summary"]["phases_s"]["mux"] is None
+    assert r["decode_s"] > 0 and bench.clips == []
+    assert "the mux is not timed" in err and "mux not timed" in err
 
 
 def test_a_split_dit_counts_every_shard(bench, tmp_path, capsys):
@@ -477,6 +543,9 @@ def test_a_decode_that_fails_keeps_what_each_shape_measured(bench,
         memfit.PHASES)
     assert list(second["peak"]) == ["encode", "denoise", "audio"]
     assert "decode_s" in first and "decode_s" not in second
+    assert "mux_s" in first and "mux_s" not in second
+    # The failed shape's ffmpeg is stopped and its clip never finishes.
+    assert len(bench.clips) == 1
     assert first["error"] == second["error"] == "RuntimeError: decode"
 
 
