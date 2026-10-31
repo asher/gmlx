@@ -107,6 +107,7 @@ def bench(monkeypatch, tmp_path):
     """``gmlx video bench`` on stub files, recording each load and run,
     with an ffmpeg that writes the raw frames it reads as the clip."""
     import stat
+    import tempfile
 
     import mlx.core as mx
 
@@ -175,8 +176,12 @@ def bench(monkeypatch, tmp_path):
     ff.write_text('#!/bin/sh\nfor last; do :; done\ncat > "$last"\n')
     ff.chmod(ff.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setattr(io, "probe", lambda *a: str(ff))
-    # Each clip's bytes and the length of each WAV it was muxed with.
-    clips, waves = [], []
+    # A temporary root of the test's own, so a folder left behind shows.
+    tmp_root = tmp_path / "tmp"
+    tmp_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_root))
+    # Each Mux, each finished clip's bytes, and the length of each WAV.
+    muxes, clips, waves = [], [], []
     write_wav = io.write_wav
 
     def spy_wav(path, waveform, rate):
@@ -184,6 +189,10 @@ def bench(monkeypatch, tmp_path):
         return write_wav(path, waveform, rate)
 
     class Mux(io.Mux):
+        def __init__(self, output, **kw):
+            super().__init__(output, **kw)
+            muxes.append((self, kw))
+
         def close(self):
             out = super().close()
             clips.append(os.path.getsize(out))
@@ -197,7 +206,7 @@ def bench(monkeypatch, tmp_path):
              for x in (k, files[k])] if flags else []
         return cmd.cmd_video(["bench", model or files["model"], *f, *argv])
     go.ev, go.cfg, go.files = ev, cfg, files
-    go.clips, go.waves = clips, waves
+    go.muxes, go.clips, go.waves, go.tmp = muxes, clips, waves, tmp_root
     return go
 
 
@@ -312,7 +321,7 @@ def test_no_decode_reads_no_vae(bench, monkeypatch, tmp_path, capsys):
 
 
 def test_each_shape_times_its_phases_and_muxes_its_own_clip(bench, capsys):
-    assert bench("--shapes", "64x64x5,96x64x22", "--steps", "2",
+    assert bench("--shapes", "96x64x5,64x96x22", "--steps", "2",
                  "--json") == 0
     out, err = capsys.readouterr()
     recs = _records(out)
@@ -323,7 +332,11 @@ def test_each_shape_times_its_phases_and_muxes_its_own_clip(bench, capsys):
         assert (ph["encode"], ph["audio"], ph["decode"], ph["mux"]) == (
             r["encode_s"], r["audio_s"], r["decode_s"], r["mux_s"])
         assert r["mux_s"] > 0
-    # Every decoded frame of each shape, with audio of that shape's length.
+    # Every decoded frame of each shape, at its size and rate, with audio
+    # of that shape's length.
+    assert [(kw["width"], kw["height"], kw["fps"], os.path.basename(
+        kw["wav"])) for _, kw in bench.muxes] == [
+            (96, 64, 24, "audio.wav"), (64, 96, 24, "audio.wav")]
     assert bench.clips == [5 * 32 * 32 * 3] * 2
     assert bench.waves == [(2, round(f * 32000 / 24)) for f in (5, 22)]
     assert len(re.findall(r"seconds per phase: encode [\d.]+, denoise "
@@ -544,8 +557,11 @@ def test_a_decode_that_fails_keeps_what_each_shape_measured(bench,
     assert list(second["peak"]) == ["encode", "denoise", "audio"]
     assert "decode_s" in first and "decode_s" not in second
     assert "mux_s" in first and "mux_s" not in second
-    # The failed shape's ffmpeg is stopped and its clip never finishes.
-    assert len(bench.clips) == 1
+    # The failed shape's ffmpeg is stopped, its clip never finishes, and
+    # no temporary folder is left.
+    (done, _), (failed, _) = bench.muxes
+    assert done._proc.returncode == 0 and failed._proc.returncode < 0
+    assert len(bench.clips) == 1 and list(bench.tmp.iterdir()) == []
     assert first["error"] == second["error"] == "RuntimeError: decode"
 
 

@@ -1416,13 +1416,15 @@ Each shape gets a JSON record of schema `gmlx.video.bench/1`. It holds:
 - the time of every step, with the first apart from the median and mean
   of the rest
 - `summary.phases_s`, the seconds of the encode, the denoise, the audio
-  decode, the video decode and the mux into an MP4
+  decode, the video decode and the mux into an MP4, without the model
+  loads, which `load_s` holds
 - the peak memory of the encode, the denoise, the audio decode and the
   video decode, each with its model's load, and `predicted`, the memory
   plan of each phase beside them
 
 The bench writes each MP4 to a temporary folder and deletes it. Without
-ffmpeg it skips the mux and records its time as `null`.
+ffmpeg it skips the mux and records its time as `null`. With
+`--no-decode`, the record has no audio, decode or mux times.
 
 A shape that does not fit in memory stops the bench before anything
 loads. Drop it from `--shapes`, or set `GMLX_OVERCOMMIT=1` to measure it
