@@ -361,6 +361,7 @@ def _load(spec) -> ServedImage:
     try:
         rows = []
         if spec.adapters:
+            lora.fit_cache(pipe, [path for path, _ in spec.adapters])
             for path, strength in spec.adapters:
                 ad = lora.load_adapter(pipe, path)
                 for w in ad.warnings:

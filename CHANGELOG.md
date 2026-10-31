@@ -15,7 +15,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - An image LoRA takes less memory: loading one no longer holds its file
-  twice, and a lone LoRA in the model's own dtype no longer copies its weights.
+  twice, and fewer of its weights are copied while it runs.
+
+### Fixed
+
+- Image LoRAs that together outgrow the adapter cache now load, where they
+  failed with "patch table names adapter ..., which this pipeline does not
+  hold".
 
 ## [0.5.4] - 2026-10-29
 

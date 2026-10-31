@@ -116,7 +116,7 @@ def register_pair(pipe, down, up, alpha: float | None = None) -> str:
     """Keep a pair in the pipeline's cache and return its content hash,
     which names it in patch table entries. A pair already held is not
     stored again. An MLX array is kept as it is, since a copy would hold
-    the pair twice while the reader still holds it, so the caller does not
+    the pair twice while the reader still holds it. The caller must not
     change it afterwards."""
     down, up = (a if isinstance(a, mx.array) else mx.array(a)
                 for a in (down, up))
@@ -230,10 +230,11 @@ class _Block:
 
 
 class _Own:
-    """One pair over the whole weight in the activation dtype, on the
-    cached pair's own arrays: ``x @ A^T`` times the part's strength and
-    ``alpha / rank`` in float32, then through B. The table holds no copy
-    of the pair while the cache keeps it."""
+    """One pair over the whole weight, in the activation dtype or under
+    float32 activations, on the cached pair's own arrays: ``x @ A^T``
+    times the part's strength and ``alpha / rank`` in float32, then
+    through B. The table holds no copy of the pair while the cache keeps
+    it."""
 
     def __init__(self, part, kept):
         self.down, self.up = part.down, part.up
@@ -377,6 +378,13 @@ def _strengths(parts: list) -> mx.array:
          for p in parts]))
 
 
+def _runs_as_kept(pair, dtype) -> bool:
+    """Whether a factor in ``pair`` runs as the cache keeps it under
+    ``dtype`` activations: in that dtype, or under float32, where MLX
+    promotes it exactly."""
+    return pair == dtype or dtype == mx.float32
+
+
 def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base,
              pair=None, kept=lambda: False):
     if how == KERNEL:
@@ -416,8 +424,9 @@ def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base,
                 return _Split(full, dims[0], [fn for fn, _ in fns],
                               [w for _, w in fns])
     one = parts[0]
-    if (len(parts) == 1 and one.band is None and one.down.dtype == dtype
-            and one.up.dtype == dtype):
+    if (len(parts) == 1 and one.band is None
+            and _runs_as_kept(one.down.dtype, dtype)
+            and _runs_as_kept(one.up.dtype, dtype)):
         return _Own(one, kept)
     return _Block(*_transposed(plan.block_diagonal(path, parts, dims),
                                dtype))

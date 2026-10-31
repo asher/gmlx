@@ -257,9 +257,11 @@ def layout_rows(torch, dm, cap: Capture, layout, sigma_v, t_v, t_a):
 
 
 def run_case(torch, dm, video, audio, feats, sigma, name, inputs, files,
-             notes) -> None:
-    """One step in fp32 and bf16, written as fixture ``name``."""
-    fx = fixtures.FixtureWriter(name, check=3, family=FAMILY, script=SCRIPT)
+             notes, *, check: int = 3, script: str = SCRIPT) -> None:
+    """One step in fp32 and bf16, written as fixture ``name`` of check
+    ``check`` by ``script``."""
+    fx = fixtures.FixtureWriter(name, check=check, family=FAMILY,
+                                script=script)
     fx.inputs.update(inputs)
     for role, path in files.items():
         fx.add_file(role, path)
@@ -325,7 +327,7 @@ def run_case(torch, dm, video, audio, feats, sigma, name, inputs, files,
     fx.results["times"] = times
     fx.tolerances["rule"] = RULE
     path = fx.write()
-    print(f"[check3] {name}: velocity bf16 vs fp32 rel L2 video "
+    print(f"[check{check}] {name}: velocity bf16 vs fp32 rel L2 video "
           f"{gaps['video']['rel_l2']:.3e} audio {gaps['audio']['rel_l2']:.3e}"
           f", {times}, wrote {path}", flush=True)
 

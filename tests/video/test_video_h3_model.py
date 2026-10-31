@@ -8,7 +8,7 @@ import dataclasses
 import mlx.core as mx
 import numpy as np
 import pytest
-from mlx.utils import tree_map
+from mlx.utils import tree_flatten
 
 from gmlx.image import ops, pacing
 from gmlx.video import api, layout, schedule
@@ -23,13 +23,28 @@ TINY = {"num_attention_heads": 2, "attention_head_dim": 128,
         "adaln_grid": 1025, "adaln_basis": 8}
 
 
-@pytest.fixture(scope="module")
-def tiny():
+def tiny_weights() -> dict:
+    """Random weights for the tiny model, with norm weights near one and
+    each block's adaLN bias at unit scale, so every block moves the
+    velocity."""
     mx.random.seed(0)
     m = hm.H3Transformer(TINY)
-    m.update(tree_map(lambda p: 0.05 * mx.random.normal(p.shape),
-                      m.parameters()))
-    m.rope.inv_freq = mx.array(1 / 10000 ** (np.arange(16) / 16), mx.float32)
+    out = {k: 0.05 * mx.random.normal(v.shape)
+           for k, v in tree_flatten(m.parameters())}
+    for k in out:
+        if k.endswith(".weight") and "norm" in k.split(".")[-2]:
+            out[k] = 1 + out[k]
+        elif k.startswith("blocks.") and k.endswith("adaln_proj.linear.bias"):
+            out[k] = 20 * out[k]
+    out["rope.inv_freq"] = mx.array(1 / 10000 ** (np.arange(16) / 16),
+                                    mx.float32)
+    return out
+
+
+@pytest.fixture(scope="module")
+def tiny():
+    m = hm.H3Transformer(TINY)
+    m.load_weights(list(tiny_weights().items()))
     m.act_dtype = mx.float32
     return m
 
@@ -118,10 +133,13 @@ def test_the_segment_order_does_not_change_the_velocity(tiny):
     cond = {"cond_video": [mx.random.normal((4, 96))],
             "cond_audio": [mx.random.normal((4, 32))]}
     got = []
-    for order in (hf.SEGMENT_ORDER, ("audio", "video", "anchors", "text")):
-        tl = dataclasses.replace(hf.TIMELINE, order=order)
-        lay = layout.pack(tl, 8, *vs[2:], aus[3], (anchor,))
-        got.append(tiny(v, a, 0.25, 0.6, text, lay, **cond))
+    # The CPU stream keeps the float32 products exact.
+    with mx.stream(mx.cpu):
+        for order in (hf.SEGMENT_ORDER, ("audio", "video", "anchors",
+                                         "text")):
+            tl = dataclasses.replace(hf.TIMELINE, order=order)
+            lay = layout.pack(tl, 8, *vs[2:], aus[3], (anchor,))
+            got.append(tiny(v, a, 0.25, 0.6, text, lay, **cond))
     for x, y in zip(*got):
         np.testing.assert_allclose(np.array(x), np.array(y), rtol=1e-4,
                                    atol=1e-5)

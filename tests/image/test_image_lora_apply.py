@@ -586,6 +586,24 @@ def test_a_lora_over_the_adapter_cache_is_refused_at_load(tmp_path):
         lora.load_adapter(pipe, path)
 
 
+def test_a_cli_stack_over_the_adapter_cache_builds_its_table(tmp_path):
+    """The CLI's memory plan prices every --adapter file, so the cache
+    holds them all while the table builds."""
+    from gmlx.commands import image as image_cmd
+
+    paths = [write_adapter(tmp_path / f"{i}.safetensors", "kohya",
+                           tiny_z_adapter(i, 4.0, wide=True))
+             for i in (1, 2)]
+    pipe = _pipe()
+    pipe.adapters.max_bytes = int(0.6 * sum(map(os.path.getsize, paths)))
+    a = SimpleNamespace(adapter=[(p, 1.0) for p in paths])
+    rows = image_cmd._read_adapters(a, pipe, lambda *_: None)
+    tid, _ = image_cmd._adapter_table(pipe, rows, lambda *_: None)
+    keys = [k for _, _, patches in pipe.patch_tables[tid]["entries"]
+            for k, _ in patches]
+    assert keys and all(pipe.adapters.peek(k) is not None for k in keys)
+
+
 def test_the_cache_keeps_a_pair_without_a_copy():
     """A LoRA's pairs reach the cache as the reader made them, so a load
     never holds the file twice."""

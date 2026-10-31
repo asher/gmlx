@@ -717,6 +717,7 @@ def _read_adapters(a, pipe, log) -> list:
         return []
     from gmlx.image import lora
 
+    lora.fit_cache(pipe, [path for path, _ in a.adapter])
     rows = []
     for path, strength in a.adapter:
         ad = lora.load_adapter(pipe, path)

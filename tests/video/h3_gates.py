@@ -232,6 +232,58 @@ def missed(got: dict, tolerances: dict) -> dict:
     return out
 
 
+def over(v: float, name: str, tolerances: dict) -> float:
+    """How many times its gate a measure is. A cosine's distance from 1
+    counts against its floor's."""
+    if name.startswith("cosine "):
+        floor = tolerances[name.removeprefix("cosine ")]["cosine_min"]
+        return (1 - v) / (1 - floor)
+    return v / gate(tolerances[name])
+
+
+# The rows the oracle runs in float32 in both modes.
+FLOAT32_ROWS = {"video_patch_proj", "audio_patch_proj",
+                "final_layer.adaln_proj.linear"}
+
+
+def assert_manifest_rule(m: dict) -> None:
+    """Every row tolerance is twice the gap beside it, or the float32
+    floor for a row the oracle runs in float32 in both modes, each
+    teacher-forced row run free is twice its free gap, the velocity
+    floors follow their gaps, the fixture holds every row of its depth
+    with a gap for each, and gmlx's stream times are the oracle's."""
+    tols, res = m["tolerances"], m["results"]
+    for stream in ("video", "audio"):
+        gap = res["velocity_bf16_vs_fp32"][stream]
+        tol = tols[f"velocity_{stream}"]
+        assert tol["rel_l2"] == 2 * gap["rel_l2"]
+        assert math.isclose(tol["cosine_min"], 1 - 4 * (1 - gap["cosine"]),
+                            rel_tol=0, abs_tol=1e-12)
+    float32 = set()
+    for k, g in res["rows_bf16_vs_fp32"].items():
+        if g["rel_l2"] == 0:
+            assert tols[k] == {"rel_l2": 1e-5, "float32": True}, k
+            float32.add(k)
+            continue
+        assert tols[k]["rel_l2"] == 2 * g["rel_l2"], k
+        assert g["teacher_forced"] == tols[k]["teacher_forced"] == \
+            forced_row(k), k
+    assert float32 == FLOAT32_ROWS
+    assert all(keeps_fp32(k) for k in float32)
+    forced = {k for k in res["rows_bf16_vs_fp32"] if forced_row(k)}
+    assert set(res["free_bf16_vs_fp32"]) == forced
+    for k, g in res["free_bf16_vs_fp32"].items():
+        assert tols[f"free {k}"] == {"rel_l2": 2 * g["rel_l2"]}, k
+    assert gated_rows(m) - {f"cosine {v}" for v in VELOCITIES} == \
+        expected_rows(m)
+    assert set(res["rows_bf16_vs_fp32"]) == {
+        k for k in expected_rows(m)
+        if not k.startswith("free ") and k not in VELOCITIES}
+    assert m["inputs"]["segment_kinds"] == ["text", "audio", "video"]
+    assert times_at(m["inputs"]["sigma_v"]) == \
+        (m["inputs"]["t_video"], m["inputs"]["t_audio"])
+
+
 def expected_rows(m: dict) -> set:
     """The rows a check 3 fixture of ``m``'s depth holds a tolerance for:
     the rows outside the blocks, each refiner block and block, ``free``

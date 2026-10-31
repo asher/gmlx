@@ -561,7 +561,7 @@ class _Encoder:
 
 
 class _Cache(dict):
-    max_bytes = None
+    max_bytes = 1 << 20
 
 
 def _pipe(encoder=None):
@@ -766,6 +766,27 @@ def test_a_failed_staged_encode_leaves_the_dit_loaded(staged_stubs):
         image_service._encode(st.served, "boom", None, ())
     assert st.events[-4:] == ["release", "dit", "wrap", "vae"]
     assert st.pipe.encoder.released and st.pipe.dit == "DIT2"
+
+
+def test_a_configured_adapter_loads_into_a_cache_that_holds_it(
+        load_stubs, monkeypatch, tmp_path):
+    """The entry books its adapters' files, so the cache holds a file
+    over its bound when the file loads."""
+    from gmlx.image import api, lora
+
+    path = tmp_path / "big.safetensors"
+    path.write_bytes(bytes(3 << 20))
+    seen = []
+
+    def load_adapter(pipe, p):
+        seen.append(pipe.adapters.max_bytes)
+        return SimpleNamespace(warnings=(), dit=(), text=())
+
+    monkeypatch.setattr(lora, "load_adapter", load_adapter)
+    monkeypatch.setattr(lora, "apply_text_adapters", lambda pipe, rows: None)
+    monkeypatch.setattr(api, "define_patch_table", lambda pipe, e: "table")
+    image_service._load(_spec(adapters=((str(path), 1.0),)))
+    assert seen == [3 << 20]
 
 
 def test_a_failed_adapter_frees_the_loaded_pipeline(load_stubs, monkeypatch):

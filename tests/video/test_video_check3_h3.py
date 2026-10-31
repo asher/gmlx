@@ -57,9 +57,6 @@ REAL = ("check3_h3_64x64x5", "check3_h3_512x512x22")
 # A float32 step against the oracle's float32 step: the gap is summation
 # order alone, about a hundred float32 roundings.
 FP32_TOL = 1e-5
-# The rows the oracle runs in float32 in both modes.
-FLOAT32_ROWS = {"video_patch_proj", "audio_patch_proj",
-                "final_layer.adaln_proj.linear"}
 
 
 def _manifest(name: str) -> dict:
@@ -79,36 +76,7 @@ def test_the_manifests_follow_the_rule(name):
     with a gap for each, gmlx's stream times are the oracle's, and on the
     real file the exact gate's tolerances follow their floors."""
     m = _manifest(name)
-    tols, res = m["tolerances"], m["results"]
-    for stream in ("video", "audio"):
-        gap = res["velocity_bf16_vs_fp32"][stream]
-        tol = tols[f"velocity_{stream}"]
-        assert tol["rel_l2"] == 2 * gap["rel_l2"]
-        assert tol["cosine_min"] == pytest.approx(
-            1 - 4 * (1 - gap["cosine"]), abs=1e-12)
-    float32 = set()
-    for k, g in res["rows_bf16_vs_fp32"].items():
-        if g["rel_l2"] == 0:
-            assert tols[k] == {"rel_l2": 1e-5, "float32": True}, k
-            float32.add(k)
-            continue
-        assert tols[k]["rel_l2"] == 2 * g["rel_l2"], k
-        assert g["teacher_forced"] == tols[k]["teacher_forced"] == \
-            hg.forced_row(k), k
-    assert float32 == FLOAT32_ROWS
-    assert all(hg.keeps_fp32(k) for k in float32)
-    forced = {k for k in res["rows_bf16_vs_fp32"] if hg.forced_row(k)}
-    assert set(res["free_bf16_vs_fp32"]) == forced
-    for k, g in res["free_bf16_vs_fp32"].items():
-        assert tols[f"free {k}"] == {"rel_l2": 2 * g["rel_l2"]}, k
-    assert hg.gated_rows(m) - {f"cosine {v}" for v in hg.VELOCITIES} == \
-        hg.expected_rows(m)
-    assert set(res["rows_bf16_vs_fp32"]) == {
-        k for k in hg.expected_rows(m)
-        if not k.startswith("free ") and k not in hg.VELOCITIES}
-    assert m["inputs"]["segment_kinds"] == ["text", "audio", "video"]
-    assert hg.times_at(m["inputs"]["sigma_v"]) == \
-        (m["inputs"]["t_video"], m["inputs"]["t_audio"])
+    hg.assert_manifest_rule(m)
     if name in REAL:
         hg.exact_tols(m)
         assert m["files"]["dit"] == committed(REAL[0])["files"]["dit"]

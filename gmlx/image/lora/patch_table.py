@@ -89,6 +89,19 @@ def _file_key(path: str) -> tuple:
     return (os.path.realpath(path), st.st_size, st.st_mtime_ns)
 
 
+def fit_cache(pipe, paths) -> None:
+    """Raise the pipeline's pair cache to hold the LoRA files at ``paths``
+    at once, as the memory plan that priced them expects. A file that
+    cannot be read is left for ``load_adapter`` to name."""
+    need = 0
+    for p in paths:
+        try:
+            need += os.path.getsize(os.path.expanduser(str(p)))
+        except OSError:
+            continue
+    pipe.adapters.max_bytes = max(pipe.adapters.max_bytes, need)
+
+
 def load_adapter(pipe, path: str, *,
                  allow_unmatched: bool = False) -> LoadedAdapter:
     """Read a LoRA file and keep its pairs in the pipeline's cache. A file

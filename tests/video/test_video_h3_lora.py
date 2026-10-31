@@ -9,15 +9,14 @@ import re
 import mlx.core as mx
 import numpy as np
 import pytest
-from mlx.utils import tree_flatten
 
 from gmlx.image.lora import AdapterError, UnsupportedAdapterError
-from gmlx.video import pipeline, schedule
+from gmlx.video import memfit, pipeline, schedule
 from gmlx.video.families.h3 import family as hf
 from gmlx.video.families.h3 import model as hm
 from gmlx.video.families.h3.lora_map import lora_map
 from lora_fixtures import reference_delta, rel_l2, write_keys
-from test_video_h3_model import TINY
+from test_video_h3_model import TINY, tiny_weights
 from video_fixtures import H3_HEADER, fixture_view
 
 # The live run against merged float32 weights, relative L2 of what the
@@ -27,13 +26,7 @@ INNER = TINY["num_attention_heads"] * TINY["attention_head_dim"]
 
 
 def _params() -> dict:
-    mx.random.seed(0)
-    m = hm.H3Transformer(TINY)
-    out = {k: 0.05 * mx.random.normal(v.shape)
-           for k, v in tree_flatten(m.parameters())}
-    out["rope.inv_freq"] = mx.array(1 / 10000 ** (np.arange(16) / 16),
-                                    mx.float32)
-    return {k: np.array(v) for k, v in out.items()}
+    return {k: np.array(v) for k, v in tiny_weights().items()}
 
 
 def _pipe(params: dict) -> pipeline.VideoPipeline:
@@ -157,6 +150,18 @@ def test_a_comfyui_lora_runs_live_as_the_merged_weights(tmp_path):
     print(f"tiny H3 LoRA run: worst relative L2 {worst:.3e}")
 
 
+def test_each_pair_of_the_tiny_lora_moves_the_run():
+    """Without any one pair, the merged run misses the live tolerance by
+    far, so the live run above sees each pair's place."""
+    params, adapter = _params(), _adapter(1)
+    want = _run(_pipe(_merged(params, [(adapter, 1.0)])))
+    for target in adapter:
+        rest = {k: v for k, v in adapter.items() if k != target}
+        got = _run(_pipe(_merged(params, [(rest, 1.0)])))
+        moved = max(rel_l2(g, w) for g, w in zip(got, want))
+        assert moved > 100 * RUN_TOL, (target, moved)
+
+
 _DIFFSYNTH = {"diffusion_model.blocks.0.attn.qkv_proj.lora_A.default.weight":
               np.zeros((4, 64), np.float32),
               "diffusion_model.blocks.0.attn.qkv_proj.lora_B.default.weight":
@@ -274,6 +279,39 @@ def test_a_lora_over_the_adapter_cache_still_builds_its_table(tmp_path):
     pipe.adapters.max_bytes = os.path.getsize(path) // 2
     tid = pipeline.adapter_table(pipe, [(path, 1.0)])
     assert pipe.patch_tables[tid]["entries"]
+
+
+def test_a_lone_bf16_lora_holds_its_file_once(tmp_path):
+    """On a bf16 DiT the patch table holds no copy of a lone bf16 LoRA,
+    on the leaves H3 runs in float32 too (the adaLN linears, the patch
+    projections and the heads), as memfit prices it."""
+    keys = {k: mx.array(v).astype(mx.bfloat16) if v.ndim == 2
+            else mx.array(v) for k, v in _comfy_keys(_adapter(1)).items()}
+    path = str(tmp_path / "lora.safetensors")
+    mx.save_safetensors(path, keys, metadata={"format": "pt"})
+    params = _params()
+    m = hm.H3Transformer(TINY)
+    keep = ("rope.inv_freq", "adaln_t_table")
+    m.load_weights([(k, mx.array(v) if k in keep
+                     else mx.array(v).astype(mx.bfloat16))
+                    for k, v in params.items()])
+    m.act_dtype = mx.bfloat16
+    m.eval()
+    pipe = pipeline.VideoPipeline(dit=m, family=hf.FAMILY,  # type: ignore
+                                  variant="fl2va")
+    tid = pipeline.adapter_table(pipe, [(path, 1.0)])
+    rng = np.random.default_rng(3)
+    vs, aus = hf.latent_shapes(5, 64, 64)
+    start = tuple(mx.array(rng.standard_normal(s).astype(np.float32))
+                  for s in (vs, aus))
+    feats = mx.array(rng.standard_normal((1, 8, TINY["text_dim"]))
+                     .astype(np.float32))
+    mx.eval(pipeline.generate(pipe, feats, frames=5, width=64, height=64,
+                              steps=1, shifts=hf.SHIFTS, start=start,
+                              table=tid))
+    assert memfit.lora_dtype(path) == "BF16"
+    assert pipe.adapters.bytes <= os.path.getsize(path)
+    assert pipe.tables.bytes == 0
 
 
 def test_a_home_path_loads_and_a_missing_file_is_refused(tmp_path,
