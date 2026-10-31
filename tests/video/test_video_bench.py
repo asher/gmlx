@@ -359,17 +359,15 @@ def test_without_ffmpeg_the_mux_is_not_timed(bench, monkeypatch, capsys):
     assert "the mux is not timed" in err and "mux not timed" in err
 
 
-def test_each_mux_step_runs_under_the_mux_clock(bench, monkeypatch, capsys):
+def test_the_mux_and_the_decode_each_run_under_their_own_clock(
+        bench, monkeypatch, capsys):
     from gmlx.commands import video_bench as vb
     from gmlx.video import io
+    from gmlx.video.vae import reader
 
-    made, running, seen = [], [], []
+    running, seen = [], []
 
     class Clock(vb._Clock):
-        def __init__(self):
-            super().__init__()
-            made.append(self)
-
         def __enter__(self):
             running.append(self)
             return super().__enter__()
@@ -397,14 +395,35 @@ def test_each_mux_step_runs_under_the_mux_clock(bench, monkeypatch, capsys):
         seen.append(("wav", list(running)))
         return write_wav(path, waveform, rate)
 
+    load_vae = reader.load_vae
+
+    def spy_load_vae(path, family, dtype):
+        vae = load_vae(path, family=family, dtype=dtype)
+        if family == "h3":
+            frames = vae.decode_frames
+
+            def decode_frames(xv):
+                for chunk in frames(xv):
+                    seen.append(("decode", list(running)))
+                    yield chunk
+            vae.decode_frames = decode_frames
+        return vae
+
     monkeypatch.setattr(vb, "_Clock", Clock)
     monkeypatch.setattr(io, "Mux", Mux)
     monkeypatch.setattr(io, "write_wav", wav)
+    monkeypatch.setattr(reader, "load_vae", spy_load_vae)
     assert bench("--shapes", "64x64x5", "--steps", "1", "--json") == 0
     (r,) = _records(capsys.readouterr().out)
-    dec, mux = made
-    assert [k for k, _ in seen] == ["wav", "init", "write", "write", "close"]
-    assert all(c == [mux] for _, c in seen), seen
+    steps = [k for k, _ in seen if k != "decode"]
+    assert steps[:2] == ["wav", "init"] and steps[-1] == "close"
+    assert set(steps[2:-1]) == {"write"}
+    # One clock at a time: the mux steps under one, each decode under
+    # another.
+    assert all(len(c) == 1 for _, c in seen), seen
+    (mux,) = {c[0] for k, c in seen if k != "decode"}
+    (dec,) = {c[0] for k, c in seen if k == "decode"}
+    assert mux is not dec
     assert r["mux_s"] == mux.s and r["decode_s"] == dec.s
 
 
