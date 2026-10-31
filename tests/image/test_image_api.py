@@ -387,9 +387,9 @@ def test_byte_lru_never_sheds_a_kept_entry():
     c.put("a", 2, 4)
     c.put("b", 3, 4)
     assert c.peek("own") == 1 and c.peek("a") is None and c.bytes == 8
-    # The others cannot make room, so the new entry is not kept.
+    # An entry that does not fit beside the kept one sheds nothing.
     c.put("c", 4, 7)
-    assert c.peek("own") == 1 and c.peek("c") is None and c.bytes == 4
+    assert c.peek("c") is None and c.peek("b") == 3 and c.bytes == 8
 
 
 class _Encoder:

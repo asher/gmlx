@@ -1201,6 +1201,20 @@ def test_request_adapters_over_the_cache_are_refused_by_name(tiny_served):
     assert _held(served.pipe, own)
 
 
+def test_a_request_may_reweight_the_entry_adapter_beside_its_own(
+        tiny_served):
+    """The entry's own LoRA is held already, so it takes none of the
+    request's room."""
+    from test_image_lora_apply import _step
+
+    served, root = tiny_served
+    tid, shown = image_service._adapter_table(
+        served, [("own", 0.5), ("a.safetensors", 1.0)], [root])
+    assert [s["strength"] for s in shown] == [0.5, 1.0]
+    assert _held(served.pipe, image_service._pair_keys(served.adapters))
+    assert np.isfinite(_step(served.pipe, tid)).all()
+
+
 def test_requests_in_turn_never_shed_the_entry_adapter(tiny_served):
     """Each request's LoRA takes the room of the one before, and every
     table builds."""

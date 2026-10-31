@@ -127,8 +127,8 @@ class ByteLRU:
     values. An entry larger than the bound is not kept. A caller with a
     rule of its own puts with ``shed`` off, which keeps the entry whatever
     its bytes and sheds nothing, and sheds through ``shed_others``. A put
-    never sheds the entries of the keys given to ``keep``; when the others
-    cannot make room, the new entry is not kept."""
+    never sheds the entries of the keys given to ``keep``, and an entry
+    that does not fit beside them is not kept and sheds nothing."""
 
     def __init__(self, max_bytes: int):
         self.max_bytes = int(max_bytes)
@@ -192,18 +192,19 @@ class ByteLRU:
             old = self._items.pop(key, None)
             if old is not None:
                 self._bytes -= old[1]
-            if shed and nbytes > self.max_bytes:
+            kept = sum(n for k, (_, n) in self._items.items()
+                       if k in self._kept) if self._kept else 0
+            if shed and nbytes > self.max_bytes - kept:
                 return
             self._items[key] = (value, int(nbytes))
             self._bytes += int(nbytes)
-            if not shed or self._bytes <= self.max_bytes:
+            if not shed:
                 return
             for k in [k for k in self._items
                       if k != key and k not in self._kept]:
-                self._bytes -= self._items.pop(k)[1]
                 if self._bytes <= self.max_bytes:
-                    return
-            self._bytes -= self._items.pop(key)[1]
+                    break
+                self._bytes -= self._items.pop(k)[1]
 
     def shed_others(self, own, room: int) -> None:
         """Shed the entries whose key is not in ``own``, the least
