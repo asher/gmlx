@@ -370,6 +370,8 @@ def _load(spec) -> ServedImage:
                 lora.apply_text_adapters(pipe, rows)
             pipe.default_table = api.define_patch_table(
                 pipe, lora.table_entries(rows))
+            # A request's pairs never shed the entry's own.
+            pipe.adapters.keep(_pair_keys(rows))
         bound_caches(pipe, sum(2 * os.path.getsize(p)
                                for p, _ in spec.adapters),
                      plan.cache_share)
@@ -1403,7 +1405,7 @@ def _adapter_table(served: ServedImage, rows: list, model_dirs) -> tuple:
     # DiT for the request, in place of the entry's, and never adds it twice.
     configured = {os.path.realpath(ad.path): i
                   for i, (ad, _st) in enumerate(served.adapters)}
-    shown = []
+    shown, extra = [], []
     for aid, strength in rows:
         path = named.get(aid)
         if path is None:
@@ -1411,15 +1413,41 @@ def _adapter_table(served: ServedImage, rows: list, model_dirs) -> tuple:
         at = configured.get(os.path.realpath(path))
         if at is not None:
             table_rows[at] = (table_rows[at][0], strength)
-            shown.append({"id": aid, "strength": strength})
-            continue
+        else:
+            extra.append((aid, path, strength))
+        shown.append({"id": aid, "strength": strength})
+    _room_for(served, [path for _aid, path, _st in extra])
+    for aid, path, strength in extra:
         ad = lora.load_adapter(pipe, path)
         if ad.text:
             raise _bad(f"adapter {aid!r} has text encoder layers; set it on "
                        "the image model's adapters instead", "adapters")
         table_rows.append((ad, strength))
-        shown.append({"id": aid, "strength": strength})
     return api.define_patch_table(pipe, lora.table_entries(table_rows)), shown
+
+
+def _pair_keys(rows) -> set:
+    """The pair keys of (LoadedAdapter, strength) rows."""
+    return {r[-1] for ad, _st in rows for r in (*ad.dit, *ad.text)}
+
+
+def _room_for(served: ServedImage, paths: list) -> None:
+    """Refuse request adapters whose files take more than the pair cache
+    holds beside the entry's own pairs."""
+    pipe = served.pipe
+    own = sum(pipe.adapters.nbytes(k) for k in _pair_keys(served.adapters))
+    room = pipe.adapters.max_bytes - own
+    need = 0
+    for p in {os.path.realpath(p) for p in paths}:
+        try:
+            need += os.path.getsize(p)
+        except OSError:
+            continue
+    if need > room:
+        raise _bad(f"the request's adapters take {need / 2**20:.1f} MB, more "
+                   f"than the {room / 2**20:.1f} MB this image model keeps "
+                   "for request adapters; raise "
+                   "server.image.adapter_cache_mb", "adapters")
 
 
 def _adapter_under_roots(aid: str, model_dirs) -> str:
