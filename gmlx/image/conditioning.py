@@ -126,13 +126,22 @@ class ByteLRU:
     """A least recently used map that holds at most ``max_bytes`` of
     values. An entry larger than the bound is not kept. A caller with a
     rule of its own puts with ``shed`` off, which keeps the entry whatever
-    its bytes and sheds nothing, and sheds through ``shed_others``."""
+    its bytes and sheds nothing, and sheds through ``shed_others``. A put
+    never sheds the entries of the keys given to ``keep``; when the others
+    cannot make room, the new entry is not kept."""
 
     def __init__(self, max_bytes: int):
         self.max_bytes = int(max_bytes)
         self._items: OrderedDict = OrderedDict()
         self._bytes = 0
+        self._kept: frozenset = frozenset()
         self._lock = threading.Lock()
+
+    def keep(self, keys) -> None:
+        """The keys whose entries a put never sheds, in place of any given
+        before. Their entries still count toward the bound."""
+        with self._lock:
+            self._kept = frozenset(keys)
 
     def __len__(self) -> int:
         return len(self._items)
@@ -187,9 +196,14 @@ class ByteLRU:
                 return
             self._items[key] = (value, int(nbytes))
             self._bytes += int(nbytes)
-            while shed and self._bytes > self.max_bytes:
-                _, (_, n) = self._items.popitem(last=False)
-                self._bytes -= n
+            if not shed or self._bytes <= self.max_bytes:
+                return
+            for k in [k for k in self._items
+                      if k != key and k not in self._kept]:
+                self._bytes -= self._items.pop(k)[1]
+                if self._bytes <= self.max_bytes:
+                    return
+            self._bytes -= self._items.pop(key)[1]
 
     def shed_others(self, own, room: int) -> None:
         """Shed the entries whose key is not in ``own``, the least

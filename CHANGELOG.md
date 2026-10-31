@@ -19,9 +19,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Image LoRAs that together outgrow the adapter cache now load, where they
-  failed with "patch table names adapter ..., which this pipeline does not
-  hold".
+- Image LoRA stacks over the adapter cache load, and a server request over
+  it is refused, where both failed with "patch table names adapter ...".
 
 ## [0.5.4] - 2026-10-29
 

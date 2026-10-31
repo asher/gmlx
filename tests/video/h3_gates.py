@@ -234,10 +234,11 @@ def missed(got: dict, tolerances: dict) -> dict:
 
 def over(v: float, name: str, tolerances: dict) -> float:
     """How many times its gate a measure is. A cosine's distance from 1
-    counts against its floor's."""
+    goes as the square of a relative L2, so its ratio to its floor's is
+    taken under a square root."""
     if name.startswith("cosine "):
         floor = tolerances[name.removeprefix("cosine ")]["cosine_min"]
-        return (1 - v) / (1 - floor)
+        return math.sqrt(max(1 - v, 0.0) / (1 - floor))
     return v / gate(tolerances[name])
 
 
@@ -380,6 +381,15 @@ def exact_measures(model, arrays: dict, m: dict) -> dict:
     with _exact(model):
         got = measures(model, arrays, m)
     return {k: v for k, v in got.items() if not k.startswith("cosine ")}
+
+
+def exact_forced(model, arrays: dict, m: dict) -> dict:
+    """Relative L2 of each teacher-forced row the manifest holds, in the
+    oracle's arithmetic."""
+    with _exact(model):
+        got = forced_rows(model, arrays)
+    return {k: rel(v, arrays[k]) for k, v in got.items()
+            if k in m["tolerances"]}
 
 
 def free_row(name: str) -> bool:

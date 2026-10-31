@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from gmlx.serve import image_service
@@ -562,6 +563,12 @@ class _Encoder:
 
 class _Cache(dict):
     max_bytes = 1 << 20
+
+    def keep(self, keys):
+        self.kept = set(keys)
+
+    def nbytes(self, key):
+        return 0
 
 
 def _pipe(encoder=None):
@@ -1140,20 +1147,74 @@ def test_a_request_naming_an_entry_adapter_sets_its_strength_once(
     (root / "lora").mkdir(parents=True)
     path = root / "lora" / "style.safetensors"
     path.write_bytes(b"x")
-    entry = SimpleNamespace(path=str(path), text=("t",))
-    other = SimpleNamespace(path=str(root / "lora" / "b.safetensors"), text=())
+    entry = SimpleNamespace(path=str(path), dit=(), text=(("t", "k"),))
+    other = SimpleNamespace(path=str(root / "lora" / "b.safetensors"),
+                            dit=(), text=())
     monkeypatch.setattr(lora, "load_adapter", lambda pipe, p: (
         entry if os.path.realpath(p) == os.path.realpath(path) else other))
     monkeypatch.setattr(lora, "table_entries", lambda rows: list(rows))
     monkeypatch.setattr(api, "define_patch_table", lambda pipe, rows: rows)
     (root / "lora" / "b.safetensors").write_bytes(b"x")
-    served = SimpleNamespace(pipe=object(), adapters=[(entry, 1.0)])
+    served = SimpleNamespace(pipe=_pipe(), adapters=[(entry, 1.0)])
     table, shown = image_service._adapter_table(
         served, [(aid, 0.4), ("lora/b.safetensors", 0.7)], [str(root)])
     assert table == [(entry, 0.4), (other, 0.7)]
     assert shown == [{"id": aid, "strength": 0.4},
                      {"id": "lora/b.safetensors", "strength": 0.7}]
     assert served.adapters == [(entry, 1.0)]
+
+
+@pytest.fixture
+def tiny_served(monkeypatch, tmp_path):
+    """A tiny Z-Image entry loaded with one LoRA of its own, its request
+    adapter cache half a LoRA file: room for one request LoRA, not two."""
+    from gmlx.image import api
+    from lora_fixtures import tiny_z_adapter, write_adapter
+    from test_image_lora_apply import _pipe as tiny_pipe
+
+    files = [write_adapter(tmp_path / f"{name}.safetensors", "kohya",
+                           tiny_z_adapter(seed, 4.0, wide=True))
+             for name, seed in (("own", 1), ("a", 11), ("b", 12))]
+    monkeypatch.setattr(api, "load", lambda path, **kw: tiny_pipe())
+    monkeypatch.setattr(image_service, "entry_plan", lambda spec: _plan())
+    monkeypatch.setattr(image_service, "_SHARES", {})
+    monkeypatch.setitem(image_service._CACHE_BYTES, "adapter",
+                        os.path.getsize(files[1]) // 2)
+    served = image_service._load(_spec(encoder=None,
+                                       adapters=((files[0], 1.0),)))
+    yield served, str(tmp_path)
+    image_service._release([served])
+
+
+def _held(pipe, keys) -> bool:
+    return all(pipe.adapters.peek(k) is not None for k in keys)
+
+
+def test_request_adapters_over_the_cache_are_refused_by_name(tiny_served):
+    served, root = tiny_served
+    own = image_service._pair_keys(served.adapters)
+    with pytest.raises(image_service.ImageRequestError,
+                       match="server.image.adapter_cache_mb") as e:
+        image_service._adapter_table(
+            served, [("a.safetensors", 1.0), ("b.safetensors", 1.0)], [root])
+    assert e.value.status == 400 and e.value.param == "adapters"
+    assert _held(served.pipe, own)
+
+
+def test_requests_in_turn_never_shed_the_entry_adapter(tiny_served):
+    """Each request's LoRA takes the room of the one before, and every
+    table builds."""
+    from test_image_lora_apply import _step
+
+    served, root = tiny_served
+    pipe = served.pipe
+    own = image_service._pair_keys(served.adapters)
+    for name in ("a", "b", "a"):
+        tid, _ = image_service._adapter_table(
+            served, [(f"{name}.safetensors", 1.0)], [root])
+        assert _held(pipe, own), name
+        assert np.isfinite(_step(pipe, tid)).all()
+    assert np.isfinite(_step(pipe, pipe.default_table)).all()
 
 
 @pytest.mark.parametrize("scheduler", ["karras", "simple", "beta"])

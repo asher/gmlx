@@ -759,6 +759,19 @@
    "fp32_s": 55.2,
    "bf16_s": 166.3,
    "bf16_teacher_forced_s": 162.0
+  },
+  "exact_free_floor": {
+   "rel_l2": 6.765060488635555e-05,
+   "row": "free blocks.37",
+   "measured": "the largest relative L2 between gmlx's exact step on the GPU and the same step on the CPU stream or on inputs nudged by one float32 step (4 seeds), worst free row; tests/video/h3_gates.py exact_free_floor on minimax_h3_fl2va_pruned-Q4_K.gguf dd948e08, Apple M5 Max"
+  },
+  "exact_velocity_video_floor": {
+   "rel_l2": 2.0129964733532098e-05,
+   "measured": "the largest relative L2 between gmlx's exact step on the GPU and the same step on the CPU stream or on inputs nudged by one float32 step (4 seeds), velocity_video; tests/video/h3_gates.py exact_free_floor on minimax_h3_fl2va_pruned-Q4_K.gguf dd948e08, Apple M5 Max"
+  },
+  "exact_velocity_audio_floor": {
+   "rel_l2": 5.7203099017565185e-06,
+   "measured": "the largest relative L2 between gmlx's exact step on the GPU and the same step on the CPU stream or on inputs nudged by one float32 step (4 seeds), velocity_audio; tests/video/h3_gates.py exact_free_floor on minimax_h3_fl2va_pruned-Q4_K.gguf dd948e08, Apple M5 Max"
   }
  },
  "tolerances": {
@@ -1171,7 +1184,16 @@
   "free final_layer.audio_out": {
    "rel_l2": 0.026442009776265596
   },
-  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each refiner block, the refiner's norm, each block and the heads, free running for the other rows and for the velocities, and free running for each teacher-forced row as 'free <row>'; rows in float32 in both modes take a float32 tolerance"
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each refiner block, the refiner's norm, each block and the heads, free running for the other rows and for the velocities, and free running for each teacher-forced row as 'free <row>'; rows in float32 in both modes take a float32 tolerance",
+  "exact_free": {
+   "rel_l2": 0.0001353012097727111
+  },
+  "exact_velocity_video": {
+   "rel_l2": 5e-05
+  },
+  "exact_velocity_audio": {
+   "rel_l2": 5e-05
+  }
  },
  "notes": [
   "oracle: ComfyUI 426f5eea52a7ece1dd599fff4cb6cd1f352ddd24, ComfyUI-GGUF 373048b8403a7820620065210a691263d4da0a61, UnetLoaderGGUF with dequant_dtype float32, LoRA through comfy.sd.load_lora_for_models, merge float32: each weight patched per call dequantized and patched in float32, then cast to the pass dtype once, as ComfyUI core merges a LoRA on the CPU"

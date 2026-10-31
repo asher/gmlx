@@ -378,6 +378,20 @@ def test_byte_lru_evicts_the_least_recent_entries():
     assert c.get("big") is None and len(c) == 2
 
 
+def test_byte_lru_never_sheds_a_kept_entry():
+    from gmlx.image.conditioning import ByteLRU
+
+    c = ByteLRU(10)
+    c.put("own", 1, 4)
+    c.keep({"own"})
+    c.put("a", 2, 4)
+    c.put("b", 3, 4)
+    assert c.peek("own") == 1 and c.peek("a") is None and c.bytes == 8
+    # The others cannot make room, so the new entry is not kept.
+    c.put("c", 4, 7)
+    assert c.peek("own") == 1 and c.peek("c") is None and c.bytes == 4
+
+
 class _Encoder:
     """An encoder handle over fixed features per character."""
 
