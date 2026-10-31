@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A served image model keeps its own LoRAs when a request brings others, and
+  a request over the adapter cache is refused, where requests failed with
+  "patch table names adapter ...".
+
 ## [0.5.4] - 2026-10-29
 
 ### Added
