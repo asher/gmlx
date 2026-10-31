@@ -195,7 +195,7 @@ class ByteLRU:
             nbytes = int(nbytes)
             if shed and self._bytes + nbytes > self.max_bytes:
                 kept = sum(n for k, (_, n) in self._items.items()
-                           if k in self._kept)
+                           if k in self._kept) if self._kept else 0
                 if nbytes > self.max_bytes - kept:
                     return
                 for k in [k for k in self._items if k not in self._kept]:
