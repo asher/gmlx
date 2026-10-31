@@ -192,19 +192,18 @@ class ByteLRU:
             old = self._items.pop(key, None)
             if old is not None:
                 self._bytes -= old[1]
-            kept = sum(n for k, (_, n) in self._items.items()
-                       if k in self._kept) if self._kept else 0
-            if shed and nbytes > self.max_bytes - kept:
-                return
-            self._items[key] = (value, int(nbytes))
-            self._bytes += int(nbytes)
-            if not shed:
-                return
-            for k in [k for k in self._items
-                      if k != key and k not in self._kept]:
-                if self._bytes <= self.max_bytes:
-                    break
-                self._bytes -= self._items.pop(k)[1]
+            nbytes = int(nbytes)
+            if shed and self._bytes + nbytes > self.max_bytes:
+                kept = sum(n for k, (_, n) in self._items.items()
+                           if k in self._kept)
+                if nbytes > self.max_bytes - kept:
+                    return
+                for k in [k for k in self._items if k not in self._kept]:
+                    if self._bytes + nbytes <= self.max_bytes:
+                        break
+                    self._bytes -= self._items.pop(k)[1]
+            self._items[key] = (value, nbytes)
+            self._bytes += nbytes
 
     def shed_others(self, own, room: int) -> None:
         """Shed the entries whose key is not in ``own``, the least
