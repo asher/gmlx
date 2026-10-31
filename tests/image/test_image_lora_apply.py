@@ -13,7 +13,7 @@ import pytest
 
 from gmlx.image import api, lora
 from gmlx.image.families.z_image.lora_map import lora_map
-from gmlx.image.lora import install, patch_table, reader
+from gmlx.image.lora import install, patch_table, plan, reader
 from gmlx.image.registry import get_family
 from image_fixtures import TINY_Z_CONFIG, tiny_z_model
 from lora_fixtures import (DIALECTS, make_pair, reference_delta, rel_l2,
@@ -320,6 +320,12 @@ def test_the_table_id_is_in_every_weight_dependent_cache_key(tmp_path):
     assert pipe.adapters.bytes > 0
     plan = api.plan_request(pipe, height=64, width=64, budget=float(1 << 40))
     assert plan.terms["adapters"] == pipe.adapters.bytes + pipe.tables.bytes
+    # Once the cache sheds the pairs, the tables that read them hold them.
+    pipe.adapters.clear()
+    pipe.lora.account()
+    assert pipe.tables.bytes > 0
+    plan = api.plan_request(pipe, height=64, width=64, budget=float(1 << 40))
+    assert plan.terms["adapters"] == pipe.tables.bytes
     # A family whose step is one forward has no step parts, and the plan
     # counts the caption states it holds among its caches.
     assert pipe.family.step is None
@@ -551,6 +557,35 @@ def test_one_pair_over_a_whole_weight_runs_on_the_cached_pair(tmp_path):
     assert [a.shape for a in f.arrays()] == [pair.down.shape, pair.up.shape]
 
 
+def test_a_lone_pair_scales_its_delta_in_float32():
+    """A strength times alpha / rank that bf16 cannot hold scales the
+    delta without a gain error."""
+    k1, k2, k3 = mx.random.split(mx.random.key(0), 3)
+    down = (mx.random.normal((16, 256), key=k1) * 0.1).astype(mx.bfloat16)
+    up = (mx.random.normal((512, 16), key=k2) * 0.1).astype(mx.bfloat16)
+    x = mx.random.normal((1024, 256), key=k3).astype(mx.bfloat16)
+    part = plan.Part(down, up, 1.0, None, 0.7)
+    f = install._Own(part, lambda: True)
+    got = np.array(f(lambda x: mx.zeros((x.shape[0], 512), x.dtype),
+                     x).astype(mx.float32), np.float64)
+    xd, dd, ud = (np.array(a.astype(mx.float32), np.float64)
+                  for a in (x, down, up))
+    want = (xd @ dd.T @ ud.T) * 0.7 / 16
+    gain = float((got * want).sum() / (want * want).sum())
+    assert abs(gain - 1) < 2e-4, gain
+
+
+def test_a_lora_over_the_adapter_cache_is_refused_at_load(tmp_path):
+    """A file whose pairs the cache cannot hold is refused when it
+    loads, not when a table names pairs the cache has shed."""
+    pipe = _pipe()
+    path = write_adapter(tmp_path / "a.safetensors", "kohya",
+                         tiny_z_adapter(1, 4.0, wide=True))
+    pipe.adapters.max_bytes = os.path.getsize(path) // 2
+    with pytest.raises(lora.AdapterError, match="this pipeline keeps"):
+        lora.load_adapter(pipe, path)
+
+
 def test_the_cache_keeps_a_pair_without_a_copy():
     """A LoRA's pairs reach the cache as the reader made them, so a load
     never holds the file twice."""
@@ -566,6 +601,13 @@ def test_the_cache_keeps_a_pair_without_a_copy():
     pair = pipe.adapters.peek(key)
     assert np.array_equal(np.array(pair.down.astype(mx.float32)),
                           np.array(down.astype(mx.float32)))
+    # A ComfyUI patch reaches the cache the same way.
+    pipe = _pipe()
+    mx.synchronize()
+    before = mx.get_active_memory()
+    mx.reset_peak_memory()
+    lora.register_patch(pipe, up, down, 16.0)
+    assert mx.get_peak_memory() - before < down.nbytes
 
 
 def test_the_placements_agree_on_a_kquant_base():

@@ -70,7 +70,7 @@ class VideoPeaks:
 #
 # A step reads 0.74 to 16.67 GiB over the DiT and its LoRA from 1891 to
 # 109087 rows (15 s at 1344x768), and 0.57 to 5.31 GiB over the DiT with
-# no LoRA up to 37735 rows. A second LoRA, at twice each file, adds 0.02
+# no LoRA up to 37735 rows. A second LoRA, at twice each file, adds 0.03
 # GiB to the step. Both lines run through the 21751 and 37735 row cells,
 # which puts the LoRA line 2.35 GiB over the 109087 row cell.
 #
@@ -250,9 +250,16 @@ def lora_dtype(path: str) -> str | None:
         header, _ = safetensors_header(os.path.expanduser(path))
     except (OSError, VAEError):
         return None
-    kinds = {v.get("dtype") for k, v in header.items()
-             if k != "__metadata__" and isinstance(v, dict)
-             and len(v.get("shape", ())) == 2}
+    kinds = set()
+    for k, v in header.items():
+        if k == "__metadata__" or not isinstance(v, dict):
+            continue
+        shape, kind = v.get("shape"), v.get("dtype")
+        if not isinstance(shape, list) or not isinstance(kind, str):
+            return None
+        # A matrix, or a 1x1 kernel the reader takes as one.
+        if len(shape) >= 2 and all(d == 1 for d in shape[2:]):
+            kinds.add(kind)
     return kinds.pop() if len(kinds) == 1 else None
 
 

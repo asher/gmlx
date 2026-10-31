@@ -3,6 +3,7 @@ ComfyUI's form run live on the tiny H3 DiT against the same run on merged
 weights, the spellings ComfyUI drops, and the files gmlx refuses. CPU."""
 from __future__ import annotations
 
+import os
 import re
 
 import mlx.core as mx
@@ -263,6 +264,16 @@ def test_given_sigma_tables_replace_the_shifts():
     with pytest.raises(ValueError, match="3 entries"):
         pipeline.generate(pipe, feats, shifts=hf.SHIFTS,
                           sigmas=schedule.stream_sigmas(3, other), **kw)
+
+
+def test_a_lora_over_the_adapter_cache_still_builds_its_table(tmp_path):
+    """The memory plan prices every file a run names, so the cache holds
+    them all, whatever its bound."""
+    path = write_keys(tmp_path / "lora.safetensors", _comfy_keys(_adapter(1)))
+    pipe = _pipe(_params())
+    pipe.adapters.max_bytes = os.path.getsize(path) // 2
+    tid = pipeline.adapter_table(pipe, [(path, 1.0)])
+    assert pipe.patch_tables[tid]["entries"]
 
 
 def test_a_home_path_loads_and_a_missing_file_is_refused(tmp_path,

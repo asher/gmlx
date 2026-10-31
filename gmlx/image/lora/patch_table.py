@@ -122,6 +122,13 @@ def load_adapter(pipe, path: str, *,
             raise AdapterError(
                 f"{path}: {t.pair.stem} does not fit {t.module} of this "
                 f"{pipe.family.title} DiT: {why}")
+    held = sum(int(t.pair.down.nbytes) + int(t.pair.up.nbytes)
+               for t in res.dit + res.text)
+    if held > pipe.adapters.max_bytes:
+        raise AdapterError(
+            f"{path}: its LoRA pairs take {held / 2**30:.2f} GiB, more than "
+            f"the {pipe.adapters.max_bytes / 2**30:.2f} GiB of pairs this "
+            "pipeline keeps")
     dit, text, nbytes = [], [], 0
     for t in res.dit:
         key = register_pair(pipe, t.pair.down, t.pair.up, t.pair.alpha)
@@ -170,7 +177,8 @@ def register_patch(pipe, up, down, alpha=None, mid=None, dora_scale=None,
             raise UnsupportedAdapterError(
                 f"a {kind} patch is not applied by gmlx image. It applies "
                 "plain LoRA pairs only", kind)
-    up, down = mx.array(up), mx.array(down)
+    up, down = (a if isinstance(a, mx.array) else mx.array(a)
+                for a in (up, down))
     if up.ndim > 2:
         up = up.reshape(up.shape[0], -1)
     if down.ndim > 2:

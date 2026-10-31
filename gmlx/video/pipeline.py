@@ -87,6 +87,10 @@ def adapter_table(pipe: VideoPipeline, adapters) -> str:
     adapters = [(path, float(strength)) for path, strength in adapters]
     for path, _ in adapters:
         _vet(pipe, path)
+    # The memory plan prices every file, so the cache holds them all.
+    need = sum(os.path.getsize(os.path.expanduser(str(p)))
+               for p, _ in adapters)
+    pipe.adapters.max_bytes = max(pipe.adapters.max_bytes, need)
     loaded = []
     for path, strength in adapters:
         ad = load_adapter(pipe, path)

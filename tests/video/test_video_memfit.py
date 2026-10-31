@@ -184,6 +184,24 @@ def test_a_lora_file_names_its_matrices_dtype(tmp_path):
     assert memfit.lora_dtype(str(tmp_path / "mixed.safetensors")) is None
     (tmp_path / "lora.gguf").write_bytes(b"GGUF" + bytes(60))
     assert memfit.lora_dtype(str(tmp_path / "lora.gguf")) is None
+    # A 1x1 kernel the reader takes as a matrix counts with the matrices.
+    _safetensors(tmp_path / "conv.safetensors", {
+        f"{key}.lora_down.weight": ("BF16", [128, 7168]),
+        f"{key}.lora_up.weight": ("BF16", [5376, 128]),
+        "conv.lora_down.weight": ("F32", [8, 64, 1, 1])})
+    assert memfit.lora_dtype(str(tmp_path / "conv.safetensors")) is None
+
+
+@pytest.mark.parametrize("entry", [("BF16", 5), ("BF16", None),
+                                   (["BF16"], [128, 7168])],
+                         ids=["int shape", "null shape", "list dtype"])
+def test_a_malformed_lora_header_names_no_dtype(tmp_path, entry):
+    """The reader refuses such a file with its own message, so pricing
+    it raises nothing."""
+    _safetensors(tmp_path / "bad.safetensors", {
+        "blocks.0.attn.out_proj.lora_up.weight": ("BF16", [5376, 128]),
+        "blocks.0.attn.out_proj.lora_down.weight": entry})
+    assert memfit.lora_dtype(str(tmp_path / "bad.safetensors")) is None
 
 
 def test_a_preview_prices_taeh3():

@@ -625,10 +625,11 @@ def test_each_placement_gives_the_tiny_step_of_the_merged_oracle(
     built = pipe.lora._cur[(tid, mx.float32, install.form())]
     ffn = pipe.dit.cfg.ffn_dim
     # Block 0 has both bands of the fused weight and block 1 its gate
-    # band alone. A whole weight is a block under every placement.
+    # band alone. A whole weight runs on its cached pair under every
+    # placement.
     both, gate = (built.get(f"{B}{i}.img_mlp.gate_up") for i in (0, 1))
     assert type(both).__name__ == kind and type(gate).__name__ == kind
-    assert type(built.get(B + "0.img_mlp.out")).__name__ == "_Block"
+    assert type(built.get(B + "0.img_mlp.out")).__name__ == "_Own"
     if how != "block":
         assert [s[:2] for s in both.spans] == [(0, ffn), (ffn, 2 * ffn)]
         assert [s[:2] for s in gate.spans] == (

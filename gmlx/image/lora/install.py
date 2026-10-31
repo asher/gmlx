@@ -116,7 +116,8 @@ def register_pair(pipe, down, up, alpha: float | None = None) -> str:
     """Keep a pair in the pipeline's cache and return its content hash,
     which names it in patch table entries. A pair already held is not
     stored again. An MLX array is kept as it is, since a copy would hold
-    the pair twice while the reader still holds it."""
+    the pair twice while the reader still holds it, so the caller does not
+    change it afterwards."""
     down, up = (a if isinstance(a, mx.array) else mx.array(a)
                 for a in (down, up))
     if down.ndim != 2 or up.ndim != 2 or up.shape[1] != down.shape[0]:
@@ -231,14 +232,13 @@ class _Block:
 class _Own:
     """One pair over the whole weight in the activation dtype, on the
     cached pair's own arrays: ``x @ A^T`` times the part's strength and
-    ``alpha / rank``, then through B. The table holds no copy of the
-    pair while the cache keeps it."""
+    ``alpha / rank`` in float32, then through B. The table holds no copy
+    of the pair while the cache keeps it."""
 
     def __init__(self, part, kept):
         self.down, self.up = part.down, part.up
-        f = part.strength * plan.pair_scale(part.alpha,
-                                            int(part.down.shape[0]))
-        self.scale = mx.array(f, part.down.dtype)
+        self.scale = part.strength * plan.pair_scale(
+            part.alpha, int(part.down.shape[0]))
         self._kept = kept
 
     def arrays(self) -> list:
@@ -247,7 +247,9 @@ class _Own:
         return [] if self._kept() else [self.down, self.up]
 
     def __call__(self, base, x: mx.array) -> mx.array:
-        return _add(base(x), (x @ self.down.T) * self.scale, self.up.T)
+        z = x @ self.down.T
+        z = (z.astype(mx.float32) * self.scale).astype(z.dtype)
+        return _add(base(x), z, self.up.T)
 
 
 class _Slice:
