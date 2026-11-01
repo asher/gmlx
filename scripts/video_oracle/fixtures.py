@@ -55,6 +55,7 @@ read_manifest = _fx.read_manifest
 load = _fx.load
 array_sha256 = _fx.array_sha256
 file_identity = _fx.file_identity
+portable_argv = _fx.portable_argv
 rel_l2 = _fx.rel_l2
 cosine = _fx.cosine
 max_abs = _fx.max_abs

@@ -40,6 +40,12 @@
     "repo": "hao-ai-lab/FastVideo",
     "revision": "4d0a10d98914b6f0110454a8dc4ef89662fc3ac0",
     "file": "fastvideo/mlx_runtime/minimax_h3_vsa.py: build_h3_segment_geometry(segments, 64) at the 512x512x22, 768x768x39 and 1344x768x124 FastH3 layouts",
+    "script": "scripts/video_oracle/fasth3_geometry.py",
+    "argv": [
+      "fasth3_geometry.py",
+      "--fastvideo",
+      "FastVideo"
+    ],
     "note": "per shape, the four index arrays of MiniMaxH3VSAGeometry as int32 and its scalar fields in meta (JSON bytes); the segments are gmlx's packed H3 layout of each shape with 56 text rows"
   },
   "h3_identity_fasth3.json": {
