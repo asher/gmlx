@@ -7,7 +7,9 @@ ported file carries the Apache-2.0 AND MIT header.
 - gmlx/video/families/h3/vsa.py: the tile map of build_h3_segment_geometry
   and the index maps of MiniMaxH3VSAGeometry in
   fastvideo/mlx_runtime/minimax_h3_vsa.py (segment-pure dense chunks, then
-  the 4 x 4 x 4 video tiles).
+  the 4 x 4 x 4 video tiles), and the traced call of the test hook, which
+  follows h3_vsa_attention of that file and its exempt routing of one video
+  region, by way of mlx-kquant's vsa_attention.
 
 FastVideo is distributed under the Apache License, Version 2.0, reproduced
 below.

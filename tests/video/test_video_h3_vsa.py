@@ -1,7 +1,8 @@
 """FastH3's video sparse attention: the tile map of gmlx's packed layout
 against FastVideo's index arrays at three FastH3 shapes, the refusal of
-a video anchor, and on a NAX GPU the call in a tiny FastH3 block. The
-tile map and the refusal are CPU-only."""
+a video anchor, and on a NAX GPU the call in a tiny FastH3 block and the
+test hook that pins and reads back its routing. The tile map and the
+refusal are CPU-only."""
 from __future__ import annotations
 
 import json
@@ -171,4 +172,69 @@ def test_keeping_every_tile_is_dense_attention_plus_the_gate_term(
     dense = np.array(dense.astype(mx.float32))
     assert np.linalg.norm(term) > 0.5 * np.linalg.norm(dense)
     assert _rel(np.array(got.astype(mx.float32)), dense + term) < 0.01
+
+
+@nax_only
+def test_the_pin_hook_reads_back_and_replays_the_routing(monkeypatch):
+    """A traced forward records each call's block indices and float32
+    pooled q and k means and runs the shipped call's bits. Pinned to
+    those indices, a forward gives the same velocity; pinned to the other
+    tiles, another one."""
+    model = _tiny(0.8)
+    lay = _layout(*_CLIP, text=8)
+    m = vsa.tile_map(vsa.segments(lay, model.cfg.patch))
+    vs, aus = hf.latent_shapes(_CLIP[2], *_CLIP[:2])
+    xv, xa = mx.random.normal(vs), mx.random.normal(aus)
+    text = model.caption(mx.random.normal((1, 8, 40)))
+    seen = []
+    stock = vsa.attend
+
+    def attend(q, k, *rest):
+        seen.append((np.array(q.astype(mx.float32)),
+                     np.array(k.astype(mx.float32))))
+        return stock(q, k, *rest)
+
+    monkeypatch.setattr(vsa, "attend", attend)
+
+    def run():
+        return model(xv, xa, 0.25, 0.25, text, lay)
+
+    shipped = run()
+    with vsa.traced() as free:
+        own = run()
+    assert len(free.calls) == TINY["num_layers"]
+    # 3 dense tiles, then 8 video tiles of which each query tile keeps 2.
+    assert (m.num_prefix_tiles, m.variable_block_sizes.size) == (3, 11)
+    for c, (q, k) in zip(free.calls, seen[TINY["num_layers"]:]):
+        assert (c.pinned, c.shipped) == (False, True)
+        assert c.block_idx.shape == (2, 8, 3 + 2)
+        assert c.q_pooled.dtype == c.k_pooled.dtype == np.float32
+        np.testing.assert_allclose(c.q_pooled, _tile_means(q, m), rtol=1e-5,
+                                   atol=1e-6)
+        np.testing.assert_allclose(c.k_pooled, _tile_means(k, m), rtol=1e-5,
+                                   atol=1e-6)
+        # The GPU's float32 matmul may run at TF32.
+        np.testing.assert_allclose(
+            c.scores, c.q_pooled @ c.k_pooled.transpose(0, 2, 1)
+            / math.sqrt(128), rtol=1e-2, atol=1e-3)
+    for a, b in zip(shipped, own):
+        assert mx.array_equal(a, b)
+    pins = [c.block_idx for c in free.calls]
+    with vsa.traced(lambda n: pins[n]) as pinned:
+        same = run()
+    assert [c.pinned for c in pinned.calls] == [True, True]
+    for a, b in zip(same, shipped):
+        assert mx.array_equal(a, b)
+
+    def other(n):
+        idx = pins[n].copy()
+        for h in range(idx.shape[0]):
+            for t in range(idx.shape[1]):
+                rest = sorted(set(range(3, 11)) - set(idx[h, t, 3:]))
+                idx[h, t, 3:] = rest[:2]
+        return idx
+
+    with vsa.traced(other):
+        moved = run()
+    assert not mx.array_equal(moved[0], shipped[0])
 

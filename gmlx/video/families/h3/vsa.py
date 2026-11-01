@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0 AND MIT
 # The tile map is ported from build_h3_segment_geometry and the index maps
 # of MiniMaxH3VSAGeometry in FastVideo's
-# fastvideo/mlx_runtime/minimax_h3_vsa.py at commit 4d0a10d, modified for
-# gmlx (Apache-2.0; see licenses/FastVideo-LICENSE).
+# fastvideo/mlx_runtime/minimax_h3_vsa.py at commit 4d0a10d, and the traced
+# call follows h3_vsa_attention of that file, by way of mlx-kquant's
+# vsa_attention, modified for gmlx (Apache-2.0; see
+# licenses/FastVideo-LICENSE).
 """FastH3's video sparse attention (VSA) over one packed H3 sequence.
 
 The packed rows are cut into tiles of 64: each dense segment (text,
@@ -16,13 +18,21 @@ of each row adds a pooled-compression term. mlx-kquant's
 ``tile_map`` is FastVideo's tile map of a segment list, in numpy.
 ``geometry`` converts it, once per segment list, to mlx-kquant's
 ``VSAGeometry``, outside any compiled function.
+
+``traced`` is a hook for tests: in its block, each call records its
+block indices and its float32 pooled q and k means, and a call takes the
+block indices of ``pins`` in place of its own routing. Outside it a call
+is ``vsa_attention`` alone.
 """
 
 from __future__ import annotations
 
 import functools
 import math
-from dataclasses import dataclass
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import Any
 
 import mlx.core as mx
@@ -33,6 +43,8 @@ from gmlx.video.layout import Layout
 
 TILE = 64
 _TILE_SHAPE = (4, 4, 4)
+
+_local = threading.local()
 
 
 def _kq(name: str):
@@ -168,5 +180,121 @@ def attend(q: mx.array, k: mx.array, v: mx.array, gate: mx.array,
            geom: Any, sparsity: float) -> mx.array:
     """Video sparse attention of packed bfloat16 [S, heads, D] rows with
     the gate of each row, exempt mode: every dense key tile is kept."""
+    trace = getattr(_local, "trace", None)
+    if trace is not None:
+        return trace.attend(q, k, v, gate, geom, sparsity)
     return _kq("vsa_attention")(q, k, v, geom, sparsity, gate=gate)
 
+
+# The test hook. Each piece follows mlx-kquant's vsa_attention op for op,
+# so a call with its own routing gives the bits of the shipped call.
+
+def _tile(x: mx.array, geom) -> mx.array:
+    zero = mx.zeros((1,) + x.shape[1:], dtype=x.dtype)
+    return mx.concatenate([x, zero])[geom.tile_gather_index]
+
+
+def _pool(x: mx.array, vbs: mx.array) -> mx.array:
+    n = x.shape[0] // TILE
+    pooled = x.astype(mx.float32).reshape(n, TILE, *x.shape[1:]).sum(axis=1)
+    pooled = pooled / vbs.astype(mx.float32)[:, None, None]
+    return pooled.transpose(1, 0, 2)
+
+
+def _dense(q, k, v, scale):
+    return mx.fast.scaled_dot_product_attention(
+        q.transpose(1, 0, 2)[None], k.transpose(1, 0, 2)[None],
+        v.transpose(1, 0, 2)[None], scale=scale)[0].transpose(1, 0, 2)
+
+
+def _gate_term(coarse, gate_tiled, tiles):
+    heads, dim = gate_tiled.shape[1:]
+    out_c = coarse[:, :tiles].transpose(1, 0, 2)
+    g = gate_tiled[:tiles * TILE].reshape(tiles, TILE, heads, dim)
+    term = (out_c[:, None, :, :] * g).reshape(tiles * TILE, heads, dim)
+    return term.astype(gate_tiled.dtype)
+
+
+def _route(scores: mx.array, n_prefix: int, sparsity: float) -> mx.array:
+    """FastVideo's exempt routing of one video region: every dense tile,
+    then the top k video tiles of each video query tile."""
+    heads, n = scores.shape[0], scores.shape[-1]
+    n_video = n - n_prefix
+    keep = max(1, min(math.ceil((1.0 - sparsity) * n_video), n_video))
+    if keep == n_video:
+        return mx.broadcast_to(mx.arange(n, dtype=mx.int32)[None, None, :],
+                               (heads, n_video, n))
+    cols = scores[:, n_prefix:, n_prefix:n]
+    top = mx.argpartition(-cols, kth=keep - 1, axis=-1)[:, :, :keep]
+    top = top.astype(mx.int32) + n_prefix
+    if not n_prefix:
+        return top
+    dense = mx.broadcast_to(mx.arange(n_prefix, dtype=mx.int32)[None, None],
+                            (heads, n_video, n_prefix))
+    return mx.concatenate([dense, top], axis=-1)
+
+
+@dataclass(frozen=True)
+class Call:
+    """One traced call: its block indices [heads, video tiles, kept], the
+    float32 pooled q and k means [heads, tiles, D] and their scores
+    [heads, tiles, tiles]. A pinned call ran the pins' indices; a call on
+    its own routing records whether its output has the bits of the
+    shipped call (``shipped``)."""
+    block_idx: np.ndarray
+    q_pooled: np.ndarray
+    k_pooled: np.ndarray
+    scores: np.ndarray
+    pinned: bool
+    shipped: bool | None
+
+
+@dataclass
+class Trace:
+    """The calls of a ``traced`` block, in order. ``pins(n)`` gives call
+    n's block indices, or None for its own routing."""
+    pins: Callable | None = None
+    calls: list = field(default_factory=list)
+
+    def attend(self, q, k, v, gate, geom, sparsity):
+        pin = None if self.pins is None else self.pins(len(self.calls))
+        heads, dim = q.shape[1:]
+        scale = dim ** -0.5
+        vbs, n_prefix = geom.variable_block_sizes, geom.num_prefix_tiles
+        qt, kt, vt, gt = (_tile(x, geom) for x in (q, k, v, gate))
+        qp, kp = _pool(qt, vbs), _pool(kt, vbs)
+        scores = (qp @ kp.transpose(0, 2, 1)) / (dim ** 0.5)
+        coarse = mx.softmax(scores, axis=-1) @ _pool(vt, vbs)
+        idx = (_route(scores, n_prefix, sparsity) if pin is None
+               else mx.array(np.asarray(pin), dtype=mx.int32))
+        num = mx.full(idx.shape[:2], idx.shape[-1], dtype=mx.int32)
+        n = geom.prefix_length
+        head = _dense(q[:n], k, v, scale) if n else q[:0]
+        video = _kq("vsa_block_sparse")(
+            qt, kt, vt, idx, num, vbs, n_prefix, scale, tile_size=TILE,
+            coarse=coarse, gate=gt)[n_prefix * TILE:]
+        zero = mx.zeros((1, heads, dim), dtype=q.dtype)
+        prefix = mx.concatenate([head, zero])[geom.prefix_gather_index]
+        prefix = prefix + _gate_term(coarse, gt, n_prefix)
+        out = mx.concatenate([prefix, video], axis=0)[geom.untile_index]
+        shipped = None
+        if pin is None:
+            ref = _kq("vsa_attention")(q, k, v, geom, sparsity, gate=gate)
+            shipped = bool(mx.array_equal(out, ref).item())
+            out = ref
+        self.calls.append(Call(
+            block_idx=np.array(idx), q_pooled=np.array(qp),
+            k_pooled=np.array(kp), scores=np.array(scores),
+            pinned=pin is not None, shipped=shipped))
+        return out
+
+
+@contextmanager
+def traced(pins: Callable | None = None) -> Iterator[Trace]:
+    """Trace every call on this thread in the block (a test hook)."""
+    prev = getattr(_local, "trace", None)
+    _local.trace = trace = Trace(pins)
+    try:
+        yield trace
+    finally:
+        _local.trace = prev
