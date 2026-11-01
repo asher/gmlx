@@ -14,6 +14,7 @@ H3_CONFIG = "h3_transformer_config.json"
 H3_IDENTITY = "h3_identity.json"
 H3_IDENTITY_MOLBAL = "h3_identity_molbal.json"
 H3_IDENTITY_MOLBAL_TURBO = "h3_identity_molbal_turbo.json"
+FASTH3_FV_GEOMETRY = "fasth3_fv_geometry.npz"
 
 
 # The size of the stock Qwen3-VL-32B GGUF's vocabulary as the stub lays it
