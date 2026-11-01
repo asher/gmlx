@@ -8,8 +8,9 @@
 """FastH3's video sparse attention (VSA) over one packed H3 sequence.
 
 The packed rows are cut into tiles of 64: each dense segment (text,
-audio, audio anchors) into chunks of its own rows, then the target video
-into 4 x 4 x 4 tiles of its (latent frames, H / 2, W / 2) token grid.
+audio) into chunks of its own rows, then the target video into 4 x 4 x 4
+tiles of its (latent frames, H / 2, W / 2) token grid. FastH3 runs text
+to video only, so a layout with an anchor is refused (``anchor_refusal``).
 Each video query tile attends every dense tile and its top-scoring video
 tiles by pooled q and k means; the dense rows attend every row; the gate
 of each row adds a pooled-compression term. mlx-kquant's
@@ -40,6 +41,8 @@ import mlx_kquant as kq
 import numpy as np
 
 from gmlx.video.layout import Layout
+
+from .family import FASTH3, TITLE
 
 TILE = 64
 _TILE_SHAPE = (4, 4, 4)
@@ -74,17 +77,26 @@ class TileMap:
     video_tile_spans: tuple
 
 
+def anchor_refusal(anchors: tuple) -> str | None:
+    """Why FastH3 does not run a request with ``anchors`` (``Anchor`` or
+    ``layout.AnchorRows``), or None for none. It runs text to video only,
+    so it takes no keyframe or guide, video or audio."""
+    n = len(anchors)
+    if not n:
+        return None
+    return (f"{TITLE} {FASTH3} runs text to video only, and this request "
+            f"has {n} anchor{'s' if n > 1 else ''}; run it without "
+            f"keyframes, guides or audio anchors")
+
+
 def segments(layout: Layout, patch: tuple) -> tuple:
     """FastVideo's segments of an H3 layout, in packed order: the target
-    video as its token grid, every other segment as its row count. FastH3
-    is text to video, so a video anchor, a second video region, is
-    refused."""
-    anchors = sum(s.kind == "cond" for s in layout.segments)
-    if anchors:
-        raise ValueError(
-            f"FastH3's video sparse attention runs over one video region, "
-            f"the target video, and this layout also has {anchors} video "
-            f"anchor segment{'s' if anchors > 1 else ''}")
+    video as its token grid, every other segment as its row count. A
+    layout with an anchor is refused, as ``api.sample`` refuses it before
+    its first step."""
+    why = anchor_refusal(layout.signature[5])
+    if why:
+        raise ValueError(why)
     _, t, h, w = layout.signature[:4]
     grid = (t // patch[0], h // patch[1], w // patch[2])
     return tuple(grid if s.kind == "video" else s.rows
