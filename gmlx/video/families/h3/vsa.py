@@ -21,9 +21,12 @@ of each row adds a pooled-compression term. mlx-kquant's
 ``VSAGeometry``, outside any compiled function.
 
 ``traced`` is a hook for tests: in its block, each call records its
-block indices and its float32 pooled q and k means, and a call takes the
-block indices of ``pins`` in place of its own routing. Outside it a call
-is ``vsa_attention`` alone.
+block indices, its float32 pooled q and k means and their scores, and a
+call takes the block indices of ``pins`` in place of its own routing.
+Outside it a call is ``vsa_attention`` alone. The scores are float32
+products on every device, as mlx-kquant computes them: on a GPU that
+multiplies float32 at TF32, each operand is split into the part TF32
+reads exactly and the rest (``gmlx.image.float32.split``).
 """
 
 from __future__ import annotations
@@ -40,6 +43,7 @@ import mlx.core as mx
 import mlx_kquant as kq
 import numpy as np
 
+from gmlx.image.float32 import f32_products_exact, split
 from gmlx.video.layout import Layout
 
 from .family import FASTH3, TITLE
@@ -226,6 +230,19 @@ def _gate_term(coarse, gate_tiled, tiles):
     return term.astype(gate_tiled.dtype)
 
 
+def _scores(qp: mx.array, kp: mx.array) -> mx.array:
+    """The routing scores of pooled q and k [heads, tiles, D] over the
+    square root of D, at float32 precision. On a device that multiplies
+    float32 at TF32 they are qh @ kh.T + (qh @ kl.T + ql @ kh.T) of the
+    split operands, k transposed after its split, in that order."""
+    scale = qp.shape[-1] ** 0.5
+    if f32_products_exact():
+        return (qp @ kp.transpose(0, 2, 1)) / scale
+    qh, ql = split(qp)
+    kh, kl = (x.transpose(0, 2, 1) for x in split(kp))
+    return (qh @ kh + (qh @ kl + ql @ kh)) / scale
+
+
 def _route(scores: mx.array, n_prefix: int, sparsity: float) -> mx.array:
     """FastVideo's exempt routing of one video region: every dense tile,
     then the top k video tiles of each video query tile."""
@@ -248,10 +265,10 @@ def _route(scores: mx.array, n_prefix: int, sparsity: float) -> mx.array:
 @dataclass(frozen=True)
 class Call:
     """One traced call: its block indices [heads, video tiles, kept], the
-    float32 pooled q and k means [heads, tiles, D] and their scores
-    [heads, tiles, tiles]. A pinned call ran the pins' indices; a call on
-    its own routing records whether its output has the bits of the
-    shipped call (``shipped``)."""
+    float32 pooled q and k means [heads, tiles, D] and their float32
+    scores [heads, tiles, tiles]. A pinned call ran the pins' indices; a
+    call on its own routing records whether its output has the bits of
+    the shipped call (``shipped``)."""
     block_idx: np.ndarray
     q_pooled: np.ndarray
     k_pooled: np.ndarray
@@ -274,7 +291,7 @@ class Trace:
         vbs, n_prefix = geom.variable_block_sizes, geom.num_prefix_tiles
         qt, kt, vt, gt = (_tile(x, geom) for x in (q, k, v, gate))
         qp, kp = _pool(qt, vbs), _pool(kt, vbs)
-        scores = (qp @ kp.transpose(0, 2, 1)) / (dim ** 0.5)
+        scores = _scores(qp, kp)
         coarse = mx.softmax(scores, axis=-1) @ _pool(vt, vbs)
         idx = (_route(scores, n_prefix, sparsity) if pin is None
                else mx.array(np.asarray(pin), dtype=mx.int32))

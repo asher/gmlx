@@ -18,6 +18,7 @@ from video_fixtures import (FASTH3_FV_GEOMETRY, FIXTURES, H3_IDENTITY_FASTH3,
                             fasth3_view, load_json)
 
 from gmlx.image import pacing
+from gmlx.image.float32 import f32_products_exact, split
 from gmlx.video import layout
 from gmlx.video import fingerprint as vfp
 from gmlx.video import loader as vloader
@@ -314,10 +315,10 @@ def test_the_pin_hook_reads_back_and_replays_the_routing(monkeypatch):
                                    atol=1e-6)
         np.testing.assert_allclose(c.k_pooled, _tile_means(k, m), rtol=1e-5,
                                    atol=1e-6)
-        # The GPU's float32 matmul may run at TF32.
+        # float32 products on every device, TF32 or not.
         np.testing.assert_allclose(
             c.scores, c.q_pooled @ c.k_pooled.transpose(0, 2, 1)
-            / math.sqrt(128), rtol=1e-2, atol=1e-3)
+            / math.sqrt(128), rtol=1e-5, atol=1e-6)
     for a, b in zip(shipped, own):
         assert mx.array_equal(a, b)
     pins = [c.block_idx for c in free.calls]
@@ -339,3 +340,32 @@ def test_the_pin_hook_reads_back_and_replays_the_routing(monkeypatch):
         moved = run()
     assert not mx.array_equal(moved[0], shipped[0])
 
+
+@nax_only
+def test_the_hook_keeps_the_shipped_bits_with_float32_scores(monkeypatch):
+    """On a GPU that multiplies float32 at TF32, mlx-kquant scores the
+    routing on split operands: qh @ kh.T + (qh @ kl.T + ql @ kh.T), k
+    transposed after its split. The hook records those scores bit for bit
+    and its own pieces give the shipped call's bits with them, and not
+    with the direct product."""
+    if f32_products_exact():
+        pytest.skip("this GPU multiplies float32 at float32")
+    lay = _layout(*_CLIP, text=8)
+    geom = vsa.geometry(vsa.segments(lay, hf.CONSTANTS.values["patch_size"]))
+    q, k, v, gate = (mx.random.normal((lay.rows, 2, 128),
+                                      key=mx.random.key(i)).astype(
+                                          mx.bfloat16) for i in range(4))
+
+    def call():
+        with vsa.traced() as trace:
+            vsa.attend(q, k, v, gate, geom, hf.VSA_SPARSITY)
+        return trace.calls[0]
+
+    c = call()
+    assert c.shipped is True
+    qh, ql = split(mx.array(c.q_pooled))
+    kh, kl = (x.transpose(0, 2, 1) for x in split(mx.array(c.k_pooled)))
+    want = (qh @ kh + (qh @ kl + ql @ kh)) / math.sqrt(128)
+    np.testing.assert_array_equal(c.scores, np.array(want))
+    monkeypatch.setattr(vsa, "f32_products_exact", lambda: True)
+    assert call().shipped is False
