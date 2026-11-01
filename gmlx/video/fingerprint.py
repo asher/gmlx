@@ -3,10 +3,13 @@
 The video families' rules run before the text-arch check, since a video
 DiT can carry a text arch label (some H3 converters write ``qwen3vl`` or
 ``wan``); a label that contradicts the tensors is refused by the family's
-name. The variant comes from the image stack's identity hash of small
-float tensors. A known file is also named by a hash of rows of q, k and v
-in its fused qkv tensor (``layout_identity``), which fixes the row order
-that the header cannot show.
+name, unless the identity row of the weights lists it. The variant comes
+from the image stack's identity hash of small float tensors. A known file
+is also named by a hash of rows of q, k and v in its fused qkv tensor
+(``layout_identity``), which fixes the row order that the header cannot
+show. A variant that runs video sparse attention takes its sparsity into
+the config, and its gate tensors must be there; a file with gates and
+other weights is refused.
 """
 
 from __future__ import annotations
@@ -116,6 +119,31 @@ def _variant(fam: VideoFamily, row: VideoVariantRow | None,
     return given
 
 
+def _vsa_sparsity(fam: VideoFamily, view: HeaderView, name: str) -> float:
+    """The VSA sparsity variant ``name`` runs at, 0 for dense attention.
+    Raises ``VideoModelError`` when the file's gates and the variant
+    disagree."""
+    row = fam.variant_row(name)
+    sparsity = row.vsa_sparsity if row is not None else 0.0
+    gated = bool(fam.vsa_gate) and any(n.endswith(fam.vsa_gate)
+                                       for n in view.tensors)
+    if gated and not sparsity:
+        known = ", ".join(sorted({r.name for r in (*fam.variants.values(),
+                                                   *fam.layouts.values())
+                                  if r.vsa_sparsity}))
+        match = ("no known weights" if name == "unknown"
+                 else f"{fam.title} {name}")
+        raise VideoModelError(
+            f"this {fam.title} GGUF has video sparse attention gates "
+            f"({fam.vsa_gate}), which gmlx video runs only on the weights "
+            f"of {fam.title} {known}, and its weights match {match}")
+    if sparsity and not gated:
+        raise VideoModelError(
+            f"{fam.title} {name} runs video sparse attention with a gate "
+            f"in each block, and this GGUF has no {fam.vsa_gate} tensors")
+    return sparsity
+
+
 def _refuse_image(view: HeaderView) -> None:
     """Refuse an image DiT by name, as gmlx image refuses a video one."""
     from gmlx.image.fingerprint import identify as image_identify
@@ -152,21 +180,26 @@ def identify(view: HeaderView, *, family: str | None = None,
             continue
         if isinstance(res, Refusal):
             raise VideoModelError(res.reason)
-        if arch not in fam.arch_strings:
+        ident = weight_identity(v, fam.identity_tensors)
+        row: VideoVariantRow | None = fam.variants.get(ident)
+        if arch not in fam.arch_strings and (row is None
+                                             or arch not in row.labels):
             raise VideoModelError(
                 f"arch {arch!r} contradicts the tensor layout, which is "
                 f"{fam.title} (arch {_arch_list(fam)})")
-        ident = weight_identity(v, fam.identity_tensors)
         if ident in fam.refused:
             raise VideoModelError(fam.refused[ident])
-        row: VideoVariantRow | None = fam.variants.get(ident)
         lhash = layout_identity(v, fam)
         lrow = fam.layouts.get(lhash)
+        name = _variant(fam, row, lrow, variant)
+        config = fam.synth_config(v)
+        sparsity = _vsa_sparsity(fam, v, name)
+        if sparsity:
+            config["vsa_sparsity"] = sparsity
         return VideoIdentified(
-            family=fam, config=fam.synth_config(v), prefix=v.prefix,
+            family=fam, config=config, prefix=v.prefix,
             layout=lrow.layout if lrow else "unverified",
-            variant=_variant(fam, row, lrow, variant), identity_hash=ident,
-            layout_hash=lhash, view=v)
+            variant=name, identity_hash=ident, layout_hash=lhash, view=v)
     if family:
         raise VideoModelError(
             f"not a {get_family(family).title} file. "

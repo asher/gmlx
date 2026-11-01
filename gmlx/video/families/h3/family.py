@@ -9,6 +9,9 @@ The header cannot tell a fused qkv stored [q; k; v] from one interleaved
 per head, so a known file is also named by a hash of rows of q, k and v
 head 0 in block 0's qkv (``layouts``); any other file loads with a
 warning.
+
+FastH3 has the same names plus a video sparse attention (VSA) gate in each
+block, ``attn.to_gate_compress``, and its files say arch ``wan``.
 """
 
 from __future__ import annotations
@@ -67,6 +70,9 @@ _BLOCK = {
 }
 BLOCK_GROUPS = (("blocks", _DEPTH, _BLOCK),
                 ("token_refiner.blocks", _REFINER, _ATTN_MLP))
+# The VSA gate of each block, which only FastH3's files carry.
+VSA_GATE = "attn.to_gate_compress.weight"
+_GATES = {VSA_GATE: (_D, _INNER)}
 _GROUP = re.compile(r"(blocks|token_refiner\.blocks)\.(\d+)\.")
 
 CONSTANTS = ConstantsRow(
@@ -226,6 +232,23 @@ SAMPLING = {
     TURBO4: VideoSampling(4, {"video": TURBO_768_SHIFT,
                               "audio": SHIFTS["audio"]}, *_MOLBAL_TURBO),
 }
+# FastVideo's FastH3 v2, distilled from H3 for 8 forwards with video
+# sparse attention: vantagewithai's pruned GGUF of it, labelled wan. The
+# release's fastvideo_inference.json runs VSA at sparsity 0.8, tile 64.
+FASTH3 = "fasth3"
+VSA_SPARSITY = 0.8
+_FASTH3 = VideoVariantRow(
+    FASTH3, "vantagewithai/FastVideo-FastH3-8-Step-V2-ComfyUI-GGUF",
+    "448ffec4210efe431a6b4a945672d88aea5f25f4",
+    ("fastvideo_fasth3_8step_v2_pruned-Q4_K_M.gguf",),
+    labels=frozenset({"wan"}), vsa_sparsity=VSA_SPARSITY)
+# Its identity tensors and its qkv rows each have a hash of their own.
+for _table, _hash in (
+        (VARIANTS,
+         "78c4a5d40cbaba415464e5bb08653edc2009759a9dd525c89757e74642fa9ef3"),
+        (LAYOUTS,
+         "af391118d2f51dd65caa716b6c1cd3efb2a7c7a2ba49548dabb8ae0658bc0e6e")):
+    _table[_hash] = _FASTH3
 REFUSED = {
     "247d976f868cf75afaa2aacee59150489afbc7006da79dec9adfb15d81b580bb": (
         "this is the %s Ref2VA checkpoint (reference images, video or audio); "
@@ -234,10 +257,13 @@ REFUSED = {
 }
 
 
-def expected() -> dict:
-    """Every tensor name of the file and its shape."""
+def expected(gates: bool = False) -> dict:
+    """Every tensor name of the file and its shape, with ``gates`` the VSA
+    gate of each block too."""
     out = dict(_TOP)
     for group, count, block in BLOCK_GROUPS:
+        if gates and group == "blocks":
+            block = {**block, **_GATES}
         for i in range(count):
             out.update({f"{group}.{i}.{n}": s for n, s in block.items()})
     return out
@@ -266,7 +292,7 @@ def fingerprint(view: HeaderView) -> Match | Refusal | None:
             f"a {TITLE} GGUF with int8 linears and separate weight_scale "
             f"tensors ({len(scaled)}), which gmlx video does not read: use "
             f"a K-quant or Q8_0 file")
-    want = expected()
+    want = expected(any(n.endswith(VSA_GATE) for n in view.tensors))
     diffs = [f"{g} has {view.count(g)} blocks, {TITLE} has {c}"
              for g, c, _ in BLOCK_GROUPS if view.count(g) != c]
     diffs += [f"{n} is {view.shape(n)}, {TITLE} has {s}"
@@ -429,4 +455,5 @@ FAMILY = VideoFamily(
     latent_shapes=latent_shapes,
     lora_map=_lora_map,
     lora_refusal=_lora_refusal,
+    vsa_gate=VSA_GATE,
 )

@@ -28,7 +28,11 @@ class VideoVariantRow:
     the order of the fused qkv rows in its files (``layout``). A variant
     with a LoRA merged into another's weights names that variant
     (``base``), whose identity tensors it keeps, and the LoRA
-    (``merged``)."""
+    (``merged``). ``labels`` are the ``general.architecture`` values its
+    files carry beyond the family's own. A variant that runs video sparse
+    attention (VSA) gives the fraction of video key tiles each video query
+    tile skips (``vsa_sparsity``), and its files carry the family's VSA
+    gate in every block."""
     name: str
     repo: str
     revision: str
@@ -36,6 +40,8 @@ class VideoVariantRow:
     layout: str = "qkv"
     base: str = ""
     merged: str = ""
+    labels: frozenset = frozenset()
+    vsa_sparsity: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -84,6 +90,9 @@ class VideoFamily:
     # kind) for a LoRA file gmlx refuses, or None.
     lora_map: Callable | None = None
     lora_refusal: Callable | None = None
+    # The name ending of the VSA gate tensors, which only the files of a
+    # VSA variant carry.
+    vsa_gate: str = ""
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in (*self.variants.values(),

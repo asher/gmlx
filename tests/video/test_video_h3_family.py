@@ -1,16 +1,17 @@
 """The MiniMax-H3 registry row: the config against the official
 transformer/config.json (check 1), the identity and qkv layout of every
 published quant, the Ref2VA rungs and relatives refused with the reason,
-the module tree against the file's names and shapes, and the line between
-gmlx video and gmlx image in both directions. CPU-only. Header fixtures
-hold names, shapes and codecs, no weights."""
+the module tree against the file's names and shapes, FastH3's gates and
+label, and the line between gmlx video and gmlx image in both directions.
+CPU-only. Header fixtures hold names, shapes and codecs, no weights."""
 from __future__ import annotations
 
 import hashlib
 
 import pytest
 from video_fixtures import (FIXTURES, H3_CONFIG, H3_HEADER, H3_IDENTITY,
-                            H3_IDENTITY_MOLBAL, H3_IDENTITY_MOLBAL_TURBO,
+                            H3_IDENTITY_FASTH3, H3_IDENTITY_MOLBAL,
+                            H3_IDENTITY_MOLBAL_TURBO, fasth3_view,
                             fixture_view, load_json, official_config)
 
 from gmlx.image import fingerprint as ifp
@@ -40,7 +41,8 @@ def test_the_fixtures_are_pinned():
     assert manifest[H3_HEADER]["revision"] == ident["revision"]
     assert ident["files"][manifest[H3_HEADER]["file"]]["sha256"] == \
         manifest[H3_HEADER]["sha256"]
-    for name in (H3_IDENTITY, H3_IDENTITY_MOLBAL, H3_IDENTITY_MOLBAL_TURBO):
+    for name in (H3_IDENTITY, H3_IDENTITY_MOLBAL, H3_IDENTITY_MOLBAL_TURBO,
+                 H3_IDENTITY_FASTH3):
         assert (manifest[name]["repo"], manifest[name]["revision"]) == (
             load_json(name)["repo"], load_json(name)["revision"])
 
@@ -71,11 +73,13 @@ def test_every_published_quant_is_named_by_its_identity():
     hash names its file and repository with the [q; k; v] layout. molbal's
     merged Turbo files keep the FL2VA identity tensors. molbal's scaled
     int8 files have no layout row: gmlx refuses them by their weight_scale
-    tensors."""
+    tensors. vantagewithai's FastH3 file has an identity of its own."""
     fam = get_family("h3")
     named = set()
-    for fixture in (H3_IDENTITY, H3_IDENTITY_MOLBAL,
-                    H3_IDENTITY_MOLBAL_TURBO):
+    for fixture, variant in ((H3_IDENTITY, "fl2va"),
+                             (H3_IDENTITY_MOLBAL, "fl2va"),
+                             (H3_IDENTITY_MOLBAL_TURBO, "fl2va"),
+                             (H3_IDENTITY_FASTH3, hf.FASTH3)):
         ident = load_json(fixture)
         assert tuple(ident["identity_tensors"]) == fam.identity_tensors
         assert (ident["layout_tensor"], ident["layout_rows"]) == (
@@ -85,7 +89,7 @@ def test_every_published_quant_is_named_by_its_identity():
                 assert "Ref2VA" in fam.refused[row["variant_hash"]], name
                 assert row["layout_hash"] not in fam.layouts, name
                 continue
-            assert fam.variants[row["variant_hash"]].name == "fl2va", name
+            assert fam.variants[row["variant_hash"]].name == variant, name
             if row["layout_codec"] == "I8":
                 assert row["layout_hash"] not in fam.layouts, name
                 continue
@@ -96,7 +100,7 @@ def test_every_published_quant_is_named_by_its_identity():
             named.add(name)
     assert named == {f for r in fam.layouts.values() for f in r.files}
     unsloth = {n for n in load_json(H3_IDENTITY)["files"] if "_fl2va_" in n}
-    assert unsloth == set(next(iter(fam.variants.values())).files)
+    assert unsloth == set(fam.variant_row("fl2va").files)
 
 
 def test_a_header_alone_runs_unverified():
@@ -167,7 +171,9 @@ def test_a_merged_turbo_file_is_its_own_variant(monkeypatch):
     assert (s.steps, s.shifts) == (4, {"video": 6.0, "audio": 3.0})
     assert hf.FAMILY.sampling["fl2va"].shifts == {"video": 12.0,
                                                   "audio": 3.0}
-    assert set(hf.FAMILY.sampling) == set(hf.FAMILY.variant_names())
+    # FastH3's own schedule is not in gmlx video yet.
+    assert set(hf.FAMILY.sampling) == set(hf.FAMILY.variant_names()) - {
+        hf.FASTH3}
     assert vfp.identify(view, variant=hf.TURBO4).variant == hf.TURBO4
     assert _refused(view, variant="fl2va") == (
         "variant='fl2va' contradicts the weights, which match MiniMax-H3 "
@@ -184,13 +190,74 @@ def test_a_given_variant_must_fit_the_weights(monkeypatch):
     assert vfp.identify(view).variant == "fl2va"
     assert vfp.identify(view, variant=hf.TURBO4).variant == hf.TURBO4
     assert _refused(view, variant="turbo") == (
-        "variant 'turbo' is not a MiniMax-H3 variant; known: fl2va, "
+        "variant 'turbo' is not a MiniMax-H3 variant; known: fasth3, fl2va, "
         "fl2va-turbo4")
     unsloth = next(h for h, r in hf.LAYOUTS.items() if r.name == "fl2va")
     view = _named(monkeypatch, base, unsloth)
     assert _refused(view, variant=hf.TURBO4) == (
         "variant='fl2va-turbo4' contradicts the weights, which match "
         "MiniMax-H3 fl2va")
+
+def _fasth3_hashes() -> tuple:
+    row = load_json(H3_IDENTITY_FASTH3)["files"][
+        "fastvideo_fasth3_8step_v2_pruned-Q4_K_M.gguf"]
+    return row["variant_hash"], row["layout_hash"]
+
+
+def test_fasth3_is_named_by_its_weights_under_its_wan_label(monkeypatch):
+    """vantagewithai's FastH3 file says wan. Its identity row accepts that
+    label, names it fasth3 with the [q; k; v] layout, and puts its VSA
+    sparsity in the config, whose module tree holds a gate in each
+    block."""
+    from mlx.utils import tree_flatten
+
+    ident, lay = _fasth3_hashes()
+    monkeypatch.setattr(vfp, "weight_identity", lambda view, names: ident)
+    monkeypatch.setattr(vfp, "layout_identity", lambda view, fam: lay)
+    view = fasth3_view()
+    got = vfp.identify(view)
+    assert (got.variant, got.layout) == (hf.FASTH3, "qkv")
+    assert got.config["vsa_sparsity"] == 0.8
+    model = hf.FAMILY.build(got.config)
+    params = {k: tuple(v.shape) for k, v in tree_flatten(model.parameters())}
+    assert params == {n: tuple(reversed(t.shape))
+                      for n, t in view.tensors.items()}
+    assert params["blocks.49.attn.to_gate_compress.weight"] == (7168, 5376)
+
+
+def test_the_wan_label_is_taken_only_with_fasth3_weights(monkeypatch):
+    fl2va = load_json(H3_IDENTITY)["files"][
+        "minimax_h3_fl2va_pruned-Q4_K.gguf"]["variant_hash"]
+    monkeypatch.setattr(vfp, "weight_identity", lambda view, names: fl2va)
+    assert _refused(fixture_view(H3_HEADER, kv={
+        "general.architecture": "wan"})) == (
+        "arch 'wan' contradicts the tensor layout, which is MiniMax-H3 "
+        "(arch 'minimax_h3' or none)")
+
+
+@pytest.mark.parametrize("weights,match", [
+    ("fl2va", "MiniMax-H3 fl2va"), ("unknown", "no known weights")])
+def test_gates_on_other_weights_are_refused(monkeypatch, weights, match):
+    """A full set of gates on FL2VA weights, or on weights gmlx does not
+    know, would run FastH3's attention on a model not trained for it."""
+    ident = (load_json(H3_IDENTITY)["files"][
+        "minimax_h3_fl2va_pruned-Q4_K.gguf"]["variant_hash"]
+        if weights == "fl2va" else None)
+    monkeypatch.setattr(vfp, "weight_identity", lambda view, names: ident)
+    assert _refused(fasth3_view(arch=None)) == (
+        "this MiniMax-H3 GGUF has video sparse attention gates "
+        "(attn.to_gate_compress.weight), which gmlx video runs only on the "
+        f"weights of MiniMax-H3 fasth3, and its weights match {match}")
+
+
+def test_fasth3_weights_without_their_gates_are_refused(monkeypatch):
+    ident, lay = _fasth3_hashes()
+    monkeypatch.setattr(vfp, "weight_identity", lambda view, names: ident)
+    monkeypatch.setattr(vfp, "layout_identity", lambda view, fam: lay)
+    assert _refused(fasth3_view(gates=False)) == (
+        "MiniMax-H3 fasth3 runs video sparse attention with a gate in each "
+        "block, and this GGUF has no attn.to_gate_compress.weight tensors")
+
 
 @pytest.mark.parametrize("change,reason", [
     ({"drop": ("blocks.49.",)}, "blocks has 49 blocks, MiniMax-H3 has 50"),
@@ -203,8 +270,8 @@ def test_a_given_variant_must_fit_the_weights(monkeypatch):
      "(5376, 28672)"),
     ({"add": {"blocks.0.attn.to_gate_compress.weight": ((5376, 7168),
                                                         "Q4_K")}},
-     "blocks.0.attn.to_gate_compress.weight is not a MiniMax-H3 tensor"),
-], ids=["depth", "refiners", "missing", "ffn width", "sparse gate"])
+     "blocks.1.attn.to_gate_compress.weight is missing"),
+], ids=["depth", "refiners", "missing", "ffn width", "one sparse gate"])
 def test_a_relative_is_refused_with_the_reason(change, reason):
     msg = _refused(fixture_view(H3_HEADER, **change))
     assert "MiniMax-H3 relative" in msg and reason in msg

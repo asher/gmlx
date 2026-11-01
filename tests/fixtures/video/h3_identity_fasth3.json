@@ -1,0 +1,23 @@
+{
+ "_note": "The identity tensors and the layout rows of the layout tensor of the FastH3 v2 GGUF of the repository that gmlx names, read from the file: the sha256 of the identity tensors' bf16 bits as gmlx.image.fingerprint.weight_identity forms it, and the sha256 of the layout rows as gmlx.video.fingerprint.layout_identity reads them",
+ "repo": "vantagewithai/FastVideo-FastH3-8-Step-V2-ComfyUI-GGUF",
+ "revision": "448ffec4210efe431a6b4a945672d88aea5f25f4",
+ "identity_tensors": [
+  "adaln_t_table",
+  "rope.inv_freq",
+  "final_layer.norm.weight",
+  "token_refiner.final_norm.weight"
+ ],
+ "layout_tensor": "blocks.0.attn.qkv_proj.weight",
+ "layout_rows": 4,
+ "files": {
+  "fastvideo_fasth3_8step_v2_pruned-Q4_K_M.gguf": {
+   "variant_hash": "78c4a5d40cbaba415464e5bb08653edc2009759a9dd525c89757e74642fa9ef3",
+   "layout_hash": "af391118d2f51dd65caa716b6c1cd3efb2a7c7a2ba49548dabb8ae0658bc0e6e",
+   "layout_codec": "Q4_K",
+   "n_tensors": 582,
+   "size": 13613532704,
+   "sha256": "2f2bb5b1c3e55782ceeda1cf4620cae97c748620001c6e35e85f5e71e5a478cc"
+  }
+ }
+}

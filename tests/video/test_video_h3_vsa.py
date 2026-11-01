@@ -180,7 +180,7 @@ def test_the_pin_hook_reads_back_and_replays_the_routing(monkeypatch):
     pooled q and k means and runs the shipped call's bits. Pinned to
     those indices, a forward gives the same velocity; pinned to the other
     tiles, another one."""
-    model = _tiny(0.8)
+    model = _tiny(hf.VSA_SPARSITY)
     lay = _layout(*_CLIP, text=8)
     m = vsa.tile_map(vsa.segments(lay, model.cfg.patch))
     vs, aus = hf.latent_shapes(_CLIP[2], *_CLIP[:2])

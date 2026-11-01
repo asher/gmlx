@@ -14,6 +14,7 @@ H3_CONFIG = "h3_transformer_config.json"
 H3_IDENTITY = "h3_identity.json"
 H3_IDENTITY_MOLBAL = "h3_identity_molbal.json"
 H3_IDENTITY_MOLBAL_TURBO = "h3_identity_molbal_turbo.json"
+H3_IDENTITY_FASTH3 = "h3_identity_fasth3.json"
 FASTH3_FV_GEOMETRY = "fasth3_fv_geometry.npz"
 
 
@@ -78,6 +79,16 @@ def fixture_view(name: str, *, drop=(), add=None, kv=None, prefix=""):
     for n, (shape, codec) in (add or {}).items():
         tensors[prefix + n] = Tensor(tuple(shape), codec)
     return HeaderView(kv=dict(d["kv"] if kv is None else kv), tensors=tensors)
+
+
+def fasth3_view(*, gates: bool = True, arch: str | None = "wan"):
+    """The FastH3 v2 file's names and shapes as a view: the base header
+    with a VSA gate (5376, 7168) Q4_K in each of its 50 blocks, and its
+    arch label."""
+    add = {f"blocks.{i}.attn.to_gate_compress.weight": ((5376, 7168), "Q4_K")
+           for i in range(50)} if gates else {}
+    kv = {} if arch is None else {"general.architecture": arch}
+    return fixture_view(H3_HEADER, add=add, kv=kv)
 
 
 @functools.lru_cache(maxsize=None)
