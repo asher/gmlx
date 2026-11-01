@@ -200,11 +200,21 @@ def test_a_run_with_an_anchor_is_refused_before_its_first_step(monkeypatch,
 
 # On a NAX GPU: the call in a tiny FastH3 block.
 
-nax_only = pytest.mark.skipif(
-    bool(os.environ.get("KQUANT_FORCE_CPU")) or not mx.metal.is_available()
-    or getattr(kq, "vsa_attention", None) is None
-    or not getattr(kq, "nax_available", lambda: False)(),
-    reason="the sparse kernel runs on a NAX GPU")
+
+def _no_kernel() -> str | None:
+    """Why the sparse kernel does not run here, or None."""
+    if os.environ.get("KQUANT_FORCE_CPU") or not mx.metal.is_available():
+        return "the sparse kernel runs on the GPU"
+    if getattr(kq, "vsa_attention", None) is None:
+        return "mlx-kquant has no vsa_attention"
+    if not kq.nax_available():
+        return "the sparse kernel needs a GPU with NAX units"
+    return None
+
+
+_NO_KERNEL = _no_kernel()
+nax_only = pytest.mark.skipif(_NO_KERNEL is not None,
+                              reason=_NO_KERNEL or "")
 
 
 def _rel(a, b) -> float:
