@@ -6,8 +6,8 @@ FastVideo's build_h3_segment_geometry, in
 fastvideo/mlx_runtime/minimax_h3_vsa.py, runs on the segments of gmlx's
 packed layout of each shape: 56 text rows, the audio rows, then the
 video grid (latent frames, H / 2, W / 2). The module loads by path from
-a FastVideo checkout with two stubs: its logger, and the array
-constructor of mlx.core, which its index properties call on the numpy
+a FastVideo checkout with stub modules for its logger and for mlx.core,
+whose array constructor and int32 its index properties use on the numpy
 arrays they build. The oracle environment so needs numpy alone.
 
 Saved per shape: the four index arrays that mlx-kquant's VSAGeometry
