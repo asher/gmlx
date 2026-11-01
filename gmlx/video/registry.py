@@ -164,7 +164,8 @@ def vsa_refusal(fam: VideoFamily, variant: str) -> str | None:
     what = f"{fam.title} {variant} runs video sparse attention"
     if getattr(kq, "vsa_attention", None) is None:
         return (f"{what}, and the installed mlx-kquant {kq.__version__} "
-                f"has no vsa_attention")
+                f"has no vsa_attention; update mlx-kquant to a release "
+                f"that has it")
     if not kq.nax_available():
         return (f"{what}, whose kernel needs a GPU with NAX units (M5 or "
                 f"newer), and this Mac's GPU has none")

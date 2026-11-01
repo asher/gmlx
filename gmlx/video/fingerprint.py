@@ -128,15 +128,12 @@ def _vsa_sparsity(fam: VideoFamily, view: HeaderView, name: str) -> float:
     gated = bool(fam.vsa_gate) and any(n.endswith(fam.vsa_gate)
                                        for n in view.tensors)
     if gated and not sparsity:
-        known = ", ".join(sorted({r.name for r in (*fam.variants.values(),
-                                                   *fam.layouts.values())
-                                  if r.vsa_sparsity}))
-        match = ("no known weights" if name == "unknown"
-                 else f"{fam.title} {name}")
+        what = ("weights it does not know" if name == "unknown"
+                else f"the weights of {fam.title} {name}")
         raise VideoModelError(
             f"this {fam.title} GGUF has video sparse attention gates "
-            f"({fam.vsa_gate}), which gmlx video runs only on the weights "
-            f"of {fam.title} {known}, and its weights match {match}")
+            f"({fam.vsa_gate}), and gmlx video runs {what} with dense "
+            f"attention only, so it does not run this file")
     if sparsity and not gated:
         raise VideoModelError(
             f"{fam.title} {name} runs video sparse attention with a gate "

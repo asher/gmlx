@@ -235,9 +235,10 @@ def test_the_wan_label_is_taken_only_with_fasth3_weights(monkeypatch):
         "(arch 'minimax_h3' or none)")
 
 
-@pytest.mark.parametrize("weights,match", [
-    ("fl2va", "MiniMax-H3 fl2va"), ("unknown", "no known weights")])
-def test_gates_on_other_weights_are_refused(monkeypatch, weights, match):
+@pytest.mark.parametrize("weights,what", [
+    ("fl2va", "the weights of MiniMax-H3 fl2va"),
+    ("unknown", "weights it does not know")])
+def test_gates_on_other_weights_are_refused(monkeypatch, weights, what):
     """A full set of gates on FL2VA weights, or on weights gmlx does not
     know, would run FastH3's attention on a model not trained for it."""
     ident = (load_json(H3_IDENTITY)["files"][
@@ -246,8 +247,8 @@ def test_gates_on_other_weights_are_refused(monkeypatch, weights, match):
     monkeypatch.setattr(vfp, "weight_identity", lambda view, names: ident)
     assert _refused(fasth3_view(arch=None)) == (
         "this MiniMax-H3 GGUF has video sparse attention gates "
-        "(attn.to_gate_compress.weight), which gmlx video runs only on the "
-        f"weights of MiniMax-H3 fasth3, and its weights match {match}")
+        f"(attn.to_gate_compress.weight), and gmlx video runs {what} with "
+        "dense attention only, so it does not run this file")
 
 
 def test_fasth3_weights_without_their_gates_are_refused(monkeypatch):
