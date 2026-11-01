@@ -92,8 +92,7 @@ def anchor_refusal(anchors: tuple) -> str | None:
 def segments(layout: Layout, patch: tuple) -> tuple:
     """FastVideo's segments of an H3 layout, in packed order: the target
     video as its token grid, every other segment as its row count. A
-    layout with an anchor is refused, as ``api.sample`` refuses it before
-    its first step."""
+    layout with an anchor is refused (``anchor_refusal``)."""
     why = anchor_refusal(layout.signature[5])
     if why:
         raise ValueError(why)

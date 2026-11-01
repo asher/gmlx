@@ -18,7 +18,7 @@ from video_fixtures import (FASTH3_FV_GEOMETRY, FIXTURES, H3_IDENTITY_FASTH3,
                             fasth3_view, load_json)
 
 from gmlx.image import pacing
-from gmlx.video import api, layout
+from gmlx.video import layout
 from gmlx.video import fingerprint as vfp
 from gmlx.video import loader as vloader
 from gmlx.video.families.h3 import family as hf
@@ -176,26 +176,6 @@ def _tiny(sparsity: float) -> hm.H3Transformer:
                                   mx.float32)
     m.load_weights(list(w.items()))
     return m
-
-
-@pytest.mark.parametrize("anchor", sorted(_ANCHORS))
-def test_a_run_with_an_anchor_is_refused_before_its_first_step(monkeypatch,
-                                                               anchor):
-    """A FastH3 run with a keyframe or an audio anchor is refused before
-    it plans a step. A dense H3 runs the same layout."""
-    model = _tiny(hf.VSA_SPARSITY)
-    lay = _layout(*_CLIP, text=8, anchors=(_ANCHORS[anchor],))
-    planned = []
-    monkeypatch.setattr(hm.H3Transformer, "plan",
-                        lambda self, *a, **k: planned.append(a))
-    vs, aus = hf.latent_shapes(_CLIP[2], *_CLIP[:2])
-    with pytest.raises(ValueError) as ei:
-        api.sample(model, mx.zeros(vs), mx.zeros(aus),
-                   mx.zeros((1, 8, TINY["hidden_size"])), lay, steps=1,
-                   shifts=hf.SHIFTS)
-    assert str(ei.value) == _TEXT_TO_VIDEO
-    assert planned == []
-    assert _tiny(0.0).refusal(lay) is None
 
 
 # On a NAX GPU: the call in a tiny FastH3 block.

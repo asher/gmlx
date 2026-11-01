@@ -376,14 +376,6 @@ class H3Transformer(nn.Module):
         i0 = i0.astype(mx.int32)
         return _lerp(tab[i0], tab[i0 + 1], w)
 
-    def refusal(self, layout: Layout) -> str | None:
-        """Why this DiT does not run a request of ``layout``, or None.
-        FastH3 (a VSA sparsity) runs text to video only, so it refuses
-        any anchor."""
-        if self.cfg.vsa_sparsity:
-            return h3vsa.anchor_refusal(layout.signature[5])
-        return None
-
     def plan(self, layout: Layout, t_video: float, t_audio: float,
              rules: dict | None = None) -> StepPlan:
         """The step's times, segment rows, RoPE tables and VSA geometry.

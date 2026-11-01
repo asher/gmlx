@@ -49,12 +49,7 @@ def sample(model, video: mx.array, audio: mx.array, text: mx.array, layout,
     of ``steps`` + 1 entries each, replaces the schedule of ``shifts``.
     ``on_step(i, n)`` runs after each forward. ``pacer`` runs at each
     pause point inside a forward; the default evaluates there, which
-    bounds the graph to one block. A request the model refuses
-    (``model.refusal``), such as anchors on a text to video DiT, raises
-    ValueError before the first step."""
-    why = model.refusal(layout)
-    if why:
-        raise ValueError(why)
+    bounds the graph to one block."""
     sig = (schedule.stream_sigmas(steps, shifts) if sigmas is None
            else sigmas)
     sv, sa = sig["video"], sig["audio"]
