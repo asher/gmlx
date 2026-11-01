@@ -274,7 +274,8 @@ class DiTBlock(_Block):
         pause point after qkv keeps a LoRA delta's second product out of
         the RoPE step's peak. With a VSA geometry ``vsa`` (B = 1) the
         rows run video sparse attention with the gate of ``h``, packed
-        [L, heads, head dim]."""
+        [L, heads, head dim], with a pause point after the call, so its
+        transients are gone before ``out_proj`` and the feed-forward run."""
         b, n, _ = h.shape
         q, k, v = self.qkv(h)
         gate = None
@@ -292,6 +293,7 @@ class DiTBlock(_Block):
         if gate is not None:
             o = h3vsa.attend(q[0].transpose(1, 0, 2), k[0].transpose(1, 0, 2),
                              v[0], gate, vsa, self.vsa_sparsity)
+            pacing.point(o)
             return o.reshape(b, n, -1)
         o = attend(q, k, v.transpose(0, 2, 1, 3), chunk)
         return o.transpose(0, 2, 1, 3).reshape(b, n, -1)

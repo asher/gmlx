@@ -1,8 +1,8 @@
 """FastH3's video sparse attention: the tile map of gmlx's packed layout
 against FastVideo's index arrays at three FastH3 shapes, the refusals,
-and on a NAX GPU the call in a tiny FastH3 block and the test hook that
-pins and reads back its routing. The tile map and the refusals are
-CPU-only."""
+and on a NAX GPU the call in a tiny FastH3 block, its pause points and
+the test hook that pins and reads back its routing. The tile map and the
+refusals are CPU-only."""
 from __future__ import annotations
 
 import json
@@ -17,6 +17,7 @@ from mlx.utils import tree_flatten
 from video_fixtures import (FASTH3_FV_GEOMETRY, FIXTURES, H3_IDENTITY_FASTH3,
                             fasth3_view, load_json)
 
+from gmlx.image import pacing
 from gmlx.video import api, layout
 from gmlx.video import fingerprint as vfp
 from gmlx.video import loader as vloader
@@ -257,6 +258,25 @@ def test_keeping_every_tile_is_dense_attention_plus_the_gate_term(
     dense = np.array(dense.astype(mx.float32))
     assert np.linalg.norm(term) > 0.5 * np.linalg.norm(dense)
     assert _rel(np.array(got.astype(mx.float32)), dense + term) < 0.01
+
+
+@nax_only
+def test_a_sparse_block_pauses_after_qkv_and_after_the_call():
+    """A paced forward evaluates q, k, v and the gate before RoPE, then
+    the sparse call's rows, so the call's transients are gone before
+    out_proj and the feed-forward run."""
+    model = _tiny(hf.VSA_SPARSITY)
+    lay = _layout(*_CLIP, text=8)
+    plan = model.plan(lay, 0.25, 0.6)
+    h = mx.random.normal((1, lay.rows, TINY["hidden_size"])).astype(
+        mx.bfloat16)
+    seen = []
+    with pacing.paced(
+            lambda arrays: seen.append([tuple(a.shape) for a in arrays])):
+        model.blocks[0].attention(h, plan.cos, plan.sin, vsa=plan.vsa)
+    rows = (lay.rows, TINY["num_attention_heads"], TINY["attention_head_dim"])
+    assert [len(s) for s in seen] == [4, 1]
+    assert seen[0][3] == seen[1][0] == rows
 
 
 @nax_only
