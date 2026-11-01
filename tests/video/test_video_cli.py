@@ -234,6 +234,16 @@ def test_an_adapter_on_a_base_file_runs_without_a_warning(run, monkeypatch,
     assert "warning" not in err and "20 steps at shift 12, seed" in err
 
 
+def test_fasth3_is_refused_before_the_encoder_loads(run, capsys):
+    """gmlx video has no FastH3 schedule yet, so the command line does
+    not run it on another variant's defaults."""
+    assert run(variant=hf.FASTH3) == 1
+    assert run.loads == []
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        "error: gmlx video has no sampling defaults for MiniMax-H3 fasth3, "
+        "so it does not run it from the command line")
+
+
 def test_the_variant_flag_reaches_the_weights_check(run, capsys):
     assert run("--variant", hf.TURBO4) == "encoder"
     assert "4 steps at shift 6, seed" in capsys.readouterr().err

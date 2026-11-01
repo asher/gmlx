@@ -107,14 +107,24 @@ class VideoFamily:
         return None
 
     def sampling_row(self, variant: str) -> VideoSampling | None:
-        """The defaults a variant samples with: its own, else its base's,
-        else the unknown variant's."""
+        """The defaults a variant samples with: its own, else its base's.
+        A file of no known variant takes the unknown variant's. None for
+        a known variant gmlx video has no defaults for."""
         row = self.sampling.get(variant)
         v = self.variant_row(variant)
         if row is None and v is not None and v.base:
             row = self.sampling.get(v.base)
-        if row is None and self.unknown_variant is not None:
+        if row is None and v is None and self.unknown_variant is not None:
             row = self.sampling.get(self.unknown_variant)
+        return row
+
+    def defaults(self, variant: str) -> VideoSampling:
+        """``sampling_row``, or ValueError for a variant without one."""
+        row = self.sampling_row(variant)
+        if row is None:
+            raise ValueError(f"gmlx video has no sampling defaults for "
+                             f"{self.title} {variant}, so it does not run "
+                             f"it from the command line")
         return row
 
 

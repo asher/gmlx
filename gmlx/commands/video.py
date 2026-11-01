@@ -280,7 +280,7 @@ def _settings(a, fam, variant: str) -> dict:
     """The clip's settings: the flags, then the entry's defaults, then
     the variant's."""
     d = a.entry_defaults
-    row = fam.sampling_row(variant)
+    row = fam.defaults(variant)
     if a.frames is not None:
         frames = a.frames
     elif a.seconds is not None:

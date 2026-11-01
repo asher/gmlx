@@ -143,7 +143,7 @@ class _Clock:
 def _shifts(a, fam, variant: str) -> dict:
     """The variant's shifts with the video shift of the flag, else the
     entry's."""
-    shifts = dict(fam.sampling_row(variant).shifts)
+    shifts = dict(fam.defaults(variant).shifts)
     video = a.shift if a.shift is not None else a.entry_defaults.get("shift")
     if video is not None:
         shifts["video"] = video
