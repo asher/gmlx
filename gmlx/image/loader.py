@@ -159,6 +159,15 @@ def identify_dit(path: str, *, family: str | None = None,
     return identify(view, family=family, variant=variant)
 
 
+def _shown(fam, variant: str) -> str:
+    """The variant as the load line names it: a variant without defaults
+    of its own that samples with the unknown variant's says so."""
+    if (fam.unknown_variant and variant not in fam.sampling
+            and fam.sampling_row(variant) is not None):
+        return f"{variant}, sampling as {fam.unknown_variant}"
+    return variant
+
+
 def load_dit(path: str, *, family: str | None = None,
              variant: str | None = None, act_dtype: mx.Dtype | None = None,
              identified: Identified | None = None,
@@ -221,11 +230,8 @@ def load_dit(path: str, *, family: str | None = None,
     why = fam.variant_needed(ident.variant)
     if why:
         raise ImageModelError(why)
-    shown = ident.variant
-    if fam.unknown_variant and ident.variant not in fam.sampling:
-        shown += f", sampling as {fam.unknown_variant}"
-    log(f"[{kind}] {fam.title} ({shown}), layout {ident.layout}, "
-        f"{len(view.tensors)} tensors")
+    log(f"[{kind}] {fam.title} ({_shown(fam, ident.variant)}), layout "
+        f"{ident.layout}, {len(view.tensors)} tensors")
     # The tensors cast to the activation dtype are held twice until the
     # load ends.
     gate_load(file_bytes(view) + cast_bytes(view, act), str(path),

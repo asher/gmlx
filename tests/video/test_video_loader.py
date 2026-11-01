@@ -1,7 +1,8 @@
 """The video loader's handling of what the fingerprint found: a warning for
 unknown weights or an unverified qkv layout, a refusal for a known layout
-other than [q; k; v], and the image loader's refusals as video errors.
-CPU-only; the image loader is stubbed."""
+other than [q; k; v], the variant its load line names, and the image
+loader's refusals as video errors. CPU-only; the image loader is
+stubbed."""
 from __future__ import annotations
 
 import dataclasses
@@ -13,6 +14,7 @@ from gmlx.image import fingerprint as ifp
 from gmlx.image import loader as image_loader
 from gmlx.video import fingerprint as vfp
 from gmlx.video import loader as video_loader
+from gmlx.video.families.h3 import family as hf
 
 
 def _load(monkeypatch, **fields):
@@ -47,6 +49,16 @@ def test_an_unknown_file_loads_with_both_warnings(monkeypatch):
         "weights; it runs as fl2va",
         "[video] warning: this MiniMax-H3 GGUF is not a known file, so its "
         "qkv row order is unverified; it runs as [q; k; v]"]
+
+
+def test_the_load_line_names_the_defaults_a_variant_samples_with():
+    """A file of no known weights samples with fl2va's defaults, and its
+    load line says so. FastH3 has no defaults, so its line names it
+    alone."""
+    assert image_loader._shown(hf.FAMILY, "unknown") == (
+        "unknown, sampling as fl2va")
+    assert image_loader._shown(hf.FAMILY, hf.FASTH3) == "fasth3"
+    assert image_loader._shown(hf.FAMILY, "fl2va") == "fl2va"
 
 
 def test_a_known_per_head_layout_is_refused(monkeypatch):
