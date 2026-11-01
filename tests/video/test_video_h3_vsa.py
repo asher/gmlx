@@ -252,22 +252,27 @@ def test_keeping_every_tile_is_dense_attention_plus_the_gate_term(
 
 
 @nax_only
-def test_a_sparse_block_pauses_after_qkv_and_after_the_call():
+def test_a_sparse_block_pauses_after_qkv_and_after_the_call(monkeypatch):
     """A paced forward evaluates q, k, v and the gate before RoPE, then
-    the sparse call's rows, so the call's transients are gone before
-    out_proj and the feed-forward run."""
+    the sparse call's own output, so the call's transients are gone
+    before out_proj and the feed-forward run."""
     model = _tiny(hf.VSA_SPARSITY)
     lay = _layout(*_CLIP, text=8)
     plan = model.plan(lay, 0.25, 0.6)
     h = mx.random.normal((1, lay.rows, TINY["hidden_size"])).astype(
         mx.bfloat16)
-    seen = []
-    with pacing.paced(
-            lambda arrays: seen.append([tuple(a.shape) for a in arrays])):
+    calls, seen = [], []
+    stock = vsa.attend
+
+    def attend(*a):
+        calls.append(stock(*a))
+        return calls[-1]
+
+    monkeypatch.setattr(vsa, "attend", attend)
+    with pacing.paced(seen.append):
         model.blocks[0].attention(h, plan.cos, plan.sin, vsa=plan.vsa)
-    rows = (lay.rows, TINY["num_attention_heads"], TINY["attention_head_dim"])
     assert [len(s) for s in seen] == [4, 1]
-    assert seen[0][3] == seen[1][0] == rows
+    assert seen[1][0] is calls[0]
 
 
 @nax_only
