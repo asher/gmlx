@@ -20,7 +20,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Image LoRA stacks over the adapter cache load, and a server request over
-  it is refused, where both failed with "patch table names adapter ...".
+  it is refused.
 
 ## [0.5.4] - 2026-10-29
 
