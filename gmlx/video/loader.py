@@ -2,7 +2,9 @@
 
 ``load_dit`` identifies the file with the video rules and hands the result
 to ``gmlx.image.loader.load_dit``, which builds the family's module tree,
-installs a KQuantLinear per quantized matrix and fills every tensor.
+installs a KQuantLinear per quantized matrix and fills every tensor. A
+variant that runs video sparse attention is refused first where this
+install or Mac does not run it.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from gmlx.image.fingerprint import (Identified, ImageModelError,
                                     view_from_scans)
 
 from .fingerprint import VideoIdentified, VideoModelError, identify
+from .registry import vsa_refusal
 
 if TYPE_CHECKING:
     from gmlx.image.registry import Family
@@ -55,6 +58,10 @@ def load_dit(path: str, *, family: str | None = None,
         raise VideoModelError(
             f"this {fam.title} GGUF stores qkv as {vid.layout}, which gmlx "
             f"video does not run")
+    if vid.config.get("vsa_sparsity"):
+        why = vsa_refusal(fam, vid.variant)
+        if why:
+            raise VideoModelError(why)
     # The image loader reads only fields a video family also has.
     ident = Identified(family=cast("Family", fam), config=vid.config,
                        prefix=vid.prefix,

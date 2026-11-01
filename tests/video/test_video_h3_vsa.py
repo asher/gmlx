@@ -1,8 +1,8 @@
 """FastH3's video sparse attention: the tile map of gmlx's packed layout
-against FastVideo's index arrays at three FastH3 shapes, the refusal of
-a video anchor, and on a NAX GPU the call in a tiny FastH3 block and the
-test hook that pins and reads back its routing. The tile map and the
-refusal are CPU-only."""
+against FastVideo's index arrays at three FastH3 shapes, the refusals,
+and on a NAX GPU the call in a tiny FastH3 block and the test hook that
+pins and reads back its routing. The tile map and the refusals are
+CPU-only."""
 from __future__ import annotations
 
 import json
@@ -14,9 +14,12 @@ import mlx_kquant as kq
 import numpy as np
 import pytest
 from mlx.utils import tree_flatten
-from video_fixtures import FASTH3_FV_GEOMETRY, FIXTURES, load_json
+from video_fixtures import (FASTH3_FV_GEOMETRY, FIXTURES, H3_IDENTITY_FASTH3,
+                            fasth3_view, load_json)
 
+from gmlx.video import fingerprint as vfp
 from gmlx.video import layout
+from gmlx.video import loader as vloader
 from gmlx.video.families.h3 import family as hf
 from gmlx.video.families.h3 import model as hm
 from gmlx.video.families.h3 import vsa
@@ -75,6 +78,59 @@ def test_a_video_anchor_is_refused():
     assert str(ei.value) == (
         "FastH3's video sparse attention runs over one video region, the "
         "target video, and this layout also has 1 video anchor segment")
+
+
+@pytest.fixture
+def fasth3_load(monkeypatch):
+    """``load_dit`` on a file that identifies as FastH3, which records
+    whether the weights load."""
+    from gmlx.image import loader as iloader
+
+    row = load_json(H3_IDENTITY_FASTH3)["files"][
+        "fastvideo_fasth3_8step_v2_pruned-Q4_K_M.gguf"]
+    monkeypatch.setattr(vfp, "weight_identity",
+                        lambda view, names: row["variant_hash"])
+    monkeypatch.setattr(vfp, "layout_identity",
+                        lambda view, fam: row["layout_hash"])
+    monkeypatch.setattr(vloader, "identify_dit",
+                        lambda path, **kw: vfp.identify(fasth3_view(), **kw))
+    loads = []
+
+    def load(*a, **k):
+        loads.append(a)
+        return object(), None
+
+    monkeypatch.setattr(iloader, "load_dit", load)
+
+    def go():
+        vloader.load_dit("fasth3.gguf", log=lambda *x: None)
+    go.loads = loads
+    return go
+
+
+def test_a_kquant_without_vsa_attention_is_refused(fasth3_load, monkeypatch):
+    monkeypatch.delattr(kq, "vsa_attention", raising=False)
+    with pytest.raises(vfp.VideoModelError) as ei:
+        fasth3_load()
+    assert str(ei.value) == (
+        f"MiniMax-H3 fasth3 runs video sparse attention, and the installed "
+        f"mlx-kquant {kq.__version__} has no vsa_attention")
+    assert fasth3_load.loads == []
+
+
+def test_a_gpu_without_nax_is_refused(fasth3_load, monkeypatch):
+    monkeypatch.setattr(kq, "vsa_attention", lambda *a, **k: None,
+                        raising=False)
+    monkeypatch.setattr(kq, "nax_available", lambda: False)
+    with pytest.raises(vfp.VideoModelError) as ei:
+        fasth3_load()
+    assert str(ei.value) == (
+        "MiniMax-H3 fasth3 runs video sparse attention, whose kernel needs "
+        "a GPU with NAX units (M5 or newer), and this Mac's GPU has none")
+    assert fasth3_load.loads == []
+    monkeypatch.setattr(kq, "nax_available", lambda: True)
+    fasth3_load()
+    assert len(fasth3_load.loads) == 1
 
 
 # On a NAX GPU: a tiny FastH3 block, head dim 128 as the kernel takes.

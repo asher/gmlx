@@ -145,6 +145,22 @@ def chip_refusal(fam: VideoFamily) -> str | None:
             f"{chip_name()} chip")
 
 
+def vsa_refusal(fam: VideoFamily, variant: str) -> str | None:
+    """Why this install or Mac does not run ``variant``'s video sparse
+    attention, or None: mlx-kquant's ``vsa_attention`` runs it, on a GPU
+    with NAX units (M5 and later)."""
+    import mlx_kquant as kq
+
+    what = f"{fam.title} {variant} runs video sparse attention"
+    if getattr(kq, "vsa_attention", None) is None:
+        return (f"{what}, and the installed mlx-kquant {kq.__version__} "
+                f"has no vsa_attention")
+    if not kq.nax_available():
+        return (f"{what}, whose kernel needs a GPU with NAX units (M5 or "
+                f"newer), and this Mac's GPU has none")
+    return None
+
+
 def get_family(name: str) -> VideoFamily:
     for fam in families():
         if fam.name == name:
