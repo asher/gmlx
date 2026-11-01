@@ -10,7 +10,8 @@ audio, audio anchors) into chunks of its own rows, then the target video
 into 4 x 4 x 4 tiles of its (latent frames, H / 2, W / 2) token grid.
 Each video query tile attends every dense tile and its top-scoring video
 tiles by pooled q and k means; the dense rows attend every row; the gate
-of each row adds a pooled-compression term.
+of each row adds a pooled-compression term. mlx-kquant's
+``vsa_attention`` runs the call.
 
 ``tile_map`` is FastVideo's tile map of a segment list, in numpy.
 ``geometry`` converts it, once per segment list, to mlx-kquant's
@@ -161,4 +162,11 @@ def geometry(segs: tuple) -> Any:
         prefix_gather_index=mx.array(m.prefix_gather_index),
         untile_index=mx.array(m.untile_index),
         video_tile_spans=m.video_tile_spans, tile_size=TILE)
+
+
+def attend(q: mx.array, k: mx.array, v: mx.array, gate: mx.array,
+           geom: Any, sparsity: float) -> mx.array:
+    """Video sparse attention of packed bfloat16 [S, heads, D] rows with
+    the gate of each row, exempt mode: every dense key tile is kept."""
+    return _kq("vsa_attention")(q, k, v, geom, sparsity, gate=gate)
 

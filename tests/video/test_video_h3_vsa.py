@@ -1,16 +1,23 @@
 """FastH3's video sparse attention: the tile map of gmlx's packed layout
-against FastVideo's index arrays at three FastH3 shapes, and the refusal
-of a video anchor. CPU-only."""
+against FastVideo's index arrays at three FastH3 shapes, the refusal of
+a video anchor, and on a NAX GPU the call in a tiny FastH3 block. The
+tile map and the refusal are CPU-only."""
 from __future__ import annotations
 
 import json
+import math
+import os
 
+import mlx.core as mx
+import mlx_kquant as kq
 import numpy as np
 import pytest
+from mlx.utils import tree_flatten
 from video_fixtures import FASTH3_FV_GEOMETRY, FIXTURES, load_json
 
 from gmlx.video import layout
 from gmlx.video.families.h3 import family as hf
+from gmlx.video.families.h3 import model as hm
 from gmlx.video.families.h3 import vsa
 
 _SHAPES = {"512x512x22": (512, 512, 22), "768x768x39": (768, 768, 39),
@@ -67,4 +74,101 @@ def test_a_video_anchor_is_refused():
     assert str(ei.value) == (
         "FastH3's video sparse attention runs over one video region, the "
         "target video, and this layout also has 1 video anchor segment")
+
+
+# On a NAX GPU: a tiny FastH3 block, head dim 128 as the kernel takes.
+
+nax_only = pytest.mark.skipif(
+    bool(os.environ.get("KQUANT_FORCE_CPU")) or not mx.metal.is_available()
+    or getattr(kq, "vsa_attention", None) is None
+    or not getattr(kq, "nax_available", lambda: False)(),
+    reason="the sparse kernel runs on a NAX GPU")
+
+TINY = {"num_attention_heads": 2, "attention_head_dim": 128,
+        "hidden_size": 64, "num_layers": 2, "num_refiner_layers": 1,
+        "ffn_dim": 48, "in_channels": 24, "audio_in_channels": 32,
+        "patch_size": [1, 2, 2], "text_dim": 40, "rope_freq_dim": 16,
+        "norm_eps": 1e-5, "qk_norm_eps": 1e-5, "final_norm_eps": 1e-5,
+        "adaln_grid": 1025, "adaln_basis": 8}
+# 22 frames at 256x256: 8 text rows, 74 audio rows and a (6, 8, 8) video
+# grid, so 3 dense tiles and 8 video tiles, of which each video query
+# tile keeps 2 at sparsity 0.8.
+_CLIP = (256, 256, 22)
+# Gate weights this many times the others' scale, which makes the gate
+# term about 0.7 of the attention rows.
+GATE_SCALE = 4.0
+
+
+def _tiny(sparsity: float) -> hm.H3Transformer:
+    """Random weights in bfloat16, but for the family's float32 ones, as
+    the loader leaves them."""
+    mx.random.seed(0)
+    m = hm.H3Transformer({**TINY, "vsa_sparsity": sparsity})
+    w = {k: 0.05 * mx.random.normal(v.shape)
+         for k, v in tree_flatten(m.parameters())}
+    for k in w:
+        if k.endswith(".weight") and "norm" in k.split(".")[-2]:
+            w[k] = 1 + w[k]
+        elif k.endswith("to_gate_compress.weight"):
+            w[k] = GATE_SCALE * w[k]
+        if not any(p in k for p in hf.FAMILY.fp32_keep):
+            w[k] = w[k].astype(mx.bfloat16)
+    w["rope.inv_freq"] = mx.array(1 / 10000 ** (np.arange(16) / 16),
+                                  mx.float32)
+    m.load_weights(list(w.items()))
+    return m
+
+
+def _rel(a, b) -> float:
+    a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+    return float(np.linalg.norm(a - b) / np.linalg.norm(b))
+
+
+def _tile_means(rows: np.ndarray, m: vsa.TileMap) -> np.ndarray:
+    """float32 [heads, tiles, D] means of each tile's packed rows."""
+    tile = m.untile_index // vsa.TILE
+    out = np.zeros((m.variable_block_sizes.size,) + rows.shape[1:])
+    np.add.at(out, tile, rows.astype(np.float64))
+    out /= m.variable_block_sizes[:, None, None]
+    return out.transpose(1, 0, 2)
+
+
+@nax_only
+def test_keeping_every_tile_is_dense_attention_plus_the_gate_term(
+        monkeypatch):
+    """At a sparsity that keeps every tile, a block's sparse attention is
+    its dense attention plus the gate term: each row's gate of ``h``
+    times the softmax of its tile's pooled scores over the pooled v."""
+    model = _tiny(0.01)
+    lay = _layout(*_CLIP, text=8)
+    plan = model.plan(lay, 0.25, 0.25)
+    blk = model.blocks[0]
+    h = mx.random.normal((1, lay.rows, TINY["hidden_size"])).astype(
+        mx.bfloat16)
+    seen = {}
+    stock = vsa.attend
+
+    def attend(q, k, v, gate, geom, sparsity):
+        seen.update(q=q, k=k, v=v, gate=gate)
+        return stock(q, k, v, gate, geom, sparsity)
+
+    monkeypatch.setattr(vsa, "attend", attend)
+    got = blk.attention(h, plan.cos, plan.sin, vsa=plan.vsa)
+    dense = blk.attention(h, plan.cos, plan.sin)
+    m = vsa.tile_map(vsa.segments(lay, model.cfg.patch))
+    q, k, v = (np.array(seen[x].astype(mx.float32)) for x in "qkv")
+    gate = np.array(blk.attn.to_gate_compress(h)[0].astype(mx.float32))
+    np.testing.assert_array_equal(
+        gate.reshape(seen["gate"].shape), np.array(seen["gate"].astype(
+            mx.float32)))
+    qp, kp, vp = (_tile_means(x, m) for x in (q, k, v))
+    scores = qp @ kp.transpose(0, 2, 1) / math.sqrt(q.shape[-1])
+    p = np.exp(scores - scores.max(-1, keepdims=True))
+    coarse = (p / p.sum(-1, keepdims=True)) @ vp
+    tile = m.untile_index // vsa.TILE
+    term = coarse.transpose(1, 0, 2)[tile] * gate.reshape(q.shape)
+    term = term.reshape(1, lay.rows, -1)
+    dense = np.array(dense.astype(mx.float32))
+    assert np.linalg.norm(term) > 0.5 * np.linalg.norm(dense)
+    assert _rel(np.array(got.astype(mx.float32)), dense + term) < 0.01
 

@@ -10,12 +10,17 @@ first 96 dims of each head as split halves (``gmlx.video.rope``). The
 token refiner runs plain blocks over the text once per generation. The
 model returns the flow velocity, noise minus data, which is the negated
 output of its heads.
+
+FastH3 (config ``vsa_sparsity``) runs every DiT attention call as video
+sparse attention (``vsa``), with the gate of each block's
+``to_gate_compress`` on the same rows as its qkv.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -27,6 +32,7 @@ from gmlx.video.anchors import pinned
 from gmlx.video.layout import Layout
 
 from . import family as fam
+from . import vsa as h3vsa
 
 _F32 = mx.float32
 # Rows of one fc1 product on the stock path, which keeps its 2 x ffn wide
@@ -56,6 +62,7 @@ class H3Config:
     final_eps: float
     grid: int
     basis: int
+    vsa_sparsity: float = 0.0
 
     @property
     def inner(self) -> int:
@@ -81,19 +88,22 @@ class H3Config:
             patch=tuple(c["patch_size"]), text_dim=c["text_dim"],
             freqs=c["rope_freq_dim"], eps=c["norm_eps"],
             qk_eps=c["qk_norm_eps"], final_eps=c["final_norm_eps"],
-            grid=c["adaln_grid"], basis=c["adaln_basis"])
+            grid=c["adaln_grid"], basis=c["adaln_basis"],
+            vsa_sparsity=float(c.get("vsa_sparsity", 0.0)))
 
 
 @dataclass(frozen=True)
 class StepPlan:
     """What a step derives from its stream times and its layout: the
     distinct times ascending, each segment's (start, stop, modulation
-    row), the time index of each head, and the RoPE tables."""
+    row), the time index of each head, the RoPE tables, and for FastH3
+    the VSA geometry of the layout."""
     times: tuple
     segs: tuple
     heads: dict
     cos: mx.array
     sin: mx.array
+    vsa: Any = None
 
 
 def patchify(latent: mx.array, patch: tuple) -> mx.array:
@@ -245,6 +255,10 @@ class DiTBlock(_Block):
     def __init__(self, cfg: H3Config):
         super().__init__(cfg)
         self.dim, self.rot = cfg.dim, cfg.rot
+        self.vsa_sparsity = cfg.vsa_sparsity
+        if cfg.vsa_sparsity:
+            self.attn.to_gate_compress = nn.Linear(cfg.dim, cfg.inner,
+                                                   bias=False)
         self.adaln_proj = AdalnProj(cfg.basis, 6 * 3 * cfg.dim)
 
     def modulation(self, t_emb: mx.array, dtype: mx.Dtype) -> tuple:
@@ -255,26 +269,39 @@ class DiTBlock(_Block):
         return tuple(y[:, i].astype(dtype) for i in range(6))
 
     def attention(self, h: mx.array, cos: mx.array, sin: mx.array,
-                  chunk: int | None = None) -> mx.array:
+                  chunk: int | None = None, vsa=None) -> mx.array:
         """The attention rows (B, L, inner) that ``out_proj`` takes. A
         pause point after qkv keeps a LoRA delta's second product out of
-        the RoPE step's peak."""
+        the RoPE step's peak. With a VSA geometry ``vsa`` (B = 1) the
+        rows run video sparse attention with the gate of ``h``, packed
+        [L, heads, head dim]."""
         b, n, _ = h.shape
         q, k, v = self.qkv(h)
-        pacing.point(q, k, v)
+        gate = None
+        if vsa is None:
+            pacing.point(q, k, v)
+        else:
+            gate = self.attn.to_gate_compress(h).reshape(n, self.heads,
+                                                         self.head_dim)
+            pacing.point(q, k, v, gate)
         a, r = self.attn, self.rot
         q, k = ops.qk_norm_rope(
             rope.pair_halves(q, r), rope.pair_halves(k, r),
             rope.pair_halves(a.q_norm.weight, r),
             rope.pair_halves(a.k_norm.weight, r), cos, sin, a.q_norm.eps)
+        if gate is not None:
+            o = h3vsa.attend(q[0].transpose(1, 0, 2), k[0].transpose(1, 0, 2),
+                             v[0], gate, vsa, self.vsa_sparsity)
+            return o.reshape(b, n, -1)
         o = attend(q, k, v.transpose(0, 2, 1, 3), chunk)
         return o.transpose(0, 2, 1, 3).reshape(b, n, -1)
 
     def __call__(self, x: mx.array, mod: tuple, segs: tuple, cos: mx.array,
-                 sin: mx.array, chunk: int | None = None) -> mx.array:
+                 sin: mx.array, chunk: int | None = None,
+                 vsa=None) -> mx.array:
         shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = mod
         h = modulated(self.norm1(x), shift_a, scale_a, segs)
-        rows = self.attention(h, cos, sin, chunk)
+        rows = self.attention(h, cos, sin, chunk, vsa)
         x = gated(x, gate_a, self.attn.out_proj(rows), segs)
         h = modulated(self.norm2(x), shift_f, scale_f, segs)
         return gated(x, gate_f, self.mlp.fc2(self.hidden(h)), segs)
@@ -349,8 +376,9 @@ class H3Transformer(nn.Module):
 
     def plan(self, layout: Layout, t_video: float, t_audio: float,
              rules: dict | None = None) -> StepPlan:
-        """The step's times, segment rows and RoPE tables. Text runs at the
-        video time; anchor rows at their stream's pinned time."""
+        """The step's times, segment rows, RoPE tables and VSA geometry.
+        Text runs at the video time; anchor rows at their stream's pinned
+        time."""
         rules = fam.ANCHOR_RULES if rules is None else rules
         t = {"text": t_video, "video": t_video, "audio": t_audio,
              "cond": pinned(t_video, rules["video"]),
@@ -365,9 +393,12 @@ class H3Transformer(nn.Module):
                      for s in layout.segments if s.rows)
         cos, sin = rope.tables(layout.positions, self.rope.inv_freq,
                                self.cfg.head_dim)
+        vsa = None
+        if self.cfg.vsa_sparsity:
+            vsa = h3vsa.geometry(h3vsa.segments(layout, self.cfg.patch))
         return StepPlan(times=times, segs=segs,
                         heads={"video": idx[t_video], "audio": idx[t_audio]},
-                        cos=cos, sin=sin)
+                        cos=cos, sin=sin, vsa=vsa)
 
     def embed(self, video: mx.array, audio: mx.array, text: mx.array,
               layout: Layout, cond_video=(), cond_audio=(),
@@ -459,7 +490,7 @@ class H3Transformer(nn.Module):
             taps["t_emb"] = t_emb
         for i, blk in enumerate(self.blocks):
             x = blk(x, blk.modulation(t_emb, self.act_dtype), plan.segs,
-                    plan.cos, plan.sin, chunk)
+                    plan.cos, plan.sin, chunk, plan.vsa)
             pacing.point(x)
             if taps is not None:
                 taps[f"blocks.{i}"] = x
