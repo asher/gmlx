@@ -1,10 +1,17 @@
-"""``gmlx.mlx_guards.addmm`` against the stock ``mx.addmm`` defect of
-docs/upstream-defects.md: a first argument of one column that is a view
-with a stride is misread on a GPU stream. The LoRA wrappers of the text
-and the image path add their delta through the guard, so a layer with one
-output, or a band of one output column, is right over a base output that
-is a column of a wider array. On the CPU device the stock op is right and
-the tests pass with or without the guard.
+"""``gmlx.mlx_guards`` against the stock mlx defects of
+docs/upstream-defects.md.
+
+``addmm``: a first argument of one column that is a view with a stride is
+misread on a GPU stream. The LoRA wrappers of the text and the image path
+add their delta through the guard, so a layer with one output, or a band
+of one output column, is right over a base output that is a column of a
+wider array. On the CPU device the stock op is right and the tests pass
+with or without the guard.
+
+``concatenate`` and ``pad``: past 2^31 output elements the stock ops
+misplace inputs on a GPU stream. The tests here hold the routing on small
+arrays with the limit lowered. The tests of each caller past the real
+limit are beside the caller's other tests.
 """
 from __future__ import annotations
 
@@ -159,3 +166,77 @@ def test_the_guard_changes_the_graph_for_one_column_only(monkeypatch):
     assert seen[0] is not column
     np.testing.assert_array_equal(_np(seen[0]), _np(column))
     np.testing.assert_array_equal(_np(out), _np(column) + 2.0)
+
+
+# The callers' layouts, at a few elements.
+CONCATS = {
+    # [old, zeros] on the token axis of a [B, H, S, D] KV regrow.
+    "kv regrow": ([(2, 2, 6, 4), (2, 2, 2, 4)], 2),
+    # [rows, hid] on the last axis of a FLUX.2 single block.
+    "single block": ([(1, 5, 4), (1, 5, 12)], -1),
+}
+PADS = {
+    # A batch's keys padded on the token axis to the joint width.
+    "batch extend": ((3, 2, 5, 4), [(0, 0), (0, 0), (2, 1), (0, 0)]),
+    # A VAE activation padded on the bottom and the right.
+    "vae downsample": ((1, 5, 7, 4), [(0, 0), (0, 1), (0, 1), (0, 0)]),
+}
+
+
+def _counts(shape, start: int) -> mx.array:
+    # Whole numbers from 1 to 250, which bfloat16 holds exactly, so no
+    # input element is the fill.
+    n = int(np.prod(shape))
+    return ((mx.arange(n) + start) % 250 + 1).reshape(shape).astype(mx.bfloat16)
+
+
+def _spy(monkeypatch, name: str) -> list:
+    """The arrays the stock ``mx.<name>`` returns from now on."""
+    calls = []
+    stock = getattr(mx, name)
+
+    def spy(*args, **kwargs):
+        calls.append(stock(*args, **kwargs))
+        return calls[-1]
+
+    monkeypatch.setattr(mlx_guards.mx, name, spy)
+    return calls
+
+
+@pytest.mark.parametrize("kind", list(CONCATS))
+def test_concatenate_takes_a_slice_update_only_past_the_limit(monkeypatch, kind):
+    """An output at the limit is the stock op's array, so the graph of the
+    shapes models run today is the stock one. One element more, the inputs
+    are written into zeros and the values are the stock op's."""
+    shapes, axis = CONCATS[kind]
+    arrays = [_counts(s, 100 * i) for i, s in enumerate(shapes)]
+    mx.eval(arrays)
+    want = np.concatenate([_np(a) for a in arrays], axis=axis)
+    calls = _spy(monkeypatch, "concatenate")
+    monkeypatch.setattr(mlx_guards, "_STOCK_MAX", want.size)
+    out = mlx_guards.concatenate(arrays, axis=axis)
+    assert len(calls) == 1 and out is calls[0]
+    monkeypatch.setattr(mlx_guards, "_STOCK_MAX", want.size - 1)
+    out = mlx_guards.concatenate(arrays, axis=axis)
+    assert len(calls) == 1
+    assert out.dtype == mx.bfloat16
+    np.testing.assert_array_equal(_np(out), want)
+
+
+@pytest.mark.parametrize("kind", list(PADS))
+def test_pad_takes_a_slice_update_only_past_the_limit(monkeypatch, kind):
+    """As for concatenate: the stock op's array at the limit, and past it
+    the input written into zeros, with the stock op's values."""
+    shape, widths = PADS[kind]
+    x = _counts(shape, 0)
+    mx.eval(x)
+    want = np.pad(_np(x), widths)
+    calls = _spy(monkeypatch, "pad")
+    monkeypatch.setattr(mlx_guards, "_STOCK_MAX", want.size)
+    out = mlx_guards.pad(x, widths)
+    assert len(calls) == 1 and out is calls[0]
+    monkeypatch.setattr(mlx_guards, "_STOCK_MAX", want.size - 1)
+    out = mlx_guards.pad(x, widths)
+    assert len(calls) == 1
+    assert out.dtype == mx.bfloat16
+    np.testing.assert_array_equal(_np(out), want)
