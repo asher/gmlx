@@ -30,6 +30,9 @@ _ACTION_DESC = {
 }
 DEFAULT_SIZE = (1344, 768)
 DEFAULT_SECONDS = 5
+# The sizes a clip refused for its size tries, in this order. A shorter
+# clip at the last one is tried when none fits.
+HINT_SIZES = ((1344, 768), (768, 1344), (768, 768))
 
 
 class _Usage(Exception):
@@ -164,6 +167,30 @@ def _frames(text: str) -> int:
         up = hf.align_frames(n)
         msg += f", such as {up - 17} or {up}"
     raise argparse.ArgumentTypeError(msg)
+
+
+def _size_hint(frames: int, plan_at) -> str | None:
+    """What a clip of ``frames`` refused for its size runs instead: the
+    first of ``HINT_SIZES`` whose plan fits at its length, else the
+    longest clip of ``DEFAULT_SECONDS`` or more that fits at the last
+    size, else None. ``plan_at(frames, width, height)`` is the run's
+    memory plan at that clip."""
+    hf = _family()
+    for w, h in HINT_SIZES:
+        if plan_at(frames, w, h).fits:
+            return f"try --size {w}x{h}, which fits at this length"
+    w, h = HINT_SIZES[-1]
+    shortest = frames_of(DEFAULT_SECONDS)
+    f = hf.align_frames(frames) - 17
+    while f >= shortest:
+        if plan_at(f, w, h).fits:
+            sizes = [f"{a}x{b}" for a, b in HINT_SIZES]
+            return (f"no {', '.join(sizes[:-1])} or {sizes[-1]} clip fits "
+                    f"at this length; try --size {w}x{h} --frames {f} "
+                    f"({f / hf.FPS:.1f} s), the longest {w}x{h} clip that "
+                    f"fits")
+        f -= 17
+    return None
 
 
 def _generate_parser(prog: str) -> argparse.ArgumentParser:
@@ -415,14 +442,17 @@ def _generate(a) -> int:
     s = _settings(a, fam, vid.variant)
     out = _output(a, s["seed"]) if ffmpeg is not None else None
     _writable(a, out)
-    plan = memfit.plan_run(
-        fam, dit=a.model, encoder=a.encoder, vae=preview or a.vae,
-        tiny=bool(preview), audio_vae=a.audio_vae,
-        loras=[p for p, _ in adapters], frames=s["frames"],
-        width=s["width"], height=s["height"], variant=vid.variant,
-        text=memfit.prompt_rows(
-            fam, prompt, video_encoder.header_tokenizer(fam, a.encoder)))
-    memfit.check(plan)
+    text = memfit.prompt_rows(
+        fam, prompt, video_encoder.header_tokenizer(fam, a.encoder))
+
+    def plan_at(frames, width, height):
+        return memfit.plan_run(
+            fam, dit=a.model, encoder=a.encoder, vae=preview or a.vae,
+            tiny=bool(preview), audio_vae=a.audio_vae,
+            loras=[p for p, _ in adapters], frames=frames, width=width,
+            height=height, variant=vid.variant, text=text)
+    memfit.check(plan_at(s["frames"], s["width"], s["height"]),
+                 resize=lambda: _size_hint(s["frames"], plan_at))
     log(f"[video] {fam.title} {s['width']}x{s['height']}, {s['frames']} "
         f"frames, {s['steps']} steps at shift {s['shifts']['video']:g}, "
         f"seed {s['seed']}")

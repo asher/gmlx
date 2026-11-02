@@ -156,17 +156,23 @@ class VideoPlan:
     def fits(self) -> bool:
         return not self.over
 
-    def hint(self) -> str:
-        """What to change: the encoder first, since no clip makes it
-        fit, then the largest phase over the budget."""
+    @property
+    def cause(self) -> str | None:
+        """The ``_HINTS`` key of what to change, or None when the plan
+        fits: the encoder first, since no clip makes it fit, then the
+        largest phase over the budget."""
         over = self.over
         if not over:
-            return ""
+            return None
         if "encode" in over:
             assert self.budget is not None
-            return _HINTS["prompt" if self.encoder_load <= self.budget
-                          else "encode"]
-        return _HINTS[max(over, key=self.phases.__getitem__)]
+            return "prompt" if self.encoder_load <= self.budget else "encode"
+        return max(over, key=self.phases.__getitem__)
+
+    def hint(self) -> str:
+        """What to change."""
+        cause = self.cause
+        return _HINTS[cause] if cause else ""
 
     def describe(self) -> str:
         """The phases against the budget. Against a budget, a phase over
@@ -297,14 +303,18 @@ def plan_run(fam, *, dit: str, encoder: str, vae: str, audio_vae: str,
                        budget=budget)
 
 
-def check(plan: VideoPlan, what: str = "this clip") -> None:
+def check(plan: VideoPlan, what: str = "this clip", resize=None) -> None:
     """Raise ``VideoMemoryError`` when the plan does not fit, unless
-    GMLX_OVERCOMMIT=1."""
+    GMLX_OVERCOMMIT=1. For a plan refused for its denoise, ``resize()``
+    names a size or length that fits in place of the plan's own hint,
+    or returns None to keep it."""
     from gmlx.serve import capacity
 
     if plan.fits or capacity.overcommit():
         return
     hint = plan.hint()
+    if resize is not None and plan.cause == "denoise":
+        hint = resize() or hint
     raise VideoMemoryError(
         f"{what} does not fit in memory: {plan.describe()}. "
         f"{hint[0].upper()}{hint[1:]}. GMLX_OVERCOMMIT=1 overrides.")

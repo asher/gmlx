@@ -7,7 +7,9 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import re
+import struct
 
 import numpy as np
 import pytest
@@ -513,6 +515,82 @@ def test_a_clip_over_the_memory_budget_is_refused_first(run, monkeypatch,
     assert run() == 1
     assert "this clip does not fit in memory" in capsys.readouterr().err
     assert run.loads == []
+
+
+def _pinned(files, recipe, monkeypatch, gb):
+    """The run's files at the sizes of ``recipe``'s pins, sparse, on a
+    Mac of ``gb`` GB."""
+    from gmlx.serve import capacity
+    from gmlx.video import catalog
+
+    pins = catalog.RECIPES[recipe].pins()
+    for key, role in (("model", "dit"), ("--encoder", "encoder"),
+                      ("--vae", "vae"), ("--audio-vae", "audio_vae")):
+        os.truncate(files[key], pins[role].size)
+    monkeypatch.setattr(capacity, "working_budget_bytes",
+                        lambda: capacity.ram_budget_bytes(gb << 30))
+    monkeypatch.setattr(capacity, "overcommit", lambda: False)
+
+
+def _hint(capsys) -> str:
+    err = capsys.readouterr().err.splitlines()[-1]
+    m = re.fullmatch(r"error: this clip does not fit in memory: .*? over "
+                     r"it\. (.*)\. GMLX_OVERCOMMIT=1 overrides\.", err)
+    assert m, err
+    return m[1]
+
+
+@pytest.mark.parametrize("recipe, variant, argv, size", [
+    ("fasth3", hf.FASTH3, (), "768x768"),
+    ("h3-base", None, ("--size", "1920x1088"), "1344x768")])
+def test_a_clip_too_large_for_the_mac_names_the_largest_size_that_fits(
+        run, monkeypatch, files, capsys, recipe, variant, argv, size):
+    """On a 32 GB Mac: FastH3's default clip, and a 1080p clip."""
+    if variant == hf.FASTH3:
+        vsa_kernel(monkeypatch)
+    _pinned(files, recipe, monkeypatch, 32)
+    assert run(*argv, variant=variant) == 1
+    assert run.loads == []
+    assert _hint(capsys) == f"Try --size {size}, which fits at this length"
+    assert run("--size", size, variant=variant) == "encoder"
+
+
+@pytest.mark.parametrize("argv", [("--seconds", "10"), ("--frames", "175")])
+def test_a_length_no_size_fits_names_the_longest_768x768_clip(
+        run, monkeypatch, files, capsys, argv):
+    """FastH3 on a 32 GB Mac fits 768x768 up to 158 frames."""
+    vsa_kernel(monkeypatch)
+    _pinned(files, "fasth3", monkeypatch, 32)
+    assert run(*argv, variant=hf.FASTH3) == 1
+    assert run.loads == []
+    assert _hint(capsys) == (
+        "No 1344x768, 768x1344 or 768x768 clip fits at this length; try "
+        "--size 768x768 --frames 158 (6.6 s), the longest 768x768 clip "
+        "that fits")
+    assert run("--size", "768x768", "--frames", "158",
+               variant=hf.FASTH3) == "encoder"
+
+
+def test_a_clip_that_fits_at_no_size_from_5_seconds_keeps_the_hint(
+        run, monkeypatch, files, tmp_path, capsys):
+    """FastH3 with a 2.2 GB bf16 LoRA on a 32 GB Mac: a 768x768 clip
+    fits at 107 frames and not at 124."""
+    from gmlx.video import pipeline
+
+    monkeypatch.setattr(pipeline, "vet_adapter", lambda *a, **k: None)
+    vsa_kernel(monkeypatch)
+    _pinned(files, "fasth3", monkeypatch, 32)
+    lora = tmp_path / "style.safetensors"
+    head = json.dumps({"blocks.0.attn.q.lora_A.weight": {
+        "dtype": "BF16", "shape": [16, 5120],
+        "data_offsets": [0, 16 * 5120 * 2]}}).encode()
+    lora.write_bytes(struct.pack("<Q", len(head)) + head)
+    os.truncate(lora, 2_200_000_000)
+    assert run("--adapter", str(lora), variant=hf.FASTH3) == 1
+    assert run.loads == []
+    assert _hint(capsys) == "Try a smaller size or a shorter clip"
+    assert run("--adapter", str(lora), "--size", "768x768", "--frames",
+               "107", variant=hf.FASTH3) == "encoder"
 
 
 def _cache_limit() -> int:
