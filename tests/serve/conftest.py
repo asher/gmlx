@@ -53,21 +53,6 @@ def _restore_batch_next():
     ar.BatchGenerator._next = saved
 
 
-@pytest.fixture(autouse=True, scope="module")
-def _restore_render():
-    """install_faithful_history wraps the prompt_utils render functions,
-    and a test module that runs it leaves its layers for every later test
-    in the process."""
-    try:
-        pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
-    except ImportError:
-        yield
-        return
-    saved = (pu.get_chat_template, pu.apply_chat_template)
-    yield
-    pu.get_chat_template, pu.apply_chat_template = saved
-
-
 def _engine_classes() -> list:
     """The mlx-vlm engine classes that the server patches wrap."""
     ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")

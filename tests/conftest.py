@@ -117,7 +117,8 @@ _read_pools: list = []
 # function-scoped fixtures. Class-, module- and session-scoped fixtures
 # set up outside the capture, so what they change stays for the tests
 # that share them, and what their own teardown does not undo persists
-# until the end-of-run check.
+# until the end-of-run check. The copied mlx-vlm bindings a VLM load wraps
+# also come back at the end of each module (_restore_vlm_bindings).
 _awaiting_capture = None
 
 
@@ -138,6 +139,19 @@ def _hand_back_process_state(item) -> None:
             _restored.append((item.nodeid, changed))
 
     item.addfinalizer(restore)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _restore_vlm_bindings():
+    """load_vlm_model and the serve patches wrap the copied mlx-vlm render
+    functions and input builders for the whole process. A module or class
+    fixture that runs one sets up outside every test's capture, so each
+    module hands them back as it found them."""
+    import process_state
+
+    saved = process_state.vlm_bindings()
+    yield
+    process_state.put_back(saved)
 
 
 def _state_report() -> bool:

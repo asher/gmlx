@@ -188,6 +188,64 @@ def test_h3_the_next_test_finds_the_stock_free_ram_read():
         pytest.skip("runs after test_h2")
     assert apc._free_ram_bytes is _MIRRORS["free_ram_read"]
 
+
+_RENDER = (("gmlx._vendor.mlx_vlm.prompt_utils", "get_chat_template"),
+           ("gmlx._vendor.mlx_vlm.prompt_utils", "apply_chat_template"))
+
+
+def _input_builders() -> list:
+    """The bindings the single-BOS fix wraps, from its own lists."""
+    from gmlx.upstream import single_bos_fix as sb
+
+    return [("gmlx._vendor.mlx_vlm.utils", "process_inputs")] + [
+        (m, "prepare_inputs") for m in sb._BINDINGS + sb._COUNT_BINDINGS]
+
+
+def _bound(names) -> list:
+    # importlib, as above: mlx_vlm re-exports functions under module names.
+    return [getattr(importlib.import_module(m), n) for m, n in names]
+
+
+def _same(now, mirror) -> list:
+    return [a is b for a, b in zip(now, mirror, strict=True)]
+
+
+def test_h4_a_vlm_load_wraps_the_render_functions():
+    from gmlx.serve.patches import render
+    from gmlx.tui.reasoning import install_template_default_thinking
+
+    _MIRRORS["render"] = _bound(_RENDER)
+    # load_vlm_model wraps get_chat_template, and the serve patches' nested
+    # layer wraps both.
+    install_template_default_thinking()
+    render._install_nested_in_place(
+        importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils"))
+    assert _same(_bound(_RENDER), _MIRRORS["render"]) == [False, False]
+
+
+def test_h5_the_next_test_finds_the_stock_render_functions():
+    """A later render goes through the stock functions, as the V4.1 list
+    content test expects, whatever an earlier VLM load wrapped."""
+    if "render" not in _MIRRORS:
+        pytest.skip("runs after test_h4")
+    assert _same(_bound(_RENDER), _MIRRORS["render"]) == [True, True]
+
+
+def test_h6_a_vlm_load_wraps_the_input_builders():
+    from gmlx.upstream.single_bos_fix import install_single_bos_fix
+
+    _MIRRORS["inputs"] = _bound(_input_builders())
+    # As load_vlm_model runs it once the server has imported its routes.
+    install_single_bos_fix(count_routes=True)
+    assert not any(_same(_bound(_input_builders()), _MIRRORS["inputs"]))
+
+
+def test_h7_the_next_test_finds_the_stock_input_builders():
+    if "inputs" not in _MIRRORS:
+        pytest.skip("runs after test_h6")
+    assert all(_same(_bound(_input_builders()), _MIRRORS["inputs"]))
+
+
 def test_i_a_server_notes_its_cache_limit_and_arms_the_governor(monkeypatch):
     from gmlx.gen import prefill_decay
     from gmlx.serve import governor, memory
@@ -334,6 +392,56 @@ def test_restore_wraps_every_function_fixture_whatever_its_name(tmp_path):
     (root / "test_scoped_after.py").write_text(_AFTER_SCOPED)
     r = _inner_pytest(root, "test_order.py", "test_scoped.py",
                       "test_scoped_after.py")
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+
+
+_VLM_LOAD = '''
+import pytest
+
+
+@pytest.fixture(scope="module")
+def vlm_load():
+    # What load_vlm_model installs, in a module fixture as the real-file
+    # VLM tests load.
+    from gmlx.tui.reasoning import install_template_default_thinking
+    from gmlx.upstream.single_bos_fix import install_single_bos_fix
+
+    install_template_default_thinking()
+    install_single_bos_fix()
+    yield
+
+
+def test_loads(vlm_load):
+    pass
+'''
+
+_AFTER_VLM_LOAD = '''
+import importlib
+
+from gmlx.tui import reasoning
+from gmlx.upstream import single_bos_fix
+from gmlx.upstream.patching import wrapped_with
+
+
+def test_the_next_module_finds_the_stock_bindings():
+    pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
+    utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
+    assert not wrapped_with(pu.get_chat_template,
+                            reasoning._TEMPLATE_DEFAULT_FLAG)
+    assert not wrapped_with(utils.process_inputs, single_bos_fix._FLAG)
+    for m in single_bos_fix._BINDINGS:
+        assert not wrapped_with(importlib.import_module(m).prepare_inputs,
+                                single_bos_fix._FLAG), m
+'''
+
+
+def test_a_module_fixture_vlm_load_goes_with_its_module(tmp_path):
+    # Set up outside every test's capture, so only the end of its module
+    # hands the bindings back.
+    root = _inner_tree(tmp_path)
+    (root / "test_vlm_load.py").write_text(_VLM_LOAD)
+    (root / "test_vlm_load_after.py").write_text(_AFTER_VLM_LOAD)
+    r = _inner_pytest(root, "test_vlm_load.py", "test_vlm_load_after.py")
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
 
 

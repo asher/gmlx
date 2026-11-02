@@ -16,8 +16,9 @@ the streaming and CPU device setups rebind, ``mx.device_info``, which
 ``--stream-cpu`` rebinds to the GPU's answer, the free-RAM read of the
 copied ``apc``, which the APC manager build rebinds to the mach counters
 (the simulated host reports those, the stock read sees the real one),
-the render functions of the copied ``prompt_utils``, which
-``load_vlm_model`` and the serve patches wrap, the limits the serve
+the render functions and input builders of the copied mlx-vlm, which
+``load_vlm_model`` and the serve patches wrap (each test module hands
+these back too, for the module fixtures that load), the limits the serve
 governor saved when it armed its throttle, and the cache limit the server
 noted for the prefill decay. A governor state that outlives the test goes
 back to the saved limits it held when the test started, and one the test
@@ -73,10 +74,20 @@ _WIRED_LIMIT_MODULES = ("gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_lm.uti
 # The module whose _free_ram_bytes the APC manager build rebinds, imported
 # at session start for the same reason.
 _APC_MODULE = "gmlx._vendor.mlx_vlm.apc"
-# The module whose render functions load_vlm_model and the serve patches
-# wrap, imported at session start for the same reason.
-_RENDER_MODULE = "gmlx._vendor.mlx_vlm.prompt_utils"
-_RENDER_NAMES = ("get_chat_template", "apply_chat_template")
+# The copied mlx-vlm functions load_vlm_model and the serve patches wrap,
+# as (module, name): the render functions, then the input builders the
+# single-BOS fix wraps, in the modules of its _BINDINGS and
+# _COUNT_BINDINGS. Their modules are imported at session start for the
+# same reason.
+_VLM_BINDINGS = (
+    ("gmlx._vendor.mlx_vlm.prompt_utils", "get_chat_template"),
+    ("gmlx._vendor.mlx_vlm.prompt_utils", "apply_chat_template"),
+    ("gmlx._vendor.mlx_vlm.utils", "process_inputs"),
+    ("gmlx._vendor.mlx_vlm.server.generation", "prepare_inputs"),
+    ("gmlx._vendor.mlx_vlm.generate.dispatch", "prepare_inputs"),
+    ("gmlx._vendor.mlx_vlm.server.anthropic", "prepare_inputs"),
+    ("gmlx._vendor.mlx_vlm.server.openai", "prepare_inputs"),
+)
 _MISSING = object()
 # Every serve governor state the session creates.
 _governor_states: weakref.WeakSet = weakref.WeakSet()
@@ -148,7 +159,8 @@ def start_session() -> None:
         _setters["set_cb_caps"] = kq.set_cb_caps
     except (ImportError, AttributeError):
         pass
-    for name in _WIRED_LIMIT_MODULES + (_APC_MODULE, _RENDER_MODULE):
+    vlm = tuple(dict.fromkeys(m for m, _ in _VLM_BINDINGS))
+    for name in _WIRED_LIMIT_MODULES + (_APC_MODULE,) + vlm:
         try:
             importlib.import_module(name)
         except ImportError:
@@ -197,6 +209,29 @@ def _governor():
     return sys.modules.get("gmlx.serve.governor")
 
 
+def vlm_bindings() -> list:
+    """(module, name, function) for each of _VLM_BINDINGS in an imported
+    module."""
+    return [(mod, name, getattr(mod, name, _MISSING))
+            for mod, name in ((sys.modules.get(m), n) for m, n in _VLM_BINDINGS)
+            if mod is not None]
+
+
+def put_back(bindings: list) -> list:
+    """Rebind each function of ``bindings`` that changed. Returns the name
+    of each."""
+    changed = []
+    for mod, name, fn in bindings:
+        if getattr(mod, name, _MISSING) is fn:
+            continue
+        changed.append(f"{mod.__name__}.{name}")
+        if fn is _MISSING:
+            delattr(mod, name)
+        else:
+            setattr(mod, name, fn)
+    return changed
+
+
 def capture() -> dict:
     _prior.clear()
     decay = _prefill_decay()
@@ -218,10 +253,7 @@ def capture() -> dict:
         "free_ram_read": [
             (mod, getattr(mod, "_free_ram_bytes", _MISSING))
             for mod in [sys.modules.get(_APC_MODULE)] if mod],
-        "render": [
-            (mod, name, getattr(mod, name, _MISSING))
-            for mod in [sys.modules.get(_RENDER_MODULE)] if mod
-            for name in _RENDER_NAMES],
+        "vlm_bindings": vlm_bindings(),
         "governor": {st: (st.saved_mem_limit, st.saved_cache_limit)
                      for st in _governor_states},
         "noted_cache_limit": getattr(decay, "_NOTED_CACHE_LIMIT", None),
@@ -306,10 +338,7 @@ def restore(state: dict) -> list:
         if getattr(mod, "_free_ram_bytes", _MISSING) is not fn:
             changed.append(f"{mod.__name__}._free_ram_bytes")
             mod._free_ram_bytes = fn
-    for mod, name, fn in state["render"]:
-        if getattr(mod, name, _MISSING) is not fn:
-            changed.append(f"{mod.__name__}.{name}")
-            setattr(mod, name, fn)
+    changed += put_back(state["vlm_bindings"])
     governor = False
     for st in list(_governor_states):
         saved = state["governor"].get(st, (None, None))
