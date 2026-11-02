@@ -654,11 +654,24 @@ def _decode(model, latents: mx.array) -> tuple[int, int]:
     return mx.get_peak_memory() - base, held
 
 
+@pytest.fixture
+def settled_evals(monkeypatch):
+    """Each eval waits for its command buffer to complete. MLX frees an
+    eval's temporaries there, after eval returns, and under CPU load the
+    next eval can allocate first."""
+    eval_ = mx.eval
+
+    def settled(*args):
+        eval_(*args)
+        mx.synchronize()
+    monkeypatch.setattr(mx, "eval", settled)
+
+
 @metal_only
 @pytest.mark.parametrize("split,d,gate", [(False, 32, 3), (True, 64, 12)],
                          ids=["sdpa", "split"])
 def test_the_audio_attention_holds_one_query_block(monkeypatch, split, d,
-                                                    gate):
+                                                    gate, settled_evals):
     """Eight query blocks peak at a few arrays of one block's scores, as one
     block does: about 1.6 on SDPA at head dim 32, where MLX holds the
     scores, and about 8 on split products. With no eval between blocks
@@ -676,7 +689,7 @@ def test_the_audio_attention_holds_one_query_block(monkeypatch, split, d,
 
 
 @metal_only
-def test_taeh3_holds_one_run_at_a_time(tiny):
+def test_taeh3_holds_one_run_at_a_time(tiny, settled_evals):
     """A run peaks under 24 times its frames, a clip of four runs as one
     run does, and between runs it holds the carry and the frames of one
     run. A carry copied in the run's own eval reads about 34 times."""
@@ -697,7 +710,8 @@ def test_taeh3_holds_one_run_at_a_time(tiny):
 
 
 @metal_only
-def test_the_video_decoder_holds_one_run_canvas_at_a_time(tiny):
+def test_the_video_decoder_holds_one_run_canvas_at_a_time(tiny,
+                                                           settled_evals):
     """Three runs of 2x3 tiles peak at one tile's peak and under 2.6 run
     canvases, and between yields hold under half a canvas: the tail the
     next run fades from, and at the last run the tail's finished frames.
