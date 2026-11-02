@@ -74,6 +74,8 @@ _COMFY = ("Comfy-Org/MiniMax-H3", "e5eb578a89295337b8ff433a035929ce0279e0b6")
 _TURBO = ("lightx2v/Minimax-h3-Turbo",
           "30f485ed874aa44c8183348ad361c5eabad318da")
 _TAEHV = ("madebyollin/taehv", "62f7591f59dfbb4c3c02b7a621d180a9eeaba26c")
+_VANTAGE = ("vantagewithai/FastVideo-FastH3-8-Step-V2-ComfyUI-GGUF",
+            "448ffec4210efe431a6b4a945672d88aea5f25f4")
 
 _H3_FILES = dict(
     dit=Pin(*_UNSLOTH, "minimax_h3_fl2va_pruned-Q4_K.gguf",
@@ -121,6 +123,14 @@ _H3 = dict(
     vae_license="minimax-h3-community-license-agreement",
     tiny_license="mit")
 
+# FastVideo's FastH3 v2, an 8-step distill of H3 with video sparse
+# attention, in vantagewithai's pruned GGUF. Both cards state the MiniMax
+# H3 community license, and FastVideo's LICENSE is MiniMaxAI's text.
+_FASTH3 = {**_H3, "variant": "fasth3", "dit": Pin(
+    *_VANTAGE, "fastvideo_fasth3_8step_v2_pruned-Q4_K_M.gguf",
+    "2f2bb5b1c3e55782ceeda1cf4620cae97c748620001c6e35e85f5e71e5a478cc",
+    13_613_532_704)}
+
 RECIPES = {r.name: r for r in (
     VideoRecipe(name="h3", title="MiniMax-H3 Turbo 8-step", lora=_TURBO_8,
                 steps=8, shift=6.0, use="video with sound",
@@ -132,6 +142,11 @@ RECIPES = {r.name: r for r in (
     VideoRecipe(name="h3-base", title="MiniMax-H3", lora=None, steps=20,
                 shift=12.0, use="base model, slow",
                 blurb="The base model at 20 steps, no LoRA.", **_H3),
+    VideoRecipe(name="fasth3", title="FastVideo FastH3 8-step", lora=None,
+                steps=8, shift=10.0, use="video with sound, M5 or newer",
+                blurb="FastVideo's 8-step distill of the base model, with "
+                      "video sparse attention, on an M5 or newer.",
+                **_FASTH3),
 )}
 
 

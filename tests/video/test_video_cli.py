@@ -242,6 +242,17 @@ def test_fasth3_runs_its_own_schedule(run, monkeypatch, capsys):
     assert "8 steps at shift 10, seed" in capsys.readouterr().err
 
 
+def test_fasth3_without_nax_is_refused_before_the_encoder_loads(
+        run, monkeypatch, capsys):
+    vsa_kernel(monkeypatch, nax=False)
+    assert run(variant=hf.FASTH3) == 1
+    assert run.loads == []
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        "error: MiniMax-H3 fasth3 runs video sparse attention, whose "
+        "kernel needs a GPU with NAX units (M5 or newer), and this Mac's "
+        "GPU has none")
+
+
 def test_the_variant_flag_reaches_the_weights_check(run, capsys):
     assert run("--variant", hf.TURBO4) == "encoder"
     assert "4 steps at shift 6, seed" in capsys.readouterr().err
@@ -481,7 +492,7 @@ def test_completion_offers_recipes_and_video_ids(tmp_path):
     from gmlx.commands.completion import _complete
 
     assert [c.split("\t")[0] for c in _complete(["video", "pull", ""])] == [
-        "h3", "h3-fast", "h3-base"]
+        "h3", "h3-fast", "h3-base", "fasth3"]
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("""video_models:
   clip: {path: h3.gguf, encoder: e.gguf, vae: v.safetensors,

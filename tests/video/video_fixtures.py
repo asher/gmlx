@@ -91,6 +91,34 @@ def fasth3_view(*, gates: bool = True, arch: str | None = "wan"):
     return fixture_view(H3_HEADER, add=add, kv=kv)
 
 
+def fasth3_hashes() -> tuple:
+    """The FastH3 file's identity and qkv layout hashes."""
+    row = load_json(H3_IDENTITY_FASTH3)["files"][
+        "fastvideo_fasth3_8step_v2_pruned-Q4_K_M.gguf"]
+    return row["variant_hash"], row["layout_hash"]
+
+
+def fasth3_gguf(path) -> str:
+    """A GGUF with the FastH3 file's header (``fasth3_view``) and no
+    tensor data."""
+    import gguf
+    import numpy as np
+
+    w = gguf.GGUFWriter(str(path), arch="wan")
+    for name, t in fasth3_view().tensors.items():
+        codec = gguf.GGMLQuantizationType[t.codec]
+        block, size = gguf.GGML_QUANT_SIZES[codec]
+        shape = tuple(reversed(t.shape))
+        w.add_tensor_info(name, shape, np.float32,
+                          int(np.prod(shape)) // block * size,
+                          raw_dtype=codec)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_ti_data_to_file()
+    w.close()
+    return str(path)
+
+
 def vsa_kernel(monkeypatch, nax: bool = True) -> None:
     """An mlx-kquant with ``vsa_attention``, on a GPU with NAX units or
     without, so a FastH3 run does not depend on the machine's kq."""

@@ -205,7 +205,7 @@ def _bench(a) -> int:
     from gmlx.video import encoder as video_encoder
     from gmlx.video import io, memfit, pipeline
     from gmlx.video.loader import identify_dit
-    from gmlx.video.registry import chip_refusal
+    from gmlx.video.registry import run_refusal
 
     from .image import _machine
 
@@ -230,7 +230,7 @@ def _bench(a) -> int:
                 "encoders: the mux is not timed")
     vid = identify_dit(os.path.expanduser(a.model), variant=a.variant)
     fam = vid.family
-    why = chip_refusal(fam)
+    why = run_refusal(fam, vid.variant)
     if why:
         raise RuntimeError(why)
     adapters = list(a.entry_adapters) + list(a.adapter or ())

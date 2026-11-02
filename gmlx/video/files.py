@@ -35,7 +35,10 @@ def _gguf_role(path: str, family) -> VideoFile | None:
 
     kv = _kv(path)
     arch = kv.get("general.architecture")
-    if arch is None or arch in family.arch_strings:
+    # A known file may carry a label of its own (``labels``), which
+    # ``identify`` checks against its weights.
+    labels = {a for v in family.variants.values() for a in v.labels}
+    if arch is None or arch in family.arch_strings or arch in labels:
         try:
             got = vfp.identify(_view(path))
         except (vfp.VideoModelError, OSError, ValueError):

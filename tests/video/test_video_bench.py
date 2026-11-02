@@ -469,6 +469,18 @@ def test_fasth3_runs_on_its_own_shifts(bench, monkeypatch):
         {"video": 10.0, "audio": 3.0}]
 
 
+def test_fasth3_without_nax_is_refused_before_any_load(bench, monkeypatch,
+                                                       capsys):
+    vsa_kernel(monkeypatch, nax=False)
+    bench.cfg["variant"] = hf.FASTH3
+    assert bench("--steps", "1") == 1
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        "error: MiniMax-H3 fasth3 runs video sparse attention, whose "
+        "kernel needs a GPU with NAX units (M5 or newer), and this Mac's "
+        "GPU has none")
+    assert _kinds(bench.ev, "identify") and len(bench.ev) == 1
+
+
 @pytest.mark.parametrize("shapes", ["1344x768x124,64x64x5",
                                     "64x64x5,1344x768x124",
                                     "64x64x5,1344x768x124,96x64x22"])

@@ -185,7 +185,7 @@ def test_the_model_folder_holds_every_file_of_the_recipe(tmp_path):
     if not d or not os.path.exists(os.path.join(d, "unsloth-h3",
                                                 REAL.dit.file)):
         pytest.skip("KQUANT_TEST_GGUF_DIR holds no MiniMax-H3 files")
-    for name in ("h3", "h3-fast", "h3-base"):
+    for name in ("h3", "h3-fast", "h3-base", "fasth3"):
         plan = video_pull.plan_pull(catalog.RECIPES[name], roots=[d],
                                     base_dir=str(tmp_path))
         missing = [p.role for p in plan.parts if not p.found]
@@ -384,6 +384,24 @@ def test_the_checks_run_chip_then_memory_then_files(lib, monkeypatch,
     assert "is there" not in err and got == []
 
 
+def test_fasth3_without_nax_is_refused_unless_forced(lib, monkeypatch,
+                                                     capsys):
+    from video_fixtures import vsa_kernel
+
+    _, cfg, got = lib
+    r = catalog.RECIPES["fasth3"]
+    monkeypatch.setitem(catalog.RECIPES, "fasth3", dataclasses.replace(
+        r, **{role: _pin(p) for role, p in r.pins().items()}))
+    vsa_kernel(monkeypatch, nax=False)
+    argv = ["fasth3", "--config", str(cfg), "--yes"]
+    assert video_pull.cmd_pull(argv) == 1
+    assert capsys.readouterr().err == (
+        "error: MiniMax-H3 fasth3 runs video sparse attention, whose kernel "
+        "needs a GPU with NAX units (M5 or newer), and this Mac's GPU has "
+        "none; pass --force to download anyway\n") and got == []
+    assert video_pull.cmd_pull([*argv, "--force"]) == 0 and len(got) == 6
+
+
 def _sparse(path, size: int):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
@@ -551,6 +569,23 @@ def test_the_scan_reads_first_shards_and_skips_hidden_folders(
     assert sorted(seen) == ["B.GGUF", "a.gguf", "bad.gguf",
                             "s-00001-of-00002.gguf", "v.safetensors"]
     assert "skipping" in capsys.readouterr().err
+
+
+def test_the_scan_finds_fasth3_under_its_wan_label(tmp_path, monkeypatch):
+    """vantagewithai's FastH3 file says wan, which its identity row
+    accepts, so the scan takes it as the fasth3 DiT."""
+    from video_fixtures import fasth3_gguf, fasth3_hashes
+
+    from gmlx.video import fingerprint as vfp
+    from gmlx.video.families.h3 import family as hf
+
+    # The file holds the header alone, so its hashes are given.
+    ident, lay = fasth3_hashes()
+    monkeypatch.setattr(vfp, "weight_identity", lambda view, names: ident)
+    monkeypatch.setattr(vfp, "layout_identity", lambda view, fam: lay)
+    path = fasth3_gguf(tmp_path / "fasth3.gguf")
+    assert files.scan([str(tmp_path)], hf.FAMILY) == [
+        files.VideoFile(path, "dit", "h3", hf.FASTH3, "qkv")]
 
 
 def test_an_image_pull_does_not_take_a_video_id():

@@ -186,6 +186,17 @@ def vsa_refusal(fam: VideoFamily, variant: str) -> str | None:
     return None
 
 
+def run_refusal(fam: VideoFamily, variant: str) -> str | None:
+    """Why this Mac or install does not run ``variant`` of ``fam``, or
+    None: its chip, then for a VSA variant the kernel. A run or a pull
+    checks it before it loads or downloads anything."""
+    why = chip_refusal(fam)
+    row = fam.variant_row(variant)
+    if why is None and row is not None and row.vsa_sparsity:
+        why = vsa_refusal(fam, variant)
+    return why
+
+
 def get_family(name: str) -> VideoFamily:
     for fam in families():
         if fam.name == name:

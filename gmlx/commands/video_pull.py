@@ -418,12 +418,12 @@ def cmd_pull(argv: list[str], prog: str = "gmlx video pull") -> int:
         return 2
     if a.dir and a.dir not in roots:
         roots.append(a.dir)
-    from gmlx.video.registry import chip_refusal, get_family
+    from gmlx.video.registry import get_family, run_refusal
 
-    chip = chip_refusal(get_family(r.family))
+    chip = run_refusal(get_family(r.family), r.variant)
     plan = plan_pull(r, roots=roots, base_dir=base)
-    # On a chip it refuses, or with an entry on this DiT and LoRA
-    # already, the pull keeps the files it finds.
+    # On a Mac or install it refuses, or with an entry on this DiT and
+    # LoRA already, the pull keeps the files it finds.
     if (a.force or not chip) and not (cfg and _registered(plan, cfg)):
         plan = fit_plan(plan)
         for n in plan.notes:

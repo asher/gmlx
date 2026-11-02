@@ -381,7 +381,7 @@ def _generate(a) -> int:
     from gmlx.video import encoder as video_encoder
     from gmlx.video import io, memfit, pipeline
     from gmlx.video.loader import identify_dit
-    from gmlx.video.registry import chip_refusal
+    from gmlx.video.registry import run_refusal
     from gmlx.video.vae.h3_audio import SAMPLE_RATE
     from gmlx.video.vae.reader import load_vae
 
@@ -401,7 +401,7 @@ def _generate(a) -> int:
         ffmpeg = io.probe()
     vid = identify_dit(os.path.expanduser(a.model), variant=a.variant)
     fam = vid.family
-    why = chip_refusal(fam)
+    why = run_refusal(fam, vid.variant)
     if why:
         raise RuntimeError(why)
     adapters = list(a.entry_adapters) + list(a.adapter or ())

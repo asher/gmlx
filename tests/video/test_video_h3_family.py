@@ -11,8 +11,9 @@ import hashlib
 import pytest
 from video_fixtures import (FIXTURES, H3_CONFIG, H3_HEADER, H3_IDENTITY,
                             H3_IDENTITY_FASTH3, H3_IDENTITY_MOLBAL,
-                            H3_IDENTITY_MOLBAL_TURBO, fasth3_view,
-                            fixture_view, load_json, official_config)
+                            H3_IDENTITY_MOLBAL_TURBO, fasth3_hashes,
+                            fasth3_view, fixture_view, load_json,
+                            official_config)
 
 from gmlx.image import fingerprint as ifp
 from gmlx.video import fingerprint as vfp
@@ -225,12 +226,6 @@ def test_a_given_variant_must_fit_the_weights(monkeypatch):
         "variant='fl2va-turbo4' contradicts the weights, which match "
         "MiniMax-H3 fl2va")
 
-def _fasth3_hashes() -> tuple:
-    row = load_json(H3_IDENTITY_FASTH3)["files"][
-        "fastvideo_fasth3_8step_v2_pruned-Q4_K_M.gguf"]
-    return row["variant_hash"], row["layout_hash"]
-
-
 def test_fasth3_is_named_by_its_weights_under_its_wan_label(monkeypatch):
     """vantagewithai's FastH3 file says wan. Its identity row accepts that
     label, names it fasth3 with the [q; k; v] layout, and puts its VSA
@@ -238,7 +233,7 @@ def test_fasth3_is_named_by_its_weights_under_its_wan_label(monkeypatch):
     block."""
     from mlx.utils import tree_flatten
 
-    ident, lay = _fasth3_hashes()
+    ident, lay = fasth3_hashes()
     monkeypatch.setattr(vfp, "weight_identity", lambda view, names: ident)
     monkeypatch.setattr(vfp, "layout_identity", lambda view, fam: lay)
     view = fasth3_view()
@@ -279,7 +274,7 @@ def test_gates_on_other_weights_are_refused(monkeypatch, weights, what):
 
 
 def test_fasth3_weights_without_their_gates_are_refused(monkeypatch):
-    ident, lay = _fasth3_hashes()
+    ident, lay = fasth3_hashes()
     monkeypatch.setattr(vfp, "weight_identity", lambda view, names: ident)
     monkeypatch.setattr(vfp, "layout_identity", lambda view, fam: lay)
     assert _refused(fasth3_view(gates=False)) == (
