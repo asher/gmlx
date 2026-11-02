@@ -128,7 +128,7 @@ def _seconds(text: str) -> float:
     return s
 
 
-def _schedules(steps: int, shifts: dict) -> bool:
+def _schedules(steps: int, shifts: dict, rungs: tuple = ()) -> bool:
     """Whether every stream gets ``steps`` finite float32 forwards."""
     import numpy as np
 
@@ -136,7 +136,7 @@ def _schedules(steps: int, shifts: dict) -> bool:
 
     try:
         with np.errstate(all="ignore"):
-            sig = schedule.stream_sigmas(steps, shifts)
+            sig = schedule.stream_sigmas(steps, shifts, rungs)
     except ValueError:
         return False
     return all(len(v) == steps + 1 and np.isfinite(v).all()
@@ -298,7 +298,7 @@ def _settings(a, fam, variant: str) -> dict:
         shifts["video"] = a.shift if a.shift is not None else d["shift"]
     shifts = {k: float(v) for k, v in shifts.items()}
     steps = a.steps or d.get("steps") or row.steps
-    if not _schedules(steps, shifts):
+    if not _schedules(steps, shifts, fam.rungs(variant, steps)):
         src = ("--shift" if a.shift is not None else
                "the entry's defaults.shift" if "shift" in d else
                "the default video shift")

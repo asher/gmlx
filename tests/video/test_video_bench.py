@@ -12,7 +12,7 @@ import struct
 
 import numpy as np
 import pytest
-from video_fixtures import H3_HEADER, fixture_view, gguf_tokenizer
+from video_fixtures import H3_HEADER, fixture_view, gguf_tokenizer, vsa_kernel
 
 from gmlx.commands import video as cmd
 from gmlx.commands import video_bench as vb
@@ -461,15 +461,12 @@ def test_an_m1_is_refused_before_any_load(bench, monkeypatch, capsys):
     assert _kinds(bench.ev, "identify") and len(bench.ev) == 1
 
 
-def test_fasth3_is_refused_before_any_load(bench, capsys):
-    """gmlx video has no FastH3 schedule, so the bench does not time it on
-    another variant's defaults."""
+def test_fasth3_runs_on_its_own_shifts(bench, monkeypatch):
+    vsa_kernel(monkeypatch)
     bench.cfg["variant"] = hf.FASTH3
-    assert bench("--steps", "1") == 1
-    assert capsys.readouterr().err.splitlines()[-1] == (
-        "error: gmlx video has no sampling defaults for MiniMax-H3 fasth3, "
-        "so it does not run it from the command line")
-    assert _kinds(bench.ev, "identify") and len(bench.ev) == 1
+    assert bench("--steps", "1", "--shapes", "64x64x5", "--no-decode") == 0
+    assert [e[3] for e in _kinds(bench.ev, "generate")] == [
+        {"video": 10.0, "audio": 3.0}]
 
 
 @pytest.mark.parametrize("shapes", ["1344x768x124,64x64x5",

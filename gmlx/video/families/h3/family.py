@@ -234,9 +234,16 @@ SAMPLING = {
 }
 # FastVideo's FastH3 v2, distilled from H3 for 8 forwards with video
 # sparse attention: vantagewithai's pruned GGUF of it, labelled wan. The
-# release's fastvideo_inference.json runs VSA at sparsity 0.8, tile 64.
+# release's fastvideo_inference.json runs VSA at sparsity 0.8, tile 64,
+# and samples the 8 timesteps the model was distilled at, at video shift
+# 10 and audio shift 3.
 FASTH3 = "fasth3"
 VSA_SPARSITY = 0.8
+FASTH3_RUNGS = (999, 874, 749, 624, 500, 375, 250, 125)
+SAMPLING[FASTH3] = VideoSampling(
+    len(FASTH3_RUNGS), {"video": 10.0, "audio": SHIFTS["audio"]},
+    "FastVideo/FastVideo-FastH3-8-Step-V2",
+    "3da2ddfe1954d9cda4c05b643dc0f26007a655c5", rungs=FASTH3_RUNGS)
 _FASTH3 = VideoVariantRow(
     FASTH3, "vantagewithai/FastVideo-FastH3-8-Step-V2-ComfyUI-GGUF",
     "448ffec4210efe431a6b4a945672d88aea5f25f4",

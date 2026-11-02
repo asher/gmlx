@@ -271,6 +271,31 @@ def test_given_sigma_tables_replace_the_shifts():
                           sigmas=schedule.stream_sigmas(3, other), **kw)
 
 
+@pytest.mark.parametrize("variant,steps,rungs", [
+    (hf.FASTH3, 8, hf.FASTH3_RUNGS), (hf.FASTH3, 2, ()), ("fl2va", 8, ())])
+def test_a_variant_at_its_trained_count_samples_its_timesteps(
+        monkeypatch, variant, steps, rungs):
+    """FastH3 at 8 steps runs the sigmas of its 8 rungs, and at another
+    count, as every other variant, the even grid of its shifts."""
+    from gmlx.video import api
+
+    got: list = []
+    monkeypatch.setattr(api, "sample", lambda *a, **k: got.append(k) or a[1:3])
+    pipe = _pipe(_params())
+    pipe.variant = variant
+    shifts = {"video": 10.0, "audio": 3.0}
+    pipeline.generate(pipe, mx.ones((1, 8, TINY["text_dim"])), frames=5,
+                      width=64, height=64, steps=steps, shifts=shifts, seed=3)
+    sig = got[0]["sigmas"]
+    if not rungs:
+        assert sig is None
+        return
+    want = schedule.stream_sigmas(steps, shifts, rungs)
+    assert {k: v.tolist() for k, v in sig.items()} == {
+        k: v.tolist() for k, v in want.items()}
+    assert sig["video"][0] != schedule.sigmas(steps, 10.0)[0]
+
+
 def test_a_lora_over_the_adapter_cache_still_builds_its_table(tmp_path):
     """The memory plan prices every file a run names, so the cache holds
     them all, whatever its bound."""

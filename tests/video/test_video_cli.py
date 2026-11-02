@@ -11,7 +11,8 @@ import re
 
 import numpy as np
 import pytest
-from video_fixtures import H3_HEADER, fixture_view, gguf_tokenizer, wait_for
+from video_fixtures import (H3_HEADER, fixture_view, gguf_tokenizer,
+                            vsa_kernel, wait_for)
 
 from gmlx.commands import video as cmd
 from gmlx.video import fingerprint as vfp
@@ -90,7 +91,8 @@ def _args(*argv, defaults=None):
 
 
 @pytest.mark.parametrize("variant,steps,shift", [
-    ("fl2va", 20, 12.0), (hf.TURBO4, 4, 6.0), ("unknown", 20, 12.0)])
+    ("fl2va", 20, 12.0), (hf.TURBO4, 4, 6.0), ("unknown", 20, 12.0),
+    (hf.FASTH3, 8, 10.0)])
 def test_the_variant_sets_steps_and_shift(variant, steps, shift):
     s = cmd._settings(_args(), hf.FAMILY, variant)
     assert (s["steps"], s["shifts"]) == (steps, {"video": shift,
@@ -234,14 +236,10 @@ def test_an_adapter_on_a_base_file_runs_without_a_warning(run, monkeypatch,
     assert "warning" not in err and "20 steps at shift 12, seed" in err
 
 
-def test_fasth3_is_refused_before_the_encoder_loads(run, capsys):
-    """gmlx video has no FastH3 schedule, so the command line does not
-    run it on another variant's defaults."""
-    assert run(variant=hf.FASTH3) == 1
-    assert run.loads == []
-    assert capsys.readouterr().err.splitlines()[-1] == (
-        "error: gmlx video has no sampling defaults for MiniMax-H3 fasth3, "
-        "so it does not run it from the command line")
+def test_fasth3_runs_its_own_schedule(run, monkeypatch, capsys):
+    vsa_kernel(monkeypatch)
+    assert run(variant=hf.FASTH3) == "encoder"
+    assert "8 steps at shift 10, seed" in capsys.readouterr().err
 
 
 def test_the_variant_flag_reaches_the_weights_check(run, capsys):

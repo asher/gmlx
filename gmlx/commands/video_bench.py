@@ -242,7 +242,7 @@ def _bench(a) -> int:
             f"merged in, and each adapter runs on top of it")
     shapes = a.shapes or _shapes(DEFAULT_SHAPES)
     shifts = _shifts(a, fam, vid.variant)
-    if not _schedules(a.steps, shifts):
+    if not _schedules(a.steps, shifts, fam.rungs(vid.variant, a.steps)):
         raise _Usage(f"video shift {shifts['video']:g} gives no "
                      f"{a.steps}-step schedule")
     files = _files(a, adapters)

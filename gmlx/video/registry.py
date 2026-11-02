@@ -48,11 +48,15 @@ class VideoVariantRow:
 @dataclass(frozen=True)
 class VideoSampling:
     """A variant's sampling defaults, with their source. ``steps`` counts
-    DiT forwards. ``shifts`` maps each stream to its static flow shift."""
+    DiT forwards. ``shifts`` maps each stream to its static flow shift.
+    ``rungs``, for a variant distilled on fixed timesteps, holds them on
+    the 1000-step clock, one per forward: a run of that many steps
+    samples them in place of the even grid."""
     steps: int
     shifts: dict
     repo: str
     revision: str
+    rungs: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -127,6 +131,15 @@ class VideoFamily:
                              f"{self.title} {variant}, so it does not run "
                              f"it from the command line")
         return row
+
+    def rungs(self, variant: str, steps: int) -> tuple:
+        """The trained timesteps a run of ``steps`` forwards samples
+        ``variant`` on: its row's when they are ``steps``, else () for
+        the even grid."""
+        row = self.sampling_row(variant)
+        if row is None or len(row.rungs) != steps:
+            return ()
+        return row.rungs
 
 
 @functools.lru_cache(maxsize=1)

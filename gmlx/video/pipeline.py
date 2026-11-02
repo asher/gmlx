@@ -22,7 +22,7 @@ from gmlx.image.lora import (AdapterError, UnsupportedAdapterError,
 from gmlx.image.lora import install as lora_install
 from gmlx.image.lora.install import linear_leaves
 
-from . import api, layout
+from . import api, layout, schedule
 from . import loader as video_loader
 
 if TYPE_CHECKING:
@@ -114,7 +114,8 @@ def generate(pipe: VideoPipeline, features: mx.array, *, frames: int,
     """The video (1, C, T, H, W) and audio (1, C, 2, T) latents of a clip
     from encoder ``features`` (1, L, text dim), sampled under patch table
     ``table`` from the noise of ``seed``, or from ``start`` as (video,
-    audio) noise, on ``sigmas`` per stream when given (``api.sample``).
+    audio) noise, on ``sigmas`` per stream when given (``api.sample``),
+    else on the variant's trained timesteps when ``steps`` is their count.
     The text rows run once, under the same table."""
     fam = pipe.video_family
     dim = int(pipe.dit.cfg.text_dim)
@@ -134,6 +135,9 @@ def generate(pipe: VideoPipeline, features: mx.array, *, frames: int,
                          f"{width}x{height} shapes {vshape} and {ashape}")
     lay = layout.pack(fam.timeline, int(features.shape[1]), vshape[2],
                       vshape[3], vshape[4], ashape[3])
+    rungs = fam.rungs(pipe.variant, steps)
+    if sigmas is None and rungs:
+        sigmas = schedule.stream_sigmas(steps, shifts, rungs)
     tid = pipe.default_table if table is None else table
     if tid not in pipe.patch_tables:
         raise ValueError(f"unknown patch table {table!r}")

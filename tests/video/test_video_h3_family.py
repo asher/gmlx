@@ -171,13 +171,40 @@ def test_a_merged_turbo_file_is_its_own_variant(monkeypatch):
     assert (s.steps, s.shifts) == (4, {"video": 6.0, "audio": 3.0})
     assert hf.FAMILY.sampling["fl2va"].shifts == {"video": 12.0,
                                                   "audio": 3.0}
-    # gmlx video has no FastH3 schedule.
-    assert set(hf.FAMILY.sampling) == set(hf.FAMILY.variant_names()) - {
-        hf.FASTH3}
+    assert set(hf.FAMILY.sampling) == set(hf.FAMILY.variant_names())
     assert vfp.identify(view, variant=hf.TURBO4).variant == hf.TURBO4
     assert _refused(view, variant="fl2va") == (
         "variant='fl2va' contradicts the weights, which match MiniMax-H3 "
         "fl2va-turbo4")
+
+
+def test_fasth3_samples_the_timesteps_it_was_distilled_at():
+    """FastVideo/FastVideo-FastH3-8-Step-V2's fastvideo_inference.json at
+    3da2ddfe: dmd_denoising_steps 999 to 125, video shift 10, audio shift
+    3. The sigmas are FastVideo's from_dmd_steps on its MLX path: each
+    stream shifts the rungs over 1000 in float64 and rounds once. Its CUDA
+    stage, in float32 throughout, lands one float32 step lower on the
+    first two video and first four audio sigmas."""
+    from gmlx.video import schedule
+
+    row = hf.FAMILY.sampling_row(hf.FASTH3)
+    assert row is not None
+    assert (row.steps, row.rungs, row.shifts, row.repo, row.revision) == (
+        8, (999, 874, 749, 624, 500, 375, 250, 125),
+        {"video": 10.0, "audio": 3.0}, "FastVideo/FastVideo-FastH3-8-Step-V2",
+        "3da2ddfe1954d9cda4c05b643dc0f26007a655c5")
+    sig = schedule.stream_sigmas(8, row.shifts, hf.FAMILY.rungs(hf.FASTH3, 8))
+    assert sig["video"].tolist() == [
+        0.9998999238014221, 0.9857884049415588, 0.9675752520561218,
+        0.9431681036949158, 0.9090909361839294, 0.8571428656578064,
+        0.7692307829856873, 0.5882353186607361, 0.0]
+    assert sig["audio"].tolist() == [
+        0.9996664524078369, 0.9541484713554382, 0.8995196223258972,
+        0.8327401876449585, 0.75, 0.6428571343421936, 0.5,
+        0.30000001192092896, 0.0]
+    # Another step count samples the even grid at the same shifts.
+    assert hf.FAMILY.rungs(hf.FASTH3, 4) == ()
+    assert hf.FAMILY.rungs("fl2va", 8) == ()
 
 
 def test_a_given_variant_must_fit_the_weights(monkeypatch):

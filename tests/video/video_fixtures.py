@@ -91,6 +91,16 @@ def fasth3_view(*, gates: bool = True, arch: str | None = "wan"):
     return fixture_view(H3_HEADER, add=add, kv=kv)
 
 
+def vsa_kernel(monkeypatch, nax: bool = True) -> None:
+    """An mlx-kquant with ``vsa_attention``, on a GPU with NAX units or
+    without, so a FastH3 run does not depend on the machine's kq."""
+    import mlx_kquant as kq
+
+    monkeypatch.setattr(kq, "vsa_attention", getattr(
+        kq, "vsa_attention", lambda *a, **k: None), raising=False)
+    monkeypatch.setattr(kq, "nax_available", lambda: nax)
+
+
 @functools.lru_cache(maxsize=None)
 def _video_dits(root: str, family: str) -> tuple:
     from gmlx.image.fingerprint import view_from_scans
