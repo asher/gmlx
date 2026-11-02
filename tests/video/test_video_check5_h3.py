@@ -656,9 +656,10 @@ def _decode(model, latents: mx.array) -> tuple[int, int]:
 
 @pytest.fixture
 def settled_evals(monkeypatch):
-    """Each eval waits for its command buffer to complete. MLX frees an
-    eval's temporaries there, after eval returns, and under CPU load the
-    next eval can allocate first."""
+    """Each eval waits for its command buffers to complete. MLX frees an
+    eval's temporaries as they complete, after eval returns, and under CPU
+    load the next eval can allocate first. So the gates bound what the
+    code holds, not how late MLX frees it."""
     eval_ = mx.eval
 
     def settled(*args):
@@ -726,9 +727,12 @@ def test_the_video_decoder_holds_one_run_canvas_at_a_time(tiny,
     canvas = run * c.ratio * 24 * 33 * SPATIAL ** 2 * 3 * 4
     zt = z[:, :, :run, :16, :16].transpose(0, 2, 3, 4, 1)
     mx.eval(zt)
+    # A tile first, so the reading holds no kernel builds.
+    vae._tile(zt)
     tile = _peak(lambda: vae._tile(zt))
     peak, held = _decode(vae, z)
-    print(f"h3 check5 decode peak: one tile and {(peak - tile) / canvas:.2f}"
-          f" run canvases; held {held / canvas:.2f}")
+    print(f"h3 check5 decode peak: tile {tile / canvas:.2f}, decode "
+          f"{peak / canvas:.2f}, over the tile {(peak - tile) / canvas:.2f} "
+          f"run canvases; held {held / canvas:.2f}")
     assert peak - tile < 2.6 * canvas, (peak, tile, canvas)
     assert held < 0.5 * canvas, (held, canvas)
