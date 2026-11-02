@@ -26,6 +26,8 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_map, tree_reduce
 
+from gmlx import mlx_guards
+
 # gmlx: in-place append and the capacity grid; see gmlx/cache/kv_append.py.
 from .kv_append import (grid_capacity, grow, grow_levers, kv_write, mark_fresh,
                         release)
@@ -2108,8 +2110,10 @@ class BatchKVCache(_BaseCache):
                 right = 0
             if left != 0 or right != 0:
                 pad = [(0, 0), (0, 0), (left, right), (0, 0)]
-                k = mx.pad(k, pad)
-                v = mx.pad(v, pad)
+                # gmlx: past 2^31 elements the stock op misplaces rows on the
+                # GPU.
+                k = mlx_guards.pad(k, pad)
+                v = mlx_guards.pad(v, pad)
             left_padding = c.left_padding + left
             return k, v, c.offset, left_padding
 
