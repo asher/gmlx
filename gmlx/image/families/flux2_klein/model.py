@@ -62,6 +62,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
+from gmlx import mlx_guards
 from gmlx.image import ops, pacing, ref_cache
 from gmlx.image.dtypes import ImageDtypeError
 from gmlx.image.ops.products import own, precise
@@ -413,9 +414,11 @@ class SingleBlock(nn.Module):
 
     def out(self, x: mx.array, gate: mx.array, rows: mx.array,
             hid: mx.array) -> mx.array:
-        """``x + gate * linear2([rows, hid])``."""
+        """``x + gate * linear2([rows, hid])``. Past 2^31 elements the
+        stock concatenate misplaces rows on the GPU, so it goes through
+        the guard."""
         return gated_out(self.linear2, x, gate,
-                         mx.concatenate([rows, hid], axis=-1))
+                         mlx_guards.concatenate([rows, hid], axis=-1))
 
     def parts(self, x: mx.array, mod: tuple, cos: mx.array,
               sin: mx.array) -> tuple:
