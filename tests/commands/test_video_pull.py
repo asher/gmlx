@@ -32,12 +32,15 @@ SMALL = dataclasses.replace(REAL, **{
 
 @pytest.fixture(autouse=True)
 def _mac(monkeypatch):
-    """An M3 with room for every recipe. The chip and memory tests set
-    their own."""
+    """An M3, with no NAX units, and room for every recipe. The chip,
+    NAX and memory tests set their own."""
+    from video_fixtures import vsa_kernel
+
     from gmlx.load import dtypes
     from gmlx.serve import capacity
 
     monkeypatch.setattr(dtypes, "_arch_gen", 15)
+    vsa_kernel(monkeypatch, nax=False)
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 100 << 30)
     for var in ("GMLX_OVERCOMMIT", "GMLX_GOV_MARGIN", "GMLX_GOV_RESERVE_GB"):
         monkeypatch.delenv(var, raising=False)
@@ -489,7 +492,8 @@ def test_a_pull_that_adds_no_entry_keeps_the_files_it_finds(
 @pytest.mark.parametrize("name", sorted(catalog.RECIPES))
 def test_every_recipe_needs_more_than_24_gb(name, monkeypatch):
     """Priced from the real pins: on a 24 GB Mac the text encoder alone
-    is over the budget, and a 32 GB Mac runs the smallest clip."""
+    is over the budget, and a 32 GB Mac runs the smallest clip. The
+    refusal prices fasth3's denoise on its own step line."""
     from gmlx.serve import capacity
 
     r = catalog.RECIPES[name]
@@ -499,6 +503,8 @@ def test_every_recipe_needs_more_than_24_gb(name, monkeypatch):
                         lambda: capacity.ram_budget_bytes(24 << 30))
     why = video_pull.memory_refusal(plan)
     assert why is not None and why.endswith(", with the encode over it")
+    if name == "fasth3":
+        assert "denoise 13.03 GiB" in why
     monkeypatch.setattr(capacity, "working_budget_bytes",
                         lambda: capacity.ram_budget_bytes(32 << 30))
     assert video_pull.memory_refusal(plan) is None

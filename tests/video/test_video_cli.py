@@ -21,15 +21,17 @@ from gmlx.video.families.h3 import family as hf
 
 @pytest.fixture(autouse=True)
 def _room(monkeypatch):
-    """An M3 with room for every clip here, and the stub tokenizer in
-    place of the encoder file's. Returns the family and path each
-    tokenizer was built for. The memory and chip tests set their own."""
+    """An M3, with no NAX units, and room for every clip here, and the
+    stub tokenizer in place of the encoder file's. Returns the family and
+    path each tokenizer was built for. The memory, chip and NAX tests set
+    their own."""
     from gmlx.load import dtypes
     from gmlx.serve import capacity
     from gmlx.video import encoder
 
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 100 << 30)
     monkeypatch.setattr(dtypes, "_arch_gen", 15)
+    vsa_kernel(monkeypatch, nax=False)
     asked: list = []
     monkeypatch.setattr(encoder, "header_tokenizer", lambda fam, path: (
         asked.append((fam.name, path)) or gguf_tokenizer()))

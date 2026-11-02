@@ -48,15 +48,16 @@ def _cache_limit() -> int:
 
 @pytest.fixture(autouse=True)
 def _room(monkeypatch):
-    """An M3 with room for every shape here, and the stub tokenizer in
-    place of the encoder file's. Returns the family and path each
-    tokenizer was built for."""
+    """An M3, with no NAX units, and room for every shape here, and the
+    stub tokenizer in place of the encoder file's. Returns the family and
+    path each tokenizer was built for."""
     from gmlx.load import dtypes
     from gmlx.serve import capacity
     from gmlx.video import encoder
 
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 100 << 30)
     monkeypatch.setattr(dtypes, "_arch_gen", 15)
+    vsa_kernel(monkeypatch, nax=False)
     asked: list = []
     monkeypatch.setattr(encoder, "header_tokenizer", lambda fam, path: (
         asked.append((fam.name, path)) or gguf_tokenizer()))
@@ -255,8 +256,8 @@ def test_one_record_per_shape_from_one_load_of_each_model(bench, tmp_path,
         assert r["summary"]["s_per_step"]["median"] == float(
             np.median(r["step_s"][1:]))
         assert r["model"]["dit"] == {"file": "h3.gguf", "bytes": 1}
-        assert r["predicted"] == vb._plan(hf.FAMILY, "fl2va", r["model"], (w, h, f),
-                                          TEXT, True).phases
+        assert r["predicted"] == vb._plan(hf.FAMILY, "fl2va", r["model"],
+                                          (w, h, f), TEXT, True).phases
         assert "error" not in r
     ev = bench.ev
     assert len(_kinds(ev, "load_encoder")) == len(_kinds(ev, "load")) == 1
@@ -503,7 +504,8 @@ def test_a_shape_over_the_budget_is_refused_before_any_load(
     text = memfit.prompt_rows(hf.FAMILY, vb.BENCH_PROMPT, gguf_tokenizer())
     small = max(vb._plan(hf.FAMILY, "fl2va", files, s, text, False).peak
                 for s in ((64, 64, 5), (96, 64, 22)))
-    big = vb._plan(hf.FAMILY, "fl2va", files, (1344, 768, 124), text, False).peak
+    big = vb._plan(hf.FAMILY, "fl2va", files, (1344, 768, 124), text,
+                   False).peak
     monkeypatch.setattr(capacity, "working_budget_bytes",
                         lambda: (small + big) / 2)
     monkeypatch.setenv("GMLX_OVERCOMMIT", "0")
