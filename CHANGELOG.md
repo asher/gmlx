@@ -11,6 +11,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A served image model keeps its own LoRAs when a request brings others, and
   a request over the adapter cache is refused, where requests failed with
   "patch table names adapter ...".
+- `gmlx serve` no longer corrupts the KV cache when one of several decoding
+  requests passes about 260K tokens, or when a long request joins them.
+- FLUX.2 klein and the FLUX.1 VAE encoder no longer leave rows of the image
+  wrong at very large canvases and reference counts.
 
 ## [0.5.4] - 2026-10-29
 
