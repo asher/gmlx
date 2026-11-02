@@ -363,8 +363,14 @@ def test_the_hook_keeps_the_shipped_bits_with_float32_scores(monkeypatch):
 
     c = call()
     assert c.shipped is True
-    qh, ql = split(mx.array(c.q_pooled))
-    kh, kl = (x.transpose(0, 2, 1) for x in split(mx.array(c.k_pooled)))
+    # The layout mlx-kquant's _pool leaves: its tile sums, 64 tiles at a
+    # time, concatenated as contiguous [tiles, heads, D] rows, then
+    # transposed. A product of a copy in another layout may round
+    # differently.
+    qp, kp = (mx.array(np.ascontiguousarray(x.transpose(1, 0, 2))).transpose(
+        1, 0, 2) for x in (c.q_pooled, c.k_pooled))
+    qh, ql = split(qp)
+    kh, kl = (x.transpose(0, 2, 1) for x in split(kp))
     want = (qh @ kh + (qh @ kl + ql @ kh)) / math.sqrt(128)
     np.testing.assert_array_equal(c.scores, np.array(want))
     monkeypatch.setattr(vsa, "f32_products_exact", lambda: True)
