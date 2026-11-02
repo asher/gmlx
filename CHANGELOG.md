@@ -12,7 +12,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prompt with MiniMax-H3, as a preview. See [Video generation](docs/video.md)
   and its [licenses](docs/video.md#licenses).
 - The `fasth3` video recipe runs FastVideo's FastH3, an 8-step MiniMax-H3
-  whose steps take about half the time, on an M5 or newer.
+  whose steps take about half as long as `h3`'s, on an M5 or newer.
 
 ### Changed
 

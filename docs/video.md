@@ -111,17 +111,18 @@ times as long.
 
 ## FastH3
 
-FastH3 is FastVideo's version of MiniMax-H3, trained to make a clip in 8
-steps with video sparse attention: each part of the video attends to the
-parts that matter most to it and skips the rest, so a step takes about
-half the time of an `h3` step. That attention runs on the neural
-accelerators of the M5's GPU, so FastH3 needs an M5 chip or newer.
-
 ```sh
 gmlx video pull fasth3
 gmlx video generate fasth3 --seed 7 --output harbor.mp4 \
     --prompt "A fishing boat comes into a small harbor at dawn. Gulls circle over the mast, the engine hums, and waves slap against the stone pier."
 ```
+
+FastH3 is FastVideo's version of MiniMax-H3, trained to make a clip in 8
+steps with video sparse attention: each part of the video attends in
+full to the parts that matter most to it, and to a pooled summary of the
+rest, so a step takes about half the time of an `h3` step. That
+attention runs on the neural accelerators of the M5's GPU, so FastH3
+needs an M5 chip or newer.
 
 `pull` downloads vantagewithai's 13.6 GB GGUF of FastH3 and uses the text
 encoder and the VAEs of the `h3` recipes, so with one of those pulled it
@@ -137,10 +138,11 @@ With another `--steps` count it samples evenly spaced levels instead.
 On an M5 Max, a 1344x768 clip of 5 seconds takes about 9 minutes with
 FastH3, against about 17 with `h3`. That clip needs 36 GB of memory,
 since sparse attention holds more than `h3`'s attention at that size. On
-a 32 GB Mac, FastH3 makes 768x768 clips of 5 seconds.
+a 32 GB Mac, add `--size 768x768`: FastH3 makes 768x768 clips of 5
+seconds there.
 
-On a Mac older than an M5, `pull` and `generate` stop before they
-download or load anything:
+On an M3 or M4, `pull`, `generate` and `bench` stop before they download
+or load anything:
 
 ```text
 error: MiniMax-H3 fasth3 runs video sparse attention, whose kernel needs a GPU with NAX units (M5 or newer), and this Mac's GPU has none
@@ -253,7 +255,7 @@ Under the MiniMax H3 Community License Agreement:
 gmlx downloads a Turbo LoRA from its model card's repository only when
 you pull `h3` or `h3-fast`, verifies the file against the revision the
 recipe pins, and redistributes none of it. How you use the file is your
-responsibility. `h3-base`, the 20-step recipe, runs with no LoRA, so you
-can make clips without it.
+responsibility. `h3-base` and `fasth3` run with no LoRA, so you can make
+clips without it.
 
 gmlx has no content filter of its own.
