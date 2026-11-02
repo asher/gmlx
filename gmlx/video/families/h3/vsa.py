@@ -219,7 +219,7 @@ def _pool(x: mx.array, vbs: mx.array) -> mx.array:
 def _dense(q, k, v, scale):
     return mx.fast.scaled_dot_product_attention(
         q.transpose(1, 0, 2)[None], k.transpose(1, 0, 2)[None],
-        v.transpose(1, 0, 2)[None], scale=scale)[0].transpose(1, 0, 2)
+        v.transpose(1, 0, 2)[None], scale=scale).squeeze(0).transpose(1, 0, 2)
 
 
 def _gate_term(coarse, gate_tiled, tiles):

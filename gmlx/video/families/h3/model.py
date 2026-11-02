@@ -291,8 +291,11 @@ class DiTBlock(_Block):
             rope.pair_halves(a.q_norm.weight, r),
             rope.pair_halves(a.k_norm.weight, r), cos, sin, a.q_norm.eps)
         if gate is not None:
-            o = h3vsa.attend(q[0].transpose(1, 0, 2), k[0].transpose(1, 0, 2),
-                             v[0], gate, vsa, self.vsa_sparsity)
+            # squeeze, not [0]: an integer index is a gather, a copy of each
+            # input inside the call's graph.
+            o = h3vsa.attend(q.squeeze(0).transpose(1, 0, 2),
+                             k.squeeze(0).transpose(1, 0, 2), v.squeeze(0),
+                             gate, vsa, self.vsa_sparsity)
             pacing.point(o)
             return o.reshape(b, n, -1)
         o = attend(q, k, v.transpose(0, 2, 1, 3), chunk)
