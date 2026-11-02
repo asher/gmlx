@@ -201,6 +201,8 @@ def test_a_sparse_block_hands_the_call_views_not_gathers(monkeypatch):
                            TINY["attention_head_dim"])
     h = mx.random.normal((1, lay.rows, TINY["hidden_size"])).astype(
         mx.bfloat16)
+    # Evaluated inputs leave only the block's own ops in the graphs.
+    mx.eval(h, cos, sin, model.parameters())
     seen = {}
 
     def attend(q, k, v, gate, geom, sparsity):
