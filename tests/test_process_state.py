@@ -395,54 +395,92 @@ def test_restore_wraps_every_function_fixture_whatever_its_name(tmp_path):
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
 
 
-_VLM_LOAD = '''
-import pytest
-
-
-@pytest.fixture(scope="module")
-def vlm_load():
-    # What load_vlm_model installs, in a module fixture as the real-file
-    # VLM tests load.
-    from gmlx.tui.reasoning import install_template_default_thinking
-    from gmlx.upstream.single_bos_fix import install_single_bos_fix
-
-    install_template_default_thinking()
-    install_single_bos_fix()
-    yield
-
-
-def test_loads(vlm_load):
-    pass
-'''
-
-_AFTER_VLM_LOAD = '''
+_VLM_WRAPS = '''
 import importlib
 
+from gmlx.serve.patches import render
 from gmlx.tui import reasoning
 from gmlx.upstream import single_bos_fix
 from gmlx.upstream.patching import wrapped_with
 
 
-def test_the_next_module_finds_the_stock_bindings():
+def wraps() -> dict:
+    """Whether each binding the installs below wrap carries its wrapper."""
     pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
     utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
-    assert not wrapped_with(pu.get_chat_template,
-                            reasoning._TEMPLATE_DEFAULT_FLAG)
-    assert not wrapped_with(utils.process_inputs, single_bos_fix._FLAG)
-    for m in single_bos_fix._BINDINGS:
-        assert not wrapped_with(importlib.import_module(m).prepare_inputs,
-                                single_bos_fix._FLAG), m
+    got = {
+        "get_chat_template": wrapped_with(pu.get_chat_template,
+                                          reasoning._TEMPLATE_DEFAULT_FLAG),
+        "apply_chat_template": wrapped_with(pu.apply_chat_template,
+                                            render._NESTED_FLAG),
+        "process_inputs": wrapped_with(utils.process_inputs,
+                                       single_bos_fix._FLAG)}
+    for m in single_bos_fix._BINDINGS + single_bos_fix._COUNT_BINDINGS:
+        got[m] = wrapped_with(importlib.import_module(m).prepare_inputs,
+                              single_bos_fix._FLAG)
+    return got
+'''
+
+_VLM_LOAD = '''
+import importlib
+
+import pytest
+
+from gmlx.serve.patches import render
+from gmlx.tui import reasoning
+from gmlx.upstream import single_bos_fix
+from vlm_wraps import wraps
+
+
+@pytest.fixture(scope="module")
+def vlm_load():
+    # Two installs load_vlm_model runs, and the serve patches' nested
+    # render layer, in a module fixture as the real-file VLM tests do.
+    reasoning.install_template_default_thinking()
+    render._install_nested_in_place(
+        importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils"))
+    single_bos_fix.install_single_bos_fix()
+    yield
+
+
+@pytest.mark.parametrize("i", [1, 2])
+def test_each_test_of_the_module_keeps_the_wrappers(vlm_load, i):
+    assert all(wraps().values()), wraps()
+'''
+
+_AFTER_VLM_LOAD = '''
+from vlm_wraps import wraps
+
+
+def test_the_next_module_finds_the_stock_bindings():
+    assert not any(wraps().values()), wraps()
 '''
 
 
-def test_a_module_fixture_vlm_load_goes_with_its_module(tmp_path):
-    # Set up outside every test's capture, so only the end of its module
-    # hands the bindings back.
+def _vlm_load_tree(tmp_path) -> Path:
     root = _inner_tree(tmp_path)
+    (root / "vlm_wraps.py").write_text(_VLM_WRAPS)
     (root / "test_vlm_load.py").write_text(_VLM_LOAD)
     (root / "test_vlm_load_after.py").write_text(_AFTER_VLM_LOAD)
-    r = _inner_pytest(root, "test_vlm_load.py", "test_vlm_load_after.py")
+    return root
+
+
+def test_a_module_fixture_vlm_load_goes_with_its_module(tmp_path):
+    # Set up outside every test's capture, so each test of its module keeps
+    # the wrappers and only the end of the module hands the bindings back.
+    r = _inner_pytest(_vlm_load_tree(tmp_path), "test_vlm_load.py",
+                      "test_vlm_load_after.py")
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+    assert "3 passed" in r.stdout, r.stdout[-4000:]
+
+
+def test_the_state_report_names_a_module_hand_back(tmp_path):
+    r = _inner_pytest(_vlm_load_tree(tmp_path), "test_vlm_load.py",
+                      GMLX_TEST_STATE_REPORT="1")
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+    names = ", ".join(f"{m}.{n}" for m, n in process_state._VLM_BINDINGS)
+    assert f"test_vlm_load.py (module end): {names}" in r.stdout, (
+        r.stdout[-4000:])
 
 
 _KVARN_TESTS = '''

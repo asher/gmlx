@@ -18,9 +18,9 @@ copied ``apc``, which the APC manager build rebinds to the mach counters
 (the simulated host reports those, the stock read sees the real one),
 the render functions and input builders of the copied mlx-vlm, which
 ``load_vlm_model`` and the serve patches wrap (each test module hands
-these back too, for the module fixtures that load), the limits the serve
-governor saved when it armed its throttle, and the cache limit the server
-noted for the prefill decay. A governor state that outlives the test goes
+these back too, for the module fixtures that load a VLM), the limits the
+serve governor saved when it armed its throttle, and the cache limit the
+server noted for the prefill decay. A governor state that outlives the test goes
 back to the saved limits it held when the test started, and one the test
 created goes back to unarmed, as the MLX limits go back to their values
 from before the test.
@@ -218,8 +218,8 @@ def vlm_bindings() -> list:
 
 
 def put_back(bindings: list) -> list:
-    """Rebind each function of ``bindings`` that changed. Returns the name
-    of each."""
+    """Rebind or remove each binding of ``bindings`` that changed. Returns
+    the name of each."""
     changed = []
     for mod, name, fn in bindings:
         if getattr(mod, name, _MISSING) is fn:

@@ -142,7 +142,7 @@ def _hand_back_process_state(item) -> None:
 
 
 @pytest.fixture(autouse=True, scope="module")
-def _restore_vlm_bindings():
+def _restore_vlm_bindings(request):
     """load_vlm_model and the serve patches wrap the copied mlx-vlm render
     functions and input builders for the whole process. A module or class
     fixture that runs one sets up outside every test's capture, so each
@@ -151,7 +151,9 @@ def _restore_vlm_bindings():
 
     saved = process_state.vlm_bindings()
     yield
-    process_state.put_back(saved)
+    changed = process_state.put_back(saved)
+    if changed and _state_report():
+        _restored.append((f"{request.node.nodeid} (module end)", changed))
 
 
 def _state_report() -> bool:
