@@ -728,7 +728,8 @@ def test_the_video_decoder_holds_one_run_canvas_at_a_time(tiny,
     canvas = run * c.ratio * 24 * 33 * SPATIAL ** 2 * 3 * 4
     zt = z[:, :, :run, :16, :16].transpose(0, 2, 3, 4, 1)
     mx.eval(zt)
-    # A tile first, so the reading holds no kernel builds.
+    # A tile first: one that builds its kernels reads 1.42 canvases, not
+    # 1.47, and the gate reads the decode over the tile.
     vae._tile(zt)
     tile = _peak(lambda: vae._tile(zt))
     peak, held = _decode(vae, z)
