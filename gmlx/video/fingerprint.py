@@ -137,7 +137,8 @@ def _vsa_sparsity(fam: VideoFamily, view: HeaderView, name: str) -> float:
     if sparsity and not gated:
         raise VideoModelError(
             f"{fam.title} {name} runs video sparse attention with a gate "
-            f"in each block, and this GGUF has no {fam.vsa_gate} tensors")
+            f"in each block, and this GGUF has no {fam.vsa_gate} tensors; "
+            f"use a {fam.title} {name} GGUF that keeps them")
     return sparsity
 
 

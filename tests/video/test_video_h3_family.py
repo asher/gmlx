@@ -257,7 +257,8 @@ def test_fasth3_weights_without_their_gates_are_refused(monkeypatch):
     monkeypatch.setattr(vfp, "layout_identity", lambda view, fam: lay)
     assert _refused(fasth3_view(gates=False)) == (
         "MiniMax-H3 fasth3 runs video sparse attention with a gate in each "
-        "block, and this GGUF has no attn.to_gate_compress.weight tensors")
+        "block, and this GGUF has no attn.to_gate_compress.weight tensors; "
+        "use a MiniMax-H3 fasth3 GGUF that keeps them")
 
 
 @pytest.mark.parametrize("change,reason", [
