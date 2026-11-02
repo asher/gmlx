@@ -8,9 +8,12 @@ command line only.
 
 Video needs a Mac with an M3 chip or newer, 32 GB of memory or more,
 ffmpeg, and about 40 GB of disk for the model's files.
+[FastH3](#fasth3), a faster version of the model, needs an M5 chip or
+newer.
 
 - [Make your first clip](#make-your-first-clip)
 - [Choose a recipe](#choose-a-recipe)
+- [FastH3](#fasth3)
 - [Clip length, size and memory](#clip-length-size-and-memory)
 - [Dialogue](#dialogue)
 - [Use the preview decoder](#use-the-preview-decoder)
@@ -77,14 +80,16 @@ Pass it back with `--seed` to make the same clip again.
 
 ## Choose a recipe
 
-`pull` takes one of three recipes. All three run the same model files, so
-pulling a second one downloads at most one more LoRA.
+`pull` takes one of four recipes. The three `h3` recipes run the same
+model files, so pulling a second one downloads at most one more LoRA.
+`fasth3` runs a DiT file of its own with the same text encoder and VAEs.
 
 | Recipe | Steps | Use |
 |--------|-------|-----|
 | `h3` | 8 | The default, with lightx2v's Turbo 8-step [LoRA](#licenses). |
 | `h3-fast` | 4 | Drafts in about half the time on the Turbo 4-step [LoRA](#licenses), with softer motion. |
 | `h3-base` | 20 | The model with no LoRA. Slower, and it fits larger clips. |
+| `fasth3` | 8 | [FastH3](#fasth3), on an M5 or newer. Each step takes about half the time of an `h3` step. |
 
 The recipe's name is the model's name in your configuration:
 
@@ -104,6 +109,43 @@ On an M5 Max, an `h3` clip takes:
 A Mac with fewer GPU cores takes longer, and a base M4 or M5 several
 times as long.
 
+## FastH3
+
+FastH3 is FastVideo's version of MiniMax-H3, trained to make a clip in 8
+steps with video sparse attention: each part of the video attends to the
+parts that matter most to it and skips the rest, so a step takes about
+half the time of an `h3` step. That attention runs on the neural
+accelerators of the M5's GPU, so FastH3 needs an M5 chip or newer.
+
+```sh
+gmlx video pull fasth3
+gmlx video generate fasth3 --seed 7 --output harbor.mp4 \
+    --prompt "A fishing boat comes into a small harbor at dawn. Gulls circle over the mast, the engine hums, and waves slap against the stone pier."
+```
+
+`pull` downloads vantagewithai's 13.6 GB GGUF of FastH3 and uses the text
+encoder and the VAEs of the `h3` recipes, so with one of those pulled it
+downloads that one file. The recipe has no LoRA. At 8 steps FastH3
+samples the 8 noise levels it was trained at, at video shift 10:
+
+```text
+[video] MiniMax-H3 1344x768, 124 frames, 8 steps at shift 10, seed 7
+```
+
+With another `--steps` count it samples evenly spaced levels instead.
+
+On an M5 Max, a 1344x768 clip of 5 seconds takes about 9 minutes with
+FastH3, against about 17 with `h3`. That clip needs 36 GB of memory,
+since sparse attention holds more than `h3`'s attention at that size. On
+a 32 GB Mac, FastH3 makes 768x768 clips of 5 seconds.
+
+On a Mac older than an M5, `pull` and `generate` stop before they
+download or load anything:
+
+```text
+error: MiniMax-H3 fasth3 runs video sparse attention, whose kernel needs a GPU with NAX units (M5 or newer), and this Mac's GPU has none
+```
+
 ## Clip length, size and memory
 
 `--seconds` sets the length, up to 15, and `--size` the width and
@@ -114,7 +156,8 @@ neither:
 gmlx video generate h3 --size 768x1344 --seconds 10 --prompt "..."
 ```
 
-This portrait clip needs 48 GB with `h3`, or 36 GB with `h3-base`.
+This portrait clip needs 48 GB with `h3`, 36 GB with `h3-base`, or
+64 GB with `fasth3`.
 
 The Turbo LoRAs were made for a short side of 768, as in 1344x768,
 768x1344 and 768x768. A longer or larger clip takes more memory, and its
@@ -123,12 +166,12 @@ times as long as a 5 second one at the same size.
 
 The largest clip each Mac makes:
 
-| Mac memory | `h3` and `h3-fast` | `h3-base` |
-|------------|--------------------|-----------|
-| 32 GB | 1344x768, 5 s | 1344x768, 5 s, or 768x768 up to 10 s |
-| 36 GB | 1344x768, 5 s, or 768x768 up to 10 s | 1344x768 up to 10 s, or 768x768 up to 15 s |
-| 48 GB | 1344x768 up to 10 s, or 768x768 up to 15 s | 1344x768 up to 15 s |
-| 64 GB or more | 1344x768 up to 15 s | 1344x768 up to 15 s |
+| Mac memory | `h3` and `h3-fast` | `h3-base` | `fasth3` |
+|------------|--------------------|-----------|----------|
+| 32 GB | 1344x768, 5 s | 1344x768, 5 s, or 768x768 up to 10 s | 768x768, 5 s |
+| 36 GB | 1344x768, 5 s, or 768x768 up to 10 s | 1344x768 up to 10 s, or 768x768 up to 15 s | 1344x768, 5 s |
+| 48 GB | 1344x768 up to 10 s, or 768x768 up to 15 s | 1344x768 up to 15 s | 1344x768, 5 s, or 768x768 up to 15 s |
+| 64 GB or more | 1344x768 up to 15 s | 1344x768 up to 15 s | 1344x768 up to 15 s |
 
 [`gmlx video bench`](cli.md#video-bench) measures the time and memory of
 a few clip shapes on your Mac.
@@ -192,6 +235,7 @@ H3 license before you use the clips.
 | Files | License | Use |
 |-------|---------|-----|
 | MiniMax-H3, its video and audio VAEs | [MiniMax H3 Community License Agreement](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) | On the terms below |
+| FastH3, in [vantagewithai's GGUF](https://huggingface.co/vantagewithai/FastVideo-FastH3-8-Step-V2-ComfyUI-GGUF) of FastVideo's release | The same license, as [FastVideo's card](https://huggingface.co/FastVideo/FastVideo-FastH3-8-Step-V2) states | On the terms below |
 | Qwen3-VL-32B-Instruct, the text encoder | Apache 2.0 | Any, under the license's terms |
 | TAEH3, the preview decoder | MIT | Any, under the license's terms |
 | lightx2v's Turbo LoRAs | None stated on the [model card](https://huggingface.co/lightx2v/Minimax-h3-Turbo) | See below |

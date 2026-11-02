@@ -1347,6 +1347,7 @@ id, or `h3-2` when another entry has that id.
 | `h3` | 8 | MiniMax-H3 with lightx2v's Turbo 8-step [LoRA](video.md#licenses). The default. |
 | `h3-fast` | 4 | The Turbo 4-step [LoRA](video.md#licenses): faster, with softer motion. |
 | `h3-base` | 20 | The base model at video shift 12, with no LoRA. |
+| `fasth3` | 8 | FastVideo's FastH3 at video shift 10, with video sparse attention and no LoRA. Needs an M5 or newer. See [FastH3](video.md#fasth3). |
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1375,7 +1376,8 @@ Without ffmpeg, pass `--frames-dir` to get PNG frames and `audio.wav`.
 
 A clip runs at 24 fps and has 17 k + 5 frames, so `--seconds` rounds up:
 5 seconds is 124 frames, 10 is 243 and 15 is 362. The step count and the
-shift come from the entry, else from the DiT's variant.
+shift come from the entry, else from the DiT's variant. FastH3 at 8 steps
+samples the timesteps it was trained at.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
