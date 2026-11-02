@@ -16,7 +16,8 @@ the streaming and CPU device setups rebind, ``mx.device_info``, which
 ``--stream-cpu`` rebinds to the GPU's answer, the free-RAM read of the
 copied ``apc``, which the APC manager build rebinds to the mach counters
 (the simulated host reports those, the stock read sees the real one),
-the limits the serve
+the render functions of the copied ``prompt_utils``, which
+``load_vlm_model`` and the serve patches wrap, the limits the serve
 governor saved when it armed its throttle, and the cache limit the server
 noted for the prefill decay. A governor state that outlives the test goes
 back to the saved limits it held when the test started, and one the test
@@ -72,6 +73,10 @@ _WIRED_LIMIT_MODULES = ("gmlx._vendor.mlx_lm.generate", "gmlx._vendor.mlx_lm.uti
 # The module whose _free_ram_bytes the APC manager build rebinds, imported
 # at session start for the same reason.
 _APC_MODULE = "gmlx._vendor.mlx_vlm.apc"
+# The module whose render functions load_vlm_model and the serve patches
+# wrap, imported at session start for the same reason.
+_RENDER_MODULE = "gmlx._vendor.mlx_vlm.prompt_utils"
+_RENDER_NAMES = ("get_chat_template", "apply_chat_template")
 _MISSING = object()
 # Every serve governor state the session creates.
 _governor_states: weakref.WeakSet = weakref.WeakSet()
@@ -143,7 +148,7 @@ def start_session() -> None:
         _setters["set_cb_caps"] = kq.set_cb_caps
     except (ImportError, AttributeError):
         pass
-    for name in _WIRED_LIMIT_MODULES + (_APC_MODULE,):
+    for name in _WIRED_LIMIT_MODULES + (_APC_MODULE, _RENDER_MODULE):
         try:
             importlib.import_module(name)
         except ImportError:
@@ -213,6 +218,10 @@ def capture() -> dict:
         "free_ram_read": [
             (mod, getattr(mod, "_free_ram_bytes", _MISSING))
             for mod in [sys.modules.get(_APC_MODULE)] if mod],
+        "render": [
+            (mod, name, getattr(mod, name, _MISSING))
+            for mod in [sys.modules.get(_RENDER_MODULE)] if mod
+            for name in _RENDER_NAMES],
         "governor": {st: (st.saved_mem_limit, st.saved_cache_limit)
                      for st in _governor_states},
         "noted_cache_limit": getattr(decay, "_NOTED_CACHE_LIMIT", None),
@@ -297,6 +306,10 @@ def restore(state: dict) -> list:
         if getattr(mod, "_free_ram_bytes", _MISSING) is not fn:
             changed.append(f"{mod.__name__}._free_ram_bytes")
             mod._free_ram_bytes = fn
+    for mod, name, fn in state["render"]:
+        if getattr(mod, name, _MISSING) is not fn:
+            changed.append(f"{mod.__name__}.{name}")
+            setattr(mod, name, fn)
     governor = False
     for st in list(_governor_states):
         saved = state["governor"].get(st, (None, None))
