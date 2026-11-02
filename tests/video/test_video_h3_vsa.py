@@ -1,13 +1,15 @@
 """FastH3's video sparse attention: the tile map of gmlx's packed layout
 against FastVideo's index arrays at three FastH3 shapes, the refusals,
-and on a NAX GPU the call in a tiny FastH3 block, its pause points and
-the test hook that pins and reads back its routing. The tile map and the
-refusals are CPU-only."""
+the views a sparse block hands the call, and on a NAX GPU the call in a
+tiny FastH3 block, its pause points and the test hook that pins and reads
+back its routing. The tile map, the refusals and the views need no
+kernel."""
 from __future__ import annotations
 
 import json
 import math
 import os
+import tempfile
 
 import mlx.core as mx
 import mlx_kquant as kq
@@ -19,7 +21,7 @@ from video_fixtures import (FASTH3_FV_GEOMETRY, FIXTURES, H3_IDENTITY_FASTH3,
 
 from gmlx.image import pacing
 from gmlx.image.float32 import f32_products_exact, split
-from gmlx.video import layout
+from gmlx.video import layout, rope
 from gmlx.video import fingerprint as vfp
 from gmlx.video import loader as vloader
 from gmlx.video.families.h3 import family as hf
@@ -177,6 +179,38 @@ def _tiny(sparsity: float) -> hm.H3Transformer:
                                   mx.float32)
     m.load_weights(list(w.items()))
     return m
+
+
+def _gathers(a: mx.array) -> bool:
+    """Whether the graph of ``a`` holds a gather."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "graph.dot")
+        mx.export_to_dot(path, a)
+        with open(path) as f:
+            return '"Gather"' in f.read()
+
+
+def test_a_sparse_block_hands_the_call_views_not_gathers(monkeypatch):
+    """q, k and v reach vsa_attention as views of the block's products,
+    with no gather in their graphs. MLX's GPU gather misreads a view that
+    spans more than INT32_MAX elements of its buffer, as v of the fused
+    qkv does from 99,866 rows (docs/upstream-defects.md)."""
+    model = _tiny(hf.VSA_SPARSITY)
+    lay = _layout(*_CLIP, text=8)
+    cos, sin = rope.tables(lay.positions, model.rope.inv_freq,
+                           TINY["attention_head_dim"])
+    h = mx.random.normal((1, lay.rows, TINY["hidden_size"])).astype(
+        mx.bfloat16)
+    seen = {}
+
+    def attend(q, k, v, gate, geom, sparsity):
+        seen.update(q=q, k=k, v=v)
+        return mx.zeros(q.shape, q.dtype)
+
+    monkeypatch.setattr(vsa, "attend", attend)
+    model.blocks[0].attention(h, cos, sin, vsa=object())
+    assert {n: _gathers(a) for n, a in seen.items()} == {
+        "q": False, "k": False, "v": False}
 
 
 # On a NAX GPU: the call in a tiny FastH3 block.

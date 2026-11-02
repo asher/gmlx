@@ -291,8 +291,10 @@ class DiTBlock(_Block):
             rope.pair_halves(a.q_norm.weight, r),
             rope.pair_halves(a.k_norm.weight, r), cos, sin, a.q_norm.eps)
         if gate is not None:
-            # squeeze, not [0]: an integer index is a gather, a copy of each
-            # input inside the call's graph.
+            # squeeze, not [0]: an integer index is a gather, and MLX's GPU
+            # gather reads a view of more than INT32_MAX elements of extent
+            # with 32-bit offsets (v of the fused qkv from 99,866 rows). See
+            # docs/upstream-defects.md.
             o = h3vsa.attend(q.squeeze(0).transpose(1, 0, 2),
                              k.squeeze(0).transpose(1, 0, 2), v.squeeze(0),
                              gate, vsa, self.vsa_sparsity)

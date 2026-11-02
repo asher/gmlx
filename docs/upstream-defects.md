@@ -46,6 +46,44 @@ print(mx.addmm(mx.contiguous(c), a, b).reshape(-1))  # GPU: [3, 10, 17]
   of one output over a column of a wider array and an image LoRA band of one output column
   against a float64 sum, and it holds that a wider c reaches the stock op as the same array.
 
+## A gather misreads a strided view that spans more than INT32_MAX elements on the GPU
+
+- Dependency: mlx 0.32.3, GPU streams. The CPU stream is right.
+- Affected: a gather, `mx.take(x, indices, axis=...)` or an index such as `x[0]` or `x[idx]`,
+  when x is a strided view of at most INT32_MAX elements whose elements span more than INT32_MAX
+  elements of its buffer: one part of a split of a fused product with many rows, or a band of
+  columns of a wide array. Any dtype.
+- What goes wrong: the gather picks 32-bit source offsets from the number of elements of x, not
+  from the span of its strides, and reads each element past the 32-bit limit at a wrapped
+  offset. The rows from the limit on come back wrong, and no error is raised.
+- Not affected: a row-major x; a copy of the view, as `mx.contiguous` makes.
+
+Smallest repro (a 2 GiB buffer):
+
+```python
+import mlx.core as mx
+
+rows, width = 65600, 32768
+base = (mx.arange(rows) % 251).astype(mx.uint8)[:, None] + mx.zeros((1, width), mx.uint8)
+view = base[:, :16]  # [65600, 16], rows 32768 apart
+want = (mx.arange(rows) % 251).astype(mx.uint8)
+print((mx.take(view, mx.arange(rows), axis=0)[:, 0] != want).sum())  # GPU: 64, from row 65536
+print((view[mx.arange(rows)][:, 0] != want).sum())  # GPU: 64
+print((mx.take(view, mx.arange(rows), axis=0, stream=mx.cpu)[:, 0] != want).sum())  # 0
+print((mx.take(mx.contiguous(view), mx.arange(rows), axis=0)[:, 0] != want).sum())  # 0
+```
+
+- Where gmlx meets it: a FastH3 block, `DiTBlock.attention` in
+  `gmlx/video/families/h3/model.py`, splits its fused qkv product, so v is a view with rows
+  3 x 56 x 128 apart. Its span passes INT32_MAX elements from 99,866 packed rows, which
+  1344x768 reaches at 345 frames. `v[0]` on that view is a gather.
+- Guard: the block hands `vsa_attention` q, k and v as views, through `squeeze(0)` and
+  transposes, never through a gather. mlx-kquant's `vsa_attention` copies a view that spans past
+  the limit to row-major before its own gathers (its docs/upstream-defects.md).
+- Test: `test_a_sparse_block_hands_the_call_views_not_gathers` in
+  `tests/video/test_video_h3_vsa.py`. It stubs the call and checks that the graph of the q, k
+  and v the call receives holds no gather. It needs no kernel, so it runs on any device.
+
 ## The diffusers single-file loader leaves a BF16 tensor outside a linear layer undecoded
 
 - Dependency: diffusers at e0abab83, the revision the image reference scripts under
