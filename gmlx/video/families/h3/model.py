@@ -385,7 +385,7 @@ class H3Transformer(nn.Module):
              rules: dict | None = None) -> StepPlan:
         """The step's times, segment rows, RoPE tables and VSA geometry.
         Text runs at the video time; anchor rows at their stream's pinned
-        time."""
+        time. A FastH3 plan refuses a layout with anchors (ValueError)."""
         rules = fam.ANCHOR_RULES if rules is None else rules
         t = {"text": t_video, "video": t_video, "audio": t_audio,
              "cond": pinned(t_video, rules["video"]),

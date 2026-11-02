@@ -28,11 +28,12 @@ class VideoVariantRow:
     the order of the fused qkv rows in its files (``layout``). A variant
     with a LoRA merged into another's weights names that variant
     (``base``), whose identity tensors it keeps, and the LoRA
-    (``merged``). ``labels`` are the ``general.architecture`` values its
-    files carry beyond the family's own. A variant that runs video sparse
-    attention (VSA) gives the fraction of video key tiles each video query
-    tile skips (``vsa_sparsity``), and its files carry the family's VSA
-    gate in every block."""
+    (``merged``). ``labels``, on an identity row, are the
+    ``general.architecture`` values its files carry beyond the family's
+    own. A variant that runs video sparse attention (VSA) gives the
+    fraction of video key tiles each video query tile skips
+    (``vsa_sparsity``), and its files carry the family's VSA gate in every
+    block."""
     name: str
     repo: str
     revision: str

@@ -82,9 +82,9 @@ class TileMap:
 
 
 def anchor_refusal(anchors: tuple) -> str | None:
-    """Why FastH3 does not run a request with ``anchors`` (``Anchor`` or
-    ``layout.AnchorRows``), or None for none. It runs text to video only,
-    so it takes no keyframe or guide, video or audio."""
+    """Why FastH3 does not run a request with ``anchors``, the layout's
+    AnchorRows, or None for none. It runs text to video only, so it takes
+    no keyframe or guide, video or audio."""
     n = len(anchors)
     if not n:
         return None
@@ -201,8 +201,9 @@ def attend(q: mx.array, k: mx.array, v: mx.array, gate: mx.array,
     return _kq("vsa_attention")(q, k, v, geom, sparsity, gate=gate)
 
 
-# The test hook. Each piece follows mlx-kquant's vsa_attention op for op,
-# so a call with its own routing gives the bits of the shipped call.
+# The test hook. Each piece gives mlx-kquant's vsa_attention bits for the
+# same routing, so a call with its own routing gives the bits of the
+# shipped call.
 
 def _tile(x: mx.array, geom) -> mx.array:
     zero = mx.zeros((1,) + x.shape[1:], dtype=x.dtype)
