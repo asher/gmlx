@@ -461,6 +461,17 @@ def test_an_m1_is_refused_before_any_load(bench, monkeypatch, capsys):
     assert _kinds(bench.ev, "identify") and len(bench.ev) == 1
 
 
+def test_fasth3_is_refused_before_any_load(bench, capsys):
+    """gmlx video has no FastH3 schedule, so the bench does not time it on
+    another variant's defaults."""
+    bench.cfg["variant"] = hf.FASTH3
+    assert bench("--steps", "1") == 1
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        "error: gmlx video has no sampling defaults for MiniMax-H3 fasth3, "
+        "so it does not run it from the command line")
+    assert _kinds(bench.ev, "identify") and len(bench.ev) == 1
+
+
 @pytest.mark.parametrize("shapes", ["1344x768x124,64x64x5",
                                     "64x64x5,1344x768x124",
                                     "64x64x5,1344x768x124,96x64x22"])
