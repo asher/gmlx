@@ -123,7 +123,8 @@ _awaiting_capture = None
 
 
 _CAPTURED = pytest.StashKey[dict]()
-# (test node id, fields restore changed), kept under GMLX_TEST_STATE_REPORT=1.
+# (test node id or "<module node id> (module end)", fields restore
+# changed), kept under GMLX_TEST_STATE_REPORT=1.
 _restored: list = []
 
 

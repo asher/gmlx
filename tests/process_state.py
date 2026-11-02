@@ -20,10 +20,10 @@ the render functions and input builders of the copied mlx-vlm, which
 ``load_vlm_model`` and the serve patches wrap (each test module hands
 these back too, for the module fixtures that load a VLM), the limits the
 serve governor saved when it armed its throttle, and the cache limit the
-server noted for the prefill decay. A governor state that outlives the test goes
-back to the saved limits it held when the test started, and one the test
-created goes back to unarmed, as the MLX limits go back to their values
-from before the test.
+server noted for the prefill decay. A governor state that outlives the
+test goes back to the saved limits it held when the test started, and
+one the test created goes back to unarmed, as the MLX limits go back to
+their values from before the test.
 
 Known exclusion: the rest of a governor state (its band, the halved
 prefill step and the clamped width) stays as the test left it. The next

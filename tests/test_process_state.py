@@ -405,7 +405,8 @@ from gmlx.upstream.patching import wrapped_with
 
 
 def wraps() -> dict:
-    """Whether each binding the installs below wrap carries its wrapper."""
+    """Whether each binding load_vlm_model and the serve patches wrap
+    carries its wrapper."""
     pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
     utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
     got = {
