@@ -607,6 +607,7 @@ video_models:
     assert (k["dit"], k["encoder"], k["vae"], k["audio_vae"]) == (
         11 << 20, 19 << 20, 1 << 20, 3 << 20)
     assert k["tiny"] is True and k["loras"] == [2 << 20, 7 << 20]
+    assert k["variant"] == "unknown"
     assert k["text"] == 22
     assert planned.seen["encoder"] == str(tmp_path / "enc.gguf")
     assert _room == [("h3", planned.seen["encoder"])]

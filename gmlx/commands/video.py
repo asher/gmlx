@@ -419,7 +419,7 @@ def _generate(a) -> int:
         fam, dit=a.model, encoder=a.encoder, vae=preview or a.vae,
         tiny=bool(preview), audio_vae=a.audio_vae,
         loras=[p for p, _ in adapters], frames=s["frames"],
-        width=s["width"], height=s["height"],
+        width=s["width"], height=s["height"], variant=vid.variant,
         text=memfit.prompt_rows(
             fam, prompt, video_encoder.header_tokenizer(fam, a.encoder)))
     memfit.check(plan)

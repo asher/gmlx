@@ -9,10 +9,11 @@ a line fit of what the run adds, both read as MLX's active peak.
   whole, and the run, which keeps part of the file once the layers past
   the tap drop and adds the prompt's activations by text row.
 - denoise: the DiT's file, its LoRAs, and one step's activations by row
-  of the packed sequence. A lone LoRA in the DiT's activation dtype runs
-  on its file's arrays and costs its file once. Any other LoRA costs
-  ``lora_k`` times its file: its arrays and the copies the patch table
-  builds from them.
+  of the packed sequence, on the variant's own fit where ``PEAKS`` has
+  one (FastH3, whose steps run video sparse attention and its gates).
+  A lone LoRA in the DiT's activation dtype runs on its file's arrays and
+  costs its file once. Any other LoRA costs ``lora_k`` times its file:
+  its arrays and the copies the patch table builds from them.
 - audio: the audio VAE's file and its decode by audio latent.
 - decode: the video VAE's file, or TAEH3's for a preview, and one chunk
   of frames by output pixel. A chunk does not grow with the clip.
@@ -23,6 +24,7 @@ The plan fits when every phase is within the working budget of
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import os
 from dataclasses import dataclass
@@ -90,6 +92,19 @@ PEAKS = {
         decode=Line(1.24 * GiB, 530),
         tiny_decode=Line(0.43 * GiB, 3_200)),
 }
+# FastH3: vantagewithai's Q4_K_M with its VSA gates, measured as the H3
+# cells on the same encoder, VAEs and LoRA, in
+# tests/fixtures/video/memfit_fasth3_cells.json. Its encode and decodes
+# run H3's files, and H3's fits cover them. A step runs video sparse
+# attention, whose call holds more than dense attention at a large clip:
+# 0.56 to 8.02 GiB over the DiT from 1891 to 37735 rows, against H3's
+# 0.57 to 5.31, and 23.41 GiB at 109087 rows. A lone bf16 LoRA adds its
+# file and no more, so the two lines are one, fit as H3's are through
+# the 21751 and 37735 row cells, which puts it 3.69 GiB over the 109087
+# row cell.
+PEAKS["fasth3"] = dataclasses.replace(
+    PEAKS["h3"], step=Line(0.35 * GiB, 263_300),
+    plain_step=Line(0.35 * GiB, 263_300))
 
 # What to change when a phase does not fit.
 _HINTS = {"encode": "the text encoder needs more memory than this Mac "
@@ -174,15 +189,17 @@ def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
                 audio_vae: int, loras=(), lora_dtypes=(), rows: int,
                 text: int, audio_latents: int, pixels: int,
                 tiny: bool = False, decode: bool = True,
+                variant: str | None = None,
                 budget: float | None = None) -> VideoPlan:
-    """The plan of one run. File sizes in bytes; ``lora_dtypes`` holds
+    """The plan of one run of ``variant``, on its own fits where ``PEAKS``
+    has them, else its family's. File sizes in bytes; ``lora_dtypes`` holds
     each LoRA's ``lora_dtype`` result, and a LoRA with none is priced
     with copies. ``rows`` is the packed sequence's length, ``text`` the
     prompt's rows, ``audio_latents`` the audio stream's length and
     ``pixels`` a frame's width times height. ``vae`` is TAEH3's file
     when ``tiny``. With ``decode`` False the plan has no audio or decode
     phase. ``budget`` defaults to ``capacity.working_budget_bytes()``."""
-    p = PEAKS[family]
+    p = PEAKS[variant] if variant in PEAKS else PEAKS[family]
     load = encoder + p.encoder_load
     kept, prompt = p.encoder_keep * encoder, p.encode.bytes(text)
     lora = sum(int(b) for b in loras)
@@ -265,7 +282,8 @@ def lora_dtype(path: str) -> str | None:
 
 def plan_run(fam, *, dit: str, encoder: str, vae: str, audio_vae: str,
              loras=(), frames: int, width: int, height: int, text: int,
-             tiny: bool = False, budget: float | None = None) -> VideoPlan:
+             tiny: bool = False, variant: str | None = None,
+             budget: float | None = None) -> VideoPlan:
     """``plan_memory`` from the files at these paths."""
     rows, audio = clip_rows(fam, frames=frames, width=width, height=height,
                             text=text)
@@ -275,7 +293,8 @@ def plan_run(fam, *, dit: str, encoder: str, vae: str, audio_vae: str,
                        loras=[file_bytes(p) for p in loras],
                        lora_dtypes=[lora_dtype(p) for p in loras], rows=rows,
                        text=text, audio_latents=audio,
-                       pixels=width * height, tiny=tiny, budget=budget)
+                       pixels=width * height, tiny=tiny, variant=variant,
+                       budget=budget)
 
 
 def check(plan: VideoPlan, what: str = "this clip") -> None:

@@ -175,7 +175,8 @@ def _smallest_run(plan: Plan):
         fam.name, dit=size["dit"], encoder=size["encoder"], vae=size["tiny"],
         tiny=True, audio_vae=size["audio_vae"],
         loras=loras, lora_dtypes=dtypes, rows=rows, text=1,
-        audio_latents=audio, pixels=side * side)
+        audio_latents=audio, pixels=side * side,
+        variant=plan.recipe.variant)
 
 
 def memory_refusal(plan: Plan) -> str | None:

@@ -1,10 +1,11 @@
 """The video memory plan against measured peaks: each fit leaves at
 least 0.25 GiB over every measured cell, its closest cell within 0.35
 GiB and none more than 1.5 GiB over past its slope's 10 percent; the
-rows of a clip; what each file costs; the refusal and its message. CPU,
-no weights."""
+same for FastH3's own step fits; the rows of a clip; what each file
+costs; the refusal and its message. CPU, no weights."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -22,9 +23,11 @@ ROOM = 0.25 * GiB               # what a fit leaves over every cell
 DOC = load_json("memfit_h3_cells.json")
 FILES = DOC["files"]
 ROW = memfit.PEAKS["h3"]
+FAST = load_json("memfit_fasth3_cells.json")
+FAST_ROW = memfit.PEAKS[hf.FASTH3]
 
 
-def _plan(cell, files):
+def _plan(cell, files, variant=None):
     w, h, _ = cell["shape"]
     rows = cell["rows"]
     return memfit.plan_memory(
@@ -33,7 +36,7 @@ def _plan(cell, files):
         loras=[files["lora"]] * cell["loras"],
         lora_dtypes=["BF16"] * cell["loras"], rows=rows["total"],
         text=rows["text"], audio_latents=rows["audio"] // 2, pixels=w * h,
-        budget=None)
+        variant=variant, budget=None)
 
 
 def _rooms() -> dict:
@@ -92,6 +95,46 @@ def test_each_fit_covers_its_cells_and_stays_close(fit):
     # A fit, not a ceiling far above the readings.
     assert min(rooms) <= 0.35 * GiB
     assert max(r - slope for r, slope in cells) <= 1.5 * GiB
+
+
+def _fast_rooms() -> dict:
+    """``_rooms`` over the FastH3 cells, each phase of each cell against
+    its FastH3 plan: its own step fits, and H3's fits for the encode and
+    the decodes, whose files are H3's."""
+    out: dict = {k: [] for k in ("encode", "step", "plain_step", "audio",
+                                 "decode")}
+    for c in FAST["cells"]:
+        plan = _plan(c, FAST["files"], hf.FASTH3)
+        w, h, _ = c["shape"]
+        units = {"encode": 0, "denoise": c["rows"]["total"],
+                 "audio": c["rows"]["audio"] // 2, "decode": w * h}
+        for phase, measured in c["peak"].items():
+            fit = ("step" if c["loras"] else "plain_step") \
+                if phase == "denoise" else phase
+            out[fit].append((plan.phases[phase] - measured,
+                             getattr(FAST_ROW, fit).k / 11 * units[phase]))
+    return out
+
+
+def test_fasth3_has_its_own_steps_and_h3s_other_fits():
+    assert FAST["variant"] == hf.FASTH3 and FAST["vsa_sparsity"] == 0.8
+    assert dataclasses.replace(FAST_ROW, step=ROW.step,
+                               plain_step=ROW.plain_step) == ROW
+    assert FAST_ROW.step != ROW.step and FAST_ROW.plain_step != ROW.plain_step
+
+
+@pytest.mark.parametrize("fit", ["encode", "step", "plain_step", "audio",
+                                 "decode"])
+def test_each_fasth3_fit_covers_its_cells(fit):
+    """Its step fits as close as H3's are; H3's other fits over FastH3's
+    cells, which run the same files, keep their room."""
+    cells = _fast_rooms()[fit]
+    rooms = [r for r, _ in cells]
+    assert len(rooms) >= 4
+    assert min(rooms) >= ROOM, [r / GiB for r in rooms]
+    if fit in ("step", "plain_step"):
+        assert min(rooms) <= 0.35 * GiB
+        assert max(r - slope for r, slope in cells) <= 1.5 * GiB
 
 
 def test_the_encoder_run_keeps_less_than_the_plan_counts():
@@ -306,6 +349,31 @@ def test_on_32_gb_the_default_clip_fits_and_a_prompt_can_be_too_long(
         in msg
     msg = _refusal(_h3(512, 512, 22, text=30_000, budget=budget))
     assert "Try a shorter prompt." in msg
+
+
+def _fasth3(w, h, f, budget):
+    """A FastH3 plan on its measured files, with the cells' prompt."""
+    rows, audio = memfit.clip_rows(hf.FAMILY, frames=f, width=w, height=h,
+                                   text=25)
+    files = FAST["files"]
+    return memfit.plan_memory(
+        "h3", dit=files["dit"], encoder=files["encoder"], vae=files["vae"],
+        audio_vae=files["audio_vae"], rows=rows, text=25,
+        audio_latents=audio, pixels=w * h, variant=hf.FASTH3, budget=budget)
+
+
+def test_on_32_gb_fasth3_makes_768x768_clips_and_not_the_default(
+        no_overcommit):
+    """FastH3 alone at 1344x768x124 measured a denoise peak over a 32 GB
+    Mac's budget, so its plan refuses the default clip there."""
+    budget = capacity.ram_budget_bytes(32 * GiB)
+    cell = next(c for c in FAST["cells"]
+                if c["shape"] == [1344, 768, 124] and not c["loras"])
+    assert cell["peak"]["denoise"] > budget
+    assert "with the denoise over it. Try a smaller size" in _refusal(
+        _fasth3(1344, 768, 124, budget))
+    assert _fasth3(768, 768, 124, budget).fits
+    assert _fasth3(1344, 768, 124, capacity.ram_budget_bytes(36 * GiB)).fits
 
 
 @pytest.mark.parametrize("gap", [1, 1 << 20, 4 << 20, 9 << 20])

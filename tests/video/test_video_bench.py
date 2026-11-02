@@ -255,7 +255,7 @@ def test_one_record_per_shape_from_one_load_of_each_model(bench, tmp_path,
         assert r["summary"]["s_per_step"]["median"] == float(
             np.median(r["step_s"][1:]))
         assert r["model"]["dit"] == {"file": "h3.gguf", "bytes": 1}
-        assert r["predicted"] == vb._plan(hf.FAMILY, r["model"], (w, h, f),
+        assert r["predicted"] == vb._plan(hf.FAMILY, "fl2va", r["model"], (w, h, f),
                                           TEXT, True).phases
         assert "error" not in r
     ev = bench.ev
@@ -461,12 +461,19 @@ def test_an_m1_is_refused_before_any_load(bench, monkeypatch, capsys):
     assert _kinds(bench.ev, "identify") and len(bench.ev) == 1
 
 
-def test_fasth3_runs_on_its_own_shifts(bench, monkeypatch):
+def test_fasth3_runs_on_its_own_shifts_and_steps_fit(bench, monkeypatch,
+                                                     capsys):
     vsa_kernel(monkeypatch)
     bench.cfg["variant"] = hf.FASTH3
-    assert bench("--steps", "1", "--shapes", "64x64x5", "--no-decode") == 0
+    assert bench("--steps", "1", "--shapes", "64x64x5", "--no-decode",
+                 "--json") == 0
     assert [e[3] for e in _kinds(bench.ev, "generate")] == [
         {"video": 10.0, "audio": 3.0}]
+    r, = _records(capsys.readouterr().out)
+    assert r["predicted"] == vb._plan(hf.FAMILY, hf.FASTH3, r["model"],
+                                      (64, 64, 5), TEXT, False).phases
+    assert r["predicted"] != vb._plan(hf.FAMILY, "fl2va", r["model"],
+                                      (64, 64, 5), TEXT, False).phases
 
 
 def test_fasth3_without_nax_is_refused_before_any_load(bench, monkeypatch,
@@ -494,9 +501,9 @@ def test_a_shape_over_the_budget_is_refused_before_any_load(
                                        "audio_vae")}
     files["adapters"] = []
     text = memfit.prompt_rows(hf.FAMILY, vb.BENCH_PROMPT, gguf_tokenizer())
-    small = max(vb._plan(hf.FAMILY, files, s, text, False).peak
+    small = max(vb._plan(hf.FAMILY, "fl2va", files, s, text, False).peak
                 for s in ((64, 64, 5), (96, 64, 22)))
-    big = vb._plan(hf.FAMILY, files, (1344, 768, 124), text, False).peak
+    big = vb._plan(hf.FAMILY, "fl2va", files, (1344, 768, 124), text, False).peak
     monkeypatch.setattr(capacity, "working_budget_bytes",
                         lambda: (small + big) / 2)
     monkeypatch.setenv("GMLX_OVERCOMMIT", "0")
@@ -581,7 +588,7 @@ def test_the_bench_prices_a_lone_bf16_lora_at_its_file(tmp_path):
     a = argparse.Namespace(no_decode=False,
                            **{k: str(tmp_path / v) for k, v in names.items()})
     files = vb._files(a, [(str(lora), 1.0)])
-    plan = vb._plan(hf.FAMILY, files, (1344, 768, 124), 25, True)
+    plan = vb._plan(hf.FAMILY, "fl2va", files, (1344, 768, 124), 25, True)
     assert plan.terms["denoise"]["lora"] == LORA
 
 
@@ -596,7 +603,7 @@ def test_a_long_prompt_can_stop_the_bench_alone(bench, monkeypatch,
     files = {k: {"bytes": 1} for k in ("dit", "encoder", "vae",
                                        "audio_vae")}
     files["adapters"] = []
-    plan = vb._plan(hf.FAMILY, files, (64, 64, 5),
+    plan = vb._plan(hf.FAMILY, "fl2va", files, (64, 64, 5),
                     memfit.prompt_rows(hf.FAMILY, prompt, gguf_tokenizer()),
                     False)
     budget = (plan.phases["denoise"] + plan.phases["encode"]) / 2

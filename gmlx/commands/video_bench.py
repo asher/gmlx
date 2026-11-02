@@ -170,7 +170,7 @@ def _files(a, adapters) -> dict:
     return out
 
 
-def _plan(fam, files, shape, text: int, decode: bool):
+def _plan(fam, variant: str, files, shape, text: int, decode: bool):
     from gmlx.video import memfit
 
     w, h, frames = shape
@@ -184,7 +184,7 @@ def _plan(fam, files, shape, text: int, decode: bool):
         loras=[f["bytes"] for f in files["adapters"]],
         lora_dtypes=[f["dtype"] for f in files["adapters"]], rows=rows,
         text=text,
-        audio_latents=audio, pixels=w * h, decode=decode)
+        audio_latents=audio, pixels=w * h, decode=decode, variant=variant)
 
 
 def _emit(a, records: list) -> None:
@@ -254,7 +254,8 @@ def _bench(a) -> int:
     text = memfit.prompt_rows(fam, a.prompt,
                               video_encoder.header_tokenizer(fam, a.encoder))
     plan, (w, h, f) = max(
-        ((_plan(fam, files, s, text, decode), s) for s in shapes),
+        ((_plan(fam, vid.variant, files, s, text, decode), s)
+         for s in shapes),
         key=lambda x: sorted(x[0].phases.values(), reverse=True))
     memfit.check(plan, what="this bench" if plan.over == ["encode"]
                  else f"the {w}x{h}x{f} shape")
@@ -265,8 +266,9 @@ def _bench(a) -> int:
         w, h, frames = r["shape"]
         rest = r["step_s"][1:] or r["step_s"]
         # Priced at the prompt's tokens, as the cells are measured.
-        predicted = {k: v for k, v in _plan(fam, files, r["shape"],
-                                            done["text"], decode)
+        predicted = {k: v for k, v in _plan(fam, vid.variant, files,
+                                            r["shape"], done["text"],
+                                            decode)
                      .phases.items() if k in r["peak"]}
         rec = {"schema": BENCH_SCHEMA, "gmlx_version": __version__,
                "mlx_version": mx.__version__, "label": a.label,
