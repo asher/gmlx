@@ -235,8 +235,8 @@ def test_an_adapter_on_a_base_file_runs_without_a_warning(run, monkeypatch,
 
 
 def test_fasth3_is_refused_before_the_encoder_loads(run, capsys):
-    """gmlx video has no FastH3 schedule yet, so the command line does
-    not run it on another variant's defaults."""
+    """gmlx video has no FastH3 schedule, so the command line does not
+    run it on another variant's defaults."""
     assert run(variant=hf.FASTH3) == 1
     assert run.loads == []
     assert capsys.readouterr().err.splitlines()[-1] == (

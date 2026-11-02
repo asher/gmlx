@@ -171,7 +171,7 @@ def test_a_merged_turbo_file_is_its_own_variant(monkeypatch):
     assert (s.steps, s.shifts) == (4, {"video": 6.0, "audio": 3.0})
     assert hf.FAMILY.sampling["fl2va"].shifts == {"video": 12.0,
                                                   "audio": 3.0}
-    # FastH3's own schedule is not in gmlx video yet.
+    # gmlx video has no FastH3 schedule.
     assert set(hf.FAMILY.sampling) == set(hf.FAMILY.variant_names()) - {
         hf.FASTH3}
     assert vfp.identify(view, variant=hf.TURBO4).variant == hf.TURBO4
