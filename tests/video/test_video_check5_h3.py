@@ -713,12 +713,13 @@ def test_taeh3_holds_one_run_at_a_time(tiny, settled_evals):
 @metal_only
 def test_the_video_decoder_holds_one_run_canvas_at_a_time(tiny,
                                                            settled_evals):
-    """Three runs of 2x3 tiles peak at one tile's peak and under 2.6 run
-    canvases, and between yields hold under half a canvas: the tail the
-    next run fades from, and at the last run the tail's finished frames.
-    A slice that keeps the canvas alive copies it at each tile write and
-    reads over 3; one that keeps the run before alive holds a canvas
-    between runs."""
+    """Three runs of 2x3 tiles peak under 2 run canvases over one tile's
+    peak, at 1.68, and between yields hold under half a canvas: the tail
+    the next run fades from, and at the last run the tail's finished
+    frames. A slice that keeps the row above alive reads 2.35, one that
+    keeps the canvas alive copies it at each tile write and reads over 3,
+    and one that keeps the run before alive holds a canvas between
+    runs."""
     vae = vr.load_vae(tiny[0]["vae"], family="h3", dtype=mx.float16)
     mx.eval(vae.parameters())
     z = mx.random.normal((1, 24, 17, 24, 33), key=mx.random.key(0))
@@ -734,5 +735,5 @@ def test_the_video_decoder_holds_one_run_canvas_at_a_time(tiny,
     print(f"h3 check5 decode peak: tile {tile / canvas:.2f}, decode "
           f"{peak / canvas:.2f}, over the tile {(peak - tile) / canvas:.2f} "
           f"run canvases; held {held / canvas:.2f}")
-    assert peak - tile < 2.6 * canvas, (peak, tile, canvas)
+    assert peak - tile < 2 * canvas, (peak, tile, canvas)
     assert held < 0.5 * canvas, (held, canvas)
