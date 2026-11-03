@@ -15,6 +15,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   requests passes about 260K tokens, or when a long request joins them.
 - FLUX.2 klein and the FLUX.1 VAE encoder no longer leave rows of the image
   wrong at very large canvases and reference counts.
+- A Qwen3-VL or Qwen3.5 mmproj load with a raised `--prefill-step-size`, and
+  a Qwen-Image 2.1 image from a very long prompt, no longer return wrong text
+  features or corrupt memory. The fused rotary kernels index in 64-bit, so a
+  query past 2^31 elements is addressed correctly.
 
 ## [0.5.4] - 2026-10-29
 

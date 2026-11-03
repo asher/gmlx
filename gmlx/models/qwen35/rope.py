@@ -159,18 +159,18 @@ def _mrope_apply_kernel(
         tmp = tmp / q_len;
         int h = tmp % q_heads;
         int b = tmp / q_heads;
-        int base = ((b * q_heads + h) * q_len + t) * q_dim;
+        long base = ((static_cast<long>(b) * q_heads + h) * q_len + t) * q_dim;
 
         if (slot >= half_dim) {{
             int pass_d = {rotary_dim} + slot - half_dim;
-            int pass_idx = base + pass_d;
+            long pass_idx = base + pass_d;
             x_out[pass_idx] = x[pass_idx];
             return;
         }}
 
         {pair_source}
 
-        int idx = base + d;
+        long idx = base + d;
         float xv = static_cast<float>(x[idx]);
         float xp = static_cast<float>(x[base + pair_d]);
         x_out[idx] = static_cast<T>(xv * c - xp * s);
