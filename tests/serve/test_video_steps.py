@@ -747,11 +747,11 @@ def test_the_step_tensor_cache_keeps_a_loaded_video_entrys_cond(
 @pytest.mark.parametrize("route", ["upload", "encode"])
 def test_a_cond_over_the_share_the_models_leave_is_413_naming_it(
         route, monkeypatch, request):
-    """A tight entry leaves the step routes' tensor cache a share of its
-    bound, no less than the share that holds one cond of the priced rows
-    of H3's 5120-wide features. Under that share the cond a pack uploads,
-    or an encode keeps, is refused with the share as its cause, and a
-    tensor over the configured bound without it."""
+    """The step routes' tensor cache takes the smallest share of the
+    entries loaded. Under the share that holds one cond of the priced rows
+    of H3's 5120-wide features, the cond a pack uploads, or an encode
+    keeps, is refused with the share as its cause and its remedy, and a
+    tensor over the configured bound with the key that sets it."""
     from gmlx.video import encoder as video_encoder
 
     pipe, weights = _own_pipe()
@@ -770,18 +770,47 @@ def test_a_cond_over_the_share_the_models_leave_is_413_naming_it(
         with pytest.raises(StepsClientError) as e:
             send()
         with pytest.raises(StepsClientError) as over:
-            c.put(np.zeros((1, configured // 4 + 1), np.float32))
+            c.put(np.zeros((1, 5 * configured // 16), np.float32))
         steps.STATE.scale_caches(rows.nbytes / configured)
         send()
     finally:
         steps.STATE.scale_caches(1.0)
     assert (e.value.status, over.value.status) == (413, 413)
     assert e.value.body["error"] == (
-        "a tensor of 20971520 bytes is over the cache of 16777216 bytes: the "
-        "models loaded leave this cache a share of 0.25 of its configured "
-        "67108864 bytes")
+        "a tensor of 20.0 MiB is over the step routes' tensor cache of 16.0 "
+        "MiB: the models loaded leave it 25% of its configured 64 MiB. A "
+        "smaller defaults.size or defaults.seconds on the tightest entry "
+        "gives it more.")
     assert over.value.body["error"] == (
-        "a tensor of 67108868 bytes is over the cache of 16777216 bytes")
+        "a tensor of 80.0 MiB is over the step routes' tensor cache of 16.0 "
+        "MiB; raise server.image.tensor_cache_mb")
+
+
+def test_the_adapter_cache_and_the_upload_limit_are_named_in_a_413(host):
+    """An adapter matrix over the share of the adapter cache is refused
+    with that cache named, and a tensor over a route's own upload limit
+    with the limit."""
+    from gmlx.serve.image_wire import read, write
+
+    c = _client()
+    try:
+        steps.STATE.scale_caches(0.25)
+        with pytest.raises(StepsClientError) as e:
+            c.put(np.zeros((1, 20 << 20), np.float32), kind="adapters")
+    finally:
+        steps.STATE.scale_caches(1.0)
+    (t,) = read(write({"t": np.zeros((1, 1 << 19), np.float32)}))[0].values()
+    with pytest.raises(steps.StepError) as limit:
+        steps.STATE.put_tensor(steps.STATE.tensors, t.hash(), {"t": t},
+                               1 << 20)
+    assert e.value.status == limit.value.status == 413
+    assert e.value.body["error"] == (
+        "a tensor of 80.0 MiB is over the step routes' adapter cache of 64.0 "
+        "MiB: the models loaded leave it 25% of its configured 256 MiB. A "
+        "smaller defaults.size or defaults.seconds on the tightest entry "
+        "gives it more.")
+    assert str(limit.value) == (
+        "a tensor of 2.0 MiB is over the upload limit of 1.0 MiB")
 
 
 def _latents(route: str):

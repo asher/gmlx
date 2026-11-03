@@ -196,12 +196,18 @@ def _wire_copy(t: WireTensor) -> WireTensor:
     return WireTensor(t.dtype, t.shape, memoryview(bytes(t.raw)))
 
 
-class _Bytes:
-    """A least recently used map of WireTensors bounded in bytes."""
+def _mib(n: int) -> str:
+    return f"{n / 2**20:.1f} MiB"
 
-    def __init__(self, max_bytes: int):
+
+class _Bytes:
+    """A least recently used map of WireTensors bounded in bytes. Its 413
+    names it by ``name`` and the server.image key that configures it."""
+
+    def __init__(self, max_bytes: int, name: str, key: str):
         from collections import OrderedDict
 
+        self.name, self.key = name, key
         self.max_bytes = int(max_bytes)
         # The configured bound, of which the models loaded leave the
         # cache max_bytes.
@@ -238,16 +244,20 @@ class _Bytes:
         return self._bytes
 
     def check(self, nbytes: int) -> None:
-        """Refuse ``nbytes`` over the bound with a 413, which names the
-        share as its cause when the configured bound holds them."""
+        """Refuse ``nbytes`` over the bound with a 413 that gives its
+        remedy: the share the models loaded leave the cache, when the
+        configured bound holds them, or else the configured bound."""
         if nbytes <= self.max_bytes:
             return
-        why = "" if nbytes > self.configured else (
-            f": the models loaded leave this cache a share of "
-            f"{self.max_bytes / self.configured:.2f} of its configured "
-            f"{self.configured} bytes")
-        raise StepError(413, f"a tensor of {nbytes} bytes is over the cache "
-                        f"of {self.max_bytes} bytes{why}")
+        over = (f"a tensor of {_mib(nbytes)} is over {self.name} of "
+                f"{_mib(self.max_bytes)}")
+        if nbytes > self.configured:
+            raise StepError(413, f"{over}; raise server.image.{self.key}")
+        raise StepError(413, f"{over}: the models loaded leave it "
+                        f"{self.max_bytes / self.configured:.0%} of its "
+                        f"configured {self.configured / 2**20:.0f} MiB. A "
+                        "smaller defaults.size or defaults.seconds on the "
+                        "tightest entry gives it more.")
 
     def bound(self, configured: int, max_bytes: int) -> None:
         """Set the bound at ``max_bytes`` of the ``configured`` one and
@@ -283,6 +293,16 @@ class Run:
     ref_cache: dict = field(default_factory=dict)   # denoise_step's, per run
 
 
+def _tensor_cache(max_bytes: int) -> _Bytes:
+    return _Bytes(max_bytes, "the step routes' tensor cache",
+                  "tensor_cache_mb")
+
+
+def _adapter_cache(max_bytes: int) -> _Bytes:
+    return _Bytes(max_bytes, "the step routes' adapter cache",
+                  "adapter_cache_mb")
+
+
 class StepsState:
     """The state the step routes share. ``configure`` sets the cache
     sizes from ``server.image``."""
@@ -291,8 +311,8 @@ class StepsState:
         from gmlx.config import ImageServerCfg
 
         cfg = ImageServerCfg()
-        self.tensors = _Bytes(cfg.tensor_cache_mb << 20)
-        self.adapters = _Bytes(cfg.adapter_cache_mb << 20)
+        self.tensors = _tensor_cache(cfg.tensor_cache_mb << 20)
+        self.adapters = _adapter_cache(cfg.adapter_cache_mb << 20)
         self._bounds = (self.tensors.max_bytes, self.adapters.max_bytes)
         # The smallest cache share of the models loaded, and the largest
         # room one of them keeps in the tensor cache for a cond.
@@ -315,9 +335,9 @@ class StepsState:
         tmb = settings.tensor_cache_mb << 20
         amb = settings.adapter_cache_mb << 20
         if tmb != self.tensors.max_bytes:
-            self.tensors = _Bytes(tmb)
+            self.tensors = _tensor_cache(tmb)
         if amb != self.adapters.max_bytes:
-            self.adapters = _Bytes(amb)
+            self.adapters = _adapter_cache(amb)
         self._bounds = (tmb, amb)
 
     def scale_caches(self, share: float) -> None:
@@ -348,8 +368,8 @@ class StepsState:
                             f"{len(tensors)}")
         (t,) = tensors.values()
         if t.nbytes > limit:
-            raise StepError(413, f"a tensor of {t.nbytes} bytes is over the "
-                            f"limit of {limit}")
+            raise StepError(413, f"a tensor of {_mib(t.nbytes)} is over the "
+                            f"upload limit of {_mib(limit)}")
         store.check(t.nbytes)
         got = t.hash()
         if got != want:
