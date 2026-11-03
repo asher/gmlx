@@ -1066,6 +1066,24 @@ def test_a_flux3_reference_the_rules_refuse_is_named():
     assert e.value.param == "image" and e.value.status == 400
 
 
+@pytest.mark.parametrize("where", ["image", "image 2"])
+def test_a_qwen_reference_the_rules_refuse_is_named(where):
+    """A 1000x2 strip is too long for the area of a Qwen-Image 2.1 edit,
+    as its only reference or the second of two: a 400 names it."""
+    import numpy as np
+
+    served = _edit_served("qwen_image21")
+    req = _edit_req(1)
+    strip = np.zeros((2, 1000, 3), np.uint8)
+    req.images = ([strip] if where == "image"
+                  else [np.zeros((512, 512, 3), np.uint8), strip])
+    with pytest.raises(image_service.ImageRequestError,
+                       match=f"^{where}: a reference image of 1000x2 pixels "
+                             "is too long for its area") as e:
+        image_service.check_family(req, served)
+    assert e.value.param == "image" and e.value.status == 400
+
+
 def test_the_fit_check_prices_the_flux3_references_as_prepared(monkeypatch):
     """The memory plan reads each reference at its prepared size, and a
     staged entry loads its encoder without a tower for them."""
