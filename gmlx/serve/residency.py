@@ -203,6 +203,10 @@ def profile_label(cache_key: tuple) -> str:
 # ``get_cached_model`` kinds ``image_generation`` and ``image_edit`` load
 # its safetensors pipelines; no gmlx route passes either one.
 IMAGE_KIND = "gmlx_image"
+# The cache-key kind of a video model entry. Its pipeline runs on the
+# image worker too, so both kinds are worker entries.
+VIDEO_KIND = "gmlx_video"
+_WORKER_KINDS = frozenset({IMAGE_KIND, VIDEO_KIND})
 _STOCK_IMAGE_KINDS = frozenset({"image_generation", "image_edit"})
 
 
@@ -224,8 +228,8 @@ class _Entry:
     retained: int = 0           # of ``busy``: process-lifetime holds (preload), not requests
     loaded_as: str | None = None  # the configured ``id[@profile]`` whose request built it
     kv_policy: Any = None       # ServeKvPolicy (None when kv-bits is off)
-    kind: str = "chat"          # "chat", or IMAGE_KIND for an image model
-    pipeline: Any = None        # an image entry's ImagePipeline
+    kind: str = "chat"          # "chat", IMAGE_KIND or VIDEO_KIND
+    pipeline: Any = None        # an image or video entry's served pipeline
     priced_up: bool = False     # the install streamed less than predicted
 
     def __post_init__(self):
@@ -234,7 +238,9 @@ class _Entry:
 
     @property
     def is_image(self) -> bool:
-        return self.kind == IMAGE_KIND
+        """Whether the entry is a pipeline on the image worker: an image
+        or a video model."""
+        return self.kind in _WORKER_KINDS
 
 
 class _BusyHold:
@@ -454,6 +460,7 @@ class _ResidencyPool:
         time_fn=None,
         in_flight_fn=None,
         image_fns=None,
+        video_fns=None,
     ):
         self._proxy = proxy
         self._stock_get = stock_get
@@ -462,6 +469,7 @@ class _ResidencyPool:
         # the pool holds: the spec, the spec, a one-item list with the
         # pipeline. Injectable so eviction across kinds tests on the CPU.
         self._image_fns = image_fns
+        self._video_fns = video_fns
         # Primary bound: total resident weight bytes. Secondary (optional) bound:
         # model count. ``max_models=None`` means bytes alone govern.
         self._budget = max(0, int(budget_bytes))
@@ -505,10 +513,11 @@ class _ResidencyPool:
             raise ValueError(f"model kind {model_kind!r} loads mlx-vlm's own "
                              f"image pipelines; gmlx loads {IMAGE_KIND!r}")
         # Cold path: one build at a time (bounds peak memory).
-        if model_kind == IMAGE_KIND:
+        if model_kind in _WORKER_KINDS:
             # Weights and the activation reserve, from the headers: a file
-            # that is no image model is refused here, before any eviction.
-            file_bytes = incoming = int(self._image_fn(0)(build_spec))
+            # that is no model of the kind is refused here, before any
+            # eviction.
+            file_bytes = incoming = int(self._kind_fn(model_kind, 0)(build_spec))
         else:
             file_bytes = self._footprint_fn(model_path)
             incoming = file_bytes
@@ -518,13 +527,13 @@ class _ResidencyPool:
                                             held_bytes=self._resident_bytes())
             _log.info("streaming entry priced at %.1f GB resident of a %.1f GB file",
                       incoming / 1e9, file_bytes / 1e9)
-        elif stream is None and model_kind != IMAGE_KIND:
+        elif stream is None and model_kind not in _WORKER_KINDS:
             incoming = _plain_footprint(model_path, file_bytes, env)
         # Refuse an unloadable GGUF *before* evicting healthy residents for
         # room - a corrupt/unsupported file would otherwise cost every LRU
         # victim a full cold reload for a build that was never going to work.
         # Header-only, so the cost is milliseconds; the loader re-validates.
-        if (model_kind != IMAGE_KIND and isinstance(model_path, str)
+        if (model_kind not in _WORKER_KINDS and isinstance(model_path, str)
                 and model_path.endswith(".gguf")
                 and os.path.isfile(model_path)):
             from gmlx.load.preflight import preflight
@@ -540,7 +549,7 @@ class _ResidencyPool:
             # behind a reservation that waits on the build lock, so the first
             # attempt evicts nothing and the second takes the reservation.
             for force in (False, True):
-                with self._worker_for(model_kind == IMAGE_KIND, force=force), \
+                with self._worker_for(model_kind in _WORKER_KINDS, force=force), \
                         self._build_lock:
                     released: list = []
                     try:
@@ -808,7 +817,8 @@ class _ResidencyPool:
                 "resident": [
                     {
                         "model_path": e.model_path,
-                        "kind": "image" if e.is_image else "chat",
+                        "kind": ("video" if e.kind == VIDEO_KIND else
+                                 "image" if e.is_image else "chat"),
                         "loaded_as": e.loaded_as,
                         "profile": profile_label(e.cache_key),
                         "pinned": e.pinned,
@@ -1003,13 +1013,26 @@ class _ResidencyPool:
                                image_service.release_on_worker)
         return self._image_fns[i]
 
+    def _kind_fn(self, kind: str, i: int) -> Callable[..., Any]:
+        """Function ``i`` of a worker kind's (footprint, load, release)."""
+        if kind == IMAGE_KIND:
+            return self._image_fn(i)
+        if self._video_fns is None:
+            from . import video_service
+
+            self._video_fns = (video_service.entry_footprint,
+                               video_service.load_on_worker,
+                               video_service.release_on_worker)
+        return self._video_fns[i]
+
     def _build(self, cache_key, model_path, adapter_path, model_kind, footprint,
                *, ttl=None, env=None, build_spec=None) -> _Entry:
         """Build one entry of ``model_kind``: the shared gate and
         bookkeeping, around the build of its kind."""
-        if model_kind == IMAGE_KIND:
+        if model_kind in _WORKER_KINDS:
             return self._build_image(cache_key, model_path, footprint,
-                                     ttl=ttl, build_spec=build_spec)
+                                     ttl=ttl, build_spec=build_spec,
+                                     kind=model_kind)
         return self._build_chat(cache_key, model_path, adapter_path,
                                 model_kind, footprint, ttl=ttl, env=env,
                                 build_spec=build_spec)
@@ -1112,14 +1135,14 @@ class _ResidencyPool:
                       last_access=self._time_fn(), **fields)
 
     def _build_image(self, cache_key, model_path, footprint, *, ttl=None,
-                     build_spec=None) -> _Entry:
-        """An image entry: the image ``load`` on the image worker, gated on
-        the weights and the activation reserve together. Never reaches the
-        stock loader."""
+                     build_spec=None, kind: str = IMAGE_KIND) -> _Entry:
+        """An image or video entry: the kind's ``load`` on the image
+        worker, gated on the weights and the activation reserve together.
+        Never reaches the stock loader."""
         self._gate(footprint, model_path, image=True)
-        pipe = self._image_fn(1)(build_spec)
+        pipe = self._kind_fn(kind, 1)(build_spec)
         return self._new_entry(cache_key, model_path, footprint, ttl,
-                               kind=IMAGE_KIND, pipeline=pipe)
+                               kind=kind, pipeline=pipe)
 
     def _build_chat(self, cache_key, model_path, adapter_path, model_kind,
                     footprint, *, ttl=None, env=None,
@@ -1464,9 +1487,9 @@ class _ResidencyPool:
         if entry.is_image:
             pipe, entry.pipeline = entry.pipeline, None
             if released is None:
-                self._release_images([pipe])
+                self._release_images([(entry.kind, pipe)])
             else:
-                released.append(pipe)
+                released.append((entry.kind, pipe))
             return
         self._teardown_chat(entry)
 
@@ -1503,15 +1526,17 @@ class _ResidencyPool:
         return image_service.reserved_worker()
 
     def _release_images(self, pipelines: list) -> None:
-        """Release image pipelines on the image worker, where their arrays
-        were made, and wait for each, so the next gate measures the memory
-        back. Call without ``_lock``."""
+        """Release image and video pipelines, ``(kind, pipeline)`` pairs,
+        on the image worker, where their arrays were made, and wait for
+        each, so the next gate measures the memory back. Call without
+        ``_lock``."""
         while pipelines:
-            box = [pipelines.pop()]
-            if box[0] is None:
+            kind, pipe = pipelines.pop()
+            box = [pipe]
+            if pipe is None:
                 continue
             try:
-                self._image_fn(2)(box)
+                self._kind_fn(kind, 2)(box)
             except Exception:
                 _log.warning("teardown: image pipeline release failed",
                              exc_info=True)
@@ -1982,6 +2007,43 @@ def acquire_image_model(model_field, *, pool=None) -> "_BusyHold":
         # the wrong file, which no retry fixes.
         raise HTTPException(status_code=400, detail={"error": {
             "type": "image_model_mismatch", "code": "image_model_mismatch",
+            "message": str(e), "model": spec.id}}) from e
+    return _BusyHold(pool, entry)
+
+
+def acquire_video_model(model_field, *, pool=None) -> "_BusyHold":
+    """Acquire the entry of a configured video model id, loading it on a
+    miss, as :func:`acquire_image_model` does an image model;
+    ``hold._entry.pipeline`` is the ``ServedVideo``. A file that is no
+    model of the family, or an entry whose default clip does not fit the
+    working budget, is a 400."""
+    from fastapi import HTTPException
+
+    from gmlx.video.fingerprint import VideoModelError
+    from gmlx.video.memfit import VideoMemoryError
+
+    from . import bridge_vlm as _serving
+
+    pool = pool or _installed_pool()
+    if pool is None or _serving.server_config() is None:
+        raise HTTPException(status_code=503, detail={"error": {
+            "type": "server_error", "message": "no residency pool"}})
+    try:
+        path, spec = _serving.resolve_video_request(model_field)
+    except (_serving.ModelNotFound, _serving.ModelFileMissing) as e:
+        raise (_http_from_resolver_error(e) or e) from e
+    try:
+        entry = pool.acquire(path, None, VIDEO_KIND, ttl=spec.ttl_s,
+                             cache_key_extra=spec.load_signature(),
+                             build_spec=spec, loaded_as=spec.id)
+    except LoadDeferred as e:
+        raise _http_from_load_deferred(str(model_field), e) from e
+    except FileNotFoundError as e:
+        miss = _serving.ModelFileMissing(spec.id, str(e))
+        raise (_http_from_resolver_error(miss) or miss) from e
+    except (VideoModelError, VideoMemoryError) as e:
+        raise HTTPException(status_code=400, detail={"error": {
+            "type": "video_model_mismatch", "code": "video_model_mismatch",
             "message": str(e), "model": spec.id}}) from e
     return _BusyHold(pool, entry)
 

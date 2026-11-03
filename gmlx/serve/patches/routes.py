@@ -453,8 +453,12 @@ def _resident_models_view() -> list:
     out = []
     for e in pool.stats()["resident"]:
         kind = e.get("kind", "chat")
-        ids = (serving.image_ids_for_path(e["model_path"]) if kind == "image"
-               else path_to_ids.get(e["model_path"], []))
+        if kind == "image":
+            ids = serving.image_ids_for_path(e["model_path"])
+        elif kind == "video":
+            ids = [e["loaded_as"]] if e.get("loaded_as") else []
+        else:
+            ids = path_to_ids.get(e["model_path"], [])
         out.append({
             "ids": ids,
             "kind": kind,

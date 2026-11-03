@@ -1310,6 +1310,17 @@ class ResolvedVideoModel:
     adapters: tuple                 # ((abspath, strength), ...)
     defaults: dict
     variant: str | None = None
+    # A video entry has no idle unload and shares no chat encoder.
+    ttl_s: float | None = None
+    encoder_model: str | None = None
+
+    def load_signature(self) -> tuple:
+        """What makes two loads of the entry the same: every file, the
+        adapter list, and the size and length its memory is priced at."""
+        d = self.defaults or {}
+        return (self.path, self.variant, self.encoder, self.encoder_mmproj,
+                self.vae, self.audio_vae, tuple(self.adapters),
+                d.get("size"), d.get("seconds"))
 
 
 # Path resolution

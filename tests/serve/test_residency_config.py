@@ -760,6 +760,60 @@ def test_acquire_image_model_builds_the_image_kind(monkeypatch, mixed_cfg):
                                    residency.IMAGE_KIND)
 
 
+_VIDEO = {**_MIXED, "video_models": {"h3": {
+    "path": "/abs/h3.gguf", "encoder": "/abs/qwen3vl.gguf",
+    "vae": "/abs/video_vae.safetensors",
+    "audio_vae": "/abs/audio_vae.safetensors"}}}
+
+
+def test_a_video_model_loads_and_releases_through_its_own_kind(monkeypatch,
+                                                                request):
+    """A video id builds on the video triple, never the image one, the
+    runtime view names it by its id, and its eviction releases it through
+    the video release."""
+    from gmlx.config import build_config
+    from gmlx.serve import capacity as cap
+
+    serving.register_resolved_models(build_config(_VIDEO))
+    request.addfinalizer(serving.clear_resolved_models)
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    proxy, pool, seen_env, _td = make_pool()
+    calls = []
+    pool._image_fns = tuple(
+        (lambda *a, n=n: calls.append(("image", n))) for n in range(3))
+    pool._video_fns = (lambda spec: 30 * GB,
+                       lambda spec: calls.append(("load", spec.id)) or "VID",
+                       lambda box: calls.append(("release", box.pop())))
+    hold = residency.acquire_video_model("h3", pool=pool)
+    entry = hold._entry
+    hold.release()
+    assert seen_env == []
+    assert entry.kind == residency.VIDEO_KIND and entry.pipeline == "VID"
+    assert entry.footprint == 30 * GB and entry.loaded_as == "h3"
+    import importlib
+
+    from gmlx.serve.patches import routes as sp_routes
+
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
+    monkeypatch.setattr(pkg, "_kq_residency_pool", pool, raising=False)
+    view = sp_routes._resident_models_view()
+    assert [(v["kind"], v["ids"]) for v in view] == [("video", ["h3"])]
+    assert pool.evict("/abs/h3.gguf")
+    assert calls == [("load", "h3"), ("release", "VID")]
+
+
+def test_an_image_route_names_a_video_id_as_no_image_model(request):
+    from gmlx.config import build_config
+
+    serving.register_resolved_models(build_config(_VIDEO))
+    request.addfinalizer(serving.clear_resolved_models)
+    with pytest.raises(serving.WrongModelKind) as e:
+        serving.resolve_image_request("h3")
+    assert e.value.message == ("'h3' is not an image model; the image models "
+                               "are ['zit']")
+    assert serving.resolve_pool_path("h3") == "/abs/h3.gguf"
+
+
 def test_resolve_pool_path_takes_either_kind(mixed_cfg):
     assert serving.resolve_pool_path("zit") == "/abs/zit.safetensors"
     assert serving.resolve_pool_path("q") == "/abs/qwen.gguf"

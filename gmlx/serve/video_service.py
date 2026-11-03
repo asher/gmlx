@@ -1,0 +1,419 @@
+"""Video models in the serve residency pool.
+
+A video entry holds a ``ServedVideo``: the pipeline over the video DiT,
+with the configured adapters as its default patch table, the plan it was
+priced by and a small cache of refined text rows. It runs on the image
+worker, as an image entry does, since MLX streams are per thread.
+
+The pool counts an entry at the larger of two phases, as the video
+command runs them one model at a time: the encode, with the text encoder
+alone, and the DiT with its LoRAs and the larger of one step, the video
+decode and the audio decode at the entry's default clip. Each encode lets
+the DiT go, loads the encoder, encodes, releases it and loads the DiT
+again. Each decode loads its VAE for the call and lets it go after.
+
+The step of the ComfyUI pack (``av_step``) takes the two streams as
+ComfyUI's sampler carries them and gives back what ComfyUI's MiniMax-H3
+forward gives: the audio stream is carried at ``sigma_v / sigma_a`` times
+its latent while ``audio_scale`` is not 1, so the step divides that out
+before the DiT and returns the velocity of the carried variable.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+
+_log = logging.getLogger(__name__)
+
+_F32 = np.float32
+# The text rows an entry's encode phase is priced at.
+PRICED_TEXT_ROWS = 1024
+# Refined text rows kept per entry, by (cond key, patch table).
+CAPTIONS = 8
+# ComfyUI's floor on the video sigma of a step (MiniMax-H3 forward).
+SIGMA_FLOOR = 1e-6
+
+
+@dataclass(frozen=True)
+class VideoEntryPlan:
+    footprint: int                  # the larger phase, in bytes
+    family: str
+    variant: str
+    size: tuple                     # default (width, height)
+    frames: int                     # default clip length
+    steps: int
+    shifts: dict
+    dit_bytes: int
+    encoder_bytes: int
+    vae_bytes: int
+    audio_vae_bytes: int
+    loras: tuple = ()               # each adapter's file bytes
+    lora_dtypes: tuple = ()
+
+
+@dataclass(eq=False)
+class ServedVideo:
+    """What a video entry holds: the pipeline, the resolved entry, the
+    plan it was priced by, its adapter rows and its refined text rows."""
+    pipe: Any
+    spec: Any
+    plan: VideoEntryPlan
+    adapters: list = field(default_factory=list)
+    captions: OrderedDict = field(default_factory=OrderedDict)
+
+
+def _log_line(*parts) -> None:
+    _log.info(" ".join(str(p) for p in parts))
+
+
+def clip_defaults(spec, fam, variant: str) -> dict:
+    """The default clip, steps and shifts of an entry, as the video
+    command takes them from its defaults and the variant's row."""
+    from gmlx.commands.video import DEFAULT_SECONDS, DEFAULT_SIZE, frames_of
+
+    d = spec.defaults or {}
+    row = fam.defaults(variant)
+    if d.get("size"):
+        w, _, h = str(d["size"]).partition("x")
+        size = (int(w), int(h))
+    else:
+        size = DEFAULT_SIZE
+    shifts = {k: float(v) for k, v in row.shifts.items()}
+    if "shift" in d:
+        shifts["video"] = float(d["shift"])
+    return {"size": size, "frames": frames_of(d.get("seconds",
+                                                    DEFAULT_SECONDS)),
+            "steps": int(d.get("steps") or row.steps), "shifts": shifts}
+
+
+def plan_clip(plan: VideoEntryPlan, *, frames: int, width: int, height: int,
+              text: int, budget=None, decode: bool = True):
+    """The memory plan of one clip on the entry's files."""
+    from gmlx.video import memfit
+    from gmlx.video.registry import get_family
+
+    fam = get_family(plan.family)
+    rows, audio = memfit.clip_rows(fam, frames=frames, width=width,
+                                   height=height, text=text)
+    return memfit.plan_memory(
+        plan.family, dit=plan.dit_bytes, encoder=plan.encoder_bytes,
+        vae=plan.vae_bytes, audio_vae=plan.audio_vae_bytes,
+        loras=plan.loras, lora_dtypes=plan.lora_dtypes, rows=rows,
+        text=text, audio_latents=audio, pixels=width * height,
+        decode=decode, variant=plan.variant, budget=budget)
+
+
+def resident_bytes(phases: dict, terms: dict) -> int:
+    """What the entry holds while the DiT is loaded: the DiT, its LoRAs
+    and the largest of the step and the two decodes."""
+    dit = terms["denoise"]["dit"] + terms["denoise"]["lora"]
+    work = [terms["denoise"]["step"]]
+    for ph in ("audio", "decode"):
+        if ph in phases:
+            work.append(phases[ph])
+    return int(dit + max(work))
+
+
+def entry_plan(spec) -> VideoEntryPlan:
+    """The footprint of a video entry from the headers of its files.
+    Raises ``VideoModelError`` for a file that is no video DiT or an
+    adapter the family refuses, and ``VideoMemoryError`` for an entry
+    whose default clip does not fit the working budget."""
+    from gmlx.video import memfit, pipeline
+    from gmlx.video.fingerprint import VideoModelError
+    from gmlx.video.loader import identify_dit
+    from gmlx.video.registry import run_refusal
+
+    from .capacity import overcommit, working_budget_bytes
+
+    try:
+        ident = identify_dit(spec.path, variant=spec.variant)
+    except VideoModelError as e:
+        raise VideoModelError(f"video model {spec.id!r}: {e}") from None
+    fam = ident.family
+    why = run_refusal(fam, ident.variant)
+    if why:
+        raise VideoModelError(f"video model {spec.id!r}: {why}")
+    for path, _st in spec.adapters:
+        pipeline.vet_adapter(fam, dict(ident.config), path)
+    try:
+        d = clip_defaults(spec, fam, ident.variant)
+    except ValueError as e:
+        raise VideoModelError(f"video model {spec.id!r}: {e}") from None
+    loras = tuple(memfit.file_bytes(p) for p, _ in spec.adapters)
+    base = VideoEntryPlan(
+        footprint=0, family=fam.name, variant=ident.variant, size=d["size"],
+        frames=d["frames"], steps=d["steps"], shifts=d["shifts"],
+        dit_bytes=memfit.file_bytes(spec.path),
+        encoder_bytes=memfit.file_bytes(spec.encoder),
+        vae_bytes=memfit.file_bytes(spec.vae),
+        audio_vae_bytes=memfit.file_bytes(spec.audio_vae), loras=loras,
+        lora_dtypes=tuple(memfit.lora_dtype(p) for p, _ in spec.adapters))
+    width, height = d["size"]
+    budget = working_budget_bytes()
+    clip = plan_clip(base, frames=d["frames"], width=width, height=height,
+                     text=PRICED_TEXT_ROWS, budget=budget)
+    footprint = max(clip.phases["encode"],
+                    resident_bytes(clip.phases, clip.terms))
+    if budget is not None and footprint > budget and not overcommit():
+        raise memfit.VideoMemoryError(
+            f"video model {spec.id!r} needs {footprint / memfit.GiB:.2f} GiB "
+            f"for one {width}x{height} clip of {d['frames']} frames, over the "
+            f"working budget of {budget / memfit.GiB:.2f} GiB. Set a smaller "
+            "defaults.size or defaults.seconds. GMLX_OVERCOMMIT=1 overrides.")
+    return VideoEntryPlan(**{**base.__dict__, "footprint": int(footprint)})
+
+
+def entry_footprint(spec) -> int:
+    return entry_plan(spec).footprint
+
+
+def _load(spec) -> ServedVideo:
+    from gmlx.image import api, lora
+    from gmlx.video import pipeline
+
+    from .image_service import _pair_keys
+
+    plan = entry_plan(spec)
+    pipe = pipeline.load(spec.path, variant=spec.variant, log=_log_line)
+    served = ServedVideo(pipe=pipe, spec=spec, plan=plan)
+    try:
+        rows = []
+        if spec.adapters:
+            for path, _st in spec.adapters:
+                pipeline._vet(pipe, path)
+            lora.fit_cache(pipe, [path for path, _ in spec.adapters])
+            for path, strength in spec.adapters:
+                ad = lora.load_adapter(pipe, path)
+                for w in ad.warnings:
+                    _log.warning("video model %s: %s", spec.id, w)
+                rows.append((ad, float(strength)))
+            pipe.default_table = api.define_patch_table(
+                pipe, lora.table_entries(rows))
+            # A step's table never sheds the entry's own pairs.
+            pipe.adapters.keep(_pair_keys(rows))
+    except BaseException:
+        del pipe
+        _release([served])
+        raise
+    served.adapters = rows
+    return served
+
+
+def load_on_worker(spec) -> ServedVideo:
+    """Load a video entry on the image worker and wait for it."""
+    from .image_service import _on_worker
+
+    return _on_worker(_load, spec)
+
+
+def _release(box: list) -> None:
+    served = box.pop() if box else None
+    if served is None:
+        return
+    pipe, served.pipe = served.pipe, None
+    served.captions.clear()
+    if pipe is not None:
+        for cache in (pipe.conditionings, pipe.captions, pipe.modulations,
+                      pipe.adapters, pipe.tables, pipe.reference_latents):
+            cache.clear()
+    del pipe, served
+    import gc
+
+    gc.collect()
+    import mlx.core as mx
+
+    mx.clear_cache()
+
+
+def release_on_worker(box: list) -> None:
+    """Drop the entry in ``box``, a one-item list, on the image worker,
+    after the jobs queued before it, and return its memory."""
+    from .image_service import _on_worker
+
+    _on_worker(_release, box)
+
+
+# The DiT while the encoder runs.
+
+def drop_dit(served: ServedVideo) -> None:
+    """Let the DiT go before the encoder loads. The pipeline keeps its
+    adapters and patch tables."""
+    import gc
+
+    import mlx.core as mx
+
+    from gmlx.image.lora import install
+
+    pipe = served.pipe
+    install.drop_built(pipe)
+    pipe.dit = None
+    gc.collect()
+    mx.clear_cache()
+
+
+def ensure_dit(served: ServedVideo) -> None:
+    """Load the DiT again after an encode, its leaves wrapped for the
+    patch tables the pipeline holds."""
+    pipe = served.pipe
+    if pipe.dit is not None:
+        return
+    from gmlx.image.lora import install
+    from gmlx.video.loader import load_dit
+
+    pipe.dit, _ = load_dit(str(served.spec.path), variant=served.spec.variant,
+                           log=_log_line)
+    install.rewrap(pipe)
+
+
+def encode(served: ServedVideo, text: str, images: list) -> np.ndarray:
+    """The encoder features (1, L, text dim) f32 of ``text``, on the image
+    worker, with the encoder loaded alone. Images are refused."""
+    from gmlx.video import encoder as video_encoder
+
+    from .image_steps import StepError
+
+    fam = served.pipe.video_family
+    if images:
+        raise StepError(400, f"the gmlx server encodes text alone for "
+                        f"{fam.title}; it takes no images with the prompt, "
+                        "which keyframes and guides send")
+    import mlx.core as mx
+
+    drop_dit(served)
+    try:
+        handle = video_encoder.load_encoder(
+            fam, os.path.expanduser(served.spec.encoder), log=_log_line)
+        try:
+            feats = mx.array(handle.encode(text).features)[None]
+            feats = feats.astype(mx.float32)
+            mx.eval(feats)
+            out = np.array(feats, copy=True)
+        finally:
+            handle.release()
+            del handle
+            mx.clear_cache()
+    finally:
+        ensure_dit(served)
+    return out
+
+
+# One step of the pack.
+
+def stream_sigmas(timestep: float, shifts: dict) -> tuple:
+    """The video and audio sigmas of a step at ComfyUI's ``timestep``
+    (sigma x 1000), in float32 as ComfyUI's forward takes them."""
+    from gmlx.video import schedule
+
+    sv = max(_F32(timestep) / _F32(1000.0), _F32(SIGMA_FLOOR))
+    sa = _F32(schedule.time_shift(float(sv), float(shifts["video"]),
+                                  float(shifts["audio"])))
+    return float(sv), float(sa)
+
+
+def caption(served: ServedVideo, key: str, feats, table: str):
+    """The refined text rows of encoder features ``feats`` under patch
+    table ``table``, kept by (key, table) while the entry holds them."""
+    import mlx.core as mx
+
+    held = served.captions.get((key, table)) if key else None
+    if held is not None:
+        served.captions.move_to_end((key, table))
+        return held, True
+    text = served.pipe.dit.caption(feats)
+    mx.eval(text)
+    if key:
+        served.captions[(key, table)] = text
+        while len(served.captions) > CAPTIONS:
+            served.captions.popitem(last=False)
+    return text, False
+
+
+def av_step(served: ServedVideo, video, audio, timestep: float,
+            shifts: dict, scale: float, feats, key: str, table: str | None):
+    """One step of the pack's MiniMax-H3 model: the video and audio
+    velocity f32 of the latents as ComfyUI's sampler carries them, at its
+    ``timestep``, with the audio carried at ``scale`` (the payload's
+    audio_scale). Returns (video, audio, caption cache hit)."""
+    import mlx.core as mx
+
+    from gmlx.image.lora import install
+    from gmlx.video import api, layout
+
+    pipe = served.pipe
+    ensure_dit(served)
+    fam = pipe.video_family
+    sv, sa = stream_sigmas(timestep, shifts)
+    xv = video.astype(mx.float32)
+    xa = audio.astype(mx.float32)
+    carry = None
+    if scale != 1.0:
+        carry = float(_F32(sa) / _F32(sv))
+        xa = xa * carry
+    tid = pipe.default_table if table is None else table
+    if tid not in pipe.patch_tables:
+        raise ValueError(f"unknown patch table {table!r}")
+    lay = layout.pack(fam.timeline, int(feats.shape[1]), xv.shape[2],
+                      xv.shape[3], xv.shape[4], xa.shape[3])
+    prev = install.activate(pipe, tid)
+    try:
+        text, hit = caption(served, key, feats, tid)
+        vv, va = api.denoise_step(pipe.dit, xv, xa,
+                                  {"video": sv, "audio": sa}, text, lay)
+    finally:
+        install.restore(pipe, prev)
+    vv = vv.astype(mx.float32)
+    va = va.astype(mx.float32)
+    if carry is not None:
+        # d/d(sigma_v) of the carried variable, each factor in float32.
+        keep = float(_F32(1.0 - scale))
+        rate = float(_F32(1) + _F32(scale - 1.0) * _F32(sa))
+        va = keep * xa + rate * va
+    return vv, va, hit
+
+
+# The decodes.
+
+def decode_video(served: ServedVideo, latents) -> np.ndarray:
+    """Frames (F, H, W, 3) f16 in [0, 1] of model-space latents
+    (1, 24, T, h, w), on the image worker, with the video VAE loaded for
+    the call."""
+    import mlx.core as mx
+
+    from gmlx.video.vae.reader import load_vae
+
+    vae = load_vae(os.path.expanduser(served.spec.vae), family="h3",
+                   dtype=mx.float16)
+    try:
+        out = []
+        for chunk in vae.decode_frames(latents.astype(mx.float32)):
+            out.append(np.array(chunk[0].astype(mx.float16), copy=True))
+        return np.concatenate(out, axis=0)
+    finally:
+        del vae
+        mx.clear_cache()
+
+
+def decode_audio(served: ServedVideo, latents) -> np.ndarray:
+    """The waveform (1, 2, samples) f32 of model-space audio latents
+    (1, 32, 2, T), on the image worker, with the audio VAE loaded for the
+    call."""
+    import mlx.core as mx
+
+    from gmlx.video.vae.reader import load_vae
+
+    avae = load_vae(os.path.expanduser(served.spec.audio_vae),
+                    family="h3_audio", dtype=mx.float32)
+    try:
+        wave = avae.decode(latents.astype(mx.float32)).astype(mx.float32)
+        mx.eval(wave)
+        return np.array(wave, copy=True)
+    finally:
+        del avae
+        mx.clear_cache()

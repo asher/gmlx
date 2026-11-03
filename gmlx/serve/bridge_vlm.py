@@ -1593,6 +1593,8 @@ def resolve_image_request(model_field: str | None):
         head = split_profile_address(image_id)[0]
         if head in cfg.models or head in cfg.aliases:
             raise WrongModelKind(image_id, "chat", cfg.image_models)
+        if head in getattr(cfg, "video_models", {}):
+            raise WrongModelKind(image_id, "video", cfg.image_models)
         raise ModelNotFound(image_id, cfg.image_models)
     try:
         rm = resolve_image_model(image_id, cfg)
@@ -1601,12 +1603,47 @@ def resolve_image_request(model_field: str | None):
     return rm.path, rm
 
 
+def video_model_ids() -> list:
+    """The configured video model ids."""
+    cfg = _SERVER_CFG
+    return list(getattr(cfg, "video_models", {}) or {}) if cfg else []
+
+
+def is_video_model(model_field: str | None) -> bool:
+    """Whether a request ``model`` field names a configured video model."""
+    raw = str(model_field or "").strip()
+    return bool(raw) and raw in video_model_ids()
+
+
+def resolve_video_request(model_field: str | None):
+    """Resolve a video model id to ``(DiT abspath, ResolvedVideoModel)``.
+    An unknown id raises :class:`ModelNotFound`, a configured id whose
+    file is gone :class:`ModelFileMissing`. Re-resolves, so an entry
+    whose file comes back serves again."""
+    from gmlx.config import MissingModelFile, resolve_video_model
+
+    cfg = _SERVER_CFG
+    if cfg is None:
+        raise RuntimeError(
+            "no config registered; call register_resolved_models() first")
+    vid = str(model_field or "").strip()
+    if vid not in getattr(cfg, "video_models", {}):
+        raise ModelNotFound(vid, video_model_ids())
+    try:
+        rm = resolve_video_model(vid, cfg)
+    except MissingModelFile as e:
+        raise ModelFileMissing(vid, str(e)) from None
+    return rm.path, rm
+
+
 def resolve_pool_path(model_field: str | None) -> str:
-    """The resident-pool path of a chat or image model id, for the routes
-    that act on either kind (unload, keep). Raises as
+    """The resident-pool path of a chat, image or video model id, for the
+    routes that act on any kind (unload, keep). Raises as
     :func:`resolve_request_model` does."""
     if is_image_model(model_field):
         return resolve_image_request(model_field)[0]
+    if is_video_model(model_field):
+        return resolve_video_request(model_field)[0]
     return resolve_request_model(model_field)[0]
 
 
