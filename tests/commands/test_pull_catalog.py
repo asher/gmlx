@@ -745,19 +745,14 @@ def test_image_entries_follow_the_image_catalog():
             assert e.license and e.use == r.use and e.license_detail == r.license_note
             if cls < 16:
                 assert e.needs_class == 16 and e in big
-            elif ic.makes_image(r, ic.memory_class(b.ram)):
-                assert e.needs_class is None and e in runs
             else:
-                assert e.needs_class == ic.least_class(r) and e in big
-    _runs, big16 = catalog.image_entries(box(16))
-    assert {e.name for e in big16} == {'flux-2-klein-9b', 'flux-2-klein-base-9b', 'flux-2-klein-9b-kv'}
-    assert all(e.needs_class == 24 for e in big16)
-    assert catalog.image_entries(box(24))[1] == []
+                assert e.needs_class is None and e in runs
+    assert catalog.image_entries(box(16))[1] == []
     assert catalog.image_entries(box(8))[0] == []
 
 
 def test_image_entry_text_and_commands():
-    runs, big = catalog.image_entries(box(16))
+    runs, _big = catalog.image_entries(box(16))
     z = next(e for e in runs if e.name == 'z-image-turbo')
     assert catalog.image_command(z) == 'gmlx pull z-image-turbo'
     assert catalog.image_command(z, z.default_quant) == 'gmlx pull z-image-turbo'
@@ -770,9 +765,9 @@ def test_image_entry_text_and_commands():
     assert len(rows) == len(quants) and sum(r.endswith('default') for r in rows) == 1
     assert rows[quants.index(z.default_quant)].endswith('default')
     assert all(catalog.human_gb(n) in row for row, (_q, n) in zip(rows, z.quants))
-    nine = next(e for e in big if e.name == 'flux-2-klein-9b')
+    nine = next(e for e in catalog.image_entries(box(8))[1] if e.name == 'flux-2-klein-9b')
     ntext = catalog.image_entry_text(nine)
-    assert ntext.endswith('Needs a 24 GB Mac.') and 'gmlx pull' not in ntext
+    assert ntext.endswith('Needs a 16 GB Mac.') and 'gmlx pull' not in ntext
     assert '\nNon-commercial use only' in ntext
     assert _banned(text) == [] and _banned(ntext) == []
 
@@ -789,8 +784,6 @@ def test_recommendation_text_lists_the_image_models_after_the_chat_models():
     for e in images[0]:
         pat = rf'^  {re.escape(e.name)} +{re.escape(catalog.human_gb(e.download))} +{re.escape(e.use)}$'
         assert re.search(pat, text, re.M), e.name
-    for e in images[1]:
-        assert re.search(rf'^  {re.escape(e.name)} +24 GB Mac +{re.escape(e.use)}$', text, re.M), e.name
     vtext = catalog.recommendation_text(groups, b, images=images, verbose=True)
     for e in images[0]:
         for row in catalog.image_rows(e):

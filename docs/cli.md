@@ -742,9 +742,7 @@ against its published sha256, packs it to GGUF, and adds an
 `image_models` entry. The quants default to
 the ones for this Mac's memory, and an encoder already on disk is used
 again when its weights match. `gmlx pull <image model name> --list`
-prints its quants with their downloads for this Mac and downloads nothing. On a Mac where no DiT of the model makes an
-image, such as a 9B model on 16 GB, `pull` downloads nothing, names the
-smallest Mac that runs one, and takes a DiT only when `--quant` names it.
+prints its quants with their downloads for this Mac and downloads nothing.
 When the three parts do not fit the Mac's memory together, or an image
 does not fit at all, the plan gives the peak of an image at the entry's
 size, as `image generate` plans it. A VAE GGUF on disk packed from the recipe's

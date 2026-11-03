@@ -25,6 +25,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   memory budget, and a large photo was refused on a Mac where it fits.
 - `gmlx serve` frees an image model it releases after a ComfyUI workflow
   applied a LoRA to it. The next model loaded beside its memory before.
+- A 16 GB Mac now pulls and runs the FLUX.2 klein 9B models, which make a
+  1024x1024 image there; `gmlx pull` refused them and named 24 GB.
 
 ## [0.5.4] - 2026-10-29
 

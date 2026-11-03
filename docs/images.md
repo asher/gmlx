@@ -11,10 +11,9 @@ Z-Image-Turbo, in float16, when you allow it.
 
 ## Choose a model
 
-Every model runs on 16 GB but the FLUX.2 klein 9B models, which need
-24 GB. `pull` downloads the quant that suits your Mac's memory, so
-the download is larger on a Mac with more. The image size is the one you
-get when you ask for none.
+Every model runs on a Mac with 16 GB. `pull` downloads the quant that
+suits your Mac's memory, so the download is larger on a Mac with more.
+The image size is the one you get when you ask for none.
 
 | Model | Download, 16 GB Mac | Download, 24 GB Mac | Image size | License |
 |-------|---------------------|---------------------|------------|---------|
@@ -26,9 +25,9 @@ get when you ask for none.
 | `moss-image-base` | 10.5 GB | 15.5 GB | 1024x1024 | Apache 2.0, any use |
 | `flux-2-klein` | 6.6 GB | 8.1 GB | 1024x1024 | Apache 2.0, any use |
 | `flux-2-klein-base` | 6.6 GB | 8.1 GB | 1024x1024 | Apache 2.0, any use |
-| `flux-2-klein-9b` | Needs 24 GB | 13.8 GB | 1024x1024 | Non-commercial only |
-| `flux-2-klein-base-9b` | Needs 24 GB | 13.8 GB | 1024x1024 | Non-commercial only |
-| `flux-2-klein-9b-kv` | Needs 24 GB | 13.6 GB | 1024x1024 | Non-commercial only |
+| `flux-2-klein-9b` | 13.8 GB | 13.8 GB | 1024x1024 | Non-commercial only |
+| `flux-2-klein-base-9b` | 13.8 GB | 13.8 GB | 1024x1024 | Non-commercial only |
+| `flux-2-klein-9b-kv` | 13.6 GB | 13.6 GB | 1024x1024 | Non-commercial only |
 | `flux-3-klein` | 7.3 GB | 9.8 GB | 1024x1024 | Non-commercial, and commercial use of the images under $5M of yearly revenue |
 | `flux-3-klein-base` | 7.3 GB | 9.8 GB | 1024x1024 | Non-commercial, and commercial use of the images under $5M of yearly revenue |
 
@@ -355,9 +354,9 @@ holds. `--quant` and `--encoder-quant` pick others, and
 | `moss-image-base` | Q6_K | Q8_0 | Q8_0 | Q8_0 |
 | `flux-2-klein` | Q4_K_M | Q8_0 | Q8_0 | Q8_0 |
 | `flux-2-klein-base` | Q4_K_M | Q8_0 | Q8_0 | Q8_0 |
-| `flux-2-klein-9b` | None fits | Q4_K_M | Q8_0 | Q8_0 |
-| `flux-2-klein-base-9b` | None fits | Q4_K_M | Q8_0 | Q8_0 |
-| `flux-2-klein-9b-kv` | None fits | Q4_K_M | Q8_0 | Q8_0 |
+| `flux-2-klein-9b` | Q4_K_M | Q4_K_M | Q8_0 | Q8_0 |
+| `flux-2-klein-base-9b` | Q4_K_M | Q4_K_M | Q8_0 | Q8_0 |
+| `flux-2-klein-9b-kv` | Q4_K_M | Q4_K_M | Q8_0 | Q8_0 |
 | `flux-3-klein` | Q4_K_M | Q8_0 | Q8_0 | Q8_0 |
 | `flux-3-klein-base` | Q4_K_M | Q8_0 | Q8_0 | Q8_0 |
 
@@ -369,14 +368,15 @@ Raw GGUF by name.
 On 16 GB a MOSS-Image pull takes the encoder at Q4_K_M, since the Q8_0
 encoder leaves too little memory for the DiT there.
 
-No FLUX.2 klein 9B DiT that `pull` takes makes an image on 16 GB, so
-there a pull of a 9B model downloads nothing and names 24 GB, the
-smallest Mac that runs one. With `--quant` it takes that DiT, and
-`image generate` and the server refuse each request with the memory it
-needs. On 24 GB the Q4_K_M DiT makes a
-1024x1024 image from up to four 1024x1024 references, and a Q8_0 one from
-one at most. FLUX.2 klein 9B KV keeps the keys and values of its
-references, so on 24 GB its Q4_K_M DiT takes up to two 1024x1024
+On 16 GB the FLUX.2 klein 9B models make a 1024x1024 image from a prompt.
+An edit there fits at a smaller size: a 768x768 image from one 768x768
+reference, or a 640x640 image from two of that size. `image generate` and
+the server refuse a larger edit with the memory it needs. On 24 GB the
+Q4_K_M DiT makes a 1024x1024 image from up to four 1024x1024 references,
+and a Q8_0 one from one at most. FLUX.2 klein 9B KV keeps the keys and
+values of its references, so its edits take more memory. On 16 GB it
+makes a 640x640 image from one 640x640 reference, or a 512x512 image from
+two of that size. On 24 GB its Q4_K_M DiT takes up to two 1024x1024
 references and its Q8_0 DiT none, and on 32 GB its Q8_0 DiT takes two.
 
 ## Licenses

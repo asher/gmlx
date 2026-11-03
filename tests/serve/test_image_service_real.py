@@ -1,8 +1,7 @@
 """The quants ``gmlx pull`` takes on each memory class, priced by serve
 on the real headers: the entry plan admits the class default of every
 recipe at that class's working budget, at the ``defaults.size`` the pull
-writes on that class, and refuses the defaults that make no image there.
-Header reads only. Skipped unless KQUANT_TEST_GGUF_DIR holds
+writes on that class. Header reads only. Skipped unless KQUANT_TEST_GGUF_DIR holds
 the files under their published names."""
 from __future__ import annotations
 
@@ -43,14 +42,8 @@ def _file(root, name: str, near: str | None = None) -> str:
     return paths[0]
 
 
-# The class defaults that make no image, as catalog.NO_IMAGE records them.
-NO_IMAGE = {(n, gb) for n, classes in catalog.NO_IMAGE.items()
-            for gb in classes}
-
-
 @pytest.mark.parametrize("name, gb", [
-    (n, gb) for n in sorted(catalog.RECIPES) for gb in catalog.MEMORY_CLASSES
-    if (n, gb) not in NO_IMAGE])
+    (n, gb) for n in sorted(catalog.RECIPES) for gb in catalog.MEMORY_CLASSES])
 def test_serve_admits_the_default_each_class_pulls(gguf_dir, monkeypatch,
                                                    name, gb):
     r = catalog.RECIPES[name]
@@ -75,26 +68,6 @@ def test_serve_admits_the_default_each_class_pulls(gguf_dir, monkeypatch,
           f"{plan.footprint / memfit.GiB:.2f} of "
           f"{budget / memfit.GiB:.2f} GiB, staged {plan.staged}, caches at "
           f"{plan.cache_share:.2f}")
-
-
-@pytest.mark.parametrize("name, gb", sorted(NO_IMAGE))
-def test_serve_refuses_the_class_default_that_makes_no_image(
-        gguf_dir, monkeypatch, name, gb):
-    """Not even a 256x256 image of a 9B default fits the 16 GB class."""
-    r = catalog.RECIPES[name]
-    dq, eq = catalog.DEFAULT_QUANTS[name][gb]
-    spec = ResolvedImageModel(
-        id=name, path=_file(gguf_dir, r.dit_name(dq)),
-        vae=_file(gguf_dir, r.vae_pack),
-        encoder=_file(gguf_dir, r.encoder_name(eq)), encoder_model=None,
-        encoder_mmproj=None, family=None, adapters=(),
-        defaults={"size": "256x256"}, encoder_release="auto", pin=False,
-        ttl_s=None)
-    budget = _class_budget(gb)
-    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
-    monkeypatch.setattr(capacity, "overcommit", lambda: False)
-    with pytest.raises(memfit.ImageMemoryError, match="256x256 image"):
-        image_service.entry_plan(spec)
 
 
 @pytest.mark.parametrize("name", sorted(
