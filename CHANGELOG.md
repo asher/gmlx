@@ -23,6 +23,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   short ones fit at sizes refused before, and an over-long edit prompt is refused.
 - Small reference images let a Qwen-Image 2.1 edit in `gmlx serve` run past the
   memory budget, and a large photo was refused on a Mac it fits.
+- `gmlx serve` frees an image model it releases after a ComfyUI workflow
+  applied a LoRA to it. The next model loaded beside its memory before.
 
 ## [0.5.4] - 2026-10-29
 
