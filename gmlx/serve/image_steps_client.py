@@ -237,8 +237,10 @@ class StepsClient:
         """The video and audio output of a model with both streams for one
         clip's latents, video (1, C, T, h, w) and audio (1, C, 2, T), as
         ComfyUI's sampler carries them: at ``timestep`` (sigma x 1000) on
-        the stream ``shifts`` {"video", "audio"}, the audio at
-        ``audio_scale`` times its latent. Records the times of the call."""
+        the stream ``shifts`` {"video", "audio"}. While ``audio_scale`` is
+        not 1, the sampler carries the audio at sigma_v / sigma_a times its
+        latent, and ``audio_scale`` scales its target. Records the times of
+        the call."""
         fields = {"model": model, "run": run, "patch_table": patch_table,
                   "rows": [row], "audio_scale": float(audio_scale),
                   "shifts": {k: float(v) for k, v in shifts.items()}}

@@ -203,8 +203,8 @@ class GmlxServerStatus(_Loader):
     FUNCTION = "status"
     CATEGORY = CATEGORY
     OUTPUT_NODE = True
-    DESCRIPTION = ("The gmlx server's view of an image model: residency and memory. The "
-                   "gmlx nodes are managed by gmlx and update with it.")
+    DESCRIPTION = ("The gmlx server's view of an image or video model: residency and memory. "
+                   "The gmlx nodes are managed by gmlx and update with it.")
 
     def status(self, model_name, server_url="", start_server=False):
         note = redirect = None
