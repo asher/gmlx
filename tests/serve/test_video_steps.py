@@ -769,6 +769,46 @@ def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
     assert scaled == [0.25, 1.0]
 
 
+@pytest.mark.parametrize("route", ["upload", "encode"])
+def test_a_cond_over_the_share_the_models_leave_is_413_naming_it(
+        route, monkeypatch, request):
+    """A tight entry leaves the step routes' tensor cache a share of its
+    bound, no less than the share that holds one cond of the priced rows
+    of H3's 5120-wide features. Under that share the cond a pack uploads,
+    or an encode keeps, is refused with the share as its cause, and a
+    tensor over the configured bound without it."""
+    from gmlx.video import encoder as video_encoder
+
+    pipe, weights = _own_pipe()
+    _mount(_Host(_served(pipe)), request)
+    _stub_encode(monkeypatch, weights)
+    rows = np.zeros((1, vs.PRICED_TEXT_ROWS, 5120), np.float32)
+    monkeypatch.setattr(video_encoder, "load_encoder", lambda *a, **k: (
+        SimpleNamespace(encode=lambda text: SimpleNamespace(features=rows[0]),
+                        release=lambda: None)))
+    c = _client()
+    send = {"upload": lambda: c.put(rows),
+            "encode": lambda: c.encode("h3", "a cat")}[route]
+    configured = steps.STATE.tensors.max_bytes
+    try:
+        steps.STATE.scale_caches(0.25)
+        with pytest.raises(StepsClientError) as e:
+            send()
+        with pytest.raises(StepsClientError) as over:
+            c.put(np.zeros((1, configured // 4 + 1), np.float32))
+        steps.STATE.scale_caches(rows.nbytes / configured)
+        send()
+    finally:
+        steps.STATE.scale_caches(1.0)
+    assert (e.value.status, over.value.status) == (413, 413)
+    assert e.value.body["error"] == (
+        "a tensor of 20971520 bytes is over the cache of 16777216 bytes: the "
+        "models loaded leave this cache a share of 0.25 of its configured "
+        "67108864 bytes")
+    assert over.value.body["error"] == (
+        "a tensor of 67108868 bytes is over the cache of 16777216 bytes")
+
+
 def _latents(route: str):
     """The latents of a 22-frame 32x32 clip, those the tiny VAEs take."""
     vshape, ashape = hf.latent_shapes(22, 32, 32)

@@ -10,8 +10,9 @@ command runs them one model at a time: the encode, with the text encoder
 alone, and the DiT with its LoRAs and the larger of one step, the video
 decode and the audio decode at the entry's default clip. Each phase also
 counts the caches the server holds, as an image entry counts them: each
-cache takes the room the clip leaves, up to its bound, and the entry
-bounds its pipeline's caches at that share. Each encode lets the DiT and
+cache takes the room the clip leaves, up to its bound, and no less than
+the share that holds one uploaded cond of the priced text rows. The
+entry bounds its pipeline's caches at that share. Each encode lets the DiT and
 its LoRA pairs go, loads the encoder, encodes, releases it and loads the
 DiT and the configured adapters again. Each decode loads its VAE for the
 call and lets it go after.
@@ -145,7 +146,8 @@ def entry_plan(spec) -> VideoEntryPlan:
     """The footprint of a video entry from the headers of its files.
     Raises ``VideoModelError`` for a file that is no video DiT or an
     adapter the family refuses, and ``VideoMemoryError`` for an entry
-    whose default clip does not fit the working budget."""
+    whose default clip does not fit the working budget with room for one
+    cond of the priced rows in the tensor cache."""
     from gmlx.video import memfit, pipeline
     from gmlx.video.fingerprint import VideoModelError
     from gmlx.video.loader import identify_dit
@@ -183,6 +185,10 @@ def entry_plan(spec) -> VideoEntryPlan:
                      text=PRICED_TEXT_ROWS, budget=budget)
     tensor, adapter = cache_bytes()
     caches = 2 * tensor + _CACHE_BYTES["steps"]
+    # The share at which the step routes' tensor cache holds one cond of
+    # the priced rows, the f32 encoder features a client uploads.
+    cond = PRICED_TEXT_ROWS * int(ident.config["text_dim"]) * 4
+    floor = min(1.0, cond / tensor) if tensor > 0 else 1.0
 
     def price(share: float) -> int:
         # The step routes' caches stay through the encode. The pairs and
@@ -193,11 +199,13 @@ def entry_plan(spec) -> VideoEntryPlan:
                    + int(2 * adapter * share))
 
     got = fit_share(price, budget)
+    if got is not None and got[1] < floor:
+        got = (price(floor), floor) if price(floor) <= budget else None
     if got is None and overcommit():
         got = price(1.0), 1.0
     if got is None:
         raise memfit.VideoMemoryError(
-            f"video model {spec.id!r} needs {price(0.0) / memfit.GiB:.2f} "
+            f"video model {spec.id!r} needs {price(floor) / memfit.GiB:.2f} "
             f"GiB for one {width}x{height} clip of {d['frames']} frames, over "
             f"the working budget of {budget / memfit.GiB:.2f} GiB. Set a "
             "smaller defaults.size or defaults.seconds. GMLX_OVERCOMMIT=1 "

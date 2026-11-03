@@ -203,6 +203,10 @@ class _Bytes:
         from collections import OrderedDict
 
         self.max_bytes = int(max_bytes)
+        # The configured bound, and the share of it the models loaded
+        # leave the cache.
+        self.configured = self.max_bytes
+        self.share = 1.0
         self._items: OrderedDict = OrderedDict()
         self._bytes = 0
         self._lock = threading.Lock()
@@ -219,9 +223,7 @@ class _Bytes:
             return key in self._items
 
     def put(self, key, t: WireTensor) -> None:
-        if t.nbytes > self.max_bytes:
-            raise StepError(413, f"a tensor of {t.nbytes} bytes is over the "
-                            f"cache of {self.max_bytes} bytes")
+        self.check(t.nbytes)
         with self._lock:
             old = self._items.pop(key, None)
             if old is not None:
@@ -236,10 +238,23 @@ class _Bytes:
     def bytes(self) -> int:
         return self._bytes
 
-    def bound(self, max_bytes: int) -> None:
-        """Set the bound and shed the oldest tensors over it."""
+    def check(self, nbytes: int) -> None:
+        """Refuse ``nbytes`` over the bound with a 413, which names the
+        share as its cause when the configured bound holds them."""
+        if nbytes <= self.max_bytes:
+            return
+        why = "" if nbytes > self.configured else (
+            f": the models loaded leave this cache a share of "
+            f"{self.share:.2f} of its configured {self.configured} bytes")
+        raise StepError(413, f"a tensor of {nbytes} bytes is over the cache "
+                        f"of {self.max_bytes} bytes{why}")
+
+    def bound(self, configured: int, share: float = 1.0) -> None:
+        """Set the bound at ``share`` of ``configured`` and shed the oldest
+        tensors over it."""
         with self._lock:
-            self.max_bytes = int(max_bytes)
+            self.configured, self.share = int(configured), float(share)
+            self.max_bytes = int(configured * share)
             while self._bytes > self.max_bytes and self._items:
                 _, gone = self._items.popitem(last=False)
                 self._bytes -= gone.nbytes
@@ -305,9 +320,9 @@ class StepsState:
 
     def scale_caches(self, share: float) -> None:
         """Bound the two caches at ``share`` of their configured sizes, for
-        an image model whose plan leaves its caches only that room."""
-        self.tensors.bound(int(self._bounds[0] * share))
-        self.adapters.bound(int(self._bounds[1] * share))
+        the models loaded whose plans leave their caches only that room."""
+        self.tensors.bound(self._bounds[0], share)
+        self.adapters.bound(self._bounds[1], share)
 
     # Tensors and adapters.
 
@@ -317,10 +332,10 @@ class StepsState:
             raise StepError(400, f"an upload holds one tensor, not "
                             f"{len(tensors)}")
         (t,) = tensors.values()
-        limit = min(limit, store.max_bytes)
         if t.nbytes > limit:
             raise StepError(413, f"a tensor of {t.nbytes} bytes is over the "
                             f"limit of {limit}")
+        store.check(t.nbytes)
         got = t.hash()
         if got != want:
             raise StepError(400, "the tensor's hash is not the one in the "
