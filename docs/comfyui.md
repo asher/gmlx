@@ -109,7 +109,7 @@ gmlx launch comfyui
 is running, then starts ComfyUI. Among its lines it prints:
 
 ```text
-[launch] installed the gmlx nodes in ~/ComfyUI/custom_nodes/comfyui-gmlx (a ComfyUI folder, ComfyUI 0.41.1)
+[launch] installed the gmlx nodes in ~/ComfyUI/custom_nodes/comfyui-gmlx (a ComfyUI folder, ComfyUI 0.43.0)
 [launch] ComfyUI runs at http://localhost:8188, which you open in a browser, from /Users/you/ComfyUI.
 ```
 
