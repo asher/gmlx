@@ -198,6 +198,8 @@ def test_clip_lengths_size_their_latents():
                                               (1, 32, 2, 37))
     with pytest.raises(ValueError, match="17 k"):
         hf.latent_shapes(24, 512, 512)
+    with pytest.raises(ValueError, match="multiple of 32"):
+        hf.latent_shapes(22, 500, 512)
 
 
 def test_a_video_latent_names_the_frames_of_its_clip():
@@ -210,5 +212,3 @@ def test_a_video_latent_names_the_frames_of_its_clip():
     taken = {hf.latent_frames(n) for n in lengths}
     assert [t for t in range(max(taken) + 1)
             if hf.clip_frames(t) is not None] == sorted(taken)
-    with pytest.raises(ValueError, match="multiple of 32"):
-        hf.latent_shapes(22, 500, 512)
