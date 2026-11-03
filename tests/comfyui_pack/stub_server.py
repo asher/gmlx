@@ -67,6 +67,13 @@ COMFY = {
                    "latent": {"channels": 128, "stride": 16, "patch": 1},
                    "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": False,
                    "context": ("text_embedder.proj.weight", 1)},
+    # MiniMax-H3 steps on a video and an audio latent, its AV step.
+    "h3": {"model_class": "MiniMaxH3", "image_model": "minimax_h3",
+           "latent": {"channels": 24, "stride": 16, "patch": 2, "temporal": 4},
+           "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": False,
+           "context": ("condition_proj.weight", 1),
+           "audio": {"channels": 32, "stereo": 2, "sample_rate": 32000,
+                     "latents_per_second": 40}},
 }
 # The families whose DiT leaves out the blocks a step names.
 SKIPS = {"moss_image"}
@@ -103,6 +110,10 @@ MODELS = {
                                                   "sigmas": None, "schedule": None}),
     "moss-image": ("moss_image", "sft", {"steps": 50, "cfg": 3.0, "shift": 5.0, "sigmas": None,
                                          "schedule": None, "neg_skip": [22]}),
+    "h3": ("h3", "fl2va", {"steps": 8, "cfg": 1.0, "shift": 6.0, "audio_shift": 3.0,
+                           "sigmas": None, "schedule": None}),
+    "fasth3": ("h3", "fasth3", {"steps": 8, "cfg": 1.0, "shift": 10.0, "audio_shift": 3.0,
+                                "sigmas": None, "schedule": None}),
 }
 # The manifest of a model whose file is not its family's fixture.
 FIXTURE = {"flux-3-klein-base": "flux3_klein-base"}
@@ -293,7 +304,7 @@ class Handler(BaseHTTPRequestHandler):
                 "wire": {"container": "safetensors", "dtypes": ["f32", "f16", "bf16", "u8"]},
                 "families": sorted(COMFY), "conventions": ["comfy"], "patch_kinds": ["lora"],
                 "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae", "ref_cache",
-                             "skip_blocks"],
+                             "skip_blocks", "av_step"],
                 "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16}})
         if sub == "/models":
             return self._json(200, {"models": [{"model": m, "family": f, "variant": v, "resident": True}
@@ -309,11 +320,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {**st.manifest(parts[1]), "model": parts[1]})
             if parts[2] == "status":
                 f = COMFY[fam]
+                extra = {"audio": dict(f["audio"])} if "audio" in f else {}
                 return self._json(200, {
                     "model": parts[1], "family": fam, "variant": variant, "resident": True,
                     "comfy": {"model_class": f["model_class"], "image_model": f["image_model"]},
                     "latent": dict(f["latent"]), "vae": dict(f["vae"]), "edit_capable": f["edit"],
-                    "sampling": dict(sampling), "compute_dtype": "bf16",
+                    "sampling": dict(sampling), "compute_dtype": "bf16", **extra,
                     "memory": {"dit_bytes": 1, "encoder_bytes": 1, "vae_bytes": 1,
                                "activation_reserve_bytes": 0, "resident_bytes": 3}})
         self._err(404, "not found", path=p)
@@ -432,6 +444,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._step(body, t0)
         if sub in ("/vae/decode", "/vae/encode"):
             return self._vae(sub, body)
+        if sub in ("/vae/video/decode", "/vae/audio/decode"):
+            return self._av_decode(sub, body)
         self._err(404, "not found")
 
     def _encode(self, body, ctype):
@@ -493,6 +507,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(404, f"no run {rid!r}; it ended or sat idle past 120 seconds")
         if self._model(req.get("model")) is None:
             return
+        if "video" in tensors or "audio" in tensors:
+            return self._av_step(tensors, req, t0, rid, run)
         x, ts = tensors.get("x"), tensors.get("timestep")
         rows = req.get("rows") or []
         if x is None or ts is None or len(x[1]) != 4 or x[1][0] != len(rows) or not rows:
@@ -552,6 +568,88 @@ class Handler(BaseHTTPRequestHandler):
             "X-Gmlx-Forward-Ms": f"{fwd:.3f}",
             "X-Gmlx-Server-Ms": f"{(time.perf_counter() - t0) * 1000:.3f}",
             "X-Gmlx-Prefix-Cache": "none"})
+
+    def _wait(self, run, rid) -> bool:
+        """Sleep the step delay; False when an interrupt or run end came."""
+        gen = run.gen if run else 0
+        deadline = time.perf_counter() + self.st.delay
+        while time.perf_counter() < deadline:
+            if run is not None and (run.gen != gen or run.ended):
+                self.st.event(kind="step_interrupted", run=rid,
+                              by="run_end" if run.ended else "interrupt")
+                self._err(409, "the step was interrupted", code="interrupted")
+                return False
+            time.sleep(0.005)
+        return True
+
+    def _av_step(self, tensors, req, t0, rid, run):
+        """A stub AV step: one clip, its video (1, C, T, h, w) and audio
+        (1, C, 2, T), one row with its cond alone, and the shifts."""
+        st = self.st
+        if MODELS[req["model"]][0] != "h3":
+            return self._err(400, f"{req['model']!r} is no video model; its step takes x")
+        v, a, ts = tensors.get("video"), tensors.get("audio"), tensors.get("timestep")
+        rows = req.get("rows") or []
+        if v is None or a is None or ts is None or len(v[1]) != 5 or len(a[1]) != 4 \
+                or v[1][0] != 1 or a[1][0] != 1 or len(rows) != 1 or set(rows[0]) != {"cond"}:
+            return self._err(400, "an AV step takes one clip and one row with its cond")
+        shifts = req.get("shifts")
+        if not isinstance(shifts, dict) or set(shifts) != {"video", "audio"}:
+            return self._err(400, "an AV step names its shifts, video and audio")
+        missing = [rows[0]["cond"]] if rows[0]["cond"] not in st.tensors else []
+        if req.get("patch_table") and req["patch_table"] not in st.tables:
+            missing.append(req["patch_table"])
+        if missing:
+            st.event(kind="step_missing", run=rid, missing=len(set(missing)))
+            return self._err(409, "not held", missing=sorted(set(missing)))
+        st.event(kind="step_begin", run=rid)
+        if not self._wait(run, rid):
+            return
+        tf = time.perf_counter()
+        t = np.float32(ts[3].astype(np.float32).reshape(-1)[0])
+        k = np.float32(scalar(rows[0]["cond"]) + scalar(req.get("patch_table") or "none") * 0.1)
+        scale = np.float32(req.get("audio_scale", 1.0))
+        vv = v[3].astype(np.float32) * np.float32(-0.25) + t * np.float32(0.05) + k * np.float32(0.02)
+        va = a[3].astype(np.float32) * np.float32(-0.5) + scale * np.float32(0.01) + k
+        fwd = (time.perf_counter() - tf) * 1000
+        st.event(kind="av_step", run=rid, model=req["model"], video_shape=v[1], audio_shape=a[1],
+                 video_dtype=v[0], timestep=float(t), shifts=shifts,
+                 audio_scale=req.get("audio_scale"), conds=[rows[0]["cond"]],
+                 patch_table=req.get("patch_table"), fields=sorted(req), tensors=sorted(tensors))
+        self._send(200, write_body({"video": vv, "audio": va}), ctype=CONTENT_TYPE, headers={
+            "X-Gmlx-Forward-Ms": f"{fwd:.3f}",
+            "X-Gmlx-Server-Ms": f"{(time.perf_counter() - t0) * 1000:.3f}",
+            "X-Gmlx-Prefix-Cache": "miss"})
+
+    def _av_decode(self, sub, body):
+        """Stub decodes of MiniMax-H3's latents: frames (F, H, W, 3) f16 of
+        5 k + 2 latents to 17 k + 5 frames, and a stereo waveform (1, 2,
+        800 T) f32."""
+        tensors, req = read_body(body)
+        m = self._model(req.get("model"))
+        if m is None:
+            return
+        if m[0] != "h3":
+            return self._err(400, f"{req['model']!r} is an image model; {sub[1:]} takes a "
+                                  "video model")
+        lat = tensors.get("latents")
+        if sub == "/vae/video/decode":
+            if lat is None or len(lat[1]) != 5 or lat[1][:2] != [1, 24]:
+                return self._err(400, "vae/video/decode takes the latents of one clip "
+                                      "(1, 24, T, h, w)")
+            _, _, T, h, w = lat[1]
+            g = 1.0 / (1.0 + np.exp(-lat[3].astype(np.float32).mean(axis=(0, 1))))
+            g = g[np.minimum(np.arange((T - 2) // 5 * 17 + 5) // 4, T - 1)]
+            img = np.repeat(np.repeat(g, 16, axis=1), 16, axis=2)[..., None].repeat(3, axis=-1)
+            self.st.event(kind="video_decode", shape=lat[1])
+            return self._send(200, write_body({"frames": img.astype(np.float16)}),
+                              ctype=CONTENT_TYPE)
+        if lat is None or len(lat[1]) != 4 or lat[1][:3] != [1, 32, 2]:
+            return self._err(400, "vae/audio/decode takes the latents of one clip (1, 32, 2, T)")
+        a = lat[3].astype(np.float32).mean(axis=1)
+        wave = np.repeat(a, 800, axis=-1)
+        self.st.event(kind="audio_decode", shape=lat[1])
+        self._send(200, write_body({"waveform": wave.astype(np.float32)}), ctype=CONTENT_TYPE)
 
     def _vae(self, sub, body):
         tensors, req = read_body(body)

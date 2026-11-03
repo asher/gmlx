@@ -65,6 +65,19 @@ def refuse(what: str):
                       "on a gmlx model")
 
 
+# What the gmlx nodes run of MiniMax-H3, which its refusals state.
+H3_TEXT_ONLY = "the gmlx nodes run MiniMax-H3 from the text prompt alone"
+# ComfyUI's MiniMax-H3 Fun ControlNet registers its control first as a
+# DIFFUSION_MODEL wrapper, a bound method of this class.
+FUN_CONTROL = "MiniMaxH3FunControlPatch"
+
+
+def _wrapper_name(wrapper) -> str:
+    if type(getattr(wrapper, "__self__", None)).__name__ == FUN_CONTROL:
+        return "the MiniMax-H3 Fun ControlNet (MiniMaxH3FunControlNetApply)"
+    return "a DIFFUSION_MODEL wrapper"
+
+
 class GmlxModelPatcher(comfy.model_patcher.ModelPatcher):
     """A ModelPatcher whose loads touch no tensors."""
 
@@ -215,7 +228,7 @@ class GmlxModelPatcher(comfy.model_patcher.ModelPatcher):
 
     def add_wrapper_with_key(self, wrapper_type, key, wrapper):
         if wrapper_type == comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL:
-            refuse("a DIFFUSION_MODEL wrapper")
+            refuse(_wrapper_name(wrapper))
         return super().add_wrapper_with_key(wrapper_type, key, wrapper)
 
     def add_hook_patches(self, *args, **kwargs):

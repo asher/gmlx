@@ -70,6 +70,15 @@ NAMES = (
     ("execution", "PromptQueue.get_current_queue_volatile"),
 )
 
+# The MiniMax-H3 internals the pack reads, probed apart at an H3 load, so a
+# ComfyUI release that changes one still runs the image models.
+H3_NAMES = (
+    ("comfy.supported_models", "MiniMaxH3"),
+    ("comfy.model_base", "MiniMaxH3.audio_scale"),
+    ("comfy.ldm.minimax.model", "MiniMaxH3Model.preprocess_text_embeds"),
+    ("comfy.ldm.minimax.model", "MiniMaxH3Model.forward"),
+)
+
 # Arguments the pack passes by name to a ComfyUI signature.
 SIGNATURES = (
     ("comfy.model_patcher", "ModelPatcher.__init__",
@@ -93,13 +102,16 @@ def _resolve(module: str, dotted: str):
     return obj
 
 
-def first_missing() -> str | None:
-    """The first internal this ComfyUI lacks, as ``module.name``, or None."""
-    for module, dotted in NAMES:
+def first_missing(names: tuple | None = None) -> str | None:
+    """The first internal this ComfyUI lacks, as ``module.name``, or None;
+    of ``names`` alone when given."""
+    for module, dotted in NAMES if names is None else names:
         try:
             _resolve(module, dotted)
         except (ImportError, AttributeError):
             return f"{module}.{dotted}"
+    if names is not None:
+        return None
     for module, dotted, params in SIGNATURES:
         try:
             sig = inspect.signature(_resolve(module, dotted))

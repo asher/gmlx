@@ -3,7 +3,8 @@
 
 The loaders give a stock MODEL, CLIP and VAE whose work runs on a gmlx
 server, so stock sampler, LoRA, conditioning and image nodes compose with
-them. ``GmlxSigmas`` gives the schedule a model variant was distilled to,
+them. MiniMax-H3 has a video VAE and an audio VAE, each with its own
+loader. ``GmlxSigmas`` gives the schedule a model variant was distilled to,
 or the schedule of the image size for a variant whose schedule follows
 it, for the custom sampler nodes.
 """
@@ -18,7 +19,7 @@ from . import discovery, schedules
 from .client import GmlxError, GmlxRefusal, get_client
 from .clip import GmlxCLIP
 from .model import load_model
-from .vae import GmlxVAE
+from .vae import GmlxAudioVAE, GmlxVAE, GmlxVideoVAE
 from .version import __version__
 
 CATEGORY = "gmlx"
@@ -88,7 +89,46 @@ class GmlxVAELoader(_Loader):
     def load(self, model_name, server_url="", start_server=True):
         client, name = connect(model_name, server_url, start_server)
         status = client.status(name)
+        if status.get("audio"):
+            raise GmlxRefusal(f"gmlx: {name!r} has a video VAE and an audio VAE; load them "
+                              f"with the {VIDEO_VAE} and the {AUDIO_VAE}")
         return (GmlxVAE(client, name, status),)
+
+
+VIDEO_VAE, AUDIO_VAE = "gmlx Video VAE Loader", "gmlx Audio VAE Loader"
+
+
+def _video_status(client, name: str) -> dict:
+    status = client.status(name)
+    if not status.get("audio"):
+        raise GmlxRefusal(f"gmlx: {name!r} is an image model; the {VIDEO_VAE} and the "
+                          f"{AUDIO_VAE} take a MiniMax-H3 model, and the gmlx VAE Loader "
+                          "takes this one")
+    return status
+
+
+class GmlxVideoVAELoader(_Loader):
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "load"
+    CATEGORY = CATEGORY
+    DESCRIPTION = ("The video VAE of a gmlx MiniMax-H3 model, run on the gmlx server, for "
+                   "VAE Decode.")
+
+    def load(self, model_name, server_url="", start_server=True):
+        client, name = connect(model_name, server_url, start_server)
+        return (GmlxVideoVAE(client, name, _video_status(client, name)),)
+
+
+class GmlxAudioVAELoader(_Loader):
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "load"
+    CATEGORY = CATEGORY
+    DESCRIPTION = ("The audio VAE of a gmlx MiniMax-H3 model, run on the gmlx server, for "
+                   "VAE Decode Audio.")
+
+    def load(self, model_name, server_url="", start_server=True):
+        client, name = connect(model_name, server_url, start_server)
+        return (GmlxAudioVAE(client, name, _video_status(client, name)),)
 
 
 def variant_sigmas(model, steps: int = 0, denoise: float = 1.0, width: int = 0,
@@ -190,6 +230,8 @@ NODE_CLASS_MAPPINGS = {
     "GmlxModelLoader": GmlxModelLoader,
     "GmlxCLIPLoader": GmlxCLIPLoader,
     "GmlxVAELoader": GmlxVAELoader,
+    "GmlxVideoVAELoader": GmlxVideoVAELoader,
+    "GmlxAudioVAELoader": GmlxAudioVAELoader,
     "GmlxSigmas": GmlxSigmas,
     "GmlxServerStatus": GmlxServerStatus,
 }
@@ -198,6 +240,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GmlxModelLoader": "gmlx Model Loader",
     "GmlxCLIPLoader": "gmlx CLIP Loader",
     "GmlxVAELoader": "gmlx VAE Loader",
+    "GmlxVideoVAELoader": VIDEO_VAE,
+    "GmlxAudioVAELoader": AUDIO_VAE,
     "GmlxSigmas": "gmlx Sigmas",
     "GmlxServerStatus": "gmlx Server Status",
 }

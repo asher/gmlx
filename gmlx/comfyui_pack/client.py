@@ -565,6 +565,28 @@ class StepClient:
         self.stats["steps"] += 1
         return out["out"], h
 
+    def av_step(self, video: torch.Tensor, audio: torch.Tensor, timestep: torch.Tensor,
+                fields: dict, on_interrupt=None) -> tuple:
+        """The video and audio output of a model with both streams, for the
+        latents as ComfyUI's sampler carries them."""
+        out, _, h = self.call_tensors("/step", {"video": video, "audio": audio,
+                                                "timestep": timestep}, fields,
+                                      what="the step", on_interrupt=on_interrupt)
+        self.stats["steps"] += 1
+        return (out["video"], out["audio"]), h
+
+    def video_decode(self, model: str, latents: torch.Tensor) -> torch.Tensor:
+        """Frames (F, H, W, 3) in [0, 1] of video latents (1, C, T, h, w)."""
+        out, _, _ = self.call_tensors("/vae/video/decode", {"latents": latents.float()},
+                                      {"model": model}, what="the video VAE decode")
+        return out["frames"]
+
+    def audio_decode(self, model: str, latents: torch.Tensor) -> torch.Tensor:
+        """The waveform (1, 2, samples) of audio latents (1, C, 2, T)."""
+        out, _, _ = self.call_tensors("/vae/audio/decode", {"latents": latents.float()},
+                                      {"model": model}, what="the audio VAE decode")
+        return out["waveform"]
+
     def vae_decode(self, model: str, latents: torch.Tensor, alpha: bool) -> torch.Tensor:
         out, _, _ = self.call_tensors("/vae/decode", {"latents": latents.float()},
                                       {"model": model, "alpha": bool(alpha)},

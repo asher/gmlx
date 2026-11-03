@@ -31,12 +31,13 @@ import comfy.patcher_extension
 import comfy.supported_models
 import comfy.utils
 
+from . import compat
 from .client import (GmlxError, GmlxInterrupted, GmlxMissing, GmlxRefusal, StepClient,
                      set_interrupt_check, tensor_hash)
 from .clip import TYPED, TypedPrompt
 from .compat import comfyui_version
 from .moss_image import PACK_MODELS
-from .patcher import CPU, KV_METHOD, KV_PATCHES, GmlxBinding, GmlxModelPatcher
+from .patcher import CPU, H3_TEXT_ONLY, KV_METHOD, KV_PATCHES, GmlxBinding, GmlxModelPatcher
 
 log = logging.getLogger("gmlx")
 
@@ -47,8 +48,11 @@ set_interrupt_check(comfy.model_management.throw_exception_if_processing_interru
 _DTYPES = {"f32": torch.float32, "f16": torch.float16, "bf16": torch.bfloat16,
            "quant": torch.bfloat16}
 
+# The shifts MiniMaxH3SigmaShift sets, which an AV step carries.
+H3_SHIFTS = {"video": "minimax_h3_sigma_shift_video", "audio": "minimax_h3_sigma_shift_audio"}
 # transformer_options keys and how the forward treats them.
-FORWARDED = {"sample_sigmas", "sigmas", "cond_or_uncond", "uuids", "qwen_image21_cache"}
+FORWARDED = {"sample_sigmas", "sigmas", "cond_or_uncond", "uuids", "qwen_image21_cache",
+             *H3_SHIFTS.values()}
 REFUSED = {"patches", "patches_replace", "rope_options"}
 # Keys ComfyUI sets on every call that carry no behavior inside the forward.
 BENIGN = {"prefetch_dynamic_vbars", "wrappers", "callbacks", "hooks", "transformer_index",
@@ -64,6 +68,8 @@ IN_FORWARD_CLASSES = {"PerturbedAttentionGuidance", "SkipLayerGuidanceDiT", "Ski
                       "FluxKontextMultiReferenceLatentMethod"}
 
 STRICT_KEYS = False
+# ComfyUI's class of the model a step with a video and an audio stream runs.
+H3_CLASS = "MiniMaxH3"
 # The node whose skips of single blocks on the negative pass a step takes
 # as its skip set, on the families whose DiT skips blocks.
 SLG_NODE = "SkipLayerGuidanceDiTSimple"
@@ -96,6 +102,10 @@ def build_weightless(manifest: dict, model_class: str):
     if not hasattr(comfy.supported_models, model_class):
         raise GmlxError(f"gmlx: ComfyUI {comfyui_version()} has no {model_class} model, which "
                         f"the server serves {manifest.get('model')!r} as; update ComfyUI")
+    missing = compat.first_missing(compat.H3_NAMES) if model_class == H3_CLASS else None
+    if missing is not None:
+        raise GmlxError(f"gmlx: the gmlx nodes run MiniMax-H3 through {missing}, which ComfyUI "
+                        f"{comfyui_version()} does not have; update ComfyUI")
     sd = manifest_state_dict(manifest)
     prefix = comfy.model_detection.unet_prefix_from_state_dict(sd)
     stripped = comfy.utils.state_dict_prefix_replace(sd, {prefix: ""}, filter_keys=True)
@@ -125,6 +135,10 @@ def _built(cfg, sd):
     model.device = CPU
     if hasattr(model.diffusion_model, "preprocess_conds"):
         _conditioning_on_server(model)
+    if type(cfg).__name__ == H3_CLASS:
+        # MiniMax-H3's extra_conds runs the refiner on the encoder features
+        # once a sample; the server runs it in each step, on those features.
+        model.diffusion_model.preprocess_text_embeds = lambda text_states: text_states
     _typed_for_edits_and_negatives(model)
     return model, cfg
 
@@ -260,6 +274,9 @@ class RemoteForward:
         # The reference rule of a DiT that reads ref_latents_method, which
         # the server's DiT follows; None for a DiT that reads no method.
         self.ref_method = getattr(params, "default_ref_method", None)
+        # A model with a video and an audio stream takes ComfyUI's unpacked
+        # [video, audio] list and returns one.
+        self.av = bool(binding.status.get("audio"))
         self.warned: set = set()
         self.memo: dict = {}
         self.calls = collections.deque(maxlen=512)
@@ -427,9 +444,104 @@ class RemoteForward:
                             "transformer_options['sample_sigmas']")
         return torch.as_tensor(s).detach().float().reshape(-1).cpu()
 
+    def _h3_conditions(self, payload: dict, kwargs: dict) -> None:
+        """Refuse what MiniMax-H3 conditions on beside the text prompt:
+        keyframes and guides, references, vision tokens in the prompt and
+        the noise masks of the latent."""
+        if payload.get("keyframes"):
+            raise GmlxRefusal("gmlx: keyframes or guides (minimax_keyframes, from the first_frame "
+                              "or last_frame of MiniMaxH3ImageToVideo or from MiniMaxH3AddGuide) "
+                              f"reached the DiT forward; {H3_TEXT_ONLY}")
+        if payload.get("refs"):
+            raise GmlxRefusal("gmlx: references (minimax_refs, from MiniMaxH3ReferenceToVideo) "
+                              f"reached the DiT forward; {H3_TEXT_ONLY}")
+        tags = payload.get("text_token_tags")
+        if tags is not None and bool((torch.as_tensor(tags) != 1).any()):
+            raise GmlxRefusal("gmlx: the conditioning holds vision tokens (minimax_token_tags), "
+                              f"which images or references shown to the text encoder make; "
+                              f"{H3_TEXT_ONLY}")
+        for k in ("denoise_mask", "audio_denoise_mask"):
+            if kwargs.pop(k, None) is not None:
+                raise GmlxRefusal(f"gmlx: a noise mask on the MiniMax-H3 latent reached the DiT "
+                                  f"forward as {k}; a gmlx model samples the whole clip, so "
+                                  "remove the latent's noise mask")
+
+    def _av_call(self, t0, x, timesteps, context, control, to: dict, kwargs: dict):
+        """One AV step: the video and audio latents as the sampler carries
+        them, the audio scale and the shifts, which the server's step reads
+        as ComfyUI's MiniMax-H3 forward does."""
+        if not isinstance(x, (list, tuple)) or len(x) != 2:
+            shape = tuple(x.shape) if hasattr(x, "shape") else type(x).__name__
+            raise GmlxError(f"gmlx: {self.b.model_id!r} samples a video and an audio latent, "
+                            f"and this call carries {shape}; start from "
+                            "EmptyMiniMaxH3LatentAV or MiniMaxH3ImageToVideo")
+        payload = kwargs.pop("minimax_payload", None) or {}
+        self._h3_conditions(payload, kwargs)
+        self._check(control, to, kwargs)
+        # One clip a step: the server refuses a batch, as ComfyUI's forward does.
+        video, audio = x
+        if context is None:
+            raise GmlxError("gmlx: the DiT forward got no conditioning")
+        patcher = getattr(self.base_model, "current_patcher", None)
+        run = getattr(patcher, "gmlx_run", None)
+        table = getattr(patcher, "gmlx_table_id", None)
+        if patcher is not None and getattr(patcher, "gmlx", None) is not None:
+            table = patcher.sync_patches()
+        uuids = list(to.get("uuids") or [None])
+        base = None if (uuids[0] is None or run is None) else (run, str(uuids[0]), 0)
+        c = context[:1].float()
+        held: dict = {}
+        row = {"cond": self._hash(None if base is None else base + ("cond", tuple(c.shape)),
+                                  c, held)}
+        client = self.b.client
+        for h, t in held.items():
+            client.ensure_tensor(t, h)
+        dm = self.base_model.diffusion_model
+        shifts = {"video": float(to.get(H3_SHIFTS["video"], dm.sigma_shift_video)),
+                  "audio": float(to.get(H3_SHIFTS["audio"], dm.sigma_shift_audio))}
+        fields = {"model": self.b.model_id, "run": run, "patch_table": table, "rows": [row],
+                  "shifts": shifts, "audio_scale": float(payload.get("audio_scale", 1.0))}
+        vs, au = video.float(), audio.float()
+        ts = timesteps.float().reshape(-1)
+
+        def send():
+            def stop():
+                try:
+                    client.interrupt(run)
+                except GmlxError as e:
+                    log.warning("gmlx: the interrupt did not reach the server: %s", e)
+            return client.av_step(vs, au, ts, fields, on_interrupt=stop)
+
+        t1 = time.perf_counter()
+        try:
+            out, hdrs = send()
+        except GmlxMissing as e:
+            client.stats["missing_retries"] += 1
+            missing = set(e.missing)
+            for h in sorted(missing & set(held)):
+                client.put_tensor(h, held[h])
+            if table is not None and table in missing:
+                fields["patch_table"] = table = patcher.sync_patches(force=True)
+            out, hdrs = send()
+        except GmlxInterrupted:
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            raise
+        t2 = time.perf_counter()
+        out = [o.to(dtype=i.dtype, device=i.device) for o, i in zip(out, (video, audio))]
+        t3 = time.perf_counter()
+        self.calls.append({"rows": 1, "wall_ms": (t3 - t0) * 1000,
+                           "prepare_ms": (t1 - t0) * 1000, "http_ms": (t2 - t1) * 1000,
+                           "server_ms": float(hdrs.get("x-gmlx-server-ms", "nan")),
+                           "forward_ms": float(hdrs.get("x-gmlx-forward-ms", "nan")),
+                           "prefix_cache": hdrs.get("x-gmlx-prefix-cache"),
+                           "table": table, "run": run})
+        return out
+
     def __call__(self, x, timesteps, context=None, control=None, transformer_options={}, **kwargs):
         t0 = time.perf_counter()
         to = transformer_options or {}
+        if self.av:
+            return self._av_call(t0, x, timesteps, context, control, to, kwargs)
         patcher = getattr(self.base_model, "current_patcher", None)
         kv = getattr(patcher, "gmlx_ref_cache", frozenset())
         if kv and kv != KV_PATCHES:
@@ -494,6 +606,9 @@ def load_model(client: StepClient, model_id: str) -> GmlxModelPatcher:
     facts = status.get("comfy") or {}
     if not facts.get("model_class"):
         raise GmlxError(f"gmlx: the server gives no ComfyUI model class for {model_id!r}")
+    if facts["model_class"] == H3_CLASS and status.get("variant") == "fasth3":
+        raise GmlxRefusal(f"gmlx: {model_id!r} is a FastH3 DiT; the gmlx nodes run the "
+                          "MiniMax-H3 recipes h3, h3-fast and h3-base")
     manifest = client.manifest(model_id)
     model, _cfg = build_weightless(manifest, facts["model_class"])
     binding = GmlxBinding(client, model_id, status, int(manifest.get("count") or 0))

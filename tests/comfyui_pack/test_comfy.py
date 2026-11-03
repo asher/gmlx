@@ -1465,7 +1465,8 @@ class Widgets(unittest.TestCase):
                 os.environ[k] = v
 
     def test_the_loaders_list_the_server_models_default_first(self):
-        want = [QID, ZID, QTID, KID, F2ID, F2BID, F29ID, F29BID, F29KID, F3ID, F3BID, MID]
+        want = [QID, ZID, QTID, KID, F2ID, F2BID, F29ID, F29BID, F29KID, F3ID, F3BID, MID,
+                "h3", "fasth3"]
         for name in ("GmlxModelLoader", "GmlxCLIPLoader", "GmlxVAELoader", "GmlxServerStatus"):
             node = P.NODE_CLASS_MAPPINGS[name]
             req = node.INPUT_TYPES()["required"]
@@ -1485,7 +1486,7 @@ class Widgets(unittest.TestCase):
             self.probed()
             names, opts = P.nodes.GmlxModelLoader.INPUT_TYPES()["required"]["model_name"]
             self.assertEqual(names, [KID, ZID, QID, QTID, F2ID, F2BID, F29ID, F29BID, F29KID,
-                                     F3ID, F3BID, MID])
+                                     F3ID, F3BID, MID, "h3", "fasth3"])
             self.assertEqual(opts["default"], KID)
         finally:
             stub.close()

@@ -19,7 +19,7 @@ import comfy.model_patcher
 import comfy.sd
 
 from .client import GmlxRefusal, StepClient
-from .patcher import CPU
+from .patcher import CPU, H3_TEXT_ONLY
 
 log = logging.getLogger("gmlx")
 
@@ -137,6 +137,10 @@ class GmlxCLIP(comfy.sd.CLIP):
     def tokenize(self, text, return_word_ids=False, **kwargs):
         if return_word_ids:
             raise GmlxRefusal("gmlx: word ids are not available from a gmlx CLIP")
+        if kwargs.get("minimax_ref_items"):
+            # MiniMaxH3ReferenceToVideo shows its references to the encoder.
+            raise GmlxRefusal("gmlx: references (minimax_ref_items, from "
+                              f"MiniMaxH3ReferenceToVideo) reached a gmlx CLIP; {H3_TEXT_ONLY}")
         images = list(kwargs.get("images") or [])
         if kwargs.get("image") is not None and not images:
             img = kwargs["image"]

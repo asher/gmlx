@@ -73,6 +73,8 @@ SPECS = {
     "GmlxModelLoader": (_loader, ("MODEL",), None, False),
     "GmlxCLIPLoader": (_loader, ("CLIP",), None, False),
     "GmlxVAELoader": (_loader, ("VAE",), None, False),
+    "GmlxVideoVAELoader": (_loader, ("VAE",), None, False),
+    "GmlxAudioVAELoader": (_loader, ("VAE",), None, False),
     "GmlxSigmas": (_sigmas, ("SIGMAS", "FLOAT"), ("sigmas", "cfg"), False),
     "GmlxServerStatus": (_loader, ("STRING",), None, True),
 }
@@ -81,6 +83,8 @@ DISPLAY_NAMES = {
     "GmlxModelLoader": "gmlx Model Loader",
     "GmlxCLIPLoader": "gmlx CLIP Loader",
     "GmlxVAELoader": "gmlx VAE Loader",
+    "GmlxVideoVAELoader": "gmlx Video VAE Loader",
+    "GmlxAudioVAELoader": "gmlx Audio VAE Loader",
     "GmlxSigmas": "gmlx Sigmas",
     "GmlxServerStatus": "gmlx Server Status",
 }
