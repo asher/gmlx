@@ -666,6 +666,70 @@ def test_a_table_an_encode_lets_go_before_its_step_runs_is_missing(
     assert all(_rel(a, b) < 1e-6 for a, b in zip(again, sent))
 
 
+@pytest.fixture
+def lora_route(monkeypatch):
+    """The lora route in force on a stand-in op, with a GPU reported
+    present, as in tests/image/test_image_lora_route.py. Put back after
+    the test."""
+    from image_fixtures import lora_rounded_once
+
+    from gmlx.image import ops
+    from gmlx.image.lora import install
+    from gmlx.image.ops import kq_routes
+
+    monkeypatch.setattr(ops, "qk_norm_rope", ops.qk_norm_rope)
+    monkeypatch.setattr(kq_routes, "_active", kq_routes._active)
+    monkeypatch.setattr(kq_routes, "_OPS", dict(kq_routes._OPS))
+    monkeypatch.setattr(install, "_PLACEMENT", "block")
+    kq_routes._OPS.update(quantized_matmul_lora=lora_rounded_once, nax=True)
+    monkeypatch.setattr(kq_routes, "_gpu", lambda: True)
+    # A 64-wide leaf, under the floor of the route's table.
+    monkeypatch.setattr(kq_routes, "_LORA_MIN_N", 0)
+    assert kq_routes.install(("lora",)) == {"lora"}
+
+
+def _kq_dit(weights):
+    """The tiny DiT in bfloat16, with the out_proj of block 1 a q4_k leaf
+    that the lora route takes."""
+    from image_fixtures import kq_leaf
+
+    m = hm.H3Transformer(TINY)
+    m.load_weights([(k, v if k == "rope.inv_freq" else v.astype(mx.bfloat16))
+                    for k, v in weights.items()])
+    inner = TINY["num_attention_heads"] * TINY["attention_head_dim"]
+    m.blocks[1].attn.out_proj = kq_leaf("q4_k", TINY["hidden_size"], inner, 1)
+    m.eval()
+    return m
+
+
+def test_an_encode_lets_the_kernel_form_copies_of_the_pairs_go(
+        lora_route, monkeypatch, request):
+    """Under the lora route a K-quant leaf's pairs are copied into the
+    pipeline's tables in the kernel's form. An encode lets the copies go
+    with the pairs."""
+    from test_video_h3_lora import _adapter
+
+    from gmlx.image.lora import install
+
+    weights = tiny_weights()
+    mx.eval(list(weights.values()))
+    pipe = _on_worker(lambda: pipeline.VideoPipeline(
+        dit=_kq_dit(weights), family=hf.FAMILY, variant="fl2va"))
+    _mount(_Host(_served(pipe)), request)
+    _stub_encode(monkeypatch, weights, _kq_dit)
+    c = _client()
+    target = "blocks.1.attn.out_proj"
+    tid = c.define_table("h3", _table_body(c, {target: _adapter(6)[target]}))
+    video, audio, feats = _clip()
+    row = {"cond": c.put(feats)}
+    c.av_step("h3", None, video, audio, 600.0, row, shifts=SHIFTS,
+              audio_scale=SCALE, patch_table=tid)
+    assert [k[1] for k in pipe.tables._items if k[0] == install.KERNEL] == [
+        target]
+    c.encode("h3", "a cat")
+    assert pipe.tables.bytes == 0
+
+
 def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
                                                             monkeypatch):
     """The pool admits an entry with each cache at the share of its bound
