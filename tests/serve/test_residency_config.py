@@ -862,6 +862,7 @@ def test_a_video_entry_is_priced_at_its_largest_phase(monkeypatch, variant,
     encode = clip.phases["encode"] + caches
     resident = dit + clip.phases["decode"] + caches + pairs
     assert got.cache_share == 1.0
+    assert got.lora_term == clip.terms["denoise"]["lora"]
     if variant == "h3-base":
         assert got.footprint == encode and encode > resident
     else:

@@ -738,8 +738,9 @@ def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
                                                             monkeypatch):
     """The pool admits an entry with each cache at the share of its bound
     that its clip leaves room for. The entry bounds its pipeline's caches
-    at that share beside its own LoRA's pairs, and the step routes' caches
-    take the smallest share of the entries loaded until it is released."""
+    at that share beside the bytes its plan books for its own LoRA, which
+    hold its pairs, and the step routes' caches take the smallest share of
+    the entries loaded until it is released."""
     import dataclasses
 
     from gmlx.serve import image_service
@@ -748,7 +749,8 @@ def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
     pipe, _w = _own_pipe()
     served = _served(pipe)
     served.spec.adapters = ((str(path), 1.0),)
-    plan = dataclasses.replace(served.plan, loras=(path.stat().st_size,),
+    size = path.stat().st_size
+    plan = dataclasses.replace(served.plan, loras=(size,), lora_term=size,
                                cache_share=0.25)
     monkeypatch.setattr(vs, "entry_plan", lambda spec: plan)
     monkeypatch.setattr(pipeline, "load", lambda *a, **k: pipe)
@@ -757,12 +759,11 @@ def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
     monkeypatch.setattr(steps.STATE, "scale_caches", scaled.append)
     got = _on_worker(vs._load, served.spec)
     tensor, adapter = image_service.cache_bytes()
-    own = 2 * path.stat().st_size
-    assert got.adapters and pipe.adapters.bytes > 0
+    assert 0 < pipe.adapters.bytes <= size
     assert pipe.conditionings.max_bytes == tensor // 4
     assert pipe.reference_latents.max_bytes == tensor // 4
     assert pipe.adapters.max_bytes == pipe.tables.max_bytes == (
-        adapter // 4 + own)
+        adapter // 4 + size)
     assert scaled == [0.25]
     _on_worker(vs._release, [got])
     assert scaled == [0.25, 1.0]

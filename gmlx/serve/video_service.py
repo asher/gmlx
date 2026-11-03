@@ -60,6 +60,7 @@ class VideoEntryPlan:
     loras: tuple = ()               # each adapter's file bytes
     lora_dtypes: tuple = ()
     cache_share: float = 1.0        # of each cache's configured bound
+    lora_term: int = 0              # what the plan books for the LoRAs
 
 
 @dataclass(eq=False)
@@ -203,7 +204,8 @@ def entry_plan(spec) -> VideoEntryPlan:
             "overrides.")
     footprint, share = got
     return VideoEntryPlan(**{**base.__dict__, "footprint": int(footprint),
-                             "cache_share": share})
+                             "cache_share": share,
+                             "lora_term": int(clip.terms["denoise"]["lora"])})
 
 
 def entry_footprint(spec) -> int:
@@ -222,7 +224,9 @@ def _load(spec) -> ServedVideo:
         for path, _st in spec.adapters:
             pipeline._vet(pipe, path)
         _load_adapters(served)
-        bound_caches(pipe, 2 * sum(plan.loras), plan.cache_share)
+        # The pair cache holds the entry's own pairs in the room the plan
+        # books for them, beside the share of a request's.
+        bound_caches(pipe, plan.lora_term, plan.cache_share)
         _SHARES[id(served)] = plan.cache_share
         _scale_step_caches()
     except BaseException:
