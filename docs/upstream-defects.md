@@ -94,24 +94,30 @@ print((out[:, 0] != want).sum())  # 0
     `--prefill-step-size 16384`, a prompt of 32,306 tokens that joins 31 decoding rows is the first
     that passes. At the default 8 rows gemma-4-26B-A4B passes with a step of 262,144 and a prompt of
     152,502 tokens. `--max-kv-size` does not build these caches in `gmlx serve`.
+  - `BatchQuantizedKVCache.extend` in the same file pads the packed keys and values and their scales
+    and biases the same way under `--kv-bits` with `--kv-quant-scheme uniform`. On gemma-4-26B-A4B
+    at 8 bits, with 2 KV heads of 512 in its global layers and `GMLX_DECODE_BATCH=64`, a row of
+    129,537 tokens that joins 63 decoding rows is the first that passes.
   - `Downsample` in `gmlx/image/vae/flux1_ae.py` pads the bottom and the right of the FLUX.1 VAE
     encoder's 128 channels. Up to 8192 a side, 38 canvases from 16,771,072 to 16,776,960 pixels
     pass, 4080x4112 and 4064x4128 among them. `gmlx image` reaches them with an init image, which it
     cuts down to whole multiples of the stride.
-- Guard: `pad` in `gmlx/mlx_guards.py`, which all three call. Past 2^31 output elements it builds
+- Guard: `pad` in `gmlx/mlx_guards.py`, which all four call. Past 2^31 output elements it builds
   the output as the fill with the input written in by a slice update. At or under 2^31 it is the
   stock op, so the graph of every smaller shape is unchanged. At the tested shapes it holds the
   stock op's memory peak. It stays until an MLX release carries afc03c5 and an A/B on these shapes
   shows the stock op right.
-- Test: `test_a_row_joining_a_batch_past_2_31_elements_keeps_every_key` and
-  `test_a_row_joining_sliding_window_rows_past_2_31_elements_keeps_every_key` in
+- Test: `test_a_row_joining_a_batch_past_2_31_elements_keeps_every_key`,
+  `test_a_row_joining_sliding_window_rows_past_2_31_elements_keeps_every_key` and
+  `test_a_row_joining_a_quantized_batch_past_2_31_elements_keeps_every_key` in
   `tests/cache/test_kv_past_int32.py`, and
   `test_a_vae_downsample_past_2_31_elements_keeps_every_pixel` in
   `tests/image/test_image_past_int32.py`. Each runs the caller at the first shape that passes, on
   a real Apple GPU, and checks every element of the output and of the inputs against a formula.
   With the stock op, the first leaves 12,058,624 keys of batch row 6, head 3 at the fill and writes
   as many over the 7 rows' own keys. The second leaves 48,896 keys of batch row 30, head 15 at the
-  fill. The third leaves 489,344 elements of the last image row at the fill and writes 472,960 of
+  fill. The third leaves the 2,228,224 packed words of the keys of batch rows 61 and 62 at the
+  fill. The fourth leaves 489,344 elements of the last image row at the fill and writes 472,960 of
   them over the start of x. `test_pad_takes_a_slice_update_only_past_the_limit` in
   `tests/test_mlx_guards.py` holds the routing on small arrays in every run. The past-limit tests
   are nightly. `tests/past_int32.py` runs them one at a time, on a real Apple GPU with a recommended
