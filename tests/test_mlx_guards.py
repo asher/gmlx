@@ -253,3 +253,14 @@ def test_a_bool_pad_past_the_limit_stays_bool(monkeypatch):
     out = mlx_guards.pad(x, widths)
     assert (out.dtype, want.dtype) == (mx.bool_, mx.bool_)
     np.testing.assert_array_equal(np.array(out), np.array(want))
+
+
+def test_concatenate_past_the_limit_raises_on_mismatched_rows(monkeypatch):
+    """Inputs whose other axes differ raise past the limit too, as the
+    stock op does, where a slice update would broadcast the smaller one."""
+    a, b = mx.zeros((2, 3, 5, 4)), mx.zeros((1, 3, 2, 4))
+    with pytest.raises(ValueError):
+        mx.concatenate([a, b], axis=2)
+    monkeypatch.setattr(mlx_guards, "_STOCK_MAX", 0)
+    with pytest.raises(ValueError):
+        mx.eval(mlx_guards.concatenate([a, b], axis=2))

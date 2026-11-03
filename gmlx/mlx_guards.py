@@ -63,12 +63,15 @@ def concatenate(arrays, axis: int = 0) -> mx.array:
     outside the output, and its place keeps what the memory held. Such an
     output is built here as zeros with each input written in by a slice
     update. A smaller output is the stock op's, so its graph is the stock
-    one."""
+    one. Inputs whose other axes differ go to the stock op too, which
+    raises where a slice update would broadcast."""
     arrays = list(arrays)
     ax = axis % arrays[0].ndim
     shape = list(arrays[0].shape)
     shape[ax] = sum(a.shape[ax] for a in arrays)
-    if _size(shape) <= _STOCK_MAX:
+    rows = shape[:ax] + shape[ax + 1:]
+    if _size(shape) <= _STOCK_MAX or any(
+            list(a.shape[:ax] + a.shape[ax + 1:]) != rows for a in arrays):
         return mx.concatenate(arrays, axis=axis)
     parts, start = [], 0
     for a in arrays:
