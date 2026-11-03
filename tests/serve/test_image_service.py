@@ -1322,15 +1322,20 @@ def _refused(req, served, size: int, budget: int):
     return e.value
 
 
-def test_a_prompt_that_fits_at_no_size_is_refused_as_the_prompt():
-    """A 60 KB Qwen-Image 2.1 prompt fits at no size, where its 2048x2048
-    request fits at the family's default rows. The rows have no cap, so a
-    plan at the default rows would admit it."""
+@pytest.mark.parametrize("fits_at_default", [2048, 1024],
+                         ids=["the size", "a smaller size"])
+def test_a_prompt_that_fits_at_no_size_is_refused_as_the_prompt(
+        fits_at_default):
+    """A 60 KB Qwen-Image 2.1 prompt fits at no size, so it must get
+    shorter whatever the size. The 400 names it where its 2048x2048
+    request fits at the family's default rows, which would admit it
+    unpriced, and where only a smaller size of the shape fits there."""
     from gmlx.commands.image_preflight import prompt_rows
 
     served = _qwen_served()
-    budget = _need(served, 2048)
+    budget = _need(served, fits_at_default)
     assert _need(served, 16, _LONG) > budget
+    assert (_need(served, 2048) > budget) == (fits_at_default < 2048)
     req = image_service.parse_request("generations", {
         "prompt": _LONG, "size": "2048x2048"})
     e = _refused(req, served, 2048, budget)

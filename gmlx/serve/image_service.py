@@ -1198,12 +1198,14 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     400 that names the cause. A family whose plan prices the prompt prices
     every size at the most text rows the texts its encoder reads can give,
     as the image command's preflight prices them. The prompt is the cause
-    when no size of the request's shape fits at those rows and the
-    request's own size fits at the family's default rows: the 400 names
-    the prompt, or the negative prompt when it has more rows. Otherwise
-    an edit gets the plan's message, which names the references that fit,
-    and any other request the largest size of its shape that fits at
-    those rows, or that none does."""
+    when no size of the request's shape fits at those rows and some size
+    of it fits at the family's default rows: the prompt must get shorter
+    whatever the size, so the 400 names the prompt, or the negative
+    prompt when it has more rows. Otherwise, when a smaller size fits at
+    the prompt's rows or no size fits even at the default rows, an edit
+    gets the plan's message, which names the references that fit, and
+    any other request the largest size of its shape that fits at those
+    rows, or that none does."""
     from gmlx.commands.image_preflight import prompt_rows
     from gmlx.image import memfit
 
@@ -1264,11 +1266,12 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
             else:
                 hi = k - 1
     # The prompt is the cause when no size of the shape fits at its rows
-    # and the request's own size fits at the family's default rows.
+    # and some size of it fits at the family's default rows. The smallest
+    # size needs the least memory, so it stands for every size.
     if caption is not None and best is None:
         base = {k: v for k, v in args.items()
                 if k not in ("caption_tokens", "text_tokens")}
-        if fits(w, h, refs, base):
+        if fits(*scaled(1), refs, base):
             what, fix = "the prompt", "shorten the prompt"
             if cause == "negative_prompt":
                 what, fix = "the negative prompt", "shorten it"
