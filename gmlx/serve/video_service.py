@@ -94,20 +94,35 @@ def clip_defaults(spec, fam, variant: str) -> dict:
 
 
 def plan_clip(plan: VideoEntryPlan, *, frames: int, width: int, height: int,
-              text: int, budget=None, decode: bool = True):
-    """The memory plan of one clip on the entry's files."""
+              text: int, budget=None, decode: bool = True,
+              audio: int | None = None, live_lora: bool = False):
+    """The memory plan of one clip on the entry's files. ``audio`` is the
+    audio stream's latents when they are not the clip's, and
+    ``live_lora`` prices the step with a LoRA the server was sent."""
     from gmlx.video import memfit
     from gmlx.video.registry import get_family
 
     fam = get_family(plan.family)
-    rows, audio = memfit.clip_rows(fam, frames=frames, width=width,
-                                   height=height, text=text)
+    rows, n_audio = memfit.clip_rows(fam, frames=frames, width=width,
+                                     height=height, text=text)
     return memfit.plan_memory(
         plan.family, dit=plan.dit_bytes, encoder=plan.encoder_bytes,
         vae=plan.vae_bytes, audio_vae=plan.audio_vae_bytes,
         loras=plan.loras, lora_dtypes=plan.lora_dtypes, rows=rows,
-        text=text, audio_latents=audio, pixels=width * height,
-        decode=decode, variant=plan.variant, budget=budget)
+        text=text, audio_latents=n_audio if audio is None else int(audio),
+        pixels=width * height, decode=decode, variant=plan.variant,
+        live_lora=live_lora, budget=budget)
+
+
+def held_bytes(served: ServedVideo) -> tuple:
+    """(adapters, caches) a video entry holds beside its DiT: its LoRA
+    pairs and patch tables, and the caches the image routes count with
+    its refined text rows."""
+    from .image_service import held_bytes as image_held
+
+    adapters, caches = image_held(served.pipe)
+    rows = sum(int(a.nbytes) for a in served.captions.values())
+    return adapters, caches + rows
 
 
 def resident_bytes(phases: dict, terms: dict) -> int:

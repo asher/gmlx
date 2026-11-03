@@ -195,7 +195,7 @@ def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
                 audio_vae: int, loras=(), lora_dtypes=(), rows: int,
                 text: int, audio_latents: int, pixels: int,
                 tiny: bool = False, decode: bool = True,
-                variant: str | None = None,
+                variant: str | None = None, live_lora: bool = False,
                 budget: float | None = None) -> VideoPlan:
     """The plan of one run of ``variant``, on its own fits where ``PEAKS``
     has them, else its family's. File sizes in bytes; ``lora_dtypes`` holds
@@ -204,13 +204,15 @@ def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
     prompt's rows, ``audio_latents`` the audio stream's length and
     ``pixels`` a frame's width times height. ``vae`` is TAEH3's file
     when ``tiny``. With ``decode`` False the plan has no audio or decode
-    phase. ``budget`` defaults to ``capacity.working_budget_bytes()``."""
+    phase. ``live_lora`` prices the step with a LoRA live when ``loras``
+    names none, as a patch table the server was sent runs it. ``budget``
+    defaults to ``capacity.working_budget_bytes()``."""
     p = PEAKS[variant] if variant in PEAKS else PEAKS[family]
     load = encoder + p.encoder_load
     kept, prompt = p.encoder_keep * encoder, p.encode.bytes(text)
     lora = sum(int(b) for b in loras)
     alone = len(loras) == 1 and list(lora_dtypes) == [p.lora_dtype]
-    step = p.step if lora else p.plain_step
+    step = p.step if lora or live_lora else p.plain_step
     terms = {
         "encode": ({"encoder": encoder, "load": p.encoder_load}
                    if load >= kept + prompt

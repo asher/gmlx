@@ -115,6 +115,15 @@ def _steps_cache_bytes() -> int:
             + sum(c.nbytes for r in runs for c in r.ref_cache.values()))
 
 
+def held_bytes(pipe) -> tuple:
+    """(adapters, caches) a served pipeline holds beside its weights, as a
+    request's plan counts them: its LoRA pairs and patch tables, and its
+    conditioning and modulation caches with the step routes' caches."""
+    return (pipe.adapters.bytes + pipe.tables.bytes,
+            pipe.conditionings.bytes + pipe.modulations.bytes
+            + _steps_cache_bytes())
+
+
 def _live_conds() -> set:
     """The keys of the conditionings of the step routes' runs, whose
     states a shed takes after those of finished work."""
@@ -1117,6 +1126,7 @@ def _fit_args(pipe, served: ServedImage, budget, cfg: float,
     enc = pipe.encoder
     resident = enc is not None and not enc.released
     act = pipe.dit.act_dtype
+    adapters, caches = held_bytes(pipe)
     staged, states = {}, {}
     if pipe.family.step is not None:
         held = pipe.captions.bytes
@@ -1133,14 +1143,11 @@ def _fit_args(pipe, served: ServedImage, budget, cfg: float,
         encoder=pipe.weights.get("encoder", 0) if resident else 0,
         vae=pipe.weights.get("vae", 0),
         mmproj=pipe.weights.get("mmproj", 0) if resident else 0,
-        adapters=pipe.adapters.bytes + pipe.tables.bytes,
-        family=pipe.family.name, cfg=cfg, dtype=act,
+        adapters=adapters, family=pipe.family.name, cfg=cfg, dtype=act,
         vae_dtype=getattr(pipe.vae, "dtype", None),
         encoder_owned=bool(resident and enc.owned
                            and not served.plan.keep_encoder),
-        cache_bytes=(pipe.conditionings.bytes + pipe.modulations.bytes
-                     + _steps_cache_bytes()),
-        budget=budget, overcommit=False) | staged | states
+        cache_bytes=caches, budget=budget, overcommit=False) | staged | states
 
 
 def _make_room(served: ServedImage, cfg: float, size: tuple, refs,

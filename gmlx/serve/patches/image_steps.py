@@ -733,27 +733,38 @@ def _clip_of(fam, vshape, ashape=None) -> tuple:
 
 
 def _check_clip(hold, served, *, frames: int, width: int, height: int,
-                text: int, phase: str, what: str) -> None:
-    """Refuse a step or a video decode of a clip that does not fit beside
-    the models loaded. The DiT and its LoRAs stay loaded through both, so
-    each is priced as the entry is: the DiT, the LoRAs and the phase's
-    work."""
+                text: int, phase: str, what: str, table: str | None = None,
+                audio: int | None = None) -> None:
+    """Refuse a step or a decode of a clip that does not fit beside the
+    models loaded. The DiT stays loaded through each, and each is priced
+    as the image routes price theirs: the DiT, the larger of its
+    configured LoRAs and the pairs and patch tables it holds, the caches
+    the server holds and the phase's work. A step under a patch table
+    with patches, ``table``, runs a LoRA. ``audio`` is the audio decode's
+    latents."""
     from ..image_steps import StepError
-    from ..video_service import plan_clip
+    from ..video_service import held_bytes, plan_clip
 
     budget_fn = getattr(SETTINGS.host, "budget", None)
     budget = budget_fn(hold) if budget_fn is not None else None
     if budget is None:
         return
+    pipe = served.pipe
+    tid = pipe.default_table if table is None else table
+    live = bool(pipe.patch_tables.get(tid, {}).get("entries"))
     plan = plan_clip(served.plan, frames=frames, width=width, height=height,
-                     text=text, budget=budget, decode=phase != "denoise")
-    held = plan.terms["denoise"]["dit"] + plan.terms["denoise"]["lora"]
+                     text=text, budget=budget, decode=phase != "denoise",
+                     audio=audio, live_lora=live and phase == "denoise")
+    adapters, caches = held_bytes(served)
+    held = (plan.terms["denoise"]["dit"]
+            + max(plan.terms["denoise"]["lora"], adapters) + caches)
     work = (plan.terms["denoise"]["step"] if phase == "denoise"
             else plan.phases[phase])
     if held + work > budget:
-        raise StepError(400, f"{what} of {width}x{height} at {frames} frames "
-                        "does not fit in memory beside the models now "
-                        "loaded")
+        clip = (f"{audio} audio latents" if phase == "audio"
+                else f"{width}x{height} at {frames} frames")
+        raise StepError(400, f"{what} of {clip} does not fit in memory "
+                        "beside the models now loaded")
 
 
 async def _av_step(t0, tensors, fields, run):
@@ -809,7 +820,7 @@ async def _av_step(t0, tensors, fields, run):
             raise Missing(hashes)
         n_text = int(held.shape[-2])
         _check_clip(hold, served, frames=frames, width=width, height=height,
-                    text=n_text, phase="denoise", what="a step")
+                    text=n_text, phase="denoise", what="a step", table=table)
         ts = float(np.asarray(t_w.numpy(), np.float32).reshape(-1)[0])
         gen = run.gen if run is not None else 0
 
@@ -1060,6 +1071,10 @@ async def audio_decode(request: Request):
         if tuple(lat.shape[1:3]) != (row["channels"], row["stereo"]):
             raise StepError(400, f"audio latents are (1, {row['channels']}, "
                             f"{row['stereo']}, T), not {list(lat.shape)}")
+        width, height = served.plan.size
+        _check_clip(hold, served, frames=served.plan.frames, width=width,
+                    height=height, text=1, phase="audio",
+                    what="an audio decode", audio=int(lat.shape[3]))
         img = await _on_worker(lambda: decode_audio(served, lat.mx()))
     finally:
         hold.release()
