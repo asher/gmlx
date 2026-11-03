@@ -577,6 +577,42 @@ def test_an_encode_loads_the_encoder_without_the_dit_or_any_lora(
     assert all(_rel(a, b) < 1e-6 for a, b in zip(again, sent))
 
 
+def test_the_encode_refuses_a_prompt_whose_rows_do_not_fit(
+        tmp_path, monkeypatch, request):
+    """The encode prices a prompt by its rows, by the encoder's tokenizer
+    from its header as the video command prices it, beside the caches the
+    server holds. A short prompt encodes, a long one is refused with the
+    command's hint, and a tensor uploaded since counts."""
+    from test_video_encoder import _gguf
+
+    pipe, weights = _own_pipe()
+    served = _served(pipe)
+    served.spec.encoder = _gguf(tmp_path / "enc.gguf")
+    host = _mount(_Host(served), request)
+    _encoder_by_text(monkeypatch, weights)
+    short, long = "a cat", "a cat on a mat " * 2000
+    rows = vs.prompt_rows(served, long)
+
+    def encode_need(text):
+        return vs.plan_clip(served.plan, frames=FRAMES, width=SIZE,
+                            height=SIZE, text=vs.prompt_rows(served, text),
+                            decode=False, budget=1).phases["encode"]
+
+    c = _client()
+    _adapters, caches = vs.held_bytes(served)
+    host.budget_bytes = caches + encode_need(short) + (4 << 20)
+    c.encode("h3", short)
+    with pytest.raises(StepsClientError) as e:
+        c.encode("h3", long)
+    assert e.value.status == 400 and e.value.body["error"] == (
+        f"the encode of {rows} text rows does not fit in memory beside the "
+        "models now loaded; try a shorter prompt")
+    c.put(np.zeros((1, 2 << 20), np.float32))
+    with pytest.raises(StepsClientError) as e:
+        c.encode("h3", short)
+    assert e.value.status == 400
+
+
 def _table_body(c, adapter: dict) -> dict:
     """A contract table of ``adapter``'s pairs on ComfyUI's keys, as the
     pack sends a stock LoRA loader's patches."""
@@ -668,6 +704,116 @@ def test_a_table_an_encode_lets_go_before_its_step_runs_is_missing(
     assert c.define_table("h3", body) == tid
     again = c.av_step("h3", None, video, audio, 600.0, row, **kw)
     assert all(_rel(a, b) < 1e-6 for a, b in zip(again, sent))
+
+
+def _encoder_by_text(monkeypatch, weights) -> list:
+    """The H3 encoder stood in with features of the prompt's own seed, and
+    the DiT loaded after an encode as the tiny DiT of ``weights``. Returns
+    the list each DiT load appends to."""
+    import zlib
+
+    from gmlx.video import encoder as video_encoder
+    from gmlx.video import loader
+
+    def load_encoder(fam, path, log=None):
+        def encode(text):
+            rng = np.random.default_rng(zlib.crc32(text.encode()))
+            return SimpleNamespace(features=rng.standard_normal(
+                (4, TINY["text_dim"])).astype(np.float32))
+        return SimpleNamespace(encode=encode, release=lambda: None)
+
+    loads = []
+    monkeypatch.setattr(video_encoder, "load_encoder", load_encoder)
+    monkeypatch.setattr(loader, "load_dit", lambda *a, **k: (
+        loads.append(1), (_tiny_dit(weights), None))[1])
+    return loads
+
+
+def test_two_clients_alternating_encode_and_step_get_their_own_steps(
+        monkeypatch, request):
+    """Two ComfyUI clients that alternate their encodes and steps on one
+    entry each get their own steps back. Each encode lets the DiT go and
+    loads it again, once, as the entry's plan prices an encode with the
+    DiT out, and no step loads it. A client's table that the other's
+    encode let go is answered as missing, and steps once sent again."""
+    from test_video_h3_lora import _adapter
+
+    pipe, weights = _own_pipe()
+    _mount(_Host(_served(pipe)), request)
+    loads = _encoder_by_text(monkeypatch, weights)
+    video, audio, _feats = _clip()
+    kw = dict(shifts=SHIFTS, audio_scale=SCALE)
+    clients = {}
+    for name, seed in (("a", 6), ("b", 7)):
+        c = _client()
+        clients[name] = SimpleNamespace(c=c, body=_table_body(c, _adapter(seed)),
+                                        row=None, tid=None)
+
+    def encode(name, text):
+        me = clients[name]
+        me.row = {"cond": me.c.encode("h3", text)[0]["cond"]}
+
+    def step(name):
+        me = clients[name]
+        if me.tid is None:
+            me.tid = me.c.define_table("h3", me.body)
+        try:
+            got = me.c.av_step("h3", None, video, audio, 600.0, me.row,
+                               patch_table=me.tid, **kw)
+            sent = False
+        except MissingTensors as e:
+            assert e.body["missing"] == [me.tid]
+            me.c.define_table("h3", me.body)
+            got = me.c.av_step("h3", None, video, audio, 600.0, me.row,
+                               patch_table=me.tid, **kw)
+            sent = True
+        return got, sent
+
+    encode("a", "a red fox")
+    first_a, _ = step("a")
+    encode("b", "a blue bird")
+    again_a, sent_a = step("a")
+    first_b, _ = step("b")
+    encode("a", "a red fox")
+    again_b, sent_b = step("b")
+    third_a, sent_a3 = step("a")
+    assert len(loads) == 3
+    assert (sent_a, sent_b, sent_a3) == (True, True, True)
+    for got, want in ((again_a, first_a), (third_a, first_a),
+                      (again_b, first_b)):
+        assert all(_rel(x, y) < 1e-6 for x, y in zip(got, want))
+    assert _rel(first_a[0], first_b[0]) > 1e-3
+
+
+def test_a_video_entry_released_with_a_client_table_frees_its_pipeline(
+        monkeypatch, request):
+    """The pool's release of a video entry a client defined a table on
+    frees its pipeline and DiT, so the next model is admitted beside
+    memory that is free."""
+    import gc
+    import weakref
+
+    from test_video_h3_lora import _adapter
+
+    from gmlx.serve import image_service
+
+    pipe, _w = _own_pipe()
+    plan, held = _served(pipe).plan, [pipe]
+    monkeypatch.setattr(vs, "entry_plan", lambda spec: plan)
+    monkeypatch.setattr(pipeline, "load", lambda *a, **k: held.pop())
+    monkeypatch.setattr(image_service, "_SHARES", {})
+    box = [_on_worker(vs._load, _served(pipe).spec)]
+    host = _mount(_Host(box[0]), request)
+    c = _client()
+    tid = c.define_table("h3", _table_body(c, _adapter(6)))
+    assert tid in steps.STATE.tables_of("h3", pipe)
+    refs = [weakref.ref(pipe), weakref.ref(pipe.dit)]
+    del pipe
+    host.entries.pop("h3")
+    host.served = None
+    vs.release_on_worker(box)
+    gc.collect()
+    assert [r() for r in refs] == [None, None]
 
 
 def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,

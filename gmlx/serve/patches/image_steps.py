@@ -772,6 +772,29 @@ def _check_clip(hold, served, *, frames: int, width: int, height: int,
                         "beside the models now loaded")
 
 
+def _check_encode(hold, served, text: str) -> None:
+    """Refuse a prompt whose encode does not fit beside the caches the
+    server holds, as the video command refuses it by the prompt's rows.
+    The DiT and its LoRA pairs go before the encoder loads."""
+    from ..image_steps import StepError
+    from ..video_service import held_bytes, plan_clip, prompt_rows
+
+    budget_fn = getattr(SETTINGS.host, "budget", None)
+    budget = budget_fn(hold) if budget_fn is not None else None
+    if budget is None:
+        return
+    rows = prompt_rows(served, text)
+    _adapters, caches = held_bytes(served)
+    width, height = served.plan.size
+    plan = plan_clip(served.plan, frames=served.plan.frames, width=width,
+                     height=height, text=rows, budget=budget - caches,
+                     decode=False)
+    if "encode" in plan.over:
+        raise StepError(400, f"the encode of {rows} text rows does not fit "
+                        "in memory beside the models now loaded; "
+                        f"{plan.hint()}")
+
+
 async def _av_step(t0, tensors, fields, run):
     """A step of a model with a video and an audio stream (``AV_FAMILIES``):
     the latents as ComfyUI's sampler carries them, one row."""
@@ -937,6 +960,9 @@ async def encode(request: Request):
         if _video(served):
             from ..video_service import encode as video_encode
 
+            # A prompt with images is refused by name, unpriced.
+            if not images:
+                await asyncio.to_thread(_check_encode, hold, served, text)
             feats = await _on_worker(video_encode, served, text, images)
             got = {"cond": feats, "refs": [], "image_slots": []}
             return _held_encode(got, None)

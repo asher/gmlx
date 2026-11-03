@@ -13,7 +13,8 @@ counts the caches the server holds, as an image entry counts them: each
 cache takes the room the clip leaves, up to its bound, and the entry
 bounds its pipeline's caches at that share. The step routes' tensor
 cache keeps room for one uploaded cond of the priced text rows at any
-share. Each encode lets the DiT and its LoRA pairs go, loads the
+share, and the entry's refined text rows count at their bound of
+``CAPTIONS`` prompts of those rows. Each encode lets the DiT and its LoRA pairs go, loads the
 encoder, encodes, releases it and loads the DiT and the configured
 adapters again. Each decode loads its VAE for the call and lets it go
 after.
@@ -69,12 +70,14 @@ class VideoEntryPlan:
 @dataclass(eq=False)
 class ServedVideo:
     """What a video entry holds: the pipeline, the resolved entry, the
-    plan it was priced by, its adapter rows and its refined text rows."""
+    plan it was priced by, its adapter rows, its refined text rows and
+    the encoder's tokenizer once a prompt is priced."""
     pipe: Any
     spec: Any
     plan: VideoEntryPlan
     adapters: list = field(default_factory=list)
     captions: OrderedDict = field(default_factory=OrderedDict)
+    tokenizer: Any = None
 
 
 def _log_line(*parts) -> None:
@@ -149,15 +152,14 @@ def entry_plan(spec) -> VideoEntryPlan:
     Raises ``VideoModelError`` for a file that is no video DiT or an
     adapter the family refuses, and ``VideoMemoryError`` for an entry
     whose default clip does not fit the working budget with its caches
-    empty but for one cond of the priced rows."""
+    empty but for one cond of the priced rows and its refined rows."""
     from gmlx.video import memfit, pipeline
     from gmlx.video.fingerprint import VideoModelError
     from gmlx.video.loader import identify_dit
     from gmlx.video.registry import run_refusal
 
     from .capacity import overcommit, working_budget_bytes
-    from .image_service import (_CACHE_BYTES, SHARE_STEPS, cache_bytes,
-                                fit_share)
+    from .image_service import _CACHE_BYTES, cache_bytes, fit_floored
 
     try:
         ident = identify_dit(spec.path, variant=spec.variant)
@@ -193,24 +195,24 @@ def entry_plan(spec) -> VideoEntryPlan:
     # rows, the f32 encoder features a client uploads, at any share.
     cond = PRICED_TEXT_ROWS * int(ident.config["text_dim"]) * 4
     floor = min(cond, tensor) if steps else 0
+    # The refined text rows the entry keeps, CAPTIONS of the priced rows
+    # at the DiT's width in bfloat16, at any share.
+    captions = CAPTIONS * PRICED_TEXT_ROWS * int(
+        ident.config["hidden_size"]) * 2
 
     def price(share: float, kept: int = floor) -> int:
-        # The step routes' caches stay through the encode, the tensor
-        # cache with room for ``kept`` bytes at any share. The pairs and
-        # tables of a request go with the DiT.
-        held = int(caches * share) + max(0, kept - int(tensor * share))
+        # The step routes' caches and the refined rows stay through the
+        # encode, the tensor cache with room for ``kept`` bytes at any
+        # share. The pairs and tables of a request go with the DiT.
+        held = (int(caches * share) + max(0, kept - int(tensor * share))
+                + captions)
         return max(clip.phases["encode"] + held,
                    resident_bytes(clip.phases, clip.terms) + held
                    + int(2 * adapter * share))
 
     # The share the clip leaves the caches, as an image entry's, then the
     # largest one under it that leaves the tensor cache its cond too.
-    got = fit_share(lambda share: price(share, 0), budget)
-    if got is not None and budget is not None:
-        k = round(got[1] * SHARE_STEPS)
-        while k >= 0 and price(k / SHARE_STEPS) > budget:
-            k -= 1
-        got = (price(k / SHARE_STEPS), k / SHARE_STEPS) if k >= 0 else None
+    got = fit_floored(price, budget)
     if got is None and overcommit():
         got = price(1.0), 1.0
     if got is None:
@@ -364,6 +366,19 @@ def ensure_dit(served: ServedVideo) -> None:
     except BaseException:
         drop_dit(served)
         raise
+
+
+def prompt_rows(served: ServedVideo, text: str) -> int:
+    """The text rows ``text`` encodes to, by the encoder's tokenizer from
+    its header, which the entry builds once."""
+    from gmlx.video import memfit
+    from gmlx.video.encoder import header_tokenizer
+
+    fam = served.pipe.video_family
+    if served.tokenizer is None:
+        served.tokenizer = header_tokenizer(
+            fam, os.path.expanduser(served.spec.encoder))
+    return memfit.prompt_rows(fam, text, served.tokenizer)
 
 
 def encode(served: ServedVideo, text: str, images: list) -> np.ndarray:

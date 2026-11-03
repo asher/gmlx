@@ -824,7 +824,8 @@ def _h3_entry(monkeypatch, variant, size, seconds, budget=120 * GB,
                         types.SimpleNamespace(
                             family=get_family("h3"),
                             variant="fasth3" if fast else "fl2va",
-                            config={"text_dim": 5120}))
+                            config={"text_dim": 5120,
+                                    "hidden_size": 5376}))
     if fast:
         monkeypatch.setattr(registry, "run_refusal", lambda fam, v: None)
     files = {**_H3_FILES, "extra": extra}
@@ -838,6 +839,11 @@ def _h3_entry(monkeypatch, variant, size, seconds, budget=120 * GB,
         adapters=((("lora", 1.0),) if variant == "h3" else ())
         + ((("extra", 1.0),) if extra else ()),
         defaults={"size": size, "seconds": seconds})
+
+
+# The refined text rows an h3 entry keeps: 8 prompts of the priced rows
+# at its 5376-wide DiT in bf16, 84 MiB.
+_CAPTIONS = 8 * 1024 * 5376 * 2
 
 
 def _cache_terms() -> tuple:
@@ -861,7 +867,7 @@ def test_a_video_entry_is_priced_at_its_largest_phase(monkeypatch, variant,
                                                       size, seconds):
     """The encode runs with the encoder alone, and every other phase with
     the DiT and its LoRAs: the entry counts the larger, each with the
-    caches the server holds through it."""
+    caches the server holds through it and its refined text rows."""
     from gmlx.serve import video_service as vs
 
     got = vs.entry_plan(_h3_entry(monkeypatch, variant, size, seconds))
@@ -869,8 +875,8 @@ def test_a_video_entry_is_priced_at_its_largest_phase(monkeypatch, variant,
                         height=got.size[1], text=vs.PRICED_TEXT_ROWS)
     dit = clip.terms["denoise"]["dit"] + clip.terms["denoise"]["lora"]
     caches, pairs = _cache_terms()
-    encode = clip.phases["encode"] + caches
-    resident = dit + clip.phases["decode"] + caches + pairs
+    encode = clip.phases["encode"] + caches + _CAPTIONS
+    resident = dit + clip.phases["decode"] + caches + _CAPTIONS + pairs
     assert got.cache_share == 1.0
     assert got.lora_term == clip.terms["denoise"]["lora"]
     if variant == "h3-base":
@@ -929,12 +935,12 @@ def test_a_tight_video_entry_keeps_one_cond_in_the_tensor_cache(
     with pytest.raises(memfit.VideoMemoryError) as e:
         vs.entry_plan(_h3_entry(monkeypatch, "h3", "1344x768", 5, need - 1))
     assert str(e.value) == (
-        "video model 'h3' needs 19.68 GiB for one 1344x768 clip of 124 "
-        "frames, over the working budget of 19.68 GiB. Set a smaller "
+        "video model 'h3' needs 19.76 GiB for one 1344x768 clip of 124 "
+        "frames, over the working budget of 19.76 GiB. Set a smaller "
         "defaults.size or defaults.seconds. GMLX_OVERCOMMIT=1 overrides.")
     budget = capacity.ram_budget_bytes(32 << 30)
     got = vs.entry_plan(_h3_entry(monkeypatch, "h3", "1344x768", 5, budget))
-    assert got.cache_share == 41 / 64 and got.footprint <= budget
+    assert got.cache_share == 36 / 64 and got.footprint <= budget
 
 
 @pytest.mark.parametrize("steps_api, tensor_mb, floor", [
@@ -969,8 +975,8 @@ def test_a_video_entry_keeps_cond_room_only_in_a_tensor_cache_it_has(
 def test_fasth3_at_1344x768_fits_a_36_gb_mac_with_one_cond_floored(
         monkeypatch):
     """FastH3 at 1344x768 for 5 s fits a 36 GB Mac's budget at a share of
-    18/64. The tensor cache's share holds 18 MiB, so the entry books the
-    2 MiB a cond needs beside it, there alone."""
+    12/64. The tensor cache's share holds 12 MiB, so the entry books the
+    8 MiB a cond needs beside it, there alone."""
     from gmlx.serve import capacity, image_service
     from gmlx.serve import video_service as vs
 
@@ -980,7 +986,7 @@ def test_fasth3_at_1344x768_fits_a_36_gb_mac_with_one_cond_floored(
                                   budget))
     caches, pairs = _cache_terms()
     tensor, _adapter = image_service.cache_bytes()
-    share = 18 / 64
+    share = 12 / 64
     assert got.cache_share == share
     assert got.footprint == (bare + int(caches * share) + int(pairs * share)
                              + _COND - int(tensor * share)) <= budget
