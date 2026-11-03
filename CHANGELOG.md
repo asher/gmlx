@@ -30,6 +30,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it is refused.
 - `gmlx serve` frees an image model it releases after a ComfyUI workflow
   applied a LoRA to it. The next model loaded beside its memory before.
+- An image model that `gmlx serve` refuses for memory shows its need above
+  its budget, where both could read the same.
 
 ## [0.5.4] - 2026-10-29
 

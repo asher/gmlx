@@ -314,7 +314,8 @@ def test_a_tight_image_entry_keeps_one_cond_in_the_tensor_cache(
     one cond of its family's priced rows. FLUX.2 klein 4B within 90 MiB
     of its budget would leave that cache 6/64 of its 64 MiB, under its
     15 MiB cond: it books the cond beside a share of 5/64. Its image and
-    one cond fit with every cache empty, and a byte less refuses it."""
+    one cond fit with every cache empty, and a byte less refuses it, the
+    need shown rounded up and the budget down."""
     from gmlx.image import loader, memfit
     from gmlx.image.registry import get_family
 
@@ -330,8 +331,10 @@ def test_a_tight_image_entry_keeps_one_cond_in_the_tensor_cache(
     plan = image_service.entry_plan(_spec())
     assert (plan.cache_share, plan.footprint) == (0.0, plan_stubs.budget)
     plan_stubs.budget -= 1
-    with pytest.raises(memfit.ImageMemoryError):
+    with pytest.raises(memfit.ImageMemoryError) as e:
         image_service.entry_plan(_spec())
+    assert " needs 5.02 GiB for one " in str(e.value)
+    assert " over the working budget of 5.01 GiB. " in str(e.value)
 
 
 @pytest.mark.parametrize("release,budget_gb,hint", [

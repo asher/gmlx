@@ -217,9 +217,9 @@ def entry_plan(spec) -> VideoEntryPlan:
         got = price(1.0), 1.0
     if got is None:
         raise memfit.VideoMemoryError(
-            f"video model {spec.id!r} needs {price(0.0) / memfit.GiB:.2f} "
+            f"video model {spec.id!r} needs {memfit.gib(price(0.0), True)} "
             f"GiB for one {width}x{height} clip of {d['frames']} frames, over "
-            f"the working budget of {budget / memfit.GiB:.2f} GiB. Set a "
+            f"the working budget of {memfit.gib(budget, False)} GiB. Set a "
             "smaller defaults.size or defaults.seconds. GMLX_OVERCOMMIT=1 "
             "overrides.")
     footprint, share = got

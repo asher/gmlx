@@ -119,7 +119,10 @@ class VideoMemoryError(RuntimeError):
     """A run with a phase that does not fit the working budget."""
 
 
-def _gib(b: float, up: bool) -> str:
+def gib(b: float, up: bool) -> str:
+    """``b`` bytes in GiB at 2 decimals, rounded up when ``up`` and down
+    otherwise. A refusal rounds a need up and its budget down, so the need
+    never reads at or under the budget."""
     x = b / GiB * 100
     return f"{(math.ceil(x) if up else math.floor(x)) / 100:.2f}"
 
@@ -182,10 +185,10 @@ class VideoPlan:
             return ", ".join(f"{p} {b / GiB:.2f} GiB"
                              for p, b in self.phases.items())
         over = self.over
-        parts = ", ".join(f"{p} {_gib(b, p in over)} GiB"
+        parts = ", ".join(f"{p} {gib(b, p in over)} GiB"
                           for p, b in self.phases.items())
         text = (f"{parts} against a working budget of "
-                f"{_gib(self.budget, False)} GiB")
+                f"{gib(self.budget, False)} GiB")
         if over:
             text += f", with {_and([f'the {p}' for p in over])} over it"
         return text

@@ -921,7 +921,8 @@ def test_a_tight_video_entry_keeps_one_cond_in_the_tensor_cache(
     """A video entry books the step routes' tensor cache at no less than
     one cond of its priced rows, and every other cache at the share its
     clip leaves. h3 at 1344x768 for 5 s needs its bare clip and one cond
-    on a 32 GB Mac's budget, and is refused one byte under that."""
+    on a 32 GB Mac's budget, and is refused one byte under that, the
+    need shown rounded up and the budget down."""
     from gmlx.serve import capacity
     from gmlx.serve import video_service as vs
     from gmlx.video import memfit
@@ -936,7 +937,7 @@ def test_a_tight_video_entry_keeps_one_cond_in_the_tensor_cache(
         vs.entry_plan(_h3_entry(monkeypatch, "h3", "1344x768", 5, need - 1))
     assert str(e.value) == (
         "video model 'h3' needs 19.76 GiB for one 1344x768 clip of 124 "
-        "frames, over the working budget of 19.76 GiB. Set a smaller "
+        "frames, over the working budget of 19.75 GiB. Set a smaller "
         "defaults.size or defaults.seconds. GMLX_OVERCOMMIT=1 overrides.")
     budget = capacity.ram_budget_bytes(32 << 30)
     got = vs.entry_plan(_h3_entry(monkeypatch, "h3", "1344x768", 5, budget))

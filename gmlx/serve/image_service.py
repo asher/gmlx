@@ -232,6 +232,7 @@ def entry_plan(spec) -> EntryPlan:
                                 sampler_defaults)
     from gmlx.image.dtypes import image_activation
     from gmlx.image.loader import identify_dit
+    from gmlx.video.memfit import gib
 
     from .capacity import overcommit, working_budget_bytes
 
@@ -347,9 +348,9 @@ def entry_plan(spec) -> EntryPlan:
                 mode_of("auto")) is not None:
             hint = "set encoder_release: auto"
         raise memfit.ImageMemoryError(
-            f"image model {spec.id!r} needs {need / memfit.GiB:.2f} GiB "
+            f"image model {spec.id!r} needs {gib(need, True)} GiB "
             f"for one {width}x{height} image, over the working budget of "
-            f"{budget / memfit.GiB:.2f} GiB. Set a smaller defaults.size, or "
+            f"{gib(budget, False)} GiB. Set a smaller defaults.size, or "
             f"{hint}. GMLX_OVERCOMMIT=1 overrides.")
     footprint, share = got
     return EntryPlan(footprint=int(footprint), keep_encoder=mode == "keep",
