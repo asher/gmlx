@@ -1149,7 +1149,9 @@ def test_a_fasth3_status_hands_the_sampler_its_trained_sigmas(
         host, tmp_path, monkeypatch):
     """No stock scheduler makes FastH3's eight sigmas, so GmlxSigmas hands
     ComfyUI's sampler the video stream's from the status, as float32
-    values. At another step count the entry samples the even grid."""
+    values, at the shifts the entry is configured with, which the status
+    names beside them. At another step count the entry samples the even
+    grid."""
     import dataclasses
 
     from gmlx.video import schedule
@@ -1161,12 +1163,14 @@ def test_a_fasth3_status_hands_the_sampler_its_trained_sigmas(
         setattr(spec, name, str(f))
     monkeypatch.setattr(steps, "family_of", lambda s: (hf.FAMILY, hf.FASTH3))
     plan = host.served.plan
-    shifts = {"video": 10.0, "audio": 3.0}
-    want = schedule.stream_sigmas(8, shifts, hf.FASTH3_RUNGS)["video"]
-    for n, sigmas in ((8, [*map(float, want)]), (6, None)):
-        monkeypatch.setattr(host.served, "plan", dataclasses.replace(
-            plan, variant=hf.FASTH3, steps=n, shifts=shifts))
-        st = _client().status("h3")
-        assert st["variant"] == hf.FASTH3 and st["sampling"]["steps"] == n
-        assert st["sampling"]["sigmas"] == sigmas
-    assert np.array_equal(np.asarray([*map(float, want)], np.float32), want)
+    for shift in (10.0, 8.0):
+        shifts = {"video": shift, "audio": 3.0}
+        want = schedule.stream_sigmas(8, shifts, hf.FASTH3_RUNGS)["video"]
+        for n, sigmas in ((8, [*map(float, want)]), (6, None)):
+            monkeypatch.setattr(host.served, "plan", dataclasses.replace(
+                plan, variant=hf.FASTH3, steps=n, shifts=shifts))
+            st = _client().status("h3")
+            assert st["variant"] == hf.FASTH3 and st["sampling"]["steps"] == n
+            assert (st["sampling"]["shift"], st["sampling"]["audio_shift"]) == (shift, 3.0)
+            assert st["sampling"]["sigmas"] == sigmas
+        assert np.array_equal(np.asarray([*map(float, want)], np.float32), want)
