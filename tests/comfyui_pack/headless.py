@@ -78,7 +78,7 @@ def workflow(name: str) -> dict:
         wf = json.load(f)
     for node in wf.values():
         node.pop("_meta", None)
-        if node["class_type"].startswith("Gmlx"):
+        if "server_url" in node["inputs"]:
             assert node["inputs"]["server_url"] == "http://127.0.0.1:8080", name
             node["inputs"]["start_server"] = False
     return wf
@@ -257,7 +257,7 @@ class Cases:
         if not upsample:
             return self.stub
         for node in wf.values():
-            if node["class_type"].startswith("Gmlx"):
+            if "server_url" in node["inputs"]:
                 node["inputs"]["server_url"] = self.stub3.url
         return self.stub3
 

@@ -309,8 +309,10 @@ def test_every_example_workflow_names_a_known_model_id():
     ids = set(RECIPES) | set(VIDEO_RECIPES)
     for path in _ui_files():
         for n in json.loads(path.read_text())["nodes"]:
-            if n["type"].startswith("Gmlx"):
-                assert n["widgets_values"][0] in ids, (path.name, n["widgets_values"][0])
+            names = _WIDGETS.get(n["type"], [])
+            if "model_name" in names:
+                got = n["widgets_values"][names.index("model_name")]
+                assert got in ids, (path.name, got)
 
 
 def test_ascii_only():
