@@ -9,8 +9,9 @@ The pool counts an entry at the larger of two phases, as the video
 command runs them one model at a time: the encode, with the text encoder
 alone, and the DiT with its LoRAs and the larger of one step, the video
 decode and the audio decode at the entry's default clip. Each encode lets
-the DiT go, loads the encoder, encodes, releases it and loads the DiT
-again. Each decode loads its VAE for the call and lets it go after.
+the DiT and its LoRA pairs go, loads the encoder, encodes, releases it and
+loads the DiT and the configured adapters again. Each decode loads its VAE
+for the call and lets it go after.
 
 The step of the ComfyUI pack (``av_step``) takes the two streams as
 ComfyUI's sampler carries them and gives back what ComfyUI's MiniMax-H3
@@ -175,35 +176,43 @@ def entry_footprint(spec) -> int:
 
 
 def _load(spec) -> ServedVideo:
-    from gmlx.image import api, lora
     from gmlx.video import pipeline
-
-    from .image_service import _pair_keys
 
     plan = entry_plan(spec)
     pipe = pipeline.load(spec.path, variant=spec.variant, log=_log_line)
     served = ServedVideo(pipe=pipe, spec=spec, plan=plan)
     try:
-        rows = []
-        if spec.adapters:
-            for path, _st in spec.adapters:
-                pipeline._vet(pipe, path)
-            lora.fit_cache(pipe, [path for path, _ in spec.adapters])
-            for path, strength in spec.adapters:
-                ad = lora.load_adapter(pipe, path)
-                for w in ad.warnings:
-                    _log.warning("video model %s: %s", spec.id, w)
-                rows.append((ad, float(strength)))
-            pipe.default_table = api.define_patch_table(
-                pipe, lora.table_entries(rows))
-            # A step's table never sheds the entry's own pairs.
-            pipe.adapters.keep(_pair_keys(rows))
+        for path, _st in spec.adapters:
+            pipeline._vet(pipe, path)
+        _load_adapters(served)
     except BaseException:
         del pipe
         _release([served])
         raise
-    served.adapters = rows
     return served
+
+
+def _load_adapters(served: ServedVideo) -> None:
+    """Read the entry's configured adapters into its pipeline, as their
+    default patch table."""
+    from gmlx.image import api, lora
+
+    from .image_service import _pair_keys
+
+    pipe, spec = served.pipe, served.spec
+    rows = []
+    if spec.adapters:
+        lora.fit_cache(pipe, [path for path, _ in spec.adapters])
+        for path, strength in spec.adapters:
+            ad = lora.load_adapter(pipe, path)
+            for w in ad.warnings:
+                _log.warning("video model %s: %s", spec.id, w)
+            rows.append((ad, float(strength)))
+        pipe.default_table = api.define_patch_table(
+            pipe, lora.table_entries(rows))
+        # A step's table never sheds the entry's own pairs.
+        pipe.adapters.keep(_pair_keys(rows))
+    served.adapters = rows
 
 
 def load_on_worker(spec) -> ServedVideo:
@@ -243,8 +252,11 @@ def release_on_worker(box: list) -> None:
 # The DiT while the encoder runs.
 
 def drop_dit(served: ServedVideo) -> None:
-    """Let the DiT go before the encoder loads. The pipeline keeps its
-    adapters and patch tables."""
+    """Let the DiT and every LoRA pair go before the encoder loads, as the
+    video command encodes with neither held. The patch tables of the
+    pairs go with them: the configured adapters load again with the DiT,
+    and the step routes answer a table they were sent as missing, which
+    the pack sends again."""
     import gc
 
     import mlx.core as mx
@@ -254,13 +266,19 @@ def drop_dit(served: ServedVideo) -> None:
     pipe = served.pipe
     install.drop_built(pipe)
     pipe.dit = None
+    pipe.adapters.keep(())
+    pipe.adapters.clear()
+    pipe.tables.clear()
+    for tid in [k for k, v in pipe.patch_tables.items() if v["entries"]]:
+        del pipe.patch_tables[tid]
+    served.adapters = []
     gc.collect()
     mx.clear_cache()
 
 
 def ensure_dit(served: ServedVideo) -> None:
     """Load the DiT again after an encode, its leaves wrapped for the
-    patch tables the pipeline holds."""
+    patch tables, and the configured adapters with it."""
     pipe = served.pipe
     if pipe.dit is not None:
         return
@@ -270,6 +288,7 @@ def ensure_dit(served: ServedVideo) -> None:
     pipe.dit, _ = load_dit(str(served.spec.path), variant=served.spec.variant,
                            log=_log_line)
     install.rewrap(pipe)
+    _load_adapters(served)
 
 
 def encode(served: ServedVideo, text: str, images: list) -> np.ndarray:
