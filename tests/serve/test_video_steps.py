@@ -250,8 +250,12 @@ def test_the_refined_rows_are_kept_by_cond_and_patch_table(host, pipe,
     video, audio, feats = _clip()
     c = _client()
     row = {"cond": c.put(feats)}
+    bare = vs.held_bytes(host.served)
     first = c.av_step("h3", None, video, audio, 600.0, row, shifts=SHIFTS,
                       audio_scale=SCALE)
+    # The step prices the rows it keeps among the caches.
+    (kept,) = host.served.captions.values()
+    assert vs.held_bytes(host.served) == (bare[0], bare[1] + kept.nbytes)
     again = c.av_step("h3", None, video, audio, 600.0, row, shifts=SHIFTS,
                       audio_scale=SCALE)
     path = tmp_path / "lora.safetensors"
@@ -830,8 +834,9 @@ def test_the_audio_decode_gives_comfyuis_waveform_layout(host, vaes):
 ])
 def test_each_route_refuses_a_model_of_the_other_kind(host, route, model,
                                                       want):
-    """ComfyUI's VAEDecode on the gmlx video VAE, or a graph that pairs a
-    gmlx MODEL with a loader of the other kind, reaches the server."""
+    """A raw client of the step API reaches these refusals. The pack sends
+    VAEDecode on the gmlx video VAE to vae/video/decode, and the gmlx VAE
+    Loader refuses a video model."""
     video, audio, feats = _clip()
     c = _client()
     row = {"cond": c.put(feats)}
