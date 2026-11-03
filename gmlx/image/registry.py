@@ -94,7 +94,10 @@ class EditParts:
     with the images through an encoder that has its vision tower and
     returns the ids, the features ``(L, D)`` and the rows of the features
     that are image slots. ``template_id()`` names the template in a
-    conditioning key.
+    conditioning key. ``render(prompt, count)`` is the prompt in that
+    template with the slot text of ``count`` references, before their
+    slots expand, whose bytes bound its text rows before a tokenizer
+    loads. A family whose plan prices the prompt gives it.
 
     A family whose encoder reads the prompt alone has no ``token_ids``,
     ``encode`` or ``template_id``: its references reach the DiT as VAE
@@ -115,6 +118,7 @@ class EditParts:
     template_id: Callable | None = None
     prepare_all: Callable | None = None
     size: Callable | None = None
+    render: Callable | None = None
 
     @property
     def text_only(self) -> bool:

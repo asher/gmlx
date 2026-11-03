@@ -270,10 +270,16 @@ def pad_rows(spec: EncoderSpec, n: int) -> int:
 
 def rows_at_most(spec: EncoderSpec, prompt: str) -> int:
     """The most rows the features of ``prompt`` hold, from its text alone,
-    before a tokenizer loads: the encoders here tokenize the NFC form of
-    the rendered text by byte-level BPE, so each token id holds at least
-    one byte of it. The NFC form of some characters holds more bytes."""
-    text = render(spec, prompt)
+    before a tokenizer loads: ``text_rows_at_most`` of the prompt in the
+    family template."""
+    return text_rows_at_most(spec, render(spec, prompt))
+
+
+def text_rows_at_most(spec: EncoderSpec, text: str) -> int:
+    """The most rows the features of the rendered ``text`` hold, before a
+    tokenizer loads: the encoders here tokenize the NFC form of the
+    rendered text by byte-level BPE, so each token id holds at least one
+    byte of it. The NFC form of some characters holds more bytes."""
     n = max(len(t.encode("utf-8"))
             for t in (text, unicodedata.normalize("NFC", text)))
     if spec.max_tokens is not None:

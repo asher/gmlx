@@ -87,6 +87,26 @@ def quant_cast_bytes(quant: str, size: int, family: str) -> int:
     return cast_of(view, family) if q in ("F16", "BF16") else 0
 
 
+def prompt_rows(family, prompt: str, refs: int = 0) -> int:
+    """The most text rows the features of ``prompt`` hold on ``family``,
+    from its bytes in the family's template, before a tokenizer loads. An
+    edit whose encoder reads its ``refs`` reference images reads the
+    prompt in the family's template for references, with the slot text of
+    each, and is priced at least at the family's default rows, those of a
+    plan that does not know the prompt. The plan prices the image rows of
+    the references apart, from their sizes."""
+    from gmlx.image import memfit
+    from gmlx.image.text_encoder import (encoder_spec, rows_at_most,
+                                         text_rows_at_most)
+
+    spec = encoder_spec(family)
+    edit = family.edit
+    if refs and edit is not None and not edit.text_only:
+        return max(text_rows_at_most(spec, edit.render(prompt, refs)),
+                   memfit.PEAKS[family.name].text_rows)
+    return rows_at_most(spec, prompt)
+
+
 def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
           width: int, cfg: float | None, adapters=(),
           init_image: bool = False, keep_encoder: bool = False,
@@ -98,18 +118,17 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
     an init image of its size, and ``keep_encoder`` that the encoder is
     not released in it. ``mmproj`` is the encoder's mmproj and ``refs``
     the (height, width) in pixels of each reference image of the request.
-    ``prompts`` holds the texts of a request whose encoder reads them
-    alone, in the family's template, and prices their rows at the most
-    their bytes can give on a family whose plan prices the prompt; else
-    the rows are the family's most.
+    ``prompts`` holds the texts the encoder reads, whose rows a family
+    whose plan prices the prompt prices at ``prompt_rows``, in the
+    caption and in the prefix of a family that caches one; with none, or
+    on another family, the rows are the family's most.
     Raises ``ImageMemoryError`` when the request cannot fit."""
     if not enabled():
         return None
     from gmlx.image import memfit
     from gmlx.image.api import _header_bytes, sampler_defaults
     from gmlx.image.dtypes import image_activation
-    from gmlx.image.text_encoder import (_header_view, encoder_spec,
-                                         rows_at_most)
+    from gmlx.image.text_encoder import _header_view
 
     ident = identify_dit(dit, variant=variant)
     fam = ident.family.name
@@ -124,14 +143,15 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
     cast = dit_transient(dit, act.dit)
     caption = None
     if prompts and memfit.prices_prompt(fam):
-        spec = encoder_spec(ident.family)
-        caption = max(rows_at_most(spec, p) for p in prompts)
+        caption = max(prompt_rows(ident.family, p, len(refs))
+                      for p in prompts)
     return memfit.plan_memory(
         _header_bytes(dit, "dit"), _header_bytes(encoder, "encoder"),
         _header_bytes(vae, "vae"), tower,
         adapters=adapters, family=fam, height=height, width=width, cfg=cfg,
         dtype=act.dit, vae_dtype=act.vae, init_image=init_image,
-        caption_tokens=caption, ref_sizes=[(int(h), int(w)) for h, w in refs],
+        caption_tokens=caption, text_tokens=caption,
+        ref_sizes=[(int(h), int(w)) for h, w in refs],
         load_peak=max(load_transient(encoder, vae, mmproj), cast),
         # Each part alone, for the staged order.
         load_parts=(load_transient(encoder, None, mmproj),
