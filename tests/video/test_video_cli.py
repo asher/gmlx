@@ -571,6 +571,16 @@ def test_a_length_no_size_fits_names_the_longest_768x768_clip(
                variant=hf.FASTH3) == "encoder"
 
 
+def _bf16_lora(path, size: int) -> str:
+    """A bf16 LoRA of ``size`` bytes: its header, then a sparse body."""
+    head = json.dumps({"blocks.0.attn.q.lora_A.weight": {
+        "dtype": "BF16", "shape": [16, 5120],
+        "data_offsets": [0, 16 * 5120 * 2]}}).encode()
+    path.write_bytes(struct.pack("<Q", len(head)) + head)
+    os.truncate(path, size)
+    return str(path)
+
+
 def test_a_large_lora_names_the_107_frame_768x768_clip(
         run, monkeypatch, files, tmp_path, capsys):
     """FastH3 with a 2.2 GB bf16 LoRA on a 32 GB Mac: a 768x768 clip
@@ -580,12 +590,7 @@ def test_a_large_lora_names_the_107_frame_768x768_clip(
     monkeypatch.setattr(pipeline, "vet_adapter", lambda *a, **k: None)
     vsa_kernel(monkeypatch)
     _pinned(files, "fasth3", monkeypatch, 32)
-    lora = tmp_path / "style.safetensors"
-    head = json.dumps({"blocks.0.attn.q.lora_A.weight": {
-        "dtype": "BF16", "shape": [16, 5120],
-        "data_offsets": [0, 16 * 5120 * 2]}}).encode()
-    lora.write_bytes(struct.pack("<Q", len(head)) + head)
-    os.truncate(lora, 2_200_000_000)
+    lora = _bf16_lora(tmp_path / "style.safetensors", 2_200_000_000)
     assert run("--adapter", str(lora), variant=hf.FASTH3) == 1
     assert run.loads == []
     assert _hint(capsys) == (
@@ -594,6 +599,24 @@ def test_a_large_lora_names_the_107_frame_768x768_clip(
         "that fits")
     assert run("--adapter", str(lora), "--size", "768x768", "--frames",
                "107", variant=hf.FASTH3) == "encoder"
+
+
+def test_two_stacked_loras_that_fit_no_768x768_clip_keep_the_hint(
+        run, monkeypatch, files, tmp_path, capsys):
+    """FastH3 with two 2.0 GB bf16 LoRAs on a 32 GB Mac: stacked, each
+    costs twice its file, and no 768x768 clip fits down to 5 frames."""
+    from gmlx.video import pipeline
+
+    monkeypatch.setattr(pipeline, "vet_adapter", lambda *a, **k: None)
+    vsa_kernel(monkeypatch)
+    _pinned(files, "fasth3", monkeypatch, 32)
+    argv = []
+    for name in ("style", "subject"):
+        argv += ["--adapter", _bf16_lora(tmp_path / f"{name}.safetensors",
+                                         2_000_000_000)]
+    assert run(*argv, variant=hf.FASTH3) == 1
+    assert run.loads == []
+    assert _hint(capsys) == "Try a smaller size or a shorter clip"
 
 
 def test_the_hints_seconds_make_its_clip():
