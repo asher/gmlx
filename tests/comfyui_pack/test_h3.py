@@ -118,13 +118,38 @@ class Model(Base):
                 return out
             return extra_conds
 
+        def renamed_input(key):
+            def extra_conds(self, **kwargs):
+                kwargs[key + "_v2"] = kwargs.pop(key)
+                return conds(self, **kwargs)
+            return extra_conds
+
+        def reads_device(self, **kwargs):
+            kwargs["device"]
+            return conds(self, **kwargs)
+
+        def new_shift_inputs(model, shift_v, shift_a):
+            return shift(model, shift_v, shift_a)
+
+        def written(key, given):
+            return f"minimax_payload[{key!r}]" + (f" from {given}" if given else "")
+
         cases = [(H.MiniMaxH3SigmaShift, "execute", renamed_shift(k),
                   f"ModelSamplingMiniMaxH3 does not write transformer_options[{k!r}]")
                  for k in P.model.H3_SHIFTS.values()]
+        cases += [(comfy.model_base.MiniMaxH3, "extra_conds", renamed_payload("minimax_payload"),
+                   "MiniMaxH3 model does not write minimax_payload")]
         cases += [(comfy.model_base.MiniMaxH3, "extra_conds", renamed_payload(k),
-                   "MiniMaxH3 model does not write " + (k if k == "minimax_payload"
-                                                        else f"minimax_payload[{k!r}]"))
-                  for k in ("minimax_payload", *P.model.H3_PAYLOAD)]
+                   f"MiniMaxH3 model does not write {written(k, given)}")
+                  for k, (_what, given) in P.model.H3_PAYLOAD.items()]
+        # A ComfyUI that renames an input the payload is written from.
+        cases += [(comfy.model_base.MiniMaxH3, "extra_conds", renamed_input(given),
+                   f"MiniMaxH3 model does not write {written(k, given)}")
+                  for k, (_what, given) in P.model.H3_PAYLOAD.items() if given]
+        # A node whose inputs are renamed.
+        cases += [(H.MiniMaxH3SigmaShift, "execute", new_shift_inputs,
+                   "ModelSamplingMiniMaxH3 fails on a model and shifts of 10 and 3, which the "
+                   "gmlx nodes check it with (TypeError: ")]
         for owner, name, fake, want in cases:
             with self.subTest(want):
                 real = owner.__dict__[name]
@@ -136,7 +161,13 @@ class Model(Base):
                     setattr(owner, name, real)
                 self.assertIn(f"gmlx: ComfyUI {P.compat.comfyui_version()}'s {want}",
                               str(e.exception))
-        self.model()
+        # The load passes the device every sampler passes.
+        real = comfy.model_base.MiniMaxH3.__dict__["extra_conds"]
+        comfy.model_base.MiniMaxH3.extra_conds = reads_device
+        try:
+            self.model()
+        finally:
+            comfy.model_base.MiniMaxH3.extra_conds = real
 
     def test_a_missing_h3_internal_is_named_with_the_version(self):
         self.assertIsNone(P.compat.first_missing(P.compat.H3_NAMES))

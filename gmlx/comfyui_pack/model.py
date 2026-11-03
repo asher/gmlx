@@ -51,9 +51,12 @@ _DTYPES = {"f32": torch.float32, "f16": torch.float16, "bf16": torch.bfloat16,
 # The shifts MiniMaxH3SigmaShift sets, which an AV step carries.
 H3_SHIFTS = {"video": "minimax_h3_sigma_shift_video", "audio": "minimax_h3_sigma_shift_audio"}
 # The minimax_payload keys of MiniMaxH3.extra_conds the forward reads, each
-# with a default when absent, and what each carries.
-H3_PAYLOAD = {"audio_scale": "the audio scale", "keyframes": "the keyframes and guides",
-              "refs": "the references", "text_token_tags": "the vision tokens of the prompt"}
+# with a default when absent: what each carries, and the extra_conds input
+# it is written from, None for one the model computes.
+H3_PAYLOAD = {"audio_scale": ("the audio scale", None),
+              "keyframes": ("the keyframes and guides", "minimax_keyframes"),
+              "refs": ("the references", "minimax_refs"),
+              "text_token_tags": ("the vision tokens of the prompt", "minimax_token_tags")}
 # transformer_options keys and how the forward treats them.
 FORWARDED = {"sample_sigmas", "sigmas", "cond_or_uncond", "uuids", "qwen_image21_cache",
              *H3_SHIFTS.values()}
@@ -659,23 +662,38 @@ def _h3_keys(patcher) -> None:
 
     from .version import COMFYUI_FLOOR, COMFYUI_TESTED
 
+    tested = f"the gmlx nodes are tested on ComfyUI {COMFYUI_FLOOR} to {COMFYUI_TESTED}"
+
     def refuse(writer: str, key: str, what: str):
         raise GmlxError(f"gmlx: ComfyUI {comfyui_version()}'s {writer} does not write {key}, "
-                        f"which the gmlx nodes read {what} from; the gmlx nodes are tested on "
-                        f"ComfyUI {COMFYUI_FLOOR} to {COMFYUI_TESTED}")
+                        f"which the gmlx nodes read {what} from; {tested}")
 
-    out = MiniMaxH3SigmaShift.execute(patcher, 10.0, 3.0)
-    shifted = (out.result if hasattr(out, "result") else out)[0]
-    to = shifted.model_options.get("transformer_options") or {}
+    def probe(writer: str, call, given: str):
+        try:
+            return call()
+        except Exception as e:  # noqa: BLE001: a changed node or model is named
+            raise GmlxError(f"gmlx: ComfyUI {comfyui_version()}'s {writer} fails on {given}, "
+                            f"which the gmlx nodes check it with ({type(e).__name__}: {e}); "
+                            f"{tested}") from e
+
+    def shifted():
+        out = MiniMaxH3SigmaShift.execute(model=patcher, shift_video=10.0, shift_audio=3.0)
+        m = (out.result if hasattr(out, "result") else out)[0]
+        return m.model_options.get("transformer_options") or {}
+
+    to = probe("ModelSamplingMiniMaxH3", shifted, "a model and shifts of 10 and 3")
     for stream, key in H3_SHIFTS.items():
         if key not in to:
             refuse("ModelSamplingMiniMaxH3", f"transformer_options[{key!r}]",
                    f"the {stream} shift")
-    conds = patcher.model.extra_conds(minimax_token_tags=torch.ones(1, dtype=torch.long),
-                                      minimax_keyframes=[{}], minimax_refs=[{}], seed=0)
-    held = conds.get("minimax_payload")
-    if held is None:
+    conds = probe("MiniMaxH3 model", lambda: patcher.model.extra_conds(
+        minimax_token_tags=torch.ones(1, dtype=torch.long), minimax_keyframes=[{}],
+        minimax_refs=[{}], seed=0, device=torch.device("cpu")),
+        "the extra_conds of a text prompt")
+    held = getattr(conds.get("minimax_payload"), "cond", None)
+    if not isinstance(held, dict):
         refuse("MiniMaxH3 model", "minimax_payload", "the conditioning beside the prompt")
-    for key, what in H3_PAYLOAD.items():
-        if key not in held.cond:
-            refuse("MiniMaxH3 model", f"minimax_payload[{key!r}]", what)
+    for key, (what, given) in H3_PAYLOAD.items():
+        if key not in held:
+            src = f" from {given}" if given else ""
+            refuse("MiniMaxH3 model", f"minimax_payload[{key!r}]{src}", what)
