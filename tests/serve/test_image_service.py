@@ -1454,7 +1454,8 @@ def test_an_edit_that_fits_at_a_smaller_size_gets_the_plan_message():
     which names the references that fit, and not the prompt."""
     served = _qwen_served()
     req = _edit_req(1, (512, 512), prompt="swap the hats")
-    refs = [(512, 512)]
+    image_service.check_family(req, served)
+    refs = [(r.height, r.width) for r in req.refs]
     budget = _need(served, 1024, req.prompt, refs=refs)
     assert _need(served, 2048, req.prompt, refs=refs) > budget
     e = _refused(req, served, 2048, budget)
