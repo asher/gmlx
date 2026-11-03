@@ -626,18 +626,18 @@ def _mrope_apply_kernel(
         tmp = tmp / q_len;
         int h = tmp % q_heads;
         int b = tmp / q_heads;
-        int base = ((b * q_heads + h) * q_len + t) * q_dim;
+        long base = ((static_cast<long>(b) * q_heads + h) * q_len + t) * q_dim;
 
         if (slot >= half_dim) {{
             int pass_d = {rotary_dim} + slot - half_dim;
-            int pass_idx = base + pass_d;
+            long pass_idx = base + pass_d;
             x_out[pass_idx] = x[pass_idx];
             return;
         }}
 
         {pair_source}
 
-        int idx = base + d;
+        long idx = base + d;
         float xv = static_cast<float>(x[idx]);
         float xp = static_cast<float>(x[base + pair_d]);
         x_out[idx] = static_cast<T>(xv * c - xp * s);
@@ -778,39 +778,39 @@ def _rotary_apply_kernel(
 
     if sectioned:
         cos_expr = (
-            f"cos[((axis * q_bsz + b) * q_len + t) * {rotary_dim} + " f"{cos_freq_idx}]"
+            f"cos[((static_cast<long>(axis) * q_bsz + b) * q_len + t) * {rotary_dim} + " f"{cos_freq_idx}]"
         )
         sin_expr = (
-            f"sin[((axis * q_bsz + b) * q_len + t) * {rotary_dim} + " f"{cos_freq_idx}]"
+            f"sin[((static_cast<long>(axis) * q_bsz + b) * q_len + t) * {rotary_dim} + " f"{cos_freq_idx}]"
         )
         pair_cos_expr = (
-            f"cos[((axis * q_bsz + b) * q_len + t) * {rotary_dim} + "
+            f"cos[((static_cast<long>(axis) * q_bsz + b) * q_len + t) * {rotary_dim} + "
             f"{pair_cos_freq_idx}]"
         )
         pair_sin_expr = (
-            f"sin[((axis * q_bsz + b) * q_len + t) * {rotary_dim} + "
+            f"sin[((static_cast<long>(axis) * q_bsz + b) * q_len + t) * {rotary_dim} + "
             f"{pair_cos_freq_idx}]"
         )
         selector_source = "int axis = int(position_selector[freq_idx]);"
         input_names = ["x", "cos", "sin", "position_selector"]
     elif cos_ndim == 4:
-        cos_expr = f"cos[((0 * q_bsz + b) * q_len + t) * {rotary_dim} + {cos_freq_idx}]"
-        sin_expr = f"sin[((0 * q_bsz + b) * q_len + t) * {rotary_dim} + {cos_freq_idx}]"
+        cos_expr = f"cos[((static_cast<long>(0) * q_bsz + b) * q_len + t) * {rotary_dim} + {cos_freq_idx}]"
+        sin_expr = f"sin[((static_cast<long>(0) * q_bsz + b) * q_len + t) * {rotary_dim} + {cos_freq_idx}]"
         pair_cos_expr = (
-            f"cos[((0 * q_bsz + b) * q_len + t) * {rotary_dim} + "
+            f"cos[((static_cast<long>(0) * q_bsz + b) * q_len + t) * {rotary_dim} + "
             f"{pair_cos_freq_idx}]"
         )
         pair_sin_expr = (
-            f"sin[((0 * q_bsz + b) * q_len + t) * {rotary_dim} + "
+            f"sin[((static_cast<long>(0) * q_bsz + b) * q_len + t) * {rotary_dim} + "
             f"{pair_cos_freq_idx}]"
         )
         selector_source = ""
         input_names = ["x", "cos", "sin"]
     else:
-        cos_expr = f"cos[(b * q_len + t) * {rotary_dim} + {cos_freq_idx}]"
-        sin_expr = f"sin[(b * q_len + t) * {rotary_dim} + {cos_freq_idx}]"
-        pair_cos_expr = f"cos[(b * q_len + t) * {rotary_dim} + {pair_cos_freq_idx}]"
-        pair_sin_expr = f"sin[(b * q_len + t) * {rotary_dim} + {pair_cos_freq_idx}]"
+        cos_expr = f"cos[(static_cast<long>(b) * q_len + t) * {rotary_dim} + {cos_freq_idx}]"
+        sin_expr = f"sin[(static_cast<long>(b) * q_len + t) * {rotary_dim} + {cos_freq_idx}]"
+        pair_cos_expr = f"cos[(static_cast<long>(b) * q_len + t) * {rotary_dim} + {pair_cos_freq_idx}]"
+        pair_sin_expr = f"sin[(static_cast<long>(b) * q_len + t) * {rotary_dim} + {pair_cos_freq_idx}]"
         selector_source = ""
         input_names = ["x", "cos", "sin"]
 
@@ -836,11 +836,11 @@ def _rotary_apply_kernel(
         tmp = tmp / q_len;
         int h = tmp % q_heads;
         int b = tmp / q_heads;
-        int base = ((b * q_heads + h) * q_len + t) * q_dim;
+        long base = ((static_cast<long>(b) * q_heads + h) * q_len + t) * q_dim;
 
         if (slot >= half_dim) {{
             int pass_d = {rotary_dim} + slot - half_dim;
-            int pass_idx = base + pass_d;
+            long pass_idx = base + pass_d;
             x_out[pass_idx] = x[pass_idx];
             return;
         }}
@@ -852,7 +852,7 @@ def _rotary_apply_kernel(
         float cp = static_cast<float>({pair_cos_expr});
         float sp = static_cast<float>({pair_sin_expr});
 
-        int idx = base + d;
+        long idx = base + d;
         float xv = static_cast<float>(x[idx]);
         float xp = static_cast<float>(x[base + pair_d]);
         x_out[idx] = static_cast<T>(xv * c - xp * s);

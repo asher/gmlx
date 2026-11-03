@@ -23,7 +23,7 @@
    "title": "gmlx nodes: install",
    "properties": {},
    "widgets_values": [
-    "These gmlx nodes run the image model on a gmlx server on your Mac (Apple Silicon, M3 or newer). Flux2Scheduler gives FLUX.2 klein's schedule for the image size, so keep its width and height those of the latent. FLUX.2 klein 9B needs a Mac with 24 GB or more, and its license allows non-commercial use only.\n\n1. Install gmlx: https://asher.github.io/gmlx/installation.html\n2. Put the nodes into ComfyUI, then restart ComfyUI:\n\n   gmlx comfyui install\n\n3. Download the model:\n\n   gmlx pull flux-2-klein-9b\n\nGuide: https://asher.github.io/gmlx/comfyui.html"
+    "These gmlx nodes run the image model on a gmlx server on your Mac (Apple Silicon, M3 or newer). Flux2Scheduler gives FLUX.2 klein's schedule for the image size, so keep its width and height those of the latent. FLUX.2 klein 9B's license allows non-commercial use only.\n\n1. Install gmlx: https://asher.github.io/gmlx/installation.html\n2. Put the nodes into ComfyUI, then restart ComfyUI:\n\n   gmlx comfyui install\n\n3. Download the model:\n\n   gmlx pull flux-2-klein-9b\n\nGuide: https://asher.github.io/gmlx/comfyui.html"
    ],
    "color": "#432",
    "bgcolor": "#653"

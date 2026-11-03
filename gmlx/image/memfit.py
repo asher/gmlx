@@ -640,6 +640,14 @@ class PrefixRow:
         ``refs`` square references of ``ref_px`` pixels."""
         return self.text_rows(text) + refs * (ref_px // self.token_px) ** 2
 
+    def sized_rows(self, text: int, ref_sizes) -> int:
+        """Prefix rows of one conditioning with ``text`` text rows and
+        the references of ``ref_sizes``, (height, width) in pixels, at
+        their own sizes."""
+        p = self.token_px
+        return self.text_rows(text) + sum((int(h) // p) * (int(w) // p)
+                                          for h, w in ref_sizes)
+
     def encoder_rows(self, rows: int, text: int) -> int:
         """Image rows the encoder runs beside ``text`` text rows for a
         prefix of ``rows`` rows."""
@@ -1231,12 +1239,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     text = row.text_rows if text_tokens is None else text_tokens
     counted = slots = 0
     if row.prefix is not None:
-        counted = row.prefix.rows(text, refs, ref_px)
-        if not refs:
-            # The references of the request by their own sizes.
-            counted += sum((int(h) // row.prefix.token_px)
-                           * (int(w) // row.prefix.token_px)
-                           for h, w in ref_sizes)
+        counted = (row.prefix.rows(text, refs, ref_px) if refs
+                   else row.prefix.sized_rows(text, ref_sizes))
         # The image rows the encoder runs beside the text.
         slots = row.prefix.encoder_rows(counted, text)
     given = [] if prefix_rows is None else [int(n) for n in prefix_rows]

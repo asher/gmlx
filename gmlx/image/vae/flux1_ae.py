@@ -32,6 +32,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 import mlx.nn as nn
 
+from gmlx import mlx_guards
 from gmlx.image import ops, pacing
 
 from .conv import Conv2d
@@ -209,14 +210,16 @@ class ResnetBlock(nn.Module):
 
 
 class Downsample(nn.Module):
-    """Zero padding on the bottom and right, then a stride 2 conv."""
+    """Zero padding on the bottom and right, then a stride 2 conv. The
+    pad goes through the guard: past 2^31 elements the stock op misplaces
+    rows on the GPU."""
 
     def __init__(self, c: int):
         super().__init__()
         self.conv = Conv2d(c, c, 3, stride=2, padding=0)
 
     def __call__(self, x: mx.array) -> mx.array:
-        return self.conv(mx.pad(x, [(0, 0), (0, 1), (0, 1), (0, 0)]))
+        return self.conv(mlx_guards.pad(x, [(0, 0), (0, 1), (0, 1), (0, 0)]))
 
 
 class Upsample(nn.Module):

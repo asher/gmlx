@@ -33,6 +33,8 @@ from functools import lru_cache
 
 import mlx.core as mx
 
+from gmlx import mlx_guards
+
 try:
     import mlx_kquant as _kq
 except ImportError:  # pragma: no cover - mlx_kquant is a dependency
@@ -224,8 +226,10 @@ def grow(cache, keys, values, prev, need, make, grid=True, routed=True) -> None:
             else:
                 rows = _round_up(need - prev, step)
             pads = _parts(make(new, rows))
+            # Past 2^31 elements the stock op misplaces rows on the GPU.
             return _like(side, tuple(
-                mx.concatenate([a, p], axis=2) for a, p in zip(parts, pads)))
+                mlx_guards.concatenate([a, p], axis=2)
+                for a, p in zip(parts, pads)))
 
         cache.keys = extend(cache.keys, keys)
         cache.values = extend(cache.values, values)

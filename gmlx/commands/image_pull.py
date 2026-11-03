@@ -342,7 +342,7 @@ def _print_plan(plan: Plan, *, ram: int | None, free: int | None,
         cast = _cast(plan)
         fit = classify_fit(total + cast, ram)
         where = {FIT_FITS: "fit", FIT_TIGHT: "are tight on"}.get(
-            fit, "are more than") if fit else None
+            fit, "are too much to load together in") if fit else None
         if where:
             load = (f", {_gb(total + cast)} while the DiT loads" if cast
                     else "")
@@ -769,15 +769,14 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
     dit_q = next(h for h in r.dit_quants if h.upper() == dit_q.upper())
     enc_q = next(h for h in r.encoder_quants if h.upper() == enc_q.upper())
     cls = catalog.memory_class(ram)
-    if not a.quant and not catalog.makes_image(r, cls):
-        least = catalog.least_class(r)
-        msg = (f"no {r.title} DiT that gmlx pulls makes an image on a {cls} "
-               f"GB Mac; the smallest Mac that runs one has {least} GB. Pass "
-               "--quant to pull one anyway")
+    if not a.quant and catalog.makes_no_image(ram):
+        least = catalog.MEMORY_CLASSES[0]
+        msg = (f"no {r.title} DiT that gmlx pulls makes an image in this "
+               f"Mac's {_gb(ram, 0)} RAM; the smallest Mac that runs one has "
+               f"{least} GB. Pass --quant to pull one anyway")
         if a.json:
             print(json.dumps({"recipe": r.name, "error": msg,
-                              "memory_class": cls, "least_class": least},
-                             indent=2))
+                              "needs_gb": least}, indent=2))
         print(f"error: {msg}", file=sys.stderr)
         return 1
 
@@ -808,8 +807,7 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
     plan.size = catalog.default_size(r, ram, plan.dit_quant)
     enc = plan.part("encoder")
     if (enc is not None and not enc.download and not a.encoder_quant
-            and plan.encoder_quant != enc_q and ram
-            and catalog.makes_image(r, cls)):
+            and plan.encoder_quant != enc_q and ram):
         # Another quant on disk serves, unless no image fits with it and
         # one fits with the class's own.
         image = _image_plan(plan, ram)
@@ -826,7 +824,7 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
                     f"GB Mac; the pull takes {enc_q}")
                 plan = own
     plan.default = (plan.dit_quant, plan.encoder_quant) == \
-        catalog.default_quants(r, ram) and catalog.makes_image(r, cls)
+        catalog.default_quants(r, ram) and not catalog.makes_no_image(ram)
     need = _need(plan)
     free = manage._disk_free(base_dir)
     if a.json:

@@ -180,3 +180,28 @@ def banned_words(text: str, *, skip_commands: bool = True) -> list:
             probe = probe.replace(name, "")
         hits += [w for w in PULL_BANNED_WORDS if w in probe]
     return hits
+
+
+def spy_guards(monkeypatch) -> list:
+    """Each call of ``gmlx.mlx_guards.pad`` and ``concatenate`` from now on,
+    as ("pad", the axes it widens) or ("concatenate", its axis), before it
+    goes on to the guard. The guarded sites look the guards up on the
+    module when they run, so the patch reaches them, and a site that calls
+    the stock op leaves no call."""
+    from gmlx import mlx_guards
+
+    calls = []
+    pad, concatenate = mlx_guards.pad, mlx_guards.concatenate
+
+    def spy_pad(x, pad_width, *args, **kwargs):
+        calls.append(("pad", tuple(i for i, (lo, hi) in enumerate(pad_width) if lo or hi)))
+        return pad(x, pad_width, *args, **kwargs)
+
+    def spy_concatenate(arrays, axis=0):
+        arrays = list(arrays)
+        calls.append(("concatenate", axis % arrays[0].ndim))
+        return concatenate(arrays, axis)
+
+    monkeypatch.setattr(mlx_guards, "pad", spy_pad)
+    monkeypatch.setattr(mlx_guards, "concatenate", spy_concatenate)
+    return calls

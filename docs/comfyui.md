@@ -193,16 +193,19 @@ with the node's name.
 
 The FLUX.2 klein 9B models take the same nodes and workflows with
 `flux-2-klein-9b` or `flux-2-klein-base-9b` in `model_name`, and read
-their prompt with the Qwen3-8B GGUF on the server. They need a Mac with
-24 GB or more, and their license allows non-commercial use only.
+their prompt with the Qwen3-8B GGUF on the server. On a Mac with 16 GB
+they make a 1024x1024 image from a prompt, and an edit from 1024x1024
+references needs 24 GB or more. Their license allows non-commercial use
+only.
 
 FLUX.2 klein 9B KV takes the same nodes and workflows with
 `flux-2-klein-9b-kv` in `model_name`. Put ComfyUI's `Flux KV Cache`
 (`FluxKVCache`) between `gmlx Model Loader` and the guider. The first step
 of an edit then keeps the keys and values of the reference images on the
 server, and the later steps reuse them, so they run faster. Without the
-node, every step runs the reference images again. FLUX.2 klein 9B KV needs
-a Mac with 24 GB or more, and its license allows non-commercial use only.
+node, every step runs the reference images again. An edit from 1024x1024
+references on FLUX.2 klein 9B KV needs a Mac with 24 GB or more, and its
+license allows non-commercial use only.
 
 Krea 2 Turbo reads its prompt with the Qwen3-VL-4B-Instruct GGUF on the
 server. Its workflow, `krea-2-turbo-t2i`, takes the three gmlx loaders with
@@ -250,7 +253,7 @@ with the commands that install the gmlx nodes and pull its model.
 | `moss-image-t2i` | MOSS-Image text to image at 1024x1024 in 50 steps at `cfg` 3, with block 22 left out of the negative pass through `SkipLayerGuidanceDiTSimple` | `gmlx pull moss-image` |
 | `flux-2-klein-t2i` | FLUX.2 klein text to image at 1024x1024 in 4 steps, through `Flux2Scheduler` and `SamplerCustomAdvanced` | `gmlx pull flux-2-klein` |
 | `flux-2-klein-edit-two-references` | A FLUX.2 klein edit from two reference images, through `ReferenceLatent` | `gmlx pull flux-2-klein`, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
-| `flux-2-klein-9b-t2i` | FLUX.2 klein 9B text to image at 1024x1024 in 4 steps, the same graph on the 9B model | `gmlx pull flux-2-klein-9b`, and a Mac with 24 GB or more |
+| `flux-2-klein-9b-t2i` | FLUX.2 klein 9B text to image at 1024x1024 in 4 steps, the same graph on the 9B model | `gmlx pull flux-2-klein-9b` |
 | `flux-2-klein-9b-kv-edit-two-references` | A FLUX.2 klein 9B KV edit from two reference images, through `ReferenceLatent` and `Flux KV Cache` | `gmlx pull flux-2-klein-9b-kv`, a Mac with 24 GB or more, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
 | `flux-3-klein-t2i` | FLUX.3 klein text to image at 1024x1024 in 16 steps, through `EmptyFlux2LatentImage` | `gmlx pull flux-3-klein`, and ComfyUI 0.41 or newer |
 | `flux-3-klein-edit-two-references` | A FLUX.3 klein edit from two reference images, through `ReferenceMultiLatent` | `gmlx pull flux-3-klein`, ComfyUI 0.41 or newer, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |

@@ -430,6 +430,12 @@ def _edit_template_id() -> str:
     return template_id()
 
 
+def _edit_render(prompt: str, count: int) -> str:
+    from .edit import render
+
+    return render(prompt, count)
+
+
 def schedule(steps: int, *, tokens: int | None, variant: str | None = None):
     """Sigmas of ``steps`` for an image of ``tokens`` latent tokens."""
     from gmlx.image.schedule import qwen21_sigmas
@@ -504,6 +510,7 @@ FAMILY = Family(
                    area=REFERENCES.values["area"],
                    min_area=REFERENCES.values["min_area"],
                    prepare=_prepare, token_ids=_edit_ids,
-                   encode=_edit_encode, template_id=_edit_template_id),
+                   encode=_edit_encode, template_id=_edit_template_id,
+                   render=_edit_render),
     upsample=UPSAMPLE,
 )
