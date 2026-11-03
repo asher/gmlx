@@ -1,9 +1,10 @@
 """The step routes on a tiny MiniMax-H3 pipeline: the AV step against
 ComfyUI's forward rule for the audio its sampler carries, the refined text
 rows kept by cond and patch table, the memory checks of the step and the
-decodes, the encode with the DiT and its LoRA let go, the refusals of each
-route, the decodes' layouts, and the video model's status. Every MLX op
-runs on the image worker."""
+decodes, the encode with the DiT and its LoRA let go and loaded again,
+the entry's cache bounds, the refusals of each route, the decodes'
+layouts, and the video model's status. Every MLX op runs on the image
+worker."""
 from __future__ import annotations
 
 import importlib
@@ -422,6 +423,15 @@ def test_a_step_counts_what_the_server_holds_and_runs_beside_the_dit(
     assert "does not fit in memory" in e.value.body["error"]
 
 
+def _lora_file(tmp_path, seed: int = 5, name: str = "lora.safetensors"):
+    from lora_fixtures import write_keys
+    from test_video_h3_lora import _adapter, _comfy_keys
+
+    path = tmp_path / name
+    write_keys(path, _comfy_keys(_adapter(seed)))
+    return path
+
+
 @pytest.mark.parametrize("ask, want", [
     # An image-to-video workflow wires its keyframe through GmlxCLIP,
     # which sends the image with the prompt.
@@ -497,6 +507,40 @@ def test_an_encode_loads_the_encoder_without_the_dit_or_any_lora(
     again = c.av_step("h3", None, video, audio, 600.0, row, patch_table=tid,
                       **kw)
     assert all(_rel(a, b) < 1e-6 for a, b in zip(again, sent))
+
+
+def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
+                                                            monkeypatch):
+    """The pool admits an entry with each cache at the share of its bound
+    that its clip leaves room for. The entry bounds its pipeline's caches
+    at that share beside its own LoRA's pairs, and the step routes' caches
+    take the smallest share of the entries loaded until it is released."""
+    import dataclasses
+
+    from gmlx.serve import image_service
+
+    path = _lora_file(tmp_path)
+    pipe, _w = _own_pipe()
+    served = _served(pipe)
+    served.spec.adapters = ((str(path), 1.0),)
+    plan = dataclasses.replace(served.plan, loras=(path.stat().st_size,),
+                               cache_share=0.25)
+    monkeypatch.setattr(vs, "entry_plan", lambda spec: plan)
+    monkeypatch.setattr(pipeline, "load", lambda *a, **k: pipe)
+    monkeypatch.setattr(image_service, "_SHARES", {})
+    scaled = []
+    monkeypatch.setattr(steps.STATE, "scale_caches", scaled.append)
+    got = _on_worker(vs._load, served.spec)
+    tensor, adapter = image_service.cache_bytes()
+    own = 2 * path.stat().st_size
+    assert got.adapters and pipe.adapters.bytes > 0
+    assert pipe.conditionings.max_bytes == tensor // 4
+    assert pipe.reference_latents.max_bytes == tensor // 4
+    assert pipe.adapters.max_bytes == pipe.tables.max_bytes == (
+        adapter // 4 + own)
+    assert scaled == [0.25]
+    _on_worker(vs._release, [got])
+    assert scaled == [0.25, 1.0]
 
 
 def _latents(route: str):

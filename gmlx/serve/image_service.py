@@ -152,8 +152,9 @@ def bound_caches(pipe, configured: int = 0, share: float = 1.0) -> None:
     pipe.tables.max_bytes = adapter + int(configured)
 
 
-# The cache share of each loaded entry, by id of its ServedImage. The
-# step routes' caches serve every entry and take the smallest share.
+# The cache share of each loaded entry, by id of its ServedImage or
+# ServedVideo. The step routes' caches serve every entry and take the
+# smallest share.
 _SHARES: dict = {}
 
 
@@ -161,6 +162,24 @@ def _scale_step_caches() -> None:
     from .image_steps import STATE
 
     STATE.scale_caches(min(_SHARES.values(), default=1.0))
+
+
+def fit_share(price, budget):
+    """(footprint, cache share) of an entry whose peak with each cache at
+    ``share`` of its bound is ``price(share)``, or None when it does not
+    fit with its caches empty. Each cache takes the room the work leaves,
+    up to its bound."""
+    full = price(1.0)
+    if budget is None or full <= budget:
+        return full, 1.0
+    bare = price(0.0)
+    if bare > budget:
+        return None
+    steps = 64
+    k = min(steps - 1, int(steps * (budget - bare) / max(1, full - bare)))
+    while k > 0 and price(k / steps) > budget:
+        k -= 1
+    return price(k / steps), k / steps
 
 
 def _load_figures(spec, act) -> dict:
@@ -284,20 +303,7 @@ def entry_plan(spec) -> EntryPlan:
         return "staged"
 
     def fitted(mode: str):
-        """(footprint, cache share) of ``mode``, or None when it does not
-        fit with its caches empty. Each cache takes the room the image
-        leaves, up to its bound."""
-        full = price(mode, 1.0)
-        if budget is None or full <= budget:
-            return full, 1.0
-        bare = price(mode, 0.0)
-        if bare > budget:
-            return None
-        steps = 64
-        k = min(steps - 1, int(steps * (budget - bare) / max(1, full - bare)))
-        while k > 0 and price(mode, k / steps) > budget:
-            k -= 1
-        return price(mode, k / steps), k / steps
+        return fit_share(lambda share: price(mode, share), budget)
 
     mode = mode_of(spec.encoder_release)
     got = fitted(mode)

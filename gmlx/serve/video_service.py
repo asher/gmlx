@@ -8,10 +8,13 @@ worker, as an image entry does, since MLX streams are per thread.
 The pool counts an entry at the larger of two phases, as the video
 command runs them one model at a time: the encode, with the text encoder
 alone, and the DiT with its LoRAs and the larger of one step, the video
-decode and the audio decode at the entry's default clip. Each encode lets
-the DiT and its LoRA pairs go, loads the encoder, encodes, releases it and
-loads the DiT and the configured adapters again. Each decode loads its VAE
-for the call and lets it go after.
+decode and the audio decode at the entry's default clip. Each phase also
+counts the caches the server holds, as an image entry counts them: each
+cache takes the room the clip leaves, up to its bound, and the entry
+bounds its pipeline's caches at that share. Each encode lets the DiT and
+its LoRA pairs go, loads the encoder, encodes, releases it and loads the
+DiT and the configured adapters again. Each decode loads its VAE for the
+call and lets it go after.
 
 The step of the ComfyUI pack (``av_step``) takes the two streams as
 ComfyUI's sampler carries them and gives back what ComfyUI's MiniMax-H3
@@ -56,6 +59,7 @@ class VideoEntryPlan:
     audio_vae_bytes: int
     loras: tuple = ()               # each adapter's file bytes
     lora_dtypes: tuple = ()
+    cache_share: float = 1.0        # of each cache's configured bound
 
 
 @dataclass(eq=False)
@@ -147,6 +151,7 @@ def entry_plan(spec) -> VideoEntryPlan:
     from gmlx.video.registry import run_refusal
 
     from .capacity import overcommit, working_budget_bytes
+    from .image_service import _CACHE_BYTES, cache_bytes, fit_share
 
     try:
         ident = identify_dit(spec.path, variant=spec.variant)
@@ -175,15 +180,30 @@ def entry_plan(spec) -> VideoEntryPlan:
     budget = working_budget_bytes()
     clip = plan_clip(base, frames=d["frames"], width=width, height=height,
                      text=PRICED_TEXT_ROWS, budget=budget)
-    footprint = max(clip.phases["encode"],
-                    resident_bytes(clip.phases, clip.terms))
-    if budget is not None and footprint > budget and not overcommit():
+    tensor, adapter = cache_bytes()
+    caches = 2 * tensor + _CACHE_BYTES["steps"]
+
+    def price(share: float) -> int:
+        # The step routes' caches stay through the encode. The pairs and
+        # tables of a request go with the DiT.
+        held = int(caches * share)
+        return max(clip.phases["encode"] + held,
+                   resident_bytes(clip.phases, clip.terms) + held
+                   + int(2 * adapter * share))
+
+    got = fit_share(price, budget)
+    if got is None and overcommit():
+        got = price(1.0), 1.0
+    if got is None:
         raise memfit.VideoMemoryError(
-            f"video model {spec.id!r} needs {footprint / memfit.GiB:.2f} GiB "
-            f"for one {width}x{height} clip of {d['frames']} frames, over the "
-            f"working budget of {budget / memfit.GiB:.2f} GiB. Set a smaller "
-            "defaults.size or defaults.seconds. GMLX_OVERCOMMIT=1 overrides.")
-    return VideoEntryPlan(**{**base.__dict__, "footprint": int(footprint)})
+            f"video model {spec.id!r} needs {price(0.0) / memfit.GiB:.2f} "
+            f"GiB for one {width}x{height} clip of {d['frames']} frames, over "
+            f"the working budget of {budget / memfit.GiB:.2f} GiB. Set a "
+            "smaller defaults.size or defaults.seconds. GMLX_OVERCOMMIT=1 "
+            "overrides.")
+    footprint, share = got
+    return VideoEntryPlan(**{**base.__dict__, "footprint": int(footprint),
+                             "cache_share": share})
 
 
 def entry_footprint(spec) -> int:
@@ -193,6 +213,8 @@ def entry_footprint(spec) -> int:
 def _load(spec) -> ServedVideo:
     from gmlx.video import pipeline
 
+    from .image_service import _SHARES, _scale_step_caches, bound_caches
+
     plan = entry_plan(spec)
     pipe = pipeline.load(spec.path, variant=spec.variant, log=_log_line)
     served = ServedVideo(pipe=pipe, spec=spec, plan=plan)
@@ -200,6 +222,9 @@ def _load(spec) -> ServedVideo:
         for path, _st in spec.adapters:
             pipeline._vet(pipe, path)
         _load_adapters(served)
+        bound_caches(pipe, 2 * sum(plan.loras), plan.cache_share)
+        _SHARES[id(served)] = plan.cache_share
+        _scale_step_caches()
     except BaseException:
         del pipe
         _release([served])
@@ -238,9 +263,13 @@ def load_on_worker(spec) -> ServedVideo:
 
 
 def _release(box: list) -> None:
+    from .image_service import _SHARES, _scale_step_caches
+
     served = box.pop() if box else None
     if served is None:
         return
+    if _SHARES.pop(id(served), None) is not None:
+        _scale_step_caches()
     pipe, served.pipe = served.pipe, None
     served.captions.clear()
     if pipe is not None:

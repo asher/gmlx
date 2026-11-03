@@ -809,6 +809,37 @@ _H3_FILES = {"dit": 11_420_663_904, "enc": 19_762_151_200,
              "lora": 1_956_193_000}
 
 
+def _h3_entry(monkeypatch, variant, size, seconds, budget=120 * GB):
+    """The h3 recipe's entry at a default clip, from its published file
+    sizes, on a working budget of ``budget`` bytes."""
+    from gmlx.serve import capacity
+    from gmlx.video import loader, memfit, pipeline
+    from gmlx.video.registry import get_family
+
+    monkeypatch.setattr(loader, "identify_dit", lambda path, variant=None:
+                        types.SimpleNamespace(family=get_family("h3"),
+                                              variant="fl2va", config={}))
+    monkeypatch.setattr(memfit, "file_bytes", lambda p: _H3_FILES[p])
+    monkeypatch.setattr(memfit, "lora_dtype", lambda p: "BF16")
+    monkeypatch.setattr(pipeline, "vet_adapter", lambda *a, **k: None)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
+    return types.SimpleNamespace(
+        id=variant, path="dit", variant=None, encoder="enc", vae="vae",
+        audio_vae="audio",
+        adapters=(("lora", 1.0),) if variant == "h3" else (),
+        defaults={"size": size, "seconds": seconds})
+
+
+def _cache_terms() -> tuple:
+    """(caches, request pairs) an entry books at a cache share of 1: the
+    tensor caches with the step routes' caches, and the pairs and tables
+    of the LoRAs a request sends."""
+    from gmlx.serve import image_service
+
+    tensor, adapter = image_service.cache_bytes()
+    return 2 * tensor + image_service._CACHE_BYTES["steps"], 2 * adapter
+
+
 @pytest.mark.parametrize("variant, size, seconds", [
     # h3-base at 512x512 for a second: the encoder alone is the larger.
     ("h3-base", "512x512", 1),
@@ -819,35 +850,38 @@ _H3_FILES = {"dit": 11_420_663_904, "enc": 19_762_151_200,
 def test_a_video_entry_is_priced_at_its_largest_phase(monkeypatch, variant,
                                                       size, seconds):
     """The encode runs with the encoder alone, and every other phase with
-    the DiT and its LoRAs: the entry counts the larger."""
-    from gmlx.serve import capacity
+    the DiT and its LoRAs: the entry counts the larger, each with the
+    caches the server holds through it."""
     from gmlx.serve import video_service as vs
-    from gmlx.video import loader, memfit, pipeline
-    from gmlx.video.registry import get_family
 
-    monkeypatch.setattr(loader, "identify_dit", lambda path, variant=None:
-                        types.SimpleNamespace(family=get_family("h3"),
-                                              variant="fl2va", config={}))
-    monkeypatch.setattr(memfit, "file_bytes", lambda p: _H3_FILES[p])
-    monkeypatch.setattr(memfit, "lora_dtype", lambda p: "BF16")
-    monkeypatch.setattr(pipeline, "vet_adapter", lambda *a, **k: None)
-    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 120 * GB)
-    spec = types.SimpleNamespace(
-        id=variant, path="dit", variant=None, encoder="enc", vae="vae",
-        audio_vae="audio",
-        adapters=(("lora", 1.0),) if variant == "h3" else (),
-        defaults={"size": size, "seconds": seconds})
-    got = vs.entry_plan(spec)
+    got = vs.entry_plan(_h3_entry(monkeypatch, variant, size, seconds))
     clip = vs.plan_clip(got, frames=got.frames, width=got.size[0],
                         height=got.size[1], text=vs.PRICED_TEXT_ROWS)
     dit = clip.terms["denoise"]["dit"] + clip.terms["denoise"]["lora"]
+    caches, pairs = _cache_terms()
+    encode = clip.phases["encode"] + caches
+    resident = dit + clip.phases["decode"] + caches + pairs
+    assert got.cache_share == 1.0
     if variant == "h3-base":
-        assert got.footprint == clip.phases["encode"]
-        assert got.footprint > dit + clip.phases["decode"]
+        assert got.footprint == encode and encode > resident
     else:
         assert clip.phases["decode"] > clip.terms["denoise"]["step"]
-        assert got.footprint == dit + clip.phases["decode"]
-        assert got.footprint > clip.phases["encode"]
+        assert got.footprint == resident and resident > encode
+
+
+def test_the_caches_of_a_tight_video_entry_take_the_room_its_clip_leaves(
+        monkeypatch):
+    """On a budget the clip fills but for half the room its caches are
+    bounded at, the entry books each cache at about half its bound."""
+    from gmlx.serve import video_service as vs
+
+    caches, pairs = _cache_terms()
+    full = vs.entry_plan(_h3_entry(monkeypatch, "h3", "768x768", 5))
+    bare = full.footprint - caches - pairs
+    budget = bare + (caches + pairs) // 2
+    got = vs.entry_plan(_h3_entry(monkeypatch, "h3", "768x768", 5, budget))
+    assert 0.4 < got.cache_share <= 0.5
+    assert bare < got.footprint <= budget
 
 
 def test_an_image_route_names_a_video_id_as_no_image_model(request):
