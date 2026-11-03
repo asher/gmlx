@@ -1112,6 +1112,39 @@ def test_a_table_that_fills_the_entrys_pair_room_steps(tmp_path, request):
     assert e.value.status == 413
 
 
+def _entry_with_own(tmp_path, request, seed: int = 5):
+    """A mounted entry with a LoRA of its own, the file of ``_adapter``
+    ``seed`` at strength 1."""
+    pipe, _w = _own_pipe()
+    served = _served(pipe)
+    served.spec.adapters = ((str(_lora_file(tmp_path, seed)), 1.0),)
+    _on_worker(vs._load_adapters, served)
+    _mount(_Host(served), request)
+    return pipe
+
+
+def test_a_table_of_the_entrys_own_lora_takes_no_pair_room(tmp_path,
+                                                           request):
+    """A workflow that keeps the recipe's LoRA in a stock loader sends the
+    entry's own pairs as its table. The cache holds them already, so the
+    table defines with 1 KiB of room beside them, adds no pair, and steps
+    as the entry does without it."""
+    from test_video_h3_lora import _adapter
+
+    pipe = _entry_with_own(tmp_path, request, seed=6)
+    held = set(pipe.adapters.keys(lambda k: True))
+    pipe.adapters.max_bytes = pipe.adapters.bytes + (1 << 10)
+    c = _client()
+    tid = c.define_table("h3", _table_body(c, _adapter(6)))
+    assert set(pipe.adapters.keys(lambda k: True)) == held
+    video, audio, feats = _clip()
+    row, kw = {"cond": c.put(feats)}, dict(shifts=SHIFTS, audio_scale=SCALE)
+    got = c.av_step("h3", None, video, audio, 600.0, row, patch_table=tid,
+                    **kw)
+    plain = c.av_step("h3", None, video, audio, 600.0, row, **kw)
+    assert all(_rel(g, p) < 1e-5 for g, p in zip(got, plain))
+
+
 def test_a_patch_alpha_that_is_no_number_is_a_400(host):
     """A patch's alpha is ComfyUI's scalar, sent as a number or null."""
     from test_video_h3_lora import _adapter

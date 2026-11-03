@@ -28,7 +28,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 
 from . import plan
-from .install import linear_dims, linear_leaves, register_pair
+from .install import linear_dims, linear_leaves, pair_hash, register_pair
 from .reader import (AdapterError, UnsupportedAdapterError, read_lora,
                      resolve)
 
@@ -179,11 +179,12 @@ def table_entries(adapters) -> list:
 
 # ComfyUI patches.
 
-def register_patch(pipe, up, down, alpha=None, mid=None, dora_scale=None,
-                   reshape=None) -> str:
-    """Keep the pair of a ComfyUI LoRA patch, given in its tuple order, and
-    return its content hash. A patch with a mid tensor, a DoRA scale or a
-    reshape is refused by name."""
+def patch_pair(up, down, alpha=None, mid=None, dora_scale=None,
+               reshape=None) -> tuple:
+    """(down, up, alpha) of a ComfyUI LoRA patch, given in its tuple order,
+    as the pipeline's cache keeps the pair, with its content hash last. A
+    patch with a mid tensor, a DoRA scale or a reshape is refused by
+    name."""
     for value, kind in ((mid, "Tucker LoCon"), (dora_scale, "DoRA"),
                         (reshape, "reshape")):
         if value is not None:
@@ -199,7 +200,18 @@ def register_patch(pipe, up, down, alpha=None, mid=None, dora_scale=None,
     if alpha is not None:
         alpha = float(mx.array(alpha).astype(mx.float32).reshape(-1)[0]
                       .item())
-    return register_pair(pipe, down, up, alpha)
+    mx.eval(down, up)
+    return down, up, alpha, pair_hash(down, up, alpha)
+
+
+def register_patch(pipe, up, down, alpha=None, mid=None, dora_scale=None,
+                   reshape=None) -> str:
+    """Keep the pair of a ComfyUI LoRA patch, given in its tuple order, and
+    return its content hash. A patch with a mid tensor, a DoRA scale or a
+    reshape is refused by name."""
+    down, up, alpha, key = patch_pair(up, down, alpha, mid, dora_scale,
+                                      reshape)
+    return register_pair(pipe, down, up, alpha, key=key)
 
 
 def _module_of(key: str, family) -> str:

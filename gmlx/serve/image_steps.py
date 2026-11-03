@@ -1002,13 +1002,15 @@ def _pair_room(served, need: int) -> None:
 def define_table(served, body: dict, adapters: _Bytes) -> str:
     """The core table of a contract table body, with its pairs registered
     on the pipeline. Raises :class:`Missing` for adapter matrices not
-    held, and a 413 for pairs the entry's pair cache cannot hold at
-    once."""
+    held, and a 413 for pairs the entry's pair cache cannot hold at once
+    beside its own."""
     from gmlx.image import api
+    from gmlx.image.lora import install
     from gmlx.image.lora import patch_table as pt
     from gmlx.image.lora.reader import AdapterError
 
     from . import video_service as vs
+    from .image_service import _pair_keys
 
     if is_video(served.spec):
         vs.ensure_dit(served)
@@ -1017,7 +1019,7 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
     if not isinstance(entries, list):
         raise StepError(400, "a patch table body needs a list of entries")
     missing = []
-    sizes: dict = {}
+    held: dict = {}
     for e in entries:
         for p in (e.get("patches") or []) if isinstance(e, dict) else []:
             alpha = p.get("alpha")
@@ -1030,13 +1032,22 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
             missing += [str(p.get(side)) for side, t in zip(("up", "down"),
                                                             got) if t is None]
             if None not in got:
-                sizes[(p["up"], p["down"], p.get("alpha"))] = sum(
-                    t.nbytes for t in got)
+                held[(p["up"], p["down"], alpha)] = got
     if missing:
         raise Missing(missing)
+    try:
+        # Each pair as the pipeline keeps it, under its content hash: a
+        # pair named twice, or one of the entry's own, takes no room.
+        pairs = {pk: pt.patch_pair(up.mx(), down.mx(), pk[2])
+                 for pk, (up, down) in held.items()}
+    except (AdapterError, ValueError, TypeError) as e:
+        raise StepError(400, f"patch table refused: {e}") from None
+    own = _pair_keys(served.adapters)
+    sizes = {key: int(down.nbytes) + int(up.nbytes)
+             for down, up, _alpha, key in pairs.values() if key not in own}
     _pair_room(served, sum(sizes.values()))
     rows = []
-    pairs: dict = {}
+    keys: dict = {}
     try:
         for e in entries:
             row = {"key": e.get("key"), "band": e.get("band"), "patches": []}
@@ -1047,13 +1058,12 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
                     raise StepError(400, f"patch fields {sorted(unknown)} "
                                     "are not read by this server")
                 pk = (p["up"], p["down"], p.get("alpha"))
-                if pk not in pairs:
-                    up = adapters.get(p["up"]).mx()
-                    down = adapters.get(p["down"]).mx()
-                    pairs[pk] = pt.register_patch(pipe, up, down,
-                                                  p.get("alpha"))
+                if pk not in keys:
+                    down, up, alpha, key = pairs[pk]
+                    keys[pk] = install.register_pair(pipe, down, up, alpha,
+                                                     key=key)
                 row["patches"].append({
-                    "adapter": pairs[pk], "strength": p.get("strength", 1.0),
+                    "adapter": keys[pk], "strength": p.get("strength", 1.0),
                     "strength_model": p.get("strength_model", 1.0),
                     **({"kind": p["kind"]} if "kind" in p else {})})
             rows.append(row)
