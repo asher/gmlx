@@ -1416,6 +1416,22 @@ def test_the_upsampled_prompt_is_priced():
     assert _refused(req, served, 2048, budget).param == "size"
 
 
+def test_an_upsampled_prompt_that_fits_at_no_size_is_named():
+    """Where the upsampler's 60 KB rewrite of a short prompt fits at no
+    size, the 400 names the upsampled prompt and how to turn the rewrite
+    off."""
+    served = _qwen_served()
+    req = image_service.parse_request("generations", {
+        "prompt": "a cat", "size": "2048x2048"})
+    req.revised_prompt = _LONG
+    e = _refused(req, served, 2048, _need(served, 2048))
+    assert e.param == "prompt"
+    assert str(e).startswith("the upsampled prompt is too long for "
+                             "Qwen-Image 2.1: up to ")
+    assert str(e).endswith("; shorten the prompt or turn prompt_upsampling "
+                           "off")
+
+
 def test_a_guided_request_prices_the_prefix_of_each_text_at_its_rows():
     """A guided Qwen-Image 2.1 request caches a prefix per text. A 4 KB
     prompt beside a short negative prompt is priced at one long prefix and
@@ -1430,6 +1446,20 @@ def test_a_guided_request_prices_the_prefix_of_each_text_at_its_rows():
     budget = _need(served, 1024, req.prompt, cfg=4.0, prefix_rows=rows)
     assert _need(served, 1024, req.prompt, cfg=4.0) > budget
     image_service.fit_check(req, served, (1024, 1024), budget)
+
+
+def test_an_edit_that_fits_at_a_smaller_size_gets_the_plan_message():
+    """A Qwen-Image 2.1 edit that does not fit at 2048x2048 where a smaller
+    size of the shape fits at its prompt's rows gets the plan's message,
+    which names the references that fit, and not the prompt."""
+    served = _qwen_served()
+    req = _edit_req(1, (512, 512), prompt="swap the hats")
+    refs = [(512, 512)]
+    budget = _need(served, 1024, req.prompt, refs=refs)
+    assert _need(served, 2048, req.prompt, refs=refs) > budget
+    e = _refused(req, served, 2048, budget)
+    assert e.param == "image", str(e)
+    assert str(e).startswith("image request does not fit")
 
 
 def test_the_room_a_prompt_makes_is_what_its_admission_priced(
@@ -1464,6 +1494,22 @@ def test_the_room_a_prompt_makes_is_what_its_admission_priced(
     image_service._make_room(served, 1.0, (1024, 1024), [], False, budget,
                              [req.prompt])
     assert shed == [need]
+
+
+@pytest.mark.parametrize("family", ["qwen_image21", "z_image"])
+def test_a_variation_without_a_prompt_reads_the_variation_prompt_to_edit(
+        family):
+    """A variation without a prompt runs as an edit on a family that
+    edits, whose encoder reads the variation prompt, and as an image to
+    image run on another family, whose encoder reads the empty prompt."""
+    from gmlx.image.registry import get_family
+
+    fam = get_family(family)
+    served = SimpleNamespace(pipe=SimpleNamespace(family=fam),
+                             plan=SimpleNamespace(cfg=1.0))
+    req = image_service.parse_request("variations", {})
+    want = "" if fam.edit is None else image_service.VARIATION_PROMPT
+    assert image_service._texts(req, served) == (want, want, None)
 
 
 @pytest.mark.parametrize("prompt", ["swap the hats", _LONG],
