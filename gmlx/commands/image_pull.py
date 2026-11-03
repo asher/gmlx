@@ -776,7 +776,7 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
                f"{least} GB. Pass --quant to pull one anyway")
         if a.json:
             print(json.dumps({"recipe": r.name, "error": msg,
-                              "needs_class": least}, indent=2))
+                              "needs_gb": least}, indent=2))
         print(f"error: {msg}", file=sys.stderr)
         return 1
 

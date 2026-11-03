@@ -407,7 +407,7 @@ def test_a_pull_on_8_gb_refuses_and_names_16_gb(lib, monkeypatch, capsys,
     assert f"error: {msg}" in capsys.readouterr().err
     assert manage.cmd_pull([name, "--config", str(cfg), "--json"]) == 1
     assert json.loads(capsys.readouterr().out) == {
-        "recipe": name, "error": msg, "needs_class": 16}
+        "recipe": name, "error": msg, "needs_gb": 16}
     assert got == []
     r = catalog.RECIPES[name]
     dq, eq = catalog.DEFAULT_QUANTS[name][16]
