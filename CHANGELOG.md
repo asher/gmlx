@@ -19,6 +19,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a Qwen-Image 2.1 image from a very long prompt, no longer return wrong text
   features or corrupt memory. The fused rotary kernels index in 64-bit, so a
   query past 2^31 elements is addressed correctly.
+- `gmlx serve` refuses an image prompt too long to fit in memory with a 400
+  that names the prompt, instead of pricing the model's default text rows and
+  reading it. Qwen-Image 2.1, whose rows are capped nowhere, was affected.
 
 ## [0.5.4] - 2026-10-29
 

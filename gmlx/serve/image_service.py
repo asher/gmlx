@@ -1177,7 +1177,9 @@ def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
 def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
               budget) -> None:
     """Refuse a request whose memory plan does not fit ``budget`` with a
-    400 that names the largest size of its aspect that fits."""
+    400 that names the largest size of its aspect that fits, or, on a
+    family whose plan prices the prompt, a prompt whose rows do not fit at
+    any size, as the preflight of the image command prices them."""
     from gmlx.image import memfit
 
     pipe = served.pipe
@@ -1193,17 +1195,41 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     init = bool(req.images) and (pipe.family.edit is None
                                  or req.mask is not None)
 
-    def fits(w: int, h: int, ref_sizes) -> bool:
+    # A family whose plan prices the prompt prices its real rows, not the
+    # family's most, so an over-long prompt is refused here rather than
+    # read by the encoder. The rows come from the text alone, before a
+    # tokenizer loads, as the image command's preflight prices them.
+    caption = None
+    if memfit.prices_prompt(pipe.family.name):
+        from gmlx.image.text_encoder import encoder_spec, rows_at_most
+
+        spec = encoder_spec(pipe.family)
+        texts = [t for t in (req.revised_prompt or req.prompt,
+                             req.negative_prompt) if t]
+        if texts:
+            caption = max(rows_at_most(spec, t) for t in texts)
+            args["caption_tokens"] = caption
+
+    def fits(w: int, h: int, ref_sizes, a=args) -> bool:
         try:
             return plan_memory(height=h, width=w, init_image=init,
                                ref_sizes=ref_sizes, _hint=False,
-                               **args).fits
+                               **a).fits
         except memfit.ImageMemoryError:
             return False
 
     w, h = size
     if budget is None or fits(w, h, refs):
         return
+    # A prompt too long to plan at any size is refused as the prompt, not
+    # the size: it fits at the family's most text rows but not its own.
+    if caption is not None:
+        base = {k: v for k, v in args.items() if k != "caption_tokens"}
+        if fits(w, h, refs, base):
+            raise _bad(
+                f"the prompt is too long for {pipe.family.title}: its "
+                f"{caption} text rows do not fit in memory beside the model; "
+                "shorten the prompt", "prompt")
     if refs:
         # The plan's own message names the references that fit.
         try:

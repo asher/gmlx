@@ -1261,3 +1261,48 @@ def test_each_server_port_keeps_its_own_url_folder(monkeypatch, tmp_path):
     b = image_service.default_store_root(8081)
     assert a != b and os.path.dirname(a) == os.path.dirname(b)
     assert a == str(tmp_path / "gmlx" / "images" / "8080")
+
+
+def test_the_fit_check_refuses_an_over_long_prompt_it_would_underprice(
+        monkeypatch):
+    """A family whose plan prices the prompt is priced at the prompt's real
+    text rows, not the family's most. Qwen-Image 2.1 caps its rows nowhere,
+    so a long prompt reaches far more rows than the 512-row default and its
+    encoder crosses a GPU index limit past 524,289 rows. The fit check must
+    refuse it at plan time, as the prompt, not read it."""
+    from gmlx.image import memfit
+    from gmlx.image.registry import get_family
+
+    served, _ = _fit_served(monkeypatch, 1 << 30)
+    served.pipe.family = get_family("qwen_image21")
+    served.pipe.variant = "base"
+    served.pipe.captions = SimpleNamespace(bytes=0)
+    served.plan = SimpleNamespace(keep_encoder=True, cfg=1.0, staged=False)
+
+    seen: list = []
+
+    def plan_memory(*, height, width, caption_tokens=None, _hint=True, **k):
+        seen.append(caption_tokens)
+        # the family's most is 512; a plan that underprices admits the long
+        # prompt, a plan that prices its real rows does not.
+        rows = 512 if caption_tokens is None else caption_tokens
+        if rows > 100_000 and _hint:
+            raise memfit.ImageMemoryError("no room")
+        return SimpleNamespace(fits=rows <= 100_000)
+
+    monkeypatch.setattr(memfit, "plan_memory", plan_memory)
+
+    short = image_service.parse_request("generations", {"prompt": "a cat"})
+    seen.clear()
+    image_service.fit_check(short, served, (1024, 1024), 1)
+    assert seen and max(c for c in seen if c is not None) < 1000
+
+    long = image_service.parse_request(
+        "generations", {"prompt": "a highly detailed scene " * 20_000})
+    seen.clear()
+    with pytest.raises(image_service.ImageRequestError,
+                       match="prompt is too long") as e:
+        image_service.fit_check(long, served, (1024, 1024), 1)
+    assert e.value.param == "prompt"
+    # the request was priced at its real rows, not the 512-row default
+    assert max(c for c in seen if c is not None) > 100_000
