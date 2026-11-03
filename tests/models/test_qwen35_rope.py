@@ -215,14 +215,32 @@ def test_cpu_default_device_takes_the_cos_sin_route(monkeypatch):
 
 # This reads the Metal source each kernel builder generates, for every
 # variant it builds, with whitespace normalized; it launches nothing. It
-# checks two rules. Each 32-bit integer the source declares is one of the
-# names below, all of which the launch grid or the shape bounds. Each
-# index into x, x_out, cos and sin, and each initializer of a long or
-# int64_t, evaluates every product and sum in 64-bit: its first product
-# operand is a 64-bit variable or a 64-bit cast (static_cast, C-style or
-# functional, to long or int64_t) of a name or a literal. A cast of a
-# whole product is refused, though a bound might make it correct. The
-# position_ids index is not checked: it reads 3 x B x L entries.
+# is a tripwire for the forms these kernels use, not a proof. It checks:
+#
+# 1. Each 32-bit integer declared at the start of a statement is one of
+#    the names below, all of which the launch grid or the shape bounds,
+#    and no auto is declared there.
+# 2. These expressions have no sum, difference, product, quotient or
+#    remainder of two 32-bit operands, and are 64-bit:
+#    - each subscript of x, x_out, cos and sin;
+#    - each offset added to or taken from one of those names, as in
+#      "x + off" (the offset after the name, up to the next ";", ")",
+#      "," or "]" outside brackets), which covers a row pointer and a
+#      dereference;
+#    - each initializer of a declared long, int64_t, ulong, uint64_t or
+#      size_t, at the start of a statement;
+#    - each right side of =, +=, -= or *= to a name declared so, at the
+#      start of a statement. That of +=, -= and *= may be 32-bit, as the
+#      name widens it.
+#    A 64-bit operand is a name declared so, a 64-bit cast (static_cast,
+#    C-style or functional) of a name or a literal, or an operation with
+#    a 64-bit operand. A 64-bit cast of anything else is refused, though
+#    a bound might make it correct, and a 32-bit cast is 32-bit.
+#
+# It does not read a subscript of another name, an offset before the
+# name, a pointer taken from another pointer, or a declaration inside a
+# for header. The position_ids index is not checked: it reads 3 x B x L
+# entries.
 
 _GRID_INTS = frozenset((
     "elem", "half_dim", "q_bsz", "q_heads", "q_len", "q_dim", "slots",
@@ -230,7 +248,7 @@ _GRID_INTS = frozenset((
     "freq_idx", "d", "pair_d", "axis"))
 _INT32 = ("int", "uint", "unsigned", "short", "ushort", "int32_t",
           "uint32_t")
-_INT64 = ("long", "int64_t")
+_INT64 = ("long", "int64_t", "ulong", "uint64_t", "size_t")
 _TOKEN = re.compile(
     r"\s*(static_cast\s*<\s*\w+\s*>|\w+|\S)")
 
@@ -327,11 +345,13 @@ class _Expr:
             if self.toks[self.i + 1] == ")":
                 kind = self.cast(m.group(1) if m else tok)
             else:
+                to = m.group(1) if m else tok
                 kind = self.sum()
-                if (m.group(1) if m else tok) in _INT64:
+                if to in _INT64:
                     raise AssertionError(
                         f"a 64-bit cast of an expression, not of a name or "
                         f"a literal, in {' '.join(self.toks)}")
+                kind = "int"
             self.take(")")
             return kind
         if tok == "(":
@@ -368,6 +388,19 @@ def _subscripts(src: str, names):
         yield m.group(1), src[m.end():j - 1]
 
 
+def _offsets(src: str, names):
+    """The text of each offset added to or taken from ``names`` in
+    ``src``: from the operator to the next ";", ")", "," or "]" outside
+    brackets."""
+    for m in re.finditer(r"(?<![\w.])(%s)\b\s*([+-])(?![+=-])"
+                         % "|".join(names), src):
+        depth, j = 0, m.end()
+        while j < len(src) and not (depth == 0 and src[j] in ";),]"):
+            depth += {"(": 1, "[": 1, ")": -1, "]": -1}.get(src[j], 0)
+            j += 1
+        yield m.group(1), m.group(2), src[m.end():j].strip()
+
+
 def _index_faults(src: str) -> list:
     """What breaks the two rules in one kernel's source."""
     src = " ".join(src.split())
@@ -388,11 +421,19 @@ def _index_faults(src: str) -> list:
             except AssertionError as err:
                 faults.append(str(err))
             wide.add(name)
-    for array, index in _subscripts(src, ("x", "x_out", "cos", "sin")):
-        e = _Expr(index, wide)
+    assign = re.compile(r"(?:^|(?<=[;{}]))\s*(\w+)\s*(=|\+=|-=|\*=)(?!=)"
+                        r"\s*([^;]*);")
+    checked = [(f"{a}[{i}]", i, True) for a, i in _subscripts(
+        src, ("x", "x_out", "cos", "sin"))]
+    checked += [(f"{a} {op} {i}", i, True) for a, op, i in _offsets(
+        src, ("x", "x_out", "cos", "sin"))]
+    checked += [(f"{name} {op} {rhs}", rhs, op == "=")
+                for name, op, rhs in assign.findall(src) if name in wide]
+    for what, text, whole in checked:
+        e = _Expr(text, wide)
         try:
-            if e.parse() != "long" or e.narrow:
-                faults.append(f"{array}[{index}]")
+            if (e.parse() != "long" and whole) or e.narrow:
+                faults.append(what)
         except AssertionError as err:
             faults.append(str(err))
     return faults
