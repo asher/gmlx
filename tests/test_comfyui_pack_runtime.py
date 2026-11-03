@@ -360,8 +360,7 @@ def test_pull_names_are_the_catalog_recipes(widgets):
 
 def test_video_pull_names_are_the_video_recipes_the_nodes_run(widgets):
     from gmlx.video.catalog import RECIPES
-    assert list(widgets.VIDEO_PULL_NAMES) == [r.name for r in RECIPES.values()
-                                              if r.variant != "fasth3"]
+    assert list(widgets.VIDEO_PULL_NAMES) == list(RECIPES)
 
 
 def test_a_kept_list_is_probed_again_after_keep_seconds(widgets, tmp_path, monkeypatch):

@@ -50,6 +50,10 @@ _DTYPES = {"f32": torch.float32, "f16": torch.float16, "bf16": torch.bfloat16,
 
 # The shifts MiniMaxH3SigmaShift sets, which an AV step carries.
 H3_SHIFTS = {"video": "minimax_h3_sigma_shift_video", "audio": "minimax_h3_sigma_shift_audio"}
+# The minimax_payload keys of MiniMaxH3.extra_conds the forward reads, each
+# with a default when absent, and what each carries.
+H3_PAYLOAD = {"audio_scale": "the audio scale", "keyframes": "the keyframes and guides",
+              "refs": "the references", "text_token_tags": "the vision tokens of the prompt"}
 # transformer_options keys and how the forward treats them.
 FORWARDED = {"sample_sigmas", "sigmas", "cond_or_uncond", "uuids", "qwen_image21_cache",
              *H3_SHIFTS.values()}
@@ -466,6 +470,27 @@ class RemoteForward:
                                   f"forward as {k}; a gmlx model samples the whole clip, so "
                                   "remove the latent's noise mask")
 
+    def _trained_shifts(self, to: dict, shifts: dict) -> None:
+        """Refuse a run on the entry's trained sigmas, or their tail, at
+        shifts other than the entry's. The forward derives the audio sigma
+        from the video one at the shifts in force, which are 12 and 3
+        without ModelSamplingMiniMaxH3, so the audio would sample off its
+        trained sigmas with no error."""
+        sampling = self.b.status.get("sampling") or {}
+        fixed, ran = sampling.get("sigmas"), to.get("sample_sigmas")
+        if not fixed or ran is None:
+            return
+        ran = torch.as_tensor(ran).detach().float().reshape(-1).cpu()
+        table = torch.tensor([float(s) for s in fixed], dtype=torch.float32)
+        if len(ran) > len(table) or not torch.equal(ran, table[len(table) - len(ran):]):
+            return
+        v, a = float(sampling["shift"]), float(sampling["audio_shift"])
+        if (shifts["video"], shifts["audio"]) != (v, a):
+            raise GmlxRefusal(f"gmlx: {self.b.model_id!r} samples on its trained sigmas at the "
+                              f"shifts {v:g} and {a:g}, and this run is at {shifts['video']:g} "
+                              f"and {shifts['audio']:g}; put ModelSamplingMiniMaxH3 on the "
+                              f"model at {v:g} and {a:g}")
+
     def _av_call(self, t0, x, timesteps, context, control, to: dict, kwargs: dict):
         """One AV step: the video and audio latents as the sampler carries
         them, the audio scale and the shifts, which the server's step reads
@@ -478,6 +503,10 @@ class RemoteForward:
         payload = kwargs.pop("minimax_payload", None) or {}
         self._h3_conditions(payload, kwargs)
         self._check(control, to, kwargs)
+        dm = self.base_model.diffusion_model
+        shifts = {"video": float(to.get(H3_SHIFTS["video"], dm.sigma_shift_video)),
+                  "audio": float(to.get(H3_SHIFTS["audio"], dm.sigma_shift_audio))}
+        self._trained_shifts(to, shifts)
         # One clip a step: the server refuses a batch, as ComfyUI's forward does.
         video, audio = x
         if context is None:
@@ -496,9 +525,6 @@ class RemoteForward:
         client = self.b.client
         for h, t in held.items():
             client.ensure_tensor(t, h)
-        dm = self.base_model.diffusion_model
-        shifts = {"video": float(to.get(H3_SHIFTS["video"], dm.sigma_shift_video)),
-                  "audio": float(to.get(H3_SHIFTS["audio"], dm.sigma_shift_audio))}
         fields = {"model": self.b.model_id, "run": run, "patch_table": table, "rows": [row],
                   "shifts": shifts, "audio_scale": float(payload.get("audio_scale", 1.0))}
         vs, au = video.float(), audio.float()
@@ -606,13 +632,43 @@ def load_model(client: StepClient, model_id: str) -> GmlxModelPatcher:
     facts = status.get("comfy") or {}
     if not facts.get("model_class"):
         raise GmlxError(f"gmlx: the server gives no ComfyUI model class for {model_id!r}")
-    if facts["model_class"] == H3_CLASS and status.get("variant") == "fasth3":
-        raise GmlxRefusal(f"gmlx: {model_id!r} is a FastH3 DiT; the gmlx nodes run the "
-                          "MiniMax-H3 recipes h3, h3-fast and h3-base")
     manifest = client.manifest(model_id)
     model, _cfg = build_weightless(manifest, facts["model_class"])
     binding = GmlxBinding(client, model_id, status, int(manifest.get("count") or 0))
     model.diffusion_model.forward = RemoteForward(model, binding)
     patcher = GmlxModelPatcher(model, load_device=CPU, offload_device=CPU)
     patcher.gmlx = binding
+    if facts["model_class"] == H3_CLASS:
+        _h3_keys(patcher)
     return patcher
+
+
+def _h3_keys(patcher) -> None:
+    """Refuse a ComfyUI whose MiniMax-H3 nodes no longer write a key the
+    forward reads with a default, so a renamed key cannot run a clip at the
+    wrong shift or scale: the shifts ModelSamplingMiniMaxH3 sets, and the
+    minimax_payload keys of the model's extra_conds."""
+    from comfy_extras.nodes_minimax_h3 import MiniMaxH3SigmaShift
+
+    from .version import COMFYUI_FLOOR, COMFYUI_TESTED
+
+    def refuse(writer: str, key: str, what: str):
+        raise GmlxError(f"gmlx: ComfyUI {comfyui_version()}'s {writer} does not write {key}, "
+                        f"which the gmlx nodes read {what} from; the gmlx nodes are tested on "
+                        f"ComfyUI {COMFYUI_FLOOR} to {COMFYUI_TESTED}")
+
+    out = MiniMaxH3SigmaShift.execute(patcher, 10.0, 3.0)
+    shifted = (out.result if hasattr(out, "result") else out)[0]
+    to = shifted.model_options.get("transformer_options") or {}
+    for stream, key in H3_SHIFTS.items():
+        if key not in to:
+            refuse("ModelSamplingMiniMaxH3", f"transformer_options[{key!r}]",
+                   f"the {stream} shift")
+    conds = patcher.model.extra_conds(minimax_token_tags=torch.ones(1, dtype=torch.long),
+                                      minimax_keyframes=[{}], minimax_refs=[{}], seed=0)
+    held = conds.get("minimax_payload")
+    if held is None:
+        refuse("MiniMaxH3 model", "minimax_payload", "the conditioning beside the prompt")
+    for key, what in H3_PAYLOAD.items():
+        if key not in held.cond:
+            refuse("MiniMaxH3 model", f"minimax_payload[{key!r}]", what)

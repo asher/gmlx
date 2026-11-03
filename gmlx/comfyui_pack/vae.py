@@ -93,8 +93,33 @@ class GmlxVAE(_ServerVAE):
         return self.gmlx_client.vae_encode(self.gmlx_model, pixels).float()
 
 
-def _no_encode(kind: str):
-    raise GmlxRefusal(f"gmlx: a gmlx {kind} VAE decodes and does not encode; {H3_TEXT_ONLY}")
+def _no_encode(kind: str, inputs: str):
+    raise GmlxRefusal(f"gmlx: a gmlx {kind} VAE decodes and does not encode, so it takes no "
+                      f"{inputs}; {H3_TEXT_ONLY}")
+
+
+# MiniMax-H3's video VAE works on a grid in time: 5 k + 2 latent frames
+# hold 17 k + 5 frames, for k = 0, 1, 2 and on, and a still image is one
+# latent frame. ComfyUI asks for either count at any frame count.
+def _grid_steps(count: int, first: int, step: int) -> int:
+    """Whole grid steps from the grid's first point up to ``count``,
+    negative below that point."""
+    return (count - first) // step
+
+
+def h3_frames(latents: int) -> int:
+    """The frames that ``latents`` latent frames decode to: those of the
+    grid point at or below them, and 1 below the grid."""
+    return max(1, 5 + 17 * _grid_steps(latents, 2, 5))
+
+
+def h3_latents(frames: int) -> int:
+    """The latent frames that ``frames`` frames encode to: those of the
+    grid point at or below them, and 1 for a still image or below the
+    grid."""
+    if frames <= 1:
+        return 1
+    return max(1, 2 + 5 * _grid_steps(frames, 5, 17))
 
 
 class GmlxVideoVAE(_ServerVAE):
@@ -109,9 +134,8 @@ class GmlxVideoVAE(_ServerVAE):
         self.latent_channels = int(lat.get("channels", 24))
         self.output_channels = int(vae.get("channels_out", 3))
         self.latent_dim = 3
-        self.upscale_ratio = (lambda a: max(1, (a - 2) // 5 * 17 + 5), stride, stride)
-        self.downscale_ratio = (lambda a: max(1, (a - 5) // 17 * 5 + 2) if a > 1 else 1,
-                                stride, stride)
+        self.upscale_ratio = (h3_frames, stride, stride)
+        self.downscale_ratio = (h3_latents, stride, stride)
         self.upscale_index_formula = (4, stride, stride)
         self.downscale_index_formula = (4, stride, stride)
         self.handles_tiling = True
@@ -122,7 +146,7 @@ class GmlxVideoVAE(_ServerVAE):
         return frames.float()[None]
 
     def encode(self, pixel_samples):
-        _no_encode("video")
+        _no_encode("video", "first frame, last frame, guide image or reference image")
 
 
 class GmlxAudioVAE(_ServerVAE):
@@ -145,4 +169,4 @@ class GmlxAudioVAE(_ServerVAE):
         return wave.float().movedim(1, -1)
 
     def encode(self, pixel_samples):
-        _no_encode("audio")
+        _no_encode("audio", "guide audio or reference audio")

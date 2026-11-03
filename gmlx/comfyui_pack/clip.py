@@ -19,7 +19,7 @@ import comfy.model_patcher
 import comfy.sd
 
 from .client import GmlxRefusal, StepClient
-from .patcher import CPU, H3_TEXT_ONLY
+from .patcher import CPU, H3_FAMILY, H3_TEXT_ONLY
 
 log = logging.getLogger("gmlx")
 
@@ -145,6 +145,11 @@ class GmlxCLIP(comfy.sd.CLIP):
         if kwargs.get("image") is not None and not images:
             img = kwargs["image"]
             images = [img[i:i + 1] for i in range(img.shape[0])]
+        if images and self.gmlx_family == H3_FAMILY:
+            # MiniMaxH3ImageToVideo shows its frames to the encoder before
+            # its VAE encodes them.
+            raise GmlxRefusal("gmlx: a first or last frame (first_frame or last_frame of "
+                              f"MiniMaxH3ImageToVideo) reached a gmlx CLIP; {H3_TEXT_ONLY}")
         return {"gmlx": {"text": str(text), "images": images,
                          "llama_template": kwargs.get("llama_template"),
                          "keep_vision": bool(kwargs.get("keep_vision", False)),

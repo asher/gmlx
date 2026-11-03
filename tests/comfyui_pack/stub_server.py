@@ -78,6 +78,10 @@ COMFY = {
 # The families whose DiT leaves out the blocks a step names.
 SKIPS = {"moss_image"}
 TURBO_SIGMAS = [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0]
+# FastH3's video sigmas: its eight trained timesteps over 1000 under the
+# flow shift 10, in float64, each rounded once to float32, then 0.
+FASTH3_SIGMAS = [float(np.float32(10.0 * b / (1.0 + 9.0 * b)))
+                 for b in (t / 1000.0 for t in (999, 874, 749, 624, 500, 375, 250, 125))] + [0.0]
 # The schedule rules of the server's status, for the families whose
 # schedule follows the image size.
 QWEN21_RULE = {"rule": "qwen_image21", "base_len": 256, "max_len": 8192, "base_shift": 0.5,
@@ -113,7 +117,7 @@ MODELS = {
     "h3": ("h3", "fl2va", {"steps": 8, "cfg": 1.0, "shift": 6.0, "audio_shift": 3.0,
                            "sigmas": None, "schedule": None}),
     "fasth3": ("h3", "fasth3", {"steps": 8, "cfg": 1.0, "shift": 10.0, "audio_shift": 3.0,
-                                "sigmas": None, "schedule": None}),
+                                "sigmas": FASTH3_SIGMAS, "schedule": None}),
 }
 # The manifest of a model whose file is not its family's fixture.
 FIXTURE = {"flux-3-klein-base": "flux3_klein-base"}

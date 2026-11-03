@@ -73,7 +73,7 @@ PULL_KINDS = {
 
 # The video models `gmlx video pull` downloads that the gmlx nodes run, in
 # the order of gmlx.video.catalog.RECIPES. gmlx's tests hold the two equal.
-VIDEO_PULL_NAMES = ("h3", "h3-fast", "h3-base")
+VIDEO_PULL_NAMES = ("h3", "h3-fast", "h3-base", "fasth3")
 
 # Timeouts of the widget probes, in seconds, and how long an answer is kept.
 STATUS_TIMEOUT = 3.0
@@ -335,7 +335,8 @@ def not_on_server(name: str, url: str, models: list) -> str:
     video = str(name).strip().lower()
     if video in VIDEO_PULL_NAMES:
         # The MiniMax-H3 recipes share one DiT and differ by their LoRA and
-        # steps, so another id of the same file is no stand-in.
+        # steps, and FastH3 has a DiT of its own, so another id is no
+        # stand-in.
         return (f"gmlx: the gmlx server at {url} has no video model {name!r} (it has: "
                 f"{have}). Run `gmlx video pull {video}`, which downloads it and adds it to "
                 "gmlx's config, then run the workflow again.")

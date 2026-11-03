@@ -67,6 +67,8 @@ def refuse(what: str):
 
 # What the gmlx nodes run of MiniMax-H3, which its refusals state.
 H3_TEXT_ONLY = "the gmlx nodes run MiniMax-H3 from the text prompt alone"
+# The server's family of MiniMax-H3 and FastH3.
+H3_FAMILY = "h3"
 # ComfyUI's MiniMax-H3 Fun ControlNet registers its control first as a
 # DIFFUSION_MODEL wrapper, a bound method of this class.
 FUN_CONTROL = "MiniMaxH3FunControlPatch"

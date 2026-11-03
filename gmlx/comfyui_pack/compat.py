@@ -77,6 +77,7 @@ H3_NAMES = (
     ("comfy.model_base", "MiniMaxH3.audio_scale"),
     ("comfy.ldm.minimax.model", "MiniMaxH3Model.preprocess_text_embeds"),
     ("comfy.ldm.minimax.model", "MiniMaxH3Model.forward"),
+    ("comfy_extras.nodes_minimax_h3", "MiniMaxH3SigmaShift.execute"),
 )
 
 # Arguments the pack passes by name to a ComfyUI signature.
