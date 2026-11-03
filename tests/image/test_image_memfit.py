@@ -1895,24 +1895,50 @@ def test_without_a_free_measure_the_automatic_choice_is_tiles(family,
             assert memfit.vae_tiling(op, 512, 512, tiled=True, **kw) is False
 
 
+# Each family's published header, and the tensors of its DiT's text input
+# whose first dims give the width of the features a cond holds. Krea 2
+# takes the rows of its encoder's layers side by side and fuses them in
+# its projector.
+TEXT_INPUT = [
+    ("z_image", Z_HEADER, ("cap_embedder.0.weight",)),
+    ("qwen_image21", Q_HEADER, ("txt_in.text_norm.weight",)),
+    ("krea2", "krea2_turbo_q4_k_m.header.json",
+     ("txtfusion.projector.weight", "txtmlp.0.scale")),
+    ("flux2_klein", "flux2_klein_4b_q4_k_m.header.json", ("txt_in.weight",)),
+    ("flux2_klein_9b", "flux2_klein_9b_q4_k_m.header.json",
+     ("txt_in.weight",)),
+    ("flux2_klein_9b_kv", "flux2_klein_9b_kv_q4_k_m.header.json",
+     ("txt_in.weight",)),
+    ("flux3_klein", "flux3_klein_q4_k_m.header.json", ("txt_in.weight",)),
+    ("moss_image", "moss_image_sft_q4_k_m.header.json",
+     ("text_embedder.proj.weight",)),
+]
+
+
 def test_every_family_names_the_text_input_of_its_cond():
     """Serve books one cond of each family's priced rows in the step
     routes' tensor cache, so each family names the config keys of its
-    DiT's text input."""
+    DiT's text input, and each is checked on its header below."""
     from gmlx.image.registry import families
 
-    assert set(memfit.COND_WIDTH) == {f.name for f in families()}
+    names = {f.name for f in families()}
+    assert set(memfit.COND_WIDTH) == names
+    assert {f for f, _h, _t in TEXT_INPUT} == names
 
 
-@pytest.mark.parametrize("header, family, width", [
-    (Z_HEADER, "z_image", 2560), (Q_HEADER, "qwen_image21", 4096)])
+@pytest.mark.parametrize("family, header, inputs", TEXT_INPUT,
+                         ids=[f for f, _h, _t in TEXT_INPUT])
 def test_a_cond_is_the_priced_rows_of_the_dits_text_input_in_f32(
-        header, family, width):
-    """On the published headers, as serve identifies them: Qwen3-4B's
-    2560-wide features feed Z-Image, and Qwen3-VL-8B's 4096-wide ones
-    Qwen-Image 2.1, at 512 rows."""
+        family, header, inputs):
+    """On the published header, a cond is the priced rows of features as
+    wide as the DiT's text input takes, in float32: Qwen3-4B's 2560 for
+    Z-Image and 12 of its layers for Krea 2, Qwen3-VL-8B's 4096 for
+    Qwen-Image 2.1."""
     from gmlx.image import fingerprint
+    from gmlx.image.registry import get_family
 
-    got = fingerprint.identify(fixture_view(header))
-    assert got.family.name == family
-    assert memfit.cond_bytes(family, got.config) == 512 * width * 4
+    fam = get_family(family)
+    view = fingerprint.strip_prefix(fixture_view(header), fam.strip_prefixes)
+    width = math.prod(view.tensors[n].shape[0] for n in inputs)
+    assert memfit.cond_bytes(family, fam.synth_config(view)) == (
+        memfit.PEAKS[family].text_rows * width * 4)
