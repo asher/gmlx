@@ -1291,21 +1291,24 @@ def _qwen_served(defaults=None):
 
 
 def _need(served, size: int, prompt: str | None = None,
-          cfg: float = 1.0) -> int:
+          cfg: float = 1.0, refs=(), **terms) -> int:
     """The least budget, to 1 MiB, at which the plan of a square request
-    of ``size`` fits with the rows of ``prompt``, or with the family's
-    default rows for None."""
+    of ``size`` with the reference images of ``refs``, (height, width) in
+    pixels, fits with the rows of ``prompt``, or with the family's default
+    rows for None. ``terms`` are further plan arguments."""
     from gmlx.commands.image_preflight import prompt_rows
     from gmlx.image import memfit
 
     def fits(budget: int) -> bool:
-        a = image_service._fit_args(served.pipe, served, budget, cfg)
+        a = image_service._fit_args(served.pipe, served, budget, cfg,
+                                    tower=bool(refs))
         if prompt is not None:
-            rows = prompt_rows(served.pipe.family, prompt)
+            rows = prompt_rows(served.pipe.family, prompt, len(refs))
             a.update(caption_tokens=rows, text_tokens=rows)
         try:
             return memfit.plan_memory(height=size, width=size, _hint=False,
-                                      **a).fits
+                                      ref_sizes=list(refs), **a,
+                                      **terms).fits
         except memfit.ImageMemoryError:
             return False
 
@@ -1413,6 +1416,56 @@ def test_the_upsampled_prompt_is_priced():
     assert _refused(req, served, 2048, budget).param == "size"
 
 
+def test_a_guided_request_prices_the_prefix_of_each_text_at_its_rows():
+    """A guided Qwen-Image 2.1 request caches a prefix per text. A 4 KB
+    prompt beside a short negative prompt is priced at one long prefix and
+    one short one, and fits where two long ones would not."""
+    from gmlx.commands.image_preflight import prompt_rows
+
+    served = _qwen_served()
+    req = image_service.parse_request("generations", {
+        "prompt": _RICH, "negative_prompt": "blurry", "guidance": 4.0})
+    fam = served.pipe.family
+    rows = [prompt_rows(fam, req.prompt), prompt_rows(fam, "blurry")]
+    budget = _need(served, 1024, req.prompt, cfg=4.0, prefix_rows=rows)
+    assert _need(served, 1024, req.prompt, cfg=4.0) > budget
+    image_service.fit_check(req, served, (1024, 1024), budget)
+
+
+def test_the_room_a_prompt_makes_is_what_its_admission_priced(
+        monkeypatch):
+    """A Qwen-Image 2.1 entry holds 12 GiB of other conditionings' prefix
+    states. A 4 KB prompt is admitted where its plan fits with some of
+    them shed, and the shed before its encode takes what that plan needs,
+    more than the plan at the family's default rows sheds."""
+    from gmlx.commands.image_preflight import prompt_rows
+    from gmlx.image import api, memfit
+
+    served = _qwen_served()
+    served.pipe.captions = SimpleNamespace(
+        bytes=12 << 30, nbytes=lambda key: 0, keys=lambda keep: [])
+    shed: list = []
+    monkeypatch.setattr(api, "_cond_key", lambda pipe, p, refs, enc: p)
+    monkeypatch.setattr(api, "shed_states", lambda pipe, n, own, live: (
+        shed.append(n) or n))
+    req = image_service.parse_request("generations", {
+        "prompt": _RICH, "size": "1024x1024"})
+    rows = prompt_rows(served.pipe.family, req.prompt)
+    budget = _need(served, 1024, req.prompt)
+
+    def sheds(**terms) -> int:
+        a = image_service._fit_args(served.pipe, served, budget, 1.0)
+        return memfit.plan_memory(height=1024, width=1024, _hint=False,
+                                  **a, **terms).shed_bytes
+
+    need = sheds(caption_tokens=rows, text_tokens=rows)
+    assert need > sheds()
+    image_service.fit_check(req, served, (1024, 1024), budget)
+    image_service._make_room(served, 1.0, (1024, 1024), [], False, budget,
+                             [req.prompt])
+    assert shed == [need]
+
+
 @pytest.mark.parametrize("prompt", ["swap the hats", _LONG],
                          ids=["short", "long"])
 def test_an_edit_is_priced_as_the_image_command_prices_it(monkeypatch,
@@ -1443,3 +1496,5 @@ def test_an_edit_is_priced_as_the_image_command_prices_it(monkeypatch,
     assert rows == serve["text_tokens"] == cli["caption_tokens"] == (
         cli["text_tokens"])
     assert rows == 512 if prompt == "swap the hats" else rows > len(prompt)
+    assert serve["prefix_rows"] == cli["prefix_rows"] == [
+        rows + 4 * (512 // 16) ** 2]

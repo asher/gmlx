@@ -1166,7 +1166,9 @@ def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
     its encode, as few as its plan names: those of finished work first,
     then those of the step routes' runs, and those of its own
     conditionings, of ``prompts`` with ``refs``, last. The request's own
-    plan counts what stays."""
+    plan counts what stays, with ``prompts`` priced as ``fit_check``
+    prices them."""
+    from gmlx.commands.image_preflight import prompt_terms
     from gmlx.image import api, memfit
 
     pipe = served.pipe
@@ -1180,6 +1182,7 @@ def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
         own = {api._cond_key(pipe, p, refs, enc) for p in prompts}
     sizes = [(r.height, r.width) for r in refs]
     args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, sizes))
+    args.update(prompt_terms(pipe.family, prompts, sizes))
     args["prefix_other"] -= sum(pipe.captions.nbytes(k) for k in
                                 pipe.captions.keys(lambda k: k[0] in own))
     try:
@@ -1197,16 +1200,17 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     """Refuse a request whose memory plan does not fit ``budget`` with a
     400 that names the cause. A family whose plan prices the prompt prices
     every size at the most text rows the texts its encoder reads can give,
-    as the image command's preflight prices them. The prompt is the cause
-    when no size of the request's shape fits at those rows and some size
-    of it fits at the family's default rows: the prompt must get shorter
-    whatever the size, so the 400 names the prompt, or the negative
-    prompt when it has more rows. Otherwise, when a smaller size fits at
-    the prompt's rows or no size fits even at the default rows, an edit
-    gets the plan's message, which names the references that fit, and
-    any other request the largest size of its shape that fits at those
-    rows, or that none does."""
-    from gmlx.commands.image_preflight import prompt_rows
+    and the prefix of each conditioning at the rows of its own text, by
+    ``prompt_terms``, as the image command's preflight and ``_make_room``
+    price them. The prompt is the cause when no size of the request's
+    shape fits at those rows and some size of it fits at the family's
+    default rows: the prompt must get shorter whatever the size, so the
+    400 names the prompt, or the negative prompt when it has more rows.
+    Otherwise, when a smaller size fits at the prompt's rows or no size
+    fits even at the default rows, an edit gets the plan's message, which
+    names the references that fit, and any other request the largest size
+    of its shape that fits at those rows, or that none does."""
+    from gmlx.commands.image_preflight import prompt_rows, prompt_terms
     from gmlx.image import memfit
 
     pipe = served.pipe
@@ -1223,18 +1227,16 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
                                  or req.mask is not None)
 
     # The rows of a family whose plan prices the prompt come from the
-    # texts run_job encodes, before a tokenizer loads, in the caption and
-    # in the prefix of a family that caches one.
-    caption = cause = None
-    if memfit.prices_prompt(pipe.family.name):
-        _, text, neg = _texts(req, served)
-        rows = {"prompt": prompt_rows(pipe.family, text, len(refs))}
-        if neg is not None:
-            rows["negative_prompt"] = prompt_rows(pipe.family, neg,
-                                                  len(refs))
-        cause = max(rows, key=rows.get)
-        caption = rows[cause]
-        args.update(caption_tokens=caption, text_tokens=caption)
+    # texts run_job encodes, before a tokenizer loads.
+    _, text, neg = _texts(req, served)
+    terms = prompt_terms(pipe.family, [text] + ([] if neg is None else [neg]),
+                         refs)
+    args.update(terms)
+    caption = terms.get("caption_tokens")
+    cause = "prompt"
+    if caption is not None and prompt_rows(pipe.family, text,
+                                           len(refs)) < caption:
+        cause = "negative_prompt"
 
     def fits(w: int, h: int, ref_sizes, a=args) -> bool:
         try:
@@ -1269,8 +1271,7 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     # and some size of it fits at the family's default rows. The smallest
     # size needs the least memory, so it stands for every size.
     if caption is not None and best is None:
-        base = {k: v for k, v in args.items()
-                if k not in ("caption_tokens", "text_tokens")}
+        base = {k: v for k, v in args.items() if k not in terms}
         if fits(*scaled(1), refs, base):
             what, fix = "the prompt", "shorten the prompt"
             if cause == "negative_prompt":

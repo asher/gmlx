@@ -107,6 +107,25 @@ def prompt_rows(family, prompt: str, refs: int = 0) -> int:
     return rows_at_most(spec, prompt)
 
 
+def prompt_terms(family, prompts, refs=()) -> dict:
+    """The ``memfit.plan_memory`` arguments that price the texts the
+    encoder reads, the positive first, beside the references of ``refs``,
+    (height, width) in pixels: the caption and the text rows at the most
+    rows of them by ``prompt_rows``, and on a family that caches a prefix
+    the prefix rows of each conditioning by its own text. Empty with no
+    texts, or on a family whose plan does not price the prompt."""
+    from gmlx.image import memfit
+
+    if not prompts or not memfit.prices_prompt(family.name):
+        return {}
+    rows = [prompt_rows(family, p, len(refs)) for p in prompts]
+    terms = dict(caption_tokens=max(rows), text_tokens=max(rows))
+    prefix = memfit.PEAKS[family.name].prefix
+    if prefix is not None:
+        terms["prefix_rows"] = [prefix.sized_rows(n, refs) for n in rows]
+    return terms
+
+
 def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
           width: int, cfg: float | None, adapters=(),
           init_image: bool = False, keep_encoder: bool = False,
@@ -118,10 +137,9 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
     an init image of its size, and ``keep_encoder`` that the encoder is
     not released in it. ``mmproj`` is the encoder's mmproj and ``refs``
     the (height, width) in pixels of each reference image of the request.
-    ``prompts`` holds the texts the encoder reads, whose rows a family
-    whose plan prices the prompt prices at ``prompt_rows``, in the
-    caption and in the prefix of a family that caches one; with none, or
-    on another family, the rows are the family's most.
+    ``prompts`` holds the texts the encoder reads, the positive first,
+    priced by ``prompt_terms``; with none, or on a family whose plan does
+    not price the prompt, the rows are the family's most.
     Raises ``ImageMemoryError`` when the request cannot fit."""
     if not enabled():
         return None
@@ -141,17 +159,13 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
     tower = None if mmproj is None else _header_view(mmproj)
     # The DiT loads after the encoder, in either order.
     cast = dit_transient(dit, act.dit)
-    caption = None
-    if prompts and memfit.prices_prompt(fam):
-        caption = max(prompt_rows(ident.family, p, len(refs))
-                      for p in prompts)
+    sizes = [(int(h), int(w)) for h, w in refs]
     return memfit.plan_memory(
         _header_bytes(dit, "dit"), _header_bytes(encoder, "encoder"),
         _header_bytes(vae, "vae"), tower,
         adapters=adapters, family=fam, height=height, width=width, cfg=cfg,
         dtype=act.dit, vae_dtype=act.vae, init_image=init_image,
-        caption_tokens=caption, text_tokens=caption,
-        ref_sizes=[(int(h), int(w)) for h, w in refs],
+        ref_sizes=sizes, **prompt_terms(ident.family, prompts, sizes),
         load_peak=max(load_transient(encoder, vae, mmproj), cast),
         # Each part alone, for the staged order.
         load_parts=(load_transient(encoder, None, mmproj),
