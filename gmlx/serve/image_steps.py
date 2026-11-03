@@ -44,6 +44,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -971,7 +972,7 @@ def _pair_room(served, need: int) -> None:
     """Refuse the pairs of a table, ``need`` bytes held at once, over the
     room the entry's pair cache keeps for a request's pairs, with a 413
     that gives the remedy: the share the entry's default work leaves the
-    cache, when the configured bound holds them, or else that bound."""
+    cache, and the configured bound when it is under the need."""
     from .image_service import cache_bytes, pair_room
 
     room = pair_room(served)
@@ -983,14 +984,19 @@ def _pair_room(served, need: int) -> None:
     over = (f"the LoRA pairs of this patch table take {_mib(need)}, over the "
             f"{_mib(room)} the pair cache of {sid!r} keeps for a request's "
             "pairs")
-    if need > configured or share >= 1.0:
-        raise StepError(413, f"{over}; raise server.image.adapter_cache_mb")
+    bound = (f"server.image.adapter_cache_mb to {math.ceil(need / 2**20)} or "
+             "more")
+    if share >= 1.0:
+        raise StepError(413, f"{over}; raise {bound}")
     video = is_video(served.spec)
-    raise StepError(413, f"{over}: its default {'clip' if video else 'image'} "
-                    f"leaves the cache {share:.0%} of its configured "
-                    f"{configured / 2**20:.0f} MiB. A smaller defaults.size"
-                    f"{' or defaults.seconds' if video else ''} on {sid!r} "
-                    "gives it more.")
+    left = (f"its default {'clip' if video else 'image'} leaves the cache "
+            f"{share:.0%} of its configured {configured / 2**20:.0f} MiB")
+    smaller = (f"a smaller defaults.size{' or defaults.seconds' if video else ''}"
+               f" on {sid!r}")
+    if need > configured:
+        raise StepError(413, f"{over}: {left}. Raise {bound}, and set "
+                        f"{smaller} so that it leaves the cache more of it.")
+    raise StepError(413, f"{over}: {left}. A{smaller[1:]} gives it more.")
 
 
 def define_table(served, body: dict, adapters: _Bytes) -> str:

@@ -1044,31 +1044,38 @@ def _big_table(c, pairs: int) -> dict:
     return {"model": "h3", "entries": entries}
 
 
-@pytest.mark.parametrize("configured_mb, want", [
-    (8, "the LoRA pairs of this patch table take 4.0 MiB, over the 2.0 MiB "
-     "the pair cache of 'h3' keeps for a request's pairs: its default clip "
-     "leaves the cache 25% of its configured 8 MiB. A smaller defaults.size "
-     "or defaults.seconds on 'h3' gives it more."),
-    (2, "the LoRA pairs of this patch table take 4.0 MiB, over the 0.5 MiB "
-     "the pair cache of 'h3' keeps for a request's pairs; raise "
-     "server.image.adapter_cache_mb")])
+@pytest.mark.parametrize("configured_mb, share, want", [
+    (8, 0.25, "the LoRA pairs of this patch table take 4.0 MiB, over the "
+     "2.0 MiB the pair cache of 'h3' keeps for a request's pairs: its "
+     "default clip leaves the cache 25% of its configured 8 MiB. A smaller "
+     "defaults.size or defaults.seconds on 'h3' gives it more."),
+    (2, 0.25, "the LoRA pairs of this patch table take 4.0 MiB, over the "
+     "0.5 MiB the pair cache of 'h3' keeps for a request's pairs: its "
+     "default clip leaves the cache 25% of its configured 2 MiB. Raise "
+     "server.image.adapter_cache_mb to 4 or more, and set a smaller "
+     "defaults.size or defaults.seconds on 'h3' so that it leaves the cache "
+     "more of it."),
+    (2, 1.0, "the LoRA pairs of this patch table take 4.0 MiB, over the "
+     "2.0 MiB the pair cache of 'h3' keeps for a request's pairs; raise "
+     "server.image.adapter_cache_mb to 4 or more")])
 def test_a_table_over_the_entrys_pair_room_is_413_naming_it(
-        monkeypatch, request, configured_mb, want):
+        monkeypatch, request, configured_mb, share, want):
     """The pairs of a ComfyUI LoRA's table that the entry's pair cache
     cannot hold at once are refused with a 413 that names the cache, the
-    sizes and the remedy: the share the entry's clip leaves the cache
-    when its configured bound holds them, or else that bound."""
+    sizes and the remedy: under a share, the share the entry's clip leaves
+    the cache, and the configured bound, with the MiB it must reach, when
+    the bound is under the pairs too."""
     import dataclasses
 
     from gmlx.serve import image_service
 
     pipe, _w = _own_pipe()
     served = _served(pipe)
-    served.plan = dataclasses.replace(served.plan, cache_share=0.25)
+    served.plan = dataclasses.replace(served.plan, cache_share=share)
     _mount(_Host(served), request)
     monkeypatch.setitem(image_service._CACHE_BYTES, "adapter",
                         configured_mb << 20)
-    image_service.bound_caches(pipe, 0, 0.25)
+    image_service.bound_caches(pipe, 0, share)
     c = _client()
     body = _big_table(c, 4)
     with pytest.raises(StepsClientError) as e:
