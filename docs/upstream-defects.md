@@ -119,10 +119,11 @@ print((out[:, 0] != want).sum())  # 0
   fill. The third leaves the 2,228,224 packed words of the keys of batch rows 61 and 62 at the
   fill. The fourth leaves 489,344 elements of the last image row at the fill and writes 472,960 of
   them over the start of x. `test_pad_takes_a_slice_update_only_past_the_limit` in
-  `tests/test_mlx_guards.py` holds the routing on small arrays in every run. The past-limit tests
-  are nightly. `tests/past_int32.py` runs them one at a time, on a real Apple GPU with a recommended
-  working set of at least 39 GiB, twice the largest test's footprint, so `gate.py run --full` on
-  such a Mac covers them.
+  `tests/test_mlx_guards.py` holds the routing on small arrays in every run, and
+  `tests/cache/test_kv_guard_calls.py` and `tests/image/test_image_guard_calls.py` fail in every run
+  when a caller calls the stock op instead. The past-limit tests are nightly. `tests/past_int32.py`
+  runs them one at a time, on a real Apple GPU with a recommended working set of at least 39 GiB,
+  twice the largest test's footprint, so `gate.py run --full` on such a Mac covers them.
 
 ## `mx.concatenate` misplaces an input past 2^31 output elements on the GPU
 
@@ -184,7 +185,10 @@ print((out[:, 0] != want).sum())  # 0
   the stock op the regrow leaves 52,428,800 keys unwritten and writes as many over the old keys, the
   shared-KV pad 1,024, and the single block its last row of 16,384, written over its attention
   rows. `test_concatenate_takes_a_slice_update_only_past_the_limit` in `tests/test_mlx_guards.py`
-  holds the routing on small arrays in every run. The past-limit tests run as the pad's do.
+  holds the routing on small arrays in every run, and `tests/cache/test_kv_guard_calls.py`,
+  `test_pad_concatenates_through_the_guard` in `tests/spec/test_shared_kv_inject_merge.py` and
+  `tests/image/test_image_guard_calls.py` fail in every run when a caller calls the stock op
+  instead. The past-limit tests run as the pad's do.
 
 ## The diffusers single-file loader leaves a BF16 tensor outside a linear layer undecoded
 
