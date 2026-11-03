@@ -262,7 +262,7 @@ steps, and ComfyUI saves it as `gmlx/minimax-h3_00001_.mp4` in its
 | `Shifts of the h3 recipe` | ComfyUI's `ModelSamplingMiniMaxH3` at the recipe's shifts, 6 for the video and 3 for the sound. |
 | `Prompt and clip size` | ComfyUI's `MiniMax H3 Image to Video`: the prompt, the clip's `width` and `height`, and its `length` in frames at 24 a second. |
 | `Schedule` | `BasicScheduler` with the `simple` scheduler and the recipe's 8 steps. |
-| `Sampler` | `KSamplerSelect` with `res_multistep`. |
+| `Sampler` | `KSamplerSelect` with `euler`. |
 | `Decode the video`, `Decode the sound` | `VAE Decode` and `VAE Decode Audio`. |
 | `Create Video`, `Save Video` | Put the frames and the sound together at 24 frames a second and save the clip. |
 

@@ -56,7 +56,7 @@ The `example_workflows` folder has twelve graphs, which ComfyUI's template brows
 - `flux-2-klein-9b-kv-edit-two-references.json`: FLUX.2 klein 9B KV editing with two reference images, the FLUX.2 klein edit graph on the KV model with the stock `Flux KV Cache` node between the model loader and the guider. The first step keeps the keys and values of the references, and the later steps reuse them. It needs a Mac with 24 GB or more.
 - `flux-3-klein-t2i.json`: FLUX.3 klein text to image through the stock `EmptyFlux2LatentImage`. It needs ComfyUI 0.41 or newer.
 - `flux-3-klein-edit-two-references.json`: FLUX.3 klein editing with two reference images through the stock `ReferenceMultiLatent` node. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images. It needs ComfyUI 0.41 or newer.
-- `minimax-h3-t2v.json`: a MiniMax-H3 clip with sound from a text prompt, 5 seconds at 1344x768 in 8 steps, through the stock `MiniMaxH3ImageToVideo`, `ModelSamplingMiniMaxH3` at the `h3` recipe's shifts, 6 and 3, `res_multistep` on the `simple` schedule, and the gmlx video and audio VAE loaders into `CreateVideo` and `SaveVideo`. It needs a Mac with 32 GB or more.
+- `minimax-h3-t2v.json`: a MiniMax-H3 clip with sound from a text prompt, 5 seconds at 1344x768 in 8 steps, through the stock `MiniMaxH3ImageToVideo`, `MiniMaxH3SigmaShift` at the `h3` recipe's shifts, 6 and 3, `euler` on the `simple` schedule, and the gmlx video and audio VAE loaders into `CreateVideo` and `SaveVideo`. It needs a Mac with 32 GB or more.
 
 ### Server address
 
