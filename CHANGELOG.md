@@ -9,8 +9,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `gmlx video` makes clips of up to 15 seconds with sound from a text
-  prompt with MiniMax-H3, as a preview. See [Video generation](docs/video.md)
-  and its [licenses](docs/video.md#licenses).
+  prompt with MiniMax-H3. See [Video generation](docs/video.md) and its
+  [licenses](docs/video.md#licenses).
+- The gmlx ComfyUI nodes run MiniMax-H3 from a text prompt with ComfyUI's
+  own MiniMax-H3 nodes. See [Make a video](docs/comfyui.md#make-a-video).
 - The `fasth3` video recipe runs FastVideo's FastH3, an 8-step MiniMax-H3
   whose steps take about half as long as `h3`'s, on an M5 or newer.
 

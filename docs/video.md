@@ -3,8 +3,8 @@
 gmlx makes short video clips with sound from a text prompt, with the
 MiniMax-H3 model. A clip runs up to 15 seconds at 24 frames a second, and
 the model makes the sound with the picture: speech, music and the noises
-of the scene. Video is a preview in this release and runs from the
-command line only.
+of the scene. Video runs from the command line, and in ComfyUI through
+the [gmlx nodes](comfyui.md#make-a-video).
 
 Video needs a Mac with an M3 chip or newer, 32 GB of memory or more,
 ffmpeg, and about 40 GB of disk for the model's files.
