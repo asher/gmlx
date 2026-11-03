@@ -26,8 +26,9 @@ import pytest
 import host_box
 from helpers import _real_apple_gpu
 
-# The largest MLX peak of these tests, measured on an M5 Max: the batch
-# extend. The floor is twice that, so the rest of a run fits beside it.
+# The largest process footprint of these tests, measured on an M5 Max:
+# the batch extend, whose MLX peak is 13.53 GiB. The floor is twice the
+# footprint, so the rest of a run fits beside it.
 PEAK_GIB = 13.8
 FLOOR_GIB = 2 * PEAK_GIB
 _LOCK = os.path.join(tempfile.gettempdir(), "gmlx-past-int32.lock")
@@ -73,7 +74,7 @@ MARKS = [
                        reason="the stock pad and concatenate defect is on GPU streams only"),
     pytest.mark.skipif(_WS < FLOOR_GIB, reason=(
         f"needs a recommended GPU working set of {FLOOR_GIB:.1f} GiB, twice the "
-        f"{PEAK_GIB} GiB peak of the largest of these tests; this GPU has {_WS:.1f} GiB")),
+        f"{PEAK_GIB} GiB footprint of the largest of these tests; this GPU has {_WS:.1f} GiB")),
     pytest.mark.usefixtures("settled"),
 ]
 

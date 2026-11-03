@@ -115,8 +115,8 @@ print((out[:, 0] != want).sum())  # 0
   them over the start of x. `test_pad_takes_a_slice_update_only_past_the_limit` in
   `tests/test_mlx_guards.py` holds the routing on small arrays in every run. The past-limit tests
   are nightly. `tests/past_int32.py` runs them one at a time, on a real Apple GPU with a recommended
-  working set of at least 27.6 GiB, twice the largest test's peak, so `gate.py run --full` on such
-  a Mac covers them.
+  working set of at least 27.6 GiB, twice the largest test's footprint, so `gate.py run --full` on
+  such a Mac covers them.
 
 ## `mx.concatenate` misplaces an input past 2^31 output elements on the GPU
 
