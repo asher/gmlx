@@ -305,6 +305,7 @@ def drop_dit(served: ServedVideo) -> None:
 
     import mlx.core as mx
 
+    from gmlx.image import api
     from gmlx.image.lora import install
 
     pipe = served.pipe
@@ -315,6 +316,7 @@ def drop_dit(served: ServedVideo) -> None:
     pipe.tables.clear()
     for tid in [k for k, v in pipe.patch_tables.items() if v["entries"]]:
         del pipe.patch_tables[tid]
+    pipe.default_table = api.EMPTY_TABLE
     served.adapters = []
     gc.collect()
     mx.clear_cache()
@@ -322,7 +324,9 @@ def drop_dit(served: ServedVideo) -> None:
 
 def ensure_dit(served: ServedVideo) -> None:
     """Load the DiT again after an encode, its leaves wrapped for the
-    patch tables, and the configured adapters with it."""
+    patch tables, and the configured adapters with it. An adapter that
+    does not load again, as from a file moved since, lets the DiT go
+    again before it raises, so the next step loads both."""
     pipe = served.pipe
     if pipe.dit is not None:
         return
@@ -331,8 +335,12 @@ def ensure_dit(served: ServedVideo) -> None:
 
     pipe.dit, _ = load_dit(str(served.spec.path), variant=served.spec.variant,
                            log=_log_line)
-    install.rewrap(pipe)
-    _load_adapters(served)
+    try:
+        install.rewrap(pipe)
+        _load_adapters(served)
+    except BaseException:
+        drop_dit(served)
+        raise
 
 
 def encode(served: ServedVideo, text: str, images: list) -> np.ndarray:

@@ -509,6 +509,53 @@ def test_an_encode_loads_the_encoder_without_the_dit_or_any_lora(
     assert all(_rel(a, b) < 1e-6 for a, b in zip(again, sent))
 
 
+def _stub_encode(monkeypatch, weights, dit=None):
+    """The H3 encoder stood in, and the DiT loaded after an encode as the
+    tiny DiT of ``weights``, or ``dit(weights)``."""
+    from gmlx.video import encoder as video_encoder
+    from gmlx.video import loader
+
+    def load_encoder(fam, path, log=None):
+        feats = np.zeros((4, TINY["text_dim"]), np.float32)
+        return SimpleNamespace(encode=lambda text: SimpleNamespace(
+            features=feats), release=lambda: None)
+
+    monkeypatch.setattr(video_encoder, "load_encoder", load_encoder)
+    monkeypatch.setattr(loader, "load_dit", lambda *a, **k: (
+        (dit or _tiny_dit)(weights), None))
+
+
+def test_a_lora_that_does_not_load_again_after_an_encode_leaves_no_dit(
+        tmp_path, monkeypatch, request):
+    """The configured LoRA loads again with the DiT after each encode. A
+    file moved since fails that encode and leaves the entry with no DiT
+    and no table of the LoRA, so the next step loads both again once the
+    file is back."""
+    from gmlx.image import api
+
+    path = _lora_file(tmp_path)
+    pipe, weights = _own_pipe()
+    served = _served(pipe)
+    served.spec.adapters = ((str(path), 1.0),)
+    _on_worker(vs._load_adapters, served)
+    _mount(_Host(served), request)
+    _stub_encode(monkeypatch, weights)
+    video, audio, feats = _clip()
+    c = _client()
+    row = {"cond": c.put(feats)}
+    kw = dict(shifts=SHIFTS, audio_scale=SCALE)
+    before = c.av_step("h3", None, video, audio, 600.0, row, **kw)
+    moved = path.rename(tmp_path / "moved.safetensors")
+    with pytest.raises(StepsClientError) as e:
+        c.encode("h3", "a cat")
+    assert e.value.status == 400
+    assert str(path) in e.value.body["error"]
+    assert pipe.dit is None and pipe.default_table == api.EMPTY_TABLE
+    moved.rename(path)
+    after = c.av_step("h3", None, video, audio, 600.0, row, **kw)
+    assert all(_rel(a, b) < 1e-6 for a, b in zip(after, before))
+
+
 def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
                                                             monkeypatch):
     """The pool admits an entry with each cache at the share of its bound
