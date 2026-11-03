@@ -17,6 +17,7 @@ from __future__ import annotations
 import fcntl
 import gc
 import os
+import sys
 import tempfile
 
 import mlx.core as mx
@@ -53,6 +54,11 @@ def settled():
             mx.set_cache_limit(0)
             mx.clear_cache()
             yield
+            # A failure's traceback holds the test's arrays until the
+            # worker's next test, past the lock.
+            for name in ("last_type", "last_value", "last_traceback", "last_exc"):
+                if hasattr(sys, name):
+                    delattr(sys, name)
             gc.collect()
             mx.synchronize()
             mx.clear_cache()
