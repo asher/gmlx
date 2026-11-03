@@ -63,7 +63,7 @@ MAX_ROWS = 16
 MAX_TENSOR_BYTES = 1 << 30
 MAX_ADAPTER_BYTES = 1 << 30
 FEATURES = ("prefix_cache", "noise_mask", "rgba_vae", "tiled_vae",
-            "ref_cache", "skip_blocks")
+            "ref_cache", "skip_blocks", "av_step")
 
 
 @dataclass(frozen=True)
@@ -131,7 +131,18 @@ COMFY = {
                    "latent": {"channels": 128, "stride": 16, "patch": 1},
                    "vae": {"channels_out": 3, "stride": 16,
                            "space": "model"}},
+    # MiniMax-H3 is a video model with a sound track: ComfyUI's
+    # MiniMaxH3 samples a nested latent of video and audio, which an AV
+    # step carries. Both VAE routes carry the DiT's model space.
+    "h3": {"model_class": "MiniMaxH3", "image_model": "minimax_h3",
+           "latent": {"channels": 24, "stride": 16, "patch": 2,
+                      "temporal": 4},
+           "vae": {"channels_out": 3, "stride": 16, "space": "model"},
+           "audio": {"channels": 32, "stereo": 2, "sample_rate": 32000,
+                     "latents_per_second": 40}},
 }
+# The families whose step is an AV step: a video and an audio stream.
+AV_FAMILIES = frozenset({"h3"})
 
 
 def _model_space(family: str) -> bool:
@@ -459,18 +470,57 @@ def shed_states(pipe, conds: set) -> None:
 
 # Family facts and payloads.
 
+def is_video(spec) -> bool:
+    """Whether a resolved entry is a video model's."""
+    return hasattr(spec, "audio_vae")
+
+
 def family_of(spec) -> tuple:
-    """``(family, variant)`` of a configured image model, from its
-    header."""
+    """``(family, variant)`` of a configured image or video model, from
+    its header."""
+    if is_video(spec):
+        from gmlx.video.loader import identify_dit as identify_video
+
+        vid = identify_video(spec.path, variant=getattr(spec, "variant", None))
+        return vid.family, vid.variant
     from gmlx.image.loader import identify_dit
 
     ident = identify_dit(spec.path, variant=getattr(spec, "variant", None))
     return ident.family, ident.variant
 
 
+def video_status(spec, resident: bool, plan=None) -> dict:
+    """The status of a video model: its ComfyUI facts, the entry's own
+    steps and shifts, and its memory."""
+    from gmlx.video.memfit import file_bytes
+
+    fam, variant = family_of(spec)
+    facts = COMFY[fam.name]
+    mem = {"dit_bytes": file_bytes(spec.path),
+           "encoder_bytes": file_bytes(spec.encoder),
+           "vae_bytes": file_bytes(spec.vae),
+           "audio_vae_bytes": file_bytes(spec.audio_vae)}
+    sampling = None
+    if plan is not None:
+        mem["resident_bytes"] = plan.footprint if resident else 0
+        sampling = {"steps": plan.steps, "cfg": 1.0,
+                    "shift": plan.shifts["video"],
+                    "audio_shift": plan.shifts["audio"], "sigmas": None,
+                    "schedule": None, "neg_skip": []}
+    return {"model": spec.id, "family": fam.name, "variant": variant,
+            "resident": resident,
+            "comfy": {"model_class": facts["model_class"],
+                      "image_model": facts["image_model"]},
+            "latent": dict(facts["latent"]), "vae": dict(facts["vae"]),
+            "audio": dict(facts["audio"]), "edit_capable": False,
+            "sampling": sampling, "compute_dtype": "bf16", "memory": mem}
+
+
 def status(spec, resident: bool, plan=None) -> dict:
     from gmlx.image.dtypes import image_activation
 
+    if is_video(spec):
+        return video_status(spec, resident, plan)
     fam, variant = family_of(spec)
     facts = COMFY[fam.name]
     from gmlx.image.api import _header_bytes
@@ -594,6 +644,7 @@ def _inline_names(family: str, names: list) -> list:
 def capabilities() -> dict:
     from gmlx import __version__
     from gmlx.image.registry import families
+    from gmlx.video.registry import families as video_families
 
     from .image_wire import CONTRACT
 
@@ -602,7 +653,8 @@ def capabilities() -> dict:
             "gmlx_version": __version__,
             "wire": {"container": "safetensors",
                      "dtypes": ["f32", "f16", "bf16", "u8"]},
-            "families": sorted(f.name for f in families()
+            "families": sorted(f.name for f in (*families(),
+                                                *video_families())
                                if f.name in COMFY),
             "conventions": sorted(CONVENTIONS),
             "patch_kinds": ["lora"],

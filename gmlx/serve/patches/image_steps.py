@@ -40,20 +40,25 @@ def _app():
 
 
 class ServeHost:
-    """Where the step routes find their image models: the configured
-    image models and the residency pool of the server."""
+    """Where the step routes find their models: the configured image and
+    video models and the residency pool of the server."""
 
     log_requests = True
 
     def resolve(self, model):
-        """``(path, spec)`` of an image model id or path."""
+        """``(path, spec)`` of an image or video model id, or an image
+        model path."""
+        if serving.is_video_model(model):
+            return serving.resolve_video_request(model)
         return serving.resolve_image_request(model)
 
     def acquire(self, model):
         """A hold of the loaded model; ``hold._entry.pipeline`` is its
-        ServedImage, and ``hold.release()`` lets it go."""
+        ServedImage or ServedVideo, and ``hold.release()`` lets it go."""
         from .. import residency
 
+        if serving.is_video_model(model):
+            return residency.acquire_video_model(model)
         return residency.acquire_image_model(model)
 
     def revise(self, model, text, requested, has_refs):
@@ -64,7 +69,13 @@ class ServeHost:
         return revise(model, text, requested, has_refs, resolve=self.resolve)
 
     def models(self) -> dict:
-        return serving.image_models()
+        out = serving.image_models()
+        for vid in serving.video_model_ids():
+            try:
+                out[vid] = serving.resolve_video_request(vid)[1]
+            except (serving.ModelNotFound, serving.ModelFileMissing):
+                continue
+        return out
 
     def default_model(self) -> str | None:
         """The id an image request with no model takes, or None."""
@@ -78,7 +89,12 @@ class ServeHost:
 
     def plan(self, spec):
         from ..image_service import entry_plan
+        from ..image_steps import is_video
 
+        if is_video(spec):
+            from ..video_service import entry_plan as video_plan
+
+            return video_plan(spec)
         return entry_plan(spec)
 
     def budget(self, hold):
@@ -258,6 +274,31 @@ async def _on_worker(fn, *args):
 
 def _served(hold):
     return hold._entry.pipeline
+
+
+def _video(served) -> bool:
+    from ..video_service import ServedVideo
+
+    return isinstance(served, ServedVideo)
+
+
+def _names_video(model) -> bool:
+    """Whether a model field names a configured video model."""
+    from ..image_steps import is_video
+
+    try:
+        return is_video(SETTINGS.host.resolve(model)[1])
+    except Exception:  # noqa: BLE001 - the acquire refuses what fails here
+        return False
+
+
+def _image_only(served, what: str) -> None:
+    """Refuse a route of the image families on a video model."""
+    from ..image_steps import StepError
+
+    if _video(served):
+        raise StepError(400, f"{served.spec.id!r} is a video model, and "
+                        f"{what} takes an image model")
 
 
 def _check_size(hold, width: int, height: int, *, what: str,
@@ -506,6 +547,8 @@ async def step(request: Request):
     t0 = time.perf_counter()
     tensors, fields = await _wire(request, MAX_BODY_BYTES)
     run = STATE.get_run(fields.get("run"))
+    if "video" in tensors or "audio" in tensors:
+        return await _av_step(t0, tensors, fields, run)
     x_w, t_w = tensors.get("x"), tensors.get("timestep")
     if x_w is None or t_w is None:
         raise StepError(400, "a step body holds x and timestep")
@@ -525,6 +568,7 @@ async def step(request: Request):
     hold = await _acquire(model)
     try:
         served = _served(hold)
+        _image_only(served, "a step on x")
         w_px, h_px = _px(served, "latent", *x_w.shape[2:])
         guided = 2.0 if len(rows) > 1 else 1.0
         budget = _check_size(hold, w_px, h_px, what="a step", cfg=guided,
@@ -651,11 +695,177 @@ async def step(request: Request):
         hold.release()
 
 
+def _number(fields: dict, name: str, default=None) -> float:
+    import math
+
+    from ..image_steps import StepError
+
+    v = fields.get(name, default)
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or \
+            not math.isfinite(v) or v <= 0:
+        raise StepError(400, f"{name} is a positive number")
+    return float(v)
+
+
+def _clip_of(fam, vshape, ashape=None) -> tuple:
+    """(frames, width, height) of the clip whose latents are video
+    ``vshape`` and audio ``ashape``, or the refusal of latents that are no
+    clip gmlx runs: 17 k + 5 frames on a canvas in multiples of 32."""
+    from ..image_steps import COMFY, StepError
+
+    stride = int(COMFY[fam.name]["latent"]["stride"])
+    t, h, w = (int(d) for d in vshape[2:])
+    frames = (t - 2) // 5 * 17 + 5 if t >= 2 else 0
+    width, height = w * stride, h * stride
+    try:
+        want = fam.latent_shapes(frames, width, height)
+    except ValueError:
+        want = None
+    got = (tuple(vshape), tuple(ashape) if ashape is not None else None)
+    if want is None or got != (want[0], want[1] if ashape is not None
+                               else None):
+        shown = f"video {list(vshape)}" + (
+            f" and audio {list(ashape)}" if ashape is not None else "")
+        raise StepError(400, f"latents {shown} are no {fam.title} clip gmlx "
+                        "runs: a clip is 17 k + 5 frames on a canvas in "
+                        "multiples of 32")
+    return frames, width, height
+
+
+def _check_clip(hold, served, *, frames: int, width: int, height: int,
+                text: int, phase: str, what: str) -> None:
+    """Refuse a step or a video decode of a clip that does not fit beside
+    the models loaded. The DiT and its LoRAs stay loaded through both, so
+    each is priced as the entry is: the DiT, the LoRAs and the phase's
+    work."""
+    from ..image_steps import StepError
+    from ..video_service import plan_clip
+
+    budget_fn = getattr(SETTINGS.host, "budget", None)
+    budget = budget_fn(hold) if budget_fn is not None else None
+    if budget is None:
+        return
+    plan = plan_clip(served.plan, frames=frames, width=width, height=height,
+                     text=text, budget=budget, decode=phase != "denoise")
+    held = plan.terms["denoise"]["dit"] + plan.terms["denoise"]["lora"]
+    work = (plan.terms["denoise"]["step"] if phase == "denoise"
+            else plan.phases[phase])
+    if held + work > budget:
+        raise StepError(400, f"{what} of {width}x{height} at {frames} frames "
+                        "does not fit in memory beside the models now "
+                        "loaded")
+
+
+async def _av_step(t0, tensors, fields, run):
+    """A step of a model with a video and an audio stream (``AV_FAMILIES``):
+    the latents as ComfyUI's sampler carries them, one row."""
+    import numpy as np
+
+    from ..image_steps import (AV_FAMILIES, STATE, Missing, StepError,
+                               _cond_key, _f32, _host, row_hashes, step_pacer)
+    from .. import video_service as vs
+
+    v_w, a_w = tensors.get("video"), tensors.get("audio")
+    t_w = tensors.get("timestep")
+    if v_w is None or a_w is None or t_w is None:
+        raise StepError(400, "an AV step body holds video, audio and timestep")
+    if len(v_w.shape) != 5 or len(a_w.shape) != 4 or v_w.shape[0] != 1 \
+            or a_w.shape[0] != 1:
+        raise StepError(400, f"an AV step takes one clip, video (1, C, T, h, "
+                        f"w) and audio (1, C, 2, T), not {list(v_w.shape)} "
+                        f"and {list(a_w.shape)}")
+    if tuple(t_w.shape) not in ((1,), ()):
+        raise StepError(400, "an AV step's timestep holds one value")
+    rows = fields.get("rows")
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise StepError(400, "an AV step names one row")
+    hashes = row_hashes(rows[0])
+    if len(hashes) != 1:
+        raise StepError(400, "an AV step's row holds its cond alone")
+    shifts = fields.get("shifts")
+    if not isinstance(shifts, dict):
+        raise StepError(400, "an AV step names its shifts, video and audio")
+    shifts = {k: _number(shifts, k) for k in ("video", "audio")}
+    scale = _number(fields, "audio_scale", 1.0)
+    missing = [h for h in hashes if h not in STATE.tensors]
+    model = fields.get("model") or (run.model if run else None)
+    hold = await _acquire(model)
+    try:
+        served = _served(hold)
+        if not _video(served) or served.plan.family not in AV_FAMILIES:
+            raise StepError(400, f"{served.spec.id!r} is no video model; "
+                            "its step takes x")
+        frames, width, height = _clip_of(served.pipe.video_family,
+                                         v_w.shape, a_w.shape)
+        table = None
+        try:
+            table = _table(served, fields.get("patch_table"))
+        except Missing as m:
+            missing += m.extra["missing"]
+        if missing:
+            raise Missing(missing)
+        held = STATE.tensors.get(hashes[0])
+        if held is None:
+            raise Missing(hashes)
+        n_text = int(held.shape[-2])
+        _check_clip(hold, served, frames=frames, width=width, height=height,
+                    text=n_text, phase="denoise", what="a step")
+        ts = float(np.asarray(t_w.numpy(), np.float32).reshape(-1)[0])
+        gen = run.gen if run is not None else 0
+
+        def work():
+            import mlx.core as mx
+
+            from gmlx.image.pacing import paced
+
+            from ..image_steps import StepInterrupted
+
+            vs.ensure_dit(served)
+            feats = _f32(held)
+            if feats.ndim == 2:
+                feats = feats[None]
+            dim = int(served.pipe.dit.cfg.text_dim)
+            if feats.ndim != 3 or feats.shape[0] != 1 or \
+                    feats.shape[1] == 0 or feats.shape[2] != dim:
+                raise StepError(400, f"a row's cond is (1, L, {dim}) encoder "
+                                f"features, not {tuple(feats.shape)}")
+            pace = step_pacer(run, gen)
+
+            def pacer(arrays):
+                pace(arrays)
+                mx.eval(*arrays)
+
+            t1 = time.perf_counter()
+            with paced(pacer):
+                vv, va, hit = vs.av_step(
+                    served, v_w.mx(), a_w.mx(), ts, shifts, scale, feats,
+                    _cond_key(hashes[0]), table)
+                mx.eval(vv, va)
+            if run is not None and (run.gen != gen or run.ended):
+                raise StepInterrupted()
+            return _host(vv), _host(va), time.perf_counter() - t1, hit
+
+        vv, va, fwd_s, hit = await _on_worker(work)
+        if run is not None:
+            run.steps += 1
+            run.rows += 1
+            run.forward_s += fwd_s
+            run.cache_hits += bool(hit)
+            run.last = STATE.clock()
+        server_ms = (time.perf_counter() - t0) * 1000
+        return _container({"video": vv, "audio": va}, None, headers={
+            "X-Gmlx-Forward-Ms": f"{fwd_s * 1000:.2f}",
+            "X-Gmlx-Server-Ms": f"{server_ms:.2f}",
+            "X-Gmlx-Prefix-Cache": "hit" if hit else "miss"})
+    finally:
+        hold.release()
+
+
 async def encode(request: Request):
     from ..image_service import ImageRequestError, decode_image
-    from ..image_steps import STATE, StepError
+    from ..image_steps import StepError
     from ..image_steps import encode as do_encode
-    from ..image_wire import CONTENT_TYPE, read, write
+    from ..image_wire import CONTENT_TYPE
 
     ctype = request.headers.get("content-type", "").split(";")[0].strip()
     images = []
@@ -685,6 +895,9 @@ async def encode(request: Request):
         raise StepError(400, "prompt_upsampling is true or false")
     revise = getattr(SETTINGS.host, "revise", None)
     revised = None
+    if _names_video(fields.get("model")):
+        # A video family has no upsampler.
+        revise = None
     if revise is not None:
         try:
             revised = await asyncio.to_thread(
@@ -694,6 +907,12 @@ async def encode(request: Request):
     hold = await _acquire(fields.get("model"))
     try:
         served = _served(hold)
+        if _video(served):
+            from ..video_service import encode as video_encode
+
+            feats = await _on_worker(video_encode, served, text, images)
+            got = {"cond": feats, "refs": [], "image_slots": []}
+            return _held_encode(got, None)
         borrow = None
         if served.spec.encoder_model is not None:
             from .images import _borrow_for
@@ -717,6 +936,14 @@ async def encode(request: Request):
                 chat_hold.release()
     finally:
         hold.release()
+    return _held_encode(got, revised)
+
+
+def _held_encode(got: dict, revised):
+    """The encode's answer, with each tensor held by its hash."""
+    from ..image_steps import STATE
+    from ..image_wire import read, write
+
     out = {"cond": got["cond"]}
     if "typed" in got:
         out["cond_typed"] = got["typed"]
@@ -755,6 +982,7 @@ async def vae_decode(request: Request):
         served = _served(hold)
         _check_size(hold, *_px(served, "vae", *lat.shape[2:]),
                     what="a VAE decode", phase="decode")
+        _image_only(served, "vae/decode")
         img = await _on_worker(do_decode, served, lat,
                                bool(fields.get("alpha")))
     finally:
@@ -776,12 +1004,66 @@ async def vae_encode(request: Request):
     hold = await _acquire(fields.get("model"))
     try:
         served = _served(hold)
+        _image_only(served, "vae/encode")
         _check_size(hold, int(img.shape[2]), int(img.shape[1]),
                     what="a VAE encode", init=True, phase="init")
         lat = await _on_worker(do_encode, served, img)
     finally:
         hold.release()
     return _container({"latents": lat})
+
+
+async def _video_decode_hold(request: Request, name: str, ndim: int,
+                             shape: str):
+    from ..image_steps import StepError
+
+    tensors, fields = await _wire(request, MAX_BODY_BYTES)
+    lat = tensors.get("latents")
+    if lat is None or len(lat.shape) != ndim or lat.shape[0] != 1:
+        raise StepError(400, f"{name} takes the latents of one clip {shape}")
+    hold = await _acquire(fields.get("model"))
+    served = _served(hold)
+    if not _video(served):
+        hold.release()
+        raise StepError(400, f"{served.spec.id!r} is an image model; {name} "
+                        "takes a video model")
+    return lat, hold, served
+
+
+async def video_decode(request: Request):
+    """Model-space video latents (1, 24, T, h, w) to frames (F, H, W, 3)
+    f16 in [0, 1]."""
+    from ..video_service import decode_video
+
+    lat, hold, served = await _video_decode_hold(
+        request, "vae/video/decode", 5, "(1, C, T, h, w)")
+    try:
+        frames, width, height = _clip_of(served.pipe.video_family, lat.shape)
+        _check_clip(hold, served, frames=frames, width=width, height=height,
+                    text=1, phase="decode", what="a video decode")
+        img = await _on_worker(lambda: decode_video(served, lat.mx()))
+    finally:
+        hold.release()
+    return _container({"frames": img})
+
+
+async def audio_decode(request: Request):
+    """Model-space audio latents (1, 32, 2, T) to the waveform
+    (1, 2, samples) f32."""
+    from ..image_steps import COMFY, StepError
+    from ..video_service import decode_audio
+
+    lat, hold, served = await _video_decode_hold(
+        request, "vae/audio/decode", 4, "(1, C, 2, T)")
+    try:
+        row = COMFY[served.pipe.video_family.name]["audio"]
+        if tuple(lat.shape[1:3]) != (row["channels"], row["stereo"]):
+            raise StepError(400, f"audio latents are (1, {row['channels']}, "
+                            f"{row['stereo']}, T), not {list(lat.shape)}")
+        img = await _on_worker(lambda: decode_audio(served, lat.mx()))
+    finally:
+        hold.release()
+    return _container({"waveform": img})
 
 
 async def run_begin(request: Request):
@@ -832,6 +1114,8 @@ ROUTES = (
     ("step", "POST", step, True),
     ("vae/decode", "POST", vae_decode, True),
     ("vae/encode", "POST", vae_encode, True),
+    ("vae/video/decode", "POST", video_decode, True),
+    ("vae/audio/decode", "POST", audio_decode, True),
     ("runs/begin", "POST", run_begin, True),
     ("runs/{run}/end", "POST", run_end, True),
     ("interrupt", "POST", interrupt, True),
