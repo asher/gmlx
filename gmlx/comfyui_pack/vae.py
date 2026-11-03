@@ -146,7 +146,8 @@ class GmlxVideoVAE(_ServerVAE):
         return frames.float()[None]
 
     def encode(self, pixel_samples):
-        _no_encode("video", "first frame, last frame, guide image or reference image")
+        _no_encode("video", "first frame, last frame, guide image or guide clip, reference "
+                   "image or reference video")
 
 
 class GmlxAudioVAE(_ServerVAE):

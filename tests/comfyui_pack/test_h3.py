@@ -39,6 +39,9 @@ HID, FID, ZID = "h3", "fasth3", "z-image-turbo"
 # The 5-frame 64x64 clip, the smallest the latent node makes.
 SIZE, FRAMES = 64, 5
 TEXT_ONLY = "the gmlx nodes run MiniMax-H3 from the text prompt alone"
+VIDEO_VAE = ("gmlx: a gmlx video VAE decodes and does not encode, so it takes no first frame, "
+             "last frame, guide image or guide clip, reference image or reference video; "
+             f"{TEXT_ONLY}")
 
 
 def _out(node_output):
@@ -528,9 +531,15 @@ class Refusals(Base):
         pos, _ = self.cond()
         with self.assertRaises(C.GmlxRefusal) as e:
             H.MiniMaxH3AddGuide.execute(pos, self.latent(), 0, vae=video, image=image)
-        self.assertEqual(str(e.exception), "gmlx: a gmlx video VAE decodes and does not "
-                         "encode, so it takes no first frame, last frame, guide image or "
-                         f"reference image; {TEXT_ONLY}")
+        self.assertEqual(str(e.exception), VIDEO_VAE)
+        frames = torch.rand(FRAMES, SIZE, SIZE, 3)
+        with self.assertRaises(C.GmlxRefusal) as e:
+            H.MiniMaxH3AddGuide.execute(pos, self.latent(), 0, vae=video, image=frames)
+        self.assertEqual(str(e.exception), VIDEO_VAE)
+        with self.assertRaises(C.GmlxRefusal) as e:
+            H.MiniMaxH3ReferenceToVideo.execute(clip, "a dog", SIZE, SIZE, FRAMES, vae=video,
+                                                ref_videos={"ref_video_1": frames})
+        self.assertEqual(str(e.exception), VIDEO_VAE)
         track = {"waveform": torch.zeros(1, 2, 3200), "sample_rate": 32000}
         with self.assertRaises(C.GmlxRefusal) as e:
             H.MiniMaxH3AddGuide.execute(pos, self.latent(), 0, audio_vae=audio, audio=track)
