@@ -432,6 +432,34 @@ def _lora_file(tmp_path, seed: int = 5, name: str = "lora.safetensors"):
     return path
 
 
+def test_a_step_counts_the_entrys_own_lora_once(tmp_path, request):
+    """The plan prices the entry's own LoRA, and its pairs are what the
+    entry holds of it: a step on a budget that fits the DiT, the LoRA,
+    the caches and the step runs."""
+    import dataclasses
+
+    path = _lora_file(tmp_path)
+    pipe, _w = _own_pipe()
+    served = _served(pipe)
+    served.spec.adapters = ((str(path), 1.0),)
+    served.plan = dataclasses.replace(served.plan,
+                                      loras=(path.stat().st_size,),
+                                      lora_dtypes=("BF16",))
+    _on_worker(vs._load_adapters, served)
+    host = _mount(_Host(served), request)
+    video, audio, feats = _clip()
+    c = _client()
+    row = {"cond": c.put(feats)}
+    plan = vs.plan_clip(served.plan, frames=FRAMES, width=SIZE, height=SIZE,
+                        text=6, decode=False, budget=1)
+    lora = plan.terms["denoise"]["lora"]
+    adapters, caches = vs.held_bytes(served)
+    assert lora == path.stat().st_size and lora // 2 < adapters <= lora
+    host.budget_bytes = lora + caches + plan.terms["denoise"]["step"] + 4096
+    c.av_step("h3", None, video, audio, 600.0, row, shifts=SHIFTS,
+              audio_scale=SCALE)
+
+
 def test_a_runs_first_step_counts_the_clips_decodes(host):
     """A clip whose decodes do not fit beside the models loaded stops at
     its run's first step, not after its last. The steps after it count
@@ -496,9 +524,15 @@ def test_an_encode_loads_the_encoder_without_the_dit_or_any_lora(
     write_keys(path, _comfy_keys(_adapter(5)))
     pipe, weights = _own_pipe()
     served = _served(pipe)
-    served.spec.adapters = ((str(path), 1.0),)
+    served.spec.adapters = ((str(path), 0.75),)
     _on_worker(vs._load_adapters, served)
     _mount(_Host(served), request)
+
+    def strengths():
+        entries = pipe.patch_tables[pipe.default_table]["entries"]
+        return {st for _path, _band, patches in entries for _k, st in patches}
+
+    assert strengths() == {0.75}
     video, audio, feats = _clip()
     c = _client()
     entries = [{"key": f"diffusion_model.{target}.weight", "band": None,
@@ -527,6 +561,7 @@ def test_an_encode_loads_the_encoder_without_the_dit_or_any_lora(
                         lambda *a, **k: (_tiny_dit(weights), None))
     c.encode("h3", "a cat")
     assert seen == {"dit": None, "pairs": 0}
+    assert strengths() == {0.75}
     after = c.av_step("h3", None, video, audio, 600.0, row, **kw)
     assert all(_rel(a, b) < 1e-6 for a, b in zip(after, before))
     with pytest.raises(MissingTensors) as e:
@@ -676,17 +711,29 @@ def _latents(route: str):
 @pytest.mark.parametrize("route", ["video", "audio"])
 def test_a_decode_that_does_not_fit_beside_the_models_is_refused(host, vaes,
                                                                  route):
-    """A clip's decode loads its VAE beside the DiT, which stays."""
-    host.served.spec.vae = vaes["vae"]
-    host.served.spec.audio_vae = vaes["audio_vae"]
+    """A clip's decode loads its VAE beside the DiT, which stays. Each is
+    priced at the latents it was sent, a clip other than the entry's
+    default: the audio decode at their length, not the entry's."""
+    served = host.served
+    served.spec.vae = vaes["vae"]
+    served.spec.audio_vae = vaes["audio_vae"]
     c = _client()
     lat = _latents(route)
-    host.budget_bytes = 1 << 20
+    if route == "video":
+        clip = dict(frames=22, width=32, height=32)
+    else:
+        assert lat.shape[3] != hf.latent_shapes(FRAMES, SIZE, SIZE)[1][3]
+        clip = dict(frames=FRAMES, width=SIZE, height=SIZE,
+                    audio=int(lat.shape[3]))
+    phase = "decode" if route == "video" else "audio"
+    work = vs.plan_clip(served.plan, text=1, budget=1, **clip).phases[phase]
+    adapters, caches = vs.held_bytes(served)
+    host.budget_bytes = adapters + caches + work - 1
     with pytest.raises(StepsClientError) as e:
         c.container(f"vae/{route}/decode", {"latents": lat}, {"model": "h3"})
     assert e.value.status == 400
     assert "does not fit in memory" in e.value.body["error"]
-    host.budget_bytes = 64 << 30
+    host.budget_bytes += 1
     c.container(f"vae/{route}/decode", {"latents": lat}, {"model": "h3"})
 
 
