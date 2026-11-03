@@ -809,10 +809,12 @@ _H3_FILES = {"dit": 11_420_663_904, "enc": 19_762_151_200,
              "lora": 1_956_193_000, "fdit": 13_613_532_704}
 
 
-def _h3_entry(monkeypatch, variant, size, seconds, budget=120 * GB):
+def _h3_entry(monkeypatch, variant, size, seconds, budget=120 * GB,
+              extra=None):
     """An h3 recipe's entry at a default clip, from its published file
-    sizes, on a working budget of ``budget`` bytes. FastH3 runs as on an
-    M5 with an mlx-kquant that has its sparse attention."""
+    sizes, on a working budget of ``budget`` bytes, with a bf16 LoRA file
+    of ``extra`` bytes beside the recipe's. FastH3 runs as on an M5 with
+    an mlx-kquant that has its sparse attention."""
     from gmlx.serve import capacity
     from gmlx.video import loader, memfit, pipeline, registry
     from gmlx.video.registry import get_family
@@ -825,14 +827,16 @@ def _h3_entry(monkeypatch, variant, size, seconds, budget=120 * GB):
                             config={"text_dim": 5120}))
     if fast:
         monkeypatch.setattr(registry, "run_refusal", lambda fam, v: None)
-    monkeypatch.setattr(memfit, "file_bytes", lambda p: _H3_FILES[p])
+    files = {**_H3_FILES, "extra": extra}
+    monkeypatch.setattr(memfit, "file_bytes", lambda p: files[p])
     monkeypatch.setattr(memfit, "lora_dtype", lambda p: "BF16")
     monkeypatch.setattr(pipeline, "vet_adapter", lambda *a, **k: None)
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
     return types.SimpleNamespace(
         id=variant, path="fdit" if fast else "dit", variant=None,
         encoder="enc", vae="vae", audio_vae="audio",
-        adapters=(("lora", 1.0),) if variant == "h3" else (),
+        adapters=((("lora", 1.0),) if variant == "h3" else ())
+        + ((("extra", 1.0),) if extra else ()),
         defaults={"size": size, "seconds": seconds})
 
 
@@ -966,6 +970,27 @@ def test_overcommit_admits_a_video_entry_over_its_budget_at_full_caches(
     budget = {"cond": bare + _COND, "clip": bare}[under] - 1
     got = vs.entry_plan(_h3_entry(monkeypatch, "h3", "768x768", 5, budget))
     assert (got.cache_share, got.footprint) == (1.0, full.footprint)
+
+
+@pytest.mark.parametrize("variant, extra, fits", [
+    ("h3-base", 3 * GB, True), ("h3", 10**6, False)])
+def test_a_32_gb_server_entry_has_the_lora_room_the_video_page_gives(
+        monkeypatch, variant, extra, fits):
+    """docs/video.md: on a 32 GB Mac an entry whose default clip is
+    768x768 for 5 s has room for a bf16 LoRA file of up to 3 GB beside
+    h3-base, and none beside h3, whose own LoRA it stacks on."""
+    from gmlx.serve import capacity
+    from gmlx.serve import video_service as vs
+    from gmlx.video import memfit
+
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    spec = _h3_entry(monkeypatch, variant, "768x768", 5,
+                     capacity.ram_budget_bytes(32 << 30), extra)
+    if fits:
+        assert vs.entry_plan(spec).footprint
+    else:
+        with pytest.raises(memfit.VideoMemoryError):
+            vs.entry_plan(spec)
 
 
 def test_an_image_route_names_a_video_id_as_no_image_model(request):

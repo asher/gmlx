@@ -351,6 +351,23 @@ def test_on_32_gb_the_default_clip_fits_and_a_prompt_can_be_too_long(
     assert "Try a shorter prompt." in msg
 
 
+@pytest.mark.parametrize("own, extra", [(0, 5 * 10**9), (1, 800 * 10**6)])
+def test_on_32_gb_a_768x768_clip_has_the_lora_room_the_video_page_gives(
+        no_overcommit, own, extra):
+    """docs/video.md: on a 32 GB Mac a 768x768 clip of 5 s has room for a
+    bf16 LoRA file of up to 5 GB beside h3-base, and up to 800 MB beside
+    h3 on its recipe's LoRA."""
+    rows, audio = memfit.clip_rows(hf.FAMILY, frames=124, width=768,
+                                   height=768, text=25)
+    loras = [FILES["lora"]] * own + [extra]
+    assert memfit.plan_memory(
+        "h3", dit=FILES["dit"], encoder=FILES["encoder"], vae=FILES["vae"],
+        audio_vae=FILES["audio_vae"], loras=loras,
+        lora_dtypes=["BF16"] * len(loras), rows=rows, text=25,
+        audio_latents=audio, pixels=768 * 768,
+        budget=capacity.ram_budget_bytes(32 * GiB)).fits
+
+
 def _fasth3(w, h, f, budget):
     """A FastH3 plan on its measured files, with the cells' prompt."""
     rows, audio = memfit.clip_rows(hf.FAMILY, frames=f, width=w, height=h,
