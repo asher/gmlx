@@ -188,11 +188,13 @@ def _size_hint(frames: int, width: int, height: int, plan_at,
     """What a clip of ``frames`` at ``width`` x ``height`` refused for its
     size runs instead, at no size wider or taller than that: the first of
     ``HINT_SIZES`` whose plan fits at its length, else the longest clip
-    that fits at the last one or at the clip's own size, else, when the
-    adapters leave even the smallest clip over the budget, their memory
-    and fewer adapters, or ``BASE_RECIPE`` when ``base``, else None.
-    ``plan_at(frames, width, height)`` is the run's memory plan at that
-    clip."""
+    that fits at the last one or at the clip's own size. When none does
+    and the smallest clip is over the budget too: with no adapters it
+    fits, so the adapters' memory and fewer of them, or ``BASE_RECIPE``
+    when ``base``; with none it is over too, so the DiT file's memory and
+    a smaller quant. Else None. ``plan_at(frames, width, height,
+    loras=None)`` is the run's memory plan at that clip, with ``loras``
+    in place of the run's adapters when given."""
     hf = _family()
     clip = (width, height)
     tried = [s for s in HINT_SIZES if _within(s, clip) and s != clip]
@@ -215,12 +217,18 @@ def _size_hint(frames: int, width: int, height: int, plan_at,
         f -= 17
     side = hf.CANVAS_MULTIPLE
     smallest = plan_at(hf.MIN_FRAMES, side, side)
-    lora = smallest.terms["denoise"]["lora"]
-    if not smallest.fits and lora:
+    if smallest.fits:
+        return None
+    bare = plan_at(hf.MIN_FRAMES, side, side, loras=())
+    if bare.fits:
+        lora = smallest.terms["denoise"]["lora"]
         return (f"no clip fits at any size with these adapters, which take "
                 f"{lora / (1 << 30):.2f} GiB of the denoise; run with fewer "
                 f"adapters" + (f", or with {BASE_RECIPE}" if base else ""))
-    return None
+    dit = bare.terms["denoise"]["dit"]
+    return (f"no clip fits at any size with this DiT file, which takes "
+            f"{dit / (1 << 30):.2f} GiB of the denoise; run a smaller quant "
+            f"of it")
 
 
 def _generate_parser(prog: str) -> argparse.ArgumentParser:
@@ -475,12 +483,13 @@ def _generate(a) -> int:
     text = memfit.prompt_rows(
         fam, prompt, video_encoder.header_tokenizer(fam, a.encoder))
 
-    def plan_at(frames, width, height):
+    def plan_at(frames, width, height, loras=None):
         return memfit.plan_run(
             fam, dit=a.model, encoder=a.encoder, vae=preview or a.vae,
             tiny=bool(preview), audio_vae=a.audio_vae,
-            loras=[p for p, _ in adapters], frames=frames, width=width,
-            height=height, variant=vid.variant, text=text)
+            loras=[p for p, _ in adapters] if loras is None else loras,
+            frames=frames, width=width, height=height, variant=vid.variant,
+            text=text)
     # BASE_RECIPE is new to a run of another DiT or with an entry LoRA.
     base = (vid.variant != catalog.RECIPES[BASE_RECIPE].variant
             or bool(a.entry_adapters))

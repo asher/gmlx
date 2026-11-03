@@ -661,6 +661,28 @@ def test_stacked_loras_that_leave_a_clip_under_768x768_keep_the_hint(
                variant=hf.FASTH3) == "encoder"
 
 
+@pytest.mark.parametrize("adapter", [False, True])
+def test_a_dit_file_that_fits_no_clip_alone_names_its_memory(
+        run, monkeypatch, files, tmp_path, capsys, adapter):
+    """unsloth's fl2va Q8_0 DiT on a 32 GB Mac, alone or with the Turbo
+    LoRA: the DiT alone leaves even the smallest clip over the budget."""
+    from gmlx.video import pipeline
+
+    monkeypatch.setattr(pipeline, "vet_adapter", lambda *a, **k: None)
+    _pinned(files, "h3-base", monkeypatch, 32)
+    os.truncate(files["model"], 21_437_786_208)
+    argv = (["--adapter", _bf16_lora(tmp_path / "turbo.safetensors",
+                                     catalog.RECIPES["h3"].lora.size)]
+            if adapter else [])
+    variant = catalog.RECIPES["h3-base"].variant
+    assert run(*argv, variant=variant) == 1
+    assert run.loads == []
+    assert _hint(capsys) == (
+        "No clip fits at any size with this DiT file, which takes 19.97 GiB "
+        "of the denoise; run a smaller quant of it")
+    assert run("--size", "32x32", "--frames", "5", variant=variant) == 1
+
+
 def test_an_entry_lora_and_one_more_name_h3_base(monkeypatch, tmp_path,
                                                  capsys):
     """An h3 entry carries the Turbo LoRA, so one more adapter stacks on
