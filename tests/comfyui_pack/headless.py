@@ -32,6 +32,7 @@ import uuid
 import aiohttp
 import numpy as np
 
+from stub_server import FASTH3_SIGMAS
 from support import PACK, Stub, manifest, write_zimage_lora
 
 # API-format copies of the example workflows, which the UI files convert to.
@@ -627,6 +628,34 @@ class Cases:
         self.check("video saved", any(f.startswith("h3_") and f.endswith(".mp4") for f in saved),
                    saved)
 
+    async def fasth3_t2v(self):
+        """The FastH3 example workflow: AV steps on the trained sigmas gmlx
+        Sigmas hands over, at the recipe's shifts, and the clip decoded by
+        the gmlx video and audio VAEs into a saved video."""
+        wf = workflow("fasth3-t2v.json")
+        wf["6"]["inputs"].update(width=64, height=64, length=22)
+        wf["15"]["inputs"]["filename_prefix"] = "video/fasth3"
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        steps = kinds(log, "av_step")
+        self.check("one row a step at the recipe's shifts and audio scale",
+                   len(steps) == 8 and all(e["shifts"] == {"video": 10.0, "audio": 3.0}
+                                           and abs(e["audio_scale"] - 10.0 / 3.0) < 1e-6
+                                           for e in steps),
+                   [(e["shifts"], e["audio_scale"]) for e in steps])
+        got = [e["timestep"] for e in steps]
+        want = [float(np.float32(s) * np.float32(1000.0)) for s in FASTH3_SIGMAS[:-1]]
+        self.check("timesteps of the trained sigmas", np.allclose(got, want, rtol=0, atol=1e-3),
+                   {"got": got, "want": want})
+        self.check("video and audio decoded once each",
+                   (len(kinds(log, "video_decode")), len(kinds(log, "audio_decode"))) == (1, 1),
+                   (len(kinds(log, "video_decode")), len(kinds(log, "audio_decode"))))
+        d = os.path.join(self.work, "output", "video")
+        saved = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        self.check("video saved",
+                   any(f.startswith("fasth3_") and f.endswith(".mp4") for f in saved), saved)
+
     async def turbo_sigmas(self):
         wf = {
             "1": {"class_type": "GmlxModelLoader", "inputs": {"model_name": "qwen-image-2.1-turbo",
@@ -712,6 +741,7 @@ async def amain(a) -> dict:
             await c.case("moss-image t2i under SkipLayerGuidanceDiTSimple", c.moss_t2i)
             await c.case("moss-image: a prompt queued behind the running one", c.moss_queued)
             await c.case("minimax-h3 t2v with the gmlx video and audio VAEs", c.h3_t2v)
+            await c.case("fasth3 t2v on its trained sigmas", c.fasth3_t2v)
             if comfy_version(a.comfy) >= (0, 41, 0):
                 await c.case("flux-3-klein t2i", c.flux3_t2i)
                 await c.case("flux-3-klein edit with two references", c.flux3_edit)

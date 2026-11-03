@@ -145,7 +145,7 @@ def test_the_wheel_ships_every_pack_file():
     for want in ("gmlx/comfyui_pack/LICENSE", "gmlx/comfyui_pack/__init__.py",
                  "gmlx/comfyui_pack/version.py"):
         assert want in files
-    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 12
+    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 13
 
 
 def test_the_pack_keeps_its_apache_license():
@@ -231,6 +231,7 @@ _WIDGETS = {
     "GmlxVideoVAELoader": ["model_name", "server_url", "start_server"],
     "GmlxAudioVAELoader": ["model_name", "server_url", "start_server"],
     "MiniMaxH3SigmaShift": ["shift_video", "shift_audio"],
+    "GmlxSigmas": ["steps", "denoise", "width", "height"],
     "MiniMaxH3ImageToVideo": ["prompt", "width", "height", "length"],
     "BasicGuider": [],
     "VAEDecodeAudio": [],
