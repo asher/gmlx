@@ -832,6 +832,9 @@ async def _av_step(t0, tensors, fields, run):
             from ..image_steps import StepInterrupted
 
             vs.ensure_dit(served)
+            if table is not None and table not in served.pipe.patch_tables:
+                # An encode since the check above let the table go.
+                raise Missing([fields["patch_table"]])
             feats = _f32(held)
             if feats.ndim == 2:
                 feats = feats[None]

@@ -509,6 +509,18 @@ def test_an_encode_loads_the_encoder_without_the_dit_or_any_lora(
     assert all(_rel(a, b) < 1e-6 for a, b in zip(again, sent))
 
 
+def _table_body(c, adapter: dict) -> dict:
+    """A contract table of ``adapter``'s pairs on ComfyUI's keys, as the
+    pack sends a stock LoRA loader's patches."""
+    entries = [{"key": f"diffusion_model.{target}.weight", "band": None,
+                "patches": [{"up": c.put(up, kind="adapters"),
+                             "down": c.put(down, kind="adapters"),
+                             "alpha": float(alpha), "strength": 1.0,
+                             "strength_model": 1.0}]}
+               for target, (down, up, alpha) in sorted(adapter.items())]
+    return {"model": "h3", "entries": entries}
+
+
 def _stub_encode(monkeypatch, weights, dit=None):
     """The H3 encoder stood in, and the DiT loaded after an encode as the
     tiny DiT of ``weights``, or ``dit(weights)``."""
@@ -554,6 +566,40 @@ def test_a_lora_that_does_not_load_again_after_an_encode_leaves_no_dit(
     moved.rename(path)
     after = c.av_step("h3", None, video, audio, 600.0, row, **kw)
     assert all(_rel(a, b) < 1e-6 for a, b in zip(after, before))
+
+
+def test_a_table_an_encode_lets_go_before_its_step_runs_is_missing(
+        monkeypatch, request):
+    """A second client's encode can run on the image worker between a
+    step's check of its table and the step itself. The step answers the
+    table as missing, and the pack sends it again."""
+    from test_video_h3_lora import _adapter
+
+    pipe, weights = _own_pipe()
+    _mount(_Host(_served(pipe)), request)
+    _stub_encode(monkeypatch, weights)
+    c = _client()
+    body = _table_body(c, _adapter(6))
+    tid = c.define_table("h3", body)
+    video, audio, feats = _clip()
+    row = {"cond": c.put(feats)}
+    kw = dict(shifts=SHIFTS, audio_scale=SCALE, patch_table=tid)
+    sent = c.av_step("h3", None, video, audio, 600.0, row, **kw)
+    ensure, ran = vs.ensure_dit, []
+
+    def encode_first(served):
+        if not ran:
+            ran.append(True)
+            vs.drop_dit(served)         # what the encode leaves
+        ensure(served)
+
+    monkeypatch.setattr(vs, "ensure_dit", encode_first)
+    with pytest.raises(MissingTensors) as e:
+        c.av_step("h3", None, video, audio, 600.0, row, **kw)
+    assert ran and e.value.body["missing"] == [tid]
+    assert c.define_table("h3", body) == tid
+    again = c.av_step("h3", None, video, audio, 600.0, row, **kw)
+    assert all(_rel(a, b) < 1e-6 for a, b in zip(again, sent))
 
 
 def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
