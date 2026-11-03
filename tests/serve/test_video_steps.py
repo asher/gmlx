@@ -432,6 +432,35 @@ def _lora_file(tmp_path, seed: int = 5, name: str = "lora.safetensors"):
     return path
 
 
+def test_a_runs_first_step_counts_the_clips_decodes(host):
+    """A clip whose decodes do not fit beside the models loaded stops at
+    its run's first step, not after its last. The steps after it count
+    the step alone, as each decode is counted when it runs."""
+    video, audio, feats = _clip()
+    c = _client()
+    row = {"cond": c.put(feats)}
+    kw = dict(shifts=SHIFTS, audio_scale=SCALE)
+    served = host.served
+    plan = vs.plan_clip(served.plan, frames=FRAMES, width=SIZE, height=SIZE,
+                        text=6, budget=1)
+    step = plan.terms["denoise"]["step"]
+    decodes = max(plan.phases["audio"], plan.phases["decode"])
+    assert decodes > step
+    adapters, caches = vs.held_bytes(served)
+    host.budget_bytes = adapters + caches + decodes - 1
+    run = c.begin("h3")
+    with pytest.raises(StepsClientError) as e:
+        c.av_step("h3", run, video, audio, 600.0, row, **kw)
+    assert e.value.status == 400 and e.value.body["error"] == (
+        "a clip of 64x64 at 5 frames does not fit in memory beside the "
+        "models now loaded")
+    host.budget_bytes += 1
+    c.av_step("h3", run, video, audio, 600.0, row, **kw)
+    adapters, caches = vs.held_bytes(served)
+    host.budget_bytes = adapters + caches + step
+    c.av_step("h3", run, video, audio, 600.0, row, **kw)
+
+
 @pytest.mark.parametrize("ask, want", [
     # An image-to-video workflow wires its keyframe through GmlxCLIP,
     # which sends the image with the prompt.

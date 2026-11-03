@@ -734,14 +734,16 @@ def _clip_of(fam, vshape, ashape=None) -> tuple:
 
 def _check_clip(hold, served, *, frames: int, width: int, height: int,
                 text: int, phase: str, what: str, table: str | None = None,
-                audio: int | None = None) -> None:
+                audio: int | None = None, decodes: bool = False) -> None:
     """Refuse a step or a decode of a clip that does not fit beside the
     models loaded. The DiT stays loaded through each, and each is priced
     as the image routes price theirs: the DiT, the larger of its
     configured LoRAs and the pairs and patch tables it holds, the caches
     the server holds and the phase's work. A step under a patch table
     with patches, ``table``, runs a LoRA. ``audio`` is the audio decode's
-    latents."""
+    latents. With ``decodes``, a step is priced at the larger of the step
+    and the clip's two decodes, so a clip that cannot decode stops before
+    its first step."""
     from ..image_steps import StepError
     from ..video_service import held_bytes, plan_clip
 
@@ -753,13 +755,16 @@ def _check_clip(hold, served, *, frames: int, width: int, height: int,
     tid = pipe.default_table if table is None else table
     live = bool(pipe.patch_tables.get(tid, {}).get("entries"))
     plan = plan_clip(served.plan, frames=frames, width=width, height=height,
-                     text=text, budget=budget, decode=phase != "denoise",
-                     audio=audio, live_lora=live and phase == "denoise")
+                     text=text, budget=budget,
+                     decode=phase != "denoise" or decodes, audio=audio,
+                     live_lora=live and phase == "denoise")
     adapters, caches = held_bytes(served)
     held = (plan.terms["denoise"]["dit"]
             + max(plan.terms["denoise"]["lora"], adapters) + caches)
     work = (plan.terms["denoise"]["step"] if phase == "denoise"
             else plan.phases[phase])
+    if decodes:
+        work = max(work, plan.phases["audio"], plan.phases["decode"])
     if held + work > budget:
         clip = (f"{audio} audio latents" if phase == "audio"
                 else f"{width}x{height} at {frames} frames")
@@ -819,8 +824,11 @@ async def _av_step(t0, tensors, fields, run):
         if held is None:
             raise Missing(hashes)
         n_text = int(held.shape[-2])
+        # A run's first step counts the clip's decodes too.
+        first = run is not None and run.steps == 0
         _check_clip(hold, served, frames=frames, width=width, height=height,
-                    text=n_text, phase="denoise", what="a step", table=table)
+                    text=n_text, phase="denoise", table=table, decodes=first,
+                    what="a clip" if first else "a step")
         ts = float(np.asarray(t_w.numpy(), np.float32).reshape(-1)[0])
         gen = run.gen if run is not None else 0
 
