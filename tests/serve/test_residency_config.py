@@ -925,6 +925,21 @@ def test_a_tight_video_entry_keeps_room_for_one_cond(monkeypatch):
     assert f"{bare / memfit.GiB:.2f}" == "18.84"
 
 
+@pytest.mark.parametrize("under", ["floor", "clip"])
+def test_overcommit_admits_a_video_entry_over_its_budget_at_full_caches(
+        monkeypatch, under):
+    """GMLX_OVERCOMMIT=1 admits a video entry its budget refuses, under
+    the price at its floor share or under its clip alone, with each cache
+    at its full bound."""
+    from gmlx.serve import video_service as vs
+
+    full, _floor, bare, need = _floor_need(monkeypatch)
+    monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
+    budget = {"floor": need, "clip": bare}[under] - 1
+    got = vs.entry_plan(_h3_entry(monkeypatch, "h3", "768x768", 5, budget))
+    assert (got.cache_share, got.footprint) == (1.0, full.footprint)
+
+
 def test_an_image_route_names_a_video_id_as_no_image_model(request):
     from gmlx.config import build_config
 
