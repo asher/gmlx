@@ -216,6 +216,8 @@ def entry_plan(spec) -> VideoEntryPlan:
     if got is None and overcommit():
         got = price(1.0), 1.0
     if got is None:
+        # An entry is refused only against a budget.
+        assert budget is not None
         raise memfit.VideoMemoryError(
             f"video model {spec.id!r} needs {memfit.gib(price(0.0), True)} "
             f"GiB for one {width}x{height} clip of {d['frames']} frames, over "

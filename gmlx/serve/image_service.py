@@ -342,6 +342,8 @@ def entry_plan(spec) -> EntryPlan:
     if got is None and overcommit():
         got = price(mode, 1.0), 1.0
     if got is None:
+        # An entry is refused only against a budget.
+        assert budget is not None
         need = price(mode, 0.0)
         hint = "use a smaller quant of the DiT or of the text encoder"
         if spec.encoder_release == "never" and enc and fitted(
