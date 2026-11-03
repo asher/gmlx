@@ -1477,12 +1477,18 @@ def _pair_keys(rows) -> set:
     return {r[-1] for ad, _st in rows for r in (*ad.dit, *ad.text)}
 
 
+def pair_room(served) -> int:
+    """Bytes the pair cache of an image or video entry holds for a
+    request's pairs, beside the entry's own."""
+    pipe = served.pipe
+    own = sum(pipe.adapters.nbytes(k) for k in _pair_keys(served.adapters))
+    return pipe.adapters.max_bytes - own
+
+
 def _room_for(served: ServedImage, paths: list) -> None:
     """Refuse request adapters whose files take more than the pair cache
     holds beside the entry's own pairs."""
-    pipe = served.pipe
-    own = sum(pipe.adapters.nbytes(k) for k in _pair_keys(served.adapters))
-    room = pipe.adapters.max_bytes - own
+    room = pair_room(served)
     need = 0
     for p in {os.path.realpath(p) for p in paths}:
         try:

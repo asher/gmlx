@@ -813,6 +813,86 @@ def test_the_adapter_cache_and_the_upload_limit_are_named_in_a_413(host):
         "a tensor of 2.0 MiB is over the upload limit of 1.0 MiB")
 
 
+def _big_table(c, pairs: int) -> dict:
+    """A ComfyUI LoRA's table of ``pairs`` pairs of 1 MiB in f32, each a
+    rank 16 pair over an 8192 wide weight."""
+    from test_video_h3_lora import _adapter
+
+    rng = np.random.default_rng(9)
+    entries = []
+    for target in sorted(_adapter(6))[:pairs]:
+        down = rng.standard_normal((16, 8192)).astype(np.float32)
+        up = rng.standard_normal((8192, 16)).astype(np.float32)
+        entries.append({"key": f"diffusion_model.{target}.weight",
+                        "band": None, "patches": [{
+                            "up": c.put(up, kind="adapters"),
+                            "down": c.put(down, kind="adapters"),
+                            "alpha": 16.0, "strength": 1.0,
+                            "strength_model": 1.0}]})
+    return {"model": "h3", "entries": entries}
+
+
+@pytest.mark.parametrize("configured_mb, want", [
+    (8, "the LoRA pairs of this patch table take 4.0 MiB, over the 2.0 MiB "
+     "the pair cache of 'h3' keeps for a request's pairs: its default clip "
+     "leaves the cache 25% of its configured 8 MiB. A smaller defaults.size "
+     "or defaults.seconds on 'h3' gives it more."),
+    (2, "the LoRA pairs of this patch table take 4.0 MiB, over the 0.5 MiB "
+     "the pair cache of 'h3' keeps for a request's pairs; raise "
+     "server.image.adapter_cache_mb")])
+def test_a_table_over_the_entrys_pair_room_is_413_naming_it(
+        monkeypatch, request, configured_mb, want):
+    """The pairs of a ComfyUI LoRA's table that the entry's pair cache
+    cannot hold at once are refused with a 413 that names the cache, the
+    sizes and the remedy: the share the entry's clip leaves the cache
+    when its configured bound holds them, or else that bound."""
+    import dataclasses
+
+    from gmlx.serve import image_service
+
+    pipe, _w = _own_pipe()
+    served = _served(pipe)
+    served.plan = dataclasses.replace(served.plan, cache_share=0.25)
+    _mount(_Host(served), request)
+    monkeypatch.setitem(image_service._CACHE_BYTES, "adapter",
+                        configured_mb << 20)
+    image_service.bound_caches(pipe, 0, 0.25)
+    c = _client()
+    body = _big_table(c, 4)
+    with pytest.raises(StepsClientError) as e:
+        c.define_table("h3", body)
+    assert e.value.status == 413 and e.value.body["error"] == want
+    assert len(pipe.adapters) == 0
+
+
+def test_a_table_that_fills_the_entrys_pair_room_steps(tmp_path, request):
+    """A table whose pairs fill the room the entry's pair cache keeps for a
+    request's pairs beside its own LoRA holds them all and steps, and one
+    a byte over that room is refused."""
+    from test_video_h3_lora import _adapter
+
+    path = _lora_file(tmp_path)
+    pipe, _w = _own_pipe()
+    served = _served(pipe)
+    served.spec.adapters = ((str(path), 1.0),)
+    _on_worker(vs._load_adapters, served)
+    _mount(_Host(served), request)
+    c = _client()
+    adapter = _adapter(6)
+    need = sum(d.nbytes + u.nbytes for d, u, _a in adapter.values())
+    own = pipe.adapters.bytes
+    pipe.adapters.max_bytes = own + need
+    tid = c.define_table("h3", _table_body(c, adapter))
+    assert pipe.adapters.bytes == own + need
+    video, audio, feats = _clip()
+    c.av_step("h3", None, video, audio, 600.0, {"cond": c.put(feats)},
+              shifts=SHIFTS, audio_scale=SCALE, patch_table=tid)
+    pipe.adapters.max_bytes -= 1
+    with pytest.raises(StepsClientError) as e:
+        c.define_table("h3", _table_body(c, _adapter(7)))
+    assert e.value.status == 413
+
+
 def _latents(route: str):
     """The latents of a 22-frame 32x32 clip, those the tiny VAEs take."""
     vshape, ashape = hf.latent_shapes(22, 32, 32)

@@ -967,10 +967,37 @@ def _ref_answer(conds, held: dict) -> str:
     return "hit" if all(k in held for k in refs) else "miss"
 
 
+def _pair_room(served, need: int) -> None:
+    """Refuse the pairs of a table, ``need`` bytes held at once, over the
+    room the entry's pair cache keeps for a request's pairs, with a 413
+    that gives the remedy: the share the entry's default work leaves the
+    cache, when the configured bound holds them, or else that bound."""
+    from .image_service import cache_bytes, pair_room
+
+    room = pair_room(served)
+    if need <= room:
+        return
+    configured = cache_bytes()[1]
+    share = served.plan.cache_share
+    sid = served.spec.id
+    over = (f"the LoRA pairs of this patch table take {_mib(need)}, over the "
+            f"{_mib(room)} the pair cache of {sid!r} keeps for a request's "
+            "pairs")
+    if need > configured or share >= 1.0:
+        raise StepError(413, f"{over}; raise server.image.adapter_cache_mb")
+    video = is_video(served.spec)
+    raise StepError(413, f"{over}: its default {'clip' if video else 'image'} "
+                    f"leaves the cache {share:.0%} of its configured "
+                    f"{configured / 2**20:.0f} MiB. A smaller defaults.size"
+                    f"{' or defaults.seconds' if video else ''} on {sid!r} "
+                    "gives it more.")
+
+
 def define_table(served, body: dict, adapters: _Bytes) -> str:
     """The core table of a contract table body, with its pairs registered
     on the pipeline. Raises :class:`Missing` for adapter matrices not
-    held."""
+    held, and a 413 for pairs the entry's pair cache cannot hold at
+    once."""
     from gmlx.image import api
     from gmlx.image.lora import patch_table as pt
     from gmlx.image.lora.reader import AdapterError
@@ -980,14 +1007,19 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
     if not isinstance(entries, list):
         raise StepError(400, "a patch table body needs a list of entries")
     missing = []
+    sizes: dict = {}
     for e in entries:
         for p in (e.get("patches") or []) if isinstance(e, dict) else []:
-            for side in ("up", "down"):
-                h = p.get(side)
-                if not isinstance(h, str) or h not in adapters:
-                    missing.append(str(h))
+            got = [adapters.get(h) if isinstance(h, str) else None
+                   for h in (p.get("up"), p.get("down"))]
+            missing += [str(p.get(side)) for side, t in zip(("up", "down"),
+                                                            got) if t is None]
+            if None not in got:
+                sizes[(p["up"], p["down"], p.get("alpha"))] = sum(
+                    t.nbytes for t in got)
     if missing:
         raise Missing(missing)
+    _pair_room(served, sum(sizes.values()))
     rows = []
     pairs: dict = {}
     try:
