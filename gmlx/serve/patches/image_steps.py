@@ -908,6 +908,11 @@ async def encode(request: Request):
     revised = None
     if _names_video(fields.get("model")):
         # A video family has no upsampler.
+        if requested:
+            sid = SETTINGS.host.resolve(fields.get("model"))[1].id
+            raise StepError(400, f"video model {sid!r} takes no prompt "
+                            "upsampling; send the request without "
+                            "prompt_upsampling")
         revise = None
     if revise is not None:
         try:
@@ -991,9 +996,9 @@ async def vae_decode(request: Request):
     hold = await _acquire(fields.get("model"))
     try:
         served = _served(hold)
+        _image_only(served, "vae/decode")
         _check_size(hold, *_px(served, "vae", *lat.shape[2:]),
                     what="a VAE decode", phase="decode")
-        _image_only(served, "vae/decode")
         img = await _on_worker(do_decode, served, lat,
                                bool(fields.get("alpha")))
     finally:
