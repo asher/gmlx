@@ -937,6 +937,35 @@ def test_a_tight_video_entry_keeps_one_cond_in_the_tensor_cache(
     assert got.cache_share == 41 / 64 and got.footprint <= budget
 
 
+@pytest.mark.parametrize("steps_api, tensor_mb, floor", [
+    (False, 64, 0), (True, 16, 16 << 20)])
+def test_a_video_entry_keeps_cond_room_only_in_a_tensor_cache_it_has(
+        monkeypatch, steps_api, tensor_mb, floor):
+    """With the step routes off, no tensor cache takes a cond, and with a
+    tensor cache under one cond the entry keeps it all: the bare clip and
+    that room admit the entry, and a byte less refuses it."""
+    import dataclasses
+
+    from gmlx.config import ImageServerCfg
+    from gmlx.serve import image_service
+    from gmlx.serve import video_service as vs
+    from gmlx.video import memfit
+
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    monkeypatch.setattr(image_service, "_CACHE_BYTES",
+                        dict(image_service._CACHE_BYTES))
+    image_service.configure_caches(dataclasses.replace(
+        ImageServerCfg(), steps_api=steps_api, tensor_cache_mb=tensor_mb))
+    _full, bare = _bare(monkeypatch, "h3", "1344x768", 5)
+    got = vs.entry_plan(_h3_entry(monkeypatch, "h3", "1344x768", 5,
+                                  bare + floor))
+    assert (got.cache_share, got.footprint, got.tensor_floor) == (
+        0.0, bare + floor, floor)
+    with pytest.raises(memfit.VideoMemoryError):
+        vs.entry_plan(_h3_entry(monkeypatch, "h3", "1344x768", 5,
+                                bare + floor - 1))
+
+
 def test_fasth3_at_1344x768_fits_a_36_gb_mac_with_one_cond_floored(
         monkeypatch):
     """FastH3 at 1344x768 for 5 s fits a 36 GB Mac's budget at a share of
