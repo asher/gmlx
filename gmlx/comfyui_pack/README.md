@@ -1,6 +1,6 @@
 # gmlx nodes for ComfyUI
 
-This ComfyUI node pack runs image model steps on a local gmlx server on Apple Silicon while the sampler stays in ComfyUI.
+This ComfyUI node pack runs image and video model steps on a local gmlx server on Apple Silicon while the sampler stays in ComfyUI.
 It ships inside gmlx and has gmlx's version.
 The loaders give a stock MODEL, CLIP and VAE, so the stock sampler, LoRA, conditioning, latent and image nodes work with them.
 The weights stay on the gmlx server, which holds the GGUF file once for ComfyUI and for its own API.
@@ -15,13 +15,14 @@ Supported model families:
 - FLUX.2 klein 9B and FLUX.2 klein Base 9B, text to image and editing with up to 10 reference images. Their license allows non-commercial use only.
 - FLUX.2 klein 9B KV, text to image and editing with up to 10 reference images, where the stock `Flux KV Cache` node makes the steps after the first reuse the keys and values of the references. Its license allows non-commercial use only.
 - FLUX.3 klein and FLUX.3 klein Base, text to image and editing with up to 10 reference images, on ComfyUI 0.41 or newer.
+- MiniMax-H3, the recipes `h3`, `h3-fast` and `h3-base`: video with sound from a text prompt, through ComfyUI's own MiniMax-H3 nodes, with video and audio VAE loaders that decode on the server. It needs a Mac with 32 GB or more.
 
 ## Install
 
 Requirements:
 
 - ComfyUI 0.37 or newer.
-- gmlx, with image models in its config.
+- gmlx, with image or video models in its config.
 
 Put the pack into ComfyUI with gmlx, then restart ComfyUI:
 
@@ -39,10 +40,10 @@ At startup it checks the ComfyUI internals it uses. When one is missing, the nod
 ## Use
 
 1. Add the image model to the gmlx config and run `gmlx serve`. The loaders also start `gmlx serve` when no server answers and `start_server` is on.
-2. Add `gmlx Model Loader`, `gmlx CLIP Loader` and `gmlx VAE Loader`, and pick the model in `model_name` on each. The list holds the image models of the gmlx server, the default first, or only the default model's name when it has none. A model the server does not have stops the run with the `gmlx pull` command that adds it.
+2. Add `gmlx Model Loader`, `gmlx CLIP Loader` and `gmlx VAE Loader`, and pick the model in `model_name` on each. For MiniMax-H3, add `gmlx Video VAE Loader` and `gmlx Audio VAE Loader` in place of `gmlx VAE Loader`. The list holds the image and video models of the gmlx server, the default first, or only the default model's name when it has none. A model the server does not have stops the run with the `gmlx pull` or `gmlx video pull` command that adds it.
 3. Connect them to stock nodes as you would any checkpoint: `CLIPTextEncode`, `KSampler`, `VAEDecode`, `LoraLoader`, `ModelSamplingAuraFlow` and so on.
 
-The `example_workflows` folder has eleven graphs, which ComfyUI's template browser lists under the pack:
+The `example_workflows` folder has twelve graphs, which ComfyUI's template browser lists under the pack:
 
 - `z-image-turbo-t2i.json`: Z-Image-Turbo text to image.
 - `z-image-turbo-lora-t2i.json`: Z-Image-Turbo text to image through a stock `LoraLoader`. Put a Z-Image LoRA named `z-image-turbo-style.safetensors` in `models/loras`, or pick another one in the node.
@@ -55,6 +56,7 @@ The `example_workflows` folder has eleven graphs, which ComfyUI's template brows
 - `flux-2-klein-9b-kv-edit-two-references.json`: FLUX.2 klein 9B KV editing with two reference images, the FLUX.2 klein edit graph on the KV model with the stock `Flux KV Cache` node between the model loader and the guider. The first step keeps the keys and values of the references, and the later steps reuse them. It needs a Mac with 24 GB or more.
 - `flux-3-klein-t2i.json`: FLUX.3 klein text to image through the stock `EmptyFlux2LatentImage`. It needs ComfyUI 0.41 or newer.
 - `flux-3-klein-edit-two-references.json`: FLUX.3 klein editing with two reference images through the stock `ReferenceMultiLatent` node. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images. It needs ComfyUI 0.41 or newer.
+- `minimax-h3-t2v.json`: a MiniMax-H3 clip with sound from a text prompt, 5 seconds at 1344x768 in 8 steps, through the stock `MiniMaxH3ImageToVideo`, `ModelSamplingMiniMaxH3` at the `h3` recipe's shifts, 6 and 3, `res_multistep` on the `simple` schedule, and the gmlx video and audio VAE loaders into `CreateVideo` and `SaveVideo`. It needs a Mac with 32 GB or more.
 
 ### Server address
 
@@ -101,7 +103,9 @@ Anything that would run inside the DiT forward in ComfyUI is refused with an err
 - ControlNet;
 - hook keyframes and scheduled CLIP hooks;
 - a quantized Qwen-Image 2.1 prefix cache (`QwenImage21Cache` with a dtype other than default);
-- a MOSS-Image conditioning that masks some of its text rows, such as one from a text encoder other than `gmlx CLIP Loader`.
+- a MOSS-Image conditioning that masks some of its text rows, such as one from a text encoder other than `gmlx CLIP Loader`;
+- on MiniMax-H3, which the pack runs from the text prompt alone: a first or last frame of `MiniMaxH3ImageToVideo`, a guide from `MiniMaxH3AddGuide`, the references of `MiniMaxH3ReferenceToVideo`, vision tokens in the prompt, the Fun ControlNet, a noise mask on the latent and an encode with the gmlx video or audio VAE;
+- a FastH3 file: the pack runs the MiniMax-H3 recipes `h3`, `h3-fast` and `h3-base`.
 
 The stock `Flux KV Cache` node on FLUX.2 klein 9B KV is not refused: the server keeps the keys and values of the references of each row of the batch from the first step of a run, the later steps of the run reuse those of each row, and the end of the run drops them.
 The stock `SkipLayerGuidanceDiTSimple` node on MOSS-Image is not refused when it names `single_layers` alone, with `start_percent` 0 and `end_percent` 1: the server leaves those blocks out of the negative pass of each step. It is refused with `double_layers`, another window, a linked widget or a block MOSS-Image lacks, and on any other model.
@@ -125,7 +129,7 @@ That runs the wire, client and in-process ComfyUI suites on the cpu device, then
 
 ### Parity with the stock loaders
 
-Eight checks hold a gmlx MODEL against ComfyUI's own model on the same graph, noise, sigmas and conditioning: ComfyUI-GGUF for Z-Image Turbo, Krea 2 Turbo, FLUX.2 klein 4B, FLUX.2 klein 9B, FLUX.2 klein 9B KV and FLUX.3 klein, ComfyUI's Qwen-Image 2.1 model on a GGUF with its arch key set, and for MOSS-Image the OpenMOSS ComfyUI plugin with the ComfyUI-MOSS-GGUF bridge on ComfyUI's cpu device. They need the model files and both loaders, so they are not part of `run_tests.py`.
+Nine checks hold a gmlx MODEL against ComfyUI's own model on the same graph, noise, sigmas and conditioning: ComfyUI-GGUF for Z-Image Turbo, Krea 2 Turbo, FLUX.2 klein 4B, FLUX.2 klein 9B, FLUX.2 klein 9B KV and FLUX.3 klein, ComfyUI's Qwen-Image 2.1 model on a GGUF with its arch key set, for MOSS-Image the OpenMOSS ComfyUI plugin with the ComfyUI-MOSS-GGUF bridge on ComfyUI's cpu device, and for MiniMax-H3 leejet's fork of ComfyUI-GGUF, which reads the MiniMax-H3 GGUF, on ComfyUI's cpu device. They need the model files and both loaders, so they are not part of `run_tests.py`.
 
 The step check is the gate. The stock model in bf16 samples and records, at each step, the latent it is fed and the denoised output it returns. The gmlx MODEL and the stock model in fp32 are then fed the same latents and sigmas. At every step the relative L2 of the gmlx output from the stock bf16 output must be at most 1.5 times that of the stock fp32 output, or at most 2e-2 where that is larger. A fixed 2e-2 cannot hold on its own: the stock fp32 output is 0.11 from the stock bf16 output at the first step of Z-Image Turbo.
 
@@ -153,6 +157,17 @@ The MOSS-Image check runs at 256x256 with the stock model on ComfyUI's cpu devic
 | MOSS-Image | 256x256, 50 steps, cfg 3, block 22 out of the negative pass | 0.099 | 0.099 | 0.037 | 1.00 | 2.69 | pass |
 | MOSS-Image | 256x256, 50 steps, cfg 3, block 22 out of the negative pass, stock LoRA loader | 0.064 | 0.064 | 0.036 | 1.00 | 2.16 | pass |
 
+The MiniMax-H3 check runs at 512x512 for 22 frames with the stock model on ComfyUI's cpu device and reads its rows from the stock fp32 output, as the MOSS-Image check does. The stock fp32 run samples and records, and the gmlx MODEL and the stock bf16 runs are fed its latents and sigmas. The stock bf16 runs are bf16 throughout, since the check's node file reports bf16 support for the cpu device, where ComfyUI otherwise runs a bf16 model's arithmetic in fp32. ComfyUI-GGUF adds a LoRA to the weight in the arithmetic of the pass, which in bf16 keeps too little of the 8-step LoRA, so the stock bf16 run with the LoRA merges it in fp32 and rounds the merged weight to bf16 once. At every step, for the video and the sound apart, the gmlx distance from the stock fp32 output must be at most 1.5 times the stock bf16 distance, or at most 2e-2. Both sides run the `h3` recipe's graph: 8 steps of `euler` on the `simple` schedule, `ModelSamplingMiniMaxH3` at 6 and 3, and the same saved text features.
+
+On the blueprint's `res_multistep` the `h3` row misses at one audio step, where the gmlx distance is 0.059 and the stock bf16 distance 0.028, a ratio of 2.09. At that step on `euler` the stock bf16 distance is 0.055 and the gmlx distance 0.053, so the miss follows the one stock bf16 run at that step, and the check pins `euler`. The `h3-base` MODEL read against the stock model with the LoRA reaches a worst step ratio of 8.9, and three faults planted in the server's step reach 32, 216 and 30: the timestep 3% low, the sign of the velocity dropped and the sound not carried at its sigma ratio.
+
+| Model | Graph | Stream | gmlx from stock fp32, worst step | stock bf16, same step | Worst ratio | Result |
+|---|---|---|---|---|---|---|
+| MiniMax-H3 | 512x512, 22 frames, 8 steps, `h3` with its LoRA | video | 0.065 | 0.056 | 1.15 | pass |
+| MiniMax-H3 | 512x512, 22 frames, 8 steps, `h3` with its LoRA | audio | 0.032 | 0.026 | 1.23 | pass |
+| MiniMax-H3 | 512x512, 22 frames, 8 steps, `h3-base` | video | 0.034 | 0.032 | 1.05 | pass |
+| MiniMax-H3 | 512x512, 22 frames, 8 steps, `h3-base` | audio | 0.071 | 0.055 | 1.29 | pass |
+
 The final image check is reported beside it: the gmlx image must be at least as close to the stock fp32 image as the stock bf16 image is, within 6 dB.
 
 | Model | gmlx to stock fp32 | stock bf16 to stock fp32 | Result |
@@ -171,6 +186,10 @@ The final image check is reported beside it: the gmlx image must be at least as 
 | FLUX.3 klein, 512x512, 16 steps, one reference | 50.41 dB | 49.28 dB | pass |
 | MOSS-Image, 256x256, 50 steps, cfg 3 | 29.75 dB | 27.44 dB | pass |
 | MOSS-Image, 256x256, 50 steps, cfg 3, stock LoRA loader | 36.86 dB | 35.15 dB | pass |
+| MiniMax-H3, 512x512, 22 frames, 8 steps, `h3` with its LoRA | 27.01 dB | 25.33 dB | pass |
+| MiniMax-H3, 512x512, 22 frames, 8 steps, `h3-base` | 29.43 dB | 28.68 dB | pass |
+
+The MiniMax-H3 rows read the frames of each clip as the gmlx video VAE decodes them. The sound, decoded by the gmlx audio VAE, is 0.214 in relative L2 from the stock fp32 sound with the LoRA, as the stock bf16 sound is, and 0.200 against 0.153 for the stock bf16 sound without it.
 
 A fault planted in the Z-Image step convention shows why the step check is the gate. With the velocity sign dropped, the worst step ratio is 188 and the final image reads 8.35 dB. With the timestep read 3% low, the worst step ratio is 7.1, while the final image reads 13.49 dB against a bound of 14.30 dB and fails by only 0.8 dB, so a smaller timestep fault would pass the final image check.
 
