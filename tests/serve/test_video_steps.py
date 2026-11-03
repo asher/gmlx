@@ -516,8 +516,9 @@ def test_an_encode_loads_the_encoder_without_the_dit_or_any_lora(
         tmp_path, monkeypatch, request):
     """The H3 encoder and the DiT with its 8-step LoRA do not fit a 32 GB
     Mac together: the encoder loads with neither the DiT nor a LoRA pair
-    held. The configured LoRA comes back with the DiT, and a table the
-    pack sent is answered as missing until the pack sends it again."""
+    held. The configured LoRA comes back with the DiT at the next step,
+    and a table the pack sent is answered as missing until the pack sends
+    it again."""
     from lora_fixtures import write_keys
     from test_video_h3_lora import _adapter, _comfy_keys
 
@@ -564,9 +565,9 @@ def test_an_encode_loads_the_encoder_without_the_dit_or_any_lora(
     monkeypatch.setattr(loader, "load_dit",
                         lambda *a, **k: (_tiny_dit(weights), None))
     c.encode("h3", "a cat")
-    assert seen == {"dit": None, "pairs": 0}
-    assert strengths() == {0.75}
+    assert seen == {"dit": None, "pairs": 0} and pipe.dit is None
     after = c.av_step("h3", None, video, audio, 600.0, row, **kw)
+    assert strengths() == {0.75}
     assert all(_rel(a, b) < 1e-6 for a, b in zip(after, before))
     with pytest.raises(MissingTensors) as e:
         c.av_step("h3", None, video, audio, 600.0, row, patch_table=tid, **kw)
@@ -641,12 +642,12 @@ def _stub_encode(monkeypatch, weights):
                         lambda *a, **k: (_tiny_dit(weights), None))
 
 
-def test_a_lora_that_does_not_load_again_after_an_encode_leaves_no_dit(
+def test_a_lora_that_does_not_load_again_with_the_dit_fails_the_step(
         tmp_path, monkeypatch, request):
-    """The configured LoRA loads again with the DiT after each encode. A
-    file moved since fails that encode and leaves the entry with no DiT
-    and no table of the LoRA, so the next step loads both again once the
-    file is back."""
+    """The configured LoRA loads again with the DiT at the first step
+    after an encode. A file moved since fails that step with its path and
+    leaves the entry with no DiT and no table of the LoRA, so the next
+    step loads both again once the file is back."""
     from gmlx.image import api
 
     path = _lora_file(tmp_path)
@@ -662,8 +663,9 @@ def test_a_lora_that_does_not_load_again_after_an_encode_leaves_no_dit(
     kw = dict(shifts=SHIFTS, audio_scale=SCALE)
     before = c.av_step("h3", None, video, audio, 600.0, row, **kw)
     moved = path.rename(tmp_path / "moved.safetensors")
+    c.encode("h3", "a cat")
     with pytest.raises(StepsClientError) as e:
-        c.encode("h3", "a cat")
+        c.av_step("h3", None, video, audio, 600.0, row, **kw)
     assert e.value.status == 400
     assert str(path) in e.value.body["error"]
     assert pipe.dit is None and pipe.default_table == api.EMPTY_TABLE
@@ -732,10 +734,11 @@ def _encoder_by_text(monkeypatch, weights) -> list:
 def test_two_clients_alternating_encode_and_step_get_their_own_steps(
         monkeypatch, request):
     """Two ComfyUI clients that alternate their encodes and steps on one
-    entry each get their own steps back. Each encode lets the DiT go and
-    loads it again, once, as the entry's plan prices an encode with the
-    DiT out, and no step loads it. A client's table that the other's
-    encode let go is answered as missing, and steps once sent again."""
+    entry each get their own steps back. Each encode lets the DiT go, as
+    the entry's plan prices an encode with the DiT out, and the first
+    define or step after it loads it again, once. A client's table that
+    the other's encode let go is answered as missing, and steps once sent
+    again."""
     from test_video_h3_lora import _adapter
 
     pipe, weights = _own_pipe()
@@ -783,6 +786,24 @@ def test_two_clients_alternating_encode_and_step_get_their_own_steps(
                       (again_b, first_b)):
         assert all(_rel(x, y) < 1e-6 for x, y in zip(got, want))
     assert _rel(first_a[0], first_b[0]) > 1e-3
+
+
+def test_a_cfg_runs_two_encodes_load_the_dit_once_for_its_step(
+        monkeypatch, request):
+    """A run with cfg encodes its prompt and its negative prompt back to
+    back, then steps. The DiT stays out between the encodes and loads
+    once, at the step."""
+    pipe, weights = _own_pipe()
+    _mount(_Host(_served(pipe)), request)
+    loads = _encoder_by_text(monkeypatch, weights)
+    c = _client()
+    pos = c.encode("h3", "a red fox")[0]["cond"]
+    c.encode("h3", "blurry, low quality")
+    assert pipe.dit is None and loads == []
+    video, audio, _feats = _clip()
+    c.av_step("h3", None, video, audio, 600.0, {"cond": pos},
+              shifts=SHIFTS, audio_scale=SCALE)
+    assert len(loads) == 1
 
 
 def test_a_video_entry_released_with_a_client_table_frees_its_pipeline(

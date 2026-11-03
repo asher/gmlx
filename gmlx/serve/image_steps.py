@@ -1002,6 +1002,10 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
     from gmlx.image.lora import patch_table as pt
     from gmlx.image.lora.reader import AdapterError
 
+    from . import video_service as vs
+
+    if is_video(served.spec):
+        vs.ensure_dit(served)
     pipe = served.pipe
     entries = body.get("entries")
     if not isinstance(entries, list):

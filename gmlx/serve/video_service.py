@@ -349,9 +349,10 @@ def drop_dit(served: ServedVideo) -> None:
 
 def ensure_dit(served: ServedVideo) -> None:
     """Load the DiT again after an encode, its leaves wrapped for the
-    patch tables, and the configured adapters with it. An adapter that
+    patch tables, and the configured adapters with it. Every reader of
+    the DiT calls it: the step and a table's define. An adapter that
     does not load again, as from a file moved since, lets the DiT go
-    again before it raises, so the next step loads both."""
+    again before it raises, so the next call loads both."""
     pipe = served.pipe
     if pipe.dit is not None:
         return
@@ -383,7 +384,9 @@ def prompt_rows(served: ServedVideo, text: str) -> int:
 
 def encode(served: ServedVideo, text: str, images: list) -> np.ndarray:
     """The encoder features (1, L, text dim) f32 of ``text``, on the image
-    worker, with the encoder loaded alone. Images are refused."""
+    worker, with the encoder loaded alone. Images are refused. The DiT
+    stays out after it: the next call that reads it loads it, so encodes
+    back to back load it once."""
     from gmlx.video import encoder as video_encoder
 
     from .image_steps import StepError
@@ -396,20 +399,17 @@ def encode(served: ServedVideo, text: str, images: list) -> np.ndarray:
     import mlx.core as mx
 
     drop_dit(served)
+    handle = video_encoder.load_encoder(
+        fam, os.path.expanduser(served.spec.encoder), log=_log_line)
     try:
-        handle = video_encoder.load_encoder(
-            fam, os.path.expanduser(served.spec.encoder), log=_log_line)
-        try:
-            feats = mx.array(handle.encode(text).features)[None]
-            feats = feats.astype(mx.float32)
-            mx.eval(feats)
-            out = np.array(feats, copy=True)
-        finally:
-            handle.release()
-            del handle
-            mx.clear_cache()
+        feats = mx.array(handle.encode(text).features)[None]
+        feats = feats.astype(mx.float32)
+        mx.eval(feats)
+        out = np.array(feats, copy=True)
     finally:
-        ensure_dit(served)
+        handle.release()
+        del handle
+        mx.clear_cache()
     return out
 
 
