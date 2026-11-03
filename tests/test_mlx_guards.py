@@ -240,3 +240,16 @@ def test_pad_takes_a_slice_update_only_past_the_limit(monkeypatch, kind):
     assert len(calls) == 1
     assert out.dtype == mx.bfloat16
     np.testing.assert_array_equal(_np(out), want)
+
+
+def test_a_bool_pad_past_the_limit_stays_bool(monkeypatch):
+    """Past the limit the output keeps x's dtype, as the stock op's does:
+    a bool mask padded with False is bool, where a fill built from the
+    constant alone is int32."""
+    x = mx.arange(24).reshape(2, 3, 4) % 3 == 0
+    widths = [(0, 0), (1, 2), (0, 0)]
+    want = mx.pad(x, widths)
+    monkeypatch.setattr(mlx_guards, "_STOCK_MAX", want.size - 1)
+    out = mlx_guards.pad(x, widths)
+    assert (out.dtype, want.dtype) == (mx.bool_, mx.bool_)
+    np.testing.assert_array_equal(np.array(out), np.array(want))

@@ -44,8 +44,9 @@ def _written(shape: list[int], fill, dtype, parts) -> mx.array:
     """An array of ``shape`` filled with ``fill``, with each (index,
     array) of ``parts`` written in by a slice update. A slice update
     offsets from the start of the whole array, so it is right at any
-    size."""
-    out = mx.full(shape, fill, dtype)
+    size. mx.full keeps the fill's own dtype for a bool, for an int dtype
+    with a float fill and for an array fill, so the fill is cast first."""
+    out = mx.full(shape, mx.full((), fill, dtype).astype(dtype))
     for index, a in parts:
         out[index] = a.astype(dtype)
     return out
