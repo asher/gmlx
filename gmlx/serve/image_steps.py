@@ -203,10 +203,9 @@ class _Bytes:
         from collections import OrderedDict
 
         self.max_bytes = int(max_bytes)
-        # The configured bound, and the share of it the models loaded
-        # leave the cache.
+        # The configured bound, of which the models loaded leave the
+        # cache max_bytes.
         self.configured = self.max_bytes
-        self.share = 1.0
         self._items: OrderedDict = OrderedDict()
         self._bytes = 0
         self._lock = threading.Lock()
@@ -245,16 +244,16 @@ class _Bytes:
             return
         why = "" if nbytes > self.configured else (
             f": the models loaded leave this cache a share of "
-            f"{self.share:.2f} of its configured {self.configured} bytes")
+            f"{self.max_bytes / self.configured:.2f} of its configured "
+            f"{self.configured} bytes")
         raise StepError(413, f"a tensor of {nbytes} bytes is over the cache "
                         f"of {self.max_bytes} bytes{why}")
 
-    def bound(self, configured: int, share: float = 1.0) -> None:
-        """Set the bound at ``share`` of ``configured`` and shed the oldest
-        tensors over it."""
+    def bound(self, configured: int, max_bytes: int) -> None:
+        """Set the bound at ``max_bytes`` of the ``configured`` one and
+        shed the oldest tensors over it."""
         with self._lock:
-            self.configured, self.share = int(configured), float(share)
-            self.max_bytes = int(configured * share)
+            self.configured, self.max_bytes = int(configured), int(max_bytes)
             while self._bytes > self.max_bytes and self._items:
                 _, gone = self._items.popitem(last=False)
                 self._bytes -= gone.nbytes
@@ -295,6 +294,9 @@ class StepsState:
         self.tensors = _Bytes(cfg.tensor_cache_mb << 20)
         self.adapters = _Bytes(cfg.adapter_cache_mb << 20)
         self._bounds = (self.tensors.max_bytes, self.adapters.max_bytes)
+        # The smallest cache share of the models loaded, and the largest
+        # room one of them keeps in the tensor cache for a cond.
+        self._share, self._tensor_floor = 1.0, 0
         self.runs: dict = {}
         # model id -> (weak reference to its pipeline,
         #              {contract table id: core table id})
@@ -320,9 +322,22 @@ class StepsState:
 
     def scale_caches(self, share: float) -> None:
         """Bound the two caches at ``share`` of their configured sizes, for
-        the models loaded whose plans leave their caches only that room."""
-        self.tensors.bound(self._bounds[0], share)
-        self.adapters.bound(self._bounds[1], share)
+        the models loaded whose plans leave their caches only that room.
+        The tensor cache keeps its floor."""
+        self._share = float(share)
+        self._bound()
+
+    def floor_tensors(self, nbytes: int) -> None:
+        """Keep the tensor cache at ``nbytes`` at any share, the room a
+        loaded video model books there for one cond."""
+        self._tensor_floor = int(nbytes)
+        self._bound()
+
+    def _bound(self) -> None:
+        tensor, adapter = self._bounds
+        self.tensors.bound(tensor, max(int(tensor * self._share),
+                                       min(self._tensor_floor, tensor)))
+        self.adapters.bound(adapter, int(adapter * self._share))
 
     # Tensors and adapters.
 

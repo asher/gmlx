@@ -705,6 +705,45 @@ def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
     assert scaled == [0.25, 1.0]
 
 
+def test_the_step_tensor_cache_keeps_a_loaded_video_entrys_cond(
+        monkeypatch, request):
+    """The step routes' caches take the smallest share of the entries
+    loaded, and their tensor cache the largest cond floor: beside an image
+    entry at a share of 1/16, a video entry's cond of the priced rows of
+    H3's 5120-wide features still uploads. Released, the video entry's
+    floor goes with it."""
+    import dataclasses
+
+    from gmlx.serve import image_service
+
+    pipe, _w = _own_pipe()
+    served = _served(pipe)
+    rows = np.zeros((1, vs.PRICED_TEXT_ROWS, 5120), np.float32)
+    plan = dataclasses.replace(served.plan, cache_share=0.5,
+                               tensor_floor=rows.nbytes)
+    monkeypatch.setattr(vs, "entry_plan", lambda spec: plan)
+    monkeypatch.setattr(pipeline, "load", lambda *a, **k: pipe)
+    _mount(_Host(served), request)
+    tensor, adapter = image_service.cache_bytes()
+    # An image entry loaded at a share of 1/16.
+    shares = {0: (1 / 16, 0)}
+    monkeypatch.setattr(image_service, "_SHARES", shares)
+    try:
+        image_service._scale_step_caches()
+        got = _on_worker(vs._load, served.spec)
+        bounds = steps.STATE.tensors.max_bytes, steps.STATE.adapters.max_bytes
+        _client().put(rows)
+        _on_worker(vs._release, [got])
+        after = steps.STATE.tensors.max_bytes
+        with pytest.raises(StepsClientError) as e:
+            _client().put(rows)
+    finally:
+        shares.clear()
+        image_service._scale_step_caches()
+    assert bounds == (rows.nbytes, adapter // 16)
+    assert after == tensor // 16 and e.value.status == 413
+
+
 @pytest.mark.parametrize("route", ["upload", "encode"])
 def test_a_cond_over_the_share_the_models_leave_is_413_naming_it(
         route, monkeypatch, request):

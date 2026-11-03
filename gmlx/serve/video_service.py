@@ -10,12 +10,13 @@ command runs them one model at a time: the encode, with the text encoder
 alone, and the DiT with its LoRAs and the larger of one step, the video
 decode and the audio decode at the entry's default clip. Each phase also
 counts the caches the server holds, as an image entry counts them: each
-cache takes the room the clip leaves, up to its bound, and no less than
-the share that holds one uploaded cond of the priced text rows. The
-entry bounds its pipeline's caches at that share. Each encode lets the DiT and
-its LoRA pairs go, loads the encoder, encodes, releases it and loads the
-DiT and the configured adapters again. Each decode loads its VAE for the
-call and lets it go after.
+cache takes the room the clip leaves, up to its bound, and the entry
+bounds its pipeline's caches at that share. The step routes' tensor
+cache keeps room for one uploaded cond of the priced text rows at any
+share. Each encode lets the DiT and its LoRA pairs go, loads the
+encoder, encodes, releases it and loads the DiT and the configured
+adapters again. Each decode loads its VAE for the call and lets it go
+after.
 
 The step of the ComfyUI pack (``av_step``) takes the two streams as
 ComfyUI's sampler carries them and gives back what ComfyUI's MiniMax-H3
@@ -62,6 +63,7 @@ class VideoEntryPlan:
     lora_dtypes: tuple = ()
     cache_share: float = 1.0        # of each cache's configured bound
     lora_term: int = 0              # what the plan books for the LoRAs
+    tensor_floor: int = 0           # step tensor cache bytes kept for a cond
 
 
 @dataclass(eq=False)
@@ -146,15 +148,16 @@ def entry_plan(spec) -> VideoEntryPlan:
     """The footprint of a video entry from the headers of its files.
     Raises ``VideoModelError`` for a file that is no video DiT or an
     adapter the family refuses, and ``VideoMemoryError`` for an entry
-    whose default clip does not fit the working budget with room for one
-    cond of the priced rows in the tensor cache."""
+    whose default clip does not fit the working budget with its caches
+    empty but for one cond of the priced rows."""
     from gmlx.video import memfit, pipeline
     from gmlx.video.fingerprint import VideoModelError
     from gmlx.video.loader import identify_dit
     from gmlx.video.registry import run_refusal
 
     from .capacity import overcommit, working_budget_bytes
-    from .image_service import _CACHE_BYTES, cache_bytes, fit_share
+    from .image_service import (_CACHE_BYTES, SHARE_STEPS, cache_bytes,
+                                fit_share)
 
     try:
         ident = identify_dit(spec.path, variant=spec.variant)
@@ -184,28 +187,35 @@ def entry_plan(spec) -> VideoEntryPlan:
     clip = plan_clip(base, frames=d["frames"], width=width, height=height,
                      text=PRICED_TEXT_ROWS, budget=budget)
     tensor, adapter = cache_bytes()
-    caches = 2 * tensor + _CACHE_BYTES["steps"]
-    # The share at which the step routes' tensor cache holds one cond of
-    # the priced rows, the f32 encoder features a client uploads.
+    steps = _CACHE_BYTES["steps"]
+    caches = 2 * tensor + steps
+    # The step routes' tensor cache keeps room for one cond of the priced
+    # rows, the f32 encoder features a client uploads, at any share.
     cond = PRICED_TEXT_ROWS * int(ident.config["text_dim"]) * 4
-    floor = min(1.0, cond / tensor) if tensor > 0 else 1.0
+    floor = min(cond, tensor) if steps else 0
 
-    def price(share: float) -> int:
-        # The step routes' caches stay through the encode. The pairs and
+    def price(share: float, kept: int = floor) -> int:
+        # The step routes' caches stay through the encode, the tensor
+        # cache with room for ``kept`` bytes at any share. The pairs and
         # tables of a request go with the DiT.
-        held = int(caches * share)
+        held = int(caches * share) + max(0, kept - int(tensor * share))
         return max(clip.phases["encode"] + held,
                    resident_bytes(clip.phases, clip.terms) + held
                    + int(2 * adapter * share))
 
-    got = fit_share(price, budget)
-    if got is not None and got[1] < floor:
-        got = (price(floor), floor) if price(floor) <= budget else None
+    # The share the clip leaves the caches, as an image entry's, then the
+    # largest one under it that leaves the tensor cache its cond too.
+    got = fit_share(lambda share: price(share, 0), budget)
+    if got is not None and budget is not None:
+        k = round(got[1] * SHARE_STEPS)
+        while k >= 0 and price(k / SHARE_STEPS) > budget:
+            k -= 1
+        got = (price(k / SHARE_STEPS), k / SHARE_STEPS) if k >= 0 else None
     if got is None and overcommit():
         got = price(1.0), 1.0
     if got is None:
         raise memfit.VideoMemoryError(
-            f"video model {spec.id!r} needs {price(floor) / memfit.GiB:.2f} "
+            f"video model {spec.id!r} needs {price(0.0) / memfit.GiB:.2f} "
             f"GiB for one {width}x{height} clip of {d['frames']} frames, over "
             f"the working budget of {budget / memfit.GiB:.2f} GiB. Set a "
             "smaller defaults.size or defaults.seconds. GMLX_OVERCOMMIT=1 "
@@ -213,7 +223,8 @@ def entry_plan(spec) -> VideoEntryPlan:
     footprint, share = got
     return VideoEntryPlan(**{**base.__dict__, "footprint": int(footprint),
                              "cache_share": share,
-                             "lora_term": int(clip.terms["denoise"]["lora"])})
+                             "lora_term": int(clip.terms["denoise"]["lora"]),
+                             "tensor_floor": floor})
 
 
 def entry_footprint(spec) -> int:
@@ -235,7 +246,7 @@ def _load(spec) -> ServedVideo:
         # The pair cache holds the entry's own pairs in the room the plan
         # books for them, beside the share of a request's.
         bound_caches(pipe, plan.lora_term, plan.cache_share)
-        _SHARES[id(served)] = plan.cache_share
+        _SHARES[id(served)] = (plan.cache_share, plan.tensor_floor)
         _scale_step_caches()
     except BaseException:
         del pipe

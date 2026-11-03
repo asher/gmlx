@@ -152,16 +152,22 @@ def bound_caches(pipe, configured: int = 0, share: float = 1.0) -> None:
     pipe.tables.max_bytes = adapter + int(configured)
 
 
-# The cache share of each loaded entry, by id of its ServedImage or
-# ServedVideo. The step routes' caches serve every entry and take the
-# smallest share.
+# The (cache share, tensor floor) of each loaded entry, by id of its
+# ServedImage or ServedVideo. The step routes' caches serve every entry
+# and take the smallest share, and their tensor cache the largest floor.
 _SHARES: dict = {}
 
 
 def _scale_step_caches() -> None:
     from .image_steps import STATE
 
-    STATE.scale_caches(min(_SHARES.values(), default=1.0))
+    shares = list(_SHARES.values())
+    STATE.floor_tensors(max((f for _s, f in shares), default=0))
+    STATE.scale_caches(min((s for s, _f in shares), default=1.0))
+
+
+# The grid of cache shares an entry is fitted on.
+SHARE_STEPS = 64
 
 
 def fit_share(price, budget):
@@ -175,7 +181,7 @@ def fit_share(price, budget):
     bare = price(0.0)
     if bare > budget:
         return None
-    steps = 64
+    steps = SHARE_STEPS
     k = min(steps - 1, int(steps * (budget - bare) / max(1, full - bare)))
     while k > 0 and price(k / steps) > budget:
         k -= 1
@@ -391,7 +397,7 @@ def _load(spec) -> ServedImage:
         bound_caches(pipe, sum(2 * os.path.getsize(p)
                                for p, _ in spec.adapters),
                      plan.cache_share)
-        _SHARES[id(served)] = plan.cache_share
+        _SHARES[id(served)] = (plan.cache_share, 0)
         _scale_step_caches()
     except BaseException:
         # The pipeline loaded and an adapter failed: free it here, as the
