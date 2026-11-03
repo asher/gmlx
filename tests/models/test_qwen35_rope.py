@@ -206,3 +206,77 @@ def test_cpu_default_device_takes_the_cos_sin_route(monkeypatch):
         emb.fused_apply = True
         mx.set_default_device(prev)
     assert mx.array_equal(qs, qo).item() and mx.array_equal(ks, ko).item()
+
+
+# ---------------------------------------------------------------------------
+# every-run guard: the fused kernels index in 64-bit
+# ---------------------------------------------------------------------------
+
+# base = ((b * q_heads + h) * q_len + t) * q_dim, and x / x_out are indexed at
+# base + d. A Qwen3-VL or Qwen3.5 prefill chunk with a raised
+# --prefill-step-size, or a Qwen-Image 2.1 encode past a prompt length, takes
+# numel(q) over 2^31 while the launch grid stays under it, so a 32-bit index
+# wraps negative: the rows past the crossing go unwritten and the wrapped
+# store lands in other memory. The grid cannot reach 2^31 at a test shape, so
+# this checks the generated kernel source instead: the element index and the
+# cos/sin row index are 64-bit, and no 32-bit form of them is left. The limit
+# itself is exercised per copy under nightly (tests/past_int32.py).
+
+_INDEX_KERNELS = (
+    (rp, "_mrope_apply_kernel"),
+    (_R, "_mrope_apply_kernel"),
+    (_R, "_rotary_apply_kernel"),
+)
+
+_INT64_BASE = (
+    "long base = ((static_cast<long>(b) * q_heads + h) * q_len + t) * q_dim;",
+    "long pass_idx = base + pass_d;",
+    "long idx = base + d;",
+)
+
+_INT32_BASE = (
+    "int base = ",
+    "int pass_idx = ",
+    "int idx = base",
+)
+
+# cos/sin row index, only in _rotary_apply_kernel
+_INT64_COS = (
+    "((static_cast<long>(axis) * q_bsz + b) * q_len + t)",
+    "((static_cast<long>(0) * q_bsz + b) * q_len + t)",
+    "(static_cast<long>(b) * q_len + t)",
+)
+
+_INT32_COS = (
+    "((axis * q_bsz + b) * q_len + t)",
+    "((0 * q_bsz + b) * q_len + t)",
+    "cos[(b * q_len + t)",
+    "sin[(b * q_len + t)",
+)
+
+
+@pytest.mark.parametrize(
+    "mod,name", _INDEX_KERNELS, ids=[f"{m.__name__}.{n}" for m, n in _INDEX_KERNELS]
+)
+def test_fused_kernel_element_index_is_64_bit(mod, name):
+    src = inspect.getsource(getattr(mod, name))
+    for needed in _INT64_BASE:
+        assert needed in src, (
+            f"{mod.__name__}.{name} lost 64-bit element indexing: missing {needed!r}"
+        )
+    for banned in _INT32_BASE:
+        assert banned not in src, (
+            f"{mod.__name__}.{name} reverted to 32-bit element indexing: {banned!r}"
+        )
+
+
+def test_rotary_kernel_cos_sin_row_index_is_64_bit():
+    src = inspect.getsource(_R._rotary_apply_kernel)
+    for needed in _INT64_COS:
+        assert needed in src, (
+            f"_rotary_apply_kernel lost 64-bit cos/sin indexing: missing {needed!r}"
+        )
+    for banned in _INT32_COS:
+        assert banned not in src, (
+            f"_rotary_apply_kernel reverted to 32-bit cos/sin indexing: {banned!r}"
+        )
