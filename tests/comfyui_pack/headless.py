@@ -592,6 +592,41 @@ class Cases:
         n = len(kinds(self.stub.log(), "step"))
         self.check("no step served", n == 0, n)
 
+    async def h3_t2v(self):
+        """The MiniMax-H3 example workflow: the prompt from MiniMaxH3ImageToVideo,
+        AV steps at the recipe's shifts on ComfyUI's simple schedule, and the
+        clip decoded by the gmlx video and audio VAEs into a saved video."""
+        wf = workflow("minimax-h3-t2v.json")
+        wf["6"]["inputs"].update(width=64, height=64, length=22)
+        wf["7"]["inputs"]["steps"] = 2
+        wf["15"]["inputs"]["filename_prefix"] = "video/h3"
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        enc = kinds(log, "encode")
+        self.check("the prompt encoded once, with no images",
+                   [(e["text"], e["images"]) for e in enc] == [(wf["6"]["inputs"]["prompt"], 0)],
+                   [(e["text"][:20], e["images"]) for e in enc])
+        steps = kinds(log, "av_step")
+        self.check("one row a step at the recipe's shifts and audio scale",
+                   len(steps) == 2 and all(e["shifts"] == {"video": 6.0, "audio": 3.0}
+                                           and e["audio_scale"] == 2.0 for e in steps),
+                   [(e["shifts"], e["audio_scale"]) for e in steps])
+        self.check("the clip's latents", {(tuple(e["video_shape"]), tuple(e["audio_shape"]))
+                                          for e in steps} == {((1, 24, 7, 4, 4), (1, 32, 2, 37))},
+                   [(e["video_shape"], e["audio_shape"]) for e in steps][:1])
+        got = [e["timestep"] for e in steps]
+        want = [1000.0, 6 * 0.5 / (1 + 5 * 0.5) * 1000]
+        self.check("timesteps of the simple schedule at shift 6", np.allclose(got, want, atol=1e-2),
+                   {"got": got, "want": want})
+        self.check("video and audio decoded once each",
+                   (len(kinds(log, "video_decode")), len(kinds(log, "audio_decode"))) == (1, 1),
+                   (len(kinds(log, "video_decode")), len(kinds(log, "audio_decode"))))
+        d = os.path.join(self.work, "output", "video")
+        saved = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        self.check("video saved", any(f.startswith("h3_") and f.endswith(".mp4") for f in saved),
+                   saved)
+
     async def turbo_sigmas(self):
         wf = {
             "1": {"class_type": "GmlxModelLoader", "inputs": {"model_name": "qwen-image-2.1-turbo",
@@ -676,6 +711,7 @@ async def amain(a) -> dict:
                          c.flux2_reference_method)
             await c.case("moss-image t2i under SkipLayerGuidanceDiTSimple", c.moss_t2i)
             await c.case("moss-image: a prompt queued behind the running one", c.moss_queued)
+            await c.case("minimax-h3 t2v with the gmlx video and audio VAEs", c.h3_t2v)
             if comfy_version(a.comfy) >= (0, 41, 0):
                 await c.case("flux-3-klein t2i", c.flux3_t2i)
                 await c.case("flux-3-klein edit with two references", c.flux3_edit)
