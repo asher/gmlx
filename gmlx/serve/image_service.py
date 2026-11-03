@@ -1025,6 +1025,24 @@ def _guided(req: ImageRequest, served: ServedImage) -> float:
     return float(served.plan.cfg)
 
 
+def _texts(req: ImageRequest, served: ServedImage) -> tuple:
+    """(prompt, text, negative) of ``req`` on ``served``: the prompt, the
+    variation prompt for a variation without one, the text the encoder
+    reads for it, the upsampler's rewrite when there is one, and the
+    negative prompt it reads, the request's or else the entry's default,
+    None when guidance is off."""
+    prompt = req.prompt
+    if (req.route == "variations" and not prompt
+            and served.pipe.family.edit is not None):
+        prompt = VARIATION_PROMPT
+    neg = None
+    if _guided(req, served) != 1.0:
+        neg = req.negative_prompt
+        if neg is None:
+            neg = (served.spec.defaults or {}).get("negative_prompt") or ""
+    return prompt, req.revised_prompt or prompt, neg
+
+
 def serves_edits(fam, tower: bool) -> bool:
     """Whether the edits routes take the reference images of ``fam`` on an
     entry with its vision tower, or without it when ``tower`` is false. A
@@ -1177,9 +1195,16 @@ def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
 def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
               budget) -> None:
     """Refuse a request whose memory plan does not fit ``budget`` with a
-    400 that names the largest size of its aspect that fits, or, on a
-    family whose plan prices the prompt, a prompt whose rows do not fit at
-    any size, as the preflight of the image command prices them."""
+    400 that names the cause. A family whose plan prices the prompt prices
+    every size at the most text rows the texts its encoder reads can give,
+    as the image command's preflight prices them. The prompt is the cause
+    when no size of the request's shape fits at those rows and the
+    request's own size fits at the family's default rows: the 400 names
+    the prompt, or the negative prompt when it has more rows. Otherwise
+    an edit gets the plan's message, which names the references that fit,
+    and any other request the largest size of its shape that fits at
+    those rows, or that none does."""
+    from gmlx.commands.image_preflight import prompt_rows
     from gmlx.image import memfit
 
     pipe = served.pipe
@@ -1195,20 +1220,19 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     init = bool(req.images) and (pipe.family.edit is None
                                  or req.mask is not None)
 
-    # A family whose plan prices the prompt prices its real rows, not the
-    # family's most, so an over-long prompt is refused here rather than
-    # read by the encoder. The rows come from the text alone, before a
-    # tokenizer loads, as the image command's preflight prices them.
-    caption = None
+    # The rows of a family whose plan prices the prompt come from the
+    # texts run_job encodes, before a tokenizer loads, in the caption and
+    # in the prefix of a family that caches one.
+    caption = cause = None
     if memfit.prices_prompt(pipe.family.name):
-        from gmlx.image.text_encoder import encoder_spec, rows_at_most
-
-        spec = encoder_spec(pipe.family)
-        texts = [t for t in (req.revised_prompt or req.prompt,
-                             req.negative_prompt) if t]
-        if texts:
-            caption = max(rows_at_most(spec, t) for t in texts)
-            args["caption_tokens"] = caption
+        _, text, neg = _texts(req, served)
+        rows = {"prompt": prompt_rows(pipe.family, text, len(refs))}
+        if neg is not None:
+            rows["negative_prompt"] = prompt_rows(pipe.family, neg,
+                                                  len(refs))
+        cause = max(rows, key=rows.get)
+        caption = rows[cause]
+        args.update(caption_tokens=caption, text_tokens=caption)
 
     def fits(w: int, h: int, ref_sizes, a=args) -> bool:
         try:
@@ -1221,22 +1245,6 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     w, h = size
     if budget is None or fits(w, h, refs):
         return
-    # A prompt too long to plan at any size is refused as the prompt, not
-    # the size: it fits at the family's most text rows but not its own.
-    if caption is not None:
-        base = {k: v for k, v in args.items() if k != "caption_tokens"}
-        if fits(w, h, refs, base):
-            raise _bad(
-                f"the prompt is too long for {pipe.family.title}: its "
-                f"{caption} text rows do not fit in memory beside the model; "
-                "shorten the prompt", "prompt")
-    if refs:
-        # The plan's own message names the references that fit.
-        try:
-            plan_memory(height=h, width=w, init_image=init, ref_sizes=refs,
-                        **args)
-        except memfit.ImageMemoryError as e:
-            raise _bad(str(e), "image") from None
     unit = _stride(pipe)
 
     def scaled(k: int) -> tuple:
@@ -1247,13 +1255,40 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     # A smaller size of the shape never needs more memory, so a bisection
     # over the longer side finds the largest that fits in a few plans.
     best = None
-    lo, hi = 1, max(w, h) // unit - 1
-    while lo <= hi:
-        k = (lo + hi) // 2
-        if fits(*scaled(k), refs):
-            best, lo = scaled(k), k + 1
-        else:
-            hi = k - 1
+    if not refs or caption is not None:
+        lo, hi = 1, max(w, h) // unit - 1
+        while lo <= hi:
+            k = (lo + hi) // 2
+            if fits(*scaled(k), refs):
+                best, lo = scaled(k), k + 1
+            else:
+                hi = k - 1
+    # The prompt is the cause when no size of the shape fits at its rows
+    # and the request's own size fits at the family's default rows.
+    if caption is not None and best is None:
+        base = {k: v for k, v in args.items()
+                if k not in ("caption_tokens", "text_tokens")}
+        if fits(w, h, refs, base):
+            what, fix = "the prompt", "shorten the prompt"
+            if cause == "negative_prompt":
+                what, fix = "the negative prompt", "shorten it"
+                if req.negative_prompt is None:
+                    what = (f"the default negative prompt of "
+                            f"{served.spec.id!r}")
+                    fix = "pass a shorter negative_prompt"
+            elif req.revised_prompt:
+                what = "the upsampled prompt"
+                fix = "shorten the prompt or turn prompt_upsampling off"
+            raise _bad(f"{what} is too long for {pipe.family.title}: up to "
+                       f"{caption} text rows do not fit in memory beside "
+                       f"the model; {fix}", cause)
+    if refs:
+        # The plan's own message names the references that fit.
+        try:
+            plan_memory(height=h, width=w, init_image=init, ref_sizes=refs,
+                        **args)
+        except memfit.ImageMemoryError as e:
+            raise _bad(str(e), "image") from None
     if best is None:
         raise _bad(f"size {w}x{h} does not fit in memory beside the models "
                    "now loaded, and no smaller size of its shape does",
@@ -1534,14 +1569,10 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
     steps = (req.steps or quality_steps(fam, pipe.variant, req.quality)
              or spec_defaults.get("steps") or pipe.defaults.steps)
     sampler = req.sampler or spec_defaults.get("sampler") or "euler"
-    neg_text = None
-    if cfg != 1.0:
-        neg_text = req.negative_prompt
-        if neg_text is None:
-            neg_text = spec_defaults.get("negative_prompt") or ""
+    # The fit check priced these texts.
+    prompt, text, neg_text = _texts(req, served)
     alpha = req.background == "transparent"
 
-    prompt = req.prompt
     refs: tuple = ()
     init = mask = crop = None
     strength = None
@@ -1554,8 +1585,6 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
             # when the request takes its size from the reference.
             if req.size is None and req.mask is None:
                 crop = getattr(req.refs, "crop", None)
-            if req.route == "variations" and not prompt:
-                prompt = VARIATION_PROMPT
         if fam.edit is None or req.mask is not None:
             init = resized(first[..., :3], (width, height))
             strength = req.strength
@@ -1566,7 +1595,6 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
             mask = mask_from_image(req.mask, (width, height))
 
     table, adapters = _adapter_table(served, req.adapters, model_dirs)
-    text = req.revised_prompt or prompt
     _make_room(served, cfg, size, refs, init is not None, budget,
                [text] + ([] if neg_text is None else [neg_text]))
     t0 = time.perf_counter()

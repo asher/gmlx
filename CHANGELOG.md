@@ -15,13 +15,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   requests passes about 260K tokens, or when a long request joins them.
 - FLUX.2 klein and the FLUX.1 VAE encoder no longer leave rows of the image
   wrong at very large canvases and reference counts.
-- A Qwen3-VL or Qwen3.5 mmproj load with a raised `--prefill-step-size`, and
-  a Qwen-Image 2.1 image from a very long prompt, no longer return wrong text
-  features or corrupt memory. The fused rotary kernels index in 64-bit, so a
-  query past 2^31 elements is addressed correctly.
-- `gmlx serve` refuses an image prompt too long to fit in memory with a 400
-  that names the prompt, instead of pricing the model's default text rows and
-  reading it. Qwen-Image 2.1, whose rows are capped nowhere, was affected.
+- Qwen3-VL, Qwen3.5 and Qwen3.6 with an mmproj, and Qwen-Image 2.1, gave wrong
+  output or corrupted memory past about 262K to 524K tokens in a prefill chunk.
+- `gmlx serve` now refuses an over-long image prompt with a 400 that names the
+  prompt, where before it ran.
 
 ## [0.5.4] - 2026-10-29
 
