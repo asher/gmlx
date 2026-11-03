@@ -342,7 +342,7 @@ def _print_plan(plan: Plan, *, ram: int | None, free: int | None,
         cast = _cast(plan)
         fit = classify_fit(total + cast, ram)
         where = {FIT_FITS: "fit", FIT_TIGHT: "are tight on"}.get(
-            fit, "are more than") if fit else None
+            fit, "are too much to load together in") if fit else None
         if where:
             load = (f", {_gb(total + cast)} while the DiT loads" if cast
                     else "")
@@ -769,6 +769,16 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
     dit_q = next(h for h in r.dit_quants if h.upper() == dit_q.upper())
     enc_q = next(h for h in r.encoder_quants if h.upper() == enc_q.upper())
     cls = catalog.memory_class(ram)
+    if not a.quant and catalog.makes_no_image(ram):
+        least = catalog.MEMORY_CLASSES[0]
+        msg = (f"no {r.title} DiT that gmlx pulls makes an image in this "
+               f"Mac's {_gb(ram, 0)} RAM; the smallest Mac that runs one has "
+               f"{least} GB. Pass --quant to pull one anyway")
+        if a.json:
+            print(json.dumps({"recipe": r.name, "error": msg,
+                              "needs_class": least}, indent=2))
+        print(f"error: {msg}", file=sys.stderr)
+        return 1
 
     cfg_path = _config_path(a)
     cfg = None
@@ -814,7 +824,7 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
                     f"GB Mac; the pull takes {enc_q}")
                 plan = own
     plan.default = (plan.dit_quant, plan.encoder_quant) == \
-        catalog.default_quants(r, ram)
+        catalog.default_quants(r, ram) and not catalog.makes_no_image(ram)
     need = _need(plan)
     free = manage._disk_free(base_dir)
     if a.json:

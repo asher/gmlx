@@ -494,6 +494,12 @@ def memory_class(ram_bytes: int | None) -> int:
     return fit[-1] if fit else MEMORY_CLASSES[0]
 
 
+def makes_no_image(ram_bytes: int | None) -> bool:
+    """Whether a Mac with ``ram_bytes`` of RAM is under the smallest memory
+    class, where no image model makes an image. Unknown RAM is not."""
+    return bool(ram_bytes) and ram_bytes / (1 << 30) + 0.5 < MEMORY_CLASSES[0]
+
+
 def default_quants(r: Recipe, ram_bytes: int | None) -> tuple[str, str]:
     """(DiT quant, encoder quant) the recipe pulls on this Mac."""
     return DEFAULT_QUANTS[r.name][memory_class(ram_bytes)]

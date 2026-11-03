@@ -864,7 +864,7 @@ def image_entries(box: Box) -> tuple:
     from gmlx.image import catalog as ic
 
     ram = box.ram
-    small = ram / GiB + 0.5 < ic.MEMORY_CLASSES[0]
+    small = ic.makes_no_image(ram)
     runs, too_big = [], []
     for r in ic.RECIPES.values():
         quants = tuple(sorted(((q, ic.download_bytes(r, ram, q)) for q in r.dit_quants),
