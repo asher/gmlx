@@ -89,8 +89,10 @@ class VideoFamily:
     # () -> EncoderSpec of the text encoder, built on call so this module
     # loads no mlx.
     encoder: Callable | None = None
-    # (frames, width, height) -> the video and audio latent shapes.
+    # (frames, width, height) -> the video and audio latent shapes, and
+    # (video latent frames) -> the clip's frames, None off the clip grid.
     latent_shapes: Callable | None = None
+    clip_frames: Callable | None = None
     # config -> LoraKeyMap, and (safetensors header, config) -> (why,
     # kind) for a LoRA file gmlx refuses, or None.
     lora_map: Callable | None = None

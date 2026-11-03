@@ -715,10 +715,11 @@ def _clip_of(fam, vshape, ashape=None) -> tuple:
 
     stride = int(COMFY[fam.name]["latent"]["stride"])
     t, h, w = (int(d) for d in vshape[2:])
-    frames = (t - 2) // 5 * 17 + 5 if t >= 2 else 0
+    frames = fam.clip_frames(t)
     width, height = w * stride, h * stride
     try:
-        want = fam.latent_shapes(frames, width, height)
+        want = (None if frames is None
+                else fam.latent_shapes(frames, width, height))
     except ValueError:
         want = None
     got = (tuple(vshape), tuple(ashape) if ashape is not None else None)

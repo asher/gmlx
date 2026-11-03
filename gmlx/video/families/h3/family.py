@@ -129,6 +129,17 @@ def latent_frames(frames: int) -> int:
     return 2 if frames <= 5 else ((frames - 5) // 17) * 5 + 2
 
 
+def clip_frames(latents: int) -> int | None:
+    """The frame count of the clip whose video latent has ``latents``
+    frames, the inverse of ``latent_frames`` on the clip grid: each 5
+    latent frames past the first clip's add 17 frames to it. None for a
+    count that no clip's latent has."""
+    steps, rest = divmod(latents - latent_frames(MIN_FRAMES), 5)
+    if steps < 0 or rest:
+        return None
+    return MIN_FRAMES + 17 * steps
+
+
 def audio_frames(frames: int) -> int:
     """Audio latent frames per stereo channel for a clip of ``frames``."""
     return round(frames / FPS * AUDIO_LATENT_FPS)
@@ -460,6 +471,7 @@ FAMILY = VideoFamily(
     anchor_rules=ANCHOR_RULES,
     encoder=_encoder,
     latent_shapes=latent_shapes,
+    clip_frames=clip_frames,
     lora_map=_lora_map,
     lora_refusal=_lora_refusal,
     vsa_gate=VSA_GATE,

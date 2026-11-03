@@ -198,5 +198,17 @@ def test_clip_lengths_size_their_latents():
                                               (1, 32, 2, 37))
     with pytest.raises(ValueError, match="17 k"):
         hf.latent_shapes(24, 512, 512)
+
+
+def test_a_video_latent_names_the_frames_of_its_clip():
+    """The server sizes a ComfyUI clip from its video latent: each clip
+    length on the grid comes back from its latent frames, and a count that
+    no clip's latent has names none."""
+    lengths = [n for n in range(hf.MIN_FRAMES, hf.MAX_FRAMES + 1)
+               if hf.align_frames(n) == n]
+    assert [hf.clip_frames(hf.latent_frames(n)) for n in lengths] == lengths
+    taken = {hf.latent_frames(n) for n in lengths}
+    assert [t for t in range(max(taken) + 1)
+            if hf.clip_frames(t) is not None] == sorted(taken)
     with pytest.raises(ValueError, match="multiple of 32"):
         hf.latent_shapes(22, 500, 512)
