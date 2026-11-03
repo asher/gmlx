@@ -1062,9 +1062,9 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
     tower, and guidance on a variant distilled to sample without it or on
     a flow map DiT, and a flow map's sampler other than euler, the rules
     of ``api.check_sampling``, which ``api.sample`` holds too. The
-    references of a family that prepares them together are prepared here
-    into ``req.refs``, and an image its rules refuse gets a 400 that
-    names it."""
+    references of an edit are prepared here into ``req.refs``, by
+    ``_prepare_refs``, so the fit check prices them at the size the job
+    runs them, and an image its rules refuse gets a 400 that names it."""
     from gmlx.image.api import check_sampling, fixed_steps
 
     pipe = served.pipe
@@ -1114,14 +1114,41 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
                else f"give the chat model {shared!r} its mmproj")
         raise _bad(f"edits on {served.spec.id!r} need the encoder's vision "
                    f"tower: {fix}", "image")
-    if edit.prepare_all is not None:
+    _prepare_refs(req, served)
+
+
+def _prepare_refs(req: ImageRequest, served: ServedImage) -> tuple:
+    """``req.refs``, prepared once: the reference images of an edit as its
+    family runs them. A family that prepares the references of a request
+    together prepares them so, and any other prepares each at its area,
+    as ``api.references`` does. An image its rules refuse gets a 400 that
+    names it."""
+    if req.refs is not None:
+        return req.refs
+    from gmlx.image import api
+
+    images = [i[..., :3] for i in req.images]
+
+    def where(i) -> str:
+        return ("image" if i is None or len(images) == 1
+                else f"image {i + 1}")
+
+    pipe = served.pipe
+    if pipe.family.edit.prepare_all is not None:
         try:
-            req.refs = edit.prepare_all([i[..., :3] for i in req.images])
+            req.refs = pipe.family.edit.prepare_all(images)
         except ValueError as e:
-            i = getattr(e, "index", None)
-            where = "image" if i is None or len(req.images) == 1 else (
-                f"image {i + 1}")
-            raise _bad(f"{where}: {e}", "image") from None
+            raise _bad(f"{where(getattr(e, 'index', None))}: {e}",
+                       "image") from None
+        return req.refs
+    refs: list = []
+    for i, image in enumerate(images):
+        try:
+            refs += api.references(pipe, [image])
+        except ValueError as e:
+            raise _bad(f"{where(i)}: {e}", "image") from None
+    req.refs = tuple(refs)
+    return req.refs
 
 
 def _fit_args(pipe, served: ServedImage, budget, cfg: float,
@@ -1209,18 +1236,19 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     Otherwise, when a smaller size fits at the prompt's rows or no size
     fits even at the default rows, an edit gets the plan's message, which
     names the references that fit, and any other request the largest size
-    of its shape that fits at those rows, or that none does."""
+    of its shape that fits at those rows, or that none does. An edit's
+    references are priced at the size the job runs them, by
+    ``_prepare_refs``."""
     from gmlx.commands.image_preflight import prompt_rows, prompt_terms
     from gmlx.image import memfit
 
     pipe = served.pipe
     cfg = _guided(req, served)
-    if pipe.family.edit is None:
-        refs = []
-    elif req.refs is not None:
-        refs = [(r.height, r.width) for r in req.refs]
-    else:
-        refs = [r.shape[:2] for r in req.images]
+    refs = []
+    if pipe.family.edit is not None and req.images:
+        # At the size the job runs them, which may be far from the raw
+        # image's.
+        refs = [(r.height, r.width) for r in _prepare_refs(req, served)]
     args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, refs))
     plan_memory = memfit.plan_memory
     init = bool(req.images) and (pipe.family.edit is None

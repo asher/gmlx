@@ -1496,6 +1496,34 @@ def test_the_room_a_prompt_makes_is_what_its_admission_priced(
     assert shed == [need]
 
 
+def test_small_references_are_priced_at_the_size_the_edit_runs_them():
+    """Qwen-Image 2.1 runs each reference at about 1024x1024 pixels. A
+    guided edit of four 512x512 images is refused on a budget their raw
+    size would fit, and admitted on one their size in the edit fits."""
+    served = _qwen_served()
+    req = _edit_req(4, (512, 512), prompt="swap the hats", guidance=4.0)
+    image_service.check_family(req, served)
+    assert [(r.height, r.width) for r in req.refs] == [(1024, 1024)] * 4
+    raw = _need(served, 1024, req.prompt, cfg=4.0, refs=[(512, 512)] * 4)
+    run = _need(served, 1024, req.prompt, cfg=4.0, refs=[(1024, 1024)] * 4)
+    assert run > raw
+    assert _refused(req, served, 1024, raw).param == "image"
+    image_service.fit_check(req, served, (1024, 1024), run)
+
+
+def test_a_large_photo_is_admitted_on_a_budget_its_edit_size_fits():
+    """A 4096x4096 photo runs at 1024x1024 in a Qwen-Image 2.1 edit, so
+    the edit is admitted on a budget that fits that size, far under what
+    the photo's own size would need."""
+    served = _qwen_served()
+    req = _edit_req(1, (4096, 4096), prompt="make it red")
+    image_service.check_family(req, served)
+    assert [(r.height, r.width) for r in req.refs] == [(1024, 1024)]
+    budget = _need(served, 1024, req.prompt, refs=[(1024, 1024)])
+    assert _need(served, 1024, req.prompt, refs=[(4096, 4096)]) > budget
+    image_service.fit_check(req, served, (1024, 1024), budget)
+
+
 @pytest.mark.parametrize("family", ["qwen_image21", "z_image"])
 def test_a_variation_without_a_prompt_reads_the_variation_prompt_to_edit(
         family):
@@ -1515,11 +1543,16 @@ def test_a_variation_without_a_prompt_reads_the_variation_prompt_to_edit(
 @pytest.mark.parametrize("prompt", ["swap the hats", _LONG],
                          ids=["short", "long"])
 def test_an_edit_is_priced_as_the_image_command_prices_it(monkeypatch,
-                                                           prompt):
-    """Serve and the image command's preflight price the text rows of a
-    Qwen-Image 2.1 edit with four references alike, in the caption and the
-    prefix: the prompt in the template for references with the slot text
-    of each, at least the family's default rows."""
+                                                           tmp_path, prompt):
+    """Serve and the image command's preflight price a Qwen-Image 2.1 edit
+    of four 512x512 images alike: each reference at the size the family
+    runs it, and the text rows, in the caption and the prefix, of the
+    prompt in the template for references with the slot text of each, at
+    least the family's default rows."""
+    import numpy as np
+    from PIL import Image
+
+    from gmlx.commands import image as image_cmd
     from gmlx.commands import image_preflight as pf
     from gmlx.image import api, memfit
 
@@ -1528,19 +1561,30 @@ def test_an_edit_is_priced_as_the_image_command_prices_it(monkeypatch,
         seen.append(k) or SimpleNamespace(fits=True)))
     served = _qwen_served()
     req = _edit_req(4, (512, 512), prompt=prompt)
+    image_service.check_family(req, served)
     image_service.fit_check(req, served, (1024, 1024), 1 << 40)
     serve = seen[-1]
+    # The image command reads its --ref files and prepares them, then
+    # prices what it prepared.
+    paths = []
+    for i in range(4):
+        paths.append(str(tmp_path / f"ref{i}.png"))
+        Image.fromarray(np.zeros((512, 512, 3), np.uint8)).save(paths[-1])
+    refs = image_cmd._references(SimpleNamespace(
+        ref=paths, encoder_mmproj="/mm.gguf", ref_size=None),
+        served.pipe.family)
     monkeypatch.setattr(pf, "identify_dit", lambda p, **k: SimpleNamespace(
         family=served.pipe.family, variant="base"))
     monkeypatch.setattr(api, "_header_bytes", lambda path, kind: 0)
     monkeypatch.setattr(pf, "dit_transient", lambda dit, act: 0)
     monkeypatch.setattr(pf, "load_transient", lambda e, v, m: 0)
     pf.check("d", "e", "v", height=1024, width=1024, cfg=1.0,
-             refs=[(512, 512)] * 4, prompts=[req.prompt])
+             refs=[(r.height, r.width) for r in refs], prompts=[req.prompt])
     cli = seen[-1]
+    assert serve["ref_sizes"] == cli["ref_sizes"] == [(1024, 1024)] * 4
     rows = serve["caption_tokens"]
     assert rows == serve["text_tokens"] == cli["caption_tokens"] == (
         cli["text_tokens"])
     assert rows == 512 if prompt == "swap the hats" else rows > len(prompt)
     assert serve["prefix_rows"] == cli["prefix_rows"] == [
-        rows + 4 * (512 // 16) ** 2]
+        rows + 4 * (1024 // 16) ** 2]
