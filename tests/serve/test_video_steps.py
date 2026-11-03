@@ -223,6 +223,37 @@ def test_the_refined_rows_are_kept_by_cond_and_patch_table(host, pipe,
     assert _rel(other[0], first[0]) > 1e-3
 
 
+def test_a_lora_from_comfyuis_patches_steps_as_its_file(host, pipe, tmp_path):
+    """The pack sends a stock LoRA loader's patches as a contract table on
+    ComfyUI's keys; a step under it equals one under the same file."""
+    from lora_fixtures import write_keys
+    from test_video_h3_lora import _adapter, _comfy_keys
+
+    adapter = _adapter(5)
+    path = tmp_path / "lora.safetensors"
+    write_keys(path, _comfy_keys(adapter))
+    c = _client()
+    entries = [{"key": f"diffusion_model.{target}.weight", "band": None,
+                "patches": [{"up": c.put(up, kind="adapters"),
+                             "down": c.put(down, kind="adapters"),
+                             "alpha": float(alpha), "strength": 1.0,
+                             "strength_model": 1.0}]}
+               for target, (down, up, alpha) in sorted(adapter.items())]
+    tid = c.define_table("h3", {"model": "h3", "entries": entries})
+    core = _on_worker(pipeline.adapter_table, pipe, [(str(path), 1.0)])
+    steps.STATE.tables_of("h3", pipe)["file"] = core
+    video, audio, feats = _clip()
+    row = {"cond": c.put(feats)}
+    got = c.av_step("h3", None, video, audio, 600.0, row, shifts=SHIFTS,
+                    audio_scale=SCALE, patch_table=tid)
+    want = c.av_step("h3", None, video, audio, 600.0, row, shifts=SHIFTS,
+                     audio_scale=SCALE, patch_table="file")
+    plain = c.av_step("h3", None, video, audio, 600.0, row, shifts=SHIFTS,
+                      audio_scale=SCALE)
+    for g, w, p in zip(got, want, plain):
+        assert _rel(g, w) < 1e-5 and _rel(g, p) > 1e-3
+
+
 @pytest.mark.parametrize("change, match", [
     # A batch of two, as RepeatLatentBatch makes; ComfyUI's own H3 forward
     # takes batch 1.
