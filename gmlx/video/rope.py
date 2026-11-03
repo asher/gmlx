@@ -13,15 +13,19 @@ from __future__ import annotations
 import mlx.core as mx
 import numpy as np
 
+from gmlx import mlx_guards
+
 
 def pair_halves(x: mx.array, rot: int) -> mx.array:
     """The last dim of ``x`` with dims i and i + rot / 2 side by side for
-    i < rot / 2, and dims past ``rot`` unchanged."""
+    i < rot / 2, and dims past ``rot`` unchanged. Past 2^31 elements the
+    stock concatenate misplaces rows on the GPU, so it goes through the
+    guard."""
     *lead, d = x.shape
     half = rot // 2
     head = x[..., :rot].reshape(*lead, 2, half).swapaxes(-1, -2)
     head = head.reshape(*lead, rot)
-    return head if rot == d else mx.concatenate([head, x[..., rot:]], axis=-1)
+    return head if rot == d else mlx_guards.concatenate([head, x[..., rot:]], axis=-1)
 
 
 def angles(positions: np.ndarray, inv_freq: mx.array) -> mx.array:

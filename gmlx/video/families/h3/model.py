@@ -26,6 +26,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
+from gmlx import mlx_guards
 from gmlx.image import ops, pacing
 from gmlx.video import rope
 from gmlx.video.anchors import pinned
@@ -160,7 +161,8 @@ def gated(x: mx.array, gate: mx.array, y: mx.array, segs: tuple) -> mx.array:
 def attend(q: mx.array, k: mx.array, v: mx.array,
            chunk: int | None) -> mx.array:
     """sdpa over (B, H, L, D), ``chunk`` query rows a call, with a pause
-    point after each."""
+    point after each. Past 2^31 elements the stock concatenate misplaces
+    rows on the GPU, so the chunks join through the guard."""
     n = q.shape[2]
     if not chunk or n <= chunk:
         return ops.sdpa(q, k, v)
@@ -168,7 +170,7 @@ def attend(q: mx.array, k: mx.array, v: mx.array,
     for a in range(0, n, chunk):
         parts.append(ops.sdpa(q[:, :, a:a + chunk], k, v))
         pacing.point(parts[-1])
-    return mx.concatenate(parts, axis=2)
+    return mlx_guards.concatenate(parts, axis=2)
 
 
 class Attention(nn.Module):

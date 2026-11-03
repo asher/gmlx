@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 import mlx.nn as nn
 
+from gmlx import mlx_guards
 from gmlx.image.vae.conv import Conv2d
 
 from .h3_video import owned
@@ -98,13 +99,15 @@ class MemBlock(nn.Module):
                  before: mx.array | None = None) -> mx.array:
         """``x`` is (B * frames, H, W, C), frames in order per clip, and
         ``before`` this block's input of the frame before the first, (B,
-        H, W, C), or zeros when None."""
+        H, W, C), or zeros when None. Past 2^31 elements the stock
+        concatenate misplaces rows on the GPU, so ``x`` and the frames
+        before join through the guard."""
         b = x.shape[0] // frames
         clip = x.reshape(b, frames, *x.shape[1:])
         head = mx.zeros_like(clip[:, :1]) if before is None \
             else before[:, None]
         past = mx.concatenate([head, clip[:, :-1]], axis=1).reshape(x.shape)
-        h = mx.concatenate([x, past], axis=-1)
+        h = mlx_guards.concatenate([x, past], axis=-1)
         for layer in self.conv:
             h = layer(h)
         return nn.relu(h + (self.skip(x) if "skip" in self else x))
