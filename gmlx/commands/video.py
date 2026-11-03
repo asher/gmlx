@@ -30,9 +30,13 @@ _ACTION_DESC = {
 }
 DEFAULT_SIZE = (1344, 768)
 DEFAULT_SECONDS = 5
-# The sizes a clip refused for its size tries, in this order. A shorter
-# clip at the last one is tried when none fits.
+# The sizes a clip refused for its size tries, in this order, each only
+# when no wider and no taller than the clip asked for. A shorter clip at
+# the last one, or at the clip's own size when the last is wider or
+# taller, is tried when none fits.
 HINT_SIZES = ((1344, 768), (768, 1344), (768, 768))
+# The recipe that runs the base DiT with no LoRA.
+BASE_RECIPE = "h3-base"
 
 
 class _Usage(Exception):
@@ -175,26 +179,47 @@ def _seconds_text(frames: int) -> str:
     return f"{math.floor(frames / _family().FPS * 100) / 100:.2f}"
 
 
-def _size_hint(frames: int, plan_at) -> str | None:
-    """What a clip of ``frames`` refused for its size runs instead: the
-    first of ``HINT_SIZES`` whose plan fits at its length, else the
-    longest clip that fits at the last size, else None.
+def _within(size: tuple, clip: tuple) -> bool:
+    return size[0] <= clip[0] and size[1] <= clip[1]
+
+
+def _size_hint(frames: int, width: int, height: int, plan_at,
+               base: bool) -> str | None:
+    """What a clip of ``frames`` at ``width`` x ``height`` refused for its
+    size runs instead, at no size wider or taller than that: the first of
+    ``HINT_SIZES`` whose plan fits at its length, else the longest clip
+    that fits at the last one or at the clip's own size, else, when the
+    adapters leave even the smallest clip over the budget, their memory
+    and fewer adapters, or ``BASE_RECIPE`` when ``base``, else None.
     ``plan_at(frames, width, height)`` is the run's memory plan at that
     clip."""
     hf = _family()
-    for w, h in HINT_SIZES:
+    clip = (width, height)
+    tried = [s for s in HINT_SIZES if _within(s, clip) and s != clip]
+    for w, h in tried:
         if plan_at(frames, w, h).fits:
             return f"try --size {w}x{h}, which fits at this length"
-    w, h = HINT_SIZES[-1]
+    w, h = HINT_SIZES[-1] if _within(HINT_SIZES[-1], clip) else clip
     f = hf.align_frames(frames) - 17
     while f >= hf.MIN_FRAMES:
         if plan_at(f, w, h).fits:
-            sizes = [f"{a}x{b}" for a, b in HINT_SIZES]
-            return (f"no {', '.join(sizes[:-1])} or {sizes[-1]} clip fits "
-                    f"at this length; try --size {w}x{h} --frames {f} "
-                    f"({_seconds_text(f)} s), the longest {w}x{h} clip "
-                    f"that fits")
+            names = [f"{a}x{b}" for a, b in tried]
+            said = ""
+            if names:
+                listed = (", ".join(names[:-1]) + " or " + names[-1]
+                          if len(names) > 1 else names[0])
+                said = f"no {listed} clip fits at this length; "
+            size = "" if (w, h) == clip else f"--size {w}x{h} "
+            return (f"{said}try {size}--frames {f} ({_seconds_text(f)} s), "
+                    f"the longest {w}x{h} clip that fits")
         f -= 17
+    side = hf.CANVAS_MULTIPLE
+    smallest = plan_at(hf.MIN_FRAMES, side, side)
+    lora = smallest.terms["denoise"]["lora"]
+    if not smallest.fits and lora:
+        return (f"no clip fits at any size with these adapters, which take "
+                f"{lora / (1 << 30):.2f} GiB of the denoise; run with fewer "
+                f"adapters" + (f", or with {BASE_RECIPE}" if base else ""))
     return None
 
 
@@ -411,7 +436,7 @@ def _generate(a) -> int:
     import numpy as np
 
     from gmlx.video import encoder as video_encoder
-    from gmlx.video import io, memfit, pipeline
+    from gmlx.video import catalog, io, memfit, pipeline
     from gmlx.video.loader import identify_dit
     from gmlx.video.registry import run_refusal
     from gmlx.video.vae.h3_audio import SAMPLE_RATE
@@ -456,8 +481,12 @@ def _generate(a) -> int:
             tiny=bool(preview), audio_vae=a.audio_vae,
             loras=[p for p, _ in adapters], frames=frames, width=width,
             height=height, variant=vid.variant, text=text)
+    # BASE_RECIPE is new to a run of another DiT or with an entry LoRA.
+    base = (vid.variant != catalog.RECIPES[BASE_RECIPE].variant
+            or bool(a.entry_adapters))
     memfit.check(plan_at(s["frames"], s["width"], s["height"]),
-                 resize=lambda: _size_hint(s["frames"], plan_at))
+                 resize=lambda: _size_hint(s["frames"], s["width"],
+                                           s["height"], plan_at, base))
     log(f"[video] {fam.title} {s['width']}x{s['height']}, {s['frames']} "
         f"frames, {s['steps']} steps at shift {s['shifts']['video']:g}, "
         f"seed {s['seed']}")

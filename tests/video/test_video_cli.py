@@ -17,6 +17,7 @@ from video_fixtures import (H3_HEADER, fixture_view, gguf_tokenizer,
                             vsa_kernel, wait_for)
 
 from gmlx.commands import video as cmd
+from gmlx.video import catalog
 from gmlx.video import fingerprint as vfp
 from gmlx.video.families.h3 import family as hf
 
@@ -521,7 +522,6 @@ def _pinned(files, recipe, monkeypatch, gb):
     """The run's files at the sizes of ``recipe``'s pins, sparse, on a
     Mac of ``gb`` GB."""
     from gmlx.serve import capacity
-    from gmlx.video import catalog
 
     pins = catalog.RECIPES[recipe].pins()
     for key, role in (("model", "dit"), ("--encoder", "encoder"),
@@ -542,10 +542,12 @@ def _hint(capsys) -> str:
 
 @pytest.mark.parametrize("recipe, variant, argv, size", [
     ("fasth3", hf.FASTH3, (), "768x768"),
-    ("h3-base", None, ("--size", "1920x1088"), "1344x768")])
-def test_a_clip_too_large_for_the_mac_names_the_largest_size_that_fits(
+    ("h3-base", None, ("--size", "1344x1344"), "1344x768"),
+    ("h3-base", None, ("--size", "1088x1920"), "768x1344")])
+def test_a_clip_too_large_for_the_mac_names_the_largest_size_inside_it(
         run, monkeypatch, files, capsys, recipe, variant, argv, size):
-    """On a 32 GB Mac: FastH3's default clip, and a 1080p clip."""
+    """On a 32 GB Mac: FastH3's default clip, a square clip, and a
+    portrait clip, which no 1344 wide size fits inside."""
     if variant == hf.FASTH3:
         vsa_kernel(monkeypatch)
     _pinned(files, recipe, monkeypatch, 32)
@@ -564,10 +566,23 @@ def test_a_length_no_size_fits_names_the_longest_768x768_clip(
     assert run(*argv, variant=hf.FASTH3) == 1
     assert run.loads == []
     assert _hint(capsys) == (
-        "No 1344x768, 768x1344 or 768x768 clip fits at this length; try "
-        "--size 768x768 --frames 158 (6.58 s), the longest 768x768 clip "
-        "that fits")
+        "No 768x768 clip fits at this length; try --size 768x768 --frames "
+        "158 (6.58 s), the longest 768x768 clip that fits")
     assert run("--size", "768x768", "--frames", "158",
+               variant=hf.FASTH3) == "encoder"
+
+
+def test_a_clip_under_768x768_names_its_own_longest_clip(run, monkeypatch,
+                                                         files, capsys):
+    """FastH3 at 640x640 on a 32 GB Mac fits up to 226 frames."""
+    vsa_kernel(monkeypatch)
+    _pinned(files, "fasth3", monkeypatch, 32)
+    assert run("--size", "640x640", "--seconds", "15",
+               variant=hf.FASTH3) == 1
+    assert run.loads == []
+    assert _hint(capsys) == (
+        "Try --frames 226 (9.41 s), the longest 640x640 clip that fits")
+    assert run("--size", "640x640", "--frames", "226",
                variant=hf.FASTH3) == "encoder"
 
 
@@ -594,29 +609,98 @@ def test_a_large_lora_names_the_107_frame_768x768_clip(
     assert run("--adapter", str(lora), variant=hf.FASTH3) == 1
     assert run.loads == []
     assert _hint(capsys) == (
-        "No 1344x768, 768x1344 or 768x768 clip fits at this length; try "
-        "--size 768x768 --frames 107 (4.45 s), the longest 768x768 clip "
-        "that fits")
+        "No 768x768 clip fits at this length; try --size 768x768 --frames "
+        "107 (4.45 s), the longest 768x768 clip that fits")
     assert run("--adapter", str(lora), "--size", "768x768", "--frames",
                "107", variant=hf.FASTH3) == "encoder"
 
 
-def test_two_stacked_loras_that_fit_no_768x768_clip_keep_the_hint(
+@pytest.mark.parametrize("recipe, variant, gb, base", [
+    ("fasth3", hf.FASTH3, 2.0, ", or with h3-base"),
+    ("h3-base", catalog.RECIPES["h3-base"].variant, 2.5, "")])
+def test_stacked_loras_that_leave_no_clip_name_their_memory(
+        run, monkeypatch, files, tmp_path, capsys, recipe, variant, gb,
+        base):
+    """Two bf16 LoRAs on a 32 GB Mac. Stacked, each costs twice its file,
+    and the smallest clip is over the budget. h3-base is named unless
+    the run is already its DiT with no entry LoRA."""
+    from gmlx.video import pipeline
+
+    monkeypatch.setattr(pipeline, "vet_adapter", lambda *a, **k: None)
+    vsa_kernel(monkeypatch)
+    _pinned(files, recipe, monkeypatch, 32)
+    loras = [_bf16_lora(tmp_path / f"{name}.safetensors", int(gb * 1e9))
+             for name in ("style", "subject")]
+    argv = [x for p in loras for x in ("--adapter", p)]
+    assert run(*argv, variant=variant) == 1
+    assert run.loads == []
+    lora = 2 * 2 * int(gb * 1e9) / (1 << 30)
+    assert _hint(capsys) == (
+        f"No clip fits at any size with these adapters, which take "
+        f"{lora:.2f} GiB of the denoise; run with fewer adapters{base}")
+    assert run("--adapter", loras[0], "--size", "768x768",
+               variant=variant) == "encoder"
+
+
+def test_stacked_loras_that_leave_a_clip_under_768x768_keep_the_hint(
         run, monkeypatch, files, tmp_path, capsys):
-    """FastH3 with two 2.0 GB bf16 LoRAs on a 32 GB Mac: stacked, each
-    costs twice its file, and no 768x768 clip fits down to 5 frames."""
+    """FastH3 with two 1.9 GB bf16 LoRAs on a 32 GB Mac: no 768x768 clip
+    fits down to 5 frames, and a 512x512 one does."""
     from gmlx.video import pipeline
 
     monkeypatch.setattr(pipeline, "vet_adapter", lambda *a, **k: None)
     vsa_kernel(monkeypatch)
     _pinned(files, "fasth3", monkeypatch, 32)
-    argv = []
-    for name in ("style", "subject"):
-        argv += ["--adapter", _bf16_lora(tmp_path / f"{name}.safetensors",
-                                         2_000_000_000)]
+    argv = [x for name in ("style", "subject") for x in (
+        "--adapter", _bf16_lora(tmp_path / f"{name}.safetensors",
+                                1_900_000_000))]
     assert run(*argv, variant=hf.FASTH3) == 1
     assert run.loads == []
     assert _hint(capsys) == "Try a smaller size or a shorter clip"
+    assert run(*argv, "--size", "512x512", "--frames", "5",
+               variant=hf.FASTH3) == "encoder"
+
+
+def test_an_entry_lora_and_one_more_name_h3_base(monkeypatch, tmp_path,
+                                                 capsys):
+    """An h3 entry carries the Turbo LoRA, so one more adapter stacks on
+    the base DiT and h3-base, with no LoRA, is new to the run."""
+    from gmlx.serve import capacity
+    from gmlx.video import encoder, loader, pipeline
+
+    h3 = catalog.RECIPES["h3"]
+    pins = h3.pins()
+    for name, role in (("h3.gguf", "dit"), ("enc.gguf", "encoder"),
+                       ("v.safetensors", "vae"), ("a.safetensors",
+                                                  "audio_vae")):
+        (tmp_path / name).write_bytes(b"")
+        os.truncate(tmp_path / name, pins[role].size)
+    _bf16_lora(tmp_path / "turbo.safetensors", pins["lora"].size)
+    mine = _bf16_lora(tmp_path / "mine.safetensors", 3_000_000_000)
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(f"""server:
+  model_dirs: [{tmp_path}]
+video_models:
+  h3:
+    path: h3.gguf
+    encoder: enc.gguf
+    vae: v.safetensors
+    audio_vae: a.safetensors
+    adapters: [turbo.safetensors]
+""")
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **kw: (
+        dataclasses.replace(vfp.identify(fixture_view(H3_HEADER), **kw),
+                            variant=h3.variant)))
+    monkeypatch.setattr(encoder, "load_encoder", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "vet_adapter", lambda *a, **k: None)
+    monkeypatch.setattr(capacity, "working_budget_bytes",
+                        lambda: capacity.ram_budget_bytes(32 << 30))
+    monkeypatch.setattr(capacity, "overcommit", lambda: False)
+    assert cmd.cmd_generate(["h3", "--config", str(cfg), "--prompt", "a cat",
+                             "--frames-dir", str(tmp_path / "out"),
+                             "--adapter", mine]) == 1
+    assert _hint(capsys).endswith(
+        "GiB of the denoise; run with fewer adapters, or with h3-base")
 
 
 def test_the_hints_seconds_make_its_clip():
