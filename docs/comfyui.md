@@ -335,6 +335,10 @@ to a workflow, double-click an empty part of the canvas, search for
 the MODEL and CLIP outputs of the gmlx loaders to its inputs, and its
 outputs to the nodes that the loaders fed before. The gmlx nodes send each
 LoRA to the server once, so a change of strength costs one small request.
+A LoRA stacks on the LoRA that `gmlx Model Loader` loads with a recipe
+that has one, as `--adapter` does. A `LoraLoader` of the recipe's own
+LoRA file sets its strength in place of the recipe's, so that LoRA
+applies once.
 `LoraLoader` works at any `strength_model`. The text encoder half of a
 LoRA is not applied in ComfyUI, so set `strength_clip` to 0. To apply both
 halves, use the LoRA with [`gmlx image generate`](images.md#use-a-lora).

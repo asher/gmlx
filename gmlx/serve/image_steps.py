@@ -999,11 +999,29 @@ def _pair_room(served, need: int) -> None:
     raise StepError(413, f"{over}: {left}. A{smaller[1:]} gives it more.")
 
 
+def _with_own(served, entries: list) -> list:
+    """Table ``entries`` with the entry's own adapters stacked on, as the
+    images API stacks a request's adapters on them. An own adapter that
+    the entries name a pair of is left out, so the table's strength for
+    it applies, once."""
+    from gmlx.image.lora import patch_table as pt
+
+    named = {k for _m, _b, patches in entries for k, _s in patches}
+    own = [(ad, st) for ad, st in served.adapters
+           if not any(r[-1] in named for r in ad.dit)]
+    if not own:
+        return entries
+    rows = {(m, b): list(patches) for m, b, patches in entries}
+    for m, b, patches in pt.table_entries(own):
+        rows.setdefault((m, b), []).extend(patches)
+    return [(m, b, patches) for (m, b), patches in rows.items()]
+
+
 def define_table(served, body: dict, adapters: _Bytes) -> str:
     """The core table of a contract table body, with its pairs registered
-    on the pipeline. Raises :class:`Missing` for adapter matrices not
-    held, and a 413 for pairs the entry's pair cache cannot hold at once
-    beside its own."""
+    on the pipeline and the entry's own adapters stacked on. Raises
+    :class:`Missing` for adapter matrices not held, and a 413 for pairs
+    the entry's pair cache cannot hold at once beside its own."""
     from gmlx.image import api
     from gmlx.image.lora import install
     from gmlx.image.lora import patch_table as pt
@@ -1068,7 +1086,7 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
                     **({"kind": p["kind"]} if "kind" in p else {})})
             rows.append(row)
         plans = pt.plans_from_patches(pipe.family, rows)
-        return api.define_patch_table(pipe, plans)
+        return api.define_patch_table(pipe, _with_own(served, plans))
     except (AdapterError, ValueError, KeyError, TypeError) as e:
         if isinstance(e, StepError):
             raise

@@ -1196,6 +1196,36 @@ def test_a_patch_alpha_that_is_no_number_is_a_400(host):
         "a patch's alpha is a number or null, not [2.0]")
 
 
+def test_a_client_table_stacks_on_the_entrys_own_lora(tmp_path, request):
+    """A ComfyUI table adds to the entry's own LoRA, as a request's
+    adapters do on the images API: LoRA B on the entry steps as a table
+    of the entry's LoRA and B on the entry without it. A table that names
+    the entry's LoRA sets its strength for the step, applied once."""
+    from test_video_h3_lora import _adapter
+
+    own, b = _adapter(5), _adapter(7)
+    video, audio, feats = _clip()
+    kw = dict(shifts=SHIFTS, audio_scale=SCALE)
+
+    def step(with_own: bool, *loras):
+        if with_own:
+            _entry_with_own(tmp_path, request, seed=5)
+        else:
+            _mount(_Host(_served(_own_pipe()[0])), request)
+        c = _client()
+        tid = c.define_table("h3", _stack_body(c, *loras))
+        got = c.av_step("h3", None, video, audio, 600.0,
+                        {"cond": c.put(feats)}, patch_table=tid, **kw)
+        steps.STATE.reset()
+        return got
+
+    stacked = step(True, (b, 1.0))
+    for got, want in ((stacked, step(False, (own, 1.0), (b, 1.0))),
+                      (step(True, (own, 0.5)), step(False, (own, 0.5)))):
+        assert all(_rel(g, w) < 1e-5 for g, w in zip(got, want))
+    assert _rel(stacked[0], step(False, (b, 1.0))[0]) > 1e-3
+
+
 def _latents(route: str):
     """The latents of a 22-frame 32x32 clip, those the tiny VAEs take."""
     vshape, ashape = hf.latent_shapes(22, 32, 32)
