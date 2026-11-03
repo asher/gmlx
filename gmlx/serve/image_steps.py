@@ -548,7 +548,9 @@ def family_of(spec) -> tuple:
 
 def video_status(spec, resident: bool, plan=None) -> dict:
     """The status of a video model: its ComfyUI facts, the entry's own
-    steps and shifts, and its memory."""
+    steps and shifts, the video sigmas of a variant trained on fixed
+    timesteps at those steps, and its memory."""
+    from gmlx.video import schedule
     from gmlx.video.memfit import file_bytes
 
     fam, variant = family_of(spec)
@@ -560,9 +562,14 @@ def video_status(spec, resident: bool, plan=None) -> dict:
     sampling = None
     if plan is not None:
         mem["resident_bytes"] = plan.footprint if resident else 0
+        rungs = fam.rungs(variant, plan.steps)
+        # ComfyUI's sampler steps the video sigma; its forward derives the
+        # audio sigma from it at the shifts in force.
+        sigmas = (list(map(float, schedule.sigmas(
+            plan.steps, plan.shifts["video"], rungs))) if rungs else None)
         sampling = {"steps": plan.steps, "cfg": 1.0,
                     "shift": plan.shifts["video"],
-                    "audio_shift": plan.shifts["audio"], "sigmas": None,
+                    "audio_shift": plan.shifts["audio"], "sigmas": sigmas,
                     "schedule": None, "neg_skip": []}
     return {"model": spec.id, "family": fam.name, "variant": variant,
             "resident": resident,

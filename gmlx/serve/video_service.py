@@ -377,7 +377,7 @@ def encode(served: ServedVideo, text: str, images: list) -> np.ndarray:
     if images:
         raise StepError(400, f"the gmlx server encodes text alone for "
                         f"{fam.title}; it takes no images with the prompt, "
-                        "which keyframes and guides send")
+                        "such as a first or last frame")
     import mlx.core as mx
 
     drop_dit(served)

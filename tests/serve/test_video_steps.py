@@ -494,10 +494,10 @@ def test_a_runs_first_step_counts_the_clips_decodes(host):
 
 
 @pytest.mark.parametrize("ask, want", [
-    # An image-to-video workflow wires its keyframe through GmlxCLIP,
-    # which sends the image with the prompt.
+    # An image-to-video request sends its first or last frame with the
+    # prompt; the gmlx CLIP refuses them before it calls the server.
     ("images", "the gmlx server encodes text alone for MiniMax-H3; it takes "
-     "no images with the prompt, which keyframes and guides send"),
+     "no images with the prompt, such as a first or last frame"),
     ("prompt_upsampling", "video model 'h3' takes no prompt upsampling; "
      "send the request without prompt_upsampling"),
 ])
@@ -916,3 +916,31 @@ def test_a_video_model_status_names_comfyuis_class_and_its_shifts(
     assert st["audio"]["sample_rate"] == 32000
     assert st["sampling"]["steps"] == 8
     assert (st["sampling"]["shift"], st["sampling"]["audio_shift"]) == (6, 3)
+    assert st["sampling"]["sigmas"] is None
+
+
+def test_a_fasth3_status_hands_the_sampler_its_trained_sigmas(
+        host, tmp_path, monkeypatch):
+    """No stock scheduler makes FastH3's eight sigmas, so GmlxSigmas hands
+    ComfyUI's sampler the video stream's from the status, as float32
+    values. At another step count the entry samples the even grid."""
+    import dataclasses
+
+    from gmlx.video import schedule
+
+    spec = host.served.spec
+    for name in ("path", "encoder", "vae", "audio_vae"):
+        f = tmp_path / name
+        f.write_bytes(b"x" * 16)
+        setattr(spec, name, str(f))
+    monkeypatch.setattr(steps, "family_of", lambda s: (hf.FAMILY, hf.FASTH3))
+    plan = host.served.plan
+    shifts = {"video": 10.0, "audio": 3.0}
+    want = schedule.stream_sigmas(8, shifts, hf.FASTH3_RUNGS)["video"]
+    for n, sigmas in ((8, [*map(float, want)]), (6, None)):
+        monkeypatch.setattr(host.served, "plan", dataclasses.replace(
+            plan, variant=hf.FASTH3, steps=n, shifts=shifts))
+        st = _client().status("h3")
+        assert st["variant"] == hf.FASTH3 and st["sampling"]["steps"] == n
+        assert st["sampling"]["sigmas"] == sigmas
+    assert np.array_equal(np.asarray([*map(float, want)], np.float32), want)
