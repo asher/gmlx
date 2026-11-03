@@ -169,26 +169,31 @@ def _frames(text: str) -> int:
     raise argparse.ArgumentTypeError(msg)
 
 
+def _seconds_text(frames: int) -> str:
+    """``frames`` in seconds, rounded down to 2 decimals, so that
+    ``--seconds`` of it makes the same clip."""
+    return f"{math.floor(frames / _family().FPS * 100) / 100:.2f}"
+
+
 def _size_hint(frames: int, plan_at) -> str | None:
     """What a clip of ``frames`` refused for its size runs instead: the
     first of ``HINT_SIZES`` whose plan fits at its length, else the
-    longest clip of ``DEFAULT_SECONDS`` or more that fits at the last
-    size, else None. ``plan_at(frames, width, height)`` is the run's
-    memory plan at that clip."""
+    longest clip that fits at the last size, else None.
+    ``plan_at(frames, width, height)`` is the run's memory plan at that
+    clip."""
     hf = _family()
     for w, h in HINT_SIZES:
         if plan_at(frames, w, h).fits:
             return f"try --size {w}x{h}, which fits at this length"
     w, h = HINT_SIZES[-1]
-    shortest = frames_of(DEFAULT_SECONDS)
     f = hf.align_frames(frames) - 17
-    while f >= shortest:
+    while f >= hf.MIN_FRAMES:
         if plan_at(f, w, h).fits:
             sizes = [f"{a}x{b}" for a, b in HINT_SIZES]
             return (f"no {', '.join(sizes[:-1])} or {sizes[-1]} clip fits "
                     f"at this length; try --size {w}x{h} --frames {f} "
-                    f"({f / hf.FPS:.1f} s), the longest {w}x{h} clip that "
-                    f"fits")
+                    f"({_seconds_text(f)} s), the longest {w}x{h} clip "
+                    f"that fits")
         f -= 17
     return None
 

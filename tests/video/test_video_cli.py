@@ -565,13 +565,13 @@ def test_a_length_no_size_fits_names_the_longest_768x768_clip(
     assert run.loads == []
     assert _hint(capsys) == (
         "No 1344x768, 768x1344 or 768x768 clip fits at this length; try "
-        "--size 768x768 --frames 158 (6.6 s), the longest 768x768 clip "
+        "--size 768x768 --frames 158 (6.58 s), the longest 768x768 clip "
         "that fits")
     assert run("--size", "768x768", "--frames", "158",
                variant=hf.FASTH3) == "encoder"
 
 
-def test_a_clip_that_fits_at_no_size_from_5_seconds_keeps_the_hint(
+def test_a_large_lora_names_the_107_frame_768x768_clip(
         run, monkeypatch, files, tmp_path, capsys):
     """FastH3 with a 2.2 GB bf16 LoRA on a 32 GB Mac: a 768x768 clip
     fits at 107 frames and not at 124."""
@@ -588,9 +588,20 @@ def test_a_clip_that_fits_at_no_size_from_5_seconds_keeps_the_hint(
     os.truncate(lora, 2_200_000_000)
     assert run("--adapter", str(lora), variant=hf.FASTH3) == 1
     assert run.loads == []
-    assert _hint(capsys) == "Try a smaller size or a shorter clip"
+    assert _hint(capsys) == (
+        "No 1344x768, 768x1344 or 768x768 clip fits at this length; try "
+        "--size 768x768 --frames 107 (4.45 s), the longest 768x768 clip "
+        "that fits")
     assert run("--adapter", str(lora), "--size", "768x768", "--frames",
                "107", variant=hf.FASTH3) == "encoder"
+
+
+def test_the_hints_seconds_make_its_clip():
+    """``--seconds`` of the seconds the size hint prints for a clip makes
+    that clip, at every clip length."""
+    hf = cmd._family()
+    for f in range(hf.MIN_FRAMES, hf.MAX_FRAMES + 1, 17):
+        assert cmd.frames_of(cmd._seconds(cmd._seconds_text(f))) == f
 
 
 def _cache_limit() -> int:
