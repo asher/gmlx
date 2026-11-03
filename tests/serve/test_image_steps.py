@@ -1100,6 +1100,28 @@ def test_a_patch_table_is_named_by_the_hash_of_its_json(host, pipe):
     assert not np.array_equal(got, _direct(pipe, feats))
 
 
+def test_a_model_released_with_a_table_frees_its_pipeline(host):
+    """The pool's release of a model a client defined a table on frees
+    its pipeline and DiT, so the next model is admitted beside memory that
+    is free."""
+    import gc
+    import weakref
+
+    from gmlx.serve.image_service import release_on_worker
+
+    served = _Host({"rel": _on_worker(_tiny_pipe)}).served["rel"]
+    host.served["rel"] = served
+    c = _client()
+    tid = c.define_table("rel", _table_body(c)[0])
+    assert tid in steps.STATE.tables_of("rel", served.pipe)
+    refs = [weakref.ref(served.pipe), weakref.ref(served.pipe.dit)]
+    box = [host.served.pop("rel")]
+    del served
+    release_on_worker(box)
+    gc.collect()
+    assert [r() for r in refs] == [None, None]
+
+
 def test_a_table_whose_matrices_are_not_held_is_a_409(host):
     c = _client()
     body = {"entries": [{"key": "diffusion_model.layers.0.attention.out."

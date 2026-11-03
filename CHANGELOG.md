@@ -25,6 +25,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Image LoRA stacks over the adapter cache load, and a server request over
   it is refused.
+- `gmlx serve` frees an image model it releases after a ComfyUI workflow
+  applied a LoRA to it. The next model loaded beside its memory before.
 
 ## [0.5.4] - 2026-10-29
 

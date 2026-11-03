@@ -48,6 +48,7 @@ import os
 import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -280,7 +281,8 @@ class StepsState:
         self.adapters = _Bytes(cfg.adapter_cache_mb << 20)
         self._bounds = (self.tensors.max_bytes, self.adapters.max_bytes)
         self.runs: dict = {}
-        # model id -> (pipeline, {contract table id: core table id})
+        # model id -> (weak reference to its pipeline,
+        #              {contract table id: core table id})
         self.tables: dict = {}
         self.lock = threading.Lock()
         self.settings = None
@@ -439,10 +441,14 @@ class StepsState:
     # Patch tables.
 
     def tables_of(self, model: str, pipe) -> dict:
+        """The contract table ids clients defined on ``pipe``, the loaded
+        pipeline of ``model``, mapped to its core table ids. A pipeline
+        loaded again starts an empty map. The map holds the pipeline
+        weakly, so a model the pool releases leaves nothing alive here."""
         with self.lock:
             held = self.tables.get(model)
-            if held is None or held[0] is not pipe:
-                held = (pipe, {})
+            if held is None or held[0]() is not pipe:
+                held = (weakref.ref(pipe), {})
                 self.tables[model] = held
             return held[1]
 
