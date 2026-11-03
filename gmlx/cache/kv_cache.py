@@ -2959,8 +2959,10 @@ class BatchQuantizedKVCache(_BaseCache):
             if left != 0 or right != 0:
                 pad_spec = [(0, 0)] * len(trimmed_keys[0].shape)
                 pad_spec[-2] = (left, right)
-                padded_keys = tuple(mx.pad(k, pad_spec) for k in trimmed_keys)
-                padded_values = tuple(mx.pad(v, pad_spec) for v in trimmed_values)
+                # gmlx: past 2^31 elements the stock op misplaces rows on the
+                # GPU.
+                padded_keys = tuple(mlx_guards.pad(k, pad_spec) for k in trimmed_keys)
+                padded_values = tuple(mlx_guards.pad(v, pad_spec) for v in trimmed_values)
             else:
                 padded_keys = trimmed_keys
                 padded_values = trimmed_values
