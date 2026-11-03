@@ -1893,3 +1893,26 @@ def test_without_a_free_measure_the_automatic_choice_is_tiles(family,
             assert memfit.vae_tiling(op, 4096, 4096, tiled=False,
                                      **kw) is False
             assert memfit.vae_tiling(op, 512, 512, tiled=True, **kw) is False
+
+
+def test_every_family_names_the_text_input_of_its_cond():
+    """Serve books one cond of each family's priced rows in the step
+    routes' tensor cache, so each family names the config keys of its
+    DiT's text input."""
+    from gmlx.image.registry import families
+
+    assert set(memfit.COND_WIDTH) == {f.name for f in families()}
+
+
+@pytest.mark.parametrize("header, family, width", [
+    (Z_HEADER, "z_image", 2560), (Q_HEADER, "qwen_image21", 4096)])
+def test_a_cond_is_the_priced_rows_of_the_dits_text_input_in_f32(
+        header, family, width):
+    """On the published headers, as serve identifies them: Qwen3-4B's
+    2560-wide features feed Z-Image, and Qwen3-VL-8B's 4096-wide ones
+    Qwen-Image 2.1, at 512 rows."""
+    from gmlx.image import fingerprint
+
+    got = fingerprint.identify(fixture_view(header))
+    assert got.family.name == family
+    assert memfit.cond_bytes(family, got.config) == 512 * width * 4

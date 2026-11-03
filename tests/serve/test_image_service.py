@@ -166,8 +166,13 @@ GB = 1024**3
 
 
 def _ident(family, variant, **config):
-    """What identify_dit returns, with the config flags a test gives."""
-    return SimpleNamespace(family=family, variant=variant, config=config)
+    """What identify_dit returns, with the config flags a test gives and
+    a text input of 64 wide unless it gives its own."""
+    from gmlx.image import memfit
+
+    width = dict.fromkeys(memfit.COND_WIDTH[family.name], 64)
+    return SimpleNamespace(family=family, variant=variant,
+                           config=width | config)
 
 
 def _spec(**kw):
@@ -295,6 +300,38 @@ def test_the_caches_of_a_tight_entry_take_the_room_its_image_leaves(
     plan = image_service.entry_plan(_spec())
     assert plan.staged and 0.4 < plan.cache_share <= 0.5
     assert 5 * GB < plan.footprint <= plan_stubs.budget
+
+
+# One cond of FLUX.2 klein 4B's 512 text rows of its 7680-wide features
+# in f32, 15 MiB.
+_KLEIN_COND = 512 * 7680 * 4
+MiB = 1 << 20
+
+
+def test_a_tight_image_entry_keeps_one_cond_in_the_tensor_cache(
+        plan_stubs, monkeypatch):
+    """An image entry books the step routes' tensor cache at no less than
+    one cond of its family's priced rows. FLUX.2 klein 4B within 90 MiB
+    of its budget would leave that cache 6/64 of its 64 MiB, under its
+    15 MiB cond: it books the cond beside a share of 5/64. Its image and
+    one cond fit with every cache empty, and a byte less refuses it."""
+    from gmlx.image import loader, memfit
+    from gmlx.image.registry import get_family
+
+    _modes(monkeypatch, caches=True)
+    fam = get_family("flux2_klein")
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: _ident(
+        fam, "distilled", joint_attention_dim=7680))
+    plan_stubs.budget = 5 * GB + 90 * MiB
+    plan = image_service.entry_plan(_spec())
+    assert plan.staged and plan.tensor_floor == _KLEIN_COND
+    assert (plan.cache_share, plan.footprint) == (5 / 64, 5 * GB + 85 * MiB)
+    plan_stubs.budget = 5 * GB + _KLEIN_COND
+    plan = image_service.entry_plan(_spec())
+    assert (plan.cache_share, plan.footprint) == (0.0, plan_stubs.budget)
+    plan_stubs.budget -= 1
+    with pytest.raises(memfit.ImageMemoryError):
+        image_service.entry_plan(_spec())
 
 
 @pytest.mark.parametrize("release,budget_gb,hint", [
@@ -619,6 +656,28 @@ def test_a_loaded_entry_bounds_its_caches(load_stubs):
     assert pipe.conditionings.max_bytes == 1 << 20
     assert pipe.reference_latents.max_bytes == 1 << 20
     assert pipe.adapters.max_bytes == pipe.tables.max_bytes == 2 << 20
+
+
+def test_a_loaded_image_entry_keeps_its_cond_in_the_step_tensor_cache(
+        load_stubs, monkeypatch):
+    """The step routes' caches take a loaded image entry's share of 1/16,
+    and their tensor cache keeps its cond floor of 15 MiB over the 4 MiB
+    that share leaves. Released, the entry's floor goes with it."""
+    from gmlx.serve import image_steps
+
+    monkeypatch.setattr(image_service, "entry_plan", lambda spec: _plan(
+        cache_share=1 / 16, tensor_floor=_KLEIN_COND))
+    tensor, adapter = image_service.cache_bytes()
+    try:
+        served = image_service._load(_spec(encoder=None))
+        held = (image_steps.STATE.tensors.max_bytes,
+                image_steps.STATE.adapters.max_bytes)
+        image_service._release([served])
+        after = image_steps.STATE.tensors.max_bytes
+    finally:
+        image_service._SHARES.clear()
+        image_service._scale_step_caches()
+    assert held == (_KLEIN_COND, adapter // 16) and after == tensor
 
 
 def test_the_fit_of_a_step_counts_what_the_step_caches_hold(monkeypatch):

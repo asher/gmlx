@@ -829,6 +829,30 @@ PEAKS = {
                           encode_base=int(0.62 * GiB), text_rows=4096),
 }
 
+# The keys of each family's DiT config whose product is the width of the
+# encoder features one conditioning carries: the DiT's text input.
+COND_WIDTH = {
+    "z_image": ("cap_feat_dim",),
+    "krea2": ("num_text_layers", "text_hidden_dim"),
+    "qwen_image21": ("context_in_dim",),
+    "flux2_klein": ("joint_attention_dim",),
+    "flux2_klein_9b": ("joint_attention_dim",),
+    "flux2_klein_9b_kv": ("joint_attention_dim",),
+    "flux3_klein": ("joint_attention_dim",),
+    "moss_image": ("text_dim",),
+}
+
+
+def cond_bytes(family: str, config: dict) -> int:
+    """Bytes of one conditioning's encoder features in float32, as a step
+    route client uploads them, at the text rows a plan prices when it
+    does not know the prompt."""
+    width = 1
+    for key in COND_WIDTH[family]:
+        width *= int(config[key])
+    return PEAKS[family].text_rows * width * 4
+
+
 def joined_row(family: str) -> PeakRow:
     """The row that prices a step of ``family`` run whole, with the tokens
     of its references joined to its rows."""

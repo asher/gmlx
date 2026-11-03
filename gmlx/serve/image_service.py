@@ -15,7 +15,8 @@ entry whose encoder does not fit beside its DiT is staged as the image
 command stages a load: each encode that the cache does not hold lets
 the DiT and the VAE go, loads the encoder alone, and loads them again
 after its release. Its caches take the room its image leaves, up to
-their bounds.
+their bounds, and the step routes' tensor cache keeps room for one
+uploaded cond of the family's priced text rows at any share.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ class EntryPlan:
     # encoder loads, encodes and goes, and the DiT and the VAE load again.
     staged: bool = False
     cache_share: float = 1.0        # of each cache's configured bound
+    tensor_floor: int = 0           # step tensor cache bytes kept for a cond
     encoder_bytes: int = 0          # an owned encoder's, from its header
     mmproj_bytes: int = 0
     load_parts: tuple | None = None   # see memfit.plan_memory, no tower
@@ -188,6 +190,21 @@ def fit_share(price, budget):
     return price(k / steps), k / steps
 
 
+def fit_floored(price, budget):
+    """``fit_share`` of an entry whose ``price(share, kept)`` books the
+    step routes' tensor cache at no less than ``kept`` bytes, and
+    ``price(share)`` at its cond floor: the share the work leaves the
+    caches with no floor, then the largest one under it that leaves the
+    tensor cache its floor too."""
+    got = fit_share(lambda share: price(share, 0), budget)
+    if got is None or budget is None:
+        return got
+    k = round(got[1] * SHARE_STEPS)
+    while k >= 0 and price(k / SHARE_STEPS) > budget:
+        k -= 1
+    return (price(k / SHARE_STEPS), k / SHARE_STEPS) if k >= 0 else None
+
+
 def _load_figures(spec, act) -> dict:
     """What the loads of an entry's parts hold over what stays resident,
     from their headers, as the image command counts them: the 16-bit
@@ -266,28 +283,35 @@ def entry_plan(spec) -> EntryPlan:
         mmproj = _header_bytes(spec.encoder_mmproj, "mmproj")
     load = _load_figures(spec, act)
     budget = working_budget_bytes()
+    # The step routes' tensor cache keeps room for one cond of the priced
+    # rows, the f32 encoder features a client uploads, at any share.
+    floor = (min(memfit.cond_bytes(fam.name, ident.config), tensor_cache)
+             if _CACHE_BYTES["steps"] else 0)
 
-    def common(share: float) -> dict:
+    def common(share: float, cond: int) -> dict:
         return dict(adapters=own + [int(2 * adapter_cache * share)],
                     family=fam.name, height=height, width=width, cfg=cfg,
                     dtype=act.dit, vae_dtype=act.vae, overcommit=True,
-                    cache_bytes=int(caches * share))
+                    cache_bytes=int(caches * share)
+                    + max(0, cond - int(tensor_cache * share)))
 
-    def kept(share: float):
+    def kept(share: float, cond: int = floor):
         return memfit.plan_memory(dit, enc, vae, mmproj,
                                   encoder_owned=False,
-                                  load_peak=load["peak"], **common(share))
+                                  load_peak=load["peak"],
+                                  **common(share, cond))
 
-    def price(mode: str, share: float) -> int:
+    def price(mode: str, share: float, cond: int = floor) -> int:
         """The peak of an image at the default size, as serve runs it in
-        ``mode``, with each cache at ``share`` of its bound."""
+        ``mode``, with each cache at ``share`` of its bound and the step
+        routes' tensor cache with room for ``cond`` bytes."""
         if mode == "keep":
-            return kept(share).peak
+            return kept(share, cond).peak
         if mode == "release":
             # The encoder loads for each encode beside the DiT and the VAE,
             # and is gone before the first step.
-            keep = kept(share)
-            alone = memfit.plan_memory(dit, 0, vae, **common(share))
+            keep = kept(share, cond)
+            alone = memfit.plan_memory(dit, 0, vae, **common(share, cond))
             return max(keep.phases["encode"], keep.phases.get("load", 0),
                        alone.peak)
         # The encoder loads alone for each encode, without its vision
@@ -296,7 +320,7 @@ def entry_plan(spec) -> EntryPlan:
         return memfit.plan_memory(dit, enc, vae, 0, encoder_owned=True,
                                   load_peak=load["text_peak"],
                                   load_parts=load["parts"],
-                                  **common(share)).peak
+                                  **common(share, cond)).peak
 
     def mode_of(release: str) -> str:
         if not enc or release == "never":
@@ -309,7 +333,8 @@ def entry_plan(spec) -> EntryPlan:
         return "staged"
 
     def fitted(mode: str):
-        return fit_share(lambda share: price(mode, share), budget)
+        return fit_floored(lambda share, cond=floor: price(mode, share, cond),
+                           budget)
 
     mode = mode_of(spec.encoder_release)
     got = fitted(mode)
@@ -331,6 +356,7 @@ def entry_plan(spec) -> EntryPlan:
                      family=fam.name, variant=ident.variant,
                      size=(width, height), cfg=float(cfg),
                      staged=mode == "staged", cache_share=share,
+                     tensor_floor=floor,
                      encoder_bytes=int(enc), mmproj_bytes=int(mmproj),
                      load_parts=load["parts"],
                      tower_parts=load["tower_parts"])
@@ -397,7 +423,7 @@ def _load(spec) -> ServedImage:
         bound_caches(pipe, sum(2 * os.path.getsize(p)
                                for p, _ in spec.adapters),
                      plan.cache_share)
-        _SHARES[id(served)] = (plan.cache_share, 0)
+        _SHARES[id(served)] = (plan.cache_share, plan.tensor_floor)
         _scale_step_caches()
     except BaseException:
         # The pipeline loaded and an adapter failed: free it here, as the
