@@ -1020,6 +1020,11 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
     sizes: dict = {}
     for e in entries:
         for p in (e.get("patches") or []) if isinstance(e, dict) else []:
+            alpha = p.get("alpha")
+            if alpha is not None and (isinstance(alpha, bool) or not
+                                      isinstance(alpha, (int, float))):
+                raise StepError(400, f"a patch's alpha is a number or null, "
+                                f"not {json.dumps(alpha)}")
             got = [adapters.get(h) if isinstance(h, str) else None
                    for h in (p.get("up"), p.get("down"))]
             missing += [str(p.get(side)) for side, t in zip(("up", "down"),

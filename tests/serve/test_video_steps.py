@@ -1112,6 +1112,19 @@ def test_a_table_that_fills_the_entrys_pair_room_steps(tmp_path, request):
     assert e.value.status == 413
 
 
+def test_a_patch_alpha_that_is_no_number_is_a_400(host):
+    """A patch's alpha is ComfyUI's scalar, sent as a number or null."""
+    from test_video_h3_lora import _adapter
+
+    c = _client()
+    body = _table_body(c, _adapter(6))
+    body["entries"][0]["patches"][0]["alpha"] = [2.0]
+    with pytest.raises(StepsClientError) as e:
+        c.define_table("h3", body)
+    assert e.value.status == 400 and e.value.body["error"] == (
+        "a patch's alpha is a number or null, not [2.0]")
+
+
 def _latents(route: str):
     """The latents of a 22-frame 32x32 clip, those the tiny VAEs take."""
     vshape, ashape = hf.latent_shapes(22, 32, 32)
