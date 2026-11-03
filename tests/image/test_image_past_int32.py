@@ -61,8 +61,8 @@ def _single_block(dim: int, mlp: int, length: int) -> tuple:
 def test_a_single_block_past_2_31_elements_keeps_every_row():
     """FLUX.2 klein 9B joins attention rows of 4096 and feed-forward rows
     of 12,288. At 131,073 rows, the first count past the limit, the stock
-    concatenate left the last row unwritten and wrote it 8 GiB below, into
-    hid rows 22 and 23, which then reached output row 22 too."""
+    concatenate left the last row unwritten and wrote it 8 GiB below, over
+    the start of the attention rows."""
     shape, last, whole, own = _single_block(4096, 12_288, 131_073)
     assert shape == (1, 131_073, 16_384)
     # {(row, first token of a span): wrong elements}, all three at once.

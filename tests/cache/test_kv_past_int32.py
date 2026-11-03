@@ -101,7 +101,8 @@ def test_a_row_joining_a_batch_past_2_31_elements_keeps_every_key():
     """A row of 293,377 tokens joins 7 rows at 293,376, so extend pads the
     7 rows' keys by one token on the left and 8,191 on the right. The stock
     pad left the keys of batch row 6, head 3 from token 246,272 at the fill
-    and wrote them 8 GiB below, over the keys of batch row 0, head 0."""
+    and wrote them 8 GiB below, over the 7 rows' own keys at batch row 1,
+    head 1."""
     shape, region, out, own, other = _extend(7, 293_376)
     assert shape == (8, H, 301_568, D)
     assert {"region": region, "keys": out, "7 rows' keys": own, "row's keys": other} == {
