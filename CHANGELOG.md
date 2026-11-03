@@ -16,6 +16,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [Make a video](docs/comfyui.md#make-a-video).
 - The `fasth3` video recipe runs FastVideo's FastH3, an 8-step MiniMax-H3
   whose steps take about half as long as `h3`'s, on an M5 or newer.
+- The gmlx ComfyUI nodes run FastH3 on the noise levels it was trained at,
+  through the new `fasth3-t2v` example workflow.
 
 ### Changed
 

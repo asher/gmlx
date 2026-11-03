@@ -134,8 +134,13 @@ that names it:
   ControlNet (`Apply MiniMax H3 Fun ControlNet`), a noise mask on the latent,
   such as one from `Set Latent Noise Mask`, and an encode with the gmlx
   video or audio VAE.
-- A FastH3 file. The gmlx nodes run the MiniMax-H3 recipes `h3`, `h3-fast`
-  and `h3-base`.
+
+On FastH3, a run on its trained noise levels, or on a part of them as a
+split schedule samples, stops at shifts other than the `fasth3` recipe's
+10 and 3, with an error that names `ModelSamplingMiniMaxH3` and the two
+shifts. Without that node, ComfyUI's forward would derive the sound's
+noise levels at 12 and 3, off those FastH3 was trained at, with no error.
+FastH3 on noise levels of another schedule runs at any shift.
 
 `Flux KV Cache` on FLUX.2 klein 9B KV is not refused. The server keeps the
 keys and values of the reference images of each row of the batch from the

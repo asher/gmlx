@@ -148,6 +148,9 @@ or load anything:
 error: MiniMax-H3 fasth3 runs video sparse attention, whose kernel needs a GPU with NAX units (M5 or newer), and this Mac's GPU has none
 ```
 
+In ComfyUI, the gmlx nodes run FastH3 through the `fasth3-t2v` workflow,
+as [FastH3 in ComfyUI](comfyui.md#fasth3) shows.
+
 ## Clip length, size and memory
 
 `--seconds` sets the length, up to 15, and `--size` the width and

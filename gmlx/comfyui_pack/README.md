@@ -15,7 +15,7 @@ Supported model families:
 - FLUX.2 klein 9B and FLUX.2 klein Base 9B, text to image and editing with up to 10 reference images. Their license allows non-commercial use only.
 - FLUX.2 klein 9B KV, text to image and editing with up to 10 reference images, where the stock `Flux KV Cache` node makes the steps after the first reuse the keys and values of the references. Its license allows non-commercial use only.
 - FLUX.3 klein and FLUX.3 klein Base, text to image and editing with up to 10 reference images, on ComfyUI 0.41 or newer.
-- MiniMax-H3, the recipes `h3`, `h3-fast` and `h3-base`: video with sound from a text prompt, through ComfyUI's own MiniMax-H3 nodes, with video and audio VAE loaders that decode on the server. It needs a Mac with 32 GB or more.
+- MiniMax-H3, the recipes `h3`, `h3-fast`, `h3-base` and `fasth3`: video with sound from a text prompt, through ComfyUI's own MiniMax-H3 nodes, with video and audio VAE loaders that decode on the server. It needs a Mac with 32 GB or more, and `fasth3` an M5 chip or newer.
 
 ## Install
 
@@ -43,7 +43,7 @@ At startup it checks the ComfyUI internals it uses. When one is missing, the nod
 2. Add `gmlx Model Loader`, `gmlx CLIP Loader` and `gmlx VAE Loader`, and pick the model in `model_name` on each. For MiniMax-H3, add `gmlx Video VAE Loader` and `gmlx Audio VAE Loader` in place of `gmlx VAE Loader`. The list holds the image and video models of the gmlx server, the default first, or only the default model's name when it has none. A model the server does not have stops the run with the `gmlx pull` or `gmlx video pull` command that adds it.
 3. Connect them to stock nodes as you would any checkpoint: `CLIPTextEncode`, `KSampler`, `VAEDecode`, `LoraLoader`, `ModelSamplingAuraFlow` and so on.
 
-The `example_workflows` folder has twelve graphs, which ComfyUI's template browser lists under the pack:
+The `example_workflows` folder has thirteen graphs, which ComfyUI's template browser lists under the pack:
 
 - `z-image-turbo-t2i.json`: Z-Image-Turbo text to image.
 - `z-image-turbo-lora-t2i.json`: Z-Image-Turbo text to image through a stock `LoraLoader`. Put a Z-Image LoRA named `z-image-turbo-style.safetensors` in `models/loras`, or pick another one in the node.
@@ -57,6 +57,7 @@ The `example_workflows` folder has twelve graphs, which ComfyUI's template brows
 - `flux-3-klein-t2i.json`: FLUX.3 klein text to image through the stock `EmptyFlux2LatentImage`. It needs ComfyUI 0.41 or newer.
 - `flux-3-klein-edit-two-references.json`: FLUX.3 klein editing with two reference images through the stock `ReferenceMultiLatent` node. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images. It needs ComfyUI 0.41 or newer.
 - `minimax-h3-t2v.json`: a MiniMax-H3 clip with sound from a text prompt, 5 seconds at 1344x768 in 8 steps, through the stock `MiniMaxH3ImageToVideo`, `MiniMaxH3SigmaShift` at the `h3` recipe's shifts, 6 and 3, `euler` on the `simple` schedule, and the gmlx video and audio VAE loaders into `CreateVideo` and `SaveVideo`. It needs a Mac with 32 GB or more.
+- `fasth3-t2v.json`: a FastH3 clip with sound from a text prompt, 5 seconds at 1344x768, the same graph on the 8 noise levels FastH3 was trained at, which `gmlx Sigmas` gives in place of `BasicScheduler`, with `MiniMaxH3SigmaShift` at the `fasth3` recipe's shifts, 10 and 3. It needs a Mac with an M5 chip or newer and 36 GB or more.
 
 ### Server address
 
@@ -87,6 +88,7 @@ The text encoder part of a LoRA is not applied; set `strength_clip` to 0.
 
 Some variants, such as Qwen-Image 2.1 Turbo, are distilled to a fixed list of sigmas.
 `gmlx Sigmas` outputs that list and the variant's cfg; connect them to `SamplerCustom` or `SamplerCustomAdvanced` with any stock sampler.
+FastH3's list is the 8 noise levels it was trained at, at video shift 10. A run on that list, or on a part of it as a split schedule samples, is refused at shifts other than 10 and 3 and names `MiniMaxH3SigmaShift`, since without that node ComfyUI's forward derives the sound's sigmas at 12 and 3.
 The schedule of FLUX.2 klein and of Qwen-Image 2.1 follows the image size. On those, give `gmlx Sigmas` the image's `width` and `height`, and it outputs the schedule gmlx samples that image on. Without them it stops, and for FLUX.2 klein it names the stock `Flux2Scheduler`, which gives the same schedule.
 For any other variant without a fixed list, it gives ComfyUI's simple schedule over the variant's step count.
 `KSampler` with its own scheduler still works on every variant; it samples on ComfyUI's schedule instead.
@@ -104,8 +106,7 @@ Anything that would run inside the DiT forward in ComfyUI is refused with an err
 - hook keyframes and scheduled CLIP hooks;
 - a quantized Qwen-Image 2.1 prefix cache (`QwenImage21Cache` with a dtype other than default);
 - a MOSS-Image conditioning that masks some of its text rows, such as one from a text encoder other than `gmlx CLIP Loader`;
-- on MiniMax-H3, which the pack runs from the text prompt alone: a first or last frame of `MiniMaxH3ImageToVideo`, a guide from `MiniMaxH3AddGuide`, the references of `MiniMaxH3ReferenceToVideo`, vision tokens in the prompt, the Fun ControlNet, a noise mask on the latent and an encode with the gmlx video or audio VAE;
-- a FastH3 file: the pack runs the MiniMax-H3 recipes `h3`, `h3-fast` and `h3-base`.
+- on MiniMax-H3, which the pack runs from the text prompt alone: a first or last frame of `MiniMaxH3ImageToVideo`, a guide from `MiniMaxH3AddGuide`, the references of `MiniMaxH3ReferenceToVideo`, vision tokens in the prompt, the Fun ControlNet, a noise mask on the latent and an encode with the gmlx video or audio VAE.
 
 The stock `Flux KV Cache` node on FLUX.2 klein 9B KV is not refused: the server keeps the keys and values of the references of each row of the batch from the first step of a run, the later steps of the run reuse those of each row, and the end of the run drops them.
 The stock `SkipLayerGuidanceDiTSimple` node on MOSS-Image is not refused when it names `single_layers` alone, with `start_percent` 0 and `end_percent` 1: the server leaves those blocks out of the negative pass of each step. It is refused with `double_layers`, another window, a linked widget or a block MOSS-Image lacks, and on any other model.
