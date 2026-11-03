@@ -1346,6 +1346,19 @@ def test_a_prompt_that_fits_at_no_size_is_refused_as_the_prompt(
                              f"up to {rows} text rows do not fit")
 
 
+def test_a_model_that_fits_at_no_size_is_refused_as_the_size():
+    """Where no size of the shape fits even at the family's default rows,
+    a shorter prompt would not make the request fit, so the 400 names the
+    size, though the 60 KB prompt fits at no size either."""
+    served = _qwen_served()
+    budget = _need(served, 16) - (1 << 30)
+    req = image_service.parse_request("generations", {
+        "prompt": _LONG, "size": "2048x2048"})
+    e = _refused(req, served, 2048, budget)
+    assert e.param == "size"
+    assert str(e).endswith("and no smaller size of its shape does")
+
+
 def test_a_prompt_that_fits_at_a_smaller_size_is_refused_as_the_size():
     """A 4 KB Qwen-Image 2.1 prompt fits at 1024x1024 but not at 2048x2048
     with its own rows, where 2048x2048 fits at the family's default rows.
