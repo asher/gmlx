@@ -3,11 +3,12 @@
 On a GPU stream of mlx 0.32.3 a pad or a concatenate on a later axis
 misplaces input elements past 2^31 output elements (docs/upstream-defects.md).
 The regrow concatenate (gmlx/cache/kv_append.py) and the extend pads
-(BatchKVCache.extend, BatchRotatingKVCache.extend) go through
-gmlx.mlx_guards. Each test runs the cache at the first shape a serve
-reaches past the limit and checks every key of the output and of the
-inputs against the formula of tests/past_int32.py. The values take the
-same path at any width, so they are 8 wide here.
+(BatchKVCache.extend, BatchRotatingKVCache.extend and
+BatchQuantizedKVCache.extend) go through gmlx.mlx_guards. Each test runs
+the cache at the first shape a serve reaches past the limit and checks
+every key of the output and of the inputs against the formula of
+tests/past_int32.py. The values take the same path at any width, so they
+are narrow here.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ import mlx.core as mx
 
 import past_int32 as p32
 from gmlx.cache import kv_append
-from gmlx.cache.kv_cache import BatchKVCache, BatchRotatingKVCache
+from gmlx.cache.kv_cache import BatchKVCache, BatchQuantizedKVCache, BatchRotatingKVCache
 
 pytestmark = p32.MARKS
 # The fixture MARKS uses, where pytest finds it.
@@ -171,3 +172,64 @@ def test_a_row_joining_sliding_window_rows_past_2_31_elements_keeps_every_key():
     assert shape == (32, WH, 16_945, D)
     assert {"region": region, "keys": out, "31 rows' keys": own, "row's keys": other} == {
         "region": {}, "keys": {}, "31 rows' keys": {}, "row's keys": {}}
+
+
+# gemma-4-26B-A4B's global layers under --kv-bits 8 --kv-quant-scheme
+# uniform: 2 KV heads of 512, packed 128 uint32 wide, with scales and
+# biases 8 wide at group size 64.
+QH, QP, QS = 2, 128, 8
+
+
+def _quant(n: int, tokens: int, packed: int, scales: int, r0: int, salt: int) -> tuple:
+    """(packed, scales, biases) of ``n`` rows of ``tokens``, the packed part
+    the pattern of twice its width viewed as uint32."""
+    return (p32.bf16((n, QH, tokens, 2 * packed), r0=r0, salt=salt).view(mx.uint32),
+            p32.bf16((n, QH, tokens, scales), r0=r0, salt=salt + 10),
+            p32.bf16((n, QH, tokens, scales), r0=r0, salt=salt + 20))
+
+
+def _quant_extend(n: int, idx: int, join: int) -> tuple:
+    """A row of ``join`` tokens joins ``n`` rows that decode at a full
+    buffer of ``idx`` tokens: the joined packed keys' shape, the wrong
+    elements of batch rows n - 2 and n - 1, of every packed key, of the n
+    rows' and of the row's."""
+    cap = kv_append.grid_capacity(join, BatchQuantizedKVCache.step)
+    rows, left, w = n * QH, join - idx, 2 * QP
+    a = BatchQuantizedKVCache([0] * n, group_size=64, bits=8)
+    a.keys, a.values = _quant(n, idx, QP, QS, 0, 0), _quant(n, idx, 4, 1, 0, 50)
+    a._idx, a.offset = idx, mx.array([idx] * n)
+    b = BatchQuantizedKVCache([0], group_size=64, bits=8)
+    b.keys, b.values = _quant(1, cap, QP, QS, rows, 0), _quant(1, cap, 4, 1, rows, 50)
+    b._idx, b.offset = join, mx.array([join])
+    keys, joiner = a.keys[0], b.keys[0]
+    a.extend(b)
+    mx.eval(a.keys, a.values)
+    packed = a.keys[0]
+
+    def joined(r, s0, n_):
+        if r >= rows:
+            return p32.pattern(r, 1, s0, n_, w)[0]
+        return p32.placed(r, s0, n_, w, left, join, shift=left)
+
+    tail = packed[n - 2:n, :, left:join]
+    region = p32.wrong(tail, (2 * QH, idx, w),
+                       lambda r, s0, n_: p32.pattern(rows - 2 * QH + r, 1, s0, n_, w)[0])
+    out = p32.wrong(packed, ((n + 1) * QH, cap, w), joined)
+    own = p32.wrong(keys, (rows, idx, w), lambda r, s0, n_: p32.pattern(r, 1, s0, n_, w)[0])
+    other = p32.wrong(joiner, (QH, cap, w),
+                      lambda r, s0, n_: p32.pattern(rows + r, 1, s0, n_, w)[0])
+    return tuple(packed.shape), region, out, own, other
+
+
+def test_a_row_joining_a_quantized_batch_past_2_31_elements_keeps_every_key():
+    """A serve of gemma-4-26B-A4B with --kv-bits 8 --kv-quant-scheme
+    uniform and GMLX_DECODE_BATCH=64: a row of 129,537 tokens, its buffer
+    137,728 on the capacity grid, joins 63 rows that decode at a full
+    buffer of 4,352. extend pads their packed keys by 125,185 tokens on
+    the left and 8,191 on the right. The stock pad left the packed keys of
+    batch rows 61 and 62, 2,228,224 words, at the fill, and the inputs
+    intact."""
+    shape, region, out, own, other = _quant_extend(63, 4352, 129_537)
+    assert shape == (64, QH, 137_728, QP)
+    assert {"region": region, "keys": out, "63 rows' keys": own, "row's keys": other} == {
+        "region": {}, "keys": {}, "63 rows' keys": {}, "row's keys": {}}
