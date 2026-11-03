@@ -26,10 +26,11 @@ import pytest
 import host_box
 from helpers import _real_apple_gpu
 
-# The largest process footprint of these tests, measured on an M5 Max:
-# the batch extend, whose MLX peak is 13.53 GiB. The floor is twice the
-# footprint, so the rest of a run fits beside it.
-PEAK_GIB = 13.8
+# The largest process footprint of these tests, rounded up: the quantized
+# batch extend, 19.44 GiB by /usr/bin/time -l on an M5 Max, whose MLX peak
+# is 18.81 GiB. A sampled footprint misses the peak of a test this short.
+# The floor is twice the footprint, so the rest of a run fits beside it.
+PEAK_GIB = 19.5
 FLOOR_GIB = 2 * PEAK_GIB
 _LOCK = os.path.join(tempfile.gettempdir(), "gmlx-past-int32.lock")
 
