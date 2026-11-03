@@ -1462,6 +1462,20 @@ def test_an_edit_that_fits_at_a_smaller_size_gets_the_plan_message():
     assert str(e).startswith("image request does not fit")
 
 
+def _held(monkeypatch, served) -> list:
+    """``served`` with 12 GiB of other conditionings' prefix states held;
+    the bytes each shed takes go in the list returned."""
+    from gmlx.image import api
+
+    served.pipe.captions = SimpleNamespace(
+        bytes=12 << 30, nbytes=lambda key: 0, keys=lambda keep: [])
+    shed: list = []
+    monkeypatch.setattr(api, "_cond_key", lambda pipe, p, refs, enc: p)
+    monkeypatch.setattr(api, "shed_states", lambda pipe, n, own, live: (
+        shed.append(n) or n))
+    return shed
+
+
 def test_the_room_a_prompt_makes_is_what_its_admission_priced(
         monkeypatch):
     """A Qwen-Image 2.1 entry holds 12 GiB of other conditionings' prefix
@@ -1469,15 +1483,10 @@ def test_the_room_a_prompt_makes_is_what_its_admission_priced(
     them shed, and the shed before its encode takes what that plan needs,
     more than the plan at the family's default rows sheds."""
     from gmlx.commands.image_preflight import prompt_rows
-    from gmlx.image import api, memfit
+    from gmlx.image import memfit
 
     served = _qwen_served()
-    served.pipe.captions = SimpleNamespace(
-        bytes=12 << 30, nbytes=lambda key: 0, keys=lambda keep: [])
-    shed: list = []
-    monkeypatch.setattr(api, "_cond_key", lambda pipe, p, refs, enc: p)
-    monkeypatch.setattr(api, "shed_states", lambda pipe, n, own, live: (
-        shed.append(n) or n))
+    shed = _held(monkeypatch, served)
     req = image_service.parse_request("generations", {
         "prompt": _RICH, "size": "1024x1024"})
     rows = prompt_rows(served.pipe.family, req.prompt)
@@ -1493,6 +1502,30 @@ def test_the_room_a_prompt_makes_is_what_its_admission_priced(
     image_service.fit_check(req, served, (1024, 1024), budget)
     image_service._make_room(served, 1.0, (1024, 1024), [], False, budget,
                              [req.prompt])
+    assert shed == [need]
+
+
+def test_the_room_an_edit_makes_counts_its_references_and_the_floor(
+        monkeypatch):
+    """Before the encode of a Qwen-Image 2.1 edit of four images, the shed
+    takes what the plan needs at the size the edit runs each reference and
+    at the family's default text rows, which a short edit prompt is
+    priced at."""
+    from gmlx.image import memfit
+
+    served = _qwen_served()
+    shed = _held(monkeypatch, served)
+    req = _edit_req(4, (512, 512), prompt="swap the hats")
+    image_service.check_family(req, served)
+    sizes = [(r.height, r.width) for r in req.refs]
+    budget = _need(served, 1024, req.prompt, refs=sizes)
+    a = image_service._fit_args(served.pipe, served, budget, 1.0, tower=True)
+    need = memfit.plan_memory(height=1024, width=1024, ref_sizes=sizes,
+                              caption_tokens=512, text_tokens=512,
+                              _hint=False, **a).shed_bytes
+    assert need > 0
+    image_service._make_room(served, 1.0, (1024, 1024), req.refs, False,
+                             budget, [req.prompt])
     assert shed == [need]
 
 
