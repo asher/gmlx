@@ -931,6 +931,34 @@ class Interrupt(Base):
         self.assertGreaterEqual(kinds.count("step_interrupted"), 1)
         self.assertLess(took, 8 * self.DELAY_S)
 
+    def test_a_step_the_server_ends_after_a_cancel_ends_the_run_as_comfyuis_interrupt(self):
+        """The server can end the step with a 409 interrupted between the
+        user's Cancel and the client's next poll. ComfyUI then shows its
+        cancel, not a gmlx error. The client's poll is off, so only the 409
+        tells the sampler."""
+        m = self.model()
+        other = C.StepClient(self.stub.url)
+        done = threading.Event()
+
+        def watch():
+            while not done.is_set():
+                if len(self.stub.events("step_begin")) >= 2:
+                    mm.interrupt_current_processing(True)
+                    other.interrupt(None)
+                    return
+                time.sleep(0.02)
+        C.set_interrupt_check(None)
+        th = threading.Thread(target=watch, daemon=True)
+        th.start()
+        try:
+            with self.assertRaises(mm.InterruptProcessingException):
+                self.sample(m, steps=8)
+        finally:
+            done.set()
+            mm.interrupt_current_processing(False)
+            C.set_interrupt_check(mm.throw_exception_if_processing_interrupted)
+        self.assertIn("step_interrupted", [e["kind"] for e in self.stub.log()])
+
 
 class ClipAndVae(Base):
     def test_clip_text_encode_gives_real_conditioning(self):
