@@ -1123,6 +1123,20 @@ def _entry_with_own(tmp_path, request, seed: int = 5):
     return pipe
 
 
+def _stack_body(c, *loras) -> dict:
+    """A contract table of the pairs of each (adapter, strength) of
+    ``loras`` on each ComfyUI key, as a chain of stock LoRA loaders sends
+    them."""
+    rows: dict = {}
+    for adapter, strength in loras:
+        for e in _table_body(c, adapter)["entries"]:
+            for patch in e["patches"]:
+                patch["strength"] = strength
+            rows.setdefault(e["key"], {**e, "patches": []})["patches"] += (
+                e["patches"])
+    return {"model": "h3", "entries": list(rows.values())}
+
+
 def test_a_table_of_the_entrys_own_lora_takes_no_pair_room(tmp_path,
                                                            request):
     """A workflow that keeps the recipe's LoRA in a stock loader sends the
@@ -1143,6 +1157,30 @@ def test_a_table_of_the_entrys_own_lora_takes_no_pair_room(tmp_path,
                     **kw)
     plain = c.av_step("h3", None, video, audio, 600.0, row, **kw)
     assert all(_rel(g, p) < 1e-5 for g, p in zip(got, plain))
+
+
+def test_a_lora_loaded_twice_takes_the_room_of_one(request):
+    """Two stock loaders of one LoRA at half strength each send each pair
+    twice on its key. The pairs fill a room of one copy and step as the
+    LoRA at full strength."""
+    from test_video_h3_lora import _adapter
+
+    pipe, _w = _own_pipe()
+    _mount(_Host(_served(pipe)), request)
+    a = _adapter(6)
+    pipe.adapters.max_bytes = sum(d.nbytes + u.nbytes for d, u, _a in
+                                  a.values())
+    c = _client()
+    twice = c.define_table("h3", _stack_body(c, (a, 0.5), (a, 0.5)))
+    video, audio, feats = _clip()
+    row, kw = {"cond": c.put(feats)}, dict(shifts=SHIFTS, audio_scale=SCALE)
+    got = c.av_step("h3", None, video, audio, 600.0, row, patch_table=twice,
+                    **kw)
+    once = c.define_table("h3", _table_body(c, a))
+    want = c.av_step("h3", None, video, audio, 600.0, row, patch_table=once,
+                     **kw)
+    # The halves sum in the module's pair, rounded on their own.
+    assert all(_rel(g, w) < 1e-3 for g, w in zip(got, want))
 
 
 def test_a_patch_alpha_that_is_no_number_is_a_400(host):
