@@ -39,7 +39,7 @@ At startup it checks the ComfyUI internals it uses. When one is missing, the nod
 
 ## Use
 
-1. Add the image model to the gmlx config and run `gmlx serve`. The loaders also start `gmlx serve` when no server answers and `start_server` is on.
+1. Add the image or video model to the gmlx config and run `gmlx serve`. The loaders also start `gmlx serve` when no server answers and `start_server` is on.
 2. Add `gmlx Model Loader`, `gmlx CLIP Loader` and `gmlx VAE Loader`, and pick the model in `model_name` on each. For MiniMax-H3, add `gmlx Video VAE Loader` and `gmlx Audio VAE Loader` in place of `gmlx VAE Loader`. The list holds the image and video models of the gmlx server, the default first, or only the default model's name when it has none. A model the server does not have stops the run with the `gmlx pull` or `gmlx video pull` command that adds it.
 3. Connect them to stock nodes as you would any checkpoint: `CLIPTextEncode`, `KSampler`, `VAEDecode`, `LoraLoader`, `ModelSamplingAuraFlow` and so on.
 

@@ -105,7 +105,7 @@ The recording runs at true speed, with a 27B model in a local server.
   and in ComfyUI. It needs an M3 chip or newer. See
   [Image generation](https://asher.github.io/gmlx/images.html).
 - Video clips with sound from a text prompt with MiniMax-H3, on the command
-  line, as a preview. It needs an M3 chip or newer and 32 GB of memory. See
+  line and in ComfyUI. It needs an M3 chip or newer and 32 GB of memory. See
   [Video generation](https://asher.github.io/gmlx/video.html).
 - A decision API at `/v1/systemone` that returns a probability for each
   answer to yes-or-no, choice and score questions about a text. See

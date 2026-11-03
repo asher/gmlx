@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""gmlx nodes for ComfyUI: image model steps on a local gmlx server.
+"""gmlx nodes for ComfyUI: image and video model steps on a local gmlx server.
 
 The full import needs ComfyUI internals that a ComfyUI release can change.
 When it fails inside ComfyUI, stand-in nodes of the same names load instead,
