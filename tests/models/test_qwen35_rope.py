@@ -215,32 +215,44 @@ def test_cpu_default_device_takes_the_cos_sin_route(monkeypatch):
 
 # This reads the Metal source each kernel builder generates, for every
 # variant it builds, with whitespace normalized; it launches nothing. It
-# is a tripwire for the forms these kernels use, not a proof. It checks:
+# is a tripwire for the forms these kernels use, not a proof, and it is
+# closed: the forms it does not read are listed at the end. It checks:
 #
 # 1. Each 32-bit integer declared at the start of a statement is one of
 #    the names below, all of which the launch grid or the shape bounds,
 #    and no auto is declared there.
-# 2. These expressions have no sum, difference, product, quotient or
-#    remainder of two 32-bit operands, and are 64-bit:
+# 2. These have no sum, difference, product, quotient or remainder of two
+#    32-bit operands, and are 64-bit:
 #    - each subscript of x, x_out, cos and sin;
 #    - each offset added to or taken from one of those names, as in
-#      "x + off" (the offset after the name, up to the next ";", ")",
-#      "," or "]" outside brackets), which covers a row pointer and a
-#      dereference;
+#      "x + off": the text after the operator, up to the next ";", ")",
+#      "," or "]" outside brackets;
 #    - each initializer of a declared long, int64_t, ulong, uint64_t or
 #      size_t, at the start of a statement;
-#    - each right side of =, +=, -= or *= to a name declared so, at the
-#      start of a statement. That of +=, -= and *= may be 32-bit, as the
-#      name widens it.
-#    A 64-bit operand is a name declared so, a 64-bit cast (static_cast,
-#    C-style or functional) of a name or a literal, or an operation with
-#    a 64-bit operand. A 64-bit cast of anything else is refused, though
-#    a bound might make it correct, and a 32-bit cast is 32-bit.
+#    - each right side of = to a name declared so, at the start of a
+#      statement.
+# 3. A pointer declared from one of those names or from another such
+#    pointer, as in "T* p = x + off" or "T* p = &x[i]", is an alias.
+#    These have no operation of two 32-bit operands, but may be 32-bit,
+#    as an offset from a 64-bit base may be:
+#    - each subscript of an alias, and each offset added to or taken
+#      from one;
+#    - each right side of +=, -= or *= to a 64-bit name, one of the four
+#      or an alias, at the start of a statement.
 #
-# It does not read a subscript of another name, an offset before the
-# name, a pointer taken from another pointer, or a declaration inside a
-# for header. The position_ids index is not checked: it reads 3 x B x L
-# entries.
+# A 64-bit operand is a name declared so, a 64-bit cast (static_cast,
+# C-style or functional) of a name or a literal, or an operation with a
+# 64-bit operand. A 64-bit cast of anything else is refused, though a
+# bound might make it correct, and a 32-bit cast is 32-bit.
+#
+# It does not read:
+# - a subscript of, or an offset from, a name that is neither one of the
+#   four nor an alias;
+# - an offset written before the name, as in "off + x";
+# - a declaration or an assignment that does not start a statement, as
+#   in a for header or after an if condition;
+# - a declaration whose type is two words, such as unsigned int;
+# - the position_ids index, which reads 3 x B x L entries.
 
 _GRID_INTS = frozenset((
     "elem", "half_dim", "q_bsz", "q_heads", "q_len", "q_dim", "slots",
@@ -401,8 +413,25 @@ def _offsets(src: str, names):
         yield m.group(1), m.group(2), src[m.end():j].strip()
 
 
+_BUFFERS = ("x", "x_out", "cos", "sin")
+
+
+def _aliases(src: str) -> list:
+    """The pointers declared from a buffer or from another such pointer,
+    as ``T* p = x + off`` or ``T* p = &x[i]`` declares them."""
+    names = set(_BUFFERS)
+    ptr = re.compile(r"\*\s*(\w+)\s*=\s*(?:&\s*(\w+)\s*\[|(\w+)\b"
+                     r"(?!\s*\[))")
+    while True:
+        new = {m.group(1) for m in ptr.finditer(src)
+               if (m.group(2) or m.group(3)) in names} - names
+        if not new:
+            return sorted(names - set(_BUFFERS))
+        names |= new
+
+
 def _index_faults(src: str) -> list:
-    """What breaks the two rules in one kernel's source."""
+    """What breaks the three rules in one kernel's source."""
     src = " ".join(src.split())
     faults, wide = [], set()
     decl = re.compile(r"(?:^|(?<=[;{}]))\s*(?:const\s+)?(\w+)\s+(\w+)\s*"
@@ -423,12 +452,21 @@ def _index_faults(src: str) -> list:
             wide.add(name)
     assign = re.compile(r"(?:^|(?<=[;{}]))\s*(\w+)\s*(=|\+=|-=|\*=)(?!=)"
                         r"\s*([^;]*);")
-    checked = [(f"{a}[{i}]", i, True) for a, i in _subscripts(
-        src, ("x", "x_out", "cos", "sin"))]
-    checked += [(f"{a} {op} {i}", i, True) for a, op, i in _offsets(
-        src, ("x", "x_out", "cos", "sin"))]
+    checked = [(f"{a}[{i}]", i, True) for a, i in _subscripts(src, _BUFFERS)]
+    checked += [(f"{a} {op} {i}", i, True)
+                for a, op, i in _offsets(src, _BUFFERS)]
     checked += [(f"{name} {op} {rhs}", rhs, op == "=")
                 for name, op, rhs in assign.findall(src) if name in wide]
+    aliases = _aliases(src)
+    if aliases:
+        checked += [(f"{a}[{i}]", i, False)
+                    for a, i in _subscripts(src, aliases)]
+        checked += [(f"{a} {op} {i}", i, False)
+                    for a, op, i in _offsets(src, aliases)]
+    pointers = set(_BUFFERS) | set(aliases)
+    checked += [(f"{name} {op} {rhs}", rhs, False)
+                for name, op, rhs in assign.findall(src)
+                if name in pointers and op != "="]
     for what, text, whole in checked:
         e = _Expr(text, wide)
         try:
