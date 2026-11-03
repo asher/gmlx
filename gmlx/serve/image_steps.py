@@ -249,15 +249,16 @@ class _Bytes:
         configured bound holds them, or else the configured bound."""
         if nbytes <= self.max_bytes:
             return
-        over = (f"a tensor of {_mib(nbytes)} is over {self.name} of "
-                f"{_mib(self.max_bytes)}")
+        configured = f"{self.configured / 2**20:.0f} MiB"
         if nbytes > self.configured:
-            raise StepError(413, f"{over}; raise server.image.{self.key}")
-        raise StepError(413, f"{over}: the models loaded leave it "
-                        f"{self.max_bytes / self.configured:.0%} of its "
-                        f"configured {self.configured / 2**20:.0f} MiB. A "
-                        "smaller defaults.size or defaults.seconds on the "
-                        "tightest entry gives it more.")
+            raise StepError(413, f"a tensor of {_mib(nbytes)} is over the "
+                            f"configured {configured} of {self.name}; raise "
+                            f"server.image.{self.key}")
+        raise StepError(413, f"a tensor of {_mib(nbytes)} is over {self.name} "
+                        f"of {_mib(self.max_bytes)}: the models loaded leave "
+                        f"it {self.max_bytes / self.configured:.0%} of its "
+                        f"configured {configured}. A smaller defaults.size or "
+                        "defaults.seconds on the tightest entry gives it more.")
 
     def bound(self, configured: int, max_bytes: int) -> None:
         """Set the bound at ``max_bytes`` of the ``configured`` one and

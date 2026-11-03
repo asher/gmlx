@@ -782,8 +782,8 @@ def test_a_cond_over_the_share_the_models_leave_is_413_naming_it(
         "smaller defaults.size or defaults.seconds on the tightest entry "
         "gives it more.")
     assert over.value.body["error"] == (
-        "a tensor of 80.0 MiB is over the step routes' tensor cache of 16.0 "
-        "MiB; raise server.image.tensor_cache_mb")
+        "a tensor of 80.0 MiB is over the configured 64 MiB of the step "
+        "routes' tensor cache; raise server.image.tensor_cache_mb")
 
 
 def test_the_adapter_cache_and_the_upload_limit_are_named_in_a_413(host):
