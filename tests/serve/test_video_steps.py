@@ -24,7 +24,8 @@ from gmlx.serve import image_wire as wire  # noqa: E402
 from gmlx.serve import video_service as vs  # noqa: E402
 from gmlx.serve.image_service import WORKER, ServedImage  # noqa: E402
 from gmlx.serve.image_steps_client import (MissingTensors,  # noqa: E402
-                                           StepsClient, StepsClientError)
+                                           StepsClient, StepsClientError,
+                                           array_hash)
 from gmlx.serve.patches import image_steps as routes  # noqa: E402
 from gmlx.serve.video_service import ServedVideo, VideoEntryPlan  # noqa: E402
 from gmlx.video import api as vapi  # noqa: E402
@@ -674,9 +675,11 @@ def test_a_lora_that_does_not_load_again_with_the_dit_fails_the_step(
     assert all(_rel(a, b) < 1e-6 for a, b in zip(after, before))
 
 
-def test_a_table_an_encode_lets_go_before_its_step_runs_is_missing(
-        monkeypatch, request):
-    """A second client's encode can run on the image worker between a
+@pytest.mark.parametrize("between", ["encode", "define"])
+def test_a_table_let_go_before_its_step_runs_is_missing(monkeypatch, request,
+                                                       between):
+    """A second client's encode, or the define of its table on a pair
+    cache with room for one table, can run on the image worker between a
     step's check of its table and the step itself. The step answers the
     table as missing, and the pack sends it again."""
     from test_video_h3_lora import _adapter
@@ -686,6 +689,9 @@ def test_a_table_an_encode_lets_go_before_its_step_runs_is_missing(
     _stub_encode(monkeypatch, weights)
     c = _client()
     body = _table_body(c, _adapter(6))
+    theirs = _table_body(_client(), _adapter(7))
+    pipe.adapters.max_bytes = sum(d.nbytes + u.nbytes
+                                  for d, u, _a in _adapter(6).values())
     tid = c.define_table("h3", body)
     video, audio, feats = _clip()
     row = {"cond": c.put(feats)}
@@ -693,19 +699,58 @@ def test_a_table_an_encode_lets_go_before_its_step_runs_is_missing(
     sent = c.av_step("h3", None, video, audio, 600.0, row, **kw)
     ensure, ran = vs.ensure_dit, []
 
-    def encode_first(served):
+    def other_first(served):
         if not ran:
             ran.append(True)
-            vs.drop_dit(served)         # what the encode leaves
+            if between == "encode":
+                vs.drop_dit(served)     # what the encode leaves
+            else:
+                steps.define_table(served, theirs, steps.STATE.adapters)
         ensure(served)
 
-    monkeypatch.setattr(vs, "ensure_dit", encode_first)
+    monkeypatch.setattr(vs, "ensure_dit", other_first)
     with pytest.raises(MissingTensors) as e:
         c.av_step("h3", None, video, audio, 600.0, row, **kw)
     assert ran and e.value.body["missing"] == [tid]
     assert c.define_table("h3", body) == tid
     again = c.av_step("h3", None, video, audio, 600.0, row, **kw)
     assert all(_rel(a, b) < 1e-6 for a, b in zip(again, sent))
+
+
+def test_a_table_whose_pairs_another_table_shed_is_missing_until_sent_again(
+        request):
+    """Two ComfyUI clients whose LoRAs each fill the entry's pair room, with
+    its built tables bounded as a loaded entry bounds them: B's table
+    sheds the pairs of A's. A's next step, on a cond the server lacks
+    too, names both in one 409, and A steps as before once the pack sends
+    its table again."""
+    from test_video_h3_lora import _adapter
+
+    pipe, _w = _own_pipe()
+    _mount(_Host(_served(pipe)), request)
+    a = _adapter(6)
+    need = sum(d.nbytes + u.nbytes for d, u, _a in a.values())
+    pipe.adapters.max_bytes = pipe.tables.max_bytes = need
+    ca, cb = _client(), _client()
+    body = _table_body(ca, a)
+    video, audio, feats = _clip()
+    kw = dict(shifts=SHIFTS, audio_scale=SCALE)
+    ta = ca.define_table("h3", body)
+    row = {"cond": ca.put(feats)}
+    first = ca.av_step("h3", None, video, audio, 600.0, row, patch_table=ta,
+                       **kw)
+    tb = cb.define_table("h3", _table_body(cb, _adapter(7)))
+    cb.av_step("h3", None, video, audio, 600.0, {"cond": cb.put(feats)},
+               patch_table=tb, **kw)
+    lacked = array_hash(_clip(1)[2])
+    with pytest.raises(MissingTensors) as e:
+        ca.av_step("h3", None, video, audio, 600.0, {"cond": lacked},
+                   patch_table=ta, **kw)
+    assert sorted(e.value.body["missing"]) == sorted([lacked, ta])
+    assert ca.define_table("h3", body) == ta
+    again = ca.av_step("h3", None, video, audio, 600.0, row, patch_table=ta,
+                       **kw)
+    assert all(_rel(x, y) < 1e-6 for x, y in zip(again, first))
 
 
 def _encoder_by_text(monkeypatch, weights) -> list:

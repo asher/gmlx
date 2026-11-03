@@ -507,13 +507,23 @@ async def put_patch_table(request: Request):
     return _json(200, {"id": want})
 
 
+def _held(pipe, core: str) -> bool:
+    """Whether the pipeline holds the core table ``core`` and every pair
+    it names. Another table's define can shed the pairs of a table it
+    did not name, and the client then sends that table again."""
+    table = pipe.patch_tables.get(core)
+    return table is not None and all(
+        pipe.adapters.peek(key) is not None
+        for _path, _band, patches in table["entries"] for key, _st in patches)
+
+
 def _table(served, tid):
     from ..image_steps import STATE, Missing
 
     if not tid:
         return None
     core = STATE.tables_of(served.spec.id, served.pipe).get(tid)
-    if core is None or core not in served.pipe.patch_tables:
+    if core is None or not _held(served.pipe, core):
         raise Missing([tid])
     return core
 
@@ -633,6 +643,10 @@ async def step(request: Request):
             from ..image_service import size_fits
             from ..image_steps import _host, conditioning
 
+            if table is not None and not _held(served.pipe, table):
+                # Another table's define since the check above shed its
+                # pairs.
+                raise Missing([fields["patch_table"]])
             fam = served.pipe.family.name
             conds = [conditioning(r, STATE.tensors, fam) for r in rows]
             # The plan of the rows as they are: their text, a prefix and
@@ -864,8 +878,9 @@ async def _av_step(t0, tensors, fields, run):
             from ..image_steps import StepInterrupted
 
             vs.ensure_dit(served)
-            if table is not None and table not in served.pipe.patch_tables:
-                # An encode since the check above let the table go.
+            if table is not None and not _held(served.pipe, table):
+                # An encode or another table's define since the check
+                # above let the table or its pairs go.
                 raise Missing([fields["patch_table"]])
             feats = _f32(held)
             if feats.ndim == 2:

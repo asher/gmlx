@@ -1122,6 +1122,42 @@ def test_a_model_released_with_a_table_frees_its_pipeline(host):
     assert [r() for r in refs] == [None, None]
 
 
+def test_a_table_whose_pairs_a_define_sheds_before_its_step_is_missing(
+        host, pipe, monkeypatch):
+    """Another client's define can run on the image worker between a
+    step's check of its table and the step, and shed the table's pairs
+    from a pair cache with room for one table and none for a built one.
+    The step answers the table as missing, and steps as before once the
+    pack sends it again."""
+    c = _client()
+    body, (down, up) = _table_body(c)
+    theirs, _pair = _table_body(_client(), scale=0.3)
+    monkeypatch.setattr(pipe.adapters, "max_bytes", down.nbytes + up.nbytes)
+    monkeypatch.setattr(pipe.tables, "max_bytes", 1)
+    tid = c.define_table("zit", body)
+    rows, x = _rows(c, _features()), noise_from_seed(3, SHAPE)
+    run = c.begin("zit")
+    first = c.step("zit", run, x, [0.75], rows, patch_table=tid)
+    table, ran = routes._table, []
+
+    def define_between(served, t):
+        core = table(served, t)
+        if t == tid and not ran:
+            ran.append(True)
+            _on_worker(steps.define_table, served, theirs,
+                       steps.STATE.adapters)
+        return core
+
+    monkeypatch.setattr(routes, "_table", define_between)
+    with pytest.raises(MissingTensors) as e:
+        c.step("zit", run, x, [0.75], rows, patch_table=tid)
+    assert ran and e.value.missing == [tid]
+    assert c.define_table("zit", body) == tid
+    again = c.step("zit", run, x, [0.75], rows, patch_table=tid)
+    c.end(run)
+    assert np.array_equal(again, first)
+
+
 def test_a_table_whose_matrices_are_not_held_is_a_409(host):
     c = _client()
     body = {"entries": [{"key": "diffusion_model.layers.0.attention.out."
