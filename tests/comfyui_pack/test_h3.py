@@ -209,11 +209,15 @@ class Sampling(Base):
     def test_fasth3_on_its_trained_sigmas_at_other_shifts_is_refused(self):
         """Without ModelSamplingMiniMaxH3 ComfyUI's forward would derive the
         audio sigma at 12 and 3, off FastH3's trained audio sigmas, with no
-        error. A schedule of the user's own runs at the shifts it is given."""
+        error, and at a wrong audio shift alone off them too. A split of the
+        trained sigmas is refused at its first sampler. A schedule of the
+        user's own runs at the shifts it is given."""
         sig = P.nodes.GmlxSigmas().get_sigmas(self.model(FID))[0]
         tail = P.nodes.GmlxSigmas().get_sigmas(self.model(FID), 0, 0.5)[0]
+        head = _out(CS.SplitSigmas.execute(sig, 4))[0]
         for shifts, sigmas, ran in ((None, sig, "12 and 3"), ((6.0, 3.0), sig, "6 and 3"),
-                                    (None, tail, "12 and 3")):
+                                    ((10.0, 4.0), sig, "10 and 4"),
+                                    (None, tail, "12 and 3"), (None, head, "12 and 3")):
             with self.subTest(shifts=shifts, steps=len(sigmas) - 1):
                 self.stub.reset()
                 model = self.model(FID)
@@ -232,6 +236,37 @@ class Sampling(Base):
                                               "simple", 4)
         self.custom(model, own)
         self.assertEqual(len(self.stub.events("av_step")), 4)
+
+    def _forward(self, model, to: dict):
+        """One forward of the model's DiT with ``to``, as a sampler calls it."""
+        mm.load_models_gpu([model])
+        model.pre_run()
+        pos, _ = self.cond()
+        video, audio = self.latent()["samples"].unbind()
+        try:
+            return model.model.diffusion_model.forward(
+                [video, audio], torch.tensor([999.9]), context=pos[0][0],
+                transformer_options={"cond_or_uncond": [0], "uuids": [uuid.uuid4()], **to},
+                minimax_payload={"audio_scale": 10.0 / 3.0})
+        finally:
+            model.cleanup()
+
+    def test_a_fasth3_call_with_no_schedule_is_refused_at_other_shifts(self):
+        """A ComfyUI that stops setting transformer_options['sample_sigmas']
+        would turn the guard off. A FastH3 call without it at shifts other
+        than FastH3's is refused by the key it lacks, and one at FastH3's
+        shifts steps."""
+        with self.assertRaises(C.GmlxError) as e:
+            self._forward(self.model(FID), {})
+        self.assertEqual(str(e.exception), "gmlx: 'fasth3' samples on its trained sigmas at "
+                         "the shifts 10 and 3, and this run is at 12 and 3 with no "
+                         "transformer_options['sample_sigmas'] to tell its schedule from them; "
+                         "put ModelSamplingMiniMaxH3 on the model at 10 and 3")
+        self.assertEqual(self.stub.events("av_step"), [])
+        model = _out(H.MiniMaxH3SigmaShift.execute(self.model(FID), 10.0, 3.0))[0]
+        to = model.model_options["transformer_options"]
+        self._forward(model, {k: to[k] for k in P.model.H3_SHIFTS.values()})
+        self.assertEqual(len(self.stub.events("av_step")), 1)
 
     def test_an_av_step_after_the_server_dropped_its_tensors_uploads_again(self):
         """A server restart or eviction between steps drops the cond and the

@@ -471,25 +471,32 @@ class RemoteForward:
                                   "remove the latent's noise mask")
 
     def _trained_shifts(self, to: dict, shifts: dict) -> None:
-        """Refuse a run on the entry's trained sigmas, or their tail, at
-        shifts other than the entry's. The forward derives the audio sigma
-        from the video one at the shifts in force, which are 12 and 3
-        without ModelSamplingMiniMaxH3, so the audio would sample off its
-        trained sigmas with no error."""
+        """Refuse a run on the entry's trained sigmas, or on any run of
+        them in order, as a split of the schedule samples, at shifts other
+        than the entry's. The forward derives the audio sigma from the
+        video one at the shifts in force, which are 12 and 3 without
+        ModelSamplingMiniMaxH3, so the audio would sample off its trained
+        sigmas with no error. A call at other shifts that carries no
+        schedule is refused too, naming the key it lacks."""
         sampling = self.b.status.get("sampling") or {}
-        fixed, ran = sampling.get("sigmas"), to.get("sample_sigmas")
-        if not fixed or ran is None:
-            return
-        ran = torch.as_tensor(ran).detach().float().reshape(-1).cpu()
-        table = torch.tensor([float(s) for s in fixed], dtype=torch.float32)
-        if len(ran) > len(table) or not torch.equal(ran, table[len(table) - len(ran):]):
+        fixed = sampling.get("sigmas")
+        if not fixed:
             return
         v, a = float(sampling["shift"]), float(sampling["audio_shift"])
-        if (shifts["video"], shifts["audio"]) != (v, a):
-            raise GmlxRefusal(f"gmlx: {self.b.model_id!r} samples on its trained sigmas at the "
-                              f"shifts {v:g} and {a:g}, and this run is at {shifts['video']:g} "
-                              f"and {shifts['audio']:g}; put ModelSamplingMiniMaxH3 on the "
-                              f"model at {v:g} and {a:g}")
+        if (shifts["video"], shifts["audio"]) == (v, a):
+            return
+        why = (f"gmlx: {self.b.model_id!r} samples on its trained sigmas at the shifts {v:g} "
+               f"and {a:g}, and this run is at {shifts['video']:g} and {shifts['audio']:g}")
+        fix = f"put ModelSamplingMiniMaxH3 on the model at {v:g} and {a:g}"
+        ran = to.get("sample_sigmas")
+        if ran is None:
+            raise GmlxError(f"{why} with no transformer_options['sample_sigmas'] to tell its "
+                            f"schedule from them; {fix}")
+        ran = torch.as_tensor(ran).detach().float().reshape(-1).cpu()
+        table = torch.tensor([float(s) for s in fixed], dtype=torch.float32)
+        n = len(ran)
+        if any(torch.equal(ran, table[i:i + n]) for i in range(len(table) - n + 1)):
+            raise GmlxRefusal(f"{why}; {fix}")
 
     def _av_call(self, t0, x, timesteps, context, control, to: dict, kwargs: dict):
         """One AV step: the video and audio latents as the sampler carries
