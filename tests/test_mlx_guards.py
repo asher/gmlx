@@ -35,6 +35,11 @@ def _np(a: mx.array) -> np.ndarray:
     return np.array(a.astype(mx.float32)).astype(np.float64)
 
 
+def _bits(a: mx.array) -> np.ndarray:
+    # The bit patterns of a bfloat16 array.
+    return np.array(a.view(mx.uint16))
+
+
 def _wide(rows: int, cols: int, dtype) -> mx.array:
     # Whole numbers, so every dtype holds them and the sums exactly.
     return mx.arange(rows * cols).reshape(rows, cols).astype(dtype)
@@ -207,7 +212,7 @@ def _spy(monkeypatch, name: str) -> list:
 def test_concatenate_takes_a_slice_update_only_past_the_limit(monkeypatch, kind):
     """An output at the limit is the stock op's array, so the graph of the
     shapes models run today is the stock one. One element more, the inputs
-    are written into zeros and the values are the stock op's."""
+    are written into zeros, with numpy's values and the stock op's bits."""
     shapes, axis = CONCATS[kind]
     arrays = [_counts(s, 100 * i) for i, s in enumerate(shapes)]
     mx.eval(arrays)
@@ -221,12 +226,14 @@ def test_concatenate_takes_a_slice_update_only_past_the_limit(monkeypatch, kind)
     assert len(calls) == 1
     assert out.dtype == mx.bfloat16
     np.testing.assert_array_equal(_np(out), want)
+    np.testing.assert_array_equal(_bits(out), _bits(calls[0]))
 
 
 @pytest.mark.parametrize("kind", list(PADS))
 def test_pad_takes_a_slice_update_only_past_the_limit(monkeypatch, kind):
     """As for concatenate: the stock op's array at the limit, and past it
-    the input written into zeros, with the stock op's values."""
+    the input written into zeros, with numpy's values and the stock op's
+    bits."""
     shape, widths = PADS[kind]
     x = _counts(shape, 0)
     mx.eval(x)
@@ -240,6 +247,7 @@ def test_pad_takes_a_slice_update_only_past_the_limit(monkeypatch, kind):
     assert len(calls) == 1
     assert out.dtype == mx.bfloat16
     np.testing.assert_array_equal(_np(out), want)
+    np.testing.assert_array_equal(_bits(out), _bits(calls[0]))
 
 
 def test_a_bool_pad_past_the_limit_stays_bool(monkeypatch):
