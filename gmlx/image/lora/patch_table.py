@@ -212,13 +212,15 @@ def patch_pair(up, down, alpha=None, mid=None, dora_scale=None,
 
 
 def register_patch(pipe, up, down, alpha=None, mid=None, dora_scale=None,
-                   reshape=None) -> str:
+                   reshape=None, *, hold=()) -> str:
     """Keep the pair of a ComfyUI LoRA patch, given in its tuple order, and
     return its content hash. A patch with a mid tensor, a DoRA scale or a
-    reshape is refused by name."""
+    reshape is refused by name. ``hold`` gives the hashes of the pairs
+    kept before this one for the same table, which the room for this
+    pair never sheds."""
     down, up, alpha, key = patch_pair(up, down, alpha, mid, dora_scale,
                                       reshape)
-    return register_pair(pipe, down, up, alpha, key=key)
+    return register_pair(pipe, down, up, alpha, key=key, hold=hold)
 
 
 def _module_of(key: str, family) -> str:

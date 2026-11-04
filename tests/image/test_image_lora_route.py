@@ -374,6 +374,29 @@ def _two_over_one_dit() -> tuple:
                                  variant="turbo")
 
 
+def test_each_pipeline_over_one_dit_runs_and_counts_its_own_table(op):
+    """Two pipelines over one DiT define the same table, under one id.
+    Each runs the table built over its own pairs and counts it in its own
+    tables cache. The pipeline whose table did not run last holds nothing
+    for the patch state, and its forward that stops before the first
+    leaf records nothing in either cache."""
+    p1, p2 = _two_over_one_dit()
+    pairs, x = _pairs(7), _x()
+    y1 = _run(p1, _entries(p1, QKV, _qkv_rows(pairs)), QKV, x)
+    (t1,) = p1.lora._cur.values()
+    y2 = _run(p2, _entries(p2, QKV, _qkv_rows(pairs)), QKV, x)
+    ((key, t2),) = p2.lora._cur.items()
+    assert p2.lora is p1.lora and t2 is not t1 and _same(y1, y2)
+    assert p1.tables.peek(key) is t1 and p2.tables.peek(key) is t2
+    stepped = p2.tables.used(key)
+    install.restore(p1, install.activate(p1, key[0]))
+    assert p1.tables.peek(key) is t1 and p2.lora._cur == {key: t2}
+    assert p2.tables.used(key) == stepped
+    p1.tables.max_bytes = 0
+    install.shed_to_bounds(p1)
+    assert p1.tables.bytes == 0
+
+
 def test_drop_built_keeps_the_tables_another_pipeline_over_the_dit_ran(op):
     """drop_built of one pipeline over a DiT drops its own tables and
     keeps those the patch state holds for the other, whose tables cache
@@ -390,6 +413,79 @@ def test_drop_built_keeps_the_tables_another_pipeline_over_the_dit_ran(op):
     assert not [k for k in p1.tables.keys(lambda k: k[0] != install.KERNEL)]
     assert p2.lora._cur == cur and p2.tables.bytes == held > 0
     _check_caches(p2)
+
+
+def _w1_patch(pipe, rng, hold=()) -> str:
+    """A ComfyUI patch on the K-quant w1, kept as register_patch keeps
+    one."""
+    out, inp = install.linear_dims(_leaf(pipe, W1))
+    d, u, _ = make_pair(rng, out, inp, 4)
+    return lora.register_patch(pipe, mx.array(u), mx.array(d), hold=hold)
+
+
+def _w1_step(pipe, keys) -> None:
+    """A forward of w1 under the table of ``keys``, or of the base model
+    without keys."""
+    tid = api.define_patch_table(
+        pipe, [(W1, None, [(k, 1.0) for k in keys])] if keys else [])
+    inp = install.linear_dims(_leaf(pipe, W1))[1]
+    x = mx.array(np.random.default_rng(0).standard_normal(
+        (1, 64, inp)).astype(np.float32)).astype(mx.bfloat16)
+    prev = install.activate(pipe, tid)
+    try:
+        mx.eval(_leaf(pipe, W1)(x))
+    finally:
+        install.restore(pipe, prev)
+
+
+def test_patches_kept_with_no_hold_shed_the_stale_tables_before_them(op):
+    """A library caller keeps a table's two patches with no hold on a full
+    pair cache whose pairs two stepped tables hold. The tables go in the
+    order they stepped, each before the pairs kept after its step, so the
+    first patch is still held for the define."""
+    rng = np.random.default_rng(11)
+    pipe = _pipe()
+    for _ in range(2):
+        _w1_step(pipe, [_w1_patch(pipe, rng)])
+    pipe.adapters.max_bytes = pipe.adapters.bytes
+    keys = [_w1_patch(pipe, rng) for _ in range(2)]
+    _w1_step(pipe, keys)
+    assert pipe.adapters.bytes == pipe.adapters.max_bytes
+
+
+def test_register_patch_keeps_the_pairs_it_holds_for_the_table(op):
+    """A table's first patch is kept, another table steps after it, and
+    the second patch needs room on a full pair cache. With the first
+    patch held, the room sheds the stepped table and its pair, though
+    the first patch was used before that step."""
+    rng = np.random.default_rng(12)
+    pipe = _pipe()
+    old = [_w1_patch(pipe, rng)]
+    _w1_step(pipe, old)
+    pipe.adapters.max_bytes = 2 * pipe.adapters.bytes
+    first = _w1_patch(pipe, rng)
+    _w1_step(pipe, old)
+    keys = [first, _w1_patch(pipe, rng, hold=[first])]
+    _w1_step(pipe, keys)
+    assert pipe.adapters.peek(old[0]) is None
+
+
+def test_a_forward_of_the_base_model_is_no_step_of_the_last_table(op):
+    """The table that ran last stays held through a forward of the base
+    model, which does not step it. A patch kept between the two was used
+    after the table's step, so the room for another drops the table and
+    its pair first."""
+    rng = np.random.default_rng(13)
+    pipe = _pipe()
+    old = [_w1_patch(pipe, rng)]
+    _w1_step(pipe, old)
+    pipe.adapters.max_bytes = 2 * pipe.adapters.bytes
+    kept = _w1_patch(pipe, rng)
+    _w1_step(pipe, [])
+    assert pipe.lora._cur
+    _w1_patch(pipe, rng)
+    assert pipe.adapters.peek(kept) is not None
+    assert pipe.adapters.peek(old[0]) is None
 
 
 @pytest.mark.parametrize("strength,alpha", [(1.0, None), (1.0, 3.0),

@@ -2489,6 +2489,109 @@ def test_a_define_that_needs_a_stepped_tables_room_drops_that_table(
     assert host.held == 0
 
 
+def _scaled(c, pairs, *scales) -> dict:
+    """A ComfyUI table body of one LoRA per scale, each the size of the
+    entry's own, with pairs of its own content."""
+    return {"entries": [{
+        "key": f"diffusion_model.{m}.weight",
+        "band": None if b is None else list(b),
+        "patches": [{"up": c.put(np.array(pair.up) * s, kind="adapters"),
+                     "down": c.put(np.array(pair.down) * (1 + s),
+                                   kind="adapters"),
+                     "alpha": None, "strength": 1.0} for s in scales]}
+        for m, b, pair in pairs]}
+
+
+def _two_stepped_tables(host, tmp_path):
+    """The entry "own" with a pair cache of its LoRA and two LoRAs of its
+    size, filled by two ComfyUI tables of one LoRA each, both stepped."""
+    p, ad, c, _body = _header_alpha_own(host, tmp_path)
+    held = p.adapters.bytes
+    p.adapters.max_bytes = 3 * held + 64
+    host.served["own"].plan.cache_share = 1.0
+    rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
+    pairs = [(m, b, p.adapters.peek(k)) for m, b, k in ad.dit]
+    for s in (2.0, 3.0):
+        c.step("own", None, x, [0.5], rows,
+               patch_table=c.define_table("own", _scaled(c, pairs, s)))
+    assert p.adapters.bytes == 3 * held
+    return p, c, held, pairs, rows, x
+
+
+def test_a_two_lora_stack_after_two_stepped_tables_takes_their_room(
+        host, tmp_path):
+    """A ComfyUI switch to a stack of two LoRAs, each the size of one a
+    stepped table holds: the room for the stack sheds both stepped tables
+    and their pairs, never the stack's first LoRA, so the table steps."""
+    p, c, held, pairs, rows, x = _two_stepped_tables(host, tmp_path)
+    tid = c.define_table("own", _scaled(c, pairs, 4.0, 5.0))
+    c.step("own", None, x, [0.5], rows, patch_table=tid)
+    assert p.adapters.bytes == 3 * held
+    assert host.held == 0
+
+
+def _request_files(tmp_path, seeds) -> list:
+    from lora_fixtures import dialect_keys, tiny_z_adapter, write_keys
+
+    names = []
+    for seed in seeds:
+        name = f"req{seed}.safetensors"
+        write_keys(tmp_path / name,
+                   dialect_keys("diffusers", tiny_z_adapter(seed)))
+        names.append(name)
+    return names
+
+
+def test_an_images_api_request_of_two_files_takes_two_stepped_tables_room(
+        host, tmp_path):
+    """An images API request names two LoRA files after two ComfyUI tables
+    stepped: the room for the files sheds the stepped tables and their
+    pairs, never the first file's, so the request's table runs."""
+    import os
+
+    from gmlx.serve import image_service
+
+    names = _request_files(tmp_path, (5, 6))
+    size = sum(os.path.getsize(tmp_path / n) for n in names)
+    p, c, held, *_ = _two_stepped_tables(host, tmp_path)
+    p.adapters.max_bytes = held + max(size, 2 * held) + 64
+    tid, _ = _on_worker(image_service._adapter_table, host.served["own"],
+                        [(n, 1.0) for n in names], [str(tmp_path)])
+    _direct(p, _features(), table=tid)
+    assert host.held == 0
+
+
+def test_an_images_api_request_between_a_define_and_its_step_keeps_it(
+        host, tmp_path):
+    """ComfyUI defines a table beside a stepped one on a full pair cache,
+    and an images API request then reads a LoRA file the size of one
+    before the table steps. The stepped table stepped before the new
+    table's pairs came, so it goes first, and the new table steps."""
+    import os
+
+    from gmlx.serve import image_service
+
+    (name,) = _request_files(tmp_path, (5,))
+    p, ad, c, _body = _header_alpha_own(host, tmp_path)
+    held = p.adapters.bytes
+    size = os.path.getsize(tmp_path / name)
+    p.adapters.max_bytes = 3 * held + max(0, size - held) + 64
+    host.served["own"].plan.cache_share = 1.0
+    rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
+    pairs = [(m, b, p.adapters.peek(k)) for m, b, k in ad.dit]
+    stale = c.define_table("own", _scaled(c, pairs, 2.0))
+    c.step("own", None, x, [0.5], rows, patch_table=stale)
+    fresh = c.define_table("own", _scaled(c, pairs, 3.0))
+    tid, _ = _on_worker(image_service._adapter_table, host.served["own"],
+                        [(name, 1.0)], [str(tmp_path)])
+    _direct(p, _features(), table=tid)
+    c.step("own", None, x, [0.5], rows, patch_table=fresh)
+    with pytest.raises(MissingTensors) as e:
+        c.step("own", None, x, [0.5], rows, patch_table=stale)
+    assert e.value.status == 409 and e.value.missing == [stale]
+    assert host.held == 0
+
+
 def test_a_request_copy_of_an_entry_lora_becomes_its_twin_at_a_define(
         host, tmp_path):
     """An images API request names a copy of the entry's LoRA with no

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import struct
 import weakref
 from dataclasses import dataclass
@@ -201,6 +202,14 @@ def _tables(pipe) -> list:
     return out
 
 
+def _last_steps(pipe) -> dict:
+    """When each built table of the pipeline's tables cache last stepped,
+    by the table's id, on the clock the uses of the pair cache share: a
+    step puts the tables it ran into the cache."""
+    return {id(pipe.tables.peek(k)): pipe.tables.used(k)
+            for k in pipe.tables.keys(lambda k: k[0] != KERNEL)}
+
+
 def _current(pipe) -> list:
     """The built tables the patch state holds for this pipeline: those of
     the table it ran last, or runs now."""
@@ -256,11 +265,12 @@ def make_room(pipe, cache, nbytes: int, hold=()) -> bool:
     on; its dependents go first.
 
     In the pair cache the pairs of the keep set and of ``hold`` stay, and
-    so do the pairs of a held built table until the table goes: the
-    unpinned pairs go first, then the least recently used table that
-    pins a pair, never one a forward runs. A put whose bytes cannot fit
-    beside the pairs that stay sheds nothing; a shed to the bound, of 0
-    bytes, sheds all it can.
+    so do the pairs of a held built table until the table goes. The
+    unpinned pairs and the held tables that pin a pair go in one order of
+    use, a pair's last get against a table's last step, and a table a
+    forward runs never goes. A put whose bytes cannot fit beside the pairs
+    that stay sheds nothing; a shed to the bound, of 0 bytes, sheds all
+    it can.
 
     In the tables cache the tables the patch state holds stay, with the
     kernel pairs of any held table: the unpinned kernel pairs go first,
@@ -287,12 +297,18 @@ def make_room(pipe, cache, nbytes: int, hold=()) -> bool:
             pinned = set(base)
             for t in held:
                 pinned |= t.keys
-            fit = cache.shed_for(nbytes, pinned)
-            victim = None if fit else next(
-                (t for t in held if id(t) not in running
-                 and not t.keys <= base), None)
+            # The table that stepped least recently of those that can go,
+            # after the unpinned pairs got before its step.
+            steps = _last_steps(pipe)
+            victim = min((t for t in held if id(t) not in running
+                          and not t.keys <= base),
+                         key=lambda t: steps.get(id(t), math.inf),
+                         default=None)
+            before = None if victim is None else steps.get(id(victim))
+            if cache.shed_for(nbytes, pinned, before):
+                return True
             if victim is None:
-                return fit
+                return False
             _drop_tables(pipe, lambda t: t is victim)
     mine = {id(t) for t in _current(pipe)}
     while True:
@@ -761,12 +777,15 @@ class PatchState:
         return hit
 
     def account(self) -> None:
-        """Record the bytes the active tables have built so far."""
+        """Record the bytes the tables of the forward that ends have built
+        so far, and that they stepped. A forward that ran none of this
+        pipeline's tables records nothing."""
         pipe = self._held()
-        if pipe is None:
+        if pipe is None or pipe is not self._pipe():
             return
         for key, table in list(self._cur.items()):
-            _keep_table(pipe, key, table, table.nbytes)
+            if key[0] == self.active:
+                _keep_table(pipe, key, table, table.nbytes)
 
 
 class ImageLoRALinear(nn.Module):
