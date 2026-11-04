@@ -1312,6 +1312,24 @@ def test_request_adapters_over_the_cache_are_refused_by_name(tiny_served):
     assert _held(served.pipe, own)
 
 
+@pytest.mark.parametrize("room,size,need,bound", [
+    ((1 << 20), (1 << 20) + 1, "1.1", "1.0"),
+    ((1 << 20) - 1, 1 << 20, "1.0", "0.9")])
+def test_request_adapters_just_over_the_room_read_their_need_above_it(
+        tmp_path, room, size, need, bound):
+    """The refusal rounds the files' bytes up and the room down, so a need
+    just over the room never reads at or under it."""
+    path = tmp_path / "style.safetensors"
+    path.write_bytes(bytes(size))
+    cache = _Cache()
+    cache.max_bytes = room
+    served = SimpleNamespace(pipe=SimpleNamespace(adapters=cache), adapters=[])
+    with pytest.raises(image_service.ImageRequestError) as e:
+        image_service._room_for(served, [str(path)])
+    assert (f"take {need} MiB, more than the {bound} MiB this image model "
+            "keeps for request adapters") in str(e.value)
+
+
 def test_a_request_may_reweight_the_entry_adapter_beside_its_own(
         tiny_served):
     """The entry's own LoRA is held already, so it takes none of the

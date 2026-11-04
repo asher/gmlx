@@ -1534,6 +1534,8 @@ def pair_room(served) -> int:
 def _room_for(served: ServedImage, paths: list) -> None:
     """Refuse request adapters whose files take more than the pair cache
     holds beside the entry's own pairs."""
+    from .image_steps import _mib
+
     room = pair_room(served)
     need = 0
     for p in {os.path.realpath(p) for p in paths}:
@@ -1542,8 +1544,8 @@ def _room_for(served: ServedImage, paths: list) -> None:
         except OSError:
             continue
     if need > room:
-        raise _bad(f"the request's adapters take {need / 2**20:.1f} MB, more "
-                   f"than the {room / 2**20:.1f} MB this image model keeps "
+        raise _bad(f"the request's adapters take {_mib(need, True)}, more "
+                   f"than the {_mib(room, False)} this image model keeps "
                    "for request adapters; raise "
                    "server.image.adapter_cache_mb", "adapters")
 
