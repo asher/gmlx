@@ -2394,6 +2394,33 @@ def test_the_twins_of_an_entry_lora_outlast_a_put_that_must_shed(
     assert host.held == 0
 
 
+def test_a_second_client_sending_the_twin_table_again_keeps_the_twins(
+        host, tmp_path):
+    """A ComfyUI restarted while the server runs sends the table of the
+    entry's LoRA with alpha None again. The twins stay the same entries,
+    so the table built at the first step still reads them as held: the
+    tables count does not rise and the step is the same."""
+    from gmlx.serve import image_service
+
+    p, ad, c, body = _header_alpha_own(host, tmp_path)
+    own = image_service._pair_keys([(ad, 1.0)])
+    x = noise_from_seed(5, SHAPE)
+    tid = c.define_table("own", body)
+    first = c.step("own", None, x, [0.5], _rows(c, _features()),
+                   patch_table=tid)
+    twins = {k: p.adapters.peek(k)
+             for k in p.adapters.keys(lambda k: k not in own)}
+    tables = p.tables.bytes
+    again = _client()
+    assert again.define_table("own", body) == tid
+    assert all(p.adapters.peek(k) is pair for k, pair in twins.items())
+    got = again.step("own", None, x, [0.5], _rows(again, _features()),
+                     patch_table=tid)
+    assert np.array_equal(got, first)
+    assert p.tables.bytes == tables
+    assert host.held == 0
+
+
 def test_a_request_copy_sampled_before_a_define_is_freed_by_it(host,
                                                                tmp_path):
     """An images API request samples over a copy of the entry's LoRA with
