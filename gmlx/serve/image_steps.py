@@ -309,7 +309,8 @@ class ClientTables:
     core table the pipeline let go defines it again from its body. The
     least recently used ids go first past ``max_bytes`` of bodies, the
     newest one staying, and a step that names an id gone is a 409 the
-    client answers by sending its table again."""
+    client answers by sending its table again. A body over ``max_bytes``
+    is not kept: its id answers that 409 once its core table goes."""
 
     def __init__(self, max_bytes: int | None = None):
         from collections import OrderedDict
@@ -321,7 +322,11 @@ class ClientTables:
         self._lock = threading.Lock()
 
     def put(self, tid: str, core: str, body: bytes | None = None) -> None:
-        """Keep ``tid`` as ``core``, with the body it was defined from."""
+        """Keep ``tid`` as ``core``, with the body it was defined from. A
+        body over the bound is not kept, so its table is not defined
+        again at a step."""
+        if body is not None and len(body) > self.max_bytes:
+            body = None
         with self._lock:
             old = self._items.pop(tid, None)
             if old is not None and old[1] is not None:

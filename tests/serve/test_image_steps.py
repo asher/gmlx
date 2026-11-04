@@ -2740,6 +2740,34 @@ def test_two_clients_whose_loras_do_not_both_fit_take_turns(
     assert host.held == 0
 
 
+def test_a_table_body_over_the_bound_of_kept_bodies_is_not_kept(
+        host, pipe, monkeypatch):
+    """A table whose body alone is over the bound of the bodies a pipeline
+    keeps keeps its id, not its body: once another define sheds its
+    pairs, a step on it is a 409 naming it, and steps as before once the
+    client sends it again."""
+    c = _client()
+    body, (down, up) = _table_body(c)
+    theirs, _pair = _table_body(_client(), scale=0.3)
+    monkeypatch.setattr(pipe.adapters, "max_bytes", down.nbytes + up.nbytes)
+    monkeypatch.setattr(pipe.tables, "max_bytes", 1)
+    tables = steps.STATE.tables_of("zit", pipe)
+    tables.max_bytes = len(json.dumps(body, sort_keys=True,
+                                      separators=(",", ":"))) - 1
+    tid = c.define_table("zit", body)
+    assert tid in tables and tables.body(tid) is None and tables.bytes == 0
+    rows, x = _rows(c, _features()), noise_from_seed(3, SHAPE)
+    first = c.step("zit", None, x, [0.75], rows, patch_table=tid)
+    _on_worker(steps.define_table, host.served["zit"], theirs,
+               steps.STATE.adapters)
+    with pytest.raises(MissingTensors) as e:
+        c.step("zit", None, x, [0.75], rows, patch_table=tid)
+    assert e.value.missing == [tid]
+    assert c.define_table("zit", body) == tid
+    assert np.array_equal(
+        c.step("zit", None, x, [0.75], rows, patch_table=tid), first)
+
+
 def _two_packs(host, tmp_path, file_bytes: int = 0):
     """Entry "own" with a pair cache that holds its own LoRA and one more
     the size of it, or a request file of ``file_bytes`` when larger, and
