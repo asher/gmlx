@@ -308,7 +308,9 @@ The clip at 1344x768 for 5 seconds needs a Mac with 36 GB or more. On a
 `768x768` in the `fasth3` entry and `width` and `height` to 768 in
 `Prompt and clip size`. Keep the shifts at 10 and 3: on the trained noise
 levels at other shifts, the run stops with an error that names
-`ModelSamplingMiniMaxH3`.
+`ModelSamplingMiniMaxH3`. With `BasicScheduler` in place of `gmlx Sigmas`,
+FastH3 samples at the shifts in force, 12 and 3 without
+`ModelSamplingMiniMaxH3`, as ComfyUI does.
 
 ## The example workflows
 

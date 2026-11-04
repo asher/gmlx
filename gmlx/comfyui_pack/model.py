@@ -289,6 +289,8 @@ class RemoteForward:
         self.warned: set = set()
         self.memo: dict = {}
         self.calls = collections.deque(maxlen=512)
+        # The run and shifts _trained_shifts last warned of.
+        self._shifts_warned = None
 
     def _check(self, control, to: dict, kwargs: dict, kv: bool = False):
         if control is not None:
@@ -506,7 +508,9 @@ class RemoteForward:
         video one at the shifts in force, which are 12 and 3 without
         ModelSamplingMiniMaxH3, so the audio would sample off its trained
         sigmas with no error. A call at other shifts that carries no
-        schedule is refused too, naming the key it lacks."""
+        schedule is refused too, naming the key it lacks. A schedule of
+        its own at other shifts, as BasicScheduler gives, runs, with one
+        warning a run."""
         sampling = self.b.status.get("sampling") or {}
         fixed = sampling.get("sigmas")
         if not fixed:
@@ -526,6 +530,12 @@ class RemoteForward:
         n = len(ran)
         if any(torch.equal(ran, table[i:i + n]) for i in range(len(table) - n + 1)):
             raise GmlxRefusal(f"{why}; {fix}")
+        run = getattr(getattr(self.base_model, "current_patcher", None), "gmlx_run", None)
+        key = (run, shifts["video"], shifts["audio"])
+        if self._shifts_warned != key:
+            self._shifts_warned = key
+            log.warning("%s on a schedule of its own; to sample as trained, %s and sample on "
+                        "gmlx Sigmas", why, fix)
 
     def _av_call(self, t0, x, timesteps, context, control, to: dict, kwargs: dict):
         """One AV step: the video and audio latents as the sampler carries

@@ -275,10 +275,16 @@ class Sampling(Base):
         """BasicScheduler on FastH3 with no ModelSamplingMiniMaxH3 makes a
         schedule of its own at the DiT's shifts, 12 and 3, which is no run of
         FastH3's trained sigmas. The guard lets it run, and every step goes at
-        12 and 3 as ComfyUI's forward would take them."""
+        12 and 3 as ComfyUI's forward would take them, with one warning in
+        the log that names the trained shifts."""
         model = self.model(FID)
         sig = _out(CS.BasicScheduler.execute(model, "simple", 8, 1.0))[0]
-        self.custom(model, sig)
+        with self.assertLogs("gmlx", "WARNING") as logs:
+            self.custom(model, sig)
+        self.assertEqual(logs.output, [
+            "WARNING:gmlx:gmlx: 'fasth3' samples on its trained sigmas at the shifts 10 and 3, "
+            "and this run is at 12 and 3 on a schedule of its own; to sample as trained, put "
+            "ModelSamplingMiniMaxH3 on the model at 10 and 3 and sample on gmlx Sigmas"])
         steps = self.stub.events("av_step")
         self.assertEqual(len(steps), 8)
         for e, s in zip(steps, sig[:-1].tolist()):
