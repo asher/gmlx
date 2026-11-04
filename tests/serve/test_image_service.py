@@ -610,9 +610,14 @@ class _Encoder:
 
 class _Cache(dict):
     max_bytes = 1 << 20
+    bytes = 0
 
     def keep(self, keys):
         self.kept = set(keys)
+
+    def drop_where(self, match):
+        for k in [k for k, v in self.items() if match(v)]:
+            del self[k]
 
     def nbytes(self, key):
         return 0
@@ -622,7 +627,7 @@ def _pipe(encoder=None):
     return SimpleNamespace(encoder=encoder, conditionings=_Cache(),
                            captions={}, modulations={}, adapters=_Cache(),
                            tables=_Cache(), reference_latents=_Cache(),
-                           default_table=None, size_multiple=16,
+                           default_table=None, size_multiple=16, lora=None,
                            dit=SimpleNamespace(act_dtype="bf16",
                                                cfg=SimpleNamespace()),
                            vae="VAE")
@@ -888,7 +893,7 @@ def test_a_request_adapter_after_a_staged_encode_loads_the_dit_for_it(
     st = staged_stubs
     st.pipe.adapters = _Cache()
     (tmp_path / "style.safetensors").write_bytes(b"x")
-    monkeypatch.setattr(lora, "load_adapter", lambda pipe, p: (
+    monkeypatch.setattr(lora, "load_adapter", lambda pipe, p, hold=(): (
         st.events.append(("adapter", pipe.dit))
         or SimpleNamespace(path=p, dit=(), text=())))
     monkeypatch.setattr(lora, "table_entries", lambda rows: list(rows))
@@ -912,7 +917,7 @@ def test_a_configured_adapter_loads_into_a_cache_that_holds_it(
     path.write_bytes(bytes(3 << 20))
     seen = []
 
-    def load_adapter(pipe, p):
+    def load_adapter(pipe, p, hold=()):
         seen.append(pipe.adapters.max_bytes)
         return SimpleNamespace(warnings=(), dit=(), text=())
 
@@ -932,7 +937,7 @@ def test_a_failed_adapter_frees_the_loaded_pipeline(load_stubs, monkeypatch):
                         lambda box: pipes.append(box[0].pipe.encoder)
                         or real_release(box))
 
-    def bad_adapter(pipe, path):
+    def bad_adapter(pipe, path, hold=()):
         raise ValueError("not a LoRA")
 
     monkeypatch.setattr(lora, "load_adapter", bad_adapter)
@@ -1278,7 +1283,7 @@ def test_a_request_naming_an_entry_adapter_sets_its_strength_once(
     entry = SimpleNamespace(path=str(path), dit=(), text=(("t", "k"),))
     other = SimpleNamespace(path=str(root / "lora" / "b.safetensors"),
                             dit=(), text=())
-    monkeypatch.setattr(lora, "load_adapter", lambda pipe, p: (
+    monkeypatch.setattr(lora, "load_adapter", lambda pipe, p, hold=(): (
         entry if os.path.realpath(p) == os.path.realpath(path) else other))
     monkeypatch.setattr(lora, "table_entries", lambda rows: list(rows))
     monkeypatch.setattr(api, "define_patch_table", lambda pipe, rows: rows)

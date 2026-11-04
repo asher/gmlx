@@ -1132,7 +1132,8 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
                 if pk not in keys:
                     down, up, alpha, key = pairs[pk]
                     keys[pk] = install.register_pair(
-                        pipe, down, up, alpha, key=key, twin=twin[key])
+                        pipe, down, up, alpha, key=key, twin=twin[key],
+                        hold=keys.values())
                 row["patches"].append({
                     "adapter": keys[pk], "strength": p.get("strength", 1.0),
                     "strength_model": p.get("strength_model", 1.0),
@@ -1144,6 +1145,8 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
     except (AdapterError, ValueError, KeyError, TypeError) as e:
         if isinstance(e, StepError):
             raise
+        if isinstance(e, install.PairRoomError):
+            raise StepError(413, f"patch table refused: {e}") from None
         raise StepError(400, f"patch table refused: {e}") from None
 
 

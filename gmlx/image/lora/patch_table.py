@@ -102,14 +102,16 @@ def fit_cache(pipe, paths) -> None:
     pipe.adapters.max_bytes = max(pipe.adapters.max_bytes, need)
 
 
-def load_adapter(pipe, path: str, *,
-                 allow_unmatched: bool = False) -> LoadedAdapter:
+def load_adapter(pipe, path: str, *, allow_unmatched: bool = False,
+                 hold=()) -> LoadedAdapter:
     """Read a LoRA file and keep its pairs in the pipeline's cache. A file
     this pipeline already read, unchanged on disk and with its pairs still
     held, is not read again. A strict read and one with
     ``allow_unmatched`` are kept apart, so a file that was read with keys
     skipped still raises for them on a strict read. A file that passed a
-    strict read has no such keys and serves both."""
+    strict read has no such keys and serves both. ``hold`` gives the
+    (LoadedAdapter, strength) rows read before this file for the same
+    table, whose pairs the room for this file's never sheds."""
     path = os.path.expanduser(str(path))
     try:
         fkey = _file_key(path)
@@ -143,12 +145,17 @@ def load_adapter(pipe, path: str, *,
             f"the {pipe.adapters.max_bytes / 2**30:.2f} GiB of pairs this "
             "pipeline keeps")
     dit, text, nbytes = [], [], 0
+    keys = [r[-1] for ad, _st in hold for r in (*ad.dit, *ad.text)]
     for t in res.dit:
-        key = register_pair(pipe, t.pair.down, t.pair.up, t.pair.alpha)
+        key = register_pair(pipe, t.pair.down, t.pair.up, t.pair.alpha,
+                            hold=keys)
+        keys.append(key)
         dit.append((t.module, t.band, key))
         nbytes += int(t.pair.down.nbytes) + int(t.pair.up.nbytes)
     for t in res.text:
-        key = register_pair(pipe, t.pair.down, t.pair.up, t.pair.alpha)
+        key = register_pair(pipe, t.pair.down, t.pair.up, t.pair.alpha,
+                            hold=keys)
+        keys.append(key)
         text.append((t.module, key))
         nbytes += int(t.pair.down.nbytes) + int(t.pair.up.nbytes)
     # A module may carry a whole-weight pair beside band pairs, so the

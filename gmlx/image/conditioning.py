@@ -144,6 +144,11 @@ class ByteLRU:
         with self._lock:
             self._kept = frozenset(keys)
 
+    @property
+    def kept(self) -> frozenset:
+        """The keys given to ``keep`` and ``keep_also``."""
+        return self._kept
+
     def keep_also(self, keys) -> None:
         """Add ``keys`` to the keys whose entries a put never sheds. A later
         ``keep`` replaces the whole set."""
@@ -194,10 +199,7 @@ class ByteLRU:
                     return key
         return None
 
-    def put(self, key, value, nbytes: int, shed: bool = True) -> list:
-        """Keep ``value`` at ``key`` as ``nbytes`` bytes. Returns the keys
-        of the entries it shed for room."""
-        gone: list = []
+    def put(self, key, value, nbytes: int, shed: bool = True) -> None:
         with self._lock:
             old = self._items.pop(key, None)
             if old is not None:
@@ -207,25 +209,32 @@ class ByteLRU:
                 kept = sum(n for k, (_, n) in self._items.items()
                            if k in self._kept) if self._kept else 0
                 if nbytes > self.max_bytes - kept:
-                    return gone
+                    return
                 for k in [k for k in self._items if k not in self._kept]:
                     if self._bytes + nbytes <= self.max_bytes:
                         break
                     self._bytes -= self._items.pop(k)[1]
-                    gone.append(k)
             self._items[key] = (value, nbytes)
             self._bytes += nbytes
-        return gone
 
-    def resize(self, key, nbytes: int) -> None:
-        """Count the entry at ``key``, if held, as ``nbytes`` bytes. The
-        order of use does not change and nothing is shed: the next put
-        sheds for the bound."""
+    def drop(self, key) -> None:
+        """Drop the entry at ``key``, if held."""
         with self._lock:
-            hit = self._items.get(key)
+            hit = self._items.pop(key, None)
             if hit is not None:
-                self._items[key] = (hit[0], int(nbytes))
-                self._bytes += int(nbytes) - hit[1]
+                self._bytes -= hit[1]
+
+    def shed_for(self, nbytes: int, pinned) -> bool:
+        """Shed the entries whose key is not in ``pinned``, the least
+        recently used first, until ``nbytes`` more fit, and return
+        whether they fit."""
+        with self._lock:
+            for k in list(self._items):
+                if self._bytes + nbytes <= self.max_bytes:
+                    break
+                if k not in pinned:
+                    self._bytes -= self._items.pop(k)[1]
+            return self._bytes + nbytes <= self.max_bytes
 
     def shed_others(self, own, room: int) -> None:
         """Shed the entries whose key is not in ``own``, the least

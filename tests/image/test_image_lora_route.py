@@ -320,10 +320,11 @@ def test_a_strength_change_builds_no_new_pair(op):
                 if k[0] == install.KERNEL]) == 2
 
 
-def test_a_shed_pair_is_counted_in_the_tables_that_hold_it(op):
-    """The pair two tables share is counted once while the cache keeps
-    it. Shed, it is counted in each built table that still holds it, so
-    the cache's bytes never leave it out."""
+def test_a_kernel_pair_stays_while_a_table_built_over_it_is_held(op):
+    """The kernel pair two tables share is counted once, under its own
+    key, and in neither table. Bounds lowered to nothing shed the table
+    that last ran only with its pairs, and the kernel pair only with the
+    last table built over it."""
     pipe = _pipe()
     pairs = _pairs(7)
     x = _x()
@@ -335,21 +336,21 @@ def test_a_shed_pair_is_counted_in_the_tables_that_hold_it(op):
     (key,) = [k for k in pipe.tables._items if k[0] == install.KERNEL]
     a_t, b_t, _ = pipe.tables.peek(key)
     pair = int(a_t.nbytes) + int(b_t.nbytes)
-    keys = [k for k in pipe.tables._items if k[0] in tids]
-    assert len(keys) == 2
-
-    def recount():
-        for k in keys:
-            pipe.tables.put(k, pipe.tables.peek(k), pipe.tables.peek(k).nbytes)
-        return pipe.tables.bytes
-
-    before = [pipe.tables.peek(k).nbytes for k in keys]
-    assert recount() == sum(before) + pair
-    pipe.tables.shed_others(set(keys), 0)
-    assert pipe.tables.peek(key) is None
-    assert [pipe.tables.peek(k).nbytes for k in keys] == [
-        n + pair for n in before]
-    assert recount() == sum(before) + 2 * pair
+    built = [pipe.tables.peek(k) for k in pipe.tables._items if k[0] in tids]
+    assert len(built) == 2
+    assert pipe.tables.bytes == sum(t.nbytes for t in built) + pair
+    pipe.tables.max_bytes = 0
+    install.shed_to_bounds(pipe)
+    (cur,) = pipe.lora._cur.values()
+    assert cur is built[1]
+    assert [pipe.tables.peek(k) for k in pipe.tables._items
+            if k[0] in tids] == [cur]
+    assert pipe.tables.peek(key) is not None
+    assert pipe.tables.bytes == cur.nbytes + pair
+    pipe.adapters.max_bytes = 0
+    install.shed_to_bounds(pipe)
+    assert pipe.adapters.bytes == pipe.tables.bytes == 0
+    assert not pipe.lora._cur
 
 
 @pytest.mark.parametrize("strength,alpha", [(1.0, None), (1.0, 3.0),
@@ -752,3 +753,4 @@ def test_a_timed_leaf_keeps_the_route_and_books_one_record(op):
         ("module", "KQuantLinear")]
     assert type(_leaf(pipe, QKV).base) is KQuantLinear
     assert ops.lora_fused is kq_routes.lora_fused
+

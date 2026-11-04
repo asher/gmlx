@@ -177,12 +177,15 @@ def bound_caches(pipe, configured: int = 0, share: float = 1.0) -> None:
     configured bounds. The adapter cache also holds the ``configured``
     bytes of the entry's own adapters, which the entry books on their
     own."""
+    from gmlx.image.lora import install
+
     tensor, adapter = cache_bytes()
     tensor, adapter = int(tensor * share), int(adapter * share)
     pipe.conditionings.max_bytes = tensor
     pipe.reference_latents.max_bytes = tensor
     pipe.adapters.max_bytes = adapter + int(configured)
     pipe.tables.max_bytes = adapter + int(configured)
+    install.shed_to_bounds(pipe)
 
 
 # The (cache share, tensor floor) of each loaded entry, by id of its
@@ -445,7 +448,7 @@ def _load(spec) -> ServedImage:
         if spec.adapters:
             lora.fit_cache(pipe, [path for path, _ in spec.adapters])
             for path, strength in spec.adapters:
-                ad = lora.load_adapter(pipe, path)
+                ad = lora.load_adapter(pipe, path, hold=rows)
                 for w in ad.warnings:
                     _log.warning("image model %s: %s", spec.id, w)
                 rows.append((ad, strength))
@@ -550,6 +553,11 @@ def _release(box: list) -> None:
         _scale_step_caches()
     pipe, served.pipe = served.pipe, None
     if pipe is not None:
+        from gmlx.image.lora import install
+
+        # The patch state outlives the pipeline when another one shares
+        # its DiT: the built tables it holds go with the caches.
+        install.drop_built(pipe)
         enc = pipe.encoder
         if enc is not None:
             enc.release()           # an owned encoder; a borrowed one stays
@@ -1510,7 +1518,7 @@ def _adapter_table(served: ServedImage, rows: list, model_dirs) -> tuple:
     # The adapters are read against the DiT, and the table is defined on it.
     ensure_dit(served)
     for aid, path, strength in extra:
-        ad = lora.load_adapter(pipe, path)
+        ad = lora.load_adapter(pipe, path, hold=table_rows)
         if ad.text:
             raise _bad(f"adapter {aid!r} has text encoder layers; set it on "
                        "the image model's adapters instead", "adapters")

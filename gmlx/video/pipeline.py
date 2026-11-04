@@ -90,7 +90,7 @@ def adapter_table(pipe: VideoPipeline, adapters) -> str:
     fit_cache(pipe, [path for path, _ in adapters])
     loaded = []
     for path, strength in adapters:
-        ad = load_adapter(pipe, path)
+        ad = load_adapter(pipe, path, hold=loaded)
         for w in ad.warnings:
             pipe.log(f"warning: {w}")
         loaded.append((ad, strength))

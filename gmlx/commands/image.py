@@ -720,7 +720,7 @@ def _read_adapters(a, pipe, log) -> list:
     lora.fit_cache(pipe, [path for path, _ in a.adapter])
     rows = []
     for path, strength in a.adapter:
-        ad = lora.load_adapter(pipe, path)
+        ad = lora.load_adapter(pipe, path, hold=rows)
         for w in ad.warnings:
             log(f"warning: {w}")
         rows.append((ad, strength))

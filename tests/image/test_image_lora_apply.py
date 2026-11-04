@@ -320,12 +320,6 @@ def test_the_table_id_is_in_every_weight_dependent_cache_key(tmp_path):
     assert pipe.adapters.bytes > 0
     plan = api.plan_request(pipe, height=64, width=64, budget=float(1 << 40))
     assert plan.terms["adapters"] == pipe.adapters.bytes + pipe.tables.bytes
-    # Once the cache sheds the pairs, the tables that read them hold them.
-    pipe.adapters.clear()
-    pipe.lora.account()
-    assert pipe.tables.bytes > 0
-    plan = api.plan_request(pipe, height=64, width=64, budget=float(1 << 40))
-    assert plan.terms["adapters"] == pipe.tables.bytes
     # A family whose step is one forward has no step parts, and the plan
     # counts the caption states it holds among its caches.
     assert pipe.family.step is None
@@ -537,8 +531,8 @@ def test_each_placement_gives_the_step_on_merged_weights(tmp_path,
 def test_one_pair_over_a_whole_weight_runs_on_the_cached_pair(tmp_path):
     """A module with one pair over its whole weight in the activation
     dtype reads the cached pair, at a strength whose scale is no power of
-    two, so a LoRA costs its file once. The table holds no copy while the
-    cache keeps the pair, and counts the pair once the cache sheds it."""
+    two, so a LoRA costs its file once. The table holds no copy and counts
+    none of the pair, which the pair cache counts."""
     adapter = tiny_z_adapter(1, 4.0, wide=True)
     pipe = _pipe()
     ad = lora.load_adapter(pipe, write_adapter(
@@ -553,8 +547,6 @@ def test_one_pair_over_a_whole_weight_runs_on_the_cached_pair(tmp_path):
     f = pipe.lora._cur[(tid, mx.float32, install.form())].get(path)
     assert f.down is pair.down and f.up is pair.up
     assert f.arrays() == []
-    pipe.adapters.clear()
-    assert [a.shape for a in f.arrays()] == [pair.down.shape, pair.up.shape]
 
 
 def test_a_lone_pair_scales_its_delta_in_float32():
@@ -565,7 +557,7 @@ def test_a_lone_pair_scales_its_delta_in_float32():
     up = (mx.random.normal((512, 16), key=k2) * 0.1).astype(mx.bfloat16)
     x = mx.random.normal((1024, 256), key=k3).astype(mx.bfloat16)
     part = plan.Part(down, up, 1.0, None, 0.7)
-    f = install._Own(part, lambda: True)
+    f = install._Own(part)
     got = np.array(f(lambda x: mx.zeros((x.shape[0], 512), x.dtype),
                      x).astype(mx.float32), np.float64)
     xd, dd, ud = (np.array(a.astype(mx.float32), np.float64)

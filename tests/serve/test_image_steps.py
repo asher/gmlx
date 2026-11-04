@@ -2452,11 +2452,13 @@ def test_a_request_copy_sampled_before_a_define_is_freed_by_it(host,
     assert host.held == 0
 
 
-def test_a_built_table_counts_the_pairs_a_later_put_sheds(host, tmp_path):
-    """A built table keeps the arrays of its pairs alive after a later
-    table's put sheds them from the pair cache, so the tables cache counts
-    them in its place, at the define: the two caches count each array
-    they keep alive once."""
+def test_a_define_that_needs_a_stepped_tables_room_drops_that_table(
+        host, tmp_path):
+    """A ComfyUI LoRA switch on an entry whose pair cache holds one
+    request LoRA: the new table's pairs need the room of the pairs a
+    stepped table is built over, so the table goes first and its pairs
+    after it, at the define. Nothing the caches let go stays alive, and
+    the old table is missing until it is sent again."""
     p, ad, c, _body = _header_alpha_own(host, tmp_path)
     held = p.adapters.bytes
     p.adapters.max_bytes = 2 * held + 64
@@ -2477,10 +2479,13 @@ def test_a_built_table_counts_the_pairs_a_later_put_sheds(host, tmp_path):
 
     first = c.define_table("own", other(2.0))
     c.step("own", None, x, [0.5], rows, patch_table=first)
-    tables = p.tables.bytes
+    assert p.tables.bytes > 0
     c.define_table("own", other(3.0))
     assert p.adapters.bytes == 2 * held
-    assert p.tables.bytes == tables + held
+    assert p.tables.bytes == 0 and not p.lora._cur
+    with pytest.raises(MissingTensors) as e:
+        c.step("own", None, x, [0.5], rows, patch_table=first)
+    assert e.value.status == 409 and e.value.missing == [first]
     assert host.held == 0
 
 

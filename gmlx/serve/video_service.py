@@ -271,7 +271,7 @@ def _load_adapters(served: ServedVideo) -> None:
     if spec.adapters:
         lora.fit_cache(pipe, [path for path, _ in spec.adapters])
         for path, strength in spec.adapters:
-            ad = lora.load_adapter(pipe, path)
+            ad = lora.load_adapter(pipe, path, hold=rows)
             for w in ad.warnings:
                 _log.warning("video model %s: %s", spec.id, w)
             rows.append((ad, float(strength)))
@@ -300,6 +300,9 @@ def _release(box: list) -> None:
     pipe, served.pipe = served.pipe, None
     served.captions.clear()
     if pipe is not None:
+        from gmlx.image.lora import install
+
+        install.drop_built(pipe)
         for cache in (pipe.conditionings, pipe.captions, pipe.modulations,
                       pipe.adapters, pipe.tables, pipe.reference_latents):
             cache.clear()

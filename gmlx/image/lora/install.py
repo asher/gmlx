@@ -112,8 +112,14 @@ def pair_hash(down: mx.array, up: mx.array, alpha: float | None) -> str:
     return h.hexdigest()
 
 
+class PairRoomError(AdapterError):
+    """A pair the pipeline's pair cache cannot hold beside the pairs it
+    keeps."""
+
+
 def register_pair(pipe, down, up, alpha: float | None = None,
-                  key: str | None = None, twin: str | None = None) -> str:
+                  key: str | None = None, twin: str | None = None,
+                  hold=()) -> str:
     """Keep a pair in the pipeline's cache and return its content hash,
     which names it in patch table entries. A pair already held is not
     stored again. An MLX array is kept as it is, since a copy would hold
@@ -122,7 +128,9 @@ def register_pair(pipe, down, up, alpha: float | None = None,
     caller has it already. ``twin`` is the key of a held pair with the
     same down and up under another alpha: the pair keeps the twin's
     arrays, in place of a copy held under its key, takes no bytes of its
-    own, and a put never sheds it, as it never sheds the twin."""
+    own, and is never shed, as the twin is not. ``hold`` names the pairs
+    the caller put before this one for the same table or file, which the
+    room for this one never sheds."""
     down, up = (a if isinstance(a, mx.array) else mx.array(a)
                 for a in (down, up))
     if down.ndim != 2 or up.ndim != 2 or up.shape[1] != down.shape[0]:
@@ -145,24 +153,165 @@ def register_pair(pipe, down, up, alpha: float | None = None,
         # would free nothing, so it is kept as the twin is.
         now = pipe.adapters.get(key)
         if now is None or now.down is not held.down or now.up is not held.up:
-            gone = pipe.adapters.put(key, Pair(held.down, held.up, alpha), 0)
             if now is not None:
-                # The tables built over the copy hold its arrays: they
-                # build again over the twin's, and the copy is freed.
-                drop_built(pipe)
-            elif gone:
-                recount_built(pipe)
+                # The tables built over the copy go first, and the twin
+                # then takes its place, which frees the copy. A forward
+                # that runs one keeps the copy as it is.
+                running = _running(pipe)
+                _drop_tables(pipe, lambda t: key in t.keys
+                             and id(t) not in running)
+                make_room(pipe, pipe.tables, 0)
+            if now is None or not any(key in t.keys for t in _tables(pipe)):
+                pipe.adapters.put(key, Pair(held.down, held.up, alpha), 0,
+                                  shed=False)
         pipe.adapters.keep_also((key,))
         return key
     if pipe.adapters.get(key) is None:
         pair = Pair(down, up, alpha)
         if pair.nbytes > pipe.adapters.max_bytes:
-            raise AdapterError(
+            raise PairRoomError(
                 f"a LoRA pair of {pair.nbytes} bytes is over the adapter "
                 f"cache of {pipe.adapters.max_bytes} bytes")
-        if pipe.adapters.put(key, pair, pair.nbytes):
-            recount_built(pipe)
+        if not make_room(pipe, pipe.adapters, pair.nbytes, hold):
+            raise PairRoomError(
+                f"a LoRA pair of {pair.nbytes} bytes does not fit the "
+                f"adapter cache of {pipe.adapters.max_bytes} bytes beside "
+                f"the pairs it keeps")
+        pipe.adapters.put(key, pair, pair.nbytes, shed=False)
     return key
+
+
+# Static ownership. A pair's bytes are counted in the pair cache from its
+# put, and a built table counts the arrays it made alone, so no array is
+# counted under two keys. An entry that something held depends on is
+# never shed: the entry's own pairs and their twins (the pair cache's keep
+# set), the pairs a held built table names, and the kernel pairs it is
+# built over. make_room sheds the dependents first.
+
+def _tables(pipe) -> list:
+    """The built tables the pipeline holds, the least recently used
+    first: those of its tables cache, then any the patch state holds
+    beside them."""
+    out, seen = [], set()
+    for k in pipe.tables.keys(lambda k: k[0] != KERNEL):
+        t = pipe.tables.peek(k)
+        if isinstance(t, BuiltTable):
+            out.append(t)
+            seen.add(id(t))
+    out += [t for t in _current(pipe) if id(t) not in seen]
+    return out
+
+
+def _current(pipe) -> list:
+    """The built tables the patch state holds for this pipeline: those of
+    the table it ran last, or runs now."""
+    state = pipe.lora
+    if state is None or state._held() is not pipe:
+        return []
+    return list(state._cur.values())
+
+
+def _running(pipe) -> set:
+    """The ids of the built tables of a forward in flight on this
+    pipeline."""
+    state = pipe.lora
+    if state is None or state.active is None or state._pipe() is not pipe \
+            or state._held() is not pipe:
+        return set()
+    return {id(t) for k, t in state._cur.items() if k[0] == state.active}
+
+
+def _drop_tables(pipe, match) -> None:
+    """Drop the built tables ``match`` takes, from the tables cache and
+    from the patch state. The caller keeps out any a forward runs, and
+    sheds the tables cache to its bound after, as the kernel pairs that
+    the tables pinned there may be past it."""
+    pipe.tables.drop_where(lambda t: isinstance(t, BuiltTable) and match(t))
+    state = pipe.lora
+    if state is not None and state._held() is pipe:
+        for k in [k for k, t in state._cur.items() if match(t)]:
+            del state._cur[k]
+
+
+def make_room(pipe, cache, nbytes: int, hold=()) -> bool:
+    """Shed entries of ``cache``, the pipeline's pair cache or its tables
+    cache, until ``nbytes`` more fit, the least recently used first, and
+    return whether they fit. No entry goes that something held depends
+    on; its dependents go first.
+
+    In the pair cache the pairs of the keep set and of ``hold`` stay, and
+    so do the pairs of a held built table until the table goes: the
+    unpinned pairs go first, then the least recently used table that
+    pins a pair, never one a forward runs. A put whose bytes cannot fit
+    beside the pairs that stay sheds nothing; a shed to the bound, of 0
+    bytes, sheds all it can.
+
+    In the tables cache the tables the patch state holds stay, with the
+    kernel pairs of any held table: the unpinned kernel pairs go first,
+    then the least recently used other table. When the bytes cannot fit,
+    everything else goes, and the caller keeps its entry past the
+    bound."""
+    def fits() -> bool:
+        return cache.bytes + nbytes <= cache.max_bytes
+
+    if fits():
+        return True
+    running = _running(pipe)
+    if cache is pipe.adapters:
+        base = set(cache.kept)
+        base.update(hold)
+        for t in _tables(pipe):
+            if id(t) in running:
+                base |= t.keys
+        free = sum(cache.nbytes(k) for k in cache.keys(lambda k: k not in base))
+        if nbytes and cache.bytes - free + nbytes > cache.max_bytes:
+            return False
+        dropped = False
+        while True:
+            held = _tables(pipe)
+            pinned = set(base)
+            for t in held:
+                pinned |= t.keys
+            fit = cache.shed_for(nbytes, pinned)
+            victim = None if fit else next(
+                (t for t in held if id(t) not in running
+                 and not t.keys <= base), None)
+            if victim is None:
+                if dropped:
+                    make_room(pipe, pipe.tables, 0)
+                return fit
+            _drop_tables(pipe, lambda t: t is victim)
+            dropped = True
+    mine = {id(t) for t in _current(pipe)}
+    while True:
+        held = _tables(pipe)
+        pinned = set(cache.keys(lambda k: k[0] != KERNEL))
+        for t in held:
+            pinned |= t.kernels
+        if cache.shed_for(nbytes, pinned):
+            return True
+        victim = next((t for t in held if id(t) not in mine), None)
+        if victim is None:
+            return False
+        _drop_tables(pipe, lambda t: t is victim)
+
+
+def shed_to_bounds(pipe) -> None:
+    """Shed both caches of the pipeline to their bounds, after a bound
+    was lowered."""
+    make_room(pipe, pipe.adapters, 0)
+    make_room(pipe, pipe.tables, 0)
+
+
+def _keep_table(pipe, key, value, nbytes: int) -> None:
+    """Count ``value`` in the tables cache at ``key``, with room made for
+    it. A table the patch state holds, or a kernel pair it is built over,
+    is kept past the bound when nothing else is left to shed."""
+    nbytes = int(nbytes)
+    grown = nbytes - (pipe.tables.nbytes(key)
+                      if pipe.tables.peek(key) is value else 0)
+    make_room(pipe, pipe.tables, grown)
+    pipe.tables.put(key, value, nbytes, shed=False)
 
 
 # Module walking.
@@ -256,19 +405,16 @@ class _Own:
     """One pair over the whole weight, in the activation dtype or under
     float32 activations, on the cached pair's own arrays: ``x @ A^T``
     times the part's strength and ``alpha / rank`` in float32, then
-    through B. The table holds no copy of the pair while the cache keeps
-    it."""
+    through B. The table holds no copy of the pair, which the pair cache
+    counts and keeps while the table is held."""
 
-    def __init__(self, part, kept):
+    def __init__(self, part):
         self.down, self.up = part.down, part.up
         self.scale = part.strength * plan.pair_scale(
             part.alpha, int(part.down.shape[0]))
-        self._kept = kept
 
     def arrays(self) -> list:
-        """The pair's arrays once the cache that kept them has shed
-        them."""
-        return [] if self._kept() else [self.down, self.up]
+        return []
 
     def __call__(self, base, x: mx.array) -> mx.array:
         z = x @ self.down.T
@@ -358,19 +504,16 @@ class _Kernel:
     the stock path from the pair's arrays, on the first call the route
     does not take, such as one of few rows."""
 
-    def __init__(self, pair: tuple, strength: mx.array, plain,
-                 kept=lambda: False):
+    def __init__(self, pair: tuple, strength: mx.array, plain):
         self.a_t, self.b_t, self.bands = pair
         self.strength = strength
         self._plain, self._stock = plain, None
-        self._kept = kept
 
     def arrays(self) -> list:
-        """The arrays this table holds that are not counted elsewhere:
-        the pair too once the cache that kept it has shed it."""
+        """The arrays this table made: the pair is the tables cache's,
+        under its own key, kept while the table is held."""
         stock = [] if self._stock is None else self._stock.arrays()
-        pair = [] if self._kept() else [self.a_t, self.b_t]
-        return [self.strength, *pair,
+        return [self.strength,
                 *(a for a in stock if a is not self.a_t and a is not self.b_t)]
 
     def stock(self):
@@ -409,7 +552,7 @@ def _runs_as_kept(pair, dtype) -> bool:
 
 
 def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base,
-             pair=None, kept=lambda: False):
+             pair=None):
     if how == KERNEL:
         how = "block"
         ranks = sum(int(p.down.shape[0]) for p in parts)
@@ -425,8 +568,7 @@ def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base,
                     b = plan.block_diagonal(path, parts, dims).b
                     b_t = mx.contiguous(b.T).astype(dtype)
                 return _Block(a_t, b_t)
-            got, kept = pair()
-            return _Kernel(got, _strengths(parts), plain, kept)
+            return _Kernel(pair(), _strengths(parts), plain)
     if how != "block":
         bands = plan.banded(path, parts, dims)
         if bands is not None and not (len(bands) == 1 and bands[0][:2]
@@ -450,7 +592,7 @@ def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base,
     if (len(parts) == 1 and one.band is None
             and _runs_as_kept(one.down.dtype, dtype)
             and _runs_as_kept(one.up.dtype, dtype)):
-        return _Own(one, kept)
+        return _Own(one)
     return _Block(*_transposed(plan.block_diagonal(path, parts, dims),
                                dtype))
 
@@ -482,13 +624,13 @@ class BuiltTable:
     and a dtype that few leaves run in costs only their factors."""
 
     def __init__(self, parts: dict, leaves: dict, dtype, how: str,
-                 pairs=None, kept=None, loose=None):
+                 pairs=None, keys=frozenset(), kernels=None):
         self._parts = parts            # path -> [Part]
         self._leaves = leaves          # path -> base leaf
         self._dtype, self._how = dtype, how
         self._pairs = pairs            # (path, parts, dims) -> kernel pair
-        self._kept = kept              # path -> its pairs still cached
-        self._loose = loose            # path -> its pairs' arrays not cached
+        self.keys = keys               # the pair keys it is built over
+        self.kernels = set() if kernels is None else kernels
         self._built: dict = {}
 
     def __contains__(self, path: str) -> bool:
@@ -496,14 +638,10 @@ class BuiltTable:
 
     @property
     def nbytes(self) -> int:
-        """Bytes of the factors built so far, and of the pairs its parts
-        keep alive that the pair cache no longer counts, each array
-        once."""
-        held = {id(a): a for f in self._built.values() for a in f.arrays()}
-        if self._loose is not None:
-            held.update((id(a), a) for path in self._parts
-                        for a in self._loose(path))
-        return sum(int(a.nbytes) for a in held.values())
+        """Bytes of the factors built so far: the arrays the table made,
+        never a pair's."""
+        return sum(int(a.nbytes) for f in self._built.values()
+                   for a in f.arrays())
 
     def get(self, path: str):
         f = self._built.get(path)
@@ -515,12 +653,8 @@ class BuiltTable:
             dims = linear_dims(leaf)
             pair = None if self._pairs is None else \
                 (lambda: self._pairs(path, parts, dims))
-            # Bound to the function, not the table: a factor that held
-            # the table would keep its leaves past drop_built.
-            held = self._kept
-            kept = (lambda: False) if held is None else (lambda: held(path))
             f = _factors(path, parts, dims, self._dtype, self._how, leaf,
-                         pair, kept)
+                         pair)
             mx.eval(f.arrays())
             self._built[path] = f
         return f
@@ -533,7 +667,6 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
     leaves = linear_leaves(pipe.dit)
     by_module: dict = {}
     named: dict = {}
-    held: dict = {}
     owner = weakref.ref(pipe)
     for path, band, patches in table["entries"]:
         for key, strength in patches:
@@ -547,41 +680,28 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
             by_module.setdefault(path, []).append(
                 plan.Part(pair.down, pair.up, pair.alpha, band, strength))
             named.setdefault(path, []).append((key, band))
-            held.setdefault(path, []).append((key, pair))
-
-    def loose(path: str) -> list:
-        p = owner()
-        return [a for k, v in held[path]
-                if p is None or p.adapters.peek(k) is not v
-                for a in (v.down, v.up)]
-
-    def kept(path: str) -> bool:
-        return not loose(path)
-
+    kernels: set = set()
     pairs = None
     if how == KERNEL:
         def pairs(path: str, parts: list, dims: tuple) -> tuple:
             # The pair of a module is named by its parts without their
-            # strengths, so every table of those parts shares it. It is
-            # counted in the cache while the cache keeps it, and in each
-            # table that holds it after that.
+            # strengths, so every table of those parts shares it. The
+            # tables cache counts it under its own key and keeps it while
+            # a held table is built over it.
             key = (KERNEL, path, tuple(named[path]), dtype)
+            kernels.add(key)
             held = owner()
             hit = None if held is None else held.tables.get(key)
             if hit is None:
                 hit = kernel_pair(path, parts, dims, dtype)
                 mx.eval(hit[0], hit[1])
                 if held is not None:
-                    held.tables.put(key, hit, int(hit[0].nbytes)
-                                    + int(hit[1].nbytes))
-
-            def kept() -> bool:
-                p = owner()
-                return p is not None and p.tables.peek(key) is hit
-
-            return hit, kept
+                    _keep_table(held, key, hit, int(hit[0].nbytes)
+                                + int(hit[1].nbytes))
+            return hit
+    keys = frozenset(k for row in named.values() for k, _b in row)
     return BuiltTable(by_module, {p: leaves[p] for p in by_module}, dtype,
-                      how, pairs, kept, loose)
+                      how, pairs, keys, kernels)
 
 
 class PatchState:
@@ -590,13 +710,16 @@ class PatchState:
     the pipeline per table id, dtype and form, and the ones of the
     active table are also held here. A DiT has one state, which every
     pipeline over it shares: ``activate`` names the pipeline whose table
-    runs, and a table id names its content, so pipelines that define
-    equal tables share the built one."""
+    runs. The tables held here are of one pipeline, built over its pairs
+    and counted in its tables cache, so a forward of another pipeline
+    starts from that pipeline's own."""
 
     def __init__(self, pipe):
         self._pipe = weakref.ref(pipe)
         self.active: str | None = None
         self._cur: dict = {}
+        # The pipeline whose tables cache holds the tables of ``_cur``.
+        self._held = self._pipe
 
     def factors(self, path: str, dtype):
         tid = self.active
@@ -604,29 +727,37 @@ class PatchState:
             return None
         key = (tid, dtype, form())
         hit = self._cur.get(key)
-        if hit is None:
-            if any(k[0] != tid for k in self._cur):
-                self._cur.clear()
-            hit = self._cur[key] = self._table(key)
+        if hit is None or self._held() is not self._pipe():
+            hit = self._table(key)
         return hit.get(path)
 
     def _table(self, key: tuple) -> BuiltTable:
+        """The built table at ``key`` of the pipeline that runs, held here
+        from now on. The tables held for another table id or pipeline go
+        first, and the tables cache that pinned them sheds to its bound."""
         pipe = self._pipe()
         if pipe is None:
             raise RuntimeError("the image pipeline of this DiT is gone")
+        old = self._held()
+        if old is not pipe or any(k[0] != key[0] for k in self._cur):
+            self._cur.clear()
+            self._held = self._pipe
+            if old is not None:
+                make_room(old, old.tables, 0)
         hit = pipe.tables.get(key)
         if hit is None:
             hit = build_table(pipe, *key)
-            pipe.tables.put(key, hit, hit.nbytes)
+            _keep_table(pipe, key, hit, hit.nbytes)
+        self._cur[key] = hit
         return hit
 
     def account(self) -> None:
         """Record the bytes the active tables have built so far."""
-        pipe = self._pipe()
+        pipe = self._held()
         if pipe is None:
             return
-        for key, table in self._cur.items():
-            pipe.tables.put(key, table, table.nbytes)
+        for key, table in list(self._cur.items()):
+            _keep_table(pipe, key, table, table.nbytes)
 
 
 class ImageLoRALinear(nn.Module):
@@ -710,21 +841,14 @@ def ensure_wrapped(pipe) -> None:
     pipe.lora = state
 
 
-def recount_built(pipe) -> None:
-    """Count the built tables of the pipeline again after its pair cache
-    lets pairs go, whose arrays a table's parts keep alive."""
-    for key in pipe.tables.keys(lambda k: True):
-        table = pipe.tables.peek(key)
-        if isinstance(table, BuiltTable):
-            pipe.tables.resize(key, table.nbytes)
-
-
 def drop_built(pipe) -> None:
     """Drop the built tables of the pipeline, which hold the leaves of
-    its DiT, so that a DiT the pipeline lets go is freed."""
+    its DiT, so that a DiT the pipeline lets go is freed. The kernel
+    pairs they pinned past the tables bound go too."""
     pipe.tables.drop_where(lambda v: isinstance(v, BuiltTable))
     if pipe.lora is not None:
         pipe.lora._cur.clear()
+    make_room(pipe, pipe.tables, 0)
 
 
 def rewrap(pipe) -> None:
@@ -735,7 +859,7 @@ def rewrap(pipe) -> None:
         return
     for path, leaf in linear_leaves(pipe.dit).items():
         _set(pipe.dit, path, ImageLoRALinear(leaf, path, state))
-    state._cur.clear()
+    drop_built(pipe)
 
 
 def activate(pipe, tid: str):
