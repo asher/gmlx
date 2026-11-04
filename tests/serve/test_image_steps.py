@@ -2392,3 +2392,46 @@ def test_the_twins_of_an_entry_lora_outlast_a_put_that_must_shed(
     assert np.array_equal(again, first)
     assert p.tables.bytes == tables
     assert host.held == 0
+
+
+def test_a_request_copy_of_an_entry_lora_becomes_its_twin_at_a_define(
+        host, tmp_path):
+    """An images API request names a copy of the entry's LoRA with no
+    header, so the cache holds its pairs at full bytes under alpha None.
+    A ComfyUI table of the same pairs, with a LoRA of their size stacked
+    on, fits only in the copy's bytes: the copy gives them back as the own
+    pairs' twin, the define holds the entry's bytes once, and a later put
+    that must shed keeps the twins."""
+    from lora_fixtures import dialect_keys, tiny_z_adapter, write_keys
+
+    from gmlx.serve import image_service
+
+    p, ad, c, body = _header_alpha_own(host, tmp_path)
+    own = image_service._pair_keys([(ad, 1.0)])
+    held = p.adapters.bytes
+    write_keys(tmp_path / "copy.safetensors",
+               dialect_keys("diffusers", tiny_z_adapter(1)))
+    _on_worker(image_service._adapter_table, host.served["own"],
+               [("copy.safetensors", 1.0)], [str(tmp_path)])
+    copies = p.adapters.keys(lambda k: k not in own)
+    assert len(copies) == len(ad.dit) and p.adapters.bytes == 2 * held
+    p.adapters.max_bytes = 2 * held + 64
+    host.served["own"].plan.cache_share = 1.0
+
+    def stacked(scale):
+        return [{"up": c.put(np.array(p.adapters.peek(k).up) * scale,
+                             kind="adapters"),
+                 "down": c.put(np.array(p.adapters.peek(k).down),
+                               kind="adapters"),
+                 "alpha": None, "strength": 1.0} for _m, _b, k in ad.dit]
+
+    for e, patch in zip(body["entries"], stacked(2.0)):
+        e["patches"].append(patch)
+    c.define_table("own", body)
+    assert p.adapters.bytes == 2 * held
+    assert all(p.adapters.nbytes(k) == 0 for k in copies)
+    later = {"entries": [{**e, "patches": [patch]}
+                         for e, patch in zip(body["entries"], stacked(3.0))]}
+    c.define_table("own", later)
+    assert all(p.adapters.peek(k) is not None for k in (*own, *copies))
+    assert host.held == 0
