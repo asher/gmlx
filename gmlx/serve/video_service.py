@@ -14,10 +14,10 @@ cache takes the room the clip leaves, up to its bound, and the entry
 bounds its pipeline's caches at that share. The step routes' tensor
 cache keeps room for one uploaded cond of the priced text rows at any
 share, and the entry's refined text rows count at their bound of
-``CAPTIONS`` prompts of those rows. Each encode lets the DiT and its LoRA pairs go, loads the
-encoder, encodes, releases it and loads the DiT and the configured
-adapters again. Each decode loads its VAE for the call and lets it go
-after.
+``CAPTIONS`` prompts of those rows. Each encode lets the DiT and its LoRA
+pairs go, loads the encoder, encodes and releases it, and the next call
+that reads the DiT loads it and the configured adapters again. Each
+decode loads its VAE for the call and lets it go after.
 
 The step of the ComfyUI pack (``av_step``) takes the two streams as
 ComfyUI's sampler carries them and gives back what ComfyUI's MiniMax-H3
