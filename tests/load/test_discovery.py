@@ -1399,7 +1399,8 @@ def test_header_meta_reads_and_memoizes(_hm, tmp_path):
     meta = disc.header_meta(str(f))
     assert meta == {"arch": "gemma4", "name": "Gemma 4 12B It",
                     "kind": "model", "mtp": False, "sampling": {},
-                    "drafter_kind": None, "declared": []}
+                    "drafter_kind": None, "declared": [],
+                    "speech_checkpoint": None}
     disc.header_meta(str(f))
     assert _hm["n"] == 1                         # second hit is the memo
 
@@ -2052,3 +2053,94 @@ def test_header_meta_keeps_the_declared_base_ids(tmp_path, monkeypatch):
     disc._HEADER_MEMO.clear()
     disc._HEADER_DISK = None                    # read back from the file
     assert disc.header_meta(path)["declared"] == ["minicpm-v-4.7-214m"]
+
+
+# Nemotron 3.5 Transcribe: a speech encoder pairs by NeMo checkpoint id
+def _speech_classify(monkeypatch):
+    def _f(path):
+        import os
+        name = os.path.basename(path)
+        if "Encoder" in name:
+            meta = {"general.architecture": "pee", "pee.fusion.proj_dim": 2688,
+                    "nemo_speech.checkpoint_id": "ck"}
+        else:
+            meta = {"general.architecture": "nemotron_h_moe",
+                    "nemotron_h_moe.embedding_length": 2688}
+            if "Transcribe" in name:
+                meta["nemo_speech.checkpoint_id"] = "ck"
+        return disc._classify_meta(meta, basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+    return _f
+
+
+def test_speech_encoder_classifies_as_mmproj():
+    c = _classify({"general.architecture": "pee", "pee.fusion.proj_dim": 2688,
+                   "nemo_speech.checkpoint_id": "ck"}, "x-Encoder-F16.gguf")
+    assert (c.kind, c.n_embd, c.speech_checkpoint) == ("mmproj", 2688, "ck")
+
+
+def test_speech_encoder_pairs_only_with_its_checkpoint(tmp_path, monkeypatch,
+                                                       capsys):
+    _speech_classify(monkeypatch)
+    root = _write(tmp_path, "Transcribe-30B-A4B-AD-NVFP4.gguf",
+                  "Transcribe-30B-A4B-Encoder-F16.gguf",
+                  "Lightning-30B-A3B-Q4_K_M.gguf")
+    models = {m.id: m for m in _scan(root)}
+    paired = [m for m in models.values() if m.mmproj]
+    assert len(models) == 2 and len(paired) == 1
+    assert paired[0].mmproj.endswith("Encoder-F16.gguf")
+    assert "transcribe" in paired[0].id
+
+
+def test_speech_encoder_stays_unpaired_without_its_model(tmp_path, monkeypatch,
+                                                         capsys):
+    _speech_classify(monkeypatch)
+    root = _write(tmp_path, "Transcribe-30B-A4B-Encoder-F16.gguf",
+                  "Lightning-30B-A3B-Q4_K_M.gguf")
+    models = _scan(root)
+    assert [m.mmproj for m in models] == [None]
+    assert "speech encoder unpaired" in capsys.readouterr().err
+
+
+def test_find_speech_encoder_reads_the_model_folder(tmp_path, monkeypatch):
+    metas = {
+        "model.gguf": {"arch": "nemotron_h_moe", "speech_checkpoint": "ck"},
+        "a-other-Encoder.gguf": {"arch": "pee", "speech_checkpoint": "zz"},
+        "b-Encoder.gguf": {"arch": "pee", "speech_checkpoint": "ck"},
+        "lightning.gguf": {"arch": "nemotron_h_moe"},
+    }
+    _write(tmp_path, *metas)
+    monkeypatch.setattr(disc, "header_meta",
+                        lambda p: metas.get(os.path.basename(p)))
+    assert disc.find_speech_encoder(str(tmp_path / "model.gguf")) == str(
+        tmp_path / "b-Encoder.gguf")
+    assert disc.find_speech_encoder(str(tmp_path / "lightning.gguf")) is None
+
+
+def test_header_cache_keeps_the_speech_checkpoint(tmp_path, monkeypatch):
+    p = str(_write(tmp_path, "Transcribe-AD-NVFP4.gguf")
+            / "Transcribe-AD-NVFP4.gguf")
+    classify = _speech_classify(monkeypatch)
+    reads = []
+
+    def read(path):
+        reads.append(path)
+        return classify(path), None, None
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(disc, "_read_header", read)
+    monkeypatch.setattr(disc, "_HEADER_MEMO", {})
+    monkeypatch.setattr(disc, "_HEADER_DISK", None)
+    assert disc.header_meta(p)["speech_checkpoint"] == "ck"
+    # A fresh process reads the disk cache, and drops an entry from an
+    # older cache version.
+    monkeypatch.setattr(disc, "_HEADER_MEMO", {})
+    monkeypatch.setattr(disc, "_HEADER_DISK", None)
+    assert disc.header_meta(p)["speech_checkpoint"] == "ck"
+    assert len(reads) == 1
+    disk = disc._load_header_cache()
+    disk[os.path.abspath(p)]["v"] = disc._HEADER_CACHE_V - 1
+    monkeypatch.setattr(disc, "_HEADER_MEMO", {})
+    disc.header_meta(p)
+    assert len(reads) == 2

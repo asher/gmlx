@@ -1001,6 +1001,8 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # keeps its file dtypes (_F16_KEEP_BY_MODEL_TYPE).
     "nemotron_h_omni": (".mixer.gate.weight", ".e_score_correction_bias",
                         ".A_log"),
+    "nemotron_h_transcribe": (".mixer.gate.weight",
+                              ".e_score_correction_bias", ".A_log"),
 }
 
 def fp32_keep_for(model_type: str) -> tuple[str, ...]:
@@ -1064,6 +1066,9 @@ _F16_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # norms and tables stay F32, Bolt's BF16 weights stay BF16, and Super
     # VL's Q8_0 weights, dequantized to F16 at remap, stay F16.
     "nemotron_h_omni": ("vision_tower.",),
+    # nemotron_h_transcribe's speech encoder runs float32 activations over
+    # its F16 matrices and F32 norms, as the transformers reference does.
+    "nemotron_h_transcribe": ("audio_tower.",),
 }
 
 # Params cast to float32 at load, whatever float dtype the file stores them

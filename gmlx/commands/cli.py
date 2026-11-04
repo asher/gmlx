@@ -2477,8 +2477,9 @@ def run_room_depth(args, *, mtp: bool = True) -> int | None:
     chat template allowance and the reply cap; or the deepest row of the
     bench that runs (--bench-depths, else --bench) and its decode tokens.
     None prices the serve context: an uncapped reply, an image or audio
-    input (their token counts are known only once the processor loads),
-    an unparsable bench list, or a run that loads an MTP drafter (with
+    input (their token counts are known only once the processor loads;
+    audio for a model's own speech encoder counts 80 ms a token), an
+    unparsable bench list, or a run that loads an MTP drafter (with
     ``mtp`` False, the depth of the run without one). None for a path
     that is no file, which the run then names."""
     path = os.path.expanduser(getattr(args, "gguf", None) or "")
@@ -2495,9 +2496,15 @@ def run_room_depth(args, *, mtp: bool = True) -> int | None:
             return None
         return deepest + (getattr(args, "bench_decode_tokens", None)
                           or _BENCH_DECODE[mode])
-    if any(_media_inputs(args)):
+    images, audios = _media_inputs(args)
+    speech = None if images or not audios else speech_audio(args)
+    if (images or audios) and speech is None:
         return None
     cap = getattr(args, "max_tokens", None)
+    if (not cap or cap <= 0) and speech and getattr(args, "_transcribes", False):
+        from gmlx.models.nemotron_h.transcription import output_budget
+
+        cap = output_budget(speech[0], speech[1])
     if not cap or cap <= 0:
         return None
     prompt_file = getattr(args, "prompt_file", "")
@@ -2510,7 +2517,7 @@ def run_room_depth(args, *, mtp: bool = True) -> int | None:
     text += len((getattr(args, "system_prompt", None) or "").encode())
     template = (0 if getattr(args, "no_chat_template", False)
                 else _TEMPLATE_TOKENS)
-    return text // 2 + template + cap
+    return text // 2 + template + cap + (speech[1] if speech else 0)
 
 
 def _media_inputs(args) -> tuple[list[str], list[str]]:
@@ -2519,6 +2526,98 @@ def _media_inputs(args) -> tuple[list[str], list[str]]:
              if s.strip()],
             [s for s in (getattr(args, "audio", None) or "").split(",")
              if s.strip()])
+
+
+def is_speech_encoder(path) -> bool:
+    """Whether ``path`` is a speech encoder GGUF that feeds a text model's
+    embeddings (Nemotron 3.5 Transcribe's)."""
+    from gmlx.load.arch_table import NATIVE_ASR_ENCODER_ARCHES
+    from gmlx.load.discovery import header_meta
+
+    meta = header_meta(os.path.expanduser(path)) if path else None
+    return bool(meta) and meta.get("arch") in NATIVE_ASR_ENCODER_ARCHES
+
+
+def pair_speech_encoder(args, *, always: bool) -> None:
+    """Give a model that hears audio through its own speech encoder that
+    encoder as its mmproj, from the model's folder: on ``run`` when it
+    has --audio, in chat (``always``) for audio staged at any turn. An
+    explicit --mmproj or --no-mmproj wins. Raises ValueError for --asr on
+    such a model, and for --audio when no encoder is found."""
+    from gmlx.load.discovery import find_speech_encoder, header_meta
+
+    meta = header_meta(args.gguf)
+    if not meta or not meta.get("speech_checkpoint"):
+        return
+    if getattr(args, "asr", None):
+        raise ValueError(
+            "this model hears audio through its own speech encoder: pass "
+            "that GGUF as --mmproj, not --asr")
+    audios = _media_inputs(args)[1]
+    if (getattr(args, "mmproj", None) or getattr(args, "no_mmproj", False)
+            or not (always or audios)):
+        return
+    path = find_speech_encoder(args.gguf)
+    if path is None:
+        if audios:
+            raise ValueError(
+                "--audio needs this model's speech encoder GGUF, and none "
+                "is beside the model: pass it as --mmproj")
+        return
+    args.mmproj = path
+    print(f"[asr] speech encoder: {os.path.basename(path)}", file=sys.stderr)
+
+
+def speech_audio(args) -> tuple[float, int] | None:
+    """Seconds and audio tokens of a run's --audio clips when its mmproj
+    is a speech encoder, else None (and None for a clip that does not
+    decode, which the processor then names)."""
+    clips = _media_inputs(args)[1]
+    if not clips or not is_speech_encoder(getattr(args, "mmproj", None)):
+        return None
+    cached = getattr(args, "_speech_audio", None)
+    if cached is None:
+        from gmlx.models.nemotron_h.speech import num_audio_tokens
+        from gmlx.serve.media_programs import decode_mono
+
+        try:
+            samples = [len(decode_mono(os.path.expanduser(c), 16000))
+                       for c in clips]
+        except (OSError, ValueError, RuntimeError):
+            return None
+        cached = args._speech_audio = (
+            sum(samples) / 16000, sum(num_audio_tokens(n) for n in samples))
+    return cached
+
+
+def transcribes(args, parser, argv) -> bool:
+    """Whether a run transcribes its --audio: the mmproj is a speech
+    encoder and the user wrote no prompt."""
+    return (bool(_media_inputs(args)[1])
+            and is_speech_encoder(getattr(args, "mmproj", None))
+            and not _explicit_dests(parser, argv) & {"prompt", "prompt_file"})
+
+
+def apply_transcription_defaults(args, parser, argv) -> None:
+    """A run with --audio on a model with a speech encoder and no prompt
+    of its own transcribes: the model card's instruction, greedy decoding,
+    no thinking, and a token budget for the audio's length. A flag the
+    user passed keeps its value."""
+    if not transcribes(args, parser, argv):
+        return
+    from gmlx.models.nemotron_h import transcription
+
+    explicit = _explicit_dests(parser, argv)
+    args.prompt = transcription.transcription_instruction()
+    for dest, value in (("temp", 0.0), ("top_p", 1.0), ("thinking", "off")):
+        if dest not in explicit:
+            setattr(args, dest, value)
+    speech = speech_audio(args)
+    if "max_tokens" not in explicit and speech is not None:
+        args.max_tokens = transcription.output_budget(
+            speech[0], speech[1] + _TEMPLATE_TOKENS)
+    print("[asr] transcribing: the model card's instruction, greedy, no "
+          "thinking (--prompt to ask something else)", file=sys.stderr)
 
 
 def _audio_companion(args) -> str | None:
@@ -2780,6 +2879,12 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     rc = maybe_load_from_config(args, parser, argv)
     if rc is not None:
         return rc
+    try:
+        pair_speech_encoder(args, always=False)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    args._transcribes = transcribes(args, parser, argv)
     if not args.report_only:
         preload_wire_check(args, depth=run_room_depth(args),
                            depth_without_mtp=run_room_depth(args, mtp=False))
@@ -2879,6 +2984,7 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     rc = apply_family_defaults(args, parser, argv)
     if rc is not None:
         return rc
+    apply_transcription_defaults(args, parser, argv)
     # After the config/family overlays: either may have seeded a cap.
     resolve_max_tokens(args)
     from gmlx.load.arch_table import UnsupportedArchError

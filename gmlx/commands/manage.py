@@ -307,6 +307,9 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
     # It is not a standalone model, so the arch gate doesn't apply - but it's a
     # perfectly valid file for its purpose (pair it with the LLM GGUF).
     mmproj = report.arch == "clip"
+    # A speech encoder that feeds a text model's embeddings pairs like one.
+    from gmlx.load.arch_table import NATIVE_ASR_ENCODER_ARCHES
+    mmproj = mmproj or report.arch in NATIVE_ASR_ENCODER_ARCHES
     # A LoRA adapter carries its base model's arch (general.type = "adapter"),
     # so like mmproj it's a valid companion file, never a standalone model.
     adapter = report.gguf_type == "adapter"

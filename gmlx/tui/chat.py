@@ -437,6 +437,9 @@ class ChatState:
     # whether the model wants one at all.
     asr: str | None = None
     asr_wanted: bool = False
+    # The user text of an empty line with staged audio, for a model that
+    # transcribes through its own speech encoder.
+    audio_instruction: str = ""
     pending_send: str | None = None      # /retry auto-resend
     pending_insert: str | None = None    # /load prompt prefill
 
@@ -671,6 +674,26 @@ def _audio_turn(state: ChatState, tok, messages: list, template_kwargs: dict,
     if cp is not None:
         cp["user_content"] = "\n".join([t or asr.EMPTY_TRANSCRIPT for t in texts] + [line])
     return ids, prompt_text
+
+
+def _transcription_sampling(clips: list, sampling: dict) -> dict:
+    """The sampling of a turn that transcribes ``clips``: greedy, and the
+    output budget of their length when the session has no reply cap."""
+    out = {"temp": 0.0, "top_p": 1.0, "top_k": 0, "min_p": 0.0,
+           "repetition_penalty": 1.0}
+    if not sampling.get("max_tokens"):
+        from gmlx.models.nemotron_h.speech import num_audio_tokens
+        from gmlx.models.nemotron_h.transcription import output_budget
+        from gmlx.serve.media_programs import decode_mono
+
+        try:
+            samples = [len(decode_mono(os.path.expanduser(c), 16000))
+                       for c in clips]
+        except (OSError, ValueError, RuntimeError):
+            return out
+        out["max_tokens"] = output_budget(
+            sum(samples) / 16000, sum(num_audio_tokens(n) for n in samples))
+    return out
 
 
 def _compose_user_content(state: ChatState, line: str) -> str:
@@ -3552,6 +3575,14 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         rc = maybe_load_from_config(args, parser, argv)
         if rc is not None:
             return rc
+        # A model that hears audio through its own speech encoder loads it
+        # up front: audio can be staged at any turn.
+        from gmlx.commands.cli import pair_speech_encoder
+        try:
+            pair_speech_encoder(args, always=True)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
         # Chat holds the conversation, so its KV room is the serve
         # context's.
         preload_wire_check(args, depth=None)
@@ -3673,6 +3704,10 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
 
     state = _wire_input(no_history=args.no_history)
     state.vlm = args.mmproj is not None
+    from gmlx.commands.cli import is_speech_encoder
+    if is_speech_encoder(args.mmproj):
+        from gmlx.models.nemotron_h.transcription import transcription_instruction
+        state.audio_instruction = transcription_instruction()
     state.asr = None if state.vlm else _chat_companion(args)
     state.asr_wanted = state.asr is not None or (
         not state.vlm and _pairs_with_companion(args))
@@ -4244,6 +4279,15 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
 
             imgs = state.take_list("staged_images")
             auds = state.take_list("staged_audio")
+            transcribe = (bool(auds) and not line.strip()
+                          and bool(state.audio_instruction))
+            turn_kwargs, turn_prefill = template_kwargs, state.thinking_prefill
+            turn_sampling = dict(s, max_tokens=eff_max)
+            if transcribe:
+                line = state.audio_instruction
+                turn_kwargs = {**template_kwargs, "enable_thinking": False}
+                turn_prefill = ""
+                turn_sampling.update(_transcription_sampling(auds, s))
             if first_turn and state.system_prompt:
                 vlm_msgs.append({"role": "system", "content": state.system_prompt})
             vlm_msgs.append(
@@ -4261,8 +4305,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             from .reasoning import with_thinking_prefill
 
             prompt = with_thinking_prefill(get_chat_template(
-                processor, vlm_msgs, add_generation_prompt=True, **template_kwargs
-            ), state.thinking_prefill)
+                processor, vlm_msgs, add_generation_prompt=True, **turn_kwargs
+            ), turn_prefill)
             # No cross-turn KV cache on the VLM path yet: each turn
             # re-prefills the whole conversation (and re-encodes media).
             # mlx-vlm's own criteria enforces thinking_budget here; the
@@ -4300,12 +4344,14 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                         prompt,
                         image=list(vlm_images) or None,
                         audio=list(vlm_audios) or None,
-                        max_tokens=eff_max,
-                        temperature=s["temp"],
-                        top_p=s["top_p"],
-                        top_k=s["top_k"],
-                        min_p=s["min_p"],
-                        repetition_penalty=None if rep in (0.0, 1.0) else rep,
+                        max_tokens=turn_sampling["max_tokens"],
+                        temperature=turn_sampling["temp"],
+                        top_p=turn_sampling["top_p"],
+                        top_k=turn_sampling["top_k"],
+                        min_p=turn_sampling["min_p"],
+                        repetition_penalty=(
+                            None if turn_sampling["repetition_penalty"]
+                            in (0.0, 1.0) else turn_sampling["repetition_penalty"]),
                         repetition_context_size=s["repetition_context_size"],
                         presence_penalty=s["presence_penalty"] or None,
                         frequency_penalty=s["frequency_penalty"] or None,

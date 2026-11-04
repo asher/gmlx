@@ -17,7 +17,7 @@ import pytest
 
 import mlx.core as mx
 
-from gmlx.models.nemotron_h import speech
+from gmlx.models.nemotron_h import speech, transcription
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests" / "fixtures" / "nemotron_transcribe"
@@ -247,3 +247,69 @@ def test_real_encoder_matches_the_oracle(real_encoder, name):
         agree = float(np.mean(got["argmax"] == arrays["fp32_ctc_argmax"]))
         assert agree >= tol["ctc_argmax"]["agree"]
         close("ctc_columns_logp", got["columns"], arrays["fp32_ctc_columns_logp"])
+
+
+# -- transcription requests ---------------------------------------------------
+
+
+@pytest.mark.parametrize("code, name", [
+    ("en", "English"), ("pt-BR", "Portuguese"), ("zh_Hant", "Chinese"),
+    (" FIL ", "Filipino"), ("en-US-x", None), ("xx", None), ("", None),
+    (None, None),
+])
+def test_language_names(code, name):
+    assert transcription.language_name(code) == name
+
+
+def test_instructions_follow_the_card():
+    assert transcription.transcription_instruction("de") == (
+        transcription.TRANSCRIBE + " The speech is in German.")
+    assert transcription.transcription_instruction("xx") == transcription.TRANSCRIBE
+    assert transcription.transcription_instruction("de", speakers=True) == transcription.SPEAKERS
+    assert transcription.translation_instruction() == (
+        "Please translate the given speech to English.")
+
+
+@pytest.mark.parametrize("seconds, prompt, want", [
+    (0.0, 100, 24), (10.0, 300, 84), (3600.0, 100, 21_624), (3700.0, 100, 21_664),
+    (3600.0, 45_200, 65_536 - 45_200), (3600.0, 70_000, 0),
+])
+def test_output_budget(seconds, prompt, want):
+    assert transcription.output_budget(seconds, prompt) == want
+
+
+def test_near_silence():
+    assert transcription.near_silent(np.zeros(0, np.float32))
+    assert transcription.near_silent(np.full(16000, 2e-5, np.float32))
+    assert not transcription.near_silent(np.full(16000, 5e-5, np.float32))
+    quiet = np.zeros(16000, np.float32)
+    quiet[5] = 2e-3
+    assert not transcription.near_silent(quiet)
+
+
+def test_loop_cleanup_matches_the_card_regex():
+    def card(text):
+        text = transcription._CHAR_RUN.sub(lambda m: m.group(1), text)
+        return transcription._BLOCK_RUN.sub(lambda m: m.group(1), text)
+
+    rng = np.random.default_rng(3)
+    alphabet = list("ab c\n")
+    for _ in range(300):
+        parts = []
+        for _ in range(int(rng.integers(0, 6))):
+            piece = "".join(rng.choice(alphabet, int(rng.integers(1, 40))))
+            parts.append(piece * (int(rng.integers(15, 45)) if rng.random() < 0.6 else 1))
+        text = "".join(parts)
+        assert transcription.cleanup_generation_loops(text) == card(text)
+
+
+def test_loop_cleanup_collapses_a_long_block():
+    block = "".join(chr(0x4E00 + i) for i in range(3000))
+    text = "start " + block * 20 + " end"
+    assert transcription.cleanup_generation_loops(text) == "start " + block + " end"
+
+
+def test_tags_strip_from_text():
+    text = "<spk:0> Hi <ev:laugh> there. <sty:whisper>  <spk:1> Bye."
+    assert transcription.strip_tags(text) == "<spk:0> Hi there. <spk:1> Bye."
+    assert transcription.strip_tags(text, speakers=True) == "Hi there. Bye."

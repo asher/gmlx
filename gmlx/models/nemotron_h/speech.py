@@ -558,6 +558,8 @@ class SpeechEncoder(nn.Module):
         self.fusion = _Fusion(cfg.asr.d_model, cfg.num_speakers, cfg.proj_dim)
         if cfg.ctc is not None:
             self.ctc = CTCHead(cfg.ctc)
+        # The file's mel filterbank (preprocessor.fb), for :func:`features`.
+        self.mel_filters = mx.zeros((cfg.n_mels, cfg.n_fft // 2 + 1))
 
     @property
     def dtype(self):
@@ -672,11 +674,19 @@ class SpeechEncoder(nn.Module):
 # -- loading ------------------------------------------------------------------
 
 
-def _module_path(name: str) -> str:
-    """The :class:`SpeechEncoder` path of GGUF tensor ``name``."""
+def remap_tensor(name: str, arr: mx.array) -> tuple[str, mx.array]:
+    """``(module path, array)`` in :class:`SpeechEncoder` of GGUF tensor
+    ``name``, in numpy order as read."""
+    if name == "preprocessor.fb":
+        return "mel_filters", arr.astype(mx.float32)
+    if name == "diar.head.subpixel_upsample.weight":
+        # torch Conv1d (out, in, k) -> MLX (out, k, in).
+        arr = arr.transpose(0, 2, 1)
+    elif name == "ctc.classifier.weight" and arr.ndim == 3:
+        arr = arr[:, :, 0]
     if name.startswith("diar.") and not name.startswith("diar.head."):
-        return "diar.encoder." + name[len("diar."):]
-    return name
+        name = "diar.encoder." + name[len("diar."):]
+    return name, arr
 
 
 def load(path, dtype=mx.float32) -> tuple[SpeechEncoder, np.ndarray, dict]:
@@ -695,34 +705,16 @@ def load(path, dtype=mx.float32) -> tuple[SpeechEncoder, np.ndarray, dict]:
     cfg = SpeechConfig.from_gguf(fields)
     enc = SpeechEncoder(cfg)
     weights = []
-    mel = None
     for t in reader.tensors:
         if t.tensor_type not in (Q.F32, Q.F16):
             raise ValueError(f"{t.name}: unsupported tensor type {t.tensor_type.name}")
         shape = tuple(int(d) for d in reversed(t.shape))
-        data = np.asarray(t.data).reshape(shape)
-        if t.name == "preprocessor.fb":
-            mel = data.astype(np.float32)
-            continue
-        if t.name == "diar.head.subpixel_upsample.weight":
-            # torch Conv1d (out, in, k) -> MLX (out, k, in).
-            data = data.transpose(0, 2, 1)
-        elif t.name == "ctc.classifier.weight" and data.ndim == 3:
-            data = data[:, :, 0]
-        arr = mx.array(data)
-        if arr.dtype not in (mx.float16, mx.float32):
-            arr = arr.astype(mx.float32)
-        if t.name.endswith(("norm.weight", "norm.bias", "learnable_sil_emb",
-                            "diar_kernel")) or arr.ndim == 1:
-            arr = arr.astype(mx.float32)
-        weights.append((_module_path(t.name), arr))
-    if mel is None:
-        raise ValueError(f"{path}: no preprocessor.fb mel filterbank")
+        weights.append(remap_tensor(t.name, mx.array(np.asarray(t.data).reshape(shape))))
     enc.load_weights(weights, strict=True)
     if dtype != mx.float32:
         enc.set_dtype(dtype)
     mx.eval(enc.parameters())
-    return enc, mel, fields
+    return enc, np.array(enc.mel_filters.astype(mx.float32)), fields
 
 
 __all__ = ["ARCH", "SpeechConfig", "SpeechEncoder", "EncoderOutput",
