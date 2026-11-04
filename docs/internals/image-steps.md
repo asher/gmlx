@@ -37,7 +37,8 @@ A client that samples one image makes these calls:
    `PUT patch-tables/{id}?model=ID` then names the set of patches and their
    strengths. The patches stack on the model's own LoRAs, as the adapters
    of an images request do. A table that names a pair of one of the
-   model's own LoRAs sets that LoRA's strength in place of the model's.
+   model's own LoRAs sets that LoRA's strength and alpha in place of the
+   model's.
 4. `POST runs/begin` holds the model for the run.
 5. `POST step` runs once a step, with the latents, the timestep, the
    conditioning hashes and the patch table id.

@@ -29,6 +29,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A served image model keeps its own LoRAs when a request brings others, and
   a request over the adapter cache is refused, where requests failed with
   "patch table names adapter ...".
+- A served model's own LoRA sent again by ComfyUI, which reads no alpha from
+  the file's header, no longer takes adapter cache room twice.
 - `gmlx serve` no longer corrupts the KV cache when one of several decoding
   requests passes about 260K tokens, or when a long request joins them.
 - FLUX.2 klein and the FLUX.1 VAE encoder no longer leave rows of the image
