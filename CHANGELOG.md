@@ -23,6 +23,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - An image LoRA takes less memory: loading one no longer holds its file
   twice, and fewer of its weights are copied while it runs.
+- In the Python API, `gmlx.image.lora.pair_hash` and `register_pair` take no
+  alpha, and `register_patch` returns the pair's hash with its alpha: a patch
+  table patch carries the alpha as `(adapter hash, strength, alpha)`.
 
 ### Fixed
 
