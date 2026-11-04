@@ -12,6 +12,7 @@ re-calls set_shared_kv with the widened per-row arrays."""
 import mlx.core as mx
 
 from gmlx.spec.speculative import _merge_injected_shared_kv, _pad_shared_kv_seq
+from helpers import spy_guards
 
 H, D = 2, 4
 
@@ -144,3 +145,14 @@ def test_pad_noop_returns_same_array():
     padded = _pad_shared_kv_seq(K, 8)
     assert padded.shape == (2, H, 8, D)
     assert mx.all(padded[:, :, 6:, :] == 0.0).item()
+
+
+def test_pad_concatenates_through_the_guard(monkeypatch):
+    """Past 2^31 output elements the stock concatenate misplaces rows on a
+    GPU stream (docs/upstream-defects.md), so the tail pad goes through
+    the guard on the token axis. This holds the call on the CPU on every
+    run; tests/spec/test_shared_kv_past_int32.py pads past the limit."""
+    calls = spy_guards(monkeypatch)
+    with mx.stream(mx.cpu):
+        _pad_shared_kv_seq(_kv(2, 3, 1.0)[0], 5)
+    assert calls == [("concatenate", 2)]

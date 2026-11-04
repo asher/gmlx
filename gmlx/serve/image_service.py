@@ -1116,6 +1116,24 @@ def _guided(req: ImageRequest, served: ServedImage) -> float:
     return float(served.plan.cfg)
 
 
+def _texts(req: ImageRequest, served: ServedImage) -> tuple:
+    """(prompt, text, negative) of ``req`` on ``served``: the prompt, the
+    variation prompt for a variation without one, the text the encoder
+    reads for it, the upsampler's rewrite when there is one, and the
+    negative prompt it reads, the request's or else the entry's default,
+    None when guidance is off."""
+    prompt = req.prompt
+    if (req.route == "variations" and not prompt
+            and served.pipe.family.edit is not None):
+        prompt = VARIATION_PROMPT
+    neg = None
+    if _guided(req, served) != 1.0:
+        neg = req.negative_prompt
+        if neg is None:
+            neg = (served.spec.defaults or {}).get("negative_prompt") or ""
+    return prompt, req.revised_prompt or prompt, neg
+
+
 def serves_edits(fam, tower: bool) -> bool:
     """Whether the edits routes take the reference images of ``fam`` on an
     entry with its vision tower, or without it when ``tower`` is false. A
@@ -1135,9 +1153,9 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
     tower, and guidance on a variant distilled to sample without it or on
     a flow map DiT, and a flow map's sampler other than euler, the rules
     of ``api.check_sampling``, which ``api.sample`` holds too. The
-    references of a family that prepares them together are prepared here
-    into ``req.refs``, and an image its rules refuse gets a 400 that
-    names it."""
+    references of an edit are prepared here into ``req.refs``, by
+    ``_prepare_refs``, so the fit check prices them at the size the job
+    runs them, and an image its rules refuse gets a 400 that names it."""
     from gmlx.image.api import check_sampling, fixed_steps
 
     pipe = served.pipe
@@ -1186,14 +1204,41 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
                else f"give the chat model {shared!r} its mmproj")
         raise _bad(f"edits on {served.spec.id!r} need the encoder's vision "
                    f"tower: {fix}", "image")
-    if edit.prepare_all is not None:
+    _prepare_refs(req, served)
+
+
+def _prepare_refs(req: ImageRequest, served: ServedImage) -> tuple:
+    """``req.refs``, prepared once: the reference images of an edit as its
+    family runs them. A family that prepares the references of a request
+    together prepares them so, and any other prepares each at its area,
+    as ``api.references`` does. An image its rules refuse gets a 400 that
+    names it."""
+    if req.refs is not None:
+        return req.refs
+    from gmlx.image import api
+
+    images = [i[..., :3] for i in req.images]
+
+    def where(i) -> str:
+        return ("image" if i is None or len(images) == 1
+                else f"image {i + 1}")
+
+    pipe = served.pipe
+    if pipe.family.edit.prepare_all is not None:
         try:
-            req.refs = edit.prepare_all([i[..., :3] for i in req.images])
+            req.refs = pipe.family.edit.prepare_all(images)
         except ValueError as e:
-            i = getattr(e, "index", None)
-            where = "image" if i is None or len(req.images) == 1 else (
-                f"image {i + 1}")
-            raise _bad(f"{where}: {e}", "image") from None
+            raise _bad(f"{where(getattr(e, 'index', None))}: {e}",
+                       "image") from None
+        return req.refs
+    refs: list = []
+    for i, image in enumerate(images):
+        try:
+            refs += api.references(pipe, [image])
+        except ValueError as e:
+            raise _bad(f"{where(i)}: {e}", "image") from None
+    req.refs = tuple(refs)
+    return req.refs
 
 
 def _fit_args(pipe, served: ServedImage, budget, cfg: float,
@@ -1236,7 +1281,9 @@ def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
     its encode, as few as its plan names: those of finished work first,
     then those of the step routes' runs, and those of its own
     conditionings, of ``prompts`` with ``refs``, last. The request's own
-    plan counts what stays."""
+    plan counts what stays, with ``prompts`` priced as ``fit_check``
+    prices them."""
+    from gmlx.commands.image_preflight import prompt_terms
     from gmlx.image import api, memfit
 
     pipe = served.pipe
@@ -1250,6 +1297,7 @@ def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
         own = {api._cond_key(pipe, p, refs, enc) for p in prompts}
     sizes = [(r.height, r.width) for r in refs]
     args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, sizes))
+    args.update(prompt_terms(pipe.family, prompts, sizes))
     args["prefix_other"] -= sum(pipe.captions.nbytes(k) for k in
                                 pipe.captions.keys(lambda k: k[0] in own))
     try:
@@ -1265,40 +1313,58 @@ def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
 def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
               budget) -> None:
     """Refuse a request whose memory plan does not fit ``budget`` with a
-    400 that names the largest size of its aspect that fits."""
+    400 that names the cause. A family whose plan prices the prompt prices
+    every size at the most text rows the texts its encoder reads can give,
+    and the prefix of each conditioning at the rows of its own text, by
+    ``prompt_terms``, as the image command's preflight and ``_make_room``
+    price them. The prompt is the cause when no size of the request's
+    shape fits at those rows and some size of it fits at the family's
+    default rows: the prompt must get shorter whatever the size, so the
+    400 names the prompt, or the negative prompt when it has more rows.
+    Otherwise, when a smaller size fits at the prompt's rows or no size
+    fits even at the default rows, an edit gets the plan's message, which
+    names the references that fit, and any other request the largest size
+    of its shape that fits at those rows, or that none does. An edit's
+    references are priced at the size the job runs them, by
+    ``_prepare_refs``."""
+    from gmlx.commands.image_preflight import prompt_rows, prompt_terms
     from gmlx.image import memfit
 
     pipe = served.pipe
     cfg = _guided(req, served)
-    if pipe.family.edit is None:
-        refs = []
-    elif req.refs is not None:
-        refs = [(r.height, r.width) for r in req.refs]
-    else:
-        refs = [r.shape[:2] for r in req.images]
+    refs = []
+    if pipe.family.edit is not None and req.images:
+        # At the size the job runs them, which may be far from the raw
+        # image's.
+        refs = [(r.height, r.width) for r in _prepare_refs(req, served)]
     args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, refs))
     plan_memory = memfit.plan_memory
     init = bool(req.images) and (pipe.family.edit is None
                                  or req.mask is not None)
 
-    def fits(w: int, h: int, ref_sizes) -> bool:
+    # The rows of a family whose plan prices the prompt come from the
+    # texts run_job encodes, before a tokenizer loads.
+    _, text, neg = _texts(req, served)
+    terms = prompt_terms(pipe.family, [text] + ([] if neg is None else [neg]),
+                         refs)
+    args.update(terms)
+    caption = terms.get("caption_tokens")
+    cause = "prompt"
+    if caption is not None and prompt_rows(pipe.family, text,
+                                           len(refs)) < caption:
+        cause = "negative_prompt"
+
+    def fits(w: int, h: int, ref_sizes, a=args) -> bool:
         try:
             return plan_memory(height=h, width=w, init_image=init,
                                ref_sizes=ref_sizes, _hint=False,
-                               **args).fits
+                               **a).fits
         except memfit.ImageMemoryError:
             return False
 
     w, h = size
     if budget is None or fits(w, h, refs):
         return
-    if refs:
-        # The plan's own message names the references that fit.
-        try:
-            plan_memory(height=h, width=w, init_image=init, ref_sizes=refs,
-                        **args)
-        except memfit.ImageMemoryError as e:
-            raise _bad(str(e), "image") from None
     unit = _stride(served)
 
     def scaled(k: int) -> tuple:
@@ -1309,13 +1375,40 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     # A smaller size of the shape never needs more memory, so a bisection
     # over the longer side finds the largest that fits in a few plans.
     best = None
-    lo, hi = 1, max(w, h) // unit - 1
-    while lo <= hi:
-        k = (lo + hi) // 2
-        if fits(*scaled(k), refs):
-            best, lo = scaled(k), k + 1
-        else:
-            hi = k - 1
+    if not refs or caption is not None:
+        lo, hi = 1, max(w, h) // unit - 1
+        while lo <= hi:
+            k = (lo + hi) // 2
+            if fits(*scaled(k), refs):
+                best, lo = scaled(k), k + 1
+            else:
+                hi = k - 1
+    # The prompt is the cause when no size of the shape fits at its rows
+    # and some size of it fits at the family's default rows. The smallest
+    # size needs the least memory, so it stands for every size.
+    if caption is not None and best is None:
+        base = {k: v for k, v in args.items() if k not in terms}
+        if fits(*scaled(1), refs, base):
+            what, fix = "the prompt", "shorten the prompt"
+            if cause == "negative_prompt":
+                what, fix = "the negative prompt", "shorten it"
+                if req.negative_prompt is None:
+                    what = (f"the default negative prompt of "
+                            f"{served.spec.id!r}")
+                    fix = "pass a shorter negative_prompt"
+            elif req.revised_prompt:
+                what = "the upsampled prompt"
+                fix = "shorten the prompt or turn prompt_upsampling off"
+            raise _bad(f"{what} is too long for {pipe.family.title}: up to "
+                       f"{caption} text rows do not fit in memory beside "
+                       f"the model; {fix}", cause)
+    if refs:
+        # The plan's own message names the references that fit.
+        try:
+            plan_memory(height=h, width=w, init_image=init, ref_sizes=refs,
+                        **args)
+        except memfit.ImageMemoryError as e:
+            raise _bad(str(e), "image") from None
     if best is None:
         raise _bad(f"size {w}x{h} does not fit in memory beside the models "
                    "now loaded, and no smaller size of its shape does",
@@ -1616,14 +1709,10 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
     steps = (req.steps or quality_steps(fam, pipe.variant, req.quality)
              or spec_defaults.get("steps") or pipe.defaults.steps)
     sampler = req.sampler or spec_defaults.get("sampler") or "euler"
-    neg_text = None
-    if cfg != 1.0:
-        neg_text = req.negative_prompt
-        if neg_text is None:
-            neg_text = spec_defaults.get("negative_prompt") or ""
+    # The fit check priced these texts.
+    prompt, text, neg_text = _texts(req, served)
     alpha = req.background == "transparent"
 
-    prompt = req.prompt
     refs: tuple = ()
     init = mask = crop = None
     strength = None
@@ -1636,8 +1725,6 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
             # when the request takes its size from the reference.
             if req.size is None and req.mask is None:
                 crop = getattr(req.refs, "crop", None)
-            if req.route == "variations" and not prompt:
-                prompt = VARIATION_PROMPT
         if fam.edit is None or req.mask is not None:
             init = resized(first[..., :3], (width, height))
             strength = req.strength
@@ -1648,7 +1735,6 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
             mask = mask_from_image(req.mask, (width, height))
 
     table, adapters = _adapter_table(served, req.adapters, model_dirs)
-    text = req.revised_prompt or prompt
     _make_room(served, cfg, size, refs, init is not None, budget,
                [text] + ([] if neg_text is None else [neg_text]))
     t0 = time.perf_counter()

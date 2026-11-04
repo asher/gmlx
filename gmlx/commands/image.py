@@ -868,8 +868,8 @@ def _generate(a) -> int:
         a.model, a.encoder, a.vae, height=height, width=width, cfg=cfg,
         adapters=_adapter_bytes(a), init_image=init is not None,
         mmproj=mmproj, refs=[(r.height, r.width) for r in refs],
-        variant=a.variant, prompts=() if refs and not text_only else (
-            [text] + ([] if cfg == 1.0 else [a.negative_prompt or ""])))
+        variant=a.variant,
+        prompts=[text] + ([] if cfg == 1.0 else [a.negative_prompt or ""]))
     _check_release(a, before)
     staged = bool(getattr(before, "staged_load", False))
 

@@ -383,25 +383,43 @@ def test_the_fit_line_says_when_the_parts_fit_in_stages(lib, monkeypatch,
     _downloads(monkeypatch)
     assert manage.cmd_pull(["qwen-image", "--config", str(cfg)]) == 1
     out = capsys.readouterr().out
-    assert "which are more than this Mac's 16 GB RAM" in out
+    assert "which are too much to load together in this Mac's 16 GB RAM" in out
     assert ("in stages, the encoder alone and then the DiT and the VAE, a "
             "1024x1024 image needs 8.2 GB at its peak, which fits the 10.1 GB "
             "working budget of this Mac's 16 GB RAM") in out
 
 
-def test_a_9b_pull_on_16_gb_refuses_and_names_24_gb(lib, monkeypatch,
-                                                   capsys):
-    """No 9B DiT the recipe pulls makes an image on 16 GB, so a bare pull
-    there downloads nothing and names the class that runs one."""
+@pytest.mark.parametrize("name, title", [
+    ("flux-2-klein-9b", "FLUX.2 klein 9B"), ("z-image-turbo", "Z-Image-Turbo")])
+def test_a_pull_on_8_gb_refuses_and_names_16_gb(lib, monkeypatch, capsys,
+                                               name, title):
+    """No image model makes an image under the 16 GB class, so a bare pull
+    on an 8 GB Mac downloads nothing and names 16 GB, and --json carries
+    the error. With --quant the plan goes on, and calls no quant the
+    default there."""
     _, cfg = lib
-    monkeypatch.setattr("gmlx.load.memfit.total_ram_bytes", lambda: 16 << 30)
+    monkeypatch.setattr("gmlx.load.memfit.total_ram_bytes", lambda: 8 << 30)
     got = _downloads(monkeypatch)
-    assert manage.cmd_pull(["flux-2-klein-9b", "--config", str(cfg)]) == 1
+    msg = (f"no {title} DiT that gmlx pulls makes an image in this Mac's 8 GB "
+           "RAM; the smallest Mac that runs one has 16 GB. Pass --quant to "
+           "pull one anyway")
+    assert manage.cmd_pull([name, "--config", str(cfg)]) == 1
+    assert f"error: {msg}" in capsys.readouterr().err
+    assert manage.cmd_pull([name, "--config", str(cfg), "--json"]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "recipe": name, "error": msg, "needs_gb": 16}
     assert got == []
-    err = capsys.readouterr().err
-    assert ("no FLUX.2 klein 9B DiT that gmlx pulls makes an image on a 16 "
-            "GB Mac; the smallest Mac that runs one has 24 GB. Pass --quant "
-            "to pull one anyway") in err
+    r = catalog.RECIPES[name]
+    dq, eq = catalog.DEFAULT_QUANTS[name][16]
+    listing = {r.dit_name(dq): 1 << 30, r.encoder_name(eq): 1 << 30,
+               r.vae_file: 1 << 20, r.vae_config: 1000}
+    monkeypatch.setattr(remote, "hf_list_dir", lambda repo, path, rev="main",
+                        **k: [(n, "file", s) for n, s in listing.items()])
+    monkeypatch.setattr(manage, "_disk_free", lambda p: 1 << 20)
+    assert manage.cmd_pull([name, "--quant", dq, "--config", str(cfg)]) == 1
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == f"pull {name} ({title}): DiT {dq}, encoder {eq}"
+    assert got == []
 
 
 def test_the_disk_check_counts_the_packed_vae_beside_its_source(
@@ -715,7 +733,7 @@ def _krea_pull(lib, monkeypatch, ram_gb, *args):
 
 @pytest.mark.parametrize("ram_gb, args, size", [
     (16, (), "512x512"),
-    (8, (), "512x512"),
+    (8, ("--quant", "q3_k_m"), "512x512"),
     (16, ("--encoder-quant", "q4_k_m"), "512x512"),
     (16, ("--quant", "q4_k_m"), None),
     (24, (), None),
@@ -937,12 +955,10 @@ def test_a_flux2_9b_pull_takes_unsloths_dit_qwen3_8b_and_bfls_vae(
         lib, monkeypatch, capsys, r, ram_gb, quant):
     """The 9B recipes pull the 9B DiT (unsloth's, and QuantStack's for KV),
     Qwen3-8B and the FLUX.2 autoencoder of the 4B repo, and print the FLUX
-    Non-Commercial License with its terms. On 16 GB, where none makes an
-    image, it takes the quant given."""
+    Non-Commercial License with its terms. On 16 GB a bare pull takes the
+    Q4_K_M DiT, which makes a 1024x1024 image there, the family's size."""
     root, cfg = lib
-    given = not catalog.makes_image(r, catalog.memory_class(ram_gb << 30))
-    got, packed, m = _shared_pull(lib, monkeypatch, r.name, ram_gb,
-                                  ("--quant", quant) if given else ())
+    got, packed, m = _shared_pull(lib, monkeypatch, r.name, ram_gb)
     assert catalog.DEFAULT_QUANTS[r.name][catalog.memory_class(
         ram_gb << 30)] == (quant, "Q8_0")
     stem, lic = NINE[r.name]
@@ -951,7 +967,7 @@ def test_a_flux2_9b_pull_takes_unsloths_dit_qwen3_8b_and_bfls_vae(
     _bfls_vae(root, r, got, packed, m, r.family)
     assert m.path == f"{r.dit_repo.replace('/', '__')}/{stem}-{quant}.gguf"
     assert m.encoder == "unsloth__Qwen3-8B-GGUF/Qwen3-8B-Q8_0.gguf"
-    assert m.encoder_mmproj is None
+    assert m.encoder_mmproj is None and not m.defaults.get("size")
     assert (f"license: {r.title} flux-non-commercial-license, non-commercial "
             "use only, with content filters or a review of each image for "
             "unlawful or infringing content before it is shared, and a "

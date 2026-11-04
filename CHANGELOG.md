@@ -26,10 +26,26 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Image LoRA stacks over the adapter cache load, and a server request over
-  it is refused.
+- A served image model keeps its own LoRAs when a request brings others, and
+  a request over the adapter cache is refused, where requests failed with
+  "patch table names adapter ...".
+- `gmlx serve` no longer corrupts the KV cache when one of several decoding
+  requests passes about 260K tokens, or when a long request joins them.
+- FLUX.2 klein and the FLUX.1 VAE encoder no longer leave rows of the image
+  wrong at very large canvases and reference counts.
+- Qwen3.5/3.6, Qwen3-VL with an mmproj, Qwen3-Omni and MiniCPM-V gave wrong output
+  past 262K to 524K tokens in one prefill chunk, Qwen-Image 2.1 past 524K tokens.
+- `gmlx serve` now refuses an over-long image prompt with a 400 that names the
+  prompt, where before the request ran past the memory budget.
+- Prompts and the Qwen-Image 2.1 prefix are priced at their length: short image
+  prompts fit at sizes refused before, and an over-long edit prompt is refused.
+- Small reference images let a Qwen-Image 2.1 edit in `gmlx serve` run past the
+  memory budget, and a large photo was refused on a Mac where it fits.
 - `gmlx serve` frees an image model it releases after a ComfyUI workflow
   applied a LoRA to it. The next model loaded beside its memory before.
+- A 16 GB Mac now pulls and runs the FLUX.2 klein 9B models at 1024x1024, and a
+  Mac under 16 GB pulls no image model, which it could not run.
+- Image LoRA stacks over the adapter cache load.
 - A LoRA in a ComfyUI workflow adds to the LoRAs of the `gmlx serve` image
   model's `adapters` key, in place of replacing them.
 - A ComfyUI step whose LoRA another workflow's LoRA pushed out of the

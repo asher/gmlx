@@ -3,8 +3,7 @@
 ``RECIPES`` names each pullable image model: its DiT repository and quants,
 its text encoder (and vision tower), its VAE source, the upsampler's
 system prompt of a family that ships none, and the licenses.
-``DEFAULT_QUANTS`` gives the quants a recipe pulls on each memory class,
-and ``NO_IMAGE`` the classes where none of them makes an image.
+``DEFAULT_QUANTS`` gives the quants a recipe pulls on each memory class.
 ``classify`` and ``scan`` find the image files on disk by their weights:
 DiTs by their fingerprint, VAEs by their family and source digest, and
 encoders and vision towers by the identity digests of their spec.
@@ -366,28 +365,27 @@ DEFAULT_QUANTS = {
                      32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     "flux-2-klein-base": {16: ("Q4_K_M", "Q8_0"), 24: ("Q8_0", "Q8_0"),
                           32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
-    # The 16 GB rows of the 9B recipes were set against an 8.55 GiB class
-    # budget, where a Q4_K_M step at 256 pixels needs 8.91 GiB. The budget
-    # is 10.13 GiB since the reserve change; the rows keep NO_IMAGE until
-    # the admits test in tests/serve/test_image_service_real.py has run on
-    # the files. The 16 GB row names the smallest, which a pull takes there
-    # only when the quant is given (NO_IMAGE). On 24 GB a Q4_K_M DiT makes a 1024 pixel image from up to
-    # four 1024 pixel references with the encoder released, and Base runs
-    # its two guided rows one at a time. A Q8_0 DiT fits there only with
-    # the staged load and a tiled decode, and from one reference, so it
-    # takes the 32 GB class, with the encoder released.
+    # On 16 GB a Q4_K_M 9B DiT makes a 1024 pixel image from the prompt
+    # with the staged load, the encoder released and a tiled decode. A
+    # measured run peaks at 8.11 GiB of MLX memory, as the encoder runs,
+    # under the 10.13 GiB budget. An edit fits there at 768 pixels from one
+    # reference of that size, or at 640 pixels from two. On 24 GB a Q4_K_M
+    # DiT makes a 1024 pixel image from up to four 1024 pixel references
+    # with the encoder released. Base runs its two guided rows one at a
+    # time on both classes. A Q8_0 DiT fits 24 GB only with the staged load
+    # and a tiled decode, and from one reference, so it takes the 32 GB
+    # class, with the encoder released.
     "flux-2-klein-9b": {16: ("Q4_K_M", "Q8_0"), 24: ("Q4_K_M", "Q8_0"),
                         32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     "flux-2-klein-base-9b": {16: ("Q4_K_M", "Q8_0"), 24: ("Q4_K_M", "Q8_0"),
                              32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     # KV keeps the keys and values of its references, so an edit takes more
-    # memory than on the 9B. As on the 9B, the 16 GB row keeps NO_IMAGE: a
-    # Q4_K_M request at 512 pixels needs 9.01 GiB of the 8.55 GiB budget
-    # before the reserve change (10.13 GiB now, untested on the files). On
-    # 24 GB a Q4_K_M DiT makes a 1024 pixel image from up to two 1024 pixel
-    # references with the encoder released, and a Q8_0 DiT makes no 1024
-    # pixel edit. On 32 GB a Q8_0 DiT takes up to two of them, and a Q4_K_M
-    # DiT four.
+    # memory than on the 9B. On 16 GB a Q4_K_M DiT makes a 1024 pixel image
+    # from the prompt as the 9B does, and an edit at 640 pixels from one
+    # reference of that size, or at 512 pixels from two. On 24 GB a Q4_K_M
+    # DiT makes a 1024 pixel image from up to two 1024 pixel references
+    # with the encoder released, and a Q8_0 DiT makes no 1024 pixel edit.
+    # On 32 GB a Q8_0 DiT takes up to two of them, and a Q4_K_M DiT four.
     "flux-2-klein-9b-kv": {16: ("Q4_K_M", "Q8_0"), 24: ("Q4_K_M", "Q8_0"),
                            32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     # A MOSS-Image request at 1024 pixels with guidance on the longest
@@ -409,14 +407,6 @@ DEFAULT_QUANTS = {
     "flux-3-klein-base": {16: ("Q4_K_M", "Q8_0"), 24: ("Q8_0", "Q8_0"),
                           32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
 }
-
-
-# The memory classes where no DiT a recipe pulls makes an image. A pull
-# there refuses unless the quant is given, and names the least class that
-# makes one.
-NO_IMAGE = {"flux-2-klein-9b": frozenset({16}),
-            "flux-2-klein-base-9b": frozenset({16}),
-            "flux-2-klein-9b-kv": frozenset({16})}
 
 
 # The output matrix of each encoder file a recipe pulls that has one, from
@@ -504,21 +494,15 @@ def memory_class(ram_bytes: int | None) -> int:
     return fit[-1] if fit else MEMORY_CLASSES[0]
 
 
+def makes_no_image(ram_bytes: int | None) -> bool:
+    """Whether a Mac with ``ram_bytes`` of RAM is under the smallest memory
+    class, where no image model makes an image. Unknown RAM is not."""
+    return bool(ram_bytes) and ram_bytes / (1 << 30) + 0.5 < MEMORY_CLASSES[0]
+
+
 def default_quants(r: Recipe, ram_bytes: int | None) -> tuple[str, str]:
     """(DiT quant, encoder quant) the recipe pulls on this Mac."""
     return DEFAULT_QUANTS[r.name][memory_class(ram_bytes)]
-
-
-def makes_image(r: Recipe, cls: int) -> bool:
-    """Whether a DiT the recipe pulls makes an image in memory class
-    ``cls``."""
-    return cls not in NO_IMAGE.get(r.name, ())
-
-
-def least_class(r: Recipe) -> int:
-    """The smallest memory class in which a DiT the recipe pulls makes an
-    image."""
-    return min(c for c in MEMORY_CLASSES if makes_image(r, c))
 
 
 def default_size(r: Recipe, ram_bytes: int | None,

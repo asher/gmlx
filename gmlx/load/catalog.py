@@ -858,17 +858,15 @@ _IMAGE_LICENSES = {"apache-2.0": "Apache 2.0", "qwen-research": "Qwen Research L
 
 
 def image_entries(box: Box) -> tuple:
-    """``(runs, too_big)``: the image models that make an image on this
-    Mac, in catalog order, and those that need a larger one. A Mac under
-    the smallest image memory class runs none."""
+    """``(runs, too_big)``: the image models in catalog order, in ``runs``
+    on a Mac of the smallest image memory class or more, where each makes
+    an image, and in ``too_big`` on a smaller one, which runs none."""
     from gmlx.image import catalog as ic
 
     ram = box.ram
-    cls = ic.memory_class(ram)
-    small = ram / GiB + 0.5 < ic.MEMORY_CLASSES[0]
+    small = ic.makes_no_image(ram)
     runs, too_big = [], []
     for r in ic.RECIPES.values():
-        ok = not small and ic.makes_image(r, cls)
         quants = tuple(sorted(((q, ic.download_bytes(r, ram, q)) for q in r.dit_quants),
                               key=lambda qb: qb[1]))
         entry = ImageEntry(
@@ -876,8 +874,8 @@ def image_entries(box: Box) -> tuple:
             license=_IMAGE_LICENSES.get(r.license, r.license), license_detail=r.license_note,
             size=ic.image_size(r, ram), default_quant=ic.default_quants(r, ram)[0],
             quants=quants,
-            needs_class=None if ok else (ic.MEMORY_CLASSES[0] if small else ic.least_class(r)))
-        (runs if ok else too_big).append(entry)
+            needs_class=ic.MEMORY_CLASSES[0] if small else None)
+        (too_big if small else runs).append(entry)
     return runs, too_big
 
 

@@ -84,3 +84,24 @@ def test_the_nfc_form_holds_more_rows_than_the_bytes_given(family):
     n = len(te.render(spec, prompt).encode("utf-8"))
     given = n - spec.drop + te.pad_rows(spec, n)
     assert given < _rows(spec, tok, prompt) <= te.rows_at_most(spec, prompt)
+
+
+@pytest.mark.parametrize("kind", PROMPTS)
+def test_the_bytes_of_an_edit_prompt_bound_its_text_rows(family, kind,
+                                                         request):
+    """A Qwen-Image 2.1 edit reads the prompt in its template for
+    references. Its bytes bound the text rows: the token ids less the pad
+    of each reference, whose image rows the plan prices apart."""
+    from gmlx.commands.image_preflight import prompt_rows
+    from gmlx.image.registry import get_family
+
+    name = request.node.callspec.params["family"]
+    fam = get_family(name)
+    if fam.edit is None or fam.edit.text_only:
+        pytest.skip(f"{name} reads the prompt of an edit alone")
+    spec, tok = family
+    for count in (1, 4):
+        ids = tok.encode(fam.edit.render(PROMPTS[kind], count),
+                         add_special_tokens=False)
+        rows = len(ids) - count - spec.drop
+        assert prompt_rows(fam, PROMPTS[kind], count) >= rows

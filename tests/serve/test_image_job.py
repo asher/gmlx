@@ -72,6 +72,36 @@ def test_a_set_stop_event_ends_the_sampler_between_steps(stubs):
     assert e.value.timed_out is False
 
 
+@pytest.mark.parametrize("fields, revised, texts", [
+    ({"prompt": "a cat", "negative_prompt": "blurry"}, None, ["a cat"]),
+    ({"prompt": "a cat", "negative_prompt": "blurry", "guidance": 4.0},
+     None, ["a cat", "blurry"]),
+    ({"prompt": "a cat", "guidance": 4.0}, "a cat on a mat",
+     ["a cat on a mat", ""]),
+], ids=["unguided", "guided", "upsampled"])
+def test_the_job_makes_room_for_the_texts_it_encodes(monkeypatch, fields,
+                                                     revised, texts):
+    """Before its encode a job makes room for the texts the encoder reads:
+    the prompt, or the upsampler's rewrite, and under guidance the
+    negative prompt."""
+    seen = []
+
+    class Room(Exception):
+        pass
+
+    def make_room(served, cfg, size, refs, init, budget, prompts=()):
+        seen.append(list(prompts))
+        raise Room
+
+    monkeypatch.setattr(svc, "_make_room", make_room)
+    req = svc.parse_request("generations", fields)
+    req.revised_prompt = revised
+    with pytest.raises(Room):
+        svc.run_job(_served(), req, size=(64, 64), budget=None,
+                    stop=threading.Event())
+    assert seen == [texts]
+
+
 def test_each_image_of_a_request_takes_the_next_seed(stubs):
     req = svc.parse_request("generations", {"prompt": "x", "n": 2,
                                             "seed": 5})

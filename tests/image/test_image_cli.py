@@ -1007,8 +1007,8 @@ def test_the_preflight_prices_the_rows_a_prompt_can_give(monkeypatch):
         assert plan.terms[k] == want.terms[k] < most.terms[k], k
     over = pf.check("d", "e", "v", prompts=[short, long], **kw)
     assert over.terms["step_peak"] == most.terms["step_peak"]
-    # An edit whose encoder reads the images passes no prompts, and is
-    # priced at the most rows beside the tokens of its reference.
+    # A plan without prompts is priced at the most rows, beside the tokens
+    # of its reference.
     row = memfit.PEAKS["flux3_klein"]
     edit = pf.check("d", "e", "v", refs=[(1024, 1024)], **kw)
     assert edit.terms["step_peak"] == row.step.bytes(
@@ -1725,11 +1725,10 @@ def test_reference_refusals_and_usage_errors(edit, env, tmp_path, capsys,
 
 
 @pytest.mark.parametrize("rules", ["qwen_image21", "flux3_klein"])
-def test_an_edit_prices_its_prompts_when_the_encoder_reads_them_alone(
-        env, monkeypatch, tmp_path, rules):
-    """The fit check before the load is given the prompts of an edit whose
-    encoder reads them alone, and none for an encoder that reads the
-    reference images with them, which is priced at the most rows."""
+def test_an_edit_prices_its_prompts(env, monkeypatch, tmp_path, rules):
+    """The fit check before the load is given the prompts of an edit and
+    its references, whether the encoder reads the prompt alone or with
+    the reference images, as serve prices an edit."""
     parts = get_family(rules).edit
     e = _edit_env(env, monkeypatch, tmp_path, parts)
     assert umbrella_main(e.base + [
@@ -1737,8 +1736,8 @@ def test_an_edit_prices_its_prompts_when_the_encoder_reads_them_alone(
         "--guidance", "3", "--negative-prompt", "blurry", "--ref",
         e.refs[0], "--encoder-mmproj", e.mmproj,
         "--output", str(tmp_path / "o.png")]) == 0
-    assert e.checks[0]["prompts"] == (
-        ["swap them", "blurry"] if parts.text_only else ())
+    assert e.checks[0]["prompts"] == ["swap them", "blurry"]
+    assert len(e.checks[0]["refs"]) == 1
 
 
 def test_one_flux3_reference_sizes_the_request_and_crops_its_image(

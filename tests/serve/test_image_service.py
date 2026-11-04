@@ -1220,6 +1220,24 @@ def test_a_flux3_reference_the_rules_refuse_is_named():
     assert e.value.param == "image" and e.value.status == 400
 
 
+@pytest.mark.parametrize("where", ["image", "image 2"])
+def test_a_qwen_reference_the_rules_refuse_is_named(where):
+    """A 1000x2 strip is too long for the area of a Qwen-Image 2.1 edit,
+    as its only reference or the second of two: a 400 names it."""
+    import numpy as np
+
+    served = _edit_served("qwen_image21")
+    req = _edit_req(1)
+    strip = np.zeros((2, 1000, 3), np.uint8)
+    req.images = ([strip] if where == "image"
+                  else [np.zeros((512, 512, 3), np.uint8), strip])
+    with pytest.raises(image_service.ImageRequestError,
+                       match=f"^{where}: a reference image of 1000x2 pixels "
+                             "is too long for its area") as e:
+        image_service.check_family(req, served)
+    assert e.value.param == "image" and e.value.status == 400
+
+
 def test_the_fit_check_prices_the_flux3_references_as_prepared(monkeypatch):
     """The memory plan reads each reference at its prepared size, and a
     staged entry loads its encoder without a tower for them."""
@@ -1320,6 +1338,13 @@ def tiny_served(monkeypatch, tmp_path):
     image_service._release([served])
 
 
+def _entry_steps(pipe) -> bool:
+    """The entry's own table still steps, so its LoRA pairs are held."""
+    from test_image_lora_apply import _step
+
+    return bool(np.isfinite(_step(pipe, pipe.default_table)).all())
+
+
 def _held(pipe, keys) -> bool:
     return all(pipe.adapters.peek(k) is not None for k in keys)
 
@@ -1333,6 +1358,7 @@ def test_request_adapters_over_the_cache_are_refused_by_name(tiny_served):
             served, [("a.safetensors", 1.0), ("b.safetensors", 1.0)], [root])
     assert e.value.status == 400 and e.value.param == "adapters"
     assert _held(served.pipe, own)
+    assert _entry_steps(served.pipe)
 
 
 @pytest.mark.parametrize("room,size,need,bound", [
@@ -1365,11 +1391,12 @@ def test_a_request_may_reweight_the_entry_adapter_beside_its_own(
     assert [s["strength"] for s in shown] == [0.5, 1.0]
     assert _held(served.pipe, image_service._pair_keys(served.adapters))
     assert np.isfinite(_step(served.pipe, tid)).all()
+    assert _entry_steps(served.pipe)
 
 
 def test_requests_in_turn_never_shed_the_entry_adapter(tiny_served):
-    """Each request's LoRA takes the room of the one before, and every
-    table builds."""
+    """Each request's LoRA takes the room of the one before, every table
+    builds, and the entry's own table still steps after the last."""
     from test_image_lora_apply import _step
 
     served, root = tiny_served
@@ -1380,7 +1407,7 @@ def test_requests_in_turn_never_shed_the_entry_adapter(tiny_served):
             served, [(f"{name}.safetensors", 1.0)], [root])
         assert _held(pipe, own), name
         assert np.isfinite(_step(pipe, tid)).all()
-    assert np.isfinite(_step(pipe, pipe.default_table)).all()
+    assert _entry_steps(pipe)
 
 
 @pytest.mark.parametrize("scheduler", ["karras", "simple", "beta"])
@@ -1441,3 +1468,364 @@ def test_each_server_port_keeps_its_own_url_folder(monkeypatch, tmp_path):
     b = image_service.default_store_root(8081)
     assert a != b and os.path.dirname(a) == os.path.dirname(b)
     assert a == str(tmp_path / "gmlx" / "images" / "8080")
+
+
+# The bytes of the Qwen-Image 2.1 Q8_0 DiT, the Qwen3-VL-8B Q4_K_M
+# encoder, its BF16 mmproj and the F32 VAE.
+_QWEN_BYTES = {"dit": 7_640_860_384, "encoder": 5_027_785_568,
+               "mmproj": 1_162_569_280, "vae": 1_350_985_376}
+_LONG = "a highly detailed scene " * 2500       # 60 KB
+_RICH = "a highly detailed scene " * 170        # 4 KB
+
+
+def _qwen_served(defaults=None):
+    """A Qwen-Image 2.1 entry with its encoder and tower resident beside
+    the DiT, sampling unguided as the base variant does."""
+    from gmlx.image.registry import get_family
+
+    nb = SimpleNamespace(bytes=0)
+    pipe = SimpleNamespace(
+        encoder=SimpleNamespace(released=False, owned=True),
+        dit=SimpleNamespace(act_dtype="bfloat16"), weights=dict(_QWEN_BYTES),
+        adapters=nb, tables=nb, family=get_family("qwen_image21"),
+        variant="base", vae=None, conditionings=nb, modulations=nb,
+        captions=nb, size_multiple=16)
+    return SimpleNamespace(
+        pipe=pipe, plan=SimpleNamespace(keep_encoder=True, cfg=1.0,
+                                        staged=False),
+        spec=SimpleNamespace(id="qwen-image", defaults=defaults or {},
+                             encoder_model=None, encoder_mmproj="/mm.gguf"))
+
+
+def _need(served, size: int, prompt: str | None = None,
+          cfg: float = 1.0, refs=(), **terms) -> int:
+    """The least budget, to 1 MiB, at which the plan of a square request
+    of ``size`` with the reference images of ``refs``, (height, width) in
+    pixels, fits with the rows of ``prompt``, or with the family's default
+    rows for None. ``terms`` are further plan arguments."""
+    from gmlx.commands.image_preflight import prompt_rows
+    from gmlx.image import memfit
+
+    def fits(budget: int) -> bool:
+        a = image_service._fit_args(served.pipe, served, budget, cfg,
+                                    tower=bool(refs))
+        if prompt is not None:
+            rows = prompt_rows(served.pipe.family, prompt, len(refs))
+            a.update(caption_tokens=rows, text_tokens=rows)
+        try:
+            return memfit.plan_memory(height=size, width=size, _hint=False,
+                                      ref_sizes=list(refs), **a,
+                                      **terms).fits
+        except memfit.ImageMemoryError:
+            return False
+
+    lo, hi = 0, 1 << 40
+    while hi - lo > 1 << 20:
+        mid = (lo + hi) // 2
+        lo, hi = (lo, mid) if fits(mid) else (mid, hi)
+    return hi
+
+
+def _refused(req, served, size: int, budget: int):
+    with pytest.raises(image_service.ImageRequestError) as e:
+        image_service.fit_check(req, served, (size, size), budget)
+    return e.value
+
+
+@pytest.mark.parametrize("fits_at_default", [2048, 1024],
+                         ids=["the size", "a smaller size"])
+def test_a_prompt_that_fits_at_no_size_is_refused_as_the_prompt(
+        fits_at_default):
+    """A 60 KB Qwen-Image 2.1 prompt fits at no size, so it must get
+    shorter whatever the size. The 400 names it where its 2048x2048
+    request fits at the family's default rows, which would admit it
+    unpriced, and where only a smaller size of the shape fits there."""
+    from gmlx.commands.image_preflight import prompt_rows
+
+    served = _qwen_served()
+    budget = _need(served, fits_at_default)
+    assert _need(served, 16, _LONG) > budget
+    assert (_need(served, 2048) > budget) == (fits_at_default < 2048)
+    req = image_service.parse_request("generations", {
+        "prompt": _LONG, "size": "2048x2048"})
+    e = _refused(req, served, 2048, budget)
+    assert e.param == "prompt"
+    rows = prompt_rows(served.pipe.family, req.prompt)
+    assert rows > 60_000
+    assert str(e).startswith(f"the prompt is too long for Qwen-Image 2.1: "
+                             f"up to {rows} text rows do not fit")
+
+
+def test_a_model_that_fits_at_no_size_is_refused_as_the_size():
+    """Where no size of the shape fits even at the family's default rows,
+    a shorter prompt would not make the request fit, so the 400 names the
+    size, though the 60 KB prompt fits at no size either."""
+    served = _qwen_served()
+    budget = _need(served, 16) - (1 << 30)
+    req = image_service.parse_request("generations", {
+        "prompt": _LONG, "size": "2048x2048"})
+    e = _refused(req, served, 2048, budget)
+    assert e.param == "size"
+    assert str(e).endswith("and no smaller size of its shape does")
+
+
+def test_a_prompt_that_fits_at_a_smaller_size_is_refused_as_the_size():
+    """A 4 KB Qwen-Image 2.1 prompt fits at 1024x1024 but not at 2048x2048
+    with its own rows, where 2048x2048 fits at the family's default rows.
+    The size is the cause, and the 400 names the largest that fits."""
+    served = _qwen_served()
+    budget = _need(served, 2048)
+    assert _need(served, 2048, _RICH) > budget >= _need(served, 1024, _RICH)
+    req = image_service.parse_request("generations", {
+        "prompt": _RICH, "size": "2048x2048"})
+    e = _refused(req, served, 2048, budget)
+    assert e.param == "size", str(e)
+    w = int(str(e).rsplit("fits is ", 1)[1].split("x")[0])
+    assert 1024 <= w < 2048
+    assert budget >= _need(served, w, _RICH)
+
+
+def test_an_unguided_request_does_not_price_its_negative_prompt():
+    """Guidance off encodes no negative prompt, so a long one is not
+    priced."""
+    served = _qwen_served()
+    req = image_service.parse_request("generations", {
+        "prompt": "a cat", "negative_prompt": _LONG, "guidance": 1.0})
+    image_service.fit_check(req, served, (1024, 1024), _need(served, 1024))
+
+
+@pytest.mark.parametrize("given", ["request", "served default"])
+def test_a_guided_request_is_refused_for_a_long_negative_prompt(given):
+    """A guided request encodes its negative prompt, or the entry's
+    default one, and the 400 names it."""
+    served = _qwen_served(
+        {"negative_prompt": _LONG} if given == "served default" else None)
+    fields = {"prompt": "a cat", "guidance": 4.0}
+    if given == "request":
+        fields["negative_prompt"] = _LONG
+    req = image_service.parse_request("generations", fields)
+    e = _refused(req, served, 1024, _need(served, 1024, cfg=4.0))
+    assert e.param == "negative_prompt"
+    assert str(e).startswith(
+        "the negative prompt is too long" if given == "request"
+        else "the default negative prompt of 'qwen-image' is too long")
+
+
+def test_the_upsampled_prompt_is_priced():
+    """The encoder reads the upsampler's rewrite, so a 4 KB rewrite of a
+    short prompt is priced at its own rows."""
+    served = _qwen_served()
+    req = image_service.parse_request("generations", {
+        "prompt": "a cat", "size": "2048x2048"})
+    budget = _need(served, 2048, "a cat")
+    image_service.fit_check(req, served, (2048, 2048), budget)
+    req.revised_prompt = _RICH
+    assert _refused(req, served, 2048, budget).param == "size"
+
+
+def test_an_upsampled_prompt_that_fits_at_no_size_is_named():
+    """Where the upsampler's 60 KB rewrite of a short prompt fits at no
+    size, the 400 names the upsampled prompt and how to turn the rewrite
+    off."""
+    served = _qwen_served()
+    req = image_service.parse_request("generations", {
+        "prompt": "a cat", "size": "2048x2048"})
+    req.revised_prompt = _LONG
+    e = _refused(req, served, 2048, _need(served, 2048))
+    assert e.param == "prompt"
+    assert str(e).startswith("the upsampled prompt is too long for "
+                             "Qwen-Image 2.1: up to ")
+    assert str(e).endswith("; shorten the prompt or turn prompt_upsampling "
+                           "off")
+
+
+def test_a_guided_request_prices_the_prefix_of_each_text_at_its_rows():
+    """A guided Qwen-Image 2.1 request caches a prefix per text. A 4 KB
+    prompt beside a short negative prompt is priced at one long prefix and
+    one short one, and fits where two long ones would not."""
+    from gmlx.commands.image_preflight import prompt_rows
+
+    served = _qwen_served()
+    req = image_service.parse_request("generations", {
+        "prompt": _RICH, "negative_prompt": "blurry", "guidance": 4.0})
+    fam = served.pipe.family
+    rows = [prompt_rows(fam, req.prompt), prompt_rows(fam, "blurry")]
+    budget = _need(served, 1024, req.prompt, cfg=4.0, prefix_rows=rows)
+    assert _need(served, 1024, req.prompt, cfg=4.0) > budget
+    image_service.fit_check(req, served, (1024, 1024), budget)
+
+
+def test_an_edit_that_fits_at_a_smaller_size_gets_the_plan_message():
+    """A Qwen-Image 2.1 edit that does not fit at 2048x2048 where a smaller
+    size of the shape fits at its prompt's rows gets the plan's message,
+    which names the references that fit, and not the prompt."""
+    served = _qwen_served()
+    req = _edit_req(1, (512, 512), prompt="swap the hats")
+    image_service.check_family(req, served)
+    refs = [(r.height, r.width) for r in req.refs]
+    budget = _need(served, 1024, req.prompt, refs=refs)
+    assert _need(served, 2048, req.prompt, refs=refs) > budget
+    e = _refused(req, served, 2048, budget)
+    assert e.param == "image", str(e)
+    assert str(e).startswith("image request does not fit")
+
+
+def _held(monkeypatch, served) -> list:
+    """``served`` with 12 GiB of other conditionings' prefix states held;
+    the bytes each shed takes go in the list returned."""
+    from gmlx.image import api
+
+    served.pipe.captions = SimpleNamespace(
+        bytes=12 << 30, nbytes=lambda key: 0, keys=lambda keep: [])
+    shed: list = []
+    monkeypatch.setattr(api, "_cond_key", lambda pipe, p, refs, enc: p)
+    monkeypatch.setattr(api, "shed_states", lambda pipe, n, own, live: (
+        shed.append(n) or n))
+    return shed
+
+
+def test_the_room_a_prompt_makes_is_what_its_admission_priced(
+        monkeypatch):
+    """A Qwen-Image 2.1 entry holds 12 GiB of other conditionings' prefix
+    states. A 4 KB prompt is admitted where its plan fits with some of
+    them shed, and the shed before its encode takes what that plan needs,
+    more than the plan at the family's default rows sheds."""
+    from gmlx.commands.image_preflight import prompt_rows
+    from gmlx.image import memfit
+
+    served = _qwen_served()
+    shed = _held(monkeypatch, served)
+    req = image_service.parse_request("generations", {
+        "prompt": _RICH, "size": "1024x1024"})
+    rows = prompt_rows(served.pipe.family, req.prompt)
+    budget = _need(served, 1024, req.prompt)
+
+    def sheds(**terms) -> int:
+        a = image_service._fit_args(served.pipe, served, budget, 1.0)
+        return memfit.plan_memory(height=1024, width=1024, _hint=False,
+                                  **a, **terms).shed_bytes
+
+    need = sheds(caption_tokens=rows, text_tokens=rows)
+    assert need > sheds()
+    image_service.fit_check(req, served, (1024, 1024), budget)
+    image_service._make_room(served, 1.0, (1024, 1024), [], False, budget,
+                             [req.prompt])
+    assert shed == [need]
+
+
+def test_the_room_an_edit_makes_counts_its_references_and_the_floor(
+        monkeypatch):
+    """Before the encode of a Qwen-Image 2.1 edit of four images, the shed
+    takes what the plan needs at the size the edit runs each reference and
+    at the family's default text rows, which a short edit prompt is
+    priced at."""
+    from gmlx.image import memfit
+
+    served = _qwen_served()
+    shed = _held(monkeypatch, served)
+    req = _edit_req(4, (512, 512), prompt="swap the hats")
+    image_service.check_family(req, served)
+    sizes = [(r.height, r.width) for r in req.refs]
+    budget = _need(served, 1024, req.prompt, refs=sizes)
+    a = image_service._fit_args(served.pipe, served, budget, 1.0, tower=True)
+    need = memfit.plan_memory(height=1024, width=1024, ref_sizes=sizes,
+                              caption_tokens=512, text_tokens=512,
+                              _hint=False, **a).shed_bytes
+    assert need > 0
+    image_service._make_room(served, 1.0, (1024, 1024), req.refs, False,
+                             budget, [req.prompt])
+    assert shed == [need]
+
+
+def test_small_references_are_priced_at_the_size_the_edit_runs_them():
+    """Qwen-Image 2.1 runs each reference at about 1024x1024 pixels. A
+    guided edit of four 512x512 images is refused on a budget their raw
+    size would fit, and admitted on one their size in the edit fits."""
+    served = _qwen_served()
+    req = _edit_req(4, (512, 512), prompt="swap the hats", guidance=4.0)
+    image_service.check_family(req, served)
+    assert [(r.height, r.width) for r in req.refs] == [(1024, 1024)] * 4
+    raw = _need(served, 1024, req.prompt, cfg=4.0, refs=[(512, 512)] * 4)
+    run = _need(served, 1024, req.prompt, cfg=4.0, refs=[(1024, 1024)] * 4)
+    assert run > raw
+    assert _refused(req, served, 1024, raw).param == "image"
+    image_service.fit_check(req, served, (1024, 1024), run)
+
+
+def test_a_large_photo_is_admitted_on_a_budget_its_edit_size_fits():
+    """A 4096x4096 photo runs at 1024x1024 in a Qwen-Image 2.1 edit, so
+    the edit is admitted on a budget that fits that size, far under what
+    the photo's own size would need."""
+    served = _qwen_served()
+    req = _edit_req(1, (4096, 4096), prompt="make it red")
+    image_service.check_family(req, served)
+    assert [(r.height, r.width) for r in req.refs] == [(1024, 1024)]
+    budget = _need(served, 1024, req.prompt, refs=[(1024, 1024)])
+    assert _need(served, 1024, req.prompt, refs=[(4096, 4096)]) > budget
+    image_service.fit_check(req, served, (1024, 1024), budget)
+
+
+@pytest.mark.parametrize("family", ["qwen_image21", "z_image"])
+def test_a_variation_without_a_prompt_reads_the_variation_prompt_to_edit(
+        family):
+    """A variation without a prompt runs as an edit on a family that
+    edits, whose encoder reads the variation prompt, and as an image to
+    image run on another family, whose encoder reads the empty prompt."""
+    from gmlx.image.registry import get_family
+
+    fam = get_family(family)
+    served = SimpleNamespace(pipe=SimpleNamespace(family=fam),
+                             plan=SimpleNamespace(cfg=1.0))
+    req = image_service.parse_request("variations", {})
+    want = "" if fam.edit is None else image_service.VARIATION_PROMPT
+    assert image_service._texts(req, served) == (want, want, None)
+
+
+@pytest.mark.parametrize("prompt", ["swap the hats", _LONG],
+                         ids=["short", "long"])
+def test_an_edit_is_priced_as_the_image_command_prices_it(monkeypatch,
+                                                           tmp_path, prompt):
+    """Serve and the image command's preflight price a Qwen-Image 2.1 edit
+    of four 512x512 images alike: each reference at the size the family
+    runs it, and the text rows, in the caption and the prefix, of the
+    prompt in the template for references with the slot text of each, at
+    least the family's default rows."""
+    import numpy as np
+    from PIL import Image
+
+    from gmlx.commands import image as image_cmd
+    from gmlx.commands import image_preflight as pf
+    from gmlx.image import api, memfit
+
+    seen: list = []
+    monkeypatch.setattr(memfit, "plan_memory", lambda *a, **k: (
+        seen.append(k) or SimpleNamespace(fits=True)))
+    served = _qwen_served()
+    req = _edit_req(4, (512, 512), prompt=prompt)
+    image_service.check_family(req, served)
+    image_service.fit_check(req, served, (1024, 1024), 1 << 40)
+    serve = seen[-1]
+    # The image command reads its --ref files and prepares them, then
+    # prices what it prepared.
+    paths = []
+    for i in range(4):
+        paths.append(str(tmp_path / f"ref{i}.png"))
+        Image.fromarray(np.zeros((512, 512, 3), np.uint8)).save(paths[-1])
+    refs = image_cmd._references(SimpleNamespace(
+        ref=paths, encoder_mmproj="/mm.gguf", ref_size=None),
+        served.pipe.family)
+    monkeypatch.setattr(pf, "identify_dit", lambda p, **k: SimpleNamespace(
+        family=served.pipe.family, variant="base"))
+    monkeypatch.setattr(api, "_header_bytes", lambda path, kind: 0)
+    monkeypatch.setattr(pf, "dit_transient", lambda dit, act: 0)
+    monkeypatch.setattr(pf, "load_transient", lambda e, v, m: 0)
+    pf.check("d", "e", "v", height=1024, width=1024, cfg=1.0,
+             refs=[(r.height, r.width) for r in refs], prompts=[req.prompt])
+    cli = seen[-1]
+    assert serve["ref_sizes"] == cli["ref_sizes"] == [(1024, 1024)] * 4
+    rows = serve["caption_tokens"]
+    assert rows == serve["text_tokens"] == cli["caption_tokens"] == (
+        cli["text_tokens"])
+    assert rows == 512 if prompt == "swap the hats" else rows > len(prompt)
+    assert serve["prefix_rows"] == cli["prefix_rows"] == [
+        rows + 4 * (1024 // 16) ** 2]

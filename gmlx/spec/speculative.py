@@ -31,6 +31,7 @@ from collections.abc import Callable, Iterator
 
 import mlx.core as mx
 import gmlx.lora_rows as lora_rows
+from gmlx import mlx_guards
 from gmlx.cache.kv_append import release as _release_kv
 from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_bool, env_float, env_int, env_value
@@ -2699,13 +2700,15 @@ def _log_spec_once(msg: str) -> None:
 
 
 def _pad_shared_kv_seq(arr, seq_len: int):
-    """Tail-pad a (B, H, S, D) shared-KV tensor to seq_len with zeros."""
+    """Tail-pad a (B, H, S, D) shared-KV tensor to seq_len with zeros.
+    Past 2^31 elements the stock concatenate misplaces rows on the GPU, so
+    it goes through the guard."""
     if arr.shape[2] == seq_len:
         return arr
     pad = mx.zeros(
         tuple(arr.shape[:2]) + (seq_len - arr.shape[2],) + tuple(arr.shape[3:]),
         dtype=arr.dtype)
-    return mx.concatenate([arr, pad], axis=2)
+    return mlx_guards.concatenate([arr, pad], axis=2)
 
 
 def _join_deltas(old, n_old: int, new, n_new: int):
