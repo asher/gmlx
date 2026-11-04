@@ -2561,6 +2561,77 @@ def test_an_images_api_request_of_two_files_takes_two_stepped_tables_room(
     assert host.held == 0
 
 
+def _built(p, client_tid) -> bool:
+    """Whether the pipeline of "own" holds a built table of a table id
+    a client or the images API was given."""
+    from gmlx.image.lora import install
+
+    core = steps.STATE.tables_of("own", p).get(client_tid, client_tid)
+    return any(k[0] == core
+               for k in p.tables.keys(lambda k: k[0] != install.KERNEL))
+
+
+def test_an_images_api_request_keeps_the_built_table_of_its_first_file(
+        host, tmp_path):
+    """An images API request of file A runs, a ComfyUI table steps after
+    it, and a request of A and B then needs B's room on a full pair cache.
+    The first request's table is built over the entry's pairs and A's,
+    which the second request holds, so dropping it frees nothing: the
+    ComfyUI table goes and the first request's table stays."""
+    import os
+
+    from gmlx.serve import image_service
+
+    names = _request_files(tmp_path, (5, 6))
+    p, ad, c, _body = _header_alpha_own(host, tmp_path)
+    held = p.adapters.bytes
+    unit = max(max(os.path.getsize(tmp_path / n) for n in names), held)
+    p.adapters.max_bytes = held + 2 * unit + 64
+    host.served["own"].plan.cache_share = 1.0
+    rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
+    pairs = [(m, b, p.adapters.peek(k)) for m, b, k in ad.dit]
+    first, _ = _on_worker(image_service._adapter_table, host.served["own"],
+                          [(names[0], 1.0)], [str(tmp_path)])
+    _direct(p, _features(), table=first)
+    t = c.define_table("own", _scaled(c, pairs, 2.0))
+    c.step("own", None, x, [0.5], rows, patch_table=t)
+    both, _ = _on_worker(image_service._adapter_table, host.served["own"],
+                         [(n, 1.0) for n in names], [str(tmp_path)])
+    _direct(p, _features(), table=both)
+    assert _built(p, first) and not _built(p, t)
+    assert host.held == 0
+
+
+def test_a_stack_switch_keeps_the_built_table_of_its_first_lora(
+        host, tmp_path):
+    """ComfyUI steps LoRA A on the first half of the modules, then LoRA C
+    on all of them, and switches to the stack of A and B, B on the second
+    half, which needs B's room on a full pair cache. A's table is built
+    over the entry's pairs and A's, which the define puts before B's, so
+    dropping it frees nothing: C's table goes and A's stays."""
+    p, ad, c, _body = _header_alpha_own(host, tmp_path)
+    pairs = [(m, b, p.adapters.peek(k)) for m, b, k in ad.dit]
+    half = len(pairs) // 2
+
+    def nbytes(ps) -> int:
+        return sum(int(q.up.nbytes) + int(q.down.nbytes) for _m, _b, q in ps)
+
+    p.adapters.max_bytes = p.adapters.bytes + nbytes(pairs[:half]) \
+        + nbytes(pairs) + 64
+    host.served["own"].plan.cache_share = 1.0
+    rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
+    ta = c.define_table("own", _scaled(c, pairs[:half], 2.0))
+    c.step("own", None, x, [0.5], rows, patch_table=ta)
+    tc = c.define_table("own", _scaled(c, pairs, 3.0))
+    c.step("own", None, x, [0.5], rows, patch_table=tc)
+    body = _scaled(c, pairs[:half], 2.0)
+    body["entries"] += _scaled(c, pairs[half:], 4.0)["entries"]
+    stack = c.define_table("own", body)
+    assert _built(p, ta) and not _built(p, tc)
+    c.step("own", None, x, [0.5], rows, patch_table=stack)
+    assert host.held == 0
+
+
 def test_an_images_api_request_between_a_define_and_its_step_keeps_it(
         host, tmp_path):
     """ComfyUI defines a table beside a stepped one on a full pair cache,
