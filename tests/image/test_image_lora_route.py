@@ -7,6 +7,8 @@ tensor ops and a stand-in on the stock ops elsewhere. Every call the
 route does not take is held bit for bit to the path with no route."""
 from __future__ import annotations
 
+import math
+
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
@@ -488,6 +490,23 @@ def test_a_forward_of_the_base_model_is_no_step_of_the_last_table(op):
     assert pipe.adapters.peek(old[0]) is None
 
 
+def test_a_run_of_steps_makes_its_last_step_the_tables_use(op):
+    """A table steps, a patch is kept, and the table steps again from the
+    patch state, which reads no cache at the step's start. The end of that
+    step is the table's use, so the room for another patch sheds the patch
+    kept between the steps and keeps the table."""
+    rng = np.random.default_rng(25)
+    pipe = _pipe()
+    t = [_w1_patch(pipe, rng)]
+    _w1_step(pipe, t)
+    between = _w1_patch(pipe, rng)
+    _w1_step(pipe, t)
+    pipe.adapters.max_bytes = pipe.adapters.bytes
+    _w1_patch(pipe, rng)
+    assert pipe.adapters.peek(between) is None
+    assert pipe.adapters.peek(t[0]) is not None and pipe.lora._cur
+
+
 @pytest.mark.parametrize("strength,alpha", [(1.0, None), (1.0, 3.0),
                                             (0.7, None), (-0.5, 2.0)])
 def test_one_table_serves_the_op_and_a_call_of_few_rows(op, strength, alpha):
@@ -937,8 +956,11 @@ def _reach(obj, out: dict) -> None:
 def _check_caches(pipe) -> None:
     """The distinct arrays the two caches and the patch state keep alive
     add up to the bytes the caches count; a cache over its bound holds
-    only what is pinned; every held table's pairs are in the pair cache."""
+    only what is pinned; every held table's pairs are in the pair cache;
+    each cache's clock holds a use for each of its entries and no other."""
     ad, tb = pipe.adapters, pipe.tables
+    for cache in (ad, tb):
+        assert set(cache._used) == set(cache.keys(lambda k: True))
     live: dict = {}
     for k in ad.keys(lambda k: True):
         _reach(ad.peek(k), live)
@@ -1153,13 +1175,89 @@ class _Sequence:
            ("step", 6), ("shrink", 2), ("drop_dit", 1), ("release", 1))
 
 
+# The pair cache's order of use, modelled apart from make_room: at each
+# turn the oldest of the unpinned pairs, by last use, and of the held
+# tables that can go, by last step, goes until the bytes fit. A pair stays
+# pinned while any held table names it.
+
+def _pair_room_inputs(pipe, hold) -> tuple:
+    """What the pair branch of make_room reads, without a use: each pair
+    with its bytes and last use, the keep set with ``hold``, and each held
+    table with its keys, last step and whether a forward runs it."""
+    ad, tb = pipe.adapters, pipe.tables
+    pairs = [(k, ad.nbytes(k), ad.used(k)) for k in ad.keys(lambda k: True)]
+    steps = {id(tb.peek(k)): tb.used(k)
+             for k in tb.keys(lambda k: k[0] != install.KERNEL)}
+    running = install._running(pipe)
+    tables = [(id(t), t.keys, steps.get(id(t), math.inf), id(t) in running)
+              for t in install._tables(pipe)]
+    return pairs, set(ad.kept) | set(hold), tables, ad.bytes, ad.max_bytes
+
+
+def _one_order(inputs, nbytes: int) -> tuple:
+    """The pairs shed, the tables dropped and whether ``nbytes`` fit, in
+    one order of use."""
+    pairs, base, tables, total, bound = inputs
+    if total + nbytes <= bound:
+        return set(), set(), True
+    base = set(base).union(*(keys for _i, keys, _s, run in tables if run))
+    if nbytes and total - sum(b for k, b, _u in pairs if k not in base) \
+            + nbytes > bound:
+        return set(), set(), False
+    left = {k: (b, u) for k, b, u in pairs}
+    live = {i: (keys, step) for i, keys, step, run in tables if not run}
+    shed, dropped = set(), set()
+    while total + nbytes > bound:
+        pinned = base.union(*(keys for keys, _s in live.values()))
+        turns = [(u, 0, k) for k, (_b, u) in left.items() if k not in pinned]
+        turns += [(step, 1, i) for i, (keys, step) in live.items()
+                  if not keys <= base]
+        if not turns:
+            break
+        _use, kind, x = min(turns, key=lambda t: t[:2])
+        if kind == 0:
+            total -= left.pop(x)[0]
+            shed.add(x)
+        else:
+            del live[x]
+            dropped.add(x)
+    return shed, dropped, total + nbytes <= bound
+
+
+class _OrderCheck:
+    """make_room with each call for the pair cache checked against
+    ``_one_order``."""
+
+    def __init__(self, monkeypatch):
+        self.make_room = install.make_room
+        self.turns = 0
+        monkeypatch.setattr(install, "make_room", self)
+
+    def __call__(self, pipe, cache, nbytes, hold=()):
+        if cache is not pipe.adapters:
+            return self.make_room(pipe, cache, nbytes, hold)
+        hold = list(hold)
+        inputs = _pair_room_inputs(pipe, hold)
+        want = _one_order(inputs, nbytes)
+        fit = self.make_room(pipe, cache, nbytes, hold)
+        got = ({k for k, _b, _u in inputs[0]} - set(cache.keys(lambda k: True)),
+               {i for i, *_ in inputs[2]}
+               - {id(t) for t in install._tables(pipe)}, fit)
+        self.turns += bool(got[0] or got[1])
+        assert got == want, (nbytes, sorted(k[:8] for k in got[0]),
+                             sorted(k[:8] for k in want[0]), len(got[1]),
+                             len(want[1]), fit, want[2])
+        return fit
+
+
 @pytest.mark.parametrize("seed", range(20))
-def test_a_random_sequence_counts_every_lora_array_once(op, seed):
+def test_a_random_sequence_counts_every_lora_array_once(op, monkeypatch, seed):
     """Every array the pair cache, the tables cache and the patch state
     keep alive is counted once, each cache is over its bound only by what
-    is pinned, and every held table's pairs are held, after each of a few
-    hundred operations of the step routes, the images API and the entry
-    in a seeded random order."""
+    is pinned, every held table's pairs are held, and the pair cache sheds
+    in one order of use, after each of a few hundred operations of the
+    step routes, the images API and the entry in a seeded random order."""
+    order = _OrderCheck(monkeypatch)
     seq = _Sequence(seed)
     names = [n for n, _w in _Sequence.OPS]
     weights = np.array([w for _n, w in _Sequence.OPS], np.float64)
@@ -1174,5 +1272,5 @@ def test_a_random_sequence_counts_every_lora_array_once(op, seed):
             _check_caches(seq.pipe)
         except AssertionError as e:
             raise AssertionError(f"after {done[-6:]}, op {len(done)}") from e
-    assert all(ran.values()) and seq.refused and seq.missing, (ran, seq.refused,
-                                                               seq.missing)
+    assert all(ran.values()) and seq.refused and seq.missing and order.turns, (
+        ran, seq.refused, seq.missing, order.turns)
