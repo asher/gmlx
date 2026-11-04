@@ -97,6 +97,12 @@ class ServeHost:
             return video_plan(spec)
         return entry_plan(spec)
 
+    def lora_pool(self):
+        """The residency pool that books LoRA bytes, or None."""
+        from ..residency import _installed_pool
+
+        return _installed_pool()
+
     def budget(self, hold):
         """The bytes a step may plan on, as an image request may."""
         from .images import _budget
@@ -272,6 +278,131 @@ async def _on_worker(fn, *args):
     return await asyncio.wrap_future(WORKER.submit(fn, *args))
 
 
+def _lora_pool():
+    fn = getattr(SETTINGS.host, "lora_pool", None)
+    return fn() if fn is not None else None
+
+
+def _hook_store(pool) -> None:
+    """Hook the upload store to the pool's books, once a store: each key
+    enters from the booking of the upload that puts it, and each key the
+    store lets go returns its bytes."""
+    from ..image_steps import STATE
+    from ..lora_books import STORE
+
+    store = STATE.adapters
+    if store.books is not pool.books:
+        store.on_put = pool.books.put_hook(STORE)
+        store.on_gone = pool.books.release_hook(STORE)
+        store.books = pool.books
+
+
+def _refused(e):
+    """The StepError of a LoraRefused."""
+    from ..image_steps import StepError
+
+    return StepError(e.status, e.message)
+
+
+async def _reserve(pool, owner, n: int, subject: str, own_held: int = 0):
+    """A reservation of ``n`` bytes for ``owner`` on a request thread.
+    ``own_held`` bytes the owner holds are the request's own keys, which
+    its claims leave."""
+    from ..lora_books import LoraRefused
+    from ..residency import reserve_on_thread
+
+    try:
+        return await reserve_on_thread(pool, owner, n, subject=subject,
+                                       own_held=own_held)
+    except LoraRefused as e:
+        raise _refused(e) from None
+
+
+def _held_bytes(pipe, keys) -> int:
+    """Bytes the pair cache holds of ``keys``, the entry's own left out:
+    a request's own keys, which its claims leave."""
+    return sum(pipe.adapters.nbytes(k) for k in keys
+               if k not in pipe.adapters.kept)
+
+
+async def _claims(pool, booking) -> None:
+    """Shed what an upload's booking claimed and release it with the
+    pool's check, before the body is read: an entry's bytes on the
+    worker, the uploads here."""
+    from ..image_service import lora_claims
+    from ..lora_books import STORE, LoraRefused
+
+    try:
+        if any(src is not STORE for src, _c in booking.claims_on()):
+            await _on_worker(lora_claims, pool, booking)
+        else:
+            await asyncio.to_thread(lora_claims, pool, booking)
+    except LoraRefused as e:
+        raise _refused(e) from None
+
+
+async def _booked_wire(request: Request, pool):
+    """``(tensors, booking)`` of an upload body read after the pool booked
+    its bytes: its Content-Length, or BODY_STEP bytes at a time as a body
+    with none is read. A refusal ends the read."""
+    from ..image_steps import BODY_STEP, UPLOAD, StepError
+    from ..image_wire import CONTENT_TYPE, WireError, read
+    from ..lora_books import STORE, LoraRefused
+
+    ctype = request.headers.get("content-type", "").split(";")[0].strip()
+    if ctype != CONTENT_TYPE:
+        raise StepError(415, f"the body is {CONTENT_TYPE}, not "
+                        f"{ctype or 'untyped'}")
+    length = request.headers.get("content-length")
+    n = None
+    if length is not None:
+        try:
+            n = int(length)
+        except ValueError:
+            raise StepError(400, "the Content-Length is not a number") \
+                from None
+        if n > MAX_BODY_BYTES:
+            raise StepError(413, f"the body is {n} bytes, over the limit of "
+                            f"{MAX_BODY_BYTES}")
+    _hook_store(pool)
+    booking = await _reserve(pool, STORE, BODY_STEP if n is None else n,
+                             UPLOAD)
+    try:
+        await _claims(pool, booking)
+        if n is not None:
+            body = await request.body()
+        else:
+            body, booked = bytearray(), BODY_STEP
+            async for chunk in request.stream():
+                body += chunk
+                if len(body) > MAX_BODY_BYTES:
+                    raise StepError(413, f"the body is over the limit of "
+                                    f"{MAX_BODY_BYTES} bytes")
+                while len(body) > booked:
+                    try:
+                        await asyncio.to_thread(pool.grow_lora, booking,
+                                                BODY_STEP, subject=UPLOAD)
+                    except LoraRefused as e:
+                        raise _refused(e) from None
+                    await _claims(pool, booking)
+                    booked += BODY_STEP
+        try:
+            tensors, _ = read(body, max_bytes=MAX_BODY_BYTES)
+        except WireError as e:
+            raise StepError(e.status, str(e)) from None
+    except BaseException:
+        booking.cancel()
+        raise
+    return tensors, booking
+
+
+def _settle_store(pool, booking) -> None:
+    from ..image_service import lora_figures
+    from ..image_steps import STATE
+
+    pool.settle_lora(booking, lora_figures((STATE.adapters,), booking.keys))
+
+
 def _served(hold):
     return hold._entry.pipeline
 
@@ -431,11 +562,25 @@ async def head_tensor(request: Request):
 
 
 async def put_adapter(request: Request):
+    """Keep an uploaded LoRA matrix. Its body is booked with the pool
+    before it is read, and kept as a view, with no copy."""
     from ..image_steps import MAX_ADAPTER_BYTES, STATE
 
     h = _hash_path(request)
-    tensors, _ = await _wire(request, MAX_BODY_BYTES)
-    STATE.put_tensor(STATE.adapters, h, tensors, MAX_ADAPTER_BYTES)
+    pool = _lora_pool()
+    if pool is None:
+        tensors, _ = await _wire(request, MAX_BODY_BYTES)
+        STATE.put_tensor(STATE.adapters, h, tensors, MAX_ADAPTER_BYTES,
+                         copy=False)
+        return _json(200, {"hash": h})
+    tensors, booking = await _booked_wire(request, pool)
+    try:
+        with booking.active():
+            STATE.put_tensor(STATE.adapters, h, tensors, MAX_ADAPTER_BYTES,
+                             copy=False)
+        _settle_store(pool, booking)
+    finally:
+        booking.cancel()
     return _json(200, {"hash": h})
 
 
@@ -458,23 +603,53 @@ async def register_adapter(request: Request):
         raise StepError(404, "no such adapter file under the server's model "
                         "folders")
 
+    pool = _lora_pool()
+
     def work():
+        import contextlib
         import os
 
-        if os.path.getsize(path) > 4 * MAX_ADAPTER_BYTES:
+        from ..image_service import WORKER, lora_claims
+        from ..image_steps import UPLOAD
+        from ..lora_books import STORE, LoraRefused
+
+        size = os.path.getsize(path)
+        if size > 4 * MAX_ADAPTER_BYTES:
             raise StepError(413, "the adapter file is over the limit")
-        with open(path, "rb") as f:
-            data = f.read()
+        booking = None
         try:
-            tensors, _ = read(data)
-        except WireError as e:
-            raise StepError(400, f"the adapter file: {e}") from None
-        out = {}
-        for name, t in tensors.items():
-            h = t.hash()
-            STATE.put_tensor(STATE.adapters, h, {name: t}, MAX_ADAPTER_BYTES)
-            out[name] = h
-        return out
+            if pool is not None:
+                # The file is booked whole before it is read.
+                _hook_store(pool)
+                try:
+                    booking = pool.reserve_lora(STORE, size, subject=UPLOAD)
+                    if any(src is not STORE
+                           for src, _c in booking.claims_on()):
+                        WORKER.submit(lora_claims, pool, booking).result()
+                    else:
+                        lora_claims(pool, booking)
+                except LoraRefused as e:
+                    raise _refused(e) from None
+            with open(path, "rb") as f:
+                data = f.read()
+            try:
+                tensors, _ = read(data)
+            except WireError as e:
+                raise StepError(400, f"the adapter file: {e}") from None
+            out = {}
+            with (booking.active() if booking is not None
+                  else contextlib.nullcontext()):
+                for name, t in tensors.items():
+                    h = t.hash()
+                    STATE.put_tensor(STATE.adapters, h, {name: t},
+                                     MAX_ADAPTER_BYTES, copy=False)
+                    out[name] = h
+            if booking is not None:
+                _settle_store(pool, booking)
+            return out
+        finally:
+            if booking is not None:
+                booking.cancel()
 
     return _json(200, {"tensors": await asyncio.to_thread(work)})
 
@@ -495,16 +670,86 @@ async def put_patch_table(request: Request):
     hold = await _acquire(model)
     try:
         served = _served(hold)
+        pool = _lora_pool()
+        booking = None
+        if pool is not None:
+            from ..image_steps import PAIRS, body_pairs, pairs_due
+
+            # The estimate: the pairs not held and not the entry's own,
+            # from the wire bytes of their matrices.
+            pairs = body_pairs(body, STATE.adapters)
+            due = pairs_due(served, pairs)
+            booking = await _reserve(
+                pool, hold._entry, sum(due.values()), PAIRS,
+                _held_bytes(served.pipe, set(pairs) - set(due)))
 
         def work():
-            core = define_table(served, body, STATE.adapters)
-            STATE.tables_of(served.spec.id, served.pipe).put(want, core, raw)
-            return core
+            nonlocal booking
+            try:
+                if pool is not None:
+                    booking = _define_turn(pool, hold._entry, served, body,
+                                           booking)
+                with _active(booking):
+                    core = define_table(served, body, STATE.adapters)
+                STATE.tables_of(served.spec.id, served.pipe).put(
+                    want, core, raw, _sizes(body))
+                if booking is not None:
+                    from ..image_service import settle_job
 
-        await _on_worker(work)
+                    settle_job(pool, booking, served.pipe)
+                return core
+            finally:
+                if booking is not None:
+                    booking.cancel()
+
+        try:
+            await _on_worker(work)
+        except BaseException:
+            if booking is not None:
+                booking.cancel()
+            raise
     finally:
         hold.release()
     return _json(200, {"id": want})
+
+
+def _active(booking):
+    import contextlib
+
+    return booking.active() if booking is not None else \
+        contextlib.nullcontext()
+
+
+def _sizes(body: dict) -> dict:
+    from ..image_steps import STATE, matrix_sizes
+
+    return matrix_sizes(body, STATE.adapters)
+
+
+def _define_turn(pool, entry, served, body: dict, booking,
+                 subject: str | None = None):
+    """The turn booking of a define on the worker, before ``.mx()``: the
+    pairs of ``body`` not held and not the entry's own. Its held pairs
+    are its own keys, which its claims never shed."""
+    from ..image_service import ensure_dit, lora_turn
+    from ..image_steps import PAIRS, STATE, body_pairs, is_video, pairs_due
+    from ..lora_books import LoraRefused
+    from .. import video_service as vs
+
+    # The define reads the DiT, which an encode lets go.
+    if is_video(served.spec):
+        vs.ensure_dit(served)
+    else:
+        ensure_dit(served)
+    pairs = body_pairs(body, STATE.adapters)
+    due = pairs_due(served, pairs)
+    held = _held_bytes(served.pipe, set(pairs) - set(due))
+    try:
+        return lora_turn(pool, entry, booking, sum(due.values()), due,
+                         subject=subject or PAIRS, own_held=held,
+                         hold=tuple(pairs))
+    except LoraRefused as e:
+        raise _refused(e) from None
 
 
 def _held(pipe, core: str) -> bool:
@@ -532,8 +777,24 @@ def _table(served, tid):
     core = tables.get(tid)
     if core is None or not (_held(served.pipe, core)
                             or _definable(tables.body(tid))):
-        raise Missing([tid])
+        raise Missing([tid], hint=_memory_hint(tables, tid))
     return core
+
+
+def _memory_hint(tables, tid) -> str | None:
+    """The sentence of a 409 whose table's matrices the server let go:
+    their bytes and the memory free beside the models in use."""
+    from ..image_steps import STATE
+    from ..lora_books import gb
+
+    pool = _lora_pool()
+    gone = sum(n for h, n in tables.sizes(tid).items()
+               if h not in STATE.adapters)
+    if pool is None or not gone:
+        return None
+    return (f"{gb(gone, True)} GB of LoRA matrices are not held; "
+            f"{gb(pool.lora_free(), False)} GB of memory is free beside the "
+            "models in use")
 
 
 def _definable(raw: bytes | None) -> bool:
@@ -566,9 +827,72 @@ def _held_table(served, tid, core):
     try:
         core = define_table(served, json.loads(raw), STATE.adapters)
     except Missing:
-        raise Missing([tid]) from None
+        raise Missing([tid], hint=_memory_hint(tables, tid)) from None
     tables.put(tid, core, raw)
     return core
+
+
+def _factor_turn(pool, entry, served, core, booking):
+    """The turn booking of a forward on ``core``, after its pairs are
+    held: the factors and kernel pairs it builds yet, or the growth of
+    the default table's excess."""
+    from ..image_service import lora_turn, turn_figures
+    from ..image_steps import FACTORS
+    from ..lora_books import LoraRefused
+
+    pipe = served.pipe
+    need, priced, held = turn_figures(pool, entry, pipe, core)
+    table = pipe.patch_tables.get(core) if core is not None else None
+    hold = [core] if core is not None else []
+    if table:
+        pairs = {k for _p, _b, patches in table["entries"]
+                 for k, _s, _a in patches}
+        hold += list(pairs)
+        # The table's pairs are the job's own keys too, never idle to it.
+        held += _held_bytes(pipe, pairs)
+    try:
+        return lora_turn(pool, entry, booking, need, priced,
+                         subject=FACTORS, own_held=held, hold=hold)
+    except LoraRefused as e:
+        raise _refused(e) from None
+
+
+def _step_estimate(served, tid, core) -> tuple:
+    """(estimate, own held) of a step's LoRA bytes on its route: the pairs
+    not held of a table it defines again, and the factors its forward
+    builds, with the bytes of its own keys held now, which its claims
+    leave. The factors are priced by the dry run while the DiT and the
+    pairs are held, and at twice the pairs' bytes otherwise, as on a
+    staged entry whose DiT an encode let go; the turn books them
+    exactly."""
+    from ..image_steps import STATE, body_pairs, pairs_due
+
+    pipe = served.pipe
+    if core is None:
+        # The default table's excess is booked at the turn.
+        return 0, 0
+    n = 0
+    pairs: dict = {}
+    held = _held(pipe, core)
+    table = pipe.patch_tables.get(core)
+    named = {k for _p, _b, ps in table["entries"] for k, _s, _a in ps} \
+        if table else set()
+    if not held:
+        raw = STATE.tables_of(served.spec.id, pipe).body(tid)
+        if raw is not None:
+            pairs = body_pairs(json.loads(raw), STATE.adapters)
+            due = pairs_due(served, pairs)
+            n += sum(due.values())
+            named = set(pairs) - set(due)
+    own = _held_bytes(pipe, named)
+    if held and table and getattr(pipe, "dit", None) is not None:
+        from ..image_service import turn_figures
+
+        need, _priced, built = turn_figures(_lora_pool(), None, pipe, core)
+        return n + need, own + built
+    if not pairs and table:
+        pairs = {k: pipe.adapters.nbytes(k) or 0 for k in named}
+    return n + 2 * sum(pairs.values()), own
 
 
 def _skip(served, raw) -> tuple:
@@ -650,12 +974,14 @@ async def step(request: Request):
             raise StepError(400, "a step on a cache of reference K and V "
                             "skips no blocks")
         table = None
+        hint = None
         try:
             table = _table(served, fields.get("patch_table"))
         except Missing as m:
             missing += m.extra["missing"]
+            hint = m.hint
         if missing:
-            raise Missing(missing)
+            raise Missing(missing, hint=hint)
         import numpy as np
 
         ts = np.broadcast_to(np.asarray(t_w.numpy(), np.float32).reshape(-1),
@@ -674,20 +1000,49 @@ async def step(request: Request):
             targets = [conv.scale * float(t) + conv.shift
                        for t in flow_targets(s_w.numpy(), ts)]
         gen = run.gen if run is not None else 0
+        pool = _lora_pool()
+        booking = None
+        if pool is not None:
+            from ..image_steps import FACTORS
+
+            n, own = _step_estimate(served, fields.get("patch_table"),
+                                    table)
+            booking = await _reserve(pool, hold._entry, n, FACTORS, own)
 
         def work():
+            nonlocal booking
+            try:
+                return _work()
+            finally:
+                if booking is not None:
+                    booking.cancel()
+
+        def _work():
             # Every MLX op of a step runs here: MLX streams belong to the
             # thread that made them.
+            nonlocal booking
             import mlx.core as mx
 
             from gmlx.image import api, memfit
 
             from ..image_service import ensure_dit, size_fits
-            from ..image_steps import _host, conditioning
+            from ..image_steps import FACTORS, _host, conditioning
 
             # A staged entry's encode let the DiT and the VAE go.
             ensure_dit(served)
-            core = _held_table(served, fields.get("patch_table"), table)
+            tid = fields.get("patch_table")
+            if pool is not None and table is not None \
+                    and not _held(served.pipe, table):
+                raw = STATE.tables_of(served.spec.id, served.pipe).body(tid)
+                if raw is not None:
+                    booking = _define_turn(pool, hold._entry, served,
+                                           json.loads(raw), booking,
+                                           FACTORS)
+            with _active(booking):
+                core = _held_table(served, tid, table)
+            if pool is not None:
+                booking = _factor_turn(pool, hold._entry, served, core,
+                                       booking)
             fam = served.pipe.family.name
             conds = [conditioning(r, STATE.tensors, fam) for r in rows]
             # The plan of the rows as they are: their text, a prefix and
@@ -726,13 +1081,22 @@ async def step(request: Request):
                 scope = list(run.cond_objs.values()) + [
                     c for c in conds if not c.key]
             x = x_w.mx().astype(mx.float32)
-            with api.state_scope(served.pipe, scope):
+            with api.state_scope(served.pipe, scope), _active(booking):
                 v, fwd_s, cache = run_step(served, x, sig, conds, core, run,
                                            gen, targets, conv.time,
                                            ref_cache, skip)
+            if booking is not None:
+                from ..image_service import settle_job
+
+                settle_job(pool, booking, served.pipe)
             return _host(v), fwd_s, cache
 
-        v, fwd_s, cache = await _on_worker(work)
+        try:
+            v, fwd_s, cache = await _on_worker(work)
+        except BaseException:
+            if booking is not None:
+                booking.cancel()
+            raise
         if conv.sign != 1.0:
             v = v * np.float32(conv.sign)
         if run is not None:

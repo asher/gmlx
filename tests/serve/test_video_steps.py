@@ -962,11 +962,12 @@ def test_a_video_entry_released_with_a_client_table_frees_its_pipeline(
 
 def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
                                                             monkeypatch):
-    """The pool admits an entry with each cache at the share of its bound
-    that its clip leaves room for. The entry bounds its pipeline's caches
-    at that share beside the bytes its plan books for its own LoRA, which
-    hold its pairs, and the step routes' caches take the smallest share of
-    the entries loaded until it is released."""
+    """The pool admits an entry with each tensor cache at the share of its
+    bound that its clip leaves room for. The entry bounds its pipeline's
+    tensor caches at that share, and its pair and tables caches at the cap
+    beside the bytes its plan books for its own LoRA, which hold its
+    pairs: the pool books a request's pairs. The step routes' caches take
+    the smallest share of the entries loaded until it is released."""
     import dataclasses
 
     from gmlx.serve import image_service
@@ -989,7 +990,7 @@ def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
     assert pipe.conditionings.max_bytes == tensor // 4
     assert pipe.reference_latents.max_bytes == tensor // 4
     assert pipe.adapters.max_bytes == pipe.tables.max_bytes == (
-        adapter // 4 + size)
+        adapter + size)
     assert scaled == [0.25]
     _on_worker(vs._release, [got])
     assert scaled == [0.25, 1.0]
@@ -997,8 +998,8 @@ def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
 
 def test_the_step_tensor_cache_keeps_a_loaded_video_entrys_cond(
         monkeypatch, request):
-    """The step routes' caches take the smallest share of the entries
-    loaded, and their tensor cache the largest cond floor: beside an image
+    """The step routes' tensor cache takes the smallest share of the
+    entries loaded and the largest cond floor: beside an image
     entry at a share of 1/16, a video entry's cond of the priced rows of
     H3's 5120-wide features still uploads. Released, the video entry's
     floor goes with it."""
@@ -1030,7 +1031,8 @@ def test_the_step_tensor_cache_keeps_a_loaded_video_entrys_cond(
     finally:
         shares.clear()
         image_service._scale_step_caches()
-    assert bounds == (rows.nbytes, adapter // 16)
+    # The upload store keeps its configured bound at any share.
+    assert bounds == (rows.nbytes, adapter)
     assert after == tensor // 16 and e.value.status == 413
 
 
@@ -1083,24 +1085,25 @@ def test_a_cond_over_the_share_the_models_leave_is_413_naming_it(
 
 
 def test_the_adapter_cache_and_the_upload_limit_are_named_in_a_413(host):
-    """An adapter matrix over the share of the adapter cache is refused
-    with that cache named, and a tensor over a route's own upload limit
-    with the limit."""
+    """The share the models loaded leave bounds the step routes' tensor
+    cache alone: at a quarter, an adapter matrix of 80 MiB is held. An
+    adapter matrix over a set server.image.adapter_cache_mb is refused
+    with the key named, and a tensor over a route's own upload limit with
+    the limit."""
     from gmlx.serve.image_wire import read, write
 
     c = _client()
+    big = np.zeros((1, 20 << 20), np.float32)
     try:
         steps.STATE.scale_caches(0.25)
-        with pytest.raises(StepsClientError) as e:
-            c.put(np.zeros((1, 20 << 20), np.float32), kind="adapters")
+        h = c.put(big, kind="adapters")
+        held = steps.STATE.adapters.nbytes(h)
+        steps.STATE.configure(ImageServerCfg(adapter_cache_mb=16))
         with pytest.raises(StepsClientError) as edge:
-            c.put(np.zeros((1, (16 << 20) + 1), np.float32), kind="adapters")
-        # A share whose bound is 69.99 MiB.
-        steps.STATE.scale_caches(0.2734)
-        with pytest.raises(StepsClientError) as share:
-            c.put(np.zeros((1, 70 << 18), np.float32), kind="adapters")
+            c.put(np.zeros((1, (4 << 20) + 1), np.float32), kind="adapters")
     finally:
         steps.STATE.scale_caches(1.0)
+        steps.STATE.configure(ImageServerCfg())
     limit, just = [], []
     for n, got in ((1 << 19, limit), ((1 << 18) + 1, just)):
         (t,) = read(write({"t": np.zeros((1, n), np.float32)}))[0].values()
@@ -1108,26 +1111,14 @@ def test_the_adapter_cache_and_the_upload_limit_are_named_in_a_413(host):
             steps.STATE.put_tensor(steps.STATE.tensors, t.hash(), {"t": t},
                                    1 << 20)
         got.append(str(refused.value))
-    assert e.value.status == 413
-    assert e.value.body["error"] == (
-        "a tensor of 80.0 MiB is over the step routes' adapter cache of 64.0 "
-        "MiB: the models loaded leave it 25% of its configured 256 MiB. A "
-        "smaller defaults.size or defaults.seconds on the tightest entry "
-        "gives it more.")
+    assert held == big.nbytes
     assert limit == ["a tensor of 2.0 MiB is over the upload limit of 1.0 MiB"]
-    # A tensor a few bytes over a bound reads above it, and a bound under a
-    # tenth of a MiB more reads under it.
+    # A tensor a few bytes over a bound reads above it.
     assert just == ["a tensor of 1.1 MiB is over the upload limit of 1.0 MiB"]
+    assert edge.value.status == 413
     assert edge.value.body["error"] == (
-        "a tensor of 64.1 MiB is over the step routes' adapter cache of 64.0 "
-        "MiB: the models loaded leave it 25% of its configured 256 MiB. A "
-        "smaller defaults.size or defaults.seconds on the tightest entry "
-        "gives it more.")
-    assert share.value.body["error"] == (
-        "a tensor of 70.0 MiB is over the step routes' adapter cache of 69.9 "
-        "MiB: the models loaded leave it 27% of its configured 256 MiB. A "
-        "smaller defaults.size or defaults.seconds on the tightest entry "
-        "gives it more.")
+        "a tensor of 16.1 MiB is over the configured 16 MiB of the step "
+        "routes' adapter cache; raise server.image.adapter_cache_mb")
 
 
 def _big_table(c, pairs: int, width: int = 8192) -> dict:
@@ -1149,27 +1140,19 @@ def _big_table(c, pairs: int, width: int = 8192) -> dict:
     return {"model": "h3", "entries": entries}
 
 
+_CAP_413 = ("the LoRA pairs of this patch table take 4.0 MiB, over the "
+            "2.0 MiB the pair cache of 'h3' keeps for a request's pairs; "
+            "raise server.image.adapter_cache_mb to 4 or more")
+
+
 @pytest.mark.parametrize("configured_mb, share, want", [
-    (8, 0.25, "the LoRA pairs of this patch table take 4.0 MiB, over the "
-     "2.0 MiB the pair cache of 'h3' keeps for a request's pairs: its "
-     "default clip leaves the cache 25% of its configured 8 MiB. A smaller "
-     "defaults.size or defaults.seconds on 'h3' gives it more."),
-    (2, 0.25, "the LoRA pairs of this patch table take 4.0 MiB, over the "
-     "0.5 MiB the pair cache of 'h3' keeps for a request's pairs: its "
-     "default clip leaves the cache 25% of its configured 2 MiB. Raise "
-     "server.image.adapter_cache_mb to 4 or more, and set a smaller "
-     "defaults.size or defaults.seconds on 'h3' so that it leaves the cache "
-     "more of it."),
-    (2, 1.0, "the LoRA pairs of this patch table take 4.0 MiB, over the "
-     "2.0 MiB the pair cache of 'h3' keeps for a request's pairs; raise "
-     "server.image.adapter_cache_mb to 4 or more")])
+    (2, 0.25, _CAP_413), (2, 1.0, _CAP_413)])
 def test_a_table_over_the_entrys_pair_room_is_413_naming_it(
         monkeypatch, request, configured_mb, share, want):
-    """The pairs of a ComfyUI LoRA's table that the entry's pair cache
-    cannot hold at once are refused with a 413 that names the cache, the
-    sizes and the remedy: under a share, the share the entry's clip leaves
-    the cache, and the configured bound, with the MiB it must reach, when
-    the bound is under the pairs too."""
+    """The pairs of a ComfyUI LoRA's table over a set
+    server.image.adapter_cache_mb are refused with a 413 that names the
+    cache, the sizes and the MiB the key must reach, at any share, before
+    a pair is made."""
     import dataclasses
 
     from gmlx.serve import image_service
@@ -1189,17 +1172,38 @@ def test_a_table_over_the_entrys_pair_room_is_413_naming_it(
     assert len(pipe.adapters) == 0
 
 
+def test_a_table_under_the_cap_defines_at_any_share(monkeypatch, request):
+    """The share the entry's clip leaves its tensor caches bounds its pair
+    cache no more: at a share of a quarter, a table whose pairs fill a set
+    server.image.adapter_cache_mb holds them all."""
+    from test_video_h3_lora import _adapter
+
+    from gmlx.serve import image_service
+
+    pipe, _w = _own_pipe()
+    _mount(_Host(_served(pipe)), request)
+    a = _adapter(6)
+    need = sum(d.nbytes + u.nbytes for d, u, _a in a.values())
+    monkeypatch.setitem(image_service._CACHE_BYTES, "adapter", need)
+    image_service.bound_caches(pipe, 0, 0.25)
+    c = _client()
+    c.define_table("h3", _table_body(c, a))
+    assert pipe.adapters.bytes == need and len(pipe.adapters) == len(a)
+
+
 @pytest.mark.parametrize("width, room, need, room_mib, bound", [
     (8192, (4 << 20) - 1, "4.0", "3.9", 4), (8200, 4 << 20, "4.1", "4.0", 5)])
 def test_a_table_just_over_the_pair_room_reads_its_need_above_it(
-        request, width, room, need, room_mib, bound):
-    """The 413 rounds the pairs' MiB up and the room's down, so a table a
-    byte over the room, or a few KiB, never reads at or under it."""
+        monkeypatch, request, width, room, need, room_mib, bound):
+    """The 413 rounds the pairs' MiB up and the cap's down, so a table a
+    byte over the cap, or a few KiB, never reads at or under it."""
+    from gmlx.serve import image_service
+
     pipe, _w = _own_pipe()
     _mount(_Host(_served(pipe)), request)
     c = _client()
     body = _big_table(c, 4, width)
-    pipe.adapters.max_bytes = room
+    monkeypatch.setitem(image_service._CACHE_BYTES, "adapter", room)
     with pytest.raises(StepsClientError) as e:
         c.define_table("h3", body)
     assert e.value.status == 413 and e.value.body["error"] == (
@@ -1288,13 +1292,15 @@ def test_the_old_pairs_of_a_lora_file_written_again_take_the_request_room(
     """The entry's LoRA file is written again between two encodes, and
     ComfyUI, which keeps a LoRA it loaded by its path, sends the old pairs
     again with alpha None. The entry reads the new file with its DiT, so
-    the old pairs are no longer its own: they take the request room, and
-    a table of them over it is a 413 with its remedy."""
+    the old pairs are no longer its own: they count against a set
+    server.image.adapter_cache_mb, and a table of them over it is a 413
+    with its remedy."""
     import os
 
     from lora_fixtures import write_keys
     from test_video_h3_lora import _adapter, _comfy_keys
 
+    from gmlx.serve import image_service
     from gmlx.serve.image_service import _pair_keys
 
     path = _lora_file(tmp_path)
@@ -1305,7 +1311,7 @@ def test_the_old_pairs_of_a_lora_file_written_again_take_the_request_room(
     _mount(_Host(served), request)
     _stub_encode(monkeypatch, weights)
     held = pipe.adapters.bytes
-    pipe.adapters.max_bytes = held + held // 2
+    monkeypatch.setitem(image_service._CACHE_BYTES, "adapter", held // 2)
     c = _client()
     body = _table_body(c, _adapter(5), alphas=False)
     c.define_table("h3", body)

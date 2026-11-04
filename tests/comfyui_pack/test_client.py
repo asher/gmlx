@@ -790,5 +790,49 @@ class StartAndCancel(unittest.TestCase):
         self.assertEqual(got, {"path": C.PREFIX + "/interrupt", "timeout": 5.0})
 
 
+
+class MemoryRefusal(unittest.TestCase):
+    """A 503 for memory the models in use hold reaches the user as the
+    server's text and a sentence to queue the prompt again, after one
+    send: the pack retries no 503."""
+
+    TEXT = ("the LoRA matrices of this upload need 1.4 GB of memory, and 0.6 GB is free "
+            "beside the models in use (qwen3-32b); retry when one is idle")
+
+    def test_an_upload_refused_for_memory_is_sent_once(self):
+        puts = []
+        text = self.TEXT
+
+        class Handler(_NotGmlx):
+            def do_HEAD(self):
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_PUT(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                puts.append(self.path)
+                body = json.dumps({"error": text}).encode()
+                self.send_response(503)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            c = C.StepClient(f"http://127.0.0.1:{srv.server_port}")
+            t = torch.ones(4, 8)
+            with self.assertRaises(C.GmlxError) as e:
+                c.ensure_adapter(t)
+        finally:
+            srv.shutdown()
+        h = c._memo_hash(t)
+        self.assertEqual(str(e.exception), f"gmlx: upload of adapter {h[:12]} failed (503): "
+                         f"{text}. Queue the prompt again then.")
+        self.assertEqual(puts, [f"{C.PREFIX}/adapters/{h}"])
+        self.assertNotIn(h, c.known_adapters)
+
+
 if __name__ == "__main__":
     unittest.main()

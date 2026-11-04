@@ -1,0 +1,572 @@
+"""The step routes' LoRA bytes, booked with the residency pool as they
+arrive: an upload is booked before its body is read, a define and a step
+at their turns, and memory the models hold is refused with its figures.
+A tiny Z-Image pipeline is the pool's image entry; the other models are
+stand-ins with a footprint and no weights."""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+pytest.importorskip("gmlx._vendor.mlx_vlm")
+mx = pytest.importorskip("mlx.core")
+
+from gmlx.config import ImageServerCfg  # noqa: E402
+from gmlx.image.samplers import noise_from_seed  # noqa: E402
+from gmlx.serve import image_service, residency  # noqa: E402
+from gmlx.serve import image_steps as steps  # noqa: E402
+from gmlx.serve import image_wire as wire  # noqa: E402
+from gmlx.serve.image_steps_client import (MissingTensors,  # noqa: E402
+                                           StepsClientError, array_hash)
+from gmlx.serve.lora_books import STORE  # noqa: E402
+from gmlx.serve.patches import image_steps as routes  # noqa: E402
+from gmlx.serve.residency import (IMAGE_KIND, _BusyHold,  # noqa: E402
+                                  _ResidencyPool)
+from test_image_steps import (_APP, SHAPE, _client, _features,  # noqa: E402
+                              _header_alpha_own, _Host, _pack_sync, _rows)
+
+GB = 10**9
+P = wire.PREFIX
+V = {wire.CONTRACT_HEADER: "1.0"}
+
+
+class _Pool(_ResidencyPool):
+    overruns: list
+
+
+def _pool(monkeypatch, budget: int) -> _Pool:
+    """A pool of ``budget`` bytes whose LoRA sheds are the server's own.
+    Each byte past a booking is recorded in ``pool.overruns``."""
+    from gmlx.serve import capacity as cap
+
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    monkeypatch.setattr(residency, "_holds_image_worker", lambda: True)
+    pool = _Pool(
+        SimpleNamespace(_last_entry=None), None, None, int(budget), (),
+        image_fns=(lambda spec: spec.fp, lambda spec: spec.pipe,
+                   lambda box: box.pop()))
+    pool._worker_for = lambda *a, **k: contextlib.nullcontext()
+    pool._headroom_fn = lambda: None
+    pool.overruns = []
+    pool.books.overrun_hook = lambda s, n: pool.overruns.append((s, n))
+    return pool
+
+
+def _model(pool, name: str, fp: int, *, busy: bool):
+    """A stand-in model of ``fp`` bytes, in use or idle."""
+    e = pool.acquire(f"/m/{name}.gguf", None, IMAGE_KIND,
+                     build_spec=SimpleNamespace(fp=int(fp), stream=None,
+                                                path=f"/m/{name}.gguf",
+                                                pipe=SimpleNamespace()),
+                     loaded_as=name)
+    if not busy:
+        pool.release(e)
+    return e
+
+
+class _PoolHost(_Host):
+    """The tiny pipelines as entries of ``pool``, each of ``fp`` bytes."""
+
+    def __init__(self, pipes: dict, pool, fp: int = GB):
+        super().__init__(pipes)
+        self.pool, self.fp = pool, int(fp)
+
+    def lora_pool(self):
+        return self.pool
+
+    def entry(self, model):
+        served = self.served[self.resolve(model)[1].id]
+        e = self.pool.acquire(
+            served.spec.path, None, IMAGE_KIND, loaded_as=served.spec.id,
+            build_spec=SimpleNamespace(fp=self.fp, stream=None,
+                                       path=served.spec.path, pipe=served))
+        self.pool.release(e)
+        return e
+
+    def acquire(self, model):
+        e = self.entry(model)
+        with self.pool._lock:
+            e.busy += 1
+        return _BusyHold(self.pool, e)
+
+
+def _mount(request, host, cfg=None, model_dirs=()):
+    routes.mount(_APP.app, cfg or ImageServerCfg(), host,
+                 model_dirs=model_dirs)
+
+    def done():
+        steps.STATE.reset()
+        routes.mount(_APP.app, ImageServerCfg(steps_api=False))
+    request.addfinalizer(done)
+    return host
+
+
+def _asgi(method: str, path: str, chunks=(), headers=None):
+    """``method`` on ``path`` through the app as a server reads a body:
+    one chunk a receive. Returns the status, the JSON answer and the
+    lengths of the chunks the app read."""
+    read: list = []
+    it = iter(chunks)
+
+    async def receive():
+        try:
+            c = next(it)
+        except StopIteration:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        read.append(len(c))
+        return {"type": "http.request", "body": c, "more_body": True}
+
+    out: dict = {"body": b""}
+
+    async def send(m):
+        if m["type"] == "http.response.start":
+            out["status"] = m["status"]
+        elif m["type"] == "http.response.body":
+            out["body"] += m.get("body", b"")
+
+    hdrs = {"host": "127.0.0.1", **V, **(headers or {})}
+    scope = {"type": "http", "asgi": {"version": "3.0"},
+             "http_version": "1.1", "method": method, "scheme": "http",
+             "path": path, "raw_path": path.encode(), "query_string": b"",
+             "root_path": "",
+             "headers": [(k.lower().encode(), str(v).encode())
+                         for k, v in hdrs.items()],
+             "client": ("127.0.0.1", 50000), "server": ("127.0.0.1", 80)}
+    asyncio.run(_APP.app(scope, receive, send))
+    return out["status"], json.loads(out["body"] or b"{}"), read
+
+
+def _store() -> dict:
+    with steps.STATE.adapters._lock:
+        return {k: t.nbytes for k, t in steps.STATE.adapters._items.items()}
+
+
+def _books_hold(pool, *entries, budget: bool = True) -> None:
+    """Each owner's ledger is the keys its caches hold beyond its own, at
+    their bytes, with nothing pending, no byte past its booking, and the
+    pool within its budget."""
+    for e in entries:
+        pipe = e.pipeline.pipe
+        held = {}
+        for cache in (pipe.adapters, pipe.tables):
+            for k in cache.keys(lambda k: True):
+                if k not in pipe.adapters.kept:
+                    held[k] = cache.nbytes(k)
+        _h, pending, ledger = pool.lora_held(e)
+        assert (ledger, pending) == (held, 0)
+    _h, pending, ledger = pool.lora_held(STORE)
+    assert (ledger, pending) == (_store(), 0)
+    assert pool._resident_bytes() <= pool._budget or not budget
+    assert pool.overruns == []
+
+
+# Capabilities.
+
+@pytest.mark.parametrize("cap_mb, want", [(None, 1 << 30), (16, 16 << 20)])
+def test_capabilities_give_a_gib_unset_and_the_cap_when_set(
+        request, monkeypatch, cap_mb, want):
+    """The largest adapter matrix a client may send is 1 GiB with no cap,
+    and the cap when server.image.adapter_cache_mb sets one, whatever the
+    store holds."""
+    pool = _pool(monkeypatch, 10 * GB)
+    _mount(request, _PoolHost({}, pool),
+           ImageServerCfg(adapter_cache_mb=cap_mb))
+    c = _client()
+    before = c.capabilities()["limits"]["max_adapter_bytes"]
+    c.put(np.ones((1, 1 << 16), np.float32), kind="adapters")
+    after = c.capabilities()["limits"]["max_adapter_bytes"]
+    assert before == after == want
+
+
+# Uploads.
+
+_UPLOAD_503 = ("the LoRA matrices of this upload need 1.0 GB of memory, "
+               "and 0.6 GB is free beside the models in use (flux2-klein); "
+               "retry when one is idle")
+
+
+def test_an_upload_over_the_memory_free_is_refused_before_its_body_is_read(
+        request, monkeypatch):
+    """A 1 GB upload beside a model in use that leaves 0.6 GB is a 503
+    with both figures, answered from its Content-Length: no byte of the
+    body is read and the store holds nothing more."""
+    pool = _pool(monkeypatch, 9_600_000_000)
+    _model(pool, "flux2-klein", 9 * GB, busy=True)
+    _mount(request, _PoolHost({}, pool))
+    status, doc, read = _asgi(
+        "PUT", f"{P}/adapters/{'ab' * 32}", [b"x" * (1 << 20)] * 4,
+        {"content-type": wire.CONTENT_TYPE, "content-length": 10**9})
+    assert (status, doc["error"], read) == (503, _UPLOAD_503, [])
+    assert _store() == {} and pool.lora_held(STORE) == (0, 0, {})
+
+
+def test_a_register_over_the_memory_free_is_refused_before_its_file_is_read(
+        request, monkeypatch, tmp_path):
+    """A registered adapter file is booked at its size before it is
+    opened: a 1 GB file beside a model in use that leaves 0.6 GB is a 503
+    that opens nothing."""
+    path = tmp_path / "big.safetensors"
+    with open(path, "wb") as f:
+        f.truncate(10**9)
+    pool = _pool(monkeypatch, 9_600_000_000)
+    _model(pool, "flux2-klein", 9 * GB, busy=True)
+    _mount(request, _PoolHost({}, pool), model_dirs=(str(tmp_path),))
+    opened = []
+    monkeypatch.setattr(routes, "open", lambda *a, **k: opened.append(a),
+                        raising=False)
+    body = json.dumps({"path": str(path)}).encode()
+    status, doc, _read = _asgi(
+        "POST", f"{P}/adapters/register", [body],
+        {"content-type": "application/json", "content-length": len(body)})
+    assert (status, doc["error"], opened) == (503, _UPLOAD_503, [])
+    assert _store() == {} and pool.lora_held(STORE) == (0, 0, {})
+
+
+def test_an_upload_never_evicts_an_idle_model_and_names_it(request,
+                                                            monkeypatch):
+    """An idle model at the memory edge stays loaded through an upload
+    that does not fit beside it: the refusal names it and its bytes, and
+    the user unloads it or pins what to keep. An upload that fits beside
+    it is kept."""
+    pool = _pool(monkeypatch, 9_600_000_000)
+    idle = _model(pool, "qwen3-32b", 9 * GB, busy=False)
+    _mount(request, _PoolHost({}, pool))
+    status, doc, read = _asgi(
+        "PUT", f"{P}/adapters/{'ab' * 32}", [b"x" * (1 << 20)],
+        {"content-type": wire.CONTENT_TYPE, "content-length": 10**9})
+    assert (status, read) == (503, [])
+    assert doc["error"] == (
+        "the LoRA matrices of this upload need 1.0 GB of memory, and 0.6 GB "
+        "is free; idle models hold 9.0 GB (qwen3-32b). Unload one to make "
+        "room")
+    a = np.ones((1, 1 << 16), np.float32)
+    h = _client().put(a, kind="adapters")
+    assert list(pool._entries.values()) == [idle]
+    assert _store() == {h: a.nbytes}
+    _books_hold(pool)
+
+
+def test_a_body_with_no_length_is_booked_in_steps_and_refused_mid_read(
+        request, monkeypatch):
+    """A body with no Content-Length is booked a step at a time as it is
+    read (64 MiB; 1 MiB here). One under the memory free is kept and its
+    booking settles at its bytes. One over it is refused at the step that
+    cannot be booked, before the rest of it is read."""
+    assert steps.BODY_STEP == 64 << 20
+    monkeypatch.setattr(steps, "BODY_STEP", 1 << 20)
+    pool = _pool(monkeypatch, GB + (5 << 19))
+    _model(pool, "flux2-klein", GB, busy=True)
+    _mount(request, _PoolHost({}, pool))
+
+    def put(a):
+        raw = wire.write({"t": a})
+        chunks = [raw[i:i + (1 << 18)] for i in range(0, len(raw), 1 << 18)]
+        return _asgi("PUT", f"{P}/adapters/{array_hash(a)}", chunks,
+                     {"content-type": wire.CONTENT_TYPE}) + (len(raw),)
+
+    # 4 MiB beside 2.5 MiB free: the third step is refused.
+    status, doc, read, size = put(np.ones((1, 1 << 20), np.float32))
+    assert (status, doc["error"]) == (
+        503, "the LoRA matrices of this upload need 0.1 GB of memory, and "
+        "0.0 GB is free beside the models in use (flux2-klein); retry when "
+        "one is idle")
+    assert 2 << 20 < sum(read) <= (2 << 20) + (1 << 18) < size
+    assert _store() == {}
+    _books_hold(pool)
+    small = np.ones((1, 3 << 17), np.float32)       # 1.5 MiB
+    status, doc, read, size = put(small)
+    assert (status, doc, sum(read)) == (200, {"hash": array_hash(small)},
+                                        size)
+    assert _store() == {array_hash(small): small.nbytes}
+    _books_hold(pool)
+
+
+# Steps.
+
+def _stepped(request, monkeypatch, tmp_path):
+    """Entry "own" with a client's table defined and stepped once: the
+    client's LoRA stacks on the entry's own, so the step builds its table.
+    Returns the pool, the entry, the client, the table id, the rows, the
+    noise and the first step's output."""
+    pool, e, _p, ((c, rows, sync),) = _own_entry(request, monkeypatch,
+                                                 tmp_path, 1)
+    tid = sync()[1]
+    x = noise_from_seed(3, SHAPE)
+    first = c.step("own", None, x, [0.75], rows, patch_table=tid)
+    return pool, e, c, tid, rows, x, first
+
+
+def _own_bytes(pipe) -> int:
+    return sum(pipe.adapters.nbytes(k) for k in pipe.adapters.kept)
+
+
+def _between(monkeypatch, fn) -> None:
+    """``fn`` on the image worker once, right after a step's route has
+    priced and booked it, as another job's claim would run there."""
+    reserve, ran = routes._reserve, []
+
+    async def then(pool, owner, n, subject, own_held=0):
+        booking = await reserve(pool, owner, n, subject, own_held)
+        if not ran:
+            ran.append(n)
+            await routes._on_worker(fn)
+        return booking
+
+    monkeypatch.setattr(routes, "_reserve", then)
+
+
+def _crowd(pool) -> None:
+    """A model in use takes the memory free and a byte more, as one whose
+    plan was priced again at its run: the pool is past its budget, so a
+    turn is refused whatever it could claim."""
+    free = pool._budget - pool._resident_bytes()
+    _model(pool, "flux2-klein", free + 1, busy=True)
+
+
+@pytest.mark.parametrize("room", [True, False])
+def test_a_step_whose_pairs_another_job_shed_books_them_at_its_turn(
+        request, monkeypatch, tmp_path, room):
+    """Another job sheds a table's pairs and its built table after the
+    step's route found them held. The step books the pairs and the
+    factors at its turns on the worker and steps as before, with the
+    books equal to what the caches hold. With no room for the pairs at
+    the turn it answers 503 and makes no pair."""
+    pool, e, c, tid, rows, x, first = _stepped(request, monkeypatch,
+                                               tmp_path)
+    pipe = e.pipeline.pipe
+    pairs, built = pipe.adapters.bytes, pipe.tables.bytes
+    assert pairs > _own_bytes(pipe) and built > 0
+
+    def shed():
+        image_service.shed_lora(e, pipe.adapters.bytes + pipe.tables.bytes)
+        if not room:
+            _crowd(pool)
+
+    _between(monkeypatch, shed)
+    if room:
+        again = c.step("own", None, x, [0.75], rows, patch_table=tid)
+        assert np.array_equal(again, first)
+        assert pipe.adapters.bytes == pairs and 0 < pipe.tables.bytes <= built
+        _books_hold(pool, e)
+        return
+    with pytest.raises(StepsClientError) as refused:
+        c.step("own", None, x, [0.75], rows, patch_table=tid)
+    assert refused.value.status == 503
+    assert refused.value.body["error"] == (
+        "the LoRA factors of this step need 0.1 GB of memory, and 0.0 GB is "
+        "free beside the models in use (own, flux2-klein); retry when one "
+        "is idle")
+    assert (pipe.adapters.bytes, pipe.tables.bytes) == (_own_bytes(pipe), 0)
+    _books_hold(pool, e, budget=False)
+
+
+@pytest.mark.parametrize("room", [True, False])
+def test_a_step_whose_built_table_another_job_shed_books_it_at_its_turn(
+        request, monkeypatch, tmp_path, room):
+    """Another job's claim sheds a held table's built factors after the
+    step's route priced them as built. The step's turn books them again
+    from the dry run, and the step steps as before. With no room for them
+    it answers 503 and builds nothing."""
+    pool, e, c, tid, rows, x, first = _stepped(request, monkeypatch,
+                                               tmp_path)
+    pipe = e.pipeline.pipe
+    built = pipe.tables.bytes
+    assert built > 0
+
+    def shed():
+        image_service.shed_lora(e, pipe.tables.bytes)
+        assert pipe.tables.bytes == 0 and pipe.adapters.bytes > 0
+        if not room:
+            _crowd(pool)
+
+    _between(monkeypatch, shed)
+    if room:
+        again = c.step("own", None, x, [0.75], rows, patch_table=tid)
+        assert np.array_equal(again, first) and 0 < pipe.tables.bytes <= built
+        _books_hold(pool, e)
+        return
+    with pytest.raises(StepsClientError) as refused:
+        c.step("own", None, x, [0.75], rows, patch_table=tid)
+    assert refused.value.status == 503
+    assert pipe.tables.bytes == 0 and pipe.adapters.bytes > 0
+    _books_hold(pool, e, budget=False)
+
+
+def test_a_turn_claims_other_jobs_bytes_and_never_its_own_pairs(
+        request, monkeypatch, tmp_path):
+    """The built tables of clients A and B go after A's step's route
+    priced A's as built, and a model in use takes most of the memory
+    free. A's turn claims what it lacks from B's pairs and then from the
+    uploads, never from A's own pairs, which its shed holds: the step
+    steps as before and the books equal what the caches hold."""
+    pool, e, p, packs = _own_entry(request, monkeypatch, tmp_path, 2)
+    x = noise_from_seed(5, SHAPE)
+    firsts = []
+    for c, rows, sync in packs:
+        tid = sync()[1]
+        firsts.append((tid, c.step("own", None, x, [0.5], rows,
+                                   patch_table=tid)))
+    pool._budget = pool._resident_bytes()
+    core = steps.STATE.tables_of("own", p)[firsts[0][0]]
+    a_pairs = routes._held_bytes(p, {
+        k for _m, _b, ps in p.patch_tables[core]["entries"] for k, _s, _a in ps})
+
+    def drop():
+        built = sum(p.tables.nbytes(k) for k in p.tables.keys(
+            lambda k: isinstance(k, tuple) and k[0] == core))
+        image_service.shed_lora(e, p.tables.bytes)
+        assert p.tables.bytes == 0
+        # A's turn lacks B's pairs and half of what the uploads hold
+        # beside them.
+        others = pool.lora_held(e)[0] - a_pairs
+        short = others + (built - others) // 2
+        assert others < short < built
+        free = pool._budget - pool._resident_bytes()
+        _model(pool, "flux2-klein", free - built + short, busy=True)
+
+    _between(monkeypatch, drop)
+    c, rows, _sync = packs[0]
+    tid, first = firsts[0]
+    assert np.array_equal(c.step("own", None, x, [0.5], rows,
+                                 patch_table=tid), first)
+    _books_hold(pool, e)
+
+
+# Review 2's sweeps, with the pool.
+
+def _own_entry(request, monkeypatch, tmp_path, n: int):
+    """Entry "own" with a LoRA of its own in an open pool, and ``n``
+    clients each under a LoRA the size of the entry's, as the pack syncs
+    them. Returns the pool, the entry, the pipeline and the packs."""
+    pool = _pool(monkeypatch, 4 * GB)
+    host = _mount(request, _PoolHost({}, pool))
+    p, ad, _c, _body = _header_alpha_own(host, tmp_path)
+    # The footprint's own term, as _load sets it.
+    host.served["own"].lora_own_term = 2 * (tmp_path /
+                                            "style.safetensors").stat().st_size
+    e = host.entry("own")
+    pairs = [(m, b, p.adapters.peek(k)) for m, b, _a, k in ad.dit]
+    packs = []
+    for scale in (2.0, 3.0, 4.0)[:n]:
+        c = _client()
+        packs.append((c, _rows(c, _features()), _pack_sync(c, pairs, scale)))
+    return pool, e, p, packs
+
+
+def _sweep(packs, x, steps_each: int, *, synced=None):
+    """Each pack syncs, unless ``synced`` gives its table id, then samples
+    ``steps_each`` steps, one request a turn across the packs. A 409 on
+    the table syncs it again, three times at most as the pack does.
+    Returns each pack's outputs and the error text of each 409 it met."""
+    outs = [[] for _ in packs]
+    errors = [[] for _ in packs]
+
+    def run(i, c, rows, sync):
+        tid = (synced or {}).get(i) or sync()[1]
+        yield
+        for _ in range(steps_each):
+            for _try in range(4):
+                try:
+                    outs[i].append(c.step("own", None, x, [0.5], rows,
+                                          patch_table=tid))
+                    break
+                except MissingTensors as e:
+                    assert e.missing == [tid] and _try < 3
+                    errors[i].append(e.body["error"])
+                    yield
+                    tid = sync()[1]
+                    yield
+            yield
+    runs = [run(i, *pk) for i, pk in enumerate(packs)]
+    while runs:
+        for r in list(runs):
+            try:
+                next(r)
+            except StopIteration:
+                runs.remove(r)
+    return outs, errors
+
+
+@pytest.mark.parametrize("n", [2, 3])
+def test_clients_whose_loras_fit_in_memory_step_without_a_409(
+        request, monkeypatch, tmp_path, n):
+    """Two and three ComfyUIs sample on one entry at once with memory for
+    all their LoRAs: no 409, each steps the same every time, and the
+    books equal what the caches hold."""
+    pool, e, p, packs = _own_entry(request, monkeypatch, tmp_path, n)
+    outs, errors = _sweep(packs, noise_from_seed(5, SHAPE), 3)
+    assert errors == [[]] * n
+    for out in outs:
+        assert len(out) == 3 and all(np.array_equal(y, out[0]) for y in out)
+    assert len({out[0].tobytes() for out in outs}) == n
+    _books_hold(pool, e)
+
+
+def _one_lora(pool, e, packs, x) -> tuple:
+    """The first pack's sync and step at the open budget, and what it
+    books: its uploads and its entry bytes."""
+    c, rows, sync = packs[0]
+    tid = sync()[1]
+    first = c.step("own", None, x, [0.5], rows, patch_table=tid)
+    return tid, first, pool.lora_held(STORE)[0], pool.lora_held(e)[0]
+
+
+def _count_sheds(monkeypatch) -> list:
+    """The entry sheds of the claims from here on."""
+    sheds, real = [], image_service.shed_lora
+
+    def shed(entry, nbytes, hold=(), own=False):
+        sheds.append(nbytes)
+        return real(entry, nbytes, hold, own)
+
+    monkeypatch.setattr(image_service, "shed_lora", shed)
+    return sheds
+
+
+def test_two_clients_at_a_budget_for_one_lora_take_turns(request,
+                                                         monkeypatch,
+                                                         tmp_path):
+    """With memory for both clients' uploads and one LoRA's pairs and
+    tables, each define claims the other's, and each step defines its
+    table again in its own turn from the matrices the server keeps: no
+    409, and each steps the same every time."""
+    pool, e, p, packs = _own_entry(request, monkeypatch, tmp_path, 2)
+    x = noise_from_seed(5, SHAPE)
+    tid, first, uploads, lora = _one_lora(pool, e, packs, x)
+    pool._budget = pool._resident_bytes() + uploads + lora // 2
+    sheds = _count_sheds(monkeypatch)
+    outs, errors = _sweep(packs, x, 3, synced={0: tid, 1: packs[1][2]()[1]})
+    assert errors == [[], []] and sheds
+    assert all(np.array_equal(y, first) for y in outs[0])
+    for out in outs:
+        assert len(out) == 3 and all(np.array_equal(y, out[0]) for y in out)
+    _books_hold(pool, e)
+
+
+def test_when_the_uploads_give_way_the_409_names_the_memory(request,
+                                                            monkeypatch,
+                                                            tmp_path):
+    """Three clients with memory for one client's uploads and LoRA: each
+    sync claims the others' pairs and tables, and then their matrices. A
+    step whose pairs and matrices both went meets a 409 whose text gives
+    the bytes of matrices not held and the memory free, and syncs again.
+    Each still steps the same every time, within the pack's tries."""
+    pool, e, p, packs = _own_entry(request, monkeypatch, tmp_path, 3)
+    x = noise_from_seed(5, SHAPE)
+    tid, first, uploads, lora = _one_lora(pool, e, packs, x)
+    pool._budget = pool._resident_bytes()
+    outs, errors = _sweep(packs, x, 3, synced={0: tid})
+    assert any(errors) and all(
+        err.endswith(" GB of memory is free beside the models in use")
+        and ". 0.1 GB of LoRA matrices are not held; " in err
+        for errs in errors for err in errs)
+    assert all(np.array_equal(y, first) for y in outs[0])
+    for out in outs:
+        assert len(out) == 3 and all(np.array_equal(y, out[0]) for y in out)
+    _books_hold(pool, e)

@@ -679,9 +679,10 @@ def test_a_loaded_entry_bounds_its_caches(load_stubs):
 
 def test_a_loaded_image_entry_keeps_its_cond_in_the_step_tensor_cache(
         load_stubs, monkeypatch):
-    """The step routes' caches take a loaded image entry's share of 1/16,
-    and their tensor cache keeps its cond floor of 15 MiB over the 4 MiB
-    that share leaves. Released, the entry's floor goes with it."""
+    """The step routes' tensor cache takes a loaded image entry's share of
+    1/16 and keeps its cond floor of 15 MiB over the 4 MiB that share
+    leaves, and the upload store keeps its bound. Released, the entry's
+    floor goes with it."""
     from gmlx.serve import image_steps
 
     monkeypatch.setattr(image_service, "entry_plan", lambda spec: _plan(
@@ -696,7 +697,8 @@ def test_a_loaded_image_entry_keeps_its_cond_in_the_step_tensor_cache(
     finally:
         image_service._SHARES.clear()
         image_service._scale_step_caches()
-    assert held == (_KLEIN_COND, adapter // 16) and after == tensor
+    # The upload store keeps its configured bound at any share.
+    assert held == (_KLEIN_COND, adapter) and after == tensor
 
 
 def test_the_fit_of_a_step_counts_what_the_step_caches_hold(monkeypatch):
@@ -766,7 +768,8 @@ def test_a_staged_entry_loads_no_encoder_and_shares_its_caches(
     assert load_stubs[-1]["mmproj"] is None
     tensor, adapter = image_service.cache_bytes()
     assert served.pipe.conditionings.max_bytes == tensor // 4
-    assert served.pipe.adapters.max_bytes == adapter // 4
+    # The share bounds the tensor caches only; the pool books LoRA bytes.
+    assert served.pipe.adapters.max_bytes == adapter
     image_service._release([served])
     assert scaled == [0.25, 1.0]
 

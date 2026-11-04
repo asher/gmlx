@@ -102,13 +102,19 @@ def _raw(arr: mx.array) -> np.ndarray:
 def pair_hash(down: mx.array, up: mx.array) -> str:
     """sha256 of a pair's content: a JSON line of each part's dtype and
     shape, then the little-endian bytes of ``down`` and of ``up``."""
-    head = {"v": 2,
-            "down": [_dtype_name(down), list(down.shape)],
-            "up": [_dtype_name(up), list(up.shape)]}
+    return pair_key((_dtype_name(down), down.shape, _raw(down).data),
+                    (_dtype_name(up), up.shape, _raw(up).data))
+
+
+def pair_key(down: tuple, up: tuple) -> str:
+    """``pair_hash`` of the parts as (dtype name, shape, little-endian
+    bytes), for a pair not made into arrays yet."""
+    head = {"v": 2, "down": [down[0], [int(d) for d in down[1]]],
+            "up": [up[0], [int(d) for d in up[1]]]}
     h = hashlib.sha256(json.dumps(head, sort_keys=True,
                                   separators=(",", ":")).encode())
-    h.update(_raw(down).data)
-    h.update(_raw(up).data)
+    h.update(down[2])
+    h.update(up[2])
     return h.hexdigest()
 
 

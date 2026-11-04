@@ -498,9 +498,9 @@ class _ResidencyPool:
         self._building = 0
         # Injectable for tests: the measured room, the shed of an entry's
         # request LoRA bytes, the shed of the uploads.
-        self._headroom_fn = None
-        self._lora_shed = None
-        self._store_shed = None
+        self._headroom_fn: Callable[[], Any] | None = None
+        self._lora_shed: Callable[..., None] | None = None
+        self._store_shed: Callable[[int], None] | None = None
         # A test's pause at a named point of a grant or a cold build.
         self._seam = None
 
@@ -952,6 +952,43 @@ class _ResidencyPool:
             over = self.books.settle(booking, figures)
         if over:
             self.books.overrun(booking.subject, over)
+
+    def lora_own(self, owner) -> tuple:
+        """(own bytes held, the footprint's own term, the excess booked)
+        of ``owner`` after the posted shrinks."""
+        with self._lock:
+            self.books.drain()
+            rec = self.books.rec(owner)
+            if rec is None:
+                return 0, 0, 0
+            return rec.own_used(), rec.own_term, rec.excess
+
+    def lora_free(self) -> int:
+        """The bytes the budget leaves beside the models and the bookings,
+        for a refusal's text."""
+        with self._lock:
+            self.books.drain()
+            eff = (sum(e.footprint for e in self._entries.values())
+                   + self.books.total() + self._building
+                   - self.books.claimed())
+        return max(0, int(self._budget - eff)) if self._budget else 0
+
+    def grow_lora(self, booking, n: int, *, subject: str):
+        """Book ``n`` more bytes on an open upload booking, on a request
+        thread, as an upload books: never a model."""
+        from .lora_books import LoraRefused
+
+        self._lora_guard("a LoRA reservation")
+        head = self._measured_lora_room()
+        with self._lock:
+            self.books.drain()
+            if not self.books.is_open(booking):
+                raise LoraRefused(503, f"{subject} lost the memory booked "
+                                  "for them to other work; retry")
+            claims, _ = self._lora_plan(booking.owner, int(n), subject,
+                                        evict=False, head=head, but=booking)
+            self.books.grow(booking, int(n), claims)
+        return booking
 
     def lora_held(self, owner) -> tuple:
         """(held, pending, ledger) of ``owner`` after the posted shrinks."""

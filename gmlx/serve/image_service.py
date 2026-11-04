@@ -102,6 +102,10 @@ class ServedImage:
     plan: EntryPlan
     facts: DitFacts
     adapters: list = field(default_factory=list)
+    # The footprint's term for the own LoRAs: 2x the files, the pairs and
+    # the default table's built factors, beyond which the pool books
+    # their excess.
+    lora_own_term: int = 0
 
 
 def family_matches(name: str, family, variant: str) -> bool:
@@ -125,15 +129,17 @@ def default_size(spec, defaults) -> tuple:
 # (adapter). server.image sets them; an entry books each at its bound.
 # The step routes keep one cache of uploaded tensors and one of adapter
 # matrices for the server (steps), which each image entry books too.
-_CACHE_BYTES = {"tensor": 64 << 20, "adapter": 256 << 20,
-                "steps": (64 + 256) << 20}
+_CACHE_BYTES: dict = {"tensor": 64 << 20, "adapter": 256 << 20,
+                      "steps": (64 + 256) << 20}
 
 
 def configure_caches(settings) -> None:
     """Take the cache bounds of ``server.image``."""
     _CACHE_BYTES["tensor"] = int(settings.tensor_cache_mb) << 20
-    _CACHE_BYTES["adapter"] = int(settings.adapter_cache_mb) << 20
-    _CACHE_BYTES["steps"] = (_CACHE_BYTES["tensor"] + _CACHE_BYTES["adapter"]
+    amb = settings.adapter_cache_mb
+    _CACHE_BYTES["adapter"] = None if amb is None else int(amb) << 20
+    _CACHE_BYTES["steps"] = (_CACHE_BYTES["tensor"]
+                             + (_CACHE_BYTES["adapter"] or 0)
                              if getattr(settings, "steps_api", True) else 0)
 
 
@@ -173,18 +179,23 @@ def cache_bytes() -> tuple:
 
 
 def bound_caches(pipe, configured: int = 0, share: float = 1.0) -> None:
-    """Bound the caches of a served pipeline at ``share`` of their
-    configured bounds. The adapter cache also holds the ``configured``
-    bytes of the entry's own adapters, which the entry books on their
-    own."""
+    """Bound the tensor caches of a served pipeline at ``share`` of their
+    configured bounds, and its pair and tables caches at the
+    ``configured`` bytes of the entry's own adapters plus the optional
+    cap, or no bound with none. The pool books each request LoRA byte,
+    and the first turn booking bounds those two at what it booked
+    (``bound_lora``)."""
     from gmlx.image.lora import install
 
-    tensor, adapter = cache_bytes()
-    tensor, adapter = int(tensor * share), int(adapter * share)
+    from .image_steps import UNBOUNDED
+
+    tensor, cap = cache_bytes()
+    tensor = int(tensor * share)
     pipe.conditionings.max_bytes = tensor
     pipe.reference_latents.max_bytes = tensor
-    pipe.adapters.max_bytes = adapter + int(configured)
-    pipe.tables.max_bytes = adapter + int(configured)
+    room = UNBOUNDED if cap is None else cap
+    pipe.adapters.max_bytes = room + int(configured)
+    pipe.tables.max_bytes = room + int(configured)
     install.shed_to_bounds(pipe)
 
 
@@ -458,9 +469,9 @@ def _load(spec) -> ServedImage:
                 pipe, lora.table_entries(rows))
             # A request's pairs never shed the entry's own.
             pipe.adapters.keep(_pair_keys(rows))
-        bound_caches(pipe, sum(2 * os.path.getsize(p)
-                               for p, _ in spec.adapters),
-                     plan.cache_share)
+        served.lora_own_term = sum(2 * os.path.getsize(p)
+                                   for p, _ in spec.adapters)
+        bound_caches(pipe, served.lora_own_term, plan.cache_share)
         _SHARES[id(served)] = (plan.cache_share, plan.tensor_floor)
         _scale_step_caches()
     except BaseException:
@@ -1636,6 +1647,11 @@ def shed_lora(entry, nbytes: int, hold=(), own: bool = False) -> None:
     if state is not None and state._held() is pipe and (
             not own or any(k[0] not in hold for k in state._cur)):
         install._release_cur(state)
+    # The built tables of the held table ids, and the kernel pairs built
+    # over held pairs alone.
+    tables_hold = {k for k in pipe.tables.keys(bool)
+                   if k[0] in hold or (k[0] == install.KERNEL
+                                       and all(n[0] in hold for n in k[2]))}
     left = int(nbytes)
     for cache in (pipe.tables, pipe.adapters):
         if left <= 0:
@@ -1644,7 +1660,7 @@ def shed_lora(entry, nbytes: int, hold=(), own: bool = False) -> None:
         cache.max_bytes = max(0, before - left)
         try:
             install.make_room(pipe, cache, 0,
-                              hold if cache is pipe.adapters else ())
+                              hold if cache is pipe.adapters else tables_hold)
         finally:
             cache.max_bytes = bound
         left -= before - cache.bytes
@@ -1674,10 +1690,64 @@ def lora_figures(caches, keys) -> dict:
 
 def settle_job(pool, booking, pipe) -> None:
     """Settle a job's booking at what its keys hold in the pipeline's
-    caches once it ran."""
+    caches once it ran, and bound the caches to what stays booked."""
     if booking is not None:
         pool.settle_lora(booking, lora_figures(
             (pipe.adapters, pipe.tables), booking.keys))
+        bound_lora(pool, booking.owner, pipe)
+
+
+def bound_lora(pool, entry, pipe) -> None:
+    """Bound the pipeline's pair and tables caches at the entry's own
+    bytes in each, plus what the entry booked there and its pending
+    bytes, within the optional cap. On the worker, after a turn and a
+    settle."""
+    _held, pending, ledger = pool.lora_held(entry)
+    cap = cache_bytes()[1]
+    for cache in (pipe.adapters, pipe.tables):
+        booked = sum(n for k, n in ledger.items()
+                     if cache.peek(k) is not None)
+        room = booked + pending
+        if cap is not None:
+            room = min(cap, room)
+        cache.max_bytes = max(0, cache.bytes - booked) + room
+
+
+def lora_turn(pool, entry, booking, need: int, priced: dict, *,
+              subject: str, own_held: int = 0, hold=()):
+    """A job's turn booking on the worker: ``need`` bytes its dry run
+    allocates next, with the figure of each key it priced. Its claims are
+    shed holding ``hold`` and released, and the entry's caches bound to
+    what it booked, before it allocates. Returns the booking."""
+    booking = pool.turn_lora(entry, booking, need, subject=subject,
+                             own_held=own_held)
+    booking.priced.update(priced)
+    lora_claims(pool, booking, hold)
+    bound_lora(pool, entry, entry.pipeline.pipe)
+    return booking
+
+
+def turn_figures(pool, entry, pipe, tid) -> tuple:
+    """(need, priced, own_held) of a forward on table ``tid``, the
+    pipeline's default for None, by the dry run against what is built:
+    the factors and kernel pairs it builds yet at the dtypes its leaves
+    run at, and for the default table the growth of its excess over the
+    footprint's own term. Runs on the worker after the job's last drop."""
+    from gmlx.image.lora import install
+
+    if tid is None:
+        tid = getattr(pipe, "default_table", None)
+    table = pipe.patch_tables.get(tid) if tid is not None else None
+    if tid is None or not table or not table["entries"]:
+        return 0, {}, 0
+    figs = install.table_figures(pipe, tid, pipe.dit.act_dtype,
+                                 install.f32_leaves(pipe))
+    need = sum(max(0, f - h) for f, h in figs.values())
+    if install._is_default(pipe, tid):
+        used, term, excess = pool.lora_own(entry)
+        return max(0, max(0, used + need - term) - excess), {}, 0
+    return (need, {k: f for k, (f, _h) in figs.items()},
+            sum(h for _f, h in figs.values()))
 
 
 def _pair_keys(rows) -> set:

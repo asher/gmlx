@@ -366,6 +366,10 @@ class StepClient:
             raise GmlxError(f"gmlx: {what} was refused ({status}): {msg}. The server takes "
                             "step requests from its own Mac only: run ComfyUI there, or set "
                             "server.image.steps_remote in the server's config")
+        if status == 503:
+            # Memory that a model in use holds: a refusal the pack does not
+            # retry, which passes once that model is idle.
+            msg = f"{str(msg).rstrip('.')}. Queue the prompt again then."
         raise GmlxError(f"gmlx: {what} failed ({status}): {msg}")
 
     def call_json(self, method: str, path: str, obj=None, *, what: str = "",

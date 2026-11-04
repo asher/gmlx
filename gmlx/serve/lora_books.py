@@ -20,6 +20,7 @@ import logging
 import math
 import queue
 import weakref
+from typing import Callable
 
 _log = logging.getLogger(__name__)
 
@@ -201,7 +202,7 @@ class Books:
         self.claims: dict = {}          # id(source) -> bytes
         self.open: set = set()          # _Open records
         # Tests set it to raise on bytes past a booking.
-        self.overrun_hook = None
+        self.overrun_hook: Callable[[str, int], None] | None = None
 
     # posts, from any thread
     def post(self, op) -> None:
