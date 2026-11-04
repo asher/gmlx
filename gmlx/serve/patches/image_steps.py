@@ -1277,16 +1277,46 @@ async def _av_step(t0, tensors, fields, run):
                     what="a clip" if first else "a step")
         ts = float(np.asarray(t_w.numpy(), np.float32).reshape(-1)[0])
         gen = run.gen if run is not None else 0
+        tid = fields.get("patch_table")
+        pool = _lora_pool()
+        booking = None
+        if pool is not None:
+            from ..image_steps import FACTORS
+
+            n, own = _step_estimate(served, tid, table)
+            booking = await _reserve(pool, hold._entry, n, FACTORS, own)
 
         def work():
+            try:
+                return _work()
+            finally:
+                if booking is not None:
+                    booking.cancel()
+
+        def _work():
+            # An encode let the DiT and every pair go: the own pairs load
+            # again with the DiT, within the footprint, and the turns book
+            # the table's pairs, its factors and the own table's excess.
+            nonlocal booking
             import mlx.core as mx
 
             from gmlx.image.pacing import paced
 
-            from ..image_steps import StepInterrupted
+            from ..image_steps import FACTORS, StepInterrupted
 
             vs.ensure_dit(served)
-            core = _held_table(served, fields.get("patch_table"), table)
+            if pool is not None and table is not None \
+                    and not _held(served.pipe, table):
+                raw = STATE.tables_of(served.spec.id, served.pipe).body(tid)
+                if raw is not None:
+                    booking = _define_turn(pool, hold._entry, served,
+                                           json.loads(raw), booking,
+                                           FACTORS)
+            with _active(booking):
+                core = _held_table(served, tid, table)
+            if pool is not None:
+                booking = _factor_turn(pool, hold._entry, served, core,
+                                       booking)
             feats = _f32(held)
             if feats.ndim == 2:
                 feats = feats[None]
@@ -1302,16 +1332,25 @@ async def _av_step(t0, tensors, fields, run):
                 mx.eval(*arrays)
 
             t1 = time.perf_counter()
-            with paced(pacer):
+            with paced(pacer), _active(booking):
                 vv, va, hit = vs.av_step(
                     served, v_w.mx(), a_w.mx(), ts, shifts, scale, feats,
                     _cond_key(hashes[0]), core)
                 mx.eval(vv, va)
+            if booking is not None:
+                from ..image_service import settle_job
+
+                settle_job(pool, booking, served.pipe)
             if run is not None and (run.gen != gen or run.ended):
                 raise StepInterrupted()
             return _host(vv), _host(va), time.perf_counter() - t1, hit
 
-        vv, va, fwd_s, hit = await _on_worker(work)
+        try:
+            vv, va, fwd_s, hit = await _on_worker(work)
+        except BaseException:
+            if booking is not None:
+                booking.cancel()
+            raise
         if run is not None:
             run.steps += 1
             run.rows += 1

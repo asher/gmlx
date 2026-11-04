@@ -886,6 +886,24 @@ def test_a_video_entry_is_priced_at_its_largest_phase(monkeypatch, variant,
         assert got.footprint == resident and resident > encode
 
 
+@pytest.mark.parametrize("extra", [None, 300_000_000])
+def test_a_video_entrys_own_lora_term_is_its_file_once_alone(monkeypatch,
+                                                              extra):
+    """The footprint books an h3 entry's own LoRA at its file once when it
+    is the one bf16 file, and at lora_k times the files beside a second:
+    the term its books hold its own pairs and default table against."""
+    from gmlx.serve import video_service as vs
+    from gmlx.video import memfit
+
+    got = vs.entry_plan(_h3_entry(monkeypatch, "h3", "768x768", 5,
+                                  extra=extra))
+    own = vs.ServedVideo(pipe=None, spec=None, plan=got).lora_own_term
+    lora = _H3_FILES["lora"]
+    want = lora if extra is None else int(
+        memfit.PEAKS["h3"].lora_k * (lora + extra))
+    assert own == got.lora_term == want
+
+
 def test_the_caches_of_a_tight_video_entry_take_the_room_its_clip_leaves(
         monkeypatch):
     """On a budget the clip fills but for half the room its caches are

@@ -79,6 +79,13 @@ class ServedVideo:
     captions: OrderedDict = field(default_factory=OrderedDict)
     tokenizer: Any = None
 
+    @property
+    def lora_own_term(self) -> int:
+        """The bytes the footprint books for the entry's own LoRA: its file
+        once alone, ``lora_k`` times the files otherwise. Its pairs and
+        default table past it are booked as they build."""
+        return int(self.plan.lora_term)
+
 
 def _log_line(*parts) -> None:
     _log.info(" ".join(str(p) for p in parts))
@@ -260,20 +267,23 @@ def _load(spec) -> ServedVideo:
 
 def _load_adapters(served: ServedVideo) -> None:
     """Read the entry's configured adapters into its pipeline, as their
-    default patch table."""
+    default patch table. Their pairs are the entry's own, in its
+    footprint, also when they load again with the DiT after an encode."""
     from gmlx.image import api, lora
 
     from .image_service import _pair_keys
+    from .lora_books import own_load
 
     pipe, spec = served.pipe, served.spec
     rows = []
     if spec.adapters:
         lora.fit_cache(pipe, [path for path, _ in spec.adapters])
-        for path, strength in spec.adapters:
-            ad = lora.load_adapter(pipe, path, hold=rows)
-            for w in ad.warnings:
-                _log.warning("video model %s: %s", spec.id, w)
-            rows.append((ad, float(strength)))
+        with own_load():
+            for path, strength in spec.adapters:
+                ad = lora.load_adapter(pipe, path, hold=rows)
+                for w in ad.warnings:
+                    _log.warning("video model %s: %s", spec.id, w)
+                rows.append((ad, float(strength)))
         pipe.default_table = api.define_patch_table(
             pipe, lora.table_entries(rows))
         # A step's table never sheds the entry's own pairs.
