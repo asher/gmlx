@@ -1005,7 +1005,9 @@ def _pair_room(served, need: int) -> None:
 
 
 # Per pipeline, the own pair keys of its entry to the hash of each pair's
-# down and up alone, taken at the entry's first define.
+# down and up alone, taken at the first define that reads each. It keeps
+# the keys of rows a video entry held before its LoRA file changed, so
+# readers look up the rows the entry holds now.
 _OWN_CONTENT: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
@@ -1104,9 +1106,10 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
     own = _pair_keys(served.adapters)
     # An own pair sent under another alpha, as ComfyUI sends a pair whose
     # alpha is in the file's header, is its twin: it keeps the own pair's
-    # arrays and takes no room.
-    twins = ({c: k for k, c in _own_content(served).items()}
-             if served.adapters else {})
+    # arrays and takes no room. The map is of the rows the entry holds
+    # now: a video entry reads its LoRA file again after an encode.
+    oc = _own_content(served) if served.adapters else {}
+    twins = {oc[r[-1]]: r[-1] for ad, _st in served.adapters for r in ad.dit}
     twin = {key: None if key in own else
             twins.get(_content(down, up, alpha, key))
             for down, up, alpha, key in pairs.values()}

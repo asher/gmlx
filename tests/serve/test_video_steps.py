@@ -615,14 +615,15 @@ def test_the_encode_refuses_a_prompt_whose_rows_do_not_fit(
     assert e.value.status == 400
 
 
-def _table_body(c, adapter: dict) -> dict:
+def _table_body(c, adapter: dict, alphas: bool = True) -> dict:
     """A contract table of ``adapter``'s pairs on ComfyUI's keys, as the
-    pack sends a stock LoRA loader's patches."""
+    pack sends a stock LoRA loader's patches; without ``alphas``, every
+    pair's alpha is None."""
     entries = [{"key": f"diffusion_model.{target}.weight", "band": None,
                 "patches": [{"up": c.put(up, kind="adapters"),
                              "down": c.put(down, kind="adapters"),
-                             "alpha": float(alpha), "strength": 1.0,
-                             "strength_model": 1.0}]}
+                             "alpha": float(alpha) if alphas else None,
+                             "strength": 1.0, "strength_model": 1.0}]}
                for target, (down, up, alpha) in sorted(adapter.items())]
     return {"model": "h3", "entries": entries}
 
@@ -1203,6 +1204,46 @@ def test_a_table_of_the_entrys_own_lora_takes_no_pair_room(tmp_path,
                     **kw)
     plain = c.av_step("h3", None, video, audio, 600.0, row, **kw)
     assert all(_rel(g, p) < 1e-5 for g, p in zip(got, plain))
+
+
+def test_the_old_pairs_of_a_lora_file_written_again_take_the_request_room(
+        tmp_path, monkeypatch, request):
+    """The entry's LoRA file is written again between two encodes, and
+    ComfyUI, which keeps a LoRA it loaded by its path, sends the old pairs
+    again with alpha None. The entry reads the new file with its DiT, so
+    the old pairs are no longer its own: they take the request room, and
+    a table of them over it is a 413 with its remedy."""
+    import os
+
+    from lora_fixtures import write_keys
+    from test_video_h3_lora import _adapter, _comfy_keys
+
+    from gmlx.serve.image_service import _pair_keys
+
+    path = _lora_file(tmp_path)
+    pipe, weights = _own_pipe()
+    served = _served(pipe)
+    served.spec.adapters = ((str(path), 1.0),)
+    _on_worker(vs._load_adapters, served)
+    _mount(_Host(served), request)
+    _stub_encode(monkeypatch, weights)
+    held = pipe.adapters.bytes
+    pipe.adapters.max_bytes = held + held // 2
+    c = _client()
+    body = _table_body(c, _adapter(5), alphas=False)
+    c.define_table("h3", body)
+    c.encode("h3", "a cat")
+    st = path.stat()
+    write_keys(path, _comfy_keys(_adapter(6)))
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    with pytest.raises(StepsClientError) as e:
+        c.define_table("h3", body)
+    assert e.value.status == 413
+    assert e.value.body["error"].startswith(
+        "the LoRA pairs of this patch table take ")
+    assert "; raise server.image.adapter_cache_mb to " in e.value.body["error"]
+    assert set(pipe.adapters.keys(lambda k: True)) == _pair_keys(
+        served.adapters)
 
 
 def test_a_lora_loaded_twice_takes_the_room_of_one(request):
