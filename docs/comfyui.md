@@ -291,8 +291,9 @@ time of an `h3` step, on an M5 chip or newer. Download it, then open the
 gmlx video pull fasth3
 ```
 
-The workflow is the `minimax-h3-t2v` graph with two nodes changed, and
-ComfyUI saves its clip as `gmlx/fasth3_00001_.mp4`:
+The workflow is the `minimax-h3-t2v` graph with `fasth3` in `model_name`
+on the four gmlx loaders and two nodes changed, and ComfyUI saves its clip
+as `gmlx/fasth3_00001_.mp4`:
 
 | Node | What it does |
 |------|--------------|
