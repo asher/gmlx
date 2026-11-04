@@ -42,11 +42,13 @@ _OFFLINE = {
 _THREAD_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
                 "VECLIB_MAXIMUM_THREADS", "OPENBLAS_NUM_THREADS")
 
+# The packages an image oracle environment must hold.
+NEEDS = ("torch", "diffusers", "gguf")
+
 _PROBE = r"""
 import importlib.util as u, json, sys
 print(json.dumps({"prefix": sys.prefix,
-                  **{n: u.find_spec(n) is not None
-                     for n in ("torch", "diffusers", "gguf", "gmlx", "mlx")}}))
+                  **{n: u.find_spec(n) is not None for n in sys.argv[1:]}}))
 """
 
 
@@ -62,15 +64,17 @@ def child_env(fixtures: Path, threads: int | None = None,
     return env
 
 
-def preflight(python: str, env: dict | None = None) -> str | None:
-    """None when ``python`` is a usable oracle interpreter, else why not."""
+def preflight(python: str, env: dict | None = None,
+              needs: tuple[str, ...] = NEEDS) -> str | None:
+    """None when ``python`` is a usable oracle interpreter holding every
+    package in ``needs``, else why not."""
     exe = Path(python).expanduser()
     if not exe.exists():
         return f"{python} does not exist"
     try:
-        out = subprocess.run([str(exe), "-I", "-c", _PROBE], env=env,
-                             capture_output=True, text=True, timeout=120,
-                             check=True).stdout
+        out = subprocess.run(
+            [str(exe), "-I", "-c", _PROBE, *needs, "gmlx", "mlx"], env=env,
+            capture_output=True, text=True, timeout=120, check=True).stdout
         found = json.loads(out.strip().splitlines()[-1])
     except (subprocess.SubprocessError, OSError, ValueError) as e:
         return f"{python} failed the environment probe: {e}"
@@ -81,7 +85,7 @@ def preflight(python: str, env: dict | None = None) -> str | None:
     if leaked:
         return (f"{python} can import {' and '.join(leaked)}; the oracle "
                 "environment must not hold the code it checks")
-    missing = [n for n in ("torch", "diffusers", "gguf") if not found[n]]
+    missing = [n for n in needs if not found[n]]
     if missing:
         return f"{python} cannot import {', '.join(missing)}"
     return None
