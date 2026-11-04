@@ -96,7 +96,8 @@ def served(monkeypatch, tmp_path, request):
     monkeypatch.setattr(svc, "target_size", lambda req, s: (64, 32))
     monkeypatch.setattr(svc, "fit_check", lambda req, s, size, budget: None)
     monkeypatch.setattr(svc, "default_store_root", lambda port=None: str(tmp_path / "files"))
-    monkeypatch.setattr(images, "_budget", lambda hold: None)
+    monkeypatch.setattr(images, "_book", lambda hold, s, req: (None, 0))
+    monkeypatch.setattr(images, "_budget", lambda hold, pairs=0: None)
     images.install_image_routes(cfg)
     return rec
 
@@ -899,19 +900,6 @@ def test_a_shared_encoder_timeout_or_cancel_ends_the_job_as_a_stop(
         borrow(SimpleNamespace(family="F", encoder=None), lambda: None,
                threading.Event(), 1.0)
     assert e.value.timed_out == (status == 504)
-
-
-def test_the_budget_counts_the_other_models_not_this_one(monkeypatch):
-    from gmlx.serve import capacity
-
-    monkeypatch.setattr(capacity, "overcommit", lambda: False)
-    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 100)
-    hold = SimpleNamespace(
-        _entry=SimpleNamespace(footprint=30),
-        _pool=SimpleNamespace(stats=lambda: {"resident_bytes": 70}))
-    assert images._budget(hold) == 60
-    monkeypatch.setattr(capacity, "overcommit", lambda: True)
-    assert images._budget(hold) is None
 
 
 def test_the_responses_route_warns_on_the_image_generation_tool(caplog):

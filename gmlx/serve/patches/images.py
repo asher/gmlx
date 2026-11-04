@@ -274,9 +274,13 @@ async def _read_body(route: str, request: Request):
     return body, images, mask
 
 
-def _budget(hold):
-    """The bytes a request may plan on: the working budget less the other
-    resident models, or None with GMLX_OVERCOMMIT set."""
+def _budget(hold, pairs: int = 0):
+    """The bytes a request may plan on, or None with GMLX_OVERCOMMIT set:
+    the working budget less what the pool holds beside the entry's
+    weights, its held LoRA bytes and the held uploads, which the plan
+    counts itself. The pending bookings stay in, the request's own among
+    them, less ``pairs``, the pair part of its own, which the plan reads
+    held once the pairs load."""
     from ..capacity import overcommit, working_budget_bytes
 
     if overcommit():
@@ -284,9 +288,29 @@ def _budget(hold):
     total = working_budget_bytes()
     if total is None:
         return None
-    pool = hold._pool
-    others = pool.stats()["resident_bytes"] - hold._entry.footprint
-    return max(0, total - others)
+    beside = hold._pool.plan_beside(hold._entry)
+    return max(0, total - (beside - int(pairs)))
+
+
+def _book(hold, served, req):
+    """(booking, pair part) of a request's LoRA reservation on the route's
+    thread, before its budget is read: the estimate of its pairs and
+    factors, which may evict idle models as a cold load does. None when
+    it has nothing to book; the job's turns book from there."""
+    from ..image_service import (ADAPTERS, lora_refusal,
+                                 request_estimate)
+    from ..lora_books import LoraRefused
+
+    pool, entry = hold._pool, hold._entry
+    pairs, factors, own = request_estimate(pool, entry, served,
+                                           req.adapters, STATE.model_dirs)
+    if pairs + factors <= 0:
+        return None, 0
+    try:
+        return pool.reserve_lora(entry, pairs + factors, subject=ADAPTERS,
+                                 own_held=own), pairs
+    except LoraRefused as e:
+        raise lora_refusal(e) from None
 
 
 def _text_model(model):
@@ -435,6 +459,8 @@ def make_endpoint(route: str):
                           headers={"Retry-After": str(wait)})
         stop = threading.Event()
         holds: list = []
+        # The route's LoRA reservation, which the job takes over.
+        booked: list = []
         gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
         timeout_s = gen.get_token_queue_timeout()
 
@@ -449,7 +475,11 @@ def make_endpoint(route: str):
             served = hold._entry.pipeline
             check_family(req, served)
             size = target_size(req, served)
-            budget = _budget(hold)
+            # The request's own reservation is pending when the budget is
+            # read.
+            booking, pairs = _book(hold, served, req)
+            booked.append(booking)
+            budget = _budget(hold, pairs)
             fit_check(req, served, size, budget)
             borrow = None
             if served.spec.encoder_model is not None:
@@ -462,6 +492,10 @@ def make_endpoint(route: str):
             return served, size, budget, borrow
 
         def release():
+            for b in booked:
+                if b is not None:
+                    b.cancel()
+            booked.clear()
             for h in holds:
                 try:
                     h.release()
@@ -507,6 +541,8 @@ def make_endpoint(route: str):
             return _error(path, 500, f"{path} failed ({type(e).__name__}); "
                           "see the server log", err_type="server_error")
         model_id = served.spec.id
+        pool, entry = holds[0]._pool, holds[0]._entry
+        booking = booked[0] if booked else None
         submitted = time.monotonic()
         loop = asyncio.get_running_loop()
         events: asyncio.Queue = asyncio.Queue()
@@ -526,7 +562,8 @@ def make_endpoint(route: str):
                                submitted=submitted, borrow=borrow,
                                emit=emit if req.stream else None,
                                model_dirs=STATE.model_dirs,
-                               embed_metadata=STATE.settings.embed_metadata)
+                               embed_metadata=STATE.settings.embed_metadata,
+                               pool=pool, entry=entry, booking=booking)
 
         future = WORKER.submit(job)
 

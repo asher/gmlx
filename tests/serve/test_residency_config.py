@@ -846,14 +846,14 @@ def _h3_entry(monkeypatch, variant, size, seconds, budget=120 * GB,
 _CAPTIONS = 8 * 1024 * 5376 * 2
 
 
-def _cache_terms() -> tuple:
-    """(caches, request pairs) an entry books at a cache share of 1: the
-    tensor caches with the step routes' caches, and the pairs and tables
-    of the LoRAs a request sends."""
+def _cache_term() -> int:
+    """The caches an entry books at a cache share of 1: the tensor caches
+    with the step routes' tensor cache. A request's LoRA bytes are booked
+    as they arrive, outside it."""
     from gmlx.serve import image_service
 
-    tensor, adapter = image_service.cache_bytes()
-    return 2 * tensor + image_service._CACHE_BYTES["steps"], 2 * adapter
+    tensor, _cap = image_service.cache_bytes()
+    return 2 * tensor + image_service._CACHE_BYTES["steps"]
 
 
 @pytest.mark.parametrize("variant, size, seconds", [
@@ -874,9 +874,9 @@ def test_a_video_entry_is_priced_at_its_largest_phase(monkeypatch, variant,
     clip = vs.plan_clip(got, frames=got.frames, width=got.size[0],
                         height=got.size[1], text=vs.PRICED_TEXT_ROWS)
     dit = clip.terms["denoise"]["dit"] + clip.terms["denoise"]["lora"]
-    caches, pairs = _cache_terms()
+    caches = _cache_term()
     encode = clip.phases["encode"] + caches + _CAPTIONS
-    resident = dit + clip.phases["decode"] + caches + _CAPTIONS + pairs
+    resident = dit + clip.phases["decode"] + caches + _CAPTIONS
     assert got.cache_share == 1.0
     assert got.lora_term == clip.terms["denoise"]["lora"]
     if variant == "h3-base":
@@ -892,10 +892,10 @@ def test_the_caches_of_a_tight_video_entry_take_the_room_its_clip_leaves(
     bounded at, the entry books each cache at about half its bound."""
     from gmlx.serve import video_service as vs
 
-    caches, pairs = _cache_terms()
+    caches = _cache_term()
     full = vs.entry_plan(_h3_entry(monkeypatch, "h3", "768x768", 5))
-    bare = full.footprint - caches - pairs
-    budget = bare + (caches + pairs) // 2
+    bare = full.footprint - caches
+    budget = bare + caches // 2
     got = vs.entry_plan(_h3_entry(monkeypatch, "h3", "768x768", 5, budget))
     assert 0.4 < got.cache_share <= 0.5
     assert bare < got.footprint <= budget
@@ -906,9 +906,9 @@ def _bare(monkeypatch, variant, size, seconds) -> tuple:
     it books with every cache empty."""
     from gmlx.serve import video_service as vs
 
-    caches, pairs = _cache_terms()
+    caches = _cache_term()
     full = vs.entry_plan(_h3_entry(monkeypatch, variant, size, seconds))
-    return full, full.footprint - caches - pairs
+    return full, full.footprint - caches
 
 
 # One cond of the priced rows of H3's 5120-wide encoder features in f32,
@@ -941,7 +941,7 @@ def test_a_tight_video_entry_keeps_one_cond_in_the_tensor_cache(
         "defaults.size or defaults.seconds. GMLX_OVERCOMMIT=1 overrides.")
     budget = capacity.ram_budget_bytes(32 << 30)
     got = vs.entry_plan(_h3_entry(monkeypatch, "h3", "1344x768", 5, budget))
-    assert got.cache_share == 36 / 64 and got.footprint <= budget
+    assert got.cache_share == 1.0 and got.footprint <= budget
 
 
 @pytest.mark.parametrize("steps_api, tensor_mb, floor", [
@@ -973,24 +973,28 @@ def test_a_video_entry_keeps_cond_room_only_in_a_tensor_cache_it_has(
                                 bare + floor - 1))
 
 
-def test_fasth3_at_1344x768_fits_a_36_gb_mac_with_one_cond_floored(
+def test_fasth3_at_1344x768_fits_a_36_gb_mac_and_floors_a_cond_when_tight(
         monkeypatch):
-    """FastH3 at 1344x768 for 5 s fits a 36 GB Mac's budget at a share of
-    12/64. The tensor cache's share holds 12 MiB, so the entry books the
+    """FastH3 at 1344x768 for 5 s fits a 36 GB Mac's budget with each cache
+    at its whole bound. On a budget that leaves its caches 12/64 of their
+    bounds, the tensor cache's share holds 12 MiB, so the entry books the
     8 MiB a cond needs beside it, there alone."""
     from gmlx.serve import capacity, image_service
     from gmlx.serve import video_service as vs
 
-    _full, bare = _bare(monkeypatch, "fasth3", "1344x768", 5)
+    full, bare = _bare(monkeypatch, "fasth3", "1344x768", 5)
     budget = capacity.ram_budget_bytes(36 << 30)
     got = vs.entry_plan(_h3_entry(monkeypatch, "fasth3", "1344x768", 5,
                                   budget))
-    caches, pairs = _cache_terms()
-    tensor, _adapter = image_service.cache_bytes()
+    assert (got.cache_share, got.footprint) == (1.0, full.footprint)
+    assert got.footprint <= budget
+    caches = _cache_term()
+    tensor, _cap = image_service.cache_bytes()
     share = 12 / 64
-    assert got.cache_share == share
-    assert got.footprint == (bare + int(caches * share) + int(pairs * share)
-                             + _COND - int(tensor * share)) <= budget
+    tight = bare + int(caches * share) + _COND - int(tensor * share)
+    got = vs.entry_plan(_h3_entry(monkeypatch, "fasth3", "1344x768", 5,
+                                  tight))
+    assert (got.cache_share, got.footprint) == (share, tight)
 
 
 @pytest.mark.parametrize("under", ["cond", "clip"])

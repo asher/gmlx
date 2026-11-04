@@ -188,7 +188,7 @@ def entry_plan(spec) -> VideoEntryPlan:
     budget = working_budget_bytes()
     clip = plan_clip(base, frames=d["frames"], width=width, height=height,
                      text=PRICED_TEXT_ROWS, budget=budget)
-    tensor, adapter = cache_bytes()
+    tensor, _cap = cache_bytes()
     steps = _CACHE_BYTES["steps"]
     caches = 2 * tensor + steps
     # The step routes' tensor cache keeps room for one cond of the priced
@@ -201,14 +201,13 @@ def entry_plan(spec) -> VideoEntryPlan:
         ident.config["hidden_size"]) * 2
 
     def price(share: float, kept: int = floor) -> int:
-        # The step routes' caches and the refined rows stay through the
-        # encode, the tensor cache with room for ``kept`` bytes at any
-        # share. The pairs and tables of a request go with the DiT.
+        # The step routes' tensor cache and the refined rows stay through
+        # the encode, the tensor cache with room for ``kept`` bytes at any
+        # share. A request's LoRA bytes are booked as they arrive.
         held = (int(caches * share) + max(0, kept - int(tensor * share))
                 + captions)
         return max(clip.phases["encode"] + held,
-                   resident_bytes(clip.phases, clip.terms) + held
-                   + int(2 * adapter * share))
+                   resident_bytes(clip.phases, clip.terms) + held)
 
     # The share the clip leaves the caches, as an image entry's, then the
     # largest one under it that leaves the tensor cache its cond too.

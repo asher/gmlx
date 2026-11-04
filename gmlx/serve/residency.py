@@ -1276,6 +1276,18 @@ class _ResidencyPool:
             return (sum(e.footprint for e in self._entries.values())
                     + self.books.total() + self._building)
 
+    def plan_beside(self, owner) -> int:
+        """What the pool holds beside a request plan on entry ``owner``:
+        the resident bytes less its weights, its held LoRA bytes and the
+        held uploads, which the plan counts itself."""
+        from .lora_books import STORE
+
+        with self._lock:
+            self.books.drain()
+            return (sum(e.footprint for e in self._entries.values())
+                    + self.books.total() + self._building - owner.footprint
+                    - self.books.held(owner) - self.books.held(STORE))
+
     def _stream_reservations(self) -> tuple[int, int, int, int]:
         """``(room, ceiling margin, host overhead, host floor)`` the
         resident streamed models keep but have not filled. The room is a

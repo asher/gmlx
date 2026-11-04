@@ -301,7 +301,7 @@ def test_the_caches_of_a_tight_entry_take_the_room_its_image_leaves(
         plan_stubs, monkeypatch):
     _modes(monkeypatch, caches=True)
     b = image_service._CACHE_BYTES
-    full = 2 * b["tensor"] + b["steps"] + 2 * b["adapter"]
+    full = 2 * b["tensor"] + b["steps"]
     plan_stubs.budget = 5 * GB + full // 2
     plan = image_service.entry_plan(_spec())
     assert plan.staged and 0.4 < plan.cache_share <= 0.5
@@ -317,9 +317,9 @@ MiB = 1 << 20
 def test_a_tight_image_entry_keeps_one_cond_in_the_tensor_cache(
         plan_stubs, monkeypatch):
     """An image entry books the step routes' tensor cache at no less than
-    one cond of its family's priced rows. FLUX.2 klein 4B within 90 MiB
-    of its budget would leave that cache 6/64 of its 64 MiB, under its
-    15 MiB cond: it books the cond beside a share of 5/64. Its image and
+    one cond of its family's priced rows. FLUX.2 klein 4B within 30 MiB
+    of its budget would leave that cache 10/64 of its 64 MiB, under its
+    15 MiB cond: it books the cond beside a share of 7/64. Its image and
     one cond fit with every cache empty, and a byte less refuses it, the
     need shown rounded up and the budget down."""
     from gmlx.image import loader, memfit
@@ -329,10 +329,10 @@ def test_a_tight_image_entry_keeps_one_cond_in_the_tensor_cache(
     fam = get_family("flux2_klein")
     monkeypatch.setattr(loader, "identify_dit", lambda path, **k: _ident(
         fam, "distilled", joint_attention_dim=7680))
-    plan_stubs.budget = 5 * GB + 90 * MiB
+    plan_stubs.budget = 5 * GB + 30 * MiB
     plan = image_service.entry_plan(_spec())
     assert plan.staged and plan.tensor_floor == _KLEIN_COND
-    assert (plan.cache_share, plan.footprint) == (5 / 64, 5 * GB + 85 * MiB)
+    assert (plan.cache_share, plan.footprint) == (7 / 64, 5 * GB + 29 * MiB)
     plan_stubs.budget = 5 * GB + _KLEIN_COND
     plan = image_service.entry_plan(_spec())
     assert (plan.cache_share, plan.footprint) == (0.0, plan_stubs.budget)
@@ -508,29 +508,41 @@ def test_a_flow_map_entry_refuses_a_guidance_or_sampler_default(
     assert image_service.entry_plan(_spec(defaults=defaults))
 
 
-def test_an_entry_books_both_caches_at_twice_their_bound(plan_stubs,
-                                                         monkeypatch):
+def test_an_entry_books_its_tensor_caches_and_no_lora_room(plan_stubs,
+                                                           monkeypatch):
+    """An entry with no LoRA of its own books its two tensor caches, and
+    with the step routes on their tensor cache, at their bounds: no room
+    for request LoRAs, whose bytes are booked as they arrive, whatever the
+    cap."""
     from gmlx.image import memfit
 
     seen = []
     plan = memfit.plan_memory
 
     def spy(*a, **kw):
-        seen.append((kw["adapters"], kw["cache_bytes"]))
+        seen.append((tuple(kw["adapters"]), kw["cache_bytes"]))
         return plan(*a, **kw)
 
     monkeypatch.setattr(memfit, "plan_memory", spy)
+    fps: dict = {}
+    calls: dict = {}
     try:
-        for steps_api in (False, True):
-            image_service.configure_caches(SimpleNamespace(
-                tensor_cache_mb=3, adapter_cache_mb=5, steps_api=steps_api))
-            image_service.entry_plan(_spec())
+        for cap in (None, 1, 256):
+            for steps_api in (False, True):
+                image_service.configure_caches(SimpleNamespace(
+                    tensor_cache_mb=3, adapter_cache_mb=cap,
+                    steps_api=steps_api))
+                seen.clear()
+                fps.setdefault(steps_api, set()).add(
+                    image_service.entry_plan(_spec()).footprint)
+                calls.setdefault(steps_api, set()).update(seen)
     finally:
         image_service.configure_caches(SimpleNamespace(tensor_cache_mb=64,
                                                        adapter_cache_mb=256))
-    # With the step routes on, the entry also books their two caches.
-    assert seen[0] == ([2 * (5 << 20)], 2 * (3 << 20))
-    assert seen[-1] == ([2 * (5 << 20)], 2 * (3 << 20) + (8 << 20))
+    # With the step routes on, the entry also books their tensor cache.
+    assert calls == {False: {((), 2 * (3 << 20))},
+                     True: {((), 3 * (3 << 20))}}
+    assert [len(f) for f in fps.values()] == [1, 1]
 
 
 def test_a_served_pipeline_caches_hold_at_most_their_bound():
@@ -1321,20 +1333,28 @@ def test_a_request_naming_an_entry_adapter_sets_its_strength_once(
 
 @pytest.fixture
 def tiny_served(monkeypatch, tmp_path):
-    """A tiny Z-Image entry loaded with one LoRA of its own, its request
-    adapter cache half a LoRA file: room for one request LoRA, not two."""
+    """A tiny Z-Image entry loaded with a one-pair LoRA of its own, its
+    request adapter cap one and a half LoRA files: room for one request
+    LoRA, not two. With no pool, the pair cache holds the cap beside the
+    room the entry books for its own, which one pair leaves for little
+    else, so a second request's LoRA sheds the first's."""
     from gmlx.image import api
-    from lora_fixtures import tiny_z_adapter, write_adapter
+    from image_fixtures import TINY_Z_CONFIG
+    from lora_fixtures import make_pair, tiny_z_adapter, write_adapter
     from test_image_lora_apply import _pipe as tiny_pipe
 
-    files = [write_adapter(tmp_path / f"{name}.safetensors", "kohya",
-                           tiny_z_adapter(seed, 4.0, wide=True))
-             for name, seed in (("own", 1), ("a", 11), ("b", 12))]
+    dim = TINY_Z_CONFIG["dim"]
+    own = {"layers.1.attention.to_k": make_pair(
+        np.random.default_rng(1), dim, dim, 2, 4.0)}
+    files = [write_adapter(tmp_path / "own.safetensors", "kohya", own)]
+    files += [write_adapter(tmp_path / f"{name}.safetensors", "kohya",
+                            tiny_z_adapter(seed, 4.0, wide=True))
+              for name, seed in (("a", 11), ("b", 12))]
     monkeypatch.setattr(api, "load", lambda path, **kw: tiny_pipe())
     monkeypatch.setattr(image_service, "entry_plan", lambda spec: _plan())
     monkeypatch.setattr(image_service, "_SHARES", {})
     monkeypatch.setitem(image_service._CACHE_BYTES, "adapter",
-                        os.path.getsize(files[1]) // 2)
+                        3 * os.path.getsize(files[1]) // 2)
     served = image_service._load(_spec(encoder=None,
                                        adapters=((files[0], 1.0),)))
     yield served, str(tmp_path)
@@ -1369,14 +1389,13 @@ def test_request_adapters_over_the_cache_are_refused_by_name(tiny_served):
     ((1 << 20), (1 << 20) + 1, "1.1", "1.0"),
     ((1 << 20) - 1, 1 << 20, "1.0", "0.9")])
 def test_request_adapters_just_over_the_room_read_their_need_above_it(
-        tmp_path, room, size, need, bound):
+        tmp_path, monkeypatch, room, size, need, bound):
     """The refusal rounds the files' bytes up and the room down, so a need
     just over the room never reads at or under it."""
     path = tmp_path / "style.safetensors"
     path.write_bytes(bytes(size))
-    cache = _Cache()
-    cache.max_bytes = room
-    served = SimpleNamespace(pipe=SimpleNamespace(adapters=cache), adapters=[])
+    monkeypatch.setitem(image_service._CACHE_BYTES, "adapter", room)
+    served = SimpleNamespace(pipe=SimpleNamespace(), adapters=[])
     with pytest.raises(image_service.ImageRequestError) as e:
         image_service._room_for(served, [str(path)])
     assert (f"take {need} MiB, more than the {bound} MiB this image model "
