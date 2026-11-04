@@ -2351,3 +2351,44 @@ def test_an_entry_lora_sent_again_by_comfyui_takes_no_request_room(
                   patch_table=c.define_table("zit", body))
     assert np.array_equal(got, want)
     assert host.held == 0
+
+
+def test_the_twins_of_an_entry_lora_outlast_a_put_that_must_shed(
+        host, tmp_path):
+    """The pairs of the entry's own LoRA sent with alpha None hold no
+    bytes, so the put of a later table that must shed leaves them and the
+    entry's own pairs: the first table steps again as before with no 409,
+    and its built table holds no copy of the entry's arrays."""
+    from gmlx.serve import image_service
+
+    p, ad, c, body = _header_alpha_own(host, tmp_path)
+    own = image_service._pair_keys([(ad, 1.0)])
+    held = p.adapters.bytes
+    p.adapters.max_bytes = 2 * held + 64
+    host.served["own"].plan.cache_share = 1.0
+    first_table = c.define_table("own", body)
+    twins = p.adapters.keys(lambda k: k not in own)
+    assert len(twins) == len(ad.dit)
+    rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
+    first = c.step("own", None, x, [0.5], rows, patch_table=first_table)
+    tables = p.tables.bytes
+    pairs = [(m, b, p.adapters.peek(k)) for m, b, k in ad.dit]
+
+    def other(scale):
+        # Pairs the size of the entry's LoRA, each table filling the room.
+        return {"entries": [{
+            "key": f"diffusion_model.{m}.weight",
+            "band": None if b is None else list(b),
+            "patches": [{"up": c.put(np.array(pair.up) * scale,
+                                     kind="adapters"),
+                         "down": c.put(np.array(pair.down), kind="adapters"),
+                         "alpha": None, "strength": 1.0}]}
+            for m, b, pair in pairs]}
+
+    c.define_table("own", other(2.0))
+    c.define_table("own", other(3.0))
+    assert all(p.adapters.peek(k) is not None for k in (*own, *twins))
+    again = c.step("own", None, x, [0.5], rows, patch_table=first_table)
+    assert np.array_equal(again, first)
+    assert p.tables.bytes == tables
+    assert host.held == 0

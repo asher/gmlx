@@ -121,7 +121,8 @@ def register_pair(pipe, down, up, alpha: float | None = None,
     change it afterwards. ``key`` is the pair's ``pair_hash`` when the
     caller has it already. ``twin`` is the key of a held pair with the
     same down and up under another alpha: the pair keeps the twin's
-    arrays and takes no bytes of its own."""
+    arrays, takes no bytes of its own, and a put never sheds it, as it
+    never sheds the twin."""
     down, up = (a if isinstance(a, mx.array) else mx.array(a)
                 for a in (down, up))
     if down.ndim != 2 or up.ndim != 2 or up.shape[1] != down.shape[0]:
@@ -140,8 +141,10 @@ def register_pair(pipe, down, up, alpha: float | None = None,
     if pipe.adapters.get(key) is None:
         held = None if twin is None else pipe.adapters.peek(twin)
         if held is not None:
-            # The cache counts the twin's arrays already.
+            # The cache counts the twin's arrays already. Shed, the pair
+            # would free nothing, so it is kept as the twin is.
             pipe.adapters.put(key, Pair(held.down, held.up, alpha), 0)
+            pipe.adapters.keep_also((key,))
             return key
         pair = Pair(down, up, alpha)
         if pair.nbytes > pipe.adapters.max_bytes:
