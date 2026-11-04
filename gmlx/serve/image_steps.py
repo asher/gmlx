@@ -64,6 +64,9 @@ MAX_RUNS = 32
 MAX_ROWS = 16
 MAX_TENSOR_BYTES = 1 << 30
 MAX_ADAPTER_BYTES = 1 << 30
+# The bytes of contract table bodies a loaded pipeline keeps, to define a
+# client's table again when the pipeline let its core table go.
+CLIENT_TABLE_BYTES = 16 << 20
 FEATURES = ("prefix_cache", "noise_mask", "rgba_vae", "tiled_vae",
             "ref_cache", "skip_blocks", "av_step")
 
@@ -300,6 +303,71 @@ class Run:
     ref_cache: dict = field(default_factory=dict)   # denoise_step's, per run
 
 
+class ClientTables:
+    """The contract tables clients defined on one pipeline: each id's
+    core table id and the body, as sent, it was defined from. A step on a
+    core table the pipeline let go defines it again from its body. The
+    least recently used ids go first past ``max_bytes`` of bodies, the
+    newest one staying, and a step that names an id gone is a 409 the
+    client answers by sending its table again."""
+
+    def __init__(self, max_bytes: int | None = None):
+        from collections import OrderedDict
+
+        self.max_bytes = int(CLIENT_TABLE_BYTES if max_bytes is None
+                             else max_bytes)
+        self._items: OrderedDict = OrderedDict()   # id -> (core, body)
+        self._bytes = 0
+        self._lock = threading.Lock()
+
+    def put(self, tid: str, core: str, body: bytes | None = None) -> None:
+        """Keep ``tid`` as ``core``, with the body it was defined from."""
+        with self._lock:
+            old = self._items.pop(tid, None)
+            if old is not None and old[1] is not None:
+                self._bytes -= len(old[1])
+            self._items[tid] = (core, body)
+            self._bytes += len(body) if body is not None else 0
+            while self._bytes > self.max_bytes and len(self._items) > 1:
+                _, (_core, gone) = self._items.popitem(last=False)
+                self._bytes -= len(gone) if gone is not None else 0
+
+    def __setitem__(self, tid: str, core: str) -> None:
+        self.put(tid, core)
+
+    def get(self, tid, default=None):
+        with self._lock:
+            got = self._items.get(tid)
+            if got is None:
+                return default
+            self._items.move_to_end(tid)
+            return got[0]
+
+    def __getitem__(self, tid) -> str:
+        got = self.get(tid)
+        if got is None:
+            raise KeyError(tid)
+        return got
+
+    def __contains__(self, tid) -> bool:
+        with self._lock:
+            return tid in self._items
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    def body(self, tid) -> bytes | None:
+        """The body ``tid`` was defined from, as sent, or None."""
+        with self._lock:
+            got = self._items.get(tid)
+        return None if got is None else got[1]
+
+    @property
+    def bytes(self) -> int:
+        return self._bytes
+
+
 def _tensor_cache(max_bytes: int) -> _Bytes:
     return _Bytes(max_bytes, "the step routes' tensor cache",
                   "tensor_cache_mb")
@@ -325,8 +393,7 @@ class StepsState:
         # room one of them keeps in the tensor cache for a cond.
         self._share, self._tensor_floor = 1.0, 0
         self.runs: dict = {}
-        # model id -> (weak reference to its pipeline,
-        #              {contract table id: core table id})
+        # model id -> (weak reference to its pipeline, ClientTables)
         self.tables: dict = {}
         self.lock = threading.Lock()
         self.settings = None
@@ -497,15 +564,15 @@ class StepsState:
 
     # Patch tables.
 
-    def tables_of(self, model: str, pipe) -> dict:
-        """The contract table ids clients defined on ``pipe``, the loaded
-        pipeline of ``model``, mapped to its core table ids. A pipeline
-        loaded again starts an empty map. The map holds the pipeline
-        weakly, so a model the pool releases leaves nothing alive here."""
+    def tables_of(self, model: str, pipe) -> ClientTables:
+        """The contract tables clients defined on ``pipe``, the loaded
+        pipeline of ``model``. A pipeline loaded again starts an empty
+        map. The map holds the pipeline weakly, so a model the pool
+        releases leaves nothing alive here."""
         with self.lock:
             held = self.tables.get(model)
             if held is None or held[0]() is not pipe:
-                held = (weakref.ref(pipe), {})
+                held = (weakref.ref(pipe), ClientTables())
                 self.tables[model] = held
             return held[1]
 

@@ -1126,13 +1126,16 @@ def test_a_model_released_with_a_table_frees_its_pipeline(host):
     assert [r() for r in refs] == [None, None]
 
 
-def test_a_table_whose_pairs_a_define_sheds_before_its_step_is_missing(
-        host, pipe, monkeypatch):
+@pytest.mark.parametrize("lost", [False, True])
+def test_a_table_whose_pairs_a_define_sheds_before_its_step_steps(
+        host, pipe, monkeypatch, lost):
     """Another client's define can run on the image worker between a
     step's check of its table and the step, and shed the table's pairs
     from a pair cache with room for one table and none for a built one.
-    The step answers the table as missing, and steps as before once the
-    pack sends it again."""
+    The step defines the table again in its own turn, from the body the
+    server keeps, and steps as before. With the table's matrices gone
+    from the adapter cache too, the step answers the table as missing,
+    and steps as before once the pack sends it again."""
     c = _client()
     body, (down, up) = _table_body(c)
     theirs, _pair = _table_body(_client(), scale=0.3)
@@ -1150,16 +1153,46 @@ def test_a_table_whose_pairs_a_define_sheds_before_its_step_is_missing(
             ran.append(True)
             _on_worker(steps.define_table, served, theirs,
                        steps.STATE.adapters)
+            if lost:
+                steps.STATE.adapters.clear()
         return core
 
     monkeypatch.setattr(routes, "_table", define_between)
-    with pytest.raises(MissingTensors) as e:
-        c.step("zit", run, x, [0.75], rows, patch_table=tid)
-    assert ran and e.value.missing == [tid]
-    assert c.define_table("zit", body) == tid
+    if lost:
+        with pytest.raises(MissingTensors) as e:
+            c.step("zit", run, x, [0.75], rows, patch_table=tid)
+        assert e.value.missing == [tid]
+        # The client sends the matrices again, as the pack's sync does.
+        c._uploaded.clear()
+        c.put(up, kind="adapters"), c.put(down, kind="adapters")
+        assert c.define_table("zit", body) == tid
     again = c.step("zit", run, x, [0.75], rows, patch_table=tid)
     c.end(run)
-    assert np.array_equal(again, first)
+    assert ran and np.array_equal(again, first)
+
+
+def test_the_table_bodies_a_pipeline_keeps_are_bounded(host, pipe):
+    """The server keeps the body of each table a client defines, to define
+    it again at a step, up to a bound in bytes. Past it the least recently
+    defined or stepped id goes first, and a step on an id gone is a 409
+    the client answers by sending its table again."""
+    c = _client()
+    bodies = [_table_body(c, strength=s)[0] for s in (0.2, 0.4, 0.6)]
+    tables = steps.STATE.tables_of("zit", pipe)
+    first = c.define_table("zit", bodies[0])
+    tables.max_bytes = 2 * tables.bytes
+    rows, x = _rows(c, _features()), noise_from_seed(3, SHAPE)
+    second = c.define_table("zit", bodies[1])
+    c.step("zit", None, x, [0.75], rows, patch_table=first)
+    third = c.define_table("zit", bodies[2])
+    assert [t in tables for t in (first, second, third)] == [True, False,
+                                                             True]
+    assert len(tables) == 2 and tables.bytes <= tables.max_bytes
+    with pytest.raises(MissingTensors) as e:
+        c.step("zit", None, x, [0.75], rows, patch_table=second)
+    assert e.value.missing == [second]
+    assert c.define_table("zit", bodies[1]) == second
+    c.step("zit", None, x, [0.75], rows, patch_table=second)
 
 
 def test_a_table_whose_matrices_are_not_held_is_a_409(host):
@@ -2387,7 +2420,8 @@ def test_a_define_that_needs_a_stepped_tables_room_drops_that_table(
     request LoRA: the new table's pairs need the room of the pairs a
     stepped table is built over, so the table goes first and its pairs
     after it, at the define. Nothing the caches let go stays alive, and
-    the old table is missing until it is sent again."""
+    a step of the old table defines it again in its own turn, in the
+    room of the new table's pairs, and steps as before."""
     p, ad, c, _body = _header_alpha_own(host, tmp_path)
     held = p.adapters.bytes
     p.adapters.max_bytes = 2 * held + 64
@@ -2407,14 +2441,14 @@ def test_a_define_that_needs_a_stepped_tables_room_drops_that_table(
             for m, b, pair in pairs]}
 
     first = c.define_table("own", other(2.0))
-    c.step("own", None, x, [0.5], rows, patch_table=first)
+    stepped = c.step("own", None, x, [0.5], rows, patch_table=first)
     assert p.tables.bytes > 0
     c.define_table("own", other(3.0))
     assert p.adapters.bytes == 2 * held
     assert p.tables.bytes == 0 and not p.lora._cur
-    with pytest.raises(MissingTensors) as e:
-        c.step("own", None, x, [0.5], rows, patch_table=first)
-    assert e.value.status == 409 and e.value.missing == [first]
+    assert np.array_equal(
+        c.step("own", None, x, [0.5], rows, patch_table=first), stepped)
+    assert p.adapters.bytes == 2 * held
     assert host.held == 0
 
 
@@ -2568,7 +2602,8 @@ def test_an_images_api_request_between_a_define_and_its_step_keeps_it(
     """ComfyUI defines a table beside a stepped one on a full pair cache,
     and an images API request then reads a LoRA file the size of one
     before the table steps. The stepped table stepped before the new
-    table's pairs came, so it goes first, and the new table steps."""
+    table's pairs came, so it goes first, and the new table steps. A step
+    of the stepped table after defines it again in its own turn."""
     import os
 
     from gmlx.serve import image_service
@@ -2582,25 +2617,24 @@ def test_an_images_api_request_between_a_define_and_its_step_keeps_it(
     rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
     pairs = [(m, b, p.adapters.peek(k)) for m, b, _a, k in ad.dit]
     stale = c.define_table("own", _scaled(c, pairs, 2.0))
-    c.step("own", None, x, [0.5], rows, patch_table=stale)
+    first = c.step("own", None, x, [0.5], rows, patch_table=stale)
     fresh = c.define_table("own", _scaled(c, pairs, 3.0))
     tid, _ = _on_worker(image_service._adapter_table, host.served["own"],
                         [(name, 1.0)], [str(tmp_path)])
     _direct(p, _features(), table=tid)
     c.step("own", None, x, [0.5], rows, patch_table=fresh)
-    with pytest.raises(MissingTensors) as e:
-        c.step("own", None, x, [0.5], rows, patch_table=stale)
-    assert e.value.status == 409 and e.value.missing == [stale]
+    assert np.array_equal(
+        c.step("own", None, x, [0.5], rows, patch_table=stale), first)
+    assert p.adapters.bytes <= p.adapters.max_bytes
     assert host.held == 0
 
 
-def _pack_steps(c, pairs, scale, x, out: list, n: int):
-    """The requests of a ComfyUI that samples ``n`` steps under a LoRA of
-    ``pairs`` scaled by ``scale``, one request a turn. It syncs the table
-    as the pack does, uploading the matrices the server lacks and then
-    defining it. A 409 for the table at a step syncs it again and sends
-    the step once more; a second 409 fails the step. Each output goes to
-    ``out`` with the 409s and the uploads its step met."""
+def _pack_sync(c, pairs, scale):
+    """The table sync of a ComfyUI under a LoRA of ``pairs`` scaled by
+    ``scale``, as the pack syncs it: upload the matrices again, which the
+    client sends when the server lacks them, then define the table.
+    Returns the sync, which returns how many matrices the server lacked
+    and the table id."""
     from gmlx.serve.image_steps_client import array_hash
 
     mats, entries = {}, []
@@ -2613,7 +2647,6 @@ def _pack_steps(c, pairs, scale, x, out: list, n: int):
                         "patches": [{"up": array_hash(up),
                                      "down": array_hash(down),
                                      "alpha": None, "strength": 1.0}]})
-    rows = _rows(c, _features())
 
     def sync() -> tuple:
         sent = sum(h not in steps.STATE.adapters for h in mats)
@@ -2621,38 +2654,55 @@ def _pack_steps(c, pairs, scale, x, out: list, n: int):
         for a in mats.values():
             c.put(a, kind="adapters")
         return sent, c.define_table("own", {"entries": entries})
+    return sync
 
+
+def _pack_steps(c, pairs, scale, x, out: list, n: int):
+    """The requests of a ComfyUI that samples ``n`` steps under a LoRA of
+    ``pairs`` scaled by ``scale``, one request a turn. A 409 for the
+    table at a step syncs it again and sends the step again, three times
+    at most as the pack does; a fourth 409 fails the step. Each output
+    goes to ``out`` with the 409s and the uploads its step met."""
+    sync = _pack_sync(c, pairs, scale)
+    rows = _rows(c, _features())
     _sent, tid = sync()
     yield
     for _ in range(n):
-        try:
-            got, missed, sent = c.step("own", None, x, [0.5], rows,
-                                       patch_table=tid), 0, 0
-        except MissingTensors as e:
-            assert e.missing == [tid]
-            yield
-            sent, tid = sync()
-            yield
-            got, missed = c.step("own", None, x, [0.5], rows,
-                                 patch_table=tid), 1
+        missed = sent = 0
+        while True:
+            try:
+                got = c.step("own", None, x, [0.5], rows, patch_table=tid)
+                break
+            except MissingTensors as e:
+                assert e.missing == [tid] and missed < 3
+                missed += 1
+                yield
+                more, tid = sync()
+                sent += more
+                yield
         out.append((got, missed, sent))
         yield
 
 
+@pytest.mark.parametrize("matrices", ["one", "both"])
 def test_two_clients_whose_loras_do_not_both_fit_take_turns(
-        host, tmp_path, monkeypatch):
+        host, tmp_path, monkeypatch, matrices):
     """Two ComfyUIs sample on one entry at once, each under a LoRA the
-    size of the entry's own, on a pair cache with room for one of them
-    and a tensor cache that holds one LoRA's matrices. Their requests take
-    turns, so each sync sheds the other's pairs and matrices, and each
-    step meets at most one 409, uploads again and runs. Neither is locked
+    size of the entry's own, on a pair cache with room for one of them.
+    Their requests take turns, so each sync sheds the other's pairs.
+    With an adapter cache that holds one LoRA's matrices, each sync sheds
+    the other's matrices too, and each step meets at most one 409,
+    uploads again and runs. With one that holds both, each step defines
+    its table again in its own turn and meets no 409. Neither is locked
     out, each steps the same every time, and the pair cache never holds
     more than its bound."""
     p, ad, _c, _body = _header_alpha_own(host, tmp_path)
     held = p.adapters.bytes
     p.adapters.max_bytes = 2 * held + 64
     host.served["own"].plan.cache_share = 1.0
-    monkeypatch.setattr(steps.STATE.adapters, "max_bytes", held + held // 2)
+    if matrices == "one":
+        monkeypatch.setattr(steps.STATE.adapters, "max_bytes",
+                            held + held // 2)
     peak = [p.adapters.bytes]
     put = p.adapters.put
 
@@ -2679,8 +2729,85 @@ def test_two_clients_whose_loras_do_not_both_fit_take_turns(
         assert all(np.array_equal(got, out[0][0]) for got, _m, _s in out)
     assert not np.array_equal(outs[0][0][0], outs[1][0][0])
     # The first client's first step meets the 409 as well: the second's
-    # define shed its pairs before it stepped.
-    assert [[m for _g, m, _s in out] for out in outs] == [[1, 1, 1],
-                                                          [0, 1, 1]]
+    # sync shed its matrices before it stepped.
+    want = [[1, 1, 1], [0, 1, 1]] if matrices == "one" else [[0] * 3] * 2
+    assert [[m for _g, m, _s in out] for out in outs] == want
     assert all(s > 0 for out in outs for _g, m, s in out if m)
+    assert host.held == 0
+
+
+def _two_packs(host, tmp_path, file_bytes: int = 0):
+    """Entry "own" with a pair cache that holds its own LoRA and one more
+    the size of it, or a request file of ``file_bytes`` when larger, and
+    two clients each under a LoRA of that size. Returns the pipeline and,
+    for each client, the client, its rows and its pack sync."""
+    p, ad, _c, _body = _header_alpha_own(host, tmp_path)
+    held = p.adapters.bytes
+    p.adapters.max_bytes = 2 * held + max(0, file_bytes - held) + 64
+    host.served["own"].plan.cache_share = 1.0
+    pairs = [(m, b, p.adapters.peek(k)) for m, b, _a, k in ad.dit]
+    packs = []
+    for scale in (2.0, 3.0):
+        c = _client()
+        packs.append((c, _rows(c, _features()), _pack_sync(c, pairs, scale)))
+    return p, packs
+
+
+def _steps_as_first(packs, firsts, x) -> None:
+    """Each client's step on its table gives the output of its first."""
+    for (c, rows, _sync), (tid, first) in zip(packs, firsts):
+        got = c.step("own", None, x, [0.5], rows, patch_table=tid)
+        assert np.array_equal(got, first)
+
+
+def test_two_clients_whose_syncs_interleave_step_without_a_409(host,
+                                                                tmp_path):
+    """Two ComfyUIs alone on an entry whose pair cache holds one of their
+    LoRAs, so each define sheds the other's pairs. A step on a table whose
+    pairs went defines it again in its own turn, from the body and the
+    matrices the server keeps, and steps as before: after the other's
+    define, and after both sync again, A then B, before A's step reaches
+    the server."""
+    p, packs = _two_packs(host, tmp_path)
+    x = noise_from_seed(5, SHAPE)
+    firsts = []
+    for c, rows, sync in packs:
+        tid = sync()[1]
+        firsts.append((tid, c.step("own", None, x, [0.5], rows,
+                                   patch_table=tid)))
+    _steps_as_first(packs, firsts, x)
+    assert [sync() for _c, _r, sync in packs] == [(0, t) for t, _y in firsts]
+    _steps_as_first(packs, firsts, x)
+    assert p.adapters.bytes <= p.adapters.max_bytes
+    assert host.held == 0
+
+
+def test_tables_an_images_api_request_dropped_step_without_a_409(host,
+                                                                 tmp_path):
+    """An images API request whose LoRA file fills the pair cache drops
+    the stepped tables of two ComfyUIs. Each client's next step defines
+    its table again in its own turn and steps as before, and so does each
+    after both sync again, A then B, before A's step reaches the
+    server."""
+    import os
+
+    from gmlx.serve import image_service
+
+    (name,) = _request_files(tmp_path, (5,))
+    p, packs = _two_packs(host, tmp_path, os.path.getsize(tmp_path / name))
+    x = noise_from_seed(5, SHAPE)
+    firsts = []
+    for c, rows, sync in packs:
+        tid = sync()[1]
+        firsts.append((tid, c.step("own", None, x, [0.5], rows,
+                                   patch_table=tid)))
+    tid, _ = _on_worker(image_service._adapter_table, host.served["own"],
+                        [(name, 1.0)], [str(tmp_path)])
+    _direct(p, _features(), table=tid)
+    cores = steps.STATE.tables_of("own", p)
+    assert not any(routes._held(p, cores[t]) for t, _y in firsts)
+    _steps_as_first(packs, firsts, x)
+    assert [sync() for _c, _r, sync in packs] == [(0, t) for t, _y in firsts]
+    _steps_as_first(packs, firsts, x)
+    assert p.adapters.bytes <= p.adapters.max_bytes
     assert host.held == 0

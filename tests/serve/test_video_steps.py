@@ -518,8 +518,8 @@ def test_an_encode_loads_the_encoder_without_the_dit_or_any_lora(
     """The H3 encoder and the DiT with its 8-step LoRA do not fit a 32 GB
     Mac together: the encoder loads with neither the DiT nor a LoRA pair
     held. The configured LoRA comes back with the DiT at the next step,
-    and a table the pack sent is answered as missing until the pack sends
-    it again."""
+    and a table the pack sent is defined again at its next step from the
+    body the server keeps."""
     from lora_fixtures import write_keys
     from test_video_h3_lora import _adapter, _comfy_keys
 
@@ -571,10 +571,6 @@ def test_an_encode_loads_the_encoder_without_the_dit_or_any_lora(
     after = c.av_step("h3", None, video, audio, 600.0, row, **kw)
     assert strengths() == {0.75}
     assert all(_rel(a, b) < 1e-6 for a, b in zip(after, before))
-    with pytest.raises(MissingTensors) as e:
-        c.av_step("h3", None, video, audio, 600.0, row, patch_table=tid, **kw)
-    assert e.value.body["missing"] == [tid]
-    assert c.define_table("h3", body) == tid
     again = c.av_step("h3", None, video, audio, 600.0, row, patch_table=tid,
                       **kw)
     assert all(_rel(a, b) < 1e-6 for a, b in zip(again, sent))
@@ -677,13 +673,16 @@ def test_a_lora_that_does_not_load_again_with_the_dit_fails_the_step(
     assert all(_rel(a, b) < 1e-6 for a, b in zip(after, before))
 
 
-@pytest.mark.parametrize("between", ["encode", "define"])
-def test_a_table_let_go_before_its_step_runs_is_missing(monkeypatch, request,
-                                                       between):
+@pytest.mark.parametrize("between", ["encode", "define", "lost"])
+def test_a_table_let_go_before_its_step_runs_steps(monkeypatch, request,
+                                                   between):
     """A second client's encode, or the define of its table on a pair
     cache with room for one table, can run on the image worker between a
-    step's check of its table and the step itself. The step answers the
-    table as missing, and the pack sends it again."""
+    step's check of its table and the step itself. The step defines the
+    table again in its own turn, from the body the server keeps, and
+    steps as before. With the table's matrices gone from the adapter
+    cache too, the step answers the table as missing, and steps as
+    before once the pack sends it again."""
     from test_video_h3_lora import _adapter
 
     pipe, weights = _own_pipe()
@@ -708,24 +707,32 @@ def test_a_table_let_go_before_its_step_runs_is_missing(monkeypatch, request,
                 vs.drop_dit(served)     # what the encode leaves
             else:
                 steps.define_table(served, theirs, steps.STATE.adapters)
+            if between == "lost":
+                steps.STATE.adapters.clear()
         ensure(served)
 
     monkeypatch.setattr(vs, "ensure_dit", other_first)
-    with pytest.raises(MissingTensors) as e:
-        c.av_step("h3", None, video, audio, 600.0, row, **kw)
-    assert ran and e.value.body["missing"] == [tid]
-    assert c.define_table("h3", body) == tid
+    if between == "lost":
+        with pytest.raises(MissingTensors) as e:
+            c.av_step("h3", None, video, audio, 600.0, row, **kw)
+        assert e.value.body["missing"] == [tid]
+        # The client sends the matrices again, as the pack's sync does.
+        c._uploaded.clear()
+        assert c.define_table("h3", _table_body(c, _adapter(6))) == tid
     again = c.av_step("h3", None, video, audio, 600.0, row, **kw)
-    assert all(_rel(a, b) < 1e-6 for a, b in zip(again, sent))
+    assert ran and all(_rel(a, b) < 1e-6 for a, b in zip(again, sent))
 
 
-def test_a_table_whose_pairs_another_table_shed_is_missing_until_sent_again(
-        request):
+def test_a_table_whose_pairs_another_table_shed_steps_in_its_turn(request):
     """Two ComfyUI clients whose LoRAs each fill the entry's pair room, with
     its built tables bounded as a loaded entry bounds them: B's table
-    sheds the pairs of A's. A's next step, on a cond the server lacks
-    too, names both in one 409, and A steps as before once the pack sends
-    its table again."""
+    sheds the pairs of A's. A's next step, on a cond the server lacks, is
+    a 409 that names the cond alone, since the server holds the table's
+    body and matrices, and A's step with its cond defines the table again
+    in its own turn and steps as before. Once B's step sheds A's pairs
+    again and the adapter cache lets the matrices go, one 409 names the
+    cond and the table, and A steps as before once the pack sends its
+    table again."""
     from test_video_h3_lora import _adapter
 
     pipe, _w = _own_pipe()
@@ -745,14 +752,93 @@ def test_a_table_whose_pairs_another_table_shed_is_missing_until_sent_again(
     cb.av_step("h3", None, video, audio, 600.0, {"cond": cb.put(feats)},
                patch_table=tb, **kw)
     lacked = array_hash(_clip(1)[2])
-    with pytest.raises(MissingTensors) as e:
-        ca.av_step("h3", None, video, audio, 600.0, {"cond": lacked},
-                   patch_table=ta, **kw)
-    assert sorted(e.value.body["missing"]) == sorted([lacked, ta])
-    assert ca.define_table("h3", body) == ta
+
+    def lacking() -> list:
+        with pytest.raises(MissingTensors) as e:
+            ca.av_step("h3", None, video, audio, 600.0, {"cond": lacked},
+                       patch_table=ta, **kw)
+        return sorted(e.value.body["missing"])
+
+    assert lacking() == [lacked]
     again = ca.av_step("h3", None, video, audio, 600.0, row, patch_table=ta,
                        **kw)
     assert all(_rel(x, y) < 1e-6 for x, y in zip(again, first))
+    cb.av_step("h3", None, video, audio, 600.0, {"cond": cb.put(feats)},
+               patch_table=tb, **kw)
+    steps.STATE.adapters.clear()
+    assert lacking() == sorted([lacked, ta])
+    ca._uploaded.clear()
+    assert ca.define_table("h3", _table_body(ca, a)) == ta
+    again = ca.av_step("h3", None, video, audio, 600.0, row, patch_table=ta,
+                       **kw)
+    assert all(_rel(x, y) < 1e-6 for x, y in zip(again, first))
+
+
+def _two_av_clients(request, monkeypatch=None):
+    """An entry whose pair cache holds one of two clients' LoRAs, so each
+    define sheds the other's pairs, with the H3 encoder stood in when
+    ``monkeypatch`` is given. Returns the pipeline and, for each client,
+    a step of its table, its define and its first step's output."""
+    from test_video_h3_lora import _adapter
+
+    pipe, weights = _own_pipe()
+    _mount(_Host(_served(pipe)), request)
+    if monkeypatch is not None:
+        _stub_encode(monkeypatch, weights)
+    pipe.adapters.max_bytes = sum(d.nbytes + u.nbytes
+                                  for d, u, _a in _adapter(6).values())
+    video, audio, feats = _clip()
+    out = []
+    for seed in (6, 7):
+        c = _client()
+        body, row = _table_body(c, _adapter(seed)), {"cond": c.put(feats)}
+        tid = c.define_table("h3", body)
+
+        def step(c=c, row=row, tid=tid):
+            return c.av_step("h3", None, video, audio, 600.0, row,
+                             patch_table=tid, shifts=SHIFTS,
+                             audio_scale=SCALE)
+
+        def define(c=c, body=body, tid=tid):
+            assert c.define_table("h3", body) == tid
+
+        out.append((step, define, step()))
+    return pipe, out
+
+
+def _av_steps_as_first(clients) -> None:
+    for step, _define, first in clients:
+        assert all(_rel(x, y) < 1e-6 for x, y in zip(step(), first))
+
+
+def test_two_av_clients_whose_defines_interleave_step_without_a_409(request):
+    """Two ComfyUI clients alone on a video entry whose pair cache holds
+    one of their LoRAs. A step on a table whose pairs the other's define
+    shed defines it again in its own turn and steps as before, and so
+    does a step after both define again, A then B, before A's step
+    reaches the server."""
+    pipe, clients = _two_av_clients(request)
+    _av_steps_as_first(clients)
+    for _step, define, _first in clients:
+        define()
+    _av_steps_as_first(clients)
+    assert pipe.adapters.bytes <= pipe.adapters.max_bytes
+
+
+def test_av_tables_a_third_clients_encode_let_go_step_without_a_409(
+        monkeypatch, request):
+    """A third client's encode lets the DiT and every LoRA pair go. Each of
+    two clients' next steps defines its table again in its own turn and
+    steps as before, and so does each after both define again, A then B,
+    before A's step reaches the server."""
+    pipe, clients = _two_av_clients(request, monkeypatch)
+    _client().encode("h3", "a cat")
+    assert pipe.dit is None and pipe.adapters.bytes == 0
+    _av_steps_as_first(clients)
+    for _step, define, _first in clients:
+        define()
+    _av_steps_as_first(clients)
+    assert pipe.adapters.bytes <= pipe.adapters.max_bytes
 
 
 def _encoder_by_text(monkeypatch, weights) -> list:
@@ -784,8 +870,8 @@ def test_two_clients_alternating_encode_and_step_get_their_own_steps(
     entry each get their own steps back. Each encode lets the DiT go, as
     the entry's plan prices an encode with the DiT out, and the first
     define or step after it loads it again, once. A client's table that
-    the other's encode let go is answered as missing, and steps once sent
-    again."""
+    the other's encode let go is defined again at its next step, in the
+    step's own turn."""
     from test_video_h3_lora import _adapter
 
     pipe, weights = _own_pipe()
@@ -807,28 +893,18 @@ def test_two_clients_alternating_encode_and_step_get_their_own_steps(
         me = clients[name]
         if me.tid is None:
             me.tid = me.c.define_table("h3", me.body)
-        try:
-            got = me.c.av_step("h3", None, video, audio, 600.0, me.row,
-                               patch_table=me.tid, **kw)
-            sent = False
-        except MissingTensors as e:
-            assert e.body["missing"] == [me.tid]
-            me.c.define_table("h3", me.body)
-            got = me.c.av_step("h3", None, video, audio, 600.0, me.row,
-                               patch_table=me.tid, **kw)
-            sent = True
-        return got, sent
+        return me.c.av_step("h3", None, video, audio, 600.0, me.row,
+                            patch_table=me.tid, **kw)
 
     encode("a", "a red fox")
-    first_a, _ = step("a")
+    first_a = step("a")
     encode("b", "a blue bird")
-    again_a, sent_a = step("a")
-    first_b, _ = step("b")
+    again_a = step("a")
+    first_b = step("b")
     encode("a", "a red fox")
-    again_b, sent_b = step("b")
-    third_a, sent_a3 = step("a")
+    again_b = step("b")
+    third_a = step("a")
     assert len(loads) == 3
-    assert (sent_a, sent_b, sent_a3) == (True, True, True)
     for got, want in ((again_a, first_a), (third_a, first_a),
                       (again_b, first_b)):
         assert all(_rel(x, y) < 1e-6 for x, y in zip(got, want))

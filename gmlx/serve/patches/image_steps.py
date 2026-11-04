@@ -498,7 +498,7 @@ async def put_patch_table(request: Request):
 
         def work():
             core = define_table(served, body, STATE.adapters)
-            STATE.tables_of(served.spec.id, served.pipe)[want] = core
+            STATE.tables_of(served.spec.id, served.pipe).put(want, core, raw)
             return core
 
         await _on_worker(work)
@@ -519,13 +519,55 @@ def _held(pipe, core: str) -> bool:
 
 
 def _table(served, tid):
+    """The core table of the client table ``tid`` a step names. A core
+    the pipeline let go, or whose pairs it shed, passes when the server
+    holds its body and every matrix the body names: the step defines it
+    again in its own turn (``_held_table``). Any other is missing, and the
+    client sends its table again."""
     from ..image_steps import STATE, Missing
 
     if not tid:
         return None
-    core = STATE.tables_of(served.spec.id, served.pipe).get(tid)
-    if core is None or not _held(served.pipe, core):
+    tables = STATE.tables_of(served.spec.id, served.pipe)
+    core = tables.get(tid)
+    if core is None or not (_held(served.pipe, core)
+                            or _definable(tables.body(tid))):
         raise Missing([tid])
+    return core
+
+
+def _definable(raw: bytes | None) -> bool:
+    """Whether the server holds every matrix of the table body ``raw``."""
+    from ..image_steps import STATE
+
+    if raw is None:
+        return False
+    return all(h in STATE.adapters
+               for e in json.loads(raw)["entries"]
+               for p in e.get("patches") or []
+               for h in (p["up"], p["down"]))
+
+
+def _held_table(served, tid, core):
+    """The step's core table ``core``, of the client table ``tid``, held
+    for the step. An encode or another table's define since the step's
+    check can let the core or its pairs go: it is defined again here from
+    the body the client sent, in the step's own turn on the worker, so no
+    other define lands between it and the step. A matrix of the body the
+    server let go since is a 409 naming ``tid``. Runs on the worker."""
+    from ..image_steps import STATE, Missing, define_table
+
+    if core is None or _held(served.pipe, core):
+        return core
+    tables = STATE.tables_of(served.spec.id, served.pipe)
+    raw = tables.body(tid)
+    if raw is None:
+        raise Missing([tid])
+    try:
+        core = define_table(served, json.loads(raw), STATE.adapters)
+    except Missing:
+        raise Missing([tid]) from None
+    tables.put(tid, core, raw)
     return core
 
 
@@ -645,10 +687,7 @@ async def step(request: Request):
 
             # A staged entry's encode let the DiT and the VAE go.
             ensure_dit(served)
-            if table is not None and not _held(served.pipe, table):
-                # Another table's define since the check above shed its
-                # pairs.
-                raise Missing([fields["patch_table"]])
+            core = _held_table(served, fields.get("patch_table"), table)
             fam = served.pipe.family.name
             conds = [conditioning(r, STATE.tensors, fam) for r in rows]
             # The plan of the rows as they are: their text, a prefix and
@@ -665,7 +704,7 @@ async def step(request: Request):
                             c.ref_latents)
             try:
                 size_fits(served, w_px, h_px, budget, cfg=guided,
-                          conds=conds, patch_table=table,
+                          conds=conds, patch_table=core,
                           joined=parts and conv.time != "reference",
                           ref_cache=run.ref_cache if ref_cache else None,
                           building=sum(building.values()),
@@ -688,7 +727,7 @@ async def step(request: Request):
                     c for c in conds if not c.key]
             x = x_w.mx().astype(mx.float32)
             with api.state_scope(served.pipe, scope):
-                v, fwd_s, cache = run_step(served, x, sig, conds, table, run,
+                v, fwd_s, cache = run_step(served, x, sig, conds, core, run,
                                            gen, targets, conv.time,
                                            ref_cache, skip)
             return _host(v), fwd_s, cache
@@ -770,7 +809,10 @@ def _check_clip(hold, served, *, frames: int, width: int, height: int,
         return
     pipe = served.pipe
     tid = pipe.default_table if table is None else table
-    live = bool(pipe.patch_tables.get(tid, {}).get("entries"))
+    got = pipe.patch_tables.get(tid)
+    # A client's core table the pipeline let go is defined again in the
+    # step's own turn, so it is priced as a table with patches.
+    live = bool(got["entries"]) if got is not None else table is not None
     plan = plan_clip(served.plan, frames=frames, width=width, height=height,
                      text=text, budget=budget,
                      decode=phase != "denoise" or decodes, audio=audio,
@@ -880,10 +922,7 @@ async def _av_step(t0, tensors, fields, run):
             from ..image_steps import StepInterrupted
 
             vs.ensure_dit(served)
-            if table is not None and not _held(served.pipe, table):
-                # An encode or another table's define since the check
-                # above let the table or its pairs go.
-                raise Missing([fields["patch_table"]])
+            core = _held_table(served, fields.get("patch_table"), table)
             feats = _f32(held)
             if feats.ndim == 2:
                 feats = feats[None]
@@ -902,7 +941,7 @@ async def _av_step(t0, tensors, fields, run):
             with paced(pacer):
                 vv, va, hit = vs.av_step(
                     served, v_w.mx(), a_w.mx(), ts, shifts, scale, feats,
-                    _cond_key(hashes[0]), table)
+                    _cond_key(hashes[0]), core)
                 mx.eval(vv, va)
             if run is not None and (run.gen != gen or run.ended):
                 raise StepInterrupted()
