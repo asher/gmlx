@@ -850,6 +850,24 @@ def test_a_staged_encode_holds_the_encoder_without_the_dit(staged_stubs):
     assert st.events[:2] == ["drop", ("encoder", None)]
 
 
+def test_a_cached_staged_encode_with_the_dit_out_loads_no_dit(staged_stubs):
+    """A guided run whose negative prompt sits in the cache from a run
+    before: its positive encode lets the DiT and the VAE go, the cached
+    negative runs on the released encoder's tokenizer and leaves them
+    out, and the first step loads them once."""
+    st = staged_stubs
+    image_service._encode(st.served, "", None, ())
+    image_service.ensure_dit(st.served)
+    del st.events[:]
+    image_service._encode(st.served, "a", None, ())
+    image_service._encode(st.served, "", None, ())
+    assert st.events == ["drop", ("encoder", None), ("encode", "a", None, None),
+                         "release", ("encode", "", None, None)]
+    assert (st.pipe.dit, st.pipe.vae) == (None, None)
+    image_service.ensure_dit(st.served)
+    assert st.events[5:] == ["dit", "wrap", "vae"]
+
+
 def test_a_failed_staged_encode_releases_its_encoder(staged_stubs):
     st = staged_stubs
     with pytest.raises(RuntimeError, match="encode failed"):
