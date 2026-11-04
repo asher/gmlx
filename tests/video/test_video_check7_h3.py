@@ -148,7 +148,7 @@ def _swapped(pipe, key: str, a: int, b: int, c: int) -> str:
     """A pair whose up rows a:b and b:c trade places."""
     p = pipe.adapters.get(key)
     up = mx.concatenate([p.up[:a], p.up[b:c], p.up[a:b], p.up[c:]])
-    return lora_install.register_pair(pipe, p.down, up, p.alpha)
+    return lora_install.register_pair(pipe, p.down, up)
 
 
 def wrong_tables(pipe, lora: str) -> dict:
@@ -157,15 +157,12 @@ def wrong_tables(pipe, lora: str) -> dict:
     cfg = pipe.dit.cfg
 
     def table(rows):
-        return define_patch_table(pipe, [(mod, band, [(key, 1.0)])
-                                         for mod, band, key in rows])
+        return define_patch_table(pipe, [(mod, band, [(key, 1.0, alpha)])
+                                         for mod, band, alpha, key in rows])
 
     def each(fn):
-        return [(mod, band, fn(mod, key)) for mod, band, key in rows]
-
-    def no_alpha(_mod, key):
-        p = pipe.adapters.get(key)
-        return lora_install.register_pair(pipe, p.down, p.up, None)
+        return [(mod, band, alpha, fn(mod, key))
+                for mod, band, alpha, key in rows]
 
     last = f"blocks.{len(pipe.dit.blocks) - 1}."
     return {
@@ -177,7 +174,8 @@ def wrong_tables(pipe, lora: str) -> dict:
         "q_and_k_bands_swapped": table(each(
             lambda mod, key: _swapped(pipe, key, 0, cfg.inner, 2 * cfg.inner)
             if mod.endswith("qkv_proj") else key)),
-        "alpha_left_out": table(each(no_alpha)),
+        "alpha_left_out": table([(mod, band, None, key)
+                                 for mod, band, _a, key in rows]),
         "refiner_pairs_left_out": table(
             [r for r in rows if not r[0].startswith("token_refiner.")]),
         "first_block_pairs_left_out": table(

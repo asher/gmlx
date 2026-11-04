@@ -1298,7 +1298,7 @@ def test_a_request_naming_an_entry_adapter_sets_its_strength_once(
     (root / "lora").mkdir(parents=True)
     path = root / "lora" / "style.safetensors"
     path.write_bytes(b"x")
-    entry = SimpleNamespace(path=str(path), dit=(), text=(("t", "k"),))
+    entry = SimpleNamespace(path=str(path), dit=(), text=(("t", None, "k"),))
     other = SimpleNamespace(path=str(root / "lora" / "b.safetensors"),
                             dit=(), text=())
     monkeypatch.setattr(lora, "load_adapter", lambda pipe, p, hold=(): (
@@ -1429,7 +1429,7 @@ def test_a_patch_table_after_a_request_lora_never_sheds_the_entry_adapter(
         # As define_table puts a table's pairs: each holds the ones before.
         pair = pipe.adapters.peek(k)
         put.append(install.register_pair(
-            pipe, pair.down, pair.up * 2.0, pair.alpha, hold=list(put)))
+            pipe, pair.down, pair.up * 2.0, hold=list(put)))
     assert _pairs_held(pipe, own)
     assert _entry_steps(pipe)
 

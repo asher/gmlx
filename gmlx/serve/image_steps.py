@@ -1004,51 +1004,20 @@ def _pair_room(served, need: int) -> None:
     raise StepError(413, f"{over}: {left}. A{smaller[1:]} gives it more.")
 
 
-# Per pipeline, the own pair keys of its entry to the hash of each pair's
-# down and up alone, taken at the first define that reads each. It keeps
-# the keys of rows a video entry held before its LoRA file changed, so
-# readers look up the rows the entry holds now.
-_OWN_CONTENT: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
-
-
-def _content(down, up, alpha, key: str) -> str:
-    """The hash of a pair's down and up alone: its key when it has no
-    alpha."""
-    from gmlx.image.lora.install import pair_hash
-
-    return key if alpha is None else pair_hash(down, up, None)
-
-
-def _own_content(served) -> dict:
-    """The entry's own pair keys to the hash of each pair's down and up
-    alone, from the pairs its pipeline keeps."""
-    memo = _OWN_CONTENT.setdefault(served.pipe, {})
-    for ad, _st in served.adapters:
-        for r in ad.dit:
-            if r[-1] not in memo:
-                pair = served.pipe.adapters.peek(r[-1])
-                memo[r[-1]] = _content(pair.down, pair.up, pair.alpha, r[-1])
-    return memo
-
-
-def _with_own(served, entries: list, pairs) -> list:
+def _with_own(served, entries: list) -> list:
     """Table ``entries`` with the entry's own adapters stacked on, as the
     images API stacks a request's adapters on them. An own adapter that
-    the entries name a pair of is left out, so the table's strength for
-    it applies, once. A pair is named by its down and up alone, from
-    ``pairs``, the (down, up, alpha, key) of the entries' pairs: ComfyUI
-    reads no adapter header, so a pair whose file holds no alpha comes
-    with none, where the entry's reader gives it the header's."""
+    the entries name a pair of is left out, so the table's strength and
+    alpha for it apply, once. ComfyUI reads no adapter header, so a pair
+    whose file holds no alpha comes with none, where the entry's reader
+    gives it the header's: the table's alpha is the one that applies."""
     from gmlx.image.lora import patch_table as pt
 
     if not served.adapters:
         return entries
-    content = {key: _content(down, up, alpha, key)
-               for down, up, alpha, key in pairs}
-    named = {content[k] for _m, _b, patches in entries for k, _s in patches}
-    own_content = _own_content(served)
+    named = {p[0] for _m, _b, patches in entries for p in patches}
     own = [(ad, st) for ad, st in served.adapters
-           if not any(own_content[r[-1]] in named for r in ad.dit)]
+           if not any(r[-1] in named for r in ad.dit)]
     if not own:
         return entries
     rows = {(m, b): list(patches) for m, b, patches in entries}
@@ -1093,29 +1062,20 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
             missing += [str(p.get(side)) for side, t in zip(("up", "down"),
                                                             got) if t is None]
             if None not in got:
-                held[(p["up"], p["down"], alpha)] = got
+                held[(p["up"], p["down"])] = got
     if missing:
         raise Missing(missing)
     try:
-        # Each pair as the pipeline keeps it, under its content hash: a
-        # pair named twice, or one of the entry's own, takes no room.
-        pairs = {pk: pt.patch_pair(up.mx(), down.mx(), pk[2])
+        # Each pair as the pipeline keeps it, under the content hash of
+        # its down and up: a pair named twice, under any alphas, or one of
+        # the entry's own takes no room.
+        pairs = {pk: pt.patch_pair(up.mx(), down.mx())
                  for pk, (up, down) in held.items()}
     except (AdapterError, ValueError, TypeError) as e:
         raise StepError(400, f"patch table refused: {e}") from None
     own = _pair_keys(served.adapters)
-    # An own pair sent under another alpha, as ComfyUI sends a pair whose
-    # alpha is in the file's header, is its twin: it keeps the own pair's
-    # arrays and takes no room. The map is of the rows the entry holds
-    # now: a video entry reads its LoRA file again after an encode.
-    oc = _own_content(served) if served.adapters else {}
-    twins = {oc[r[-1]]: r[-1] for ad, _st in served.adapters for r in ad.dit}
-    twin = {key: None if key in own else
-            twins.get(_content(down, up, alpha, key))
-            for down, up, alpha, key in pairs.values()}
     sizes = {key: int(down.nbytes) + int(up.nbytes)
-             for down, up, _alpha, key in pairs.values()
-             if key not in own and twin[key] is None}
+             for down, up, _alpha, key in pairs.values() if key not in own}
     _pair_room(served, sum(sizes.values()))
     rows = []
     keys: dict = {}
@@ -1128,20 +1088,19 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
                 if unknown:
                     raise StepError(400, f"patch fields {sorted(unknown)} "
                                     "are not read by this server")
-                pk = (p["up"], p["down"], p.get("alpha"))
+                pk = (p["up"], p["down"])
                 if pk not in keys:
-                    down, up, alpha, key = pairs[pk]
+                    down, up, _alpha, key = pairs[pk]
                     keys[pk] = install.register_pair(
-                        pipe, down, up, alpha, key=key, twin=twin[key],
-                        hold=keys.values())
+                        pipe, down, up, key=key, hold=keys.values())
                 row["patches"].append({
-                    "adapter": keys[pk], "strength": p.get("strength", 1.0),
+                    "adapter": keys[pk], "alpha": p.get("alpha"),
+                    "strength": p.get("strength", 1.0),
                     "strength_model": p.get("strength_model", 1.0),
                     **({"kind": p["kind"]} if "kind" in p else {})})
             rows.append(row)
         plans = pt.plans_from_patches(pipe.family, rows)
-        return api.define_patch_table(pipe, _with_own(served, plans,
-                                                      pairs.values()))
+        return api.define_patch_table(pipe, _with_own(served, plans))
     except (AdapterError, ValueError, KeyError, TypeError) as e:
         if isinstance(e, StepError):
             raise

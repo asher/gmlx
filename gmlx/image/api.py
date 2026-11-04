@@ -132,7 +132,7 @@ def check_sampling(family, variant: str, flow_map: bool, cfg: float,
 def _canonical_table(entries: tuple) -> str:
     return json.dumps(
         [{"module": m, "band": None if b is None else list(b),
-          "patches": [[h, st] for h, st in p]} for m, b, p in entries],
+          "patches": [[h, st, a] for h, st, a in p]} for m, b, p in entries],
         sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
@@ -822,14 +822,26 @@ def _table_entry(entry, modules: dict) -> tuple:
         raise ValueError(f"patch table entry for {path} has no patches")
     out = []
     for p in patches:
-        h, st = tuple(p)
+        p = tuple(p)
+        if len(p) not in (2, 3):
+            raise ValueError(f"a patch of {path} is (adapter hash, strength, "
+                             f"alpha), not {p!r}")
+        h, st, alpha = p if len(p) == 3 else (*p, None)
         if not isinstance(h, str) or not h:
             raise ValueError(f"adapter hash of {path} must be a non-empty "
                              f"string, not {h!r}")
         st = float(st)
         if not math.isfinite(st):
             raise ValueError(f"strength of {h} on {path} is {st}")
-        out.append((h, 0.0 if st == 0.0 else st))
+        if alpha is not None:
+            if isinstance(alpha, bool) or not isinstance(alpha,
+                                                          numbers.Real):
+                raise ValueError(f"alpha of {h} on {path} is a number or "
+                                 f"None, not {alpha!r}")
+            alpha = float(alpha)
+            if not math.isfinite(alpha):
+                raise ValueError(f"alpha of {h} on {path} is {alpha}")
+        out.append((h, 0.0 if st == 0.0 else st, alpha))
     return path, band, tuple(out)
 
 
@@ -838,29 +850,34 @@ def _canonical_rows(rows: list, modules: dict) -> list:
     band that covers its whole axis is the whole weight, and joins a
     whole-weight row on the same module. The patches of a row sum, so
     their order is not kept. ``_table_entry`` has made band values plain
-    integers and a negative zero strength zero."""
+    integers and a negative zero strength zero. A patch without an alpha
+    sorts before the same pair and strength with one."""
     merged: dict = {}
     for path, band, patches in rows:
         if band is not None and band[1] == 0 \
                 and band[2] == _linear_dims(modules[path])[band[0]]:
             band = None
         merged.setdefault((path, band), []).extend(patches)
-    return [(path, band, tuple(sorted(patches)))
+    return [(path, band, tuple(sorted(patches, key=lambda p: (
+                p[0], p[1], p[2] is not None, p[2] or 0.0))))
             for (path, band), patches in merged.items()]
 
 
 def define_patch_table(pipe: ImagePipeline, entries) -> str:
     """Define an immutable patch table from entries of module path, band
-    (dim, start, length) or None, and patches of (adapter hash,
-    strength), and return its id: the sha256 of its canonical JSON.
-    Entries that give the same delta give the same id: the order of the
-    entries and of the patches in one, a band that covers the whole
-    weight against None, and a strength of -0.0 against 0.0 do not change
-    it. An adapter hash names a
-    LoRA pair the pipeline holds, from ``gmlx.image.lora``, and a table
-    that names a pair it does not hold, or one that does not fit its
-    module and band, is refused. The pipeline keeps the table under its
-    id, and ``denoise_step`` and ``sample`` apply it when given the id."""
+    (dim, start, length) or None, and patches of (adapter hash, strength,
+    alpha), and return its id: the sha256 of its canonical JSON. A
+    patch's delta is its strength times its pair's product times alpha
+    over the pair's rank, or times 1 when the alpha is None, as it is in
+    a patch of (adapter hash, strength). Entries that give the same delta
+    give the same id: the order of the entries and of the patches in one,
+    a band that covers the whole weight against None, and a strength of
+    -0.0 against 0.0 do not change it. An adapter hash names a LoRA pair
+    the pipeline holds, from ``gmlx.image.lora``, which a table may name
+    under several alphas, and a table that names a pair it does not hold,
+    or one that does not fit its module and band, is refused. The
+    pipeline keeps the table under its id, and ``denoise_step`` and
+    ``sample`` apply it when given the id."""
     from .lora import install
 
     modules = install.modules(pipe.dit)

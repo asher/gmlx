@@ -383,23 +383,43 @@ def test_pairs_are_cached_by_content_hash(tmp_path, monkeypatch):
                         lambda *a, **kw: reads.append(a) or real(*a, **kw))
     assert lora.load_adapter(pipe, str(tmp_path / "k.safetensors")) is k
     assert reads == []
-    # Another alpha or another byte is another pair.
+    # Another byte or dtype is another pair.
     d, u, _ = adapter["layers.0.feed_forward.w1"]
-    h = lora.pair_hash(mx.array(d), mx.array(u), 4.0)
+    h = lora.pair_hash(mx.array(d), mx.array(u))
     assert h in pipe.adapters._items and len(h) == 64
-    assert lora.pair_hash(mx.array(d), mx.array(u), None) != h
-    assert lora.pair_hash(mx.array(d), mx.array(u), 4.5) != h
     d2 = d.copy()
     d2[0, 0] = np.nextafter(d2[0, 0], np.float32(1))
-    assert lora.pair_hash(mx.array(d2), mx.array(u), 4.0) != h
-    assert lora.pair_hash(mx.array(d).astype(mx.bfloat16), mx.array(u),
-                          4.0) != h
-    assert lora.register_pair(pipe, d, u, 4.0) == h
+    assert lora.pair_hash(mx.array(d2), mx.array(u)) != h
+    assert lora.pair_hash(mx.array(d).astype(mx.bfloat16), mx.array(u)) != h
+    assert lora.register_pair(pipe, d, u) == h
     assert len(pipe.adapters) == held
     # A rewritten file is read again.
     os.utime(tmp_path / "k.safetensors", ns=(1, 1))
     assert lora.load_adapter(pipe, str(tmp_path / "k.safetensors")) is not k
     assert len(reads) == 1 and len(pipe.adapters) == held
+
+
+def test_a_file_of_the_same_pairs_under_another_alpha_holds_them_once(
+        tmp_path):
+    """Two files of the same weights at alphas 4 and 8: the cache holds
+    the pairs once, at the first file's bytes, each file names its own
+    alpha, and each table steps as the merged weights of its rows, a stack
+    of the two files included."""
+    four, eight = tiny_z_adapter(1, 4.0), tiny_z_adapter(1, 8.0)
+    pipe = _pipe()
+    k = lora.load_adapter(pipe, write_adapter(
+        tmp_path / "four.safetensors", "kohya", four))
+    held = (len(pipe.adapters), pipe.adapters.bytes)
+    e = lora.load_adapter(pipe, write_adapter(
+        tmp_path / "eight.safetensors", "kohya", eight))
+    assert (len(pipe.adapters), pipe.adapters.bytes) == held
+    assert sorted(r[-1] for r in e.dit) == sorted(r[-1] for r in k.dit)
+    assert {r[2] for r in e.dit} == {8.0} and e.sha256 != k.sha256
+    for rows, stack in (([(k, 0.7)], [(four, 0.7)]),
+                        ([(e, 0.7)], [(eight, 0.7)]),
+                        ([(k, 0.7), (e, -0.4)], [(four, 0.7), (eight, -0.4)])):
+        assert rel_l2(_step(pipe, _table(pipe, rows)),
+                      _step(_merged(stack))) <= STEP_TOL
 
 
 def test_a_table_that_names_an_unknown_or_misfit_pair_is_refused():
@@ -542,7 +562,7 @@ def test_one_pair_over_a_whole_weight_runs_on_the_cached_pair(tmp_path):
     assert rel_l2(got, _step(_merged([(adapter, 0.7)]))) <= STEP_TOL
     path = "layers.0.feed_forward.w1"
     (key,) = [k for p, _, patches in pipe.patch_tables[tid]["entries"]
-              if p == path for k, _ in patches]
+              if p == path for k, _st, _a in patches]
     pair = pipe.adapters.peek(key)
     f = pipe.lora._cur[(tid, mx.float32, install.form())].get(path)
     assert f.down is pair.down and f.up is pair.up
@@ -592,7 +612,7 @@ def test_a_cli_stack_over_the_adapter_cache_builds_its_table(tmp_path):
     rows = image_cmd._read_adapters(a, pipe, lambda *_: None)
     tid, _ = image_cmd._adapter_table(pipe, rows, lambda *_: None)
     keys = [k for _, _, patches in pipe.patch_tables[tid]["entries"]
-            for k, _ in patches]
+            for k, _st, _a in patches]
     assert keys and all(pipe.adapters.peek(k) is not None for k in keys)
 
 
@@ -606,7 +626,7 @@ def test_the_cache_keeps_a_pair_without_a_copy():
     mx.synchronize()
     before = mx.get_active_memory()
     mx.reset_peak_memory()
-    key = install.register_pair(pipe, down, up, 16.0)
+    key = install.register_pair(pipe, down, up)
     assert mx.get_peak_memory() - before < down.nbytes
     pair = pipe.adapters.peek(key)
     assert np.array_equal(np.array(pair.down.astype(mx.float32)),
@@ -668,8 +688,8 @@ def test_a_whole_weight_pair_and_band_pairs_on_one_module_all_apply(
     pipe = _pipe()
     ad = lora.load_adapter(pipe, write_adapter(
         tmp_path / "mixed.safetensors", "onetrainer", adapter))
-    assert {m for m, _, _ in ad.dit} == {QKV} and len(ad.sha256) == 64
-    assert sorted((b for _, b, _ in ad.dit), key=lambda b: b or ()) == [
+    assert {m for m, _b, _a, _k in ad.dit} == {QKV} and len(ad.sha256) == 64
+    assert sorted((b for _m, b, _a, _k in ad.dit), key=lambda b: b or ()) == [
         None, (0, 0, dim), (0, 2 * dim, dim)]
     tid = _table(pipe, [(ad, 0.7)])
     got = _step(pipe, tid)
@@ -690,7 +710,7 @@ def test_a_whole_weight_pair_and_band_pairs_on_one_module_all_apply(
     flipped = lora.load_adapter(again, write_keys(
         tmp_path / "flipped.safetensors", keys))
     assert flipped.dit != ad.dit and set(flipped.dit) == set(ad.dit)
-    assert [b for _, b, _ in ad.dit][0] is None
-    assert [b for _, b, _ in flipped.dit][-1] is None
+    assert [b for _m, b, _a, _k in ad.dit][0] is None
+    assert [b for _m, b, _a, _k in flipped.dit][-1] is None
     assert flipped.sha256 == ad.sha256
     assert _table(again, [(flipped, 0.7)]) == tid

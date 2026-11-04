@@ -133,9 +133,8 @@ class ByteLRU:
     values. An entry larger than the bound is not kept. A caller with a
     rule of its own puts with ``shed`` off, which keeps the entry whatever
     its bytes and sheds nothing, and sheds through ``shed_others``. A put
-    never sheds the entries of the keys given to ``keep`` or
-    ``keep_also``, and an entry that does not fit beside them is not kept
-    and sheds nothing."""
+    never sheds the entries of the keys given to ``keep``, and an entry
+    that does not fit beside them is not kept and sheds nothing."""
 
     def __init__(self, max_bytes: int):
         self.max_bytes = int(max_bytes)
@@ -153,14 +152,8 @@ class ByteLRU:
 
     @property
     def kept(self) -> frozenset:
-        """The keys given to ``keep`` and ``keep_also``."""
+        """The keys given to ``keep``."""
         return self._kept
-
-    def keep_also(self, keys) -> None:
-        """Add ``keys`` to the keys whose entries a put never sheds. A later
-        ``keep`` replaces the whole set."""
-        with self._lock:
-            self._kept = self._kept | frozenset(keys)
 
     def __len__(self) -> int:
         return len(self._items)

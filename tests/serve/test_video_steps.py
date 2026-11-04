@@ -536,7 +536,8 @@ def test_an_encode_loads_the_encoder_without_the_dit_or_any_lora(
 
     def strengths():
         entries = pipe.patch_tables[pipe.default_table]["entries"]
-        return {st for _path, _band, patches in entries for _k, st in patches}
+        return {st for _path, _band, patches in entries
+                for _k, st, _a in patches}
 
     assert strengths() == {0.75}
     video, audio, feats = _clip()

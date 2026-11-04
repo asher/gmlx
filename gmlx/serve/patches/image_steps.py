@@ -514,7 +514,8 @@ def _held(pipe, core: str) -> bool:
     table = pipe.patch_tables.get(core)
     return table is not None and all(
         pipe.adapters.peek(key) is not None
-        for _path, _band, patches in table["entries"] for key, _st in patches)
+        for _path, _band, patches in table["entries"]
+        for key, _st, _alpha in patches)
 
 
 def _table(served, tid):

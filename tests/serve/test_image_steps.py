@@ -2294,10 +2294,10 @@ def _header_alpha_own(host, tmp_path):
         p.default_table = api.define_patch_table(
             p, lora.table_entries([(ad, 1.0)]))
         p.adapters.keep(image_service._pair_keys([(ad, 1.0)]))
-        return ad, [(m, b, p.adapters.peek(k)) for m, b, k in ad.dit]
+        return ad, [(m, b, p.adapters.peek(k)) for m, b, _a, k in ad.dit]
 
     ad, pairs = _on_worker(own)
-    assert pairs and all(pair.alpha is not None for _m, _b, pair in pairs)
+    assert pairs and all(a is not None for _m, _b, a, _k in ad.dit)
     _serve(host, "own", p)
     host.served["own"].adapters = [(ad, 1.0)]
     c = _client()
@@ -2353,102 +2353,31 @@ def test_an_entry_lora_sent_again_by_comfyui_takes_no_request_room(
     assert host.held == 0
 
 
-def test_the_twins_of_an_entry_lora_outlast_a_put_that_must_shed(
+def test_an_entry_lora_under_no_alpha_and_its_header_alpha_is_one_pair(
         host, tmp_path):
-    """The pairs of the entry's own LoRA sent with alpha None hold no
-    bytes, so the put of a later table that must shed leaves them and the
-    entry's own pairs: the first table steps again as before with no 409,
-    and its built table holds no copy of the entry's arrays."""
-    from gmlx.serve import image_service
-
+    """ComfyUI sends the entry's own LoRA with alpha None, as it reads no
+    header, and a client that reads the header sends it with the header's
+    alpha. Each table names the pairs the entry holds, so the pair cache
+    keeps its keys and its bytes, and each table applies its own alpha:
+    the step equals the same table's on an entry without the LoRA, and at
+    the header's alpha it equals the entry's own step."""
     p, ad, c, body = _header_alpha_own(host, tmp_path)
-    own = image_service._pair_keys([(ad, 1.0)])
-    held = p.adapters.bytes
-    p.adapters.max_bytes = 2 * held + 64
-    host.served["own"].plan.cache_share = 1.0
-    first_table = c.define_table("own", body)
-    twins = p.adapters.keys(lambda k: k not in own)
-    assert len(twins) == len(ad.dit)
+    keys, held = set(p.adapters.keys(lambda k: True)), p.adapters.bytes
+    header = {"entries": [
+        {**e, "patches": [{**e["patches"][0], "alpha": float(a)}]}
+        for e, (_m, _b, a, _k) in zip(body["entries"], ad.dit)]}
     rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
-    first = c.step("own", None, x, [0.5], rows, patch_table=first_table)
-    tables = p.tables.bytes
-    pairs = [(m, b, p.adapters.peek(k)) for m, b, k in ad.dit]
-
-    def other(scale):
-        # Pairs the size of the entry's LoRA, each table filling the room.
-        return {"entries": [{
-            "key": f"diffusion_model.{m}.weight",
-            "band": None if b is None else list(b),
-            "patches": [{"up": c.put(np.array(pair.up) * scale,
-                                     kind="adapters"),
-                         "down": c.put(np.array(pair.down), kind="adapters"),
-                         "alpha": None, "strength": 1.0}]}
-            for m, b, pair in pairs]}
-
-    c.define_table("own", other(2.0))
-    c.define_table("own", other(3.0))
-    assert all(p.adapters.peek(k) is not None for k in (*own, *twins))
-    again = c.step("own", None, x, [0.5], rows, patch_table=first_table)
-    assert np.array_equal(again, first)
-    assert p.tables.bytes == tables
-    assert host.held == 0
-
-
-def test_a_second_client_sending_the_twin_table_again_keeps_the_twins(
-        host, tmp_path):
-    """A ComfyUI restarted while the server runs sends the table of the
-    entry's LoRA with alpha None again. The twins stay the same entries,
-    so the table built at the first step still reads them as held: the
-    tables count does not rise and the step is the same."""
-    from gmlx.serve import image_service
-
-    p, ad, c, body = _header_alpha_own(host, tmp_path)
-    own = image_service._pair_keys([(ad, 1.0)])
-    x = noise_from_seed(5, SHAPE)
-    tid = c.define_table("own", body)
-    first = c.step("own", None, x, [0.5], _rows(c, _features()),
-                   patch_table=tid)
-    twins = {k: p.adapters.peek(k)
-             for k in p.adapters.keys(lambda k: k not in own)}
-    tables = p.tables.bytes
-    again = _client()
-    assert again.define_table("own", body) == tid
-    assert all(p.adapters.peek(k) is pair for k, pair in twins.items())
-    got = again.step("own", None, x, [0.5], _rows(again, _features()),
-                     patch_table=tid)
-    assert np.array_equal(got, first)
-    assert p.tables.bytes == tables
-    assert host.held == 0
-
-
-def test_a_request_copy_sampled_before_a_define_is_freed_by_it(host,
-                                                               tmp_path):
-    """An images API request samples over a copy of the entry's LoRA with
-    no header, so a built table holds the copy's arrays. The ComfyUI
-    define of the same pairs makes them the own pairs' twins and lets the
-    built tables go: the request samples the same over the twins, and the
-    caches count what they did before less the copy."""
-    from lora_fixtures import dialect_keys, tiny_z_adapter, write_keys
-
-    from gmlx.serve import image_service
-
-    p, _ad, c, body = _header_alpha_own(host, tmp_path)
-    held = p.adapters.bytes
-    write_keys(tmp_path / "copy.safetensors",
-               dialect_keys("diffusers", tiny_z_adapter(1)))
-    tid, _ = _on_worker(image_service._adapter_table, host.served["own"],
-                        [("copy.safetensors", 1.0)], [str(tmp_path)])
-    feats = _features()
-    sampled = _direct(p, feats, table=tid)
-    tables = p.tables.bytes
-    assert p.adapters.bytes == 2 * held and tables > 0
-    c.define_table("own", body)
-    assert p.adapters.bytes == held
-    # The caption is refined again, so the run builds every module the
-    # first built, over the twins.
-    p.captions.clear()
-    assert np.array_equal(_direct(p, feats, table=tid), sampled)
-    assert p.tables.bytes == tables
+    got = []
+    for b in (body, header):
+        got.append(c.step("own", None, x, [0.5], rows,
+                          patch_table=c.define_table("own", b)))
+        assert set(p.adapters.keys(lambda k: True)) == keys
+        assert p.adapters.bytes == held
+        assert np.array_equal(got[-1], c.step(
+            "zit", None, x, [0.5], rows,
+            patch_table=c.define_table("zit", b)))
+    assert not np.array_equal(got[0], got[1])
+    assert np.array_equal(got[1], c.step("own", None, x, [0.5], rows))
     assert host.held == 0
 
 
@@ -2464,7 +2393,7 @@ def test_a_define_that_needs_a_stepped_tables_room_drops_that_table(
     p.adapters.max_bytes = 2 * held + 64
     host.served["own"].plan.cache_share = 1.0
     rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
-    pairs = [(m, b, p.adapters.peek(k)) for m, b, k in ad.dit]
+    pairs = [(m, b, p.adapters.peek(k)) for m, b, _a, k in ad.dit]
 
     def other(scale):
         # Pairs the size of the entry's LoRA, each table filling the room.
@@ -2510,7 +2439,7 @@ def _two_stepped_tables(host, tmp_path):
     p.adapters.max_bytes = 3 * held + 64
     host.served["own"].plan.cache_share = 1.0
     rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
-    pairs = [(m, b, p.adapters.peek(k)) for m, b, k in ad.dit]
+    pairs = [(m, b, p.adapters.peek(k)) for m, b, _a, k in ad.dit]
     for s in (2.0, 3.0):
         c.step("own", None, x, [0.5], rows,
                patch_table=c.define_table("own", _scaled(c, pairs, s)))
@@ -2591,7 +2520,7 @@ def test_an_images_api_request_keeps_the_built_table_of_its_first_file(
     p.adapters.max_bytes = held + files * unit + 64
     host.served["own"].plan.cache_share = 1.0
     rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
-    pairs = [(m, b, p.adapters.peek(k)) for m, b, k in ad.dit]
+    pairs = [(m, b, p.adapters.peek(k)) for m, b, _a, k in ad.dit]
     first, _ = _on_worker(image_service._adapter_table, host.served["own"],
                           [(names[0], 1.0)], [str(tmp_path)])
     _direct(p, _features(), table=first)
@@ -2612,7 +2541,7 @@ def test_a_stack_switch_keeps_the_built_table_of_its_first_lora(
     over the entry's pairs and A's, which the define puts before B's, so
     dropping it frees nothing: C's table goes and A's stays."""
     p, ad, c, _body = _header_alpha_own(host, tmp_path)
-    pairs = [(m, b, p.adapters.peek(k)) for m, b, k in ad.dit]
+    pairs = [(m, b, p.adapters.peek(k)) for m, b, _a, k in ad.dit]
     half = len(pairs) // 2
 
     def nbytes(ps) -> int:
@@ -2651,7 +2580,7 @@ def test_an_images_api_request_between_a_define_and_its_step_keeps_it(
     p.adapters.max_bytes = 3 * held + max(0, size - held) + 64
     host.served["own"].plan.cache_share = 1.0
     rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
-    pairs = [(m, b, p.adapters.peek(k)) for m, b, k in ad.dit]
+    pairs = [(m, b, p.adapters.peek(k)) for m, b, _a, k in ad.dit]
     stale = c.define_table("own", _scaled(c, pairs, 2.0))
     c.step("own", None, x, [0.5], rows, patch_table=stale)
     fresh = c.define_table("own", _scaled(c, pairs, 3.0))
@@ -2665,44 +2594,93 @@ def test_an_images_api_request_between_a_define_and_its_step_keeps_it(
     assert host.held == 0
 
 
-def test_a_request_copy_of_an_entry_lora_becomes_its_twin_at_a_define(
-        host, tmp_path):
-    """An images API request names a copy of the entry's LoRA with no
-    header, so the cache holds its pairs at full bytes under alpha None.
-    A ComfyUI table of the same pairs, with a LoRA of their size stacked
-    on, fits only in the copy's bytes: the copy gives them back as the own
-    pairs' twin, the define holds the entry's bytes once, and a later put
-    that must shed keeps the twins."""
-    from lora_fixtures import dialect_keys, tiny_z_adapter, write_keys
+def _pack_steps(c, pairs, scale, x, out: list, n: int):
+    """The requests of a ComfyUI that samples ``n`` steps under a LoRA of
+    ``pairs`` scaled by ``scale``, one request a turn. It syncs the table
+    as the pack does, uploading the matrices the server lacks and then
+    defining it. A 409 for the table at a step syncs it again and sends
+    the step once more; a second 409 fails the step. Each output goes to
+    ``out`` with the 409s and the uploads its step met."""
+    from gmlx.serve.image_steps_client import array_hash
 
-    from gmlx.serve import image_service
+    mats, entries = {}, []
+    for m, b, pair in pairs:
+        up = np.array(pair.up) * scale
+        down = np.array(pair.down) * (1 + scale)
+        mats.update({array_hash(up): up, array_hash(down): down})
+        entries.append({"key": f"diffusion_model.{m}.weight",
+                        "band": None if b is None else list(b),
+                        "patches": [{"up": array_hash(up),
+                                     "down": array_hash(down),
+                                     "alpha": None, "strength": 1.0}]})
+    rows = _rows(c, _features())
 
-    p, ad, c, body = _header_alpha_own(host, tmp_path)
-    own = image_service._pair_keys([(ad, 1.0)])
+    def sync() -> tuple:
+        sent = sum(h not in steps.STATE.adapters for h in mats)
+        c._uploaded.difference_update(mats)
+        for a in mats.values():
+            c.put(a, kind="adapters")
+        return sent, c.define_table("own", {"entries": entries})
+
+    _sent, tid = sync()
+    yield
+    for _ in range(n):
+        try:
+            got, missed, sent = c.step("own", None, x, [0.5], rows,
+                                       patch_table=tid), 0, 0
+        except MissingTensors as e:
+            assert e.missing == [tid]
+            yield
+            sent, tid = sync()
+            yield
+            got, missed = c.step("own", None, x, [0.5], rows,
+                                 patch_table=tid), 1
+        out.append((got, missed, sent))
+        yield
+
+
+def test_two_clients_whose_loras_do_not_both_fit_take_turns(
+        host, tmp_path, monkeypatch):
+    """Two ComfyUIs sample on one entry at once, each under a LoRA the
+    size of the entry's own, on a pair cache with room for one of them
+    and a tensor cache that holds one LoRA's matrices. Their requests take
+    turns, so each sync sheds the other's pairs and matrices, and each
+    step meets at most one 409, uploads again and runs. Neither is locked
+    out, each steps the same every time, and the pair cache never holds
+    more than its bound."""
+    p, ad, _c, _body = _header_alpha_own(host, tmp_path)
     held = p.adapters.bytes
-    write_keys(tmp_path / "copy.safetensors",
-               dialect_keys("diffusers", tiny_z_adapter(1)))
-    _on_worker(image_service._adapter_table, host.served["own"],
-               [("copy.safetensors", 1.0)], [str(tmp_path)])
-    copies = p.adapters.keys(lambda k: k not in own)
-    assert len(copies) == len(ad.dit) and p.adapters.bytes == 2 * held
     p.adapters.max_bytes = 2 * held + 64
     host.served["own"].plan.cache_share = 1.0
+    monkeypatch.setattr(steps.STATE.adapters, "max_bytes", held + held // 2)
+    peak = [p.adapters.bytes]
+    put = p.adapters.put
 
-    def stacked(scale):
-        return [{"up": c.put(np.array(p.adapters.peek(k).up) * scale,
-                             kind="adapters"),
-                 "down": c.put(np.array(p.adapters.peek(k).down),
-                               kind="adapters"),
-                 "alpha": None, "strength": 1.0} for _m, _b, k in ad.dit]
+    def counted(*a, **k):
+        put(*a, **k)
+        peak.append(p.adapters.bytes)
 
-    for e, patch in zip(body["entries"], stacked(2.0)):
-        e["patches"].append(patch)
-    c.define_table("own", body)
-    assert p.adapters.bytes == 2 * held
-    assert all(p.adapters.nbytes(k) == 0 for k in copies)
-    later = {"entries": [{**e, "patches": [patch]}
-                         for e, patch in zip(body["entries"], stacked(3.0))]}
-    c.define_table("own", later)
-    assert all(p.adapters.peek(k) is not None for k in (*own, *copies))
+    monkeypatch.setattr(p.adapters, "put", counted)
+    pairs = [(m, b, p.adapters.peek(k)) for m, b, _a, k in ad.dit]
+    x = noise_from_seed(5, SHAPE)
+    outs: list = [[], []]
+    runs = [_pack_steps(_client(), pairs, s, x, out, 3)
+            for s, out in zip((2.0, 3.0), outs)]
+    while runs:
+        for r in list(runs):
+            try:
+                next(r)
+            except StopIteration:
+                runs.remove(r)
+            assert p.adapters.bytes <= p.adapters.max_bytes
+    assert max(peak) <= p.adapters.max_bytes
+    for out in outs:
+        assert len(out) == 3
+        assert all(np.array_equal(got, out[0][0]) for got, _m, _s in out)
+    assert not np.array_equal(outs[0][0][0], outs[1][0][0])
+    # The first client's first step meets the 409 as well: the second's
+    # define shed its pairs before it stepped.
+    assert [[m for _g, m, _s in out] for out in outs] == [[1, 1, 1],
+                                                          [0, 1, 1]]
+    assert all(s > 0 for out in outs for _g, m, s in out if m)
     assert host.held == 0

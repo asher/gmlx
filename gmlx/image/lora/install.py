@@ -17,7 +17,9 @@ text models. ``EncoderLoRALinear`` is the same for the text halves on the
 pipeline's own encoder.
 
 Pairs live in the pipeline's ``adapters`` cache under the sha256 of their
-content, so a file read twice or two files that share a pair hold it once.
+down and up, so a file read twice or two files that share a pair hold it
+once, whatever alpha each gives it. A pair's alpha is a patch table's:
+an entry gives it beside the strength.
 The leaf swap runs when the first patch table with entries is defined, so
 a pipeline that never uses an adapter keeps its plain leaves.
 
@@ -40,7 +42,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import struct
 import weakref
 from dataclasses import dataclass
 
@@ -77,10 +78,9 @@ def form() -> str:
 
 @dataclass(frozen=True)
 class Pair:
-    """One cached pair: ``down`` (rank, in), ``up`` (out, rank), alpha."""
+    """One cached pair: ``down`` (rank, in) and ``up`` (out, rank)."""
     down: mx.array
     up: mx.array
-    alpha: float | None
 
     @property
     def nbytes(self) -> int:
@@ -97,15 +97,12 @@ def _raw(arr: mx.array) -> np.ndarray:
     return np.ascontiguousarray(np.array(arr))
 
 
-def pair_hash(down: mx.array, up: mx.array, alpha: float | None) -> str:
+def pair_hash(down: mx.array, up: mx.array) -> str:
     """sha256 of a pair's content: a JSON line of each part's dtype and
-    shape and the alpha as a float64 hex string, then the little-endian
-    bytes of ``down`` and of ``up``."""
-    head = {"v": 1,
+    shape, then the little-endian bytes of ``down`` and of ``up``."""
+    head = {"v": 2,
             "down": [_dtype_name(down), list(down.shape)],
-            "up": [_dtype_name(up), list(up.shape)],
-            "alpha": None if alpha is None
-            else struct.pack("<d", float(alpha)).hex()}
+            "up": [_dtype_name(up), list(up.shape)]}
     h = hashlib.sha256(json.dumps(head, sort_keys=True,
                                   separators=(",", ":")).encode())
     h.update(_raw(down).data)
@@ -118,20 +115,16 @@ class PairRoomError(AdapterError):
     keeps."""
 
 
-def register_pair(pipe, down, up, alpha: float | None = None,
-                  key: str | None = None, twin: str | None = None,
+def register_pair(pipe, down, up, *, key: str | None = None,
                   hold=()) -> str:
     """Keep a pair in the pipeline's cache and return its content hash,
-    which names it in patch table entries. A pair already held is not
-    stored again. An MLX array is kept as it is, since a copy would hold
-    the pair twice while the reader still holds it. The caller must not
-    change it afterwards. ``key`` is the pair's ``pair_hash`` when the
-    caller has it already. ``twin`` is the key of a held pair with the
-    same down and up under another alpha: the pair keeps the twin's
-    arrays, in place of a copy held under its key, takes no bytes of its
-    own, and is never shed, as the twin is not. ``hold`` names the pairs
-    the caller put before this one for the same table or file, which the
-    room for this one never sheds."""
+    which names it in patch table entries beside its alpha. A pair
+    already held is not stored again. An MLX array is kept as it is,
+    since a copy would hold the pair twice while the reader still holds
+    it. The caller must not change it afterwards. ``key`` is the pair's
+    ``pair_hash`` when the caller has it already. ``hold`` names the
+    pairs the caller put before this one for the same table or file,
+    which the room for this one never sheds."""
     down, up = (a if isinstance(a, mx.array) else mx.array(a)
                 for a in (down, up))
     if down.ndim != 2 or up.ndim != 2 or up.shape[1] != down.shape[0]:
@@ -142,32 +135,11 @@ def register_pair(pipe, down, up, alpha: float | None = None,
         if not mx.issubdtype(a.dtype, mx.floating):
             raise AdapterError(f"a LoRA pair is floating point, not "
                                f"{_dtype_name(a)}")
-    if alpha is not None:
-        alpha = float(alpha)
     mx.eval(down, up)
     if key is None:
-        key = pair_hash(down, up, alpha)
-    held = None if twin is None else pipe.adapters.peek(twin)
-    if held is not None:
-        # The cache counts the twin's arrays already, so a copy a request
-        # put first at full bytes gives its bytes back. Shed, the pair
-        # would free nothing, so it is kept as the twin is.
-        now = pipe.adapters.get(key)
-        if now is None or now.down is not held.down or now.up is not held.up:
-            if now is not None:
-                # The tables built over the copy go first, and the twin
-                # then takes its place, which frees the copy. A forward
-                # that runs one keeps the copy as it is.
-                running = _running(pipe)
-                _drop_tables(pipe, lambda t: key in t.keys
-                             and id(t) not in running)
-            if now is None or not any(key in t.keys for t in _tables(pipe)):
-                pipe.adapters.put(key, Pair(held.down, held.up, alpha), 0,
-                                  shed=False)
-        pipe.adapters.keep_also((key,))
-        return key
+        key = pair_hash(down, up)
     if pipe.adapters.get(key) is None:
-        pair = Pair(down, up, alpha)
+        pair = Pair(down, up)
         if pair.nbytes > pipe.adapters.max_bytes:
             raise PairRoomError(
                 f"a LoRA pair of {pair.nbytes} bytes is over the adapter "
@@ -184,9 +156,9 @@ def register_pair(pipe, down, up, alpha: float | None = None,
 # Static ownership. A pair's bytes are counted in the pair cache from its
 # put, and a built table counts the arrays it made alone, so no array is
 # counted under two keys. An entry that something held depends on is
-# never shed: the entry's own pairs and their twins (the pair cache's keep
-# set), the pairs a held built table names, and the kernel pairs it is
-# built over. make_room sheds the dependents first.
+# never shed: the entry's own pairs (the pair cache's keep set), the pairs
+# a held built table names, and the kernel pairs it is built over.
+# make_room sheds the dependents first.
 
 def _tables(pipe) -> list:
     """The built tables the pipeline holds, the least recently used
@@ -631,7 +603,7 @@ def check_table(pipe, table) -> None:
     leaves = linear_leaves(pipe.dit)
     for path, band, patches in table["entries"]:
         dims = linear_dims(leaves[path])
-        for key, _ in patches:
+        for key, _strength, _alpha in patches:
             pair = pipe.adapters.get(key)
             if pair is None:
                 raise AdapterError(
@@ -697,7 +669,7 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
     named: dict = {}
     owner = weakref.ref(pipe)
     for path, band, patches in table["entries"]:
-        for key, strength in patches:
+        for key, strength, alpha in patches:
             if strength == 0.0:
                 continue
             pair = pipe.adapters.get(key)
@@ -706,16 +678,17 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
                     f"adapter {key[:16]} of patch table {tid[:16]} is no "
                     f"longer held. Register the pair again")
             by_module.setdefault(path, []).append(
-                plan.Part(pair.down, pair.up, pair.alpha, band, strength))
-            named.setdefault(path, []).append((key, band))
+                plan.Part(pair.down, pair.up, alpha, band, strength))
+            named.setdefault(path, []).append((key, band, alpha))
     kernels: set = set()
     pairs = None
     if how == KERNEL:
         def pairs(path: str, parts: list, dims: tuple) -> tuple:
             # The pair of a module is named by its parts without their
-            # strengths, so every table of those parts shares it. The
-            # tables cache counts it under its own key and keeps it while
-            # a held table is built over it.
+            # strengths, so every table of those parts shares it. Its B
+            # holds each part's alpha / rank, so the alphas name it too.
+            # The tables cache counts it under its own key and keeps it
+            # while a held table is built over it.
             key = (KERNEL, path, tuple(named[path]), dtype)
             kernels.add(key)
             held = owner()
@@ -727,7 +700,7 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
                     _keep_table(held, key, hit, int(hit[0].nbytes)
                                 + int(hit[1].nbytes))
             return hit
-    keys = frozenset(k for row in named.values() for k, _b in row)
+    keys = frozenset(k for row in named.values() for k, _b, _a in row)
     return BuiltTable(by_module, {p: leaves[p] for p in by_module}, dtype,
                       how, pairs, keys, kernels)
 
