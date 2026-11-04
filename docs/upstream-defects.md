@@ -171,7 +171,23 @@ print((out[:, 0] != want).sum())  # 0
     attention and feed-forward rows on the last axis. 9B passes from 131,073 rows and 4B from
     174,763, which the ComfyUI steps route reaches with several large references and `gmlx image`
     with a large canvas.
-- Guard: `concatenate` in `gmlx/mlx_guards.py`, which all three call. Past 2^31 output elements it
+  - `pair_halves` in `gmlx/video/rope.py` reorders the 96 rotated dims of each 128-dim head of a
+    MiniMax-H3 block's queries and keys and joins the other 32 back on the last axis. With 56
+    heads, H3 and FastH3 pass from 299,594 rows of the packed sequence. A 15 s clip at 2240x1280
+    has 299,600 video rows, and `gmlx video` reaches it on a 128 GB Mac.
+  - `attend` in `gmlx/video/families/h3/model.py` joins H3's dense attention of query chunks of
+    4,096 rows on the token axis of [1, 56, L, 128]. It passes from 304,966 rows. A 15 s clip at
+    2304x1280 has 308,160 video rows, and `gmlx video` reaches it on a 128 GB Mac. FastH3 runs
+    video sparse attention instead.
+  - `MemBlock` in `gmlx/video/vae/tiny.py` joins each frame's features and those of the frame
+    before on the last axis in TAEH3, the decoder of `gmlx video --preview`. The three blocks at 64
+    channels, over the 10 frames that a run of 5 latents grows to at a quarter of the canvas a
+    side, pass at canvases from 26,844,160 to 53,686,272 pixels, 5184x5184 and 7200x3744 among
+    them, on clips of 22 frames or more. Past that range each input gets 64-bit offsets. A 128 GB
+    Mac reaches canvases up to 30,450,261 pixels and a 256 GB Mac the whole range. A run of 2
+    latents, the last of every clip, passes from 67,109,888 pixels and the blocks at 128 channels
+    from 107,374,592, and a 512 GB Mac reaches both, up to 122,255,187 pixels.
+- Guard: `concatenate` in `gmlx/mlx_guards.py`, which all six call. Past 2^31 output elements it
   builds the output as zeros with each input written in by a slice update. At or under 2^31 it is
   the stock op, so the graph of every smaller shape is unchanged. At the tested shapes it holds the
   stock op's memory peak. It stays until an MLX release carries df46f58 and an A/B on these shapes
@@ -186,9 +202,10 @@ print((out[:, 0] != want).sum())  # 0
   shared-KV pad 1,024, and the single block its last row of 16,384, written over its attention
   rows. `test_concatenate_takes_a_slice_update_only_past_the_limit` in `tests/test_mlx_guards.py`
   holds the routing on small arrays in every run, and `tests/cache/test_kv_guard_calls.py`,
-  `test_pad_concatenates_through_the_guard` in `tests/spec/test_shared_kv_inject_merge.py` and
-  `tests/image/test_image_guard_calls.py` fail in every run when a caller calls the stock op
-  instead. The past-limit tests run as the pad's do.
+  `test_pad_concatenates_through_the_guard` in `tests/spec/test_shared_kv_inject_merge.py`,
+  `tests/image/test_image_guard_calls.py` and `tests/video/test_video_guard_calls.py` fail in every
+  run when a caller calls the stock op instead. The past-limit tests run as the pad's do. The video
+  sites have no past-limit test.
 
 ## A gather misreads a strided view that spans more than INT32_MAX elements on the GPU
 
