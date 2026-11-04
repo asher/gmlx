@@ -36,8 +36,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   server's adapter cache sends its LoRA again, in place of failing.
 - An image model that `gmlx serve` refuses for memory shows its need above
   its budget, where both could read the same.
-- A ComfyUI workflow with a negative prompt loads an image model whose text
-  encoder does not fit beside its DiT once before its first step, not twice.
+- A ComfyUI workflow with a negative prompt loads the DiT and VAE once, not
+  twice, before its first step when the text encoder cannot fit beside them.
 
 ## [0.5.4] - 2026-10-29
 
