@@ -428,8 +428,12 @@ def _w1_patch(pipe, rng, hold=()) -> str:
 def _w1_step(pipe, keys) -> None:
     """A forward of w1 under the table of ``keys``, or of the base model
     without keys."""
-    tid = api.define_patch_table(
-        pipe, [(W1, None, [(k, 1.0) for k in keys])] if keys else [])
+    _w1_run(pipe, api.define_patch_table(
+        pipe, [(W1, None, [(k, 1.0) for k in keys])] if keys else []))
+
+
+def _w1_run(pipe, tid) -> None:
+    """A forward of w1 under the table ``tid``, defined before."""
     inp = install.linear_dims(_leaf(pipe, W1))[1]
     x = mx.array(np.random.default_rng(0).standard_normal(
         (1, 64, inp)).astype(np.float32)).astype(mx.bfloat16)
@@ -440,11 +444,14 @@ def _w1_step(pipe, keys) -> None:
         install.restore(pipe, prev)
 
 
-def test_patches_kept_with_no_hold_shed_the_stale_tables_before_them(op):
+def test_patches_kept_with_no_hold_shed_the_stale_tables_before_them(
+        op, monkeypatch):
     """A library caller keeps a table's two patches with no hold on a full
     pair cache whose pairs two stepped tables hold. The tables go in the
     order they stepped, each before the pairs kept after its step, so the
-    first patch is still held for the define."""
+    first patch is still held for the define. Each put drops one table, in
+    the order the check gives."""
+    order = _OrderCheck(monkeypatch)
     rng = np.random.default_rng(11)
     pipe = _pipe()
     for _ in range(2):
@@ -453,6 +460,7 @@ def test_patches_kept_with_no_hold_shed_the_stale_tables_before_them(op):
     keys = [_w1_patch(pipe, rng) for _ in range(2)]
     _w1_step(pipe, keys)
     assert pipe.adapters.bytes == pipe.adapters.max_bytes
+    assert order.drops == 2
 
 
 def test_register_patch_keeps_the_pairs_it_holds_for_the_table(op):
@@ -488,6 +496,42 @@ def test_a_forward_of_the_base_model_is_no_step_of_the_last_table(op):
     _w1_patch(pipe, rng)
     assert pipe.adapters.peek(kept) is not None
     assert pipe.adapters.peek(old[0]) is None
+
+
+def test_a_define_is_a_use_of_the_pairs_it_names(op):
+    """A library caller keeps patch p, steps a table over another patch,
+    then defines a table over p and keeps one more patch on a full pair
+    cache. The define is p's last use, after that step, so the stepped
+    table and its patch go, p stays, and the new table steps."""
+    rng = np.random.default_rng(31)
+    pipe = _pipe()
+    p = _w1_patch(pipe, rng)
+    _w1_step(pipe, [_w1_patch(pipe, rng)])
+    tid = api.define_patch_table(pipe, [(W1, None, [(p, 1.0)])])
+    pipe.adapters.max_bytes = pipe.adapters.bytes
+    _w1_patch(pipe, rng)
+    assert pipe.adapters.peek(p) is not None
+    _w1_run(pipe, tid)
+
+
+def test_a_build_is_a_use_of_the_pairs_it_reads(op):
+    """A table is defined over patch q, patch r is kept, and the table
+    steps, which builds it over q. The table then leaves the tables cache
+    for another's build, and a patch that needs one pair of room sheds r,
+    kept before the build, so the table steps again over q."""
+    rng = np.random.default_rng(32)
+    pipe = _pipe()
+    q = _w1_patch(pipe, rng)
+    tid = api.define_patch_table(pipe, [(W1, None, [(q, 1.0)])])
+    r = _w1_patch(pipe, rng)
+    _w1_run(pipe, tid)
+    pipe.tables.max_bytes = pipe.tables.bytes
+    _w1_step(pipe, [_w1_patch(pipe, rng)])
+    assert not any(k[0] == tid for k in pipe.tables.keys(lambda k: True))
+    pipe.adapters.max_bytes = pipe.adapters.bytes
+    _w1_patch(pipe, rng)
+    assert pipe.adapters.peek(q) is not None and pipe.adapters.peek(r) is None
+    _w1_run(pipe, tid)
 
 
 def test_a_run_of_steps_makes_its_last_step_the_tables_use(op):
@@ -1226,11 +1270,13 @@ def _one_order(inputs, nbytes: int) -> tuple:
 
 class _OrderCheck:
     """make_room with each call for the pair cache checked against
-    ``_one_order``."""
+    ``_one_order``. ``puts`` counts the puts, of more than 0 bytes, that
+    shed or dropped, and ``drops`` those that dropped a table: the sheds
+    to a bound, of 0 bytes, check no put."""
 
     def __init__(self, monkeypatch):
         self.make_room = install.make_room
-        self.turns = 0
+        self.puts = self.drops = 0
         monkeypatch.setattr(install, "make_room", self)
 
     def __call__(self, pipe, cache, nbytes, hold=()):
@@ -1243,7 +1289,9 @@ class _OrderCheck:
         got = ({k for k, _b, _u in inputs[0]} - set(cache.keys(lambda k: True)),
                {i for i, *_ in inputs[2]}
                - {id(t) for t in install._tables(pipe)}, fit)
-        self.turns += bool(got[0] or got[1])
+        if nbytes:
+            self.puts += bool(got[0] or got[1])
+            self.drops += bool(got[1])
         assert got == want, (nbytes, sorted(k[:8] for k in got[0]),
                              sorted(k[:8] for k in want[0]), len(got[1]),
                              len(want[1]), fit, want[2])
@@ -1272,5 +1320,5 @@ def test_a_random_sequence_counts_every_lora_array_once(op, monkeypatch, seed):
             _check_caches(seq.pipe)
         except AssertionError as e:
             raise AssertionError(f"after {done[-6:]}, op {len(done)}") from e
-    assert all(ran.values()) and seq.refused and seq.missing and order.turns, (
-        ran, seq.refused, seq.missing, order.turns)
+    assert all(ran.values()) and seq.refused and seq.missing and order.puts, (
+        ran, seq.refused, seq.missing, order.puts)
