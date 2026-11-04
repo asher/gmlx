@@ -27,7 +27,7 @@ def _index(root: str) -> dict:
     found: dict = {}
     for d, _, names in os.walk(root):
         for n in names:
-            if n.endswith(".gguf"):
+            if n.endswith((".gguf", ".safetensors")):
                 found.setdefault(n, []).append(os.path.join(d, n))
     return found
 
@@ -182,3 +182,42 @@ def test_a_kv_run_whose_first_step_fits_fits_its_later_steps(
         lo, hi = (lo, mid) if step(mid, {}) else (mid + 1, hi)
     held["bytes"] = row.prefix.cache_bytes(refs * 64 * 64, 2)
     assert step(lo, {api._ref_key(cond, 0): None})
+
+
+@pytest.mark.parametrize("gb, fits", [(36, True), (32, False)])
+def test_serve_admits_the_fasth3_default_clip_from_36_gb(gguf_dir, monkeypatch,
+                                                         gb, fits):
+    """docs/video.md: FastH3's clip at 1344x768 for 5 s needs a Mac with
+    36 GB. The entry ``gmlx video pull fasth3`` writes is priced at that
+    clip on the headers of its DiT, encoder and VAEs: a 36 GB Mac's
+    working budget admits it and a 32 GB Mac's refuses it. FastH3 runs as
+    on an M5 with an mlx-kquant that has its sparse attention."""
+    from gmlx.commands.video import frames_of
+    from gmlx.config import ResolvedVideoModel
+    from gmlx.serve import video_service
+    from gmlx.video import catalog as video_catalog
+    from gmlx.video import memfit as video_memfit
+    from gmlx.video import registry
+
+    r = video_catalog.RECIPES["fasth3"]
+    spec = ResolvedVideoModel(
+        id="fasth3", path=_file(gguf_dir, r.dit.name),
+        encoder=_file(gguf_dir, r.encoder.name),
+        vae=_file(gguf_dir, r.vae.name),
+        audio_vae=_file(gguf_dir, r.audio_vae.name), encoder_mmproj=None,
+        tiny_vae=None, adapters=(),
+        defaults={"steps": r.steps, "shift": r.shift, "size": r.size,
+                  "seconds": r.seconds})
+    budget = _class_budget(gb)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
+    monkeypatch.setattr(capacity, "overcommit", lambda: False)
+    monkeypatch.setattr(registry, "run_refusal", lambda fam, variant: None)
+    if not fits:
+        with pytest.raises(video_memfit.VideoMemoryError):
+            video_service.entry_plan(spec)
+        return
+    plan = video_service.entry_plan(spec)
+    assert (plan.variant, plan.size, plan.frames) == (
+        "fasth3", (1344, 768), frames_of(5))
+    assert plan.footprint <= budget, (plan.footprint / memfit.GiB,
+                                      budget / memfit.GiB)
