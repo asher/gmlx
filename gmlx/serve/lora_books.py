@@ -8,15 +8,20 @@ bytes grow only under the pool's lock. They shrink without it: a cache
 that lets keys go, a settle and a cancel post to a queue, which every
 holder of the pool's lock drains before it reads the books. So a grant
 that misses a concurrent change misses a shrink, and a post never waits,
-under a cache's lock or in a finalizer."""
+under a cache's lock or in a finalizer. A cache posts the key it puts
+from under its own lock too, so the queue holds each cache's puts and
+drops in the order the cache made them."""
 
 from __future__ import annotations
 
 import contextlib
 import contextvars
+import logging
 import math
 import queue
 import weakref
+
+_log = logging.getLogger(__name__)
 
 
 class _Store:
@@ -108,18 +113,12 @@ class Booking:
         return [(s, b) for s, b in self._rec.claims.values()]
 
     def enter(self, key, nbytes: int) -> None:
-        """Book ``key`` from this booking before its cache put, up to its
+        """Book ``key`` from this booking as its cache puts it, up to its
         priced figure when it has one. A key booked already is raised to
         the figure, never booked twice."""
         self.keys.add(key)
         self.books.post(("enter", self._rec, key,
                          int(self.priced.get(key, nbytes))))
-
-    def unenter(self, key) -> None:
-        """A put that failed after ``key`` entered: what it moved goes
-        back to pending, for the settle to return."""
-        self.keys.discard(key)
-        self.books.post(("unenter", self._rec, key))
 
     def cancel(self) -> None:
         """Give back what was not entered, and the claims. A shrink, as a
@@ -182,6 +181,14 @@ class _Owner:
         return sum(self.own.values())
 
 
+def _ref(owner):
+    """A weak reference to ``owner``, or to the store, which lives as long
+    as the process."""
+    if owner is STORE:
+        return lambda: STORE
+    return weakref.ref(owner)
+
+
 class Books:
     """The ledger of every owner, the open claims and the shrink queue.
     Every method but ``post`` and ``release_hook`` runs under the pool's
@@ -204,11 +211,7 @@ class Books:
         """The ``on_gone`` of an owner's caches: posts the keys they let
         go. It holds the owner weakly, so a released pipeline keeps no
         entry alive."""
-        if owner is STORE:
-            def ref():
-                return STORE
-        else:
-            ref = weakref.ref(owner)
+        ref = _ref(owner)
 
         def gone(keys) -> None:
             o = ref()
@@ -216,15 +219,35 @@ class Books:
                 self.post(("release", o, tuple(keys)))
         return gone
 
-    def own_hook(self, owner):
-        """Posts an own key's cache bytes, for the owner's excess."""
-        ref = weakref.ref(owner)
+    def put_hook(self, owner):
+        """The ``on_put`` of an owner's caches. A key put while the owner
+        loads its own adapters is its own; any other enters from the
+        booking of the job that puts it. A put that grows the bytes with
+        no booking is an overrun."""
+        ref = _ref(owner)
 
-        def put(key, nbytes: int) -> None:
+        def put(key, nbytes, old) -> None:
             o = ref()
-            if o is not None:
+            if o is None:
+                return
+            if _OWN.get():
                 self.post(("own", o, key, int(nbytes)))
+                return
+            b = _CURRENT.get()
+            if b is not None and b.owner is o and not b.done:
+                b.enter(key, nbytes)
+            elif int(nbytes) > int(old):
+                self.overrun(f"a LoRA put of {key!r} with no booking",
+                             int(nbytes) - int(old))
         return put
+
+    def overrun(self, subject: str, nbytes: int) -> None:
+        """Bytes past their booking: a pricing bug. Logged; a test's hook
+        raises."""
+        _log.warning("LoRA bytes %.3f GB past their booking: %s",
+                     nbytes / 1e9, subject)
+        if self.overrun_hook is not None:
+            self.overrun_hook(subject, nbytes)
 
     # under the pool's lock
     def attach(self, owner, own_term: int = 0, own: dict | None = None):
@@ -294,21 +317,6 @@ class Books:
         rec.ledger[key] = cur + move
         rec.held += move
         r.entered[key] = r.entered.get(key, 0) + move
-
-    def _op_unenter(self, r: _Open, key) -> None:
-        rec = self.rec(r.owner)
-        if rec is None or r not in self.open or key not in r.entered:
-            return
-        b = min(r.entered.pop(key), rec.ledger.get(key, 0))
-        if key in rec.ledger:
-            left = rec.ledger[key] - b
-            if left > 0:
-                rec.ledger[key] = left
-            else:
-                rec.ledger.pop(key)
-            rec.held -= b
-            r.pending += b
-            rec.pending += b
 
     def _op_cancel(self, r: _Open) -> None:
         self.close(r)

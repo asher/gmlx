@@ -223,6 +223,22 @@ class _Bytes:
         self._items: OrderedDict = OrderedDict()
         self._bytes = 0
         self._lock = threading.Lock()
+        # The books' hooks, as ByteLRU has them: on_put(key, nbytes, old)
+        # before a tensor goes in, on_gone(keys) for the keys let go.
+        self.on_put = None
+        self.on_gone = None
+
+    def _gone(self, keys) -> None:
+        if keys and self.on_gone is not None:
+            self.on_gone(list(keys))
+
+    def _shed_over(self, keep_one: bool) -> list:
+        gone = []
+        while self._bytes > self.max_bytes and len(self._items) > keep_one:
+            k, t = self._items.popitem(last=False)
+            self._bytes -= t.nbytes
+            gone.append(k)
+        return gone
 
     def get(self, key):
         with self._lock:
@@ -235,17 +251,41 @@ class _Bytes:
         with self._lock:
             return key in self._items
 
+    def peek(self, key):
+        """The tensor at ``key``, or None, without a use."""
+        with self._lock:
+            return self._items.get(key)
+
+    def nbytes(self, key) -> int:
+        """Bytes of the tensor at ``key``, 0 without one, without a use."""
+        with self._lock:
+            t = self._items.get(key)
+            return 0 if t is None else t.nbytes
+
     def put(self, key, t: WireTensor) -> None:
         self.check(t.nbytes)
         with self._lock:
             old = self._items.pop(key, None)
             if old is not None:
                 self._bytes -= old.nbytes
+            if self.on_put is not None:
+                self.on_put(key, t.nbytes, 0 if old is None else old.nbytes)
             self._items[key] = t
             self._bytes += t.nbytes
-            while self._bytes > self.max_bytes and len(self._items) > 1:
-                _, gone = self._items.popitem(last=False)
-                self._bytes -= gone.nbytes
+            self._gone(self._shed_over(True))
+
+    def shed(self, nbytes: int) -> int:
+        """Drop the least recently used tensors until ``nbytes`` are gone,
+        and return the bytes dropped."""
+        with self._lock:
+            dropped, keys = 0, []
+            while dropped < nbytes and self._items:
+                k, t = self._items.popitem(last=False)
+                self._bytes -= t.nbytes
+                dropped += t.nbytes
+                keys.append(k)
+            self._gone(keys)
+            return dropped
 
     @property
     def bytes(self) -> int:
@@ -274,14 +314,14 @@ class _Bytes:
         shed the oldest tensors over it."""
         with self._lock:
             self.configured, self.max_bytes = int(configured), int(max_bytes)
-            while self._bytes > self.max_bytes and self._items:
-                _, gone = self._items.popitem(last=False)
-                self._bytes -= gone.nbytes
+            self._gone(self._shed_over(False))
 
     def clear(self) -> None:
         with self._lock:
+            keys = list(self._items)
             self._items.clear()
             self._bytes = 0
+            self._gone(keys)
 
 
 @dataclass(eq=False)

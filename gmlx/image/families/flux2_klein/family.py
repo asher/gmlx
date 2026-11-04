@@ -441,6 +441,13 @@ FAMILY = Family(
     constants=CONSTANTS,
     build=build,
     lora_map=lora_map,
+    # The time embedder and the modulations run through precise on the
+    # float32 time row.
+    lora_f32=("time_in.in_layer", "time_in.out_layer",
+              "double_stream_modulation_img.lin",
+              "double_stream_modulation_txt.lin",
+              "single_stream_modulation.lin",
+              "final_layer.adaLN_modulation.1"),
     # The q and k norm scales, F32 in the file, stay fp32: the norm then
     # runs in fp32 and rounds once with the rotation.
     fp32_keep=("norm.query_norm.scale", "norm.key_norm.scale"),

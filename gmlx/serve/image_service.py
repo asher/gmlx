@@ -1619,6 +1619,67 @@ def _adapter_table(served: ServedImage, rows: list, model_dirs) -> tuple:
     return api.define_patch_table(pipe, lora.table_entries(table_rows)), shown
 
 
+def shed_lora(entry, nbytes: int, hold=(), own: bool = False) -> None:
+    """Shed ``nbytes`` of a pool entry's request LoRA bytes for a claim,
+    on the image worker, where no forward runs: its built tables and
+    kernel pairs first, then its pairs. ``hold`` names what the claimant's
+    job keeps on its own entry (``own``): its pair keys and its table
+    ids. The tables of a step that ended let go first, except on the
+    claimant's own entry while they are its table's."""
+    from gmlx.image.lora import install
+
+    pipe = getattr(entry.pipeline, "pipe", None)
+    if pipe is None or not hasattr(pipe, "adapters"):
+        return
+    hold = set(hold)
+    state = pipe.lora
+    if state is not None and state._held() is pipe and (
+            not own or any(k[0] not in hold for k in state._cur)):
+        install._release_cur(state)
+    left = int(nbytes)
+    for cache in (pipe.tables, pipe.adapters):
+        if left <= 0:
+            break
+        bound, before = cache.max_bytes, cache.bytes
+        cache.max_bytes = max(0, before - left)
+        try:
+            install.make_room(pipe, cache, 0,
+                              hold if cache is pipe.adapters else ())
+        finally:
+            cache.max_bytes = bound
+        left -= before - cache.bytes
+
+
+def lora_claims(pool, booking, hold=()) -> None:
+    """A job's claims at its start or turn, on the worker: shed what its
+    booking claimed, then release the claims and check the pool again in
+    one hold, before it allocates. Raises LoraRefused when the check
+    fails, having allocated nothing."""
+    pool.shed_claims(booking, hold)
+    pool.release_claims(booking)
+
+
+def lora_figures(caches, keys) -> dict:
+    """What ``caches`` hold at each of ``keys`` now, for a settle. Read
+    before the pool's lock: each read takes its cache's own."""
+    out = {}
+    for k in keys:
+        for cache in caches:
+            n = cache.nbytes(k)
+            if n is not None and (n or cache.peek(k) is not None):
+                out[k] = int(n)
+                break
+    return out
+
+
+def settle_job(pool, booking, pipe) -> None:
+    """Settle a job's booking at what its keys hold in the pipeline's
+    caches once it ran."""
+    if booking is not None:
+        pool.settle_lora(booking, lora_figures(
+            (pipe.adapters, pipe.tables), booking.keys))
+
+
 def _pair_keys(rows) -> set:
     """The pair keys of (LoadedAdapter, strength) rows."""
     return {r[-1] for ad, _st in rows for r in (*ad.dit, *ad.text)}

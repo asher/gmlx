@@ -39,6 +39,8 @@ route does not take runs the block-diagonal pair on stock ops.
 
 from __future__ import annotations
 
+import contextlib
+import fnmatch
 import hashlib
 import json
 import math
@@ -303,15 +305,25 @@ def shed_to_bounds(pipe) -> None:
     make_room(pipe, pipe.tables, 0)
 
 
-def _keep_table(pipe, key, value, nbytes: int) -> None:
+def _keep_table(pipe, key, value, nbytes: int, own: bool = False) -> None:
     """Count ``value`` in the tables cache at ``key``, with room made for
     it. A table the patch state holds, or a kernel pair it is built over,
-    is kept past the bound when nothing else is left to shed."""
+    is kept past the bound when nothing else is left to shed. ``own``
+    marks the arrays of the pipeline's own default table, which a server
+    counts in the model's footprint."""
     nbytes = int(nbytes)
     grown = nbytes - (pipe.tables.nbytes(key)
                       if pipe.tables.peek(key) is value else 0)
     make_room(pipe, pipe.tables, grown)
-    pipe.tables.put(key, value, nbytes, shed=False)
+    from gmlx.serve.lora_books import own_load
+
+    with own_load() if own else contextlib.nullcontext():
+        pipe.tables.put(key, value, nbytes, shed=False)
+
+
+def _is_default(pipe, tid) -> bool:
+    """Whether ``tid`` is the pipeline's own default table."""
+    return tid is not None and tid == getattr(pipe, "default_table", None)
 
 
 # Module walking.
@@ -444,14 +456,18 @@ class _Slice:
         return parts[0] if len(parts) == 1 else mx.concatenate(parts, -1)
 
 
+def _kq_linear(base) -> bool:
+    from mlx_kquant.nn import KQuantLinear
+
+    return isinstance(base, KQuantLinear)
+
+
 def _band_fn(base, start: int, stop: int):
     """The base product over output rows ``start`` to ``stop`` alone and
     the weight copy it holds, or None for a base this cannot split."""
-    from mlx_kquant.nn import KQuantLinear
-
     bias = base.bias[start:stop] if "bias" in base else None
     w = base.weight[start:stop]
-    if isinstance(base, KQuantLinear):
+    if _kq_linear(base):
         import mlx_kquant as kq
 
         w = mx.contiguous(w)
@@ -551,50 +567,114 @@ def _runs_as_kept(pair, dtype) -> bool:
     return pair == dtype or dtype == mx.float32
 
 
-def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base,
-             pair=None):
+def _band_spans(parts: list, dims: tuple) -> list | None:
+    """``plan.banded`` of the parts by their shapes alone: (start, stop,
+    ranks) per output band, or None where it gives None."""
+    out = dims[0]
+    groups: dict = {}
+    for p in parts:
+        if p.band is not None and p.band[0] != 0:
+            return None
+        span = (0, out) if p.band is None else (p.band[1],
+                                                p.band[1] + p.band[2])
+        groups[span] = groups.get(span, 0) + int(p.down.shape[0])
+    spans = sorted(groups)
+    if any(a[1] > b[0] for a, b in zip(spans, spans[1:])):
+        return None
+    return [(s, e, groups[(s, e)]) for s, e in spans]
+
+
+def _splittable(base) -> bool:
+    """Whether ``_band_fn`` can split ``base``."""
+    return _kq_linear(base) or type(base) is nn.Linear
+
+
+def _form(parts: list, dims: tuple, dtype, how: str, base,
+          has_pair: bool) -> tuple:
+    """The form ``_factors`` builds a module in at ``dtype``, with the
+    figures its bytes take: ("kernel", ranks), ("slice", spans),
+    ("split", spans), ("own",) or ("block", ranks). The build and the
+    dry run read this one plan."""
+    ranks = sum(int(p.down.shape[0]) for p in parts)
     if how == KERNEL:
         how = "block"
-        ranks = sum(int(p.down.shape[0]) for p in parts)
         bands = plan.band_table(parts, dims)
-        if pair is not None and kq_routes.lora_static(base, dtype, ranks,
-                                                      bands):
-            def plain(a_t: mx.array, b_t: mx.array):
-                # The block-diagonal pair of the stock path: its A is the
-                # pair's, and so is its B when every strength is 1.0, the
-                # factor it then holds. Any other strength is folded into
-                # a B of its own.
-                if any(p.strength != 1.0 for p in parts):
-                    b = plan.block_diagonal(path, parts, dims).b
-                    b_t = mx.contiguous(b.T).astype(dtype)
-                return _Block(a_t, b_t)
-            return _Kernel(pair(), _strengths(parts), plain)
+        if has_pair and kq_routes.lora_static(base, dtype, ranks, bands):
+            return ("kernel", ranks)
     if how != "block":
-        bands = plan.banded(path, parts, dims)
-        if bands is not None and not (len(bands) == 1 and bands[0][:2]
+        spans = _band_spans(parts, dims)
+        if spans is not None and not (len(spans) == 1 and spans[0][:2]
                                       == (0, dims[0])):
-            spans = [(s, e, *_transposed(lm, dtype)) for s, e, lm in bands]
             if how == "slice":
-                return _Slice(spans, dims[0])
-            full, pos = [], 0
-            for span in spans:
-                if span[0] > pos:
-                    full.append((pos, span[0], None, None))
-                full.append(span)
-                pos = span[1]
-            if pos < dims[0]:
-                full.append((pos, dims[0], None, None))
-            fns = [_band_fn(base, s[0], s[1]) for s in full]
-            if all(fn is not None for fn in fns):
-                return _Split(full, dims[0], [fn for fn, _ in fns],
-                              [w for _, w in fns])
+                return ("slice", spans)
+            if _splittable(base):
+                return ("split", spans)
     one = parts[0]
     if (len(parts) == 1 and one.band is None
             and _runs_as_kept(one.down.dtype, dtype)
             and _runs_as_kept(one.up.dtype, dtype)):
-        return _Own(one)
+        return ("own",)
+    return ("block", ranks)
+
+
+def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base,
+             pair=None):
+    form = _form(parts, dims, dtype, how, base, pair is not None)
+    if form[0] == "kernel":
+        def plain(a_t: mx.array, b_t: mx.array):
+            # The block-diagonal pair of the stock path: its A is the
+            # pair's, and so is its B when every strength is 1.0, the
+            # factor it then holds. Any other strength is folded into a B
+            # of its own.
+            if any(p.strength != 1.0 for p in parts):
+                b = plan.block_diagonal(path, parts, dims).b
+                b_t = mx.contiguous(b.T).astype(dtype)
+            return _Block(a_t, b_t)
+        return _Kernel(pair(), _strengths(parts), plain)
+    if form[0] in ("slice", "split"):
+        spans = [(s, e, *_transposed(lm, dtype))
+                 for s, e, lm in plan.banded(path, parts, dims)]
+        if form[0] == "slice":
+            return _Slice(spans, dims[0])
+        full, pos = [], 0
+        for span in spans:
+            if span[0] > pos:
+                full.append((pos, span[0], None, None))
+            full.append(span)
+            pos = span[1]
+        if pos < dims[0]:
+            full.append((pos, dims[0], None, None))
+        fns = [_band_fn(base, s[0], s[1]) for s in full]
+        return _Split(full, dims[0], [fn for fn, _ in fns],
+                      [w for _, w in fns])
+    if form[0] == "own":
+        return _Own(parts[0])
     return _Block(*_transposed(plan.block_diagonal(path, parts, dims),
                                dtype))
+
+
+def _factor_bytes(parts: list, dims: tuple, dtype, how: str, base,
+                  has_pair: bool = True) -> tuple:
+    """(table bytes, kernel pair bytes) ``_factors`` builds for a module
+    at ``dtype``, from the parts' shapes: what the table's arrays hold
+    once the module ran, its stock B included, and the kernel pair the
+    tables cache keeps under its own key."""
+    a = dtype.size
+    out, inp = dims
+    form = _form(parts, dims, dtype, how, base, has_pair)
+    if form[0] == "kernel":
+        r = form[1]
+        stock = (out * r * a if any(p.strength != 1.0 for p in parts)
+                 else 0)
+        return 4 * r + stock, a * r * (inp + out)
+    if form[0] in ("slice", "split"):
+        got = sum(a * r * (inp + e - s) for s, e, r in form[1])
+        if form[0] == "split":
+            got += int(base.weight.nbytes)
+        return got, 0
+    if form[0] == "own":
+        return 0, 0
+    return a * form[1] * (inp + out), 0
 
 
 def check_table(pipe, table) -> None:
@@ -698,11 +778,88 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
                 mx.eval(hit[0], hit[1])
                 if held is not None:
                     _keep_table(held, key, hit, int(hit[0].nbytes)
-                                + int(hit[1].nbytes))
+                                + int(hit[1].nbytes),
+                                own=_is_default(held, tid))
             return hit
     keys = frozenset(k for row in named.values() for k, _b, _a in row)
     return BuiltTable(by_module, {p: leaves[p] for p in by_module}, dtype,
                       how, pairs, keys, kernels)
+
+
+@dataclass(frozen=True)
+class _Like:
+    """The shape and dtype of an array not made yet."""
+    shape: tuple
+    dtype: mx.Dtype
+
+    @property
+    def nbytes(self) -> int:
+        return int(np.prod(self.shape)) * self.dtype.size
+
+
+@dataclass(frozen=True)
+class _Sized:
+    """A part by the figures its factors' bytes take."""
+    down: mx.array | _Like
+    up: mx.array | _Like
+    band: tuple | None
+    strength: float
+
+
+def f32_leaves(pipe) -> frozenset:
+    """The paths of the DiT's linear leaves that its family names in
+    ``lora_f32``: the leaves that see float32 rows under any activation
+    dtype."""
+    pats = getattr(getattr(pipe, "family", None), "lora_f32", ())
+    if not pats:
+        return frozenset()
+    return frozenset(p for p in linear_leaves(pipe.dit)
+                     if any(fnmatch.fnmatchcase(p, s) for s in pats))
+
+
+def table_figures(pipe, tid: str, act, f32=frozenset(),
+                  shapes=None) -> dict:
+    """The dry run of a forward on table ``tid`` at activation dtype
+    ``act``: {key: (bytes once built, bytes held now)} for each tables
+    cache key it holds, its built table at each dtype its modules run at
+    and the kernel pairs, and for each pair the pair cache does not hold.
+    A module runs at ``act``, or float32 for a leaf named in ``f32``, the
+    family's leaves that see float32 rows. ``shapes`` gives (down shape,
+    up shape, dtype) of each pair not held."""
+    table = pipe.patch_tables[tid]
+    leaves = linear_leaves(pipe.dit)
+    how = form()
+    out: dict = {}
+    by_module: dict = {}
+    named: dict = {}
+    for path, band, patches in table["entries"]:
+        for key, strength, alpha in patches:
+            if strength == 0.0:
+                continue
+            pair = pipe.adapters.peek(key)
+            if pair is None:
+                down, up, dtype = shapes[key]
+                d, u = _Like(tuple(down), dtype), _Like(tuple(up), dtype)
+                out[key] = (d.nbytes + u.nbytes, 0)
+            else:
+                d, u = pair.down, pair.up
+            by_module.setdefault(path, []).append(
+                _Sized(d, u, band, strength))
+            named.setdefault(path, []).append((key, band, alpha))
+    for path, parts in by_module.items():
+        leaf = leaves[path]
+        dims = linear_dims(leaf)
+        if dims is None:            # check_table refuses such a leaf
+            continue
+        dtype = mx.float32 if (act == mx.float32 or path in f32) else act
+        tb, pb = _factor_bytes(parts, dims, dtype, how, leaf, how == KERNEL)
+        key = (tid, dtype, how)
+        fig, held = out.get(key, (0, pipe.tables.nbytes(key)))
+        out[key] = (fig + tb, held)
+        if pb:
+            key = (KERNEL, path, tuple(named[path]), dtype)
+            out[key] = (pb, pipe.tables.nbytes(key))
+    return out
 
 
 class PatchState:
@@ -723,6 +880,17 @@ class PatchState:
         self._held = self._pipe
 
     def factors(self, path: str, dtype):
+        hit = self._at(dtype)
+        return None if hit is None else hit.get(path)
+
+    def names(self, path: str, dtype) -> bool:
+        """Whether the active table has a delta for ``path``, with no
+        factors built: a probe of a route that may not run the leaf at
+        ``dtype``."""
+        hit = self._at(dtype)
+        return hit is not None and path in hit
+
+    def _at(self, dtype) -> BuiltTable | None:
         tid = self.active
         if tid is None:
             return None
@@ -730,7 +898,7 @@ class PatchState:
         hit = self._cur.get(key)
         if hit is None or self._held() is not self._pipe():
             hit = self._table(key)
-        return hit.get(path)
+        return hit
 
     def _table(self, key: tuple) -> BuiltTable:
         """The built table at ``key`` of the pipeline that runs, held here
@@ -745,7 +913,8 @@ class PatchState:
         hit = pipe.tables.get(key)
         if hit is None:
             hit = build_table(pipe, *key)
-            _keep_table(pipe, key, hit, hit.nbytes)
+            _keep_table(pipe, key, hit, hit.nbytes,
+                        own=_is_default(pipe, key[0]))
         self._cur[key] = hit
         return hit
 
@@ -758,7 +927,8 @@ class PatchState:
             return
         for key, table in list(self._cur.items()):
             if key[0] == self.active:
-                _keep_table(pipe, key, table, table.nbytes)
+                _keep_table(pipe, key, table, table.nbytes,
+                            own=_is_default(pipe, key[0]))
 
 
 class ImageLoRALinear(nn.Module):

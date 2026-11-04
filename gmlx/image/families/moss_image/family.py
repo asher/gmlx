@@ -312,6 +312,9 @@ FAMILY = Family(
     constants=CONSTANTS,
     build=build,
     lora_map=lora_map,
+    # The time embedding and the modulations run through precise.
+    lora_f32=("time_embedding.0", "time_embedding.2",
+              "shared_block_modulation", "video_head_modulation"),
     encoder=encoder,
     # The release builds the bands from constants and ignores the stored
     # ones; the file's copy keeps its float32 values.

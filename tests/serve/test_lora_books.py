@@ -10,6 +10,8 @@ import gc
 import threading
 from types import SimpleNamespace
 
+import mlx.core as mx
+import numpy as np
 import pytest
 
 from gmlx.image.conditioning import ByteLRU
@@ -201,15 +203,6 @@ def test_the_ledger_holds_the_keys_the_caches_hold(monkeypatch):
     b = pool.reserve_lora(y, GB, subject="s")
     put(pool, b, "p3", GB)
     c.drop("p3")
-    pool.settle_lora(b, {})
-    books_equal_the_cache()
-
-    # A put that fails after its key entered returns the bytes to pending,
-    # and the settle returns them.
-    b = pool.reserve_lora(y, GB, subject="s")
-    b.enter("p4", GB)
-    b.unenter("p4")
-    assert pool.lora_held(y)[1] == GB
     pool.settle_lora(b, {})
     books_equal_the_cache()
 
@@ -653,3 +646,289 @@ def test_a_cold_load_after_a_turns_decision_sees_its_booking(monkeypatch):
     # The load evicted the idle model to fit beside the booking.
     assert w.cache_key not in pool._entries
     assert resident(pool) == int(9.5 * GB)
+
+
+# The pipe caches and the upload store, hooked to the books.
+class Overrun(AssertionError):
+    pass
+
+
+def _raise_overrun(subject, nbytes):
+    raise Overrun(f"{nbytes} bytes past their booking: {subject}")
+
+
+def lora_pipe(pool, name, *, own=(), own_term=0, busy=True):
+    """An image entry whose pipeline has a served model's LoRA caches,
+    hooked to the pool's books at its insert. ``own`` pairs are its own,
+    loaded before the insert."""
+    from gmlx.image.lora import install
+
+    p = SimpleNamespace(adapters=ByteLRU(1 << 40), tables=ByteLRU(1 << 40),
+                        lora=None, patch_tables={}, default_table=None)
+    keys = [install.register_pair(p, *pr) for pr in own]
+    p.adapters.keep(keys)
+    served = SimpleNamespace(pipe=p, lora_own_term=own_term)
+    return image(pool, name, 0, busy=busy, pipe=served), p
+
+
+def pair(rng, nbytes):
+    """A float32 pair of ``nbytes``: rank 1, in and out of nbytes / 8."""
+    side = nbytes // 8
+    return (mx.array(rng.standard_normal((1, side)).astype(np.float32)),
+            mx.array(rng.standard_normal((side, 1)).astype(np.float32)))
+
+
+def wire(rng, nbytes):
+    from gmlx.serve.image_wire import WireTensor
+
+    raw = rng.standard_normal(nbytes // 4).astype(np.float32).tobytes()
+    return WireTensor("F32", (nbytes // 4,), memoryview(raw))
+
+
+def upload_store(pool, max_bytes=1 << 40):
+    from gmlx.serve.image_steps import _Bytes
+
+    store = _Bytes(max_bytes, "the adapter store", "adapter_cache_mb")
+    store.on_put = pool.books.put_hook(STORE)
+    store.on_gone = pool.books.release_hook(STORE)
+    pool._store_shed = store.shed
+    return store
+
+
+def store_keys(store):
+    return {k: store.nbytes(k) for k in list(store._items)}
+
+
+def upload(pool, store, key, t, subject="the LoRA matrices of this upload"):
+    from gmlx.serve import image_service
+
+    b = pool.reserve_lora(STORE, t.nbytes, subject=subject)
+    image_service.lora_claims(pool, b)
+    with b.active():
+        store.put(key, t)
+    pool.settle_lora(b, image_service.lora_figures((store,), b.keys))
+
+
+def test_the_ledger_follows_the_pipe_caches(monkeypatch):
+    """T10: each put enters, each shed and drop releases, and a held key
+    put again books once (F1)."""
+    from gmlx.image.lora import install
+    from gmlx.serve import image_service
+
+    pool = make_pool(monkeypatch, 0.01)
+    pool.books.overrun_hook = _raise_overrun
+    rng = np.random.default_rng(0)
+    y, p = lora_pipe(pool, "y")
+    KB = 100_000
+
+    def held_equals_the_caches():
+        held = {k: p.adapters.nbytes(k) for k in p.adapters.keys(bool)}
+        held.update({k: p.tables.nbytes(k) for k in p.tables.keys(bool)})
+        h, pending, led = pool.lora_held(y)
+        assert led == held and h == sum(held.values()) and pending == 0
+        assert resident(pool) <= pool._budget
+
+    def job(nbytes, put):
+        b = pool.reserve_lora(y, nbytes, subject="s")
+        try:
+            with b.active():
+                return put()
+        finally:
+            image_service.settle_job(pool, b, p)
+            held_equals_the_caches()
+
+    k1, k2 = job(2 * KB, lambda: [install.register_pair(p, *pair(rng, KB))
+                                  for _ in range(2)])
+    # An LRU shed of the pair cache releases the pair it let go.
+    p.adapters.max_bytes = int(2.5 * KB)
+    k3 = job(KB, lambda: install.register_pair(p, *pair(rng, KB)))
+    assert set(p.adapters.keys(bool)) == {k2, k3}
+    # A pair shed by the next put of its own job leaves nothing booked.
+    p.adapters.max_bytes = KB
+    job(2 * KB, lambda: [install.register_pair(p, *pair(rng, KB))
+                         for _ in range(2)])
+    assert len(p.adapters) == 1
+    # A pair over the cache is refused before it is put: its booking
+    # returns whole at the settle.
+    with pytest.raises(install.PairRoomError):
+        job(2 * KB, lambda: install.register_pair(p, *pair(rng, 2 * KB)))
+
+    # A built table put again at the same bytes after each forward books
+    # once; grown, it books the growth.
+    key = ("t", mx.bfloat16, "block")
+    table = object()
+    job(KB, lambda: install._keep_table(p, key, table, KB))
+    job(0, lambda: install._keep_table(p, key, table, KB))
+    job(KB, lambda: install._keep_table(p, key, table, 2 * KB))
+    assert pool.lora_held(y)[2][key] == 2 * KB
+    # A drop of the tables cache releases what it let go.
+    p.tables.clear()
+    held_equals_the_caches()
+
+
+def test_an_own_put_is_not_booked_and_an_unbooked_put_is_an_overrun(
+        monkeypatch):
+    from gmlx.image.lora import install
+    from gmlx.serve.lora_books import own_load
+
+    pool = make_pool(monkeypatch, 0.01)
+    pool.books.overrun_hook = _raise_overrun
+    rng = np.random.default_rng(1)
+    own = [pair(rng, 100_000)]
+    y, p = lora_pipe(pool, "y", own=own, own_term=150_000)
+    with pool._lock:
+        rec = pool.books.rec(y)
+        assert sum(rec.own.values()) == 100_000 and rec.own_term == 150_000
+    # The own pairs loaded again, as a video entry's after an encode,
+    # are its own.
+    p.adapters.keep(())
+    p.adapters.clear()
+    with own_load():
+        install.register_pair(p, *own[0])
+    assert pool.lora_held(y) == (0, 0, {})
+    with pytest.raises(Overrun, match="no booking"):
+        install.register_pair(p, *pair(rng, 100_000))
+    # A put past its booking's figure is an overrun at the settle.
+    from gmlx.serve import image_service
+
+    b = pool.reserve_lora(y, 50_000, subject="the LoRA factors of this step")
+    with b.active():
+        install.register_pair(p, *pair(rng, 100_000))
+    with pytest.raises(Overrun, match="50000 bytes .* this step"):
+        image_service.settle_job(pool, b, p)
+
+
+def test_the_upload_store_books_its_puts_and_sheds(monkeypatch):
+    """T10: a store eviction lowers the uploads."""
+    from gmlx.serve import image_service
+
+    pool = make_pool(monkeypatch, 0.01)
+    pool.books.overrun_hook = _raise_overrun
+    rng = np.random.default_rng(2)
+    store = upload_store(pool, max_bytes=250_000)
+    for i in range(3):
+        upload(pool, store, f"u{i}", wire(rng, 100_000))
+        assert ledger(pool, STORE) == store_keys(store)
+    assert len(store_keys(store)) == 2
+    store.shed(1)
+    assert ledger(pool, STORE) == store_keys(store)
+    store.clear()
+    assert pool.lora_held(STORE) == (0, 0, {})
+    # Another reservation's claim sheds the store between a job's read of
+    # its figures and its settle: the key it put is not booked.
+    b = pool.reserve_lora(STORE, 100_000, subject="s")
+    with b.active():
+        store.put("late", wire(rng, 100_000))
+    figures = image_service.lora_figures((store,), b.keys)
+    assert figures == {"late": 100_000}
+    store.shed(store.bytes)
+    pool.settle_lora(b, figures)
+    assert pool.lora_held(STORE) == (0, 0, {})
+
+
+def test_an_evicting_upload_on_the_event_loop_never_waits_on_the_lock(
+        monkeypatch):
+    """T14 (a)."""
+    pool = make_pool(monkeypatch, 0.01)
+    rng = np.random.default_rng(3)
+    store = upload_store(pool, max_bytes=150_000)
+    upload(pool, store, "old", wire(rng, 100_000))
+    b = pool.reserve_lora(STORE, 100_000, subject="s")
+    locked, done = threading.Event(), threading.Event()
+
+    def holder():
+        with pool._lock:
+            locked.set()
+            return done.wait(WAIT)
+    h = start("holder", holder)
+    assert locked.wait(WAIT)
+
+    async def put_on_the_loop():
+        with b.active():
+            store.put("new", wire(rng, 100_000))
+        done.set()
+    asyncio.run(put_on_the_loop())
+    assert finish(*h), "the put waited on the pool's lock"
+    pool.settle_lora(b, {"new": 100_000})
+    assert ledger(pool, STORE) == store_keys(store) == {"new": 100_000}
+
+
+def test_rounds_of_bookings_and_sheds_against_evicting_puts(monkeypatch):
+    """T14 (c): uploads from three threads, two of them evicting each
+    other's past the store's bound and one booking past the pool's
+    budget, end with the books equal to the keys held."""
+    pool = make_pool(monkeypatch, 0.0005)
+    store = upload_store(pool, max_bytes=300_000)
+    refused = []
+
+    def uploads(seed, prefix, nbytes):
+        rng = np.random.default_rng(seed)
+        for i in range(200):
+            # Keys repeat, so a put also replaces a key it put before,
+            # or puts again one a shed let go.
+            try:
+                upload(pool, store, f"{prefix}{i % 7}", wire(rng, nbytes))
+            except LoraRefused:
+                refused.append(prefix)
+
+    threads = [start(f"uploads-{n}", lambda s=s, n=n, b=b: uploads(s, n, b))
+               for s, n, b in ((4, "a", 100_000), (5, "b", 100_000),
+                               (6, "c", 200_000))]
+    for t in threads:
+        finish(*t)
+    assert ledger(pool, STORE) == store_keys(store)
+    held, pending, _ = pool.lora_held(STORE)
+    assert pending == 0 and held == store.bytes <= pool._budget
+    with pool._lock:
+        assert pool.books.claimed() == 0
+
+
+def test_a_claim_sheds_the_default_table_another_entry_ran_last(
+        monkeypatch, tmp_path):
+    """T15, probe B of review 4: entry x ran its own default table last
+    and its excess is booked; y's claim sheds it through _release_cur, and
+    y runs."""
+    from image_fixtures import tiny_z_model
+    from lora_fixtures import tiny_z_adapter, write_adapter
+
+    from gmlx.image import api, lora
+    from gmlx.image.lora import install
+    from gmlx.image.registry import get_family
+    from gmlx.serve import image_service
+
+    pool = make_pool(monkeypatch, 1)
+    pool._lora_shed = None
+    pool.books.overrun_hook = _raise_overrun
+    m, _ = tiny_z_model()
+    pipe = api.ImagePipeline(dit=m, family=get_family("z_image"),
+                             variant="turbo")
+    ad = lora.load_adapter(pipe, write_adapter(
+        tmp_path / "own.safetensors", "kohya", tiny_z_adapter(7)))
+    pipe.default_table = api.define_patch_table(
+        pipe, lora.table_entries([(ad, 0.8)]))
+    pipe.adapters.keep(image_service._pair_keys([(ad, 0.8)]))
+    own_pairs = pipe.adapters.bytes
+    served = SimpleNamespace(pipe=pipe, lora_own_term=own_pairs)
+    x = image(pool, "x", 0, busy=True, pipe=served)
+    y = image(pool, "y", 0, busy=True)
+    figs = install.table_figures(pipe, pipe.default_table, mx.float32)
+    excess = sum(f for f, _h in figs.values())
+    assert excess > 0
+    b = pool.reserve_lora(x, excess, subject="s")
+    rng = np.random.default_rng(0)
+    lat = mx.array(rng.standard_normal((1, 4, 6, 8)).astype(np.float32))
+    cond = api.Conditioning(
+        mx.array(rng.standard_normal((5, 16)).astype(np.float32)), "k")
+    with b.active(), mx.stream(mx.cpu):
+        mx.eval(api.denoise_step(pipe, lat, 0.75, cond))
+    image_service.settle_job(pool, b, pipe)
+    with pool._lock:
+        assert pool.books.excess(x) == excess
+    assert pool.lora_held(x) == (excess, 0, {})
+    # y needs the room x's excess holds.
+    pool._budget = excess + excess // 2
+    c = pool.reserve_lora(y, excess, subject="s")
+    assert c.claims_on() == [(x, excess - excess // 2)]
+    image_service.lora_claims(pool, c)
+    assert pool.lora_held(x) == (0, 0, {})
+    assert resident(pool) == excess

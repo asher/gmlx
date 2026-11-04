@@ -473,6 +473,11 @@ FAMILY = VideoFamily(
     latent_shapes=latent_shapes,
     clip_frames=clip_frames,
     lora_map=_lora_map,
+    # The adaLN projections on the float32 time embedding, and the patch
+    # projections and heads on their float32 rows.
+    lora_f32=("blocks.*.adaln_proj.linear", "final_layer.adaln_proj.linear",
+              "video_patch_proj", "audio_patch_proj",
+              "final_layer.video_out", "final_layer.audio_out"),
     lora_refusal=_lora_refusal,
     vsa_gate=VSA_GATE,
 )

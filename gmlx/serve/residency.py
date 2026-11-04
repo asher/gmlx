@@ -679,10 +679,9 @@ class _ResidencyPool:
         pipe = getattr(entry.pipeline, "pipe", None)
         if pipe is None or not hasattr(pipe, "adapters"):
             return None
-        gone = self.books.release_hook(entry)
-        pipe.adapters.on_gone = gone
-        pipe.tables.on_gone = gone
-        pipe.lora_owner = self.books.own_hook(entry)
+        gone, put = self.books.release_hook(entry), self.books.put_hook(entry)
+        for cache in (pipe.adapters, pipe.tables):
+            cache.on_gone, cache.on_put = gone, put
         own = {k: pipe.adapters.nbytes(k) for k in pipe.adapters.kept}
         return int(getattr(entry.pipeline, "lora_own_term", 0) or 0), own
 
@@ -952,11 +951,7 @@ class _ResidencyPool:
             self.books.drain()
             over = self.books.settle(booking, figures)
         if over:
-            _log.warning("LoRA bytes %.3f GB past their booking for %s",
-                         over / 1e9, booking.subject)
-            hook = self.books.overrun_hook
-            if hook is not None:
-                hook(booking, over)
+            self.books.overrun(booking.subject, over)
 
     def lora_held(self, owner) -> tuple:
         """(held, pending, ledger) of ``owner`` after the posted shrinks."""

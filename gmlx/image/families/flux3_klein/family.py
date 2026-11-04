@@ -392,6 +392,13 @@ FAMILY = Family(
     schedule=schedule,
     sampling=SAMPLING,
     lora_map=lora_map,
+    # The time embedders and the modulations run through precise on the
+    # float32 time rows.
+    lora_f32=("time_in.in_layer", "time_in.out_layer",
+              "ref_time_in.in_layer", "ref_time_in.out_layer",
+              "early_stream_modulations.*.lin",
+              "single_stream_modulations.*.lin",
+              "final_layer.image.adaLN_modulation.1"),
     loop=LOOP,
     edit=EditParts(max_refs=REFERENCES.values["max_refs"],
                    prepare_all=_prepare_all, size=_size),

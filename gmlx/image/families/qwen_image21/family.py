@@ -505,6 +505,9 @@ FAMILY = Family(
                    _prefix_bytes),
     schedule=schedule,
     lora_map=lora_map,
+    # The output norm's float32 linear under fp32_keep takes its row in
+    # float32.
+    lora_f32=("norm_out.linear",),
     encoder=encoder,
     edit=EditParts(max_refs=REFERENCES.values["max_refs"],
                    area=REFERENCES.values["area"],
