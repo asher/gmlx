@@ -1271,12 +1271,12 @@ def _one_order(inputs, nbytes: int) -> tuple:
 class _OrderCheck:
     """make_room with each call for the pair cache checked against
     ``_one_order``. ``puts`` counts the puts, of more than 0 bytes, that
-    shed or dropped, and ``drops`` those that dropped a table: the sheds
-    to a bound, of 0 bytes, check no put."""
+    shed or dropped, ``drops`` the puts that dropped a table, and
+    ``bounds`` the sheds to a bound, of 0 bytes, that shed or dropped."""
 
     def __init__(self, monkeypatch):
         self.make_room = install.make_room
-        self.puts = self.drops = 0
+        self.puts = self.drops = self.bounds = 0
         monkeypatch.setattr(install, "make_room", self)
 
     def __call__(self, pipe, cache, nbytes, hold=()):
@@ -1292,6 +1292,8 @@ class _OrderCheck:
         if nbytes:
             self.puts += bool(got[0] or got[1])
             self.drops += bool(got[1])
+        else:
+            self.bounds += bool(got[0] or got[1])
         assert got == want, (nbytes, sorted(k[:8] for k in got[0]),
                              sorted(k[:8] for k in want[0]), len(got[1]),
                              len(want[1]), fit, want[2])
@@ -1320,5 +1322,6 @@ def test_a_random_sequence_counts_every_lora_array_once(op, monkeypatch, seed):
             _check_caches(seq.pipe)
         except AssertionError as e:
             raise AssertionError(f"after {done[-6:]}, op {len(done)}") from e
-    assert all(ran.values()) and seq.refused and seq.missing and order.puts, (
-        ran, seq.refused, seq.missing, order.puts)
+    assert (all(ran.values()) and seq.refused and seq.missing and order.puts
+            and order.bounds), (ran, seq.refused, seq.missing, order.puts,
+                                order.bounds)
