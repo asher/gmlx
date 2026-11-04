@@ -160,7 +160,6 @@ def register_pair(pipe, down, up, alpha: float | None = None,
                 running = _running(pipe)
                 _drop_tables(pipe, lambda t: key in t.keys
                              and id(t) not in running)
-                make_room(pipe, pipe.tables, 0)
             if now is None or not any(key in t.keys for t in _tables(pipe)):
                 pipe.adapters.put(key, Pair(held.down, held.up, alpha), 0,
                                   shed=False)
@@ -221,16 +220,33 @@ def _running(pipe) -> set:
     return {id(t) for k, t in state._cur.items() if k[0] == state.active}
 
 
-def _drop_tables(pipe, match) -> None:
-    """Drop the built tables ``match`` takes, from the tables cache and
-    from the patch state. The caller keeps out any a forward runs, and
-    sheds the tables cache to its bound after, as the kernel pairs that
-    the tables pinned there may be past it."""
+# A table that goes releases the pins it held, so every function that
+# lets one go sheds the tables cache of the pipeline that held it, to its
+# bound: _drop_tables and _release_cur.
+
+def _drop_tables(pipe, match, shed: bool = True) -> None:
+    """Drop the built tables ``match`` takes, from the tables cache and,
+    when it holds this pipeline's tables, from the patch state. Then shed
+    the tables cache to its bound, as the kernel pairs the tables pinned
+    there may be past it; ``shed`` is off for the victims of make_room's
+    tables loop, which sheds itself. The caller keeps out any table a
+    forward runs."""
     pipe.tables.drop_where(lambda t: isinstance(t, BuiltTable) and match(t))
     state = pipe.lora
     if state is not None and state._held() is pipe:
         for k in [k for k, t in state._cur.items() if match(t)]:
             del state._cur[k]
+    if shed:
+        make_room(pipe, pipe.tables, 0)
+
+
+def _release_cur(state) -> None:
+    """Let go of the built tables the patch state holds, and shed the
+    tables cache of the pipeline that held them to its bound."""
+    holder = state._held()
+    state._cur.clear()
+    if holder is not None:
+        make_room(holder, holder.tables, 0)
 
 
 def make_room(pipe, cache, nbytes: int, hold=()) -> bool:
@@ -266,7 +282,6 @@ def make_room(pipe, cache, nbytes: int, hold=()) -> bool:
         free = sum(cache.nbytes(k) for k in cache.keys(lambda k: k not in base))
         if nbytes and cache.bytes - free + nbytes > cache.max_bytes:
             return False
-        dropped = False
         while True:
             held = _tables(pipe)
             pinned = set(base)
@@ -277,11 +292,8 @@ def make_room(pipe, cache, nbytes: int, hold=()) -> bool:
                 (t for t in held if id(t) not in running
                  and not t.keys <= base), None)
             if victim is None:
-                if dropped:
-                    make_room(pipe, pipe.tables, 0)
                 return fit
             _drop_tables(pipe, lambda t: t is victim)
-            dropped = True
     mine = {id(t) for t in _current(pipe)}
     while True:
         held = _tables(pipe)
@@ -293,7 +305,7 @@ def make_room(pipe, cache, nbytes: int, hold=()) -> bool:
         victim = next((t for t in held if id(t) not in mine), None)
         if victim is None:
             return False
-        _drop_tables(pipe, lambda t: t is victim)
+        _drop_tables(pipe, lambda t: t is victim, shed=False)
 
 
 def shed_to_bounds(pipe) -> None:
@@ -734,16 +746,13 @@ class PatchState:
     def _table(self, key: tuple) -> BuiltTable:
         """The built table at ``key`` of the pipeline that runs, held here
         from now on. The tables held for another table id or pipeline go
-        first, and the tables cache that pinned them sheds to its bound."""
+        first."""
         pipe = self._pipe()
         if pipe is None:
             raise RuntimeError("the image pipeline of this DiT is gone")
-        old = self._held()
-        if old is not pipe or any(k[0] != key[0] for k in self._cur):
-            self._cur.clear()
+        if self._held() is not pipe or any(k[0] != key[0] for k in self._cur):
+            _release_cur(self)
             self._held = self._pipe
-            if old is not None:
-                make_room(old, old.tables, 0)
         hit = pipe.tables.get(key)
         if hit is None:
             hit = build_table(pipe, *key)
@@ -844,11 +853,9 @@ def ensure_wrapped(pipe) -> None:
 def drop_built(pipe) -> None:
     """Drop the built tables of the pipeline, which hold the leaves of
     its DiT, so that a DiT the pipeline lets go is freed. The kernel
-    pairs they pinned past the tables bound go too."""
-    pipe.tables.drop_where(lambda v: isinstance(v, BuiltTable))
-    if pipe.lora is not None:
-        pipe.lora._cur.clear()
-    make_room(pipe, pipe.tables, 0)
+    pairs they pinned past the tables bound go too. Tables the patch
+    state holds for another pipeline over the DiT stay with it."""
+    _drop_tables(pipe, lambda t: True)
 
 
 def rewrap(pipe) -> None:

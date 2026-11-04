@@ -353,6 +353,45 @@ def test_a_kernel_pair_stays_while_a_table_built_over_it_is_held(op):
     assert not pipe.lora._cur
 
 
+def test_a_put_that_drops_the_table_that_ran_sheds_its_kernel_pair(op):
+    """The table that ran last is held past a tables bound of nothing,
+    with its kernel pair. A put that needs the room of its pairs drops
+    it, and the kernel pair it kept goes in the same call."""
+    pipe = _pipe()
+    _run(pipe, _entries(pipe, QKV, _qkv_rows(_pairs(7))), QKV, _x())
+    pipe.tables.max_bytes = 0
+    install.shed_to_bounds(pipe)
+    assert pipe.lora._cur and pipe.tables.bytes > 0
+    pipe.adapters.max_bytes = pipe.adapters.bytes
+    lora.register_pair(pipe, *_pairs(8)[0])
+    assert not pipe.lora._cur
+    assert pipe.tables.bytes == 0
+
+
+def _two_over_one_dit() -> tuple:
+    p1 = _pipe()
+    return p1, api.ImagePipeline(dit=p1.dit, family=p1.family,
+                                 variant="turbo")
+
+
+def test_drop_built_keeps_the_tables_another_pipeline_over_the_dit_ran(op):
+    """drop_built of one pipeline over a DiT drops its own tables and
+    keeps those the patch state holds for the other, whose tables cache
+    stays over its bound by them alone."""
+    p1, p2 = _two_over_one_dit()
+    pairs, x = _pairs(7), _x()
+    _run(p1, _entries(p1, QKV, _qkv_rows(pairs)), QKV, x)
+    _run(p2, _entries(p2, QKV, _qkv_rows(pairs, 0.6)), QKV, x)
+    cur = dict(p2.lora._cur)
+    p2.tables.max_bytes = 0
+    install.shed_to_bounds(p2)
+    held = p2.tables.bytes
+    install.drop_built(p1)
+    assert not [k for k in p1.tables.keys(lambda k: k[0] != install.KERNEL)]
+    assert p2.lora._cur == cur and p2.tables.bytes == held > 0
+    _check_caches(p2)
+
+
 @pytest.mark.parametrize("strength,alpha", [(1.0, None), (1.0, 3.0),
                                             (0.7, None), (-0.5, 2.0)])
 def test_one_table_serves_the_op_and_a_call_of_few_rows(op, strength, alpha):
@@ -866,18 +905,27 @@ class _Sequence:
                 self.pipe, d, u, OWN_ALPHA, hold=self.own_keys))
         self.pipe.adapters.keep(self.own_keys)
 
+    def _held(self) -> tuple:
+        pipe = self.pipe
+        cur = pipe.lora._cur.values() if pipe.lora is not None else ()
+        return (set(pipe.adapters.keys(lambda k: True)),
+                set(pipe.tables.keys(lambda k: True)), {id(t) for t in cur})
+
     def _put(self, row, hold=()) -> str | None:
         slot, d, u, alpha, twin = row
         pipe = self.pipe
         nbytes = int(d.nbytes) + int(u.nbytes)
+        before = self._held()
         try:
             return install.register_pair(pipe, d, u, alpha, twin=twin,
                                          hold=hold)
         except install.PairRoomError:
-            # Only a pair that cannot fit beside the pairs that stay.
+            # Only a pair that cannot fit beside the pairs that stay, and
+            # its refusal sheds nothing.
             stay = set(pipe.adapters.kept) | set(hold)
             assert sum(pipe.adapters.nbytes(k) for k in stay) + nbytes \
                 > pipe.adapters.max_bytes
+            assert self._held() == before
             self.refused += 1
             return None
 
@@ -1009,7 +1057,7 @@ class _Sequence:
            ("step", 6), ("shrink", 2), ("drop_dit", 1), ("release", 1))
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2])
+@pytest.mark.parametrize("seed", range(20))
 def test_a_random_sequence_counts_every_lora_array_once(op, seed):
     """Every array the pair cache, the tables cache and the patch state
     keep alive is counted once, each cache is over its bound only by what

@@ -217,13 +217,6 @@ class ByteLRU:
             self._items[key] = (value, nbytes)
             self._bytes += nbytes
 
-    def drop(self, key) -> None:
-        """Drop the entry at ``key``, if held."""
-        with self._lock:
-            hit = self._items.pop(key, None)
-            if hit is not None:
-                self._bytes -= hit[1]
-
     def shed_for(self, nbytes: int, pinned) -> bool:
         """Shed the entries whose key is not in ``pinned``, the least
         recently used first, until ``nbytes`` more fit, and return
