@@ -105,7 +105,10 @@ as ComfyUI does, samples an edit and a negative on `cond_typed`.
 
 A step names its conditionings and its patch table by hash. When the
 server does not hold one, the step gets 409 with a `missing` list, and
-the client uploads those and sends the step again. A run keeps the
+the client uploads those and sends the step again. The server keeps the
+body of each patch table it was sent, and a step on a table whose LoRA
+pairs it let go defines the table again from that body, while it holds
+the LoRA matrices the body names. A run keeps the
 prefix state of each of its conditionings between steps, and the
 `X-Gmlx-Prefix-Cache` header of a step answers `hit` or `miss`.
 `X-Gmlx-Forward-Ms` is the time of the model forward, so a client's wall
