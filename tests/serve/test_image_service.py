@@ -1345,7 +1345,8 @@ def _entry_steps(pipe) -> bool:
     return bool(np.isfinite(_step(pipe, pipe.default_table)).all())
 
 
-def _held(pipe, keys) -> bool:
+def _pairs_held(pipe, keys) -> bool:
+    """Every pair of ``keys`` is in the pair cache."""
     return all(pipe.adapters.peek(k) is not None for k in keys)
 
 
@@ -1357,7 +1358,7 @@ def test_request_adapters_over_the_cache_are_refused_by_name(tiny_served):
         image_service._adapter_table(
             served, [("a.safetensors", 1.0), ("b.safetensors", 1.0)], [root])
     assert e.value.status == 400 and e.value.param == "adapters"
-    assert _held(served.pipe, own)
+    assert _pairs_held(served.pipe, own)
     assert _entry_steps(served.pipe)
 
 
@@ -1389,7 +1390,7 @@ def test_a_request_may_reweight_the_entry_adapter_beside_its_own(
     tid, shown = image_service._adapter_table(
         served, [("own", 0.5), ("a.safetensors", 1.0)], [root])
     assert [s["strength"] for s in shown] == [0.5, 1.0]
-    assert _held(served.pipe, image_service._pair_keys(served.adapters))
+    assert _pairs_held(served.pipe, image_service._pair_keys(served.adapters))
     assert np.isfinite(_step(served.pipe, tid)).all()
     assert _entry_steps(served.pipe)
 
@@ -1405,7 +1406,7 @@ def test_requests_in_turn_never_shed_the_entry_adapter(tiny_served):
     for name in ("a", "b", "a"):
         tid, _ = image_service._adapter_table(
             served, [(f"{name}.safetensors", 1.0)], [root])
-        assert _held(pipe, own), name
+        assert _pairs_held(pipe, own), name
         assert np.isfinite(_step(pipe, tid)).all()
     assert _entry_steps(pipe)
 
