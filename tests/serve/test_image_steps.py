@@ -2571,22 +2571,24 @@ def _built(p, client_tid) -> bool:
                for k in p.tables.keys(lambda k: k[0] != install.KERNEL))
 
 
+@pytest.mark.parametrize("files", [2, 3])
 def test_an_images_api_request_keeps_the_built_table_of_its_first_file(
-        host, tmp_path):
+        host, tmp_path, files):
     """An images API request of file A runs, a ComfyUI table steps after
-    it, and a request of A and B then needs B's room on a full pair cache.
-    The first request's table is built over the entry's pairs and A's,
-    which the second request holds, so dropping it frees nothing: the
-    ComfyUI table goes and the first request's table stays."""
+    it, and a request of A and one or two more files then needs the last
+    file's room on a full pair cache. The first request's table is built
+    over the entry's pairs and A's, which the room for every later file
+    holds, so dropping it frees nothing: the ComfyUI table goes and the
+    first request's table stays."""
     import os
 
     from gmlx.serve import image_service
 
-    names = _request_files(tmp_path, (5, 6))
+    names = _request_files(tmp_path, (5, 6, 7)[:files])
     p, ad, c, _body = _header_alpha_own(host, tmp_path)
     held = p.adapters.bytes
     unit = max(max(os.path.getsize(tmp_path / n) for n in names), held)
-    p.adapters.max_bytes = held + 2 * unit + 64
+    p.adapters.max_bytes = held + files * unit + 64
     host.served["own"].plan.cache_share = 1.0
     rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
     pairs = [(m, b, p.adapters.peek(k)) for m, b, k in ad.dit]
