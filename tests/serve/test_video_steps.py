@@ -983,6 +983,8 @@ def test_a_cond_over_the_share_the_models_leave_is_413_naming_it(
             send()
         with pytest.raises(StepsClientError) as over:
             c.put(np.zeros((1, 5 * configured // 16), np.float32))
+        with pytest.raises(StepsClientError) as edge:
+            c.put(np.zeros((1, configured // 4 + 1), np.float32))
         steps.STATE.scale_caches(rows.nbytes / configured)
         send()
     finally:
@@ -995,6 +997,10 @@ def test_a_cond_over_the_share_the_models_leave_is_413_naming_it(
         "gives it more.")
     assert over.value.body["error"] == (
         "a tensor of 80.0 MiB is over the configured 64 MiB of the step "
+        "routes' tensor cache; raise server.image.tensor_cache_mb")
+    # A tensor a few bytes over the bound reads above it.
+    assert edge.value.body["error"] == (
+        "a tensor of 64.1 MiB is over the configured 64 MiB of the step "
         "routes' tensor cache; raise server.image.tensor_cache_mb")
 
 
@@ -1009,32 +1015,53 @@ def test_the_adapter_cache_and_the_upload_limit_are_named_in_a_413(host):
         steps.STATE.scale_caches(0.25)
         with pytest.raises(StepsClientError) as e:
             c.put(np.zeros((1, 20 << 20), np.float32), kind="adapters")
+        with pytest.raises(StepsClientError) as edge:
+            c.put(np.zeros((1, (16 << 20) + 1), np.float32), kind="adapters")
+        # A share whose bound is 69.99 MiB.
+        steps.STATE.scale_caches(0.2734)
+        with pytest.raises(StepsClientError) as share:
+            c.put(np.zeros((1, 70 << 18), np.float32), kind="adapters")
     finally:
         steps.STATE.scale_caches(1.0)
-    (t,) = read(write({"t": np.zeros((1, 1 << 19), np.float32)}))[0].values()
-    with pytest.raises(steps.StepError) as limit:
-        steps.STATE.put_tensor(steps.STATE.tensors, t.hash(), {"t": t},
-                               1 << 20)
-    assert e.value.status == limit.value.status == 413
+    limit, just = [], []
+    for n, got in ((1 << 19, limit), ((1 << 18) + 1, just)):
+        (t,) = read(write({"t": np.zeros((1, n), np.float32)}))[0].values()
+        with pytest.raises(steps.StepError) as refused:
+            steps.STATE.put_tensor(steps.STATE.tensors, t.hash(), {"t": t},
+                                   1 << 20)
+        got.append(str(refused.value))
+    assert e.value.status == 413
     assert e.value.body["error"] == (
         "a tensor of 80.0 MiB is over the step routes' adapter cache of 64.0 "
         "MiB: the models loaded leave it 25% of its configured 256 MiB. A "
         "smaller defaults.size or defaults.seconds on the tightest entry "
         "gives it more.")
-    assert str(limit.value) == (
-        "a tensor of 2.0 MiB is over the upload limit of 1.0 MiB")
+    assert limit == ["a tensor of 2.0 MiB is over the upload limit of 1.0 MiB"]
+    # A tensor a few bytes over a bound reads above it, and a bound under a
+    # tenth of a MiB more reads under it.
+    assert just == ["a tensor of 1.1 MiB is over the upload limit of 1.0 MiB"]
+    assert edge.value.body["error"] == (
+        "a tensor of 64.1 MiB is over the step routes' adapter cache of 64.0 "
+        "MiB: the models loaded leave it 25% of its configured 256 MiB. A "
+        "smaller defaults.size or defaults.seconds on the tightest entry "
+        "gives it more.")
+    assert share.value.body["error"] == (
+        "a tensor of 70.0 MiB is over the step routes' adapter cache of 69.9 "
+        "MiB: the models loaded leave it 27% of its configured 256 MiB. A "
+        "smaller defaults.size or defaults.seconds on the tightest entry "
+        "gives it more.")
 
 
-def _big_table(c, pairs: int) -> dict:
-    """A ComfyUI LoRA's table of ``pairs`` pairs of 1 MiB in f32, each a
-    rank 16 pair over an 8192 wide weight."""
+def _big_table(c, pairs: int, width: int = 8192) -> dict:
+    """A ComfyUI LoRA's table of ``pairs`` pairs in f32, each a rank 16
+    pair over a ``width`` wide weight: 1 MiB at the default width."""
     from test_video_h3_lora import _adapter
 
     rng = np.random.default_rng(9)
     entries = []
     for target in sorted(_adapter(6))[:pairs]:
-        down = rng.standard_normal((16, 8192)).astype(np.float32)
-        up = rng.standard_normal((8192, 16)).astype(np.float32)
+        down = rng.standard_normal((16, width)).astype(np.float32)
+        up = rng.standard_normal((width, 16)).astype(np.float32)
         entries.append({"key": f"diffusion_model.{target}.weight",
                         "band": None, "patches": [{
                             "up": c.put(up, kind="adapters"),
@@ -1082,6 +1109,25 @@ def test_a_table_over_the_entrys_pair_room_is_413_naming_it(
         c.define_table("h3", body)
     assert e.value.status == 413 and e.value.body["error"] == want
     assert len(pipe.adapters) == 0
+
+
+@pytest.mark.parametrize("width, room, need, room_mib, bound", [
+    (8192, (4 << 20) - 1, "4.0", "3.9", 4), (8200, 4 << 20, "4.1", "4.0", 5)])
+def test_a_table_just_over_the_pair_room_reads_its_need_above_it(
+        request, width, room, need, room_mib, bound):
+    """The 413 rounds the pairs' MiB up and the room's down, so a table a
+    byte over the room, or a few KiB, never reads at or under it."""
+    pipe, _w = _own_pipe()
+    _mount(_Host(_served(pipe)), request)
+    c = _client()
+    body = _big_table(c, 4, width)
+    pipe.adapters.max_bytes = room
+    with pytest.raises(StepsClientError) as e:
+        c.define_table("h3", body)
+    assert e.value.status == 413 and e.value.body["error"] == (
+        f"the LoRA pairs of this patch table take {need} MiB, over the "
+        f"{room_mib} MiB the pair cache of 'h3' keeps for a request's pairs; "
+        f"raise server.image.adapter_cache_mb to {bound} or more")
 
 
 def test_a_table_that_fills_the_entrys_pair_room_steps(tmp_path, request):

@@ -197,8 +197,12 @@ def _wire_copy(t: WireTensor) -> WireTensor:
     return WireTensor(t.dtype, t.shape, memoryview(bytes(t.raw)))
 
 
-def _mib(n: int) -> str:
-    return f"{n / 2**20:.1f} MiB"
+def _mib(n: int, up: bool) -> str:
+    """``n`` bytes in MiB at 1 decimal, rounded up when ``up`` and down
+    otherwise. A 413 rounds the bytes it refuses up and its bound down, so
+    they never read at or under the bound."""
+    x = n / 2**20 * 10
+    return f"{(math.ceil(x) if up else math.floor(x)) / 10:.1f} MiB"
 
 
 class _Bytes:
@@ -252,11 +256,12 @@ class _Bytes:
             return
         configured = f"{self.configured / 2**20:.0f} MiB"
         if nbytes > self.configured:
-            raise StepError(413, f"a tensor of {_mib(nbytes)} is over the "
+            raise StepError(413, f"a tensor of {_mib(nbytes, True)} is over the "
                             f"configured {configured} of {self.name}; raise "
                             f"server.image.{self.key}")
-        raise StepError(413, f"a tensor of {_mib(nbytes)} is over {self.name} "
-                        f"of {_mib(self.max_bytes)}: the models loaded leave "
+        raise StepError(413, f"a tensor of {_mib(nbytes, True)} is over "
+                        f"{self.name} of {_mib(self.max_bytes, False)}: the "
+                        "models loaded leave "
                         f"it {self.max_bytes / self.configured:.0%} of its "
                         f"configured {configured}. A smaller defaults.size or "
                         "defaults.seconds on the tightest entry gives it more.")
@@ -370,8 +375,8 @@ class StepsState:
                             f"{len(tensors)}")
         (t,) = tensors.values()
         if t.nbytes > limit:
-            raise StepError(413, f"a tensor of {_mib(t.nbytes)} is over the "
-                            f"upload limit of {_mib(limit)}")
+            raise StepError(413, f"a tensor of {_mib(t.nbytes, True)} is over "
+                            f"the upload limit of {_mib(limit, False)}")
         store.check(t.nbytes)
         got = t.hash()
         if got != want:
@@ -981,9 +986,9 @@ def _pair_room(served, need: int) -> None:
     configured = cache_bytes()[1]
     share = served.plan.cache_share
     sid = served.spec.id
-    over = (f"the LoRA pairs of this patch table take {_mib(need)}, over the "
-            f"{_mib(room)} the pair cache of {sid!r} keeps for a request's "
-            "pairs")
+    over = (f"the LoRA pairs of this patch table take {_mib(need, True)}, over "
+            f"the {_mib(room, False)} the pair cache of {sid!r} keeps for a "
+            "request's pairs")
     bound = (f"server.image.adapter_cache_mb to {math.ceil(need / 2**20)} or "
              "more")
     if share >= 1.0:
