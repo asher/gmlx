@@ -34,6 +34,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   model's `adapters` key, in place of replacing them.
 - A ComfyUI step whose LoRA another workflow's LoRA pushed out of the
   server's adapter cache sends its LoRA again, in place of failing.
+- `gmlx serve` frees an image LoRA that a later ComfyUI LoRA pushed out of
+  its adapter cache, which stayed in memory while its patch table did.
 - An image model that `gmlx serve` refuses for memory shows its need above
   its budget, where both could read the same.
 - A ComfyUI workflow with a negative prompt loads the DiT and VAE once, not
