@@ -1481,7 +1481,8 @@ _RICH = "a highly detailed scene " * 170        # 4 KB
 
 def _qwen_served(defaults=None):
     """A Qwen-Image 2.1 entry with its encoder and tower resident beside
-    the DiT, sampling unguided as the base variant does."""
+    the DiT, sampling unguided as the base variant does, and the DiT facts
+    its load keeps."""
     from gmlx.image.registry import get_family
 
     nb = SimpleNamespace(bytes=0)
@@ -1495,7 +1496,8 @@ def _qwen_served(defaults=None):
         pipe=pipe, plan=SimpleNamespace(keep_encoder=True, cfg=1.0,
                                         staged=False),
         spec=SimpleNamespace(id="qwen-image", defaults=defaults or {},
-                             encoder_model=None, encoder_mmproj="/mm.gguf"))
+                             encoder_model=None, encoder_mmproj="/mm.gguf"),
+        facts=_facts(act_dtype="bfloat16"))
 
 
 def _need(served, size: int, prompt: str | None = None,
