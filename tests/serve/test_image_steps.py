@@ -1107,7 +1107,8 @@ def test_a_patch_table_is_named_by_the_hash_of_its_json(host, pipe):
 def test_a_model_released_with_a_table_frees_its_pipeline(host):
     """The pool's release of a model a client defined a table on frees
     its pipeline and DiT, so the next model is admitted beside memory that
-    is free."""
+    is free, and the next table lookup drops the bodies kept of its
+    tables."""
     import gc
     import weakref
 
@@ -1124,6 +1125,9 @@ def test_a_model_released_with_a_table_frees_its_pipeline(host):
     release_on_worker(box)
     gc.collect()
     assert [r() for r in refs] == [None, None]
+    assert "rel" in steps.STATE.tables
+    steps.STATE.tables_of("zit", host.served["zit"].pipe)
+    assert "rel" not in steps.STATE.tables
 
 
 @pytest.mark.parametrize("lost", [False, True])

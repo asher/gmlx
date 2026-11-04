@@ -568,8 +568,12 @@ class StepsState:
         """The contract tables clients defined on ``pipe``, the loaded
         pipeline of ``model``. A pipeline loaded again starts an empty
         map. The map holds the pipeline weakly, so a model the pool
-        releases leaves nothing alive here."""
+        releases leaves no pipeline alive here, and the next lookup drops
+        its map with the table bodies kept in it."""
         with self.lock:
+            for dead in [m for m, (ref, _t) in self.tables.items()
+                         if ref() is None]:
+                del self.tables[dead]
             held = self.tables.get(model)
             if held is None or held[0]() is not pipe:
                 held = (weakref.ref(pipe), ClientTables())
