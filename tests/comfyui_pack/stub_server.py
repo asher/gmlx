@@ -9,7 +9,9 @@ Usage: stub_server.py [--port 0] [--step-delay-ms 0] [--contract 1.0]
                       [--no-contract-field] [--default-model ID]
 It prints one JSON line with its address, then serves until killed.
 Test routes outside the contract: GET /stub/log, POST /stub/log/reset,
-POST /stub/forget (drop every tensor, adapter and table held).
+POST /stub/forget (drop every tensor, adapter and table held), POST
+/stub/lose-table {"steps": n} (the next n steps that name a table drop it
+first, as a server whose adapter cache let its matrices go would).
 """
 
 from __future__ import annotations
@@ -199,6 +201,7 @@ class State:
         self.tensors: dict = {}
         self.adapters: dict = {}
         self.tables: dict = {}
+        self.lose_table = 0
         self.runs: dict = {}
         self.log: list = []
         self.lock = threading.Lock()
@@ -399,6 +402,9 @@ class Handler(BaseHTTPRequestHandler):
             st.tables.clear()
             st.event(kind="forget")
             return self._json(200, {})
+        if p == "/stub/lose-table":
+            st.lose_table = int(json.loads(self._body())["steps"])
+            return self._json(200, {})
         if not p.startswith(PREFIX):
             return self._err(404, "not found")
         sub = p[len(PREFIX):]
@@ -511,6 +517,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(404, f"no run {rid!r}; it ended or sat idle past 120 seconds")
         if self._model(req.get("model")) is None:
             return
+        if req.get("patch_table") and st.lose_table > 0:
+            st.lose_table -= 1
+            st.tables.pop(req["patch_table"], None)
         if "video" in tensors or "audio" in tensors:
             return self._av_step(tensors, req, t0, rid, run)
         x, ts = tensors.get("x"), tensors.get("timestep")

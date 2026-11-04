@@ -59,6 +59,10 @@ class Stub:
     def forget(self):
         self.call("/stub/forget", {})
 
+    def lose_table(self, steps: int):
+        """The next ``steps`` steps that name a table find it dropped."""
+        self.call("/stub/lose-table", {"steps": steps})
+
     def close(self):
         self.proc.terminate()
         try:

@@ -81,6 +81,8 @@ H3_CLASS = "MiniMaxH3"
 # as its skip set, on the families whose DiT skips blocks.
 SLG_NODE = "SkipLayerGuidanceDiTSimple"
 SKIP_FAMILIES = frozenset({"moss_image"})
+# The sends again of a step the server answers 409, after the first.
+STEP_RETRIES = 3
 # The block replacement that node installs, which returns its input.
 SLG_SKIP = f"{SLG_NODE}.execute.<locals>.skip"
 
@@ -440,6 +442,30 @@ class RemoteForward:
 
         return client.step(x, timesteps, fields, on_interrupt=stop, sample_sigmas=sigmas)
 
+    def _send_held(self, send, fields: dict, held: dict, patcher):
+        """``send()``, sent again after a 409 with what it names put again:
+        the step's tensors, and its patch table synced again. An upload of
+        another client can make the server drop them again before the step
+        reaches it, so a step is sent STEP_RETRIES times more at most, and
+        the 409 past that raises with the server's message."""
+        client: StepClient = self.b.client
+        tries, sync = 0, False
+        while True:
+            try:
+                if sync:
+                    fields["patch_table"] = patcher.sync_patches(force=True)
+                    sync = False
+                return send()
+            except GmlxMissing as e:
+                if tries == STEP_RETRIES:
+                    raise
+                tries += 1
+                client.stats["missing_retries"] += 1
+                missing = set(e.missing)
+                for h in sorted(missing & set(held)):
+                    client.put_tensor(h, held[h])
+                sync = sync or fields["patch_table"] in missing
+
     def _schedule(self, to: dict):
         """The sampler's schedule a flow map step carries, else None."""
         if not self.flow_map:
@@ -550,18 +576,11 @@ class RemoteForward:
 
         t1 = time.perf_counter()
         try:
-            out, hdrs = send()
-        except GmlxMissing as e:
-            client.stats["missing_retries"] += 1
-            missing = set(e.missing)
-            for h in sorted(missing & set(held)):
-                client.put_tensor(h, held[h])
-            if table is not None and table in missing:
-                fields["patch_table"] = table = patcher.sync_patches(force=True)
-            out, hdrs = send()
+            out, hdrs = self._send_held(send, fields, held, patcher)
         except GmlxInterrupted:
             comfy.model_management.throw_exception_if_processing_interrupted()
             raise
+        table = fields["patch_table"]
         t2 = time.perf_counter()
         out = [o.to(dtype=i.dtype, device=i.device) for o, i in zip(out, (video, audio))]
         t3 = time.perf_counter()
@@ -611,19 +630,12 @@ class RemoteForward:
         ts = timesteps.float().reshape(-1)
         t1 = time.perf_counter()
         try:
-            out, hdrs = self._send(xs, ts, fields, sigmas)
-        except GmlxMissing as e:
-            client.stats["missing_retries"] += 1
-            missing = set(e.missing)
-            for h in sorted(missing & set(held)):
-                client.put_tensor(h, held[h])
-            if table is not None and table in missing:
-                table = patcher.sync_patches(force=True)
-                fields["patch_table"] = table
-            out, hdrs = self._send(xs, ts, fields, sigmas)
+            out, hdrs = self._send_held(lambda: self._send(xs, ts, fields, sigmas), fields,
+                                        held, patcher)
         except GmlxInterrupted:
             comfy.model_management.throw_exception_if_processing_interrupted()
             raise
+        table = fields["patch_table"]
         t2 = time.perf_counter()
         out = out.to(dtype=x.dtype, device=x.device)
         t3 = time.perf_counter()
