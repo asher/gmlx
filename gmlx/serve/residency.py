@@ -488,6 +488,21 @@ class _ResidencyPool:
         self._lock = threading.RLock()
         self._build_lock = threading.Lock()
         self._clock = 0
+        # The LoRA bytes of image and video entries and the step routes'
+        # uploads, booked before they are allocated (lora_books).
+        from .lora_books import Books
+
+        self.books = Books()
+        # The footprint of the cold build in flight, counted resident from
+        # its room check to its insert.
+        self._building = 0
+        # Injectable for tests: the measured room, the shed of an entry's
+        # request LoRA bytes, the shed of the uploads.
+        self._headroom_fn = None
+        self._lora_shed = None
+        self._store_shed = None
+        # A test's pause at a named point of a grant or a cold build.
+        self._seam = None
 
     # public
     def acquire(self, model_path, adapter_path, model_kind, *,
@@ -568,29 +583,53 @@ class _ResidencyPool:
                                 incoming, model_path=model_path,
                                 streaming=getattr(build_spec, "stream", None) == "experts",
                                 released=released)
+                            self._hit("room")
+                            # The build's room, in the hold that found it, so
+                            # a LoRA booking cannot take it before the insert.
+                            self._building = incoming
+                        self._hit("roomed")
                     finally:
                         self._release_images(released)
+                    inserted = False
                     try:
-                        entry = self._build(cache_key, model_path, adapter_path,
-                                            model_kind, file_bytes, ttl=ttl, env=env,
-                                            build_spec=build_spec)
-                    except BaseException:
-                        # Free the failed build before the lock drops: a waiting
-                        # acquire gates on live memory next.
-                        _collect_failed_build()
-                        _clear_table_step(model_path)
-                        raise
-                    if entry.priced_up:
-                        self._fit_repriced(entry, model_path, late)
-                    # The id that built the entry names it for the process lifetime
-                    # (a metrics label wants a name fixed per entry; aliases sharing
-                    # the signature reuse this entry and keep the first name).
-                    entry.loaded_as = loaded_as
-                    with self._lock:
-                        self._entries[cache_key] = entry
-                        self._touch(entry)
-                        entry.busy += 1
-                    return entry
+                        try:
+                            entry = self._build(cache_key, model_path, adapter_path,
+                                                model_kind, file_bytes, ttl=ttl, env=env,
+                                                build_spec=build_spec)
+                        except BaseException:
+                            # Free the failed build before the lock drops: a waiting
+                            # acquire gates on live memory next.
+                            _collect_failed_build()
+                            _clear_table_step(model_path)
+                            raise
+                        if entry.priced_up:
+                            self._fit_repriced(entry, model_path, late)
+                        # The id that built the entry names it for the process lifetime
+                        # (a metrics label wants a name fixed per entry; aliases sharing
+                        # the signature reuse this entry and keep the first name).
+                        entry.loaded_as = loaded_as
+                        # The own LoRA figures are read before the hold: no
+                        # cache lock is taken inside it.
+                        try:
+                            self._hit("inserting")
+                            lora = self._lora_prepare(entry)
+                        except BaseException:
+                            self._teardown(entry, late)
+                            raise
+                        with self._lock:
+                            self._hit("insert")
+                            self._entries[cache_key] = entry
+                            self._building = 0
+                            inserted = True
+                            self._touch(entry)
+                            entry.busy += 1
+                            if lora is not None:
+                                self.books.attach(entry, *lora)
+                        return entry
+                    finally:
+                        if not inserted:
+                            with self._lock:
+                                self._building = 0
             # Without a byte budget, only the count cap evicts.
             bound = (f"the {self._budget / 1e9:.1f} GB budget"
                      if self._budget else "the model count cap")
@@ -612,8 +651,11 @@ class _ResidencyPool:
         outside the build lock."""
         try:
             with self._lock:
+                # The build counts at its new price once, in this hold.
+                self._building = 0
                 self._evict_for_room(entry.footprint, model_path=model_path,
                                      streaming=True, released=released)
+                self._building = entry.footprint
         except BaseException:
             try:
                 self._teardown(entry)
@@ -622,6 +664,306 @@ class _ResidencyPool:
                              exc_info=True)
             _collect_failed_build()
             raise
+
+    def _hit(self, name: str) -> None:
+        if self._seam is not None:
+            self._seam(name)
+
+    # LoRA bookings (lora_books). Grants decide and record in one _lock
+    # hold; no cache lock is taken inside it.
+    def _lora_prepare(self, entry: _Entry):
+        """Hook an image or video entry's LoRA caches to the books, and
+        return its own LoRA term and own pair figures, or None."""
+        if not entry.is_image or entry.pipeline is None:
+            return None
+        pipe = getattr(entry.pipeline, "pipe", None)
+        if pipe is None or not hasattr(pipe, "adapters"):
+            return None
+        gone = self.books.release_hook(entry)
+        pipe.adapters.on_gone = gone
+        pipe.tables.on_gone = gone
+        pipe.lora_owner = self.books.own_hook(entry)
+        own = {k: pipe.adapters.nbytes(k) for k in pipe.adapters.kept}
+        return int(getattr(entry.pipeline, "lora_own_term", 0) or 0), own
+
+    @staticmethod
+    def _lora_name(e) -> str:
+        return e.loaded_as or os.path.basename(str(e.model_path))
+
+    def _lora_guard(self, what: str) -> None:
+        import asyncio
+
+        if threading.current_thread().name.startswith("image-worker"):
+            raise RuntimeError(f"{what} runs on a request thread, never on "
+                               "the image worker it may wait on")
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        raise RuntimeError(f"{what} runs on a request thread, never on the "
+                           "event loop")
+
+    def _measured_lora_room(self):
+        """The free working set measured now, against the serve ceiling,
+        or None where it cannot be measured. Read before any lock."""
+        if self._headroom_fn is not None:
+            return self._headroom_fn()
+        from gmlx.gen.prefill_decay import headroom_bytes
+
+        from .capacity import working_budget_bytes, working_set_bytes
+
+        head = headroom_bytes()
+        if head is None:
+            return None
+        budget, ws = working_budget_bytes(), working_set_bytes()
+        if budget is not None and ws is not None:
+            head -= max(0.0, ws - budget)
+        return head
+
+    def _lora_refuse(self, status, subject, n, text, *, free=None):
+        from .lora_books import LoraRefused, gb
+
+        lead = f"{subject} need {gb(n, True)} GB of memory"
+        raise LoraRefused(status, f"{lead}{text}")
+
+    def _lora_plan(self, owner, n: int, subject: str, *, evict: bool,
+                   own_held: int = 0, head=None, but=None):
+        """Under _lock after a drain: the claims and the idle models that
+        make room for ``n`` more bytes, or a refusal. ``own_held`` bytes
+        of the owner are the job's own keys, which it never claims."""
+        from .capacity import overcommit
+        from .lora_books import STORE, gb
+
+        if n <= 0:
+            return [], []
+        over = overcommit()
+        budget = self._budget
+        books = self.books
+        eff = (sum(e.footprint for e in self._entries.values())
+               + books.total() + self._building - books.claimed())
+        claims, victims, got = [], [], 0
+        need = eff + n - budget if budget else 0
+        if need > 0:
+            take = min(need, n)
+            order = [] if owner is STORE else [owner]
+            order += [e for e in sorted(self._entries.values(),
+                                        key=lambda e: e.seq)
+                      if e.is_image and e is not owner]
+            order.append(STORE)
+            for src in order:
+                if take <= 0:
+                    break
+                c = min(take, books.idle(src, own_held if src is owner
+                                         else 0))
+                if c > 0:
+                    claims.append((src, c))
+                    take -= c
+                    got += c
+            short = need - got
+            if short > 0 and not over:
+                pinned = sum(e.footprint for e in self._entries.values()
+                             if e.pinned and e is not owner)
+                mine = 0 if owner is STORE else getattr(owner,
+                                                         "footprint", 0)
+                if n > budget - mine - pinned:
+                    beside = ("the pinned models" if owner is STORE else
+                              f"{self._lora_name(owner)!r} and the pinned "
+                              "models")
+                    self._lora_refuse(
+                        413, subject, n,
+                        f", over the {gb(budget - mine - pinned, False)} GB "
+                        f"the server's memory budget leaves beside {beside}")
+                idle = sorted((e for e in self._entries.values()
+                               if not e.pinned and e.busy == 0
+                               and e is not owner), key=lambda e: e.seq)
+                if evict and owner is not STORE:
+                    freed = 0
+                    for e in idle:
+                        if freed >= short:
+                            break
+                        victims.append(e)
+                        freed += (e.footprint + books.held(e)
+                                  + books.pending(e))
+                    if freed < short:
+                        victims = []
+                if not victims:
+                    free = max(0, budget - eff)
+                    if idle and owner is STORE:
+                        held = sum(e.footprint for e in idle)
+                        names = ", ".join(self._lora_name(e) for e in idle)
+                        self._lora_refuse(
+                            503, subject, n,
+                            f", and {gb(free, False)} GB is free; idle "
+                            f"models hold {gb(held, False)} GB ({names}). "
+                            "Unload one to make room")
+                    busy = [self._lora_name(e)
+                            for e in self._entries.values() if e.busy > 0]
+                    names = ", ".join(busy) or "none"
+                    self._lora_refuse(
+                        503, subject, n,
+                        f", and {gb(free, False)} GB is free beside the "
+                        f"models in use ({names}); retry when one is idle")
+        if head is not None and not over:
+            room = (head - self._reserved_room_bytes()
+                    - books.pending_total(but) - self._building)
+            if n - got > room:
+                self._lora_refuse(
+                    503, subject, n,
+                    f", and {gb(room, False)} GB is free in the working set "
+                    "now; retry when the models in use finish")
+        return claims, victims
+
+    def reserve_lora(self, owner, n: int, *, subject: str,
+                     own_held: int = 0):
+        """Book ``n`` bytes for ``owner``, an entry or the upload store,
+        on a request thread: the estimate of a route. An entry's booking
+        may evict idle models as a cold load does; an upload's never does.
+        Returns the Booking, or raises LoraRefused. ``own_held`` bytes of
+        the owner are the request's own keys, which it never claims."""
+        from .lora_books import STORE
+
+        self._lora_guard("a LoRA reservation")
+        n = max(0, int(n))
+        head = self._measured_lora_room()
+        evict = owner is not STORE
+        for attempt in range(3):
+            # An eviction runs as a cold load's does: under the worker
+            # reservation and the build lock, taken before _lock.
+            windowed = attempt > 0
+            with (self._worker_for(False, force=True) if windowed
+                  else contextlib.nullcontext()), \
+                    (self._build_lock if windowed
+                     else contextlib.nullcontext()):
+                released: list = []
+                try:
+                    with self._lock:
+                        self.books.drain()
+                        claims, victims = self._lora_plan(
+                            owner, n, subject, evict=evict, head=head,
+                            own_held=own_held)
+                        self._hit("reserve")
+                        if victims and not windowed:
+                            continue
+                        if (any(v.is_image for v in victims)
+                                and not _holds_image_worker()):
+                            continue
+                        for v in victims:
+                            _log.info("evicting LRU model (%.1f GB) for "
+                                      "LoRA bytes: %s", v.footprint / 1e9,
+                                      v.model_path)
+                            self._teardown(v, released)
+                            del self._entries[v.cache_key]
+                            if self._proxy._last_entry is v:
+                                self._proxy._last_entry = None
+                        return self.books.open_booking(owner, n, subject,
+                                                       claims)
+                finally:
+                    self._release_images(released)
+        from .lora_books import LoraRefused
+
+        raise LoraRefused(503, f"{subject} cannot be booked while the image "
+                          "worker is busy; retry")
+
+    def turn_lora(self, owner, booking, need: int, *, subject: str,
+                  own_held: int = 0):
+        """The booking at a job's turn, on the image worker: ``need``
+        bytes the job will allocate by its dry run, past its pending
+        booking. Room from free memory, idle LoRA bytes and uploads, never
+        a model. Returns the booking (a new one when ``booking`` is
+        None)."""
+        if not threading.current_thread().name.startswith("image-worker"):
+            raise RuntimeError("a turn booking runs on the image worker, "
+                               "where the job allocates")
+        need = max(0, int(need))
+        head = self._measured_lora_room()
+        with self._lock:
+            self.books.drain()
+            if booking is not None and not self.books.is_open(booking):
+                booking = None
+            pending = 0 if booking is None else booking.pending
+            short = max(0, need - pending)
+            # The measured check takes what the job has yet to allocate.
+            claims, _ = self._lora_plan(owner, short, subject, evict=False,
+                                        own_held=own_held, head=None,
+                                        but=booking)
+            if head is not None:
+                from .capacity import overcommit
+
+                room = (head - self._reserved_room_bytes()
+                        - self.books.pending_total(booking) - self._building)
+                got = sum(c for _s, c in claims)
+                if not overcommit() and need - got > room:
+                    from .lora_books import gb
+
+                    self._lora_refuse(
+                        503, subject, need,
+                        f", and {gb(room, False)} GB is free in the working "
+                        "set now; retry when the models in use finish")
+            self._hit("turn")
+            if booking is None:
+                return self.books.open_booking(owner, short, subject, claims)
+            if short:
+                self.books.grow(booking, short, claims)
+            return booking
+
+    def shed_claims(self, booking, hold=()) -> None:
+        """Shed what ``booking`` claimed, after _lock dropped: an entry's
+        request LoRA bytes on the image worker, the uploads anywhere."""
+        from .lora_books import STORE
+
+        for src, c in booking.claims_on():
+            if src is STORE:
+                shed = self._store_shed or _default_store_shed
+                shed(c)
+            else:
+                shed = self._lora_shed or _default_lora_shed
+                shed(src, c, hold if src is booking.owner else (),
+                     src is booking.owner)
+
+    def release_claims(self, booking) -> None:
+        """A claimant releases its claims and re-checks, in one hold,
+        after its shed and before it allocates. A claim whose bytes left
+        another way ends here in a 503, never an overbook."""
+        from .capacity import overcommit
+        from .lora_books import LoraRefused
+
+        with self._lock:
+            self.books.drain()
+            self.books.unclaim(booking)
+            if not self._budget or overcommit():
+                return
+            eff = (sum(e.footprint for e in self._entries.values())
+                   + self.books.total() + self._building
+                   - self.books.claimed())
+            if eff > self._budget:
+                booking.done = True
+                self.books.close(booking._rec)
+                raise LoraRefused(
+                    503, f"{booking.subject} lost the memory booked for "
+                    "them to other work; retry")
+
+    def settle_lora(self, booking, figures: dict) -> None:
+        """Set the keys ``booking`` entered to the caches' ``figures``,
+        read before this hold, and return the rest. Bytes past the
+        booking are a growth: booked here, under _lock, with one line."""
+        if booking is None:
+            return
+        with self._lock:
+            self.books.drain()
+            over = self.books.settle(booking, figures)
+        if over:
+            _log.warning("LoRA bytes %.3f GB past their booking for %s",
+                         over / 1e9, booking.subject)
+            hook = self.books.overrun_hook
+            if hook is not None:
+                hook(booking, over)
+
+    def lora_held(self, owner) -> tuple:
+        """(held, pending, ledger) of ``owner`` after the posted shrinks."""
+        with self._lock:
+            self.books.drain()
+            return (self.books.held(owner), self.books.pending(owner),
+                    self.books.ledger(owner))
 
     def release(self, entry: _Entry) -> None:
         """Drop one in-flight reference taken by :meth:`acquire`. At zero the
@@ -895,7 +1237,12 @@ class _ResidencyPool:
             self._proxy._last_entry = entry
 
     def _resident_bytes(self) -> int:
-        return sum(e.footprint for e in self._entries.values())
+        """The footprints, the LoRA bookings and the cold build in
+        flight, after the shrinks posted so far."""
+        with self._lock:
+            self.books.drain()
+            return (sum(e.footprint for e in self._entries.values())
+                    + self.books.total() + self._building)
 
     def _stream_reservations(self) -> tuple[int, int, int, int]:
         """``(room, ceiling margin, host overhead, host floor)`` the
@@ -1484,6 +1831,8 @@ class _ResidencyPool:
         once it drops ``_lock``: the release waits on the image worker, and
         a collection there can finalize a hold whose release takes
         ``_lock``."""
+        with self._lock:
+            self.books.drop(entry)
         if entry.is_image:
             pipe, entry.pipeline = entry.pipeline, None
             if released is None:
@@ -1650,6 +1999,54 @@ class _ResidencyPool:
         gc.collect()
 
 
+
+
+_RESERVE_POOL = None
+
+
+def _reserve_executor():
+    global _RESERVE_POOL
+    if _RESERVE_POOL is None:
+        import concurrent.futures
+
+        _RESERVE_POOL = concurrent.futures.ThreadPoolExecutor(
+            max_workers=32, thread_name_prefix="lora-reserve")
+    return _RESERVE_POOL
+
+
+def _cancel_result(fut) -> None:
+    if not fut.cancelled() and fut.exception() is None:
+        got = fut.result()
+        if got is not None:
+            got.cancel()
+
+
+async def reserve_on_thread(pool, owner, n: int, *, subject: str,
+                            executor=None, **kw):
+    """``pool.reserve_lora`` on a thread, awaited from a route. A route
+    cancelled while it waits leaves the booking to the thread's done
+    callback, which cancels it when it arrives."""
+    import asyncio
+
+    fut = (executor or _reserve_executor()).submit(
+        pool.reserve_lora, owner, n, subject=subject, **kw)
+    try:
+        return await asyncio.wrap_future(fut)
+    except asyncio.CancelledError:
+        fut.add_done_callback(_cancel_result)
+        raise
+
+
+def _default_lora_shed(entry, nbytes: int, hold, own: bool) -> None:
+    from . import image_service
+
+    image_service.shed_lora(entry, nbytes, hold, own)
+
+
+def _default_store_shed(nbytes: int) -> None:
+    from .image_steps import STATE
+
+    STATE.adapters.shed(nbytes)
 
 
 def _holds_image_worker() -> bool:
