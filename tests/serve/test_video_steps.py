@@ -960,17 +960,23 @@ def test_a_video_entry_released_with_a_client_table_frees_its_pipeline(
     assert [r() for r in refs] == [None, None]
 
 
+@pytest.mark.parametrize("cap_mb", [None, 256])
 def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
-                                                            monkeypatch):
+                                                            monkeypatch,
+                                                            cap_mb):
     """The pool admits an entry with each tensor cache at the share of its
     bound that its clip leaves room for. The entry bounds its pipeline's
-    tensor caches at that share, and its pair and tables caches at the cap
-    beside the bytes its plan books for its own LoRA, which hold its
-    pairs: the pool books a request's pairs. The step routes' caches take
-    the smallest share of the entries loaded until it is released."""
+    tensor caches at that share, and its pair and tables caches at the cap,
+    or no bound with none, beside the bytes its plan books for its own
+    LoRA, which hold its pairs: the pool books a request's pairs. The step
+    routes' caches take the smallest share of the entries loaded until it
+    is released."""
     import dataclasses
 
     from gmlx.serve import image_service
+
+    monkeypatch.setitem(image_service._CACHE_BYTES, "adapter",
+                        None if cap_mb is None else cap_mb << 20)
 
     path = _lora_file(tmp_path)
     pipe, _w = _own_pipe()
@@ -985,12 +991,12 @@ def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
     scaled = []
     monkeypatch.setattr(steps.STATE, "scale_caches", scaled.append)
     got = _on_worker(vs._load, served.spec)
-    tensor, adapter = image_service.cache_bytes()
+    tensor, cap = image_service.cache_bytes()
+    room = steps.UNBOUNDED if cap is None else cap
     assert 0 < pipe.adapters.bytes <= size
     assert pipe.conditionings.max_bytes == tensor // 4
     assert pipe.reference_latents.max_bytes == tensor // 4
-    assert pipe.adapters.max_bytes == pipe.tables.max_bytes == (
-        adapter + size)
+    assert pipe.adapters.max_bytes == pipe.tables.max_bytes == room + size
     assert scaled == [0.25]
     _on_worker(vs._release, [got])
     assert scaled == [0.25, 1.0]
@@ -1015,7 +1021,7 @@ def test_the_step_tensor_cache_keeps_a_loaded_video_entrys_cond(
     monkeypatch.setattr(vs, "entry_plan", lambda spec: plan)
     monkeypatch.setattr(pipeline, "load", lambda *a, **k: pipe)
     _mount(_Host(served), request)
-    tensor, adapter = image_service.cache_bytes()
+    tensor, _cap = image_service.cache_bytes()
     # An image entry loaded at a share of 1/16.
     shares = {0: (1 / 16, 0)}
     monkeypatch.setattr(image_service, "_SHARES", shares)
@@ -1031,8 +1037,8 @@ def test_the_step_tensor_cache_keeps_a_loaded_video_entrys_cond(
     finally:
         shares.clear()
         image_service._scale_step_caches()
-    # The upload store keeps its configured bound at any share.
-    assert bounds == (rows.nbytes, adapter)
+    # With no cap the upload store has no bound at any share.
+    assert bounds == (rows.nbytes, steps.UNBOUNDED)
     assert after == tensor // 16 and e.value.status == 413
 
 

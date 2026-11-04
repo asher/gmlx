@@ -316,6 +316,26 @@ def test_a_lora_over_256_mb_runs_on_the_images_api_with_the_cap_unset(
     assert pairs > 256 << 20
 
 
+def test_a_lora_over_a_cap_of_256_mb_gets_the_refusal_naming_it(
+        request, monkeypatch, tmp_path):
+    """With server.image.adapter_cache_mb set to 256, the same LoRA gets
+    the images API's refusal that names the setting, from its file's
+    size before it is read: no encode, nothing booked. The cap adds
+    nothing to the entry's footprint (T3's plan test, at caps None, 1 and
+    256)."""
+    t = _entry(request, monkeypatch, tmp_path, budget=16 * GB, own=False,
+               cap_mb=256, dit=lambda: _wide_dit(T1_DIM))
+    _wide_lora(t.root / "wide.safetensors", T1_DIM, T1_RANK)
+    status, doc, _h = _post([("wide.safetensors", 1.0)])
+    assert (status, doc["error"]["param"]) == (400, "adapters")
+    assert doc["error"]["message"] == (
+        "the request's adapters take 270.1 MiB, more than the 256.0 MiB "
+        "this image model keeps for request adapters; raise "
+        "server.image.adapter_cache_mb")
+    assert t.encodes == 0 and t.pool.lora_held(t.e) == (0, 0, {})
+    assert t.pipe.adapters.bytes == 0
+
+
 def _over_the_old_bound_on_the_steps(request, monkeypatch, dim, rank):
     """A client's LoRA of ``rank`` at width ``dim`` in float32, as the pack
     sends one, through the step routes: its matrices uploaded, its table
@@ -669,3 +689,47 @@ def test_the_request_budget_counts_each_byte_once_and_fits_exactly(
                 svc.fit_check(req, served, (256, 256), total - beside)
     for b in (pending_up, step, own):
         b.cancel()
+
+
+# T21: the optional cap at startup.
+
+def test_a_set_lora_cap_logs_one_line_at_startup_and_none_shifts_unbounded(
+        request, monkeypatch, tmp_path, caplog):
+    """The image routes installed at startup with server.image.
+    adapter_cache_mb set log one line that names the cap and its remedy,
+    and none without it. With no cap the step routes' upload store keeps
+    no bound at any share and refuses no size; a cap bounds it at the cap
+    alone, at any share."""
+    import logging
+
+    monkeypatch.setattr(svc, "_CACHE_BYTES", dict(svc._CACHE_BYTES))
+    monkeypatch.setattr(svc, "default_store_root",
+                        lambda port=None: str(tmp_path / "files"))
+
+    def start(cap_mb):
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=svc.__name__):
+            images.install_image_routes(SimpleNamespace(
+                image=ImageServerCfg(adapter_cache_mb=cap_mb),
+                model_dirs=(), port=None))
+        return [r.getMessage() for r in caplog.records
+                if "adapter_cache_mb" in r.getMessage()]
+
+    request.addfinalizer(lambda: start(None))
+    assert start(256) == [
+        "server.image.adapter_cache_mb: 256 caps each image model's "
+        "request LoRAs at 256 MB; remove the key to let LoRAs use free "
+        "memory"]
+    assert start(None) == []
+    state = steps.StepsState()
+    for cap_mb, bound in ((None, steps.UNBOUNDED), (256, 256 << 20)):
+        state.configure(ImageServerCfg(adapter_cache_mb=cap_mb))
+        state.scale_caches(0.25)
+        assert state.adapters.max_bytes == bound
+        if cap_mb is None:
+            state.adapters.check(1 << 40)
+        else:
+            with pytest.raises(steps.StepError) as e:
+                state.adapters.check(bound + 1)
+            assert e.value.status == 413
+            assert "server.image.adapter_cache_mb" in str(e.value)

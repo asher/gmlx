@@ -1671,7 +1671,9 @@ def test_the_default_step_caches_are_the_configured_ones():
     cfg = ImageServerCfg()
     fresh = steps.StepsState()
     assert fresh.tensors.max_bytes == cfg.tensor_cache_mb << 20
-    assert fresh.adapters.max_bytes == cfg.adapter_cache_mb << 20
+    # No cap is set: the pool books the store's bytes.
+    assert cfg.adapter_cache_mb is None and fresh.adapters.configured is None
+    assert fresh.adapters.max_bytes == steps.UNBOUNDED
 
 
 def test_a_tensor_over_the_cache_is_refused_before_it_is_copied(

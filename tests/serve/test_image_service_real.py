@@ -42,15 +42,14 @@ def _file(root, name: str, near: str | None = None) -> str:
     return paths[0]
 
 
-@pytest.mark.parametrize("name, gb", [
-    (n, gb) for n in sorted(catalog.RECIPES) for gb in catalog.MEMORY_CLASSES])
-def test_serve_admits_the_default_each_class_pulls(gguf_dir, monkeypatch,
-                                                   name, gb):
+def _class_default(gguf_dir, name: str, gb: int):
+    """The entry ``gmlx pull`` writes for recipe ``name`` on the ``gb`` GB
+    class, with ``encoder_release: auto``."""
     r = catalog.RECIPES[name]
     dq, eq = catalog.DEFAULT_QUANTS[name][gb]
     size = catalog.DEFAULT_SIZES.get(name, {}).get(gb)
     enc = _file(gguf_dir, r.encoder_name(eq))
-    spec = ResolvedImageModel(
+    return ResolvedImageModel(
         id=name, path=_file(gguf_dir, r.dit_name(dq)),
         vae=_file(gguf_dir, r.vae_pack), encoder=enc, encoder_model=None,
         encoder_mmproj=(_file(gguf_dir, r.mmproj_file, near=enc)
@@ -58,6 +57,15 @@ def test_serve_admits_the_default_each_class_pulls(gguf_dir, monkeypatch,
         family=None, adapters=(), defaults={"size": size} if size else {},
         encoder_release="auto",
         pin=False, ttl_s=None)
+
+
+@pytest.mark.parametrize("name, gb", [
+    (n, gb) for n in sorted(catalog.RECIPES) for gb in catalog.MEMORY_CLASSES])
+def test_serve_admits_the_default_each_class_pulls(gguf_dir, monkeypatch,
+                                                   name, gb):
+    dq, eq = catalog.DEFAULT_QUANTS[name][gb]
+    size = catalog.DEFAULT_SIZES.get(name, {}).get(gb)
+    spec = _class_default(gguf_dir, name, gb)
     budget = _class_budget(gb)
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
     monkeypatch.setattr(capacity, "overcommit", lambda: False)
@@ -68,6 +76,27 @@ def test_serve_admits_the_default_each_class_pulls(gguf_dir, monkeypatch,
           f"{plan.footprint / memfit.GiB:.2f} of "
           f"{budget / memfit.GiB:.2f} GiB, staged {plan.staged}, caches at "
           f"{plan.cache_share:.2f}")
+
+
+@pytest.mark.parametrize("name, gb, mode", [
+    # 10.56 of 10.88 GB with the encoder released: a LoRA room of 512 MiB
+    # would stage the DiT instead.
+    ("flux-3-klein", 16, "release"),
+    ("flux-2-klein-9b", 24, "release"),
+])
+def test_the_auto_encoder_mode_of_a_class_default_counts_no_lora(
+        gguf_dir, monkeypatch, name, gb, mode):
+    """encoder_release: auto picks a class default's encoder mode from its
+    real headers with no LoRA in it: a model books no memory for request
+    LoRAs, which are booked as they arrive."""
+    spec = _class_default(gguf_dir, name, gb)
+    budget = _class_budget(gb)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
+    monkeypatch.setattr(capacity, "overcommit", lambda: False)
+    plan = image_service.entry_plan(spec)
+    got = "staged" if plan.staged else (
+        "keep" if plan.keep_encoder else "release")
+    assert got == mode, (plan.footprint / memfit.GiB, budget / memfit.GiB)
 
 
 @pytest.mark.parametrize("name", sorted(
@@ -113,8 +142,8 @@ def test_the_kv_edit_workflow_fits_the_24_gb_class(gguf_dir, monkeypatch):
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
     monkeypatch.setattr(capacity, "overcommit", lambda: False)
     entry = image_service.entry_plan(spec)
-    tensor, adapter = image_service.cache_bytes()
-    caches = int((2 * tensor + image_service._CACHE_BYTES["steps"] - adapter)
+    tensor, _cap = image_service.cache_bytes()
+    caches = int((2 * tensor + image_service._CACHE_BYTES["steps"])
                  * entry.cache_share)
     act = image_activation("flux2_klein_9b_kv")
     row = memfit.PEAKS["flux2_klein_9b_kv"]

@@ -538,7 +538,7 @@ def test_an_entry_books_its_tensor_caches_and_no_lora_room(plan_stubs,
                 calls.setdefault(steps_api, set()).update(seen)
     finally:
         image_service.configure_caches(SimpleNamespace(tensor_cache_mb=64,
-                                                       adapter_cache_mb=256))
+                                                       adapter_cache_mb=None))
     # With the step routes on, the entry also books their tensor cache.
     assert calls == {False: {((), 2 * (3 << 20))},
                      True: {((), 3 * (3 << 20))}}
@@ -557,19 +557,19 @@ def test_a_served_pipeline_caches_hold_at_most_their_bound():
         image_service.bound_caches(pipe, configured=7)
     finally:
         image_service.configure_caches(SimpleNamespace(tensor_cache_mb=64,
-                                                       adapter_cache_mb=256))
+                                                       adapter_cache_mb=None))
     assert pipe.conditionings.max_bytes == 1 << 20
     assert pipe.reference_latents.max_bytes == 1 << 20
     assert pipe.adapters.max_bytes == (2 << 20) + 7
     assert pipe.tables.max_bytes == (2 << 20) + 7
 
 
-def test_the_default_cache_bounds_are_small():
+def test_the_default_tensor_bound_is_small_and_no_lora_cap_is_set():
     from gmlx.config import ImageServerCfg
 
     cfg = ImageServerCfg()
-    assert (cfg.tensor_cache_mb, cfg.adapter_cache_mb) == (64, 256)
-    assert image_service.cache_bytes() == (64 << 20, 256 << 20)
+    assert (cfg.tensor_cache_mb, cfg.adapter_cache_mb) == (64, None)
+    assert image_service.cache_bytes() == (64 << 20, None)
 
 
 def test_the_parts_are_checked_before_the_entry_is_priced(plan_stubs, monkeypatch):
@@ -682,24 +682,28 @@ def test_a_loaded_entry_bounds_its_caches(load_stubs):
         served = image_service._load(_spec(encoder=None))
     finally:
         image_service.configure_caches(SimpleNamespace(tensor_cache_mb=64,
-                                                       adapter_cache_mb=256))
+                                                       adapter_cache_mb=None))
     pipe = served.pipe
     assert pipe.conditionings.max_bytes == 1 << 20
     assert pipe.reference_latents.max_bytes == 1 << 20
     assert pipe.adapters.max_bytes == pipe.tables.max_bytes == 2 << 20
 
 
+@pytest.mark.parametrize("cap_mb", [None, 256])
 def test_a_loaded_image_entry_keeps_its_cond_in_the_step_tensor_cache(
-        load_stubs, monkeypatch):
+        load_stubs, monkeypatch, cap_mb):
     """The step routes' tensor cache takes a loaded image entry's share of
     1/16 and keeps its cond floor of 15 MiB over the 4 MiB that share
-    leaves, and the upload store keeps its bound. Released, the entry's
-    floor goes with it."""
+    leaves, and the upload store keeps the cap at any share, or no bound
+    with none. Released, the entry's floor goes with it."""
+    from gmlx.config import ImageServerCfg
     from gmlx.serve import image_steps
 
     monkeypatch.setattr(image_service, "entry_plan", lambda spec: _plan(
         cache_share=1 / 16, tensor_floor=_KLEIN_COND))
-    tensor, adapter = image_service.cache_bytes()
+    tensor, _cap = image_service.cache_bytes()
+    image_steps.STATE.configure(ImageServerCfg(adapter_cache_mb=cap_mb))
+    adapter = image_steps.UNBOUNDED if cap_mb is None else cap_mb << 20
     try:
         served = image_service._load(_spec(encoder=None))
         held = (image_steps.STATE.tensors.max_bytes,
@@ -708,8 +712,8 @@ def test_a_loaded_image_entry_keeps_its_cond_in_the_step_tensor_cache(
         after = image_steps.STATE.tensors.max_bytes
     finally:
         image_service._SHARES.clear()
+        image_steps.STATE.configure(ImageServerCfg())
         image_service._scale_step_caches()
-    # The upload store keeps its configured bound at any share.
     assert held == (_KLEIN_COND, adapter) and after == tensor
 
 
@@ -778,10 +782,12 @@ def test_a_staged_entry_loads_no_encoder_and_shares_its_caches(
     served = image_service._load(_spec(encoder_mmproj="/own-mmproj.gguf"))
     assert load_stubs[-1]["text_encoder"] is None
     assert load_stubs[-1]["mmproj"] is None
-    tensor, adapter = image_service.cache_bytes()
+    tensor, cap = image_service.cache_bytes()
     assert served.pipe.conditionings.max_bytes == tensor // 4
-    # The share bounds the tensor caches only; the pool books LoRA bytes.
-    assert served.pipe.adapters.max_bytes == adapter
+    # The share bounds the tensor caches only; the pool books LoRA bytes,
+    # with no cap set.
+    assert cap is None
+    assert served.pipe.adapters.max_bytes == image_steps.UNBOUNDED
     image_service._release([served])
     assert scaled == [0.25, 1.0]
 

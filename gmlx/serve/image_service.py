@@ -131,15 +131,20 @@ def default_size(spec, defaults) -> tuple:
 # books LoRA bytes as they arrive. The step routes keep one cache of
 # uploaded tensors for the server (steps), which each image entry books
 # too; their uploaded adapter matrices are booked as they arrive.
-_CACHE_BYTES: dict = {"tensor": 64 << 20, "adapter": 256 << 20,
+_CACHE_BYTES: dict = {"tensor": 64 << 20, "adapter": None,
                       "steps": 64 << 20}
 
 
 def configure_caches(settings) -> None:
-    """Take the cache bounds of ``server.image``."""
+    """Take the cache bounds of ``server.image``, and log the cap on
+    request LoRAs when one is set."""
     _CACHE_BYTES["tensor"] = int(settings.tensor_cache_mb) << 20
     amb = settings.adapter_cache_mb
     _CACHE_BYTES["adapter"] = None if amb is None else int(amb) << 20
+    if amb is not None:
+        _log.info("server.image.adapter_cache_mb: %d caps each image "
+                  "model's request LoRAs at %d MB; remove the key to let "
+                  "LoRAs use free memory", int(amb), int(amb))
     _CACHE_BYTES["steps"] = (_CACHE_BYTES["tensor"]
                              if getattr(settings, "steps_api", True) else 0)
 
