@@ -94,7 +94,7 @@ class _Host(routes.ServeHost):
         image = ServedImage(
             pipe=SimpleNamespace(family=SimpleNamespace(name="zimage")),
             spec=SimpleNamespace(id="zit", path="/abs/zit.safetensors"),
-            plan=None)  # type: ignore
+            plan=None, facts=None)  # type: ignore
         self.entries = {"h3": served, "zit": image}
 
     def resolve(self, model):

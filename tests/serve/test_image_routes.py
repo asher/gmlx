@@ -300,10 +300,10 @@ def test_a_flux3_flow_map_with_guidance_is_a_400_before_any_stream(
     flux3 = SimpleNamespace(
         spec=SimpleNamespace(id="zit", encoder_model=None, defaults={}),
         pipe=SimpleNamespace(family=get_family("flux3_klein"),
-                             variant="distilled",
-                             dit=SimpleNamespace(cfg=SimpleNamespace(
-                                 flow_map=True))),
-        plan=SimpleNamespace(cfg=1.0))
+                             variant="distilled"),
+        plan=SimpleNamespace(cfg=1.0),
+        facts=svc.DitFacts(act_dtype=None, vae_dtype=None, size_multiple=16,
+                           flow_map=True, ref_cache=False, blocks=None))
     hold = _Hold(served.released)
     hold._entry = SimpleNamespace(footprint=0, pipeline=flux3)
     monkeypatch.setattr(residency, "acquire_image_model", lambda m: hold)

@@ -538,11 +538,10 @@ def _skip(served, raw) -> tuple:
         raise StepError(400, "skip is a list of block indices")
     if not raw:
         return ()
-    dit = served.pipe.dit
     title = served.pipe.family.title
-    if not getattr(dit, "skips_blocks", False):
+    n = served.facts.blocks
+    if n is None:
         raise StepError(400, f"the {title} DiT skips no blocks")
-    n = len(dit.layers)
     bad = sorted({i for i in raw if not 0 <= i < n})
     if bad:
         raise StepError(400, f"the {title} DiT has blocks 0 to {n - 1}, "
@@ -597,7 +596,7 @@ async def step(request: Request):
         if ref_cache and run is None:
             raise StepError(400, "a step on a cache of reference K and V "
                             "names its run, whose end drops the cache")
-        if ref_cache and not hasattr(served.pipe.dit, "extract"):
+        if ref_cache and not served.facts.ref_cache:
             raise StepError(400, f"the {title} DiT keeps no cache of "
                             "reference K and V")
         if ref_cache and parts and conv.time == "reference":
@@ -621,7 +620,7 @@ async def step(request: Request):
         # In float64, so a scaled timestep gives back its time in float32.
         sig = [conv.scale * float(t) + conv.shift for t in ts]
         targets = None
-        if getattr(served.pipe.dit.cfg, "flow_map", False):
+        if served.facts.flow_map:
             # The schedule is in the client's timestep convention.
             s_w = tensors.get("sample_sigmas")
             if s_w is None:
@@ -640,9 +639,11 @@ async def step(request: Request):
 
             from gmlx.image import api, memfit
 
-            from ..image_service import size_fits
+            from ..image_service import ensure_dit, size_fits
             from ..image_steps import _host, conditioning
 
+            # A staged entry's encode let the DiT and the VAE go.
+            ensure_dit(served)
             if table is not None and not _held(served.pipe, table):
                 # Another table's define since the check above shed its
                 # pairs.

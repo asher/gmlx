@@ -13,10 +13,13 @@ plan. With the text encoder released after each encode, that is the
 larger of the encode phase and the denoise phase, not their sum. An
 entry whose encoder does not fit beside its DiT is staged as the image
 command stages a load: each encode that the cache does not hold lets
-the DiT and the VAE go, loads the encoder alone, and loads them again
-after its release. Its caches take the room its image leaves, up to
-their bounds, and the step routes' tensor cache keeps room for one
-uploaded cond of the family's priced text rows at any share.
+the DiT and the VAE go and loads the encoder alone, and the next call
+that reads them loads them again, so encodes back to back load them
+once. The routes read what they check of the DiT and the VAE before any
+work from the entry, which keeps it from the load. Its caches take the
+room its image leaves, up to their bounds, and the step routes' tensor
+cache keeps room for one uploaded cond of the family's priced text rows
+at any share.
 """
 
 from __future__ import annotations
@@ -52,7 +55,8 @@ class EntryPlan:
     size: tuple                     # default (width, height)
     cfg: float
     # Each encode runs with the DiT and the VAE out of memory: the owned
-    # encoder loads, encodes and goes, and the DiT and the VAE load again.
+    # encoder loads, encodes and goes, and the next reader of the DiT and
+    # the VAE loads them again.
     staged: bool = False
     cache_share: float = 1.0        # of each cache's configured bound
     tensor_floor: int = 0           # step tensor cache bytes kept for a cond
@@ -62,14 +66,41 @@ class EntryPlan:
     tower_parts: tuple | None = None  # the same with the vision tower
 
 
+@dataclass(frozen=True)
+class DitFacts:
+    """What the routes read of the DiT and the VAE before their work runs
+    on the worker, kept from the load. A staged entry's DiT and VAE are
+    out from an encode until the next call on the worker that reads them,
+    and the handlers run beside the worker, so they read these."""
+    act_dtype: Any                  # the DiT's activation dtype
+    vae_dtype: Any                  # the VAE's
+    size_multiple: int              # of an image's width and height
+    flow_map: bool                  # the DiT is a flow map
+    ref_cache: bool                 # the DiT keeps a cache of reference K and V
+    blocks: int | None              # the blocks a step may skip, None for none
+
+
+def dit_facts(pipe) -> DitFacts:
+    """The DitFacts of a pipeline with its DiT and VAE loaded."""
+    dit = pipe.dit
+    return DitFacts(act_dtype=dit.act_dtype,
+                    vae_dtype=getattr(pipe.vae, "dtype", None),
+                    size_multiple=int(pipe.size_multiple),
+                    flow_map=bool(getattr(dit.cfg, "flow_map", False)),
+                    ref_cache=hasattr(dit, "extract"),
+                    blocks=(len(dit.layers)
+                            if getattr(dit, "skips_blocks", False) else None))
+
+
 @dataclass(eq=False)
 class ServedImage:
     """What an image entry holds: the pipeline, the resolved config entry,
-    the plan it was priced by and its configured adapters as (adapter,
-    strength) rows."""
+    the plan it was priced by, the facts of its DiT and VAE and its
+    configured adapters as (adapter, strength) rows."""
     pipe: Any
     spec: Any
     plan: EntryPlan
+    facts: DitFacts
     adapters: list = field(default_factory=list)
 
 
@@ -407,7 +438,8 @@ def _load(spec) -> ServedImage:
     pipe = api.load(spec.path, text_encoder=owned, vae=spec.vae,
                     mmproj=spec.encoder_mmproj if owned else None,
                     memory="off", variant=spec.variant, log=_log_line)
-    served = ServedImage(pipe=pipe, spec=spec, plan=plan)
+    served = ServedImage(pipe=pipe, spec=spec, plan=plan,
+                         facts=dit_facts(pipe))
     try:
         rows = []
         if spec.adapters:
@@ -1033,8 +1065,8 @@ def quality_steps(family, variant: str, quality: str) -> int | None:
     return dict(row.quality).get(quality)
 
 
-def _stride(pipe) -> int:
-    return int(pipe.size_multiple)
+def _stride(served: ServedImage) -> int:
+    return served.facts.size_multiple
 
 
 def target_size(req: ImageRequest, served: ServedImage) -> tuple:
@@ -1045,7 +1077,7 @@ def target_size(req: ImageRequest, served: ServedImage) -> tuple:
     from gmlx.image.registry import edit_size
 
     pipe = served.pipe
-    unit = _stride(pipe)
+    unit = _stride(served)
     if req.size is not None:
         w, h = req.size
         if w % unit or h % unit:
@@ -1106,8 +1138,7 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
     if n is not None and req.steps is not None and req.steps != n:
         raise _bad(f"steps: {fam.title} {pipe.variant} runs {n} steps, the "
                    f"schedule it was distilled to, not {req.steps}", "steps")
-    dit_cfg = getattr(getattr(pipe, "dit", None), "cfg", None)
-    flow_map = bool(getattr(dit_cfg, "flow_map", False))
+    flow_map = served.facts.flow_map
     if flow_map or pipe.variant in fam.unguided:
         try:
             check_sampling(fam, pipe.variant, flow_map, _guided(req, served))
@@ -1166,7 +1197,7 @@ def _fit_args(pipe, served: ServedImage, budget, cfg: float,
     own."""
     enc = pipe.encoder
     resident = enc is not None and not enc.released
-    act = pipe.dit.act_dtype
+    act = served.facts.act_dtype
     adapters, caches = held_bytes(pipe)
     staged, states = {}, {}
     if pipe.family.step is not None:
@@ -1185,7 +1216,7 @@ def _fit_args(pipe, served: ServedImage, budget, cfg: float,
         vae=pipe.weights.get("vae", 0),
         mmproj=pipe.weights.get("mmproj", 0) if resident else 0,
         adapters=adapters, family=pipe.family.name, cfg=cfg, dtype=act,
-        vae_dtype=getattr(pipe.vae, "dtype", None),
+        vae_dtype=served.facts.vae_dtype,
         encoder_owned=bool(resident and enc.owned
                            and not served.plan.keep_encoder),
         cache_bytes=caches, budget=budget, overcommit=False) | staged | states
@@ -1260,7 +1291,7 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
                         **args)
         except memfit.ImageMemoryError as e:
             raise _bad(str(e), "image") from None
-    unit = _stride(pipe)
+    unit = _stride(served)
 
     def scaled(k: int) -> tuple:
         scale = k * unit / max(w, h)
@@ -1361,48 +1392,58 @@ def _drop_dit(served: ServedImage) -> None:
     mx.clear_cache()
 
 
-def _ensure_dit(served: ServedImage) -> None:
-    """Load the DiT and the VAE of a staged entry again, with the DiT's
-    leaves wrapped for the patch tables the pipeline holds."""
+def ensure_vae(served: ServedImage) -> None:
+    """Load the VAE of a staged entry again after an encode let it go.
+    Every call on the worker that reads the VAE alone calls it first: a
+    reference's latents and the VAE routes."""
     pipe = served.pipe
-    if pipe.dit is not None and pipe.vae is not None:
+    if not getattr(served.plan, "staged", False) or pipe.vae is not None:
         return
     from gmlx.image.dtypes import image_activation
-    from gmlx.image.loader import load_dit
-    from gmlx.image.lora import install
     from gmlx.image.vae import load_vae
 
-    act = image_activation(pipe.family.name)
+    pipe.vae = load_vae(str(served.spec.vae), family=pipe.family.name,
+                        dtype=image_activation(pipe.family.name).vae)
+
+
+def ensure_dit(served: ServedImage) -> None:
+    """Load the DiT and the VAE of a staged entry again after an encode let
+    them go, with the DiT's leaves wrapped for the patch tables the
+    pipeline holds. Every call on the worker that reads the DiT calls it
+    first: a step, a table's define and an image of the images API."""
+    pipe = served.pipe
+    if not getattr(served.plan, "staged", False):
+        return
     if pipe.dit is None:
+        from gmlx.image.dtypes import image_activation
+        from gmlx.image.loader import load_dit
+        from gmlx.image.lora import install
+
+        act = image_activation(pipe.family.name)
         pipe.dit, _ = load_dit(str(served.spec.path), act_dtype=act.dit,
                                variant=served.spec.variant, log=_log_line)
         install.rewrap(pipe)
-    if pipe.vae is None:
-        pipe.vae = load_vae(str(served.spec.vae), family=pipe.family.name,
-                            dtype=act.vae)
+    ensure_vae(served)
 
 
 def _staged_encode(served: ServedImage, run, prompts: list, refs):
     """``run()`` on a staged entry. A request whose conditionings are all
     in the cache runs on the released encoder's tokenizer. Any other
-    lets the DiT and the VAE go, loads the encoder, encodes, releases it
-    and loads the DiT and the VAE again, so the encoder is never resident
-    beside them."""
+    lets the DiT and the VAE go, loads the encoder, encodes and releases
+    it, so the encoder is never resident beside them. The DiT and the VAE
+    stay out after it: the next call that reads them loads them, so the
+    two encodes of a guided ComfyUI run load them once."""
     from gmlx.image import api
 
     pipe = served.pipe
     if all(api.conditioning_cached(pipe, p, images=refs) for p in prompts):
-        _ensure_dit(served)
         return run()
     _drop_dit(served)
+    _ensure_encoder(served, tower=_tower(pipe, refs))
     try:
-        _ensure_encoder(served, tower=_tower(pipe, refs))
-        try:
-            return run()
-        finally:
-            pipe.encoder.release()
+        return run()
     finally:
-        _ensure_dit(served)
+        pipe.encoder.release()
 
 
 def _encode(served: ServedImage, prompt: str, neg: str | None, refs,
@@ -1466,6 +1507,8 @@ def _adapter_table(served: ServedImage, rows: list, model_dirs) -> tuple:
             extra.append((aid, path, strength))
         shown.append({"id": aid, "strength": strength})
     _room_for(served, [path for _aid, path, _st in extra])
+    # The adapters are read against the DiT, and the table is defined on it.
+    ensure_dit(served)
     for aid, path, strength in extra:
         ad = lora.load_adapter(pipe, path)
         if ad.text:
@@ -1600,6 +1643,8 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
                [text] + ([] if neg_text is None else [neg_text]))
     t0 = time.perf_counter()
     cond, neg = _encode(served, text, neg_text, refs, borrow)
+    # A staged entry's encode let the DiT and the VAE go.
+    ensure_dit(served)
     plan = api.plan_request(
         pipe, height=height, width=width, cfg=cfg,
         conds=[cond] if neg is None else [cond, neg], patch_table=table,

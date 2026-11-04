@@ -29,7 +29,10 @@ def _served():
         pipe=pipe, adapters=(),
         spec=SimpleNamespace(id="zit", path="/zit.gguf", defaults={},
                              encoder=None, encoder_model=None),
-        plan=SimpleNamespace(keep_encoder=True, cfg=1.0, size=(64, 64)))
+        plan=SimpleNamespace(keep_encoder=True, cfg=1.0, size=(64, 64)),
+        facts=svc.DitFacts(act_dtype=mx.bfloat16, vae_dtype=None,
+                           size_multiple=16, flow_map=False, ref_cache=False,
+                           blocks=None))
 
 
 @pytest.fixture
@@ -327,7 +330,8 @@ def test_a_request_after_a_kv_edit_encodes_with_its_states_priced(
         pipe=pipe, adapters=(),
         spec=SimpleNamespace(id="kv", path="/kv.gguf", defaults={},
                              encoder=None, encoder_model=None),
-        plan=SimpleNamespace(keep_encoder=True, cfg=1.0, size=(1024, 1024)))
+        plan=SimpleNamespace(keep_encoder=True, cfg=1.0, size=(1024, 1024)),
+        facts=svc.dit_facts(pipe))
     req = svc.parse_request("generations", {"prompt": "x"})
     svc.run_job(served, req, size=(1024, 1024), budget=budget_gib * GiB,
                 stop=threading.Event())

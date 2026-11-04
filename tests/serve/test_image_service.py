@@ -185,6 +185,12 @@ def _spec(**kw):
     return SimpleNamespace(**base)
 
 
+def _facts(**kw):
+    base = dict(act_dtype="bf16", vae_dtype=None, size_multiple=16,
+                flow_map=False, ref_cache=False, blocks=None)
+    return image_service.DitFacts(**(base | kw))
+
+
 @pytest.fixture
 def plan_stubs(monkeypatch):
     """entry_plan over stubbed headers: with the encoder an image peaks at
@@ -380,7 +386,7 @@ def test_a_request_on_turbo_takes_only_its_own_step_count(variant, steps,
 
     q = get_family("qwen_image21")
     served = SimpleNamespace(pipe=SimpleNamespace(family=q, variant=variant),
-                             spec=SimpleNamespace(id="qi"))
+                             spec=SimpleNamespace(id="qi"), facts=_facts())
     req = image_service.parse_request("generations", {
         "prompt": "p", **({"steps": steps} if steps else {})})
     if not refused:
@@ -403,7 +409,7 @@ def test_a_distilled_flux2_request_refuses_guidance(variant, guidance,
     fam = get_family("flux2_klein")
     served = SimpleNamespace(pipe=SimpleNamespace(family=fam, variant=variant),
                              spec=SimpleNamespace(id="f2"),
-                             plan=SimpleNamespace(cfg=default))
+                             plan=SimpleNamespace(cfg=default), facts=_facts())
     req = image_service.parse_request("generations", {
         "prompt": "p", **({} if guidance is None else {"guidance": guidance})})
     if not refused:
@@ -419,15 +425,16 @@ def test_a_distilled_flux2_request_refuses_guidance(variant, guidance,
 
 
 def _flux3_served(flow_map: bool, cfg: float = 1.0, defaults=None):
+    """A FLUX.3 klein entry with its DiT out, as a staged entry's is after
+    an encode: the checks read the facts the entry kept from its load."""
     from gmlx.image.registry import get_family
 
     return SimpleNamespace(
         pipe=SimpleNamespace(
             family=get_family("flux3_klein"),
-            variant="distilled" if flow_map else "base",
-            dit=SimpleNamespace(cfg=SimpleNamespace(flow_map=flow_map))),
+            variant="distilled" if flow_map else "base", dit=None),
         spec=SimpleNamespace(id="f3", defaults=defaults),
-        plan=SimpleNamespace(cfg=cfg))
+        plan=SimpleNamespace(cfg=cfg), facts=_facts(flow_map=flow_map))
 
 
 @pytest.mark.parametrize("fields,default,param", [
@@ -615,12 +622,16 @@ def _pipe(encoder=None):
     return SimpleNamespace(encoder=encoder, conditionings=_Cache(),
                            captions={}, modulations={}, adapters=_Cache(),
                            tables=_Cache(), reference_latents=_Cache(),
-                           default_table=None)
+                           default_table=None, size_multiple=16,
+                           dit=SimpleNamespace(act_dtype="bf16",
+                                               cfg=SimpleNamespace()),
+                           vae="VAE")
 
 
 def test_a_release_drops_the_owned_encoder():
     enc = _Encoder()
-    served = image_service.ServedImage(pipe=_pipe(enc), spec=_spec(), plan=None)
+    served = image_service.ServedImage(pipe=_pipe(enc), spec=_spec(),
+                                       plan=None, facts=_facts())
     image_service._release([served])
     assert enc.released == 1 and served.pipe is None
 
@@ -699,7 +710,8 @@ def test_the_fit_of_a_step_counts_what_the_step_caches_hold(monkeypatch):
                            tables=held,
                            family=SimpleNamespace(name="z_image", step=None),
                            vae=None, conditionings=held, modulations=held)
-    served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(keep_encoder=True))
+    served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(keep_encoder=True),
+                             facts=_facts())
     assert image_service.size_fits(served, 64, 64, 1 << 30)
     assert not image_service.size_fits(served, 512, 512, 1 << 30)
     assert image_service.size_fits(served, 4096, 4096, None)
@@ -707,15 +719,18 @@ def test_the_fit_of_a_step_counts_what_the_step_caches_hold(monkeypatch):
 
 
 def test_a_staged_request_is_priced_with_its_encoder_loaded_alone():
+    # The DiT and the VAE are out, as between an encode and the next call
+    # that reads them, and the plan takes their dtypes from the entry.
     held = SimpleNamespace(bytes=0)
-    pipe = SimpleNamespace(encoder=None, dit=SimpleNamespace(act_dtype="bf16"),
+    pipe = SimpleNamespace(encoder=None, dit=None,
                            weights={"dit": 1, "vae": 1}, adapters=held,
                            tables=held,
                            family=SimpleNamespace(name="z_image", step=None),
                            vae=None, conditionings=held, modulations=held)
     served = SimpleNamespace(pipe=pipe, plan=_plan(
         staged=True, keep_encoder=False, encoder_bytes=5, mmproj_bytes=7,
-        load_parts=(1, 2), tower_parts=(3, 2)))
+        load_parts=(1, 2), tower_parts=(3, 2)),
+        facts=_facts(vae_dtype="f32"))
     text = image_service._fit_args(pipe, served, 1 << 30, 1.0)
     edit = image_service._fit_args(pipe, served, 1 << 30, 1.0, tower=True)
     assert (text["encoder"], text["mmproj"], text["load_parts"]) == (
@@ -723,6 +738,7 @@ def test_a_staged_request_is_priced_with_its_encoder_loaded_alone():
     assert (edit["encoder"], edit["mmproj"], edit["load_parts"]) == (
         5, 7, (3, 2))
     assert text["encoder_owned"] and edit["encoder_owned"]
+    assert (text["dtype"], text["vae_dtype"]) == ("bf16", "f32")
 
 
 def test_a_shared_encoder_loads_no_mmproj_of_its_own(load_stubs):
@@ -804,7 +820,7 @@ def staged_stubs(monkeypatch):
                                edit=SimpleNamespace(text_only=False)))
     served = image_service.ServedImage(
         pipe=pipe, spec=_spec(encoder_mmproj="/tower.gguf"),
-        plan=_plan(staged=True, keep_encoder=False))
+        plan=_plan(staged=True, keep_encoder=False), facts=_facts())
     return SimpleNamespace(served=served, pipe=pipe, events=events)
 
 
@@ -812,7 +828,12 @@ def test_a_staged_encode_holds_the_encoder_without_the_dit(staged_stubs):
     st = staged_stubs
     image_service._encode(st.served, "a", None, ())
     assert st.events == ["drop", ("encoder", None), ("encode", "a", None, None),
-                         "release", "dit", "wrap", "vae"]
+                         "release"]
+    # The DiT and the VAE stay out until a call that reads them.
+    assert (st.pipe.dit, st.pipe.vae) == (None, None)
+    image_service.ensure_dit(st.served)
+    image_service.ensure_dit(st.served)
+    assert st.events[4:] == ["dit", "wrap", "vae"]
     assert (st.pipe.dit, st.pipe.vae) == ("DIT2", "VAE2")
     # A prompt in the cache runs on the released encoder's tokenizer.
     del st.events[:]
@@ -829,12 +850,38 @@ def test_a_staged_encode_holds_the_encoder_without_the_dit(staged_stubs):
     assert st.events[:2] == ["drop", ("encoder", None)]
 
 
-def test_a_failed_staged_encode_leaves_the_dit_loaded(staged_stubs):
+def test_a_failed_staged_encode_releases_its_encoder(staged_stubs):
     st = staged_stubs
     with pytest.raises(RuntimeError, match="encode failed"):
         image_service._encode(st.served, "boom", None, ())
-    assert st.events[-4:] == ["release", "dit", "wrap", "vae"]
-    assert st.pipe.encoder.released and st.pipe.dit == "DIT2"
+    assert st.events[-1] == "release" and st.pipe.encoder.released
+    # The next call that reads the DiT loads it.
+    image_service.ensure_dit(st.served)
+    assert st.events[-3:] == ["dit", "wrap", "vae"] and st.pipe.dit == "DIT2"
+
+
+def test_a_request_adapter_after_a_staged_encode_loads_the_dit_for_it(
+        staged_stubs, monkeypatch, tmp_path):
+    """A request's adapters are read against the DiT and its table is
+    defined on it. After an encode that failed or came from the step
+    routes the DiT is out, and the table loads it first."""
+    from gmlx.image import api, lora
+
+    st = staged_stubs
+    st.pipe.adapters = _Cache()
+    (tmp_path / "style.safetensors").write_bytes(b"x")
+    monkeypatch.setattr(lora, "load_adapter", lambda pipe, p: (
+        st.events.append(("adapter", pipe.dit))
+        or SimpleNamespace(path=p, dit=(), text=())))
+    monkeypatch.setattr(lora, "table_entries", lambda rows: list(rows))
+    monkeypatch.setattr(api, "define_patch_table", lambda pipe, rows: (
+        st.events.append(("table", pipe.dit)) or "tid"))
+    image_service._encode(st.served, "a", None, ())
+    table, _ = image_service._adapter_table(
+        st.served, [("style.safetensors", 0.7)], [str(tmp_path)])
+    assert table == "tid"
+    assert st.events[-5:] == ["dit", "wrap", "vae", ("adapter", "DIT2"),
+                              ("table", "DIT2")]
 
 
 def test_a_configured_adapter_loads_into_a_cache_that_holds_it(
@@ -942,7 +989,8 @@ def _fit_served(monkeypatch, fits_px: int):
                                step=None),
         vae=None, conditionings=nb, modulations=nb, size_multiple=16)
     served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(
-        keep_encoder=True, cfg=1.0), spec=SimpleNamespace(id="zit"))
+        keep_encoder=True, cfg=1.0), spec=SimpleNamespace(id="zit"),
+        facts=_facts(act_dtype="bfloat16"))
     return served, calls
 
 
@@ -978,7 +1026,7 @@ def _edit_served(family: str, mmproj=True, encoder_model=None):
         pipe=SimpleNamespace(family=fam, variant="base", size_multiple=16),
         spec=SimpleNamespace(id="m", encoder_model=encoder_model,
                              encoder_mmproj="/mm.gguf" if mmproj else None),
-        plan=SimpleNamespace(size=(1024, 1024)))
+        plan=SimpleNamespace(size=(1024, 1024)), facts=_facts())
 
 
 def _edit_req(n: int, shape=(32, 32), route="edits", **fields):
@@ -1217,7 +1265,8 @@ def test_a_request_naming_an_entry_adapter_sets_its_strength_once(
     monkeypatch.setattr(lora, "table_entries", lambda rows: list(rows))
     monkeypatch.setattr(api, "define_patch_table", lambda pipe, rows: rows)
     (root / "lora" / "b.safetensors").write_bytes(b"x")
-    served = SimpleNamespace(pipe=_pipe(), adapters=[(entry, 1.0)])
+    served = SimpleNamespace(pipe=_pipe(), adapters=[(entry, 1.0)],
+                             plan=_plan())
     table, shown = image_service._adapter_table(
         served, [(aid, 0.4), ("lora/b.safetensors", 0.7)], [str(root)])
     assert table == [(entry, 0.4), (other, 0.7)]
@@ -1305,8 +1354,15 @@ def test_a_scheduler_other_than_the_variant_own_is_refused(scheduler):
 
 
 def test_a_size_off_the_family_stride_is_refused():
-    served = SimpleNamespace(pipe=SimpleNamespace(size_multiple=16),
-                             plan=SimpleNamespace(size=(1024, 1024)))
+    from gmlx.image import api
+    from gmlx.image.registry import get_family
+
+    # A Z-Image entry with its DiT out, as a staged entry's is after an
+    # encode: the stride is one DiT patch, kept from the load.
+    pipe = api.ImagePipeline(dit=None, family=get_family("z_image"),
+                             variant="turbo")
+    served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(size=(1024, 1024)),
+                             facts=_facts())
     req = image_service.parse_request("generations", {
         "prompt": "x", "size": "1000x1024"})
     with pytest.raises(image_service.ImageRequestError,
@@ -1319,7 +1375,8 @@ def test_a_large_edit_image_gives_the_largest_size_of_its_shape():
     import numpy as np
 
     served = SimpleNamespace(pipe=SimpleNamespace(size_multiple=16),
-                             plan=SimpleNamespace(size=(1024, 1024)))
+                             plan=SimpleNamespace(size=(1024, 1024)),
+                             facts=_facts())
     req = image_service.parse_request("edits", {"prompt": "x"})
     req.images = [np.zeros((3000, 6000, 3), np.uint8)]
     w, h = image_service.target_size(req, served)

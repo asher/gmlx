@@ -56,13 +56,15 @@ class _Host(routes.ServeHost):
     """Tiny pipelines served by id."""
 
     def __init__(self, pipes: dict):
+        from gmlx.serve.image_service import dit_facts
+
         self.served = {
             mid: SimpleNamespace(
                 pipe=p, adapters=(),
                 spec=SimpleNamespace(id=mid, path=f"/abs/{mid}.gguf",
                                      encoder=None, vae="/abs/vae.gguf",
                                      encoder_model=None),
-                plan=SimpleNamespace(keep_encoder=True))
+                plan=SimpleNamespace(keep_encoder=True), facts=dit_facts(p))
             for mid, p in pipes.items()}
         self.held = 0
 
@@ -531,11 +533,13 @@ def fpipes():
 
 def _serve(host, mid, pipe):
     """``pipe`` served as ``mid`` beside the host's own."""
+    from gmlx.serve.image_service import dit_facts
+
     host.served[mid] = SimpleNamespace(
         pipe=pipe, adapters=(),
         spec=SimpleNamespace(id=mid, path=f"/abs/{mid}.gguf", encoder=None,
                              vae="/abs/vae.gguf", encoder_model=None),
-        plan=SimpleNamespace(keep_encoder=True))
+        plan=SimpleNamespace(keep_encoder=True), facts=dit_facts(pipe))
 
 
 def _f3_velocity(pipe, x, sigma, cond, target=None):
@@ -2048,3 +2052,212 @@ def test_a_patch_table_body_that_is_no_object_is_400(host):
                     content=body, headers={**V,
                                            "Content-Type": "application/json"})
     assert r.status_code == 400 and "JSON object" in r.json()["error"]
+
+
+# A staged entry: an encode lets the DiT and the VAE go, and the next call
+# that reads them loads them.
+
+class _StagedEncoder:
+    owned = True
+    released = False
+
+    def release(self):
+        self.released = True
+        return True
+
+
+def _stage(host, monkeypatch, mid, pipe):
+    """``pipe`` served as ``mid`` on a staged entry over stubbed loads,
+    which record each load in ``loads``. An encode gives the features
+    ``texts`` holds for its prompt, and the DiT and the VAE that load
+    again are those the pipeline held, which it gets back at the end."""
+    from gmlx.image import loader, text_encoder
+    from gmlx.image import vae as vae_mod
+    from gmlx.serve import image_service
+
+    dit = pipe.dit
+    vae = pipe.vae or SimpleNamespace(
+        dtype=None, config=SimpleNamespace(in_channels=3),
+        to_model_space=lambda z: z, to_vae_space=lambda z: z)
+    monkeypatch.setattr(pipe, "dit", dit)
+    monkeypatch.setattr(pipe, "vae", vae)
+    st = SimpleNamespace(loads=[], texts={}, vae=vae)
+
+    def encode_text(p, prompt, images=(), ref_latents=True):
+        assert p.dit is None and p.vae is None
+        return api.Conditioning(mx.array(st.texts[prompt][0]), prompt)
+
+    monkeypatch.setattr(text_encoder, "load_encoder", lambda *a, **k: (
+        st.loads.append("encoder") or _StagedEncoder()))
+    monkeypatch.setattr(text_encoder, "encoder_spec", lambda fam: None)
+    monkeypatch.setattr(api, "encode_text", encode_text)
+    monkeypatch.setattr(api, "conditioning_cached",
+                        lambda p, prompt, images=(): False)
+    monkeypatch.setattr(loader, "load_dit", lambda path, **k: (
+        st.loads.append("dit") or dit, None))
+    monkeypatch.setattr(vae_mod, "load_vae", lambda path, **k: (
+        st.loads.append("vae") or vae))
+    plan = image_service.EntryPlan(
+        footprint=0, keep_encoder=False, family=pipe.family.name,
+        variant=pipe.variant, size=(1024, 1024), cfg=1.0, staged=True)
+    host.served[mid] = image_service.ServedImage(
+        pipe=pipe, plan=plan, facts=image_service.dit_facts(pipe),
+        spec=SimpleNamespace(id=mid, path=f"/abs/{mid}.gguf",
+                             encoder="/abs/enc.gguf", vae="/abs/vae.gguf",
+                             encoder_model=None, encoder_mmproj=None,
+                             variant=None))
+    return st
+
+
+def test_a_guided_run_on_a_staged_entry_loads_the_dit_once_for_its_steps(
+        host, pipe, monkeypatch):
+    """A ComfyUI graph with cfg encodes its prompt and its negative prompt
+    back to back, then steps. The DiT and the VAE stay out between the
+    encodes and load once, at the first step, which the handler prices
+    from the entry, and the steps give the latents of sample."""
+    st = _stage(host, monkeypatch, "zst", pipe)
+    st.texts.update({"a red fox": _features(0), "blurry": _features(1, n=3)})
+    c = _client()
+    pos = c.encode("zst", "a red fox")[0]["cond"]
+    neg = c.encode("zst", "blurry")[0]["cond"]
+    assert st.loads == ["encoder", "encoder"] and pipe.dit is None
+    host.budget_bytes = 1 << 40
+    try:
+        got = c.sample("zst", noise_from_seed(3, SHAPE), SIGMAS,
+                       [{"cond": pos}], cfg=3.0, neg_rows=[{"cond": neg}])
+    finally:
+        host.budget_bytes = None
+    assert st.loads == ["encoder", "encoder", "dit", "vae"]
+    assert np.array_equal(got, _direct(pipe, st.texts["a red fox"],
+                                       neg=st.texts["blurry"], cfg=3.0))
+    assert host.held == 0
+
+
+@pytest.mark.parametrize("path, tensors", [
+    ("vae/encode", {"image": np.zeros((1, 32, 48, 3), np.float32)}),
+    ("vae/decode", {"latents": np.zeros(SHAPE, np.float32)})])
+def test_a_vae_pass_after_a_staged_encode_loads_the_vae_alone(
+        host, pipe, monkeypatch, path, tensors):
+    """An img2img graph encodes its prompt, then its image through the VAE
+    route: the VAE loads for the pass, and the DiT waits for the step."""
+    st = _stage(host, monkeypatch, "zst", pipe)
+    st.texts["a red fox"] = _features(0)
+
+    def vae_pass(p, z, **kw):
+        assert p.vae is st.vae
+        return mx.zeros((1, 32, 48, 3))
+
+    monkeypatch.setattr(api, "vae_encode", vae_pass)
+    monkeypatch.setattr(api, "vae_decode", vae_pass)
+    c = _client()
+    c.encode("zst", "a red fox")
+    c.container(path, tensors, {"model": "zst"})
+    assert st.loads == ["encoder", "vae"] and pipe.dit is None
+
+
+def test_a_table_defined_after_a_staged_encode_loads_the_dit_for_it(
+        host, pipe, monkeypatch):
+    """The pack defines a LoRA's table after the graph's encode: the define
+    loads the DiT the encode let go, and the table steps as the core table
+    of the same pair."""
+    st = _stage(host, monkeypatch, "zst", pipe)
+    st.texts["a red fox"] = _features(0)
+    c = _client()
+    pos = c.encode("zst", "a red fox")[0]["cond"]
+    body, _ = _table_body(c)
+    tid = c.define_table("zst", body)
+    assert st.loads == ["encoder", "dit", "vae"]
+    core = steps.STATE.tables_of("zst", pipe)[tid]
+    got = c.sample("zst", noise_from_seed(3, SHAPE), SIGMAS, [{"cond": pos}],
+                   patch_table=tid)
+    assert np.array_equal(got, _direct(pipe, st.texts["a red fox"],
+                                       table=core))
+    assert st.loads == ["encoder", "dit", "vae"]
+
+
+@pytest.mark.parametrize("case", ["moss skip", "flux3 flow map",
+                                  "kv ref cache"])
+def test_a_staged_step_after_an_encode_checks_its_dit_from_the_entry(
+        host, monkeypatch, request, case):
+    """The step handler checks a step's skip, its schedule and its cache of
+    reference K and V against the DiT before the work, and on a staged
+    entry the encode before it let the DiT go. The checks read what the
+    entry kept from the load, and the step gives the velocity it gives
+    with the DiT loaded."""
+    rng = np.random.default_rng(7)
+    run = None
+    if case == "moss skip":
+        pipe = request.getfixturevalue("mpipe")
+        feats, x = _features(4, n=6), noise_from_seed(9, MOSS_SHAPE)
+        sigma = np.float32(0.6875)
+        t, kw = np.float32(sigma * np.float32(1000)), {"skip": [1]}
+    else:
+        pipe = (request.getfixturevalue("fpipes")[True]
+                if case == "flux3 flow map"
+                else request.getfixturevalue("kvpipe"))
+        feats = rng.standard_normal((1, 10, 24)).astype(np.float32)
+        x, t = noise_from_seed(5, F3_SHAPE), 0.75
+        kw = ({"sample_sigmas": SIGMAS} if case == "flux3 flow map"
+              else {"ref_cache": True})
+    st = _stage(host, monkeypatch, "st", pipe)
+    st.texts["a red fox"] = feats
+    c = _client()
+    row = {"cond": c.encode("st", "a red fox")[0]["cond"]}
+    if case == "kv ref cache":
+        ref = rng.standard_normal((1, 8, 2, 3)).astype(np.float32)
+        row["ref_latents"] = [c.put(ref)]
+        run = c.begin("st")
+    assert pipe.dit is None
+    try:
+        out = c.step("st", run, x, [t], [row], **kw)
+    finally:
+        if run is not None:
+            c.end(run)
+        pipe.captions.clear()
+    if case == "moss skip":
+        want = _moss_velocity(pipe, x, sigma, feats, (1,))
+    elif case == "flux3 flow map":
+        want = _f3_velocity(pipe, x, 0.75, _f3_cond(feats), 0.5)
+    else:
+        def extract():
+            m = pipe.dit
+            s0 = np.full(1, 0.75, np.float32)
+            v, _ = m.extract(mx.array(x), s0, mx.array(feats),
+                             refs=m.references([mx.array(ref)]),
+                             mod=m.modulation(s0, 1, "fp32"))
+            return np.array(v)
+        want = _on_worker(extract)
+    assert np.array_equal(out, want)
+    assert st.loads == ["encoder", "dit", "vae"]
+
+
+def test_a_staged_edit_encode_loads_the_vae_for_its_reference_latents(
+        host, qpipe, monkeypatch):
+    """A Qwen-Image edit's encode on a staged entry encodes the prompt and
+    its image with the DiT and the VAE out, then the image's VAE latents:
+    the VAE loads for them, and the DiT waits for the step."""
+    st = _stage(host, monkeypatch, "qst", qpipe)
+
+    def encode_text(p, prompt, images=(), ref_latents=True):
+        # Two text rows, the image's slot rows, a slot of 32x32 pixels,
+        # and three text rows.
+        assert p.dit is None and p.vae is None
+        n = sum((r.pixels.shape[0] // 32) * (r.pixels.shape[1] // 32)
+                for r in images)
+        feats = mx.concatenate([mx.ones((2, 16)), mx.zeros((n, 16)),
+                                mx.full((3, 16), 2.0)])
+        return api.Conditioning(feats, prompt, refs=tuple(images),
+                                image_slots=tuple(range(2, 2 + n)))
+
+    def encode_references(p, cond):
+        assert p.vae is st.vae
+        return dataclasses.replace(cond, ref_latents=tuple(
+            mx.zeros((16, 8, 8)) for _ in cond.refs))
+
+    monkeypatch.setattr(api, "encode_text", encode_text)
+    monkeypatch.setattr(api, "encode_references", encode_references)
+    fields, got = _client().encode("qst", "make it red",
+                                   [np.zeros((256, 256, 3), np.uint8)])
+    assert st.loads == ["encoder", "vae"] and qpipe.dit is None
+    assert got["ref_0"].shape == (1, 16, 8, 8)
+    assert len(fields["ref_latents"]) == 1

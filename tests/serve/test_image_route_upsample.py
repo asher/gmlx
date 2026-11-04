@@ -110,7 +110,7 @@ def server(monkeypatch):
         return SimpleNamespace(features=mx.zeros((5, 4)), image_slots=(),
                                refs=(), ref_latents=())
 
-    dit = SimpleNamespace(cfg=SimpleNamespace(patch=1))
+    dit = SimpleNamespace(cfg=SimpleNamespace(patch=1), act_dtype="bf16")
     monkeypatch.setattr(text_encoder, "load_encoder", load_encoder)
     monkeypatch.setattr(text_encoder, "encoder_spec", lambda fam: "SPEC")
     monkeypatch.setattr(loader, "load_dit", lambda path, **k: (dit, None))
@@ -136,10 +136,12 @@ def server(monkeypatch):
                         mx.zeros((1, 64, 64, 3)))
     pipe = SimpleNamespace(
         family=fam, variant="base", dit=dit, vae="VAE", encoder=None,
-        defaults=SimpleNamespace(steps=2, strength=0.6), vae_scale=16)
+        defaults=SimpleNamespace(steps=2, strength=0.6), vae_scale=16,
+        size_multiple=16)
     served = svc.ServedImage(
         pipe=pipe, spec=spec,
-        plan=SimpleNamespace(staged=True, keep_encoder=False, cfg=4.0))
+        plan=SimpleNamespace(staged=True, keep_encoder=False, cfg=4.0),
+        facts=svc.dit_facts(pipe))
     rec.served = served
     rec.spec = spec
     return rec

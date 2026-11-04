@@ -190,7 +190,7 @@ def test_a_kv_run_whose_first_step_fits_fits_its_later_steps(
         weights={"dit": api._header_bytes(dit, "dit"),
                  "vae": api._header_bytes(vae, "vae")})
     served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(
-        keep_encoder=False, staged=False))
+        keep_encoder=False, staged=False), facts=image_service.dit_facts(pipe))
     cond = Conditioning(mx.zeros((512, 3 * 4096)), "run", ref_latents=tuple(
         mx.zeros((128, 64, 64)) for _ in range(refs)))
     row = memfit.PEAKS["flux2_klein_9b_kv"]

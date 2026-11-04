@@ -1028,10 +1028,13 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
     from gmlx.image.lora.reader import AdapterError
 
     from . import video_service as vs
-    from .image_service import _pair_keys
+    from .image_service import _pair_keys, ensure_dit
 
+    # The table is defined on the DiT, which an encode lets go.
     if is_video(served.spec):
         vs.ensure_dit(served)
+    else:
+        ensure_dit(served)
     pipe = served.pipe
     entries = body.get("entries")
     if not isinstance(entries, list):
@@ -1117,7 +1120,7 @@ def encode(served, text: str, images: list, borrow=None,
 
     from gmlx.image import api
 
-    from .image_service import _encode
+    from .image_service import _encode, ensure_vae
 
     pipe = served.pipe
     refs: tuple = ()
@@ -1143,6 +1146,8 @@ def encode(served, text: str, images: list, borrow=None,
             not served.plan.keep_encoder:
         enc.release()
     if refs and ref_latents:
+        # A staged entry's encode let the VAE go.
+        ensure_vae(served)
         cond = api.encode_references(pipe, cond)
     feats = cond.features.astype(mx.float32)
     slots = [int(s) for s in cond.image_slots]
@@ -1184,6 +1189,9 @@ def vae_decode(served, raw: WireTensor, alpha: bool):
 
     from gmlx.image import api
 
+    from .image_service import ensure_vae
+
+    ensure_vae(served)
     pipe = served.pipe
     vae = pipe.vae
     model = _model_space(pipe.family.name)
@@ -1208,6 +1216,9 @@ def vae_encode(served, image: WireTensor):
 
     import numpy as np
 
+    from .image_service import ensure_vae
+
+    ensure_vae(served)
     pipe = served.pipe
     img = _f32(image)
     if pipe.vae.config.in_channels == 3:
