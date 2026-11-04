@@ -146,7 +146,11 @@ def register_pair(pipe, down, up, alpha: float | None = None,
         now = pipe.adapters.get(key)
         if now is None or now.down is not held.down or now.up is not held.up:
             gone = pipe.adapters.put(key, Pair(held.down, held.up, alpha), 0)
-            if gone or now is not None:
+            if now is not None:
+                # The tables built over the copy hold its arrays: they
+                # build again over the twin's, and the copy is freed.
+                drop_built(pipe)
+            elif gone:
                 recount_built(pipe)
         pipe.adapters.keep_also((key,))
         return key

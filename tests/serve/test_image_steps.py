@@ -2394,6 +2394,37 @@ def test_the_twins_of_an_entry_lora_outlast_a_put_that_must_shed(
     assert host.held == 0
 
 
+def test_a_request_copy_sampled_before_a_define_is_freed_by_it(host,
+                                                               tmp_path):
+    """An images API request samples over a copy of the entry's LoRA with
+    no header, so a built table holds the copy's arrays. The ComfyUI
+    define of the same pairs makes them the own pairs' twins and lets the
+    built tables go: the request samples the same over the twins, and the
+    caches count what they did before less the copy."""
+    from lora_fixtures import dialect_keys, tiny_z_adapter, write_keys
+
+    from gmlx.serve import image_service
+
+    p, _ad, c, body = _header_alpha_own(host, tmp_path)
+    held = p.adapters.bytes
+    write_keys(tmp_path / "copy.safetensors",
+               dialect_keys("diffusers", tiny_z_adapter(1)))
+    tid, _ = _on_worker(image_service._adapter_table, host.served["own"],
+                        [("copy.safetensors", 1.0)], [str(tmp_path)])
+    feats = _features()
+    sampled = _direct(p, feats, table=tid)
+    tables = p.tables.bytes
+    assert p.adapters.bytes == 2 * held and tables > 0
+    c.define_table("own", body)
+    assert p.adapters.bytes == held
+    # The caption is refined again, so the run builds every module the
+    # first built, over the twins.
+    p.captions.clear()
+    assert np.array_equal(_direct(p, feats, table=tid), sampled)
+    assert p.tables.bytes == tables
+    assert host.held == 0
+
+
 def test_a_built_table_counts_the_pairs_a_later_put_sheds(host, tmp_path):
     """A built table keeps the arrays of its pairs alive after a later
     table's put sheds them from the pair cache, so the tables cache counts
