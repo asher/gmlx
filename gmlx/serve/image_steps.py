@@ -1102,8 +1102,17 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
     except (AdapterError, ValueError, TypeError) as e:
         raise StepError(400, f"patch table refused: {e}") from None
     own = _pair_keys(served.adapters)
+    # An own pair sent under another alpha, as ComfyUI sends a pair whose
+    # alpha is in the file's header, is its twin: it keeps the own pair's
+    # arrays and takes no room.
+    twins = ({c: k for k, c in _own_content(served).items()}
+             if served.adapters else {})
+    twin = {key: None if key in own else
+            twins.get(_content(down, up, alpha, key))
+            for down, up, alpha, key in pairs.values()}
     sizes = {key: int(down.nbytes) + int(up.nbytes)
-             for down, up, _alpha, key in pairs.values() if key not in own}
+             for down, up, _alpha, key in pairs.values()
+             if key not in own and twin[key] is None}
     _pair_room(served, sum(sizes.values()))
     rows = []
     keys: dict = {}
@@ -1119,8 +1128,8 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
                 pk = (p["up"], p["down"], p.get("alpha"))
                 if pk not in keys:
                     down, up, alpha, key = pairs[pk]
-                    keys[pk] = install.register_pair(pipe, down, up, alpha,
-                                                     key=key)
+                    keys[pk] = install.register_pair(
+                        pipe, down, up, alpha, key=key, twin=twin[key])
                 row["patches"].append({
                     "adapter": keys[pk], "strength": p.get("strength", 1.0),
                     "strength_model": p.get("strength_model", 1.0),

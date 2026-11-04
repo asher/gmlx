@@ -113,13 +113,15 @@ def pair_hash(down: mx.array, up: mx.array, alpha: float | None) -> str:
 
 
 def register_pair(pipe, down, up, alpha: float | None = None,
-                  key: str | None = None) -> str:
+                  key: str | None = None, twin: str | None = None) -> str:
     """Keep a pair in the pipeline's cache and return its content hash,
     which names it in patch table entries. A pair already held is not
     stored again. An MLX array is kept as it is, since a copy would hold
     the pair twice while the reader still holds it. The caller must not
     change it afterwards. ``key`` is the pair's ``pair_hash`` when the
-    caller has it already."""
+    caller has it already. ``twin`` is the key of a held pair with the
+    same down and up under another alpha: the pair keeps the twin's
+    arrays and takes no bytes of its own."""
     down, up = (a if isinstance(a, mx.array) else mx.array(a)
                 for a in (down, up))
     if down.ndim != 2 or up.ndim != 2 or up.shape[1] != down.shape[0]:
@@ -136,6 +138,11 @@ def register_pair(pipe, down, up, alpha: float | None = None,
     if key is None:
         key = pair_hash(down, up, alpha)
     if pipe.adapters.get(key) is None:
+        held = None if twin is None else pipe.adapters.peek(twin)
+        if held is not None:
+            # The cache counts the twin's arrays already.
+            pipe.adapters.put(key, Pair(held.down, held.up, alpha), 0)
+            return key
         pair = Pair(down, up, alpha)
         if pair.nbytes > pipe.adapters.max_bytes:
             raise AdapterError(

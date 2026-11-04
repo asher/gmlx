@@ -2265,14 +2265,13 @@ def test_a_staged_edit_encode_loads_the_vae_for_its_reference_latents(
 
 # The entry's own LoRAs under a client table.
 
-def test_an_entry_lora_with_header_alphas_sent_by_comfyui_applies_once(
-        host, tmp_path):
-    """A LoRA that diffusers' save_lora_weights wrote holds no alpha
-    tensors, so the entry's reader takes each pair's alpha from the
-    header. ComfyUI reads no header and sends the same pairs with none.
-    The table names the entry's own LoRA by its pairs all the same and
-    leaves it out, so the LoRA applies once, at the table's scale: the
-    step equals the same table's on an entry without it."""
+def _header_alpha_own(host, tmp_path):
+    """Entry "own": the tiny pipeline with a LoRA as diffusers'
+    save_lora_weights writes it, no alpha tensors, so the entry's reader
+    takes each pair's alpha from the header. Returns the pipeline, the
+    adapter, a client and the table body ComfyUI's LoRA loader sends for
+    the same file: every pair with alpha None, as ComfyUI reads no
+    header."""
     from lora_fixtures import dialect_keys, header, tiny_z_adapter, write_keys
 
     from gmlx.image import lora
@@ -2309,6 +2308,15 @@ def test_an_entry_lora_with_header_alphas_sent_by_comfyui_applies_once(
                      "down": c.put(np.array(pair.down), kind="adapters"),
                      "alpha": None, "strength": 1.0}]}
         for m, b, pair in pairs]}
+    return p, ad, c, body
+
+
+def test_an_entry_lora_with_header_alphas_sent_by_comfyui_applies_once(
+        host, tmp_path):
+    """The table names the entry's own LoRA by its pairs all the same and
+    leaves it out, so the LoRA applies once, at the table's scale: the
+    step equals the same table's on an entry without it."""
+    _p, _ad, c, body = _header_alpha_own(host, tmp_path)
     rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
     got = c.step("own", None, x, [0.5], rows,
                  patch_table=c.define_table("own", body))
@@ -2317,4 +2325,29 @@ def test_an_entry_lora_with_header_alphas_sent_by_comfyui_applies_once(
     assert np.array_equal(got, want)
     # The entry's LoRA alone, at its header's scale, steps elsewhere.
     assert not np.array_equal(got, c.step("own", None, x, [0.5], rows))
+    assert host.held == 0
+
+
+def test_an_entry_lora_sent_again_by_comfyui_takes_no_request_room(
+        host, tmp_path):
+    """The pairs of the entry's own LoRA, sent again with alpha None, are
+    held already under the header's alpha. They take none of the room the
+    pair cache keeps for a request's pairs, and the cache holds their
+    arrays once: a room of half the LoRA defines the table, and the cache
+    holds the entry's own bytes alone."""
+    from gmlx.serve import image_service
+
+    p, ad, c, body = _header_alpha_own(host, tmp_path)
+    held = p.adapters.bytes
+    assert held == sum(p.adapters.nbytes(k)
+                       for k in image_service._pair_keys([(ad, 1.0)]))
+    p.adapters.max_bytes = held + held // 2
+    host.served["own"].plan.cache_share = 1.0
+    rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
+    got = c.step("own", None, x, [0.5], rows,
+                 patch_table=c.define_table("own", body))
+    assert p.adapters.bytes == held
+    want = c.step("zit", None, x, [0.5], rows,
+                  patch_table=c.define_table("zit", body))
+    assert np.array_equal(got, want)
     assert host.held == 0
