@@ -145,7 +145,9 @@ def register_pair(pipe, down, up, alpha: float | None = None,
         # would free nothing, so it is kept as the twin is.
         now = pipe.adapters.get(key)
         if now is None or now.down is not held.down or now.up is not held.up:
-            pipe.adapters.put(key, Pair(held.down, held.up, alpha), 0)
+            gone = pipe.adapters.put(key, Pair(held.down, held.up, alpha), 0)
+            if gone or now is not None:
+                recount_built(pipe)
         pipe.adapters.keep_also((key,))
         return key
     if pipe.adapters.get(key) is None:
@@ -154,7 +156,8 @@ def register_pair(pipe, down, up, alpha: float | None = None,
             raise AdapterError(
                 f"a LoRA pair of {pair.nbytes} bytes is over the adapter "
                 f"cache of {pipe.adapters.max_bytes} bytes")
-        pipe.adapters.put(key, pair, pair.nbytes)
+        if pipe.adapters.put(key, pair, pair.nbytes):
+            recount_built(pipe)
     return key
 
 
@@ -475,12 +478,13 @@ class BuiltTable:
     and a dtype that few leaves run in costs only their factors."""
 
     def __init__(self, parts: dict, leaves: dict, dtype, how: str,
-                 pairs=None, kept=None):
+                 pairs=None, kept=None, loose=None):
         self._parts = parts            # path -> [Part]
         self._leaves = leaves          # path -> base leaf
         self._dtype, self._how = dtype, how
         self._pairs = pairs            # (path, parts, dims) -> kernel pair
         self._kept = kept              # path -> its pairs still cached
+        self._loose = loose            # path -> its pairs' arrays not cached
         self._built: dict = {}
 
     def __contains__(self, path: str) -> bool:
@@ -488,9 +492,14 @@ class BuiltTable:
 
     @property
     def nbytes(self) -> int:
-        """Bytes of the factors built so far."""
-        return sum(int(a.nbytes) for f in self._built.values()
-                   for a in f.arrays())
+        """Bytes of the factors built so far, and of the pairs its parts
+        keep alive that the pair cache no longer counts, each array
+        once."""
+        held = {id(a): a for f in self._built.values() for a in f.arrays()}
+        if self._loose is not None:
+            held.update((id(a), a) for path in self._parts
+                        for a in self._loose(path))
+        return sum(int(a.nbytes) for a in held.values())
 
     def get(self, path: str):
         f = self._built.get(path)
@@ -536,10 +545,14 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
             named.setdefault(path, []).append((key, band))
             held.setdefault(path, []).append((key, pair))
 
-    def kept(path: str) -> bool:
+    def loose(path: str) -> list:
         p = owner()
-        return p is not None and all(p.adapters.peek(k) is v
-                                     for k, v in held[path])
+        return [a for k, v in held[path]
+                if p is None or p.adapters.peek(k) is not v
+                for a in (v.down, v.up)]
+
+    def kept(path: str) -> bool:
+        return not loose(path)
 
     pairs = None
     if how == KERNEL:
@@ -564,7 +577,7 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
 
             return hit, kept
     return BuiltTable(by_module, {p: leaves[p] for p in by_module}, dtype,
-                      how, pairs, kept)
+                      how, pairs, kept, loose)
 
 
 class PatchState:
@@ -691,6 +704,15 @@ def ensure_wrapped(pipe) -> None:
         for path, leaf in linear_leaves(pipe.dit).items():
             _set(pipe.dit, path, ImageLoRALinear(leaf, path, state))
     pipe.lora = state
+
+
+def recount_built(pipe) -> None:
+    """Count the built tables of the pipeline again after its pair cache
+    lets pairs go, whose arrays a table's parts keep alive."""
+    for key in pipe.tables.keys(lambda k: True):
+        table = pipe.tables.peek(key)
+        if isinstance(table, BuiltTable):
+            pipe.tables.resize(key, table.nbytes)
 
 
 def drop_built(pipe) -> None:

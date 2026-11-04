@@ -2394,6 +2394,38 @@ def test_the_twins_of_an_entry_lora_outlast_a_put_that_must_shed(
     assert host.held == 0
 
 
+def test_a_built_table_counts_the_pairs_a_later_put_sheds(host, tmp_path):
+    """A built table keeps the arrays of its pairs alive after a later
+    table's put sheds them from the pair cache, so the tables cache counts
+    them in its place, at the define: the two caches count each array
+    they keep alive once."""
+    p, ad, c, _body = _header_alpha_own(host, tmp_path)
+    held = p.adapters.bytes
+    p.adapters.max_bytes = 2 * held + 64
+    host.served["own"].plan.cache_share = 1.0
+    rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
+    pairs = [(m, b, p.adapters.peek(k)) for m, b, k in ad.dit]
+
+    def other(scale):
+        # Pairs the size of the entry's LoRA, each table filling the room.
+        return {"entries": [{
+            "key": f"diffusion_model.{m}.weight",
+            "band": None if b is None else list(b),
+            "patches": [{"up": c.put(np.array(pair.up) * scale,
+                                     kind="adapters"),
+                         "down": c.put(np.array(pair.down), kind="adapters"),
+                         "alpha": None, "strength": 1.0}]}
+            for m, b, pair in pairs]}
+
+    first = c.define_table("own", other(2.0))
+    c.step("own", None, x, [0.5], rows, patch_table=first)
+    tables = p.tables.bytes
+    c.define_table("own", other(3.0))
+    assert p.adapters.bytes == 2 * held
+    assert p.tables.bytes == tables + held
+    assert host.held == 0
+
+
 def test_a_request_copy_of_an_entry_lora_becomes_its_twin_at_a_define(
         host, tmp_path):
     """An images API request names a copy of the entry's LoRA with no

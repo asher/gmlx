@@ -194,7 +194,10 @@ class ByteLRU:
                     return key
         return None
 
-    def put(self, key, value, nbytes: int, shed: bool = True) -> None:
+    def put(self, key, value, nbytes: int, shed: bool = True) -> list:
+        """Keep ``value`` at ``key`` as ``nbytes`` bytes. Returns the keys
+        of the entries it shed for room."""
+        gone: list = []
         with self._lock:
             old = self._items.pop(key, None)
             if old is not None:
@@ -204,13 +207,25 @@ class ByteLRU:
                 kept = sum(n for k, (_, n) in self._items.items()
                            if k in self._kept) if self._kept else 0
                 if nbytes > self.max_bytes - kept:
-                    return
+                    return gone
                 for k in [k for k in self._items if k not in self._kept]:
                     if self._bytes + nbytes <= self.max_bytes:
                         break
                     self._bytes -= self._items.pop(k)[1]
+                    gone.append(k)
             self._items[key] = (value, nbytes)
             self._bytes += nbytes
+        return gone
+
+    def resize(self, key, nbytes: int) -> None:
+        """Count the entry at ``key``, if held, as ``nbytes`` bytes. The
+        order of use does not change and nothing is shed: the next put
+        sheds for the bound."""
+        with self._lock:
+            hit = self._items.get(key)
+            if hit is not None:
+                self._items[key] = (hit[0], int(nbytes))
+                self._bytes += int(nbytes) - hit[1]
 
     def shed_others(self, own, room: int) -> None:
         """Shed the entries whose key is not in ``own``, the least
