@@ -999,16 +999,49 @@ def _pair_room(served, need: int) -> None:
     raise StepError(413, f"{over}: {left}. A{smaller[1:]} gives it more.")
 
 
-def _with_own(served, entries: list) -> list:
+# Per pipeline, the own pair keys of its entry to the hash of each pair's
+# down and up alone, taken at the entry's first define.
+_OWN_CONTENT: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _content(down, up, alpha, key: str) -> str:
+    """The hash of a pair's down and up alone: its key when it has no
+    alpha."""
+    from gmlx.image.lora.install import pair_hash
+
+    return key if alpha is None else pair_hash(down, up, None)
+
+
+def _own_content(served) -> dict:
+    """The entry's own pair keys to the hash of each pair's down and up
+    alone, from the pairs its pipeline keeps."""
+    memo = _OWN_CONTENT.setdefault(served.pipe, {})
+    for ad, _st in served.adapters:
+        for r in ad.dit:
+            if r[-1] not in memo:
+                pair = served.pipe.adapters.peek(r[-1])
+                memo[r[-1]] = _content(pair.down, pair.up, pair.alpha, r[-1])
+    return memo
+
+
+def _with_own(served, entries: list, pairs) -> list:
     """Table ``entries`` with the entry's own adapters stacked on, as the
     images API stacks a request's adapters on them. An own adapter that
     the entries name a pair of is left out, so the table's strength for
-    it applies, once."""
+    it applies, once. A pair is named by its down and up alone, from
+    ``pairs``, the (down, up, alpha, key) of the entries' pairs: ComfyUI
+    reads no adapter header, so a pair whose file holds no alpha comes
+    with none, where the entry's reader gives it the header's."""
     from gmlx.image.lora import patch_table as pt
 
-    named = {k for _m, _b, patches in entries for k, _s in patches}
+    if not served.adapters:
+        return entries
+    content = {key: _content(down, up, alpha, key)
+               for down, up, alpha, key in pairs}
+    named = {content[k] for _m, _b, patches in entries for k, _s in patches}
+    own_content = _own_content(served)
     own = [(ad, st) for ad, st in served.adapters
-           if not any(r[-1] in named for r in ad.dit)]
+           if not any(own_content[r[-1]] in named for r in ad.dit)]
     if not own:
         return entries
     rows = {(m, b): list(patches) for m, b, patches in entries}
@@ -1089,7 +1122,8 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
                     **({"kind": p["kind"]} if "kind" in p else {})})
             rows.append(row)
         plans = pt.plans_from_patches(pipe.family, rows)
-        return api.define_patch_table(pipe, _with_own(served, plans))
+        return api.define_patch_table(pipe, _with_own(served, plans,
+                                                      pairs.values()))
     except (AdapterError, ValueError, KeyError, TypeError) as e:
         if isinstance(e, StepError):
             raise

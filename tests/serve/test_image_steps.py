@@ -2261,3 +2261,60 @@ def test_a_staged_edit_encode_loads_the_vae_for_its_reference_latents(
     assert st.loads == ["encoder", "vae"] and qpipe.dit is None
     assert got["ref_0"].shape == (1, 16, 8, 8)
     assert len(fields["ref_latents"]) == 1
+
+
+# The entry's own LoRAs under a client table.
+
+def test_an_entry_lora_with_header_alphas_sent_by_comfyui_applies_once(
+        host, tmp_path):
+    """A LoRA that diffusers' save_lora_weights wrote holds no alpha
+    tensors, so the entry's reader takes each pair's alpha from the
+    header. ComfyUI reads no header and sends the same pairs with none.
+    The table names the entry's own LoRA by its pairs all the same and
+    leaves it out, so the LoRA applies once, at the table's scale: the
+    step equals the same table's on an entry without it."""
+    from lora_fixtures import dialect_keys, header, tiny_z_adapter, write_keys
+
+    from gmlx.image import lora
+    from gmlx.serve import image_service
+
+    fields = {
+        "r": 4, "lora_alpha": 6.0,
+        "rank_pattern": {"^layers.1.attention.to_k": 2,
+                         "^layers.1.attention.to_v": 8,
+                         "noise_refiner.0.attention.to_v": 2, "w3": 2},
+        "target_modules": ["to_q", "to_k", "to_v", "to_out.0", "w1", "w2",
+                           "w3"]}
+    path = write_keys(tmp_path / "style.safetensors",
+                      dialect_keys("diffusers", tiny_z_adapter(1)),
+                      header(fields))
+    p = _on_worker(_tiny_pipe)
+
+    def own():
+        ad = lora.load_adapter(p, path)
+        p.default_table = api.define_patch_table(
+            p, lora.table_entries([(ad, 1.0)]))
+        p.adapters.keep(image_service._pair_keys([(ad, 1.0)]))
+        return ad, [(m, b, p.adapters.peek(k)) for m, b, k in ad.dit]
+
+    ad, pairs = _on_worker(own)
+    assert pairs and all(pair.alpha is not None for _m, _b, pair in pairs)
+    _serve(host, "own", p)
+    host.served["own"].adapters = [(ad, 1.0)]
+    c = _client()
+    body = {"entries": [{
+        "key": f"diffusion_model.{m}.weight",
+        "band": None if b is None else list(b),
+        "patches": [{"up": c.put(np.array(pair.up), kind="adapters"),
+                     "down": c.put(np.array(pair.down), kind="adapters"),
+                     "alpha": None, "strength": 1.0}]}
+        for m, b, pair in pairs]}
+    rows, x = _rows(c, _features()), noise_from_seed(5, SHAPE)
+    got = c.step("own", None, x, [0.5], rows,
+                 patch_table=c.define_table("own", body))
+    want = c.step("zit", None, x, [0.5], rows,
+                  patch_table=c.define_table("zit", body))
+    assert np.array_equal(got, want)
+    # The entry's LoRA alone, at its header's scale, steps elsewhere.
+    assert not np.array_equal(got, c.step("own", None, x, [0.5], rows))
+    assert host.held == 0
