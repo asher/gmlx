@@ -89,7 +89,7 @@ The text encoder part of a LoRA is not applied; set `strength_clip` to 0.
 
 Some variants, such as Qwen-Image 2.1 Turbo, are distilled to a fixed list of sigmas.
 `gmlx Sigmas` outputs that list and the variant's cfg; connect them to `SamplerCustom` or `SamplerCustomAdvanced` with any stock sampler.
-FastH3's list is the 8 noise levels it was trained at, at video shift 10. A run on that list, or on a part of it as a split schedule samples, is refused at shifts other than 10 and 3 and names `MiniMaxH3SigmaShift`, since without that node ComfyUI's forward derives the sound's sigmas at 12 and 3.
+FastH3's list is the 8 noise levels it was trained at, at video shift 10. A run on that list, or on a part of it as a split schedule samples, is refused at shifts other than 10 and 3 and names `ModelSamplingMiniMaxH3`, since without that node ComfyUI's forward derives the sound's sigmas at 12 and 3.
 The schedule of FLUX.2 klein and of Qwen-Image 2.1 follows the image size. On those, give `gmlx Sigmas` the image's `width` and `height`, and it outputs the schedule gmlx samples that image on. Without them it stops, and for FLUX.2 klein it names the stock `Flux2Scheduler`, which gives the same schedule.
 For any other variant without a fixed list, it gives ComfyUI's simple schedule over the variant's step count.
 `KSampler` with its own scheduler still works on every variant; it samples on ComfyUI's schedule instead.
