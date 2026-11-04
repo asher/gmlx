@@ -414,6 +414,36 @@ such as `loras/watercolor.safetensors`, or by the file name of one in the
 entry's `adapters`. Move the file into a model folder and use its path
 there.
 
+### A LoRA is refused for memory
+
+The server books a LoRA's memory when the LoRA arrives, with an images
+request, a ComfyUI step or its patch table, or an adapter upload. One that
+does not fit is refused. The message names what needs the memory, such as
+the request's adapters or the LoRA matrices of an upload, the GB it needs,
+and the room:
+
+- `... need ... GB of memory, over the ... GB the server's memory budget
+  leaves beside ...` (413): the LoRAs do not fit beside the model named
+  and the pinned models, even with every other model unloaded. Use a
+  smaller LoRA or fewer of them, or unpin a model.
+- `... and ... GB is free beside the models in use (...); retry when one
+  is idle` (503): the models named are generating. Send the request again
+  when one finishes. In ComfyUI, queue the prompt again.
+- `... and ... GB is free; idle models hold ... GB (...). Unload one to
+  make room` (503): an adapter upload never unloads a model, so it names
+  the idle models instead. Unload one with
+  [`POST /unload`](api.md#endpoints), then queue the prompt again.
+- `... GB is free in the working set now; retry when the models in use
+  finish` (503): macOS has less memory free than the plan counts on while
+  other models run. Retry when they finish.
+
+A request or a ComfyUI step whose LoRAs fit once an idle model unloads
+pushes that model out, as a model load does. A pinned model stays loaded,
+as [`pin`](config.md#modelspin) describes. With
+[`image.adapter_cache_mb`](config.md#serverimageadapter_cache_mb) set, a
+LoRA over that cap is refused with a message that names the key. Raise the
+cap, or remove the key to let LoRAs use the memory free.
+
 ## Video generation
 
 ### `the smallest MiniMax-H3 clip does not fit in memory`

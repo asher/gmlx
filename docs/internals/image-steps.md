@@ -153,14 +153,20 @@ as does a VAE pass of more than 16 images. One whose memory plan does not
 fit beside the models loaded gets 400, and so does the encode of a prompt
 on a video model, priced by its rows. The message of a step names the
 largest term of its plan and, where the plan keeps the keys and values of
-the reference latents, how many of them fit. A patch table whose LoRA
-pairs do not fit the model's pair cache at once, beside the model's own
-LoRAs, gets 413 with what gives the cache room. The VAE routes decode and
-encode the images of a batch one at a time. `capabilities` gives the
-largest tensor and adapter upload, which are the
-[`image.tensor_cache_mb`](../config.md#serverimagetensor_cache_mb) and
-[`image.adapter_cache_mb`](../config.md#serverimageadapter_cache_mb) caches.
-Each image model books those two caches while the step routes are on.
+the reference latents, how many of them fit. A patch table, a step or an
+adapter upload whose LoRA bytes do not fit in memory is refused when it
+arrives, before the server reads or builds them. It gets 413 when the
+LoRAs do not fit beside the model and the pinned models, and 503 while
+models in use hold the memory, each naming the GB the LoRAs need and the
+GB free. A table or a step can push out an idle model, as a cold load
+does. An upload never unloads a model: its 503 names the idle models that
+hold the room. The VAE routes decode and encode the images of a batch one
+at a time. `capabilities` gives the largest tensor upload, which is the
+[`image.tensor_cache_mb`](../config.md#serverimagetensor_cache_mb) cache,
+and the largest adapter upload, which is
+[`image.adapter_cache_mb`](../config.md#serverimageadapter_cache_mb) when
+it is set and 1 GiB when it is not. Each image model books the tensor
+cache while the step routes are on.
 
 ## Access
 

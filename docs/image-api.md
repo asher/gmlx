@@ -156,6 +156,9 @@ for event in stream:
 | The entry's VAE, encoder or mmproj is of another model | 400 `image_model_mismatch` |
 | A size that does not fit in memory beside the loaded models | 400 naming the largest size of its shape that fits |
 | More reference images than fit in memory | 400 naming the count and the reference size that fit |
+| The request's `adapters` need more memory than the budget leaves beside the model and the pinned models | 413 naming the GB they need and the room |
+| The request's `adapters` need memory that models in use hold | 503 `server_overloaded` with `Retry-After`, naming the models in use |
+| A request LoRA over a set [`image.adapter_cache_mb`](config.md#serverimageadapter_cache_mb) | 400 naming that key |
 | One of several FLUX.3 klein references is under 16 pixels on a side | 400 naming the image |
 | A FLUX.2 klein reference is under 64 pixels on a side, or one side is more than 8 times the other | 400 naming the image |
 | `prompt_upsampling: true` on an entry without an upsampler | 400 naming the `upsampler` setting |

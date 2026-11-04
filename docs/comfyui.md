@@ -344,6 +344,11 @@ to a workflow, double-click an empty part of the canvas, search for
 the MODEL and CLIP outputs of the gmlx loaders to its inputs, and its
 outputs to the nodes that the loaders fed before. The gmlx nodes send each
 LoRA to the server once, so a change of strength costs one small request.
+A LoRA runs when the Mac has the memory for it. One that does not fit is
+refused with the memory it needs, as
+[A LoRA is refused for memory](troubleshooting.md#a-lora-is-refused-for-memory)
+describes. A 503 means models in use hold the memory: queue the prompt
+again when they finish.
 A LoRA stacks on the LoRA that `gmlx Model Loader` loads with a recipe
 that has one, as `--adapter` does. A `LoraLoader` of the recipe's own
 LoRA file sets its strength in place of the recipe's, so that LoRA

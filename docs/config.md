@@ -283,9 +283,10 @@ entries.
 | <a id="image_modelspin"></a>`pin` | `false` | Load at start and stay loaded, as a model's [`pin`](#modelspin) |
 | <a id="image_modelsttl_s"></a>`ttl_s` | `server.defaults.ttl_s` | Seconds without a request before the model unloads. `null` or `0` turns off the timeout. |
 
-A shared encoder must be a model without an `adapter`. A quantized chat
-GGUF used as the encoder gives slightly different images than a full
-precision encoder file.
+The `auto` choice of `encoder_release` counts no request LoRAs. A shared
+encoder must be a model without an `adapter`. A quantized chat GGUF used as
+the encoder gives slightly different images than a full precision encoder
+file.
 
 ## Video models
 
@@ -715,13 +716,17 @@ under [`image_models`](#image-models).
 | <a id="serverimagemax_queue"></a>`image.max_queue` | `4` | Image requests that may wait behind the one running. One more gets 429 with `Retry-After`. |
 | <a id="serverimageembed_metadata"></a>`image.embed_metadata` | `false` | Write the prompt and settings into each PNG the routes return |
 | <a id="serverimagetensor_cache_mb"></a>`image.tensor_cache_mb` | `64` | MB each image model keeps of encoded prompts, and again of reference image latents. The step routes keep as much of uploaded tensors. |
-| <a id="serverimageadapter_cache_mb"></a>`image.adapter_cache_mb` | `256` | MB each image model keeps of request LoRA weights, and again of their merged patches. The step routes keep as much of uploads. Raise it for a larger LoRA. |
+| <a id="serverimageadapter_cache_mb"></a>`image.adapter_cache_mb` | none | Optional cap in MB on the request LoRAs of each image or video model, again on their merged patches and on step route uploads. Unset, LoRAs use free memory. |
 | <a id="serverimagesteps_api"></a>`image.steps_api` | `true` | Serve the [image step routes](internals/image-steps.md) that the ComfyUI node pack and `gmlx image bench --via-steps` call. |
 | <a id="serverimagesteps_remote"></a>`image.steps_remote` | `false` | Take step route requests from clients beyond loopback. The routes take uploads of any bytes, so they answer loopback clients alone by default. |
 
-The memory gmlx counts for an image model includes both caches at their
-full size, twice each. At the defaults, one model of any family still fits
-on a 16 GB Mac at its default quant and size.
+The memory gmlx counts for an image model includes its tensor caches at
+their full size: two of `image.tensor_cache_mb`, and a third while the step
+routes are on. Request LoRAs are counted when they arrive, as the
+[LoRA refusal](troubleshooting.md#a-lora-is-refused-for-memory) describes,
+and a LoRA over a set `image.adapter_cache_mb` is refused with a message
+that names the key. At the defaults, one model of any family still fits on
+a 16 GB Mac at its default quant and size.
 
 ### Structured decisions
 
