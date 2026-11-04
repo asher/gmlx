@@ -1411,6 +1411,29 @@ def test_requests_in_turn_never_shed_the_entry_adapter(tiny_served):
     assert _entry_steps(pipe)
 
 
+def test_a_patch_table_after_a_request_lora_never_sheds_the_entry_adapter(
+        tiny_served):
+    """A steps route table holds only its own pairs as it puts them, so
+    the entry's pairs stay through the keep set of the load alone: the
+    pairs of a LoRA the size of a request's, put after one."""
+    from gmlx.image.lora import install
+
+    served, root = tiny_served
+    pipe = served.pipe
+    own = image_service._pair_keys(served.adapters)
+    image_service._adapter_table(served, [("a.safetensors", 1.0)], [root])
+    others = pipe.adapters.keys(lambda k: k not in own)
+    assert others
+    put: list = []
+    for k in others:
+        # As define_table puts a table's pairs: each holds the ones before.
+        pair = pipe.adapters.peek(k)
+        put.append(install.register_pair(
+            pipe, pair.down, pair.up * 2.0, pair.alpha, hold=list(put)))
+    assert _pairs_held(pipe, own)
+    assert _entry_steps(pipe)
+
+
 @pytest.mark.parametrize("scheduler", ["karras", "simple", "beta"])
 def test_a_scheduler_other_than_the_variant_own_is_refused(scheduler):
     with pytest.raises(image_service.ImageRequestError,
