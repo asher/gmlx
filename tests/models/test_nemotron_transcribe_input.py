@@ -301,10 +301,10 @@ def _run_args(argv):
 def speech_run(monkeypatch, tmp_path):
     """A run whose --mmproj is a speech encoder and whose clips are 2.5 s."""
     monkeypatch.setattr(cli, "is_speech_encoder", lambda p: bool(p))
-    import gmlx.serve.media_programs as mp
+    import gmlx._vendor.mlx_vlm.utils as vu
 
-    monkeypatch.setattr(mp, "decode_mono",
-                        lambda path, rate: np.zeros(40_000, np.float32))
+    monkeypatch.setattr(vu, "load_audio",
+                        lambda path, sr: np.zeros(40_000, np.float32))
     model = tmp_path / "m.gguf"
     model.write_bytes(b"GGUF")
     return str(model)
@@ -434,14 +434,76 @@ def test_speaker_and_event_tags_survive_decoding():
 
 # gmlx chat
 
-def test_chat_transcription_turn_is_greedy_with_a_budget(monkeypatch):
-    import gmlx.serve.media_programs as mp
+def test_run_reads_each_clip_once(speech_run, monkeypatch):
+    import gmlx._vendor.mlx_vlm.utils as vu
+
+    reads = []
+    monkeypatch.setattr(vu, "load_audio", lambda path, sr: (
+        reads.append(path), np.zeros(40_000, np.float32))[1])
+    argv = [speech_run, "--mmproj", "enc.gguf", "--audio", "a.wav,b.wav"]
+    parser, args = _run_args(argv)
+    cli.apply_transcription_defaults(args, parser, argv)
+    assert cli.speech_audio(args) == (5.0, 2 * 32)
+    assert len(cli.speech_clips(args) or []) == 2
+    assert reads == ["a.wav", "b.wav"]
+
+
+def test_chat_transcription_turn_keeps_the_knobs_the_user_set():
     from gmlx.tui.chat import _transcription_sampling
 
-    monkeypatch.setattr(mp, "decode_mono",
-                        lambda path, rate: np.zeros(40_000, np.float32))
-    out = _transcription_sampling(["a.wav"], {"max_tokens": 0, "temp": 1.0})
-    assert out == {"temp": 0.0, "top_p": 1.0, "top_k": 0, "min_p": 0.0,
-                   "repetition_penalty": 1.0, "max_tokens": 15 + 24}
-    assert "max_tokens" not in _transcription_sampling(
-        ["a.wav"], {"max_tokens": 500})
+    assert _transcription_sampling(set()) == {
+        "temp": 0.0, "top_p": 1.0, "top_k": 0, "min_p": 0.0,
+        "repetition_penalty": 1.0}
+    assert _transcription_sampling({"temp", "top_k"}) == {
+        "top_p": 1.0, "min_p": 0.0, "repetition_penalty": 1.0}
+
+
+def test_chat_reads_each_clip_once_and_keeps_the_limits(monkeypatch):
+    import gmlx._vendor.mlx_vlm.utils as vu
+    from gmlx.tui.chat import _speech_clips
+
+    reads = []
+    monkeypatch.setattr(vu, "load_audio", lambda path, sr: (
+        reads.append(path), np.zeros(1280, np.float32))[1])
+    proc = _processor()
+    held, new = _speech_clips(proc, ["a.wav"], ["b.wav"])
+    assert reads == ["a.wav", "b.wav"]
+    held, new = _speech_clips(proc, held + new, ["c.wav"])
+    assert reads == ["a.wav", "b.wav", "c.wav"] and len(held) == 2
+    with pytest.raises(ValueError, match="7 audio clips"):
+        _speech_clips(proc, held + new, ["d"] * 4)
+
+
+def test_chat_counts_the_audio_tokens_of_the_prompt():
+    from gmlx.tui.chat import _speech_prompt_tokens
+
+    proc = _processor()
+    clips = [np.zeros(1280, np.float32), np.zeros(2560, np.float32)]
+    assert _speech_prompt_tokens(proc, "hi <|audio|> hi <|audio|>",
+                                 clips) == 2 + 1 + 2
+
+
+def test_chat_context_is_the_trained_one_with_the_encoder(monkeypatch):
+    from argparse import Namespace
+
+    from gmlx.tui.chat import _speech_context
+
+    monkeypatch.setattr(cli, "is_speech_encoder", lambda p: bool(p))
+    assert _speech_context(Namespace(mmproj="enc.gguf")) == 65_536
+    assert _speech_context(Namespace(mmproj=None)) is None
+
+
+def test_profile_follows_the_card():
+    from gmlx.gen import profiles
+
+    family = profiles.detect_family(
+        "nemotron_h_moe", "NVIDIA-Nemotron-3.5-Transcribe-30B-A4B")
+    assert family == "nemotron-transcribe"
+    assert profiles.groups_for(family)["sampling"] == {
+        "temperature": 0.6, "top_p": 0.95, "top_k": 0,
+        "thinking_budget": 16384}
+    instruct = profiles.groups_for(family, "instruct")
+    assert instruct["sampling"]["temperature"] == 0.0
+    assert instruct["chat_template_kwargs"] == {"enable_thinking": False}
+    assert profiles.detect_family(
+        "nemotron_h_moe", "NVIDIA-Nemotron-3-Nano-30B-A3B") == "nemotron"

@@ -461,6 +461,8 @@ class ChatState:
     thinking_prefill: str = ""           # appended to each turn's render
     render_fallback_logged: bool = False
     sampling: dict = dataclasses.field(default_factory=dict)
+    # Sampling keys the user set: a flag on the command line or a /command.
+    sampling_explicit: set = dataclasses.field(default_factory=set)
     transcript: list = dataclasses.field(default_factory=list)
     replay_messages: list | None = None  # deferred history prefill (--resume)
     turn_checkpoint: dict | None = None
@@ -676,24 +678,54 @@ def _audio_turn(state: ChatState, tok, messages: list, template_kwargs: dict,
     return ids, prompt_text
 
 
-def _transcription_sampling(clips: list, sampling: dict) -> dict:
-    """The sampling of a turn that transcribes ``clips``: greedy, and the
-    output budget of their length when the session has no reply cap."""
-    out = {"temp": 0.0, "top_p": 1.0, "top_k": 0, "min_p": 0.0,
-           "repetition_penalty": 1.0}
-    if not sampling.get("max_tokens"):
-        from gmlx.models.nemotron_h.speech import num_audio_tokens
-        from gmlx.models.nemotron_h.transcription import output_budget
-        from gmlx.serve.media_programs import decode_mono
+def _speech_context(args) -> int | None:
+    """The trained context of a model that hears audio through its speech
+    encoder (the mmproj), else None."""
+    from gmlx.commands.cli import is_speech_encoder
 
-        try:
-            samples = [len(decode_mono(os.path.expanduser(c), 16000))
-                       for c in clips]
-        except (OSError, ValueError, RuntimeError):
-            return out
-        out["max_tokens"] = output_budget(
-            sum(samples) / 16000, sum(num_audio_tokens(n) for n in samples))
-    return out
+    if not is_speech_encoder(getattr(args, "mmproj", None)):
+        return None
+    from gmlx.models.nemotron_h.transcription import CONTEXT_TOKENS
+
+    return CONTEXT_TOKENS
+
+
+def _speech_clips(processor, held: list, new: list) -> tuple[list, list]:
+    """``held`` and ``new`` as 16 kHz samples, each clip read once (a
+    restored session holds paths). Raises OSError, ValueError or
+    RuntimeError for a clip that does not read, or past the model's
+    clip and duration limits."""
+    import numpy as np
+
+    from gmlx._vendor.mlx_vlm.utils import load_audio
+
+    fe = processor.feature_extractor
+
+    def read(c):
+        if isinstance(c, np.ndarray):
+            return c
+        return load_audio(os.path.expanduser(c), sr=fe.sampling_rate)
+
+    held, new = [read(c) for c in held], [read(c) for c in new]
+    fe.check(held + new)
+    return held, new
+
+
+def _speech_prompt_tokens(processor, prompt: str, clips: list) -> int:
+    """Tokens of a speech model's prompt once each audio marker is its
+    clip's audio tokens."""
+    text = prompt.replace(processor.audio_token, "")
+    fe = processor.feature_extractor
+    return (len(processor.tokenizer.encode(text, add_special_tokens=False))
+            + sum(fe.tokens(len(c)) for c in clips))
+
+
+def _transcription_sampling(explicit: set) -> dict:
+    """The sampling of a turn that transcribes: greedy, but for the knobs
+    the user set."""
+    greedy = {"temp": 0.0, "top_p": 1.0, "top_k": 0, "min_p": 0.0,
+              "repetition_penalty": 1.0}
+    return {k: v for k, v in greedy.items() if k not in explicit}
 
 
 def _compose_user_content(state: ChatState, line: str) -> str:
@@ -1281,6 +1313,7 @@ def _slash_sampling_knob(cmd, arg, state):
     except ValueError:
         print(f"[chat] {cmd} needs a {cast.__name__}, got {arg!r}")
         return None
+    state.sampling_explicit.add(key)
     if (state.assistant_brain is not None
             and key in _ASSISTANT_SAMPLING):
         # An explicit /command rides along even when it lands back on
@@ -3584,8 +3617,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             print(f"error: {e}", file=sys.stderr)
             return 2
         # Chat holds the conversation, so its KV room is the serve
-        # context's.
-        preload_wire_check(args, depth=None)
+        # context's, or the speech model's trained context.
+        preload_wire_check(args, depth=_speech_context(args))
         _ensure_stream_cb_caps(args)
         from gmlx.serve.cb_phase import install_cb_phase_steps
 
@@ -3762,6 +3795,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         "drafted": 0,
         "rounds": 0,
     }
+    from gmlx.commands.cli import _explicit_dests
+    state.sampling_explicit = _explicit_dests(parser, argv) & {
+        "temp", "top_p", "top_k", "min_p", "max_tokens", "repetition_penalty"}
     state.sampling = {
         "temp": args.temp,
         "top_p": args.top_p,
@@ -3858,6 +3894,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             return
         state.ctx_max = args.max_kv_size or _cfg_get(
             "max_position_embeddings")
+        speech_ctx = _speech_context(args)
+        if speech_ctx:
+            state.ctx_max = min(state.ctx_max or speech_ctx, speech_ctx)
         state.model_info = _build_model_info(args, config, drafter, vlm_mtp)
         state.session_meta["arch"] = (
             state.model_info.get("arch") or args.arch)
@@ -4279,6 +4318,17 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
 
             imgs = state.take_list("staged_images")
             auds = state.take_list("staged_audio")
+            speech_ctx = _speech_context(args)
+            if speech_ctx:
+                try:
+                    if imgs:
+                        raise ValueError("this model takes no images")
+                    held, auds = _speech_clips(processor, vlm_audios, auds)
+                except (OSError, ValueError, RuntimeError) as e:
+                    state.turn_checkpoint = None
+                    print(f"[chat] message not sent: {e}")
+                    continue
+                vlm_audios[:] = held
             transcribe = (bool(auds) and not line.strip()
                           and bool(state.audio_instruction))
             turn_kwargs, turn_prefill = template_kwargs, state.thinking_prefill
@@ -4287,10 +4337,13 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 line = state.audio_instruction
                 turn_kwargs = {**template_kwargs, "enable_thinking": False}
                 turn_prefill = ""
-                turn_sampling.update(_transcription_sampling(auds, s))
+                turn_sampling.update(
+                    _transcription_sampling(state.sampling_explicit))
+            turn_msgs = []
             if first_turn and state.system_prompt:
-                vlm_msgs.append({"role": "system", "content": state.system_prompt})
-            vlm_msgs.append(
+                turn_msgs.append(
+                    {"role": "system", "content": state.system_prompt})
+            turn_msgs.append(
                 _vlm_message(
                     model_type,
                     _compose_user_content(state, line),
@@ -4299,14 +4352,36 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     len(auds),
                 )
             )
-            vlm_images.extend(imgs)
-            vlm_audios.extend(auds)
-            first_turn = False
             from .reasoning import with_thinking_prefill
 
             prompt = with_thinking_prefill(get_chat_template(
-                processor, vlm_msgs, add_generation_prompt=True, **turn_kwargs
+                processor, vlm_msgs + turn_msgs, add_generation_prompt=True,
+                **turn_kwargs
             ), turn_prefill)
+            if speech_ctx:
+                used = _speech_prompt_tokens(
+                    processor, str(prompt), vlm_audios + auds)
+                if used >= speech_ctx:
+                    state.turn_checkpoint = None
+                    print(f"[chat] message not sent: the conversation would "
+                          f"be {used:,} tokens, and the model's context is "
+                          f"{speech_ctx:,}. /reset starts a new conversation")
+                    continue
+                if transcribe and "max_tokens" not in state.sampling_explicit:
+                    from gmlx.models.nemotron_h.transcription import (
+                        output_budget,
+                    )
+
+                    rate = processor.feature_extractor.sampling_rate
+                    seconds = sum(len(c) for c in auds) / rate
+                    turn_sampling["max_tokens"] = output_budget(
+                        seconds, used, speech_ctx)
+                turn_sampling["max_tokens"] = min(
+                    turn_sampling["max_tokens"], speech_ctx - used)
+            vlm_msgs.extend(turn_msgs)
+            vlm_images.extend(imgs)
+            vlm_audios.extend(auds)
+            first_turn = False
             # No cross-turn KV cache on the VLM path yet: each turn
             # re-prefills the whole conversation (and re-encodes media).
             # mlx-vlm's own criteria enforces thinking_budget here; the

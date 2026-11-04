@@ -1957,7 +1957,7 @@ def _run_vlm(args) -> int:
             cast(Any, processor),
             prompt,
             image=images or None,
-            audio=audios or None,
+            audio=speech_clips(args) or audios or None,
             max_tokens=args.max_tokens,
             temperature=args.temp,
             verbose=True,
@@ -2568,26 +2568,36 @@ def pair_speech_encoder(args, *, always: bool) -> None:
     print(f"[asr] speech encoder: {os.path.basename(path)}", file=sys.stderr)
 
 
-def speech_audio(args) -> tuple[float, int] | None:
-    """Seconds and audio tokens of a run's --audio clips when its mmproj
-    is a speech encoder, else None (and None for a clip that does not
-    decode, which the processor then names)."""
+def speech_clips(args) -> list | None:
+    """A run's --audio clips as 16 kHz samples, read once, when its mmproj
+    is a speech encoder; else None (and None for a clip that does not
+    read, which the processor then names)."""
     clips = _media_inputs(args)[1]
     if not clips or not is_speech_encoder(getattr(args, "mmproj", None)):
         return None
-    cached = getattr(args, "_speech_audio", None)
+    cached = getattr(args, "_speech_clips", None)
     if cached is None:
-        from gmlx.models.nemotron_h.speech import num_audio_tokens
-        from gmlx.serve.media_programs import decode_mono
+        from gmlx._vendor.mlx_vlm.utils import load_audio
 
         try:
-            samples = [len(decode_mono(os.path.expanduser(c), 16000))
-                       for c in clips]
+            cached = [load_audio(os.path.expanduser(c), sr=16000)
+                      for c in clips]
         except (OSError, ValueError, RuntimeError):
             return None
-        cached = args._speech_audio = (
-            sum(samples) / 16000, sum(num_audio_tokens(n) for n in samples))
+        args._speech_clips = cached
     return cached
+
+
+def speech_audio(args) -> tuple[float, int] | None:
+    """Seconds and audio tokens of a run's speech clips (``speech_clips``),
+    else None."""
+    clips = speech_clips(args)
+    if clips is None:
+        return None
+    from gmlx.models.nemotron_h.speech import num_audio_tokens
+
+    return (sum(len(c) for c in clips) / 16000,
+            sum(num_audio_tokens(len(c)) for c in clips))
 
 
 def transcribes(args, parser, argv) -> bool:
