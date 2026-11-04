@@ -172,13 +172,14 @@ print((out[:, 0] != want).sum())  # 0
     174,763, which the ComfyUI steps route reaches with several large references and `gmlx image`
     with a large canvas.
   - `pair_halves` in `gmlx/video/rope.py` reorders the 96 rotated dims of each 128-dim head of a
-    MiniMax-H3 block's queries and keys and joins the other 32 back on the last axis. With 56
-    heads, H3 and FastH3 pass from 299,594 rows of the packed sequence. A 15 s clip at 2240x1280
-    has 299,600 video rows, and `gmlx video` reaches it on a 128 GB Mac.
+    MiniMax-H3 block's queries and keys and joins the other 32 back on the last axis. With 56 heads,
+    H3 and FastH3 pass from 299,594 rows of the packed sequence. A 15 s clip at 2240x1280 has
+    299,600 video rows, and `gmlx video` reaches it with H3 on a 96 GB Mac and with FastH3 on a
+    128 GB Mac.
   - `attend` in `gmlx/video/families/h3/model.py` joins H3's dense attention of query chunks of
     4,096 rows on the token axis of [1, 56, L, 128]. It passes from 304,966 rows. A 15 s clip at
-    2304x1280 has 308,160 video rows, and `gmlx video` reaches it on a 128 GB Mac. FastH3 runs
-    video sparse attention instead.
+    2304x1280 has 308,160 video rows, and `gmlx video` reaches it on a 96 GB Mac. FastH3 runs video
+    sparse attention instead.
   - `MemBlock` in `gmlx/video/vae/tiny.py` joins each frame's features and those of the frame
     before on the last axis in TAEH3, the decoder of `gmlx video --preview`. The three blocks at 64
     channels, over the 10 frames that a run of 5 latents grows to at a quarter of the canvas a
