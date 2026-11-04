@@ -339,6 +339,28 @@ def test_an_alpha_change_builds_its_own_pair(op):
                 if k[0] == install.KERNEL]) == 2
 
 
+def test_a_table_naming_a_pair_under_two_alphas_runs_each_at_its_own(op):
+    """One table names each held pair twice on its band: at strength 1
+    with no alpha, and at strength -1 at alpha 3, as two LoRA nodes of
+    one file with and without its header alpha give it. The pipeline
+    holds each pair once and the table builds one kernel pair, whose B
+    holds each part at its own alpha / rank. One alpha for both parts
+    would cancel them and leave the base output."""
+    pipe = _pipe()
+    x = _x()
+    pairs = [(d, u) for d, u, _a in _pairs(7)]
+    rows = (_qkv_rows([(d, u, None) for d, u in pairs], 1.0)
+            + _qkv_rows([(d, u, 3.0) for d, u in pairs], -1.0))
+    entries = _entries(pipe, QKV, rows)
+    assert all(len(patches) == 2 for _m, _b, patches in entries)
+    y = _f64(_run(pipe, entries, QKV, x))
+    assert rel_l2(y, _ref(pipe, QKV, x, rows)) <= TOL
+    assert rel_l2(y, _ref(pipe, QKV, x, [])) > 10 * TOL
+    assert len(pipe.adapters) == 3 and op.calls == 1
+    assert len([k for k in pipe.tables._items
+                if k[0] == install.KERNEL]) == 1
+
+
 def test_a_kernel_pair_stays_while_a_table_built_over_it_is_held(op):
     """The kernel pair two tables share is counted once, under its own
     key, and in neither table. Bounds lowered to nothing shed the table
