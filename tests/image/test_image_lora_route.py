@@ -754,3 +754,281 @@ def test_a_timed_leaf_keeps_the_route_and_books_one_record(op):
     assert type(_leaf(pipe, QKV).base) is KQuantLinear
     assert ops.lora_fused is kq_routes.lora_fused
 
+
+# The two LoRA caches under a random sequence of their callers'
+# operations, in the kernel form and on stock leaves.
+
+SLOTS = [*((QKV, b) for b in BANDS), (QKV, None), (OTHER, None), (W1, None),
+         ("layers.0.attention.out", None), ("layers.1.feed_forward.w2", None)]
+OWN_ALPHA = 4.0
+OPS_PER_SEED = 300
+
+
+def _slot_dims(pipe, slot) -> tuple:
+    path, band = slot
+    out, inp = install.linear_dims(_leaf(pipe, path))
+    return (band[2] if band else out), inp
+
+
+def _new_pair(pipe, rng, slot) -> tuple:
+    out, inp = _slot_dims(pipe, slot)
+    d, u, _ = make_pair(rng, out, inp, int(rng.choice([2, 4, 8])))
+    dtype = mx.bfloat16 if rng.random() < 0.5 else mx.float32
+    d, u = mx.array(d).astype(dtype), mx.array(u).astype(dtype)
+    mx.eval(d, u)
+    return d, u
+
+
+def _reach(obj, out: dict) -> None:
+    """The arrays ``obj`` keeps alive, by identity: a pair, a built table's
+    parts and factors, a kernel pair. The leaves of the DiT and the
+    closures over them are left out."""
+    if isinstance(obj, mx.array):
+        out[id(obj)] = obj
+    elif isinstance(obj, (list, tuple)):
+        for o in obj:
+            _reach(o, out)
+    elif isinstance(obj, dict):
+        for o in obj.values():
+            _reach(o, out)
+    elif isinstance(obj, (install.Pair, plan.Part)):
+        _reach([obj.down, obj.up], out)
+    elif type(obj).__module__ == install.__name__:
+        for k, v in vars(obj).items():
+            if k not in ("_leaves", "_pairs", "_plain", "fns"):
+                _reach(v, out)
+
+
+def _check_caches(pipe) -> None:
+    """The distinct arrays the two caches and the patch state keep alive
+    add up to the bytes the caches count; a cache over its bound holds
+    only what is pinned; every held table's pairs are in the pair cache."""
+    ad, tb = pipe.adapters, pipe.tables
+    live: dict = {}
+    for k in ad.keys(lambda k: True):
+        _reach(ad.peek(k), live)
+    held = []
+    for k in tb.keys(lambda k: True):
+        v = tb.peek(k)
+        if k[0] == install.KERNEL:
+            _reach(v, live)
+        else:
+            held.append(v)
+    cur = list(pipe.lora._cur.values()) if pipe.lora is not None else []
+    for t in held + cur:
+        _reach(t, live)
+    assert sum(int(a.nbytes) for a in live.values()) == ad.bytes + tb.bytes
+    if ad.bytes > ad.max_bytes:
+        assert set(ad.keys(lambda k: True)) <= ad.kept
+    if tb.bytes > tb.max_bytes:
+        mine = {id(t) for t in cur}
+        kernels = set().union(*(t.kernels for t in cur))
+        free = [(k[0][:8], tb.nbytes(k)) for k in tb.keys(lambda k: True)
+                if k not in kernels and id(tb.peek(k)) not in mine]
+        assert not free, (tb.bytes, tb.max_bytes, free)
+    pair_arrays: dict = {}
+    for k in ad.keys(lambda k: True):
+        _reach(ad.peek(k), pair_arrays)
+    for t in held + cur:
+        assert all(ad.peek(k) is not None for k in t.keys)
+        parts: dict = {}
+        _reach(t._parts, parts)
+        assert parts.keys() <= pair_arrays.keys()
+
+
+class _Sequence:
+    """A pipeline, the entry's own pairs, and the pairs and tables the
+    operations made, with one method per operation."""
+
+    def __init__(self, seed: int):
+        self.rng = np.random.default_rng(seed)
+        self.pipe = _pipe()
+        self.own = [(slot, *_new_pair(self.pipe, self.rng, slot))
+                    for slot in (SLOTS[1], (W1, None), SLOTS[-2])]
+        self.own_keys: list = []
+        self.load_own()
+        own = self.pipe.adapters.bytes
+        self.bounds = {"adapters": own + (96 << 10), "tables": 96 << 10}
+        self.pipe.adapters.max_bytes = self.bounds["adapters"]
+        self.pipe.tables.max_bytes = self.bounds["tables"]
+        self.pool: list = []        # (slot, down, up, alpha, twin)
+        self.tids: list = []
+        self.refused = self.missing = 0
+
+    def load_own(self) -> None:
+        # The entry reads its file into a cache fitted to hold it, then
+        # sets the keep set.
+        need = sum(int(d.nbytes) + int(u.nbytes) for _s, d, u in self.own)
+        self.pipe.adapters.max_bytes = max(self.pipe.adapters.max_bytes, need)
+        self.own_keys = []
+        for _slot, d, u in self.own:
+            self.own_keys.append(install.register_pair(
+                self.pipe, d, u, OWN_ALPHA, hold=self.own_keys))
+        self.pipe.adapters.keep(self.own_keys)
+
+    def _put(self, row, hold=()) -> str | None:
+        slot, d, u, alpha, twin = row
+        pipe = self.pipe
+        nbytes = int(d.nbytes) + int(u.nbytes)
+        try:
+            return install.register_pair(pipe, d, u, alpha, twin=twin,
+                                         hold=hold)
+        except install.PairRoomError:
+            # Only a pair that cannot fit beside the pairs that stay.
+            stay = set(pipe.adapters.kept) | set(hold)
+            assert sum(pipe.adapters.nbytes(k) for k in stay) + nbytes \
+                > pipe.adapters.max_bytes
+            self.refused += 1
+            return None
+
+    def _fresh(self) -> tuple:
+        slot = SLOTS[self.rng.integers(len(SLOTS))]
+        alpha = None if self.rng.random() < 0.5 else 2.0
+        return (slot, *_new_pair(self.pipe, self.rng, slot), alpha, None)
+
+    def _own_row(self, copy: bool) -> tuple:
+        i = int(self.rng.integers(len(self.own)))
+        slot, d, u = self.own[i]
+        if copy:
+            # An images API read of a copy of the entry's file with no
+            # header: the same content at full bytes under alpha None.
+            d, u = (mx.array(np.array(a.astype(mx.float32))).astype(a.dtype)
+                    for a in (d, u))
+            mx.eval(d, u)
+            return slot, d, u, None, None
+        return slot, d, u, None, self.own_keys[i]
+
+    def register(self) -> None:
+        row = self._fresh()
+        if self._put(row) is not None:
+            self.pool.append(row)
+
+    def twin(self) -> None:
+        row = self._own_row(copy=False)
+        if self._put(row) is not None:
+            self.pool.append(row)
+
+    def copy(self) -> None:
+        row = self._own_row(copy=True)
+        if self._put(row) is not None:
+            self.pool.append(row)
+
+    def define(self) -> None:
+        # A step route's define: every pair of the body registered, the
+        # earlier ones held for the later, then the table.
+        rows = []
+        for _ in range(int(self.rng.integers(1, 4))):
+            pick = self.rng.random()
+            if pick < 0.4 or not self.pool:
+                rows.append(self._fresh())
+            elif pick < 0.8:
+                rows.append(self.pool[self.rng.integers(len(self.pool))])
+            else:
+                rows.append(self._own_row(copy=self.rng.random() < 0.3))
+        if self.rng.random() < 0.3:
+            i = int(self.rng.integers(len(self.own)))
+            rows.append((self.own[i][0], *self.own[i][1:], OWN_ALPHA, None))
+        keys: list = []
+        entries: dict = {}
+        for row in rows:
+            key = self._put(row, keys)
+            if key is None:
+                return
+            keys.append(key)
+            patches = entries.setdefault(row[0], [])
+            if key not in [k for k, _s in patches]:
+                patches.append((key, float(self.rng.choice([1.0, 0.5,
+                                                            -0.7]))))
+        self.pool += [r for r in rows if not any(r is q for q in self.pool)]
+        self.tids.append(api.define_patch_table(
+            self.pipe, [(p, b, patches) for (p, b), patches in
+                        entries.items()]))
+
+    def step(self) -> None:
+        pipe = self.pipe
+        self.tids = [t for t in self.tids if t in pipe.patch_tables]
+        if not self.tids:
+            return
+        tid = self.tids[self.rng.integers(len(self.tids))]
+        dtype = mx.bfloat16 if self.rng.random() < 0.7 else mx.float32
+        rows = int(self.rng.choice([2, 64]))
+        paths = sorted({p for p, _b, _s in pipe.patch_tables[tid]["entries"]})
+        prev = install.activate(pipe, tid)
+        try:
+            for path in paths:
+                inp = install.linear_dims(_leaf(pipe, path))[1]
+                x = mx.array(self.rng.standard_normal(
+                    (1, rows, inp)).astype(np.float32)).astype(dtype)
+                mx.eval(_leaf(pipe, path)(x))
+        except lora.AdapterError:
+            # The step route's 409: a pair of the table is no longer held.
+            assert any(pipe.adapters.peek(k) is None
+                       for _p, _b, patches in pipe.patch_tables[tid]["entries"]
+                       for k, _s in patches)
+            self.missing += 1
+        finally:
+            install.restore(pipe, prev)
+
+    def shrink(self) -> None:
+        which = "adapters" if self.rng.random() < 0.5 else "tables"
+        frac = float(self.rng.choice([0.0, 0.125, 0.25, 0.5, 1.0, 1.0]))
+        cache = getattr(self.pipe, which)
+        cache.max_bytes = int(self.bounds[which] * frac)
+        install.shed_to_bounds(self.pipe)
+
+    def drop_dit(self) -> None:
+        from types import SimpleNamespace
+
+        from gmlx.serve import image_service, video_service
+
+        pipe, dit, vae = self.pipe, self.pipe.dit, self.pipe.vae
+        served = SimpleNamespace(pipe=pipe, adapters=[])
+        if self.rng.random() < 0.5:
+            # A video entry's encode: the DiT and every pair go, and its
+            # ensure_dit reads the entry's file again.
+            video_service.drop_dit(served)
+            pipe.dit = dit
+            install.rewrap(pipe)
+            self.load_own()
+        else:
+            # A staged image entry's encode: the DiT goes, the pairs stay.
+            image_service._drop_dit(served)
+            pipe.dit, pipe.vae = dit, vae
+            install.rewrap(pipe)
+
+    def release(self) -> None:
+        from types import SimpleNamespace
+
+        from gmlx.serve import image_service
+
+        # The pool lets the entry go, and loads it again.
+        image_service._release([SimpleNamespace(pipe=self.pipe)])
+        self.load_own()
+
+    OPS = (("register", 4), ("twin", 1), ("copy", 1), ("define", 5),
+           ("step", 6), ("shrink", 2), ("drop_dit", 1), ("release", 1))
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_a_random_sequence_counts_every_lora_array_once(op, seed):
+    """Every array the pair cache, the tables cache and the patch state
+    keep alive is counted once, each cache is over its bound only by what
+    is pinned, and every held table's pairs are held, after each of a few
+    hundred operations of the step routes, the images API and the entry
+    in a seeded random order."""
+    seq = _Sequence(seed)
+    names = [n for n, _w in _Sequence.OPS]
+    weights = np.array([w for _n, w in _Sequence.OPS], np.float64)
+    ran = dict.fromkeys(names, 0)
+    done: list = []
+    for _ in range(OPS_PER_SEED):
+        name = names[seq.rng.choice(len(names), p=weights / weights.sum())]
+        getattr(seq, name)()
+        ran[name] += 1
+        done.append(name)
+        try:
+            _check_caches(seq.pipe)
+        except AssertionError as e:
+            raise AssertionError(f"after {done[-6:]}, op {len(done)}") from e
+    assert all(ran.values()) and seq.refused and seq.missing, (ran, seq.refused,
+                                                               seq.missing)
