@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import importlib
 import json
 import logging
@@ -448,7 +449,9 @@ async def load(request: Request):
 async def unload(request: Request):
     body = await _fields(request)
     path, spec = _spec(body.get("model"))
-    return SETTINGS.host.unload(path, spec)
+    # An unload waits on the build lock and the image worker: off the
+    # event loop.
+    return await asyncio.to_thread(SETTINGS.host.unload, path, spec)
 
 
 def _hash_path(request: Request) -> str:
@@ -901,6 +904,7 @@ async def step(request: Request):
                if h not in STATE.tensors]
     model = fields.get("model") or (run.model if run else None)
     hold = await _acquire(model)
+    keep = contextlib.ExitStack()
     try:
         served = _served(hold)
         _image_only(served, "a step on x")
@@ -934,6 +938,10 @@ async def step(request: Request):
                             "skips no blocks")
         table = None
         hint = None
+        # The matrices the step may define its table again from stay in
+        # the store from its check to its turn's end.
+        keep.enter_context(STATE.adapters.holding(
+            _step_holds(served, fields.get("patch_table"))))
         try:
             table = _table(served, fields.get("patch_table"))
         except Missing as m:
@@ -1043,11 +1051,7 @@ async def step(request: Request):
                                            ref_cache, skip)
             return _host(v), fwd_s, cache
 
-        # The matrices the step may define its table again from stay in
-        # the store to its turn's end.
-        with STATE.adapters.holding(_step_holds(served, fields.get(
-                "patch_table")) if table is not None else {}):
-            v, fwd_s, cache = await _on_worker(work)
+        v, fwd_s, cache = await _on_worker(work)
         if conv.sign != 1.0:
             v = v * np.float32(conv.sign)
         if run is not None:
@@ -1062,6 +1066,7 @@ async def step(request: Request):
             "X-Gmlx-Server-Ms": f"{server_ms:.2f}",
             "X-Gmlx-Prefix-Cache": cache})
     finally:
+        keep.close()
         hold.release()
 
 
@@ -1203,6 +1208,7 @@ async def _av_step(t0, tensors, fields, run):
     missing = [h for h in hashes if h not in STATE.tensors]
     model = fields.get("model") or (run.model if run else None)
     hold = await _acquire(model)
+    keep = contextlib.ExitStack()
     try:
         served = _served(hold)
         if not _video(served) or served.plan.family not in AV_FAMILIES:
@@ -1211,6 +1217,10 @@ async def _av_step(t0, tensors, fields, run):
         frames, width, height = _clip_of(served.pipe.video_family,
                                          v_w.shape, a_w.shape)
         table = None
+        # The matrices the step may define its table again from stay in
+        # the store from its check to its turn's end.
+        keep.enter_context(STATE.adapters.holding(
+            _step_holds(served, fields.get("patch_table"))))
         try:
             table = _table(served, fields.get("patch_table"))
         except Missing as m:
@@ -1290,9 +1300,7 @@ async def _av_step(t0, tensors, fields, run):
                 raise StepInterrupted()
             return _host(vv), _host(va), time.perf_counter() - t1, hit
 
-        with STATE.adapters.holding(_step_holds(served, tid)
-                                    if table is not None else {}):
-            vv, va, fwd_s, hit = await _on_worker(work)
+        vv, va, fwd_s, hit = await _on_worker(work)
         if run is not None:
             run.steps += 1
             run.rows += 1
@@ -1305,6 +1313,7 @@ async def _av_step(t0, tensors, fields, run):
             "X-Gmlx-Server-Ms": f"{server_ms:.2f}",
             "X-Gmlx-Prefix-Cache": "hit" if hit else "miss"})
     finally:
+        keep.close()
         hold.release()
 
 

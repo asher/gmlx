@@ -740,13 +740,19 @@ def test_a_step_defining_its_table_again_never_sheds_its_matrices(
 LOOP_WAIT = 5
 
 
-def _loop_client(loops: list):
-    """A steps client whose requests each record the event loop that
-    serves them in ``loops``."""
+def _loop_app(loops: list):
+    """The server's app, each request of which records the event loop
+    that serves it in ``loops``."""
     async def app(scope, receive, send):
         loops.append(asyncio.get_running_loop())
         await _APP.app(scope, receive, send)
-    return _client(http=TestClient(app, base_url="http://127.0.0.1"))
+    return TestClient(app, base_url="http://127.0.0.1")
+
+
+def _loop_client(loops: list):
+    """A steps client whose requests each record the event loop that
+    serves them in ``loops``."""
+    return _client(http=_loop_app(loops))
 
 
 def _locked_at(monkeypatch, pool, name: str, loops: list) -> list:
@@ -817,6 +823,118 @@ def test_a_steps_409_names_its_memory_without_the_pools_lock(
         "1 tensor(s) or table(s) are not held by the server; upload them "
         "and retry. 0.1 GB of LoRA matrices are not held: the server let "
         "them go for memory")
+
+
+# The unload routes wait on the build lock off the event loop.
+
+def _build_held_at(monkeypatch, pool, loops: list) -> list:
+    """Wrap an unload's eviction: as it starts, a thread takes the pool's
+    build lock, as a cold load in flight holds it, and asks the request's
+    event loop to let it go. The list returned gets True when the loop
+    did, and False when it did not within LOOP_WAIT, as when the unload
+    waits on the lock on the loop."""
+    from gmlx.serve.patches import routes as serve_routes
+
+    real, out = serve_routes._evict_ignoring_retained, []
+
+    def wrapped(*a, **k):
+        locked, free = threading.Event(), threading.Event()
+        loop = loops[-1]
+
+        def holder():
+            with pool._build_lock:
+                locked.set()
+                loop.call_soon_threadsafe(free.set)
+                out.append(free.wait(LOOP_WAIT))
+        threading.Thread(target=holder, daemon=True).start()
+        assert locked.wait(LOOP_WAIT)
+        return real(*a, **k)
+
+    monkeypatch.setattr(serve_routes, "_evict_ignoring_retained", wrapped)
+    return out
+
+
+def test_a_step_unload_waits_for_a_cold_load_off_the_event_loop(
+        request, monkeypatch, tmp_path):
+    """A step route's unload while a cold load holds the build lock: the
+    unload waits for the lock on a thread, and the request's event loop
+    runs on. The model goes once the load lets the lock go."""
+    pool, e, _p, _pairs = _own_pairs(request, monkeypatch, tmp_path)
+    monkeypatch.setattr(residency, "_installed_pool", lambda: pool)
+    loops: list = []
+    c = _loop_client(loops)
+    free = _build_held_at(monkeypatch, pool, loops)
+    assert c.json("POST", "models/unload", {"model": "own"}) == {
+        "model": "own", "unloaded": True}
+    assert free == [True], "the unload waited on the build lock on the loop"
+    assert e not in pool._entries.values()
+
+
+def test_an_unload_waits_for_a_cold_load_off_the_event_loop(
+        request, monkeypatch, tmp_path):
+    """The server's /unload of a model while a cold load holds the build
+    lock: the unload waits for the lock on a thread, and the request's
+    event loop runs on. The model goes once the load lets the lock go."""
+    import gmlx.serve.patches as sp
+    from gmlx.serve.patches import routes as serve_routes
+
+    pool, e, _p, _pairs = _own_pairs(request, monkeypatch, tmp_path)
+    monkeypatch.setattr(serve_routes, "_get_pool", lambda: pool)
+    monkeypatch.setattr(serve_routes.serving, "resolve_pool_path",
+                        lambda model: e.model_path)
+    sp.install_pool_aware_unload()
+    loops: list = []
+    free = _build_held_at(monkeypatch, pool, loops)
+    r = _loop_app(loops).post("/unload", json={"model": "own"})
+    assert (r.status_code, r.json()) == (
+        200, {"status": "success", "unloaded": "own"})
+    assert free == [True], "the unload waited on the build lock on the loop"
+    assert e not in pool._entries.values()
+
+
+def _cap_put_after_check(monkeypatch) -> dict:
+    """Set the adapter cap at what the store holds, and put another
+    client's tensor right after a step's table check, as an upload on
+    another thread can: the put's cap shed drops the oldest tensors not
+    held. Returns the store's tensors and their bytes before."""
+    before = _store()
+    total = sum(before.values())
+    monkeypatch.setattr(steps.STATE.adapters, "configured", total)
+    monkeypatch.setattr(steps.STATE.adapters, "max_bytes", total)
+    real = routes._table
+
+    def then(served, tid):
+        got = real(served, tid)
+        k = min(before.values())
+        steps.STATE.adapters.put("another client's", wire.WireTensor(
+            "U8", (k,), memoryview(bytes(k))))
+        return got
+
+    monkeypatch.setattr(routes, "_table", then)
+    return before
+
+
+def test_a_steps_matrices_are_held_from_its_table_check(
+        request, monkeypatch, tmp_path):
+    """A step whose table and pairs another job let go passes its check on
+    the matrices the server keeps, and another client's upload then puts a
+    tensor past the adapter cap. The step holds its matrices from that
+    check, so the cap's shed drops none of them: the step defines its
+    table again and steps as before with no 409."""
+    pool, e, p, pairs = _own_pairs(request, monkeypatch, tmp_path)
+    steps.STATE.adapters.clear()
+    c = _client()
+    rows = _rows(c, _features())
+    tid = _pack_sync(c, pairs, 2.0)()[1]
+    x = noise_from_seed(3, SHAPE)
+    first = c.step("own", None, x, [0.75], rows, patch_table=tid)
+    image_service.shed_lora(e, p.adapters.bytes + p.tables.bytes)
+    pool.lora_settle(e, "another job")
+    before = _cap_put_after_check(monkeypatch)
+    again = c.step("own", None, x, [0.75], rows, patch_table=tid)
+    assert np.array_equal(again, first)
+    assert set(before) | {"another client's"} == set(_store())
+    _books_hold(pool, e)
 
 
 # A route's estimate reads no pipeline.

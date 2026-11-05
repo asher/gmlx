@@ -613,13 +613,17 @@ def install_pool_aware_unload() -> None:
     app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def unload_endpoint(request: Request):
-        pool = _get_pool()
         try:
             body = await request.json()
         except Exception:
             body = None
         model_id = (body or {}).get("model") if isinstance(body, dict) else None
+        # An unload waits on the build lock and the image worker: off the
+        # event loop.
+        return await run_in_threadpool(_unload, model_id)
 
+    def _unload(model_id):
+        pool = _get_pool()
         if model_id:
             if pool is None:
                 # 503, not 200: without a pool the unload cannot be honored.

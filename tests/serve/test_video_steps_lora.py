@@ -204,3 +204,25 @@ def test_a_video_step_defining_its_table_again_never_sheds_its_matrices(
     assert all(_rel(a, b) < 1e-6 for a, b in zip(again, first))
     assert idle not in t.pool._entries.values()
     _books_hold(t.pool, t.e)
+
+
+def test_a_video_steps_matrices_are_held_from_its_table_check(
+        request, monkeypatch, tmp_path):
+    """A video step after an encode, which let the table's pairs go,
+    passes its check on the matrices the server keeps, and another
+    client's upload then puts a tensor past the adapter cap. The step
+    holds its matrices from that check, so the cap's shed drops none of
+    them: the step defines its table again and gives the first one's
+    output with no 409."""
+    from test_step_routes_lora import _cap_put_after_check
+    from test_video_h3_lora import _adapter
+
+    t = _entry(request, monkeypatch, tmp_path)
+    tid = t.c.define_table("h3", _table_body(t.c, _adapter(6)))
+    first = _step(t, patch_table=tid)
+    t.c.encode("h3", "a cat")
+    before = _cap_put_after_check(monkeypatch)
+    again = _step(t, patch_table=tid)
+    assert all(_rel(a, b) < 1e-6 for a, b in zip(again, first))
+    assert set(before) | {"another client's"} == set(_store())
+    _books_hold(t.pool, t.e)
