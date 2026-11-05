@@ -22,10 +22,17 @@ site gate holds each op of every block and each linear leaf on the path a
 request takes to the stock op in float32 on the same input, within 2 n u
 (h3_gates.py).
 
+The anchor cases of merge 3 run the same step with keyframes and guides:
+the first frame, the last, both, a mid-clip image with an audio anchor,
+and at 512x512x22 a 5-frame guide clip at frame 17. Each carries its
+anchors' latents, the oracle's noise of their video rows, and the
+prompt's tags with a vision run where the case has keyframes.
+
 The tiny cases run ComfyUI's class at a tiny size on random weights. Its
-fixture is committed, so the whole forward is checked on the CPU tier:
+fixtures are committed, so the whole forward is checked on the CPU tier:
 in fp32 within FP32_TOL of the oracle, and in bf16 under the product
-gate.
+gate. Each anchor case moves the velocities, and a tag run one row off,
+an anchor one frame off or its noise dropped misses the fp32 gate.
 
 The rows on the real file need the MiniMax-H3 GGUF under
 KQUANT_TEST_GGUF_DIR and the fixtures under GMLX_VIDEO_FIXTURES. They
@@ -37,6 +44,7 @@ import os
 from pathlib import Path
 
 import mlx.core as mx
+import numpy as np
 import pytest
 import block_gates as bg
 from block_gates import exact_process, kernel_calls, rerun_exact
@@ -53,7 +61,12 @@ from gmlx.video import loader as video_loader
 from gmlx.video.families.h3 import model as hm
 
 TINY = "selftest_h3_tiny"
+ANCHOR_CASES = ("first", "last", "both", "mid_audio", "clip17")
+TINY_ANCHORS = tuple(f"{TINY}_{c}" for c in ANCHOR_CASES)
 REAL = ("check3_h3_64x64x5", "check3_h3_512x512x22")
+REAL_ANCHORS = tuple(f"check3_h3_{c}_{shape}" for shape in
+                     ("64x64x5", "512x512x22") for c in ANCHOR_CASES
+                     if not (c == "clip17" and shape == "64x64x5"))
 # A float32 step against the oracle's float32 step: the gap is summation
 # order alone, about a hundred float32 roundings.
 FP32_TOL = 1e-5
@@ -67,7 +80,8 @@ def _manifest(name: str) -> dict:
     return committed(name)
 
 
-@pytest.mark.parametrize("name", (TINY, *REAL))
+@pytest.mark.parametrize("name", (TINY, *TINY_ANCHORS, *REAL,
+                                  *REAL_ANCHORS))
 def test_the_manifests_follow_the_rule(name):
     """Every row tolerance is twice the gap beside it, or the float32
     floor for a row the oracle runs in float32 in both modes, each
@@ -77,7 +91,7 @@ def test_the_manifests_follow_the_rule(name):
     real file the exact gate's tolerances follow their floors."""
     m = _manifest(name)
     hg.assert_manifest_rule(m)
-    if name in REAL:
+    if name in REAL or name in REAL_ANCHORS:
         hg.exact_tols(m)
         assert m["files"]["dit"] == committed(REAL[0])["files"]["dit"]
 
@@ -110,6 +124,104 @@ def test_the_tiny_step_in_float32_is_the_oracle_step(tiny, request):
     print(f"h3 check3 tiny fp32: worst {rows[top]:.2e} at {top}")
     over = {k: v for k, v in rows.items() if not v <= FP32_TOL}
     assert not over, over
+
+
+@pytest.fixture(scope="module")
+def tiny_anchors(tiny):
+    weights, t2v, _ = tiny
+    return weights, t2v, {n: committed_fixture(n) for n in TINY_ANCHORS}
+
+
+def test_each_tiny_anchor_case_is_its_keyframes_or_guides(tiny_anchors):
+    """The anchors sit where ComfyUI's nodes put them on the 22-frame
+    clip, with vision runs in the prompt where the case has keyframes."""
+    _, _, cases = tiny_anchors
+    got = {n.removeprefix(TINY + "_"): (
+        [(a["frame"], a["video_t"], a["audio_t"])
+         for a in m["inputs"]["anchors"]], m["inputs"]["spans"])
+        for n, (_, m) in cases.items()}
+    assert got == {"first": ([(0, 1, 0)], [[2, 6]]),
+                   "last": ([(21, 1, 0)], [[2, 6]]),
+                   "both": ([(0, 1, 0), (21, 1, 0)], [[1, 3], [4, 7]]),
+                   "mid_audio": ([(10, 1, 8)], []),
+                   "clip17": ([(17, 2, 0)], [])}
+
+
+@pytest.mark.parametrize("name", TINY_ANCHORS)
+def test_the_tiny_anchor_step_in_float32_is_the_oracle_step(
+        tiny_anchors, request, name):
+    """Each anchor case lays out as the oracle and runs its step within
+    FP32_TOL, and its anchors move the velocities from the text to video
+    step's by far more than the gate."""
+    if not exact_process():
+        return rerun_exact(request, f"h3 check3 tiny fp32 {name}")
+    weights, t2v, cases = tiny_anchors
+    arrays, m = cases[name]
+    model = hg.tiny_model(weights, m["inputs"]["config"])
+    assert not hg.layout_misses(model, arrays, m)
+    got = hg.measures(model, arrays, m)
+    assert not hg.unmeasured(got, m)
+    rows = {k: v for k, v in got.items() if not k.startswith("cosine ")}
+    top = max(rows, key=rows.get)
+    moved = {v: hg.rel(arrays[v], t2v[v]) for v in hg.VELOCITIES}
+    print(f"h3 check3 tiny fp32 {name}: worst {rows[top]:.2e} at {top}; "
+          "the velocities move from text to video by "
+          + ", ".join(f"{k} {v:.2e}" for k, v in moved.items()))
+    over = {k: v for k, v in rows.items() if not v <= FP32_TOL}
+    assert not over, over
+    assert all(v > 100 * FP32_TOL for v in moved.values()), moved
+
+
+@pytest.mark.parametrize("name", TINY_ANCHORS)
+def test_the_tiny_anchor_step_in_bfloat16_passes_the_product_gate(
+        tiny_anchors, name):
+    weights, _, cases = tiny_anchors
+    arrays, m = cases[name]
+    model = hg.tiny_model(weights, m["inputs"]["config"], act=mx.bfloat16)
+    got = hg.measures(model, arrays, m)
+    assert not hg.unmeasured(got, m)
+    print(hg.worst_line(f"h3 check3 tiny bf16 {name}", got, m))
+    out = hg.missed(got, m["tolerances"])
+    assert not out, out
+
+
+def _spans_off(arrays):
+    return {**arrays, "spans": arrays["spans"] + 1}
+
+
+def _frame_off(arrays):
+    return {**arrays, "anchor.0.frame": arrays["anchor.0.frame"] - 1}
+
+
+def _noise_dropped(arrays):
+    return {**arrays, "anchor_noise.0": np.zeros_like(
+        arrays["anchor_noise.0"])}
+
+
+# A wrong anchor the float32 gate must fail, and the case that shows it:
+# the vision run one row late, the guide a frame early, the noise of its
+# video rows not drawn.
+ANCHOR_FAULTS = {"a tag run one row off": (_spans_off, "first"),
+                 "an anchor one frame off": (_frame_off, "clip17"),
+                 "the noise draw dropped": (_noise_dropped, "both")}
+
+
+@pytest.mark.parametrize("fault", ANCHOR_FAULTS)
+def test_the_tiny_float32_gate_fails_a_wrong_anchor(tiny_anchors, request,
+                                                    fault):
+    if not exact_process():
+        return rerun_exact(request, "h3 check3 tiny anchor fault")
+    weights, _, cases = tiny_anchors
+    wrong, case = ANCHOR_FAULTS[fault]
+    arrays, m = cases[f"{TINY}_{case}"]
+    model = hg.tiny_model(weights, m["inputs"]["config"])
+    got = hg.measures(model, wrong(arrays), m)
+    rows = {k: v for k, v in got.items() if not k.startswith("cosine ")}
+    top = max(rows, key=rows.get)
+    vel = {v: rows[v] for v in hg.VELOCITIES}
+    print(f"h3 check3 tiny anchor fault {fault}: {rows[top]:.2e} at {top}; "
+          + ", ".join(f"{k} {v:.2e}" for k, v in vel.items()))
+    assert rows[top] > 10 * FP32_TOL, (top, rows[top])
 
 
 def _glu_halves_swapped(mp):
@@ -209,7 +321,7 @@ def test_the_loaded_dit_keeps_its_float32_leaves(real):
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("name", REAL)
+@pytest.mark.parametrize("name", (*REAL, *REAL_ANCHORS))
 def test_check3_rows(real, name):
     arrays, m = fixture(_manifest(name)["name"])
     model = _depth(real, m)
@@ -231,7 +343,7 @@ def test_check3_rows(real, name):
 # The exact gate.
 
 @pytest.mark.integration
-@pytest.mark.parametrize("name", REAL)
+@pytest.mark.parametrize("name", (*REAL, *REAL_ANCHORS))
 def test_check3_exact_gate(real, request, name):
     """Every teacher-forced row within EXACT_TOL of the oracle in its
     arithmetic, and the free rows and the velocities within the fixture's

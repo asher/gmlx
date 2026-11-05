@@ -8,7 +8,9 @@ to them, each row within twice the oracle's own gap. The exact gate runs
 it in the oracle's fp32 arithmetic. The site gate reads each op of every
 block and each linear leaf against the stock op in float32 on the same
 input. The step's layout, angles, segment rows, times and curve rows are
-held to the oracle's own."""
+held to the oracle's own. An anchor case's fixture holds each anchor's
+latents, the noise the oracle mixed into its video rows and the prompt's
+vision spans; the step takes them as a request does."""
 from __future__ import annotations
 
 import json
@@ -24,6 +26,7 @@ import qwen_gates as qg
 from block_gates import tf32
 
 from gmlx.image import pacing
+from gmlx.video import anchors as va
 from gmlx.video import api, layout, rope, schedule
 from gmlx.video.families.h3 import family as hf
 from gmlx.video.families.h3 import model as hm
@@ -92,15 +95,68 @@ def stream_times(arrays: dict) -> tuple[float, float]:
     return times_at(arrays["sigma"])
 
 
+def anchored(arrays: dict) -> tuple:
+    """The fixture's placed anchors, the oracle's noise of their video rows
+    in order and the prompt's vision spans; none for a text to video
+    step."""
+    out, noise, i = [], [], 0
+    while f"anchor.{i}.frame" in arrays:
+        v, a = arrays.get(f"anchor.{i}.video"), arrays.get(f"anchor.{i}.audio")
+        out.append(va.Anchor(int(arrays[f"anchor.{i}.frame"]),
+                             None if v is None else mx.array(v),
+                             None if a is None else mx.array(a)))
+        if v is not None:
+            noise.append(mx.array(arrays[f"anchor_noise.{len(noise)}"]))
+        i += 1
+    spans = tuple(tuple(r) for r in arrays["spans"].tolist()) \
+        if "spans" in arrays else ()
+    return tuple(out), noise, spans
+
+
+def cond(model, arrays: dict) -> tuple:
+    """(cond_video, cond_audio): the fixture's anchor rows as the step
+    mixes them with the oracle's noise."""
+    anchors, noise, _ = anchored(arrays)
+    if not anchors:
+        return (), ()
+    return model.cond_rows(anchors, int(arrays["anchor_seed"]), noise=noise)
+
+
 def case(arrays: dict):
     """The fixture's step: latents, text features, gmlx's stream times and
-    the layout gmlx builds for them."""
+    the layout gmlx builds for them, with its anchors and vision spans."""
     video = mx.array(arrays["video"])
     audio = mx.array(arrays["audio"])
     feats = mx.array(arrays["features"])[None]
     _, _, t, h, w = video.shape
-    lay = layout.pack(hf.TIMELINE, feats.shape[1], t, h, w, audio.shape[-1])
+    anchors, _, spans = anchored(arrays)
+    lay = layout.pack(hf.TIMELINE, feats.shape[1], t, h, w, audio.shape[-1],
+                      anchors=va.layout_rows(anchors), spans=spans)
     return (video, audio, feats, *stream_times(arrays), lay)
+
+
+def segment_kinds(lay) -> list:
+    """The kinds of a layout's segments as the oracle's layout has them:
+    the oracle's text segment holds the vision rows, which its tags
+    split."""
+    out: list = []
+    for s in lay.segments:
+        if not s.rows:
+            continue
+        k = "text" if s.kind == "vision" else s.kind
+        if not (out and out[-1] == k == "text"):
+            out.append(k)
+    return out
+
+
+def want_kinds(m: dict) -> list:
+    """The segment kinds of a fixture's step: text, each anchor's cond and
+    cond_audio rows in turn, then the targets."""
+    kinds = ["text"]
+    for a in m["inputs"].get("anchors", ()):
+        kinds += ["cond"] * bool(a["video_t"]) + \
+            ["cond_audio"] * bool(a["audio_t"])
+    return kinds + ["audio", "video"]
 
 
 def layout_misses(model, arrays: dict, m: dict) -> list[str]:
@@ -113,7 +169,7 @@ def layout_misses(model, arrays: dict, m: dict) -> list[str]:
     if (tv, ta) != (m["inputs"]["t_video"], m["inputs"]["t_audio"]):
         out.append(f"stream times {(tv, ta)}")
     plan = model.plan(lay, tv, ta)
-    kinds = [s.kind for s in lay.segments if s.rows]
+    kinds = segment_kinds(lay)
     if kinds != m["inputs"]["segment_kinds"]:
         out.append(f"segment kinds {kinds}")
     if not np.array_equal(lay.positions, arrays["positions"]):
@@ -145,12 +201,14 @@ def free_rows(model, arrays: dict) -> dict:
     """Every tapped row of one step from the fixture's inputs, and the
     velocities. Each block evaluates before the next, as a run does."""
     video, audio, feats, tv, ta, lay = case(arrays)
+    cv, ca = cond(model, arrays)
     taps: dict = {}
     with pacing.paced(_eval_blocks):
         text = model.caption(feats, taps)
-        vv, va = model(video, audio, tv, ta, text, lay, taps=taps)
+        vv, vaud = model(video, audio, tv, ta, text, lay, cond_video=cv,
+                         cond_audio=ca, taps=taps)
     got = {k: _np(v) for k, v in taps.items()}
-    got["velocity_video"], got["velocity_audio"] = _np(vv), _np(va)
+    got["velocity_video"], got["velocity_audio"] = _np(vv), _np(vaud)
     return got
 
 
@@ -280,7 +338,7 @@ def assert_manifest_rule(m: dict) -> None:
     assert set(res["rows_bf16_vs_fp32"]) == {
         k for k in expected_rows(m)
         if not k.startswith("free ") and k not in VELOCITIES}
-    assert m["inputs"]["segment_kinds"] == ["text", "audio", "video"]
+    assert m["inputs"]["segment_kinds"] == want_kinds(m)
     assert times_at(m["inputs"]["sigma_v"]) == \
         (m["inputs"]["t_video"], m["inputs"]["t_audio"])
 

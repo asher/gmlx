@@ -1,0 +1,574 @@
+{
+ "schema": 1,
+ "name": "selftest_h3_tiny_mid_audio",
+ "check": 3,
+ "family": "h3",
+ "script": "scripts/video_oracle/check3_h3.py",
+ "argv": [
+  "check3_h3.py",
+  "--comfy-dir",
+  "ComfyUI-h3",
+  "--self-test"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.0"
+   },
+   "diffusers": null,
+   "transformers": {
+    "version": "5.17.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": null,
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   },
+   "comfy-kitchen": {
+    "version": "0.2.40"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {},
+ "inputs": {
+  "comfy_config": {
+   "hidden_size": 64,
+   "num_layers": 2,
+   "token_refiner_num_layers": 1,
+   "num_attention_heads": 2,
+   "attention_head_dim": 128,
+   "ffn_hidden_size": 48,
+   "latents_dim": 24,
+   "audio_latents_dim": 32,
+   "patch_size": [
+    1,
+    2,
+    2
+   ],
+   "text_dim": 40,
+   "time_embed_dim": 8,
+   "rope_inv_freq_len": 16,
+   "adaln_curve_grid": 1025,
+   "norm_eps": 1e-05,
+   "qk_norm_eps": 1e-05,
+   "final_norm_eps": 1e-05
+  },
+  "config": {
+   "hidden_size": 64,
+   "num_layers": 2,
+   "num_refiner_layers": 1,
+   "num_attention_heads": 2,
+   "attention_head_dim": 128,
+   "ffn_dim": 48,
+   "in_channels": 24,
+   "audio_in_channels": 32,
+   "patch_size": [
+    1,
+    2,
+    2
+   ],
+   "text_dim": 40,
+   "adaln_basis": 8,
+   "rope_freq_dim": 16,
+   "adaln_grid": 1025,
+   "norm_eps": 1e-05,
+   "qk_norm_eps": 1e-05,
+   "final_norm_eps": 1e-05
+  },
+  "case": "mid_audio",
+  "seed": 0,
+  "shape": [
+   96,
+   64,
+   22
+  ],
+  "text_rows": 8,
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "attention": "attention_pytorch",
+  "comfy": "426f5eea52a7ece1dd599fff4cb6cd1f352ddd24",
+  "anchors": [
+   {
+    "frame": 10,
+    "video_t": 1,
+    "audio_t": 8
+   }
+  ],
+  "spans": [],
+  "anchor_seed": 5,
+  "sigma_v": 0.6875,
+  "t_video": 0.3125,
+  "t_audio": 0.6451612710952759,
+  "shifts": {
+   "video": 12.0,
+   "audio": 3.0
+  },
+  "segment_kinds": [
+   "text",
+   "cond",
+   "cond_audio",
+   "audio",
+   "video"
+  ]
+ },
+ "results": {
+  "velocity_bf16_vs_fp32": {
+   "video": {
+    "rel_l2": 0.00617376738055639,
+    "cosine": 0.9999810414224121,
+    "max_abs": 0.03389391303062439
+   },
+   "audio": {
+    "rel_l2": 0.008586382369792435,
+    "cosine": 0.9999631644125349,
+    "max_abs": 0.056679219007492065
+   }
+  },
+  "rows_bf16_vs_fp32": {
+   "video_patch_proj": {
+    "rel_l2": 0.0,
+    "cosine": 0.9999999999999999,
+    "max_abs": 0.0,
+    "teacher_forced": false
+   },
+   "audio_patch_proj": {
+    "rel_l2": 0.0,
+    "cosine": 1.0,
+    "max_abs": 0.0,
+    "teacher_forced": false
+   },
+   "condition_proj": {
+    "rel_l2": 0.002770638528143465,
+    "cosine": 0.9999961799020245,
+    "max_abs": 0.01346731185913086,
+    "teacher_forced": false
+   },
+   "token_refiner.blocks.0": {
+    "rel_l2": 0.005080681544660136,
+    "cosine": 0.9999871783966868,
+    "max_abs": 0.021263062953948975,
+    "teacher_forced": true
+   },
+   "token_refiner.final_norm": {
+    "rel_l2": 0.002731186823492428,
+    "cosine": 0.999996288412813,
+    "max_abs": 0.012421607971191406,
+    "teacher_forced": true
+   },
+   "blocks.0": {
+    "rel_l2": 0.005751868448663283,
+    "cosine": 0.9999835650296591,
+    "max_abs": 0.08396673202514648,
+    "teacher_forced": true
+   },
+   "blocks.1": {
+    "rel_l2": 0.005129895693072184,
+    "cosine": 0.9999869208010204,
+    "max_abs": 0.08330106735229492,
+    "teacher_forced": true
+   },
+   "final_layer.adaln_proj.linear": {
+    "rel_l2": 0.0,
+    "cosine": 1.0,
+    "max_abs": 0.0,
+    "teacher_forced": false
+   },
+   "final_layer.video_out": {
+    "rel_l2": 0.0024474435848963897,
+    "cosine": 0.9999970291356655,
+    "max_abs": 0.014951944351196289,
+    "teacher_forced": true
+   },
+   "final_layer.audio_out": {
+    "rel_l2": 0.0027354887802924824,
+    "cosine": 0.999996259562318,
+    "max_abs": 0.014332354068756104,
+    "teacher_forced": true
+   }
+  },
+  "free_bf16_vs_fp32": {
+   "token_refiner.blocks.0": {
+    "rel_l2": 0.005338678301661419,
+    "cosine": 0.9999858203919426,
+    "max_abs": 0.02460843324661255
+   },
+   "token_refiner.final_norm": {
+    "rel_l2": 0.0059451118574964535,
+    "cosine": 0.9999823285621131,
+    "max_abs": 0.0279085636138916
+   },
+   "blocks.0": {
+    "rel_l2": 0.005970251632984001,
+    "cosine": 0.9999823357849326,
+    "max_abs": 0.1064610481262207
+   },
+   "blocks.1": {
+    "rel_l2": 0.008553521261017256,
+    "cosine": 0.9999638587671956,
+    "max_abs": 0.14580106735229492
+   },
+   "final_layer.video_out": {
+    "rel_l2": 0.00617376738055639,
+    "cosine": 0.9999810414224121,
+    "max_abs": 0.03389391303062439
+   },
+   "final_layer.audio_out": {
+    "rel_l2": 0.008586382369792435,
+    "cosine": 0.9999631644125349,
+    "max_abs": 0.056679219007492065
+   }
+  },
+  "times": {
+   "fp32_s": 0.0,
+   "bf16_s": 0.0,
+   "bf16_teacher_forced_s": 0.0
+  }
+ },
+ "tolerances": {
+  "velocity_video": {
+   "rel_l2": 0.01234753476111278,
+   "cosine_min": 0.9999241656896483
+  },
+  "velocity_audio": {
+   "rel_l2": 0.01717276473958487,
+   "cosine_min": 0.9998526576501394
+  },
+  "video_patch_proj": {
+   "rel_l2": 1e-05,
+   "float32": true
+  },
+  "audio_patch_proj": {
+   "rel_l2": 1e-05,
+   "float32": true
+  },
+  "condition_proj": {
+   "rel_l2": 0.00554127705628693,
+   "teacher_forced": false
+  },
+  "token_refiner.blocks.0": {
+   "rel_l2": 0.010161363089320271,
+   "teacher_forced": true
+  },
+  "free token_refiner.blocks.0": {
+   "rel_l2": 0.010677356603322839
+  },
+  "token_refiner.final_norm": {
+   "rel_l2": 0.005462373646984856,
+   "teacher_forced": true
+  },
+  "free token_refiner.final_norm": {
+   "rel_l2": 0.011890223714992907
+  },
+  "blocks.0": {
+   "rel_l2": 0.011503736897326566,
+   "teacher_forced": true
+  },
+  "free blocks.0": {
+   "rel_l2": 0.011940503265968003
+  },
+  "blocks.1": {
+   "rel_l2": 0.010259791386144367,
+   "teacher_forced": true
+  },
+  "free blocks.1": {
+   "rel_l2": 0.017107042522034512
+  },
+  "final_layer.adaln_proj.linear": {
+   "rel_l2": 1e-05,
+   "float32": true
+  },
+  "final_layer.video_out": {
+   "rel_l2": 0.004894887169792779,
+   "teacher_forced": true
+  },
+  "free final_layer.video_out": {
+   "rel_l2": 0.01234753476111278
+  },
+  "final_layer.audio_out": {
+   "rel_l2": 0.005470977560584965,
+   "teacher_forced": true
+  },
+  "free final_layer.audio_out": {
+   "rel_l2": 0.01717276473958487
+  },
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each refiner block, the refiner's norm, each block and the heads, free running for the other rows and for the velocities, and free running for each teacher-forced row as 'free <row>'; rows in float32 in both modes take a float32 tolerance"
+ },
+ "notes": [
+  "the weights are in selftest_h3_tiny_weights by name in torch order"
+ ],
+ "created": "2026-11-05T10:40:33Z",
+ "npz": "selftest_h3_tiny_mid_audio.npz",
+ "tensors": {
+  "anchor.0.audio": {
+   "shape": [
+    1,
+    32,
+    2,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "1586375f1aa06e74cf65832a5a0a532fe159d59885a86ea821fe938f5cd5d8d3"
+  },
+  "anchor.0.frame": {
+   "shape": [],
+   "dtype": "int64",
+   "sha256": "a111f275cc2e7588000001d300a31e76336d15b9d314cd1a1d8f3d3556975eed"
+  },
+  "anchor.0.video": {
+   "shape": [
+    1,
+    24,
+    1,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "04c8f52018f94eedaef467e9c9c12b751234ddc45a0c1f5b0285f318bbc3ca55"
+  },
+  "anchor_noise.0": {
+   "shape": [
+    6,
+    96
+   ],
+   "dtype": "float32",
+   "sha256": "0304fb3de6698bc8b35973a0c72909f2c6f4445867a85e381c7ad619bdb56aad"
+  },
+  "anchor_seed": {
+   "shape": [],
+   "dtype": "int64",
+   "sha256": "f13ee6ed54ea2aae9fc49a9faeb5da6e8ddef0e12ed5d30d35a624ae813e0485"
+  },
+  "audio": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "4ac406776f215591e7261066912d000dce61680257f8f569bf5dd61b7e0220ec"
+  },
+  "audio_patch_proj": {
+   "shape": [
+    90,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "ec1f74b5575b51a3308aea1ee11e6f7a7e952136789fa65e6d9ee77077e69ca8"
+  },
+  "blocks.0": {
+   "shape": [
+    146,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "3902af4bb0db198768d053a9eaf14126d65b69f0162785296ca152a1c9679e2b"
+  },
+  "blocks.1": {
+   "shape": [
+    146,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "9ee10fb9767938b99361e12cc00fe23827aa29ce1b16c922dce1c0cd1408ca48"
+  },
+  "condition_proj": {
+   "shape": [
+    8,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "3aff3e29e9b7cb4dce489fa594c261d355027e423e33e890603bebe2d2d4f8c0"
+  },
+  "features": {
+   "shape": [
+    8,
+    40
+   ],
+   "dtype": "float32",
+   "sha256": "6990670c1a3e5ace9f0a87b4113ee0257f41c0ac2476154fde3062a7dbb11545"
+  },
+  "final_layer.adaln_proj.linear": {
+   "shape": [
+    4,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "90b103ac675f8f1cca38306095b634d4ae026940e77c028ed778850fe50521d2"
+  },
+  "final_layer.audio_out": {
+   "shape": [
+    74,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "32e936700e0b5919a61cf9e512cefd14a368a90fa0c452101d1ba6a966cbe2a5"
+  },
+  "final_layer.video_out": {
+   "shape": [
+    42,
+    96
+   ],
+   "dtype": "float32",
+   "sha256": "846e9a0866f5b2c13aa20805c6cf0ab7405137b7bcbe6e4e816d1be0e3f613d3"
+  },
+  "in.blocks.0": {
+   "shape": [
+    146,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "4d293cb4e9885526815150795e77839f8c7e96d8c9bcb8d95a9a9c55396ee6fc"
+  },
+  "in.final_layer": {
+   "shape": [
+    146,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "9ee10fb9767938b99361e12cc00fe23827aa29ce1b16c922dce1c0cd1408ca48"
+  },
+  "positions": {
+   "shape": [
+    146,
+    3
+   ],
+   "dtype": "float64",
+   "sha256": "29acc8397979ab83ef9f2aad563f7b6053721d0a1c5bf5f59febcfc933a381e6"
+  },
+  "rope.angles": {
+   "shape": [
+    146,
+    96
+   ],
+   "dtype": "float32",
+   "sha256": "eaa8010450b5808a75379c39980a21311c9305e8994d133a72d2a6425f9b8e12"
+  },
+  "segments": {
+   "shape": [
+    5,
+    3
+   ],
+   "dtype": "int64",
+   "sha256": "9623933b194b1f0875cdd6b4f2ceeaf1f45feade70ab21d28761e86a86c083ee"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "06ebd70f712594b2c876556943aaa43db9d26e9c3f4fa8fcfe39e589eae9940c"
+  },
+  "t_emb": {
+   "shape": [
+    4,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "82d0fc50c0179f04953749bb4f2e18093bb0122c4ae162fb5681fe06715d4d9d"
+  },
+  "t_values": {
+   "shape": [
+    4
+   ],
+   "dtype": "float64",
+   "sha256": "fb73215a1dc01eade135651ca315360e4fa61997d6e40fd41af8ef8c96410fb3"
+  },
+  "timestep": {
+   "shape": [
+    1
+   ],
+   "dtype": "float32",
+   "sha256": "723b6da32a396adc2f865ec9e3980269bc9bd75f0fc1d8a7fdb7cb3267df19dd"
+  },
+  "token_refiner.blocks.0": {
+   "shape": [
+    8,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "8893e28bc470652049a60d9f894dea88085858a054ebf34a0a14c2a4adb142d7"
+  },
+  "token_refiner.final_norm": {
+   "shape": [
+    8,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "9a71afb98c3b1c940a671643ddf447d5be32cbd9601027e4a67d0cf5e31f1922"
+  },
+  "velocity_audio": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "4c9031da01b64b0a98ddf387c54d3084927168a2c6f2119ff8553fea374bd0a2"
+  },
+  "velocity_audio_bf16": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "80a9fbcdb7c7d6b2804da5de560e1074003efd1190239aa24c8b1bf06db425af"
+  },
+  "velocity_video": {
+   "shape": [
+    1,
+    24,
+    7,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "9a25757218a226391f01215c3b5a5c1739dcbc6955a0f54ad3658bd4ea1beba7"
+  },
+  "velocity_video_bf16": {
+   "shape": [
+    1,
+    24,
+    7,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "65c84952334694fdbfaad288e67e0eceb23677c5592fd32f3559bab9b4848e12"
+  },
+  "video": {
+   "shape": [
+    1,
+    24,
+    7,
+    4,
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "30046a0ae38170a25ee144f567b5efb2db839094d70e94b8db4caa16d2f402eb"
+  },
+  "video_patch_proj": {
+   "shape": [
+    48,
+    64
+   ],
+   "dtype": "float32",
+   "sha256": "a2a9f5de5e400be1928b9571c594a645ba234a144b344503704f1519fc9d1577"
+  }
+ }
+}

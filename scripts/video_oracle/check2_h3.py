@@ -29,9 +29,29 @@ floor of 1 - 4 (1 - c), c the smallest per-token cosine of the two
 passes, at most 0.999. The first row holds nearly all of the tap's norm,
 so the gate over every row reads little else.
 
+A keyframe prompt (--prompts keyframe keyframes, merge 3) is ComfyUI's
+fl2va presentation: per image "<Picture i>: " and a vision block, then the
+prompt, with ComfyUI's ids, tags and tower input (process_qwen2vl_images
+at patch 16, mean and std 0.5) of seeded images at 640x400 and 400x640,
+brought to the 512x512 canvas as MiniMaxH3ImageToVideo brings them. transformers'
+Qwen3VLVisionModel runs the mmproj beside the encoder (--mmproj, its
+tensors in float32 by gguf-py) in float32 in both passes, as ComfyUI and
+gmlx run the tower; its merger rows replace the image pad rows, its
+deepstack rows join them after decoder layers 1 to 3, and the rows take
+transformers' 3D RoPE positions (Qwen3VLModel.get_rope_index). The
+fixture holds the images, the tower's input and output, and the tags,
+and a report column that does not gate: ComfyUI's own tower on the same
+input and weights, and ComfyUI's positions, against transformers'.
+
   python scripts/video_oracle/run.py --python <comfyui venv python> \\
       --threads 16 check2_h3.py --comfy-dir <ComfyUI checkout> \\
       --encoder Qwen3-VL-32B-Instruct-Q4_K_M.gguf
+
+  python scripts/video_oracle/run.py --python <comfyui venv python> \\
+      --threads 16 check2_h3.py --comfy-dir <ComfyUI checkout> \\
+      --encoder Qwen3-VL-32B-Instruct-Q4_K_M.gguf \\
+      --mmproj mmproj-BF16.gguf --prompts keyframe keyframes \\
+      --name check2_h3_keyframes
 """
 
 from __future__ import annotations
@@ -70,6 +90,21 @@ MARKUP = ("A street singer tunes a guitar under a bridge. <|caption_start|>"
           "Warm dusk light, a slow push in.<|caption_end|> She sings "
           "<|lyrics_start|><d>[English] Hold on to the light.</d>"
           "<|lyrics_end|> and stops.<|cutoff|>")
+
+# The keyframe prompts: the text, and the size (width, height) of each
+# source image, first then last. MiniMaxH3ImageToVideo brings each to the
+# canvas, the first stretched, the last cropped about its center.
+KEYFRAME_TEXT = "A red fox trots through fresh snow at dawn, then looks back"
+KEYFRAMES = {"keyframe": [(640, 400)], "keyframes": [(640, 400), (400, 640)]}
+CANVAS = (512, 512)
+CROPS = ("disabled", "center")
+PAD = 151655            # the image pad id the tower's rows replace
+# mmproj GGUF tensor names of a vision block, to the names under
+# transformers' Qwen3VLVisionBlock, and of a merger.
+VISION_BLOCK = {"ln1": "norm1", "ln2": "norm2", "attn_qkv": "attn.qkv",
+                "attn_out": "attn.proj", "ffn_up": "mlp.linear_fc1",
+                "ffn_down": "mlp.linear_fc2"}
+MERGER = {"norm": "norm", "fc1": "linear_fc1", "fc2": "linear_fc2"}
 
 # GGUF tensor names of a decoder layer, to the names under the
 # transformers layer.
@@ -175,6 +210,168 @@ def comfy_ids(prompts: dict) -> dict:
     return out, tok.qwen3vl_32b.tokenizer
 
 
+def keyframe_image(seed: int, w: int, h: int) -> np.ndarray:
+    """A seeded picture, (h, w, 3) uint8: smooth color with mild noise,
+    as a photo is."""
+    rng = np.random.default_rng(seed)
+    y, x = np.mgrid[0:h, 0:w] / 37.0
+    rgb = np.stack([np.sin(x + 0.3 * y), np.cos(0.7 * x - y),
+                    np.sin(x * y / 9)], -1)
+    rgb = np.clip((rgb + 1) * 120 + rng.normal(0, 4, rgb.shape), 0, 255)
+    return rgb.astype(np.uint8)
+
+
+def canvas_image(torch, source: np.ndarray, crop: str) -> np.ndarray:
+    """``source`` at the canvas, as MiniMaxH3ImageToVideo resizes a
+    keyframe (crop "disabled" for the first, "center" for the last),
+    uint8: the resize's lanczos returns whole 8-bit levels."""
+    from comfy_extras.nodes_minimax_h3 import _resize
+
+    x = torch.from_numpy(source.astype(np.float32) / 255.0)[None]
+    out = _resize(x, *CANVAS, crop)[0].numpy()
+    im = np.round(out * 255.0).astype(np.uint8)
+    if not np.array_equal(im.astype(np.float32) / 255.0, out):
+        raise SystemExit("error: the resize left a value off the 8-bit "
+                         "levels")
+    return im
+
+
+def comfy_keyframe_prompt(torch, key: str) -> dict:
+    """ComfyUI's ids, tags, embeds_info and tower input of a keyframe
+    prompt: the image entries expanded to their pad rows, as its encode
+    expands them."""
+    from comfy.text_encoders import minimax
+    from comfy.text_encoders.qwen_vl import process_qwen2vl_images
+
+    sources = [keyframe_image(10 + i, w, h)
+               for i, (w, h) in enumerate(KEYFRAMES[key])]
+    images = [canvas_image(torch, src, crop)
+              for src, crop in zip(sources, CROPS)]
+    shown = [torch.from_numpy(im.astype(np.float32) / 255.0)[None]
+             for im in images]
+    tok = minimax.MiniMaxH3Tokenizer()
+    entries = tok.tokenize_with_weights(KEYFRAME_TEXT, images=shown)
+    (batch,) = entries["qwen3vl_32b"]
+    pixels, grids = [], []
+    for im in shown:
+        px, grid = process_qwen2vl_images(im, patch_size=16,
+                                          image_mean=[0.5, 0.5, 0.5],
+                                          image_std=[0.5, 0.5, 0.5])
+        pixels.append(px.float())
+        grids.append([int(v) for v in grid.reshape(-1)])
+    ids, info, k = [], [], 0
+    for t, _w in batch:
+        if isinstance(t, dict):
+            n = grids[k][1] * grids[k][2] // 4
+            info.append({"type": "image", "index": len(ids), "size": n,
+                         "extra": {"grid": torch.tensor([grids[k]])}})
+            ids += [PAD] * n
+            k += 1
+        else:
+            ids.append(int(t))
+    tags = minimax.token_tags_from_embeds_info(len(ids), info)
+    return {"ids": np.asarray(ids, np.int32), "tags": tags.numpy(),
+            "sources": sources, "images": images, "pixels": pixels,
+            "grids": grids, "info": info}
+
+
+def vision_config(kv: dict, tensors: dict):
+    """transformers' vision config from the mmproj header's values and
+    its position table."""
+    from transformers.models.qwen3_vl.configuration_qwen3_vl import \
+        Qwen3VLVisionConfig
+
+    def get(key):
+        return kv[f"clip.vision.{key}"].contents()
+
+    deep = [i for i, d in enumerate(get("is_deepstack_layers")) if d]
+    cfg = Qwen3VLVisionConfig(
+        depth=int(get("block_count")),
+        hidden_size=int(get("embedding_length")),
+        intermediate_size=int(get("feed_forward_length")),
+        num_heads=int(get("attention.head_count")),
+        patch_size=int(get("patch_size")),
+        spatial_merge_size=int(get("spatial_merge_size")),
+        temporal_patch_size=2, in_channels=3,
+        out_hidden_size=int(get("projection_dim")),
+        num_position_embeddings=int(
+            tensors["v.position_embd.weight"].shape[-1]),
+        deepstack_visual_indexes=deep, hidden_act="gelu_pytorch_tanh")
+    cfg._attn_implementation = "sdpa"
+    return cfg
+
+
+def vision_state(torch, tensors: dict, cfg) -> dict:
+    """The mmproj's tensors in float32 under transformers' names."""
+    def t(name):
+        return dequantized(torch, tensors[name])
+
+    out = {"patch_embed.proj.weight": torch.stack(
+               [t("v.patch_embd.weight"), t("v.patch_embd.weight.1")], 2),
+           "patch_embed.proj.bias": t("v.patch_embd.bias"),
+           "pos_embed.weight": t("v.position_embd.weight")}
+    for i in range(cfg.depth):
+        for g, h in VISION_BLOCK.items():
+            for kind in ("weight", "bias"):
+                out[f"blocks.{i}.{h}.{kind}"] = t(f"v.blk.{i}.{g}.{kind}")
+    for kind in ("weight", "bias"):
+        out[f"merger.norm.{kind}"] = t(f"v.post_ln.{kind}")
+        out[f"merger.linear_fc1.{kind}"] = t(f"mm.0.{kind}")
+        out[f"merger.linear_fc2.{kind}"] = t(f"mm.2.{kind}")
+        for k, layer in enumerate(cfg.deepstack_visual_indexes):
+            for g, h in MERGER.items():
+                out[f"deepstack_merger_list.{k}.{h}.{kind}"] = t(
+                    f"v.deepstack.{layer}.{g}.{kind}")
+    return out
+
+
+def rope_positions(torch, hf, ids, grids):
+    """transformers' 3D RoPE positions (3, 1, L) of a prompt with images,
+    the image pad rows its image tokens."""
+    from types import SimpleNamespace
+
+    shim = SimpleNamespace(config=SimpleNamespace(
+        vision_config=SimpleNamespace(spatial_merge_size=2)))
+    shim.get_vision_position_ids = (
+        lambda *a, **k: hf.Qwen3VLModel.get_vision_position_ids(shim, *a,
+                                                                **k))
+    x = torch.from_numpy(np.asarray(ids, np.int64))[None]
+    pos, _ = hf.Qwen3VLModel.get_rope_index(
+        shim, x, (x == PAD).int(), image_grid_thw=torch.tensor(grids))
+    return pos
+
+
+def comfy_column(torch, state: dict, prompt: dict, tower: dict) -> dict:
+    """ComfyUI's own Qwen3-VL tower on the same input and weights, and
+    its positions, against transformers': a report column, not a gate."""
+    import comfy.ops
+    from comfy.text_encoders.qwen3vl import (QWEN3VL_VISION,
+                                             QWEN3VL_VISION_COMMON,
+                                             Qwen3VLVisionModel)
+    from comfy.text_encoders.qwen_vl import qwen2vl_mrope_position_ids
+
+    cfg = {**QWEN3VL_VISION_COMMON, **QWEN3VL_VISION["qwen3vl_32b"],
+           "out_hidden_size": 5120}
+    vis = Qwen3VLVisionModel(cfg, device="cpu", dtype=torch.float32,
+                             ops=comfy.ops.manual_cast).eval()
+    vis.load_state_dict(state, strict=True)
+    gaps = []
+    with torch.no_grad():
+        for i, (px, grid) in enumerate(zip(prompt["pixels"],
+                                           prompt["grids"])):
+            merged, deep = vis(px, torch.tensor([grid]))
+            row = {"merger": fixtures.compare(oracle.to_numpy(merged),
+                                              tower[f"merger_{i}"])}
+            for k, d in enumerate(deep):
+                row[f"deepstack_{k}"] = fixtures.compare(
+                    oracle.to_numpy(d), tower[f"deepstack_{i}_{k}"])
+            gaps.append(row)
+    pos = qwen2vl_mrope_position_ids(prompt["info"], len(prompt["ids"]),
+                                     "cpu")
+    return {"tower": gaps, "positions_equal": bool(np.array_equal(
+        pos.numpy().astype(np.int64), prompt["positions"][:, 0].numpy()))}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--comfy-dir", type=Path, required=True,
@@ -182,7 +379,9 @@ def main(argv=None) -> int:
     ap.add_argument("--encoder", type=Path, required=True,
                     help="stock Qwen3-VL-32B-Instruct text GGUF")
     ap.add_argument("--prompts", nargs="+", default=list(PROMPTS),
-                    choices=list(PROMPTS))
+                    choices=[*PROMPTS, *KEYFRAMES])
+    ap.add_argument("--mmproj", type=Path,
+                    help="the encoder's mmproj GGUF, for a keyframe prompt")
     ap.add_argument("--name", default=NAME)
     ap.add_argument("--out", type=Path,
                     help="fixture directory (default $GMLX_VIDEO_FIXTURES)")
@@ -192,8 +391,44 @@ def main(argv=None) -> int:
     import gguf
     from transformers.models.qwen3_vl import modeling_qwen3_vl as hf
 
-    prompts = {k: PROMPTS[k] for k in a.prompts}
-    ids, qwen_tok = comfy_ids({**prompts, "sanity": SANITY})
+    prompts = {k: PROMPTS.get(k, KEYFRAME_TEXT) for k in a.prompts}
+    ids, qwen_tok = comfy_ids({k: v for k, v in {**prompts,
+                                                  "sanity": SANITY}.items()
+                               if k not in KEYFRAMES})
+    framed = {k: comfy_keyframe_prompt(torch, k) for k in prompts
+              if k in KEYFRAMES}
+    if framed and a.mmproj is None:
+        ap.error("a keyframe prompt needs --mmproj")
+    for k, f in framed.items():
+        ids[k] = f["ids"]
+    tower, deep, column = {}, {}, {}
+    if framed:
+        vreader = gguf.GGUFReader(str(a.mmproj))
+        vtensors = {t.name: t for t in vreader.tensors}
+        vcfg = vision_config(vreader.fields, vtensors)
+        state = vision_state(torch, vtensors, vcfg)
+        vis = hf.Qwen3VLVisionModel(vcfg).eval()
+        vis.load_state_dict(state, strict=True)
+        with torch.no_grad():
+            for k, f in framed.items():
+                merged, stacks = [], []
+                for i, (px, grid) in enumerate(zip(f["pixels"], f["grids"])):
+                    o = vis(px, grid_thw=torch.tensor([grid]))
+                    merged.append(o.pooler_output)
+                    stacks.append(o.deepstack_features)
+                    tower[k, f"merger_{i}"] = oracle.to_numpy(o.pooler_output)
+                    for j, d in enumerate(o.deepstack_features):
+                        tower[k, f"deepstack_{i}_{j}"] = oracle.to_numpy(d)
+                f["merged"] = torch.cat(merged)
+                deep[k] = [torch.cat([s[j] for s in stacks])
+                           for j in range(len(stacks[0]))]
+                f["positions"] = rope_positions(torch, hf, f["ids"],
+                                                f["grids"])
+                column[k] = comfy_column(torch, state, f, {
+                    n: v for (kk, n), v in tower.items() if kk == k})
+                print(f"[check2] {k}: ComfyUI's tower and positions "
+                      f"against transformers': {column[k]}", flush=True)
+        del vis, state
     reader = gguf.GGUFReader(str(a.encoder))
     tensors = {t.name: t for t in reader.tensors}
     cfg, depth = text_config(reader.fields)
@@ -210,6 +445,11 @@ def main(argv=None) -> int:
         for key, row in ids.items():
             x = rows_of(torch, embed, row.tolist())[None]
             pos = torch.arange(x.shape[1]).view(1, 1, -1).expand(3, 1, -1)
+            if key in framed:
+                f = framed[key]
+                f["mask"] = torch.from_numpy(f["ids"] == PAD)[None]
+                x[f["mask"]] = f["merged"]
+                pos = f["positions"]
             h32[key] = x
             pe32[key] = rotary(x, pos)
             if key != "sanity":
@@ -227,6 +467,9 @@ def main(argv=None) -> int:
             for key in keys:
                 h32[key] = layer32(h32[key], position_embeddings=pe32[key],
                                    attention_mask=None)
+                if key in deep and i < len(deep[key]):
+                    h32[key] = hf.Qwen3VLTextModel._deepstack_process(
+                        None, h32[key], framed[key]["mask"], deep[key][i])
             if i < TAP:
                 layer16.load_state_dict(
                     {k: v.to(torch.bfloat16) for k, v in state.items()},
@@ -236,6 +479,10 @@ def main(argv=None) -> int:
                     h16[key] = layer16(h16[key],
                                        position_embeddings=pe16[key],
                                        attention_mask=None)
+                    if key in deep and i < len(deep[key]):
+                        h16[key] = hf.Qwen3VLTextModel._deepstack_process(
+                            None, h16[key], framed[key]["mask"],
+                            deep[key][i])
                 oracle.emulate_bf16_matmul(False)
                 for key in prompts:
                     gaps[key].append(fixtures.rel_l2(
@@ -270,10 +517,25 @@ def main(argv=None) -> int:
         raise SystemExit(f"error: the model continues {SANITY!r} with "
                          f"{token!r}")
 
-    fx = fixtures.FixtureWriter(
-        a.name, check=2, family=FAMILY, script=SCRIPT,
-        argv=[Path(__file__).name, "--encoder", a.encoder.name])
+    argv = [Path(__file__).name, "--encoder", a.encoder.name]
+    if framed:
+        argv += ["--mmproj", a.mmproj.name, "--prompts", *a.prompts,
+                 "--name", a.name]
+    fx = fixtures.FixtureWriter(a.name, check=2, family=FAMILY,
+                                script=SCRIPT, argv=argv)
     fx.add_file("encoder", a.encoder)
+    if framed:
+        fx.add_file("mmproj", a.mmproj)
+    for k, f in framed.items():
+        fx.add(f"tags_{k}", f["tags"])
+        fx.add(f"positions_{k}", oracle.to_numpy(f["positions"][:, 0]))
+        for i, (src, im, px) in enumerate(zip(f["sources"], f["images"],
+                                              f["pixels"])):
+            fx.add(f"source_{k}_{i}", src)
+            fx.add(f"image_{k}_{i}", im)
+            fx.add(f"pixels_{k}_{i}", oracle.to_numpy(px))
+    for (k, n), v in tower.items():
+        fx.add(f"tower_{k}_{n}", v)
     stats, tol_rel, tol_rest, tol_cos, lengths = {}, {}, {}, {}, {}
     for key in prompts:
         t32, t16 = taps32[key], taps16[key]
@@ -319,6 +581,22 @@ def main(argv=None) -> int:
                 "rounding"},
         name_map_check=sanity, bf16_vs_fp32=stats,
         seconds={"layers_s": round(layer_s, 1)})
+    if framed:
+        fx.inputs.update(
+            keyframes={k: {"text": KEYFRAME_TEXT,
+                           "sources": [list(sz) for sz in KEYFRAMES[k]],
+                           "sizes": [list(CANVAS)] * len(KEYFRAMES[k]),
+                           "crops": list(CROPS[:len(KEYFRAMES[k])]),
+                           "grids": framed[k]["grids"]} for k in framed},
+            images="keyframe_image(10 + i): seeded smooth color, uint8, "
+            "at the source size; MiniMaxH3ImageToVideo's _resize to the "
+            "canvas, the first with crop disabled, the last center",
+            tower="transformers Qwen3VLVisionModel on the mmproj in "
+            "float32 in both passes; its merger rows replace the image pad "
+            "rows, its deepstack rows join them after decoder layers 1 to "
+            f"{len(next(iter(deep.values())))}; RoPE positions of "
+            "Qwen3VLModel.get_rope_index")
+        fx.results["comfyui_column"] = column
     fx.tolerances.update(rule=RULE, starting=STARTING, rel_l2=tol_rel,
                          rel_l2_after_first=tol_rest,
                          token_cosine_min=tol_cos)

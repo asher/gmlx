@@ -40,8 +40,16 @@ running tolerance, ``free <row>``, twice its gap in the free bf16 pass.
       --dit minimax_h3_fl2va_pruned-Q4_K.gguf \\
       --shapes 64x64x5 512x512x22 --name check3_h3
 
+--cases adds the anchor cases of merge 3 (ANCHOR_CASES) beside the text
+to video step: keyframes and guides with seeded normal latents in
+minimax_payload as ComfyUI's MiniMaxH3.extra_conds writes it, the seed of
+their noise and the prompt's tags with its vision runs. Each fixture holds
+each anchor's latents, the noise ComfyUI's forward mixes into its video
+rows and the vision spans of its tags.
+
 --self-test writes a tiny model of the class on random weights, with the
-weights by name, so the gmlx side checks the whole forward on the CPU.
+weights by name, and its step for the text to video case and each anchor
+case, so the gmlx side checks the whole forward on the CPU.
 """
 
 from __future__ import annotations
@@ -95,6 +103,21 @@ _OFFICIAL = {"hidden_size": "hidden_size", "num_layers": "num_layers",
              "qk_norm_eps": "qk_norm_eps",
              "final_norm_eps": "final_norm_eps"}
 TINY_CASE = {"shape": "96x64x22", "text": 8, "sigma": 0.6875}
+# The anchor cases: each keyframe or guide as (frame, video latent frames,
+# audio latent frames), and the vision runs [start, stop) of the prompt's
+# 8 text rows. A negative frame counts from the clip's end; "mid" is the
+# clip's middle frame; "rest" is the audio latent frames left on the
+# clip's audio from the frame, at most 8. A 5-frame guide clip holds 2
+# latent frames, so clip17 needs a clip of 22 frames or more.
+ANCHOR_CASES = {
+    "first": ([(0, 1, 0)], [(2, 6)]),
+    "last": ([(-1, 1, 0)], [(2, 6)]),
+    "both": ([(0, 1, 0), (-1, 1, 0)], [(1, 3), (4, 7)]),
+    "mid_audio": ([("mid", 1, "rest")], []),
+    "clip17": ([(17, 2, 0)], []),
+}
+CASES = ("t2v", *ANCHOR_CASES)
+ANCHOR_SEED = 5
 
 
 def parse_shape(s: str) -> tuple[int, int, int]:
@@ -184,7 +207,7 @@ class Capture:
             h.remove()
 
 
-def call(torch, dm, video, audio, feats, sigma, mode):
+def call(torch, dm, video, audio, feats, sigma, mode, payload=None):
     """One forward; the velocities, the hooks' rows and the layout."""
     dtype = oracle.torch_dtype(mode)
     ctx = torch.from_numpy(feats[None]).to(dtype)
@@ -192,7 +215,8 @@ def call(torch, dm, video, audio, feats, sigma, mode):
     cap = Capture(dm)
     try:
         out = dm([torch.from_numpy(video), torch.from_numpy(audio)],
-                 timestep(torch, sigma), ctx, transformer_options=opts)
+                 timestep(torch, sigma), ctx, transformer_options=opts,
+                 minimax_payload=payload)
     finally:
         cap.remove()
     return (oracle.to_numpy(out[0]), oracle.to_numpy(out[1]), cap,
@@ -230,12 +254,19 @@ def teacher_forced(torch, dm, cap32: Capture) -> dict:
 
 def layout_rows(torch, dm, cap: Capture, layout, sigma_v, t_v, t_a):
     """The layout's positions, angles and segment table, the distinct
-    times and the curve rows, checked against what the forward used."""
+    times and the curve rows, checked against what the forward used. The
+    anchor rows run at least at their stream's cond time."""
+    from comfy.ldm.minimax.model import (AUDIO_COND_TIMESTEP,
+                                         VISUAL_COND_TIMESTEP)
+
     x, t_emb, segs = cap.inputs["blocks.0"][:3]
-    times = sorted({t_v, t_a})
+    seg_t = {"text": t_v, "video": t_v, "audio": t_a,
+             "cond": max(t_v, VISUAL_COND_TIMESTEP),
+             "cond_audio": max(t_a, AUDIO_COND_TIMESTEP)}
+    times = sorted({t_v, t_a} | {seg_t[k] for _, _, k in layout.segments})
     if t_emb.shape[0] != len(times):
         raise SystemExit(f"error: the forward used {t_emb.shape[0]} times, "
-                         f"a text to video step has {len(times)}")
+                         f"the step's segments have {len(times)}")
     table = dm.adaln_t_table.float()
     g = table.shape[0] - 1
     pos = torch.tensor(times, dtype=torch.float32).clamp(0, 1) * g
@@ -256,10 +287,116 @@ def layout_rows(torch, dm, cap: Capture, layout, sigma_v, t_v, t_a):
     }
 
 
+def anchor_case(case: str, shape: tuple, seed: int):
+    """The keyframes of anchor case ``case`` on a WxHxFRAMES clip as
+    ComfyUI's nodes write them, with seeded normal latents on the clip's
+    grid, the prompt's tags over its 8 text rows, and the fixture's arrays
+    and inputs of them. None when the clip does not fit the case."""
+    import torch
+    from comfy.ldm.minimax.model import FRAME_RESCALE
+    from comfy_extras.nodes_minimax_h3 import _empty_av_latent
+
+    specs, runs = ANCHOR_CASES[case]
+    w, h, frames = shape
+    lat, _ = _empty_av_latent(*shape)
+    v, a = lat["samples"].unbind()
+    audio_t = int(a.shape[-1])
+    keyframes, arrays, placed = [], {}, []
+    for i, (frame, vt, at) in enumerate(specs):
+        f = (frames - 1) // 2 if frame == "mid" else frame
+        f = f + frames if f < 0 else f
+        span = 1 if vt == 1 else 17 * ((vt - 2) // 5) + 5
+        if f + span > frames:
+            return None
+        if at == "rest":
+            at = min(8, int(audio_t - FRAME_RESCALE * f))
+        rng = np.random.default_rng([seed, CASES.index(case), i])
+        kf = {"resolved_frame_index": f}
+        arrays[f"anchor.{i}.frame"] = np.int64(f)
+        if vt:
+            z = rng.standard_normal((1, 24, vt, *v.shape[3:])).astype(
+                np.float32)
+            kf["latent"] = torch.from_numpy(z)
+            arrays[f"anchor.{i}.video"] = z
+        if at:
+            z = rng.standard_normal((1, 32, 2, at)).astype(np.float32)
+            kf["audio_latent"] = torch.from_numpy(z)
+            arrays[f"anchor.{i}.audio"] = z
+        keyframes.append(kf)
+        placed.append({"frame": f, "video_t": vt, "audio_t": at})
+    tags = None
+    if runs:
+        tags = torch.ones(8, dtype=torch.long)
+        for start, stop in runs:
+            tags[start:stop] = 0
+        arrays["text_token_tags"] = tags.numpy()
+        arrays["spans"] = np.array(runs, np.int64)
+    arrays["anchor_seed"] = np.int64(seed)
+    inputs = {"case": case, "anchors": placed,
+              "spans": [list(r) for r in runs], "anchor_seed": seed}
+    return keyframes, tags, arrays, inputs
+
+
+def payload_of(keyframes, tags, seed: int) -> dict:
+    """minimax_payload as ComfyUI's MiniMaxH3.extra_conds writes it for
+    keyframes, a prompt's tags and the sampler's seed."""
+    out = {"keyframes": keyframes,
+           "cond_video_latents": [kf["latent"] for kf in keyframes
+                                  if kf.get("latent") is not None],
+           "cond_audio_latents": [kf["audio_latent"] for kf in keyframes
+                                  if kf.get("audio_latent") is not None],
+           "seed": seed, "audio_scale": 1.0}
+    if tags is not None:
+        out["text_token_tags"] = tags
+    return out
+
+
+def check_payload(torch, patcher, keyframes, tags, seed: int) -> None:
+    """payload_of is what the checkout's extra_conds writes."""
+    got = patcher.model.extra_conds(
+        minimax_keyframes=keyframes, minimax_token_tags=tags, seed=seed,
+        device=torch.device("cpu"))["minimax_payload"].cond
+    want = payload_of(keyframes, tags, seed)
+    if sorted(got) != sorted(want):
+        raise SystemExit(f"error: extra_conds writes {sorted(got)}, the "
+                         f"oracle {sorted(want)}")
+    for k in ("cond_video_latents", "cond_audio_latents"):
+        if len(got[k]) != len(want[k]) or not all(
+                torch.equal(x, y) for x, y in zip(got[k], want[k])):
+            raise SystemExit(f"error: extra_conds writes another {k}")
+    if got["seed"] != seed or got["keyframes"] is not keyframes:
+        raise SystemExit("error: extra_conds writes another seed or "
+                         "keyframes")
+
+
+def anchor_noise(torch, dm, payload: dict) -> list:
+    """The noise ComfyUI's forward mixes into each video anchor's rows: a
+    CPU generator restarted at the payload's seed for each, drawn in the
+    rows' shape. The forward's own rows must take it."""
+    from comfy.ldm.minimax.model import VISUAL_COND_TIMESTEP, patchify_video
+
+    seed = int(payload["seed"])
+    out, mixed = [], []
+    for z in payload["cond_video_latents"]:
+        r = patchify_video(z.to(torch.float32), dm.patch_size)
+        gen = torch.Generator("cpu").manual_seed(seed)
+        n = torch.randn(r.shape, generator=gen, dtype=torch.float32)
+        out.append(n)
+        mixed.append(VISUAL_COND_TIMESTEP * r + (1.0 - VISUAL_COND_TIMESTEP) * n)
+    if out:
+        got = dm._cond_video_rows(payload, "cpu")
+        if not torch.equal(got, torch.cat(mixed)):
+            raise SystemExit("error: the forward's anchor rows are not the "
+                             "oracle's draw")
+    return [oracle.to_numpy(n) for n in out]
+
+
 def run_case(torch, dm, video, audio, feats, sigma, name, inputs, files,
-             notes, *, check: int = 3, script: str = SCRIPT) -> None:
+             notes, *, check: int = 3, script: str = SCRIPT,
+             payload: dict | None = None, extra: dict | None = None) -> None:
     """One step in fp32 and bf16, written as fixture ``name`` of check
-    ``check`` by ``script``."""
+    ``check`` by ``script``. ``payload`` is the step's minimax_payload,
+    ``extra`` more arrays for the fixture."""
     fx = fixtures.FixtureWriter(name, check=check, family=FAMILY,
                                 script=script)
     fx.inputs.update(inputs)
@@ -277,12 +414,17 @@ def run_case(torch, dm, video, audio, feats, sigma, name, inputs, files,
     fx.add("features", feats)
     fx.add("sigma", np.float32(sigma))
     fx.add("timestep", oracle.to_numpy(ts))
+    for k, arr in (extra or {}).items():
+        fx.add(k, arr)
+    if payload is not None:
+        for i, n in enumerate(anchor_noise(torch, dm, payload)):
+            fx.add(f"anchor_noise.{i}", n)
     vel, caps, times = {}, {}, {}
     for mode in ("fp32", "bf16"):
         t0 = time.perf_counter()
         oracle.emulate_bf16_matmul(mode == "bf16")
         v, a, caps[mode], layout = call(torch, dm, video, audio, feats,
-                                        sigma, mode)
+                                        sigma, mode, payload)
         vel[mode] = {"video": v, "audio": a}
         times[f"{mode}_s"] = round(time.perf_counter() - t0, 1)
     oracle.emulate_bf16_matmul(False)
@@ -398,9 +540,18 @@ def self_test(torch, a) -> int:
               "seed": a.seed, "shape": list(shape), "text_rows":
               TINY_CASE["text"], "matmul_bf16": MATMUL,
               "attention": "attention_pytorch", "comfy": a.comfy_head}
+    note = f"the weights are in {name}_weights by name in torch order"
     run_case(torch, dm, video, audio, feats, TINY_CASE["sigma"], name,
-             inputs, {}, [
-                 f"the weights are in {name}_weights by name in torch order"])
+             inputs, {}, [note])
+    for c in ANCHOR_CASES:
+        got = anchor_case(c, shape, ANCHOR_SEED)
+        if got is None:
+            continue
+        keyframes, tags, arrays, more = got
+        run_case(torch, dm, video, audio, feats, TINY_CASE["sigma"],
+                 f"{name}_{c}", {**inputs, **more}, {}, [note],
+                 payload=payload_of(keyframes, tags, ANCHOR_SEED),
+                 extra=arrays)
     wx = fixtures.FixtureWriter(name + "_weights", check=3, family=FAMILY,
                                 script=SCRIPT)
     wx.inputs.update(inputs)
@@ -429,6 +580,8 @@ def main(argv=None) -> int:
     ap.add_argument("--sigma", type=float, default=0.9)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--name", default="check3_h3")
+    ap.add_argument("--cases", nargs="+", default=["t2v"], choices=CASES,
+                    help="t2v and the anchor cases (ANCHOR_CASES)")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args(argv)
     torch = oracle.setup()
@@ -441,7 +594,7 @@ def main(argv=None) -> int:
     gguf_head = oracle.load_comfy_gguf(a.comfy_dir)
     shapes = [parse_shape(s) for s in a.shapes]
     t0 = time.perf_counter()
-    _patcher, dm = load_gguf_dit(torch, a.dit, a.blocks)
+    patcher, dm = load_gguf_dit(torch, a.dit, a.blocks)
     depth = len(dm.blocks)
     print(f"[check3] loaded {a.dit.name} in {time.perf_counter() - t0:.1f}s"
           f", {depth} blocks", flush=True)
@@ -473,8 +626,22 @@ def main(argv=None) -> int:
                   "comfy": a.comfy_head, "comfy_gguf": gguf_head}
         tag = f"_{a.blocks}b" if a.blocks is not None else ""
         w, h, f = shape
-        run_case(torch, dm, video, audio, feats, a.sigma,
-                 f"{a.name}{tag}_{w}x{h}x{f}", inputs, files, notes)
+        for c in a.cases:
+            if c == "t2v":
+                run_case(torch, dm, video, audio, feats, a.sigma,
+                         f"{a.name}{tag}_{w}x{h}x{f}", inputs, files, notes)
+                continue
+            got = anchor_case(c, shape, ANCHOR_SEED)
+            if got is None:
+                print(f"[check3] {c} does not fit {w}x{h}x{f}", flush=True)
+                continue
+            keyframes, tags, arrays, more = got
+            check_payload(torch, patcher, keyframes, tags, ANCHOR_SEED)
+            run_case(torch, dm, video, audio, feats, a.sigma,
+                     f"{a.name}{tag}_{c}_{w}x{h}x{f}", {**inputs, **more},
+                     files, notes,
+                     payload=payload_of(keyframes, tags, ANCHOR_SEED),
+                     extra=arrays)
     return 0
 
 
