@@ -628,40 +628,40 @@ async def put_patch_table(request: Request):
     if not isinstance(body, dict):
         raise StepError(400, "a patch table body is a JSON object")
     model = request.query_params.get("model") or body.get("model")
-    hold = await _acquire(model)
-    try:
-        served = _served(hold)
-        pool = _lora_pool()
-        sizes = _sizes(body)
-        # The pairs the define holds at its forward, the entry's own left
-        # out, from the wire bytes of their matrices: hashed off the loop.
-        own = await asyncio.to_thread(_request_sizes, served, body)
-        if pool is not None:
-            from ..image_steps import PAIRS
+    # The body's matrices stay in the store from its arrival to its turn's
+    # end: no shed lets them go between.
+    with STATE.adapters.holding(_sizes(body)):
+        hold = await _acquire(model)
+        try:
+            served = _served(hold)
+            pool = _lora_pool()
+            # The pairs the define holds at its forward, the entry's own
+            # left out, from the wire bytes of their matrices: hashed off
+            # the loop.
+            own = await asyncio.to_thread(_request_sizes, served, body)
+            if pool is not None:
+                from ..image_steps import PAIRS
 
-            _hopeless(pool, hold._entry, sum(own.values()), PAIRS)
+                _hopeless(pool, hold._entry, sum(own.values()), PAIRS)
 
-        def work():
-            try:
-                if pool is not None:
-                    _define_turn(pool, hold._entry, served, body)
-                core = define_table(served, body, STATE.adapters)
-                STATE.tables_of(served.spec.id, served.pipe).put(
-                    want, core, raw, own)
-                return core
-            finally:
-                if pool is not None:
-                    from ..image_service import lora_settle
-                    from ..image_steps import PAIRS
+            def work():
+                try:
+                    if pool is not None:
+                        _define_turn(pool, hold._entry, served, body)
+                    core = define_table(served, body, STATE.adapters)
+                    STATE.tables_of(served.spec.id, served.pipe).put(
+                        want, core, raw, own)
+                    return core
+                finally:
+                    if pool is not None:
+                        from ..image_service import lora_settle
+                        from ..image_steps import PAIRS
 
-                    lora_settle(pool, hold._entry, PAIRS)
+                        lora_settle(pool, hold._entry, PAIRS)
 
-        # The body's matrices stay in the store from its arrival to its
-        # turn's end: no shed lets them go between.
-        with STATE.adapters.holding(sizes):
             await _on_worker(work)
-    finally:
-        hold.release()
+        finally:
+            hold.release()
     return _json(200, {"id": want})
 
 

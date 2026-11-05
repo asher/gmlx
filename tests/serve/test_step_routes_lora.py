@@ -28,8 +28,8 @@ from gmlx.serve import image_wire as wire  # noqa: E402
 from gmlx.serve.image_steps_client import (MissingTensors,  # noqa: E402
                                            StepsClientError, array_hash)
 from gmlx.serve.patches import image_steps as routes  # noqa: E402
-from gmlx.serve.residency import (IMAGE_KIND, _BusyHold,  # noqa: E402
-                                  _ResidencyPool)
+from gmlx.serve.residency import (IMAGE_KIND, LoraRefused,  # noqa: E402
+                                  _BusyHold, _ResidencyPool)
 from test_image_steps import (_APP, SHAPE, _client, _features,  # noqa: E402
                               _header_alpha_own, _Host, _pack_mats,
                               _pack_sync, _rows)
@@ -630,7 +630,7 @@ def test_a_define_short_by_part_of_its_matrices_never_sheds_them(
         request, monkeypatch, tmp_path, case):
     """A client's define on a server short by a quarter of the bytes of
     the matrices it just uploaded, synced as the pack does. The matrices
-    are the define's own keys of the uploads, which its claim never
+    are the define's own keys of the uploads, which its turn never
     sheds: alone it is refused with the memory figures and the matrices
     stay, beside an idle model it unloads the model and defines, and
     beside another upload, sent before or after its own, it sheds that
@@ -668,6 +668,40 @@ def test_a_define_short_by_part_of_its_matrices_never_sheds_them(
         assert idle not in pool._entries.values()
     else:
         assert array_hash(stale) not in _store()
+    _books_hold(pool, e)
+
+
+def test_an_upload_while_a_define_waits_never_sheds_its_matrices(
+        request, monkeypatch, tmp_path):
+    """Another client's upload takes its store turn after a define's route
+    checked it and before the define's own turn, on a server the define's
+    matrices and pairs fill. The define holds its matrices from its
+    arrival, so the store turn sheds none of them: the upload gets 503 and
+    the define runs with no 409."""
+    pool, e, p, pairs = _own_pairs(request, monkeypatch, tmp_path)
+    steps.STATE.adapters.clear()
+    c = _client()
+    mats, entries = _pack_mats(pairs, 2.0)
+    m_bytes = sum(a.nbytes for a in mats.values())
+    for a in mats.values():
+        c.put(a, kind="adapters")
+    _set_budget(pool, _held(pool) + m_bytes)
+    real, refused = routes._hopeless, []
+
+    def then(*a):
+        real(*a)
+        # An upload a byte over the room the define's pairs take.
+        try:
+            image_service.store_turn(pool, m_bytes + 1, steps.UPLOAD)
+            steps.STATE.adapters.done(m_bytes + 1)
+            refused.append(200)
+        except LoraRefused as err:
+            refused.append(err.status)
+
+    monkeypatch.setattr(routes, "_hopeless", then)
+    tid = c.define_table("own", {"entries": entries})
+    assert tid and refused == [503]
+    assert all(h in _store() for h in mats)
     _books_hold(pool, e)
 
 
