@@ -105,12 +105,15 @@ def install_chat_load_offload() -> None:
     and back, though the process never restarts). Decode is already offloaded
     by mlx-vlm (``asyncio.to_thread``); this closes the one remaining on-loop
     blocking call: pre-warm the model on a worker thread, after which the stock
-    handler's own ``get_cached_model`` is a fast in-memory cache hit. The warm
-    keeps its hold on the model until the handler returns, so no eviction
-    takes the model between the two. A warm failure is swallowed - the stock
+    handler's own ``get_cached_model`` is a fast in-memory cache hit. The warm's
+    hold stays on the model until the handler's own resolve takes its place,
+    or until the handler returns, so no eviction takes the model between the
+    two and the request counts once. A warm failure is swallowed - the stock
     handler re-resolves and surfaces the real error (404/400/500) normally.
     Idempotent per route."""
     import asyncio
+
+    from .. import residency
 
     app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     app = app_mod.app
@@ -125,6 +128,10 @@ def install_chat_load_offload() -> None:
                 try:
                     hold = await asyncio.to_thread(_routes._load_resident,
                                                    model_id, adapter)
+                    if hold is not None:
+                        # The thread set it in a copy of this context; here
+                        # the handler's own resolve releases it.
+                        residency._active_hold.set(hold)
                 except LoadDeferred as exc:
                     # The gate's retryable refusal (resident models pinned
                     # or busy): a typed 503 + Retry-After, the shape a

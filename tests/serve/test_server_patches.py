@@ -1632,9 +1632,9 @@ def _post_endpoint(path):
                                   "/responses/input_tokens",
                                   "/v1/responses/input_tokens"])
 def test_a_token_count_loads_its_model_off_the_event_loop(monkeypatch, path):
-    """A token count for a model not loaded: the cold load waits on a
-    thread, as for an image job and the build lock, while the request's
-    event loop runs on, and the stock handler then counts."""
+    """A token count for a model not loaded: the cold load runs on a
+    thread while the event loop runs on, and the stock handler then
+    counts."""
     import threading
 
     order = []
@@ -1661,41 +1661,67 @@ def test_a_token_count_loads_its_model_off_the_event_loop(monkeypatch, path):
     assert order == [("load", "m", True), "handler"]
 
 
-def test_a_warmed_model_stays_held_until_its_handler_returns(monkeypatch):
-    """The chat pre-warm keeps its hold on the model it loaded until the
-    stock handler returns: a LoRA turn on the image worker that needs the
-    model's room meanwhile cannot evict it, so the handler never loads it
-    again on the event loop."""
-    from test_lora_turn import GB, chat, image, make_pool, turn
+@pytest.mark.host_gb(64)
+@pytest.mark.parametrize("reply", ["json", "error", "stream"])
+def test_a_warmed_model_stays_held_until_its_handler_returns(monkeypatch, reply):
+    """The chat pre-warm holds the model it loaded until the stock handler's
+    own resolve takes its place: another load meanwhile passes it over, so
+    the handler never loads it again on the event loop, and the request
+    counts once in flight. The hold is gone once the handler answers or
+    raises, and a streamed reply keeps the hold the handler's resolve
+    took."""
+    from fastapi import HTTPException
+    from test_residency import _FakeRG, busy_count, make_pool
 
-    from gmlx.serve.residency import LoraRefused, _BusyHold
+    from gmlx.serve.residency import _BusyHold, _GenerationGuard, _active_hold
 
-    pool = make_pool(monkeypatch, 10, retry=0)
-    x = image(pool, "x", 4, busy=True)
-    warm = chat(pool, "m", 4, busy=0)
+    _proxy, pool, teardowns = make_pool(15, {"A": 10, "B": 10})
 
-    def load(model_id, adapter):
-        with pool._lock:
-            warm.busy += 1
-        return _BusyHold(pool, warm)
+    def pooled_get_cached_model(model_id, *_a, **_k):
+        # The pooled resolver's hold, as the residency seam sets it.
+        entry = pool.acquire(model_id, None, "auto")
+        prev = _active_hold.get()
+        if prev is not None:
+            prev.release()
+        _active_hold.set(_BusyHold(pool, entry))
+        return entry.model_cache["model"], None, None
 
-    seen = []
+    monkeypatch.setattr(_APP, "get_cached_model", pooled_get_cached_model)
+    seen = {}
 
     async def fake_handler(request, http_request):
-        try:
-            turn(pool, x, 4 * GB)
-        except LoraRefused as e:
-            seen.append(e.status)
-        seen.append(pool.entry_resident(warm))
-        return {"ok": True}
+        pool.release(pool.acquire("B", None, "auto"))   # B needs A's room
+        seen["A kept"] = "A" not in teardowns
+        seen["busy before"] = busy_count(pool, "A")
+        if reply == "error":                            # refused before its resolve
+            raise HTTPException(status_code=400, detail="bad request")
+        _APP.get_cached_model(request.model)            # the stock resolve
+        seen["busy after"] = busy_count(pool, "A")
+        tokens = _GenerationGuard(_FakeRG(), _active_hold.get()).generate("hi")[1]
+        if reply == "stream":
+            return tokens
+        return {"text": list(tokens)}
 
     _register_fake_chat(fake_handler)
-    monkeypatch.setattr(sp_routes, "_load_resident", load)
     sp.install_chat_load_offload()
-    res = asyncio.run(_chat_endpoint()(_FakeReq(model="m"), object()))
-    assert res == {"ok": True}
-    assert seen == [503, True]
-    assert warm.busy == 0
+    call = _chat_endpoint()(_FakeReq(model="A"), object())
+    if reply == "error":
+        with pytest.raises(HTTPException) as raised:
+            asyncio.run(call)
+        # The error's traceback keeps the wrapper's frame alive.
+        assert raised.value.status_code == 400
+        assert seen == {"A kept": True, "busy before": 1}
+        assert busy_count(pool, "A") == 0
+        return
+    res = asyncio.run(call)
+    assert seen == {"A kept": True, "busy before": 1, "busy after": 1}
+    if reply == "json":
+        assert res == {"text": ["t1", "t2"]}
+        assert busy_count(pool, "A") == 0
+        return
+    assert busy_count(pool, "A") == 1                   # the stream's own hold
+    assert list(res) == ["t1", "t2"]
+    assert busy_count(pool, "A") == 0
 
 
 def test_warm_and_release_drops_hold(monkeypatch):
