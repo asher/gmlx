@@ -780,6 +780,89 @@
   "exact_velocity_audio_floor": {
    "rel_l2": 9.133712242529068e-06,
    "measured": "the largest relative L2 between gmlx's exact step on the GPU and the same step on the CPU stream or on inputs nudged by one float32 step (4 seeds), velocity_audio; tests/video/h3_gates.py exact_free_floor on minimax_h3_fl2va_pruned-Q4_K.gguf dd948e08, Apple M5 Max"
+  },
+  "free_restart_spread": {
+   "rule": "a free block row from the first one gmlx's free run misses at twice the oracle's free gap, while the teacher-forced rows, the velocities and the exact gates pass, to the last block: tolerance = the larger of 2 x the oracle's free bf16 against fp32 relative L2 and the restart spread, the oracle's own largest relative L2 at that row over its bf16 blocks restarted from the fixture's state at each of 13 blocks (4 to 30), as is and with 3 nudges of one float32 step; measured once per fixture by scripts/video_oracle/check3_h3_spread.py",
+   "starts": [
+    4,
+    6,
+    8,
+    10,
+    12,
+    14,
+    16,
+    18,
+    20,
+    22,
+    24,
+    27,
+    30
+   ],
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "first": 36,
+   "rows": {
+    "blocks.36": {
+     "rel_l2": 0.29592571956443037,
+     "run": "blocks.10 nudge2"
+    },
+    "blocks.37": {
+     "rel_l2": 0.2930756253921321,
+     "run": "blocks.10 nudge2"
+    },
+    "blocks.38": {
+     "rel_l2": 0.28500622538160697,
+     "run": "blocks.10 nudge2"
+    },
+    "blocks.39": {
+     "rel_l2": 0.37337847811745944,
+     "run": "blocks.8 nudge1"
+    },
+    "blocks.40": {
+     "rel_l2": 0.3566549580041334,
+     "run": "blocks.8 nudge1"
+    },
+    "blocks.41": {
+     "rel_l2": 0.3383908037468507,
+     "run": "blocks.8 nudge1"
+    },
+    "blocks.42": {
+     "rel_l2": 0.34479579014431094,
+     "run": "blocks.8 nudge1"
+    },
+    "blocks.43": {
+     "rel_l2": 0.3005494212105102,
+     "run": "blocks.8 nudge1"
+    },
+    "blocks.44": {
+     "rel_l2": 0.23646221059539893,
+     "run": "blocks.8 nudge1"
+    },
+    "blocks.45": {
+     "rel_l2": 0.2160968654493854,
+     "run": "blocks.8 nudge1"
+    },
+    "blocks.46": {
+     "rel_l2": 0.1835500788250579,
+     "run": "blocks.8 nudge1"
+    },
+    "blocks.47": {
+     "rel_l2": 0.14939028659357037,
+     "run": "blocks.8 nudge1"
+    },
+    "blocks.48": {
+     "rel_l2": 0.10519848747370714,
+     "run": "blocks.8 nudge1"
+    },
+    "blocks.49": {
+     "rel_l2": 0.06524358246701895,
+     "run": "blocks.8 nudge1"
+    }
+   },
+   "measured": "ComfyUI 426f5eea52a7ece1dd599fff4cb6cd1f352ddd24, ComfyUI-GGUF 373048b8403a7820620065210a691263d4da0a61, 8 CPU threads, bf16 matmul emulation; scripts/video_oracle/check3_h3_spread.py"
   }
  },
  "tolerances": {
@@ -1081,21 +1164,21 @@
    "teacher_forced": true
   },
   "free blocks.36": {
-   "rel_l2": 0.0644108435942358
+   "rel_l2": 0.29592571956443037
   },
   "blocks.37": {
    "rel_l2": 0.008267810576131818,
    "teacher_forced": true
   },
   "free blocks.37": {
-   "rel_l2": 0.07238889864098635
+   "rel_l2": 0.2930756253921321
   },
   "blocks.38": {
    "rel_l2": 0.008651122233535802,
    "teacher_forced": true
   },
   "free blocks.38": {
-   "rel_l2": 0.08504437535306275
+   "rel_l2": 0.28500622538160697
   },
   "blocks.39": {
    "rel_l2": 0.007962956519945498,
