@@ -3,6 +3,9 @@
 One sequence holds every row of a step, in segments grouped as the
 family orders them (``Timeline.order``): the text, the anchors (a cond and
 a cond_audio segment per anchor), the target audio and the target video.
+The text group splits into text and vision segments at the vision spans
+of a prompt with images, each span a block of image rows with its
+markers; their positions are the text's.
 Each row has a position (t, h, w) for RoPE. The target clock starts after
 the text, and anchors sit on it at their frame times. The family supplies
 the order and the clock.
@@ -115,10 +118,31 @@ def audio_positions(cursor: float, t: int, w_low: float,
     return g
 
 
+def text_segments(text_len: int, spans: tuple) -> list:
+    """(kind, start, stop) of the text group: text, and vision over each
+    span (start, stop) of the prefix."""
+    if not spans:
+        return [("text", 0, text_len)]
+    out, at = [], 0
+    for start, stop in spans:
+        if not at <= start < stop <= text_len:
+            raise ValueError(f"vision spans {list(spans)} are not ascending "
+                             f"spans of a {text_len}-row prefix")
+        if start > at:
+            out.append(("text", at, start))
+        out.append(("vision", start, stop))
+        at = stop
+    if at < text_len:
+        out.append(("text", at, text_len))
+    return out
+
+
 def pack(tl: Timeline, text_len: int, latent_t: int, lat_h: int, lat_w: int,
-         audio_t: int, anchors: tuple = ()) -> Layout:
+         audio_t: int, anchors: tuple = (), spans: tuple = ()) -> Layout:
     """The segments and positions of a step. ``lat_h`` and ``lat_w`` are
-    latent pixels; ``audio_t`` counts latent frames per stereo channel."""
+    latent pixels; ``audio_t`` counts latent frames per stereo channel.
+    ``anchors`` are placed: each frame counts from the start. ``spans``
+    are the prefix's vision spans."""
     if lat_h % tl.patch or lat_w % tl.patch:
         raise ValueError(f"latent {lat_h}x{lat_w} is not a multiple of the "
                          f"patch {tl.patch}")
@@ -132,6 +156,9 @@ def pack(tl: Timeline, text_len: int, latent_t: int, lat_h: int, lat_w: int,
     origin = float(text_len)
     anchor_rows = []
     for a in anchors:
+        if a.frame < 0:
+            raise ValueError(f"anchor frame {a.frame} is not placed: place "
+                             "it on the clip before the pack")
         at = origin + tl.frame_rescale * a.frame
         if a.video_t:
             anchor_rows.append(
@@ -139,8 +166,10 @@ def pack(tl: Timeline, text_len: int, latent_t: int, lat_h: int, lat_w: int,
         if a.audio_t:
             anchor_rows.append(
                 ("cond_audio", audio_positions(at, a.audio_t, *w_ends)))
+    spans = tuple((int(a), int(b)) for a, b in spans)
     groups = {
-        "text": [("text", g)],
+        "text": [(kind, g[a:b]) for kind, a, b in
+                 text_segments(text_len, spans)],
         "anchors": anchor_rows,
         "audio": [("audio", audio_positions(origin, audio_t, *w_ends))],
         "video": [("video", video_positions(tl, latent_t, frame, origin))],
@@ -152,4 +181,4 @@ def pack(tl: Timeline, text_len: int, latent_t: int, lat_h: int, lat_w: int,
         off += p.shape[0]
     return Layout(segments=tuple(segs), positions=np.concatenate(pos),
                   signature=(text_len, latent_t, lat_h, lat_w, audio_t,
-                             tuple(anchors)))
+                             tuple(anchors), spans))

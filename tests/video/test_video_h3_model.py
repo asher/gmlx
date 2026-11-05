@@ -274,3 +274,44 @@ def test_a_run_steps_each_stream_on_its_own_schedule(tiny, monkeypatch,
 def test_float16_is_refused(tiny):
     with pytest.raises(hm.H3DtypeError, match="bfloat16 or float32"):
         hm.H3Transformer(TINY).act_dtype = mx.float16
+
+
+def test_vision_rows_run_at_the_video_time_with_the_video_tag(tiny):
+    """ComfyUI's tag runs over the prefix (model.py:677-688): a vision
+    block with its markers runs at the text's time, the video's, with the
+    video tag; the text around it keeps the text tag."""
+    lay = layout.pack(hf.TIMELINE, 20, 2, 4, 4, 8, spans=((6, 11),))
+    plan = tiny.plan(lay, 0.25, 0.6)
+    tv = plan.times.index(0.25)
+    v, t = hf.TAGS["video"], hf.TAGS["text"]
+    assert [(a, b, r) for a, b, r in plan.segs][:3] == [
+        (0, 6, 3 * tv + t), (6, 11, 3 * tv + v), (11, 20, 3 * tv + t)]
+
+
+def test_the_prefix_takes_its_rows_by_segment(tiny):
+    vs, aus = hf.latent_shapes(5, 64, 64)
+    v, a = mx.random.normal(vs), mx.random.normal(aus)
+    text = mx.random.normal((1, 20, TINY["hidden_size"]))
+    plain = layout.pack(hf.TIMELINE, 20, *vs[2:], aus[3])
+    split = layout.pack(hf.TIMELINE, 20, *vs[2:], aus[3],
+                        spans=((6, 11), (14, 20)))
+    assert mx.array_equal(tiny.embed(v, a, text, split),
+                          tiny.embed(v, a, text, plain))
+    with pytest.raises(ValueError, match="19 text rows for a layout of 20"):
+        tiny.embed(v, a, text[:, 1:], split)
+
+
+def test_cond_rows_patchify_and_mix_each_anchor(tiny):
+    from gmlx.video.anchors import Anchor
+
+    z = mx.random.normal((1, 24, 1, 4, 4))
+    s = mx.random.normal((1, 32, 2, 3))
+    noise = [mx.random.normal((4, 96))]
+    cv, ca = tiny.cond_rows((Anchor(0, video=z), Anchor(4, audio=s)), 5,
+                            noise=noise)
+    rule = hf.ANCHOR_RULES["video"]
+    want = rule.aug * hm.patchify(z, (1, 2, 2)) + (1 - rule.aug) * noise[0]
+    np.testing.assert_allclose(np.array(cv[0]), np.array(want), rtol=1e-6,
+                               atol=1e-7)
+    assert len(cv) == len(ca) == 1
+    assert mx.array_equal(ca[0], hm.pack_audio(s))

@@ -96,10 +96,15 @@ def anchor_refusal(anchors: tuple) -> str | None:
 def segments(layout: Layout, patch: tuple) -> tuple:
     """FastVideo's segments of an H3 layout, in packed order: the target
     video as its token grid, every other segment as its row count. A
-    layout with an anchor is refused (``anchor_refusal``)."""
+    layout with an anchor is refused (``anchor_refusal``), and so is one
+    with the vision rows of a prompt with images."""
     why = anchor_refusal(layout.signature[5])
     if why:
         raise ValueError(why)
+    if layout.signature[6]:
+        raise ValueError(f"{TITLE} {FASTH3} runs text to video only, and "
+                         "this prompt holds images; encode it without "
+                         "keyframes")
     _, t, h, w = layout.signature[:4]
     grid = (t // patch[0], h // patch[1], w // patch[2])
     return tuple(grid if s.kind == "video" else s.rows

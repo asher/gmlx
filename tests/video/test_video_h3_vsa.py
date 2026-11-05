@@ -90,6 +90,14 @@ def test_a_layout_with_an_anchor_does_not_reach_the_tile_map(anchor):
     assert str(ei.value) == _TEXT_TO_VIDEO
 
 
+def test_a_layout_with_vision_rows_does_not_reach_the_tile_map():
+    vs, aus = hf.latent_shapes(22, 512, 512)
+    lay = layout.pack(hf.TIMELINE, 56, *vs[2:], aus[3], spans=((7, 30),))
+    with pytest.raises(ValueError, match="fasth3 runs text to video only, "
+                                         "and this prompt holds images"):
+        vsa.segments(lay, (1, 2, 2))
+
+
 @pytest.fixture
 def fasth3_load(monkeypatch):
     """``load_dit`` on a file that identifies as FastH3, which records

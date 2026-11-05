@@ -6,21 +6,32 @@ place of target rows. A family's rule mixes a little noise into the
 rows, ``aug * z + (1 - aug) * noise`` from a generator every anchor
 restarts at the same seed, with no noise at ``aug`` 1, and runs them at
 a time of at least ``aug``.
+
+``place`` applies ComfyUI's rule for where an anchor sits and what it
+keeps, before its frames or audio are encoded: a guide clip keeps its
+first frame alone under 5 frames, else its first 17 k + 5; a negative
+frame counts from the end; the kept frames fit the clip; and audio keeps
+the latent frames left on the clip's audio track from the anchor's time.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import mlx.core as mx
 
+# Seeds and their offsets wrap to 64 bits, the range of a ComfyUI seed.
+SEED_RANGE = 1 << 64
+
 
 @dataclass(frozen=True)
 class Anchor:
-    """A frame index of the target clip, negative from the end, with a
-    video latent (1, C, T, H, W), an audio latent (1, C, 2, T), or both."""
+    """A frame index of the target clip, counted from the start once
+    placed, with a video latent (1, C, T, H, W), an audio latent (1, C, 2,
+    T), or both."""
     frame: int
     video: mx.array | None = None
     audio: mx.array | None = None
@@ -39,6 +50,59 @@ class AnchorRule:
     seed_offset: int
 
 
+@dataclass(frozen=True)
+class Placement:
+    """Where an anchor sits and what it keeps: its frame counted from the
+    start, the video frames it keeps (0 for audio alone), and the most
+    audio latent frames a channel it keeps (None without audio)."""
+    frame: int
+    video_frames: int = 0
+    audio_t: int | None = None
+
+
+def guide_frames(n: int) -> int:
+    """The frames of an ``n``-frame guide an anchor keeps: its first
+    frame alone under 5, else its first 17 k + 5."""
+    if n < 1:
+        raise ValueError("a guide holds no frames")
+    return 1 if n < 5 else n - (n - 5) % 17
+
+
+def place(frame: int, frames: int, audio_t: int, frame_rescale: float, *,
+          video_frames: int = 0, audio: bool = False) -> Placement:
+    """The placement of an anchor at ``frame`` of a clip of ``frames``
+    frames and ``audio_t`` audio latent frames a channel, with
+    ``video_frames`` frames of video (0 for none) and audio or not. The
+    audio keeps floor(audio_t - frame_rescale x frame) latent frames."""
+    if not video_frames and not audio:
+        raise ValueError("an anchor needs frames or audio")
+    kept = guide_frames(video_frames) if video_frames else 1
+    at = frame + frames if frame < 0 else frame
+    if at < 0 or at + kept > frames:
+        if kept == 1:
+            raise ValueError(f"frame {frame} is outside the clip's {frames} "
+                             "frames")
+        raise ValueError(f"a {kept}-frame guide clip at frame {frame} does "
+                         f"not fit in the clip's {frames} frames")
+    max_rt = None
+    if audio:
+        max_rt = math.floor(audio_t - frame_rescale * at)
+        if max_rt < 1:
+            raise ValueError(f"frame {frame} is past the end of the clip's "
+                             "audio")
+    return Placement(at, kept if video_frames else 0, max_rt)
+
+
+def layout_rows(anchors) -> tuple:
+    """The ``layout.AnchorRows`` of placed anchors, from their latents."""
+    from .layout import AnchorRows
+
+    return tuple(AnchorRows(
+        a.frame, video_t=0 if a.video is None else int(a.video.shape[2]),
+        audio_t=0 if a.audio is None else int(a.audio.shape[-1]))
+        for a in anchors)
+
+
 def resolve_frame(frame: int, frames: int) -> int:
     """A frame index counted from the start, for a clip of ``frames``."""
     f = frame + frames if frame < 0 else frame
@@ -48,18 +112,31 @@ def resolve_frame(frame: int, frames: int) -> int:
     return f
 
 
-def augment(rows: list, rule: AnchorRule, seed: int) -> list:
-    """Each anchor's rows (n, features) as the rule mixes them, each from
-    the same restarted generator, in float32."""
+def augment(rows: list, rule: AnchorRule, seed: int, noise=None) -> list:
+    """Each anchor's rows (n, features) as the rule mixes them, in
+    float32. Each anchor's noise comes from the same generator, restarted
+    at the seed plus the rule's offset, wrapped to 64 bits; or it is
+    ``noise``'s array for that anchor, in its rows' shape, which is how
+    the pack sends the draws of ComfyUI's torch generator."""
     import mlx.core as mx
 
+    if noise is not None and len(noise) != len(rows):
+        raise ValueError(f"{len(noise)} noise arrays for {len(rows)} "
+                         "anchors")
     out = []
-    for r in rows:
+    for i, r in enumerate(rows):
         r = r.astype(mx.float32)
         if rule.aug < 1.0:
-            key = mx.random.key(seed + rule.seed_offset)
-            noise = mx.random.normal(r.shape, mx.float32, key=key)
-            r = rule.aug * r + (1.0 - rule.aug) * noise
+            if noise is None:
+                key = mx.random.key((seed + rule.seed_offset) % SEED_RANGE)
+                n = mx.random.normal(r.shape, mx.float32, key=key)
+            else:
+                n = noise[i].astype(mx.float32)
+                if tuple(n.shape) != tuple(r.shape):
+                    raise ValueError(f"anchor noise {tuple(n.shape)} is not "
+                                     f"the shape of its rows "
+                                     f"{tuple(r.shape)}")
+            r = rule.aug * r + (1.0 - rule.aug) * n
         out.append(r)
     return out
 

@@ -29,7 +29,7 @@ import numpy as np
 from gmlx import mlx_guards
 from gmlx.image import ops, pacing
 from gmlx.video import rope
-from gmlx.video.anchors import pinned
+from gmlx.video.anchors import augment, pinned
 from gmlx.video.layout import Layout
 
 from . import family as fam
@@ -114,6 +114,21 @@ def patchify(latent: mx.array, patch: tuple) -> mx.array:
     x = latent[0].reshape(c, t // pt, pt, h // ph, ph, w // pw, pw)
     x = x.transpose(1, 3, 5, 0, 2, 4, 6)
     return x.reshape(-1, c * pt * ph * pw)
+
+
+def cond_rows(anchors, seed: int, patch: tuple, *, rules: dict | None = None,
+              noise=None) -> tuple:
+    """(cond_video, cond_audio): the rows of each placed anchor's cond and
+    cond_audio segments in order, as ``embed`` takes them, mixed by the
+    rule of their stream from ``seed``. ``noise`` is the video rows'
+    noise, one array per anchor with video (``anchors.augment``)."""
+    rules = fam.ANCHOR_RULES if rules is None else rules
+    video = [patchify(a.video.astype(_F32), patch) for a in anchors
+             if a.video is not None]
+    audio = [pack_audio(a.audio.astype(_F32)) for a in anchors
+             if a.audio is not None]
+    return (tuple(augment(video, rules["video"], seed, noise)),
+            tuple(augment(audio, rules["audio"], seed)))
 
 
 def unpatchify(rows: mx.array, shape: tuple, patch: tuple) -> mx.array:
@@ -383,18 +398,23 @@ class H3Transformer(nn.Module):
         i0 = i0.astype(mx.int32)
         return _lerp(tab[i0], tab[i0 + 1], w)
 
+    def cond_rows(self, anchors, seed: int, *, noise=None) -> tuple:
+        """``cond_rows`` of placed anchors at this DiT's patch."""
+        return cond_rows(anchors, seed, self.cfg.patch, noise=noise)
+
     def plan(self, layout: Layout, t_video: float, t_audio: float,
              rules: dict | None = None) -> StepPlan:
         """The step's times, segment rows, RoPE tables and VSA geometry.
-        Text runs at the video time; anchor rows at their stream's pinned
-        time. A FastH3 plan refuses a layout with anchors (ValueError)."""
+        Text runs at the video time, its vision rows with the video tag;
+        anchor rows at their stream's pinned time. A FastH3 plan refuses a
+        layout with anchors or vision rows (ValueError)."""
         rules = fam.ANCHOR_RULES if rules is None else rules
-        t = {"text": t_video, "video": t_video, "audio": t_audio,
-             "cond": pinned(t_video, rules["video"]),
+        t = {"text": t_video, "vision": t_video, "video": t_video,
+             "audio": t_audio, "cond": pinned(t_video, rules["video"]),
              "cond_audio": pinned(t_audio, rules["audio"])}
-        tag = {"text": fam.TAGS["text"], "video": fam.TAGS["video"],
-               "cond": fam.TAGS["video"], "audio": fam.TAGS["audio"],
-               "cond_audio": fam.TAGS["audio"]}
+        tag = {"text": fam.TAGS["text"], "vision": fam.TAGS["video"],
+               "video": fam.TAGS["video"], "cond": fam.TAGS["video"],
+               "audio": fam.TAGS["audio"], "cond_audio": fam.TAGS["audio"]}
         times = tuple(sorted({t_video, t_audio}
                              | {t[s.kind] for s in layout.segments}))
         idx = {v: i for i, v in enumerate(times)}
@@ -414,9 +434,10 @@ class H3Transformer(nn.Module):
               taps: dict | None = None) -> mx.array:
         """The sequence (1, rows, dim) in segment order. The patch
         projections run in float32 on the anchor rows, then the targets.
-        Each segment takes its rows by kind: each cond and cond_audio
-        segment the next anchor's rows of its stream, the video and audio
-        segments the targets'."""
+        Each segment takes its rows by kind: each text and vision segment
+        the next rows of ``text``, each cond and cond_audio segment the next
+        anchor's rows of its stream, the video and audio segments the
+        targets'."""
         act = self.act_dtype
         vrows = mx.concatenate(
             [*cond_video, patchify(video, self.cfg.patch).astype(_F32)])
@@ -435,13 +456,16 @@ class H3Transformer(nn.Module):
                 "video": (ve, [ve.shape[0] - sum(cv)], sum(cv)),
                 "cond_audio": (ae, ca, 0),
                 "audio": (ae, [ae.shape[0] - sum(ca)], sum(ca))}
-        parts = []
+        prefix = sum(s.rows for s in layout.segments
+                     if s.kind in ("text", "vision"))
+        if text.shape[1] != prefix:
+            raise ValueError(f"{text.shape[1]} text rows for a layout of "
+                             f"{prefix}")
+        parts, at_text = [], 0
         for s in layout.segments:
-            if s.kind == "text":
-                if text.shape[1] != s.rows:
-                    raise ValueError(f"{text.shape[1]} text rows for a "
-                                     f"layout of {s.rows}")
-                parts.append(text.astype(act))
+            if s.kind in ("text", "vision"):
+                parts.append(text[:, at_text:at_text + s.rows].astype(act))
+                at_text += s.rows
                 continue
             rows, sizes, at = take[s.kind]
             if not sizes or sizes[0] != s.rows:

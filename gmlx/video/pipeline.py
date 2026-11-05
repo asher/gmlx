@@ -23,6 +23,7 @@ from gmlx.image.lora import install as lora_install
 from gmlx.image.lora.install import linear_leaves
 
 from . import api, layout, schedule
+from .anchors import layout_rows as anchor_rows
 from . import loader as video_loader
 
 if TYPE_CHECKING:
@@ -110,13 +111,18 @@ def generate(pipe: VideoPipeline, features: mx.array, *, frames: int,
              width: int, height: int, steps: int, shifts: dict,
              seed: int | None = None, start: tuple | None = None,
              table: str | None = None, sigmas: dict | None = None,
-             on_step: Callable | None = None) -> tuple[mx.array, mx.array]:
+             on_step: Callable | None = None, anchors: tuple = (),
+             spans: tuple = (), anchor_noise=None,
+             ) -> tuple[mx.array, mx.array]:
     """The video (1, C, T, H, W) and audio (1, C, 2, T) latents of a clip
     from encoder ``features`` (1, L, text dim), sampled under patch table
     ``table`` from the noise of ``seed``, or from ``start`` as (video,
     audio) noise, on ``sigmas`` per stream when given (``api.sample``),
     else on the variant's trained timesteps when ``steps`` is their count.
-    The text rows run once, under the same table."""
+    The text rows run once, under the same table. ``anchors`` are placed
+    anchors, whose rows take their noise from ``seed`` or from
+    ``anchor_noise`` (``anchors.augment``), and ``spans`` the vision spans
+    of the features' prompt."""
     fam = pipe.video_family
     dim = int(pipe.dit.cfg.text_dim)
     if features.ndim != 3 or features.shape[0] != 1 \
@@ -134,19 +140,27 @@ def generate(pipe: VideoPipeline, features: mx.array, *, frames: int,
                          f"{tuple(xa.shape)} are not the {frames}-frame "
                          f"{width}x{height} shapes {vshape} and {ashape}")
     lay = layout.pack(fam.timeline, int(features.shape[1]), vshape[2],
-                      vshape[3], vshape[4], ashape[3])
+                      vshape[3], vshape[4], ashape[3],
+                      anchor_rows(anchors), spans)
+    model = pipe.dit
+    cond_video, cond_audio = (), ()
+    if anchors:
+        if seed is None and anchor_noise is None:
+            raise ValueError("anchors take a seed or their noise")
+        cond_video, cond_audio = model.cond_rows(
+            anchors, 0 if seed is None else seed, noise=anchor_noise)
     rungs = fam.rungs(pipe.variant, steps)
     if sigmas is None and rungs:
         sigmas = schedule.stream_sigmas(steps, shifts, rungs)
     tid = pipe.default_table if table is None else table
     if tid not in pipe.patch_tables:
         raise ValueError(f"unknown patch table {table!r}")
-    model = pipe.dit
     prev = lora_install.activate(pipe, tid)
     try:
         text = model.caption(features)
         mx.eval(text)
         return api.sample(model, xv, xa, text, lay, steps=steps,
-                          shifts=shifts, sigmas=sigmas, on_step=on_step)
+                          shifts=shifts, sigmas=sigmas, on_step=on_step,
+                          cond_video=cond_video, cond_audio=cond_audio)
     finally:
         lora_install.restore(pipe, prev)
