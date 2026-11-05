@@ -1688,12 +1688,13 @@ def shed_lora(entry, nbytes: int, hold=(), own: bool = False) -> None:
         left -= before - cache.bytes
 
 
-def lora_claims(pool, booking, hold=()) -> None:
+def lora_claims(pool, booking, hold=(), store_hold=()) -> None:
     """A job's claims at its start or turn, on the worker: shed what its
-    booking claimed, then release the claims and check the pool again in
-    one hold, before it allocates. Raises LoraRefused when the check
+    booking claimed, the owner's keys in ``hold`` and the uploads in
+    ``store_hold`` left, then release the claims and check the pool again
+    in one hold, before it allocates. Raises LoraRefused when the check
     fails, having allocated nothing."""
-    pool.shed_claims(booking, hold)
+    pool.shed_claims(booking, hold, store_hold)
     pool.release_claims(booking)
 
 
@@ -1736,15 +1737,18 @@ def bound_lora(pool, entry, pipe) -> None:
 
 
 def lora_turn(pool, entry, booking, need: int, priced: dict, *,
-              subject: str, own_held: int = 0, hold=()):
+              subject: str, own_held: int = 0, hold=(), store=None):
     """A job's turn booking on the worker: ``need`` bytes its dry run
     allocates next, with the figure of each key it priced. Its claims are
-    shed holding ``hold`` and released, and the entry's caches bound to
-    what it booked, before it allocates. Returns the booking."""
+    shed holding ``hold`` and the uploads ``store`` sizes, {hash: bytes},
+    which are its own keys too, and released, and the entry's caches
+    bound to what it booked, before it allocates. Returns the booking."""
+    store = store or {}
     booking = pool.turn_lora(entry, booking, need, subject=subject,
-                             own_held=own_held)
+                             own_held=own_held,
+                             store_held=sum(store.values()))
     booking.priced.update(priced)
-    lora_claims(pool, booking, hold)
+    lora_claims(pool, booking, hold, tuple(store))
     bound_lora(pool, entry, entry.pipeline.pipe)
     return booking
 

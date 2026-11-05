@@ -42,7 +42,7 @@ def make_pool(monkeypatch, budget_gb):
     pool._headroom_fn = lambda: pool.head
     pool.caches = {}
     pool._lora_shed = lambda e, n, hold, own: pool.caches[id(e)].shed(n, hold)
-    pool._store_shed = lambda n: pool.caches[id(STORE)].shed(n)
+    pool._store_shed = lambda n, hold=(): pool.caches[id(STORE)].shed(n, hold)
     return pool
 
 

@@ -2635,12 +2635,9 @@ def test_an_images_api_request_between_a_define_and_its_step_keeps_it(
     assert host.held == 0
 
 
-def _pack_sync(c, pairs, scale):
-    """The table sync of a ComfyUI under a LoRA of ``pairs`` scaled by
-    ``scale``, as the pack syncs it: upload the matrices again, which the
-    client sends when the server lacks them, then define the table.
-    Returns the sync, which returns how many matrices the server lacked
-    and the table id."""
+def _pack_mats(pairs, scale) -> tuple:
+    """The matrices, {hash: array}, and the table entries of a ComfyUI's
+    LoRA of ``pairs`` scaled by ``scale``."""
     from gmlx.serve.image_steps_client import array_hash
 
     mats, entries = {}, []
@@ -2653,6 +2650,16 @@ def _pack_sync(c, pairs, scale):
                         "patches": [{"up": array_hash(up),
                                      "down": array_hash(down),
                                      "alpha": None, "strength": 1.0}]})
+    return mats, entries
+
+
+def _pack_sync(c, pairs, scale):
+    """The table sync of a ComfyUI under a LoRA of ``pairs`` scaled by
+    ``scale``, as the pack syncs it: upload the matrices again, which the
+    client sends when the server lacks them, then define the table.
+    Returns the sync, which returns how many matrices the server lacked
+    and the table id."""
+    mats, entries = _pack_mats(pairs, scale)
 
     def sync() -> tuple:
         sent = sum(h not in steps.STATE.adapters for h in mats)

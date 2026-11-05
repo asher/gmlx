@@ -186,3 +186,32 @@ def test_a_video_step_after_an_encode_books_the_own_tables_excess_again(
     assert 0 < t.pool.books.excess(t.e) <= excess
     _books_hold(t.pool, t.e)
     _held_never_negative(t)
+
+
+def test_a_video_step_defining_its_table_again_never_sheds_its_matrices(
+        request, monkeypatch, tmp_path):
+    """A video step after an encode, which let the table's pairs go,
+    defines the table again in its turn from the matrices the server
+    keeps, on a server short by a quarter of their bytes beside an idle
+    model. The matrices are the step's own keys of the uploads until its
+    define: its route unloads the idle model, and the step gives the
+    first one's output with no 409."""
+    from gmlx.serve import image_steps as steps
+    from gmlx.serve.patches import image_steps as routes
+    from test_step_routes_lora import _model
+    from test_video_h3_lora import _adapter
+
+    t = _entry(request, monkeypatch, tmp_path)
+    tid = t.c.define_table("h3", _table_body(t.c, _adapter(6)))
+    first = _step(t, patch_table=tid)
+    t.c.encode("h3", "a cat")
+    core = steps.STATE.tables_of("h3", t.pipe)[tid]
+    assert not routes._held(t.pipe, core)
+    short = sum(_store().values()) // 4
+    n, _own, _uploads = routes._step_estimate(t.served, tid, core)
+    idle = _model(t.pool, "idle-chat", 2 * short, busy=False)
+    t.pool._budget = t.pool._resident_bytes() + n - short
+    again = _step(t, patch_table=tid)
+    assert all(_rel(a, b) < 1e-6 for a, b in zip(again, first))
+    assert idle not in t.pool._entries.values()
+    _books_hold(t.pool, t.e)

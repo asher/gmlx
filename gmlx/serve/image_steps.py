@@ -354,13 +354,16 @@ class _Bytes:
             self._bytes += t.nbytes
             self._gone(self._shed_over(True))
 
-    def shed(self, nbytes: int) -> int:
-        """Drop the least recently used tensors until ``nbytes`` are gone,
-        and return the bytes dropped."""
+    def shed(self, nbytes: int, hold=()) -> int:
+        """Drop the least recently used tensors but those at ``hold``
+        until ``nbytes`` are gone, and return the bytes dropped."""
+        hold = set(hold)
         with self._lock:
             dropped, keys = 0, []
-            while dropped < nbytes and self._items:
-                k, t = self._items.popitem(last=False)
+            for k in [k for k in self._items if k not in hold]:
+                if dropped >= nbytes:
+                    break
+                t = self._items.pop(k)
                 self._bytes -= t.nbytes
                 dropped += t.nbytes
                 keys.append(k)

@@ -500,7 +500,7 @@ class _ResidencyPool:
         # request LoRA bytes, the shed of the uploads.
         self._headroom_fn: Callable[[], Any] | None = None
         self._lora_shed: Callable[..., None] | None = None
-        self._store_shed: Callable[[int], None] | None = None
+        self._store_shed: Callable[[int, tuple], None] | None = None
         # A test's pause at a named point of a grant or a cold build.
         self._seam = None
 
@@ -762,10 +762,12 @@ class _ResidencyPool:
             "close other apps or unload a model to make room")
 
     def _lora_plan(self, owner, n: int, subject: str, *, evict: bool,
-                   own_held: int = 0, head=None, but=None):
+                   own_held: int = 0, store_held: int = 0, head=None,
+                   but=None):
         """Under _lock after a drain: the claims and the idle models that
         make room for ``n`` more bytes, or a refusal. ``own_held`` bytes
-        of the owner are the job's own keys, which it never claims."""
+        of the owner and ``store_held`` bytes of the upload store are the
+        job's own keys, which it never claims."""
         from .capacity import overcommit
         from .lora_books import STORE, gb
 
@@ -788,8 +790,9 @@ class _ResidencyPool:
             for src in order:
                 if take <= 0:
                     break
-                c = min(take, books.idle(src, own_held if src is owner
-                                         else 0))
+                c = min(take, books.idle(
+                    src, own_held if src is owner
+                    else store_held if src is STORE else 0))
                 if c > 0:
                     claims.append((src, c))
                     take -= c
@@ -843,12 +846,13 @@ class _ResidencyPool:
         return claims, victims
 
     def reserve_lora(self, owner, n: int, *, subject: str,
-                     own_held: int = 0):
+                     own_held: int = 0, store_held: int = 0):
         """Book ``n`` bytes for ``owner``, an entry or the upload store,
         on a request thread: the estimate of a route. An entry's booking
         may evict idle models as a cold load does; an upload's never does.
         Returns the Booking, or raises LoraRefused. ``own_held`` bytes of
-        the owner are the request's own keys, which it never claims."""
+        the owner and ``store_held`` bytes of the upload store are the
+        request's own keys, which it never claims."""
         from .lora_books import STORE
 
         self._lora_guard("a LoRA reservation")
@@ -869,7 +873,7 @@ class _ResidencyPool:
                         self.books.drain()
                         claims, victims = self._lora_plan(
                             owner, n, subject, evict=evict, head=head,
-                            own_held=own_held)
+                            own_held=own_held, store_held=store_held)
                         self._hit("reserve")
                         if victims and not windowed:
                             continue
@@ -894,7 +898,7 @@ class _ResidencyPool:
                           "worker is busy; retry")
 
     def turn_lora(self, owner, booking, need: int, *, subject: str,
-                  own_held: int = 0):
+                  own_held: int = 0, store_held: int = 0):
         """The booking at a job's turn, on the image worker: ``need``
         bytes the job will allocate by its dry run, past its pending
         booking. Room from free memory, idle LoRA bytes and uploads, never
@@ -913,7 +917,8 @@ class _ResidencyPool:
             short = max(0, need - pending)
             # The measured check takes what the job has yet to allocate.
             claims, _ = self._lora_plan(owner, short, subject, evict=False,
-                                        own_held=own_held, head=None,
+                                        own_held=own_held,
+                                        store_held=store_held, head=None,
                                         but=booking)
             if head is not None:
                 from .capacity import overcommit
@@ -930,15 +935,16 @@ class _ResidencyPool:
                 self.books.grow(booking, short, claims)
             return booking
 
-    def shed_claims(self, booking, hold=()) -> None:
+    def shed_claims(self, booking, hold=(), store_hold=()) -> None:
         """Shed what ``booking`` claimed, after _lock dropped: an entry's
-        request LoRA bytes on the image worker, the uploads anywhere."""
+        request LoRA bytes on the image worker, the uploads anywhere. The
+        owner's keys in ``hold`` and the uploads in ``store_hold`` stay."""
         from .lora_books import STORE
 
         for src, c in booking.claims_on():
             if src is STORE:
                 shed = self._store_shed or _default_store_shed
-                shed(c)
+                shed(c, tuple(store_hold))
             else:
                 shed = self._lora_shed or _default_lora_shed
                 shed(src, c, hold if src is booking.owner else (),
@@ -2112,10 +2118,10 @@ def _default_lora_shed(entry, nbytes: int, hold, own: bool) -> None:
     image_service.shed_lora(entry, nbytes, hold, own)
 
 
-def _default_store_shed(nbytes: int) -> None:
+def _default_store_shed(nbytes: int, hold=()) -> None:
     from .image_steps import STATE
 
-    STATE.adapters.shed(nbytes)
+    STATE.adapters.shed(nbytes, hold)
 
 
 def _holds_image_worker() -> bool:

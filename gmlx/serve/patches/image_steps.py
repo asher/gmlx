@@ -304,16 +304,18 @@ def _refused(e):
     return StepError(e.status, e.message)
 
 
-async def _reserve(pool, owner, n: int, subject: str, own_held: int = 0):
+async def _reserve(pool, owner, n: int, subject: str, own_held: int = 0,
+                   store_held: int = 0):
     """A reservation of ``n`` bytes for ``owner`` on a request thread.
-    ``own_held`` bytes the owner holds are the request's own keys, which
-    its claims leave."""
+    ``own_held`` bytes the owner holds and ``store_held`` bytes of the
+    uploads are the request's own keys, which its claims leave."""
     from ..lora_books import LoraRefused
     from ..residency import reserve_on_thread
 
     try:
         return await reserve_on_thread(pool, owner, n, subject=subject,
-                                       own_held=own_held)
+                                       own_held=own_held,
+                                       store_held=store_held)
     except LoraRefused as e:
         raise _refused(e) from None
 
@@ -676,12 +678,14 @@ async def put_patch_table(request: Request):
             from ..image_steps import PAIRS, body_pairs, pairs_due
 
             # The estimate: the pairs not held and not the entry's own,
-            # from the wire bytes of their matrices.
+            # from the wire bytes of their matrices, which are the
+            # define's own keys of the uploads.
             pairs = body_pairs(body, STATE.adapters)
             due = pairs_due(served, pairs)
             booking = await _reserve(
                 pool, hold._entry, sum(due.values()), PAIRS,
-                _held_bytes(served.pipe, set(pairs) - set(due)))
+                _held_bytes(served.pipe, set(pairs) - set(due)),
+                sum(_sizes(body).values()))
 
         def work():
             nonlocal booking
@@ -730,7 +734,8 @@ def _define_turn(pool, entry, served, body: dict, booking,
                  subject: str | None = None):
     """The turn booking of a define on the worker, before ``.mx()``: the
     pairs of ``body`` not held and not the entry's own. Its held pairs
-    are its own keys, which its claims never shed."""
+    and the uploaded matrices it names are its own keys, which its claims
+    never shed."""
     from ..image_service import ensure_dit, lora_turn
     from ..image_steps import PAIRS, STATE, body_pairs, is_video, pairs_due
     from ..lora_books import LoraRefused
@@ -747,7 +752,7 @@ def _define_turn(pool, entry, served, body: dict, booking,
     try:
         return lora_turn(pool, entry, booking, sum(due.values()), due,
                          subject=subject or PAIRS, own_held=held,
-                         hold=tuple(pairs))
+                         hold=tuple(pairs), store=_sizes(body))
     except LoraRefused as e:
         raise _refused(e) from None
 
@@ -858,10 +863,11 @@ def _factor_turn(pool, entry, served, core, booking):
 
 
 def _step_estimate(served, tid, core) -> tuple:
-    """(estimate, own held) of a step's LoRA bytes on its route: the pairs
-    not held of a table it defines again, and the factors its forward
-    builds, with the bytes of its own keys held now, which its claims
-    leave. The factors are priced by the dry run while the DiT and the
+    """(estimate, own held, uploads held) of a step's LoRA bytes on its
+    route: the pairs not held of a table it defines again, and the factors
+    its forward builds, with the bytes of its own keys held now in the
+    pipeline and of the uploaded matrices of a table it defines again,
+    which its claims leave. The factors are priced by the dry run while the DiT and the
     pairs are held, and at twice the pairs' bytes otherwise, as on a
     staged entry whose DiT an encode let go; the turn books them
     exactly."""
@@ -870,8 +876,8 @@ def _step_estimate(served, tid, core) -> tuple:
     pipe = served.pipe
     if core is None:
         # The default table's excess is booked at the turn.
-        return 0, 0
-    n = 0
+        return 0, 0, 0
+    n = store = 0
     pairs: dict = {}
     held = _held(pipe, core)
     table = pipe.patch_tables.get(core)
@@ -880,19 +886,21 @@ def _step_estimate(served, tid, core) -> tuple:
     if not held:
         raw = STATE.tables_of(served.spec.id, pipe).body(tid)
         if raw is not None:
-            pairs = body_pairs(json.loads(raw), STATE.adapters)
+            body = json.loads(raw)
+            pairs = body_pairs(body, STATE.adapters)
             due = pairs_due(served, pairs)
             n += sum(due.values())
             named = set(pairs) - set(due)
+            store = sum(_sizes(body).values())
     own = _held_bytes(pipe, named)
     if held and table and getattr(pipe, "dit", None) is not None:
         from ..image_service import turn_figures
 
         need, _priced, built = turn_figures(_lora_pool(), None, pipe, core)
-        return n + need, own + built
+        return n + need, own + built, store
     if not pairs and table:
         pairs = {k: pipe.adapters.nbytes(k) or 0 for k in named}
-    return n + 2 * sum(pairs.values()), own
+    return n + 2 * sum(pairs.values()), own, store
 
 
 def _skip(served, raw) -> tuple:
@@ -1005,9 +1013,10 @@ async def step(request: Request):
         if pool is not None:
             from ..image_steps import FACTORS
 
-            n, own = _step_estimate(served, fields.get("patch_table"),
-                                    table)
-            booking = await _reserve(pool, hold._entry, n, FACTORS, own)
+            n, own, store = _step_estimate(
+                served, fields.get("patch_table"), table)
+            booking = await _reserve(pool, hold._entry, n, FACTORS, own,
+                                     store)
 
         def work():
             nonlocal booking
@@ -1283,8 +1292,9 @@ async def _av_step(t0, tensors, fields, run):
         if pool is not None:
             from ..image_steps import FACTORS
 
-            n, own = _step_estimate(served, tid, table)
-            booking = await _reserve(pool, hold._entry, n, FACTORS, own)
+            n, own, store = _step_estimate(served, tid, table)
+            booking = await _reserve(pool, hold._entry, n, FACTORS, own,
+                                     store)
 
         def work():
             try:
