@@ -2356,11 +2356,14 @@ def _synthesize_nemotron_transcribe_vlm_config(
     """Nemotron 3.5 Transcribe config: the nemotron_h text synth plus the
     speech encoder's ``pee.*`` and ``ctc.*`` header fields, which build
     :class:`gmlx.models.nemotron_h.speech.SpeechConfig`."""
-    from gmlx.models.nemotron_h.transcribe_model import AUDIO_PLACEHOLDER
+    from gmlx.models.nemotron_h.transcribe_model import (
+        AUDIO_PLACEHOLDER,
+        CTC_TOKENIZER,
+    )
 
     fields = {k: v for k, v in mm_meta.items()
               if k.startswith(("pee.", "ctc."))
-              and isinstance(v, (bool, int, float))}
+              and (isinstance(v, (bool, int, float)) or k == CTC_TOKENIZER)}
     audio_id = _gguf_token_id(llm_meta, AUDIO_PLACEHOLDER)
     if audio_id is None:
         raise UnsupportedVLMError(

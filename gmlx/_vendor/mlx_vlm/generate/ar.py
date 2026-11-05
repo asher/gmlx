@@ -181,15 +181,18 @@ def normalize_resize_shape(values):
 def _request_step(model, prompt_cache, input_ids, inputs_embeds,
                   max_tokens, step: int) -> int:
     """gmlx: ``step`` cut to the request step of this prompt, its embedded
-    rows and its output budget (``prefill_decay.run_request_step``)."""
+    rows and its output budget (``prefill_decay.run_request_step``). Rows
+    a model builds a chunk at a time hold nothing between chunks."""
     from gmlx.gen import prefill_decay as pd
 
     if not pd.row_bytes(model):
         return step
     rows = int(inputs_embeds.shape[1])
+    held_rows = rows if isinstance(inputs_embeds, mx.array) else 0
     return pd.run_request_step(
         model, prompt_cache, rows, max_tokens, step,
-        audio_tokens=pd.audio_tokens_in(model, input_ids), embedded_rows=rows)
+        audio_tokens=pd.audio_tokens_in(model, input_ids),
+        embedded_rows=held_rows)
 
 
 def generate_step(
@@ -831,6 +834,14 @@ def _concat_prompt_kwarg_rows(key: str, rows: List[mx.array]) -> mx.array:
     return mx.concatenate(rows, axis=0)
 
 
+def _built_rows(embeds):
+    """gmlx: ``embeds`` as an array: rows a model builds a chunk at a time
+    (``PromptRows``) are built whole."""
+    if embeds is None or isinstance(embeds, mx.array):
+        return embeds
+    return embeds[:, : embeds.shape[1]]
+
+
 def _merge_prefill_prompt_kwargs(
     prompt_kwargs_list: List[Optional[dict]],
     input_ids: List[List[int]],
@@ -846,6 +857,9 @@ def _merge_prefill_prompt_kwargs(
         if not kw or kw.get("inputs_embeds") is None:
             raise ValueError("inputs_embeds is required")
         embeds = kw["inputs_embeds"]  # [1, length, D]
+        # gmlx: one row's unbuilt rows pass through; a batch builds them.
+        if len(prompt_kwargs_list) > 1:
+            embeds = _built_rows(embeds)
         embed_dtype = embeds.dtype
         embed_dim = embeds.shape[-1]
         if length < max_length:
@@ -855,7 +869,9 @@ def _merge_prefill_prompt_kwargs(
             )
             embeds = mx.concatenate([pad, embeds], axis=1)
         row_embeds.append(embeds)
-    inputs_embeds = mx.concatenate(row_embeds, axis=0)
+    inputs_embeds = (
+        row_embeds[0] if len(row_embeds) == 1 else mx.concatenate(row_embeds, axis=0)
+    )
 
     merged_kwargs: dict = {}
     per_row_keys: dict = {}
@@ -2212,7 +2228,7 @@ class PromptProcessingBatch:
         output = self.model(
             self._input_ids,
             cache=self.prompt_cache,
-            inputs_embeds=self._inputs_embeds,
+            inputs_embeds=_built_rows(self._inputs_embeds),
             **call_kwargs,
         )
         output = self._speculative_prefill.finish(output)
@@ -2725,7 +2741,11 @@ class BatchGenerator:
             if kw is None or kw.get("inputs_embeds") is None:
                 raise ValueError("APC mixed prefill requires precomputed inputs_embeds")
             full = kw["inputs_embeds"]  # [1, full_len, D]
-            suff = full[:, prefix_lens[i] :, :]
+            # gmlx: unbuilt rows (PromptRows) move past the prefix; a batch
+            # of several builds them.
+            suff = full[:, prefix_lens[i] :]
+            if len(prompt_kwargs_list) > 1:
+                suff = _built_rows(suff)
             pad = right_pad_per_row[i]
             if pad > 0:
                 pad_emb = mx.zeros(
@@ -2733,7 +2753,11 @@ class BatchGenerator:
                 )
                 suff = mx.concatenate([suff, pad_emb], axis=1)
             suffix_embeds_per_row.append(suff)
-        inputs_embeds = mx.concatenate(suffix_embeds_per_row, axis=0)
+        inputs_embeds = (
+            suffix_embeds_per_row[0]
+            if len(suffix_embeds_per_row) == 1
+            else mx.concatenate(suffix_embeds_per_row, axis=0)
+        )
 
         # Merge prompt-side kwargs (excluding inputs_embeds, which we've just
         # rebuilt). Per-batch tensors get concatenated across rows; scalars

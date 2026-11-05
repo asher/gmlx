@@ -5,6 +5,7 @@ gated test at the end reads the real decoder's tokenizer."""
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import os
 from pathlib import Path
@@ -319,6 +320,77 @@ def test_generate_step_takes_prompt_rows(container):
         np.testing.assert_array_equal(a, b)
 
 
+def test_a_served_prompt_batch_takes_prompt_rows(container, monkeypatch):
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
+    monkeypatch.setenv("GMLX_PREFILL_MIN_TAIL", "0")
+    model, mel, pcm = container
+    feats, mask = _inputs(mel, [pcm])
+    n = speech.num_audio_tokens(pcm.size)
+    ids = [5] + [AUDIO_ID] * n + [6, 7, 8]
+    lm = model.language_model
+
+    def last_logits(lazy):
+        rows = model.get_input_embeddings(
+            mx.array([ids]), input_features=feats, input_features_mask=mask,
+            prompt_rows=lazy).inputs_embeds
+        assert isinstance(rows, mx.array) != lazy
+        embeds, _ = ar._merge_prefill_prompt_kwargs([{"inputs_embeds": rows}], [ids])
+        assert embeds is rows                     # one row passes through
+        batch = ar.PromptProcessingBatch(
+            model=lm, uids=[0], input_ids=[ids], max_tokens=[2],
+            inputs_embeds=embeds, prompt_kwargs={}, prefill_step_size=4)
+        while batch.needs_processing() and batch.prompt_step() > 0:
+            pass
+        out = lm(batch._input_ids, cache=batch.prompt_cache,
+                 inputs_embeds=ar._built_rows(batch._inputs_embeds))
+        logits = out.logits if hasattr(out, "logits") else out
+        return np.asarray(logits[:, -1, :].astype(mx.float32))
+
+    np.testing.assert_array_equal(last_logits(True), last_logits(False))
+
+
+def test_a_batch_of_several_builds_prompt_rows(container):
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    model, mel, pcm = container
+    feats, mask = _inputs(mel, [pcm])
+    n = speech.num_audio_tokens(pcm.size)
+    ids = [5] + [AUDIO_ID] * n + [6]
+    kw = dict(input_features=feats, input_features_mask=mask)
+    lazy = model.get_input_embeddings(mx.array([ids]), prompt_rows=True,
+                                      **kw).inputs_embeds
+    whole = model.get_input_embeddings(mx.array([ids]), **kw).inputs_embeds
+    merged, _ = ar._merge_prefill_prompt_kwargs(
+        [{"inputs_embeds": lazy}, {"inputs_embeds": whole[:, 1:]}],
+        [ids, ids[1:]])
+    assert merged.shape == (2, len(ids), whole.shape[-1])
+    np.testing.assert_array_equal(np.asarray(merged[0].astype(mx.float32)),
+                                  np.asarray(whole[0].astype(mx.float32)))
+
+
+def test_the_engine_asks_for_prompt_rows_and_drops_the_flag(monkeypatch):
+    from types import SimpleNamespace
+
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    seen = {}
+
+    class M:
+        builds_prompt_rows = True
+
+        def get_input_embeddings(self, ids, pixels, **kw):
+            seen.update(kw)
+            return SimpleNamespace(to_dict=lambda: {"inputs_embeds": "rows"})
+
+    rg = SimpleNamespace(model=M(), vision_cache=None)
+    _, out = gen.ResponseGenerator._gpu_embed(rg, {"input_ids": mx.array([[1, 2]])})
+    assert seen.get("prompt_rows") is True and "prompt_rows" not in out
+    seen.clear()
+    gen.ResponseGenerator._gpu_embed(rg, {"input_ids": mx.array([[1], [2]])})
+    assert "prompt_rows" not in seen               # a batch of two builds rows
+
+
 def test_container_refuses_more_slots_than_audio(container):
     model, mel, pcm = container
     feats, mask = _inputs(mel, [pcm[:1280]])
@@ -493,6 +565,31 @@ def test_serve_on_a_model_path_pairs_its_encoder(monkeypatch):
         a.model, a.mmproj = path, flag
         cfg = server._single_model_cfg(a)
         assert cfg.models[cfg.defaults.model].mmproj == want
+
+
+def test_a_served_config_entry_pairs_its_encoder(monkeypatch, tmp_path):
+    import gmlx.load.discovery as disc
+    from gmlx.config import build_config
+    from gmlx.serve import bridge_vlm as serving
+
+    for n in ("Transcribe.gguf", "mine.gguf"):
+        (tmp_path / n).write_bytes(b"GGUF")
+    enc = str(tmp_path / "Encoder-F16.gguf")
+    monkeypatch.setattr(disc, "find_speech_encoder", lambda p: enc)
+    monkeypatch.setattr(serving, "_fill_families", lambda cfg: None)
+    doc = {"server": {"model_dirs": [str(tmp_path)]},
+           "models": {"plain": {"path": "Transcribe.gguf"},
+                      "set": {"path": "Transcribe.gguf", "mmproj": "mine.gguf"}}}
+    try:
+        serving.register_resolved_models(build_config(doc))
+        assert serving.resolved_models()["plain"].mmproj == enc
+        assert serving.resolve_request_model("plain")[1].mmproj == enc
+        assert serving.resolved_models()["set"].mmproj == str(tmp_path / "mine.gguf")
+        doc["server"]["family_defaults"] = False
+        serving.register_resolved_models(build_config(doc))
+        assert serving.resolved_models()["plain"].mmproj is None
+    finally:
+        serving.clear_resolved_models()
 
 
 def test_pairing_refuses_asr_and_a_missing_encoder(monkeypatch):
@@ -716,7 +813,7 @@ def engine(monkeypatch):
     seen = {"steps": [], "encoding": []}
 
     def run(rg, job, *, stop, what, stepwise, **kw):
-        assert stepwise and what == "the audio encoder"
+        assert stepwise and what in ("the audio encoder", "the word timestamp head")
         seen["encoding"].append(native_audio.encoding_requests(rg))
         gen, steps = job(rg, stop.is_set), 0
         while True:
@@ -747,6 +844,131 @@ def test_encode_runs_a_window_per_step_and_caches_the_rows(container, engine):
     again = native_audio.encode(rg, model, [pcm], threading.Event(), None)
     assert len(engine["steps"]) == 1 and again[0].embeds is clips[0].embeds
     assert native_audio.held_bytes() >= clips[0].embeds.nbytes
+
+
+def test_a_capture_reencodes_and_keeps_what_alignment_needs(container, engine):
+    import threading
+
+    from gmlx.serve.patches import native_audio
+
+    model, mel, pcm = container
+    rg = object()
+    native_audio.encode(rg, model, [pcm], threading.Event(), None)
+    captures: list = []
+    token = native_audio.CAPTURE.set(captures)
+    try:
+        before = native_audio.held_bytes()
+        native_audio.encode(rg, model, [pcm], threading.Event(), None)
+    finally:
+        native_audio.CAPTURE.reset(token)
+    assert len(engine["steps"]) == 2              # the cached clip re-encoded
+    (cap,) = captures
+    cfg = model.audio_tower.cfg
+    tokens = speech.num_audio_tokens(pcm.size)
+    assert cap.states.dtype == mx.bfloat16
+    assert cap.states.shape == (tokens, cfg.asr.d_model)
+    assert cap.labels.shape == (cfg.num_speakers, speech.num_frames(pcm.size))
+    assert cap.labels.dtype == np.bool_ and cap.samples == pcm.size
+    assert cap.nbytes == native_audio.capture_bytes(model, [pcm])
+    assert native_audio.held_bytes() >= before + cap.nbytes
+    cols = [cfg.ctc.blank_id, 3, 17]
+    logp = native_audio.ctc_log_probs(rg, model, cap, cols, threading.Event(), None)
+    want = model.audio_tower.ctc_columns(cap.states.astype(model.audio_tower.dtype),
+                                         cols[1:])
+    np.testing.assert_allclose(logp[:, 0], want["blank"], atol=1e-5)
+    np.testing.assert_allclose(logp[:, 1:], want["columns"], atol=1e-5)
+    held = native_audio.held_bytes()
+    del cap, captures
+    assert native_audio.held_bytes() < held
+
+
+class _Owner:
+    """A stand-in model a row cache can hang from."""
+
+
+def _filled_cache(n: int, size: int = 100):
+    from gmlx.serve.patches import native_audio
+
+    owner = _Owner()
+    cache = native_audio.row_cache(owner)
+    cache._cap = 1 << 30
+    for i in range(n):
+        cache.put(f"d{i}", 1, mx.zeros((size,)), None)
+    return owner, cache
+
+
+def test_a_request_does_not_count_its_own_cached_clip(monkeypatch):
+    from gmlx.serve.patches import native_audio
+
+    monkeypatch.setattr(native_audio, "_CACHES", {})
+    monkeypatch.setattr(native_audio, "_LIVE", {})
+    owner, cache = _filled_cache(2)
+    assert native_audio.held_bytes() == 800
+    assert native_audio.held_bytes(skip={"d0"}) == 400
+    clip = native_audio._priced(owner, [np.zeros(4, np.float32)] * 2,
+                                ["d1", "new"])
+    assert clip[0].embeds is cache.get("d1")[1] and clip[1].size == 4
+
+
+def test_the_row_cache_yields_to_a_request_that_does_not_fit(monkeypatch):
+    from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
+    from gmlx.serve import mem_preflight
+    from gmlx.serve.patches import native_audio
+
+    monkeypatch.setattr(native_audio, "_CACHES", {})
+    monkeypatch.setattr(native_audio, "_LIVE", {})
+    owner, cache = _filled_cache(3)
+    room = {"left": 450}
+
+    def preflight(rg, prompt, audio=None, args=None, held_bytes=0):
+        if held_bytes > room["left"]:
+            raise PromptTooLongError("no room")
+
+    monkeypatch.setattr(mem_preflight, "preflight_prompt_memory", preflight)
+    waves = [np.zeros(4, np.float32)]
+    # d1 is the request's own clip: it stays (and is now the newest), the
+    # oldest other entry goes.
+    native_audio._check_memory(object(), owner, ["x"], waves, ["d1"], None)
+    assert list(cache.entries) == ["d2", "d1"]
+    room["left"] = 0
+    native_audio._check_memory(object(), owner, ["x"], waves, ["d1"], None)
+    assert list(cache.entries) == ["d1"]
+    room["left"] = -1
+    with pytest.raises(PromptTooLongError):
+        native_audio._check_memory(object(), owner, ["x"], waves, ["d1"], None)
+
+
+def test_the_row_cache_cap_is_a_share_of_the_room(monkeypatch):
+    import gmlx.gen.prefill_decay as pd
+    from gmlx.serve.patches import native_audio
+
+    monkeypatch.setattr(pd, "prefill_room_bytes", lambda: 8 << 20)
+    cache = native_audio._RowCache()
+    assert cache.cap == 1 << 20
+    cache.put("big", 1, mx.zeros(((2 << 20) // 4,)), None)
+    assert not cache.entries
+    monkeypatch.setattr(pd, "prefill_room_bytes", lambda: 64 << 30)
+    assert cache.cap == native_audio.CACHE_BYTES
+
+
+def test_encode_takes_the_processors_numpy_filterbank():
+    from gmlx.serve.patches import native_audio
+
+    mel = np.ones((2, 3), np.float32)
+    proc = type("P", (), {"feature_extractor": type("F", (), {"mel_filters": mel})()})()
+    assert native_audio._mel(None, proc) is mel
+
+
+def test_the_language_model_prices_the_audio_of_a_serve_batch(container):
+    import gmlx.gen.prefill_decay as pd
+
+    model, _, _ = container
+    lm = model.language_model
+    assert lm.audio_held_bytes(10) == model.audio_held_bytes(10) > 0
+    assert lm.context_tokens == model.context_tokens
+    ids = mx.array([[1, AUDIO_ID, AUDIO_ID, 2]])
+    assert pd.audio_tokens_in(lm, ids) == 2
+    assert pd.output_budget(lm, 65_000, 1 << 30) == 536
 
 
 def test_row_cache_lets_the_oldest_go_past_its_cap():

@@ -2616,7 +2616,10 @@ def unfit_request(model, tokenizer, prompt: str, audio_tokens: int,
     except Exception:
         return None
     gen = max(0, int(max_tokens or 0))
-    fit = request_fit(model, tokens, gen, int(audio_tokens), step)
+    # Rows built a chunk at a time hold nothing between chunks.
+    rows = 0 if getattr(model, "builds_prompt_rows", False) else None
+    fit = request_fit(model, tokens, gen, int(audio_tokens), step,
+                      embedded_rows=rows)
     if fit is None or fit[0] is not None:
         return None
     _, need, room = fit

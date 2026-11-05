@@ -153,6 +153,13 @@ def _deaf_reason(model_field) -> str | None:
         return None
     meta = header_meta(path) if path else None
     if meta and meta.get("speech_checkpoint"):
+        from gmlx.load.discovery import find_speech_encoder
+
+        found = find_speech_encoder(path)
+        if found:
+            return ("this model hears audio through its speech encoder "
+                    f"GGUF, which is not loaded: add `mmproj: {found}` to "
+                    "the model's config entry")
         return ("this model hears audio through its speech encoder GGUF, "
                 "which is not loaded: put it beside the model, or set "
                 "`mmproj:` in the model's config entry")

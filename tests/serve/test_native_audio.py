@@ -9,8 +9,10 @@ is tested beside the model (tests/models/test_nemotron_transcribe_input.py).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import importlib
+import json
 import math
 import types
 from pathlib import Path
@@ -127,13 +129,16 @@ def native(monkeypatch):
 
     monkeypatch.setattr(mem_preflight, "preflight_prompt_memory", preflight)
 
-    def encode(rg_, model_, waves, stop, timeout_s):
+    def encode(rg_, model_, waves, stop, timeout_s, **kw):
         state.events.append("encode")
         if isinstance(state.fail, JobCancelled):
             raise state.fail
         clips = [EncodedClip.of(len(w), f"d{len(w)}", mx.zeros((_tokens(len(w)), 4)),
                                 np.zeros((_tokens(len(w)), 8))) for w in waves]
         state.encoded.append(clips)
+        captures = native_audio.CAPTURE.get()
+        if captures is not None:
+            captures.extend(f"capture{len(w)}" for w in waves)
         return clips
 
     monkeypatch.setattr(native_audio, "encode", encode)
@@ -305,3 +310,95 @@ def test_responses_audio_on_other_models_is_still_refused(native):
     assert r.status_code == 400
     assert "takes no audio" in r.json()["error"]["message"]
     assert native.events == []
+
+
+# -- word timestamps on chat -------------------------------------------------
+
+
+@pytest.fixture
+def stamps(native, monkeypatch):
+    from gmlx.serve import word_timestamps
+
+    seen = []
+
+    async def chat_result(http_request, model_id, capture, transcript):
+        seen.append((capture, transcript))
+        return {"words": [], "diarization": [], "error": None,
+                "speaker_tag_to_diarization_speaker": {}}
+
+    monkeypatch.setattr(word_timestamps, "chat_result", chat_result)
+    model = _APP.get_cached_model("m")[0]
+    model.audio_tower = types.SimpleNamespace(cfg=types.SimpleNamespace(
+        asr=types.SimpleNamespace(d_model=4), num_speakers=8))
+    native.stamped = seen
+    return native
+
+
+def test_chat_word_timestamps_ride_the_completion(stamps):
+    messages = [{"role": "user", "content": [{"type": "text", "text": "Hi"}, _clip(1.0)]}]
+    for opt in ({"mm_processor_kwargs": {"capture_ctc_timestamps": True}},
+                {"timestamp_granularities": ["word"]}):
+        r = _chat(stamps, messages, **opt)
+        assert r.status_code == 200, r.text
+        assert r.json()["ctc_timestamps"]["error"] is None
+    assert stamps.stamped == [("capture16000", "ok")] * 2
+    r = _chat(stamps, messages)
+    assert "ctc_timestamps" not in r.json() and len(stamps.stamped) == 2
+    assert native_audio.CAPTURE.get() is None
+
+
+def test_chat_word_timestamps_need_one_clip_and_one_choice(stamps):
+    opt = {"timestamp_granularities": ["word"]}
+    two = [{"role": "user", "content": [_clip(1.0), _clip(2.0)]}]
+    r = _chat(stamps, two, **opt)
+    assert r.status_code == 400 and "exactly one audio clip" in r.text
+    one = [{"role": "user", "content": [_clip(1.0)]}]
+    r = _chat(stamps, one, n=2, **opt)
+    assert r.status_code == 400 and "n = 1" in r.text
+    assert stamps.encoded == []
+
+
+def _sse(*chunks):
+    async def body():
+        for c in chunks:
+            yield c if isinstance(c, str) else f"data: {json.dumps(c)}\n\n"
+        yield "data: [DONE]\n\n"
+    return body()
+
+
+def test_a_stream_holds_only_its_final_chunk_for_the_timestamps(monkeypatch):
+    from gmlx.serve import word_timestamps
+
+    order = []
+
+    async def chat_result(http_request, model_id, capture, transcript):
+        order.append(("align", transcript))
+        return {"words": [], "error": None}
+
+    monkeypatch.setattr(word_timestamps, "chat_result", chat_result)
+
+    def delta(text=None, finish=None):
+        d = {"role": "assistant"} if text is None else {"content": text}
+        return {"id": "c", "choices": [{"index": 0, "delta": d, "finish_reason": finish}]}
+
+    async def collect(body):
+        out = []
+        async for event in word_timestamps._stream(body, None, "m", "cap"):
+            order.append("event")
+            out.append(event)
+        return out
+
+    usage = {"id": "c", "choices": [], "usage": {"total_tokens": 3}}
+    out = asyncio.run(collect(_sse(delta("Hel"), delta("lo"), delta(finish="stop"), usage)))
+    events = [e[len("data: "):].strip() for e in out]
+    assert json.loads(events[2])["ctc_timestamps"] == {"words": [], "error": None}
+    assert json.loads(events[2])["choices"][0]["finish_reason"] == "stop"
+    assert "usage" in json.loads(events[3]) and events[4] == "[DONE]"
+    assert order == ["event", "event", ("align", "Hello"), "event", "event", "event"]
+    # Text sharing the finish chunk goes out before the wait.
+    order.clear()
+    out = asyncio.run(collect(_sse(delta("Hi"), delta(" there", "stop"))))
+    first = [json.loads(e[len("data: "):]) for e in out[:3]]
+    assert first[1]["choices"][0] == {"index": 0, "delta": {"content": " there"},
+                                      "finish_reason": None}
+    assert first[2]["choices"][0]["delta"] == {} and "ctc_timestamps" in first[2]

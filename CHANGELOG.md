@@ -31,6 +31,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   another load unloaded just as a request for it started.
 - A Messages or Responses token count for a model not loaded yet no longer
   holds up the server's other requests while the model loads.
+- `/v1/responses` and `/v1/responses/input_tokens` answer a body that is not
+  a JSON object with a 400 and an invalid request with a 422, where they
+  returned a 500.
+- `gmlx serve` refuses audio sent to a model that cannot hear it with a 400
+  that says why, where it returned a 500.
+- The kvarn serve test no longer fails when it runs after another test that
+  installs the safe KV quantization.
+- `gmlx serve` frees a finished request's images and audio at once. It kept
+  the last request's inputs in memory until the next request arrived.
 
 ## [0.5.4] - 2026-10-29
 

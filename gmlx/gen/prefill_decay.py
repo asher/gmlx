@@ -1150,6 +1150,7 @@ _ROW_COSTS: dict[str, Callable] = {}
 _RESIDENT: dict[int, dict[int, int]] = {}
 _RESIDENT_LOCK = threading.Lock()
 _ROOM: list[float | None] = []      # the room, cleared on a residency change
+_RESIDENCY = [0]                    # bumped on each residency change
 _ROWS_BYTES = 2                     # embedded prompt rows are 16-bit
 
 
@@ -1205,6 +1206,7 @@ def note_resident_model(model, nbytes: float | None = None) -> None:
     with _RESIDENT_LOCK:
         _RESIDENT[key] = arrays
         _ROOM.clear()
+        _RESIDENCY[0] += 1
     try:
         weakref.finalize(model, forget_resident_model, key)
     except TypeError:
@@ -1215,6 +1217,7 @@ def forget_resident_model(key: int) -> None:
     with _RESIDENT_LOCK:
         if _RESIDENT.pop(key, None) is not None:
             _ROOM.clear()
+            _RESIDENCY[0] += 1
 
 
 def prefill_room_bytes() -> float | None:
@@ -1229,12 +1232,15 @@ def prefill_room_bytes() -> float | None:
         for arrays in _RESIDENT.values():
             union.update(arrays)
         resident = sum(union.values())
+        seen = _RESIDENCY[0]
     from gmlx.serve.capacity import ceiling_bytes, working_set_bytes
 
     ws = working_set_bytes()
     room = None if ws is None else ceiling_bytes(ws) - resident
     with _RESIDENT_LOCK:
-        if _RESIDENT and not _ROOM:
+        # A load or unload since the sum makes this room stale: keep it
+        # out of the cache.
+        if _RESIDENCY[0] == seen and not _ROOM:
             _ROOM.append(room)
     return room
 
@@ -1318,19 +1324,22 @@ def audio_tokens_in(model, ids) -> int:
 
 
 def request_fit(model, prompt_tokens: int, gen_tokens: int,
-                audio_tokens: int = 0, base: int | None = None
+                audio_tokens: int = 0, base: int | None = None,
+                embedded_rows: int | None = None
                 ) -> tuple[int | None, float, float] | None:
-    """``(step, need, room)`` for a request of ``prompt_tokens`` (all
-    embedded, ``audio_tokens`` of them audio) and ``gen_tokens`` of output:
-    its request step (None when not even the floor fits), what it holds at
-    that step's chunk (the floor's when none fits), and the room. None for
-    an arch without a row cost or before the room is known."""
+    """``(step, need, room)`` for a request of ``prompt_tokens``
+    (``audio_tokens`` of them audio; ``embedded_rows`` of them held as
+    merged rows, by default all) and ``gen_tokens`` of output: its request
+    step (None when not even the floor fits), what it holds at that step's
+    chunk (the floor's when none fits), and the room. None for an arch
+    without a row cost or before the room is known."""
     row = row_bytes(model)
     room = prefill_room_bytes() if row else None
     if room is None:
         return None
+    rows = prompt_tokens if embedded_rows is None else embedded_rows
     held = request_held_bytes(model, prompt_tokens, gen_tokens, audio_tokens,
-                              prompt_tokens)
+                              rows)
     base = _run_base(model, None, base)
     step = request_step(model, base, held)
     floor = min(base, max(1, env_int("GMLX_PREFILL_MIN_STEP", 256)))
@@ -1366,12 +1375,20 @@ def batch_request_step(batch, base: int) -> int:
     if not row_bytes(model):
         return base
     embeds = getattr(batch, "_inputs_embeds", None)
-    rows = 0 if embeds is None else int(embeds.shape[0] * embeds.shape[1])
-    prompts = sum(getattr(batch, "_prompt_tokens_per_row", None) or ()) or rows
-    gen = sum(int(t or 0) for t in (getattr(batch, "max_tokens", None) or ()))
-    held = request_held_bytes(
-        model, prompts, gen,
-        audio_tokens_in(model, getattr(batch, "_input_ids", None)), rows)
+    width = 0 if embeds is None else int(embeds.shape[1])
+    held_rows = width if isinstance(embeds, mx.array) else 0
+    ids = getattr(batch, "_input_ids", None)
+    prompts = list(getattr(batch, "_prompt_tokens_per_row", None) or ())
+    budgets = list(getattr(batch, "max_tokens", None) or ())
+    n = max(len(prompts), len(budgets), 0 if embeds is None else int(embeds.shape[0]))
+    held = 0.0
+    # Each row holds its own prompt and output budget.
+    for i in range(n):
+        p = prompts[i] if i < len(prompts) else width
+        g = budgets[i] if i < len(budgets) else 0
+        row_ids = ids[i] if ids is not None and i < ids.shape[0] else None
+        held += request_held_bytes(model, p, int(g or 0),
+                                   audio_tokens_in(model, row_ids), held_rows)
     step = request_step(model, base, held)
     if step is None:
         step = min(base, max(1, env_int("GMLX_PREFILL_MIN_STEP", 256)))

@@ -288,6 +288,9 @@ def test_deaf_reason_names_a_missing_speech_encoder(monkeypatch):
     monkeypatch.setattr(disc, "header_meta", lambda p: head)
     assert audio_cascade._deaf_reason("m") == "this model takes no audio input"
     head["speech_checkpoint"] = "ck"
-    assert "speech encoder" in audio_cascade._deaf_reason("m")
+    monkeypatch.setattr(disc, "find_speech_encoder", lambda p: None)
+    assert "put it beside the model" in audio_cascade._deaf_reason("m")
+    monkeypatch.setattr(disc, "find_speech_encoder", lambda p: "/m/enc.gguf")
+    assert "add `mmproj: /m/enc.gguf`" in audio_cascade._deaf_reason("m")
     spec.mmproj = "/m/enc.gguf"
     assert audio_cascade._deaf_reason("m") is None

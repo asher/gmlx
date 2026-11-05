@@ -187,6 +187,48 @@ def test_ctc_columns_pick_from_the_log_softmax(golden, encoder):
     np.testing.assert_allclose(got["columns"], full[:, cols], atol=1e-5)
 
 
+def test_ctc_log_probs_read_their_columns_a_slice_at_a_time(golden, encoder,
+                                                          monkeypatch):
+    arrays, _ = golden
+    enc, mel, _ = encoder
+    audio = _audio(arrays, "short")
+    out = enc(speech.features(audio, mel), speech.num_frames(audio.size),
+              speech.num_audio_tokens(audio.size))
+    whole = enc.ctc_columns(out.asr_states, [39, 3, 17])
+    # Slices of 10 frames: the vocabulary is 40 classes.
+    monkeypatch.setattr(speech, "CTC_MAX_ELEMENTS", 400)
+    steps = enc.ctc_log_prob_steps(out.asr_states, [39, 3, 17])
+    n = 0
+    while True:
+        try:
+            next(steps)
+            n += 1
+        except StopIteration as done:
+            got = done.value
+            break
+    assert n == -(-got.shape[0] // 10)
+    np.testing.assert_allclose(got, whole["columns"], atol=1e-5)
+
+
+def test_diarization_labels_are_the_10ms_activity_above_the_threshold(
+        golden, encoder):
+    arrays, _ = golden
+    enc, mel, _ = encoder
+    audio = _audio(arrays, "short")
+    feats = speech.features(audio, mel)
+    valid = speech.num_frames(audio.size)
+    out = enc.steps(feats, valid, speech.num_audio_tokens(audio.size),
+                    label_threshold=0.4641)
+    while True:
+        try:
+            next(out)
+        except StopIteration as done:
+            labels = done.value.diarization_labels
+            break
+    probs = 1 / (1 + np.exp(-enc.diar.logits(np.asarray(feats))[:valid]))
+    np.testing.assert_array_equal(labels, (probs > 0.4641).T)
+
+
 def test_load_refuses_a_gguf_of_another_arch(tmp_path):
     import gguf
 

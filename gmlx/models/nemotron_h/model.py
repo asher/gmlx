@@ -22,6 +22,7 @@ dense MLP. Every block is ``x + mixer(rms_norm(x))``.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple, Union
 
@@ -30,7 +31,7 @@ import mlx.nn as nn
 
 from gmlx._vendor.mlx_lm.models.activations import swiglu
 from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
-from gmlx._vendor.mlx_lm.models.ssm import ssm_update
+from gmlx._vendor.mlx_lm.models.ssm import ssm_attn, ssm_update
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchMLP
 from gmlx.cache.attention import (
     create_attention_mask,
@@ -624,18 +625,24 @@ class Model(nn.Module):
 _FP32_PARAMS = (".mixer.gate.weight", ".e_score_correction_bias", ".A_log")
 
 
-# Prefill bytes per chunk row with the per-layer eval: the Mamba scan and
-# MoE scratch of one layer at a time. Measured on hidden 2688 (30B-A4B) at
-# 0.72 MiB per row for chunks of 256 and 512 and 0.57 MiB for 2048, so this
-# linear price is an upper bound that grows with the hidden size.
-ROW_BYTES_PER_HIDDEN = 0.75 * 2**20 / 2688
+# Prefill bytes per chunk row with the per-layer eval. A Mamba layer's scan
+# holds about six fp32 buffers per head as wide as the scan chunk and six as
+# wide as the head; the MoE and the residual stream add the rest, priced by
+# the hidden size. Measured peaks fit under it: 0.74 MiB a row on the
+# 30B-A4B (64 heads, hidden 2688) and 1.17 MiB on Bolt-74B (128 heads, hidden
+# 4096), both at head dim 64 and state 128. Wider chunks cost less a row.
+SCAN_CHUNK = inspect.signature(ssm_attn).parameters["step"].default
+SCAN_BUFFERS = 6
+REST_BYTES_PER_HIDDEN = 0.29 * 2**20 / 2688
 
 
 def _row_bytes(cfg) -> float:
-    hidden = getattr(cfg, "hidden_size", None)
-    if hidden is None and isinstance(cfg, dict):
-        hidden = cfg.get("hidden_size")
-    return ROW_BYTES_PER_HIDDEN * int(hidden or 0)
+    def get(name):
+        v = cfg.get(name) if isinstance(cfg, dict) else getattr(cfg, name, None)
+        return int(v or 0)
+
+    scan = 4 * SCAN_BUFFERS * (SCAN_CHUNK + get("mamba_head_dim"))
+    return get("mamba_num_heads") * scan + REST_BYTES_PER_HIDDEN * get("hidden_size")
 
 
 def _register_prefill_costs() -> None:

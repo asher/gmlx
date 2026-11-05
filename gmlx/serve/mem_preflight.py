@@ -570,19 +570,31 @@ def _check_request_fit(rg, model, prompt: str, audio_tokens: int,
     does not; False for any other arch."""
     from gmlx.gen.prefill_decay import request_fit
 
+    # Output counts once the client sets a budget, as the stock check does.
+    gen = _pinned_max_tokens(args)
+    base = getattr(rg, "prefill_step_size", None)
+
+    def fits(tokens: int):
+        fit = request_fit(model, tokens, gen, int(audio_tokens), base)
+        if fit is None:
+            return None, 0.0, 0.0
+        step, need, room = fit
+        need = max(need, float(encode_bytes))
+        avail = room - float(others)
+        return step is not None and need <= avail, need, avail
+
+    # A text token is at least one character: most requests fit at that
+    # bound and never pay a tokenize.
+    ok, need, avail = fits(len(prompt) + int(audio_tokens))
+    if ok is None:
+        return False
+    if ok:
+        return True
     tok = getattr(rg, "tokenizer", None)
     text = len(tok.encode(prompt)) if tok is not None else len(prompt)
     tokens = text + int(audio_tokens)
-    # Output counts once the client sets a budget, as the stock check does.
-    gen = _pinned_max_tokens(args)
-    fit = request_fit(model, tokens, gen, int(audio_tokens),
-                      getattr(rg, "prefill_step_size", None))
-    if fit is None:
-        return False
-    step, need, room = fit
-    need = max(need, float(encode_bytes))
-    avail = room - float(others)
-    if step is not None and need <= avail:
+    ok, need, avail = fits(tokens)
+    if ok:
         return True
     output = f" and {gen:,} output tokens" if gen else ""
     raise _preflight_error_cls()(

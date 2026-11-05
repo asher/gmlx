@@ -12,6 +12,7 @@ unchanged.
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -34,6 +35,8 @@ TextConfig = ModelArgs
 # The placeholder of one audio token: a control token the template and
 # the model's own output never use.
 AUDIO_PLACEHOLDER = "<SPECIAL_19>"
+# The encoder GGUF field with the word timestamp head's SentencePiece model.
+CTC_TOKENIZER = "ctc.tokenizer.spm_model"
 
 __all__ = ["AudioConfig", "EncodedClip", "LanguageModel", "Model",
            "ModelConfig", "TextConfig"]
@@ -126,6 +129,8 @@ class PromptRows:
         self.dtype = probe.dtype
         self._hidden = int(probe.shape[-1])
 
+    ndim = 3
+
     @property
     def shape(self) -> tuple[int, int, int]:
         return (int(self._ids.shape[0]), int(self._ids.shape[1]) - self._start,
@@ -192,6 +197,10 @@ def _scatter(token_id: int, features: mx.array, embeds: mx.array,
     return mx.where(positions[..., None], gathered.reshape(embeds.shape), embeds)
 
 
+def _audio_held_bytes(proj_dim: int, audio_tokens: int) -> int:
+    return int(audio_tokens) * int(proj_dim) * _ROW_BYTES
+
+
 class Model(nn.Module):
     # generate_step asks for PromptRows in place of whole merged rows.
     builds_prompt_rows = True
@@ -208,6 +217,26 @@ class Model(nn.Module):
         # The APC guard reads the media ids off the text config: a reused
         # prefix then holds every audio slot of the prompt or none.
         self.language_model.config.media_token_ids = list(config.media_token_ids)
+        # The serve engine prices a prompt batch on the language model:
+        # give it the audio token, the encoder output's size and the context.
+        lm = self.language_model
+        lm.config.audio_token_id = int(config.audio_token_id)
+        lm.context_tokens = CONTEXT_TOKENS
+        lm.audio_held_bytes = functools.partial(
+            _audio_held_bytes, self.audio_tower.cfg.proj_dim)
+
+    def ctc_tokenizer(self):
+        """The word timestamp head's SentencePiece model, or None when the
+        encoder GGUF has none."""
+        tok = getattr(self, "_ctc_tokenizer", None)
+        if tok is None:
+            proto = self.config.audio_config.fields.get(CTC_TOKENIZER)
+            if not proto:
+                return None
+            from .align import Tokenizer
+
+            tok = self._ctc_tokenizer = Tokenizer(proto)
+        return tok
 
     def clip_lengths(self, mask) -> list[tuple[int, int]]:
         """``(valid frames, audio tokens)`` of each clip of a
@@ -217,14 +246,15 @@ class Model(nn.Module):
         return [(int(v), -(-int(v) // f)) for v in valid]
 
     def encode_steps(self, feats: np.ndarray, valid: int, tokens: int, *,
-                     keep_states: bool = False, join: bool = True):
+                     keep_states: bool = False, join: bool = True,
+                     label_threshold: float | None = None):
         """One clip's encoder steps (:meth:`SpeechEncoder.steps`), one
         window each, its rows in the dtype of the token embeddings."""
         # A quantized table's weight is packed: ask an embedding row.
         dtype = self.language_model.backbone.embeddings(mx.array([0])).dtype
         return self.audio_tower.steps(feats, valid, tokens, batch=1,
                                       dtype=dtype, keep_states=keep_states,
-                                      join=join)
+                                      join=join, label_threshold=label_threshold)
 
     def audio_parts(self, input_features, mask, n_slots: int) -> list:
         """:meth:`audio_features` as the encoder's fusion-step parts, in
@@ -289,7 +319,7 @@ class Model(nn.Module):
 
     def audio_held_bytes(self, audio_tokens: int) -> int:
         """The bytes of the encoder output for ``audio_tokens``."""
-        return int(audio_tokens) * self.audio_tower.cfg.proj_dim * _ROW_BYTES
+        return _audio_held_bytes(self.audio_tower.cfg.proj_dim, audio_tokens)
 
     def encoded_rows(self, clips, n_slots: int) -> mx.array:
         """The rows of the last ``n_slots`` audio tokens of the prompt's

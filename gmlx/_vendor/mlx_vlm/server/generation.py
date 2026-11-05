@@ -1648,6 +1648,11 @@ class ResponseGenerator:
             data_kwargs["vision_cache"] = self.vision_cache
             data_kwargs["_image_key"] = images
 
+        # gmlx: a model that builds a prompt's rows a chunk at a time hands
+        # one request's rows over unbuilt (PromptRows).
+        if (getattr(self.model, "builds_prompt_rows", False)
+                and getattr(input_ids, "shape", (0,))[0] == 1):
+            data_kwargs["prompt_rows"] = True
         # Always call get_input_embeddings — BatchGenerator requires inputs_embeds
         embed = self.model.get_input_embeddings(
             input_ids, pixel_values, mask=mask, **data_kwargs
@@ -1655,6 +1660,7 @@ class ResponseGenerator:
         # Remove cache kwargs before passing to BatchGenerator
         data_kwargs.pop("vision_cache", None)
         data_kwargs.pop("_image_key", None)
+        data_kwargs.pop("prompt_rows", None)
         gen_kwargs = {
             **data_kwargs,
             **{k: v for k, v in embed.to_dict().items() if v is not None},
@@ -1891,6 +1897,10 @@ class ResponseGenerator:
                         ),
                         **log_state,
                     }
+
+                # gmlx: the loop variables would keep the last request's
+                # inputs (images, audio rows) alive until the next request.
+                request = raw_inputs = images = input_ids = gen_kwargs = None
 
                 if not active or batch_gen is None:
                     continue

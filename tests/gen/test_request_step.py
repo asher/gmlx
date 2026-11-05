@@ -129,14 +129,31 @@ def test_held_counts_kv_states_rows_and_audio():
         kv + 100 * args.hidden_size * 2 + 70)
 
 
-def test_nemotron_h_prices_its_rows_by_the_hidden_size():
+@pytest.mark.parametrize("heads,hidden,measured", [
+    (64, 2688, 0.738),     # 30B-A4B, Nano and Lightning
+    (128, 4096, 1.166),    # Bolt-74B
+])
+def test_nemotron_h_row_price_covers_the_measured_peaks(heads, hidden,
+                                                        measured):
+    from gmlx.models.nemotron_h import model as nh
+
+    cfg = {"mamba_num_heads": heads, "mamba_head_dim": 64,
+           "hidden_size": hidden}
+    price = nh._row_bytes(cfg) / MIB
+    assert measured < price < 1.25 * measured
+
+
+def test_nemotron_h_prices_its_rows_from_the_mamba_shape():
     from gmlx.models.nemotron_h import model as nh
 
     from tests.models.test_nemotron_h import _tiny_args
 
-    m = nh.Model(_tiny_args())
-    assert pd.row_bytes(m) == nh.ROW_BYTES_PER_HIDDEN * 64
-    assert nh.ROW_BYTES_PER_HIDDEN * 2688 == 0.75 * MIB
+    args = _tiny_args()
+    m = nh.Model(args)
+    assert nh.SCAN_CHUNK == 256
+    assert pd.row_bytes(m) == (
+        args.mamba_num_heads * 24 * (256 + args.mamba_head_dim)
+        + nh.REST_BYTES_PER_HIDDEN * args.hidden_size)
 
 
 def _rg(text_tokens):
@@ -154,12 +171,12 @@ def test_the_memory_check_refuses_a_request_the_floor_cannot_fit(
     _weights(-200)  # room 300
     m = _model()
     args = SimpleNamespace(max_tokens=10)
-    assert mp._check_request_fit(_rg(30), m, "x", 0, 0, 0, args)
+    assert mp._check_request_fit(_rg(30), m, "x" * 30, 0, 0, 0, args)
     with pytest.raises(PromptTooLongError, match="max_tokens"):
-        mp._check_request_fit(_rg(100), m, "x", 0, 0, 0, args)
+        mp._check_request_fit(_rg(100), m, "x" * 100, 0, 0, 0, args)
     # What other requests hold leaves less room, and the check refuses.
     with pytest.raises(PromptTooLongError):
-        mp._check_request_fit(_rg(30), m, "x", 0, 0, 50 * MIB, args)
+        mp._check_request_fit(_rg(30), m, "x" * 30, 0, 0, 50 * MIB, args)
     # A model without a row cost takes the stock check.
     assert not mp._check_request_fit(_rg(100), _model("dense_x"), "x", 0, 0,
                                      0, args)
@@ -204,3 +221,67 @@ def test_an_until_eos_budget_holds_no_output_unless_the_context_bounds_it():
     assert pd.output_budget(speech, 800, 400) == 200
     assert pd.output_budget(speech, 100, 1 << 30) == 900
     assert pd.output_budget(speech, 1200, None) == 0
+
+
+def test_a_load_during_the_room_sum_leaves_no_stale_room(monkeypatch):
+    _weights(10)
+    loaded = []
+
+    def ws():
+        if not loaded:
+            loaded.append(1)
+            _weights(20)            # a model loads while the room is summed
+        return 100 * MIB
+
+    monkeypatch.setattr(capacity, "working_set_bytes", ws)
+    assert pd.prefill_room_bytes() == 90 * MIB     # the sum it started from
+    assert pd.prefill_room_bytes() == 70 * MIB     # not cached: re-summed
+
+
+def test_each_batch_row_holds_its_own_output_budget(monkeypatch):
+    calls = []
+    real = pd.request_held_bytes
+
+    def held(model, p, g, a=0, r=0):
+        calls.append((p, pd.output_budget(model, p, g)))
+        return real(model, p, g, a, r)
+
+    monkeypatch.setattr(pd, "request_held_bytes", held)
+    _weights(-1000)
+    m = SimpleNamespace(config=SimpleNamespace(model_type="rows_x"),
+                        context_tokens=65_536)
+    batch = SimpleNamespace(
+        model=m, max_tokens=[1 << 30, 1 << 30],
+        _prompt_tokens_per_row=[30_000, 30_000],
+        _inputs_embeds=None, _input_ids=None)
+    pd.batch_request_step(batch, 2048)
+    assert calls == [(30_000, 35_536), (30_000, 35_536)]
+
+
+def test_rows_built_a_chunk_at_a_time_are_not_priced(monkeypatch):
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    seen = {}
+    monkeypatch.setattr(pd, "run_request_step",
+                        lambda *a, **kw: seen.update(kw) or a[4])
+    m = _model()
+    lazy = SimpleNamespace(shape=(1, 100, 8))
+    ar._request_step(m, [], None, lazy, 10, 2048)
+    assert seen["embedded_rows"] == 0
+    ar._request_step(m, [], None, mx.zeros((1, 100, 8)), 10, 2048)
+    assert seen["embedded_rows"] == 100
+
+
+def test_the_memory_check_skips_the_tokenize_when_the_bound_fits(monkeypatch):
+    from gmlx.serve import mem_preflight as mp
+
+    monkeypatch.setattr(pd, "request_held_bytes",
+                        lambda model, p, g, a=0, r=0: (p + g) * MIB)
+    _weights(-200)  # room 300
+
+    def boom(s):
+        raise AssertionError("tokenized a prompt whose bound fits")
+
+    rg = SimpleNamespace(tokenizer=SimpleNamespace(encode=boom))
+    assert mp._check_request_fit(rg, _model(), "x" * 30, 0, 0, 0,
+                                 SimpleNamespace(max_tokens=10))

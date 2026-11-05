@@ -61,6 +61,9 @@ MAX_WINDOW_BATCH = 8
 # Audio tokens fused per step: the fusion of a whole hour at once holds
 # about 1.4 GB of fp32 intermediates.
 FUSE_ROWS = 4096
+# Vocabulary-wide CTC logits per classifier call (NeMo's
+# _CTC_WINDOW_MAX_ELEMENTS, 64 MiB at float32).
+CTC_MAX_ELEMENTS = 16 * 1024 * 1024
 
 
 @dataclass
@@ -530,6 +533,8 @@ class EncoderOutput:
     asr_states: mx.array | None  # (frames, d_model): the CTC head's input
     speaker_probs: np.ndarray  # (frames, speakers): 80 ms means
     parts: list | None = None  # the rows in fusion steps, when not joined
+    # (speakers, 10 ms frames) boolean activity, when asked for
+    diarization_labels: np.ndarray | None = None
 
 
 class _Fusion(nn.Module):
@@ -629,7 +634,8 @@ class SpeechEncoder(nn.Module):
 
     def steps(self, feats: np.ndarray, valid: int, tokens: int,
               batch: int = MAX_WINDOW_BATCH, dtype=None,
-              keep_states: bool = True, join: bool = True):
+              keep_states: bool = True, join: bool = True,
+              label_threshold: float | None = None):
         """Encode one recording a window at a time: a generator that yields
         after each ASR batch of up to ``batch`` windows, each speaker
         chunk and each fusion step, and returns the
@@ -637,7 +643,9 @@ class SpeechEncoder(nn.Module):
         None) and its ASR states only with ``keep_states``; without
         ``join`` the rows stay in their fusion steps, in ``parts``. ``feats``
         comes from :func:`features`, ``valid`` is its valid frames,
-        ``tokens`` the prompt's audio tokens for it."""
+        ``tokens`` the prompt's audio tokens for it. With
+        ``label_threshold``, the output carries the 10 ms speaker activity
+        above it (NeMo's diarization labels)."""
         n = feats.shape[0] // self.cfg.asr.subsampling
         pieces: dict[int, mx.array] = {}
         yield from self.asr_steps(normalize_per_feature(feats, valid), pieces,
@@ -650,6 +658,11 @@ class SpeechEncoder(nn.Module):
         logits: list[np.ndarray] = []
         yield from self.diar.logit_steps(feats, logits)
         probs = self._pool(logits, n)[:tokens]
+        labels = None
+        if label_threshold is not None:
+            fine = (np.concatenate(logits, axis=0)[:valid] if logits else
+                    np.zeros((0, self.cfg.num_speakers), np.float32))
+            labels = np.ascontiguousarray((_sigmoid(fine) > label_threshold).T)
         rows = []
         for a in range(0, tokens, FUSE_ROWS):
             part = self.fuse(states[a:a + FUSE_ROWS], probs[a:a + FUSE_ROWS])
@@ -660,13 +673,14 @@ class SpeechEncoder(nn.Module):
             states = None
         if not join:
             return EncoderOutput(embeds=None, asr_states=states,
-                                 speaker_probs=probs, parts=rows)
+                                 speaker_probs=probs, parts=rows,
+                                 diarization_labels=labels)
         embeds = (rows[0] if len(rows) == 1 else mx.concatenate(rows)
                   if rows else mx.zeros((0, self.cfg.proj_dim), dtype or self.dtype))
         rows.clear()
         mx.eval(embeds)
         return EncoderOutput(embeds=embeds, asr_states=states,
-                             speaker_probs=probs)
+                             speaker_probs=probs, diarization_labels=labels)
 
     def __call__(self, feats: np.ndarray, valid: int, tokens: int) -> EncoderOutput:
         """Encode one recording in one call; see :meth:`steps`."""
@@ -678,16 +692,18 @@ class SpeechEncoder(nn.Module):
                 return done.value
 
     def ctc_logits(self, asr_states: mx.array):
-        """Yield ``(first 40 ms frame, logits)`` per window of the CTC head:
-        the kept frames' raw logits ``(frames, vocab)``, never the whole
-        recording's at once."""
+        """Yield ``(first 40 ms frame, logits)`` per window of the CTC head,
+        in slices of at most :data:`CTC_MAX_ELEMENTS` logits: never the
+        whole recording's at once."""
         c = self.cfg.ctc
         if c is None:
             raise ValueError("this encoder GGUF has no CTC timestamp head")
         u = c.upsampling
+        rows = max(1, CTC_MAX_ELEMENTS // c.vocab_size)
         for a, b, k0, k1 in self.windows(asr_states.shape[0]):
             h = self.ctc.hidden(asr_states[a:b])[k0 * u:k1 * u]
-            yield (a + k0) * u, self.ctc.classifier(h)
+            for s in range(0, h.shape[0], rows):
+                yield (a + k0) * u + s, self.ctc.classifier(h[s:s + rows])
 
     def ctc_columns(self, asr_states: mx.array, columns) -> dict:
         """Per 40 ms frame of the CTC head: the greedy class, the log
@@ -705,6 +721,20 @@ class SpeechEncoder(nn.Module):
         return {"argmax": np.array(mx.concatenate(argmax)).astype(np.int32),
                 "blank": np.array(mx.concatenate(blank)),
                 "columns": np.array(mx.concatenate(picked))}
+
+    def ctc_log_prob_steps(self, asr_states: mx.array, columns):
+        """The CTC head's log probabilities of ``columns`` only,
+        ``(40 ms frames, len(columns))`` float32: a generator that yields
+        after each slice and returns them."""
+        cols = mx.array(np.asarray(columns, np.int32))
+        out = []
+        for _, logits in self.ctc_logits(asr_states):
+            logits = logits.astype(mx.float32)
+            out.append(np.array(mx.take(logits, cols, axis=1)
+                                - mx.logsumexp(logits, axis=-1, keepdims=True)))
+            yield
+        return (np.concatenate(out) if out
+                else np.zeros((0, len(columns)), np.float32))
 
 
 # -- loading ------------------------------------------------------------------

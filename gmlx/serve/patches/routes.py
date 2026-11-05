@@ -750,7 +750,7 @@ def _install_audio_task_route(stt_model: str | None, *, path: str, task: str,
     from fastapi.responses import JSONResponse, PlainTextResponse
     from starlette.concurrency import run_in_threadpool
 
-    from .. import stt
+    from .. import native_stt, stt
 
     async def audio_endpoint(request: Request):
         started = time.monotonic()
@@ -764,6 +764,23 @@ def _install_audio_task_route(stt_model: str | None, *, path: str, task: str,
         if upload is None or not hasattr(upload, "read"):
             return _aux_error(400, "multipart field 'file' is required")
         audio_bytes = await upload.read()
+        filename = getattr(upload, "filename", "") or ""
+        try:
+            native = native_stt.target(str(form.get("model") or ""), stt_model)
+            if native is not None:
+                content, media_type = await native_stt.answer(
+                    request, form, native, audio_bytes, filename, task)
+        except stt.STTRequestError as exc:
+            return _aux_error(exc.status_code, str(exc))
+        except Exception as exc:
+            return _aux_server_error(path, stt_model, started, exc)
+        if native is not None:
+            _log_aux_request(path, native, started, file=filename or None,
+                             in_bytes=len(audio_bytes),
+                             fmt=(str(form.get("response_format") or "") or None))
+            if media_type == "application/json":
+                return JSONResponse(content=content)
+            return PlainTextResponse(content=content, media_type=media_type)
         try:
             content, media_type = await run_in_threadpool(
                 stt.run_transcription, audio_bytes,
