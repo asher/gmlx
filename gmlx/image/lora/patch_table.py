@@ -11,7 +11,8 @@ a new list of entries over the same cached pairs.
 ComfyUI's key names equal the GGUF names, so the module path is the key
 without the model prefix and ``.weight``, and the band is the patch offset
 of (dim, start, length). The pairs arrive through ``register_patch`` under
-their content hash, and the dialect reader is not involved.
+their content hash, each patch gives its alpha beside its strength, and
+the dialect reader is not involved.
 
 ``apply_text_adapters`` sets the text encoder halves on an encoder the
 pipeline owns, through ``EncoderLoRALinear``, and takes them off again.
@@ -36,8 +37,9 @@ from .reader import (AdapterError, UnsupportedAdapterError, read_lora,
 @dataclass(frozen=True)
 class LoadedAdapter:
     """A LoRA file placed on a pipeline. ``dit`` rows are (module path,
-    band, pair hash) and ``text`` rows (encoder module path, pair hash).
-    ``sha256`` names the content: every row with its hash."""
+    band, alpha, pair hash) and ``text`` rows (encoder module path, alpha,
+    pair hash), the alpha the file gives the pair or None. ``sha256``
+    names the content: every row with its alpha and hash."""
     path: str
     sha256: str
     dit: tuple
@@ -82,6 +84,12 @@ def _linear_shapes(pipe) -> dict:
     return {n[:-len(tail)]: (int(t.shape[1]), int(t.shape[0]))
             for n, t in pipe.identified.view.tensors.items()
             if n.endswith(tail) and len(t.shape) == 2}
+
+
+def _none_first(a) -> tuple:
+    """A sort key for an alpha that puts None first and never compares
+    it."""
+    return (a is not None, a or 0.0)
 
 
 def _file_key(path: str) -> tuple:
@@ -147,24 +155,25 @@ def load_adapter(pipe, path: str, *, allow_unmatched: bool = False,
     dit, text, nbytes = [], [], 0
     keys = [r[-1] for ad, _st in hold for r in (*ad.dit, *ad.text)]
     for t in res.dit:
-        key = register_pair(pipe, t.pair.down, t.pair.up, t.pair.alpha,
-                            hold=keys)
+        key = register_pair(pipe, t.pair.down, t.pair.up, hold=keys)
         keys.append(key)
-        dit.append((t.module, t.band, key))
+        dit.append((t.module, t.band, t.pair.alpha, key))
         nbytes += int(t.pair.down.nbytes) + int(t.pair.up.nbytes)
     for t in res.text:
-        key = register_pair(pipe, t.pair.down, t.pair.up, t.pair.alpha,
-                            hold=keys)
+        key = register_pair(pipe, t.pair.down, t.pair.up, hold=keys)
         keys.append(key)
-        text.append((t.module, key))
+        text.append((t.module, t.pair.alpha, key))
         nbytes += int(t.pair.down.nbytes) + int(t.pair.up.nbytes)
     # A module may carry a whole-weight pair beside band pairs, so the
     # rows sort with the whole weight first and never compare None.
-    doc = json.dumps({"dit": sorted(([m, b, k] for m, b, k in dit),
+    doc = json.dumps({"dit": sorted(([m, b, a, k] for m, b, a, k in dit),
                                     key=lambda r: (r[0], r[1] is not None,
-                                                   r[1] or (), r[2])),
-                      "text": sorted(text)}, sort_keys=True,
-                     separators=(",", ":"), default=list)
+                                                   r[1] or (), r[3],
+                                                   _none_first(r[2]))),
+                      "text": sorted(([m, a, k] for m, a, k in text),
+                                     key=lambda r: (r[0], r[2],
+                                                    _none_first(r[1])))},
+                     sort_keys=True, separators=(",", ":"), default=list)
     loaded = LoadedAdapter(path=path,
                            sha256=hashlib.sha256(doc.encode()).hexdigest(),
                            dit=tuple(dit), text=tuple(text),
@@ -179,19 +188,28 @@ def table_entries(adapters) -> list:
     order given."""
     rows: dict = {}
     for ad, strength in adapters:
-        for module, band, key in ad.dit:
-            rows.setdefault((module, band), []).append((key, float(strength)))
+        for module, band, alpha, key in ad.dit:
+            rows.setdefault((module, band), []).append(
+                (key, float(strength), alpha))
     return [(m, b, p) for (m, b), p in rows.items()]
 
 
 # ComfyUI patches.
 
+def patch_alpha(alpha) -> float | None:
+    """The alpha of a ComfyUI LoRA patch, a number or a one-element
+    tensor, as a float, or None."""
+    if alpha is None:
+        return None
+    return float(mx.array(alpha).astype(mx.float32).reshape(-1)[0].item())
+
+
 def patch_pair(up, down, alpha=None, mid=None, dora_scale=None,
                reshape=None) -> tuple:
     """(down, up, alpha) of a ComfyUI LoRA patch, given in its tuple order,
-    as the pipeline's cache keeps the pair, with its content hash last. A
-    patch with a mid tensor, a DoRA scale or a reshape is refused by
-    name."""
+    as the pipeline's cache keeps the pair, with the content hash of down
+    and up last. A patch with a mid tensor, a DoRA scale or a reshape is
+    refused by name."""
     for value, kind in ((mid, "Tucker LoCon"), (dora_scale, "DoRA"),
                         (reshape, "reshape")):
         if value is not None:
@@ -204,23 +222,22 @@ def patch_pair(up, down, alpha=None, mid=None, dora_scale=None,
         up = up.reshape(up.shape[0], -1)
     if down.ndim > 2:
         down = down.reshape(down.shape[0], -1)
-    if alpha is not None:
-        alpha = float(mx.array(alpha).astype(mx.float32).reshape(-1)[0]
-                      .item())
+    alpha = patch_alpha(alpha)
     mx.eval(down, up)
-    return down, up, alpha, pair_hash(down, up, alpha)
+    return down, up, alpha, pair_hash(down, up)
 
 
 def register_patch(pipe, up, down, alpha=None, mid=None, dora_scale=None,
-                   reshape=None, *, hold=()) -> str:
+                   reshape=None, *, hold=()) -> tuple:
     """Keep the pair of a ComfyUI LoRA patch, given in its tuple order, and
-    return its content hash. A patch with a mid tensor, a DoRA scale or a
-    reshape is refused by name. ``hold`` gives the hashes of the pairs
-    kept before this one for the same table, which the room for this
-    pair never sheds."""
+    return its content hash and its alpha, which the patch's table entry
+    carries. A patch with a mid tensor, a DoRA scale or a reshape is
+    refused by name. ``hold`` gives the hashes of the pairs kept before
+    this one for the same table, which the room for this pair never
+    sheds."""
     down, up, alpha, key = patch_pair(up, down, alpha, mid, dora_scale,
                                       reshape)
-    return register_pair(pipe, down, up, alpha, key=key, hold=hold)
+    return register_pair(pipe, down, up, key=key, hold=hold), alpha
 
 
 def _module_of(key: str, family) -> str:
@@ -238,7 +255,8 @@ def _module_of(key: str, family) -> str:
 # The fields of a patch row and of one patch in it. A field outside these
 # says something this code does not read, so the row is refused.
 _ROW_FIELDS = frozenset({"key", "band", "offset", "patches"})
-_PATCH_FIELDS = frozenset({"adapter", "strength", "strength_model", "kind"})
+_PATCH_FIELDS = frozenset({"adapter", "strength", "alpha", "strength_model",
+                           "kind"})
 
 
 def _unknown_fields(row, known, module: str) -> None:
@@ -256,10 +274,11 @@ def plans_from_patches(family, patches) -> list:
     patch is a mapping of ``key``, the model's weight key, ``band`` or
     ``offset``, the offset (dim, start, length) or None, and ``patches``, a
     list of mappings of ``adapter``, the pair hash, ``strength``, an
-    optional ``strength_model`` and an optional ``kind``. A model strength
-    other than 1 scales the base weight, which is refused. A kind other
-    than ``lora`` and a field outside these are refused by name, so a
-    patch this code does not understand is never applied as plain LoRA."""
+    optional ``alpha``, an optional ``strength_model`` and an optional
+    ``kind``. A model strength other than 1 scales the base weight, which
+    is refused. A kind other than ``lora`` and a field outside these are
+    refused by name, so a patch this code does not understand is never
+    applied as plain LoRA."""
     rows: dict = {}
     for patch in patches:
         module = _module_of(str(patch["key"]), family)
@@ -286,7 +305,8 @@ def plans_from_patches(family, patches) -> list:
                     f"{p['strength_model']}, which gmlx image does not "
                     "apply", "model strength")
             rows.setdefault((module, band), []).append(
-                (str(p["adapter"]), float(p["strength"])))
+                (str(p["adapter"]), float(p["strength"]),
+                 patch_alpha(p.get("alpha"))))
     return [(m, b, p) for (m, b), p in rows.items()]
 
 
@@ -310,7 +330,7 @@ def _text_wraps(pipe, enc, rows) -> dict:
     leaves = dict(enc.model.named_modules())
     parts: dict = {}
     for ad, strength in rows:
-        for path, key in ad.text:
+        for path, alpha, key in ad.text:
             pair = pipe.adapters.get(key)
             if pair is None:
                 raise AdapterError(f"{ad.name}: pair {key[:16]} is no "
@@ -327,7 +347,7 @@ def _text_wraps(pipe, enc, rows) -> dict:
                     f"{ad.name}: the text encoder pair on {path} does not "
                     f"fit the {enc.spec.name} encoder: {why}")
             parts.setdefault(path, (leaf, dims, []))[2].append(plan.Part(
-                pair.down, pair.up, pair.alpha, None, strength))
+                pair.down, pair.up, alpha, None, strength))
     return {path: EncoderLoRALinear(leaf, plan.block_diagonal(path, rows_,
                                                               dims))
             for path, (leaf, dims, rows_) in parts.items()}

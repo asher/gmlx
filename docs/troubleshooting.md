@@ -414,6 +414,57 @@ such as `loras/watercolor.safetensors`, or by the file name of one in the
 entry's `adapters`. Move the file into a model folder and use its path
 there.
 
+### A LoRA is refused for memory
+
+When a LoRA needs memory that is not free, the server makes room for it
+before it runs: it lets idle LoRAs and uploads go and unloads idle
+models, as a model load does. A pinned model stays loaded, as
+[`pin`](config.md#modelspin) describes. A LoRA that still does not fit
+is refused. The message names what needs the memory, such as the
+request's adapters or the LoRA matrices of an upload, the GB it needs,
+and the room or what holds the request up. Each 503 carries
+`Retry-After`:
+
+- `... need ... GB of memory, over the ... GB the server's memory budget
+  leaves beside ...` (413): the LoRAs do not fit beside the pinned models,
+  even with every other model unloaded. An images API request on an
+  image model counts that model and the chat model it shares as its
+  encoder too, loaded or not, and the message names them. Use a smaller
+  LoRA or fewer of them, or unpin a model.
+- `... and ... GB is free beside the models in use (...); retry when one
+  is idle` (503): the models named are generating, and their memory goes
+  once they are idle. The server waits for a chat model among them up to
+  the `Retry-After` seconds before it answers. Send the request again
+  when one finishes. In ComfyUI, queue the prompt again.
+- `... and the image worker is busy with ...; retry when it is idle`
+  (503): an upload waited the `Retry-After` seconds for a job of the
+  image models named, with the memory free. Send it again when the job
+  ends.
+- `... and the server is loading ... (... GB) now; retry when it is
+  loaded` (503): a model load holds the memory. Send the request again
+  once the model is loaded.
+- `... and the server is loading or unloading another model now; retry
+  when it is done` (503): a model load or unload held the request up past
+  the `Retry-After` seconds. Send it again when that ends.
+- `... and ... GB is free; unload a model or retry when the requests in
+  flight finish` (503): no model whose memory goes once idle is
+  generating, and a preloaded or pinned model or the LoRAs and uploads of
+  other requests hold the room. Unload a model with
+  [`POST /unload`](api.md#endpoints), or send the request again once the
+  other requests finish.
+- `... GB is free in the working set now; retry when the models in use
+  finish` (503): macOS has less memory free than the plan counts on while
+  other models run. Retry when they finish.
+- `... GB is free in the working set now; close other apps or unload a
+  model to make room` (503): no model is in use, and other apps hold the
+  memory macOS has free. Close one, or unload a model with
+  [`POST /unload`](api.md#endpoints).
+
+With
+[`image.adapter_cache_mb`](config.md#serverimageadapter_cache_mb) set, a
+LoRA over that cap is refused with a message that names the key. Raise the
+cap, or remove the key to let LoRAs use the memory free.
+
 ## Video generation
 
 ### `the smallest MiniMax-H3 clip does not fit in memory`

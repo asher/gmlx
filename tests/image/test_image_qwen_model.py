@@ -714,7 +714,7 @@ def test_the_plan_reads_the_held_states_under_the_table_of_the_request(
     dim = pipe.dit.cfg.dim
     pair = install.register_pair(
         pipe, mx.array(rng.standard_normal((2, dim)).astype(np.float32)),
-        mx.array(rng.standard_normal((dim, 2)).astype(np.float32)), None)
+        mx.array(rng.standard_normal((dim, 2)).astype(np.float32)))
     table = api.define_patch_table(
         pipe, [("transformer_blocks.0.attn.to_q", None, [(pair, 0.1)])])
     cond = _text("one")
@@ -772,7 +772,7 @@ def test_a_scope_holds_the_state_of_the_table_its_steps_run_under(
     dim = pipe.dit.cfg.dim
     pair = install.register_pair(
         pipe, mx.array(rng.standard_normal((2, dim)).astype(np.float32)),
-        mx.array(rng.standard_normal((dim, 2)).astype(np.float32)), None)
+        mx.array(rng.standard_normal((dim, 2)).astype(np.float32)))
     table = api.define_patch_table(
         pipe, [("transformer_blocks.0.attn.to_q", None, [(pair, 0.1)])])
     r = _with_ref("r")

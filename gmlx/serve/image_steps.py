@@ -41,6 +41,7 @@ normalized, so their VAE routes take and give model-space latents.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -64,6 +65,11 @@ MAX_RUNS = 32
 MAX_ROWS = 16
 MAX_TENSOR_BYTES = 1 << 30
 MAX_ADAPTER_BYTES = 1 << 30
+# The bytes of contract table bodies a loaded pipeline keeps, to define a
+# client's table again when the pipeline let its core table go.
+CLIENT_TABLE_BYTES = 16 << 20
+# The bound of a store with no cap, which its bookings bound.
+UNBOUNDED = 1 << 62
 FEATURES = ("prefix_cache", "noise_mask", "rgba_vae", "tiled_vae",
             "ref_cache", "skip_blocks", "av_step")
 
@@ -172,6 +178,9 @@ def flow_targets(sample_sigmas, timesteps) -> list:
 class StepError(Exception):
     """A step contract request refused with its status and a body."""
 
+    # The Retry-After seconds of a 503, or None for a deferred load's.
+    retry_after: int | None = None
+
     def __init__(self, status: int, message: str, **extra):
         super().__init__(message)
         self.status = status
@@ -186,11 +195,110 @@ class StepInterrupted(Exception):
 
 
 class Missing(StepError):
-    def __init__(self, hashes):
+    """A 409 naming what the server does not hold. ``hint`` says why, when
+    the LoRA matrices of a table gave way to memory."""
+
+    def __init__(self, hashes, hint: str | None = None):
         missing = sorted(set(hashes))
-        super().__init__(409, f"{len(missing)} tensor(s) or table(s) are not "
-                         "held by the server; upload them and retry",
+        text = (f"{len(missing)} tensor(s) or table(s) are not held by the "
+                "server; upload them and retry")
+        super().__init__(409, f"{text}. {hint}" if hint else text,
                          missing=missing)
+        self.hint = hint
+
+
+# The subjects of the step routes' LoRA refusals.
+UPLOAD = "the LoRA matrices of this upload"
+PAIRS = "the LoRA pairs of this patch table"
+FACTORS = "the LoRA factors of this step"
+ENCODE = "the LoRA bytes of this encode"
+# A body with no Content-Length is booked this many bytes at a time.
+BODY_STEP = 64 << 20
+
+_WIRE_DTYPES = {"F32": "float32", "F16": "float16", "BF16": "bfloat16"}
+
+
+def adapter_cap() -> int | None:
+    """server.image.adapter_cache_mb in bytes, or None when unset."""
+    from .image_service import cache_bytes
+
+    return cache_bytes()[1]
+
+
+def wire_pair_key(up: WireTensor, down: WireTensor) -> str | None:
+    """The pair hash ``patch_pair`` gives the arrays of ``up`` and
+    ``down``, from their wire bytes, or None for a dtype it takes not."""
+    from gmlx.image.lora import install
+
+    names = [_WIRE_DTYPES.get(t.dtype) for t in (down, up)]
+    if None in names:
+        return None
+
+    def flat(t):
+        s = tuple(int(d) for d in t.shape)
+        return s if len(s) <= 2 else (s[0], math.prod(s[1:]))
+    return install.pair_key((names[0], flat(down), down.raw),
+                            (names[1], flat(up), up.raw))
+
+
+def body_pairs(body: dict, adapters) -> dict:
+    """{pair key: bytes} of the pairs of a contract table ``body`` whose
+    matrices ``adapters`` holds."""
+    out: dict = {}
+    for e in body.get("entries") or []:
+        for p in (e.get("patches") or []) if isinstance(e, dict) else []:
+            if not isinstance(p, dict):
+                continue
+            up, down = (adapters.peek(h) if isinstance(h, str) else None
+                        for h in (p.get("up"), p.get("down")))
+            if up is None or down is None:
+                continue
+            key = wire_pair_key(up, down)
+            if key is not None:
+                out[key] = up.nbytes + down.nbytes
+    return out
+
+
+def pairs_due(served, pairs: dict) -> dict:
+    """The pairs of ``pairs`` the pipeline holds not and that are not the
+    entry's own: what a define of them puts."""
+    from .image_service import _pair_keys
+
+    own = _pair_keys(served.adapters)
+    return {k: n for k, n in pairs.items()
+            if k not in own and served.pipe.adapters.peek(k) is None}
+
+
+def request_matrices(served, body: dict, adapters) -> dict:
+    """{hash: bytes} of the matrices ``adapters`` holds of the pairs of a
+    contract table ``body`` that are not the entry's own: what the
+    request's LoRA holds at its forward, from the wire bytes."""
+    from .image_service import _pair_keys
+
+    own = _pair_keys(served.adapters)
+    out: dict = {}
+    for e in body.get("entries") or []:
+        for p in (e.get("patches") or []) if isinstance(e, dict) else []:
+            if not isinstance(p, dict):
+                continue
+            hs = [h for h in (p.get("up"), p.get("down"))
+                  if isinstance(h, str)]
+            ts = [adapters.peek(h) for h in hs]
+            if len(ts) != 2 or None in ts:
+                continue
+            if wire_pair_key(ts[0], ts[1]) in own:
+                continue
+            out.update({h: t.nbytes for h, t in zip(hs, ts)})
+    return out
+
+
+def matrix_sizes(body: dict, adapters) -> dict:
+    """{hash: bytes} of the matrices a contract table ``body`` names."""
+    return {h: adapters.nbytes(h)
+            for e in body.get("entries") or [] if isinstance(e, dict)
+            for p in e.get("patches") or [] if isinstance(p, dict)
+            for h in (p.get("up"), p.get("down"))
+            if isinstance(h, str) and h in adapters}
 
 
 def _wire_copy(t: WireTensor) -> WireTensor:
@@ -209,17 +317,49 @@ class _Bytes:
     """A least recently used map of WireTensors bounded in bytes. Its 413
     names it by ``name`` and the server.image key that configures it."""
 
-    def __init__(self, max_bytes: int, name: str, key: str):
+    def __init__(self, max_bytes: int | None, name: str, key: str):
         from collections import OrderedDict
 
         self.name, self.key = name, key
-        self.max_bytes = int(max_bytes)
+        # None bounds the store by nothing but its bookings.
+        self.max_bytes = UNBOUNDED if max_bytes is None else int(max_bytes)
         # The configured bound, of which the models loaded leave the
-        # cache max_bytes.
-        self.configured = self.max_bytes
+        # cache max_bytes, or None.
+        self.configured = None if max_bytes is None else self.max_bytes
         self._items: OrderedDict = OrderedDict()
         self._bytes = 0
         self._lock = threading.Lock()
+        # The keys a define or a step holds, by count: neither a shed nor
+        # the bound lets them go.
+        self._held: dict = {}
+
+    def _shed_over(self, keep_one: bool) -> None:
+        """Drop the oldest tensors not held while the store is over its
+        bound, the newest kept with ``keep_one``."""
+        newest = next(reversed(self._items), None) if keep_one else None
+        for k in [k for k in self._items
+                  if k not in self._held and k != newest]:
+            if self._bytes <= self.max_bytes:
+                return
+            self._bytes -= self._items.pop(k).nbytes
+
+    @contextlib.contextmanager
+    def holding(self, keys):
+        """Hold ``keys`` for the block: a shed and the bound skip them."""
+        keys = list(keys)
+        with self._lock:
+            for k in keys:
+                self._held[k] = self._held.get(k, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                for k in keys:
+                    n = self._held.get(k, 0) - 1
+                    if n > 0:
+                        self._held[k] = n
+                    else:
+                        self._held.pop(k, None)
 
     def get(self, key):
         with self._lock:
@@ -232,17 +372,41 @@ class _Bytes:
         with self._lock:
             return key in self._items
 
+    def peek(self, key):
+        """The tensor at ``key``, or None, without a use."""
+        with self._lock:
+            return self._items.get(key)
+
+    def nbytes(self, key) -> int:
+        """Bytes of the tensor at ``key``, 0 without one, without a use."""
+        with self._lock:
+            t = self._items.get(key)
+            return 0 if t is None else t.nbytes
+
     def put(self, key, t: WireTensor) -> None:
         self.check(t.nbytes)
         with self._lock:
             old = self._items.pop(key, None)
-            if old is not None:
-                self._bytes -= old.nbytes
             self._items[key] = t
-            self._bytes += t.nbytes
-            while self._bytes > self.max_bytes and len(self._items) > 1:
-                _, gone = self._items.popitem(last=False)
-                self._bytes -= gone.nbytes
+            # One write: the pool reads the count with no lock.
+            self._bytes += t.nbytes - (0 if old is None else old.nbytes)
+            self._shed_over(True)
+
+    def shed(self, nbytes: int, hold=()) -> int:
+        """Drop the least recently used tensors but those at ``hold`` and
+        those held until ``nbytes`` are gone, and return the bytes
+        dropped."""
+        hold = set(hold)
+        with self._lock:
+            dropped = 0
+            for k in [k for k in self._items
+                      if k not in hold and k not in self._held]:
+                if dropped >= nbytes:
+                    break
+                t = self._items.pop(k)
+                self._bytes -= t.nbytes
+                dropped += t.nbytes
+            return dropped
 
     @property
     def bytes(self) -> int:
@@ -251,8 +415,9 @@ class _Bytes:
     def check(self, nbytes: int) -> None:
         """Refuse ``nbytes`` over the bound with a 413 that gives its
         remedy: the share the models loaded leave the cache, when the
-        configured bound holds them, or else the configured bound."""
-        if nbytes <= self.max_bytes:
+        configured bound holds them, or else the configured bound. A
+        store with no bound refuses nothing: the pool's room bounds it."""
+        if self.configured is None or nbytes <= self.max_bytes:
             return
         configured = f"{self.configured / 2**20:.0f} MiB"
         if nbytes > self.configured:
@@ -266,14 +431,17 @@ class _Bytes:
                         f"configured {configured}. A smaller defaults.size or "
                         "defaults.seconds on the tightest entry gives it more.")
 
-    def bound(self, configured: int, max_bytes: int) -> None:
-        """Set the bound at ``max_bytes`` of the ``configured`` one and
-        shed the oldest tensors over it."""
+    def bound(self, configured: int | None, max_bytes: int) -> None:
+        """Set the bound at ``max_bytes`` of the ``configured`` one, or at
+        none for a ``configured`` of None, and shed the oldest tensors
+        over it."""
         with self._lock:
-            self.configured, self.max_bytes = int(configured), int(max_bytes)
-            while self._bytes > self.max_bytes and self._items:
-                _, gone = self._items.popitem(last=False)
-                self._bytes -= gone.nbytes
+            if configured is None:
+                self.configured, self.max_bytes = None, UNBOUNDED
+            else:
+                self.configured = int(configured)
+                self.max_bytes = int(max_bytes)
+            self._shed_over(False)
 
     def clear(self) -> None:
         with self._lock:
@@ -300,12 +468,97 @@ class Run:
     ref_cache: dict = field(default_factory=dict)   # denoise_step's, per run
 
 
+class ClientTables:
+    """The contract tables clients defined on one pipeline: each id's
+    core table id and the body, as sent, it was defined from. A step on a
+    core table the pipeline let go defines it again from its body. The
+    least recently used ids go first past ``max_bytes`` of bodies, the
+    newest one staying, and a step that names an id gone is a 409 the
+    client answers by sending its table again. A body over ``max_bytes``
+    is not kept: its id answers that 409 once its core table goes."""
+
+    def __init__(self, max_bytes: int | None = None):
+        from collections import OrderedDict
+
+        self.max_bytes = int(CLIENT_TABLE_BYTES if max_bytes is None
+                             else max_bytes)
+        self._items: OrderedDict = OrderedDict()   # id -> (core, body)
+        # id -> {matrix hash: bytes} of the body, from its define.
+        self._sizes: dict = {}
+        self._bytes = 0
+        self._lock = threading.Lock()
+
+    def put(self, tid: str, core: str, body: bytes | None = None,
+            sizes: dict | None = None) -> None:
+        """Keep ``tid`` as ``core``, with the body it was defined from and
+        the bytes of the matrices it names. A body over the bound is not
+        kept, so its table is not defined again at a step."""
+        if body is not None and len(body) > self.max_bytes:
+            body = None
+        with self._lock:
+            old = self._items.pop(tid, None)
+            if old is not None and old[1] is not None:
+                self._bytes -= len(old[1])
+            self._items[tid] = (core, body)
+            if sizes is not None:
+                self._sizes[tid] = dict(sizes)
+            self._bytes += len(body) if body is not None else 0
+            while self._bytes > self.max_bytes and len(self._items) > 1:
+                gid, (_core, gone) = self._items.popitem(last=False)
+                self._bytes -= len(gone) if gone is not None else 0
+                self._sizes.pop(gid, None)
+
+    def __setitem__(self, tid: str, core: str) -> None:
+        self.put(tid, core)
+
+    def get(self, tid, default=None):
+        with self._lock:
+            got = self._items.get(tid)
+            if got is None:
+                return default
+            self._items.move_to_end(tid)
+            return got[0]
+
+    def __getitem__(self, tid) -> str:
+        got = self.get(tid)
+        if got is None:
+            raise KeyError(tid)
+        return got
+
+    def __contains__(self, tid) -> bool:
+        with self._lock:
+            return tid in self._items
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    def body(self, tid) -> bytes | None:
+        """The body ``tid`` was defined from, as sent, or None."""
+        with self._lock:
+            got = self._items.get(tid)
+        return None if got is None else got[1]
+
+    def sizes(self, tid) -> dict:
+        """{matrix hash: bytes} of the body of ``tid``, as defined."""
+        with self._lock:
+            return dict(self._sizes.get(tid) or {})
+
+    @property
+    def bytes(self) -> int:
+        return self._bytes
+
+
+def _mb(mb: int | None) -> int | None:
+    return None if mb is None else int(mb) << 20
+
+
 def _tensor_cache(max_bytes: int) -> _Bytes:
     return _Bytes(max_bytes, "the step routes' tensor cache",
                   "tensor_cache_mb")
 
 
-def _adapter_cache(max_bytes: int) -> _Bytes:
+def _adapter_cache(max_bytes: int | None) -> _Bytes:
     return _Bytes(max_bytes, "the step routes' adapter cache",
                   "adapter_cache_mb")
 
@@ -319,14 +572,13 @@ class StepsState:
 
         cfg = ImageServerCfg()
         self.tensors = _tensor_cache(cfg.tensor_cache_mb << 20)
-        self.adapters = _adapter_cache(cfg.adapter_cache_mb << 20)
-        self._bounds = (self.tensors.max_bytes, self.adapters.max_bytes)
+        self.adapters = _adapter_cache(_mb(cfg.adapter_cache_mb))
+        self._bounds = (self.tensors.max_bytes, self.adapters.configured)
         # The smallest cache share of the models loaded, and the largest
         # room one of them keeps in the tensor cache for a cond.
         self._share, self._tensor_floor = 1.0, 0
         self.runs: dict = {}
-        # model id -> (weak reference to its pipeline,
-        #              {contract table id: core table id})
+        # model id -> (weak reference to its pipeline, ClientTables)
         self.tables: dict = {}
         self.lock = threading.Lock()
         self.settings = None
@@ -340,10 +592,10 @@ class StepsState:
     def configure(self, settings) -> None:
         self.settings = settings
         tmb = settings.tensor_cache_mb << 20
-        amb = settings.adapter_cache_mb << 20
+        amb = _mb(settings.adapter_cache_mb)
         if tmb != self.tensors.max_bytes:
             self.tensors = _tensor_cache(tmb)
-        if amb != self.adapters.max_bytes:
+        if amb != self.adapters.configured:
             self.adapters = _adapter_cache(amb)
         self._bounds = (tmb, amb)
 
@@ -361,15 +613,20 @@ class StepsState:
         self._bound()
 
     def _bound(self) -> None:
+        """The tensor store at the share; the upload store at the cap
+        alone, as its bookings bound it."""
         tensor, adapter = self._bounds
         self.tensors.bound(tensor, max(int(tensor * self._share),
                                        min(self._tensor_floor, tensor)))
-        self.adapters.bound(adapter, int(adapter * self._share))
+        self.adapters.bound(adapter, UNBOUNDED if adapter is None
+                            else adapter)
 
     # Tensors and adapters.
 
     def put_tensor(self, store: _Bytes, want: str, tensors: dict,
-                   limit: int) -> str:
+                   limit: int, copy: bool = True) -> str:
+        """Keep the one tensor of an upload under its hash. ``copy=False``
+        keeps a view of the body, which an adapter upload books whole."""
         if len(tensors) != 1:
             raise StepError(400, f"an upload holds one tensor, not "
                             f"{len(tensors)}")
@@ -382,7 +639,7 @@ class StepsState:
         if got != want:
             raise StepError(400, "the tensor's hash is not the one in the "
                             "path", got=got)
-        store.put(got, _wire_copy(t))
+        store.put(got, _wire_copy(t) if copy else t)
         return got
 
     # Runs.
@@ -497,15 +754,19 @@ class StepsState:
 
     # Patch tables.
 
-    def tables_of(self, model: str, pipe) -> dict:
-        """The contract table ids clients defined on ``pipe``, the loaded
-        pipeline of ``model``, mapped to its core table ids. A pipeline
-        loaded again starts an empty map. The map holds the pipeline
-        weakly, so a model the pool releases leaves nothing alive here."""
+    def tables_of(self, model: str, pipe) -> ClientTables:
+        """The contract tables clients defined on ``pipe``, the loaded
+        pipeline of ``model``. A pipeline loaded again starts an empty
+        map. The map holds the pipeline weakly, so a model the pool
+        releases leaves no pipeline alive here, and the next lookup drops
+        its map with the table bodies kept in it."""
         with self.lock:
+            for dead in [m for m, (ref, _t) in self.tables.items()
+                         if ref() is None]:
+                del self.tables[dead]
             held = self.tables.get(model)
             if held is None or held[0]() is not pipe:
-                held = (weakref.ref(pipe), {})
+                held = (weakref.ref(pipe), ClientTables())
                 self.tables[model] = held
             return held[1]
 
@@ -731,8 +992,9 @@ def capabilities() -> dict:
             "features": list(FEATURES),
             "limits": {"max_tensor_bytes": min(MAX_TENSOR_BYTES,
                                                STATE.tensors.max_bytes),
-                       "max_adapter_bytes": min(MAX_ADAPTER_BYTES,
-                                                STATE.adapters.max_bytes),
+                       "max_adapter_bytes": min(
+                           MAX_ADAPTER_BYTES,
+                           STATE.adapters.configured or MAX_ADAPTER_BYTES),
                        "max_rows": MAX_ROWS, "max_runs": MAX_RUNS}}
 
 
@@ -975,80 +1237,32 @@ def _ref_answer(conds, held: dict) -> str:
 
 def _pair_room(served, need: int) -> None:
     """Refuse the pairs of a table, ``need`` bytes held at once, over the
-    room the entry's pair cache keeps for a request's pairs, with a 413
-    that gives the remedy: the share the entry's default work leaves the
-    cache, and the configured bound when it is under the need."""
-    from .image_service import cache_bytes, pair_room
-
-    room = pair_room(served)
-    if need <= room:
+    optional cap server.image.adapter_cache_mb with a 413 that names it.
+    With no cap the pool books the pairs, and refuses them there."""
+    cap = adapter_cap()
+    if cap is None or need <= cap:
         return
-    configured = cache_bytes()[1]
-    share = served.plan.cache_share
-    sid = served.spec.id
-    over = (f"the LoRA pairs of this patch table take {_mib(need, True)}, over "
-            f"the {_mib(room, False)} the pair cache of {sid!r} keeps for a "
-            "request's pairs")
-    bound = (f"server.image.adapter_cache_mb to {math.ceil(need / 2**20)} or "
-             "more")
-    if share >= 1.0:
-        raise StepError(413, f"{over}; raise {bound}")
-    video = is_video(served.spec)
-    left = (f"its default {'clip' if video else 'image'} leaves the cache "
-            f"{share:.0%} of its configured {configured / 2**20:.0f} MiB")
-    smaller = (f"a smaller defaults.size{' or defaults.seconds' if video else ''}"
-               f" on {sid!r}")
-    if need > configured:
-        raise StepError(413, f"{over}: {left}. Raise {bound}, and set "
-                        f"{smaller} so that it leaves the cache more of it.")
-    raise StepError(413, f"{over}: {left}. A{smaller[1:]} gives it more.")
+    raise StepError(413, f"the LoRA pairs of this patch table take "
+                    f"{_mib(need, True)}, over the {_mib(cap, False)} the "
+                    f"pair cache of {served.spec.id!r} keeps for a request's "
+                    f"pairs; raise server.image.adapter_cache_mb to "
+                    f"{math.ceil(need / 2**20)} or more")
 
 
-# Per pipeline, the own pair keys of its entry to the hash of each pair's
-# down and up alone, taken at the first define that reads each. It keeps
-# the keys of rows a video entry held before its LoRA file changed, so
-# readers look up the rows the entry holds now.
-_OWN_CONTENT: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
-
-
-def _content(down, up, alpha, key: str) -> str:
-    """The hash of a pair's down and up alone: its key when it has no
-    alpha."""
-    from gmlx.image.lora.install import pair_hash
-
-    return key if alpha is None else pair_hash(down, up, None)
-
-
-def _own_content(served) -> dict:
-    """The entry's own pair keys to the hash of each pair's down and up
-    alone, from the pairs its pipeline keeps."""
-    memo = _OWN_CONTENT.setdefault(served.pipe, {})
-    for ad, _st in served.adapters:
-        for r in ad.dit:
-            if r[-1] not in memo:
-                pair = served.pipe.adapters.peek(r[-1])
-                memo[r[-1]] = _content(pair.down, pair.up, pair.alpha, r[-1])
-    return memo
-
-
-def _with_own(served, entries: list, pairs) -> list:
+def _with_own(served, entries: list) -> list:
     """Table ``entries`` with the entry's own adapters stacked on, as the
     images API stacks a request's adapters on them. An own adapter that
-    the entries name a pair of is left out, so the table's strength for
-    it applies, once. A pair is named by its down and up alone, from
-    ``pairs``, the (down, up, alpha, key) of the entries' pairs: ComfyUI
-    reads no adapter header, so a pair whose file holds no alpha comes
-    with none, where the entry's reader gives it the header's."""
+    the entries name a pair of is left out, so the table's strength and
+    alpha for it apply, once. ComfyUI reads no adapter header, so a pair
+    whose file holds no alpha comes with none, where the entry's reader
+    gives it the header's: the table's alpha is the one that applies."""
     from gmlx.image.lora import patch_table as pt
 
     if not served.adapters:
         return entries
-    content = {key: _content(down, up, alpha, key)
-               for down, up, alpha, key in pairs}
-    named = {content[k] for _m, _b, patches in entries for k, _s in patches}
-    own_content = _own_content(served)
+    named = {p[0] for _m, _b, patches in entries for p in patches}
     own = [(ad, st) for ad, st in served.adapters
-           if not any(own_content[r[-1]] in named for r in ad.dit)]
+           if not any(r[-1] in named for r in ad.dit)]
     if not own:
         return entries
     rows = {(m, b): list(patches) for m, b, patches in entries}
@@ -1093,30 +1307,22 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
             missing += [str(p.get(side)) for side, t in zip(("up", "down"),
                                                             got) if t is None]
             if None not in got:
-                held[(p["up"], p["down"], alpha)] = got
+                held[(p["up"], p["down"])] = got
     if missing:
         raise Missing(missing)
+    # The cap's check, from the wire bytes, before a pair is made.
+    own = _pair_keys(served.adapters)
+    sizes = {wire_pair_key(up, down): up.nbytes + down.nbytes
+             for up, down in held.values()}
+    _pair_room(served, sum(n for k, n in sizes.items() if k not in own))
     try:
-        # Each pair as the pipeline keeps it, under its content hash: a
-        # pair named twice, or one of the entry's own, takes no room.
-        pairs = {pk: pt.patch_pair(up.mx(), down.mx(), pk[2])
+        # Each pair as the pipeline keeps it, under the content hash of
+        # its down and up: a pair named twice, under any alphas, or one of
+        # the entry's own takes no room.
+        pairs = {pk: pt.patch_pair(up.mx(), down.mx())
                  for pk, (up, down) in held.items()}
     except (AdapterError, ValueError, TypeError) as e:
         raise StepError(400, f"patch table refused: {e}") from None
-    own = _pair_keys(served.adapters)
-    # An own pair sent under another alpha, as ComfyUI sends a pair whose
-    # alpha is in the file's header, is its twin: it keeps the own pair's
-    # arrays and takes no room. The map is of the rows the entry holds
-    # now: a video entry reads its LoRA file again after an encode.
-    oc = _own_content(served) if served.adapters else {}
-    twins = {oc[r[-1]]: r[-1] for ad, _st in served.adapters for r in ad.dit}
-    twin = {key: None if key in own else
-            twins.get(_content(down, up, alpha, key))
-            for down, up, alpha, key in pairs.values()}
-    sizes = {key: int(down.nbytes) + int(up.nbytes)
-             for down, up, _alpha, key in pairs.values()
-             if key not in own and twin[key] is None}
-    _pair_room(served, sum(sizes.values()))
     rows = []
     keys: dict = {}
     try:
@@ -1128,20 +1334,19 @@ def define_table(served, body: dict, adapters: _Bytes) -> str:
                 if unknown:
                     raise StepError(400, f"patch fields {sorted(unknown)} "
                                     "are not read by this server")
-                pk = (p["up"], p["down"], p.get("alpha"))
+                pk = (p["up"], p["down"])
                 if pk not in keys:
-                    down, up, alpha, key = pairs[pk]
+                    down, up, _alpha, key = pairs[pk]
                     keys[pk] = install.register_pair(
-                        pipe, down, up, alpha, key=key, twin=twin[key],
-                        hold=keys.values())
+                        pipe, down, up, key=key, hold=keys.values())
                 row["patches"].append({
-                    "adapter": keys[pk], "strength": p.get("strength", 1.0),
+                    "adapter": keys[pk], "alpha": p.get("alpha"),
+                    "strength": p.get("strength", 1.0),
                     "strength_model": p.get("strength_model", 1.0),
                     **({"kind": p["kind"]} if "kind" in p else {})})
             rows.append(row)
         plans = pt.plans_from_patches(pipe.family, rows)
-        return api.define_patch_table(pipe, _with_own(served, plans,
-                                                      pairs.values()))
+        return api.define_patch_table(pipe, _with_own(served, plans))
     except (AdapterError, ValueError, KeyError, TypeError) as e:
         if isinstance(e, StepError):
             raise

@@ -677,7 +677,7 @@ class ImageServerCfg:
     max_queue: int = 4               # image jobs waiting before a 429
     embed_metadata: bool = False     # API outputs carry the PNG text chunk
     tensor_cache_mb: int = 64        # each cache of conditionings, latents
-    adapter_cache_mb: int = 256      # each cache of request adapters, tables
+    adapter_cache_mb: int | None = None  # optional cap on request LoRAs
     steps_api: bool = True           # serve the image step contract
     steps_remote: bool = False       # step clients beyond loopback
 

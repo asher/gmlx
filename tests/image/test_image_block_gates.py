@@ -767,7 +767,7 @@ def adapted():
     rng = np.random.default_rng(5)
     path = f"layers.0.{LEAVES['qkv']}"
     return pipe, [(path, (0, i * WIDTH, WIDTH), [(lora.register_pair(
-        pipe, *make_pair(rng, WIDTH, WIDTH, 4)), 0.8)]) for i in range(3)]
+        pipe, *make_pair(rng, WIDTH, WIDTH, 4)[:2]), 0.8)]) for i in range(3)]
 
 
 def test_a_leaf_on_the_lora_op_is_one_site_at_the_count_of_the_op(

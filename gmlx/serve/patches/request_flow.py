@@ -23,7 +23,11 @@ _log = logging.getLogger(__name__)
 _LOAD_OFFLOAD_FLAG = "_kq_gguf_load_offload"
 
 _LOAD_OFFLOAD_PATHS = _CHAT_PATHS + ("/responses", "/v1/responses",
+                                     "/responses/input_tokens",
+                                     "/v1/responses/input_tokens",
                                      "/messages", "/v1/messages",
+                                     "/messages/count_tokens",
+                                     "/v1/messages/count_tokens",
                                      "/completions", "/v1/completions",
                                      "/systemone", "/v1/systemone",
                                      "/prewarm", "/v1/prewarm")
@@ -59,12 +63,10 @@ async def _extract_request_model(values, inherit):
     return None, inherit
 
 
-def _load_deferred_response(model_id, exc):
-    """503 for a gate-deferred load: typed error body carrying the gate's
-    numbers, ``Retry-After`` from the live admission state (the readiness
-    verdict's own backoff when the server is busy, else the floor)."""
-    from fastapi.responses import JSONResponse
-
+def deferred_retry_after() -> int:
+    """The ``Retry-After`` seconds of a deferred load, from the live
+    admission state: the readiness verdict's own backoff when the server
+    is busy, else the floor."""
     from ..queue_cap import _RETRY_MIN_S
 
     retry = _RETRY_MIN_S
@@ -76,6 +78,15 @@ def _load_deferred_response(model_id, exc):
             retry = max(int(r), int(_RETRY_MIN_S))
     except Exception:  # noqa: S110 - readiness unreadable -> the floor Retry-After
         pass
+    return int(retry)
+
+
+def _load_deferred_response(model_id, exc):
+    """503 for a gate-deferred load: typed error body carrying the gate's
+    numbers, with ``deferred_retry_after``."""
+    from fastapi.responses import JSONResponse
+
+    retry = deferred_retry_after()
     return JSONResponse(status_code=503, content={
         "error": {"message": str(exc), "type": "model_load_deferred",
                   "code": "load_deferred", "model": model_id},
@@ -94,14 +105,15 @@ def install_chat_load_offload() -> None:
     and back, though the process never restarts). Decode is already offloaded
     by mlx-vlm (``asyncio.to_thread``); this closes the one remaining on-loop
     blocking call: pre-warm the model on a worker thread, after which the stock
-    handler's own ``get_cached_model`` is a fast in-memory cache hit. A warm
-    failure is swallowed - the stock handler re-resolves and surfaces the real
-    error (404/400/500) normally. Idempotent per route.
-
-    Benign race: if the warm is evicted (memory pressure) before the stock handler
-    re-acquires, that handler reloads on the loop - i.e. degrades to today's
-    behaviour only under concurrent pressure, never worse."""
+    handler's own ``get_cached_model`` is a fast in-memory cache hit. The warm's
+    hold stays on the model until the handler's own resolve takes its place,
+    or until the handler returns, so no eviction takes the model between the
+    two and the request counts once. A warm failure is swallowed - the stock
+    handler re-resolves and surfaces the real error (404/400/500) normally.
+    Idempotent per route."""
     import asyncio
+
+    from .. import residency
 
     app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     app = app_mod.app
@@ -111,9 +123,15 @@ def install_chat_load_offload() -> None:
         async def endpoint(*args, **kwargs):
             model_id, adapter = await _extract_request_model(
                 list(args) + list(kwargs.values()), inherit)
+            hold = None
             if model_id is not None:
                 try:
-                    await asyncio.to_thread(_routes._warm_and_release, model_id, adapter)
+                    hold = await asyncio.to_thread(_routes._load_resident,
+                                                   model_id, adapter)
+                    if hold is not None:
+                        # The thread set it in a copy of this context; here
+                        # the handler's own resolve releases it.
+                        residency._active_hold.set(hold)
                 except LoadDeferred as exc:
                     # The gate's retryable refusal (resident models pinned
                     # or busy): a typed 503 + Retry-After, the shape a
@@ -126,7 +144,11 @@ def install_chat_load_offload() -> None:
                         _load_deferred_response, model_id, exc)
                 except Exception:  # noqa: S110 - stock handler re-resolves + surfaces errors
                     pass
-            return await original(*args, **kwargs)
+            try:
+                return await original(*args, **kwargs)
+            finally:
+                if hold is not None:
+                    hold.release()
         return endpoint
 
     _wrap_post_routes(app, _LOAD_OFFLOAD_PATHS, _LOAD_OFFLOAD_FLAG, _make)

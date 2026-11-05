@@ -37,7 +37,8 @@ A client that samples one image makes these calls:
    `PUT patch-tables/{id}?model=ID` then names the set of patches and their
    strengths. The patches stack on the model's own LoRAs, as the adapters
    of an images request do. A table that names a pair of one of the
-   model's own LoRAs sets that LoRA's strength in place of the model's.
+   model's own LoRAs sets that LoRA's strength and alpha in place of the
+   model's.
 4. `POST runs/begin` holds the model for the run.
 5. `POST step` runs once a step, with the latents, the timestep, the
    conditioning hashes and the patch table id.
@@ -104,7 +105,11 @@ as ComfyUI does, samples an edit and a negative on `cond_typed`.
 
 A step names its conditionings and its patch table by hash. When the
 server does not hold one, the step gets 409 with a `missing` list, and
-the client uploads those and sends the step again. A run keeps the
+the client uploads those and sends the step again. The server keeps the
+body of each patch table it was sent, up to 16 MiB of bodies for each
+loaded model with the least recently used going first, and a step on a
+table whose LoRA pairs it let go defines the table again from that
+body, while it holds the LoRA matrices the body names. A run keeps the
 prefix state of each of its conditionings between steps, and the
 `X-Gmlx-Prefix-Cache` header of a step answers `hit` or `miss`.
 `X-Gmlx-Forward-Ms` is the time of the model forward, so a client's wall
@@ -148,14 +153,38 @@ as does a VAE pass of more than 16 images. One whose memory plan does not
 fit beside the models loaded gets 400, and so does the encode of a prompt
 on a video model, priced by its rows. The message of a step names the
 largest term of its plan and, where the plan keeps the keys and values of
-the reference latents, how many of them fit. A patch table whose LoRA
-pairs do not fit the model's pair cache at once, beside the model's own
-LoRAs, gets 413 with what gives the cache room. The VAE routes decode and
-encode the images of a batch one at a time. `capabilities` gives the
-largest tensor and adapter upload, which are the
-[`image.tensor_cache_mb`](../config.md#serverimagetensor_cache_mb) and
-[`image.adapter_cache_mb`](../config.md#serverimageadapter_cache_mb) caches.
-Each image model books those two caches while the step routes are on.
+the reference latents, how many of them fit. A patch table or a step
+whose LoRA bytes do not fit beside its model and the pinned models gets
+413 when it arrives, and so does an adapter upload whose bytes do not fit
+beside the pinned models. The 413 names the GB the LoRAs need and the
+room. The server books the other LoRA bytes on the image thread, at
+the turn of the job that reads or builds them. The turn drops idle LoRA
+bytes and idle uploads, unloads idle models as a cold load does, and
+books what the job needs. A turn whose bytes, such as a step's factors,
+need more than the budget leaves beside the model, the encoder its job
+holds and the pinned models gets 413 in the same words. A turn left
+short gets 503 with `Retry-After`, naming the GB its LoRAs need and one
+of: the model the server is loading; the GB free beside the models in
+use whose memory goes once they are idle; the GB free with none of them
+in use, to unload a model or retry; or the GB free in the working set
+macOS measures, to retry when the models in use finish or, with none in
+use, to close other apps or unload a model. While a chat model in use
+holds the memory, the turn waits for it up to those seconds first. An
+upload that does not fit takes a turn of its own. One the image thread
+does not start within those seconds gets the 503 of what is short then,
+the budget or the working set, or with neither short, a 503 naming the
+models the image thread is busy with. A turn that a model load or
+unload holds up past those seconds with neither short gets a 503 that
+says so. A model load does not count the uploads the routes hold, and
+the next turn drops idle ones when memory runs short. A step whose
+table's LoRA pairs and matrices the server let go for memory gets 409
+with their GB, and the client sends them again.
+The VAE routes decode and encode the images of a batch one at a time. `capabilities` gives the largest tensor upload, which is the
+[`image.tensor_cache_mb`](../config.md#serverimagetensor_cache_mb) cache,
+and the largest adapter upload, which is the smaller of
+[`image.adapter_cache_mb`](../config.md#serverimageadapter_cache_mb) and
+1 GiB. Each image model books the tensor
+cache while the step routes are on.
 
 ## Access
 

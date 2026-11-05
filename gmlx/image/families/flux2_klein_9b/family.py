@@ -144,6 +144,7 @@ FAMILY = Family(
     constants=CONSTANTS,
     build=klein.build,
     lora_map=lora_map,
+    lora_f32=klein.FAMILY.lora_f32,
     fp32_keep=klein.FAMILY.fp32_keep,
     encoder=encoder,
     identity_tensors=klein.IDENTITY_TENSORS,

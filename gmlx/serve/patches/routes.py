@@ -613,13 +613,17 @@ def install_pool_aware_unload() -> None:
     app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def unload_endpoint(request: Request):
-        pool = _get_pool()
         try:
             body = await request.json()
         except Exception:
             body = None
         model_id = (body or {}).get("model") if isinstance(body, dict) else None
+        # An unload waits on the build lock and the image worker: off the
+        # event loop.
+        return await run_in_threadpool(_unload, model_id)
 
+    def _unload(model_id):
+        pool = _get_pool()
         if model_id:
             if pool is None:
                 # 503, not 200: without a pool the unload cannot be honored.
@@ -1175,9 +1179,9 @@ def _load_resident(model_id, adapter=_WARM_DEFAULT, *, images: bool = False):
 def _warm_and_release(model_id, adapter=_WARM_DEFAULT, *,
                       images: bool = False) -> None:
     """Load ``model_id`` resident, then drop the in-flight hold so it stays
-    LRU/TTL-managed. The transient warm used by the keep route and the chat
-    load-offload (a later request re-acquires the now-resident entry).
-    ``images`` as in :func:`_load_resident`."""
+    LRU/TTL-managed. The transient warm of the keep route and the preload's
+    extras (a later request re-acquires the now-resident entry). ``images``
+    as in :func:`_load_resident`."""
     hold = _load_resident(model_id, adapter, images=images)
     if hold is not None:
         hold.release()

@@ -21,14 +21,31 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- An image or video LoRA runs when the Mac has the memory for it, where
+  `gmlx serve` refused LoRAs over 256 MB.
+- `server.image.adapter_cache_mb` is now an optional cap with no default.
+- An image or video model reserves no memory for request LoRAs at load, so it
+  fits beside more models.
+- A LoRA that fits once an idle model unloads makes room as a model load
+  does, and one refused for memory names the GB it needs.
 - An image LoRA takes less memory: loading one no longer holds its file
   twice, and fewer of its weights are copied while it runs.
+- In the Python API, `gmlx.image.lora.pair_hash` and `register_pair` take no
+  alpha, and `register_patch` returns the pair's hash with its alpha: a patch
+  table patch carries the alpha as `(adapter hash, strength, alpha)`.
 
 ### Fixed
 
-- A served image model keeps its own LoRAs when a request brings others, and
-  a request over the adapter cache is refused, where requests failed with
-  "patch table names adapter ...".
+- A served image model keeps its own LoRAs when a request brings others,
+  where requests failed with "patch table names adapter ...".
+- A served model's own LoRA sent again by ComfyUI, which reads no alpha from
+  the file's header, no longer takes its memory twice.
+- Two ComfyUI workflows whose LoRAs fit in memory run at once, where they
+  could push each other's LoRA out until a run failed.
+- An unload sent while a model loads or an image job runs no longer holds
+  up the server's other requests until that ends.
+- A Messages or Responses token count for a model not loaded yet no longer
+  holds up the server's other requests while the model loads.
 - `gmlx serve` no longer corrupts the KV cache when one of several decoding
   requests passes about 260K tokens, or when a long request joins them.
 - FLUX.2 klein and the FLUX.1 VAE encoder no longer leave rows of the image
@@ -45,13 +62,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   applied a LoRA to it. The next model loaded beside its memory before.
 - A 16 GB Mac now pulls and runs the FLUX.2 klein 9B models at 1024x1024, and a
   Mac under 16 GB pulls no image model, which it could not run.
-- Image LoRA stacks over the adapter cache load.
 - A LoRA in a ComfyUI workflow adds to the LoRAs of the `gmlx serve` image
   model's `adapters` key, in place of replacing them.
-- A ComfyUI step whose LoRA another workflow's LoRA pushed out of the
-  server's adapter cache sends its LoRA again, in place of failing.
+- A ComfyUI step whose LoRA the server let go for another workflow's LoRA
+  sends its LoRA again, in place of failing.
 - `gmlx serve` frees an image LoRA that a later ComfyUI or images API LoRA
-  pushed out of its adapter cache, which its patch table kept in memory.
+  pushed out, which its patch table kept in memory.
 - An image model that `gmlx serve` refuses for memory shows its need above
   its budget, where both could read the same.
 - A ComfyUI workflow with a negative prompt loads the DiT and VAE once, not

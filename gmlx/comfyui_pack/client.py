@@ -65,11 +65,12 @@ class GmlxVersionError(GmlxError):
 
 
 class GmlxMissing(GmlxError):
-    """The server does not hold some tensors or tables a request named."""
+    """The server does not hold some tensors or tables a request named.
+    ``msg`` is the server's answer."""
 
-    def __init__(self, missing):
+    def __init__(self, missing, msg: str | None = None):
         self.missing = list(missing)
-        super().__init__(f"the gmlx server does not hold {len(self.missing)} "
+        super().__init__(msg or f"the gmlx server does not hold {len(self.missing)} "
                          "tensor(s) or table(s)")
 
 
@@ -353,7 +354,7 @@ class StepClient:
             doc = {}
         msg = doc.get("error") or data[:300].decode("utf-8", "replace")
         if status == 409 and doc.get("missing") is not None:
-            raise GmlxMissing(doc["missing"])
+            raise GmlxMissing(doc["missing"], f"gmlx: {what}: {msg}")
         if status == 409 and doc.get("code") == "interrupted":
             raise GmlxInterrupted(f"{what}: {msg}")
         if status == 400 and "step contract" in str(msg):
@@ -365,6 +366,10 @@ class StepClient:
             raise GmlxError(f"gmlx: {what} was refused ({status}): {msg}. The server takes "
                             "step requests from its own Mac only: run ComfyUI there, or set "
                             "server.image.steps_remote in the server's config")
+        if status == 503:
+            # Memory that a model in use or a load in flight holds: a
+            # refusal the pack does not retry, which passes once it ends.
+            msg = f"{str(msg).rstrip('.')}. Queue the prompt again then."
         raise GmlxError(f"gmlx: {what} failed ({status}): {msg}")
 
     def call_json(self, method: str, path: str, obj=None, *, what: str = "",

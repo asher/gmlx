@@ -281,7 +281,7 @@ def test_check7_community_step_rows_at_512(pipes, aid):
     pipe = pipes(m)
     ad = _adapter(pipe, aid)
     if aid.startswith("pixel_art"):
-        assert {t for t, _, _ in ad.dit} >= set(MODULATIONS)
+        assert {t for t, _b, _a, _k in ad.dit} >= set(MODULATIONS)
     tid = api.define_patch_table(pipe, _entries(ad, m["inputs"]["strength"]))
     got = _product(pipe, arrays, m, tid, f"flux2 check7 512 {aid}, "
                    f"{len(ad.dit)} pairs")
@@ -386,7 +386,7 @@ def wrong_tables(entries: list, strength: float) -> dict:
     mid = singles[len(singles) // 2]
 
     def scaled(k):
-        return [(p, band, [(key, s * k) for key, s in patches])
+        return [(p, band, [(key, s * k, a) for key, s, a in patches])
                 for p, band, patches in entries]
 
     out = {"strength a tenth low": scaled(0.9),

@@ -110,7 +110,7 @@ def _entries(pipe, path: str, rows: list) -> list:
     by_band: dict = {}
     for band, (d, u, a), s in rows:
         by_band.setdefault(band, []).append(
-            (lora.register_pair(pipe, d, u, a), s))
+            (lora.register_pair(pipe, d, u), s, a))
     return [(path, band, patches) for band, patches in by_band.items()]
 
 
@@ -322,6 +322,45 @@ def test_a_strength_change_builds_no_new_pair(op):
                 if k[0] == install.KERNEL]) == 2
 
 
+def test_an_alpha_change_builds_its_own_pair(op):
+    """Two tables of the same held pairs, one with no alpha as ComfyUI
+    reads a file without a header and one at the alpha the header gives.
+    B holds alpha / rank, so each table runs on a pair of its own, and
+    each output is that of its alpha."""
+    pipe = _pipe()
+    x = _x()
+    for alpha in (None, 3.0):
+        rows = _qkv_rows([(d, u, alpha) for d, u, _a in _pairs(7)])
+        y = _run(pipe, _entries(pipe, QKV, rows), QKV, x)
+        assert rel_l2(_f64(y), _ref(pipe, QKV, x, rows)) <= TOL, alpha
+    assert len(pipe.adapters) == 3
+    assert op.seen[1][0][4] is not op.seen[0][0][4]
+    assert len([k for k in pipe.tables._items
+                if k[0] == install.KERNEL]) == 2
+
+
+def test_a_table_naming_a_pair_under_two_alphas_runs_each_at_its_own(op):
+    """One table names each held pair twice on its band: at strength 1
+    with no alpha, and at strength -1 at alpha 3, as two LoRA nodes of
+    one file with and without its header alpha give it. The pipeline
+    holds each pair once and the table builds one kernel pair, whose B
+    holds each part at its own alpha / rank. One alpha for both parts
+    would cancel them and leave the base output."""
+    pipe = _pipe()
+    x = _x()
+    pairs = [(d, u) for d, u, _a in _pairs(7)]
+    rows = (_qkv_rows([(d, u, None) for d, u in pairs], 1.0)
+            + _qkv_rows([(d, u, 3.0) for d, u in pairs], -1.0))
+    entries = _entries(pipe, QKV, rows)
+    assert all(len(patches) == 2 for _m, _b, patches in entries)
+    y = _f64(_run(pipe, entries, QKV, x))
+    assert rel_l2(y, _ref(pipe, QKV, x, rows)) <= TOL
+    assert rel_l2(y, _ref(pipe, QKV, x, [])) > 10 * TOL
+    assert len(pipe.adapters) == 3 and op.calls == 1
+    assert len([k for k in pipe.tables._items
+                if k[0] == install.KERNEL]) == 1
+
+
 def test_a_kernel_pair_stays_while_a_table_built_over_it_is_held(op):
     """The kernel pair two tables share is counted once, under its own
     key, and in neither table. Bounds lowered to nothing shed the table
@@ -365,7 +404,7 @@ def test_a_put_that_drops_the_table_that_ran_sheds_its_kernel_pair(op):
     install.shed_to_bounds(pipe)
     assert pipe.lora._cur and pipe.tables.bytes > 0
     pipe.adapters.max_bytes = pipe.adapters.bytes
-    lora.register_pair(pipe, *_pairs(8)[0])
+    lora.register_pair(pipe, *_pairs(8)[0][:2])
     assert not pipe.lora._cur
     assert pipe.tables.bytes == 0
 
@@ -422,7 +461,9 @@ def _w1_patch(pipe, rng, hold=()) -> str:
     one."""
     out, inp = install.linear_dims(_leaf(pipe, W1))
     d, u, _ = make_pair(rng, out, inp, 4)
-    return lora.register_patch(pipe, mx.array(u), mx.array(d), hold=hold)
+    key, _alpha = lora.register_patch(pipe, mx.array(u), mx.array(d),
+                                      hold=hold)
+    return key
 
 
 def _w1_step(pipe, keys) -> None:
@@ -959,6 +1000,7 @@ def test_a_timed_leaf_keeps_the_route_and_books_one_record(op):
 SLOTS = [*((QKV, b) for b in BANDS), (QKV, None), (OTHER, None), (W1, None),
          ("layers.0.attention.out", None), ("layers.1.feed_forward.w2", None)]
 OWN_ALPHA = 4.0
+ALPHAS = (None, 2.0, OWN_ALPHA, 8.0)
 OPS_PER_SEED = 300
 
 
@@ -1052,9 +1094,9 @@ class _Sequence:
         self.bounds = {"adapters": own + (96 << 10), "tables": 96 << 10}
         self.pipe.adapters.max_bytes = self.bounds["adapters"]
         self.pipe.tables.max_bytes = self.bounds["tables"]
-        self.pool: list = []        # (slot, down, up, alpha, twin)
+        self.pool: list = []        # (slot, down, up, alpha)
         self.tids: list = []
-        self.refused = self.missing = 0
+        self.refused = self.missing = self.held_again = 0
 
     def load_own(self) -> None:
         # The entry reads its file into a cache fitted to hold it, then
@@ -1064,7 +1106,7 @@ class _Sequence:
         self.own_keys = []
         for _slot, d, u in self.own:
             self.own_keys.append(install.register_pair(
-                self.pipe, d, u, OWN_ALPHA, hold=self.own_keys))
+                self.pipe, d, u, hold=self.own_keys))
         self.pipe.adapters.keep(self.own_keys)
 
     def _held(self) -> tuple:
@@ -1074,13 +1116,12 @@ class _Sequence:
                 set(pipe.tables.keys(lambda k: True)), {id(t) for t in cur})
 
     def _put(self, row, hold=()) -> str | None:
-        slot, d, u, alpha, twin = row
+        _slot, d, u, _alpha = row
         pipe = self.pipe
         nbytes = int(d.nbytes) + int(u.nbytes)
         before = self._held()
         try:
-            return install.register_pair(pipe, d, u, alpha, twin=twin,
-                                         hold=hold)
+            return install.register_pair(pipe, d, u, hold=hold)
         except install.PairRoomError:
             # Only a pair that cannot fit beside the pairs that stay, and
             # its refusal sheds nothing.
@@ -1094,33 +1135,47 @@ class _Sequence:
     def _fresh(self) -> tuple:
         slot = SLOTS[self.rng.integers(len(SLOTS))]
         alpha = None if self.rng.random() < 0.5 else 2.0
-        return (slot, *_new_pair(self.pipe, self.rng, slot), alpha, None)
+        return (slot, *_new_pair(self.pipe, self.rng, slot), alpha)
 
-    def _own_row(self, copy: bool) -> tuple:
-        i = int(self.rng.integers(len(self.own)))
-        slot, d, u = self.own[i]
-        if copy:
-            # An images API read of a copy of the entry's file with no
-            # header: the same content at full bytes under alpha None.
-            d, u = (mx.array(np.array(a.astype(mx.float32))).astype(a.dtype)
-                    for a in (d, u))
-            mx.eval(d, u)
-            return slot, d, u, None, None
-        return slot, d, u, None, self.own_keys[i]
+    def _alpha(self, *but) -> float | None:
+        alphas = [a for a in ALPHAS if a not in but]
+        return alphas[self.rng.integers(len(alphas))]
+
+    def _copied(self, d, u) -> tuple:
+        # The same pair read from another file: new arrays, same bytes.
+        if self.rng.random() < 0.5:
+            return d, u
+        d, u = (mx.array(np.array(a.astype(mx.float32))).astype(a.dtype)
+                for a in (d, u))
+        mx.eval(d, u)
+        return d, u
+
+    def _own_row(self) -> tuple:
+        # The entry's own pair as a client sends it: from the entry's
+        # file, a ComfyUI read of it or a header-less copy, at any alpha.
+        slot, d, u = self.own[self.rng.integers(len(self.own))]
+        return (slot, *self._copied(d, u), self._alpha())
 
     def register(self) -> None:
         row = self._fresh()
         if self._put(row) is not None:
             self.pool.append(row)
 
-    def twin(self) -> None:
-        row = self._own_row(copy=False)
-        if self._put(row) is not None:
-            self.pool.append(row)
-
-    def copy(self) -> None:
-        row = self._own_row(copy=True)
-        if self._put(row) is not None:
+    def again(self) -> None:
+        # A pair put again under another alpha, by the step route or the
+        # images API. A held pair takes no new bytes and keeps one key.
+        rows = self.pool + [(*o, OWN_ALPHA) for o in self.own]
+        slot, d, u, alpha = rows[self.rng.integers(len(rows))]
+        row = (slot, *self._copied(d, u), self._alpha(alpha))
+        key = install.pair_hash(d, u)
+        ad = self.pipe.adapters
+        before = (ad.bytes, set(ad.keys(lambda k: True)))
+        got = self._put(row)
+        if key in before[1]:
+            assert got == key
+            assert (ad.bytes, set(ad.keys(lambda k: True))) == before
+            self.held_again += 1
+        if got is not None:
             self.pool.append(row)
 
     def define(self) -> None:
@@ -1134,10 +1189,10 @@ class _Sequence:
             elif pick < 0.8:
                 rows.append(self.pool[self.rng.integers(len(self.pool))])
             else:
-                rows.append(self._own_row(copy=self.rng.random() < 0.3))
+                rows.append(self._own_row())
         if self.rng.random() < 0.3:
-            i = int(self.rng.integers(len(self.own)))
-            rows.append((self.own[i][0], *self.own[i][1:], OWN_ALPHA, None))
+            rows.append((*self.own[self.rng.integers(len(self.own))],
+                         OWN_ALPHA))
         keys: list = []
         entries: dict = {}
         for row in rows:
@@ -1146,9 +1201,10 @@ class _Sequence:
                 return
             keys.append(key)
             patches = entries.setdefault(row[0], [])
-            if key not in [k for k, _s in patches]:
+            if (key, row[3]) not in [(k, a) for k, _s, a in patches]:
                 patches.append((key, float(self.rng.choice([1.0, 0.5,
-                                                            -0.7]))))
+                                                            -0.7])),
+                                row[3]))
         self.pool += [r for r in rows if not any(r is q for q in self.pool)]
         self.tids.append(api.define_patch_table(
             self.pipe, [(p, b, patches) for (p, b), patches in
@@ -1174,7 +1230,7 @@ class _Sequence:
             # The step route's 409: a pair of the table is no longer held.
             assert any(pipe.adapters.peek(k) is None
                        for _p, _b, patches in pipe.patch_tables[tid]["entries"]
-                       for k, _s in patches)
+                       for k, _s, _a in patches)
             self.missing += 1
         finally:
             install.restore(pipe, prev)
@@ -1215,7 +1271,7 @@ class _Sequence:
         image_service._release([SimpleNamespace(pipe=self.pipe)])
         self.load_own()
 
-    OPS = (("register", 4), ("twin", 1), ("copy", 1), ("define", 5),
+    OPS = (("register", 4), ("again", 2), ("define", 5),
            ("step", 6), ("shrink", 2), ("drop_dit", 1), ("release", 1))
 
 
@@ -1322,6 +1378,7 @@ def test_a_random_sequence_counts_every_lora_array_once(op, monkeypatch, seed):
             _check_caches(seq.pipe)
         except AssertionError as e:
             raise AssertionError(f"after {done[-6:]}, op {len(done)}") from e
-    assert (all(ran.values()) and seq.refused and seq.missing and order.puts
-            and order.bounds), (ran, seq.refused, seq.missing, order.puts,
-                                order.bounds)
+    assert (all(ran.values()) and seq.refused and seq.missing
+            and seq.held_again and order.puts and order.bounds), (
+        ran, seq.refused, seq.missing, seq.held_again, order.puts,
+        order.bounds)

@@ -17,7 +17,9 @@ text models. ``EncoderLoRALinear`` is the same for the text halves on the
 pipeline's own encoder.
 
 Pairs live in the pipeline's ``adapters`` cache under the sha256 of their
-content, so a file read twice or two files that share a pair hold it once.
+down and up, so a file read twice or two files that share a pair hold it
+once, whatever alpha each gives it. A pair's alpha is a patch table's:
+an entry gives it beside the strength.
 The leaf swap runs when the first patch table with entries is defined, so
 a pipeline that never uses an adapter keeps its plain leaves.
 
@@ -37,10 +39,10 @@ route does not take runs the block-diagonal pair on stock ops.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import math
-import struct
 import weakref
 from dataclasses import dataclass
 
@@ -77,10 +79,9 @@ def form() -> str:
 
 @dataclass(frozen=True)
 class Pair:
-    """One cached pair: ``down`` (rank, in), ``up`` (out, rank), alpha."""
+    """One cached pair: ``down`` (rank, in) and ``up`` (out, rank)."""
     down: mx.array
     up: mx.array
-    alpha: float | None
 
     @property
     def nbytes(self) -> int:
@@ -97,19 +98,22 @@ def _raw(arr: mx.array) -> np.ndarray:
     return np.ascontiguousarray(np.array(arr))
 
 
-def pair_hash(down: mx.array, up: mx.array, alpha: float | None) -> str:
+def pair_hash(down: mx.array, up: mx.array) -> str:
     """sha256 of a pair's content: a JSON line of each part's dtype and
-    shape and the alpha as a float64 hex string, then the little-endian
-    bytes of ``down`` and of ``up``."""
-    head = {"v": 1,
-            "down": [_dtype_name(down), list(down.shape)],
-            "up": [_dtype_name(up), list(up.shape)],
-            "alpha": None if alpha is None
-            else struct.pack("<d", float(alpha)).hex()}
+    shape, then the little-endian bytes of ``down`` and of ``up``."""
+    return pair_key((_dtype_name(down), down.shape, _raw(down).data),
+                    (_dtype_name(up), up.shape, _raw(up).data))
+
+
+def pair_key(down: tuple, up: tuple) -> str:
+    """``pair_hash`` of the parts as (dtype name, shape, little-endian
+    bytes), for a pair not made into arrays yet."""
+    head = {"v": 2, "down": [down[0], [int(d) for d in down[1]]],
+            "up": [up[0], [int(d) for d in up[1]]]}
     h = hashlib.sha256(json.dumps(head, sort_keys=True,
                                   separators=(",", ":")).encode())
-    h.update(_raw(down).data)
-    h.update(_raw(up).data)
+    h.update(down[2])
+    h.update(up[2])
     return h.hexdigest()
 
 
@@ -118,20 +122,16 @@ class PairRoomError(AdapterError):
     keeps."""
 
 
-def register_pair(pipe, down, up, alpha: float | None = None,
-                  key: str | None = None, twin: str | None = None,
+def register_pair(pipe, down, up, *, key: str | None = None,
                   hold=()) -> str:
     """Keep a pair in the pipeline's cache and return its content hash,
-    which names it in patch table entries. A pair already held is not
-    stored again. An MLX array is kept as it is, since a copy would hold
-    the pair twice while the reader still holds it. The caller must not
-    change it afterwards. ``key`` is the pair's ``pair_hash`` when the
-    caller has it already. ``twin`` is the key of a held pair with the
-    same down and up under another alpha: the pair keeps the twin's
-    arrays, in place of a copy held under its key, takes no bytes of its
-    own, and is never shed, as the twin is not. ``hold`` names the pairs
-    the caller put before this one for the same table or file, which the
-    room for this one never sheds."""
+    which names it in patch table entries beside its alpha. A pair
+    already held is not stored again. An MLX array is kept as it is,
+    since a copy would hold the pair twice while the reader still holds
+    it. The caller must not change it afterwards. ``key`` is the pair's
+    ``pair_hash`` when the caller has it already. ``hold`` names the
+    pairs the caller put before this one for the same table or file,
+    which the room for this one never sheds."""
     down, up = (a if isinstance(a, mx.array) else mx.array(a)
                 for a in (down, up))
     if down.ndim != 2 or up.ndim != 2 or up.shape[1] != down.shape[0]:
@@ -142,32 +142,11 @@ def register_pair(pipe, down, up, alpha: float | None = None,
         if not mx.issubdtype(a.dtype, mx.floating):
             raise AdapterError(f"a LoRA pair is floating point, not "
                                f"{_dtype_name(a)}")
-    if alpha is not None:
-        alpha = float(alpha)
     mx.eval(down, up)
     if key is None:
-        key = pair_hash(down, up, alpha)
-    held = None if twin is None else pipe.adapters.peek(twin)
-    if held is not None:
-        # The cache counts the twin's arrays already, so a copy a request
-        # put first at full bytes gives its bytes back. Shed, the pair
-        # would free nothing, so it is kept as the twin is.
-        now = pipe.adapters.get(key)
-        if now is None or now.down is not held.down or now.up is not held.up:
-            if now is not None:
-                # The tables built over the copy go first, and the twin
-                # then takes its place, which frees the copy. A forward
-                # that runs one keeps the copy as it is.
-                running = _running(pipe)
-                _drop_tables(pipe, lambda t: key in t.keys
-                             and id(t) not in running)
-            if now is None or not any(key in t.keys for t in _tables(pipe)):
-                pipe.adapters.put(key, Pair(held.down, held.up, alpha), 0,
-                                  shed=False)
-        pipe.adapters.keep_also((key,))
-        return key
+        key = pair_hash(down, up)
     if pipe.adapters.get(key) is None:
-        pair = Pair(down, up, alpha)
+        pair = Pair(down, up)
         if pair.nbytes > pipe.adapters.max_bytes:
             raise PairRoomError(
                 f"a LoRA pair of {pair.nbytes} bytes is over the adapter "
@@ -184,9 +163,9 @@ def register_pair(pipe, down, up, alpha: float | None = None,
 # Static ownership. A pair's bytes are counted in the pair cache from its
 # put, and a built table counts the arrays it made alone, so no array is
 # counted under two keys. An entry that something held depends on is
-# never shed: the entry's own pairs and their twins (the pair cache's keep
-# set), the pairs a held built table names, and the kernel pairs it is
-# built over. make_room sheds the dependents first.
+# never shed: the entry's own pairs (the pair cache's keep set), the pairs
+# a held built table names, and the kernel pairs it is built over.
+# make_room sheds the dependents first.
 
 def _tables(pipe) -> list:
     """The built tables the pipeline holds, the least recently used
@@ -342,6 +321,11 @@ def _keep_table(pipe, key, value, nbytes: int) -> None:
     pipe.tables.put(key, value, nbytes, shed=False)
 
 
+def _is_default(pipe, tid) -> bool:
+    """Whether ``tid`` is the pipeline's own default table."""
+    return tid is not None and tid == getattr(pipe, "default_table", None)
+
+
 # Module walking.
 
 def linear_dims(mod) -> tuple[int, int] | None:
@@ -472,14 +456,18 @@ class _Slice:
         return parts[0] if len(parts) == 1 else mx.concatenate(parts, -1)
 
 
+def _kq_linear(base) -> bool:
+    from mlx_kquant.nn import KQuantLinear
+
+    return isinstance(base, KQuantLinear)
+
+
 def _band_fn(base, start: int, stop: int):
     """The base product over output rows ``start`` to ``stop`` alone and
     the weight copy it holds, or None for a base this cannot split."""
-    from mlx_kquant.nn import KQuantLinear
-
     bias = base.bias[start:stop] if "bias" in base else None
     w = base.weight[start:stop]
-    if isinstance(base, KQuantLinear):
+    if _kq_linear(base):
         import mlx_kquant as kq
 
         w = mx.contiguous(w)
@@ -579,50 +567,114 @@ def _runs_as_kept(pair, dtype) -> bool:
     return pair == dtype or dtype == mx.float32
 
 
-def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base,
-             pair=None):
+def _band_spans(parts: list, dims: tuple) -> list | None:
+    """``plan.banded`` of the parts by their shapes alone: (start, stop,
+    ranks) per output band, or None where it gives None."""
+    out = dims[0]
+    groups: dict = {}
+    for p in parts:
+        if p.band is not None and p.band[0] != 0:
+            return None
+        span = (0, out) if p.band is None else (p.band[1],
+                                                p.band[1] + p.band[2])
+        groups[span] = groups.get(span, 0) + int(p.down.shape[0])
+    spans = sorted(groups)
+    if any(a[1] > b[0] for a, b in zip(spans, spans[1:])):
+        return None
+    return [(s, e, groups[(s, e)]) for s, e in spans]
+
+
+def _splittable(base) -> bool:
+    """Whether ``_band_fn`` can split ``base``."""
+    return _kq_linear(base) or type(base) is nn.Linear
+
+
+def _form(parts: list, dims: tuple, dtype, how: str, base,
+          has_pair: bool) -> tuple:
+    """The form ``_factors`` builds a module in at ``dtype``, with the
+    figures its bytes take: ("kernel", ranks), ("slice", spans),
+    ("split", spans), ("own",) or ("block", ranks). The build and the
+    dry run read this one plan."""
+    ranks = sum(int(p.down.shape[0]) for p in parts)
     if how == KERNEL:
         how = "block"
-        ranks = sum(int(p.down.shape[0]) for p in parts)
         bands = plan.band_table(parts, dims)
-        if pair is not None and kq_routes.lora_static(base, dtype, ranks,
-                                                      bands):
-            def plain(a_t: mx.array, b_t: mx.array):
-                # The block-diagonal pair of the stock path: its A is the
-                # pair's, and so is its B when every strength is 1.0, the
-                # factor it then holds. Any other strength is folded into
-                # a B of its own.
-                if any(p.strength != 1.0 for p in parts):
-                    b = plan.block_diagonal(path, parts, dims).b
-                    b_t = mx.contiguous(b.T).astype(dtype)
-                return _Block(a_t, b_t)
-            return _Kernel(pair(), _strengths(parts), plain)
+        if has_pair and kq_routes.lora_static(base, dtype, ranks, bands):
+            return ("kernel", ranks)
     if how != "block":
-        bands = plan.banded(path, parts, dims)
-        if bands is not None and not (len(bands) == 1 and bands[0][:2]
+        spans = _band_spans(parts, dims)
+        if spans is not None and not (len(spans) == 1 and spans[0][:2]
                                       == (0, dims[0])):
-            spans = [(s, e, *_transposed(lm, dtype)) for s, e, lm in bands]
             if how == "slice":
-                return _Slice(spans, dims[0])
-            full, pos = [], 0
-            for span in spans:
-                if span[0] > pos:
-                    full.append((pos, span[0], None, None))
-                full.append(span)
-                pos = span[1]
-            if pos < dims[0]:
-                full.append((pos, dims[0], None, None))
-            fns = [_band_fn(base, s[0], s[1]) for s in full]
-            if all(fn is not None for fn in fns):
-                return _Split(full, dims[0], [fn for fn, _ in fns],
-                              [w for _, w in fns])
+                return ("slice", spans)
+            if _splittable(base):
+                return ("split", spans)
     one = parts[0]
     if (len(parts) == 1 and one.band is None
             and _runs_as_kept(one.down.dtype, dtype)
             and _runs_as_kept(one.up.dtype, dtype)):
-        return _Own(one)
+        return ("own",)
+    return ("block", ranks)
+
+
+def _factors(path: str, parts: list, dims: tuple, dtype, how: str, base,
+             pair=None):
+    form = _form(parts, dims, dtype, how, base, pair is not None)
+    if form[0] == "kernel":
+        def plain(a_t: mx.array, b_t: mx.array):
+            # The block-diagonal pair of the stock path: its A is the
+            # pair's, and so is its B when every strength is 1.0, the
+            # factor it then holds. Any other strength is folded into a B
+            # of its own.
+            if any(p.strength != 1.0 for p in parts):
+                b = plan.block_diagonal(path, parts, dims).b
+                b_t = mx.contiguous(b.T).astype(dtype)
+            return _Block(a_t, b_t)
+        return _Kernel(pair(), _strengths(parts), plain)
+    if form[0] in ("slice", "split"):
+        spans = [(s, e, *_transposed(lm, dtype))
+                 for s, e, lm in plan.banded(path, parts, dims)]
+        if form[0] == "slice":
+            return _Slice(spans, dims[0])
+        full, pos = [], 0
+        for span in spans:
+            if span[0] > pos:
+                full.append((pos, span[0], None, None))
+            full.append(span)
+            pos = span[1]
+        if pos < dims[0]:
+            full.append((pos, dims[0], None, None))
+        fns = [_band_fn(base, s[0], s[1]) for s in full]
+        return _Split(full, dims[0], [fn for fn, _ in fns],
+                      [w for _, w in fns])
+    if form[0] == "own":
+        return _Own(parts[0])
     return _Block(*_transposed(plan.block_diagonal(path, parts, dims),
                                dtype))
+
+
+def _factor_bytes(parts: list, dims: tuple, dtype, how: str, base,
+                  has_pair: bool = True) -> tuple:
+    """(table bytes, kernel pair bytes) ``_factors`` builds for a module
+    at ``dtype``, from the parts' shapes: what the table's arrays hold
+    once the module ran, its stock B included, and the kernel pair the
+    tables cache keeps under its own key."""
+    a = dtype.size
+    out, inp = dims
+    form = _form(parts, dims, dtype, how, base, has_pair)
+    if form[0] == "kernel":
+        r = form[1]
+        stock = (out * r * a if any(p.strength != 1.0 for p in parts)
+                 else 0)
+        return 4 * r + stock, a * r * (inp + out)
+    if form[0] in ("slice", "split"):
+        got = sum(a * r * (inp + e - s) for s, e, r in form[1])
+        if form[0] == "split":
+            got += int(base.weight.nbytes)
+        return got, 0
+    if form[0] == "own":
+        return 0, 0
+    return a * form[1] * (inp + out), 0
 
 
 def check_table(pipe, table) -> None:
@@ -631,7 +683,7 @@ def check_table(pipe, table) -> None:
     leaves = linear_leaves(pipe.dit)
     for path, band, patches in table["entries"]:
         dims = linear_dims(leaves[path])
-        for key, _ in patches:
+        for key, _strength, _alpha in patches:
             pair = pipe.adapters.get(key)
             if pair is None:
                 raise AdapterError(
@@ -697,7 +749,7 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
     named: dict = {}
     owner = weakref.ref(pipe)
     for path, band, patches in table["entries"]:
-        for key, strength in patches:
+        for key, strength, alpha in patches:
             if strength == 0.0:
                 continue
             pair = pipe.adapters.get(key)
@@ -706,16 +758,17 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
                     f"adapter {key[:16]} of patch table {tid[:16]} is no "
                     f"longer held. Register the pair again")
             by_module.setdefault(path, []).append(
-                plan.Part(pair.down, pair.up, pair.alpha, band, strength))
-            named.setdefault(path, []).append((key, band))
+                plan.Part(pair.down, pair.up, alpha, band, strength))
+            named.setdefault(path, []).append((key, band, alpha))
     kernels: set = set()
     pairs = None
     if how == KERNEL:
         def pairs(path: str, parts: list, dims: tuple) -> tuple:
             # The pair of a module is named by its parts without their
-            # strengths, so every table of those parts shares it. The
-            # tables cache counts it under its own key and keeps it while
-            # a held table is built over it.
+            # strengths, so every table of those parts shares it. Its B
+            # holds each part's alpha / rank, so the alphas name it too.
+            # The tables cache counts it under its own key and keeps it
+            # while a held table is built over it.
             key = (KERNEL, path, tuple(named[path]), dtype)
             kernels.add(key)
             held = owner()
@@ -727,9 +780,92 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
                     _keep_table(held, key, hit, int(hit[0].nbytes)
                                 + int(hit[1].nbytes))
             return hit
-    keys = frozenset(k for row in named.values() for k, _b in row)
+    keys = frozenset(k for row in named.values() for k, _b, _a in row)
     return BuiltTable(by_module, {p: leaves[p] for p in by_module}, dtype,
                       how, pairs, keys, kernels)
+
+
+@dataclass(frozen=True)
+class _Like:
+    """The shape and dtype of an array not made yet."""
+    shape: tuple
+    dtype: mx.Dtype
+
+    @property
+    def nbytes(self) -> int:
+        return int(np.prod(self.shape)) * self.dtype.size
+
+
+@dataclass(frozen=True)
+class _Sized:
+    """A part by the figures its factors' bytes take."""
+    down: mx.array | _Like
+    up: mx.array | _Like
+    band: tuple | None
+    strength: float
+
+
+def f32_leaves(pipe) -> frozenset:
+    """The paths of the DiT's linear leaves that its family names in
+    ``lora_f32``: the leaves that see float32 rows under any activation
+    dtype."""
+    pats = getattr(getattr(pipe, "family", None), "lora_f32", ())
+    if not pats:
+        return frozenset()
+    return frozenset(p for p in linear_leaves(pipe.dit)
+                     if any(fnmatch.fnmatchcase(p, s) for s in pats))
+
+
+def dry_run(pipe, tid: str) -> dict:
+    """``table_figures`` of table ``tid`` at the DiT's activation dtype,
+    with its family's float32 leaves. On the image worker, with the DiT
+    loaded."""
+    return table_figures(pipe, tid, pipe.dit.act_dtype, f32_leaves(pipe))
+
+
+def table_figures(pipe, tid: str, act, f32=frozenset(),
+                  shapes=None) -> dict:
+    """The dry run of a forward on table ``tid`` at activation dtype
+    ``act``: {key: (bytes once built, bytes held now)} for each tables
+    cache key it holds, its built table at each dtype its modules run at
+    and the kernel pairs, and for each pair the pair cache does not hold.
+    A module runs at ``act``, or float32 for a leaf named in ``f32``, the
+    family's leaves that see float32 rows. ``shapes`` gives (down shape,
+    up shape, dtype) of each pair not held."""
+    table = pipe.patch_tables[tid]
+    leaves = linear_leaves(pipe.dit)
+    how = form()
+    out: dict = {}
+    by_module: dict = {}
+    named: dict = {}
+    for path, band, patches in table["entries"]:
+        for key, strength, alpha in patches:
+            if strength == 0.0:
+                continue
+            pair = pipe.adapters.peek(key)
+            if pair is None:
+                down, up, dtype = shapes[key]
+                d, u = _Like(tuple(down), dtype), _Like(tuple(up), dtype)
+                out[key] = (d.nbytes + u.nbytes, 0)
+            else:
+                d, u = pair.down, pair.up
+            by_module.setdefault(path, []).append(
+                _Sized(d, u, band, strength))
+            named.setdefault(path, []).append((key, band, alpha))
+    for path, parts in by_module.items():
+        leaf = leaves[path]
+        dims = linear_dims(leaf)
+        if dims is None:            # check_table refuses such a leaf
+            continue
+        dtype = mx.float32 if (act == mx.float32 or path in f32) else act
+        tb, pb = _factor_bytes(parts, dims, dtype, how, leaf, how == KERNEL)
+        key = (tid, dtype, how)
+        fig, held = out.get(key, (0, pipe.tables.nbytes(key)))
+        out[key] = (fig + tb, held)
+        if pb:
+            key = (KERNEL, path, tuple(named[path]), dtype)
+            out[key] = (pb, pipe.tables.nbytes(key))
+    return out
 
 
 class PatchState:
@@ -750,6 +886,17 @@ class PatchState:
         self._held = self._pipe
 
     def factors(self, path: str, dtype):
+        hit = self._at(dtype)
+        return None if hit is None else hit.get(path)
+
+    def names(self, path: str, dtype) -> bool:
+        """Whether the active table has a delta for ``path``, with no
+        factors built: a probe of a route that may not run the leaf at
+        ``dtype``."""
+        hit = self._at(dtype)
+        return hit is not None and path in hit
+
+    def _at(self, dtype) -> BuiltTable | None:
         tid = self.active
         if tid is None:
             return None
@@ -757,7 +904,7 @@ class PatchState:
         hit = self._cur.get(key)
         if hit is None or self._held() is not self._pipe():
             hit = self._table(key)
-        return hit.get(path)
+        return hit
 
     def _table(self, key: tuple) -> BuiltTable:
         """The built table at ``key`` of the pipeline that runs, held here

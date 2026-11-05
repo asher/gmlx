@@ -133,9 +133,8 @@ class ByteLRU:
     values. An entry larger than the bound is not kept. A caller with a
     rule of its own puts with ``shed`` off, which keeps the entry whatever
     its bytes and sheds nothing, and sheds through ``shed_others``. A put
-    never sheds the entries of the keys given to ``keep`` or
-    ``keep_also``, and an entry that does not fit beside them is not kept
-    and sheds nothing."""
+    never sheds the entries of the keys given to ``keep``, and an entry
+    that does not fit beside them is not kept and sheds nothing."""
 
     def __init__(self, max_bytes: int):
         self.max_bytes = int(max_bytes)
@@ -153,14 +152,8 @@ class ByteLRU:
 
     @property
     def kept(self) -> frozenset:
-        """The keys given to ``keep`` and ``keep_also``."""
+        """The keys given to ``keep``."""
         return self._kept
-
-    def keep_also(self, keys) -> None:
-        """Add ``keys`` to the keys whose entries a put never sheds. A later
-        ``keep`` replaces the whole set."""
-        with self._lock:
-            self._kept = self._kept | frozenset(keys)
 
     def __len__(self) -> int:
         return len(self._items)
@@ -197,6 +190,12 @@ class ByteLRU:
         with self._lock:
             hit = self._items.get(key)
             return 0 if hit is None else hit[1]
+
+    def sizes(self) -> dict:
+        """{key: bytes} of every entry, read in one hold of the cache's
+        lock. The order of use does not change."""
+        with self._lock:
+            return {k: n for k, (_v, n) in self._items.items()}
 
     def keys(self, match) -> list:
         """The keys that ``match`` takes, the least recently used first.

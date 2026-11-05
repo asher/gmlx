@@ -82,6 +82,14 @@ class ServedVideo:
     captions: OrderedDict = field(default_factory=OrderedDict)
     tokenizer: Any = None
 
+    @property
+    def lora_own_term(self) -> int:
+        """The bytes the footprint books for the entry's own LoRA: its file
+        once alone, ``lora_k`` times the files otherwise. Its pairs and
+        default table past it are booked at the turn of the job that
+        builds them."""
+        return int(self.plan.lora_term)
+
 
 def _log_line(*parts) -> None:
     _log.info(" ".join(str(p) for p in parts))
@@ -209,7 +217,7 @@ def entry_plan(spec) -> VideoEntryPlan:
     budget = working_budget_bytes()
     clip = plan_clip(base, frames=d["frames"], width=width, height=height,
                      text=PRICED_TEXT_ROWS, budget=budget)
-    tensor, adapter = cache_bytes()
+    tensor, _cap = cache_bytes()
     steps = _CACHE_BYTES["steps"]
     caches = 2 * tensor + steps
     # The step routes' tensor cache keeps room for one cond of the priced
@@ -220,14 +228,13 @@ def entry_plan(spec) -> VideoEntryPlan:
     captions = caption_bytes(ident.config["hidden_size"])
 
     def price(share: float, kept: int = floor) -> int:
-        # The step routes' caches and the refined rows stay through the
-        # encode, the tensor cache with room for ``kept`` bytes at any
-        # share. The pairs and tables of a request go with the DiT.
+        # The step routes' tensor cache and the refined rows stay through
+        # the encode, the tensor cache with room for ``kept`` bytes at any
+        # share. A request's LoRA bytes are booked at its job's turns.
         held = (int(caches * share) + max(0, kept - int(tensor * share))
                 + captions)
         return max(clip.phases["encode"] + held,
-                   resident_bytes(clip.phases, clip.terms) + held
-                   + int(2 * adapter * share))
+                   resident_bytes(clip.phases, clip.terms) + held)
 
     # The share the clip leaves the caches, as an image entry's, then the
     # largest one under it that leaves the tensor cache its cond too.

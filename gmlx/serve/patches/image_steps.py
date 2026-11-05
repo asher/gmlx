@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import importlib
 import json
 import logging
@@ -96,6 +97,12 @@ class ServeHost:
 
             return video_plan(spec)
         return entry_plan(spec)
+
+    def lora_pool(self):
+        """The residency pool that books LoRA bytes, or None."""
+        from ..residency import _installed_pool
+
+        return _installed_pool()
 
     def budget(self, hold):
         """The bytes a step may plan on, as an image request may."""
@@ -245,7 +252,15 @@ def _route(fn, *, versioned: bool = True, name: str = ""):
             if e.status != 409:
                 _log_aux_request(path, None, started, status="refused",
                                  error=str(e))
-            return _json(e.status, e.body())
+            headers = None
+            if e.status == 503:
+                retry = getattr(e, "retry_after", None)
+                if retry is None:
+                    from .request_flow import deferred_retry_after
+
+                    retry = deferred_retry_after()
+                headers = {"Retry-After": str(retry)}
+            return _json(e.status, e.body(), headers)
         except StepInterrupted:
             return _err(409, "the step was interrupted", code="interrupted")
         except HTTPException as e:
@@ -270,6 +285,38 @@ async def _on_worker(fn, *args):
     from ..image_service import WORKER
 
     return await asyncio.wrap_future(WORKER.submit(fn, *args))
+
+
+def _lora_pool():
+    fn = getattr(SETTINGS.host, "lora_pool", None)
+    return fn() if fn is not None else None
+
+
+def _settled(hold, fn):
+    """``fn`` as a worker job that sets the entry's LoRA ledger to its
+    caches in its finally: an encode lets LoRA bytes go and books none."""
+    pool = _lora_pool()
+    if pool is None:
+        return fn
+
+    def job(*args):
+        try:
+            return fn(*args)
+        finally:
+            from ..image_service import lora_settle
+            from ..image_steps import ENCODE
+
+            lora_settle(pool, hold._entry, ENCODE)
+    return job
+
+
+def _refused(e):
+    """The StepError of a LoraRefused, with its Retry-After."""
+    from ..image_steps import StepError
+
+    err = StepError(e.status, e.message)
+    err.retry_after = e.retry_after
+    return err
 
 
 def _served(hold):
@@ -402,7 +449,9 @@ async def load(request: Request):
 async def unload(request: Request):
     body = await _fields(request)
     path, spec = _spec(body.get("model"))
-    return SETTINGS.host.unload(path, spec)
+    # An unload waits on the build lock and the image worker: off the
+    # event loop.
+    return await asyncio.to_thread(SETTINGS.host.unload, path, spec)
 
 
 def _hash_path(request: Request) -> str:
@@ -430,12 +479,94 @@ async def head_tensor(request: Request):
     return Response(status_code=200 if h in STATE.tensors else 404)
 
 
+def _admit(pool, n: int) -> None:
+    """Admit ``n`` bytes of an upload into the store before they are read,
+    off the event loop: at once when the pool's room holds them beside the
+    store, else at a store turn on the image worker, which sheds and
+    evicts for them. The put holds the store to its cap. The caller's
+    ``pool.upload_done`` ends the count. Raises the StepError of a
+    refusal."""
+    from ..image_service import store_turn
+    from ..image_steps import UPLOAD
+    from ..residency import STORE, LoraRefused
+
+    _hopeless(pool, STORE, n, UPLOAD)
+    if pool.upload_admit(n, pool._measured_lora_room()):
+        return
+    try:
+        store_turn(pool, n, UPLOAD)
+    except LoraRefused as e:
+        raise _refused(e) from None
+
+
+async def _admitted_wire(request: Request, pool):
+    """``(tensors, admitted)`` of an upload body read once the store
+    admitted its bytes: its Content-Length, or BODY_STEP bytes at a time
+    as a body with none is read. A refusal ends the read; the bytes
+    admitted count in the pool until the caller's ``pool.upload_done``."""
+    from ..image_steps import BODY_STEP, StepError
+    from ..image_wire import CONTENT_TYPE, WireError, read
+
+    ctype = request.headers.get("content-type", "").split(";")[0].strip()
+    if ctype != CONTENT_TYPE:
+        raise StepError(415, f"the body is {CONTENT_TYPE}, not "
+                        f"{ctype or 'untyped'}")
+    length = request.headers.get("content-length")
+    n = None
+    if length is not None:
+        try:
+            n = int(length)
+        except ValueError:
+            raise StepError(400, "the Content-Length is not a number") \
+                from None
+        if n > MAX_BODY_BYTES:
+            raise StepError(413, f"the body is {n} bytes, over the limit of "
+                            f"{MAX_BODY_BYTES}")
+    admitted = BODY_STEP if n is None else n
+    await asyncio.to_thread(_admit, pool, admitted)
+    try:
+        if n is not None:
+            body = await request.body()
+        else:
+            body = bytearray()
+            async for chunk in request.stream():
+                body += chunk
+                if len(body) > MAX_BODY_BYTES:
+                    raise StepError(413, f"the body is over the limit of "
+                                    f"{MAX_BODY_BYTES} bytes")
+                while len(body) > admitted:
+                    await asyncio.to_thread(_admit, pool, BODY_STEP)
+                    admitted += BODY_STEP
+        try:
+            tensors, _ = read(body, max_bytes=MAX_BODY_BYTES)
+        except WireError as e:
+            raise StepError(e.status, str(e)) from None
+    except BaseException:
+        pool.upload_done(admitted)
+        raise
+    return tensors, admitted
+
+
 async def put_adapter(request: Request):
+    """Keep an uploaded LoRA matrix. Its body is admitted into the store
+    before it is read, and kept as a view, with no copy."""
     from ..image_steps import MAX_ADAPTER_BYTES, STATE
 
     h = _hash_path(request)
-    tensors, _ = await _wire(request, MAX_BODY_BYTES)
-    STATE.put_tensor(STATE.adapters, h, tensors, MAX_ADAPTER_BYTES)
+    pool = _lora_pool()
+    if pool is None:
+        tensors, _ = await _wire(request, MAX_BODY_BYTES)
+        STATE.put_tensor(STATE.adapters, h, tensors, MAX_ADAPTER_BYTES,
+                         copy=False)
+        return _json(200, {"hash": h})
+    tensors, admitted = await _admitted_wire(request, pool)
+    try:
+        STATE.put_tensor(STATE.adapters, h, tensors, MAX_ADAPTER_BYTES,
+                         copy=False)
+    finally:
+        # After the put: the store counts the bytes before they leave the
+        # admitted count.
+        pool.upload_done(admitted)
     return _json(200, {"hash": h})
 
 
@@ -458,23 +589,34 @@ async def register_adapter(request: Request):
         raise StepError(404, "no such adapter file under the server's model "
                         "folders")
 
+    pool = _lora_pool()
+
     def work():
         import os
 
-        if os.path.getsize(path) > 4 * MAX_ADAPTER_BYTES:
+        size = os.path.getsize(path)
+        if size > 4 * MAX_ADAPTER_BYTES:
             raise StepError(413, "the adapter file is over the limit")
-        with open(path, "rb") as f:
-            data = f.read()
+        if pool is not None:
+            # The file is admitted whole before it is read.
+            _admit(pool, size)
         try:
-            tensors, _ = read(data)
-        except WireError as e:
-            raise StepError(400, f"the adapter file: {e}") from None
-        out = {}
-        for name, t in tensors.items():
-            h = t.hash()
-            STATE.put_tensor(STATE.adapters, h, {name: t}, MAX_ADAPTER_BYTES)
-            out[name] = h
-        return out
+            with open(path, "rb") as f:
+                data = f.read()
+            try:
+                tensors, _ = read(data)
+            except WireError as e:
+                raise StepError(400, f"the adapter file: {e}") from None
+            out = {}
+            for name, t in tensors.items():
+                h = t.hash()
+                STATE.put_tensor(STATE.adapters, h, {name: t},
+                                 MAX_ADAPTER_BYTES, copy=False)
+                out[name] = h
+            return out
+        finally:
+            if pool is not None:
+                pool.upload_done(size)
 
     return _json(200, {"tensors": await asyncio.to_thread(work)})
 
@@ -492,19 +634,91 @@ async def put_patch_table(request: Request):
     if not isinstance(body, dict):
         raise StepError(400, "a patch table body is a JSON object")
     model = request.query_params.get("model") or body.get("model")
-    hold = await _acquire(model)
-    try:
-        served = _served(hold)
+    # The body's matrices stay in the store from its arrival to its turn's
+    # end: no shed lets them go between.
+    with STATE.adapters.holding(_sizes(body)):
+        hold = await _acquire(model)
+        try:
+            served = _served(hold)
+            pool = _lora_pool()
+            # The pairs the define holds at its forward, the entry's own
+            # left out, from the wire bytes of their matrices: hashed off
+            # the loop.
+            own = await asyncio.to_thread(_request_sizes, served, body)
+            if pool is not None:
+                from ..image_steps import PAIRS
 
-        def work():
-            core = define_table(served, body, STATE.adapters)
-            STATE.tables_of(served.spec.id, served.pipe)[want] = core
-            return core
+                _hopeless(pool, hold._entry, sum(own.values()), PAIRS)
 
-        await _on_worker(work)
-    finally:
-        hold.release()
+            def work():
+                try:
+                    if pool is not None:
+                        _define_turn(pool, hold._entry, served, body)
+                    core = define_table(served, body, STATE.adapters)
+                    STATE.tables_of(served.spec.id, served.pipe).put(
+                        want, core, raw, own)
+                    return core
+                finally:
+                    if pool is not None:
+                        from ..image_service import lora_settle
+                        from ..image_steps import PAIRS
+
+                        lora_settle(pool, hold._entry, PAIRS)
+
+            await _on_worker(work)
+        finally:
+            hold.release()
     return _json(200, {"id": want})
+
+
+def _hopeless(pool, entry, n: int, subject: str) -> None:
+    """The route's 413 for ``n`` LoRA bytes no unload makes room for,
+    from the pool's figures, with no lock."""
+    from ..residency import LoraRefused
+
+    try:
+        pool.lora_hopeless(entry, n, subject)
+    except LoraRefused as e:
+        raise _refused(e) from None
+
+
+def _sizes(body: dict) -> dict:
+    from ..image_steps import STATE, matrix_sizes
+
+    return matrix_sizes(body, STATE.adapters)
+
+
+def _request_sizes(served, body: dict) -> dict:
+    """{hash: bytes} of the matrices of ``body`` the store holds, those of
+    the entry's own pairs left out: the request's own LoRA bytes."""
+    from ..image_steps import STATE, request_matrices
+
+    return request_matrices(served, body, STATE.adapters)
+
+
+def _define_turn(pool, entry, served, body: dict,
+                 subject: str | None = None) -> None:
+    """The turn of a define on the worker, before ``.mx()``: the pairs of
+    ``body`` not held and not the entry's own. Its held pairs and the
+    uploaded matrices it names are its own keys, which its shed keeps."""
+    from ..image_service import ensure_dit, lora_turn, own_bytes
+    from ..image_steps import PAIRS, STATE, body_pairs, is_video, pairs_due
+    from ..residency import LoraRefused
+    from .. import video_service as vs
+
+    # The define reads the DiT, which an encode lets go.
+    if is_video(served.spec):
+        vs.ensure_dit(served)
+    else:
+        ensure_dit(served)
+    pairs = body_pairs(body, STATE.adapters)
+    due = pairs_due(served, pairs)
+    held = own_bytes(served.pipe, set(pairs) - set(due))
+    try:
+        lora_turn(pool, entry, sum(due.values()), subject=subject or PAIRS,
+                  held=held, hold=tuple(pairs), store=tuple(_sizes(body)))
+    except LoraRefused as e:
+        raise _refused(e) from None
 
 
 def _held(pipe, core: str) -> bool:
@@ -514,18 +728,134 @@ def _held(pipe, core: str) -> bool:
     table = pipe.patch_tables.get(core)
     return table is not None and all(
         pipe.adapters.peek(key) is not None
-        for _path, _band, patches in table["entries"] for key, _st in patches)
+        for _path, _band, patches in table["entries"]
+        for key, _st, _alpha in patches)
 
 
 def _table(served, tid):
+    """The core table of the client table ``tid`` a step names. A core
+    the pipeline let go, or whose pairs it shed, passes when the server
+    holds its body and every matrix the body names: the step defines it
+    again in its own turn (``_held_table``). Any other is missing, and the
+    client sends its table again, with the 409's memory sentence of
+    ``_table_hint``."""
     from ..image_steps import STATE, Missing
 
     if not tid:
         return None
-    core = STATE.tables_of(served.spec.id, served.pipe).get(tid)
-    if core is None or not _held(served.pipe, core):
+    tables = STATE.tables_of(served.spec.id, served.pipe)
+    core = tables.get(tid)
+    if core is None or not (_held(served.pipe, core)
+                            or _definable(tables.body(tid))):
         raise Missing([tid])
     return core
+
+
+def _table_hint(served, tid) -> str | None:
+    """The memory sentence of the 409 of a step's missing table ``tid``.
+    It takes no pool lock."""
+    from ..image_steps import STATE
+
+    if not tid:
+        return None
+    return _memory_hint(STATE.tables_of(served.spec.id, served.pipe), tid)
+
+
+def _memory_hint(tables, tid) -> str | None:
+    """The sentence of a 409 whose table's matrices the server let go:
+    their bytes."""
+    from ..image_steps import STATE
+    from ..residency import gb
+
+    gone = sum(n for h, n in tables.sizes(tid).items()
+               if h not in STATE.adapters)
+    if _lora_pool() is None or not gone:
+        return None
+    return (f"{gb(gone, True)} GB of LoRA matrices are not held: the "
+            "server let them go for memory")
+
+
+def _definable(raw: bytes | None) -> bool:
+    """Whether the server holds every matrix of the table body ``raw``."""
+    from ..image_steps import STATE
+
+    if raw is None:
+        return False
+    return all(h in STATE.adapters
+               for e in json.loads(raw)["entries"]
+               for p in e.get("patches") or []
+               for h in (p["up"], p["down"]))
+
+
+def _held_table(served, tid, core):
+    """The step's core table ``core``, of the client table ``tid``, held
+    for the step. An encode or another table's define since the step's
+    check can let the core or its pairs go: it is defined again here from
+    the body the client sent, in the step's own turn on the worker, so no
+    other define lands between it and the step. A matrix of the body the
+    server let go since is a 409 naming ``tid``. Runs on the worker."""
+    from ..image_steps import STATE, Missing, define_table
+
+    if core is None or _held(served.pipe, core):
+        return core
+    tables = STATE.tables_of(served.spec.id, served.pipe)
+    raw = tables.body(tid)
+    if raw is None:
+        raise Missing([tid])
+    try:
+        core = define_table(served, json.loads(raw), STATE.adapters)
+    except Missing:
+        raise Missing([tid], hint=_memory_hint(tables, tid)) from None
+    tables.put(tid, core, raw)
+    return core
+
+
+def _factor_turn(pool, entry, served, core) -> None:
+    """The turn of a forward on ``core``, after its pairs are held: the
+    factors and kernel pairs it builds yet, or the growth of the default
+    table's own bytes."""
+    from ..image_service import lora_turn, own_bytes, turn_figures
+    from ..image_steps import FACTORS
+    from ..residency import LoraRefused
+
+    pipe = served.pipe
+    need, held = turn_figures(entry, pipe, core)
+    tid = core if core is not None else getattr(pipe, "default_table", None)
+    table = pipe.patch_tables.get(tid) if tid is not None else None
+    hold = [tid] if tid is not None else []
+    if table:
+        pairs = {k for _p, _b, patches in table["entries"]
+                 for k, _s, _a in patches}
+        hold += list(pairs)
+        # The table's pairs are the job's own keys too, never idle to it.
+        held += own_bytes(pipe, pairs)
+    try:
+        lora_turn(pool, entry, need, subject=FACTORS, held=held, hold=hold)
+    except LoraRefused as e:
+        raise _refused(e) from None
+
+
+def _step_estimate(served, tid) -> int:
+    """The LoRA bytes a step's forward holds of its client table ``tid``,
+    the entry's own left out, from the sizes its define kept: a lower
+    bound with no factors, for the route's 413. It reads no pipeline."""
+    from ..image_steps import STATE
+
+    if not tid:
+        return 0
+    return sum(STATE.tables_of(served.spec.id, served.pipe)
+               .sizes(tid).values())
+
+
+def _step_holds(served, tid) -> dict:
+    """The uploaded matrices a step on ``tid`` defines its table from
+    again, which it holds in the store to its turn's end."""
+    from ..image_steps import STATE
+
+    if not tid:
+        return {}
+    tables = STATE.tables_of(served.spec.id, served.pipe)
+    return _sizes(json.loads(tables.body(tid) or b'{"entries": []}'))
 
 
 def _skip(served, raw) -> tuple:
@@ -575,6 +905,7 @@ async def step(request: Request):
                if h not in STATE.tensors]
     model = fields.get("model") or (run.model if run else None)
     hold = await _acquire(model)
+    keep = contextlib.ExitStack()
     try:
         served = _served(hold)
         _image_only(served, "a step on x")
@@ -607,12 +938,18 @@ async def step(request: Request):
             raise StepError(400, "a step on a cache of reference K and V "
                             "skips no blocks")
         table = None
+        hint = None
+        # The matrices the step may define its table again from stay in
+        # the store from its check to its turn's end.
+        keep.enter_context(STATE.adapters.holding(
+            _step_holds(served, fields.get("patch_table"))))
         try:
             table = _table(served, fields.get("patch_table"))
         except Missing as m:
             missing += m.extra["missing"]
+            hint = _table_hint(served, fields.get("patch_table"))
         if missing:
-            raise Missing(missing)
+            raise Missing(missing, hint=hint)
         import numpy as np
 
         ts = np.broadcast_to(np.asarray(t_w.numpy(), np.float32).reshape(-1),
@@ -631,8 +968,25 @@ async def step(request: Request):
             targets = [conv.scale * float(t) + conv.shift
                        for t in flow_targets(s_w.numpy(), ts)]
         gen = run.gen if run is not None else 0
+        pool = _lora_pool()
+        if pool is not None:
+            from ..image_steps import FACTORS
+
+            _hopeless(pool, hold._entry,
+                      _step_estimate(served, fields.get("patch_table")),
+                      FACTORS)
 
         def work():
+            try:
+                return _work()
+            finally:
+                if pool is not None:
+                    from ..image_service import lora_settle
+                    from ..image_steps import FACTORS
+
+                    lora_settle(pool, hold._entry, FACTORS)
+
+        def _work():
             # Every MLX op of a step runs here: MLX streams belong to the
             # thread that made them.
             import mlx.core as mx
@@ -640,14 +994,20 @@ async def step(request: Request):
             from gmlx.image import api, memfit
 
             from ..image_service import ensure_dit, size_fits
-            from ..image_steps import _host, conditioning
+            from ..image_steps import FACTORS, _host, conditioning
 
             # A staged entry's encode let the DiT and the VAE go.
             ensure_dit(served)
-            if table is not None and not _held(served.pipe, table):
-                # Another table's define since the check above shed its
-                # pairs.
-                raise Missing([fields["patch_table"]])
+            tid = fields.get("patch_table")
+            if pool is not None and table is not None \
+                    and not _held(served.pipe, table):
+                raw = STATE.tables_of(served.spec.id, served.pipe).body(tid)
+                if raw is not None:
+                    _define_turn(pool, hold._entry, served, json.loads(raw),
+                                 FACTORS)
+            core = _held_table(served, tid, table)
+            if pool is not None:
+                _factor_turn(pool, hold._entry, served, core)
             fam = served.pipe.family.name
             conds = [conditioning(r, STATE.tensors, fam) for r in rows]
             # The plan of the rows as they are: their text, a prefix and
@@ -664,7 +1024,7 @@ async def step(request: Request):
                             c.ref_latents)
             try:
                 size_fits(served, w_px, h_px, budget, cfg=guided,
-                          conds=conds, patch_table=table,
+                          conds=conds, patch_table=core,
                           joined=parts and conv.time != "reference",
                           ref_cache=run.ref_cache if ref_cache else None,
                           building=sum(building.values()),
@@ -687,7 +1047,7 @@ async def step(request: Request):
                     c for c in conds if not c.key]
             x = x_w.mx().astype(mx.float32)
             with api.state_scope(served.pipe, scope):
-                v, fwd_s, cache = run_step(served, x, sig, conds, table, run,
+                v, fwd_s, cache = run_step(served, x, sig, conds, core, run,
                                            gen, targets, conv.time,
                                            ref_cache, skip)
             return _host(v), fwd_s, cache
@@ -707,6 +1067,7 @@ async def step(request: Request):
             "X-Gmlx-Server-Ms": f"{server_ms:.2f}",
             "X-Gmlx-Prefix-Cache": cache})
     finally:
+        keep.close()
         hold.release()
 
 
@@ -769,7 +1130,10 @@ def _check_clip(hold, served, *, frames: int, width: int, height: int,
         return
     pipe = served.pipe
     tid = pipe.default_table if table is None else table
-    live = bool(pipe.patch_tables.get(tid, {}).get("entries"))
+    got = pipe.patch_tables.get(tid)
+    # A client's core table the pipeline let go is defined again in the
+    # step's own turn, so it is priced as a table with patches.
+    live = bool(got["entries"]) if got is not None else table is not None
     plan = plan_clip(served.plan, frames=frames, width=width, height=height,
                      text=text, budget=budget,
                      decode=phase != "denoise" or decodes, audio=audio,
@@ -845,6 +1209,7 @@ async def _av_step(t0, tensors, fields, run):
     missing = [h for h in hashes if h not in STATE.tensors]
     model = fields.get("model") or (run.model if run else None)
     hold = await _acquire(model)
+    keep = contextlib.ExitStack()
     try:
         served = _served(hold)
         if not _video(served) or served.plan.family not in AV_FAMILIES:
@@ -853,6 +1218,10 @@ async def _av_step(t0, tensors, fields, run):
         frames, width, height = _clip_of(served.pipe.video_family,
                                          v_w.shape, a_w.shape)
         table = None
+        # The matrices the step may define its table again from stay in
+        # the store from its check to its turn's end.
+        keep.enter_context(STATE.adapters.holding(
+            _step_holds(served, fields.get("patch_table"))))
         try:
             table = _table(served, fields.get("patch_table"))
         except Missing as m:
@@ -870,19 +1239,44 @@ async def _av_step(t0, tensors, fields, run):
                     what="a clip" if first else "a step")
         ts = float(np.asarray(t_w.numpy(), np.float32).reshape(-1)[0])
         gen = run.gen if run is not None else 0
+        tid = fields.get("patch_table")
+        pool = _lora_pool()
+        if pool is not None:
+            from ..image_steps import FACTORS
+
+            _hopeless(pool, hold._entry, _step_estimate(served, tid),
+                      FACTORS)
 
         def work():
+            try:
+                return _work()
+            finally:
+                if pool is not None:
+                    from ..image_service import lora_settle
+                    from ..image_steps import FACTORS
+
+                    lora_settle(pool, hold._entry, FACTORS)
+
+        def _work():
+            # An encode let the DiT and every pair go: the own pairs load
+            # again with the DiT, within the footprint, and the turns book
+            # the table's pairs, its factors and the own table's excess.
             import mlx.core as mx
 
             from gmlx.image.pacing import paced
 
-            from ..image_steps import StepInterrupted
+            from ..image_steps import FACTORS, StepInterrupted
 
             vs.ensure_dit(served)
-            if table is not None and not _held(served.pipe, table):
-                # An encode or another table's define since the check
-                # above let the table or its pairs go.
-                raise Missing([fields["patch_table"]])
+            if pool is not None and table is not None \
+                    and not _held(served.pipe, table):
+                raw = STATE.tables_of(served.spec.id, served.pipe).body(tid)
+                if raw is not None:
+                    _define_turn(pool, hold._entry, served, json.loads(raw),
+                                 FACTORS)
+            core = _held_table(served, tid, table)
+            if pool is not None:
+                _factor_turn(pool, hold._entry, served, core)
             feats = _f32(held)
             if feats.ndim == 2:
                 feats = feats[None]
@@ -901,7 +1295,7 @@ async def _av_step(t0, tensors, fields, run):
             with paced(pacer):
                 vv, va, hit = vs.av_step(
                     served, v_w.mx(), a_w.mx(), ts, shifts, scale, feats,
-                    _cond_key(hashes[0]), table)
+                    _cond_key(hashes[0]), core)
                 mx.eval(vv, va)
             if run is not None and (run.gen != gen or run.ended):
                 raise StepInterrupted()
@@ -920,6 +1314,7 @@ async def _av_step(t0, tensors, fields, run):
             "X-Gmlx-Server-Ms": f"{server_ms:.2f}",
             "X-Gmlx-Prefix-Cache": "hit" if hit else "miss"})
     finally:
+        keep.close()
         hold.release()
 
 
@@ -980,7 +1375,8 @@ async def encode(request: Request):
             # A prompt with images is refused by name, unpriced.
             if not images:
                 await asyncio.to_thread(_check_encode, hold, served, text)
-            feats = await _on_worker(video_encode, served, text, images)
+            feats = await _on_worker(_settled(hold, video_encode), served,
+                                     text, images)
             got = {"cond": feats, "refs": [], "image_slots": []}
             return _held_encode(got, None)
         borrow = None
@@ -998,7 +1394,8 @@ async def encode(request: Request):
             chat_hold = None
         try:
             typed = (text,) if revised else ()
-            got = await _on_worker(do_encode, served, revised or text,
+            got = await _on_worker(_settled(hold, do_encode), served,
+                                   revised or text,
                                    [i[..., :3] for i in images], borrow,
                                    want_refs, *typed)
         finally:

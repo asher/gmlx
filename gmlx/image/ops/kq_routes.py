@@ -254,7 +254,9 @@ def kquant_leaf(m, dtype) -> KQuantLinear | None:
     from gmlx.image.lora.install import ImageLoRALinear
 
     if isinstance(m, ImageLoRALinear):
-        if m._state.factors(m._path, dtype) is not None:
+        # A probe: precise asks at bfloat16 and then runs the leaf on a
+        # float32 row, so it builds no factors at the dtype it asks.
+        if m._state.names(m._path, dtype):
             return None
         m = m.base
     cls = type(m)

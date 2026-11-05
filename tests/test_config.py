@@ -3378,7 +3378,7 @@ def test_server_image_block():
                                              "adapter_cache_mb": 128}}})
     assert (cfg.image.tensor_cache_mb, cfg.image.adapter_cache_mb) == (32, 128)
     base = build_config({}).image
-    assert (base.tensor_cache_mb, base.adapter_cache_mb) == (64, 256)
+    assert (base.tensor_cache_mb, base.adapter_cache_mb) == (64, None)
     for bad in ({"tensor_cache_mb": 0}, {"adapter_cache_mb": -5},
                 {"tensor_cache_mb": "lots"}):
         with pytest.raises(ConfigError, match=next(iter(bad))):
@@ -3396,6 +3396,36 @@ def test_default_image_model_must_be_an_image_model():
     doc["server"] = {"defaults": {"image_model": "chat"}}
     with pytest.raises(ConfigError, match="image_model"):
         build_config(doc)
+
+
+def test_server_image_adapter_cache_mb_is_an_optional_cap():
+    """server.image.adapter_cache_mb has no default: absent and null leave
+    it unset, a positive number of MB sets the cap, and 0, -5 and a word
+    are refused naming the key."""
+    assert build_config({}).image.adapter_cache_mb is None
+    cfg = build_config({"server": {"image": {"adapter_cache_mb": None}}})
+    assert cfg.image.adapter_cache_mb is None
+    cfg = build_config({"server": {"image": {"adapter_cache_mb": 256}}})
+    assert cfg.image.adapter_cache_mb == 256
+    for bad in (0, -5, "lots"):
+        with pytest.raises(ConfigError, match="adapter_cache_mb"):
+            build_config({"server": {"image": {"adapter_cache_mb": bad}}})
+
+
+def test_print_config_writes_no_lora_cap_and_reads_back_none():
+    """print-config writes the unset cap as null, which a --config read
+    of the output leaves unset; a set cap writes its MB."""
+    import yaml
+
+    from gmlx.serve import server as srv
+
+    cfg = build_config({})
+    text = srv._dump_cfg_yaml(cfg)
+    assert "    adapter_cache_mb: null\n" in text
+    again = build_config(yaml.safe_load(text))
+    assert again.image.adapter_cache_mb is None
+    cfg = build_config({"server": {"image": {"adapter_cache_mb": 256}}})
+    assert "    adapter_cache_mb: 256\n" in srv._dump_cfg_yaml(cfg)
 
 
 def test_image_models_round_trip_through_print_config():

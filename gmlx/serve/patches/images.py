@@ -275,8 +275,12 @@ async def _read_body(route: str, request: Request):
 
 
 def _budget(hold):
-    """The bytes a request may plan on: the working budget less the other
-    resident models, or None with GMLX_OVERCOMMIT set."""
+    """The bytes a request may plan on, or None with GMLX_OVERCOMMIT set:
+    the working budget less what the pool holds beside the entry's
+    weights and its held LoRA bytes, and less the upload bodies in
+    flight. The plan counts the entry's weights, its held LoRA bytes and
+    the held uploads itself. Read from the pool's figures with no pool
+    lock; the pending bookings stay in."""
     from ..capacity import overcommit, working_budget_bytes
 
     if overcommit():
@@ -285,8 +289,52 @@ def _budget(hold):
     if total is None:
         return None
     pool = hold._pool
-    others = pool.stats()["resident_bytes"] - hold._entry.footprint
-    return max(0, total - others)
+    beside = pool.plan_beside(hold._entry) + pool.figures.incoming
+    return max(0, total - beside)
+
+
+def _hopeless(hold, served, req, beside=None) -> None:
+    """The route's 413 for a request whose adapters' bytes, from their
+    headers, no unload makes room for beside its model and the entries
+    ``beside`` its job holds, or before the borrow (None), the encoder it
+    will borrow. The job's turns book them."""
+    from ..image_service import ADAPTERS, lora_refusal, request_estimate
+    from ..residency import LoraRefused
+
+    n = request_estimate(served, req.adapters, STATE.model_dirs)
+    if n <= 0:
+        return
+    if beside is None:
+        beside = _encoder(hold, served)
+    try:
+        hold._pool.lora_hopeless(hold._entry, n, ADAPTERS, beside)
+    except LoraRefused as e:
+        raise lora_refusal(e) from None
+
+
+def _encoder(hold, served) -> tuple:
+    """The chat model a job borrows as its encoder, before the borrow: its
+    resident entry, or one at the bytes its load books. Empty when the
+    model shares no encoder or the id does not resolve, which the borrow
+    answers."""
+    model_id = served.spec.encoder_model
+    if model_id is None:
+        return ()
+    from gmlx.config import env_for
+
+    try:
+        path, spec = serving.resolve_request_model(
+            model_id, profile_field=serving.get_request_profile())
+        return (hold._pool.load_entry(path, spec, env_for(spec)),)
+    except Exception:  # noqa: BLE001 - the borrow resolves it and answers
+        return ()
+
+
+def _beside(holds) -> tuple:
+    """The pool entries a job holds besides its model, ``holds[0]``: the
+    chat model it borrows as its encoder."""
+    return tuple(e for e in (getattr(h, "_entry", None) for h in holds[1:])
+                 if e is not None)
 
 
 def _text_model(model):
@@ -449,6 +497,7 @@ def make_endpoint(route: str):
             served = hold._entry.pipeline
             check_family(req, served)
             size = target_size(req, served)
+            _hopeless(hold, served, req)
             budget = _budget(hold)
             fit_check(req, served, size, budget)
             borrow = None
@@ -456,6 +505,9 @@ def make_endpoint(route: str):
                 fn, chat_hold = _borrow_for(served.spec)
                 if chat_hold is not None:
                     holds.append(chat_hold)
+                    # The encoder the job holds is its own, for its turns
+                    # too.
+                    _hopeless(hold, served, req, _beside(holds))
 
                 def borrow(run, _fn=fn, _pipe=served.pipe):
                     return _fn(_pipe, run, stop, timeout_s)
@@ -507,6 +559,8 @@ def make_endpoint(route: str):
             return _error(path, 500, f"{path} failed ({type(e).__name__}); "
                           "see the server log", err_type="server_error")
         model_id = served.spec.id
+        pool, entry = holds[0]._pool, holds[0]._entry
+        beside = _beside(holds)
         submitted = time.monotonic()
         loop = asyncio.get_running_loop()
         events: asyncio.Queue = asyncio.Queue()
@@ -526,7 +580,8 @@ def make_endpoint(route: str):
                                submitted=submitted, borrow=borrow,
                                emit=emit if req.stream else None,
                                model_dirs=STATE.model_dirs,
-                               embed_metadata=STATE.settings.embed_metadata)
+                               embed_metadata=STATE.settings.embed_metadata,
+                               pool=pool, entry=entry, beside=beside)
 
         future = WORKER.submit(job)
 

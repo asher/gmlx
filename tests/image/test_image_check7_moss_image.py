@@ -240,7 +240,7 @@ def wrong_tables(entries: list, strength: float) -> dict:
     assert mid - 1 not in blocks
 
     def scaled(k):
-        return [(p, band, [(key, s * k) for key, s in patches])
+        return [(p, band, [(key, s * k, a) for key, s, a in patches])
                 for p, band, patches in entries]
 
     return {

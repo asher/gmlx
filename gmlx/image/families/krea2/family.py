@@ -345,6 +345,8 @@ FAMILY = Family(
     needs_variant=True,
     sampling=SAMPLING,
     lora_map=lora_map,
+    # The time MLP and projection run through precise.
+    lora_f32=("tmlp.0", "tmlp.2", "tproj.1"),
     encoder=encoder,
     schedule=schedule,
     reshaped=(PROJECTOR,),

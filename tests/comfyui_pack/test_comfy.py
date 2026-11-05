@@ -851,6 +851,39 @@ class Sampling(Base):
         self.assertEqual(kinds.count("put_adapter"), 2 * LORA_TARGETS)
         self.assertEqual(kinds.count("step"), 1)
 
+    def test_a_step_whose_table_the_server_keeps_losing_goes_three_times_more(self):
+        """An upload of another client can make the server let a table's
+        matrices go again between the pack's sync and its step. The step
+        syncs the table and goes again three times at most, and the
+        fourth 409 fails it with the server's answer."""
+        m = comfy_nodes.LoraLoaderModelOnly().load_lora_model_only(self.model(), LORA, 0.6)[0]
+        mm.load_models_gpu([m])
+        m.pre_run()
+        try:
+            f = m.model.diffusion_model.forward
+            cond = self.cond(ZID, "z")[0][0]
+            to = {"cond_or_uncond": [0], "uuids": [uuid.uuid4()]}
+            x = torch.zeros(1, 16, 4, 4)
+            f(x, torch.tensor([0.5]), context=cond, transformer_options=to)
+            for lost in (3, 4):
+                self.stub.reset()
+                self.stub.lose_table(lost)
+                retries = self.client.stats["missing_retries"]
+                if lost == 3:
+                    out = f(x, torch.tensor([0.4]), context=cond, transformer_options=to)
+                    self.assertEqual(tuple(out.shape), (1, 16, 4, 4))
+                else:
+                    with self.assertRaises(C.GmlxMissing) as e:
+                        f(x, torch.tensor([0.3]), context=cond, transformer_options=to)
+                    self.assertEqual(str(e.exception), "gmlx: the step: not held")
+                    self.assertEqual(e.exception.missing, [m.gmlx_table_id])
+                kinds = [e["kind"] for e in self.stub.log()]
+                self.assertEqual((kinds.count("step_missing"), kinds.count("put_table"),
+                                  kinds.count("step")), (lost, 3, int(lost == 3)))
+                self.assertEqual(self.client.stats["missing_retries"], retries + 3)
+        finally:
+            m.cleanup()
+
     def test_variant_sigmas(self):
         turbo = self.model(QTID)
         sig, cfg = P.nodes.GmlxSigmas().get_sigmas(turbo)

@@ -544,8 +544,8 @@ def test_an_encode_loads_the_encoder_without_the_dit_or_any_lora(
     """The H3 encoder and the DiT with its 8-step LoRA do not fit a 32 GB
     Mac together: the encoder loads with neither the DiT nor a LoRA pair
     held. The configured LoRA comes back with the DiT at the next step,
-    and a table the pack sent is answered as missing until the pack sends
-    it again."""
+    and a table the pack sent is defined again at its next step from the
+    body the server keeps."""
     from lora_fixtures import write_keys
     from test_video_h3_lora import _adapter, _comfy_keys
 
@@ -562,7 +562,8 @@ def test_an_encode_loads_the_encoder_without_the_dit_or_any_lora(
 
     def strengths():
         entries = pipe.patch_tables[pipe.default_table]["entries"]
-        return {st for _path, _band, patches in entries for _k, st in patches}
+        return {st for _path, _band, patches in entries
+                for _k, st, _a in patches}
 
     assert strengths() == {0.75}
     video, audio, feats = _clip()
@@ -596,10 +597,6 @@ def test_an_encode_loads_the_encoder_without_the_dit_or_any_lora(
     after = c.av_step("h3", None, video, audio, 600.0, row, **kw)
     assert strengths() == {0.75}
     assert all(_rel(a, b) < 1e-6 for a, b in zip(after, before))
-    with pytest.raises(MissingTensors) as e:
-        c.av_step("h3", None, video, audio, 600.0, row, patch_table=tid, **kw)
-    assert e.value.body["missing"] == [tid]
-    assert c.define_table("h3", body) == tid
     again = c.av_step("h3", None, video, audio, 600.0, row, patch_table=tid,
                       **kw)
     assert all(_rel(a, b) < 1e-6 for a, b in zip(again, sent))
@@ -702,13 +699,16 @@ def test_a_lora_that_does_not_load_again_with_the_dit_fails_the_step(
     assert all(_rel(a, b) < 1e-6 for a, b in zip(after, before))
 
 
-@pytest.mark.parametrize("between", ["encode", "define"])
-def test_a_table_let_go_before_its_step_runs_is_missing(monkeypatch, request,
-                                                       between):
+@pytest.mark.parametrize("between", ["encode", "define", "lost"])
+def test_a_table_let_go_before_its_step_runs_steps(monkeypatch, request,
+                                                   between):
     """A second client's encode, or the define of its table on a pair
     cache with room for one table, can run on the image worker between a
-    step's check of its table and the step itself. The step answers the
-    table as missing, and the pack sends it again."""
+    step's check of its table and the step itself. The step defines the
+    table again in its own turn, from the body the server keeps, and
+    steps as before. With the table's matrices gone from the adapter
+    cache too, the step answers the table as missing, and steps as
+    before once the pack sends it again."""
     from test_video_h3_lora import _adapter
 
     pipe, weights = _own_pipe()
@@ -733,24 +733,32 @@ def test_a_table_let_go_before_its_step_runs_is_missing(monkeypatch, request,
                 vs.drop_dit(served)     # what the encode leaves
             else:
                 steps.define_table(served, theirs, steps.STATE.adapters)
+            if between == "lost":
+                steps.STATE.adapters.clear()
         ensure(served)
 
     monkeypatch.setattr(vs, "ensure_dit", other_first)
-    with pytest.raises(MissingTensors) as e:
-        c.av_step("h3", None, video, audio, 600.0, row, **kw)
-    assert ran and e.value.body["missing"] == [tid]
-    assert c.define_table("h3", body) == tid
+    if between == "lost":
+        with pytest.raises(MissingTensors) as e:
+            c.av_step("h3", None, video, audio, 600.0, row, **kw)
+        assert e.value.body["missing"] == [tid]
+        # The client sends the matrices again, as the pack's sync does.
+        c._uploaded.clear()
+        assert c.define_table("h3", _table_body(c, _adapter(6))) == tid
     again = c.av_step("h3", None, video, audio, 600.0, row, **kw)
-    assert all(_rel(a, b) < 1e-6 for a, b in zip(again, sent))
+    assert ran and all(_rel(a, b) < 1e-6 for a, b in zip(again, sent))
 
 
-def test_a_table_whose_pairs_another_table_shed_is_missing_until_sent_again(
-        request):
+def test_a_table_whose_pairs_another_table_shed_steps_in_its_turn(request):
     """Two ComfyUI clients whose LoRAs each fill the entry's pair room, with
     its built tables bounded as a loaded entry bounds them: B's table
-    sheds the pairs of A's. A's next step, on a cond the server lacks
-    too, names both in one 409, and A steps as before once the pack sends
-    its table again."""
+    sheds the pairs of A's. A's next step, on a cond the server lacks, is
+    a 409 that names the cond alone, since the server holds the table's
+    body and matrices, and A's step with its cond defines the table again
+    in its own turn and steps as before. Once B's step sheds A's pairs
+    again and the adapter cache lets the matrices go, one 409 names the
+    cond and the table, and A steps as before once the pack sends its
+    table again."""
     from test_video_h3_lora import _adapter
 
     pipe, _w = _own_pipe()
@@ -770,14 +778,93 @@ def test_a_table_whose_pairs_another_table_shed_is_missing_until_sent_again(
     cb.av_step("h3", None, video, audio, 600.0, {"cond": cb.put(feats)},
                patch_table=tb, **kw)
     lacked = array_hash(_clip(1)[2])
-    with pytest.raises(MissingTensors) as e:
-        ca.av_step("h3", None, video, audio, 600.0, {"cond": lacked},
-                   patch_table=ta, **kw)
-    assert sorted(e.value.body["missing"]) == sorted([lacked, ta])
-    assert ca.define_table("h3", body) == ta
+
+    def lacking() -> list:
+        with pytest.raises(MissingTensors) as e:
+            ca.av_step("h3", None, video, audio, 600.0, {"cond": lacked},
+                       patch_table=ta, **kw)
+        return sorted(e.value.body["missing"])
+
+    assert lacking() == [lacked]
     again = ca.av_step("h3", None, video, audio, 600.0, row, patch_table=ta,
                        **kw)
     assert all(_rel(x, y) < 1e-6 for x, y in zip(again, first))
+    cb.av_step("h3", None, video, audio, 600.0, {"cond": cb.put(feats)},
+               patch_table=tb, **kw)
+    steps.STATE.adapters.clear()
+    assert lacking() == sorted([lacked, ta])
+    ca._uploaded.clear()
+    assert ca.define_table("h3", _table_body(ca, a)) == ta
+    again = ca.av_step("h3", None, video, audio, 600.0, row, patch_table=ta,
+                       **kw)
+    assert all(_rel(x, y) < 1e-6 for x, y in zip(again, first))
+
+
+def _two_av_clients(request, monkeypatch=None):
+    """An entry whose pair cache holds one of two clients' LoRAs, so each
+    define sheds the other's pairs, with the H3 encoder stood in when
+    ``monkeypatch`` is given. Returns the pipeline and, for each client,
+    a step of its table, its define and its first step's output."""
+    from test_video_h3_lora import _adapter
+
+    pipe, weights = _own_pipe()
+    _mount(_Host(_served(pipe)), request)
+    if monkeypatch is not None:
+        _stub_encode(monkeypatch, weights)
+    pipe.adapters.max_bytes = sum(d.nbytes + u.nbytes
+                                  for d, u, _a in _adapter(6).values())
+    video, audio, feats = _clip()
+    out = []
+    for seed in (6, 7):
+        c = _client()
+        body, row = _table_body(c, _adapter(seed)), {"cond": c.put(feats)}
+        tid = c.define_table("h3", body)
+
+        def step(c=c, row=row, tid=tid):
+            return c.av_step("h3", None, video, audio, 600.0, row,
+                             patch_table=tid, shifts=SHIFTS,
+                             audio_scale=SCALE)
+
+        def define(c=c, body=body, tid=tid):
+            assert c.define_table("h3", body) == tid
+
+        out.append((step, define, step()))
+    return pipe, out
+
+
+def _av_steps_as_first(clients) -> None:
+    for step, _define, first in clients:
+        assert all(_rel(x, y) < 1e-6 for x, y in zip(step(), first))
+
+
+def test_two_av_clients_whose_defines_interleave_step_without_a_409(request):
+    """Two ComfyUI clients alone on a video entry whose pair cache holds
+    one of their LoRAs. A step on a table whose pairs the other's define
+    shed defines it again in its own turn and steps as before, and so
+    does a step after both define again, A then B, before A's step
+    reaches the server."""
+    pipe, clients = _two_av_clients(request)
+    _av_steps_as_first(clients)
+    for _step, define, _first in clients:
+        define()
+    _av_steps_as_first(clients)
+    assert pipe.adapters.bytes <= pipe.adapters.max_bytes
+
+
+def test_av_tables_a_third_clients_encode_let_go_step_without_a_409(
+        monkeypatch, request):
+    """A third client's encode lets the DiT and every LoRA pair go. Each of
+    two clients' next steps defines its table again in its own turn and
+    steps as before, and so does each after both define again, A then B,
+    before A's step reaches the server."""
+    pipe, clients = _two_av_clients(request, monkeypatch)
+    _client().encode("h3", "a cat")
+    assert pipe.dit is None and pipe.adapters.bytes == 0
+    _av_steps_as_first(clients)
+    for _step, define, _first in clients:
+        define()
+    _av_steps_as_first(clients)
+    assert pipe.adapters.bytes <= pipe.adapters.max_bytes
 
 
 def _encoder_by_text(monkeypatch, weights) -> list:
@@ -809,8 +896,8 @@ def test_two_clients_alternating_encode_and_step_get_their_own_steps(
     entry each get their own steps back. Each encode lets the DiT go, as
     the entry's plan prices an encode with the DiT out, and the first
     define or step after it loads it again, once. A client's table that
-    the other's encode let go is answered as missing, and steps once sent
-    again."""
+    the other's encode let go is defined again at its next step, in the
+    step's own turn."""
     from test_video_h3_lora import _adapter
 
     pipe, weights = _own_pipe()
@@ -832,28 +919,18 @@ def test_two_clients_alternating_encode_and_step_get_their_own_steps(
         me = clients[name]
         if me.tid is None:
             me.tid = me.c.define_table("h3", me.body)
-        try:
-            got = me.c.av_step("h3", None, video, audio, 600.0, me.row,
-                               patch_table=me.tid, **kw)
-            sent = False
-        except MissingTensors as e:
-            assert e.body["missing"] == [me.tid]
-            me.c.define_table("h3", me.body)
-            got = me.c.av_step("h3", None, video, audio, 600.0, me.row,
-                               patch_table=me.tid, **kw)
-            sent = True
-        return got, sent
+        return me.c.av_step("h3", None, video, audio, 600.0, me.row,
+                            patch_table=me.tid, **kw)
 
     encode("a", "a red fox")
-    first_a, _ = step("a")
+    first_a = step("a")
     encode("b", "a blue bird")
-    again_a, sent_a = step("a")
-    first_b, _ = step("b")
+    again_a = step("a")
+    first_b = step("b")
     encode("a", "a red fox")
-    again_b, sent_b = step("b")
-    third_a, sent_a3 = step("a")
+    again_b = step("b")
+    third_a = step("a")
     assert len(loads) == 3
-    assert (sent_a, sent_b, sent_a3) == (True, True, True)
     for got, want in ((again_a, first_a), (third_a, first_a),
                       (again_b, first_b)):
         assert all(_rel(x, y) < 1e-6 for x, y in zip(got, want))
@@ -909,16 +986,23 @@ def test_a_video_entry_released_with_a_client_table_frees_its_pipeline(
     assert [r() for r in refs] == [None, None]
 
 
+@pytest.mark.parametrize("cap_mb", [None, 256])
 def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
-                                                            monkeypatch):
-    """The pool admits an entry with each cache at the share of its bound
-    that its clip leaves room for. The entry bounds its pipeline's caches
-    at that share beside the bytes its plan books for its own LoRA, which
-    hold its pairs, and the step routes' caches take the smallest share of
-    the entries loaded until it is released."""
+                                                            monkeypatch,
+                                                            cap_mb):
+    """The pool admits an entry with each tensor cache at the share of its
+    bound that its clip leaves room for. The entry bounds its pipeline's
+    tensor caches at that share, and its pair and tables caches at the cap,
+    or no bound with none, beside the bytes its plan books for its own
+    LoRA, which hold its pairs: the pool books a request's pairs. The step
+    routes' caches take the smallest share of the entries loaded until it
+    is released."""
     import dataclasses
 
     from gmlx.serve import image_service
+
+    monkeypatch.setitem(image_service._CACHE_BYTES, "adapter",
+                        None if cap_mb is None else cap_mb << 20)
 
     path = _lora_file(tmp_path)
     pipe, _w = _own_pipe()
@@ -933,12 +1017,12 @@ def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
     scaled = []
     monkeypatch.setattr(steps.STATE, "scale_caches", scaled.append)
     got = _on_worker(vs._load, served.spec)
-    tensor, adapter = image_service.cache_bytes()
+    tensor, cap = image_service.cache_bytes()
+    room = steps.UNBOUNDED if cap is None else cap
     assert 0 < pipe.adapters.bytes <= size
     assert pipe.conditionings.max_bytes == tensor // 4
     assert pipe.reference_latents.max_bytes == tensor // 4
-    assert pipe.adapters.max_bytes == pipe.tables.max_bytes == (
-        adapter // 4 + size)
+    assert pipe.adapters.max_bytes == pipe.tables.max_bytes == room + size
     assert scaled == [0.25]
     _on_worker(vs._release, [got])
     assert scaled == [0.25, 1.0]
@@ -946,8 +1030,8 @@ def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
 
 def test_the_step_tensor_cache_keeps_a_loaded_video_entrys_cond(
         monkeypatch, request):
-    """The step routes' caches take the smallest share of the entries
-    loaded, and their tensor cache the largest cond floor: beside an image
+    """The step routes' tensor cache takes the smallest share of the
+    entries loaded and the largest cond floor: beside an image
     entry at a share of 1/16, a video entry's cond of the priced rows of
     H3's 5120-wide features still uploads. Released, the video entry's
     floor goes with it."""
@@ -963,7 +1047,7 @@ def test_the_step_tensor_cache_keeps_a_loaded_video_entrys_cond(
     monkeypatch.setattr(vs, "entry_plan", lambda spec: plan)
     monkeypatch.setattr(pipeline, "load", lambda *a, **k: pipe)
     _mount(_Host(served), request)
-    tensor, adapter = image_service.cache_bytes()
+    tensor, _cap = image_service.cache_bytes()
     # An image entry loaded at a share of 1/16.
     shares = {0: (1 / 16, 0)}
     monkeypatch.setattr(image_service, "_SHARES", shares)
@@ -979,7 +1063,8 @@ def test_the_step_tensor_cache_keeps_a_loaded_video_entrys_cond(
     finally:
         shares.clear()
         image_service._scale_step_caches()
-    assert bounds == (rows.nbytes, adapter // 16)
+    # With no cap the upload store has no bound at any share.
+    assert bounds == (rows.nbytes, steps.UNBOUNDED)
     assert after == tensor // 16 and e.value.status == 413
 
 
@@ -1012,6 +1097,10 @@ def test_a_cond_over_the_share_the_models_leave_is_413_naming_it(
             c.put(np.zeros((1, 5 * configured // 16), np.float32))
         with pytest.raises(StepsClientError) as edge:
             c.put(np.zeros((1, configured // 4 + 1), np.float32))
+        # A share whose bound is 17.49 MiB.
+        steps.STATE.scale_caches(0.2734)
+        with pytest.raises(StepsClientError) as share:
+            c.put(np.zeros((1, 70 << 16), np.float32))
         steps.STATE.scale_caches(rows.nbytes / configured)
         send()
     finally:
@@ -1029,27 +1118,34 @@ def test_a_cond_over_the_share_the_models_leave_is_413_naming_it(
     assert edge.value.body["error"] == (
         "a tensor of 64.1 MiB is over the configured 64 MiB of the step "
         "routes' tensor cache; raise server.image.tensor_cache_mb")
+    # A bound under a tenth of a MiB below the tensor reads under it.
+    assert share.value.body["error"] == (
+        "a tensor of 17.5 MiB is over the step routes' tensor cache of 17.4 "
+        "MiB: the models loaded leave it 27% of its configured 64 MiB. A "
+        "smaller defaults.size or defaults.seconds on the tightest entry "
+        "gives it more.")
 
 
 def test_the_adapter_cache_and_the_upload_limit_are_named_in_a_413(host):
-    """An adapter matrix over the share of the adapter cache is refused
-    with that cache named, and a tensor over a route's own upload limit
-    with the limit."""
+    """The share the models loaded leave bounds the step routes' tensor
+    cache alone: at a quarter, an adapter matrix of 80 MiB is held. An
+    adapter matrix over a set server.image.adapter_cache_mb is refused
+    with the key named, and a tensor over a route's own upload limit with
+    the limit."""
     from gmlx.serve.image_wire import read, write
 
     c = _client()
+    big = np.zeros((1, 20 << 20), np.float32)
     try:
         steps.STATE.scale_caches(0.25)
-        with pytest.raises(StepsClientError) as e:
-            c.put(np.zeros((1, 20 << 20), np.float32), kind="adapters")
+        h = c.put(big, kind="adapters")
+        held = steps.STATE.adapters.nbytes(h)
+        steps.STATE.configure(ImageServerCfg(adapter_cache_mb=16))
         with pytest.raises(StepsClientError) as edge:
-            c.put(np.zeros((1, (16 << 20) + 1), np.float32), kind="adapters")
-        # A share whose bound is 69.99 MiB.
-        steps.STATE.scale_caches(0.2734)
-        with pytest.raises(StepsClientError) as share:
-            c.put(np.zeros((1, 70 << 18), np.float32), kind="adapters")
+            c.put(np.zeros((1, (4 << 20) + 1), np.float32), kind="adapters")
     finally:
         steps.STATE.scale_caches(1.0)
+        steps.STATE.configure(ImageServerCfg())
     limit, just = [], []
     for n, got in ((1 << 19, limit), ((1 << 18) + 1, just)):
         (t,) = read(write({"t": np.zeros((1, n), np.float32)}))[0].values()
@@ -1057,26 +1153,14 @@ def test_the_adapter_cache_and_the_upload_limit_are_named_in_a_413(host):
             steps.STATE.put_tensor(steps.STATE.tensors, t.hash(), {"t": t},
                                    1 << 20)
         got.append(str(refused.value))
-    assert e.value.status == 413
-    assert e.value.body["error"] == (
-        "a tensor of 80.0 MiB is over the step routes' adapter cache of 64.0 "
-        "MiB: the models loaded leave it 25% of its configured 256 MiB. A "
-        "smaller defaults.size or defaults.seconds on the tightest entry "
-        "gives it more.")
+    assert held == big.nbytes
     assert limit == ["a tensor of 2.0 MiB is over the upload limit of 1.0 MiB"]
-    # A tensor a few bytes over a bound reads above it, and a bound under a
-    # tenth of a MiB more reads under it.
+    # A tensor a few bytes over a bound reads above it.
     assert just == ["a tensor of 1.1 MiB is over the upload limit of 1.0 MiB"]
+    assert edge.value.status == 413
     assert edge.value.body["error"] == (
-        "a tensor of 64.1 MiB is over the step routes' adapter cache of 64.0 "
-        "MiB: the models loaded leave it 25% of its configured 256 MiB. A "
-        "smaller defaults.size or defaults.seconds on the tightest entry "
-        "gives it more.")
-    assert share.value.body["error"] == (
-        "a tensor of 70.0 MiB is over the step routes' adapter cache of 69.9 "
-        "MiB: the models loaded leave it 27% of its configured 256 MiB. A "
-        "smaller defaults.size or defaults.seconds on the tightest entry "
-        "gives it more.")
+        "a tensor of 16.1 MiB is over the configured 16 MiB of the step "
+        "routes' adapter cache; raise server.image.adapter_cache_mb")
 
 
 def _big_table(c, pairs: int, width: int = 8192) -> dict:
@@ -1098,27 +1182,19 @@ def _big_table(c, pairs: int, width: int = 8192) -> dict:
     return {"model": "h3", "entries": entries}
 
 
+_CAP_413 = ("the LoRA pairs of this patch table take 4.0 MiB, over the "
+            "2.0 MiB the pair cache of 'h3' keeps for a request's pairs; "
+            "raise server.image.adapter_cache_mb to 4 or more")
+
+
 @pytest.mark.parametrize("configured_mb, share, want", [
-    (8, 0.25, "the LoRA pairs of this patch table take 4.0 MiB, over the "
-     "2.0 MiB the pair cache of 'h3' keeps for a request's pairs: its "
-     "default clip leaves the cache 25% of its configured 8 MiB. A smaller "
-     "defaults.size or defaults.seconds on 'h3' gives it more."),
-    (2, 0.25, "the LoRA pairs of this patch table take 4.0 MiB, over the "
-     "0.5 MiB the pair cache of 'h3' keeps for a request's pairs: its "
-     "default clip leaves the cache 25% of its configured 2 MiB. Raise "
-     "server.image.adapter_cache_mb to 4 or more, and set a smaller "
-     "defaults.size or defaults.seconds on 'h3' so that it leaves the cache "
-     "more of it."),
-    (2, 1.0, "the LoRA pairs of this patch table take 4.0 MiB, over the "
-     "2.0 MiB the pair cache of 'h3' keeps for a request's pairs; raise "
-     "server.image.adapter_cache_mb to 4 or more")])
+    (2, 0.25, _CAP_413), (2, 1.0, _CAP_413)])
 def test_a_table_over_the_entrys_pair_room_is_413_naming_it(
         monkeypatch, request, configured_mb, share, want):
-    """The pairs of a ComfyUI LoRA's table that the entry's pair cache
-    cannot hold at once are refused with a 413 that names the cache, the
-    sizes and the remedy: under a share, the share the entry's clip leaves
-    the cache, and the configured bound, with the MiB it must reach, when
-    the bound is under the pairs too."""
+    """The pairs of a ComfyUI LoRA's table over a set
+    server.image.adapter_cache_mb are refused with a 413 that names the
+    cache, the sizes and the MiB the key must reach, at any share, before
+    a pair is made."""
     import dataclasses
 
     from gmlx.serve import image_service
@@ -1138,17 +1214,38 @@ def test_a_table_over_the_entrys_pair_room_is_413_naming_it(
     assert len(pipe.adapters) == 0
 
 
+def test_a_table_under_the_cap_defines_at_any_share(monkeypatch, request):
+    """The share the entry's clip leaves its tensor caches bounds its pair
+    cache no more: at a share of a quarter, a table whose pairs fill a set
+    server.image.adapter_cache_mb holds them all."""
+    from test_video_h3_lora import _adapter
+
+    from gmlx.serve import image_service
+
+    pipe, _w = _own_pipe()
+    _mount(_Host(_served(pipe)), request)
+    a = _adapter(6)
+    need = sum(d.nbytes + u.nbytes for d, u, _a in a.values())
+    monkeypatch.setitem(image_service._CACHE_BYTES, "adapter", need)
+    image_service.bound_caches(pipe, 0, 0.25)
+    c = _client()
+    c.define_table("h3", _table_body(c, a))
+    assert pipe.adapters.bytes == need and len(pipe.adapters) == len(a)
+
+
 @pytest.mark.parametrize("width, room, need, room_mib, bound", [
     (8192, (4 << 20) - 1, "4.0", "3.9", 4), (8200, 4 << 20, "4.1", "4.0", 5)])
 def test_a_table_just_over_the_pair_room_reads_its_need_above_it(
-        request, width, room, need, room_mib, bound):
-    """The 413 rounds the pairs' MiB up and the room's down, so a table a
-    byte over the room, or a few KiB, never reads at or under it."""
+        monkeypatch, request, width, room, need, room_mib, bound):
+    """The 413 rounds the pairs' MiB up and the cap's down, so a table a
+    byte over the cap, or a few KiB, never reads at or under it."""
+    from gmlx.serve import image_service
+
     pipe, _w = _own_pipe()
     _mount(_Host(_served(pipe)), request)
     c = _client()
     body = _big_table(c, 4, width)
-    pipe.adapters.max_bytes = room
+    monkeypatch.setitem(image_service._CACHE_BYTES, "adapter", room)
     with pytest.raises(StepsClientError) as e:
         c.define_table("h3", body)
     assert e.value.status == 413 and e.value.body["error"] == (
@@ -1237,13 +1334,15 @@ def test_the_old_pairs_of_a_lora_file_written_again_take_the_request_room(
     """The entry's LoRA file is written again between two encodes, and
     ComfyUI, which keeps a LoRA it loaded by its path, sends the old pairs
     again with alpha None. The entry reads the new file with its DiT, so
-    the old pairs are no longer its own: they take the request room, and
-    a table of them over it is a 413 with its remedy."""
+    the old pairs are no longer its own: they count against a set
+    server.image.adapter_cache_mb, and a table of them over it is a 413
+    with its remedy."""
     import os
 
     from lora_fixtures import write_keys
     from test_video_h3_lora import _adapter, _comfy_keys
 
+    from gmlx.serve import image_service
     from gmlx.serve.image_service import _pair_keys
 
     path = _lora_file(tmp_path)
@@ -1254,7 +1353,7 @@ def test_the_old_pairs_of_a_lora_file_written_again_take_the_request_room(
     _mount(_Host(served), request)
     _stub_encode(monkeypatch, weights)
     held = pipe.adapters.bytes
-    pipe.adapters.max_bytes = held + held // 2
+    monkeypatch.setitem(image_service._CACHE_BYTES, "adapter", held // 2)
     c = _client()
     body = _table_body(c, _adapter(5), alphas=False)
     c.define_table("h3", body)

@@ -308,7 +308,9 @@ The clip at 1344x768 for 5 seconds needs a Mac with 36 GB or more. On a
 `768x768` in the `fasth3` entry and `width` and `height` to 768 in
 `Prompt and clip size`. Keep the shifts at 10 and 3: on the trained noise
 levels at other shifts, the run stops with an error that names
-`ModelSamplingMiniMaxH3`.
+`ModelSamplingMiniMaxH3`. With `BasicScheduler` in place of `gmlx Sigmas`,
+FastH3 samples at the shifts in force, 12 and 3 without
+`ModelSamplingMiniMaxH3`, as ComfyUI does.
 
 ## The example workflows
 
@@ -342,6 +344,12 @@ to a workflow, double-click an empty part of the canvas, search for
 the MODEL and CLIP outputs of the gmlx loaders to its inputs, and its
 outputs to the nodes that the loaders fed before. The gmlx nodes send each
 LoRA to the server once, so a change of strength costs one small request.
+A LoRA runs when the Mac has the memory for it. One that does not fit is
+refused with the memory it needs, as
+[A LoRA is refused for memory](troubleshooting.md#a-lora-is-refused-for-memory)
+describes. A 503 means the memory is not free yet, and its message says
+what to wait for or what to free: queue the prompt again when that
+finishes, or unload a model or close an app as the message says.
 A LoRA stacks on the LoRA that `gmlx Model Loader` loads with a recipe
 that has one, as `--adapter` does. A `LoraLoader` of the recipe's own
 LoRA file sets its strength in place of the recipe's, so that LoRA

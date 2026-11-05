@@ -276,7 +276,9 @@ def install_with_fakes(monkeypatch, env=None, **kwargs):
     fake_threading = types.SimpleNamespace(
         Thread=lambda **kw: threads.append(kw) or types.SimpleNamespace(
             start=lambda: None),
-        RLock=threading.RLock, Lock=threading.Lock)
+        RLock=threading.RLock, Lock=threading.Lock,
+        Condition=threading.Condition,
+        current_thread=threading.current_thread)
     monkeypatch.setattr(residency, "threading", fake_threading)
     monkeypatch.setattr(residency.atexit, "register", lambda fn: None)
     residency.install_gguf_residency_pool(**kwargs)
@@ -853,14 +855,14 @@ def _h3_entry(monkeypatch, variant, size, seconds, budget=120 * GB,
 _CAPTIONS = 8 * 1024 * 5376 * 2
 
 
-def _cache_terms() -> tuple:
-    """(caches, request pairs) an entry books at a cache share of 1: the
-    tensor caches with the step routes' caches, and the pairs and tables
-    of the LoRAs a request sends."""
+def _cache_term() -> int:
+    """The caches an entry books at a cache share of 1: the tensor caches
+    with the step routes' tensor cache. A request's LoRA bytes are booked
+    at its job's turns, outside it."""
     from gmlx.serve import image_service
 
-    tensor, adapter = image_service.cache_bytes()
-    return 2 * tensor + image_service._CACHE_BYTES["steps"], 2 * adapter
+    tensor, _cap = image_service.cache_bytes()
+    return 2 * tensor + image_service._CACHE_BYTES["steps"]
 
 
 @pytest.mark.parametrize("variant, size, seconds", [
@@ -881,9 +883,9 @@ def test_a_video_entry_is_priced_at_its_largest_phase(monkeypatch, variant,
     clip = vs.plan_clip(got, frames=got.frames, width=got.size[0],
                         height=got.size[1], text=vs.PRICED_TEXT_ROWS)
     dit = clip.terms["denoise"]["dit"] + clip.terms["denoise"]["lora"]
-    caches, pairs = _cache_terms()
+    caches = _cache_term()
     encode = clip.phases["encode"] + caches + _CAPTIONS
-    resident = dit + clip.phases["decode"] + caches + _CAPTIONS + pairs
+    resident = dit + clip.phases["decode"] + caches + _CAPTIONS
     assert got.cache_share == 1.0
     assert got.lora_term == clip.terms["denoise"]["lora"]
     if variant == "h3-base":
@@ -893,16 +895,34 @@ def test_a_video_entry_is_priced_at_its_largest_phase(monkeypatch, variant,
         assert got.footprint == resident and resident > encode
 
 
+@pytest.mark.parametrize("extra", [None, 300_000_000])
+def test_a_video_entrys_own_lora_term_is_its_file_once_alone(monkeypatch,
+                                                              extra):
+    """The footprint books an h3 entry's own LoRA at its file once when it
+    is the one bf16 file, and at lora_k times the files beside a second:
+    the term its books hold its own pairs and default table against."""
+    from gmlx.serve import video_service as vs
+    from gmlx.video import memfit
+
+    got = vs.entry_plan(_h3_entry(monkeypatch, "h3", "768x768", 5,
+                                  extra=extra))
+    own = vs.ServedVideo(pipe=None, spec=None, plan=got).lora_own_term
+    lora = _H3_FILES["lora"]
+    want = lora if extra is None else int(
+        memfit.PEAKS["h3"].lora_k * (lora + extra))
+    assert own == got.lora_term == want
+
+
 def test_the_caches_of_a_tight_video_entry_take_the_room_its_clip_leaves(
         monkeypatch):
     """On a budget the clip fills but for half the room its caches are
     bounded at, the entry books each cache at about half its bound."""
     from gmlx.serve import video_service as vs
 
-    caches, pairs = _cache_terms()
+    caches = _cache_term()
     full = vs.entry_plan(_h3_entry(monkeypatch, "h3", "768x768", 5))
-    bare = full.footprint - caches - pairs
-    budget = bare + (caches + pairs) // 2
+    bare = full.footprint - caches
+    budget = bare + caches // 2
     got = vs.entry_plan(_h3_entry(monkeypatch, "h3", "768x768", 5, budget))
     assert 0.4 < got.cache_share <= 0.5
     assert bare < got.footprint <= budget
@@ -913,9 +933,9 @@ def _bare(monkeypatch, variant, size, seconds) -> tuple:
     it books with every cache empty."""
     from gmlx.serve import video_service as vs
 
-    caches, pairs = _cache_terms()
+    caches = _cache_term()
     full = vs.entry_plan(_h3_entry(monkeypatch, variant, size, seconds))
-    return full, full.footprint - caches - pairs
+    return full, full.footprint - caches
 
 
 # One cond of the priced rows of H3's 5120-wide encoder features in f32,
@@ -948,7 +968,7 @@ def test_a_tight_video_entry_keeps_one_cond_in_the_tensor_cache(
         "defaults.size or defaults.seconds. GMLX_OVERCOMMIT=1 overrides.")
     budget = capacity.ram_budget_bytes(32 << 30)
     got = vs.entry_plan(_h3_entry(monkeypatch, "h3", "1344x768", 5, budget))
-    assert got.cache_share == 36 / 64 and got.footprint <= budget
+    assert got.cache_share == 1.0 and got.footprint <= budget
 
 
 def test_an_entry_with_an_mmproj_books_the_clip_it_books_without_one(
@@ -975,22 +995,26 @@ def _booked(entry) -> int:
     tensor cache's cond floor and the refined text rows."""
     from gmlx.serve import image_service
 
-    caches, _pairs = _cache_terms()
-    tensor, _adapter = image_service.cache_bytes()
+    caches = _cache_term()
+    tensor, _cap = image_service.cache_bytes()
     return (int(caches * entry.cache_share)
             + max(0, entry.tensor_floor - int(tensor * entry.cache_share))
             + _CAPTIONS)
 
 
-@pytest.mark.parametrize("size, beside", [("1344x768", False),
-                                          ("768x768", True)])
+@pytest.mark.parametrize("size, mode, empty, beside", [
+    ("1344x768", "first frame", True, True),
+    ("1344x768", "5-frame guide clip with sound", True, False),
+    ("1344x768", "both keyframes", False, False),
+    ("768x768", "both keyframes", True, True)])
 def test_a_32_gb_h3_entry_runs_a_keyframe_step_beside_the_caches_it_books(
-        monkeypatch, size, beside):
+        monkeypatch, size, mode, empty, beside):
     """docs/comfyui.md: through the pack a step is priced beside the
-    caches the server holds. On a 32 GB Mac an entry of the default clip
-    runs a text to video step beside the caches at the share it books,
-    and a step with a first frame only while they are empty; at 768x768
-    the step with a first frame runs beside them."""
+    caches the server holds. On a 32 GB Mac an entry of the default
+    1344x768 clip runs a step with a first frame beside the caches at the
+    share it books, a step with a 5-frame guide clip with sound only while
+    they are empty, and no step with both keyframes; at 768x768 a step
+    with both runs beside them."""
     from gmlx.serve import capacity
     from gmlx.serve import video_service as vs
     from gmlx.video.families.h3 import family as hf
@@ -1000,21 +1024,26 @@ def test_a_32_gb_h3_entry_runs_a_keyframe_step_beside_the_caches_it_books(
     entry = vs.entry_plan(_h3_entry(monkeypatch, "h3", size, 5, budget))
     w, h = entry.size
     tok = hf.vision_tokens(w, h)
+    first, last = AnchorRows(0, 1, 0), AnchorRows(entry.frames - 1, 1, 0)
+    keyframes, anchors = {
+        "first frame": (1, (first,)), "both keyframes": (2, (first, last)),
+        "5-frame guide clip with sound": (
+            0, (AnchorRows(0, 2, hf.audio_frames(5)),))}[mode]
 
-    def clip(keyframes: int):
+    def clip(anchors=(), keyframes=0):
         return vs.plan_clip(entry, frames=entry.frames, width=w, height=h,
                             text=vs.PRICED_TEXT_ROWS + keyframes * (tok + 8),
-                            anchors=(AnchorRows(0, 1, 0),) * keyframes,
-                            budget=budget)
+                            anchors=anchors, budget=budget)
 
-    def step(keyframes: int) -> int:
-        d = clip(keyframes).terms["denoise"]
-        return int(d["dit"] + d["lora"] + d["step"])
-    # The prompt's keyframe block and the first frame's latent rows.
-    assert clip(1).rows == clip(0).rows + (tok + 8) + tok
-    assert step(0) + _booked(entry) <= budget
-    assert step(1) <= budget
-    assert (step(1) + _booked(entry) <= budget) == beside
+    d = clip(anchors, keyframes).terms["denoise"]
+    step = int(d["dit"] + d["lora"] + d["step"])
+    # The prompt's keyframe blocks and the anchors' latent rows.
+    assert clip(anchors, keyframes).rows == clip().rows + keyframes * (
+        tok + 8) + sum(a.video_t * tok + 2 * a.audio_t for a in anchors)
+    d = clip().terms["denoise"]
+    assert int(d["dit"] + d["lora"] + d["step"]) + _booked(entry) <= budget
+    assert (step <= budget, step + _booked(entry) <= budget) == (empty,
+                                                                 beside)
 
 
 @pytest.mark.parametrize("steps_api, tensor_mb, floor", [
@@ -1046,24 +1075,28 @@ def test_a_video_entry_keeps_cond_room_only_in_a_tensor_cache_it_has(
                                 bare + floor - 1))
 
 
-def test_fasth3_at_1344x768_fits_a_36_gb_mac_with_one_cond_floored(
+def test_fasth3_at_1344x768_fits_a_36_gb_mac_and_floors_a_cond_when_tight(
         monkeypatch):
-    """FastH3 at 1344x768 for 5 s fits a 36 GB Mac's budget at a share of
-    12/64. The tensor cache's share holds 12 MiB, so the entry books the
+    """FastH3 at 1344x768 for 5 s fits a 36 GB Mac's budget with each cache
+    at its whole bound. On a budget that leaves its caches 12/64 of their
+    bounds, the tensor cache's share holds 12 MiB, so the entry books the
     8 MiB a cond needs beside it, there alone."""
     from gmlx.serve import capacity, image_service
     from gmlx.serve import video_service as vs
 
-    _full, bare = _bare(monkeypatch, "fasth3", "1344x768", 5)
+    full, bare = _bare(monkeypatch, "fasth3", "1344x768", 5)
     budget = capacity.ram_budget_bytes(36 << 30)
     got = vs.entry_plan(_h3_entry(monkeypatch, "fasth3", "1344x768", 5,
                                   budget))
-    caches, pairs = _cache_terms()
-    tensor, _adapter = image_service.cache_bytes()
+    assert (got.cache_share, got.footprint) == (1.0, full.footprint)
+    assert got.footprint <= budget
+    caches = _cache_term()
+    tensor, _cap = image_service.cache_bytes()
     share = 12 / 64
-    assert got.cache_share == share
-    assert got.footprint == (bare + int(caches * share) + int(pairs * share)
-                             + _COND - int(tensor * share)) <= budget
+    tight = bare + int(caches * share) + _COND - int(tensor * share)
+    got = vs.entry_plan(_h3_entry(monkeypatch, "fasth3", "1344x768", 5,
+                                  tight))
+    assert (got.cache_share, got.footprint) == (share, tight)
 
 
 @pytest.mark.parametrize("under", ["cond", "clip"])
@@ -1086,8 +1119,8 @@ def test_overcommit_admits_a_video_entry_over_its_budget_at_full_caches(
 def test_a_32_gb_server_entry_has_the_lora_room_the_video_page_gives(
         monkeypatch, variant, extra, fits):
     """docs/video.md: on a 32 GB Mac an entry whose default clip is
-    768x768 for 5 s has room for a bf16 LoRA file of up to 3 GB beside
-    h3-base, and none beside h3, whose own LoRA it stacks on."""
+    768x768 for 5 s has room in its adapters for a bf16 LoRA file of up to
+    3 GB beside h3-base, and none beside h3, whose own LoRA it stacks on."""
     from gmlx.serve import capacity
     from gmlx.serve import video_service as vs
     from gmlx.video import memfit
@@ -1100,6 +1133,23 @@ def test_a_32_gb_server_entry_has_the_lora_room_the_video_page_gives(
     else:
         with pytest.raises(memfit.VideoMemoryError):
             vs.entry_plan(spec)
+
+
+@pytest.mark.parametrize("variant, free", [("h3-base", 1.4), ("h3", 1.2)])
+def test_a_32_gb_server_entry_leaves_the_free_memory_the_video_page_gives(
+        monkeypatch, variant, free):
+    """docs/video.md: on a 32 GB Mac an entry whose default clip is
+    768x768 for 5 s leaves about 1.4 GB free beside h3-base and 1.2 GB
+    beside h3, the memory a request's LoRA is booked in when it arrives.
+    The entry reserves none for request LoRAs at load."""
+    from gmlx.serve import capacity
+    from gmlx.serve import video_service as vs
+
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    budget = capacity.ram_budget_bytes(32 << 30)
+    plan = vs.entry_plan(_h3_entry(monkeypatch, variant, "768x768", 5,
+                                   budget))
+    assert round((budget - plan.footprint) / 1e9, 1) == free
 
 
 def test_an_image_route_names_a_video_id_as_no_image_model(request):
@@ -1124,7 +1174,7 @@ def test_resolve_pool_path_takes_either_kind(mixed_cfg):
 
 def test_the_chat_warm_never_loads_an_image_model(monkeypatch, mixed_cfg):
     """Every chat, Messages and Responses route warms its model through
-    _warm_and_release; an image id there loads nothing and evicts nothing,
+    _load_resident; an image id there loads nothing and evicts nothing,
     and the route answers it 400. Keep and preload still load it."""
     import importlib
 
@@ -1136,7 +1186,7 @@ def test_the_chat_warm_never_loads_an_image_model(monkeypatch, mixed_cfg):
     app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     monkeypatch.setattr(app, "get_cached_model",
                         lambda *a, **k: loads.append(("chat",) + a))
-    sp_routes._warm_and_release("zit", app._INHERIT_ADAPTER)
+    assert sp_routes._load_resident("zit", app._INHERIT_ADAPTER) is None
     assert loads == []
     sp_routes._spawn_keep_warm("zit").join(timeout=5)
     assert loads == [("image", "zit")]

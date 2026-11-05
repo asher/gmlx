@@ -165,8 +165,11 @@ adapter, which sets that adapter's strength for the request:
 An absolute path gets 400, and so does a request LoRA with text encoder
 layers. List that one in the entry's `adapters`, where both halves apply.
 LoHa, LoKr, DoRA and the other kinds that are not plain LoRA pairs are
-refused by name, as is a LoRA of another model. ComfyUI takes LoRAs as
-[LoRAs](comfyui.md#loras) describes.
+refused by name, as is a LoRA of another model. The server books a
+request LoRA's memory when its job runs, before it reads the file, and
+refuses one that does not fit with the memory it needs, as
+[A LoRA is refused for memory](troubleshooting.md#a-lora-is-refused-for-memory)
+describes. ComfyUI takes LoRAs as [LoRAs](comfyui.md#loras) describes.
 
 ## Prompt upsampling
 

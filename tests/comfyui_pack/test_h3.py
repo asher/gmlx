@@ -271,6 +271,27 @@ class Sampling(Base):
         self.custom(model, own)
         self.assertEqual(len(self.stub.events("av_step")), 4)
 
+    def test_fasth3_on_basic_scheduler_without_the_shift_node_runs_at_12_and_3(self):
+        """BasicScheduler on FastH3 with no ModelSamplingMiniMaxH3 makes a
+        schedule of its own at the DiT's shifts, 12 and 3, which is no run of
+        FastH3's trained sigmas. The guard lets it run, and every step goes at
+        12 and 3 as ComfyUI's forward would take them, with one warning in
+        the log that names the trained shifts."""
+        model = self.model(FID)
+        sig = _out(CS.BasicScheduler.execute(model, "simple", 8, 1.0))[0]
+        with self.assertLogs("gmlx", "WARNING") as logs:
+            self.custom(model, sig)
+        self.assertEqual(logs.output, [
+            "WARNING:gmlx:gmlx: 'fasth3' samples on its trained sigmas at the shifts 10 and 3, "
+            "and this run is at 12 and 3 on a schedule of its own; to sample as trained, put "
+            "ModelSamplingMiniMaxH3 on the model at 10 and 3 and sample on gmlx Sigmas"])
+        steps = self.stub.events("av_step")
+        self.assertEqual(len(steps), 8)
+        for e, s in zip(steps, sig[:-1].tolist()):
+            self.assertAlmostEqual(e["timestep"], s * 1000, places=2)
+            self.assertEqual(e["shifts"], {"video": 12.0, "audio": 3.0})
+            self.assertAlmostEqual(e["audio_scale"], 4.0, places=5)
+
     def _forward(self, model, to: dict):
         """One forward of the model's DiT with ``to``, as a sampler calls it."""
         mm.load_models_gpu([model])

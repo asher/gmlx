@@ -97,6 +97,9 @@ class VideoFamily:
     # kind) for a LoRA file gmlx refuses, or None.
     lora_map: Callable | None = None
     lora_refusal: Callable | None = None
+    # Path patterns (fnmatch) of the linear leaves that see float32 rows
+    # under any activation dtype, as the image Family has them.
+    lora_f32: tuple = ()
     # The name ending of the VSA gate tensors, which only the files of a
     # VSA variant carry.
     vsa_gate: str = ""
