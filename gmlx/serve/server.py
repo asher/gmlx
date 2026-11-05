@@ -1602,6 +1602,8 @@ def register_downloads(paths: list, config_path=None, *,
             pr = pairs.get(os.path.abspath(m.path), {})
             if pr.get("mmproj"):
                 m.mmproj = pr["mmproj"]
+            if pr.get("speculative") is False:
+                m.speculative = m.speculative_auto = False
             if pr.get("draft_gguf"):
                 if m.stream:
                     print(f"{os.path.basename(pr['draft_gguf'])} is not set for "

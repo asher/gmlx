@@ -111,6 +111,7 @@ class Model:
     heads: int = 0
     trained_ctx: int = 0
     preferred_at: tuple = ()         # (memory class, tier) pairs, over preferred on that class
+    head_from_class: int = 0         # the smallest memory class that keeps the native head on
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,7 @@ class PullPlan:
     mmproj: bool
     drafter: bool
     streaming: bool
+    head: bool = True                # the native head speculates
 
 
 @dataclass(frozen=True)
@@ -553,12 +555,20 @@ def has_head(m: Model, r: Rung) -> bool:
     return m.native_mtp or r.head
 
 
-def speculates(m: Model, r: Rung, drafter_on: bool, streaming: bool = False) -> bool:
+def speculates(m: Model, r: Rung, drafter_on: bool, streaming: bool = False,
+               head: bool = True) -> bool:
     """Whether a plan on ``r`` speculates: never from the SSD; else with a
-    native head, or with the drafter add-on on."""
+    native head the plan keeps on, or with the drafter add-on on."""
     if streaming:
         return False
-    return has_head(m, r) or (drafter_on and m.drafter is not None)
+    return (head and has_head(m, r)) or (drafter_on and m.drafter is not None)
+
+
+def head_on(m: Model, box: Box) -> bool:
+    """Whether a plan on ``box`` keeps the native head: off below the
+    entry's ``head_from_class``, where the head would take the room a
+    long prompt needs."""
+    return memory_class(box.ram) >= m.head_from_class
 
 
 def resident_bytes(m: Model, r: Rung, speculative: bool) -> int:
@@ -731,12 +741,15 @@ def default_plan(m: Model, box: Box) -> PullPlan | None:
     fits in memory, the lowest tier that streams, else the largest
     compact quant that streams, with both add-ons off."""
     compacts = sorted(compact_candidates(m), key=lambda r: r.bytes, reverse=True)
+    head = head_on(m, box)
     for mm, dr in _addon_sets(m):
+        if dr and not head:
+            continue
         addon = addon_bytes(m, mm, dr)
         for r in _ladder(m, box) + compacts:
             if (rung_state(m, r, box) == RESIDENT
-                    and fits_with(m, r, box, addon, speculates(m, r, dr))):
-                return PullPlan(m, r, mm, dr, False)
+                    and fits_with(m, r, box, addon, speculates(m, r, dr, head=head))):
+                return PullPlan(m, r, mm, dr, False, head)
     ladder = tiers(m) if has_tiers(m) else list(m.rungs)
     for r in sorted(ladder, key=lambda r: r.bytes) + compacts:
         if rung_state(m, r, box) == STREAMS:
@@ -968,7 +981,7 @@ def plan_for(m: Model, box: Box, *, quant: str | None = None,
         d_mm, d_dr = False, False
     return PullPlan(m, rung,
                     d_mm if mmproj is None else bool(mmproj),
-                    d_dr if drafter is None else bool(drafter), False)
+                    d_dr if drafter is None else bool(drafter), False, head_on(m, box))
 
 
 def plan_command(plan: PullPlan, box: Box) -> str:
@@ -995,7 +1008,7 @@ def plan_addon_bytes(plan: PullPlan) -> int:
 
 
 def plan_speculates(plan: PullPlan) -> bool:
-    return speculates(plan.model, plan.rung, plan.drafter, plan.streaming)
+    return speculates(plan.model, plan.rung, plan.drafter, plan.streaming, plan.head)
 
 
 def plan_bytes(plan: PullPlan) -> int:
@@ -1045,6 +1058,8 @@ def plan_pairs(plan: PullPlan, base_dir: str, nest: bool) -> dict:
         pairs["draft_gguf"] = dest_path(m.drafter.repo, m.drafter.file, base_dir, nest)
     if m.asr is not None:
         pairs["asr"] = dest_path(m.asr.repo, m.asr.file, base_dir, nest)
+    if not plan.head and has_head(m, plan.rung) and not plan.drafter:
+        pairs["speculative"] = False
     return {model_path: pairs}
 
 
@@ -1097,7 +1112,7 @@ def rung_rows(m: Model, box: Box, dp: PullPlan | None, addon: int) -> list:
     pool = m.rungs if not has_tiers(m) else tiers(m)
     rows = []
     for r in sorted(set(pool) | set(shown_rungs(m, box)), key=lambda r: r.bytes):
-        label, note = rung_label(m, r, box, addon, speculates(m, r, dr))
+        label, note = rung_label(m, r, box, addon, speculates(m, r, dr, head=head_on(m, box)))
         mark = "  default" if dp is not None and r == dp.rung else ""
         name = r.tier or "compact" if has_tiers(m) else r.quant
         quant = r.quant if has_tiers(m) else ""

@@ -1769,7 +1769,8 @@ def _rung_json(m, r, box, addon: int, drafter_on: bool) -> dict:
     from gmlx.load import catalog as pc
 
     state = pc.rung_state(m, r, box)
-    ctx = (pc.context_estimate(m, r, box, addon, pc.speculates(m, r, drafter_on))
+    spec = pc.speculates(m, r, drafter_on, head=pc.head_on(m, box))
+    ctx = (pc.context_estimate(m, r, box, addon, spec)
            if state == pc.RESIDENT else None)
     return {"quant": r.quant, "tier": r.tier or None, "bytes": r.bytes, "state": state,
             "needs_gb": pc.needs_class(m, r) if state == pc.OVER else None,
@@ -1968,7 +1969,7 @@ def _pull_recommended(a) -> int:
         streaming = pc.rung_state(m, r, box) != pc.RESIDENT
         mm, dr = "vision" in on_ids, "drafter" in on_ids and not streaming
         return pc.rung_label(m, r, box, pc.addon_bytes(m, mm, dr),
-                             pc.speculates(m, r, dr, streaming))
+                             pc.speculates(m, r, dr, streaming, pc.head_on(m, box)))
 
     def footer(row, rung, on_ids):
         if pc.model(row.id) is None:

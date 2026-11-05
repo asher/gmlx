@@ -555,6 +555,25 @@ def test_a_speech_companion_rides_every_plan(tmp_path):
     assert per_ref[refs[-1]] == (0, G(0.88), False) and remaining == catalog.plan_bytes(plan)
 
 
+def test_a_head_off_class_plans_text_and_companions_only(tmp_path):
+    """Below ``head_from_class`` the plan keeps the native head off, never
+    takes the drafter, prices no head block and registers speculation off."""
+    m = dataclasses.replace(DENSE, head_from_class=48)
+    small = catalog.default_plan(m, box(32))
+    assert small is not None and not small.head and not small.drafter
+    assert not catalog.plan_speculates(small)
+    assert catalog.resident_bytes(m, small.rung, catalog.plan_speculates(small)) == \
+        small.rung.text_bytes
+    assert catalog.plan_for(m, box(32), mmproj=False).head is False
+    pairs = catalog.plan_pairs(small, str(tmp_path), True)
+    assert next(iter(pairs.values()))["speculative"] is False
+    big = catalog.default_plan(m, box(64))
+    assert big.head and catalog.plan_speculates(big)
+    assert "speculative" not in next(iter(catalog.plan_pairs(big, str(tmp_path), True).values()))
+    # An entry without the field keeps its head everywhere.
+    assert catalog.default_plan(DENSE, box(32)).head
+
+
 # -- text ----------------------------------------------------------------------------
 
 def test_recommendation_and_entry_text_are_plain(small_catalog):
