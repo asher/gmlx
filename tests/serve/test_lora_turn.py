@@ -275,7 +275,7 @@ def test_an_unload_drops_the_ledger(monkeypatch):
     assert pool.figures.lora == 0 and pool.figures.entries == ()
 
 
-def test_a_settle_past_the_booking_logs_an_overrun(monkeypatch):
+def test_a_settle_past_the_booking_logs_an_overrun(monkeypatch, caplog):
     pool = make_pool(monkeypatch, 10)
     got = []
     pool.overrun_hook = lambda subject, n: got.append(n)
@@ -285,8 +285,12 @@ def test_a_settle_past_the_booking_logs_an_overrun(monkeypatch):
         pool.lora_turn(e, GB, subject="s")
         pool.caches["x"].items["a"] = 2 * GB
         pool.lora_settle(e, "s")
-    on_worker(run)
+    with caplog.at_level("INFO", logger=residency._log.name):
+        on_worker(run)
     assert got == [GB]
+    assert [r.getMessage() for r in caplog.records
+            if "past their turn's booking" in r.getMessage()] == [
+        "s hold 1000.0 MB of LoRA memory past their turn's booking"]
 
 
 def test_a_job_that_raises_after_its_turn_leaves_nothing_pending(
@@ -645,22 +649,26 @@ def test_the_budget_503_names_no_pinned_model_in_use(monkeypatch):
     assert w.timeouts == []
 
 
+@pytest.mark.parametrize("back", [True, False])
 def test_a_turn_whose_build_lock_stays_held_past_its_deadline_says_so(
-        monkeypatch):
+        monkeypatch, back):
     """A turn left short by the working set while an unload holds the
-    build lock past the deadline, with the memory back by then: the 503
-    says a load or unload held it up, and names no free figure over its
-    need."""
+    build lock past the deadline: with the memory back by then, the 503
+    says a load or unload held it up, and with it still short, it names
+    the working set's room. Neither names a free figure over its need."""
     pool = make_pool(monkeypatch, 10, retry=0)
     x = image(pool, "x", 4, busy=True)
-    heads = iter([GB // 2, 5 * GB])
+    heads = iter([GB // 2, 5 * GB if back else GB // 2])
     pool._headroom_fn = lambda: next(heads)
     with pool._build_lock:
         with pytest.raises(LoraRefused) as ei:
             turn(pool, x, GB)
     assert (ei.value.status, ei.value.message) == (
-        503, "the test's LoRA need 1.0 GB of memory, and the server is "
-        "loading or unloading another model now; retry when it is done")
+        503, "the test's LoRA need 1.0 GB of memory, and " + (
+            "the server is loading or unloading another model now; retry "
+            "when it is done" if back else
+            "0.5 GB is free in the working set now; close other apps or "
+            "unload a model to make room"))
     assert x.lora.pending == 0
 
 
