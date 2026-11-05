@@ -626,7 +626,7 @@ def test_fa_verify_hd128_eligibility_by_fold(qL, hq, hkv, below, from_kv):
     (2, 32, 1),
     (5, 64, 2),    # a group of 32 at 160 rows: four chunks
     (2, 16, 2),    # 16 rows at 2 KV heads
-    (9, 32, 2),    # past the kernel's q_len (the split takes it)
+    (9, 32, 2),    # past the kernel's q_len
 ])
 def test_fa_verify_hd128_stays_stock(qL, hq, hkv):
     q, k, v = _rand(qL, kL=65536, hq=hq, hkv=hkv, d=128)
@@ -659,44 +659,6 @@ def test_fa_verify_hd128_kill_switch(monkeypatch):
     assert grew == ["stock"], grew
     err = mx.abs(out.astype(mx.float32) - _ref(q, k, v, True, scale=scale)).max().item()
     assert err < 2e-2
-
-
-@_NEEDS_FA
-@pytest.mark.parametrize("hq,hkv,kL,chunks", [
-    (32, 2, 1024, 2),    # nemotron-h MTP, 8 drafts
-    (32, 4, 4096, 1),
-    (32, 2, 16384, 2),
-])
-def test_fa_verify_split9_matches_reference(hq, hkv, kL, chunks):
-    scale = 128**-0.5
-    q, k, v = _rand(9, kL=kL, hq=hq, hkv=hkv, d=128)
-    out, grew = _routed_sdpa(q, k, v, scale)
-    assert grew[0] == f"fa_verify_split(chunks={chunks})", grew
-    ref = _ref(q, k, v, True, scale=scale)
-    err = mx.abs(out.astype(mx.float32) - ref).max().item()
-    assert err < 2e-2, f"hq/hkv={hq}/{hkv} kL={kL} err={err}"
-
-
-@pytest.mark.parametrize("hq,hkv,kL,want", [
-    (32, 2, 1023, False),   # gqa 16 from 1024 keys
-    (32, 2, 1024, True),
-    (32, 4, 4095, False),   # gqa 8 from 4096
-    (32, 4, 4096, True),
-    (32, 8, 65536, False),  # gqa 4: an 8-row fold stock fuses
-    (32, 1, 65536, False),  # one KV head
-])
-def test_fa_verify_split9_eligibility(hq, hkv, kL, want):
-    q, k, v = _rand(9, kL=kL, hq=hq, hkv=hkv, d=128)
-    assert attn_hd512._fa_split9_eligible(q, k, v, "causal") is want
-    assert not attn_hd512._fa_split9_eligible(q, k, v, None)
-
-
-@_NEEDS_FA
-def test_fa_verify_split9_kill_switch(monkeypatch):
-    q, k, v = _rand(9, kL=4096, hq=32, hkv=2, d=128)
-    monkeypatch.setattr(attn_hd512, "_VERIFY_FA", False)
-    _, grew = _routed_sdpa(q, k, v, 128**-0.5)
-    assert grew == ["stock"], grew
 
 
 def test_stock_depth_warning_hd128(capsys, monkeypatch):
