@@ -1,7 +1,11 @@
 """``gmlx video generate``: the clip length, size, shift and seed
 parsers, the settings from the flags, the entry and the variant, the
 config entry, the refusals that come before the text encoder loads, and
-the decode and mux of a run with every model replaced. CPU."""
+the decode and mux of a run with every model replaced. Keyframes and
+guides: their flags, their refusals before any load, their memory plan,
+and a run with them through the encoder, the VAEs and the DiT, in that
+order, the guide files read by the system ffmpeg (skipped without it).
+CPU."""
 from __future__ import annotations
 
 import argparse
@@ -9,7 +13,10 @@ import dataclasses
 import json
 import os
 import re
+import shutil
 import struct
+import subprocess
+import wave
 
 import numpy as np
 import pytest
@@ -872,3 +879,308 @@ def test_the_cache_bound_holds_for_the_run_and_is_restored(planned):
         assert _cache_limit() == prior
     finally:
         mx.set_cache_limit(first)
+
+
+@pytest.mark.parametrize("text, ok", [
+    ("18446744073709551615", True), ("0", True),
+    ("18446744073709551616", False), ("-1", False), ("seven", False)])
+def test_a_seed_is_a_64_bit_integer_as_comfyuis_is(text, ok):
+    if ok:
+        assert cmd._seed(text) == int(text)
+        return
+    with pytest.raises(argparse.ArgumentTypeError, match=re.escape(
+            f"an integer from 0 to 18446744073709551615 is required, got "
+            f"{text!r}")):
+        cmd._seed(text)
+
+
+@pytest.mark.parametrize("text, want", [
+    ("clip.mp4@12", ("clip.mp4", 12)), ("clip.mp4@-17", ("clip.mp4", -17)),
+    ("clip.mp4", ("clip.mp4", 0)), ("me@home.png", ("me@home.png", 0)),
+    ("take@2/clip.mp4@3", ("take@2/clip.mp4", 3)),
+    ("clip.mp4@+3", ("clip.mp4@+3", 0))])
+def test_only_an_integer_after_the_last_at_is_a_frame(text, want):
+    assert cmd._at(text) == want
+
+
+def _ffmpeg() -> str:
+    exe = shutil.which("ffmpeg")
+    if exe is None:
+        pytest.skip("no ffmpeg on PATH")
+    return exe
+
+
+def _png(path, w, h, seed=0) -> str:
+    from PIL import Image
+
+    rng = np.random.default_rng(seed)
+    Image.fromarray(rng.integers(0, 256, (h, w, 3), dtype=np.uint8)).save(
+        path)
+    return str(path)
+
+
+def _wav(path, seconds, channels=1, rate=32000) -> str:
+    t = np.arange(int(rate * seconds)) / rate
+    x = np.stack([0.4 * np.sin(2 * np.pi * (330 + 110 * c) * t)
+                  for c in range(channels)], -1)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes((x * 32767).astype("<i2").tobytes())
+    return str(path)
+
+
+def _clip(path, frames, sound=True) -> str:
+    """A 64x48 clip of ``frames`` frames at 24 fps, with ``frames`` / 24 s
+    of 16-bit stereo sound when ``sound``, in a MOV so its length is
+    exact."""
+    ff = _ffmpeg()
+    sec = f"{frames / 24:.6f}"
+    args = ["-f", "lavfi", "-i", "testsrc=size=64x48:rate=24"]
+    if sound:
+        args += ["-f", "lavfi", "-i", "sine=frequency=330:sample_rate=32000",
+                 "-ac", "2", "-c:a", "pcm_s16le"]
+    subprocess.run([ff, "-v", "error", "-nostdin", "-y", *args, "-t", sec,
+                    "-frames:v", str(frames), "-pix_fmt", "yuv420p",
+                    str(path)], check=True)
+    return str(path)
+
+
+def test_fasth3_refuses_anchors_before_any_load(run, monkeypatch, tmp_path,
+                                                capsys):
+    vsa_kernel(monkeypatch)
+    sound = _wav(tmp_path / "a.wav", 0.1)
+    assert run("--guide-audio", sound, variant=hf.FASTH3) == 1
+    assert run.loads == []
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        "error: MiniMax-H3 fasth3 runs text to video only, and this request "
+        "has 1 anchor; run it without keyframes, guides or audio anchors")
+
+
+def test_a_keyframe_needs_the_mmproj_and_a_preview_the_vae(
+        files, tmp_path, monkeypatch, capsys):
+    from gmlx.video import loader
+
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **kw: (
+        vfp.identify(fixture_view(H3_HEADER), **kw)))
+    still = _png(tmp_path / "f.png", 64, 48)
+    base = [files["model"], "--prompt", "a cat", "--frames-dir",
+            str(tmp_path / "out"), "--encoder", files["--encoder"],
+            "--audio-vae", files["--audio-vae"]]
+    assert cmd.cmd_generate([*base, "--vae", files["--vae"],
+                             "--first-frame", still]) == 2
+    assert capsys.readouterr().err.splitlines()[-1].endswith(
+        "error: --first-frame needs the encoder's vision tower: pass "
+        "--mmproj, or name encoder_mmproj in the entry")
+    assert cmd.cmd_generate([*base, "--preview", files["--vae"],
+                             "--guide", still]) == 2
+    assert capsys.readouterr().err.splitlines()[-1].endswith(
+        "error: --vae is required with --preview and --guide, whose anchor "
+        "encodes through the video VAE")
+
+
+@pytest.mark.parametrize("argv, why", [
+    (["--guide", "{clip}@20"], "--guide {clip}: a 22-frame guide clip at "
+                               "frame 20 does not fit in the clip's 39 "
+                               "frames"),
+    (["--guide", "{long}"], "--guide {long}: a guide clip of 56 or more "
+                            "frames at frame 0 does not fit in the clip's "
+                            "39 frames"),
+    (["--guide", "{clip}@39"], "--guide {clip}: frame 39 is outside the "
+                               "clip's 39 frames"),
+    (["--guide-audio", "{clip}@-39", "--guide-audio", "{still}"],
+     "{still} has no audio stream")])
+def test_a_guide_that_does_not_fit_is_refused_before_any_load(
+        run, tmp_path, capsys, argv, why):
+    """ComfyUI's guide bound on a 39-frame clip: a 30-frame guide keeps 22
+    frames, a guide read to its bound holds more than fits, and a frame
+    off the clip; and a file without sound as an audio guide."""
+    paths = {"clip": _clip(tmp_path / "clip.mov", 30),
+             "long": _clip(tmp_path / "long.mov", 80, sound=False),
+             "still": _png(tmp_path / "s.png", 64, 48)}
+    argv = [x.format(**paths) for x in argv]
+    assert run("--frames", "39", *argv) == 1
+    assert run.loads == []
+    err = capsys.readouterr().err.splitlines()[-1]
+    assert err.startswith("error: " + why.format(**paths)), err
+
+
+class _Recorded(_VAE):
+    """A VAE that records its loads and encodes: frames to one latent
+    frame for a still and the clip grid's for a clip, a waveform to a
+    latent per 800 samples, read with a 12 latent halo."""
+    halo = 12
+
+    def __init__(self, family, order):
+        super().__init__()
+        self.family, self.order, self.encoded = family, order, []
+
+    def samples_for(self, latents):
+        return (latents + self.halo) * 800
+
+    def encode(self, x):
+        import mlx.core as mx
+
+        self.encoded.append(tuple(x.shape))
+        if self.family == "h3_audio":
+            return mx.zeros((1, 32, 2, -(-x.shape[-1] // 800)))
+        t = x.shape[1]
+        return mx.zeros((1, 24, 1 if t == 1 else hf.latent_frames(t),
+                         x.shape[2] // 16, x.shape[3] // 16))
+
+
+@pytest.fixture
+def anchored(stubbed, monkeypatch, tmp_path):
+    """``stubbed`` with the loads, the releases and the encodes recorded
+    in order, the keyframe encode replaced, and a 39-frame 32x32 clip."""
+    import mlx.core as mx
+
+    from gmlx.video import encoder, memfit, pipeline
+    from gmlx.video.families.h3 import keyframes
+    from gmlx.video.vae import reader
+
+    order: list = []
+    seen: dict = {"vae": {}}
+
+    class Handle(_Handle):
+        def release(self):
+            order.append("release")
+
+    def load_encoder(fam, path, **kw):
+        order.append("encoder")
+        seen["mmproj"] = kw.get("mmproj")
+        return Handle()
+
+    def keyframe_encode(handle, prompt, images):
+        seen["keyframes"] = images
+        return mx.zeros((1, 9, 8)), ((0, 4),)
+
+    def load_vae(path, family, dtype):
+        order.append(family)
+        return seen["vae"].setdefault(family, _Recorded(family, order))
+
+    def generate(pipe, feats, **kw):
+        seen["generate"] = kw
+        return mx.zeros((1, 24, 2, 2, 2)), mx.zeros((1, 32, 2, 1))
+
+    monkeypatch.setattr(encoder, "load_encoder", load_encoder)
+    monkeypatch.setattr(keyframes, "encode", keyframe_encode)
+    monkeypatch.setattr(reader, "load_vae", load_vae)
+    monkeypatch.setattr(pipeline, "load", lambda path, **kw: (
+        order.append("dit") or object()))
+    monkeypatch.setattr(pipeline, "generate", generate)
+    monkeypatch.setattr(memfit, "tower_bytes", lambda p: 1 << 20)
+    mm = tmp_path / "mm.gguf"
+    mm.write_bytes(b"x")
+
+    def go(*argv):
+        return stubbed("--frames", "39", "--frames-dir",
+                       str(tmp_path / "out"), "--mmproj", str(mm), *argv)
+    go.order, go.seen = order, seen
+    return go
+
+
+@pytest.mark.parametrize("quiet", [False, True], ids=["sound", "no-sound"])
+def test_a_run_encodes_its_anchors_between_the_encoder_and_the_dit(
+        anchored, tmp_path, capsys, quiet):
+    """Both keyframes, a guide clip with its sound and an audio guide at a
+    frame from the end: the encoder loads with the mmproj and sees the
+    keyframes resized as ComfyUI resizes them, the video VAE then the
+    audio VAE encode the anchors after the encoder's release and before
+    the DiT loads, the audio guide is read past its kept latents' halo,
+    and the DiT gets the anchors in the flags' order with the spans and
+    the seed."""
+    from gmlx.video import images
+
+    first = _png(tmp_path / "first.png", 64, 48, seed=1)
+    last = _png(tmp_path / "last.png", 96, 48, seed=2)
+    clip = _clip(tmp_path / "clip.mov", 30)
+    sound = _wav(tmp_path / "long.wav", 3.0)
+    argv = ["--first-frame", first, "--last-frame", last, "--guide",
+            f"{clip}@4", "--guide-audio", f"{sound}@-35", "--json"]
+    assert anchored(*argv, *(["--guide-no-audio"] if quiet else [])) == 0
+    assert anchored.order == ["encoder", "release", "h3", "h3_audio", "dit",
+                              "h3_audio", "h3"]
+    seen = anchored.seen
+    assert seen["mmproj"] == str(tmp_path / "mm.gguf")
+    np.testing.assert_array_equal(seen["keyframes"][0], images.stretch(
+        images.read(first), 32, 32))
+    np.testing.assert_array_equal(seen["keyframes"][1], images.cover(
+        images.read(last), 32, 32))
+    video = seen["vae"]["h3"].encoded
+    assert video == [(1, 1, 32, 32, 3), (1, 1, 32, 32, 3),
+                     (1, 22, 32, 32, 3)]
+    # The clip's 1.25 s of sound is short of its kept latents; the audio
+    # guide at frame 4 keeps 58 latents and is read to their halo.
+    sounds = seen["vae"]["h3_audio"].encoded
+    assert sounds == ([] if quiet else [(1, 2, 40000)]) + [
+        (1, 2, (58 + 12) * 800)]
+    gen = seen["generate"]
+    assert gen["seed"] == 3 and gen["spans"] == ((0, 4),)
+    got = [(x.frame, None if x.video is None else x.video.shape[2],
+            None if x.audio is None else x.audio.shape[-1])
+           for x in gen["anchors"]]
+    assert got == [(0, 1, None), (38, 1, None),
+                   (4, 7, None if quiet else 50), (4, None, 58)]
+    rec = json.loads(capsys.readouterr().out)
+    assert [(r["flag"], r["frame"], r["frames"], r["audio_latents"])
+            for r in rec["anchors"]] == [
+        ("--first-frame", 0, 1, 0), ("--last-frame", 38, 1, 0),
+        ("--guide", 4, 22, 0 if quiet else 50), ("--guide-audio", 4, 0, 58)]
+
+
+def test_the_memory_plan_prices_the_anchors_the_run_encodes(
+        planned, tmp_path, monkeypatch):
+    """A first frame at 512x320 adds its vision rows to the prompt and its
+    block to the encode, through the mmproj; a guide image is one more
+    frame to encode, and a half-second audio guide its 20 latents, not
+    the 207 the clip leaves it."""
+    from gmlx.video import memfit
+
+    monkeypatch.setattr(memfit, "tower_bytes", lambda p: 5 << 20)
+    with open(tmp_path / "mm.gguf", "wb") as f:
+        f.truncate(3 << 20)
+    still = _png(tmp_path / "f.png", 64, 48)
+    _ffmpeg()
+    sound = _wav(tmp_path / "a.wav", 0.5)
+    assert planned(*planned.files, "--prompt", "a cat", "--size", "512x320",
+                   "--mmproj", "~/mm.gguf", "--first-frame", still,
+                   "--guide", f"{still}@60", "--guide-audio",
+                   sound) == "encoder"
+    k = planned.seen["plan"]
+    tok = hf.vision_tokens(512, 320)
+    assert k["blocks"] == (tok,)
+    assert (k["mmproj"], k["tower"]) == (3 << 20, 5 << 20)
+    assert k["text"] == memfit.prompt_rows(hf.FAMILY, "a cat",
+                                           gguf_tokenizer(), [(512, 320)])
+    assert k["text"] >= memfit.prompt_rows(hf.FAMILY, "a cat",
+                                           gguf_tokenizer()) + tok + 8
+    assert k["anchor_frames"] == [1, 1] and k["anchor_audio"] == [20]
+    assert planned.seen["order"] == ["writable", "check", "encoder"]
+
+
+def test_a_run_with_anchors_hints_no_shorter_clip(run, monkeypatch, files,
+                                                  tmp_path, capsys):
+    """A shorter clip moves the last frame and can drop a guide, so the
+    hint of a run with anchors names no shorter clip: with a 7 GB LoRA on
+    a 32 GB Mac a 768x768 clip fits at 73 frames and not at 124. A LoRA
+    that leaves no clip at all is named with anchors as without."""
+    from gmlx.video import pipeline
+
+    monkeypatch.setattr(pipeline, "vet_adapter", lambda *a, **k: None)
+    _pinned(files, "h3", monkeypatch, 32)
+    still = _png(tmp_path / "g.png", 64, 48)
+    lora = _bf16_lora(tmp_path / "style.safetensors", 7_000_000_000)
+    assert run("--adapter", lora) == 1
+    assert _hint(capsys) == (
+        "No 768x768 clip fits at this length; try --size 768x768 --frames "
+        "73 (3.04 s), the longest 768x768 clip that fits")
+    assert run("--adapter", lora, "--guide", f"{still}@60") == 1
+    assert _hint(capsys) == "Try a smaller size or a shorter clip"
+    lora = _bf16_lora(tmp_path / "style.safetensors", 20_000_000_000)
+    assert run("--adapter", lora, "--guide", f"{still}@60") == 1
+    assert _hint(capsys) == (
+        "No clip fits at any size with these adapters, which take 18.63 GiB "
+        "of the denoise; run with fewer adapters, or with h3-base")
+    assert run.loads == []

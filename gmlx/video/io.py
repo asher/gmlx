@@ -6,11 +6,19 @@ child that takes raw RGB frames on its stdin a chunk at a time, as the
 VAE decodes them, with the clip's audio from a WAV file, and writes
 ``<output>.part``, renamed to the output when ffmpeg ends. A failure or a
 Ctrl-C kills the child and removes the ``.part``.
+
+Guides are read through ffmpeg too. ``guide_frames`` streams a video's
+frames at the file's own rate, turned by its rotation, and crops and
+resizes each as it arrives, so a large source never sits whole in
+memory; ``guide_length`` counts the frames it would read. ``guide_audio``
+reads a file's first audio stream at the audio VAE's rate as two
+channels: mono on both, more than two mixed down by ffmpeg.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -23,6 +31,14 @@ ENCODERS = ("h264_videotoolbox", "aac")
 VIDEO_ARGS = ("-c:v", "h264_videotoolbox", "-q:v", "65", "-pix_fmt",
               "yuv420p")
 AUDIO_ARGS = ("-c:a", "aac", "-b:a", "192k")
+
+
+# The header ffmpeg's PPM encoder writes before each frame's pixels.
+_PPM = re.compile(rb"P6\n(\d+) (\d+)\n255\n")
+# What ffmpeg says of a map that found no stream, and of an output whose
+# optional map found none.
+_NO_MATCH = "matches no streams"
+_NO_STREAM = "does not contain any stream"
 
 
 class FfmpegError(RuntimeError):
@@ -176,3 +192,133 @@ def write_frames(folder: str, frames, start: int) -> int:
         Image.fromarray(f).save(path + ".part", format="PNG")
         os.replace(path + ".part", path)
     return start + int(x.shape[0])
+
+
+def _ffmpeg_failed(path: str, err, kind: str) -> FfmpegError:
+    err.seek(0)
+    text = err.read().decode(errors="replace")
+    if _NO_MATCH in text:
+        return FfmpegError(f"{path} has no {kind} stream")
+    why = text.strip().splitlines()
+    return FfmpegError(f"ffmpeg could not read {path}"
+                       + (f": {why[-1]}" if why else ""))
+
+
+def _frames(ffmpeg: str, path: str, most: int, each, scale=None) -> int:
+    """Call ``each`` on each of the first ``most`` frames of the video at
+    ``path``, (H, W, 3) uint8 as ffmpeg decodes them, scaled to ``scale``
+    (width, height) when given. Returns the frame count."""
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", path, "-map", "0:v:0",
+           "-frames:v", str(int(most)), "-fps_mode", "passthrough"]
+    if scale is not None:
+        cmd += ["-vf", f"scale={scale[0]}:{scale[1]}"]
+    cmd += ["-f", "image2pipe", "-c:v", "ppm", "-pix_fmt", "rgb24", "-"]
+    n = 0
+    with tempfile.TemporaryFile() as err:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err)
+        read = False
+        try:
+            out = p.stdout
+            assert out is not None
+            while n < most:
+                head = b"".join(out.readline() for _ in range(3))
+                if not head:
+                    break
+                m = _PPM.fullmatch(head)
+                if m is None:
+                    raise FfmpegError(f"ffmpeg gave no frame header for "
+                                      f"{path}")
+                w, h = int(m.group(1)), int(m.group(2))
+                data = out.read(w * h * 3)
+                if len(data) != w * h * 3:
+                    raise FfmpegError(f"ffmpeg gave part of a frame of "
+                                      f"{path}")
+                each(np.frombuffer(data, np.uint8).reshape(h, w, 3))
+                n += 1
+            read = True
+        finally:
+            if not read and p.poll() is None:
+                p.kill()
+            p.stdout.close()
+            rc = p.wait()
+        if rc:
+            raise _ffmpeg_failed(path, err, "video")
+    if not n:
+        raise FfmpegError(f"ffmpeg found no frames in {path}")
+    return n
+
+
+def guide_frames(path: str, *, width: int, height: int, most: int,
+                 ffmpeg: str) -> np.ndarray:
+    """The first ``most`` frames of the video at ``path``, or all of
+    them, (T, height, width, 3) uint8: each cropped about its center to
+    the canvas's aspect and resized as it arrives."""
+    from .images import cover
+
+    out: list = []
+    _frames(ffmpeg, path, most, lambda f: out.append(cover(f, width,
+                                                           height)))
+    return np.stack(out)
+
+
+def guide_length(path: str, *, most: int, ffmpeg: str) -> int:
+    """How many frames ``guide_frames`` reads of ``path`` with ``most``,
+    counted from a small scale of each."""
+    return _frames(ffmpeg, path, most, lambda f: None, scale=(16, 16))
+
+
+def _wav(data: bytes, path: str) -> np.ndarray:
+    """The float32 samples (channels, n) of a WAV ffmpeg wrote to a
+    pipe, whose sizes it leaves unset."""
+    if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        raise FfmpegError(f"ffmpeg gave no WAV stream for {path}")
+    i, channels = 12, 0
+    while i + 8 <= len(data):
+        tag = data[i:i + 4]
+        size = int.from_bytes(data[i + 4:i + 8], "little")
+        if tag == b"fmt ":
+            channels = int.from_bytes(data[i + 10:i + 12], "little")
+        elif tag == b"data" and channels:
+            body = data[i + 8:]
+            body = body[:len(body) - len(body) % (4 * channels)]
+            return np.frombuffer(body, "<f4").reshape(-1, channels).T.copy()
+        i += 8 + size + (size & 1)
+    raise FfmpegError(f"ffmpeg gave a WAV stream with no samples for "
+                      f"{path}")
+
+
+def _audio(ffmpeg: str, path: str, rate: int, samples: int,
+           optional: bool, mix: tuple) -> np.ndarray | None:
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", path, "-map",
+           "0:a:0?" if optional else "0:a:0", *mix, "-af",
+           f"aresample={int(rate)},atrim=end_sample={int(samples)}",
+           "-c:a", "pcm_f32le", "-f", "wav", "-"]
+    with tempfile.TemporaryFile() as err:
+        try:
+            r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=err,
+                               timeout=300)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise FfmpegError(f"ffmpeg could not read {path}: {e}") from None
+        if r.returncode:
+            err.seek(0)
+            if optional and _NO_STREAM in err.read().decode(
+                    errors="replace"):
+                return None
+            raise _ffmpeg_failed(path, err, "audio")
+    return _wav(r.stdout, path)
+
+
+def guide_audio(path: str, *, rate: int, samples: int, ffmpeg: str,
+                optional: bool = False) -> np.ndarray | None:
+    """The first ``samples`` samples or fewer of the first audio stream
+    of ``path``, (2, n) float32 at ``rate`` Hz: a mono stream on both
+    channels as it is, more than two channels mixed down to two by
+    ffmpeg. With ``optional``, None for a file with no audio stream."""
+    w = _audio(ffmpeg, path, rate, samples, optional, ())
+    if w is not None and w.shape[0] > 2:
+        w = _audio(ffmpeg, path, rate, samples, optional, ("-ac", "2"))
+    if w is not None and w.shape[0] == 1:
+        w = np.repeat(w, 2, axis=0)
+    if w is not None and not w.shape[1]:
+        raise FfmpegError(f"{path} holds no audio samples")
+    return w

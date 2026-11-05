@@ -424,6 +424,12 @@ def _prompt_ids(spec, tokenizer, prompt: str, sizes) -> tuple:
     return keyframe_ids(spec, tokenizer, prompt, sizes)
 
 
+def _keyframe_encode(handle, prompt: str, images) -> tuple:
+    from .keyframes import encode
+
+    return encode(handle, prompt, images)
+
+
 def vision_tokens(width: int, height: int) -> int:
     """The vision tokens of a keyframe, one per 32 x 32 pixels."""
     return (width // VISION_PX) * (height // VISION_PX)
@@ -498,4 +504,5 @@ FAMILY = VideoFamily(
     vsa_gate=VSA_GATE,
     prompt_ids=_prompt_ids,
     vision_tokens=vision_tokens,
+    keyframe_encode=_keyframe_encode,
 )

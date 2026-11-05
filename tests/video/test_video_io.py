@@ -1,11 +1,15 @@
 """Clips to files: the ffmpeg probe, the MP4 mux through a stand-in
 ffmpeg (the .part file, the rename, a failure and an abort), the WAV and
 PNG writers, and one real mux when the system ffmpeg has the encoders.
-CPU."""
+Guides from files through the system ffmpeg (skipped without it): a
+video's frames at its own rate and rotation, cropped as they arrive,
+and a file's sound as two channels at the audio VAE's rate. CPU."""
 from __future__ import annotations
 
 import os
+import shutil
 import stat
+import subprocess
 import wave
 
 import numpy as np
@@ -171,3 +175,128 @@ def test_a_real_mux_with_audio(tmp_path):
     with io.Mux(out, width=128, height=128, fps=24, wav=wav, ffmpeg=ff) as m:
         m.write(np.zeros((24, 128, 128, 3), np.float32))
     assert os.path.getsize(out) > 0 and not os.path.exists(out + ".part")
+
+
+@pytest.fixture
+def ffmpeg():
+    exe = shutil.which("ffmpeg")
+    if exe is None:
+        pytest.skip("no ffmpeg on PATH")
+    return exe
+
+
+def _make(ffmpeg, *args) -> None:
+    subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-y", *args],
+                   check=True)
+
+
+def _rgb(ffmpeg, path, w, h) -> np.ndarray:
+    """Every frame of ``path`` as ffmpeg decodes it to 8-bit RGB, unturned
+    and at the file's size."""
+    out = subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-noautorotate",
+                          "-i", path, "-fps_mode", "passthrough", "-f",
+                          "rawvideo", "-pix_fmt", "rgb24", "-"],
+                         capture_output=True, check=True).stdout
+    return np.frombuffer(out, np.uint8).reshape(-1, h, w, 3)
+
+
+def test_a_guide_video_streams_its_frames_at_its_own_rate(ffmpeg, tmp_path):
+    """A 30 fps second of 64x48: guide_length counts what guide_frames
+    reads, at most ``most`` frames and at 30 a second, and each frame is
+    the decoded one cropped about its center to the canvas."""
+    from gmlx.video import images
+
+    src = str(tmp_path / "clip.mp4")
+    _make(ffmpeg, "-f", "lavfi", "-i", "testsrc=size=64x48:rate=30", "-t",
+          "1", "-pix_fmt", "yuv420p", src)
+    assert io.guide_length(src, most=100, ffmpeg=ffmpeg) == 30
+    assert io.guide_length(src, most=22, ffmpeg=ffmpeg) == 22
+    got = io.guide_frames(src, width=32, height=32, most=22, ffmpeg=ffmpeg)
+    want = [images.cover(f, 32, 32) for f in _rgb(ffmpeg, src, 64, 48)[:22]]
+    np.testing.assert_array_equal(got, np.stack(want))
+
+
+@pytest.mark.parametrize("rotation", [90, -90])
+def test_a_guide_videos_rotation_turns_its_frames(ffmpeg, tmp_path,
+                                                  rotation):
+    """A phone video stores its frames on their side with a rotation;
+    each frame turns by it, a quarter turn counter-clockwise for 90, as
+    ComfyUI's LoadVideo turns it (np.rot90 by the rotation's quarters)."""
+    flat, src = str(tmp_path / "flat.mp4"), str(tmp_path / "turned.mp4")
+    _make(ffmpeg, "-f", "lavfi", "-i", "testsrc=size=64x48:rate=24",
+          "-frames:v", "5", "-pix_fmt", "yuv420p", flat)
+    _make(ffmpeg, "-display_rotation", str(rotation), "-i", flat, "-c",
+          "copy", src)
+    got = io.guide_frames(src, width=48, height=64, most=5, ffmpeg=ffmpeg)
+    want = np.rot90(_rgb(ffmpeg, flat, 64, 48), k=rotation // 90 % 4,
+                    axes=(1, 2))
+    np.testing.assert_array_equal(got, want)
+
+
+def _pcm(path, channels) -> np.ndarray:
+    """A 16-bit WAV's samples (channels, n) as float32, as ffmpeg reads
+    them."""
+    with wave.open(str(path), "rb") as w:
+        x = np.frombuffer(w.readframes(w.getnframes()), "<i2")
+    return (x.reshape(-1, channels).T / 32768.0).astype(np.float32)
+
+
+def _tones(path, rate, seconds, freqs) -> None:
+    t = np.arange(int(rate * seconds)) / rate
+    x = np.stack([0.5 * np.sin(2 * np.pi * f * t) for f in freqs], -1)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(len(freqs))
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes((x * 32767).astype("<i2").tobytes())
+
+
+def test_a_mono_guide_sounds_on_both_channels_as_it_is(ffmpeg, tmp_path):
+    """Mono on both channels at its own level, as ComfyUI pads it; a
+    stereo file keeps its channels apart."""
+    mono, stereo = tmp_path / "mono.wav", tmp_path / "stereo.wav"
+    _tones(mono, 32000, 0.5, [440])
+    _tones(stereo, 32000, 0.5, [440, 660])
+    got = io.guide_audio(str(mono), rate=32000, samples=16000,
+                         ffmpeg=ffmpeg)
+    np.testing.assert_array_equal(got, np.repeat(_pcm(mono, 1), 2, 0))
+    got = io.guide_audio(str(stereo), rate=32000, samples=16000,
+                         ffmpeg=ffmpeg)
+    np.testing.assert_array_equal(got, _pcm(stereo, 2))
+
+
+def test_a_guide_sound_is_resampled_cut_and_mixed_down(ffmpeg, tmp_path):
+    """48 kHz to 32 kHz, cut at ``samples`` or shorter when the file is,
+    and a 5.1 soundtrack mixed down to two channels."""
+    long, short = tmp_path / "long.wav", tmp_path / "short.wav"
+    _tones(long, 48000, 1.0, [440])
+    _tones(short, 48000, 0.25, [440])
+    assert io.guide_audio(str(long), rate=32000, samples=20000,
+                          ffmpeg=ffmpeg).shape == (2, 20000)
+    assert io.guide_audio(str(short), rate=32000, samples=20000,
+                          ffmpeg=ffmpeg).shape == (2, 8000)
+    six = tmp_path / "six.wav"
+    _tones(six, 48000, 0.25, [220, 330, 440, 550, 660, 770])
+    got = io.guide_audio(str(six), rate=32000, samples=20000, ffmpeg=ffmpeg)
+    assert got.shape == (2, 8000) and np.isfinite(got).all()
+
+
+def test_a_guide_video_without_sound_has_none(ffmpeg, tmp_path):
+    """A video guide's sound is optional; an audio guide's is not, and
+    a file with no video is no video guide."""
+    src = str(tmp_path / "silent.mp4")
+    _make(ffmpeg, "-f", "lavfi", "-i", "testsrc=size=64x48:rate=24",
+          "-frames:v", "5", "-pix_fmt", "yuv420p", src)
+    assert io.guide_audio(src, rate=32000, samples=800, ffmpeg=ffmpeg,
+                          optional=True) is None
+    with pytest.raises(io.FfmpegError, match="silent.mp4 has no audio "
+                                             "stream$"):
+        io.guide_audio(src, rate=32000, samples=800, ffmpeg=ffmpeg)
+    _tones(tmp_path / "a.wav", 32000, 0.1, [440])
+    with pytest.raises(io.FfmpegError, match="a.wav has no video stream$"):
+        io.guide_frames(str(tmp_path / "a.wav"), width=32, height=32,
+                        most=5, ffmpeg=ffmpeg)
+    (tmp_path / "junk.mp4").write_bytes(b"junk" * 64)
+    with pytest.raises(io.FfmpegError, match="could not read .*junk.mp4: "
+                                             ".*Invalid data"):
+        io.guide_length(str(tmp_path / "junk.mp4"), most=5, ffmpeg=ffmpeg)

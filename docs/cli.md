@@ -1325,6 +1325,7 @@ follow.
 gmlx video pull h3
 gmlx video generate h3 --prompt "a red bicycle rolls down a wet street, rain on the roofs" --output bicycle.mp4
 gmlx video generate h3 --prompt "waves on a pebble beach" --seconds 10 --size 768x768 --seed 1
+gmlx video generate h3 --prompt "the fox turns and runs into the snow" --first-frame fox.png --output fox.mp4
 ```
 
 Every action exits 0 on success, 1 on a refusal or a runtime failure, 2 on
@@ -1379,6 +1380,14 @@ A clip runs at 24 fps and has 17 k + 5 frames, so `--seconds` rounds up:
 shift come from the entry, else from the DiT's variant. FastH3 at 8 steps
 samples the timesteps it was trained at.
 
+`--first-frame` and `--last-frame` start or end the clip at an image,
+which the prompt also reads through the text encoder's vision tower.
+`--guide` anchors an image, or a video with its sound, at a frame, and
+`--guide-audio` anchors a sound alone. ffmpeg reads guide videos and
+sounds, and the images too when it is installed. The anchors are encoded
+after the text encoder is released, one VAE at a time. FastH3 runs text
+to video only, so it refuses them.
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `MODEL`, positional | Required | Generate with the `video_models` entry of this id, or this DiT GGUF. |
@@ -1390,16 +1399,22 @@ samples the timesteps it was trained at.
 | `--frames N` | None | Make a clip of exactly N frames, 17 k + 5 from 5 to 362. |
 | `--size WxH` | The entry's, else `1344x768` | Set the width and height, multiples of 32. |
 | `--steps N` | The entry's, else the variant's | Sample for N steps. |
-| `--seed N` | Random, and printed | Seed the noise. |
+| `--seed N` | Random, and printed | Seed the noise, from 0 to 2^64 - 1. |
 | `--shift S` | The entry's, else the variant's | Set the video flow shift. |
 | `--adapter PATH[:STRENGTH]` | The entry's | Apply this LoRA safetensors file after the entry's. Repeat the flag to stack adapters. |
+| `--first-frame IMAGE` | None | Start the clip at this image, stretched to the canvas. |
+| `--last-frame IMAGE` | None | End the clip at this image, cropped about its center to the canvas's aspect. |
+| `--guide PATH[@FRAME]` | None | Anchor this image, or this video with its sound, at FRAME, cropped about its center to the canvas's aspect. FRAME is `0` when none is given, and a negative frame counts from the end. Only an integer after the last `@` is a frame. A video keeps its first 17 k + 5 frames, or its first frame when it has fewer than 5, and they must fit in the clip from FRAME. Repeat the flag for more guides. |
+| `--guide-audio AUDIO[@FRAME]` | None | Anchor the sound of this file at FRAME, cut to the clip's sound from there. Repeat the flag for more. |
+| `--guide-no-audio` | Off | Anchor `--guide` videos without their sound. |
 | `--output PATH` | `./gmlx-<time>-<seed>.mp4`, or none with `--frames-dir` alone | Write the MP4 here. |
 | `--frames-dir DIR` | None | Write PNG frames and `audio.wav` to this folder. Alone, it writes no MP4 and needs no ffmpeg. |
 | `--preview [TAEH3]` | Off | Decode with TAEH3, the small preview decoder: the entry's file, or this one. |
 | `--save-latent PATH` | None | Also write the final latents to this `.npz` file. |
 | `--encoder GGUF` | The entry's | Encode the prompt with this text encoder. |
-| `--vae PATH` | The entry's | Decode the frames with this video VAE. |
-| `--audio-vae PATH` | The entry's | Decode the sound with this audio VAE. |
+| `--mmproj GGUF` | The entry's `encoder_mmproj` | Read `--first-frame` and `--last-frame` with this vision tower of the text encoder. Required with them when `MODEL` is a DiT GGUF. |
+| `--vae PATH` | The entry's | Decode the frames with this video VAE, and encode the keyframes and guides. Required with `--preview` and a keyframe or a guide image or video. |
+| `--audio-vae PATH` | The entry's | Decode the sound with this audio VAE, and encode the guides' sound. |
 | `--json` | Off | Print a JSON record of the run on stdout. |
 
 ### video bench

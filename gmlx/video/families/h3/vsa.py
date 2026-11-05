@@ -81,11 +81,10 @@ class TileMap:
     video_tile_spans: tuple
 
 
-def anchor_refusal(anchors: tuple) -> str | None:
-    """Why FastH3 does not run a request with ``anchors``, the layout's
-    AnchorRows, or None for none. It runs text to video only, so it takes
-    no keyframe or guide, video or audio."""
-    n = len(anchors)
+def anchor_refusal(n: int) -> str | None:
+    """Why FastH3 does not run a request with ``n`` anchors, or None for
+    none. It runs text to video only, so it takes no keyframe or guide,
+    video or audio."""
     if not n:
         return None
     return (f"{TITLE} {FASTH3} runs text to video only, and this request "
@@ -98,7 +97,7 @@ def segments(layout: Layout, patch: tuple) -> tuple:
     video as its token grid, every other segment as its row count. A
     layout with an anchor is refused (``anchor_refusal``), and so is one
     with the vision rows of a prompt with images."""
-    why = anchor_refusal(layout.signature[5])
+    why = anchor_refusal(len(layout.signature[5]))
     if why:
         raise ValueError(why)
     if layout.signature[6]:

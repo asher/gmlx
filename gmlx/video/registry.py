@@ -101,10 +101,13 @@ class VideoFamily:
     # VSA variant carry.
     vsa_gate: str = ""
     # (spec, tokenizer, prompt, sizes) -> (ids, vision spans) of a prompt
-    # with keyframes of sizes (width, height), and (width, height) -> a
-    # keyframe's vision tokens, for a family that takes keyframes.
+    # with keyframes of sizes (width, height), (width, height) -> a
+    # keyframe's vision tokens, and (encoder handle, prompt, images) ->
+    # (features (1, L, D), vision spans), for a family that takes
+    # keyframes.
     prompt_ids: Callable | None = None
     vision_tokens: Callable | None = None
+    keyframe_encode: Callable | None = None
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in (*self.variants.values(),

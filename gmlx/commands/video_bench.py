@@ -89,6 +89,8 @@ def _parser(prog: str) -> argparse.ArgumentParser:
                    help="Print one JSON record per shape on stdout.")
     p.add_argument("--json-out", default=None, metavar="FILE",
                    help="Write one JSON record per shape to this file.")
+    # A bench runs from text alone, with no keyframes for an mmproj to see.
+    p.set_defaults(mmproj=None)
     return p
 
 
