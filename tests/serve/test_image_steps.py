@@ -176,7 +176,7 @@ def test_capabilities_answer_without_the_version_header(host):
                                 "flux2_klein_9b_kv", "flux3_klein", "h3",
                                 "krea2", "moss_image", "qwen_image21",
                                 "z_image"]
-    assert {"skip_blocks", "av_step"} <= set(caps["features"])
+    assert {"skip_blocks", "av_step", "anchors"} <= set(caps["features"])
     assert caps["conventions"] == ["comfy", "reference"]
     assert caps["wire"]["container"] == "safetensors"
 

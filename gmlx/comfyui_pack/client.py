@@ -592,6 +592,18 @@ class StepClient:
                                       {"model": model}, what="the audio VAE decode")
         return out["waveform"]
 
+    def video_encode(self, model: str, frames: torch.Tensor) -> torch.Tensor:
+        """Video latents (1, C, t, h, w) of frames (T, H, W, 3) in [0, 1]."""
+        out, _, _ = self.call_tensors("/vae/video/encode", {"frames": frames.float()},
+                                      {"model": model}, what="the video VAE encode")
+        return out["latents"]
+
+    def audio_encode(self, model: str, waveform: torch.Tensor) -> torch.Tensor:
+        """Audio latents (1, C, 2, T) of a waveform (1, 2, samples)."""
+        out, _, _ = self.call_tensors("/vae/audio/encode", {"waveform": waveform.float()},
+                                      {"model": model}, what="the audio VAE encode")
+        return out["latents"]
+
     def vae_decode(self, model: str, latents: torch.Tensor, alpha: bool) -> torch.Tensor:
         out, _, _ = self.call_tensors("/vae/decode", {"latents": latents.float()},
                                       {"model": model, "alpha": bool(alpha)},

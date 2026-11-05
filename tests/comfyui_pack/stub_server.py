@@ -311,7 +311,7 @@ class Handler(BaseHTTPRequestHandler):
                 "wire": {"container": "safetensors", "dtypes": ["f32", "f16", "bf16", "u8"]},
                 "families": sorted(COMFY), "conventions": ["comfy"], "patch_kinds": ["lora"],
                 "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae", "ref_cache",
-                             "skip_blocks", "av_step"],
+                             "skip_blocks", "av_step", "anchors"],
                 "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16}})
         if sub == "/models":
             return self._json(200, {"models": [{"model": m, "family": f, "variant": v, "resident": True}
@@ -456,6 +456,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._vae(sub, body)
         if sub in ("/vae/video/decode", "/vae/audio/decode"):
             return self._av_decode(sub, body)
+        if sub in ("/vae/video/encode", "/vae/audio/encode"):
+            return self._av_encode(sub, body)
         self._err(404, "not found")
 
     def _encode(self, body, ctype):
@@ -476,9 +478,22 @@ class Handler(BaseHTTPRequestHandler):
         if m is None:
             return
         fam = m[0]
-        if images and not COMFY[fam]["edit"]:
+        spans = []
+        if images and fam == "h3":
+            # Keyframes: a 3-token label and a block of one pad per 32 x 32
+            # pixels with its two markers each, before the prompt.
+            if m[1] == "fasth3":
+                return self._err(400, "MiniMax-H3 fasth3 runs text to video only")
+            at = 0
+            for im in images:
+                if im.shape[0] % 32 or im.shape[1] % 32:
+                    return self._err(400, f"keyframe {im.shape[1]}x{im.shape[0]} is no canvas")
+                at += 3
+                spans.append([at, at + (im.shape[0] // 32) * (im.shape[1] // 32) + 2])
+                at = spans[-1][1]
+        elif images and not COMFY[fam]["edit"]:
             return self._err(400, "this family takes no reference images")
-        n = int(req.get("num_tokens") or st.cond_tokens)
+        n = int(req.get("num_tokens") or st.cond_tokens) + (spans[-1][1] if spans else 0)
 
         def features(text):
             rng = np.random.default_rng(int(hashlib.sha256(text.encode()).hexdigest()[:8], 16))
@@ -491,7 +506,7 @@ class Handler(BaseHTTPRequestHandler):
         if revised:
             out["cond_typed"] = features(req["text"])
         stride, ch = COMFY[fam]["latent"]["stride"], COMFY[fam]["latent"]["channels"]
-        want_refs = req.get("refs", True)
+        want_refs = req.get("refs", True) and fam != "h3"
         for i, im in enumerate(images if want_refs else []):
             h, w = -(-im.shape[0] // stride), -(-im.shape[1] // stride)
             out[f"ref_{i}"] = np.full((1, ch, h, w), float(im.mean()) / 255.0, np.float32)
@@ -504,8 +519,12 @@ class Handler(BaseHTTPRequestHandler):
                   "image_slots": [2 + 3 * i for i in range(len(images))], "num_tokens": n}
         if revised:
             fields.update(revised_prompt=revised, cond_typed=hashes["cond_typed"])
+        if spans:
+            fields.update(spans=spans, image_slots=[])
         st.event(kind="encode", model=req["model"], text=req["text"], tokens=n, images=len(images), refs=want_refs,
-                 cond=hashes["cond"], cond_typed=hashes.get("cond_typed"))
+                 cond=hashes["cond"], cond_typed=hashes.get("cond_typed"), spans=spans,
+                 image_shapes=[list(im.shape) for im in images],
+                 image_sums=[int(im.astype(np.int64).sum()) for im in images])
         self._send(200, write_body(out, fields), ctype=CONTENT_TYPE)
 
     def _step(self, body, t0):
@@ -609,7 +628,9 @@ class Handler(BaseHTTPRequestHandler):
         shifts = req.get("shifts")
         if not isinstance(shifts, dict) or set(shifts) != {"video", "audio"}:
             return self._err(400, "an AV step names its shifts, video and audio")
-        missing = [rows[0]["cond"]] if rows[0]["cond"] not in st.tensors else []
+        anchors = req.get("anchors") or []
+        named = [a[k] for a in anchors for k in ("video", "noise", "audio") if a.get(k)]
+        missing = [h for h in [rows[0]["cond"], *named] if h not in st.tensors]
         if req.get("patch_table") and req["patch_table"] not in st.tables:
             missing.append(req["patch_table"])
         if missing:
@@ -628,7 +649,9 @@ class Handler(BaseHTTPRequestHandler):
         st.event(kind="av_step", run=rid, model=req["model"], video_shape=v[1], audio_shape=a[1],
                  video_dtype=v[0], timestep=float(t), shifts=shifts,
                  audio_scale=req.get("audio_scale"), conds=[rows[0]["cond"]],
-                 patch_table=req.get("patch_table"), fields=sorted(req), tensors=sorted(tensors))
+                 patch_table=req.get("patch_table"), fields=sorted(req), tensors=sorted(tensors),
+                 anchors=anchors, spans=req.get("spans") or [],
+                 anchor_tensors={h: st.tensors[h][2].tolist() for h in named})
         self._send(200, write_body({"video": vv, "audio": va}), ctype=CONTENT_TYPE, headers={
             "X-Gmlx-Forward-Ms": f"{fwd:.3f}",
             "X-Gmlx-Server-Ms": f"{(time.perf_counter() - t0) * 1000:.3f}",
@@ -663,6 +686,41 @@ class Handler(BaseHTTPRequestHandler):
         wave = np.repeat(a, 800, axis=-1)
         self.st.event(kind="audio_decode", shape=lat[1])
         self._send(200, write_body({"waveform": wave.astype(np.float32)}), ctype=CONTENT_TYPE)
+
+    def _av_encode(self, sub, body):
+        """Stub encodes of MiniMax-H3's anchors: frames (T, H, W, 3) in
+        [0, 1], 1 or 17 k + 5 of them, to latents (1, 24, t, H/16, W/16) of
+        their means, and a waveform (1, 2, n) to latents (1, 32, 2,
+        ceil(n / 800)) of each channel's mean."""
+        tensors, req = read_body(body)
+        m = self._model(req.get("model"))
+        if m is None:
+            return
+        if m[0] != "h3":
+            return self._err(400, f"{req['model']!r} is an image model; {sub[1:]} takes a "
+                                  "video model")
+        if sub == "/vae/video/encode":
+            fr = tensors.get("frames")
+            if fr is None or len(fr[1]) != 4 or fr[1][3] != 3:
+                return self._err(400, "vae/video/encode takes frames (T, H, W, 3) in [0, 1]")
+            T, H, W, _ = fr[1]
+            if (T != 1 and (T < 5 or (T - 5) % 17)) or H % 32 or W % 32:
+                return self._err(400, f"frames {fr[1]} are no MiniMax-H3 keyframe or guide clip")
+            t = 1 if T == 1 else (T - 5) // 17 * 5 + 2
+            g = fr[3].astype(np.float32).mean(axis=(0, 3)).reshape(H // 16, 16, W // 16, 16)
+            z = np.broadcast_to(g.mean(axis=(1, 3)), (1, 24, t, H // 16, W // 16))
+            self.st.event(kind="video_encode", shape=fr[1])
+            return self._send(200, write_body({"latents": np.ascontiguousarray(z, np.float32)}),
+                              ctype=CONTENT_TYPE)
+        wav = tensors.get("waveform")
+        if wav is None or len(wav[1]) != 3 or wav[1][:2] != [1, 2]:
+            return self._err(400, "vae/audio/encode takes the waveform of one sound (1, 2, n)")
+        t = -(-wav[1][2] // 800)
+        z = np.broadcast_to(wav[3].astype(np.float32).mean(axis=2)[:, None, :, None],
+                            (1, 32, 2, t))
+        self.st.event(kind="audio_encode", shape=wav[1])
+        self._send(200, write_body({"latents": np.ascontiguousarray(z, np.float32)}),
+                   ctype=CONTENT_TYPE)
 
     def _vae(self, sub, body):
         tensors, req = read_body(body)

@@ -5,7 +5,9 @@ They set the attributes stock nodes read and send latents in the space
 ComfyUI's LATENT carries, the raw VAE space or, for FLUX.2, FLUX.3 and
 MiniMax-H3, the DiT's own model space, and images as (B, H, W, C) floats in
 [0, 1]. The server tiles large images itself, so the tiled calls are the
-plain ones. MiniMax-H3 has a video VAE and an audio VAE, one node each.
+plain ones. MiniMax-H3 has a video VAE and an audio VAE, one node each,
+which encode its keyframes, guide clips and guide audio as ComfyUI's
+encode does, cropped to whole latents first.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import comfy.model_patcher
 import comfy.sd
 
 from .client import GmlxRefusal, StepClient
-from .patcher import CPU, H3_TEXT_ONLY
+from .patcher import CPU
 
 
 class _StubDecoder(torch.nn.Module):
@@ -93,11 +95,6 @@ class GmlxVAE(_ServerVAE):
         return self.gmlx_client.vae_encode(self.gmlx_model, pixels).float()
 
 
-def _no_encode(kind: str, inputs: str):
-    raise GmlxRefusal(f"gmlx: a gmlx {kind} VAE decodes and does not encode, so it takes no "
-                      f"{inputs}; {H3_TEXT_ONLY}")
-
-
 # MiniMax-H3's video VAE works on a grid in time: 5 k + 2 latent frames
 # hold 17 k + 5 frames, for k = 0, 1, 2 and on, and a still image is one
 # latent frame. ComfyUI asks for either count at any frame count.
@@ -146,8 +143,10 @@ class GmlxVideoVAE(_ServerVAE):
         return frames.float()[None]
 
     def encode(self, pixel_samples):
-        _no_encode("video", "first frame, last frame, guide image or guide clip, reference "
-                   "image or reference video")
+        """Model-space latents (1, 24, t, h, w) of frames (T, H, W, C) in
+        [0, 1], a keyframe or a guide clip at the clip's canvas."""
+        pixels = self.vae_encode_crop_pixels(pixel_samples.detach().float().cpu())
+        return self.gmlx_client.video_encode(self.gmlx_model, pixels).float()
 
 
 class GmlxAudioVAE(_ServerVAE):
@@ -163,6 +162,8 @@ class GmlxAudioVAE(_ServerVAE):
         self.upscale_ratio = self.audio_sample_rate // int(audio.get("latents_per_second", 40))
         self.downscale_ratio = self.upscale_ratio
         self.latent_dim = 2
+        # A mono sound is encoded on both channels, as ComfyUI's encode pads it.
+        self.pad_channel_value = "replicate"
 
     def decode(self, samples_in, vae_options={}):
         wave = self.gmlx_client.audio_decode(self.gmlx_model, samples_in.detach().float().cpu())
@@ -170,4 +171,8 @@ class GmlxAudioVAE(_ServerVAE):
         return wave.float().movedim(1, -1)
 
     def encode(self, pixel_samples):
-        _no_encode("audio", "guide audio or reference audio")
+        """Model-space audio latents (1, 32, 2, T) of a waveform (1,
+        samples, channels) at 32 kHz, cut to whole latents about its middle
+        as ComfyUI's encode cuts it."""
+        wave = self.vae_encode_crop_pixels(pixel_samples.detach().float().cpu())
+        return self.gmlx_client.audio_encode(self.gmlx_model, wave.movedim(-1, 1)).float()

@@ -19,7 +19,7 @@ import comfy.model_patcher
 import comfy.sd
 
 from .client import GmlxRefusal, StepClient
-from .patcher import CPU, H3_FAMILY, H3_TEXT_ONLY
+from .patcher import CPU, H3_FAMILY, H3_NO_REFS, token_tags
 
 log = logging.getLogger("gmlx")
 
@@ -140,16 +140,13 @@ class GmlxCLIP(comfy.sd.CLIP):
         if kwargs.get("minimax_ref_items"):
             # MiniMaxH3ReferenceToVideo shows its references to the encoder.
             raise GmlxRefusal("gmlx: references (minimax_ref_items, from "
-                              f"MiniMaxH3ReferenceToVideo) reached a gmlx CLIP; {H3_TEXT_ONLY}")
+                              f"MiniMaxH3ReferenceToVideo) reached a gmlx CLIP; {H3_NO_REFS}")
+        # MiniMaxH3ImageToVideo shows its first and last frames to the
+        # encoder, at the clip's canvas, before its VAE encodes them.
         images = list(kwargs.get("images") or [])
         if kwargs.get("image") is not None and not images:
             img = kwargs["image"]
             images = [img[i:i + 1] for i in range(img.shape[0])]
-        if images and self.gmlx_family == H3_FAMILY:
-            # MiniMaxH3ImageToVideo shows its frames to the encoder before
-            # its VAE encodes them.
-            raise GmlxRefusal("gmlx: a first or last frame (first_frame or last_frame of "
-                              f"MiniMaxH3ImageToVideo) reached a gmlx CLIP; {H3_TEXT_ONLY}")
         return {"gmlx": {"text": str(text), "images": images,
                          "llama_template": kwargs.get("llama_template"),
                          "keep_vision": bool(kwargs.get("keep_vision", False)),
@@ -187,6 +184,9 @@ class GmlxCLIP(comfy.sd.CLIP):
             d = {"cond": cond, "pooled_output": None}
             if images and fields.get("image_slots"):
                 d["image_slots"] = [int(s) for s in fields["image_slots"]]
+            if images and self.gmlx_family == H3_FAMILY:
+                # The vision rows of the keyframes, as ComfyUI's encoder tags them.
+                d["minimax_token_tags"] = token_tags(cond.shape[1], fields.get("spans") or ())
             if "cond_typed" in out:
                 d[TYPED] = TypedPrompt(cond, _batched(out["cond_typed"]))
             self.add_hooks_to_dict(d)

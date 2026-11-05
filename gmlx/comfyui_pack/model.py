@@ -37,7 +37,8 @@ from .client import (GmlxError, GmlxInterrupted, GmlxMissing, GmlxRefusal, StepC
 from .clip import TYPED, TypedPrompt
 from .compat import comfyui_version
 from .moss_image import PACK_MODELS
-from .patcher import CPU, H3_TEXT_ONLY, KV_METHOD, KV_PATCHES, GmlxBinding, GmlxModelPatcher
+from .patcher import (CPU, FASTH3, H3_NO_REFS, KV_METHOD, KV_PATCHES, GmlxBinding,
+                      GmlxModelPatcher, tag_spans)
 
 log = logging.getLogger("gmlx")
 
@@ -56,7 +57,15 @@ H3_SHIFTS = {"video": "minimax_h3_sigma_shift_video", "audio": "minimax_h3_sigma
 H3_PAYLOAD = {"audio_scale": ("the audio scale", None),
               "keyframes": ("the keyframes and guides", "minimax_keyframes"),
               "refs": ("the references", "minimax_refs"),
-              "text_token_tags": ("the vision tokens of the prompt", "minimax_token_tags")}
+              "text_token_tags": ("the vision tokens of the prompt", "minimax_token_tags"),
+              "seed": ("the seed of the keyframes' noise", "seed")}
+# The noise mix of the anchor rows the server runs, ComfyUI's defaults:
+# minimax_payload key, ComfyUI's constant, the server's value. No stock
+# node sets the keys.
+H3_COND_AUG = {"video": ("visual_cond_noise_aug", "VISUAL_COND_TIMESTEP", 0.999),
+               "audio": ("audio_cond_noise_aug", "AUDIO_COND_TIMESTEP", 1.0)}
+# The seed the load's probe of extra_conds passes, not the default 0.
+PROBE_SEED = 7
 # transformer_options keys and how the forward treats them.
 FORWARDED = {"sample_sigmas", "sigmas", "cond_or_uncond", "uuids", "qwen_image21_cache",
              *H3_SHIFTS.values()}
@@ -480,21 +489,34 @@ class RemoteForward:
         return torch.as_tensor(s).detach().float().reshape(-1).cpu()
 
     def _h3_conditions(self, payload: dict, kwargs: dict) -> None:
-        """Refuse what MiniMax-H3 conditions on beside the text prompt:
-        keyframes and guides, references, vision tokens in the prompt and
-        the noise masks of the latent."""
-        if payload.get("keyframes"):
-            raise GmlxRefusal("gmlx: keyframes or guides (minimax_keyframes, from the first_frame "
-                              "or last_frame of MiniMaxH3ImageToVideo or from MiniMaxH3AddGuide) "
-                              f"reached the DiT forward; {H3_TEXT_ONLY}")
+        """Refuse what MiniMax-H3 conditions on that a gmlx model does not
+        run: references, tags other than text and vision, an anchor noise
+        mix other than ComfyUI's default, keyframes and guides on FastH3,
+        and the noise masks of the latent."""
         if payload.get("refs"):
             raise GmlxRefusal("gmlx: references (minimax_refs, from MiniMaxH3ReferenceToVideo) "
-                              f"reached the DiT forward; {H3_TEXT_ONLY}")
+                              f"reached the DiT forward; {H3_NO_REFS}")
         tags = payload.get("text_token_tags")
-        if tags is not None and bool((torch.as_tensor(tags) != 1).any()):
-            raise GmlxRefusal("gmlx: the conditioning holds vision tokens (minimax_token_tags), "
-                              f"which images or references shown to the text encoder make; "
-                              f"{H3_TEXT_ONLY}")
+        if tags is not None and not bool(torch.isin(torch.as_tensor(tags),
+                                                    torch.tensor([0, 1])).all()):
+            raise GmlxRefusal("gmlx: the prompt's minimax_token_tags hold tags other than text "
+                              "(1) and vision (0), which no stock node makes; a gmlx model runs "
+                              "the text and the keyframes' vision rows of a prompt")
+        for stream, (key, _name, value) in H3_COND_AUG.items():
+            if key in payload and float(payload[key]) != value:
+                art = "an" if stream == "audio" else "a"
+                raise GmlxRefusal(f"gmlx: {art} {stream} anchor noise mix of {float(payload[key]):g} "
+                                  f"(minimax_payload[{key!r}], which no stock node sets) reached "
+                                  f"the DiT forward; a gmlx model mixes at ComfyUI's {value:g}")
+        anchors = sum(1 for kf in payload.get("keyframes") or ()
+                      if kf.get("latent") is not None or kf.get("audio_latent") is not None)
+        vision = tags is not None and bool((torch.as_tensor(tags) == 0).any())
+        if self.b.status.get("variant") == FASTH3 and (anchors or vision):
+            held = (f"{anchors} keyframe{'s' if anchors > 1 else ''} or guide"
+                    f"{'s' if anchors > 1 else ''}" if anchors else "keyframes in its prompt")
+            raise GmlxRefusal(f"gmlx: {self.b.model_id!r} is FastH3, which runs text to video "
+                              f"only, and this run has {held}; run it without keyframes or "
+                              "guides, or on h3")
         for k in ("denoise_mask", "audio_denoise_mask"):
             if kwargs.pop(k, None) is not None:
                 raise GmlxRefusal(f"gmlx: a noise mask on the MiniMax-H3 latent reached the DiT "
@@ -537,6 +559,45 @@ class RemoteForward:
             log.warning("%s on a schedule of its own; to sample as trained, %s and sample on "
                         "gmlx Sigmas", why, fix)
 
+    def _h3_anchors(self, payload: dict, rows: int, base, held: dict) -> tuple:
+        """(anchors, spans) of an AV step: each keyframe's frame and its
+        latents by hash, a video latent with the noise ComfyUI's forward
+        mixes into its rows (a CPU torch generator restarted at the
+        payload's seed for each one, drawn in the rows' shape), and the
+        vision spans of the prompt's ``rows`` tags."""
+        keyframes = [kf for kf in payload.get("keyframes") or ()
+                     if kf.get("latent") is not None or kf.get("audio_latent") is not None]
+        tags = payload.get("text_token_tags")
+        spans = tag_spans(tags) if tags is not None else []
+        if tags is not None and torch.as_tensor(tags).numel() != rows:
+            raise GmlxError(f"gmlx: the prompt's minimax_token_tags hold "
+                            f"{torch.as_tensor(tags).numel()} tags for its {rows} rows; encode "
+                            "the prompt and its keyframes with one text encode node")
+        if keyframes:
+            caps = getattr(self.b.client, "capabilities", None) or {}
+            if "anchors" not in (caps.get("features") or ()):
+                raise GmlxRefusal("gmlx: this gmlx server runs no keyframes or guides; update it")
+        pt, ph, pw = (int(p) for p in self.base_model.diffusion_model.patch_size)
+        seed = int(payload.get("seed", 0))
+
+        def put(i, kind, t):
+            key = None if base is None else base + ("anchor", i, kind, tuple(t.shape), seed)
+            return self._hash(key, t, held)
+        anchors = []
+        for i, kf in enumerate(keyframes):
+            a = {"frame": int(kf["resolved_frame_index"])}
+            if kf.get("latent") is not None:
+                z = kf["latent"].detach().float().cpu()
+                _, ch, t, h, w = z.shape
+                gen = torch.Generator("cpu").manual_seed(seed)
+                noise = torch.randn((t // pt * (h // ph) * (w // pw), ch * pt * ph * pw),
+                                    generator=gen, dtype=torch.float32)
+                a.update(video=put(i, "video", z), noise=put(i, "noise", noise))
+            if kf.get("audio_latent") is not None:
+                a["audio"] = put(i, "audio", kf["audio_latent"].detach().float().cpu())
+            anchors.append(a)
+        return anchors, spans
+
     def _av_call(self, t0, x, timesteps, context, control, to: dict, kwargs: dict):
         """One AV step: the video and audio latents as the sampler carries
         them, the audio scale and the shifts, which the server's step reads
@@ -568,11 +629,16 @@ class RemoteForward:
         held: dict = {}
         row = {"cond": self._hash(None if base is None else base + ("cond", tuple(c.shape)),
                                   c, held)}
+        anchors, spans = self._h3_anchors(payload, int(c.shape[1]), base, held)
         client = self.b.client
         for h, t in held.items():
             client.ensure_tensor(t, h)
         fields = {"model": self.b.model_id, "run": run, "patch_table": table, "rows": [row],
                   "shifts": shifts, "audio_scale": float(payload.get("audio_scale", 1.0))}
+        if anchors:
+            fields["anchors"] = anchors
+        if spans:
+            fields["spans"] = spans
         vs, au = video.float(), audio.float()
         ts = timesteps.float().reshape(-1)
 
@@ -710,12 +776,20 @@ def _h3_keys(patcher) -> None:
                    f"the {stream} shift")
     conds = probe("MiniMaxH3 model", lambda: patcher.model.extra_conds(
         minimax_token_tags=torch.ones(1, dtype=torch.long), minimax_keyframes=[{}],
-        minimax_refs=[{}], seed=0, device=torch.device("cpu")),
+        minimax_refs=[{}], seed=PROBE_SEED, device=torch.device("cpu")),
         "the extra_conds of a text prompt")
     held = getattr(conds.get("minimax_payload"), "cond", None)
     if not isinstance(held, dict):
         refuse("MiniMaxH3 model", "minimax_payload", "the conditioning beside the prompt")
     for key, (what, given) in H3_PAYLOAD.items():
-        if key not in held:
+        # The seed is written with a default, so the probe's own must come back.
+        if key not in held or (key == "seed" and held[key] != PROBE_SEED):
             src = f" from {given}" if given else ""
             refuse("MiniMaxH3 model", f"minimax_payload[{key!r}]{src}", what)
+    import comfy.ldm.minimax.model as h3_model
+
+    for stream, (_key, name, value) in H3_COND_AUG.items():
+        if getattr(h3_model, name, None) != value:
+            raise GmlxError(f"gmlx: ComfyUI {comfyui_version()} mixes the {stream} anchor rows "
+                            f"at {getattr(h3_model, name, None)} ({name}), and a gmlx model at "
+                            f"{value:g}; {tested}")

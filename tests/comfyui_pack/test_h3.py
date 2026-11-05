@@ -3,9 +3,11 @@ weightless model and the ComfyUI keys its forward reads, a sample of
 ComfyUI's nested video and audio latent through the AV step with the shifts
 and audio scale ComfyUI's forward reads, FastH3 on its trained sigmas, a
 LoRA from the stock loader, the 409 retry and the interrupt of an AV step,
-the video and audio VAE nodes, and the refusals of what MiniMax-H3
-conditions on beside the text prompt and the Fun ControlNet. Every ComfyUI
-the pack supports has MiniMax-H3, which came in v0.30.0.
+the video and audio VAE nodes, keyframes and guides from the stock nodes
+through the gmlx CLIP and VAEs to the AV step, and the refusals of what a
+gmlx model does not run: references, FastH3 with keyframes, the noise masks
+and the Fun ControlNet. Every ComfyUI the pack supports has MiniMax-H3,
+which came in v0.30.0.
 
 Needs ``COMFYUI_DIR``. Run with ``python -m unittest`` from this folder."""
 
@@ -38,10 +40,8 @@ C = P.client
 HID, FID, ZID = "h3", "fasth3", "z-image-turbo"
 # The 5-frame 64x64 clip, the smallest the latent node makes.
 SIZE, FRAMES = 64, 5
-TEXT_ONLY = "the gmlx nodes run MiniMax-H3 from the text prompt alone"
-VIDEO_VAE = ("gmlx: a gmlx video VAE decodes and does not encode, so it takes no first frame, "
-             "last frame, guide image or guide clip, reference image or reference video; "
-             f"{TEXT_ONLY}")
+NO_REFS = ("the gmlx nodes run MiniMax-H3 from the text prompt with keyframes and guides, and "
+           "take no references")
 
 
 def _out(node_output):
@@ -171,6 +171,23 @@ class Model(Base):
             self.model()
         finally:
             comfy.model_base.MiniMaxH3.extra_conds = real
+
+    def test_a_comfyui_whose_anchor_noise_mix_differs_is_named_at_the_load(self):
+        """The server mixes the anchor rows at ComfyUI's defaults, 0.999 for
+        the video and 1 for the audio; a ComfyUI that changes one is named
+        at the load, not run at the old one."""
+        import comfy.ldm.minimax.model as h3_model
+
+        real = h3_model.VISUAL_COND_TIMESTEP
+        h3_model.VISUAL_COND_TIMESTEP = 0.995
+        try:
+            with self.assertRaises(C.GmlxError) as e:
+                self.model()
+        finally:
+            h3_model.VISUAL_COND_TIMESTEP = real
+        self.assertIn(f"gmlx: ComfyUI {P.compat.comfyui_version()} mixes the video anchor rows "
+                      "at 0.995 (VISUAL_COND_TIMESTEP), and a gmlx model at 0.999",
+                      str(e.exception))
 
     def test_a_missing_h3_internal_is_named_with_the_version(self):
         self.assertIsNone(P.compat.first_missing(P.compat.H3_NAMES))
@@ -469,6 +486,18 @@ class Vaes(Base):
         self.assertEqual((latents(1), frames(1)), (1, 1))
         self.assertEqual((vae.upscale_ratio[1:], vae.downscale_ratio[1:]), ((16, 16), (16, 16)))
 
+    def test_the_stock_vae_encode_node_crops_a_frame_to_whole_latents(self):
+        """A loaded image reaches the video VAE through the stock VAE
+        Encode node; the encode cuts it to whole latents about its middle
+        and drops its alpha, as ComfyUI's encode does."""
+        vae = P.nodes.GmlxVideoVAELoader().load(HID, self.stub.url, False)[0]
+        image = torch.rand(1, SIZE + 12, SIZE + 4, 4)
+        (out,) = comfy_nodes.VAEEncode().encode(vae, image)
+        self.assertEqual(out["samples"].tolist(),
+                         vae.encode(image[:, 6:6 + SIZE, 2:2 + SIZE, :3]).tolist())
+        self.assertEqual([e["shape"] for e in self.stub.events("video_encode")],
+                         [[1, SIZE, SIZE, 3]] * 2)
+
     def test_each_vae_loader_refuses_the_other_kind_of_model(self):
         with self.assertRaises(C.GmlxRefusal) as e:
             P.nodes.GmlxVAELoader().load(HID, self.stub.url, False)
@@ -480,25 +509,173 @@ class Vaes(Base):
             self.assertIn("'z-image-turbo' is an image model", str(e.exception))
 
 
-class Refusals(Base):
-    """What MiniMax-H3 conditions on beside the text prompt, each as the
-    stock node that adds it builds it, and the Fun ControlNet."""
+def _rows_noise(z: torch.Tensor, seed: int) -> list:
+    """The noise ComfyUI's forward mixes into the rows of video latent
+    ``z`` at ``seed``: a CPU generator restarted for it, in the rows'
+    shape at the DiT's patch (1, 2, 2)."""
+    _, c, t, h, w = z.shape
+    g = torch.Generator("cpu").manual_seed(seed)
+    return torch.randn((t * (h // 2) * (w // 2), c * 4), generator=g).tolist()
 
-    def refused(self, want: str, **kw):
-        with self.assertRaises(C.GmlxRefusal) as e:
-            self.sample(self.model(), steps=1, **kw)
-        self.assertIn(want, str(e.exception))
-        self.assertIn(TEXT_ONLY if "noise mask" not in want else "samples the whole clip",
-                      str(e.exception))
+
+class Anchors(Base):
+    """Keyframes and guides as the stock nodes make them, through the gmlx
+    CLIP and VAEs, reach the AV step: each anchor's frame and latents by
+    hash, the noise of its video rows and the prompt's vision spans."""
+
+    def nodes(self, mid=HID):
+        clip = P.nodes.GmlxCLIPLoader().load(mid, self.stub.url, False)[0]
+        video = P.nodes.GmlxVideoVAELoader().load(mid, self.stub.url, False)[0]
+        audio = P.nodes.GmlxAudioVAELoader().load(mid, self.stub.url, False)[0]
+        return clip, video, audio
+
+    def step_of(self, pos, latent=None, seed=1):
+        (out,) = comfy_nodes.common_ksampler(self.model(), seed, 1, 1.0, "res_multistep", "simple",
+                                             pos, pos, latent or self.latent())
+        (step,) = self.stub.events("av_step")
+        return step
+
+    def test_image_to_video_sends_its_frames_to_the_encoder_and_the_step(self):
+        """MiniMaxH3ImageToVideo shows the encoder its first frame
+        stretched and its last cover-cropped to the canvas, and its VAE
+        encodes them. The encoder's vision spans come back as ComfyUI's
+        tags, and the step anchors the frames at 0 and the clip's last,
+        each with the noise of its rows at the sampler's seed."""
+        clip, video, _a = self.nodes()
+        first, last = torch.rand(1, 48, 80, 3), torch.rand(1, 80, 48, 4)
+        pos, latent = _out(H.MiniMaxH3ImageToVideo.execute(clip, video, "a dog", SIZE, SIZE,
+                                                           FRAMES, first_frame=first,
+                                                           last_frame=last))
+        (enc,) = self.stub.events("encode")
+        shown = [H._resize(first[:1], SIZE, SIZE, "disabled"),
+                 H._resize(last[:1], SIZE, SIZE, "center")]
+        self.assertEqual(enc["image_shapes"], [[SIZE, SIZE, 3]] * 2)
+        self.assertEqual(enc["image_sums"], [
+            int(im.clamp(0, 1).mul(255).round().to(torch.uint8).long().sum()) for im in shown])
+        tags = pos[0][1]["minimax_token_tags"]
+        self.assertEqual((tags.dtype, tags.numel()), (torch.long, pos[0][0].shape[1]))
+        self.assertEqual(P.patcher.tag_spans(tags), enc["spans"])
+        self.assertEqual(enc["spans"], [[3, 9], [12, 18]])
+        self.assertEqual([e["shape"] for e in self.stub.events("video_encode")],
+                         [[1, SIZE, SIZE, 3]] * 2)
+        keyframes = pos[0][1]["minimax_keyframes"]
+        step = self.step_of(pos, latent, seed=11)
+        self.assertEqual([a["frame"] for a in step["anchors"]], [0, FRAMES - 1])
+        self.assertEqual(step["spans"], enc["spans"])
+        for a, kf in zip(step["anchors"], keyframes):
+            got = step["anchor_tensors"]
+            self.assertEqual(sorted(a), ["frame", "noise", "video"])
+            self.assertEqual(got[a["video"]], kf["latent"].tolist())
+            self.assertEqual(got[a["noise"]], _rows_noise(kf["latent"], 11))
+
+    def test_a_guide_image_clip_and_sound_reach_the_step(self):
+        """MiniMaxH3AddGuide anchors an image, a clip cut to 17 k + 5
+        frames and a sound cut to the clip's audio from its frame; the
+        gmlx VAEs encode them, the sound mono on both channels and cut to
+        whole latents about its middle, as ComfyUI's encode does."""
+        clip, video, audio = self.nodes()
+        pos, _ = self.cond()
+        latent = self.latent()
+        image = torch.rand(1, SIZE, SIZE, 3)
+        frames = torch.rand(FRAMES + 3, SIZE, SIZE, 3)
+        wave = torch.rand(1, 1, 3000) * 2 - 1
+        track = {"waveform": wave, "sample_rate": 32000}
+        pos = _out(H.MiniMaxH3AddGuide.execute(pos, latent, -1, vae=video, image=image))[0]
+        pos = _out(H.MiniMaxH3AddGuide.execute(pos, latent, 0, vae=video, image=frames,
+                                               audio_vae=audio, audio=track))[0]
+        self.assertEqual([e["shape"] for e in self.stub.events("video_encode")],
+                         [[1, SIZE, SIZE, 3], [FRAMES, SIZE, SIZE, 3]])
+        self.assertEqual([e["shape"] for e in self.stub.events("audio_encode")], [[1, 2, 2400]])
+        keyframes = pos[0][1]["minimax_keyframes"]
+        a_t = latent["samples"].unbind()[1].shape[-1]
+        self.assertEqual([tuple(k["latent"].shape) for k in keyframes],
+                         [(1, 24, 1, 4, 4), (1, 24, 2, 4, 4)])
+        sound = keyframes[1]["audio_latent"]
+        self.assertEqual(tuple(sound.shape), (1, 32, 2, min(3, a_t)))
+        mid = wave[0, 0, 300:2700].mean().item()
+        self.assertAlmostEqual(sound[0, 0, 1, 0].item(), mid, places=5)
+        step = self.step_of(pos, latent)
+        self.assertEqual([a["frame"] for a in step["anchors"]], [FRAMES - 1, 0])
+        self.assertEqual(sorted(step["anchors"][1]), ["audio", "frame", "noise", "video"])
+        got = step["anchor_tensors"]
+        self.assertEqual(got[step["anchors"][1]["audio"]], sound.tolist())
+        self.assertEqual(got[step["anchors"][1]["noise"]], _rows_noise(keyframes[1]["latent"], 1))
+        self.assertEqual(step["spans"], [])
+
+    def test_a_guide_from_a_stock_vae_and_a_stock_encoders_tags_step(self):
+        """A stock VAE's latent in minimax_keyframes and a stock CLIP's tags
+        reach the step as the gmlx nodes' do: tags of text and vision as
+        the spans of their vision runs."""
+        pos, _ = self.cond()
+        n = pos[0][0].shape[1]
+        tags = torch.ones(n, dtype=torch.long)
+        tags[3:9] = 0
+        z = torch.rand(1, 24, 1, SIZE // 16, SIZE // 16)
+        pos = node_helpers.conditioning_set_values(pos, {
+            "minimax_token_tags": tags,
+            "minimax_keyframes": [{"resolved_frame_index": 2, "latent": z}]})
+        step = self.step_of(pos)
+        self.assertEqual(step["spans"], [[3, 9]])
+        (a,) = step["anchors"]
+        self.assertEqual((a["frame"], step["anchor_tensors"][a["video"]]), (2, z.tolist()))
+
+    def test_an_anchor_the_server_dropped_is_put_again(self):
+        """A 409 names the anchors' tensors too; the step puts them and
+        runs once."""
+        pos, _ = self.cond()
+        z = torch.rand(1, 24, 1, SIZE // 16, SIZE // 16)
+        payload = {"audio_scale": 2.0, "seed": 3,
+                   "keyframes": [{"resolved_frame_index": 0, "latent": z}]}
+        model = self.model()
+        mm.load_models_gpu([model])
+        model.pre_run()
+        video, audio = self.latent()["samples"].unbind()
+        to = {"cond_or_uncond": [0], "uuids": [uuid.uuid4()]}
+        f = model.model.diffusion_model.forward
+        try:
+            f([video, audio], torch.tensor([600.0]), context=pos[0][0],
+              transformer_options=dict(to), minimax_payload=dict(payload))
+            self.stub.forget()
+            self.stub.reset()
+            f([video, audio], torch.tensor([400.0]), context=pos[0][0],
+              transformer_options=dict(to), minimax_payload=dict(payload))
+        finally:
+            model.cleanup()
+        kinds = [e["kind"] for e in self.stub.log()]
+        self.assertEqual(kinds[0], "step_missing")
+        self.assertEqual((kinds.count("put_tensor"), kinds.count("av_step")), (3, 1))
+
+    def test_a_server_without_anchors_refuses_keyframes(self):
+        pos, _ = self.cond()
+        z = torch.rand(1, 24, 1, SIZE // 16, SIZE // 16)
+        pos = node_helpers.conditioning_set_values(pos, {
+            "minimax_keyframes": [{"resolved_frame_index": 0, "latent": z}]})
+        model = self.model()
+        caps = model.gmlx.client.capabilities
+        had = caps["features"]
+        caps["features"] = [f for f in had if f != "anchors"]
+        try:
+            with self.assertRaises(C.GmlxRefusal) as e:
+                comfy_nodes.common_ksampler(model, 1, 1, 1.0, "res_multistep", "simple", pos,
+                                            pos, self.latent())
+        finally:
+            caps["features"] = had
+        self.assertEqual(str(e.exception), "gmlx: this gmlx server runs no keyframes or guides; "
+                         "update it")
         self.assertEqual(self.stub.events("av_step"), [])
 
-    def test_keyframes_and_guides_are_refused_by_name(self):
-        """MiniMaxH3AddGuide with a stock VAE puts the encoded frame in
-        minimax_keyframes."""
-        pos, _ = self.cond()
-        guide = [{"resolved_frame_index": 0, "latent": torch.zeros(1, 24, 1, SIZE // 16, SIZE // 16)}]
-        pos = node_helpers.conditioning_set_values(pos, {"minimax_keyframes": guide})
-        self.refused("keyframes or guides (minimax_keyframes", pos=pos)
+
+class Refusals(Base):
+    """What a gmlx model does not run of what MiniMax-H3 conditions on,
+    each as the stock node that adds it builds it, and the Fun
+    ControlNet."""
+
+    def refused(self, want: str, model=None, **kw):
+        with self.assertRaises(C.GmlxRefusal) as e:
+            self.sample(model or self.model(), steps=1, **kw)
+        self.assertIn(want, str(e.exception))
+        self.assertEqual(self.stub.events("av_step"), [])
+        return str(e.exception)
 
     def test_references_are_refused_by_name(self):
         """MiniMaxH3ReferenceToVideo with a stock VAE puts its encoded
@@ -507,17 +684,61 @@ class Refusals(Base):
         ref = [{"kind": "image", "latent_h": SIZE // 16, "latent_w": SIZE // 16,
                 "latent": torch.zeros(1, 24, 1, SIZE // 16, SIZE // 16)}]
         pos = node_helpers.conditioning_set_values(pos, {"minimax_refs": ref})
-        self.refused("references (minimax_refs", pos=pos)
+        self.assertIn(NO_REFS, self.refused("references (minimax_refs", pos=pos))
 
-    def test_vision_tokens_in_the_prompt_are_refused(self):
-        """A stock CLIP shown references without a VAE tags their vision
-        tokens 0 and adds no minimax_refs."""
+    def test_tags_other_than_text_and_vision_are_refused(self):
+        pos, _ = self.cond()
+        tags = torch.ones(pos[0][0].shape[1], dtype=torch.long)
+        tags[3:9] = 2
+        pos = node_helpers.conditioning_set_values(pos, {"minimax_token_tags": tags})
+        self.refused("gmlx: the prompt's minimax_token_tags hold tags other than text (1) and "
+                     "vision (0), which no stock node makes", pos=pos)
+
+    def test_tags_of_another_prompt_are_refused(self):
+        """ConditioningConcat joins the features of two prompts and keeps
+        the first one's tags."""
         pos, _ = self.cond()
         n = pos[0][0].shape[1]
-        tags = torch.ones(n, dtype=torch.long)
+        pos = node_helpers.conditioning_set_values(pos, {
+            "minimax_token_tags": torch.ones(n - 1, dtype=torch.long)})
+        with self.assertRaises(C.GmlxError) as e:
+            self.sample(self.model(), pos=pos, steps=1)
+        self.assertEqual(str(e.exception), f"gmlx: the prompt's minimax_token_tags hold {n - 1} "
+                         f"tags for its {n} rows; encode the prompt and its keyframes with one "
+                         "text encode node")
+        self.assertEqual(self.stub.events("av_step"), [])
+
+    def test_an_anchor_noise_mix_of_a_custom_node_is_refused_by_name(self):
+        """No stock node sets the cond noise augs; the server mixes the
+        anchor rows at ComfyUI's defaults."""
+        pos, _ = self.cond()
+        for key, want in (("minimax_visual_cond_noise_aug", "a video anchor noise mix of 0.99 "
+                           "(minimax_payload['visual_cond_noise_aug']"),
+                          ("minimax_audio_cond_noise_aug", "an audio anchor noise mix of 0.99 "
+                           "(minimax_payload['audio_cond_noise_aug']")):
+            with self.subTest(key):
+                self.stub.reset()
+                p = node_helpers.conditioning_set_values(pos, {key: 0.99})
+                self.refused(want, pos=p)
+
+    def test_fasth3_refuses_keyframes_and_guides_by_name(self):
+        """FastH3 runs text to video only: a guide, or keyframes in the
+        prompt, stop before any upload."""
+        pos, _ = self.cond()
+        z = torch.rand(1, 24, 1, SIZE // 16, SIZE // 16)
+        tags = torch.ones(pos[0][0].shape[1], dtype=torch.long)
         tags[3:9] = 0
-        pos = node_helpers.conditioning_set_values(pos, {"minimax_token_tags": tags})
-        self.refused("vision tokens (minimax_token_tags)", pos=pos)
+        for given, held in (({"minimax_keyframes": [{"resolved_frame_index": 0, "latent": z}]},
+                             "1 keyframe or guide"),
+                            ({"minimax_token_tags": tags}, "keyframes in its prompt")):
+            with self.subTest(held):
+                self.stub.reset()
+                p = node_helpers.conditioning_set_values(pos, given)
+                text = self.refused("gmlx: 'fasth3' is FastH3", self.model(FID), pos=p)
+                self.assertEqual(text, "gmlx: 'fasth3' is FastH3, which runs text to video "
+                                 f"only, and this run has {held}; run it without keyframes or "
+                                 "guides, or on h3")
+                self.assertEqual(self.stub.events("put_tensor"), [])
 
     def test_a_noise_mask_on_either_stream_is_refused_by_name(self):
         """SetLatentNoiseMask masks the video; a mask beside an audio
@@ -535,8 +756,9 @@ class Refusals(Base):
                     keep[..., :2] = 0.0
                     latent = {**latent, "noise_mask": comfy.nested_tensor.NestedTensor(
                         (torch.ones(v.shape[0], 1, *v.shape[2:]), keep))}
-                self.refused(f"a noise mask on the MiniMax-H3 latent reached the DiT forward "
-                             f"as {stream}", latent=latent)
+                text = self.refused(f"a noise mask on the MiniMax-H3 latent reached the DiT "
+                                    f"forward as {stream}", latent=latent)
+                self.assertIn("samples the whole clip", text)
 
     def test_the_fun_controlnet_is_refused_by_name(self):
         with self.assertRaises(C.GmlxRefusal) as e:
@@ -547,53 +769,28 @@ class Refusals(Base):
                          "(MiniMaxH3FunControlNetApply) runs inside the DiT forward and is not "
                          "supported on a gmlx model")
 
-    def test_a_first_or_last_frame_on_the_gmlx_nodes_is_refused_by_name(self):
-        """MiniMaxH3ImageToVideo shows its frames to the text encoder before
-        its VAE encodes them, so with the gmlx CLIP and video VAE wired, as
-        the example workflow is, the CLIP refuses them before any encode."""
+    def test_references_on_the_gmlx_nodes_are_refused_by_name(self):
+        """MiniMaxH3ReferenceToVideo shows its references to the gmlx CLIP,
+        after its VAE encoded them when it has one."""
         clip = P.nodes.GmlxCLIPLoader().load(HID, self.stub.url, False)[0]
-        vae = P.nodes.GmlxVideoVAELoader().load(HID, self.stub.url, False)[0]
+        video = P.nodes.GmlxVideoVAELoader().load(HID, self.stub.url, False)[0]
         image = torch.rand(1, SIZE, SIZE, 3)
-        for frame in ("first_frame", "last_frame"):
-            with self.subTest(frame), self.assertRaises(C.GmlxRefusal) as e:
-                H.MiniMaxH3ImageToVideo.execute(clip, vae, "a dog", SIZE, SIZE, FRAMES,
-                                                **{frame: image})
-            self.assertEqual(str(e.exception), "gmlx: a first or last frame (first_frame or "
-                             f"last_frame of MiniMaxH3ImageToVideo) reached a gmlx CLIP; "
-                             f"{TEXT_ONLY}")
+        frames = torch.rand(FRAMES, SIZE, SIZE, 3)
+        for given in ({"ref_images": {"ref_image_1": image}},
+                      {"vae": video, "ref_videos": {"ref_video_1": frames}}):
+            with self.subTest(sorted(given)), self.assertRaises(C.GmlxRefusal) as e:
+                H.MiniMaxH3ReferenceToVideo.execute(clip, "a dog", SIZE, SIZE, FRAMES, **given)
+            self.assertEqual(str(e.exception), "gmlx: references (minimax_ref_items, from "
+                             f"MiniMaxH3ReferenceToVideo) reached a gmlx CLIP; {NO_REFS}")
         self.assertEqual(self.stub.events("encode"), [])
 
-    def test_reference_and_guide_nodes_on_gmlx_nodes_are_refused_by_name(self):
-        """MiniMaxH3ReferenceToVideo without a VAE shows its references to
-        the gmlx CLIP; MiniMaxH3AddGuide hands its image to the gmlx video
-        VAE and its audio to the gmlx audio VAE."""
-        clip = P.nodes.GmlxCLIPLoader().load(HID, self.stub.url, False)[0]
-        image = torch.rand(1, SIZE, SIZE, 3)
-        with self.assertRaises(C.GmlxRefusal) as e:
-            H.MiniMaxH3ReferenceToVideo.execute(clip, "a dog", SIZE, SIZE, FRAMES,
-                                                ref_images={"ref_image_1": image})
-        self.assertEqual(str(e.exception), "gmlx: references (minimax_ref_items, from "
-                         f"MiniMaxH3ReferenceToVideo) reached a gmlx CLIP; {TEXT_ONLY}")
-        self.assertEqual(self.stub.events("encode"), [])
-        video = P.nodes.GmlxVideoVAELoader().load(HID, self.stub.url, False)[0]
-        audio = P.nodes.GmlxAudioVAELoader().load(HID, self.stub.url, False)[0]
-        pos, _ = self.cond()
-        with self.assertRaises(C.GmlxRefusal) as e:
-            H.MiniMaxH3AddGuide.execute(pos, self.latent(), 0, vae=video, image=image)
-        self.assertEqual(str(e.exception), VIDEO_VAE)
-        frames = torch.rand(FRAMES, SIZE, SIZE, 3)
-        with self.assertRaises(C.GmlxRefusal) as e:
-            H.MiniMaxH3AddGuide.execute(pos, self.latent(), 0, vae=video, image=frames)
-        self.assertEqual(str(e.exception), VIDEO_VAE)
-        with self.assertRaises(C.GmlxRefusal) as e:
-            H.MiniMaxH3ReferenceToVideo.execute(clip, "a dog", SIZE, SIZE, FRAMES, vae=video,
-                                                ref_videos={"ref_video_1": frames})
-        self.assertEqual(str(e.exception), VIDEO_VAE)
-        track = {"waveform": torch.zeros(1, 2, 3200), "sample_rate": 32000}
-        with self.assertRaises(C.GmlxRefusal) as e:
-            H.MiniMaxH3AddGuide.execute(pos, self.latent(), 0, audio_vae=audio, audio=track)
-        self.assertEqual(str(e.exception), "gmlx: a gmlx audio VAE decodes and does not "
-                         f"encode, so it takes no guide audio or reference audio; {TEXT_ONLY}")
+    def test_fasth3_refuses_keyframes_at_the_encode(self):
+        clip = P.nodes.GmlxCLIPLoader().load(FID, self.stub.url, False)[0]
+        video = P.nodes.GmlxVideoVAELoader().load(FID, self.stub.url, False)[0]
+        with self.assertRaises(C.GmlxError) as e:
+            H.MiniMaxH3ImageToVideo.execute(clip, video, "a dog", SIZE, SIZE, FRAMES,
+                                            first_frame=torch.rand(1, SIZE, SIZE, 3))
+        self.assertIn("fasth3 runs text to video only", str(e.exception))
 
 
 if __name__ == "__main__":

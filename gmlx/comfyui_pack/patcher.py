@@ -66,9 +66,37 @@ def refuse(what: str):
 
 
 # What the gmlx nodes run of MiniMax-H3, which its refusals state.
-H3_TEXT_ONLY = "the gmlx nodes run MiniMax-H3 from the text prompt alone"
-# The server's family of MiniMax-H3 and FastH3.
+H3_NO_REFS = ("the gmlx nodes run MiniMax-H3 from the text prompt with keyframes and guides, "
+              "and take no references")
+# The server's family of MiniMax-H3 and FastH3, and FastH3's variant.
 H3_FAMILY = "h3"
+FASTH3 = "fasth3"
+
+
+def token_tags(n: int, spans) -> torch.Tensor:
+    """ComfyUI's minimax_token_tags of a prompt of ``n`` rows: 1 for text
+    and 0 over each vision span [start, stop) the server encoded, a
+    keyframe's block with its markers."""
+    tags = torch.ones(n, dtype=torch.long)
+    for a, b in spans:
+        tags[int(a):int(b)] = 0
+    return tags
+
+
+def tag_spans(tags) -> list:
+    """The [start, stop) runs of tag 0, the vision rows, of ComfyUI's
+    minimax_token_tags."""
+    t = torch.as_tensor(tags).reshape(-1).tolist()
+    out, start = [], None
+    for i, v in enumerate(t + [1]):
+        if v == 0 and start is None:
+            start = i
+        elif v != 0 and start is not None:
+            out.append([start, i])
+            start = None
+    return out
+
+
 # ComfyUI's MiniMax-H3 Fun ControlNet registers its control first as a
 # DIFFUSION_MODEL wrapper, a bound method of this class.
 FUN_CONTROL = "MiniMaxH3FunControlPatch"
