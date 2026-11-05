@@ -143,12 +143,6 @@ class ByteLRU:
         self._bytes = 0
         self._kept: frozenset = frozenset()
         self._lock = threading.Lock()
-        # Hooks of a cache whose bytes a server books (serve/lora_books):
-        # on_put(key, nbytes, old) before an entry goes in, with the bytes
-        # of the entry it replaces, and on_gone(keys) for the keys it lets
-        # go. Each runs under this cache's lock and must not block.
-        self.on_put = None
-        self.on_gone = None
 
     def keep(self, keys) -> None:
         """The keys whose entries a put never sheds, in place of any given
@@ -197,6 +191,12 @@ class ByteLRU:
             hit = self._items.get(key)
             return 0 if hit is None else hit[1]
 
+    def sizes(self) -> dict:
+        """{key: bytes} of every entry, read in one hold of the cache's
+        lock. The order of use does not change."""
+        with self._lock:
+            return {k: n for k, (_v, n) in self._items.items()}
+
     def keys(self, match) -> list:
         """The keys that ``match`` takes, the least recently used first.
         The order of use does not change."""
@@ -219,31 +219,20 @@ class ByteLRU:
         self._bytes -= n
         return n
 
-    def _gone(self, keys) -> None:
-        if keys and self.on_gone is not None:
-            self.on_gone(list(keys))
-
     def put(self, key, value, nbytes: int, shed: bool = True) -> None:
-        """Keep ``value`` at ``key``. A key held already is replaced, and
-        reported to ``on_gone`` only when the put does not keep it."""
         with self._lock:
-            old = self._pop(key) if key in self._items else 0
+            if key in self._items:
+                self._pop(key)
             nbytes = int(nbytes)
-            gone = []
             if shed and self._bytes + nbytes > self.max_bytes:
                 kept = sum(n for k, (_, n) in self._items.items()
                            if k in self._kept) if self._kept else 0
                 if nbytes > self.max_bytes - kept:
-                    self._gone([key])
                     return
                 for k in [k for k in self._items if k not in self._kept]:
                     if self._bytes + nbytes <= self.max_bytes:
                         break
                     self._pop(k)
-                    gone.append(k)
-            self._gone(gone)
-            if self.on_put is not None:
-                self.on_put(key, nbytes, old)
             self._items[key] = (value, nbytes)
             self._used[key] = next(_USES)
             self._bytes += nbytes
@@ -254,7 +243,6 @@ class ByteLRU:
         whether they fit. With ``before``, a use of the clock of ``used``,
         only the entries last used before it go."""
         with self._lock:
-            gone = []
             for k in list(self._items):
                 if self._bytes + nbytes <= self.max_bytes:
                     break
@@ -262,8 +250,6 @@ class ByteLRU:
                     break
                 if k not in pinned:
                     self._pop(k)
-                    gone.append(k)
-            self._gone(gone)
             return self._bytes + nbytes <= self.max_bytes
 
     def shed_others(self, own, room: int) -> None:
@@ -273,40 +259,31 @@ class ByteLRU:
         with self._lock:
             others = [k for k in self._items if k not in own]
             held = sum(self._items[k][1] for k in others)
-            gone = []
             for k in others:
                 if held <= room:
                     break
                 held -= self._pop(k)
-                gone.append(k)
-            self._gone(gone)
 
     def shed_by(self, nbytes: int, rank) -> int:
         """Drop entries until ``nbytes`` are gone, the lowest ``rank`` of
         their key first and the least recently used first within a rank.
         Returns the bytes dropped."""
         with self._lock:
-            dropped, keys = 0, []
+            gone = 0
             for k in sorted(self._items, key=rank):
-                if dropped >= nbytes:
+                if gone >= nbytes:
                     break
-                dropped += self._pop(k)
-                keys.append(k)
-            self._gone(keys)
-            return dropped
+                gone += self._pop(k)
+            return gone
 
     def drop_where(self, match) -> None:
         """Drop the entries whose value ``match`` takes."""
         with self._lock:
-            keys = [k for k, v in self._items.items() if match(v[0])]
-            for k in keys:
+            for k in [k for k, v in self._items.items() if match(v[0])]:
                 self._pop(k)
-            self._gone(keys)
 
     def clear(self) -> None:
         with self._lock:
-            keys = list(self._items)
             self._items.clear()
             self._used.clear()
             self._bytes = 0
-            self._gone(keys)

@@ -188,8 +188,8 @@ def bound_caches(pipe, configured: int = 0, share: float = 1.0) -> None:
     """Bound the tensor caches of a served pipeline at ``share`` of their
     configured bounds, and its pair and tables caches at the
     ``configured`` bytes of the entry's own adapters plus the optional
-    cap, or no bound with none. The pool books each request LoRA byte,
-    and the first turn booking bounds those two at what it booked
+    cap, or no bound with none. The pool's ledger counts each request
+    LoRA byte, and each turn bounds those two at what it booked
     (``bound_lora``)."""
     from gmlx.image.lora import install
 
@@ -551,6 +551,10 @@ def worker_reserved() -> bool:
 
 
 def _on_worker(fn, *args):
+    """``fn`` on the image worker: inline on the worker itself, where a
+    turn's eviction releases a pipeline, or in the caller's hold."""
+    if threading.current_thread().name.startswith("image-worker"):
+        return fn(*args)
     run = getattr(_reservation, "run", None)
     if run is not None:
         return run(fn, *args)
@@ -1652,19 +1656,21 @@ def _adapter_table(served: ServedImage, rows: list, model_dirs,
     return api.define_patch_table(pipe, lora.table_entries(table_rows)), shown
 
 
-def shed_lora(entry, nbytes: int, hold=(), own: bool = False) -> None:
-    """Shed ``nbytes`` of a pool entry's request LoRA bytes for a claim,
+def shed_lora(entry, nbytes: int, hold=(), own: bool = False) -> int:
+    """Shed ``nbytes`` of a pool entry's request LoRA bytes for a turn,
     on the image worker, where no forward runs: its built tables and
-    kernel pairs first, then its pairs. ``hold`` names what the claimant's
+    kernel pairs first, then its pairs. ``hold`` names what the turn's
     job keeps on its own entry (``own``): its pair keys and its table
     ids. The tables of a step that ended let go first, except on the
-    claimant's own entry while they are its table's."""
+    turn's own entry while they are its table's. Returns the bytes
+    dropped."""
     from gmlx.image.lora import install
 
     pipe = getattr(entry.pipeline, "pipe", None)
     if pipe is None or not hasattr(pipe, "adapters"):
-        return
+        return 0
     hold = set(hold)
+    start = pipe.adapters.bytes + pipe.tables.bytes
     state = pipe.lora
     if state is not None and state._held() is pipe and (
             not own or any(k[0] not in hold for k in state._cur)):
@@ -1686,95 +1692,93 @@ def shed_lora(entry, nbytes: int, hold=(), own: bool = False) -> None:
         finally:
             cache.max_bytes = bound
         left -= before - cache.bytes
+    return max(0, start - pipe.adapters.bytes - pipe.tables.bytes)
 
 
-def lora_claims(pool, booking, hold=(), store_hold=()) -> None:
-    """A job's claims at its start or turn, on the worker: shed what its
-    booking claimed, the owner's keys in ``hold`` and the uploads in
-    ``store_hold`` left, then release the claims and check the pool again
-    in one hold, before it allocates. Raises LoraRefused when the check
-    fails, having allocated nothing."""
-    pool.shed_claims(booking, hold, store_hold)
-    pool.release_claims(booking)
+def lora_figures(entry) -> tuple:
+    """({request key: bytes}, own bytes) the LoRA caches of a pool entry
+    hold now. Own keys are the keep set's pairs, the built tables of the
+    default table and the kernel pairs built over kept pairs alone; the
+    footprint counts them up to its own term. Each read takes its cache's
+    lock: call with no pool lock."""
+    from gmlx.image.lora import install
 
-
-def lora_figures(caches, keys) -> dict:
-    """What ``caches`` hold at each of ``keys`` now, for a settle. Read
-    before the pool's lock: each read takes its cache's own."""
-    out = {}
-    for k in keys:
-        for cache in caches:
-            n = cache.nbytes(k)
-            if n is not None and (n or cache.peek(k) is not None):
-                out[k] = int(n)
-                break
-    return out
-
-
-def settle_job(pool, booking, pipe) -> None:
-    """Settle a job's booking at what its keys hold in the pipeline's
-    caches once it ran, and bound the caches to what stays booked."""
-    if booking is not None:
-        pool.settle_lora(booking, lora_figures(
-            (pipe.adapters, pipe.tables), booking.keys))
-        bound_lora(pool, booking.owner, pipe)
+    pipe = getattr(entry.pipeline, "pipe", None)
+    if pipe is None or not hasattr(pipe, "adapters"):
+        return None
+    kept = pipe.adapters.kept
+    default = getattr(pipe, "default_table", None)
+    keys: dict = {}
+    own = 0
+    for cache in (pipe.adapters, pipe.tables):
+        for k, n in cache.sizes().items():
+            if k in kept or (isinstance(k, tuple) and (
+                    (k[0] == install.KERNEL
+                     and all(p[0] in kept for p in k[2]))
+                    or (default is not None and k[0] == default))):
+                own += n
+            else:
+                keys[k] = n
+    return keys, own
 
 
 def bound_lora(pool, entry, pipe) -> None:
-    """Bound the pipeline's pair and tables caches at the entry's own
-    bytes in each, plus what the entry booked there and its pending
-    bytes, within the optional cap. On the worker, after a turn and a
-    settle."""
-    _held, pending, ledger = pool.lora_held(entry)
+    """Bound the pipeline's pair and tables caches at what the entry's
+    ledger counts in each plus its pending bytes, within the optional
+    cap. On the worker, after a turn and a settle."""
+    pending, ledger = pool.lora_ledger(entry)
     cap = cache_bytes()[1]
     for cache in (pipe.adapters, pipe.tables):
-        booked = sum(n for k, n in ledger.items()
-                     if cache.peek(k) is not None)
+        sizes = cache.sizes()
+        booked = sum(n for k, n in ledger.items() if k in sizes)
         room = booked + pending
         if cap is not None:
             room = min(cap, room)
         cache.max_bytes = max(0, cache.bytes - booked) + room
 
 
-def lora_turn(pool, entry, booking, need: int, priced: dict, *,
-              subject: str, own_held: int = 0, hold=(), store=None):
-    """A job's turn booking on the worker: ``need`` bytes its dry run
-    allocates next, with the figure of each key it priced. Its claims are
-    shed holding ``hold`` and the uploads ``store`` sizes, {hash: bytes},
-    which are its own keys too, and released, and the entry's caches
-    bound to what it booked, before it allocates. Returns the booking."""
-    store = store or {}
-    booking = pool.turn_lora(entry, booking, need, subject=subject,
-                             own_held=own_held,
-                             store_held=sum(store.values()))
-    booking.priced.update(priced)
-    lora_claims(pool, booking, hold, tuple(store))
+def lora_turn(pool, entry, need: int, *, subject: str, held: int = 0,
+              hold=(), store=()) -> None:
+    """A job's turn on the worker: room for ``need`` bytes its dry run
+    allocates next. The shed keeps the entry's keys in ``hold``, ``held``
+    bytes of them held now, and the uploads in ``store``. The entry's
+    caches are then bound to what it booked, before it allocates."""
+    pool.lora_turn(entry, need, subject=subject, hold=tuple(hold),
+                   held=held, store=tuple(store))
     bound_lora(pool, entry, entry.pipeline.pipe)
-    return booking
 
 
-def turn_figures(pool, entry, pipe, tid) -> tuple:
-    """(need, priced, own_held) of a forward on table ``tid``, the
-    pipeline's default for None, by the dry run against what is built:
-    the factors and kernel pairs it builds yet at the dtypes its leaves
-    run at, and for the default table the growth of its excess over the
-    footprint's own term. Runs on the worker after the job's last drop;
-    a route's estimate off the worker meets install.TableGone when a shed
-    or a drop there let the DiT, the table or a pair go."""
+def lora_settle(pool, entry, subject: str) -> None:
+    """A job's settle on the worker, in its finally: the ledger set to the
+    caches, the booking ended and the caches bound to it."""
+    pool.lora_settle(entry, subject)
+    pipe = getattr(entry.pipeline, "pipe", None)
+    if pipe is not None and hasattr(pipe, "adapters"):
+        bound_lora(pool, entry, pipe)
+
+
+def turn_figures(entry, pipe, tid) -> tuple:
+    """(need, held) of a forward on table ``tid``, the pipeline's default
+    for None, by the dry run against what is built: the factors and
+    kernel pairs it builds yet at the dtypes its leaves run at, and the
+    bytes of them held now. For the default table, the growth of its own
+    bytes past the footprint's own term. On the worker after the job's
+    last drop."""
     from gmlx.image.lora import install
 
     if tid is None:
         tid = getattr(pipe, "default_table", None)
     table = pipe.patch_tables.get(tid) if tid is not None else None
     if tid is None or not table or not table["entries"]:
-        return 0, {}, 0
+        return 0, 0
     figs = install.dry_run(pipe, tid)
     need = sum(max(0, f - h) for f, h in figs.values())
     if install._is_default(pipe, tid):
-        used, term, excess = pool.lora_own(entry)
-        return max(0, max(0, used + need - term) - excess), {}, 0
-    return (need, {k: f for k, (f, _h) in figs.items()},
-            sum(h for _f, h in figs.values()))
+        got = lora_figures(entry)
+        own = 0 if got is None else got[1]
+        term = int(getattr(entry.pipeline, "lora_own_term", 0) or 0)
+        return max(0, own + need - term) - max(0, own - term), 0
+    return need, sum(h for _f, h in figs.values())
 
 
 def _pair_keys(rows) -> set:
@@ -1806,7 +1810,7 @@ def _room_for(served: ServedImage, paths: list) -> None:
 
 def own_bytes(pipe, keys) -> int:
     """Bytes the pair cache holds of ``keys``, the entry's own left out:
-    a job's own keys, which its claims leave."""
+    a job's own keys, which its turn's shed keeps."""
     return sum(pipe.adapters.nbytes(k) or 0 for k in keys
                if k not in pipe.adapters.kept)
 
@@ -1836,60 +1840,22 @@ def file_pairs(pipe, path: str) -> tuple:
         held, hit
 
 
-def request_estimate(pool, entry, served: ServedImage, rows: list,
-                     model_dirs) -> tuple:
-    """(pairs, factors, own held) an images API request books on its route
-    before its budget is read: the pairs of its files the pair cache does
-    not hold, and the factors of its table. A table whose files the
-    pipeline holds, on a loaded DiT, is priced by the dry run: in full on
-    a staged entry, whose encode lets the built tables go, else less what
-    is built. Any other request table, and one whose DiT or pairs a shed
-    or a drop on the worker let go since, is priced at twice its pairs,
-    and the default table at its excess. ``own held`` is the bytes of the
-    request's own keys held now, which its claims leave. The job's turns
-    book both exactly."""
-    from gmlx.image import api, lora
-    from gmlx.image.lora import install
+def request_estimate(served: ServedImage, rows: list, model_dirs) -> int:
+    """The LoRA bytes an images API request's files hold at its forward,
+    from their headers alone, for the route's 413: no memo, cache or
+    pipeline is read. A file that cannot be read counts nothing, for its
+    load to name."""
+    from gmlx.image.vae.reader import VAEError, safetensors_header
 
-    pipe = served.pipe
-    table_rows, extra, _shown = _request_rows(served, rows, model_dirs)
-    pairs = total = 0
-    held: set = set()
-    hits = []
-    for _aid, path, strength in extra:
-        n, size, keys, hit = file_pairs(pipe, path)
-        pairs, total = pairs + n, total + size
-        held |= keys
-        hits.append(None if hit is None else (hit, strength))
-    own = own_bytes(pipe, held)
-    if not extra and table_rows == list(served.adapters):
-        if getattr(pipe, "dit", None) is None:
-            return 0, 0, 0
+    _rows, extra, _shown = _request_rows(served, rows, model_dirs)
+    n = 0
+    for _aid, path, _strength in extra:
         try:
-            need, _priced, _built = turn_figures(pool, entry, pipe, None)
-        except install.TableGone:
-            # The DiT went since the check: the turn books the excess.
-            return 0, 0, 0
-        return 0, need, 0
-    tid = None
-    if not pairs and None not in hits and getattr(pipe, "dit", None) \
-            is not None:
-        try:
-            tid = api.patch_table_id(pipe, lora.table_entries(
-                table_rows + hits))
-        except ValueError:
-            tid = None
-    twice = 2 * (total + sum(ad.nbytes for ad, _st in served.adapters))
-    if tid is None or tid not in pipe.patch_tables:
-        return pairs, twice, own
-    try:
-        figs = install.dry_run(pipe, tid)
-    except install.TableGone:
-        return pairs, twice, own
-    if getattr(served.plan, "staged", False):
-        return 0, sum(f for f, _h in figs.values()), own
-    return (0, sum(max(0, f - h) for f, h in figs.values()),
-            own + sum(h for _f, h in figs.values()))
+            _header, start = safetensors_header(path)
+            n += max(0, os.path.getsize(path) - start)
+        except (OSError, VAEError):
+            continue
+    return n
 
 
 ADAPTERS = "the request's adapters"
@@ -1899,20 +1865,22 @@ def lora_refusal(e) -> "ImageRequestError":
     """The ImageRequestError of a LoraRefused: a 413 that stays until the
     setup changes, or a 503 with Retry-After as a deferred load has it."""
     if e.status == 503:
-        from .patches.request_flow import deferred_retry_after
+        retry = e.retry_after
+        if retry is None:
+            from .patches.request_flow import deferred_retry_after
 
+            retry = deferred_retry_after()
         return ImageRequestError(503, e.message, param="adapters",
                                  err_type="server_overloaded",
-                                 headers={"Retry-After":
-                                          str(deferred_retry_after())})
+                                 headers={"Retry-After": str(retry)})
     return ImageRequestError(e.status, e.message, param="adapters")
 
 
-def pair_turn(pool, entry, served: ServedImage, booking, paths: list):
-    """The images API job's first turn booking, on the worker before a
-    file is read: the pairs of the request's files not held. Returns the
-    booking, or raises the ImageRequestError of a refusal."""
-    from .lora_books import LoraRefused
+def pair_turn(pool, entry, served: ServedImage, paths: list) -> None:
+    """The images API job's first turn, on the worker before a file is
+    read: the pairs of the request's files not held. Raises the
+    ImageRequestError of a refusal."""
+    from .residency import LoraRefused
 
     pipe = served.pipe
     need, held = 0, set()
@@ -1921,23 +1889,25 @@ def pair_turn(pool, entry, served: ServedImage, booking, paths: list):
         need += n
         held |= keys
     try:
-        return lora_turn(pool, entry, booking, need, {}, subject=ADAPTERS,
-                         own_held=own_bytes(pipe, held), hold=tuple(held))
+        lora_turn(pool, entry, need, subject=ADAPTERS,
+                  held=own_bytes(pipe, held), hold=tuple(held))
     except LoraRefused as e:
         raise lora_refusal(e) from None
 
 
-def table_turn(pool, entry, served: ServedImage, tid, booking,
-               subject: str = ADAPTERS):
-    """The turn booking of a forward on table ``tid``, the default for
-    None, on the worker after the job's last drop: the factors and kernel
-    pairs it builds yet, or the growth of the default table's excess.
-    The table's pairs and built tables are the job's own keys. Returns
-    the booking, or raises the ImageRequestError of a refusal."""
-    from .lora_books import LoraRefused
+def table_turn(pool, entry, served: ServedImage, tid,
+               subject: str = ADAPTERS) -> None:
+    """The turn of a forward on table ``tid``, the default for None, on
+    the worker after the job's last drop: the factors and kernel pairs it
+    builds yet, or the growth of the default table's own bytes. The
+    table's pairs and built tables are the job's own keys. Raises the
+    ImageRequestError of a refusal."""
+    from .residency import LoraRefused
 
     pipe = served.pipe
-    need, priced, held = turn_figures(pool, entry, pipe, tid)
+    need, held = turn_figures(entry, pipe, tid)
+    if tid is None:
+        tid = getattr(pipe, "default_table", None)
     table = pipe.patch_tables.get(tid) if tid is not None else None
     hold = [tid] if tid is not None else []
     if table:
@@ -1946,8 +1916,7 @@ def table_turn(pool, entry, served: ServedImage, tid, booking,
         hold += list(pairs)
         held += own_bytes(pipe, pairs)
     try:
-        return lora_turn(pool, entry, booking, need, priced,
-                         subject=subject, own_held=held, hold=hold)
+        lora_turn(pool, entry, need, subject=subject, held=held, hold=hold)
     except LoraRefused as e:
         raise lora_refusal(e) from None
 
@@ -1977,61 +1946,53 @@ def partial_steps(steps: int, count: int) -> list:
     return picks[:count]
 
 
-class _JobBooking:
-    """The LoRA booking of an images API job: the route's reservation,
-    grown at the job's two turns on the worker. With no pool it books
-    nothing."""
+class _JobTurns:
+    """The LoRA turns of an images API job on pool entry ``entry``: the
+    pairs before a file is read, the table after the encode, and the
+    settle in the job's finally. With no pool there is none."""
 
-    def __init__(self, pool, entry, booking):
-        self.pool, self.entry, self.booking = pool, entry, booking
+    def __init__(self, pool, entry):
+        self.pool, self.entry = pool, entry
 
     def pairs(self, paths: list):
-        """The first turn, before a file is read. Returns the context the
-        files load in, whose puts enter from the booking."""
-        self.booking = pair_turn(self.pool, self.entry, self.entry.pipeline,
-                                 self.booking, paths)
-        return self.booking.active()
+        """The first turn. Returns the context the files load in."""
+        pair_turn(self.pool, self.entry, self.entry.pipeline, paths)
+        return contextlib.nullcontext()
 
     def table(self, tid) -> None:
         """The second turn, after the encode and ``ensure_dit``."""
         if self.pool is not None:
-            self.booking = table_turn(self.pool, self.entry,
-                                      self.entry.pipeline, tid, self.booking)
+            table_turn(self.pool, self.entry, self.entry.pipeline, tid)
 
-    def active(self):
-        return (self.booking.active() if self.booking is not None
-                else contextlib.nullcontext())
-
-    def settle(self, pipe) -> None:
+    def settle(self) -> None:
         if self.pool is not None:
-            settle_job(self.pool, self.booking, pipe)
+            lora_settle(self.pool, self.entry, ADAPTERS)
 
 
 def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
             budget, stop, timeout_s: float | None = None,
             submitted: float | None = None, borrow=None, emit=None,
             model_dirs=(), embed_metadata: bool = False, pool=None,
-            entry=None, booking=None) -> ImageJobResult:
+            entry=None) -> ImageJobResult:
     """Run one request on the image worker's thread. ``stop`` is a
     threading.Event a disconnect sets; ``emit(index, bytes)`` takes the
     partial images of a stream. Raises :class:`JobStopped` when ``stop``
     ends the job between steps, or when it waits ``timeout_s`` for its
     turn after ``submitted`` or for one step. With ``pool``, the job books
     the LoRA bytes of pool entry ``entry`` at two turns, the pairs before
-    a file is read and the table after the encode, from ``booking``, the
-    route's reservation, and settles or cancels it."""
-    book = _JobBooking(pool, entry, booking)
+    a file is read and the table after the encode, and settles them in
+    its finally."""
+    book = _JobTurns(pool, entry)
     try:
         return _run_job(served, req, book, size=size, budget=budget,
                         stop=stop, timeout_s=timeout_s, submitted=submitted,
                         borrow=borrow, emit=emit, model_dirs=model_dirs,
                         embed_metadata=embed_metadata)
     finally:
-        if book.booking is not None:
-            book.booking.cancel()
+        book.settle()
 
 
-def _run_job(served: ServedImage, req: ImageRequest, book: _JobBooking, *,
+def _run_job(served: ServedImage, req: ImageRequest, book: _JobTurns, *,
              size: tuple, budget, stop, timeout_s, submitted, borrow, emit,
              model_dirs, embed_metadata) -> ImageJobResult:
     import secrets
@@ -2175,13 +2136,12 @@ def _run_job(served: ServedImage, req: ImageRequest, book: _JobBooking, *,
 
         t_img = time.perf_counter()
         try:
-            with book.active():
-                x = api.sample(pipe, cond, neg=neg, cfg=cfg, height=height,
-                               width=width, steps=steps, seed=s,
-                               sampler=sampler, init_latents=init_latents,
-                               denoise=denoise, mask=mask, patch_table=table,
-                               plan=plan, on_step=on_step,
-                               should_stop=should_stop)
+            x = api.sample(pipe, cond, neg=neg, cfg=cfg, height=height,
+                           width=width, steps=steps, seed=s,
+                           sampler=sampler, init_latents=init_latents,
+                           denoise=denoise, mask=mask, patch_table=table,
+                           plan=plan, on_step=on_step,
+                           should_stop=should_stop)
         except api.SampleStopped:
             raise JobStopped(timed_out=not stop.is_set()) from None
         step_s += time.perf_counter() - t_img   # sample evaluates each step
@@ -2192,7 +2152,6 @@ def _run_job(served: ServedImage, req: ImageRequest, book: _JobBooking, *,
         del x
         mx.clear_cache()
 
-    book.settle(pipe)
     tokens = api.image_tokens(pipe, height, width)
     text_tokens = int(cond.features.shape[0]) - len(cond.image_slots) + (
         0 if neg is None else int(neg.features.shape[0]) - len(neg.image_slots))

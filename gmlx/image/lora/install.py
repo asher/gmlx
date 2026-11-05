@@ -39,7 +39,6 @@ route does not take runs the block-diagonal pair on stock ops.
 
 from __future__ import annotations
 
-import contextlib
 import fnmatch
 import hashlib
 import json
@@ -311,20 +310,15 @@ def shed_to_bounds(pipe) -> None:
     make_room(pipe, pipe.tables, 0)
 
 
-def _keep_table(pipe, key, value, nbytes: int, own: bool = False) -> None:
+def _keep_table(pipe, key, value, nbytes: int) -> None:
     """Count ``value`` in the tables cache at ``key``, with room made for
     it. A table the patch state holds, or a kernel pair it is built over,
-    is kept past the bound when nothing else is left to shed. ``own``
-    marks the arrays of the pipeline's own default table, which a server
-    counts in the model's footprint."""
+    is kept past the bound when nothing else is left to shed."""
     nbytes = int(nbytes)
     grown = nbytes - (pipe.tables.nbytes(key)
                       if pipe.tables.peek(key) is value else 0)
     make_room(pipe, pipe.tables, grown)
-    from gmlx.serve.lora_books import own_load
-
-    with own_load() if own else contextlib.nullcontext():
-        pipe.tables.put(key, value, nbytes, shed=False)
+    pipe.tables.put(key, value, nbytes, shed=False)
 
 
 def _is_default(pipe, tid) -> bool:
@@ -784,8 +778,7 @@ def build_table(pipe, tid: str, dtype, how: str) -> BuiltTable:
                 mx.eval(hit[0], hit[1])
                 if held is not None:
                     _keep_table(held, key, hit, int(hit[0].nbytes)
-                                + int(hit[1].nbytes),
-                                own=_is_default(held, tid))
+                                + int(hit[1].nbytes))
             return hit
     keys = frozenset(k for row in named.values() for k, _b, _a in row)
     return BuiltTable(by_module, {p: leaves[p] for p in by_module}, dtype,
@@ -812,33 +805,22 @@ class _Sized:
     strength: float
 
 
-class TableGone(LookupError):
-    """The DiT, the table of a dry run or a pair it names with no shape
-    given went before the run read it: a shed or a drop on the image
-    worker, which a route's estimate off the worker can meet."""
-
-
 def f32_leaves(pipe) -> frozenset:
     """The paths of the DiT's linear leaves that its family names in
     ``lora_f32``: the leaves that see float32 rows under any activation
-    dtype. Raises TableGone without a DiT."""
+    dtype."""
     pats = getattr(getattr(pipe, "family", None), "lora_f32", ())
     if not pats:
         return frozenset()
-    dit = getattr(pipe, "dit", None)
-    if dit is None:
-        raise TableGone("the DiT")
-    return frozenset(p for p in linear_leaves(dit)
+    return frozenset(p for p in linear_leaves(pipe.dit)
                      if any(fnmatch.fnmatchcase(p, s) for s in pats))
 
 
 def dry_run(pipe, tid: str) -> dict:
     """``table_figures`` of table ``tid`` at the DiT's activation dtype,
-    with its family's float32 leaves. Raises TableGone without a DiT."""
-    dit = getattr(pipe, "dit", None)
-    if dit is None:
-        raise TableGone("the DiT")
-    return table_figures(pipe, tid, dit.act_dtype, f32_leaves(pipe))
+    with its family's float32 leaves. On the image worker, with the DiT
+    loaded."""
+    return table_figures(pipe, tid, pipe.dit.act_dtype, f32_leaves(pipe))
 
 
 def table_figures(pipe, tid: str, act, f32=frozenset(),
@@ -849,13 +831,9 @@ def table_figures(pipe, tid: str, act, f32=frozenset(),
     and the kernel pairs, and for each pair the pair cache does not hold.
     A module runs at ``act``, or float32 for a leaf named in ``f32``, the
     family's leaves that see float32 rows. ``shapes`` gives (down shape,
-    up shape, dtype) of each pair not held. Raises TableGone when the
-    DiT, the table or a pair not held and not in ``shapes`` is gone."""
-    table = pipe.patch_tables.get(tid)
-    dit = getattr(pipe, "dit", None)
-    if table is None or dit is None:
-        raise TableGone(tid)
-    leaves = linear_leaves(dit)
+    up shape, dtype) of each pair not held."""
+    table = pipe.patch_tables[tid]
+    leaves = linear_leaves(pipe.dit)
     how = form()
     out: dict = {}
     by_module: dict = {}
@@ -866,8 +844,6 @@ def table_figures(pipe, tid: str, act, f32=frozenset(),
                 continue
             pair = pipe.adapters.peek(key)
             if pair is None:
-                if shapes is None or key not in shapes:
-                    raise TableGone(key)
                 down, up, dtype = shapes[key]
                 d, u = _Like(tuple(down), dtype), _Like(tuple(up), dtype)
                 out[key] = (d.nbytes + u.nbytes, 0)
@@ -943,8 +919,7 @@ class PatchState:
         hit = pipe.tables.get(key)
         if hit is None:
             hit = build_table(pipe, *key)
-            _keep_table(pipe, key, hit, hit.nbytes,
-                        own=_is_default(pipe, key[0]))
+            _keep_table(pipe, key, hit, hit.nbytes)
         self._cur[key] = hit
         return hit
 
@@ -957,8 +932,7 @@ class PatchState:
             return
         for key, table in list(self._cur.items()):
             if key[0] == self.active:
-                _keep_table(pipe, key, table, table.nbytes,
-                            own=_is_default(pipe, key[0]))
+                _keep_table(pipe, key, table, table.nbytes)
 
 
 class ImageLoRALinear(nn.Module):

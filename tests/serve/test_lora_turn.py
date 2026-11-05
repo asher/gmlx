@@ -780,3 +780,56 @@ def test_a_random_sequence_keeps_the_four_invariants(monkeypatch, seed):
                 pool.store.shed(GB)
     on_worker(run)
     assert counts["turns"] > 20 and counts["refused"] > 0, counts
+
+
+# The caches a ledger is set from (image_service).
+def _lru_pipe(default="dflt"):
+    from gmlx.image.conditioning import ByteLRU
+
+    return SimpleNamespace(adapters=ByteLRU(1 << 40), tables=ByteLRU(1 << 40),
+                           default_table=default, lora=None,
+                           patch_tables={})
+
+
+def test_the_ledger_counts_request_keys_and_the_own_bytes_apart():
+    from gmlx.image.lora import install
+    from gmlx.serve.image_service import lora_figures
+
+    pipe = _lru_pipe()
+    pipe.adapters.keep({"own1"})
+    pipe.adapters.put("own1", object(), 100, shed=False)
+    pipe.adapters.put("req", object(), 50, shed=False)
+    k_own = (install.KERNEL, "p", (("own1", None, 1.0),), "f32")
+    k_req = (install.KERNEL, "p", (("req", None, 1.0),), "f32")
+    k_mix = (install.KERNEL, "q", (("own1", None, 1.0), ("req", None, 1.0)),
+             "f32")
+    pipe.tables.put(("dflt", "f32", "kernel"), object(), 30, shed=False)
+    pipe.tables.put(k_own, object(), 20, shed=False)
+    pipe.tables.put(k_req, object(), 10, shed=False)
+    pipe.tables.put(k_mix, object(), 5, shed=False)
+    pipe.tables.put(("other", "f32", "kernel"), object(), 40, shed=False)
+    keys, own = lora_figures(SimpleNamespace(pipeline=SimpleNamespace(
+        pipe=pipe)))
+    assert keys == {"req": 50, k_req: 10, k_mix: 5,
+                    ("other", "f32", "kernel"): 40}
+    assert own == 150
+
+
+def test_a_shed_returns_the_bytes_it_let_go():
+    from gmlx.serve.image_service import shed_lora
+
+    pipe = _lru_pipe()
+    pipe.adapters.put("a", object(), 50, shed=False)
+    pipe.adapters.put("b", object(), 60, shed=False)
+    e = SimpleNamespace(pipeline=SimpleNamespace(pipe=pipe))
+    assert shed_lora(e, 10, hold=("a",), own=True) == 60
+    assert pipe.adapters.sizes() == {"a": 50}
+    assert shed_lora(e, 10) == 50
+
+
+def test_a_pipeline_release_on_the_worker_runs_inline():
+    from gmlx.serve import image_service
+
+    seen = finish(*start("image-worker-test", lambda: image_service._on_worker(
+        threading.current_thread)))
+    assert seen.name == "image-worker-test"
