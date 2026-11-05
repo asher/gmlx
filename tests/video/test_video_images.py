@@ -1,7 +1,11 @@
 """Keyframe and guide images at the canvas size: the resizes against
 ComfyUI's MiniMax-H3 nodes (scripts/video_oracle/keyframes_h3.py), the
-crop offset's rounding, and the file reader. CPU-only, no weights."""
+crop offset's rounding, and the file reader against ComfyUI's LoadImage,
+through ffmpeg (skipped without it on PATH) and through Pillow. CPU-only,
+no weights."""
 from __future__ import annotations
+
+import shutil
 
 import numpy as np
 import pytest
@@ -11,6 +15,17 @@ from gmlx.video import images
 
 NAME = "keyframes_h3"
 RESIZES = committed(NAME)["inputs"]["resizes"]
+STILLS = committed(NAME)["inputs"]["stills"]
+# A reader: the ffmpeg it is given, None for Pillow.
+READERS = {"ffmpeg": "ffmpeg", "pillow": None}
+
+
+@pytest.fixture(params=sorted(READERS))
+def reader(request):
+    exe = READERS[request.param]
+    if exe is not None and shutil.which(exe) is None:
+        pytest.skip(f"no {exe} on PATH")
+    return exe
 
 
 @pytest.mark.parametrize("case", sorted(RESIZES))
@@ -47,7 +62,25 @@ def test_an_image_that_is_not_8_bit_rgb_is_refused():
         images.stretch(np.zeros((4, 4, 4), np.uint8), 2, 2)
 
 
-def test_the_reader_turns_by_exif_and_drops_alpha(tmp_path):
+@pytest.mark.parametrize("still", sorted(STILLS))
+def test_a_still_reads_as_comfyuis_loadimage(tmp_path, reader, still):
+    """A JPEG and an RGBA PNG saved with EXIF orientation 6 come out
+    upright and without alpha as LoadImage gives them: ffmpeg's decode
+    exactly, Pillow's within the 8 levels it measures on the JPEG."""
+    arrays, _ = committed_fixture(NAME)
+    fmt = STILLS[still]["format"].lower()
+    path = tmp_path / f"{still}.{fmt}"
+    path.write_bytes(arrays[f"still_{still}"].tobytes())
+    want = arrays[f"still_{still}_out"]
+    w, h = STILLS[still]["size"]
+    assert want.shape == (w, h, 3)
+    got = images.read(str(path), reader)
+    assert got.dtype == np.uint8 and got.shape == want.shape
+    gap = np.abs(got.astype(int) - want.astype(int)).max()
+    assert gap <= (8 if reader is None and fmt == "jpeg" else 0)
+
+
+def test_the_reader_turns_by_exif_and_drops_alpha(tmp_path, reader):
     from PIL import Image
 
     rng = np.random.default_rng(3)
@@ -57,9 +90,10 @@ def test_the_reader_turns_by_exif_and_drops_alpha(tmp_path):
     exif[0x0112] = 6
     path = tmp_path / "turned.png"
     img.save(path, exif=exif.tobytes())
-    got = images.read(str(path))
+    got = images.read(str(path), reader)
     assert got.dtype == np.uint8 and got.shape == (10, 6, 3)
     np.testing.assert_array_equal(got, np.rot90(rgba[..., :3], k=-1))
     plain = tmp_path / "plain.png"
     Image.fromarray(rgba[..., :3]).save(plain)
-    np.testing.assert_array_equal(images.read(str(plain)), rgba[..., :3])
+    np.testing.assert_array_equal(images.read(str(plain), reader),
+                                  rgba[..., :3])

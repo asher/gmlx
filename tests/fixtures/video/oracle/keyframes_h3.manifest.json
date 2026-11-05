@@ -170,6 +170,26 @@
     "crop": "center"
    }
   },
+  "stills": {
+   "turned_jpg": {
+    "format": "JPEG",
+    "mode": "RGB",
+    "size": [
+     96,
+     64
+    ],
+    "exif_orientation": 6
+   },
+   "turned_rgba_png": {
+    "format": "PNG",
+    "mode": "RGBA",
+    "size": [
+     64,
+     48
+    ],
+    "exif_orientation": 6
+   }
+  },
   "pad_id": 151655,
   "image": "uint8 64x64x3, numpy default_rng(0)"
  },
@@ -11121,10 +11141,11 @@
   "tags": "exact",
   "pixels_64": "max abs 1e-6",
   "resize": "exact, as uint8",
+  "stills": "ffmpeg's decode exact, as uint8; Pillow's upright, a few levels on the JPEG",
   "rule": "gmlx's ids and spans equal ComfyUI's; its tower input within 1e-6 of process_qwen2vl_images"
  },
  "notes": [],
- "created": "2026-11-05T06:44:12Z",
+ "created": "2026-11-05T07:41:22Z",
  "npz": "keyframes_h3.npz",
  "tensors": {
   "grid_64": {
@@ -11241,6 +11262,38 @@
    ],
    "dtype": "uint8",
    "sha256": "9c2398b52d8973a26f0b5758148ca747fb65c3df7e74667279b6bd599afed0cf"
+  },
+  "still_turned_jpg": {
+   "shape": [
+    1923
+   ],
+   "dtype": "uint8",
+   "sha256": "07e472c30cf8338d612b28253eff5ed9c229f8d87899876cbe04fc270fd84792"
+  },
+  "still_turned_jpg_out": {
+   "shape": [
+    96,
+    64,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "d2382635440a87a35be5f98129aecab48048958f0ff0255bb21ef806bc905f84"
+  },
+  "still_turned_rgba_png": {
+   "shape": [
+    9413
+   ],
+   "dtype": "uint8",
+   "sha256": "b23318319d8795f56f31cc543df398f218a5359e6746b81ad35fbf6a17b28ccf"
+  },
+  "still_turned_rgba_png_out": {
+   "shape": [
+    64,
+    48,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "168da2acca405886500bd0f1289ab9905040abe82cc61db37d1b8d43a3a9ac51"
   }
  }
 }
