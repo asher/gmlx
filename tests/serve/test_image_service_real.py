@@ -88,7 +88,7 @@ def test_the_auto_encoder_mode_of_a_class_default_counts_no_lora(
         gguf_dir, monkeypatch, name, gb, mode):
     """encoder_release: auto picks a class default's encoder mode from its
     real headers with no LoRA in it: a model books no memory for request
-    LoRAs, which are booked as they arrive."""
+    LoRAs, which their job's turns book."""
     spec = _class_default(gguf_dir, name, gb)
     budget = _class_budget(gb)
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)

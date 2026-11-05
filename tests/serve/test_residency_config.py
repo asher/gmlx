@@ -851,7 +851,7 @@ _CAPTIONS = 8 * 1024 * 5376 * 2
 def _cache_term() -> int:
     """The caches an entry books at a cache share of 1: the tensor caches
     with the step routes' tensor cache. A request's LoRA bytes are booked
-    as they arrive, outside it."""
+    at its job's turns, outside it."""
     from gmlx.serve import image_service
 
     tensor, _cap = image_service.cache_bytes()

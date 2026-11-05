@@ -481,10 +481,11 @@ async def head_tensor(request: Request):
 
 def _admit(pool, n: int) -> None:
     """Admit ``n`` bytes of an upload into the store before they are read,
-    off the event loop: at once when the cap and the pool's room hold them
-    beside the store, else at a store turn on the image worker, which
-    sheds and evicts for them. The caller's ``pool.upload_done`` ends the
-    count. Raises the StepError of a refusal."""
+    off the event loop: at once when the pool's room holds them beside the
+    store, else at a store turn on the image worker, which sheds and
+    evicts for them. The put holds the store to its cap. The caller's
+    ``pool.upload_done`` ends the count. Raises the StepError of a
+    refusal."""
     from ..image_service import store_turn
     from ..image_steps import UPLOAD
     from ..residency import STORE, LoraRefused

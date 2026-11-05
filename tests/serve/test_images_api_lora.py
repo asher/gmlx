@@ -321,9 +321,9 @@ def test_a_lora_over_256_mb_runs_on_the_images_api_with_the_cap_unset(
         request, monkeypatch, tmp_path):
     """A request LoRA of 270 MiB of pairs on attention leaves of a full
     DiT's width runs on the images API with server.image.adapter_cache_mb
-    unset and the memory free: its pairs and built factors are booked as
-    they arrive, the books equal what the caches hold, and no byte is
-    past its booking."""
+    unset and the memory free: its pairs and built factors are booked at
+    their job's turns, the books equal what the caches hold, and no byte
+    is past its booking."""
     pairs = _over_the_old_bound(request, monkeypatch, tmp_path, T1_DIM,
                                 T1_RANK)
     assert pairs > 256 << 20

@@ -512,7 +512,7 @@ def test_an_entry_books_its_tensor_caches_and_no_lora_room(plan_stubs,
                                                            monkeypatch):
     """An entry with no LoRA of its own books its two tensor caches, and
     with the step routes on their tensor cache, at their bounds: no room
-    for request LoRAs, whose bytes are booked as they arrive, whatever the
+    for request LoRAs, whose bytes their job's turns book, whatever the
     cap."""
     from gmlx.image import memfit
 

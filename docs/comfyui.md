@@ -348,8 +348,8 @@ A LoRA runs when the Mac has the memory for it. One that does not fit is
 refused with the memory it needs, as
 [A LoRA is refused for memory](troubleshooting.md#a-lora-is-refused-for-memory)
 describes. A 503 means the memory is not free yet, and its message says
-what holds it: queue the prompt again when that finishes, or unload a
-model as the message says.
+what to wait for or what to free: queue the prompt again when that
+finishes, or unload a model or close an app as the message says.
 A LoRA stacks on the LoRA that `gmlx Model Loader` loads with a recipe
 that has one, as `--adapter` does. A `LoraLoader` of the recipe's own
 LoRA file sets its strength in place of the recipe's, so that LoRA
