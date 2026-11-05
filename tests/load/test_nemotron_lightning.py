@@ -225,10 +225,10 @@ class _Built(Exception):
     pass
 
 
-@pytest.mark.parametrize("speech,block", [(False, 3), (True, 9)])
-def test_the_speech_decoder_head_drafts_eight(monkeypatch, speech, block):
+@pytest.mark.parametrize("speech,block", [(False, 3), (True, 8)])
+def test_the_speech_decoder_head_drafts_seven(monkeypatch, speech, block):
     """Nemotron 3.5 Transcribe (a file naming its encoder checkpoint) runs
-    its head at 8 drafts per round; other Nemotron-H heads keep 2."""
+    its head at 7 drafts per round; other Nemotron-H heads keep 2."""
     import gmlx.models.nemotron_h.mtp as nm
     import gmlx.spec.mtp_load as mtp_load
 

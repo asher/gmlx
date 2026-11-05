@@ -326,11 +326,11 @@ def _load_mtp_drafter(
                 # decode loop after one token. llama.cpp's draft-mtp runs
                 # this head at n_max 2 drafts; the rollouts self-condition,
                 # so depth beyond the default is measurement-gated. The
-                # speech decoder drafts 8, as vLLM serves it: 2.0x plain
-                # on a 166 s clip, 0.92x on an hour.
+                # speech decoder drafts 7: its verify fits the fused
+                # kernel's 8 rows, and 8 drafts are no faster on speech.
                 block_size=max(2, env_int(
                     "GMLX_NEM_MTP_BLOCK",
-                    9 if config_dict.get("speech_checkpoint_id") else 3)),
+                    8 if config_dict.get("speech_checkpoint_id") else 3)),
             )
         )
         log(
