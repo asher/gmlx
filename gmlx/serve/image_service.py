@@ -1757,6 +1757,44 @@ def lora_settle(pool, entry, subject: str) -> None:
         bound_lora(pool, entry, pipe)
 
 
+def store_turn(pool, n: int, subject: str, hold=()) -> None:
+    """An upload's store turn: the image worker sheds idle uploads, then
+    the entries' idle LoRA bytes, evicts idle models as a cold load does
+    and admits ``n`` bytes into the store. The upload waits for the worker
+    up to the turn's deadline, and past it raises the 503 naming the
+    models in use or the load in flight. A turn that starts by then runs
+    to its end, so the store never keeps bytes for an upload that left."""
+    import concurrent.futures
+
+    from .image_steps import STATE
+    from .residency import STORE
+
+    state = {"at": None}
+    lock = threading.Lock()
+
+    def admit(head):
+        return STATE.adapters.admit(n, lambda: pool.upload_room(head))
+
+    def job():
+        with lock:
+            if state["at"] == "abandoned":
+                return
+            state["at"] = "started"
+        pool.lora_turn(STORE, n, subject=subject, store=tuple(hold),
+                       admit=admit)
+
+    fut = WORKER.submit(job)
+    try:
+        fut.result(timeout=pool._retry())
+        return
+    except concurrent.futures.TimeoutError:
+        with lock:
+            if state["at"] is None:
+                state["at"] = "abandoned"
+                raise pool.lora_busy_refusal(subject, n) from None
+    fut.result()
+
+
 def turn_figures(entry, pipe, tid) -> tuple:
     """(need, held) of a forward on table ``tid``, the pipeline's default
     for None, by the dry run against what is built: the factors and

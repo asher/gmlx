@@ -367,8 +367,8 @@ class StepClient:
                             "step requests from its own Mac only: run ComfyUI there, or set "
                             "server.image.steps_remote in the server's config")
         if status == 503:
-            # Memory that a model in use holds: a refusal the pack does not
-            # retry, which passes once that model is idle.
+            # Memory that a model in use or a load in flight holds: a
+            # refusal the pack does not retry, which passes once it ends.
             msg = f"{str(msg).rstrip('.')}. Queue the prompt again then."
         raise GmlxError(f"gmlx: {what} failed ({status}): {msg}")
 

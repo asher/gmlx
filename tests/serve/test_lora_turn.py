@@ -833,3 +833,31 @@ def test_a_pipeline_release_on_the_worker_runs_inline():
     seen = finish(*start("image-worker-test", lambda: image_service._on_worker(
         threading.current_thread)))
     assert seen.name == "image-worker-test"
+
+
+def test_an_upload_fits_the_budget_and_the_measure_beside_the_store(
+        monkeypatch):
+    from gmlx.serve.image_steps import _Bytes
+
+    pool = make_pool(monkeypatch, 10)
+    image(pool, "x", 4, busy=True)
+    store = _Bytes(None, "the step routes' adapter cache", "adapter_cache_mb")
+    store.put("old", SimpleNamespace(nbytes=GB))
+
+    def admit(n, head):
+        return store.admit(int(n), lambda: pool.upload_room(head))
+
+    # 6 GB the budget leaves, of which the store holds 1.
+    assert not admit(5.5 * GB, None) and store.incoming == 0
+    assert admit(5 * GB, None)
+    store.done(5 * GB)
+    # A measure of 3 GB bounds the store, which it does not see.
+    assert not admit(2.5 * GB, 3 * GB)
+    assert admit(2 * GB, 3 * GB)
+    store.done(2 * GB)
+    # A booking the measure does not see yet counts too.
+    x = pool._entries[("x", None, IMAGE_KIND)]
+    turn(pool, x, GB)
+    assert not admit(1.5 * GB, 3 * GB)
+    assert admit(GB, 3 * GB)
+    assert store.live() == 2 * GB

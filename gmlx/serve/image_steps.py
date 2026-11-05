@@ -41,6 +41,7 @@ normalized, so their VAE routes take and give model-space latents.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -264,6 +265,29 @@ def pairs_due(served, pairs: dict) -> dict:
             if k not in own and served.pipe.adapters.peek(k) is None}
 
 
+def request_matrices(served, body: dict, adapters) -> dict:
+    """{hash: bytes} of the matrices ``adapters`` holds of the pairs of a
+    contract table ``body`` that are not the entry's own: what the
+    request's LoRA holds at its forward, from the wire bytes."""
+    from .image_service import _pair_keys
+
+    own = _pair_keys(served.adapters)
+    out: dict = {}
+    for e in body.get("entries") or []:
+        for p in (e.get("patches") or []) if isinstance(e, dict) else []:
+            if not isinstance(p, dict):
+                continue
+            hs = [h for h in (p.get("up"), p.get("down"))
+                  if isinstance(h, str)]
+            ts = [adapters.peek(h) for h in hs]
+            if len(ts) != 2 or None in ts:
+                continue
+            if wire_pair_key(ts[0], ts[1]) in own:
+                continue
+            out.update({h: t.nbytes for h, t in zip(hs, ts)})
+    return out
+
+
 def matrix_sizes(body: dict, adapters) -> dict:
     """{hash: bytes} of the matrices a contract table ``body`` names."""
     return {h: adapters.nbytes(h)
@@ -301,24 +325,63 @@ class _Bytes:
         self._items: OrderedDict = OrderedDict()
         self._bytes = 0
         self._lock = threading.Lock()
-        # The books' hooks, as ByteLRU has them: on_put(key, nbytes, old)
-        # before a tensor goes in, on_gone(keys) for the keys let go, and
-        # the books they post to.
-        self.on_put = None
-        self.on_gone = None
-        self.books = None
+        # The keys a define or a step holds, by count: neither a shed nor
+        # the bound lets them go.
+        self._held: dict = {}
+        # The bytes of bodies admitted and not put yet.
+        self.incoming = 0
 
-    def _gone(self, keys) -> None:
-        if keys and self.on_gone is not None:
-            self.on_gone(list(keys))
+    def _shed_over(self, keep_one: bool) -> None:
+        """Drop the oldest tensors not held while the store is over its
+        bound, the newest kept with ``keep_one``."""
+        newest = next(reversed(self._items), None) if keep_one else None
+        for k in [k for k in self._items
+                  if k not in self._held and k != newest]:
+            if self._bytes <= self.max_bytes:
+                return
+            self._bytes -= self._items.pop(k).nbytes
 
-    def _shed_over(self, keep_one: bool) -> list:
-        gone = []
-        while self._bytes > self.max_bytes and len(self._items) > keep_one:
-            k, t = self._items.popitem(last=False)
-            self._bytes -= t.nbytes
-            gone.append(k)
-        return gone
+    @contextlib.contextmanager
+    def holding(self, keys):
+        """Hold ``keys`` for the block: a shed and the bound skip them."""
+        keys = list(keys)
+        with self._lock:
+            for k in keys:
+                self._held[k] = self._held.get(k, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                for k in keys:
+                    n = self._held.get(k, 0) - 1
+                    if n > 0:
+                        self._held[k] = n
+                    else:
+                        self._held.pop(k, None)
+
+    def live(self) -> int:
+        """The bytes held and admitted."""
+        with self._lock:
+            return self._bytes + self.incoming
+
+    def admit(self, nbytes: int, room) -> bool:
+        """Count ``nbytes`` of a body as incoming, then read ``room()``,
+        the bytes the store may hold in all (None for no bound), and undo
+        the count when the store's live bytes pass it. A turn books first
+        and reads the store next, so one of two grants that race sees the
+        other."""
+        with self._lock:
+            self.incoming += int(nbytes)
+        got = room()
+        if got is None or self.live() <= got:
+            return True
+        self.done(nbytes)
+        return False
+
+    def done(self, nbytes: int) -> None:
+        """An admitted body was put, or failed."""
+        with self._lock:
+            self.incoming = max(0, self.incoming - int(nbytes))
 
     def get(self, key):
         with self._lock:
@@ -348,26 +411,24 @@ class _Bytes:
             old = self._items.pop(key, None)
             if old is not None:
                 self._bytes -= old.nbytes
-            if self.on_put is not None:
-                self.on_put(key, t.nbytes, 0 if old is None else old.nbytes)
             self._items[key] = t
             self._bytes += t.nbytes
-            self._gone(self._shed_over(True))
+            self._shed_over(True)
 
     def shed(self, nbytes: int, hold=()) -> int:
-        """Drop the least recently used tensors but those at ``hold``
-        until ``nbytes`` are gone, and return the bytes dropped."""
+        """Drop the least recently used tensors but those at ``hold`` and
+        those held until ``nbytes`` are gone, and return the bytes
+        dropped."""
         hold = set(hold)
         with self._lock:
-            dropped, keys = 0, []
-            for k in [k for k in self._items if k not in hold]:
+            dropped = 0
+            for k in [k for k in self._items
+                      if k not in hold and k not in self._held]:
                 if dropped >= nbytes:
                     break
                 t = self._items.pop(k)
                 self._bytes -= t.nbytes
                 dropped += t.nbytes
-                keys.append(k)
-            self._gone(keys)
             return dropped
 
     @property
@@ -378,7 +439,7 @@ class _Bytes:
         """Refuse ``nbytes`` over the bound with a 413 that gives its
         remedy: the share the models loaded leave the cache, when the
         configured bound holds them, or else the configured bound. A
-        store with no bound refuses nothing: the pool books its bytes."""
+        store with no bound refuses nothing: the pool's room bounds it."""
         if self.configured is None or nbytes <= self.max_bytes:
             return
         configured = f"{self.configured / 2**20:.0f} MiB"
@@ -403,14 +464,12 @@ class _Bytes:
             else:
                 self.configured = int(configured)
                 self.max_bytes = int(max_bytes)
-            self._gone(self._shed_over(False))
+            self._shed_over(False)
 
     def clear(self) -> None:
         with self._lock:
-            keys = list(self._items)
             self._items.clear()
             self._bytes = 0
-            self._gone(keys)
 
 
 @dataclass(eq=False)
