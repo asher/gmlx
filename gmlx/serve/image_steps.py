@@ -178,6 +178,9 @@ def flow_targets(sample_sigmas, timesteps) -> list:
 class StepError(Exception):
     """A step contract request refused with its status and a body."""
 
+    # The Retry-After seconds of a 503, or None for a deferred load's.
+    retry_after: int | None = None
+
     def __init__(self, status: int, message: str, **extra):
         super().__init__(message)
         self.status = status

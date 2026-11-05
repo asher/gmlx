@@ -1695,7 +1695,7 @@ def shed_lora(entry, nbytes: int, hold=(), own: bool = False) -> int:
     return max(0, start - pipe.adapters.bytes - pipe.tables.bytes)
 
 
-def lora_figures(entry) -> tuple:
+def lora_figures(entry) -> tuple | None:
     """({request key: bytes}, own bytes) the LoRA caches of a pool entry
     hold now. Own keys are the keep set's pairs, the built tables of the
     default table and the kernel pairs built over kept pairs alone; the
@@ -1769,7 +1769,7 @@ def store_turn(pool, n: int, subject: str, hold=()) -> None:
     from .image_steps import STATE
     from .residency import STORE
 
-    state = {"at": None}
+    state: dict = {"at": None}
     lock = threading.Lock()
 
     def admit(head):

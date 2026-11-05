@@ -231,7 +231,10 @@ def gb(n: float, up: bool) -> str:
 
 
 class _Store:
-    """The step routes' upload store as the owner of a turn."""
+    """The step routes' upload store as the owner of a turn. It keeps no
+    ledger: the store counts its own bytes."""
+
+    lora = None
 
     def __repr__(self) -> str:
         return "uploads"
