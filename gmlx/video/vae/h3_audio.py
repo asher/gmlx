@@ -11,6 +11,12 @@ that multiplies float32 at TF32 (gmlx.image.float32), where TF32 products
 would put its decode 38 dB from the float32 one.
 
 Latents are (B, 32, 2, T) in model space, waveforms (B, 2, samples).
+
+The encoder's convolutions see a few latents each side, and its attention
+head is causal. So the encode runs the convolutions WINDOW latents at a
+time with the latents they see each side, which bounds its memory on long
+audio, and the first T latents of a long waveform need its first T
+latents of samples and that halo after them alone.
 """
 
 from __future__ import annotations
@@ -27,6 +33,8 @@ from gmlx.image.float32 import (conv1d, conv_transpose1d, exact_matmul,
 HOP = 800
 SAMPLE_RATE = 32000
 QUERY_BLOCK = 512
+# Latents the encoder's convolutions run at a time, 4 s.
+WINDOW = 160
 
 
 @dataclass(frozen=True)
@@ -223,6 +231,25 @@ class Encoder(nn.Module):
         return x
 
 
+def _convs(layers):
+    for layer in layers:
+        if isinstance(layer, nn.Conv1d):
+            yield layer
+        elif isinstance(getattr(layer, "block", None), list):
+            yield from _convs(layer.block)
+
+
+def reach(encoder: Encoder) -> tuple[int, int]:
+    """The samples before the first and after the last sample of a latent
+    that the encoder's convolutions read for it: (before, after)."""
+    lo = hi = 0
+    for c in reversed(list(_convs(encoder.block))):
+        k = c.weight.shape[1]
+        lo = lo * c.stride - c.padding
+        hi = hi * c.stride - c.padding + (k - 1) * c.dilation
+    return -lo, hi - (HOP - 1)
+
+
 def _matmul(a: mx.array, b: mx.array) -> mx.array:
     return a @ b if f32_products_exact() else exact_matmul(a, b)
 
@@ -402,14 +429,40 @@ class H3AudioVAE(nn.Module):
         self.latents_mean = mx.zeros((cfg.z,))
         self.latents_std = mx.ones((cfg.z,))
 
-    def encode(self, waveform: mx.array) -> mx.array:
+    @property
+    def halo(self) -> int:
+        """The latents each side of a window that its convolutions read."""
+        return -(-max(reach(self.encoder)) // HOP)
+
+    def samples_for(self, latents: int) -> int:
+        """The samples whose encode gives a waveform's first ``latents``
+        latents as its whole encode does."""
+        return (latents + self.halo) * HOP
+
+    def _features(self, x: mx.array, window: int | None) -> mx.array:
+        t = x.shape[1] // HOP
+        if window is None or t <= window:
+            return self.encoder(x)
+        h, out = self.halo, []
+        for a in range(0, t, window):
+            b = min(a + window, t)
+            lo, hi = max(a - h, 0), min(b + h, t)
+            y = self.encoder(x[:, lo * HOP:hi * HOP])[:, a - lo:b - lo]
+            mx.eval(y)
+            out.append(y)
+        return mx.concatenate(out, axis=1)
+
+    def encode(self, waveform: mx.array,
+               window: int | None = WINDOW) -> mx.array:
         """Model-space latents (B, 32, 2, T) of a stereo waveform (B, 2, n)
-        in [-1, 1], right-padded with zeros to a whole latent."""
+        in [-1, 1], right-padded with zeros to a whole latent, its
+        convolutions ``window`` latents at a time (None for all at
+        once)."""
         b, s, n = waveform.shape
         pad = -n % HOP
         x = mx.pad(waveform.astype(mx.float32), [(0, 0), (0, 0), (0, pad)])
         x = x.reshape(b * s, n + pad, 1)
-        x = self.pre_block(self.encoder(x))
+        x = self.pre_block(self._features(x, window))
         z = (self.mean_proj(x) - self.latents_mean) / self.latents_std
         return z.reshape(b, s, z.shape[1], self.cfg.z).transpose(0, 3, 1, 2)
 

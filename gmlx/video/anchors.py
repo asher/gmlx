@@ -12,6 +12,8 @@ keeps, before its frames or audio are encoded: a guide clip keeps its
 first frame alone under 5 frames, else its first 17 k + 5; a negative
 frame counts from the end; the kept frames fit the clip; and audio keeps
 the latent frames left on the clip's audio track from the anchor's time.
+``encode`` then makes the anchor of a placement from its frames and its
+waveform with the family's VAEs.
 """
 
 from __future__ import annotations
@@ -91,6 +93,38 @@ def place(frame: int, frames: int, audio_t: int, frame_rescale: float, *,
             raise ValueError(f"frame {frame} is past the end of the clip's "
                              "audio")
     return Placement(at, kept if video_frames else 0, max_rt)
+
+
+def encode(placement: Placement, *, frames=None, waveform=None,
+           video_vae=None, audio_vae=None) -> Anchor:
+    """The anchor of ``placement``: its kept frames of ``frames``, (T, H,
+    W, 3) uint8 at the canvas size, through ``video_vae``, and
+    ``waveform``, (2, samples) at the audio VAE's rate, through
+    ``audio_vae``, read as far as its kept latents need and cut to
+    them, as a whole encode cut to them would be."""
+    import mlx.core as mx
+
+    video = audio = None
+    if placement.video_frames:
+        if frames is None or len(frames) < placement.video_frames:
+            raise ValueError(f"a placement keeps {placement.video_frames} "
+                             "frames, and fewer were given")
+        x = mx.array(frames[:placement.video_frames])
+        if x.dtype != mx.uint8 or x.ndim != 4 or x.shape[-1] != 3:
+            raise ValueError(f"anchor frames are (T, H, W, 3) uint8, not "
+                             f"{x.dtype} {tuple(x.shape)}")
+        video = video_vae.encode((x.astype(mx.float32) / 255.0)[None]
+                                 * 2.0 - 1.0)
+        mx.eval(video)
+    if placement.audio_t is not None:
+        w = mx.array(waveform, mx.float32)
+        if w.ndim != 2 or w.shape[0] != 2:
+            raise ValueError(f"an anchor waveform is (2, samples), not "
+                             f"{tuple(w.shape)}")
+        need = audio_vae.samples_for(placement.audio_t)
+        audio = audio_vae.encode(w[None, :, :need])[..., :placement.audio_t]
+        mx.eval(audio)
+    return Anchor(placement.frame, video, audio)
 
 
 def layout_rows(anchors) -> tuple:
