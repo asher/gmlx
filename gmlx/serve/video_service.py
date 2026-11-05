@@ -41,7 +41,8 @@ _log = logging.getLogger(__name__)
 _F32 = np.float32
 # The text rows an entry's encode phase is priced at.
 PRICED_TEXT_ROWS = 1024
-# Refined text rows kept per entry, by (cond key, patch table).
+# Refined text rows kept per entry, by (cond key, patch table): the
+# bytes of this many prompts of the priced rows.
 CAPTIONS = 8
 # ComfyUI's floor on the video sigma of a step (MiniMax-H3 forward).
 SIGMA_FLOOR = 1e-6
@@ -65,6 +66,8 @@ class VideoEntryPlan:
     cache_share: float = 1.0        # of each cache's configured bound
     lora_term: int = 0              # what the plan books for the LoRAs
     tensor_floor: int = 0           # step tensor cache bytes kept for a cond
+    mmproj_bytes: int = 0           # the encoder's mmproj file, for keyframes
+    tower_bytes: int = 0            # its vision tower once attached
 
 
 @dataclass(eq=False)
@@ -106,23 +109,38 @@ def clip_defaults(spec, fam, variant: str) -> dict:
 
 def plan_clip(plan: VideoEntryPlan, *, frames: int, width: int, height: int,
               text: int, budget=None, decode: bool = True,
-              audio: int | None = None, live_lora: bool = False):
+              audio: int | None = None, live_lora: bool = False,
+              blocks=(), anchors=()):
     """The memory plan of one clip on the entry's files. ``audio`` is the
     audio stream's latents when they are not the clip's, and
-    ``live_lora`` prices the step with a LoRA the server was sent."""
+    ``live_lora`` prices the step with a LoRA the server was sent.
+    ``blocks`` are the vision tokens of the prompt's keyframes, which
+    ``text`` counts, and ``anchors`` the placed ``layout.AnchorRows``."""
     from gmlx.video import memfit
     from gmlx.video.registry import get_family
 
     fam = get_family(plan.family)
     rows, n_audio = memfit.clip_rows(fam, frames=frames, width=width,
-                                     height=height, text=text)
+                                     height=height, text=text,
+                                     anchors=anchors)
     return memfit.plan_memory(
         plan.family, dit=plan.dit_bytes, encoder=plan.encoder_bytes,
         vae=plan.vae_bytes, audio_vae=plan.audio_vae_bytes,
         loras=plan.loras, lora_dtypes=plan.lora_dtypes, rows=rows,
         text=text, audio_latents=n_audio if audio is None else int(audio),
         pixels=width * height, decode=decode, variant=plan.variant,
-        live_lora=live_lora, budget=budget)
+        live_lora=live_lora, mmproj=plan.mmproj_bytes,
+        tower=plan.tower_bytes, blocks=blocks,
+        anchor_frames=memfit.anchor_frames(fam, anchors),
+        anchor_audio=[a.audio_t for a in anchors if a.audio_t],
+        budget=budget)
+
+
+def caption_bytes(hidden: int) -> int:
+    """The bytes of refined text rows an entry keeps: ``CAPTIONS``
+    prompts of the priced rows at the DiT's width ``hidden`` in
+    bfloat16."""
+    return CAPTIONS * PRICED_TEXT_ROWS * int(hidden) * 2
 
 
 def held_bytes(served: ServedVideo) -> tuple:
@@ -176,6 +194,7 @@ def entry_plan(spec) -> VideoEntryPlan:
     except ValueError as e:
         raise VideoModelError(f"video model {spec.id!r}: {e}") from None
     loras = tuple(memfit.file_bytes(p) for p, _ in spec.adapters)
+    mmproj = getattr(spec, "encoder_mmproj", None)
     base = VideoEntryPlan(
         footprint=0, family=fam.name, variant=ident.variant, size=d["size"],
         frames=d["frames"], steps=d["steps"], shifts=d["shifts"],
@@ -183,7 +202,9 @@ def entry_plan(spec) -> VideoEntryPlan:
         encoder_bytes=memfit.file_bytes(spec.encoder),
         vae_bytes=memfit.file_bytes(spec.vae),
         audio_vae_bytes=memfit.file_bytes(spec.audio_vae), loras=loras,
-        lora_dtypes=tuple(memfit.lora_dtype(p) for p, _ in spec.adapters))
+        lora_dtypes=tuple(memfit.lora_dtype(p) for p, _ in spec.adapters),
+        mmproj_bytes=memfit.file_bytes(mmproj) if mmproj else 0,
+        tower_bytes=memfit.tower_bytes(mmproj) if mmproj else 0)
     width, height = d["size"]
     budget = working_budget_bytes()
     clip = plan_clip(base, frames=d["frames"], width=width, height=height,
@@ -195,10 +216,8 @@ def entry_plan(spec) -> VideoEntryPlan:
     # rows, the f32 encoder features a client uploads, at any share.
     cond = PRICED_TEXT_ROWS * int(ident.config["text_dim"]) * 4
     floor = min(cond, tensor) if steps else 0
-    # The refined text rows the entry keeps, CAPTIONS of the priced rows
-    # at the DiT's width in bfloat16, at any share.
-    captions = CAPTIONS * PRICED_TEXT_ROWS * int(
-        ident.config["hidden_size"]) * 2
+    # The refined text rows the entry keeps, at any share.
+    captions = caption_bytes(ident.config["hidden_size"])
 
     def price(share: float, kept: int = floor) -> int:
         # The step routes' caches and the refined rows stay through the
@@ -433,7 +452,9 @@ def stream_sigmas(timestep: float, shifts: dict) -> tuple:
 
 def caption(served: ServedVideo, key: str, feats, table: str):
     """The refined text rows of encoder features ``feats`` under patch
-    table ``table``, kept by (key, table) while the entry holds them."""
+    table ``table``, kept by (key, table) while the entry holds them and
+    within ``caption_bytes``, the oldest dropped first. Rows over that
+    bound alone are not kept."""
     import mlx.core as mx
 
     held = served.captions.get((key, table)) if key else None
@@ -442,10 +463,13 @@ def caption(served: ServedVideo, key: str, feats, table: str):
         return held, True
     text = served.pipe.dit.caption(feats)
     mx.eval(text)
-    if key:
+    bound = caption_bytes(served.pipe.dit.cfg.dim)
+    if key and int(text.nbytes) <= bound:
         served.captions[(key, table)] = text
-        while len(served.captions) > CAPTIONS:
-            served.captions.popitem(last=False)
+        held = sum(int(a.nbytes) for a in served.captions.values())
+        while held > bound:
+            _k, old = served.captions.popitem(last=False)
+            held -= int(old.nbytes)
     return text, False
 
 

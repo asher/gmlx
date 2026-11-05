@@ -41,6 +41,11 @@
     "file": "MLX active peaks per phase of runs of the fasth3 recipe's pinned DiT, with the h3 recipe's encoder, VAEs and 8-step LoRA, on an M5 Max, mlx 0.32.3, mlx-kquant with vsa_attention",
     "note": "FastH3's step fits are tested against these cells"
   },
+  "memfit_h3_keyframe_cells.json": {
+    "source": "measured",
+    "file": "MLX active peaks of encodes with keyframes, the h3 recipe's pinned encoder with unsloth's mmproj-BF16.gguf, and of anchors through its VAEs, on an M5 Max, mlx 0.32.3",
+    "note": "the video memory plan's keyframe and anchor fits are tested against these cells"
+  },
   "fasth3_fv_geometry.npz": {
     "repo": "hao-ai-lab/FastVideo",
     "revision": "4d0a10d98914b6f0110454a8dc4ef89662fc3ac0",

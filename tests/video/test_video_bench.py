@@ -28,6 +28,8 @@ ENC = 64
 DIT, STEP = 128, 32
 AVAE, AVAE_LOAD, AVAE_RUN = 8, 256, 16
 VAE, VAE_LOAD, VAE_RUN = 8, 256, 24
+# The phases of a clip from text alone, the bench's: it encodes no anchors.
+T2V = tuple(p for p in memfit.PHASES if p != "anchors")
 
 
 def _alloc(mib):
@@ -248,7 +250,7 @@ def test_one_record_per_shape_from_one_load_of_each_model(bench, tmp_path,
         assert (s["width"], s["height"], s["frames"], s["steps"],
                 s["seed"]) == (w, h, f, 3, 4)
         assert len(r["step_s"]) == 3
-        assert set(r["peak"]) == set(r["predicted"]) == set(memfit.PHASES)
+        assert list(r["peak"]) == list(r["predicted"]) == list(T2V)
         rows, _ = memfit.clip_rows(hf.FAMILY, frames=f, width=w, height=h,
                                    text=TEXT)
         assert r["rows"]["total"] == rows and r["rows"]["text"] == TEXT
@@ -649,8 +651,7 @@ def test_a_decode_that_fails_keeps_what_each_shape_measured(bench,
     assert bench("--shapes", "64x64x5,96x64x22", "--steps", "1",
                  "--json-out", str(out)) == 1
     first, second = _records(out.read_text())
-    assert list(first["peak"]) == list(first["predicted"]) == list(
-        memfit.PHASES)
+    assert list(first["peak"]) == list(first["predicted"]) == list(T2V)
     assert list(second["peak"]) == ["encode", "denoise", "audio"]
     assert "decode_s" in first and "decode_s" not in second
     assert "mux_s" in first and "mux_s" not in second

@@ -270,6 +270,32 @@ def test_the_refined_rows_are_kept_by_cond_and_patch_table(host, pipe,
     assert _rel(other[0], first[0]) > 1e-3
 
 
+def test_the_refined_rows_keep_to_the_bytes_the_entry_books():
+    """The entry keeps refined rows of any count within the bytes it
+    books for them, CAPTIONS prompts of the priced rows, and drops the
+    oldest past that; rows over the bound alone are not kept and drop
+    nothing."""
+    dim = 4
+    dit = SimpleNamespace(cfg=SimpleNamespace(dim=dim), caption=lambda f: f)
+    served = ServedVideo(pipe=SimpleNamespace(dit=dit), spec=None,
+                         plan=None)  # type: ignore
+
+    def put(key, rows):
+        feats = mx.zeros((1, rows, dim), mx.float32)
+        mx.eval(feats)
+        return _on_worker(vs.caption, served, key, feats, "t")[0]
+    assert vs.caption_bytes(dim) == 64 << 10
+    for i in range(vs.CAPTIONS + 2):
+        put(f"c{i}", 64)                # 1 KiB each
+    assert len(served.captions) == vs.CAPTIONS + 2
+    put("big", 3840)                    # 60 KiB
+    assert [k for k, _ in served.captions] == [f"c{i}" for i in range(6, 10)
+                                               ] + ["big"]
+    assert put("huge", 4200).shape == (1, 4200, dim)
+    assert [k for k, _ in served.captions] == [f"c{i}" for i in range(6, 10)
+                                               ] + ["big"]
+
+
 def test_the_negative_of_a_guided_step_is_refined_from_its_own_cond(host):
     """At cfg above 1 ComfyUI runs the model on the positive cond and then
     on the negative one, each a step of its own under the same table."""

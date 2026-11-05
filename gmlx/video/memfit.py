@@ -1,13 +1,21 @@
 """The memory plan of a video run, from file sizes and the clip's size.
 
-A run holds one model at a time, in four phases: the encode, the
-denoise, the audio decode and the video decode. MLX counts
+A run holds one model at a time, in five phases: the encode, the
+anchors, the denoise, the audio decode and the video decode. MLX counts
 memory-mapped weights as active memory, so each phase is its files plus
 a line fit of what the run adds, both read as MLX's active peak.
 
 - encode: the larger of the load, which maps the text encoder's file
   whole, and the run, which keeps part of the file once the layers past
-  the tap drop and adds the prompt's activations by text row.
+  the tap drop and adds the prompt's activations by text row. A prompt
+  with keyframes adds two terms: the attach, which reads the mmproj into
+  the vision tower at float32 beside the kept part, and a run that holds
+  the tower too and is the larger of the tower's pass over the largest
+  keyframe and the language model's pass over the prompt's rows.
+- anchors: the keyframes and guides through the video VAE, one at a
+  time, a lone frame by pixel and a clip by pixel and frame-pixel, or
+  the guide audio through the audio VAE by audio latent, whichever is
+  larger. A run with no anchors has no such phase.
 - denoise: the DiT's file, its LoRAs, and one step's activations by row
   of the packed sequence, on the variant's own fit where ``PEAKS`` has
   one (FastH3, whose steps run video sparse attention and its gates).
@@ -30,7 +38,7 @@ import os
 from dataclasses import dataclass
 
 GiB = 1 << 30
-PHASES = ("encode", "denoise", "audio", "decode")
+PHASES = ("encode", "anchors", "denoise", "audio", "decode")
 
 
 @dataclass(frozen=True)
@@ -54,6 +62,14 @@ class VideoPeaks:
     audio: Line                     # per audio latent
     decode: Line                    # per output pixel
     tiny_decode: Line               # per output pixel, TAEH3
+    # A prompt with keyframes, over the kept part and the vision tower:
+    tower: Line                     # per vision token of the largest one
+    vision_encode: Line             # per prompt row
+    # The anchors, each over its VAE's file:
+    frame_encode: Line              # per pixel, a lone frame
+    clip_encode: Line               # per pixel, a guide clip
+    clip_frame: float               # per frame-pixel of a guide clip
+    audio_encode: Line              # per audio latent
     lora_dtype: str = "BF16"        # the DiT's activation dtype
     lora_k: float = 2.0
 
@@ -81,6 +97,24 @@ class VideoPeaks:
 # The video decode reads 1.10 to 1.49 GiB over its file from 512x512 to
 # 1344x768, 0.05 GiB more at 362 frames than at 124, and TAEH3 0.90 to
 # 3.00 GiB, each through its 512x512 and 1344x768 cells.
+#
+# Keyframes and anchors, on the same encoder with unsloth's
+# mmproj-BF16.gguf and the same VAEs, in
+# tests/fixtures/video/memfit_h3_keyframe_cells.json. The encoder loads
+# its text part first, at the load's own peak, and the attach then holds
+# 0.65 GB over the tower it leaves at float32. Over the kept part and the
+# tower, the tower's pass over one keyframe reads 0.12 to 1.31 GB from 60
+# to 1008 vision tokens, through the 576 and 1008 token cells, and 0.80
+# and 1.38 GB with a second keyframe of 576 and 1008 tokens beside the
+# first one's features. A prompt with keyframes reads 0.16 to 2.53 GB
+# from 82 to 7283 rows, the tower's pass the larger at one 1344x768
+# keyframe; its line runs through the 1182 and 7283 row cells. A lone frame through the
+# video VAE reads 0.86 to 0.96 GB over its file from 320x192 to 1344x768,
+# through the 768x768 and 1344x768 cells; a guide clip 2.68 to 5.80 GB
+# from 320x192 at 22 frames to 1344x768 at 124, through the 672x384 and
+# 1344x768 cells at 22 frames by pixel and the 22 and 124 frame cells at
+# 1344x768 by frame-pixel. The audio VAE reads 1.10 to 1.87 GB over its
+# file from 40 to 600 latents, through the 160 and 600 latent cells.
 PEAKS = {
     "h3": VideoPeaks(
         encoder_load=0.26 * GiB,
@@ -90,7 +124,13 @@ PEAKS = {
         plain_step=Line(0.54 * GiB, 163_500),
         audio=Line(2.01 * GiB, 3_980_000),
         decode=Line(1.24 * GiB, 530),
-        tiny_decode=Line(0.43 * GiB, 3_200)),
+        tiny_decode=Line(0.43 * GiB, 3_200),
+        tower=Line(0.29 * GiB, 1_378_900),
+        vision_encode=Line(1.16 * GiB, 273_000),
+        frame_encode=Line(1.12 * GiB, 26),
+        clip_encode=Line(3.52 * GiB, 303),
+        clip_frame=17,
+        audio_encode=Line(1.84 * GiB, 301_400)),
 }
 # FastH3: vantagewithai's Q4_K_M with its VSA gates, measured as the H3
 # cells on the same encoder, VAEs and LoRA, in
@@ -110,6 +150,9 @@ PEAKS["fasth3"] = dataclasses.replace(
 _HINTS = {"encode": "the text encoder needs more memory than this Mac "
                     "has, and gmlx has no smaller one for this model yet",
           "prompt": "try a shorter prompt",
+          "keyframes": "try a shorter prompt or a smaller size, or one "
+                       "keyframe",
+          "anchors": "try a smaller size or a shorter guide clip",
           "denoise": "try a smaller size or a shorter clip",
           "audio": "try a shorter clip",
           "decode": "try a smaller size, or --preview"}
@@ -138,7 +181,8 @@ class VideoPlan:
     terms: dict                     # phase -> {term: bytes}
     budget: float | None
     rows: int
-    encoder_load: int = 0           # the encode phase of a short prompt
+    encoder_load: int = 0           # the encode's part no prompt changes
+    keyframes: bool = False         # the encode runs the vision tower
 
     @property
     def peak(self) -> int:
@@ -169,7 +213,9 @@ class VideoPlan:
             return None
         if "encode" in over:
             assert self.budget is not None
-            return "prompt" if self.encoder_load <= self.budget else "encode"
+            if self.encoder_load > self.budget:
+                return "encode"
+            return "keyframes" if self.keyframes else "prompt"
         return max(over, key=self.phases.__getitem__)
 
     def hint(self) -> str:
@@ -199,6 +245,9 @@ def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
                 text: int, audio_latents: int, pixels: int,
                 tiny: bool = False, decode: bool = True,
                 variant: str | None = None, live_lora: bool = False,
+                mmproj: int = 0, tower: int = 0, blocks=(),
+                anchor_frames=(), anchor_audio=(),
+                anchor_vae: int | None = None,
                 budget: float | None = None) -> VideoPlan:
     """The plan of one run of ``variant``, on its own fits where ``PEAKS``
     has them, else its family's. File sizes in bytes; ``lora_dtypes`` holds
@@ -208,21 +257,40 @@ def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
     ``pixels`` a frame's width times height. ``vae`` is TAEH3's file
     when ``tiny``. With ``decode`` False the plan has no audio or decode
     phase. ``live_lora`` prices the step with a LoRA live when ``loras``
-    names none, as a patch table the server was sent runs it. ``budget``
-    defaults to ``capacity.working_budget_bytes()``."""
+    names none, as a patch table the server was sent runs it.
+
+    ``blocks`` holds each keyframe's vision tokens, whose rows ``text``
+    counts; the encode then attaches the vision tower of the ``mmproj``
+    file, ``tower`` bytes once loaded (``tower_bytes``). The anchors
+    phase encodes ``anchor_frames``, the frames of each keyframe and
+    guide at ``pixels``, through the video VAE file ``anchor_vae``
+    (``vae`` when None), and ``anchor_audio``, the latents of each guide
+    audio. ``budget`` defaults to
+    ``capacity.working_budget_bytes()``."""
     p = PEAKS[variant] if variant in PEAKS else PEAKS[family]
     load = encoder + p.encoder_load
-    kept, prompt = p.encoder_keep * encoder, p.encode.bytes(text)
+    kept = p.encoder_keep * encoder
     lora = sum(int(b) for b in loras)
     alone = len(loras) == 1 and list(lora_dtypes) == [p.lora_dtype]
     step = p.step if lora or live_lora else p.plain_step
-    terms = {
-        "encode": ({"encoder": encoder, "load": p.encoder_load}
-                   if load >= kept + prompt
-                   else {"encoder": kept, "prompt": prompt}),
-        "denoise": {"dit": dit, "lora": lora if alone else p.lora_k * lora,
-                    "step": step.bytes(rows)},
-    }
+    terms = {"encode": _encode_terms(p, encoder, kept, text, mmproj, tower,
+                                     tuple(int(b) for b in blocks))}
+    floor = load
+    if blocks:
+        from gmlx.image.memfit import LOAD_ROOM
+
+        floor = max(load, kept + tower + LOAD_ROOM * mmproj)
+    if anchor_frames or anchor_audio:
+        if anchor_frames and anchor_vae is None and tiny:
+            raise ValueError("a preview's plan needs the video VAE its "
+                             "anchors encode through, as anchor_vae")
+        terms["anchors"] = _anchor_terms(
+            p, pixels, [int(f) for f in anchor_frames],
+            [int(n) for n in anchor_audio],
+            vae if anchor_vae is None else anchor_vae, audio_vae)
+    terms["denoise"] = {"dit": dit,
+                        "lora": lora if alone else p.lora_k * lora,
+                        "step": step.bytes(rows)}
     if decode:
         terms["audio"] = {"audio_vae": audio_vae,
                           "decode": p.audio.bytes(audio_latents)}
@@ -234,29 +302,102 @@ def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
         budget = working_budget_bytes()
     phases = {ph: int(sum(t.values())) for ph, t in terms.items()}
     return VideoPlan(phases=phases, terms=terms, budget=budget, rows=rows,
-                     encoder_load=int(load))
+                     encoder_load=int(floor), keyframes=bool(blocks))
 
 
-def prompt_rows(fam, prompt: str, tokenizer) -> int:
+def _encode_terms(p: VideoPeaks, encoder: int, kept: float, text: int,
+                  mmproj: int, tower: int, blocks: tuple) -> dict:
+    """The encode phase's terms: its load, or a run over the kept part,
+    and with keyframes the tower's attach, whichever is the largest."""
+    if not blocks:
+        prompt = p.encode.bytes(text)
+        if encoder + p.encoder_load >= kept + prompt:
+            return {"encoder": encoder, "load": p.encoder_load}
+        return {"encoder": kept, "prompt": prompt}
+    from gmlx.image.memfit import LOAD_ROOM
+
+    run = max(p.vision_encode.bytes(text), p.tower.bytes(max(blocks)))
+    parts = ({"encoder": encoder, "load": p.encoder_load},
+             {"encoder": kept, "tower": tower,
+              "attach": LOAD_ROOM * mmproj},
+             {"encoder": kept, "tower": tower, "prompt": run})
+    return max(parts, key=lambda t: sum(t.values()))
+
+
+def _anchor_terms(p: VideoPeaks, pixels: int, frames: list, audio: list,
+                  vae: int, audio_vae: int) -> dict:
+    """The anchors phase's terms: the larger of the video VAE with its
+    largest encode and the audio VAE with its, which run one at a
+    time."""
+    parts = []
+    if frames:
+        parts.append({"vae": vae, "encode": max(
+            p.frame_encode.bytes(pixels) if f == 1
+            else p.clip_encode.bytes(pixels) + p.clip_frame * f * pixels
+            for f in frames)})
+    if audio:
+        parts.append({"audio_vae": audio_vae,
+                      "encode": p.audio_encode.bytes(max(audio))})
+    return max(parts, key=lambda t: sum(t.values()))
+
+
+def prompt_rows(fam, prompt: str, tokenizer, sizes=()) -> int:
     """The text rows ``prompt`` encodes to: its token ids by the
-    encoder's ``tokenizer``, less the dropped ones, plus the pads."""
+    encoder's ``tokenizer``, less the dropped ones, plus the pads. With
+    keyframes of ``sizes`` (width, height) the ids are the family's
+    prompt with them, their vision rows in it."""
     from gmlx.image.text_encoder import pad_rows, token_ids
 
     spec = fam.encoder()
-    n = len(token_ids(spec, tokenizer, prompt))
+    if sizes:
+        if fam.prompt_ids is None:
+            raise ValueError(f"a {fam.title} prompt takes no keyframes")
+        n = len(fam.prompt_ids(spec, tokenizer, prompt, tuple(sizes))[0])
+    else:
+        n = len(token_ids(spec, tokenizer, prompt))
     return n - spec.drop + pad_rows(spec, n)
 
 
-def clip_rows(fam, *, frames: int, width: int, height: int,
-              text: int) -> tuple[int, int]:
-    """The packed rows of a clip with ``text`` prompt rows, and its audio
-    latents."""
+def keyframe_blocks(fam, sizes) -> tuple:
+    """The vision tokens of each keyframe of ``sizes`` (width, height)."""
+    if fam.vision_tokens is None:
+        raise ValueError(f"a {fam.title} prompt takes no keyframes")
+    return tuple(int(fam.vision_tokens(w, h)) for w, h in sizes)
+
+
+def clip_rows(fam, *, frames: int, width: int, height: int, text: int,
+              anchors=()) -> tuple[int, int]:
+    """The packed rows of a clip with ``text`` prompt rows and placed
+    ``anchors`` (``layout.AnchorRows``), and its audio latents."""
     from .layout import pack
 
     vshape, ashape = fam.latent_shapes(frames, width, height)
     lay = pack(fam.timeline, text, vshape[2], vshape[3], vshape[4],
-               ashape[3])
+               ashape[3], anchors=tuple(anchors))
     return int(lay.rows), int(ashape[3])
+
+
+def anchor_frames(fam, anchors) -> list:
+    """The frames each anchor with video encodes, from its latent frames:
+    one for a lone frame's one, else the clip's."""
+    out = []
+    for a in anchors:
+        if a.video_t:
+            f = 1 if a.video_t == 1 else fam.clip_frames(a.video_t)
+            if f is None:
+                raise ValueError(f"{a.video_t} latent frames are no "
+                                 f"{fam.title} guide clip")
+            out.append(int(f))
+    return out
+
+
+def tower_bytes(mmproj: str) -> int:
+    """Bytes the vision tower of an mmproj holds once attached, its
+    16-bit float tensors at float32, from the file's header."""
+    from gmlx.image.memfit import mmproj_bytes
+    from gmlx.image.text_encoder import _header_view
+
+    return mmproj_bytes(_header_view(os.path.expanduser(mmproj)), fp32=True)
 
 
 def file_bytes(path: str) -> int:
@@ -294,10 +435,17 @@ def lora_dtype(path: str) -> str | None:
 def plan_run(fam, *, dit: str, encoder: str, vae: str, audio_vae: str,
              loras=(), frames: int, width: int, height: int, text: int,
              tiny: bool = False, variant: str | None = None,
+             mmproj: str | None = None, blocks=(), anchors=(),
+             anchor_vae: str | None = None,
              budget: float | None = None) -> VideoPlan:
-    """``plan_memory`` from the files at these paths."""
+    """``plan_memory`` from the files at these paths, with ``blocks``
+    keyframe vision tokens through ``mmproj`` and placed ``anchors``
+    (``layout.AnchorRows``) encoded through ``anchor_vae`` (``vae``
+    when None) and ``audio_vae``."""
+    if blocks and mmproj is None:
+        raise ValueError("keyframes need the encoder's mmproj")
     rows, audio = clip_rows(fam, frames=frames, width=width, height=height,
-                            text=text)
+                            text=text, anchors=anchors)
     return plan_memory(fam.name, dit=file_bytes(dit),
                        encoder=file_bytes(encoder), vae=file_bytes(vae),
                        audio_vae=file_bytes(audio_vae),
@@ -305,7 +453,14 @@ def plan_run(fam, *, dit: str, encoder: str, vae: str, audio_vae: str,
                        lora_dtypes=[lora_dtype(p) for p in loras], rows=rows,
                        text=text, audio_latents=audio,
                        pixels=width * height, tiny=tiny, variant=variant,
-                       budget=budget)
+                       mmproj=file_bytes(mmproj) if blocks else 0,
+                       tower=tower_bytes(mmproj) if blocks else 0,
+                       blocks=blocks, anchor_frames=anchor_frames(fam,
+                                                                  anchors),
+                       anchor_audio=[a.audio_t for a in anchors
+                                     if a.audio_t],
+                       anchor_vae=None if anchor_vae is None
+                       else file_bytes(anchor_vae), budget=budget)
 
 
 def check(plan: VideoPlan, what: str = "this clip", resize=None) -> None:

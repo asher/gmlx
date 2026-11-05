@@ -1,8 +1,9 @@
 """The video memory plan against measured peaks: each fit leaves at
 least 0.25 GiB over every measured cell, its closest cell within 0.35
 GiB and none more than 1.5 GiB over past its slope's 10 percent; the
-same for FastH3's own step fits; the rows of a clip; what each file
-costs; the refusal and its message. CPU, no weights."""
+same for FastH3's own step fits and for the fits of keyframes and
+anchors; the rows of a clip; what each file costs; the refusal and its
+message; the admission table of docs/video.md. CPU, no weights."""
 from __future__ import annotations
 
 import dataclasses
@@ -17,6 +18,7 @@ from video_fixtures import load_json
 from gmlx.serve import capacity
 from gmlx.video import memfit
 from gmlx.video.families.h3 import family as hf
+from gmlx.video.layout import AnchorRows
 
 GiB = 1 << 30
 ROOM = 0.25 * GiB               # what a fit leaves over every cell
@@ -446,3 +448,292 @@ def test_gmlx_overcommit_lets_a_plan_through(monkeypatch):
         memfit.check(plan)
     assert ("with the encode, the denoise, the audio and the decode over "
             "it") in str(e.value)
+
+
+# Keyframes and anchors, against memfit_h3_keyframe_cells.json.
+
+KF = load_json("memfit_h3_keyframe_cells.json")
+# What the attach leaves over the kept part: the tower at float32.
+TOWER = KF["encode"]["resident"] - KF["encode"]["kept"]
+
+
+def _part(**kw) -> memfit.VideoPlan:
+    """A plan of no files but those given, with no decode."""
+    args = dict(dit=0, encoder=0, vae=0, audio_vae=0, rows=1, text=1,
+                audio_latents=1, pixels=1, decode=False, budget=None)
+    return memfit.plan_memory("h3", **{**args, **kw})
+
+
+def _vision_run(rows: int, blocks) -> float:
+    """The run of an encode with keyframes over the kept part and the
+    tower, as the plan prices it: with no encoder or mmproj bytes the
+    plan's encode is the tower and that run."""
+    terms = _part(text=rows, tower=TOWER, blocks=blocks).terms["encode"]
+    assert terms["encoder"] == 0 and terms["tower"] == TOWER
+    return terms["prompt"]
+
+
+def _kf_rooms() -> dict:
+    """Bytes each keyframe and anchor fit leaves over each of its cells,
+    by fit, with the part of it that is the slope's 10 percent there."""
+    out: dict = {k: [] for k in ("tower", "vision_encode", "frame_encode",
+                                 "clip_encode", "audio_encode")}
+    for c in KF["tower"]:
+        # A second keyframe runs beside the first one's features.
+        out["tower"].append((ROW.tower.bytes(c["tokens"])
+                             - (c["peak"] - c["start"]),
+                             ROW.tower.k / 11 * c["tokens"]))
+    for c in KF["encode"]["cells"]:
+        run = _vision_run(c["rows"], c["blocks"])
+        line = ROW.vision_encode
+        slope = (line.k * c["rows"] if run == line.bytes(c["rows"])
+                 else ROW.tower.k * max(c["blocks"])) / 11
+        out["vision_encode"].append((run - (c["peak"] - c["start"]), slope))
+    vae = KF["files"]["vae"]
+    for c in KF["video_encode"]:
+        w, h, f = c["shape"]
+        fit = "frame_encode" if f == 1 else "clip_encode"
+        enc = _part(vae=vae, pixels=w * h, anchor_frames=[f]).terms[
+            "anchors"]
+        slope = (ROW.frame_encode.k if f == 1
+                 else ROW.clip_encode.k + ROW.clip_frame * f) * w * h / 11
+        out[fit].append((vae + enc["encode"] - c["peak"], slope))
+    audio = KF["files"]["audio_vae"]
+    for c in KF["audio_encode"]:
+        enc = _part(audio_vae=audio, anchor_audio=[c["latents"]]).terms[
+            "anchors"]
+        out["audio_encode"].append((audio + enc["encode"] - c["peak"],
+                                    ROW.audio_encode.k / 11 * c["latents"]))
+    return out
+
+
+def test_the_keyframe_cells_cover_the_table_shapes():
+    enc = {(tuple(c["shape"]), len(c["blocks"])) for c in KF["encode"][
+        "cells"]}
+    for size in ((768, 768), (1344, 768)):
+        assert (size, 1) in enc and (size, 2) in enc
+    # The table's prompt, 1,024 text rows and two keyframes, and longer.
+    assert max(c["rows"] for c in KF["encode"]["cells"]) > 7000
+    clips = {tuple(c["shape"]) for c in KF["video_encode"]}
+    for w, h in ((768, 768), (1344, 768)):
+        assert {(w, h, 1), (w, h, 22)} <= clips
+    assert (1344, 768, 124) in clips
+    assert [c["seconds"] for c in KF["audio_encode"]] == [1.0, 4.0, 15.0]
+    assert KF["files"]["encoder"] == FILES["encoder"]
+    assert (KF["files"]["vae"], KF["files"]["audio_vae"]) == (
+        FILES["vae"], FILES["audio_vae"])
+
+
+@pytest.mark.parametrize("fit", ["tower", "vision_encode", "frame_encode",
+                                 "clip_encode", "audio_encode"])
+def test_each_keyframe_and_anchor_fit_covers_its_cells(fit):
+    cells = _kf_rooms()[fit]
+    rooms = [r for r, _ in cells]
+    assert len(rooms) >= 3
+    assert min(rooms) >= ROOM, [r / GiB for r in rooms]
+    assert min(rooms) <= 0.35 * GiB
+    assert max(r - slope for r, slope in cells) <= 1.5 * GiB
+
+
+def test_the_text_load_of_a_keyframe_encode_is_the_t2v_load():
+    """The encoder loads its text part as text to video does, and the
+    attach then holds less: the load stays the encode's floor and the
+    attach is priced over its reading."""
+    from gmlx.image.memfit import LOAD_ROOM
+
+    enc = KF["encode"]
+    assert enc["load_peak"] == DOC["encode"]["load_peak"]
+    assert enc["kept"] == DOC["encode"]["resident"]
+    attach = (ROW.encoder_keep * KF["files"]["encoder"] + TOWER
+              + LOAD_ROOM * KF["files"]["mmproj"])
+    assert ROOM <= attach - enc["attach_peak"] <= 1.5 * GiB
+    plan = _part(encoder=KF["files"]["encoder"], mmproj=KF["files"][
+        "mmproj"], tower=TOWER, text=3083, blocks=(1008, 1008))
+    assert plan.terms["encode"] == {"encoder": KF["files"]["encoder"],
+                                    "load": ROW.encoder_load}
+    assert plan.encoder_load == plan.phases["encode"] > attach
+
+
+def test_an_encode_with_keyframes_is_its_load_its_attach_or_its_run():
+    from gmlx.image.memfit import LOAD_ROOM
+
+    kw = dict(encoder=20 * GiB, mmproj=GiB, tower=2 * GiB)
+    t2v = _part(encoder=20 * GiB, text=1024)
+    one = _part(text=2040, blocks=(1008,), **kw)
+    assert one.terms["encode"] == t2v.terms["encode"]
+    assert one.keyframes and not t2v.keyframes
+    kept = ROW.encoder_keep * 20 * GiB
+    long = _part(text=30_000, blocks=(1008, 1008), **kw)
+    assert long.terms["encode"] == {
+        "encoder": kept, "tower": 2 * GiB,
+        "prompt": ROW.vision_encode.bytes(30_000)}
+    assert long.encoder_load == one.encoder_load == int(
+        20 * GiB + ROW.encoder_load)
+    big = _part(text=100, blocks=(60,), **{**kw, "mmproj": 8 * GiB})
+    assert big.terms["encode"] == {"encoder": kept, "tower": 2 * GiB,
+                                   "attach": LOAD_ROOM * 8 * GiB}
+    assert big.encoder_load == big.phases["encode"]
+    # The tower runs one keyframe at a time, the larger one the peak.
+    for blocks in ((1008, 60), (60, 1008)):
+        assert _vision_run(100, blocks) == ROW.tower.bytes(1008)
+
+
+def test_the_anchors_phase_is_the_larger_vae_with_its_largest_encode():
+    px = 1344 * 768
+    kw = dict(dit=10 * GiB, encoder=20 * GiB, vae=5 * GiB, audio_vae=GiB,
+              rows=20_000, text=25, audio_latents=200, pixels=px,
+              budget=None)
+    assert "anchors" not in memfit.plan_memory("h3", **kw).phases
+    clip = memfit.plan_memory("h3", anchor_frames=[1, 22, 5], **kw)
+    assert list(clip.phases) == list(memfit.PHASES)
+    assert clip.terms["anchors"] == {
+        "vae": 5 * GiB,
+        "encode": ROW.clip_encode.bytes(px) + ROW.clip_frame * 22 * px}
+    one = memfit.plan_memory("h3", anchor_frames=[1], **kw)
+    assert one.terms["anchors"] == {"vae": 5 * GiB,
+                                    "encode": ROW.frame_encode.bytes(px)}
+    sound = memfit.plan_memory("h3", anchor_audio=[40, 600], **kw)
+    assert sound.terms["anchors"] == {
+        "audio_vae": GiB, "encode": ROW.audio_encode.bytes(600)}
+    # The VAEs run one at a time.
+    both = memfit.plan_memory("h3", anchor_frames=[1], anchor_audio=[600],
+                              **kw)
+    assert both.terms["anchors"] == one.terms["anchors"]
+    both = memfit.plan_memory("h3", anchor_frames=[1], anchor_audio=[600],
+                              **{**kw, "audio_vae": 8 * GiB})
+    assert both.terms["anchors"]["audio_vae"] == 8 * GiB
+    # A preview decodes through TAEH3 and encodes through the video VAE.
+    tiny = {**kw, "vae": 22 << 20, "tiny": True}
+    with pytest.raises(ValueError, match="the video VAE its anchors "
+                                         "encode through, as anchor_vae"):
+        memfit.plan_memory("h3", anchor_frames=[1], **tiny)
+    got = memfit.plan_memory("h3", anchor_frames=[1], anchor_vae=5 * GiB,
+                             **tiny)
+    assert got.terms["anchors"]["vae"] == 5 * GiB
+    assert got.terms["decode"]["vae"] == 22 << 20
+    assert "anchors" in memfit.plan_memory("h3", anchor_audio=[40],
+                                           **tiny).phases
+
+
+def test_the_rows_count_each_anchors_latents():
+    """A 1344x768 latent frame packs 1008 rows, and an audio latent two,
+    one a channel: docs/video.md's rows."""
+    base, audio = memfit.clip_rows(hf.FAMILY, frames=124, width=1344,
+                                   height=768, text=1024)
+    for anchors, extra in [
+            ((AnchorRows(0, 1, 0),), 1008),
+            ((AnchorRows(0, 1, 0), AnchorRows(123, 1, 0)), 2016),
+            ((AnchorRows(0, 2, hf.audio_frames(5)),), 2016 + 16),
+            ((AnchorRows(0, 7, hf.audio_frames(22)),), 7056 + 74),
+            ((AnchorRows(0, 0, hf.audio_frames(124)),), 414)]:
+        assert memfit.clip_rows(hf.FAMILY, frames=124, width=1344,
+                                height=768, text=1024, anchors=anchors) \
+            == (base + extra, audio)
+    assert memfit.anchor_frames(hf.FAMILY, [
+        AnchorRows(0, 1, 0), AnchorRows(0, 2, 8), AnchorRows(9, 7, 37),
+        AnchorRows(0, 0, 207)]) == [1, 5, 22]
+    with pytest.raises(ValueError, match="3 latent frames are no "
+                                         "MiniMax-H3 guide clip"):
+        memfit.anchor_frames(hf.FAMILY, [AnchorRows(0, 3, 0)])
+
+
+def test_a_prompt_with_keyframes_counts_comfyuis_rows():
+    from test_video_keyframes import CASES, _Pieces
+
+    for c in CASES.values():
+        sizes = [tuple(s) for s in c["sizes"]]
+        tok = _Pieces(c["pieces"])
+        assert memfit.prompt_rows(hf.FAMILY, c["prompt"], tok, sizes) == \
+            len(c["ids"])
+        assert sum(memfit.keyframe_blocks(hf.FAMILY, sizes)) == \
+            c["ids"].count(hf.IMAGE_PAD)
+
+
+# The CLI's admission table in docs/video.md: each mode's smallest Mac
+# at 1344x768 and 768x768, for h3 on its 8-step LoRA, 5 s, the prompt at
+# 1,024 text rows plus each keyframe's, caches empty. mode: (keyframes,
+# anchors).
+_MODES = {
+    "text to video": (0, ()),
+    "first frame": (1, (AnchorRows(0, 1, 0),)),
+    "last frame": (1, (AnchorRows(123, 1, 0),)),
+    "both keyframes": (2, (AnchorRows(0, 1, 0), AnchorRows(123, 1, 0))),
+    "image guide": (0, (AnchorRows(60, 1, 0),)),
+    "5-frame guide clip with sound": (
+        0, (AnchorRows(0, 2, hf.audio_frames(5)),)),
+    "22-frame guide clip with sound": (
+        0, (AnchorRows(0, 7, hf.audio_frames(22)),)),
+    "guide audio, 5 s": (0, (AnchorRows(0, 0, hf.audio_frames(124)),)),
+}
+_TABLE = {"text to video": (32, 32), "first frame": (32, 32),
+          "last frame": (32, 32), "both keyframes": (36, 32),
+          "image guide": (32, 32), "5-frame guide clip with sound": (32, 32),
+          "22-frame guide clip with sound": (36, 32),
+          "guide audio, 5 s": (32, 32)}
+_SMALLER = {32: 24, 36: 32}
+
+
+def _mode(monkeypatch, mode, w, h, mac):
+    files = {"dit": FILES["dit"], "enc": FILES["encoder"],
+             "vae": FILES["vae"], "audio": FILES["audio_vae"],
+             "lora": FILES["lora"], "mmproj": KF["files"]["mmproj"]}
+    monkeypatch.setattr(memfit, "file_bytes", lambda p: files[p])
+    monkeypatch.setattr(memfit, "lora_dtype", lambda p: "BF16")
+    monkeypatch.setattr(memfit, "tower_bytes", lambda p: TOWER)
+    keyframes, anchors = _MODES[mode]
+    blocks = memfit.keyframe_blocks(hf.FAMILY, [(w, h)] * keyframes)
+    return memfit.plan_run(
+        hf.FAMILY, dit="dit", encoder="enc", vae="vae", audio_vae="audio",
+        loras=["lora"], frames=124, width=w, height=h,
+        text=1024 + sum(b + 8 for b in blocks), mmproj="mmproj",
+        blocks=blocks, anchors=anchors,
+        budget=capacity.ram_budget_bytes(mac * GiB))
+
+
+@pytest.mark.parametrize("size", [(1344, 768), (768, 768)],
+                         ids=["1344x768", "768x768"])
+@pytest.mark.parametrize("mode", list(_MODES))
+def test_each_mode_runs_on_the_mac_the_table_names(monkeypatch,
+                                                   no_overcommit, mode,
+                                                   size):
+    mac = _TABLE[mode][size == (768, 768)]
+    assert _mode(monkeypatch, mode, *size, mac).fits
+    msg = _refusal(_mode(monkeypatch, mode, *size, _SMALLER[mac]))
+    if mac == 32:
+        assert "The text encoder needs more memory than this Mac has" in msg
+    else:
+        assert "with the denoise over it. Try a smaller size or a shorter " \
+               "clip." in msg
+
+
+@pytest.mark.parametrize("mode", ["first frame",
+                                  "5-frame guide clip with sound"])
+def test_on_32_gb_the_default_clip_has_the_room_the_table_gives(
+        monkeypatch, no_overcommit, mode):
+    """A first frame or a 5-frame guide clip at 1344x768 leaves 0.27 GiB
+    of a 32 GB Mac's budget, to 2 decimals."""
+    plan = _mode(monkeypatch, mode, 1344, 768, 32)
+    assert plan.largest == "denoise"
+    assert f"{(plan.budget - plan.peak) / GiB:.2f}" == "0.27"
+
+
+def test_on_32_gb_a_long_prompt_with_keyframes_names_them(monkeypatch,
+                                                          no_overcommit):
+    """Two 512x512 keyframes with a prompt of 15,000 text rows run the
+    encode over a 32 GB Mac's budget, where the prompt alone runs."""
+    budget = capacity.ram_budget_bytes(32 * GiB)
+    text = 15_000
+    rows, audio = memfit.clip_rows(hf.FAMILY, frames=22, width=512,
+                                   height=512, text=text + 2 * 264)
+    kw = dict(dit=FILES["dit"], encoder=FILES["encoder"], vae=FILES["vae"],
+              audio_vae=FILES["audio_vae"], loras=[FILES["lora"]],
+              lora_dtypes=["BF16"], rows=rows, audio_latents=audio,
+              pixels=512 * 512, budget=budget)
+    assert memfit.plan_memory("h3", text=text, **kw).fits
+    msg = _refusal(memfit.plan_memory(
+        "h3", text=text + 2 * 264, mmproj=KF["files"]["mmproj"],
+        tower=TOWER, blocks=(256, 256), **kw))
+    assert msg.startswith("this clip does not fit in memory: encode ")
+    assert msg.endswith("with the encode over it. Try a shorter prompt or "
+                        "a smaller size, or one keyframe. GMLX_OVERCOMMIT=1 "
+                        "overrides.")

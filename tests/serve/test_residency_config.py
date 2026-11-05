@@ -806,15 +806,19 @@ def test_a_video_model_loads_and_releases_through_its_own_kind(monkeypatch,
 # encoder, the video and audio VAEs, the 8-step LoRA and FastH3's DiT.
 _H3_FILES = {"dit": 11_420_663_904, "enc": 19_762_151_200,
              "vae": 5_207_808_496, "audio": 605_254_808,
-             "lora": 1_956_193_000, "fdit": 13_613_532_704}
+             "lora": 1_956_193_000, "fdit": 13_613_532_704,
+             "mmproj": 1_200_334_496}
+# The bytes unsloth's mmproj-BF16.gguf holds once its tower is attached.
+_TOWER = 2_383_479_488
 
 
 def _h3_entry(monkeypatch, variant, size, seconds, budget=120 * GB,
-              extra=None):
+              extra=None, mmproj=False):
     """An h3 recipe's entry at a default clip, from its published file
     sizes, on a working budget of ``budget`` bytes, with a bf16 LoRA file
-    of ``extra`` bytes beside the recipe's. FastH3 runs as on an M5 with
-    an mlx-kquant that has its sparse attention."""
+    of ``extra`` bytes beside the recipe's and with the encoder's mmproj
+    when ``mmproj``. FastH3 runs as on an M5 with an mlx-kquant that has
+    its sparse attention."""
     from gmlx.serve import capacity
     from gmlx.video import loader, memfit, pipeline, registry
     from gmlx.video.registry import get_family
@@ -831,11 +835,14 @@ def _h3_entry(monkeypatch, variant, size, seconds, budget=120 * GB,
     files = {**_H3_FILES, "extra": extra}
     monkeypatch.setattr(memfit, "file_bytes", lambda p: files[p])
     monkeypatch.setattr(memfit, "lora_dtype", lambda p: "BF16")
+    monkeypatch.setattr(memfit, "tower_bytes", lambda p: {
+        "mmproj": _TOWER}[p])
     monkeypatch.setattr(pipeline, "vet_adapter", lambda *a, **k: None)
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
     return types.SimpleNamespace(
         id=variant, path="fdit" if fast else "dit", variant=None,
         encoder="enc", vae="vae", audio_vae="audio",
+        encoder_mmproj="mmproj" if mmproj else None,
         adapters=((("lora", 1.0),) if variant == "h3" else ())
         + ((("extra", 1.0),) if extra else ()),
         defaults={"size": size, "seconds": seconds})
@@ -942,6 +949,72 @@ def test_a_tight_video_entry_keeps_one_cond_in_the_tensor_cache(
     budget = capacity.ram_budget_bytes(32 << 30)
     got = vs.entry_plan(_h3_entry(monkeypatch, "h3", "1344x768", 5, budget))
     assert got.cache_share == 36 / 64 and got.footprint <= budget
+
+
+def test_an_entry_with_an_mmproj_books_the_clip_it_books_without_one(
+        monkeypatch):
+    """The mmproj loads for an encode with keyframes alone, so an entry
+    that names one keeps its price and holds the mmproj's bytes for the
+    encode check."""
+    from gmlx.serve import capacity
+    from gmlx.serve import video_service as vs
+
+    budget = capacity.ram_budget_bytes(32 << 30)
+    bare = vs.entry_plan(_h3_entry(monkeypatch, "h3", "1344x768", 5, budget))
+    got = vs.entry_plan(_h3_entry(monkeypatch, "h3", "1344x768", 5, budget,
+                                  mmproj=True))
+    assert (bare.mmproj_bytes, bare.tower_bytes) == (0, 0)
+    assert (got.mmproj_bytes, got.tower_bytes) == (_H3_FILES["mmproj"],
+                                                   _TOWER)
+    assert (got.footprint, got.cache_share) == (bare.footprint,
+                                                bare.cache_share)
+
+
+def _booked(entry) -> int:
+    """The cache bytes an entry books at its share: the caches, the
+    tensor cache's cond floor and the refined text rows."""
+    from gmlx.serve import image_service
+
+    caches, _pairs = _cache_terms()
+    tensor, _adapter = image_service.cache_bytes()
+    return (int(caches * entry.cache_share)
+            + max(0, entry.tensor_floor - int(tensor * entry.cache_share))
+            + _CAPTIONS)
+
+
+@pytest.mark.parametrize("size, beside", [("1344x768", False),
+                                          ("768x768", True)])
+def test_a_32_gb_h3_entry_runs_a_keyframe_step_beside_the_caches_it_books(
+        monkeypatch, size, beside):
+    """docs/comfyui.md: through the pack a step is priced beside the
+    caches the server holds. On a 32 GB Mac an entry of the default clip
+    runs a text to video step beside the caches at the share it books,
+    and a step with a first frame only while they are empty; at 768x768
+    the step with a first frame runs beside them."""
+    from gmlx.serve import capacity
+    from gmlx.serve import video_service as vs
+    from gmlx.video.families.h3 import family as hf
+    from gmlx.video.layout import AnchorRows
+
+    budget = capacity.ram_budget_bytes(32 << 30)
+    entry = vs.entry_plan(_h3_entry(monkeypatch, "h3", size, 5, budget))
+    w, h = entry.size
+    tok = hf.vision_tokens(w, h)
+
+    def clip(keyframes: int):
+        return vs.plan_clip(entry, frames=entry.frames, width=w, height=h,
+                            text=vs.PRICED_TEXT_ROWS + keyframes * (tok + 8),
+                            anchors=(AnchorRows(0, 1, 0),) * keyframes,
+                            budget=budget)
+
+    def step(keyframes: int) -> int:
+        d = clip(keyframes).terms["denoise"]
+        return int(d["dit"] + d["lora"] + d["step"])
+    # The prompt's keyframe block and the first frame's latent rows.
+    assert clip(1).rows == clip(0).rows + (tok + 8) + tok
+    assert step(0) + _booked(entry) <= budget
+    assert step(1) <= budget
+    assert (step(1) + _booked(entry) <= budget) == beside
 
 
 @pytest.mark.parametrize("steps_api, tensor_mb, floor", [

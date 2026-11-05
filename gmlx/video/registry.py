@@ -100,6 +100,11 @@ class VideoFamily:
     # The name ending of the VSA gate tensors, which only the files of a
     # VSA variant carry.
     vsa_gate: str = ""
+    # (spec, tokenizer, prompt, sizes) -> (ids, vision spans) of a prompt
+    # with keyframes of sizes (width, height), and (width, height) -> a
+    # keyframe's vision tokens, for a family that takes keyframes.
+    prompt_ids: Callable | None = None
+    vision_tokens: Callable | None = None
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in (*self.variants.values(),

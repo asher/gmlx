@@ -418,6 +418,17 @@ VISION_PX = 32
 KEYFRAME_PIXELS = (3136, 12845056)
 
 
+def _prompt_ids(spec, tokenizer, prompt: str, sizes) -> tuple:
+    from .keyframes import keyframe_ids
+
+    return keyframe_ids(spec, tokenizer, prompt, sizes)
+
+
+def vision_tokens(width: int, height: int) -> int:
+    """The vision tokens of a keyframe, one per 32 x 32 pixels."""
+    return (width // VISION_PX) * (height // VISION_PX)
+
+
 def _lora_map(config: dict):
     from .lora_map import lora_map
 
@@ -485,4 +496,6 @@ FAMILY = VideoFamily(
     lora_map=_lora_map,
     lora_refusal=_lora_refusal,
     vsa_gate=VSA_GATE,
+    prompt_ids=_prompt_ids,
+    vision_tokens=vision_tokens,
 )

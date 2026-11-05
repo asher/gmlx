@@ -3,7 +3,8 @@ the text encoder alone, cut after its tap, then the vision tower from the
 mmproj. It must build the joint load's model: the same parameters by
 name, shape and dtype, the same module classes, the tower's weights to
 the bit, and the tower output and keyframe features of the 64x64 fixture
-image within 1e-5. The real files are the encoder GGUF check 2's
+image within 1e-5. The tower holds the bytes the memory plan prices for
+it. The real files are the encoder GGUF check 2's
 manifest names, under KQUANT_TEST_GGUF_DIR, and mmproj-BF16.gguf beside
 it."""
 from __future__ import annotations
@@ -125,7 +126,10 @@ def _readings(handle, image) -> dict:
 
 @pytest.mark.integration
 def test_the_staged_load_is_the_joint_load(files):
+    from mlx.utils import tree_flatten
+
     from gmlx.image import text_encoder as te
+    from gmlx.video import memfit
 
     path, mm = files
     image = committed_fixture("keyframes_h3")[0]["image_64"]
@@ -134,6 +138,9 @@ def test_the_staged_load_is_the_joint_load(files):
     try:
         assert len(staged.model.language_model.model.layers) == hf.TAP_LAYER
         assert "lm_head" not in staged.model.language_model
+        held = sum(int(v.nbytes) for v in dict(tree_flatten(
+            staged.model.vision_tower.parameters())).values())
+        assert held == memfit.tower_bytes(mm)
         got = _readings(staged, image)
     finally:
         staged.release()

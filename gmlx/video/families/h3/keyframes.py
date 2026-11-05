@@ -30,7 +30,7 @@ def keyframe_ids(spec, tokenizer, prompt: str, sizes) -> tuple:
                              f"vision tower's {fam.VISION_PX}-pixel grid")
         ids += te._encode(spec, tokenizer, fam.PICTURE.format(i=i))
         start = len(ids)
-        n = (w // fam.VISION_PX) * (h // fam.VISION_PX)
+        n = fam.vision_tokens(w, h)
         ids += [fam.VISION_START] + [fam.IMAGE_PAD] * n + [fam.VISION_END]
         spans.append((start, len(ids)))
     ids += te._encode(spec, tokenizer, te.render(spec, prompt))
