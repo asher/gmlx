@@ -1071,6 +1071,10 @@ def test_a_cond_over_the_share_the_models_leave_is_413_naming_it(
             c.put(np.zeros((1, 5 * configured // 16), np.float32))
         with pytest.raises(StepsClientError) as edge:
             c.put(np.zeros((1, configured // 4 + 1), np.float32))
+        # A share whose bound is 17.49 MiB.
+        steps.STATE.scale_caches(0.2734)
+        with pytest.raises(StepsClientError) as share:
+            c.put(np.zeros((1, 70 << 16), np.float32))
         steps.STATE.scale_caches(rows.nbytes / configured)
         send()
     finally:
@@ -1088,6 +1092,12 @@ def test_a_cond_over_the_share_the_models_leave_is_413_naming_it(
     assert edge.value.body["error"] == (
         "a tensor of 64.1 MiB is over the configured 64 MiB of the step "
         "routes' tensor cache; raise server.image.tensor_cache_mb")
+    # A bound under a tenth of a MiB below the tensor reads under it.
+    assert share.value.body["error"] == (
+        "a tensor of 17.5 MiB is over the step routes' tensor cache of 17.4 "
+        "MiB: the models loaded leave it 27% of its configured 64 MiB. A "
+        "smaller defaults.size or defaults.seconds on the tightest entry "
+        "gives it more.")
 
 
 def test_the_adapter_cache_and_the_upload_limit_are_named_in_a_413(host):

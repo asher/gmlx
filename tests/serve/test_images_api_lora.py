@@ -456,6 +456,44 @@ def test_a_lora_whose_factors_no_unload_makes_room_for_is_413_at_its_turn(
     _books_hold(t.pool, t.e)
 
 
+def _shares_encoder(t, monkeypatch, fp: int):
+    """Entry ``t`` shares the encoder of chat model "enc-qwen3" of ``fp``
+    bytes, idle in the pool: a request's route borrows it for the job,
+    which holds it until it ends. Returns the chat entry."""
+    enc = _chat(t.pool, "enc-qwen3", fp)
+    t.pool.release(enc)
+
+    def borrow_for(spec):
+        with t.pool._lock:
+            enc.busy += 1
+        return (lambda pipe, run, stop, timeout_s: run()), \
+            _BusyHold(t.pool, enc)
+
+    monkeypatch.setattr(images, "_borrow_for", borrow_for)
+    monkeypatch.setattr(t.served.spec, "encoder_model", "enc-qwen3")
+    return enc
+
+
+def test_a_route_counts_the_encoder_its_job_holds_as_its_own(
+        request, monkeypatch, tmp_path):
+    """A request LoRA of 3 GB on a model that shares a chat model's
+    encoder, on a budget that leaves 2 GB beside the model and the
+    encoder: once the route holds the encoder for the job, it answers 413
+    naming both, and the job takes no turn."""
+    t = _entry(request, monkeypatch, tmp_path, budget=10 * GB, own=False)
+    _big_lora(t.root / "big.safetensors", 3 * GB)
+    enc = _shares_encoder(t, monkeypatch, 10 * GB - t.e.footprint - 2 * GB)
+    turns, real = [], svc.pair_turn
+    monkeypatch.setattr(svc, "pair_turn",
+                        lambda *a, **k: turns.append(a) or real(*a, **k))
+    status, doc, _h = _post([("big.safetensors", 1.0)])
+    assert (status, doc["error"]["message"]) == (
+        413, "the request's adapters need 3.0 GB of memory, over the 2.0 GB "
+        "the server's memory budget leaves beside 'zit', 'enc-qwen3' and "
+        "the pinned models")
+    assert turns == [] and t.encodes == 0 and enc.busy == 0
+
+
 def test_a_factor_turn_counts_the_encoder_its_job_holds_as_its_own(
         request, monkeypatch, tmp_path):
     """The factor turn of a model that shares a chat model's encoder, on a
@@ -468,17 +506,7 @@ def test_a_factor_turn_counts_the_encoder_its_job_holds_as_its_own(
     pairs, factors = t.pipe.adapters.bytes, t.pipe.tables.bytes
     _on_worker(lambda: svc.shed_lora(t.e, pairs + factors))
     _settle(t)
-    enc = _chat(t.pool, "enc-qwen3", 2 * GB)
-    t.pool.release(enc)
-
-    def borrow_for(spec):
-        with t.pool._lock:
-            enc.busy += 1
-        return (lambda pipe, run, stop, timeout_s: run()), \
-            _BusyHold(t.pool, enc)
-
-    monkeypatch.setattr(images, "_borrow_for", borrow_for)
-    monkeypatch.setattr(t.served.spec, "encoder_model", "enc-qwen3")
+    enc = _shares_encoder(t, monkeypatch, 2 * GB)
     kept = t.e.footprint + enc.footprint
     budget = kept + pairs + factors // 2
     _set_budget(t.pool, budget)

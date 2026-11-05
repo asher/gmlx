@@ -795,6 +795,25 @@ def test_a_steps_route_checks_its_lora_without_the_pools_lock(
     assert free == [True], "the route's check waited on the pool's lock"
 
 
+def test_an_upload_takes_its_store_turn_off_the_event_loop(
+        request, monkeypatch):
+    """An upload that needs a store turn, admitted while another thread
+    holds the pool's lock: the admission and its turn wait on threads,
+    and the request's event loop runs on. The turn unloads the idle model
+    and the upload is kept."""
+    a = np.ones((1, 1 << 16), np.float32)
+    pool = _pool(monkeypatch, 9 * GB + a.nbytes // 2)
+    idle = _model(pool, "qwen3-32b", 9 * GB, busy=False)
+    _mount(request, _PoolHost({}, pool))
+    loops: list = []
+    free = _locked_at(monkeypatch, pool, "_admit", loops)
+    h = _loop_client(loops).put(a, kind="adapters")
+    assert free == [True], "the upload's admission waited on the loop"
+    assert idle not in pool._entries.values()
+    assert _store() == {h: a.nbytes}
+    _books_hold(pool)
+
+
 def test_a_steps_409_names_its_memory_without_the_pools_lock(
         request, monkeypatch, tmp_path):
     """A step whose table's pairs and matrices the server let go meets a

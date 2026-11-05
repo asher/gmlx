@@ -99,11 +99,20 @@ def make_pool(monkeypatch, budget_gb, retry=1):
     pool._headroom_fn = lambda: pool.head
     pool.caches = {}
     pool.store = Store()
-    pool._lora_figures = lambda e: pool.caches.setdefault(
-        e.model_path, Cache()).figures()
-    pool._lora_shed = lambda e, n, hold, own: \
-        pool.caches[e.model_path].shed(n, hold)
-    pool._store_shed = lambda n, hold=(): pool.store.shed(n, hold)
+
+    def unlocked(fn):
+        # A cache's lock taken inside a hold of the pool's lock deadlocks
+        # with a finalizer that releases into the pool under it.
+        def run(*a):
+            assert not pool._lock._is_owned(), "a LoRA cache read under _lock"
+            return fn(*a)
+        return run
+
+    pool._lora_figures = unlocked(lambda e: pool.caches.setdefault(
+        e.model_path, Cache()).figures())
+    pool._lora_shed = unlocked(lambda e, n, hold, own:
+                               pool.caches[e.model_path].shed(n, hold))
+    pool._store_shed = unlocked(lambda n, hold=(): pool.store.shed(n, hold))
     pool._store_live = lambda: pool.store.n
     pool._retry_fn = lambda: retry
     return pool
@@ -477,17 +486,24 @@ def test_a_turn_counts_the_other_pending_bookings(monkeypatch):
     turn(pool, x, int(1.5 * GB))
     with pytest.raises(LoraRefused) as ei:
         turn(pool, y, int(1.5 * GB))
-    assert ei.value.status == 503
+    assert (ei.value.status, ei.value.message) == (
+        503, "the test's LoRA need 1.5 GB of memory, and 0.5 GB is free in "
+        "the working set now; retry when the models in use finish")
 
 
 def test_overcommit_sheds_and_never_refuses(monkeypatch):
-    pool = make_pool(monkeypatch, 4)
+    """Under GMLX_OVERCOMMIT=1 a turn past the budget sheds the idle
+    LoRA bytes and books, and evicts no model: the idle entry an eviction
+    would take for the room stays resident."""
+    pool = make_pool(monkeypatch, 6)
     monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
     x = image(pool, "x", 2, busy=True)
+    idle = image(pool, "idle", 2)
     job(pool, x, "old", GB)
     turn(pool, x, 3 * GB)
     assert pool.caches["x"].items == {}
     assert x.lora.pending == 3 * GB
+    assert pool.entry_resident(idle)
 
 
 def test_a_turn_during_a_cold_load_names_the_load(monkeypatch):
@@ -593,18 +609,35 @@ def test_a_cold_load_after_a_turn_sees_its_booking(monkeypatch):
     assert not pool.entry_resident(idle)
 
 
-def test_no_lock_is_held_at_a_teardown_or_a_measure(monkeypatch):
+@pytest.mark.parametrize("case", ["turn", "repriced", "reaper"])
+def test_no_lock_is_held_at_a_teardown_or_a_measure(monkeypatch, case):
+    """No hold of the pool's lock spans a teardown or a measure: at a
+    turn's eviction and measure and a clear, at a repriced build's
+    eviction, and at the reaper's unload."""
     pool = make_pool(monkeypatch, 10)
     held = []
     pool._seam = lambda name: held.append(
         (name, pool._lock._is_owned())) if name in ("teardown",
                                                      "measure") else None
     idle = image(pool, "idle", 3)
-    x = image(pool, "x", 4, busy=True)
-    turn(pool, x, 4 * GB)
-    image(pool, "z", 1)
-    pool.clear()
-    assert {n for n, _ in held} == {"teardown", "measure"}
+    want = {"teardown"}
+    if case == "turn":
+        x = image(pool, "x", 4, busy=True)
+        turn(pool, x, 4 * GB)
+        image(pool, "z", 1)
+        pool.clear()
+        want.add("measure")
+    elif case == "repriced":
+        image(pool, "y", 4, busy=True)
+        reprice(pool, "z", 6)
+        z = pool.acquire("z", None, IMAGE_KIND, build_spec=spec("z", 3))
+        assert z.footprint == 6 * GB
+    else:
+        pool._in_flight_fn = lambda: 0
+        with pool._lock:
+            idle.ttl, idle.last_access = 1, -1e9
+        assert pool.reap_idle() == ["idle"]
+    assert want <= {n for n, _ in held}
     assert not any(h for _, h in held), held
     assert not pool.entry_resident(idle)
 
