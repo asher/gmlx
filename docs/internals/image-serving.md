@@ -29,9 +29,9 @@ An entry whose text encoder and DiT do not fit side by side loads the
 encoder for each new prompt, as [Models and
 quants](../images.md#models-and-quants) describes. A prompt encoded before
 comes from the cache, and nothing loads for it. On a 16 GB Mac the server
-keeps a smaller cache of prompts. A request's LoRAs are booked when it
-arrives, before their files are read, and a request whose LoRAs do not fit
-is refused with the memory they need.
+keeps a smaller cache of prompts. A request's LoRAs are booked when its
+job runs on the image thread, before their files are read, and a request
+whose LoRAs do not fit is refused with the memory they need.
 
 ## Step routes
 

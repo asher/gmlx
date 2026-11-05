@@ -154,14 +154,20 @@ fit beside the models loaded gets 400, and so does the encode of a prompt
 on a video model, priced by its rows. The message of a step names the
 largest term of its plan and, where the plan keeps the keys and values of
 the reference latents, how many of them fit. A patch table, a step or an
-adapter upload whose LoRA bytes do not fit in memory is refused when it
-arrives, before the server reads or builds them. It gets 413 when the
-LoRAs do not fit beside the model and the pinned models, and 503 while
-models in use hold the memory, each naming the GB the LoRAs need and the
-GB free. A table or a step can push out an idle model, as a cold load
-does. An upload never unloads a model: its 503 names the idle models that
-hold the room. The VAE routes decode and encode the images of a batch one
-at a time. `capabilities` gives the largest tensor upload, which is the
+adapter upload whose LoRA bytes do not fit beside the model and the
+pinned models gets 413 when it arrives, naming the GB the LoRAs need and
+the room. The server books the other LoRA bytes on the image thread, at
+the turn of the job that reads or builds them. The turn drops idle LoRA
+bytes and idle uploads, unloads idle models as a cold load does, and
+books what the job needs. A turn left short gets 503 with `Retry-After`,
+naming the GB its LoRAs need and the GB free beside the models in use,
+or the model the server is loading. While a chat model in use holds the
+memory, the turn waits for it up to those seconds first. An upload that
+does not fit takes a turn of its own. A model load does not count the
+uploads the routes hold, and the next turn drops idle ones when memory
+runs short. A step whose table's LoRA pairs and matrices the server let
+go for memory gets 409 with their GB, and the client sends them again.
+The VAE routes decode and encode the images of a batch one at a time. `capabilities` gives the largest tensor upload, which is the
 [`image.tensor_cache_mb`](../config.md#serverimagetensor_cache_mb) cache,
 and the largest adapter upload, which is
 [`image.adapter_cache_mb`](../config.md#serverimageadapter_cache_mb) when

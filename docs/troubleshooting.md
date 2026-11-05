@@ -416,26 +416,35 @@ there.
 
 ### A LoRA is refused for memory
 
-The server books a LoRA's memory when the LoRA arrives, with an images
-request, a ComfyUI step or its patch table, or an adapter upload. One that
-does not fit is refused. The message names what needs the memory, such as
-the request's adapters or the LoRA matrices of an upload, the GB it needs,
-and the room:
+The server books a LoRA's memory on its image thread, at the turn of the
+job that reads or builds the LoRA: an images request, a ComfyUI step or
+its patch table, or an adapter upload. The turn lets idle LoRAs and
+uploads go and unloads idle models, as a model load does. A pinned model
+stays loaded, as [`pin`](config.md#modelspin) describes. A LoRA that
+still does not fit is refused. The message names what needs the memory,
+such as the request's adapters or the LoRA matrices of an upload, the GB
+it needs, and the room. Each 503 carries `Retry-After`:
 
 - `... need ... GB of memory, over the ... GB the server's memory budget
   leaves beside ...` (413): the LoRAs do not fit beside the model named
   and the pinned models, even with every other model unloaded. Use a
   smaller LoRA or fewer of them, or unpin a model.
 - `... and ... GB is free beside the models in use (...); retry when one
-  is idle` (503): the models named are generating. Send the request again
-  when one finishes. In ComfyUI, queue the prompt again.
-- `... and ... GB is free; idle models hold ... GB (...). Unload one to
-  make room` (503): an adapter upload never unloads a model, so it names
-  the idle models instead. Unload one with
-  [`POST /unload`](api.md#endpoints), then queue the prompt again.
+  is idle` (503): the models named are generating. The server waits for a
+  chat model among them up to the `Retry-After` seconds before it answers.
+  Send the request again when one finishes. In ComfyUI, queue the prompt
+  again.
+- `... and the server is loading ... (... GB) now; retry when it is
+  loaded` (503): a model load holds the memory. Send the request again
+  once the model is loaded.
+- `... and the image worker is busy beside the models in use (...); retry
+  when one is idle`, or `... and the image worker is busy; retry when the
+  requests in flight finish` (503): an adapter upload waited for the image
+  thread past its `Retry-After` while other jobs ran there. Send it again.
 - `... and ... GB is free; unload a model or retry when the requests in
-  flight finish` (503): no model is in use, and other requests' LoRAs or a
-  model load hold the room. Unload a model, or send the request again.
+  flight finish` (503): no model is in use, and other requests' LoRAs hold
+  the room. Unload a model with [`POST /unload`](api.md#endpoints), or
+  send the request again.
 - `... GB is free in the working set now; retry when the models in use
   finish` (503): macOS has less memory free than the plan counts on while
   other models run. Retry when they finish.
@@ -444,9 +453,7 @@ and the room:
   memory macOS has free. Close one, or unload a model with
   [`POST /unload`](api.md#endpoints).
 
-A request or a ComfyUI step whose LoRAs fit once an idle model unloads
-pushes that model out, as a model load does. A pinned model stays loaded,
-as [`pin`](config.md#modelspin) describes. With
+With
 [`image.adapter_cache_mb`](config.md#serverimageadapter_cache_mb) set, a
 LoRA over that cap is refused with a message that names the key. Raise the
 cap, or remove the key to let LoRAs use the memory free.

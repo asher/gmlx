@@ -26,6 +26,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `server.image.adapter_cache_mb` is now an optional cap with no default.
 - An image or video model reserves no memory for request LoRAs at load, so it
   fits beside more models.
+- A LoRA that fits once an idle model unloads makes room as a model load
+  does, and one refused for memory names the GB it needs.
 - An image LoRA takes less memory: loading one no longer holds its file
   twice, and fewer of its weights are copied while it runs.
 - In the Python API, `gmlx.image.lora.pair_hash` and `register_pair` take no

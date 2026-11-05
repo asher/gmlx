@@ -722,7 +722,7 @@ under [`image_models`](#image-models).
 
 The memory gmlx counts for an image model includes its tensor caches at
 their full size: two of `image.tensor_cache_mb`, and a third while the step
-routes are on. Request LoRAs are counted when they arrive, as the
+routes are on. Request LoRAs are counted when their jobs run, as the
 [LoRA refusal](troubleshooting.md#a-lora-is-refused-for-memory) describes,
 and a LoRA over a set `image.adapter_cache_mb` is refused with a message
 that names the key. At the defaults, one model of any family still fits on
