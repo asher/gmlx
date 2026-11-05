@@ -551,6 +551,50 @@ def _fa_verify_eligible(q, k, v, mask):
     return isinstance(mask, str) and mask == "causal"
 
 
+def _fa_split9_eligible(q, k, v, mask):
+    # hd128 verify of 9 rows (8 drafts): the kernel's op check caps q_len
+    # at 8, so rows 0..7 run as an 8-row fold over all keys but the last
+    # and row 8 as a decode row. Stock runs 9 rows on its tiled kernel.
+    # Chained over 8 layers: 1.1-1.6x from 1024 keys at gqa 16 (two
+    # chunks), 1.2-2.2x from 4096 at gqa 8 (one chunk) and 0.84-0.98x below.
+    if q.ndim != 4 or q.shape[0] != 1 or q.shape[2] != 9:
+        return False
+    if q.shape[-1] != 128 or v.shape[-1] != 128 or k.shape[-1] != 128:
+        return False
+    kv = k.shape[1]
+    if kv < 2 or q.shape[1] % kv != 0:
+        return False
+    g = q.shape[1] // kv
+    n = _fa_chunks(g, 8)
+    if n is None or n > 2 or g * 8 <= 32:
+        return False
+    min_kv = 1024 if g * 8 > 64 else 4096
+    if k.shape[2] < min_kv:
+        return False
+    return isinstance(mask, str) and mask == "causal"
+
+
+def _fa_fold(q, k, v, scale):
+    # One kernel call per kv-major chunk of the GQA group (one KV sweep each).
+    B, hq, qL, hd = q.shape
+    kv = k.shape[1]
+    g = hq // kv
+    n = _fa_chunks(g, qL, _fa_row_cap(hd))
+    if n is None:
+        raise ValueError(f"a fold of {g} x {qL} rows has no split")
+    if n == 1:
+        out = mlx_kquant.sdpa_fa_verify(
+            q.reshape(B, kv, g * qL, hd), k, v, float(scale), qL)
+    else:
+        qc = q.reshape(B, kv, n, (g // n) * qL, hd)
+        out = mx.concatenate(
+            [mlx_kquant.sdpa_fa_verify(mx.contiguous(qc[:, :, i]),
+                                       k, v, float(scale), qL)
+             for i in range(n)],
+            axis=2)
+    return out.reshape(B, hq, qL, hd)
+
+
 _SDPA_DEBUG = [24] if env_bool("GMLX_SDPA_DEBUG", False) else None
 
 # Route visibility, always on: per-(route, head_dim, q_len, kv-bucket) call
@@ -663,21 +707,21 @@ def _wrapped_sdpa(q, k, v, *, scale=1.0, mask=None, **kw):
             g = hq // kv
             n = _fa_chunks(g, qL, _fa_row_cap(hd))
             _route(f"fa_verify(chunks={n})", q, k, mask)
-            if n == 1:
-                out = mlx_kquant.sdpa_fa_verify(
-                    q.reshape(B, kv, g * qL, hd), k, v, float(scale), qL)
-            else:
-                # Oversized fold (e.g. gqa16 x qL4 = 64 rows): kv-major chunks
-                # of the GQA group, one kernel call (= one KV sweep) each.
-                qc = q.reshape(B, kv, n, (g // n) * qL, hd)
-                out = mx.concatenate(
-                    [mlx_kquant.sdpa_fa_verify(mx.contiguous(qc[:, :, i]),
-                                               k, v, float(scale), qL)
-                     for i in range(n)],
-                    axis=2)
-            return out.reshape(B, hq, qL, hd)
+            return _fa_fold(q, k, v, scale)
         except Exception as exc:  # any unsupported shape -> stock fallback
             _warn_fallback_once("fa_verify", exc)
+    if (_VERIFY_FA and _HAS_FA_VERIFY and kw.get("sinks") is None
+            and _fa_split9_eligible(q, k, v, mask)):
+        try:
+            kL = k.shape[2]
+            n = _fa_chunks(q.shape[1] // k.shape[1], 8)
+            _route(f"fa_verify_split(chunks={n})", q, k, mask)
+            head = _fa_fold(q[:, :, :8], k[:, :, :kL - 1], v[:, :, :kL - 1],
+                            scale)
+            last = _wrapped_sdpa(q[:, :, 8:], k, v, scale=scale, mask=None)
+            return mx.concatenate([head, last], axis=2)
+        except Exception as exc:  # any unsupported shape -> stock fallback
+            _warn_fallback_once("fa_verify_split", exc)
     if (_VERIFY_GEMM and kw.get("sinks") is None
             and _verify_gemm_eligible(q, k, v, mask)):
         try:
