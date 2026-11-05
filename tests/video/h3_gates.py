@@ -304,13 +304,45 @@ def over(v: float, name: str, tolerances: dict) -> float:
 FLOAT32_ROWS = {"video_patch_proj", "audio_patch_proj",
                 "final_layer.adaln_proj.linear"}
 
+# The restarts a free block row's restart spread is the largest gap over
+# (scripts/video_oracle/check3_h3_spread.py): the oracle's bf16 blocks
+# from the fixture's state at each of these blocks, as is and nudged with
+# each seed. The counts are fixed, so the largest gap does not grow with
+# more runs.
+RESTART_STARTS = (4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 27, 30)
+RESTART_SEEDS = (0, 1, 2)
+
+
+def restart_spread(m: dict) -> dict:
+    """The restart spread the manifest records for each free block row, by
+    row; none when it records no spread. A spread covers the fixed
+    restarts and every block row from its first, past the last start, to
+    the last block."""
+    rec = m["results"].get("free_restart_spread")
+    if rec is None:
+        return {}
+    assert tuple(rec["starts"]) == RESTART_STARTS
+    assert tuple(rec["seeds"]) == RESTART_SEEDS
+    depth = m["inputs"]["blocks"]
+    assert RESTART_STARTS[-1] < rec["first"] < depth
+    assert set(rec["rows"]) == {f"blocks.{b}"
+                                for b in range(rec["first"], depth)}
+    runs = {f"blocks.{k}" for k in RESTART_STARTS} | {
+        f"blocks.{k} nudge{s}" for k in RESTART_STARTS
+        for s in RESTART_SEEDS}
+    for k, r in rec["rows"].items():
+        assert r["run"] in runs and r["rel_l2"] > 0, k
+    return {k: r["rel_l2"] for k, r in rec["rows"].items()}
+
 
 def assert_manifest_rule(m: dict) -> None:
     """Every row tolerance is twice the gap beside it, or the float32
     floor for a row the oracle runs in float32 in both modes, each
-    teacher-forced row run free is twice its free gap, the velocity
-    floors follow their gaps, the fixture holds every row of its depth
-    with a gap for each, and gmlx's stream times are the oracle's."""
+    teacher-forced row run free is twice its free gap, or the larger of
+    that and its restart spread where the manifest records one, the
+    velocity floors follow their gaps, the fixture holds every row of its
+    depth with a gap for each, and gmlx's stream times are the oracle's.
+    The restart spread widens free block rows alone."""
     tols, res = m["tolerances"], m["results"]
     for stream in ("video", "audio"):
         gap = res["velocity_bf16_vs_fp32"][stream]
@@ -331,8 +363,11 @@ def assert_manifest_rule(m: dict) -> None:
     assert all(keeps_fp32(k) for k in float32)
     forced = {k for k in res["rows_bf16_vs_fp32"] if forced_row(k)}
     assert set(res["free_bf16_vs_fp32"]) == forced
+    spread = restart_spread(m)
+    assert set(spread) <= set(res["free_bf16_vs_fp32"])
     for k, g in res["free_bf16_vs_fp32"].items():
-        assert tols[f"free {k}"] == {"rel_l2": 2 * g["rel_l2"]}, k
+        want = max(2 * g["rel_l2"], spread.get(k, 0.0))
+        assert tols[f"free {k}"] == {"rel_l2": want}, k
     assert gated_rows(m) - {f"cosine {v}" for v in VELOCITIES} == \
         expected_rows(m)
     assert set(res["rows_bf16_vs_fp32"]) == {

@@ -11,8 +11,15 @@ The product gate runs the model as it ships, in bf16 with the kernel
 routes at their default, and holds each row to twice the oracle's gap:
 teacher-forced for each refiner block, the refiner's norm, each block and
 the heads, and free running for the other rows, for each of those rows
-run free and for the velocities. The kernel routes in force must run
-where they apply. The exact gate runs the model in the oracle's fp32
+run free and for the velocities. Where gmlx's free run misses twice the
+oracle's free gap at a block row while the teacher-forced rows, the
+velocities and the exact gates pass, the free block rows from that row
+to the last block take the larger of twice the gap and the oracle's
+restart spread: its own largest gap at the row over its bf16 blocks
+restarted from the fixture's state at 13 blocks (4 to 30), as is and with
+3 nudges of one float32 step. scripts/video_oracle/check3_h3_spread.py
+measures the spread once and records it in the manifest; the tests read
+it. The kernel routes in force must run where they apply. The exact gate runs the model in the oracle's fp32
 arithmetic, every K-quant product dense on its dequantized weight and
 every float tensor of the file in float32. It holds the teacher-forced
 rows to EXACT_TOL, and the free rows and each velocity to the larger of
@@ -40,6 +47,7 @@ skip until both are there.
 """
 from __future__ import annotations
 
+import copy
 import os
 from pathlib import Path
 
@@ -94,6 +102,61 @@ def test_the_manifests_follow_the_rule(name):
     if name in REAL or name in REAL_ANCHORS:
         hg.exact_tols(m)
         assert m["files"]["dit"] == committed(REAL[0])["files"]["dit"]
+
+
+def _with_spread(m: dict, first: int) -> dict:
+    """``m`` with a restart spread recorded from block row ``first`` to the
+    last block, each row's spread four times its free gap, and the gates
+    it gives."""
+    m = copy.deepcopy(m)
+    free = m["results"]["free_bf16_vs_fp32"]
+    rows = {f"blocks.{b}": {"rel_l2": 4 * free[f"blocks.{b}"]["rel_l2"],
+                            "run": "blocks.8 nudge1"}
+            for b in range(first, m["inputs"]["blocks"])}
+    m["results"]["free_restart_spread"] = {
+        "starts": list(hg.RESTART_STARTS), "seeds": list(hg.RESTART_SEEDS),
+        "first": first, "rows": rows}
+    for k, r in rows.items():
+        m["tolerances"][f"free {k}"] = {"rel_l2": r["rel_l2"]}
+    return m
+
+
+def _gate_left(m, row="blocks.40"):
+    gap = m["results"]["free_bf16_vs_fp32"][row]["rel_l2"]
+    m["tolerances"][f"free {row}"] = {"rel_l2": 2 * gap}
+
+
+def _forced_widened(m):
+    m["tolerances"]["blocks.40"]["rel_l2"] *= 4
+
+
+def _start_dropped(m):
+    m["results"]["free_restart_spread"]["starts"].pop()
+
+
+def _from_a_start(m):
+    wider = _with_spread(m, hg.RESTART_STARTS[-1])
+    m["results"] = wider["results"]
+    m["tolerances"] = wider["tolerances"]
+
+
+def _row_dropped(m):
+    del m["results"]["free_restart_spread"]["rows"]["blocks.49"]
+    _gate_left(m, "blocks.49")
+
+
+@pytest.mark.parametrize("wrong", (_gate_left, _forced_widened,
+                                   _start_dropped, _from_a_start,
+                                   _row_dropped))
+def test_a_restart_spread_widens_free_block_rows_alone(wrong):
+    """A recorded restart spread sets the gate of each free block row from
+    its first to the last block, over the fixed restarts. It never widens
+    a teacher-forced row, and a spread off that shape fails the rule."""
+    m = _with_spread(_manifest(REAL[1]), 36)
+    hg.assert_manifest_rule(m)
+    wrong(m)
+    with pytest.raises(AssertionError):
+        hg.assert_manifest_rule(m)
 
 
 @pytest.fixture(scope="module")
