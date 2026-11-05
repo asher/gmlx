@@ -1621,6 +1621,46 @@ def test_load_offload_covers_raw_request_routes(monkeypatch):
     assert len(seen) == 1               # no model in the body -> no warm
 
 
+def _post_endpoint(path):
+    return next(r.endpoint for r in _APP.app.router.routes
+                if getattr(r, "path", None) == path
+                and "POST" in (getattr(r, "methods", None) or ()))
+
+
+@pytest.mark.parametrize("path", ["/messages/count_tokens",
+                                  "/v1/messages/count_tokens",
+                                  "/responses/input_tokens",
+                                  "/v1/responses/input_tokens"])
+def test_a_token_count_loads_its_model_off_the_event_loop(monkeypatch, path):
+    """A token count for a model not loaded: the cold load runs on a
+    thread while the event loop runs on, and the stock handler then
+    counts."""
+    import threading
+
+    order = []
+
+    async def fake_handler(request):
+        order.append("handler")
+        return {"input_tokens": 1}
+
+    sp_common._remove_routes(_APP.app, path)
+    _APP.app.add_api_route(path, fake_handler, methods=["POST"],
+                           include_in_schema=False)
+    free = threading.Event()
+
+    def cold(model_id, adapter):
+        # Ends only once the loop has run on.
+        order.append(("load", model_id, free.wait(5)))
+    monkeypatch.setattr(sp_routes, "_load_resident", cold)
+    sp.install_chat_load_offload()
+
+    async def run():
+        asyncio.get_running_loop().call_soon(free.set)
+        return await _post_endpoint(path)(_FakeRawReq({"model": "m"}))
+    assert asyncio.run(run()) == {"input_tokens": 1}
+    assert order == [("load", "m", True), "handler"]
+
+
 @pytest.mark.host_gb(64)
 @pytest.mark.parametrize("reply", ["json", "error", "stream"])
 def test_a_warmed_model_stays_held_until_its_handler_returns(monkeypatch, reply):

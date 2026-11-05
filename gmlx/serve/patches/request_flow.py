@@ -23,7 +23,11 @@ _log = logging.getLogger(__name__)
 _LOAD_OFFLOAD_FLAG = "_kq_gguf_load_offload"
 
 _LOAD_OFFLOAD_PATHS = _CHAT_PATHS + ("/responses", "/v1/responses",
+                                     "/responses/input_tokens",
+                                     "/v1/responses/input_tokens",
                                      "/messages", "/v1/messages",
+                                     "/messages/count_tokens",
+                                     "/v1/messages/count_tokens",
                                      "/completions", "/v1/completions",
                                      "/systemone", "/v1/systemone",
                                      "/prewarm", "/v1/prewarm")
