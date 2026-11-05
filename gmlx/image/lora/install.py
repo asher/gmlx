@@ -812,15 +812,33 @@ class _Sized:
     strength: float
 
 
+class TableGone(LookupError):
+    """The DiT, the table of a dry run or a pair it names with no shape
+    given went before the run read it: a shed or a drop on the image
+    worker, which a route's estimate off the worker can meet."""
+
+
 def f32_leaves(pipe) -> frozenset:
     """The paths of the DiT's linear leaves that its family names in
     ``lora_f32``: the leaves that see float32 rows under any activation
-    dtype."""
+    dtype. Raises TableGone without a DiT."""
     pats = getattr(getattr(pipe, "family", None), "lora_f32", ())
     if not pats:
         return frozenset()
-    return frozenset(p for p in linear_leaves(pipe.dit)
+    dit = getattr(pipe, "dit", None)
+    if dit is None:
+        raise TableGone("the DiT")
+    return frozenset(p for p in linear_leaves(dit)
                      if any(fnmatch.fnmatchcase(p, s) for s in pats))
+
+
+def dry_run(pipe, tid: str) -> dict:
+    """``table_figures`` of table ``tid`` at the DiT's activation dtype,
+    with its family's float32 leaves. Raises TableGone without a DiT."""
+    dit = getattr(pipe, "dit", None)
+    if dit is None:
+        raise TableGone("the DiT")
+    return table_figures(pipe, tid, dit.act_dtype, f32_leaves(pipe))
 
 
 def table_figures(pipe, tid: str, act, f32=frozenset(),
@@ -831,9 +849,13 @@ def table_figures(pipe, tid: str, act, f32=frozenset(),
     and the kernel pairs, and for each pair the pair cache does not hold.
     A module runs at ``act``, or float32 for a leaf named in ``f32``, the
     family's leaves that see float32 rows. ``shapes`` gives (down shape,
-    up shape, dtype) of each pair not held."""
-    table = pipe.patch_tables[tid]
-    leaves = linear_leaves(pipe.dit)
+    up shape, dtype) of each pair not held. Raises TableGone when the
+    DiT, the table or a pair not held and not in ``shapes`` is gone."""
+    table = pipe.patch_tables.get(tid)
+    dit = getattr(pipe, "dit", None)
+    if table is None or dit is None:
+        raise TableGone(tid)
+    leaves = linear_leaves(dit)
     how = form()
     out: dict = {}
     by_module: dict = {}
@@ -844,6 +866,8 @@ def table_figures(pipe, tid: str, act, f32=frozenset(),
                 continue
             pair = pipe.adapters.peek(key)
             if pair is None:
+                if shapes is None or key not in shapes:
+                    raise TableGone(key)
                 down, up, dtype = shapes[key]
                 d, u = _Like(tuple(down), dtype), _Like(tuple(up), dtype)
                 out[key] = (d.nbytes + u.nbytes, 0)

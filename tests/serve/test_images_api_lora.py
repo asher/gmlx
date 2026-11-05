@@ -30,7 +30,8 @@ from gmlx.serve.residency import IMAGE_KIND, _BusyHold  # noqa: E402
 from test_image_routes import _APP, _DOC  # noqa: E402
 from test_image_steps import _client as _steps_client  # noqa: E402
 from test_step_routes_lora import (GB, _crowd, _model, _mount,  # noqa: E402
-                                   _pool, _PoolHost, _store)
+                                   _pool, _PoolHost, _racing_dry_run,
+                                   _store)
 
 MB = 10**6
 
@@ -606,6 +607,29 @@ def test_a_pair_held_at_the_route_and_shed_before_the_job_is_booked_again(
         "the request's adapters need 0.1 GB of memory, and 0.0 GB is free ")
     assert t.pipe.adapters.bytes == own
     _books_hold(t.pool, t.e, budget=False)
+
+
+@pytest.mark.parametrize("gone", ["pair", "dit"])
+def test_a_request_whose_table_goes_during_its_routes_dry_run_is_priced(
+        request, monkeypatch, tmp_path, gone):
+    """Another job sheds a request table's pairs and built table, or a
+    staged entry's encode lets the DiT go, on the worker while the
+    request's route prices the table by the dry run. The route prices it
+    at twice its pairs, as any other request table, the job's turns book
+    it exactly, and it gives the same image."""
+    t = _entry(request, monkeypatch, tmp_path, staged=gone == "dit")
+    assert _post([("a.safetensors", 1.0)])[0] == 200
+    if gone == "pair":
+        def fn():
+            svc.shed_lora(t.e, t.pipe.adapters.bytes + t.pipe.tables.bytes)
+    else:
+        def fn():
+            svc._drop_dit(t.served)
+    ran = _racing_dry_run(monkeypatch, fn)
+    status, doc, _headers = _post([("a.safetensors", 1.0)])
+    assert ran and status == 200, doc
+    assert np.array_equal(t.latents[-1], t.latents[0])
+    _books_hold(t.pool, t.e)
 
 
 # T20: the request budget.

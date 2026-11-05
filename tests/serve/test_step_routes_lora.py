@@ -326,6 +326,26 @@ def _between(monkeypatch, fn) -> None:
     monkeypatch.setattr(routes, "_reserve", then)
 
 
+def _racing_dry_run(monkeypatch, fn) -> list:
+    """``fn`` on the image worker once, as a route's estimate starts its
+    dry run off the worker: another job's shed or drop that lands between
+    the estimate's check and the dry run's reads. Returns the table ids
+    of the dry runs it raced."""
+    from gmlx.image.lora import install
+
+    real, ran = install.dry_run, []
+
+    def racing(pipe, tid):
+        if not ran and not threading.current_thread().name.startswith(
+                "image-worker"):
+            ran.append(tid)
+            image_service.WORKER.submit(fn).result()
+        return real(pipe, tid)
+
+    monkeypatch.setattr(install, "dry_run", racing)
+    return ran
+
+
 def _crowd(pool) -> None:
     """A model in use takes the memory free and a byte more, as one whose
     plan was priced again at its run: the pool is past its budget, so a
@@ -764,3 +784,32 @@ def test_a_steps_409_prices_its_memory_sentence_off_the_event_loop(
         "1 tensor(s) or table(s) are not held by the server; upload them "
         "and retry. 0.1 GB of LoRA matrices are not held; 3.0 GB of memory "
         "is free beside the models in use")
+
+
+# A route's estimate against the worker's sheds and drops.
+
+def test_a_step_whose_pairs_go_during_its_routes_dry_run_is_priced_again(
+        request, monkeypatch, tmp_path):
+    """Another client's define sheds a held table's pairs and built table
+    on the worker while a step's route prices the table by the dry run.
+    The route prices the step as one that defines its table again: its
+    pairs, twice their bytes for the factors, and its matrices in the
+    uploads as its own. The turns book it exactly, and the step steps as
+    before."""
+    pool, e, c, tid, rows, x, first = _stepped(request, monkeypatch,
+                                               tmp_path)
+    pipe = e.pipeline.pipe
+    ran = _racing_dry_run(monkeypatch, lambda: image_service.shed_lora(
+        e, pipe.adapters.bytes + pipe.tables.bytes))
+    reserve, priced = routes._reserve, []
+
+    async def recorded(pool_, owner, n, subject, own_held=0, store_held=0):
+        priced.append((n, store_held))
+        return await reserve(pool_, owner, n, subject, own_held, store_held)
+
+    monkeypatch.setattr(routes, "_reserve", recorded)
+    again = c.step("own", None, x, [0.75], rows, patch_table=tid)
+    mats = sum(steps.STATE.tables_of("own", pipe).sizes(tid).values())
+    assert ran and priced == [(3 * mats, mats)]
+    assert np.array_equal(again, first)
+    _books_hold(pool, e)

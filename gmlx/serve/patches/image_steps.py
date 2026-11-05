@@ -877,23 +877,36 @@ def _step_estimate(served, tid, core) -> tuple:
     route: the pairs not held of a table it defines again, and the factors
     its forward builds, with the bytes of its own keys held now in the
     pipeline and of the uploaded matrices of a table it defines again,
-    which its claims leave. The factors are priced by the dry run while the DiT and the
-    pairs are held, and at twice the pairs' bytes otherwise, as on a
-    staged entry whose DiT an encode let go; the turn books them
-    exactly."""
+    which its claims leave. The factors are priced by the dry run while
+    the DiT and the pairs are held, and at twice the pairs' bytes
+    otherwise, as on a staged entry whose DiT an encode let go; the turn
+    books them exactly. A shed or a drop on the worker that lets the
+    pairs or the DiT go during the dry run prices the step as one of
+    those."""
+    from gmlx.image.lora.install import TableGone
+
+    from ..image_service import turn_figures
     from ..image_steps import STATE, body_pairs, pairs_due
 
     pipe = served.pipe
     if core is None:
         # The default table's excess is booked at the turn.
         return 0, 0, 0
-    n = store = 0
-    pairs: dict = {}
-    held = _held(pipe, core)
     table = pipe.patch_tables.get(core)
     named = {k for _p, _b, ps in table["entries"] for k, _s, _a in ps} \
         if table else set()
-    if not held:
+    if _held(pipe, core) and table \
+            and getattr(pipe, "dit", None) is not None:
+        try:
+            need, _priced, built = turn_figures(_lora_pool(), None, pipe,
+                                                core)
+            return need, _held_bytes(pipe, named) + built, 0
+        except TableGone:
+            # A shed or a drop on the worker since the check.
+            pass
+    n = store = 0
+    pairs: dict = {}
+    if not _held(pipe, core):
         raw = STATE.tables_of(served.spec.id, pipe).body(tid)
         if raw is not None:
             body = json.loads(raw)
@@ -902,15 +915,9 @@ def _step_estimate(served, tid, core) -> tuple:
             n += sum(due.values())
             named = set(pairs) - set(due)
             store = sum(_sizes(body).values())
-    own = _held_bytes(pipe, named)
-    if held and table and getattr(pipe, "dit", None) is not None:
-        from ..image_service import turn_figures
-
-        need, _priced, built = turn_figures(_lora_pool(), None, pipe, core)
-        return n + need, own + built, store
     if not pairs and table:
         pairs = {k: pipe.adapters.nbytes(k) or 0 for k in named}
-    return n + 2 * sum(pairs.values()), own, store
+    return n + 2 * sum(pairs.values()), _held_bytes(pipe, named), store
 
 
 def _skip(served, raw) -> tuple:

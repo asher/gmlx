@@ -1758,7 +1758,9 @@ def turn_figures(pool, entry, pipe, tid) -> tuple:
     pipeline's default for None, by the dry run against what is built:
     the factors and kernel pairs it builds yet at the dtypes its leaves
     run at, and for the default table the growth of its excess over the
-    footprint's own term. Runs on the worker after the job's last drop."""
+    footprint's own term. Runs on the worker after the job's last drop;
+    a route's estimate off the worker meets install.TableGone when a shed
+    or a drop there let the DiT, the table or a pair go."""
     from gmlx.image.lora import install
 
     if tid is None:
@@ -1766,8 +1768,7 @@ def turn_figures(pool, entry, pipe, tid) -> tuple:
     table = pipe.patch_tables.get(tid) if tid is not None else None
     if tid is None or not table or not table["entries"]:
         return 0, {}, 0
-    figs = install.table_figures(pipe, tid, pipe.dit.act_dtype,
-                                 install.f32_leaves(pipe))
+    figs = install.dry_run(pipe, tid)
     need = sum(max(0, f - h) for f, h in figs.values())
     if install._is_default(pipe, tid):
         used, term, excess = pool.lora_own(entry)
@@ -1842,8 +1843,9 @@ def request_estimate(pool, entry, served: ServedImage, rows: list,
     not hold, and the factors of its table. A table whose files the
     pipeline holds, on a loaded DiT, is priced by the dry run: in full on
     a staged entry, whose encode lets the built tables go, else less what
-    is built. Any other request table is priced at twice its pairs, and
-    the default table at its excess. ``own held`` is the bytes of the
+    is built. Any other request table, and one whose DiT or pairs a shed
+    or a drop on the worker let go since, is priced at twice its pairs,
+    and the default table at its excess. ``own held`` is the bytes of the
     request's own keys held now, which its claims leave. The job's turns
     book both exactly."""
     from gmlx.image import api, lora
@@ -1863,7 +1865,11 @@ def request_estimate(pool, entry, served: ServedImage, rows: list,
     if not extra and table_rows == list(served.adapters):
         if getattr(pipe, "dit", None) is None:
             return 0, 0, 0
-        need, _priced, _built = turn_figures(pool, entry, pipe, None)
+        try:
+            need, _priced, _built = turn_figures(pool, entry, pipe, None)
+        except install.TableGone:
+            # The DiT went since the check: the turn books the excess.
+            return 0, 0, 0
         return 0, need, 0
     tid = None
     if not pairs and None not in hits and getattr(pipe, "dit", None) \
@@ -1873,11 +1879,13 @@ def request_estimate(pool, entry, served: ServedImage, rows: list,
                 table_rows + hits))
         except ValueError:
             tid = None
+    twice = 2 * (total + sum(ad.nbytes for ad, _st in served.adapters))
     if tid is None or tid not in pipe.patch_tables:
-        return pairs, 2 * (total + sum(ad.nbytes for ad, _st in
-                                       served.adapters)), own
-    figs = install.table_figures(pipe, tid, pipe.dit.act_dtype,
-                                 install.f32_leaves(pipe))
+        return pairs, twice, own
+    try:
+        figs = install.dry_run(pipe, tid)
+    except install.TableGone:
+        return pairs, twice, own
     if getattr(served.plan, "staged", False):
         return 0, sum(f for f, _h in figs.values()), own
     return (0, sum(max(0, f - h) for f, h in figs.values()),
