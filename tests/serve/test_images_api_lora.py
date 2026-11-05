@@ -21,7 +21,7 @@ mx = pytest.importorskip("mlx.core")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from gmlx.config import ImageServerCfg, build_config  # noqa: E402
+from gmlx.config import ImageServerCfg, ResolvedModel, build_config  # noqa: E402
 from gmlx.image import api  # noqa: E402
 from gmlx.serve import bridge_vlm as serving  # noqa: E402
 from gmlx.serve import capacity, residency  # noqa: E402
@@ -456,42 +456,102 @@ def test_a_lora_whose_factors_no_unload_makes_room_for_is_413_at_its_turn(
     _books_hold(t.pool, t.e)
 
 
-def _shares_encoder(t, monkeypatch, fp: int):
+ENC = "/m/enc-qwen3.gguf"
+
+
+def _shares_encoder(t, monkeypatch, fp: int, *, resident: bool = True):
     """Entry ``t`` shares the encoder of chat model "enc-qwen3" of ``fp``
-    bytes, idle in the pool: a request's route borrows it for the job,
-    which holds it until it ends. Returns the chat entry."""
-    enc = _chat(t.pool, "enc-qwen3", fp)
-    t.pool.release(enc)
+    bytes, a configured id: idle in the pool, or with ``resident`` False,
+    loaded by the borrow. A request's route borrows it for the job, which
+    holds it until it ends. Returns the chat entry, or None, and the
+    entries borrowed."""
+    rm = ResolvedModel(id="enc-qwen3", path=ENC, sampling={}, load={},
+                       cache={}, system=None, speculative=False, mmproj=None,
+                       draft_gguf=None, pin=False, ttl_s=None)
+    real = serving.resolve_request_model
+    monkeypatch.setattr(serving, "resolve_request_model", lambda m, **k: (
+        (ENC, rm) if m == "enc-qwen3" else real(m, **k)))
+    enc = None
+    if resident:
+        enc = _chat(t.pool, "enc-qwen3", fp)
+        t.pool.release(enc)
+    borrowed: list = []
 
     def borrow_for(spec):
-        with t.pool._lock:
-            enc.busy += 1
+        got = next((e for e in t.pool._entries.values()
+                    if e.model_path == ENC), None)
+        if got is None:
+            got = _chat(t.pool, "enc-qwen3", fp)
+        else:
+            with t.pool._lock:
+                got.busy += 1
+        borrowed.append(got)
         return (lambda pipe, run, stop, timeout_s: run()), \
-            _BusyHold(t.pool, enc)
+            _BusyHold(t.pool, got)
 
     monkeypatch.setattr(images, "_borrow_for", borrow_for)
     monkeypatch.setattr(t.served.spec, "encoder_model", "enc-qwen3")
-    return enc
+    return enc, borrowed
 
 
-def test_a_route_counts_the_encoder_its_job_holds_as_its_own(
-        request, monkeypatch, tmp_path):
-    """A request LoRA of 3 GB on a model that shares a chat model's
-    encoder, on a budget that leaves 2 GB beside the model and the
-    encoder: once the route holds the encoder for the job, it answers 413
-    naming both, and the job takes no turn."""
-    t = _entry(request, monkeypatch, tmp_path, budget=10 * GB, own=False)
+def _route_413(t, monkeypatch, room_gb: float):
+    """Post a request LoRA of 3 GB; returns the job's pair turns and
+    asserts the 413 the route gives it with ``room_gb`` left beside the
+    model and its encoder."""
     _big_lora(t.root / "big.safetensors", 3 * GB)
-    enc = _shares_encoder(t, monkeypatch, 10 * GB - t.e.footprint - 2 * GB)
     turns, real = [], svc.pair_turn
     monkeypatch.setattr(svc, "pair_turn",
                         lambda *a, **k: turns.append(a) or real(*a, **k))
     status, doc, _h = _post([("big.safetensors", 1.0)])
     assert (status, doc["error"]["message"]) == (
-        413, "the request's adapters need 3.0 GB of memory, over the 2.0 GB "
-        "the server's memory budget leaves beside 'zit', 'enc-qwen3' and "
-        "the pinned models")
-    assert turns == [] and t.encodes == 0 and enc.busy == 0
+        413, f"the request's adapters need 3.0 GB of memory, over the "
+        f"{room_gb:.1f} GB the server's memory budget leaves beside 'zit', "
+        "'enc-qwen3' and the pinned models")
+    return turns
+
+
+def test_a_route_counts_the_encoder_its_job_holds_as_its_own(
+        request, monkeypatch, tmp_path):
+    """A request LoRA of 3 GB on a model that shares a resident chat
+    model's encoder, on a budget that leaves 2 GB beside the model and
+    the encoder: the route answers 413 naming both before it borrows the
+    encoder, and the job takes no turn."""
+    t = _entry(request, monkeypatch, tmp_path, budget=10 * GB, own=False)
+    enc, borrowed = _shares_encoder(t, monkeypatch,
+                                    10 * GB - t.e.footprint - 2 * GB)
+    assert _route_413(t, monkeypatch, 2) == []
+    assert borrowed == [] and t.encodes == 0 and enc.busy == 0
+
+
+def test_a_route_counts_the_encoder_it_would_load_at_its_price(
+        request, monkeypatch, tmp_path):
+    """A request LoRA of 3 GB between what the budget leaves beside the
+    model alone and beside it and its encoder, which is not loaded: the
+    route counts the encoder at its load price and answers 413 naming
+    both, with no encoder load."""
+    t = _entry(request, monkeypatch, tmp_path, budget=10 * GB, own=False)
+    price = 10 * GB - t.e.footprint - 2 * GB
+    monkeypatch.setattr(t.pool, "_footprint_fn", lambda path: price)
+    _enc, borrowed = _shares_encoder(t, monkeypatch, price, resident=False)
+    assert _route_413(t, monkeypatch, 2) == []
+    assert borrowed == [] and t.encodes == 0
+    assert all(e.model_path != ENC for e in t.pool._entries.values())
+
+
+def test_a_route_checks_again_once_the_encoder_loads_past_its_price(
+        request, monkeypatch, tmp_path):
+    """An encoder whose load holds more than its price, as a streamed
+    model's decode arena sized at install can: the route's check after
+    the borrow counts what it holds and answers 413 naming both, and the
+    job takes no turn and no encode."""
+    t = _entry(request, monkeypatch, tmp_path, budget=10 * GB, own=False)
+    monkeypatch.setattr(t.pool, "_footprint_fn", lambda path: GB)
+    _enc, borrowed = _shares_encoder(t, monkeypatch,
+                                     10 * GB - t.e.footprint - 2 * GB,
+                                     resident=False)
+    assert _route_413(t, monkeypatch, 2) == []
+    assert len(borrowed) == 1 and t.encodes == 0
+    assert borrowed[0].busy == 0
 
 
 def test_a_factor_turn_counts_the_encoder_its_job_holds_as_its_own(
@@ -506,7 +566,7 @@ def test_a_factor_turn_counts_the_encoder_its_job_holds_as_its_own(
     pairs, factors = t.pipe.adapters.bytes, t.pipe.tables.bytes
     _on_worker(lambda: svc.shed_lora(t.e, pairs + factors))
     _settle(t)
-    enc = _shares_encoder(t, monkeypatch, 2 * GB)
+    enc, _borrowed = _shares_encoder(t, monkeypatch, 2 * GB)
     kept = t.e.footprint + enc.footprint
     budget = kept + pairs + factors // 2
     _set_budget(t.pool, budget)

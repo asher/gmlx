@@ -626,22 +626,11 @@ class _ResidencyPool:
             raise ValueError(f"model kind {model_kind!r} loads mlx-vlm's own "
                              f"image pipelines; gmlx loads {IMAGE_KIND!r}")
         # Cold path: one build at a time (bounds peak memory).
-        if model_kind in _WORKER_KINDS:
-            # Weights and the activation reserve, from the headers: a file
-            # that is no model of the kind is refused here, before any
-            # eviction.
-            file_bytes = incoming = int(self._kind_fn(model_kind, 0)(build_spec))
-        else:
-            file_bytes = self._footprint_fn(model_path)
-            incoming = file_bytes
-        stream = getattr(build_spec, "stream", None)
-        if stream == "experts":
-            incoming = _streaming_footprint(model_path, file_bytes, env,
-                                            held_bytes=self._resident_bytes())
+        file_bytes, incoming = self._price(model_path, model_kind, build_spec,
+                                           env)
+        if getattr(build_spec, "stream", None) == "experts":
             _log.info("streaming entry priced at %.1f GB resident of a %.1f GB file",
                       incoming / 1e9, file_bytes / 1e9)
-        elif stream is None and model_kind not in _WORKER_KINDS:
-            incoming = _plain_footprint(model_path, file_bytes, env)
         # Refuse an unloadable GGUF *before* evicting healthy residents for
         # room - a corrupt/unsupported file would otherwise cost every LRU
         # victim a full cold reload for a build that was never going to work.
@@ -762,6 +751,40 @@ class _ResidencyPool:
                 "frees.")
         finally:
             self._release_images(late)
+
+    def _price(self, model_path, model_kind, build_spec, env,
+               held: int | None = None) -> tuple:
+        """(file bytes, resident bytes) of a cold load of ``model_path``: a
+        worker kind's weights and activation reserve, a streamed model's
+        every-token weights and arena beside ``held`` resident bytes (the
+        pool's now when None), else the file less the tables read from
+        it."""
+        if model_kind in _WORKER_KINDS:
+            # From the headers: a file that is no model of the kind is
+            # refused here, before any eviction.
+            file_bytes = incoming = int(self._kind_fn(model_kind, 0)(build_spec))
+        else:
+            file_bytes = incoming = self._footprint_fn(model_path)
+        stream = getattr(build_spec, "stream", None)
+        if stream == "experts":
+            incoming = _streaming_footprint(
+                model_path, file_bytes, env, held_bytes=(
+                    self._resident_bytes() if held is None else held))
+        elif stream is None and model_kind not in _WORKER_KINDS:
+            incoming = _plain_footprint(model_path, file_bytes, env)
+        return file_bytes, incoming
+
+    def load_entry(self, model_path, spec, env=None) -> _Entry:
+        """For a route's check, from ``figures`` with no lock: the resident
+        chat entry of ``model_path``, or one outside the pool at the bytes
+        a cold load of it books."""
+        f = self.figures
+        for e in f.entries:
+            if not e.is_image and str(e.model_path) == str(model_path):
+                return e
+        _file, price = self._price(model_path, "auto", spec, env, f.resident)
+        return _Entry(cache_key=(model_path,), model_path=model_path,
+                      footprint=int(price), loaded_as=getattr(spec, "id", None))
 
     def _fit_repriced(self, entry: _Entry, model_path, released) -> None:
         """The install streamed less than the header predicted, so the

@@ -293,20 +293,41 @@ def _budget(hold):
     return max(0, total - beside)
 
 
-def _hopeless(hold, served, req, beside=()) -> None:
+def _hopeless(hold, served, req, beside=None) -> None:
     """The route's 413 for a request whose adapters' bytes, from their
     headers, no unload makes room for beside its model and the entries
-    ``beside`` its job holds. The job's turns book them."""
+    ``beside`` its job holds, or before the borrow (None), the encoder it
+    will borrow. The job's turns book them."""
     from ..image_service import ADAPTERS, lora_refusal, request_estimate
     from ..residency import LoraRefused
 
     n = request_estimate(served, req.adapters, STATE.model_dirs)
     if n <= 0:
         return
+    if beside is None:
+        beside = _encoder(hold, served)
     try:
         hold._pool.lora_hopeless(hold._entry, n, ADAPTERS, beside)
     except LoraRefused as e:
         raise lora_refusal(e) from None
+
+
+def _encoder(hold, served) -> tuple:
+    """The chat model a job borrows as its encoder, before the borrow: its
+    resident entry, or one at the bytes its load books. Empty when the
+    model shares no encoder or the id does not resolve, which the borrow
+    answers."""
+    model_id = served.spec.encoder_model
+    if model_id is None:
+        return ()
+    from gmlx.config import env_for
+
+    try:
+        path, spec = serving.resolve_request_model(
+            model_id, profile_field=serving.get_request_profile())
+        return (hold._pool.load_entry(path, spec, env_for(spec)),)
+    except Exception:  # noqa: BLE001 - the borrow resolves it and answers
+        return ()
 
 
 def _beside(holds) -> tuple:

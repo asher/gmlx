@@ -1473,7 +1473,7 @@ def test_chat_load_offload_warms_off_loop_before_handler(monkeypatch):
         order.append(("warm", model_id))
 
     _register_fake_chat(fake_handler)
-    monkeypatch.setattr(sp_routes, "_warm_and_release", fake_warm)
+    monkeypatch.setattr(sp_routes, "_load_resident", fake_warm)
     sp.install_chat_load_offload()
 
     res = asyncio.run(_chat_endpoint()(_FakeReq(model="m"), object()))
@@ -1489,7 +1489,7 @@ def test_chat_load_offload_passes_explicit_adapter(monkeypatch):
     async def fake_handler(request, http_request):
         return {"ok": True}
 
-    monkeypatch.setattr(sp_routes, "_warm_and_release",
+    monkeypatch.setattr(sp_routes, "_load_resident",
                         lambda m, a: seen.append((m, a)))
     _register_fake_chat(fake_handler)
     sp.install_chat_load_offload()
@@ -1510,7 +1510,7 @@ def test_chat_load_offload_swallows_warm_error(monkeypatch):
         raise RuntimeError("load failed")
 
     _register_fake_chat(fake_handler)
-    monkeypatch.setattr(sp_routes, "_warm_and_release", boom)
+    monkeypatch.setattr(sp_routes, "_load_resident", boom)
     sp.install_chat_load_offload()
 
     res = asyncio.run(_chat_endpoint()(_FakeReq(model="m"), object()))
@@ -1536,7 +1536,7 @@ def test_chat_load_offload_deferred_load_is_a_typed_503(monkeypatch):
                            "measured free working set 27.0 GB")
 
     _register_fake_chat(fake_handler)
-    monkeypatch.setattr(sp_routes, "_warm_and_release", deferred)
+    monkeypatch.setattr(sp_routes, "_load_resident", deferred)
     monkeypatch.setattr(cr, "readiness", lambda: (False, "busy", 7))
     sp.install_chat_load_offload()
 
@@ -1561,7 +1561,7 @@ def test_chat_load_offload_skips_when_no_model(monkeypatch):
     async def fake_handler(request, http_request):
         return {"ok": True}
 
-    monkeypatch.setattr(sp_routes, "_warm_and_release",
+    monkeypatch.setattr(sp_routes, "_load_resident",
                         lambda m, a: seen.append(m))
     _register_fake_chat(fake_handler)
     sp.install_chat_load_offload()
@@ -1604,8 +1604,8 @@ def test_load_offload_covers_raw_request_routes(monkeypatch):
     sp_common._remove_routes(app, "/v1/messages")
     app.add_api_route("/v1/messages", fake_handler, methods=["POST"],
                       include_in_schema=False)
-    monkeypatch.setattr(sp_routes, "_warm_and_release",
-                        lambda m, a: (order.append("warm"), seen.append((m, a))))
+    monkeypatch.setattr(sp_routes, "_load_resident",
+                        lambda m, a: order.append("warm") or seen.append((m, a)))
     sp.install_chat_load_offload()
 
     ep = next(r.endpoint for r in app.router.routes
@@ -1619,6 +1619,83 @@ def test_load_offload_covers_raw_request_routes(monkeypatch):
     res = asyncio.run(ep(_FakeRawReq({"max_tokens": 8})))
     assert res == {"ok": True}
     assert len(seen) == 1               # no model in the body -> no warm
+
+
+def _post_endpoint(path):
+    return next(r.endpoint for r in _APP.app.router.routes
+                if getattr(r, "path", None) == path
+                and "POST" in (getattr(r, "methods", None) or ()))
+
+
+@pytest.mark.parametrize("path", ["/messages/count_tokens",
+                                  "/v1/messages/count_tokens",
+                                  "/responses/input_tokens",
+                                  "/v1/responses/input_tokens"])
+def test_a_token_count_loads_its_model_off_the_event_loop(monkeypatch, path):
+    """A token count for a model not loaded: the cold load waits on a
+    thread, as for an image job and the build lock, while the request's
+    event loop runs on, and the stock handler then counts."""
+    import threading
+
+    order = []
+
+    async def fake_handler(request):
+        order.append("handler")
+        return {"input_tokens": 1}
+
+    sp_common._remove_routes(_APP.app, path)
+    _APP.app.add_api_route(path, fake_handler, methods=["POST"],
+                           include_in_schema=False)
+    free = threading.Event()
+
+    def cold(model_id, adapter):
+        # Ends only once the loop has run on.
+        order.append(("load", model_id, free.wait(5)))
+    monkeypatch.setattr(sp_routes, "_load_resident", cold)
+    sp.install_chat_load_offload()
+
+    async def run():
+        asyncio.get_running_loop().call_soon(free.set)
+        return await _post_endpoint(path)(_FakeRawReq({"model": "m"}))
+    assert asyncio.run(run()) == {"input_tokens": 1}
+    assert order == [("load", "m", True), "handler"]
+
+
+def test_a_warmed_model_stays_held_until_its_handler_returns(monkeypatch):
+    """The chat pre-warm keeps its hold on the model it loaded until the
+    stock handler returns: a LoRA turn on the image worker that needs the
+    model's room meanwhile cannot evict it, so the handler never loads it
+    again on the event loop."""
+    from test_lora_turn import GB, chat, image, make_pool, turn
+
+    from gmlx.serve.residency import LoraRefused, _BusyHold
+
+    pool = make_pool(monkeypatch, 10, retry=0)
+    x = image(pool, "x", 4, busy=True)
+    warm = chat(pool, "m", 4, busy=0)
+
+    def load(model_id, adapter):
+        with pool._lock:
+            warm.busy += 1
+        return _BusyHold(pool, warm)
+
+    seen = []
+
+    async def fake_handler(request, http_request):
+        try:
+            turn(pool, x, 4 * GB)
+        except LoraRefused as e:
+            seen.append(e.status)
+        seen.append(pool.entry_resident(warm))
+        return {"ok": True}
+
+    _register_fake_chat(fake_handler)
+    monkeypatch.setattr(sp_routes, "_load_resident", load)
+    sp.install_chat_load_offload()
+    res = asyncio.run(_chat_endpoint()(_FakeReq(model="m"), object()))
+    assert res == {"ok": True}
+    assert seen == [503, True]
+    assert warm.busy == 0
 
 
 def test_warm_and_release_drops_hold(monkeypatch):

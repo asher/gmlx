@@ -1092,7 +1092,7 @@ def test_resolve_pool_path_takes_either_kind(mixed_cfg):
 
 def test_the_chat_warm_never_loads_an_image_model(monkeypatch, mixed_cfg):
     """Every chat, Messages and Responses route warms its model through
-    _warm_and_release; an image id there loads nothing and evicts nothing,
+    _load_resident; an image id there loads nothing and evicts nothing,
     and the route answers it 400. Keep and preload still load it."""
     import importlib
 
@@ -1104,7 +1104,7 @@ def test_the_chat_warm_never_loads_an_image_model(monkeypatch, mixed_cfg):
     app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
     monkeypatch.setattr(app, "get_cached_model",
                         lambda *a, **k: loads.append(("chat",) + a))
-    sp_routes._warm_and_release("zit", app._INHERIT_ADAPTER)
+    assert sp_routes._load_resident("zit", app._INHERIT_ADAPTER) is None
     assert loads == []
     sp_routes._spawn_keep_warm("zit").join(timeout=5)
     assert loads == [("image", "zit")]

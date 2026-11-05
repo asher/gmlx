@@ -1179,9 +1179,9 @@ def _load_resident(model_id, adapter=_WARM_DEFAULT, *, images: bool = False):
 def _warm_and_release(model_id, adapter=_WARM_DEFAULT, *,
                       images: bool = False) -> None:
     """Load ``model_id`` resident, then drop the in-flight hold so it stays
-    LRU/TTL-managed. The transient warm used by the keep route and the chat
-    load-offload (a later request re-acquires the now-resident entry).
-    ``images`` as in :func:`_load_resident`."""
+    LRU/TTL-managed. The transient warm of the keep route and the preload's
+    extras (a later request re-acquires the now-resident entry). ``images``
+    as in :func:`_load_resident`."""
     hold = _load_resident(model_id, adapter, images=images)
     if hold is not None:
         hold.release()
