@@ -244,7 +244,8 @@ def test_the_speech_decoder_head_drafts_seven(monkeypatch, speech, block):
         raise _Built
 
     monkeypatch.delenv("GMLX_NEM_MTP_BLOCK", raising=False)
-    monkeypatch.setenv("KQ_VERIFY_EXT", "0")
+    # The route writes a KQ_* key mlx-kquant keeps for the whole run.
+    monkeypatch.setattr(mtp_load, "_nemotron_verify_route", lambda *a, **k: None)
     monkeypatch.setattr(nm, "remap_nemotron_mtp_arrays", lambda *a, **k: ({}, {}, {}))
     monkeypatch.setattr(mtp_load, "_install_and_load", install)
     with pytest.raises(_Built):
