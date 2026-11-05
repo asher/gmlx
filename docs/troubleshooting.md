@@ -416,19 +416,20 @@ there.
 
 ### A LoRA is refused for memory
 
-The server books a LoRA's memory on its image thread, at the turn of the
-job that reads or builds the LoRA: an images request, a ComfyUI step or
-its patch table, or an adapter upload. The turn lets idle LoRAs and
-uploads go and unloads idle models, as a model load does. A pinned model
-stays loaded, as [`pin`](config.md#modelspin) describes. A LoRA that
-still does not fit is refused. The message names what needs the memory,
-such as the request's adapters or the LoRA matrices of an upload, the GB
-it needs, and the room. Each 503 carries `Retry-After`:
+When a LoRA needs memory that is not free, the server makes room for it
+before it runs: it lets idle LoRAs and uploads go and unloads idle
+models, as a model load does. A pinned model stays loaded, as
+[`pin`](config.md#modelspin) describes. A LoRA that still does not fit
+is refused. The message names what needs the memory, such as the
+request's adapters or the LoRA matrices of an upload, the GB it needs,
+and the room. Each 503 carries `Retry-After`:
 
 - `... need ... GB of memory, over the ... GB the server's memory budget
-  leaves beside ...` (413): the LoRAs do not fit beside the model named
-  and the pinned models, even with every other model unloaded. Use a
-  smaller LoRA or fewer of them, or unpin a model.
+  leaves beside ...` (413): the LoRAs do not fit beside the pinned models,
+  even with every other model unloaded. A request on an image model
+  counts that model and the chat model it shares as its encoder too, and
+  the message names them. Use a smaller LoRA or fewer of them, or unpin a
+  model.
 - `... and ... GB is free beside the models in use (...); retry when one
   is idle` (503): the models named are generating. The server waits for a
   chat model among them up to the `Retry-After` seconds before it answers.
@@ -437,14 +438,11 @@ it needs, and the room. Each 503 carries `Retry-After`:
 - `... and the server is loading ... (... GB) now; retry when it is
   loaded` (503): a model load holds the memory. Send the request again
   once the model is loaded.
-- `... and the image worker is busy beside the models in use (...); retry
-  when one is idle`, or `... and the image worker is busy; retry when the
-  requests in flight finish` (503): an adapter upload waited for the image
-  thread past its `Retry-After` while other jobs ran there. Send it again.
 - `... and ... GB is free; unload a model or retry when the requests in
-  flight finish` (503): no model is in use, and other requests' LoRAs hold
-  the room. Unload a model with [`POST /unload`](api.md#endpoints), or
-  send the request again.
+  flight finish` (503): no model is generating, and a preloaded model or
+  the LoRAs and uploads of other requests hold the room. Unload a model
+  with [`POST /unload`](api.md#endpoints), or send the request again once
+  the other requests finish.
 - `... GB is free in the working set now; retry when the models in use
   finish` (503): macOS has less memory free than the plan counts on while
   other models run. Retry when they finish.

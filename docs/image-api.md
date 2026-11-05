@@ -157,7 +157,7 @@ for event in stream:
 | A size that does not fit in memory beside the loaded models | 400 naming the largest size of its shape that fits |
 | More reference images than fit in memory | 400 naming the count and the reference size that fit |
 | The request's `adapters` need more memory than the budget leaves beside the model and the pinned models | 413 naming the GB they need and the room |
-| The request's `adapters` need memory that models in use hold | 503 `server_overloaded` with `Retry-After`, naming the models in use or the model loading |
+| The request's `adapters` need memory that is not free now | 503 `server_overloaded` with `Retry-After`, naming what holds the memory ([A LoRA is refused for memory](troubleshooting.md#a-lora-is-refused-for-memory)) |
 | A request LoRA over a set [`image.adapter_cache_mb`](config.md#serverimageadapter_cache_mb) | 400 naming that key |
 | One of several FLUX.3 klein references is under 16 pixels on a side | 400 naming the image |
 | A FLUX.2 klein reference is under 64 pixels on a side, or one side is more than 8 times the other | 400 naming the image |

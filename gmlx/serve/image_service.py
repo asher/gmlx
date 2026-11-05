@@ -128,9 +128,10 @@ def default_size(spec, defaults) -> tuple:
 # reference latents (tensor), and the optional cap on request adapter
 # pairs and built patch tables (adapter), None when unset. server.image
 # sets them; an entry books each tensor cache at its bound, and the pool
-# books LoRA bytes as they arrive. The step routes keep one cache of
-# uploaded tensors for the server (steps), which each image entry books
-# too; their uploaded adapter matrices are booked as they arrive.
+# books LoRA bytes at the turn of the job that reads or builds them. The
+# step routes keep one cache of uploaded tensors for the server (steps),
+# which each image entry books too; their uploaded adapter matrices are
+# admitted before their bodies are read.
 _CACHE_BYTES: dict = {"tensor": 64 << 20, "adapter": None,
                       "steps": 64 << 20}
 
@@ -227,7 +228,7 @@ def fit_share(price, budget):
     """(footprint, cache share) of an entry whose peak with each tensor
     cache at ``share`` of its bound is ``price(share)``, or None when it
     does not fit with them empty. Each takes the room the work leaves, up
-    to its bound. LoRA bytes are booked as they arrive, outside it."""
+    to its bound. LoRA bytes are booked at the job's turns, outside it."""
     full = price(1.0)
     if budget is None or full <= budget:
         return full, 1.0

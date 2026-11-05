@@ -83,7 +83,8 @@ class ServedVideo:
     def lora_own_term(self) -> int:
         """The bytes the footprint books for the entry's own LoRA: its file
         once alone, ``lora_k`` times the files otherwise. Its pairs and
-        default table past it are booked as they build."""
+        default table past it are booked at the turn of the job that
+        builds them."""
         return int(self.plan.lora_term)
 
 
@@ -210,7 +211,7 @@ def entry_plan(spec) -> VideoEntryPlan:
     def price(share: float, kept: int = floor) -> int:
         # The step routes' tensor cache and the refined rows stay through
         # the encode, the tensor cache with room for ``kept`` bytes at any
-        # share. A request's LoRA bytes are booked as they arrive.
+        # share. A request's LoRA bytes are booked at its job's turns.
         held = (int(caches * share) + max(0, kept - int(tensor * share))
                 + captions)
         return max(clip.phases["encode"] + held,

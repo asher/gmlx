@@ -42,6 +42,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the file's header, no longer takes its memory twice.
 - Two ComfyUI workflows whose LoRAs fit in memory run at once, where they
   could push each other's LoRA out until a run failed.
+- An unload sent while a model loads no longer holds up the server's other
+  requests until the load ends.
 - `gmlx serve` no longer corrupts the KV cache when one of several decoding
   requests passes about 260K tokens, or when a long request joins them.
 - FLUX.2 klein and the FLUX.1 VAE encoder no longer leave rows of the image

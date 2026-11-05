@@ -159,19 +159,26 @@ pinned models gets 413 when it arrives, naming the GB the LoRAs need and
 the room. The server books the other LoRA bytes on the image thread, at
 the turn of the job that reads or builds them. The turn drops idle LoRA
 bytes and idle uploads, unloads idle models as a cold load does, and
-books what the job needs. A turn left short gets 503 with `Retry-After`,
-naming the GB its LoRAs need and the GB free beside the models in use,
-or the model the server is loading. While a chat model in use holds the
-memory, the turn waits for it up to those seconds first. An upload that
-does not fit takes a turn of its own. A model load does not count the
+books what the job needs. A turn whose bytes, such as a step's factors,
+need more than the budget leaves beside the model, the encoder its job
+holds and the pinned models gets 413 in the same words. A turn left
+short gets 503 with `Retry-After`, naming the GB its LoRAs need and one
+of: the model the server is loading; the GB free beside the models in
+use; the GB free with no model in use, to unload a model or retry; or
+the GB free in the working set macOS measures, to retry when the models
+in use finish or, with none in use, to close other apps or unload a
+model. While a chat model in use holds the memory, the turn waits for it
+up to those seconds first. An upload that does not fit takes a turn of
+its own, and one the image thread does not start within those seconds
+gets the 503 its turn would give. A model load does not count the
 uploads the routes hold, and the next turn drops idle ones when memory
 runs short. A step whose table's LoRA pairs and matrices the server let
 go for memory gets 409 with their GB, and the client sends them again.
 The VAE routes decode and encode the images of a batch one at a time. `capabilities` gives the largest tensor upload, which is the
 [`image.tensor_cache_mb`](../config.md#serverimagetensor_cache_mb) cache,
-and the largest adapter upload, which is
-[`image.adapter_cache_mb`](../config.md#serverimageadapter_cache_mb) when
-it is set and 1 GiB when it is not. Each image model books the tensor
+and the largest adapter upload, which is the smaller of
+[`image.adapter_cache_mb`](../config.md#serverimageadapter_cache_mb) and
+1 GiB. Each image model books the tensor
 cache while the step routes are on.
 
 ## Access
