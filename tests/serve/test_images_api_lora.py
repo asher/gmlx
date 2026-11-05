@@ -711,6 +711,9 @@ def test_the_request_budget_counts_each_byte_once_and_fits_exactly(
         else:
             with pytest.raises(svc.ImageRequestError):
                 svc.fit_check(req, served, (256, 256), total - beside)
+    # With GMLX_OVERCOMMIT set a request plans on no budget.
+    monkeypatch.setattr(capacity, "overcommit", lambda: True)
+    assert images._budget(hold, pairs) is None
     for b in (pending_up, step, own):
         b.cancel()
 
@@ -742,7 +745,7 @@ def test_a_set_lora_cap_logs_one_line_at_startup_and_none_shifts_unbounded(
     request.addfinalizer(lambda: start(None))
     assert start(256) == [
         "server.image.adapter_cache_mb: 256 caps each image model's "
-        "request LoRAs at 256 MB; remove the key to let LoRAs use free "
+        "request LoRAs at 256 MiB; remove the key to let LoRAs use free "
         "memory"]
     assert start(None) == []
     state = steps.StepsState()

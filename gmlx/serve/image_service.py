@@ -143,7 +143,7 @@ def configure_caches(settings) -> None:
     _CACHE_BYTES["adapter"] = None if amb is None else int(amb) << 20
     if amb is not None:
         _log.info("server.image.adapter_cache_mb: %d caps each image "
-                  "model's request LoRAs at %d MB; remove the key to let "
+                  "model's request LoRAs at %d MiB; remove the key to let "
                   "LoRAs use free memory", int(amb), int(amb))
     _CACHE_BYTES["steps"] = (_CACHE_BYTES["tensor"]
                              if getattr(settings, "steps_api", True) else 0)

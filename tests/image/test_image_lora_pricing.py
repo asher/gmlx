@@ -323,6 +323,23 @@ FAMILIES = {"flux2_klein": _flux2, "flux3_klein": _flux3, "krea2": _krea2,
             "h3": _h3}
 
 
+def test_every_family_a_lora_loads_on_is_traced_or_takes_a_traced_list():
+    """Each image and video family with a lora_map is in FAMILIES, whose
+    forwards the trace test below runs, or takes the lora_f32 list of one
+    that is, as the 9B kleins take klein's."""
+    from gmlx.image import registry as image_registry
+    from gmlx.video import registry as video_registry
+
+    fams = {f.name: f for f in (*image_registry.families(),
+                                *video_registry.families())}
+    assert set(FAMILIES) <= set(fams)
+    traced = [fams[n].lora_f32 for n in FAMILIES]
+    untraced = sorted(
+        n for n, f in fams.items() if f.lora_map is not None
+        and n not in FAMILIES and not any(f.lora_f32 is t for t in traced))
+    assert untraced == []
+
+
 def every_leaf_table(pipe, paths, seed: int) -> str:
     """A table of two bfloat16 pairs on each of ``paths``."""
     from gmlx.image import api
