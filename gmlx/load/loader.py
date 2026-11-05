@@ -2050,7 +2050,9 @@ def load_model(
     from gmlx.stream.wired_limit import _install_wired_limit_warn_once
 
     _install_wired_limit_warn_once()
+    from gmlx.gen.prefill_decay import note_resident_model
 
+    note_resident_model(model)
     return model, config, tokenizer
 
 

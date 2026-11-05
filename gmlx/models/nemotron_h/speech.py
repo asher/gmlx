@@ -58,6 +58,9 @@ LAYER_NORM_EPS = 1e-5
 
 # ASR windows run in batches of at most this many (an hour has 90).
 MAX_WINDOW_BATCH = 8
+# Audio tokens fused per step: the fusion of a whole hour at once holds
+# about 1.4 GB of fp32 intermediates.
+FUSE_ROWS = 4096
 
 
 @dataclass
@@ -320,6 +323,10 @@ class RopeEncoder(nn.Module):
         h = self.embed_norm(embeds)
         for layer in self.layers:
             h = layer(h)
+            # Weights stay F16 and activations run in fp32. MLX computes
+            # the fp32 copies of the weights ahead of their matmuls, so
+            # without an eval per layer a call holds about 1.3 GB of them.
+            mx.eval(h)
         return self.final_norm(h)
 
     @classmethod
@@ -480,15 +487,20 @@ class SpeakerBranch(nn.Module):
             ctx = max(start - c.left_context, 0)
             yield start, end, ctx, min(end + c.right_context, n)
 
-    def logit_steps(self, feats: mx.array, out: list[np.ndarray]):
+    def logit_steps(self, feats: np.ndarray, out: list[np.ndarray]):
         """Append the 10 ms speaker logits ``(frames, speakers)`` of each
         chunk of one recording's raw spectrogram ``(frames, n_mels)`` to
         ``out``, yielding after each chunk."""
-        rows = np.array(self.encoder.embed(feats[None])[0].astype(mx.float32))
+        dtype = self.encoder.embed_norm.weight.dtype
+        step = self.cfg.diar.subsampling * self.cfg.chunk_length
+        rows = np.concatenate([
+            np.array(self.encoder.embed(mx.array(feats[a:a + step], dtype=dtype)[None])[0]
+                     .astype(mx.float32))
+            for a in range(0, feats.shape[0], step)] or [
+                np.zeros((0, self.cfg.diar.d_model), np.float32)])
         cache = SpeakerCache(self.cfg, rows.shape[1])
         silence = np.array(self.head.learnable_sil_emb.astype(mx.float32))
         f = self.cfg.diar.subsampling
-        dtype = self.encoder.embed_norm.weight.dtype
         for start, end, ctx, stop in self.chunks(rows.shape[0]):
             cached = cache.rows()
             x = np.concatenate([cached, rows[ctx:stop]], axis=0)
@@ -500,7 +512,7 @@ class SpeakerBranch(nn.Module):
             out.append(logits[s:s + (end - start) * f])
             yield
 
-    def logits(self, feats: mx.array) -> np.ndarray:
+    def logits(self, feats: np.ndarray) -> np.ndarray:
         """10 ms speaker logits ``(frames, speakers)`` of one recording."""
         out: list[np.ndarray] = []
         for _ in self.logit_steps(feats, out):
@@ -514,9 +526,10 @@ class SpeakerBranch(nn.Module):
 
 @dataclass
 class EncoderOutput:
-    embeds: mx.array         # (frames, proj_dim): one row per audio token
-    asr_states: mx.array     # (frames, d_model): the CTC head's input
+    embeds: mx.array | None  # (frames, proj_dim): one row per audio token
+    asr_states: mx.array | None  # (frames, d_model): the CTC head's input
     speaker_probs: np.ndarray  # (frames, speakers): 80 ms means
+    parts: list | None = None  # the rows in fusion steps, when not joined
 
 
 class _Fusion(nn.Module):
@@ -577,24 +590,26 @@ class SpeechEncoder(nn.Module):
             out.append((ctx0, ctx1, start - ctx0, end - ctx0))
         return out
 
-    def asr_steps(self, normalized: np.ndarray, pieces: dict[int, mx.array]):
+    def asr_steps(self, normalized: np.ndarray, pieces: dict[int, mx.array],
+                  batch: int = MAX_WINDOW_BATCH):
         """Run the ASR branch over the per-feature normalized spectrogram,
         storing each window's kept frames in ``pieces`` by window index.
-        Same-length windows run batched; yields after each batch."""
+        Up to ``batch`` same-length windows run together; yields after
+        each batch."""
         f = self.cfg.asr.subsampling
         wins = self.windows(normalized.shape[0] // f)
         by_len: dict[int, list[int]] = {}
         for i, (a, b, _, _) in enumerate(wins):
             by_len.setdefault(b - a, []).append(i)
-        x_all = mx.array(normalized, dtype=self.dtype)
         for idxs in by_len.values():
-            for s in range(0, len(idxs), MAX_WINDOW_BATCH):
-                batch = idxs[s:s + MAX_WINDOW_BATCH]
-                x = mx.stack([x_all[wins[i][0] * f:wins[i][1] * f] for i in batch])
+            for s in range(0, len(idxs), batch):
+                group = idxs[s:s + batch]
+                x = mx.array(np.stack([normalized[wins[i][0] * f:wins[i][1] * f]
+                                       for i in group]), dtype=self.dtype)
                 h = self.asr(self.asr.embed(x))
-                for j, i in enumerate(batch):
+                for j, i in enumerate(group):
                     pieces[i] = h[j, wins[i][2]:wins[i][3]]
-                mx.eval([pieces[i] for i in batch])
+                mx.eval([pieces[i] for i in group])
                 yield
 
     def _pool(self, logits: list[np.ndarray], n: int) -> np.ndarray:
@@ -612,25 +627,46 @@ class SpeechEncoder(nn.Module):
         spk = fu.diar_norm(active) @ fu.diar_kernel.astype(asr_states.dtype)
         return fu.proj(fu.asr_norm(asr_states) + spk)
 
-    def steps(self, feats: np.ndarray, valid: int, tokens: int):
+    def steps(self, feats: np.ndarray, valid: int, tokens: int,
+              batch: int = MAX_WINDOW_BATCH, dtype=None,
+              keep_states: bool = True, join: bool = True):
         """Encode one recording a window at a time: a generator that yields
-        after each ASR batch and speaker chunk and returns the
-        :class:`EncoderOutput`. ``feats`` comes from :func:`features`,
-        ``valid`` is its valid frames, ``tokens`` the prompt's audio tokens
-        for it."""
+        after each ASR batch of up to ``batch`` windows, each speaker
+        chunk and each fusion step, and returns the
+        :class:`EncoderOutput`, its rows in ``dtype`` (the encoder's when
+        None) and its ASR states only with ``keep_states``; without
+        ``join`` the rows stay in their fusion steps, in ``parts``. ``feats``
+        comes from :func:`features`, ``valid`` is its valid frames,
+        ``tokens`` the prompt's audio tokens for it."""
         n = feats.shape[0] // self.cfg.asr.subsampling
         pieces: dict[int, mx.array] = {}
-        yield from self.asr_steps(normalize_per_feature(feats, valid), pieces)
+        yield from self.asr_steps(normalize_per_feature(feats, valid), pieces,
+                                  batch)
         states = (mx.concatenate([pieces[i] for i in range(len(pieces))], axis=0)
                   if pieces else mx.zeros((0, self.cfg.asr.d_model), self.dtype))
-        logits: list[np.ndarray] = []
-        yield from self.diar.logit_steps(mx.array(feats, dtype=self.dtype), logits)
-        probs = self._pool(logits, n)
-        embeds = self.fuse(states, probs)[:tokens]
+        pieces.clear()
         states = states[:tokens]
-        mx.eval(embeds, states)
+        mx.eval(states)
+        logits: list[np.ndarray] = []
+        yield from self.diar.logit_steps(feats, logits)
+        probs = self._pool(logits, n)[:tokens]
+        rows = []
+        for a in range(0, tokens, FUSE_ROWS):
+            part = self.fuse(states[a:a + FUSE_ROWS], probs[a:a + FUSE_ROWS])
+            rows.append(part.astype(dtype or part.dtype))
+            mx.eval(rows[-1])
+            yield
+        if not keep_states:
+            states = None
+        if not join:
+            return EncoderOutput(embeds=None, asr_states=states,
+                                 speaker_probs=probs, parts=rows)
+        embeds = (rows[0] if len(rows) == 1 else mx.concatenate(rows)
+                  if rows else mx.zeros((0, self.cfg.proj_dim), dtype or self.dtype))
+        rows.clear()
+        mx.eval(embeds)
         return EncoderOutput(embeds=embeds, asr_states=states,
-                             speaker_probs=probs[:tokens])
+                             speaker_probs=probs)
 
     def __call__(self, feats: np.ndarray, valid: int, tokens: int) -> EncoderOutput:
         """Encode one recording in one call; see :meth:`steps`."""

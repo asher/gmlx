@@ -115,6 +115,21 @@ def test_processor_expands_each_clip_to_one_token_per_80_ms():
     assert not feats[1, 8:].any()
 
 
+def test_encoded_clips_reach_the_model_through_prepare_inputs():
+    from gmlx._vendor.mlx_vlm.utils import prepare_inputs
+    from gmlx.models.nemotron_h.transcribe_model import EncodedClip
+
+    proc = _processor()
+    proc.tokenizer.pad_token = "[UNK]"
+    clips = [EncodedClip.of(n, f"d{n}", mx.zeros((proc.feature_extractor.tokens(n), 4)),
+                            None) for n in (2000, 1300)]
+    out = prepare_inputs(proc, audio=clips, prompts="hi <|audio|> hi <|audio|>")
+    assert [id(c) for c in out["audio_clips"]] == [id(c) for c in clips]
+    assert out["audio_digests"] == ["d2000", "d1300"]
+    assert np.asarray(out["input_ids"])[0].tolist() == [1, AUDIO_ID, AUDIO_ID, 1,
+                                                        AUDIO_ID]
+
+
 @pytest.mark.parametrize("text, clips", [
     ("hi", 1), ("<|audio|> <|audio|>", 1), ("<|audio|>", 2)])
 def test_processor_refuses_markers_that_miss_the_clips(text, clips):
@@ -233,14 +248,14 @@ def test_container_encodes_only_the_slots_past_a_reused_prefix(container):
     n = [speech.num_audio_tokens(c.size) for c in clips]
     full = model.audio_features(feats, mask, sum(n))
     calls = []
-    real = model.audio_tower.__call__
+    real = model.audio_tower.steps
 
     class Spy:
         cfg = model.audio_tower.cfg
 
-        def __call__(self, *a):
+        def steps(self, *a, **kw):
             calls.append(a[2])
-            return real(*a)
+            return real(*a, **kw)
 
     model.audio_tower = Spy()
     tail = model.audio_features(feats, mask, n[1] + 3)
@@ -250,6 +265,58 @@ def test_container_encodes_only_the_slots_past_a_reused_prefix(container):
     calls.clear()
     model.audio_features(feats, mask, n[1])
     assert calls == [n[1]]
+
+
+@pytest.mark.parametrize("chunk", [1, 4, 7, 1000])
+@pytest.mark.parametrize("prefix", [False, True])
+def test_prompt_rows_build_the_merged_rows_a_chunk_at_a_time(
+        container, monkeypatch, chunk, prefix):
+    model, mel, pcm = container
+    # Several fusion parts per clip, so the rows free them as they pass.
+    monkeypatch.setattr(speech, "FUSE_ROWS", 3)
+    clips = [pcm, pcm[:8000]]
+    feats, mask = _inputs(mel, clips)
+    n = [speech.num_audio_tokens(c.size) for c in clips]
+    ids = [5] + [AUDIO_ID] * n[0] + [6] + [AUDIO_ID] * n[1] + [7]
+    if prefix:
+        # A reused prefix ends inside the first clip.
+        ids = ids[3:]
+    ids = mx.array([ids])
+    kw = dict(input_features=feats, input_features_mask=mask)
+    merged = model.get_input_embeddings(ids, **kw).inputs_embeds
+    rows = model.get_input_embeddings(ids, prompt_rows=True, **kw).inputs_embeds
+    assert rows.shape == merged.shape and rows.dtype == merged.dtype
+    got = []
+    while rows.shape[1] > 0:
+        k = min(chunk, rows.shape[1])
+        got.append(rows[:, :k])
+        rows = rows[:, k:]
+    assert mx.array_equal(mx.concatenate(got, axis=1), merged)
+    assert rows._parts == []
+
+
+def test_generate_step_takes_prompt_rows(container):
+    from gmlx._vendor.mlx_vlm.generate.ar import generate_step
+
+    model, mel, pcm = container
+    feats, mask = _inputs(mel, [pcm])
+    n = speech.num_audio_tokens(pcm.size)
+    ids = mx.array([[5] + [AUDIO_ID] * n + [6, 7]])
+    kw = dict(input_features=feats, input_features_mask=mask)
+
+    def first(lazy):
+        model.builds_prompt_rows = lazy
+        try:
+            step = generate_step(ids, model, None, None, max_tokens=2,
+                                 temperature=0.0, prefill_step_size=5, **kw)
+            return [(int(y), np.asarray(lp)) for (y, lp), _ in zip(step, range(2))]
+        finally:
+            del model.builds_prompt_rows
+
+    lazy, whole = first(True), first(False)
+    assert [y for y, _ in lazy] == [y for y, _ in whole]
+    for (_, a), (_, b) in zip(lazy, whole):
+        np.testing.assert_array_equal(a, b)
 
 
 def test_container_refuses_more_slots_than_audio(container):
@@ -383,6 +450,51 @@ def test_pairing_finds_the_encoder_beside_the_model(monkeypatch, capsys):
     assert args.mmproj is None
 
 
+def test_the_encoder_pairs_once_per_folder_change(monkeypatch, tmp_path):
+    import gmlx.load.discovery as disc
+
+    model, enc, other = (tmp_path / n for n in (
+        "Transcribe-NVFP4.gguf", "Transcribe-Encoder-F16.gguf", "x.gguf"))
+    for f in (model, enc, other):
+        f.write_bytes(b"")
+    heads = {str(model): {"arch": "nemotron_h_moe", "speech_checkpoint": "ck"},
+             str(enc): {"arch": "pee", "speech_checkpoint": "ck"},
+             str(other): {"arch": "pee", "speech_checkpoint": "other"}}
+    reads = []
+
+    def meta(p):
+        reads.append(str(p))
+        return heads.get(str(p))
+
+    monkeypatch.setattr(disc, "header_meta", meta)
+    monkeypatch.setattr(disc, "_SPEECH_PAIRS", {})
+    assert disc.find_speech_encoder(str(model)) == str(enc)
+    n = reads.count(str(enc))
+    assert disc.find_speech_encoder(str(model)) == str(enc)
+    assert reads.count(str(enc)) == n
+    heads[str(model)] = {"arch": "nemotron_h_moe"}      # Lightning: no pair
+    assert disc.find_speech_encoder(str(model)) is None
+
+
+def test_serve_on_a_model_path_pairs_its_encoder(monkeypatch):
+    import argparse
+
+    import gmlx.load.discovery as disc
+    from gmlx.serve import server
+
+    monkeypatch.setattr(disc, "find_speech_encoder",
+                        lambda p: "/m/Encoder-F16.gguf" if "Transcribe" in p else None)
+    ap = argparse.ArgumentParser()
+    server._add_serve_args(ap)
+    for path, flag, want in (("/m/Transcribe.gguf", None, "/m/Encoder-F16.gguf"),
+                             ("/m/Transcribe.gguf", "/m/mine.gguf", "/m/mine.gguf"),
+                             ("/m/Lightning.gguf", None, None)):
+        a = ap.parse_args([])
+        a.model, a.mmproj = path, flag
+        cfg = server._single_model_cfg(a)
+        assert cfg.models[cfg.defaults.model].mmproj == want
+
+
 def test_pairing_refuses_asr_and_a_missing_encoder(monkeypatch):
     disc = _meta(monkeypatch)
     monkeypatch.setattr(disc, "find_speech_encoder", lambda p: None)
@@ -507,3 +619,153 @@ def test_profile_follows_the_card():
     assert instruct["chat_template_kwargs"] == {"enable_thinking": False}
     assert profiles.detect_family(
         "nemotron_h_moe", "NVIDIA-Nemotron-3-Nano-30B-A3B") == "nemotron"
+
+
+# The server's encoded clips
+
+def _encoded(model, mel, pcm, digest="d"):
+    from gmlx.models.nemotron_h.transcribe_model import EncodedClip, drain
+
+    out = drain(model.encode_steps(speech.features(pcm, mel),
+                                   speech.num_frames(pcm.size),
+                                   speech.num_audio_tokens(pcm.size)))
+    return EncodedClip.of(pcm.size, digest, out.embeds, out.speaker_probs)
+
+
+def test_encoded_clips_fill_the_slots_as_features_do(container):
+    model, mel, pcm = container
+    clips = [pcm, pcm[:8000]]
+    feats, mask = _inputs(mel, clips)
+    n = [speech.num_audio_tokens(c.size) for c in clips]
+    ids = mx.array([[5] + [AUDIO_ID] * n[0] + [6] + [AUDIO_ID] * n[1] + [7]])
+    want = model.get_input_embeddings(
+        ids, input_features=feats, input_features_mask=mask).inputs_embeds
+    encoded = tuple(_encoded(model, mel, c, str(i)) for i, c in enumerate(clips))
+    got = model.get_input_embeddings(ids, audio_clips=encoded).inputs_embeds
+    assert mx.array_equal(got, want)
+    tail = mx.array([[AUDIO_ID] * (n[1] + 2)])
+    rows = model.get_input_embeddings(tail, audio_clips=encoded).inputs_embeds
+    assert mx.array_equal(rows[0], mx.concatenate(
+        [encoded[0].embeds[-2:], encoded[1].embeds]))
+    with pytest.raises(ValueError, match="placeholder tokens but"):
+        model.get_input_embeddings(mx.array([[AUDIO_ID] * (sum(n) + 1)]),
+                                   audio_clips=encoded)
+
+
+def test_an_encoded_clip_keeps_its_rows_through_the_audio_loader(container):
+    from gmlx._vendor.mlx_vlm.utils import load_audio
+    from gmlx.models.nemotron_h.transcribe_model import EncodedClip
+
+    model, mel, pcm = container
+    clip = _encoded(model, mel, pcm, "abc")
+    loaded = load_audio(clip, sr=16000)
+    assert isinstance(loaded, EncodedClip) and loaded.digest == "abc"
+    assert loaded.embeds is clip.embeds and len(loaded) == pcm.size
+    assert clip.nbytes == 4 * pcm.size and clip.base is not None
+
+
+def test_processor_hands_encoded_clips_over(container):
+    from gmlx.models.nemotron_h.transcribe_model import EncodedClip
+
+    proc = _processor()
+    clip = EncodedClip.of(2560, "abc", mx.zeros((2, 24)), np.zeros((2, 8)))
+    out = proc(text=["hi <|audio|>"], audio=[clip])
+    assert [id(c) for c in out["audio_clips"]] == [id(clip)]
+    assert out["audio_digests"] == ["abc"]
+    assert "input_features" not in out
+    assert np.asarray(out["input_ids"]).tolist()[0].count(AUDIO_ID) == 2
+    with pytest.raises(ValueError, match="all encoded or none"):
+        proc(text=["<|audio|> <|audio|>"], audio=[clip, np.zeros(1280)])
+    with pytest.raises(ValueError, match="7 audio clips"):
+        proc(text=["<|audio|>" * 7], audio=[clip] * 7)
+
+
+def test_audio_preflight_prices_only_clips_to_encode(container):
+    model, mel, pcm = container
+    clip = _encoded(model, mel, pcm)
+    tokens = speech.num_audio_tokens(pcm.size)
+    assert model.audio_preflight([clip]) == (tokens, 0)
+    hour = np.broadcast_to(np.float32(0), (3600 * 16000,))
+    n, size = model.audio_preflight([clip, hour])
+    assert n == tokens + 45_000
+    cfg = model.audio_tower.cfg
+    assert size == 45_000 * 2 * max(cfg.proj_dim * 2, cfg.asr.d_model * 4) + (160 << 20)
+
+
+def test_mtp_prefill_reads_audio_prompts_as_media(container):
+    from types import SimpleNamespace
+
+    from gmlx.spec.mtp_prefill import _carries_media
+
+    lm = container[0].language_model
+    batch = SimpleNamespace(model=lm, _prompt_kwargs={},
+                            _input_ids=mx.array([[1, AUDIO_ID, 2]]))
+    assert _carries_media(batch)
+    batch._input_ids = mx.array([[1, 2, 3]])
+    assert not _carries_media(batch)
+    batch._prompt_kwargs = {"audio_clips": ("clip",)}
+    assert _carries_media(batch)
+
+
+@pytest.fixture()
+def engine(monkeypatch):
+    """``run_on_engine`` driven in place: it records each job's steps."""
+    import gmlx.serve.engine_jobs as ej
+    from gmlx.serve.patches import native_audio
+
+    seen = {"steps": [], "encoding": []}
+
+    def run(rg, job, *, stop, what, stepwise, **kw):
+        assert stepwise and what == "the audio encoder"
+        seen["encoding"].append(native_audio.encoding_requests(rg))
+        gen, steps = job(rg, stop.is_set), 0
+        while True:
+            try:
+                next(gen)
+                steps += 1
+            except StopIteration as done:
+                seen["steps"].append(steps)
+                return done.value
+    monkeypatch.setattr(ej, "run_on_engine", run)
+    return seen
+
+
+def test_encode_runs_a_window_per_step_and_caches_the_rows(container, engine):
+    import threading
+
+    from gmlx.serve.patches import native_audio
+
+    model, mel, pcm = container
+    rg = object()
+    clips = native_audio.encode(rg, model, [pcm, pcm], threading.Event(), None)
+    wins = len(model.audio_tower.windows(speech.num_audio_tokens(pcm.size)))
+    assert engine["steps"] == [2 * wins + 1]          # one clip, encoded once
+    assert engine["encoding"] == [1] and native_audio.encoding_requests(rg) == 0
+    assert clips[0].digest == clips[1].digest and clips[0].embeds is clips[1].embeds
+    want = _encoded(model, mel, pcm)
+    assert mx.array_equal(clips[0].embeds, want.embeds)
+    again = native_audio.encode(rg, model, [pcm], threading.Event(), None)
+    assert len(engine["steps"]) == 1 and again[0].embeds is clips[0].embeds
+    assert native_audio.held_bytes() >= clips[0].embeds.nbytes
+
+
+def test_row_cache_lets_the_oldest_go_past_its_cap():
+    from gmlx.serve.patches.native_audio import _RowCache
+
+    cache = _RowCache(cap=2 * 400)
+    for d in "abc":
+        cache.put(d, 1, mx.zeros((100,)), None)
+    assert list(cache.entries) == ["b", "c"] and cache.bytes == 800
+    assert cache.get("a") is None and cache.get("b") is not None
+    cache.put("d", 1, mx.zeros((100,)), None)
+    assert list(cache.entries) == ["b", "d"]
+    cache.put("big", 1, mx.zeros((1000,)), None)
+    assert "big" not in cache.entries
+
+
+def test_clip_limits():
+    transcription.check_clips([16000] * 6)
+    with pytest.raises(ValueError, match="7 audio clips"):
+        transcription.check_clips([1] * 7)
+    with pytest.raises(ValueError, match="3600.1 s"):
+        transcription.check_clips([3600 * 16000 + 1600])

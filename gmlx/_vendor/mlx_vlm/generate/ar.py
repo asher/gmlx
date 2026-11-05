@@ -178,6 +178,20 @@ def normalize_resize_shape(values):
     return (values[0], values[0]) if len(values) == 1 else tuple(values)
 
 
+def _request_step(model, prompt_cache, input_ids, inputs_embeds,
+                  max_tokens, step: int) -> int:
+    """gmlx: ``step`` cut to the request step of this prompt, its embedded
+    rows and its output budget (``prefill_decay.run_request_step``)."""
+    from gmlx.gen import prefill_decay as pd
+
+    if not pd.row_bytes(model):
+        return step
+    rows = int(inputs_embeds.shape[1])
+    return pd.run_request_step(
+        model, prompt_cache, rows, max_tokens, step,
+        audio_tokens=pd.audio_tokens_in(model, input_ids), embedded_rows=rows)
+
+
 def generate_step(
     input_ids: mx.array,
     model: nn.Module,
@@ -432,8 +446,15 @@ def generate_step(
             if kwargs.get(key) is not None
         }
         # Get input embeddings (handles both multimodal and text-only)
+        # gmlx: a model that builds its prompt rows per chunk returns them
+        # lazily; the loop below slices them as it slices an array.
+        lazy_rows = (
+            {"prompt_rows": True}
+            if getattr(model, "builds_prompt_rows", False)
+            else {}
+        )
         embedding_output = model.get_input_embeddings(
-            input_ids, pixel_values, mask=mask, **kwargs
+            input_ids, pixel_values, mask=mask, **kwargs, **lazy_rows
         )
 
         inputs_embeds = embedding_output.inputs_embeds
@@ -462,6 +483,11 @@ def generate_step(
             prefill_kwargs=policy_kwargs,
         ):
             prefill_step_size = None
+        # gmlx: the request step, for an arch that prices its chunk rows.
+        if prefill_step_size is not None:
+            prefill_step_size = _request_step(
+                model, prompt_cache, input_ids, inputs_embeds,
+                max_tokens, prefill_step_size)
         checkpoint_lengths = set(prompt_cache_checkpoint_lengths or [])
         if prompt_cache_checkpoint_len is not None:
             checkpoint_lengths.add(int(prompt_cache_checkpoint_len))
@@ -519,6 +545,8 @@ def generate_step(
 
             input_ids = input_ids[:, -1:]
 
+        if lazy_rows:
+            inputs_embeds = inputs_embeds[:, : inputs_embeds.shape[1]]
         y, logprobs = _step(input_ids, inputs_embeds=inputs_embeds)
 
     mx.async_eval(y, logprobs)

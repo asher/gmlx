@@ -1215,7 +1215,9 @@ class ResponseGenerator:
                 tenant=getattr(args, "tenant_id", None),
                 image_hash=image_hash,
                 media={
-                    "audio": raw_inputs.get("input_features"),
+                    # Encoded clips key by their digests (gmlx native audio).
+                    "audio": raw_inputs.get("audio_digests")
+                    or raw_inputs.get("input_features"),
                     "video": raw_inputs.get("pixel_values_videos"),
                 },
                 model=getattr(self.model, "language_model", self.model),

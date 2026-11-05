@@ -1944,6 +1944,13 @@ def _run_vlm(args) -> int:
     if tbp is not None:
         extra["logits_processors"] = [tbp]
 
+    speech = speech_audio(args)
+    why = unfit_request(
+        model, getattr(processor, "tokenizer", processor), prompt,
+        speech[1] if speech else 0, args.max_tokens, step)
+    if why:
+        print(f"error: {why}.", file=sys.stderr)
+        return 1
     print(
         f"[generate] max_tokens={max_tokens_label(args)} temp={args.temp} "
         f"images={len(images)} audios={len(audios)}\n"
@@ -2531,11 +2538,9 @@ def _media_inputs(args) -> tuple[list[str], list[str]]:
 def is_speech_encoder(path) -> bool:
     """Whether ``path`` is a speech encoder GGUF that feeds a text model's
     embeddings (Nemotron 3.5 Transcribe's)."""
-    from gmlx.load.arch_table import NATIVE_ASR_ENCODER_ARCHES
-    from gmlx.load.discovery import header_meta
+    from gmlx.load.discovery import is_speech_encoder as is_encoder
 
-    meta = header_meta(os.path.expanduser(path)) if path else None
-    return bool(meta) and meta.get("arch") in NATIVE_ASR_ENCODER_ARCHES
+    return is_encoder(path)
 
 
 def pair_speech_encoder(args, *, always: bool) -> None:
@@ -2598,6 +2603,28 @@ def speech_audio(args) -> tuple[float, int] | None:
 
     return (sum(len(c) for c in clips) / 16000,
             sum(num_audio_tokens(len(c)) for c in clips))
+
+
+def unfit_request(model, tokenizer, prompt: str, audio_tokens: int,
+                  max_tokens, step) -> str | None:
+    """Why a run's prompt and output budget cannot fit this Mac at the
+    smallest prefill step (``prefill_decay.request_fit``), else None."""
+    from gmlx.gen.prefill_decay import request_fit
+
+    try:
+        tokens = len(tokenizer.encode(prompt)) + int(audio_tokens)
+    except Exception:
+        return None
+    gen = max(0, int(max_tokens or 0))
+    fit = request_fit(model, tokens, gen, int(audio_tokens), step)
+    if fit is None or fit[0] is not None:
+        return None
+    _, need, room = fit
+    return (f"this run needs an estimated {need / 1e9:.2f} GB beside the "
+            f"model weights for {tokens:,} prompt tokens and {gen:,} output "
+            f"tokens, and this Mac leaves {room / 1e9:.2f} GB under its "
+            "memory ceiling. Use a shorter prompt"
+            + (" or clip" if audio_tokens else "") + ", or a lower --max-tokens")
 
 
 def transcribes(args, parser, argv) -> bool:
@@ -2891,6 +2918,11 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
         return rc
     try:
         pair_speech_encoder(args, always=False)
+        clips = speech_clips(args)
+        if clips is not None:
+            from gmlx.models.nemotron_h.transcription import check_clips
+
+            check_clips([len(c) for c in clips])
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

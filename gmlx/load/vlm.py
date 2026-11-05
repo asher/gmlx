@@ -2112,11 +2112,8 @@ def _synthesize_muse_glimmer_vlm_config(
 # constant (hparams.audio_sample_rate), not GGUF metadata.
 MUSE_SPARK_AUDIO_RATE = 24000
 
-# Nemotron 3.5 Transcribe's speech encoder GGUF arch, and its limits on the
-# clips of one prompt: the model is trained on up to an hour of audio.
+# Nemotron 3.5 Transcribe's speech encoder GGUF arch.
 NEMOTRON_SPEECH_ARCH = "pee"
-NEMOTRON_TRANSCRIBE_MAX_CLIPS = 6
-NEMOTRON_TRANSCRIBE_MAX_SECONDS = 3600.0
 
 
 def _synthesize_muse_spark_audio_config(mm_meta: dict,
@@ -4408,16 +4405,9 @@ class _NemotronTranscribeFeatureExtractor:
 
     def check(self, clips) -> None:
         """Refuse more clips, or more audio, than the model is trained on."""
-        if len(clips) > NEMOTRON_TRANSCRIBE_MAX_CLIPS:
-            raise ValueError(
-                f"{len(clips)} audio clips in one request; the limit is "
-                f"{NEMOTRON_TRANSCRIBE_MAX_CLIPS}. Start a new conversation "
-                "for more audio")
-        seconds = sum(len(c) for c in clips) / self.sampling_rate
-        if seconds > NEMOTRON_TRANSCRIBE_MAX_SECONDS + 1e-6:
-            raise ValueError(
-                f"{seconds:.1f} s of audio in one request; the limit is "
-                f"{NEMOTRON_TRANSCRIBE_MAX_SECONDS:.0f} s")
+        from gmlx.models.nemotron_h.transcription import check_clips
+
+        check_clips([len(c) for c in clips], self.sampling_rate)
 
     def __call__(self, clips) -> dict:
         import numpy as np
@@ -4450,7 +4440,10 @@ def _synthesize_nemotron_transcribe_processor(tokenizer):
     from transformers.processing_utils import ProcessorMixin
 
     from gmlx._vendor.mlx_vlm.models.base import to_mlx
-    from gmlx.models.nemotron_h.transcribe_model import AUDIO_PLACEHOLDER
+    from gmlx.models.nemotron_h.transcribe_model import (
+        AUDIO_PLACEHOLDER,
+        EncodedClip,
+    )
 
     from gmlx.upstream.single_bos_fix import KWARGS_REACH_TOKENIZER
 
@@ -4473,13 +4466,25 @@ def _synthesize_nemotron_transcribe_processor(tokenizer):
                 text = [text]
             clips = [] if audio is None else (
                 list(audio) if isinstance(audio, (list, tuple)) else [audio])
+            # The server hands over clips the encoder has read already.
+            encoded = [c for c in clips if isinstance(c, EncodedClip)]
+            if encoded and len(encoded) != len(clips):
+                raise ValueError("a prompt's clips are all encoded or none")
             fe = self.feature_extractor
             text = self._expand(text, [fe.tokens(len(c)) for c in clips])
             kwargs.pop("return_tensors", None)
             data = dict(self.tokenizer(text, **kwargs))
-            if clips:
+            if encoded:
+                fe.check(encoded)
+            elif clips:
                 data.update(fe(clips))
-            return BatchFeature(data=to_mlx(data))
+            out = BatchFeature(data=to_mlx(data))
+            if encoded:
+                # Lists, after the conversion: prepare_inputs passes a list
+                # through and makes an array of anything else.
+                out["audio_clips"] = list(encoded)
+                out["audio_digests"] = [c.digest for c in encoded]
+            return out
 
         def _expand(self, texts, counts):
             """Replace each ``<|audio|>`` with its clip's placeholder run,
@@ -5197,6 +5202,9 @@ def load_vlm_model(
     from gmlx.upstream.system_content_fix import enable_system_content_fix
     enable_system_content_fix(processor, model_type)
     collect_after_load()
+    from gmlx.gen.prefill_decay import note_resident_model
+
+    note_resident_model(model)
     if return_tokenizer:
         return model, config, processor, mtp_tokenizer
     return model, config, processor

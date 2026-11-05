@@ -124,6 +124,11 @@ class MambaRMSNormGated(nn.Module):
         return self.weight * x.flatten(-2)
 
 
+# A prefill chunk at least this wide evaluates each Mamba layer as it
+# finishes. Decode and speculative verify rounds stay one lazy graph.
+PREFILL_EVAL_ROWS = 64
+
+
 class NemotronHMamba2Mixer(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -270,7 +275,14 @@ class NemotronHMamba2Mixer(nn.Module):
         if cache:
             cache.advance(y.shape[1])
         y = self.norm(y, gate)
-        return self.out_proj(y)
+        out = self.out_proj(y)
+        if cache is not None and hidden_states.shape[1] >= PREFILL_EVAL_ROWS:
+            # Left lazy, a chunk's cache update keeps this layer's scan
+            # scratch alive until the whole chunk is evaluated. The copy
+            # keeps the conv tail from pinning the chunk's conv input.
+            cache[0] = cache[0] * 1
+            mx.eval(out, [c for c in (cache[0], cache[1]) if c is not None])
+        return out
 
     def replay_prefix(self, record: dict, n: int, cache: ArraysCache,
                       mask: Optional[mx.array]) -> None:
@@ -610,3 +622,30 @@ class Model(nn.Module):
 
 # Kept fp32 by the loader (loader._FP32_KEEP_BY_MODEL_TYPE["nemotron_h"]).
 _FP32_PARAMS = (".mixer.gate.weight", ".e_score_correction_bias", ".A_log")
+
+
+# Prefill bytes per chunk row with the per-layer eval: the Mamba scan and
+# MoE scratch of one layer at a time. Measured on hidden 2688 (30B-A4B) at
+# 0.72 MiB per row for chunks of 256 and 512 and 0.57 MiB for 2048, so this
+# linear price is an upper bound that grows with the hidden size.
+ROW_BYTES_PER_HIDDEN = 0.75 * 2**20 / 2688
+
+
+def _row_bytes(cfg) -> float:
+    hidden = getattr(cfg, "hidden_size", None)
+    if hidden is None and isinstance(cfg, dict):
+        hidden = cfg.get("hidden_size")
+    return ROW_BYTES_PER_HIDDEN * int(hidden or 0)
+
+
+def _register_prefill_costs() -> None:
+    from gmlx.gen import prefill_decay
+
+    prefill_decay.register_row_cost("nemotron_h", _row_bytes)
+    # Prefill attention is stock SDPA with a causal or array mask.
+    for mt in ("nemotron_h", "nemotron_h_transcribe"):
+        prefill_decay.register_score_profile(
+            mt, prefill_decay.fused_attention_profile)
+
+
+_register_prefill_costs()

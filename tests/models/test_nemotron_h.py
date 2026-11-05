@@ -278,3 +278,94 @@ def test_synth_eps_falls_back_to_layer_norm_epsilon():
     meta[f"{ARCH}.attention.layer_norm_epsilon"] = 2e-5
     config = synthesize_config(meta, tensor_shapes=_bolt_shapes())
     assert config["layer_norm_epsilon"] == pytest.approx(2e-5)
+
+
+# Prefill evaluates each Mamba layer as it finishes, so a chunk frees each
+# layer's scan scratch before the next layer runs. Only when values are
+# computed changes, never which ones.
+
+def _prefill_and_step(model, tokens, chunk):
+    """Chunked prefill then one decode step, evaluating the cache after each
+    chunk as the generate loop does."""
+    cache = model.make_cache()
+    outs = []
+    for i in range(0, tokens.shape[1] - 1, chunk):
+        outs.append(model(tokens[:, i:i + chunk], cache=cache))
+        mx.eval(outs[-1], [c.state for c in cache])
+    outs.append(model(tokens[:, -1:], cache=cache))
+    mx.eval(outs, [c.state for c in cache])
+    states = [np.array(s) for c in cache for s in c.state if s is not None]
+    return [np.array(o) for o in outs], states
+
+
+def test_prefill_layer_eval_is_bit_identical(monkeypatch):
+    import gmlx.models.nemotron_h.model as nh
+
+    # The GPU decode kernel splits the state over 32 lanes, so a state
+    # narrower than 32 would leave its update unwritten.
+    model = _randomized(_tiny_args(ssm_state_size=32), seed=6)
+    tokens = mx.array(np.random.default_rng(6).integers(0, 40, (1, 201)))
+    on = _prefill_and_step(model, tokens, 100)
+    monkeypatch.setattr(nh, "PREFILL_EVAL_ROWS", 10**9)
+    off = _prefill_and_step(model, tokens, 100)
+    for a, b in zip(on[0] + on[1], off[0] + off[1], strict=True):
+        np.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.parametrize("width,evals", [(1, 0), (9, 0), (16, 0), (64, 1)])
+def test_only_prefill_chunks_evaluate_per_layer(monkeypatch, width, evals):
+    model = _randomized(_tiny_args(), seed=7)
+    cache = model.make_cache()
+    model(mx.array([[1, 2, 3]]), cache=cache)
+    mx.eval([c.state for c in cache])
+    calls = []
+    real = mx.eval
+    monkeypatch.setattr(mx, "eval", lambda *a, **k: (calls.append(1), real(*a, **k)))
+    model(mx.ones((1, width), dtype=mx.int32), cache=cache)
+    # One Mamba layer in the tiny stack.
+    assert len(calls) == evals * _PATTERN.count("M")
+
+
+def test_real_prefill_layer_eval_is_bit_identical(monkeypatch):
+    """The same check on the real decoder: two 256-row prefill chunks and a
+    decode step, on the GPU."""
+    import os
+    from pathlib import Path
+
+    import gmlx.models.nemotron_h.model as nh
+    from gmlx.load.discovery import header_meta
+    from gmlx.load.vlm import load_vlm_model
+
+    folder = os.environ.get("GMLX_TEST_NEMOTRON_TRANSCRIBE")
+    if not folder:
+        pytest.skip("set GMLX_TEST_NEMOTRON_TRANSCRIBE to the model folder")
+    files = sorted(Path(folder).expanduser().glob("*.gguf"))
+    arch = {p: (header_meta(str(p)) or {}).get("arch") for p in files}
+    dec = next((p for p in files if arch[p] == "nemotron_h_moe"), None)
+    enc = next((p for p in files if arch[p] == "pee"), None)
+    if dec is None or enc is None:
+        pytest.skip(f"no decoder and encoder pair in {folder}")
+    model, *_ = load_vlm_model(str(dec), str(enc))
+    lm = model.language_model
+    rows = mx.random.normal((1, 513, 2688), key=mx.random.key(0))
+    rows = (rows * 0.5).astype(mx.bfloat16)
+    ids = mx.zeros((1, 513), dtype=mx.int32)
+
+    def run():
+        cache = lm.make_cache()
+        outs = []
+        for i in (0, 256):
+            outs.append(lm(inputs=ids[:, i:i + 256], inputs_embeds=rows[:, i:i + 256],
+                           cache=cache, n_to_process=256))
+            mx.eval(outs[-1], [c.state for c in cache])
+        outs.append(lm(inputs=ids[:, -1:], inputs_embeds=rows[:, -1:], cache=cache))
+        mx.eval(outs, [c.state for c in cache])
+        return ([np.array(getattr(o, "logits", o)[:, -1].astype(mx.float32)) for o in outs]
+                + [np.array(s.astype(mx.float32)) for c in cache for s in c.state
+                   if s is not None])
+
+    on = run()
+    monkeypatch.setattr(nh, "PREFILL_EVAL_ROWS", 10**9)
+    off = run()
+    for a, b in zip(on, off, strict=True):
+        np.testing.assert_array_equal(a, b)

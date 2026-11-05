@@ -982,6 +982,7 @@ def apply_chat_template(
         # last user message for backward compatibility.
         last_user_idx = -1
         explicit_image_counts = [0] * len(prompt)
+        explicit_audio_counts = [0] * len(prompt)
         for i, p in enumerate(prompt):
             if isinstance(p, str):
                 last_user_idx = i
@@ -991,6 +992,9 @@ def apply_chat_template(
                     last_user_idx = i
                     explicit_image_counts[i] = _content_media_count(
                         content, ("image", "image_url", "input_image")
+                    )
+                    explicit_audio_counts[i] = _content_media_count(
+                        content, ("audio", "input_audio")
                     )
 
         def _allocate_media_counts(explicit_counts, total_count):
@@ -1005,9 +1009,7 @@ def apply_chat_template(
             return allocated
 
         image_counts = _allocate_media_counts(explicit_image_counts, num_images)
-        audio_counts = [0] * len(prompt)
-        if last_user_idx >= 0:
-            audio_counts[last_user_idx] = num_audios
+        audio_counts = _allocate_media_counts(explicit_audio_counts, num_audios)
 
         for i, p in enumerate(prompt):
             if isinstance(p, str):

@@ -332,6 +332,8 @@ CLAIMS: tuple[Claim, ...] = (
           "route's text extraction call, which keeps it); "
           "audio_cascade.install_audio_cascade (route wrap: a message with "
           "audio for a model with a speech companion becomes marked text); "
+          "native_audio.install_native_audio (route wrap: the clips of a "
+          "model with its own speech encoder are encoded first); "
           "the route stack of patches and the assistant aliases",
           how="route", paths=("/chat/completions", "/v1/chat/completions")),
     Claim("gmlx._vendor.mlx_vlm.server.openai", "extract_text_from_content",
@@ -369,20 +371,32 @@ CLAIMS: tuple[Claim, ...] = (
           "render.install_faithful_history (renders the messages and "
           "image list _response_items_to_chat builds, in the order it "
           "builds them); audio_cascade.install_audio_cascade (route wrap: "
-          "transcribes the clips of the input and the stored chain); the "
-          "route stack of patches and the assistant aliases",
+          "transcribes the clips of the input and the stored chain); "
+          "native_audio.install_native_audio (route wrap: encodes the clips "
+          "of the input and the stored chain first); the route stack of "
+          "patches and the assistant aliases",
           how="route", paths=("/responses", "/v1/responses")),
     Claim("gmlx._vendor.mlx_vlm.server.responses_state",
           "_append_response_item_to_prompt",
           "audio_cascade.install_audio_cascade (a message with audio, in a "
           "cascade request, converts as marked text and queues its "
-          "transcripts)",
-          wrappers=("gmlx.serve.patches.audio_cascade",)),
+          "transcripts); native_audio.install_native_audio (a user "
+          "message's clips, in a native request, convert as audio markers "
+          "in place)",
+          wrappers=("gmlx.serve.patches.audio_cascade",
+                    "gmlx.serve.patches.native_audio")),
+    Claim("gmlx._vendor.mlx_vlm.server.openai", "_response_items_audio",
+          "native_audio.install_native_audio (wrapped: a native request's "
+          "encoded clips, in prompt order)",
+          wrappers=("gmlx.serve.patches.native_audio",)),
     Claim("gmlx._vendor.mlx_vlm.server.generation",
           "ResponseGenerator._cpu_preprocess",
           "audio_cascade.install_audio_cascade (splices the request's "
-          "transcripts in place of its audio markers)",
-          wrappers=("gmlx.serve.patches.audio_cascade",)),
+          "transcripts in place of its audio markers); "
+          "native_audio.install_native_audio (hands the processor the "
+          "request's encoded clips in place of its audio)",
+          wrappers=("gmlx.serve.patches.audio_cascade",
+                    "gmlx.serve.patches.native_audio")),
     Claim("gmlx._vendor.mlx_vlm.server.app", "_protocol_deps.apply_chat_template",
           "patches.render, patches.apc and patches.chat_behavior (gmlx wraps "
           "the member beside both route-module copies)",
@@ -544,7 +558,9 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_vlm.server.openai", "responses_input_tokens_endpoint",
           "single_bos_fix (the fallback count calls the prepare_inputs "
           "binding with prompts= and no add_special_tokens, after "
-          "get_cached_model filled the model cache); the assistant "
+          "get_cached_model filled the model cache); "
+          "native_audio.install_native_audio (route wrap: the decoded clips "
+          "of a native request, counted without an encode); the assistant "
           "aliases' route guard",
           how="route",
           paths=("/responses/input_tokens", "/v1/responses/input_tokens")),

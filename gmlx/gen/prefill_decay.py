@@ -1041,13 +1041,16 @@ def fit_cut(batch, n: int) -> int:
 
 
 def size_chunk(model, profile, base: int, depth: int, cols, cut,
-               rows: int = 1) -> tuple[int, int, bool]:
+               rows: int = 1, request=None) -> tuple[int, int, bool]:
     """``decayed_for_batch`` on explicit state: ``base`` the batch's step,
     ``depth`` the cached columns, ``cols()`` the columns the loop chunks
     (None: no tail merge), ``cut(step)`` the chunk the loop runs from a
-    step, ``rows`` the batch's prompts. Returns the step, the run base and
-    whether the tick set it."""
+    step, ``rows`` the batch's prompts, ``request(base)`` the request step
+    of that base. Returns the step, the run base and whether the tick set
+    it."""
     base = _run_base(model, profile, base, rows)
+    if request is not None:
+        base = request(base)
     heads = score_heads(model)
     step = decayed_step(base, depth, heads, profile=profile)
     from gmlx.stream.expert_streaming import experts_streamed
@@ -1095,7 +1098,8 @@ def decayed_for_batch(batch) -> int | None:
         lambda: embeds.shape[1] - (0 if _folds(batch) else 1))
     step, run_base, ticked = size_chunk(
         batch.model, profile, base, depth, cols,
-        lambda s: _cut_chunk(batch, s), prompt_rows(batch))
+        lambda s: _cut_chunk(batch, s), prompt_rows(batch),
+        request=lambda b: batch_request_step(batch, b))
     global _LAST_STEP
     _LAST_STEP = int(step or 0)
     if env_bool("GMLX_PREFILL_DECAY_LOG", False):
@@ -1133,6 +1137,246 @@ def with_decayed_step(batch, fn):
     finally:
         batch.prefill_step_size = base
         vars(batch).pop("_gmlx_base_step", None)
+
+
+# Request step. An arch whose chunk holds a transient per row beyond any
+# score tensor (Nemotron-H's Mamba scan and MoE) registers its bytes per
+# row. A request runs the largest halving tier of its base whose rows fit
+# the room: the ceiling less the resident models' weights, less what the
+# request itself holds at its full length. The room changes only when a
+# model loads or unloads, never per chunk, so the step depends on the
+# request and the Mac alone, and stays fixed for the request's life.
+_ROW_COSTS: dict[str, Callable] = {}
+_RESIDENT: dict[int, dict[int, int]] = {}
+_RESIDENT_LOCK = threading.Lock()
+_ROOM: list[float | None] = []      # the room, cleared on a residency change
+_ROWS_BYTES = 2                     # embedded prompt rows are 16-bit
+
+
+def register_row_cost(model_type: str, provider: Callable) -> None:
+    """``provider(config)`` returns the arch's prefill bytes per chunk
+    row, an upper bound at every step."""
+    _ROW_COSTS[model_type] = provider
+
+
+def _configs(model):
+    for holder in (model, getattr(model, "language_model", None)):
+        for cfg in (getattr(holder, "config", None),
+                    getattr(holder, "args", None)):
+            if cfg is not None:
+                yield cfg
+
+
+def row_bytes(model) -> float:
+    """The registered prefill bytes per chunk row of ``model``, 0 when its
+    arch registers none."""
+    for cfg in _configs(model):
+        mt = getattr(cfg, "model_type", None)
+        if mt is None and isinstance(cfg, dict):
+            mt = cfg.get("model_type")
+        provider = _ROW_COSTS.get(mt) if mt else None
+        if provider is not None:
+            return float(provider(cfg))
+    return 0.0
+
+
+def _weight_arrays(model) -> dict[int, int]:
+    from mlx.utils import tree_flatten
+
+    return {id(a): int(a.nbytes) for _, a in tree_flatten(model.parameters())
+            if isinstance(a, mx.array)}
+
+
+def model_weight_bytes(model) -> int:
+    """The bytes of ``model``'s parameters, each array counted once."""
+    return sum(_weight_arrays(model).values())
+
+
+def note_resident_model(model, nbytes: float | None = None) -> None:
+    """Loader hook: ``model`` is resident with ``nbytes`` of weights (its
+    parameters by default; an array a drafter shares with its target
+    counts once). It leaves the room when it is freed."""
+    import weakref
+
+    if nbytes is None and not callable(getattr(model, "parameters", None)):
+        return              # no drafter, or a stand-in without weights
+    key = id(model)
+    arrays = _weight_arrays(model) if nbytes is None else {-key: int(nbytes)}
+    with _RESIDENT_LOCK:
+        _RESIDENT[key] = arrays
+        _ROOM.clear()
+    try:
+        weakref.finalize(model, forget_resident_model, key)
+    except TypeError:
+        pass
+
+
+def forget_resident_model(key: int) -> None:
+    with _RESIDENT_LOCK:
+        if _RESIDENT.pop(key, None) is not None:
+            _ROOM.clear()
+
+
+def prefill_room_bytes() -> float | None:
+    """The ceiling less the resident models' weights, or None before any
+    model registers or without Metal."""
+    with _RESIDENT_LOCK:
+        if _ROOM:
+            return _ROOM[0]
+        if not _RESIDENT:
+            return None
+        union: dict[int, int] = {}
+        for arrays in _RESIDENT.values():
+            union.update(arrays)
+        resident = sum(union.values())
+    from gmlx.serve.capacity import ceiling_bytes, working_set_bytes
+
+    ws = working_set_bytes()
+    room = None if ws is None else ceiling_bytes(ws) - resident
+    with _RESIDENT_LOCK:
+        if _RESIDENT and not _ROOM:
+            _ROOM.append(room)
+    return room
+
+
+# A budget this large is "until EOS" (run's and serve's uncapped defaults).
+_UNBOUNDED_TOKENS = 1 << 25
+
+
+def output_budget(model, prompt_tokens: int, max_tokens) -> int:
+    """The output tokens a request may hold: ``max_tokens`` when it is a
+    real budget, else none; at most the context a model with a trained
+    limit (``context_tokens``) leaves the prompt, and that context's rest
+    when no budget is set."""
+    mt = int(max_tokens or 0)
+    if mt <= 0 or mt >= _UNBOUNDED_TOKENS:
+        mt = 0
+    ctx = getattr(model, "context_tokens", None)
+    if isinstance(ctx, int) and ctx > 0:
+        rest = max(0, ctx - int(prompt_tokens))
+        mt = min(mt, rest) if mt else rest
+    return mt
+
+
+def request_held_bytes(model, prompt_tokens: int, gen_tokens: int,
+                       audio_tokens: int = 0, embedded_rows: int = 0) -> float:
+    """What a request holds besides its chunk: the KV and recurrent states
+    of the prompt and its output budget (``output_budget`` of
+    ``gen_tokens``), the embedded prompt rows the loop chunks, and the
+    encoder output of its audio."""
+    from gmlx.serve.mem_preflight import (
+        _get,
+        _lm_config,
+        kv_layer_costs,
+        prompt_kv_bytes,
+    )
+
+    costs = kv_layer_costs(model, 2.0) or []
+    gen = output_budget(model, prompt_tokens, gen_tokens)
+    held = prompt_kv_bytes(costs, int(prompt_tokens) + gen)
+    hidden = _get(_lm_config(model), "hidden_size") or 0
+    held += int(embedded_rows) * int(hidden) * _ROWS_BYTES
+    hook: Callable[[int], int] | None = getattr(model, "audio_held_bytes", None)
+    if audio_tokens and callable(hook):
+        held += hook(int(audio_tokens))
+    return float(held)
+
+
+def request_step(model, base: int | None, held: float) -> int | None:
+    """The largest halving tier of ``base``, down to the decay floor, whose
+    rows fit the room less ``held``. ``base`` itself when the arch
+    registers no row cost, the room is unknown or the decay is off; None
+    when not even the floor fits."""
+    row = row_bytes(model)
+    if not base or base <= 0 or not row or not _enabled():
+        return base
+    room = prefill_room_bytes()
+    if room is None:
+        return base
+    free = room - float(held)
+    min_step = max(1, env_int("GMLX_PREFILL_MIN_STEP", 256))
+    step = int(base)
+    while step > min_step and row * step > free:
+        step //= 2
+    return step if row * step <= free else None
+
+
+def audio_tokens_in(model, ids) -> int:
+    """The audio placeholder tokens of ``ids``, 0 for a model without
+    ``audio_token_id``."""
+    tok = None
+    for cfg in _configs(model):
+        tok = getattr(cfg, "audio_token_id", None)
+        if tok is not None:
+            break
+    if tok is None or ids is None:
+        return 0
+    try:
+        return int(mx.sum(ids == int(tok)).item())  # pyright: ignore[reportArgumentType]
+    except Exception:
+        return 0
+
+
+def request_fit(model, prompt_tokens: int, gen_tokens: int,
+                audio_tokens: int = 0, base: int | None = None
+                ) -> tuple[int | None, float, float] | None:
+    """``(step, need, room)`` for a request of ``prompt_tokens`` (all
+    embedded, ``audio_tokens`` of them audio) and ``gen_tokens`` of output:
+    its request step (None when not even the floor fits), what it holds at
+    that step's chunk (the floor's when none fits), and the room. None for
+    an arch without a row cost or before the room is known."""
+    row = row_bytes(model)
+    room = prefill_room_bytes() if row else None
+    if room is None:
+        return None
+    held = request_held_bytes(model, prompt_tokens, gen_tokens, audio_tokens,
+                              prompt_tokens)
+    base = _run_base(model, None, base)
+    step = request_step(model, base, held)
+    floor = min(base, max(1, env_int("GMLX_PREFILL_MIN_STEP", 256)))
+    return step, held + row * (step or floor), room
+
+
+def run_request_step(model, prompt_cache, prompt_rows: int, max_tokens,
+                     step: int, audio_tokens: int = 0,
+                     embedded_rows: int = 0) -> int:
+    """``request_step`` for one generate call: the cached depth and
+    ``prompt_rows`` to prefill, then ``max_tokens`` of output. The floor
+    when nothing fits (a run refuses such a request first)."""
+    if not step or not row_bytes(model):
+        return step
+    held = request_held_bytes(
+        model, kv_depth(prompt_cache) + int(prompt_rows),
+        max(0, int(max_tokens or 0)), audio_tokens, embedded_rows)
+    fit = request_step(model, step, held)
+    if fit is None:
+        fit = min(step, max(1, env_int("GMLX_PREFILL_MIN_STEP", 256)))
+    return fit
+
+
+def batch_request_step(batch, base: int) -> int:
+    """``request_step`` for a prompt batch, taken once for the batch's
+    life: its prompts, their output budgets, the rows it chunks and the
+    audio among them. The floor when nothing fits (the memory preflight
+    refuses such a request first)."""
+    steps = vars(batch).setdefault("_gmlx_request_steps", {})
+    if base in steps:
+        return steps[base]
+    model = batch.model
+    if not row_bytes(model):
+        return base
+    embeds = getattr(batch, "_inputs_embeds", None)
+    rows = 0 if embeds is None else int(embeds.shape[0] * embeds.shape[1])
+    prompts = sum(getattr(batch, "_prompt_tokens_per_row", None) or ()) or rows
+    gen = sum(int(t or 0) for t in (getattr(batch, "max_tokens", None) or ()))
+    held = request_held_bytes(
+        model, prompts, gen,
+        audio_tokens_in(model, getattr(batch, "_input_ids", None)), rows)
+    step = request_step(model, base, held)
+    if step is None:
+        step = min(base, max(1, env_int("GMLX_PREFILL_MIN_STEP", 256)))
+    steps[base] = step
+    return step
 
 
 def install_prefill_decay() -> bool:

@@ -127,7 +127,8 @@ def cascade(monkeypatch):
     monkeypatch.setattr(_OPENAI, "get_cached_model", lambda *a, **k: (
         None, processor, {"model_type": "granite_switch"}))
     state = types.SimpleNamespace(pairs=True, companion="/m/companion.gguf",
-                                  said={}, transcribed=[])
+                                  said={}, transcribed=[], deaf=None)
+    monkeypatch.setattr(audio_cascade, "_deaf_reason", lambda model: state.deaf)
     monkeypatch.setattr(audio_cascade, "_companion_for",
                         lambda model: (state.pairs, state.companion if state.pairs else None))
 
@@ -260,3 +261,33 @@ def test_responses_refuses_audio_it_would_drop(cascade):
     assert r.status_code == 400
     assert "/v1/chat/completions" in r.json()["error"]["message"]
     assert not cascade.rg.calls
+
+
+def test_a_model_that_cannot_hear_refuses_audio(cascade):
+    cascade.pairs, cascade.deaf = False, "this model takes no audio input"
+    messages = [{"role": "user", "content": [_clip("a"), _text("Hi")]}]
+    r = _chat(cascade, messages)
+    assert r.status_code == 400
+    assert r.json()["error"]["message"] == "this model takes no audio input"
+    r = cascade.client.post("/v1/responses", json={
+        "model": "m", "input": messages, "max_output_tokens": 4})
+    assert r.status_code == 400
+    assert r.json()["error"]["message"] == "this model takes no audio input"
+    assert not cascade.rg.calls
+
+
+def test_deaf_reason_names_a_missing_speech_encoder(monkeypatch):
+    import gmlx.load.discovery as disc
+    from gmlx.serve import bridge_vlm
+
+    spec = types.SimpleNamespace(mmproj=None)
+    monkeypatch.setattr(bridge_vlm, "resolve_request_model",
+                        lambda m, profile_field=None: ("/m/x.gguf", spec))
+    monkeypatch.setattr(bridge_vlm, "get_request_profile", lambda: None)
+    head = {"arch": "llama"}
+    monkeypatch.setattr(disc, "header_meta", lambda p: head)
+    assert audio_cascade._deaf_reason("m") == "this model takes no audio input"
+    head["speech_checkpoint"] = "ck"
+    assert "speech encoder" in audio_cascade._deaf_reason("m")
+    spec.mmproj = "/m/enc.gguf"
+    assert audio_cascade._deaf_reason("m") is None

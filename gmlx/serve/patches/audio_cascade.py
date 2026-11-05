@@ -136,6 +136,29 @@ def _texts_hold_marker(value) -> bool:
     return False
 
 
+def _deaf_reason(model_field) -> str | None:
+    """Why the request's model cannot take audio at all: a text model
+    loaded without an mmproj (Nemotron 3.5 Transcribe without its speech
+    encoder among them). None when it might."""
+    from gmlx.load.discovery import header_meta
+
+    from .. import bridge_vlm as serving
+
+    try:
+        path, spec = serving.resolve_request_model(
+            model_field, profile_field=serving.get_request_profile())
+    except Exception:  # noqa: BLE001  the stock route answers the error
+        return None
+    if getattr(spec, "mmproj", None):
+        return None
+    meta = header_meta(path) if path else None
+    if meta and meta.get("speech_checkpoint"):
+        return ("this model hears audio through its speech encoder GGUF, "
+                "which is not loaded: put it beside the model, or set "
+                "`mmproj:` in the model's config entry")
+    return "this model takes no audio input"
+
+
 async def _prepare(model_field, parts: list, texts_with_marker: bool):
     """The request's cascade state, None for a model that takes audio
     another way. Raises _Refused for a client error."""
@@ -178,6 +201,9 @@ def _chat_wrap(original):
                 request.model, _audio_parts([m.content for m in with_audio]),
                 any(_texts_hold_marker(m.content) for m in messages))
             if state is None:
+                reason = _deaf_reason(request.model)
+                if reason:
+                    raise _Refused(reason)
                 return await original(request, http_request)
             for message in with_audio:
                 _flatten_message(message, state)
@@ -186,6 +212,13 @@ def _chat_wrap(original):
         _STATE.set(state)        # read in the generate call, maybe in the stream
         return await original(request, http_request)
     return endpoint
+
+
+def _native_on() -> bool:
+    """Whether the native audio wrap took this request (it runs first)."""
+    from .native_audio import _CLIPS
+
+    return _CLIPS.get() is not None
 
 
 def _responses_wrap(original):
@@ -203,15 +236,16 @@ def _responses_wrap(original):
             chain = []
         current = _audio_parts(body.get("input"))
         parts = _audio_parts(chain) + current
-        if not parts:
+        if not parts or _native_on():
             return await original(request)
         try:
             state = await _prepare(body.get("model"), parts,
                                    _texts_hold_marker(body.get("input")))
             if state is None:
                 # The stock route drops every clip.
-                raise _Refused("/v1/responses takes no audio for this model. "
-                               "Send audio to /v1/chat/completions.")
+                raise _Refused(_deaf_reason(body.get("model")) or (
+                    "/v1/responses takes no audio for this model. "
+                    "Send audio to /v1/chat/completions."))
         except _Refused as e:
             return _refusal(request, e)
         _STATE.set(state)

@@ -479,17 +479,41 @@ def _need_bytes(model, costs, prompt_tokens: int, gen_tokens: int = 0):
     return kv + score_transient_bytes(model, None, prompt_tokens)
 
 
+def _audio_cost(model, audio) -> tuple[int, int] | None:
+    """``(audio tokens, encoder bytes)`` of ``audio`` from the model's
+    ``audio_preflight`` hook, ``(0, 0)`` without audio, None for audio a
+    model without the hook takes (the check skips it)."""
+    if not audio:
+        return 0, 0
+    hook = getattr(model, "audio_preflight", None)
+    # Clips the route has not decoded yet (the route that decodes them
+    # runs the check itself).
+    import numpy as np
+    if not callable(hook) or not all(isinstance(c, np.ndarray) for c in audio):
+        return None
+    return hook(audio)
+
+
 def preflight_prompt_memory(rg, prompt, images=None, audio=None,
-                            videos=None, args=None) -> None:
+                            videos=None, args=None, held_bytes: int = 0) -> None:
     """Raise MemoryPreflightError when the prompt cannot fit. Best
-    effort: any probe failure admits."""
+    effort: any probe failure admits. Audio counts only on a model that
+    prices it (``audio_preflight``); ``held_bytes`` is memory other
+    requests hold outside the KV cache."""
     try:
         if os.environ.get("GMLX_PREFLIGHT_MEM", "1") == "0":
             return
-        if images or audio or videos:
+        if images or videos:
             return
         model = getattr(rg, "model", None)
         if model is None or not isinstance(prompt, str):
+            return
+        cost = _audio_cost(model, audio)
+        if cost is None:
+            return
+        audio_tokens, extra = cost
+        if _check_request_fit(rg, model, prompt, audio_tokens, extra,
+                              held_bytes, args):
             return
         costs = _policy_costs(rg, model)
         if not costs:
@@ -497,15 +521,21 @@ def preflight_prompt_memory(rg, prompt, images=None, audio=None,
         avail = available_drained_bytes()
         if avail is None:
             return
+        avail -= extra + held_bytes
         # A text token is at least one character, so the character count
         # bounds the token count; most requests never pay a tokenize.
-        if _need_bytes(model, costs, len(prompt)) <= avail:
+        bound = len(prompt) + audio_tokens
+        if _need_bytes(model, costs, bound) <= avail:
             pinned = _pinned_max_tokens(args)
             if not pinned or _need_bytes(
-                    model, costs, len(prompt), pinned) <= avail:
+                    model, costs, bound, pinned) <= avail:
                 return
-        from gmlx._vendor.mlx_vlm.server.generation import _count_prompt_tokens
-        tokens = _count_prompt_tokens(rg._preprocess_request(prompt))
+        if audio:
+            tok = getattr(rg, "tokenizer", None)
+            tokens = len(tok.encode(prompt)) + audio_tokens
+        else:
+            from gmlx._vendor.mlx_vlm.server.generation import _count_prompt_tokens
+            tokens = _count_prompt_tokens(rg._preprocess_request(prompt))
         if tokens <= 0:
             return
         need = _need_bytes(model, costs, tokens)
@@ -522,12 +552,45 @@ def preflight_prompt_memory(rg, prompt, images=None, audio=None,
             f"estimated {worst / GB:.1f} GB of KV and prefill transient, but "
             f"only {avail / GB:.1f} GB remains with the batch drained "
             f"(prompt_tokens={tokens}). Reduce the prompt"
+            + (", its audio" if audio else "")
             + (" or max_tokens" if need_pinned > avail else "") + ".")
     except Exception as e:
         from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
         if isinstance(e, PromptTooLongError):
             raise
         _log.warning("memory preflight failed; admitting", exc_info=True)
+
+
+def _check_request_fit(rg, model, prompt: str, audio_tokens: int,
+                       encode_bytes: int, others: int, args) -> bool:
+    """The check for an arch that prices its prefill rows: what the
+    request holds at its full length plus one chunk at its request step
+    (``prefill_decay.request_fit``) must fit the room the resident models
+    leave, less what other requests hold. True when it fits; raises when it
+    does not; False for any other arch."""
+    from gmlx.gen.prefill_decay import request_fit
+
+    tok = getattr(rg, "tokenizer", None)
+    text = len(tok.encode(prompt)) if tok is not None else len(prompt)
+    tokens = text + int(audio_tokens)
+    # Output counts once the client sets a budget, as the stock check does.
+    gen = _pinned_max_tokens(args)
+    fit = request_fit(model, tokens, gen, int(audio_tokens),
+                      getattr(rg, "prefill_step_size", None))
+    if fit is None:
+        return False
+    step, need, room = fit
+    need = max(need, float(encode_bytes))
+    avail = room - float(others)
+    if step is not None and need <= avail:
+        return True
+    output = f" and {gen:,} output tokens" if gen else ""
+    raise _preflight_error_cls()(
+        f"this request needs an estimated {need / GB:.2f} GB beside the "
+        f"model weights for {tokens:,} prompt tokens{output}, but only "
+        f"{avail / GB:.2f} GB is left under this Mac's memory ceiling. "
+        "Reduce the prompt" + (", its audio" if audio_tokens else "")
+        + (" or max_tokens." if gen else "."))
 
 
 def _pinned_max_tokens(args):

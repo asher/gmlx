@@ -2229,7 +2229,10 @@ def load_mtp_model(
         _wire_target(model, gguf_path)
     wait_for_populate(pf.shards, log=_log)
     collect_after_load()
+    from gmlx.gen.prefill_decay import note_resident_model
 
+    note_resident_model(model)
+    note_resident_model(drafter)
     return model, drafter, config, tokenizer
 
 
@@ -2412,7 +2415,9 @@ def load_vlm_mtp_model(
     # wire=False: as for load_mtp_model, a caller that installs streaming.
     if wire:
         _wire_target(model, gguf_path)
+    from gmlx.gen.prefill_decay import note_resident_model
 
+    note_resident_model(drafter)
     return model, drafter, config, tokenizer, processor
 
 

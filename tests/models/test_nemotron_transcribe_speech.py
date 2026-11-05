@@ -117,7 +117,7 @@ def test_encoder_matches_the_reference(golden, encoder, case):
            arrays[f"{case}/asr_states"][:tokens])
     _close(manifest, f"{case}/speaker_probs", out.speaker_probs[:keep],
            arrays[f"{case}/speaker_probs"][:keep])
-    logits = enc.diar.logits(mx.array(feats))[: min(valid, keep * 8)]
+    logits = enc.diar.logits(np.asarray(feats))[: min(valid, keep * 8)]
     _close(manifest, f"{case}/speaker_logits", logits,
            arrays[f"{case}/speaker_logits"][: len(logits)])
     rows = []
@@ -143,20 +143,29 @@ def test_steps_yield_per_window_and_chunk(golden, encoder):
     feats = speech.features(audio, mel)
     wins = enc.windows(tokens)
     lengths = [b - a for a, b, _, _ in wins]
+    fusions = -(-tokens // speech.FUSE_ROWS)
+
+    def run(**kw):
+        gen = enc.steps(feats, valid, tokens, **kw)
+        yields = 0
+        while True:
+            try:
+                next(gen)
+                yields += 1
+            except StopIteration as done:
+                return yields, done.value
+
     batches = sum(-(-lengths.count(n) // speech.MAX_WINDOW_BATCH)
                   for n in set(lengths))
-    gen = enc.steps(feats, valid, tokens)
-    yields = 0
-    while True:
-        try:
-            next(gen)
-            yields += 1
-        except StopIteration as done:
-            result = done.value
-            break
-    assert yields == batches + len(wins)
+    yields, result = run()
+    assert yields == batches + len(wins) + fusions
     whole = enc(feats, valid, tokens)
     np.testing.assert_array_equal(np.array(result.embeds), np.array(whole.embeds))
+    yields, one = run(batch=1, dtype=mx.bfloat16, keep_states=False)
+    assert yields == 2 * len(wins) + fusions
+    assert one.asr_states is None and one.embeds.dtype == mx.bfloat16
+    np.testing.assert_allclose(np.array(one.embeds.astype(mx.float32)),
+                               np.array(whole.embeds), rtol=1e-2, atol=1e-2)
 
 
 def test_ctc_columns_pick_from_the_log_softmax(golden, encoder):

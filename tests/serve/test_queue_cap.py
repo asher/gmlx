@@ -55,6 +55,17 @@ def test_depth_counts_queue_and_pending(monkeypatch):
     assert qc._waiting_depth(_rg(qsize=2)) == 5
 
 
+def test_depth_counts_requests_encoding_audio(monkeypatch):
+    from gmlx.serve.patches import native_audio
+
+    monkeypatch.setattr(qc, "_GEN_REF", lambda: None)
+    rg = _rg(qsize=1)
+    monkeypatch.setitem(native_audio._ENCODING, id(rg), 2)
+    assert qc._waiting_depth(rg) == 3
+    # The handlers' per-request guard counts the engine behind it.
+    assert qc._waiting_depth(SimpleNamespace(_rg=rg)) == 3
+
+
 def test_depth_survives_dead_generator(monkeypatch):
     monkeypatch.setattr(qc, "_GEN_REF", lambda: None)
     assert qc._waiting_depth(_rg(qsize=1)) == 1

@@ -23,10 +23,12 @@ SPEAKERS = ("Transcribe this audio with punctuation and capitalization. "
             "their standard written form. Put speaker tags <spk:0> <spk:1> "
             "<spk:2> <spk:3> on the transcription.")
 
-# The trained limits: one hour of audio in a 65,536-token context.
+# The trained limits: one hour of audio in a 65,536-token context. A
+# request holds at most six clips.
 CONTEXT_TOKENS = 65_536
 MAX_AUDIO_SECONDS = 3600.0
 MAX_OUTPUT_TOKENS = 21_664
+MAX_CLIPS = 6
 
 # BCP-47 primary subtag to the name the language hint uses.
 LANGUAGE_NAMES = {
@@ -76,6 +78,19 @@ def transcription_instruction(language: str | None = None, *,
 
 def translation_instruction(language: str = "English") -> str:
     return f"Please translate the given speech to {language}."
+
+
+def check_clips(samples: list[int], rate: int = 16000) -> None:
+    """Refuse more clips, or more audio, than the model is trained on:
+    ``samples`` holds each clip's sample count."""
+    if len(samples) > MAX_CLIPS:
+        raise ValueError(
+            f"{len(samples)} audio clips in one request; the limit is "
+            f"{MAX_CLIPS}. Start a new conversation for more audio")
+    seconds = sum(samples) / rate
+    if seconds > MAX_AUDIO_SECONDS + 1e-6:
+        raise ValueError(f"{seconds:.1f} s of audio in one request; the "
+                         f"limit is {MAX_AUDIO_SECONDS:.0f} s")
 
 
 def output_budget(seconds: float, prompt_tokens: int,

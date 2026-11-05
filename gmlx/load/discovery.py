@@ -608,6 +608,13 @@ def find_asr_companion(path: str) -> str | None:
     return None
 
 
+def is_speech_encoder(path) -> bool:
+    """Whether ``path`` is a speech encoder GGUF that feeds a text model's
+    embeddings (Nemotron 3.5 Transcribe's)."""
+    meta = header_meta(os.path.expanduser(path)) if path else None
+    return bool(meta) and meta.get("arch") in _arch_table.NATIVE_ASR_ENCODER_ARCHES
+
+
 def find_speech_encoder(path: str) -> str | None:
     """The speech encoder GGUF in the folder of the text model at ``path``
     whose NeMo checkpoint id is the model's, or None: Nemotron 3.5
@@ -619,9 +626,21 @@ def find_speech_encoder(path: str) -> str | None:
     ap = os.path.abspath(os.path.expanduser(path))
     folder = os.path.dirname(ap)
     try:
+        # Serve resolves a model per request: scan the folder once per change.
+        key = (ap, os.stat(folder).st_mtime_ns)
+        if key in _SPEECH_PAIRS:
+            return _SPEECH_PAIRS[key]
         names = sorted(os.listdir(folder))
     except OSError:
         return None
+    _SPEECH_PAIRS[key] = found = _speech_encoder_in(folder, names, ap, want)
+    return found
+
+
+_SPEECH_PAIRS: dict = {}
+
+
+def _speech_encoder_in(folder: str, names: list, ap: str, want: str):
     for name in names:
         p = os.path.join(folder, name)
         if name.endswith(".gguf") and p != ap:

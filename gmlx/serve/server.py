@@ -2901,7 +2901,9 @@ def _single_model_cfg(a) -> ServerCfg:
         id=mid,
         path=mp,
         profile=getattr(a, "profile", None),
-        mmproj=os.path.abspath(os.path.expanduser(a.mmproj)) if a.mmproj else None,
+        # Nemotron 3.5 Transcribe hears through the encoder beside it.
+        mmproj=(os.path.abspath(os.path.expanduser(a.mmproj)) if a.mmproj
+                else discovery.find_speech_encoder(mp)),
         asr=(False if getattr(a, "no_asr", False)
              else os.path.abspath(os.path.expanduser(a.asr))
              if getattr(a, "asr", None) else None),
