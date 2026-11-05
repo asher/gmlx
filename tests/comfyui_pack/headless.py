@@ -628,6 +628,35 @@ class Cases:
         self.check("video saved", any(f.startswith("h3_") and f.endswith(".mp4") for f in saved),
                    saved)
 
+    async def h3_i2v(self):
+        """The MiniMax-H3 first frame workflow: the image from Load Image
+        encoded with the prompt and by the gmlx video VAE, and every step
+        anchored at frame 0 with the prompt's vision span."""
+        wf = workflow("minimax-h3-i2v.json")
+        wf["6"]["inputs"].update(width=64, height=64, length=22)
+        wf["7"]["inputs"]["steps"] = 2
+        wf["15"]["inputs"]["filename_prefix"] = "video/h3-i2v"
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        enc = kinds(log, "encode")
+        self.check("the prompt encoded once, with the first frame at the canvas",
+                   [(e["images"], e["image_shapes"]) for e in enc] == [(1, [[64, 64, 3]])],
+                   [(e["images"], e["image_shapes"]) for e in enc])
+        self.check("the first frame encoded once by the video VAE",
+                   [e["shape"] for e in kinds(log, "video_encode")] == [[1, 64, 64, 3]],
+                   [e["shape"] for e in kinds(log, "video_encode")])
+        steps = kinds(log, "av_step")
+        self.check("each step anchored at frame 0 with one vision span",
+                   len(steps) == 2 and all(
+                       [a["frame"] for a in e["anchors"]] == [0] and len(e["spans"]) == 1
+                       for e in steps),
+                   [(e["anchors"], e["spans"]) for e in steps])
+        d = os.path.join(self.work, "output", "video")
+        saved = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        self.check("video saved",
+                   any(f.startswith("h3-i2v_") and f.endswith(".mp4") for f in saved), saved)
+
     async def fasth3_t2v(self):
         """The FastH3 example workflow: AV steps on the trained sigmas gmlx
         Sigmas hands over, at the recipe's shifts, and the clip decoded by
@@ -695,6 +724,8 @@ async def amain(a) -> dict:
         os.path.join(work, "input", "reference-1.png"))
     Image.fromarray(rng.integers(0, 255, (512, 512, 4), dtype=np.uint8), "RGBA").save(
         os.path.join(work, "input", "reference-2.png"))
+    Image.fromarray(rng.integers(0, 255, (96, 128, 3), dtype=np.uint8)).save(
+        os.path.join(work, "input", "first-frame.png"))
     stub = Stub("--step-delay-ms", str(a.step_delay_ms))
     stub2 = Stub("--contract", "2.0")
     stub3 = Stub("--upsample")
@@ -741,6 +772,7 @@ async def amain(a) -> dict:
             await c.case("moss-image t2i under SkipLayerGuidanceDiTSimple", c.moss_t2i)
             await c.case("moss-image: a prompt queued behind the running one", c.moss_queued)
             await c.case("minimax-h3 t2v with the gmlx video and audio VAEs", c.h3_t2v)
+            await c.case("minimax-h3 i2v from a Load Image first frame", c.h3_i2v)
             await c.case("fasth3 t2v on its trained sigmas", c.fasth3_t2v)
             if comfy_version(a.comfy) >= (0, 41, 0):
                 await c.case("flux-3-klein t2i", c.flux3_t2i)

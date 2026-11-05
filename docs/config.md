@@ -312,7 +312,7 @@ video_models:
 |-----|---------|---------|
 | <a id="video_modelspath"></a>`path` | required | The DiT GGUF, found as a model [`path`](#modelspath) is |
 | <a id="video_modelsencoder"></a>`encoder` | required | The text encoder GGUF |
-| <a id="video_modelsencoder_mmproj"></a>`encoder_mmproj` | none | The encoder's vision tower GGUF |
+| <a id="video_modelsencoder_mmproj"></a>`encoder_mmproj` | none | The encoder's vision tower GGUF, which reads a first or last frame |
 | <a id="video_modelsvae"></a>`vae` | required | The video VAE safetensors file |
 | <a id="video_modelsaudio_vae"></a>`audio_vae` | required | The audio VAE safetensors file |
 | <a id="video_modelstiny_vae"></a>`tiny_vae` | none | The TAEH3 file that `--preview` decodes with |

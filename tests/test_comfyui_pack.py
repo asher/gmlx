@@ -147,7 +147,7 @@ def test_the_wheel_ships_every_pack_file():
     for want in ("gmlx/comfyui_pack/LICENSE", "gmlx/comfyui_pack/__init__.py",
                  "gmlx/comfyui_pack/version.py"):
         assert want in files
-    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 13
+    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 14
 
 
 def test_the_pack_keeps_its_apache_license():

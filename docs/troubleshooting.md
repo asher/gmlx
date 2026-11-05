@@ -491,6 +491,31 @@ refuses it on those Macs before it downloads anything, and `--force`
 downloads it anyway. `gmlx video generate` and `gmlx video bench` refuse
 to run it.
 
+### `--first-frame needs the encoder's vision tower`
+
+A first or last frame is read through the text encoder's vision tower,
+its `mmproj` file, which `gmlx video pull` downloads with the model and
+names in the entry as
+[`encoder_mmproj`](config.md#video_modelsencoder_mmproj). Pass
+`--mmproj` when `MODEL` is a DiT GGUF, or add the key to an entry you
+wrote yourself. A `gmlx serve` entry without the key refuses a ComfyUI
+first or last frame with `names no encoder_mmproj`.
+
+### `MiniMax-H3 fasth3 runs text to video only`
+
+FastH3 takes no keyframe or guide. Run the clip on `h3`, or without
+`--first-frame`, `--last-frame`, `--guide` and `--guide-audio`. In
+ComfyUI, leave `first_frame` and `last_frame` unconnected and add no
+`Add Guide for MiniMax H3` node.
+
+### `a ...-frame guide clip at frame ... does not fit in the clip's ... frames`
+
+A guide video keeps 5, 22, 39 or more of its first frames, and they must
+fit in the clip from the guide's frame on. Move the guide to an earlier
+frame, make the clip longer, or cut the video shorter.
+[Keyframes and guides](video.md#keyframes-and-guides) describes how many
+frames a guide keeps.
+
 ## ComfyUI
 
 ### `no ComfyUI found`

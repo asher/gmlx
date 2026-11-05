@@ -279,10 +279,20 @@ server before its first step.
 [Clip length, size and memory](video.md#clip-length-size-and-memory)
 lists the largest clip each Mac makes.
 
-The gmlx nodes run MiniMax-H3 from the text prompt alone, so leave
-`first_frame` and `last_frame` unconnected. A first or last frame, a
-guide, a reference image, the Fun ControlNet or a noise mask on the latent
-stops the run with an error that names it.
+To start the clip at an image, open the `minimax-h3-i2v` workflow. Its
+`First frame` node, a stock `Load Image`, feeds `first_frame` of
+`Prompt and clip size`, and an image in `last_frame` ends the clip at it.
+The prompt reads both images through the text encoder's vision tower, and
+the gmlx video VAE encodes them on the server.
+`Add Guide for MiniMax H3` anchors an image, a video or a sound at a
+frame of the clip, as `--guide` does on the command line.
+[Keyframes and guides](video.md#keyframes-and-guides) describes each,
+and [Clip length, size and memory](video.md#clip-length-size-and-memory)
+the memory they take.
+
+A reference of `MiniMax H3 Reference to Video`, the Fun ControlNet or a
+noise mask on the latent stops the run with an error that names it, and
+so do keyframes and guides on `fasth3`, which runs text to video only.
 
 ### FastH3
 
@@ -314,7 +324,7 @@ FastH3 samples at the shifts in force, 12 and 3 without
 
 ## The example workflows
 
-ComfyUI's template browser lists thirteen workflows under `comfyui-gmlx`. Their
+ComfyUI's template browser lists fourteen workflows under `comfyui-gmlx`. Their
 files are in `custom_nodes/comfyui-gmlx/example_workflows`. Each has a note
 with the commands that install the gmlx nodes and pull its model.
 
@@ -332,6 +342,7 @@ with the commands that install the gmlx nodes and pull its model.
 | `flux-3-klein-t2i` | FLUX.3 klein text to image at 1024x1024 in 16 steps, through `EmptyFlux2LatentImage` | `gmlx pull flux-3-klein`, and ComfyUI 0.41 or newer |
 | `flux-3-klein-edit-two-references` | A FLUX.3 klein edit from two reference images, through `ReferenceMultiLatent` | `gmlx pull flux-3-klein`, ComfyUI 0.41 or newer, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
 | `minimax-h3-t2v` | A MiniMax-H3 clip with sound from a text prompt, 5 seconds at 1344x768 in 8 steps, through `MiniMax H3 Image to Video` and the gmlx video and audio VAE loaders | `gmlx video pull h3`, and a Mac with 32 GB or more |
+| `minimax-h3-i2v` | The same clip started at an image, which `Load Image` gives to `first_frame` | `gmlx video pull h3`, a Mac with 32 GB or more, and `first-frame.png` in ComfyUI's `input` folder |
 | `fasth3-t2v` | A FastH3 clip with sound from a text prompt, 5 seconds at 1344x768 on its 8 trained noise levels, through `gmlx Sigmas` | `gmlx video pull fasth3`, and a Mac with an M5 chip or newer and 36 GB or more |
 
 ## LoRAs

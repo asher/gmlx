@@ -3,8 +3,10 @@
 gmlx makes short video clips with sound from a text prompt, with the
 MiniMax-H3 model. A clip runs up to 15 seconds at 24 frames a second, and
 the model makes the sound with the picture: speech, music and the noises
-of the scene. Video runs from the command line, and in ComfyUI through
-the [gmlx nodes](comfyui.md#make-a-video).
+of the scene. A clip can also start or end at an image, or follow an
+image, a video or a sound at a frame you pick. Video runs from the
+command line, and in ComfyUI through the
+[gmlx nodes](comfyui.md#make-a-video).
 
 Video needs a Mac with an M3 chip or newer, 32 GB of memory or more,
 ffmpeg, and about 40 GB of disk for the model's files.
@@ -16,6 +18,7 @@ newer.
 - [FastH3](#fasth3)
 - [Clip length, size and memory](#clip-length-size-and-memory)
 - [Dialogue](#dialogue)
+- [Keyframes and guides](#keyframes-and-guides)
 - [Use the preview decoder](#use-the-preview-decoder)
 - [Frames without ffmpeg](#frames-without-ffmpeg)
 - [Use a LoRA](#use-a-lora)
@@ -178,6 +181,24 @@ The largest clip each Mac makes:
 | 48 GB | 1344x768 up to 10 s, or 768x768 up to 15 s | 1344x768 up to 15 s | 1344x768, 5 s, or 768x768 up to 15 s |
 | 64 GB or more | 1344x768 up to 15 s | 1344x768 up to 15 s | 1344x768 up to 15 s |
 
+[Keyframes and guides](#keyframes-and-guides) take more memory. The
+smallest Mac that makes a 5 second `h3` clip with them, for a prompt of up
+to 1,024 tokens beside its images:
+
+| Clip | 1344x768 | 768x768 |
+|------|----------|---------|
+| Text alone | 32 GB | 32 GB |
+| A first frame or a last frame | 32 GB | 32 GB |
+| A first frame and a last frame | 36 GB | 32 GB |
+| An image guide | 32 GB | 32 GB |
+| A 5-frame guide video with its sound | 32 GB | 32 GB |
+| A 22-frame guide video with its sound | 36 GB | 32 GB |
+| 5 seconds of guide sound | 32 GB | 32 GB |
+
+A longer prompt takes more, and a clip that does not fit stops before it
+loads a model, as [`this clip does not fit in
+memory`](troubleshooting.md#this-clip-does-not-fit-in-memory) describes.
+
 [`gmlx video bench`](cli.md#video-bench) measures the time and memory of
 a few clip shapes on your Mac.
 
@@ -191,6 +212,58 @@ gmlx video generate h3 --prompt "A man in a grey raincoat stops under a streetli
 ```
 
 For a long prompt, put it in a file and pass `--prompt-file`.
+
+## Keyframes and guides
+
+`--first-frame` starts the clip at an image, and `--last-frame` ends it
+at one:
+
+```sh
+gmlx video generate h3 --size 768x768 --first-frame fox.png --output fox.mp4 \
+    --prompt "The red fox in the snow lifts its head, turns and runs off between the pines."
+```
+
+The first frame is stretched to the clip's size, so give it the clip's
+shape. The last frame is cropped about its center to the clip's shape.
+The prompt reads both images through the text encoder's vision tower,
+the `mmproj` file that `pull` downloads with the model, so write what
+happens in the clip.
+
+`--guide` anchors an image, or a video with its sound, at a frame of the
+clip, and `--guide-audio` anchors a sound. The frame goes after an `@`,
+counted from 0, or from the end of the clip when it is negative:
+
+```sh
+gmlx video generate h3 --guide street.png@60 --guide-audio rain.wav --prompt "..."
+```
+
+A guide video keeps 5, 22, 39 or more of its first frames, 17 k + 5 for
+the largest k it holds, and its sound unless you pass `--guide-no-audio`.
+Those frames must fit in the clip from the guide's frame on.
+
+To continue a clip, cut its last 22 frames with ffmpeg and guide a new
+clip with them at frame 0:
+
+```sh
+ffmpeg -sseof -0.92 -i part1.mp4 part1-end.mp4
+gmlx video generate h3 --guide part1-end.mp4@0 --output part2.mp4 --prompt "..."
+```
+
+`part2.mp4` starts with those 22 frames and their sound, so cut its first
+0.92 seconds before you join the two. At 1344x768 the 22-frame guide
+needs 36 GB, and at 768x768 it runs on 32 GB.
+
+The seed also sets the noise that gmlx mixes into each keyframe and
+guide, so the same seed and the same files make the same clip again.
+ComfyUI draws that noise another way, so the same seed there makes
+another clip.
+
+gmlx reads guide videos and sounds through ffmpeg, and images too when
+ffmpeg is installed. Without it, gmlx reads images through Pillow, and a
+JPEG can then decode a few levels of color away from ComfyUI's reading of
+it.
+
+FastH3 runs text to video only, so `fasth3` refuses keyframes and guides.
 
 ## Use the preview decoder
 
@@ -206,7 +279,8 @@ gmlx video generate h3-fast --preview --seed 3 --prompt "..."
 ## Frames without ffmpeg
 
 `--frames-dir` writes the clip as PNG frames and an `audio.wav` file.
-Alone, it needs no ffmpeg:
+Alone, it writes the clip without ffmpeg, though guide videos and sounds
+are still read through it:
 
 ```sh
 gmlx video generate h3 --frames-dir clip-frames --prompt "..."
