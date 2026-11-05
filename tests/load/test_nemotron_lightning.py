@@ -219,3 +219,35 @@ def test_probe_mtp_only_full_model(tmp_path):
         tensor_names=["token_embd.weight", "blk.0.attn_q.weight"])
     kv = scan_gguf(plain, include_tensors=False).kv
     assert _probe_mtp_only(plain, kv) is False
+
+
+class _Built(Exception):
+    pass
+
+
+@pytest.mark.parametrize("speech,block", [(False, 3), (True, 9)])
+def test_the_speech_decoder_head_drafts_eight(monkeypatch, speech, block):
+    """Nemotron 3.5 Transcribe (a file naming its encoder checkpoint) runs
+    its head at 8 drafts per round; other Nemotron-H heads keep 2."""
+    import gmlx.models.nemotron_h.mtp as nm
+    import gmlx.spec.mtp_load as mtp_load
+
+    meta = _lightning_meta()
+    if speech:
+        meta["nemo_speech.checkpoint_id"] = "0b5820fa"
+    config = synthesize_config(meta, tensor_shapes={})
+    assert bool(config.get("speech_checkpoint_id")) is speech
+    seen = {}
+
+    def install(drafter, *a, **k):
+        seen["drafter"] = drafter
+        raise _Built
+
+    monkeypatch.delenv("GMLX_NEM_MTP_BLOCK", raising=False)
+    monkeypatch.setenv("KQ_VERIFY_EXT", "0")
+    monkeypatch.setattr(nm, "remap_nemotron_mtp_arrays", lambda *a, **k: ({}, {}, {}))
+    monkeypatch.setattr(mtp_load, "_install_and_load", install)
+    with pytest.raises(_Built):
+        mtp_load._load_mtp_drafter({}, {}, ARCH, config, None, n_head=4, n_head_kv=4,
+                                   log=lambda *a, **k: None)
+    assert seen["drafter"].config.block_size == block
