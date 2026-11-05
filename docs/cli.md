@@ -1384,9 +1384,12 @@ samples the timesteps it was trained at.
 which the prompt also reads through the text encoder's vision tower.
 `--guide` anchors an image, or a video with its sound, at a frame, and
 `--guide-audio` anchors a sound alone. ffmpeg reads guide videos and
-sounds, and the images too when it is installed. The anchors are encoded
-after the text encoder is released, one VAE at a time. FastH3 runs text
-to video only, so it refuses them.
+sounds, and the images too when it is installed. FRAME is `0` when none
+is given, a negative frame counts from the end, and only an integer after
+the last `@` is a frame. A guide video keeps its first 17 k + 5 frames, or
+its first frame when it has fewer than 5, and they must fit in the clip
+from FRAME. The anchors are encoded after the text encoder is released,
+one VAE at a time. FastH3 runs text to video only, so it refuses them.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1399,12 +1402,12 @@ to video only, so it refuses them.
 | `--frames N` | None | Make a clip of exactly N frames, 17 k + 5 from 5 to 362. |
 | `--size WxH` | The entry's, else `1344x768` | Set the width and height, multiples of 32. |
 | `--steps N` | The entry's, else the variant's | Sample for N steps. |
-| `--seed N` | Random, and printed | Seed the noise, from 0 to 2^64 - 1. |
+| `--seed N` | Random, and printed | Seed the noise with an integer under 2^64. |
 | `--shift S` | The entry's, else the variant's | Set the video flow shift. |
 | `--adapter PATH[:STRENGTH]` | The entry's | Apply this LoRA safetensors file after the entry's. Repeat the flag to stack adapters. |
 | `--first-frame IMAGE` | None | Start the clip at this image, stretched to the canvas. |
 | `--last-frame IMAGE` | None | End the clip at this image, cropped about its center to the canvas's aspect. |
-| `--guide PATH[@FRAME]` | None | Anchor this image, or this video with its sound, at FRAME, cropped about its center to the canvas's aspect. FRAME is `0` when none is given, and a negative frame counts from the end. Only an integer after the last `@` is a frame. A video keeps its first 17 k + 5 frames, or its first frame when it has fewer than 5, and they must fit in the clip from FRAME. Repeat the flag for more guides. |
+| `--guide PATH[@FRAME]` | None | Anchor this image, or this video with its sound, at FRAME, cropped about its center to the canvas's aspect. Repeat the flag for more. |
 | `--guide-audio AUDIO[@FRAME]` | None | Anchor the sound of this file at FRAME, cut to the clip's sound from there. Repeat the flag for more. |
 | `--guide-no-audio` | Off | Anchor `--guide` videos without their sound. |
 | `--output PATH` | `./gmlx-<time>-<seed>.mp4`, or none with `--frames-dir` alone | Write the MP4 here. |
