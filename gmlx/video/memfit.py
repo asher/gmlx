@@ -444,6 +444,7 @@ def plan_run(fam, *, dit: str, encoder: str, vae: str, audio_vae: str,
     when None) and ``audio_vae``."""
     if blocks and mmproj is None:
         raise ValueError("keyframes need the encoder's mmproj")
+    vision = mmproj if blocks else None
     rows, audio = clip_rows(fam, frames=frames, width=width, height=height,
                             text=text, anchors=anchors)
     return plan_memory(fam.name, dit=file_bytes(dit),
@@ -453,8 +454,8 @@ def plan_run(fam, *, dit: str, encoder: str, vae: str, audio_vae: str,
                        lora_dtypes=[lora_dtype(p) for p in loras], rows=rows,
                        text=text, audio_latents=audio,
                        pixels=width * height, tiny=tiny, variant=variant,
-                       mmproj=file_bytes(mmproj) if blocks else 0,
-                       tower=tower_bytes(mmproj) if blocks else 0,
+                       mmproj=0 if vision is None else file_bytes(vision),
+                       tower=0 if vision is None else tower_bytes(vision),
                        blocks=blocks, anchor_frames=anchor_frames(fam,
                                                                   anchors),
                        anchor_audio=[a.audio_t for a in anchors

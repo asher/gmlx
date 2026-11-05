@@ -117,6 +117,9 @@ def encode(placement: Placement, *, frames=None, waveform=None,
                                  * 2.0 - 1.0)
         mx.eval(video)
     if placement.audio_t is not None:
+        if waveform is None:
+            raise ValueError("a placement keeps audio, and no waveform was "
+                             "given")
         w = mx.array(waveform, mx.float32)
         if w.ndim != 2 or w.shape[0] != 2:
             raise ValueError(f"an anchor waveform is (2, samples), not "

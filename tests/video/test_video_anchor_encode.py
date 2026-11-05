@@ -126,3 +126,6 @@ def test_anchor_inputs_of_the_wrong_form_are_refused(audio_vae):
         anchors.encode(anchors.Placement(0, 0, 1),
                        waveform=np.zeros((1, 800), np.float32),
                        audio_vae=audio_vae)
+    with pytest.raises(ValueError, match="keeps audio, and no waveform was "
+                                         "given"):
+        anchors.encode(anchors.Placement(0, 0, 1), audio_vae=audio_vae)
