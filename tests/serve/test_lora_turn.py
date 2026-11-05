@@ -580,6 +580,25 @@ def reprice(pool, name, fp_gb):
     pool._build = build
 
 
+def test_an_upload_admitted_as_a_turn_books_takes_the_room_from_it(
+        monkeypatch):
+    pool = make_pool(monkeypatch, 10)
+    x = image(pool, "x", 4, busy=True)
+    got = []
+
+    def seam(name):
+        # The upload reads the figures from before the turn's booking.
+        if name == "booked" and not got:
+            got.append(pool.store.admit(pool, 4 * GB, None))
+
+    pool._seam = seam
+    with pytest.raises(LoraRefused) as ei:
+        turn(pool, x, 4 * GB)
+    assert got == [True] and ei.value.status == 503
+    assert x.lora.pending == 0 and pool.figures.pending == 0
+    assert pool._resident_bytes() + pool.store.live() <= 10 * GB
+
+
 def test_a_repriced_build_evicts_once_for_its_new_price(monkeypatch):
     pool = make_pool(monkeypatch, 10)
     w = image(pool, "w", 1)

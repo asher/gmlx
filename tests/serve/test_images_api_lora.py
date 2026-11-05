@@ -456,6 +456,25 @@ def test_a_lora_whose_factors_no_unload_makes_room_for_is_413_at_its_turn(
     _books_hold(t.pool, t.e)
 
 
+def test_a_job_that_fails_after_its_turns_leaves_nothing_pending(
+        request, monkeypatch, tmp_path):
+    """A request of LoRA a whose plan fails after its turns booked its
+    pairs and factors: it answers the plan's 400, and the settle in the
+    job's finally ends the booking, the books equal to what the caches
+    hold."""
+    t = _entry(request, monkeypatch, tmp_path, own=False)
+
+    def refused(*a, **k):
+        raise svc.ImageRequestError(400, "the plan does not fit",
+                                    param="size")
+
+    monkeypatch.setattr(api, "plan_request", refused)
+    status, doc, _h = _post([("a.safetensors", 1.0)])
+    assert (status, doc["error"]["message"]) == (400, "the plan does not fit")
+    assert t.pipe.adapters.bytes > 0 and t.pipe.tables.bytes == 0
+    _books_hold(t.pool, t.e)
+
+
 def test_a_lora_a_chat_model_in_use_holds_the_room_for_waits_then_is_503(
         request, monkeypatch, tmp_path):
     """The 3 GB LoRA beside a chat model in use that leaves 1.6 GB: the
