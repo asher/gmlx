@@ -580,7 +580,8 @@ async def put_adapter(request: Request):
         with booking.active():
             STATE.put_tensor(STATE.adapters, h, tensors, MAX_ADAPTER_BYTES,
                              copy=False)
-        _settle_store(pool, booking)
+        # The settle takes the pool's lock: off the event loop.
+        await asyncio.to_thread(_settle_store, pool, booking)
     finally:
         booking.cancel()
     return _json(200, {"hash": h})
@@ -773,7 +774,8 @@ def _table(served, tid):
     the pipeline let go, or whose pairs it shed, passes when the server
     holds its body and every matrix the body names: the step defines it
     again in its own turn (``_held_table``). Any other is missing, and the
-    client sends its table again."""
+    client sends its table again; the 409's memory sentence is
+    ``_table_hint``'s, off the event loop."""
     from ..image_steps import STATE, Missing
 
     if not tid:
@@ -782,8 +784,16 @@ def _table(served, tid):
     core = tables.get(tid)
     if core is None or not (_held(served.pipe, core)
                             or _definable(tables.body(tid))):
-        raise Missing([tid], hint=_memory_hint(tables, tid))
+        raise Missing([tid])
     return core
+
+
+def _table_hint(served, tid) -> str | None:
+    """The memory sentence of the 409 of a step's missing table ``tid``,
+    on a request thread: it reads the pool under its lock."""
+    from ..image_steps import STATE
+
+    return _memory_hint(STATE.tables_of(served.spec.id, served.pipe), tid)
 
 
 def _memory_hint(tables, tid) -> str | None:
@@ -987,7 +997,8 @@ async def step(request: Request):
             table = _table(served, fields.get("patch_table"))
         except Missing as m:
             missing += m.extra["missing"]
-            hint = m.hint
+            hint = await asyncio.to_thread(_table_hint, served,
+                                           fields.get("patch_table"))
         if missing:
             raise Missing(missing, hint=hint)
         import numpy as np

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -15,6 +16,8 @@ import pytest
 
 pytest.importorskip("gmlx._vendor.mlx_vlm")
 mx = pytest.importorskip("mlx.core")
+
+from fastapi.testclient import TestClient  # noqa: E402
 
 from gmlx.config import ImageServerCfg  # noqa: E402
 from gmlx.image.samplers import noise_from_seed  # noqa: E402
@@ -681,3 +684,83 @@ def test_a_step_defining_its_table_again_never_sheds_its_matrices(
     assert np.array_equal(again, first)
     assert idle not in pool._entries.values()
     _books_hold(pool, e)
+
+
+# T14 (a) at the routes: the event loop never waits on the pool's lock.
+
+# Seconds a lock holder waits for the event loop before it lets go.
+LOOP_WAIT = 5
+
+
+def _loop_client(loops: list):
+    """A steps client whose requests each record the event loop that
+    serves them in ``loops``."""
+    async def app(scope, receive, send):
+        loops.append(asyncio.get_running_loop())
+        await _APP.app(scope, receive, send)
+    return _client(http=TestClient(app, base_url="http://127.0.0.1"))
+
+
+def _locked_at(monkeypatch, pool, name: str, loops: list) -> list:
+    """Wrap the route helper ``name``: as it starts, a thread takes the
+    pool's lock and asks the request's event loop to let it go. The list
+    returned gets True when the loop did, and False when it did not
+    within LOOP_WAIT, as when the helper waits on the lock on the loop."""
+    real, out = getattr(routes, name), []
+
+    def wrapped(*a, **k):
+        locked, free = threading.Event(), threading.Event()
+        loop = loops[-1]
+
+        def holder():
+            with pool._lock:
+                locked.set()
+                loop.call_soon_threadsafe(free.set)
+                out.append(free.wait(LOOP_WAIT))
+        threading.Thread(target=holder, daemon=True).start()
+        assert locked.wait(LOOP_WAIT)
+        return real(*a, **k)
+
+    monkeypatch.setattr(routes, name, wrapped)
+    return out
+
+
+def test_an_upload_settles_off_the_event_loop(request, monkeypatch):
+    """Another thread holds the pool's lock as an adapter upload settles
+    its booking. The request's event loop runs on while the settle waits,
+    and the upload is booked at its bytes once the lock goes."""
+    pool = _pool(monkeypatch, 4 * GB)
+    _mount(request, _PoolHost({}, pool))
+    loops: list = []
+    c = _loop_client(loops)
+    free = _locked_at(monkeypatch, pool, "_settle_store", loops)
+    h = c.put(np.ones((4, 8), np.float32), kind="adapters")
+    assert free == [True], "the settle waited on the pool's lock"
+    _held, pending, ledger = pool.lora_held(STORE)
+    assert (ledger, pending) == (_store(), 0) and h in ledger
+
+
+def test_a_steps_409_prices_its_memory_sentence_off_the_event_loop(
+        request, monkeypatch, tmp_path):
+    """A step whose table's pairs and matrices the server let go meets a
+    409 whose memory sentence reads the pool. Another thread holds the
+    pool's lock as it is priced: the request's event loop runs on while
+    it waits, and the 409 gives the sentence once the lock goes."""
+    pool, e, p, pairs = _own_pairs(request, monkeypatch, tmp_path)
+    loops: list = []
+    c = _loop_client(loops)
+    rows = _rows(c, _features())
+    tid = _pack_sync(c, pairs, 2.0)()[1]
+    x = noise_from_seed(3, SHAPE)
+    c.step("own", None, x, [0.75], rows, patch_table=tid)
+    image_service.shed_lora(e, p.adapters.bytes + p.tables.bytes)
+    steps.STATE.adapters.clear()
+    free = _locked_at(monkeypatch, pool, "_memory_hint", loops)
+    with pytest.raises(MissingTensors) as missing:
+        c.step("own", None, x, [0.75], rows, patch_table=tid)
+    assert free == [True], "the 409's sentence waited on the pool's lock"
+    assert missing.value.missing == [tid]
+    assert missing.value.body["error"] == (
+        "1 tensor(s) or table(s) are not held by the server; upload them "
+        "and retry. 0.1 GB of LoRA matrices are not held; 3.0 GB of memory "
+        "is free beside the models in use")
