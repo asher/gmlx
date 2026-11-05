@@ -27,6 +27,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   applied a LoRA to it. The next model loaded beside its memory before.
 - A 16 GB Mac now pulls and runs the FLUX.2 klein 9B models at 1024x1024, and a
   Mac under 16 GB pulls no image model, which it could not run.
+- `gmlx serve` no longer stalls other requests to reload a chat model that
+  another load unloaded just as a request for it started.
 
 ## [0.5.4] - 2026-10-29
 
