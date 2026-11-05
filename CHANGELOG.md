@@ -6,6 +6,21 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- NVIDIA Nemotron 3.5 Transcribe hears audio through its speech encoder in
+  `gmlx run`, chat and `gmlx serve`, and answers `/v1/audio/transcriptions`
+  and `/v1/audio/translations` itself, with word times and speakers.
+  `gmlx pull nemotron-3.5-transcribe` downloads the model with its encoder.
+
+### Changed
+
+- Nemotron-H models prefill in less memory, and a request takes the largest
+  prefill step that fits beside the loaded models.
+- Speculative decoding verifies 2 to 8 drafted tokens at head dim 128 on a
+  fused kernel where MLX built the whole score matrix, so Nemotron-H and
+  other models with wide query groups draft faster at long context.
+
 ### Fixed
 
 - A served image model keeps its own LoRAs when a request brings others, and

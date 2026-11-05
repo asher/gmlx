@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Ported from NVIDIA NeMo Speech 979cc6c6 and modified for gmlx
+# (Apache-2.0; see licenses/nemo-speech-LICENSE).
 """Word timestamps and speakers for Nemotron 3.5 Transcribe.
 
 A port of NeMo Speech's ``MultiSpeakerSOTWordTimestampAligner`` with its
