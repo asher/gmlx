@@ -276,7 +276,9 @@ def install_with_fakes(monkeypatch, env=None, **kwargs):
     fake_threading = types.SimpleNamespace(
         Thread=lambda **kw: threads.append(kw) or types.SimpleNamespace(
             start=lambda: None),
-        RLock=threading.RLock, Lock=threading.Lock)
+        RLock=threading.RLock, Lock=threading.Lock,
+        Condition=threading.Condition,
+        current_thread=threading.current_thread)
     monkeypatch.setattr(residency, "threading", fake_threading)
     monkeypatch.setattr(residency.atexit, "register", lambda fn: None)
     residency.install_gguf_residency_pool(**kwargs)

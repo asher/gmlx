@@ -210,6 +210,84 @@ _WORKER_KINDS = frozenset({IMAGE_KIND, VIDEO_KIND})
 _STOCK_IMAGE_KINDS = frozenset({"image_generation", "image_edit"})
 
 
+class LoraRefused(Exception):
+    """LoRA bytes a turn or a route cannot grant: ``status`` 413 when no
+    unload makes room, 503 when one can, with ``retry_after`` seconds."""
+
+    def __init__(self, status: int, message: str,
+                 retry_after: int | None = None):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+        self.retry_after = retry_after
+
+
+def gb(n: float, up: bool) -> str:
+    """``n`` bytes in decimal GB to one decimal, rounded up or down."""
+    import math
+
+    x = max(0.0, float(n)) / 1e9 * 10
+    return f"{(math.ceil(x) if up else math.floor(x)) / 10:.1f}"
+
+
+class _Store:
+    """The step routes' upload store as the owner of a turn."""
+
+    def __repr__(self) -> str:
+        return "uploads"
+
+
+STORE = _Store()
+
+
+class _Ledger:
+    """The LoRA bytes of an image or video entry past its footprint: the
+    request keys its caches hold (``keys``), the excess of its own keys
+    over the footprint's own term, and the bytes its job booked at its
+    turn and has not allocated yet. Set from the caches on the worker,
+    under the pool's lock."""
+
+    __slots__ = ("keys", "own_term", "own", "excess", "pending", "base")
+
+    def __init__(self, own_term: int = 0):
+        self.keys: dict = {}
+        self.own_term = int(own_term)
+        self.own = 0
+        self.excess = 0
+        self.pending = 0
+        # What the ledger held when the job booked ``pending``.
+        self.base = 0
+
+    @property
+    def held(self) -> int:
+        return sum(self.keys.values()) + self.excess
+
+    def set(self, figures) -> None:
+        keys, own = figures
+        self.keys = {k: int(n) for k, n in keys.items()}
+        self.own = int(own)
+        self.excess = max(0, self.own - self.own_term)
+
+
+@dataclass(frozen=True)
+class _Figures:
+    """What the pool holds, as of the last ``_lock`` hold that changed it.
+    Routes and uploads read it with no lock."""
+    budget: int = 0
+    entries: tuple = ()
+    held: tuple = ()            # each entry's ledger bytes, as ``entries``
+    footprints: int = 0
+    pinned: int = 0
+    lora: int = 0               # the ledgers and their pending bytes
+    pending: int = 0
+    building: int = 0
+    loading: str | None = None  # the model the cold build in flight loads
+
+    @property
+    def resident(self) -> int:
+        return self.footprints + self.lora + self.building
+
+
 @dataclass
 class _Entry:
     cache_key: tuple
@@ -231,6 +309,7 @@ class _Entry:
     kind: str = "chat"          # "chat", IMAGE_KIND or VIDEO_KIND
     pipeline: Any = None        # an image or video entry's served pipeline
     priced_up: bool = False     # the install streamed less than predicted
+    lora: _Ledger | None = None  # an image or video entry's LoRA bytes
 
     def __post_init__(self):
         if self.model_cache is None:
@@ -488,21 +567,31 @@ class _ResidencyPool:
         self._lock = threading.RLock()
         self._build_lock = threading.Lock()
         self._clock = 0
-        # The LoRA bytes of image and video entries and the step routes'
-        # uploads, booked before they are allocated (lora_books).
-        from .lora_books import Books
-
-        self.books = Books()
         # The footprint of the cold build in flight, counted resident from
-        # its room check to its insert.
+        # its room check to its insert, and the model it loads.
         self._building = 0
-        # Injectable for tests: the measured room, the shed of an entry's
-        # request LoRA bytes, the shed of the uploads.
+        self._loading: str | None = None
+        # A turn that waits for a chat model in use to go idle waits here;
+        # release() notifies it.
+        self._idle = threading.Condition(self._lock)
+        self._releases = 0
+        # Injectable for tests: the measured room; an entry's LoRA figures
+        # ({request key: bytes}, own bytes) from its caches; the shed of an
+        # entry's request LoRA bytes and of the idle uploads, each returning
+        # the bytes it let go; the uploads' live bytes; the Retry-After of
+        # a turn's 503, which bounds its waits.
         self._headroom_fn: Callable[[], Any] | None = None
-        self._lora_shed: Callable[..., None] | None = None
-        self._store_shed: Callable[[int, tuple], None] | None = None
-        # A test's pause at a named point of a grant or a cold build.
+        self._lora_figures: Callable[[Any], Any] | None = None
+        self._lora_shed: Callable[..., int] | None = None
+        self._store_shed: Callable[[int, tuple], int] | None = None
+        self._store_live: Callable[[], int] | None = None
+        self._retry_fn: Callable[[], int] | None = None
+        # A test's hook on a ledger's bytes past its booking.
+        self.overrun_hook: Callable[[str, int], None] | None = None
+        # A test's pause at a named point of a turn or a cold build, and
+        # its check at each teardown and measure.
         self._seam = None
+        self.figures = _Figures(budget=self._budget)
 
     # public
     def acquire(self, model_path, adapter_path, model_kind, *,
@@ -523,6 +612,7 @@ class _ResidencyPool:
                     entry.ttl = ttl          # latest acquire's TTL wins
                 self._touch(entry)
                 entry.busy += 1
+                self._publish()
                 return entry
         if model_kind in _STOCK_IMAGE_KINDS:
             raise ValueError(f"model kind {model_kind!r} loads mlx-vlm's own "
@@ -567,6 +657,7 @@ class _ResidencyPool:
                 with self._worker_for(model_kind in _WORKER_KINDS, force=force), \
                         self._build_lock:
                     released: list = []
+                    torn: list = []
                     try:
                         with self._lock:
                             entry = self._entries.get(cache_key)
@@ -575,20 +666,30 @@ class _ResidencyPool:
                                     entry.ttl = ttl
                                 self._touch(entry)
                                 entry.busy += 1
+                                self._publish()
                                 return entry
                             if (self._evicts_image(incoming)
                                     and not _holds_image_worker()):
                                 continue
-                            self._evict_for_room(
-                                incoming, model_path=model_path,
-                                streaming=getattr(build_spec, "stream", None) == "experts",
-                                released=released)
+                            try:
+                                self._evict_for_room(
+                                    incoming, model_path=model_path,
+                                    streaming=getattr(build_spec, "stream", None) == "experts",
+                                    torn=torn)
+                            finally:
+                                self._publish()
                             self._hit("room")
                             # The build's room, in the hold that found it, so
-                            # a LoRA booking cannot take it before the insert.
+                            # a LoRA turn cannot take it before the insert.
                             self._building = incoming
+                            self._loading = (loaded_as or
+                                             os.path.basename(str(model_path)))
+                            self._publish()
                         self._hit("roomed")
                     finally:
+                        # The victims go after _lock drops, under the
+                        # build lock.
+                        self._teardown_all(torn, released)
                         self._release_images(released)
                     inserted = False
                     try:
@@ -608,28 +709,31 @@ class _ResidencyPool:
                         # (a metrics label wants a name fixed per entry; aliases sharing
                         # the signature reuse this entry and keep the first name).
                         entry.loaded_as = loaded_as
-                        # The own LoRA figures are read before the hold: no
+                        # The LoRA figures are read before the hold: no
                         # cache lock is taken inside it.
                         try:
                             self._hit("inserting")
-                            lora = self._lora_prepare(entry)
+                            lora = self._new_ledger(entry)
                         except BaseException:
                             self._teardown(entry, late)
                             raise
                         with self._lock:
                             self._hit("insert")
+                            entry.lora = lora
                             self._entries[cache_key] = entry
                             self._building = 0
+                            self._loading = None
                             inserted = True
                             self._touch(entry)
                             entry.busy += 1
-                            if lora is not None:
-                                self.books.attach(entry, *lora)
+                            self._publish()
                         return entry
                     finally:
                         if not inserted:
                             with self._lock:
                                 self._building = 0
+                                self._loading = None
+                                self._publish()
             # Without a byte budget, only the count cap evicts.
             bound = (f"the {self._budget / 1e9:.1f} GB budget"
                      if self._budget else "the model count cap")
@@ -649,13 +753,19 @@ class _ResidencyPool:
         cannot fit, unload the new model and defer the request. Evicted
         image pipelines go to ``released`` for the caller to release
         outside the build lock."""
+        torn: list = []
         try:
-            with self._lock:
-                # The build counts at its new price once, in this hold.
-                self._building = 0
-                self._evict_for_room(entry.footprint, model_path=model_path,
-                                     streaming=True, released=released)
-                self._building = entry.footprint
+            try:
+                with self._lock:
+                    # The build counts at its new price once, in this hold.
+                    self._building = 0
+                    self._evict_for_room(entry.footprint,
+                                         model_path=model_path,
+                                         streaming=True, torn=torn)
+                    self._building = entry.footprint
+                    self._publish()
+            finally:
+                self._teardown_all(torn, released)
         except BaseException:
             try:
                 self._teardown(entry)
@@ -669,42 +779,424 @@ class _ResidencyPool:
         if self._seam is not None:
             self._seam(name)
 
-    # LoRA bookings (lora_books). Grants decide and record in one _lock
-    # hold; no cache lock is taken inside it.
-    def _lora_prepare(self, entry: _Entry):
-        """Hook an image or video entry's LoRA caches to the books, and
-        return its own LoRA term and own pair figures, or None."""
-        if not entry.is_image or entry.pipeline is None:
+    # The LoRA turn (docs/internals/image-steps.md). A worker's job books
+    # the LoRA bytes it allocates next at its turn, under the build lock a
+    # cold load holds, with _lock inside it for each read or write of the
+    # entries and ledgers. No hold of _lock spans a teardown, a pipeline
+    # release, a collection, a measure or a cache lock.
+
+    def _publish(self) -> None:
+        """Rebind ``figures`` to what the pool holds now. Under _lock, at
+        the end of each hold that changes the entries, a ledger, a booking,
+        the build in flight or a pin."""
+        es = tuple(self._entries.values())
+        held = tuple(0 if e.lora is None else e.lora.held for e in es)
+        pending = sum(e.lora.pending for e in es if e.lora is not None)
+        self.figures = _Figures(
+            budget=self._budget, entries=es, held=held,
+            footprints=sum(e.footprint for e in es),
+            pinned=sum(e.footprint for e in es if e.pinned),
+            lora=sum(held) + pending, pending=pending,
+            building=self._building, loading=self._loading)
+
+    def _read_lora(self, entry):
+        """({request key: bytes}, own bytes) the LoRA caches of ``entry``
+        hold now, or None for an entry without them. Each read takes its
+        cache's lock: call with no pool lock."""
+        if entry is STORE or not getattr(entry, "is_image", False):
             return None
-        pipe = getattr(entry.pipeline, "pipe", None)
-        if pipe is None or not hasattr(pipe, "adapters"):
+        return (self._lora_figures or _default_lora_figures)(entry)
+
+    def _new_ledger(self, entry):
+        """The ledger of a new image or video entry, set from its caches,
+        or None. Before the insert's hold."""
+        figs = self._read_lora(entry)
+        if figs is None:
             return None
-        gone, put = self.books.release_hook(entry), self.books.put_hook(entry)
-        for cache in (pipe.adapters, pipe.tables):
-            cache.on_gone, cache.on_put = gone, put
-        own = {k: pipe.adapters.nbytes(k) for k in pipe.adapters.kept}
-        return int(getattr(entry.pipeline, "lora_own_term", 0) or 0), own
+        led = _Ledger(int(getattr(entry.pipeline, "lora_own_term", 0) or 0))
+        led.set(figs)
+        led.base = led.held
+        return led
+
+    def _reconcile(self, entry, figs) -> int:
+        """Under _lock: set the ledger of ``entry``, the turn's owner, to
+        ``figs`` and end its booking. Returns the bytes it holds past what
+        it booked."""
+        led = entry.lora if entry is not STORE else None
+        if led is None or figs is None or not self._in_pool(entry):
+            return 0
+        led.set(figs)
+        over = led.held - (led.base + led.pending)
+        led.pending = 0
+        led.base = led.held
+        return max(0, over)
+
+    def _in_pool(self, entry) -> bool:
+        return self._entries.get(entry.cache_key) is entry
+
+    def _overrun(self, subject: str, over: int) -> None:
+        if over <= 0:
+            return
+        _log.info("%s hold %.1f MB of LoRA memory past their turn's "
+                  "booking", subject, over / 1e6)
+        if self.overrun_hook is not None:
+            self.overrun_hook(subject, over)
+
+    def _store_bytes(self) -> int:
+        """The uploads' live bytes: held and admitted bodies. No pool
+        lock."""
+        return int((self._store_live or _default_store_live)())
+
+    def _retry(self) -> int:
+        if self._retry_fn is not None:
+            return int(self._retry_fn())
+        from .patches.request_flow import deferred_retry_after
+
+        return int(deferred_retry_after())
+
+    def _lora_resident(self, live: int) -> int:
+        """Under _lock: what the budget counts with ``live`` upload bytes."""
+        return self._resident_bytes() + live
+
+    def _measured_room(self, owner, head, live: int):
+        """Under _lock: the measured room of a turn, or None unmeasured:
+        the measure less what the streams keep, the bookings of other
+        owners, the build in flight and the uploads, host memory the
+        measure misses."""
+        if head is None:
+            return None
+        other = sum(e.lora.pending for e in self._entries.values()
+                    if e.lora is not None and e is not owner)
+        return (head - self._reserved_room_bytes() - other - self._building
+                - live)
+
+    def _fits(self, owner, need: int, head, live: int) -> bool:
+        """Under _lock: whether ``need`` more bytes fit the budget and the
+        measured room."""
+        if self._budget and self._lora_resident(live) + need > self._budget:
+            return False
+        room = self._measured_room(owner, head, live)
+        return room is None or need <= room
+
+    def _book(self, owner, need: int) -> None:
+        """Under _lock: book ``need`` bytes on the owner's ledger."""
+        led = owner.lora
+        if led is not None:
+            led.base = led.held
+            led.pending = int(need)
+
+    def _verify(self, owner, need: int, head, over: bool) -> bool:
+        """After the booking's hold: read the uploads again and undo the
+        booking when they took the room meanwhile. The upload side counts
+        itself first and reads the pool next, so one of two grants that
+        race sees the other."""
+        if over or owner.lora is None or need <= 0:
+            return True
+        live = self._store_bytes()
+        with self._lock:
+            led = owner.lora
+            booked, led.pending = led.pending, 0
+            if self._fits(owner, need, head, live):
+                led.pending = booked
+                return True
+            self._publish()
+        return False
+
+    def _worker_guard(self) -> None:
+        if not threading.current_thread().name.startswith("image-worker"):
+            raise RuntimeError("a LoRA turn runs on the image worker, "
+                               "where its job allocates")
+
+    def lora_turn(self, owner, need: int, *, subject: str, hold=(),
+                  held: int = 0, store=(), admit=None) -> None:
+        """The turn of a job on the image worker: room for ``need`` bytes
+        it allocates next, booked on the ledger of ``owner``, a pool entry.
+        ``hold`` names the owner's keys its job keeps, ``held`` their bytes
+        held now, and ``store`` the uploads it keeps. With ``owner`` the
+        upload store, ``admit(head)`` counts the bytes in the store when
+        they fit. Sheds idle LoRA bytes, evicts idle models as a cold load
+        does, measures and books, or waits for chat models in use within
+        the deadline. Raises LoraRefused: 413 when no unload makes room,
+        else 503 with Retry-After."""
+        from .capacity import overcommit
+
+        self._worker_guard()
+        need = max(0, int(need))
+        over = overcommit()
+        retry = self._retry()
+        deadline = time.monotonic() + retry
+        figs = self._read_lora(owner)
+        live = self._store_bytes()
+        head = None if over else self._measured_lora_room()
+        with self._lock:
+            late = self._reconcile(owner, figs)
+            ok = owner is not STORE and self._fits(owner, need, head, live)
+            if ok:
+                self._book(owner, need)
+                self._hit("booked")
+            self._publish()
+        self._overrun(subject, late)
+        if ok and self._verify(owner, need, head, over):
+            return
+        err = None
+        while True:
+            left = deadline - time.monotonic()
+            if err is not None and left <= 0:
+                raise err
+            if not self._build_lock.acquire(timeout=max(0.0, left)):
+                with self._lock:
+                    self._refuse_late(owner, subject, need, retry, err)
+            try:
+                got = self._turn_room(owner, need, subject, hold, held,
+                                      store, admit, retry, over)
+            finally:
+                self._build_lock.release()
+            if got is None:
+                return
+            seen, err = got
+            with self._lock:
+                while self._releases == seen:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        raise err
+                    self._idle.wait(left)
+
+    def _turn_room(self, owner, need, subject, hold, held, store, admit,
+                   retry, over):
+        """Under the build lock: shed, evict, measure and book. Returns
+        None when booked, or (the release count, the 503) to wait on."""
+        self._hit("turn")
+        live = self._store_bytes()
+        head = None if over else self._measured_lora_room()
+        with self._lock:
+            short = self._shortfall(owner, need, head, live)
+        if short > 0:
+            self._shed_for(owner, short, hold, store)
+        torn: list = []
+        released: list = []
+        live = self._store_bytes()
+        try:
+            with self._lock:
+                if not over:
+                    self._evict_for_room(need, torn=torn, strict=True,
+                                         extra=live)
+                self._publish()
+        finally:
+            self._teardown_all(torn, released)
+            self._release_images(released)
+        head = None if over else self._measured_lora_room()
+        live = self._store_bytes()
+        if owner is STORE:
+            if over or admit is None or admit(head):
+                return None
+        else:
+            with self._lock:
+                ok = over or self._fits(owner, need, head, live)
+                if ok:
+                    self._book(owner, need)
+                    self._publish()
+            if ok and self._verify(owner, need, head, over):
+                return None
+            live = self._store_bytes()
+        with self._lock:
+            return self._refusal(owner, need, head, live, held, subject,
+                                 retry)
+
+    def _shortfall(self, owner, need: int, head, live: int) -> int:
+        """Under _lock: the bytes past the budget or the measured room."""
+        short = 0
+        if self._budget:
+            short = self._lora_resident(live) + need - self._budget
+        room = self._measured_room(owner, head, live)
+        if room is not None:
+            short = max(short, need - room)
+        return max(0, short)
+
+    def _shed_for(self, owner, nbytes: int, hold, store) -> None:
+        """Shed ``nbytes`` of idle LoRA bytes, after _lock dropped: the
+        owner's own request bytes (``hold`` kept), its worker's other
+        entries' by their last use, then the idle uploads (``store``
+        kept). The store's own turn sheds the uploads first."""
+        shed = self._lora_shed or _default_lora_shed
+        store_shed = self._store_shed or _default_store_shed
+        left = int(nbytes)
+        with self._lock:
+            others = sorted((e for e in self._entries.values()
+                             if e.lora is not None and e is not owner),
+                            key=lambda e: e.seq)
+        order = ([STORE] + others if owner is STORE
+                 else [owner] + others + [STORE])
+        for src in order:
+            if left <= 0:
+                return
+            if src is STORE:
+                left -= int(store_shed(left, tuple(store)) or 0)
+                continue
+            mine = src is owner
+            left -= int(shed(src, left, tuple(hold) if mine else (), mine)
+                        or 0)
+            figs = self._read_lora(src)
+            with self._lock:
+                if figs is not None and src.lora is not None \
+                        and self._in_pool(src):
+                    src.lora.set(figs)
+                    src.lora.base = src.lora.held
+                self._publish()
+
+    def _refusal(self, owner, need, head, live, held, subject, retry):
+        """Under _lock, for a turn left short: raise the 413 when no
+        unload makes room, the 503 at once when no chat model in use
+        holds the bytes, else return (the release count, the 503) for the
+        turn to wait on."""
+        budget = self._budget
+        es = list(self._entries.values())
+        if budget:
+            mine = 0 if owner is STORE else owner.footprint
+            pinned = sum(e.footprint for e in es
+                         if e.pinned and e is not owner)
+            if need + held > budget - mine - pinned:
+                beside = ("the pinned models" if owner is STORE else
+                          f"{self._lora_name(owner)!r} and the pinned "
+                          "models")
+                self._lora_refuse(
+                    413, subject, need,
+                    f", over the {gb(budget - mine - pinned, False)} GB the "
+                    f"server's memory budget leaves beside {beside}")
+        chat = [e for e in es if e is not owner and not e.pinned
+                and not e.is_image and e.busy > e.retained]
+        free = max(0, budget - self._lora_resident(live)) if budget else 0
+        if budget and self._lora_resident(live) + need > budget:
+            idle = sum(self._entry_bytes(e) for e in es
+                       if e is not owner and not e.pinned and e.busy == 0)
+            freed = idle + sum(self._entry_bytes(e) for e in chat)
+            err = self._lora_short(owner, subject, need, free, retry)
+            short = self._lora_resident(live) + need - budget
+            if not chat or freed < short:
+                raise err
+            return self._releases, err
+        room = self._measured_room(owner, head, live)
+        if room is None:
+            # The uploads that took the room went meanwhile: check again.
+            return self._releases - 1, self._lora_short(
+                owner, subject, need, free, retry)
+        err = self._lora_unmeasured(subject, need, room, retry, owner)
+        if not chat:
+            raise err
+        return self._releases, err
+
+    def _refuse_late(self, owner, subject, need, retry, err) -> None:
+        """Under _lock, at the deadline before the build lock: the 503 of
+        the cold load in flight, or of the last check."""
+        if self._building:
+            self._lora_refuse(
+                503, subject, need,
+                f", and the server is loading {self._loading} "
+                f"({gb(self._building, True)} GB) now; retry when it is "
+                "loaded", retry=retry)
+        if err is not None:
+            raise err
+        free = (max(0, self._budget - self._resident_bytes())
+                if self._budget else 0)
+        raise self._lora_short(owner, subject, need, free, retry)
+
+    def _entry_bytes(self, e) -> int:
+        led = e.lora
+        return e.footprint + (0 if led is None else led.held + led.pending)
+
+    def lora_settle(self, entry, subject: str) -> None:
+        """A job's settle, on the worker in its finally: the ledger set to
+        what the caches hold once it ran, its booking ended. A ledger past
+        its booking logs one line."""
+        figs = self._read_lora(entry)
+        with self._lock:
+            over = self._reconcile(entry, figs)
+            self._publish()
+        self._overrun(subject, over)
+
+    def lora_ledger(self, entry) -> tuple:
+        """(pending, {key: bytes}) of the ledger of ``entry``."""
+        with self._lock:
+            led = entry.lora
+            if led is None:
+                return 0, {}
+            return led.pending, dict(led.keys)
+
+    def lora_own(self, entry) -> tuple:
+        """(own bytes held, the footprint's own term, the excess) of the
+        ledger of ``entry``, as of its last setting."""
+        with self._lock:
+            led = entry.lora
+            if led is None:
+                return 0, 0, 0
+            return led.own, led.own_term, led.excess
+
+    def lora_hopeless(self, owner, n: int, subject: str) -> None:
+        """A route's check of ``n`` bytes its job's turn would book, from
+        ``figures`` with no lock: the 413 when no unload makes room."""
+        from .capacity import overcommit
+
+        f = self.figures
+        if not f.budget or overcommit():
+            return
+        mine = 0 if owner is STORE else owner.footprint
+        pinned = sum(e.footprint for e in f.entries
+                     if e.pinned and e is not owner)
+        if int(n) > f.budget - mine - pinned:
+            beside = ("the pinned models" if owner is STORE else
+                      f"{self._lora_name(owner)!r} and the pinned models")
+            self._lora_refuse(
+                413, subject, n,
+                f", over the {gb(f.budget - mine - pinned, False)} GB the "
+                f"server's memory budget leaves beside {beside}")
+
+    def upload_room(self, head) -> int | None:
+        """The bytes the uploads may hold in all, from ``figures`` with no
+        lock: the budget less what the pool holds, and the measured room
+        ``head`` less the bookings, the build in flight and what the
+        streams keep. None when nothing bounds them."""
+        from .capacity import overcommit
+
+        if overcommit():
+            return None
+        f = self.figures
+        room = None
+        if f.budget:
+            room = f.budget - f.resident
+        if head is not None:
+            res, ceiling, _host, _floor = self._stream_reservations(f.entries)
+            m = head - res - ceiling - f.pending - f.building
+            room = m if room is None else min(room, m)
+        return room
+
+    def lora_busy_refusal(self, subject: str, n: int):
+        """The 503 of an upload whose store turn did not start within the
+        deadline, from ``figures`` with no lock."""
+        f = self.figures
+        retry = self._retry()
+        if f.building:
+            return LoraRefused(
+                503, f"{subject} need {gb(n, True)} GB of memory, and the "
+                f"server is loading {f.loading} ({gb(f.building, True)} GB) "
+                "now; retry when it is loaded", retry)
+        busy = [self._lora_name(e) for e in f.entries if e.busy > e.retained]
+        if busy:
+            return LoraRefused(
+                503, f"{subject} need {gb(n, True)} GB of memory, and the "
+                f"image worker is busy beside the models in use "
+                f"({', '.join(busy)}); retry when one is idle", retry)
+        return LoraRefused(
+            503, f"{subject} need {gb(n, True)} GB of memory, and the image "
+            "worker is busy; retry when the requests in flight finish",
+            retry)
 
     @staticmethod
     def _lora_name(e) -> str:
         return e.loaded_as or os.path.basename(str(e.model_path))
 
-    def _lora_guard(self, what: str) -> None:
-        import asyncio
-
-        if threading.current_thread().name.startswith("image-worker"):
-            raise RuntimeError(f"{what} runs on a request thread, never on "
-                               "the image worker it may wait on")
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        raise RuntimeError(f"{what} runs on a request thread, never on the "
-                           "event loop")
-
     def _measured_lora_room(self):
         """The free working set measured now, against the serve ceiling,
-        or None where it cannot be measured. Read before any lock."""
+        or None where it cannot be measured. Read with no pool lock."""
+        self._hit("measure")
         if self._headroom_fn is not None:
             return self._headroom_fn()
         from gmlx.gen.prefill_decay import headroom_bytes
@@ -719,320 +1211,53 @@ class _ResidencyPool:
             head -= max(0.0, ws - budget)
         return head
 
-    def _lora_refuse(self, status, subject, n, text, *, free=None):
-        from .lora_books import LoraRefused, gb
-
+    def _lora_refuse(self, status, subject, n, text, *, retry=None):
         lead = f"{subject} need {gb(n, True)} GB of memory"
-        raise LoraRefused(status, f"{lead}{text}")
+        raise LoraRefused(status, f"{lead}{text}", retry)
 
-    def _lora_busy(self) -> list:
-        """The names of the models in use, under _lock."""
+    def _lora_err(self, subject, n, text, retry) -> LoraRefused:
+        return LoraRefused(503, f"{subject} need {gb(n, True)} GB of "
+                           f"memory{text}", retry)
+
+    def _lora_busy(self, owner=None) -> list:
+        """Under _lock: the names of the models in use beside ``owner``."""
         return [self._lora_name(e) for e in self._entries.values()
-                if e.busy > 0]
+                if e.busy > e.retained and e is not owner]
 
-    def _lora_short(self, subject, n, free) -> None:
-        """The 503 of a booking the budget leaves ``free`` bytes for, with
-        no idle model to unload for it."""
-        from .lora_books import gb
-
-        busy = self._lora_busy()
+    def _lora_short(self, owner, subject, n, free, retry) -> LoraRefused:
+        """The 503 of a turn the budget leaves ``free`` bytes for."""
+        busy = self._lora_busy(owner)
         if busy:
-            self._lora_refuse(
-                503, subject, n,
+            return self._lora_err(
+                subject, n,
                 f", and {gb(free, False)} GB is free beside the models in "
-                f"use ({', '.join(busy)}); retry when one is idle")
-        self._lora_refuse(
-            503, subject, n,
+                f"use ({', '.join(busy)}); retry when one is idle", retry)
+        return self._lora_err(
+            subject, n,
             f", and {gb(free, False)} GB is free; unload a model or retry "
-            "when the requests in flight finish")
+            "when the requests in flight finish", retry)
 
-    def _lora_unmeasured(self, subject, n, room) -> None:
-        """The 503 of a booking the measured working set leaves ``room``
+    def _lora_unmeasured(self, subject, n, room, retry,
+                         owner=None) -> LoraRefused:
+        """The 503 of a turn the measured working set leaves ``room``
         bytes for."""
-        from .lora_books import gb
-
-        if self._lora_busy():
-            self._lora_refuse(
-                503, subject, n,
+        if self._lora_busy(owner):
+            return self._lora_err(
+                subject, n,
                 f", and {gb(room, False)} GB is free in the working set "
-                "now; retry when the models in use finish")
-        self._lora_refuse(
-            503, subject, n,
+                "now; retry when the models in use finish", retry)
+        return self._lora_err(
+            subject, n,
             f", and {gb(room, False)} GB is free in the working set now; "
-            "close other apps or unload a model to make room")
-
-    def _lora_plan(self, owner, n: int, subject: str, *, evict: bool,
-                   own_held: int = 0, store_held: int = 0, head=None,
-                   but=None):
-        """Under _lock after a drain: the claims and the idle models that
-        make room for ``n`` more bytes, or a refusal. ``own_held`` bytes
-        of the owner and ``store_held`` bytes of the upload store are the
-        job's own keys, which it never claims."""
-        from .capacity import overcommit
-        from .lora_books import STORE, gb
-
-        if n <= 0:
-            return [], []
-        over = overcommit()
-        budget = self._budget
-        books = self.books
-        eff = (sum(e.footprint for e in self._entries.values())
-               + books.total() + self._building - books.claimed())
-        claims, victims, got = [], [], 0
-        need = eff + n - budget if budget else 0
-        if need > 0:
-            take = min(need, n)
-            order = [] if owner is STORE else [owner]
-            order += [e for e in sorted(self._entries.values(),
-                                        key=lambda e: e.seq)
-                      if e.is_image and e is not owner]
-            order.append(STORE)
-            for src in order:
-                if take <= 0:
-                    break
-                c = min(take, books.idle(
-                    src, own_held if src is owner
-                    else store_held if src is STORE else 0))
-                if c > 0:
-                    claims.append((src, c))
-                    take -= c
-                    got += c
-            short = need - got
-            if short > 0 and not over:
-                pinned = sum(e.footprint for e in self._entries.values()
-                             if e.pinned and e is not owner)
-                mine = 0 if owner is STORE else getattr(owner,
-                                                         "footprint", 0)
-                if n > budget - mine - pinned:
-                    beside = ("the pinned models" if owner is STORE else
-                              f"{self._lora_name(owner)!r} and the pinned "
-                              "models")
-                    self._lora_refuse(
-                        413, subject, n,
-                        f", over the {gb(budget - mine - pinned, False)} GB "
-                        f"the server's memory budget leaves beside {beside}")
-                idle = sorted((e for e in self._entries.values()
-                               if not e.pinned and e.busy == 0
-                               and e is not owner), key=lambda e: e.seq)
-                if evict and owner is not STORE:
-                    freed = 0
-                    for e in idle:
-                        if freed >= short:
-                            break
-                        victims.append(e)
-                        freed += (e.footprint + books.held(e)
-                                  + books.pending(e))
-                    if freed < short:
-                        victims = []
-                if not victims:
-                    free = max(0, budget - eff)
-                    if idle and owner is STORE:
-                        held = sum(e.footprint for e in idle)
-                        names = ", ".join(self._lora_name(e) for e in idle)
-                        self._lora_refuse(
-                            503, subject, n,
-                            f", and {gb(free, False)} GB is free; idle "
-                            f"models hold {gb(held, False)} GB ({names}). "
-                            "Unload one to make room")
-                    self._lora_short(subject, n, free)
-        if head is not None and not over:
-            room = (head - self._reserved_room_bytes()
-                    - books.pending_total(but) - self._building)
-            # The models chosen to go free what the budget counts of them.
-            freed = sum(e.footprint + books.held(e) + books.pending(e)
-                        for e in victims)
-            if n - got - freed > room:
-                self._lora_unmeasured(subject, n, room)
-        return claims, victims
-
-    def reserve_lora(self, owner, n: int, *, subject: str,
-                     own_held: int = 0, store_held: int = 0):
-        """Book ``n`` bytes for ``owner``, an entry or the upload store,
-        on a request thread: the estimate of a route. An entry's booking
-        may evict idle models as a cold load does; an upload's never does.
-        Returns the Booking, or raises LoraRefused. ``own_held`` bytes of
-        the owner and ``store_held`` bytes of the upload store are the
-        request's own keys, which it never claims."""
-        from .lora_books import STORE
-
-        self._lora_guard("a LoRA reservation")
-        n = max(0, int(n))
-        head = self._measured_lora_room()
-        evict = owner is not STORE
-        for attempt in range(3):
-            # An eviction runs as a cold load's does: under the worker
-            # reservation and the build lock, taken before _lock.
-            windowed = attempt > 0
-            with (self._worker_for(False, force=True) if windowed
-                  else contextlib.nullcontext()), \
-                    (self._build_lock if windowed
-                     else contextlib.nullcontext()):
-                released: list = []
-                try:
-                    with self._lock:
-                        self.books.drain()
-                        claims, victims = self._lora_plan(
-                            owner, n, subject, evict=evict, head=head,
-                            own_held=own_held, store_held=store_held)
-                        self._hit("reserve")
-                        if victims and not windowed:
-                            continue
-                        if (any(v.is_image for v in victims)
-                                and not _holds_image_worker()):
-                            continue
-                        for v in victims:
-                            _log.info("evicting LRU model (%.1f GB) for "
-                                      "LoRA bytes: %s", v.footprint / 1e9,
-                                      v.model_path)
-                            self._teardown(v, released)
-                            del self._entries[v.cache_key]
-                            if self._proxy._last_entry is v:
-                                self._proxy._last_entry = None
-                        return self.books.open_booking(owner, n, subject,
-                                                       claims)
-                finally:
-                    self._release_images(released)
-        from .lora_books import LoraRefused
-
-        raise LoraRefused(503, f"{subject} cannot be booked while the image "
-                          "worker is busy; retry")
-
-    def turn_lora(self, owner, booking, need: int, *, subject: str,
-                  own_held: int = 0, store_held: int = 0):
-        """The booking at a job's turn, on the image worker: ``need``
-        bytes the job will allocate by its dry run, past its pending
-        booking. Room from free memory, idle LoRA bytes and uploads, never
-        a model. Returns the booking (a new one when ``booking`` is
-        None)."""
-        if not threading.current_thread().name.startswith("image-worker"):
-            raise RuntimeError("a turn booking runs on the image worker, "
-                               "where the job allocates")
-        need = max(0, int(need))
-        head = self._measured_lora_room()
-        with self._lock:
-            self.books.drain()
-            if booking is not None and not self.books.is_open(booking):
-                booking = None
-            pending = 0 if booking is None else booking.pending
-            short = max(0, need - pending)
-            # The measured check takes what the job has yet to allocate.
-            claims, _ = self._lora_plan(owner, short, subject, evict=False,
-                                        own_held=own_held,
-                                        store_held=store_held, head=None,
-                                        but=booking)
-            if head is not None:
-                from .capacity import overcommit
-
-                room = (head - self._reserved_room_bytes()
-                        - self.books.pending_total(booking) - self._building)
-                got = sum(c for _s, c in claims)
-                if not overcommit() and need - got > room:
-                    self._lora_unmeasured(subject, need, room)
-            self._hit("turn")
-            if booking is None:
-                return self.books.open_booking(owner, short, subject, claims)
-            if short:
-                self.books.grow(booking, short, claims)
-            return booking
-
-    def shed_claims(self, booking, hold=(), store_hold=()) -> None:
-        """Shed what ``booking`` claimed, after _lock dropped: an entry's
-        request LoRA bytes on the image worker, the uploads anywhere. The
-        owner's keys in ``hold`` and the uploads in ``store_hold`` stay."""
-        from .lora_books import STORE
-
-        for src, c in booking.claims_on():
-            if src is STORE:
-                shed = self._store_shed or _default_store_shed
-                shed(c, tuple(store_hold))
-            else:
-                shed = self._lora_shed or _default_lora_shed
-                shed(src, c, hold if src is booking.owner else (),
-                     src is booking.owner)
-
-    def release_claims(self, booking) -> None:
-        """A claimant releases its claims and re-checks, in one hold,
-        after its shed and before it allocates. A claim whose bytes left
-        another way ends here in a 503, never an overbook."""
-        from .capacity import overcommit
-        from .lora_books import LoraRefused
-
-        with self._lock:
-            self.books.drain()
-            self.books.unclaim(booking)
-            if not self._budget or overcommit():
-                return
-            eff = (sum(e.footprint for e in self._entries.values())
-                   + self.books.total() + self._building
-                   - self.books.claimed())
-            if eff > self._budget:
-                booking.done = True
-                self.books.close(booking._rec)
-                raise LoraRefused(
-                    503, f"{booking.subject} lost the memory booked for "
-                    "them to other work; retry")
-
-    def settle_lora(self, booking, figures: dict) -> None:
-        """Set the keys ``booking`` entered to the caches' ``figures``,
-        read before this hold, and return the rest. Bytes past the
-        booking are a growth: booked here, under _lock, with one line."""
-        if booking is None:
-            return
-        with self._lock:
-            self.books.drain()
-            over = self.books.settle(booking, figures)
-        if over:
-            self.books.overrun(booking.subject, over)
-
-    def lora_own(self, owner) -> tuple:
-        """(own bytes held, the footprint's own term, the excess booked)
-        of ``owner`` after the posted shrinks."""
-        with self._lock:
-            self.books.drain()
-            rec = self.books.rec(owner)
-            if rec is None:
-                return 0, 0, 0
-            return rec.own_used(), rec.own_term, rec.excess
-
-    def lora_free(self) -> int:
-        """The bytes the budget leaves beside the models and the bookings,
-        for a refusal's text."""
-        with self._lock:
-            self.books.drain()
-            eff = (sum(e.footprint for e in self._entries.values())
-                   + self.books.total() + self._building
-                   - self.books.claimed())
-        return max(0, int(self._budget - eff)) if self._budget else 0
-
-    def grow_lora(self, booking, n: int, *, subject: str):
-        """Book ``n`` more bytes on an open upload booking, on a request
-        thread, as an upload books: never a model."""
-        from .lora_books import LoraRefused
-
-        self._lora_guard("a LoRA reservation")
-        head = self._measured_lora_room()
-        with self._lock:
-            self.books.drain()
-            if not self.books.is_open(booking):
-                raise LoraRefused(503, f"{subject} lost the memory booked "
-                                  "for them to other work; retry")
-            claims, _ = self._lora_plan(booking.owner, int(n), subject,
-                                        evict=False, head=head, but=booking)
-            self.books.grow(booking, int(n), claims)
-        return booking
-
-    def lora_held(self, owner) -> tuple:
-        """(held, pending, ledger) of ``owner`` after the posted shrinks."""
-        with self._lock:
-            self.books.drain()
-            return (self.books.held(owner), self.books.pending(owner),
-                    self.books.ledger(owner))
+            "close other apps or unload a model to make room", retry)
 
     def release(self, entry: _Entry) -> None:
         """Drop one in-flight reference taken by :meth:`acquire`. At zero the
         entry becomes LRU-evictable again."""
         with self._lock:
             entry.busy = max(0, entry.busy - 1)
+            self._releases += 1
+            self._idle.notify_all()
 
     def resident_adapter(self, model_path):
         """Adapter path of a resident entry for ``model_path`` (adapter
@@ -1060,21 +1285,22 @@ class _ResidencyPool:
         a later unload collects it once released. Returns whether anything was
         torn down. ``ignore_retained`` as in :meth:`evict`."""
         released: list = []
+        torn: list = []
         with self._teardown_window(released):
-            with self._lock:
-                cleared = False
-                for key, entry in list(self._entries.items()):
-                    if self._live_count(entry, ignore_retained) > 0:
-                        loadlog.verbose_print(
-                            f"[residency] unload skipping busy model "
-                            f"{os.path.basename(str(entry.model_path))} "
-                            f"({entry.busy} in-flight)")
-                        continue
-                    self._teardown(entry, released)
-                    if self._proxy._last_entry is entry:
-                        self._proxy._last_entry = None
-                    del self._entries[key]
-                    cleared = True
+            try:
+                with self._lock:
+                    for entry in list(self._entries.values()):
+                        if self._live_count(entry, ignore_retained) > 0:
+                            loadlog.verbose_print(
+                                f"[residency] unload skipping busy model "
+                                f"{os.path.basename(str(entry.model_path))} "
+                                f"({entry.busy} in-flight)")
+                            continue
+                        self._detach(entry, torn)
+                    cleared = bool(torn)
+                    self._publish()
+            finally:
+                self._teardown_all(torn, released)
             return cleared
 
     def busy_paths(self) -> list:
@@ -1160,6 +1386,7 @@ class _ResidencyPool:
         Also drops any keep mark - an explicit unload is a full release, so the
         path won't be silently re-kept (and TTL-exempted) on a later reload."""
         released: list = []
+        torn: list = []
         with self._teardown_window(released):
             with self._lock:
                 self._keep_paths.discard(model_path)
@@ -1171,11 +1398,9 @@ class _ResidencyPool:
                 if in_flight:
                     raise ModelBusyError(model_path, in_flight)
                 for k in keys:
-                    entry = self._entries[k]
-                    self._teardown(entry, released)
-                    if self._proxy._last_entry is entry:
-                        self._proxy._last_entry = None
-                    del self._entries[k]
+                    self._detach(self._entries[k], torn)
+                self._publish()
+            self._teardown_all(torn, released)
             return bool(keys)
 
     def set_keep(self, model_path, keep: bool) -> None:
@@ -1254,26 +1479,33 @@ class _ResidencyPool:
         now = self._time_fn()
         reaped = []
         released: list = []
+        torn: list = []
         with self._teardown_window(released):
-            with self._lock:
-                for entry in list(self._entries.values()):
-                    if (entry.pinned or entry.model_path in self._keep_paths
-                            or not entry.ttl or entry.ttl <= 0):
-                        continue
-                    if now - entry.last_access < entry.ttl:
-                        continue
-                    if entry.is_image and entry.busy > 0:
-                        # An image job is not in the server's in-flight
-                        # count; its hold is.
-                        continue
-                    _log.info("idle TTL unload (%.0fs): %s",
-                              entry.ttl, entry.model_path)
-                    self._teardown(entry, released)
-                    del self._entries[entry.cache_key]
-                    if self._proxy._last_entry is entry:
-                        self._proxy._last_entry = None
-                    reaped.append(entry.model_path)
+            try:
+                with self._lock:
+                    self._reap_locked(now, torn, reaped)
+                    self._publish()
+            finally:
+                self._teardown_all(torn, released)
         return reaped
+
+    def _reap_locked(self, now, torn: list, reaped: list) -> None:
+        """Under _lock: take the entries idle past their TTL out of the
+        pool into ``torn``."""
+        for entry in list(self._entries.values()):
+            if (entry.pinned or entry.model_path in self._keep_paths
+                    or not entry.ttl or entry.ttl <= 0):
+                continue
+            if now - entry.last_access < entry.ttl:
+                continue
+            if entry.is_image and entry.busy > 0:
+                # An image job is not in the server's in-flight
+                # count; its hold is.
+                continue
+            _log.info("idle TTL unload (%.0fs): %s",
+                      entry.ttl, entry.model_path)
+            self._detach(entry, torn)
+            reaped.append(entry.model_path)
 
     def _server_in_flight(self):
         """The server-wide in-flight request count (mlx-vlm's metrics store), or
@@ -1300,26 +1532,21 @@ class _ResidencyPool:
             self._proxy._last_entry = entry
 
     def _resident_bytes(self) -> int:
-        """The footprints, the LoRA bookings and the cold build in
-        flight, after the shrinks posted so far."""
+        """The footprints, the LoRA ledgers and bookings and the cold
+        build in flight."""
         with self._lock:
-            self.books.drain()
-            return (sum(e.footprint for e in self._entries.values())
-                    + self.books.total() + self._building)
+            return sum(self._entry_bytes(e)
+                       for e in self._entries.values()) + self._building
 
     def plan_beside(self, owner) -> int:
-        """What the pool holds beside a request plan on entry ``owner``:
-        the resident bytes less its weights, its held LoRA bytes and the
-        held uploads, which the plan counts itself."""
-        from .lora_books import STORE
+        """What the pool holds beside a request plan on entry ``owner``,
+        from ``figures`` with no lock: the resident bytes less its weights
+        and its held LoRA bytes, which the plan counts itself."""
+        f = self.figures
+        mine = next((h for e, h in zip(f.entries, f.held) if e is owner), 0)
+        return f.resident - owner.footprint - mine
 
-        with self._lock:
-            self.books.drain()
-            return (sum(e.footprint for e in self._entries.values())
-                    + self.books.total() + self._building - owner.footprint
-                    - self.books.held(owner) - self.books.held(STORE))
-
-    def _stream_reservations(self) -> tuple[int, int, int, int]:
+    def _stream_reservations(self, entries=None) -> tuple[int, int, int, int]:
         """``(room, ceiling margin, host overhead, host floor)`` the
         resident streamed models keep but have not filled. The room is a
         released prefill ring and the priced KV room. The host floor and
@@ -1328,7 +1555,7 @@ class _ResidencyPool:
         past the RAM outside the ceiling. The margins are the machine's
         and the process's, so they count once."""
         room = ceiling = host = floor = 0
-        for e in self._entries.values():
+        for e in (self._entries.values() if entries is None else entries):
             rg = e.response_generator
             feeder = _decode_feeder_of(rg)
             if feeder is None:
@@ -1384,14 +1611,43 @@ class _ResidencyPool:
         return False
 
     def _evict_for_room(self, incoming: int, *, model_path=None,
-                        streaming: bool = False, released=None):
-        # Evict LRU-unpinned models until the incoming one fits the budget (and
-        # the optional count cap). Never evict a pinned or busy (in-flight
-        # generation) model; if only those remain, exceed the budget rather than
-        # refuse the request or kill a live generation. A streaming model is
-        # the exception: its arena is sized to the ceiling, so an overcommit
-        # takes the room the live generation's KV needs and the governor
-        # sheds it. That one defers with the typed 503 instead.
+                        streaming: bool = False, torn: list,
+                        strict: bool = False, extra: int = 0) -> bool:
+        """Under _lock: take LRU idle unpinned entries out of the pool, into
+        ``torn``, until ``incoming`` more bytes fit. The caller tears them
+        down after _lock drops, under the build lock. Returns whether it
+        fits.
+
+        A cold load (not ``strict``) fits the budget and the optional count
+        cap. It never evicts a pinned or busy (in-flight generation) model;
+        if only those remain, it exceeds the budget rather than refuse the
+        request or kill a live generation. A streaming model is the
+        exception: its arena is sized to the ceiling, so an overcommit
+        takes the room the live generation's KV needs and the governor
+        sheds it. That one defers with the typed 503 instead.
+
+        A LoRA turn (``strict``) fits the budget alone, with ``extra``
+        upload bytes, and takes no entry unless the entries it takes make
+        the room."""
+        if strict:
+            if not self._budget:
+                return True
+            short = self._resident_bytes() + extra + incoming - self._budget
+            victims, freed = [], 0
+            for e in sorted((e for e in self._entries.values()
+                             if not e.pinned and e.busy == 0),
+                            key=lambda e: e.seq):
+                if freed >= short:
+                    break
+                victims.append(e)
+                freed += self._entry_bytes(e)
+            if freed < short:
+                return False
+            for v in victims:
+                _log.info("evicting LRU model (%.1f GB) for LoRA bytes: %s",
+                          v.footprint / 1e9, v.model_path)
+                self._detach(v, torn)
+            return True
         while self._entries and self._over_capacity(incoming):
             victim = min(
                 (e for e in self._entries.values() if not e.pinned and e.busy == 0),
@@ -1416,15 +1672,37 @@ class _ResidencyPool:
                     len(self._entries), self._resident_bytes() / 1e9,
                     incoming / 1e9, self._budget / 1e9,
                 )
-                return
+                return False
             _log.info(
                 "evicting LRU model (%.1f GB) to fit %.1f GB: %s",
                 victim.footprint / 1e9, incoming / 1e9, victim.model_path,
             )
-            self._teardown(victim, released)
-            del self._entries[victim.cache_key]
-            if self._proxy._last_entry is victim:
-                self._proxy._last_entry = None
+            self._detach(victim, torn)
+        return True
+
+    def _detach(self, entry: _Entry, torn: list) -> None:
+        """Under _lock: take ``entry`` out of the pool, with its ledger,
+        for a teardown after _lock drops."""
+        del self._entries[entry.cache_key]
+        if self._proxy._last_entry is entry:
+            self._proxy._last_entry = None
+        entry.lora = None
+        torn.append(entry)
+
+    def _teardown_all(self, torn: list, released: list) -> None:
+        """Tear down the entries taken out of the pool, with no _lock held:
+        every one is tried, and the first failure raises after."""
+        first = None
+        while torn:
+            entry = torn.pop(0)
+            try:
+                self._teardown(entry, released)
+            except Exception as e:  # noqa: BLE001 - raised after the rest
+                _log.warning("teardown of %s failed", entry.model_path,
+                             exc_info=True)
+                first = first or e
+        if first is not None:
+            raise first
 
     def _image_fn(self, i: int) -> Callable[..., Any]:
         if self._image_fns is None:
@@ -1467,6 +1745,7 @@ class _ResidencyPool:
         without the log line."""
         from .capacity import preload_gate
 
+        self._hit("measure")
         extra = {"image": True} if image else {}
         room, ceiling, host, floor = self._stream_reservations()
         preload_gate(gate_bytes, str(model_path), streaming=streaming,
@@ -1905,9 +2184,8 @@ class _ResidencyPool:
         ``released``, which the caller hands to :meth:`_release_images`
         once it drops ``_lock``: the release waits on the image worker, and
         a collection there can finalize a hold whose release takes
-        ``_lock``."""
-        with self._lock:
-            self.books.drop(entry)
+        ``_lock``. Called with no _lock held."""
+        self._hit("teardown")
         if entry.is_image:
             pipe, entry.pipeline = entry.pipeline, None
             if released is None:
@@ -2076,52 +2354,28 @@ class _ResidencyPool:
 
 
 
-_RESERVE_POOL = None
-
-
-def _reserve_executor():
-    global _RESERVE_POOL
-    if _RESERVE_POOL is None:
-        import concurrent.futures
-
-        _RESERVE_POOL = concurrent.futures.ThreadPoolExecutor(
-            max_workers=32, thread_name_prefix="lora-reserve")
-    return _RESERVE_POOL
-
-
-def _cancel_result(fut) -> None:
-    if not fut.cancelled() and fut.exception() is None:
-        got = fut.result()
-        if got is not None:
-            got.cancel()
-
-
-async def reserve_on_thread(pool, owner, n: int, *, subject: str,
-                            executor=None, **kw):
-    """``pool.reserve_lora`` on a thread, awaited from a route. A route
-    cancelled while it waits leaves the booking to the thread's done
-    callback, which cancels it when it arrives."""
-    import asyncio
-
-    fut = (executor or _reserve_executor()).submit(
-        pool.reserve_lora, owner, n, subject=subject, **kw)
-    try:
-        return await asyncio.wrap_future(fut)
-    except asyncio.CancelledError:
-        fut.add_done_callback(_cancel_result)
-        raise
-
-
-def _default_lora_shed(entry, nbytes: int, hold, own: bool) -> None:
+def _default_lora_figures(entry):
     from . import image_service
 
-    image_service.shed_lora(entry, nbytes, hold, own)
+    return image_service.lora_figures(entry)
 
 
-def _default_store_shed(nbytes: int, hold=()) -> None:
+def _default_lora_shed(entry, nbytes: int, hold, own: bool) -> int:
+    from . import image_service
+
+    return image_service.shed_lora(entry, nbytes, hold, own)
+
+
+def _default_store_shed(nbytes: int, hold=()) -> int:
     from .image_steps import STATE
 
-    STATE.adapters.shed(nbytes, hold)
+    return STATE.adapters.shed(nbytes, hold)
+
+
+def _default_store_live() -> int:
+    from .image_steps import STATE
+
+    return STATE.adapters.live()
 
 
 def _holds_image_worker() -> bool:
