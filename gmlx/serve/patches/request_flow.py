@@ -108,7 +108,7 @@ def install_chat_load_offload() -> None:
     handler's own ``get_cached_model`` is a fast in-memory cache hit. The warm's
     hold stays on the model until the handler's own resolve takes its place,
     or until the handler returns, so no eviction takes the model between the
-    two and the request counts once. A warm failure is swallowed - the stock
+    two and the request counts once. A warm failure is swallowed: the stock
     handler re-resolves and surfaces the real error (404/400/500) normally.
     Idempotent per route."""
     import asyncio

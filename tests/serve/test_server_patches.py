@@ -1697,10 +1697,18 @@ def test_a_warmed_model_stays_held_until_its_handler_returns(monkeypatch, reply)
             raise HTTPException(status_code=400, detail="bad request")
         _APP.get_cached_model(request.model)            # the stock resolve
         seen["busy after"] = busy_count(pool, "A")
-        tokens = _GenerationGuard(_FakeRG(), _active_hold.get()).generate("hi")[1]
-        if reply == "stream":
-            return tokens
-        return {"text": list(tokens)}
+        if reply == "json":
+            tokens = _GenerationGuard(_FakeRG(), _active_hold.get()).generate("hi")[1]
+            return {"text": list(tokens)}
+
+        async def body():
+            # The stock routes take the generator when the stream runs,
+            # after this handler and the wrapper have returned.
+            tokens = _GenerationGuard(_FakeRG(), _active_hold.get()).generate("hi")[1]
+            for t in tokens:
+                seen.setdefault("busy in stream", busy_count(pool, "A"))
+                yield t
+        return body()
 
     _register_fake_chat(fake_handler)
     sp.install_chat_load_offload()
@@ -1713,14 +1721,19 @@ def test_a_warmed_model_stays_held_until_its_handler_returns(monkeypatch, reply)
         assert seen == {"A kept": True, "busy before": 1}
         assert busy_count(pool, "A") == 0
         return
-    res = asyncio.run(call)
-    assert seen == {"A kept": True, "busy before": 1, "busy after": 1}
     if reply == "json":
-        assert res == {"text": ["t1", "t2"]}
+        assert asyncio.run(call) == {"text": ["t1", "t2"]}
+        assert seen == {"A kept": True, "busy before": 1, "busy after": 1}
         assert busy_count(pool, "A") == 0
         return
-    assert busy_count(pool, "A") == 1                   # the stream's own hold
-    assert list(res) == ["t1", "t2"]
+
+    async def serve():                                  # one task, as the server's
+        body = await call
+        seen["busy at return"] = busy_count(pool, "A")  # the handler's own hold
+        return [t async for t in body]
+    assert asyncio.run(serve()) == ["t1", "t2"]
+    assert seen == {"A kept": True, "busy before": 1, "busy after": 1,
+                    "busy at return": 1, "busy in stream": 1}
     assert busy_count(pool, "A") == 0
 
 
