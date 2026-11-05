@@ -641,7 +641,7 @@ OP_ROUNDINGS = {
     "modulate": 2,        # 1 + scale, then the product
     "sdpa": 1,
     "swiglu": 3,          # sigmoid(a), a times it, then the product with b
-    "gated_residual": 2,  # gate * y, then the sum
+    "gated_residual_once": 1,  # in float32, rounded once
 }
 
 
@@ -651,7 +651,7 @@ def block_ops(kind: str, rows: int, segments: int) -> dict:
     if kind == "block":
         return {"norm": 2, "modulate": 2 * segments, "qk": 1,
                 "sdpa": math.ceil(rows / hf.ATTENTION_CHUNK), "swiglu": 1,
-                "gated_residual": 2 * segments}
+                "gated_residual_once": 2 * segments}
     return {"norm": 4, "sdpa": 1, "swiglu": 1}
 
 
@@ -821,13 +821,14 @@ def step_sites(model, sites: dict, routed: dict | None = None,
             return y
         return run
 
-    def gated_residual(orig):
+    def gated_residual_once(orig):
         def run(x, gate, y):
             out = orig(x, gate, y)
             if cur:
-                read("gated_residual", out, lambda: epilogues.gated_residual(
-                    x.astype(f), gate.astype(f), y.astype(f)),
-                    OP_ROUNDINGS["gated_residual"])
+                read("gated_residual_once", out,
+                     lambda: epilogues.gated_residual(
+                         x.astype(f), gate.astype(f), y.astype(f)),
+                     OP_ROUNDINGS["gated_residual_once"])
             return out
         return run
 
@@ -855,7 +856,8 @@ def step_sites(model, sites: dict, routed: dict | None = None,
              (norms.RMSNorm, "__call__", norm),
              (hm._Block, "hidden", hidden),
              (ops, "modulate", modulate), (ops, "qk_norm_rope", qk),
-             (ops, "sdpa", sdpa), (ops, "gated_residual", gated_residual)]
+             (ops, "sdpa", sdpa),
+             (ops, "gated_residual_once", gated_residual_once)]
     hooks += [(cls, "__call__", leaf) for cls in leaf_types]
     saved = []
     try:

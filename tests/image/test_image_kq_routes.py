@@ -32,7 +32,8 @@ from image_fixtures import (glu_rounded_once, kq_leaf, kq_z_model,
                             lora_rounded_once, qk_rounded_once)
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
-SEAMS = ("sdpa", "qk_norm_rope", "swiglu", "modulate", "gated_residual")
+SEAMS = ("sdpa", "qk_norm_rope", "swiglu", "modulate", "gated_residual",
+         "gated_residual_once")
 DTYPES = [mx.bfloat16, mx.float16]
 EPS = 1e-5
 # Relative L2 to the float64 reference. Each kernel gate is above the
@@ -173,7 +174,7 @@ def _glu_ref(x, gate, up) -> np.ndarray:
 
 # The seam contract.
 
-def test_the_seams_are_five_plain_functions_and_install_assigns(routes):
+def test_the_seams_are_six_plain_functions_and_install_assigns(routes):
     assert ops.SEAMS == SEAMS
     for name in SEAMS:
         assert type(getattr(ops, name)) is types.FunctionType, name

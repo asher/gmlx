@@ -187,6 +187,28 @@ def test_anchor_rows_in_the_wrong_order_are_refused(tiny):
         tiny.embed(v, a, text, lay, [*cv, cv[1]], ca)
 
 
+def test_a_large_update_keeps_the_residual_under_it():
+    """MiniMax-H3's block 0 writes about -2e4 into one channel of each
+    text row over an input of about 40, where the bfloat16 step is 128.
+    The gated residual adds in float32 and rounds once, as the
+    reference's addcmul_ does, so each sum is the nearest bfloat16 to the
+    true one. Rounding the product first puts a sum up to a step off."""
+    rng = np.random.default_rng(0)
+    x = mx.array(40 + rng.standard_normal((1, 24, 64)), mx.bfloat16)
+    y = mx.array(-2e4 * (1 + 0.1 * rng.standard_normal((1, 24, 64))),
+                 mx.bfloat16)
+    gate = mx.array(rng.uniform(0.5, 1.0, (2, 64)), mx.bfloat16)
+    segs = ((0, 8, 1), (8, 24, 0))
+    got = np.array(hm.gated(x, gate, y, segs).astype(mx.float32),
+                   np.float64)
+    xf, yf, gf = (np.array(v.astype(mx.float32), np.float64)
+                  for v in (x, y, gate))
+    rows = gf[[1] * 8 + [0] * 16]
+    truth = xf + rows[None] * yf    # exact: bfloat16 inputs, float64
+    step = 2.0 ** (np.floor(np.log2(np.abs(got))) - 7)
+    assert np.all(np.abs(got - truth) <= step / 2)
+
+
 def test_chunked_attention_matches_one_call(tiny):
     vs, aus = hf.latent_shapes(22, 128, 128)
     lay = layout.pack(hf.TIMELINE, 8, *vs[2:], aus[3])

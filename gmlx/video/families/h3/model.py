@@ -167,8 +167,10 @@ def modulated(n: mx.array, shift: mx.array, scale: mx.array,
 
 
 def gated(x: mx.array, gate: mx.array, y: mx.array, segs: tuple) -> mx.array:
-    """``x + gate * y`` with each segment's gate row."""
-    parts = [ops.gated_residual(x[:, a:b], gate[r], y[:, a:b])
+    """``x + gate * y`` with each segment's gate row, rounded once, as the
+    reference's addcmul_ rounds. A block can write an update of 2e4 over a
+    residual of 40, which a rounded product drops in bfloat16."""
+    parts = [ops.gated_residual_once(x[:, a:b], gate[r], y[:, a:b])
              for a, b, r in segs]
     return parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=1)
 

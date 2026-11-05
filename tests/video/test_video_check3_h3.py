@@ -537,8 +537,8 @@ def _modulate_high(mp):
 
 
 def _gated_residual_high(mp):
-    real_res = ops.gated_residual
-    mp.setattr(ops, "gated_residual",
+    real_res = ops.gated_residual_once
+    mp.setattr(ops, "gated_residual_once",
                lambda x, g, y: real_res(x, g * 1.05, y))
 
 
@@ -549,8 +549,8 @@ SITE_FAULTS = {"swiglu a twentieth high": (_swiglu_high, {"swiglu"}),
                "one head of q a twentieth off": (_a_head_off, {"qk"}),
                "modulation a twentieth high": (_modulate_high,
                                                {"modulate"}),
-               "gated residual a twentieth high": (_gated_residual_high,
-                                                   {"gated_residual"})}
+               "gated residual a twentieth high": (
+                   _gated_residual_high, {"gated_residual_once"})}
 
 
 @pytest.mark.integration
