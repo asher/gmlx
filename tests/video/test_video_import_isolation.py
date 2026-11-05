@@ -1,6 +1,6 @@
 """Importing gmlx, gmlx.image, the image serve paths or the CLI never
 imports gmlx.video, and identifying a video file or importing the video
-encoder module or the VAE schedules loads no mlx. Checked in a child
+encoder module, the image resizes or the VAE schedules loads no mlx. Checked in a child
 process so earlier tests cannot mask it."""
 from __future__ import annotations
 
@@ -33,7 +33,8 @@ def test_identifying_a_video_file_loads_no_mlx():
         "sys.path.insert(0, 'tests/video')\n"
         "from video_fixtures import H3_HEADER, fixture_view\n"
         "from gmlx.video import fingerprint as vfp\n"
-        "import gmlx.video.encoder, gmlx.video.vae.chunking\n"
+        "import gmlx.video.encoder, gmlx.video.images\n"
+        "import gmlx.video.vae.chunking\n"
         "assert vfp.identify(fixture_view(H3_HEADER)).family.name == 'h3'\n"
         "bad = sorted(m for m in sys.modules if m.split('.')[0] == 'mlx')\n"
         "assert not bad, bad\n"

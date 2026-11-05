@@ -8,9 +8,12 @@ fixture writes as the image pad id, the id the tower's rows replace in
 transformers' and gmlx's prompt. The tags are ComfyUI's
 token_tags_from_embeds_info over those rows. The fixture also holds each
 text piece's ids as ComfyUI tokenizes it alone, so a test can build the
-prompt from them without the tokenizer, and the tower input
+prompt from them without the tokenizer, the tower input
 process_qwen2vl_images makes of one 64x64 image at Qwen3-VL's patch and
-normalization.
+normalization, and the output of the nodes' _resize on small random
+images: stretched, and cropped about the center for a wide, a tall and
+two half-pixel crop offsets, which Python's round takes to the even
+pixel.
 
   python scripts/video_oracle/run.py --python <comfyui venv python> \\
       keyframes_h3.py --comfy-dir <ComfyUI checkout>
@@ -40,6 +43,14 @@ CASES = {
     "first_1344x768": (PROMPT, [(1344, 768)]),
     "both_1344x768": (PROMPT, [(1344, 768), (1344, 768)]),
     "both_768_empty": ("", [(768, 768), (768, 768)]),
+}
+# case: (source width, height), (target width, height), _resize's crop
+RESIZES = {
+    "stretch": ((200, 100), (64, 64), "disabled"),
+    "wide": ((200, 100), (64, 64), "center"),
+    "tall": ((90, 160), (96, 64), "center"),
+    "half_x": ((103, 100), (100, 100), "center"),
+    "half_y": ((100, 103), (100, 100), "center"),
 }
 
 
@@ -105,11 +116,25 @@ def main(argv=None) -> int:
     fx.add("image_64", image)
     fx.add("pixels_64", oracle.to_numpy(pix).astype(np.float32))
     fx.add("grid_64", np.asarray(grid, np.int64))
+    from comfy_extras.nodes_minimax_h3 import _resize
+
+    for i, (name, ((sw, sh), (w, h), crop)) in enumerate(RESIZES.items()):
+        src = np.random.default_rng(10 + i).integers(0, 256, (sh, sw, 3),
+                                                     dtype=np.uint8)
+        out = _resize(torch.from_numpy(src.astype(np.float32) / 255.0)[None],
+                      w, h, crop)
+        fx.add(f"resize_{name}_src", src)
+        fx.add(f"resize_{name}_out",
+               np.round(oracle.to_numpy(out[0]) * 255.0).astype(np.uint8))
     fx.inputs.update(cases={k: {"prompt": p, "sizes": [list(s) for s in v]}
                             for k, (p, v) in CASES.items()},
+                     resizes={k: {"source": list(s), "target": list(d),
+                                  "crop": c}
+                              for k, (s, d, c) in RESIZES.items()},
                      pad_id=PAD, image="uint8 64x64x3, numpy default_rng(0)")
     fx.results.update(cases=cases, comfyui_commit=commit)
     fx.tolerances.update(ids="exact", tags="exact", pixels_64="max abs 1e-6",
+                         resize="exact, as uint8",
                          rule="gmlx's ids and spans equal ComfyUI's; its "
                               "tower input within 1e-6 of "
                               "process_qwen2vl_images")
