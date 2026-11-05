@@ -114,7 +114,8 @@ def make_pool(monkeypatch, budget_gb, retry=1):
                                pool.caches[e.model_path].shed(n, hold))
     pool._store_shed = unlocked(lambda n, hold=(): pool.store.shed(n, hold))
     pool._store_live = lambda: pool.store.n
-    pool._retry_fn = lambda: retry
+    # The deadline reads the server's readiness, code outside the pool.
+    pool._retry_fn = unlocked(lambda: retry)
     return pool
 
 
@@ -302,7 +303,6 @@ def test_a_job_that_raises_after_its_turn_leaves_nothing_pending(
     with pytest.raises(ValueError):
         on_worker(run)
     assert e.lora.pending == 0
-    assert pool.figures.pending == 0
 
 
 def test_a_turn_sheds_its_own_entry_then_others_then_the_uploads(
@@ -599,6 +599,71 @@ def test_no_grant_takes_the_bytes_of_a_victim_still_torn_down(monkeypatch):
     assert pool.figures.tearing == 0
 
 
+def test_a_torn_image_counts_until_its_pipeline_is_released(monkeypatch):
+    """A cold load evicts an idle image model, whose pipeline's release on
+    the worker runs on past its teardown: the budget counts its bytes
+    until the release ends, and no upload is admitted into them."""
+    pool = make_pool(monkeypatch, 10)
+    image(pool, "x", 3, busy=True)
+    y = image(pool, "y", 4)
+    fp, load, release = pool._image_fns
+    at, go = threading.Event(), threading.Event()
+
+    def slow(box):
+        at.set()
+        assert go.wait(WAIT)
+        release(box)
+    pool._image_fns = (fp, load, slow)
+    loader = start("loader", lambda: image(pool, "z", 4))
+    try:
+        assert at.wait(WAIT), "no release started"
+        assert not pool.entry_resident(y)
+        assert pool.figures.tearing == 4 * GB
+        # x, z's build and 2 GB fit only once y's pipeline is gone.
+        assert not pool.upload_admit(2 * GB, None)
+    finally:
+        go.set()
+    finish(*loader)
+    assert pool.figures.tearing == 0 and pool._tearing == 0
+    assert pool.upload_admit(2 * GB, None)
+
+
+def test_the_budget_503_names_no_pinned_model_in_use(monkeypatch):
+    """A pinned chat model streams while upload bodies in flight leave the
+    budget short: its bytes stay once it is idle, so the 503 names no
+    model and says to unload one or retry."""
+    pool = make_pool(monkeypatch, 10)
+    x = image(pool, "x", 4, busy=True)
+    chat(pool, "qwen3", 4, pinned=True)
+    assert pool.upload_admit(GB, None)
+    w = waits(pool)
+    with pytest.raises(LoraRefused) as ei:
+        turn(pool, x, 2 * GB)
+    assert (ei.value.status, ei.value.message) == (
+        503, "the test's LoRA need 2.0 GB of memory, and 1.0 GB is free; "
+        "unload a model or retry when the requests in flight finish")
+    assert w.timeouts == []
+
+
+def test_a_turn_whose_build_lock_stays_held_past_its_deadline_says_so(
+        monkeypatch):
+    """A turn left short by the working set while an unload holds the
+    build lock past the deadline, with the memory back by then: the 503
+    says a load or unload held it up, and names no free figure over its
+    need."""
+    pool = make_pool(monkeypatch, 10, retry=0)
+    x = image(pool, "x", 4, busy=True)
+    heads = iter([GB // 2, 5 * GB])
+    pool._headroom_fn = lambda: next(heads)
+    with pool._build_lock:
+        with pytest.raises(LoraRefused) as ei:
+            turn(pool, x, GB)
+    assert (ei.value.status, ei.value.message) == (
+        503, "the test's LoRA need 1.0 GB of memory, and the server is "
+        "loading or unloading another model now; retry when it is done")
+    assert x.lora.pending == 0
+
+
 def test_a_cold_load_after_a_turn_sees_its_booking(monkeypatch):
     pool = make_pool(monkeypatch, 10)
     x = image(pool, "x", 4, busy=True)
@@ -700,12 +765,21 @@ class StoreWorker:
         self.real.get().shutdown(wait=True)
 
 
-def test_a_store_turn_not_started_by_its_deadline_never_runs(monkeypatch):
-    """An upload whose store turn waits behind another job past the
-    deadline: the queued turn is cancelled and the upload gets the turn's
-    own 503, and once the worker is free nothing is admitted for it."""
+@pytest.mark.parametrize("short", ["neither", "measured", "budget"])
+def test_a_store_turn_not_started_by_its_deadline_never_runs(monkeypatch,
+                                                             short):
+    """An upload whose store turn waits behind a step on the worker past
+    the deadline: the queued turn is cancelled, and the upload gets the
+    503 of what is short then, the budget or the working set, or with
+    neither short, of the worker's job. Once the worker is free nothing is
+    admitted for it."""
     pool = make_pool(monkeypatch, 10)
     image(pool, "x", 4, busy=True)
+    n = 3 * GB
+    if short == "measured":
+        pool.head, n = GB // 2, GB
+    elif short == "budget":
+        pool.store.keep("old", 4 * GB)
     seams = Seams()
     pool._seam = seams
     w = StoreWorker(monkeypatch)
@@ -713,13 +787,19 @@ def test_a_store_turn_not_started_by_its_deadline_never_runs(monkeypatch):
     w.submit(go.wait, WAIT)
     try:
         with pytest.raises(LoraRefused) as err:
-            w.store_turn(pool, 3 * GB, "the upload")
+            w.store_turn(pool, n, "the upload")
     finally:
         go.set()
         w.drain()
     assert (err.value.status, err.value.message, err.value.retry_after) == (
-        503, "the upload need 3.0 GB of memory, and 6.0 GB is free beside "
-        "the models in use (x); retry when one is idle", 1)
+        503, {"neither": "the upload need 3.0 GB of memory, and the image "
+                         "worker is busy with x; retry when it is idle",
+              "measured": "the upload need 1.0 GB of memory, and 0.5 GB is "
+                          "free in the working set now; retry when the "
+                          "models in use finish",
+              "budget": "the upload need 3.0 GB of memory, and 2.0 GB is "
+                        "free beside the models in use (x); retry when one "
+                        "is idle"}[short], 1)
     assert w.cancelled == [True]
     assert "turn" not in seams.hit and pool._incoming == 0
 
@@ -799,7 +879,7 @@ def test_a_build_that_fails_after_its_room_check_leaves_no_building(
     with pytest.raises(LoadDeferred):
         pool.acquire("z", None, IMAGE_KIND, build_spec=spec("z", 2))
     assert pool._building == 0 and pool._resident_bytes() == 8 * GB
-    assert pool.figures.building == 0 and pool.figures.loading is None
+    assert pool.figures.building == 0 and pool._loading is None
 
     # A build that fails between its refit and its insert.
     pool._build = real
@@ -923,6 +1003,8 @@ def test_a_random_sequence_keeps_the_four_invariants(monkeypatch, seed):
         f = pool.figures
         assert (f.footprints, f.lora) == live_sums(pool)
         assert f.entries == tuple(pool._entries.values())
+        # Every teardown and pipeline release ran to its end.
+        assert f.tearing == 0 and pool._tearing == 0
 
     def entry(name):
         return pool._entries.get((name, None, IMAGE_KIND))

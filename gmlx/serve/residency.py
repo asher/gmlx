@@ -281,9 +281,7 @@ class _Figures:
     held: tuple = ()            # each entry's ledger bytes, as ``entries``
     footprints: int = 0
     lora: int = 0               # the ledgers and their pending bytes
-    pending: int = 0
     building: int = 0
-    loading: str | None = None  # the model the cold build in flight loads
     tearing: int = 0            # the victims whose teardown runs
     incoming: int = 0           # the upload bodies admitted, not put
 
@@ -314,7 +312,7 @@ class _Entry:
     pipeline: Any = None        # an image or video entry's served pipeline
     priced_up: bool = False     # the install streamed less than predicted
     lora: _Ledger | None = None  # an image or video entry's LoRA bytes
-    tearing: int = 0            # bytes counted until its teardown ends
+    tearing: int = 0            # counted until its teardown or release ends
 
     def __post_init__(self):
         if self.model_cache is None:
@@ -580,13 +578,11 @@ class _ResidencyPool:
         # release() notifies it.
         self._idle = threading.Condition(self._lock)
         self._releases = 0
-        # The bytes of the victims taken out of the pool whose teardown
-        # runs, and of the upload bodies admitted and not put yet.
+        # The bytes of the victims taken out of the pool whose teardown,
+        # or pipeline release, runs, and of the upload bodies admitted and
+        # not put yet.
         self._tearing = 0
         self._incoming = 0
-        # Of ``_tearing``: the image pipelines torn down and not released
-        # yet, by id, and their bytes.
-        self._tearing_pipes: dict = {}
         # Injectable for tests: the measured room; an entry's LoRA figures
         # ({request key: bytes}, own bytes) from its caches; the shed of an
         # entry's request LoRA bytes and of the idle uploads, each returning
@@ -816,8 +812,7 @@ class _ResidencyPool:
         self.figures = _Figures(
             budget=self._budget, entries=es, held=held,
             footprints=sum(e.footprint for e in es),
-            lora=sum(held) + pending, pending=pending,
-            building=self._building, loading=self._loading,
+            lora=sum(held) + pending, building=self._building,
             tearing=self._tearing, incoming=self._incoming)
 
     def _read_lora(self, entry):
@@ -980,9 +975,13 @@ class _ResidencyPool:
             if err is not None and left <= 0:
                 raise err
             if not self._build_lock.acquire(timeout=max(0.0, left)):
+                head = (None if over or err is not None
+                        else self._measured_lora_room())
                 with self._lock:
-                    self._refuse_late(owner, subject, need, retry, err,
-                                      beside)
+                    if err is not None and not self._building:
+                        raise err
+                    raise self._late_503(owner, need, subject, retry, head,
+                                         beside)
             try:
                 got = self._turn_room(owner, need, subject, hold, held,
                                       store, retry, over, beside)
@@ -1102,10 +1101,12 @@ class _ResidencyPool:
             f"leaves beside {where}")
 
     def _lora_503(self, subject: str, n: int, room: int, retry: int,
-                  own=(), measured: bool = False) -> "LoraRefused":
+                  own=(), measured: bool = False,
+                  held_up: str | None = None) -> "LoraRefused":
         """Under _lock: the 503 of a turn left short. It names the cold
-        load in flight, else the models in use beside the job's own
-        entries ``own``, else none, with the room the budget leaves or,
+        load in flight, else what held up a turn with room (``held_up``),
+        else the room the budget leaves beside the models in use whose
+        bytes go once idle, past the job's own entries ``own``, or,
         ``measured``, the working set's."""
         lead = f"{subject} need {gb(n, True)} GB of memory"
         if self._building:
@@ -1113,14 +1114,16 @@ class _ResidencyPool:
                 503, f"{lead}, and the server is loading {self._loading} "
                 f"({gb(self._building, True)} GB) now; retry when it is "
                 "loaded", retry)
-        busy = self._lora_busy(own)
         free = f"{gb(room, False)} GB is free"
-        if measured:
+        if held_up is not None:
+            tail = held_up
+        elif measured:
             tail = (f"{free} in the working set now; retry when the models "
-                    "in use finish" if busy else
+                    "in use finish" if self._lora_busy(own) else
                     f"{free} in the working set now; close other apps or "
                     "unload a model to make room")
         else:
+            busy = self._lora_busy(own, pinned=False)
             tail = (f"{free} beside the models in use ({', '.join(busy)}); "
                     "retry when one is idle" if busy else
                     f"{free}; unload a model or retry when the requests in "
@@ -1159,23 +1162,44 @@ class _ResidencyPool:
             raise err
         return self._releases, err
 
-    def _refuse_late(self, owner, subject, need, retry, err,
-                     beside=()) -> None:
-        """Under _lock, at the deadline before the build lock: the 503 of
-        the cold load in flight, else of the last check, else of the
-        pool now."""
-        if err is not None and not self._building:
-            raise err
-        free = (max(0, self._budget - self._lora_resident(self._uploads()))
-                if self._budget else 0)
-        raise self._lora_503(subject, need, free, retry,
-                             self._own(owner, beside))
+    def _late_503(self, owner, need: int, subject: str, retry: int, head,
+                  beside=(), worker: bool = False) -> "LoraRefused":
+        """Under _lock: the 503 of a turn that never reached its room
+        check by its deadline, from the pool now and the measure ``head``
+        read before the hold: the cold load in flight, else the budget
+        short, else the measured room short, else what held the turn up,
+        the image worker's job (``worker``) or the build lock."""
+        own = self._own(owner, beside)
+        live = self._uploads()
+        free = self._budget - self._lora_resident(live)
+        if self._budget and need > free:
+            return self._lora_503(subject, need, max(0, free), retry, own)
+        room = self._measured_room(owner, head, live)
+        if room is not None and need > room:
+            return self._lora_503(subject, need, max(0, room), retry, own,
+                                  measured=True)
+        if worker:
+            names = [self._lora_name(e) for e in self._entries.values()
+                     if e.is_image and e.busy > e.retained]
+            held_up = ("the image worker is busy"
+                       + (f" with {', '.join(names)}" if names else "")
+                       + "; retry when it is idle")
+        else:
+            held_up = ("the server is loading or unloading another model "
+                       "now; retry when it is done")
+        return self._lora_503(subject, need, 0, retry, own, held_up=held_up)
 
     def lora_late(self, owner, need: int, subject: str) -> None:
-        """The 503 of a turn that did not start within its deadline, the
-        one it would raise there."""
+        """The 503 of a turn that the image worker did not start within
+        its deadline. The measure and the deadline are read before the
+        pool's lock."""
+        from .capacity import overcommit
+
+        retry = self._retry()
+        head = None if overcommit() else self._measured_lora_room()
         with self._lock:
-            self._refuse_late(owner, subject, int(need), self._retry(), None)
+            raise self._late_503(owner, int(need), subject, retry, head,
+                                 worker=True)
 
     def _entry_bytes(self, e) -> int:
         led = e.lora
@@ -1234,12 +1258,13 @@ class _ResidencyPool:
             head -= max(0.0, ws - budget)
         return head
 
-    def _lora_busy(self, own=()) -> list:
+    def _lora_busy(self, own=(), pinned: bool = True) -> list:
         """Under _lock: the names of the models in use beside the entries
-        ``own`` a job holds."""
+        ``own`` a job holds, the pinned ones only with ``pinned``."""
         ids = {id(e) for e in own}
         return [self._lora_name(e) for e in self._entries.values()
-                if e.busy > e.retained and id(e) not in ids]
+                if e.busy > e.retained and id(e) not in ids
+                and (pinned or not e.pinned)]
 
     def release(self, entry: _Entry) -> None:
         """Drop one in-flight reference taken by :meth:`acquire`. At zero the
@@ -1685,11 +1710,11 @@ class _ResidencyPool:
     def _teardown_all(self, torn: list, released: list) -> None:
         """Tear down the entries taken out of the pool, with no _lock held:
         every one is tried, and the first failure raises after. Each one's
-        bytes leave the tearing count once its teardown ends."""
+        bytes leave the tearing count once its teardown ends, an image
+        entry's once its pipeline's release ends."""
         first = None
         while torn:
             entry = torn.pop(0)
-            pipe = entry.pipeline if entry.is_image else None
             try:
                 self._teardown(entry, released)
             except Exception as e:  # noqa: BLE001 - raised after the rest
@@ -1697,13 +1722,10 @@ class _ResidencyPool:
                              exc_info=True)
                 first = first or e
             finally:
+                # An image entry's bytes went with its pipeline.
                 with self._lock:
                     n, entry.tearing = entry.tearing, 0
-                    if pipe is not None and entry.pipeline is None:
-                        # Counted until _release_images lets it go.
-                        self._tearing_pipes[id(pipe)] = n
-                    else:
-                        self._tearing = max(0, self._tearing - n)
+                    self._tearing = max(0, self._tearing - n)
                     self._publish()
         if first is not None:
             raise first
@@ -2192,10 +2214,12 @@ class _ResidencyPool:
         self._hit("teardown")
         if entry.is_image:
             pipe, entry.pipeline = entry.pipeline, None
+            # The bytes it counts as tearing go with the pipeline.
+            item, entry.tearing = (entry.kind, pipe, entry.tearing), 0
             if released is None:
-                self._release_images([(entry.kind, pipe)])
+                self._release_images([item])
             else:
-                released.append((entry.kind, pipe))
+                released.append(item)
             return
         self._teardown_chat(entry)
 
@@ -2232,29 +2256,30 @@ class _ResidencyPool:
         return image_service.reserved_worker()
 
     def _release_images(self, pipelines: list) -> None:
-        """Release image and video pipelines, ``(kind, pipeline)`` pairs,
+        """Release image and video pipelines, ``(kind, pipeline, bytes)``,
         on the image worker, where their arrays were made, and wait for
-        each, so the next gate measures the memory back. Call without
+        each, so the next gate measures the memory back. Each one's bytes
+        leave the tearing count once its release ends. Call without
         ``_lock``."""
         while pipelines:
-            kind, pipe = pipelines.pop()
-            box = [pipe]
-            if pipe is None:
-                continue
-            key = id(pipe)
+            kind, pipe, n = pipelines.pop()
             try:
-                self._kind_fn(kind, 2)(box)
-            except Exception:
-                _log.warning("teardown: image pipeline release failed",
-                             exc_info=True)
+                if pipe is None:
+                    continue
+                box = [pipe]
+                try:
+                    self._kind_fn(kind, 2)(box)
+                except Exception:
+                    _log.warning("teardown: image pipeline release failed",
+                                 exc_info=True)
+                finally:
+                    box.clear()
+                    del pipe
+                    import gc
+                    gc.collect()
             finally:
-                box.clear()
-                del pipe
-                import gc
-                gc.collect()
-                with self._lock:
-                    n = self._tearing_pipes.pop(key, 0)
-                    if n:
+                if n:
+                    with self._lock:
                         self._tearing = max(0, self._tearing - n)
                         self._publish()
 
