@@ -1082,6 +1082,7 @@ def _generate_speculative(
     thinking_budget: int | None = None,
     thinking_start_token: str | None = None,
     thinking_end_token: str | None = None,
+    prompt_rows=None,
 ) -> dict:
     """Single-stream MTP speculative generation via mlx-vlm's engine.
 
@@ -1101,6 +1102,7 @@ def _generate_speculative(
     # acceptance also lives only in the owned walk).
     from gmlx.spec.speculative import use_owned_engine
     if (os.environ.get("GMLX_OWNED_ROUND") != "0"
+            or prompt_rows is not None
             or use_owned_engine(drafter, temp)
             or _wants_processors(xtc_probability, logit_bias,
                                  repetition_penalty, presence_penalty,
@@ -1123,6 +1125,7 @@ def _generate_speculative(
             thinking_budget=thinking_budget,
             thinking_start_token=thinking_start_token,
             thinking_end_token=thinking_end_token,
+            prompt_rows=prompt_rows,
         )
 
     kvarn_cache = None
@@ -1280,6 +1283,23 @@ def _generate_speculative(
     }
 
 
+def _rows_chunk(model, prompt_cache, input_ids, max_tokens, prompt_rows) -> dict:
+    """``stream_speculative``'s prefill chunk for a prompt with its own
+    rows (audio): long, so chunked as the plain path chunks it, within the
+    room its held state leaves. Empty otherwise."""
+    if prompt_rows is None:
+        return {}
+    from gmlx.gen import prefill_decay as pd
+    from gmlx.spec.speculative import _PREFILL_CHUNK
+
+    if not pd.row_bytes(model):
+        return {}
+    ids = input_ids.reshape(1, -1)
+    return {"prefill_chunk": pd.run_request_step(
+        model, prompt_cache, int(ids.shape[1]), max_tokens, _PREFILL_CHUNK,
+        audio_tokens=pd.audio_tokens_in(model, ids))}
+
+
 def generate_speculative_owned(
     model,
     drafter,
@@ -1311,6 +1331,7 @@ def generate_speculative_owned(
     thinking_budget: int | None = None,
     thinking_start_token: str | None = None,
     thinking_end_token: str | None = None,
+    prompt_rows=None,
 ) -> dict:
     """Same contract as generate_speculative but drives the owned
     stream_speculative engine (engine/speculative.py) instead of mlx-vlm's
@@ -1413,6 +1434,7 @@ def generate_speculative_owned(
         prompt=prompt,
     )
     set_finish_key_target(hook)
+    chunk = _rows_chunk(model, prompt_cache, input_ids, max_tokens, prompt_rows)
     tic = time.perf_counter()
     prefill_s = None
     try:
@@ -1426,6 +1448,8 @@ def generate_speculative_owned(
             draft_block_size=block,
             thinking_hook=hook,
             logits_processors=processors,
+            prompt_rows=prompt_rows,
+            **chunk,
         ):
             if prefill_s is None:
                 prefill_s = time.perf_counter() - tic
@@ -1549,6 +1573,7 @@ def _stream_generate_speculative_owned(
     thinking_start_token: str | None = None,
     thinking_end_token: str | None = None,
     start_in_thinking: bool | None = None,
+    prompt_rows=None,
 ):
     """Owned-engine body of :func:`stream_generate_speculative` (the REPL
     default; see the routing note there). Same ``_MTPStreamResponse``
@@ -1617,6 +1642,9 @@ def _stream_generate_speculative_owned(
             draft_block_size=block,
             thinking_hook=hook,
             logits_processors=processors,
+            prompt_rows=prompt_rows,
+            **_rows_chunk(model, prompt_cache, input_ids, max_tokens,
+                          prompt_rows),
         ):
             if not prefill_done:
                 prefill_done = True
@@ -1687,6 +1715,7 @@ def _stream_generate_speculative(
     thinking_start_token: str | None = None,
     thinking_end_token: str | None = None,
     start_in_thinking: bool | None = None,
+    prompt_rows=None,
 ):
     """Streaming MTP speculative generation over a persistent prompt cache - the
     interactive-REPL sibling of :func:`generate_speculative`. Yields
@@ -1712,6 +1741,7 @@ def _stream_generate_speculative(
     # drafters whose contract demands the owned engine.
     from gmlx.spec.speculative import use_owned_engine
     if (os.environ.get("GMLX_OWNED_ROUND") != "0"
+            or prompt_rows is not None
             or use_owned_engine(drafter, temp)
             or _wants_processors(xtc_probability, logit_bias,
                                  repetition_penalty, presence_penalty,
@@ -1729,6 +1759,7 @@ def _stream_generate_speculative(
             thinking_start_token=thinking_start_token,
             thinking_end_token=thinking_end_token,
             start_in_thinking=start_in_thinking,
+            prompt_rows=prompt_rows,
         )
         return
 

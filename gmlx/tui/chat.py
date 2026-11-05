@@ -2434,7 +2434,8 @@ def _continuation(render, history: list, new: list) -> str | None:
     return None
 
 
-def _render_turn(tok, state, messages, starts_cache: bool, template_kwargs) -> str:
+def _render_turn(tok, state, messages, starts_cache: bool, template_kwargs,
+                 thinking_prefill: str | None = None) -> str:
     """The text one turn appends to the cache, the thinking prefill
     included. A turn that starts the cache renders ``messages`` whole. A
     later turn renders the whole conversation and keeps the text past the
@@ -2467,7 +2468,8 @@ def _render_turn(tok, state, messages, starts_cache: bool, template_kwargs) -> s
                 "turn follows; later turns render on their own")
     if text is None:
         text = render(messages, True)
-    return with_thinking_prefill(text, state.thinking_prefill)
+    return with_thinking_prefill(
+        text, state.thinking_prefill if thinking_prefill is None else thinking_prefill)
 
 
 def _prompt_opens_thinking_cfg(state, prompt_text) -> bool:
@@ -3956,7 +3958,10 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         )
     if drafter is not None:
         kind = _drafter_kind_label(drafter, args)
-        if vlm_mtp:
+        if vlm_mtp and _speech_context(args):
+            print(f"[chat] MTP speculative decoding on text and audio turns "
+                  f"({kind} drafter)")
+        elif vlm_mtp:
             print(
                 f"[chat] MTP speculative decoding on text-only turns "
                 f"({kind} drafter); image/audio turns use the VLM path"
@@ -3978,9 +3983,13 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     vlm_msgs: list = []  # rendered messages (media markers pinned per turn)
     vlm_images: list = []  # media paths, in marker order across all turns
     vlm_audios: list = []
+    # The clips the drafted path prefilled into ``cache``: while it holds
+    # every clip of the conversation, a turn with audio drafts too.
+    cached_clips = 0
 
     def _reset_conversation():
-        nonlocal cache, first_turn
+        nonlocal cache, first_turn, cached_clips
+        cached_clips = 0
         if state.vlm:
             vlm_msgs.clear()
             vlm_images.clear()
@@ -4006,7 +4015,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         cache, and the remaining history re-prefills with the next message via
         the same deferred-replay path --resume uses. Returns the popped ledger
         entry, or None with a notice."""
-        nonlocal cache, first_turn
+        nonlocal cache, first_turn, cached_clips
         transcript = state.transcript
         if not transcript:
             print(f"[chat] nothing to {verb}")
@@ -4022,6 +4031,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 rebuilt = True
         m, i, a = entry.get("vlm_lens", (0, 0, 0))
         del vlm_msgs[m:], vlm_images[i:], vlm_audios[a:]
+        # A rebuilt cache replays text only: its clips are gone.
+        cached_clips = 0 if rebuilt else min(cached_clips, a)
         if brain is not None:
             # Truncate to the turn's brain checkpoint: an assistant turn can
             # append several messages (tool rounds), not just user+reply.
@@ -4252,33 +4263,88 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         if state.vlm:
             staged_imgs = state.staged_images
             staged_auds = state.staged_audio
+            speech_ctx = _speech_context(args) or 0
             if (
                 vlm_mtp
                 and not vlm_images
-                and not vlm_audios
                 and not staged_imgs
-                and not staged_auds
+                and (
+                    (not vlm_audios and not staged_auds)
+                    or (speech_ctx and cached_clips == len(vlm_audios))
+                )
             ):
-                # Text-only turn while the conversation holds no media: run the MTP
-                # engine over the persistent text cache (the incremental templating +
-                # cache append of the plain MTP path). Also record the turn in
-                # vlm_msgs so the first image turn can re-prefill the full history on
-                # the VLM path; once any media enters, the session stays on that path.
+                # A turn while the cache holds the whole conversation: run the
+                # MTP engine over the persistent cache (the incremental templating
+                # + cache append of the plain MTP path). A speech model's clips
+                # enter it as prompt rows. Also record the turn in vlm_msgs so a
+                # later turn can re-prefill the full history on the VLM path; once
+                # it does, the session stays there.
                 from gmlx.gen.generation import stream_generate_speculative
 
+                auds = []
+                if staged_auds:
+                    try:
+                        held, auds = _speech_clips(
+                            processor, vlm_audios, state.take_list("staged_audio"))
+                    except (OSError, ValueError, RuntimeError) as e:
+                        state.turn_checkpoint = None
+                        print(f"[chat] message not sent: {e}")
+                        continue
+                    vlm_audios[:] = held
+                transcribe = (bool(auds) and not line.strip()
+                              and bool(state.audio_instruction))
+                turn_kwargs, turn_sampling = template_kwargs, dict(s, max_tokens=eff_max)
+                turn_prefill = None
+                if transcribe:
+                    line = state.audio_instruction
+                    turn_kwargs = {**template_kwargs, "enable_thinking": False}
+                    turn_prefill = ""
+                    turn_sampling.update(
+                        _transcription_sampling(state.sampling_explicit))
                 messages = list(state.take("replay_messages") or [])
                 starts_cache = first_turn or bool(messages)
+                turn_msgs = []
                 if first_turn and state.system_prompt:
                     sys_msg = {"role": "system", "content": state.system_prompt}
                     messages.append(sys_msg)
-                    vlm_msgs.append(sys_msg)  # same shape the VLM branch records
+                    turn_msgs.append(sys_msg)  # same shape the VLM branch records
                 user_text = _compose_user_content(state, line)
-                messages.append({"role": "user", "content": user_text})
-                vlm_msgs.append(_vlm_message(model_type, user_text, "user", 0, 0))
-                first_turn = False
+                user_msg = _vlm_message(model_type, user_text, "user", 0, len(auds))
+                turn_msgs.append(user_msg)
+                marked = (user_msg.get("content") if isinstance(user_msg, dict)
+                          else None)
+                messages.append({"role": "user", "content": (
+                    marked if auds and isinstance(marked, str) else user_text)})
                 prompt_text = _render_turn(
-                    tok, state, messages, starts_cache, template_kwargs)
-                prompt = _encode_turn(tok, prompt_text, starts_cache)
+                    tok, state, messages, starts_cache, turn_kwargs, turn_prefill)
+                rows = None
+                if auds:
+                    from gmlx.commands.cli import speech_prompt
+
+                    prompt, rows = speech_prompt(model, processor, prompt_text, auds)
+                    used = _cache_tokens(cache) + len(prompt)
+                    if used >= speech_ctx:
+                        state.turn_checkpoint = None
+                        print(f"[chat] message not sent: the conversation would "
+                              f"be {used:,} tokens, and the model's context is "
+                              f"{speech_ctx:,}. /reset starts a new conversation")
+                        continue
+                    if transcribe and "max_tokens" not in state.sampling_explicit:
+                        from gmlx.models.nemotron_h.transcription import (
+                            output_budget,
+                        )
+
+                        rate = processor.feature_extractor.sampling_rate
+                        turn_sampling["max_tokens"] = output_budget(
+                            sum(len(c) for c in auds) / rate, used, speech_ctx)
+                    turn_sampling["max_tokens"] = min(
+                        turn_sampling["max_tokens"], speech_ctx - used)
+                else:
+                    prompt = _encode_turn(tok, prompt_text, starts_cache)
+                vlm_msgs.extend(turn_msgs)
+                vlm_audios.extend(auds)
+                cached_clips += len(auds)
+                first_turn = False
                 reply, _canceled = _stream_reply(
                     stream_generate_speculative(
                         model,
@@ -4286,12 +4352,12 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                         tok,
                         prompt,
                         prompt_cache=cache,
-                        max_tokens=eff_max,
-                        temp=s["temp"],
-                        top_p=s["top_p"],
-                        top_k=s["top_k"],
-                        min_p=s["min_p"],
-                        repetition_penalty=rep,
+                        max_tokens=turn_sampling["max_tokens"],
+                        temp=turn_sampling["temp"],
+                        top_p=turn_sampling["top_p"],
+                        top_k=turn_sampling["top_k"],
+                        min_p=turn_sampling["min_p"],
+                        repetition_penalty=turn_sampling["repetition_penalty"],
                         repetition_context_size=s["repetition_context_size"],
                         presence_penalty=s["presence_penalty"],
                         frequency_penalty=s["frequency_penalty"],
@@ -4302,6 +4368,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                         thinking_end_token=state.thinking_end_token,
                         start_in_thinking=_prompt_opens_thinking_cfg(
                             state, prompt_text),
+                        prompt_rows=rows,
                     ),
                     state,
                     stops=args.stop,

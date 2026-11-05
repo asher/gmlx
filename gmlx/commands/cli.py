@@ -2001,7 +2001,11 @@ def _run_vlm_mtp(args) -> int:
         mx.random.seed(args.seed)
 
     logit_bias = parse_logit_bias(args.logit_bias)  # fail fast on a typo
-    print("[mtp] VLM loaded, text-only request -> MTP speculative decoding")
+    template_kwargs = fold_thinking_flag(
+        args, parse_template_config(args.chat_template_config))
+    clips = speech_clips(args)
+    print("[mtp] VLM loaded, " + ("speech" if clips else "text-only")
+          + " request -> MTP speculative decoding")
     dropped = mtp_dropped_run_flags(args)
     if dropped:
         print(
@@ -2012,7 +2016,7 @@ def _run_vlm_mtp(args) -> int:
     import gmlx.load.loadlog as loadlog
 
     with loadlog.load_ui(args.verbose, args.gguf):
-        model, drafter, _config, tok, _processor = load_vlm_mtp_model(
+        model, drafter, config, tok, processor = load_vlm_mtp_model(
             args.gguf,
             args.mmproj,
             arch=args.arch,
@@ -2025,15 +2029,37 @@ def _run_vlm_mtp(args) -> int:
         )
     _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
+    prompt, rows = args.prompt, None
+    if clips:
+        from typing import Any, cast
+
+        from gmlx._vendor.mlx_vlm.prompt_utils import apply_chat_template
+
+        speech = speech_audio(args)
+        from gmlx.spec.speculative import _PREFILL_CHUNK
+
+        why = unfit_request(model, tok, prompt, speech[1] if speech else 0,
+                            args.max_tokens, _PREFILL_CHUNK)
+        if why:
+            print(f"error: {why}.", file=sys.stderr)
+            return 1
+        if not args.no_chat_template:
+            messages = ([{"role": "system", "content": args.system_prompt}]
+                        if args.system_prompt else [])
+            messages.append({"role": "user", "content": prompt})
+            prompt = cast(str, apply_chat_template(
+                processor, config, messages, num_audios=len(clips),
+                **template_kwargs))
+        prompt, rows = speech_prompt(model, cast(Any, processor), prompt, clips)
     print(
-        f"[generate] VLM text-only MTP: max_tokens={max_tokens_label(args)} "
-        f"temp={args.temp}\n"
+        f"[generate] VLM {'speech' if clips else 'text-only'} MTP: "
+        f"max_tokens={max_tokens_label(args)} temp={args.temp}\n"
     )
     stats = generate_speculative(
         model,
         drafter,
         tok,
-        args.prompt,
+        prompt,
         max_tokens=args.max_tokens,
         temp=args.temp,
         top_p=args.top_p,
@@ -2046,10 +2072,9 @@ def _run_vlm_mtp(args) -> int:
         frequency_penalty=args.frequency_penalty,
         logit_bias=logit_bias,
         draft_block_size=args.draft_block_size,
-        apply_chat_template=not args.no_chat_template,
+        apply_chat_template=not args.no_chat_template and rows is None,
         system_prompt=args.system_prompt,
-        template_kwargs=fold_thinking_flag(
-            args, parse_template_config(args.chat_template_config)),
+        template_kwargs=template_kwargs,
         verbose=True,
         reasoning=args.reasoning,
         kv_bits=args.kv_bits,
@@ -2059,6 +2084,7 @@ def _run_vlm_mtp(args) -> int:
         thinking_budget=getattr(args, "thinking_budget", None),
         thinking_start_token=args.thinking_start_token,
         thinking_end_token=args.thinking_end_token,
+        prompt_rows=rows,
     )
     print(
         f"\n[mtp] {stats['tokens']} tok @ {stats['decode_tps']:.1f} tok/s "
@@ -2593,6 +2619,21 @@ def speech_clips(args) -> list | None:
     return cached
 
 
+def speech_prompt(model, processor, prompt: str, clips: list):
+    """``(token ids, prompt rows)`` of a rendered prompt and its speech
+    clips: the placeholders expanded, the rows built a chunk at a time
+    as the model's prefill reads them."""
+    from gmlx._vendor.mlx_vlm.utils import prepare_inputs
+
+    inputs = prepare_inputs(processor, audio=clips, prompts=prompt)
+    input_ids = inputs["input_ids"]
+    data = {k: v for k, v in inputs.items()
+            if k not in ("input_ids", "pixel_values", "attention_mask")}
+    rows = model.get_input_embeddings(input_ids, None, prompt_rows=True,
+                                      **data).inputs_embeds
+    return input_ids[0].tolist(), rows
+
+
 def speech_audio(args) -> tuple[float, int] | None:
     """Seconds and audio tokens of a run's speech clips (``speech_clips``),
     else None."""
@@ -2706,12 +2747,16 @@ def _audio_prompt_ids(args, tok, companion: str, template_kwargs) -> list[int]:
 
 def _run_mode(args) -> str:
     """The path ``gmlx run`` dispatches to: ``vlm_mtp`` (a --mmproj load
-    with no image or audio when a drafter is available), ``vlm``,
+    with no image, and no audio unless a speech encoder hears it, when a
+    drafter is available), ``vlm``,
     ``bench_depths``, ``bench`` or ``generate``. ``gmlx chat`` without
     --mmproj is ``generate``."""
     if getattr(args, "mmproj", None):
         images, audios = _media_inputs(args)
-        if not images and not audios and _vlm_mtp_drafter_available(args):
+        # A speech encoder's clips become prompt rows the drafted path
+        # prefills too (speech_prompt).
+        hears = not audios or is_speech_encoder(args.mmproj)
+        if not images and hears and _vlm_mtp_drafter_available(args):
             return "vlm_mtp"
         return "vlm"
     if getattr(args, "bench_depths", ""):

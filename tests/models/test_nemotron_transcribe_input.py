@@ -459,6 +459,21 @@ def test_run_transcribes_audio_without_a_prompt(speech_run):
     assert args.max_tokens == 15 + 24
 
 
+def test_a_speech_clip_drafts_and_other_media_does_not(speech_run, monkeypatch):
+    monkeypatch.setattr(cli, "_vlm_mtp_drafter_available", lambda args: True)
+    for media, mode in ((["--audio", "a.wav"], "vlm_mtp"),
+                        (["--image", "a.png"], "vlm"), ([], "vlm_mtp")):
+        _, args = _run_args([speech_run, "--mmproj", "enc.gguf", *media])
+        assert cli._run_mode(args) == mode
+    # Audio for an mmproj that is not a speech encoder keeps the plain path.
+    monkeypatch.setattr(cli, "is_speech_encoder", lambda p: False)
+    _, args = _run_args([speech_run, "--mmproj", "enc.gguf", "--audio", "a.wav"])
+    assert cli._run_mode(args) == "vlm"
+    monkeypatch.setattr(cli, "_vlm_mtp_drafter_available", lambda args: False)
+    monkeypatch.setattr(cli, "is_speech_encoder", lambda p: True)
+    assert cli._run_mode(args) == "vlm"
+
+
 def test_run_keeps_the_flags_the_user_passed(speech_run):
     argv = [speech_run, "--mmproj", "enc.gguf", "--audio", "a.wav",
             "--temp", "0.7", "--max-tokens", "9", "--thinking", "on"]
