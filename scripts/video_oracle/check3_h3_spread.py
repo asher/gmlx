@@ -22,10 +22,12 @@ row from --first on is the largest relative L2 to the fixture over the
 grow with more runs.
 
 Each run's reads go to --work as the run ends, and a rerun resumes after
-the runs already there. --write puts the spread and the gates it gives
-into the fixture's manifest under GMLX_VIDEO_FIXTURES and into each
---copy of it; the repository keeps its copy under
-tests/fixtures/video/oracle/. --write needs no ComfyUI.
+the runs already there. --starts limits a process to the runs of those
+starts, so processes with their own --work files share the restarts.
+--write takes every --work file, refuses a run in two of them, and puts
+the spread and the gates it gives into the fixture's manifest under
+GMLX_VIDEO_FIXTURES and into each --copy of it; the repository keeps its
+copy under tests/fixtures/video/oracle/. --write needs no ComfyUI.
 
   python scripts/video_oracle/run.py --python <comfyui venv python> \\
       --threads 8 check3_h3_spread.py --comfy-dir <ComfyUI checkout> \\
@@ -80,11 +82,11 @@ def bf16_bits(a: np.ndarray) -> np.ndarray:
     return ((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint16)
 
 
-def runs() -> list[tuple[str, int, int | None]]:
-    """(tag, start, seed) of every restart: the bases first, then each
-    start's nudges."""
-    out = [(f"blocks.{k}", k, None) for k in STARTS]
-    out += [(f"blocks.{k} nudge{s}", k, s) for k in STARTS for s in SEEDS]
+def runs(starts=STARTS) -> list[tuple[str, int, int | None]]:
+    """(tag, start, seed) of every restart of ``starts``: the bases
+    first, then each start's nudges."""
+    out = [(f"blocks.{k}", k, None) for k in starts]
+    out += [(f"blocks.{k} nudge{s}", k, s) for k in starts for s in SEEDS]
     return out
 
 
@@ -116,12 +118,20 @@ def measure(a) -> int:
     if last != inp["blocks"] - 1 or a.first > last:
         raise SystemExit(f"error: {len(dm.blocks)} blocks, the fixture "
                          f"{inp['blocks']}, --first {a.first}")
-    work = json.loads(a.work.read_text()) if a.work.exists() else {}
+    (path,) = a.work
+    only = sorted(set(a.starts or STARTS))
+    if set(only) - set(STARTS):
+        raise SystemExit(f"error: --starts {only} are not all of {STARTS}")
+    work = json.loads(path.read_text()) if path.exists() else {}
     if work and (work.get("name"), work.get("first")) != (a.name, a.first):
-        raise SystemExit(f"error: {a.work} holds another measurement")
+        raise SystemExit(f"error: {path} holds another measurement")
+    extra = {t for t in work.get("runs", {})} - {t for t, _, _ in runs(only)}
+    if extra:
+        raise SystemExit(f"error: {path} holds runs of other starts: "
+                         f"{sorted(extra)}")
     work.update(name=a.name, first=a.first, last=last, comfy=head,
                 comfy_gguf=gguf_head, threads=torch.get_num_threads(),
-                starts=list(STARTS), seeds=list(SEEDS))
+                starts=list(STARTS), seeds=list(SEEDS), only=only)
     work.setdefault("runs", {})
     oracle.emulate_bf16_matmul(True)
     try:
@@ -136,7 +146,7 @@ def measure(a) -> int:
         x, t_emb, msegs, table = cap.inputs["blocks.0"][:4]
         shape, dtype = x.shape, x.dtype
         del cap, x
-        for tag, k, seed in runs():
+        for tag, k, seed in runs(only):
             if tag in work["runs"]:
                 continue
             state = z[f"blocks.{k}"]
@@ -164,9 +174,9 @@ def measure(a) -> int:
                 "digest": hashlib.sha256(bf16_bits(state).tobytes())
                 .hexdigest()[:16],
                 "reads": reads, "wall_s": round(time.perf_counter() - t0, 1)}
-            tmp = a.work.with_name(a.work.name + ".part")
+            tmp = path.with_name(path.name + ".part")
             tmp.write_text(json.dumps(work, indent=1) + "\n")
-            os.replace(tmp, a.work)
+            os.replace(tmp, path)
             print(f"[spread] {tag}: blocks.{last} "
                   f"{reads[f'blocks.{last}']:.4f}, "
                   + " ".join(f"{b} {reads[f'blocks.{b}']:.4f}"
@@ -193,8 +203,26 @@ def spread(work: dict) -> dict:
     return out
 
 
+def merged(paths: list[Path]) -> dict:
+    """The runs of every work file, one measurement: the same fixture,
+    rows, oracle and thread count in each, and no run in two files."""
+    keys = ("name", "first", "last", "comfy", "comfy_gguf", "threads",
+            "starts", "seeds")
+    out: dict = {}
+    for p in paths:
+        w = json.loads(p.read_text())
+        if out and any(w[k] != out[k] for k in keys):
+            raise SystemExit(f"error: {p} is another measurement")
+        out.update({k: w[k] for k in keys})
+        both = set(out.get("runs", {})) & set(w["runs"])
+        if both:
+            raise SystemExit(f"error: {p} repeats runs {sorted(both)}")
+        out.setdefault("runs", {}).update(w["runs"])
+    return out
+
+
 def write(a) -> int:
-    work = json.loads(a.work.read_text())
+    work = merged(a.work)
     if (work["name"], work["first"]) != (a.name, a.first):
         raise SystemExit(f"error: {a.work} holds another measurement")
     rows = spread(work)
@@ -232,8 +260,11 @@ def main(argv=None) -> int:
     ap.add_argument("--name", required=True, help="check 3 fixture name")
     ap.add_argument("--first", type=int, required=True,
                     help="the first block row the spread gates")
-    ap.add_argument("--work", type=Path, required=True,
-                    help="JSON of every run's reads, resumed on a rerun")
+    ap.add_argument("--work", type=Path, nargs="+", required=True,
+                    help="JSON of the runs' reads, resumed on a rerun; "
+                         "--write takes every process's file")
+    ap.add_argument("--starts", type=int, nargs="+",
+                    help="measure the runs of these starts only")
     ap.add_argument("--comfy-dir", type=Path,
                     help="ComfyUI checkout with custom_nodes/ComfyUI-GGUF")
     ap.add_argument("--dit", type=Path, help="MiniMax-H3 DiT GGUF")
