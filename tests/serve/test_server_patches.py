@@ -1473,7 +1473,7 @@ def test_chat_load_offload_warms_off_loop_before_handler(monkeypatch):
         order.append(("warm", model_id))
 
     _register_fake_chat(fake_handler)
-    monkeypatch.setattr(sp_routes, "_warm_and_release", fake_warm)
+    monkeypatch.setattr(sp_routes, "_load_resident", fake_warm)
     sp.install_chat_load_offload()
 
     res = asyncio.run(_chat_endpoint()(_FakeReq(model="m"), object()))
@@ -1489,7 +1489,7 @@ def test_chat_load_offload_passes_explicit_adapter(monkeypatch):
     async def fake_handler(request, http_request):
         return {"ok": True}
 
-    monkeypatch.setattr(sp_routes, "_warm_and_release",
+    monkeypatch.setattr(sp_routes, "_load_resident",
                         lambda m, a: seen.append((m, a)))
     _register_fake_chat(fake_handler)
     sp.install_chat_load_offload()
@@ -1510,7 +1510,7 @@ def test_chat_load_offload_swallows_warm_error(monkeypatch):
         raise RuntimeError("load failed")
 
     _register_fake_chat(fake_handler)
-    monkeypatch.setattr(sp_routes, "_warm_and_release", boom)
+    monkeypatch.setattr(sp_routes, "_load_resident", boom)
     sp.install_chat_load_offload()
 
     res = asyncio.run(_chat_endpoint()(_FakeReq(model="m"), object()))
@@ -1536,7 +1536,7 @@ def test_chat_load_offload_deferred_load_is_a_typed_503(monkeypatch):
                            "measured free working set 27.0 GB")
 
     _register_fake_chat(fake_handler)
-    monkeypatch.setattr(sp_routes, "_warm_and_release", deferred)
+    monkeypatch.setattr(sp_routes, "_load_resident", deferred)
     monkeypatch.setattr(cr, "readiness", lambda: (False, "busy", 7))
     sp.install_chat_load_offload()
 
@@ -1561,7 +1561,7 @@ def test_chat_load_offload_skips_when_no_model(monkeypatch):
     async def fake_handler(request, http_request):
         return {"ok": True}
 
-    monkeypatch.setattr(sp_routes, "_warm_and_release",
+    monkeypatch.setattr(sp_routes, "_load_resident",
                         lambda m, a: seen.append(m))
     _register_fake_chat(fake_handler)
     sp.install_chat_load_offload()
@@ -1604,8 +1604,8 @@ def test_load_offload_covers_raw_request_routes(monkeypatch):
     sp_common._remove_routes(app, "/v1/messages")
     app.add_api_route("/v1/messages", fake_handler, methods=["POST"],
                       include_in_schema=False)
-    monkeypatch.setattr(sp_routes, "_warm_and_release",
-                        lambda m, a: (order.append("warm"), seen.append((m, a))))
+    monkeypatch.setattr(sp_routes, "_load_resident",
+                        lambda m, a: order.append("warm") or seen.append((m, a)))
     sp.install_chat_load_offload()
 
     ep = next(r.endpoint for r in app.router.routes
@@ -1619,6 +1619,122 @@ def test_load_offload_covers_raw_request_routes(monkeypatch):
     res = asyncio.run(ep(_FakeRawReq({"max_tokens": 8})))
     assert res == {"ok": True}
     assert len(seen) == 1               # no model in the body -> no warm
+
+
+def _post_endpoint(path):
+    return next(r.endpoint for r in _APP.app.router.routes
+                if getattr(r, "path", None) == path
+                and "POST" in (getattr(r, "methods", None) or ()))
+
+
+@pytest.mark.parametrize("path", ["/messages/count_tokens",
+                                  "/v1/messages/count_tokens",
+                                  "/responses/input_tokens",
+                                  "/v1/responses/input_tokens"])
+def test_a_token_count_loads_its_model_off_the_event_loop(monkeypatch, path):
+    """A token count for a model not loaded: the cold load runs on a
+    thread while the event loop runs on, and the stock handler then
+    counts."""
+    import threading
+
+    order = []
+
+    async def fake_handler(request):
+        order.append("handler")
+        return {"input_tokens": 1}
+
+    sp_common._remove_routes(_APP.app, path)
+    _APP.app.add_api_route(path, fake_handler, methods=["POST"],
+                           include_in_schema=False)
+    free = threading.Event()
+
+    def cold(model_id, adapter):
+        # Ends only once the loop has run on.
+        order.append(("load", model_id, free.wait(5)))
+    monkeypatch.setattr(sp_routes, "_load_resident", cold)
+    sp.install_chat_load_offload()
+
+    async def run():
+        asyncio.get_running_loop().call_soon(free.set)
+        return await _post_endpoint(path)(_FakeRawReq({"model": "m"}))
+    assert asyncio.run(run()) == {"input_tokens": 1}
+    assert order == [("load", "m", True), "handler"]
+
+
+@pytest.mark.host_gb(64)
+@pytest.mark.parametrize("reply", ["json", "error", "stream"])
+def test_a_warmed_model_stays_held_until_its_handler_returns(monkeypatch, reply):
+    """The chat pre-warm holds the model it loaded until the stock handler's
+    own resolve takes its place: another load meanwhile passes it over, so
+    the handler never loads it again on the event loop, and the request
+    counts once in flight. The hold is gone once the handler answers or
+    raises, and a streamed reply keeps the hold the handler's resolve
+    took."""
+    from fastapi import HTTPException
+    from test_residency import _FakeRG, busy_count, make_pool
+
+    from gmlx.serve.residency import _BusyHold, _GenerationGuard, _active_hold
+
+    _proxy, pool, teardowns = make_pool(15, {"A": 10, "B": 10})
+
+    def pooled_get_cached_model(model_id, *_a, **_k):
+        # The pooled resolver's hold, as the residency seam sets it.
+        entry = pool.acquire(model_id, None, "auto")
+        prev = _active_hold.get()
+        if prev is not None:
+            prev.release()
+        _active_hold.set(_BusyHold(pool, entry))
+        return entry.model_cache["model"], None, None
+
+    monkeypatch.setattr(_APP, "get_cached_model", pooled_get_cached_model)
+    seen = {}
+
+    async def fake_handler(request, http_request):
+        pool.release(pool.acquire("B", None, "auto"))   # B needs A's room
+        seen["A kept"] = "A" not in teardowns
+        seen["busy before"] = busy_count(pool, "A")
+        if reply == "error":                            # refused before its resolve
+            raise HTTPException(status_code=400, detail="bad request")
+        _APP.get_cached_model(request.model)            # the stock resolve
+        seen["busy after"] = busy_count(pool, "A")
+        if reply == "json":
+            tokens = _GenerationGuard(_FakeRG(), _active_hold.get()).generate("hi")[1]
+            return {"text": list(tokens)}
+
+        async def body():
+            # The stock routes take the generator when the stream runs,
+            # after this handler and the wrapper have returned.
+            tokens = _GenerationGuard(_FakeRG(), _active_hold.get()).generate("hi")[1]
+            for t in tokens:
+                seen.setdefault("busy in stream", busy_count(pool, "A"))
+                yield t
+        return body()
+
+    _register_fake_chat(fake_handler)
+    sp.install_chat_load_offload()
+    call = _chat_endpoint()(_FakeReq(model="A"), object())
+    if reply == "error":
+        with pytest.raises(HTTPException) as raised:
+            asyncio.run(call)
+        # The error's traceback keeps the wrapper's frame alive.
+        assert raised.value.status_code == 400
+        assert seen == {"A kept": True, "busy before": 1}
+        assert busy_count(pool, "A") == 0
+        return
+    if reply == "json":
+        assert asyncio.run(call) == {"text": ["t1", "t2"]}
+        assert seen == {"A kept": True, "busy before": 1, "busy after": 1}
+        assert busy_count(pool, "A") == 0
+        return
+
+    async def serve():                                  # one task, as the server's
+        body = await call
+        seen["busy at return"] = busy_count(pool, "A")  # the handler's own hold
+        return [t async for t in body]
+    assert asyncio.run(serve()) == ["t1", "t2"]
+    assert seen == {"A kept": True, "busy before": 1, "busy after": 1,
+                    "busy at return": 1, "busy in stream": 1}
+    assert busy_count(pool, "A") == 0
 
 
 def test_warm_and_release_drops_hold(monkeypatch):
