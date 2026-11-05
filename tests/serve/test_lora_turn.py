@@ -376,6 +376,20 @@ def test_a_turn_no_unload_can_fit_gets_413(monkeypatch):
         pool.lora_hopeless(x, 3 * GB + 1, "the test's LoRA")
     assert er.value.message == ei.value.message
     pool.lora_hopeless(x, 3 * GB, "the test's LoRA")
+    # The bytes it holds of its own keys count, and the text names them.
+    pool.caches["x"].items["k"] = GB + 1
+    with pytest.raises(LoraRefused) as eh:
+        turn(pool, x, 2 * GB, held=GB + 1, hold=("k",))
+    assert eh.value.status == 413 and eh.value.message == ei.value.message
+
+
+def test_a_turn_that_allocates_nothing_passes_on_a_pool_past_its_budget(
+        monkeypatch):
+    pool = make_pool(monkeypatch, 10)
+    x = image(pool, "x", 4, busy=True)
+    chat(pool, "c", 6.5, busy=1)
+    turn(pool, x, 0)
+    assert pool.lora_ledger(x) == (0, {})
 
 
 def test_a_turn_waits_for_a_chat_model_in_use_and_runs_on_its_release(

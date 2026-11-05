@@ -1,12 +1,16 @@
-"""The images API's LoRA bytes, booked with the residency pool: a
-reservation on the route before the request's budget is read, and two
-turns in the job, the pairs before a file is read and the factors after
-the encode. A tiny Z-Image pipeline is the pool's image entry; the other
-models are stand-ins with a footprint and no weights."""
+"""The images API's LoRA bytes, booked with the residency pool at two
+turns of the job on the image worker: the pairs before a file is read and
+the factors after the encode. The route reads the request's file headers
+for its 413 and its budget from the pool's figures, and books nothing. A
+tiny Z-Image pipeline is the pool's image entry; the other models are
+stand-ins with a footprint and no weights."""
 from __future__ import annotations
 
 import json
+import os
 import struct
+import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -23,17 +27,18 @@ from gmlx.serve import bridge_vlm as serving  # noqa: E402
 from gmlx.serve import capacity, residency  # noqa: E402
 from gmlx.serve import image_service as svc  # noqa: E402
 from gmlx.serve import image_steps as steps  # noqa: E402
-from gmlx.serve.lora_books import STORE  # noqa: E402
 from gmlx.serve.patches import images  # noqa: E402
 from gmlx.serve.queue_cap import _RETRY_MIN_S  # noqa: E402
-from gmlx.serve.residency import IMAGE_KIND, _BusyHold  # noqa: E402
+from gmlx.serve.residency import IMAGE_KIND, _BusyHold, gb  # noqa: E402
 from test_image_routes import _APP, _DOC  # noqa: E402
 from test_image_steps import _client as _steps_client  # noqa: E402
-from test_step_routes_lora import (GB, _crowd, _model, _mount,  # noqa: E402
-                                   _pool, _PoolHost, _racing_dry_run,
+from test_step_routes_lora import (GB, _crowd, _held, _model,  # noqa: E402
+                                   _mount, _pool, _PoolHost, _set_budget,
                                    _store)
 
 MB = 10**6
+# Seconds a lock holder waits for the route before it lets go.
+LOCK_WAIT = 5
 
 
 def _spec(**kw):
@@ -99,6 +104,8 @@ def _entry(request, monkeypatch, tmp_path, *, budget: int = 4 * GB,
         footprint=fp, keep_encoder=True, family="z_image", variant="turbo",
         size=(64, 48), cfg=1.0, staged=staged))
     pool = _pool(monkeypatch, budget)
+    # Retry-After as a deferred load has it.
+    pool._retry_fn = None
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
     cfg = SimpleNamespace(image=ImageServerCfg(adapter_cache_mb=cap_mb),
                           model_dirs=(str(root),), port=None)
@@ -136,7 +143,8 @@ def _entry(request, monkeypatch, tmp_path, *, budget: int = 4 * GB,
     monkeypatch.setattr(svc, "check_family", lambda req, s: None)
     monkeypatch.setattr(svc, "target_size", lambda req, s: (64, 48))
     monkeypatch.setattr(svc, "fit_check", lambda req, s, size, b:
-                        rec.budgets.append((b, pool.lora_held(e)[1])))
+                        rec.budgets.append((b, 0 if e.lora is None
+                                            else e.lora.pending)))
     monkeypatch.setattr(svc, "_encode", encode)
     monkeypatch.setattr(api, "plan_request", lambda *a, **k: SimpleNamespace(
         release_encoder=False, rows=1))
@@ -168,26 +176,23 @@ def _post(adapters=(), **fields):
 
 
 def _books_hold(pool, e, *, budget: bool = True) -> None:
-    """The entry's ledger is the keys its caches hold beyond its own, at
-    their bytes, and its own keys are the load's and its default table's,
-    their excess over the footprint's own term booked. Nothing is
-    pending, no byte is past its booking, and the pool is within its
-    budget."""
-    pipe = e.pipeline.pipe
-    with pool._lock:
-        pool.books.drain()
-        rec = pool.books.rec(e)
-        own, ledger = dict(rec.own), dict(rec.ledger)
-        pending, excess, held = rec.pending, rec.excess, rec.held
-        term = rec.own_term
-    cached = {k: c.nbytes(k) for c in (pipe.adapters, pipe.tables)
-              for k in c.keys(lambda k: True)}
-    assert {k: n for k, n in cached.items() if k not in own} == ledger
-    assert {k: n for k, n in cached.items() if k in own} == own
-    assert excess == max(0, sum(own.values()) - term)
-    assert (held, pending) == (sum(ledger.values()) + excess, 0)
+    """The entry's ledger is the request keys its caches hold, at their
+    bytes, and the excess of its own keys over the footprint's own term.
+    Nothing is pending, no byte is past its booking, and the pool and the
+    uploads are within the budget."""
+    keys, own = svc.lora_figures(e)
+    assert pool.lora_ledger(e) == (0, keys)
+    held, term, excess = pool.lora_own(e)
+    assert held == own and excess == max(0, own - term)
+    assert steps.STATE.adapters.incoming == 0
     assert pool.overruns == []
-    assert pool._resident_bytes() <= pool._budget or not budget
+    assert _held(pool) <= pool._budget or not budget
+
+
+def _settle(t) -> None:
+    """The entry's ledger set to its caches on the worker, as the next
+    job's turn would, after a test let LoRA bytes go outside a job."""
+    _on_worker(lambda: svc.lora_settle(t.pool, t.e, "another job"))
 
 
 def _crowd_in_use(t) -> None:
@@ -205,25 +210,32 @@ def _on_worker(fn):
 
 def _after_route(monkeypatch, fn) -> list:
     """``fn`` on the image worker once, right after a request's route has
-    booked it and read its budget, as another job would run there.
-    Returns the route's bookings."""
-    book, budget, seen = images._book, images._budget, []
+    read its budget, as another job would run there before this one.
+    Returns a list that gets "ran" when it did."""
+    budget, seen = images._budget, []
 
-    def booked(hold, served, req):
-        got = book(hold, served, req)
-        seen.append(got)
-        return got
-
-    def then(hold, pairs=0):
-        got = budget(hold, pairs)
-        if len(seen) == 1:
+    def then(hold):
+        got = budget(hold)
+        if not seen:
             seen.append("ran")
             _on_worker(fn)
         return got
 
-    monkeypatch.setattr(images, "_book", booked)
     monkeypatch.setattr(images, "_budget", then)
     return seen
+
+
+def _chat(pool, name: str, fp: int):
+    """A chat model in use of ``fp`` bytes, put in the pool as a cold load
+    would leave it."""
+    e = residency._Entry(cache_key=(f"/m/{name}.gguf", None, "chat"),
+                         model_path=f"/m/{name}.gguf", footprint=int(fp),
+                         busy=1, loaded_as=name)
+    with pool._lock:
+        pool._entries[e.cache_key] = e
+        pool._touch(e)
+        pool._publish()
+    return e
 
 
 def _big_lora(path, nbytes: int) -> str:
@@ -333,7 +345,7 @@ def test_a_lora_over_a_cap_of_256_mb_gets_the_refusal_naming_it(
         "the request's adapters take 270.1 MiB, more than the 256.0 MiB "
         "this image model keeps for request adapters; raise "
         "server.image.adapter_cache_mb")
-    assert t.encodes == 0 and t.pool.lora_held(t.e) == (0, 0, {})
+    assert t.encodes == 0 and t.pool.lora_ledger(t.e) == (0, {})
     assert t.pipe.adapters.bytes == 0
 
 
@@ -394,49 +406,88 @@ def test_a_lora_over_256_mb_runs_on_the_step_routes_with_the_cap_unset(
 
 def test_a_lora_no_unload_makes_room_for_is_413_with_its_gb(
         request, monkeypatch, tmp_path):
-    """A 3 GB LoRA file, priced with its factors at 9 GB, on a server
-    whose budget leaves 7.4 GB beside the entry: 413 from the file's
-    header, with both figures in decimal GB. Nothing is read or booked."""
-    t = _entry(request, monkeypatch, tmp_path, budget=8_400_000_000,
+    """A 3 GB LoRA file on a server whose budget leaves 2.4 GB beside the
+    entry: 413 on the route from the file's header, with both figures in
+    decimal GB. Nothing is read or booked."""
+    t = _entry(request, monkeypatch, tmp_path, budget=3_400_000_000,
                own=False)
     _big_lora(t.root / "big.safetensors", 3 * GB)
     status, doc, _h = _post([("big.safetensors", 1.0)])
     assert (status, doc["error"]["message"]) == (
-        413, "the request's adapters need 9.0 GB of memory, over the 7.4 GB "
+        413, "the request's adapters need 3.0 GB of memory, over the 2.4 GB "
         "the server's memory budget leaves beside 'zit' and the pinned "
         "models")
     assert doc["error"]["param"] == "adapters"
-    assert t.encodes == 0 and t.pool.lora_held(t.e) == (0, 0, {})
+    assert t.encodes == 0 and t.pool.lora_ledger(t.e) == (0, {})
 
 
-def test_a_lora_a_busy_model_holds_the_room_for_is_503_with_retry_after(
+def test_a_lora_whose_factors_no_unload_makes_room_for_is_413_at_its_turn(
         request, monkeypatch, tmp_path):
-    """The same LoRA beside a model in use that leaves 8.6 GB: a 503 that
-    names the models in use, with Retry-After as a deferred load has it.
-    Once that model is idle, a request of LoRA a runs beside it."""
-    t = _entry(request, monkeypatch, tmp_path, budget=20 * GB, own=False)
-    _big_lora(t.root / "big.safetensors", 3 * GB)
-    busy = _model(t.pool, "qwen3-32b", 10_400_000_000, busy=True)
-    status, doc, headers = _post([("big.safetensors", 1.0)])
-    assert (status, doc["error"]["message"]) == (
-        503, "the request's adapters need 9.0 GB of memory, and 8.6 GB is "
-        "free beside the models in use (zit, qwen3-32b); retry when one is "
-        "idle")
-    assert headers["retry-after"] == str(_RETRY_MIN_S)
-    assert t.encodes == 0 and t.pool.lora_held(t.e) == (0, 0, {})
-    t.pool.release(busy)
+    """A request LoRA whose pairs fit beside the entry, on a budget that
+    leaves half its factors' room past them: the route and the pair turn
+    let it through, and the factor turn after the encode answers 413 for
+    its pairs and factors, which no unload makes room for. No factor is
+    built, and the books equal the pairs the caches hold."""
+    t = _entry(request, monkeypatch, tmp_path, own=False)
+    assert _post([("a.safetensors", 1.0)])[0] == 200
+    pairs, factors = t.pipe.adapters.bytes, t.pipe.tables.bytes
+    assert pairs > 0 and factors > 0
+    _on_worker(lambda: svc.shed_lora(t.e, pairs + factors))
+    _settle(t)
+    budget = t.e.footprint + pairs + factors // 2
+    _set_budget(t.pool, budget)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
+    priced, real = [], svc.turn_figures
+
+    def spy(*a):
+        priced.append(real(*a))
+        return priced[-1]
+
+    monkeypatch.setattr(svc, "turn_figures", spy)
     status, doc, _h = _post([("a.safetensors", 1.0)])
-    assert status == 200 and doc["data"]
+    (need, built), = priced
+    assert built == 0 and need > factors // 2
+    assert (status, doc["error"]["message"]) == (
+        413, f"the request's adapters need {gb(need + pairs, True)} GB "
+        f"of memory, over the {gb(budget - t.e.footprint, False)} GB the "
+        "server's memory budget leaves beside 'zit' and the pinned models")
+    assert t.encodes == 2 and t.pipe.tables.bytes == 0
+    assert t.pipe.adapters.bytes == pairs
     _books_hold(t.pool, t.e)
 
 
-def test_an_idle_model_holding_the_room_is_evicted_at_the_route(
+def test_a_lora_a_chat_model_in_use_holds_the_room_for_waits_then_is_503(
         request, monkeypatch, tmp_path):
-    """A request LoRA that fits only once an idle model goes: the route's
-    reservation evicts that model, as a cold load does, and the request
-    runs on the room it booked."""
-    import os
+    """The 3 GB LoRA beside a chat model in use that leaves 1.6 GB: the
+    job's pair turn waits for that model up to the deadline, then answers
+    503 naming it, with Retry-After as a deferred load has it. Nothing is
+    read or booked. Once that model is idle, a request of LoRA a runs
+    beside it."""
+    t = _entry(request, monkeypatch, tmp_path, budget=20 * GB, own=False)
+    _big_lora(t.root / "big.safetensors", 3 * GB)
+    busy = _chat(t.pool, "qwen3-32b", 17_400_000_000)
+    start = time.monotonic()
+    status, doc, headers = _post([("big.safetensors", 1.0)])
+    assert time.monotonic() - start >= _RETRY_MIN_S
+    assert (status, doc["error"]["message"]) == (
+        503, "the request's adapters need 3.0 GB of memory, and 1.6 GB is "
+        "free beside the models in use (qwen3-32b); retry when one is "
+        "idle")
+    assert headers["retry-after"] == str(_RETRY_MIN_S)
+    assert t.encodes == 0 and t.pool.lora_ledger(t.e) == (0, {})
+    assert t.pipe.adapters.bytes == 0
+    t.pool.release(busy)
+    status, doc, _h = _post([("a.safetensors", 1.0)])
+    assert status == 200 and doc["data"]
+    assert busy in t.pool._entries.values()
+    _books_hold(t.pool, t.e)
 
+
+def test_an_idle_model_holding_the_room_is_evicted_at_the_jobs_turn(
+        request, monkeypatch, tmp_path):
+    """A request LoRA that fits only once an idle model goes: the job's
+    pair turn evicts that model, as a cold load does, and the request
+    runs on the room it booked."""
     t = _entry(request, monkeypatch, tmp_path, own=False)
     size = os.path.getsize(t.root / "a.safetensors")
     other = _model(t.pool, "qwen3-32b", 3 * GB - size // 2, busy=False)
@@ -448,27 +499,63 @@ def test_an_idle_model_holding_the_room_is_evicted_at_the_route(
     _books_hold(t.pool, t.e)
 
 
-def test_the_route_reads_its_budget_after_its_reservation(
+def test_the_route_reads_its_lora_and_its_budget_without_the_pools_lock(
         request, monkeypatch, tmp_path):
-    """The route books a request's LoRA before it reads its budget: the
-    fit check gets the working budget less the reservation's factors,
-    with the pairs left to the plan, which counts them once they load."""
+    """Another thread holds the pool's lock as the route checks the
+    request's LoRA bytes and reads its budget: both read the pool's
+    figures alone and book nothing. The fit check gets the working budget
+    less the other model, with nothing pending, and the job's turns book
+    the request's LoRA."""
     t = _entry(request, monkeypatch, tmp_path, own=False)
-    pairs = []
-    book = images._book
+    _model(t.pool, "qwen3-32b", 500 * MB, busy=False)
+    hopeless, budget, out = images._hopeless, images._budget, []
 
-    def booked(hold, served, req):
-        got = book(hold, served, req)
-        pairs.append(got[1])
-        return got
+    def checked(hold, served, req):
+        locked, free = threading.Event(), threading.Event()
 
-    monkeypatch.setattr(images, "_book", booked)
+        def holder():
+            with t.pool._lock:
+                locked.set()
+                out.append(free.wait(LOCK_WAIT))
+        th = threading.Thread(target=holder, daemon=True)
+        th.start()
+        assert locked.wait(LOCK_WAIT)
+        hopeless(hold, served, req)
+        out.append(budget(hold))
+        free.set()
+        th.join()
+
+    monkeypatch.setattr(images, "_hopeless", checked)
     assert _post([("a.safetensors", 1.0)])[0] == 200
-    (budget, pending), = t.budgets
-    factors = pending - pairs[0]
-    assert pairs[0] > 0 and factors > 0
-    assert budget == 4 * GB - factors
+    assert out == [4 * GB - 500 * MB, True], "the route waited on the lock"
+    assert t.budgets == [(4 * GB - 500 * MB, 0)]
+    assert t.pipe.adapters.bytes > 0
     _books_hold(t.pool, t.e)
+
+
+def test_a_requests_estimate_is_its_files_whatever_the_pipeline_holds(
+        request, monkeypatch, tmp_path):
+    """The route counts the tensor bytes of the request's files from their
+    headers, whether the pipeline holds their pairs or a shed let them
+    go: it reads no cache or memo."""
+    from gmlx.image.vae.reader import safetensors_header
+
+    t = _entry(request, monkeypatch, tmp_path, own=False)
+    path = t.root / "a.safetensors"
+    tensors = os.path.getsize(path) - safetensors_header(str(path))[1]
+    req = svc.parse_request("generations", {
+        "prompt": "x", "adapters": [{"id": "a.safetensors",
+                                     "strength": 1.0}]})
+
+    def estimate():
+        return svc.request_estimate(t.served, req.adapters, (str(t.root),))
+
+    assert estimate() == tensors > 0
+    assert _post([("a.safetensors", 1.0)])[0] == 200
+    assert t.pipe.adapters.bytes > 0 and estimate() == tensors
+    _on_worker(lambda: svc.shed_lora(t.e, t.pipe.adapters.bytes
+                                     + t.pipe.tables.bytes))
+    assert t.pipe.adapters.bytes == 0 and estimate() == tensors
 
 
 # T3 at the pool.
@@ -480,10 +567,10 @@ def test_a_model_with_no_lora_books_no_lora_memory(request, monkeypatch,
     ledger is empty after the load and after the job, and the pool's
     resident bytes are the footprints, with or without a cap."""
     t = _entry(request, monkeypatch, tmp_path, own=False, cap_mb=cap_mb)
-    assert t.pool.lora_held(t.e) == (0, 0, {})
+    assert t.pool.lora_ledger(t.e) == (0, {}) and t.e.lora.held == 0
     status, _doc, _h = _post()
     assert status == 200
-    assert t.pool.lora_held(t.e) == (0, 0, {})
+    assert t.pool.lora_ledger(t.e) == (0, {}) and t.e.lora.held == 0
     assert t.pool._resident_bytes() == sum(
         e.footprint for e in t.pool._entries.values()) == GB
     _books_hold(t.pool, t.e)
@@ -500,17 +587,18 @@ def test_a_request_with_no_adapters_books_the_own_tables_excess(
     t = _entry(request, monkeypatch, tmp_path)
     status, _doc, _h = _post()
     assert status == 200 and t.pipe.tables.bytes > 0
-    excess = t.pool.books.excess(t.e)
+    excess = t.pool.lora_own(t.e)[2]
     assert excess > 0
     _books_hold(t.pool, t.e)
     assert _post()[0] == 200
     assert np.array_equal(t.latents[-1], t.latents[0])
-    assert t.pool.books.excess(t.e) == excess
+    assert t.pool.lora_own(t.e)[2] == excess
     _books_hold(t.pool, t.e)
-    # Another job's claim takes the built table, and a model in use the
-    # memory free.
+    # Another job's turn sheds the built table, and a model in use takes
+    # the memory free.
     _on_worker(lambda: svc.shed_lora(t.e, t.pipe.tables.bytes, own=True))
     assert t.pipe.tables.bytes == 0
+    _settle(t)
     _crowd_in_use(t)
     status, doc, headers = _post()
     assert status == 503 and headers["retry-after"] == str(_RETRY_MIN_S)
@@ -532,12 +620,12 @@ def test_the_own_adapter_at_another_strength_is_a_table_booked_in_full(
     assert _post([("own", 0.6)])[0] == 200
     plain, weaker = t.latents
     assert not np.allclose(plain, weaker)
-    _held, _pending, ledger = t.pool.lora_held(t.e)
+    _pending, ledger = t.pool.lora_ledger(t.e)
     assert ledger and all(isinstance(k, tuple) for k in ledger)
     _books_hold(t.pool, t.e)
     assert _post([("own", 0.6)])[0] == 200
     assert np.array_equal(t.latents[-1], weaker)
-    assert t.pool.lora_held(t.e)[2] == ledger
+    assert t.pool.lora_ledger(t.e)[1] == ledger
     _books_hold(t.pool, t.e)
 
 
@@ -545,11 +633,11 @@ def test_the_own_adapter_at_another_strength_is_a_table_booked_in_full(
 def test_a_staged_entrys_encode_drops_its_tables_and_its_turn_books_them(
         request, monkeypatch, tmp_path, room):
     """On a staged entry the encode lets the DiT and its built tables go
-    inside the job. A request of LoRA a again prices its factors in full
-    on its route and builds them after the encode, with the same image
-    and the books equal to what the caches hold. With the memory taken
-    after a first request let the DiT go, its route answers 503 and the
-    job never runs."""
+    inside the job. A request of LoRA a again books its factors in full
+    at its turn after the encode and builds them, with the same image and
+    the books equal to what the caches hold. With the memory taken after
+    a first request let the DiT go, that turn answers 503 and builds
+    nothing."""
     t = _entry(request, monkeypatch, tmp_path, staged=True)
     assert _post([("a.safetensors", 1.0)])[0] == 200
     built = t.pipe.tables.bytes
@@ -557,11 +645,12 @@ def test_a_staged_entrys_encode_drops_its_tables_and_its_turn_books_them(
     _books_hold(t.pool, t.e)
     if not room:
         _on_worker(lambda: svc._drop_dit(t.served))
+        _settle(t)
         _crowd_in_use(t)
         encodes = t.encodes
         status, doc, headers = _post([("a.safetensors", 1.0)])
-        assert status == 503 and headers["retry-after"]
-        assert t.encodes == encodes and t.pipe.tables.bytes == 0
+        assert status == 503 and headers["retry-after"] == str(_RETRY_MIN_S)
+        assert t.encodes == encodes + 1 and t.pipe.tables.bytes == 0
         _books_hold(t.pool, t.e, budget=False)
         return
     assert _post([("a.safetensors", 1.0)])[0] == 200
@@ -575,9 +664,9 @@ def test_a_staged_entrys_encode_drops_its_tables_and_its_turn_books_them(
 @pytest.mark.parametrize("room", [True, False])
 def test_a_pair_held_at_the_route_and_shed_before_the_job_is_booked_again(
         request, monkeypatch, tmp_path, room):
-    """The route of a request of LoRA a finds its pairs and its built
-    table held and books nothing; another job sheds both before the job
-    runs. The job books the pairs at its first turn and the factors at its
+    """Another job sheds the pairs and the built table of a request of
+    LoRA a after its route, which books nothing, and before its job runs.
+    The job books the pairs at its first turn and the factors at its
     second, and gives the same image, the books equal to what the caches
     hold. With the memory taken it answers 503 at its first turn and reads
     no pair."""
@@ -590,12 +679,13 @@ def test_a_pair_held_at_the_route_and_shed_before_the_job_is_booked_again(
     def shed():
         svc.shed_lora(t.e, t.pipe.adapters.bytes + t.pipe.tables.bytes)
         assert t.pipe.adapters.bytes == own
+        svc.lora_settle(t.pool, t.e, "another job")
         if not room:
             _crowd(t.pool)
 
-    booked = _after_route(monkeypatch, shed)
+    ran = _after_route(monkeypatch, shed)
     status, doc, headers = _post([("a.safetensors", 1.0)])
-    assert booked == [(None, 0), "ran"]
+    assert ran == ["ran"]
     if room:
         assert status == 200
         assert np.array_equal(t.latents[-1], t.latents[0])
@@ -607,29 +697,6 @@ def test_a_pair_held_at_the_route_and_shed_before_the_job_is_booked_again(
         "the request's adapters need 0.1 GB of memory, and 0.0 GB is free ")
     assert t.pipe.adapters.bytes == own
     _books_hold(t.pool, t.e, budget=False)
-
-
-@pytest.mark.parametrize("gone", ["pair", "dit"])
-def test_a_request_whose_table_goes_during_its_routes_dry_run_is_priced(
-        request, monkeypatch, tmp_path, gone):
-    """Another job sheds a request table's pairs and built table, or a
-    staged entry's encode lets the DiT go, on the worker while the
-    request's route prices the table by the dry run. The route prices it
-    at twice its pairs, as any other request table, the job's turns book
-    it exactly, and it gives the same image."""
-    t = _entry(request, monkeypatch, tmp_path, staged=gone == "dit")
-    assert _post([("a.safetensors", 1.0)])[0] == 200
-    if gone == "pair":
-        def fn():
-            svc.shed_lora(t.e, t.pipe.adapters.bytes + t.pipe.tables.bytes)
-    else:
-        def fn():
-            svc._drop_dit(t.served)
-    ran = _racing_dry_run(monkeypatch, fn)
-    status, doc, _headers = _post([("a.safetensors", 1.0)])
-    assert ran and status == 200, doc
-    assert np.array_equal(t.latents[-1], t.latents[0])
-    _books_hold(t.pool, t.e)
 
 
 # T20: the request budget.
@@ -655,39 +722,38 @@ def _fit_entry(pipe_bytes: int):
 
 def test_the_request_budget_counts_each_byte_once_and_fits_exactly(
         request, monkeypatch):
-    """A request plan on an entry with held request pairs, held and
-    pending uploads, a pending step on it, a cold build in flight and the
-    request's own reservation of pairs and factors: its budget is the
-    working budget less the other models, the pending uploads, the
-    pending step, the build and its own factors. The plan counts the
-    entry's weights, its held pairs with the request's once they load,
-    and the held uploads itself, so a plan that fills that budget to the
-    byte fits, and one a byte over does not."""
+    """A request plan on an entry with held request pairs and a booking of
+    a step's turn, beside held uploads, an upload body in flight, another
+    model and a cold build in flight: its budget is the working budget
+    less the other model, the step's booking, the body in flight and the
+    build. The plan counts the entry's weights, its held pairs and the
+    held uploads itself, so a plan that fills that budget to the byte
+    fits, and one a byte over does not."""
     from gmlx.image import memfit
 
     pool = _pool(monkeypatch, 100 * GB)
     _mount(request, _PoolHost({}, pool))
     up = np.ones((1, 1 << 18), np.float32)          # 1 MiB held upload
     _steps_client().put(up, kind="adapters")
+    assert steps.STATE.adapters.admit(2 * MB, lambda: None)
+    request.addfinalizer(lambda: steps.STATE.adapters.done(2 * MB))
     other = _model(pool, "qwen3-32b", 900 * MB, busy=False)
     o = _model(pool, "flux2-klein", 60 * MB, busy=True)
-    held = pool.reserve_lora(o, 3 * MB, subject=steps.PAIRS)
-    held.enter("pair", 3 * MB)
-    held.cancel()
-    pending_up = pool.reserve_lora(STORE, 2 * MB, subject=steps.UPLOAD)
-    step = pool.reserve_lora(o, 5 * MB, subject=steps.FACTORS)
-    pairs, factors = 7 * MB, 11 * MB
-    own = pool.reserve_lora(o, pairs + factors, subject=svc.ADAPTERS)
-    pool._building = 13 * MB
-    assert pool.lora_held(o)[0] == 3 * MB
-    assert pool.lora_held(STORE)[:2] == (up.nbytes, 2 * MB) == (
-        sum(_store().values()), 2 * MB)
+    with pool._lock:
+        o.lora = residency._Ledger()
+        o.lora.set(({"pair": 3 * MB}, 0))
+        o.lora.pending = 5 * MB
+        pool._building = 13 * MB
+        pool._publish()
+    assert pool.lora_ledger(o) == (5 * MB, {"pair": 3 * MB})
+    assert steps.STATE.adapters.live() == up.nbytes + 2 * MB == (
+        sum(_store().values()) + 2 * MB)
     monkeypatch.setattr(capacity, "overcommit", lambda: False)
     hold = SimpleNamespace(_pool=pool, _entry=o)
-    beside = other.footprint + 2 * MB + 5 * MB + 13 * MB + factors
+    beside = other.footprint + 5 * MB + 2 * MB + 13 * MB
 
-    # The plan once the request's pairs load: the held pairs and its own.
-    served = _fit_entry(3 * MB + pairs)
+    # The plan reads the held pairs from the pipeline.
+    served = _fit_entry(3 * MB)
     req = svc.parse_request("generations", {"prompt": "x",
                                             "size": "256x256"})
     peaks = []
@@ -700,12 +766,12 @@ def test_the_request_budget_counts_each_byte_once_and_fits_exactly(
 
     monkeypatch.setattr(memfit, "plan_memory", spy)
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 10**15)
-    svc.fit_check(req, served, (256, 256), images._budget(hold, pairs))
+    svc.fit_check(req, served, (256, 256), images._budget(hold))
     peak = peaks[-1]
     for total, fits in ((beside + peak, True), (beside + peak - 1, False)):
         monkeypatch.setattr(capacity, "working_budget_bytes",
                             lambda total=total: total)
-        assert images._budget(hold, pairs) == total - beside
+        assert images._budget(hold) == total - beside
         if fits:
             svc.fit_check(req, served, (256, 256), total - beside)
         else:
@@ -713,9 +779,7 @@ def test_the_request_budget_counts_each_byte_once_and_fits_exactly(
                 svc.fit_check(req, served, (256, 256), total - beside)
     # With GMLX_OVERCOMMIT set a request plans on no budget.
     monkeypatch.setattr(capacity, "overcommit", lambda: True)
-    assert images._budget(hold, pairs) is None
-    for b in (pending_up, step, own):
-        b.cancel()
+    assert images._budget(hold) is None
 
 
 # T21: the optional cap at startup.

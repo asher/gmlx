@@ -96,8 +96,8 @@ def served(monkeypatch, tmp_path, request):
     monkeypatch.setattr(svc, "target_size", lambda req, s: (64, 32))
     monkeypatch.setattr(svc, "fit_check", lambda req, s, size, budget: None)
     monkeypatch.setattr(svc, "default_store_root", lambda port=None: str(tmp_path / "files"))
-    monkeypatch.setattr(images, "_book", lambda hold, s, req: (None, 0))
-    monkeypatch.setattr(images, "_budget", lambda hold, pairs=0: None)
+    monkeypatch.setattr(images, "_hopeless", lambda hold, s, req: None)
+    monkeypatch.setattr(images, "_budget", lambda hold: None)
     images.install_image_routes(cfg)
     return rec
 

@@ -930,7 +930,9 @@ class _ResidencyPool:
         head = None if over else self._measured_lora_room()
         with self._lock:
             late = self._reconcile(owner, figs)
-            ok = owner is not STORE and self._fits(owner, need, head, live)
+            # A turn that allocates nothing needs no room.
+            ok = owner is not STORE and (
+                need == 0 or self._fits(owner, need, head, live))
             if ok:
                 self._book(owner, need)
                 self._hit("booked")
@@ -1059,7 +1061,7 @@ class _ResidencyPool:
                           f"{self._lora_name(owner)!r} and the pinned "
                           "models")
                 self._lora_refuse(
-                    413, subject, need,
+                    413, subject, need + held,
                     f", over the {gb(budget - mine - pinned, False)} GB the "
                     f"server's memory budget leaves beside {beside}")
         chat = [e for e in es if e is not owner and not e.pinned
