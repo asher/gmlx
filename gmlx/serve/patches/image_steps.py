@@ -291,6 +291,24 @@ def _lora_pool():
     return fn() if fn is not None else None
 
 
+def _settled(hold, fn):
+    """``fn`` as a worker job that sets the entry's LoRA ledger to its
+    caches in its finally: an encode lets LoRA bytes go and books none."""
+    pool = _lora_pool()
+    if pool is None:
+        return fn
+
+    def job(*args):
+        try:
+            return fn(*args)
+        finally:
+            from ..image_service import lora_settle
+            from ..image_steps import ENCODE
+
+            lora_settle(pool, hold._entry, ENCODE)
+    return job
+
+
 def _refused(e):
     """The StepError of a LoraRefused, with its Retry-After."""
     from ..image_steps import StepError
@@ -1345,7 +1363,8 @@ async def encode(request: Request):
             # A prompt with images is refused by name, unpriced.
             if not images:
                 await asyncio.to_thread(_check_encode, hold, served, text)
-            feats = await _on_worker(video_encode, served, text, images)
+            feats = await _on_worker(_settled(hold, video_encode), served,
+                                     text, images)
             got = {"cond": feats, "refs": [], "image_slots": []}
             return _held_encode(got, None)
         borrow = None
@@ -1363,7 +1382,8 @@ async def encode(request: Request):
             chat_hold = None
         try:
             typed = (text,) if revised else ()
-            got = await _on_worker(do_encode, served, revised or text,
+            got = await _on_worker(_settled(hold, do_encode), served,
+                                   revised or text,
                                    [i[..., :3] for i in images], borrow,
                                    want_refs, *typed)
         finally:

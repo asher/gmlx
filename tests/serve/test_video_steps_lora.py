@@ -1,9 +1,9 @@
-"""The video step's LoRA bytes, booked with the residency pool: a tiny
-MiniMax-H3 entry with a LoRA of its own runs encode and step with its
-books equal to what its caches hold. The encode lets the DiT and every
-pair go; the own pairs load again with the DiT, within the footprint,
-and the step's turns book a client's table and the own table's excess
-again."""
+"""The video step's LoRA bytes, booked with the residency pool at the
+step's turns on the image worker: a tiny MiniMax-H3 entry with a LoRA of
+its own runs encode and step with its ledger equal to what its caches
+hold. The encode lets the DiT and every pair go and settles the ledger;
+the own pairs load again with the DiT, within the footprint, and the
+step's turns book a client's table and the own table's excess again."""
 from __future__ import annotations
 
 import dataclasses
@@ -16,10 +16,10 @@ mx = pytest.importorskip("mlx.core")
 
 from gmlx.serve import video_service as vs  # noqa: E402
 from gmlx.serve.image_steps_client import StepsClientError  # noqa: E402
-from gmlx.serve.lora_books import STORE  # noqa: E402
 from gmlx.serve.residency import IMAGE_KIND, _BusyHold  # noqa: E402
 from test_images_api_lora import _books_hold  # noqa: E402
-from test_step_routes_lora import GB, _crowd, _pool, _store  # noqa: E402
+from test_step_routes_lora import GB, _crowd, _pool, _set_budget  # noqa: E402
+from test_step_routes_lora import _store  # noqa: E402
 from test_video_steps import (FRAMES, SCALE, SHIFTS, SIZE,  # noqa: E402
                               _clip, _client,
                               _Host, _lora_file, _mount, _on_worker,
@@ -92,9 +92,8 @@ def _entry(request, monkeypatch, tmp_path, *, own=(5,), bf16=False,
     host = _mount(_PoolHost(served, pool), request)
     _stub_encode(monkeypatch, weights)
     e = host.entry()
-    with pool._lock:
-        assert pool.books.rec(e).own_term == served.lora_own_term == (
-            served.plan.lora_term) > 0
+    assert pool.lora_own(e)[1] == served.lora_own_term == (
+        served.plan.lora_term) > 0
     c = _client()
     video, audio, feats = _clip()
     return SimpleNamespace(pool=pool, e=e, pipe=pipe, served=served, c=c,
@@ -107,44 +106,35 @@ def _step(t, **kw):
                        shifts=SHIFTS, audio_scale=SCALE, **kw)
 
 
-def _held_never_negative(t) -> None:
-    with t.pool._lock:
-        t.pool.books.drain()
-        assert t.pool.books.held(t.e) >= 0
-        assert t.pool.books.held(STORE) == sum(_store().values())
-
-
 def test_a_video_entrys_encodes_and_steps_book_its_request_keys_alone(
         request, monkeypatch, tmp_path):
     """A client's table on an entry with its own LoRA runs step, encode,
     step, encode, step. After each, the ledger holds the request keys the
     caches hold and the excess of the own pairs and default table, the
-    own keys are never in it, held is never below zero, and each step
-    gives the first one's output (G1)."""
+    own keys are never in it, and each step gives the first one's output
+    (G1)."""
     from test_video_h3_lora import _adapter
 
     t = _entry(request, monkeypatch, tmp_path)
     tid = t.c.define_table("h3", _table_body(t.c, _adapter(6)))
     first = _step(t, patch_table=tid)
     _books_hold(t.pool, t.e)
-    _held_never_negative(t)
-    _held, _pending, ledger = t.pool.lora_held(t.e)
+    _pending, ledger = t.pool.lora_ledger(t.e)
     assert ledger
     for _ in range(2):
         t.c.encode("h3", "a cat")
         assert t.pipe.adapters.bytes == t.pipe.tables.bytes == 0
-        assert t.pool.lora_held(t.e) == (0, 0, {})
+        assert t.pool.lora_ledger(t.e) == (0, {})
+        assert t.pool.lora_own(t.e)[::2] == (0, 0)
         _books_hold(t.pool, t.e)
-        _held_never_negative(t)
         again = _step(t, patch_table=tid)
         assert all(_rel(a, b) < 1e-6 for a, b in zip(again, first))
         # The entry keeps the refined rows of the cond, so the token
         # refiner's leaves build no factors again.
-        got = t.pool.lora_held(t.e)[2]
+        got = t.pool.lora_ledger(t.e)[1]
         assert got.keys() == ledger.keys()
         assert all(0 < got[k] <= ledger[k] for k in got)
         _books_hold(t.pool, t.e)
-        _held_never_negative(t)
 
 
 @pytest.mark.parametrize("room", [True, False])
@@ -158,12 +148,12 @@ def test_a_video_step_after_an_encode_books_the_own_tables_excess_again(
     by then it answers 503 and builds no table."""
     t = _entry(request, monkeypatch, tmp_path, own=(5, 6), bf16=True)
     first = _step(t)
-    excess = t.pool.books.excess(t.e)
+    excess = t.pool.lora_own(t.e)[2]
     assert excess > 0
     _books_hold(t.pool, t.e)
     t.c.encode("h3", "a cat")
-    assert t.pool.lora_held(t.e) == (0, 0, {})
-    assert t.pool.books.excess(t.e) == 0
+    assert t.pool.lora_ledger(t.e) == (0, {})
+    assert t.pool.lora_own(t.e)[2] == 0
     _books_hold(t.pool, t.e)
     if not room:
         with t.pool._lock:
@@ -177,15 +167,13 @@ def test_a_video_step_after_an_encode_books_the_own_tables_excess_again(
             "the LoRA factors of this step need ")
         assert t.pipe.tables.bytes == 0
         _books_hold(t.pool, t.e, budget=False)
-        _held_never_negative(t)
         return
     again = _step(t)
     assert all(_rel(a, b) < 1e-6 for a, b in zip(again, first))
     # The refined rows are kept: the token refiner's leaves build no
     # factors again.
-    assert 0 < t.pool.books.excess(t.e) <= excess
+    assert 0 < t.pool.lora_own(t.e)[2] <= excess
     _books_hold(t.pool, t.e)
-    _held_never_negative(t)
 
 
 def test_a_video_step_defining_its_table_again_never_sheds_its_matrices(
@@ -194,23 +182,24 @@ def test_a_video_step_defining_its_table_again_never_sheds_its_matrices(
     defines the table again in its turn from the matrices the server
     keeps, on a server short by a quarter of their bytes beside an idle
     model. The matrices are the step's own keys of the uploads until its
-    define: its route unloads the idle model, and the step gives the
-    first one's output with no 409."""
+    define: its turn unloads the idle model, and the step gives the first
+    one's output with no 409."""
     from gmlx.serve import image_steps as steps
     from gmlx.serve.patches import image_steps as routes
-    from test_step_routes_lora import _model
+    from test_step_routes_lora import _held, _model
     from test_video_h3_lora import _adapter
 
     t = _entry(request, monkeypatch, tmp_path)
     tid = t.c.define_table("h3", _table_body(t.c, _adapter(6)))
     first = _step(t, patch_table=tid)
+    # What the step holds once it ran: its pairs and its built table.
+    n = t.e.lora.held
     t.c.encode("h3", "a cat")
     core = steps.STATE.tables_of("h3", t.pipe)[tid]
     assert not routes._held(t.pipe, core)
     short = sum(_store().values()) // 4
-    n, _own, _uploads = routes._step_estimate(t.served, tid, core)
     idle = _model(t.pool, "idle-chat", 2 * short, busy=False)
-    t.pool._budget = t.pool._resident_bytes() + n - short
+    _set_budget(t.pool, _held(t.pool) + n - short)
     again = _step(t, patch_table=tid)
     assert all(_rel(a, b) < 1e-6 for a, b in zip(again, first))
     assert idle not in t.pool._entries.values()

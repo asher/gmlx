@@ -208,6 +208,7 @@ class Missing(StepError):
 UPLOAD = "the LoRA matrices of this upload"
 PAIRS = "the LoRA pairs of this patch table"
 FACTORS = "the LoRA factors of this step"
+ENCODE = "the LoRA bytes of this encode"
 # A body with no Content-Length is booked this many bytes at a time.
 BODY_STEP = 64 << 20
 

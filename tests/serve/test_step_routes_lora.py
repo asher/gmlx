@@ -676,7 +676,7 @@ def test_a_step_defining_its_table_again_never_sheds_its_matrices(
     """A step whose table and pairs another job let go defines the table
     again in its turn from the matrices the server keeps, on a server
     short by a quarter of their bytes beside an idle model. The matrices
-    are the step's own keys of the uploads until its define: its route
+    are the step's own keys of the uploads until its define: its turn
     unloads the idle model, and the step steps as before with no 409."""
     pool, e, p, pairs = _own_pairs(request, monkeypatch, tmp_path)
     steps.STATE.adapters.clear()
