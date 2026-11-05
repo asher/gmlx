@@ -725,6 +725,42 @@ class _ResidencyPool:
         lead = f"{subject} need {gb(n, True)} GB of memory"
         raise LoraRefused(status, f"{lead}{text}")
 
+    def _lora_busy(self) -> list:
+        """The names of the models in use, under _lock."""
+        return [self._lora_name(e) for e in self._entries.values()
+                if e.busy > 0]
+
+    def _lora_short(self, subject, n, free) -> None:
+        """The 503 of a booking the budget leaves ``free`` bytes for, with
+        no idle model to unload for it."""
+        from .lora_books import gb
+
+        busy = self._lora_busy()
+        if busy:
+            self._lora_refuse(
+                503, subject, n,
+                f", and {gb(free, False)} GB is free beside the models in "
+                f"use ({', '.join(busy)}); retry when one is idle")
+        self._lora_refuse(
+            503, subject, n,
+            f", and {gb(free, False)} GB is free; unload a model or retry "
+            "when the requests in flight finish")
+
+    def _lora_unmeasured(self, subject, n, room) -> None:
+        """The 503 of a booking the measured working set leaves ``room``
+        bytes for."""
+        from .lora_books import gb
+
+        if self._lora_busy():
+            self._lora_refuse(
+                503, subject, n,
+                f", and {gb(room, False)} GB is free in the working set "
+                "now; retry when the models in use finish")
+        self._lora_refuse(
+            503, subject, n,
+            f", and {gb(room, False)} GB is free in the working set now; "
+            "close other apps or unload a model to make room")
+
     def _lora_plan(self, owner, n: int, subject: str, *, evict: bool,
                    own_held: int = 0, head=None, but=None):
         """Under _lock after a drain: the claims and the idle models that
@@ -795,21 +831,15 @@ class _ResidencyPool:
                             f", and {gb(free, False)} GB is free; idle "
                             f"models hold {gb(held, False)} GB ({names}). "
                             "Unload one to make room")
-                    busy = [self._lora_name(e)
-                            for e in self._entries.values() if e.busy > 0]
-                    names = ", ".join(busy) or "none"
-                    self._lora_refuse(
-                        503, subject, n,
-                        f", and {gb(free, False)} GB is free beside the "
-                        f"models in use ({names}); retry when one is idle")
+                    self._lora_short(subject, n, free)
         if head is not None and not over:
             room = (head - self._reserved_room_bytes()
                     - books.pending_total(but) - self._building)
-            if n - got > room:
-                self._lora_refuse(
-                    503, subject, n,
-                    f", and {gb(room, False)} GB is free in the working set "
-                    "now; retry when the models in use finish")
+            # The models chosen to go free what the budget counts of them.
+            freed = sum(e.footprint + books.held(e) + books.pending(e)
+                        for e in victims)
+            if n - got - freed > room:
+                self._lora_unmeasured(subject, n, room)
         return claims, victims
 
     def reserve_lora(self, owner, n: int, *, subject: str,
@@ -892,12 +922,7 @@ class _ResidencyPool:
                         - self.books.pending_total(booking) - self._building)
                 got = sum(c for _s, c in claims)
                 if not overcommit() and need - got > room:
-                    from .lora_books import gb
-
-                    self._lora_refuse(
-                        503, subject, need,
-                        f", and {gb(room, False)} GB is free in the working "
-                        "set now; retry when the models in use finish")
+                    self._lora_unmeasured(subject, need, room)
             self._hit("turn")
             if booking is None:
                 return self.books.open_booking(owner, short, subject, claims)

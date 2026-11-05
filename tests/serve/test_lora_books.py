@@ -259,6 +259,74 @@ def test_two_reservations_share_the_measured_room(monkeypatch):
     assert "and 1.0 GB is free in the working set now" in e.value.message
 
 
+def _measured_as_resident(pool, outside: int = 0) -> None:
+    """The working set measured as the pool's residents fill it, with
+    ``outside`` bytes held by other processes."""
+    pool._headroom_fn = (lambda: pool._budget - pool._resident_bytes()
+                         - outside)
+
+
+def test_a_route_eviction_under_a_measured_headroom_credits_its_victim(
+        monkeypatch):
+    """A 10 GB pool, the owner at 3 GB, an idle model at 6 GB, the working
+    set measured as the residents fill it: the idle model holds the room a
+    2 GB request needs by both figures. The route evicts it and grants the
+    request, its measured room crediting what the model it chose frees,
+    as the budget does. The turn measures again before the forward."""
+    pool = make_pool(monkeypatch, 10)
+    own = image(pool, "own", 3)
+    idle = image(pool, "idle", 6)
+    _measured_as_resident(pool)
+    b = pool.reserve_lora(own, 2 * GB, subject="the request's adapters")
+    assert b.granted == 2 * GB
+    assert idle not in pool._entries.values()
+    assert resident(pool) == 5 * GB <= pool._budget
+    assert on_worker(lambda: pool.turn_lora(
+        own, b, 2 * GB, subject="the request's adapters")) is b
+    b.cancel()
+
+
+def test_a_measured_room_short_after_the_credit_names_no_busy_model(
+        monkeypatch):
+    """The same eviction with 3 GB of the working set held outside the
+    pool: crediting the idle model leaves a 6 GB request short, so it is
+    refused 503 and the idle model stays. No model is in use, so the text
+    says what frees memory, not to wait for one."""
+    pool = make_pool(monkeypatch, 10)
+    own = image(pool, "own", 3)
+    idle = image(pool, "idle", 2)
+    _measured_as_resident(pool, 3 * GB)
+    with pytest.raises(LoraRefused) as e:
+        pool.reserve_lora(own, 6 * GB, subject="the request's adapters")
+    assert e.value.status == 503
+    assert e.value.message == (
+        "the request's adapters need 6.0 GB of memory, and 2.0 GB is free in "
+        "the working set now; close other apps or unload a model to make "
+        "room")
+    assert idle in pool._entries.values()
+    assert pool.lora_held(own) == (0, 0, {})
+
+
+def test_an_upload_short_beside_no_model_in_use_says_what_frees_memory(
+        monkeypatch):
+    """An upload the budget is short for, beside a pinned model and a
+    request's pending booking, with no idle model to name and no model in
+    use: the 503 says to unload a model or retry, never "models in use"."""
+    pool = make_pool(monkeypatch, 10)
+    pinned = image(pool, "pinned", 5)
+    pinned.pinned = True
+    other = pool.reserve_lora(pinned, 3 * GB, subject="s")
+    with pytest.raises(LoraRefused) as e:
+        pool.reserve_lora(STORE, 3 * GB,
+                          subject="the LoRA matrices of this upload")
+    assert e.value.status == 503
+    assert e.value.message == (
+        "the LoRA matrices of this upload need 3.0 GB of memory, and 2.0 GB "
+        "is free; unload a model or retry when the requests in flight "
+        "finish")
+    other.cancel()
+
+
 # T14 (b)
 class _Collecting:
     """The keys a shrink reports. Reading them forces a collection, as a

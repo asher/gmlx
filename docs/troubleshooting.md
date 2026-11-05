@@ -433,9 +433,16 @@ and the room:
   make room` (503): an adapter upload never unloads a model, so it names
   the idle models instead. Unload one with
   [`POST /unload`](api.md#endpoints), then queue the prompt again.
+- `... and ... GB is free; unload a model or retry when the requests in
+  flight finish` (503): no model is in use, and other requests' LoRAs or a
+  model load hold the room. Unload a model, or send the request again.
 - `... GB is free in the working set now; retry when the models in use
   finish` (503): macOS has less memory free than the plan counts on while
   other models run. Retry when they finish.
+- `... GB is free in the working set now; close other apps or unload a
+  model to make room` (503): no model is in use, and other apps hold the
+  memory macOS has free. Close one, or unload a model with
+  [`POST /unload`](api.md#endpoints).
 
 A request or a ComfyUI step whose LoRAs fit once an idle model unloads
 pushes that model out, as a model load does. A pinned model stays loaded,
