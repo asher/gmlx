@@ -406,6 +406,16 @@ ADDED_TOKENS = (("<d>", 151669), ("</d>", 151670), ("<|cutoff|>", 151671),
                 ("<|lyrics_start|>", 151672), ("<|lyrics_end|>", 151673),
                 ("<|caption_start|>", 151674), ("<|caption_end|>", 151675))
 EMPTY_IDS = (151643,)
+# A prompt with keyframes, as ComfyUI's tokenizer builds it
+# (text_encoders/minimax.py): per image, first then last, its label
+# tokenized alone, the vision start id, the image pad once per vision
+# token of 32 x 32 pixels, the vision end id; then the prompt, tokenized
+# alone. Labels count the images given. The image processor takes
+# ComfyUI's bounds in pixels, which keep a 1344x768 canvas whole.
+PICTURE = "<Picture {i}>: "
+VISION_START, VISION_END, IMAGE_PAD = 151652, 151653, 151655
+VISION_PX = 32
+KEYFRAME_PIXELS = (3136, 12845056)
 
 
 def _lora_map(config: dict):
