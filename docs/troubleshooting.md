@@ -427,10 +427,10 @@ and the room or what holds the request up. Each 503 carries
 
 - `... need ... GB of memory, over the ... GB the server's memory budget
   leaves beside ...` (413): the LoRAs do not fit beside the pinned models,
-  even with every other model unloaded. A request on an image model
-  counts that model and the chat model it shares as its encoder too,
-  loaded or not, and the message names them. Use a smaller LoRA or fewer
-  of them, or unpin a model.
+  even with every other model unloaded. An images API request on an
+  image model counts that model and the chat model it shares as its
+  encoder too, loaded or not, and the message names them. Use a smaller
+  LoRA or fewer of them, or unpin a model.
 - `... and ... GB is free beside the models in use (...); retry when one
   is idle` (503): the models named are generating, and their memory goes
   once they are idle. The server waits for a chat model among them up to

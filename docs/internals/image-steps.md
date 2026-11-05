@@ -153,10 +153,11 @@ as does a VAE pass of more than 16 images. One whose memory plan does not
 fit beside the models loaded gets 400, and so does the encode of a prompt
 on a video model, priced by its rows. The message of a step names the
 largest term of its plan and, where the plan keeps the keys and values of
-the reference latents, how many of them fit. A patch table, a step or an
-adapter upload whose LoRA bytes do not fit beside the model and the
-pinned models gets 413 when it arrives, naming the GB the LoRAs need and
-the room. The server books the other LoRA bytes on the image thread, at
+the reference latents, how many of them fit. A patch table or a step
+whose LoRA bytes do not fit beside its model and the pinned models gets
+413 when it arrives, and so does an adapter upload whose bytes do not fit
+beside the pinned models. The 413 names the GB the LoRAs need and the
+room. The server books the other LoRA bytes on the image thread, at
 the turn of the job that reads or builds them. The turn drops idle LoRA
 bytes and idle uploads, unloads idle models as a cold load does, and
 books what the job needs. A turn whose bytes, such as a step's factors,
