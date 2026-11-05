@@ -474,8 +474,9 @@ def test_a_measured_short_turn_refuses_at_once_with_no_chat_in_use(
     pool.head = 2 * GB
     with pytest.raises(LoraRefused) as ei:
         turn(pool, x, 3 * GB)
-    assert ("2.0 GB is free in the working set now; close other apps"
-            in ei.value.message)
+    assert ei.value.message == (
+        "the test's LoRA need 3.0 GB of memory, and 2.0 GB is free in the "
+        "working set now; close other apps or unload a model to make room")
 
 
 def test_a_turn_counts_the_other_pending_bookings(monkeypatch):
