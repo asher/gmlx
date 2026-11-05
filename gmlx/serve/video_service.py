@@ -16,14 +16,20 @@ cache keeps room for one uploaded cond of the priced text rows at any
 share, and the entry's refined text rows count at their bound of
 ``CAPTIONS`` prompts of those rows. Each encode lets the DiT and its LoRA
 pairs go, loads the encoder, encodes and releases it, and the next call
-that reads the DiT loads it and the configured adapters again. Each
-decode loads its VAE for the call and lets it go after.
+that reads the DiT loads it and the configured adapters again. An
+encode with keyframe images loads the encoder with the entry's mmproj,
+whose vision tower reads them. Each decode, and each encode of an
+anchor's frames or sound, loads its VAE for the call and lets it go
+after.
 
 The step of the ComfyUI pack (``av_step``) takes the two streams as
 ComfyUI's sampler carries them and gives back what ComfyUI's MiniMax-H3
 forward gives: the audio stream is carried at ``sigma_v / sigma_a`` times
 its latent while ``audio_scale`` is not 1, so the step divides that out
-before the DiT and returns the velocity of the carried variable.
+before the DiT and returns the velocity of the carried variable. A step
+with anchors names each one's frame and the hashes of its latents and of
+the noise of its video rows, the draw of ComfyUI's generator at the
+payload's seed, and the vision spans of its prompt.
 """
 
 from __future__ import annotations
@@ -400,9 +406,10 @@ def ensure_dit(served: ServedVideo) -> None:
         raise
 
 
-def prompt_rows(served: ServedVideo, text: str) -> int:
-    """The text rows ``text`` encodes to, by the encoder's tokenizer from
-    its header, which the entry builds once."""
+def prompt_rows(served: ServedVideo, text: str, sizes=()) -> int:
+    """The text rows ``text`` encodes to, with keyframes of ``sizes``
+    (width, height), by the encoder's tokenizer from its header, which the
+    entry builds once."""
     from gmlx.video import memfit
     from gmlx.video.encoder import header_tokenizer
 
@@ -410,30 +417,89 @@ def prompt_rows(served: ServedVideo, text: str) -> int:
     if served.tokenizer is None:
         served.tokenizer = header_tokenizer(
             fam, os.path.expanduser(served.spec.encoder))
-    return memfit.prompt_rows(fam, text, served.tokenizer)
+    return memfit.prompt_rows(fam, text, served.tokenizer, sizes)
 
 
-def encode(served: ServedVideo, text: str, images: list) -> np.ndarray:
-    """The encoder features (1, L, text dim) f32 of ``text``, on the image
-    worker, with the encoder loaded alone. Images are refused. The DiT
-    stays out after it: the next call that reads it loads it, so encodes
-    back to back load it once."""
+def anchor_refusal(served: ServedVideo, n: int) -> str | None:
+    """Why the entry's DiT runs no request with ``n`` anchors or keyframe
+    images, or None: FastH3 runs text to video only."""
+    fam = served.pipe.video_family
+    row = fam.variant_row(served.plan.variant)
+    if not n or row is None or not row.vsa_sparsity:
+        return None
+    from gmlx.video.families.h3 import vsa
+
+    return vsa.anchor_refusal(n)
+
+
+def keyframe_refusal(served: ServedVideo, images: list) -> str | None:
+    """Why the entry encodes no prompt with keyframe ``images``, each
+    (H, W, 3) uint8, or None. A keyframe is the clip's canvas, as
+    ComfyUI's node resizes it."""
+    if not images:
+        return None
+    fam = served.pipe.video_family
+    if fam.keyframe_encode is None:
+        return (f"the gmlx server encodes text alone for {fam.title}; it "
+                "takes no images with the prompt")
+    why = anchor_refusal(served, len(images))
+    if why:
+        return why
+    if not getattr(served.spec, "encoder_mmproj", None):
+        return (f"video model {served.spec.id!r} names no encoder_mmproj, "
+                "the vision tower of its text encoder that reads keyframes; "
+                "name the encoder's mmproj GGUF as encoder_mmproj in its "
+                "entry")
+    for i, im in enumerate(images):
+        h, w = (int(d) for d in im.shape[:2])
+        if not on_canvas(fam, w, h):
+            return (f"keyframe image {i} is {w}x{h}, no {fam.title} canvas: "
+                    "a keyframe is the clip's canvas, in multiples of 32")
+    return None
+
+
+def on_canvas(fam, width: int, height: int) -> bool:
+    """Whether ``width`` x ``height`` pixels are a canvas of the family's
+    clips: multiples of its VAE stride times its patch."""
+    from .image_steps import COMFY
+
+    lat = COMFY[fam.name]["latent"]
+    m = int(lat["stride"]) * int(lat["patch"])
+    return width > 0 and height > 0 and not width % m and not height % m
+
+
+def encode(served: ServedVideo, text: str, images: list) -> tuple:
+    """(features, spans): the encoder features (1, L, text dim) f32 of
+    ``text``, with keyframe ``images`` (H, W, 3) uint8 at the clip's
+    canvas, and their vision spans in the features, on the image worker,
+    with the encoder loaded alone, and with the entry's mmproj for
+    images. The DiT stays out after it: the next call that reads it
+    loads it, so encodes back to back load it once. ``keyframe_refusal``
+    comes first."""
+    import mlx.core as mx
+
     from gmlx.video import encoder as video_encoder
 
     from .image_steps import StepError
 
     fam = served.pipe.video_family
-    if images:
-        raise StepError(400, f"the gmlx server encodes text alone for "
-                        f"{fam.title}; it takes no images with the prompt, "
-                        "such as a first or last frame")
-    import mlx.core as mx
-
     drop_dit(served)
-    handle = video_encoder.load_encoder(
-        fam, os.path.expanduser(served.spec.encoder), log=_log_line)
+    path = os.path.expanduser(served.spec.encoder)
+    if images:
+        handle = video_encoder.load_encoder(
+            fam, path, mmproj=os.path.expanduser(served.spec.encoder_mmproj),
+            log=_log_line)
+    else:
+        handle = video_encoder.load_encoder(fam, path, log=_log_line)
     try:
-        feats = mx.array(handle.encode(text).features)[None]
+        spans = ()
+        if images:
+            try:
+                feats, spans = fam.keyframe_encode(handle, text, images)
+            except ValueError as e:
+                raise StepError(400, str(e)) from None
+        else:
+            feats = mx.array(handle.encode(text).features)[None]
         feats = feats.astype(mx.float32)
         mx.eval(feats)
         out = np.array(feats, copy=True)
@@ -441,7 +507,7 @@ def encode(served: ServedVideo, text: str, images: list) -> np.ndarray:
         handle.release()
         del handle
         mx.clear_cache()
-    return out
+    return out, tuple(spans)
 
 
 # One step of the pack.
@@ -480,12 +546,137 @@ def caption(served: ServedVideo, key: str, feats, table: str):
     return text, False
 
 
+# The anchors of a step.
+
+@dataclass(frozen=True)
+class AnchorRef:
+    """An anchor an AV step names: its frame, counted from the end when
+    negative, and the tensor hashes of its video latent (1, C, T, h, w),
+    the noise of its video rows and its audio latent (1, C, 2, T)."""
+    frame: int
+    video: str | None = None
+    noise: str | None = None
+    audio: str | None = None
+
+    def hashes(self) -> list:
+        return [h for h in (self.video, self.noise, self.audio) if h]
+
+
+def _int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def step_anchors(fields: dict) -> tuple:
+    """(anchors, spans): the ``AnchorRef`` of each of an AV step's
+    ``anchors`` and its ``spans``, the [start, stop) vision rows of its
+    cond. A video latent comes with the noise of its rows. Raises
+    ValueError naming the field that is wrong."""
+    raw = fields.get("anchors")
+    raw = [] if raw is None else raw
+    if not isinstance(raw, list):
+        raise ValueError("an AV step's anchors are a list")
+    refs = []
+    for i, a in enumerate(raw):
+        if not isinstance(a, dict) or not _int(a.get("frame")):
+            raise ValueError(f"anchors[{i}] is an object with an integer "
+                             "frame")
+        got = {}
+        for k in ("video", "noise", "audio"):
+            if a.get(k) is not None and not isinstance(a[k], str):
+                raise ValueError(f"anchors[{i}].{k} is a tensor hash")
+            got[k] = a.get(k)
+        if got["video"] is None and got["audio"] is None:
+            raise ValueError(f"anchors[{i}] names a video or an audio latent")
+        if (got["video"] is None) != (got["noise"] is None):
+            raise ValueError(f"anchors[{i}] names the noise of its video rows "
+                             "with its video latent, and with it alone")
+        refs.append(AnchorRef(int(a["frame"]), **got))
+    spans = fields.get("spans")
+    spans = [] if spans is None else spans
+    if not isinstance(spans, list) or not all(
+            isinstance(sp, list) and len(sp) == 2 and all(map(_int, sp))
+            for sp in spans):
+        raise ValueError("an AV step's spans are [start, stop] pairs of "
+                         "integers")
+    return tuple(refs), tuple((int(a), int(b)) for a, b in spans)
+
+
+def anchor_rows(served: ServedVideo, refs, held: dict, frames: int,
+                vshape, ashape) -> tuple:
+    """The ``layout.AnchorRows`` of a step's anchors ``refs``, placed by
+    ComfyUI's guide rule on its clip of ``frames`` frames and latents
+    ``vshape`` and ``ashape``, from the shapes of their tensors ``held``
+    by hash. Raises ValueError naming an anchor that is no part of the
+    clip."""
+    from gmlx.video import anchors
+    from gmlx.video.layout import AnchorRows
+
+    fam = served.pipe.video_family
+    vshape, ashape = tuple(vshape), tuple(ashape)
+    out = []
+    for i, r in enumerate(refs):
+        video_t = audio_t = kept = 0
+        if r.video is not None:
+            got = tuple(held[r.video].shape)
+            if len(got) != 5 or got[:2] != vshape[:2] or got[3:] != vshape[3:]:
+                raise ValueError(
+                    f"anchors[{i}]'s video latent is {list(got)}, not (1, "
+                    f"{vshape[1]}, T, {vshape[3]}, {vshape[4]}) on the clip's "
+                    "canvas")
+            video_t = got[2]
+            kept = 1 if video_t == 1 else fam.clip_frames(video_t)
+            if kept is None:
+                raise ValueError(f"anchors[{i}]'s video latent holds {video_t} "
+                                 f"latent frames, no {fam.title} guide clip: "
+                                 "1, or 5 k + 2")
+        if r.audio is not None:
+            got = tuple(held[r.audio].shape)
+            if len(got) != 4 or got[:3] != ashape[:3] or got[3] < 1:
+                raise ValueError(
+                    f"anchors[{i}]'s audio latent is {list(got)}, not (1, "
+                    f"{ashape[1]}, {ashape[2]}, T)")
+            audio_t = got[3]
+        try:
+            p = anchors.place(r.frame, frames, ashape[3],
+                              fam.timeline.frame_rescale, video_frames=kept,
+                              audio=r.audio is not None)
+        except ValueError as e:
+            raise ValueError(f"anchors[{i}]: {e}") from None
+        if p.audio_t is not None and audio_t > p.audio_t:
+            raise ValueError(f"anchors[{i}]'s audio holds {audio_t} latent "
+                             f"frames, past the {p.audio_t} the clip's audio "
+                             f"holds from frame {p.frame}")
+        out.append(AnchorRows(p.frame, video_t, audio_t))
+    return tuple(out)
+
+
+def anchor_cond(served: ServedVideo, refs, rows, held: dict) -> tuple:
+    """(cond_video, cond_audio): the rows of a step's anchors ``refs``
+    placed at ``rows``, from their tensors ``held`` by hash, mixed with
+    the noise each video latent came with. On the image worker, with the
+    DiT loaded. Raises ValueError for noise of another shape than its
+    rows."""
+    import mlx.core as mx
+
+    from gmlx.video.anchors import Anchor
+
+    def f32(h):
+        return None if h is None else held[h].mx().astype(mx.float32)
+    placed = tuple(Anchor(row.frame, f32(r.video), f32(r.audio))
+                   for r, row in zip(refs, rows))
+    noise = [f32(r.noise) for r in refs if r.noise is not None]
+    return served.pipe.dit.cond_rows(placed, 0, noise=noise)
+
+
 def av_step(served: ServedVideo, video, audio, timestep: float,
-            shifts: dict, scale: float, feats, key: str, table: str | None):
+            shifts: dict, scale: float, feats, key: str, table: str | None,
+            *, anchors=(), cond=((), ()), spans=()):
     """One step of the pack's MiniMax-H3 model: the video and audio
     velocity f32 of the latents as ComfyUI's sampler carries them, at its
     ``timestep``, with the audio carried at ``scale`` (the payload's
-    audio_scale). Returns (video, audio, caption cache hit)."""
+    audio_scale). ``anchors`` are the placed ``layout.AnchorRows`` of the
+    anchor rows ``cond`` (``anchor_cond``) and ``spans`` the vision spans
+    of ``feats``. Returns (video, audio, caption cache hit)."""
     import mlx.core as mx
 
     from gmlx.image.lora import install
@@ -505,12 +696,14 @@ def av_step(served: ServedVideo, video, audio, timestep: float,
     if tid not in pipe.patch_tables:
         raise ValueError(f"unknown patch table {table!r}")
     lay = layout.pack(fam.timeline, int(feats.shape[1]), xv.shape[2],
-                      xv.shape[3], xv.shape[4], xa.shape[3])
+                      xv.shape[3], xv.shape[4], xa.shape[3], tuple(anchors),
+                      tuple(spans))
     prev = install.activate(pipe, tid)
     try:
         text, hit = caption(served, key, feats, tid)
         vv, va = api.denoise_step(pipe.dit, xv, xa,
-                                  {"video": sv, "audio": sa}, text, lay)
+                                  {"video": sv, "audio": sa}, text, lay,
+                                  cond_video=cond[0], cond_audio=cond[1])
     finally:
         install.restore(pipe, prev)
     vv = vv.astype(mx.float32)
@@ -523,7 +716,7 @@ def av_step(served: ServedVideo, video, audio, timestep: float,
     return vv, va, hit
 
 
-# The decodes.
+# The decodes, and the encodes of anchors.
 
 def decode_video(served: ServedVideo, latents) -> np.ndarray:
     """Frames (F, H, W, 3) f16 in [0, 1] of model-space latents
@@ -542,6 +735,47 @@ def decode_video(served: ServedVideo, latents) -> np.ndarray:
         return np.concatenate(out, axis=0)
     finally:
         del vae
+        mx.clear_cache()
+
+
+def encode_video(served: ServedVideo, frames) -> np.ndarray:
+    """Model-space latents (1, 24, T, h, w) f32 of frames (F, H, W, 3) in
+    [0, 1], 1 or 17 k + 5 of them, on the image worker, with the video VAE
+    loaded for the call."""
+    import mlx.core as mx
+
+    from gmlx.video.vae.reader import load_vae
+
+    vae = load_vae(os.path.expanduser(served.spec.vae), family="h3",
+                   dtype=mx.float16)
+    try:
+        x = frames.astype(mx.float32)[None] * 2.0 - 1.0
+        z = vae.encode(x).astype(mx.float32)
+        mx.eval(z)
+        return np.array(z, copy=True)
+    finally:
+        del vae
+        mx.clear_cache()
+
+
+def encode_audio(served: ServedVideo, waveform) -> np.ndarray:
+    """Model-space audio latents (1, 32, 2, T) f32 of a stereo waveform
+    (1, 2, samples) at the audio VAE's rate, padded to a whole latent, on
+    the image worker, with the audio VAE loaded for the call. Its
+    convolutions run in windows, so a long sound encodes as a whole one
+    does."""
+    import mlx.core as mx
+
+    from gmlx.video.vae.reader import load_vae
+
+    avae = load_vae(os.path.expanduser(served.spec.audio_vae),
+                    family="h3_audio", dtype=mx.float32)
+    try:
+        z = avae.encode(waveform.astype(mx.float32)).astype(mx.float32)
+        mx.eval(z)
+        return np.array(z, copy=True)
+    finally:
+        del avae
         mx.clear_cache()
 
 

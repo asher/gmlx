@@ -1,10 +1,11 @@
 """The step routes on a tiny MiniMax-H3 pipeline: the AV step against
-ComfyUI's forward rule for the audio its sampler carries, the refined text
-rows kept by cond and patch table, the memory checks of the step and the
-decodes, the encode with the DiT and its LoRA let go and loaded again,
-the entry's cache bounds, the refusals of each route, the decodes'
-layouts, and the video model's status. Every MLX op runs on the image
-worker."""
+ComfyUI's forward rule for the audio its sampler carries, with anchors as
+the gmlx pipeline runs them, the refined text rows kept by cond and patch
+table, the memory checks of the step, the encodes and the decodes, the
+encode with the DiT and its LoRA let go and loaded again, with keyframes
+through the entry's mmproj, the entry's cache bounds, the refusals of
+each route, the VAE routes against the VAEs, and the video model's
+status. Every MLX op runs on the image worker."""
 from __future__ import annotations
 
 import importlib
@@ -195,10 +196,15 @@ def _comfy_sigmas(t: float) -> tuple:
     return f(sv), f(sa)
 
 
-def _comfy_rule(pipe, video, audio, t, feats):
+def _comfy_rule(pipe, video, audio, t, feats, anchors=(), noise=(),
+                spans=()):
     """ComfyUI's forward around gmlx's network: the audio carried at
     sigma_a / sigma_v into the network, and its velocity converted back
-    to the carried variable's."""
+    to the carried variable's. ``anchors`` (frame, video, audio) placed,
+    with the ``noise`` of each one's video rows, and the cond's vision
+    ``spans`` run as the gmlx pipeline runs them."""
+    from gmlx.video.anchors import Anchor
+
     sv, sa = _comfy_sigmas(t)
     carry = sa / sv
     xa = (audio * carry).astype(np.float32)
@@ -206,11 +212,18 @@ def _comfy_rule(pipe, video, audio, t, feats):
     def run():
         dit = pipe.dit
         text = dit.caption(mx.array(feats))
+        rows = tuple(layout.AnchorRows(
+            f, 0 if v is None else v.shape[2], 0 if a is None else a.shape[3])
+            for f, v, a in anchors)
         lay = layout.pack(hf.FAMILY.timeline, feats.shape[1],
-                          *video.shape[2:], audio.shape[3])
+                          *video.shape[2:], audio.shape[3], rows, spans)
+        placed = tuple(Anchor(f, None if v is None else mx.array(v),
+                              None if a is None else mx.array(a))
+                       for f, v, a in anchors)
+        cv, ca = dit.cond_rows(placed, 0, noise=[mx.array(n) for n in noise])
         vv, va = vapi.denoise_step(dit, mx.array(video), mx.array(xa),
                                    {"video": float(sv), "audio": float(sa)},
-                                   text, lay)
+                                   text, lay, cond_video=cv, cond_audio=ca)
         return np.array(vv.astype(mx.float32)), np.array(
             va.astype(mx.float32))
 
@@ -520,23 +533,341 @@ def test_a_runs_first_step_counts_the_clips_decodes(host):
     c.av_step("h3", run, video, audio, 600.0, row, **kw)
 
 
+def _anchor_parts(seed=4):
+    """A lone first frame's video latent with its sound and the noise of
+    its video rows, and a lone frame's latent and noise for the last
+    frame, on the 5-frame 64x64 clip."""
+    rng = np.random.default_rng(seed)
+    vshape, _a = hf.latent_shapes(FRAMES, SIZE, SIZE)
+    one = (1, vshape[1], 1, *vshape[3:])
+    # The rows of a lone frame at patch (1, 2, 2): (h/2 * w/2, C * 4).
+    rows = (vshape[3] * vshape[4] // 4, vshape[1] * 4)
+
+    def draw(shape):
+        return rng.standard_normal(shape).astype(np.float32)
+    return {"first": draw(one), "first_noise": draw(rows),
+            "sound": draw((1, 32, 2, 3)), "last": draw(one),
+            "last_noise": draw(rows)}
+
+
+def _anchored(c, parts) -> tuple:
+    """The step's anchors by hash, and ComfyUI's (frame, video, audio)
+    and noise of them placed."""
+    h = {k: c.put(v) for k, v in parts.items()}
+    sent = [{"frame": 0, "video": h["first"], "noise": h["first_noise"],
+             "audio": h["sound"]},
+            {"frame": -1, "video": h["last"], "noise": h["last_noise"]}]
+    placed = [(0, parts["first"], parts["sound"]),
+              (FRAMES - 1, parts["last"], None)]
+    return sent, placed, [parts["first_noise"], parts["last_noise"]]
+
+
+def test_an_av_step_with_anchors_and_spans_runs_them_as_the_pipeline(
+        host, pipe):
+    """The anchors are placed by ComfyUI's guide rule, the last frame's
+    counted from the end, their rows mixed with the noise each was sent
+    with, and the cond's vision spans run with the video tag, as the
+    gmlx pipeline runs a clip with keyframes and a guide."""
+    video, audio, feats = _clip()
+    c = _client()
+    row = {"cond": c.put(feats)}
+    t = np.float32(600)
+    sent, placed, noise = _anchored(c, _anchor_parts())
+    kw = dict(shifts=SHIFTS, audio_scale=SCALE)
+    vv, va = c.av_step("h3", None, video, audio, t, row, anchors=sent,
+                       spans=[[1, 3]], **kw)
+    want_v, want_a = _comfy_rule(pipe, video, audio, t, feats, placed, noise,
+                                 ((1, 3),))
+    assert _rel(vv, want_v) < 1e-5 and _rel(va, want_a) < 1e-5
+    plain_v, plain_a = c.av_step("h3", None, video, audio, t, row, **kw)
+    assert _rel(vv, plain_v) > 1e-3 and _rel(va, plain_a) > 1e-3
+
+
+def _refused_step(c, row, fields_of, parts=None):
+    """The refusal of a step whose anchors and spans ``fields_of`` makes
+    from the anchors sent, in a raw body as any client may send it."""
+    video, audio, _f = _clip()
+    sent, _p, _n = _anchored(c, parts or _anchor_parts())
+    anchors, spans = fields_of(sent)
+    fields = {"model": "h3", "rows": [row], "audio_scale": SCALE,
+              "shifts": SHIFTS}
+    for k, v in (("anchors", anchors), ("spans", spans)):
+        if v is not None:
+            fields[k] = v
+    tensors = {"video": video, "audio": audio,
+               "timestep": np.asarray([600.0], np.float32)}
+    with pytest.raises(StepsClientError) as e:
+        c.container("step", tensors, fields)
+    return e.value
+
+
+def _with(i, **kw):
+    def fields_of(sent):
+        sent = [dict(a) for a in sent]
+        sent[i].update(kw)
+        for k in [k for k, v in sent[i].items() if v is None]:
+            del sent[i][k]
+        return sent, None
+    return fields_of
+
+
+@pytest.mark.parametrize("case, want", [
+    ("list", "an AV step's anchors are a list"),
+    ("frame", "anchors[1] is an object with an integer frame"),
+    ("noise", "anchors[0] names the noise of its video rows with its video "
+     "latent, and with it alone"),
+    ("canvas", "anchors[1]'s video latent is [1, 24, 1, 2, 2], not (1, 24, "
+     "T, 4, 4) on the clip's canvas"),
+    ("guide", "anchors[1]'s video latent holds 3 latent frames, no "
+     "MiniMax-H3 guide clip: 1, or 5 k + 2"),
+    ("outside", "anchors[1]: frame 5 is outside the clip's 5 frames"),
+    ("sound", None),
+    ("noise_shape", "anchor noise (4, 95) is not the shape of its rows "
+     "(4, 96)"),
+    ("spans", "vision spans [(4, 9)] are not ascending spans of a 6-row "
+     "prefix"),
+])
+def test_an_av_step_refuses_anchors_that_are_no_part_of_its_clip(
+        host, monkeypatch, case, want):
+    """Each refusal names the anchor and what is wrong with it, before
+    the step's turn on the worker, which would load the DiT an encode let
+    go. The noise is checked against the rows the DiT makes, in the
+    turn."""
+    _v, audio, feats = _clip()
+    c = _client()
+    if case != "noise_shape":
+        def turn(served):
+            raise AssertionError("the refused step took its turn")
+        monkeypatch.setattr(vs, "ensure_dit", turn)
+    row = {"cond": c.put(feats)}
+    parts = _anchor_parts()
+    if case == "list":
+        fields_of = lambda sent: ({"frame": 0}, None)  # noqa: E731
+    elif case == "frame":
+        fields_of = _with(1, frame=1.5)
+    elif case == "noise":
+        fields_of = _with(0, noise=None)
+    elif case == "canvas":
+        fields_of = _with(1, video=c.put(parts["last"][..., :2, :2]))
+    elif case == "guide":
+        fields_of = _with(1, video=c.put(np.repeat(parts["last"], 3, 2)))
+    elif case == "outside":
+        fields_of = _with(1, frame=FRAMES)
+    elif case == "sound":
+        t = audio.shape[3]
+        want = (f"anchors[0]'s audio holds {t + 1} latent frames, past the "
+                f"{t} the clip's audio holds from frame 0")
+        fields_of = _with(0, audio=c.put(np.zeros((1, 32, 2, t + 1),
+                                                  np.float32)))
+    elif case == "noise_shape":
+        fields_of = _with(1, noise=c.put(parts["last_noise"][:, :95]))
+    else:
+        fields_of = lambda sent: (sent, [[4, 9]])  # noqa: E731
+    e = _refused_step(c, row, fields_of, parts)
+    assert e.status == 400 and e.body["error"] == want
+
+
+def test_an_av_step_names_the_anchor_tensors_it_does_not_hold(host):
+    """One 409 names each tensor of the step the server does not hold,
+    the cond and the anchors', so the client sends them all at once."""
+    video, audio, _f = _clip()
+    c = _client()
+    # A cond no test has sent: the tensor store outlives a test.
+    cond = array_hash(np.full((1, 6, TINY["text_dim"]), 3.0, np.float32))
+    sent, _p, _n = _anchored(c, _anchor_parts())
+    lost = array_hash(np.full((1, 32, 2, 2), 7.0, np.float32))
+    sent[0]["audio"] = lost
+    with pytest.raises(MissingTensors) as e:
+        c.av_step("h3", None, video, audio, 600.0, {"cond": cond},
+                  anchors=sent, shifts=SHIFTS, audio_scale=SCALE)
+    assert e.value.missing == sorted([cond, lost])
+
+
+@pytest.mark.parametrize("ask", ["anchors", "spans"])
+def test_a_fasth3_step_refuses_anchors_and_vision_spans(host, monkeypatch,
+                                                         ask):
+    """FastH3 runs text to video only; a vision span is a keyframe's
+    image, so it counts as an anchor."""
+    import dataclasses
+
+    monkeypatch.setattr(host.served, "plan", dataclasses.replace(
+        host.served.plan, variant=hf.FASTH3))
+    c = _client()
+    row = {"cond": c.put(_clip()[2])}
+
+    def fields_of(sent):
+        return (sent, None) if ask == "anchors" else (None, [[1, 3]])
+    e = _refused_step(c, row, fields_of)
+    n = "2 anchors" if ask == "anchors" else "1 anchor"
+    assert e.status == 400 and e.body["error"] == (
+        f"MiniMax-H3 fasth3 runs text to video only, and this request has "
+        f"{n}; run it without keyframes, guides or audio anchors")
+
+
+def test_a_step_with_anchors_counts_their_rows(host):
+    """The anchors' rows join the packed sequence the step is priced at:
+    a budget that fits the clip's step alone refuses it with anchors."""
+    video, audio, feats = _clip()
+    c = _client()
+    row = {"cond": c.put(feats)}
+    sent, _p, _n = _anchored(c, _anchor_parts())
+    served = host.served
+    rows = (layout.AnchorRows(0, 1, 3), layout.AnchorRows(FRAMES - 1, 1, 0))
+
+    def need(anchors):
+        return vs.plan_clip(served.plan, frames=FRAMES, width=SIZE,
+                            height=SIZE, text=6, decode=False, budget=1,
+                            anchors=anchors).terms["denoise"]["step"]
+    assert need(rows) > need(())
+    kw = dict(shifts=SHIFTS, audio_scale=SCALE)
+    # The first step keeps the cond's refined rows, which the caches count.
+    c.av_step("h3", None, video, audio, 600.0, row, **kw)
+    adapters, caches = vs.held_bytes(served)
+    host.budget_bytes = adapters + caches + need(rows) - 1
+    c.av_step("h3", None, video, audio, 600.0, row, **kw)
+    with pytest.raises(StepsClientError) as e:
+        c.av_step("h3", None, video, audio, 600.0, row, anchors=sent, **kw)
+    assert e.value.status == 400 and e.value.body["error"] == (
+        "a step of 64x64 at 5 frames does not fit in memory beside the "
+        "models now loaded")
+    host.budget_bytes += 1
+    c.av_step("h3", None, video, audio, 600.0, row, anchors=sent, **kw)
+
+
 @pytest.mark.parametrize("ask, want", [
     # An image-to-video request sends its first or last frame with the
-    # prompt; the gmlx CLIP refuses them before it calls the server.
-    ("images", "the gmlx server encodes text alone for MiniMax-H3; it takes "
-     "no images with the prompt, such as a first or last frame"),
+    # prompt, which the encoder's vision tower reads.
+    ("images", "video model 'h3' names no encoder_mmproj, the vision tower "
+     "of its text encoder that reads keyframes; name the encoder's mmproj "
+     "GGUF as encoder_mmproj in its entry"),
+    # ComfyUI's node resizes a keyframe to the clip's canvas first.
+    ("canvas", "keyframe image 1 is 48x32, no MiniMax-H3 canvas: a keyframe "
+     "is the clip's canvas, in multiples of 32"),
+    ("fasth3", "MiniMax-H3 fasth3 runs text to video only, and this request "
+     "has 2 anchors; run it without keyframes, guides or audio anchors"),
     ("prompt_upsampling", "video model 'h3' takes no prompt upsampling; "
      "send the request without prompt_upsampling"),
 ])
-def test_the_h3_encode_refuses_what_it_does_not_run_by_name(host, ask, want):
+def test_the_h3_encode_refuses_what_it_does_not_run_by_name(
+        host, monkeypatch, ask, want):
+    import dataclasses
+
     c = _client()
+    images = [np.zeros((32, 32, 3), np.uint8)]
+    if ask != "images":
+        host.served.spec.encoder_mmproj = "/abs/mmproj.gguf"
+    if ask == "canvas":
+        images.append(np.zeros((32, 48, 3), np.uint8))
+    if ask == "fasth3":
+        images.append(images[0])
+        monkeypatch.setattr(host.served, "plan", dataclasses.replace(
+            host.served.plan, variant=hf.FASTH3))
     with pytest.raises(StepsClientError) as e:
-        if ask == "images":
-            c.encode("h3", "a cat", images=[np.zeros((32, 32, 3), np.uint8)])
-        else:
+        if ask == "prompt_upsampling":
             c.container("encode", {}, {"model": "h3", "text": "a cat",
                                        "prompt_upsampling": True})
+        else:
+            c.encode("h3", "a cat", images=images)
     assert e.value.status == 400 and e.value.body["error"] == want
+
+
+def _keyframe_encoder(monkeypatch, served) -> list:
+    """The encoder load replaced by tests/video's tiny Qwen3-VL with its
+    tower, built on the image worker at each load; returns the (path,
+    mmproj, DiT held) of each load."""
+    import os
+
+    from test_video_keyframes import _Pieces, _tiny_h3_encoder
+
+    from gmlx.video import encoder as video_encoder
+
+    served.spec.encoder_mmproj = "~/mmproj.gguf"
+    served.tokenizer = _Pieces({"<Picture 1>: ": [11, 12, 13],
+                                "<Picture 2>: ": [11, 12, 14],
+                                "a fox": [21, 22]})
+    loads = []
+
+    def load_encoder(fam, path, mmproj=None, log=None):
+        loads.append((path, mmproj, served.pipe.dit is not None))
+        return _tiny_h3_encoder()
+
+    monkeypatch.setattr(video_encoder, "load_encoder", load_encoder)
+    assert os.path.expanduser("~/mmproj.gguf") != "~/mmproj.gguf"
+    return loads
+
+
+def test_an_encode_with_keyframes_reads_them_through_the_entrys_mmproj(
+        monkeypatch, request):
+    """The encoder loads alone with the entry's mmproj, and the features
+    and vision spans are the keyframe encode's on the images, their alpha
+    dropped, as the step takes them back."""
+    import os
+
+    from test_video_keyframes import _tiny_h3_encoder
+
+    from gmlx.video.families.h3 import keyframes as kf
+
+    pipe, _w = _own_pipe()
+    served = _served(pipe)
+    _mount(_Host(served), request)
+    loads = _keyframe_encoder(monkeypatch, served)
+    rng = np.random.default_rng(1)
+    images = [rng.integers(0, 256, (64, 96, 3), dtype=np.uint8),
+              rng.integers(0, 256, (64, 64, 4), dtype=np.uint8)]
+    fields, got = _client().encode("h3", "a fox", images=images)
+    rgb = [im[..., :3] for im in images]
+
+    def direct():
+        feats, spans = kf.encode(_tiny_h3_encoder(), "a fox", rgb)
+        return np.array(feats), spans
+
+    want, spans = _on_worker(direct)
+    assert loads == [("/abs/enc.gguf", os.path.expanduser("~/mmproj.gguf"),
+                      False)]
+    assert fields["spans"] == [list(sp) for sp in spans] == [[3, 11],
+                                                             [14, 20]]
+    assert fields["num_tokens"] == want.shape[1]
+    np.testing.assert_allclose(got["cond"], want, rtol=1e-6, atol=1e-6)
+    text, _ = _client().encode("h3", "a fox")
+    assert "spans" not in text and loads[-1][1] is None
+
+
+def test_an_encode_with_keyframes_counts_their_rows_and_the_tower(
+        monkeypatch, request):
+    """The encode of a prompt with keyframes is priced at the prompt's
+    rows with their vision blocks through the tower, as the video command
+    prices it."""
+    import dataclasses
+
+    from gmlx.video import memfit
+
+    pipe, _w = _own_pipe()
+    served = _served(pipe)
+    served.plan = dataclasses.replace(served.plan, mmproj_bytes=8 << 20,
+                                      tower_bytes=16 << 20)
+    host = _mount(_Host(served), request)
+    _keyframe_encoder(monkeypatch, served)
+    sizes = [(64, 64)]
+    rows = vs.prompt_rows(served, "a fox", sizes)
+    need = vs.plan_clip(
+        served.plan, frames=FRAMES, width=SIZE, height=SIZE, text=rows,
+        decode=False, budget=1,
+        blocks=memfit.keyframe_blocks(hf.FAMILY, sizes)).phases["encode"]
+    assert need > vs.plan_clip(served.plan, frames=FRAMES, width=SIZE,
+                               height=SIZE, text=rows, decode=False,
+                               budget=1).phases["encode"]
+    _adapters, caches = vs.held_bytes(served)
+    host.budget_bytes = caches + need - 1
+    images = [np.zeros((64, 64, 3), np.uint8)]
+    c = _client()
+    with pytest.raises(StepsClientError) as e:
+        c.encode("h3", "a fox", images=images)
+    assert e.value.status == 400 and e.value.body["error"] == (
+        f"the encode of {rows} text rows with 1 keyframe does not fit in "
+        "memory beside the models now loaded; try a shorter prompt or a "
+        "smaller size, or one keyframe")
+    host.budget_bytes += 1
+    c.encode("h3", "a fox", images=images)
 
 
 def test_an_encode_loads_the_encoder_without_the_dit_or_any_lora(
@@ -1493,6 +1824,109 @@ def test_the_audio_decode_gives_comfyuis_waveform_layout(host, vaes):
     wave = got["waveform"]
     assert wave.shape[:2] == (1, 2) and wave.shape[2] > 2
     assert np.array_equal(wave, want)
+
+
+def _encode_inputs(route: str, n: int = 22):
+    """Frames in [0, 1] of an ``n``-frame 32x32 clip, those the tiny VAE
+    takes, or a waveform of 1000 samples, past one latent's 800."""
+    rng = np.random.default_rng(5)
+    if route == "video":
+        return {"frames": rng.random((n, 32, 32, 3), np.float32)}
+    return {"waveform": (rng.random((1, 2, 1000), np.float32) * 2 - 1)}
+
+
+@pytest.mark.parametrize("route, n", [("video", 22), ("video", 1),
+                                      ("audio", 0)])
+def test_the_vae_encodes_are_the_vaes_on_comfyuis_layouts(host, vaes, route,
+                                                          n):
+    """The pack sends ComfyUI's IMAGE frames and AUDIO waveform; the
+    latents are the gmlx VAEs' on them, the frames in [-1, 1] as
+    ComfyUI's video VAE takes them, and the waveform padded to whole
+    latents."""
+    from gmlx.video.vae.reader import load_vae
+
+    host.served.spec.vae = vaes["vae"]
+    host.served.spec.audio_vae = vaes["audio_vae"]
+    sent = _encode_inputs(route, n)
+    got, _f, _h = _client().container(f"vae/{route}/encode", sent,
+                                      {"model": "h3"})
+
+    def direct():
+        if route == "video":
+            vae = load_vae(vaes["vae"], family="h3", dtype=mx.float16)
+            x = mx.array(sent["frames"])[None] * 2.0 - 1.0
+        else:
+            vae = load_vae(vaes["audio_vae"], family="h3_audio",
+                           dtype=mx.float32)
+            x = mx.array(sent["waveform"])
+        return np.array(vae.encode(x).astype(mx.float32))
+
+    want = _on_worker(direct)
+    lat = got["latents"]
+    if route == "video":
+        t = 1 if n == 1 else hf.latent_shapes(n, 32, 32)[0][2]
+        assert lat.shape == (1, 24, t, 2, 2)
+    else:
+        assert lat.shape == (1, 32, 2, 2)
+    assert np.array_equal(lat, want)
+
+
+@pytest.mark.parametrize("route", ["video", "audio"])
+def test_a_vae_encode_that_does_not_fit_beside_the_models_is_refused(
+        host, vaes, route):
+    """An anchor's encode loads its VAE beside the DiT, which stays, and
+    is priced as the video command prices the anchors of a run: a guide
+    clip at its frames and size, a sound at its latents."""
+    served = host.served
+    served.spec.vae = vaes["vae"]
+    served.spec.audio_vae = vaes["audio_vae"]
+    c = _client()
+    sent = _encode_inputs(route)
+    if route == "video":
+        clip = dict(frames=22, width=32, height=32,
+                    anchors=(layout.AnchorRows(0, 7, 0),))
+        shown = "22 frames of 32x32"
+    else:
+        clip = dict(frames=FRAMES, width=SIZE, height=SIZE,
+                    anchors=(layout.AnchorRows(0, 0, 2),))
+        shown = "1000 samples"
+    work = vs.plan_clip(served.plan, text=1, budget=1, **clip
+                        ).phases["anchors"]
+    adapters, caches = vs.held_bytes(served)
+    host.budget_bytes = adapters + caches + work - 1
+    with pytest.raises(StepsClientError) as e:
+        c.container(f"vae/{route}/encode", sent, {"model": "h3"})
+    assert e.value.status == 400 and e.value.body["error"] == (
+        f"a{'n' if route == 'audio' else ''} {route} encode of {shown} does "
+        "not fit in memory beside the models now loaded")
+    host.budget_bytes += 1
+    c.container(f"vae/{route}/encode", sent, {"model": "h3"})
+
+
+@pytest.mark.parametrize("route, sent, model, want", [
+    ("video", np.zeros((7, 32, 32, 3), np.float32), "h3",
+     "frames [7, 32, 32, 3] are no MiniMax-H3 keyframe or guide clip: 1 or "
+     "17 k + 5 frames on a canvas in multiples of 32"),
+    ("video", np.zeros((1, 32, 48, 3), np.float32), "h3",
+     "frames [1, 32, 48, 3] are no MiniMax-H3 keyframe or guide clip: 1 or "
+     "17 k + 5 frames on a canvas in multiples of 32"),
+    ("video", np.zeros((1, 32, 32, 3), np.uint8), "h3",
+     "vae/video/encode takes frames (T, H, W, 3) in [0, 1], not U8 "
+     "[1, 32, 32, 3]"),
+    ("video", np.zeros((1, 32, 32, 3), np.float32), "zit",
+     "'zit' is an image model; vae/video/encode takes a video model"),
+    ("audio", np.zeros((1, 1, 800), np.float32), "h3",
+     "a waveform is (1, 2, n) at 32000 Hz, not [1, 1, 800]"),
+    ("audio", np.zeros((2, 800), np.float32), "h3",
+     "vae/audio/encode takes the waveform of one sound (1, 2, n)"),
+])
+def test_a_vae_encode_refuses_what_is_no_anchor(host, route, sent, model,
+                                                want):
+    key = "frames" if route == "video" else "waveform"
+    with pytest.raises(StepsClientError) as e:
+        _client().container(f"vae/{route}/encode", {key: sent},
+                            {"model": model})
+    assert e.value.status == 400 and e.value.body["error"] == want
 
 
 @pytest.mark.parametrize("route, model, want", [

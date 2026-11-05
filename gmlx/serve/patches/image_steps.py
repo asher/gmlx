@@ -1111,7 +1111,8 @@ def _clip_of(fam, vshape, ashape=None) -> tuple:
 
 def _check_clip(hold, served, *, frames: int, width: int, height: int,
                 text: int, phase: str, what: str, table: str | None = None,
-                audio: int | None = None, decodes: bool = False) -> None:
+                audio: int | None = None, decodes: bool = False,
+                anchors=(), shown: str | None = None) -> None:
     """Refuse a step or a decode of a clip that does not fit beside the
     models loaded. The DiT stays loaded through each, and each is priced
     as the image routes price theirs: the DiT, the larger of its
@@ -1120,7 +1121,9 @@ def _check_clip(hold, served, *, frames: int, width: int, height: int,
     with patches, ``table``, runs a LoRA. ``audio`` is the audio decode's
     latents. With ``decodes``, a step is priced at the larger of the step
     and the clip's two decodes, so a clip that cannot decode stops before
-    its first step."""
+    its first step. ``anchors`` are the clip's placed
+    ``layout.AnchorRows``, and an anchors phase prices their encodes;
+    ``shown`` names what is priced in the refusal."""
     from ..image_steps import StepError
     from ..video_service import held_bytes, plan_clip
 
@@ -1137,7 +1140,7 @@ def _check_clip(hold, served, *, frames: int, width: int, height: int,
     plan = plan_clip(served.plan, frames=frames, width=width, height=height,
                      text=text, budget=budget,
                      decode=phase != "denoise" or decodes, audio=audio,
-                     live_lora=live and phase == "denoise")
+                     live_lora=live and phase == "denoise", anchors=anchors)
     adapters, caches = held_bytes(served)
     held = (plan.terms["denoise"]["dit"]
             + max(plan.terms["denoise"]["lora"], adapters) + caches)
@@ -1146,16 +1149,19 @@ def _check_clip(hold, served, *, frames: int, width: int, height: int,
     if decodes:
         work = max(work, plan.phases["audio"], plan.phases["decode"])
     if held + work > budget:
-        clip = (f"{audio} audio latents" if phase == "audio"
-                else f"{width}x{height} at {frames} frames")
+        clip = shown or (f"{audio} audio latents" if phase == "audio"
+                         else f"{width}x{height} at {frames} frames")
         raise StepError(400, f"{what} of {clip} does not fit in memory "
                         "beside the models now loaded")
 
 
-def _check_encode(hold, served, text: str) -> None:
+def _check_encode(hold, served, text: str, sizes=()) -> None:
     """Refuse a prompt whose encode does not fit beside the caches the
-    server holds, as the video command refuses it by the prompt's rows.
+    server holds, as the video command refuses it by the prompt's rows,
+    with keyframes of ``sizes`` (width, height) through the vision tower.
     The DiT and its LoRA pairs go before the encoder loads."""
+    from gmlx.video import memfit
+
     from ..image_steps import StepError
     from ..video_service import held_bytes, plan_clip, prompt_rows
 
@@ -1163,22 +1169,29 @@ def _check_encode(hold, served, text: str) -> None:
     budget = budget_fn(hold) if budget_fn is not None else None
     if budget is None:
         return
-    rows = prompt_rows(served, text)
+    rows = prompt_rows(served, text, sizes)
+    blocks = (memfit.keyframe_blocks(served.pipe.video_family, sizes)
+              if sizes else ())
     _adapters, caches = held_bytes(served)
     width, height = served.plan.size
     plan = plan_clip(served.plan, frames=served.plan.frames, width=width,
                      height=height, text=rows, budget=budget - caches,
-                     decode=False)
+                     decode=False, blocks=blocks)
     if "encode" in plan.over:
-        raise StepError(400, f"the encode of {rows} text rows does not fit "
-                        "in memory beside the models now loaded; "
+        kf = (f" with {len(sizes)} keyframe{'s' if len(sizes) > 1 else ''}"
+              if sizes else "")
+        raise StepError(400, f"the encode of {rows} text rows{kf} does not "
+                        "fit in memory beside the models now loaded; "
                         f"{plan.hint()}")
 
 
 async def _av_step(t0, tensors, fields, run):
     """A step of a model with a video and an audio stream (``AV_FAMILIES``):
-    the latents as ComfyUI's sampler carries them, one row."""
+    the latents as ComfyUI's sampler carries them, one row, with the
+    anchors and vision spans it names (``video_service.step_anchors``)."""
     import numpy as np
+
+    from gmlx.video import layout
 
     from ..image_steps import (AV_FAMILIES, STATE, Missing, StepError,
                                _cond_key, _f32, _host, row_hashes, step_pacer)
@@ -1206,7 +1219,12 @@ async def _av_step(t0, tensors, fields, run):
         raise StepError(400, "an AV step names its shifts, video and audio")
     shifts = {k: _number(shifts, k) for k in ("video", "audio")}
     scale = _number(fields, "audio_scale", 1.0)
-    missing = [h for h in hashes if h not in STATE.tensors]
+    try:
+        refs, spans = vs.step_anchors(fields)
+    except ValueError as e:
+        raise StepError(400, str(e)) from None
+    named = [h for r in refs for h in r.hashes()]
+    missing = [h for h in hashes + named if h not in STATE.tensors]
     model = fields.get("model") or (run.model if run else None)
     hold = await _acquire(model)
     keep = contextlib.ExitStack()
@@ -1217,6 +1235,10 @@ async def _av_step(t0, tensors, fields, run):
                             "its step takes x")
         frames, width, height = _clip_of(served.pipe.video_family,
                                          v_w.shape, a_w.shape)
+        # Each vision span is a keyframe's image.
+        why = vs.anchor_refusal(served, len(refs) or len(spans))
+        if why:
+            raise StepError(400, why)
         table = None
         # The matrices the step may define its table again from stay in
         # the store from its check to its turn's end.
@@ -1232,11 +1254,21 @@ async def _av_step(t0, tensors, fields, run):
         if held is None:
             raise Missing(hashes)
         n_text = int(held.shape[-2])
+        got = {h: STATE.tensors.get(h) for h in named}
+        lost = [h for h, t in got.items() if t is None]
+        if lost:
+            raise Missing(lost)
+        try:
+            placed = vs.anchor_rows(served, refs, got, frames, v_w.shape,
+                                    a_w.shape)
+            layout.text_segments(n_text, spans)
+        except ValueError as e:
+            raise StepError(400, str(e)) from None
         # A run's first step counts the clip's decodes too.
         first = run is not None and run.steps == 0
         _check_clip(hold, served, frames=frames, width=width, height=height,
                     text=n_text, phase="denoise", table=table, decodes=first,
-                    what="a clip" if first else "a step")
+                    what="a clip" if first else "a step", anchors=placed)
         ts = float(np.asarray(t_w.numpy(), np.float32).reshape(-1)[0])
         gen = run.gen if run is not None else 0
         tid = fields.get("patch_table")
@@ -1285,6 +1317,12 @@ async def _av_step(t0, tensors, fields, run):
                     feats.shape[1] == 0 or feats.shape[2] != dim:
                 raise StepError(400, f"a row's cond is (1, L, {dim}) encoder "
                                 f"features, not {tuple(feats.shape)}")
+            cond = ((), ())
+            if refs:
+                try:
+                    cond = vs.anchor_cond(served, refs, placed, got)
+                except ValueError as e:
+                    raise StepError(400, str(e)) from None
             pace = step_pacer(run, gen)
 
             def pacer(arrays):
@@ -1295,7 +1333,8 @@ async def _av_step(t0, tensors, fields, run):
             with paced(pacer):
                 vv, va, hit = vs.av_step(
                     served, v_w.mx(), a_w.mx(), ts, shifts, scale, feats,
-                    _cond_key(hashes[0]), core)
+                    _cond_key(hashes[0]), core, anchors=placed, cond=cond,
+                    spans=spans)
                 mx.eval(vv, va)
             if run is not None and (run.gen != gen or run.ended):
                 raise StepInterrupted()
@@ -1370,14 +1409,20 @@ async def encode(request: Request):
     try:
         served = _served(hold)
         if _video(served):
-            from ..video_service import encode as video_encode
+            from ..video_service import encode as encode_prompt
+            from ..video_service import keyframe_refusal
 
-            # A prompt with images is refused by name, unpriced.
-            if not images:
-                await asyncio.to_thread(_check_encode, hold, served, text)
-            feats = await _on_worker(_settled(hold, video_encode), served,
-                                     text, images)
-            got = {"cond": feats, "refs": [], "image_slots": []}
+            # Keyframes are the clip's canvas, through the vision tower.
+            frames = [i[..., :3] for i in images]
+            why = keyframe_refusal(served, frames)
+            if why:
+                raise StepError(400, why)
+            sizes = [(int(i.shape[1]), int(i.shape[0])) for i in frames]
+            await asyncio.to_thread(_check_encode, hold, served, text, sizes)
+            feats, spans = await _on_worker(_settled(hold, encode_prompt),
+                                            served, text, frames)
+            got = {"cond": feats, "refs": [], "image_slots": [],
+                   "spans": spans}
             return _held_encode(got, None)
         borrow = None
         if served.spec.encoder_model is not None:
@@ -1431,6 +1476,8 @@ def _held_encode(got: dict, revised):
     if revised:
         fields_out["revised_prompt"] = revised
         fields_out["cond_typed"] = hashes["cond_typed"]
+    if got.get("spans"):
+        fields_out["spans"] = [list(sp) for sp in got["spans"]]
     return _container(out, fields_out)
 
 
@@ -1480,14 +1527,17 @@ async def vae_encode(request: Request):
     return _container({"latents": lat})
 
 
-async def _video_decode_hold(request: Request, name: str, ndim: int,
-                             shape: str):
+async def _video_hold(request: Request, name: str, ndim: int, shape: str,
+                      key: str = "latents", one: bool = True):
+    """The tensor ``key`` of a VAE route of video models, of ``ndim``
+    dimensions and the first of them 1 with ``one``, its hold and the
+    served entry. ``shape`` names it in the refusal."""
     from ..image_steps import StepError
 
     tensors, fields = await _wire(request, MAX_BODY_BYTES)
-    lat = tensors.get("latents")
-    if lat is None or len(lat.shape) != ndim or lat.shape[0] != 1:
-        raise StepError(400, f"{name} takes the latents of one clip {shape}")
+    lat = tensors.get(key)
+    if lat is None or len(lat.shape) != ndim or (one and lat.shape[0] != 1):
+        raise StepError(400, f"{name} takes {shape}")
     hold = await _acquire(fields.get("model"))
     served = _served(hold)
     if not _video(served):
@@ -1502,8 +1552,9 @@ async def video_decode(request: Request):
     f16 in [0, 1]."""
     from ..video_service import decode_video
 
-    lat, hold, served = await _video_decode_hold(
-        request, "vae/video/decode", 5, "(1, C, T, h, w)")
+    lat, hold, served = await _video_hold(
+        request, "vae/video/decode", 5,
+        "the latents of one clip (1, C, T, h, w)")
     try:
         frames, width, height = _clip_of(served.pipe.video_family, lat.shape)
         _check_clip(hold, served, frames=frames, width=width, height=height,
@@ -1520,8 +1571,8 @@ async def audio_decode(request: Request):
     from ..image_steps import COMFY, StepError
     from ..video_service import decode_audio
 
-    lat, hold, served = await _video_decode_hold(
-        request, "vae/audio/decode", 4, "(1, C, 2, T)")
+    lat, hold, served = await _video_hold(
+        request, "vae/audio/decode", 4, "the latents of one clip (1, C, 2, T)")
     try:
         row = COMFY[served.pipe.video_family.name]["audio"]
         if tuple(lat.shape[1:3]) != (row["channels"], row["stereo"]):
@@ -1535,6 +1586,75 @@ async def audio_decode(request: Request):
     finally:
         hold.release()
     return _container({"waveform": img})
+
+
+async def video_encode(request: Request):
+    """Frames (T, H, W, 3) in [0, 1] of a keyframe or a guide clip, 1 or
+    17 k + 5 of them on a canvas of the clip, to model-space video latents
+    (1, 24, t, h, w) f32, priced as the anchor encode of a clip."""
+    from gmlx.video.layout import AnchorRows
+
+    from ..image_steps import StepError
+    from ..video_service import encode_video, on_canvas
+
+    img, hold, served = await _video_hold(
+        request, "vae/video/encode", 4, "frames (T, H, W, 3) in [0, 1]",
+        key="frames", one=False)
+    try:
+        fam = served.pipe.video_family
+        n, height, width, c = (int(d) for d in img.shape)
+        if c != 3 or not img.dtype.startswith(("F", "BF")):
+            raise StepError(400, "vae/video/encode takes frames (T, H, W, 3) "
+                            f"in [0, 1], not {img.dtype} {list(img.shape)}")
+        try:
+            t = 1 if n == 1 else fam.latent_shapes(n, width, height)[0][2]
+        except ValueError:
+            t = None
+        if t is None or not on_canvas(fam, width, height):
+            raise StepError(400, f"frames {list(img.shape)} are no "
+                            f"{fam.title} keyframe or guide clip: 1 or 17 k "
+                            "+ 5 frames on a canvas in multiples of 32")
+        shown = (f"a {width}x{height} frame" if n == 1
+                 else f"{n} frames of {width}x{height}")
+        _check_clip(hold, served, frames=max(served.plan.frames, n),
+                    width=width, height=height, text=1, phase="anchors",
+                    what="a video encode", anchors=(AnchorRows(0, t, 0),),
+                    shown=shown)
+        lat = await _on_worker(lambda: encode_video(served, img.mx()))
+    finally:
+        hold.release()
+    return _container({"latents": lat})
+
+
+async def audio_encode(request: Request):
+    """A stereo waveform (1, 2, samples) f32 at the audio VAE's rate to
+    model-space audio latents (1, 32, 2, T) f32, the samples padded to a
+    whole latent, priced as the anchor encode of a clip."""
+    from gmlx.video.layout import AnchorRows
+
+    from ..image_steps import COMFY, StepError
+    from ..video_service import encode_audio
+
+    wav, hold, served = await _video_hold(
+        request, "vae/audio/encode", 3, "the waveform of one sound (1, 2, n)",
+        key="waveform")
+    try:
+        row = COMFY[served.pipe.video_family.name]["audio"]
+        n = int(wav.shape[2])
+        if int(wav.shape[1]) != row["stereo"] or n < 1:
+            raise StepError(400, f"a waveform is (1, {row['stereo']}, n) at "
+                            f"{row['sample_rate']} Hz, not {list(wav.shape)}")
+        hop = row["sample_rate"] // row["latents_per_second"]
+        t = -(-n // hop)
+        width, height = served.plan.size
+        _check_clip(hold, served, frames=served.plan.frames, width=width,
+                    height=height, text=1, phase="anchors",
+                    what="an audio encode", anchors=(AnchorRows(0, 0, t),),
+                    shown=f"{n} samples")
+        lat = await _on_worker(lambda: encode_audio(served, wav.mx()))
+    finally:
+        hold.release()
+    return _container({"latents": lat})
 
 
 async def run_begin(request: Request):
@@ -1587,6 +1707,8 @@ ROUTES = (
     ("vae/encode", "POST", vae_encode, True),
     ("vae/video/decode", "POST", video_decode, True),
     ("vae/audio/decode", "POST", audio_decode, True),
+    ("vae/video/encode", "POST", video_encode, True),
+    ("vae/audio/encode", "POST", audio_encode, True),
     ("runs/begin", "POST", run_begin, True),
     ("runs/{run}/end", "POST", run_end, True),
     ("interrupt", "POST", interrupt, True),
