@@ -894,18 +894,6 @@ def define_patch_table(pipe: ImagePipeline, entries) -> str:
     return tid
 
 
-def patch_table_id(pipe: ImagePipeline, entries) -> str:
-    """The id ``define_patch_table`` gives ``entries``, without keeping
-    the table or checking its pairs. Raises ValueError for an entry that
-    names no linear module of the DiT."""
-    from .lora import install
-
-    modules = install.modules(pipe.dit)
-    rows = _canonical_rows([_table_entry(e, modules) for e in entries],
-                           modules)
-    return _freeze_table(tuple(rows))[0]
-
-
 def _table_id(pipe: ImagePipeline, patch_table) -> str:
     """The table id a call runs under: None is the pipeline's default."""
     tid = pipe.default_table if patch_table is None else patch_table

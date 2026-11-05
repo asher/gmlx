@@ -332,8 +332,6 @@ class _Bytes:
         # The keys a define or a step holds, by count: neither a shed nor
         # the bound lets them go.
         self._held: dict = {}
-        # The bytes of bodies admitted and not put yet.
-        self.incoming = 0
 
     def _shed_over(self, keep_one: bool) -> None:
         """Drop the oldest tensors not held while the store is over its
@@ -363,30 +361,6 @@ class _Bytes:
                     else:
                         self._held.pop(k, None)
 
-    def live(self) -> int:
-        """The bytes held and admitted."""
-        with self._lock:
-            return self._bytes + self.incoming
-
-    def admit(self, nbytes: int, room) -> bool:
-        """Count ``nbytes`` of a body as incoming, then read ``room()``,
-        the bytes the store may hold in all (None for no bound), and undo
-        the count when the store's live bytes pass it. A turn books first
-        and reads the store next, so one of two grants that race sees the
-        other."""
-        with self._lock:
-            self.incoming += int(nbytes)
-        got = room()
-        if got is None or self.live() <= got:
-            return True
-        self.done(nbytes)
-        return False
-
-    def done(self, nbytes: int) -> None:
-        """An admitted body was put, or failed."""
-        with self._lock:
-            self.incoming = max(0, self.incoming - int(nbytes))
-
     def get(self, key):
         with self._lock:
             t = self._items.get(key)
@@ -413,10 +387,9 @@ class _Bytes:
         self.check(t.nbytes)
         with self._lock:
             old = self._items.pop(key, None)
-            if old is not None:
-                self._bytes -= old.nbytes
             self._items[key] = t
-            self._bytes += t.nbytes
+            # One write: the pool reads the count with no lock.
+            self._bytes += t.nbytes - (0 if old is None else old.nbytes)
             self._shed_over(True)
 
     def shed(self, nbytes: int, hold=()) -> int:

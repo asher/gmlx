@@ -478,16 +478,16 @@ async def head_tensor(request: Request):
 
 def _admit(pool, n: int) -> None:
     """Admit ``n`` bytes of an upload into the store before they are read,
-    off the event loop with no pool lock: at once when the pool's room
-    holds them beside the store, else at a store turn on the image worker,
-    which sheds and evicts for them. Raises the StepError of a refusal."""
+    off the event loop: at once when the cap and the pool's room hold them
+    beside the store, else at a store turn on the image worker, which
+    sheds and evicts for them. The caller's ``pool.upload_done`` ends the
+    count. Raises the StepError of a refusal."""
     from ..image_service import store_turn
-    from ..image_steps import STATE, UPLOAD
+    from ..image_steps import UPLOAD
     from ..residency import STORE, LoraRefused
 
     _hopeless(pool, STORE, n, UPLOAD)
-    head = pool._measured_lora_room()
-    if STATE.adapters.admit(n, lambda: pool.upload_room(head)):
+    if pool.upload_admit(n, pool._measured_lora_room()):
         return
     try:
         store_turn(pool, n, UPLOAD)
@@ -499,8 +499,8 @@ async def _admitted_wire(request: Request, pool):
     """``(tensors, admitted)`` of an upload body read once the store
     admitted its bytes: its Content-Length, or BODY_STEP bytes at a time
     as a body with none is read. A refusal ends the read; the bytes
-    admitted count in the store until the caller's ``done``."""
-    from ..image_steps import BODY_STEP, STATE, StepError
+    admitted count in the pool until the caller's ``pool.upload_done``."""
+    from ..image_steps import BODY_STEP, StepError
     from ..image_wire import CONTENT_TYPE, WireError, read
 
     ctype = request.headers.get("content-type", "").split(";")[0].strip()
@@ -538,7 +538,7 @@ async def _admitted_wire(request: Request, pool):
         except WireError as e:
             raise StepError(e.status, str(e)) from None
     except BaseException:
-        STATE.adapters.done(admitted)
+        pool.upload_done(admitted)
         raise
     return tensors, admitted
 
@@ -560,7 +560,9 @@ async def put_adapter(request: Request):
         STATE.put_tensor(STATE.adapters, h, tensors, MAX_ADAPTER_BYTES,
                          copy=False)
     finally:
-        STATE.adapters.done(admitted)
+        # After the put: the store counts the bytes before they leave the
+        # admitted count.
+        pool.upload_done(admitted)
     return _json(200, {"hash": h})
 
 
@@ -610,7 +612,7 @@ async def register_adapter(request: Request):
             return out
         finally:
             if pool is not None:
-                STATE.adapters.done(size)
+                pool.upload_done(size)
 
     return _json(200, {"tensors": await asyncio.to_thread(work)})
 

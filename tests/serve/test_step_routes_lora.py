@@ -72,7 +72,7 @@ def _set_budget(pool, budget: int) -> None:
 
 def _held(pool) -> int:
     """What the budget counts: the pool and the uploads."""
-    return pool._resident_bytes() + steps.STATE.adapters.live()
+    return pool._resident_bytes() + steps.STATE.adapters.bytes + pool._incoming
 
 
 def _model(pool, name: str, fp: int, *, busy: bool):
@@ -172,7 +172,7 @@ def _books_hold(pool, *entries, budget: bool = True) -> None:
     for e in entries:
         keys, _own = image_service.lora_figures(e)
         assert pool.lora_ledger(e) == (0, keys)
-    assert steps.STATE.adapters.incoming == 0
+    assert pool._incoming == 0
     assert _held(pool) <= pool._budget or not budget
     assert pool.overruns == []
 
@@ -214,7 +214,7 @@ def test_an_upload_over_the_memory_free_is_refused_before_its_body_is_read(
         "PUT", f"{P}/adapters/{'ab' * 32}", [b"x" * (1 << 20)] * 4,
         {"content-type": wire.CONTENT_TYPE, "content-length": 10**9})
     assert (status, doc["error"], read) == (503, _UPLOAD_503, [])
-    assert _store() == {} and steps.STATE.adapters.incoming == 0
+    assert _store() == {} and pool._incoming == 0
 
 
 def test_a_register_over_the_memory_free_is_refused_before_its_file_is_read(
@@ -236,7 +236,7 @@ def test_a_register_over_the_memory_free_is_refused_before_its_file_is_read(
         "POST", f"{P}/adapters/register", [body],
         {"content-type": "application/json", "content-length": len(body)})
     assert (status, doc["error"], opened) == (503, _UPLOAD_503, [])
-    assert _store() == {} and steps.STATE.adapters.incoming == 0
+    assert _store() == {} and pool._incoming == 0
 
 
 def test_an_upload_evicts_an_idle_model_at_its_store_turn(request,
@@ -538,7 +538,7 @@ def _one_lora(pool, e, packs, x) -> tuple:
     c, rows, sync = packs[0]
     tid = sync()[1]
     first = c.step("own", None, x, [0.5], rows, patch_table=tid)
-    return tid, first, steps.STATE.adapters.live(), e.lora.held
+    return tid, first, steps.STATE.adapters.bytes, e.lora.held
 
 
 def _count_sheds(monkeypatch) -> list:
@@ -693,7 +693,7 @@ def test_an_upload_while_a_define_waits_never_sheds_its_matrices(
         # An upload a byte over the room the define's pairs take.
         try:
             image_service.store_turn(pool, m_bytes + 1, steps.UPLOAD)
-            steps.STATE.adapters.done(m_bytes + 1)
+            pool.upload_done(m_bytes + 1)
             refused.append(200)
         except LoraRefused as err:
             refused.append(err.status)

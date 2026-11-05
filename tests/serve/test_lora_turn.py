@@ -42,16 +42,13 @@ class Cache:
 
 
 class Store:
-    """The upload store as a turn and an upload see it."""
+    """The upload store as a turn and an upload see it: its bytes, one
+    int the pool reads with no lock, and its shed."""
 
     def __init__(self):
         self.items: dict = {}
-        self.incoming = 0
+        self.n = 0
         self.lock = threading.Lock()
-
-    def live(self):
-        with self.lock:
-            return sum(self.items.values()) + self.incoming
 
     def shed(self, nbytes, hold=()):
         dropped = 0
@@ -61,23 +58,21 @@ class Store:
                     break
                 if k not in hold:
                     dropped += self.items.pop(k)
+            self.n -= dropped
         return dropped
 
-    def admit(self, pool, n, head):
-        """Count ``n`` first, then read the pool; undo when over."""
+    def put(self, pool, key, n):
+        """An admitted body's put, then its done."""
         with self.lock:
-            self.incoming += n
-        room = pool.upload_room(head)
-        if room is None or room >= self.live():
-            return True
-        with self.lock:
-            self.incoming -= n
-        return False
-
-    def put(self, key, n):
-        with self.lock:
-            self.incoming -= n
             self.items[key] = n
+            self.n += n
+        pool.upload_done(n)
+
+    def keep(self, key, n):
+        """Bytes held before the test, admitted by no one."""
+        with self.lock:
+            self.items[key] = n
+            self.n += n
 
 
 def make_pool(monkeypatch, budget_gb, retry=1):
@@ -109,7 +104,7 @@ def make_pool(monkeypatch, budget_gb, retry=1):
     pool._lora_shed = lambda e, n, hold, own: \
         pool.caches[e.model_path].shed(n, hold)
     pool._store_shed = lambda n, hold=(): pool.store.shed(n, hold)
-    pool._store_live = pool.store.live
+    pool._store_live = lambda: pool.store.n
     pool._retry_fn = lambda: retry
     return pool
 
@@ -310,7 +305,7 @@ def test_a_turn_sheds_its_own_entry_then_others_then_the_uploads(
     job(pool, y, "y1", GB)
     job(pool, x, "x1", GB)
     job(pool, x, "mine", GB)
-    pool.store.items["u1"] = GB
+    pool.store.keep("u1", GB)
     # 9 GB held of 10: a 3 GB turn on x needs 2 GB, which x's own idle
     # key and y's give; the uploads and the idle model stay.
     turn(pool, x, 3 * GB, hold=("mine",))
@@ -326,7 +321,7 @@ def test_a_turn_evicts_an_idle_model_after_the_sheds(monkeypatch):
     idle = image(pool, "idle", 3)
     x = image(pool, "x", 4, busy=True)
     job(pool, x, "x1", GB)
-    pool.store.items["u1"] = GB
+    pool.store.keep("u1", GB)
     # 9 GB held of 10: a 4 GB turn sheds the two idle 1 GB keys and then
     # evicts the idle model.
     turn(pool, x, 4 * GB)
@@ -335,7 +330,7 @@ def test_a_turn_evicts_an_idle_model_after_the_sheds(monkeypatch):
     assert not pool.entry_resident(idle)
     assert len(pool.released) == 1
     assert x.lora.pending == 4 * GB
-    assert pool._resident_bytes() + pool.store.live() <= 10 * GB
+    assert pool._resident_bytes() + pool.store.n <= 10 * GB
 
 
 def test_the_measure_follows_the_eviction(monkeypatch):
@@ -513,6 +508,80 @@ def test_a_turn_during_a_cold_load_names_the_load(monkeypatch):
     assert ei.value.retry_after == 1
 
 
+def test_a_turn_never_waits_on_the_encoder_its_own_job_holds(monkeypatch):
+    # The images API job holds its shared encoder through both turns.
+    pool = make_pool(monkeypatch, 10, retry=5)
+    own = image(pool, "own", 3, busy=True)
+    enc = chat(pool, "enc-qwen3", 4)
+    w = waits(pool)
+    turn(pool, own, 3 * GB, beside=(enc,))
+    assert own.lora.pending == 3 * GB
+    pool.lora_settle(own, "s")
+    # Short beside another job's model: 503 at once, naming that one.
+    other = image(pool, "other", 2, busy=True)
+    with pytest.raises(LoraRefused) as ei:
+        turn(pool, own, 2 * GB, beside=(enc,))
+    assert ei.value.message == (
+        "the test's LoRA need 2.0 GB of memory, and 1.0 GB is free beside "
+        "the models in use (other); retry when one is idle")
+    assert pool.entry_resident(other)
+    # More than the budget leaves beside the model and its encoder: 413.
+    with pytest.raises(LoraRefused) as ei:
+        turn(pool, own, 4 * GB, beside=(enc,))
+    assert (ei.value.status, ei.value.message) == (413, (
+        "the test's LoRA need 4.0 GB of memory, over the 3.0 GB the "
+        "server's memory budget leaves beside 'own', 'enc-qwen3' and the "
+        "pinned models"))
+    assert w.timeouts == [] and pool.entry_resident(enc)
+    assert own.lora.pending == 0
+
+
+@pytest.mark.parametrize("at", ["turn", "cold load"])
+def test_a_chat_teardown_that_raises_still_releases_an_evicted_image(
+        monkeypatch, at):
+    pool = make_pool(monkeypatch, 10)
+    own = image(pool, "own", 2, busy=True)
+    side = image(pool, "side-image", 3)
+    chat(pool, "old-chat", 3, busy=0)
+    with pool._lock:
+        side.seq = 0
+
+    def boom(e):
+        raise RuntimeError("chat teardown failed")
+    pool._teardown_chat = boom
+    with pytest.raises(RuntimeError, match="chat teardown failed"):
+        if at == "turn":
+            turn(pool, own, 7 * GB)
+        else:
+            image(pool, "new", 7)
+    assert not pool.entry_resident(side)
+    assert [p.name for p in pool.released] == ["side-image"]
+    assert pool._tearing == 0 and pool.figures.tearing == 0
+    assert pool._building == 0 and pool.figures.building == 0
+
+
+def test_no_grant_takes_the_bytes_of_a_victim_still_torn_down(monkeypatch):
+    pool = make_pool(monkeypatch, 10, retry=0)
+    x = image(pool, "x", 4, busy=True)
+    chat(pool, "y", 4, busy=0)
+    seams = Seams("teardown")
+    pool._seam = seams
+    load = start("loader", lambda: image(pool, "z", 4))
+    seams.reach("teardown")
+    try:
+        # The budget counts y until its teardown ends.
+        assert pool.figures.tearing == 4 * GB
+        assert not pool.upload_admit(GB, None)
+        with pytest.raises(LoraRefused) as ei:
+            turn(pool, x, 2 * GB)
+    finally:
+        seams.go["teardown"].set()
+    finish(*load)
+    assert "the server is loading z (4.0 GB) now" in ei.value.message
+    assert x.lora.pending == 0 and pool._incoming == 0
+    assert pool.figures.tearing == 0
+
+
 def test_a_cold_load_after_a_turn_sees_its_booking(monkeypatch):
     pool = make_pool(monkeypatch, 10)
     x = image(pool, "x", 4, busy=True)
@@ -547,43 +616,38 @@ def test_routes_read_the_figures_while_the_lock_is_held(monkeypatch):
     out = {}
     with pool._lock:
         t, o = start("route", lambda: (pool.plan_beside(x),
-                                       pool.upload_room(None),
                                        pool.lora_hopeless(x, GB, "s")))
         out["v"] = finish(t, o)
-    assert out["v"][:2] == (GB, 5 * GB)
+    assert out["v"] == (GB, None)
 
 
 def test_a_store_turn_evicts_an_idle_model(monkeypatch):
     pool = make_pool(monkeypatch, 10)
     idle = image(pool, "idle", 4)
     image(pool, "x", 4)
-    pool.store.items["old"] = GB
+    pool.store.keep("old", GB)
     n = 3 * GB
-    assert not pool.store.admit(pool, n, None)
-
-    def run():
-        pool.lora_turn(STORE, n, subject="the upload",
-                       admit=lambda head: pool.store.admit(pool, n, head))
-    on_worker(run)
+    assert not pool.upload_admit(n, None)
+    on_worker(lambda: pool.lora_turn(STORE, n, subject="the upload"))
     assert pool.store.items == {}
-    assert pool.store.incoming == n
+    assert pool._incoming == n
     assert not pool.entry_resident(idle)
 
 
 def test_an_upload_and_a_turn_never_both_take_the_last_room(monkeypatch):
     pool = make_pool(monkeypatch, 10)
     x = image(pool, "x", 4, busy=True)
-    # The upload counts itself, then a turn checks against it.
-    assert pool.store.admit(pool, 4 * GB, None)
+    # The upload is admitted first, and the turn sees it.
+    assert pool.upload_admit(4 * GB, None)
     with pytest.raises(LoraRefused):
         turn(pool, x, 4 * GB)
     assert x.lora.pending == 0
     # The turn books first, and the upload sees it.
-    pool.store.put("u", 4 * GB)
-    pool.store.items.clear()
+    pool.store.put(pool, "u", 4 * GB)
+    pool.store.shed(4 * GB)
     turn(pool, x, 4 * GB)
-    assert not pool.store.admit(pool, 4 * GB, None)
-    assert pool.store.incoming == 0
+    assert not pool.upload_admit(4 * GB, None)
+    assert pool._incoming == 0
 
 
 def reprice(pool, name, fp_gb):
@@ -598,25 +662,6 @@ def reprice(pool, name, fp_gb):
             e.priced_up = True
         return e
     pool._build = build
-
-
-def test_an_upload_admitted_as_a_turn_books_takes_the_room_from_it(
-        monkeypatch):
-    pool = make_pool(monkeypatch, 10)
-    x = image(pool, "x", 4, busy=True)
-    got = []
-
-    def seam(name):
-        # The upload reads the figures from before the turn's booking.
-        if name == "booked" and not got:
-            got.append(pool.store.admit(pool, 4 * GB, None))
-
-    pool._seam = seam
-    with pytest.raises(LoraRefused) as ei:
-        turn(pool, x, 4 * GB)
-    assert got == [True] and ei.value.status == 503
-    assert x.lora.pending == 0 and pool.figures.pending == 0
-    assert pool._resident_bytes() + pool.store.live() <= 10 * GB
 
 
 def test_a_repriced_build_evicts_once_for_its_new_price(monkeypatch):
@@ -790,7 +835,8 @@ def test_a_random_sequence_keeps_the_four_invariants(monkeypatch, seed):
                 try:
                     pool.lora_turn(e, need, subject="s", hold=hold)
                     counts["turns"] += 1
-                    resident = pool._resident_bytes() + pool.store.live()
+                    resident = (pool._resident_bytes() + pool.store.n
+                                + pool._incoming)
                     assert resident <= budget, (i, resident)
                     check(booked_owner=e)
                     if op == "turn":
@@ -803,16 +849,14 @@ def test_a_random_sequence_keeps_the_four_invariants(monkeypatch, seed):
                 check()
             elif op == "upload":
                 n = rng.randrange(1, 4) * GB // 2
-                if pool.store.admit(pool, n, head()):
-                    pool.store.put(f"u{i}", n)
+                if pool.upload_admit(n, head()):
+                    pool.store.put(pool, f"u{i}", n)
                     counts["uploads"] += 1
             elif op == "store":
                 n = rng.randrange(1, 4) * GB // 2
                 try:
-                    pool.lora_turn(
-                        STORE, n, subject="u",
-                        admit=lambda h, n=n: pool.store.admit(pool, n, h))
-                    pool.store.put(f"s{i}", n)
+                    pool.lora_turn(STORE, n, subject="u")
+                    pool.store.put(pool, f"s{i}", n)
                     counts["store"] += 1
                 except LoraRefused:
                     pass
@@ -829,7 +873,7 @@ def test_a_random_sequence_keeps_the_four_invariants(monkeypatch, seed):
                     if e is not None:
                         pool.lora_settle(e, "s")
             check()
-            if pool.store.live() and rng.random() < 0.2:
+            if pool.store.n and rng.random() < 0.2:
                 pool.store.shed(GB)
     on_worker(run)
     assert counts["turns"] > 20 and counts["refused"] > 0, counts
@@ -896,21 +940,22 @@ def test_an_upload_fits_the_budget_and_the_measure_beside_the_store(
     image(pool, "x", 4, busy=True)
     store = _Bytes(None, "the step routes' adapter cache", "adapter_cache_mb")
     store.put("old", SimpleNamespace(nbytes=GB))
+    pool._store_live = lambda: store.bytes
 
     def admit(n, head):
-        return store.admit(int(n), lambda: pool.upload_room(head))
+        return pool.upload_admit(int(n), head)
 
     # 6 GB the budget leaves, of which the store holds 1.
-    assert not admit(5.5 * GB, None) and store.incoming == 0
+    assert not admit(5.5 * GB, None) and pool._incoming == 0
     assert admit(5 * GB, None)
-    store.done(5 * GB)
+    pool.upload_done(5 * GB)
     # A measure of 3 GB bounds the store, which it does not see.
     assert not admit(2.5 * GB, 3 * GB)
     assert admit(2 * GB, 3 * GB)
-    store.done(2 * GB)
+    pool.upload_done(2 * GB)
     # A booking the measure does not see yet counts too.
     x = pool._entries[("x", None, IMAGE_KIND)]
     turn(pool, x, GB)
     assert not admit(1.5 * GB, 3 * GB)
     assert admit(GB, 3 * GB)
-    assert store.live() == 2 * GB
+    assert store.bytes + pool._incoming == 2 * GB

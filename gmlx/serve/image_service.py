@@ -1738,13 +1738,15 @@ def bound_lora(pool, entry, pipe) -> None:
 
 
 def lora_turn(pool, entry, need: int, *, subject: str, held: int = 0,
-              hold=(), store=()) -> None:
+              hold=(), store=(), beside=()) -> None:
     """A job's turn on the worker: room for ``need`` bytes its dry run
     allocates next. The shed keeps the entry's keys in ``hold``, ``held``
-    bytes of them held now, and the uploads in ``store``. The entry's
-    caches are then bound to what it booked, before it allocates."""
+    bytes of them held now, and the uploads in ``store``; ``beside`` are
+    the other entries the job holds, such as its borrowed encoder. The
+    entry's caches are then bound to what it booked, before it
+    allocates."""
     pool.lora_turn(entry, need, subject=subject, hold=tuple(hold),
-                   held=held, store=tuple(store))
+                   held=held, store=tuple(store), beside=tuple(beside))
     bound_lora(pool, entry, entry.pipeline.pipe)
 
 
@@ -1766,22 +1768,17 @@ def store_turn(pool, n: int, subject: str, hold=()) -> None:
     to its end, so the store never keeps bytes for an upload that left."""
     import concurrent.futures
 
-    from .image_steps import STATE
     from .residency import STORE
 
     state: dict = {"at": None}
     lock = threading.Lock()
-
-    def admit(head):
-        return STATE.adapters.admit(n, lambda: pool.upload_room(head))
 
     def job():
         with lock:
             if state["at"] == "abandoned":
                 return
             state["at"] = "started"
-        pool.lora_turn(STORE, n, subject=subject, store=tuple(hold),
-                       admit=admit)
+        pool.lora_turn(STORE, n, subject=subject, store=tuple(hold))
 
     fut = WORKER.submit(job)
     try:
@@ -1791,7 +1788,7 @@ def store_turn(pool, n: int, subject: str, hold=()) -> None:
         with lock:
             if state["at"] is None:
                 state["at"] = "abandoned"
-                raise pool.lora_busy_refusal(subject, n) from None
+                pool.lora_late(STORE, n, subject)
     fut.result()
 
 
@@ -1914,10 +1911,12 @@ def lora_refusal(e) -> "ImageRequestError":
     return ImageRequestError(e.status, e.message, param="adapters")
 
 
-def pair_turn(pool, entry, served: ServedImage, paths: list) -> None:
+def pair_turn(pool, entry, served: ServedImage, paths: list,
+              beside=()) -> None:
     """The images API job's first turn, on the worker before a file is
-    read: the pairs of the request's files not held. Raises the
-    ImageRequestError of a refusal."""
+    read: the pairs of the request's files not held. ``beside`` are the
+    entries the job holds besides ``entry``. Raises the ImageRequestError
+    of a refusal."""
     from .residency import LoraRefused
 
     pipe = served.pipe
@@ -1928,13 +1927,14 @@ def pair_turn(pool, entry, served: ServedImage, paths: list) -> None:
         held |= keys
     try:
         lora_turn(pool, entry, need, subject=ADAPTERS,
-                  held=own_bytes(pipe, held), hold=tuple(held))
+                  held=own_bytes(pipe, held), hold=tuple(held),
+                  beside=beside)
     except LoraRefused as e:
         raise lora_refusal(e) from None
 
 
 def table_turn(pool, entry, served: ServedImage, tid,
-               subject: str = ADAPTERS) -> None:
+               subject: str = ADAPTERS, beside=()) -> None:
     """The turn of a forward on table ``tid``, the default for None, on
     the worker after the job's last drop: the factors and kernel pairs it
     builds yet, or the growth of the default table's own bytes. The
@@ -1954,7 +1954,8 @@ def table_turn(pool, entry, served: ServedImage, tid,
         hold += list(pairs)
         held += own_bytes(pipe, pairs)
     try:
-        lora_turn(pool, entry, need, subject=subject, held=held, hold=hold)
+        lora_turn(pool, entry, need, subject=subject, held=held, hold=hold,
+                  beside=beside)
     except LoraRefused as e:
         raise lora_refusal(e) from None
 
@@ -1987,20 +1988,23 @@ def partial_steps(steps: int, count: int) -> list:
 class _JobTurns:
     """The LoRA turns of an images API job on pool entry ``entry``: the
     pairs before a file is read, the table after the encode, and the
-    settle in the job's finally. With no pool there is none."""
+    settle in the job's finally. ``beside`` are the other entries the job
+    holds, its borrowed encoder. With no pool there is none."""
 
-    def __init__(self, pool, entry):
-        self.pool, self.entry = pool, entry
+    def __init__(self, pool, entry, beside=()):
+        self.pool, self.entry, self.beside = pool, entry, tuple(beside)
 
     def pairs(self, paths: list):
         """The first turn. Returns the context the files load in."""
-        pair_turn(self.pool, self.entry, self.entry.pipeline, paths)
+        pair_turn(self.pool, self.entry, self.entry.pipeline, paths,
+                  self.beside)
         return contextlib.nullcontext()
 
     def table(self, tid) -> None:
         """The second turn, after the encode and ``ensure_dit``."""
         if self.pool is not None:
-            table_turn(self.pool, self.entry, self.entry.pipeline, tid)
+            table_turn(self.pool, self.entry, self.entry.pipeline, tid,
+                       beside=self.beside)
 
     def settle(self) -> None:
         if self.pool is not None:
@@ -2011,7 +2015,7 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
             budget, stop, timeout_s: float | None = None,
             submitted: float | None = None, borrow=None, emit=None,
             model_dirs=(), embed_metadata: bool = False, pool=None,
-            entry=None) -> ImageJobResult:
+            entry=None, beside=()) -> ImageJobResult:
     """Run one request on the image worker's thread. ``stop`` is a
     threading.Event a disconnect sets; ``emit(index, bytes)`` takes the
     partial images of a stream. Raises :class:`JobStopped` when ``stop``
@@ -2019,8 +2023,9 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
     turn after ``submitted`` or for one step. With ``pool``, the job books
     the LoRA bytes of pool entry ``entry`` at two turns, the pairs before
     a file is read and the table after the encode, and settles them in
-    its finally."""
-    book = _JobTurns(pool, entry)
+    its finally. ``beside`` are the other pool entries the job holds,
+    which its turns count as its own."""
+    book = _JobTurns(pool, entry, beside)
     try:
         return _run_job(served, req, book, size=size, budget=budget,
                         stop=stop, timeout_s=timeout_s, submitted=submitted,

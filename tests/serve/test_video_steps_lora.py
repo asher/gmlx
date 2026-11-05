@@ -92,7 +92,7 @@ def _entry(request, monkeypatch, tmp_path, *, own=(5,), bf16=False,
     host = _mount(_PoolHost(served, pool), request)
     _stub_encode(monkeypatch, weights)
     e = host.entry()
-    assert pool.lora_own(e)[1] == served.lora_own_term == (
+    assert e.lora.own_term == served.lora_own_term == (
         served.plan.lora_term) > 0
     c = _client()
     video, audio, feats = _clip()
@@ -125,7 +125,7 @@ def test_a_video_entrys_encodes_and_steps_book_its_request_keys_alone(
         t.c.encode("h3", "a cat")
         assert t.pipe.adapters.bytes == t.pipe.tables.bytes == 0
         assert t.pool.lora_ledger(t.e) == (0, {})
-        assert t.pool.lora_own(t.e)[::2] == (0, 0)
+        assert (t.e.lora.own, t.e.lora.excess) == (0, 0)
         _books_hold(t.pool, t.e)
         again = _step(t, patch_table=tid)
         assert all(_rel(a, b) < 1e-6 for a, b in zip(again, first))
@@ -148,12 +148,12 @@ def test_a_video_step_after_an_encode_books_the_own_tables_excess_again(
     by then it answers 503 and builds no table."""
     t = _entry(request, monkeypatch, tmp_path, own=(5, 6), bf16=True)
     first = _step(t)
-    excess = t.pool.lora_own(t.e)[2]
+    excess = t.e.lora.excess
     assert excess > 0
     _books_hold(t.pool, t.e)
     t.c.encode("h3", "a cat")
     assert t.pool.lora_ledger(t.e) == (0, {})
-    assert t.pool.lora_own(t.e)[2] == 0
+    assert t.e.lora.excess == 0
     _books_hold(t.pool, t.e)
     if not room:
         with t.pool._lock:
@@ -172,7 +172,7 @@ def test_a_video_step_after_an_encode_books_the_own_tables_excess_again(
     assert all(_rel(a, b) < 1e-6 for a, b in zip(again, first))
     # The refined rows are kept: the token refiner's leaves build no
     # factors again.
-    assert 0 < t.pool.lora_own(t.e)[2] <= excess
+    assert 0 < t.e.lora.excess <= excess
     _books_hold(t.pool, t.e)
 
 

@@ -182,9 +182,8 @@ def _books_hold(pool, e, *, budget: bool = True) -> None:
     uploads are within the budget."""
     keys, own = svc.lora_figures(e)
     assert pool.lora_ledger(e) == (0, keys)
-    held, term, excess = pool.lora_own(e)
-    assert held == own and excess == max(0, own - term)
-    assert steps.STATE.adapters.incoming == 0
+    assert e.lora.own == own and e.lora.excess == max(0, own - e.lora.own_term)
+    assert pool._incoming == 0
     assert pool.overruns == []
     assert _held(pool) <= pool._budget or not budget
 
@@ -456,6 +455,54 @@ def test_a_lora_whose_factors_no_unload_makes_room_for_is_413_at_its_turn(
     _books_hold(t.pool, t.e)
 
 
+def test_a_factor_turn_counts_the_encoder_its_job_holds_as_its_own(
+        request, monkeypatch, tmp_path):
+    """The factor turn of a model that shares a chat model's encoder, on a
+    budget that leaves half the factors' room beside the model, the
+    encoder its job holds and the pairs: the turn answers 413 at once
+    naming both as the job's own, and never waits on the encoder as a
+    chat model in use. The encoder is held for the job only."""
+    t = _entry(request, monkeypatch, tmp_path, own=False)
+    assert _post([("a.safetensors", 1.0)])[0] == 200
+    pairs, factors = t.pipe.adapters.bytes, t.pipe.tables.bytes
+    _on_worker(lambda: svc.shed_lora(t.e, pairs + factors))
+    _settle(t)
+    enc = _chat(t.pool, "enc-qwen3", 2 * GB)
+    t.pool.release(enc)
+
+    def borrow_for(spec):
+        with t.pool._lock:
+            enc.busy += 1
+        return (lambda pipe, run, stop, timeout_s: run()), \
+            _BusyHold(t.pool, enc)
+
+    monkeypatch.setattr(images, "_borrow_for", borrow_for)
+    monkeypatch.setattr(t.served.spec, "encoder_model", "enc-qwen3")
+    kept = t.e.footprint + enc.footprint
+    budget = kept + pairs + factors // 2
+    _set_budget(t.pool, budget)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
+    priced, real = [], svc.turn_figures
+
+    def spy(*a):
+        priced.append(real(*a))
+        return priced[-1]
+
+    monkeypatch.setattr(svc, "turn_figures", spy)
+    start = time.monotonic()
+    status, doc, _h = _post([("a.safetensors", 1.0)])
+    assert time.monotonic() - start < _RETRY_MIN_S
+    (need, _built), = priced
+    assert (status, doc["error"]["message"]) == (
+        413, f"the request's adapters need {gb(need + pairs, True)} GB "
+        f"of memory, over the {gb(budget - kept, False)} GB the server's "
+        "memory budget leaves beside 'zit', 'enc-qwen3' and the pinned "
+        "models")
+    assert t.encodes == 2 and t.pipe.tables.bytes == 0
+    assert enc in t.pool._entries.values() and enc.busy == 0
+    _books_hold(t.pool, t.e)
+
+
 def test_a_job_that_fails_after_its_turns_leaves_nothing_pending(
         request, monkeypatch, tmp_path):
     """A request of LoRA a whose plan fails after its turns booked its
@@ -606,12 +653,12 @@ def test_a_request_with_no_adapters_books_the_own_tables_excess(
     t = _entry(request, monkeypatch, tmp_path)
     status, _doc, _h = _post()
     assert status == 200 and t.pipe.tables.bytes > 0
-    excess = t.pool.lora_own(t.e)[2]
+    excess = t.e.lora.excess
     assert excess > 0
     _books_hold(t.pool, t.e)
     assert _post()[0] == 200
     assert np.array_equal(t.latents[-1], t.latents[0])
-    assert t.pool.lora_own(t.e)[2] == excess
+    assert t.e.lora.excess == excess
     _books_hold(t.pool, t.e)
     # Another job's turn sheds the built table, and a model in use takes
     # the memory free.
@@ -754,8 +801,8 @@ def test_the_request_budget_counts_each_byte_once_and_fits_exactly(
     _mount(request, _PoolHost({}, pool))
     up = np.ones((1, 1 << 18), np.float32)          # 1 MiB held upload
     _steps_client().put(up, kind="adapters")
-    assert steps.STATE.adapters.admit(2 * MB, lambda: None)
-    request.addfinalizer(lambda: steps.STATE.adapters.done(2 * MB))
+    assert pool.upload_admit(2 * MB, None)
+    request.addfinalizer(lambda: pool.upload_done(2 * MB))
     other = _model(pool, "qwen3-32b", 900 * MB, busy=False)
     o = _model(pool, "flux2-klein", 60 * MB, busy=True)
     with pool._lock:
@@ -765,8 +812,8 @@ def test_the_request_budget_counts_each_byte_once_and_fits_exactly(
         pool._building = 13 * MB
         pool._publish()
     assert pool.lora_ledger(o) == (5 * MB, {"pair": 3 * MB})
-    assert steps.STATE.adapters.live() == up.nbytes + 2 * MB == (
-        sum(_store().values()) + 2 * MB)
+    assert steps.STATE.adapters.bytes + pool.figures.incoming == (
+        up.nbytes + 2 * MB) == sum(_store().values()) + 2 * MB
     monkeypatch.setattr(capacity, "overcommit", lambda: False)
     hold = SimpleNamespace(_pool=pool, _entry=o)
     beside = other.footprint + 5 * MB + 2 * MB + 13 * MB

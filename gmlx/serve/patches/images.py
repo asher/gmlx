@@ -282,20 +282,21 @@ def _budget(hold):
     the held uploads itself. Read from the pool's figures with no pool
     lock; the pending bookings stay in."""
     from ..capacity import overcommit, working_budget_bytes
-    from ..image_steps import STATE as STEPS
 
     if overcommit():
         return None
     total = working_budget_bytes()
     if total is None:
         return None
-    beside = hold._pool.plan_beside(hold._entry) + STEPS.adapters.incoming
+    pool = hold._pool
+    beside = pool.plan_beside(hold._entry) + pool.figures.incoming
     return max(0, total - beside)
 
 
-def _hopeless(hold, served, req) -> None:
+def _hopeless(hold, served, req, beside=()) -> None:
     """The route's 413 for a request whose adapters' bytes, from their
-    headers, no unload makes room for. The job's turns book them."""
+    headers, no unload makes room for beside its model and the entries
+    ``beside`` its job holds. The job's turns book them."""
     from ..image_service import ADAPTERS, lora_refusal, request_estimate
     from ..residency import LoraRefused
 
@@ -303,9 +304,16 @@ def _hopeless(hold, served, req) -> None:
     if n <= 0:
         return
     try:
-        hold._pool.lora_hopeless(hold._entry, n, ADAPTERS)
+        hold._pool.lora_hopeless(hold._entry, n, ADAPTERS, beside)
     except LoraRefused as e:
         raise lora_refusal(e) from None
+
+
+def _beside(holds) -> tuple:
+    """The pool entries a job holds besides its model, ``holds[0]``: the
+    chat model it borrows as its encoder."""
+    return tuple(e for e in (getattr(h, "_entry", None) for h in holds[1:])
+                 if e is not None)
 
 
 def _text_model(model):
@@ -476,6 +484,9 @@ def make_endpoint(route: str):
                 fn, chat_hold = _borrow_for(served.spec)
                 if chat_hold is not None:
                     holds.append(chat_hold)
+                    # The encoder the job holds is its own, for its turns
+                    # too.
+                    _hopeless(hold, served, req, _beside(holds))
 
                 def borrow(run, _fn=fn, _pipe=served.pipe):
                     return _fn(_pipe, run, stop, timeout_s)
@@ -528,6 +539,7 @@ def make_endpoint(route: str):
                           "see the server log", err_type="server_error")
         model_id = served.spec.id
         pool, entry = holds[0]._pool, holds[0]._entry
+        beside = _beside(holds)
         submitted = time.monotonic()
         loop = asyncio.get_running_loop()
         events: asyncio.Queue = asyncio.Queue()
@@ -548,7 +560,7 @@ def make_endpoint(route: str):
                                emit=emit if req.stream else None,
                                model_dirs=STATE.model_dirs,
                                embed_metadata=STATE.settings.embed_metadata,
-                               pool=pool, entry=entry)
+                               pool=pool, entry=entry, beside=beside)
 
         future = WORKER.submit(job)
 
