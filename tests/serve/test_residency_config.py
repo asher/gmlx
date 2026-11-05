@@ -1035,8 +1035,8 @@ def test_overcommit_admits_a_video_entry_over_its_budget_at_full_caches(
 def test_a_32_gb_server_entry_has_the_lora_room_the_video_page_gives(
         monkeypatch, variant, extra, fits):
     """docs/video.md: on a 32 GB Mac an entry whose default clip is
-    768x768 for 5 s has room for a bf16 LoRA file of up to 3 GB beside
-    h3-base, and none beside h3, whose own LoRA it stacks on."""
+    768x768 for 5 s has room in its adapters for a bf16 LoRA file of up to
+    3 GB beside h3-base, and none beside h3, whose own LoRA it stacks on."""
     from gmlx.serve import capacity
     from gmlx.serve import video_service as vs
     from gmlx.video import memfit
@@ -1049,6 +1049,23 @@ def test_a_32_gb_server_entry_has_the_lora_room_the_video_page_gives(
     else:
         with pytest.raises(memfit.VideoMemoryError):
             vs.entry_plan(spec)
+
+
+@pytest.mark.parametrize("variant, free", [("h3-base", 1.4), ("h3", 1.2)])
+def test_a_32_gb_server_entry_leaves_the_free_memory_the_video_page_gives(
+        monkeypatch, variant, free):
+    """docs/video.md: on a 32 GB Mac an entry whose default clip is
+    768x768 for 5 s leaves about 1.4 GB free beside h3-base and 1.2 GB
+    beside h3, the memory a request's LoRA is booked in when it arrives.
+    The entry reserves none for request LoRAs at load."""
+    from gmlx.serve import capacity
+    from gmlx.serve import video_service as vs
+
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    budget = capacity.ram_budget_bytes(32 << 30)
+    plan = vs.entry_plan(_h3_entry(monkeypatch, variant, "768x768", 5,
+                                   budget))
+    assert round((budget - plan.footprint) / 1e9, 1) == free
 
 
 def test_an_image_route_names_a_video_id_as_no_image_model(request):

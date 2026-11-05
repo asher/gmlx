@@ -231,12 +231,13 @@ Mac, `gmlx video generate` has room in a 5 second clip at 768x768 for a
 bf16 LoRA file of up to 5 GB beside `h3-base`, and up to 800 MB beside
 `h3`. The [`adapters`](config.md#video_modelsadapters) key of the
 model's entry applies LoRAs to every clip. A `gmlx serve` entry keeps
-its DiT and LoRAs loaded through the decode, and books a request's LoRA
-when it arrives. On a 32 GB Mac an entry whose default clip is 768x768
-for 5 seconds leaves about 1.4 GB free beside `h3-base`, room for a bf16
-LoRA file of about that size, and no room beside `h3`, where a LoRA
-stacks on the recipe's LoRA. A LoRA that does not fit is refused with the
-memory it needs, as the
+its DiT and LoRAs loaded through the decode, so on a 32 GB Mac an entry
+whose default clip is 768x768 for 5 seconds has room in its `adapters`
+for a bf16 LoRA file of up to 3 GB beside `h3-base`, and none beside
+`h3`. A LoRA a request sends is booked when it arrives, in the memory
+free beside the loaded entry: about 1.4 GB beside `h3-base`, and 1.2 GB
+beside `h3`, where the LoRA stacks on the recipe's. One that does not
+fit is refused with the memory it needs, as the
 [LoRA refusal](troubleshooting.md#a-lora-is-refused-for-memory)
 describes.
 
