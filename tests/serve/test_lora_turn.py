@@ -7,7 +7,6 @@ their caches are dicts of keys and bytes."""
 import contextlib
 import random
 import threading
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -163,6 +162,26 @@ def finish(t, out):
 def on_worker(fn):
     """``fn`` on a thread named as the image worker's are."""
     return finish(*start("image-worker-test", fn))
+
+
+class Waits(threading.Condition):
+    """The pool's release condition, recording the timeout of each wait
+    a turn takes on it and setting ``waiting`` at the first."""
+
+    def __init__(self, lock):
+        super().__init__(lock)
+        self.timeouts: list = []
+        self.waiting = threading.Event()
+
+    def wait(self, timeout=None):
+        self.timeouts.append(timeout)
+        self.waiting.set()
+        return super().wait(timeout)
+
+
+def waits(pool) -> Waits:
+    pool._idle = Waits(pool._lock)
+    return pool._idle
 
 
 def turn(pool, e, need, **kw):
@@ -397,9 +416,10 @@ def test_a_turn_waits_for_a_chat_model_in_use_and_runs_on_its_release(
     pool = make_pool(monkeypatch, 10, retry=5)
     x = image(pool, "x", 4, busy=True)
     c = chat(pool, "c", 4, busy=1)
+    w = waits(pool)
     t, out = start("image-worker-test",
                    lambda: pool.lora_turn(x, 3 * GB, subject="s"))
-    time.sleep(0.3)
+    assert w.waiting.wait(WAIT), "the turn did not wait"
     assert t.is_alive()
     with pool._lock:
         c.busy = 0
@@ -414,11 +434,11 @@ def test_a_turn_waits_at_most_the_retry_and_names_the_models_in_use(
     pool = make_pool(monkeypatch, 10, retry=1)
     x = image(pool, "x", 4, busy=True)
     chat(pool, "c", 4, busy=1)
-    t0 = time.monotonic()
+    w = waits(pool)
     with pytest.raises(LoraRefused) as ei:
         turn(pool, x, 3 * GB)
-    took = time.monotonic() - t0
-    assert 0.9 < took < 3
+    # Each wait is bounded by what is left of the one deadline.
+    assert w.timeouts and all(0 < s <= 1 for s in w.timeouts)
     assert ei.value.status == 503 and ei.value.retry_after == 1
     assert ("need 3.0 GB of memory, and 2.0 GB is free beside the models "
             "in use (c); retry when one is idle" in ei.value.message)
@@ -428,18 +448,18 @@ def test_no_wait_on_a_worker_entry_in_use_or_a_preload(monkeypatch):
     pool = make_pool(monkeypatch, 10, retry=5)
     x = image(pool, "x", 4, busy=True)
     image(pool, "y", 4, busy=True)
-    t0 = time.monotonic()
+    w = waits(pool)
     with pytest.raises(LoraRefused) as ei:
         turn(pool, x, 3 * GB)
-    assert time.monotonic() - t0 < 1
+    assert w.timeouts == []
     assert "models in use (y)" in ei.value.message
     pool2 = make_pool(monkeypatch, 10, retry=5)
     x2 = image(pool2, "x", 4, busy=True)
     chat(pool2, "pre", 4, busy=1, retained=1)
-    t0 = time.monotonic()
+    w2 = waits(pool2)
     with pytest.raises(LoraRefused) as ei:
         turn(pool2, x2, 3 * GB)
-    assert time.monotonic() - t0 < 1
+    assert w2.timeouts == []
     assert "unload a model or retry" in ei.value.message
 
 
