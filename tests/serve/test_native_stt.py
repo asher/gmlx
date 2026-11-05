@@ -250,11 +250,18 @@ WORDS = [_w("Hi", 0.1, 0.3), _w("there.", 0.35, 0.7), _w("How", 0.8, 0.9, 1),
 
 def test_segments_break_at_sentences_pauses_and_speakers():
     segs = native_stt.segments([_w("a", 0, 1), _w("b", 1.1, 2), _w("c", 3.5, 4),
-                                _w("d.", 4.1, 5), _w("e", 5.1, 6), _w("f", 6.1, 7, 1)])
-    assert [g["text"] for g in segs] == ["a b", "c d.", "e", "f"]
+                                _w("do.", 4.1, 5), _w("e", 5.1, 6), _w("f", 6.1, 7, 1)])
+    assert [g["text"] for g in segs] == ["a b", "c do.", "e", "f"]
     turns = native_stt.segments(WORDS, by_turn=True)
     assert [(g["text"], g["speaker"]) for g in turns] == [
         ("Hi there.", 0), ("How are you?", 1), ("Fine.", 0)]
+
+
+def test_initials_and_titles_end_no_segment():
+    words = "the U. S. came to Mr. Smith. Then Dr. J. Doe left. Done".split()
+    segs = native_stt.segments([_w(x, i * 0.2, i * 0.2 + 0.1) for i, x in enumerate(words)])
+    assert [g["text"] for g in segs] == [
+        "the U. S. came to Mr. Smith.", "Then Dr. J. Doe left.", "Done"]
 
 
 def test_verbose_json_words_and_segments_name_speakers_only_when_asked():

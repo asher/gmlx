@@ -47,6 +47,18 @@ _ALIGNED_FORMATS = ("verbose_json", "srt", "vtt", "diarized_json")
 # change always starts one.
 SEGMENT_PAUSE = 1.0
 _SENTENCE_END = (".", "?", "!", "\u3002", "\uff1f", "\uff01")
+# Periods that end no sentence: the model writes "U. S." as two words.
+_TITLES = frozenset({"mr.", "mrs.", "ms.", "dr.", "st."})
+
+
+def _ends_sentence(word: str) -> bool:
+    if not word.endswith(_SENTENCE_END):
+        return False
+    core = word.lstrip("\"'([")
+    if core.endswith(".") and (len(core) == 2 and core[0].isalpha()
+                               or core.lower() in _TITLES):
+        return False
+    return True
 
 
 class NoSpeech(Exception):
@@ -356,7 +368,7 @@ def segments(words: list[dict], *, by_turn: bool = False) -> list[dict]:
     for w in words:
         last = out[-1] if out else None
         if (last is None or w["speaker"] != last["speaker"]
-                or (not by_turn and (last["_words"][-1].endswith(_SENTENCE_END)
+                or (not by_turn and (_ends_sentence(last["_words"][-1])
                                      or w["start"] - last["end"] >= SEGMENT_PAUSE))):
             out.append({"start": w["start"], "end": w["end"],
                         "speaker": w["speaker"], "_words": [w["word"]]})
