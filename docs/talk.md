@@ -44,6 +44,11 @@ does the work while the microphone and speakers stay on your Mac.
 4. Run `gmlx restart` so that the server starts the services, and then run
    `gmlx talk`.
 
+A served model that hears audio, such as
+[Nemotron 3.5 Transcribe](nemotron-transcribe.md#a-voice-session-on-one-model),
+can hear you and answer you in one model. The server then needs only
+`tts`, because `server.stt` left unset picks that model.
+
 The first session downloads two small models, for the wake phrase and for
 speech detection, into the cache folder that
 [Where files are on disk](troubleshooting.md#where-files-are-on-disk)
