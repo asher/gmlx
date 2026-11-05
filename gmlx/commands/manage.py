@@ -1596,7 +1596,8 @@ def _confirm_lines(plan, state: str, stream_verdict: str | None, box, *,
                               pc.plan_speculates(plan))
         lines.append(f"Fits in memory. {ctx}".rstrip())
     if plan.mmproj and m.mmproj:
-        lines.append(f"image input  {pc.human_gb(m.mmproj_bytes)}")
+        label = "audio input" if m.hears else "image input"
+        lines.append(f"{label}  {pc.human_gb(m.mmproj_bytes)}")
     if plan.drafter and m.drafter is not None:
         lines.append(f"faster replies  {pc.human_gb(m.drafter.bytes)}")
     if m.asr is not None:
@@ -1855,7 +1856,7 @@ def _pick_row(m, dp, box, dest: Destination, free: int):
             on_disk=done[pc.rung_ref(m, r)], default=r == dp.rung))
     base = dp if not dp.streaming else None
     toggles = []
-    if m.mmproj:
+    if m.mmproj and not m.hears:
         done = _complete_on_disk(pc.PullPlan(m, dp.rung, True, False, False), dest)
         toggles.append(pick.Toggle(
             id="vision", label="image input", size_label=pc.human_gb(m.mmproj_bytes),
@@ -1927,7 +1928,7 @@ def _plan_from_pick(row, rung, on_ids, box):
     m = pc.model(row.id)
     on = set(on_ids)
     return pc.plan_for(m, box, quant=rung.id,
-                       mmproj=("vision" in on) if m.mmproj else None,
+                       mmproj=("vision" in on) if m.mmproj and not m.hears else None,
                        drafter=("drafter" in on) if m.drafter is not None else None)
 
 
