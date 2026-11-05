@@ -1763,32 +1763,22 @@ def store_turn(pool, n: int, subject: str, hold=()) -> None:
     """An upload's store turn: the image worker sheds idle uploads, then
     the entries' idle LoRA bytes, evicts idle models as a cold load does
     and admits ``n`` bytes into the store. The upload waits for the worker
-    up to the turn's deadline, and past it raises the 503 naming the
-    models in use or the load in flight. A turn that starts by then runs
-    to its end, so the store never keeps bytes for an upload that left."""
+    up to the turn's deadline: a turn that has not started by then is
+    cancelled and raises the turn's own 503, and one that started runs to
+    its end, which its own deadline bounds, so no upload leaves with bytes
+    admitted for it."""
     import concurrent.futures
 
     from .residency import STORE
 
-    state: dict = {"at": None}
-    lock = threading.Lock()
-
-    def job():
-        with lock:
-            if state["at"] == "abandoned":
-                return
-            state["at"] = "started"
-        pool.lora_turn(STORE, n, subject=subject, store=tuple(hold))
-
-    fut = WORKER.submit(job)
+    fut = WORKER.submit(pool.lora_turn, STORE, n, subject=subject,
+                        store=tuple(hold))
     try:
         fut.result(timeout=pool._retry())
         return
     except concurrent.futures.TimeoutError:
-        with lock:
-            if state["at"] is None:
-                state["at"] = "abandoned"
-                pool.lora_late(STORE, n, subject)
+        if fut.cancel():
+            pool.lora_late(STORE, n, subject)
     fut.result()
 
 

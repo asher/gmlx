@@ -634,6 +634,84 @@ def test_a_store_turn_evicts_an_idle_model(monkeypatch):
     assert not pool.entry_resident(idle)
 
 
+class StoreWorker:
+    """The image worker of a store turn, a thread of its own, recording
+    whether each cancel an upload tries takes its job off the queue."""
+
+    def __init__(self, monkeypatch):
+        from gmlx.serve import image_service
+        from gmlx.serve.subservice import SingleWorker
+
+        self.real = SingleWorker("image-worker-store")
+        self.cancelled: list = []
+        self.tried = threading.Event()
+        monkeypatch.setattr(image_service, "WORKER", self)
+        self.store_turn = image_service.store_turn
+
+    def submit(self, fn, *a, **k):
+        fut = self.real.submit(fn, *a, **k)
+        cancel = fut.cancel
+
+        def tried():
+            got = cancel()
+            self.cancelled.append(got)
+            self.tried.set()
+            return got
+
+        fut.cancel = tried
+        return fut
+
+    def drain(self):
+        self.real.submit(lambda: None).result(WAIT)
+        self.real.get().shutdown(wait=True)
+
+
+def test_a_store_turn_not_started_by_its_deadline_never_runs(monkeypatch):
+    """An upload whose store turn waits behind another job past the
+    deadline: the queued turn is cancelled and the upload gets the turn's
+    own 503, and once the worker is free nothing is admitted for it."""
+    pool = make_pool(monkeypatch, 10)
+    image(pool, "x", 4, busy=True)
+    seams = Seams()
+    pool._seam = seams
+    w = StoreWorker(monkeypatch)
+    go = threading.Event()
+    w.submit(go.wait, WAIT)
+    try:
+        with pytest.raises(LoraRefused) as err:
+            w.store_turn(pool, 3 * GB, "the upload")
+    finally:
+        go.set()
+        w.drain()
+    assert (err.value.status, err.value.message, err.value.retry_after) == (
+        503, "the upload need 3.0 GB of memory, and 6.0 GB is free beside "
+        "the models in use (x); retry when one is idle", 1)
+    assert w.cancelled == [True]
+    assert "turn" not in seams.hit and pool._incoming == 0
+
+
+def test_a_store_turn_started_by_its_deadline_runs_to_its_end(monkeypatch):
+    """An upload whose store turn started before the deadline and runs
+    past it: the upload's cancel fails, it waits for that turn, and it is
+    admitted, never answered 503 with its bytes admitted."""
+    pool = make_pool(monkeypatch, 10)
+    seams = Seams("turn")
+    pool._seam = seams
+    w = StoreWorker(monkeypatch)
+    try:
+        t, out = start("upload", lambda: w.store_turn(pool, 3 * GB,
+                                                      "the upload"))
+        seams.reach("turn")
+        assert w.tried.wait(WAIT)
+        seams.go["turn"].set()
+        finish(t, out)
+    finally:
+        seams.go["turn"].set()
+        w.drain()
+    assert w.cancelled == [False]
+    assert pool._incoming == 3 * GB
+
+
 def test_an_upload_and_a_turn_never_both_take_the_last_room(monkeypatch):
     pool = make_pool(monkeypatch, 10)
     x = image(pool, "x", 4, busy=True)
@@ -959,3 +1037,19 @@ def test_an_upload_fits_the_budget_and_the_measure_beside_the_store(
     assert not admit(1.5 * GB, 3 * GB)
     assert admit(GB, 3 * GB)
     assert store.bytes + pool._incoming == 2 * GB
+
+
+def test_the_cap_shed_at_a_put_skips_the_held_keys():
+    """A put past the store's configured cap drops the oldest tensors on
+    the putting thread: the keys a define or a step holds stay, and the
+    next oldest go in their place."""
+    from gmlx.serve.image_steps import _Bytes
+
+    store = _Bytes(3 * GB, "the step routes' adapter cache",
+                   "adapter_cache_mb")
+    for k in "abc":
+        store.put(k, SimpleNamespace(nbytes=GB))
+    with store.holding(["a"]):
+        store.put("d", SimpleNamespace(nbytes=GB))
+        assert list(store._items) == ["a", "c", "d"]
+    assert store.bytes == 3 * GB

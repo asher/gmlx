@@ -32,6 +32,7 @@ from gmlx.serve.queue_cap import _RETRY_MIN_S  # noqa: E402
 from gmlx.serve.residency import IMAGE_KIND, _BusyHold, gb  # noqa: E402
 from test_image_routes import _APP, _DOC  # noqa: E402
 from test_image_steps import _client as _steps_client  # noqa: E402
+from test_lora_turn import waits  # noqa: E402
 from test_step_routes_lora import (GB, _crowd, _held, _model,  # noqa: E402
                                    _mount, _pool, _PoolHost, _set_budget,
                                    _store)
@@ -489,9 +490,9 @@ def test_a_factor_turn_counts_the_encoder_its_job_holds_as_its_own(
         return priced[-1]
 
     monkeypatch.setattr(svc, "turn_figures", spy)
-    start = time.monotonic()
+    w = waits(t.pool)
     status, doc, _h = _post([("a.safetensors", 1.0)])
-    assert time.monotonic() - start < _RETRY_MIN_S
+    assert w.timeouts == []
     (need, _built), = priced
     assert (status, doc["error"]["message"]) == (
         413, f"the request's adapters need {gb(need + pairs, True)} GB "
