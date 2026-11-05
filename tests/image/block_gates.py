@@ -69,6 +69,7 @@ and its worst token row 0.34, and the worst row of the glu kernel 0.26.
 """
 from __future__ import annotations
 
+import gc
 import hashlib
 import os
 import subprocess
@@ -333,7 +334,10 @@ def stock_ops_only():
 def _rerun(request, tag: str, env: dict) -> None:
     """Rerun this test in a child process with ``env`` set. A child that
     skips, as one without the model's GGUF does, skips this test with
-    its reason."""
+    its reason. The child loads its own model, so this process first
+    frees what MLX caches for it."""
+    gc.collect()
+    mx.clear_cache()
     r = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-s", "-rs", "-p",
          "no:cacheprovider", request.node.nodeid],

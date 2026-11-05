@@ -109,26 +109,19 @@ def _measures(pipe, tid: str, arrays: dict, m: dict) -> dict:
     return _under(pipe, tid, hg.measures, arrays, m)
 
 
-@pytest.mark.integration
-def test_check7_rows(real):
-    pipe, _, tid, arrays, m = real
-    assert pipe.dit.act_dtype == mx.bfloat16
-    assert not hg.layout_misses(pipe.dit, arrays, m)
-    got = _measures(pipe, tid, arrays, m)
-    assert not hg.unmeasured(got, m)
-    print(hg.worst_line(f"h3 check7 {NAME}", got, m))
-    out = hg.missed(got, m["tolerances"])
-    assert not out, out
-
+# The exact gates rerun in a child process, which loads its own model. The
+# parent takes none, and they come before the tests that hold the module's
+# model, so a run of the whole file starts each child with no model loaded
+# beside it.
 
 @pytest.mark.integration
-def test_check7_exact_gate(real, request):
+def test_check7_exact_gate(request):
     """Every teacher-forced row within EXACT_TOL of the oracle in its
     arithmetic, and the free rows and the velocities within the fixture's
     gates from the floors measured now."""
     if not exact_process():
         return rerun_exact(request, "h3 check7 exact")
-    pipe, _, tid, arrays, m = real
+    pipe, _, tid, arrays, m = request.getfixturevalue("real")
     label = f"h3 check7 exact {NAME}"
     with hg.exact_floats(pipe.dit) as n:
         floor = _under(pipe, tid, hg.exact_free_floor, arrays, m)
@@ -186,6 +179,42 @@ def wrong_tables(pipe, lora: str) -> dict:
 
 
 @pytest.mark.integration
+def test_each_wrong_table_fails_the_check7_exact_gate(request):
+    """In the oracle's arithmetic each wrong table moves a teacher-forced
+    row by SEEN times EXACT_TOL at least, and the right table passes after
+    them."""
+    if not exact_process():
+        return rerun_exact(request, "h3 check7 exact")
+    pipe, lora, tid, arrays, m = request.getfixturevalue("real")
+    pipe.adapters.max_bytes = max(pipe.adapters.max_bytes, 8 << 30)
+    tables = {**wrong_tables(pipe, lora), "right table": tid}
+    seen = {}
+    with hg.exact_floats(pipe.dit):
+        for name, t in tables.items():
+            got = _under(pipe, t, hg.exact_forced, arrays, m)
+            top = max(got, key=got.get)
+            seen[name] = (got[top] / EXACT_TOL, top)
+            print(f"h3 check7 exact {name}: {seen[name][0]:.2f} of "
+                  f"EXACT_TOL at {top}")
+    right = seen.pop("right table")
+    assert right[0] <= 1, right
+    weak = {k: v for k, v in seen.items() if not v[0] >= SEEN}
+    assert not weak, weak
+
+
+@pytest.mark.integration
+def test_check7_rows(real):
+    pipe, _, tid, arrays, m = real
+    assert pipe.dit.act_dtype == mx.bfloat16
+    assert not hg.layout_misses(pipe.dit, arrays, m)
+    got = _measures(pipe, tid, arrays, m)
+    assert not hg.unmeasured(got, m)
+    print(hg.worst_line(f"h3 check7 {NAME}", got, m))
+    out = hg.missed(got, m["tolerances"])
+    assert not out, out
+
+
+@pytest.mark.integration
 def test_each_wrong_table_fails_the_check7_gate(real):
     """The right table passes after the wrong ones."""
     pipe, lora, tid, arrays, m = real
@@ -206,27 +235,3 @@ def test_each_wrong_table_fails_the_check7_gate(real):
     assert not weak, weak
     out = hg.missed(_measures(pipe, tid, arrays, m), tols)
     assert not out, out
-
-
-@pytest.mark.integration
-def test_each_wrong_table_fails_the_check7_exact_gate(real, request):
-    """In the oracle's arithmetic each wrong table moves a teacher-forced
-    row by SEEN times EXACT_TOL at least, and the right table passes after
-    them."""
-    if not exact_process():
-        return rerun_exact(request, "h3 check7 exact")
-    pipe, lora, tid, arrays, m = real
-    pipe.adapters.max_bytes = max(pipe.adapters.max_bytes, 8 << 30)
-    tables = {**wrong_tables(pipe, lora), "right table": tid}
-    seen = {}
-    with hg.exact_floats(pipe.dit):
-        for name, t in tables.items():
-            got = _under(pipe, t, hg.exact_forced, arrays, m)
-            top = max(got, key=got.get)
-            seen[name] = (got[top] / EXACT_TOL, top)
-            print(f"h3 check7 exact {name}: {seen[name][0]:.2f} of "
-                  f"EXACT_TOL at {top}")
-    right = seen.pop("right table")
-    assert right[0] <= 1, right
-    weak = {k: v for k, v in seen.items() if not v[0] >= SEEN}
-    assert not weak, weak

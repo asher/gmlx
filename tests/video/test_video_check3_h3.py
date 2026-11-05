@@ -305,6 +305,91 @@ def _depth(real, m: dict, blocks: int | None = None):
     return model
 
 
+# The exact gate. Each test reruns in a child process, which loads its
+# own DiT. The parent takes none, and these tests come before the first
+# test that holds the module's DiT, so a run of the whole file starts each
+# child with no model loaded beside it.
+
+@pytest.mark.integration
+@pytest.mark.parametrize("name", (*REAL, *REAL_ANCHORS))
+def test_check3_exact_gate(request, name):
+    """Every teacher-forced row within EXACT_TOL of the oracle in its
+    arithmetic, and the free rows and the velocities within the fixture's
+    gates from the floors measured now."""
+    fixture_present(_manifest(name)["name"])
+    if not exact_process():
+        return rerun_exact(request, f"h3 check3 exact {name}")
+    arrays, m = fixture(name)
+    model = _depth(request.getfixturevalue("real"), m)
+    label = f"h3 check3 exact {name}"
+    with hg.exact_floats(model) as n:
+        floor = hg.exact_free_floor(model, arrays, m)
+        if os.environ.get(hg.RECORD) == "1":
+            m = hg.record_floors(m, floor, (
+                ORACLE / f"{name}.manifest.json",
+                fx.fixture_root() / f"{name}.manifest.json"))
+        tol = hg.check_floor(m, floor, label)
+        got = hg.exact_measures(model, arrays, m)
+    print(hg.exact_line(f"{label}, {n} float tensors cast to fp32", got,
+                        tol))
+    over = hg.exact_over(got, tol)
+    assert not over, over
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("fault", FAULTS)
+def test_check3_exact_gate_fails_a_wrong_model(request, monkeypatch, fault):
+    fixture_present(_manifest(REAL[0])["name"])
+    if not exact_process():
+        return rerun_exact(request, "h3 check3 exact fault")
+    arrays, m = fixture(REAL[0])
+    model = _depth(request.getfixturevalue("real"), m)
+    tol = hg.exact_tols(m)
+    with hg.exact_floats(model), monkeypatch.context() as mp:
+        FAULTS[fault](mp)
+        bad = hg.exact_measures(model, arrays, m)
+    line, top = hg.fault_line(f"h3 check3 exact fault {fault}", bad, tol)
+    print(line)
+    assert top > 10, (fault, top)
+
+
+def _text_rows_rounded(mp):
+    """The text rows of the packed sequence rounded to bfloat16."""
+    real_embed = hm.H3Transformer.embed
+
+    def embed(self, video, audio, text, layout, *a, **k):
+        x = real_embed(self, video, audio, text, layout, *a, **k)
+        s = layout.span("text")
+        t = x[:, s.start:s.stop].astype(mx.bfloat16).astype(x.dtype)
+        return mx.concatenate([x[:, :s.start], t, x[:, s.stop:]], axis=1)
+    mp.setattr(hm.H3Transformer, "embed", embed)
+
+
+@pytest.mark.integration
+def test_check3_exact_gate_fails_a_wrong_sequence(request, monkeypatch):
+    """A slip in the sequence between the blocks, which the teacher-forced
+    rows cannot see since each block takes the oracle's input there, misses
+    the free rows' and the velocities' gates from the floors."""
+    fixture_present(_manifest(REAL[0])["name"])
+    if not exact_process():
+        return rerun_exact(request, "h3 check3 exact sequence fault")
+    arrays, m = fixture(REAL[0])
+    model = _depth(request.getfixturevalue("real"), m)
+    tol = hg.exact_tols(m)
+    with hg.exact_floats(model), monkeypatch.context() as mp:
+        _text_rows_rounded(mp)
+        bad = hg.exact_measures(model, arrays, m)
+    line, _ = hg.fault_line("h3 check3 exact sequence fault text rows "
+                              "in bfloat16", bad, tol)
+    print(line)
+    assert not [k for k in hg.exact_over(bad, tol) if hg.forced_row(k)]
+    ratio = {k: v / hg.exact_gate(k, tol) for k, v in bad.items()}
+    free = max(r for k, r in ratio.items() if hg.free_row(k))
+    vel = {v: ratio[v] for v in hg.VELOCITIES}
+    assert free > 10, free
+    assert all(r > 1 for r in vel.values()) and max(vel.values()) > 10, vel
+
+
 @pytest.mark.integration
 def test_the_loaded_dit_keeps_its_float32_leaves(real):
     """Every float tensor under the family's fp32_keep loads in float32,
@@ -338,90 +423,6 @@ def test_check3_rows(real, name):
     print(hg.worst_line(f"h3 check3 {name}", got, m))
     out = hg.missed(got, m["tolerances"])
     assert not out, out
-
-
-# The exact gate.
-
-@pytest.mark.integration
-@pytest.mark.parametrize("name", (*REAL, *REAL_ANCHORS))
-def test_check3_exact_gate(real, request, name):
-    """Every teacher-forced row within EXACT_TOL of the oracle in its
-    arithmetic, and the free rows and the velocities within the fixture's
-    gates from the floors measured now."""
-    fixture_present(_manifest(name)["name"])
-    if not exact_process():
-        return rerun_exact(request, f"h3 check3 exact {name}")
-    arrays, m = fixture(name)
-    model = _depth(real, m)
-    label = f"h3 check3 exact {name}"
-    with hg.exact_floats(model) as n:
-        floor = hg.exact_free_floor(model, arrays, m)
-        if os.environ.get(hg.RECORD) == "1":
-            m = hg.record_floors(m, floor, (
-                ORACLE / f"{name}.manifest.json",
-                fx.fixture_root() / f"{name}.manifest.json"))
-        tol = hg.check_floor(m, floor, label)
-        got = hg.exact_measures(model, arrays, m)
-    print(hg.exact_line(f"{label}, {n} float tensors cast to fp32", got,
-                        tol))
-    over = hg.exact_over(got, tol)
-    assert not over, over
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize("fault", FAULTS)
-def test_check3_exact_gate_fails_a_wrong_model(real, request, monkeypatch,
-                                               fault):
-    fixture_present(_manifest(REAL[0])["name"])
-    if not exact_process():
-        return rerun_exact(request, "h3 check3 exact fault")
-    arrays, m = fixture(REAL[0])
-    model = _depth(real, m)
-    tol = hg.exact_tols(m)
-    with hg.exact_floats(model), monkeypatch.context() as mp:
-        FAULTS[fault](mp)
-        bad = hg.exact_measures(model, arrays, m)
-    line, top = hg.fault_line(f"h3 check3 exact fault {fault}", bad, tol)
-    print(line)
-    assert top > 10, (fault, top)
-
-
-def _text_rows_rounded(mp):
-    """The text rows of the packed sequence rounded to bfloat16."""
-    real_embed = hm.H3Transformer.embed
-
-    def embed(self, video, audio, text, layout, *a, **k):
-        x = real_embed(self, video, audio, text, layout, *a, **k)
-        s = layout.span("text")
-        t = x[:, s.start:s.stop].astype(mx.bfloat16).astype(x.dtype)
-        return mx.concatenate([x[:, :s.start], t, x[:, s.stop:]], axis=1)
-    mp.setattr(hm.H3Transformer, "embed", embed)
-
-
-@pytest.mark.integration
-def test_check3_exact_gate_fails_a_wrong_sequence(real, request,
-                                                  monkeypatch):
-    """A slip in the sequence between the blocks, which the teacher-forced
-    rows cannot see since each block takes the oracle's input there, misses
-    the free rows' and the velocities' gates from the floors."""
-    fixture_present(_manifest(REAL[0])["name"])
-    if not exact_process():
-        return rerun_exact(request, "h3 check3 exact sequence fault")
-    arrays, m = fixture(REAL[0])
-    model = _depth(real, m)
-    tol = hg.exact_tols(m)
-    with hg.exact_floats(model), monkeypatch.context() as mp:
-        _text_rows_rounded(mp)
-        bad = hg.exact_measures(model, arrays, m)
-    line, _ = hg.fault_line("h3 check3 exact sequence fault text rows "
-                              "in bfloat16", bad, tol)
-    print(line)
-    assert not [k for k in hg.exact_over(bad, tol) if hg.forced_row(k)]
-    ratio = {k: v / hg.exact_gate(k, tol) for k, v in bad.items()}
-    free = max(r for k, r in ratio.items() if hg.free_row(k))
-    vel = {v: ratio[v] for v in hg.VELOCITIES}
-    assert free > 10, free
-    assert all(r > 1 for r in vel.values()) and max(vel.values()) > 10, vel
 
 
 # The site gate.
