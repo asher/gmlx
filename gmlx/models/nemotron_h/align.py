@@ -327,11 +327,13 @@ def speaker_mapping(ctc: np.ndarray, streams: list[dict], speaker: np.ndarray,
                     threshold: float, greedy: np.ndarray) -> dict:
     """NeMo's ``_one_pass_speaker_mapping``: speaker tag to diarization
     column, by IDF-weighted cosine similarity of token counts and a linear
-    assignment; unassigned tags map to None."""
+    assignment; unassigned tags map to None. Also returns, per assigned
+    tag, the unassigned columns with greedy onsets that are most similar
+    to it, to fold into its column."""
     if not streams:
-        return {}
+        return {}, {}
     if speaker.shape[1] == 0:
-        return {s["speaker_tag"]: None for s in streams}
+        return {s["speaker_tag"]: None for s in streams}, {}
     from scipy.optimize import linear_sum_assignment
 
     peaks = (greedy != 0) & np.r_[True, greedy[1:] != greedy[:-1]]
@@ -350,7 +352,32 @@ def speaker_mapping(ctc: np.ndarray, streams: list[dict], speaker: np.ndarray,
     rows, cols = linear_sum_assignment(-sim)
     mapping = {s["speaker_tag"]: None for s in streams}
     mapping.update({streams[r]["speaker_tag"]: int(c) for r, c in zip(rows, cols)})
-    return mapping
+    extra: dict = {}
+    claimed = set(int(c) for c in cols)
+    for c in range(speaker.shape[1]):
+        if c not in claimed and observed[c].any():
+            r = int(rows[np.argmax(sim[rows, c])])
+            extra.setdefault(streams[r]["speaker_tag"], []).append(c)
+    return mapping, extra
+
+
+def fold_columns(mapping: dict, extra: dict, speaker: np.ndarray | None,
+                 labels: np.ndarray | None):
+    """``speaker`` ``(frames, speakers)`` and ``labels`` ``(speakers,
+    frames)`` with each tag's extra columns folded into its assigned
+    column: max for probabilities, any for labels. A voice the diarizer
+    splits over several columns then aligns over all of them."""
+    if not extra:
+        return speaker, labels
+    speaker = None if speaker is None else speaker.copy()
+    labels = None if labels is None else labels.copy()
+    for tag, columns in extra.items():
+        c = mapping[tag]
+        if speaker is not None:
+            speaker[:, c] = speaker[:, [c, *columns]].max(axis=1)
+        if labels is not None:
+            labels[c] = labels[[c, *columns]].any(axis=0)
+    return speaker, labels
 
 
 # -- banded search ------------------------------------------------------------
@@ -731,13 +758,17 @@ def align(prepared: Prepared, logp: np.ndarray, speaker_probs: np.ndarray | None
     ctc_step = float(duration) / frames
     greedy = logp.argmax(axis=1)
     tags = [s["speaker_tag"] for s in prepared.streams]
+    folded_labels = diarization_labels
     if speaker_probs is None:
         speaker = None
         mapping = {t: None for t in tags}
     else:
         speaker = resample_speaker_probs(np.clip(speaker_probs, 0, 1).astype(np.float32), frames)
-        mapping = speaker_mapping(logp, prepared.streams, speaker,
-                                  p.speaker_activity_threshold, greedy)
+        mapping, extra = speaker_mapping(logp, prepared.streams, speaker,
+                                         p.speaker_activity_threshold, greedy)
+        # NeMo leaves unassigned columns out, so a voice the diarizer split
+        # over columns crowds into one column's frames. Fold them in.
+        speaker, folded_labels = fold_columns(mapping, extra, speaker, diarization_labels)
     rows, failed = [], []
     for stream in prepared.streams:
         labels = np.asarray(stream["labels"], np.int64)
@@ -758,11 +789,13 @@ def align(prepared: Prepared, logp: np.ndarray, speaker_probs: np.ndarray | None
                               time_offset, labels, p.maximum_token_len))
     diarization = ([] if diarization_labels is None else diarization_segments(
         diarization_labels, DIARIZATION_FRAME_SECONDS, time_offset, duration))
+    folded = (diarization if folded_labels is diarization_labels else diarization_segments(
+        folded_labels, DIARIZATION_FRAME_SECONDS, time_offset, duration))
     if p.calibration is not None:
         interpolate_word_boundaries(rows, logp, ctc_step, time_offset, duration,
-                                    diarization, mapping, p)
+                                    folded, mapping, p)
     speaker_words = refine_word_timestamps(
-        _public_word_timestamps(rows), diarization, mapping, ctc_step,
+        _public_word_timestamps(rows), folded, mapping, ctc_step,
         p.max_word_frames * upsampling, p)
     words = [{"word": w["word"], "start": w["start"], "end": w["end"], "speaker": w["speaker"]}
              for ws in speaker_words.values() for w in ws]

@@ -152,3 +152,71 @@ def test_the_public_result_rounds_to_milliseconds_and_names_tags_as_strings():
         "speaker_tag_to_diarization_speaker": {"0": 2, "1": None},
         "error": None}
     assert align.public_result(None, "alignment_failed")["error"] == "alignment_failed"
+
+
+FOLD_FRAMES = 300  # 40 ms CTC frames: 12 s
+
+
+def _spread(prepared, ranges):
+    """CTC log probabilities with each stream's tokens peaking at even steps
+    over its ``(first, last)`` frame range, blank everywhere else, and the
+    seconds at which each word's first token peaks."""
+    logp = np.full((FOLD_FRAMES, len(prepared.columns)), np.log(1e-4), np.float32)
+    logp[:, 0] = np.log(0.99)
+    onsets = []
+    for stream, (a, b) in zip(prepared.streams, ranges):
+        tokens = stream["labels"][1::2]
+        owners = [w for w in stream["state_to_word"][1::2]]
+        frames = np.linspace(a, b, len(tokens)).round().astype(int)
+        for i, (t, frame) in enumerate(zip(tokens, frames)):
+            logp[frame] = np.log(1e-4)
+            logp[frame, t] = np.log(0.99)
+            if i == 0 or owners[i] != owners[i - 1]:
+                onsets.append(frame * 0.04)
+    return logp, sorted(onsets)
+
+
+def _activity(spans, speakers):
+    """80 ms speaker probabilities and 10 ms labels: each ``(speaker,
+    first, last)`` span is active, in 40 ms frames."""
+    probs = np.full((FOLD_FRAMES, speakers), 0.001, np.float32)
+    for s, a, b in spans:
+        probs[a:b + 1, s] = 0.95
+    labels = np.repeat(probs.T > 0.5, 4, axis=1)
+    return probs[::2], labels
+
+
+def test_a_voice_split_over_two_diarizer_speakers_aligns_over_both(tokenizer):
+    words = "red mat and ran garden at twelve open meeting closed budget seven new friday green"
+    blank = tokenizer.sp.get_piece_size()
+    prepared = align.prepare("<spk:0> " + words, tokenizer, blank, FOLD_FRAMES)
+    logp, onsets = _spread(prepared, [(5, 290)])
+    probs, labels = _activity([(0, 0, 149), (1, 150, 299)], 2)
+    got = align.align(prepared, logp, probs, labels, FOLD_FRAMES * 0.04)
+    starts = [w["start"] for w in got.words]
+    assert len(starts) == len(words.split())
+    assert np.abs(np.array(starts) - onsets).max() <= 0.2
+    assert max(onsets) > 150 * 0.04
+    assert len(got.mapping) == 1 and got.mapping[0] in (0, 1)
+    assert {s["speaker"] for s in got.diarization} == {0, 1}
+
+
+def test_a_leftover_column_joins_the_tag_whose_words_it_heard(tokenizer):
+    first = "red mat and ran garden at twelve"
+    second = "open meeting closed budget seven new friday green tuesday river"
+    blank = tokenizer.sp.get_piece_size()
+    prepared = align.prepare(f"<spk:0> {first} <spk:1> {second}", tokenizer, blank,
+                             FOLD_FRAMES)
+    logp, onsets = _spread(prepared, [(5, 120), (140, 290)])
+    probs, labels = _activity([(0, 0, 130), (1, 131, 255), (2, 256, 299)], 3)
+    speaker = align.resample_speaker_probs(probs, FOLD_FRAMES)
+    mapping, extra = align.speaker_mapping(
+        logp, prepared.streams, speaker, align.CHECKPOINT.speaker_activity_threshold,
+        logp.argmax(axis=1))
+    assert mapping == {0: 0, 1: 1} and extra == {1: [2]}
+    got = align.align(prepared, logp, probs, labels, FOLD_FRAMES * 0.04)
+    assert got.mapping == {0: 0, 1: 1}
+    assert len(got.words) == len(onsets)
+    assert np.abs(np.array([w["start"] for w in got.words]) - onsets).max() <= 0.2
+    assert sum(w["speaker"] == 1 and w["start"] > 256 * 0.04 for w in got.words) >= 2
+    assert {s["speaker"] for s in got.diarization} == {0, 1, 2}
