@@ -77,6 +77,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its budget, where both could read the same.
 - A ComfyUI workflow with a negative prompt loads the DiT and VAE once, not
   twice, before its first step when the text encoder cannot fit beside them.
+- `gmlx serve` no longer stalls other requests to reload a chat model that
+  another load unloaded just as a request for it started.
 
 ## [0.5.4] - 2026-10-29
 
