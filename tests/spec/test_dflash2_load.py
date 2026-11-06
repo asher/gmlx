@@ -140,6 +140,33 @@ def test_config_unshifts_target_layers_and_reads_the_v2_keys():
     assert config.block_size == 8 and config.native_block_size == 8
 
 
+def test_config_reads_the_rope_pattern_and_context_window():
+    arrays, _ = _skeleton()
+    config, _ = _dflash_config_from_meta("d.gguf", _meta(), _target_dict(),
+                                         "dflash2", arrays=arrays)
+    assert config.rope_layers == [] and config.context_window is None
+    meta = _meta(**{"dflash.attention.rope_pattern": [True, False],
+                    "dflash.attention.context_window": 16384})
+    config, _ = _dflash_config_from_meta("d.gguf", meta, _target_dict(),
+                                         "dflash2", arrays=arrays)
+    assert config.rope_layers == [True, False]
+    assert config.context_window == 16384
+    meta = _meta(**{"dflash.attention.rope_pattern": [True]})
+    with pytest.raises(ValueError, match="rope_pattern has 1 entries"):
+        _dflash_config_from_meta("d.gguf", meta, _target_dict(), "dflash2",
+                                 arrays=arrays)
+
+
+def test_dflash2_takes_its_measured_block(monkeypatch):
+    arrays, _ = _skeleton()
+    monkeypatch.setitem(mtp_load._DRAFTER_BLOCK_BY_ID, "some-target", 4)
+    meta = _meta(**{"general.base_model.count": 1,
+                    "general.base_model.0.name": "Some-Target"})
+    config, _ = _dflash_config_from_meta("d.gguf", meta, _target_dict(),
+                                         "dflash2", arrays=arrays)
+    assert config.runtime_block_size == 4
+
+
 @pytest.mark.parametrize("layers", [[0, 2], [1, 5], [3, 1], [1, 1]])
 def test_config_rejects_out_of_range_or_unordered_layers(layers):
     arrays, _ = _skeleton()

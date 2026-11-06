@@ -992,6 +992,9 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # in the output dtype. Kept in step with the model class's
     # cast_predicate.
     "flint": (".mlp.gate.weight", ".e_score_correction_bias"),
+    # ricursive: the value-residual logit is F32 on the wire, one per layer.
+    # Kept in step with the model class's cast_predicate.
+    "ricursive": (".vres_lambda",),
     # nemotron_h: llama.cpp routes in fp32 (F32 wire router and selection
     # bias; Bolt picks top-9 of up to 496), and A_log feeds the fp32 scan.
     # Kept in step with the model class's cast_predicate.

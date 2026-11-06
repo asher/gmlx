@@ -63,6 +63,7 @@ _TEMPLATES = {
     "minicpm-v-4.7": ("minicpmv4_7", "minicpmv47_template.jinja"),
     "beam": ("beam", "beam_template.jinja"),
     "flint": ("flint", "flint_template.jinja"),
+    "ripple": ("ricursive", "ricursive_template.jinja"),
 }
 # Templates the Messages cases above do not take: Mistral 7B v0.3 takes
 # nine-character call ids only.

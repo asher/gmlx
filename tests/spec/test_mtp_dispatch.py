@@ -54,6 +54,7 @@ def _stub_loaders(monkeypatch, arches):
     ("nemotron_h", "nemotron_h_moe", "_load_nemotron_mtp_drafter"),
     ("qwen3_5", "dflash", "_load_dflash_drafter"),
     ("muse_glimmer", "dflash", "_load_dflash_drafter"),
+    ("ricursive", "dflash", "_load_dflash_drafter"),
     ("gemma4_text", "gemma4_assistant", "_load_gemma4_assistant_drafter"),
     ("gemma4_text", "dflash", "_load_dflash_drafter"),
 ])
@@ -108,7 +109,7 @@ def test_companion_resolver_skips_native_head_families(monkeypatch):
     monkeypatch.setattr(discovery, "find_mtp_companion",
                         lambda gguf, arches: "/x/sneaky-dflash2.gguf")
     for mt in ("qwen3_5", "qwen3_5_moe", "gemma4_text", "glm5_next",
-               "hy_v3", None):
+               "hy_v3", "ricursive", None):
         assert _resolve_companion_drafter(
             mt, "/x/t.gguf", log=lambda *a: None) is None, mt
 
@@ -123,7 +124,8 @@ def test_vlm_hook_rows_resolve_per_arch():
             == _MTP_TARGET_HOOKS_BY_TYPE["gemma4_text"])
     assert (_MTP_TARGET_HOOKS_BY_TYPE.get(_spec_hook_key("gemma4_unified"))
             == _MTP_TARGET_HOOKS_BY_TYPE["gemma4_text"])
-    for mt in ("muse_glimmer", "glm5_next", "qwen4_exp", "deepseek_v4"):
+    for mt in ("muse_glimmer", "glm5_next", "qwen4_exp", "deepseek_v4",
+               "ricursive"):
         assert _spec_hook_key(mt) in _MTP_TARGET_HOOKS_BY_TYPE
     # qwen3_5 takes the full default row.
     assert _MTP_TARGET_HOOKS_BY_TYPE.get(

@@ -67,7 +67,8 @@ def _target(seed=SEED):
 
 
 def _config(cfg, *, n_layers=2, block_size=BLOCK, native_block_size=None,
-            window=512, layer_types=None, is_causal=None, top_k=TOP_K):
+            window=512, layer_types=None, is_causal=None, top_k=TOP_K,
+            **extra):
     return DFlashConfig(
         hidden_size=cfg.hidden_size,
         intermediate_size=64,
@@ -91,6 +92,7 @@ def _config(cfg, *, n_layers=2, block_size=BLOCK, native_block_size=None,
         conv_group_size=16,
         selector_rank=8,
         selector_top_k=top_k,
+        **extra,
     )
 
 
@@ -425,6 +427,19 @@ def test_block_mask_cases():
     assert (only_causal[:, 3:] == np.tri(4, dtype=bool)).all()
 
 
+def test_block_mask_context_window_is_the_same_span_for_every_row():
+    assert block_attention_mask(8, 4, None, False, context=8) is None
+    m = np.broadcast_to(
+        np.array(block_attention_mask(20, 4, None, False, context=8)), (4, 24))
+    for i in range(4):
+        assert np.nonzero(m[i, :20])[0].tolist() == list(range(12, 20))
+        assert m[i, 20:].all()
+    both = np.array(block_attention_mask(20, 4, 6, False, context=8))
+    for i in range(4):
+        keep = np.nonzero(both[i, :20])[0].tolist()
+        assert keep == list(range(max(12, 15 + i), 20)), f"row {i} keeps {keep}"
+
+
 def _inject(drafter, n, seed):
     mx.random.seed(seed)
     caps = mx.random.normal((1, n, _tcfg().hidden_size * len(CAPTURE)))
@@ -482,9 +497,10 @@ def test_sliding_layers_mask_and_full_layers_do_not(monkeypatch):
         lambda *a, **k: (masks.append(k.get("mask")), real(*a, **k))[1])
     drafter._draft_hidden(mx.array([[3, 7, 7, 7]]))
     assert len(masks) == 2
-    assert masks[0] is not None and masks[0].shape == (4, 16)
+    # The sliding layer keeps only the window - 1 rows it can see.
+    assert masks[0] is not None and masks[0].shape == (4, 11)
     assert masks[1] is None
-    assert drafter._cache[1].offset == 12
+    assert [c.offset for c in drafter._cache] == [7, 12]
 
 
 def test_causal_flag_adds_the_block_triangle(monkeypatch):
@@ -498,6 +514,73 @@ def test_causal_flag_adds_the_block_triangle(monkeypatch):
     _drafter(lm, window=8, n_layers=1, is_causal=True)._draft_hidden(mx.array([[3, 7, 7, 7]]))
     assert masks[0] is None
     assert (np.array(masks[1]) == np.tri(4, dtype=bool)).all()
+
+
+# --- NoPE layers and the context window ---------------------------------------
+
+def _caps(n, seed):
+    mx.random.seed(seed)
+    return mx.random.normal((1, n, _tcfg().hidden_size * len(CAPTURE)))
+
+
+def test_rope_layers_needs_one_entry_per_layer():
+    with pytest.raises(ValueError, match="entries for"):
+        _config(_tcfg(), rope_layers=[True])
+
+
+@pytest.mark.parametrize("rope_layers,invariant", [
+    ([False, False], True), ([True, False], False)])
+def test_a_nope_layer_ignores_context_order(rope_layers, invariant):
+    """Unmasked non-causal attention without RoPE is a set function of the
+    context rows, so reversing them leaves the draft unchanged. A roped
+    layer sees the order."""
+    lm = _target()
+    block = mx.array([[3, 7, 7, 7]])
+    caps = _caps(10, seed=3)
+    drafter = _drafter(lm, layer_types=["full_attention"] * 2,
+                       rope_layers=rope_layers)
+    drafter.append_context(caps)
+    want = _draft_hidden(drafter, block)
+    drafter.reset(lm)
+    drafter.append_context(caps[:, ::-1])
+    got = _draft_hidden(drafter, block)
+    assert np.allclose(want, got, atol=5e-3) == invariant
+
+
+@pytest.mark.parametrize("n_rows", [30, 200])
+def test_context_window_bounds_the_full_layer(n_rows):
+    """A full layer with context window 8 sees the last 8 committed rows
+    however many went in, through ring compactions."""
+    lm = _target()
+    block = mx.array([[3, 7, 7, 7]])
+    drafter = _drafter(lm, layer_types=["full_attention"] * 2,
+                       context_window=8)
+    ring = drafter._cache[0]
+    assert isinstance(ring, BufferedRotatingKVCache) and ring.max_size == 9
+    assert drafter.hidden_capture_limit == 511
+    caps = _caps(n_rows, seed=4)
+    for i in range(0, n_rows, BLOCK):
+        drafter.append_context(caps[:, i:i + BLOCK])
+    assert ring.offset == n_rows
+    want = _draft_hidden(drafter, block)
+
+    drafter.reset(lm)
+    drafter.append_context(caps[:, -8:])
+    assert np.allclose(want, _draft_hidden(drafter, block), atol=5e-3)
+    drafter.reset(lm)
+    drafter.append_context(caps[:, -7:])
+    assert not np.allclose(want, _draft_hidden(drafter, block), atol=1e-4)
+
+
+def test_a_long_seed_projects_only_each_layers_span():
+    lm = _target()
+    drafter = _drafter(lm, window=8,
+                       layer_types=["sliding_attention", "full_attention"],
+                       context_window=20)
+    assert drafter.hidden_capture_limit == 20
+    drafter.append_context(_caps(20, seed=6))
+    held = [int(c.state[0].shape[2]) for c in drafter._cache]
+    assert held == [7, 20]
 
 
 # --- draw / stash -------------------------------------------------------------
@@ -920,3 +1003,38 @@ def test_instrumented_rounds_hand_the_block_drafter_a_stash(monkeypatch, switch)
         assert s is not None
         assert s[field] == s["rows"]
         assert all(s[o] is None for o in ("q", "pq", "top2") if o != field)
+
+
+def test_the_capture_prices_only_the_rows_the_drafter_keeps():
+    # Packed hidden (1 + taps), its tap slice (taps) and the fc output (1),
+    # 2 bytes each, over the prompt rows up to the capture limit.
+    cfg = _tcfg()
+    row = cfg.hidden_size * (2 * len(CAPTURE) + 2) * 2
+    windowed = DFlash2Drafter(_config(cfg, window=512))
+    assert windowed.capture_held_bytes(100) == 100 * row
+    assert windowed.capture_held_bytes(10_000) == 511 * row
+    full = ["sliding_attention", "full_attention"]
+    wide = DFlash2Drafter(_config(cfg, window=512, layer_types=full,
+                                  context_window=2000))
+    assert wide.capture_held_bytes(10_000) == 2000 * row
+    unbounded = DFlash2Drafter(_config(
+        cfg, window=None, layer_types=["full_attention"] * 2))
+    assert unbounded.capture_held_bytes(10_000) == 0
+
+
+def test_the_target_prices_the_capture_while_the_drafter_lives():
+    import gc
+    from types import SimpleNamespace
+
+    from gmlx.gen import prefill_decay as pd
+
+    drafter = DFlash2Drafter(_config(_tcfg(), window=512))
+    target = SimpleNamespace()
+    pd.note_drafter_held(target, drafter)
+    assert pd.drafter_held_bytes(target, 100) == drafter.capture_held_bytes(100)
+    wrapped = SimpleNamespace(language_model=target)
+    assert pd.drafter_held_bytes(wrapped, 100) > 0
+    del drafter
+    gc.collect()
+    assert pd.drafter_held_bytes(target, 100) == 0
+    assert pd.drafter_held_bytes(SimpleNamespace(), 100) == 0

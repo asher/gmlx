@@ -75,6 +75,7 @@ def test_families_never_set_max_tokens():
     ("hunyuan-moe", "hunyuan"),
     ("kimi-k3", "kimi"),
     ("flint", "flint"),
+    ("ricursive", "default"),     # the card and repo give no sampling
     ("llama", "llama"), ("smollm3", "llama"),
     ("mistral3", "mistral"),
     ("phi3", "default"),          # no card entry -> generic

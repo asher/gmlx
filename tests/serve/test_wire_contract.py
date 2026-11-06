@@ -998,6 +998,65 @@ def test_flint_tool_call_without_arguments(flint, stream):
     assert json.loads(call["function"]["arguments"] or "{}") == {}
 
 
+# 7e. Ripple: <think> reasoning on its own lines and JSON tool calls in
+#     <tool_call> tags, one per line. The prompt stops at a bare
+#     "<|im_start|>assistant\n", so the model opens <think> itself.
+_RIPPLE_PROMPT = "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n"
+_RIPPLE_REPLY = [("<think>\nThink", None), ("ing.\n</think>\n", None),
+                 ("Hello!", "stop")]
+_RIPPLE_CALL_REPLY = [
+    ("<think>\nNeed the weather.\n</think>\n\n", None),
+    ("<tool_call>\n{\"name\": \"get_weather\", ", None),
+    ("\"arguments\": {\"city\": \"Paris\"}}\n</tool_call>", "stop")]
+
+
+@pytest.fixture()
+def ripple(wire, monkeypatch):
+    template = (Path(__file__).parents[1] / "fixtures"
+                / "ricursive_template.jinja").read_text()
+    monkeypatch.setattr(_WireTokenizer, "chat_template", template)
+    monkeypatch.setattr(_PKG, "apply_chat_template",
+                        lambda *a, **k: _RIPPLE_PROMPT)
+    return wire
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_ripple_reasoning_and_answer(ripple, stream):
+    ripple.gen.script = _RIPPLE_REPLY
+    r = ripple.client.post("/v1/chat/completions",
+                           json=_chat_body(stream=stream))
+    assert r.status_code == 200, r.text
+    if stream:
+        content, reasoning, calls, finish = _stream_parts(r.text)
+        assert not calls and finish == "stop"
+    else:
+        msg = r.json()["choices"][0]["message"]
+        content, reasoning = msg["content"], msg["reasoning"]
+    assert content.strip() == "Hello!"
+    assert reasoning.strip() == "Thinking."
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_ripple_tool_call(ripple, stream):
+    ripple.gen.script = _RIPPLE_CALL_REPLY
+    r = ripple.client.post("/v1/chat/completions",
+                           json=_chat_body(stream=stream, tools=_WEATHER))
+    assert r.status_code == 200, r.text
+    if stream:
+        content, reasoning, calls, finish = _stream_parts(r.text)
+    else:
+        choice = r.json()["choices"][0]
+        msg, finish = choice["message"], choice["finish_reason"]
+        content, reasoning, calls = (msg["content"], msg["reasoning"],
+                                     msg["tool_calls"])
+    assert not (content or "").strip()
+    assert reasoning.strip() == "Need the weather."
+    assert finish == "tool_calls"
+    [call] = calls
+    assert call["function"]["name"] == "get_weather"
+    assert json.loads(call["function"]["arguments"]) == {"city": "Paris"}
+
+
 _ANTHROPIC_WEATHER = [{"name": "get_weather", "input_schema": {
     "type": "object", "properties": {"city": {"type": "string"}}}}]
 
