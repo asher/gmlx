@@ -1387,10 +1387,11 @@ which the prompt also reads through the text encoder's vision tower.
 `--guide-audio` anchors a sound alone. ffmpeg reads guide videos and
 sounds, and the images too when it is installed. FRAME is `0` when none
 is given, a negative frame counts from the end, and only an integer after
-the last `@` is a frame. A guide video keeps the first frames
-[Keyframes and guides](video.md#keyframes-and-guides) gives, which must
-fit in the clip from FRAME. The anchors are encoded after the text encoder is released,
-one VAE at a time. FastH3 runs text to video only, so it refuses them.
+the last `@` is a frame. A guide video keeps the frames that
+[Keyframes and guides](video.md#keyframes-and-guides) gives, counted from
+its start, and they must fit in the clip from FRAME. The anchors are
+encoded after the text encoder is released, one VAE at a time. FastH3
+runs text to video only, so it refuses them.
 
 | Flag | Default | Meaning |
 |------|---------|---------|

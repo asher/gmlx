@@ -522,11 +522,12 @@ make the clip longer, or cut the video shorter.
 The server answers 400 when the gmlx video VAE cannot encode a first or
 last frame, or a part of a guide video, beside the models it holds. The
 nodes send a long guide video in parts of up to 124 frames, and the
-message gives the memory a part needs, the memory free and the largest
-part that fits now. The nodes send the guide again once in parts of that
-size. When no part fits, unload chat models with
-[`POST /unload`](api.md#endpoints), make the clip smaller, or cut the
-guide video shorter.
+message gives the memory the frame or the part needs, the memory free
+and, for a part, the largest part that fits now. The nodes then send
+the parts that remain, from the first frame of the refused part on, in
+parts of that size, and stop if one is refused again. When no part fits,
+unload chat models with [`POST /unload`](api.md#endpoints) or make the
+clip smaller.
 
 ### `no ComfyUI found`
 

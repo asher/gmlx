@@ -228,7 +228,7 @@ gmlx video generate h3 --size 768x768 --first-frame fox.png --output fox.mp4 \
     --prompt "The red fox in the snow lifts its head, turns and runs off between the pines."
 ```
 
-Give each image the clip's shape: the
+Give each image the clip's shape. The
 [`video generate`](cli.md#video-generate) flags say how one of another
 shape is fitted. The prompt reads both images through the text encoder's
 vision tower, the `mmproj` file that `pull` downloads with the model, so
