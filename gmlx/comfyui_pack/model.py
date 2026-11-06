@@ -508,8 +508,7 @@ class RemoteForward:
                 raise GmlxRefusal(f"gmlx: {art} {stream} anchor noise mix of {float(payload[key]):g} "
                                   f"(minimax_payload[{key!r}], which no stock node sets) reached "
                                   f"the DiT forward; a gmlx model mixes at ComfyUI's {value:g}")
-        anchors = sum(1 for kf in payload.get("keyframes") or ()
-                      if kf.get("latent") is not None or kf.get("audio_latent") is not None)
+        anchors = len(_h3_keyframes(payload))
         vision = tags is not None and bool((torch.as_tensor(tags) == 0).any())
         if self.b.status.get("variant") == FASTH3 and (anchors or vision):
             held = (f"{anchors} keyframe{'s' if anchors > 1 else ''} or guide"
@@ -565,8 +564,7 @@ class RemoteForward:
         mixes into its rows (a CPU torch generator restarted at the
         payload's seed for each one, drawn in the rows' shape), and the
         vision spans of the prompt's ``rows`` tags."""
-        keyframes = [kf for kf in payload.get("keyframes") or ()
-                     if kf.get("latent") is not None or kf.get("audio_latent") is not None]
+        keyframes = _h3_keyframes(payload)
         tags = payload.get("text_token_tags")
         spans = tag_spans(tags) if tags is not None else []
         if tags is not None and torch.as_tensor(tags).numel() != rows:
@@ -741,6 +739,31 @@ def load_model(client: StepClient, model_id: str) -> GmlxModelPatcher:
     return patcher
 
 
+# The keys of a MiniMax-H3 keyframe the AV step reads.
+H3_KEYFRAME = ("resolved_frame_index", "latent", "audio_latent")
+
+
+def _h3_keyframes(payload: dict) -> list:
+    """The keyframes of ``payload`` that anchor latents. A keyframe that
+    holds no latent anchors nothing, as in ComfyUI's forward. Refuses one
+    that names none of the keys the step reads, or a latent with no
+    frame, which a renamed key would give."""
+    out = []
+    for kf in payload.get("keyframes") or ():
+        if not isinstance(kf, dict) or not any(k in kf for k in H3_KEYFRAME) or (
+                "resolved_frame_index" not in kf
+                and any(kf.get(k) is not None for k in H3_KEYFRAME[1:])):
+            from .version import COMFYUI_FLOOR, COMFYUI_TESTED
+
+            keys = sorted(kf) if isinstance(kf, dict) else type(kf).__name__
+            raise GmlxError(f"gmlx: a MiniMax-H3 keyframe holds {keys}, and the gmlx nodes "
+                            f"read {', '.join(H3_KEYFRAME)}; the gmlx nodes are tested on "
+                            f"ComfyUI {COMFYUI_FLOOR} to {COMFYUI_TESTED}")
+        if kf.get("latent") is not None or kf.get("audio_latent") is not None:
+            out.append(kf)
+    return out
+
+
 def _h3_keys(patcher) -> None:
     """Refuse a ComfyUI whose MiniMax-H3 nodes no longer write a key the
     forward reads with a default, so a renamed key cannot run a clip at the
@@ -786,6 +809,26 @@ def _h3_keys(patcher) -> None:
         if key not in held or (key == "seed" and held[key] != PROBE_SEED):
             src = f" from {given}" if given else ""
             refuse("MiniMaxH3 model", f"minimax_payload[{key!r}]{src}", what)
+    from comfy_extras.nodes_minimax_h3 import EmptyMiniMaxH3LatentAV, MiniMaxH3AddGuide
+
+    class _Encoder:
+        """A VAE that encodes a frame to zeros, for the probe of a guide."""
+        def encode(self, frames):
+            return torch.zeros(1, 24, 1, frames.shape[1] // 16, frames.shape[2] // 16)
+
+    def guided():
+        out = EmptyMiniMaxH3LatentAV.execute(width=64, height=64, length=5)
+        latent = (out.result if hasattr(out, "result") else out)[0]
+        out = MiniMaxH3AddGuide.execute([[torch.zeros(1, 1, 8), {}]], latent, 0,
+                                        vae=_Encoder(), image=torch.zeros(1, 64, 64, 3))
+        pos = (out.result if hasattr(out, "result") else out)[0]
+        return (pos[0][1].get("minimax_keyframes") or [None])[-1]
+
+    kf = probe("MiniMaxH3AddGuide", guided, "a 64x64 image at frame 0")
+    for key, what in (("resolved_frame_index", "a guide's frame"),
+                      ("latent", "a guide's latents")):
+        if not isinstance(kf, dict) or key not in kf:
+            refuse("MiniMaxH3AddGuide", f"a keyframe's {key!r}", what)
     import comfy.ldm.minimax.model as h3_model
 
     for stream, (_key, name, value) in H3_COND_AUG.items():

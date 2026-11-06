@@ -172,6 +172,31 @@ class Model(Base):
         finally:
             comfy.model_base.MiniMaxH3.extra_conds = real
 
+    def test_a_keyframe_key_comfyui_stops_writing_is_named_at_the_load(self):
+        """The AV step reads a guide's frame and latents by key; a ComfyUI
+        whose MiniMaxH3AddGuide renames one is named at the load."""
+        real = H.MiniMaxH3AddGuide.__dict__["execute"]
+        add = H.MiniMaxH3AddGuide.execute
+
+        def renamed(key):
+            def execute(positive, latent, frame_idx, **kw):
+                pos = _out(add(positive, latent, frame_idx, **kw))[0]
+                kf = pos[0][1]["minimax_keyframes"][-1]
+                kf[key + "_v2"] = kf.pop(key)
+                return (pos,)
+            return execute
+
+        for key in ("resolved_frame_index", "latent"):
+            with self.subTest(key):
+                H.MiniMaxH3AddGuide.execute = renamed(key)
+                try:
+                    with self.assertRaises(C.GmlxError) as e:
+                        self.model()
+                finally:
+                    H.MiniMaxH3AddGuide.execute = real
+                self.assertIn(f"gmlx: ComfyUI {P.compat.comfyui_version()}'s MiniMaxH3AddGuide "
+                              f"does not write a keyframe's {key!r}", str(e.exception))
+
     def test_a_comfyui_whose_anchor_noise_mix_differs_is_named_at_the_load(self):
         """The server mixes the anchor rows at ComfyUI's defaults, 0.999 for
         the video and 1 for the audio; a ComfyUI that changes one is named
@@ -906,6 +931,22 @@ class Refusals(Base):
             self.assertEqual(str(e.exception), "gmlx: references (minimax_ref_items, from "
                              f"MiniMaxH3ReferenceToVideo) reached a gmlx CLIP; {NO_REFS}")
         self.assertEqual(self.stub.events("encode"), [])
+
+    def test_a_keyframe_of_keys_the_step_does_not_read_is_refused(self):
+        """A keyframe that names none of the keys the step reads, or a
+        latent with no frame, is refused, not dropped."""
+        pos, _ = self.cond()
+        z = torch.rand(1, 24, 1, SIZE // 16, SIZE // 16)
+        for kf in ({"frame_index": 0, "video_latent": z}, {"latent": z}):
+            with self.subTest(sorted(kf)):
+                self.stub.reset()
+                p = node_helpers.conditioning_set_values(pos, {"minimax_keyframes": [kf]})
+                with self.assertRaises(C.GmlxError) as e:
+                    self.sample(self.model(), pos=p, steps=1)
+                self.assertIn(f"gmlx: a MiniMax-H3 keyframe holds {sorted(kf)}, and the gmlx "
+                              "nodes read resolved_frame_index, latent, audio_latent",
+                              str(e.exception))
+                self.assertEqual(self.stub.events("av_step"), [])
 
     def running(self, node):
         """Run the test body as if ComfyUI ran the stock node ``node``."""
