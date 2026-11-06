@@ -254,7 +254,8 @@ A guide video keeps 5, 22, 39 or more of its first frames, 17 k + 5 for
 the largest k it holds, or its first frame alone when it has fewer than
 5, and its sound unless you pass `--guide-no-audio`. Those frames must fit
 in the clip from the guide's frame on. A guide video lines up with the
-clip's latents when its frame is a multiple of 17.
+clip's latents when its frame is a multiple of 17. At another frame the
+clip can flash for one frame where the guide's latents meet its own.
 
 To continue a clip, cut its last 22 frames with ffmpeg and guide a new
 clip with them at frame 0:
@@ -360,21 +361,25 @@ optional strength after a colon:
 gmlx video generate h3 --adapter ~/models/loras/style.safetensors:0.8 --prompt "..."
 ```
 
-Repeat the flag to stack LoRAs. A LoRA takes memory about the size of
-its file when it runs alone and its file is bf16, as the recipes' LoRAs
-are, and about twice its size otherwise. An `--adapter` on `h3` or
-`h3-fast` stacks on the recipe's LoRA, so both take twice. On a 32 GB
-Mac, `gmlx video generate` has room in a 5 second clip at 768x768 for a
-bf16 LoRA file of up to 5 GB beside `h3-base`, and up to 800 MB beside
-`h3`. The [`adapters`](config.md#video_modelsadapters) key of the
-model's entry applies LoRAs to every clip. A `gmlx serve` entry keeps
-its DiT and LoRAs loaded through the decode, so on a 32 GB Mac an entry
-whose default clip is 768x768 for 5 seconds has room in its `adapters`
-for a bf16 LoRA file of up to 3 GB beside `h3-base`, and none beside
-`h3`. A LoRA a request sends is booked when its step runs, in the memory
-free beside the loaded entry: about 1.4 GB beside `h3-base`, and 1.2 GB
-beside `h3`, where the LoRA stacks on the recipe's. One that does not
-fit is refused with the memory it needs, as the
+Repeat the flag to stack LoRAs. The
+[`adapters`](config.md#video_modelsadapters) key of the model's entry
+applies LoRAs to every clip. A LoRA takes memory about the size of its
+file when it runs alone and its file is bf16, as the recipes' LoRAs are,
+and about twice its size otherwise. A LoRA on `h3` or `h3-fast` stacks on
+the recipe's LoRA, so both take twice.
+
+A `gmlx serve` entry keeps its DiT and LoRAs loaded through the decode,
+so it has less room than `gmlx video generate`. A LoRA a request sends is
+booked when its step runs, in the memory free beside the loaded entry.
+On a 32 GB Mac, with a 5 second clip at 768x768:
+
+| LoRA | Beside `h3-base` | Beside `h3` |
+|------|------------------|-------------|
+| `--adapter` on `gmlx video generate` | A bf16 file of up to 5 GB | A bf16 file of up to 800 MB |
+| The `adapters` of a `gmlx serve` entry with that default clip | A bf16 file of up to 3 GB | None |
+| A LoRA a request sends to that entry | About 1.4 GB of memory free | About 1.2 GB of memory free |
+
+A LoRA that does not fit is refused with the memory it needs, as the
 [LoRA refusal](troubleshooting.md#a-lora-is-refused-for-memory)
 describes.
 
