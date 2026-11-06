@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import math
 import os
 import threading
 from types import SimpleNamespace
@@ -922,7 +923,7 @@ def test_a_video_body_is_priced_at_the_copies_its_parse_holds(
     else:
         body, ctype = _form({"prompt": text}, {"first_frame": _png()})
         n, copies = len(text), body_intake.FORM_TEXT_COPIES
-    need = body_intake.held(n, copies)
+    need = math.ceil(n * copies)
     for free, status in ((need - 1, 413), (need, 200)):
         monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
         r = routes.client.post("/v1/videos", content=body,

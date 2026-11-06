@@ -11,6 +11,7 @@ import importlib
 import io
 import json
 import logging
+import math
 import threading
 from types import SimpleNamespace
 
@@ -1054,7 +1055,7 @@ def test_an_images_body_is_priced_at_the_copies_its_parse_holds(
     else:
         body, ctype = _edit_form(prompt)
         path, copies = "/v1/images/edits", images.FORM_COPIES
-    need = body_intake.held(len(body), copies)
+    need = math.ceil(len(body) * copies)
     for free, status in ((need - 1, 413), (need, 200)):
         monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
         r = TestClient(_gated_app()).post(path, content=body,
