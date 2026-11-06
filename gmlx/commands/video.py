@@ -20,7 +20,6 @@ import re
 import secrets
 import shutil
 import sys
-import tempfile
 import time
 
 from .image import _adapter
@@ -42,9 +41,6 @@ HINT_SIZES = ((1344, 768), (768, 1344), (768, 768))
 BASE_RECIPE = "h3-base"
 # Seeds run from 0 to 2^64 - 1, as a ComfyUI seed does.
 SEED_RANGE = 1 << 64
-# A guide's sound is read to a second past the clip's audio, more than the
-# audio encode's halo (12 latents) past the latents an anchor keeps.
-GUIDE_AUDIO_PAST_S = 1
 _FRAME_AT = re.compile(r"-?\d+")
 
 
@@ -518,103 +514,22 @@ def _progress(log, t0):
     return on_step
 
 
-@dataclasses.dataclass(frozen=True)
-class _Anchor:
-    """An anchor the flags ask for, read and placed before any model
-    loads: its flag and path, its placement and planned rows, and what
-    it encodes from, a still at the canvas size, a video file whose
-    frames are read when it encodes, its sound, or both."""
-    flag: str
-    path: str
-    placed: object                  # anchors.Placement
-    rows: object                    # layout.AnchorRows
-    still: object = None            # (H, W, 3) uint8
-    video: str | None = None
-    wave: object = None             # (2, samples) float32
-    ffmpeg: str | None = None
-
-
 def _still(path: str) -> bool:
-    """Whether Pillow opens ``path`` as an image."""
-    from PIL import Image, UnidentifiedImageError
+    from gmlx.video.run import is_still
 
-    try:
-        with Image.open(path):
-            return True
-    except UnidentifiedImageError:
-        return False
+    return is_still(path)
 
 
 def _read_anchors(a, fam, s: dict) -> tuple[list, list]:
     """The keyframes, (H, W, 3) uint8 at the canvas in prompt order, and
-    each anchor of the flags as ``_Anchor``, before any model loads. A
+    each anchor of the flags as ``run.Anchor``, before any model loads. A
     guide video's frames are counted here and read when it encodes."""
-    from gmlx.video import anchors, images, io
-    from gmlx.video.layout import AnchorRows
-    from gmlx.video.vae.h3_audio import HOP, SAMPLE_RATE
+    from gmlx.video import run
 
-    frames, w, h = s["frames"], s["width"], s["height"]
-    audio_t = fam.latent_shapes(frames, w, h)[1][3]
-    samples = audio_t * HOP + GUIDE_AUDIO_PAST_S * SAMPLE_RATE
-    exe = shutil.which("ffmpeg")
-    keyframes: list = []
-    out: list = []
-
-    def add(flag, path, frame, *, n=0, wave=None, most=None, **kw):
-        try:
-            if n == most:
-                # Read to its bound, the video holds more than fits.
-                raise ValueError(
-                    f"a guide clip of {anchors.guide_frames(n)} or more "
-                    f"frames at frame {frame} does not fit in the clip's "
-                    f"{frames} frames")
-            p = anchors.place(frame, frames, audio_t,
-                              fam.timeline.frame_rescale, video_frames=n,
-                              audio=wave is not None)
-        except ValueError as e:
-            raise ValueError(f"{flag} {path}: {e}") from None
-        video_t = (0 if not p.video_frames else 1 if p.video_frames == 1
-                   else fam.latent_shapes(p.video_frames, w, h)[0][2])
-        sound = (0 if p.audio_t is None
-                 else min(p.audio_t, wave.shape[1] // HOP))
-        out.append(_Anchor(flag, path, p, AnchorRows(p.frame, video_t, sound),
-                           wave=wave, **kw))
-
-    for flag, frame, resize in (("--first-frame", 0, images.stretch),
-                                ("--last-frame", frames - 1, images.cover)):
-        path = getattr(a, flag[2:].replace("-", "_"))
-        if path:
-            im = resize(images.read(os.path.expanduser(path), exe), w, h)
-            keyframes.append(im)
-            add(flag, path, frame, n=1, still=im)
-    for flag, path, frame in a.guides or ():
-        file = os.path.expanduser(path)
-        if flag == "--guide" and _still(file):
-            add(flag, path, frame, n=1,
-                still=images.cover(images.read(file, exe), w, h))
-            continue
-        if exe is None:
-            raise io.FfmpegError(
-                f"{flag} {path}: gmlx reads video and audio files through "
-                "ffmpeg, which is not on PATH: install ffmpeg (brew install "
-                "ffmpeg)")
-        at = frame + frames if frame < 0 else frame
-        if not 0 <= at < frames:
-            add(flag, path, frame, n=1)     # refuses a frame off the clip
-        wave = None
-        if flag == "--guide-audio" or not a.guide_no_audio:
-            wave = io.guide_audio(file, rate=SAMPLE_RATE, samples=samples,
-                                  ffmpeg=exe, hop=HOP,
-                                  optional=flag == "--guide")
-        if flag == "--guide-audio":
-            add(flag, path, frame, wave=wave)
-            continue
-        # 17 frames past those left from the frame tell a guide that does
-        # not fit from one that does.
-        most = frames - at + 17
-        add(flag, path, frame, n=io.guide_length(file, most=most, ffmpeg=exe),
-            most=most, wave=wave, video=file, ffmpeg=exe)
-    return keyframes, out
+    return run.read_anchors(fam, s, first=a.first_frame, last=a.last_frame,
+                            guides=a.guides or (),
+                            guide_no_audio=bool(a.guide_no_audio),
+                            ffmpeg=shutil.which("ffmpeg"))
 
 
 def _encode_anchors(todo: list, s: dict, vae: str, audio_vae: str) -> tuple:
@@ -670,7 +585,7 @@ def _generate(a) -> int:
     import numpy as np
 
     from gmlx.video import encoder as video_encoder
-    from gmlx.video import catalog, io, memfit, pipeline
+    from gmlx.video import catalog, io, memfit, pipeline, run
     from gmlx.video.loader import identify_dit
     from gmlx.video.registry import run_refusal
     from gmlx.video.vae.h3_audio import SAMPLE_RATE
@@ -794,51 +709,16 @@ def _generate(a) -> int:
         np.savez(os.path.expanduser(a.save_latent), video=np.array(xv),
                  audio=np.array(xa), seed=s["seed"], steps=s["steps"])
 
-    t0 = time.perf_counter()
-    avae = load_vae(os.path.expanduser(a.audio_vae), family="h3_audio",
-                    dtype=mx.float32)
     hf = _family()
-    rate = SAMPLE_RATE
-    # One length for the MP4 and the frames' audio.wav.
-    wave = io.fit_audio(np.array(avae.decode(xa)[0]), frames=s["frames"],
-                        fps=hf.FPS, rate=rate)
-    del avae
-    _release()
-    times["audio_s"] = round(time.perf_counter() - t0, 2)
-
-    t0 = time.perf_counter()
-    vae = load_vae(os.path.expanduser(preview or a.vae),
-                   family="h3_tiny" if preview else "h3", dtype=mx.float16)
-    if a.frames_dir is not None:
-        os.makedirs(os.path.expanduser(a.frames_dir), exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".gmlx-video-") as tmp:
-        wav = io.write_wav(os.path.join(tmp, "audio.wav"), wave, rate)
-        mux = None
-        if out is not None:
-            _makedirs_for(out)
-            mux = io.Mux(out, width=s["width"], height=s["height"],
-                         fps=hf.FPS, wav=wav, ffmpeg=ffmpeg)
-        try:
-            n = 0
-            for chunk in vae.decode_frames(xv):
-                frames = np.array(chunk[0])
-                if mux is not None:
-                    mux.write(frames)
-                if a.frames_dir is not None:
-                    n = io.write_frames(os.path.expanduser(a.frames_dir),
-                                        frames, n)
-                log(f"decoded {mux.frames if mux else n} of {s['frames']} "
-                    "frames")
-            if mux is not None:
-                mux.close()
-        except BaseException:
-            if mux is not None:
-                mux.abort()
-            raise
-        if a.frames_dir is not None:
-            io.write_wav(os.path.join(os.path.expanduser(a.frames_dir),
-                                      "audio.wav"), wave, rate)
-    times["decode_s"] = round(time.perf_counter() - t0, 2)
+    times.update(run.decode_and_mux(
+        xv, xa, frames=s["frames"], width=s["width"], height=s["height"],
+        fps=hf.FPS, rate=SAMPLE_RATE, out=out, ffmpeg=ffmpeg,
+        frames_dir=a.frames_dir, log=log,
+        audio_vae=lambda: load_vae(os.path.expanduser(a.audio_vae),
+                                   family="h3_audio", dtype=mx.float32),
+        video_vae=lambda: load_vae(os.path.expanduser(preview or a.vae),
+                                   family="h3_tiny" if preview else "h3",
+                                   dtype=mx.float16)))
     rec = {"output": out, "frames_dir": a.frames_dir, "prompt": prompt,
            "variant": vid.variant, **s, "times": times,
            "adapters": [[p, st] for p, st in adapters],

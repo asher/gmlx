@@ -113,6 +113,7 @@ def generate(pipe: VideoPipeline, features: mx.array, *, frames: int,
              table: str | None = None, sigmas: dict | None = None,
              on_step: Callable | None = None, anchors: tuple = (),
              spans: tuple = (), anchor_noise=None,
+             pacer: Callable | None = None,
              ) -> tuple[mx.array, mx.array]:
     """The video (1, C, T, H, W) and audio (1, C, 2, T) latents of a clip
     from encoder ``features`` (1, L, text dim), sampled under patch table
@@ -122,7 +123,9 @@ def generate(pipe: VideoPipeline, features: mx.array, *, frames: int,
     The text rows run once, under the same table. ``anchors`` are placed
     anchors, whose rows take their noise from ``seed`` or from
     ``anchor_noise`` (``anchors.augment``), and ``spans`` the vision spans
-    of the features' prompt."""
+    of the features' prompt. ``pacer`` runs at each pause point inside a
+    forward in place of ``api.sample``'s, which evaluates there; a
+    server's job paces with it beside chat decode and stops by it."""
     fam = pipe.video_family
     dim = int(pipe.dit.cfg.text_dim)
     if features.ndim != 3 or features.shape[0] != 1 \
@@ -159,8 +162,10 @@ def generate(pipe: VideoPipeline, features: mx.array, *, frames: int,
     try:
         text = model.caption(features)
         mx.eval(text)
+        paced = {} if pacer is None else {"pacer": pacer}
         return api.sample(model, xv, xa, text, lay, steps=steps,
                           shifts=shifts, sigmas=sigmas, on_step=on_step,
-                          cond_video=cond_video, cond_audio=cond_audio)
+                          cond_video=cond_video, cond_audio=cond_audio,
+                          **paced)
     finally:
         lora_install.restore(pipe, prev)

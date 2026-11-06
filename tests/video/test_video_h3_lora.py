@@ -232,6 +232,38 @@ def test_a_seed_is_one_draw_of_the_start_noise():
     assert not np.array_equal(got[0], other[0])
 
 
+def test_a_pacer_runs_inside_each_forward_and_can_stop_the_run():
+    """A job's pacer reaches the pause points inside the forwards in
+    place of the default, which evaluates there, so the latents are the
+    default's; one that raises ends the run in its first forward."""
+    pipe = _pipe(_params())
+    feats = mx.zeros((1, 8, TINY["text_dim"]))
+    kw = dict(frames=5, width=64, height=64, steps=2, shifts=hf.SHIFTS,
+              seed=7)
+    seen = []
+
+    def pacer(arrays):
+        seen.append(len(arrays))
+        mx.eval(*arrays)
+
+    class Stopped(Exception):
+        pass
+
+    def stop(arrays):
+        raise Stopped
+
+    steps = []
+    with mx.stream(mx.cpu):
+        want = pipeline.generate(pipe, feats, **kw)
+        got = pipeline.generate(pipe, feats, pacer=pacer, **kw)
+        with pytest.raises(Stopped):
+            pipeline.generate(pipe, feats, pacer=stop,
+                              on_step=lambda i, n: steps.append(i), **kw)
+    assert len(seen) >= 2 * TINY["num_layers"]
+    assert all(np.array_equal(g, w) for g, w in zip(got, want))
+    assert steps == []
+
+
 @pytest.mark.parametrize("stem, dropped", [
     ("lora_unet_blocks_1_mlp_fc2", False),
     ("diffusion_model.blocks.1.mlp.fc2", False),
