@@ -78,7 +78,7 @@ def read_anchors(fam, s: dict, *, first: str | None = None,
     keyframes: list = []
     out: list = []
 
-    def add(flag, path, frame, *, n=0, wave=None, most=None, label, **kw):
+    def placed(frame, n, most, label, audio):
         try:
             if n == most:
                 # Read to its bound, the video holds more than fits.
@@ -86,11 +86,14 @@ def read_anchors(fam, s: dict, *, first: str | None = None,
                     f"a guide clip of {anchors.guide_frames(n)} or more "
                     f"frames at frame {frame} does not fit in the clip's "
                     f"{frames} frames")
-            p = anchors.place(frame, frames, audio_t,
-                              fam.timeline.frame_rescale, video_frames=n,
-                              audio=wave is not None)
+            return anchors.place(frame, frames, audio_t,
+                                 fam.timeline.frame_rescale, video_frames=n,
+                                 audio=audio)
         except ValueError as e:
             raise ValueError(f"{label}: {e}") from None
+
+    def add(flag, path, frame, *, n=0, wave=None, most=None, label, **kw):
+        p = placed(frame, n, most, label, wave is not None)
         video_t = (0 if not p.video_frames else 1 if p.video_frames == 1
                    else fam.latent_shapes(p.video_frames, w, h)[0][2])
         sound = (0 if p.audio_t is None
@@ -128,6 +131,14 @@ def read_anchors(fam, s: dict, *, first: str | None = None,
                 raise ValueError(f"{label}: its frames are {gw}x{gh}, over "
                                  f"the {max_pixels} pixels the server "
                                  "decodes")
+        n = most = None
+        if flag == "--guide":
+            # 17 frames past those left from the frame tell a guide that
+            # does not fit from one that does. One that does not fit is
+            # refused before its sound is decoded.
+            most = frames - at + 17
+            n = io.guide_length(file, most=most, ffmpeg=exe)
+            placed(frame, n, most, label, False)
         wave = None
         if flag == "--guide-audio" or not guide_no_audio:
             wave = io.guide_audio(file, rate=SAMPLE_RATE, samples=samples,
@@ -136,11 +147,8 @@ def read_anchors(fam, s: dict, *, first: str | None = None,
         if flag == "--guide-audio":
             add(flag, path, frame, wave=wave, label=label)
             continue
-        # 17 frames past those left from the frame tell a guide that does
-        # not fit from one that does.
-        most = frames - at + 17
-        add(flag, path, frame, n=io.guide_length(file, most=most, ffmpeg=exe),
-            most=most, wave=wave, video=file, ffmpeg=exe, label=label)
+        add(flag, path, frame, n=n, most=most, wave=wave, video=file,
+            ffmpeg=exe, label=label)
     return keyframes, out
 
 

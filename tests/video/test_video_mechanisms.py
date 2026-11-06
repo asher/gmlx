@@ -246,6 +246,26 @@ def test_an_anchor_is_placed_as_comfyui_places_it():
         _place(0)
 
 
+def test_a_guide_that_does_not_fit_is_refused_before_its_sound_is_read(
+        monkeypatch, tmp_path):
+    """The guide's frames are counted and refused before ffmpeg decodes
+    its whole audio stream."""
+    from gmlx.video import io, run
+
+    def no_audio(*a, **k):
+        raise AssertionError("the guide's sound was read")
+
+    monkeypatch.setattr(io, "guide_length", lambda path, most, ffmpeg: 30)
+    monkeypatch.setattr(io, "guide_audio", no_audio)
+    clip = tmp_path / "clip.mov"
+    clip.write_bytes(b"no image")
+    s = {"frames": 39, "width": 64, "height": 64}
+    with pytest.raises(ValueError, match="a 22-frame guide clip at frame 20 "
+                                         "does not fit in the clip's 39"):
+        run.read_anchors(hf.FAMILY, s, guides=[("--guide", str(clip), 20)],
+                         ffmpeg="ffmpeg")
+
+
 def test_placed_anchors_give_their_layout_rows():
     got = anchors.layout_rows((
         anchors.Anchor(0, video=mx.zeros((1, 24, 1, 4, 4))),
