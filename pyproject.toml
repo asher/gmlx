@@ -243,7 +243,7 @@ include = [
     "gmlx/gen/prefill_decay.py",
     "gmlx/gen/prefill_tail.py",
     "gmlx/gen/thinking_budget.py",
-    "gmlx/image/families/qwen_image21/edit.py",
+    "gmlx/image/vision_tap.py",
     "gmlx/load/hadamard_modules.py",
     "gmlx/load/loader.py",
     "gmlx/load/mlx_checkpoint.py",
