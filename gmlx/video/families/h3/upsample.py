@@ -60,8 +60,10 @@ def system(guide: str, *, frames: int | None, fps: int,
     if frames is None and pictures:
         raise ValueError(f"a {name} prompt names the clip's length")
     length = None if frames is None else seconds(frames, fps)
-    clip = (f"a {name} video" if length is None
-            else f"a {name} video of {length} seconds")
+    # I2VA, FL2VA and L2VA are read with a vowel sound first.
+    clip = f"{'an' if pictures else 'a'} {name} video"
+    if length is not None:
+        clip += f" of {length} seconds"
     unseen = ""
     if pictures:
         clip += f", where {pictures}"

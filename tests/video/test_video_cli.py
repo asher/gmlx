@@ -1055,7 +1055,7 @@ def anchored(stubbed, monkeypatch, tmp_path):
         return Handle()
 
     def keyframe_encode(handle, prompt, images):
-        seen["keyframes"] = images
+        seen["keyframes"], seen["prompt"] = images, prompt
         return mx.zeros((1, 9, 8)), ((0, 4),)
 
     def load_vae(path, family, dtype):
@@ -1277,3 +1277,27 @@ def test_no_upsample_or_no_guide_keeps_the_typed_prompt_or_says_why(
     assert stubbed("--no-upsample", "--frames-dir", out) == 0
     assert stubbed("--upsampler", "chat", "--frames-dir", out) == 2
     assert "gmlx video pull h3` fetches it" in capsys.readouterr().err
+
+
+def test_a_keyframe_run_asks_the_upsampler_for_the_guides_keyframe_task(
+        anchored, monkeypatch, tmp_path):
+    """A first and a last frame make the clip the guide's FL2VA task, of
+    the clip's length; the upsampler sees no picture, and its caption
+    joins the keyframes in the encode."""
+    from gmlx.commands import image as image_cmd
+
+    guide = tmp_path / "guide.md"
+    guide.write_text("the guide")
+    systems = []
+    monkeypatch.setattr(image_cmd, "_upsampler_path", lambda a: "/up.gguf")
+    monkeypatch.setattr(image_cmd, "run_upsampler", lambda *a, system=None,
+                        **k: (systems.append(system), "the caption")[1])
+    first = _png(tmp_path / "first.png", 64, 48, seed=1)
+    last = _png(tmp_path / "last.png", 64, 48, seed=2)
+    assert anchored("--first-frame", first, "--last-frame", last,
+                    "--upsampler", "chat", "--upsample-prompt", str(guide),
+                    "--json") == 0
+    assert "an FL2VA video of 1.58 seconds, where its first and last" in (
+        systems[0])
+    assert "You see no picture" in systems[0]
+    assert anchored.seen["prompt"] == "the caption"

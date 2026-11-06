@@ -35,7 +35,8 @@ def test_the_system_prompt_names_the_task_and_the_clips_length(
     """124 frames at 24 fps end at 5.12 s, the S.SS a keyframe task's
     instruction line holds; the guide follows gmlx's lines whole."""
     text = hf.FAMILY.upsample_system(GUIDE, 124, first, last)
-    assert f"a {task} video of {length} seconds" in text
+    article = "a" if task == "T2VA" else "an"
+    assert f"{article} {task} video of {length} seconds" in text
     assert text.endswith(f"The guide:\n\n{GUIDE}\n")
     if task == "T2VA":
         assert '"instruction" is empty, since T2VA has none' in text
