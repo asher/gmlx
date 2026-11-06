@@ -529,7 +529,9 @@ def run_clip(job: Job, store: VideoJobs) -> None:
     while True:
         try:
             caption = revise(p["model"], p["prompt"], p.get("upsampling"),
-                             False, stop=job.stop, frames=s["frames"],
+                             False, stop=job.stop,
+                             resolve=serving.resolve_video_request,
+                             frames=s["frames"],
                              first=bool(p.get("first_frame")),
                              last=bool(p.get("last_frame")))
             break

@@ -422,6 +422,50 @@ def test_a_chat_model_in_use_holds_the_rewrite_to_its_release(
     assert calls[:2] == ["acquire", "_encode_part"]
 
 
+def test_a_jobs_prompt_is_rewritten_through_its_video_entry(
+        tmp_path, monkeypatch):
+    """The rewrite resolves the job's model among the video models, not
+    the image models, and its system prompt names the clip's length."""
+    from gmlx.serve import image_steps, image_upsample
+    from gmlx.video.families.h3 import family as hf
+
+    revise = image_upsample.revise
+    calls = _run_clip_stubs(monkeypatch, [])
+    monkeypatch.setattr(image_upsample, "revise", revise)
+    guide = tmp_path / "guide.md"
+    guide.write_text("the guide")
+    spec = SimpleNamespace(id="h3", path="/abs/h3.gguf", variant=None,
+                           audio_vae="/abs/a.safetensors", upsampler="chat",
+                           upsample=True, upsample_prompt=str(guide))
+    monkeypatch.setattr(serving, "resolve_video_request",
+                        lambda m: (spec.path, spec))
+
+    def no_image_model(m):
+        raise KeyError(m)
+    monkeypatch.setattr(serving, "resolve_image_request", no_image_model)
+    monkeypatch.setattr(image_steps, "family_of",
+                        lambda s: (hf.FAMILY, "fl2va"))
+    monkeypatch.setattr(image_upsample, "_upsampler_identity",
+                        lambda up: (up,))
+    image_upsample.CAPTIONS.clear()
+    systems = []
+    reply = json.dumps({"instruction": "",
+                        "integrated_multimodal_description": "[Shot 1] A cat.",
+                        "overall_soundscape": "Purring.",
+                        "non_diegetic_music": "N/A"})
+    monkeypatch.setattr(image_upsample, "_chat", lambda up, req, stop: (
+        systems.append(req.system), reply)[1])
+    store, clock, driver = _store(tmp_path)
+    job = _submit(store)
+    job.params = {"model": "h3", "prompt": "a cat", "upsampling": None,
+                  "settings": {"frames": 22}, "ffmpeg": "ffmpeg"}
+    vj.run_clip(job, store)
+    assert job.record["gmlx"]["revised_prompt"].startswith(
+        "integrated_multimodal_description: [Shot 1] A cat.")
+    assert "a T2VA video of 0.92 seconds" in systems[0]
+    assert calls[:2] == ["acquire", "_encode_part"]
+
+
 # The routes.
 
 def _png(w=32, h=32) -> bytes:
