@@ -775,14 +775,14 @@ def _install_audio_task_route(stt_model: str | None, *, path: str, task: str,
         filename = getattr(upload, "filename", "") or ""
         try:
             native = native_stt.target(str(form.get("model") or ""), stt_model)
-            if native is not None:
-                content, media_type = await native_stt.answer(
-                    request, form, native, audio_bytes, filename, task)
+            answer = (None if native is None else await native_stt.answer(
+                request, form, native, audio_bytes, filename, task))
         except stt.STTRequestError as exc:
             return _aux_error(exc.status_code, str(exc))
         except Exception as exc:
             return _aux_server_error(path, stt_model, started, exc)
-        if native is not None:
+        if answer is not None:
+            content, media_type = answer
             _log_aux_request(path, native, started, file=filename or None,
                              in_bytes=len(audio_bytes),
                              fmt=(str(form.get("response_format") or "") or None))

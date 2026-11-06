@@ -24,6 +24,7 @@ import math
 import os
 import re
 import tempfile
+from collections.abc import Callable
 
 import numpy as np
 
@@ -343,7 +344,7 @@ def _body(response) -> dict:
             raise STTRequestError(response.status_code,
                                   str(msg or "the transcription failed"))
         return body if isinstance(body, dict) else {}
-    dump = getattr(response, "model_dump", None)
+    dump: Callable[[], dict] | None = getattr(response, "model_dump", None)
     return dump() if callable(dump) else dict(response or {})
 
 

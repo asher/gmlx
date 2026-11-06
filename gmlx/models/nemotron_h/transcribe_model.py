@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import functools
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -165,14 +165,14 @@ class PromptRows:
     def _build(self, n: int) -> mx.array:
         ids = self._ids[:, self._start:self._start + n]
         embeds = self._embed(ids)
-        k = int(mx.sum(ids == self._tok).item())
+        k = int(mx.sum(ids == self._tok))
         if k:
             embeds = _scatter(self._tok, self._audio_rows(k), embeds, ids)
         return embeds
 
     def _advance(self, n: int) -> None:
         ids = self._ids[:, self._start:self._start + n]
-        self._audio += int(mx.sum(ids == self._tok).item())
+        self._audio += int(mx.sum(ids == self._tok))
         self._start += n
         while self._parts and (self._dropped + int(self._parts[0].shape[0])
                                <= self._audio):
@@ -214,13 +214,15 @@ class Model(nn.Module):
         self.audio_tower = SpeechEncoder(
             SpeechConfig.from_gguf(config.audio_config.fields))
         self.language_model = LanguageModel(config.text_config)
+        # Not ModelArgs fields: their readers take them with getattr.
+        text_config: Any = self.language_model.config
         # The APC guard reads the media ids off the text config: a reused
         # prefix then holds every audio slot of the prompt or none.
-        self.language_model.config.media_token_ids = list(config.media_token_ids)
+        text_config.media_token_ids = list(config.media_token_ids)
         # The serve engine prices a prompt batch on the language model:
         # give it the audio token, the encoder output's size and the context.
         lm = self.language_model
-        lm.config.audio_token_id = int(config.audio_token_id)
+        text_config.audio_token_id = int(config.audio_token_id)
         lm.context_tokens = CONTEXT_TOKENS
         lm.audio_held_bytes = functools.partial(
             _audio_held_bytes, self.audio_tower.cfg.proj_dim)
@@ -342,7 +344,9 @@ class Model(nn.Module):
             raise ValueError("Nemotron 3.5 Transcribe takes no image input")
         feats = kwargs.get("input_features")
         clips = kwargs.get("audio_clips")
-        n_slots = (int(mx.sum(input_ids == self.config.audio_token_id).item())
+        if input_ids is None:
+            raise ValueError("Nemotron 3.5 Transcribe embeds token ids")
+        n_slots = (int(mx.sum(input_ids == self.config.audio_token_id))
                    if feats is not None or clips else 0)
         embed = self.language_model.backbone.embeddings
         if kwargs.get("prompt_rows"):
