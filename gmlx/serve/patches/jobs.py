@@ -34,8 +34,10 @@ class JobBook:
                 self.timed(seconds)
 
     def timed(self, seconds: float) -> None:
-        """Add a job's seconds to the recent ones; the caller holds the
-        lock."""
+        """Add a job's seconds to the recent ones. Callers serialize:
+        ``leave`` holds the book's lock and VideoJobs its own. The list is
+        replaced, not changed in place, so ``typical`` reads the old one or
+        the new one."""
         self.durations = (self.durations + [float(seconds)])[-RECENT:]
 
     def count(self, key: str, n: int = 1) -> None:
