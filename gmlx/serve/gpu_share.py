@@ -11,9 +11,11 @@ and ``CHAT.end``. While chat is active, the image job's pacer evaluates
 the forward at each point between DiT blocks, so the GPU holds at most
 one block of image work, and then waits while chat steps run, for a time
 in proportion to the image work since the last pause. For an image job,
-a chat share of 0.5 gives chat as much GPU time as the image. The pacer
-always waits for at least one chat step, which is longer than a video
-clip's pause, so beside a clip chat gets more than its share, as
+a chat share of 0.5 gives chat as much GPU time as the image. Each pause
+waits through chat steps until one ends past its budget, and through one
+at least, so a wait runs up to one chat step over the budget. A video
+clip's pauses are short, so beside a clip that step is a large part of
+each wait, and at a share of 0 it is the whole wait, as
 docs/internals/image-serving.md#video-jobs describes. With no chat
 active, it does nothing.
 

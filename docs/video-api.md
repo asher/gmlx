@@ -112,11 +112,13 @@ holds the upsampler's caption.
 
 Jobs run one at a time, in order, on a thread of their own, so a clip
 never holds up the image routes. Chat replies keep streaming while a clip
-runs, and chat takes at least one step at each of the clip's pause
-points. Beside a chat reply that streams without a break, a clip at the
-default share runs about 2.8 times slower than alone, and at
-[`GMLX_IMAGE_CHAT_SHARE`](env-vars.md#server) `0` about 1.6 times
-slower, as [Video jobs](internals/image-serving.md#video-jobs) describes.
+runs. Each of the clip's pauses for chat waits through chat steps until
+one ends past the share's budget, and through one step at least, and a
+768x768 clip pauses about 250 times a step. Beside a chat reply that
+streams without a break, its steps take about 2.7 times as long as alone
+at the default share, and about 1.6 times at
+[`GMLX_IMAGE_CHAT_SHARE`](env-vars.md#server) `0`, as
+[Video jobs](internals/image-serving.md#video-jobs) describes.
 When the memory a job needs is held by models in use, the job stays
 `in_progress` with `gmlx.phase` `waiting for memory`, and tries again
 once they finish. A failed job has `error` with its `code`, `message` and
@@ -135,10 +137,13 @@ The jobs, their inputs and their MP4s live under
 by default, and then read as 404. Past
 [`video.store_max_bytes`](config.md#video-jobs) the oldest MP4s go first,
 and their jobs with them. The files of a job's form go to the store as
-they arrive, and so do the images of a JSON body's keyframes. A job whose
-files do not fit in the room left gets 413. A server that restarts fails
-the jobs it had queued or running with `server_restarted` and status 500,
-and keeps the ones that ended.
+they arrive, and so do the images of a JSON body's keyframes. A form
+with a Content-Length takes its room before its first byte, and one sent
+with no length takes it 64 MiB at a time as its bytes come. A job whose
+files do not fit in the room left gets 413, and the message says how
+much of the store the uploads arriving now hold. A server that restarts
+fails the jobs it had queued or running with `server_restarted` and
+status 500, and keeps the ones that ended.
 
 ## Errors
 
@@ -150,7 +155,8 @@ and keeps the ones that ended.
 | The entry's file is no video DiT, its chip, an adapter or its defaults are refused, or its default clip does not fit the working budget | 400 `video_model_mismatch` |
 | `seconds` past 15, or a `size` that is no multiple of 32 | 400 naming the field |
 | A clip too large for the memory left beside the pinned models | 413 with the plan's phases and what to change |
-| A JSON body larger than the memory free | 413 naming both figures, before the body is read |
+| A JSON body that its read and parse cannot hold in the memory free | 413 naming both figures, before the body is read |
+| A form's text fields past the memory free | 413 naming the memory free, once the text read passes it |
 | A form's files larger than the room left in the job store | 413 naming both figures, before the files are read |
 | A JSON keyframe larger than the room left in the job store | 413 naming the keyframe and both figures |
 | A keyframe or guide image over 64 Mi pixels | 400 naming the field |

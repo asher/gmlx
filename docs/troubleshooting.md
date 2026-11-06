@@ -536,7 +536,9 @@ These are the answers and job errors of
   ... of room left` (413) for a JSON body's keyframe: the job store holds
   [`video.store_max_bytes`](config.md#video-jobs) of clips and inputs.
   Delete finished jobs you have downloaded, send smaller files, or raise
-  the setting.
+  the setting. With `..., and ... of it is held by uploads arriving now`,
+  other jobs' files are arriving in the store. They stay as those jobs'
+  inputs until the jobs end, so wait for one to end or delete one.
 - `a ... clip of ... frames on ... does not fit in memory` (413): the clip
   does not fit beside the pinned models even with every other model
   unloaded. The message lists the memory of each phase and what to

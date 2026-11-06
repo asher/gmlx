@@ -59,13 +59,15 @@ when its whole encode does not fit, each part priced before it is read.
 Chat replies keep streaming while a clip runs. The sampler pauses for
 chat after each attention and each MLP chunk of a step, and the decode
 after each piece it decodes, about 250 times in a step of a 768x768
-clip. Chat takes at least one step at each of these pause points, so a
-clip gives chat more than its share. Beside a chat reply that streams
-without a break, a 768x768 clip at the default share runs about 2.8 times
-slower than alone, and chat gets about 60% of the GPU. At
-[`GMLX_IMAGE_CHAT_SHARE`](../env-vars.md#server) `0`, chat still takes
-its one step at each pause, and the clip runs about 1.6 times slower than
-alone, with chat at about 40% of the GPU.
+clip. Each pause waits through chat steps until one ends past the
+share's budget, and through one step at least. At the default share the
+budget sets the wait, and the wait runs on to the end of the chat step
+in flight, about 29 ms a pause against about 24 ms of clip work. At
+[`GMLX_IMAGE_CHAT_SHARE`](../env-vars.md#server) `0` the one step is the
+whole wait, about 9 ms. Beside a chat reply that streams without a
+break, a 768x768 clip's steps take about 2.7 times as long as alone at
+the default share, with the pauses 55% of the denoise, and about 1.6
+times at `0`, with the pauses 29%.
 
 The request that queues a job plans its clip from the model's file
 headers against the memory the pinned models leave, and books nothing.
