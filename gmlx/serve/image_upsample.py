@@ -1,7 +1,7 @@
-"""Prompt upsampling on the image routes.
+"""Prompt upsampling on the image and video routes.
 
-``revise`` gives the caption the image entry's upsampler writes for a
-typed prompt, or None when the prompt runs as typed. The caption comes
+``revise`` gives the caption the image or video entry's upsampler writes
+for a typed prompt, or None when the prompt runs as typed. The caption comes
 from the server's own chat generation on the upsampler, a ``models:``
 entry acquired from the residency pool as a chat request acquires it.
 A bounded table maps (upsampler, the family's turn, the system prompt
@@ -60,13 +60,15 @@ _WARNED: set = set()
 
 def upsampler_for(spec, family, requested: bool | None,
                   has_refs: bool) -> str | None:
-    """The ``models:`` id that rewrites a prompt of the image entry
-    ``spec``, or None to run it as typed. ``requested`` is the request's
-    ``prompt_upsampling``, None when it gives none. Raises
+    """The ``models:`` id that rewrites a prompt of the image or video
+    entry ``spec``, or None to run it as typed. ``requested`` is the
+    request's ``prompt_upsampling``, None when it gives none. Raises
     ``ImageRequestError`` for a request that asks for a rewrite this
     entry cannot run."""
     from .image_service import _bad
+    from .image_steps import is_video
 
+    block = "video_models" if is_video(spec) else "image_models"
     if has_refs:
         return None
     if family.upsample is None:
@@ -81,14 +83,14 @@ def upsampler_for(spec, family, requested: bool | None,
     if upsampler is None:
         if requested:
             raise _bad(f"prompt_upsampling needs an upsampler: set "
-                       f"upsampler to a models: id on the image_models entry "
+                       f"upsampler to a models: id on the {block} entry "
                        f"{spec.id!r}", "prompt_upsampling")
         if family.upsample.expected and spec.id not in _WARNED and \
                 getattr(spec, "upsample", True):
             _WARNED.add(spec.id)
-            _log.warning("image model %r: %s expects its prompts upsampled; "
-                         "set upsampler on its image_models entry to the "
-                         "models: id of a %s GGUF", spec.id, family.title,
+            _log.warning("model %r: %s expects its prompts upsampled; set "
+                         "upsampler on its %s entry to the models: id of a "
+                         "%s GGUF", spec.id, family.title, block,
                          family.upsample.suggested)
         return None
     if requested is None and not getattr(spec, "upsample", True):
@@ -97,14 +99,17 @@ def upsampler_for(spec, family, requested: bool | None,
 
 
 def revise(model_field, prompt: str, requested: bool | None = None,
-           has_refs: bool = False, *, stop=None,
-           resolve=None) -> str | None:
-    """The caption of ``prompt`` for the image model ``model_field``, or
-    None when it runs as typed. ``resolve(model_field)`` gives the
-    entry's ``(path, spec)``, the server's image models by default. A
-    model field that does not resolve, or a file that is no image model,
-    returns None, so the image model's own acquire refuses it. ``stop``
-    is a threading.Event that ends the rewrite between tokens."""
+           has_refs: bool = False, *, stop=None, resolve=None,
+           frames: int | None = None, first: bool = False,
+           last: bool = False) -> str | None:
+    """The caption of ``prompt`` for the image or video model
+    ``model_field``, or None when it runs as typed. ``resolve(model_field)``
+    gives the entry's ``(path, spec)``, the server's image models by
+    default. A model field that does not resolve, or a file that is no
+    image or video model, returns None, so the model's own acquire refuses
+    it. ``stop`` is a threading.Event that ends the rewrite between tokens.
+    A video family's system prompt names the clip's ``frames``, when
+    known, and its keyframes, ``first`` and ``last``."""
     from gmlx.image.upsample import (UpsampleError, cache_key, system_prompt,
                                      upsample)
 
@@ -123,7 +128,14 @@ def revise(model_field, prompt: str, requested: bool | None = None,
         return None
     t0 = time.monotonic()
     try:
-        system = system_prompt(family, getattr(spec, "upsample_prompt", None))
+        path = getattr(spec, "upsample_prompt", None)
+        if getattr(family, "upsample_system", None) is not None:
+            from gmlx.video.run import upsample_system
+
+            system = upsample_system(family, path, frames=frames,
+                                     first=first, last=last)
+        else:
+            system = system_prompt(family, path)
         key = cache_key(_upsampler_identity(up), family, prompt, system)
         caption = CAPTIONS.get(key)
         if caption is not None:
@@ -134,7 +146,8 @@ def revise(model_field, prompt: str, requested: bool | None = None,
     except UpsampleError as e:
         raise ImageRequestError(500, str(e), err_type="server_error") from e
     CAPTIONS.put(key, caption)
-    _log.info("[image] prompt upsampled by %s in %.1f s, %d words", up,
+    tag = "video" if getattr(family, "upsample_system", None) else "image"
+    _log.info("[%s] prompt upsampled by %s in %.1f s, %d words", tag, up,
               time.monotonic() - t0, len(caption.split()))
     return caption
 

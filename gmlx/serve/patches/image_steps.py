@@ -373,16 +373,6 @@ def _video(served) -> bool:
     return isinstance(served, ServedVideo)
 
 
-def _names_video(model) -> bool:
-    """Whether a model field names a configured video model."""
-    from ..image_steps import is_video
-
-    try:
-        return is_video(SETTINGS.host.resolve(model)[1])
-    except Exception:  # noqa: BLE001 - the acquire refuses what fails here
-        return False
-
-
 def _image_only(served, what: str) -> None:
     """Refuse a route of the image families on a video model."""
     from ..image_steps import StepError
@@ -1453,15 +1443,9 @@ async def encode(request: Request):
         raise StepError(400, "prompt_upsampling is true or false")
     revise = getattr(SETTINGS.host, "revise", None)
     revised = None
-    if _names_video(fields.get("model")):
-        # A video family has no upsampler.
-        if requested:
-            sid = SETTINGS.host.resolve(fields.get("model"))[1].id
-            raise StepError(400, f"video model {sid!r} takes no prompt "
-                            "upsampling; send the request without "
-                            "prompt_upsampling")
-        revise = None
     if revise is not None:
+        # A video entry's rewrite knows no clip length here, and a prompt
+        # with keyframes runs as typed, as one with reference images.
         try:
             revised = await asyncio.to_thread(
                 revise, fields.get("model"), text, requested, bool(images))
@@ -1480,12 +1464,13 @@ async def encode(request: Request):
             if why:
                 raise StepError(400, why)
             sizes = [(int(i.shape[1]), int(i.shape[0])) for i in frames]
+            text = revised or text
             await asyncio.to_thread(_check_encode, hold, served, text, sizes)
             feats, spans = await _on_worker(_settled(hold, encode_prompt),
                                             served, text, frames, on=served)
             got = {"cond": feats, "refs": [], "image_slots": [],
                    "spans": spans}
-            return _held_encode(got, None)
+            return _held_encode(got, revised)
         borrow = None
         if served.spec.encoder_model is not None:
             from .images import _borrow_for
@@ -1537,6 +1522,8 @@ def _held_encode(got: dict, revised):
                   "num_tokens": int(got["cond"].shape[1])}
     if revised:
         fields_out["revised_prompt"] = revised
+    if "cond_typed" in hashes:
+        # The typed prompt's cond, for references added after the encode.
         fields_out["cond_typed"] = hashes["cond_typed"]
     if got.get("spans"):
         fields_out["spans"] = [list(sp) for sp in got["spans"]]

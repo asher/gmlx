@@ -746,8 +746,8 @@ def test_a_step_with_anchors_counts_their_rows(host):
      "is the clip's canvas, in multiples of 32"),
     ("fasth3", "MiniMax-H3 fasth3 runs text to video only, and this request "
      "has 2 anchors; run it without keyframes, guides or audio anchors"),
-    ("prompt_upsampling", "video model 'h3' takes no prompt upsampling; "
-     "send the request without prompt_upsampling"),
+    ("prompt_upsampling", "prompt_upsampling needs an upsampler: set "
+     "upsampler to a models: id on the video_models entry 'h3'"),
 ])
 def test_the_h3_encode_refuses_what_it_does_not_run_by_name(
         host, monkeypatch, ask, want):
@@ -763,6 +763,9 @@ def test_the_h3_encode_refuses_what_it_does_not_run_by_name(
         images.append(images[0])
         monkeypatch.setattr(host.served, "plan", dataclasses.replace(
             host.served.plan, variant=hf.FASTH3))
+    if ask == "prompt_upsampling":
+        monkeypatch.setattr(steps, "family_of", lambda spec: (hf.FAMILY,
+                                                              "fl2va"))
     with pytest.raises(StepsClientError) as e:
         if ask == "prompt_upsampling":
             c.container("encode", {}, {"model": "h3", "text": "a cat",
@@ -2299,3 +2302,50 @@ def test_a_tensor_body_with_no_length_stops_at_the_limit():
     assert e.value.status == 413 and str(e.value) == (
         "the body is over the limit of 65536 bytes")
     assert len(pulls) == 17
+
+
+def test_the_encode_of_an_entry_with_an_upsampler_encodes_its_caption(
+        monkeypatch, request, tmp_path):
+    """The pack's encode rewrites the typed prompt with the entry's
+    upsampler, under the guide the entry names, as a T2VA prompt of no
+    known length, and answers the caption as revised_prompt; the encoder
+    reads the caption. A prompt with keyframes runs as typed."""
+    import json
+
+    from gmlx.serve import image_upsample
+    from gmlx.video import encoder as video_encoder
+
+    pipe, weights = _own_pipe()
+    served = _served(pipe)
+    guide = tmp_path / "guide.md"
+    guide.write_text("the guide")
+    served.spec.upsampler = "chat"
+    served.spec.upsample_prompt = str(guide)
+    _mount(_Host(served), request)
+    _encoder_by_text(monkeypatch, weights)
+    load = video_encoder.load_encoder
+    texts = []
+
+    def spy(fam, path, log=None):
+        enc = load(fam, path, log)
+        return SimpleNamespace(encode=lambda text: (
+            texts.append(text), enc.encode(text))[1], release=enc.release)
+    monkeypatch.setattr(video_encoder, "load_encoder", spy)
+    monkeypatch.setattr(steps, "family_of", lambda s: (hf.FAMILY, "fl2va"))
+    monkeypatch.setattr(image_upsample, "_upsampler_identity",
+                        lambda up: (up,))
+    image_upsample.CAPTIONS.clear()
+    systems = []
+    reply = json.dumps({"instruction": "",
+                        "integrated_multimodal_description": "[Shot 1] A fox.",
+                        "overall_soundscape": "Wind.",
+                        "non_diegetic_music": "N/A"})
+    monkeypatch.setattr(image_upsample, "_chat", lambda up, req, stop: (
+        systems.append(req.system), reply)[1])
+    caption = ("integrated_multimodal_description: [Shot 1] A fox.\n\n"
+               "overall_soundscape: Wind.\n\nnon_diegetic_music: N/A")
+    fields, _ = _client().encode("h3", "a fox")
+    assert fields["revised_prompt"] == caption and texts == [caption]
+    assert "cond_typed" not in fields
+    assert "a T2VA video. " in systems[0]
+    assert systems[0].endswith("The guide:\n\nthe guide\n")
