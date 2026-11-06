@@ -191,7 +191,9 @@ def _waiting_depth(rg) -> int:
     pending = getattr(gen, "_unprocessed_sequences", None)
     if pending is not None:
         depth += len(pending)
-    return depth
+    # A request counts from the start of its audio encode.
+    from gmlx.serve.patches.native_audio import encoding_requests
+    return depth + encoding_requests(rg)
 
 
 def _retry_after_s(metrics, depth: int) -> int:

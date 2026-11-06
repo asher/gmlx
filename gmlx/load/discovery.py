@@ -120,6 +120,9 @@ class ClassifiedGguf:
     # On a ``dflash`` drafter, the container its tensors name
     # (arch_table.dflash_container), or None when unknown.
     container: str | None = None
+    # The NeMo checkpoint id of a Nemotron speech model or its encoder
+    # (``nemo_speech.checkpoint_id``), which pairs the two.
+    speech_checkpoint: str | None = None
 
 
 # Classification
@@ -221,6 +224,12 @@ def _classify_meta(
     quant = quant_tag(basename)
     ap = os.path.abspath(path)
 
+    speech_checkpoint = read_string(meta, "nemo_speech.checkpoint_id")
+    if arch in _arch_table.NATIVE_ASR_ENCODER_ARCHES:
+        return ClassifiedGguf(ap, "mmproj", arch, False, quant, False,
+                              n_embd=read_int(meta, "pee.fusion.proj_dim"),
+                              declared=declared_base_ids(meta),
+                              speech_checkpoint=speech_checkpoint)
     if arch == "clip" or basename.lower().startswith("mmproj"):
         # The projection width is the text model's hidden size in a file
         # that llama.cpp's mmproj converter wrote, which sets general.type.
@@ -259,7 +268,8 @@ def _classify_meta(
                           moe=bool(experts and experts > 0),
                           name=read_string(meta, "general.name"),
                           n_embd=_hidden_size(meta, arch),
-                          declared=declared_base_ids(meta))
+                          declared=declared_base_ids(meta),
+                          speech_checkpoint=speech_checkpoint)
 
 
 def _image_dit_arch(arch: str | None) -> bool:
@@ -421,13 +431,14 @@ def _read_header(path: str) -> tuple:
     return c, read_string(kv, "general.name"), _read_sampling(kv)
 
 
+_HEADER_CACHE_V = 5
 _HEADER_META_KEYS = ("arch", "name", "kind", "mtp", "sampling",
-                     "drafter_kind", "declared")
+                     "drafter_kind", "declared", "speech_checkpoint")
 
 
 def header_meta(path: str) -> dict | None:
     """``{"arch", "name", "kind", "mtp", "sampling", "drafter_kind",
-    "declared"}`` from a GGUF's header, or ``None`` when the file is missing/unreadable. Unlike :func:`classify_gguf`
+    "declared", "speech_checkpoint"}`` from a GGUF's header, or ``None`` when the file is missing/unreadable. Unlike :func:`classify_gguf`
     this is **silent** on failure - registration over a config that references a
     not-yet-pulled file must not spam stderr. A sharded model's configured path
     is its first shard, which carries the full KV block, so a plain read of the
@@ -441,9 +452,10 @@ def header_meta(path: str) -> dict | None:
         return None                              # not memoized: it may appear later
     disk = _load_header_cache()
     ent = disk.get(ap)
-    # v3 adds the declared base ids; v4 the speech companion kind.
+    # v3 adds the declared base ids; v4 the speech companion kind; v5 the
+    # speech encoder kind and the NeMo checkpoint id.
     if (isinstance(ent, dict) and ent.get("mtime") == int(st.st_mtime)
-            and ent.get("size") == st.st_size and ent.get("v") == 4):
+            and ent.get("size") == st.st_size and ent.get("v") == _HEADER_CACHE_V):
         meta = {k: ent.get(k) for k in _HEADER_META_KEYS}
         _HEADER_MEMO[ap] = meta
         return meta
@@ -454,9 +466,11 @@ def header_meta(path: str) -> dict | None:
         return None
     meta = {"arch": c.arch, "name": name, "kind": c.kind, "mtp": c.mtp,
             "sampling": sampling, "drafter_kind": c.drafter_kind,
-            "declared": list(c.declared)}
+            "declared": list(c.declared),
+            "speech_checkpoint": c.speech_checkpoint}
     _HEADER_MEMO[ap] = meta
-    disk[ap] = {"mtime": int(st.st_mtime), "size": st.st_size, "v": 4, **meta}
+    disk[ap] = {"mtime": int(st.st_mtime), "size": st.st_size,
+                "v": _HEADER_CACHE_V, **meta}
     _save_header_cache(disk)
     return meta
 
@@ -591,6 +605,49 @@ def find_asr_companion(path: str) -> str | None:
                 m = header_meta(p)
                 if m and m.get("arch") in _arch_table.ASR_ARCHES:
                     return p
+    return None
+
+
+def is_speech_encoder(path) -> bool:
+    """Whether ``path`` is a speech encoder GGUF that feeds a text model's
+    embeddings (Nemotron 3.5 Transcribe's)."""
+    meta = header_meta(os.path.expanduser(path)) if path else None
+    return bool(meta) and meta.get("arch") in _arch_table.NATIVE_ASR_ENCODER_ARCHES
+
+
+def find_speech_encoder(path: str) -> str | None:
+    """The speech encoder GGUF in the folder of the text model at ``path``
+    whose NeMo checkpoint id is the model's, or None: Nemotron 3.5
+    Transcribe ships the two side by side."""
+    meta = header_meta(path)
+    want = meta.get("speech_checkpoint") if meta else None
+    if not want:
+        return None
+    ap = os.path.abspath(os.path.expanduser(path))
+    folder = os.path.dirname(ap)
+    try:
+        # Serve resolves a model per request: scan the folder once per change.
+        key = (ap, os.stat(folder).st_mtime_ns)
+        if key in _SPEECH_PAIRS:
+            return _SPEECH_PAIRS[key]
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return None
+    _SPEECH_PAIRS[key] = found = _speech_encoder_in(folder, names, ap, want)
+    return found
+
+
+_SPEECH_PAIRS: dict = {}
+
+
+def _speech_encoder_in(folder: str, names: list, ap: str, want: str):
+    for name in names:
+        p = os.path.join(folder, name)
+        if name.endswith(".gguf") and p != ap:
+            m = header_meta(p)
+            if (m and m.get("arch") in _arch_table.NATIVE_ASR_ENCODER_ARCHES
+                    and m.get("speech_checkpoint") == want):
+                return p
     return None
 
 
@@ -1527,6 +1584,15 @@ def _mmproj_targets(mm: ClassifiedGguf, made, *, quiet=False) -> list:
     the model it picks stays unpaired."""
     if not made:
         return []
+    if mm.arch in _arch_table.NATIVE_ASR_ENCODER_ARCHES and mm.speech_checkpoint:
+        # A speech encoder names its decoder's checkpoint: only that model.
+        hits = [(mc, c) for mc, c in made
+                if c.speech_checkpoint == mm.speech_checkpoint]
+        if not hits and not quiet:
+            print(f"[discover] speech encoder unpaired (no model of NeMo "
+                  f"checkpoint {mm.speech_checkpoint}): {mm.path}",
+                  file=sys.stderr)
+        return _same_width(mm, hits, quiet=quiet) if hits else []
     core = _mmproj_name(mm)
     if not core:                                     # generic projector, no name
         if len({_model_name(c) for _mc, c in made}) == 1:

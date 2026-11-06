@@ -307,6 +307,9 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
     # It is not a standalone model, so the arch gate doesn't apply - but it's a
     # perfectly valid file for its purpose (pair it with the LLM GGUF).
     mmproj = report.arch == "clip"
+    # A speech encoder that feeds a text model's embeddings pairs like one.
+    from gmlx.load.arch_table import NATIVE_ASR_ENCODER_ARCHES
+    mmproj = mmproj or report.arch in NATIVE_ASR_ENCODER_ARCHES
     # A LoRA adapter carries its base model's arch (general.type = "adapter"),
     # so like mmproj it's a valid companion file, never a standalone model.
     adapter = report.gguf_type == "adapter"
@@ -1593,7 +1596,8 @@ def _confirm_lines(plan, state: str, stream_verdict: str | None, box, *,
                               pc.plan_speculates(plan))
         lines.append(f"Fits in memory. {ctx}".rstrip())
     if plan.mmproj and m.mmproj:
-        lines.append(f"image input  {pc.human_gb(m.mmproj_bytes)}")
+        label = "audio input" if m.hears else "image input"
+        lines.append(f"{label}  {pc.human_gb(m.mmproj_bytes)}")
     if plan.drafter and m.drafter is not None:
         lines.append(f"faster replies  {pc.human_gb(m.drafter.bytes)}")
     if m.asr is not None:
@@ -1766,7 +1770,8 @@ def _rung_json(m, r, box, addon: int, drafter_on: bool) -> dict:
     from gmlx.load import catalog as pc
 
     state = pc.rung_state(m, r, box)
-    ctx = (pc.context_estimate(m, r, box, addon, pc.speculates(m, r, drafter_on))
+    spec = pc.speculates(m, r, drafter_on, head=pc.head_on(m, box))
+    ctx = (pc.context_estimate(m, r, box, addon, spec)
            if state == pc.RESIDENT else None)
     return {"quant": r.quant, "tier": r.tier or None, "bytes": r.bytes, "state": state,
             "needs_gb": pc.needs_class(m, r) if state == pc.OVER else None,
@@ -1851,7 +1856,7 @@ def _pick_row(m, dp, box, dest: Destination, free: int):
             on_disk=done[pc.rung_ref(m, r)], default=r == dp.rung))
     base = dp if not dp.streaming else None
     toggles = []
-    if m.mmproj:
+    if m.mmproj and not m.hears:
         done = _complete_on_disk(pc.PullPlan(m, dp.rung, True, False, False), dest)
         toggles.append(pick.Toggle(
             id="vision", label="image input", size_label=pc.human_gb(m.mmproj_bytes),
@@ -1923,7 +1928,7 @@ def _plan_from_pick(row, rung, on_ids, box):
     m = pc.model(row.id)
     on = set(on_ids)
     return pc.plan_for(m, box, quant=rung.id,
-                       mmproj=("vision" in on) if m.mmproj else None,
+                       mmproj=("vision" in on) if m.mmproj and not m.hears else None,
                        drafter=("drafter" in on) if m.drafter is not None else None)
 
 
@@ -1965,7 +1970,7 @@ def _pull_recommended(a) -> int:
         streaming = pc.rung_state(m, r, box) != pc.RESIDENT
         mm, dr = "vision" in on_ids, "drafter" in on_ids and not streaming
         return pc.rung_label(m, r, box, pc.addon_bytes(m, mm, dr),
-                             pc.speculates(m, r, dr, streaming))
+                             pc.speculates(m, r, dr, streaming, pc.head_on(m, box)))
 
     def footer(row, rung, on_ids):
         if pc.model(row.id) is None:

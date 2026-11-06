@@ -2,6 +2,7 @@ import argparse
 import codecs
 import json
 import logging
+import os
 import sys
 import time
 from collections.abc import Sequence
@@ -1229,7 +1230,9 @@ def generate(
         if image is not None:
             files.extend(image)
         if audio is not None:
-            files.extend(audio)
+            # Decoded clips print as their length, not their samples.
+            files.extend(a if isinstance(a, (str, os.PathLike)) else f"<{len(a)} samples>"
+                         for a in audio)
         if video is not None:
             files.extend(video if isinstance(video, list) else [video])
 

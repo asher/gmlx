@@ -174,6 +174,22 @@ FAMILIES: dict[str, dict] = {
             "reasoning-medium": {"chat_template_kwargs": {"medium_effort": True}},
         },
     },
+    # https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B
+    # "Evaluation settings", 2026-11. Base is audio understanding (reasoning
+    # on, 16,384-token reasoning budget); instruct is the transcription,
+    # translation and language-identification point.
+    "nemotron-transcribe": {
+        "label": "Nemotron Transcribe",
+        "arches": (),
+        "base": {"sampling": {"temperature": 0.6, "top_p": 0.95, "top_k": 0,
+                              "thinking_budget": 16384}},
+        "intents": {
+            "instruct": {
+                "sampling": {"temperature": 0.0, "top_p": 1.0},
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        },
+    },
     # https://huggingface.co/tencent/Hunyuan-A13B-Instruct, 2026-07.
     "hunyuan": {
         "label": "Hunyuan",
@@ -390,6 +406,7 @@ _NAME_REFINEMENTS: tuple = (
     # Moonshot's K2 line is MLA + fine-grained MoE, so it converts to the same
     # 'deepseek2' arch as DeepSeek V2/V3 but ships a different card.
     ("deepseek2", r"(?i)\bkimi", "kimi-k2"),
+    ("nemotron_h_moe", r"(?i)nemotron-3\.5-transcribe", "nemotron-transcribe"),
 )
 
 

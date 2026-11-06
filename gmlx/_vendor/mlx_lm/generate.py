@@ -436,6 +436,13 @@ def generate_step(
         total_prompt_tokens = (
             len(input_embeddings) if input_embeddings is not None else len(prompt)
         )
+        # gmlx: the request step, for an arch that prices its chunk rows.
+        from gmlx.gen.prefill_decay import run_request_step
+
+        prefill_step_size = run_request_step(
+            model, prompt_cache, total_prompt_tokens, max_tokens,
+            prefill_step_size,
+            embedded_rows=total_prompt_tokens if input_embeddings is not None else 0)
         prompt_processed_tokens = 0
         prompt_progress_callback(prompt_processed_tokens, total_prompt_tokens)
         while total_prompt_tokens - prompt_processed_tokens > 1:

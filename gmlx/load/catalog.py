@@ -104,6 +104,7 @@ class Model:
     native_mtp: bool = False         # every rung carries a head
     mmproj: str | None = None
     mmproj_bytes: int = 0
+    hears: bool = False              # the mmproj is a speech encoder: every pull takes it
     drafter: Drafter | None = None
     asr: Asr | None = None
     ignored_files: tuple = ()        # repo companions the seed leaves out on purpose
@@ -111,6 +112,7 @@ class Model:
     heads: int = 0
     trained_ctx: int = 0
     preferred_at: tuple = ()         # (memory class, tier) pairs, over preferred on that class
+    head_from_class: int = 0         # the smallest memory class that keeps the native head on
 
 
 @dataclass(frozen=True)
@@ -131,6 +133,7 @@ class PullPlan:
     mmproj: bool
     drafter: bool
     streaming: bool
+    head: bool = True                # the native head speculates
 
 
 @dataclass(frozen=True)
@@ -184,6 +187,8 @@ class Seed:
     params: str = ""          # over the header's size label when that is not plain
     use: str = ""             # the "good for" column: 31 characters at most, its width at 80 columns
     preferred_at: tuple = ()  # (memory class, tier) pairs: where a bare pull starts there
+    hears: bool = False       # the mmproj is a speech encoder: every pull takes it
+    head_from_class: int = 0  # the smallest memory class that keeps the native head on
 
 
 _SEED = (
@@ -304,6 +309,20 @@ _SEED = (
          mmproj="mmproj-F16.gguf",
          params="122B-A10B",
          use="coding"),
+    Seed("nemotron-3.5-transcribe", "Nemotron 3.5 Transcribe",
+         "AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF", "NVFP4",
+         "Transcribes and translates speech, with word times and speakers.",
+         "Quick for its size: it reads 4B of its 30B weights per token.",
+         aliases=("nemotron-transcribe",),
+         mmproj="NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-Encoder-F16.gguf",
+         hears=True,
+         head_from_class=48,
+         ignored_files=("NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-AD-IQ4_NL.gguf",
+                        "NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-DFlash2-BF16.gguf"),
+         license_note="OpenMDW-1.1",
+         quants=("NVFP4",),
+         params="30B-A4B",
+         use="transcription and speech"),
     Seed("nemotron-3.5-super-vl", "Nemotron 3.5 Super VL",
          "unsloth/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-GGUF", "balanced",
          "Reads long documents and images well.",
@@ -417,10 +436,11 @@ def _build(seed: Seed, facts: dict) -> Model:
         license_detail=seed.license_detail, aliases=seed.aliases, arch=facts.get("arch", ""), moe=facts.get("moe", False),
         native_mtp=facts.get("native_mtp", False),
         mmproj=seed.mmproj, mmproj_bytes=facts.get("mmproj_bytes", 0) if seed.mmproj else 0,
+        hears=seed.hears and seed.mmproj is not None,
         drafter=drafter, asr=asr, ignored_files=seed.ignored_files,
         kv_cost=KvCost(tuple(tuple(row) for row in kv)) if kv else None,
         heads=facts.get("heads", 0), trained_ctx=facts.get("trained_ctx", 0),
-        preferred_at=seed.preferred_at)
+        preferred_at=seed.preferred_at, head_from_class=seed.head_from_class)
 
 
 def _models() -> dict:
@@ -553,12 +573,20 @@ def has_head(m: Model, r: Rung) -> bool:
     return m.native_mtp or r.head
 
 
-def speculates(m: Model, r: Rung, drafter_on: bool, streaming: bool = False) -> bool:
+def speculates(m: Model, r: Rung, drafter_on: bool, streaming: bool = False,
+               head: bool = True) -> bool:
     """Whether a plan on ``r`` speculates: never from the SSD; else with a
-    native head, or with the drafter add-on on."""
+    native head the plan keeps on, or with the drafter add-on on."""
     if streaming:
         return False
-    return has_head(m, r) or (drafter_on and m.drafter is not None)
+    return (head and has_head(m, r)) or (drafter_on and m.drafter is not None)
+
+
+def head_on(m: Model, box: Box) -> bool:
+    """Whether a plan on ``box`` keeps the native head: off below the
+    entry's ``head_from_class``, where the head would take the room a
+    long prompt needs."""
+    return memory_class(box.ram) >= m.head_from_class
 
 
 def resident_bytes(m: Model, r: Rung, speculative: bool) -> int:
@@ -707,7 +735,7 @@ def _addon_sets(m: Model) -> list:
     """The add-on sets the default walk tries: all on, drafter off, both off."""
     out = []
     for mm, dr in ((True, True), (True, False), (False, False)):
-        pair = (mm and m.mmproj is not None, dr and m.drafter is not None)
+        pair = ((mm or m.hears) and m.mmproj is not None, dr and m.drafter is not None)
         if pair not in out:
             out.append(pair)
     return out
@@ -731,16 +759,19 @@ def default_plan(m: Model, box: Box) -> PullPlan | None:
     fits in memory, the lowest tier that streams, else the largest
     compact quant that streams, with both add-ons off."""
     compacts = sorted(compact_candidates(m), key=lambda r: r.bytes, reverse=True)
+    head = head_on(m, box)
     for mm, dr in _addon_sets(m):
+        if dr and not head:
+            continue
         addon = addon_bytes(m, mm, dr)
         for r in _ladder(m, box) + compacts:
             if (rung_state(m, r, box) == RESIDENT
-                    and fits_with(m, r, box, addon, speculates(m, r, dr))):
-                return PullPlan(m, r, mm, dr, False)
+                    and fits_with(m, r, box, addon, speculates(m, r, dr, head=head))):
+                return PullPlan(m, r, mm, dr, False, head)
     ladder = tiers(m) if has_tiers(m) else list(m.rungs)
     for r in sorted(ladder, key=lambda r: r.bytes) + compacts:
         if rung_state(m, r, box) == STREAMS:
-            return PullPlan(m, r, False, False, True)
+            return PullPlan(m, r, m.hears, False, True)
     return None
 
 
@@ -794,11 +825,11 @@ def rung_label(m: Model, r: Rung, box: Box, addon: int, speculative: bool) -> tu
 
 def tags(m: Model) -> list:
     out = []
-    if m.mmproj:
+    if m.mmproj and not m.hears:
         out.append("images")
     if m.drafter is not None or m.native_mtp or any(r.head for r in m.rungs):
         out.append("faster replies")
-    if m.asr is not None:
+    if m.asr is not None or m.hears:
         out.append("audio")
     return out
 
@@ -955,20 +986,22 @@ def plan_for(m: Model, box: Box, *, quant: str | None = None,
                              f"choose from {quant_choices(m)}")
     if mmproj and m.mmproj is None:
         raise ValueError(f"{m.name} has no vision tower")
+    if mmproj is False and m.hears:
+        raise ValueError(f"{m.name} hears audio through its speech encoder; drop --no-vision")
     if drafter is not None and m.drafter is None:
         flag = "--drafter" if drafter else "--no-drafter"
         raise ValueError(f"{m.name} comes without faster replies; drop {flag}")
     state = rung_state(m, rung, box)
     streaming = state != RESIDENT and m.moe
     if streaming:
-        return PullPlan(m, rung, bool(mmproj), False, True)
+        return PullPlan(m, rung, bool(mmproj) or m.hears, False, True)
     if dp is not None and not dp.streaming:
         d_mm, d_dr = dp.mmproj, dp.drafter
     else:
         d_mm, d_dr = False, False
     return PullPlan(m, rung,
                     d_mm if mmproj is None else bool(mmproj),
-                    d_dr if drafter is None else bool(drafter), False)
+                    d_dr if drafter is None else bool(drafter), False, head_on(m, box))
 
 
 def plan_command(plan: PullPlan, box: Box) -> str:
@@ -979,11 +1012,11 @@ def plan_command(plan: PullPlan, box: Box) -> str:
     if dp is None or plan.rung != dp.rung:
         parts += ["--quant", plan.rung.tier or plan.rung.quant]
     if plan.streaming:
-        if plan.mmproj:
+        if plan.mmproj and not m.hears:
             parts.append("--vision")
         return " ".join(parts)
     d_mm, d_dr = (dp.mmproj, dp.drafter) if dp is not None and not dp.streaming else (False, False)
-    if m.mmproj and plan.mmproj != d_mm:
+    if m.mmproj and not m.hears and plan.mmproj != d_mm:
         parts.append("--vision" if plan.mmproj else "--no-vision")
     if m.drafter is not None and plan.drafter != d_dr:
         parts.append("--drafter" if plan.drafter else "--no-drafter")
@@ -995,7 +1028,7 @@ def plan_addon_bytes(plan: PullPlan) -> int:
 
 
 def plan_speculates(plan: PullPlan) -> bool:
-    return speculates(plan.model, plan.rung, plan.drafter, plan.streaming)
+    return speculates(plan.model, plan.rung, plan.drafter, plan.streaming, plan.head)
 
 
 def plan_bytes(plan: PullPlan) -> int:
@@ -1045,6 +1078,8 @@ def plan_pairs(plan: PullPlan, base_dir: str, nest: bool) -> dict:
         pairs["draft_gguf"] = dest_path(m.drafter.repo, m.drafter.file, base_dir, nest)
     if m.asr is not None:
         pairs["asr"] = dest_path(m.asr.repo, m.asr.file, base_dir, nest)
+    if not plan.head and has_head(m, plan.rung) and not plan.drafter:
+        pairs["speculative"] = False
     return {model_path: pairs}
 
 
@@ -1097,7 +1132,7 @@ def rung_rows(m: Model, box: Box, dp: PullPlan | None, addon: int) -> list:
     pool = m.rungs if not has_tiers(m) else tiers(m)
     rows = []
     for r in sorted(set(pool) | set(shown_rungs(m, box)), key=lambda r: r.bytes):
-        label, note = rung_label(m, r, box, addon, speculates(m, r, dr))
+        label, note = rung_label(m, r, box, addon, speculates(m, r, dr, head=head_on(m, box)))
         mark = "  default" if dp is not None and r == dp.rung else ""
         name = r.tier or "compact" if has_tiers(m) else r.quant
         quant = r.quant if has_tiers(m) else ""
@@ -1110,7 +1145,8 @@ def extras_text(m: Model) -> str:
     """``image input 0.8 GB, faster replies 2.6 GB``, or "" for an entry with no add-on."""
     extras = []
     if m.mmproj:
-        extras.append(f"image input {human_gb(m.mmproj_bytes)}")
+        label = "audio input" if m.hears else "image input"
+        extras.append(f"{label} {human_gb(m.mmproj_bytes)}")
     if m.drafter is not None:
         extras.append(f"faster replies {human_gb(m.drafter.bytes)}")
     if m.asr is not None:

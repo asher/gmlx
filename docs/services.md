@@ -81,6 +81,28 @@ ignores `language`, `prompt` and `temperature`. The other formats and
 `/v1/audio/translations` get a 400. The chat models and this route share
 one loaded copy of the companion.
 
+### A served model that hears audio
+
+A chat model that hears audio through its own speech encoder, such as
+[Nemotron 3.5 Transcribe](nemotron-transcribe.md), answers both routes
+itself, without mlx-whisper. Name it by its id or alias:
+
+```yaml
+server:
+  stt: nemotron-3.5-transcribe
+```
+
+With `server.stt` unset, the server picks such a model by itself: the
+default model when it hears audio, else the one configured model that
+does. `stt: false` turns speech-to-text off. Such a model also gives
+speakers and word times, as
+[Transcription and translation](api.md#transcription-and-translation)
+shows.
+
+Unlike the other service models, this one is a chat model. It loads,
+counts against `server.budget_gb` and unloads as chat models do, and a
+transcription waits in the same queue as chat requests.
+
 ## Text-to-speech
 
 Text-to-speech reads text aloud with

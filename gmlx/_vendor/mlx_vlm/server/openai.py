@@ -155,12 +155,29 @@ def _message_has_effective_input(message: Any) -> bool:
     )
 
 
+# gmlx: Responses audio for a model with its own speech encoder.
+def _present(item) -> bool:
+    try:
+        return len(item) > 0  # a decoded clip is an array, with no truth value
+    except TypeError:
+        return bool(item)
+
+
 def _ensure_effective_input(messages, *, images=None, audio=None):
-    if any(image for image in (images or [])) or any(item for item in (audio or [])):
+    if any(image for image in (images or [])) or any(
+        _present(item) for item in (audio or [])
+    ):
         return
     if any(_message_has_effective_input(message) for message in messages or []):
         return
     raise HTTPException(status_code=400, detail=_MISSING_INPUT_DETAIL)
+
+
+def _response_items_audio(items):
+    """The clips a Responses prompt renders, in order. The stock conversion
+    drops audio parts, so this is empty; gmlx wraps it for a model that
+    hears audio through its own speech encoder."""
+    return []
 
 
 def _runtime_cache_get(key, default=None, *, kind=None):
@@ -709,9 +726,26 @@ async def images_edits_endpoint(request: Request):
         raise HTTPException(status_code=500, detail=f"Image edit failed: {e}")
 
 
+async def _responses_request(request: Request) -> "OpenAIRequest":
+    # gmlx: a body that is not a valid Responses request is a client error
+    # (400 or 422), not a 500.
+    from fastapi.exceptions import RequestValidationError
+    from pydantic import ValidationError
+
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="the request body is not valid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="the request body must be a JSON object")
+    try:
+        return OpenAIRequest(**body)
+    except ValidationError as e:
+        raise RequestValidationError(e.errors())
+
+
 async def responses_input_tokens_endpoint(request: Request):
-    body = await request.json()
-    openai_request = OpenAIRequest(**body)
+    openai_request = await _responses_request(request)
     try:
         current_input_items = _normalize_response_input(openai_request.input)
         prompt_items = (
@@ -719,11 +753,12 @@ async def responses_input_tokens_endpoint(request: Request):
             + current_input_items
         )
         chat_messages, images = _response_items_to_chat(prompt_items)
+        audio = _response_items_audio(prompt_items)
         _normalize_instruction_messages(
             chat_messages,
             openai_request.instructions,
         )
-        _ensure_effective_input(chat_messages, images=images)
+        _ensure_effective_input(chat_messages, images=images, audio=audio)
 
         model, processor, config = get_cached_model(
             openai_request.model, _adapter_path_or_inherit(openai_request)
@@ -741,6 +776,7 @@ async def responses_input_tokens_endpoint(request: Request):
             config,
             chat_messages,
             num_images=len(images),
+            num_audios=len(audio),
             tools=chat_tools or None,
             **template_kwargs,
         )
@@ -749,7 +785,7 @@ async def responses_input_tokens_endpoint(request: Request):
                 runtime.response_generator._cpu_preprocess,
                 formatted_prompt,
                 images if images else None,
-                None,
+                audio or None,
             )
         else:
             image_token_index = getattr(config, "image_token_index", None)
@@ -864,8 +900,7 @@ async def responses_endpoint(request: Request):
     """
 
     request_start = time.perf_counter()
-    body = await request.json()
-    openai_request = OpenAIRequest(**body)
+    openai_request = await _responses_request(request)
 
     try:
         kwargs = {}
@@ -880,11 +915,14 @@ async def responses_endpoint(request: Request):
             + current_input_items
         )
         chat_messages, images = _response_items_to_chat(prompt_items)
+        # Stock: [] (the conversion drops audio); gmlx wraps the seam for a
+        # model that hears audio through its own speech encoder.
+        audio = _response_items_audio(prompt_items)
         instructions = _normalize_instruction_messages(
             chat_messages,
             openai_request.instructions,
         )
-        _ensure_effective_input(chat_messages, images=images)
+        _ensure_effective_input(chat_messages, images=images, audio=audio)
 
         # Get model, processor, config - loading if necessary
         model, processor, config = get_cached_model(
@@ -915,6 +953,7 @@ async def responses_endpoint(request: Request):
             config,
             chat_messages,
             num_images=len(images),
+            num_audios=len(audio),
             tools=chat_tools or None,
             **template_kwargs,
         )
@@ -944,7 +983,7 @@ async def responses_endpoint(request: Request):
                 model=openai_request.model,
                 prompt=formatted_prompt,
                 images=images if images else None,
-                audio=None,
+                audio=audio or None,
                 args=gen_args,
             )
 
@@ -1034,7 +1073,7 @@ async def responses_endpoint(request: Request):
                             runtime.response_generator.generate,
                             formatted_prompt,
                             images if images else None,
-                            None,  # audio
+                            audio or None,
                             gen_args,
                         )
                         usage_stats["input_tokens"] = ctx.prompt_tokens
@@ -1353,6 +1392,7 @@ async def responses_endpoint(request: Request):
                         ctx_, ti = runtime.response_generator.generate(
                             prompt=formatted_prompt,
                             images=images if images else None,
+                            audio=audio or None,
                             args=gen_args,
                         )
                         text = ""

@@ -254,6 +254,7 @@ _VLM_SPEC_MODEL_TYPE_ALIASES = {
     "deepseek_v4_vl": "deepseek_v4",
     # The Bolt image container's language model is NemotronHSpecLM.
     "nemotron_h_omni": "nemotron_h",
+    "nemotron_h_transcribe": "nemotron_h",
 }
 
 

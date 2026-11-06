@@ -325,8 +325,12 @@ def _load_mtp_drafter(
                 # Block TOTAL (drafts + bonus); < 2 would exit the owned
                 # decode loop after one token. llama.cpp's draft-mtp runs
                 # this head at n_max 2 drafts; the rollouts self-condition,
-                # so depth beyond the default is measurement-gated.
-                block_size=max(2, env_int("GMLX_NEM_MTP_BLOCK", 3)),
+                # so depth beyond the default is measurement-gated. The
+                # speech decoder drafts 7: its verify fits the fused
+                # kernel's 8 rows, and 8 drafts are no faster on speech.
+                block_size=max(2, env_int(
+                    "GMLX_NEM_MTP_BLOCK",
+                    8 if config_dict.get("speech_checkpoint_id") else 3)),
             )
         )
         log(
@@ -2229,7 +2233,10 @@ def load_mtp_model(
         _wire_target(model, gguf_path)
     wait_for_populate(pf.shards, log=_log)
     collect_after_load()
+    from gmlx.gen.prefill_decay import note_resident_model
 
+    note_resident_model(model)
+    note_resident_model(drafter)
     return model, drafter, config, tokenizer
 
 
@@ -2412,7 +2419,9 @@ def load_vlm_mtp_model(
     # wire=False: as for load_mtp_model, a caller that installs streaming.
     if wire:
         _wire_target(model, gguf_path)
+    from gmlx.gen.prefill_decay import note_resident_model
 
+    note_resident_model(drafter)
     return model, drafter, config, tokenizer, processor
 
 

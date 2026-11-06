@@ -779,8 +779,10 @@ def _needed_extras(cfg) -> list[str]:
     if cfg is None:
         return []
     from gmlx.config import TalkCfg
+    from gmlx.serve.stt import needs_whisper
+
     need = []
-    if cfg.stt:
+    if needs_whisper(cfg.stt, cfg):
         need.append("stt")
     if cfg.tts:
         need.append("tts")

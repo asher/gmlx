@@ -598,6 +598,87 @@ def test_fa_verify_eligibility_narrow_fold():
     assert not elig(6, KL, 32, 4, d=512)
 
 
+@pytest.mark.parametrize("qL,hq,hkv,below,from_kv", [
+    (3, 32, 2, 511, 512),     # nemotron-h: 48 rows, one tile
+    (8, 32, 2, 511, 512),     # 128 rows, two chunks
+    (3, 32, 4, 1023, 1024),   # 24 rows at 4 KV heads
+    (2, 32, 2, 4095, 4096),   # 32 rows at 2 KV heads
+    (2, 32, 4, 8191, 8192),   # 16 rows at 4 KV heads
+    (3, 24, 2, 511, 512),     # a group of 12, not measured: 36 rows
+    (2, 24, 2, 4095, 4096),   # a group of 12 at 24 rows
+    (8, 32, 8, 1023, 1024),   # a group of 4 at 32 rows
+    (4, 32, 8, 8191, 8192),   # a group of 4 at 16 rows
+])
+def test_fa_verify_hd128_eligibility_by_fold(qL, hq, hkv, below, from_kv):
+    def elig(kL):
+        return attn_hd512._fa_verify_eligible(
+            *_rand(qL, kL=kL, hq=hq, hkv=hkv, d=128), "causal")
+
+    assert not elig(below)
+    assert elig(from_kv)
+
+
+@pytest.mark.parametrize("qL,hq,hkv", [
+    (2, 32, 8),    # a group of 4 under 16 rows
+    (3, 32, 8),
+    (3, 16, 4),
+    (3, 32, 1),    # one KV head: stock's broadcast matmul
+    (2, 32, 1),
+    (5, 64, 2),    # a group of 32 at 160 rows: four chunks
+    (2, 16, 2),    # 16 rows at 2 KV heads
+    (9, 32, 2),    # past the kernel's q_len
+])
+def test_fa_verify_hd128_stays_stock(qL, hq, hkv):
+    q, k, v = _rand(qL, kL=65536, hq=hq, hkv=hkv, d=128)
+    assert not attn_hd512._fa_verify_eligible(q, k, v, "causal")
+
+
+@_NEEDS_FA
+@pytest.mark.parametrize("hq,hkv,qL,kL,route", [
+    (32, 2, 3, 512, "fa_verify(chunks=1)"),    # nemotron-h MTP, 2 drafts
+    (32, 2, 8, 4096, "fa_verify(chunks=2)"),   # 7 drafts
+    (32, 4, 4, 1024, "fa_verify(chunks=1)"),
+    (32, 8, 8, 1024, "fa_verify(chunks=1)"),
+])
+def test_fa_verify_hd128_matches_reference(hq, hkv, qL, kL, route):
+    scale = 128**-0.5
+    q, k, v = _rand(qL, kL=kL, hq=hq, hkv=hkv, d=128)
+    out, grew = _routed_sdpa(q, k, v, scale)
+    assert grew == [route], grew
+    ref = _ref(q, k, v, True, scale=scale)
+    err = mx.abs(out.astype(mx.float32) - ref).max().item()
+    assert err < 2e-2, f"hq/hkv={hq}/{hkv} qL={qL} err={err}"
+
+
+@_NEEDS_FA
+def test_fa_verify_hd128_kill_switch(monkeypatch):
+    scale = 128**-0.5
+    q, k, v = _rand(3, kL=1024, hq=32, hkv=2, d=128)
+    monkeypatch.setattr(attn_hd512, "_VERIFY_FA", False)
+    out, grew = _routed_sdpa(q, k, v, scale)
+    assert grew == ["stock"], grew
+    err = mx.abs(out.astype(mx.float32) - _ref(q, k, v, True, scale=scale)).max().item()
+    assert err < 2e-2
+
+
+def test_stock_depth_warning_hd128(capsys, monkeypatch):
+    attn_hd512._STOCK_WARNED.clear()
+    # a fold stock materializes warns once
+    q, k, _ = _rand(4, kL=16384, d=128, hq=32, hkv=2)
+    attn_hd512._stock_depth_warning(q, k, "causal", None)
+    attn_hd512._stock_depth_warning(q, k, "causal", None)
+    assert capsys.readouterr().err.count("stock materialized") == 1
+    # folds stock fuses, one KV head and the kill switch stay quiet
+    attn_hd512._STOCK_WARNED.clear()
+    q2, k2, _ = _rand(4, kL=16384, d=128, hq=32, hkv=8)
+    attn_hd512._stock_depth_warning(q2, k2, "causal", None)
+    q3, k3, _ = _rand(4, kL=16384, d=128, hq=32, hkv=1)
+    attn_hd512._stock_depth_warning(q3, k3, "causal", None)
+    monkeypatch.setattr(attn_hd512, "_VERIFY_FA", False)
+    attn_hd512._stock_depth_warning(q, k, "causal", None)
+    assert "stock materialized" not in capsys.readouterr().err
+
+
 @_NEEDS_FA
 def test_wrapped_sdpa_routes_verify(monkeypatch):
     # the wrapper produces the GEMM result at verify width, and the kill
