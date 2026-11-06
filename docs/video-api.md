@@ -112,11 +112,11 @@ holds the upsampler's caption.
 
 Jobs run one at a time, in order, on a thread of their own, so a clip
 never holds up the image routes. Chat replies keep streaming while a clip
-runs. Chat takes at least one step at each of the clip's pause points, so
-beside a chat reply that streams without a break, a clip at the default
-share runs about 2.8 times slower than alone, and
-[`GMLX_IMAGE_CHAT_SHARE`](env-vars.md#server) changes little for a clip,
-as [Video jobs](internals/image-serving.md#video-jobs) describes.
+runs, and chat takes at least one step at each of the clip's pause
+points. Beside a chat reply that streams without a break, a clip at the
+default share runs about 2.8 times slower than alone, and at
+[`GMLX_IMAGE_CHAT_SHARE`](env-vars.md#server) `0` about 1.6 times
+slower, as [Video jobs](internals/image-serving.md#video-jobs) describes.
 When the memory a job needs is held by models in use, the job stays
 `in_progress` with `gmlx.phase` `waiting for memory`, and tries again
 once they finish. A failed job has `error` with its `code`, `message` and
