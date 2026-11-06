@@ -51,10 +51,12 @@ def _pool(monkeypatch, budget: int) -> _Pool:
     monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
     monkeypatch.setattr(residency, "_holds_image_worker", lambda: True)
+    monkeypatch.setattr(residency, "_holds_video_worker", lambda: True)
     pool = _Pool(
         SimpleNamespace(_last_entry=None), None, None, int(budget), (),
         image_fns=(lambda spec: spec.fp, lambda spec: spec.pipe,
                    lambda box: box.pop()))
+    pool._video_fns = pool._image_fns
     pool._worker_for = lambda *a, **k: contextlib.nullcontext()
     pool._headroom_fn = lambda: None
     pool._retry_fn = lambda: 1
@@ -75,9 +77,10 @@ def _held(pool) -> int:
     return pool._resident_bytes() + steps.STATE.adapters.bytes + pool._incoming
 
 
-def _model(pool, name: str, fp: int, *, busy: bool):
-    """A stand-in model of ``fp`` bytes, in use or idle."""
-    e = pool.acquire(f"/m/{name}.gguf", None, IMAGE_KIND,
+def _model(pool, name: str, fp: int, *, busy: bool, kind=IMAGE_KIND):
+    """A stand-in model of ``fp`` bytes, in use or idle, an entry of the
+    worker of ``kind``."""
+    e = pool.acquire(f"/m/{name}.gguf", None, kind,
                      build_spec=SimpleNamespace(fp=int(fp), stream=None,
                                                 path=f"/m/{name}.gguf",
                                                 pipe=SimpleNamespace()),

@@ -2,8 +2,10 @@
 
 A video entry holds a ``ServedVideo``: the pipeline over the video DiT,
 with the configured adapters as its default patch table, the plan it was
-priced by and a small cache of refined text rows. It runs on the image
-worker, as an image entry does, since MLX streams are per thread.
+priced by and a small cache of refined text rows. It runs on its own
+worker thread, ``video-worker``, as an image entry runs on the image
+worker, since MLX streams are per thread: a clip's steps never queue
+behind an image job, nor an image behind a clip.
 
 The pool counts an entry at the larger of two phases, as the video
 command runs them one model at a time: the encode, with the text encoder
@@ -42,7 +44,11 @@ from typing import Any
 
 import numpy as np
 
+from .subservice import SingleWorker
+
 _log = logging.getLogger(__name__)
+
+WORKER = SingleWorker("video-worker")
 
 _F32 = np.float32
 # The text rows an entry's encode phase is priced at.
@@ -314,10 +320,25 @@ def _load_adapters(served: ServedVideo) -> None:
     served.adapters = rows
 
 
-def load_on_worker(spec) -> ServedVideo:
-    """Load a video entry on the image worker and wait for it."""
-    from .image_service import _on_worker
+def reserved_worker():
+    """Hold the video worker for the calling thread, as
+    :meth:`SingleWorker.reserved` does."""
+    return WORKER.reserved()
 
+
+def worker_reserved() -> bool:
+    """True when the calling thread holds the video worker or is it."""
+    return WORKER.held()
+
+
+def _on_worker(fn, *args):
+    """``fn`` on the video worker: inline on it, or in the caller's
+    hold."""
+    return WORKER.run(fn, *args)
+
+
+def load_on_worker(spec) -> ServedVideo:
+    """Load a video entry on the video worker and wait for it."""
     return _on_worker(_load, spec)
 
 
@@ -348,10 +369,8 @@ def _release(box: list) -> None:
 
 
 def release_on_worker(box: list) -> None:
-    """Drop the entry in ``box``, a one-item list, on the image worker,
+    """Drop the entry in ``box``, a one-item list, on the video worker,
     after the jobs queued before it, and return its memory."""
-    from .image_service import _on_worker
-
     _on_worker(_release, box)
 
 
@@ -471,7 +490,7 @@ def on_canvas(fam, width: int, height: int) -> bool:
 def encode(served: ServedVideo, text: str, images: list) -> tuple:
     """(features, spans): the encoder features (1, L, text dim) f32 of
     ``text``, with keyframe ``images`` (H, W, 3) uint8 at the clip's
-    canvas, and their vision spans in the features, on the image worker,
+    canvas, and their vision spans in the features, on the video worker,
     with the encoder loaded alone, and with the entry's mmproj for
     images. The DiT stays out after it: the next call that reads it
     loads it, so encodes back to back load it once. ``keyframe_refusal``
@@ -653,7 +672,7 @@ def anchor_rows(served: ServedVideo, refs, held: dict, frames: int,
 def anchor_cond(served: ServedVideo, refs, rows, held: dict) -> tuple:
     """(cond_video, cond_audio): the rows of a step's anchors ``refs``
     placed at ``rows``, from their tensors ``held`` by hash, mixed with
-    the noise each video latent came with. On the image worker, with the
+    the noise each video latent came with. On the video worker, with the
     DiT loaded. Raises ValueError for noise of another shape than its
     rows."""
     import mlx.core as mx
@@ -720,7 +739,7 @@ def av_step(served: ServedVideo, video, audio, timestep: float,
 
 def decode_video(served: ServedVideo, latents) -> np.ndarray:
     """Frames (F, H, W, 3) f16 in [0, 1] of model-space latents
-    (1, 24, T, h, w), on the image worker, with the video VAE loaded for
+    (1, 24, T, h, w), on the video worker, with the video VAE loaded for
     the call."""
     import mlx.core as mx
 
@@ -754,7 +773,7 @@ def encoder_frames(frames):
 def encode_video(served: ServedVideo, frames, *, open: bool = False
                  ) -> np.ndarray:
     """Model-space latents (1, 24, T, h, w) f32 of frames (F, H, W, 3) in
-    [0, 1], float or uint8 levels, 1 or 17 k + 5 of them, on the image
+    [0, 1], float or uint8 levels, 1 or 17 k + 5 of them, on the video
     worker, with the video VAE loaded for the call. An ``open`` window is
     17 m frames and keeps the latents a clip drops at its end."""
     import mlx.core as mx
@@ -776,7 +795,7 @@ def encode_video(served: ServedVideo, frames, *, open: bool = False
 def encode_audio(served: ServedVideo, waveform) -> np.ndarray:
     """Model-space audio latents (1, 32, 2, T) f32 of a stereo waveform
     (1, 2, samples) at the audio VAE's rate, padded to a whole latent, on
-    the image worker, with the audio VAE loaded for the call. Its
+    the video worker, with the audio VAE loaded for the call. Its
     convolutions run in windows, so a long sound encodes as a whole one
     does."""
     import mlx.core as mx
@@ -796,7 +815,7 @@ def encode_audio(served: ServedVideo, waveform) -> np.ndarray:
 
 def decode_audio(served: ServedVideo, latents) -> np.ndarray:
     """The waveform (1, 2, samples) f32 of model-space audio latents
-    (1, 32, 2, T), on the image worker, with the audio VAE loaded for the
+    (1, 32, 2, T), on the video worker, with the audio VAE loaded for the
     call."""
     import mlx.core as mx
 

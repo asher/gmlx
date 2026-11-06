@@ -1,5 +1,5 @@
 """The video step's LoRA bytes, booked with the residency pool at the
-step's turns on the image worker: a tiny MiniMax-H3 entry with a LoRA of
+step's turns on the video worker: a tiny MiniMax-H3 entry with a LoRA of
 its own runs encode and step with its ledger equal to what its caches
 hold. The encode lets the DiT and every pair go and settles the ledger;
 the own pairs load again with the DiT, within the footprint, and the
@@ -16,7 +16,7 @@ mx = pytest.importorskip("mlx.core")
 
 from gmlx.serve import video_service as vs  # noqa: E402
 from gmlx.serve.image_steps_client import StepsClientError  # noqa: E402
-from gmlx.serve.residency import IMAGE_KIND, _BusyHold  # noqa: E402
+from gmlx.serve.residency import VIDEO_KIND, _BusyHold  # noqa: E402
 from test_images_api_lora import _books_hold  # noqa: E402
 from test_step_routes_lora import GB, _crowd, _pool, _set_budget  # noqa: E402
 from test_step_routes_lora import _store  # noqa: E402
@@ -40,7 +40,7 @@ class _PoolHost(_Host):
     def entry(self):
         spec = self.served.spec
         e = self.pool.acquire(
-            spec.path, None, IMAGE_KIND, loaded_as=spec.id,
+            spec.path, None, VIDEO_KIND, loaded_as=spec.id,
             build_spec=SimpleNamespace(fp=self.fp, stream=None,
                                        path=spec.path, pipe=self.served))
         self.pool.release(e)
@@ -198,7 +198,9 @@ def test_a_video_step_defining_its_table_again_never_sheds_its_matrices(
     core = steps.STATE.tables_of("h3", t.pipe)[tid]
     assert not routes._held(t.pipe, core)
     short = sum(_store().values()) // 4
-    idle = _model(t.pool, "idle-chat", 2 * short, busy=False)
+    # An idle model of the video worker, which the turn may evict.
+    idle = _model(t.pool, "idle-clip", 2 * short, busy=False,
+                  kind=VIDEO_KIND)
     _set_budget(t.pool, _held(t.pool) + n - short)
     again = _step(t, patch_table=tid)
     assert all(_rel(a, b) < 1e-6 for a, b in zip(again, first))

@@ -311,10 +311,14 @@ def _route(fn, *, versioned: bool = True, name: str = ""):
     return endpoint
 
 
-async def _on_worker(fn, *args):
-    from ..image_service import WORKER
+async def _on_worker(fn, *args, on=None):
+    """``fn`` on the worker of the entry that serves ``on``: the video
+    worker for a video model, else the image worker."""
+    from .. import image_service, video_service
 
-    return await asyncio.wrap_future(WORKER.submit(fn, *args))
+    worker = video_service.WORKER if on is not None and _video(on) \
+        else image_service.WORKER
+    return await asyncio.wrap_future(worker.submit(fn, *args))
 
 
 def _lora_pool():
@@ -695,7 +699,7 @@ async def put_patch_table(request: Request):
 
                         lora_settle(pool, hold._entry, PAIRS)
 
-            await _on_worker(work)
+            await _on_worker(work, on=served)
         finally:
             hold.release()
     return _json(200, {"id": want})
@@ -1082,7 +1086,7 @@ async def step(request: Request):
                                            ref_cache, skip)
             return _host(v), fwd_s, cache
 
-        v, fwd_s, cache = await _on_worker(work)
+        v, fwd_s, cache = await _on_worker(work, on=served)
         if conv.sign != 1.0:
             v = v * np.float32(conv.sign)
         if run is not None:
@@ -1386,7 +1390,7 @@ async def _av_step(t0, tensors, fields, run):
                 raise StepInterrupted()
             return _host(vv), _host(va), time.perf_counter() - t1, hit
 
-        vv, va, fwd_s, hit = await _on_worker(work)
+        vv, va, fwd_s, hit = await _on_worker(work, on=served)
         if run is not None:
             run.steps += 1
             run.rows += 1
@@ -1466,7 +1470,7 @@ async def encode(request: Request):
             sizes = [(int(i.shape[1]), int(i.shape[0])) for i in frames]
             await asyncio.to_thread(_check_encode, hold, served, text, sizes)
             feats, spans = await _on_worker(_settled(hold, encode_prompt),
-                                            served, text, frames)
+                                            served, text, frames, on=served)
             got = {"cond": feats, "refs": [], "image_slots": [],
                    "spans": spans}
             return _held_encode(got, None)
@@ -1488,7 +1492,7 @@ async def encode(request: Request):
             got = await _on_worker(_settled(hold, do_encode), served,
                                    revised or text,
                                    [i[..., :3] for i in images], borrow,
-                                   want_refs, *typed)
+                                   want_refs, *typed, on=served)
         finally:
             if chat_hold is not None:
                 chat_hold.release()
@@ -1544,7 +1548,7 @@ async def vae_decode(request: Request):
         _check_size(hold, *_px(served, "vae", *lat.shape[2:]),
                     what="a VAE decode", phase="decode")
         img = await _on_worker(do_decode, served, lat,
-                               bool(fields.get("alpha")))
+                               bool(fields.get("alpha")), on=served)
     finally:
         hold.release()
     return _container({"image": img})
@@ -1567,7 +1571,7 @@ async def vae_encode(request: Request):
         _image_only(served, "vae/encode")
         _check_size(hold, int(img.shape[2]), int(img.shape[1]),
                     what="a VAE encode", init=True, phase="init")
-        lat = await _on_worker(do_encode, served, img)
+        lat = await _on_worker(do_encode, served, img, on=served)
     finally:
         hold.release()
     return _container({"latents": lat})
@@ -1605,7 +1609,7 @@ async def video_decode(request: Request):
         frames, width, height = _clip_of(served.pipe.video_family, lat.shape)
         _check_clip(hold, served, frames=frames, width=width, height=height,
                     text=1, phase="decode", what="a video decode")
-        img = await _on_worker(lambda: decode_video(served, lat.mx()))
+        img = await _on_worker(lambda: decode_video(served, lat.mx()), on=served)
     finally:
         hold.release()
     return _container({"frames": img})
@@ -1628,7 +1632,7 @@ async def audio_decode(request: Request):
         _check_clip(hold, served, frames=served.plan.frames, width=width,
                     height=height, text=1, phase="audio",
                     what="an audio decode", audio=int(lat.shape[3]))
-        img = await _on_worker(lambda: decode_audio(served, lat.mx()))
+        img = await _on_worker(lambda: decode_audio(served, lat.mx()), on=served)
     finally:
         hold.release()
     return _container({"waveform": img})
@@ -1826,7 +1830,7 @@ async def video_encode(request: Request):
             img = tensors["frames"].mx()
             del raw, tensors
             lat = await _on_worker(lambda: encode_video(served, img,
-                                                        open=is_open))
+                                                        open=is_open), on=served)
         finally:
             hold.release()
     except StepError as e:
@@ -1861,7 +1865,7 @@ async def audio_encode(request: Request):
                     height=height, text=1, phase="anchors",
                     what="an audio encode", anchors=(AnchorRows(0, 0, t),),
                     shown=f"{n} samples")
-        lat = await _on_worker(lambda: encode_audio(served, wav.mx()))
+        lat = await _on_worker(lambda: encode_audio(served, wav.mx()), on=served)
     finally:
         hold.release()
     return _container({"latents": lat})

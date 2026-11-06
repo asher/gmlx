@@ -27,7 +27,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -491,75 +490,23 @@ def _load(spec) -> ServedImage:
     return served
 
 
-_reservation = threading.local()
-
-
-@contextlib.contextmanager
 def reserved_worker():
-    """Hold the image worker for the calling thread: wait here, before the
-    caller takes any lock, for the jobs queued ahead to finish, then keep
-    the worker idle until the block ends. ``load_on_worker`` and
-    ``release_on_worker`` called inside the block run on it at once. So a
-    pool build that loads or releases an image pipeline never waits on the
-    worker's queue while it holds the pool's build lock. Nested blocks
-    share the outer hold, and on the worker itself there is nothing to
-    hold."""
-    if getattr(_reservation, "run", None) is not None or \
-            threading.current_thread().name.startswith("image-worker"):
-        yield
-        return
-    import concurrent.futures
-    import queue
-
-    started = threading.Event()
-    jobs: queue.SimpleQueue = queue.SimpleQueue()
-
-    def hold():
-        started.set()
-        while True:
-            item = jobs.get()
-            if item is None:
-                return
-            fn, args, fut = item
-            try:
-                fut.set_result(fn(*args))
-            except BaseException as e:  # noqa: BLE001 - handed to the caller
-                fut.set_exception(e)
-
-    outer = WORKER.submit(hold)
-    started.wait()
-
-    def run(fn, *args):
-        fut: concurrent.futures.Future = concurrent.futures.Future()
-        jobs.put((fn, args, fut))
-        return fut.result()
-
-    _reservation.run = run
-    try:
-        yield
-    finally:
-        _reservation.run = None
-        jobs.put(None)
-        outer.result()
+    """Hold the image worker for the calling thread, as
+    :meth:`SingleWorker.reserved` does."""
+    return WORKER.reserved()
 
 
 def worker_reserved() -> bool:
-    """True when the calling thread holds the image worker (a
-    :func:`reserved_worker` block) or is the worker itself, so a release
-    from it runs at once instead of queueing."""
-    return (getattr(_reservation, "run", None) is not None
-            or threading.current_thread().name.startswith("image-worker"))
+    """True when the calling thread holds the image worker or is the
+    worker itself, so a release from it runs at once instead of
+    queueing."""
+    return WORKER.held()
 
 
 def _on_worker(fn, *args):
     """``fn`` on the image worker: inline on the worker itself, where a
     turn's eviction releases a pipeline, or in the caller's hold."""
-    if threading.current_thread().name.startswith("image-worker"):
-        return fn(*args)
-    run = getattr(_reservation, "run", None)
-    if run is not None:
-        return run(fn, *args)
-    return WORKER.submit(fn, *args).result()
+    return WORKER.run(fn, *args)
 
 
 def load_on_worker(spec) -> ServedImage:

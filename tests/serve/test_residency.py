@@ -1626,19 +1626,19 @@ def test_a_build_takes_the_image_worker_to_evict_an_image_gone_idle(
 
     @contextlib.contextmanager
     def reserved_worker():
-        image_service._reservation.run = lambda fn, *a: fn(*a)
+        image_service.WORKER._held.run = lambda fn, *a: fn(*a)
         try:
             yield
         finally:
-            image_service._reservation.run = None
+            image_service.WORKER._held.run = None
 
     monkeypatch.setattr(image_service, "reserved_worker", reserved_worker)
     worker_for = pool._worker_for
     forced = []
 
-    def worker_for_then_image_done(image_build, **k):
+    def worker_for_then_image_done(*a, **k):
         forced.append(k.get("force", False))
-        ctx = worker_for(image_build, **k)
+        ctx = worker_for(*a, **k)
         image.busy = 0                  # the image job ends meanwhile
         return ctx
 
@@ -1649,7 +1649,7 @@ def test_a_build_takes_the_image_worker_to_evict_an_image_gone_idle(
         free = pool._build_lock.acquire(blocking=False)
         if free:
             pool._build_lock.release()
-        held = getattr(image_service._reservation, "run", None) is not None
+        held = getattr(image_service.WORKER._held, "run", None) is not None
         released.append((list(box), free or held))
 
     pool._image_fns = (None, None, release_on_worker)
@@ -1657,7 +1657,7 @@ def test_a_build_takes_the_image_worker_to_evict_an_image_gone_idle(
                          build_spec=SimpleNamespace(stream=None))
     pool.release(entry)
     assert released == [(["P"], True)]
-    assert forced == [False, True]
+    assert forced == [frozenset(), frozenset({IMAGE_KIND})]
     assert list(pool._entries) == [("a.gguf", None, "auto")]
 
 
@@ -1679,17 +1679,17 @@ def _image_gone_idle(monkeypatch, pool):
 
     @contextlib.contextmanager
     def reserved_worker():
-        image_service._reservation.run = lambda fn, *a: fn(*a)
+        image_service.WORKER._held.run = lambda fn, *a: fn(*a)
         try:
             yield
         finally:
-            image_service._reservation.run = None
+            image_service.WORKER._held.run = None
 
     monkeypatch.setattr(image_service, "reserved_worker", reserved_worker)
     worker_for = pool._worker_for
 
-    def worker_for_then_image_done(image_build, **k):
-        ctx = worker_for(image_build, **k)
+    def worker_for_then_image_done(*a, **k):
+        ctx = worker_for(*a, **k)
         image.busy = 0                  # the image job ends meanwhile
         return ctx
 
@@ -1700,7 +1700,7 @@ def _image_gone_idle(monkeypatch, pool):
         free = pool._build_lock.acquire(blocking=False)
         if free:
             pool._build_lock.release()
-        held = getattr(image_service._reservation, "run", None) is not None
+        held = getattr(image_service.WORKER._held, "run", None) is not None
         released.append((list(box), free or held))
 
     pool._image_fns = (None, None, release_on_worker)

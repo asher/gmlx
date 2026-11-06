@@ -12,8 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from gmlx.serve import residency
-from gmlx.serve.residency import (IMAGE_KIND, STORE, LoraRefused,
-                                  _ResidencyPool)
+from gmlx.serve.residency import (IMAGE_KIND, STORE, VIDEO_KIND,
+                                  LoraRefused, _ResidencyPool)
 
 GB = 10**9
 # Seconds a pool thread may take before the test calls it stuck.
@@ -81,18 +81,24 @@ def make_pool(monkeypatch, budget_gb, retry=1):
     monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
     monkeypatch.setattr(residency, "_holds_image_worker", lambda: True)
+    monkeypatch.setattr(residency, "_holds_video_worker", lambda: True)
     released = []
+    # The thread each pipeline release ran on, by pipeline.
+    pool_threads: dict = {}
 
     def release(box):
         pipe = box.pop()
         released.append(pipe)
+        pool_threads[pipe.name] = threading.current_thread().name
         pool.caches.pop(pipe.name, None)
 
     pool = _ResidencyPool(
         SimpleNamespace(_last_entry=None), None, None, int(budget_gb * GB),
         (), image_fns=(lambda spec: spec.fp, lambda spec: spec.pipe,
                        release))
+    pool._video_fns = pool._image_fns
     pool.released = released
+    pool.release_threads = pool_threads
     pool._teardown_chat = lambda e: released.append(e.model_path)
     pool._worker_for = lambda *a, **k: contextlib.nullcontext()
     pool.head = None
@@ -131,6 +137,13 @@ def image(pool, name, fp_gb, *, busy=False):
     return e
 
 
+def video(pool, name, fp_gb, *, busy=False):
+    e = pool.acquire(name, None, VIDEO_KIND, build_spec=spec(name, fp_gb))
+    if not busy:
+        pool.release(e)
+    return e
+
+
 def chat(pool, name, fp_gb, *, busy=1, retained=0, pinned=False):
     """A chat entry put in the pool as a cold load would leave it."""
     e = residency._Entry(cache_key=(name, None, "chat"), model_path=name,
@@ -164,9 +177,10 @@ def finish(t, out):
     return out.get("value")
 
 
-def on_worker(fn):
-    """``fn`` on a thread named as the image worker's are."""
-    return finish(*start("image-worker-test", fn))
+def on_worker(fn, kind=IMAGE_KIND):
+    """``fn`` on a thread named as the workers of ``kind`` are."""
+    name = "video-worker-test" if kind == VIDEO_KIND else "image-worker-test"
+    return finish(*start(name, fn))
 
 
 class Waits(threading.Condition):
@@ -191,7 +205,8 @@ def waits(pool) -> Waits:
 
 def turn(pool, e, need, **kw):
     kw.setdefault("subject", "the test's LoRA")
-    return on_worker(lambda: pool.lora_turn(e, int(need), **kw))
+    kind = e.kind if e is not STORE else IMAGE_KIND
+    return on_worker(lambda: pool.lora_turn(e, int(need), **kw), kind)
 
 
 def job(pool, e, key, need, **kw):
@@ -237,6 +252,89 @@ def test_a_turn_runs_on_the_worker(monkeypatch):
         pool.lora_turn(e, GB, subject="s")
     turn(pool, e, GB)
     assert e.lora.pending == GB
+
+
+def test_a_video_turn_runs_on_the_video_worker(monkeypatch):
+    """A video entry's job allocates on the video worker, so its turn
+    there is refused on the image worker."""
+    pool = make_pool(monkeypatch, 10)
+    v = video(pool, "v", 2, busy=True)
+    with pytest.raises(RuntimeError, match="video worker"):
+        on_worker(lambda: pool.lora_turn(v, GB, subject="s"), IMAGE_KIND)
+    turn(pool, v, GB)
+    assert v.lora.pending == GB
+
+
+def test_a_video_turn_short_by_an_idle_image_entry_names_it(monkeypatch):
+    """The room a video turn misses is held by an idle image entry: the
+    turn never evicts it, which would release its pipeline on the image
+    worker, and its 503 names it with the unload that makes room."""
+    pool = make_pool(monkeypatch, 10)
+    zimage = image(pool, "zimage", 4)
+    v = video(pool, "v", 4, busy=True)
+    w = waits(pool)
+    with pytest.raises(LoraRefused) as ei:
+        turn(pool, v, 3 * GB)
+    assert (ei.value.status, ei.value.message, ei.value.transient) == (
+        503, "the test's LoRA need 3.0 GB of memory, 2.0 GB is free, and "
+        "'zimage' is idle on the image worker; unload it (POST /unload) to "
+        "make room", False)
+    assert pool.entry_resident(zimage) and pool.released == []
+    assert w.timeouts == []
+
+
+def test_a_store_turn_short_by_an_idle_video_entry_names_it(monkeypatch):
+    pool = make_pool(monkeypatch, 10)
+    clip = video(pool, "clip", 4)
+    image(pool, "x", 4, busy=True)
+    with pytest.raises(LoraRefused) as ei:
+        turn(pool, STORE, 3 * GB, subject="the upload")
+    assert ei.value.message == (
+        "the upload need 3.0 GB of memory, 2.0 GB is free, and 'clip' is "
+        "idle on the video worker; unload it (POST /unload) to make room")
+    assert pool.entry_resident(clip) and pool.released == []
+
+
+def test_a_video_turn_evicts_its_own_idle_entries_and_chat(monkeypatch):
+    """The entries a video turn can evict are released inline on the
+    video worker, or need no worker: an idle chat model and an idle video
+    entry go, the idle image entry beside them stays."""
+    pool = make_pool(monkeypatch, 12)
+    zimage = image(pool, "zimage", 2)
+    old = video(pool, "old", 3)
+    qwen = chat(pool, "qwen3", 3, busy=0)
+    v = video(pool, "v", 3, busy=True)
+    turn(pool, v, 5 * GB)
+    assert not pool.entry_resident(old) and not pool.entry_resident(qwen)
+    assert pool.entry_resident(zimage)
+    assert pool.release_threads == {"old": "video-worker-test"}
+
+
+def test_a_video_turn_sheds_an_idle_upload_with_the_image_worker_busy(
+        monkeypatch):
+    """An upload is its body's bytes, made on no worker: a video turn
+    sheds it in its own hold, while the image worker runs a job, and
+    leaves the image entry's idle caches alone."""
+    from gmlx.serve import image_service
+    from gmlx.serve.subservice import SingleWorker
+
+    pool = make_pool(monkeypatch, 10)
+    x = image(pool, "x", 2, busy=True)
+    v = video(pool, "v", 4, busy=True)
+    job(pool, x, "x1", GB)
+    pool.store.keep("u1", 2 * GB)
+    busy = SingleWorker("image-worker-busy")
+    monkeypatch.setattr(image_service, "WORKER", busy)
+    go = threading.Event()
+    blocked = busy.submit(go.wait, WAIT)
+    try:
+        # 9 GB held of 10: 2 GB more needs the upload gone.
+        turn(pool, v, 3 * GB)
+    finally:
+        go.set()
+        blocked.result()
+    assert pool.store.items == {} and pool.caches["x"].items == {"x1": GB}
+    assert v.lora.pending == 3 * GB
 
 
 def test_the_ledger_holds_the_keys_the_caches_hold(monkeypatch):
@@ -1177,3 +1275,152 @@ def test_the_cap_shed_at_a_put_skips_the_held_keys():
         store.put("d", SimpleNamespace(nbytes=GB))
         assert list(store._items) == ["a", "c", "d"]
     assert store.bytes == 3 * GB
+
+
+def _recorded_holds(monkeypatch, pool):
+    """The pool's own worker reservations, each recorded by kind in the
+    order taken, and held while its block runs."""
+    from gmlx.serve import image_service, video_service
+
+    del pool._worker_for
+    order: list = []
+    held: set = set()
+
+    def fake(kind):
+        @contextlib.contextmanager
+        def reserved():
+            order.append(kind)
+            held.add(kind)
+            try:
+                yield
+            finally:
+                held.discard(kind)
+        return reserved
+
+    monkeypatch.setattr(image_service, "reserved_worker", fake(IMAGE_KIND))
+    monkeypatch.setattr(video_service, "reserved_worker", fake(VIDEO_KIND))
+    monkeypatch.setattr(residency, "_holds_image_worker",
+                        lambda: IMAGE_KIND in held)
+    monkeypatch.setattr(residency, "_holds_video_worker",
+                        lambda: VIDEO_KIND in held)
+    return order
+
+
+def test_a_cold_load_holds_only_the_workers_it_loads_or_releases_on(
+        monkeypatch):
+    """An image load that evicts an idle chat model holds the image
+    worker it builds on, and not the video worker of the idle video
+    entry it leaves resident."""
+    pool = make_pool(monkeypatch, 10)
+    chat(pool, "old", 3, busy=0)
+    clip = video(pool, "clip", 3)
+    order = _recorded_holds(monkeypatch, pool)
+    image(pool, "zimage", 4)
+    assert order == [IMAGE_KIND]
+    assert pool.entry_resident(clip)
+
+
+def test_a_cold_load_that_evicts_on_both_workers_holds_image_then_video(
+        monkeypatch):
+    """The one order every thread takes the workers in: a load whose
+    eviction releases an image and a video pipeline holds both, image
+    first, and releases each on its own worker."""
+    pool = make_pool(monkeypatch, 10)
+    image(pool, "zimage", 3)
+    video(pool, "clip", 3)
+    order = _recorded_holds(monkeypatch, pool)
+    chat_load = spec("big", 8)
+    e = pool.acquire("big", None, VIDEO_KIND, build_spec=chat_load)
+    pool.release(e)
+    assert order == [IMAGE_KIND, VIDEO_KIND]
+    assert sorted(p.name for p in pool.released) == ["clip", "zimage"]
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_two_workers_turn_at_once_and_never_release_on_each_other(
+        monkeypatch, seed):
+    """The image and the video worker run turns at once while another
+    thread loads and unloads entries of both kinds. No turn releases a
+    pipeline of the other worker's kind, none reserves a worker, and each
+    turn's booking fits the budget."""
+    budget = 10 * GB
+    pool = make_pool(monkeypatch, budget / GB, retry=0)
+    kinds: dict = {}
+    reserved: list = []
+
+    @contextlib.contextmanager
+    def record(ks):
+        reserved.append(threading.current_thread().name)
+        yield
+
+    # The pool's own reservations, recorded by the thread that takes them.
+    del pool._worker_for
+    monkeypatch.setattr(residency, "_reserved_workers", record)
+    stop = threading.Event()
+    errors: list = []
+
+    def entries(kind):
+        with pool._lock:
+            return [e for e in pool._entries.values() if e.kind == kind]
+
+    def worker(kind):
+        rng = random.Random(seed * 10 + len(kind))
+        try:
+            for i in range(150):
+                es = entries(kind)
+                if not es:
+                    continue
+                e = rng.choice(es)
+                with pool._lock:
+                    if not pool.entry_resident(e):
+                        continue
+                    e.busy += 1
+                try:
+                    need = rng.randrange(1, 5) * GB // 2
+                    pool.lora_turn(e, need, subject="s")
+                    with pool._lock:
+                        resident = (pool._resident_bytes() + pool.store.n
+                                    + pool._incoming)
+                    assert resident <= budget, (kind, i, resident)
+                    pool.caches.setdefault(e.model_path, Cache()).items[
+                        f"{kind}{i}"] = need
+                except LoraRefused:
+                    pass
+                finally:
+                    pool.lora_settle(e, "s")
+                    pool.release(e)
+        except BaseException as err:  # noqa: BLE001 - reported below
+            errors.append(err)
+
+    def loads():
+        rng = random.Random(seed)
+        n = 0
+        while not stop.is_set():
+            kind = rng.choice([IMAGE_KIND, VIDEO_KIND])
+            name = f"{kind[5]}{n}"
+            n += 1
+            kinds[name] = kind
+            make = image if kind == IMAGE_KIND else video
+            make(pool, name, rng.randrange(1, 4))
+            if rng.random() < 0.3:
+                es = entries(rng.choice([IMAGE_KIND, VIDEO_KIND]))
+                if es:
+                    try:
+                        pool.evict(rng.choice(es).model_path)
+                    except residency.ModelBusyError:
+                        pass
+
+    loader = threading.Thread(target=loads, daemon=True)
+    loader.start()
+    a = start("image-worker-test", lambda: worker(IMAGE_KIND))
+    b = start("video-worker-test", lambda: worker(VIDEO_KIND))
+    finish(*a)
+    finish(*b)
+    stop.set()
+    loader.join(WAIT)
+    assert not errors, errors
+    assert reserved and not [r for r in reserved if "worker" in r]
+    for name, thread in pool.release_threads.items():
+        want = "video-worker" if kinds[name] == VIDEO_KIND else "image-worker"
+        assert "worker" not in thread or thread.startswith(want), (name,
+                                                                   thread)

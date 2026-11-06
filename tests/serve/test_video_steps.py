@@ -23,10 +23,11 @@ from gmlx.config import ImageServerCfg  # noqa: E402
 from gmlx.serve import image_steps as steps  # noqa: E402
 from gmlx.serve import image_wire as wire  # noqa: E402
 from gmlx.serve import video_service as vs  # noqa: E402
-from gmlx.serve.image_service import WORKER, ServedImage  # noqa: E402
+from gmlx.serve.image_service import ServedImage  # noqa: E402
 from gmlx.serve.image_steps_client import (MissingTensors,  # noqa: E402
                                            StepsClient, StepsClientError,
                                            array_hash)
+from gmlx.serve.video_service import WORKER  # noqa: E402
 from gmlx.serve.patches import image_steps as routes  # noqa: E402
 from gmlx.serve.video_service import ServedVideo, VideoEntryPlan  # noqa: E402
 from gmlx.video import api as vapi  # noqa: E402

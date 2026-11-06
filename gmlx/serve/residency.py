@@ -204,22 +204,30 @@ def profile_label(cache_key: tuple) -> str:
 # its safetensors pipelines; no gmlx route passes either one.
 IMAGE_KIND = "gmlx_image"
 # The cache-key kind of a video model entry. Its pipeline runs on the
-# image worker too, so both kinds are worker entries.
+# video worker, so both kinds are worker entries, each on its own worker.
 VIDEO_KIND = "gmlx_video"
 _WORKER_KINDS = frozenset({IMAGE_KIND, VIDEO_KIND})
+# The workers in the order a thread that holds both takes them.
+_WORKER_ORDER = (IMAGE_KIND, VIDEO_KIND)
+_WORKER_NAMES = {IMAGE_KIND: "image-worker", VIDEO_KIND: "video-worker"}
+_WORKER_WORDS = {IMAGE_KIND: "image", VIDEO_KIND: "video"}
 _STOCK_IMAGE_KINDS = frozenset({"image_generation", "image_edit"})
 
 
 class LoraRefused(Exception):
     """LoRA bytes a turn or a route cannot grant: ``status`` 413 when no
-    unload makes room, 503 when one can, with ``retry_after`` seconds."""
+    unload makes room, 503 when one can, with ``retry_after`` seconds.
+    ``transient`` marks a 503 that ends by itself, as models in use
+    finish, a load lands or a worker frees; one that needs an act, as an
+    unload or other apps closed, is not."""
 
     def __init__(self, status: int, message: str,
-                 retry_after: int | None = None):
+                 retry_after: int | None = None, transient: bool = False):
         super().__init__(message)
         self.status = status
         self.message = message
         self.retry_after = retry_after
+        self.transient = transient
 
 
 def gb(n: float, up: bool) -> str:
@@ -320,8 +328,8 @@ class _Entry:
 
     @property
     def is_image(self) -> bool:
-        """Whether the entry is a pipeline on the image worker: an image
-        or a video model."""
+        """Whether the entry is a pipeline on a worker: an image model on
+        the image worker or a video model on the video worker."""
         return self.kind in _WORKER_KINDS
 
 
@@ -646,12 +654,15 @@ class _ResidencyPool:
         # since waits on that lock, and a release would queue behind it.
         late: list = []
         try:
-            # An image entry busy when the worker reservation is decided can
-            # be idle at the eviction. Its release would queue on the worker
-            # behind a reservation that waits on the build lock, so the first
-            # attempt evicts nothing and the second takes the reservation.
-            for force in (False, True):
-                with self._worker_for(model_kind in _WORKER_KINDS, force=force), \
+            # A worker entry busy when the worker reservations are decided
+            # can be idle at the eviction. Its release would queue on its
+            # worker behind a reservation that waits on the build lock, so
+            # that attempt evicts nothing and the next takes the
+            # reservation of that entry's worker, and no other.
+            force: frozenset = frozenset()
+            for _attempt in range(len(_WORKER_ORDER) + 1):
+                with self._worker_for(model_kind, incoming=incoming,
+                                      force=force), \
                         self._build_lock:
                     released: list = []
                     torn: list = []
@@ -665,8 +676,11 @@ class _ResidencyPool:
                                 entry.busy += 1
                                 self._publish()
                                 return entry
-                            if (self._evicts_image(incoming)
-                                    and not _holds_image_worker()):
+                            missing = frozenset(
+                                k for k in self._victim_kinds(incoming)
+                                if not _holds_worker(k))
+                            if missing:
+                                force = force | missing
                                 continue
                             try:
                                 self._evict_for_room(
@@ -746,7 +760,7 @@ class _ResidencyPool:
             _defer(
                 f"model load deferred: {model_path} priced at "
                 f"{incoming / 1e9:.1f} GB resident does not fit {bound} "
-                "unless an idle image model is evicted, and the image "
+                "unless an idle image or video model is evicted, and its "
                 "worker could not be held to release it. Retry when a slot "
                 "frees.")
         finally:
@@ -953,14 +967,16 @@ class _ResidencyPool:
             self._incoming = max(0, self._incoming - int(n))
             self._publish()
 
-    def _worker_guard(self) -> None:
-        if not threading.current_thread().name.startswith("image-worker"):
-            raise RuntimeError("a LoRA turn runs on the image worker, "
-                               "where its job allocates")
+    def _worker_guard(self, owner) -> None:
+        kind = _owner_kind(owner)
+        if not threading.current_thread().name.startswith(
+                _WORKER_NAMES[kind]):
+            raise RuntimeError(f"a LoRA turn runs on the {_WORKER_WORDS[kind]}"
+                               " worker, where its job allocates")
 
     def lora_turn(self, owner, need: int, *, subject: str, hold=(),
                   held: int = 0, store=(), beside=()) -> None:
-        """The turn of a job on the image worker: room for ``need`` bytes
+        """The turn of a job on its owner's worker: room for ``need`` bytes
         it allocates next, booked on the ledger of ``owner``, a pool entry,
         or admitted into the upload store. ``hold`` names the owner's keys
         its job keeps, ``held`` their bytes held now, ``store`` the uploads
@@ -972,7 +988,7 @@ class _ResidencyPool:
         Retry-After."""
         from .capacity import overcommit
 
-        self._worker_guard()
+        self._worker_guard(owner)
         need = max(0, int(need))
         beside = tuple(beside)
         over = overcommit()
@@ -1037,7 +1053,8 @@ class _ResidencyPool:
             with self._lock:
                 if not over:
                     self._evict_for_room(need, torn=torn, strict=True,
-                                         extra=self._uploads())
+                                         extra=self._uploads(),
+                                         kind=_owner_kind(owner))
                 self._publish()
         finally:
             try:
@@ -1068,13 +1085,18 @@ class _ResidencyPool:
         """Shed ``nbytes`` of idle LoRA bytes, after _lock dropped: the
         owner's own request bytes (``hold`` kept), its worker's other
         entries' by their last use, then the idle uploads (``store``
-        kept). The store's own turn sheds the uploads first."""
+        kept). The store's own turn sheds the uploads first. The other
+        worker's caches are never shed here, where its job may read them;
+        an upload is its body's bytes, no worker's arrays, so any turn
+        sheds it."""
         shed = self._lora_shed or _default_lora_shed
         store_shed = self._store_shed or _default_store_shed
         left = int(nbytes)
+        kind = _owner_kind(owner)
         with self._lock:
             others = sorted((e for e in self._entries.values()
-                             if e.lora is not None and e is not owner),
+                             if e.lora is not None and e is not owner
+                             and _mine(e, kind)),
                             key=lambda e: e.seq)
         order = ([STORE] + others if owner is STORE
                  else [owner] + others + [STORE])
@@ -1136,22 +1158,52 @@ class _ResidencyPool:
             return LoraRefused(
                 503, f"{lead}, and the server is loading {self._loading} "
                 f"({gb(self._building, True)} GB) now; retry when it is "
-                "loaded", retry)
+                "loaded", retry, transient=True)
         free = f"{gb(room, False)} GB is free"
+        transient = True
         if held_up is not None:
             tail = held_up
         elif measured:
+            busy = self._lora_busy(own)
+            transient = bool(busy)
             tail = (f"{free} in the working set now; retry when the models "
-                    "in use finish" if self._lora_busy(own) else
+                    "in use finish" if busy else
                     f"{free} in the working set now; close other apps or "
                     "unload a model to make room")
         else:
             busy = self._lora_busy(own, pinned=False)
+            transient = bool(busy)
             tail = (f"{free} beside the models in use ({', '.join(busy)}); "
                     "retry when one is idle" if busy else
                     f"{free}; unload a model or retry when the requests in "
                     "flight finish")
-        return LoraRefused(503, f"{lead}, and {tail}", retry)
+        return LoraRefused(503, f"{lead}, and {tail}", retry,
+                           transient=transient)
+
+    def _aside_503(self, subject: str, n: int, room: int, retry: int,
+                   es, ids, kind: str, short: int):
+        """Under _lock: the 503 of a turn of worker ``kind`` that the idle
+        entries of the other worker would make ``short`` bytes of room
+        for, naming them, or None when they would not. A turn never waits
+        on the other worker, so it evicts none of them."""
+        names, freed = [], 0
+        for e in sorted((e for e in es if e.is_image and e.kind != kind
+                         and id(e) not in ids and not e.pinned
+                         and e.busy == 0), key=lambda e: e.seq):
+            if freed >= short:
+                break
+            names.append(repr(self._lora_name(e)))
+            freed += self._entry_bytes(e)
+        if not names or freed < short:
+            return None
+        other = next(k for k in _WORKER_ORDER if k != kind)
+        them = "it" if len(names) == 1 else "them"
+        verb = "is" if len(names) == 1 else "are"
+        return LoraRefused(
+            503, f"{subject} need {gb(n, True)} GB of memory, "
+            f"{gb(room, False)} GB is free, and {', '.join(names)} {verb} "
+            f"idle on the {_WORKER_WORDS[other]} worker; unload {them} "
+            "(POST /unload) to make room", retry)
 
     def _refusal(self, owner, need, head, live, held, subject, retry,
                  beside):
@@ -1165,16 +1217,26 @@ class _ResidencyPool:
         self._hopeless_413(budget, es, owner, beside, need + held, subject)
         own = self._own(owner, beside)
         ids = {id(e) for e in own}
+        kind = _owner_kind(owner)
         chat = [e for e in es if id(e) not in ids and not e.pinned
                 and not e.is_image and e.busy > e.retained]
         resident = self._lora_resident(live)
         if budget and resident + need > budget:
+            # The idle entries this turn can evict: chat and its worker's.
             idle = sum(self._entry_bytes(e) for e in es
-                       if id(e) not in ids and not e.pinned and e.busy == 0)
+                       if id(e) not in ids and not e.pinned and e.busy == 0
+                       and _mine(e, kind))
             freed = idle + sum(self._entry_bytes(e) for e in chat)
+            short = resident + need - budget
+            if freed < short:
+                aside = self._aside_503(subject, need,
+                                        max(0, budget - resident), retry,
+                                        es, ids, kind, short - freed)
+                if aside is not None:
+                    raise aside
             err = self._lora_503(subject, need, max(0, budget - resident),
                                  retry, own)
-            if not chat or freed < resident + need - budget:
+            if not chat or freed < short:
                 raise err
             return self._releases, err
         # The measured room is short: the budget passed in this hold.
@@ -1191,7 +1253,7 @@ class _ResidencyPool:
         check by its deadline, from the pool now and the measure ``head``
         read before the hold: the cold load in flight, else the budget
         short, else the measured room short, else what held the turn up,
-        the image worker's job (``worker``) or the build lock."""
+        its worker's job (``worker``) or the build lock."""
         own = self._own(owner, beside)
         live = self._uploads()
         free = self._budget - self._lora_resident(live)
@@ -1202,9 +1264,10 @@ class _ResidencyPool:
             return self._lora_503(subject, need, max(0, room), retry, own,
                                   measured=True)
         if worker:
+            kind = _owner_kind(owner)
             names = [self._lora_name(e) for e in self._entries.values()
-                     if e.is_image and e.busy > e.retained]
-            held_up = ("the image worker is busy"
+                     if e.kind == kind and e.busy > e.retained]
+            held_up = (f"the {_WORKER_WORDS[kind]} worker is busy"
                        + (f" with {', '.join(names)}" if names else "")
                        + "; retry when it is idle")
         else:
@@ -1213,7 +1276,7 @@ class _ResidencyPool:
         return self._lora_503(subject, need, 0, retry, own, held_up=held_up)
 
     def lora_late(self, owner, need: int, subject: str) -> None:
-        """The 503 of a turn that the image worker did not start within
+        """The 503 of a turn that its worker did not start within
         its deadline. The measure and the deadline are read before the
         pool's lock."""
         from .capacity import overcommit
@@ -1632,25 +1695,28 @@ class _ResidencyPool:
             return True
         return False
 
-    def _evicts_image(self, incoming: int) -> bool:
-        """Whether :meth:`_evict_for_room` would evict an image entry to fit
-        ``incoming``, taking victims in its order. Evicts nothing."""
+    def _victim_kinds(self, incoming: int) -> frozenset:
+        """Under _lock: the worker kinds of the entries
+        :meth:`_evict_for_room` would evict to fit ``incoming``, taking
+        victims in its order. Evicts nothing."""
         held = self._resident_bytes()
         count = len(self._entries)
+        kinds = set()
         for e in sorted((e for e in self._entries.values()
                          if not e.pinned and e.busy == 0),
                         key=lambda e: e.seq):
             if not self._over_capacity(incoming, held, count):
-                return False
+                break
             if e.is_image:
-                return True
+                kinds.add(e.kind)
             held -= e.footprint
             count -= 1
-        return False
+        return frozenset(kinds)
 
     def _evict_for_room(self, incoming: int, *, model_path=None,
                         streaming: bool = False, torn: list,
-                        strict: bool = False, extra: int = 0) -> bool:
+                        strict: bool = False, extra: int = 0,
+                        kind: str | None = None) -> bool:
         """Under _lock: take LRU idle unpinned entries out of the pool, into
         ``torn``, until ``incoming`` more bytes fit. The caller tears them
         down after _lock drops, under the build lock. Returns whether it
@@ -1666,14 +1732,17 @@ class _ResidencyPool:
 
         A LoRA turn (``strict``) fits the budget alone, with ``extra``
         upload bytes, and takes no entry unless the entries it takes make
-        the room."""
+        the room. It takes chat entries and those of its own worker
+        ``kind`` only, whose release runs inline on that worker; the other
+        worker's idle entries are named by its 503."""
         if strict:
             if not self._budget:
                 return True
             short = self._resident_bytes() + extra + incoming - self._budget
             victims, freed = [], 0
             for e in sorted((e for e in self._entries.values()
-                             if not e.pinned and e.busy == 0),
+                             if not e.pinned and e.busy == 0
+                             and (kind is None or _mine(e, kind))),
                             key=lambda e: e.seq):
                 if freed >= short:
                     break
@@ -2231,7 +2300,7 @@ class _ResidencyPool:
     def _teardown(self, entry: _Entry, released=None):
         """Tear ``entry`` down. An image entry's pipeline goes to
         ``released``, which the caller hands to :meth:`_release_images`
-        once it drops ``_lock``: the release waits on the image worker, and
+        once it drops ``_lock``: the release waits on its worker, and
         a collection there can finalize a hold whose release takes
         ``_lock``. Called with no _lock held."""
         self._hit("teardown")
@@ -2254,33 +2323,43 @@ class _ResidencyPool:
         released after the lock drops, as a release would queue on the
         worker behind a reservation that waits on the lock."""
         try:
-            with self._worker_for(False), self._build_lock:
+            with self._worker_for(), self._build_lock:
                 try:
                     yield
                 finally:
-                    if released and _holds_image_worker():
-                        self._release_images(released)
+                    held = [r for r in released if _holds_worker(r[0])]
+                    released[:] = [r for r in released
+                                   if not _holds_worker(r[0])]
+                    self._release_images(held)
         finally:
             self._release_images(released)
 
-    def _worker_for(self, image_build: bool, *, force: bool = False):
-        """Hold the image worker before the build lock for a build that
-        loads an image pipeline, or that may release one: an image entry
-        with no job is resident, or ``force``. Then the lock is never held
-        while the worker runs an image job, and a chat cold load does not
-        wait behind one. Without any, nothing is held."""
+    def _worker_for(self, build_kind=None, *, incoming: int | None = None,
+                    force: frozenset = frozenset()):
+        """Hold the workers before the build lock, image before video,
+        that a build loads its pipeline on (``build_kind``) or may release
+        one on: those whose entries the eviction for ``incoming`` bytes
+        takes, or, with ``incoming`` None, a teardown's, every worker with
+        an idle entry; and those of ``force``. Then the lock is never held
+        while a worker runs a job, and a chat cold load waits behind no
+        job of a worker it does not release on. Without any, nothing is
+        held."""
         with self._lock:
-            idle_image = any(e.is_image and e.busy == 0
-                             for e in self._entries.values())
-        if not (image_build or idle_image or force):
+            kinds = set(force)
+            if build_kind in _WORKER_KINDS:
+                kinds.add(build_kind)
+            if incoming is None:
+                kinds.update(e.kind for e in self._entries.values()
+                             if e.is_image and e.busy == 0)
+            else:
+                kinds.update(self._victim_kinds(incoming))
+        if not kinds:
             return contextlib.nullcontext()
-        from . import image_service
-
-        return image_service.reserved_worker()
+        return _reserved_workers(frozenset(kinds))
 
     def _release_images(self, pipelines: list) -> None:
         """Release image and video pipelines, ``(kind, pipeline, bytes)``,
-        on the image worker, where their arrays were made, and wait for
+        each on its kind's worker, where its arrays were made, and wait for
         each, so the next gate measures the memory back. Each one's bytes
         leave the tearing count once its release ends. Call without
         ``_lock``."""
@@ -2442,6 +2521,46 @@ def _holds_image_worker() -> bool:
     from . import image_service
 
     return image_service.worker_reserved()
+
+
+def _holds_video_worker() -> bool:
+    from . import video_service
+
+    return video_service.worker_reserved()
+
+
+def _holds_worker(kind: str) -> bool:
+    """Whether the calling thread holds the worker of ``kind`` or is it."""
+    return _holds_image_worker() if kind == IMAGE_KIND else \
+        _holds_video_worker()
+
+
+@contextlib.contextmanager
+def _reserved_workers(kinds: frozenset):
+    """Hold the workers of ``kinds``, image before video, the one order
+    every thread takes them in."""
+    from . import image_service, video_service
+
+    holds = {IMAGE_KIND: image_service.reserved_worker,
+             VIDEO_KIND: video_service.reserved_worker}
+    with contextlib.ExitStack() as stack:
+        for k in _WORKER_ORDER:
+            if k in kinds:
+                stack.enter_context(holds[k]())
+        yield
+
+
+def _owner_kind(owner) -> str:
+    """The worker kind of a turn's owner: the upload store's is the image
+    worker's, where its store turn runs."""
+    kind = getattr(owner, "kind", None)
+    return kind if kind in _WORKER_KINDS else IMAGE_KIND
+
+
+def _mine(e, kind: str) -> bool:
+    """Whether a turn on the worker of ``kind`` may shed or evict entry
+    ``e``: a chat entry, or one of its own worker."""
+    return not e.is_image or e.kind == kind
 
 
 def _collect_failed_build() -> None:

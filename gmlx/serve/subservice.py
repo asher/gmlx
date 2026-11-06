@@ -7,7 +7,9 @@ pass and request/response shape; only the plumbing lives here."""
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import os
+import queue
 import sys
 import threading
 
@@ -25,6 +27,8 @@ class SingleWorker:
         self._prefix = thread_name_prefix
         self._executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._lock = threading.Lock()
+        # The calling thread's hold of the worker, set in ``reserved``.
+        self._held = threading.local()
 
     def get(self) -> concurrent.futures.ThreadPoolExecutor:
         if self._executor is None:
@@ -36,6 +40,70 @@ class SingleWorker:
 
     def submit(self, fn, /, *args, **kwargs) -> concurrent.futures.Future:
         return self.get().submit(fn, *args, **kwargs)
+
+    def on_thread(self) -> bool:
+        """True on the worker's own thread."""
+        return threading.current_thread().name.startswith(self._prefix)
+
+    @contextlib.contextmanager
+    def reserved(self):
+        """Hold the worker for the calling thread: wait here, before the
+        caller takes any lock, for the jobs queued ahead to finish, then
+        keep the worker idle until the block ends. :meth:`run` called
+        inside the block runs on it at once. So a pool build that loads or
+        releases a pipeline never waits on the worker's queue while it
+        holds the pool's build lock. Nested blocks share the outer hold,
+        and on the worker itself there is nothing to hold."""
+        if getattr(self._held, "run", None) is not None or self.on_thread():
+            yield
+            return
+        started = threading.Event()
+        jobs: queue.SimpleQueue = queue.SimpleQueue()
+
+        def hold():
+            started.set()
+            while True:
+                item = jobs.get()
+                if item is None:
+                    return
+                fn, args, fut = item
+                try:
+                    fut.set_result(fn(*args))
+                except BaseException as e:  # noqa: BLE001 - to the caller
+                    fut.set_exception(e)
+
+        outer = self.submit(hold)
+        started.wait()
+
+        def run(fn, *args):
+            fut: concurrent.futures.Future = concurrent.futures.Future()
+            jobs.put((fn, args, fut))
+            return fut.result()
+
+        self._held.run = run
+        try:
+            yield
+        finally:
+            self._held.run = None
+            jobs.put(None)
+            outer.result()
+
+    def held(self) -> bool:
+        """True when the calling thread holds the worker (a
+        :meth:`reserved` block) or is the worker itself, so a job from it
+        runs at once instead of queueing."""
+        return getattr(self._held, "run", None) is not None or \
+            self.on_thread()
+
+    def run(self, fn, /, *args):
+        """``fn`` on the worker and its result: inline on the worker
+        itself, in the caller's hold, else queued and waited for."""
+        if self.on_thread():
+            return fn(*args)
+        run = getattr(self._held, "run", None)
+        if run is not None:
+            return run(fn, *args)
+        return self.submit(fn, *args).result()
 
 
 class SubserviceRequestError(Exception):
