@@ -517,7 +517,7 @@ def test_last_step_3_audio_misses_the_one_sample_gate():
 
 
 @pytest.mark.parametrize("case, step", [
-    ("last", 2), ("last", 8), ("clip17", 7)])
+    ("last", 2), ("last", 8), ("clip17", 7), ("first", 8)])
 def test_the_audio_misses_past_the_spread_are_recorded_cells(case, step):
     """Each shipping audio cell whose gmlx reading is over the spread's
     gate as well is recorded: gated at RECORDED_FACTOR times that
