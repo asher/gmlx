@@ -1261,7 +1261,7 @@ def test_an_upsampler_rewrites_the_prompt_before_the_encoder_reads_it(
     assert first == ("price", "a cat")
     assert (path, prompt, tag) == ("/up.gguf", "a cat", "video")
     assert rest == [("price", "the caption"), ("encode", "the caption")]
-    assert "a T2VA video of 0.17 seconds" in system
+    assert "a T2VA video of 0.21 seconds" in system
     assert system.endswith("The guide:\n\nthe guide\n")
     rec = json.loads(capsys.readouterr().out)
     assert (rec["prompt"], rec["revised_prompt"]) == ("a cat", "the caption")
@@ -1297,7 +1297,7 @@ def test_a_keyframe_run_asks_the_upsampler_for_the_guides_keyframe_task(
     assert anchored("--first-frame", first, "--last-frame", last,
                     "--upsampler", "chat", "--upsample-prompt", str(guide),
                     "--json") == 0
-    assert "an FL2VA video of 1.58 seconds, where its first and last" in (
+    assert "an FL2VA video of 1.62 seconds, where its first and last" in (
         systems[0])
     assert "You see no picture" in systems[0]
     assert anchored.seen["prompt"] == "the caption"

@@ -45,9 +45,9 @@ def task(first: bool, last: bool) -> str:
 
 
 def seconds(frames: int, fps: int) -> str:
-    """The clip's length as the guide's S.SS: the time of its last
-    frame."""
-    return f"{(frames - 1) / fps:.2f}"
+    """The clip's length as the guide's S.SS: its frames over its fps,
+    as the guide's 8 s FL2VA case puts its last picture at 8.00."""
+    return f"{frames / fps:.2f}"
 
 
 def system(guide: str, *, frames: int | None, fps: int,

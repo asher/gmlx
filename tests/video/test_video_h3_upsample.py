@@ -25,14 +25,14 @@ LINE = ("For the target video, at 0.00 seconds into the target video, "
 
 
 @pytest.mark.parametrize("first, last, task, length", [
-    (False, False, "T2VA", "5.12"),
-    (True, False, "I2VA", "5.12"),
-    (True, True, "FL2VA", "5.12"),
-    (False, True, "L2VA", "5.12"),
+    (False, False, "T2VA", "5.17"),
+    (True, False, "I2VA", "5.17"),
+    (True, True, "FL2VA", "5.17"),
+    (False, True, "L2VA", "5.17"),
 ])
 def test_the_system_prompt_names_the_task_and_the_clips_length(
         first, last, task, length):
-    """124 frames at 24 fps end at 5.12 s, the S.SS a keyframe task's
+    """124 frames at 24 fps last 5.17 s, the S.SS a keyframe task's
     instruction line holds; the guide follows gmlx's lines whole."""
     text = hf.FAMILY.upsample_system(GUIDE, 124, first, last)
     article = "a" if task == "T2VA" else "an"
@@ -46,6 +46,12 @@ def test_the_system_prompt_names_the_task_and_the_clips_length(
                 f"with S.SS as {length}") in text
         assert "You see no picture" in text
     assert text[:text.index("The guide:")].isascii()
+
+
+def test_the_guides_eight_second_case_ends_at_its_length():
+    """The guide's 8 s FL2VA case puts its last picture at 8.00: 192
+    frames at 24 fps, frames over fps as ComfyUI's node counts it."""
+    assert hu.seconds(192, 24) == "8.00"
 
 
 def test_a_prompt_of_no_known_length_is_a_text_to_video_one():
