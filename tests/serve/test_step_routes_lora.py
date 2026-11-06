@@ -758,12 +758,32 @@ def _loop_client(loops: list):
     return _client(http=_loop_app(loops))
 
 
-def _locked_at(monkeypatch, pool, name: str, loops: list) -> list:
+class _Held(list):
+    """The holder threads' results. ``joined`` waits for each holder to
+    end, so a result is in before the test reads it."""
+
+    def __init__(self):
+        super().__init__()
+        self.threads: list = []
+
+    def start(self, holder) -> None:
+        th = threading.Thread(target=holder, daemon=True)
+        self.threads.append(th)
+        th.start()
+
+    def joined(self) -> list:
+        for th in self.threads:
+            th.join(LOOP_WAIT)
+            assert not th.is_alive(), "a holder thread did not end"
+        return list(self)
+
+
+def _locked_at(monkeypatch, pool, name: str, loops: list) -> _Held:
     """Wrap the route helper ``name``: as it starts, a thread takes the
     pool's lock and asks the request's event loop to let it go. The list
     returned gets True when the loop did, and False when it did not
     within LOOP_WAIT, as when the helper waits on the lock on the loop."""
-    real, out = getattr(routes, name), []
+    real, out = getattr(routes, name), _Held()
 
     def wrapped(*a, **k):
         locked, free = threading.Event(), threading.Event()
@@ -774,7 +794,7 @@ def _locked_at(monkeypatch, pool, name: str, loops: list) -> list:
                 locked.set()
                 loop.call_soon_threadsafe(free.set)
                 out.append(free.wait(LOOP_WAIT))
-        threading.Thread(target=holder, daemon=True).start()
+        out.start(holder)
         assert locked.wait(LOOP_WAIT)
         return real(*a, **k)
 
@@ -795,7 +815,7 @@ def test_a_steps_route_checks_its_lora_without_the_pools_lock(
     x = noise_from_seed(3, SHAPE)
     free = _locked_at(monkeypatch, pool, "_hopeless", loops)
     c.step("own", None, x, [0.75], rows, patch_table=tid)
-    assert free == [True], "the route's check waited on the pool's lock"
+    assert free.joined() == [True], "the route's check waited on the pool's lock"
 
 
 def test_an_upload_takes_its_store_turn_off_the_event_loop(
@@ -811,7 +831,7 @@ def test_an_upload_takes_its_store_turn_off_the_event_loop(
     loops: list = []
     free = _locked_at(monkeypatch, pool, "_admit", loops)
     h = _loop_client(loops).put(a, kind="adapters")
-    assert free == [True], "the upload's admission waited on the loop"
+    assert free.joined() == [True], "the upload's admission waited on the loop"
     assert idle not in pool._entries.values()
     assert _store() == {h: a.nbytes}
     _books_hold(pool)
@@ -849,7 +869,7 @@ def test_a_steps_409_names_its_memory_without_the_pools_lock(
 
 # The unload routes wait on the build lock off the event loop.
 
-def _build_held_at(monkeypatch, pool, loops: list) -> list:
+def _build_held_at(monkeypatch, pool, loops: list) -> _Held:
     """Wrap an unload's eviction: as it starts, a thread takes the pool's
     build lock, as a cold load in flight holds it, and asks the request's
     event loop to let it go. The list returned gets True when the loop
@@ -857,7 +877,7 @@ def _build_held_at(monkeypatch, pool, loops: list) -> list:
     waits on the lock on the loop."""
     from gmlx.serve.patches import routes as serve_routes
 
-    real, out = serve_routes._evict_ignoring_retained, []
+    real, out = serve_routes._evict_ignoring_retained, _Held()
 
     def wrapped(*a, **k):
         locked, free = threading.Event(), threading.Event()
@@ -868,7 +888,7 @@ def _build_held_at(monkeypatch, pool, loops: list) -> list:
                 locked.set()
                 loop.call_soon_threadsafe(free.set)
                 out.append(free.wait(LOOP_WAIT))
-        threading.Thread(target=holder, daemon=True).start()
+        out.start(holder)
         assert locked.wait(LOOP_WAIT)
         return real(*a, **k)
 
@@ -888,7 +908,7 @@ def test_a_step_unload_waits_for_a_cold_load_off_the_event_loop(
     free = _build_held_at(monkeypatch, pool, loops)
     assert c.json("POST", "models/unload", {"model": "own"}) == {
         "model": "own", "unloaded": True}
-    assert free == [True], "the unload waited on the build lock on the loop"
+    assert free.joined() == [True], "the unload waited on the build lock on the loop"
     assert e not in pool._entries.values()
 
 
@@ -910,7 +930,7 @@ def test_an_unload_waits_for_a_cold_load_off_the_event_loop(
     r = _loop_app(loops).post("/unload", json={"model": "own"})
     assert (r.status_code, r.json()) == (
         200, {"status": "success", "unloaded": "own"})
-    assert free == [True], "the unload waited on the build lock on the loop"
+    assert free.joined() == [True], "the unload waited on the build lock on the loop"
     assert e not in pool._entries.values()
 
 
