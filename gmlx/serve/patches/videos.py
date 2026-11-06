@@ -153,7 +153,7 @@ def _int(fields: dict, name: str) -> int | None:
         raise Refused(400, f"{name} is a whole number", name)
     try:
         n = int(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise Refused(400, f"{name} is a whole number", name) from None
     if n < 0 or n >= 2 ** 32 or (isinstance(v, float) and v != n):
         raise Refused(400, f"{name} is a whole number from 0 to 2^32 - 1",
@@ -228,7 +228,7 @@ def _guides(fields: dict, files: dict) -> list:
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             raise Refused(400, "guides is a JSON list", "guides") from None
     if not isinstance(raw, list):
         raise Refused(400, "guides is a JSON list", "guides")
@@ -238,10 +238,11 @@ def _guides(fields: dict, files: dict) -> list:
             raise Refused(400, f"guides[{i}] is an object of file, frame and "
                           "kind", "guides")
         name, kind = g.get("file"), g.get("kind", "video")
-        if kind not in _KINDS:
+        if not isinstance(kind, str) or kind not in _KINDS:
             raise Refused(400, f"guides[{i}].kind is video or audio",
                           "guides")
-        if name not in files or name in KEYFRAMES or name == "input_reference":
+        if not isinstance(name, str) or name not in files \
+                or name in KEYFRAMES or name == "input_reference":
             raise Refused(400, f"guides[{i}].file names a file field of the "
                           "form", "guides")
         frame = g.get("frame", 0)
