@@ -261,7 +261,10 @@ async def _read_priced_body(route: str, request: Request):
         if route == "generations":
             raise _bad("this route takes a JSON body, not a multipart form")
         try:
-            form = await request.form(max_files=64)
+            # The body was priced whole and is in RAM: no part of it
+            # is larger, so its length bounds a text part.
+            form = await request.form(max_files=64,
+                                      max_part_size=max(1, len(raw)))
         except Exception as e:  # noqa: BLE001 - any parse failure is a 400
             raise _bad(f"could not parse multipart form data: {e}") from None
         fields = {}

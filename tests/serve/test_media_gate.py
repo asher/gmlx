@@ -724,3 +724,17 @@ def test_a_disconnect_inside_a_route_still_raises():
 
     with pytest.raises(ClientDisconnect):
         asyncio.run(app(scope, receive, send))
+
+
+def test_the_gate_reads_a_forms_text_part_past_a_mib():
+    import asyncio
+
+    from starlette.datastructures import Headers
+
+    b = "b0"
+    text = "a" * (2 << 20)
+    raw = (f'--{b}\r\nContent-Disposition: form-data; name="prompt"\r\n\r\n'
+           f"{text}\r\n--{b}--\r\n").encode()
+    headers = Headers({"content-type": f"multipart/form-data; boundary={b}"})
+    assert asyncio.run(mg.multipart_text_fields(headers, raw)) == [
+        ("prompt", text)]

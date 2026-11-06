@@ -27,12 +27,14 @@ Three classes of body are left to their routes, unread:
   (:mod:`gmlx.serve.patches.body_intake`).
 - POST bodies to /v1/videos, whose route prices a JSON body or a form's
   text fields from free memory and streams a form's files to the video
-  job store, bounded by its room, then runs the gate's checks on the text
+  job store, within the room it reserves there. It runs the gate's
+  checks on a JSON body; a form's text fields have no gate rule, and the
+  route's own checks of each field refuse a path or a URL
   (:mod:`gmlx.serve.patches.body_intake`).
 
 A request on a launch session socket keeps the session's body limit: the
-gate reads an images API or /v1/videos body to it, as before, and the
-route reads the copy.
+gate reads an images API body to it, as before, and the route reads the
+copy. A session does not serve /v1/videos.
 
 The gate is the fast, clearly worded refusal. The boundary is in
 :mod:`gmlx.serve.media_sinks`, which checks every reference again in the
@@ -650,7 +652,8 @@ class _Discard:
 
 async def multipart_text_fields(headers, raw: bytes) -> list[tuple[str, str]]:
     """The text fields of a multipart body, parsed by the parser a route's
-    ``request.form()`` uses, with the file parts discarded unread."""
+    ``request.form()`` uses, with the file parts discarded unread. The
+    body is in RAM whole, so its length bounds a text part."""
     from starlette.formparsers import MultiPartParser
 
     class _TextParser(MultiPartParser):
@@ -662,7 +665,7 @@ async def multipart_text_fields(headers, raw: bytes) -> list[tuple[str, str]]:
     async def stream():
         yield raw
 
-    parser = _TextParser(headers, stream())
+    parser = _TextParser(headers, stream(), max_part_size=max(1, len(raw)))
     try:
         form = await parser.parse()
     finally:

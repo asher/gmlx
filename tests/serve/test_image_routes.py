@@ -1074,3 +1074,19 @@ def test_a_launch_session_keeps_its_body_limit_on_the_images_api(
     r = TestClient(app).post("/v1/images/generations", content=body,
                              headers={"content-type": "application/json"})
     assert r.status_code == 200, r.text
+
+
+def test_an_edit_forms_text_part_past_a_mib_is_read(served, monkeypatch):
+    """A text part has no bound of its own: the body was priced whole,
+    and the gate's check and the route both read a prompt of 2 MiB."""
+    from gmlx.serve.patches import body_intake
+
+    monkeypatch.setattr(body_intake, "free_bytes", lambda: 64 << 20)
+    prompt = "a" * (2 << 20)
+    r = TestClient(_gated_app()).post(
+        "/v1/images/edits", files=[("image[]", ("a.png", _png(),
+                                                "image/png"))],
+        data={"prompt": prompt})
+    assert r.status_code == 200, r.text
+    (req, _), = served.jobs
+    assert req.prompt == prompt
