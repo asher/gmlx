@@ -47,6 +47,13 @@ _DISCONNECT_POLL_S = 0.25
 _CONSUMED = {"generations": IMAGES_GENERATIONS_CONSUMED,
              "edits": IMAGES_EDITS_CONSUMED,
              "variations": IMAGES_VARIATIONS_CONSUMED}
+# The copies of a body its read and parse hold, which its price counts.
+# A form: the body, and the route form's bytearray and str of its text,
+# measured at 3.04. A JSON body: the body, the gate's json.loads and its
+# decode of an edit image, then the route's, measured at 4.75 with a data
+# URL. The post-V6 parse change removes the copies.
+FORM_COPIES = 3.25
+JSON_COPIES = 5
 
 
 class _State:
@@ -249,15 +256,17 @@ async def _read_priced_body(route: str, request: Request):
     from ..image_service import ImageRequestError, _bad, decode_image
     from .body_intake import BodyRefused, check_media, read_in_ram
 
+    ctype = request.headers.get("content-type", "").lower()
+    is_form = ctype.startswith("multipart/form-data")
     try:
-        raw = await read_in_ram(request)
+        raw = await read_in_ram(request, copies=FORM_COPIES if is_form
+                                else JSON_COPIES)
         await check_media(request, raw)
     except BodyRefused as e:
         raise ImageRequestError(e.status, str(e), param=e.param,
                                 headers=e.headers) from None
-    ctype = request.headers.get("content-type", "").lower()
     images, mask = [], None
-    if ctype.startswith("multipart/form-data"):
+    if is_form:
         if route == "generations":
             raise _bad("this route takes a JSON body, not a multipart form")
         try:

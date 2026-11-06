@@ -993,7 +993,8 @@ def test_the_gate_leaves_an_images_body_to_the_route_and_its_price(
     body = json.dumps({"prompt": "x", "images": [{"image_url": uri}]})
     monkeypatch.setattr(mg, "BODY_MAX_BYTES", len(body) // 2)
     monkeypatch.setattr(mg, "MEDIA_MAX_BYTES", len(png) // 2)
-    monkeypatch.setattr(body_intake, "free_bytes", lambda: 4 * len(body))
+    monkeypatch.setattr(body_intake, "free_bytes", lambda: body_intake.held(
+        len(body), images.JSON_COPIES))
     r = TestClient(_gated_app()).post(
         "/v1/images/edits", content=body,
         headers={"content-type": "application/json"})
@@ -1020,13 +1021,49 @@ def test_an_images_body_past_the_memory_free_answers_413_before_its_read(
         r = send(conn, "/v1/images/generations", b"{", length=8 << 20)
         assert r.status == 413, r.body
         assert json.loads(r.body)["error"]["message"] == (
-            "the request body is 8.0 MiB, and 1.0 MiB of memory is free "
-            "beside the models loaded; send a smaller body, or unload a "
-            "model to make room")
+            "the request body is 8.0 MiB, its read holds 5 times that, and "
+            "1.0 MiB of memory is free beside the models loaded; send a "
+            "smaller body, or unload a model to make room")
         assert r.getheader("connection") == "close"
         assert closed(other)
         conn.close()
     assert served.jobs == []
+
+
+def _edit_form(prompt: str) -> tuple[bytes, str]:
+    b = "gmlxboundary"
+    body = (f'--{b}\r\nContent-Disposition: form-data; name="prompt"\r\n'
+            f"\r\n{prompt}\r\n--{b}\r\nContent-Disposition: form-data; "
+            f'name="image[]"; filename="a.png"\r\nContent-Type: image/png'
+            f"\r\n\r\n").encode() + _png() + f"\r\n--{b}--\r\n".encode()
+    return body, f"multipart/form-data; boundary={b}"
+
+
+@pytest.mark.parametrize("kind", ["json", "form"])
+def test_an_images_body_is_priced_at_the_copies_its_parse_holds(
+        served, monkeypatch, kind):
+    """The read and the parse hold the body a few times over: the price
+    counts each copy, so a body fits only where all of them fit."""
+    from gmlx.serve.patches import body_intake
+
+    prompt = "a" * (256 << 10)
+    if kind == "json":
+        body = json.dumps({"prompt": prompt}).encode()
+        ctype, path, copies = ("application/json", "/v1/images/generations",
+                               images.JSON_COPIES)
+    else:
+        body, ctype = _edit_form(prompt)
+        path, copies = "/v1/images/edits", images.FORM_COPIES
+    need = body_intake.held(len(body), copies)
+    for free, status in ((need - 1, 413), (need, 200)):
+        monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
+        r = TestClient(_gated_app()).post(path, content=body,
+                                          headers={"content-type": ctype})
+        assert r.status_code == status, r.text
+        if status == 413:
+            assert f", its read holds {copies:g} times that, " in \
+                r.json()["error"]["message"]
+    assert len(served.jobs) == 1
 
 
 def test_an_images_body_with_no_length_stops_at_the_memory_free(
@@ -1048,8 +1085,10 @@ def test_an_images_body_with_no_length_stops_at_the_memory_free(
         "/v1/images/generations", content=chunks(),
         headers={"content-type": "application/json"})
     assert r.status_code == 413, r.text
-    assert r.json()["error"]["message"].startswith(
-        "the request body is over 64.0 KiB")
+    msg = r.json()["error"]["message"]
+    assert msg.startswith("the request body is over "), msg
+    assert ", its read holds 5 times that, and 64.0 KiB of memory is " \
+        "free" in msg
     assert served.jobs == []
 
 
