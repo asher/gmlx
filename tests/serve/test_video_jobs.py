@@ -535,7 +535,7 @@ def test_no_ffmpeg_is_a_501_with_the_missing_program_text(routes,
 
     monkeypatch.setattr(media_programs, "find", lambda n: None)
     monkeypatch.setattr(media_programs, "problem", lambda n: (
-        "the server cannot find ffmpeg. Install it with `brew install "
+        "The gmlx server finds no ffmpeg on its PATH. Install it with `brew install "
         "ffmpeg`, or start the server from a shell whose PATH holds your "
         "ffmpeg."))
     r = routes.client.post("/v1/videos", json={"prompt": "a cat"})
@@ -797,4 +797,31 @@ def test_the_jobs_pacer_reaches_the_sampler_and_stops_the_job(
         vj._clip_part(job, store, hold, store.clip(job.id))
     assert seen["pacer"] is not None
     assert job.record["gmlx"]["step"] == 1
+    assert order[-1] == ("settle", vj.JOB)
+
+
+def test_the_decode_paces_and_stops_between_its_pieces(tmp_path,
+                                                       monkeypatch):
+    """Chat's share and the stop run after each decoded piece, and the
+    progress counts the frames."""
+    from gmlx.serve.image_service import JobStopped
+    from gmlx.video import run
+
+    order = []
+    hold = _clip_part_stubs(monkeypatch, order, lambda *a, **k: (
+        __import__("mlx.core").core.zeros((1,)),) * 2)
+    store, clock, driver = _store(tmp_path)
+    job = _clip_job(store)
+    seen = []
+
+    def decode(*a, between, **k):
+        between(11)
+        seen.append(job.record["gmlx"]["frames_decoded"])
+        job.stop.set()
+        between(22)
+
+    monkeypatch.setattr(run, "decode_and_mux", decode)
+    with pytest.raises(JobStopped):
+        vj._clip_part(job, store, hold, store.clip(job.id))
+    assert seen == [11]
     assert order[-1] == ("settle", vj.JOB)

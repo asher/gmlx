@@ -735,7 +735,8 @@ def job_pacer(job: Job):
             raise JobStopped(timed_out=False)
         if chat is not None:
             chat(arrays)
-        mx.eval(*arrays)
+        if arrays:
+            mx.eval(*arrays)
 
     return fn
 
@@ -752,7 +753,6 @@ def _clip_part(job: Job, store: VideoJobs, hold, out: str) -> None:
     from gmlx.video.vae.reader import load_vae
 
     from . import video_service as vs
-    from .image_service import JobStopped
     from .patches.image_steps import _check_clip, _factor_turn, _lora_pool
 
     served = hold._entry.pipeline
@@ -791,23 +791,22 @@ def _clip_part(job: Job, store: VideoJobs, hold, out: str) -> None:
         store.progress(job, phase="decoding")
 
         def between(n):
-            if job.stop.is_set():
-                raise JobStopped(timed_out=False)
+            # The decode's pause point: the stop, and chat's share.
+            pace(())
             store.progress(job, frames=(n, s["frames"]))
 
         from gmlx.video.families.h3 import family as hf
 
-        with paced(pace):
-            run.decode_and_mux(
-                xv, xa, frames=s["frames"], width=s["width"],
-                height=s["height"], fps=hf.FPS, rate=SAMPLE_RATE, out=out,
-                ffmpeg=job.params["ffmpeg"], between=between,
-                audio_vae=lambda: load_vae(
-                    os.path.expanduser(served.spec.audio_vae),
-                    family="h3_audio", dtype=mx.float32),
-                video_vae=lambda: load_vae(
-                    os.path.expanduser(served.spec.vae), family="h3",
-                    dtype=mx.float16))
+        run.decode_and_mux(
+            xv, xa, frames=s["frames"], width=s["width"],
+            height=s["height"], fps=hf.FPS, rate=SAMPLE_RATE, out=out,
+            ffmpeg=job.params["ffmpeg"], between=between,
+            audio_vae=lambda: load_vae(
+                os.path.expanduser(served.spec.audio_vae),
+                family="h3_audio", dtype=mx.float32),
+            video_vae=lambda: load_vae(
+                os.path.expanduser(served.spec.vae), family="h3",
+                dtype=mx.float16))
     finally:
         if pool is not None:
             from .image_service import lora_settle

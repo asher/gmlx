@@ -1084,6 +1084,44 @@ def test_a_32_gb_h3_entry_runs_a_keyframe_step_beside_the_caches_it_books(
                                                                  beside)
 
 
+@pytest.mark.parametrize("mac, size, admitted", [
+    (32, "1344x768", False), (32, "768x768", True), (36, "1344x768", True)])
+def test_an_h3_entry_with_an_upsampler_on_a_32_or_36_gb_mac(
+        monkeypatch, mac, size, admitted):
+    """docs/config.md and docs/video.md: an entry with an upsampler books a
+    caption of the upsampler's max_tokens, so on a 32 GB Mac an h3 entry
+    of the default 1344x768 clip is refused at its load, and one of
+    768x768 loads; on a 36 GB Mac the 1344x768 entry loads, and a step
+    with both keyframes runs beside the caches it books."""
+    from gmlx.serve import capacity, image_service
+    from gmlx.serve import video_service as vs
+    from gmlx.video import memfit
+    from gmlx.video.families.h3 import family as hf
+    from gmlx.video.layout import AnchorRows
+
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    budget = capacity.ram_budget_bytes(mac << 30)
+    spec = _h3_entry(monkeypatch, "h3", size, 5, budget)
+    spec.upsampler = "chat"
+    if not admitted:
+        with pytest.raises(memfit.VideoMemoryError, match="over the working "
+                           "budget"):
+            vs.entry_plan(spec)
+        return
+    entry = vs.entry_plan(spec)
+    w, h = entry.size
+    tok = hf.vision_tokens(w, h)
+    anchors = (AnchorRows(0, 1, 0), AnchorRows(entry.frames - 1, 1, 0))
+    d = vs.plan_clip(entry, frames=entry.frames, width=w, height=h,
+                     text=vs.PRICED_TEXT_ROWS + 2 * (tok + 8),
+                     anchors=anchors, budget=budget).terms["denoise"]
+    tensor, _cap = image_service.cache_bytes()
+    booked = (int(_cache_term() * entry.cache_share)
+              + max(0, entry.tensor_floor - int(tensor * entry.cache_share))
+              + vs.caption_bytes(5376, entry.text_rows))
+    assert int(d["dit"] + d["lora"] + d["step"]) + booked <= budget
+
+
 @pytest.mark.parametrize("steps_api, tensor_mb, floor", [
     (False, 64, 0), (True, 16, 16 << 20)])
 def test_a_video_entry_keeps_cond_room_only_in_a_tensor_cache_it_has(
