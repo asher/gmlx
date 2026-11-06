@@ -8,8 +8,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Ricursive Ripple-65B Preview loads, `gmlx pull ripple-65b` fetches it, and it
-  runs speculative decoding with its DFlash2 drafter. `scripts/convert_dflash2.py`
+- Ricursive Ripple-65B Preview loads, and `gmlx pull ripple-65b` fetches it with
+  its DFlash2 drafter for speculative decoding. `scripts/convert_dflash2.py`
   converts the drafter to GGUF.
 - NVIDIA Nemotron 3.5 Transcribe hears audio through its speech encoder in
   `gmlx run`, chat and `gmlx serve`, and answers `/v1/audio/transcriptions`

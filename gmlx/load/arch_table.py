@@ -127,7 +127,7 @@ _CAVEATS = {
     "flint": "The GGUF has no MTP head, so speculative decoding is not available. `--kv-bits` has no effect, and the KV cache stays fp16.",
     "graniteswitch": "The GGUF has no MTP head, so speculative decoding is not available.",
     "beam": "Speculative decoding is not available: the DFlash2 drafter ships only as safetensors.",
-    "ricursive": "Speculative decoding needs the DFlash2 drafter GGUF beside the model or named with `--draft-gguf`.",
+    "ricursive": "Speculative decoding needs the DFlash2 drafter GGUF: `gmlx pull ripple-65b` pairs it; otherwise name it with `--draft-gguf`.",
     "qwen4exp": "Speculative decoding needs a companion MTP GGUF beside the model or in an `MTP` folder, or named with `--draft-gguf`.",
     "kimi-k3": "The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again with the next message.",
     "glm5-next": "The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again with the next message.",

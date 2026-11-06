@@ -613,9 +613,14 @@ def test_the_ripple_entry_steps_down_the_quants_by_memory_class():
     picks = {}
     for cls in (32, 48, 64, 128):
         dp = catalog.default_plan(m, catalog.box_for_class(cls))
-        assert dp is not None and not dp.streaming and not dp.drafter
-        picks[cls] = dp.rung.quant
-    assert picks == {32: "IQ2_XXS", 48: "IQ3_XXS", 64: "Q4_K_M", 128: "Q4_K_M"}
+        assert dp is not None and not dp.streaming
+        picks[cls] = (dp.rung.quant, dp.drafter)
+    # The drafter stays on where it fits, one quant step down at 48 GB.
+    assert picks == {32: ("IQ2_XXS", False), 48: ("IQ2_S", True),
+                     64: ("Q4_K_M", True), 128: ("Q4_K_M", True)}
+    # The drafter repo is not pinned: its ref follows main.
+    refs = catalog.plan_refs(catalog.default_plan(m, catalog.box_for_class(128)))
+    assert refs[1] == "hf:ashbash/Ripple-65B-Preview-DFlash2-GGUF/Ripple-65B-Preview-DFlash2-Q8_0.gguf@main"
     assert catalog.needs_class(m, catalog.find_rung(m, "balanced")) == 64
     assert catalog.needs_class(m, catalog.find_rung(m, "xhigh")) == 96
 
@@ -728,7 +733,9 @@ def test_seed_rungs_are_well_formed(m):
             assert re.match(r"^(UD-)?(IQ|Q)[123]_", r.quant), (m.name, r.quant)
     if m.drafter is not None:
         d = m.drafter
-        assert d.repo and d.revision != "main" and d.file.endswith(".gguf") and d.bytes > 0
+        branch = catalog.SEEDS[m.name].drafter_revision
+        assert d.revision == branch if branch else d.revision != "main", (m.name, d.revision)
+        assert d.repo and d.file.endswith(".gguf") and d.bytes > 0
         assert d.kind == "dflash2" or arch_table.drafter_serves(d.kind, m.arch) is not False, d
     if m.mmproj:
         assert m.mmproj.endswith(".gguf") and m.mmproj_bytes > 0

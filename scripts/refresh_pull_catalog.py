@@ -431,6 +431,9 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
     if seed.drafter_file:
         if seed.drafter_repo == seed.repo:
             d_rev, d_files = revision, files
+        elif seed.drafter_revision:
+            d_rev = seed.drafter_revision
+            d_files = listing(seed.drafter_repo, d_rev)
         else:
             d_card = card(seed.drafter_repo)
             d_rec = (recorded or {}).get("drafter")
