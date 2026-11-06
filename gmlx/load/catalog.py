@@ -347,6 +347,12 @@ _SEED = (
          # whole model in 91 GB and leaves room for other apps.
          preferred_at=((128, "fastest"),),
          use="documents, code and tool calls"),
+    Seed("ripple-65b", "Ripple-65B Preview", "AtomicChat/Ripple-65B-Preview-GGUF", "balanced",
+         "A dense 65B reasoning and chat model with a 2M token context.",
+         "Steady: a 65B dense model reads all of its weights per token.",
+         aliases=("ripple",),
+         params="65B",
+         use="reasoning and chat, long context"),
     Seed("glm-5.3-flash", "GLM-5.3-Flash", "unsloth/GLM-5.3-Flash-GGUF", "balanced",
          "A strong coding and agent model.",
          "Quick for its size: it reads a small part of its weights per token.",

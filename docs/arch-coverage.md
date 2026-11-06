@@ -70,6 +70,6 @@ family, backend, status and caveat:
 | `qwen3vl` | qwen3 | mlx-lm | loadable |  |
 | `qwen3vlmoe` | qwen3 | mlx-lm | loadable |  |
 | `qwen4exp` | qwen3 | mlx-lm | loadable | Speculative decoding needs a companion MTP GGUF beside the model or in an `MTP` folder, or named with `--draft-gguf`. |
-| `ricursive` | ripple | mlx-lm | loadable |  |
+| `ricursive` | ripple | mlx-lm | loadable | Speculative decoding needs the DFlash2 drafter GGUF beside the model or named with `--draft-gguf`. |
 | `seed_oss` | seed_oss | mlx-lm | loadable |  |
 | `smollm3` | llama | mlx-lm | loadable |  |

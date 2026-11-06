@@ -607,6 +607,19 @@ def test_the_transcribe_entry_keeps_its_encoder_and_drops_the_head_on_32_gb(tmp_
     assert big.mmproj and big.head and catalog.plan_speculates(big)
 
 
+def test_the_ripple_entry_steps_down_the_quants_by_memory_class():
+    m = catalog.model("ripple")
+    assert m is not None and m.arch == "ricursive" and catalog.has_tiers(m)
+    picks = {}
+    for cls in (32, 48, 64, 128):
+        dp = catalog.default_plan(m, catalog.box_for_class(cls))
+        assert dp is not None and not dp.streaming and not dp.drafter
+        picks[cls] = dp.rung.quant
+    assert picks == {32: "IQ2_XXS", 48: "IQ3_XXS", 64: "Q4_K_M", 128: "Q4_K_M"}
+    assert catalog.needs_class(m, catalog.find_rung(m, "balanced")) == 64
+    assert catalog.needs_class(m, catalog.find_rung(m, "xhigh")) == 96
+
+
 # -- text ----------------------------------------------------------------------------
 
 def test_recommendation_and_entry_text_are_plain(small_catalog):
