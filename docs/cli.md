@@ -1359,7 +1359,7 @@ id, or `h3-2` when another entry has that id.
 |------|---------|---------|
 | `RECIPE`, positional | Required | Pull this recipe. |
 | `--config FILE` | The first default location | Add the entry to this config, and search its `model_dirs`. |
-| `--dir DIR` | The first `model_dirs` folder | Download into this folder. |
+| `--dir DIR` | The first `model_dirs` folder | Download into this folder, which must lie inside a `model_dirs` folder. |
 | `--yes`, `-y` | Off | Download without asking. |
 | `--force` | Off | Download even when the free disk space looks too small, or this Mac's chip or memory does not run the model. |
 | `--dry-run` | Off | Print what the pull finds and would download, and stop. |

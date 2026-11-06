@@ -584,11 +584,15 @@ def test_a_file_that_lands_during_the_pull_is_not_replaced(lib, monkeypatch,
                    for _, ds, _ in os.walk(root) for n in ds)
 
 
-def test_a_download_outside_model_dirs_is_not_registered(lib, tmp_path,
-                                                         capsys):
-    _, cfg, _ = lib
-    assert _pull(cfg, "--yes", "--dir", str(tmp_path / "elsewhere")) == 0
-    assert "is not registered" in capsys.readouterr().err
+@pytest.mark.parametrize("flags", [["--yes"], ["--dry-run"]])
+def test_a_dir_outside_model_dirs_is_refused_before_any_download(
+        lib, tmp_path, capsys, flags):
+    _, cfg, got = lib
+    elsewhere = tmp_path / "elsewhere"
+    assert _pull(cfg, *flags, "--dir", str(elsewhere)) == 1
+    err = capsys.readouterr().err
+    assert "is outside the model_dirs" in err and "pass a --dir inside" in err
+    assert got == [] and not elsewhere.exists()
     from gmlx.config import load_config
 
     assert load_config(cfg).video_models == {}
@@ -655,6 +659,7 @@ def test_an_image_pull_does_not_take_a_video_id():
 def test_the_download_folder_expands_variables_and_home(
         lib, monkeypatch, tmp_path, form):
     _, cfg, _ = lib
+    cfg.write_text(cfg.read_text() + f"    - {tmp_path / 'dl'}\n")
     monkeypatch.setenv("GMLX_TEST_DL", str(tmp_path / "dl"))
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)

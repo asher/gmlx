@@ -367,6 +367,18 @@ def _registered(plan: Plan, cfg) -> str | None:
     return None
 
 
+def _outside(plan: Plan, cfg) -> str | None:
+    """The first file of ``plan`` outside every model_dirs root of
+    ``cfg``, else None."""
+    roots = [os.path.abspath(os.path.expanduser(os.path.expandvars(d)))
+             for d in cfg.model_dirs]
+    for p in plan.parts:
+        ap = os.path.abspath(p.path)
+        if not any(ap == r or ap.startswith(r + os.sep) for r in roots):
+            return p.path
+    return None
+
+
 def register(plan: Plan, cfg_path: str, out=None) -> str | None:
     """Add the recipe under ``video_models:``, named as the recipe unless
     another entry takes that id. Returns the id, or None when an entry
@@ -376,14 +388,11 @@ def register(plan: Plan, cfg_path: str, out=None) -> str | None:
 
     out = out or sys.stdout
     cfg = load_config(cfg_path)
-    roots = [os.path.abspath(os.path.expanduser(os.path.expandvars(d)))
-             for d in cfg.model_dirs]
-    for p in plan.parts:
-        ap = os.path.abspath(p.path)
-        if not any(ap == r or ap.startswith(r + os.sep) for r in roots):
-            print(f"note: {p.path} is outside the config's model_dirs, so "
-                  f"{plan.recipe.name} is not registered", file=sys.stderr)
-            return None
+    stray = _outside(plan, cfg)
+    if stray is not None:
+        print(f"note: {stray} is outside the config's model_dirs, so "
+              f"{plan.recipe.name} is not registered", file=sys.stderr)
+        return None
     entry = _entry(plan, cfg)
     name = plan.recipe.name
     old = _registered(plan, cfg)
@@ -486,6 +495,13 @@ def cmd_pull(argv: list[str], prog: str = "gmlx video pull") -> int:
             print(f"error: {p.path} is there and is not the {r.title} "
                   f"{_ROLE[p.role]}; move it away and pull again",
                   file=sys.stderr)
+        return 1
+    # A file outside model_dirs is not registered, so it does not download.
+    stray = _outside(plan, cfg) if cfg is not None else None
+    if stray is not None:
+        print(f"error: {stray} is outside the model_dirs of {cfg_path}, so "
+              f"{r.name} would not be registered; pass a --dir inside one, "
+              "or add the folder to model_dirs", file=sys.stderr)
         return 1
     if a.dry_run:
         return 0
