@@ -1803,17 +1803,21 @@ async def video_encode(request: Request):
                               level=level, is_open=is_open)
             if fit is not None and fit[0] > fit[1]:
                 need, free, k = fit
-                shown = (f"a {width}x{height} frame" if clip == 1 else
-                         f"a guide clip of {clip} frames of {width}x{height}")
+                cost = (f"{dtype.lower()} on the wire, needs "
+                        f"{need / (1 << 30):.2f} GiB, and "
+                        f"{max(free, 0) / (1 << 30):.2f} GiB is free")
+                if clip == 1:
+                    shown = f"a {width}x{height} frame"
+                    told = f"the frame, {cost}"
+                else:
+                    shown = (f"a guide clip of {clip} frames of "
+                             f"{width}x{height}")
+                    told = (f"its window of {n} frames, {cost}; " + (
+                        f"a window of {17 * k} frames, or {17 * k + 5} at "
+                        "the clip's end, fits" if k else "no window fits"))
                 raise StepError(
                     400, f"a video encode of {shown} does not fit in memory "
-                    f"beside the models now loaded: its window of {n} "
-                    f"frames, {dtype.lower()} on the wire, needs "
-                    f"{need / (1 << 30):.2f} GiB, and "
-                    f"{max(free, 0) / (1 << 30):.2f} GiB is free; "
-                    + (f"a window of {17 * k} frames, or {17 * k + 5} at the "
-                       "clip's end, fits" if k else "no window fits"),
-                    window=k)
+                    f"beside the models now loaded: {told}", window=k)
             raw = await body.rest(MAX_BODY_BYTES)
             try:
                 tensors, _ = read(raw, max_bytes=MAX_BODY_BYTES)

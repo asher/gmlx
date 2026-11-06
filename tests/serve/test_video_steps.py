@@ -1871,21 +1871,22 @@ def test_the_vae_encodes_are_the_vaes_on_comfyuis_layouts(host, vaes, route,
     assert np.array_equal(lat, want)
 
 
-@pytest.mark.parametrize("route", ["video", "audio"])
+@pytest.mark.parametrize("route, n", [("video", 22), ("video", 1),
+                                      ("audio", 0)])
 def test_a_vae_encode_that_does_not_fit_beside_the_models_is_refused(
-        host, vaes, route):
+        host, vaes, route, n):
     """An anchor's encode loads its VAE beside the DiT, which stays, and
     is priced as the video command prices the anchors of a run: a guide
-    clip at its frames and size, a sound at its latents."""
+    clip or a keyframe at its frames and size, a sound at its latents."""
     served = host.served
     served.spec.vae = vaes["vae"]
     served.spec.audio_vae = vaes["audio_vae"]
     c = _client()
-    sent = _encode_inputs(route)
+    sent = _encode_inputs(route, n or 22)
     wire_bytes = 0
     if route == "video":
-        clip = dict(frames=22, width=32, height=32,
-                    anchors=(layout.AnchorRows(0, 7, 0),))
+        clip = dict(frames=max(served.plan.frames, n), width=32, height=32,
+                    anchors=(layout.AnchorRows(0, 7 if n > 1 else 1, 0),))
         # The body and its MLX copy.
         wire_bytes = 2 * sent["frames"].nbytes
     else:
@@ -1901,11 +1902,15 @@ def test_a_vae_encode_that_does_not_fit_beside_the_models_is_refused(
     if route == "video":
         need = (work + wire_bytes) / (1 << 30)
         free = (work + wire_bytes - 1) / (1 << 30)
-        assert e.value.body == {"error": (
-            "a video encode of a guide clip of 22 frames of 32x32 does not "
-            "fit in memory beside the models now loaded: its window of 22 "
-            f"frames, f32 on the wire, needs {need:.2f} GiB, and "
-            f"{free:.2f} GiB is free; no window fits"), "window": 0}
+        cost = (f"f32 on the wire, needs {need:.2f} GiB, and {free:.2f} GiB "
+                "is free")
+        told = ("a 32x32 frame does not fit in memory beside the models now "
+                f"loaded: the frame, {cost}" if n == 1 else
+                "a guide clip of 22 frames of 32x32 does not fit in memory "
+                "beside the models now loaded: its window of 22 frames, "
+                f"{cost}; no window fits")
+        assert e.value.body == {"error": f"a video encode of {told}",
+                                "window": 0}
     else:
         assert e.value.body["error"] == (
             "an audio encode of 1000 samples does not fit in memory beside "
@@ -1990,6 +1995,7 @@ RULES = ("breaks the rules: a guide clip goes in windows, each at frame "
     (136, 0, 141, True),      # 8 pieces in an open window
     (141, 0, 141, False),     # 8 pieces and the end in one body
     (22, 17, 22, False),      # past the clip's end
+    (17, 17, 22, True),       # an open window past the clip's end
 ])
 def test_a_window_off_the_rules_is_refused_by_them(host, n, at, clip,
                                                    is_open):
@@ -2049,7 +2055,8 @@ def test_a_window_is_priced_from_its_header_and_its_frames_drained(
     """The window's price is read before a byte of its frames: the body
     arrives a chunk at a time, the refusal comes after the header alone,
     and the rest is read and dropped so a client still sending gets it.
-    The refusal names the largest window that fits, 3 pieces."""
+    The refusal names the largest window that fits, 3 pieces, and the
+    drain holds no more than one chunk of 4096 bytes at a time."""
     import asyncio
 
     served = host.served
@@ -2065,8 +2072,17 @@ def test_a_window_is_priced_from_its_header_and_its_frames_drained(
     host.budget_bytes = adapters + caches + need(56, 17)
     seen: list = []
     budget = host.budget
-    monkeypatch.setattr(host, "budget",
-                        lambda hold: seen.append("price") or budget(hold))
+    held: list = []
+    monkeypatch.setattr(host, "budget", lambda hold: seen.append("price")
+                        or held.append("price") or budget(hold))
+    more = routes._Stream._more
+
+    async def _more(self):
+        go = await more(self)
+        held.append(len(self.got))
+        return go
+
+    monkeypatch.setattr(routes._Stream, "_more", _more)
     monkeypatch.setattr(vs, "encode_video", lambda *a, **k: seen.append(
         "encode"))
     body = wire.write({"frames": _levels(119)},
@@ -2081,6 +2097,8 @@ def test_a_window_is_priced_from_its_header_and_its_frames_drained(
     assert seen.index("price") < seen.index("chunk 1")
     assert seen.count("price") >= 1 and "encode" not in seen
     assert seen[-1] == f"chunk {chunks - 1}"
+    drained = [x for x in held[held.index("price") + 1:] if x != "price"]
+    assert len(drained) >= chunks - 1 and max(drained) <= 4096
 
 @pytest.mark.parametrize("route, model, want", [
     ("vae/decode", "h3", "'h3' is a video model, and vae/decode takes an "
