@@ -353,7 +353,7 @@ _SEED = (
          "Steady: a 65B dense model reads all of its weights per token.",
          aliases=("ripple",),
          drafter_repo="ashbash/Ripple-65B-Preview-DFlash2-GGUF",
-         drafter_file="Ripple-65B-Preview-DFlash2-Q8_0.gguf",
+         drafter_file="Ripple-65B-Preview-DFlash2-Q4_K_M.gguf",
          drafter_revision="main",
          params="65B",
          use="reasoning and chat, long context"),

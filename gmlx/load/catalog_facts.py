@@ -504,7 +504,7 @@ FACTS: dict = {
         'license_url': 'https://huggingface.co/AtomicChat/Ripple-65B-Preview-GGUF/blob/265a516b077309363590b9ca8e29d6d414050135/LICENSE',
         'license_name': '',
         'mmproj_bytes': 0,
-        'drafter': ('dflash2', 'main', 4295047776),
+        'drafter': ('dflash2', 'main', 2387245664),
         'heads': 80,
         'trained_ctx': 2097152,
         'kv_cost': (('window', 1024, 4096.0, 64), ('full', 0, 4096.0, 16)),

@@ -615,12 +615,12 @@ def test_the_ripple_entry_steps_down_the_quants_by_memory_class():
         dp = catalog.default_plan(m, catalog.box_for_class(cls))
         assert dp is not None and not dp.streaming
         picks[cls] = (dp.rung.quant, dp.drafter)
-    # The drafter stays on where it fits, one quant step down at 48 GB.
-    assert picks == {32: ("IQ2_XXS", False), 48: ("IQ2_S", True),
+    # The drafter stays on wherever a tier fits beside it.
+    assert picks == {32: ("IQ2_XXS", False), 48: ("IQ3_XXS", True),
                      64: ("Q4_K_M", True), 128: ("Q4_K_M", True)}
     # The drafter repo is not pinned: its ref follows main.
     refs = catalog.plan_refs(catalog.default_plan(m, catalog.box_for_class(128)))
-    assert refs[1] == "hf:ashbash/Ripple-65B-Preview-DFlash2-GGUF/Ripple-65B-Preview-DFlash2-Q8_0.gguf@main"
+    assert refs[1] == "hf:ashbash/Ripple-65B-Preview-DFlash2-GGUF/Ripple-65B-Preview-DFlash2-Q4_K_M.gguf@main"
     assert catalog.needs_class(m, catalog.find_rung(m, "balanced")) == 64
     assert catalog.needs_class(m, catalog.find_rung(m, "xhigh")) == 96
 
