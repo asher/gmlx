@@ -971,6 +971,39 @@ def test_a_tight_video_entry_keeps_one_cond_in_the_tensor_cache(
     assert got.cache_share == 1.0 and got.footprint <= budget
 
 
+# A caption of the H3 upsampler's 6144 tokens and the one row of its
+# empty template.
+_CAPTION_ROWS = 6145
+
+
+def test_an_entry_with_an_upsampler_books_a_caption_of_its_max_tokens(
+        monkeypatch):
+    """An entry that names an upsampler prices its encode, its tensor
+    cache's cond and its refined rows at a caption of the upsampler's
+    max_tokens. The cond, 120 MiB of f32 rows, stands past the 64 MiB
+    tensor cache, booked in the footprint, so the encode's put takes it."""
+    from gmlx.serve import image_service
+    from gmlx.serve import video_service as vs
+
+    spec = _h3_entry(monkeypatch, "h3-base", "512x512", 1)
+    spec.upsampler = "chat"
+    got = vs.entry_plan(spec)
+    cond = _CAPTION_ROWS * 5120 * 4
+    tensor, _cap = image_service.cache_bytes()
+    assert (got.text_rows, got.tensor_floor) == (_CAPTION_ROWS, cond)
+    assert cond > tensor
+    clip = vs.plan_clip(got, frames=got.frames, width=got.size[0],
+                        height=got.size[1], text=_CAPTION_ROWS)
+    held = (_cache_term() + cond - tensor
+            + vs.caption_bytes(5376, _CAPTION_ROWS))
+    assert got.footprint == clip.phases["encode"] + held
+    spec.upsampler = None
+    bare = vs.entry_plan(spec)
+    assert (bare.text_rows, bare.tensor_floor) == (vs.PRICED_TEXT_ROWS,
+                                                   _COND)
+    assert got.footprint > bare.footprint
+
+
 def test_an_entry_with_an_mmproj_books_the_clip_it_books_without_one(
         monkeypatch):
     """The mmproj loads for an encode with keyframes alone, so an entry

@@ -617,11 +617,13 @@ class StepsState:
         self._bound()
 
     def _bound(self) -> None:
-        """The tensor store at the share; the upload store at the cap
-        alone, as its bookings bound it."""
+        """The tensor store at the share, and at no less than its floor,
+        which stands past the configured bound for the cond of a video
+        entry's upsampler caption; the upload store at the cap alone, as
+        its bookings bound it."""
         tensor, adapter = self._bounds
         self.tensors.bound(tensor, max(int(tensor * self._share),
-                                       min(self._tensor_floor, tensor)))
+                                       self._tensor_floor))
         self.adapters.bound(adapter, UNBOUNDED if adapter is None
                             else adapter)
 

@@ -286,13 +286,14 @@ def test_the_refined_rows_are_kept_by_cond_and_patch_table(host, pipe,
 
 def test_the_refined_rows_keep_to_the_bytes_the_entry_books():
     """The entry keeps refined rows of any count within the bytes it
-    books for them, CAPTIONS prompts of the priced rows, and drops the
+    books for them, CAPTIONS prompts of its priced rows, and drops the
     oldest past that; rows over the bound alone are not kept and drop
-    nothing."""
+    nothing. An entry priced at an upsampler's captions keeps more."""
     dim = 4
     dit = SimpleNamespace(cfg=SimpleNamespace(dim=dim), caption=lambda f: f)
     served = ServedVideo(pipe=SimpleNamespace(dit=dit), spec=None,
-                         plan=None)  # type: ignore
+                         plan=SimpleNamespace(  # type: ignore
+                             text_rows=vs.PRICED_TEXT_ROWS))
 
     def put(key, rows):
         feats = mx.zeros((1, rows, dim), mx.float32)
@@ -308,6 +309,9 @@ def test_the_refined_rows_keep_to_the_bytes_the_entry_books():
     assert put("huge", 4200).shape == (1, 4200, dim)
     assert [k for k, _ in served.captions] == [f"c{i}" for i in range(6, 10)
                                                ] + ["big"]
+    served.plan.text_rows = 2 * vs.PRICED_TEXT_ROWS
+    put("huge", 4200)                   # 65.6 KiB, of a bound of 128 KiB
+    assert [k for k, _ in served.captions] == ["c8", "c9", "big", "huge"]
 
 
 def test_the_negative_of_a_guided_step_is_refined_from_its_own_cond(host):
@@ -1401,6 +1405,41 @@ def test_the_step_tensor_cache_keeps_a_loaded_video_entrys_cond(
     # With no cap the upload store has no bound at any share.
     assert bounds == (rows.nbytes, steps.UNBOUNDED)
     assert after == tensor // 16 and e.value.status == 413
+
+
+def test_a_caption_cond_past_the_configured_tensor_cache_is_kept(
+        monkeypatch, request):
+    """An entry with an upsampler floors the tensor cache at the cond of
+    a full caption, past the configured tensor_cache_mb: the cond goes in
+    while it is loaded, and is over the configured bound once it is
+    released."""
+    import dataclasses
+
+    from gmlx.serve import image_service
+
+    pipe, _w = _own_pipe()
+    served = _served(pipe)
+    configured = steps.STATE.tensors.max_bytes
+    rows = np.zeros((1, configured // (5120 * 4) + 64, 5120), np.float32)
+    plan = dataclasses.replace(served.plan, tensor_floor=rows.nbytes)
+    monkeypatch.setattr(vs, "entry_plan", lambda spec: plan)
+    monkeypatch.setattr(pipeline, "load", lambda *a, **k: pipe)
+    shares: dict = {}
+    monkeypatch.setattr(image_service, "_SHARES", shares)
+    _mount(_Host(served), request)
+    try:
+        got = _on_worker(vs._load, served.spec)
+        bound = steps.STATE.tensors.max_bytes
+        _client().put(rows)
+        _on_worker(vs._release, [got])
+        with pytest.raises(StepsClientError) as e:
+            _client().put(rows)
+    finally:
+        shares.clear()
+        image_service._scale_step_caches()
+    assert bound == rows.nbytes > configured
+    assert e.value.status == 413 and "raise server.image.tensor_cache_mb" in (
+        str(e.value))
 
 
 @pytest.mark.parametrize("route", ["upload", "encode"])

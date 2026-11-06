@@ -3581,6 +3581,14 @@ def test_a_video_models_upsampler_and_its_prompt_resolve(tmp_path):
     rm = cfgmod.resolve_video_model("h3", build_config(doc))
     assert (rm.upsampler, rm.upsample, rm.upsample_prompt) == (
         "chat", False, str(tmp_path / "guide.md"))
+    # An upsampler prices the entry's text rows, so naming one reloads it,
+    # and another chat model does not.
+    doc["models"]["chat2"] = {"path": "/m/chat2.gguf"}
+    sig = {up: cfgmod.resolve_video_model("h3", build_config(
+        {**doc, "video_models": {"h3": {**doc["video_models"]["h3"],
+                                        "upsampler": up}}})).load_signature()
+        for up in ("chat", "chat2", None)}
+    assert sig["chat"] == sig["chat2"] != sig[None]
 
 
 def test_video_models_round_trip_through_print_config():

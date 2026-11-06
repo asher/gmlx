@@ -80,6 +80,7 @@ class VideoEntryPlan:
     tensor_floor: int = 0           # step tensor cache bytes kept for a cond
     mmproj_bytes: int = 0           # the encoder's mmproj file, for keyframes
     tower_bytes: int = 0            # its vision tower once attached
+    text_rows: int = PRICED_TEXT_ROWS  # the rows its encode is priced at
 
 
 @dataclass(eq=False)
@@ -156,11 +157,25 @@ def plan_clip(plan: VideoEntryPlan, *, frames: int, width: int, height: int,
         budget=budget)
 
 
-def caption_bytes(hidden: int) -> int:
+def caption_bytes(hidden: int, rows: int = PRICED_TEXT_ROWS) -> int:
     """The bytes of refined text rows an entry keeps: ``CAPTIONS``
-    prompts of the priced rows at the DiT's width ``hidden`` in
-    bfloat16."""
-    return CAPTIONS * PRICED_TEXT_ROWS * int(hidden) * 2
+    prompts of the entry's priced ``rows`` at the DiT's width ``hidden``
+    in bfloat16."""
+    return CAPTIONS * int(rows) * int(hidden) * 2
+
+
+def priced_rows(spec, fam) -> int:
+    """The text rows an entry's encode is priced at: PRICED_TEXT_ROWS, or
+    for an entry with an upsampler the larger of that and a caption of
+    the upsampler's max_tokens. The encoder's tokenizer counts a caption
+    about as the chat model's does, so each token is a row, beside the
+    most rows of the family's template."""
+    from gmlx.image.text_encoder import rows_at_most
+
+    if fam.upsample is None or getattr(spec, "upsampler", None) is None:
+        return PRICED_TEXT_ROWS
+    caption = fam.upsample.max_tokens + rows_at_most(fam.encoder(), "")
+    return max(PRICED_TEXT_ROWS, caption)
 
 
 def held_bytes(served: ServedVideo) -> tuple:
@@ -227,17 +242,21 @@ def entry_plan(spec) -> VideoEntryPlan:
         tower_bytes=memfit.tower_bytes(mmproj) if mmproj else 0)
     width, height = d["size"]
     budget = working_budget_bytes()
+    rows = priced_rows(spec, fam)
     clip = plan_clip(base, frames=d["frames"], width=width, height=height,
-                     text=PRICED_TEXT_ROWS, budget=budget)
+                     text=rows, budget=budget)
     tensor, _cap = cache_bytes()
     steps = _CACHE_BYTES["steps"]
     caches = 2 * tensor + steps
     # The step routes' tensor cache keeps room for one cond of the priced
-    # rows, the f32 encoder features a client uploads, at any share.
-    cond = PRICED_TEXT_ROWS * int(ident.config["text_dim"]) * 4
-    floor = min(cond, tensor) if steps else 0
+    # rows, the f32 encoder features a client uploads, at any share. The
+    # cond of an upsampler's caption is the server's own, so its room
+    # stands past the configured tensor_cache_mb.
+    cond = rows * int(ident.config["text_dim"]) * 4
+    floor = (cond if rows > PRICED_TEXT_ROWS else min(cond, tensor)
+             ) if steps else 0
     # The refined text rows the entry keeps, at any share.
-    captions = caption_bytes(ident.config["hidden_size"])
+    captions = caption_bytes(ident.config["hidden_size"], rows)
 
     def price(share: float, kept: int = floor) -> int:
         # The step routes' tensor cache and the refined rows stay through
@@ -266,7 +285,7 @@ def entry_plan(spec) -> VideoEntryPlan:
     return VideoEntryPlan(**{**base.__dict__, "footprint": int(footprint),
                              "cache_share": share,
                              "lora_term": int(clip.terms["denoise"]["lora"]),
-                             "tensor_floor": floor})
+                             "tensor_floor": floor, "text_rows": rows})
 
 
 def entry_footprint(spec) -> int:
@@ -555,7 +574,7 @@ def caption(served: ServedVideo, key: str, feats, table: str):
         return held, True
     text = served.pipe.dit.caption(feats)
     mx.eval(text)
-    bound = caption_bytes(served.pipe.dit.cfg.dim)
+    bound = caption_bytes(served.pipe.dit.cfg.dim, served.plan.text_rows)
     if key and int(text.nbytes) <= bound:
         served.captions[(key, table)] = text
         held = sum(int(a.nbytes) for a in served.captions.values())
