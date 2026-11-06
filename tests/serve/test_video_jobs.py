@@ -1556,6 +1556,28 @@ def test_a_json_keyframe_past_the_store_room_is_a_413(routes):
     assert routes.store.pending == {}
 
 
+def test_a_json_keyframe_refusal_names_the_uploads_arriving(routes):
+    """Another POST still arriving holds part of the room: the keyframe's
+    413 says how much."""
+    png = _noise_png()
+    store = routes.store
+    store.settings = VideoServerCfg(store_max_bytes=len(png) + 4096)
+    other = store.new_id()
+    store.begin(other)
+    assert store.take(other, len(png)) == (True, len(png), 0)
+    url = "data:image/png;base64," + base64.b64encode(png).decode()
+    r = routes.client.post("/v1/videos", json={"prompt": "a cat",
+                                               "first_frame": url})
+    assert r.status_code == 413, r.text
+    assert r.json()["error"]["message"] == (
+        f"the keyframe first_frame is {body_intake._mib(len(png), True)}, "
+        "and the video job store has 4.0 KiB of room left, and "
+        f"{body_intake._mib(len(png))} of it is held by uploads arriving "
+        "now; send a smaller image, delete finished jobs, or raise "
+        "server.video.store_max_bytes")
+    assert store.pending == {other: len(png)}
+
+
 def test_a_form_keyframe_field_takes_no_path(routes, monkeypatch):
     """A form's text field where an image goes is a data URL: a path is
     refused with the field named, and never opened."""
