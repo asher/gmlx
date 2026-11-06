@@ -9,12 +9,13 @@ figures, and none is read past them:
 
 - what stays in RAM (a JSON body, a form's text fields, the images API's
   files, which decode into arrays) against the bytes free beside the
-  models loaded, read from the pool's figures with no lock;
+  models loaded, read from the pool's figures with no lock, at the copies
+  of it the read and the parse hold;
 - a video job's form files, which go to disk, against the room left in
   the job store.
 
 A body with no Content-Length is read until it passes its figure, and
-refused there. The gate's own checks of the media a JSON or images API
+refused there; a video form with none takes its room a step at a time. The gate's own checks of the media a JSON or images API
 body names run here, on the body read, as the gate runs them on every
 other route. A video form's text fields have no gate rule: the route's
 own checks of each field it reads are their check, and refuse a path or
@@ -34,6 +35,12 @@ from starlette.requests import Request
 IMAGE_PATHS = frozenset(f"{p}/images/{r}" for p in ("/v1", "")
                         for r in ("generations", "edits", "variations"))
 VIDEO_PATHS = frozenset({"/v1/videos"})
+
+# A video form's text fields are held twice while the form is parsed:
+# Starlette's bytearray of each part, with its growth slack, and the str
+# it decodes to. The sum is priced at that factor, measured at 2.1; the
+# post-V6 parse change removes the copy.
+FORM_TEXT_COPIES = 2.25
 
 
 class BodyRefused(Exception):
@@ -106,29 +113,39 @@ def content_length(request) -> int | None:
     return n
 
 
-def _over_free(n: int, free: int, sent: bool) -> BodyRefused:
+def held(n: int, copies: float) -> int:
+    """The bytes a read of ``n`` bytes holds at ``copies`` copies."""
+    return math.ceil(n * copies)
+
+
+def _over_free(n: int, free: int, sent: bool,
+               copies: float = 1) -> BodyRefused:
     size = _mib(n, True) if sent else f"over {_mib(n)}"
-    return BodyRefused(413, f"the request body is {size}, and {_mib(free)} "
-                       "of memory is free beside the models loaded; send a "
-                       "smaller body, or unload a model to make room")
+    times = f", its read holds {copies:g} times that," if copies != 1 else ","
+    return BodyRefused(413, f"the request body is {size}{times} and "
+                       f"{_mib(free)} of memory is free beside the models "
+                       "loaded; send a smaller body, or unload a model to "
+                       "make room")
 
 
-async def read_in_ram(request: Request, free: int | None = None) -> bytes:
+async def read_in_ram(request: Request, free: int | None = None,
+                      copies: float = 1) -> bytes:
     """The body of ``request``, priced against ``free`` bytes (the pool's
-    free figure when None) before a byte of it is read. A body with no
-    Content-Length is refused once what arrived passes the figure. The
+    free figure when None) before a byte of it is read, at the ``copies``
+    of it the route's read and parse hold. A body with no Content-Length
+    is refused once what arrived, at that factor, passes the figure. The
     body read is kept on the request, so ``request.form()`` and
     ``request.json()`` parse it after."""
     if free is None:
         free = free_bytes()
     n = content_length(request)
-    if n is not None and free is not None and n > free:
-        raise _over_free(n, free, True)
+    if n is not None and free is not None and held(n, copies) > free:
+        raise _over_free(n, free, True, copies)
     chunks, size = [], 0
     async for chunk in request.stream():
         size += len(chunk)
-        if free is not None and size > free:
-            raise _over_free(free, free, False)
+        if free is not None and held(size, copies) > free:
+            raise _over_free(size, free, False, copies)
         chunks.append(chunk)
     raw = b"".join(chunks)
     request._body = raw
@@ -155,14 +172,23 @@ async def check_media(request: Request, raw: bytes) -> None:
         raise BodyRefused(400, str(e), e.param) from None
 
 
-def _over_room(n: int | None, room: int) -> BodyRefused:
+def arriving_note(arriving: int) -> str:
+    """The part of a store refusal that names the bytes the other POSTs
+    still arriving hold, when they hold any."""
+    return (f", and {_mib(arriving)} of it is held by uploads arriving now"
+            if arriving else "")
+
+
+def _over_room(n: int | None, room: int, arriving: int = 0) -> BodyRefused:
     """The 413 of a form past the job store's room: its Content-Length
-    ``n``, or None for a stream cut at the room."""
+    ``n``, or None for a stream cut at the room. ``arriving`` is what the
+    other POSTs still arriving hold of the store."""
     what = (f"over the {_mib(room)} of room the video job store has left"
             if n is None else f"{_mib(n, True)}, and the video job store "
             f"has {_mib(room)} of room left")
-    return BodyRefused(413, f"the files of this job are {what}; send "
-                       "smaller files, delete finished jobs, or raise "
+    return BodyRefused(413, f"the files of this job are {what}"
+                       f"{arriving_note(arriving)}; send smaller files, "
+                       "delete finished jobs, or raise "
                        "server.video.store_max_bytes")
 
 
@@ -174,10 +200,12 @@ async def read_form_to_disk(request: Request, folder: str, take,
     ``folder``, by field name, each as ``NAME.part`` while it arrives and
     renamed once whole. ``await take(n)`` reserves the body's ``n`` bytes
     of the room left in the job store before the read and answers ``(ok,
-    bytes)``: the bytes reserved, or the room left when they do not fit;
-    with no Content-Length, ``take(None)`` reserves all the room left and
-    the read stops past it. A refusal or a failed read removes every file
-    it began."""
+    bytes, arriving)``: the bytes reserved, or the room left and the bytes
+    other POSTs hold when they do not fit. A body with no Content-Length
+    reserves a step with ``take(None)`` before its first byte and another
+    each time the bytes arrived pass what it holds, so it holds the room
+    as its body comes, and the read stops where a step does not fit. A
+    refusal or a failed read removes every file it began."""
     from starlette.datastructures import UploadFile
     from starlette.formparsers import MultiPartException, MultiPartParser
     from starlette.requests import ClientDisconnect
@@ -185,9 +213,9 @@ async def read_form_to_disk(request: Request, folder: str, take,
     if free is None:
         free = free_bytes()
     n = content_length(request)
-    ok, room = await take(n)
+    ok, room, arriving = await take(n)
     if not ok:
-        raise _over_room(n, room)
+        raise _over_room(n, room, arriving)
     os.makedirs(folder, exist_ok=True)
     began: list = []
     names: dict = {}
@@ -216,18 +244,23 @@ async def read_form_to_disk(request: Request, folder: str, take,
             if part.file is not None:
                 super().on_part_data(data, start, end)
                 return
-            # The text fields stay in RAM: their sum is priced, not each.
+            # The text fields stay in RAM: their sum is priced, not each,
+            # at the copies the parse holds.
             text[0] += end - start
-            if free is not None and text[0] > free:
-                raise _over_free(text[0], free, False)
+            if free is not None and held(text[0], FORM_TEXT_COPIES) > free:
+                raise _over_free(text[0], free, False, FORM_TEXT_COPIES)
             part.data.extend(data[start:end])
 
     async def stream():
-        got = 0
+        held, got = room, 0
         async for chunk in request.stream():
             got += len(chunk)
-            if got > room:
-                raise _over_room(None, room)
+            while got > held:
+                ok, more, arriving = ((False, 0, 0) if n is not None
+                                      else await take(None))
+                if not ok:
+                    raise _over_room(None, held, arriving)
+                held += more
             yield chunk
 
     parser = _ToDisk(request.headers, stream(), max_files=16,

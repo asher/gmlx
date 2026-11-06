@@ -902,11 +902,37 @@ def test_a_json_body_past_the_free_figure_is_a_413_with_no_byte_read(
         r = send(conn, "/v1/videos", b"{", length=8 << 20)
         assert r.status == 413, r.body
         assert json.loads(r.body)["error"]["message"] == (
-            "the request body is 8.0 MiB, and 1.0 MiB of memory is free "
-            "beside the models loaded; send a smaller body, or unload a "
-            "model to make room")
+            "the request body is 8.0 MiB, its read holds 4.25 times that, "
+            "and 1.0 MiB of memory is free beside the models loaded; send "
+            "a smaller body, or unload a model to make room")
         assert closed(other)
         conn.close()
+
+
+@pytest.mark.parametrize("kind", ["json", "form"])
+def test_a_video_body_is_priced_at_the_copies_its_parse_holds(
+        routes, monkeypatch, kind):
+    """A JSON body is held a few times over while it is read and parsed,
+    and a form's text twice: each fits only where all its copies fit."""
+    url = "data:image/png;base64," + base64.b64encode(_png()).decode()
+    text = "a" * (256 << 10)
+    if kind == "json":
+        body = json.dumps({"prompt": text, "first_frame": url}).encode()
+        ctype, n, copies = "application/json", len(body), videos.JSON_COPIES
+    else:
+        body, ctype = _form({"prompt": text}, {"first_frame": _png()})
+        n, copies = len(text), body_intake.FORM_TEXT_COPIES
+    need = body_intake.held(n, copies)
+    for free, status in ((need - 1, 413), (need, 200)):
+        monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
+        r = routes.client.post("/v1/videos", content=body,
+                               headers={"content-type": ctype})
+        assert r.status_code == status, r.text
+        if status == 413:
+            assert f", its read holds {copies:g} times that, " in \
+                r.json()["error"]["message"]
+    assert len(routes.store.jobs) == 1
+    assert routes.store.pending == {}
 
 
 def test_a_jobs_anchor_refusal_names_its_field_not_its_path(tmp_path):
@@ -1099,9 +1125,11 @@ def _until(cond, timeout=10.0):
     return True
 
 
-def test_a_sweep_while_a_form_arrives_leaves_its_files(routes):
+def test_a_sweep_while_a_form_arrives_leaves_its_files(routes,
+                                                      monkeypatch):
     """A sweep runs from every other POST and after every job: it leaves
-    the inputs of a POST still arriving, before its job exists."""
+    the inputs of a POST still arriving, before its job exists. Once read,
+    the POST holds the bytes it wrote."""
     import http.client
 
     from live_socket import serving
@@ -1110,6 +1138,14 @@ def test_a_sweep_while_a_form_arrives_leaves_its_files(routes):
     body, ctype = _form({"prompt": "a cat"}, {"first_frame": png})
     cut = body.index(png) + len(png) // 2
     store = routes.store
+    settled = []
+    real = store.settle
+
+    def settle(jid):
+        real(jid)
+        settled.append((store.pending[jid],
+                        store._bytes(store.inputs(jid))))
+    monkeypatch.setattr(store, "settle", settle)
     with serving(routes.app) as port:
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
         _start(conn, body[:cut], len(body), ctype)
@@ -1126,6 +1162,7 @@ def test_a_sweep_while_a_form_arrives_leaves_its_files(routes):
     assert json.loads(text)["id"] == jid
     with open(os.path.join(store.inputs(jid), "first_frame"), "rb") as f:
         assert f.read() == png
+    assert settled == [(len(png), len(png))]
     assert store.pending == {}
 
 
@@ -1152,8 +1189,9 @@ def test_two_forms_that_each_fit_alone_cannot_pass_the_room_together(
         assert json.loads(r.body)["error"]["message"] == (
             f"the files of this job are {body_intake._mib(len(b), True)}, "
             "and the video job store has "
-            f"{body_intake._mib((1 << 20) - len(a))} of room left; send "
-            "smaller files, delete finished jobs, or raise "
+            f"{body_intake._mib((1 << 20) - len(a))} of room left, and "
+            f"{body_intake._mib(len(a))} of it is held by uploads arriving "
+            "now; send smaller files, delete finished jobs, or raise "
             "server.video.store_max_bytes")
         cb.close()
         ca.send(a[64:])
@@ -1182,6 +1220,202 @@ def test_a_form_whose_client_leaves_frees_its_reservation(routes):
         assert _until(lambda: store.pending == {})
     assert store.jobs == {}
     assert os.listdir(os.path.join(str(store.root), "inputs")) == []
+
+
+def _chunked(conn, ctype: str) -> None:
+    """Send the headers of a POST to /v1/videos with no Content-Length."""
+    conn.putrequest("POST", "/v1/videos")
+    conn.putheader("Content-Type", ctype)
+    conn.putheader("Transfer-Encoding", "chunked")
+    conn.endheaders()
+
+
+def _chunk(conn, data: bytes) -> None:
+    conn.send(b"%x\r\n" % len(data) + data + b"\r\n")
+
+
+@pytest.mark.parametrize("pad_kib, fits", [(240, True), (560, False)])
+def test_two_forms_with_no_length_reserve_the_room_as_they_arrive(
+        routes, monkeypatch, pad_kib, fits):
+    """A form with no Content-Length holds a step past the bytes it read,
+    not the whole room: a second form beside it is refused only when the
+    two together pass the room, and the refusal names what the first
+    holds."""
+    import http.client
+
+    from live_socket import serving
+
+    from gmlx.serve import image_steps
+
+    step = 64 << 10
+    monkeypatch.setattr(image_steps, "BODY_STEP", step)
+    store = routes.store
+    store.settings = VideoServerCfg(store_max_bytes=1 << 20)
+    pad = b"\0" * (pad_kib << 10)
+    a, ctype = _form({"prompt": "a cat"}, {"first_frame": _png() + pad})
+    b, _ = _form({"prompt": "a dog"}, {"first_frame": _png() + pad})
+    cut = len(a) - (16 << 10)
+    with serving(routes.app) as port:
+        ca = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        _chunked(ca, ctype)
+        _chunk(ca, a[:cut])
+        assert _until(lambda: list(store.pending.values())
+                      and next(iter(store.pending.values())) >= cut)
+        held = next(iter(store.pending.values()))
+        assert held < cut + step
+        cb = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        _chunked(cb, ctype)
+        left = (1 << 20) - held
+        if fits:
+            _chunk(cb, b)
+            cb.send(b"0\r\n\r\n")
+        else:
+            _chunk(cb, b[:left + step])
+        r = cb.getresponse()
+        text = r.read()
+        cb.close()
+        if fits:
+            assert r.status == 200, text
+        else:
+            assert r.status == 413, text
+            assert json.loads(text)["error"]["message"] == (
+                f"the files of this job are over the "
+                f"{body_intake._mib(left)} of room the video job store has "
+                f"left, and {body_intake._mib(held)} of it is held by "
+                "uploads arriving now; send smaller files, delete finished "
+                "jobs, or raise server.video.store_max_bytes")
+        _chunk(ca, a[cut:])
+        ca.send(b"0\r\n\r\n")
+        r = ca.getresponse()
+        text = r.read()
+        assert r.status == 200, text
+        ca.close()
+    assert store.pending == {}
+    assert len(store.jobs) == (2 if fits else 1)
+
+
+def _create(body: bytes, ctype: str = "application/json"):
+    """POST /v1/videos as the route sees it, with no server."""
+    import asyncio
+
+    from starlette.requests import Request
+
+    scope = {"type": "http", "method": "POST", "path": "/v1/videos",
+             "query_string": b"", "headers": [
+                 (b"content-type", ctype.encode()),
+                 (b"content-length", str(len(body)).encode())]}
+    sent = [False]
+
+    async def receive():
+        if not sent[0]:
+            sent[0] = True
+            return {"type": "http.request", "body": body,
+                    "more_body": False}
+        await asyncio.sleep(3600)
+    return videos.create(Request(scope, receive))
+
+
+def _hold(store, monkeypatch, name):
+    """Hold the store's ``name`` in its thread until the test lets it go:
+    ``(entered, release)``."""
+    entered, release = threading.Event(), threading.Event()
+    real = getattr(store, name)
+
+    def held(*a):
+        entered.set()
+        assert release.wait(10)
+        return real(*a)
+    monkeypatch.setattr(store, name, held)
+    return entered, release
+
+
+def _cancel_while_held(store, monkeypatch, name, body):
+    """Cancel a POST while the store's ``name`` runs in its thread, then let
+    it end, and wait for the abandon the cancel hands the executor."""
+    import asyncio
+
+    entered, release = _hold(store, monkeypatch, name)
+    abandoned = threading.Event()
+    real = store.abandon
+
+    def abandon(jid):
+        real(jid)
+        abandoned.set()
+    monkeypatch.setattr(store, "abandon", abandon)
+
+    async def main():
+        task = asyncio.ensure_future(_create(body))
+        assert await asyncio.to_thread(entered.wait, 10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        assert await asyncio.to_thread(abandoned.wait, 10)
+    asyncio.run(main())
+
+
+def test_a_cancel_while_submit_runs_keeps_the_job_it_queued(routes,
+                                                             monkeypatch):
+    """The cancel's abandon runs after the submit in its thread, and leaves
+    the job it queued with its inputs."""
+    url = "data:image/png;base64," + base64.b64encode(_png()).decode()
+    store = routes.store
+    _cancel_while_held(store, monkeypatch, "submit", json.dumps(
+        {"prompt": "a cat", "first_frame": url}).encode())
+    (job,) = store.jobs.values()
+    assert job.record["status"] == "queued"
+    with open(job.params["first_frame"], "rb") as f:
+        assert f.read() == _png()
+    assert store.pending == {}
+
+
+def test_a_cancel_while_begin_runs_leaves_nothing_pending(routes,
+                                                          monkeypatch):
+    """A begin still in its thread when the request was cancelled ends
+    before the abandon, so nothing stays reserved."""
+    store = routes.store
+    _cancel_while_held(store, monkeypatch, "begin",
+                       json.dumps({"prompt": "a cat"}).encode())
+    assert store.pending == {}
+    assert store.jobs == {}
+
+
+def test_a_posts_store_calls_after_its_abandon_do_nothing(tmp_path):
+    """Whatever order the executor runs them in, a begin, take, settle or
+    submit that comes after a POST's abandon leaves nothing behind."""
+    store, clock, driver = _store(tmp_path)
+    post = videos._Post(store, store.new_id())
+    post.abandon()
+    post.begin()
+    assert post.take(4096) == (False, 0, 0)
+    post.settle()
+    assert post.submit({"model": "h3", "gmlx": {"frames": 22}}, {}) is None
+    assert (store.pending, store.jobs, driver.jobs) == ({}, {}, [])
+
+
+def test_a_take_after_the_abandon_reserves_nothing(tmp_path):
+    store, clock, driver = _store(tmp_path)
+    jid = store.new_id()
+    store.begin(jid)
+    store.abandon(jid)
+    assert store.take(jid, 4096) == (False, 0, 0)
+    assert store.take(jid, None) == (False, 0, 0)
+    assert store.pending == {}
+
+
+def test_a_record_write_that_fails_queues_no_job(tmp_path, monkeypatch):
+    store, clock, driver = _store(tmp_path)
+    jid = store.new_id()
+    store.begin(jid)
+
+    def write(job):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(store, "_write", write)
+    with pytest.raises(OSError):
+        store.submit(jid, {"model": "h3", "gmlx": {"frames": 22}}, {})
+    assert (store.jobs, store.queued(), driver.jobs) == ({}, 0, [])
+    store.abandon(jid)
+    assert store.pending == {}
 
 
 # The route's refusals of what a form or a JSON body sends.
@@ -1364,9 +1598,13 @@ def test_the_post_names_the_fields_it_ignores(routes, caplog):
 
 
 def test_the_store_lock_is_taken_off_the_event_loop(routes, monkeypatch):
-    """The store's lock is held across a sweep's walk of the disk: the
-    POST takes it on a worker thread, never on the loop."""
+    """The store's lock is held across a sweep's walk of the disk: every
+    route takes it on a worker thread, never on the loop, a client that
+    leaves included."""
     import asyncio
+    import http.client
+
+    from live_socket import serving
 
     store = routes.store
     on_loop = []
@@ -1383,15 +1621,27 @@ def test_the_store_lock_is_taken_off_the_event_loop(routes, monkeypatch):
             return real(*a, **k)
         monkeypatch.setattr(store, name, fn)
 
-    for name in ("submit", "get", "begin", "take", "settle", "full",
-                 "retry_after", "abandon"):
+    for name in ("submit", "get", "content", "delete", "begin", "take",
+                 "settle", "full", "retry_after", "abandon"):
         spy(name)
+    c = routes.client
     body, ctype = _form({"prompt": "a cat"}, {"first_frame": _png()})
-    r = routes.client.post("/v1/videos", content=body,
-                           headers={"content-type": ctype})
+    r = c.post("/v1/videos", content=body, headers={"content-type": ctype})
     assert r.status_code == 200, r.text
-    r = routes.client.post("/v1/videos", json={"prompt": ""})
+    jid = r.json()["id"]
+    r = c.post("/v1/videos", json={"prompt": ""})
     assert r.status_code == 400, r.text
+    routes.driver.run()
+    assert c.get(f"/v1/videos/{jid}").json()["status"] == "completed"
+    assert c.get(f"/v1/videos/{jid}/content").content == b"mp4"
+    assert c.delete(f"/v1/videos/{jid}").json()["deleted"] is True
+    with serving(routes.app) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        _start(conn, body[:64], len(body), ctype)
+        assert _until(lambda: bool(store.pending))
+        conn.sock.close()
+        conn.close()
+        assert _until(lambda: store.pending == {})
     assert on_loop == []
 
 

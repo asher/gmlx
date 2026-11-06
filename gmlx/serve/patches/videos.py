@@ -3,8 +3,9 @@
 DELETE /v1/videos/{id} cancels it or removes it.
 
 The media gate leaves a POST body unread (``body_intake``). A JSON body
-is priced against the bytes free beside the models loaded before it is
-read, and takes its keyframes as data URLs; a multipart form streams its
+is priced against the bytes free beside the models loaded, at the copies
+its read and parse hold, before it is read, and takes its keyframes as
+data URLs; a multipart form streams its
 files to the job store, within the room it reserves there before its
 first byte, and its text fields are priced together against free
 memory. The route then estimates the
@@ -35,6 +36,7 @@ from ._common import _error_content, _remove_routes
 from .body_intake import (
     BodyRefused,
     _mib,
+    arriving_note,
     check_media,
     read_form_to_disk,
     read_in_ram,
@@ -47,6 +49,10 @@ FIELDS = ("prompt", "model", "seconds", "size", "seed", "prompt_upsampling",
           "first_frame", "last_frame", "input_reference", "guides",
           "guide_no_audio", "references")
 KEYFRAMES = ("first_frame", "last_frame")
+# A JSON body is held about four times while it is read: the body, the
+# gate's json.loads, the route's, and a data-URL keyframe's decode,
+# measured at 4.0. The post-V6 parse change removes the copies.
+JSON_COPIES = 4.25
 _KINDS = {"video": "--guide", "audio": "--guide-audio"}
 # The entry plans and encoder tokenizers the estimate reads, by entry.
 _PLANS: dict = {}
@@ -71,6 +77,42 @@ def _store():
     from ..video_jobs import STORE
 
     return STORE
+
+
+class _Post:
+    """The store calls of one POST, each in its thread under this POST's
+    lock. Once :meth:`abandon` ran, a call still to come does nothing,
+    whatever order the threads take, so a begin, take or submit still in
+    its thread when the request ended leaves nothing behind."""
+
+    def __init__(self, store, jid: str):
+        self.store = store
+        self.jid = jid
+        self._lock = threading.Lock()
+        self._ended = False
+
+    def _call(self, fn, *args, gone=None):
+        with self._lock:
+            if self._ended:
+                return gone
+            return fn(self.jid, *args)
+
+    def begin(self) -> None:
+        self._call(self.store.begin)
+
+    def take(self, n: int | None) -> tuple[bool, int, int]:
+        return self._call(self.store.take, n, gone=(False, 0, 0))
+
+    def settle(self) -> None:
+        self._call(self.store.settle)
+
+    def submit(self, record: dict, params: dict):
+        return self._call(self.store.submit, record, params)
+
+    def abandon(self) -> None:
+        with self._lock:
+            self._ended = True
+            self.store.abandon(self.jid)
 
 
 def _answer(e: Refused) -> JSONResponse:
@@ -128,12 +170,13 @@ def _data_url(value, name: str, folder: str, take) -> str:
     except (binascii.Error, ValueError):
         raise Refused(400, f"{name} is not base64", name) from None
     if take is not None:
-        ok, left = take(len(data))
+        ok, left, arriving = take(len(data))
         if not ok:
             raise Refused(413, f"the keyframe {name} is "
                           f"{_mib(len(data), True)}, and the video job "
-                          f"store has {_mib(left)} of room left; send a "
-                          "smaller image, delete finished jobs, or raise "
+                          f"store has {_mib(left)} of room left"
+                          f"{arriving_note(arriving)}; send a smaller "
+                          "image, delete finished jobs, or raise "
                           "server.video.store_max_bytes", name)
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, name)
@@ -385,6 +428,7 @@ async def create(request: Request):
 
     store = _store()
     jid = store.new_id()
+    post = _Post(store, jid)
     folder = store.inputs(jid)
     # Refused before the body is read: the answer ends the connection, so
     # the server does not drain a body it will not use.
@@ -403,10 +447,8 @@ async def create(request: Request):
                               "Retry-After": str(retry), **close})
         # From here the sweep leaves this job's inputs, and its bytes
         # count in the room, until submit or abandon.
-        await asyncio.to_thread(store.begin, jid)
-
-        def take(n):
-            return store.take(jid, n)
+        await asyncio.to_thread(post.begin)
+        take = post.take
 
         async def take_async(n):
             return await asyncio.to_thread(take, n)
@@ -416,10 +458,10 @@ async def create(request: Request):
             if ctype == "multipart/form-data":
                 pairs, files = await read_form_to_disk(request, folder,
                                                        take_async)
-                await asyncio.to_thread(store.settle, jid)
+                await asyncio.to_thread(post.settle)
                 fields = dict(pairs)
             else:
-                raw = await read_in_ram(request)
+                raw = await read_in_ram(request, copies=JSON_COPIES)
                 await check_media(request, raw)
                 try:
                     fields = json.loads(raw or b"{}")
@@ -434,17 +476,19 @@ async def create(request: Request):
         record, params = await asyncio.to_thread(prepare, fields, files,
                                                  folder, ffmpeg, take)
         try:
-            job = await asyncio.to_thread(store.submit, jid, record, params)
+            job = await asyncio.to_thread(post.submit, record, params)
         except QueueFull as e:
             raise Refused(429, "the video job queue is full; retry later",
                           code="queue_full",
                           headers={"Retry-After": str(e.retry_after)}) \
                 from None
     except Refused as e:
-        await asyncio.to_thread(store.abandon, jid)
+        await asyncio.to_thread(post.abandon)
         return _answer(e)
     except BaseException:
-        store.abandon(jid)
+        # The request is ending (a client that left, a cancel): the
+        # abandon runs in the executor, and nothing waits for it.
+        asyncio.get_running_loop().run_in_executor(None, post.abandon)
         raise
     rec = await asyncio.to_thread(store.get, job.id)
     return JSONResponse(status_code=200, content=rec or job.record)
@@ -457,16 +501,16 @@ def _missing(jid: str) -> JSONResponse:
 
 
 async def retrieve(video_id: str):
-    rec = _store().get(video_id)
+    rec = await asyncio.to_thread(_store().get, video_id)
     return _missing(video_id) if rec is None else JSONResponse(rec)
 
 
 async def content(video_id: str):
     store = _store()
-    rec = store.get(video_id)
+    rec, path = await asyncio.to_thread(
+        lambda: (store.get(video_id), store.content(video_id)))
     if rec is None:
         return _missing(video_id)
-    path = store.content(video_id)
     if path is None:
         return _answer(Refused(409, f"video job {video_id!r} is "
                                f"{rec['status']}; its content is ready "

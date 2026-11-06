@@ -317,18 +317,26 @@ class VideoJobs:
         with self.lock:
             self.pending[jid] = 0
 
-    def take(self, jid: str, n: int | None) -> tuple[bool, int]:
+    def take(self, jid: str, n: int | None) -> tuple[bool, int, int]:
         """Reserve ``n`` more bytes of the room for the POST ``jid``, or
-        all the room left with ``n`` None: ``(True, bytes reserved)``, or
-        ``(False, room left)`` when they do not fit, reserving nothing."""
+        with ``n`` None the next step of a body with no length: BODY_STEP
+        bytes, or the room left when less. Answers ``(True, bytes
+        reserved, 0)``, or ``(False, room left, bytes the other POSTs
+        hold)`` when they do not fit, reserving nothing. A POST that is
+        not pending, abandoned or submitted, takes nothing."""
+        from .image_steps import BODY_STEP
+
         self.sweep()
         with self.lock:
+            if jid not in self.pending:
+                return False, 0, 0
             left = max(0, self.settings.store_max_bytes - self._held())
-            want = left if n is None else n
-            if want > left:
-                return False, left
-            self.pending[jid] = self.pending.get(jid, 0) + want
-            return True, want
+            want = n if n is not None else min(BODY_STEP, left)
+            if want > left or (n is None and not want):
+                arriving = sum(b for j, b in self.pending.items() if j != jid)
+                return False, left, arriving
+            self.pending[jid] += want
+            return True, want, 0
 
     def settle(self, jid: str) -> None:
         """Hold the POST ``jid`` to the bytes it wrote, once its form is
@@ -340,8 +348,10 @@ class VideoJobs:
 
     def abandon(self, jid: str) -> None:
         """End a refused or failed POST: its inputs go with its
-        reservation."""
+        reservation. A job submit registered keeps its inputs."""
         with self.lock:
+            if jid in self.jobs:
+                return
             self.pending.pop(jid, None)
             self._drop_inputs(jid)
 
@@ -384,12 +394,15 @@ class VideoJobs:
                   "error": None, **record}
         job = Job(jid, record, params)
         with self.lock:
-            self.pending.pop(jid, None)
             if self.queued() >= self.settings.max_queue:
+                self.pending.pop(jid, None)
                 self._drop_inputs(jid)
                 raise QueueFull(self._retry_after())
-            self.jobs[jid] = job
+            # The record goes to disk before the job is queued: a write
+            # that fails queues nothing, and a restart finds every job.
             self._write(job)
+            self.pending.pop(jid, None)
+            self.jobs[jid] = job
         self._driver_submit(job)
         return job
 
