@@ -1376,22 +1376,21 @@ brew install ffmpeg
 
 Without ffmpeg, pass `--frames-dir` to get PNG frames and `audio.wav`.
 
-A clip runs at 24 fps and has 17 k + 5 frames, so `--seconds` rounds up:
-5 seconds is 124 frames, 10 is 243 and 15 is 362. The step count and the
-shift come from the entry, else from the DiT's variant. FastH3 at 8 steps
-samples the timesteps it was trained at.
+A clip has 17 k + 5 frames, so `--seconds` rounds up, as
+[Clip length, size and memory](video.md#clip-length-size-and-memory)
+shows. The step count and the shift come from the entry, else from the
+DiT's variant.
 
 `--first-frame` and `--last-frame` start or end the clip at an image,
-which the prompt also reads through the text encoder's vision tower.
-`--guide` anchors an image, or a video with its sound, at a frame, and
-`--guide-audio` anchors a sound alone. ffmpeg reads guide videos and
-sounds, and the images too when it is installed. FRAME is `0` when none
-is given, a negative frame counts from the end, and only an integer after
-the last `@` is a frame. A guide video keeps the frames that
-[Keyframes and guides](video.md#keyframes-and-guides) gives, counted from
-its start, and they must fit in the clip from FRAME. The anchors are
-encoded after the text encoder is released, one VAE at a time. FastH3
-runs text to video only, so it refuses them.
+which the prompt also reads. `--guide` anchors an image, or a video with
+its sound, at a frame, and `--guide-audio` anchors a sound alone. ffmpeg
+reads guide videos and sounds, and the images too when it is installed.
+FRAME is `0` when none is given, a negative frame counts from the end,
+and only an integer after the last `@` is a frame. A guide video keeps
+the frames that [Keyframes and guides](video.md#keyframes-and-guides)
+gives, counted from its start, and they must fit in the clip from FRAME.
+The anchors are encoded after the text encoder is released, one VAE at a
+time.
 
 | Flag | Default | Meaning |
 |------|---------|---------|

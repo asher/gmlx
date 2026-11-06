@@ -8,6 +8,11 @@ image, a video or a sound at a frame you pick. Video runs from the
 command line, and in ComfyUI through the
 [gmlx nodes](comfyui.md#make-a-video).
 
+```sh
+gmlx video pull h3
+gmlx video generate h3 --prompt "waves on a pebble beach at dawn" --output beach.mp4
+```
+
 Video needs a Mac with an M3 chip or newer, 32 GB of memory or more,
 ffmpeg, and about 40 GB of disk for the model's files.
 [FastH3](#fasth3), a faster version of the model, needs an M5 chip or
@@ -159,8 +164,9 @@ as [FastH3 in ComfyUI](comfyui.md#fasth3) shows.
 ## Clip length, size and memory
 
 `--seconds` sets the length, up to 15, and `--size` the width and
-height, in multiples of 32. A clip is 1344x768 for 5 seconds when you set
-neither:
+height, in multiples of 32. A clip has 17 k + 5 frames at 24 a second, so
+its length rounds up: 5 seconds is 124 frames, 10 is 243 and 15 is 362.
+A clip is 1344x768 for 5 seconds when you set neither:
 
 ```sh
 gmlx video generate h3 --size 768x1344 --seconds 10 --prompt "..."
@@ -247,7 +253,8 @@ gmlx video generate h3 --guide street.png@60 --guide-audio rain.wav --prompt "..
 A guide video keeps 5, 22, 39 or more of its first frames, 17 k + 5 for
 the largest k it holds, or its first frame alone when it has fewer than
 5, and its sound unless you pass `--guide-no-audio`. Those frames must fit
-in the clip from the guide's frame on.
+in the clip from the guide's frame on. A guide video lines up with the
+clip's latents when its frame is a multiple of 17.
 
 To continue a clip, cut its last 22 frames with ffmpeg and guide a new
 clip with them at frame 0:

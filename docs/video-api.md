@@ -43,8 +43,8 @@ serves these routes. They need ffmpeg, which writes the MP4, as
 |-------|---------|
 | `prompt` | What the clip shows and sounds like. Required. |
 | `model` | A `video_models` id. It may be left out when the configuration has one video model. |
-| `seconds` | The length, up to 15, as a number or a string such as `"8"`, rounded up as [`--seconds`](cli.md#video-generate) is. The entry's default, else 5. |
-| `size` | `WxH` in multiples of 32. The entry's `defaults.size`, else `1344x768`, without it. |
+| `seconds` | The length, up to 15, as a number or a string such as `"8"`, rounded up to [whole frames](video.md#clip-length-size-and-memory). Unset, the entry's, else 5. |
+| `size` | `WxH` in multiples of 32. Unset, the entry's `defaults.size`, else `1344x768`. |
 | `seed` | The seed of the noise, an integer under 2^32, random without it. |
 | `prompt_upsampling` | `false` runs the prompt as typed on an entry with an [upsampler](video.md#prompt-upsampling), and `true` rewrites it on one with `upsample: false`. |
 | `first_frame`, `input_reference` | An image the clip starts at. `input_reference` is the OpenAI name of the same field. |
@@ -112,11 +112,9 @@ holds the upsampler's caption.
 
 Jobs run one at a time, in order, on a thread of their own, so a clip
 never holds up the image routes. Chat replies keep streaming while a clip
-runs. Each of the clip's pauses for chat waits through chat steps until
-one ends past the share's budget, and through one step at least, and a
-768x768 clip pauses about 250 times a step. Beside a chat reply that
-streams without a break, its steps take about 2.7 times as long as alone
-at the default share, and about 1.6 times at
+runs, since the clip pauses for them. Beside a chat reply that streams
+without a break, a clip's steps take about 2.7 times as long as alone at
+the default share, and about 1.6 times at
 [`GMLX_IMAGE_CHAT_SHARE`](env-vars.md#server) `0`, as
 [Video jobs](internals/image-serving.md#video-jobs) describes.
 When the memory a job needs is held by models in use, the job stays
@@ -162,6 +160,7 @@ status 500, and keeps the ones that ended.
 | A keyframe or guide image over 64 Mi pixels | 400 naming the field |
 | A guide video whose frames are over 64 Mi pixels | The job fails with 400 naming the guide, before a frame is read |
 | A guide video that does not fit in the clip from its frame | The job fails with 400 naming the guide |
+| A guide video whose encode does not fit beside the models loaded, even a few seconds at a time | The job fails with 400 naming the guide, the memory it needs and the memory free |
 | `references` | 400 naming Ref2VA |
 | `prompt_upsampling: true` on an entry without an upsampler | 400 naming the `upsampler` setting |
 | An unknown or expired job | 404 `not_found` |

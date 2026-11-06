@@ -336,14 +336,16 @@ counts each copy, about three for an image form, five for a JSON body to
 the image API, four for one to `POST /v1/videos`, and two for a video
 form's text. A JSON body adds 80 bytes for each value it can parse to,
 counted from its commas, colons and opening brackets and braces before
-the parse, and a body or form text that is not plain ASCII counts its
-strings at four bytes a character. With `GMLX_OVERCOMMIT=1`, or with no
+the parse. A JSON body that is not plain ASCII, or that holds a `\u`
+escape, counts its strings at four bytes a character, and so does the
+text of a video form that is not plain ASCII. An image form is priced at
+its copies alone, whatever its text. With `GMLX_OVERCOMMIT=1`, or with no
 model pool or memory budget, the server reads the bodies it prices from
 free memory with no bound, and a video form's files still take the job
 store's room. The step routes that the [ComfyUI nodes](comfyui.md) call
 take a body of up to one 1 GiB tensor and its header, and price the work
-it asks for from the memory free. The nodes
-send a video's frames in windows that fit.
+it asks for from the memory free. The nodes send a video's frames in
+windows that fit.
 
 Both 400s for a prompt that does not fit start with `prompt is too long`,
 so agent clients such as pi compact the conversation and retry.
