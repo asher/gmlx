@@ -717,3 +717,84 @@ def test_a_jobs_anchor_refusal_names_its_field_not_its_path(tmp_path):
                          names=("first_frame", "last_frame"), paths=False)
     assert str(ei.value).startswith("guides[0] (guide_0): ")
     assert str(tmp_path) not in str(ei.value)
+
+
+def _clip_part_stubs(monkeypatch, order, generate):
+    from gmlx.serve import gpu_share, video_service
+    from gmlx.serve.patches import image_steps as pis
+    from gmlx.video import pipeline, run
+
+    pool = object()
+    monkeypatch.setattr(pis, "_check_clip", lambda *a, **k: order.append(
+        "check"))
+    monkeypatch.setattr(pis, "_lora_pool", lambda: pool)
+    monkeypatch.setattr(video_service, "ensure_dit", lambda s: order.append(
+        "ensure_dit"))
+    monkeypatch.setattr(pis, "_factor_turn", lambda p, e, s, core, subject:
+                        order.append(("turn", core, subject)))
+    monkeypatch.setattr(image_service, "lora_settle", lambda p, e, subject:
+                        order.append(("settle", subject)))
+    monkeypatch.setattr(pipeline, "generate", generate)
+    monkeypatch.setattr(run, "decode_and_mux", lambda *a, **k: order.append(
+        "decode"))
+    monkeypatch.setattr(gpu_share, "pacer", lambda: None)
+    served = SimpleNamespace(pipe=SimpleNamespace(default_table="t0"),
+                             spec=SimpleNamespace(vae="v", audio_vae="a"))
+    return SimpleNamespace(_entry=SimpleNamespace(pipeline=served))
+
+
+def _clip_job(store):
+    import numpy as np
+
+    job = _submit(store)
+    job.record["status"] = "in_progress"
+    job.params = {"settings": {"frames": 22, "width": 64, "height": 64,
+                               "steps": 2, "shifts": {}, "seed": 1},
+                  "ffmpeg": "ffmpeg"}
+    job.kept = {"feats": np.zeros((1, 4, 8), np.float32), "spans": (),
+                "rows": (), "anchors": ()}
+    return job
+
+
+def test_the_jobs_turn_runs_after_the_dit_loads_and_settles_in_finally(
+        tmp_path, monkeypatch):
+    """The signed rule on the worker: the clip is checked, the DiT loads,
+    the turn books the default table, and the settle runs when the
+    denoise raises."""
+    order = []
+
+    def generate(*a, **k):
+        order.append("generate")
+        raise RuntimeError("boom")
+
+    hold = _clip_part_stubs(monkeypatch, order, generate)
+    store, clock, driver = _store(tmp_path)
+    job = _clip_job(store)
+    with pytest.raises(RuntimeError):
+        vj._clip_part(job, store, hold, store.clip(job.id))
+    assert order == ["check", "ensure_dit", ("turn", None, vj.JOB),
+                     "generate", ("settle", vj.JOB)]
+
+
+def test_the_jobs_pacer_reaches_the_sampler_and_stops_the_job(
+        tmp_path, monkeypatch):
+    from gmlx.serve.image_service import JobStopped
+
+    order = []
+    seen = {}
+
+    def generate(pipe, feats, **k):
+        seen["pacer"] = k["pacer"]
+        k["pacer"](())
+        k["on_step"](0, 2)
+        job.stop.set()
+        k["pacer"](())
+
+    hold = _clip_part_stubs(monkeypatch, order, generate)
+    store, clock, driver = _store(tmp_path)
+    job = _clip_job(store)
+    with pytest.raises(JobStopped):
+        vj._clip_part(job, store, hold, store.clip(job.id))
+    assert seen["pacer"] is not None
+    assert job.record["gmlx"]["step"] == 1
+    assert order[-1] == ("settle", vj.JOB)
