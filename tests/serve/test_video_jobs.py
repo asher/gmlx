@@ -1312,7 +1312,7 @@ def _create(body: bytes, ctype: str = "application/json"):
             sent[0] = True
             return {"type": "http.request", "body": body,
                     "more_body": False}
-        await asyncio.sleep(3600)
+        await asyncio.Event().wait()
     return videos.create(Request(scope, receive))
 
 
