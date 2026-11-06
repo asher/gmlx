@@ -445,9 +445,13 @@ def _gqa_wide_ok(dtype, hd, group):
     ok = _GQA_WIDE_OK.get(key)
     if ok is None:
         try:
+            from gmlx.eval_guard import guard
+
             q = mx.zeros((1, group, 1, hd), dtype=dtype)
             kv = mx.zeros((1, 1, 64, hd), dtype=dtype)
-            mx.eval(mlx_kquant.sdpa_decode_gqa(q, kv, kv, 1.0))
+            # Scratch arrays: the guard drains before the fallback runs.
+            guard.eval(mlx_kquant.sdpa_decode_gqa(q, kv, kv, 1.0),
+                       site="gqa-wide-probe", owner="scratch")
             ok = True
         except Exception as exc:
             _warn_fallback_once("gqa_decode", exc)
