@@ -295,6 +295,23 @@ def test_the_media_gate_passes_tensor_bodies_and_still_reads_json(host):
         headers={"content-type": wire.CONTENT_TYPE})) is False
 
 
+def test_only_the_tensor_step_routes_skip_the_gate():
+    """A JSON step route sent the tensor content type is still read by the
+    gate to its bound; only the routes that carry a container skip it."""
+    from gmlx.serve.patches import media_gate as mg
+    from gmlx.serve.patches.image_steps import ROUTES
+
+    tensor = {"encode", "tensors/{digest}", "adapters/{digest}", "step",
+              "vae/decode", "vae/encode", "vae/video/decode",
+              "vae/audio/decode", "vae/video/encode", "vae/audio/encode"}
+    for path, method, *_ in ROUTES:
+        concrete = path.replace("{digest}", "ab" * 32).replace(
+            "{model}", "zit").replace("{run}", "r1")
+        req = SimpleNamespace(url=SimpleNamespace(path=f"{P}/{concrete}"),
+                              headers={"content-type": wire.CONTENT_TYPE})
+        assert mg._is_step_tensors(req) is (path in tensor), (method, path)
+
+
 def test_a_binary_body_passes_the_serve_middleware(host):
     from gmlx.serve.patches.hardening import (
         install_api_key_auth,

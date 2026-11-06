@@ -896,12 +896,15 @@ def _is_upload(request) -> bool:
 
 
 def _is_step_tensors(request) -> bool:
-    """True for a safetensors body sent to the image and video step
-    routes, which read, price and check it themselves."""
-    from gmlx.serve.image_wire import CONTENT_TYPE, PREFIX
+    """True for a safetensors body sent to an image or video step route
+    that carries tensors, which reads, prices and checks it itself. The
+    JSON step routes take the gate's bound whatever their content type."""
+    from gmlx.serve.image_wire import CONTENT_TYPE, PREFIX, TENSOR_ROUTES
 
     ctype = (request.headers.get("content-type") or "").split(";", 1)[0]
-    return (request.url.path.startswith(PREFIX + "/")
+    path = request.url.path
+    return (path.startswith(PREFIX + "/")
+            and TENSOR_ROUTES.fullmatch(path[len(PREFIX):]) is not None
             and ctype.strip().lower() == CONTENT_TYPE)
 
 
