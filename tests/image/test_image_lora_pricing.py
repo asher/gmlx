@@ -193,6 +193,19 @@ def test_a_pair_not_held_is_priced_from_its_shape():
     assert figs[key] == (int(down.nbytes) + int(up.nbytes), 0)
 
 
+def test_a_pair_the_cache_dropped_is_refused_by_the_dry_run():
+    """A dry run on a table whose pair the cache no longer holds refuses as
+    the build does, so the turn names the pair to register again."""
+    rng = np.random.default_rng(5)
+    pipe = tiny_pipe({"blocks.0.attn.qkv": float_leaf(192, 64)})
+    down = mx.array(rng.standard_normal((4, 64)).astype(np.float32))
+    up = mx.array(rng.standard_normal((192, 4)).astype(np.float32))
+    tid = table_of(pipe, [("blocks.0.attn.qkv", None, (down, up), 0.5)])
+    pipe.adapters.clear()
+    with pytest.raises(install.AdapterError, match="Register the pair again"):
+        install.table_figures(pipe, tid, mx.float32)
+
+
 # The trace test (F3): the leaves of each family that see float32 rows in
 # a forward at bfloat16, against the family's lora_f32 list.
 def serve_cast(model, keep, act=mx.bfloat16):

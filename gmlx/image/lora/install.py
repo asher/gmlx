@@ -843,6 +843,10 @@ def table_figures(pipe, tid: str, act, f32=frozenset(),
             if strength == 0.0:
                 continue
             pair = pipe.adapters.peek(key)
+            if pair is None and key not in (shapes or {}):
+                raise AdapterError(
+                    f"adapter {key[:16]} of patch table {tid[:16]} is no "
+                    f"longer held. Register the pair again")
             if pair is None:
                 down, up, dtype = shapes[key]
                 d, u = _Like(tuple(down), dtype), _Like(tuple(up), dtype)
