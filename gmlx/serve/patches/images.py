@@ -28,6 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 import gmlx.serve.bridge_vlm as serving
 
 from ._common import _error_content, _remove_routes
+from .jobs import JobBook
 from .api_contract import (
     IMAGES_EDITS_CONSUMED,
     IMAGES_GENERATIONS_CONSUMED,
@@ -59,12 +60,19 @@ class _State:
         self.settings = ImageServerCfg()
         self.model_dirs: tuple = ()
         self.store = None
-        self.lock = threading.Lock()
-        self.in_flight = 0
-        self.durations: list = []           # seconds of recent jobs
-        self.counts = {"jobs": 0, "failed": 0, "cancelled": 0, "images": 0,
-                       "steps": 0}
+        self.book = JobBook("jobs", "failed", "cancelled", "images", "steps")
+        self.lock = self.book.lock
+        self.counts = self.book.counts
         self.recent: list = []              # (image_s, step_s) per image
+
+    @property
+    def in_flight(self) -> int:
+        return self.book.in_flight
+
+    @in_flight.setter
+    def in_flight(self, n: int) -> None:
+        with self.lock:
+            self.book.in_flight = n
 
     def configure(self, cfg) -> None:
         from gmlx.config import ImageServerCfg
@@ -88,17 +96,10 @@ class _State:
     def admit(self) -> bool:
         """Take a slot, or refuse when ``max_queue`` requests wait behind
         the one running."""
-        with self.lock:
-            if self.in_flight > self.settings.max_queue:
-                return False
-            self.in_flight += 1
-            return True
+        return self.book.admit(self.settings.max_queue)
 
     def leave(self, seconds: float | None = None) -> None:
-        with self.lock:
-            self.in_flight = max(0, self.in_flight - 1)
-            if seconds is not None:
-                self.durations = (self.durations + [seconds])[-16:]
+        self.book.leave(seconds)
 
     def record(self, status: str, result=None) -> None:
         """Count a finished job; an ``ok`` one adds its seconds per image
@@ -138,9 +139,9 @@ class _State:
             }
 
     def retry_after(self) -> int:
-        with self.lock:
-            typical = statistics.median(self.durations) if self.durations else 10.0
-            waiting = max(1, self.in_flight)
+        typical = self.book.typical()
+        waiting = max(1, self.in_flight)
+        typical = 10.0 if typical is None else typical
         return int(min(600, max(2, round(typical * waiting))))
 
 
