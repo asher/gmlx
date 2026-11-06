@@ -921,7 +921,8 @@ def test_a_video_body_is_priced_at_the_copies_its_parse_holds(
     if kind == "json":
         body = json.dumps({"prompt": text, "first_frame": url}).encode()
         ctype = "application/json"
-        need = _json_need(body, 4.25)
+        copies = 4.25
+        need = _json_need(body, copies)
     else:
         text += "\U0001F600" if kind == "form_wide" else ""
         body, ctype = _form({"prompt": text}, {"first_frame": _png()})
@@ -934,7 +935,7 @@ def test_a_video_body_is_priced_at_the_copies_its_parse_holds(
         assert r.status_code == status, r.text
         if status == 413:
             assert (" with the values it parses to, " if kind == "json"
-                    else f", its read holds {copies:g} times that, ") in \
+                    else f", their read holds {copies:g} times that, ") in \
                 r.json()["error"]["message"]
     assert len(routes.store.jobs) == 1
     assert routes.store.pending == {}
@@ -1558,10 +1559,10 @@ def test_a_forms_text_past_the_free_figure_is_a_413(routes, monkeypatch,
                            headers={"content-type": ctype})
     assert r.status_code == 413, r.text
     msg = r.json()["error"]["message"]
-    assert msg.startswith("the request body is over "), msg
+    assert msg.startswith("the text fields of this form are over "), msg
     assert msg.endswith("and 1.0 MiB of memory is free beside the models "
-                        "loaded; send a smaller body, or unload a model to "
-                        "make room")
+                        "loaded; send shorter text fields, or unload a model "
+                        "to make room")
     assert r.headers["connection"] == "close"
     assert routes.store.pending == {}
 

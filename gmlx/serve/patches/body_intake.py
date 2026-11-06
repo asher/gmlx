@@ -141,6 +141,16 @@ def json_held(raw: bytes, copies: float, str_copies: float) -> int:
     return held(len(raw), copies) + JSON_VALUE_BYTES * (count + 1)
 
 
+def _text_over_free(n: int, free: int, copies: float) -> BodyRefused:
+    """The 413 of a form whose text fields, ``n`` bytes so far, passed the
+    memory free at ``copies``."""
+    return BodyRefused(413, f"the text fields of this form are over "
+                       f"{_mib(n)}, their read holds {copies:g} times that, "
+                       f"and {_mib(free)} of memory is free beside the "
+                       "models loaded; send shorter text fields, or unload "
+                       "a model to make room")
+
+
 def _over_free(n: int, free: int, sent: bool,
                copies: float = 1) -> BodyRefused:
     size = _mib(n, True) if sent else f"over {_mib(n)}"
@@ -288,7 +298,7 @@ async def read_form_to_disk(request: Request, folder: str, take,
             wide[0] = wide[0] or not chunk.isascii()
             copies = FORM_TEXT_WIDE_COPIES if wide[0] else FORM_TEXT_COPIES
             if free is not None and held(text[0], copies) > free:
-                raise _over_free(text[0], free, False, copies)
+                raise _text_over_free(text[0], free, copies)
             part.data.extend(chunk)
 
     async def stream():
