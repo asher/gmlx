@@ -23,9 +23,17 @@ Three gates:
 - shipping steps: gmlx's default path with its own encoder's features,
   its own schedule and the LoRA live, each step from the oracle's fp32
   latents, its velocity within twice the oracle's own bf16 gap at that
-  step. On the LoRA case that bf16 pass merges the LoRA in float32 and
-  rounds once (--lora-merge float32): ComfyUI-GGUF's own bf16 add keeps
-  too little of the LoRA for the gap to tell a run without it.
+  step, or, at a step and stream whose gmlx reading misses that while
+  the case's exact gates pass, within the larger of that and the
+  oracle's nudge spread the manifest records: the oracle's largest bf16
+  gap over its recorded step and the same step from inputs nudged one
+  float32 step (scripts/video_oracle/check6_h3_spread.py). A step and
+  stream whose gmlx reading is over that as well is a recorded cell:
+  within the larger of that gate and RECORDED_FACTOR times the reading
+  the manifest records, with the reason it records. On the LoRA case
+  that bf16 pass merges the LoRA in float32 and rounds once
+  (--lora-merge float32): ComfyUI-GGUF's own bf16 add keeps too little
+  of the LoRA for the gap to tell a run without it.
 
 The same run without the LoRA must miss both exact gates on the LoRA
 case. Over eight steps a free run drifts from the fp32 run as a
@@ -49,6 +57,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import types
 from collections import Counter
 from pathlib import Path
@@ -106,6 +116,80 @@ def _manifest(name: str) -> dict:
     return committed(name)
 
 
+SPREAD_SEEDS = (0, 1, 2)
+RECORDED_FACTOR = 1.25
+
+
+def _assert_step_gates(m: dict) -> None:
+    """Each shipping step's gate is twice the oracle's bf16 gap at that
+    step, or, where the manifest records the oracle's nudge spread for a
+    step and stream, the larger of that and the spread: the largest of the
+    recorded gap and the gaps from 3 nudged inputs, at a step and stream
+    gmlx's shipping reading missed twice the gap at. A recorded cell, one
+    whose gmlx reading is over that derived gate too, takes the larger of
+    it and RECORDED_FACTOR times the reading, with a reason."""
+    gaps = m["results"]["step_bf16_vs_fp32"]
+    tols = m["tolerances"]["steps"]
+    assert len(gaps) == len(tols) == m["inputs"]["steps"]
+    rec = m["results"].get("step_nudge_spread")
+    spread = {}
+    if rec is not None:
+        assert tuple(rec["seeds"]) == SPREAD_SEEDS
+        assert rec["steps"]
+        for k, v in rec["steps"].items():
+            i = int(k) - 1
+            assert 0 <= i < len(gaps) and v and set(v) <= set(STREAMS), k
+            for s, r in v.items():
+                one = 2 * gaps[i][s]["rel_l2"]
+                assert set(r["runs"]) == {"recorded", *(
+                    f"nudge{x}" for x in SPREAD_SEEDS)}, (k, s)
+                assert r["runs"]["recorded"] == gaps[i][s]["rel_l2"], (k, s)
+                assert r["rel_l2"] == max(r["runs"].values()), (k, s)
+                assert r["run"] in r["runs"] and \
+                    r["runs"][r["run"]] == r["rel_l2"], (k, s)
+                assert r["gmlx"] > one, (k, s, "a spread at a step gmlx's "
+                                         "reading passes")
+                derived = max(one, r["rel_l2"])
+                spread[(i, s)] = derived
+                if "mark" in r:
+                    assert r["mark"] == "recorded", (k, s)
+                    assert r["gmlx"] > derived, (k, s, "a recorded cell "
+                                                 "inside its derived gate")
+                    assert r["derived"] == derived, (k, s)
+                    assert r["factor"] == RECORDED_FACTOR, (k, s)
+                    assert isinstance(r["reason"], str) and \
+                        r["reason"].strip() and "\n" not in r["reason"], (k, s)
+                    spread[(i, s)] = max(derived, RECORDED_FACTOR * r["gmlx"])
+                else:
+                    assert not {"derived", "factor", "reason"} & set(r), (k, s)
+    for i, (g, tol) in enumerate(zip(gaps, tols)):
+        assert tol == {s: {"rel_l2": spread.get((i, s), 2 * g[s]["rel_l2"])}
+                       for s in STREAMS}, i + 1
+
+
+def _ship_misses(m: dict, steps: list) -> list:
+    """The steps and streams of a shipping run over their gates, as
+    (step, stream, reading, gate). A recorded cell over its gate fails
+    loud with the re-record hint."""
+    tols = m["tolerances"]["steps"]
+    cells = m["results"].get("step_nudge_spread", {}).get("steps", {})
+    over = []
+    for i, (r, t) in enumerate(zip(steps, tols)):
+        for s in STREAMS:
+            c = cells.get(str(i + 1), {}).get(s, {})
+            if "mark" in c:
+                assert r[s] <= t[s]["rel_l2"], (
+                    f"step {i + 1} {s} {r[s]:.3e} is over "
+                    f"{c['factor']}x the recorded reading {c['gmlx']:.3e} "
+                    f"({c['reason']}); on another machine, or after an mlx, "
+                    f"mlx-kquant or macOS update, re-record it with "
+                    f"scripts/video_oracle/check6_h3_spread.py --write "
+                    f"--recorded {i + 1}:{s}:READING and a reason")
+            if not r[s] <= t[s]["rel_l2"]:
+                over.append((i + 1, s, r[s], t[s]["rel_l2"]))
+    return over
+
+
 def _assert_step_floors(m: dict) -> None:
     """The step floors a manifest records, if any: each for a step and
     stream whose velocity missed EXACT_TOL when it was recorded, with its
@@ -144,10 +228,7 @@ def test_the_manifests_follow_the_rule(name):
     assert inp["prompt"] == prompt
     assert inp["shifts"]["audio"] == hf.SHIFTS["audio"]
     assert inp["modes"][:1] == ["fp32"] and "bf16_forced" in inp["modes"]
-    gaps = m["results"]["step_bf16_vs_fp32"]
-    assert len(gaps) == len(m["tolerances"]["steps"]) == inp["steps"]
-    for g, tol in zip(gaps, m["tolerances"]["steps"]):
-        assert tol == {s: {"rel_l2": 2 * g[s]["rel_l2"]} for s in STREAMS}
+    _assert_step_gates(m)
     floor = _floor(m)
     assert m["tolerances"]["exact_free"] == {
         s: {"rel_l2": max(bg.EXACT_TOL, 2 * floor[s]["rel_l2"])}
@@ -175,6 +256,260 @@ def test_the_manifests_follow_the_rule(name):
         assert inp["shifts"]["video"] == hf.SHIFTS["video"]
         assert inp["lora"] is None and "lora" not in m["files"]
         assert inp.get("lora_merge") is None
+
+
+GAP = 0.0145
+SPREAD = 0.04
+# The recorded cell, step 3 audio: last's step 2 audio as recorded.
+R_GAP, R_SPREAD, R_GMLX = 0.0144, 0.0156, 0.0359
+REASON = "gmlx's bf16 path rounds twice where the oracle rounds once"
+
+
+def _spread_case() -> dict:
+    """A manifest whose step 2 audio carries the oracle's nudge spread
+    and whose step 3 audio is a recorded cell."""
+    gaps = [{s: {"rel_l2": GAP} for s in STREAMS} for _ in range(8)]
+    tols = [{s: {"rel_l2": 2 * GAP} for s in STREAMS} for _ in range(8)]
+    tols[1]["audio"] = {"rel_l2": SPREAD}
+    gaps[2]["audio"] = {"rel_l2": R_GAP}
+    tols[2]["audio"] = {"rel_l2": RECORDED_FACTOR * R_GMLX}
+    runs = {"recorded": GAP, "nudge0": 0.02, "nudge1": SPREAD,
+            "nudge2": 0.015}
+    r_runs = {"recorded": R_GAP, "nudge0": 0.0118, "nudge1": 0.0139,
+              "nudge2": R_SPREAD}
+    return {"inputs": {"steps": 8},
+            "results": {"step_bf16_vs_fp32": gaps, "step_nudge_spread": {
+                "seeds": list(SPREAD_SEEDS), "steps": {
+                    "2": {"audio": {
+                        "rel_l2": SPREAD, "run": "nudge1", "runs": runs,
+                        "gmlx": 0.036, "base_rerun": GAP}},
+                    "3": {"audio": {
+                        "rel_l2": R_SPREAD, "run": "nudge2", "runs": r_runs,
+                        "gmlx": R_GMLX, "base_rerun": R_GAP,
+                        "mark": "recorded", "derived": 2 * R_GAP,
+                        "factor": RECORDED_FACTOR, "reason": REASON}}}}},
+            "tolerances": {"steps": tols}}
+
+
+def _cell(m):
+    return m["results"]["step_nudge_spread"]["steps"]["3"]["audio"]
+
+
+def _recorded_gate_derived(m):
+    m["tolerances"]["steps"][2]["audio"] = {"rel_l2": 2 * R_GAP}
+
+
+def _recorded_gate_widened(m):
+    m["tolerances"]["steps"][2]["audio"] = {"rel_l2": 1.5 * R_GMLX}
+
+
+def _recorded_inside_derived(m):
+    """A spread over the one-sample gate puts the reading inside it."""
+    c = _cell(m)
+    c["runs"]["nudge2"] = c["rel_l2"] = c["derived"] = 0.04
+
+
+def _recorded_off_its_derived(m):
+    _cell(m)["derived"] = R_SPREAD
+
+
+def _recorded_other_factor(m):
+    _cell(m)["factor"] = 1.5
+    m["tolerances"]["steps"][2]["audio"] = {"rel_l2": 1.5 * R_GMLX}
+
+
+def _recorded_without_reason(m):
+    _cell(m)["reason"] = " "
+
+
+def _recorded_other_mark(m):
+    _cell(m)["mark"] = "ungated"
+
+
+def _unmarked_with_a_reason(m):
+    m["results"]["step_nudge_spread"]["steps"]["2"]["audio"]["reason"] = \
+        REASON
+
+
+def _spread_gate_left(m):
+    m["tolerances"]["steps"][1]["audio"] = {"rel_l2": 2 * GAP}
+
+
+def _spread_gate_widened(m):
+    m["tolerances"]["steps"][1]["audio"] = {"rel_l2": 1.5 * SPREAD}
+
+
+def _spread_on_another_stream(m):
+    m["tolerances"]["steps"][1]["video"] = {"rel_l2": SPREAD}
+
+
+def _spread_where_gmlx_passes(m):
+    m["results"]["step_nudge_spread"]["steps"]["2"]["audio"]["gmlx"] = GAP
+
+
+def _spread_short_a_nudge(m):
+    r = m["results"]["step_nudge_spread"]["steps"]["2"]["audio"]
+    del r["runs"]["nudge2"]
+
+
+def _spread_not_the_max(m):
+    r = m["results"]["step_nudge_spread"]["steps"]["2"]["audio"]
+    r["runs"]["nudge0"] = 2 * SPREAD
+
+
+def _spread_off_the_recorded_gap(m):
+    r = m["results"]["step_nudge_spread"]["steps"]["2"]["audio"]
+    r["runs"]["recorded"] = GAP / 2
+
+
+def _spread_more_seeds(m):
+    m["results"]["step_nudge_spread"]["seeds"] = [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("wrong", [
+    _spread_gate_left, _spread_gate_widened, _spread_on_another_stream,
+    _spread_where_gmlx_passes, _spread_short_a_nudge, _spread_not_the_max,
+    _spread_off_the_recorded_gap, _spread_more_seeds,
+    _recorded_gate_derived, _recorded_gate_widened, _recorded_inside_derived,
+    _recorded_off_its_derived, _recorded_other_factor,
+    _recorded_without_reason, _recorded_other_mark, _unmarked_with_a_reason])
+def test_a_nudge_spread_widens_its_shipping_step_alone(wrong):
+    """A shipping step and stream with the oracle's nudge spread on record
+    takes the larger of twice its gap and the spread, the largest of the
+    recorded gap and 3 nudged ones, only where gmlx's reading missed twice
+    the gap, and a recorded cell RECORDED_FACTOR times gmlx's reading, only
+    where that reading is over the derived gate, with its reason; every
+    other step keeps twice its gap."""
+    m = _spread_case()
+    _assert_step_gates(m)
+    wrong(m)
+    with pytest.raises(AssertionError):
+        _assert_step_gates(m)
+
+
+@pytest.mark.parametrize("scale, passes", [
+    (0.5, True), (1.0, True), (1.2, True), (1.3, False), (8.2, False)])
+def test_a_recorded_cell_holds_its_reading(scale, passes):
+    """A shipping run at a recorded cell passes an improvement and a drift
+    inside RECORDED_FACTOR of the recorded reading; a replay at 1.3x of it
+    and a fault fail loud with the re-record hint."""
+    m = _spread_case()
+    steps = [{s: GAP for s in STREAMS} for _ in range(8)]
+    steps[2]["audio"] = scale * R_GMLX
+    if passes:
+        assert _ship_misses(m, steps) == []
+    else:
+        with pytest.raises(AssertionError, match="re-record it with"):
+            _ship_misses(m, steps)
+
+
+def test_a_spread_cell_misses_without_the_hint():
+    """A shipping run over a spread cell's gate is a miss, listed with
+    the others."""
+    m = _spread_case()
+    steps = [{s: GAP for s in STREAMS} for _ in range(8)]
+    steps[1]["audio"] = 1.1 * SPREAD
+    steps[4]["video"] = 3 * GAP
+    assert _ship_misses(m, steps) == [(2, "audio", 1.1 * SPREAD, SPREAD),
+                                      (5, "video", 3 * GAP, 2 * GAP)]
+
+
+SPREAD_TOOL = Path(__file__).resolve().parents[2] / "scripts" / \
+    "video_oracle" / "check6_h3_spread.py"
+
+
+def _spread_write(tmp_path, *args) -> tuple[subprocess.CompletedProcess,
+                                             dict]:
+    """check6_h3_spread.py --write on a fixture root at ``tmp_path`` whose
+    manifest has the one-sample gaps of _spread_case and whose work file
+    holds the oracle's base and nudged runs of steps 2 and 3."""
+    m = _spread_case()
+    gaps = m["results"]["step_bf16_vs_fp32"]
+    doc = {"npz": "x.npz", "tensors": {}, "inputs": m["inputs"],
+           "results": {"step_bf16_vs_fp32": gaps},
+           "tolerances": {"steps": [{s: {"rel_l2": 2 * g[s]["rel_l2"]}
+                                     for s in STREAMS} for g in gaps]}}
+    (tmp_path / "x.manifest.json").write_text(json.dumps(doc))
+    cells = m["results"]["step_nudge_spread"]["steps"]
+    runs = {}
+    for k, v in cells.items():
+        r = v["audio"]["runs"]
+        runs[f"step{k} base"] = {"step": int(k), "seed": None, "gaps": {
+            "video": GAP, "audio": r["recorded"]}}
+        for x in SPREAD_SEEDS:
+            runs[f"step{k} nudge{x}"] = {"step": int(k), "seed": x, "gaps": {
+                "video": GAP, "audio": r[f"nudge{x}"]}}
+    work = tmp_path / "w.json"
+    work.write_text(json.dumps({"name": "x", "comfy": "c", "comfy_gguf": "g",
+                                "threads": 8, "seeds": list(SPREAD_SEEDS),
+                                "runs": runs}))
+    r = subprocess.run([sys.executable, str(SPREAD_TOOL), "--name", "x",
+                        "--work", str(work), "--write", *args],
+                       capture_output=True, text=True, timeout=120,
+                       env={**os.environ, "GMLX_VIDEO_FIXTURES": str(tmp_path)})
+    return r, json.loads((tmp_path / "x.manifest.json").read_text())
+
+
+def test_the_spread_tool_writes_a_recorded_cell(tmp_path):
+    """--recorded writes a cell the rule takes: gmlx's reading over the
+    derived gate, gated at RECORDED_FACTOR times it with the reason."""
+    r, doc = _spread_write(tmp_path, "--gmlx", "2:audio:0.036",
+                           "--recorded", f"3:audio:{R_GMLX}",
+                           "--reason", REASON)
+    assert r.returncode == 0, r.stderr
+    _assert_step_gates(doc)
+    cell = doc["results"]["step_nudge_spread"]["steps"]["3"]["audio"]
+    assert (cell["mark"], cell["reason"]) == ("recorded", REASON)
+    assert doc["tolerances"]["steps"][2]["audio"]["rel_l2"] == \
+        RECORDED_FACTOR * R_GMLX
+
+
+def test_a_re_record_inside_the_derived_gate_drops_the_mark(tmp_path):
+    """A recorded reading over the one-sample gate but inside the spread
+    is written as an ordinary spread cell."""
+    r, doc = _spread_write(tmp_path, "--recorded", "2:audio:0.035",
+                           "--reason", REASON)
+    assert r.returncode == 0, r.stderr
+    assert "the mark drops" in r.stdout
+    _assert_step_gates(doc)
+    cell = doc["results"]["step_nudge_spread"]["steps"]["2"]["audio"]
+    assert "mark" not in cell and "reason" not in cell
+    assert doc["tolerances"]["steps"][1]["audio"]["rel_l2"] == SPREAD
+
+
+@pytest.mark.parametrize("args, why", [
+    (("--recorded", f"3:audio:{R_GMLX}"), "go together"),
+    (("--recorded", f"3:audio:{R_GMLX}", "--reason", "a\nb"), "one line"),
+    (("--gmlx", "3:audio:0.03", "--recorded", f"3:audio:{R_GMLX}",
+      "--reason", REASON), "named twice"),
+    (("--recorded", "3:audio:0.02", "--reason", REASON), "does not miss")])
+def test_the_spread_tool_refuses_a_recorded_cell_it_cannot_write(
+        tmp_path, args, why):
+    r, doc = _spread_write(tmp_path, *args)
+    assert r.returncode != 0 and why in r.stderr
+    assert "step_nudge_spread" not in doc["results"]
+
+
+def test_last_step_3_audio_misses_the_one_sample_gate():
+    """gmlx's shipping reading of last's step 3 audio, as recorded beside
+    the spread, misses twice the oracle's one-sample gap and passes the
+    spread's gate."""
+    m = _manifest("check6_h3_lora_last_512x512x22")
+    r = m["results"]["step_nudge_spread"]["steps"]["3"]["audio"]
+    one = 2 * m["results"]["step_bf16_vs_fp32"][2]["audio"]["rel_l2"]
+    assert "mark" not in r
+    assert r["gmlx"] > one
+    assert r["gmlx"] <= m["tolerances"]["steps"][2]["audio"]["rel_l2"]
+
+
+def test_last_step_2_audio_is_a_recorded_cell():
+    """last's step 2 audio, gmlx's reading over the spread's gate as well,
+    is recorded: gated at RECORDED_FACTOR times that reading."""
+    m = _manifest("check6_h3_lora_last_512x512x22")
+    r = m["results"]["step_nudge_spread"]["steps"]["2"]["audio"]
+    assert r["mark"] == "recorded" and r["gmlx"] > r["derived"]
+    assert m["tolerances"]["steps"][1]["audio"]["rel_l2"] == \
+        RECORDED_FACTOR * r["gmlx"]
 
 
 FLOOR8 = 1.5e-04
@@ -816,7 +1151,5 @@ def test_check6_shipping_steps(gguf_dir, pipe, cases, name):
         assert plain == (0 if table is not None
                          else len(pipe.dit.blocks)), plain
     assert calls == want
-    over = [(i + 1, s, r[s], t[s]["rel_l2"])
-            for i, (r, t) in enumerate(zip(steps, tols)) for s in STREAMS
-            if not r[s] <= t[s]["rel_l2"]]
+    over = _ship_misses(m, steps)
     assert not over, over

@@ -269,6 +269,50 @@
     "rel_l2": 0.0005452448410195122,
     "measured": "the largest relative L2 between gmlx's exact run on the GPU and the same run on the CPU stream or from inputs nudged by one float32 step (4 seeds); tests/video/test_video_check6_h3.py on minimax_h3_fl2va_pruned-Q4_K.gguf dd948e08 with minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors fb4c0036, Apple M5 Max"
    }
+  },
+  "step_nudge_spread": {
+   "rule": "a shipping step and stream whose gmlx reading misses twice the oracle's one-sample bf16 against fp32 gap while the case's exact gates pass: tolerance = the larger of that and the nudge spread, the oracle's own largest bf16 against fp32 relative L2 at the step over its recorded base and the same bf16 step from the step's input latents and features nudged one float32 step (seeds 0 to 2), sigmas not nudged; measured once per fixture by scripts/video_oracle/check6_h3_spread.py",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "steps": {
+    "2": {
+     "audio": {
+      "rel_l2": 0.015570161371195977,
+      "run": "nudge2",
+      "runs": {
+       "recorded": 0.014446996656056496,
+       "nudge0": 0.011788191117118279,
+       "nudge1": 0.013928799603720267,
+       "nudge2": 0.015570161371195977
+      },
+      "gmlx": 0.035931322222143604,
+      "base_rerun": 0.014446996656056496,
+      "mark": "recorded",
+      "derived": 0.02889399331211299,
+      "factor": 1.25,
+      "reason": "gmlx 3.593e-02 against the reference's nudged spread to 1.557e-02; probe 3 found no op noisier on audio rows on identical input; the reference's bf16 rope is exact at the audio rows' zero angles"
+     }
+    },
+    "3": {
+     "audio": {
+      "rel_l2": 0.033138965422376696,
+      "run": "nudge1",
+      "runs": {
+       "recorded": 0.014822133698303907,
+       "nudge0": 0.020382235028287492,
+       "nudge1": 0.033138965422376696,
+       "nudge2": 0.027943370889519772
+      },
+      "gmlx": 0.0322725310113893,
+      "base_rerun": 0.014822133698303907
+     }
+    }
+   },
+   "recorded_rule": "a recorded cell, a shipping step and stream whose gmlx reading is over the gate above: tolerance = the larger of that gate (derived) and 1.25 x gmlx's reading, with the reason it is recorded; a re-record that lands inside the derived gate drops the mark",
+   "measured": "ComfyUI 426f5eea52a7ece1dd599fff4cb6cd1f352ddd24, ComfyUI-GGUF 373048b8403a7820620065210a691263d4da0a61, 8 CPU threads, bf16 matmul emulation; scripts/video_oracle/check6_h3_spread.py"
   }
  },
  "tolerances": {
@@ -286,7 +330,7 @@
      "rel_l2": 0.09127551576313642
     },
     "audio": {
-     "rel_l2": 0.02889399331211299
+     "rel_l2": 0.0449141527776795
     }
    },
    {
@@ -294,7 +338,7 @@
      "rel_l2": 0.11331755335769504
     },
     "audio": {
-     "rel_l2": 0.029644267396607814
+     "rel_l2": 0.033138965422376696
     }
    },
    {

@@ -25,8 +25,12 @@ every --work file, refuses a run in two of them, and puts the spread and
 the gates it gives into the fixture's manifest under GMLX_VIDEO_FIXTURES
 and into each --copy of it. --gmlx names gmlx's shipping reading of each
 step and stream the spread gates, recorded beside it; a step and stream
-gmlx's reading does not miss the one-sample gate at is refused. --write
-needs no ComfyUI.
+gmlx's reading does not miss the one-sample gate at is refused.
+--recorded names a step and stream whose gmlx reading is over the gate
+the spread gives as well (RECORDED): it is written as a recorded cell,
+gated at the larger of that gate and FACTOR times gmlx's reading, with
+--reason. A re-record whose reading lands inside the spread's gate writes
+an ordinary cell, the mark dropped. --write needs no ComfyUI.
 
   python scripts/video_oracle/run.py --python <comfyui venv python> \\
       --threads 8 check6_h3_spread.py --comfy-dir <ComfyUI checkout> \\
@@ -35,7 +39,8 @@ needs no ComfyUI.
       --name check6_h3_lora_last_512x512x22 --steps 2 3 8 --work last.json
   python scripts/video_oracle/check6_h3_spread.py \\
       --name check6_h3_lora_last_512x512x22 --work last.json --write \\
-      --gmlx 2:audio:0.0359 3:audio:0.0323 8:audio:0.0374 --copy <manifest>
+      --gmlx 3:audio:0.0323 8:audio:0.0374 --recorded 2:audio:0.0359 \\
+      --reason "<one line>" --copy <manifest>
 """
 
 from __future__ import annotations
@@ -63,6 +68,12 @@ RULE = ("a shipping step and stream whose gmlx reading misses twice the "
         "over its recorded base and the same bf16 step from the step's "
         "input latents and features nudged one float32 step (seeds 0 to "
         "2), sigmas not nudged; measured once per fixture by " + SCRIPT)
+FACTOR = 1.25
+RECORDED = ("a recorded cell, a shipping step and stream whose gmlx reading "
+            "is over the gate above: tolerance = the larger of that gate "
+            f"(derived) and {FACTOR} x gmlx's reading, with the reason it is "
+            "recorded; a re-record that lands inside the derived gate drops "
+            "the mark")
 
 
 def nudged(inputs: dict, seed: int) -> dict:
@@ -247,7 +258,11 @@ def write(a) -> int:
     gaps = docs[0]["results"]["step_bf16_vs_fp32"]
     tols = [dict(t) for t in docs[0]["tolerances"]["steps"]]
     steps: dict = {}
-    for spec in a.gmlx:
+    specs = [(x, False) for x in a.gmlx] + [(x, True) for x in a.recorded]
+    cells = [x.rsplit(":", 1)[0] for x, _ in specs]
+    if len(set(cells)) != len(cells):
+        raise SystemExit(f"error: a step and stream named twice in {cells}")
+    for spec, mark in specs:
         i, s, v = spec.split(":")
         i, v = int(i), float(v)
         one = 2 * gaps[i - 1][s]["rel_l2"]
@@ -262,11 +277,24 @@ def write(a) -> int:
                  **{t.split()[1]: work["runs"][t]["gaps"][s]
                     for t in tags if work["runs"][t]["seed"] is not None}}
         top = max(reads, key=reads.get)
-        steps.setdefault(str(i), {})[s] = {
+        cell = steps.setdefault(str(i), {})[s] = {
             "rel_l2": reads[top], "run": top, "runs": reads, "gmlx": v,
             "base_rerun": work["runs"][tags[0]]["gaps"][s]}
-        tols[i - 1][s] = {"rel_l2": max(one, reads[top])}
+        derived = max(one, reads[top])
+        tols[i - 1][s] = {"rel_l2": derived}
+        if mark and v > derived:
+            cell.update(mark="recorded", derived=derived, factor=FACTOR,
+                        reason=a.reason)
+            tols[i - 1][s] = {"rel_l2": max(derived, FACTOR * v)}
+        elif mark:
+            print(f"[spread6] step {i} {s}: gmlx {v:.4e} lands inside the "
+                  f"derived gate {derived:.4e}, the mark drops", flush=True)
+    steps = {k: dict(sorted(steps[k].items()))
+             for k in sorted(steps, key=int)}
     rec = {"rule": RULE, "seeds": work["seeds"], "steps": steps,
+           **({"recorded_rule": RECORDED}
+              if any("mark" in r for v in steps.values() for r in v.values())
+              else {}),
            "measured": (f"ComfyUI {work['comfy']}, ComfyUI-GGUF "
                         f"{work['comfy_gguf']}, {work['threads']} CPU "
                         f"threads, bf16 matmul emulation; {SCRIPT}")}
@@ -281,8 +309,8 @@ def write(a) -> int:
             print(f"[spread6] {a.name} step {i} {s}: spread "
                   f"{r['rel_l2']:.4e} ({r['run']}), one-sample gate "
                   f"{2 * gaps[int(i) - 1][s]['rel_l2']:.4e}, gmlx "
-                  f"{r['gmlx']:.4e}, gate {tols[int(i) - 1][s]['rel_l2']:.4e}",
-                  flush=True)
+                  f"{r['gmlx']:.4e}, gate {tols[int(i) - 1][s]['rel_l2']:.4e}"
+                  + (", recorded" if "mark" in r else ""), flush=True)
     return 0
 
 
@@ -306,12 +334,21 @@ def main(argv=None) -> int:
     ap.add_argument("--gmlx", nargs="+", default=[],
                     help="STEP:STREAM:READING of each gated step, gmlx's "
                          "shipping reading")
+    ap.add_argument("--recorded", nargs="+", default=[],
+                    help="STEP:STREAM:READING of each recorded cell, gmlx's "
+                         "shipping reading over the spread's gate")
+    ap.add_argument("--reason", help="one line: why the recorded cells are "
+                    "recorded")
     ap.add_argument("--copy", type=Path, nargs="*", default=[],
                     help="committed copies of the manifest to update too")
     a = ap.parse_args(argv)
     if a.write:
-        if not a.gmlx:
-            ap.error("--write needs --gmlx")
+        if not a.gmlx and not a.recorded:
+            ap.error("--write needs --gmlx or --recorded")
+        if bool(a.recorded) != bool(a.reason and a.reason.strip()):
+            ap.error("--recorded and --reason go together")
+        if a.reason and "\n" in a.reason:
+            ap.error("--reason is one line")
         return write(a)
     if a.comfy_dir is None or a.dit is None or a.features is None \
             or a.steps is None:
