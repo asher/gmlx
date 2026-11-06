@@ -2487,6 +2487,10 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
         if im is not None:
             return _rm_image(a, cfg, cfg_path, im, disc, images,
                              configured=a.id in cfg.image_models)
+        if a.id in cfg.video_models:
+            print(f"error: {a.id!r} is a video model; remove its entry "
+                  f"from video_models in {cfg_path}", file=sys.stderr)
+            return 2
         print(f"error: unknown model id {a.id!r} (see: gmlx list)",
               file=sys.stderr)
         return 2
@@ -2791,6 +2795,8 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
                          ("discovered", images)):
         for im in entries:
             rows.append(_image_row(cfg, im, src, default_image))
+    for vm in cfg.video_models.values():
+        rows.append(_video_row(cfg, vm))
 
     images_only = a.image or a.family or a.edit or a.shared_encoder
     if images_only:
@@ -2800,7 +2806,8 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
                      or _family_key(r["family_title"] or "") == want)
                 and (not a.edit or r["edit"])
                 and (not a.shared_encoder or r["shared_encoder"])]
-    rows.sort(key=lambda r: (r["kind"] != "chat", r["id"]))
+    order = {"chat": 0, "image": 1, "video": 2}
+    rows.sort(key=lambda r: (order[r["kind"]], r["id"]))
     aliases = dict(cfg.aliases)
     for r in rows:
         if r["kind"] == "chat":
@@ -2914,6 +2921,21 @@ def _image_row(cfg, im, source: str, default_image: str | None) -> dict:
             "flags": flags, "family": family, "family_title": title,
             "edit": edit, "shared_encoder": shared, "encoder": im.encoder,
             "vae": im.vae,
+            "size_bytes": (None if any(x is None for x in sizes)
+                           else sum(sizes))}
+
+
+def _video_row(cfg, vm) -> dict:
+    """The ``gmlx list`` row of a video_models entry, sized by the files it
+    loads: its DiT, text encoder, vision tower, VAEs and LoRAs."""
+    files = [vm.path, vm.encoder, vm.encoder_mmproj, vm.vae, vm.audio_vae,
+             *(a[0] for a in vm.adapters)]
+    sizes = [_model_size_bytes(p, cfg.model_dirs) for p in files if p]
+    flags = [vm.variant or "video"]
+    if vm.upsampler:
+        flags.append(f"upsampler {vm.upsampler}")
+    return {"id": vm.id, "kind": "video", "path": vm.path, "profile": None,
+            "source": "config", "default": False, "flags": flags,
             "size_bytes": (None if any(x is None for x in sizes)
                            else sum(sizes))}
 

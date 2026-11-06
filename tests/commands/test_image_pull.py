@@ -1473,6 +1473,46 @@ def test_list_sizes_an_image_model_by_the_files_it_loads(images, capsys):
     assert rows["qt"]["size_bytes"] == 400           # dit, vae, tower, own
 
 
+_VIDEO_CFG = """video_models:
+  h3:
+    path: h3.gguf
+    encoder: own.gguf
+    vae: v.safetensors
+    audio_vae: a.safetensors
+    variant: fl2va
+    adapters: [lora.safetensors]
+"""
+
+
+def test_list_shows_a_video_entry_sized_by_the_files_it_loads(images,
+                                                              capsys):
+    lib, cfg = images
+    for f in ("h3.gguf", "v.safetensors", "a.safetensors",
+              "lora.safetensors"):
+        (lib / f).write_bytes(b"x" * 100)
+    cfg.write_text(cfg.read_text() + _VIDEO_CFG)
+    assert manage.cmd_list(["--config", str(cfg), "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)["models"]
+    assert [r["kind"] for r in rows][-1] == "video"
+    row = rows[-1]
+    assert (row["id"], row["flags"], row["size_bytes"]) == (
+        "h3", ["fl2va"], 500)
+    assert manage.cmd_list(["--config", str(cfg), "--image", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)["models"]
+    assert "h3" not in {r["id"] for r in rows}
+    assert manage.cmd_list(["--config", str(cfg)]) == 0
+    line = next(x for x in capsys.readouterr().out.splitlines() if " h3 " in x)
+    assert "video" in line and "fl2va" in line
+
+
+def test_rm_of_a_video_model_names_the_config_entry(images, capsys):
+    lib, cfg = images
+    cfg.write_text(cfg.read_text() + _VIDEO_CFG)
+    assert manage.cmd_rm(["h3", "--config", str(cfg), "--yes"]) == 2
+    assert "remove its entry from video_models" in capsys.readouterr().err
+    assert "h3:" in cfg.read_text()
+
+
 def test_rm_of_an_image_model_keeps_what_others_use(images, capsys):
     lib, cfg = images
     assert manage.cmd_rm(["qt", "--config", str(cfg), "--yes"]) == 0

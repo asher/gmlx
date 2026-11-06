@@ -302,9 +302,10 @@ For the menu bar side, read [Menu bar app](menubar.md).
 
 `gmlx list` lists the model ids a request can address. Discovered models
 are tagged, aliases follow, and the default model is marked with `*`. The
-KIND column reads `chat` or `image`. An image model's size counts its DiT,
-VAE and vision tower, and its text encoder unless it shares a chat model's,
-which that model's row counts.
+KIND column reads `chat`, `image` or `video`. An image model's size counts
+its DiT, VAE and vision tower, and its text encoder unless it shares a chat
+model's, which that model's row counts. A video model's size counts every
+file its entry loads.
 
 ```sh
 gmlx list
@@ -831,6 +832,9 @@ anything.
 An image model id removes its DiT, VAE, text encoder and vision tower. A text encoder
 that is a chat model, or that another image model uses, is kept, and `rm`
 refuses a chat model that an image model uses as its encoder.
+
+`rm` does not take a video model id. To remove a video model, delete its
+entry under `video_models` in the config, then delete its files.
 
 ```sh
 gmlx rm old-model
