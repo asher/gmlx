@@ -2952,8 +2952,20 @@ def _parse_video_defaults(where: str, raw) -> dict:
                 raise ConfigError(f"{where}.steps: expected a whole number, "
                                   f"got {raw.get(key)!r}")
             v = int(v)
+        if key == "seconds":
+            _clip_seconds(f"{where}.seconds", raw.get(key), v)
         out[key] = v
     return out
+
+
+def _clip_seconds(where: str, raw, seconds: float) -> None:
+    """Refuse a clip length outside the family's frame range, counted in
+    whole frames as ``gmlx video --seconds`` counts them."""
+    from gmlx.commands.video import _clip_seconds as fits, _seconds_range
+
+    if not fits(seconds):
+        raise ConfigError(f"{where}: expected {_seconds_range()} seconds, "
+                          f"got {raw!r}")
 
 
 def _video_size(where: str, raw) -> str:

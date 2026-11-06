@@ -3565,6 +3565,19 @@ def test_video_model_keys_and_defaults_are_strict(entry, match):
         build_config(_video_doc(**entry))
 
 
+@pytest.mark.parametrize("seconds", [0.2, 15.1, 600])
+def test_a_clip_length_past_the_frame_range_is_refused_at_load(seconds):
+    with pytest.raises(ConfigError, match=r"defaults.seconds: expected "
+                       r"0.208333 to 15.0833 seconds"):
+        build_config(_video_doc(defaults={"seconds": seconds}))
+
+
+@pytest.mark.parametrize("seconds", [0.2085, 5 / 24, 15.08, 362 / 24])
+def test_a_clip_length_inside_the_frame_range_loads(seconds):
+    cfg = build_config(_video_doc(defaults={"seconds": seconds}))
+    assert cfg.video_models["h3"].defaults["seconds"] == seconds
+
+
 def test_a_video_model_needs_its_four_files():
     doc = _video_doc()
     del doc["video_models"]["h3"]["audio_vae"]
