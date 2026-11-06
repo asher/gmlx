@@ -51,7 +51,8 @@ FIELDS = ("prompt", "model", "seconds", "size", "seed", "prompt_upsampling",
 KEYFRAMES = ("first_frame", "last_frame")
 # A JSON body is held about four times while it is read: the body, the
 # gate's json.loads, the route's, and a data-URL keyframe's decode,
-# measured at 4.0. The post-V6 parse change removes the copies.
+# measured at 4.0. The post-V6 parse change removes the copies. The
+# values it parses to add body_intake.JSON_VALUE_BYTES each.
 JSON_COPIES = 4.25
 _KINDS = {"video": "--guide", "audio": "--guide-audio"}
 # The entry plans and encoder tokenizers the estimate reads, by entry.
@@ -461,7 +462,8 @@ async def create(request: Request):
                 await asyncio.to_thread(post.settle)
                 fields = dict(pairs)
             else:
-                raw = await read_in_ram(request, copies=JSON_COPIES)
+                raw = await read_in_ram(request, copies=JSON_COPIES,
+                                        is_json=True)
                 await check_media(request, raw)
                 try:
                     fields = json.loads(raw or b"{}")

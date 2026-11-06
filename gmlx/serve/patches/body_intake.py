@@ -118,6 +118,20 @@ def held(n: int, copies: float) -> int:
     return math.ceil(n * copies)
 
 
+# A JSON value or container parses to an object of 56 bytes or more and
+# a pointer to it: the price counts each one the body can make at this.
+JSON_VALUE_BYTES = 64
+
+
+def json_held(raw: bytes, copies: float) -> int:
+    """The bytes a JSON body's read and parse hold: ``copies`` of its
+    length, and JSON_VALUE_BYTES for each value or container it can parse
+    to. A value or container starts the body or follows a ",", "[" or
+    "{", so their count bounds it, read with no parse."""
+    count = raw.count(b",") + raw.count(b"[") + raw.count(b"{")
+    return held(len(raw), copies) + JSON_VALUE_BYTES * (count + 1)
+
+
 def _over_free(n: int, free: int, sent: bool,
                copies: float = 1) -> BodyRefused:
     size = _mib(n, True) if sent else f"over {_mib(n)}"
@@ -129,12 +143,14 @@ def _over_free(n: int, free: int, sent: bool,
 
 
 async def read_in_ram(request: Request, free: int | None = None,
-                      copies: float = 1) -> bytes:
+                      copies: float = 1, is_json: bool = False) -> bytes:
     """The body of ``request``, priced against ``free`` bytes (the pool's
     free figure when None) before a byte of it is read, at the ``copies``
     of it the route's read and parse hold. A body with no Content-Length
-    is refused once what arrived, at that factor, passes the figure. The
-    body read is kept on the request, so ``request.form()`` and
+    is refused once what arrived, at that factor, passes the figure. A
+    JSON body (``is_json``) is priced again once read and before it is
+    parsed, with the values it can parse to (:func:`json_held`). The body
+    read is kept on the request, so ``request.form()`` and
     ``request.json()`` parse it after."""
     if free is None:
         free = free_bytes()
@@ -148,6 +164,15 @@ async def read_in_ram(request: Request, free: int | None = None,
             raise _over_free(size, free, False, copies)
         chunks.append(chunk)
     raw = b"".join(chunks)
+    if is_json and free is not None:
+        need = json_held(raw, copies)
+        if need > free:
+            raise BodyRefused(413, f"the request body is "
+                              f"{_mib(len(raw), True)}, its read and parse "
+                              f"hold {_mib(need, True)} with the values it "
+                              f"parses to, and {_mib(free)} of memory is "
+                              "free beside the models loaded; send a "
+                              "smaller body, or unload a model to make room")
     request._body = raw
     return raw
 

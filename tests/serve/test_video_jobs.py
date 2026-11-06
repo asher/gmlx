@@ -924,16 +924,47 @@ def test_a_video_body_is_priced_at_the_copies_its_parse_holds(
         body, ctype = _form({"prompt": text}, {"first_frame": _png()})
         n, copies = len(text), body_intake.FORM_TEXT_COPIES
     need = math.ceil(n * copies)
+    if kind == "json":
+        need += 64 * (sum(body.count(c) for c in (b",", b"[", b"{")) + 1)
     for free, status in ((need - 1, 413), (need, 200)):
         monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
         r = routes.client.post("/v1/videos", content=body,
                                headers={"content-type": ctype})
         assert r.status_code == status, r.text
         if status == 413:
-            assert f", its read holds {copies:g} times that, " in \
+            assert (" with the values it parses to, " if kind == "json"
+                    else f", its read holds {copies:g} times that, ") in \
                 r.json()["error"]["message"]
     assert len(routes.store.jobs) == 1
     assert routes.store.pending == {}
+
+
+def _small_values(n: int) -> tuple[bytes, bytes]:
+    """Two JSON bodies of one length near ``n``: one of empty objects in
+    a list, and one whose length is a single string."""
+    head = b'{"prompt": "a cat", "x": ['
+    empties = head + b",".join([b"{}"] * ((n - len(head)) // 3)) + b"]}"
+    string = b'{"prompt": "' + b"a" * (len(empties) - 14) + b'"}'
+    assert len(string) == len(empties)
+    return empties, string
+
+
+def test_a_json_body_of_small_values_is_priced_by_its_values(routes,
+                                                             monkeypatch):
+    """A body of empty objects parses to far more than its length: it is
+    refused where a body of one string of its length fits."""
+    empties, string = _small_values(96 << 10)
+    free = math.ceil(len(empties) * videos.JSON_COPIES) + 64 * 16
+    monkeypatch.setattr(body_intake, "free_bytes", lambda: free)
+    r = routes.client.post("/v1/videos", content=empties,
+                           headers={"content-type": "application/json"})
+    assert r.status_code == 413, r.text
+    assert r.json()["error"]["message"].startswith(
+        f"the request body is {body_intake._mib(len(empties), True)}, its "
+        "read and parse hold ")
+    r = routes.client.post("/v1/videos", content=string,
+                           headers={"content-type": "application/json"})
+    assert r.status_code == 200, r.text
 
 
 def test_a_jobs_anchor_refusal_names_its_field_not_its_path(tmp_path):

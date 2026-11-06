@@ -51,7 +51,8 @@ _CONSUMED = {"generations": IMAGES_GENERATIONS_CONSUMED,
 # A form: the body, and the route form's bytearray and str of its text,
 # measured at 3.04. A JSON body: the body, the gate's json.loads and its
 # decode of an edit image, then the route's, measured at 4.75 with a data
-# URL. The post-V6 parse change removes the copies.
+# URL. The post-V6 parse change removes the copies. The values a JSON
+# body parses to add body_intake.JSON_VALUE_BYTES each.
 FORM_COPIES = 3.25
 JSON_COPIES = 5
 
@@ -260,7 +261,7 @@ async def _read_priced_body(route: str, request: Request):
     is_form = ctype.startswith("multipart/form-data")
     try:
         raw = await read_in_ram(request, copies=FORM_COPIES if is_form
-                                else JSON_COPIES)
+                                else JSON_COPIES, is_json=not is_form)
         await check_media(request, raw)
     except BodyRefused as e:
         raise ImageRequestError(e.status, str(e), param=e.param,
