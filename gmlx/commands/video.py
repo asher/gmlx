@@ -275,6 +275,18 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
     src.add_argument("--prompt", default=None, help="The prompt.")
     src.add_argument("--prompt-file", default=None, metavar="FILE",
                      help="Read the prompt from this file.")
+    up = p.add_mutually_exclusive_group()
+    up.add_argument("--upsampler", default=None, metavar="GGUF",
+                    help="The chat model that rewrites the prompt into the "
+                         "fields MiniMax's prompt guide lays out, before it "
+                         "is encoded: a GGUF, or a models: id of the config "
+                         "(default: the entry's upsampler).")
+    up.add_argument("--no-upsample", action="store_true",
+                    help="Run the prompt as typed, without the upsampler.")
+    p.add_argument("--upsample-prompt", default=None, metavar="FILE",
+                   help="The prompt guide the upsampler reads (default: the "
+                        "entry's upsample_prompt, which gmlx video pull "
+                        "fetches).")
     length = p.add_mutually_exclusive_group()
     length.add_argument("--seconds", type=_seconds, default=None,
                         metavar="S",
@@ -392,6 +404,16 @@ def _from_config(a) -> None:
     a.tiny_vae = rm.tiny_vae
     a.entry_defaults = dict(rm.defaults)
     a.entry_adapters = list(rm.adapters)
+    if "upsampler" not in vars(a):
+        # The bench takes no upsampler flags: it runs its prompt as typed.
+        return
+    if a.upsampler is None:
+        if not rm.upsample:
+            a.no_upsample = True
+        elif rm.upsampler:
+            a.upsampler = rm.upsampler
+    if a.upsample_prompt is None and rm.upsample_prompt:
+        a.upsample_prompt = rm.upsample_prompt
 
 
 def _settings(a, fam, variant: str) -> dict:
@@ -436,6 +458,33 @@ def _prompt(a) -> str:
         raise _Usage("--prompt or --prompt-file is required")
     with open(os.path.expanduser(a.prompt_file), encoding="utf-8") as f:
         return f.read().rstrip("\n")
+
+
+def _upsample(a, fam, prompt: str, s: dict, log) -> str | None:
+    """The caption the upsampler writes for ``prompt``, or None when the
+    prompt runs as typed. Keyframes name the guide's task in its system
+    prompt; the upsampler sees no image."""
+    if fam.upsample is None:
+        if a.upsampler is not None:
+            log(f"note: the upsampler is unused, since {fam.title} takes no "
+                "prompt upsampling, and is not loaded")
+        return None
+    if a.no_upsample or a.upsampler is None or not prompt.strip():
+        return None
+    from gmlx.image.upsample import UpsampleError
+    from gmlx.video import run
+
+    from .image import _upsampler_path, run_upsampler
+
+    try:
+        system = run.upsample_system(
+            fam, a.upsample_prompt, frames=s["frames"],
+            first=bool(a.first_frame), last=bool(a.last_frame))
+    except UpsampleError as e:
+        raise _Usage(str(e)) from None
+    a.upsampler = _upsampler_path(a)
+    return run_upsampler(a.upsampler, fam, prompt, log, quiet=a.json,
+                         system=system, tag="video")
 
 
 def _keyframe_flags(a) -> list:
@@ -655,10 +704,18 @@ def _generate(a) -> int:
     # BASE_RECIPE is new to a run of another DiT or with an entry LoRA.
     base = (vid.variant != catalog.RECIPES[BASE_RECIPE].variant
             or bool(a.entry_adapters))
-    memfit.check(plan_at(s["frames"], s["width"], s["height"]),
-                 resize=lambda: _size_hint(s["frames"], s["width"],
-                                           s["height"], plan_at, base,
-                                           lengths=not todo))
+    def check():
+        memfit.check(plan_at(s["frames"], s["width"], s["height"]),
+                     resize=lambda: _size_hint(s["frames"], s["width"],
+                                               s["height"], plan_at, base,
+                                               lengths=not todo))
+    check()
+    typed, caption = prompt, _upsample(a, fam, prompt, s, log)
+    if caption is not None:
+        # Priced again at the caption's rows, before the encoder loads.
+        prompt = caption
+        texts.clear()
+        check()
     log(f"[video] {fam.title} {s['width']}x{s['height']}, {s['frames']} "
         f"frames, {s['steps']} steps at shift {s['shifts']['video']:g}, "
         f"seed {s['seed']}")
@@ -719,7 +776,8 @@ def _generate(a) -> int:
         video_vae=lambda: load_vae(os.path.expanduser(preview or a.vae),
                                    family="h3_tiny" if preview else "h3",
                                    dtype=mx.float16)))
-    rec = {"output": out, "frames_dir": a.frames_dir, "prompt": prompt,
+    rec = {"output": out, "frames_dir": a.frames_dir, "prompt": typed,
+           "revised_prompt": caption,
            "variant": vid.variant, **s, "times": times,
            "adapters": [[p, st] for p, st in adapters],
            "anchors": [{"flag": t.flag, "path": t.path,

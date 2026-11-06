@@ -1221,3 +1221,50 @@ def test_a_run_with_anchors_hints_no_shorter_clip(run, monkeypatch, files,
         "No clip fits at any size with these adapters, which take 18.63 GiB "
         "of the denoise; run with fewer adapters, or with h3-base")
     assert run.loads == []
+
+
+def test_an_upsampler_rewrites_the_prompt_before_the_encoder_reads_it(
+        stubbed, monkeypatch, tmp_path, capsys):
+    """--upsampler loads the chat model before the encoder, under the
+    guide's system prompt for the clip's task and length, and the encoder
+    reads its caption; the record keeps both prompts."""
+    from gmlx.commands import image as image_cmd
+    from gmlx.video import encoder
+
+    guide = tmp_path / "guide.md"
+    guide.write_text("the guide")
+    seen = []
+    monkeypatch.setattr(image_cmd, "_upsampler_path", lambda a: "/up.gguf")
+
+    def run_upsampler(path, fam, prompt, log, quiet=False, system=None,
+                      tag="image"):
+        seen.append(("upsample", path, prompt, system, tag))
+        return "the caption"
+    monkeypatch.setattr(image_cmd, "run_upsampler", run_upsampler)
+
+    class Handle(_Handle):
+        def encode(self, prompt):
+            seen.append(("encode", prompt))
+            return super().encode(prompt)
+    monkeypatch.setattr(encoder, "load_encoder", lambda *a, **k: Handle())
+    assert stubbed("--upsampler", "chat", "--upsample-prompt", str(guide),
+                   "--frames-dir", str(tmp_path / "f"), "--json") == 0
+    (_, path, prompt, system, tag), enc = seen
+    assert (path, prompt, tag, enc) == ("/up.gguf", "a cat", "video",
+                                        ("encode", "the caption"))
+    assert "a T2VA video of 0.17 seconds" in system
+    assert system.endswith("The guide:\n\nthe guide\n")
+    rec = json.loads(capsys.readouterr().out)
+    assert (rec["prompt"], rec["revised_prompt"]) == ("a cat", "the caption")
+
+
+def test_no_upsample_or_no_guide_keeps_the_typed_prompt_or_says_why(
+        stubbed, monkeypatch, tmp_path, capsys):
+    from gmlx.commands import image as image_cmd
+
+    monkeypatch.setattr(image_cmd, "run_upsampler", lambda *a, **k: (
+        pytest.fail("the upsampler ran")))
+    out = str(tmp_path / "f")
+    assert stubbed("--no-upsample", "--frames-dir", out) == 0
+    assert stubbed("--upsampler", "chat", "--frames-dir", out) == 2
+    assert "gmlx video pull h3` fetches it" in capsys.readouterr().err

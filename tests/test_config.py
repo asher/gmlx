@@ -3522,6 +3522,9 @@ def test_video_models_parse_and_normalize():
     ({"defaults": {"shift": float("nan")}}, "positive"),
     ({"variant": 1}, "variant: expected a string"),
     ({"adapters": [{"path": "/a", "strength": "x"}]}, "strength"),
+    ({"upsampler": "nope"}, "`upsampler` 'nope' is not a model id"),
+    ({"upsample": "yes"}, "upsample: expected true or false"),
+    ({"upsample_prompt": 3}, "upsample_prompt: expected a string"),
 ])
 def test_video_model_keys_and_defaults_are_strict(entry, match):
     with pytest.raises(ConfigError, match=match):
@@ -3564,6 +3567,20 @@ def test_a_video_model_resolves_under_model_dirs(tmp_path):
     assert rm.audio_vae == str(tmp_path / "a.safetensors")
     assert rm.adapters == ((str(tmp_path / "lora.safetensors"), 0.8),)
     assert (rm.tiny_vae, rm.variant) == (None, "fl2va")
+    assert (rm.upsampler, rm.upsample, rm.upsample_prompt) == (None, True,
+                                                               None)
+
+
+def test_a_video_models_upsampler_and_its_prompt_resolve(tmp_path):
+    """A video entry names its upsampler, a chat model id, and the guide
+    it reads, found under model_dirs as the entry's files are."""
+    (tmp_path / "guide.md").write_text("the guide")
+    doc = _video_doc(upsampler="chat", upsample=False,
+                     upsample_prompt="guide.md")
+    doc["server"] = {"model_dirs": [str(tmp_path)]}
+    rm = cfgmod.resolve_video_model("h3", build_config(doc))
+    assert (rm.upsampler, rm.upsample, rm.upsample_prompt) == (
+        "chat", False, str(tmp_path / "guide.md"))
 
 
 def test_video_models_round_trip_through_print_config():
@@ -3572,6 +3589,7 @@ def test_video_models_round_trip_through_print_config():
     from gmlx.serve import server as srv
     cfg = build_config(_video_doc(
         adapters=[{"path": "/a.safetensors", "strength": 0.5}],
-        defaults={"steps": 8}, tiny_vae="/m/taeh3.safetensors"))
+        defaults={"steps": 8}, tiny_vae="/m/taeh3.safetensors",
+        upsampler="chat", upsample_prompt="/m/guide.md"))
     again = build_config(yaml.safe_load(srv._dump_cfg_yaml(cfg)))
     assert again.video_models == cfg.video_models

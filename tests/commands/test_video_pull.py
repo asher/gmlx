@@ -26,8 +26,13 @@ def _pin(pin: catalog.Pin) -> catalog.Pin:
                                size=len(data))
 
 
-SMALL = dataclasses.replace(REAL, **{
-    role: _pin(p) for role, p in REAL.pins().items()})
+def _small(r: catalog.VideoRecipe) -> catalog.VideoRecipe:
+    """``r`` with each file, and its upsampler prompt, pinned by _pin."""
+    return dataclasses.replace(r, upsample_prompt=_pin(r.upsample_prompt),
+                               **{role: _pin(p) for role, p in r.pins().items()})
+
+
+SMALL = _small(REAL)
 
 
 @pytest.fixture(autouse=True)
@@ -106,7 +111,8 @@ def test_a_pull_downloads_every_file_and_adds_the_entry(lib, capsys):
 
     root, cfg, got = lib
     assert _pull(cfg, "--yes") == 0
-    assert len(got) == 7
+    # The six files, the LoRA and MiniMax's prompt guide.
+    assert len(got) == 8
     out = capsys.readouterr().out
     assert "license: minimax-h3-community-license-agreement" in out
     assert ("video and audio VAEs: minimax-h3-community-license-agreement"
@@ -118,6 +124,8 @@ def test_a_pull_downloads_every_file_and_adds_the_entry(lib, capsys):
                                 / REAL.lora.file), 1.0),)
     assert rm.defaults == {"steps": 8, "shift": 6.0, "size": "1344x768",
                            "seconds": 5.0}
+    assert rm.upsample_prompt == str(root / "MiniMaxAI__MiniMax-H3"
+                                     / REAL.upsample_prompt.file)
     # Again: every file is found and nothing downloads.
     got.clear()
     assert _pull(cfg, "--yes") == 0
@@ -134,9 +142,13 @@ def test_files_on_disk_are_found_by_their_weights(lib, capsys):
         name = "renamed.safetensors" if role == "lora" else (
             f"my-{os.path.basename(pin.file)}")
         (root / "mine" / name).write_bytes(pin.file.encode())
+    # The guide is found only at its own path, by its sha256.
+    guide = root / "MiniMaxAI__MiniMax-H3" / SMALL.upsample_prompt.file
+    guide.parent.mkdir(parents=True)
+    guide.write_bytes(SMALL.upsample_prompt.file.encode())
     assert _pull(cfg, "--dry-run") == 0
     out = capsys.readouterr().out
-    assert "download" not in out and out.count("found: ") == 7
+    assert "download" not in out and out.count("found: ") == 8
     assert str(root / "mine" / "renamed.safetensors") in out
     assert got == []
 
@@ -171,6 +183,36 @@ def test_a_foreign_file_in_the_way_blocks_the_pull(lib, capsys):
 
     assert _pull(cfg, "--json") == 1
     assert json.loads(capsys.readouterr().out)["blocked"] == [str(dest)]
+
+
+def test_the_upsampler_prompt_is_an_optional_part(lib, monkeypatch, capsys):
+    """MiniMax's guide is the one part a pull goes on without: a fetch
+    that fails warns and registers the entry without upsample_prompt, and
+    a file of other bytes at its path is the user's, kept and not
+    named."""
+    from gmlx.config import load_config, resolve_video_model
+
+    root, cfg, got = lib
+    real = manage._hf_download
+
+    def offline(repo, filename, revision, dest_dir):
+        if filename == REAL.upsample_prompt.file:
+            raise OSError("the network is down")
+        return real(repo, filename, revision, dest_dir)
+    monkeypatch.setattr(manage, "_hf_download", offline)
+    assert _pull(cfg, "--yes") == 0 and len(got) == 7
+    assert ("warning: the upsampler prompt did not download (the network is "
+            "down); the entry runs without it, and the next pull fetches it"
+            in capsys.readouterr().err)
+    assert resolve_video_model("h3", load_config(cfg)).upsample_prompt is None
+    mine = root / "MiniMaxAI__MiniMax-H3" / REAL.upsample_prompt.file
+    mine.parent.mkdir(parents=True, exist_ok=True)
+    mine.write_text("my own guide")
+    cfg.write_text(f"server:\n  model_dirs:\n    - {root}\n")
+    assert _pull(cfg, "--yes") == 0 and len(got) == 7
+    assert "upsampler prompt" not in capsys.readouterr().out
+    assert mine.read_text() == "my own guide"
+    assert resolve_video_model("h3", load_config(cfg)).upsample_prompt is None
 
 
 def test_no_terminal_and_no_yes_downloads_nothing(lib, monkeypatch, capsys):
@@ -263,8 +305,7 @@ def test_each_recipe_on_one_dit_gets_its_own_entry(lib, monkeypatch, capsys):
     assert _pull(cfg, "--yes") == 0
     for name in ("h3-fast", "h3-base"):
         r = catalog.RECIPES[name]
-        monkeypatch.setitem(catalog.RECIPES, name, dataclasses.replace(
-            r, **{role: _pin(p) for role, p in r.pins().items()}))
+        monkeypatch.setitem(catalog.RECIPES, name, _small(r))
         assert video_pull.cmd_pull([name, "--config", str(cfg),
                                     "--yes"]) == 0
         assert f"registered {name} in {cfg}" in capsys.readouterr().out
@@ -327,7 +368,7 @@ def test_too_little_free_disk_is_refused_unless_forced(lib, monkeypatch,
     monkeypatch.setattr(manage, "_disk_free", lambda path: 10)
     assert _pull(cfg, "--yes") == 1
     assert "not enough disk space" in capsys.readouterr().err and got == []
-    assert _pull(cfg, "--yes", "--force") == 0 and len(got) == 7
+    assert _pull(cfg, "--yes", "--force") == 0 and len(got) == 8
 
 
 def test_an_m2_is_refused_unless_forced(lib, monkeypatch, capsys):
@@ -339,7 +380,7 @@ def test_an_m2_is_refused_unless_forced(lib, monkeypatch, capsys):
     assert capsys.readouterr().err == (
         "error: MiniMax-H3 needs an M3 or newer, and this Mac has an M2 "
         "chip; pass --force to download anyway\n") and got == []
-    assert _pull(cfg, "--yes", "--force") == 0 and len(got) == 7
+    assert _pull(cfg, "--yes", "--force") == 0 and len(got) == 8
 
 
 def test_a_mac_too_small_for_any_clip_is_refused_unless_forced(
@@ -360,7 +401,7 @@ def test_a_mac_too_small_for_any_clip_is_refused_unless_forced(
     monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
     assert _pull(cfg, "--dry-run") == 0
     monkeypatch.delenv("GMLX_OVERCOMMIT")
-    assert _pull(cfg, "--yes", "--force") == 0 and len(got) == 7
+    assert _pull(cfg, "--yes", "--force") == 0 and len(got) == 8
 
 
 def test_the_checks_run_chip_then_memory_then_files(lib, monkeypatch,
@@ -393,8 +434,7 @@ def test_fasth3_without_nax_is_refused_unless_forced(lib, monkeypatch,
 
     _, cfg, got = lib
     r = catalog.RECIPES["fasth3"]
-    monkeypatch.setitem(catalog.RECIPES, "fasth3", dataclasses.replace(
-        r, **{role: _pin(p) for role, p in r.pins().items()}))
+    monkeypatch.setitem(catalog.RECIPES, "fasth3", _small(r))
     vsa_kernel(monkeypatch, nax=False)
     argv = ["fasth3", "--config", str(cfg), "--yes"]
     assert video_pull.cmd_pull(argv) == 1
@@ -402,7 +442,7 @@ def test_fasth3_without_nax_is_refused_unless_forced(lib, monkeypatch,
         "error: MiniMax-H3 fasth3 runs video sparse attention, whose kernel "
         "needs a GPU with NAX units (M5 or newer), and this Mac's GPU has "
         "none; pass --force to download anyway\n") and got == []
-    assert video_pull.cmd_pull([*argv, "--force"]) == 0 and len(got) == 6
+    assert video_pull.cmd_pull([*argv, "--force"]) == 0 and len(got) == 7
 
 
 def _sparse(path, size: int):
@@ -454,7 +494,7 @@ def test_found_files_too_large_for_this_mac_give_way(
         f"note: {enc[found[0]]} does not fit this Mac's memory, so the "
         f"pull {how}"]
     assert (SMALL.encoder.file in got) is (takes is None)
-    assert len(got) == (4 if takes else 5)
+    assert len(got) == (5 if takes else 6)
     rm = resolve_video_model("h3", load_config(cfg))
     assert rm.path == str(dit)
     assert rm.encoder_mmproj == str(tower)
@@ -480,10 +520,10 @@ def test_a_pull_that_adds_no_entry_keeps_the_files_it_finds(
     assert "note:" not in err
     monkeypatch.setattr(dtypes, "_arch_gen", 15)
     monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
-    assert _pull(cfg, "--yes") == 0 and len(got) == 6
+    assert _pull(cfg, "--yes") == 0 and len(got) == 7
     monkeypatch.delenv("GMLX_OVERCOMMIT")
     capsys.readouterr()
-    assert _pull(cfg, "--yes") == 1 and len(got) == 6
+    assert _pull(cfg, "--yes") == 1 and len(got) == 7
     err = capsys.readouterr().err
     assert err.startswith("error: the smallest MiniMax-H3 clip")
     assert "note:" not in err
@@ -520,7 +560,8 @@ def test_json_carries_the_licenses_and_stays_json(lib, capsys):
     assert doc["license"] == "minimax-h3-community-license-agreement"
     assert (doc["encoder_license"], doc["vae_license"]) == (
         "apache-2.0", "minimax-h3-community-license-agreement")
-    assert doc["download_bytes"] == sum(p.size for p in SMALL.pins().values())
+    assert doc["download_bytes"] == sum(p.size for p in SMALL.pins().values()
+                                        ) + SMALL.upsample_prompt.size
     assert "registered h3" in io.err
 
 

@@ -129,6 +129,18 @@ def read_anchors(fam, s: dict, *, first: str | None = None,
     return keyframes, out
 
 
+def upsample_system(fam, path: str | None, *, frames: int | None,
+                    first: bool = False, last: bool = False) -> str:
+    """The upsampler's system prompt for a clip of ``frames``, None when
+    the length is not known, with these keyframes: the family's lines
+    around the text of the file at ``path`` (the entry's
+    ``upsample_prompt``), read on each call. Raises ``UpsampleError`` with
+    the family's refusal when there is none."""
+    from gmlx.image.upsample import system_prompt
+
+    return fam.upsample_system(system_prompt(fam, path), frames, first, last)
+
+
 def decode_and_mux(xv, xa, *, video_vae: Callable, audio_vae: Callable,
                    frames: int, width: int, height: int, fps: int,
                    rate: int, out: str | None, ffmpeg: str | None,

@@ -163,7 +163,8 @@ _SERVER_IMAGE_KEYS = frozenset({"url_ttl_s", "url_max_bytes", "max_queue",
 # image_models is.
 _VIDEO_MODEL_KEYS = frozenset({"path", "variant", "encoder", "encoder_mmproj",
                                "vae", "audio_vae", "tiny_vae", "adapters",
-                               "defaults"})
+                               "defaults", "upsampler", "upsample",
+                               "upsample_prompt"})
 _VIDEO_DEFAULTS_KEYS = frozenset({"steps", "shift", "size", "seconds"})
 IMAGE_SAMPLERS = ("euler", "uni_pc_bh2")
 IMAGE_ENCODER_RELEASE = ("auto", "always", "never")
@@ -656,7 +657,10 @@ class VideoModelCfg:
     """One ``video_models:`` entry: a video DiT GGUF with its text
     encoder, vision tower, video and audio VAEs and preview decoder.
     ``adapters`` holds ``(path, strength)`` pairs applied to every clip,
-    and ``defaults`` the steps, shift, size and seconds it runs at."""
+    and ``defaults`` the steps, shift, size and seconds it runs at.
+    ``upsampler`` is the chat model id that rewrites a prompt, by default
+    while ``upsample`` is on, under the system prompt of the text file
+    ``upsample_prompt``, as on an image entry."""
     id: str
     path: str
     encoder: str
@@ -667,6 +671,9 @@ class VideoModelCfg:
     adapters: tuple = ()
     defaults: dict = field(default_factory=dict)
     variant: str | None = None
+    upsampler: str | None = None
+    upsample: bool = True
+    upsample_prompt: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1316,6 +1323,9 @@ class ResolvedVideoModel:
     # A video entry has no idle unload and shares no chat encoder.
     ttl_s: float | None = None
     encoder_model: str | None = None
+    upsampler: str | None = None
+    upsample: bool = True
+    upsample_prompt: str | None = None
 
     def load_signature(self) -> tuple:
         """What makes two loads of the entry the same: every file, the
@@ -2187,7 +2197,9 @@ def resolve_video_model(video_id: str, cfg) -> ResolvedVideoModel:
         tiny_vae=resolve_path(m.tiny_vae, dirs),
         adapters=tuple((resolve_path(a, dirs), float(st))
                        for a, st in m.adapters),
-        defaults=dict(m.defaults), variant=m.variant)
+        defaults=dict(m.defaults), variant=m.variant,
+        upsampler=m.upsampler, upsample=m.upsample,
+        upsample_prompt=_prompt_path(m.upsample_prompt, dirs))
 
 
 def _prompt_path(p: str | None, dirs: list[str]) -> str | None:
@@ -2953,10 +2965,15 @@ def _parse_video_model(video_id: str, raw) -> VideoModelCfg:
         if not isinstance(raw.get(key), str) or not raw[key]:
             raise ConfigError(f"{where} needs `{key}` (keys present: "
                               f"{sorted(raw)})")
-    for key in ("variant", "encoder_mmproj", "tiny_vae"):
+    for key in ("variant", "encoder_mmproj", "tiny_vae", "upsampler",
+                "upsample_prompt"):
         if raw.get(key) is not None and not isinstance(raw[key], str):
             raise ConfigError(f"{where}.{key}: expected a string, got "
                               f"{raw[key]!r}")
+    upsample = raw.get("upsample", True)
+    if not isinstance(upsample, bool):
+        raise ConfigError(f"{where}.upsample: expected true or false, got "
+                          f"{upsample!r}")
     return VideoModelCfg(
         id=video_id, path=raw["path"], encoder=raw["encoder"],
         vae=raw["vae"], audio_vae=raw["audio_vae"],
@@ -2965,7 +2982,9 @@ def _parse_video_model(video_id: str, raw) -> VideoModelCfg:
         adapters=_parse_image_adapters(f"{where}.adapters",
                                        raw.get("adapters")),
         defaults=_parse_video_defaults(f"{where}.defaults",
-                                       raw.get("defaults")))
+                                       raw.get("defaults")),
+        upsampler=raw.get("upsampler") or None, upsample=upsample,
+        upsample_prompt=raw.get("upsample_prompt") or None)
 
 
 def _parse_server_image(raw) -> ImageServerCfg:
@@ -3821,6 +3840,12 @@ def _validate_video_models(cfg) -> None:
             if vid in names:
                 raise ConfigError(f"video model {vid!r} collides with "
                                   f"{what}; rename one")
+        m = cfg.video_models[vid]
+        if m.upsampler is not None and m.upsampler not in cfg.models:
+            raise ConfigError(
+                f"video model {vid!r}: `upsampler` {m.upsampler!r} is not a "
+                f"model id; name a chat model under models: (known: "
+                f"{sorted(cfg.models)})")
 
 
 def load_config(path) -> ServerCfg:

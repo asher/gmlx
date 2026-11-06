@@ -6,6 +6,10 @@ files, sizes and free disk, into a staging folder beside its path, where
 an interrupted transfer resumes, and lands only once its sha256 is the
 recipe's. The entry is then added under ``video_models:`` in the server
 config.
+
+A recipe's upsampler prompt is an optional part: a fetch that fails
+leaves the entry without ``upsample_prompt``, and a file of another
+digest at its path is the user's, kept as it is and not named.
 """
 from __future__ import annotations
 
@@ -21,7 +25,8 @@ from gmlx.video import catalog
 
 _ROLE = {"dit": "DiT", "encoder": "text encoder", "mmproj": "vision tower",
          "vae": "video VAE", "audio_vae": "audio VAE",
-         "tiny": "preview decoder", "lora": "LoRA"}
+         "tiny": "preview decoder", "lora": "LoRA",
+         "prompt": "upsampler prompt"}
 # The files the smallest run prices (_smallest_run).
 _PRICED = frozenset({"dit", "encoder", "tiny", "audio_vae", "lora"})
 
@@ -43,6 +48,9 @@ class Plan:
     notes: list = field(default_factory=list)
     # Each role's parts to choose from: the files found, then the download.
     choices: dict = field(default_factory=dict, repr=False)
+    # The upsampler prompt, optional: None when the recipe has none or a
+    # file of another digest is at its path.
+    prompt: Part | None = None
 
     def part(self, role: str) -> Part | None:
         return next((p for p in self.parts if p.role == role), None)
@@ -106,7 +114,26 @@ def plan_pull(r: catalog.VideoRecipe, *, roots: list, base_dir: str) -> Plan:
         dest = _dest(pin, base_dir)
         choices[role] = [Part(role, pin, p, True) for p in paths] + [
             Part(role, pin, dest, False, _remaining(dest, pin))]
-    return _plan(r, {role: c[0] for role, c in choices.items()}, choices)
+    plan = _plan(r, {role: c[0] for role, c in choices.items()}, choices)
+    plan.prompt = _prompt_part(r, base_dir)
+    return plan
+
+
+def _prompt_part(r: catalog.VideoRecipe, base_dir: str) -> Part | None:
+    """The upsampler prompt at its place in the download folder: found
+    when its sha256 is the pin's, else a download; None when the recipe
+    pins none or another file is there, which is the user's."""
+    from gmlx.image.catalog import sha256_file
+
+    pin = r.upsample_prompt
+    if pin is None:
+        return None
+    dest = _dest(pin, base_dir)
+    if not os.path.lexists(dest):
+        return Part("prompt", pin, dest, False, _remaining(dest, pin))
+    if os.path.isfile(dest) and sha256_file(dest) == pin.sha256:
+        return Part("prompt", pin, dest, True)
+    return None
 
 
 def _gb(n: int) -> str:
@@ -114,7 +141,8 @@ def _gb(n: int) -> str:
 
 
 def _need(plan: Plan) -> int:
-    return sum(p.need for p in plan.parts if not p.found)
+    extra = [plan.prompt] if plan.prompt is not None else []
+    return sum(p.need for p in plan.parts + extra if not p.found)
 
 
 def _print_plan(plan: Plan, free: int | None) -> None:
@@ -123,6 +151,11 @@ def _print_plan(plan: Plan, free: int | None) -> None:
     for p in plan.parts:
         how = "found" if p.found else f"download {_gb(p.need)}"
         print(f"  {_ROLE[p.role]:<16} {p.pin.name}")
+        print(f"  {'':<16} {how}: {p.path}")
+    if plan.prompt is not None:
+        p = plan.prompt
+        how = "found" if p.found else f"download {p.pin.size:,} bytes"
+        print(f"  {_ROLE['prompt']:<16} {p.pin.name}")
         print(f"  {'':<16} {how}: {p.path}")
     need = _need(plan)
     if need:
@@ -149,7 +182,8 @@ def _plan_json(plan: Plan, free: int | None) -> dict:
             "blocked": [p.path for p in plan.blocked],
             "parts": [{"role": p.role, "file": p.pin.name, "path": p.path,
                        "found": p.found, "need": p.need}
-                      for p in plan.parts]}
+                      for p in plan.parts + (
+                          [plan.prompt] if plan.prompt else [])]}
 
 
 def _smallest_run(plan: Plan):
@@ -220,6 +254,7 @@ def fit_plan(plan: Plan) -> Plan:
             tries = [c[0], *sorted(c[1:-1], key=size, reverse=True), c[-1]]
             pick[role] = next(t for t in tries if fits({**pick, role: t}))
     out = _plan(r, pick, choices)
+    out.prompt = plan.prompt
     for p, q in zip(plan.parts, out.parts):
         if p.path != q.path:
             how = f"uses {q.path}" if q.found else f"downloads {q.pin.name}"
@@ -297,6 +332,8 @@ def _entry(plan: Plan, cfg) -> dict:
     lora = plan.part("lora")
     if lora is not None:
         out["adapters"] = [_rel(lora.path, dirs)]
+    if plan.prompt is not None and plan.prompt.found:
+        out["upsample_prompt"] = _rel(plan.prompt.path, dirs)
     out["defaults"] = {"steps": r.steps, "shift": r.shift, "size": r.size,
                        "seconds": r.seconds}
     return out
@@ -459,7 +496,9 @@ def cmd_pull(argv: list[str], prog: str = "gmlx video pull") -> int:
               f"{_gb(free)} free at {base} (free space, pass --dir on "
               "another volume, or --force)", file=sys.stderr)
         return 1
-    if todo and not a.yes:
+    fetch_prompt = (plan.prompt if plan.prompt is not None
+                    and not plan.prompt.found else None)
+    if (todo or fetch_prompt is not None) and not a.yes:
         if not sys.stdin.isatty():
             print("error: pass --yes to download without a terminal",
                   file=sys.stderr)
@@ -473,6 +512,13 @@ def cmd_pull(argv: list[str], prog: str = "gmlx video pull") -> int:
     except (remote.RemoteError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    if fetch_prompt is not None:
+        try:
+            _fetch(fetch_prompt)
+        except (remote.RemoteError, OSError) as e:
+            print(f"warning: the upsampler prompt did not download ({e}); "
+                  f"the entry runs without it, and the next pull fetches "
+                  f"it", file=sys.stderr)
     if cfg_path:
         register(plan, cfg_path, out=talk)
     else:

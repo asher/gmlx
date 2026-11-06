@@ -24,6 +24,8 @@ from gmlx.video.anchors import AnchorRule
 from gmlx.video.layout import Timeline
 from gmlx.video.registry import VideoFamily, VideoSampling, VideoVariantRow
 
+from . import upsample as _upsample
+
 TITLE = "MiniMax-H3"
 
 # Width, heads, head dim, feed-forward width, text width, latent and audio
@@ -470,6 +472,12 @@ def _encoder():
     )
 
 
+def _upsample_system(guide: str, frames: int | None, first: bool,
+                     last: bool) -> str:
+    return _upsample.system(guide, frames=frames, fps=FPS, first=first,
+                            last=last)
+
+
 FAMILY = VideoFamily(
     name="h3",
     title=TITLE,
@@ -510,4 +518,6 @@ FAMILY = VideoFamily(
     prompt_ids=_prompt_ids,
     vision_tokens=vision_tokens,
     keyframe_encode=_keyframe_encode,
+    upsample=_upsample.UPSAMPLE,
+    upsample_system=_upsample_system,
 )

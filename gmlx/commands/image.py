@@ -534,11 +534,12 @@ def _upsample(a, family, prompt: str, refs, log) -> str | None:
 
 
 def run_upsampler(path: str, family, prompt: str, log,
-                  quiet: bool = False, system: str | None = None) -> str:
+                  quiet: bool = False, system: str | None = None,
+                  tag: str = "image") -> str:
     """Load the chat model at ``path``, write the caption of ``prompt``,
     and release the model before returning, under ``system``, by default
     the family's shipped system prompt. ``quiet`` keeps the load's lines
-    off stdout."""
+    off stdout; ``tag`` heads the line that reports the rewrite."""
     import gc
 
     import mlx.core as mx
@@ -605,7 +606,7 @@ def run_upsampler(path: str, family, prompt: str, log,
         mx.clear_cache()
         if prev is not None:
             mx.set_cache_limit(prev)
-    log(f"[image] prompt upsampled by {name} in "
+    log(f"[{tag}] prompt upsampled by {name} in "
         f"{time.perf_counter() - t0:.1f} s, {len(caption.split())} words")
     return caption
 

@@ -111,6 +111,11 @@ class VideoFamily:
     prompt_ids: Callable | None = None
     vision_tokens: Callable | None = None
     keyframe_encode: Callable | None = None
+    # How a chat model rewrites a typed prompt (image.registry's
+    # UpsampleParts), and (system prompt text, frames, first, last) -> the
+    # system prompt of a clip of that length with those keyframes.
+    upsample: object = None
+    upsample_system: Callable | None = None
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in (*self.variants.values(),

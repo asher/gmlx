@@ -3,13 +3,15 @@
 ``RECIPES`` names each pullable video model: its DiT, text encoder and
 vision tower, video VAE, audio VAE, preview decoder and LoRA, each pinned
 by repository revision and sha256, with the steps, shift and clip the
-recipe runs and the licenses. Every file is used as published.
+recipe runs and the licenses, and the upsampler's system prompt the pull
+fetches when it can. Every file is used as published.
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,9 @@ class VideoRecipe:
     aliases: tuple = ()
     use: str = ""                    # gmlx video pull's GOOD FOR cell
     blurb: str = ""
+    # The upsampler's system prompt, which the family ships none of: an
+    # optional part of the pull, named upsample_prompt by the entry.
+    upsample_prompt: Pin | None = None
 
     def pins(self) -> dict:
         """Role -> pin of every file the recipe pulls."""
@@ -109,8 +114,15 @@ _TURBO_4 = Pin(*_TURBO,
                "70103fd0d80a947ed4e7fe6f88915863d54ef22c5cab03bd5d2fd649385ffe1e",
                1_956_193_000)
 
-_H3 = dict(
+# MiniMax's prompt guide, which the upsampler reads.
+_GUIDE = Pin("MiniMaxAI/MiniMax-H3", "42ed227ee7df40d41602854ae760620d6eb651fe",
+             "docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md",
+             "2cfebc096a6e08370f288d468d90b60f7f9bcb938f94bf090816e910e48e75fc",
+             15_773)
+
+_H3: dict[str, Any] = dict(
     family="h3", variant="fl2va", **_H3_FILES, size="1344x768", seconds=5,
+    upsample_prompt=_GUIDE,
     license="minimax-h3-community-license-agreement",
     license_url="https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/"
                 "LICENSE",
@@ -126,7 +138,7 @@ _H3 = dict(
 # FastVideo's FastH3 v2, an 8-step distill of H3 with video sparse
 # attention, in vantagewithai's pruned GGUF. Both cards state the MiniMax
 # H3 community license, and FastVideo's LICENSE is MiniMaxAI's text.
-_FASTH3 = {**_H3, "variant": "fasth3", "dit": Pin(
+_FASTH3: dict[str, Any] = {**_H3, "variant": "fasth3", "dit": Pin(
     *_VANTAGE, "fastvideo_fasth3_8step_v2_pruned-Q4_K_M.gguf",
     "2f2bb5b1c3e55782ceeda1cf4620cae97c748620001c6e35e85f5e71e5a478cc",
     13_613_532_704)}
