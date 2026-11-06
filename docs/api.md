@@ -334,9 +334,11 @@ cannot change it.
 The read and the parse of a body hold it a few times over, so its price
 counts each copy, about three for an image form, five for a JSON body to
 the image API, four for one to `POST /v1/videos`, and two for a video
-form's text. With `GMLX_OVERCOMMIT=1`, or with no model pool or memory
-budget, the server reads the bodies it prices from free memory with no
-bound, and a video form's files still take the job store's room. The
+form's text. A JSON body adds 64 bytes for each value it can parse to,
+counted from its commas and opening brackets and braces before the
+parse. With `GMLX_OVERCOMMIT=1`, or with no model pool or memory budget,
+the server reads the bodies it prices from free memory with no bound,
+and a video form's files still take the job store's room. The
 step routes that the [ComfyUI nodes](comfyui.md) call take a body of up
 to one 1 GiB tensor and its header, and price the work it asks for from
 the memory free. The nodes
