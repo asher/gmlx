@@ -19,6 +19,7 @@ import asyncio
 import importlib
 import logging
 import threading
+from collections.abc import Callable
 
 _log = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ def wanted(request) -> bool:
 
 def _special_tokens(tokenizer) -> list[str]:
     tokens = set(getattr(tokenizer, "all_special_tokens", None) or ())
-    added = getattr(tokenizer, "get_added_vocab", None)
+    added: Callable[[], dict] | None = getattr(tokenizer, "get_added_vocab", None)
     if callable(added):
         tokens.update(added())
     return sorted(tokens, key=len, reverse=True)
@@ -170,7 +171,7 @@ async def attach(response, http_request, model_id: str, capture):
             return response
         body = json.loads(bytes(response.body))
     else:
-        dump = getattr(response, "model_dump", None)
+        dump: Callable[[], dict] | None = getattr(response, "model_dump", None)
         body = dump() if callable(dump) else dict(response or {})
     choices = body.get("choices") or []
     text = (choices[0].get("message") or {}).get("content") if choices else ""
