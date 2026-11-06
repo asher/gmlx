@@ -53,8 +53,9 @@ The job thread runs the jobs one at a time, in order, and runs no model.
 It reads the keyframes and counts a guide video's frames, has the
 upsampler write the caption, and loads the video model. The video worker
 then encodes the prompt and the anchors, takes the job's LoRA bytes,
-samples the clip and decodes it into the MP4. A guide video is read through ffmpeg a few seconds at a time
-when its whole encode does not fit, each part priced before it is read.
+samples the clip and decodes it into the MP4. A guide video is read
+through ffmpeg a few seconds at a time when its whole encode does not
+fit, each part priced before it is read.
 
 Chat replies keep streaming while a clip runs. The sampler pauses for
 chat after each attention and each MLP chunk of a step, and the decode
