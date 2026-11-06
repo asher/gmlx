@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import stat
 import subprocess
 import wave
 
@@ -18,33 +17,14 @@ from video_fixtures import wait_for
 
 from gmlx.video import io
 
-_ENCODERS = """Encoders:
- V....D h264_videotoolbox    VideoToolbox H.264 Encoder
- A....D aac                  AAC (Advanced Audio Coding)
-"""
 
-
-def _ffmpeg(tmp_path, body: str, encoders: str = _ENCODERS) -> str:
-    """A stand-in ffmpeg: ``-encoders`` prints ``encoders``, any other
-    call runs ``body`` with ``$last`` the output path."""
-    (tmp_path / "encoders.txt").write_text(encoders)
-    path = tmp_path / "ffmpeg"
-    path.write_text(f"""#!/bin/sh
-for last; do :; done
-case " $* " in *" -encoders "*) cat "{tmp_path}/encoders.txt"; exit 0;; esac
-{body}
-""")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
-    return str(path)
-
-
-def test_probe_finds_an_ffmpeg_with_the_encoders(tmp_path):
-    ff = _ffmpeg(tmp_path, "exit 0")
+def test_probe_finds_an_ffmpeg_with_the_encoders(stand_in_ffmpeg):
+    ff = stand_in_ffmpeg("exit 0")
     assert io.probe(ff) == ff
 
 
-def test_probe_names_a_missing_encoder(tmp_path):
-    ff = _ffmpeg(tmp_path, "exit 0", encoders=" A....D aac  AAC\n")
+def test_probe_names_a_missing_encoder(stand_in_ffmpeg):
+    ff = stand_in_ffmpeg("exit 0", encoders=" A....D aac  AAC\n")
     with pytest.raises(io.FfmpegError, match="has no h264_videotoolbox"):
         io.probe(ff)
 
@@ -59,8 +39,8 @@ def _frames(n=3, h=4, w=6):
         n, h, w, 3)
 
 
-def test_a_mux_writes_part_then_renames(tmp_path):
-    ff = _ffmpeg(tmp_path, 'cat > "$last"')
+def test_a_mux_writes_part_then_renames(stand_in_ffmpeg, tmp_path):
+    ff = stand_in_ffmpeg('cat > "$last"')
     out = str(tmp_path / "clip.mp4")
     with io.Mux(out, width=6, height=4, fps=24, wav=None, ffmpeg=ff) as m:
         m.write(_frames())
@@ -72,8 +52,9 @@ def test_a_mux_writes_part_then_renames(tmp_path):
     assert np.array_equal(data[:72], io.to_uint8(_frames()[0]).ravel())
 
 
-def test_a_failed_mux_raises_ffmpegs_message_and_leaves_no_part(tmp_path):
-    ff = _ffmpeg(tmp_path, 'cat > "$last"; echo "bad frame size" >&2; exit 1')
+def test_a_failed_mux_raises_ffmpegs_message_and_leaves_no_part(
+        stand_in_ffmpeg, tmp_path):
+    ff = stand_in_ffmpeg('cat > "$last"; echo "bad frame size" >&2; exit 1')
     out = str(tmp_path / "clip.mp4")
     m = io.Mux(out, width=6, height=4, fps=24, wav=None, ffmpeg=ff)
     m.write(_frames())
@@ -82,8 +63,9 @@ def test_a_failed_mux_raises_ffmpegs_message_and_leaves_no_part(tmp_path):
     assert not os.path.exists(out) and not os.path.exists(out + ".part")
 
 
-def test_an_aborted_mux_kills_ffmpeg_and_leaves_no_part(tmp_path):
-    ff = _ffmpeg(tmp_path, 'cat > "$last"')
+def test_an_aborted_mux_kills_ffmpeg_and_leaves_no_part(stand_in_ffmpeg,
+                                                         tmp_path):
+    ff = stand_in_ffmpeg('cat > "$last"')
     out = str(tmp_path / "clip.mp4")
     with pytest.raises(KeyboardInterrupt):
         with io.Mux(out, width=6, height=4, fps=24, wav=None, ffmpeg=ff) as m:
@@ -96,11 +78,11 @@ def test_an_aborted_mux_kills_ffmpeg_and_leaves_no_part(tmp_path):
 
 @pytest.mark.parametrize("n, side, at", [(1, 8, "close"),
                                          (4, 512, "write")])
-def test_a_write_into_an_ffmpeg_that_exited_raises_its_message(tmp_path, n,
-                                                                side, at):
+def test_a_write_into_an_ffmpeg_that_exited_raises_its_message(
+        stand_in_ffmpeg, tmp_path, n, side, at):
     """A small frame waits in the pipe's buffer until close; 3 MB meet
     the closed pipe in the write itself."""
-    ff = _ffmpeg(tmp_path, 'echo "could not open output" >&2; exit 1')
+    ff = stand_in_ffmpeg('echo "could not open output" >&2; exit 1')
     out = str(tmp_path / "clip.mp4")
     m = io.Mux(out, width=side, height=side, fps=24, wav=None, ffmpeg=ff)
     m._proc.wait()
@@ -177,6 +159,35 @@ def test_a_real_mux_with_audio(tmp_path):
     assert os.path.getsize(out) > 0 and not os.path.exists(out + ".part")
 
 
+@pytest.mark.parametrize("name", ["-clip.mp4", "scene1:take2.mp4"])
+def test_a_real_mux_writes_an_output_named_as_an_option_or_a_protocol(
+        tmp_path, monkeypatch, name):
+    """A relative output that starts with "-" or holds a ":" is a file to
+    ffmpeg, as --output keeps it relative."""
+    try:
+        ff = io.probe()
+    except io.FfmpegError as e:
+        pytest.skip(str(e))
+    monkeypatch.chdir(tmp_path)
+    wav = io.write_wav("-a:b.wav", np.zeros((2, 3200), np.float32), 32000)
+    with io.Mux(name, width=64, height=64, fps=24, wav=wav, ffmpeg=ff) as m:
+        m.write(np.zeros((5, 64, 64, 3), np.float32))
+    assert os.path.getsize(tmp_path / name) > 0
+
+
+def test_an_image_decode_runs_ffmpeg_without_stdin(stand_in_ffmpeg,
+                                                   tmp_path):
+    """ffmpeg reading stdin would take the terminal's keys from a
+    generate run, so every decode passes -nostdin."""
+    from gmlx.video import images
+
+    ff = stand_in_ffmpeg('echo "$@" > "$here/argv"; exit 1')
+    with pytest.raises(ValueError, match="ffmpeg could not read"):
+        images._decode(ff, "-still.png")
+    argv = (tmp_path / "argv").read_text().split()
+    assert "-nostdin" in argv and "file:-still.png" in argv
+
+
 @pytest.fixture
 def ffmpeg():
     exe = shutil.which("ffmpeg")
@@ -198,6 +209,15 @@ def _rgb(ffmpeg, path, w, h) -> np.ndarray:
                           "rawvideo", "-pix_fmt", "rgb24", "-"],
                          capture_output=True, check=True).stdout
     return np.frombuffer(out, np.uint8).reshape(-1, h, w, 3)
+
+
+def test_a_guide_named_as_an_option_or_a_protocol_is_read(ffmpeg, tmp_path,
+                                                         monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _make(ffmpeg, "-f", "lavfi", "-i", "testsrc=size=64x48:rate=30", "-t",
+          "1", "-pix_fmt", "yuv420p", "file:-take:2.mp4")
+    assert io.guide_length("-take:2.mp4", most=100, ffmpeg=ffmpeg) == 30
+    assert io.video_size("-take:2.mp4", ffmpeg=ffmpeg) == (64, 48)
 
 
 def test_a_guide_video_streams_its_frames_at_its_own_rate(ffmpeg, tmp_path):

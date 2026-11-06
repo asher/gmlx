@@ -41,6 +41,13 @@ _NO_MATCH = "matches no streams"
 _NO_STREAM = "does not contain any stream"
 
 
+def file_arg(path: str) -> str:
+    """``path`` as ffmpeg's file protocol names it, so a name that starts
+    with "-" or holds a ":" is read as a path, not an option or a
+    protocol."""
+    return f"file:{path}"
+
+
 class FfmpegError(RuntimeError):
     """ffmpeg is missing, lacks an encoder gmlx uses, or failed."""
 
@@ -117,10 +124,10 @@ class Mux:
                "-f", "rawvideo", "-pix_fmt", "rgb24",
                "-s", f"{width}x{height}", "-r", str(fps), "-i", "pipe:0"]
         if wav is not None:
-            cmd += ["-i", wav]
+            cmd += ["-i", file_arg(wav)]
         cmd += ["-map", "0:v"] + (["-map", "1:a"] if wav else [])
         cmd += [*VIDEO_ARGS] + ([*AUDIO_ARGS] if wav else [])
-        cmd += ["-movflags", "+faststart", "-f", "mp4", self.part]
+        cmd += ["-movflags", "+faststart", "-f", "mp4", file_arg(self.part)]
         # A file, not a pipe, so ffmpeg never blocks on a full stderr.
         self._err = tempfile.TemporaryFile()
         self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
@@ -208,7 +215,7 @@ def _frames(ffmpeg: str, path: str, most: int, each, scale=None) -> int:
     """Call ``each`` on each of the first ``most`` frames of the video at
     ``path``, (H, W, 3) uint8 as ffmpeg decodes them, scaled to ``scale``
     (width, height) when given. Returns the frame count."""
-    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", path, "-map", "0:v:0",
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", file_arg(path), "-map", "0:v:0",
            "-frames:v", str(int(most)), "-fps_mode", "passthrough"]
     if scale is not None:
         cmd += ["-vf", f"scale={scale[0]}:{scale[1]}"]
@@ -271,7 +278,7 @@ def each_guide_frame(path: str, *, most: int, ffmpeg: str, each) -> int:
 def video_size(path: str, *, ffmpeg: str) -> tuple[int, int]:
     """The width and height of the first frame of the video at ``path``,
     from the header ffmpeg writes before the frame, which is never read."""
-    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", path, "-map", "0:v:0",
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", file_arg(path), "-map", "0:v:0",
            "-frames:v", "1", "-f", "image2pipe", "-c:v", "ppm", "-pix_fmt",
            "rgb24", "-"]
     with tempfile.TemporaryFile() as err:
@@ -321,7 +328,7 @@ def _wav(data: bytes, path: str) -> np.ndarray:
 
 def _audio(ffmpeg: str, path: str, rate: int, samples: int,
            optional: bool, mix: tuple) -> np.ndarray | None:
-    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", path, "-map",
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", file_arg(path), "-map",
            "0:a:0?" if optional else "0:a:0", *mix, "-af",
            f"aresample={int(rate)},atrim=end_sample={int(samples)}",
            "-c:a", "pcm_f32le", "-f", "wav", "-"]
@@ -344,7 +351,7 @@ def _samples(ffmpeg: str, path: str, rate: int, channels: int,
              mix: tuple) -> int:
     """The samples of the first audio stream of ``path`` at ``rate`` Hz,
     counted as ffmpeg decodes the whole stream, none of them kept."""
-    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", path, "-map", "0:a:0",
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", file_arg(path), "-map", "0:a:0",
            *mix, "-af", f"aresample={int(rate)}", "-c:a", "pcm_f32le",
            "-f", "f32le", "-"]
     n = 0

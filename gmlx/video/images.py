@@ -59,9 +59,12 @@ def read(path: str, ffmpeg: str | None = "ffmpeg") -> np.ndarray:
 def _decode(exe: str, path: str) -> np.ndarray:
     """The first frame of ``path`` as ffmpeg decodes it, unturned, in
     8-bit RGB."""
+    from .io import file_arg
+
     try:
-        r = subprocess.run([exe, "-v", "error", "-noautorotate", "-i", path,
-                            "-frames:v", "1", "-f", "image2pipe",
+        r = subprocess.run([exe, "-v", "error", "-nostdin", "-noautorotate",
+                            "-i", file_arg(path), "-frames:v", "1",
+                            "-f", "image2pipe",
                             "-c:v", "ppm", "-pix_fmt", "rgb24", "-"],
                            capture_output=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as e:
