@@ -1004,17 +1004,20 @@ def _booked(entry) -> int:
 
 @pytest.mark.parametrize("size, mode, empty, beside", [
     ("1344x768", "first frame", True, True),
+    ("1344x768", "last frame", True, True),
+    ("1344x768", "image guide", True, True),
     ("1344x768", "5-frame guide clip with sound", True, False),
     ("1344x768", "both keyframes", False, False),
     ("768x768", "both keyframes", True, True)])
 def test_a_32_gb_h3_entry_runs_a_keyframe_step_beside_the_caches_it_books(
         monkeypatch, size, mode, empty, beside):
-    """docs/comfyui.md: through the pack a step is priced beside the
-    caches the server holds. On a 32 GB Mac an entry of the default
-    1344x768 clip runs a step with a first frame beside the caches at the
-    share it books, a step with a 5-frame guide clip with sound only while
-    they are empty, and no step with both keyframes; at 768x768 a step
-    with both runs beside them."""
+    """docs/comfyui.md: through the nodes, a step is priced beside the
+    caches the server holds, at the share its model's entry books. On a
+    32 GB Mac an entry of the default 1344x768 clip runs a step with a
+    first frame, a last frame or an image guide beside the caches, a step
+    with a 5-frame guide clip with sound only while they are empty, and no
+    step with both keyframes; at 768x768 a step with both runs beside
+    them."""
     from gmlx.serve import capacity
     from gmlx.serve import video_service as vs
     from gmlx.video.families.h3 import family as hf
@@ -1026,7 +1029,9 @@ def test_a_32_gb_h3_entry_runs_a_keyframe_step_beside_the_caches_it_books(
     tok = hf.vision_tokens(w, h)
     first, last = AnchorRows(0, 1, 0), AnchorRows(entry.frames - 1, 1, 0)
     keyframes, anchors = {
-        "first frame": (1, (first,)), "both keyframes": (2, (first, last)),
+        "first frame": (1, (first,)), "last frame": (1, (last,)),
+        "image guide": (0, (AnchorRows(entry.frames // 2, 1, 0),)),
+        "both keyframes": (2, (first, last)),
         "5-frame guide clip with sound": (
             0, (AnchorRows(0, 2, hf.audio_frames(5)),))}[mode]
 

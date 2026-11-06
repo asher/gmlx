@@ -182,8 +182,9 @@ The largest clip each Mac makes:
 | 64 GB or more | 1344x768 up to 15 s | 1344x768 up to 15 s | 1344x768 up to 15 s |
 
 [Keyframes and guides](#keyframes-and-guides) take more memory. The
-smallest Mac that makes a 5 second `h3` clip with them, for a prompt of up
-to 1,024 tokens beside its images:
+smallest Mac that makes a 5 second `h3` clip with them on the command
+line, which holds no caches, for a prompt of up to 1,024 tokens beside its
+images:
 
 | Clip | 1344x768 | 768x768 |
 |------|----------|---------|
@@ -194,6 +195,9 @@ to 1,024 tokens beside its images:
 | A 5-frame guide video with its sound | 32 GB | 32 GB |
 | A 22-frame guide video with its sound | 36 GB | 32 GB |
 | 5 seconds of guide sound | 32 GB | 32 GB |
+
+Through ComfyUI a step also holds the server's caches, so
+[Make a video](comfyui.md#make-a-video) says what runs there.
 
 A longer prompt takes more, and a clip that does not fit stops before it
 loads a model, as [`this clip does not fit in
@@ -223,11 +227,11 @@ gmlx video generate h3 --size 768x768 --first-frame fox.png --output fox.mp4 \
     --prompt "The red fox in the snow lifts its head, turns and runs off between the pines."
 ```
 
-The first frame is stretched to the clip's size, so give it the clip's
-shape. The last frame is cropped about its center to the clip's shape.
-The prompt reads both images through the text encoder's vision tower,
-the `mmproj` file that `pull` downloads with the model, so write what
-happens in the clip.
+Give each image the clip's shape: the
+[`video generate`](cli.md#video-generate) flags say how one of another
+shape is fitted. The prompt reads both images through the text encoder's
+vision tower, the `mmproj` file that `pull` downloads with the model, so
+write what happens in the clip.
 
 `--guide` anchors an image, or a video with its sound, at a frame of the
 clip, and `--guide-audio` anchors a sound. The frame goes after an `@`,
@@ -238,8 +242,9 @@ gmlx video generate h3 --guide street.png@60 --guide-audio rain.wav --prompt "..
 ```
 
 A guide video keeps 5, 22, 39 or more of its first frames, 17 k + 5 for
-the largest k it holds, and its sound unless you pass `--guide-no-audio`.
-Those frames must fit in the clip from the guide's frame on.
+the largest k it holds, or its first frame alone when it has fewer than
+5, and its sound unless you pass `--guide-no-audio`. Those frames must fit
+in the clip from the guide's frame on.
 
 To continue a clip, cut its last 22 frames with ffmpeg and guide a new
 clip with them at frame 0:
@@ -250,8 +255,8 @@ gmlx video generate h3 --guide part1-end.mp4@0 --output part2.mp4 --prompt "..."
 ```
 
 `part2.mp4` starts with those 22 frames and their sound, so cut its first
-0.92 seconds before you join the two. At 1344x768 the 22-frame guide
-needs 36 GB, and at 768x768 it runs on 32 GB.
+0.92 seconds before you join the two. The memory the 22-frame guide
+needs is in [Clip length, size and memory](#clip-length-size-and-memory).
 
 The seed also sets the noise that gmlx mixes into each keyframe and
 guide, so the same seed and the same files make the same clip again.

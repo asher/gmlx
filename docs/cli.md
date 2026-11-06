@@ -1387,9 +1387,9 @@ which the prompt also reads through the text encoder's vision tower.
 `--guide-audio` anchors a sound alone. ffmpeg reads guide videos and
 sounds, and the images too when it is installed. FRAME is `0` when none
 is given, a negative frame counts from the end, and only an integer after
-the last `@` is a frame. A guide video keeps its first 17 k + 5 frames, or
-its first frame when it has fewer than 5, and they must fit in the clip
-from FRAME. The anchors are encoded after the text encoder is released,
+the last `@` is a frame. A guide video keeps the first frames
+[Keyframes and guides](video.md#keyframes-and-guides) gives, which must
+fit in the clip from FRAME. The anchors are encoded after the text encoder is released,
 one VAE at a time. FastH3 runs text to video only, so it refuses them.
 
 | Flag | Default | Meaning |
@@ -1412,7 +1412,7 @@ one VAE at a time. FastH3 runs text to video only, so it refuses them.
 | `--guide-audio AUDIO[@FRAME]` | None | Anchor the sound of this file at FRAME, cut to the clip's sound from there. Repeat the flag for more. |
 | `--guide-no-audio` | Off | Anchor `--guide` videos without their sound. |
 | `--output PATH` | `./gmlx-<time>-<seed>.mp4`, or none with `--frames-dir` alone | Write the MP4 here. |
-| `--frames-dir DIR` | None | Write PNG frames and `audio.wav` to this folder. Alone, it writes no MP4 and needs no ffmpeg. |
+| `--frames-dir DIR` | None | Write PNG frames and `audio.wav` to this folder. Alone, it writes no MP4 and needs no ffmpeg, unless a guide video or sound is read. |
 | `--preview [TAEH3]` | Off | Decode with TAEH3, the small preview decoder: the entry's file, or this one. |
 | `--save-latent PATH` | None | Also write the final latents to this `.npz` file. |
 | `--encoder GGUF` | The entry's | Encode the prompt with this text encoder. |

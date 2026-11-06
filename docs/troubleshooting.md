@@ -510,11 +510,10 @@ ComfyUI, leave `first_frame` and `last_frame` unconnected and add no
 
 ### `a ...-frame guide clip at frame ... does not fit in the clip's ... frames`
 
-A guide video keeps 5, 22, 39 or more of its first frames, and they must
-fit in the clip from the guide's frame on. Move the guide to an earlier
-frame, make the clip longer, or cut the video shorter.
-[Keyframes and guides](video.md#keyframes-and-guides) describes how many
-frames a guide keeps.
+The frames a guide video keeps, which
+[Keyframes and guides](video.md#keyframes-and-guides) gives, must fit in
+the clip from the guide's frame on. Move the guide to an earlier frame,
+make the clip longer, or cut the video shorter.
 
 ## ComfyUI
 

@@ -288,7 +288,13 @@ the gmlx video VAE encodes them on the server.
 frame of the clip, as `--guide` does on the command line.
 [Keyframes and guides](video.md#keyframes-and-guides) describes each,
 and [Clip length, size and memory](video.md#clip-length-size-and-memory)
-the memory they take.
+the memory they take on the command line. Through the nodes, a step is
+priced beside the caches the server holds, at the share its model's entry
+books. On a 32 GB Mac at 1344x768, a step with a first frame, a last
+frame or an image guide runs beside the caches, a step with a 5-frame guide
+video and its sound runs only while the caches are empty, and a step with both
+keyframes needs a larger Mac. At 768x768, a step with both keyframes runs
+beside the caches on a 32 GB Mac.
 
 A reference of `MiniMax H3 Reference to Video`, the Fun ControlNet or a
 noise mask on the latent stops the run with an error that names it, and

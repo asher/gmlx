@@ -332,7 +332,7 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--frames-dir", default=None, metavar="DIR",
                    help="Write PNG frames and audio.wav to this folder. "
                         "Without --output, no MP4 is written and ffmpeg is "
-                        "not needed.")
+                        "not needed, unless a guide video or sound is read.")
     p.add_argument("--preview", nargs="?", const="", default=None,
                    metavar="TAEH3",
                    help="Decode with TAEH3, the small preview decoder, in "

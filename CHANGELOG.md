@@ -11,14 +11,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx video` makes clips of up to 15 seconds with sound from a text
   prompt with MiniMax-H3. See [Video generation](docs/video.md) and its
   [licenses](docs/video.md#licenses).
-- `gmlx video generate` starts or ends a clip at an image with
-  `--first-frame` and `--last-frame`, and anchors images, videos and sounds
-  at a frame with `--guide` and `--guide-audio`. See
-  [Keyframes and guides](docs/video.md#keyframes-and-guides).
-- The gmlx ComfyUI nodes run MiniMax-H3 with ComfyUI's own MiniMax-H3
-  nodes from a text prompt, a first or last frame and guides, and the new
-  `minimax-h3-i2v` example workflow starts a clip at an image. See
-  [Make a video](docs/comfyui.md#make-a-video).
+- `gmlx video generate` takes a first and a last frame, and guide images,
+  videos and sounds. See [Keyframes and guides](docs/video.md#keyframes-and-guides).
+- The gmlx ComfyUI nodes run MiniMax-H3 from keyframes and guides, with a new
+  `minimax-h3-i2v` workflow. See [Make a video](docs/comfyui.md#make-a-video).
 - The `fasth3` video recipe runs FastVideo's FastH3, an 8-step MiniMax-H3
   whose steps take about half as long as `h3`'s, on an M5 or newer.
 - The gmlx ComfyUI nodes run FastH3 on the noise levels it was trained at,
@@ -40,8 +36,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An image LoRA takes less memory: loading one no longer holds its file
   twice, and fewer of its weights are copied while it runs.
 - In the Python API, `gmlx.image.lora.pair_hash` and `register_pair` take no
-  alpha, and `register_patch` returns the pair's hash with its alpha: a patch
-  table patch carries the alpha as `(adapter hash, strength, alpha)`.
+  alpha, and `register_patch` returns `(hash, alpha)` for its table entry.
 - Nemotron-H models prefill in less memory, and a request takes the largest
   prefill step that fits beside the loaded models.
 - Speculative decoding verifies 2 to 8 drafted tokens at head dim 128 on a
