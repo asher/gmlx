@@ -234,6 +234,32 @@ def test_unload_and_reload_routes_register():
     assert paths.count("/v1/reload") == 1
 
 
+def test_a_reload_runs_off_the_event_loop():
+    """A reload takes the pool's build lock, which a worker's turn or a
+    load can hold for seconds: it runs on a thread, so the server keeps
+    answering meanwhile."""
+    import asyncio
+    import threading
+
+    from fastapi.testclient import TestClient
+
+    seen = {}
+
+    def reload_fn():
+        seen["thread"] = threading.current_thread()
+        try:
+            asyncio.get_running_loop()
+            seen["loop"] = True
+        except RuntimeError:
+            seen["loop"] = False
+        return {"reloaded": 1}
+
+    sp.install_reload_route(reload_fn)
+    r = TestClient(_APP.app).post("/v1/reload")
+    assert r.json() == {"status": "success", "reloaded": 1}
+    assert seen["loop"] is False
+
+
 def test_unload_accepts_body_and_empty_post():
     """Regression: the ``request: Request`` annotation must resolve at module level.
     Under ``from __future__ import annotations`` a locally-imported ``Request`` left

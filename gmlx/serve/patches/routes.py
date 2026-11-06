@@ -1077,7 +1077,9 @@ def install_reload_route(reload_fn) -> None:
                 "status": "unsupported",
                 "message": "reload requires a --config launch"})
         try:
-            result = reload_fn() or {}
+            # Off the event loop: a reload re-registers models under the
+            # pool's build lock, which a worker's turn or a load holds.
+            result = await run_in_threadpool(reload_fn) or {}
         except Exception as exc:
             # An admin route: the message (usually a config-validation error)
             # is the point, but a failed reload must not answer 200.
