@@ -576,16 +576,22 @@ class GuideWire(Base):
         self.assert_tiles(lat, 362)
 
     def test_a_window_fits_the_servers_body_limit(self):
-        """Float32 frames past the body limit at 7 pieces go 2 pieces a
-        window, 39 frames of 49152 bytes and the header in the limit."""
-        self.stub.video_encode(max_body=(1 << 20) + 39 * SIZE * SIZE * 3 * 4)
-        self.vae.gmlx_client.handshake()
+        """Float32 frames past the body limit at 7 pieces go as many pieces
+        a window as fit beside the 5 frames of the clip's end and the
+        header: 2 at 39 frames of 49152 bytes, 1 at 36."""
         frames = self.clip(73)
         frames[0, 0, 0, 0] = 0.5
-        lat = self.vae.encode(frames)
-        self.assertEqual([w[:3] for w in self.windows()], [(34, 0, True), (39, 34, False)])
-        self.assertEqual({w[3] for w in self.windows()}, {"F32"})
-        self.assertEqual(lat.shape[2], 22)
+        for fit, want in ((39, [(34, 0, True), (39, 34, False)]),
+                          (36, [(17, 0, True), (17, 17, True), (17, 34, True),
+                                (22, 51, False)])):
+            with self.subTest(fit=fit):
+                self.stub.reset()
+                self.stub.video_encode(max_body=(1 << 20) + fit * SIZE * SIZE * 3 * 4)
+                self.vae.gmlx_client.handshake()
+                lat = self.vae.encode(frames)
+                self.assertEqual([w[:3] for w in self.windows()], want)
+                self.assertEqual({w[3] for w in self.windows()}, {"F32"})
+                self.assertEqual(lat.shape[2], 22)
 
     def test_a_window_refused_for_memory_goes_again_at_the_window_named(self):
         """The first window is refused from its header, naming 3 pieces;
@@ -593,9 +599,22 @@ class GuideWire(Base):
         self.stub.video_encode(refuse=[3])
         lat = self.vae.encode(self.clip(362))
         (refused,) = self.stub.events("video_encode_refused")
-        self.assertEqual((refused["shape"][0], refused["window"]), (119, 3))
+        self.assertEqual((refused["shape"][0], refused["at"], refused["window"]), (119, 0, 3))
         self.assertEqual([w[:3] for w in self.windows()],
                          [(51, at, True) for at in range(0, 306, 51)] + [(56, 306, False)])
+        self.assert_tiles(lat, 362)
+
+    def test_a_later_window_refused_goes_again_from_its_own_frame(self):
+        """The second window is refused, naming 3 pieces: the first window,
+        encoded already, goes once, and the rest of the clip goes from the
+        refused window's frame 119, 51 frames a window."""
+        self.stub.video_encode(refuse=[None, 3])
+        lat = self.vae.encode(self.clip(362))
+        (refused,) = self.stub.events("video_encode_refused")
+        self.assertEqual((refused["shape"][0], refused["at"], refused["window"]), (119, 119, 3))
+        self.assertEqual([w[:3] for w in self.windows()],
+                         [(119, 0, True)] + [(51, at, True) for at in range(119, 323, 51)]
+                         + [(39, 323, False)])
         self.assert_tiles(lat, 362)
 
     def test_a_second_refusal_shows_the_servers_text(self):

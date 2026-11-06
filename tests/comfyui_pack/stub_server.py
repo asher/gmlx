@@ -203,7 +203,8 @@ class State:
         self.tables: dict = {}
         self.lose_table = 0
         # Windows the next video encodes refuse for memory, each naming the
-        # window that fits, and the body limit the capabilities name.
+        # window that fits or None to answer that encode, and the body
+        # limit the capabilities name.
         self.refuse_windows: list = []
         self.max_body = (1 << 30) + (1 << 20)
         self.runs: dict = {}
@@ -412,7 +413,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {})
         if p == "/stub/video-encode":
             req = json.loads(self._body())
-            st.refuse_windows = [int(k) for k in req.get("refuse", ())]
+            st.refuse_windows = [None if k is None else int(k)
+                                 for k in req.get("refuse", ())]
             st.max_body = int(req.get("max_body", st.max_body))
             return self._json(200, {})
         if not p.startswith(PREFIX):
@@ -422,7 +424,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         t0 = time.perf_counter()
         if sub == "/vae/video/encode" and st.refuse_windows:
-            return self._refuse_window(st.refuse_windows.pop(0))
+            k = st.refuse_windows.pop(0)
+            if k is not None:
+                return self._refuse_window(k)
         body = self._body()
         ctype = self.headers.get("Content-Type", "").split(";")[0]
         if sub == "/runs/begin":
@@ -706,11 +710,13 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", "0"))
         head = self.rfile.read(8)
         hn = struct.unpack("<Q", head)[0]
-        shape = json.loads(self.rfile.read(hn))["frames"]["shape"]
+        spec = json.loads(self.rfile.read(hn))
+        shape = spec["frames"]["shape"]
+        at = json.loads(spec.get("__metadata__", {}).get("gmlx", "{}")).get("at")
         left = n - 8 - hn
         while left > 0:
             left -= len(self.rfile.read(min(left, 1 << 20)))
-        self.st.event(kind="video_encode_refused", shape=shape, window=k)
+        self.st.event(kind="video_encode_refused", shape=shape, at=at, window=k)
         return self._err(400, f"a video encode of a window of {shape[0]} frames does not fit "
                               f"in memory beside the models now loaded; a window of {17 * k} "
                               "frames fits", window=k)

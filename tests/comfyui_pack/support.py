@@ -65,7 +65,8 @@ class Stub:
 
     def video_encode(self, refuse=(), max_body=(1 << 30) + (1 << 20)):
         """The next video encodes refuse for memory, each naming its
-        window of ``refuse``; the capabilities name ``max_body``."""
+        window of ``refuse``, or go when its entry is None; the
+        capabilities name ``max_body``."""
         self.call("/stub/video-encode", {"refuse": list(refuse), "max_body": max_body})
 
     def close(self):
