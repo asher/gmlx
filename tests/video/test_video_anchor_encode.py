@@ -1,7 +1,8 @@
 """Anchors through the VAEs: the audio encode's convolutions windowed with
-their halo and a guide's audio read only as far as its kept latents need,
-both against the whole encode, and an anchor's frames and waveform as
-the VAEs take them. Seeded tiny weights, no files."""
+their halo, the video encode in windows of whole pieces, and a guide's
+audio read only as far as its kept latents need, each against the whole
+encode, and an anchor's frames and waveform as the VAEs take them. Seeded
+tiny weights, no files."""
 from __future__ import annotations
 
 import mlx.core as mx
@@ -77,6 +78,38 @@ def test_the_first_latents_need_their_samples_and_the_halo_alone(
     got = audio_vae.encode(w[..., :need], window=None)[..., :37]
     np.testing.assert_allclose(np.array(got), np.array(whole), rtol=0,
                                atol=1e-5)
+
+
+@pytest.fixture(scope="module")
+def video_vae(tmp_path_factory):
+    """The seeded tiny video VAE of check 5's self-test."""
+    from test_video_check5_h3 import seeded
+    from video_oracle_fixture import committed
+
+    from gmlx.video.vae.reader import load_vae
+
+    shapes = committed("selftest_h3_vae")["inputs"]["shapes"]
+    path = str(tmp_path_factory.mktemp("h3_vae") / "vae.safetensors")
+    seeded.write_safetensors(path, seeded.weights(shapes["vae"]))
+    return load_vae(path, family="h3", dtype=mx.float32)
+
+
+@pytest.mark.parametrize("pieces", [1, 2])
+def test_windows_of_whole_pieces_are_the_whole_video_encode(video_vae,
+                                                            pieces):
+    """Each 17-frame piece encodes alone and the clip's end drops 3
+    latents, so 56 frames in open windows of whole pieces, kept whole,
+    and the clip's last 22 frames give the whole encode bit for bit."""
+    rng = np.random.default_rng(3)
+    x = mx.array(rng.uniform(-1, 1, (1, 56, 32, 32, 3)).astype(np.float32))
+    whole = video_vae.encode(x)
+    parts = [video_vae.encode(x[:, a:a + 17 * pieces], drop=False)
+             for a in range(0, 34, 17 * pieces)]
+    parts.append(video_vae.encode(x[:, 34:]))
+    assert [p.shape[2] for p in parts] == [5 * pieces] * (2 // pieces) + [7]
+    assert whole.shape[2] == 17
+    np.testing.assert_array_equal(np.array(mx.concatenate(parts, axis=2)),
+                                  np.array(whole))
 
 
 class _Seen:

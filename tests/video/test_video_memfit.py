@@ -524,6 +524,19 @@ def test_the_keyframe_cells_cover_the_table_shapes():
         FILES["vae"], FILES["audio_vae"])
 
 
+def test_the_servers_encode_window_is_the_longest_measured_clip():
+    """The server takes a guide clip in windows of at most encode_pieces
+    pieces of 17 frames, 17 p + 5 frames at the clip's end: the longest
+    clip the video encode cells measure at 1344x768, so a window is priced
+    inside them."""
+    from gmlx.serve.image_steps import COMFY
+
+    p = COMFY["h3"]["vae"]["encode_pieces"]
+    longest = max(c["shape"][2] for c in KF["video_encode"]
+                  if c["shape"][:2] == [1344, 768])
+    assert 17 * p + 5 == longest == 124
+
+
 @pytest.mark.parametrize("fit", ["tower", "vision_encode", "frame_encode",
                                  "clip_encode", "audio_encode"])
 def test_each_keyframe_and_anchor_fit_covers_its_cells(fit):

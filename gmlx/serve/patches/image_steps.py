@@ -188,6 +188,33 @@ async def _fields(request: Request) -> dict:
     return body
 
 
+def _content_type(request: Request) -> None:
+    from ..image_steps import StepError
+    from ..image_wire import CONTENT_TYPE
+
+    ctype = request.headers.get("content-type", "").split(";")[0].strip()
+    if ctype != CONTENT_TYPE:
+        raise StepError(415, f"the body is {CONTENT_TYPE}, not "
+                        f"{ctype or 'untyped'}")
+
+
+def _content_length(request: Request, max_bytes: int) -> None:
+    """Refuse a body whose Content-Length is past ``max_bytes`` before a
+    byte of it is read; the answer closes the connection."""
+    from ..image_steps import StepError
+
+    length = request.headers.get("content-length")
+    if length is None:
+        return
+    try:
+        n = int(length)
+    except ValueError:
+        raise StepError(400, "the Content-Length is not a number") from None
+    if n > max_bytes:
+        raise StepError(413, f"the body is {n} bytes, over the limit of "
+                        f"{max_bytes}")
+
+
 async def _wire(request: Request, max_bytes: int):
     from ..image_steps import StepError
     from ..image_wire import CONTENT_TYPE, WireError, read
@@ -253,6 +280,9 @@ def _route(fn, *, versioned: bool = True, name: str = ""):
                 _log_aux_request(path, None, started, status="refused",
                                  error=str(e))
             headers = None
+            if e.status == 413:
+                # The body past the limit is not read: end the connection.
+                headers = {"Connection": "close"}
             if e.status == 503:
                 retry = getattr(e, "retry_after", None)
                 if retry is None:
@@ -1125,12 +1155,32 @@ def _check_clip(hold, served, *, frames: int, width: int, height: int,
     ``layout.AnchorRows``, and an anchors phase prices their encodes;
     ``shown`` names what is priced in the refusal."""
     from ..image_steps import StepError
+
+    got = _clip_terms(hold, served, frames=frames, width=width,
+                      height=height, text=text, phase=phase, table=table,
+                      audio=audio, decodes=decodes, anchors=anchors)
+    if got is None:
+        return
+    held, work, budget = got
+    if held + work > budget:
+        clip = shown or (f"{audio} audio latents" if phase == "audio"
+                         else f"{width}x{height} at {frames} frames")
+        raise StepError(400, f"{what} of {clip} does not fit in memory "
+                        "beside the models now loaded")
+
+
+def _clip_terms(hold, served, *, frames: int, width: int, height: int,
+                text: int, phase: str, table: str | None = None,
+                audio: int | None = None, decodes: bool = False,
+                anchors=()) -> tuple[int, int, int] | None:
+    """``(held, work, budget)`` bytes of a phase as ``_check_clip`` prices
+    it, or None when the host sets no budget."""
     from ..video_service import held_bytes, plan_clip
 
     budget_fn = getattr(SETTINGS.host, "budget", None)
     budget = budget_fn(hold) if budget_fn is not None else None
     if budget is None:
-        return
+        return None
     pipe = served.pipe
     tid = pipe.default_table if table is None else table
     got = pipe.patch_tables.get(tid)
@@ -1148,11 +1198,7 @@ def _check_clip(hold, served, *, frames: int, width: int, height: int,
             else plan.phases[phase])
     if decodes:
         work = max(work, plan.phases["audio"], plan.phases["decode"])
-    if held + work > budget:
-        clip = shown or (f"{audio} audio latents" if phase == "audio"
-                         else f"{width}x{height} at {frames} frames")
-        raise StepError(400, f"{what} of {clip} does not fit in memory "
-                        "beside the models now loaded")
+    return held, work, budget
 
 
 def _check_encode(hold, served, text: str, sizes=()) -> None:
@@ -1588,41 +1634,201 @@ async def audio_decode(request: Request):
     return _container({"waveform": img})
 
 
-async def video_encode(request: Request):
-    """Frames (T, H, W, 3) in [0, 1] of a keyframe or a guide clip, 1 or
-    17 k + 5 of them on a canvas of the clip, to model-space video latents
-    (1, 24, t, h, w) f32, priced as the anchor encode of a clip."""
+class _Stream:
+    """A request body read as far as its safetensors header, the rest
+    read or drained after: a refusal after the header reads the rest a
+    chunk at a time and keeps none of it, so a client still sending gets
+    the answer."""
+
+    def __init__(self, request: Request):
+        self._it = request.stream().__aiter__()
+        self.got = bytearray()
+
+    async def _more(self) -> bool:
+        try:
+            self.got += await self._it.__anext__()
+        except StopAsyncIteration:
+            return False
+        return True
+
+    async def header(self, max_bytes: int) -> dict:
+        """The header's tensor specs and the request fields."""
+        from ..image_steps import StepError
+        from ..image_wire import MAX_HEADER_BYTES
+
+        while len(self.got) < 8 and await self._more():
+            pass
+        n = int.from_bytes(bytes(self.got[:8]), "little") \
+            if len(self.got) >= 8 else -1
+        if not 0 <= n <= MAX_HEADER_BYTES:
+            raise StepError(400, "the body has no safetensors header")
+        while len(self.got) < 8 + n and await self._more():
+            if len(self.got) > max_bytes:
+                raise StepError(413, f"the body is over the limit of "
+                                f"{max_bytes} bytes")
+        try:
+            head = json.loads(bytes(self.got[8:8 + n]))
+            fields = json.loads((head.pop("__metadata__", None) or {}).get(
+                "gmlx", "{}"))
+        except (ValueError, AttributeError):
+            raise StepError(400, "the safetensors header is not JSON") \
+                from None
+        if not isinstance(head, dict) or not isinstance(fields, dict):
+            raise StepError(400, "the safetensors header is not a JSON "
+                            "object")
+        return head, fields
+
+    async def rest(self, max_bytes: int) -> bytearray:
+        from ..image_steps import StepError
+
+        while await self._more():
+            if len(self.got) > max_bytes:
+                raise StepError(413, f"the body is over the limit of "
+                                f"{max_bytes} bytes")
+        return self.got
+
+    async def drain(self) -> None:
+        self.got = bytearray()
+        while await self._more():
+            self.got = bytearray()
+
+
+# The video encode's window rules, as its refusals state them.
+WINDOW_RULES = (
+    "a guide clip goes in windows, each at frame `at` of `clip_frames`: "
+    "an open window is 17 m frames from a multiple of 17, 1 <= m <= {p}, "
+    "ending before the clip does; the last window is the clip's 1 frame or "
+    "17 j + 5 frames from a multiple of 17 to the clip's end, j <= {p}")
+
+
+def _window(n: int, at: int, clip: int, is_open: bool, pieces: int) -> None:
+    """Refuse a window of ``n`` frames at frame ``at`` of a ``clip``-frame
+    clip that breaks the window rules."""
+    from ..image_steps import StepError
+
+    ok = at >= 0 and at % 17 == 0
+    if ok and is_open:
+        ok = n % 17 == 0 and 1 <= n // 17 <= pieces and at + n < clip
+    elif ok:
+        ok = at + n == clip and (n == clip == 1 or (
+            n >= 5 and (n - 5) % 17 == 0 and (n - 5) // 17 <= pieces))
+    if not ok:
+        raise StepError(400, f"a window of {n} frames at frame {at} of a "
+                        f"{clip}-frame clip{' (open)' if is_open else ''} "
+                        "breaks the rules: " + WINDOW_RULES.format(p=pieces))
+
+
+def _window_fit(hold, served, *, n: int, width: int, height: int,
+                level: int, is_open: bool):
+    """``(need, free, largest)``: the bytes a window of ``n`` frames needs
+    beside the models now loaded, the bytes free beside them, and the
+    largest k whose windows of 17 k + 5 frames fit (0 for none, None when
+    the host sets no budget). An open window of 17 m frames is priced as
+    the clip of 17 m + 5, its encode a piece shy of that one's. The wire
+    bytes count twice: the body and its MLX copy."""
     from gmlx.video.layout import AnchorRows
 
-    from ..image_steps import StepError
+    def need(f, wire):
+        t = 1 if f == 1 else (f - 5) // 17 * 5 + 2
+        got = _clip_terms(hold, served, frames=max(served.plan.frames, f),
+                          width=width, height=height, text=1,
+                          phase="anchors", anchors=(AnchorRows(0, t, 0),))
+        if got is None:
+            return None
+        held, work, budget = got
+        return work + 2 * wire * height * width * 3 * level, budget - held
+
+    first = need(n + 5 if is_open else n, n)
+    if first is None:
+        return None
+    k = (n - 5) // 17 if n > 1 else 0
+    while k > 0:
+        w, free = need(17 * k + 5, 17 * k + 5)
+        if w <= free:
+            break
+        k -= 1
+    return first[0], first[1], k
+
+
+async def video_encode(request: Request):
+    """Frames (T, H, W, 3) of a keyframe or a guide clip, float in [0, 1]
+    or uint8 levels, 1 or 17 k + 5 of them on a canvas of the clip, to
+    model-space video latents (1, 24, t, h, w) f32, priced as the anchor
+    encode of a clip. A long clip goes in windows of whole pieces, by the
+    fields ``at``, ``clip_frames`` and ``open``: an open window keeps the
+    latents the clip's end drops, 5 a piece. The window is priced from
+    the header, before its frames are read; a refusal drains them."""
+    from ..image_steps import COMFY, StepError
+    from ..image_wire import WireError, read
     from ..video_service import encode_video, on_canvas
 
-    img, hold, served = await _video_hold(
-        request, "vae/video/encode", 4, "frames (T, H, W, 3) in [0, 1]",
-        key="frames", one=False)
+    _content_type(request)
+    _content_length(request, MAX_BODY_BYTES)
+    body = _Stream(request)
     try:
-        fam = served.pipe.video_family
-        n, height, width, c = (int(d) for d in img.shape)
-        if c != 3 or not img.dtype.startswith(("F", "BF")):
+        head, fields = await body.header(MAX_BODY_BYTES)
+        spec = head.get("frames")
+        shape = spec.get("shape") if isinstance(spec, dict) else None
+        dtype = spec.get("dtype") if isinstance(spec, dict) else None
+        if (not isinstance(shape, list) or len(shape) != 4
+                or not all(isinstance(d, int) for d in shape)):
+            raise StepError(400, "vae/video/encode takes frames (T, H, W, 3)"
+                            " in [0, 1]")
+        n, height, width, c = shape
+        if c != 3 or dtype not in ("F32", "F16", "BF16", "U8"):
             raise StepError(400, "vae/video/encode takes frames (T, H, W, 3) "
-                            f"in [0, 1], not {img.dtype} {list(img.shape)}")
+                            f"in [0, 1] or uint8 levels, not {dtype} {shape}")
+        hold = await _acquire(fields.get("model"))
         try:
-            t = 1 if n == 1 else fam.latent_shapes(n, width, height)[0][2]
-        except ValueError:
-            t = None
-        if t is None or not on_canvas(fam, width, height):
-            raise StepError(400, f"frames {list(img.shape)} are no "
-                            f"{fam.title} keyframe or guide clip: 1 or 17 k "
-                            "+ 5 frames on a canvas in multiples of 32")
-        shown = (f"a {width}x{height} frame" if n == 1
-                 else f"{n} frames of {width}x{height}")
-        _check_clip(hold, served, frames=max(served.plan.frames, n),
-                    width=width, height=height, text=1, phase="anchors",
-                    what="a video encode", anchors=(AnchorRows(0, t, 0),),
-                    shown=shown)
-        lat = await _on_worker(lambda: encode_video(served, img.mx()))
-    finally:
-        hold.release()
+            served = _served(hold)
+            if not _video(served):
+                raise StepError(400, f"{served.spec.id!r} is an image model; "
+                                "vae/video/encode takes a video model")
+            fam = served.pipe.video_family
+            pieces = int(COMFY[fam.name]["vae"]["encode_pieces"])
+            at, clip = int(fields.get("at", 0)), int(
+                fields.get("clip_frames", n))
+            is_open = bool(fields.get("open", False))
+            if not on_canvas(fam, width, height) or not (
+                    clip == 1 or (clip >= 5 and (clip - 5) % 17 == 0)):
+                what = f"frames {shape}" if clip == n else (
+                    f"a clip of {clip} frames of {width}x{height}")
+                raise StepError(400, f"{what} are no {fam.title} keyframe or "
+                                "guide clip: 1 or 17 k + 5 frames on a canvas "
+                                "in multiples of 32")
+            _window(n, at, clip, is_open, pieces)
+            level = 1 if dtype == "U8" else 2 if dtype in ("F16", "BF16") \
+                else 4
+            fit = _window_fit(hold, served, n=n, width=width, height=height,
+                              level=level, is_open=is_open)
+            if fit is not None and fit[0] > fit[1]:
+                need, free, k = fit
+                shown = (f"a {width}x{height} frame" if clip == 1 else
+                         f"a guide clip of {clip} frames of {width}x{height}")
+                raise StepError(
+                    400, f"a video encode of {shown} does not fit in memory "
+                    f"beside the models now loaded: its window of {n} "
+                    f"frames, {dtype.lower()} on the wire, needs "
+                    f"{need / (1 << 30):.2f} GiB, and "
+                    f"{max(free, 0) / (1 << 30):.2f} GiB is free; "
+                    + (f"a window of {17 * k} frames, or {17 * k + 5} at the "
+                       "clip's end, fits" if k else "no window fits"),
+                    window=k)
+            raw = await body.rest(MAX_BODY_BYTES)
+            try:
+                tensors, _ = read(raw, max_bytes=MAX_BODY_BYTES)
+            except WireError as e:
+                raise StepError(e.status, str(e)) from None
+            img = tensors["frames"].mx()
+            del raw, tensors
+            lat = await _on_worker(lambda: encode_video(served, img,
+                                                        open=is_open))
+        finally:
+            hold.release()
+    except StepError as e:
+        if e.status != 413:
+            await body.drain()
+        raise
     return _container({"latents": lat})
 
 

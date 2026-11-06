@@ -738,10 +738,25 @@ def decode_video(served: ServedVideo, latents) -> np.ndarray:
         mx.clear_cache()
 
 
-def encode_video(served: ServedVideo, frames) -> np.ndarray:
+def encoder_frames(frames):
+    """Frames (F, H, W, 3) in [0, 1], float or uint8 levels, as the video
+    VAE takes them: float32 in [-1, 1], (1, F, H, W, 3). Level k is k / 255
+    as torch's ``u8.float() / 255`` gives it, through a table of the same
+    float32 operations, one array of the clip."""
+    import mlx.core as mx
+
+    if frames.dtype != mx.uint8:
+        return frames.astype(mx.float32)[None] * 2.0 - 1.0
+    k = np.arange(256, dtype=np.float32) / np.float32(255)
+    return mx.take(mx.array(k * np.float32(2) - np.float32(1)), frames)[None]
+
+
+def encode_video(served: ServedVideo, frames, *, open: bool = False
+                 ) -> np.ndarray:
     """Model-space latents (1, 24, T, h, w) f32 of frames (F, H, W, 3) in
-    [0, 1], 1 or 17 k + 5 of them, on the image worker, with the video VAE
-    loaded for the call."""
+    [0, 1], float or uint8 levels, 1 or 17 k + 5 of them, on the image
+    worker, with the video VAE loaded for the call. An ``open`` window is
+    17 m frames and keeps the latents a clip drops at its end."""
     import mlx.core as mx
 
     from gmlx.video.vae.reader import load_vae
@@ -749,8 +764,8 @@ def encode_video(served: ServedVideo, frames) -> np.ndarray:
     vae = load_vae(os.path.expanduser(served.spec.vae), family="h3",
                    dtype=mx.float16)
     try:
-        x = frames.astype(mx.float32)[None] * 2.0 - 1.0
-        z = vae.encode(x).astype(mx.float32)
+        x = encoder_frames(frames)
+        z = vae.encode(x, drop=not open).astype(mx.float32)
         mx.eval(z)
         return np.array(z, copy=True)
     finally:

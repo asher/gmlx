@@ -444,9 +444,11 @@ class H3VideoVAE(nn.Module):
             out_rows.append(mx.concatenate(parts, axis=3))
         return mx.concatenate(out_rows, axis=2)
 
-    def encode(self, frames: mx.array) -> mx.array:
+    def encode(self, frames: mx.array, drop: bool = True) -> mx.array:
         """Model-space latents (B, 24, T, H, W) of frames (B, T, H, W, 3)
-        in [-1, 1]: the posterior mean, normalized per channel."""
+        in [-1, 1]: the posterior mean, normalized per channel. Each piece
+        encodes alone, so a run of whole pieces with ``drop`` False gives
+        the latents a whole clip's encode gives those pieces."""
         t = frames.shape[1]
         if t == 1:
             m = self._tiled_moments(self._normalized(frames))[:, -1:]
@@ -460,7 +462,9 @@ class H3VideoVAE(nn.Module):
                                      axis=1)
                     piece = mx.concatenate([piece, last], axis=1)
                 pieces.append(self._tiled_moments(self._normalized(piece)))
-            m = drop_latents(mx.concatenate(pieces, axis=1))
+            m = mx.concatenate(pieces, axis=1)
+            if drop:
+                m = drop_latents(m)
         mean = m[..., :self.cfg.z]
         z = ((mean - self.latents_mean.astype(mx.float32))
              / self.latents_std.astype(mx.float32))

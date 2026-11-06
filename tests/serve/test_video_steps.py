@@ -1882,23 +1882,34 @@ def test_a_vae_encode_that_does_not_fit_beside_the_models_is_refused(
     served.spec.audio_vae = vaes["audio_vae"]
     c = _client()
     sent = _encode_inputs(route)
+    wire_bytes = 0
     if route == "video":
         clip = dict(frames=22, width=32, height=32,
                     anchors=(layout.AnchorRows(0, 7, 0),))
-        shown = "22 frames of 32x32"
+        # The body and its MLX copy.
+        wire_bytes = 2 * sent["frames"].nbytes
     else:
         clip = dict(frames=FRAMES, width=SIZE, height=SIZE,
                     anchors=(layout.AnchorRows(0, 0, 2),))
-        shown = "1000 samples"
     work = vs.plan_clip(served.plan, text=1, budget=1, **clip
                         ).phases["anchors"]
     adapters, caches = vs.held_bytes(served)
-    host.budget_bytes = adapters + caches + work - 1
+    host.budget_bytes = adapters + caches + work + wire_bytes - 1
     with pytest.raises(StepsClientError) as e:
         c.container(f"vae/{route}/encode", sent, {"model": "h3"})
-    assert e.value.status == 400 and e.value.body["error"] == (
-        f"a{'n' if route == 'audio' else ''} {route} encode of {shown} does "
-        "not fit in memory beside the models now loaded")
+    assert e.value.status == 400
+    if route == "video":
+        need = (work + wire_bytes) / (1 << 30)
+        free = (work + wire_bytes - 1) / (1 << 30)
+        assert e.value.body == {"error": (
+            "a video encode of a guide clip of 22 frames of 32x32 does not "
+            "fit in memory beside the models now loaded: its window of 22 "
+            f"frames, f32 on the wire, needs {need:.2f} GiB, and "
+            f"{free:.2f} GiB is free; no window fits"), "window": 0}
+    else:
+        assert e.value.body["error"] == (
+            "an audio encode of 1000 samples does not fit in memory beside "
+            "the models now loaded")
     host.budget_bytes += 1
     c.container(f"vae/{route}/encode", sent, {"model": "h3"})
 
@@ -1910,9 +1921,9 @@ def test_a_vae_encode_that_does_not_fit_beside_the_models_is_refused(
     ("video", np.zeros((1, 32, 48, 3), np.float32), "h3",
      "frames [1, 32, 48, 3] are no MiniMax-H3 keyframe or guide clip: 1 or "
      "17 k + 5 frames on a canvas in multiples of 32"),
-    ("video", np.zeros((1, 32, 32, 3), np.uint8), "h3",
-     "vae/video/encode takes frames (T, H, W, 3) in [0, 1], not U8 "
-     "[1, 32, 32, 3]"),
+    ("video", np.zeros((1, 32, 32, 3), np.bool_), "h3",
+     "vae/video/encode takes frames (T, H, W, 3) in [0, 1] or uint8 levels, "
+     "not BOOL [1, 32, 32, 3]"),
     ("video", np.zeros((1, 32, 32, 3), np.float32), "zit",
      "'zit' is an image model; vae/video/encode takes a video model"),
     ("audio", np.zeros((1, 1, 800), np.float32), "h3",
@@ -1928,6 +1939,148 @@ def test_a_vae_encode_refuses_what_is_no_anchor(host, route, sent, model,
                             {"model": model})
     assert e.value.status == 400 and e.value.body["error"] == want
 
+
+def _levels(n: int) -> np.ndarray:
+    return np.random.default_rng(6).integers(0, 256, (n, 32, 32, 3),
+                                             dtype=np.uint8)
+
+
+def test_uint8_levels_encode_as_their_float32(host, vaes):
+    """Frames as uint8 levels give the latents of the same frames as
+    float32 k / 255, bit for bit, at a keyframe and a clip."""
+    host.served.spec.vae = vaes["vae"]
+    c = _client()
+    for n in (1, 22):
+        u8 = _levels(n)
+        f32 = u8.astype(np.float32) / np.float32(255)
+        got = [c.container("vae/video/encode", {"frames": f}, {"model": "h3"}
+                           )[0]["latents"] for f in (u8, f32)]
+        assert got[0].shape == got[1].shape and np.array_equal(*got), n
+
+
+def test_windows_that_tile_a_clip_encode_as_the_whole_clip(host, vaes):
+    """39 frames as two open windows of one piece and the 5 frames of the
+    clip's end give the latents of the clip in one body, bit for bit."""
+    host.served.spec.vae = vaes["vae"]
+    c = _client()
+    u8 = _levels(39)
+    whole = c.container("vae/video/encode", {"frames": u8},
+                        {"model": "h3"})[0]["latents"]
+    parts = [c.container("vae/video/encode", {"frames": u8[at:at + n]},
+                         {"model": "h3", "at": at, "clip_frames": 39,
+                          "open": is_open})[0]["latents"]
+             for at, n, is_open in ((0, 17, True), (17, 17, True),
+                                    (34, 5, False))]
+    assert [p.shape[2] for p in parts] == [5, 5, 2]
+    assert np.array_equal(np.concatenate(parts, axis=2), whole)
+
+
+RULES = ("breaks the rules: a guide clip goes in windows, each at frame "
+         "`at` of `clip_frames`: an open window is 17 m frames from a "
+         "multiple of 17, 1 <= m <= 7, ending before the clip does; the "
+         "last window is the clip's 1 frame or 17 j + 5 frames from a "
+         "multiple of 17 to the clip's end, j <= 7")
+
+
+@pytest.mark.parametrize("n, at, clip, is_open", [
+    (16, 0, 39, True),        # an open window of no whole piece
+    (17, 5, 39, True),        # off a piece boundary
+    (34, 0, 34 + 5, False),   # a last window that is not 17 j + 5
+    (17, 0, 22, False),       # a last window short of the clip's end
+    (136, 0, 141, True),      # 8 pieces in an open window
+    (141, 0, 141, False),     # 8 pieces and the end in one body
+    (22, 17, 22, False),      # past the clip's end
+])
+def test_a_window_off_the_rules_is_refused_by_them(host, n, at, clip,
+                                                   is_open):
+    with pytest.raises(StepsClientError) as e:
+        _client().container("vae/video/encode", {"frames": _levels(n)},
+                            {"model": "h3", "at": at, "clip_frames": clip,
+                             "open": is_open})
+    open_ = " (open)" if is_open else ""
+    assert e.value.status == 400 and e.value.body["error"] == (
+        f"a window of {n} frames at frame {at} of a {clip}-frame clip{open_} "
+        + RULES)
+
+
+def _asgi_request(body: bytes, seen: list, length: int | None = None,
+                  step: int = 4096):
+    """A Request whose body arrives ``step`` bytes at a time after its
+    safetensors header, each pull of it booked in ``seen``."""
+    from starlette.requests import Request
+
+    head = 8 + int.from_bytes(body[:8], "little")
+    chunks = [body[:head]] + [body[i:i + step]
+                              for i in range(head, len(body), step)]
+
+    async def receive():
+        i = sum(1 for x in seen if x.startswith("chunk"))
+        seen.append(f"chunk {i}")
+        return {"type": "http.request", "body": chunks[i],
+                "more_body": i + 1 < len(chunks)}
+
+    n = len(body) if length is None else length
+    scope = {"type": "http", "method": "POST", "path": "/", "query_string":
+             b"", "headers": [(b"content-type", wire.CONTENT_TYPE.encode()),
+                              (b"content-length", str(n).encode())]}
+    return Request(scope, receive), len(chunks)
+
+
+def test_a_body_past_the_limit_is_refused_before_a_byte_is_read(
+        host, monkeypatch):
+    """Its Content-Length alone refuses it, 413, with no pull of the body
+    and no hold of the model."""
+    import asyncio
+
+    monkeypatch.setattr(routes, "MAX_BODY_BYTES", 1 << 16)
+    seen: list = []
+    monkeypatch.setattr(host, "acquire", lambda m: seen.append("acquire"))
+    body = wire.write({"frames": _levels(22)}, {"model": "h3"})
+    req, _ = _asgi_request(body, seen)
+    with pytest.raises(steps.StepError) as e:
+        asyncio.run(routes.video_encode(req))
+    assert e.value.status == 413 and str(e.value) == (
+        f"the body is {len(body)} bytes, over the limit of 65536")
+    assert seen == []
+
+
+def test_a_window_is_priced_from_its_header_and_its_frames_drained(
+        host, monkeypatch):
+    """The window's price is read before a byte of its frames: the body
+    arrives a chunk at a time, the refusal comes after the header alone,
+    and the rest is read and dropped so a client still sending gets it.
+    The refusal names the largest window that fits, 3 pieces."""
+    import asyncio
+
+    served = host.served
+    adapters, caches = vs.held_bytes(served)
+
+    def need(f, t):
+        work = vs.plan_clip(served.plan, frames=max(served.plan.frames, f),
+                            width=32, height=32, text=1, budget=1,
+                            anchors=(layout.AnchorRows(0, t, 0),)
+                            ).phases["anchors"]
+        return work + 2 * f * 32 * 32 * 3
+
+    host.budget_bytes = adapters + caches + need(56, 17)
+    seen: list = []
+    budget = host.budget
+    monkeypatch.setattr(host, "budget",
+                        lambda hold: seen.append("price") or budget(hold))
+    monkeypatch.setattr(vs, "encode_video", lambda *a, **k: seen.append(
+        "encode"))
+    body = wire.write({"frames": _levels(119)},
+                      {"model": "h3", "at": 0, "clip_frames": 362,
+                       "open": True})
+    req, chunks = _asgi_request(body, seen)
+    with pytest.raises(steps.StepError) as e:
+        asyncio.run(routes.video_encode(req))
+    assert e.value.status == 400 and e.value.extra == {"window": 3}
+    assert "does not fit in memory beside the models now loaded" in str(
+        e.value)
+    assert seen.index("price") < seen.index("chunk 1")
+    assert seen.count("price") >= 1 and "encode" not in seen
+    assert seen[-1] == f"chunk {chunks - 1}"
 
 @pytest.mark.parametrize("route, model, want", [
     ("vae/decode", "h3", "'h3' is a video model, and vae/decode takes an "

@@ -1721,6 +1721,10 @@ def test_a_step_or_vae_pass_over_the_size_limits_is_413(host, path, tensors,
     assert r.status_code == 413, r.text
     if path.startswith(("vae/video/", "vae/audio/")):
         assert "over the limit of 65536" in r.text
+    if path == "vae/video/encode":
+        # Refused from its Content-Length, its body unread: the answer
+        # ends the connection.
+        assert r.headers["connection"] == "close"
     assert host.held == 0
 
 

@@ -145,7 +145,11 @@ COMFY = {
     "h3": {"model_class": "MiniMaxH3", "image_model": "minimax_h3",
            "latent": {"channels": 24, "stride": 16, "patch": 2,
                       "temporal": 4},
-           "vae": {"channels_out": 3, "stride": 16, "space": "model"},
+           # A long guide clip is encoded in windows of at most 7 pieces
+           # of 17 frames, 124 frames at the clip's end: the longest clip
+           # the video VAE's measured encode cells hold.
+           "vae": {"channels_out": 3, "stride": 16, "space": "model",
+                   "encode_pieces": 7},
            "audio": {"channels": 32, "stereo": 2, "sample_rate": 32000,
                      "latents_per_second": 40}},
 }
@@ -977,7 +981,7 @@ def capabilities() -> dict:
     from gmlx.image.registry import families
     from gmlx.video.registry import families as video_families
 
-    from .image_wire import CONTRACT
+    from .image_wire import CONTRACT, MAX_BODY_BYTES
 
     return {"contract": {"major": CONTRACT[0], "minor": CONTRACT[1]},
             "min_client": {"major": 1, "minor": 0},
@@ -995,7 +999,8 @@ def capabilities() -> dict:
                        "max_adapter_bytes": min(
                            MAX_ADAPTER_BYTES,
                            STATE.adapters.configured or MAX_ADAPTER_BYTES),
-                       "max_rows": MAX_ROWS, "max_runs": MAX_RUNS}}
+                       "max_rows": MAX_ROWS, "max_runs": MAX_RUNS,
+                       "max_body_bytes": MAX_BODY_BYTES}}
 
 
 # Work on the image worker.
