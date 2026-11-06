@@ -49,7 +49,8 @@ rows and the vision spans of its tags.
 
 --self-test writes a tiny model of the class on random weights, with the
 weights by name, and its step for the text to video case and each anchor
-case, so the gmlx side checks the whole forward on the CPU.
+case, so the gmlx side checks the whole forward on the CPU. Its fixtures
+are written compressed, to be committed beside their manifests.
 """
 
 from __future__ import annotations
@@ -84,11 +85,13 @@ FP32_ROWS = 1e-5
 
 # The tiny model of --self-test, in ComfyUI's constructor arguments, and
 # the same model in the official config's names that gmlx reads.
-TINY = {"hidden_size": 64, "num_layers": 2, "token_refiner_num_layers": 1,
-        "num_attention_heads": 2, "attention_head_dim": 128,
+# Its RoPE turns 48 of each head's 64 dims, so a tail of the head passes
+# through unturned, as in the official model.
+TINY = {"hidden_size": 32, "num_layers": 2, "token_refiner_num_layers": 1,
+        "num_attention_heads": 2, "attention_head_dim": 64,
         "ffn_hidden_size": 48, "latents_dim": 24, "audio_latents_dim": 32,
         "patch_size": [1, 2, 2], "text_dim": 40, "time_embed_dim": 8,
-        "rope_inv_freq_len": 16, "adaln_curve_grid": 1025,
+        "rope_inv_freq_len": 8, "adaln_curve_grid": 1025,
         "norm_eps": 1e-5, "qk_norm_eps": 1e-5, "final_norm_eps": 1e-5}
 _OFFICIAL = {"hidden_size": "hidden_size", "num_layers": "num_layers",
              "token_refiner_num_layers": "num_refiner_layers",
@@ -393,10 +396,12 @@ def anchor_noise(torch, dm, payload: dict) -> list:
 
 def run_case(torch, dm, video, audio, feats, sigma, name, inputs, files,
              notes, *, check: int = 3, script: str = SCRIPT,
-             payload: dict | None = None, extra: dict | None = None) -> None:
+             payload: dict | None = None, extra: dict | None = None,
+             compressed: bool = False) -> None:
     """One step in fp32 and bf16, written as fixture ``name`` of check
     ``check`` by ``script``. ``payload`` is the step's minimax_payload,
-    ``extra`` more arrays for the fixture."""
+    ``extra`` more arrays for the fixture, ``compressed`` a deflated
+    ``.npz``."""
     fx = fixtures.FixtureWriter(name, check=check, family=FAMILY,
                                 script=script)
     fx.inputs.update(inputs)
@@ -468,7 +473,7 @@ def run_case(torch, dm, video, audio, feats, sigma, name, inputs, files,
     fx.results["free_bf16_vs_fp32"] = free_gaps
     fx.results["times"] = times
     fx.tolerances["rule"] = RULE
-    path = fx.write()
+    path = fx.write(compressed=compressed)
     print(f"[check{check}] {name}: velocity bf16 vs fp32 rel L2 video "
           f"{gaps['video']['rel_l2']:.3e} audio {gaps['audio']['rel_l2']:.3e}"
           f", {times}, wrote {path}", flush=True)
@@ -542,7 +547,7 @@ def self_test(torch, a) -> int:
               "attention": "attention_pytorch", "comfy": a.comfy_head}
     note = f"the weights are in {name}_weights by name in torch order"
     run_case(torch, dm, video, audio, feats, TINY_CASE["sigma"], name,
-             inputs, {}, [note])
+             inputs, {}, [note], compressed=True)
     for c in ANCHOR_CASES:
         got = anchor_case(c, shape, ANCHOR_SEED)
         if got is None:
@@ -551,13 +556,13 @@ def self_test(torch, a) -> int:
         run_case(torch, dm, video, audio, feats, TINY_CASE["sigma"],
                  f"{name}_{c}", {**inputs, **more}, {}, [note],
                  payload=payload_of(keyframes, tags, ANCHOR_SEED),
-                 extra=arrays)
+                 extra=arrays, compressed=True)
     wx = fixtures.FixtureWriter(name + "_weights", check=3, family=FAMILY,
                                 script=SCRIPT)
     wx.inputs.update(inputs)
     for k, v in state.items():
         wx.add(k, v)
-    wx.write()
+    wx.write(compressed=True)
     return 0
 
 
