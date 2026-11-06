@@ -834,10 +834,10 @@ def _concat_prompt_kwarg_rows(key: str, rows: List[mx.array]) -> mx.array:
     return mx.concatenate(rows, axis=0)
 
 
-def _built_rows(embeds):
+def _built_rows(embeds) -> mx.array:
     """gmlx: ``embeds`` as an array: rows a model builds a chunk at a time
     (``PromptRows``) are built whole."""
-    if embeds is None or isinstance(embeds, mx.array):
+    if isinstance(embeds, mx.array):
         return embeds
     return embeds[:, : embeds.shape[1]]
 
@@ -2228,7 +2228,8 @@ class PromptProcessingBatch:
         output = self.model(
             self._input_ids,
             cache=self.prompt_cache,
-            inputs_embeds=_built_rows(self._inputs_embeds),
+            inputs_embeds=(None if self._inputs_embeds is None
+                           else _built_rows(self._inputs_embeds)),
             **call_kwargs,
         )
         output = self._speculative_prefill.finish(output)
