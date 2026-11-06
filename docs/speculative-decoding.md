@@ -53,7 +53,8 @@ Speculation works with some other features and stays off with others:
 - The [lossy MoE settings](streaming.md#the-lossy-settings): off, and
   `chat` refuses `--speculative`.
 - `--mmproj`: text turns speculate. Turns with images or audio speculate on
-  the server, and decode without it in `run` and `chat`.
+  the server. In `run` and `chat`, audio turns on a model with its own
+  speech encoder speculate too, and other media turns decode without it.
 - `--adapter`: the adapted model checks each draft, so the output matches
   plain decoding with the adapter.
 
@@ -86,6 +87,12 @@ draft: five drafts when it is sure, three when it is fairly sure, and one
 when it is not, with at most three after a round where the model rejected
 a draft. Code decodes up to a fifth faster this way than with a fixed
 three drafts, and prose about as fast.
+
+The native head of [Nemotron 3.5 Transcribe](nemotron-transcribe.md)
+drafts 7 tokens a round, where other Nemotron-H heads draft 2.
+`--draft-block-size` sets a smaller block, and `GMLX_NEM_MTP_BLOCK` sets
+the block of every Nemotron-H head, drafts plus one. Below 48 GB of
+memory, `gmlx pull` registers this model with `speculative: false`.
 
 A [quantized KV cache](kv-quantization.md#speed-and-speculative-decoding)
 lowers the share of accepted drafts, and 4 bits costs the most. With

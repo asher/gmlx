@@ -206,7 +206,7 @@ These flags enable the services in
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--stt [MODEL]` | Off | Serve speech-to-text at `POST /v1/audio/transcriptions`, with `whisper-turbo` when the flag is bare. |
+| `--stt [MODEL]` | Off | Serve speech-to-text at `POST /v1/audio/transcriptions`, with `whisper-turbo` when bare. MODEL can be a served model that hears audio. |
 | `--tts [MODEL]` | Off | Serve text-to-speech at `POST /v1/audio/speech`, with `kokoro` when the flag is bare. |
 | `--embeddings [MODEL]` | Off | Serve embeddings at `POST /v1/embeddings`, with `qwen3-embed-0.6b` when the flag is bare. |
 | `--rerank [MODEL]` | Off | Serve reranking at `POST /v1/rerank`, with `qwen3-rerank-0.6b` when the flag is bare. |
@@ -727,6 +727,7 @@ The recommended models:
 | `ornith-1.5-35b-a3b` | 35B-A3B | MIT | coding |
 | `k2-horizon-mova-36b-a4b` | 36B-A4B | Apache 2.0 | chat with a 512K context |
 | `ornith-1.5-122b` | 122B-A10B | MIT | coding |
+| `nemotron-3.5-transcribe` | 30B-A4B | OpenMDW-1.1 | transcription and speech |
 | `nemotron-3.5-super-vl` | 120B-A12B | NVIDIA Open Model License | long documents and images |
 | `qwen3.8-flash-next` | 177B | Qwen Community License | documents, code and tool calls |
 | `glm-5.3-flash` | 321B | MIT | coding and agents |

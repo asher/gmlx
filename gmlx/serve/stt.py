@@ -80,6 +80,75 @@ def import_mlx_whisper():
     return mlx_whisper
 
 
+NATIVE_PREFIX = "model:"
+
+
+def is_native(model) -> bool:
+    """True when ``model`` is a served chat model's ``model:<id>``."""
+    return str(model or "").startswith(NATIVE_PREFIX)
+
+
+def native_models(cfg) -> list[str]:
+    """The ids of the configured chat models that hear audio through their
+    own speech encoder."""
+    from gmlx.load.discovery import is_speech_encoder
+
+    from .bridge_vlm import _resolve_served
+
+    out = []
+    for mid in (getattr(cfg, "models", None) or {}):
+        try:
+            rm = _resolve_served(mid, cfg)
+        except Exception:  # noqa: BLE001  a skipped model hears nothing
+            continue
+        if is_speech_encoder(rm.mmproj):
+            out.append(mid)
+    return out
+
+
+def auto_native(cfg) -> str | None:
+    """``model:<id>`` for an unset ``server.stt``: the default model when it
+    hears audio, else the one configured model that does, else None."""
+    native = native_models(cfg)
+    default = getattr(getattr(cfg, "defaults", None), "model", None)
+    if default in native:
+        return NATIVE_PREFIX + default
+    return NATIVE_PREFIX + native[0] if len(native) == 1 else None
+
+
+def native_for(value, cfg) -> str | None:
+    """``model:<id>`` when ``value`` names a configured chat model (by id or
+    alias), else None. Raises ConfigError for a model that takes no audio."""
+    from gmlx.config import ConfigError
+
+    if cfg is None or not isinstance(value, str):
+        return None
+    v = value.strip()
+    v = v[len(NATIVE_PREFIX):] if v.startswith(NATIVE_PREFIX) else v
+    mid = (getattr(cfg, "aliases", None) or {}).get(v, v)
+    if mid not in (getattr(cfg, "models", None) or {}):
+        return None
+    if mid not in native_models(cfg):
+        raise ConfigError(
+            f"server.stt: model {v!r} takes no audio input. Name a model "
+            "with a speech encoder, a Whisper model or a speech companion "
+            "GGUF")
+    return NATIVE_PREFIX + mid
+
+
+def needs_whisper(value, cfg=None) -> bool:
+    """Whether a raw ``server.stt`` value runs on mlx-whisper (the ``stt``
+    extra): not when it is off, a served model or a speech companion."""
+    if not value or value is False:
+        return False
+    v = str(value).strip()
+    if is_native(v) or v.lower() == ALIAS_COMPANION or v.endswith(".gguf"):
+        return False
+    models = getattr(cfg, "models", None) or {}
+    aliases = getattr(cfg, "aliases", None) or {}
+    return v not in models and v not in aliases
+
+
 def is_companion(model: str | None) -> bool:
     """True when ``model`` is a speech companion GGUF."""
     if not model or not str(model).endswith(".gguf"):
@@ -94,6 +163,8 @@ def is_companion(model: str | None) -> bool:
 def check_backend(model: str) -> None:
     """Import what serving ``model`` needs, with install guidance when it
     is missing. A companion needs only the form parser."""
+    if is_native(model):
+        return                 # the form parser is a base dependency
     if not is_companion(model):
         import_mlx_whisper()
         return
@@ -150,6 +221,10 @@ def _load_stt_model(model_path: str) -> None:
 def prewarm(model_path: str) -> concurrent.futures.Future:
     """Background-load the configured Whisper model at server startup
     (best-effort; see :func:`subservice.prewarm`)."""
+    if is_native(model_path):
+        done: concurrent.futures.Future = concurrent.futures.Future()
+        done.set_result(None)      # a served model loads as chat models do
+        return done
     if is_companion(model_path):
         from . import asr_service
         return asr_service.prewarm(model_path)

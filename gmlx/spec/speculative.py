@@ -1666,6 +1666,7 @@ def stream_speculative(
     prefill_chunk: int = _PREFILL_CHUNK,
     thinking_hook=None,
     logits_processors=None,
+    prompt_rows=None,
 ) -> Iterator[int]:
     """Yield generated token ids one at a time.
 
@@ -1674,6 +1675,10 @@ def stream_speculative(
     ^T finish-thinking key (see _owned_decode_rounds). logits_processors are
     mlx-lm (tokens, logits) processors; as in mlx-lm's generate_step, their
     context is the last prompt token plus the generated tokens.
+    prompt_rows are the target's input rows for ``prompt`` when they are
+    not its token embeddings (audio): an array, or rows read as one
+    (``[:, :n]`` builds the next n, ``[:, n:]`` moves past them). The
+    drafter still seeds from the token ids.
     """
     lm = model.language_model if hasattr(model, "language_model") else model
     if not hasattr(lm, "rollback_speculative_cache"):
@@ -1736,8 +1741,12 @@ def stream_speculative(
         while i < body:
             take = min(prefill_chunk, body - i)
             last = (i + take >= n)
+            rows = {}
+            if prompt_rows is not None:
+                rows = {"inputs_embeds": prompt_rows[:, :take]}
+                prompt_rows = prompt_rows[:, take:]
             out = lm(prompt[:, i:i + take], cache=prompt_cache,
-                     return_hidden=True, return_shared_kv=last)
+                     return_hidden=True, return_shared_kv=last, **rows)
             ch = out.hidden_states[-1]
             streamed = False
             if seed_active and i + take < n:
@@ -1771,8 +1780,10 @@ def stream_speculative(
                         + ([c.state for c in seed_kv] if streamed else []))
                 mx.clear_cache()
         if split_last:
+            rows = ({} if prompt_rows is None
+                    else {"inputs_embeds": prompt_rows[:, :1]})
             out = lm(prompt[:, n - 1:], cache=prompt_cache,
-                     return_hidden=True, return_shared_kv=True)
+                     return_hidden=True, return_shared_kv=True, **rows)
             if keep_all_hiddens:
                 hiddens.append(out.hidden_states[-1])
                 if capture_limit:

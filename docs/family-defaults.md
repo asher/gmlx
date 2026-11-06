@@ -33,6 +33,7 @@ a model ends up with.
 | `minimax` | `minimax-m2` | temperature=1.0 top_p=0.95 top_k=40 | - |
 | `minimax-m3` | `minimax-m3` | temperature=1.0 top_p=0.95 top_k=40 thinking_start_token=&lt;mm:think&gt; thinking_end_token=&lt;/mm:think&gt; | - |
 | `nemotron` | `nemotron_h_moe` | temperature=1.0 top_p=0.95 | `@instruct`: enable_thinking=False; `@reasoning-medium`: medium_effort=True |
+| `nemotron-transcribe` | `nemotron_h_moe named (?i)nemotron-3\.5-transcribe` | temperature=0.6 top_p=0.95 top_k=0 thinking_budget=16384 | `@instruct`: temperature=0.0 top_p=1.0 enable_thinking=False |
 | `hunyuan` | `hunyuan-moe` | temperature=0.7 top_p=0.8 top_k=20 repetition_penalty=1.05 | - |
 | `hy3` | `hy_v3` | temperature=0.9 thinking_start_token=&lt;think:opensource&gt; thinking_end_token=&lt;/think:opensource&gt; | `@reasoning-high`: reasoning_effort=high; `@reasoning-low`: reasoning_effort=low |
 | `hy4` | `hyv4` | temperature=0.9 top_p=1.0 thinking_start_token=&lt;think:6124c78e&gt; thinking_end_token=&lt;/think:6124c78e&gt; | `@reasoning-high`: reasoning_effort=high; `@reasoning-low`: reasoning_effort=low |

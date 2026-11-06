@@ -1944,6 +1944,13 @@ def _run_vlm(args) -> int:
     if tbp is not None:
         extra["logits_processors"] = [tbp]
 
+    speech = speech_audio(args)
+    why = unfit_request(
+        model, getattr(processor, "tokenizer", processor), prompt,
+        speech[1] if speech else 0, args.max_tokens, step)
+    if why:
+        print(f"error: {why}.", file=sys.stderr)
+        return 1
     print(
         f"[generate] max_tokens={max_tokens_label(args)} temp={args.temp} "
         f"images={len(images)} audios={len(audios)}\n"
@@ -1957,7 +1964,7 @@ def _run_vlm(args) -> int:
             cast(Any, processor),
             prompt,
             image=images or None,
-            audio=audios or None,
+            audio=speech_clips(args) or audios or None,
             max_tokens=args.max_tokens,
             temperature=args.temp,
             verbose=True,
@@ -1994,7 +2001,11 @@ def _run_vlm_mtp(args) -> int:
         mx.random.seed(args.seed)
 
     logit_bias = parse_logit_bias(args.logit_bias)  # fail fast on a typo
-    print("[mtp] VLM loaded, text-only request -> MTP speculative decoding")
+    template_kwargs = fold_thinking_flag(
+        args, parse_template_config(args.chat_template_config))
+    clips = speech_clips(args)
+    print("[mtp] VLM loaded, " + ("speech" if clips else "text-only")
+          + " request -> MTP speculative decoding")
     dropped = mtp_dropped_run_flags(args)
     if dropped:
         print(
@@ -2005,7 +2016,7 @@ def _run_vlm_mtp(args) -> int:
     import gmlx.load.loadlog as loadlog
 
     with loadlog.load_ui(args.verbose, args.gguf):
-        model, drafter, _config, tok, _processor = load_vlm_mtp_model(
+        model, drafter, config, tok, processor = load_vlm_mtp_model(
             args.gguf,
             args.mmproj,
             arch=args.arch,
@@ -2018,15 +2029,37 @@ def _run_vlm_mtp(args) -> int:
         )
     _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
+    prompt, rows = args.prompt, None
+    if clips:
+        from typing import Any, cast
+
+        from gmlx._vendor.mlx_vlm.prompt_utils import apply_chat_template
+
+        speech = speech_audio(args)
+        from gmlx.spec.speculative import _PREFILL_CHUNK
+
+        why = unfit_request(model, tok, prompt, speech[1] if speech else 0,
+                            args.max_tokens, _PREFILL_CHUNK)
+        if why:
+            print(f"error: {why}.", file=sys.stderr)
+            return 1
+        if not args.no_chat_template:
+            messages = ([{"role": "system", "content": args.system_prompt}]
+                        if args.system_prompt else [])
+            messages.append({"role": "user", "content": prompt})
+            prompt = cast(str, apply_chat_template(
+                processor, config, messages, num_audios=len(clips),
+                **template_kwargs))
+        prompt, rows = speech_prompt(model, cast(Any, processor), prompt, clips)
     print(
-        f"[generate] VLM text-only MTP: max_tokens={max_tokens_label(args)} "
-        f"temp={args.temp}\n"
+        f"[generate] VLM {'speech' if clips else 'text-only'} MTP: "
+        f"max_tokens={max_tokens_label(args)} temp={args.temp}\n"
     )
     stats = generate_speculative(
         model,
         drafter,
         tok,
-        args.prompt,
+        prompt,
         max_tokens=args.max_tokens,
         temp=args.temp,
         top_p=args.top_p,
@@ -2039,10 +2072,9 @@ def _run_vlm_mtp(args) -> int:
         frequency_penalty=args.frequency_penalty,
         logit_bias=logit_bias,
         draft_block_size=args.draft_block_size,
-        apply_chat_template=not args.no_chat_template,
+        apply_chat_template=not args.no_chat_template and rows is None,
         system_prompt=args.system_prompt,
-        template_kwargs=fold_thinking_flag(
-            args, parse_template_config(args.chat_template_config)),
+        template_kwargs=template_kwargs,
         verbose=True,
         reasoning=args.reasoning,
         kv_bits=args.kv_bits,
@@ -2052,6 +2084,7 @@ def _run_vlm_mtp(args) -> int:
         thinking_budget=getattr(args, "thinking_budget", None),
         thinking_start_token=args.thinking_start_token,
         thinking_end_token=args.thinking_end_token,
+        prompt_rows=rows,
     )
     print(
         f"\n[mtp] {stats['tokens']} tok @ {stats['decode_tps']:.1f} tok/s "
@@ -2477,8 +2510,9 @@ def run_room_depth(args, *, mtp: bool = True) -> int | None:
     chat template allowance and the reply cap; or the deepest row of the
     bench that runs (--bench-depths, else --bench) and its decode tokens.
     None prices the serve context: an uncapped reply, an image or audio
-    input (their token counts are known only once the processor loads),
-    an unparsable bench list, or a run that loads an MTP drafter (with
+    input (their token counts are known only once the processor loads;
+    audio for a model's own speech encoder counts 80 ms a token), an
+    unparsable bench list, or a run that loads an MTP drafter (with
     ``mtp`` False, the depth of the run without one). None for a path
     that is no file, which the run then names."""
     path = os.path.expanduser(getattr(args, "gguf", None) or "")
@@ -2495,9 +2529,15 @@ def run_room_depth(args, *, mtp: bool = True) -> int | None:
             return None
         return deepest + (getattr(args, "bench_decode_tokens", None)
                           or _BENCH_DECODE[mode])
-    if any(_media_inputs(args)):
+    images, audios = _media_inputs(args)
+    speech = None if images or not audios else speech_audio(args)
+    if (images or audios) and speech is None:
         return None
     cap = getattr(args, "max_tokens", None)
+    if (not cap or cap <= 0) and speech and getattr(args, "_transcribes", False):
+        from gmlx.models.nemotron_h.transcription import output_budget
+
+        cap = output_budget(speech[0], speech[1])
     if not cap or cap <= 0:
         return None
     prompt_file = getattr(args, "prompt_file", "")
@@ -2510,7 +2550,7 @@ def run_room_depth(args, *, mtp: bool = True) -> int | None:
     text += len((getattr(args, "system_prompt", None) or "").encode())
     template = (0 if getattr(args, "no_chat_template", False)
                 else _TEMPLATE_TOKENS)
-    return text // 2 + template + cap
+    return text // 2 + template + cap + (speech[1] if speech else 0)
 
 
 def _media_inputs(args) -> tuple[list[str], list[str]]:
@@ -2519,6 +2559,146 @@ def _media_inputs(args) -> tuple[list[str], list[str]]:
              if s.strip()],
             [s for s in (getattr(args, "audio", None) or "").split(",")
              if s.strip()])
+
+
+def is_speech_encoder(path) -> bool:
+    """Whether ``path`` is a speech encoder GGUF that feeds a text model's
+    embeddings (Nemotron 3.5 Transcribe's)."""
+    from gmlx.load.discovery import is_speech_encoder as is_encoder
+
+    return is_encoder(path)
+
+
+def pair_speech_encoder(args, *, always: bool) -> None:
+    """Give a model that hears audio through its own speech encoder that
+    encoder as its mmproj, from the model's folder: on ``run`` when it
+    has --audio, in chat (``always``) for audio staged at any turn. An
+    explicit --mmproj or --no-mmproj wins. Raises ValueError for --asr on
+    such a model, and for --audio when no encoder is found."""
+    from gmlx.load.discovery import find_speech_encoder, header_meta
+
+    meta = header_meta(args.gguf)
+    if not meta or not meta.get("speech_checkpoint"):
+        return
+    if getattr(args, "asr", None):
+        raise ValueError(
+            "this model hears audio through its own speech encoder: pass "
+            "that GGUF as --mmproj, not --asr")
+    audios = _media_inputs(args)[1]
+    if (getattr(args, "mmproj", None) or getattr(args, "no_mmproj", False)
+            or not (always or audios)):
+        return
+    path = find_speech_encoder(args.gguf)
+    if path is None:
+        if audios:
+            raise ValueError(
+                "--audio needs this model's speech encoder GGUF, and none "
+                "is beside the model: pass it as --mmproj")
+        return
+    args.mmproj = path
+    print(f"[asr] speech encoder: {os.path.basename(path)}", file=sys.stderr)
+
+
+def speech_clips(args) -> list | None:
+    """A run's --audio clips as 16 kHz samples, read once, when its mmproj
+    is a speech encoder; else None (and None for a clip that does not
+    read, which the processor then names)."""
+    clips = _media_inputs(args)[1]
+    if not clips or not is_speech_encoder(getattr(args, "mmproj", None)):
+        return None
+    cached = getattr(args, "_speech_clips", None)
+    if cached is None:
+        from gmlx._vendor.mlx_vlm.utils import load_audio
+
+        try:
+            cached = [load_audio(os.path.expanduser(c), sr=16000)
+                      for c in clips]
+        except (OSError, ValueError, RuntimeError):
+            return None
+        args._speech_clips = cached
+    return cached
+
+
+def speech_prompt(model, processor, prompt: str, clips: list):
+    """``(token ids, prompt rows)`` of a rendered prompt and its speech
+    clips: the placeholders expanded, the rows built a chunk at a time
+    as the model's prefill reads them."""
+    from gmlx._vendor.mlx_vlm.utils import prepare_inputs
+
+    inputs = prepare_inputs(processor, audio=clips, prompts=prompt)
+    input_ids = inputs["input_ids"]
+    data = {k: v for k, v in inputs.items()
+            if k not in ("input_ids", "pixel_values", "attention_mask")}
+    rows = model.get_input_embeddings(input_ids, None, prompt_rows=True,
+                                      **data).inputs_embeds
+    return input_ids[0].tolist(), rows
+
+
+def speech_audio(args) -> tuple[float, int] | None:
+    """Seconds and audio tokens of a run's speech clips (``speech_clips``),
+    else None."""
+    clips = speech_clips(args)
+    if clips is None:
+        return None
+    from gmlx.models.nemotron_h.speech import num_audio_tokens
+
+    return (sum(len(c) for c in clips) / 16000,
+            sum(num_audio_tokens(len(c)) for c in clips))
+
+
+def unfit_request(model, tokenizer, prompt: str, audio_tokens: int,
+                  max_tokens, step) -> str | None:
+    """Why a run's prompt and output budget cannot fit this Mac at the
+    smallest prefill step (``prefill_decay.request_fit``), else None."""
+    from gmlx.gen.prefill_decay import request_fit
+
+    try:
+        tokens = len(tokenizer.encode(prompt)) + int(audio_tokens)
+    except Exception:
+        return None
+    gen = max(0, int(max_tokens or 0))
+    # Rows built a chunk at a time hold nothing between chunks.
+    rows = 0 if getattr(model, "builds_prompt_rows", False) else None
+    fit = request_fit(model, tokens, gen, int(audio_tokens), step,
+                      embedded_rows=rows)
+    if fit is None or fit[0] is not None:
+        return None
+    _, need, room = fit
+    return (f"this run needs an estimated {need / 1e9:.2f} GB beside the "
+            f"model weights for {tokens:,} prompt tokens and {gen:,} output "
+            f"tokens, and this Mac leaves {room / 1e9:.2f} GB under its "
+            "memory ceiling. Use a shorter prompt"
+            + (" or clip" if audio_tokens else "") + ", or a lower --max-tokens")
+
+
+def transcribes(args, parser, argv) -> bool:
+    """Whether a run transcribes its --audio: the mmproj is a speech
+    encoder and the user wrote no prompt."""
+    return (bool(_media_inputs(args)[1])
+            and is_speech_encoder(getattr(args, "mmproj", None))
+            and not _explicit_dests(parser, argv) & {"prompt", "prompt_file"})
+
+
+def apply_transcription_defaults(args, parser, argv) -> None:
+    """A run with --audio on a model with a speech encoder and no prompt
+    of its own transcribes: the model card's instruction, greedy decoding,
+    no thinking, and a token budget for the audio's length. A flag the
+    user passed keeps its value."""
+    if not transcribes(args, parser, argv):
+        return
+    from gmlx.models.nemotron_h import transcription
+
+    explicit = _explicit_dests(parser, argv)
+    args.prompt = transcription.transcription_instruction()
+    for dest, value in (("temp", 0.0), ("top_p", 1.0), ("thinking", "off")):
+        if dest not in explicit:
+            setattr(args, dest, value)
+    speech = speech_audio(args)
+    if "max_tokens" not in explicit and speech is not None:
+        args.max_tokens = transcription.output_budget(
+            speech[0], speech[1] + _TEMPLATE_TOKENS)
+    print("[asr] transcribing: the model card's instruction, greedy, no "
+          "thinking (--prompt to ask something else)", file=sys.stderr)
 
 
 def _audio_companion(args) -> str | None:
@@ -2567,12 +2747,16 @@ def _audio_prompt_ids(args, tok, companion: str, template_kwargs) -> list[int]:
 
 def _run_mode(args) -> str:
     """The path ``gmlx run`` dispatches to: ``vlm_mtp`` (a --mmproj load
-    with no image or audio when a drafter is available), ``vlm``,
+    with no image, and no audio unless a speech encoder hears it, when a
+    drafter is available), ``vlm``,
     ``bench_depths``, ``bench`` or ``generate``. ``gmlx chat`` without
     --mmproj is ``generate``."""
     if getattr(args, "mmproj", None):
         images, audios = _media_inputs(args)
-        if not images and not audios and _vlm_mtp_drafter_available(args):
+        # A speech encoder's clips become prompt rows the drafted path
+        # prefills too (speech_prompt).
+        hears = not audios or is_speech_encoder(args.mmproj)
+        if not images and hears and _vlm_mtp_drafter_available(args):
             return "vlm_mtp"
         return "vlm"
     if getattr(args, "bench_depths", ""):
@@ -2780,6 +2964,17 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     rc = maybe_load_from_config(args, parser, argv)
     if rc is not None:
         return rc
+    try:
+        pair_speech_encoder(args, always=False)
+        clips = speech_clips(args)
+        if clips is not None:
+            from gmlx.models.nemotron_h.transcription import check_clips
+
+            check_clips([len(c) for c in clips])
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    args._transcribes = transcribes(args, parser, argv)
     if not args.report_only:
         preload_wire_check(args, depth=run_room_depth(args),
                            depth_without_mtp=run_room_depth(args, mtp=False))
@@ -2879,6 +3074,7 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     rc = apply_family_defaults(args, parser, argv)
     if rc is not None:
         return rc
+    apply_transcription_defaults(args, parser, argv)
     # After the config/family overlays: either may have seeded a cap.
     resolve_max_tokens(args)
     from gmlx.load.arch_table import UnsupportedArchError

@@ -186,6 +186,54 @@ def test_media_requests_skip(tight):
     mp.preflight_prompt_memory(rg, "x" * 200_000, images=["img"])
 
 
+def _hearing(tokens_per_clip=10_000, encoder_bytes=0):
+    """DENSE with a model hook that prices its audio."""
+    calls = []
+
+    def audio_preflight(clips):
+        calls.append(clips)
+        return tokens_per_clip * len(clips), encoder_bytes
+    model = SimpleNamespace(config=DENSE.config, audio_preflight=audio_preflight)
+    rg = _rg(model)
+    rg.tokenizer = SimpleNamespace(encode=lambda text: [0] * len(text))
+    return rg, calls
+
+
+def test_audio_counts_on_a_model_that_prices_it(tight):
+    import numpy as np
+
+    rg, calls = _hearing(tokens_per_clip=30_000)       # 0.24 GB
+    mp.preflight_prompt_memory(rg, "x" * 100, audio=[np.zeros(4)])
+    assert calls and not rg._pre_calls
+    with pytest.raises(PromptTooLongError) as e:
+        mp.preflight_prompt_memory(rg, "x" * 100, audio=[np.zeros(4)] * 3)
+    assert "prompt_tokens=90100" in str(e.value) and "audio" in str(e.value)
+
+
+def test_audio_encoder_and_held_bytes_shrink_the_room(tight):
+    import numpy as np
+
+    rg, _ = _hearing(tokens_per_clip=30_000, encoder_bytes=int(0.3e9))
+    with pytest.raises(PromptTooLongError):
+        mp.preflight_prompt_memory(rg, "x", audio=[np.zeros(4)])
+    rg, _ = _hearing(tokens_per_clip=30_000)
+    with pytest.raises(PromptTooLongError):
+        mp.preflight_prompt_memory(rg, "x", audio=[np.zeros(4)],
+                                   held_bytes=int(0.3e9))
+
+
+def test_audio_skips_without_the_hook_or_before_decoding(tight):
+    import io
+
+    import numpy as np
+
+    rg = _rg(DENSE, tokens=100_000)
+    mp.preflight_prompt_memory(rg, "x" * 200_000, audio=[np.zeros(4)])
+    rg, calls = _hearing(tokens_per_clip=100_000)
+    mp.preflight_prompt_memory(rg, "x", audio=[io.BytesIO(b"wav")])
+    assert not calls
+
+
 def test_no_model_skips(tight):
     rg = _rg(None)
     mp.preflight_prompt_memory(rg, "x" * 200_000)

@@ -18,6 +18,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whose steps take about half as long as `h3`'s, on an M5 or newer.
 - The gmlx ComfyUI nodes run FastH3 on the noise levels it was trained at,
   through the new `fasth3-t2v` example workflow.
+- NVIDIA Nemotron 3.5 Transcribe hears audio through its speech encoder in
+  `gmlx run`, chat and `gmlx serve`, and answers `/v1/audio/transcriptions`
+  and `/v1/audio/translations` itself, with word times and speakers.
+  `gmlx pull nemotron-3.5-transcribe` downloads the model with its encoder.
 
 ### Changed
 
@@ -33,6 +37,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - In the Python API, `gmlx.image.lora.pair_hash` and `register_pair` take no
   alpha, and `register_patch` returns the pair's hash with its alpha: a patch
   table patch carries the alpha as `(adapter hash, strength, alpha)`.
+- Nemotron-H models prefill in less memory, and a request takes the largest
+  prefill step that fits beside the loaded models.
+- Speculative decoding verifies 2 to 8 drafted tokens at head dim 128 on a
+  fused kernel where MLX built the whole score matrix, so Nemotron-H and
+  other models with wide query groups draft faster at long context.
 
 ### Fixed
 
@@ -74,6 +83,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   twice, before its first step when the text encoder cannot fit beside them.
 - `gmlx serve` no longer stalls other requests to reload a chat model that
   another load unloaded just as a request for it started.
+- `/v1/responses` and `/v1/responses/input_tokens` answer a body that is not
+  a JSON object with a 400 and an invalid request with a 422, where they
+  returned a 500.
+- `gmlx serve` refuses audio sent to a model that cannot hear it with a 400
+  that says why, where it returned a 500.
+- The kvarn serve test no longer fails when it runs after another test that
+  installs the safe KV quantization.
+- `gmlx serve` frees a finished request's images and audio at once. It kept
+  the last request's inputs in memory until the next request arrived.
 
 ## [0.5.4] - 2026-10-29
 

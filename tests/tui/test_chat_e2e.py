@@ -818,6 +818,60 @@ def test_vlm_mtp_native_head_text_turns_use_mtp(monkeypatch, tmp_path):
     assert len(vstream.turns) == 0
 
 
+def _speech_model(monkeypatch, tmp_path, *, rebuilds=False):
+    """A speech model's chat: clips read as samples, and speech_prompt's
+    ids and rows stubbed. ``rebuilds``: a cache that cannot rewind, so
+    /undo rebuilds it."""
+    import numpy as np
+
+    monkeypatch.setattr(chat, "_speech_context", lambda args: 65_536)
+    monkeypatch.setattr(chat, "_speech_clips", lambda proc, held, new: (
+        list(held), [np.zeros(16_000, np.float32) for _ in new]))
+    monkeypatch.setattr(chat, "_speech_prompt_tokens", lambda *a: 50)
+    rows = []
+
+    def speech_prompt(model, processor, text, clips):
+        rows.append(("rows", len(clips)))
+        return [7] * 30, rows[-1]
+
+    monkeypatch.setattr("gmlx.commands.cli.speech_prompt", speech_prompt)
+    if rebuilds:
+        held = iter(range(0, 10_000, 100))
+        monkeypatch.setattr(chat, "_cache_tokens", lambda c: next(held))
+        monkeypatch.setattr(chat, "_trim_to", lambda *a, **k: False)
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"RIFF")
+    return clip, rows
+
+
+def test_a_speech_model_drafts_its_audio_turns_over_one_cache(monkeypatch, tmp_path):
+    clip, rows = _speech_model(monkeypatch, tmp_path)
+    rc, _s, vstream, sstream, msgs = _run_vlm_mtp_chat(
+        monkeypatch, tmp_path,
+        [f"/audio {clip}", "what is said?", "and then?", "/exit"], native=True)
+    assert rc == 0
+    assert len(vstream.turns) == 0
+    assert [t["kw"]["prompt_rows"] for t in sstream.turns] == [("rows", 1), None]
+    assert sstream.turns[0]["prompt"] == [7] * 30
+    assert sstream.turns[0]["cache_id"] == sstream.turns[1]["cache_id"]
+    # The turn is recorded with its clip, for a later re-prefill.
+    users = [m for m in msgs if m["role"] == "user"]
+    assert [u["n_audios"] for u in users] == [1, 0]
+
+
+def test_a_rebuilt_cache_sends_later_audio_turns_down_the_vlm_path(monkeypatch, tmp_path):
+    clip, _rows = _speech_model(monkeypatch, tmp_path, rebuilds=True)
+    rc, _s, vstream, sstream, _m = _run_vlm_mtp_chat(
+        monkeypatch, tmp_path,
+        [f"/audio {clip}", "what is said?", "and then?", "/undo",
+         f"/audio {clip}", "and this one?", "/exit"], native=True)
+    assert rc == 0
+    # The rebuilt cache lost the first clip: the next audio turn
+    # re-prefills the conversation with both clips.
+    assert len(sstream.turns) == 2
+    assert len(vstream.turns) == 1 and len(vstream.turns[0]["audio"]) == 2
+
+
 # ------------- Tier 1 - loop driver (multi-turn render, thinking) -------------
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"

@@ -1006,8 +1006,11 @@ class ServerCfg:
     # Optional speech-to-text model (POST /v1/audio/transcriptions; needs the
     # `stt` extra). An alias (`whisper-turbo`), an HF repo id in MLX-whisper
     # format, a local model dir, or `true` for the default alias - resolved by
-    # stt.resolve_stt_model at serve time.
-    stt: str | None = None
+    # stt.resolve_stt_model at serve time. A configured model with a speech
+    # encoder resolves to `model:<id>`. Unset picks such a model when the
+    # default model is one, or when exactly one is configured; `false` turns
+    # speech-to-text off.
+    stt: str | bool | None = None
     # Optional text-to-speech model (POST /v1/audio/speech; needs the `tts`
     # extra). An alias (`kokoro`), an HF repo id in MLX-audio format, a local
     # model dir, or `true` for the default alias - resolved by
@@ -3703,7 +3706,8 @@ def build_config(doc: dict) -> ServerCfg:
         max_models=_coerce_num("max_models", srv.get("max_models"), int),
         hf_cache=bool(srv.get("hf_cache", False)),
         cache=srv_cache,
-        stt=srv.get("stt") or None,   # raw; resolved (aliases etc.) at serve time
+        # raw; resolved (aliases etc.) at serve time. False stays False.
+        stt=False if srv.get("stt") is False else (srv.get("stt") or None),
         tts=srv.get("tts") or None,   # raw; resolved (aliases etc.) at serve time
         embeddings=srv.get("embeddings") or None,   # raw; resolved at serve time
         rerank=srv.get("rerank") or None,           # raw; resolved at serve time

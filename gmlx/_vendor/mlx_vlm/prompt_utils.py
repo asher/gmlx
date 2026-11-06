@@ -27,6 +27,8 @@ class MessageFormat(Enum):
     PROMPT_WITH_IMAGE_TOKEN = "prompt_with_image_token"
     PROMPT_WITH_START_IMAGE_TOKEN = "prompt_with_start_image_token"
     VIDEO_WITH_TEXT = "video_with_text"
+    # gmlx: the text, then one "<|audio|>" per clip, as one string.
+    AUDIO_LOCATORS_AFTER_TEXT = "audio_locators_after_text"
 
 
 # Model configuration mapping
@@ -128,6 +130,7 @@ MODEL_CONFIG = {
     "deepseek_v41_vl": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "muse_spark": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "nemotron_h_omni": MessageFormat.LIST_WITH_IMAGE_FIRST,
+    "nemotron_h_transcribe": MessageFormat.AUDIO_LOCATORS_AFTER_TEXT,
     "minimax_m3_vision": MessageFormat.LIST_WITH_IMAGE_FIRST,
 }
 
@@ -380,6 +383,7 @@ class MessageFormatter:
             MessageFormat.PROMPT_WITH_START_IMAGE_TOKEN: lambda *args, **kw: prompt
             + "<start_of_image>" * num_images,
             MessageFormat.VIDEO_WITH_TEXT: self._format_video_message,
+            MessageFormat.AUDIO_LOCATORS_AFTER_TEXT: self._format_audio_locators,
         }
 
         formatter = formatter_map.get(self.format_type)
@@ -499,6 +503,28 @@ class MessageFormatter:
             audio_prefix = "".join([f"<|audio_{i+1}|>" for i in range(num_audios)])
             content = f"{audio_prefix}{content}"
 
+        return {"role": role, "content": content}
+
+    def _format_audio_locators(
+        self,
+        prompt: str,
+        role: str,
+        skip_image_token: bool,
+        skip_audio_token: bool,
+        num_images: int,
+        num_audios: int,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """gmlx: Nemotron 3.5 Transcribe's trained user turn, the text and
+        then the clips' locators, each after one space. Its template
+        renders the content as a string."""
+        if role == "user" and not skip_image_token and num_images > 0:
+            raise ValueError(f"{self.model_name} takes no image input")
+        content = prompt
+        if role == "user" and not skip_audio_token and num_audios > 0:
+            locators = " ".join(["<|audio|>"] * num_audios)
+            text = prompt.strip()
+            content = f"{text} {locators}" if text else locators
         return {"role": role, "content": content}
 
     def _format_numbered_tokens(
@@ -956,6 +982,7 @@ def apply_chat_template(
         # last user message for backward compatibility.
         last_user_idx = -1
         explicit_image_counts = [0] * len(prompt)
+        explicit_audio_counts = [0] * len(prompt)
         for i, p in enumerate(prompt):
             if isinstance(p, str):
                 last_user_idx = i
@@ -965,6 +992,9 @@ def apply_chat_template(
                     last_user_idx = i
                     explicit_image_counts[i] = _content_media_count(
                         content, ("image", "image_url", "input_image")
+                    )
+                    explicit_audio_counts[i] = _content_media_count(
+                        content, ("audio", "input_audio")
                     )
 
         def _allocate_media_counts(explicit_counts, total_count):
@@ -979,9 +1009,7 @@ def apply_chat_template(
             return allocated
 
         image_counts = _allocate_media_counts(explicit_image_counts, num_images)
-        audio_counts = [0] * len(prompt)
-        if last_user_idx >= 0:
-            audio_counts[last_user_idx] = num_audios
+        audio_counts = _allocate_media_counts(explicit_audio_counts, num_audios)
 
         for i, p in enumerate(prompt):
             if isinstance(p, str):

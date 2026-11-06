@@ -67,6 +67,15 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
     # (Qwen3-VL / Qwen3-Omni) put it under ``clip.vision.projector_type``.
     # DeepSeek-V4.1-Flash-Vision ships its own arch rather than clip.* keys:
     # raw HF tensor names, fused wqkv and w1, and no image_pad.
+    if mm_meta.get("general.architecture") == NEMOTRON_SPEECH_ARCH:
+        # NVIDIA Nemotron 3.5 Transcribe: the speech encoder NeMo-Speech.cpp
+        # writes beside the nemotron_h decoder
+        # (gmlx.models.nemotron_h.transcribe_model).
+        if llm_arch != "nemotron_h_moe":
+            raise UnsupportedVLMError(
+                f"speech encoder arch 'pee' on LLM arch {llm_arch!r} is not "
+                "supported (only Nemotron-H text GGUFs, arch 'nemotron_h_moe')")
+        return "nemotron_h_transcribe"
     if mm_meta.get("general.architecture") == "deepseek4-vision":
         if llm_arch != "deepseek41":
             raise UnsupportedVLMError(
@@ -224,7 +233,26 @@ def check_mmproj_width(llm_meta: dict, llm_arch: str, mm_meta: dict) -> None:
     Only llama.cpp's mmproj converter (``general.type == "mmproj"``)
     writes the text width as ``projection_dim``; the older LLaVA
     converter writes CLIP's own width there. A file without the key
-    (``deepseek4-vision``) is not checked."""
+    (``deepseek4-vision``) is not checked.
+
+    A Nemotron speech encoder (``pee``) checks its projection width, and
+    the NeMo checkpoint id when both files carry one."""
+    if mm_meta.get("general.architecture") == NEMOTRON_SPEECH_ARCH:
+        want = llm_meta.get("nemo_speech.checkpoint_id")
+        have = mm_meta.get("nemo_speech.checkpoint_id")
+        if want and have and want != have:
+            raise UnsupportedVLMError(
+                f"the speech encoder is from NeMo checkpoint {have}, but the "
+                f"text model is from {want}: this encoder belongs to a "
+                "different model")
+        width = llm_meta.get(f"{llm_arch}.embedding_length")
+        proj = mm_meta.get("pee.fusion.proj_dim")
+        if width is not None and proj is not None and int(proj) != int(width):
+            raise UnsupportedVLMError(
+                f"the speech encoder outputs width {int(proj)}, but the text "
+                f"model is {int(width)} wide: this encoder belongs to a "
+                "different model")
+        return
     if mm_meta.get("general.type") != "mmproj":
         return
     width = llm_meta.get(f"{llm_arch}.embedding_length")
@@ -1409,6 +1437,14 @@ def _remap_float_arrays(
             out[hf] = arr
         return out, skipped
 
+    if model_type == "nemotron_h_transcribe":
+        from gmlx.models.nemotron_h.speech import remap_tensor
+
+        for name, arr in arrays.items():
+            path, arr = remap_tensor(name, arr)
+            out[f"audio_tower.{path}"] = arr
+        return out, skipped
+
     if model_type == "nemotron_h_omni":
         for name, arr in arrays.items():
             if name.endswith(".scales") or name.endswith(".biases"):
@@ -2076,6 +2112,9 @@ def _synthesize_muse_glimmer_vlm_config(
 # constant (hparams.audio_sample_rate), not GGUF metadata.
 MUSE_SPARK_AUDIO_RATE = 24000
 
+# Nemotron 3.5 Transcribe's speech encoder GGUF arch.
+NEMOTRON_SPEECH_ARCH = "pee"
+
 
 def _synthesize_muse_spark_audio_config(mm_meta: dict,
                                         mm_shapes: dict | None) -> dict:
@@ -2309,6 +2348,33 @@ def _synthesize_minicpmv_vlm_config(
     if video is not None:
         config["video_token_id"] = video
     return config
+
+
+def _synthesize_nemotron_transcribe_vlm_config(
+    text_config: dict, mm_meta: dict, llm_meta: dict,
+) -> dict:
+    """Nemotron 3.5 Transcribe config: the nemotron_h text synth plus the
+    speech encoder's ``pee.*`` and ``ctc.*`` header fields, which build
+    :class:`gmlx.models.nemotron_h.speech.SpeechConfig`."""
+    from gmlx.models.nemotron_h.transcribe_model import (
+        AUDIO_PLACEHOLDER,
+        CTC_TOKENIZER,
+    )
+
+    fields = {k: v for k, v in mm_meta.items()
+              if k.startswith(("pee.", "ctc."))
+              and (isinstance(v, (bool, int, float)) or k == CTC_TOKENIZER)}
+    audio_id = _gguf_token_id(llm_meta, AUDIO_PLACEHOLDER)
+    if audio_id is None:
+        raise UnsupportedVLMError(
+            f"the text model's vocab has no {AUDIO_PLACEHOLDER} token")
+    return {
+        "model_type": "nemotron_h_transcribe",
+        "text_config": text_config,
+        "audio_config": {"fields": fields},
+        "vocab_size": int(text_config.get("vocab_size", 131072)),
+        "audio_token_id": audio_id,
+    }
 
 
 def _synthesize_nemotron_omni_vlm_config(
@@ -2655,6 +2721,10 @@ def synthesize_vlm_config(
         return _synthesize_nemotron_omni_vlm_config(
             text_config, mm_meta, llm_meta, mm_shapes)
 
+    if model_type == "nemotron_h_transcribe":
+        return _synthesize_nemotron_transcribe_vlm_config(
+            text_config, mm_meta, llm_meta)
+
     if model_type == MINIMAX_M3_VISION:
         return _synthesize_minimax_m3_vlm_config(
             text_config, mm_meta, llm_meta, mm_shapes)
@@ -2974,6 +3044,8 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
         return _synthesize_minicpmv_processor(tokenizer, mm_meta)
     if model_type == "nemotron_h_omni":
         return _synthesize_nemotron_omni_processor(tokenizer, mm_meta)
+    if model_type == "nemotron_h_transcribe":
+        return _synthesize_nemotron_transcribe_processor(tokenizer)
     if model_type == MINIMAX_M3_VISION:
         return _synthesize_minimax_m3_processor(tokenizer, mm_meta)
     if model_type == "deepseek_v4_vl":
@@ -4316,6 +4388,153 @@ def _synthesize_nemotron_omni_processor(tokenizer, mm_meta: dict):
     return _attach_streaming_helpers(processor, tokenizer)
 
 
+class _NemotronTranscribeFeatureExtractor:
+    """Nemotron 3.5 Transcribe audio preprocessing: each 16 kHz clip's raw
+    log-mel spectrogram (:func:`gmlx.models.nemotron_h.speech.features`),
+    padded to the longest, and a mask of its valid frames. The filterbank
+    comes from the loaded encoder (``bind_model``)."""
+
+    model_input_names = ["input_features", "input_features_mask"]
+    sampling_rate = 16000
+
+    def __init__(self):
+        self.mel_filters = None
+
+    @staticmethod
+    def tokens(n_samples: int) -> int:
+        from gmlx.models.nemotron_h.speech import num_audio_tokens
+
+        return num_audio_tokens(int(n_samples))
+
+    def check(self, clips) -> None:
+        """Refuse more clips, or more audio, than the model is trained on."""
+        from gmlx.models.nemotron_h.transcription import check_clips
+
+        check_clips([len(c) for c in clips], self.sampling_rate)
+
+    def __call__(self, clips) -> dict:
+        import numpy as np
+
+        from gmlx.models.nemotron_h.speech import features, num_frames
+
+        if self.mel_filters is None:
+            raise RuntimeError("the audio processor has no mel filterbank: "
+                               "bind it to the loaded model first")
+        waves = [np.asarray(c, dtype=np.float32).reshape(-1) for c in clips]
+        self.check(waves)
+        feats = [features(w, self.mel_filters) for w in waves]
+        width = max((f.shape[0] for f in feats), default=0)
+        n_mels = self.mel_filters.shape[0]
+        out = np.zeros((len(feats), width, n_mels), np.float32)
+        mask = np.zeros((len(feats), width), bool)
+        for i, (w, f) in enumerate(zip(waves, feats)):
+            out[i, : f.shape[0]] = f
+            mask[i, : num_frames(w.size)] = True
+        return {"input_features": out, "input_features_mask": mask}
+
+
+def _synthesize_nemotron_transcribe_processor(tokenizer):
+    """Build the Nemotron 3.5 Transcribe processor from the GGUFs alone.
+
+    The prompt writes one ``<|audio|>`` per clip. The processor turns each
+    into one ``<SPECIAL_19>`` per audio token of its clip (80 ms), the
+    rows the encoder output replaces. The model takes no images."""
+    from transformers.feature_extraction_utils import BatchFeature
+    from transformers.processing_utils import ProcessorMixin
+
+    from gmlx._vendor.mlx_vlm.models.base import to_mlx
+    from gmlx.models.nemotron_h.transcribe_model import (
+        AUDIO_PLACEHOLDER,
+        EncodedClip,
+    )
+
+    from gmlx.upstream.single_bos_fix import KWARGS_REACH_TOKENIZER
+
+    class NemotronTranscribeProcessor(ProcessorMixin):
+        attributes = ["tokenizer"]
+        tokenizer_class = "AutoTokenizer"
+
+        audio_token = "<|audio|>"
+        supports_multiple_audio = True
+
+        def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
+                self, images=None, text=None, audio=None, **kwargs):
+            if images is not None and len(images) > 0:
+                raise ValueError("Nemotron 3.5 Transcribe takes no image input")
+            for key in ("videos", "images"):
+                kwargs.pop(key, None)
+            if text is None:
+                raise ValueError("You must provide text.")
+            if isinstance(text, str):
+                text = [text]
+            clips = [] if audio is None else (
+                list(audio) if isinstance(audio, (list, tuple)) else [audio])
+            # The server hands over clips the encoder has read already.
+            encoded = [c for c in clips if isinstance(c, EncodedClip)]
+            if encoded and len(encoded) != len(clips):
+                raise ValueError("a prompt's clips are all encoded or none")
+            fe = self.feature_extractor
+            text = self._expand(text, [fe.tokens(len(c)) for c in clips])
+            kwargs.pop("return_tensors", None)
+            data = dict(self.tokenizer(text, **kwargs))
+            if encoded:
+                fe.check(encoded)
+            elif clips:
+                data.update(fe(clips))
+            out = BatchFeature(data=to_mlx(data))
+            if encoded:
+                # Lists, after the conversion: prepare_inputs passes a list
+                # through and makes an array of anything else.
+                out["audio_clips"] = list(encoded)
+                out["audio_digests"] = [c.digest for c in encoded]
+            return out
+
+        def _expand(self, texts, counts):
+            """Replace each ``<|audio|>`` with its clip's placeholder run,
+            clips consumed in order across the batch."""
+            markers = sum(t.count(self.audio_token) for t in texts)
+            if markers != len(counts):
+                raise ValueError(
+                    f"the prompt has {markers} {self.audio_token} markers for "
+                    f"{len(counts)} audio clips")
+            out, index = [], 0
+            for sample in texts:
+                parts = sample.split(self.audio_token)
+                rebuilt = parts[0]
+                for part in parts[1:]:
+                    rebuilt += AUDIO_PLACEHOLDER * counts[index] + part
+                    index += 1
+                out.append(rebuilt)
+            return out
+
+        def bind_model(self, model) -> None:
+            """Take the mel filterbank of the loaded encoder."""
+            import numpy as np
+
+            self.feature_extractor.mel_filters = np.array(
+                model.audio_tower.mel_filters.astype(mx.float32))
+
+        def batch_decode(self, *args, **kwargs):
+            return self.tokenizer.batch_decode(*args, **kwargs)
+
+        def decode(self, *args, **kwargs):
+            return self.tokenizer.decode(*args, **kwargs)
+
+        @property
+        def model_input_names(self):
+            return list(dict.fromkeys(
+                list(self.tokenizer.model_input_names)
+                + self.feature_extractor.model_input_names))
+
+    # __call__ hands **kwargs to self.tokenizer (single_bos_fix).
+    setattr(NemotronTranscribeProcessor, KWARGS_REACH_TOKENIZER, True)
+    processor = NemotronTranscribeProcessor(
+        tokenizer=tokenizer,
+        chat_template=getattr(tokenizer, "chat_template", None))
+    processor.feature_extractor = _NemotronTranscribeFeatureExtractor()
+    return _attach_streaming_helpers(processor, tokenizer)
+
+
 class _DeepseekV4VGgufImageProcessor(ImageProcessingMixin):
     """Torch-free DeepSeek-V4-Flash-Vision-Exp image preprocessing (numpy +
     PIL only), a port of the checkpoint's ``inference/image_processor.py``
@@ -4978,10 +5197,17 @@ def load_vlm_model(
         processor = _synthesize_vlm_processor(
             model_type, tokenizer, mm_meta, config=config)
         mtp_tokenizer = tokenizer
+        # A processor that reads arrays of the loaded model takes them here.
+        bind = getattr(processor, "bind_model", None)
+        if callable(bind):
+            bind(model)
         _log("[vlm] processor: synthesized from GGUF (no download)")
     from gmlx.upstream.system_content_fix import enable_system_content_fix
     enable_system_content_fix(processor, model_type)
     collect_after_load()
+    from gmlx.gen.prefill_decay import note_resident_model
+
+    note_resident_model(model)
     if return_tokenizer:
         return model, config, processor, mtp_tokenizer
     return model, config, processor

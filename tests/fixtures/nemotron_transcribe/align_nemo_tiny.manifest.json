@@ -1,0 +1,2165 @@
+{
+ "schema": 1,
+ "name": "align_nemo_tiny",
+ "check": "alignment",
+ "family": "nemotron-transcribe",
+ "script": "ref_align.py",
+ "argv": [
+  "ref_align.py",
+  "--nemo",
+  "ctc_timestamp_utils.py",
+  "--out",
+  "nemotron_transcribe"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.15.0"
+   },
+   "torchaudio": {
+    "version": "2.11.1"
+   },
+   "transformers": {
+    "version": "5.23.0.dev0",
+    "source": "9b283429f9bf5c680bec437ab888c435dd2fef8b"
+   },
+   "tokenizers": {
+    "version": "0.23.3"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "sentencepiece": {
+    "version": "0.2.2"
+   },
+   "librosa": {
+    "version": "1.0.0"
+   },
+   "scipy": {
+    "version": "1.18.1"
+   },
+   "numpy": {
+    "version": "2.5.4"
+   }
+  },
+  "hf_hub_offline": "1",
+  "transformers_rev": "9b283429f9bf5c680bec437ab888c435dd2fef8b"
+ },
+ "files": {
+  "nemo_ctc_timestamp_utils": {
+   "name": "ctc_timestamp_utils.py",
+   "size": 157294,
+   "sha256": "d2efc58adf61dfec81e1ac02144a7f922452390d7d6e5c64fb7eb71331dca6df"
+  }
+ },
+ "inputs": {
+  "seed": 29,
+  "parameters": {
+   "speaker_logprob_weight": 0.6057,
+   "speaker_activity_threshold": 0.1881,
+   "support_activity_threshold": 0.0225,
+   "vad_threshold": 0.4641,
+   "band_ratio": 0.0484,
+   "maximum_token_len": 1.0364,
+   "refinement_end_blend": 0.7382,
+   "boundary_outside_word_duration_seconds": 0.1747,
+   "onset_snap_seconds": 0.08,
+   "boundary_max_correction_seconds": 0.04,
+   "boundary_min_onset_spacing_seconds": 0.01,
+   "boundary_min_word_duration_seconds": 0.005,
+   "band_min_states": 50,
+   "max_word_frames": 19,
+   "band_full_below_frames": 0,
+   "boundary_profile_radius_frames": 4,
+   "boundary_profile_points": 33,
+   "boundary_logprob_floor": -20.0,
+   "boundary_logprob_ceiling": 0.0,
+   "boundary_grid_seconds": 0.01,
+   "boundary_interpolation": {
+    "coefficients": [
+     [
+      -0.0002166376730768876,
+      0.0011034308334353859,
+      -0.0023364347654229443,
+      0.0004432468739614406,
+      -0.0006112624259137253,
+      0.0009186590141194121,
+      0.0008936531449761716,
+      -0.00032564959098740524,
+      0.0009534467373316291,
+      -0.0006841331962980549,
+      0.0002364067745016569,
+      -7.613400442991535e-05,
+      -0.00037485682802432463,
+      0.0010040103810179503,
+      -0.0003161025648419653,
+      0.0006077597635300055,
+      -0.0010064009281295807,
+      -0.0009313666476320707,
+      -0.0001362872039203774,
+      0.0002812433651844184,
+      6.10944274587241e-05,
+      0.0004609156208085293,
+      0.00010091507507042862,
+      -0.0001028959125451627
+     ],
+     [
+      0.003366517585792393,
+      -0.0038862878823709107,
+      -0.004189308829413212,
+      0.0025464040055689016,
+      -0.0010541458667035343,
+      0.0010038389587020283,
+      0.0009109164073724175,
+      -0.0015966388571699583,
+      0.0007440020382137693,
+      -0.0002527302196180498,
+      0.0002965690615668117,
+      0.0014428291779151339,
+      -0.0007785076678433898,
+      0.0004340954622391335,
+      1.0325823582757346e-05,
+      -0.00044058912087083815,
+      -0.00011999138369963432,
+      -0.0013171473151848026,
+      0.00022320090572465454,
+      -0.00032724805493375766,
+      -0.0002112379836947067,
+      0.000306075565007786,
+      3.6466920221606976e-05,
+      0.00036613335041990705
+     ]
+    ],
+    "offset": [
+     0.02618952076580825,
+     0.12891473673580162
+    ]
+   },
+   "interpolation_enabled": true
+  },
+  "plain": {
+   "transcript": "tuesday and stone small as big letter by <ev:laughter> river is quarter a",
+   "duration": 6.0
+  },
+  "two": {
+   "transcript": "<spk:0> red mat and ran garden a the at is twelve <spk:1> is garden thousand open is meeting closed garden ran <spk:0> on to budget seven red new <spk:1> a red friday green tuesday ran cat",
+   "duration": 16.8
+  },
+  "long": {
+   "transcript": "<spk:0> new ran from window seven answer open from market the market big as <spk:1> from closed ran red river open answer lazy an <spk:0> lazy to friday letter as an red and an morning twelve <spk:1> it the letter as at green tuesday thousand schedule question quick answer window closed <spk:0> hat for morning for thousand an question small to green sat with of review <spk:1> friday an closed by schedule seven green lazy this thousand new hat <spk:0> in of with this eleven big open was <spk:1> open number of and that garden seven at for a it review at market in <spk:0> lazy river new cat letter is tuesday meeting market open river big number hundred this <spk:1> dog and answer closed sat garden mat river ran hat big sat cat mat tuesday <spk:0> quick open new committee was a market in old thousand thousand was <spk:1> evening it to a evening closed and budget green <spk:0> old as at of at friday new budget committee number that quick river letter in <spk:1> as quick open question budget on this lazy quick question twelve it committee that <spk:0> an mat thousand is at at green tuesday answer hat and hundred <spk:1> window morning garden answer sat lazy red a",
+   "duration": 74.88
+  },
+  "unmatched": {
+   "transcript": "<spk:0> friday new meeting open on lazy friday to <spk:1> letter small letter big morning evening at market <spk:2> to market thousand garden closed from",
+   "duration": 14.4
+  },
+  "cjk": {
+   "transcript": "\u4eca\u5929\u5929\u6c14 \u5f88\u597d\u6211\u4eec\u53bb \u516c\u56ed\u6563\u6b65",
+   "duration": 4.8
+  },
+  "too_long": {
+   "transcript": "on dog letter cat stone by closed river sat quarter answer quick committee from meeting letter meeting lazy review the",
+   "duration": 0.48
+  }
+ },
+ "results": {
+  "plain": {
+   "words": [
+    {
+     "word": "tuesday",
+     "speaker": 0,
+     "start": 0.33,
+     "end": 0.53
+    },
+    {
+     "word": "and",
+     "speaker": 0,
+     "start": 0.54,
+     "end": 0.73
+    },
+    {
+     "word": "stone",
+     "speaker": 0,
+     "start": 0.98,
+     "end": 1.17
+    },
+    {
+     "word": "small",
+     "speaker": 0,
+     "start": 1.85,
+     "end": 2.05
+    },
+    {
+     "word": "as",
+     "speaker": 0,
+     "start": 2.98,
+     "end": 3.17
+    },
+    {
+     "word": "big",
+     "speaker": 0,
+     "start": 3.17,
+     "end": 3.37
+    },
+    {
+     "word": "letter",
+     "speaker": 0,
+     "start": 3.41,
+     "end": 3.61
+    },
+    {
+     "word": "by",
+     "speaker": 0,
+     "start": 3.62,
+     "end": 3.81
+    },
+    {
+     "word": "<ev:laughter>",
+     "speaker": 0,
+     "start": 4.0600000000000005,
+     "end": 4.25
+    },
+    {
+     "word": "river",
+     "speaker": 0,
+     "start": 4.5,
+     "end": 4.69
+    },
+    {
+     "word": "is",
+     "speaker": 0,
+     "start": 4.73,
+     "end": 4.93
+    },
+    {
+     "word": "quarter",
+     "speaker": 0,
+     "start": 5.18,
+     "end": 5.37
+    },
+    {
+     "word": "a",
+     "speaker": 0,
+     "start": 5.38,
+     "end": 5.57
+    }
+   ],
+   "diarization": [],
+   "mapping": {
+    "0": null
+   },
+   "failed": [],
+   "banded": [
+    {
+     "speaker": 0,
+     "retained_frames": 150,
+     "states": 49,
+     "half_width": 49
+    }
+   ]
+  },
+  "two": {
+   "words": [
+    {
+     "word": "red",
+     "speaker": 0,
+     "start": 0.34,
+     "end": 0.5728759999999999
+    },
+    {
+     "word": "mat",
+     "speaker": 0,
+     "start": 0.62,
+     "end": 1.165494
+    },
+    {
+     "word": "and",
+     "speaker": 0,
+     "start": 1.21,
+     "end": 1.755022
+    },
+    {
+     "word": "ran",
+     "speaker": 0,
+     "start": 1.81,
+     "end": 2.06455
+    },
+    {
+     "word": "garden",
+     "speaker": 0,
+     "start": 2.13,
+     "end": 2.362404
+    },
+    {
+     "word": "a",
+     "speaker": 0,
+     "start": 2.42,
+     "end": 2.675022
+    },
+    {
+     "word": "the",
+     "speaker": 0,
+     "start": 2.73,
+     "end": 3.26455
+    },
+    {
+     "word": "at",
+     "speaker": 0,
+     "start": 3.33,
+     "end": 3.882404
+    },
+    {
+     "word": "is",
+     "speaker": 0,
+     "start": 3.94,
+     "end": 4.475022
+    },
+    {
+     "word": "twelve",
+     "speaker": 0,
+     "start": 4.53,
+     "end": 4.806696
+    },
+    {
+     "word": "is",
+     "speaker": 1,
+     "start": 5.41,
+     "end": 6.1709879999999995
+    },
+    {
+     "word": "garden",
+     "speaker": 1,
+     "start": 6.26,
+     "end": 6.610988
+    },
+    {
+     "word": "thousand",
+     "speaker": 1,
+     "start": 6.7,
+     "end": 7.02146
+    },
+    {
+     "word": "open",
+     "speaker": 1,
+     "start": 7.1000000000000005,
+     "end": 7.42146
+    },
+    {
+     "word": "is",
+     "speaker": 1,
+     "start": 7.5,
+     "end": 8.250988
+    },
+    {
+     "word": "meeting",
+     "speaker": 1,
+     "start": 8.34,
+     "end": 8.683606
+    },
+    {
+     "word": "closed",
+     "speaker": 1,
+     "start": 8.77,
+     "end": 9.083606
+    },
+    {
+     "word": "garden",
+     "speaker": 1,
+     "start": 9.17,
+     "end": 9.520516
+    },
+    {
+     "word": "ran",
+     "speaker": 1,
+     "start": 9.620000000000001,
+     "end": 9.97528
+    },
+    {
+     "word": "on",
+     "speaker": 0,
+     "start": 10.61,
+     "end": 10.99382
+    },
+    {
+     "word": "to",
+     "speaker": 0,
+     "start": 11.02,
+     "end": 11.391202
+    },
+    {
+     "word": "budget",
+     "speaker": 0,
+     "start": 11.42,
+     "end": 12.375966
+    },
+    {
+     "word": "seven",
+     "speaker": 0,
+     "start": 12.41,
+     "end": 12.786438
+    },
+    {
+     "word": "red",
+     "speaker": 0,
+     "start": 12.81,
+     "end": 12.983348
+    },
+    {
+     "word": "new",
+     "speaker": 0,
+     "start": 13.02,
+     "end": 13.227640000000001
+    },
+    {
+     "word": "a",
+     "speaker": 1,
+     "start": 13.72,
+     "end": 13.962404
+    },
+    {
+     "word": "red",
+     "speaker": 1,
+     "start": 14.02,
+     "end": 14.252876
+    },
+    {
+     "word": "friday",
+     "speaker": 1,
+     "start": 14.3,
+     "end": 14.492876
+    },
+    {
+     "word": "green",
+     "speaker": 1,
+     "start": 14.540000000000001,
+     "end": 15.565494000000001
+    },
+    {
+     "word": "tuesday",
+     "speaker": 1,
+     "start": 15.610000000000001,
+     "end": 15.835022
+    },
+    {
+     "word": "ran",
+     "speaker": 1,
+     "start": 15.89,
+     "end": 16.100258
+    },
+    {
+     "word": "cat",
+     "speaker": 1,
+     "start": 16.15,
+     "end": 16.417168
+    }
+   ],
+   "diarization": [
+    {
+     "speaker": 1,
+     "start": 0.12,
+     "end": 4.88
+    },
+    {
+     "speaker": 3,
+     "start": 5.16,
+     "end": 10.08
+    },
+    {
+     "speaker": 1,
+     "start": 10.44,
+     "end": 13.280000000000001
+    },
+    {
+     "speaker": 3,
+     "start": 13.56,
+     "end": 16.48
+    }
+   ],
+   "mapping": {
+    "0": 1,
+    "1": 3
+   },
+   "failed": [],
+   "banded": [
+    {
+     "speaker": 0,
+     "retained_frames": 285,
+     "states": 57,
+     "half_width": 53
+    },
+    {
+     "speaker": 1,
+     "retained_frames": 282,
+     "states": 43,
+     "half_width": 43
+    }
+   ]
+  },
+  "long": {
+   "words": [
+    {
+     "word": "new",
+     "speaker": 0,
+     "start": 0.38,
+     "end": 0.575966
+    },
+    {
+     "word": "ran",
+     "speaker": 0,
+     "start": 0.61,
+     "end": 0.835022
+    },
+    {
+     "word": "from",
+     "speaker": 0,
+     "start": 0.89,
+     "end": 1.0854940000000002
+    },
+    {
+     "word": "window",
+     "speaker": 0,
+     "start": 1.1300000000000001,
+     "end": 1.3328760000000002
+    },
+    {
+     "word": "seven",
+     "speaker": 0,
+     "start": 1.3800000000000001,
+     "end": 1.845494
+    },
+    {
+     "word": "answer",
+     "speaker": 0,
+     "start": 1.8900000000000001,
+     "end": 2.8381119999999997
+    },
+    {
+     "word": "open",
+     "speaker": 0,
+     "start": 2.88,
+     "end": 3.1150219999999997
+    },
+    {
+     "word": "from",
+     "speaker": 0,
+     "start": 3.17,
+     "end": 3.383348
+    },
+    {
+     "word": "market",
+     "speaker": 0,
+     "start": 3.42,
+     "end": 3.615966
+    },
+    {
+     "word": "the",
+     "speaker": 0,
+     "start": 3.65,
+     "end": 4.125494
+    },
+    {
+     "word": "market",
+     "speaker": 0,
+     "start": 4.17,
+     "end": 4.365494
+    },
+    {
+     "word": "big",
+     "speaker": 0,
+     "start": 4.41,
+     "end": 4.642404
+    },
+    {
+     "word": "as",
+     "speaker": 0,
+     "start": 4.7,
+     "end": 4.94764
+    },
+    {
+     "word": "from",
+     "speaker": 1,
+     "start": 5.53,
+     "end": 5.769786
+    },
+    {
+     "word": "closed",
+     "speaker": 1,
+     "start": 5.83,
+     "end": 6.015966
+    },
+    {
+     "word": "ran",
+     "speaker": 1,
+     "start": 6.05,
+     "end": 6.275022
+    },
+    {
+     "word": "red",
+     "speaker": 1,
+     "start": 6.33,
+     "end": 6.532876
+    },
+    {
+     "word": "river",
+     "speaker": 1,
+     "start": 6.58,
+     "end": 6.795022
+    },
+    {
+     "word": "open",
+     "speaker": 1,
+     "start": 6.8500000000000005,
+     "end": 7.045494
+    },
+    {
+     "word": "answer",
+     "speaker": 1,
+     "start": 7.09,
+     "end": 8.103348
+    },
+    {
+     "word": "lazy",
+     "speaker": 1,
+     "start": 8.14,
+     "end": 8.372876
+    },
+    {
+     "word": "an",
+     "speaker": 1,
+     "start": 8.42,
+     "end": 8.657168
+    },
+    {
+     "word": "lazy",
+     "speaker": 0,
+     "start": 9.290000000000001,
+     "end": 9.532876
+    },
+    {
+     "word": "to",
+     "speaker": 0,
+     "start": 9.58,
+     "end": 10.122404
+    },
+    {
+     "word": "friday",
+     "speaker": 0,
+     "start": 10.18,
+     "end": 10.405494000000001
+    },
+    {
+     "word": "letter",
+     "speaker": 0,
+     "start": 10.450000000000001,
+     "end": 10.682404
+    },
+    {
+     "word": "as",
+     "speaker": 0,
+     "start": 10.74,
+     "end": 10.995022
+    },
+    {
+     "word": "an",
+     "speaker": 0,
+     "start": 11.05,
+     "end": 11.282404
+    },
+    {
+     "word": "red",
+     "speaker": 0,
+     "start": 11.34,
+     "end": 11.565494
+    },
+    {
+     "word": "and",
+     "speaker": 0,
+     "start": 11.61,
+     "end": 12.165494
+    },
+    {
+     "word": "an",
+     "speaker": 0,
+     "start": 12.21,
+     "end": 12.435022
+    },
+    {
+     "word": "morning",
+     "speaker": 0,
+     "start": 12.49,
+     "end": 12.751932
+    },
+    {
+     "word": "twelve",
+     "speaker": 0,
+     "start": 12.82,
+     "end": 13.086696
+    },
+    {
+     "word": "it",
+     "speaker": 1,
+     "start": 13.66,
+     "end": 13.801674
+    },
+    {
+     "word": "the",
+     "speaker": 1,
+     "start": 13.82,
+     "end": 14.124292
+    },
+    {
+     "word": "letter",
+     "speaker": 1,
+     "start": 14.14,
+     "end": 14.288584
+    },
+    {
+     "word": "as",
+     "speaker": 1,
+     "start": 14.32,
+     "end": 14.47382
+    },
+    {
+     "word": "at",
+     "speaker": 1,
+     "start": 14.5,
+     "end": 14.79382
+    },
+    {
+     "word": "green",
+     "speaker": 1,
+     "start": 14.82,
+     "end": 15.463348
+    },
+    {
+     "word": "tuesday",
+     "speaker": 1,
+     "start": 15.5,
+     "end": 15.619056
+    },
+    {
+     "word": "thousand",
+     "speaker": 1,
+     "start": 15.64,
+     "end": 15.791202
+    },
+    {
+     "word": "schedule",
+     "speaker": 1,
+     "start": 15.82,
+     "end": 16.601202
+    },
+    {
+     "word": "question",
+     "speaker": 1,
+     "start": 16.63,
+     "end": 17.426438
+    },
+    {
+     "word": "quick",
+     "speaker": 1,
+     "start": 17.45,
+     "end": 17.58382
+    },
+    {
+     "word": "answer",
+     "speaker": 1,
+     "start": 17.61,
+     "end": 18.266438
+    },
+    {
+     "word": "window",
+     "speaker": 1,
+     "start": 18.29,
+     "end": 18.426438
+    },
+    {
+     "word": "closed",
+     "speaker": 1,
+     "start": 18.45,
+     "end": 18.638112
+    },
+    {
+     "word": "hat",
+     "speaker": 0,
+     "start": 19.17,
+     "end": 19.31382
+    },
+    {
+     "word": "for",
+     "speaker": 0,
+     "start": 19.34,
+     "end": 19.63382
+    },
+    {
+     "word": "morning",
+     "speaker": 0,
+     "start": 19.66,
+     "end": 19.786438
+    },
+    {
+     "word": "for",
+     "speaker": 0,
+     "start": 19.81,
+     "end": 20.106438
+    },
+    {
+     "word": "thousand",
+     "speaker": 0,
+     "start": 20.13,
+     "end": 20.27382
+    },
+    {
+     "word": "an",
+     "speaker": 0,
+     "start": 20.3,
+     "end": 20.441202
+    },
+    {
+     "word": "question",
+     "speaker": 0,
+     "start": 20.47,
+     "end": 21.23382
+    },
+    {
+     "word": "small",
+     "speaker": 0,
+     "start": 21.26,
+     "end": 22.03691
+    },
+    {
+     "word": "to",
+     "speaker": 0,
+     "start": 22.05,
+     "end": 22.35382
+    },
+    {
+     "word": "green",
+     "speaker": 0,
+     "start": 22.38,
+     "end": 23.004292
+    },
+    {
+     "word": "sat",
+     "speaker": 0,
+     "start": 23.02,
+     "end": 23.146438000000003
+    },
+    {
+     "word": "with",
+     "speaker": 0,
+     "start": 23.17,
+     "end": 23.649056
+    },
+    {
+     "word": "friday",
+     "speaker": 1,
+     "start": 23.2,
+     "end": 23.383348
+    },
+    {
+     "word": "an",
+     "speaker": 1,
+     "start": 23.42,
+     "end": 23.58073
+    },
+    {
+     "word": "closed",
+     "speaker": 1,
+     "start": 23.62,
+     "end": 23.79073
+    },
+    {
+     "word": "of",
+     "speaker": 0,
+     "start": 23.67,
+     "end": 23.95382
+    },
+    {
+     "word": "by",
+     "speaker": 1,
+     "start": 23.830000000000002,
+     "end": 24.15382
+    },
+    {
+     "word": "review",
+     "speaker": 0,
+     "start": 23.98,
+     "end": 24.168584
+    },
+    {
+     "word": "schedule",
+     "speaker": 1,
+     "start": 24.18,
+     "end": 25.116909999999997
+    },
+    {
+     "word": "seven",
+     "speaker": 1,
+     "start": 25.13,
+     "end": 25.503348
+    },
+    {
+     "word": "green",
+     "speaker": 1,
+     "start": 25.54,
+     "end": 26.255966
+    },
+    {
+     "word": "lazy",
+     "speaker": 1,
+     "start": 26.29,
+     "end": 26.463348
+    },
+    {
+     "word": "this",
+     "speaker": 1,
+     "start": 26.5,
+     "end": 26.855966
+    },
+    {
+     "word": "thousand",
+     "speaker": 1,
+     "start": 26.89,
+     "end": 27.033820000000002
+    },
+    {
+     "word": "new",
+     "speaker": 1,
+     "start": 27.060000000000002,
+     "end": 27.215966
+    },
+    {
+     "word": "hat",
+     "speaker": 1,
+     "start": 27.25,
+     "end": 27.46764
+    },
+    {
+     "word": "in",
+     "speaker": 0,
+     "start": 28.02,
+     "end": 28.383348
+    },
+    {
+     "word": "of",
+     "speaker": 0,
+     "start": 28.42,
+     "end": 28.748584
+    },
+    {
+     "word": "with",
+     "speaker": 0,
+     "start": 28.78,
+     "end": 29.295966
+    },
+    {
+     "word": "this",
+     "speaker": 0,
+     "start": 29.330000000000002,
+     "end": 29.655966
+    },
+    {
+     "word": "eleven",
+     "speaker": 0,
+     "start": 29.69,
+     "end": 30.226438
+    },
+    {
+     "word": "big",
+     "speaker": 0,
+     "start": 30.25,
+     "end": 30.423348
+    },
+    {
+     "word": "open",
+     "speaker": 0,
+     "start": 30.46,
+     "end": 30.611673999999997
+    },
+    {
+     "word": "was",
+     "speaker": 0,
+     "start": 30.63,
+     "end": 30.838112
+    },
+    {
+     "word": "open",
+     "speaker": 1,
+     "start": 31.42,
+     "end": 31.575966
+    },
+    {
+     "word": "number",
+     "speaker": 1,
+     "start": 31.61,
+     "end": 32.575966
+    },
+    {
+     "word": "of",
+     "speaker": 1,
+     "start": 32.61,
+     "end": 32.975966
+    },
+    {
+     "word": "and",
+     "speaker": 1,
+     "start": 33.01,
+     "end": 33.375966000000005
+    },
+    {
+     "word": "that",
+     "speaker": 1,
+     "start": 33.410000000000004,
+     "end": 33.612876
+    },
+    {
+     "word": "garden",
+     "speaker": 1,
+     "start": 33.660000000000004,
+     "end": 33.833819999999996
+    },
+    {
+     "word": "seven",
+     "speaker": 1,
+     "start": 33.86,
+     "end": 34.231201999999996
+    },
+    {
+     "word": "at",
+     "speaker": 1,
+     "start": 34.26,
+     "end": 34.619056
+    },
+    {
+     "word": "for",
+     "speaker": 1,
+     "start": 34.64,
+     "end": 35.038584
+    },
+    {
+     "word": "a",
+     "speaker": 1,
+     "start": 35.07,
+     "end": 35.233819999999994
+    },
+    {
+     "word": "it",
+     "speaker": 1,
+     "start": 35.26,
+     "end": 35.415966000000004
+    },
+    {
+     "word": "review",
+     "speaker": 1,
+     "start": 35.45,
+     "end": 35.645494
+    },
+    {
+     "word": "at",
+     "speaker": 1,
+     "start": 35.69,
+     "end": 36.055966000000005
+    },
+    {
+     "word": "market",
+     "speaker": 1,
+     "start": 36.09,
+     "end": 36.248584
+    },
+    {
+     "word": "in",
+     "speaker": 1,
+     "start": 36.28,
+     "end": 36.70764
+    },
+    {
+     "word": "lazy",
+     "speaker": 0,
+     "start": 37.29,
+     "end": 37.485494
+    },
+    {
+     "word": "river",
+     "speaker": 0,
+     "start": 37.53,
+     "end": 37.755022000000004
+    },
+    {
+     "word": "new",
+     "speaker": 0,
+     "start": 37.81,
+     "end": 37.998112
+    },
+    {
+     "word": "cat",
+     "speaker": 0,
+     "start": 38.04,
+     "end": 38.245494
+    },
+    {
+     "word": "letter",
+     "speaker": 0,
+     "start": 38.29,
+     "end": 38.515022
+    },
+    {
+     "word": "is",
+     "speaker": 0,
+     "start": 38.57,
+     "end": 39.005494000000006
+    },
+    {
+     "word": "tuesday",
+     "speaker": 0,
+     "start": 39.050000000000004,
+     "end": 39.252876
+    },
+    {
+     "word": "meeting",
+     "speaker": 0,
+     "start": 39.300000000000004,
+     "end": 39.532876
+    },
+    {
+     "word": "market",
+     "speaker": 0,
+     "start": 39.58,
+     "end": 39.77073
+    },
+    {
+     "word": "open",
+     "speaker": 0,
+     "start": 39.81,
+     "end": 40.005494000000006
+    },
+    {
+     "word": "river",
+     "speaker": 0,
+     "start": 40.050000000000004,
+     "end": 40.252876
+    },
+    {
+     "word": "big",
+     "speaker": 0,
+     "start": 40.300000000000004,
+     "end": 40.540258
+    },
+    {
+     "word": "number",
+     "speaker": 0,
+     "start": 40.59,
+     "end": 41.77193352
+    },
+    {
+     "word": "hundred",
+     "speaker": 0,
+     "start": 41.82,
+     "end": 42.023348
+    },
+    {
+     "word": "this",
+     "speaker": 0,
+     "start": 42.06,
+     "end": 42.577168
+    },
+    {
+     "word": "dog",
+     "speaker": 1,
+     "start": 43.17,
+     "end": 43.365494000000005
+    },
+    {
+     "word": "and",
+     "speaker": 1,
+     "start": 43.410000000000004,
+     "end": 43.885494
+    },
+    {
+     "word": "answer",
+     "speaker": 1,
+     "start": 43.93,
+     "end": 44.892876
+    },
+    {
+     "word": "closed",
+     "speaker": 1,
+     "start": 44.94,
+     "end": 45.132876
+    },
+    {
+     "word": "sat",
+     "speaker": 1,
+     "start": 45.18,
+     "end": 45.405494000000004
+    },
+    {
+     "word": "garden",
+     "speaker": 1,
+     "start": 45.45,
+     "end": 45.652876000000006
+    },
+    {
+     "word": "mat",
+     "speaker": 1,
+     "start": 45.7,
+     "end": 46.135966
+    },
+    {
+     "word": "river",
+     "speaker": 1,
+     "start": 46.17,
+     "end": 46.405494000000004
+    },
+    {
+     "word": "ran",
+     "speaker": 1,
+     "start": 46.45,
+     "end": 46.645494
+    },
+    {
+     "word": "hat",
+     "speaker": 1,
+     "start": 46.69,
+     "end": 46.892876
+    },
+    {
+     "word": "big",
+     "speaker": 1,
+     "start": 46.94,
+     "end": 47.162404
+    },
+    {
+     "word": "sat",
+     "speaker": 1,
+     "start": 47.22,
+     "end": 47.398112
+    },
+    {
+     "word": "cat",
+     "speaker": 1,
+     "start": 47.44,
+     "end": 47.645494
+    },
+    {
+     "word": "quick",
+     "speaker": 0,
+     "start": 47.57,
+     "end": 47.743348
+    },
+    {
+     "word": "mat",
+     "speaker": 1,
+     "start": 47.69,
+     "end": 48.172876
+    },
+    {
+     "word": "open",
+     "speaker": 0,
+     "start": 47.78,
+     "end": 47.980258
+    },
+    {
+     "word": "new",
+     "speaker": 0,
+     "start": 48.03,
+     "end": 48.175966
+    },
+    {
+     "word": "committee",
+     "speaker": 0,
+     "start": 48.21,
+     "end": 49.64815752
+    },
+    {
+     "word": "tuesday",
+     "speaker": 1,
+     "start": 48.22,
+     "end": 48.46764
+    },
+    {
+     "word": "was",
+     "speaker": 0,
+     "start": 49.78,
+     "end": 49.975966
+    },
+    {
+     "word": "a",
+     "speaker": 0,
+     "start": 50.01,
+     "end": 50.186438
+    },
+    {
+     "word": "market",
+     "speaker": 0,
+     "start": 50.21,
+     "end": 50.412876000000004
+    },
+    {
+     "word": "in",
+     "speaker": 0,
+     "start": 50.46,
+     "end": 50.855966
+    },
+    {
+     "word": "old",
+     "speaker": 0,
+     "start": 50.89,
+     "end": 51.048584
+    },
+    {
+     "word": "thousand",
+     "speaker": 0,
+     "start": 51.08,
+     "end": 51.29287600000001
+    },
+    {
+     "word": "thousand",
+     "speaker": 0,
+     "start": 51.34,
+     "end": 51.506438
+    },
+    {
+     "word": "was",
+     "speaker": 0,
+     "start": 51.53,
+     "end": 51.777168
+    },
+    {
+     "word": "evening",
+     "speaker": 1,
+     "start": 52.33,
+     "end": 52.739056
+    },
+    {
+     "word": "it",
+     "speaker": 1,
+     "start": 52.76,
+     "end": 52.87691
+    },
+    {
+     "word": "to",
+     "speaker": 1,
+     "start": 52.89,
+     "end": 53.164291999999996
+    },
+    {
+     "word": "a",
+     "speaker": 1,
+     "start": 53.18,
+     "end": 53.31382
+    },
+    {
+     "word": "evening",
+     "speaker": 1,
+     "start": 53.34,
+     "end": 53.764292
+    },
+    {
+     "word": "closed",
+     "speaker": 1,
+     "start": 53.78,
+     "end": 53.887382
+    },
+    {
+     "word": "and",
+     "speaker": 1,
+     "start": 53.89,
+     "end": 54.186438
+    },
+    {
+     "word": "budget",
+     "speaker": 1,
+     "start": 54.21,
+     "end": 54.91382
+    },
+    {
+     "word": "green",
+     "speaker": 1,
+     "start": 54.94,
+     "end": 55.528584
+    },
+    {
+     "word": "old",
+     "speaker": 0,
+     "start": 56.06,
+     "end": 56.193819999999995
+    },
+    {
+     "word": "as",
+     "speaker": 0,
+     "start": 56.22,
+     "end": 56.346438000000006
+    },
+    {
+     "word": "at",
+     "speaker": 0,
+     "start": 56.370000000000005,
+     "end": 56.67382
+    },
+    {
+     "word": "of",
+     "speaker": 0,
+     "start": 56.7,
+     "end": 56.991202
+    },
+    {
+     "word": "at",
+     "speaker": 0,
+     "start": 57.02,
+     "end": 57.31382
+    },
+    {
+     "word": "friday",
+     "speaker": 0,
+     "start": 57.34,
+     "end": 57.466438000000004
+    },
+    {
+     "word": "new",
+     "speaker": 0,
+     "start": 57.49,
+     "end": 57.626438
+    },
+    {
+     "word": "budget",
+     "speaker": 0,
+     "start": 57.65,
+     "end": 58.436910000000005
+    },
+    {
+     "word": "committee",
+     "speaker": 0,
+     "start": 58.45,
+     "end": 59.59287752
+    },
+    {
+     "word": "number",
+     "speaker": 0,
+     "start": 59.620000000000005,
+     "end": 60.386438000000005
+    },
+    {
+     "word": "that",
+     "speaker": 0,
+     "start": 60.410000000000004,
+     "end": 60.546438
+    },
+    {
+     "word": "quick",
+     "speaker": 0,
+     "start": 60.57,
+     "end": 60.71382
+    },
+    {
+     "word": "river",
+     "speaker": 0,
+     "start": 60.74,
+     "end": 60.884292
+    },
+    {
+     "word": "letter",
+     "speaker": 0,
+     "start": 60.9,
+     "end": 61.03382
+    },
+    {
+     "word": "in",
+     "speaker": 0,
+     "start": 61.06,
+     "end": 61.408584
+    },
+    {
+     "word": "as",
+     "speaker": 1,
+     "start": 61.92,
+     "end": 62.036910000000006
+    },
+    {
+     "word": "quick",
+     "speaker": 1,
+     "start": 62.050000000000004,
+     "end": 62.186438
+    },
+    {
+     "word": "open",
+     "speaker": 1,
+     "start": 62.21,
+     "end": 62.346438000000006
+    },
+    {
+     "word": "question",
+     "speaker": 1,
+     "start": 62.370000000000005,
+     "end": 63.084292
+    },
+    {
+     "word": "budget",
+     "speaker": 1,
+     "start": 63.1,
+     "end": 63.804292
+    },
+    {
+     "word": "on",
+     "speaker": 1,
+     "start": 63.82,
+     "end": 64.11690999999999
+    },
+    {
+     "word": "this",
+     "speaker": 1,
+     "start": 64.13,
+     "end": 64.39382
+    },
+    {
+     "word": "lazy",
+     "speaker": 1,
+     "start": 64.42,
+     "end": 64.54643800000001
+    },
+    {
+     "word": "quick",
+     "speaker": 1,
+     "start": 64.57000000000001,
+     "end": 64.67690999999999
+    },
+    {
+     "word": "question",
+     "speaker": 1,
+     "start": 64.69,
+     "end": 65.39690999999999
+    },
+    {
+     "word": "twelve",
+     "speaker": 1,
+     "start": 65.41,
+     "end": 65.54643800000001
+    },
+    {
+     "word": "it",
+     "speaker": 1,
+     "start": 65.57000000000001,
+     "end": 65.71382
+    },
+    {
+     "word": "committee",
+     "speaker": 1,
+     "start": 65.74,
+     "end": 66.731674
+    },
+    {
+     "word": "that",
+     "speaker": 1,
+     "start": 66.75,
+     "end": 66.928584
+    },
+    {
+     "word": "an",
+     "speaker": 0,
+     "start": 67.45,
+     "end": 67.615966
+    },
+    {
+     "word": "mat",
+     "speaker": 0,
+     "start": 67.65,
+     "end": 67.98334799999999
+    },
+    {
+     "word": "thousand",
+     "speaker": 0,
+     "start": 68.02,
+     "end": 68.18643800000001
+    },
+    {
+     "word": "is",
+     "speaker": 0,
+     "start": 68.21000000000001,
+     "end": 68.535966
+    },
+    {
+     "word": "at",
+     "speaker": 0,
+     "start": 68.57000000000001,
+     "end": 68.895966
+    },
+    {
+     "word": "at",
+     "speaker": 0,
+     "start": 68.93,
+     "end": 69.26643800000001
+    },
+    {
+     "word": "green",
+     "speaker": 0,
+     "start": 69.29,
+     "end": 70.01596599999999
+    },
+    {
+     "word": "tuesday",
+     "speaker": 0,
+     "start": 70.05,
+     "end": 70.19382
+    },
+    {
+     "word": "answer",
+     "speaker": 0,
+     "start": 70.22,
+     "end": 70.95382000000001
+    },
+    {
+     "word": "window",
+     "speaker": 1,
+     "start": 70.8,
+     "end": 71.012876
+    },
+    {
+     "word": "hat",
+     "speaker": 0,
+     "start": 70.98,
+     "end": 71.11382
+    },
+    {
+     "word": "morning",
+     "speaker": 1,
+     "start": 71.06,
+     "end": 71.282876
+    },
+    {
+     "word": "and",
+     "speaker": 0,
+     "start": 71.14,
+     "end": 71.466438
+    },
+    {
+     "word": "garden",
+     "speaker": 1,
+     "start": 71.33,
+     "end": 71.532876
+    },
+    {
+     "word": "hundred",
+     "speaker": 0,
+     "start": 71.49,
+     "end": 71.70764
+    },
+    {
+     "word": "answer",
+     "speaker": 1,
+     "start": 71.58,
+     "end": 72.532876
+    },
+    {
+     "word": "sat",
+     "speaker": 1,
+     "start": 72.58,
+     "end": 72.79073
+    },
+    {
+     "word": "lazy",
+     "speaker": 1,
+     "start": 72.83,
+     "end": 73.01596599999999
+    },
+    {
+     "word": "red",
+     "speaker": 1,
+     "start": 73.05,
+     "end": 73.275022
+    },
+    {
+     "word": "a",
+     "speaker": 1,
+     "start": 73.33,
+     "end": 73.577168
+    }
+   ],
+   "diarization": [
+    {
+     "speaker": 2,
+     "start": 0.2,
+     "end": 5.0
+    },
+    {
+     "speaker": 0,
+     "start": 5.36,
+     "end": 8.72
+    },
+    {
+     "speaker": 2,
+     "start": 9.08,
+     "end": 13.16
+    },
+    {
+     "speaker": 0,
+     "start": 13.52,
+     "end": 18.68
+    },
+    {
+     "speaker": 2,
+     "start": 19.04,
+     "end": 24.2
+    },
+    {
+     "speaker": 0,
+     "start": 23.080000000000002,
+     "end": 27.52
+    },
+    {
+     "speaker": 2,
+     "start": 27.88,
+     "end": 30.88
+    },
+    {
+     "speaker": 0,
+     "start": 31.240000000000002,
+     "end": 36.76
+    },
+    {
+     "speaker": 2,
+     "start": 37.12,
+     "end": 42.64
+    },
+    {
+     "speaker": 0,
+     "start": 43.0,
+     "end": 48.52
+    },
+    {
+     "speaker": 2,
+     "start": 47.4,
+     "end": 51.84
+    },
+    {
+     "speaker": 0,
+     "start": 52.2,
+     "end": 55.56
+    },
+    {
+     "speaker": 2,
+     "start": 55.92,
+     "end": 61.44
+    },
+    {
+     "speaker": 0,
+     "start": 61.800000000000004,
+     "end": 66.96000000000001
+    },
+    {
+     "speaker": 2,
+     "start": 67.32000000000001,
+     "end": 71.76
+    },
+    {
+     "speaker": 0,
+     "start": 70.64,
+     "end": 73.64
+    }
+   ],
+   "mapping": {
+    "0": 2,
+    "1": 0
+   },
+   "failed": [],
+   "banded": [
+    {
+     "speaker": 0,
+     "retained_frames": 1276,
+     "states": 347,
+     "half_width": 67
+    },
+    {
+     "speaker": 1,
+     "retained_frames": 1284,
+     "states": 357,
+     "half_width": 68
+    }
+   ]
+  },
+  "unmatched": {
+   "words": [
+    {
+     "word": "friday",
+     "speaker": 0,
+     "start": 0.37,
+     "end": 0.6909879999999999
+    },
+    {
+     "word": "new",
+     "speaker": 0,
+     "start": 0.78,
+     "end": 1.0836059999999998
+    },
+    {
+     "word": "meeting",
+     "speaker": 0,
+     "start": 1.17,
+     "end": 1.483606
+    },
+    {
+     "word": "open",
+     "speaker": 0,
+     "start": 1.57,
+     "end": 1.883606
+    },
+    {
+     "word": "on",
+     "speaker": 0,
+     "start": 1.97,
+     "end": 2.730988
+    },
+    {
+     "word": "lazy",
+     "speaker": 0,
+     "start": 2.82,
+     "end": 3.116224
+    },
+    {
+     "word": "friday",
+     "speaker": 0,
+     "start": 3.2,
+     "end": 3.523606
+    },
+    {
+     "word": "to",
+     "speaker": 0,
+     "start": 3.61,
+     "end": 4.385752
+    },
+    {
+     "word": "letter",
+     "speaker": 1,
+     "start": 4.97,
+     "end": 5.195022
+    },
+    {
+     "word": "small",
+     "speaker": 1,
+     "start": 5.25,
+     "end": 6.56266352
+    },
+    {
+     "word": "letter",
+     "speaker": 1,
+     "start": 6.65,
+     "end": 6.86764
+    },
+    {
+     "word": "big",
+     "speaker": 1,
+     "start": 6.92,
+     "end": 7.155022
+    },
+    {
+     "word": "morning",
+     "speaker": 1,
+     "start": 7.21,
+     "end": 7.435022
+    },
+    {
+     "word": "evening",
+     "speaker": 1,
+     "start": 7.49,
+     "end": 8.325494
+    },
+    {
+     "word": "at",
+     "speaker": 1,
+     "start": 8.370000000000001,
+     "end": 8.885494
+    },
+    {
+     "word": "market",
+     "speaker": 1,
+     "start": 8.93,
+     "end": 9.206695999999999
+    }
+   ],
+   "diarization": [
+    {
+     "speaker": 0,
+     "start": 0.12,
+     "end": 4.48
+    },
+    {
+     "speaker": 1,
+     "start": 4.76,
+     "end": 9.28
+    }
+   ],
+   "mapping": {
+    "0": 0,
+    "1": 1,
+    "2": null
+   },
+   "failed": [
+    {
+     "speaker": 2,
+     "reason": "no_legal_path_in_anchor_band",
+     "words": [
+      "to",
+      "market",
+      "thousand",
+      "garden",
+      "closed",
+      "from"
+     ]
+    }
+   ],
+   "banded": [
+    {
+     "speaker": 0,
+     "retained_frames": 204,
+     "states": 21,
+     "half_width": 21
+    },
+    {
+     "speaker": 1,
+     "retained_frames": 194,
+     "states": 31,
+     "half_width": 31
+    },
+    {
+     "speaker": 2,
+     "retained_frames": 0,
+     "states": 15,
+     "half_width": 15
+    }
+   ]
+  },
+  "cjk": {
+   "words": [
+    {
+     "word": "\u4eca",
+     "speaker": 0,
+     "start": 0.34,
+     "end": 0.595022
+    },
+    {
+     "word": "\u5929",
+     "speaker": 0,
+     "start": 0.65,
+     "end": 0.90455
+    },
+    {
+     "word": "\u5929",
+     "speaker": 0,
+     "start": 0.97,
+     "end": 1.202404
+    },
+    {
+     "word": "\u6c14",
+     "speaker": 0,
+     "start": 1.26,
+     "end": 1.522404
+    },
+    {
+     "word": "\u5f88",
+     "speaker": 0,
+     "start": 1.58,
+     "end": 1.8245500000000001
+    },
+    {
+     "word": "\u597d",
+     "speaker": 0,
+     "start": 1.8900000000000001,
+     "end": 2.151932
+    },
+    {
+     "word": "\u6211",
+     "speaker": 0,
+     "start": 2.22,
+     "end": 2.475022
+    },
+    {
+     "word": "\u4eec",
+     "speaker": 0,
+     "start": 2.5300000000000002,
+     "end": 2.799314
+    },
+    {
+     "word": "\u53bb",
+     "speaker": 0,
+     "start": 2.87,
+     "end": 3.1150219999999997
+    },
+    {
+     "word": "\u516c",
+     "speaker": 0,
+     "start": 3.17,
+     "end": 3.402404
+    },
+    {
+     "word": "\u56ed",
+     "speaker": 0,
+     "start": 3.46,
+     "end": 3.722404
+    },
+    {
+     "word": "\u6563",
+     "speaker": 0,
+     "start": 3.7800000000000002,
+     "end": 4.02455
+    },
+    {
+     "word": "\u6b65",
+     "speaker": 0,
+     "start": 4.09,
+     "end": 4.406696
+    }
+   ],
+   "diarization": [
+    {
+     "speaker": 0,
+     "start": 0.12,
+     "end": 4.48
+    }
+   ],
+   "mapping": {
+    "0": 0
+   },
+   "failed": [],
+   "banded": [
+    {
+     "speaker": 0,
+     "retained_frames": 114,
+     "states": 27,
+     "half_width": 27
+    }
+   ]
+  },
+  "too_long": {
+   "error": "Speaker 0 transcript is too long for the CTC timeline."
+  }
+ },
+ "tolerances": {},
+ "notes": [
+  "NeMo ctc_timestamp_utils.py at 979cc6c6, NumPy forward, checkpoint alignment parameters and calibration; times compare to 1e-9 s."
+ ],
+ "created": "2026-11-05T05:51:49Z",
+ "npz": "align_nemo_tiny.npz",
+ "tensors": {
+  "cjk/labels": {
+   "shape": [
+    4,
+    480
+   ],
+   "dtype": "bool",
+   "sha256": "5378d39604b388529fedd9d073301192ca7663c80def6d85c4930aebccdfb28e"
+  },
+  "cjk/logp": {
+   "shape": [
+    120,
+    161
+   ],
+   "dtype": "float16",
+   "sha256": "2c1018c9c374f7c6cd7dc21972e6dcf669436bbf83360125fb3fa8b648047c92"
+  },
+  "cjk/speaker_probs": {
+   "shape": [
+    60,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "12d8950da8775e56aa526353a023bd21f3fda67b76fcd1b6efa07bf567727fcf"
+  },
+  "long/labels": {
+   "shape": [
+    4,
+    7488
+   ],
+   "dtype": "bool",
+   "sha256": "8f81ab36f7e90a177a83f01631b25445fd9f47208b15facc1e4cd04ad7cb6d2f"
+  },
+  "long/logp": {
+   "shape": [
+    1872,
+    161
+   ],
+   "dtype": "float16",
+   "sha256": "b3006c46bc8d2b86ad65f7a856b48a699331057cb9724a5ca0154d0e249eb999"
+  },
+  "long/speaker_probs": {
+   "shape": [
+    936,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "ca740fd9531fdab727505a993977c8e33f3fb03fadda9122b6e86bcd4d692851"
+  },
+  "plain/logp": {
+   "shape": [
+    150,
+    161
+   ],
+   "dtype": "float16",
+   "sha256": "1349fe6a3ab22ed83928d9319708c88df24e8a6dca9e7f719957e06d333cc39c"
+  },
+  "spm": {
+   "shape": [
+    242151
+   ],
+   "dtype": "uint8",
+   "sha256": "8432e3aeac0510e0bcd14dfb6240a1ed899adf9bf6f49bccfb37d5bbe02e3f31"
+  },
+  "too_long/logp": {
+   "shape": [
+    12,
+    161
+   ],
+   "dtype": "float16",
+   "sha256": "491f0a051b2897d832f223146c73fec6dcad5333b2f46f34532e3595337cb68a"
+  },
+  "two/labels": {
+   "shape": [
+    4,
+    1680
+   ],
+   "dtype": "bool",
+   "sha256": "8293d4b07111f6815320ec5c75cc642407b42419b89cd517a67b65b9d8cdc0e3"
+  },
+  "two/logp": {
+   "shape": [
+    420,
+    161
+   ],
+   "dtype": "float16",
+   "sha256": "2e9d5e9cda0671930fd93d4aaf5293dfa756bd4653b49ec05ad1f941e45e2bc9"
+  },
+  "two/speaker_probs": {
+   "shape": [
+    210,
+    4
+   ],
+   "dtype": "float32",
+   "sha256": "a29a24df2bd6878e9b11d2df7b02d3b8f8a8a6b410b141895cb427b338278182"
+  },
+  "unmatched/labels": {
+   "shape": [
+    2,
+    1440
+   ],
+   "dtype": "bool",
+   "sha256": "bf59f30769fd064e37b2cdced977a471eb911bb68b0fcf57af18831f0d433c1b"
+  },
+  "unmatched/logp": {
+   "shape": [
+    360,
+    161
+   ],
+   "dtype": "float16",
+   "sha256": "6c15933e0559c947eb5cc49c237a602acdfdf16933a320ccbb373a6609e2b6f6"
+  },
+  "unmatched/speaker_probs": {
+   "shape": [
+    180,
+    2
+   ],
+   "dtype": "float32",
+   "sha256": "23052bf34412ba4054ce1a4cde2ff8af945f03919e7b96a33dc5ab599a7eb9c0"
+  }
+ }
+}

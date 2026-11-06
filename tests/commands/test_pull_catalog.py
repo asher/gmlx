@@ -555,6 +555,58 @@ def test_a_speech_companion_rides_every_plan(tmp_path):
     assert per_ref[refs[-1]] == (0, G(0.88), False) and remaining == catalog.plan_bytes(plan)
 
 
+def test_a_head_off_class_plans_text_and_companions_only(tmp_path):
+    """Below ``head_from_class`` the plan keeps the native head off, never
+    takes the drafter, prices no head block and registers speculation off."""
+    m = dataclasses.replace(DENSE, head_from_class=48)
+    small = catalog.default_plan(m, box(32))
+    assert small is not None and not small.head and not small.drafter
+    assert not catalog.plan_speculates(small)
+    assert catalog.resident_bytes(m, small.rung, catalog.plan_speculates(small)) == \
+        small.rung.text_bytes
+    assert catalog.plan_for(m, box(32), mmproj=False).head is False
+    pairs = catalog.plan_pairs(small, str(tmp_path), True)
+    assert next(iter(pairs.values()))["speculative"] is False
+    big = catalog.default_plan(m, box(64))
+    assert big.head and catalog.plan_speculates(big)
+    assert "speculative" not in next(iter(catalog.plan_pairs(big, str(tmp_path), True).values()))
+    # An entry without the field keeps its head everywhere.
+    assert catalog.default_plan(DENSE, box(32)).head
+
+
+def test_a_speech_encoder_rides_every_plan(tmp_path):
+    """An entry whose mmproj is its speech encoder pulls it on every plan,
+    streaming too, refuses --no-vision, prints no --vision and words it
+    as audio."""
+    m = dataclasses.replace(MOE, hears=True)
+    for cls in (32, 64, 128, 512):
+        p = catalog.default_plan(m, box(cls))
+        assert p is not None and p.mmproj, cls
+        assert "--vision" not in catalog.plan_command(p, box(cls))
+        assert "mmproj" in next(iter(catalog.plan_pairs(p, str(tmp_path), True).values()))
+    streams = catalog.default_plan(m, box(32))
+    assert streams.streaming and streams.mmproj
+    assert not catalog.default_plan(MOE, box(32)).mmproj
+    assert catalog.plan_for(m, box(32), quant="xhigh").mmproj
+    with pytest.raises(ValueError, match="speech encoder"):
+        catalog.plan_for(m, box(128), mmproj=False)
+    assert "images" not in catalog.tags(m) and "audio" in catalog.tags(m)
+    assert catalog.extras_text(m).startswith("audio input ")
+    # Without the flag the vision tower stays an add-on.
+    assert "images" in catalog.tags(MOE)
+
+
+def test_the_transcribe_entry_keeps_its_encoder_and_drops_the_head_on_32_gb(tmp_path):
+    m = catalog.model("nemotron-transcribe")
+    assert m is not None and m.hears and m.head_from_class == 48
+    small = catalog.default_plan(m, catalog.box_for_class(32))
+    assert small.mmproj and not small.head and not small.streaming
+    pairs = next(iter(catalog.plan_pairs(small, str(tmp_path), True).values()))
+    assert pairs["mmproj"].endswith("Encoder-F16.gguf") and pairs["speculative"] is False
+    big = catalog.default_plan(m, catalog.box_for_class(64))
+    assert big.mmproj and big.head and catalog.plan_speculates(big)
+
+
 # -- text ----------------------------------------------------------------------------
 
 def test_recommendation_and_entry_text_are_plain(small_catalog):

@@ -130,6 +130,7 @@ nav:
           - arch-coverage.md
           - vlm.md
           - granite-switch.md
+          - nemotron-transcribe.md
           - streaming.md
           - long-context.md
           - lora.md

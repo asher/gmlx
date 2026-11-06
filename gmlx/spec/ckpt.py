@@ -395,7 +395,8 @@ def _ckpt_chunks(batch, cuts, restored: int, n: int,
             return k if col is None else min(k, col - pos)
 
         return pd.size_chunk(model, profile, step, pos, lambda: cols,
-                             cut, pd.prompt_rows(batch))[0]
+                             cut, pd.prompt_rows(batch),
+                             request=lambda b: pd.batch_request_step(batch, b))[0]
 
     while stop is None or pos < stop:
         col = pending[0] if pending else None

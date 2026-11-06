@@ -1295,6 +1295,20 @@ def _clear_registries() -> None:
     _MTP_DRAFTER_STASH.clear()
 
 
+def _resolve_served(mid: str, cfg, request_profile=None):
+    """``resolve_model`` for serve, with a speech decoder's encoder GGUF
+    paired from its folder when the entry sets no ``mmproj``. Family
+    detection off (``server.family_defaults: false``) reads no headers, so
+    it pairs nothing."""
+    from gmlx.config import resolve_model
+
+    rm = resolve_model(mid, cfg, request_profile=request_profile)
+    if rm.mmproj is None and cfg.family_defaults:
+        from gmlx.load.discovery import find_speech_encoder
+        rm.mmproj = find_speech_encoder(rm.path)
+    return rm
+
+
 def _register_one(mid: str, rm) -> None:
     """Enter one resolved model in the id tables + companion registries."""
     _RESOLVED_MODELS[mid] = rm
@@ -1328,7 +1342,7 @@ def _register_image(iid: str, rm) -> None:
 
 
 def _register_resolved_models_locked(cfg) -> None:
-    from gmlx.config import MissingModelFile, resolve_image_model, resolve_model
+    from gmlx.config import MissingModelFile, resolve_image_model
 
     _clear_registries()
     for root in getattr(cfg, "model_dirs", None) or []:
@@ -1341,7 +1355,7 @@ def _register_resolved_models_locked(cfg) -> None:
     skipped = []
     for mid in cfg.models:
         try:
-            rm = resolve_model(mid, cfg)        # default-profile (no request) view
+            rm = _resolve_served(mid, cfg)      # default-profile (no request) view
         except MissingModelFile as e:           # disk state, not config shape
             skipped.append((mid, e))
             continue
@@ -1371,7 +1385,7 @@ def reregister_missing_models() -> bool:
     this, a healed model serves fine while staying invisible to clients that
     enumerate models. Cheap when nothing is missing (a set-membership pass);
     one resolve attempt per still-missing id otherwise. True if any healed."""
-    from gmlx.config import ConfigError, resolve_model
+    from gmlx.config import ConfigError
 
     cfg = _SERVER_CFG
     if cfg is None:
@@ -1381,7 +1395,7 @@ def reregister_missing_models() -> bool:
         if mid in _RESOLVED_MODELS:
             continue
         try:
-            rm = resolve_model(mid, cfg)
+            rm = _resolve_served(mid, cfg)
         except ConfigError:
             continue                      # still missing (or still malformed)
         _register_one(mid, rm)
@@ -1491,12 +1505,7 @@ def resolve_request_model(model_field: str | None, *,
     **never** an HF fetch. Re-resolves through :func:`config.resolve_model` so the
     chosen profile reshapes the merged sampling/load spec (and a skipped model
     self-heals here the moment its file is back)."""
-    from gmlx.config import (
-        MissingModelFile,
-        profile_names,
-        resolve_model,
-        split_address,
-    )
+    from gmlx.config import MissingModelFile, profile_names, split_address
 
     cfg = _SERVER_CFG
     if cfg is None:
@@ -1532,7 +1541,7 @@ def resolve_request_model(model_field: str | None, *,
         raise ModelNotFound(model_id, cfg.models)
 
     try:
-        rm = resolve_model(model_id, cfg, request_profile=request_profile)
+        rm = _resolve_served(model_id, cfg, request_profile=request_profile)
     except MissingModelFile as e:
         raise ModelFileMissing(model_id, str(e)) from None
     _fill_adapters(rm)
