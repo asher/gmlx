@@ -124,6 +124,10 @@ def _entry(request, monkeypatch, tmp_path, *, budget: int = 4 * GB,
     rec = SimpleNamespace(pool=pool, e=e, pipe=served.pipe, root=root,
                           served=served, encodes=0, at_encode=None,
                           latents=[], budgets=[])
+    # The endpoint installed below binds the stubs that hold ``rec``, and
+    # FastAPI caches each endpoint for the process: the pipeline goes with
+    # the test, so no later test counts its weights in a peak.
+    request.addfinalizer(rec.__dict__.clear)
 
     def acquire(model):
         with pool._lock:
