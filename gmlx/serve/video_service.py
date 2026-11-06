@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
@@ -94,6 +95,9 @@ class ServedVideo:
     adapters: list = field(default_factory=list)
     captions: OrderedDict = field(default_factory=OrderedDict)
     tokenizer: Any = None
+    # Guards captions: the video worker changes it, and a step's plan on
+    # the event loop sums it.
+    captions_lock: Any = field(default_factory=threading.Lock, repr=False)
 
     @property
     def lora_own_term(self) -> int:
@@ -185,7 +189,8 @@ def held_bytes(served: ServedVideo) -> tuple:
     from .image_service import held_bytes as image_held
 
     adapters, caches = image_held(served.pipe)
-    rows = sum(int(a.nbytes) for a in served.captions.values())
+    with served.captions_lock:
+        rows = sum(int(a.nbytes) for a in served.captions.values())
     return adapters, caches + rows
 
 
@@ -368,7 +373,8 @@ def _release(box: list) -> None:
         return
     drop_share(served)
     pipe, served.pipe = served.pipe, None
-    served.captions.clear()
+    with served.captions_lock:
+        served.captions.clear()
     if pipe is not None:
         from gmlx.image.lora import install
 
@@ -566,19 +572,21 @@ def caption(served: ServedVideo, key: str, feats, table: str):
     bound alone are not kept."""
     import mlx.core as mx
 
-    held = served.captions.get((key, table)) if key else None
-    if held is not None:
-        served.captions.move_to_end((key, table))
-        return held, True
+    with served.captions_lock:
+        held = served.captions.get((key, table)) if key else None
+        if held is not None:
+            served.captions.move_to_end((key, table))
+            return held, True
     text = served.pipe.dit.caption(feats)
     mx.eval(text)
     bound = caption_bytes(served.pipe.dit.cfg.dim, served.plan.text_rows)
     if key and int(text.nbytes) <= bound:
-        served.captions[(key, table)] = text
-        held = sum(int(a.nbytes) for a in served.captions.values())
-        while held > bound:
-            _k, old = served.captions.popitem(last=False)
-            held -= int(old.nbytes)
+        with served.captions_lock:
+            served.captions[(key, table)] = text
+            held = sum(int(a.nbytes) for a in served.captions.values())
+            while held > bound:
+                _k, old = served.captions.popitem(last=False)
+                held -= int(old.nbytes)
     return text, False
 
 

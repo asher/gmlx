@@ -284,6 +284,44 @@ def test_the_refined_rows_are_kept_by_cond_and_patch_table(host, pipe,
     assert _rel(other[0], first[0]) > 1e-3
 
 
+def test_a_plan_sums_the_refined_rows_while_the_worker_keeps_one(
+        monkeypatch):
+    """A step's plan on the event loop sums the entry's refined rows while
+    the video worker keeps a new one: the worker waits for the sum, which
+    never sees the cache change under it."""
+    import threading
+
+    from gmlx.serve import image_service
+
+    monkeypatch.setattr(image_service, "held_bytes", lambda pipe: (0, 0))
+    dim = 4
+    dit = SimpleNamespace(cfg=SimpleNamespace(dim=dim), caption=lambda f: f)
+    served = ServedVideo(pipe=SimpleNamespace(dit=dit), spec=None,
+                         plan=SimpleNamespace(  # type: ignore
+                             text_rows=vs.PRICED_TEXT_ROWS))
+    feats = mx.zeros((1, 8, dim), mx.float32)
+    mx.eval(feats)
+    worker: list = []
+
+    class Rows:
+        @property
+        def nbytes(self):
+            # The worker keeps a caption while the sum is under way.
+            if not worker:
+                t = threading.Thread(target=vs.caption,
+                                     args=(served, "new", feats, "t"))
+                worker.append(t)
+                t.start()
+                t.join(0.5)
+            return 64
+
+    served.captions[("old", "t")] = Rows()
+    assert vs.held_bytes(served) == (0, 64)
+    worker[0].join(10)
+    assert not worker[0].is_alive()
+    assert list(served.captions) == [("old", "t"), ("new", "t")]
+
+
 def test_the_refined_rows_keep_to_the_bytes_the_entry_books():
     """The entry keeps refined rows of any count within the bytes it
     books for them, CAPTIONS prompts of its priced rows, and drops the
