@@ -72,8 +72,8 @@ COMFY = {
     # MiniMax-H3 steps on a video and an audio latent, its AV step.
     "h3": {"model_class": "MiniMaxH3", "image_model": "minimax_h3",
            "latent": {"channels": 24, "stride": 16, "patch": 2, "temporal": 4},
-           "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": False,
-           "context": ("condition_proj.weight", 1),
+           "vae": {"channels_out": 3, "stride": 16, "space": "model", "encode_pieces": 7},
+           "edit": False, "context": ("condition_proj.weight", 1),
            "audio": {"channels": 32, "stereo": 2, "sample_rate": 32000,
                      "latents_per_second": 40}},
 }
@@ -202,6 +202,10 @@ class State:
         self.adapters: dict = {}
         self.tables: dict = {}
         self.lose_table = 0
+        # Windows the next video encodes refuse for memory, each naming the
+        # window that fits, and the body limit the capabilities name.
+        self.refuse_windows: list = []
+        self.max_body = (1 << 30) + (1 << 20)
         self.runs: dict = {}
         self.log: list = []
         self.lock = threading.Lock()
@@ -312,7 +316,8 @@ class Handler(BaseHTTPRequestHandler):
                 "families": sorted(COMFY), "conventions": ["comfy"], "patch_kinds": ["lora"],
                 "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae", "ref_cache",
                              "skip_blocks", "av_step", "anchors"],
-                "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16}})
+                "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16,
+                           "max_body_bytes": st.max_body}})
         if sub == "/models":
             return self._json(200, {"models": [{"model": m, "family": f, "variant": v, "resident": True}
                                                for m, (f, v, _s) in MODELS.items()],
@@ -405,12 +410,19 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/stub/lose-table":
             st.lose_table = int(json.loads(self._body())["steps"])
             return self._json(200, {})
+        if p == "/stub/video-encode":
+            req = json.loads(self._body())
+            st.refuse_windows = [int(k) for k in req.get("refuse", ())]
+            st.max_body = int(req.get("max_body", st.max_body))
+            return self._json(200, {})
         if not p.startswith(PREFIX):
             return self._err(404, "not found")
         sub = p[len(PREFIX):]
         if not self._gate(sub):
             return
         t0 = time.perf_counter()
+        if sub == "/vae/video/encode" and st.refuse_windows:
+            return self._refuse_window(st.refuse_windows.pop(0))
         body = self._body()
         ctype = self.headers.get("Content-Type", "").split(";")[0]
         if sub == "/runs/begin":
@@ -687,6 +699,22 @@ class Handler(BaseHTTPRequestHandler):
         self.st.event(kind="audio_decode", shape=lat[1])
         self._send(200, write_body({"waveform": wave.astype(np.float32)}), ctype=CONTENT_TYPE)
 
+    def _refuse_window(self, k):
+        """A video encode refused for memory from its header alone, as the
+        server refuses one: the rest of the body read and dropped, then
+        the answer, naming the window ``k`` that fits."""
+        n = int(self.headers.get("Content-Length", "0"))
+        head = self.rfile.read(8)
+        hn = struct.unpack("<Q", head)[0]
+        shape = json.loads(self.rfile.read(hn))["frames"]["shape"]
+        left = n - 8 - hn
+        while left > 0:
+            left -= len(self.rfile.read(min(left, 1 << 20)))
+        self.st.event(kind="video_encode_refused", shape=shape, window=k)
+        return self._err(400, f"a video encode of a window of {shape[0]} frames does not fit "
+                              f"in memory beside the models now loaded; a window of {17 * k} "
+                              "frames fits", window=k)
+
     def _av_encode(self, sub, body):
         """Stub encodes of MiniMax-H3's anchors: frames (T, H, W, 3) in
         [0, 1], 1 or 17 k + 5 of them, to latents (1, 24, t, H/16, W/16) of
@@ -704,12 +732,20 @@ class Handler(BaseHTTPRequestHandler):
             if fr is None or len(fr[1]) != 4 or fr[1][3] != 3:
                 return self._err(400, "vae/video/encode takes frames (T, H, W, 3) in [0, 1]")
             T, H, W, _ = fr[1]
-            if (T != 1 and (T < 5 or (T - 5) % 17)) or H % 32 or W % 32:
+            at, clip, is_open = req.get("at", 0), req.get("clip_frames", T), req.get("open", False)
+            if is_open:
+                if T % 17 or at % 17 or at + T >= clip or H % 32 or W % 32:
+                    return self._err(400, f"an open window of {T} frames at {at} of {clip}")
+                t = T // 17 * 5
+            elif (T != 1 and (T < 5 or (T - 5) % 17)) or at % 17 or at + T != clip \
+                    or H % 32 or W % 32:
                 return self._err(400, f"frames {fr[1]} are no MiniMax-H3 keyframe or guide clip")
-            t = 1 if T == 1 else (T - 5) // 17 * 5 + 2
-            g = fr[3].astype(np.float32).mean(axis=(0, 3)).reshape(H // 16, 16, W // 16, 16)
+            else:
+                t = 1 if T == 1 else (T - 5) // 17 * 5 + 2
+            x = fr[3].astype(np.float32) / (255.0 if fr[0] == "U8" else 1.0)
+            g = x.mean(axis=(0, 3)).reshape(H // 16, 16, W // 16, 16)
             z = np.broadcast_to(g.mean(axis=(1, 3)), (1, 24, t, H // 16, W // 16))
-            self.st.event(kind="video_encode", shape=fr[1])
+            self.st.event(kind="video_encode", shape=fr[1], dtype=fr[0], at=at, open=is_open)
             return self._send(200, write_body({"latents": np.ascontiguousarray(z, np.float32)}),
                               ctype=CONTENT_TYPE)
         wav = tensors.get("waveform")

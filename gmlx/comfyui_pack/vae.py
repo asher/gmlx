@@ -130,6 +130,8 @@ class GmlxVideoVAE(_ServerVAE):
         stride = int(vae.get("stride", lat.get("stride", 16)))
         self.latent_channels = int(lat.get("channels", 24))
         self.output_channels = int(vae.get("channels_out", 3))
+        # A server that names no window takes a clip in one body.
+        self.encode_pieces = int(vae.get("encode_pieces") or 0)
         self.latent_dim = 3
         self.upscale_ratio = (h3_frames, stride, stride)
         self.downscale_ratio = (h3_latents, stride, stride)
@@ -146,7 +148,8 @@ class GmlxVideoVAE(_ServerVAE):
         """Model-space latents (1, 24, t, h, w) of frames (T, H, W, C) in
         [0, 1], a keyframe or a guide clip at the clip's canvas."""
         pixels = self.vae_encode_crop_pixels(pixel_samples.detach().float().cpu())
-        return self.gmlx_client.video_encode(self.gmlx_model, pixels).float()
+        return self.gmlx_client.video_encode(self.gmlx_model, pixels,
+                                             pieces=self.encode_pieces).float()
 
 
 class GmlxAudioVAE(_ServerVAE):

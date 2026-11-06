@@ -509,6 +509,110 @@ class Vaes(Base):
             self.assertIn("'z-image-turbo' is an image model", str(e.exception))
 
 
+class GuideWire(Base):
+    """A guide clip on the wire: uint8 levels when its frames are such
+    levels exactly, float32 otherwise, and a long clip in windows of whole
+    pieces that tile it in order, each within the server's body limit, a
+    window refused for memory sent again once at the window named."""
+
+    def setUp(self):
+        super().setUp()
+        self.stub.video_encode()
+        self.vae = P.nodes.GmlxVideoVAELoader().load(HID, self.stub.url, False)[0]
+        self.vae.gmlx_client.handshake()
+
+    def windows(self):
+        return [(e["shape"][0], e["at"], e["open"], e["dtype"])
+                for e in self.stub.events("video_encode")]
+
+    def test_frames_go_as_uint8_only_when_they_are_levels_exactly(self):
+        """Levels k / 255, as an image read gives them, go as uint8 and
+        come back as the same values; a frame of 0.5 is no level."""
+        levels = torch.randint(0, 256, (5, SIZE, SIZE, 3)).float() / 255
+        self.assertEqual(C.wire_frames(levels).dtype, torch.uint8)
+        self.assertTrue(torch.equal(C.wire_frames(levels).float() / 255, levels))
+        half = levels.clone()
+        half[2, 3, 4, 1] = 0.5
+        self.assertEqual(C.wire_frames(half).dtype, torch.float32)
+        self.vae.encode(levels)
+        self.vae.encode(half)
+        self.assertEqual(self.windows(), [(5, 0, False, "U8"), (5, 0, False, "F32")])
+
+    def test_add_guide_frames_are_levels_and_go_as_uint8(self):
+        """MiniMaxH3AddGuide resizes a clip through PIL's Lanczos at 8 bits,
+        so its frames are levels and go as uint8."""
+        pos, _ = self.cond()
+        _out(H.MiniMaxH3AddGuide.execute(pos, self.latent(), 0, vae=self.vae,
+                                         image=torch.rand(FRAMES, SIZE + 8, SIZE, 3)))
+        self.assertEqual(self.windows(), [(FRAMES, 0, False, "U8")])
+
+    def clip(self, n):
+        """``n`` frames whose pieces of 17 frames each hold one level, its
+        index plus 1, so a latent's value names its piece."""
+        piece = torch.arange(n) // 17 + 1
+        return (piece.float() / 255)[:, None, None, None].expand(n, SIZE, SIZE, 3).contiguous()
+
+    def assert_tiles(self, lat, n):
+        """The clip's 5 k + 2 latents, each window's in turn: the stub
+        gives a window's latents its frames' mean level, which differs
+        from window to window, so a window out of place shows."""
+        self.assertEqual(lat.shape[2], 5 * -(-n // 17) - 3)
+        clip, want = self.clip(n), []
+        for size, at, is_open, _ in self.windows():
+            level = clip[at:at + size, 0, 0, 0].mean().item()
+            want += [level] * (size // 17 * 5 + (0 if is_open else 2))
+        got = lat[0, 0, :, 0, 0].tolist()
+        self.assertEqual(len(got), len(want))
+        for g, w in zip(got, want):
+            self.assertAlmostEqual(g, w, places=5)
+
+    def test_a_362_frame_guide_goes_in_three_windows(self):
+        """The longest guide ComfyUI makes at 15 s: windows of 7 pieces,
+        two open ones of 119 frames and the last 124, uint8, to 107
+        latents."""
+        lat = self.vae.encode(self.clip(362))
+        self.assertEqual(self.windows(), [(119, 0, True, "U8"), (119, 119, True, "U8"),
+                                          (124, 238, False, "U8")])
+        self.assert_tiles(lat, 362)
+
+    def test_a_window_fits_the_servers_body_limit(self):
+        """Float32 frames past the body limit at 7 pieces go 2 pieces a
+        window, 39 frames of 49152 bytes and the header in the limit."""
+        self.stub.video_encode(max_body=(1 << 20) + 39 * SIZE * SIZE * 3 * 4)
+        self.vae.gmlx_client.handshake()
+        frames = self.clip(73)
+        frames[0, 0, 0, 0] = 0.5
+        lat = self.vae.encode(frames)
+        self.assertEqual([w[:3] for w in self.windows()], [(34, 0, True), (39, 34, False)])
+        self.assertEqual({w[3] for w in self.windows()}, {"F32"})
+        self.assertEqual(lat.shape[2], 22)
+
+    def test_a_window_refused_for_memory_goes_again_at_the_window_named(self):
+        """The first window is refused from its header, naming 3 pieces;
+        the clip then goes 51 frames a window, in order, once more."""
+        self.stub.video_encode(refuse=[3])
+        lat = self.vae.encode(self.clip(362))
+        (refused,) = self.stub.events("video_encode_refused")
+        self.assertEqual((refused["shape"][0], refused["window"]), (119, 3))
+        self.assertEqual([w[:3] for w in self.windows()],
+                         [(51, at, True) for at in range(0, 306, 51)] + [(56, 306, False)])
+        self.assert_tiles(lat, 362)
+
+    def test_a_second_refusal_shows_the_servers_text(self):
+        """A window refused again after the retry, or one naming no window
+        that fits, stops with the server's text, drained and answered, not
+        a lost connection."""
+        for refuse in ([3, 2], [0]):
+            with self.subTest(refuse=refuse):
+                self.stub.reset()
+                self.stub.video_encode(refuse=refuse)
+                with self.assertRaises(C.GmlxError) as e:
+                    self.vae.encode(self.clip(362))
+                self.assertIn("does not fit in memory beside the models now loaded",
+                              str(e.exception))
+                self.assertNotIn("did not answer", str(e.exception))
+                self.assertEqual(self.windows(), [])
+
 def _rows_noise(z: torch.Tensor, seed: int) -> list:
     """The noise ComfyUI's forward mixes into the rows of video latent
     ``z`` at ``seed``: a CPU generator restarted for it, in the rows'

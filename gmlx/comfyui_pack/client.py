@@ -592,11 +592,40 @@ class StepClient:
                                       {"model": model}, what="the audio VAE decode")
         return out["waveform"]
 
-    def video_encode(self, model: str, frames: torch.Tensor) -> torch.Tensor:
-        """Video latents (1, C, t, h, w) of frames (T, H, W, 3) in [0, 1]."""
-        out, _, _ = self.call_tensors("/vae/video/encode", {"frames": frames.float()},
-                                      {"model": model}, what="the video VAE encode")
-        return out["latents"]
+    def video_encode(self, model: str, frames: torch.Tensor,
+                     pieces: int | None = None) -> torch.Tensor:
+        """Video latents (1, C, t, h, w) of frames (T, H, W, 3) in [0, 1].
+        A server that names its window of ``pieces`` pieces of 17 frames
+        takes the frames as uint8 levels when they are such levels
+        exactly, and a long clip in windows that tile it in order, each
+        within its body limit. A window refused for memory is sent again
+        once, at the window the refusal names."""
+        what = "the video VAE encode"
+        if not pieces:
+            out, _, _ = self.call_tensors("/vae/video/encode", {"frames": frames.float()},
+                                          {"model": model}, what=what)
+            return out["latents"]
+        wire = wire_frames(frames)
+        limit = int(((getattr(self, "capabilities", None) or {}).get("limits") or {}).get(
+            "max_body_bytes") or 0)
+        m = window_pieces(pieces, frames[0].numel() * wire.element_size(), limit)
+        n, at, parts, retried = len(wire), 0, [], False
+        while at < n:
+            size, is_open = next_window(n, at, m)
+            fields = {"model": model, "at": at, "clip_frames": n, "open": is_open}
+            s, _, d = self.request("POST", PREFIX + "/vae/video/encode",
+                                   pack({"frames": wire[at:at + size]}, fields),
+                                   {"Content-Type": CONTENT_TYPE})
+            if s == 400 and not retried:
+                k = _refused_window(d)
+                if k is not None and 0 < k < m:
+                    m, retried = k, True
+                    continue
+            if s != 200:
+                self._fail(s, d, what)
+            parts.append(unpack(d)[0]["latents"])
+            at += size
+        return torch.cat(parts, dim=2)
 
     def audio_encode(self, model: str, waveform: torch.Tensor) -> torch.Tensor:
         """Audio latents (1, C, 2, T) of a waveform (1, 2, samples)."""
@@ -625,6 +654,43 @@ class StepClient:
         self.call_json("POST", "/interrupt", {"run": run}, what="the interrupt",
                        timeout=INTERRUPT_TIMEOUT)
 
+
+
+def wire_frames(frames: torch.Tensor) -> torch.Tensor:
+    """Frames in [0, 1] as uint8 levels when each is k / 255 exactly as
+    float32, which a level k read from an image gives, else as float32."""
+    f = frames.float()
+    u8 = (f * 255).round().clamp(0, 255).to(torch.uint8)
+    return u8 if torch.equal(u8.float() / 255, f) else f
+
+
+def window_pieces(pieces: int, frame_bytes: int, limit: int) -> int:
+    """The pieces of 17 frames a window takes: at most the server's
+    ``pieces``, and few enough that a window of them and the 5 frames of
+    a clip's end fit a body of ``limit`` bytes, with 1 MiB for the
+    header."""
+    if limit <= 0:
+        return pieces
+    fit = ((limit - (1 << 20)) // max(frame_bytes, 1) - 5) // 17
+    return max(1, min(pieces, fit))
+
+
+def next_window(n: int, at: int, m: int) -> tuple[int, bool]:
+    """``(frames, open)`` of the window at frame ``at`` of an ``n``-frame
+    clip in windows of ``m`` pieces: an open window of 17 m frames while
+    more than 17 m + 5 are left, then the rest, 1 or 17 j + 5 frames."""
+    left = n - at
+    return (17 * m, True) if left > 17 * m + 5 else (left, False)
+
+
+def _refused_window(data: bytes) -> int | None:
+    """The window a refusal for memory names, if it names one."""
+    try:
+        doc = json.loads(data)
+    except ValueError:
+        return None
+    k = doc.get("window") if isinstance(doc, dict) else None
+    return k if isinstance(k, int) and not isinstance(k, bool) else None
 
 # The interrupt is sent while the user waits on Cancel.
 INTERRUPT_TIMEOUT = 5.0

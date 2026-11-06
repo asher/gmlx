@@ -628,6 +628,33 @@ class Cases:
         self.check("video saved", any(f.startswith("h3_") and f.endswith(".mp4") for f in saved),
                    saved)
 
+    async def h3_long_guide(self):
+        """A 15 s clip guided from frame 0 by a 362-frame clip, the longest
+        guide ComfyUI makes at that length: MiniMaxH3AddGuide's frames go
+        to the gmlx video VAE as uint8 levels in windows of 7 pieces that
+        tile the clip, and every step anchors the guide at frame 0."""
+        wf = workflow("minimax-h3-t2v.json")
+        wf["6"]["inputs"].update(width=64, height=64, length=362)
+        wf["7"]["inputs"]["steps"] = 1
+        wf["15"]["inputs"]["filename_prefix"] = "video/h3-guide"
+        wf["90"] = {"class_type": "EmptyImage",
+                    "inputs": {"width": 80, "height": 64, "batch_size": 362, "color": 0x336699}}
+        wf["91"] = {"class_type": "MiniMaxH3AddGuide",
+                    "inputs": {"positive": ["6", 0], "latent": ["6", 1], "frame_idx": 0,
+                               "vae": ["3", 0], "image": ["90", 0]}}
+        wf["10"]["inputs"]["conditioning"] = ["91", 0]
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        got = [(e["shape"][0], e["at"], e["open"], e["dtype"]) for e in kinds(log, "video_encode")]
+        self.check("the guide in three uint8 windows that tile it",
+                   got == [(119, 0, True, "U8"), (119, 119, True, "U8"), (124, 238, False, "U8")],
+                   got)
+        steps = kinds(log, "av_step")
+        self.check("the step anchors the guide at frame 0",
+                   len(steps) == 1 and [a["frame"] for a in steps[0]["anchors"]] == [0],
+                   [e["anchors"] for e in steps])
+
     async def h3_i2v(self):
         """The MiniMax-H3 first frame workflow: the image from Load Image
         encoded with the prompt and by the gmlx video VAE, and every step
@@ -773,6 +800,7 @@ async def amain(a) -> dict:
             await c.case("moss-image: a prompt queued behind the running one", c.moss_queued)
             await c.case("minimax-h3 t2v with the gmlx video and audio VAEs", c.h3_t2v)
             await c.case("minimax-h3 i2v from a Load Image first frame", c.h3_i2v)
+            await c.case("minimax-h3 with a 362-frame guide clip", c.h3_long_guide)
             await c.case("fasth3 t2v on its trained sigmas", c.fasth3_t2v)
             if comfy_version(a.comfy) >= (0, 41, 0):
                 await c.case("flux-3-klein t2i", c.flux3_t2i)
