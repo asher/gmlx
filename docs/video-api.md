@@ -130,9 +130,9 @@ job keeps its record until it expires, and a second `DELETE` removes it.
 ## The job store
 
 The jobs, their inputs and their MP4s live under
-`~/.cache/gmlx/videos/<port>/`. A job and its MP4 last
-[`video.job_ttl_s`](config.md#video-jobs) seconds from its creation, a day
-by default, and then read as 404. Past
+`~/.cache/gmlx/videos/<port>/`. A finished job and its MP4 last
+[`video.job_ttl_s`](config.md#video-jobs) seconds from when it finishes, a
+day by default, and then read as 404. Past
 [`video.store_max_bytes`](config.md#video-jobs) the oldest MP4s go first,
 and their jobs with them. The files of a job's form go to the store as
 they arrive, and so do the images of a JSON body's keyframes. A form

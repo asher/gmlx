@@ -742,7 +742,7 @@ models under [`video_models`](#video-models).
 | Key | Default | Meaning |
 |-----|---------|---------|
 | <a id="servervideomax_queue"></a>`video.max_queue` | `2` | Video jobs that may wait behind the one running. One more gets 429 with `Retry-After`. |
-| <a id="servervideojob_ttl_s"></a>`video.job_ttl_s` | `86400` | Seconds a job and its MP4 stay available from the job's creation |
+| <a id="servervideojob_ttl_s"></a>`video.job_ttl_s` | `86400` | Seconds a finished job and its MP4 stay available from when the job finishes. A job still queued that long after its creation never runs. |
 | <a id="servervideostore_max_bytes"></a>`video.store_max_bytes` | `8G` | Most bytes of MP4s and job inputs kept at once, as bytes or a size such as `20G`. The oldest MP4s go first. |
 
 ### Structured decisions

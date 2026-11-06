@@ -98,9 +98,9 @@ def test_a_job_runs_from_queued_to_completed_with_its_record_on_disk(
     rec = store.get(job.id)
     assert (rec["status"], rec["progress"], rec["error"]) == (
         "completed", 100, None)
-    # Its expiry is fixed when it is created, not when it ends.
-    assert rec["expires_at"] == expires
+    # Its record and clip last job_ttl_s from its end.
     assert rec["completed_at"] == rec["created_at"] + 500
+    assert rec["expires_at"] == rec["completed_at"] + 86400 == expires + 500
     assert _on_disk(store, job.id)["status"] == "completed"
     assert store.content(job.id) == store.clip(job.id)
     # Its inputs go when it ends.
@@ -224,6 +224,26 @@ def test_a_job_past_its_expiry_is_gone_before_any_sweep(tmp_path):
     store.sweep()
     assert not os.path.exists(store.clip(job.id))
     assert not os.path.exists(store._record_path(job.id))
+
+
+def test_a_job_that_runs_past_its_expiry_keeps_its_clip_from_its_end(
+        tmp_path):
+    """A clip that takes longer than job_ttl_s is kept job_ttl_s from
+    when it finishes, not read as 404 and swept at once."""
+    def run(job, store):
+        clock.now += 100
+        _clip(job, store)
+
+    store, clock, driver = _store(tmp_path, run, job_ttl_s=60)
+    job = _submit(store)
+    driver.run()
+    store.sweep()
+    assert store.get(job.id)["status"] == "completed"
+    assert store.content(job.id) == store.clip(job.id)
+    clock.now += 59
+    assert store.content(job.id) is not None
+    clock.now += 1
+    assert store.get(job.id) is None
 
 
 def test_the_store_sweeps_at_install_and_after_each_job(tmp_path):
@@ -844,6 +864,32 @@ def test_a_form_streams_its_files_to_the_jobs_inputs(routes):
                                      os.path.join(folder, "guide_0"), 0,
                                      "guides[0] (guide_0)")]
     assert job.params["guide_no_audio"] is True
+
+
+@pytest.mark.parametrize("guides, text", [
+    (json.dumps([{"file": "guide_0", "kind": []}]),
+     "guides[0].kind is video or audio"),
+    (json.dumps([{"file": {}}]), "guides[0].file names a file field"),
+    ("[" * 100_000, "guides is a JSON list")])
+def test_a_malformed_guides_field_is_a_400(routes, guides, text):
+    """A guide whose kind or file is not a string, or a guides field too
+    deep to parse, is the field's 400, never a 500."""
+    body, ctype = _form({"prompt": "a cat", "guides": guides},
+                        {"guide_0": _png(64, 64)})
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": ctype})
+    assert r.status_code == 400, r.text
+    assert text in r.json()["error"]["message"]
+    assert routes.store.jobs == {}
+
+
+def test_a_seed_past_any_number_is_a_400(routes):
+    """1e999 parses to inf, which int() refuses with OverflowError."""
+    r = routes.client.post("/v1/videos",
+                           content=b'{"prompt": "a cat", "seed": 1e999}',
+                           headers={"content-type": "application/json"})
+    assert r.status_code == 400, r.text
+    assert "seed is a whole number" in r.json()["error"]["message"]
 
 
 def test_a_form_past_the_store_room_is_a_413_before_its_read(routes):

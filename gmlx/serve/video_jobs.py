@@ -5,8 +5,9 @@ A job is the OpenAI video object with a gmlx part, kept as
 rename, at each change of status. Its inputs are files under
 ``inputs/<id>/`` until it ends, and its clip is ``files/<id>.mp4``,
 muxed as a ``.part`` and renamed once whole. A job lives for
-``server.video.job_ttl_s`` from its creation, and past
-``store_max_bytes`` the oldest finished clips go first.
+``server.video.job_ttl_s`` from its creation, and once it ends for
+``job_ttl_s`` from its end. Past ``store_max_bytes`` the oldest finished
+clips go first.
 
 The driver thread, ``video-jobs``, runs one job at a time in order and
 does no MLX work: it reads the anchors' headers, has the upsampler
@@ -451,10 +452,16 @@ class VideoJobs:
 
     # Transitions; under ``lock``.
 
-    def _end(self, job: Job, status: str, error: dict | None = None) -> None:
+    def _end(self, job: Job, status: str, error: dict | None = None,
+             keep_expiry: bool = False) -> None:
+        """End ``job`` with ``status``. Its record and clip last
+        job_ttl_s from now, unless ``keep_expiry``."""
         rec = job.record
         rec["status"] = status
         rec["completed_at"] = int(self._time())
+        if not keep_expiry:
+            rec["expires_at"] = (rec["completed_at"]
+                                 + int(self.settings.job_ttl_s))
         rec["error"] = error
         rec.get("gmlx", {}).pop("eta_s", None)
         if status == DONE:
@@ -521,7 +528,7 @@ class VideoJobs:
                     "code": "timed_out",
                     "message": "the job was still queued when it expired; "
                     "submit it again, or raise server.video.job_ttl_s",
-                    "type": "server_error", "status": 503})
+                    "type": "server_error", "status": 503}, keep_expiry=True)
                 self._drop_inputs(job.id)
                 job.kept.clear()
                 return
