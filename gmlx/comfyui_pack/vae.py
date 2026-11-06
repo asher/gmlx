@@ -18,7 +18,12 @@ import comfy.model_patcher
 import comfy.sd
 
 from .client import GmlxRefusal, StepClient
-from .patcher import CPU
+from .patcher import CPU, FASTH3, H3_NO_REFS
+
+# The stock nodes whose VAE encodes a gmlx model refuses at its AV step:
+# references on every MiniMax-H3, keyframes and guides on FastH3.
+REFS_NODE = "MiniMaxH3ReferenceToVideo"
+ANCHOR_NODES = ("MiniMaxH3AddGuide", "MiniMaxH3ImageToVideo")
 
 
 class _StubDecoder(torch.nn.Module):
@@ -119,6 +124,23 @@ def h3_latents(frames: int) -> int:
     return max(1, 2 + 5 * _grid_steps(frames, 5, 17))
 
 
+def _refuse_before_encode(vae, variant) -> None:
+    """Refuse an encode the AV step would refuse, before it reaches the
+    server: a reference of MiniMaxH3ReferenceToVideo, or a keyframe or
+    guide on FastH3. A plain VAE Encode is not refused."""
+    from .model import _running
+
+    graph, sid = _running()
+    node = (graph.get(sid) or {}).get("class_type") if graph else None
+    if node == REFS_NODE:
+        raise GmlxRefusal(f"gmlx: references (from {REFS_NODE}) reached a gmlx VAE; "
+                          f"{H3_NO_REFS}")
+    if node in ANCHOR_NODES and variant == FASTH3:
+        raise GmlxRefusal(f"gmlx: {vae.gmlx_model!r} is FastH3, which runs text to video "
+                          f"only, and {node} encodes a keyframe or guide on its VAE; run it "
+                          "without keyframes or guides, or on h3")
+
+
 class GmlxVideoVAE(_ServerVAE):
     """MiniMax-H3's video VAE: model-space latents (1, 24, T, h, w) to
     frames, at 17 k + 5 frames for 5 k + 2 latents and 16x in space."""
@@ -127,6 +149,7 @@ class GmlxVideoVAE(_ServerVAE):
         lat = status.get("latent") or {}
         vae = status.get("vae") or {}
         self._bind(client, model_id)
+        self.gmlx_variant = status.get("variant")
         stride = int(vae.get("stride", lat.get("stride", 16)))
         self.latent_channels = int(lat.get("channels", 24))
         self.output_channels = int(vae.get("channels_out", 3))
@@ -147,6 +170,7 @@ class GmlxVideoVAE(_ServerVAE):
     def encode(self, pixel_samples):
         """Model-space latents (1, 24, t, h, w) of frames (T, H, W, C) in
         [0, 1], a keyframe or a guide clip at the clip's canvas."""
+        _refuse_before_encode(self, self.gmlx_variant)
         pixels = self.vae_encode_crop_pixels(pixel_samples.detach().float().cpu())
         return self.gmlx_client.video_encode(self.gmlx_model, pixels,
                                              pieces=self.encode_pieces).float()
@@ -159,6 +183,7 @@ class GmlxAudioVAE(_ServerVAE):
     def __init__(self, client: StepClient, model_id: str, status: dict):
         audio = status.get("audio") or {}
         self._bind(client, model_id)
+        self.gmlx_variant = status.get("variant")
         self.latent_channels = int(audio.get("channels", 32))
         self.output_channels = int(audio.get("stereo", 2))
         self.audio_sample_rate = int(audio.get("sample_rate", 32000))
@@ -177,5 +202,6 @@ class GmlxAudioVAE(_ServerVAE):
         """Model-space audio latents (1, 32, 2, T) of a waveform (1,
         samples, channels) at 32 kHz, cut to whole latents about its middle
         as ComfyUI's encode cuts it."""
+        _refuse_before_encode(self, self.gmlx_variant)
         wave = self.vae_encode_crop_pixels(pixel_samples.detach().float().cpu())
         return self.gmlx_client.audio_encode(self.gmlx_model, wave.movedim(-1, 1)).float()

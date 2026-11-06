@@ -907,6 +907,48 @@ class Refusals(Base):
                              f"MiniMaxH3ReferenceToVideo) reached a gmlx CLIP; {NO_REFS}")
         self.assertEqual(self.stub.events("encode"), [])
 
+    def running(self, node):
+        """Run the test body as if ComfyUI ran the stock node ``node``."""
+        real = P.model._running
+        P.model._running = lambda: ({"9": {"class_type": node, "inputs": {}}}, "9")
+        self.addCleanup(setattr, P.model, "_running", real)
+
+    def test_references_are_refused_before_the_vaes_encode_them(self):
+        clip = P.nodes.GmlxCLIPLoader().load(HID, self.stub.url, False)[0]
+        video = P.nodes.GmlxVideoVAELoader().load(HID, self.stub.url, False)[0]
+        audio = P.nodes.GmlxAudioVAELoader().load(HID, self.stub.url, False)[0]
+        self.running("MiniMaxH3ReferenceToVideo")
+        sound = {"waveform": torch.rand(1, 2, 32000), "sample_rate": 32000}
+        for given in ({"vae": video, "ref_images": {"ref_image_1": torch.rand(1, SIZE, SIZE, 3)}},
+                      {"audio_vae": audio, "ref_audios": {"ref_audio_1": sound}}):
+            with self.subTest(sorted(given)), self.assertRaises(C.GmlxRefusal) as e:
+                H.MiniMaxH3ReferenceToVideo.execute(clip, "a dog", SIZE, SIZE, FRAMES, **given)
+            self.assertEqual(str(e.exception), "gmlx: references (from MiniMaxH3ReferenceToVideo) "
+                             f"reached a gmlx VAE; {NO_REFS}")
+        self.assertEqual(self.stub.events("video_encode") + self.stub.events("audio_encode"), [])
+
+    def test_fasth3_refuses_a_guide_before_its_vae_encodes_it(self):
+        video = P.nodes.GmlxVideoVAELoader().load(FID, self.stub.url, False)[0]
+        pos, _ = self.cond()
+        self.running("MiniMaxH3AddGuide")
+        with self.assertRaises(C.GmlxRefusal) as e:
+            H.MiniMaxH3AddGuide.execute(pos, self.latent(), 0, vae=video,
+                                        image=torch.rand(1, SIZE, SIZE, 3))
+        self.assertEqual(str(e.exception), "gmlx: 'fasth3' is FastH3, which runs text to video "
+                         "only, and MiniMaxH3AddGuide encodes a keyframe or guide on its VAE; "
+                         "run it without keyframes or guides, or on h3")
+        self.assertEqual(self.stub.events("video_encode"), [])
+
+    def test_a_plain_vae_encode_on_fasth3_and_a_guide_on_h3_are_sent(self):
+        image = torch.rand(1, SIZE, SIZE, 3)
+        self.running("VAEEncode")
+        fast = P.nodes.GmlxVideoVAELoader().load(FID, self.stub.url, False)[0]
+        comfy_nodes.VAEEncode().encode(fast, image)
+        self.running("MiniMaxH3AddGuide")
+        video = P.nodes.GmlxVideoVAELoader().load(HID, self.stub.url, False)[0]
+        H.MiniMaxH3AddGuide.execute(self.cond()[0], self.latent(), 0, vae=video, image=image)
+        self.assertEqual(len(self.stub.events("video_encode")), 2)
+
     def test_fasth3_refuses_keyframes_at_the_encode(self):
         clip = P.nodes.GmlxCLIPLoader().load(FID, self.stub.url, False)[0]
         video = P.nodes.GmlxVideoVAELoader().load(FID, self.stub.url, False)[0]
