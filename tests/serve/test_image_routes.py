@@ -995,7 +995,7 @@ def test_the_gate_leaves_an_images_body_to_the_route_and_its_price(
     monkeypatch.setattr(mg, "BODY_MAX_BYTES", len(body) // 2)
     monkeypatch.setattr(mg, "MEDIA_MAX_BYTES", len(png) // 2)
     monkeypatch.setattr(body_intake, "free_bytes", lambda: body_intake.json_held(
-        body.encode(), images.JSON_COPIES))
+        body.encode(), images.JSON_COPIES, images.JSON_STR_COPIES))
     r = TestClient(_gated_app()).post(
         "/v1/images/edits", content=body,
         headers={"content-type": "application/json"})
@@ -1055,9 +1055,8 @@ def test_an_images_body_is_priced_at_the_copies_its_parse_holds(
     else:
         body, ctype = _edit_form(prompt)
         path, copies = "/v1/images/edits", images.FORM_COPIES
-    need = math.ceil(len(body) * copies)
-    if kind == "json":
-        need += 64 * (sum(body.count(c) for c in (b",", b"[", b"{")) + 1)
+    need = (_json_need(body, copies) if kind == "json"
+            else math.ceil(len(body) * copies))
     for free, status in ((need - 1, 413), (need, 200)):
         monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
         r = TestClient(_gated_app()).post(path, content=body,
@@ -1070,26 +1069,49 @@ def test_an_images_body_is_priced_at_the_copies_its_parse_holds(
     assert len(served.jobs) == 1
 
 
-def _small_values(n: int) -> tuple[bytes, bytes]:
-    """Two JSON bodies of one length near ``n``: one of empty objects in
-    a list, and one whose length is a single string."""
-    head = b'{"prompt": "a cat", "x": ['
-    empties = head + b",".join([b"{}"] * ((n - len(head)) // 3)) + b"]}"
-    string = b'{"prompt": "' + b"a" * (len(empties) - 14) + b'"}'
-    assert len(string) == len(empties)
-    return empties, string
+def _json_need(body: bytes, copies: float) -> int:
+    """What a JSON body's read and parse hold, as priced: its copies, two
+    of them strs at 4 bytes a character in a body that is not ASCII or
+    holds a \\u escape, and 80 bytes for each value it can parse to."""
+    wide = not body.isascii() or b"\\u" in body
+    count = sum(body.count(c) for c in (b",", b":", b"[", b"{"))
+    return math.ceil(len(body) * (copies + (6 if wide else 0))) + \
+        80 * (count + 1)
 
 
-def test_an_images_json_body_of_small_values_is_priced_by_its_values(
-        served, monkeypatch):
-    """A body of empty objects parses to far more than its length: it is
-    refused where a body of one string of its length fits."""
+def _shaped(shape: str, n: int = 64 << 10) -> bytes:
+    """A JSON body of about ``n`` bytes whose parse the price must bound:
+    lists of small values, a dict of short keys, a prompt with one emoji
+    escaped or literal, or one plain string."""
+    emoji = "\U0001F600"
+    if shape in ("emoji_escaped", "emoji_literal", "string"):
+        prompt = "a" * n + ("" if shape == "string" else emoji)
+        return json.dumps({"prompt": prompt},
+                          ensure_ascii=shape != "emoji_literal").encode()
+    unit = {"objects": "{}", "floats": "0.5", "strs": '"ab"'}.get(shape)
+    if unit is not None:
+        x = "[" + ",".join([unit] * (n // (len(unit) + 1))) + "]"
+    else:
+        x = "{" + ",".join(f'"k{i}":0' for i in range(n // 8)) + "}"
+    return f'{{"prompt": "a cat", "x": {x}}}'.encode()
+
+
+SHAPES = ["objects", "floats", "strs", "pairs", "emoji_escaped",
+          "emoji_literal", "string"]
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_an_images_json_body_is_priced_by_what_its_parse_makes(
+        served, monkeypatch, shape):
+    """Small values parse to far more than their text, and one emoji
+    widens every str of the body: each shape is refused a byte under its
+    price and fits at it."""
     from gmlx.serve.patches import body_intake
 
-    empties, string = _small_values(96 << 10)
-    free = math.ceil(len(empties) * images.JSON_COPIES) + 64 * 16
-    monkeypatch.setattr(body_intake, "free_bytes", lambda: free)
-    for body, status in ((empties, 413), (string, 200)):
+    body = _shaped(shape)
+    need = _json_need(body, 5)
+    for free, status in ((need - 1, 413), (need, 200)):
+        monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
         r = TestClient(_gated_app()).post(
             "/v1/images/generations", content=body,
             headers={"content-type": "application/json"})

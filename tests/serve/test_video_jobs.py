@@ -910,22 +910,23 @@ def test_a_json_body_past_the_free_figure_is_a_413_with_no_byte_read(
         conn.close()
 
 
-@pytest.mark.parametrize("kind", ["json", "form"])
+@pytest.mark.parametrize("kind", ["json", "form", "form_wide"])
 def test_a_video_body_is_priced_at_the_copies_its_parse_holds(
         routes, monkeypatch, kind):
     """A JSON body is held a few times over while it is read and parsed,
-    and a form's text twice: each fits only where all its copies fit."""
+    and a form's text twice, or six times once a chunk of it is not
+    ASCII: each fits only where all its copies fit."""
     url = "data:image/png;base64," + base64.b64encode(_png()).decode()
     text = "a" * (256 << 10)
     if kind == "json":
         body = json.dumps({"prompt": text, "first_frame": url}).encode()
-        ctype, n, copies = "application/json", len(body), videos.JSON_COPIES
+        ctype = "application/json"
+        need = _json_need(body, 4.25)
     else:
+        text += "\U0001F600" if kind == "form_wide" else ""
         body, ctype = _form({"prompt": text}, {"first_frame": _png()})
-        n, copies = len(text), body_intake.FORM_TEXT_COPIES
-    need = math.ceil(n * copies)
-    if kind == "json":
-        need += 64 * (sum(body.count(c) for c in (b",", b"[", b"{")) + 1)
+        copies = 6.25 if kind == "form_wide" else 2.25
+        need = math.ceil(len(text.encode()) * copies)
     for free, status in ((need - 1, 413), (need, 200)):
         monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
         r = routes.client.post("/v1/videos", content=body,
@@ -939,32 +940,55 @@ def test_a_video_body_is_priced_at_the_copies_its_parse_holds(
     assert routes.store.pending == {}
 
 
-def _small_values(n: int) -> tuple[bytes, bytes]:
-    """Two JSON bodies of one length near ``n``: one of empty objects in
-    a list, and one whose length is a single string."""
-    head = b'{"prompt": "a cat", "x": ['
-    empties = head + b",".join([b"{}"] * ((n - len(head)) // 3)) + b"]}"
-    string = b'{"prompt": "' + b"a" * (len(empties) - 14) + b'"}'
-    assert len(string) == len(empties)
-    return empties, string
+def _json_need(body: bytes, copies: float) -> int:
+    """What a JSON body's read and parse hold, as priced: its copies, two
+    of them strs at 4 bytes a character in a body that is not ASCII or
+    holds a \\u escape, and 80 bytes for each value it can parse to."""
+    wide = not body.isascii() or b"\\u" in body
+    count = sum(body.count(c) for c in (b",", b":", b"[", b"{"))
+    return math.ceil(len(body) * (copies + (6 if wide else 0))) + \
+        80 * (count + 1)
 
 
-def test_a_json_body_of_small_values_is_priced_by_its_values(routes,
-                                                             monkeypatch):
-    """A body of empty objects parses to far more than its length: it is
-    refused where a body of one string of its length fits."""
-    empties, string = _small_values(96 << 10)
-    free = math.ceil(len(empties) * videos.JSON_COPIES) + 64 * 16
-    monkeypatch.setattr(body_intake, "free_bytes", lambda: free)
-    r = routes.client.post("/v1/videos", content=empties,
-                           headers={"content-type": "application/json"})
-    assert r.status_code == 413, r.text
-    assert r.json()["error"]["message"].startswith(
-        f"the request body is {body_intake._mib(len(empties), True)}, its "
-        "read and parse hold ")
-    r = routes.client.post("/v1/videos", content=string,
-                           headers={"content-type": "application/json"})
-    assert r.status_code == 200, r.text
+def _shaped(shape: str, n: int = 64 << 10) -> bytes:
+    """A JSON body of about ``n`` bytes whose parse the price must bound:
+    lists of small values, a dict of short keys, a prompt with one emoji
+    escaped or literal, or one plain string."""
+    emoji = "\U0001F600"
+    if shape in ("emoji_escaped", "emoji_literal", "string"):
+        prompt = "a" * n + ("" if shape == "string" else emoji)
+        return json.dumps({"prompt": prompt},
+                          ensure_ascii=shape != "emoji_literal").encode()
+    unit = {"objects": "{}", "floats": "0.5", "strs": '"ab"'}.get(shape)
+    if unit is not None:
+        x = "[" + ",".join([unit] * (n // (len(unit) + 1))) + "]"
+    else:
+        x = "{" + ",".join(f'"k{i}":0' for i in range(n // 8)) + "}"
+    return f'{{"prompt": "a cat", "x": {x}}}'.encode()
+
+
+SHAPES = ["objects", "floats", "strs", "pairs", "emoji_escaped",
+          "emoji_literal", "string"]
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_a_json_body_is_priced_by_what_its_parse_makes(routes, monkeypatch,
+                                                       shape):
+    """Small values parse to far more than their text, and one emoji
+    widens every str of the body: each shape is refused a byte under its
+    price and fits at it."""
+    body = _shaped(shape)
+    need = _json_need(body, 4.25)
+    for free, status in ((need - 1, 413), (need, 200)):
+        monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
+        r = routes.client.post("/v1/videos", content=body,
+                               headers={"content-type": "application/json"})
+        assert r.status_code == status, r.text
+        if status == 413:
+            assert r.json()["error"]["message"].startswith(
+                f"the request body is {body_intake._mib(len(body), True)}, "
+                "its read and parse hold ")
+    assert len(routes.store.jobs) == 1
 
 
 def test_a_jobs_anchor_refusal_names_its_field_not_its_path(tmp_path):

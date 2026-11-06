@@ -51,9 +51,12 @@ FIELDS = ("prompt", "model", "seconds", "size", "seed", "prompt_upsampling",
 KEYFRAMES = ("first_frame", "last_frame")
 # A JSON body is held about four times while it is read: the body, the
 # gate's json.loads, the route's, and a data-URL keyframe's decode,
-# measured at 4.0. The post-V6 parse change removes the copies. The
-# values it parses to add body_intake.JSON_VALUE_BYTES each.
+# measured at 4.0. The post-V6 parse change removes the copies. Two of
+# them are strs (the gate's json.loads and the route's), which widen in a
+# body that is not ASCII, and the values it parses to add
+# body_intake.JSON_VALUE_BYTES each.
 JSON_COPIES = 4.25
+JSON_STR_COPIES = 2
 _KINDS = {"video": "--guide", "audio": "--guide-audio"}
 # The entry plans and encoder tokenizers the estimate reads, by entry.
 _PLANS: dict = {}
@@ -463,7 +466,7 @@ async def create(request: Request):
                 fields = dict(pairs)
             else:
                 raw = await read_in_ram(request, copies=JSON_COPIES,
-                                        is_json=True)
+                                        str_copies=JSON_STR_COPIES)
                 await check_media(request, raw)
                 try:
                     fields = json.loads(raw or b"{}")

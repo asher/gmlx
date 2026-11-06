@@ -39,8 +39,10 @@ VIDEO_PATHS = frozenset({"/v1/videos"})
 # A video form's text fields are held twice while the form is parsed:
 # Starlette's bytearray of each part, with its growth slack, and the str
 # it decodes to. The sum is priced at that factor, measured at 2.1; the
-# post-V6 parse change removes the copy.
+# post-V6 parse change removes the copy. Once a text chunk is not ASCII
+# the str can take 4 bytes a character: measured at 6.1.
 FORM_TEXT_COPIES = 2.25
+FORM_TEXT_WIDE_COPIES = 6.25
 
 
 class BodyRefused(Exception):
@@ -118,17 +120,25 @@ def held(n: int, copies: float) -> int:
     return math.ceil(n * copies)
 
 
-# A JSON value or container parses to an object of 56 bytes or more and
-# a pointer to it: the price counts each one the body can make at this.
-JSON_VALUE_BYTES = 64
+# The bytes a value or container of a parsed JSON body holds past its
+# text, measured at up to 64 (a dict of short keys); priced at 80.
+JSON_VALUE_BYTES = 80
+# The bytes a character of a str takes at most, in a body that is not
+# ASCII or holds a \u escape.
+WIDE_CHAR_BYTES = 4
 
 
-def json_held(raw: bytes, copies: float) -> int:
+def json_held(raw: bytes, copies: float, str_copies: float) -> int:
     """The bytes a JSON body's read and parse hold: ``copies`` of its
-    length, and JSON_VALUE_BYTES for each value or container it can parse
-    to. A value or container starts the body or follows a ",", "[" or
-    "{", so their count bounds it, read with no parse."""
-    count = raw.count(b",") + raw.count(b"[") + raw.count(b"{")
+    length, of which ``str_copies`` are the strs it parses to, each at 4
+    bytes a character when the body is not ASCII or holds a ``\\u``
+    escape, and JSON_VALUE_BYTES for each value or container it can parse
+    to. A value or container starts the body or follows a ",", ":", "["
+    or "{", so their count bounds it, read with no parse."""
+    if not raw.isascii() or b"\\u" in raw:
+        copies += str_copies * (WIDE_CHAR_BYTES - 1)
+    count = (raw.count(b",") + raw.count(b":") + raw.count(b"[")
+             + raw.count(b"{"))
     return held(len(raw), copies) + JSON_VALUE_BYTES * (count + 1)
 
 
@@ -143,13 +153,15 @@ def _over_free(n: int, free: int, sent: bool,
 
 
 async def read_in_ram(request: Request, free: int | None = None,
-                      copies: float = 1, is_json: bool = False) -> bytes:
+                      copies: float = 1,
+                      str_copies: float | None = None) -> bytes:
     """The body of ``request``, priced against ``free`` bytes (the pool's
     free figure when None) before a byte of it is read, at the ``copies``
     of it the route's read and parse hold. A body with no Content-Length
     is refused once what arrived, at that factor, passes the figure. A
-    JSON body (``is_json``) is priced again once read and before it is
-    parsed, with the values it can parse to (:func:`json_held`). The body
+    JSON body, whose parse makes ``str_copies`` of its strs, is priced
+    again once read and before it is parsed, with the width of its strs
+    and the values it can parse to (:func:`json_held`). The body
     read is kept on the request, so ``request.form()`` and
     ``request.json()`` parse it after."""
     if free is None:
@@ -164,8 +176,8 @@ async def read_in_ram(request: Request, free: int | None = None,
             raise _over_free(size, free, False, copies)
         chunks.append(chunk)
     raw = b"".join(chunks)
-    if is_json and free is not None:
-        need = json_held(raw, copies)
+    if str_copies is not None and free is not None:
+        need = json_held(raw, copies, str_copies)
         if need > free:
             raise BodyRefused(413, f"the request body is "
                               f"{_mib(len(raw), True)}, its read and parse "
@@ -245,6 +257,7 @@ async def read_form_to_disk(request: Request, folder: str, take,
     began: list = []
     names: dict = {}
     text = [0]
+    wide = [False]
 
     class _ToDisk(MultiPartParser):
         def on_headers_finished(self) -> None:
@@ -270,11 +283,14 @@ async def read_form_to_disk(request: Request, folder: str, take,
                 super().on_part_data(data, start, end)
                 return
             # The text fields stay in RAM: their sum is priced, not each,
-            # at the copies the parse holds.
-            text[0] += end - start
-            if free is not None and held(text[0], FORM_TEXT_COPIES) > free:
-                raise _over_free(text[0], free, False, FORM_TEXT_COPIES)
-            part.data.extend(data[start:end])
+            # at the copies the parse holds, wide once a chunk is not ASCII.
+            chunk = data[start:end]
+            text[0] += len(chunk)
+            wide[0] = wide[0] or not chunk.isascii()
+            copies = FORM_TEXT_WIDE_COPIES if wide[0] else FORM_TEXT_COPIES
+            if free is not None and held(text[0], copies) > free:
+                raise _over_free(text[0], free, False, copies)
+            part.data.extend(chunk)
 
     async def stream():
         held, got = room, 0
