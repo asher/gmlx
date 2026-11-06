@@ -946,10 +946,11 @@ class _ResidencyPool:
             led.pending = int(need)
 
     def upload_admit(self, n: int, head) -> bool:
-        """Count ``n`` bytes of an upload body as admitted when they fit
-        the budget and the measured room ``head`` (read with no lock)
-        beside what the pool holds. Off the event loop, with no store
-        lock; it books, claims and sheds nothing in the pool."""
+        """Count the ``n`` bytes of an upload body in the pool's incoming
+        figure when they fit the budget and the measured room ``head``
+        (read with no lock) beside what the pool holds. Runs off the event
+        loop and takes the pool lock for the count. It books, claims and
+        sheds no model or LoRA memory."""
         from .capacity import overcommit
 
         over = overcommit()
