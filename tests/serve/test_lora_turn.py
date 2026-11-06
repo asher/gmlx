@@ -254,6 +254,20 @@ def test_a_turn_runs_on_the_worker(monkeypatch):
     assert e.lora.pending == GB
 
 
+def test_a_turn_evicts_past_the_bytes_still_tearing_down(monkeypatch):
+    """Bytes of a teardown still running count in the turn's shortfall as
+    they count in its fit, so the turn evicts the idle entry that makes
+    the room, where it evicted nothing and refused."""
+    pool = make_pool(monkeypatch, 10)
+    e = image(pool, "x", 2, busy=True)
+    image(pool, "y", 4)
+    with pool._lock:
+        pool._tearing = 2 * GB          # another teardown, not yet done
+    turn(pool, e, 3 * GB)
+    assert e.lora.pending == 3 * GB
+    assert [p.name for p in pool.released] == ["y"]
+
+
 def test_a_video_turn_runs_on_the_video_worker(monkeypatch):
     """A video entry's job allocates on the video worker, so its turn
     there is refused on the image worker."""

@@ -1745,7 +1745,7 @@ class _ResidencyPool:
         if strict:
             if not self._budget:
                 return True
-            short = self._resident_bytes() + extra + incoming - self._budget
+            short = self._lora_resident(extra) + incoming - self._budget
             victims, freed = [], 0
             for e in sorted((e for e in self._entries.values()
                              if not e.pinned and e.busy == 0
