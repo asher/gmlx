@@ -142,7 +142,7 @@ _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "media_urls",
                           "decode_prefill_ratio", "prefill_tick_ms",
                           "cache_limit_gb", "family_defaults", "stochastic_mtp",
                           "gpu_keepwarm", "assistants", "assistant_allow_remote",
-                          "image"})
+                          "image", "video"})
 _DEFAULTS_KEYS = frozenset({"profile", "ttl_s", "model", "preload",
                             "image_model"})
 # An image model entry: the DiT and its companions, never merged with the
@@ -159,6 +159,7 @@ _SERVER_IMAGE_KEYS = frozenset({"url_ttl_s", "url_max_bytes", "max_queue",
                                 "embed_metadata", "tensor_cache_mb",
                                 "adapter_cache_mb", "steps_api",
                                 "steps_remote"})
+_SERVER_VIDEO_KEYS = frozenset({"max_queue", "job_ttl_s", "store_max_bytes"})
 # A video model entry: the DiT and its companions, a sibling block as
 # image_models is.
 _VIDEO_MODEL_KEYS = frozenset({"path", "variant", "encoder", "encoder_mmproj",
@@ -690,6 +691,14 @@ class ImageServerCfg:
 
 
 @dataclass(frozen=True)
+class VideoServerCfg:
+    """``server.video``: the job store of POST /v1/videos."""
+    max_queue: int = 2               # queued video jobs before a 429
+    job_ttl_s: float = 86400.0       # life of a job, its record and its MP4
+    store_max_bytes: int = 8 << 30   # the job store's files, oldest out first
+
+
+@dataclass(frozen=True)
 class SystemoneCfg:
     """``server.systemone``: structured decisions on POST /v1/systemone.
     ``canvas``, ``constrained`` and the think keys apply to DiffusionGemma
@@ -1112,6 +1121,7 @@ class ServerCfg:
     # Video models: their own block, in the same id namespace.
     video_models: dict[str, VideoModelCfg] = field(default_factory=dict)
     image: ImageServerCfg = field(default_factory=ImageServerCfg)
+    video: VideoServerCfg = field(default_factory=VideoServerCfg)
     discover: list[DiscoverSpec] = field(default_factory=list)
     talk: TalkCfg = field(default_factory=TalkCfg)
     launch: LaunchCfg = field(default_factory=LaunchCfg)
@@ -2988,6 +2998,42 @@ def _parse_video_model(video_id: str, raw) -> VideoModelCfg:
         upsample_prompt=raw.get("upsample_prompt") or None)
 
 
+def _parse_size_key(where: str, key: str, value) -> int | None:
+    """A positive byte count of a key that takes bytes or a size such as
+    8G, or None when unset."""
+    if isinstance(value, str):
+        size = parse_size_bytes(value)
+        if size is None:
+            raise ConfigError(f"{where}.{key}: expected bytes or a size such "
+                              f"as 2G, got {value!r}")
+        value = size
+    n = _coerce_num(key, value, int, where=where)
+    if n is not None and n <= 0:
+        raise ConfigError(f"{where}.{key}: expected a positive size, got "
+                          f"{n!r}")
+    return n
+
+
+def _parse_server_video(raw) -> VideoServerCfg:
+    where = "server.video"
+    raw = _section_mapping(where, raw)
+    _warn_unknown_keys(where, raw, _SERVER_VIDEO_KEYS, strict=True)
+    base = VideoServerCfg()
+    ttl = _coerce_num("job_ttl_s", raw.get("job_ttl_s"), float, where=where)
+    if ttl is not None and not ttl > 0:
+        raise ConfigError(f"{where}.job_ttl_s: expected a positive number "
+                          f"of seconds, got {ttl!r}")
+    queue = _coerce_num("max_queue", raw.get("max_queue"), int, where=where)
+    if queue is not None and queue < 0:
+        raise ConfigError(f"{where}.max_queue: expected 0 or more, got "
+                          f"{queue!r}")
+    cap = _parse_size_key(where, "store_max_bytes", raw.get("store_max_bytes"))
+    return VideoServerCfg(
+        max_queue=base.max_queue if queue is None else queue,
+        job_ttl_s=base.job_ttl_s if ttl is None else ttl,
+        store_max_bytes=base.store_max_bytes if cap is None else cap)
+
+
 def _parse_server_image(raw) -> ImageServerCfg:
     where = "server.image"
     raw = _section_mapping(where, raw)
@@ -2997,17 +3043,7 @@ def _parse_server_image(raw) -> ImageServerCfg:
     if ttl is not None and ttl <= 0:
         raise ConfigError(f"{where}.url_ttl_s: expected a positive number "
                           f"of seconds, got {ttl!r}")
-    cap = raw.get("url_max_bytes")
-    if isinstance(cap, str):
-        size = parse_size_bytes(cap)
-        if size is None:
-            raise ConfigError(f"{where}.url_max_bytes: expected bytes or a "
-                              f"size such as 2G, got {cap!r}")
-        cap = size
-    cap = _coerce_num("url_max_bytes", cap, int, where=where)
-    if cap is not None and cap <= 0:
-        raise ConfigError(f"{where}.url_max_bytes: expected a positive size, "
-                          f"got {cap!r}")
+    cap = _parse_size_key(where, "url_max_bytes", raw.get("url_max_bytes"))
     queue = _coerce_num("max_queue", raw.get("max_queue"), int, where=where)
     if queue is not None and queue < 0:
         raise ConfigError(f"{where}.max_queue: expected 0 or more, got "
@@ -3775,6 +3811,7 @@ def build_config(doc: dict) -> ServerCfg:
                       _section_mapping("video_models",
                                        doc.get("video_models")).items()},
         image=_parse_server_image(srv.get("image")),
+        video=_parse_server_video(srv.get("video")),
         discover=[_parse_discover(d) for d in
                   _section_list("discover", doc.get("discover"))],
         talk=_parse_talk(doc.get("talk")),

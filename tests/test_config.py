@@ -3389,6 +3389,39 @@ def test_server_image_block():
         build_config({"server": {"image": {"max_queue": -1}}})
 
 
+def test_server_video_block():
+    """server.video sets the job store of POST /v1/videos: two queued
+    jobs, a day's life and 8 GiB by default; sizes read as bytes or as
+    8G; a bad queue, life or size and an unknown key are refused naming
+    the key."""
+    assert build_config({}).video == cfgmod.VideoServerCfg(
+        max_queue=2, job_ttl_s=86400.0, store_max_bytes=8 << 30)
+    cfg = build_config({"server": {"video": {
+        "max_queue": 0, "job_ttl_s": 600, "store_max_bytes": "8G"}}})
+    assert cfg.video == cfgmod.VideoServerCfg(
+        max_queue=0, job_ttl_s=600.0, store_max_bytes=8 << 30)
+    cfg = build_config({"server": {"video": {"store_max_bytes": 1 << 20}}})
+    assert cfg.video.store_max_bytes == 1 << 20
+    for bad in ({"max_queue": -1}, {"max_queue": "two"}, {"job_ttl_s": 0},
+                {"job_ttl_s": float("nan")}, {"store_max_bytes": "lots"},
+                {"store_max_bytes": 0}, {"max_queue_x": 1}):
+        with pytest.raises(ConfigError, match=next(iter(bad))):
+            build_config({"server": {"video": bad}})
+
+
+def test_server_video_round_trips_through_print_config():
+    import yaml
+
+    pytest.importorskip("gmlx.serve.server")
+    from gmlx.serve import server as srv
+
+    cfg = build_config({"server": {"video": {"max_queue": 5,
+                                             "store_max_bytes": "1G"}}})
+    doc = yaml.safe_load(srv._dump_cfg_yaml(cfg))
+    assert doc["server"]["video"]["store_max_bytes"] == 1 << 30
+    assert build_config(doc).video == cfg.video
+
+
 def test_default_image_model_must_be_an_image_model():
     doc = _image_doc()
     doc["server"] = {"defaults": {"image_model": "zit"}}

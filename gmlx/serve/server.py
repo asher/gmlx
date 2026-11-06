@@ -2821,7 +2821,7 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
                "stochastic_mtp", "gpu_keepwarm", "stt", "tts", "embeddings",
                "rerank", "systemone",
                "defaults", "cache", "assistants", "assistant_allow_remote",
-               "image")}
+               "image", "video")}
     # Profile/model names double as dict keys; drop the redundant fields so the
     # entries match the file schema (which has no `name`/`id` keys). An
     # auto drafter writes back as `speculative: auto`.
