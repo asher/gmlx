@@ -40,7 +40,8 @@ the float64 results, and the fp32 latents that every decode takes.
 --self-test runs the same passes on the tiny models of h3_vae_tiny with
 seeded weights, written as safetensors files in the published layout.
 The manifest records each model's names and shapes and each file's
-sha256, so the gmlx tests write the same files.
+sha256, so the gmlx tests write the same files. Its fixture is written
+compressed, to be committed beside the manifest.
 
   python scripts/video_oracle/run.py --python <comfyui venv python> \\
       --threads 16 check5_h3.py --comfy-dir <ComfyUI checkout> \\
@@ -92,6 +93,10 @@ OFFICIAL = {"clips": {"256x256x22": (22, 256, 256),
                       "512x320x39": (39, 320, 512)},
             "images": {"256x256": (256, 256)},
             "latents": {}, "audio_samples": 2 * 32000 + 123}
+# The self-test keeps each tile and chunk case at its smallest size. The
+# encoder's reflect pad needs 2 rows and 2 columns at its last level, so an
+# encode is at least 32 px high and wide. The audio keeps a partial last
+# hop after 3 whole ones.
 SELF_TEST = {"clips": {"32x32x22": (22, 32, 32)},
              # Three tiles wide on encode and decode, overlaps 160 and 144
              # px, so the middle tile's overlaps cross.
@@ -100,10 +105,11 @@ SELF_TEST = {"clips": {"32x32x22": (22, 32, 32)},
              # TAEH3 runs of 5, 5 and 2 latents, of 5, 5 and 1, and of 5.
              # TAEH3 decodes every case here of more than one latent.
              # One latent at 2x2 tiles, where each tile blends with
-             # neighbors already blended.
+             # neighbors already blended: 17 latents, 272 px, is the
+             # least side of two 256 px tiles.
              "latents": {"12x1x1": (12, 1, 1), "11x1x1": (11, 1, 1),
                          "5x1x1": (5, 1, 1), "1x17x17": (1, 17, 17)},
-             "audio_samples": 8000 + 123}
+             "audio_samples": 2400 + 123}
 
 _NATIVE: dict = {}
 _PATCHED = ("linear", "conv1d", "conv2d", "conv3d", "conv_transpose1d",
@@ -420,7 +426,7 @@ def run(torch, a, name: str, cases: dict, files: dict, builds: dict,
     fx.tolerances.update(rule=RULE, items=tol)
     for n in notes:
         fx.note(n)
-    path = fx.write(a.out)
+    path = fx.write(a.out, compressed=a.self_test)
     print(f"[check5] wrote {path}")
     return 0
 

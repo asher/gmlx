@@ -98,7 +98,7 @@
      17
     ]
    },
-   "audio_samples": 8123
+   "audio_samples": 2523
   },
   "seed": 5,
   "plans": {
@@ -8749,58 +8749,58 @@
    },
    "audio encode": {
     "fp32_vs_f64": {
-     "rel_l2": 1.3624243035325274e-05,
-     "cosine": 0.999999999907204,
-     "max_abs": 8.39826216325612e-05
+     "rel_l2": 1.0792374390434691e-05,
+     "cosine": 0.9999999999417626,
+     "max_abs": 4.584539631968809e-05
     }
    },
    "audio decode": {
     "fp32_vs_f64": {
-     "rel_l2": 4.854985349863335e-06,
-     "cosine": 0.9999999999882154,
-     "max_abs": 3.5478698222346505e-05
+     "rel_l2": 2.5689113993278467e-06,
+     "cosine": 0.9999999999967187,
+     "max_abs": 1.2598107110683987e-05
     }
    }
   },
   "times": {
-   "fp32 video loaded rss gib": 0.35,
+   "fp32 video loaded rss gib": 0.34,
    "fp32 encode 32x32x22": 0.1,
    "fp32 encode 464x32": 0.0,
-   "fp32 video encoded rss gib": 0.44,
+   "fp32 video encoded rss gib": 0.43,
    "fp32 decode 32x32x22": 0.0,
    "fp32 decode 464x32": 0.0,
    "fp32 decode 12x1x1": 0.0,
    "fp32 decode 11x1x1": 0.0,
    "fp32 decode 5x1x1": 0.0,
    "fp32 decode 1x17x17": 0.0,
-   "fp32 video peak rss gib": 0.53,
-   "f16 video loaded rss gib": 0.37,
+   "fp32 video peak rss gib": 0.52,
+   "f16 video loaded rss gib": 0.36,
    "f16 encode 32x32x22": 0.1,
    "f16 encode 464x32": 0.0,
-   "f16 video encoded rss gib": 0.45,
+   "f16 video encoded rss gib": 0.43,
    "f16 decode 32x32x22": 0.0,
    "f16 decode 464x32": 0.0,
    "f16 decode 12x1x1": 0.0,
    "f16 decode 11x1x1": 0.0,
    "f16 decode 5x1x1": 0.0,
    "f16 decode 1x17x17": 0.0,
-   "f16 video peak rss gib": 0.53,
-   "f64 video loaded rss gib": 0.42,
+   "f16 video peak rss gib": 0.52,
+   "f64 video loaded rss gib": 0.41,
    "f64 encode 32x32x22": 0.1,
-   "f64 encode 464x32": 0.1,
-   "f64 video encoded rss gib": 0.6,
+   "f64 encode 464x32": 0.0,
+   "f64 video encoded rss gib": 0.59,
    "f64 decode 32x32x22": 0.0,
    "f64 decode 464x32": 0.0,
    "f64 decode 12x1x1": 0.0,
    "f64 decode 11x1x1": 0.0,
    "f64 decode 5x1x1": 0.0,
    "f64 decode 1x17x17": 0.1,
-   "f64 video peak rss gib": 0.69,
+   "f64 video peak rss gib": 0.68,
    "fp32 tiny decodes": 0.2,
-   "f16 tiny decodes": 0.3,
+   "f16 tiny decodes": 0.2,
    "f64 tiny decodes": 0.2,
-   "fp32 audio": 0.9,
-   "f64 audio": 0.9
+   "fp32 audio": 0.8,
+   "f64 audio": 0.7
   }
  },
  "tolerances": {
@@ -8859,17 +8859,17 @@
     "f16_psnr_db": 81.21364416127514
    },
    "audio encode": {
-    "fp32_rel_l2": 2.7248486070650547e-05
+    "fp32_rel_l2": 2.1584748780869382e-05
    },
    "audio decode": {
-    "fp32_rel_l2": 9.70997069972667e-06
+    "fp32_rel_l2": 5.137822798655693e-06
    }
   }
  },
  "notes": [
   "Each model is a ComfyUI class at a tiny size with seeded weights, so the numbers say nothing about image or audio quality."
  ],
- "created": "2026-10-30T01:26:14Z",
+ "created": "2026-11-06T23:45:51Z",
  "npz": "selftest_h3_vae.npz",
  "tensors": {
   "decoded_f64_11x1x1": {
@@ -9107,39 +9107,39 @@
    "shape": [
     1,
     2,
-    8123
+    2523
    ],
    "dtype": "float32",
-   "sha256": "6bb584031b7006e48119aba1e24d5031526ef6d78be0d1daf44db209ea66a929"
+   "sha256": "bc7c964f6b59feae07e59d77c1cff5890ce29077eaff04f91d145fd3d2660c5a"
   },
   "wave_decoded_f64": {
    "shape": [
     1,
     2,
-    8800
+    3200
    ],
    "dtype": "float64",
-   "sha256": "6de425a751200d9c8e16c0dcddc7c76404cf6e0607b81d357bd86c0c1f6b498c"
+   "sha256": "cf73aa0d30c72642836a2a7c4053aa87873523f053199d071c2bff4e3c0b56cf"
   },
   "wave_latents_f64": {
    "shape": [
     1,
     32,
     2,
-    11
+    4
    ],
    "dtype": "float64",
-   "sha256": "3bcc39b7f289e5c78bcd365cf7bd06613cb601c79d50ab2f5aa7525f22e1ea3c"
+   "sha256": "e12689c108d52a694a9618cd428f48c1cffc51b3a07f7b715260a7792d5776b9"
   },
   "wave_latents_fp32": {
    "shape": [
     1,
     32,
     2,
-    11
+    4
    ],
    "dtype": "float32",
-   "sha256": "f9aeb9630e0abcccde1648e870dfb8cee1e99300e66d79a7a9355f2157db2cb0"
+   "sha256": "f9f88d11fa2e749ff7beb1727c61dfdc1ec48e90a8544f355cee521e5ea969c5"
   }
  }
 }
