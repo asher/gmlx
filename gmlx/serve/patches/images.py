@@ -761,12 +761,16 @@ def _job_failure(path: str, e: Exception, finish) -> JSONResponse:
 
 def _stream_error(path: str, e: Exception) -> dict:
     """The error frame of a streamed job that raised ``e``: the error the
-    non-streamed path answers with."""
+    non-streamed path answers with. A refusal with a Retry-After header,
+    as a turn's 503, carries its seconds as ``retry_after``, since a
+    frame has no headers."""
     from ..image_service import ImageRequestError
 
     if isinstance(e, ImageRequestError):
+        retry = e.headers.get("Retry-After")
+        extra = {} if retry is None else {"retry_after": int(retry)}
         return _error_content(path, e.status, e.err_type, str(e),
-                              param=e.param, code=e.code)
+                              param=e.param, code=e.code, **extra)
     refusal = _job_refusal(e)
     if refusal is not None:
         message, param, _ = refusal

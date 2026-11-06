@@ -946,3 +946,20 @@ def test_each_server_keeps_its_url_files_under_its_port(monkeypatch, tmp_path):
     st = images._State()
     st.configure(build_config({**_DOC, "server": {"port": 8123}}))
     assert st.store.root == str(tmp_path / "gmlx" / "images" / "8123")
+
+
+def test_a_turn_refused_in_a_streamed_job_gives_its_retry_seconds(served):
+    """A streamed job refused at its turn with a 503 gets the plain
+    path's error in its frame, with the Retry-After seconds the plain
+    answer sends as a header."""
+    from gmlx.serve.residency import LoraRefused
+
+    served.job = lambda req, kw: (_ for _ in ()).throw(svc.lora_refusal(
+        LoraRefused(503, "the LoRA need 3.0 GB of memory", 7)))
+    plain = _client().post("/v1/images/generations", json={"prompt": "x"})
+    r = _client().post("/v1/images/generations",
+                       json={"prompt": "x", "stream": True})
+    assert plain.status_code == 503 and plain.headers["Retry-After"] == "7"
+    ((kind, frame),) = _frames(r.text)
+    assert kind == "error" and frame["error"].pop("retry_after") == 7
+    assert frame == plain.json()
