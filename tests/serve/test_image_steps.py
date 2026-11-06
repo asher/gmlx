@@ -1707,11 +1707,20 @@ def _put_container(path, tensors, fields=None):
      {"model": "zit"}),
     ("vae/encode", {"image": np.zeros((1, 4800, 8, 3), np.float32)},
      {"model": "zit"}),
+    # A body over the limit, which is set to 64 KiB here.
+    ("vae/video/encode", {"frames": np.zeros((5, 64, 64, 3), np.float32)},
+     {"model": "zit"}),
+    ("vae/audio/encode", {"waveform": np.zeros((1, 2, 9600), np.float32)},
+     {"model": "zit"}),
 ])
 def test_a_step_or_vae_pass_over_the_size_limits_is_413(host, path, tensors,
-                                                         fields):
+                                                         fields, monkeypatch):
+    if path.startswith(("vae/video/", "vae/audio/")):
+        monkeypatch.setattr(routes, "MAX_BODY_BYTES", 1 << 16)
     r = _put_container(path, tensors, fields)
     assert r.status_code == 413, r.text
+    if path.startswith(("vae/video/", "vae/audio/")):
+        assert "over the limit of 65536" in r.text
     assert host.held == 0
 
 
