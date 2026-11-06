@@ -179,13 +179,6 @@ def test_audio_anchor_rows_stay_clean_and_run_clean():
     assert anchors.pinned(0.9995, hf.ANCHOR_RULES["video"]) == 0.9995
 
 
-def test_a_negative_frame_counts_from_the_end():
-    assert anchors.resolve_frame(-1, 22) == 21
-    assert anchors.resolve_frame(0, 22) == 0
-    with pytest.raises(ValueError, match="outside a clip of 22 frames"):
-        anchors.resolve_frame(22, 22)
-
-
 @pytest.mark.parametrize("n,want", [(1, 5), (5, 5), (6, 22), (22, 22),
                                     (120, 124), (124, 124), (361, 362)])
 def test_frame_counts_snap_up_to_the_grid(n, want):

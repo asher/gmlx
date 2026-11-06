@@ -140,15 +140,6 @@ def layout_rows(anchors) -> tuple:
         for a in anchors)
 
 
-def resolve_frame(frame: int, frames: int) -> int:
-    """A frame index counted from the start, for a clip of ``frames``."""
-    f = frame + frames if frame < 0 else frame
-    if not 0 <= f < frames:
-        raise ValueError(f"frame {frame} is outside a clip of {frames} "
-                         f"frames")
-    return f
-
-
 def augment(rows: list, rule: AnchorRule, seed: int, noise=None) -> list:
     """Each anchor's rows (n, features) as the rule mixes them, in
     float32. Each anchor's noise comes from the same generator, restarted
