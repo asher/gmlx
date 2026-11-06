@@ -663,9 +663,9 @@ def test_a_prompt_with_keyframes_counts_comfyuis_rows():
 
 
 # The CLI's admission table in docs/video.md: each mode's smallest Mac
-# at 1344x768 and 768x768, for h3 on its 8-step LoRA, 5 s, the prompt at
-# 1,024 text rows plus each keyframe's, caches empty. mode: (keyframes,
-# anchors).
+# at 1344x768 and 768x768, for h3 on its 8-step LoRA, 5 s unless _FRAMES
+# names the mode, the prompt at 1,024 text rows plus each keyframe's,
+# caches empty. mode: (keyframes, anchors).
 _MODES = {
     "text to video": (0, ()),
     "first frame": (1, (AnchorRows(0, 1, 0),)),
@@ -677,16 +677,20 @@ _MODES = {
     "22-frame guide clip with sound": (
         0, (AnchorRows(0, 7, hf.audio_frames(22)),)),
     "guide audio, 5 s": (0, (AnchorRows(0, 0, hf.audio_frames(124)),)),
+    "362-frame guide clip with sound, 15 s": (
+        0, (AnchorRows(0, hf.latent_frames(362), hf.audio_frames(362)),)),
 }
+_FRAMES = {"362-frame guide clip with sound, 15 s": 362}
 _TABLE = {"text to video": (32, 32), "first frame": (32, 32),
           "last frame": (32, 32), "both keyframes": (36, 32),
           "image guide": (32, 32), "5-frame guide clip with sound": (32, 32),
           "22-frame guide clip with sound": (36, 32),
-          "guide audio, 5 s": (32, 32)}
-_SMALLER = {32: 24, 36: 32}
+          "guide audio, 5 s": (32, 32),
+          "362-frame guide clip with sound, 15 s": (96, 64)}
+_SMALLER = {32: 24, 36: 32, 64: 48, 96: 64}
 
 
-def _mode(monkeypatch, mode, w, h, mac):
+def _mode(monkeypatch, mode, w, h, mac, frames=124):
     files = {"dit": FILES["dit"], "enc": FILES["encoder"],
              "vae": FILES["vae"], "audio": FILES["audio_vae"],
              "lora": FILES["lora"], "mmproj": KF["files"]["mmproj"]}
@@ -697,7 +701,7 @@ def _mode(monkeypatch, mode, w, h, mac):
     blocks = memfit.keyframe_blocks(hf.FAMILY, [(w, h)] * keyframes)
     return memfit.plan_run(
         hf.FAMILY, dit="dit", encoder="enc", vae="vae", audio_vae="audio",
-        loras=["lora"], frames=124, width=w, height=h,
+        loras=["lora"], frames=frames, width=w, height=h,
         text=1024 + sum(b + 8 for b in blocks), mmproj="mmproj",
         blocks=blocks, anchors=anchors,
         budget=capacity.ram_budget_bytes(mac * GiB))
@@ -710,8 +714,9 @@ def test_each_mode_runs_on_the_mac_the_table_names(monkeypatch,
                                                    no_overcommit, mode,
                                                    size):
     mac = _TABLE[mode][size == (768, 768)]
-    assert _mode(monkeypatch, mode, *size, mac).fits
-    msg = _refusal(_mode(monkeypatch, mode, *size, _SMALLER[mac]))
+    frames = _FRAMES.get(mode, 124)
+    assert _mode(monkeypatch, mode, *size, mac, frames).fits
+    msg = _refusal(_mode(monkeypatch, mode, *size, _SMALLER[mac], frames))
     if mac == 32:
         assert "The text encoder needs more memory than this Mac has" in msg
     else:
