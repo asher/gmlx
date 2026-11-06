@@ -295,7 +295,7 @@ def entry_footprint(spec) -> int:
 def _load(spec) -> ServedVideo:
     from gmlx.video import pipeline
 
-    from .image_service import _SHARES, _scale_step_caches, bound_caches
+    from .image_service import bound_caches, set_share
 
     plan = entry_plan(spec)
     pipe = pipeline.load(spec.path, variant=spec.variant, log=_log_line)
@@ -307,8 +307,7 @@ def _load(spec) -> ServedVideo:
         # The pair cache holds the entry's own pairs in the room the plan
         # books for them, beside the share of a request's.
         bound_caches(pipe, plan.lora_term, plan.cache_share)
-        _SHARES[id(served)] = (plan.cache_share, plan.tensor_floor)
-        _scale_step_caches()
+        set_share(served, plan.cache_share, plan.tensor_floor)
     except BaseException:
         del pipe
         _release([served])
@@ -362,13 +361,12 @@ def load_on_worker(spec) -> ServedVideo:
 
 
 def _release(box: list) -> None:
-    from .image_service import _SHARES, _scale_step_caches
+    from .image_service import drop_share
 
     served = box.pop() if box else None
     if served is None:
         return
-    if _SHARES.pop(id(served), None) is not None:
-        _scale_step_caches()
+    drop_share(served)
     pipe, served.pipe = served.pipe, None
     served.captions.clear()
     if pipe is not None:

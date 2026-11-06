@@ -1883,3 +1883,18 @@ def test_an_edit_is_priced_as_the_image_command_prices_it(monkeypatch,
     assert rows == 512 if prompt == "swap the hats" else rows > len(prompt)
     assert serve["prefix_rows"] == cli["prefix_rows"] == [
         rows + 4 * (1024 // 16) ** 2]
+
+
+def test_the_cache_shares_and_their_scale_change_under_one_lock(
+        monkeypatch):
+    """The image and the video worker both load and release entries: the
+    table and the scale it sets are written together, under one lock."""
+    seen = []
+    monkeypatch.setattr(image_service, "_SHARES", {})
+    monkeypatch.setattr(image_service, "_scale_step_caches", lambda: seen.append(
+        (image_service._SHARES_LOCK.locked(), dict(image_service._SHARES))))
+    a = object()
+    image_service.set_share(a, 0.5, 7)
+    image_service.drop_share(a)
+    image_service.drop_share(a)
+    assert seen == [(True, {id(a): (0.5, 7)}), (True, {})]

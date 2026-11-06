@@ -27,6 +27,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -208,15 +209,35 @@ def bound_caches(pipe, configured: int = 0, share: float = 1.0) -> None:
 # The (cache share, tensor floor) of each loaded entry, by id of its
 # ServedImage or ServedVideo. The step routes' caches serve every entry
 # and take the smallest share, and their tensor cache the largest floor.
+# The image and video workers both load and release entries: the table
+# and the scale it sets change together under _SHARES_LOCK.
 _SHARES: dict = {}
+_SHARES_LOCK = threading.Lock()
 
 
 def _scale_step_caches() -> None:
+    """Scale the step routes' caches to the table; under _SHARES_LOCK."""
     from .image_steps import STATE
 
     shares = list(_SHARES.values())
     STATE.floor_tensors(max((f for _s, f in shares), default=0))
     STATE.scale_caches(min((s for s, _f in shares), default=1.0))
+
+
+def set_share(served, share: float, floor: int) -> None:
+    """Enter a loaded entry's cache share and tensor floor, and scale the
+    step routes' caches to the table."""
+    with _SHARES_LOCK:
+        _SHARES[id(served)] = (share, floor)
+        _scale_step_caches()
+
+
+def drop_share(served) -> None:
+    """Take a released entry out of the table, and scale the step routes'
+    caches to what is left."""
+    with _SHARES_LOCK:
+        if _SHARES.pop(id(served), None) is not None:
+            _scale_step_caches()
 
 
 # The grid of cache shares an entry is fitted on.
@@ -478,8 +499,7 @@ def _load(spec) -> ServedImage:
         served.lora_own_term = sum(2 * os.path.getsize(p)
                                    for p, _ in spec.adapters)
         bound_caches(pipe, served.lora_own_term, plan.cache_share)
-        _SHARES[id(served)] = (plan.cache_share, plan.tensor_floor)
-        _scale_step_caches()
+        set_share(served, plan.cache_share, plan.tensor_floor)
     except BaseException:
         # The pipeline loaded and an adapter failed: free it here, as the
         # pool never holds it.
@@ -518,8 +538,7 @@ def _release(box: list) -> None:
     served = box.pop() if box else None
     if served is None:
         return
-    if _SHARES.pop(id(served), None) is not None:
-        _scale_step_caches()
+    drop_share(served)
     pipe, served.pipe = served.pipe, None
     if pipe is not None:
         from gmlx.image.lora import install
