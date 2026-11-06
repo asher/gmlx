@@ -15,6 +15,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   videos and sounds. See [Keyframes and guides](docs/video.md#keyframes-and-guides).
 - The gmlx ComfyUI nodes run MiniMax-H3 from keyframes and guides, with a new
   `minimax-h3-i2v` workflow. See [Make a video](docs/comfyui.md#make-a-video).
+- `gmlx serve` makes MiniMax-H3 clips as jobs on the OpenAI video routes,
+  `POST /v1/videos` and its MP4 download. See [Video API](docs/video-api.md).
+- A chat model rewrites MiniMax-H3 prompts in the form of MiniMax's prompt
+  guide, which `gmlx video pull` fetches. See [Prompt upsampling](docs/video.md#prompt-upsampling).
 - The `fasth3` video recipe runs FastVideo's FastH3, an 8-step MiniMax-H3
   whose steps take about half as long as `h3`'s, on an M5 or newer.
 - The gmlx ComfyUI nodes run FastH3 on the noise levels it was trained at,

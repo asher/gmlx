@@ -459,6 +459,11 @@ and the room or what holds the request up. Each 503 carries
   model to make room` (503): no model is in use, and other apps hold the
   memory macOS has free. Close one, or unload a model with
   [`POST /unload`](api.md#endpoints).
+- `... and ... is idle on the image worker; unload it (POST /unload) to
+  make room` (503), or `on the video worker`: the room is held by idle
+  models of the other kind, image or video, which a LoRA's turn does not
+  unload. Unload them with [`POST /unload`](api.md#endpoints), then send
+  the request again. A video job fails with this message.
 
 With
 [`image.adapter_cache_mb`](config.md#serverimageadapter_cache_mb) set, a
@@ -514,6 +519,38 @@ The frames a guide video keeps, which
 [Keyframes and guides](video.md#keyframes-and-guides) gives, must fit in
 the clip from the guide's frame on. Move the guide to an earlier frame,
 make the clip longer, or cut the video shorter.
+
+### Video jobs
+
+These are the answers and job errors of
+[`POST /v1/videos`](video-api.md#errors).
+
+- `The gmlx server finds no ffmpeg on its PATH` (501): the server writes
+  each MP4 through ffmpeg. Install it with `brew install ffmpeg`, or start
+  the server from a shell whose PATH holds it.
+- `the video job queue is full; retry later` (429): more jobs wait than
+  [`video.max_queue`](config.md#video-jobs). Send the job again after the
+  `Retry-After` seconds, or raise the setting.
+- `the files of this job are ..., and the video job store has ... of room
+  left` (413): the job store holds
+  [`video.store_max_bytes`](config.md#video-jobs) of clips and inputs.
+  Delete finished jobs you have downloaded, send smaller files, or raise
+  the setting.
+- `a ... clip of ... frames on ... does not fit in memory` (413): the clip
+  does not fit beside the pinned models even with every other model
+  unloaded. The message lists the memory of each phase and what to
+  change, as [`this clip does not fit in
+  memory`](#this-clip-does-not-fit-in-memory) describes.
+- `a clip of ... does not fit in memory beside the models now loaded`, as
+  a job's error with status 400: the clip did not fit beside the models
+  loaded when it ran. Unload a model with [`POST /unload`](api.md#endpoints)
+  and submit the job again, or make the clip smaller.
+- `server_restarted`: the server stopped while the job was queued or
+  running, and a job does not resume. Submit it again.
+- `timed_out`, `the job waited for memory until it expired`: models in use
+  held the memory the job needed until the job's
+  [`video.job_ttl_s`](config.md#video-jobs) ran out. Submit it again when
+  the server is less busy.
 
 ## ComfyUI
 

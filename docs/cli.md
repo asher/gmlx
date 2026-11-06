@@ -1418,6 +1418,9 @@ runs text to video only, so it refuses them.
 | `--save-latent PATH` | None | Also write the final latents to this `.npz` file. |
 | `--encoder GGUF` | The entry's | Encode the prompt with this text encoder. |
 | `--mmproj GGUF` | The entry's `encoder_mmproj` | Read `--first-frame` and `--last-frame` with this vision tower of the text encoder. Required with them when `MODEL` is a DiT GGUF. |
+| `--upsampler GGUF` | The entry's `upsampler` | Rewrite the prompt with this chat model, a GGUF or a `models` id, as [Prompt upsampling](video.md#prompt-upsampling) describes. |
+| `--no-upsample` | Off | Run the prompt as typed, without the upsampler. |
+| `--upsample-prompt FILE` | The entry's `upsample_prompt` | The upsampler reads this prompt guide in place of the entry's. |
 | `--vae PATH` | The entry's | Decode the frames with this video VAE, and encode the keyframes and guides. Required with `--preview` and a keyframe or a guide image or video. |
 | `--audio-vae PATH` | The entry's | Decode the sound with this audio VAE, and encode the guides' sound. |
 | `--json` | Off | Print a JSON record of the run on stdout. |

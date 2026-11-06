@@ -41,6 +41,8 @@ These pages are the starting points:
   beside chat models.
 - [Image API](image-api.md): The OpenAI image routes, their request fields
   and their errors.
+- [Video API](video-api.md): The OpenAI video routes, their jobs, the job
+  store and their errors.
 - [ComfyUI](comfyui.md): The gmlx node pack, which runs the server's image
   and video models in ComfyUI graphs.
 - [RAG pipelines](rag.md): Retrieval with the embeddings and rerank services.

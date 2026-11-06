@@ -39,3 +39,27 @@ The [image step routes](image-steps.md) run one denoise step at a time for
 a sampler in another program, such as the ComfyUI node pack. Their steps
 queue with the other image jobs, as [Access](image-steps.md#access)
 describes.
+
+## Video jobs
+
+A video model's work runs on a thread of its own, the video worker, so a
+clip's steps never queue behind an image job, and an image never waits
+for a clip. The step routes on a video model run there too.
+
+A job of [`POST /v1/videos`](../video-api.md) passes through two threads.
+The job thread runs the jobs one at a time, in order, and runs no model:
+it reads the keyframes and counts a guide video's frames, has the
+upsampler write the caption, and loads the video model. The video worker
+then encodes the prompt and the anchors, takes the job's LoRA bytes,
+samples the clip and decodes it into the MP4. Chat decodes between the
+blocks of each step and between the decoded pieces, as it does beside an
+image job. A guide video is read through ffmpeg a few seconds at a time
+when its whole encode does not fit, each part priced before it is read.
+
+The request that queues a job plans its clip from the model's file
+headers against the memory the pinned models leave, and books nothing.
+The video worker checks the memory of each phase beside the models
+loaded when the job runs, and books the job's LoRA bytes there, through
+the path a model load takes. When models in use hold the memory, the job
+waits on its own thread and runs the same phase again, the encoded
+prompt kept.

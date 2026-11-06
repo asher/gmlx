@@ -66,6 +66,7 @@ gets a 400 of type `unknown_profile`. A chat route that names one of the
 | `POST /v1/embeddings` | Text embeddings, with `embeddings` set up |
 | `POST /v1/rerank` | Document reranking, with `rerank` set up |
 | `POST /v1/images/generations`, `/v1/images/edits`, `/v1/images/variations` | Image generation, with [image models](config.md#image-models) set up, as the [Image API](image-api.md) shows |
+| `POST /v1/videos`, `GET` and `DELETE /v1/videos/{id}`, `GET /v1/videos/{id}/content` | Video jobs, with [video models](config.md#video-models) set up, as the [Video API](video-api.md) shows. These answer only with the `/v1` prefix. |
 | `POST /v1/systemone` | Probabilities for a fixed set of questions, as [Structured decisions](decisions.md) shows |
 | `POST /v1/prewarm` | Read a decision state ahead of its questions, as [Repeated states](decisions-reference.md#repeated-states) shows |
 
@@ -88,7 +89,8 @@ Every route except `/health` and the image files of
 [URL responses](image-api.md#url-responses) needs the API key when the server
 has one. Most routes also answer without the `/v1` prefix. Every route takes
 a JSON body, except the two audio upload routes and image variations, which
-take a form, and image edits, which take a form or a JSON body.
+take a form, and image edits and `POST /v1/videos`, which take a form or a
+JSON body.
 
 `/v1/completions` honors the sampling parameters, `seed`, `stop`, `stream`,
 `stream_options` and `profile`. It refuses list prompts, `n` above 1,
@@ -322,13 +324,15 @@ cannot change it.
 | More requests wait than the queue cap | 503 `server_overloaded`, with `Retry-After` of 2 to 60 seconds | `GMLX_QUEUE_DEPTH_CAP` |
 | A model cannot load beside the pinned or busy models | 503 `model_load_deferred`, with `Retry-After` | `GMLX_OVERCOMMIT=1` |
 | Memory runs out while a request streams | The [governor](glossary.md#governor) ends the largest request: `server_overloaded_shed`, `finish_reason` `shed` | `GMLX_GOVERNOR=0` |
-| A body over 64 MiB, or an audio form over 1024 MiB, to a route other than the image API and the step routes | 413 before the body is read | None |
-| A body to the [image API](image-api.md) larger than the memory free beside the loaded models | 413 before the body is read, with the body's size and the memory free | `GMLX_OVERCOMMIT=1` |
+| A body over 64 MiB, or an audio form over 1024 MiB, to a route other than the image API, `POST /v1/videos` and the step routes | 413 before the body is read | None |
+| A body to the [image API](image-api.md), or a JSON body to [`POST /v1/videos`](video-api.md), larger than the memory free beside the loaded models | 413 before the body is read, with the body's size and the memory free | `GMLX_OVERCOMMIT=1` |
+| The files of a [`POST /v1/videos`](video-api.md) form larger than the room left in the video job store | 413 before the files are read, with their size and the room | [`video.store_max_bytes`](config.md#video-jobs) |
 | From a [launch session](container-security.md#what-the-client-reaches-on-the-server), a body over 32 MiB, or 64 MiB for audio | 413 before the body is read | None |
 | More than 64 media items, more than 256 Mi pixels in all, or audio over 128 Mi samples or with a sample rate over 384 kHz | 400 before decoding | None |
 
-The image API prices a request body from the memory free beside the
-loaded models, not from a fixed limit. The step routes that the
+The image API and `POST /v1/videos` price a request body from the memory
+free beside the loaded models, not from a fixed limit, and a video job's
+files from the room left in its store. The step routes that the
 [ComfyUI nodes](comfyui.md) call take a body of up to 1 GiB, and price the
 work it asks for from the memory free. The nodes send a video's frames in
 windows that fit.

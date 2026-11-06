@@ -319,6 +319,9 @@ video_models:
 | <a id="video_modelsadapters"></a>`adapters` | none | LoRA files applied to every clip, each a path or `{path, strength}` with strength 1 by default |
 | <a id="video_modelsvariant"></a>`variant` | detected | The DiT's variant, such as `fl2va-turbo4` for a merged Turbo file gmlx does not know |
 | <a id="video_modelsdefaults"></a>`defaults` | none | Clip defaults: `steps`, `shift`, `size` as `WxH` and `seconds`. Unset, steps and shift come from the variant, and a clip is 1344x768 for 5 s |
+| <a id="video_modelsupsampler"></a>`upsampler` | none | The `models` id of the chat model that rewrites each prompt, as [Prompt upsampling](video.md#prompt-upsampling) describes |
+| <a id="video_modelsupsample_prompt"></a>`upsample_prompt` | none | MiniMax's prompt guide, which the `upsampler` reads, found in `model_dirs` when relative. `gmlx video pull` fetches it |
+| <a id="video_modelsupsample"></a>`upsample` | `true` | Rewrite prompts with the `upsampler`. `false` runs them as typed, unless a request sends `prompt_upsampling: true`. |
 
 ## Profiles
 
@@ -722,11 +725,25 @@ under [`image_models`](#image-models).
 
 The memory gmlx counts for an image model includes its tensor caches at
 their full size: two of `image.tensor_cache_mb`, and a third while the step
-routes are on. Request LoRAs are counted when their jobs run, as the
+routes are on. A video model with an `upsampler` keeps room past
+`image.tensor_cache_mb` for one encoded caption as long as the upsampler
+writes, 120 MB for MiniMax-H3, so the ComfyUI nodes' encode of a long
+caption is not refused. Request LoRAs are counted when their jobs run, as the
 [LoRA refusal](troubleshooting.md#a-lora-is-refused-for-memory) describes,
 and a LoRA over a set `image.adapter_cache_mb` is refused with a message
 that names the key. At the defaults, one model of any family still fits on
 a 16 GB Mac at its default quant and size.
+
+### Video jobs
+
+These keys set the job store of [`POST /v1/videos`](video-api.md) for the
+models under [`video_models`](#video-models).
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| <a id="servervideomax_queue"></a>`video.max_queue` | `2` | Video jobs that may wait behind the one running. One more gets 429 with `Retry-After`. |
+| <a id="servervideojob_ttl_s"></a>`video.job_ttl_s` | `86400` | Seconds a job and its MP4 stay available from the job's creation |
+| <a id="servervideostore_max_bytes"></a>`video.store_max_bytes` | `8G` | Most bytes of MP4s and job inputs kept at once, as bytes or a size such as `20G`. The oldest MP4s go first. |
 
 ### Structured decisions
 
