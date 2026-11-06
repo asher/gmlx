@@ -106,10 +106,9 @@ class _VAE:
 
 
 @pytest.fixture
-def bench(monkeypatch, tmp_path):
+def bench(monkeypatch, tmp_path, stand_in_ffmpeg):
     """``gmlx video bench`` on stub files, recording each load and run,
     with an ffmpeg that writes the raw frames it reads as the clip."""
-    import stat
     import tempfile
 
     import mlx.core as mx
@@ -175,10 +174,8 @@ def bench(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "generate", generate)
     monkeypatch.setattr(reader, "load_vae", load_vae)
 
-    ff = tmp_path / "ffmpeg"
-    ff.write_text('#!/bin/sh\nfor last; do :; done\ncat > "$last"\n')
-    ff.chmod(ff.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setattr(io, "probe", lambda *a: str(ff))
+    ff = stand_in_ffmpeg('cat > "$last"')
+    monkeypatch.setattr(io, "probe", lambda *a: ff)
     # A temporary root of the test's own, so a folder left behind shows.
     tmp_root = tmp_path / "tmp"
     tmp_root.mkdir()

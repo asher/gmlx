@@ -409,22 +409,18 @@ class _VAE:
 
 
 @pytest.fixture
-def stubbed(monkeypatch, files, tmp_path):
+def stubbed(monkeypatch, files, tmp_path, stand_in_ffmpeg):
     """``cmd_generate`` with every model replaced: an encoder handle, a
     pipeline whose run returns zeros, VAEs that decode 5 frames of 32x32
     in two chunks, and a stand-in ffmpeg that writes its input. Returns
     the arguments ``pipeline.load`` got."""
-    import stat
-
     import mlx.core as mx
 
     from gmlx.video import encoder, io, loader, pipeline
     from gmlx.video.vae import reader
 
-    ff = tmp_path / "ffmpeg"
-    ff.write_text('#!/bin/sh\nfor last; do :; done\ncat > "$last"\n')
-    ff.chmod(ff.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setattr(io, "probe", lambda *a: str(ff))
+    ff = stand_in_ffmpeg('cat > "$last"')
+    monkeypatch.setattr(io, "probe", lambda *a: ff)
     monkeypatch.setattr(loader, "identify_dit", lambda path, **kw: (
         vfp.identify(fixture_view(H3_HEADER), **kw)))
     monkeypatch.setattr(encoder, "load_encoder",
