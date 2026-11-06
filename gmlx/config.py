@@ -3020,9 +3020,9 @@ def _parse_server_video(raw) -> VideoServerCfg:
     _warn_unknown_keys(where, raw, _SERVER_VIDEO_KEYS, strict=True)
     base = VideoServerCfg()
     ttl = _coerce_num("job_ttl_s", raw.get("job_ttl_s"), float, where=where)
-    if ttl is not None and not ttl > 0:
-        raise ConfigError(f"{where}.job_ttl_s: expected a positive number "
-                          f"of seconds, got {ttl!r}")
+    if ttl is not None and not 0 < ttl < float("inf"):
+        raise ConfigError(f"{where}.job_ttl_s: expected a positive, finite "
+                          f"number of seconds, got {ttl!r}")
     queue = _coerce_num("max_queue", raw.get("max_queue"), int, where=where)
     if queue is not None and queue < 0:
         raise ConfigError(f"{where}.max_queue: expected 0 or more, got "

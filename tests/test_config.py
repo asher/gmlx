@@ -3403,7 +3403,8 @@ def test_server_video_block():
     cfg = build_config({"server": {"video": {"store_max_bytes": 1 << 20}}})
     assert cfg.video.store_max_bytes == 1 << 20
     for bad in ({"max_queue": -1}, {"max_queue": "two"}, {"job_ttl_s": 0},
-                {"job_ttl_s": float("nan")}, {"store_max_bytes": "lots"},
+                {"job_ttl_s": float("nan")}, {"job_ttl_s": float("inf")},
+                {"store_max_bytes": "lots"},
                 {"store_max_bytes": 0}, {"max_queue_x": 1}):
         with pytest.raises(ConfigError, match=next(iter(bad))):
             build_config({"server": {"video": bad}})
