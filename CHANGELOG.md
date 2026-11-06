@@ -18,6 +18,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- gmlx now requires transformers older than 5.23, so a new transformers release
+  cannot break an install before gmlx is tested against it.
 - When `gmlx serve` checks whether a request fits in memory, it counts the
   prompt hidden states a DFlash drafter keeps.
 - Nemotron-H models prefill in less memory, and a request takes the largest
@@ -28,6 +30,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Distillation's pinned day renders on transformers 5.22, where a template that
+  prints today's date failed with "'str' object is not callable".
 - A served image model keeps its own LoRAs when a request brings others, and
   a request over the adapter cache is refused, where requests failed with
   "patch table names adapter ...".

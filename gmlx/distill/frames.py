@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import os
 from pathlib import Path
 
@@ -159,11 +160,17 @@ def today_string() -> str:
     return datetime.date.today().strftime("%d %b %Y")
 
 
-def _pinned_strftime(day: str):
-    """A strftime_now for templates that formats ``day`` at midnight."""
+_STRFTIME_CALL = re.compile(r"""strftime_now\(\s*(['"])(.*?)\1\s*\)""")
+
+
+def _pin_strftime(template: str, day: str) -> str:
+    """``template`` with each literal strftime_now call replaced by the
+    string it formats for ``day`` at midnight. The render then reads no
+    clock, and passes no function: transformers rebuilds every render
+    variable out of plain JSON types and a function becomes a string."""
     import datetime
     at = datetime.datetime.fromisoformat(day)
-    return lambda fmt: at.strftime(fmt)
+    return _STRFTIME_CALL.sub(lambda m: json.dumps(at.strftime(m.group(2))), template)
 
 
 def _fold_system(messages: list[dict]) -> list[dict] | None:
@@ -190,8 +197,10 @@ def apply_template(tokenizer, messages: list[dict], *, add_generation_prompt: bo
     kw.update(extra)
     day = kw.pop(PINNED_DAY_KEY, None)
     if day:
-        # a render variable shadows the template global of the same name
-        kw["strftime_now"] = _pinned_strftime(day)
+        tpl = getattr(inner, "chat_template", None)
+        tpl = tpl.get("default") if isinstance(tpl, dict) else tpl
+        if tpl:
+            kw["chat_template"] = _pin_strftime(str(tpl), day)
     try:
         return inner.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt, **kw)
     except Exception as e:  # jinja TemplateError, ValueError from the template
