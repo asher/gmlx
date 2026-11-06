@@ -695,7 +695,8 @@ def test_a_loaded_image_entry_keeps_its_cond_in_the_step_tensor_cache(
     """The step routes' tensor cache takes a loaded image entry's share of
     1/16 and keeps its cond floor of 15 MiB over the 4 MiB that share
     leaves, and the upload store keeps the cap at any share, or no bound
-    with none. Released, the entry's floor goes with it."""
+    with none. Released, the entry's floor goes with it. The load and the
+    release enter and drop the share through the table's lock."""
     from gmlx.config import ImageServerCfg
     from gmlx.serve import image_steps
 
@@ -704,6 +705,14 @@ def test_a_loaded_image_entry_keeps_its_cond_in_the_step_tensor_cache(
     tensor, _cap = image_service.cache_bytes()
     image_steps.STATE.configure(ImageServerCfg(adapter_cache_mb=cap_mb))
     adapter = image_steps.UNBOUNDED if cap_mb is None else cap_mb << 20
+    calls, locked = [], []
+    for name in ("set_share", "drop_share"):
+        real = getattr(image_service, name)
+        monkeypatch.setattr(image_service, name, lambda served, *a, r=real,
+                            n=name: (calls.append(n), r(served, *a))[1])
+    scale = image_service._scale_step_caches
+    monkeypatch.setattr(image_service, "_scale_step_caches", lambda: (
+        locked.append(image_service._SHARES_LOCK.locked()), scale())[1])
     try:
         served = image_service._load(_spec(encoder=None))
         held = (image_steps.STATE.tensors.max_bytes,
@@ -713,8 +722,10 @@ def test_a_loaded_image_entry_keeps_its_cond_in_the_step_tensor_cache(
     finally:
         image_service._SHARES.clear()
         image_steps.STATE.configure(ImageServerCfg())
-        image_service._scale_step_caches()
+        scale()
     assert held == (_KLEIN_COND, adapter) and after == tensor
+    assert calls == ["set_share", "drop_share"]
+    assert locked == [True, True]
 
 
 def test_the_fit_of_a_step_counts_what_the_step_caches_hold(monkeypatch):
