@@ -2720,6 +2720,10 @@ def _synth_nemotron_h_moe(meta, shapes, config: dict) -> None:
     if eps is not None:
         config["layer_norm_epsilon"] = eps
         config.pop("rms_norm_eps", None)
+    # A speech decoder (Nemotron 3.5 Transcribe) names its encoder checkpoint.
+    speech = _read_string(meta, "nemo_speech.checkpoint_id")
+    if speech:
+        config["speech_checkpoint_id"] = speech
 
     # Mamba2 SSM parameters
     ssm_inner = _require(

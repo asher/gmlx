@@ -27,6 +27,9 @@ whose GQA fold (qL x G rows) holds 18 rows or more goes to kq.sdpa_fa_verify
 once the KV passes a depth set by the fold and the KV heads, from 512 keys for
 most folds. Stock's vector kernel declines folds over 32 rows (e.g. Qwen3.x
 24/4 at qL 6..8, 32/2 from qL 3) and materializes their scores at every depth.
+Head_dim 128 verify (qL 2..8) takes the same kernel by its own table: folds
+over 32 rows from 512 keys (e.g. Nemotron-H 32/2 from qL 3), narrower folds
+at 2 or more KV heads from 1024 to 8192 keys.
 
 Separately, GQA decode (qL==1, gqa 2..8) routes to mlx_kquant.sdpa_decode_gqa
 once the KV is deep enough. head_dim 64 (e.g. gpt-oss full-attn layers) engages
@@ -202,7 +205,14 @@ _VERIFY_GEMM = env_bool("GMLX_VERIFY_GEMM", True)
 # to 4x that (e.g. 32/2 gqa16 at qL 5..8) run as per-chunk calls over a
 # kv-major split of the GQA group, each sweeping the KV again, which pays
 # from 1024 keys (1.4-2.2x to 16k). hd512 takes fa where _hd512_route
-# says (2 KV heads, 21 to 32 rows). Disable with GMLX_VERIFY_FA=0.
+# says (2 KV heads, 21 to 32 rows). At hd128 stock fuses up to 32 folded
+# rows (its vector kernel) and from qL 9 (its tiled kernel); qL 3..8 at
+# gqa 16 materializes. The gate keys on the same terms (_fa_min_kv_128).
+# Chained over 8 layers, bf16: folds over 32 rows gain 1.1-2.4x at 512 keys
+# and 1.6-15x at 16k (gqa 7 to 16); 24-32 rows 1.1-1.6x from 1024 at 4 or
+# more KV heads and 1.4-2x from 4096 at 2; 16-23 rows 1.1-1.5x from 8192 at
+# 4 or more KV heads. One KV head (32/1) loses at every depth: stock's
+# broadcast matmul is one GEMM there. Disable with GMLX_VERIFY_FA=0.
 _VERIFY_FA = env_bool("GMLX_VERIFY_FA", True)
 _HAS_FA_VERIFY = mlx_kquant is not None and hasattr(mlx_kquant, "sdpa_fa_verify")
 # hd256 wide-group decode (gqa > 8, i.e. qwen3.5-122b 32/2): the per-key dot
@@ -497,14 +507,29 @@ def _fa_min_kv_256(rows, chunks, kv):
     return None
 
 
+def _fa_min_kv_128(rows, chunks, kv):
+    # First key count from which the hd128 fold beats stock, or None where
+    # it never does or was not measured (see _VERIFY_FA).
+    if chunks > 2 or kv < 2:
+        return None
+    if rows > 32:
+        return 512
+    if rows >= 24:
+        return 1024 if kv >= 4 else 4096
+    if rows >= 16 and kv >= 4:
+        return 8192
+    return None
+
+
 def _fa_verify_eligible(q, k, v, mask):
     # B==1 verify width, causal only, fold must split into <=4 row tiles
-    # along the GQA group. hd256 = qwen3.x full-attn; hd512 = gemma-4
-    # global layers, one 32-row tile where _hd512_route picks fa.
+    # along the GQA group. hd128 = nemotron-h, llama-class; hd256 = qwen3.x
+    # full-attn; hd512 = gemma-4 global layers, one 32-row tile where
+    # _hd512_route picks fa.
     if q.ndim != 4 or q.shape[0] != 1:
         return False
     hd = q.shape[-1]
-    if hd not in (256, 512) or v.shape[-1] != hd or k.shape[-1] != hd:
+    if hd not in (128, 256, 512) or v.shape[-1] != hd or k.shape[-1] != hd:
         return False
     qL = q.shape[2]
     kv = k.shape[1]
@@ -517,7 +542,8 @@ def _fa_verify_eligible(q, k, v, mask):
     n = _fa_chunks(g, qL, _fa_row_cap(hd))
     if n is None:
         return False
-    min_kv = _fa_min_kv_256(g * qL, n, kv) if 2 <= qL <= 8 else None
+    table = _fa_min_kv_128 if hd == 128 else _fa_min_kv_256
+    min_kv = table(g * qL, n, kv) if 2 <= qL <= 8 else None
     if min_kv is None:
         return False
     if qL > k.shape[2] or k.shape[2] < min_kv:
@@ -559,9 +585,15 @@ def _stock_depth_warning(q, k, mask, sinks):
     if sinks is not None or not (isinstance(mask, str) and mask == "causal"):
         return
     B, hq, qL, hd = q.shape
-    if B != 1 or not 2 <= qL <= 8 or hd < 256 or k.shape[2] < 16384:
+    if B != 1 or not 2 <= qL <= 8 or k.shape[2] < 16384:
         return
-    if hd == 512:
+    if hd == 128:
+        if (qL * (hq // max(k.shape[1], 1)) <= 32 or k.shape[1] < 2
+                or not (_VERIFY_FA and _HAS_FA_VERIFY)):
+            return  # stock fuses it, or stock by the table or a kill switch
+    elif hd < 256:
+        return
+    elif hd == 512:
         r = _hd512_route(q, k)
         if (r is None or (r == "fa" and not (_VERIFY_FA and _HAS_FA_VERIFY))
                 or (r == "gemm" and not _VERIFY_GEMM)):

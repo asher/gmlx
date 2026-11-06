@@ -76,17 +76,18 @@ class _JobError:
 def run_on_engine(rg, job: Callable[[Any, Callable[[], bool]], Any], *,
                   request_id: str, prompt_tokens: int,
                   stop: threading.Event, timeout_s: Optional[float],
-                  stepwise: bool = False) -> Any:
+                  stepwise: bool = False, what: str = "the decision") -> Any:
     """Run ``job(response_generator, should_stop)`` on ``rg``'s engine
     thread and return its value. With ``stepwise`` the job returns a
     generator for an autoregressive model's engine, and its return value
     is the result. An exception from the job is raised here as itself.
-    ``timeout_s`` of ``None`` waits for the job forever."""
+    ``timeout_s`` of ``None`` waits for the job forever. ``what`` names
+    the job in its timeout and cancel messages."""
     rg.wait_until_ready()
     rqueue: queue.Queue = queue.Queue()
     request = _generation.QueuedGenerationRequest(
         rqueue=rqueue,
-        raw_inputs={_STEP_JOB_KEY if stepwise else _JOB_KEY: (job, stop)},
+        raw_inputs={_STEP_JOB_KEY if stepwise else _JOB_KEY: (job, stop, what)},
         prompt_tokens=int(prompt_tokens),
         args=_generation.GenerationArguments(max_tokens=1),
         request_id=request_id,
@@ -100,7 +101,7 @@ def run_on_engine(rg, job: Callable[[Any, Callable[[], bool]], Any], *,
     except queue.Empty:
         stop.set()
         raise JobTimeout(
-            f"the decision did not finish within {timeout_s:g} s") from None
+            f"{what} did not finish within {timeout_s:g} s") from None
     if isinstance(item, _JobError):
         raise item.exc
     if isinstance(item, BaseException):
@@ -130,7 +131,7 @@ def _install_diffusion_jobs() -> None:
         if entry is None:
             return original(self, uid, rqueue, raw_inputs, args, cancelled,
                             log_state, apc_semantic_hash=apc_semantic_hash)
-        job, stop = entry
+        job, stop, _ = entry
 
         def should_stop() -> bool:
             if stop.is_set():
@@ -161,12 +162,13 @@ def _install_diffusion_jobs() -> None:
 
 
 class _StepJob:
-    __slots__ = ("step", "stop", "rqueue")
+    __slots__ = ("step", "stop", "rqueue", "what")
 
-    def __init__(self, step, stop: threading.Event, rqueue):
+    def __init__(self, step, stop: threading.Event, rqueue, what: str):
         self.step = step
         self.stop = stop
         self.rqueue = rqueue
+        self.what = what
 
 
 def _is_step_job(item) -> bool:
@@ -211,7 +213,7 @@ def _step_scope(model):
 
 
 def _start(rg, request) -> Optional[_StepJob]:
-    job, stop = request.raw_inputs[_STEP_JOB_KEY]
+    job, stop, what = request.raw_inputs[_STEP_JOB_KEY]
     rqueue = request.rqueue
     rg._log_prefill_started(request, backend="decision")
     # A negative uid never names a batch row.
@@ -221,7 +223,7 @@ def _start(rg, request) -> Optional[_StepJob]:
         rqueue.put(_JobError(JobCancelled("cancelled before the job ran")))
         return None
     try:
-        return _StepJob(job(rg, stop.is_set), stop, rqueue)
+        return _StepJob(job(rg, stop.is_set), stop, rqueue, what)
     except Exception as e:  # noqa: BLE001 - forwarded to the waiting caller
         rqueue.put(_JobError(e))
         return None
@@ -232,7 +234,7 @@ def _advance(rg, run: _StepJob) -> bool:
     try:
         if run.stop.is_set():
             run.step.close()
-            raise JobCancelled("the decision was cancelled")
+            raise JobCancelled(f"{run.what} was cancelled")
         with _step_scope(getattr(rg, "model", None)):
             next(run.step)
         return False

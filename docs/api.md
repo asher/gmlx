@@ -21,6 +21,8 @@ sets up the server is in [Configuration](config.md).
   - [Structured output](#structured-output)
   - [Logprobs](#logprobs)
   - [Media in requests](#media-in-requests)
+  - [Word timestamps in chat](#word-timestamps-in-chat)
+  - [Transcription and translation](#transcription-and-translation)
 - [Limits and back-pressure](#limits-and-back-pressure)
 - [Hugging Face policy](#hugging-face-policy)
 
@@ -59,7 +61,7 @@ gets a 400 of type `unknown_profile`. A chat route that names one of the
 | `POST /unload` | Unload `{"model": "<id>"}`, a chat or an image model, or every idle model with no body. 409 while that model streams. |
 | `POST /v1/keep` | Load and warm `{"model": "<id>"}`, a chat or an image model, and keep it past its idle timeout. `"warm": false` skips the load. `"keep": false` releases it. |
 | `POST /v1/reload` | Re-read the config file and keep models whose load settings did not change |
-| `POST /v1/audio/transcriptions`, `/v1/audio/translations` | Speech to text, with `stt` set up as in [Speech, embeddings and rerank](services.md) |
+| `POST /v1/audio/transcriptions`, `/v1/audio/translations` | Speech to text, with `stt` set up as in [Speech, embeddings and rerank](services.md), or a served model that hears audio |
 | `POST /v1/audio/speech` | Text to speech, with `tts` set up. `GET /v1/audio/voices` lists the voices. |
 | `POST /v1/embeddings` | Text embeddings, with `embeddings` set up |
 | `POST /v1/rerank` | Document reranking, with `rerank` set up |
@@ -234,8 +236,78 @@ companion, a request with audio gets a 400. `/v1/estimate` reports such a
 request as `media: true`, because the transcript length is unknown until
 the clip is transcribed.
 
+A model that hears audio through its own speech encoder, such as
+[Nemotron 3.5 Transcribe](nemotron-transcribe.md), takes `input_audio`
+parts on `/v1/chat/completions` and `/v1/responses`, up to six clips and
+3600 seconds of audio in one request. The model reads each clip where its
+message put it.
+
 Other models with an audio tower take audio on `/v1/chat/completions`
 only. `/v1/responses` answers a request with audio for them with a 400.
+
+### Word timestamps in chat
+
+A chat completion on a model that hears audio through its own speech
+encoder can return the time of each word of its reply. Set
+`mm_processor_kwargs` in the request:
+
+```sh
+curl localhost:8080/v1/chat/completions -d '{
+  "model": "nemotron-3.5-transcribe@instruct",
+  "messages": [{"role": "user", "content": [
+    {"type": "text", "text": "Audio transcription. Language: as spoken. Wording: verbatim, including fillers and repetitions. Formatting: punctuation and capitalization. Output: transcript only."},
+    {"type": "input_audio", "input_audio": {"data": "<base64 WAV>", "format": "wav"}}
+  ]}],
+  "mm_processor_kwargs": {"capture_ctc_timestamps": true}
+}'
+```
+
+`"timestamp_granularities": ["word"]` asks for the same. The request must
+hold exactly one clip, and `n` above 1 gets a 400. The response adds a
+`ctc_timestamps` object, in the shape that NVIDIA's NeMo and vLLM servers
+use:
+
+```jsonc
+"ctc_timestamps": {"words": [{"word": "He", "start": 0.36, "end": 0.524, "speaker": "0"}, ...],
+                   "diarization": [{"speaker": 0, "start": 0.39, "end": 4.98}, ...],
+                   "speaker_tag_to_diarization_speaker": {"0": 0, "1": 1}, "error": null}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `words` | Each word of the reply, with `start` and `end` in seconds, and `speaker`, the number of its `<spk:N>` tag as a string |
+| `diarization` | The stretches of speech of each speaker that the encoder heard, by the encoder's own speaker number |
+| `speaker_tag_to_diarization_speaker` | The encoder speaker that each speaker tag matched |
+| `error` | Why `words` is empty, else `null`. The response is still a 200. |
+
+With `"stream": true`, the text deltas stream as the model writes them.
+The final choice chunk waits until the words are timed, and carries
+`finish_reason` and `ctc_timestamps` together. The usage chunk follows
+when `stream_options.include_usage` is set, and then `[DONE]`.
+
+### Transcription and translation
+
+`/v1/audio/transcriptions` and `/v1/audio/translations` take a multipart
+form with the recording in `file`, as OpenAI's routes do.
+[Speech-to-text](services.md#speech-to-text) lists the fields that every
+speech model takes. A served model that hears audio, such as
+[Nemotron 3.5 Transcribe](nemotron-transcribe.md#transcription-and-translation-routes),
+adds speakers and word times:
+
+| Name | Default | Meaning |
+|------|---------|---------|
+| `diarization` | `false` | `true` labels the speakers in `verbose_json`, `srt`, `vtt` and `diarized_json`. With `json` or `text`, a 400. |
+| `response_format=diarized_json` | Off | OpenAI's diarized transcript: one segment per speaker turn, with speakers `A`, `B` and on |
+| `timestamp_granularities[]` | None | `word` adds `words` to `verbose_json`. With `diarized_json`, a 400. |
+
+When `server.stt` names such a model, the model name
+`gpt-4o-transcribe-diarize` goes to it, as `whisper-1` does. When the aligner cannot time a transcript, the
+response is still a 200 with the text. `verbose_json` and `diarized_json`
+then carry empty `words` and `segments` and an `alignment_error` field
+that names the reason.
+
+Transcriptions and translations do not stream. The server answers when
+the whole recording is done.
 
 ## Limits and back-pressure
 

@@ -503,6 +503,7 @@ _CENSUSED = (
     "gmlx.serve.patches.apc",
     "gmlx.serve.patches.api_contract",
     "gmlx.serve.patches.audio_cascade",
+    "gmlx.serve.patches.native_audio",
     "gmlx.serve.patches.chat_behavior",
     "gmlx.serve.patches.context_copy",
     "gmlx.serve.patches.media_gate",

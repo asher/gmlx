@@ -325,7 +325,7 @@ def test_the_stop_event_cancels_a_running_job_and_an_engine_cancel_does_not():
     stop = threading.Event()
     rq = queue.Queue()
     rg.requests.put(_GEN.QueuedGenerationRequest(
-        rqueue=rq, raw_inputs={"_kq_engine_step_job": (_steps(10), stop)},
+        rqueue=rq, raw_inputs={"_kq_engine_step_job": (_steps(10), stop, "the job")},
         prompt_tokens=1, args=_GEN.GenerationArguments(max_tokens=1)))
     rg._collect_pending_requests(active=True)
     ctx = rq.get_nowait()
@@ -350,7 +350,7 @@ def test_a_keyboard_interrupt_is_not_swallowed():
         return step()
 
     rg.requests.put(_GEN.QueuedGenerationRequest(
-        rqueue=queue.Queue(), raw_inputs={"_kq_engine_step_job": (job, threading.Event())},
+        rqueue=queue.Queue(), raw_inputs={"_kq_engine_step_job": (job, threading.Event(), "the job")},
         prompt_tokens=1, args=_GEN.GenerationArguments(max_tokens=1)))
     rg._collect_pending_requests(active=True)
     with pytest.raises(KeyboardInterrupt):
@@ -389,7 +389,7 @@ def test_a_step_leaves_rng_rope_state_and_buffer_caps_as_they_were(monkeypatch):
     before = mx.random.state[0]
     rq = queue.Queue()
     rg.requests.put(_GEN.QueuedGenerationRequest(
-        rqueue=rq, raw_inputs={"_kq_engine_step_job": (job, threading.Event())},
+        rqueue=rq, raw_inputs={"_kq_engine_step_job": (job, threading.Event(), "the job")},
         prompt_tokens=1, args=_GEN.GenerationArguments(max_tokens=1)))
     rg._collect_pending_requests(active=True)
     rg._collect_pending_requests(active=True)
@@ -406,7 +406,7 @@ def test_a_diffusion_engine_passes_step_jobs_through():
     rg._stop, rg.requests, rg.model = False, queue.Queue(), None
     rg.__dict__["_kq_engine_is_diffusion"] = True
     item = _GEN.QueuedGenerationRequest(
-        rqueue=queue.Queue(), raw_inputs={"_kq_engine_step_job": (_steps(1), threading.Event())},
+        rqueue=queue.Queue(), raw_inputs={"_kq_engine_step_job": (_steps(1), threading.Event(), "the job")},
         prompt_tokens=1, args=_GEN.GenerationArguments(max_tokens=1))
     rg.requests.put(item)
     pending, _ = rg._collect_pending_requests(active=True)
@@ -419,7 +419,7 @@ def test_a_stopping_engine_fails_its_pending_jobs():
     rg._stop, rg.requests, rg.model = False, queue.Queue(), None
     rq = queue.Queue()
     rg.requests.put(_GEN.QueuedGenerationRequest(
-        rqueue=rq, raw_inputs={"_kq_engine_step_job": (_steps(10), threading.Event())},
+        rqueue=rq, raw_inputs={"_kq_engine_step_job": (_steps(10), threading.Event(), "the job")},
         prompt_tokens=1, args=_GEN.GenerationArguments(max_tokens=1)))
     rg._collect_pending_requests(active=True)
     rq.get_nowait()                          # the generation context

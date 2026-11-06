@@ -52,6 +52,18 @@ modifications:
   a relative position bias, the convolution module with its batch norm
   folded at load, subsampling and self-conditioning), restated in MLX.
 
+The Nemotron 3.5 Transcribe speech encoder ports model code from
+transformers at commit 9b283429f9bf (Apache-2.0), with modifications:
+
+- gmlx/models/nemotron_h/speech.py: the log-mel features of
+  src/transformers/models/nemotron_asr_streaming/
+  feature_extraction_nemotron_asr_streaming.py, restated in NumPy; the
+  speech recognition and speaker transformers, fusion and word timestamp
+  head of models/nemotron3_5_transcribe/modeling_nemotron3_5_transcribe.py
+  and the speaker cache of models/nemotron3_diarization/
+  modeling_nemotron3_diarization.py, restated in MLX over the pee GGUF's
+  tensors, with windowed batches and a column-limited CTC classifier.
+
 transformers is Copyright The Hugging Face team and licensed under the
 Apache License, Version 2.0, reproduced below. transformers ships no NOTICE
 file.

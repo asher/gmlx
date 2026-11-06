@@ -1113,7 +1113,8 @@ def _capability_guidance(caps: dict, *, needs_stt: bool, explicit_url: bool,
     else:
         print(
             "  add to your config's server: block\n"
-            "      stt: true      # whisper-turbo\n"
+            "      stt: true      # whisper-turbo, or a served model's id\n"
+            "                     # if that model hears audio\n"
             "      tts: true      # kokoro\n"
             "  install the models' engines if needed:\n"
             f"      {install_hint('talk')}\n"

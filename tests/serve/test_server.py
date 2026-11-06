@@ -2996,6 +2996,21 @@ def test_register_downloads_adds_entry_and_reloads(monkeypatch, tmp_path, capsys
     assert "registered new-q4" in capsys.readouterr().out
 
 
+def test_register_downloads_keeps_speculation_off_when_the_plan_says_so(monkeypatch, tmp_path):
+    cfg_path, lib = _reg_config(tmp_path)
+    new = lib / "head.gguf"
+    new.write_bytes(b"x")
+    from gmlx.config import ModelCfg as MC
+    from gmlx.config import load_config
+    monkeypatch.setattr(srv.discovery, "scan_dirs", lambda specs, dirs, **kw: [
+        MC(id="head-q4", path=str(new), speculative=True, speculative_auto=True)])
+    monkeypatch.setattr(srv, "_reload_running", lambda path, skip: None)
+    srv.register_downloads([str(new)], str(cfg_path),
+                           pairs={str(new): {"alias": "head", "speculative": False}})
+    m = load_config(cfg_path).models["head-q4"]
+    assert not m.speculative and not m.speculative_auto
+
+
 def test_register_downloads_leaves_a_pulled_speech_companion_out_of_the_scan(
         monkeypatch, tmp_path):
     cfg_path, lib = _reg_config(tmp_path)

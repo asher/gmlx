@@ -53,7 +53,7 @@ _log = logging.getLogger(__name__)
 # an image turn: image_position_ids (gemma4 unified), image_sizes
 # (muse_glimmer).
 _MEDIA_PROMPT_KWARGS = ("pixel_values", "pixel_values_videos", "input_features",
-                        "image_grid_thw", "video_grid_thw",
+                        "audio_clips", "image_grid_thw", "video_grid_thw",
                         "image_position_ids", "image_sizes")
 
 

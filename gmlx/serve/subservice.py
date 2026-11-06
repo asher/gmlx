@@ -102,6 +102,8 @@ def service_display(value) -> str:
     (aliases, repo ids, ``hf:``) pass through, and a filesystem path shrinks
     to its basename, so no answer reveals the Mac's folder layout."""
     v = str(value)
+    if v.startswith("model:"):            # a served chat model's id
+        return v[len("model:"):]
     if v.startswith("hf:"):
         return v
     if v.startswith(("/", "~")) or (os.sep in v and v.endswith(".gguf")):

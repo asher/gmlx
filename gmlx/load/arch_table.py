@@ -213,6 +213,12 @@ ASR_COMPANION_REPOS = {
     "graniteswitch": "granite-speech-5.0-470m-turboctc-GGUF",
 }
 
+# Speech encoders that feed a text model's own embeddings, as an mmproj
+# does: the model hears the audio itself. Nemotron 3.5 Transcribe's
+# encoder (NeMo-Speech.cpp writes it as ``pee``) names its decoder by
+# ``nemo_speech.checkpoint_id``.
+NATIVE_ASR_ENCODER_ARCHES = frozenset({"pee"})
+
 
 # llama.cpp packs five drafters under the ``dflash`` arch and tells them
 # apart by tensor names. The container decides which targets a drafter
@@ -365,6 +371,11 @@ def gate(gguf_arch: str, *, hf_source: str | None = None) -> ArchEntry:
             f"this GGUF ({gguf_arch!r}) is a speech companion, not a chat "
             f"model. Pass it to the text model it pairs with: --asr PATH on "
             f"run, chat or serve, or `asr:` in the model's config entry.")
+    if entry is None and gguf_arch in NATIVE_ASR_ENCODER_ARCHES:
+        raise UnsupportedArchError(
+            f"this GGUF ({gguf_arch!r}) is a speech encoder, not a chat "
+            f"model. Load the text model it belongs to, with this file as "
+            f"its --mmproj.")
     if entry is None:
         from gmlx.image.preflight import arch_hint
 

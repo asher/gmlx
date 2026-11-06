@@ -110,6 +110,7 @@ from .observability import (
     uvicorn_log_config,
 )
 from .audio_cascade import install_audio_cascade
+from .native_audio import install_native_audio
 from .render import install_chat_image_placement, install_faithful_history
 from .request_flow import (
     install_chat_load_offload,
@@ -159,6 +160,7 @@ __all__ = [
     "install_audio_voices_route",
     "install_auto_docs_removal",
     "install_audio_cascade",
+    "install_native_audio",
     "install_chat_image_placement",
     "install_chat_load_offload",
     "install_chat_template_kwargs",
@@ -363,6 +365,9 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # Outside the placement wrap: a model that reads audio through a speech
     # companion gets each audio message as marked text first.
     install_audio_cascade()
+    # A model that hears audio through its own speech encoder gets each
+    # clip encoded before the stock route runs.
+    install_native_audio()
     install_messages_route()
     install_apc_lone_harvest()
     install_retire_render_capture()

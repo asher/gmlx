@@ -5,6 +5,7 @@ are seams, so nothing reaches the network or a terminal."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 
@@ -592,6 +593,18 @@ def test_the_picker_gets_the_chat_groups_then_the_image_group_and_its_choice_run
     assert footer[0].startswith("Download 16.2 GB (8 B already on disk)   free disk")
     assert footer[1] == "gmlx pull dense --no-drafter"
     assert len(downloads) == 3 and "run it:  gmlx chat dense" in capsys.readouterr().out
+
+
+def test_the_picker_shows_no_toggle_for_a_speech_encoder_and_still_pulls_it(
+        cat, monkeypatch, capsys):
+    cfg, lib, downloads = cat
+    catalog.MODELS["dense"] = dataclasses.replace(DENSE, hears=True)
+    _tty(monkeypatch)
+    seen = _fake_pick(monkeypatch, lambda groups: _default_plan_of(groups[0].rows[0]))
+    assert manage.cmd_pull(["--config", str(cfg)]) == 0
+    dense = seen["groups"][0].rows[0]
+    assert [t.id for t in dense.toggles] == ["drafter"]
+    assert any(f == DENSE.mmproj for _, f, _ in downloads)
 
 
 def _pick_image(groups, name, quant):

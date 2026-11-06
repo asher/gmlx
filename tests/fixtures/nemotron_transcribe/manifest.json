@@ -1,0 +1,21 @@
+{
+ "schema": 1,
+ "fixtures": {
+  "selftest_pee_tiny": {
+   "manifest": "selftest_pee_tiny.manifest.json",
+   "npz": "selftest_pee_tiny.npz",
+   "check": "encoder",
+   "family": "nemotron-transcribe",
+   "created": "2026-11-04T20:21:08Z",
+   "tensors": 121
+  },
+  "align_nemo_tiny": {
+   "manifest": "align_nemo_tiny.manifest.json",
+   "npz": "align_nemo_tiny.npz",
+   "check": "alignment",
+   "family": "nemotron-transcribe",
+   "created": "2026-11-05T05:51:49Z",
+   "tensors": 15
+  }
+ }
+}

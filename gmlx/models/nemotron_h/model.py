@@ -22,6 +22,7 @@ dense MLP. Every block is ``x + mixer(rms_norm(x))``.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple, Union
 
@@ -30,7 +31,7 @@ import mlx.nn as nn
 
 from gmlx._vendor.mlx_lm.models.activations import swiglu
 from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
-from gmlx._vendor.mlx_lm.models.ssm import ssm_update
+from gmlx._vendor.mlx_lm.models.ssm import ssm_attn, ssm_update
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchMLP
 from gmlx.cache.attention import (
     create_attention_mask,
@@ -122,6 +123,11 @@ class MambaRMSNormGated(nn.Module):
         x = mx.unflatten(x, axis=-1, shape=(-1, self.group_size))
         x = mx.fast.rms_norm(x, weight=None, eps=self.eps)
         return self.weight * x.flatten(-2)
+
+
+# A prefill chunk at least this wide evaluates each Mamba layer as it
+# finishes. Decode and speculative verify rounds stay one lazy graph.
+PREFILL_EVAL_ROWS = 64
 
 
 class NemotronHMamba2Mixer(nn.Module):
@@ -270,7 +276,14 @@ class NemotronHMamba2Mixer(nn.Module):
         if cache:
             cache.advance(y.shape[1])
         y = self.norm(y, gate)
-        return self.out_proj(y)
+        out = self.out_proj(y)
+        if cache is not None and hidden_states.shape[1] >= PREFILL_EVAL_ROWS:
+            # Left lazy, a chunk's cache update keeps this layer's scan
+            # scratch alive until the whole chunk is evaluated. The copy
+            # keeps the conv tail from pinning the chunk's conv input.
+            cache[0] = cache[0] * 1
+            mx.eval(out, [c for c in (cache[0], cache[1]) if c is not None])
+        return out
 
     def replay_prefix(self, record: dict, n: int, cache: ArraysCache,
                       mask: Optional[mx.array]) -> None:
@@ -610,3 +623,36 @@ class Model(nn.Module):
 
 # Kept fp32 by the loader (loader._FP32_KEEP_BY_MODEL_TYPE["nemotron_h"]).
 _FP32_PARAMS = (".mixer.gate.weight", ".e_score_correction_bias", ".A_log")
+
+
+# Prefill bytes per chunk row with the per-layer eval. A Mamba layer's scan
+# holds about six fp32 buffers per head as wide as the scan chunk and six as
+# wide as the head; the MoE and the residual stream add the rest, priced by
+# the hidden size. Measured peaks fit under it: 0.74 MiB a row on the
+# 30B-A4B (64 heads, hidden 2688) and 1.17 MiB on Bolt-74B (128 heads, hidden
+# 4096), both at head dim 64 and state 128. Wider chunks cost less a row.
+SCAN_CHUNK = inspect.signature(ssm_attn).parameters["step"].default
+SCAN_BUFFERS = 6
+REST_BYTES_PER_HIDDEN = 0.29 * 2**20 / 2688
+
+
+def _row_bytes(cfg) -> float:
+    def get(name):
+        v = cfg.get(name) if isinstance(cfg, dict) else getattr(cfg, name, None)
+        return int(v or 0)
+
+    scan = 4 * SCAN_BUFFERS * (SCAN_CHUNK + get("mamba_head_dim"))
+    return get("mamba_num_heads") * scan + REST_BYTES_PER_HIDDEN * get("hidden_size")
+
+
+def _register_prefill_costs() -> None:
+    from gmlx.gen import prefill_decay
+
+    prefill_decay.register_row_cost("nemotron_h", _row_bytes)
+    # Prefill attention is stock SDPA with a causal or array mask.
+    for mt in ("nemotron_h", "nemotron_h_transcribe"):
+        prefill_decay.register_score_profile(
+            mt, prefill_decay.fused_attention_profile)
+
+
+_register_prefill_costs()

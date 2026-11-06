@@ -1,0 +1,309 @@
+{
+ "schema": 1,
+ "name": "enc_two_speakers",
+ "check": "encoder",
+ "family": "nemotron-transcribe",
+ "script": "ref_encoder.py",
+ "argv": [
+  "ref_encoder.py",
+  "--encoder",
+  "NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-Encoder-F16.gguf",
+  "--audio",
+  "two_speakers.wav",
+  "--name",
+  "enc_two_speakers"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.15.0"
+   },
+   "torchaudio": {
+    "version": "2.11.1"
+   },
+   "transformers": {
+    "version": "5.23.0.dev0",
+    "source": "9b283429f9bf5c680bec437ab888c435dd2fef8b"
+   },
+   "tokenizers": {
+    "version": "0.23.3"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "sentencepiece": {
+    "version": "0.2.2"
+   },
+   "librosa": {
+    "version": "1.0.0"
+   },
+   "scipy": {
+    "version": "1.18.1"
+   },
+   "numpy": {
+    "version": "2.5.4"
+   }
+  },
+  "hf_hub_offline": "1",
+  "transformers_rev": "9b283429f9bf5c680bec437ab888c435dd2fef8b"
+ },
+ "files": {
+  "encoder": {
+   "name": "NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-Encoder-F16.gguf",
+   "size": 1670410080,
+   "sha256": "4221029c8a565c4a80c507ffa760c716e595acf663f9f4273ce69910050e7ba2"
+  },
+  "audio": {
+   "name": "two_speakers.wav",
+   "size": 5316664,
+   "sha256": "ac9c582dde6cf99501583482e0cb170d220d4263475556d74a2491818a92eead"
+  }
+ },
+ "inputs": {
+  "seconds": 166.144375,
+  "samples": 2658310,
+  "mel_frames": 16614,
+  "padded_frames": 16616,
+  "ctc": "summary"
+ },
+ "results": {
+  "fp32_seconds": 2.9,
+  "bf16_seconds": 60.01,
+  "bf16_vs_fp32": {
+   "embeds": {
+    "rel_l2": 0.04733689127887078,
+    "cosine": 0.9988791102005766,
+    "max_abs": 1.232195258140564
+   },
+   "fused": {
+    "rel_l2": 0.06289624287937531,
+    "cosine": 0.9980201527680269,
+    "max_abs": 14.309791564941406
+   },
+   "asr_states": {
+    "rel_l2": 0.022020360858063758,
+    "cosine": 0.999757537183675,
+    "max_abs": 12.198215782642365
+   },
+   "speaker_logits": {
+    "rel_l2": 0.08300169796495781,
+    "cosine": 0.9980987071542188,
+    "max_abs": 8.832633972167969
+   },
+   "speaker_probs": {
+    "rel_l2": 0.07824821903917799,
+    "cosine": 0.9973165047002563,
+    "max_abs": 0.18370097875595093
+   },
+   "ctc_argmax": {
+    "agree": 0.9985556090515166
+   },
+   "ctc_logsumexp": {
+    "rel_l2": 0.01655388777678388,
+    "cosine": 0.9998632442835181,
+    "max_abs": 6.458578109741211
+   },
+   "ctc_columns_logp": {
+    "rel_l2": 0.008632268913773992,
+    "cosine": 0.9999628454098985,
+    "max_abs": 10.441596150499208
+   }
+  }
+ },
+ "tolerances": {
+  "embeds": {
+   "rel_l2": 0.09467378255774156,
+   "max_abs": 2.464390516281128
+  },
+  "fused": {
+   "rel_l2": 0.12579248575875063,
+   "max_abs": 28.619583129882812
+  },
+  "asr_states": {
+   "rel_l2": 0.044040721716127516,
+   "max_abs": 24.39643156528473
+  },
+  "speaker_logits": {
+   "rel_l2": 0.16600339592991561,
+   "max_abs": 17.665267944335938
+  },
+  "speaker_probs": {
+   "rel_l2": 0.15649643807835598,
+   "max_abs": 0.36740195751190186
+  },
+  "ctc_argmax": {
+   "agree": 0.9971112181030333
+  },
+  "ctc_logsumexp": {
+   "rel_l2": 0.03310777555356776,
+   "max_abs": 12.917156219482422
+  },
+  "ctc_columns_logp": {
+   "rel_l2": 0.017264537827547985,
+   "max_abs": 20.883192300998417
+  }
+ },
+ "notes": [
+  "Tolerances are twice the reference's own fp32-vs-bf16 gap."
+ ],
+ "created": "2026-11-04T20:10:32Z",
+ "npz": "enc_two_speakers.npz",
+ "tensors": {
+  "audio": {
+   "shape": [
+    2658310
+   ],
+   "dtype": "float32",
+   "sha256": "2181aa7e3c96711e4575f2f90fb79851310307fb84cefcf21ca48a7a11dc8fe1"
+  },
+  "bf16_asr_states": {
+   "shape": [
+    2077,
+    1280
+   ],
+   "dtype": "float32",
+   "sha256": "226619ee6309ac49f45543aa1570525e04ee49c6094c92316aa22fe8e3972749"
+  },
+  "bf16_ctc_argmax": {
+   "shape": [
+    4154
+   ],
+   "dtype": "int32",
+   "sha256": "fa3bf4a8d6dd3b17b2a4b080f5a1bb698a5dc3673355a43305f2b950c915cc95"
+  },
+  "bf16_ctc_columns_logp": {
+   "shape": [
+    4154,
+    513
+   ],
+   "dtype": "float32",
+   "sha256": "3e10bba13a53e73eef0ca5391866e4cd660bbb561c015e69f937a404745ac688"
+  },
+  "bf16_ctc_logsumexp": {
+   "shape": [
+    4154
+   ],
+   "dtype": "float32",
+   "sha256": "28d44d002527d1a5434c4aeaa73898680ce7f0b35c1987f41458dbf3ea4f939c"
+  },
+  "bf16_embeds": {
+   "shape": [
+    2077,
+    2688
+   ],
+   "dtype": "float32",
+   "sha256": "9c735eb8a3a3ad774e06db5add6f0e0a1e7a3c76a7d93af2ba2d78a3351c9cd3"
+  },
+  "bf16_fused": {
+   "shape": [
+    2077,
+    1280
+   ],
+   "dtype": "float32",
+   "sha256": "c31037c770ab16112b0badde085f461676746892533ec2ba04363fd7a6ffe204"
+  },
+  "bf16_speaker_logits": {
+   "shape": [
+    16616,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "21e685d09cc89200234924654289bac121831896e5ffb9243c2a9dc3db6451c8"
+  },
+  "bf16_speaker_probs": {
+   "shape": [
+    2077,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "2f2d08ae7222e339322ed01094cf8aaebd474be0a8dc3b62c7f6fc56ec540ca6"
+  },
+  "ctc_columns": {
+   "shape": [
+    513
+   ],
+   "dtype": "int32",
+   "sha256": "24f69ff721481bc8863b0a313dea5d24ce2f4e57c22630cbe5302402eaae678e"
+  },
+  "features": {
+   "shape": [
+    16616,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "5ab557ff7256feee3fdd216286da0a64aabe20d50c58de13f9404e042adacf5f"
+  },
+  "fp32_asr_states": {
+   "shape": [
+    2077,
+    1280
+   ],
+   "dtype": "float32",
+   "sha256": "1fdfb886ce2346966f6f11b5946043b53c9174267704199181df8387aad70fcb"
+  },
+  "fp32_ctc_argmax": {
+   "shape": [
+    4154
+   ],
+   "dtype": "int32",
+   "sha256": "5738d935265b64788f9751997eba0d47117e6867ee9f101d973b576af5083a7e"
+  },
+  "fp32_ctc_columns_logp": {
+   "shape": [
+    4154,
+    513
+   ],
+   "dtype": "float32",
+   "sha256": "8807d314a0f5cb00966644fe14fafb90eb16881fa66d5556d4239cc9c83271af"
+  },
+  "fp32_ctc_logsumexp": {
+   "shape": [
+    4154
+   ],
+   "dtype": "float32",
+   "sha256": "1e79b76b7e1415c20707158ceafda165918a0c96ce0404d6573588d19405b121"
+  },
+  "fp32_embeds": {
+   "shape": [
+    2077,
+    2688
+   ],
+   "dtype": "float32",
+   "sha256": "817439388362ccb30c81e45cc67ddd25fe710019507d3a441221ffe2ccc1cc26"
+  },
+  "fp32_fused": {
+   "shape": [
+    2077,
+    1280
+   ],
+   "dtype": "float32",
+   "sha256": "f4c1b0a0cc693e71cbebfa1281c9311f986fbfa1e84f2d8844d384f9ad63a11e"
+  },
+  "fp32_speaker_logits": {
+   "shape": [
+    16616,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "ec12fd5fb1fac5723905375b33d67a6fd2cfdf88b3be0ca23a96d0b1cab096e9"
+  },
+  "fp32_speaker_probs": {
+   "shape": [
+    2077,
+    8
+   ],
+   "dtype": "float32",
+   "sha256": "62573455645bb698fd1fb1575f0af80f2b2d9f6343c6f53a2151731e908f3cb0"
+  },
+  "mask": {
+   "shape": [
+    16616
+   ],
+   "dtype": "int32",
+   "sha256": "4d78a24e04ee4d60621da3c630ffddc21a0d0546026aa26d67fb2aeae45ba16e"
+  }
+ }
+}

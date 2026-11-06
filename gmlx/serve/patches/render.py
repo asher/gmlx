@@ -472,6 +472,11 @@ class _PlacedImages(list):
     that message."""
 
 
+class _PlacedMedia(_PlacedImages):
+    """A user message's content whose images and clips both render in that
+    message (a model that hears audio through its own speech encoder)."""
+
+
 def _placed_content(content) -> list:
     """Text parts and one ``{"type": "image"}`` marker per image, in
     content order, as the Responses route builds a message. The stock
@@ -483,6 +488,8 @@ def _placed_content(content) -> list:
         kind = item.get("type")
         if kind in _IMAGE_PARTS:
             out.append({"type": "image"})
+        elif kind == "input_audio" and isinstance(content, _PlacedMedia):
+            out.append({"type": "audio"})
         elif kind in _TEXT_PARTS:
             text = item.get("text", "") or item.get("content", "")
             if text:

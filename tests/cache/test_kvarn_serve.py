@@ -231,6 +231,11 @@ def test_safe_quant_kvarn_arm(restorable, kvarn_ops_ok):
     restorable.setattr(
         vlm_common, "maybe_quantize_kv_cache", vlm_common.maybe_quantize_kv_cache
     )
+    # The installer marks the mlx-lm module done. Undo the mark with the
+    # bindings, or a later install would no-op on the stock VLM binding.
+    lm_gen = importlib.import_module("gmlx._vendor.mlx_lm.generate")
+    restorable.setattr(lm_gen, "maybe_quantize_kv_cache", lm_gen.maybe_quantize_kv_cache)
+    restorable.setattr(lm_gen, "_kq_safe_kv_quant", False, raising=False)
     install_safe_kv_quantization()
 
     class _Convertible:

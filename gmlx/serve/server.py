@@ -1607,6 +1607,8 @@ def register_downloads(paths: list, config_path=None, *,
             pr = pairs.get(os.path.abspath(m.path), {})
             if pr.get("mmproj"):
                 m.mmproj = pr["mmproj"]
+            if pr.get("speculative") is False:
+                m.speculative = m.speculative_auto = False
             if pr.get("draft_gguf"):
                 if m.stream:
                     print(f"{os.path.basename(pr['draft_gguf'])} is not set for "
@@ -2049,7 +2051,8 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "mlx-whisper (needs the stt extra, and ffmpeg on the "
                          "server's PATH). MODEL is an alias (whisper-turbo, "
                          "whisper-turbo-q4, whisper-large/medium/small/base/tiny), "
-                         "any HF repo in MLX-whisper format, or a local model dir; "
+                         "any HF repo in MLX-whisper format, a local model dir, or "
+                         "the id of a served model with a speech encoder; "
                          "bare --stt picks whisper-turbo - give it a value or put "
                          "it after the positional model, or the model path is "
                          "parsed as the STT model. Works in every serve mode and "
@@ -2911,7 +2914,9 @@ def _single_model_cfg(a) -> ServerCfg:
         id=mid,
         path=mp,
         profile=getattr(a, "profile", None),
-        mmproj=os.path.abspath(os.path.expanduser(a.mmproj)) if a.mmproj else None,
+        # Nemotron 3.5 Transcribe hears through the encoder beside it.
+        mmproj=(os.path.abspath(os.path.expanduser(a.mmproj)) if a.mmproj
+                else discovery.find_speech_encoder(mp)),
         asr=(False if getattr(a, "no_asr", False)
              else os.path.abspath(os.path.expanduser(a.asr))
              if getattr(a, "asr", None) else None),
@@ -3056,12 +3061,17 @@ def _resolve_service_models(cfg, a) -> None:
     from . import stt as stt_mod
     from . import tts as tts_mod
 
+    unset = getattr(a, "stt", None) is None and getattr(cfg, "stt", None) is None
     cfg.stt = _speech_service("stt", getattr(a, "stt", None), cfg,
-                              lambda v: (stt_mod.paired_companion(cfg)
-                                         if str(v).strip().lower()
-                                         == stt_mod.ALIAS_COMPANION
-                                         else stt_mod.resolve_stt_model(v)),
+                              lambda v: (stt_mod.native_for(v, cfg)
+                                         or (stt_mod.paired_companion(cfg)
+                                             if str(v).strip().lower()
+                                             == stt_mod.ALIAS_COMPANION
+                                             else stt_mod.resolve_stt_model(v))),
                               stt_mod.check_backend)
+    if unset:
+        # A served model that hears audio answers the STT routes itself.
+        cfg.stt = stt_mod.auto_native(cfg)
     cfg.tts = _speech_service("tts", getattr(a, "tts", None), cfg,
                               tts_mod.resolve_tts_model,
                               lambda _model: tts_mod.import_mlx_audio())
@@ -3371,8 +3381,13 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     _print_models(cfg.models)
     _warn_stale_stream_marks(cfg, config_given)
     if cfg.stt:
-        print(f"[server] stt: {cfg.stt}  (POST /v1/audio/transcriptions, "
-              f"pre-warming in background)")
+        from .stt import is_native
+        from .subservice import service_display
+
+        print(f"[server] stt: {service_display(cfg.stt)}  (POST "
+              "/v1/audio/transcriptions"
+              + (", the served model itself)" if is_native(cfg.stt)
+                 else ", pre-warming in background)"))
     if cfg.tts:
         print(f"[server] tts: {cfg.tts}  (POST /v1/audio/speech, "
               f"pre-warming in background)")

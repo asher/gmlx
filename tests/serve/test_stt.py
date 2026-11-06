@@ -218,7 +218,7 @@ def test_config_stt_key_round_trips():
     cfg = build_config({"server": {"stt": "whisper-turbo-q4"}})
     assert cfg.stt == "whisper-turbo-q4"      # raw; resolved at serve time
     assert build_config({"server": {}}).stt is None
-    assert build_config({"server": {"stt": False}}).stt is None
+    assert build_config({"server": {"stt": False}}).stt is False   # opted out
     # YAML `stt: true` enables the default alias downstream.
     assert build_config({"server": {"stt": True}}).stt is True
     assert stt.resolve_stt_model(True) == TURBO
