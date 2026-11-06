@@ -1130,6 +1130,19 @@ def test_a_run_encodes_its_anchors_between_the_encoder_and_the_dit(
         ("--guide", 4, 22, 0 if quiet else 50), ("--guide-audio", 4, 0, 58)]
 
 
+@pytest.mark.parametrize("guided", [True, False], ids=["guide", "text"])
+def test_a_run_without_keyframes_loads_no_mmproj(anchored, tmp_path, guided):
+    """The vision tower reads keyframes alone: a run with an image guide
+    and a run from text alone, each given --mmproj, load the encoder
+    without it."""
+    argv = ["--guide", f"{_png(tmp_path / 'g.png', 64, 48)}@10"] \
+        if guided else []
+    assert anchored(*argv) == 0
+    assert anchored.order[0] == "encoder"
+    assert anchored.seen["mmproj"] is None
+    assert "keyframes" not in anchored.seen
+
+
 def test_the_memory_plan_prices_the_anchors_the_run_encodes(
         planned, tmp_path, monkeypatch):
     """A first frame at 512x320 adds its vision rows to the prompt and its
