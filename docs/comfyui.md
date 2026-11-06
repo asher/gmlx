@@ -285,7 +285,11 @@ To start the clip at an image, open the `minimax-h3-i2v` workflow. Its
 The prompt reads both images through the text encoder's vision tower, and
 the gmlx video VAE encodes them on the server.
 `Add Guide for MiniMax H3` anchors an image, a video or a sound at a
-frame of the clip, as `--guide` does on the command line.
+frame of the clip, as `--guide` does on the command line. A guide video
+runs when the Mac's memory holds its encode beside the models: the nodes
+send a long one to the server a few seconds at a time, and one that does
+not fit stops with
+[`a video encode ... does not fit in memory`](troubleshooting.md#a-video-encode--does-not-fit-in-memory-beside-the-models-now-loaded).
 [Keyframes and guides](video.md#keyframes-and-guides) describes each,
 and [Clip length, size and memory](video.md#clip-length-size-and-memory)
 the memory they take on the command line. Through the nodes, a step is

@@ -195,6 +195,7 @@ images:
 | A 5-frame guide video with its sound | 32 GB | 32 GB |
 | A 22-frame guide video with its sound | 36 GB | 32 GB |
 | 5 seconds of guide sound | 32 GB | 32 GB |
+| A 362-frame guide video with its sound, in a 15 second clip | 96 GB | 64 GB |
 
 Through ComfyUI a step also holds the server's caches, so
 [Make a video](comfyui.md#make-a-video) says what runs there.

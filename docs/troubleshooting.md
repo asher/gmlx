@@ -517,6 +517,17 @@ make the clip longer, or cut the video shorter.
 
 ## ComfyUI
 
+### `a video encode ... does not fit in memory beside the models now loaded`
+
+The server answers 400 when the gmlx video VAE cannot encode a first or
+last frame, or a part of a guide video, beside the models it holds. The
+nodes send a long guide video in parts of up to 124 frames, and the
+message gives the memory a part needs, the memory free and the largest
+part that fits now. The nodes send the guide again once in parts of that
+size. When no part fits, unload chat models with
+[`POST /unload`](api.md#endpoints), make the clip smaller, or cut the
+guide video shorter.
+
 ### `no ComfyUI found`
 
 `gmlx comfyui install` and `gmlx launch comfyui` found no ComfyUI in the
