@@ -963,3 +963,114 @@ def test_a_turn_refused_in_a_streamed_job_gives_its_retry_seconds(served):
     ((kind, frame),) = _frames(r.text)
     assert kind == "error" and frame["error"].pop("retry_after") == 7
     assert frame == plain.json()
+
+
+def _gated_app():
+    """The images routes on an app of their own behind the media gate, as
+    the server stacks them."""
+    from fastapi import FastAPI
+
+    from gmlx.serve.patches import media_gate
+
+    app = FastAPI()
+    for route in images.ROUTES:
+        app.add_api_route(f"/v1/images/{route}", images.make_endpoint(route),
+                          methods=["POST"])
+    media_gate.install_media_gate(app=app)
+    return app
+
+
+def test_the_gate_leaves_an_images_body_to_the_route_and_its_price(
+        served, monkeypatch):
+    """An edit body past the gate's own bound, its inline image past the
+    gate's byte limit for one image, reaches the route, which prices the
+    whole body against the memory free and reads it."""
+    from gmlx.serve.patches import body_intake
+    from gmlx.serve.patches import media_gate as mg
+
+    png = _png(64, 64)
+    uri = "data:image/png;base64," + base64.b64encode(png).decode()
+    body = json.dumps({"prompt": "x", "images": [{"image_url": uri}]})
+    monkeypatch.setattr(mg, "BODY_MAX_BYTES", len(body) // 2)
+    monkeypatch.setattr(mg, "MEDIA_MAX_BYTES", len(png) // 2)
+    monkeypatch.setattr(body_intake, "free_bytes", lambda: 4 * len(body))
+    r = TestClient(_gated_app()).post(
+        "/v1/images/edits", content=body,
+        headers={"content-type": "application/json"})
+    assert r.status_code == 200, r.text
+    (req, _), = served.jobs
+    assert [im.shape for im in req.images] == [(64, 64, 3)]
+
+
+def test_an_images_body_past_the_memory_free_answers_413_before_its_read(
+        served, monkeypatch):
+    """On a live socket, a Content-Length past the memory free is refused
+    with both figures before the body is sent, and the connection
+    closes."""
+    import http.client
+
+    from live_socket import closed, peer, send, serving
+
+    from gmlx.serve.patches import body_intake
+
+    monkeypatch.setattr(body_intake, "free_bytes", lambda: 1 << 20)
+    with serving(_gated_app()) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        other = peer(conn)
+        r = send(conn, "/v1/images/generations", b"{", length=8 << 20)
+        assert r.status == 413, r.body
+        assert json.loads(r.body)["error"]["message"] == (
+            "the request body is 8.0 MiB, and 1.0 MiB of memory is free "
+            "beside the models loaded; send a smaller body, or unload a "
+            "model to make room")
+        assert r.getheader("connection") == "close"
+        assert closed(other)
+        conn.close()
+    assert served.jobs == []
+
+
+def test_an_images_body_with_no_length_stops_at_the_memory_free(
+        served, monkeypatch):
+    """A chunked body is read until it passes the figure, and refused
+    there."""
+    from gmlx.serve.patches import body_intake
+
+    monkeypatch.setattr(body_intake, "free_bytes", lambda: 1 << 16)
+    sent = []
+
+    def chunks():
+        yield b'{"prompt": "'
+        for _ in range(64):
+            sent.append(1)
+            yield b"x" * 4096
+        yield b'"}'
+    r = TestClient(_gated_app()).post(
+        "/v1/images/generations", content=chunks(),
+        headers={"content-type": "application/json"})
+    assert r.status_code == 413, r.text
+    assert r.json()["error"]["message"].startswith(
+        "the request body is over 64.0 KiB")
+    assert served.jobs == []
+
+
+def test_a_launch_session_keeps_its_body_limit_on_the_images_api(
+        served, monkeypatch):
+    """On a launch session socket the gate reads an images body to the
+    session's limit, as before; over TCP the route prices it."""
+    from gmlx.serve.patches import media_gate as mg
+    from gmlx.serve.patches._common import SESSION_SCOPE_KEY
+
+    monkeypatch.setattr(mg, "SESSION_BODY_MAX_BYTES", 1000)
+    app = _gated_app()
+
+    async def session_app(scope, receive, send):
+        await app({**scope, SESSION_SCOPE_KEY: "s1"}, receive, send)
+    body = json.dumps({"prompt": "x" * 2000})
+    r = TestClient(session_app).post(
+        "/v1/images/generations", content=body,
+        headers={"content-type": "application/json"})
+    assert r.status_code == 413, r.text
+    assert "limit of a launch session" in r.json()["error"]["message"]
+    r = TestClient(app).post("/v1/images/generations", content=body,
+                             headers={"content-type": "application/json"})
+    assert r.status_code == 200, r.text

@@ -232,9 +232,28 @@ def _json_image(value, param: str):
 
 
 async def _read_body(route: str, request: Request):
-    """``(fields, images, mask)`` of a JSON body or a multipart form."""
-    from ..image_service import _bad, decode_image
+    """``(fields, images, mask)`` of a JSON body or a multipart form. The
+    media gate leaves the body to the route: the whole body, its images
+    with it, is priced against the memory free before a byte of it is
+    read, then held to the gate's media rules (body_intake). The price is
+    an estimate and books nothing; the job's admission prices the decoded
+    images. Its inline images take no byte limit of their own."""
+    from .media_gate import body_priced
 
+    with body_priced():
+        return await _read_priced_body(route, request)
+
+
+async def _read_priced_body(route: str, request: Request):
+    from ..image_service import ImageRequestError, _bad, decode_image
+    from .body_intake import BodyRefused, check_media, read_in_ram
+
+    try:
+        raw = await read_in_ram(request)
+        await check_media(request, raw)
+    except BodyRefused as e:
+        raise ImageRequestError(e.status, str(e), param=e.param,
+                                headers=e.headers) from None
     ctype = request.headers.get("content-type", "").lower()
     images, mask = [], None
     if ctype.startswith("multipart/form-data"):
