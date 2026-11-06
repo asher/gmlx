@@ -1311,11 +1311,33 @@ def test_a_cold_load_holds_only_the_workers_it_loads_or_releases_on(
     """An image load that evicts an idle chat model holds the image
     worker it builds on, and not the video worker of the idle video
     entry it leaves resident."""
-    pool = make_pool(monkeypatch, 10)
-    chat(pool, "old", 3, busy=0)
+    pool = make_pool(monkeypatch, 9)
+    old = chat(pool, "old", 3, busy=0)
     clip = video(pool, "clip", 3)
     order = _recorded_holds(monkeypatch, pool)
     image(pool, "zimage", 4)
+    assert order == [IMAGE_KIND]
+    assert not pool.entry_resident(old)
+    assert pool.entry_resident(clip)
+
+
+def test_a_reaper_tick_holds_only_the_workers_of_what_it_reaps(
+        monkeypatch):
+    """An idle image entry under its TTL, beside a running video part:
+    the tick holds no worker, so it waits behind no job. Past the TTL it
+    holds the image worker alone, and reaps the entry."""
+    pool = make_pool(monkeypatch, 10)
+    idle = image(pool, "idle", 3)
+    clip = video(pool, "clip", 3, busy=True)
+    pool._in_flight_fn = lambda: 0
+    order = _recorded_holds(monkeypatch, pool)
+    with pool._lock:
+        idle.ttl = clip.ttl = 100
+    assert pool.reap_idle() == []
+    assert order == []
+    with pool._lock:
+        idle.last_access -= 1000
+    assert pool.reap_idle() == ["idle"]
     assert order == [IMAGE_KIND]
     assert pool.entry_resident(clip)
 

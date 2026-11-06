@@ -1488,7 +1488,8 @@ class _ResidencyPool:
         path won't be silently re-kept (and TTL-exempted) on a later reload."""
         released: list = []
         torn: list = []
-        with self._teardown_window(released):
+        with self._teardown_window(
+                released, lambda e: e.model_path == model_path):
             with self._lock:
                 self._keep_paths.discard(model_path)
                 keys = [k for k, e in self._entries.items()
@@ -1581,7 +1582,8 @@ class _ResidencyPool:
         reaped = []
         released: list = []
         torn: list = []
-        with self._teardown_window(released):
+        with self._teardown_window(released,
+                                   lambda e: self._reapable(e, now)):
             try:
                 with self._lock:
                     self._reap_locked(now, torn, reaped)
@@ -1590,18 +1592,23 @@ class _ResidencyPool:
                 self._teardown_all(torn, released)
         return reaped
 
+    def _reapable(self, entry, now) -> bool:
+        """Under _lock: whether the reaper takes ``entry``, idle past its
+        TTL and neither pinned, kept nor held by an image or video job."""
+        if (entry.pinned or entry.model_path in self._keep_paths
+                or not entry.ttl or entry.ttl <= 0):
+            return False
+        if now - entry.last_access < entry.ttl:
+            return False
+        # An image or video job is not in the server's in-flight count;
+        # its hold is.
+        return not (entry.is_image and entry.busy > 0)
+
     def _reap_locked(self, now, torn: list, reaped: list) -> None:
         """Under _lock: take the entries idle past their TTL out of the
         pool into ``torn``."""
         for entry in list(self._entries.values()):
-            if (entry.pinned or entry.model_path in self._keep_paths
-                    or not entry.ttl or entry.ttl <= 0):
-                continue
-            if now - entry.last_access < entry.ttl:
-                continue
-            if entry.is_image and entry.busy > 0:
-                # An image job is not in the server's in-flight
-                # count; its hold is.
+            if not self._reapable(entry, now):
                 continue
             _log.info("idle TTL unload (%.0fs): %s",
                       entry.ttl, entry.model_path)
@@ -2316,14 +2323,16 @@ class _ResidencyPool:
         self._teardown_chat(entry)
 
     @contextlib.contextmanager
-    def _teardown_window(self, released: list):
-        """The worker reservation and the build lock for a teardown. An
+    def _teardown_window(self, released: list, which=None):
+        """The worker reservation and the build lock for a teardown of the
+        idle entries ``which(entry)`` picks, under _lock (every idle one
+        when None): only their workers are held. An
         image entry busy when the reservation was decided can be idle and
         torn down under the lock: without the worker held, its pipeline is
         released after the lock drops, as a release would queue on the
         worker behind a reservation that waits on the lock."""
         try:
-            with self._worker_for(), self._build_lock:
+            with self._worker_for(teardown=which), self._build_lock:
                 try:
                     yield
                 finally:
@@ -2335,12 +2344,13 @@ class _ResidencyPool:
             self._release_images(released)
 
     def _worker_for(self, build_kind=None, *, incoming: int | None = None,
-                    force: frozenset = frozenset()):
+                    force: frozenset = frozenset(), teardown=None):
         """Hold the workers before the build lock, image before video,
         that a build loads its pipeline on (``build_kind``) or may release
         one on: those whose entries the eviction for ``incoming`` bytes
-        takes, or, with ``incoming`` None, a teardown's, every worker with
-        an idle entry; and those of ``force``. Then the lock is never held
+        takes, or, with ``incoming`` None, a teardown's, the workers of the
+        idle entries ``teardown(entry)`` picks (every idle one when None);
+        and those of ``force``. Then the lock is never held
         while a worker runs a job, and a chat cold load waits behind no
         job of a worker it does not release on. Without any, nothing is
         held."""
@@ -2350,7 +2360,8 @@ class _ResidencyPool:
                 kinds.add(build_kind)
             if incoming is None:
                 kinds.update(e.kind for e in self._entries.values()
-                             if e.is_image and e.busy == 0)
+                             if e.is_image and e.busy == 0
+                             and (teardown is None or teardown(e)))
             else:
                 kinds.update(self._victim_kinds(incoming))
         if not kinds:
