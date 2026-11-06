@@ -2349,3 +2349,27 @@ def test_the_encode_of_an_entry_with_an_upsampler_encodes_its_caption(
     assert "cond_typed" not in fields
     assert "a T2VA video. " in systems[0]
     assert systems[0].endswith("The guide:\n\nthe guide\n")
+
+
+def test_an_encode_with_keyframes_runs_its_prompt_as_typed(
+        monkeypatch, request, tmp_path):
+    """The guide's keyframe tasks name the clip's length, which the pack's
+    encode does not know: a prompt with keyframes skips the upsampler."""
+    from gmlx.serve import image_upsample
+
+    pipe, _w = _own_pipe()
+    served = _served(pipe)
+    guide = tmp_path / "guide.md"
+    guide.write_text("the guide")
+    served.spec.upsampler = "chat"
+    served.spec.upsample_prompt = str(guide)
+    _mount(_Host(served), request)
+    _keyframe_encoder(monkeypatch, served)
+    monkeypatch.setattr(steps, "family_of", lambda s: (hf.FAMILY, "fl2va"))
+    calls = []
+    monkeypatch.setattr(image_upsample, "_chat", lambda up, req, stop: (
+        calls.append(req), "{}")[1])
+    image = np.random.default_rng(1).integers(0, 256, (64, 64, 3),
+                                              dtype=np.uint8)
+    fields, _ = _client().encode("h3", "a fox", images=[image])
+    assert "revised_prompt" not in fields and calls == []

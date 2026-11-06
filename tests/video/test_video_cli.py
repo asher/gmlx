@@ -1227,9 +1227,10 @@ def test_an_upsampler_rewrites_the_prompt_before_the_encoder_reads_it(
         stubbed, monkeypatch, tmp_path, capsys):
     """--upsampler loads the chat model before the encoder, under the
     guide's system prompt for the clip's task and length, and the encoder
-    reads its caption; the record keeps both prompts."""
+    reads its caption, priced again at its rows; the record keeps both
+    prompts."""
     from gmlx.commands import image as image_cmd
-    from gmlx.video import encoder
+    from gmlx.video import encoder, memfit
 
     guide = tmp_path / "guide.md"
     guide.write_text("the guide")
@@ -1241,6 +1242,13 @@ def test_an_upsampler_rewrites_the_prompt_before_the_encoder_reads_it(
         seen.append(("upsample", path, prompt, system, tag))
         return "the caption"
     monkeypatch.setattr(image_cmd, "run_upsampler", run_upsampler)
+    rows = memfit.prompt_rows
+
+    def priced(fam, text, *a, **k):
+        if not seen or seen[-1] != ("price", text):
+            seen.append(("price", text))
+        return rows(fam, text, *a, **k)
+    monkeypatch.setattr(memfit, "prompt_rows", priced)
 
     class Handle(_Handle):
         def encode(self, prompt):
@@ -1249,9 +1257,10 @@ def test_an_upsampler_rewrites_the_prompt_before_the_encoder_reads_it(
     monkeypatch.setattr(encoder, "load_encoder", lambda *a, **k: Handle())
     assert stubbed("--upsampler", "chat", "--upsample-prompt", str(guide),
                    "--frames-dir", str(tmp_path / "f"), "--json") == 0
-    (_, path, prompt, system, tag), enc = seen
-    assert (path, prompt, tag, enc) == ("/up.gguf", "a cat", "video",
-                                        ("encode", "the caption"))
+    first, (_, path, prompt, system, tag), *rest = seen
+    assert first == ("price", "a cat")
+    assert (path, prompt, tag) == ("/up.gguf", "a cat", "video")
+    assert rest == [("price", "the caption"), ("encode", "the caption")]
     assert "a T2VA video of 0.17 seconds" in system
     assert system.endswith("The guide:\n\nthe guide\n")
     rec = json.loads(capsys.readouterr().out)
