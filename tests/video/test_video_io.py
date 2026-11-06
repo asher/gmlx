@@ -258,12 +258,37 @@ def test_a_mono_guide_sounds_on_both_channels_as_it_is(ffmpeg, tmp_path):
     _tones(mono, 32000, 0.5, [440])
     _tones(stereo, 32000, 0.5, [440, 660])
     got = io.guide_audio(str(mono), rate=32000, samples=16000,
-                         ffmpeg=ffmpeg)
+                         ffmpeg=ffmpeg, hop=800)
     np.testing.assert_array_equal(got, np.repeat(_pcm(mono, 1), 2, 0))
     got = io.guide_audio(str(stereo), rate=32000, samples=16000,
-                         ffmpeg=ffmpeg)
+                         ffmpeg=ffmpeg, hop=800)
     np.testing.assert_array_equal(got, _pcm(stereo, 2))
 
+
+
+def test_a_guide_sound_is_cut_to_whole_latents_about_its_middle(
+        ffmpeg, tmp_path):
+    """3000 samples hold 3 latents of 800: ComfyUI's VAE encode keeps
+    samples 300 to 2699, so the read does. Read to its first 800 samples,
+    the cut still sits at 300, from the length of the whole stream."""
+    src = tmp_path / "ramp.wav"
+    with wave.open(str(src), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(32000)
+        w.writeframes((np.arange(3000) * 7 - 10000).astype("<i2").tobytes())
+    pcm = np.repeat(_pcm(src, 1), 2, 0)
+    got = io.guide_audio(str(src), rate=32000, samples=48000,
+                         ffmpeg=ffmpeg, hop=800)
+    np.testing.assert_array_equal(got, pcm[:, 300:2700])
+    got = io.guide_audio(str(src), rate=32000, samples=800, ffmpeg=ffmpeg,
+                         hop=800)
+    np.testing.assert_array_equal(got, pcm[:, 300:1100])
+    _tones(tmp_path / "blip.wav", 32000, 0.02, [440])
+    with pytest.raises(io.FfmpegError, match="holds 640 audio samples, "
+                                             "less than one latent of 800"):
+        io.guide_audio(str(tmp_path / "blip.wav"), rate=32000,
+                       samples=800, ffmpeg=ffmpeg, hop=800)
 
 def test_a_guide_sound_is_resampled_cut_and_mixed_down(ffmpeg, tmp_path):
     """48 kHz to 32 kHz, cut at ``samples`` or shorter when the file is,
@@ -272,12 +297,13 @@ def test_a_guide_sound_is_resampled_cut_and_mixed_down(ffmpeg, tmp_path):
     _tones(long, 48000, 1.0, [440])
     _tones(short, 48000, 0.25, [440])
     assert io.guide_audio(str(long), rate=32000, samples=20000,
-                          ffmpeg=ffmpeg).shape == (2, 20000)
+                          ffmpeg=ffmpeg, hop=800).shape == (2, 20000)
     assert io.guide_audio(str(short), rate=32000, samples=20000,
-                          ffmpeg=ffmpeg).shape == (2, 8000)
+                          ffmpeg=ffmpeg, hop=800).shape == (2, 8000)
     six = tmp_path / "six.wav"
     _tones(six, 48000, 0.25, [220, 330, 440, 550, 660, 770])
-    got = io.guide_audio(str(six), rate=32000, samples=20000, ffmpeg=ffmpeg)
+    got = io.guide_audio(str(six), rate=32000, samples=20000, ffmpeg=ffmpeg,
+                         hop=800)
     assert got.shape == (2, 8000) and np.isfinite(got).all()
 
 
@@ -288,10 +314,11 @@ def test_a_guide_video_without_sound_has_none(ffmpeg, tmp_path):
     _make(ffmpeg, "-f", "lavfi", "-i", "testsrc=size=64x48:rate=24",
           "-frames:v", "5", "-pix_fmt", "yuv420p", src)
     assert io.guide_audio(src, rate=32000, samples=800, ffmpeg=ffmpeg,
-                          optional=True) is None
+                          hop=800, optional=True) is None
     with pytest.raises(io.FfmpegError, match="silent.mp4 has no audio "
                                              "stream$"):
-        io.guide_audio(src, rate=32000, samples=800, ffmpeg=ffmpeg)
+        io.guide_audio(src, rate=32000, samples=800, ffmpeg=ffmpeg,
+                       hop=800)
     _tones(tmp_path / "a.wav", 32000, 0.1, [440])
     with pytest.raises(io.FfmpegError, match="a.wav has no video stream$"):
         io.guide_frames(str(tmp_path / "a.wav"), width=32, height=32,

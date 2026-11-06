@@ -1015,6 +1015,7 @@ class _Recorded(_VAE):
     def __init__(self, family, order):
         super().__init__()
         self.family, self.order, self.encoded = family, order, []
+        self.waves: list = []
 
     def samples_for(self, latents):
         return (latents + self.halo) * 800
@@ -1024,6 +1025,7 @@ class _Recorded(_VAE):
 
         self.encoded.append(tuple(x.shape))
         if self.family == "h3_audio":
+            self.waves.append(np.array(x))
             return mx.zeros((1, 32, 2, -(-x.shape[-1] // 800)))
         t = x.shape[1]
         return mx.zeros((1, 24, 1 if t == 1 else hf.latent_frames(t),
@@ -1130,6 +1132,7 @@ def test_a_run_encodes_its_anchors_between_the_encoder_and_the_dit(
         ("--guide", 4, 22, 0 if quiet else 50), ("--guide-audio", 4, 0, 58)]
 
 
+
 @pytest.mark.parametrize("guided", [True, False], ids=["guide", "text"])
 def test_a_run_without_keyframes_loads_no_mmproj(anchored, tmp_path, guided):
     """The vision tower reads keyframes alone: a run with an image guide
@@ -1142,6 +1145,27 @@ def test_a_run_without_keyframes_loads_no_mmproj(anchored, tmp_path, guided):
     assert anchored.seen["mmproj"] is None
     assert "keyframes" not in anchored.seen
 
+
+def test_a_guide_sound_is_cut_as_comfyuis_vae_encode_cuts_it(anchored,
+                                                             tmp_path):
+    """3000 samples of guide sound give 3 latents, from samples 300 to
+    2699, as ComfyUI's VAE encode crops a waveform to whole latents about
+    its middle; the CLI once started at 0 and padded a fourth latent."""
+    src = tmp_path / "ramp.wav"
+    ramp = (np.arange(3000) * 7 - 10000).astype("<i2")
+    with wave.open(str(src), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(32000)
+        w.writeframes(ramp.tobytes())
+    _ffmpeg()
+    assert anchored("--guide-audio", f"{src}@4") == 0
+    rec = anchored.seen["vae"]["h3_audio"]
+    want = np.repeat(ramp[None, 300:2700] / 32768.0, 2, 0)[None]
+    assert rec.encoded == [(1, 2, 2400)]
+    np.testing.assert_array_equal(rec.waves[0], want.astype(np.float32))
+    assert [x.audio.shape[-1] for x in anchored.seen["generate"]["anchors"]
+            ] == [3]
 
 def test_the_memory_plan_prices_the_anchors_the_run_encodes(
         planned, tmp_path, monkeypatch):

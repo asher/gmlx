@@ -308,17 +308,50 @@ def _audio(ffmpeg: str, path: str, rate: int, samples: int,
     return _wav(r.stdout, path)
 
 
+def _samples(ffmpeg: str, path: str, rate: int, channels: int,
+             mix: tuple) -> int:
+    """The samples of the first audio stream of ``path`` at ``rate`` Hz,
+    counted as ffmpeg decodes the whole stream, none of them kept."""
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", path, "-map", "0:a:0",
+           *mix, "-af", f"aresample={int(rate)}", "-c:a", "pcm_f32le",
+           "-f", "f32le", "-"]
+    n = 0
+    with tempfile.TemporaryFile() as err:
+        try:
+            with subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                  stderr=err) as proc:
+                assert proc.stdout is not None
+                while chunk := proc.stdout.read(1 << 20):
+                    n += len(chunk)
+        except OSError as e:
+            raise FfmpegError(f"ffmpeg could not read {path}: {e}") from None
+        if proc.returncode:
+            raise _ffmpeg_failed(path, err, "audio")
+    return n // (4 * channels)
+
+
 def guide_audio(path: str, *, rate: int, samples: int, ffmpeg: str,
-                optional: bool = False) -> np.ndarray | None:
-    """The first ``samples`` samples or fewer of the first audio stream
-    of ``path``, (2, n) float32 at ``rate`` Hz: a mono stream on both
-    channels as it is, more than two channels mixed down to two by
-    ffmpeg. With ``optional``, None for a file with no audio stream."""
-    w = _audio(ffmpeg, path, rate, samples, optional, ())
+                hop: int, optional: bool = False) -> np.ndarray | None:
+    """The first audio stream of ``path`` cut to whole latents of ``hop``
+    samples about its middle, as ComfyUI's VAE encode cuts it, then to its
+    first ``samples`` samples or fewer: (2, n) float32 at ``rate`` Hz, a
+    mono stream on both channels as it is, more than two channels mixed
+    down to two by ffmpeg. With ``optional``, None for a file with no
+    audio stream."""
+    mix: tuple = ()
+    w = _audio(ffmpeg, path, rate, samples + hop, optional, mix)
     if w is not None and w.shape[0] > 2:
-        w = _audio(ffmpeg, path, rate, samples, optional, ("-ac", "2"))
-    if w is not None and w.shape[0] == 1:
-        w = np.repeat(w, 2, axis=0)
-    if w is not None and not w.shape[1]:
+        mix = ("-ac", "2")
+        w = _audio(ffmpeg, path, rate, samples + hop, optional, mix)
+    if w is None:
+        return None
+    if not w.shape[1]:
         raise FfmpegError(f"{path} holds no audio samples")
-    return w
+    n = (w.shape[1] if w.shape[1] < samples + hop
+         else _samples(ffmpeg, path, rate, w.shape[0], mix))
+    if n < hop:
+        raise FfmpegError(f"{path} holds {n} audio samples, less than one "
+                          f"latent of {hop}")
+    at = n % hop // 2
+    w = w[:, at:at + min(n - n % hop, samples)]
+    return np.repeat(w, 2, axis=0) if w.shape[0] == 1 else w

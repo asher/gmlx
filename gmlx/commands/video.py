@@ -576,7 +576,7 @@ def _read_anchors(a, fam, s: dict) -> tuple[list, list]:
         video_t = (0 if not p.video_frames else 1 if p.video_frames == 1
                    else fam.latent_shapes(p.video_frames, w, h)[0][2])
         sound = (0 if p.audio_t is None
-                 else min(p.audio_t, -(-wave.shape[1] // HOP)))
+                 else min(p.audio_t, wave.shape[1] // HOP))
         out.append(_Anchor(flag, path, p, AnchorRows(p.frame, video_t, sound),
                            wave=wave, **kw))
 
@@ -604,7 +604,8 @@ def _read_anchors(a, fam, s: dict) -> tuple[list, list]:
         wave = None
         if flag == "--guide-audio" or not a.guide_no_audio:
             wave = io.guide_audio(file, rate=SAMPLE_RATE, samples=samples,
-                                  ffmpeg=exe, optional=flag == "--guide")
+                                  ffmpeg=exe, hop=HOP,
+                                  optional=flag == "--guide")
         if flag == "--guide-audio":
             add(flag, path, frame, wave=wave)
             continue
