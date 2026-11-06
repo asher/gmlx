@@ -2355,6 +2355,8 @@ def test_an_encode_with_keyframes_runs_its_prompt_as_typed(
         monkeypatch, request, tmp_path):
     """The guide's keyframe tasks name the clip's length, which the pack's
     encode does not know: a prompt with keyframes skips the upsampler."""
+    import json
+
     from gmlx.serve import image_upsample
 
     pipe, _w = _own_pipe()
@@ -2367,9 +2369,21 @@ def test_an_encode_with_keyframes_runs_its_prompt_as_typed(
     _keyframe_encoder(monkeypatch, served)
     monkeypatch.setattr(steps, "family_of", lambda s: (hf.FAMILY, "fl2va"))
     calls = []
+    reply = json.dumps({"instruction": "",
+                        "integrated_multimodal_description": "[Shot 1] A fox.",
+                        "overall_soundscape": "Wind.",
+                        "non_diegetic_music": "N/A"})
+    monkeypatch.setattr(image_upsample, "_upsampler_identity",
+                        lambda up: (up,))
+    image_upsample.CAPTIONS.clear()
     monkeypatch.setattr(image_upsample, "_chat", lambda up, req, stop: (
-        calls.append(req), "{}")[1])
+        calls.append(req), reply)[1])
     image = np.random.default_rng(1).integers(0, 256, (64, 64, 3),
                                               dtype=np.uint8)
-    fields, _ = _client().encode("h3", "a fox", images=[image])
-    assert "revised_prompt" not in fields and calls == []
+    try:
+        fields, _ = _client().encode("h3", "a fox", images=[image])
+    finally:
+        # Before the encode's answer: the stand-in tokenizer knows no
+        # caption, so a rewrite fails the encode.
+        assert calls == []
+    assert "revised_prompt" not in fields
