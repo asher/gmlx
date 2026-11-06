@@ -28,9 +28,10 @@ Three gates:
   oracle's nudge spread the manifest records: the oracle's largest bf16
   gap over its recorded step and the same step from inputs nudged one
   float32 step (scripts/video_oracle/check6_h3_spread.py). A step and
-  stream whose gmlx reading is over that as well is a recorded cell:
-  within the larger of that gate and RECORDED_FACTOR times the reading
-  the manifest records, with the reason it records. On the LoRA case
+  stream whose gmlx reading is over that as well, within
+  RECORDED_CEILING times the spread, is a recorded cell: within the
+  larger of that gate and RECORDED_FACTOR times the reading the manifest
+  records, with the reason it records. On the LoRA case
   that bf16 pass merges the LoRA in float32 and rounds once
   (--lora-merge float32): ComfyUI-GGUF's own bf16 add keeps too little
   of the LoRA for the gap to tell a run without it.
@@ -118,6 +119,7 @@ def _manifest(name: str) -> dict:
 
 SPREAD_SEEDS = (0, 1, 2)
 RECORDED_FACTOR = 1.25
+RECORDED_CEILING = 2.5
 
 
 def _assert_step_gates(m: dict) -> None:
@@ -126,8 +128,9 @@ def _assert_step_gates(m: dict) -> None:
     step and stream, the larger of that and the spread: the largest of the
     recorded gap and the gaps from 3 nudged inputs, at a step and stream
     gmlx's shipping reading missed twice the gap at. A recorded cell, one
-    whose gmlx reading is over that derived gate too, takes the larger of
-    it and RECORDED_FACTOR times the reading, with a reason."""
+    whose gmlx reading is over that derived gate too and within
+    RECORDED_CEILING times the spread, takes the larger of it and
+    RECORDED_FACTOR times the reading, with a reason."""
     gaps = m["results"]["step_bf16_vs_fp32"]
     tols = m["tolerances"]["steps"]
     assert len(gaps) == len(tols) == m["inputs"]["steps"]
@@ -156,6 +159,8 @@ def _assert_step_gates(m: dict) -> None:
                     assert r["gmlx"] > derived, (k, s, "a recorded cell "
                                                  "inside its derived gate")
                     assert r["derived"] == derived, (k, s)
+                    assert r["gmlx"] <= RECORDED_CEILING * r["rel_l2"], (
+                        k, s, "a recorded cell past the ceiling")
                     assert r["factor"] == RECORDED_FACTOR, (k, s)
                     assert isinstance(r["reason"], str) and \
                         r["reason"].strip() and "\n" not in r["reason"], (k, s)
@@ -326,6 +331,13 @@ def _recorded_other_mark(m):
     _cell(m)["mark"] = "ungated"
 
 
+def _recorded_past_the_ceiling(m):
+    c = _cell(m)
+    c["gmlx"] = 2.6 * R_SPREAD
+    m["tolerances"]["steps"][2]["audio"] = {
+        "rel_l2": RECORDED_FACTOR * 2.6 * R_SPREAD}
+
+
 def _unmarked_with_a_reason(m):
     m["results"]["step_nudge_spread"]["steps"]["2"]["audio"]["reason"] = \
         REASON
@@ -372,7 +384,8 @@ def _spread_more_seeds(m):
     _spread_off_the_recorded_gap, _spread_more_seeds,
     _recorded_gate_derived, _recorded_gate_widened, _recorded_inside_derived,
     _recorded_off_its_derived, _recorded_other_factor,
-    _recorded_without_reason, _recorded_other_mark, _unmarked_with_a_reason])
+    _recorded_without_reason, _recorded_other_mark, _unmarked_with_a_reason,
+    _recorded_past_the_ceiling])
 def test_a_nudge_spread_widens_its_shipping_step_alone(wrong):
     """A shipping step and stream with the oracle's nudge spread on record
     takes the larger of twice its gap and the spread, the largest of the
@@ -482,7 +495,8 @@ def test_a_re_record_inside_the_derived_gate_drops_the_mark(tmp_path):
     (("--recorded", f"3:audio:{R_GMLX}", "--reason", "a\nb"), "one line"),
     (("--gmlx", "3:audio:0.03", "--recorded", f"3:audio:{R_GMLX}",
       "--reason", REASON), "named twice"),
-    (("--recorded", "3:audio:0.02", "--reason", REASON), "does not miss")])
+    (("--recorded", "3:audio:0.02", "--reason", REASON), "does not miss"),
+    (("--recorded", "3:audio:0.04", "--reason", REASON), "past 2.5x")])
 def test_the_spread_tool_refuses_a_recorded_cell_it_cannot_write(
         tmp_path, args, why):
     r, doc = _spread_write(tmp_path, *args)
@@ -502,13 +516,17 @@ def test_last_step_3_audio_misses_the_one_sample_gate():
     assert r["gmlx"] <= m["tolerances"]["steps"][2]["audio"]["rel_l2"]
 
 
-def test_last_step_2_audio_is_a_recorded_cell():
-    """last's step 2 audio, gmlx's reading over the spread's gate as well,
-    is recorded: gated at RECORDED_FACTOR times that reading."""
-    m = _manifest("check6_h3_lora_last_512x512x22")
-    r = m["results"]["step_nudge_spread"]["steps"]["2"]["audio"]
+@pytest.mark.parametrize("case, step", [
+    ("last", 2), ("last", 8), ("clip17", 7)])
+def test_the_audio_misses_past_the_spread_are_recorded_cells(case, step):
+    """Each shipping audio cell whose gmlx reading is over the spread's
+    gate as well is recorded: gated at RECORDED_FACTOR times that
+    reading, with its reason."""
+    m = _manifest(f"check6_h3_lora_{case}_512x512x22")
+    r = m["results"]["step_nudge_spread"]["steps"][str(step)]["audio"]
     assert r["mark"] == "recorded" and r["gmlx"] > r["derived"]
-    assert m["tolerances"]["steps"][1]["audio"]["rel_l2"] == \
+    assert "live-LoRA leaf" in r["reason"]
+    assert m["tolerances"]["steps"][step - 1]["audio"]["rel_l2"] == \
         RECORDED_FACTOR * r["gmlx"]
 
 

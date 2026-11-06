@@ -29,7 +29,7 @@ gmlx's reading does not miss the one-sample gate at is refused.
 --recorded names a step and stream whose gmlx reading is over the gate
 the spread gives as well (RECORDED): it is written as a recorded cell,
 gated at the larger of that gate and FACTOR times gmlx's reading, with
---reason. A re-record whose reading lands inside the spread's gate writes
+--reason. A reading past CEILING times the spread is refused. A re-record whose reading lands inside the spread's gate writes
 an ordinary cell, the mark dropped. --write needs no ComfyUI.
 
   python scripts/video_oracle/run.py --python <comfyui venv python> \\
@@ -69,11 +69,13 @@ RULE = ("a shipping step and stream whose gmlx reading misses twice the "
         "input latents and features nudged one float32 step (seeds 0 to "
         "2), sigmas not nudged; measured once per fixture by " + SCRIPT)
 FACTOR = 1.25
+CEILING = 2.5
 RECORDED = ("a recorded cell, a shipping step and stream whose gmlx reading "
-            "is over the gate above: tolerance = the larger of that gate "
-            f"(derived) and {FACTOR} x gmlx's reading, with the reason it is "
-            "recorded; a re-record that lands inside the derived gate drops "
-            "the mark")
+            "is over the gate above and within "
+            f"{CEILING} x the nudge spread: tolerance = the larger of that "
+            f"gate (derived) and {FACTOR} x gmlx's reading, with the reason "
+            "it is recorded; a re-record that lands inside the derived gate "
+            "drops the mark")
 
 
 def nudged(inputs: dict, seed: int) -> dict:
@@ -282,6 +284,10 @@ def write(a) -> int:
             "base_rerun": work["runs"][tags[0]]["gaps"][s]}
         derived = max(one, reads[top])
         tols[i - 1][s] = {"rel_l2": derived}
+        if mark and v > CEILING * reads[top]:
+            raise SystemExit(f"error: gmlx's step {i} {s} reading {v} is "
+                             f"past {CEILING}x the nudge spread "
+                             f"{reads[top]}: not a recorded cell")
         if mark and v > derived:
             cell.update(mark="recorded", derived=derived, factor=FACTOR,
                         reason=a.reason)
