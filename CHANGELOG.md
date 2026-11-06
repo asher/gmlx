@@ -9,20 +9,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `gmlx video` makes clips of up to 15 seconds with sound from a text
-  prompt with MiniMax-H3. See [Video generation](docs/video.md) and its
-  [licenses](docs/video.md#licenses).
-- `gmlx video generate` takes a first and a last frame, and guide images,
-  videos and sounds. See [Keyframes and guides](docs/video.md#keyframes-and-guides).
-- The gmlx ComfyUI nodes run MiniMax-H3 from keyframes and guides, with a new
-  `minimax-h3-i2v` workflow. See [Make a video](docs/comfyui.md#make-a-video).
-- `gmlx serve` makes MiniMax-H3 clips as jobs on the OpenAI video routes,
-  `POST /v1/videos` and its MP4 download. See [Video API](docs/video-api.md).
+  prompt with MiniMax-H3. See [Video generation](docs/video.md) and its [licenses](docs/video.md#licenses).
+- A clip can start or end at an image, which the text encoder's vision tower
+  reads, and follow guide images, videos and sounds. See [Keyframes and guides](docs/video.md#keyframes-and-guides).
+- The `fasth3` recipe runs FastVideo's FastH3, an 8-step MiniMax-H3 whose steps
+  take about half as long as `h3`'s, on an M5 or newer. See [FastH3](docs/video.md#fasth3).
 - A chat model rewrites MiniMax-H3 prompts in the form of MiniMax's prompt
   guide, which `gmlx video pull` fetches. See [Prompt upsampling](docs/video.md#prompt-upsampling).
-- The `fasth3` video recipe runs FastVideo's FastH3, an 8-step MiniMax-H3
-  whose steps take about half as long as `h3`'s, on an M5 or newer.
-- The gmlx ComfyUI nodes run FastH3 on the noise levels it was trained at,
-  through the new `fasth3-t2v` example workflow.
+- `gmlx serve` makes MiniMax-H3 clips as jobs on the OpenAI video routes,
+  `POST /v1/videos` and its MP4 download. See [Video API](docs/video-api.md).
+- The gmlx ComfyUI nodes run the MiniMax-H3 recipes, with the new `minimax-h3-t2v`,
+  `minimax-h3-i2v` and `fasth3-t2v` workflows. See [Make a video](docs/comfyui.md#make-a-video).
 - NVIDIA Nemotron 3.5 Transcribe hears audio through its speech encoder in
   `gmlx run`, chat and `gmlx serve`, and answers `/v1/audio/transcriptions`
   and `/v1/audio/translations` itself, with word times and speakers.
@@ -57,8 +54,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   could push each other's LoRA out until a run failed.
 - An unload sent while a model loads or an image job runs no longer holds
   up the server's other requests until that ends.
-- A Messages or Responses token count for a model not loaded yet no longer
-  holds up the server's other requests while the model loads.
+- A LoRA in a ComfyUI workflow adds to the LoRAs of the `gmlx serve` image
+  model's `adapters` key, in place of replacing them.
+- A ComfyUI step whose LoRA the server let go for another workflow's LoRA
+  sends its LoRA again, in place of failing.
+- `gmlx serve` frees an image LoRA that a later ComfyUI or images API LoRA
+  pushed out, which its patch table kept in memory.
+- An image model that `gmlx serve` refuses for memory shows its need above
+  its budget, where both could read the same.
+- A ComfyUI workflow with a negative prompt loads the DiT and VAE once, not
+  twice, before its first step when the text encoder cannot fit beside them.
 - `gmlx serve` no longer corrupts the KV cache when one of several decoding
   requests passes about 260K tokens, or when a long request joins them.
 - FLUX.2 klein and the FLUX.1 VAE encoder no longer leave rows of the image
@@ -75,18 +80,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   applied a LoRA to it. The next model loaded beside its memory before.
 - A 16 GB Mac now pulls and runs the FLUX.2 klein 9B models at 1024x1024, and a
   Mac under 16 GB pulls no image model, which it could not run.
-- A LoRA in a ComfyUI workflow adds to the LoRAs of the `gmlx serve` image
-  model's `adapters` key, in place of replacing them.
-- A ComfyUI step whose LoRA the server let go for another workflow's LoRA
-  sends its LoRA again, in place of failing.
-- `gmlx serve` frees an image LoRA that a later ComfyUI or images API LoRA
-  pushed out, which its patch table kept in memory.
-- An image model that `gmlx serve` refuses for memory shows its need above
-  its budget, where both could read the same.
-- A ComfyUI workflow with a negative prompt loads the DiT and VAE once, not
-  twice, before its first step when the text encoder cannot fit beside them.
 - `gmlx serve` no longer stalls other requests to reload a chat model that
   another load unloaded just as a request for it started.
+- A Messages or Responses token count for a model not loaded yet no longer
+  holds up the server's other requests while the model loads.
 - `/v1/responses` and `/v1/responses/input_tokens` answer a body that is not
   a JSON object with a 400 and an invalid request with a 422, where they
   returned a 500.
