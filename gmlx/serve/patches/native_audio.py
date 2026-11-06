@@ -26,6 +26,8 @@ import threading
 import types
 import weakref
 from collections import OrderedDict
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
@@ -293,7 +295,8 @@ def encode(rg, model, waves: list[np.ndarray], stop: threading.Event,
     digests = digests or [_digest(w) for w in waves]
     captures = CAPTURE.get()
     # A capture needs the encoder's ASR states, which no cache keeps.
-    hits = {d: None if captures is not None else cache.get(d) for d in digests}
+    hits: dict[str, tuple | None] = {
+        d: None if captures is not None else cache.get(d) for d in digests}
     todo, fresh = [], {}
     mel = None
     for w, d in zip(waves, digests):
@@ -328,11 +331,13 @@ def encode(rg, model, waves: list[np.ndarray], stop: threading.Event,
             hits[d] = (n, out.embeds, out.speaker_probs)
             cache.put(d, n, out.embeds, out.speaker_probs)
             by_digest[d] = out
+    # Each digest has its rows now: from the cache or the job.
+    rows: dict[str, tuple] = {d: h for d, h in hits.items() if h is not None}
     if captures is not None:
         import mlx.core as mx
 
         for d in digests:
-            n, _, probs = hits[d]
+            n, _, probs = rows[d]
             out = by_digest[d]
             states = out.asr_states.astype(mx.bfloat16)
             mx.eval(states)
@@ -342,7 +347,7 @@ def encode(rg, model, waves: list[np.ndarray], stop: threading.Event,
             captures.append(cap)
     clips = []
     for d in digests:
-        n, embeds, probs = hits[d]
+        n, embeds, probs = rows[d]
         clip = EncodedClip.of(n, d, embeds, probs)
         key = id(clip)
         _LIVE[key] = weakref.ref(clip, lambda _, k=key: _LIVE.pop(k, None))
@@ -404,7 +409,7 @@ def _control_pattern(tokenizer):
     hit = _CONTROL.get(id(tokenizer))
     if hit is not None and hit[0] is tokenizer:
         return hit[1]
-    get = getattr(tokenizer, "get_added_vocab", None)
+    get: Callable[[], dict] | None = getattr(tokenizer, "get_added_vocab", None)
     names = {n for n in (get() if callable(get) else {})
              if len(n) > 1 and not _OUTPUT_TAG.fullmatch(n)} | {_AUDIO_MARKER}
     pattern = re.compile("|".join(
@@ -744,11 +749,12 @@ def install_native_audio() -> None:
     cls = gen.ResponseGenerator
     if not wrapped_with(cls._cpu_preprocess, _FLAG):
         cls._cpu_preprocess = _preprocess(cls._cpu_preprocess)
-    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
+    # Modules typed Any: the wraps rebind their functions.
+    rs: Any = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
     if not wrapped_with(rs._append_response_item_to_prompt, _FLAG):
         rs._append_response_item_to_prompt = _item_converter(
             rs._append_response_item_to_prompt)
-    openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    openai: Any = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
     if not wrapped_with(openai._response_items_audio, _FLAG):
         openai._response_items_audio = _items_audio(openai._response_items_audio)
     app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app

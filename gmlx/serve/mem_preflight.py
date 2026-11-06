@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from gmlx.upstream.patching import link, wrapped_with
@@ -485,7 +486,8 @@ def _audio_cost(model, audio) -> tuple[int, int] | None:
     model without the hook takes (the check skips it)."""
     if not audio:
         return 0, 0
-    hook = getattr(model, "audio_preflight", None)
+    hook: Callable[[list], tuple[int, int]] | None = getattr(
+        model, "audio_preflight", None)
     # Clips the route has not decoded yet (the route that decodes them
     # runs the check itself).
     import numpy as np

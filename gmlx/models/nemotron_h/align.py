@@ -218,7 +218,8 @@ class Tokenizer:
         proto = (base64.b64decode(spm_model) if isinstance(spm_model, str)
                  else bytes(spm_model))
         # sentencepiece's methods are generated: no stubs to check.
-        self.sp: Any = spm.SentencePieceProcessor(model_proto=proto)
+        self.sp: Any = spm.SentencePieceProcessor()
+        self.sp.Load(model_proto=proto)
 
     def text_to_ids(self, text: str) -> list[int]:
         return [int(i) for i in self.sp.encode(text)]
@@ -324,7 +325,7 @@ def resample_speaker_probs(probs: np.ndarray, frames: int) -> np.ndarray:
 
 
 def speaker_mapping(ctc: np.ndarray, streams: list[dict], speaker: np.ndarray,
-                    threshold: float, greedy: np.ndarray) -> dict:
+                    threshold: float, greedy: np.ndarray) -> tuple[dict, dict]:
     """NeMo's ``_one_pass_speaker_mapping``: speaker tag to diarization
     column, by IDF-weighted cosine similarity of token counts and a linear
     assignment; unassigned tags map to None. Also returns, per assigned
@@ -789,8 +790,10 @@ def align(prepared: Prepared, logp: np.ndarray, speaker_probs: np.ndarray | None
                               time_offset, labels, p.maximum_token_len))
     diarization = ([] if diarization_labels is None else diarization_segments(
         diarization_labels, DIARIZATION_FRAME_SECONDS, time_offset, duration))
-    folded = (diarization if folded_labels is diarization_labels else diarization_segments(
-        folded_labels, DIARIZATION_FRAME_SECONDS, time_offset, duration))
+    folded = (diarization
+              if folded_labels is None or folded_labels is diarization_labels
+              else diarization_segments(folded_labels, DIARIZATION_FRAME_SECONDS,
+                                        time_offset, duration))
     if p.calibration is not None:
         interpolate_word_boundaries(rows, logp, ctc_step, time_offset, duration,
                                     folded, mapping, p)
