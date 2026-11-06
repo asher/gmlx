@@ -57,11 +57,12 @@ def system(guide: str, *, frames: int | None, fps: int,
     guide. A keyframe task names its length, which its instruction line
     holds."""
     name, pictures = _TASKS[(bool(first), bool(last))]
-    if frames is None and pictures:
-        raise ValueError(f"a {name} prompt names the clip's length")
-    length = None if frames is None else seconds(frames, fps)
     # I2VA, FL2VA and L2VA are read with a vowel sound first.
-    clip = f"{'an' if pictures else 'a'} {name} video"
+    article = "an" if pictures else "a"
+    if frames is None and pictures:
+        raise ValueError(f"{article} {name} prompt names the clip's length")
+    length = None if frames is None else seconds(frames, fps)
+    clip = f"{article} {name} video"
     if length is not None:
         clip += f" of {length} seconds"
     unseen = ""

@@ -20,8 +20,10 @@ FIELDS = {"integrated_multimodal_description": "[Shot 1] Live-action, a fox "
 LAID_OUT = ("integrated_multimodal_description: [Shot 1] Live-action, a fox "
             "runs through snow.\n\noverall_soundscape: Wind and soft "
             "footsteps in snow.\n\nnon_diegetic_music: N/A")
-LINE = ("For the target video, at 0.00 seconds into the target video, "
-        "<Picture 1> (from [Shot 1]) is fully referenced.")
+# An instruction line of gmlx's own invention, in the shape a keyframe
+# caption opens with; no text of MiniMax's guide ships in gmlx.
+LINE = ("Keyframe note: <Picture 1> opens [Shot 1] at 0.00 s and holds its "
+        "look.")
 
 
 @pytest.mark.parametrize("first, last, task, length", [
@@ -59,7 +61,8 @@ def test_a_prompt_of_no_known_length_is_a_text_to_video_one():
     a keyframe task, whose instruction line holds the length, needs it."""
     assert "a T2VA video. " in hf.FAMILY.upsample_system(GUIDE, None,
                                                         False, False)
-    with pytest.raises(ValueError, match="names the clip's length"):
+    with pytest.raises(ValueError, match="^an I2VA prompt names the "
+                                         "clip's length$"):
         hf.FAMILY.upsample_system(GUIDE, None, True, False)
 
 
