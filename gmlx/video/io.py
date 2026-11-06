@@ -261,6 +261,13 @@ def guide_frames(path: str, *, width: int, height: int, most: int,
     return np.stack(out)
 
 
+def each_guide_frame(path: str, *, most: int, ffmpeg: str, each) -> int:
+    """Call ``each`` on each of the first ``most`` frames of the video at
+    ``path``, (H, W, 3) uint8 as ffmpeg decodes them, through one pipe, so
+    a caller keeps only the frames it needs. Returns the frame count."""
+    return _frames(ffmpeg, path, most, each)
+
+
 def guide_length(path: str, *, most: int, ffmpeg: str) -> int:
     """How many frames ``guide_frames`` reads of ``path`` with ``most``,
     counted from a small scale of each."""

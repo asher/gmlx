@@ -162,3 +162,63 @@ def test_anchor_inputs_of_the_wrong_form_are_refused(audio_vae):
     with pytest.raises(ValueError, match="keeps audio, and no waveform was "
                                          "given"):
         anchors.encode(anchors.Placement(0, 0, 1), audio_vae=audio_vae)
+
+
+@pytest.mark.parametrize("fits", [True, False])
+def test_a_jobs_guide_past_one_window_encodes_in_windows_as_the_whole(
+        video_vae, monkeypatch, fits):
+    """A video job's guide clip goes through ffmpeg a frame at a time:
+    when the whole clip does not fit, in open windows of the pieces that
+    do and the clip's end, which give the whole encode; the frames read
+    are dropped once encoded."""
+    from types import SimpleNamespace
+
+    from gmlx.serve import video_jobs as vj
+    from gmlx.serve.patches import image_steps as pis
+    from gmlx.video import images, io
+    from gmlx.video.layout import AnchorRows
+    from gmlx.video.vae import reader
+
+    rng = np.random.default_rng(5)
+    clip = rng.integers(0, 256, (56, 32, 32, 3), dtype=np.uint8)
+    held = []
+
+    def each_frame(path, *, most, ffmpeg, each):
+        for f in clip[:most]:
+            each(f)
+            held.append(1)
+        return most
+
+    monkeypatch.setattr(io, "each_guide_frame", each_frame)
+    monkeypatch.setattr(images, "cover", lambda f, w, h: f)
+    monkeypatch.setattr(reader, "load_vae", lambda *a, **k: video_vae)
+    sizes = []
+
+    def fit(hold, served, *, n, width, height, level, is_open):
+        sizes.append((n, level, is_open))
+        return (0, 1, 3) if fits else (2, 1, 1)
+
+    monkeypatch.setattr(pis, "_window_fit", fit)
+    monkeypatch.setattr(pis, "_check_clip", lambda *a, **k: None)
+    encoded = []
+    real = video_vae.encode
+    monkeypatch.setattr(video_vae, "encode", lambda x, drop=True: (
+        encoded.append((x.shape[1], drop)) or real(x, drop=drop)))
+    placed = SimpleNamespace(frame=0, video_frames=56, audio_t=None)
+    t = SimpleNamespace(video="guide.mp4", ffmpeg="ffmpeg", still=None,
+                        wave=None, placed=placed, label="guides[0] (g)",
+                        rows=AnchorRows(0, 17, 0))
+    job = SimpleNamespace(stop=SimpleNamespace(is_set=lambda: False),
+                          params={"settings": {"width": 32, "height": 32,
+                                               "frames": 56}})
+    served = SimpleNamespace(spec=SimpleNamespace(vae="vae.safetensors",
+                                                  audio_vae=None))
+    got = vj.encode_anchors(job, None, served, [t])
+    assert sizes == [(56, 1, False)]
+    assert encoded == ([(56, True)] if fits else
+                       [(17, False), (17, False), (17, False), (5, True)])
+    whole = real((mx.array(clip).astype(mx.float32) / 255.0)[None]
+                 * 2.0 - 1.0)
+    (frame, video, audio), = got["anchors"]
+    assert (frame, audio) == (0, None)
+    np.testing.assert_array_equal(video, np.array(whole))

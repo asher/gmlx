@@ -37,6 +37,7 @@ class Anchor:
     video: str | None = None
     wave: object = None             # (2, samples) float32
     ffmpeg: str | None = None
+    label: str = ""                 # how its refusals name it
 
 
 def is_still(path: str) -> bool:
@@ -53,14 +54,16 @@ def is_still(path: str) -> bool:
 def read_anchors(fam, s: dict, *, first: str | None = None,
                  last: str | None = None, guides=(),
                  guide_no_audio: bool = False, ffmpeg: str | None = None,
-                 names: tuple = ("--first-frame", "--last-frame")
-                 ) -> tuple[list, list]:
+                 names: tuple = ("--first-frame", "--last-frame"),
+                 paths: bool = True) -> tuple[list, list]:
     """The keyframes, (H, W, 3) uint8 at the canvas in prompt order, and
     each anchor as :class:`Anchor`, before any model loads: the keyframe
     images ``first`` and ``last``, and ``guides``, (flag, path, frame)
     of ``--guide`` or ``--guide-audio``, of the clip of settings ``s``.
-    ``names`` are the keyframes' flags as the refusals name them. A guide
-    video's frames are counted here and read when it encodes."""
+    ``names`` are the keyframes' flags as the refusals name them, each
+    with its path unless ``paths`` is False; a guide may carry its own
+    name as a fourth item. A guide video's frames are counted here and
+    read when it encodes."""
     from gmlx.video import anchors, images, io
     from gmlx.video.layout import AnchorRows
     from gmlx.video.vae.h3_audio import HOP, SAMPLE_RATE
@@ -72,7 +75,7 @@ def read_anchors(fam, s: dict, *, first: str | None = None,
     keyframes: list = []
     out: list = []
 
-    def add(flag, path, frame, *, n=0, wave=None, most=None, **kw):
+    def add(flag, path, frame, *, n=0, wave=None, most=None, label, **kw):
         try:
             if n == most:
                 # Read to its bound, the video holds more than fits.
@@ -84,13 +87,13 @@ def read_anchors(fam, s: dict, *, first: str | None = None,
                               fam.timeline.frame_rescale, video_frames=n,
                               audio=wave is not None)
         except ValueError as e:
-            raise ValueError(f"{flag} {path}: {e}") from None
+            raise ValueError(f"{label}: {e}") from None
         video_t = (0 if not p.video_frames else 1 if p.video_frames == 1
                    else fam.latent_shapes(p.video_frames, w, h)[0][2])
         sound = (0 if p.audio_t is None
                  else min(p.audio_t, wave.shape[1] // HOP))
         out.append(Anchor(flag, path, p, AnchorRows(p.frame, video_t, sound),
-                          wave=wave, **kw))
+                          wave=wave, label=label, **kw))
 
     for flag, path, frame, resize in (
             (names[0], first, 0, images.stretch),
@@ -98,34 +101,37 @@ def read_anchors(fam, s: dict, *, first: str | None = None,
         if path:
             im = resize(images.read(os.path.expanduser(path), exe), w, h)
             keyframes.append(im)
-            add(flag, path, frame, n=1, still=im)
-    for flag, path, frame in guides or ():
+            add(flag, path, frame, n=1, still=im,
+                label=f"{flag} {path}" if paths else flag)
+    for g in guides or ():
+        flag, path, frame = g[:3]
+        label = g[3] if len(g) > 3 else f"{flag} {path}"
         file = os.path.expanduser(path)
         if flag == "--guide" and is_still(file):
-            add(flag, path, frame, n=1,
+            add(flag, path, frame, n=1, label=label,
                 still=images.cover(images.read(file, exe), w, h))
             continue
         if exe is None:
             raise io.FfmpegError(
-                f"{flag} {path}: gmlx reads video and audio files through "
+                f"{label}: gmlx reads video and audio files through "
                 "ffmpeg, which is not on PATH: install ffmpeg (brew install "
                 "ffmpeg)")
         at = frame + frames if frame < 0 else frame
         if not 0 <= at < frames:
-            add(flag, path, frame, n=1)     # refuses a frame off the clip
+            add(flag, path, frame, n=1, label=label)  # refuses a frame off the clip
         wave = None
         if flag == "--guide-audio" or not guide_no_audio:
             wave = io.guide_audio(file, rate=SAMPLE_RATE, samples=samples,
                                   ffmpeg=exe, hop=HOP,
                                   optional=flag == "--guide")
         if flag == "--guide-audio":
-            add(flag, path, frame, wave=wave)
+            add(flag, path, frame, wave=wave, label=label)
             continue
         # 17 frames past those left from the frame tell a guide that does
         # not fit from one that does.
         most = frames - at + 17
         add(flag, path, frame, n=io.guide_length(file, most=most, ffmpeg=exe),
-            most=most, wave=wave, video=file, ffmpeg=exe)
+            most=most, wave=wave, video=file, ffmpeg=exe, label=label)
     return keyframes, out
 
 

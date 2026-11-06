@@ -184,6 +184,8 @@ class StepError(Exception):
 
     # The Retry-After seconds of a 503, or None for a deferred load's.
     retry_after: int | None = None
+    # A 503 that ends by itself, as models in use finish.
+    transient: bool = False
 
     def __init__(self, status: int, message: str, **extra):
         super().__init__(message)

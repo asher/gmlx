@@ -360,6 +360,7 @@ def _refused(e):
 
     err = StepError(e.status, e.message)
     err.retry_after = e.retry_after
+    err.transient = e.transient
     return err
 
 
@@ -846,10 +847,12 @@ def _held_table(served, tid, core):
     return core
 
 
-def _factor_turn(pool, entry, served, core) -> None:
+def _factor_turn(pool, entry, served, core, subject: str | None = None
+                 ) -> None:
     """The turn of a forward on ``core``, after its pairs are held: the
     factors and kernel pairs it builds yet, or the growth of the default
-    table's own bytes."""
+    table's own bytes, booked as ``subject`` (a step's factors by
+    default)."""
     from ..image_service import lora_turn, own_bytes, turn_figures
     from ..image_steps import FACTORS
     from ..residency import LoraRefused
@@ -866,7 +869,8 @@ def _factor_turn(pool, entry, served, core) -> None:
         # The table's pairs are the job's own keys too, never idle to it.
         held += own_bytes(pipe, pairs)
     try:
-        lora_turn(pool, entry, need, subject=FACTORS, held=held, hold=hold)
+        lora_turn(pool, entry, need, subject=subject or FACTORS, held=held,
+                  hold=hold)
     except LoraRefused as e:
         raise _refused(e) from None
 

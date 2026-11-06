@@ -1002,11 +1002,12 @@ class FileStore:
             return removed
 
 
-def default_store_root(port=None) -> str:
-    """The URL file folder of the server on ``port``: each server keeps its
-    own, so one server's sweep never takes another's files."""
+def default_store_root(port=None, kind: str = "images") -> str:
+    """The folder of the server on ``port`` for its ``kind`` of files, the
+    images API's URL files or the video jobs: each server keeps its own,
+    so one server's sweep never takes another's files."""
     base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    root = os.path.join(base, "gmlx", "images")
+    root = os.path.join(base, "gmlx", kind)
     return root if port is None else os.path.join(root, str(int(port)))
 
 

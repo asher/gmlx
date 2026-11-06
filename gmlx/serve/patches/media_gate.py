@@ -13,7 +13,7 @@ right kind, or an absolute path inside the media folder
 not name the media folder either. The gate never stats, opens or fetches the
 reference. ``server.media_urls`` lets http(s) URLs through.
 
-Two classes of body are left to their routes, unread:
+Three classes of body are left to their routes, unread:
 
 - the safetensors bodies of the image and video step routes (the step,
   encode and adapter upload routes), which name no media. Each route
@@ -25,10 +25,14 @@ Two classes of body are left to their routes, unread:
   free memory before it reads a byte, then runs the gate's checks on it,
   with no byte limit on one inline image
   (:mod:`gmlx.serve.patches.body_intake`).
+- POST bodies to /v1/videos, whose route prices a JSON body or a form's
+  text fields from free memory and streams a form's files to the video
+  job store, bounded by its room, then runs the gate's checks on the text
+  (:mod:`gmlx.serve.patches.body_intake`).
 
 A request on a launch session socket keeps the session's body limit: the
-gate reads an images API body to it, as before, and the route reads the
-copy.
+gate reads an images API or /v1/videos body to it, as before, and the
+route reads the copy.
 
 The gate is the fast, clearly worded refusal. The boundary is in
 :mod:`gmlx.serve.media_sinks`, which checks every reference again in the
@@ -949,7 +953,7 @@ def _refusal(path: str, status: int, message: str):
 
 def reads_own_body(request) -> bool:
     """True for a route that reads and prices its own body
-    (``body_intake``): the images API."""
+    (``body_intake``): the images API and POST /v1/videos."""
     from .body_intake import reads_own_body as own
 
     return own(request)
