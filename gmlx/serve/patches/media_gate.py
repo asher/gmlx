@@ -6,12 +6,21 @@ server open that file on the Mac, and one that names it by URL makes the
 server fetch it. A client can run with less access than the server has,
 such as a client in a launch container, which gets a placeholder key and
 reaches the server through a scoped session socket. So neither may happen
-by default. The gate reads every request body before its route runs and
+by default. The gate reads each request body before its route runs and
 answers 400 for any media reference that is not a ``data:`` URI of the
 right kind, or an absolute path inside the media folder
 (``$XDG_CACHE_HOME/gmlx/media``). A request on a launch session socket may
 not name the media folder either. The gate never stats, opens or fetches the
 reference. ``server.media_urls`` lets http(s) URLs through.
+
+One class of body is left to its routes, unread:
+
+- the safetensors bodies of the image and video step routes (the step,
+  encode and adapter upload routes), which name no media. Each route
+  reads its body to ``MAX_BODY_BYTES``, the pack's transfer unit, held
+  from its Content-Length before the read; the video encode prices a
+  window from its header, and an adapter upload is admitted into the
+  store, before its tensors are read.
 
 The gate is the fast, clearly worded refusal. The boundary is in
 :mod:`gmlx.serve.media_sinks`, which checks every reference again in the
@@ -827,8 +836,8 @@ def _is_upload(request) -> bool:
 
 
 def _is_step_tensors(request) -> bool:
-    """True for a safetensors body sent to the image step routes, which
-    read and check it themselves."""
+    """True for a safetensors body sent to the image and video step
+    routes, which read, price and check it themselves."""
     from gmlx.serve.image_wire import CONTENT_TYPE, PREFIX
 
     ctype = (request.headers.get("content-type") or "").split(";", 1)[0]
@@ -919,22 +928,16 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
 
     async def _gate(request):
         """The refusal for ``request``, or None when the route may run."""
+        if _is_step_tensors(request):
+            # Tensors, not JSON, which name no media: the step routes read
+            # the container themselves, its header first, and price it
+            # before its tensors are read.
+            return None
         # Every method: a route reads a body whatever the method is.
         upload = _is_upload(request)
         session = request.scope.get(SESSION_SCOPE_KEY) is not None
         # Taken out of the scope, so that the route does not keep it.
         parsed = request.scope.pop(SESSION_BODY_KEY, None)
-        if _is_step_tensors(request):
-            # Tensors, not JSON: the step routes read the container and
-            # hold it to their own limit, and it names no media.
-            from gmlx.serve.image_wire import MAX_BODY_BYTES
-
-            limit = SESSION_UPLOAD_MAX_BYTES if session else MAX_BODY_BYTES
-            if await _read_body(request, limit) is None:
-                return _refusal(request.url.path, 413,
-                                f"the tensor body is larger than the "
-                                f"{limit >> 20} MiB limit")
-            return None
         raw = await _read_body(request, body_limit(upload, session))
         if raw is None:
             return _refusal(request.url.path, 413,

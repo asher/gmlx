@@ -2179,3 +2179,123 @@ def test_a_fasth3_status_hands_the_sampler_its_trained_sigmas(
             assert (st["sampling"]["shift"], st["sampling"]["audio_shift"]) == (shift, 3.0)
             assert st["sampling"]["sigmas"] == sigmas
         assert np.array_equal(np.asarray([*map(float, want)], np.float32), want)
+
+
+def _live_app(host):
+    """The step routes on an app of their own behind the media gate, as
+    the server stacks them, for a uvicorn server on a real socket."""
+    from fastapi import FastAPI
+
+    from gmlx.serve.patches import media_gate
+
+    app = FastAPI()
+    routes.mount(app, ImageServerCfg(), host)
+    media_gate.install_media_gate(app=app)
+    return app
+
+
+def test_a_refused_window_on_a_live_socket_is_drained_and_the_next_runs(
+        host, monkeypatch):
+    """On a keep-alive connection, the window is priced from its header
+    alone, with the media gate in front: its frames are sent after the
+    answer's price, the refusal reads and drops them, and the window it
+    names runs next on the same connection."""
+    import http.client
+    import json
+
+    from live_socket import send, serving
+
+    served = host.served
+    adapters, caches = vs.held_bytes(served)
+
+    def need(f, t):
+        work = vs.plan_clip(served.plan, frames=max(served.plan.frames, f),
+                            width=32, height=32, text=1, budget=1,
+                            anchors=(layout.AnchorRows(0, t, 0),)
+                            ).phases["anchors"]
+        return work + 2 * f * 32 * 32 * 3
+
+    host.budget_bytes = adapters + caches + need(56, 17)
+    got: list = [0]
+    priced: list = []
+    budget = host.budget
+    monkeypatch.setattr(host, "budget", lambda hold: priced.append(got[-1])
+                        or budget(hold))
+    more = routes._Stream._more
+
+    async def _more(self):
+        go = await more(self)
+        got.append(len(self.got))
+        return go
+
+    monkeypatch.setattr(routes._Stream, "_more", _more)
+
+    def encode(served, img, open):
+        # Evaluated on the worker, as the encode's latents are.
+        lat = mx.zeros((1, 24, img.shape[0] // 17 * 5, 1, 1), mx.float32)
+        mx.eval(lat)
+        return lat
+    monkeypatch.setattr(vs, "encode_video", encode)
+    fields = {"model": "h3", "at": 0, "clip_frames": 362, "open": True}
+    big = wire.write({"frames": _levels(119)}, fields)
+    head = 8 + int.from_bytes(big[:8], "little")
+    with serving(_live_app(host)) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        version = {wire.CONTRACT_HEADER: f"{wire.CONTRACT[0]}.{wire.CONTRACT[1]}"}
+        r = send(conn, f"{wire.PREFIX}/vae/video/encode", big[:head],
+                 big[head:], ctype=wire.CONTENT_TYPE, pause=0.3,
+                 headers=version)
+        assert r.status == 400 and json.loads(r.body)["window"] == 3, r.body
+        assert not r.will_close
+        assert priced and priced[0] < len(big)
+        assert got[-1] == 0                 # the drain kept none of it
+        sock = conn.sock
+        fit = wire.write({"frames": _levels(51)}, fields)
+        r = send(conn, f"{wire.PREFIX}/vae/video/encode", fit,
+                 ctype=wire.CONTENT_TYPE, headers=version)
+        assert r.status == 200, r.body
+        assert conn.sock is sock
+        conn.close()
+
+
+def test_a_body_past_the_limit_on_a_live_socket_answers_413_and_closes(host):
+    """A Content-Length past MAX_BODY_BYTES is refused before the body is
+    sent, and the server ends the connection."""
+    import http.client
+
+    from live_socket import closed, peer, send, serving
+
+    with serving(_live_app(host)) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        other = peer(conn)
+        r = send(conn, f"{wire.PREFIX}/vae/video/encode", b"\0" * 8,
+                 length=wire.MAX_BODY_BYTES + 1, ctype=wire.CONTENT_TYPE,
+                 headers={wire.CONTRACT_HEADER:
+                          f"{wire.CONTRACT[0]}.{wire.CONTRACT[1]}"})
+        assert r.status == 413, r.body
+        assert r.getheader("connection") == "close"
+        assert closed(other)
+        conn.close()
+
+
+def test_a_tensor_body_with_no_length_stops_at_the_limit():
+    """The media gate leaves a step route's tensors unread: a body with no
+    Content-Length is read to the route's limit and refused there, with
+    the rest of it never pulled."""
+    import asyncio
+
+    from starlette.requests import Request
+
+    pulls: list = []
+
+    async def receive():
+        pulls.append(1)
+        return {"type": "http.request", "body": b"\0" * 4096,
+                "more_body": len(pulls) < 64}
+    scope = {"type": "http", "method": "POST", "path": "/", "query_string":
+             b"", "headers": [(b"content-type", wire.CONTENT_TYPE.encode())]}
+    with pytest.raises(steps.StepError) as e:
+        asyncio.run(routes._wire(Request(scope, receive), 1 << 16))
+    assert e.value.status == 413 and str(e.value) == (
+        "the body is over the limit of 65536 bytes")
+    assert len(pulls) == 17

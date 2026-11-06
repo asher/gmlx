@@ -216,6 +216,10 @@ def _content_length(request: Request, max_bytes: int) -> None:
 
 
 async def _wire(request: Request, max_bytes: int):
+    """The tensors and fields of a safetensors body, read to ``max_bytes``:
+    the media gate leaves it unread, so its Content-Length is held to the
+    bound before the read, and a body with none is refused once it passes
+    it."""
     from ..image_steps import StepError
     from ..image_wire import CONTENT_TYPE, WireError, read
 
@@ -223,7 +227,13 @@ async def _wire(request: Request, max_bytes: int):
     if ctype != CONTENT_TYPE:
         raise StepError(415, f"the body is {CONTENT_TYPE}, not "
                         f"{ctype or 'untyped'}")
-    body = await request.body()
+    _content_length(request, max_bytes)
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > max_bytes:
+            raise StepError(413, f"the body is over the limit of "
+                            f"{max_bytes} bytes")
     try:
         return read(body, max_bytes=max_bytes)
     except WireError as e:
@@ -536,8 +546,10 @@ def _admit(pool, n: int) -> None:
 async def _admitted_wire(request: Request, pool):
     """``(tensors, admitted)`` of an upload body read once the store
     admitted its bytes: its Content-Length, or BODY_STEP bytes at a time
-    as a body with none is read. A refusal ends the read; the bytes
-    admitted count in the pool until the caller's ``pool.upload_done``."""
+    as a body with none is read. The media gate leaves the body unread, so
+    the admission comes before its first byte. A refusal ends the read; a
+    413 closes the connection. The bytes admitted count in the pool until
+    the caller's ``pool.upload_done``."""
     from ..image_steps import BODY_STEP, StepError
     from ..image_wire import CONTENT_TYPE, WireError, read
 
@@ -1760,8 +1772,11 @@ async def video_encode(request: Request):
     model-space video latents (1, 24, t, h, w) f32, priced as the anchor
     encode of a clip. A long clip goes in windows of whole pieces, by the
     fields ``at``, ``clip_frames`` and ``open``: an open window keeps the
-    latents the clip's end drops, 5 a piece. The window is priced from
-    the header, before its frames are read; a refusal drains them."""
+    latents the clip's end drops, 5 a piece. The media gate leaves the
+    body unread, and the window is priced from its header before a byte
+    of its frames is read. A refusal past the header reads the frames a
+    chunk at a time and drops them, so the connection serves the next
+    request; a body past MAX_BODY_BYTES answers 413 and closes it."""
     from ..image_steps import COMFY, StepError
     from ..image_wire import WireError, read
     from ..video_service import encode_video, on_canvas
