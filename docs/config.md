@@ -727,7 +727,7 @@ The memory gmlx counts for an image model includes its tensor caches at
 their full size: two of `image.tensor_cache_mb`, and a third while the step
 routes are on. A video model with an `upsampler` keeps room past
 `image.tensor_cache_mb` for one encoded caption as long as the upsampler
-writes, 120 MB for MiniMax-H3, so the ComfyUI nodes' encode of a long
+writes, about 120 MiB for MiniMax-H3, so the ComfyUI nodes' encode of a long
 caption is not refused. Request LoRAs are counted when their jobs run, as the
 [LoRA refusal](troubleshooting.md#a-lora-is-refused-for-memory) describes,
 and a LoRA over a set `image.adapter_cache_mb` is refused with a message

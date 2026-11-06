@@ -1,9 +1,9 @@
 # Video API
 
 `gmlx serve` answers the OpenAI video routes with the video models of its
-configuration. A clip takes minutes, so `POST /v1/videos` answers at once
-with a job, which runs in the background. You read the job until it is
-`completed`, then download its MP4:
+configuration. This page lists the routes, the fields a request takes, the
+job it makes and the errors it can get, for an app or a script that makes
+clips through the server. A first clip:
 
 ```sh
 curl -s localhost:8080/v1/videos -H "Content-Type: application/json" \
@@ -12,6 +12,10 @@ curl -s localhost:8080/v1/videos -H "Content-Type: application/json" \
 curl -s localhost:8080/v1/videos/video_3f...
 curl -s -o beach.mp4 localhost:8080/v1/videos/video_3f.../content
 ```
+
+A clip takes minutes, so `POST /v1/videos` answers at once with a job,
+which runs in the background. You read the job until it is `completed`,
+then download its MP4.
 
 A server whose configuration has a [video model](config.md#video-models)
 serves these routes. They need ffmpeg, which writes the MP4, as
@@ -50,13 +54,14 @@ serves these routes. They need ffmpeg, which writes the MP4, as
 
 The steps and the shifts come from the entry, as on the command line. A
 `references` list asks for MiniMax-H3's Ref2VA mode, which the server does
-not run, and gets 400.
+not run, and gets 400. Other fields, `adapters` among them, are ignored,
+and the log names them in a warning.
 
 ## Keyframes and guides
 
 A JSON body takes `first_frame` and `last_frame` as image data URLs,
 `data:image/png;base64,...`. The server never reads a local path or
-fetches a URL. Guides need a multipart form: each guide is a file field,
+fetches a URL. Guides need a multipart form. Each guide is a file field,
 and the `guides` field lists them as JSON, each with its field name, the
 frame it starts at, from the end when below 0, and its kind, `video` for
 an image or a video with its sound, or `audio` for a sound alone:
@@ -99,17 +104,24 @@ The job is the OpenAI video object, with a `gmlx` part:
 
 `status` runs from `queued` to `in_progress`, and ends `completed`,
 `failed` or `cancelled`. `seconds` is the clip's length, its frames over 24.
-`progress` counts the steps to 90 and the decode from 90 to 100.
+`progress` is 5 once the job runs, counts the steps to 90 and the decode
+after them, and is 100 when the MP4 is written.
 `gmlx.phase` names the work now running, `gmlx.step` the steps done, and
 `gmlx.eta_s` the seconds the job expects to take still. `revised_prompt`
 holds the upsampler's caption.
 
 Jobs run one at a time, in order, on a thread of their own, so a clip
-never holds up the image routes. Chat decodes between the steps of a clip.
+never holds up the image routes. Chat replies keep streaming while a clip
+runs. Chat takes at least one step at each of the clip's pause points, so
+beside a chat reply that streams without a break, a clip at the default
+share runs about 2.8 times slower than alone, and
+[`GMLX_IMAGE_CHAT_SHARE`](env-vars.md#server) changes little for a clip,
+as [Video jobs](internals/image-serving.md#video-jobs) describes.
 When the memory a job needs is held by models in use, the job stays
 `in_progress` with `gmlx.phase` `waiting for memory`, and tries again
 once they finish. A failed job has `error` with its `code`, `message` and
-the HTTP `status` the request would have had.
+the HTTP `status` the request would have had. A job still queued when
+it expires never runs, and reads 404 as any expired job does.
 
 `DELETE` on a queued job cancels it at once. On a running job it answers
 at once, and the job stops at its next step or decoded piece. A cancelled
@@ -123,23 +135,26 @@ The jobs, their inputs and their MP4s live under
 by default, and then read as 404. Past
 [`video.store_max_bytes`](config.md#video-jobs) the oldest MP4s go first,
 and their jobs with them. The files of a job's form go to the store as
-they arrive, and a job whose files do not fit in the room left gets 413.
-A server that restarts fails the jobs it had queued or running with
-`server_restarted`, and keeps the ones that ended.
+they arrive, and so do the images of a JSON body's keyframes. A job whose
+files do not fit in the room left gets 413. A server that restarts fails
+the jobs it had queued or running with `server_restarted` and status 500,
+and keeps the ones that ended.
 
 ## Errors
 
 | Condition | Response |
 |-----------|----------|
 | The server cannot run ffmpeg | 501 naming ffmpeg and `brew install ffmpeg` |
-| More jobs queued than [`video.max_queue`](config.md#video-jobs) | 429 `queue_full` with `Retry-After`: the median time of the recent clips, less the time of the job running |
+| More jobs queued than [`video.max_queue`](config.md#video-jobs) | 429 `queue_full`, with a `Retry-After` of the median job time less the running job's time, at least 2, or 60 before the first clip ends |
 | No `model` with several video models, or an unknown one | 400 naming the video models, or 404 `model_not_found` |
-| The entry's default clip does not fit the working budget | 400 `video_model_mismatch` |
+| The entry's file is no video DiT, its chip, an adapter or its defaults are refused, or its default clip does not fit the working budget | 400 `video_model_mismatch` |
 | `seconds` past 15, or a `size` that is no multiple of 32 | 400 naming the field |
 | A clip too large for the memory left beside the pinned models | 413 with the plan's phases and what to change |
 | A JSON body larger than the memory free | 413 naming both figures, before the body is read |
 | A form's files larger than the room left in the job store | 413 naming both figures, before the files are read |
+| A JSON keyframe larger than the room left in the job store | 413 naming the keyframe and both figures |
 | A keyframe or guide image over 64 Mi pixels | 400 naming the field |
+| A guide video whose frames are over 64 Mi pixels | The job fails with 400 naming the guide, before a frame is read |
 | A guide video that does not fit in the clip from its frame | The job fails with 400 naming the guide |
 | `references` | 400 naming Ref2VA |
 | `prompt_upsampling: true` on an entry without an upsampler | 400 naming the `upsampler` setting |
@@ -147,7 +162,8 @@ A server that restarts fails the jobs it had queued or running with
 | The content of a job not completed | 409 `not_ready` |
 | A clip that does not fit beside the models loaded when it runs | The job fails with 400, as [this clip does not fit in memory](troubleshooting.md#this-clip-does-not-fit-in-memory) describes |
 | Memory held by models in use past the job's expiry | The job fails with `timed_out` |
-| The server restarted during the job | The job fails with `server_restarted` |
+| The upsampler gives no caption for a job whose prompt it rewrites | The job fails with 500 `upsample_failed` |
+| The server restarted during the job | The job fails with 500 `server_restarted` |
 
 [Troubleshooting](troubleshooting.md#video-jobs) has the fix for each
 message.

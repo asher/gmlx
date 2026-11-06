@@ -55,7 +55,7 @@ is internal and may change between releases.
 | `GMLX_MTP_WIDTH_CAP` | Each drafter's default | Speculative width cap for every model, over each model's `speculative_width_cap`. `0` removes the cap. |
 | `GMLX_CONTEXT_COPY` | Unset | `1` turns on [context copy](speculative-decoding.md#context-copy) for every model, `0` turns it off. Unset, each model's `context_copy` decides. |
 | `GMLX_CONTEXT_COPY_MAX` | `24` | Longest context copy in tokens, up to 31. Under 4 turns copying off. A block drafter's draft length keeps the output token-identical to a run without copies. |
-| `GMLX_IMAGE_CHAT_SHARE` | `0.5` | Share of the GPU that chat replies get while an image runs, `0` to `0.9`, or `off`, as [Image serving](internals/image-serving.md) describes. |
+| `GMLX_IMAGE_CHAT_SHARE` | `0.5` | Chat's GPU share while an image runs, `0` to `0.9`, or `off`. A clip gives chat more, as [Video jobs](internals/image-serving.md#video-jobs) says. |
 
 ## Runtime
 

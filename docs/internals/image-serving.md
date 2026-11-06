@@ -16,6 +16,8 @@ By default chat gets half of the GPU while both run.
 [`GMLX_IMAGE_CHAT_SHARE`](../env-vars.md#server) sets chat's share, from 0
 to 0.9. At 0, chat runs one step after each block of the image model. `off`
 runs each image step whole, which leaves chat waiting for each step to end.
+The share holds for image jobs. A video clip pauses more often, and gives
+chat more, as [Video jobs](#video-jobs) describes.
 
 ## Memory plan of a request
 
@@ -47,14 +49,22 @@ clip's steps never queue behind an image job, and an image never waits
 for a clip. The step routes on a video model run there too.
 
 A job of [`POST /v1/videos`](../video-api.md) passes through two threads.
-The job thread runs the jobs one at a time, in order, and runs no model:
-it reads the keyframes and counts a guide video's frames, has the
+The job thread runs the jobs one at a time, in order, and runs no model.
+It reads the keyframes and counts a guide video's frames, has the
 upsampler write the caption, and loads the video model. The video worker
 then encodes the prompt and the anchors, takes the job's LoRA bytes,
-samples the clip and decodes it into the MP4. Chat decodes between the
-blocks of each step and between the decoded pieces, as it does beside an
-image job. A guide video is read through ffmpeg a few seconds at a time
+samples the clip and decodes it into the MP4. A guide video is read through ffmpeg a few seconds at a time
 when its whole encode does not fit, each part priced before it is read.
+
+Chat replies keep streaming while a clip runs. The sampler pauses for
+chat after each attention and each MLP chunk of a step, and the decode
+after each piece it decodes. Chat takes at least one step at each of
+these pause points, and one pause holds less GPU work than one chat step,
+so beside a chat reply that streams without a break, a clip at the
+default share runs about 2.8 times slower than alone.
+[`GMLX_IMAGE_CHAT_SHARE`](../env-vars.md#server) changes little for a
+clip, because the one chat step at each pause takes longer than the wait
+the share sets.
 
 The request that queues a job plans its clip from the model's file
 headers against the memory the pinned models leave, and books nothing.

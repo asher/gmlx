@@ -10,9 +10,12 @@ The chat engines mark each prefill and decode step with ``CHAT.begin``
 and ``CHAT.end``. While chat is active, the image job's pacer evaluates
 the forward at each point between DiT blocks, so the GPU holds at most
 one block of image work, and then waits while chat steps run, for a time
-in proportion to the image work since the last pause: a chat share of
-0.5 gives chat as much GPU time as the image. The pacer always waits for
-at least one chat step. With no chat active, it does nothing.
+in proportion to the image work since the last pause. For an image job,
+a chat share of 0.5 gives chat as much GPU time as the image. The pacer
+always waits for at least one chat step, which is longer than a video
+clip's pause, so beside a clip chat gets more than its share, as
+docs/internals/image-serving.md#video-jobs describes. With no chat
+active, it does nothing.
 
 GMLX_IMAGE_CHAT_SHARE sets the share, from 0 to 0.9, and ``off`` turns
 the pacer off.

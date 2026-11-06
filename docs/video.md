@@ -296,20 +296,21 @@ video_models:
     upsampler: qwen3.5-9b
 ```
 
-`--upsampler` names a chat model for one run, `--no-upsample` runs the
-prompt as typed, and `--upsample-prompt FILE` reads another guide. With
-`--json` the record holds your prompt as `prompt` and the caption as
-`revised_prompt`. The caption names the clip's length, and with a first
-or a last frame it opens with the guide's line for that task, so the
-same prompt gives another caption at another length. The chat model sees
-no image.
+[`--upsampler`](cli.md#video-generate) names a chat model for one run,
+`--no-upsample` runs the prompt as typed, and `--upsample-prompt FILE`
+reads another guide. With `--json` the record holds your prompt as
+`prompt` and the caption as `revised_prompt`. The upsampler is told the
+clip's length and which keyframes it has. With a first or a last frame,
+the caption opens with the instruction line of that task, which names the
+length, so the same prompt gives another caption at another length. The
+chat model sees no image.
 
 `gmlx video generate` loads the chat model, writes the caption and lets
 the chat model go before the text encoder loads. `gmlx serve` lets the
 chat model go before it loads the video model, so on a Mac without room
 for both, each prompt loads the upsampler or the text encoder again. A
 caption can take 6,144 tokens, and a served entry with an upsampler keeps
-room for one: on a 32 GB Mac an `h3` entry with an upsampler loads at
+room for one. On a 32 GB Mac an `h3` entry with an upsampler loads at
 768x768 and not at its 1344x768 default, so set `defaults.size:
 768x768` there, and on a 36 GB Mac it loads at 1344x768.
 
@@ -372,7 +373,7 @@ describes.
 
 ## Serve clips
 
-`gmlx serve` makes clips for the OpenAI video routes: `POST /v1/videos`
+`gmlx serve` makes clips for the OpenAI video routes. `POST /v1/videos`
 queues a job, and its MP4 downloads when it is done. Each `video_models`
 entry of the configuration is a model there.
 [Video API](video-api.md) lists the routes and their fields, and

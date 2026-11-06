@@ -532,7 +532,8 @@ These are the answers and job errors of
   [`video.max_queue`](config.md#video-jobs). Send the job again after the
   `Retry-After` seconds, or raise the setting.
 - `the files of this job are ..., and the video job store has ... of room
-  left` (413): the job store holds
+  left` (413), or `the keyframe ... is ..., and the video job store has
+  ... of room left` (413) for a JSON body's keyframe: the job store holds
   [`video.store_max_bytes`](config.md#video-jobs) of clips and inputs.
   Delete finished jobs you have downloaded, send smaller files, or raise
   the setting.
@@ -547,6 +548,9 @@ These are the answers and job errors of
   and submit the job again, or make the clip smaller.
 - `server_restarted`: the server stopped while the job was queued or
   running, and a job does not resume. Submit it again.
+- `upsample_failed`: the entry's upsampler gave no caption for a job whose
+  prompt it rewrites. The server log names the reason. Fix the entry's
+  `upsampler`, or send the job with `prompt_upsampling: false`.
 - `timed_out`, `the job waited for memory until it expired`: models in use
   held the memory the job needed until the job's
   [`video.job_ttl_s`](config.md#video-jobs) ran out. Submit it again when

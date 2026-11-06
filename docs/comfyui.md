@@ -302,10 +302,9 @@ beside the caches on a 32 GB Mac.
 
 On an entry with an [upsampler](video.md#prompt-upsampling), the server
 rewrites the prompt of `Prompt and clip size` before it encodes it, and
-ComfyUI's log shows the caption. The node does not send the clip's length
-or which images are keyframes, so through the nodes a prompt without
-keyframes is rewritten as the guide's text to video form, which names no
-length, and a prompt with keyframes is encoded as typed.
+ComfyUI's log shows the caption. [Prompt
+upsampling](video.md#prompt-upsampling) says which prompts the nodes have
+rewritten.
 
 A reference of `MiniMax H3 Reference to Video`, the Fun ControlNet or a
 noise mask on the latent stops the run with an error that names it, and
