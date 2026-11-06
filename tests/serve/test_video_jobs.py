@@ -81,6 +81,7 @@ def test_a_job_runs_from_queued_to_completed_with_its_record_on_disk(
 
     def run(job, store):
         seen.append(store.get(job.id)["status"])
+        clock.now += 500
         _clip(job, store)
 
     store, clock, driver = _store(tmp_path, run)
@@ -89,12 +90,16 @@ def test_a_job_runs_from_queued_to_completed_with_its_record_on_disk(
     assert (rec["status"], rec["object"], rec["progress"]) == (
         "queued", "video", 0)
     assert rec["expires_at"] == rec["created_at"] + 86400
+    expires = rec["expires_at"]
     assert _on_disk(store, job.id)["status"] == "queued"
     driver.run()
     assert seen == ["in_progress"]
     rec = store.get(job.id)
     assert (rec["status"], rec["progress"], rec["error"]) == (
         "completed", 100, None)
+    # Its expiry is fixed when it is created, not when it ends.
+    assert rec["expires_at"] == expires
+    assert rec["completed_at"] == rec["created_at"] + 500
     assert _on_disk(store, job.id)["status"] == "completed"
     assert store.content(job.id) == store.clip(job.id)
     # Its inputs go when it ends.
@@ -124,6 +129,9 @@ def test_a_job_that_raises_fails_with_its_status_and_no_clip(
             err["message"]) == want
     assert store.content(job.id) is None
     assert os.listdir(os.path.join(str(store.root), "files")) == []
+    assert store.delete(job.id) == {"id": job.id, "object": "video.deleted",
+                                    "deleted": True, "status": "failed"}
+    assert store.get(job.id) is None
 
 
 def test_a_queued_job_cancelled_never_runs_and_its_inputs_go(tmp_path):
@@ -178,16 +186,26 @@ def test_a_restart_fails_the_jobs_a_past_server_queued_or_ran(tmp_path):
     queued = _submit(store)
     with open(store.clip(queued.id) + ".part", "wb") as f:
         f.write(b"x")
+    # A crash after the clip's rename, before its record said completed.
+    running = _submit(store)
+    with store.lock:
+        running.record["status"] = "in_progress"
+        store._write(running)
+    _clip(running, store)
     again = vj.VideoJobs(store.root, time_fn=clock, mono_fn=clock,
                          driver=Driver())
     again.configure(SimpleNamespace(video=VideoServerCfg()))
-    rec = again.get(queued.id)
-    assert rec["status"] == "failed"
-    assert rec["error"]["code"] == "server_restarted"
+    for job in (queued, running):
+        rec = again.get(job.id)
+        assert rec["status"] == "failed"
+        assert rec["error"] == {
+            "code": "server_restarted", "message": "the server restarted "
+            "before the job finished; submit it again",
+            "type": "server_error", "status": 500}
+        assert not os.path.exists(again.inputs(job.id))
     assert again.get(done.id)["status"] == "completed"
     assert os.listdir(os.path.join(str(store.root), "files")) == [
         f"{done.id}.mp4"]
-    assert not os.path.exists(again.inputs(queued.id))
 
 
 def test_a_job_past_its_expiry_is_gone_before_any_sweep(tmp_path):
@@ -239,6 +257,9 @@ def test_past_the_bound_the_oldest_clip_goes_never_the_new_or_live_inputs(
         f.write(b"g" * 400)
     store.sweep()
     assert store.get(a.id) is not None
+    # 2000 clip bytes and the queued job's 403 input bytes.
+    assert store.room() == 97
+    assert os.path.exists(os.path.join(store.inputs(live.id), "guide_0"))
     store._run = lambda job, s: _clip(job, s, b"x" * 1000)
     driver.run()
     # 3000 clip bytes past 2500: the oldest goes, the one just written
@@ -275,6 +296,10 @@ def test_the_queue_refuses_at_max_queue_with_the_clip_median(tmp_path):
     assert store.retry_after() == 50
     job.started = clock.now - 400
     assert store.retry_after() == 2
+    # Long clips give a long wait: the median, with no cap.
+    for s in (90_000,) * 5:
+        store.book.timed(s)
+    assert store.retry_after() == 90_000 - 400
     store.settings = VideoServerCfg(max_queue=0)
     assert store.full()
 
@@ -422,11 +447,13 @@ def test_a_chat_model_in_use_holds_the_rewrite_to_its_release(
     assert calls[:2] == ["acquire", "_encode_part"]
 
 
-def test_a_jobs_prompt_is_rewritten_through_its_video_entry(
-        tmp_path, monkeypatch):
-    """The rewrite resolves the job's model among the video models, not
-    the image models, and its system prompt names the clip's length."""
-    from gmlx.serve import image_steps, image_upsample
+def _rewrite_stubs(tmp_path, monkeypatch, chat=None):
+    """run_clip's stubs with the real revise, on a video entry configured
+    as the server reads it, whose header names MiniMax-H3, and a stand-in
+    chat model; the system prompts it was sent."""
+    from gmlx.config import VideoModelCfg
+    from gmlx.serve import image_upsample
+    from gmlx.video import loader
     from gmlx.video.families.h3 import family as hf
 
     revise = image_upsample.revise
@@ -434,17 +461,18 @@ def test_a_jobs_prompt_is_rewritten_through_its_video_entry(
     monkeypatch.setattr(image_upsample, "revise", revise)
     guide = tmp_path / "guide.md"
     guide.write_text("the guide")
-    spec = SimpleNamespace(id="h3", path="/abs/h3.gguf", variant=None,
-                           audio_vae="/abs/a.safetensors", upsampler="chat",
-                           upsample=True, upsample_prompt=str(guide))
+    spec = VideoModelCfg(id="h3", path="/abs/h3.gguf", encoder="/abs/e.gguf",
+                         vae="/abs/v.safetensors",
+                         audio_vae="/abs/a.safetensors", upsampler="chat",
+                         upsample_prompt=str(guide))
     monkeypatch.setattr(serving, "resolve_video_request",
                         lambda m: (spec.path, spec))
 
     def no_image_model(m):
         raise KeyError(m)
     monkeypatch.setattr(serving, "resolve_image_request", no_image_model)
-    monkeypatch.setattr(image_steps, "family_of",
-                        lambda s: (hf.FAMILY, "fl2va"))
+    monkeypatch.setattr(loader, "identify_dit", lambda p, variant=None:
+                        SimpleNamespace(family=hf.FAMILY, variant="fl2va"))
     monkeypatch.setattr(image_upsample, "_upsampler_identity",
                         lambda up: (up,))
     image_upsample.CAPTIONS.clear()
@@ -453,17 +481,118 @@ def test_a_jobs_prompt_is_rewritten_through_its_video_entry(
                         "integrated_multimodal_description": "[Shot 1] A cat.",
                         "overall_soundscape": "Purring.",
                         "non_diegetic_music": "N/A"})
-    monkeypatch.setattr(image_upsample, "_chat", lambda up, req, stop: (
-        systems.append(req.system), reply)[1])
+
+    def stand_in(up, req, stop):
+        systems.append(req.system)
+        if chat is not None:
+            chat(stop)
+        return reply
+
+    monkeypatch.setattr(image_upsample, "_chat", stand_in)
+    return calls, systems
+
+
+@pytest.mark.parametrize("first, last, task", [
+    (False, False, "a T2VA video"), (True, False, "an I2VA video"),
+    (True, True, "an FL2VA video"), (False, True, "an L2VA video")])
+def test_a_jobs_prompt_is_rewritten_through_its_video_entry(
+        tmp_path, monkeypatch, first, last, task):
+    """The rewrite resolves the job's model among the video models, not
+    the image models, reads its family from the entry's header, and its
+    system prompt names the clip's length and its keyframes."""
+    calls, systems = _rewrite_stubs(tmp_path, monkeypatch)
     store, clock, driver = _store(tmp_path)
     job = _submit(store)
     job.params = {"model": "h3", "prompt": "a cat", "upsampling": None,
-                  "settings": {"frames": 22}, "ffmpeg": "ffmpeg"}
+                  "rewrites": True, "settings": {"frames": 22},
+                  "first_frame": "/s/first_frame" if first else None,
+                  "last_frame": "/s/last_frame" if last else None,
+                  "ffmpeg": "ffmpeg"}
     vj.run_clip(job, store)
     assert job.record["gmlx"]["revised_prompt"].startswith(
         "integrated_multimodal_description: [Shot 1] A cat.")
-    assert "a T2VA video of 0.92 seconds" in systems[0]
+    assert f"{task} of 0.92 seconds" in systems[0]
     assert calls[:2] == ["acquire", "_encode_part"]
+
+
+def test_a_job_sent_with_upsampling_off_runs_as_typed(tmp_path,
+                                                      monkeypatch):
+    calls, systems = _rewrite_stubs(tmp_path, monkeypatch)
+    store, clock, driver = _store(tmp_path)
+    job = _submit(store)
+    job.params = {"model": "h3", "prompt": "a cat", "upsampling": False,
+                  "rewrites": False, "settings": {"frames": 22},
+                  "ffmpeg": "ffmpeg"}
+    vj.run_clip(job, store)
+    assert systems == []
+    assert "revised_prompt" not in job.record["gmlx"]
+    assert calls[:2] == ["acquire", "_encode_part"]
+
+
+def test_a_delete_during_the_rewrite_stops_the_job(tmp_path, monkeypatch):
+    """The rewrite ends between tokens on the job's stop."""
+    from gmlx.serve.image_service import JobStopped
+
+    def chat(stop):
+        if stop is job.stop:
+            job.stop.set()
+            raise JobStopped(timed_out=False)
+
+    calls, systems = _rewrite_stubs(tmp_path, monkeypatch, chat)
+    store, clock, driver = _store(tmp_path)
+    job = _submit(store)
+    job.params = {"model": "h3", "prompt": "a cat", "upsampling": None,
+                  "rewrites": True, "settings": {"frames": 22},
+                  "ffmpeg": "ffmpeg"}
+    with pytest.raises(JobStopped):
+        vj.run_clip(job, store)
+    assert len(systems) == 1 and calls == []
+
+
+@pytest.mark.parametrize("rewrites", [True, False])
+def test_a_job_whose_post_decided_a_rewrite_fails_when_none_comes(
+        tmp_path, monkeypatch, rewrites):
+    """revise answers None for an entry it cannot resolve or read: a job
+    whose POST decided it rewrites fails with its reason, never runs as
+    typed."""
+    calls = _run_clip_stubs(monkeypatch, [])
+    store, clock, driver = _store(tmp_path)
+    job = _submit(store)
+    job.params = {"model": "h3", "prompt": "a cat", "upsampling": None,
+                  "rewrites": rewrites, "settings": {"frames": 22},
+                  "ffmpeg": "ffmpeg"}
+    if not rewrites:
+        vj.run_clip(job, store)
+        assert calls[:2] == ["acquire", "_encode_part"]
+        return
+    with pytest.raises(vj.JobFailed) as ei:
+        vj.run_clip(job, store)
+    assert (ei.value.status, ei.value.code) == (500, "upsample_failed")
+    assert calls == []
+
+
+def test_a_jobs_inputs_reach_the_read_as_the_post_kept_them(tmp_path,
+                                                            monkeypatch):
+    from gmlx.serve.patches.media_gate import MEDIA_MAX_PIXELS
+    from gmlx.video import run
+
+    _run_clip_stubs(monkeypatch, [])
+    seen = {}
+    monkeypatch.setattr(run, "read_anchors", lambda fam, s, **k: (
+        seen.update(k), ([], []))[1])
+    store, clock, driver = _store(tmp_path)
+    job = _submit(store)
+    guides = [("--guide", "/s/guide_0", 0, "guides[0] (guide_0)")]
+    job.params = {"model": "h3", "prompt": "a cat", "settings": {
+        "frames": 22}, "first_frame": "/s/first_frame",
+        "last_frame": "/s/last_frame", "guides": guides,
+        "guide_no_audio": True, "ffmpeg": "/opt/ffmpeg"}
+    vj.run_clip(job, store)
+    assert seen == {"first": "/s/first_frame", "last": "/s/last_frame",
+                    "guides": guides, "guide_no_audio": True,
+                    "ffmpeg": "/opt/ffmpeg",
+                    "names": ("first_frame", "last_frame"), "paths": False,
+                    "max_pixels": MEDIA_MAX_PIXELS}
 
 
 # The routes.
@@ -513,6 +642,7 @@ def test_a_json_job_runs_to_its_mp4_through_the_routes(routes):
     assert (rec["status"], rec["model"], rec["size"], rec["seconds"]) == (
         "queued", "h3", "768x768", "1.62")
     assert rec["gmlx"]["frames"] == 39 and rec["gmlx"]["seed"] == 7
+    assert routes.store.pending == {}
     jid = rec["id"]
     r = c.get(f"/v1/videos/{jid}/content")
     assert r.status_code == 409
@@ -570,6 +700,7 @@ def test_a_job_the_server_cannot_run_is_refused_at_post(routes, body,
     assert r.status_code == status, r.text
     assert text in r.json()["error"]["message"]
     assert routes.store.jobs == {}
+    assert routes.store.pending == {}
     assert os.listdir(os.path.join(str(routes.store.root), "inputs")) == []
 
 
@@ -585,6 +716,7 @@ def test_no_ffmpeg_is_a_501_with_the_missing_program_text(routes,
     r = routes.client.post("/v1/videos", json={"prompt": "a cat"})
     assert r.status_code == 501
     assert "brew install ffmpeg" in r.json()["error"]["message"]
+    assert r.headers["connection"] == "close"
 
 
 def test_a_full_queue_is_a_429_with_its_retry_after(routes):
@@ -594,20 +726,50 @@ def test_a_full_queue_is_a_429_with_its_retry_after(routes):
     r = routes.client.post("/v1/videos", json={"prompt": "b"})
     assert r.status_code == 429
     assert r.headers["retry-after"] == str(vj.FIRST_RETRY_S)
+    assert r.headers["connection"] == "close"
+    assert routes.store.pending == {}
 
 
 def test_post_takes_no_pool_lock_and_no_acquire(routes, monkeypatch):
     """The signed rule: the request thread books nothing; the job's
     memory is decided on the video worker."""
-    from gmlx.serve import residency
+    from gmlx.serve import residency, video_service
+    from gmlx.serve.patches import _common
+    from gmlx.video import memfit
 
     def refuse(*a, **k):
         raise AssertionError("the request thread acquired")
 
+    class Refuses:
+        def __enter__(self):
+            raise AssertionError("the request thread took a pool lock")
+
+        def __exit__(self, *a):
+            return False
+
+        acquire = __enter__
+
+    pool = SimpleNamespace(
+        _lock=Refuses(), _build_lock=Refuses(),
+        figures=SimpleNamespace(budget=100 << 30, resident=0, incoming=0,
+                                entries=()))
     monkeypatch.setattr(residency, "acquire_video_model", refuse)
-    monkeypatch.setattr(residency, "_installed_pool", lambda: None)
+    monkeypatch.setattr(residency, "_installed_pool", lambda: pool)
+    monkeypatch.setattr(_common, "_get_pool", lambda: pool)
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    monkeypatch.setattr(videos, "_tokenizer", lambda fam, spec: None)
+    monkeypatch.setattr(memfit, "prompt_rows", lambda *a: 12)
+    budgets = []
+    monkeypatch.setattr(video_service, "plan_clip", lambda plan, **kw: (
+        budgets.append(kw["budget"]), SimpleNamespace(over=[]))[1])
     r = routes.client.post("/v1/videos", json={"prompt": "a cat"})
     assert r.status_code == 200, r.text
+    body, ctype = _form({"prompt": "a cat"}, {"first_frame": _png()})
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": ctype})
+    assert r.status_code == 200, r.text
+    # The estimate ran on the pool's figures, read with no lock.
+    assert budgets == [100 << 30] * 2
 
 
 def test_the_estimate_refuses_a_clip_past_the_budget_beside_pinned_models(
@@ -669,7 +831,7 @@ def _form(fields: dict, files: dict) -> tuple[bytes, str]:
 
 def test_a_form_streams_its_files_to_the_jobs_inputs(routes):
     body, ctype = _form({"prompt": "a cat", "guides": json.dumps(
-        [{"file": "guide_0", "frame": 0}])},
+        [{"file": "guide_0", "frame": 0}]), "guide_no_audio": "true"},
         {"first_frame": _png(), "guide_0": _png(64, 64)})
     r = routes.client.post("/v1/videos", content=body,
                            headers={"content-type": ctype})
@@ -680,6 +842,7 @@ def test_a_form_streams_its_files_to_the_jobs_inputs(routes):
     assert job.params["guides"] == [("--guide",
                                      os.path.join(folder, "guide_0"), 0,
                                      "guides[0] (guide_0)")]
+    assert job.params["guide_no_audio"] is True
 
 
 def test_a_form_past_the_store_room_is_a_413_before_its_read(routes):
@@ -721,7 +884,8 @@ def test_a_form_with_no_length_stops_at_the_room_and_leaves_no_part(
                            headers={"content-type": ctype})
     assert r.status_code == 413, r.text
     assert r.json()["error"]["message"].startswith(
-        "the files of this job are over 64.0 KiB")
+        "the files of this job are over the 64.0 KiB of room the video "
+        "job store has left;")
     assert os.listdir(os.path.join(str(routes.store.root), "inputs")) == []
 
 
@@ -869,3 +1033,460 @@ def test_the_decode_paces_and_stops_between_its_pieces(tmp_path,
         vj._clip_part(job, store, hold, store.clip(job.id))
     assert seen == [11]
     assert order[-1] == ("settle", vj.JOB)
+
+
+# An ended job's memory, and a job past its expiry.
+
+@pytest.mark.parametrize("end", ["completed", "failed", "cancelled"])
+def test_an_ended_job_keeps_no_features_or_latents(tmp_path, end):
+    """The encode's features and the anchors' latents go when the job
+    ends, however it ends: the job stays in the store to its expiry."""
+    from gmlx.serve.image_service import JobStopped
+
+    def run(job, store):
+        job.kept.update(feats=b"f" * 64, anchors=((0, b"v", None),))
+        if end == "failed":
+            raise vj.JobFailed(400, "a clip does not fit")
+        if end == "cancelled":
+            job.stop.set()
+            raise JobStopped(timed_out=False)
+        _clip(job, store)
+
+    store, clock, driver = _store(tmp_path, run)
+    job = _submit(store)
+    if end == "cancelled":
+        store._run = lambda j, s: (store.delete(j.id), run(j, s))
+    driver.run()
+    assert store.get(job.id)["status"] == end
+    assert job.kept == {}
+
+
+def test_a_job_still_queued_at_its_expiry_never_runs(tmp_path):
+    ran = []
+    store, clock, driver = _store(tmp_path, lambda j, s: ran.append(j),
+                                  job_ttl_s=60)
+    job = _submit(store)
+    clock.now += 60
+    driver.run()
+    assert ran == []
+    assert job.record["status"] == "failed"
+    assert job.record["error"] == {
+        "code": "timed_out", "message": "the job was still queued when it "
+        "expired; submit it again, or raise server.video.job_ttl_s",
+        "type": "server_error", "status": 503}
+    assert not os.path.exists(store.inputs(job.id))
+
+
+# A POST's reservation in the store.
+
+def _start(conn, head: bytes, length: int, ctype: str) -> None:
+    """Send the headers of a POST to /v1/videos and the first ``head``
+    bytes of its body."""
+    conn.putrequest("POST", "/v1/videos")
+    conn.putheader("Content-Type", ctype)
+    conn.putheader("Content-Length", str(length))
+    conn.endheaders(head)
+
+
+def _until(cond, timeout=10.0):
+    import time
+
+    end = time.monotonic() + timeout
+    while not cond():
+        if time.monotonic() > end:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def test_a_sweep_while_a_form_arrives_leaves_its_files(routes):
+    """A sweep runs from every other POST and after every job: it leaves
+    the inputs of a POST still arriving, before its job exists."""
+    import http.client
+
+    from live_socket import serving
+
+    png = _png(48, 48)
+    body, ctype = _form({"prompt": "a cat"}, {"first_frame": png})
+    cut = body.index(png) + len(png) // 2
+    store = routes.store
+    with serving(routes.app) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        _start(conn, body[:cut], len(body), ctype)
+        assert _until(lambda: store.pending and os.path.exists(os.path.join(
+            store.inputs(next(iter(store.pending))), "first_frame.part")))
+        jid = next(iter(store.pending))
+        assert store.pending[jid] == len(body)
+        store.sweep()
+        conn.send(body[cut:])
+        r = conn.getresponse()
+        text = r.read()
+        assert r.status == 200, text
+        conn.close()
+    assert json.loads(text)["id"] == jid
+    with open(os.path.join(store.inputs(jid), "first_frame"), "rb") as f:
+        assert f.read() == png
+    assert store.pending == {}
+
+
+def test_two_forms_that_each_fit_alone_cannot_pass_the_room_together(
+        routes):
+    """The first POST reserves its Content-Length before its first byte:
+    the second, which fits alone, is refused beside it."""
+    import http.client
+
+    from live_socket import send, serving
+
+    store = routes.store
+    store.settings = VideoServerCfg(store_max_bytes=1 << 20)
+    pad = b"\0" * (600 << 10)
+    a, ctype = _form({"prompt": "a cat"}, {"first_frame": _png() + pad})
+    b, _ = _form({"prompt": "a dog"}, {"first_frame": _png() + pad})
+    with serving(routes.app) as port:
+        ca = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        _start(ca, a[:64], len(a), ctype)
+        assert _until(lambda: list(store.pending.values()) == [len(a)])
+        cb = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        r = send(cb, "/v1/videos", b, ctype=ctype)
+        assert r.status == 413, r.body
+        assert json.loads(r.body)["error"]["message"] == (
+            f"the files of this job are {body_intake._mib(len(b), True)}, "
+            "and the video job store has "
+            f"{body_intake._mib((1 << 20) - len(a))} of room left; send "
+            "smaller files, delete finished jobs, or raise "
+            "server.video.store_max_bytes")
+        cb.close()
+        ca.send(a[64:])
+        r = ca.getresponse()
+        assert r.status == 200, r.read()
+        r.read()
+        ca.close()
+    assert store.pending == {}
+    assert len(store.jobs) == 1
+    assert store.room() == (1 << 20) - len(_png() + pad)
+
+
+def test_a_form_whose_client_leaves_frees_its_reservation(routes):
+    import http.client
+
+    from live_socket import serving
+
+    store = routes.store
+    body, ctype = _form({"prompt": "a cat"}, {"first_frame": _png()})
+    with serving(routes.app) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        _start(conn, body[:64], len(body), ctype)
+        assert _until(lambda: bool(store.pending))
+        conn.sock.close()
+        conn.close()
+        assert _until(lambda: store.pending == {})
+    assert store.jobs == {}
+    assert os.listdir(os.path.join(str(store.root), "inputs")) == []
+
+
+# The route's refusals of what a form or a JSON body sends.
+
+def _bomb_png(w=14000, h=14000) -> bytes:
+    """The header of a 1-bit PNG of ``w`` x ``h``, a few dozen bytes,
+    past Pillow's decompression bound."""
+    import struct
+    import zlib
+
+    def chunk(kind, data):
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data)))
+
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(
+        ">IIBBBBB", w, h, 1, 0, 0, 0, 0)) + chunk(b"IEND", b""))
+
+
+@pytest.mark.parametrize("how", ["form", "json"])
+def test_a_keyframe_past_the_decompression_bound_is_a_400(routes, how):
+    from gmlx.serve.patches.media_gate import MEDIA_MAX_PIXELS
+
+    if how == "form":
+        body, ctype = _form({"prompt": "a cat"},
+                            {"first_frame": _bomb_png()})
+        r = routes.client.post("/v1/videos", content=body,
+                               headers={"content-type": ctype})
+    else:
+        url = "data:image/png;base64," + base64.b64encode(
+            _bomb_png()).decode()
+        r = routes.client.post("/v1/videos", json={
+            "prompt": "a cat", "input_reference": url})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert (err["param"], err["message"]) == (
+        "first_frame", f"first_frame is over the {MEDIA_MAX_PIXELS} pixels "
+        "the server decodes")
+    assert os.listdir(os.path.join(str(routes.store.root), "inputs")) == []
+    assert routes.store.pending == {}
+
+
+def test_a_keyframe_in_a_format_off_the_list_is_no_image(routes):
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 32)).save(buf, "PPM")
+    body, ctype = _form({"prompt": "a cat"}, {"first_frame": buf.getvalue()})
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": ctype})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["message"] == (
+        "first_frame is no image the server reads")
+
+
+def test_a_form_the_parser_cannot_read_is_a_400(routes, monkeypatch):
+    """Starlette maps python-multipart's errors to its own; any other
+    error of the parse is the same 400, never a 500."""
+    from starlette.formparsers import MultiPartParser
+
+    async def parse(self):
+        raise ValueError("Invalid boundary")
+
+    monkeypatch.setattr(MultiPartParser, "parse", parse)
+    body, ctype = _form({"prompt": "a cat"}, {"first_frame": _png()})
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": ctype})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["message"] == (
+        "the multipart form cannot be read: Invalid boundary")
+    assert routes.store.pending == {}
+
+
+@pytest.mark.parametrize("fields", [
+    {"prompt": "a" * (400 << 10), "x1": "b" * (400 << 10),
+     "x2": "c" * (400 << 10)},
+    {"prompt": "a" * (2 << 20)}])
+def test_a_forms_text_past_the_free_figure_is_a_413(routes, monkeypatch,
+                                                     fields):
+    """The text fields stay in RAM: their sum is priced against the
+    memory free, and one field past it is the same 413."""
+    monkeypatch.setattr(body_intake, "free_bytes", lambda: 1 << 20)
+    body, ctype = _form(fields, {"first_frame": _png()})
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": ctype})
+    assert r.status_code == 413, r.text
+    msg = r.json()["error"]["message"]
+    assert msg.startswith("the request body is over "), msg
+    assert msg.endswith("and 1.0 MiB of memory is free beside the models "
+                        "loaded; send a smaller body, or unload a model to "
+                        "make room")
+    assert r.headers["connection"] == "close"
+    assert routes.store.pending == {}
+
+
+def _noise_png(side=64) -> bytes:
+    import numpy as np
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.fromarray(np.random.default_rng(0).integers(
+        0, 256, (side, side, 3), dtype=np.uint8)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_a_form_with_a_file_and_a_data_url_keyframe_runs(routes):
+    """The keyframe takes its room beside the bytes the form wrote, not
+    beside its whole length, whose text stays in RAM."""
+    png = _noise_png()
+    url = "data:image/png;base64," + base64.b64encode(png).decode()
+    body, ctype = _form({"prompt": "a cat", "last_frame": url},
+                        {"first_frame": _png()})
+    # The form fits, and the keyframe beside the form's length does not.
+    routes.store.settings = VideoServerCfg(
+        store_max_bytes=len(body) + len(png) // 2)
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": ctype})
+    assert r.status_code == 200, r.text
+    job = routes.store.jobs[r.json()["id"]]
+    with open(job.params["last_frame"], "rb") as f:
+        assert f.read() == png
+    assert routes.store.room() == (len(body) + len(png) // 2
+                                   - len(_png()) - len(png))
+
+
+def test_a_json_keyframe_past_the_store_room_is_a_413(routes):
+    png = _noise_png()
+    routes.store.settings = VideoServerCfg(store_max_bytes=4096)
+    url = "data:image/png;base64," + base64.b64encode(png).decode()
+    r = routes.client.post("/v1/videos", json={"prompt": "a cat",
+                                               "first_frame": url})
+    assert r.status_code == 413, r.text
+    err = r.json()["error"]
+    assert (err["param"], err["message"]) == (
+        "first_frame", f"the keyframe first_frame is "
+        f"{body_intake._mib(len(png), True)}, and the video job store has "
+        "4.0 KiB of room left; send a smaller image, delete finished jobs, "
+        "or raise server.video.store_max_bytes")
+    assert routes.store.pending == {}
+
+
+def test_a_form_keyframe_field_takes_no_path(routes, monkeypatch):
+    """A form's text field where an image goes is a data URL: a path is
+    refused with the field named, and never opened."""
+    from PIL import Image
+
+    opened = []
+    real = Image.open
+    monkeypatch.setattr(Image, "open", lambda fp, *a, **k: (
+        opened.append(fp), real(fp, *a, **k))[1])
+    body, ctype = _form({"prompt": "a cat", "first_frame": "/etc/passwd"},
+                        {})
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": ctype})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["param"] == "first_frame"
+    assert err["message"].startswith("first_frame is an image as a data URL")
+    assert "/etc/passwd" not in opened
+
+
+def test_the_post_names_the_fields_it_ignores(routes, caplog):
+    import logging
+
+    body, ctype = _form({"prompt": "a cat", "adapters": "[]"},
+                        {"first_frame": _png(), "extra": b"x"})
+    with caplog.at_level(logging.WARNING):
+        r = routes.client.post("/v1/videos", content=body,
+                               headers={"content-type": ctype})
+        assert r.status_code == 200, r.text
+        r = routes.client.post("/v1/videos", json={
+            "prompt": "a cat", "adapters": [{"path": "x"}]})
+        assert r.status_code == 200, r.text
+    lines = [r.getMessage() for r in caplog.records
+             if "ignoring unsupported" in r.getMessage()]
+    assert lines == [
+        "/v1/videos: ignoring unsupported parameter(s): adapters, extra "
+        "(see the parameter support table in docs/api.md)",
+        "/v1/videos: ignoring unsupported parameter(s): adapters "
+        "(see the parameter support table in docs/api.md)"]
+
+
+def test_the_store_lock_is_taken_off_the_event_loop(routes, monkeypatch):
+    """The store's lock is held across a sweep's walk of the disk: the
+    POST takes it on a worker thread, never on the loop."""
+    import asyncio
+
+    store = routes.store
+    on_loop = []
+
+    def spy(name):
+        real = getattr(store, name)
+
+        def fn(*a, **k):
+            try:
+                asyncio.get_running_loop()
+                on_loop.append(name)
+            except RuntimeError:
+                pass
+            return real(*a, **k)
+        monkeypatch.setattr(store, name, fn)
+
+    for name in ("submit", "get", "begin", "take", "settle", "full",
+                 "retry_after", "abandon"):
+        spy(name)
+    body, ctype = _form({"prompt": "a cat"}, {"first_frame": _png()})
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": ctype})
+    assert r.status_code == 200, r.text
+    r = routes.client.post("/v1/videos", json={"prompt": ""})
+    assert r.status_code == 400, r.text
+    assert on_loop == []
+
+
+# The job's parts on the video worker.
+
+def test_the_clip_samples_with_the_jobs_settings_and_anchors(
+        tmp_path, monkeypatch):
+    import mlx.core as mx
+    import numpy as np
+
+    order = []
+    seen = {}
+
+    def generate(pipe, feats, **k):
+        seen.update(k)
+        return mx.zeros((1,)), mx.zeros((1,))
+
+    hold = _clip_part_stubs(monkeypatch, order, generate)
+    store, clock, driver = _store(tmp_path)
+    job = _clip_job(store)
+    video = np.ones((1, 4, 1, 2, 2), np.float32)
+    job.kept.update(anchors=((0, video, None),), spans=((3, 9),))
+    job.params["settings"].update(seed=1234, shifts={"video": 3.0})
+    vj._clip_part(job, store, hold, store.clip(job.id))
+    (anchor,) = seen.pop("anchors")
+    assert anchor.frame == 0 and anchor.audio is None
+    np.testing.assert_array_equal(np.array(anchor.video), video)
+    seen.pop("on_step"), seen.pop("pacer")
+    assert seen == {"frames": 22, "width": 64, "height": 64, "steps": 2,
+                    "shifts": {"video": 3.0}, "seed": 1234, "table": "t0",
+                    "spans": ((3, 9),)}
+
+
+def test_the_prompt_encode_settles_its_turn_when_it_raises(tmp_path,
+                                                           monkeypatch):
+    from gmlx.serve import image_steps, video_service
+    from gmlx.serve.patches import image_steps as pis
+
+    settled = []
+    monkeypatch.setattr(pis, "_lora_pool", lambda: object())
+    monkeypatch.setattr(image_service, "lora_settle", lambda p, e, subject:
+                        settled.append(subject))
+    monkeypatch.setattr(pis, "_check_encode", lambda *a: None)
+    monkeypatch.setattr(video_service, "keyframe_refusal", lambda *a: None)
+    monkeypatch.setattr(video_service, "anchor_refusal", lambda *a: None)
+
+    def encode(*a):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(video_service, "encode", encode)
+    store, clock, driver = _store(tmp_path)
+    job = _clip_job(store)
+    hold = SimpleNamespace(_entry=SimpleNamespace(pipeline=object()))
+    with pytest.raises(RuntimeError):
+        vj._encode_part(job, store, hold, "a cat", [], [])
+    assert settled == [image_steps.ENCODE]
+
+
+def test_a_guide_video_past_the_pixel_limit_is_refused_from_its_header(
+        tmp_path, monkeypatch):
+    """The frames of a guide video are read at their own size: one past
+    the limit is refused before any of them is read."""
+    from gmlx.serve.patches.media_gate import MEDIA_MAX_PIXELS
+    from gmlx.video import io as vio
+    from gmlx.video import run
+    from gmlx.video.registry import get_family
+
+    path = tmp_path / "guide_0"
+    path.write_bytes(b"\0" * 64)
+
+    def unread(*a, **k):
+        raise AssertionError("a frame of the guide was read")
+
+    monkeypatch.setattr(vio, "video_size", lambda p, ffmpeg: (9000, 9000))
+    for name in ("guide_length", "guide_audio", "each_guide_frame"):
+        monkeypatch.setattr(vio, name, unread)
+    with pytest.raises(ValueError) as ei:
+        run.read_anchors(get_family("h3"), {"frames": 22, "width": 32,
+                                            "height": 32},
+                         guides=[("--guide", str(path), 0,
+                                  "guides[0] (guide_0)")],
+                         ffmpeg="ffmpeg", paths=False,
+                         max_pixels=MEDIA_MAX_PIXELS)
+    assert str(ei.value) == (
+        f"guides[0] (guide_0): its frames are 9000x9000, over the "
+        f"{MEDIA_MAX_PIXELS} pixels the server decodes")
+
+
+def test_a_jobs_keyframe_is_named_by_its_field(tmp_path):
+    from gmlx.video import run
+    from gmlx.video.registry import get_family
+
+    path = tmp_path / "first_frame"
+    path.write_bytes(_png())
+    keyframes, todo = run.read_anchors(
+        get_family("h3"), {"frames": 22, "width": 32, "height": 32},
+        first=str(path), names=("first_frame", "last_frame"), paths=False)
+    assert [t.label for t in todo] == ["first_frame"]

@@ -164,13 +164,14 @@ def test_anchor_inputs_of_the_wrong_form_are_refused(audio_vae):
         anchors.encode(anchors.Placement(0, 0, 1), audio_vae=audio_vae)
 
 
-@pytest.mark.parametrize("fits", [True, False])
+@pytest.mark.parametrize("fits", ["whole", 1, 2])
 def test_a_jobs_guide_past_one_window_encodes_in_windows_as_the_whole(
         video_vae, monkeypatch, fits):
     """A video job's guide clip goes through ffmpeg a frame at a time:
     when the whole clip does not fit, in open windows of the pieces that
-    do and the clip's end, which give the whole encode; the frames read
-    are dropped once encoded."""
+    do (one or two here) and the clip's end, which give the whole encode;
+    the frames read are dropped once encoded. The windows are priced
+    before the VAE loads."""
     from types import SimpleNamespace
 
     from gmlx.serve import video_jobs as vj
@@ -191,12 +192,15 @@ def test_a_jobs_guide_past_one_window_encodes_in_windows_as_the_whole(
 
     monkeypatch.setattr(io, "each_guide_frame", each_frame)
     monkeypatch.setattr(images, "cover", lambda f, w, h: f)
-    monkeypatch.setattr(reader, "load_vae", lambda *a, **k: video_vae)
+    order = []
+    monkeypatch.setattr(reader, "load_vae", lambda *a, **k: (
+        order.append("load"), video_vae)[1])
     sizes = []
 
     def fit(hold, served, *, n, width, height, level, is_open):
         sizes.append((n, level, is_open))
-        return (0, 1, 3) if fits else (2, 1, 1)
+        order.append("fit")
+        return (0, 1, 3) if fits == "whole" else (2, 1, fits)
 
     monkeypatch.setattr(pis, "_window_fit", fit)
     monkeypatch.setattr(pis, "_check_clip", lambda *a, **k: None)
@@ -215,10 +219,76 @@ def test_a_jobs_guide_past_one_window_encodes_in_windows_as_the_whole(
                                                   audio_vae=None))
     got = vj.encode_anchors(job, None, served, [t])
     assert sizes == [(56, 1, False)]
-    assert encoded == ([(56, True)] if fits else
-                       [(17, False), (17, False), (17, False), (5, True)])
+    assert order == ["fit", "load"]
+    assert encoded == {"whole": [(56, True)],
+                       1: [(17, False), (17, False), (17, False), (5, True)],
+                       2: [(34, False), (22, True)]}[fits]
     whole = real((mx.array(clip).astype(mx.float32) / 255.0)[None]
                  * 2.0 - 1.0)
     (frame, video, audio), = got["anchors"]
     assert (frame, audio) == (0, None)
     np.testing.assert_array_equal(video, np.array(whole))
+
+
+def _guide_job(todo_kw):
+    from types import SimpleNamespace
+
+    from gmlx.video.layout import AnchorRows
+
+    t = SimpleNamespace(**{"video": None, "ffmpeg": "ffmpeg", "still": None,
+                           "wave": None, "label": "guides[0] (g)",
+                           "rows": AnchorRows(0, 0, 0), **todo_kw})
+    job = SimpleNamespace(stop=SimpleNamespace(is_set=lambda: False),
+                          params={"settings": {"width": 32, "height": 32,
+                                               "frames": 56}})
+    served = SimpleNamespace(spec=SimpleNamespace(vae="vae.safetensors",
+                                                  audio_vae="a.safetensors"))
+    return job, served, t
+
+
+def test_a_guide_no_window_fits_is_refused_before_the_vae_loads(
+        monkeypatch):
+    from types import SimpleNamespace
+
+    from gmlx.serve import video_jobs as vj
+    from gmlx.serve.image_steps import StepError
+    from gmlx.serve.patches import image_steps as pis
+    from gmlx.video.vae import reader
+
+    def load(*a, **k):
+        raise AssertionError("the VAE loaded before the window was priced")
+
+    monkeypatch.setattr(reader, "load_vae", load)
+    monkeypatch.setattr(pis, "_check_clip", lambda *a, **k: None)
+    monkeypatch.setattr(pis, "_window_fit", lambda *a, **k: (
+        3 << 30, 1 << 30, 0))
+    placed = SimpleNamespace(frame=0, video_frames=56, audio_t=None)
+    job, served, t = _guide_job({"video": "g.mp4", "placed": placed})
+    with pytest.raises(StepError) as ei:
+        vj.encode_anchors(job, None, served, [t])
+    assert str(ei.value).endswith("no window fits; the clip needs 3.00 GiB, "
+                                  "and 1.00 GiB is free")
+
+
+def test_an_audio_guides_latents_reach_the_jobs_anchors(monkeypatch):
+    from types import SimpleNamespace
+
+    from gmlx.serve import video_jobs as vj
+    from gmlx.serve.patches import image_steps as pis
+    from gmlx.video.vae import reader
+
+    loaded = []
+    monkeypatch.setattr(reader, "load_vae", lambda path, family, dtype: (
+        loaded.append(family), object())[1])
+    monkeypatch.setattr(pis, "_check_clip", lambda *a, **k: None)
+    sound = np.ones((1, 8, 2, 3), np.float32)
+    monkeypatch.setattr(anchors, "encode", lambda placed, **k: (
+        SimpleNamespace(audio=mx.array(sound))))
+    placed = anchors.Placement(4, 0, 3)
+    job, served, t = _guide_job({"placed": placed, "wave": np.zeros(
+        (2, 800), np.float32)})
+    got = vj.encode_anchors(job, None, served, [t])
+    assert loaded == ["h3_audio"]
+    (frame, video, audio), = got["anchors"]
+    assert (frame, video) == (4, None)
+    np.testing.assert_array_equal(audio, sound)

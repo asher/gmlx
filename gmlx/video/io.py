@@ -268,6 +268,31 @@ def each_guide_frame(path: str, *, most: int, ffmpeg: str, each) -> int:
     return _frames(ffmpeg, path, most, each)
 
 
+def video_size(path: str, *, ffmpeg: str) -> tuple[int, int]:
+    """The width and height of the first frame of the video at ``path``,
+    from the header ffmpeg writes before the frame, which is never read."""
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", path, "-map", "0:v:0",
+           "-frames:v", "1", "-f", "image2pipe", "-c:v", "ppm", "-pix_fmt",
+           "rgb24", "-"]
+    with tempfile.TemporaryFile() as err:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err)
+        try:
+            out = p.stdout
+            assert out is not None
+            head = b"".join(out.readline() for _ in range(3))
+        finally:
+            if p.poll() is None:
+                p.kill()
+            p.stdout.close()
+            rc = p.wait()
+        m = _PPM.fullmatch(head)
+        if m is None:
+            if rc > 0:
+                raise _ffmpeg_failed(path, err, "video")
+            raise FfmpegError(f"ffmpeg found no frames in {path}")
+    return int(m.group(1)), int(m.group(2))
+
+
 def guide_length(path: str, *, most: int, ffmpeg: str) -> int:
     """How many frames ``guide_frames`` reads of ``path`` with ``most``,
     counted from a small scale of each."""

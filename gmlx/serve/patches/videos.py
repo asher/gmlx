@@ -5,8 +5,9 @@ DELETE /v1/videos/{id} cancels it or removes it.
 The media gate leaves a POST body unread (``body_intake``). A JSON body
 is priced against the bytes free beside the models loaded before it is
 read, and takes its keyframes as data URLs; a multipart form streams its
-files to the job store, priced against the store's room, and its text
-fields are priced against free memory. The route then estimates the
+files to the job store, within the room it reserves there before its
+first byte, and its text fields are priced together against free
+memory. The route then estimates the
 clip from the entry's headers against the budget the pinned models
 leave, with no pool lock, and books nothing: the job's own checks on
 the video worker decide its memory. See :mod:`gmlx.serve.video_jobs`.
@@ -33,7 +34,7 @@ import gmlx.serve.bridge_vlm as serving
 from ._common import _error_content, _remove_routes
 from .body_intake import (
     BodyRefused,
-    check_fields,
+    _mib,
     check_media,
     read_form_to_disk,
     read_in_ram,
@@ -114,9 +115,9 @@ def _int(fields: dict, name: str) -> int | None:
     return n
 
 
-def _data_url(value, name: str, folder: str, room: list) -> str:
-    """Write the image of the data URL ``value`` to ``folder``, within
-    ``room[0]`` bytes of the store, which it takes."""
+def _data_url(value, name: str, folder: str, take) -> str:
+    """Write the image of the data URL ``value`` to ``folder``, within the
+    room ``take(n)`` reserves in the job store."""
     if not isinstance(value, str) or not value.startswith("data:image/") \
             or ";base64," not in value:
         raise Refused(400, f"{name} is an image as a data URL "
@@ -126,12 +127,14 @@ def _data_url(value, name: str, folder: str, room: list) -> str:
         data = base64.b64decode(value.split(",", 1)[1], validate=True)
     except (binascii.Error, ValueError):
         raise Refused(400, f"{name} is not base64", name) from None
-    if len(data) > room[0]:
-        raise Refused(413, f"the keyframes of this job are over the "
-                      f"{room[0]} bytes of room the video job store has "
-                      "left; delete finished jobs, or raise "
-                      "server.video.store_max_bytes", name)
-    room[0] -= len(data)
+    if take is not None:
+        ok, left = take(len(data))
+        if not ok:
+            raise Refused(413, f"the keyframe {name} is "
+                          f"{_mib(len(data), True)}, and the video job "
+                          f"store has {_mib(left)} of room left; send a "
+                          "smaller image, delete finished jobs, or raise "
+                          "server.video.store_max_bytes", name)
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, name)
     with open(path, "wb") as f:
@@ -142,14 +145,17 @@ def _data_url(value, name: str, folder: str, room: list) -> str:
 def _pixels(path: str, name: str) -> bool:
     """Whether ``path`` is an image, refusing one past the media pixel
     limit; a video is no image."""
-    from PIL import Image, UnidentifiedImageError
+    from PIL import Image
 
-    from .media_gate import MEDIA_MAX_PIXELS
+    from .media_gate import IMAGE_FORMATS, MEDIA_MAX_PIXELS
 
     try:
-        with Image.open(path) as im:
+        with Image.open(path, formats=IMAGE_FORMATS) as im:
             w, h = im.size
-    except (UnidentifiedImageError, OSError):
+    except Image.DecompressionBombError:
+        raise Refused(400, f"{name} is over the {MEDIA_MAX_PIXELS} pixels "
+                      "the server decodes", name) from None
+    except Exception:  # noqa: BLE001 - Pillow raises many types for bad data
         return False
     if w * h > MEDIA_MAX_PIXELS:
         raise Refused(400, f"{name} is {w}x{h}, over the {MEDIA_MAX_PIXELS} "
@@ -260,10 +266,11 @@ def estimate(spec, fam, plan, s: dict, prompt: str, sizes, rewrites: bool,
 
 
 def prepare(fields: dict, files: dict, folder: str, ffmpeg: str,
-            room: int = 0) -> tuple:
+            take=None) -> tuple:
     """``(record, params)`` of a job from the request's fields and files,
-    or Refused. A JSON body's keyframes go to ``folder`` within ``room``
-    bytes."""
+    or Refused. A data URL keyframe goes to ``folder`` within the room
+    ``take(n)`` reserves in the job store. Fields and files the route
+    does not read are named in a warning, as the images API does."""
     from gmlx.commands import video as cmd
     from gmlx.video.registry import get_family
 
@@ -320,13 +327,12 @@ def prepare(fields: dict, files: dict, folder: str, ffmpeg: str,
     if any(sent["first_frame"]) and any(sent["input_reference"]):
         raise Refused(400, "first_frame and input_reference both name the "
                       "first frame; send one", "input_reference")
-    left = [room]
     keys = {}
     for name, alias in (("first_frame", "input_reference"),
                         ("last_frame", "last_frame")):
         file, value = sent[name] if any(sent[name]) else sent[alias]
         keys[name] = file if file is not None else (
-            None if value is None else _data_url(value, name, folder, left))
+            None if value is None else _data_url(value, name, folder, take))
     for name, v in keys.items():
         if v is not None and not _pixels(v, name):
             raise Refused(400, f"{name} is no image the server reads", name)
@@ -350,6 +356,12 @@ def prepare(fields: dict, files: dict, folder: str, ffmpeg: str,
     sizes = [(s["width"], s["height"])] * sum(v is not None
                                               for v in keys.values())
     estimate(spec, fam, plan, s, prompt, sizes, rewrites, path)
+    from .api_contract import warn_ignored_fields
+
+    used = set(KEYFRAMES) | {"input_reference"} | {
+        os.path.basename(g[1]) for g in guides}
+    warn_ignored_fields(PATH, (set(fields) - set(FIELDS))
+                        | (set(files) - used))
     from gmlx.video.families.h3 import family as hf
 
     record = {"model": spec.id, "prompt": prompt,
@@ -362,7 +374,8 @@ def prepare(fields: dict, files: dict, folder: str, ffmpeg: str,
               "first_frame": keys["first_frame"],
               "last_frame": keys["last_frame"], "guides": guides,
               "guide_no_audio": bool(_bool(fields, "guide_no_audio")),
-              "upsampling": requested, "ffmpeg": ffmpeg}
+              "upsampling": requested, "rewrites": rewrites,
+              "ffmpeg": ffmpeg}
     return record, params
 
 
@@ -373,21 +386,37 @@ async def create(request: Request):
     store = _store()
     jid = store.new_id()
     folder = store.inputs(jid)
+    # Refused before the body is read: the answer ends the connection, so
+    # the server does not drain a body it will not use.
+    close = {"Connection": "close"}
     try:
         ffmpeg = media_programs.find("ffmpeg")
         if ffmpeg is None:
             raise Refused(501, media_programs.problem("ffmpeg") or
-                          "the server cannot run ffmpeg", code="ffmpeg_missing")
-        if store.full():
+                          "the server cannot run ffmpeg", code="ffmpeg_missing",
+                          headers=close)
+        full, retry = await asyncio.to_thread(
+            lambda: (store.full(), store.retry_after()))
+        if full:
             raise Refused(429, "the video job queue is full; retry later",
                           code="queue_full", headers={
-                              "Retry-After": str(store.retry_after())})
+                              "Retry-After": str(retry), **close})
+        # From here the sweep leaves this job's inputs, and its bytes
+        # count in the room, until submit or abandon.
+        await asyncio.to_thread(store.begin, jid)
+
+        def take(n):
+            return store.take(jid, n)
+
+        async def take_async(n):
+            return await asyncio.to_thread(take, n)
+
         ctype = request.headers.get("content-type", "").split(";")[0].strip()
         try:
             if ctype == "multipart/form-data":
-                room = await asyncio.to_thread(store.room)
-                pairs, files = await read_form_to_disk(request, folder, room)
-                await check_fields(request, pairs)
+                pairs, files = await read_form_to_disk(request, folder,
+                                                       take_async)
+                await asyncio.to_thread(store.settle, jid)
                 fields = dict(pairs)
             else:
                 raw = await read_in_ram(request)
@@ -402,24 +431,23 @@ async def create(request: Request):
         except BodyRefused as e:
             raise Refused(e.status, str(e), e.param,
                           headers=e.headers) from None
-        room = 0 if files else await asyncio.to_thread(store.room)
         record, params = await asyncio.to_thread(prepare, fields, files,
-                                                 folder, ffmpeg, room)
+                                                 folder, ffmpeg, take)
         try:
-            job = store.submit(jid, record, params)
+            job = await asyncio.to_thread(store.submit, jid, record, params)
         except QueueFull as e:
             raise Refused(429, "the video job queue is full; retry later",
                           code="queue_full",
                           headers={"Retry-After": str(e.retry_after)}) \
                 from None
     except Refused as e:
-        store._drop_inputs(jid)
+        await asyncio.to_thread(store.abandon, jid)
         return _answer(e)
     except BaseException:
-        store._drop_inputs(jid)
+        store.abandon(jid)
         raise
-    return JSONResponse(status_code=200, content=store.get(job.id) or
-                        job.record)
+    rec = await asyncio.to_thread(store.get, job.id)
+    return JSONResponse(status_code=200, content=rec or job.record)
 
 
 def _missing(jid: str) -> JSONResponse:

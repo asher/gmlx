@@ -55,7 +55,8 @@ def read_anchors(fam, s: dict, *, first: str | None = None,
                  last: str | None = None, guides=(),
                  guide_no_audio: bool = False, ffmpeg: str | None = None,
                  names: tuple = ("--first-frame", "--last-frame"),
-                 paths: bool = True) -> tuple[list, list]:
+                 paths: bool = True,
+                 max_pixels: int | None = None) -> tuple[list, list]:
     """The keyframes, (H, W, 3) uint8 at the canvas in prompt order, and
     each anchor as :class:`Anchor`, before any model loads: the keyframe
     images ``first`` and ``last``, and ``guides``, (flag, path, frame)
@@ -63,7 +64,9 @@ def read_anchors(fam, s: dict, *, first: str | None = None,
     ``names`` are the keyframes' flags as the refusals name them, each
     with its path unless ``paths`` is False; a guide may carry its own
     name as a fourth item. A guide video's frames are counted here and
-    read when it encodes."""
+    read when it encodes; with ``max_pixels``, a guide video whose frames
+    are larger is refused from its first frame's header, before a frame
+    of it is read."""
     from gmlx.video import anchors, images, io
     from gmlx.video.layout import AnchorRows
     from gmlx.video.vae.h3_audio import HOP, SAMPLE_RATE
@@ -119,6 +122,12 @@ def read_anchors(fam, s: dict, *, first: str | None = None,
         at = frame + frames if frame < 0 else frame
         if not 0 <= at < frames:
             add(flag, path, frame, n=1, label=label)  # refuses a frame off the clip
+        if max_pixels is not None and flag == "--guide":
+            gw, gh = io.video_size(file, ffmpeg=exe)
+            if gw * gh > max_pixels:
+                raise ValueError(f"{label}: its frames are {gw}x{gh}, over "
+                                 f"the {max_pixels} pixels the server "
+                                 "decodes")
         wave = None
         if flag == "--guide-audio" or not guide_no_audio:
             wave = io.guide_audio(file, rate=SAMPLE_RATE, samples=samples,

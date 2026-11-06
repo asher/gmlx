@@ -143,6 +143,9 @@ class VideoJobs:
         self._driver = driver
         self.lock = threading.Lock()
         self.jobs: dict = {}
+        # The bytes reserved by each POST whose inputs are still arriving,
+        # by job id: the sweep leaves its inputs, and the room counts it.
+        self.pending: dict = {}
         self.book = JobBook("completed", "failed", "cancelled")
         self._restored = False
 
@@ -227,7 +230,13 @@ class VideoJobs:
                     self._end(job, FAILED, error={
                         "code": "server_restarted",
                         "message": "the server restarted before the job "
-                        "finished; submit it again"})
+                        "finished; submit it again",
+                        "type": "server_error", "status": 500})
+                    # A clip renamed in before its record said completed
+                    # is no job's: it would count to the job's expiry.
+                    for clip in (self.clip(jid), f"{self.clip(jid)}.part"):
+                        with contextlib.suppress(OSError):
+                            os.unlink(clip)
             for name in os.listdir(self._dir("files")):
                 if name.endswith(".part"):
                     with contextlib.suppress(OSError):
@@ -258,6 +267,8 @@ class VideoJobs:
             for kind in ("inputs", "files"):
                 for name in os.listdir(self._dir(kind)):
                     jid = name.split(".")[0]
+                    if jid in self.pending:
+                        continue
                     live = self.jobs.get(jid)
                     if live is None or (kind == "inputs"
                                         and live.record["status"] in ENDED):
@@ -282,8 +293,14 @@ class VideoJobs:
             return gone
 
     def _held(self) -> int:
-        return self._bytes(self._dir("files")) + self._bytes(
-            self._dir("inputs"))
+        """The bytes on disk and reserved: the clips, the inputs of the
+        jobs, and the reservation of each POST still arriving in place of
+        what it wrote so far. Under ``lock``."""
+        inputs = self._dir("inputs")
+        return (self._bytes(self._dir("files"))
+                + sum(self._bytes(os.path.join(inputs, n))
+                      for n in os.listdir(inputs) if n not in self.pending)
+                + sum(self.pending.values()))
 
     def room(self) -> int:
         """The bytes left in the store for a new job's inputs, after a
@@ -291,6 +308,42 @@ class VideoJobs:
         self.sweep()
         with self.lock:
             return max(0, self.settings.store_max_bytes - self._held())
+
+    # A POST's reservation, from its first byte to its submit.
+
+    def begin(self, jid: str) -> None:
+        """Reserve the job id of a POST before its first byte: the sweep
+        leaves its inputs until :meth:`submit` or :meth:`abandon`."""
+        with self.lock:
+            self.pending[jid] = 0
+
+    def take(self, jid: str, n: int | None) -> tuple[bool, int]:
+        """Reserve ``n`` more bytes of the room for the POST ``jid``, or
+        all the room left with ``n`` None: ``(True, bytes reserved)``, or
+        ``(False, room left)`` when they do not fit, reserving nothing."""
+        self.sweep()
+        with self.lock:
+            left = max(0, self.settings.store_max_bytes - self._held())
+            want = left if n is None else n
+            if want > left:
+                return False, left
+            self.pending[jid] = self.pending.get(jid, 0) + want
+            return True, want
+
+    def settle(self, jid: str) -> None:
+        """Hold the POST ``jid`` to the bytes it wrote, once its form is
+        read, so the rest of its reservation is room again."""
+        with self.lock:
+            if jid in self.pending:
+                self.pending[jid] = self._bytes(
+                    os.path.join(self._dir("inputs"), jid))
+
+    def abandon(self, jid: str) -> None:
+        """End a refused or failed POST: its inputs go with its
+        reservation."""
+        with self.lock:
+            self.pending.pop(jid, None)
+            self._drop_inputs(jid)
 
     # Queue.
 
@@ -331,6 +384,7 @@ class VideoJobs:
                   "error": None, **record}
         job = Job(jid, record, params)
         with self.lock:
+            self.pending.pop(jid, None)
             if self.queued() >= self.settings.max_queue:
                 self._drop_inputs(jid)
                 raise QueueFull(self._retry_after())
@@ -448,6 +502,16 @@ class VideoJobs:
         with self.lock:
             if job.record["status"] != QUEUED:
                 return
+            if self._time() >= job.record["expires_at"]:
+                # Its record would read 404 once it ran: it never runs.
+                self._end(job, FAILED, error={
+                    "code": "timed_out",
+                    "message": "the job was still queued when it expired; "
+                    "submit it again, or raise server.video.job_ttl_s",
+                    "type": "server_error", "status": 503})
+                self._drop_inputs(job.id)
+                job.kept.clear()
+                return
             job.record["status"] = RUNNING
             job.record["progress"] = 0
             job.record.setdefault("gmlx", {})["phase"] = "starting"
@@ -471,6 +535,9 @@ class VideoJobs:
                         "code": f.code or f.err_type, "message": f.message,
                         "type": f.err_type, "status": f.status})
         finally:
+            # The encode's features and the anchors' latents: no ended job
+            # needs them, and the job lives to its expiry.
+            job.kept.clear()
             with self.lock:
                 self._drop_inputs(job.id)
                 if job.record["status"] != DONE:
@@ -511,6 +578,7 @@ def run_clip(job: Job, store: VideoJobs) -> None:
     from . import video_service as vs
     from .image_service import JobStopped
     from .image_upsample import revise
+    from .patches.media_gate import MEDIA_MAX_PIXELS
 
     p = job.params
     _path, spec = serving.resolve_video_request(p["model"])
@@ -523,7 +591,8 @@ def run_clip(job: Job, store: VideoJobs) -> None:
         fam, s, first=p.get("first_frame"), last=p.get("last_frame"),
         guides=p.get("guides") or (),
         guide_no_audio=bool(p.get("guide_no_audio")), ffmpeg=p["ffmpeg"],
-        names=("first_frame", "last_frame"))
+        names=("first_frame", "last_frame"), paths=False,
+        max_pixels=MEDIA_MAX_PIXELS)
     caption = None
     store.progress(job, phase="rewriting the prompt")
     while True:
@@ -542,6 +611,10 @@ def run_clip(job: Job, store: VideoJobs) -> None:
             if not f.transient:
                 raise f from None
             store.wait(job, f)
+    if caption is None and p.get("rewrites"):
+        raise JobFailed(500, "the job's prompt was to be rewritten, and the "
+                        "upsampler gave no caption; see the server log",
+                        code="upsample_failed")
     if caption is not None:
         store.note(job, revised_prompt=caption)
     text = caption or p["prompt"]
@@ -634,6 +707,7 @@ def encode_anchors(job: Job, hold, served, todo) -> dict:
 
     from .image_service import JobStopped
     from .image_steps import StepError
+    from .patches.body_intake import _mib
     from .patches.image_steps import _check_clip, _window_fit
 
     s = job.params["settings"]
@@ -643,6 +717,26 @@ def encode_anchors(job: Job, hold, served, todo) -> dict:
         _check_clip(hold, served, frames=frames, width=w, height=h, text=1,
                     phase="anchors", what="the anchors' encode",
                     anchors=small)
+    # Each guide video's windows, priced before the VAE loads: the whole
+    # clip in one window when it fits, else open windows of the most
+    # whole pieces that fit.
+    windows: dict = {}
+    for i, t in enumerate(todo):
+        n = t.placed.video_frames
+        if not n or t.still is not None:
+            continue
+        fit = _window_fit(hold, served, n=n, width=w, height=h, level=1,
+                          is_open=False)
+        windows[i] = None
+        if fit is not None and fit[0] > fit[1]:
+            need, free, k = fit
+            if n == 1 or not k:
+                raise StepError(
+                    400, f"the encode of {t.label}, a guide clip of {n} "
+                    f"frames of {w}x{h}, does not fit in memory beside the "
+                    "models now loaded: no window fits; the clip needs "
+                    f"{_mib(need, True)}, and {_mib(max(free, 0))} is free")
+            windows[i] = 17 * k
     video, audio = {}, {}
     if any(t.placed.video_frames for t in todo):
         vae = load_vae(os.path.expanduser(served.spec.vae), family="h3",
@@ -657,21 +751,7 @@ def encode_anchors(job: Job, hold, served, todo) -> dict:
                         dataclasses.replace(t.placed, audio_t=None),
                         frames=t.still[None], video_vae=vae).video)
                     continue
-                fit = _window_fit(hold, served, n=n, width=w, height=h,
-                                  level=1, is_open=False)
-                # The whole clip in one window when it fits, else open
-                # windows of the most whole pieces that fit.
-                window = None
-                if fit is not None and fit[0] > fit[1]:
-                    need, free, k = fit
-                    if n == 1 or not k:
-                        raise StepError(
-                            400, f"the encode of {t.label}, a guide clip of "
-                            f"{n} frames of {w}x{h}, does not fit in memory "
-                            "beside the models now loaded: no window fits; "
-                            f"the clip needs {need / (1 << 30):.2f} GiB, "
-                            f"and {max(free, 0) / (1 << 30):.2f} GiB is free")
-                    window = 17 * k
+                window = windows[i]
                 got: list = []
                 buf: list = []
 
