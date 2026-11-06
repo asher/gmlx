@@ -987,3 +987,39 @@ def test_a_steps_estimate_is_its_matrices_whatever_the_pipeline_holds(
     assert refused.value.body["error"].endswith(
         " GB the server's memory budget leaves beside 'own' and the pinned "
         "models")
+
+
+@pytest.mark.parametrize("length", [5, None])
+def test_an_upload_is_admitted_before_the_bytes_it_reads(monkeypatch,
+                                                         length):
+    """With a Content-Length, the whole body is admitted before its first
+    byte; with none, a step at a time before the bytes past the last."""
+    order: list = []
+    monkeypatch.setattr(routes, "_admit", lambda pool, n: order.append(
+        ("admit", n)))
+    monkeypatch.setattr(wire, "read", lambda body, max_bytes: (
+        {"t": bytes(body)}, None))
+    monkeypatch.setattr(steps, "BODY_STEP", 4)
+
+    class Req:
+        headers = {"content-type": wire.CONTENT_TYPE}
+        if length is not None:
+            headers["content-length"] = str(length)
+
+        async def body(self):
+            order.append("body")
+            return b"hello"
+
+        async def stream(self):
+            for chunk in (b"abc", b"defgh"):
+                order.append("chunk")
+                yield chunk
+
+    pool = SimpleNamespace(upload_done=lambda n: order.append(("done", n)))
+    tensors, admitted = asyncio.run(routes._admitted_wire(Req(), pool))
+    if length is not None:
+        assert (order, admitted) == ([("admit", 5), "body"], 5)
+    else:
+        assert (order, admitted) == ([("admit", 4), "chunk", "chunk",
+                                      ("admit", 4)], 8)
+        assert tensors == {"t": b"abcdefgh"}
