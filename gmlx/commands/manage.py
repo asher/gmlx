@@ -1067,6 +1067,11 @@ def _fetch_hf_file(repo: str, name: str, revision: str, dest_dir: str,
     if os.path.isfile(dest):
         why = _out_of_date(dest, size, sha, verify)
         if why is None:
+            if os.path.isfile(dest + ".old"):
+                # An update ended after its new copy landed.
+                print(f"  {name}: removing the old copy an interrupted update "
+                      "left beside the current one", file=sys.stderr)
+                os.remove(dest + ".old")
             return _hf_download(repo, name, revision, dest_dir)    # returns the file in place
         print(f"  {name}: {why}, downloading the current file", file=sys.stderr)
         old = dest + ".old"

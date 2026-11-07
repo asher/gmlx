@@ -2308,6 +2308,27 @@ def test_pull_restores_the_copy_a_killed_update_set_aside(
     assert ("differs from Hugging Face" in err) is not current
 
 
+def test_pull_removes_the_old_copy_a_killed_update_left_beside_the_new_one(
+        tmp_path, monkeypatch, capsys):
+    """A kill between the new copy landing and the old one's removal leaves
+    model.gguf.old beside a current model.gguf: the next pull downloads
+    nothing and removes it."""
+    payload = _mint(tmp_path / "m.gguf", codec=GT.Q4_0)
+    _serve(monkeypatch, payload)
+    _sha_listing(monkeypatch, {"model.gguf": payload})
+    got = []
+    _like_hf(monkeypatch, {"model.gguf": payload}, got)
+    (tmp_path / "model.gguf").write_bytes(payload)
+    (tmp_path / "model.gguf.old").write_bytes(payload[:-32])
+    assert manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(tmp_path)]) == 0
+    assert not (tmp_path / "model.gguf.old").exists()
+    assert (tmp_path / "model.gguf").read_bytes() == payload
+    err = capsys.readouterr().err
+    assert "differs from Hugging Face" not in err
+    assert ("model.gguf: removing the old copy an interrupted update left "
+            "beside the current one") in err
+
+
 def test_pull_verify_catches_a_change_of_the_same_size(tmp_path, monkeypatch, capsys):
     payload = _mint(tmp_path / "m.gguf", codec=GT.Q4_0)
     _serve(monkeypatch, payload)
