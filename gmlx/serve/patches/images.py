@@ -303,6 +303,7 @@ async def _read_body(route: str, request: Request):
 async def _read_priced_body(route: str, request: Request):
     from ..image_service import ImageRequestError
     from .body_intake import (
+        BodyHold,
         BodyRefused,
         _in_turn,
         free_bytes,
@@ -312,18 +313,25 @@ async def _read_priced_body(route: str, request: Request):
 
     ctype = request.headers.get("content-type", "").lower()
     is_form = ctype.startswith("multipart/form-data")
-    free = free_bytes()
+    # What a JSON body holds in RAM, counted beside the other bodies being
+    # read until its images are decoded.
+    hold = BodyHold()
     try:
-        if is_form:
-            form = await read_form_in_ram(request, free)
-        else:
-            # The images decode in the parse's worker thread.
-            return await read_json(request, free, then=functools.partial(
-                _json_parts, route, free))
-    except BodyRefused as e:
-        _log_media(e.status, str(e))
-        raise ImageRequestError(e.status, str(e), param=e.param,
-                                headers=e.headers) from None
+        try:
+            if is_form:
+                free = free_bytes()
+                form = await read_form_in_ram(request, free)
+            else:
+                # The images decode in the parse's worker thread.
+                return await read_json(
+                    request, then=functools.partial(_json_parts, route, hold),
+                    hold=hold)
+        except BodyRefused as e:
+            _log_media(e.status, str(e))
+            raise ImageRequestError(e.status, str(e), param=e.param,
+                                    headers=e.headers) from None
+    finally:
+        hold.release()
     try:
         # In the turn the parses take: the form's price counts its
         # largest file, which this reads whole.
@@ -355,17 +363,20 @@ def _form_parts(form, pixels):
     return fields, images, mask
 
 
-def _json_parts(route: str, free: int | None, body, price: int):
+def _json_parts(route: str, hold, body, price: int):
     """``(body, images, mask)`` of a parsed JSON body, its images decoded
-    against ``free`` less ``price``, what the body was priced at
-    (:class:`_Pixels`). Runs in the parse's worker thread."""
+    against the memory free beside the other bodies ``hold`` counts it
+    with, less ``price``, what the body was priced at (:class:`_Pixels`).
+    Runs in the parse's worker thread."""
+    from .body_intake import free_beside
+
     from ..image_service import _bad
 
     if not isinstance(body, dict):
         raise _bad("request body must be a JSON object")
     images, mask = [], None
     if route != "generations":
-        pixels = _Pixels(free, price)
+        pixels = _Pixels(free_beside(hold), price)
         raw = body.get("images", body.get("image"))
         for item in raw if isinstance(raw, list) else ([] if raw is None else [raw]):
             images.append(_json_image(item, "images", pixels))

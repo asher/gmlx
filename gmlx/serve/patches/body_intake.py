@@ -196,6 +196,16 @@ class BodyHold:
             self.n = 0
 
 
+def free_beside(hold: BodyHold) -> int | None:
+    """The pool's figure less what the bodies other than the one ``hold``
+    counts hold, or None with no budget to price by."""
+    free = _pool_free()
+    if free is None:
+        return None
+    with _HELD_LOCK:
+        return max(0, free - (_held - hold.n))
+
+
 def _busy(need: int, free: int, others: int) -> BodyRefused:
     """The 503 of a body that fits the memory free once the other bodies
     being read, ``others`` bytes, are read."""

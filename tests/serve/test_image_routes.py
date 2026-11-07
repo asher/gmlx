@@ -1058,7 +1058,7 @@ def test_the_gate_leaves_an_images_body_to_the_route_and_its_price(
     body = json.dumps({"prompt": "x", "images": [{"image_url": uri}]})
     monkeypatch.setattr(mg, "BODY_MAX_BYTES", len(body) // 2)
     monkeypatch.setattr(mg, "MEDIA_MAX_BYTES", len(png) // 2)
-    monkeypatch.setattr(body_intake, "free_bytes",
+    monkeypatch.setattr(body_intake, "_pool_free",
                         lambda: body_intake.json_price(body.encode(), True)
                         + svc.decode_price(png)[0])
     r = TestClient(_gated_app()).post(
@@ -1080,7 +1080,7 @@ def test_an_images_body_past_the_memory_free_answers_413_before_its_read(
 
     from gmlx.serve.patches import body_intake
 
-    monkeypatch.setattr(body_intake, "free_bytes", lambda: 1 << 20)
+    monkeypatch.setattr(body_intake, "_pool_free", lambda: 1 << 20)
     with serving(_gated_app()) as port:
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
         other = peer(conn)
@@ -1093,6 +1093,127 @@ def test_an_images_body_past_the_memory_free_answers_413_before_its_read(
         assert r.getheader("connection") == "close"
         assert closed(other)
         conn.close()
+    assert served.jobs == []
+
+
+def _wait_for(cond, timeout: float = 10.0) -> bool:
+    import time
+
+    end = time.monotonic() + timeout
+    while not cond():
+        if time.monotonic() > end:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def _body_pool(monkeypatch, free: int) -> SimpleNamespace:
+    """A pool with ``free`` bytes of its budget free, and none admitted."""
+    from gmlx.serve.patches import _common
+
+    pool = SimpleNamespace(figures=SimpleNamespace(
+        budget=free, resident=0, incoming=0))
+    monkeypatch.setattr(_common, "_get_pool", lambda: pool)
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    return pool
+
+
+def _begin(conn, path: str, head: bytes, length: int) -> None:
+    conn.putrequest("POST", path)
+    conn.putheader("Content-Type", "application/json")
+    conn.putheader("Content-Length", str(length))
+    conn.endheaders(head)
+
+
+def test_two_images_json_bodies_that_each_fit_alone_cannot_pass_together(
+        served, monkeypatch):
+    """An images JSON body counts what its read holds beside the other
+    bodies being read from before its first byte: the second of two that
+    each fit the memory free alone, but not beside each other, is a 503
+    on its headers, naming what the first holds. The pool is never
+    booked."""
+    import http.client
+
+    from live_socket import send, serving
+
+    from gmlx.serve.patches import body_intake as bi
+
+    monkeypatch.setattr(bi, "STALL_S", 5.0)
+    a = json.dumps({"prompt": "a cat " + "a" * (2 << 20)}).encode()
+    b = json.dumps({"prompt": "a dog " + "a" * (2 << 20)}).encode()
+    # The first fits its parse; the second fits alone, not beside it.
+    need = bi.json_price(a)
+    assert bi.json_price(b) <= need < 4 * len(a)
+    pool = _body_pool(monkeypatch, need)
+    path = "/v1/images/generations"
+    with serving(_gated_app()) as port:
+        ca = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        _begin(ca, path, a[:64], len(a))
+        counted = _wait_for(lambda: bi.free_bytes() == need - 2 * len(a))
+        cb = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        r = send(cb, path, b"", length=len(b))
+        cb.close()
+        assert r.status == 503, r.body
+        assert int(r.getheader("Retry-After")) > 0
+        assert json.loads(r.body)["error"]["message"] == (
+            f"the body of this request holds {bi._mib(2 * len(b), True)} "
+            f"as it is read and parsed, with {bi._mib(need)} of memory free "
+            f"beside the models loaded, and {bi._mib(2 * len(a))} of it is "
+            "held by uploads arriving now; send it again once they are "
+            "read")
+        assert counted
+        assert pool.figures.incoming == 0
+        ca.send(a[64:])
+        r = ca.getresponse()
+        assert r.status == 200, r.read()
+        r.read()
+        ca.close()
+        assert _wait_for(lambda: bi.held_bytes() == 0)
+        cb = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        r = send(cb, path, b)
+        cb.close()
+        assert r.status == 200, r.body
+    assert bi.held_bytes() == 0
+    assert pool.figures.incoming == 0
+    assert len(served.jobs) == 2
+
+
+@pytest.mark.parametrize("ending", ["bad json", "route 400", "client leaves",
+                                    "stall"])
+def test_an_images_json_bodys_count_ends_however_its_request_ends(
+        served, monkeypatch, ending):
+    """The count an images JSON body holds ends on every exit of its
+    request: a parse refusal, the route's own 400, a client that leaves
+    mid-body and a body that stops sending. The pool is never booked."""
+    import http.client
+
+    from live_socket import send, serving
+
+    from gmlx.serve.patches import body_intake as bi
+
+    monkeypatch.setattr(bi, "STALL_S", 0.5)
+    pool = _body_pool(monkeypatch, 64 << 20)
+    path = "/v1/images/generations"
+    body = {"bad json": b'{"prompt": "a cat",' + b" " * (1 << 20),
+            "route 400": json.dumps({"prompt": "a cat", "n": 0}).encode()}.get(
+        ending, json.dumps({"prompt": "a" * (1 << 20)}).encode())
+    with serving(_gated_app()) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        if ending in ("bad json", "route 400"):
+            r = send(conn, path, body)
+            assert r.status == 400, r.body
+        else:
+            _begin(conn, path, body[:64], len(body))
+            assert _wait_for(lambda: bi.held_bytes() == 2 * len(body))
+            assert pool.figures.incoming == 0
+            if ending == "client leaves":
+                conn.sock.close()
+            else:
+                r = conn.getresponse()
+                assert r.status == 408, r.read()
+        conn.close()
+        assert _wait_for(lambda: bi.held_bytes() == 0)
+    assert pool.figures.incoming == 0
     assert served.jobs == []
 
 
@@ -1115,7 +1236,7 @@ def test_an_images_json_body_is_priced_at_what_its_read_and_parse_hold(
     body = json.dumps({"prompt": prompt}).encode()
     need = bi.json_price(body)
     for free, status in ((need - 1, 413), (need, 200)):
-        monkeypatch.setattr(bi, "free_bytes", lambda f=free: f)
+        monkeypatch.setattr(bi, "_pool_free", lambda f=free: f)
         r = TestClient(_gated_app()).post(
             "/v1/images/generations", content=body,
             headers={"content-type": "application/json"})
@@ -1144,7 +1265,7 @@ def test_an_images_form_is_priced_as_its_text_arrives(served, monkeypatch,
     # Its image decodes past the read, priced on its own.
     decode = svc.decode_price(_png())[0]
     for free, status in ((need - 1, 413), (need + decode, 200)):
-        monkeypatch.setattr(bi, "free_bytes", lambda f=free: f)
+        monkeypatch.setattr(bi, "_pool_free", lambda f=free: f)
         r = TestClient(_gated_app()).post("/v1/images/edits", content=body,
                                           headers={"content-type": ctype})
         assert r.status_code == status, r.text
@@ -1247,7 +1368,7 @@ def test_an_edit_with_a_photo_is_read_within_its_price(served, monkeypatch,
     # Its read and parse, and its decode at 22 bytes a pixel and 8 MiB.
     budget = ((2 if kind == "form" else 4) * len(body) + bi._SLACK
               + 768 * 768 * 22 + (8 << 20))
-    monkeypatch.setattr(bi, "free_bytes", lambda: budget)
+    monkeypatch.setattr(bi, "_pool_free", lambda: budget)
     r = TestClient(_gated_app()).post("/v1/images/edits", content=body,
                                       headers={"content-type": ctype})
     assert r.status_code == 200, r.text
@@ -1260,7 +1381,7 @@ def test_an_edit_with_a_photo_is_read_within_its_price(served, monkeypatch,
                         lambda data, param: np.zeros(0, np.uint8))
 
     def run(free):
-        monkeypatch.setattr(bi, "free_bytes", lambda: free)
+        monkeypatch.setattr(bi, "_pool_free", lambda: free)
         req = _request("/v1/images/edits", body, ctype)
 
         async def read():
@@ -1335,7 +1456,7 @@ def test_an_edit_image_whose_decode_passes_the_memory_free_is_a_413(
     client = TestClient(_gated_app())
 
     def post(free):
-        monkeypatch.setattr(bi, "free_bytes", lambda: free)
+        monkeypatch.setattr(bi, "_pool_free", lambda: free)
         return client.post("/v1/images/edits", content=body,
                            headers={"content-type": ctype})
     price = _body_price(post, len(body))
@@ -1369,7 +1490,7 @@ def test_the_images_of_an_edit_are_priced_beside_the_arrays_before_them(
     client = TestClient(_gated_app())
 
     def post(body, free):
-        monkeypatch.setattr(bi, "free_bytes", lambda: free)
+        monkeypatch.setattr(bi, "_pool_free", lambda: free)
         return client.post("/v1/images/edits", content=body,
                            headers={"content-type": "application/json"})
     term = 512 * 512 * 22 + (8 << 20)
@@ -1422,7 +1543,7 @@ def test_an_edits_image_decodes_off_the_event_loop(served, monkeypatch,
                             blocking(mg.check_form_fields))
     else:
         monkeypatch.setattr(images, "_decoded", blocking(images._decoded))
-    monkeypatch.setattr(bi, "free_bytes", lambda: 1 << 30)
+    monkeypatch.setattr(bi, "_pool_free", lambda: 1 << 30)
     body, ctype = _edit_bodies()[kind]
 
     async def main():
@@ -1494,7 +1615,7 @@ def test_an_images_json_body_is_priced_by_what_its_parse_makes(
     body = _shaped(shape)
     need = body_intake.json_price(body)
     for free, status in ((need - 1, 413), (need, 200)):
-        monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
+        monkeypatch.setattr(body_intake, "_pool_free", lambda f=free: f)
         r = TestClient(_gated_app()).post(
             "/v1/images/generations", content=body,
             headers={"content-type": "application/json"})
@@ -1509,7 +1630,7 @@ def test_an_images_body_with_no_length_stops_at_the_memory_free(
     there."""
     from gmlx.serve.patches import body_intake
 
-    monkeypatch.setattr(body_intake, "free_bytes", lambda: 1 << 16)
+    monkeypatch.setattr(body_intake, "_pool_free", lambda: 1 << 16)
     sent = []
 
     def chunks():
@@ -1557,7 +1678,7 @@ def test_an_edit_forms_text_part_past_a_mib_is_read(served, monkeypatch):
     and the gate's check and the route both read a prompt of 2 MiB."""
     from gmlx.serve.patches import body_intake
 
-    monkeypatch.setattr(body_intake, "free_bytes", lambda: 64 << 20)
+    monkeypatch.setattr(body_intake, "_pool_free", lambda: 64 << 20)
     prompt = "a" * (2 << 20)
     r = TestClient(_gated_app()).post(
         "/v1/images/edits", files=[("image[]", ("a.png", _png(),
