@@ -215,7 +215,9 @@ def cmd_kld_adapter(args) -> int:
     """llama-perplexity's Mean KLD and Same top p of MODEL with a rank-1
     adapter at each strength, against MODEL bare, over the frozen docs
     page. The adapter is minted once, on ffn_down of a few layers, and
-    checked in; a later run reuses it."""
+    checked in; a later run reuses it. The fixture records the layers and
+    the B norm read back from the adapter, and the seed only when this run
+    minted it."""
     import gguf
     import numpy as np
 
@@ -228,7 +230,8 @@ def cmd_kld_adapter(args) -> int:
     for p in (model, text):
         if not p.is_file():
             raise SystemExit(f"error: no such file: {p}")
-    if not adapter.is_file():
+    minted = not adapter.is_file()
+    if minted:
         # A unit A and a B of norm `norm` per layer: delta = B A, alpha 1.
         reader = gguf.GGUFReader(str(model))
         arch = bytes(reader.fields["general.architecture"].parts[-1]).decode()
@@ -251,6 +254,17 @@ def cmd_kld_adapter(args) -> int:
         w.write_tensors_to_file()
         w.close()
         print(f"wrote {_shown(adapter)}")
+    found: dict = {}
+    for t in gguf.GGUFReader(str(adapter)).tensors:
+        m = re.fullmatch(r"blk\.(\d+)\..*\.lora_b", t.name)
+        if m:
+            found[int(m[1])] = round(float(np.linalg.norm(np.asarray(t.data))), 4)
+    provenance = {"adapter_layers": sorted(found),
+                  "adapter_b_norm": sorted(set(found.values()))}
+    if len(provenance["adapter_b_norm"]) == 1:
+        provenance["adapter_b_norm"] = provenance["adapter_b_norm"][0]
+    if minted:
+        provenance["adapter_seed"] = seed
     check_recorded_files(out, [model, adapter, text])
     commit = llama_commit(tool)
     ident = _image_fixtures().file_identity
@@ -281,8 +295,7 @@ def cmd_kld_adapter(args) -> int:
     write_fixture(out, {
         "llama_cpp": commit, "created": now(), "argv": argvs,
         "files": {p.name: ident(p) for p in (model, adapter, text)},
-        "adapter_layers": list(layers), "adapter_b_norm": norm,
-        "adapter_seed": seed, "rows": rows})
+        **provenance, "rows": rows})
     return 0
 
 
