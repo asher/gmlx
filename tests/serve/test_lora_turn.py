@@ -476,6 +476,26 @@ def test_a_turn_waits_for_the_build_lock_after_its_wait_aside(
         q.run()
 
 
+def test_a_turn_short_of_more_than_a_release_frees_does_not_wait(
+        monkeypatch):
+    """A release on the other worker that frees less than the turn is
+    short of leaves it to evict anyway: the turn evicts at once."""
+    pool = make_pool(monkeypatch, 10, retry=1)
+    image(pool, "zimage", 1)
+    qwen = chat(pool, "qwen3", 3, busy=0)
+    v = video(pool, "v", 4, busy=True)
+    q = Queued(pool, monkeypatch, "zimage")
+    w = waits(pool)
+    try:
+        # 1 + 3 + 4 held of 10: 4 GB more is 2 GB short, 1 GB tearing.
+        turn(pool, v, 4 * GB)
+        assert not pool.entry_resident(qwen)
+        assert v.lora.pending == 4 * GB
+        assert w.timeouts == []
+    finally:
+        q.run()
+
+
 def test_a_video_turn_sheds_an_idle_upload_with_the_image_worker_busy(
         monkeypatch):
     """An upload is its body's bytes, made on no worker: a video turn

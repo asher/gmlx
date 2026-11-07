@@ -990,8 +990,8 @@ class _ResidencyPool:
         evicts idle models as a cold load does, measures and books, or
         waits for chat models in use within the deadline. A release
         queued on the other worker frees its bytes first: the turn waits
-        on it, for at most half the deadline left, before it sheds or
-        evicts; the rest keeps the wait for the build lock.
+        on it, for at most half the deadline left, after it sheds and
+        before it evicts; the rest keeps the wait for the build lock.
         Raises LoraRefused: 413 when no unload makes room, else 503 with
         Retry-After."""
         from .capacity import overcommit
@@ -1066,16 +1066,21 @@ class _ResidencyPool:
         """Under the build lock: shed, evict, measure, then check and book
         in one hold. Returns None when booked, (the release count, the
         503) to wait on, or, with ``aside``, _ASIDE when a release queued
-        on the other worker frees bytes the turn is short of: the turn
-        waits on it before it sheds or picks a victim."""
+        on the other worker frees the bytes the turn is still short of
+        after it sheds: the turn waits on it before it picks a victim."""
         self._hit("turn")
         head = None if over else self._measured_lora_room()
         with self._lock:
             short = self._shortfall(owner, need, head, self._uploads())
-            if short > 0 and aside and not over and self._aside(owner):
-                return _ASIDE
         if short > 0:
             self._shed_for(owner, short, hold, store)
+            if aside and not over and self._has_aside(owner):
+                head = self._measured_lora_room()
+                with self._lock:
+                    short = self._shortfall(owner, need, head,
+                                            self._uploads())
+                    if 0 < short <= self._aside(owner):
+                        return _ASIDE
         torn: list = []
         released: list = []
         try:
@@ -1849,6 +1854,10 @@ class _ResidencyPool:
         self._publish()
         if n:
             self._idle.notify_all()
+
+    def _has_aside(self, owner) -> bool:
+        with self._lock:
+            return self._aside(owner) > 0
 
     def _aside(self, owner) -> int:
         """Under _lock: the tearing bytes of the pipelines the other worker
