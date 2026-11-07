@@ -771,7 +771,11 @@ def _over_room(n: int | None, room: int, arriving: int = 0) -> BodyRefused:
 
 async def _within(timeout: float, aw):
     """The wait for a body's next chunk, ``timeout`` seconds at most."""
-    return await asyncio.wait_for(aw, timeout)
+    # Not asyncio.wait_for: on 3.11 its inner task keeps the stream's end
+    # in a cycle with the reader's frame, so the body outlives its read
+    # until the gc runs, past the price.
+    async with asyncio.timeout(timeout):
+        return await aw
 
 
 def _stalled(stall: float, got: int, n: int | None,
