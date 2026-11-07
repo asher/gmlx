@@ -211,11 +211,12 @@ def _busy(need: int, free: int, others: int) -> BodyRefused:
     being read, ``others`` bytes, are read."""
     from .request_flow import deferred_retry_after
 
+    note = arriving_note(others, "request bodies")
     return BodyRefused(503, f"the body of this request holds "
                        f"{_mib(need, True)} as it is read and parsed, "
                        f"with {_mib(free)} of memory free beside the models "
-                       f"loaded{arriving_note(others)}; send it again once "
-                       "they are read", retry_after=deferred_retry_after())
+                       f"loaded{note}; send it again once they are read",
+                       retry_after=deferred_retry_after())
 
 
 def _price(hold: BodyHold | None, need: int, free: int | None, over,
@@ -930,10 +931,10 @@ async def read_form_in_ram(request: Request, free: int | None = None,
     return form
 
 
-def arriving_note(arriving: int) -> str:
-    """The part of a store refusal that names the bytes the other POSTs
-    still arriving hold, when they hold any."""
-    return (f", and {_mib(arriving)} of it is held by uploads arriving now"
+def arriving_note(arriving: int, what: str = "uploads") -> str:
+    """The part of a refusal that names the bytes ``what``, the other POSTs
+    still arriving, hold, when they hold any."""
+    return (f", and {_mib(arriving)} of it is held by {what} arriving now"
             if arriving else "")
 
 

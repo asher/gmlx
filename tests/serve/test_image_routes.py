@@ -1159,8 +1159,8 @@ def test_two_images_json_bodies_that_each_fit_alone_cannot_pass_together(
             f"the body of this request holds {bi._mib(2 * len(b), True)} "
             f"as it is read and parsed, with {bi._mib(need)} of memory free "
             f"beside the models loaded, and {bi._mib(2 * len(a))} of it is "
-            "held by uploads arriving now; send it again once they are "
-            "read")
+            "held by request bodies arriving now; send it again once they "
+            "are read")
         assert counted
         assert pool.figures.incoming == 0
         ca.send(a[64:])
@@ -1284,7 +1284,8 @@ def test_two_images_forms_whose_text_fits_alone_cannot_hold_it_together(
         message = r.json()["error"]["message"]
         assert message.startswith("the body of this request holds "), message
         assert message.endswith(
-            f", and {bi._mib(first)} of it is held by uploads arriving now; "
+            f", and {bi._mib(first)} of it is held by request bodies arriving "
+            "now; "
             "send it again once they are read"), message
         assert counted
         assert pool.figures.incoming == 0

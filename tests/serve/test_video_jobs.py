@@ -1831,8 +1831,8 @@ def test_two_json_jobs_that_each_fit_alone_cannot_hold_the_memory_together(
             f"{body_intake._mib(2 * len(b), True)} as it is read and "
             f"parsed, with {body_intake._mib(need)} of memory free beside "
             f"the models loaded, and {body_intake._mib(2 * len(a))} of it is "
-            "held by uploads arriving now; send it again once they are "
-            "read")
+            "held by request bodies arriving now; send it again once they "
+            "are read")
         assert counted
         assert pool.figures.incoming == 0
         ca.send(a[64:])
@@ -1918,7 +1918,7 @@ def test_two_video_forms_whose_text_fits_alone_cannot_hold_it_together(
         message = r.json()["error"]["message"]
         assert message.startswith("the body of this request holds "), message
         assert message.endswith(
-            f", and {body_intake._mib(first)} of it is held by uploads "
+            f", and {body_intake._mib(first)} of it is held by request bodies "
             "arriving now; send it again once they are read"), message
         assert counted
         assert pool.figures.incoming == 0
