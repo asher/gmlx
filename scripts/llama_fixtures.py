@@ -211,6 +211,81 @@ def cmd_kld_reference(args) -> int:
     return 0
 
 
+def cmd_kld_adapter(args) -> int:
+    """llama-perplexity's Mean KLD and Same top p of MODEL with a rank-1
+    adapter at each strength, against MODEL bare, over the frozen docs
+    page. The adapter is minted once, on ffn_down of a few layers, and
+    checked in; a later run reuses it."""
+    import gguf
+    import numpy as np
+
+    layers, norm, seed = (8, 16, 24), 60.0, 0
+    tool = binary("llama-perplexity")
+    model = Path(args.model).expanduser().resolve()
+    text = Path(args.text).expanduser().resolve()
+    adapter = Path(args.adapter).expanduser().resolve()
+    out = Path(args.out)
+    for p in (model, text):
+        if not p.is_file():
+            raise SystemExit(f"error: no such file: {p}")
+    if not adapter.is_file():
+        # A unit A and a B of norm `norm` per layer: delta = B A, alpha 1.
+        reader = gguf.GGUFReader(str(model))
+        arch = bytes(reader.fields["general.architecture"].parts[-1]).decode()
+        shapes = {t.name: [int(n) for n in t.shape] for t in reader.tensors}
+        rng = np.random.default_rng(seed)
+        w = gguf.GGUFWriter(str(adapter), arch)
+        w.add_type(gguf.GGUFType.ADAPTER)
+        w.add_string(gguf.Keys.Adapter.TYPE, "lora")
+        w.add_float32(gguf.Keys.Adapter.LORA_ALPHA, 1.0)
+        for i in layers:
+            n_in, n_out = shapes[f"blk.{i}.ffn_down.weight"]
+            a = rng.standard_normal((1, n_in))
+            b = rng.standard_normal((n_out, 1))
+            w.add_tensor(f"blk.{i}.ffn_down.weight.lora_a",
+                         (a / np.linalg.norm(a)).astype(np.float32))
+            w.add_tensor(f"blk.{i}.ffn_down.weight.lora_b",
+                         (b * norm / np.linalg.norm(b)).astype(np.float32))
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+        print(f"wrote {_shown(adapter)}")
+    check_recorded_files(out, [model, adapter, text])
+    commit = llama_commit(tool)
+    ident = _image_fixtures().file_identity
+    portable = _image_fixtures().portable_argv
+    chunks = ["--chunks", str(args.chunks)] if args.chunks else []
+    argvs, rows = {}, []
+    with tempfile.TemporaryDirectory(prefix="llama-kld-adapter-",
+                                     dir=args.work_dir) as tmp:
+        base = Path(tmp) / "reference.kld"
+        argv = [tool, "-m", str(model), "-f", str(text), "-c", str(args.ctx),
+                *chunks, "--kl-divergence-base", str(base)]
+        run_logged(argv, Path(args.log_dir) / "kld-adapter-base.log")
+        argvs["llama-perplexity/base"] = portable(argv)
+        n_ctx, n_vocab, n_chunk, tokens = read_base_tokens(base)
+        for strength in args.strength:
+            run = f"llama-perplexity/s{strength:g}"
+            argv = [tool, "-m", str(model), "-c", str(args.ctx),
+                    "--kl-divergence-base", str(base), "--kl-divergence",
+                    "--lora-scaled", f"{adapter}:{strength:g}"]
+            log = Path(args.log_dir) / f"kld-adapter-s{strength:g}.log"
+            stats = parse_kld(run_logged(argv, log))
+            argvs[run] = portable(argv)
+            rows.append({"run": run, "base_run": "llama-perplexity/base",
+                         "model": model.name, "adapter": adapter.name,
+                         "strength": strength, "text": text.name,
+                         "ctx": n_ctx, "chunks": n_chunk, "n_vocab": n_vocab,
+                         "tokens_sha256": tokens_sha256(tokens), **stats})
+    write_fixture(out, {
+        "llama_cpp": commit, "created": now(), "argv": argvs,
+        "files": {p.name: ident(p) for p in (model, adapter, text)},
+        "adapter_layers": list(layers), "adapter_b_norm": norm,
+        "adapter_seed": seed, "rows": rows})
+    return 0
+
+
 # continuation: llama-server /apply-template on a final assistant message.
 CONTINUATION_FIXTURE = FIXTURES / "llama_continuation.json"
 # GGUF file name -> (run label suffix, template fixture, thinking values).
@@ -482,6 +557,28 @@ def main(argv: list[str] | None = None) -> int:
     kr.add_argument("--log-dir", default=".",
                     help="where each run's output log goes")
     kr.set_defaults(fn=cmd_kld_reference)
+    ka = sub.add_parser(
+        "kld-adapter",
+        help="llama-perplexity KL divergence of a model with a checked-in "
+        "rank-1 adapter at each strength, against the model bare")
+    ka.add_argument("--model", required=True,
+                    help="the GGUF the adapter is minted for and scored on")
+    ka.add_argument("--adapter",
+                    default=str(FIXTURES / "kld" / "qwen35_9b_rank1.gguf"),
+                    help="the adapter; minted here when it does not exist")
+    ka.add_argument("--strength", type=float, nargs="+",
+                    default=[0.5, 1.0, 2.0])
+    ka.add_argument("--text", default=str(KLD_TEXT))
+    ka.add_argument("--ctx", type=int, default=512)
+    ka.add_argument("--chunks", type=int, default=None)
+    ka.add_argument("--out", default=str(FIXTURES / "kld"
+                                         / "llama_perplexity_adapter.json"))
+    ka.add_argument("--work-dir", default=None,
+                    help="where the reference logits file goes (default: the "
+                    "temporary directory)")
+    ka.add_argument("--log-dir", default=".",
+                    help="where each run's output log goes")
+    ka.set_defaults(fn=cmd_kld_adapter)
     co = sub.add_parser(
         "continuation",
         help="llama-server /apply-template of a final assistant message "

@@ -102,3 +102,49 @@ def test_mean_kld_matches_llama_perplexity(case):
     first, second = out["active_at_load"]
     assert second - first < 10**9
     assert out["peak"] < BUDGET_BYTES
+
+
+ADAPTER_FIXTURE = REPO / "tests" / "fixtures" / "kld" / "llama_perplexity_adapter.json"
+
+
+@pytest.fixture(scope="module")
+def adapter_case(gguf_dir):
+    fixture = json.loads(ADAPTER_FIXTURE.read_text())
+    rows = fixture["rows"]
+    files = fixture["files"]
+    here = ADAPTER_FIXTURE.parent
+    for name in (rows[0]["text"], rows[0]["adapter"]):
+        if hashlib.sha256((here / name).read_bytes()).hexdigest() != files[name]["sha256"]:
+            pytest.fail(f"{name} is not the file the fixture recorded")
+    name, size = rows[0]["model"], files[rows[0]["model"]]["size"]
+    model = next((str(p) for p in sorted(gguf_dir.rglob(name))
+                  if p.stat().st_size == size), None)
+    if model is None:
+        pytest.skip(f"no {name} of {size} bytes under KQUANT_TEST_GGUF_DIR")
+    return {"rows": rows, "model": model, "adapter": str(here / rows[0]["adapter"]),
+            "text": str(here / rows[0]["text"])}
+
+
+def test_adapter_points_match_llama_perplexity(adapter_case):
+    """MODEL with the rank-1 adapter at each strength, against MODEL bare,
+    all points in one load."""
+    rows = adapter_case["rows"]
+    env = dict(os.environ, MLX_ENABLE_TF32="0")
+    flags = [f for r in rows
+             for f in ("--adapter", f"{adapter_case['adapter']}:{r['strength']}")]
+    r = subprocess.run(
+        [sys.executable, "-c", _CHILD, adapter_case["model"], "--text",
+         adapter_case["text"], "--ctx", str(rows[0]["ctx"]), *flags],
+        capture_output=True, text=True, env=env, cwd=REPO)
+    assert r.returncode == 0, r.stderr[-4000:]
+    results = json.loads(r.stdout.splitlines()[-1])["results"]
+    assert [x["strength"] for x in results] == [row["strength"] for row in rows]
+    for got, row in zip(results, rows):
+        want = row["mean_kld"]
+        print(f"strength {row['strength']:g}: mean_kld {got['mean_kld']:.6f} "
+              f"(fixture {want:.6f}), same_top_p {got['same_top_p']:.5f} "
+              f"(fixture {row['same_top_p']:.5f})")
+        assert got["chunks"] == row["chunks"]
+        assert abs(got["mean_kld"] - want) <= KLD_REL_TOL * want + KLD_ABS_FLOOR, \
+            (row["strength"], got["mean_kld"])
+        assert abs(got["same_top_p"] - row["same_top_p"]) <= SAME_TOP_ABS_TOL
