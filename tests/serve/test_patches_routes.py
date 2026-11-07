@@ -511,8 +511,9 @@ def test_models_payload_lists_image_models_with_their_markers(
                                                                 False)
     assert (qi["resident"], qi["pinned"], qi["default"]) == (True, False, True)
     assert "context_length" not in zit
-    assert set(by_id["qwen"]) - {"context_length", "max_context_at_width_1"} \
-        <= set(zit)
+    assert set(by_id["qwen"]) - {"context_length", "max_context_at_width_1",
+                                  "adapters"} <= set(zit)
+    assert by_id["qwen"]["adapters"] == [] and "adapters" not in zit
 
 
 def test_models_payload_lists_krea_2_by_its_header(monkeypatch, tmp_path):

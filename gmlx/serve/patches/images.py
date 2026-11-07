@@ -425,7 +425,12 @@ def _borrow_for(spec):
                 encoder_spec(served_pipe.family), gguf=gguf,
                 processor=processor)
             try:
-                return fn()
+                # The copy can carry its sibling ids' text adapters; the
+                # encode reads the chat base, with every slot off.
+                from gmlx import lora_rows
+
+                with lora_rows.adapters_off():
+                    return fn()
             finally:
                 # The handle without its model names the states of a later
                 # request, which a shed before its encode keeps last.

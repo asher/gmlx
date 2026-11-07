@@ -701,6 +701,54 @@ def test_a_shared_encoder_encodes_as_a_step_of_the_chat_engine(monkeypatch):
         "model": None, "tokenizer": "TOK"}
 
 
+def test_a_shared_encoder_encodes_with_every_adapter_off(monkeypatch):
+    """The chat copy can carry text adapters in rows mode; the encode
+    reads the base, so it runs with every slot off, and the engine's own
+    published state is back after it."""
+    import importlib
+    from types import SimpleNamespace
+
+    import gmlx.serve.engine_jobs as engine_jobs
+    import gmlx.image.text_encoder as text_encoder
+    from gmlx import lora_rows
+    from gmlx.image import api
+
+    app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
+    runtime_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime")
+    rg = SimpleNamespace(model=SimpleNamespace(
+        _is_text_model=True,
+        language_model=SimpleNamespace(_model="CHAT")), tokenizer="TOK")
+    monkeypatch.setattr(app_mod, "get_cached_model", lambda *a, **k: None)
+    monkeypatch.setattr(runtime_mod, "runtime",
+                        SimpleNamespace(response_generator=rg))
+    monkeypatch.setattr(api, "_borrowed", lambda pair, spec, gguf=None, processor=None:
+                        SimpleNamespace(model=pair[0], tokenizer=pair[1]))
+    monkeypatch.setattr(text_encoder, "encoder_spec", lambda fam: "SPEC")
+
+    def run_on_engine(engine_rg, job, *, stepwise=False, **kw):
+        gen = job(engine_rg, lambda: False)
+        try:
+            next(gen)
+        except StopIteration as done:
+            return done.value
+
+    monkeypatch.setattr(engine_jobs, "run_on_engine", run_on_engine)
+    lora_rows.configure("rows", 2)
+    try:
+        lora_rows.publish_tuple((1.0, 0.0), 1)
+        assert not lora_rows.slot_off(0)
+        borrow, _hold = images._borrow_for(SimpleNamespace(encoder_model="chat"))
+        pipe = SimpleNamespace(family="FAM", encoder=None)
+        seen = []
+        borrow(pipe, lambda: seen.append(lora_rows.all_off((0, 1))),
+               threading.Event(), None)
+        assert seen == [True]
+        assert not lora_rows.slot_off(0)
+        assert lora_rows.row_scales(0).tolist() == [1.0]
+    finally:
+        lora_rows.configure("static", 1)
+
+
 @pytest.mark.parametrize("share, paced", [(None, True), ("0.25", True),
                                           ("off", False)])
 def test_the_job_runs_under_the_chat_pacer(served, monkeypatch, share, paced):

@@ -206,3 +206,10 @@ def _restore_routes(app, snapshot) -> None:
     for routes, copy in snapshot:
         routes[:] = copy
     _invalidate_route_caches(app)
+
+
+def refuse_both_spellings(fs, a: str, b: str) -> None:
+    """Refuse a request that sets both spellings of one field."""
+    if a in fs and b in fs:
+        from fastapi import HTTPException
+        raise HTTPException(400, detail=f"Set {a} or {b}, not both.")

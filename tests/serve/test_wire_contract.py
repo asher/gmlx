@@ -43,6 +43,7 @@ _UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
 _RUNTIME = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
 
 MODEL_ID = "stub"
+MIX_ID = "stub-mix"   # the same file, with two adapters
 MODEL_PATH = "/abs/wire-stub.gguf"  # absolute path: resolver skips the stat
 DEFAULT_TEXT = "Hello world."
 
@@ -164,7 +165,7 @@ _CONFIG = _WireConfig()
 # -- fixture: real routes + full patch set over the fakes ----------------------
 
 @pytest.fixture(scope="module")
-def wire_app(module_engine_seams):
+def wire_app(module_engine_seams, tmp_path_factory):
     # module_engine_seams restores the engine classes after this teardown,
     # ResponseGenerator._make_logits_processors among them.
     fastapi_app = _APP.app
@@ -220,11 +221,17 @@ def wire_app(module_engine_seams):
     }
 
     serving.clear_resolved_models()
+    adapters = tmp_path_factory.mktemp("adapters")
+    for name in ("a.gguf", "b.gguf"):
+        (adapters / name).write_bytes(b"GGUF")
     cfg = build_config({
         "server": {"host": "127.0.0.1", "port": 8080,
                    "stt": "mlx-community/whisper-large-v3-turbo"},
         "profiles": {"fast": {"sampling": {"temperature": 0.15}}},
-        "models": {MODEL_ID: {"path": MODEL_PATH}},
+        "models": {MODEL_ID: {"path": MODEL_PATH},
+                   MIX_ID: {"path": MODEL_PATH, "adapters": [
+                       {"path": str(adapters / "a.gguf"), "strength": 0},
+                       str(adapters / "b.gguf")]}},
     })
     serving.register_resolved_models(cfg)
     sp.install_server_patches(cfg, reload_fn=None)   # exactly the serve path
@@ -1265,7 +1272,7 @@ def test_metrics_resident_models_and_timings(wire):
     assert m.status_code == 200, m.text
     payload = m.json()
     entry = payload["server"]["resident_models"][0]
-    assert entry["ids"] == [MODEL_ID]
+    assert entry["ids"] == [MODEL_ID, MIX_ID]   # one copy: same file, adapter union
     assert entry["pinned"] is True
     assert entry["idle_s"] == 4.6                    # rounded to 0.1
     assert entry["ttl_s"] == 900
@@ -1661,3 +1668,63 @@ def test_a_stock_drafter_refuses_logprobs(wire, monkeypatch, draft_model, kind,
         assert (f"logprobs are not available while model '{MODEL_ID}' speculates "
                 "with draft kind 'eagle'; set speculative: false on the entry"
                 ) in r.text
+
+
+# adapters and lora: every route on the gen-args seam refuses a bad field
+# with the same 400, and passes a good one through as the row's scales.
+
+_ADAPTER_ROUTES = {
+    "chat": ("/v1/chat/completions", lambda m, **kw: _chat_body(model=m, **kw)),
+    "responses": ("/v1/responses", lambda m, **kw: {"model": m, "input": "hi", **kw}),
+    "responses_input_tokens": ("/v1/responses/input_tokens",
+                               lambda m, **kw: {"model": m, "input": "hi", **kw}),
+    "messages": ("/v1/messages", lambda m, **kw: {
+        "model": m, "max_tokens": 8,
+        "messages": [{"role": "user", "content": "hi"}], **kw}),
+    "count_tokens": ("/v1/messages/count_tokens", lambda m, **kw: {
+        "model": m, "messages": [{"role": "user", "content": "hi"}], **kw}),
+    "completions": ("/v1/completions", lambda m, **kw: {
+        "model": m, "prompt": "hi", "max_tokens": 4, **kw}),
+    "estimate": ("/v1/estimate", lambda m, **kw: _chat_body(model=m, **kw)),
+}
+
+
+def _error_text(r):
+    body = r.json()
+    err = body.get("error", body)
+    if isinstance(err, dict):
+        return err.get("message") or str(err.get("detail") or "")
+    return str(body.get("detail", err))
+
+
+@pytest.mark.parametrize("route", sorted(_ADAPTER_ROUTES))
+@pytest.mark.parametrize("model,fields,message", [
+    (MIX_ID, {"adapters": ["c.gguf"]},
+     "adapter 'c.gguf' is not an adapter of model 'stub-mix'; a request sets "
+     "the strength of the adapters its model entry loads (see /v1/models)"),
+    (MIX_ID, {"adapters": [], "lora": []}, "Set adapters or lora, not both."),
+    (MIX_ID, {"lora": [{"id": 2, "scale": 1}]},
+     "lora id 2 is out of range; model 'stub-mix' has 2 adapters (ids 0 to 1)"),
+    (MODEL_ID, {"lora": [{"id": 0, "scale": 1}]},
+     "model 'stub' loads no adapters; adapters and lora apply only to a model "
+     "entry with adapters"),
+])
+def test_a_bad_adapter_field_is_a_400_on_every_route(wire, route, model, fields,
+                                                     message):
+    path, body = _ADAPTER_ROUTES[route]
+    r = wire.client.post(path, json=body(model, **fields))
+    assert r.status_code == 400, r.text
+    assert message in _error_text(r)
+    assert not wire.gen.calls
+
+
+@pytest.mark.parametrize("fields,scales", [
+    ({}, (0.0, 1.0)),
+    ({"adapters": [{"id": "a.gguf", "strength": 0.5}]}, (0.5, 1.0)),
+    ({"lora": [{"id": 0, "scale": 0.25}]}, (0.25, 0.0)),
+])
+def test_an_adapter_field_reaches_the_row(wire, fields, scales):
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(model=MIX_ID,
+                                                                 **fields))
+    assert r.status_code == 200, r.text
+    assert wire.gen.calls[-1]["args"]._kq_lora.scales == scales

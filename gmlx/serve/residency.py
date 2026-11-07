@@ -786,7 +786,19 @@ class _ResidencyPool:
                     self._resident_bytes() if held is None else held))
         elif stream is None and model_kind not in _WORKER_KINDS:
             incoming = _plain_footprint(model_path, file_bytes, env)
+        if model_kind not in _WORKER_KINDS:
+            incoming += text_adapter_bytes(build_spec)
         return file_bytes, incoming
+
+    def resident_chat_entry(self, model_path, signature) -> _Entry | None:
+        """From ``figures`` with no lock: the resident chat entry built for
+        ``model_path`` under ``signature`` (a load signature), or None. The
+        entry may be mid-teardown."""
+        for e in self.figures.entries:
+            if (not e.is_image and str(e.model_path) == str(model_path)
+                    and tuple(e.cache_key[3:]) == tuple(signature)):
+                return e
+        return None
 
     def load_entry(self, model_path, spec, env=None) -> _Entry:
         """For a route's check, from ``figures`` with no lock: the resident
@@ -1919,6 +1931,8 @@ class _ResidencyPool:
                   else max(0, streamed_table_bytes(model_path) - deferred))
         mmproj = getattr(build_spec, "mmproj", None) or ""
         extra = os.path.getsize(mmproj) if os.path.isfile(mmproj) else 0
+        # The adapters wire with the text set.
+        extra += text_adapter_bytes(build_spec)
         room = bmod.kv_room_bytes(model_path, env=env, resident=True)
         held, _ceiling, host, _floor = self._stream_reservations()
         drafter = _drafter_bytes(model_path, build_spec)
@@ -1995,6 +2009,9 @@ class _ResidencyPool:
 
         force_table_stream(
             getattr(build_spec, "stream", None) in ("cpu", "experts"))
+        # The text adapters' bytes, added where each figure is used: the
+        # repricing below resets gate_bytes from the base.
+        adapter_bytes = text_adapter_bytes(build_spec)
         gate_bytes = footprint
         streamed = 0
         shares = (0, 0)
@@ -2032,7 +2049,8 @@ class _ResidencyPool:
                         stream_tables_for_memory(model_path)
                         gate_bytes = _plain_footprint(model_path, footprint,
                                                       env)
-                elif self._tables_for_memory(model_path, gate_bytes, env):
+                elif self._tables_for_memory(model_path,
+                                             gate_bytes + adapter_bytes, env):
                     gate_bytes = _plain_footprint(model_path, footprint, env)
             if for_memory:
                 # Priced and gated as a stream build; the install streams
@@ -2062,7 +2080,7 @@ class _ResidencyPool:
                     "experts %.1f GB; gating on %.1f GB resident)",
                     streamed / 1e9, shares[0] / 1e9, shares[1] / 1e9,
                     gate_bytes / 1e9)
-        self._gate(gate_bytes, model_path,
+        self._gate(gate_bytes + adapter_bytes, model_path,
                    streaming=(getattr(build_spec, "stream", None) == "experts"
                               or bool(for_memory)))
         guarded = _latch_guarded_wire(
@@ -2072,11 +2090,11 @@ class _ResidencyPool:
         _say_tables_offloaded(model_path, offloaded)
         # What the entry holds resident. A streaming build adds its decode
         # arena below, once the loader has sized it.
-        resident_bytes = gate_bytes
+        resident_bytes = gate_bytes + adapter_bytes
         # The boot table feeds request admission (width/ctx budgets), so a
         # streaming model's table must also price only the resident share:
         # the expert stacks decode through the disk arena, not the KV budget.
-        install_boot_table(str(model_path), gate_bytes, str(model_path),
+        install_boot_table(str(model_path), resident_bytes, str(model_path),
                            env=env)
         scratch = _Scratch()
         token = _build_scratch.set(scratch)
@@ -2203,7 +2221,7 @@ class _ResidencyPool:
                         "this load has no streaming install; re-pricing "
                         "the resident weights", model_path)
                     gate_bytes = _plain_footprint(model_path, footprint, env)
-                    resident_bytes = gate_bytes
+                    resident_bytes = gate_bytes + adapter_bytes
                     repriced = priced_up = True
                 elif done is not None and sum(done) != streamed:
                     _log.warning(
@@ -2214,7 +2232,7 @@ class _ResidencyPool:
                         done[1] / 1e9, streamed / 1e9)
                     gate_bytes = preload_gate_bytes(
                         footprint, "experts", sum(done))
-                    resident_bytes = gate_bytes
+                    resident_bytes = gate_bytes + adapter_bytes
                     repriced = True
                     priced_up = sum(done) < streamed
             # The decode arena is MLX-tracked and sized at install, after
@@ -2223,7 +2241,8 @@ class _ResidencyPool:
             # see the KV room that is really left.
             feeder = _decode_feeder_of(rg)
             if feeder is not None and getattr(feeder, "nominal_bytes", 0):
-                resident_bytes = (gate_bytes + int(feeder.nominal_bytes)
+                resident_bytes = (gate_bytes + adapter_bytes
+                                  + int(feeder.nominal_bytes)
                                   + _prefill_ring_of(rg))
                 try:
                     install_boot_table(
@@ -2692,6 +2711,17 @@ def _drafter_bytes(model_path: str, build_spec) -> int:
     from gmlx.load.discovery import mtp_block_bytes
 
     return mtp_block_bytes(model_path)
+
+
+def text_adapter_bytes(build_spec) -> int:
+    """The resident bytes of the text adapters a chat entry loads: twice
+    each file of the entry's adapter union. The load copies the tensors
+    out of the file, and the per-dtype tables add at most that again. A
+    missing file prices at 0; its load fails."""
+    effective = getattr(build_spec, "effective_adapters", None)
+    if not callable(effective):
+        return 0
+    return sum(2 * os.path.getsize(p) for p in effective() if os.path.isfile(p))
 
 
 def _plain_footprint(model_path, file_bytes: int, env=None) -> int:

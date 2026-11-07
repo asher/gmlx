@@ -2217,3 +2217,63 @@ def test_a_chat_cold_load_completes_while_an_image_job_runs(monkeypatch):
     img.join(5.0)
     assert not img.is_alive() and loads == ["/dit.safetensors"]
     assert resident(pool) == {"A.gguf", "/dit.safetensors"}
+
+
+def _adapter_spec(tmp_path, sizes):
+    paths = []
+    for i, n in enumerate(sizes):
+        p = tmp_path / f"a{i}.gguf"
+        p.write_bytes(b"x" * n)
+        paths.append(str(p))
+    return SimpleNamespace(effective_adapters=lambda: tuple(paths), stream=None,
+                           mmproj=None)
+
+
+def test_text_adapters_price_twice_their_files_in_every_figure(monkeypatch,
+                                                                tmp_path):
+    import gmlx.serve.capacity as cap
+    import gmlx.serve.residency as residency
+    from gmlx.stream import budget as bmod
+
+    add = 2 * (1000 + 3000)
+    spec = _adapter_spec(tmp_path, (1000, 3000))
+    bare = SimpleNamespace(effective_adapters=lambda: (), stream=None, mmproj=None)
+    assert residency.text_adapter_bytes(spec) == add
+    assert residency.text_adapter_bytes(bare) == 0
+    gates, tables = [], []
+    monkeypatch.setattr(cap, "preload_gate",
+                        lambda w, m, **k: gates.append(int(w)))
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda path, b, label, env=None: tables.append(int(b)))
+    monkeypatch.setattr(residency, "_plain_footprint", lambda p, f, env=None: f)
+    _proxy, pool, _ = make_pool(64, {"m": 10, "n": 10})
+    base = 10 * GB
+    assert pool._price("m", "auto", spec, None, 0) == (base, base + add)
+    assert pool._price("m", "auto", bare, None, 0) == (base, base)
+    assert pool.load_entry("m", spec).footprint == base + add
+    entry = pool.acquire("m", None, "auto", build_spec=spec)
+    pool.release(entry)
+    assert gates == [base + add] and tables[0] == base + add
+    assert entry.footprint == base + add
+    entry = pool.acquire("n", None, "auto", build_spec=bare)
+    pool.release(entry)
+    assert gates[-1] == base and entry.footprint == base
+
+    seen = {}
+    monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: 1)
+    monkeypatch.setattr("gmlx.load.discovery.text_tensor_bytes", lambda p: 5 * GB)
+    monkeypatch.setattr(cap, "deferred_table_bytes", lambda p, env=None: 0)
+    monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: 0)
+    monkeypatch.setattr(bmod, "kv_room_bytes",
+                        lambda p, env=None, resident=True: SimpleNamespace(bytes=0))
+
+    def check(text, tables, drafter, **k):
+        seen["text"] = text
+        return SimpleNamespace(fits=True)
+
+    monkeypatch.setattr(bmod, "check_wire_with_tables", check)
+    monkeypatch.setattr(bmod, "settled_wire_check", lambda f: f())
+    pool._keep_check("m", build_spec=spec)
+    assert seen["text"] == 5 * GB + add
+    pool._keep_check("m", build_spec=bare)
+    assert seen["text"] == 5 * GB

@@ -79,8 +79,10 @@ CLAIMS: tuple[Claim, ...] = (
           "via the pending-list stash); "
           "mtp_prefill._install_l0_tenant_rows (publishes the generator's "
           "tenant rows for the step; the prompt batch is built and first "
-          "stepped inside _next)",
-          wrappers=("gmlx.cache.fresh_gate", "gmlx.serve.admit_gate",
+          "stepped inside _next); lora_rows.install_row_channel (binds the "
+          "generator's row settings as the uid lookup for the step)",
+          wrappers=("gmlx.cache.fresh_gate", "gmlx.lora_rows",
+                    "gmlx.serve.admit_gate",
                     "gmlx.serve.batch_sched", "gmlx.serve.governor",
                     "gmlx.serve.queue_cap", "gmlx.serve.tick_guard",
                     "gmlx.spec.mtp_prefill")),
@@ -88,7 +90,9 @@ CLAIMS: tuple[Claim, ...] = (
     # rebinding _unprocessed_sequences.
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "BatchGenerator.insert",
           "lora_rows (per-row prompt_kwargs carry the APC "
-          "salt, positional order prompts, max_tokens, prompt_kwargs); "
+          "salt, positional order prompts, max_tokens, prompt_kwargs, "
+          "logits_processors, thinking_budget_criteria, attention_mask, "
+          "row_settings); "
           "mtp_prefill._install_l0_tenant_rows "
           "(each row's _apc_tenant kwarg, None included, on the generator "
           "by returned uid)",
@@ -280,11 +284,9 @@ CLAIMS: tuple[Claim, ...] = (
                     "gmlx.serve.patches.sampling")),
     Claim("gmlx._vendor.mlx_vlm.server.generation",
           "ResponseGenerator._make_logits_processors",
-          "lora_rows.install_row_channel (engine-thread handoff to the "
-          "insert that takes the result as an argument); "
           "patches.spec_processors (puts the deferred processors back "
           "before the row's processors are built)",
-          wrappers=("gmlx.lora_rows", "gmlx.serve.patches.spec_processors")),
+          wrappers=("gmlx.serve.patches.spec_processors",)),
     Claim("gmlx._vendor.mlx_vlm.server.generation", "ResponseGenerator._step",
           "patches.row_failed (permanently failed rows delivered "
           "to their response queues on the engine thread)",

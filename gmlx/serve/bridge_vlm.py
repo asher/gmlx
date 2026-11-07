@@ -50,8 +50,10 @@ import json
 import logging
 import os
 import sys
+import threading
 from collections.abc import Callable
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
 from gmlx._vendor.mlx_vlm import tokenizer_utils as _mlxvlm_tok
@@ -429,13 +431,15 @@ def _load_serveable_mtp(
         gguf_path, draft_gguf_path=draft_gguf_path,
         chat_template=chat_template, verbose=False
     )
+    identities: tuple = ()
     if adapter_gguf is not None:
         # The trunk (``model.language_model``) carries the HF leaf paths the
         # adapter remap targets; the drafter has no targets (a target on an
         # MTP block fails the install as a missing module). Verify runs
         # against the adapted target, so speculation stays lossless.
-        _apply_gguf_adapter(model.language_model, _config, adapter_gguf,
-                            base_gguf_path=gguf_path)
+        identities = _apply_gguf_adapter(model.language_model, _config, adapter_gguf,
+                                         base_gguf_path=gguf_path)
+    _stamp_adapter_identities(model, identities)
     # MTPTextTarget.config is a plain dict (the CLI path only reads it
     # dict-style). The server also reads it attribute-style
     # (``self.model.config.model_type`` in the request preprocessor), so promote
@@ -484,7 +488,7 @@ def _load_serveable_vlm_mtp(
 
 
 def _apply_gguf_adapter(raw_model, config, adapter_gguf,
-                        base_gguf_path: str | None = None) -> int:
+                        base_gguf_path: str | None = None) -> tuple:
     """Wrap the base text model's Linear leaves with the GGUF LoRA adapter(s) -
     live, no merge (base stays K-quant; the adapter rides alongside in full
     precision). ``adapter_gguf`` is one path or the resident entry's adapter
@@ -498,9 +502,13 @@ def _apply_gguf_adapter(raw_model, config, adapter_gguf,
     the synthesized config; a qk_permute target without them raises in the installer.
     ``base_gguf_path`` supplies the base's GGUF arch so an adapter trained for a
     different family fails with the clean arch-mismatch message up front, instead
-    of the structural missing-targets raise from :func:`install_lora_adapter`."""
+    of the structural missing-targets raise from :func:`install_lora_adapter`.
+
+    Returns one ``AdapterIdentity`` per slot: the path, the sha256 of the
+    bytes loaded and their size. The caller stamps it on the loaded model."""
     import gmlx.lora_rows as lora_rows
-    from gmlx.load.adapter import apply_gguf_adapter
+    from gmlx.load.adapter import (AdapterIdentity, install_gguf_adapter,
+                                   load_lora_adapter)
 
     adapters = ((adapter_gguf,) if isinstance(adapter_gguf, str)
                 else tuple(adapter_gguf))
@@ -508,13 +516,55 @@ def _apply_gguf_adapter(raw_model, config, adapter_gguf,
     if base_gguf_path:
         from gmlx.load.discovery import header_meta
         base_arch = (header_meta(base_gguf_path) or {}).get("arch")
-    n = 0
+    out = []
     for slot, path in enumerate(adapters):
-        n += apply_gguf_adapter(raw_model, config, path, base_arch=base_arch,
-                                slot=slot)
+        plan = load_lora_adapter(path, base_arch=base_arch)
+        install_gguf_adapter(raw_model, config, plan, slot=slot)
+        out.append(AdapterIdentity(path, plan.sha256, plan.nbytes))
         _log.info("[adapter] loaded %s into slot %d", path, slot)
     lora_rows.ensure_rows(len(adapters))
-    return n
+    return tuple(out)
+
+
+def _stamp_adapter_identities(model, identities: tuple) -> None:
+    # Outside the module tree: a tuple attribute would join the parameters.
+    object.__setattr__(model, "gmlx_adapter_identities", tuple(identities))
+
+
+def loaded_adapters_of(rg):
+    """The adapter identities the copy of engine ``rg`` loaded, or None."""
+    model = getattr(rg, "model", None)
+    got = getattr(model, "gmlx_adapter_identities", None) if model is not None else None
+    return tuple(got) if got is not None else None
+
+
+def loaded_adapters(entry):
+    """The adapter identities of a residency entry's copy, or None. Reads
+    the engine once: teardown clears it with no lock."""
+    return loaded_adapters_of(getattr(entry, "response_generator", None))
+
+
+def adapter_listing(rm, pool=None) -> list:
+    """The ``/v1/models`` adapters of ``rm``: config index, file name,
+    default strength and the sha256 of the bytes its resident copy loaded
+    (None when no copy is resident). Never a path."""
+    items = tuple(getattr(rm, "adapter_list", ()) or ())
+    if not items:
+        return []
+    loaded = None
+    finder = getattr(pool, "resident_chat_entry", None)
+    if callable(finder):
+        entry = finder(rm.path, rm.load_signature())
+        loaded = loaded_adapters(entry) if entry is not None else None
+    slots = tuple(getattr(rm, "adapter_slots", ()) or ())
+    out = []
+    for i, ref in enumerate(items):
+        digest = None
+        if loaded is not None and i < len(slots) and slots[i] < len(loaded):
+            digest = loaded[slots[i]].sha256
+        out.append({"index": i, "name": os.path.basename(ref.path),
+                    "strength": float(ref.strength), "sha256": digest})
+    return out
 
 
 def _install_stream_placement(
@@ -724,9 +774,10 @@ def load_serveable_model(
         _reject_unwired("diffusion")
         return raw_model, _make_text_processor(tokenizer), raw_model.config
 
+    identities: tuple = ()
     if adapter_gguf is not None:
-        _apply_gguf_adapter(raw_model, config, adapter_gguf,
-                            base_gguf_path=gguf_path)
+        identities = _apply_gguf_adapter(raw_model, config, adapter_gguf,
+                                         base_gguf_path=gguf_path)
     _install_stream_placement(
         raw_model, gguf_path=gguf_path, stream=stream,
         feeder_prefill=feeder_prefill, feeder_decode=feeder_decode,
@@ -735,6 +786,7 @@ def load_serveable_model(
     model = TextOnlyModel(raw_model, config=_as_dict(config))
     _ensure_inner_config(model, _AttrDict(_as_dict(config)))
     _ensure_text_embedding_probe(model, raw_model)
+    _stamp_adapter_identities(model, identities)
     return model, processor, model.config
 
 
@@ -992,8 +1044,9 @@ def install_gguf_server_bridge() -> None:
             # load_serveable_model (text path; VLM/MTP+adapter raise there, never a
             # silent drop). Distinct from the stock ``adapter_path`` param above, which
             # is mlx-vlm's HF-PEFT mechanism (unsupported on a GGUF base).
-            adapter_gguf = (tuple(getattr(spec, "adapters", None) or ())
-                            or getattr(spec, "adapter", None) or None)
+            effective = getattr(spec, "effective_adapters", None)
+            adapter_gguf = tuple(effective() if callable(effective)
+                                 else getattr(spec, "adapters", None) or ()) or None
             # The stream placement rides the same build-spec channel (config
             # `stream:` / `serve --stream-experts` / `--stream-cpu`): it is
             # applied to the loaded base in load_serveable_model (text path;
@@ -1158,6 +1211,25 @@ _PATH_TO_IDS: dict[str, list[str]] = {}        # abspath -> [id, ...]
 _IMAGE_MODELS: dict[str, Any] = {}             # id -> ResolvedImageModel
 _IMAGE_PATH_TO_IDS: dict[str, list[str]] = {}  # DiT abspath -> [id, ...]
 _SERVER_CFG = None                             # the live ServerCfg (for re-resolve)
+
+
+@dataclass(frozen=True)
+class _Registry:
+    """One generation of the id tables and the config they came from. A
+    rebuild makes a new one and rebinds it once, so a reader that takes
+    ``_REGISTRY`` once sees one whole generation. The four module tables
+    above are rebound to its dicts, which nothing edits after."""
+    cfg: Any
+    models: dict
+    path_to_ids: dict
+    image_models: dict
+    image_path_to_ids: dict
+
+
+_REGISTRY: _Registry | None = None
+# Serializes the writers (registration and the self-heal); readers take no
+# lock.
+_REGISTRY_WRITE_LOCK = threading.Lock()
 # The ResolvedModel for the request in flight - set at the residency seam, read at
 # the gen-args seam. A ContextVar so concurrent requests don't see each other's.
 _active_spec: ContextVar = ContextVar("_kq_active_spec", default=None)
@@ -1272,6 +1344,9 @@ def register_resolved_models(cfg) -> None:
     would otherwise keep loading the old VLM/speculative shape). The drafter
     stash goes with them - any live engine already owns its drafter.
 
+    The id tables are built aside and swapped in at once, so a request that
+    resolves during the rebuild sees the old generation whole.
+
     A model whose file is gone from disk is skipped with a warning instead of
     failing the whole server: registration runs at startup and on config
     reload, and one deleted GGUF must not take a multi-model server down. The
@@ -1281,38 +1356,49 @@ def register_resolved_models(cfg) -> None:
     global _SERVER_CFG
     _SERVER_CFG = cfg
     _fill_families(cfg)
-    with _residency_build_lock():
+    with _residency_build_lock(), _REGISTRY_WRITE_LOCK:
         _register_resolved_models_locked(cfg)
 
 
+def _bind_registry(reg: _Registry | None) -> None:
+    global _REGISTRY, _RESOLVED_MODELS, _PATH_TO_IDS, _IMAGE_MODELS, _IMAGE_PATH_TO_IDS
+    if reg is None:
+        _REGISTRY = None
+        _RESOLVED_MODELS, _PATH_TO_IDS = {}, {}
+        _IMAGE_MODELS, _IMAGE_PATH_TO_IDS = {}, {}
+        return
+    _RESOLVED_MODELS, _PATH_TO_IDS = reg.models, reg.path_to_ids
+    _IMAGE_MODELS, _IMAGE_PATH_TO_IDS = reg.image_models, reg.image_path_to_ids
+    _REGISTRY = reg
+
+
 def _clear_registries() -> None:
-    _RESOLVED_MODELS.clear()
-    _PATH_TO_IDS.clear()
-    _IMAGE_MODELS.clear()
-    _IMAGE_PATH_TO_IDS.clear()
+    _bind_registry(None)
     _GGUF_VLM_REGISTRY.clear()
     _GGUF_MTP_REGISTRY.clear()
     _MTP_DRAFTER_STASH.clear()
 
 
-def _resolve_served(mid: str, cfg, request_profile=None):
+def _resolve_served(mid: str, cfg, request_profile=None, adapter_list=None):
     """``resolve_model`` for serve, with a speech decoder's encoder GGUF
     paired from its folder when the entry sets no ``mmproj``. Family
     detection off (``server.family_defaults: false``) reads no headers, so
     it pairs nothing."""
     from gmlx.config import resolve_model
 
-    rm = resolve_model(mid, cfg, request_profile=request_profile)
+    rm = resolve_model(mid, cfg, request_profile=request_profile,
+                       adapter_list=adapter_list)
     if rm.mmproj is None and cfg.family_defaults:
         from gmlx.load.discovery import find_speech_encoder
         rm.mmproj = find_speech_encoder(rm.path)
     return rm
 
 
-def _register_one(mid: str, rm) -> None:
-    """Enter one resolved model in the id tables + companion registries."""
-    _RESOLVED_MODELS[mid] = rm
-    _PATH_TO_IDS.setdefault(rm.path, []).append(mid)
+def _register_one(mid: str, rm, models: dict, path_to_ids: dict) -> None:
+    """Enter one resolved model in the given id tables and the companion
+    registries."""
+    models[mid] = rm
+    path_to_ids.setdefault(rm.path, []).append(mid)
     # Companions are model-level (not profile-level), so they're stable per
     # path even when two ids back one GGUF under different load profiles.
     if rm.mmproj:
@@ -1321,30 +1407,34 @@ def _register_one(mid: str, rm) -> None:
         register_gguf_mtp(rm.path, draft_gguf_path=rm.draft_gguf)
 
 
-def _fill_adapters(rm) -> None:
-    """Set ``rm.adapters`` to the sorted union of ``adapter`` over the
-    registered ids on the same path whose remaining load signature matches
-    (they share one resident entry; slot i of the row channel holds
-    adapters[i]). The union is in the load signature, so a reload or
+def _fill_adapters(rm, models: dict) -> None:
+    """Set ``rm.adapters`` to the sorted union of the adapter paths of the
+    ids in ``models`` on the same path whose remaining load signature
+    matches (they share one resident entry; slot i of the row channel holds
+    adapters[i]), and ``rm.adapter_slots`` to the union slot of each of its
+    own adapters. The union is in the load signature, so a reload or
     re-resolve that adds an id with a new adapter yields a new signature,
     hence a new entry; the old one ages out under normal eviction."""
     base = rm.base_signature()
-    union = {rm.adapter} if rm.adapter else set()
-    for sib in _RESOLVED_MODELS.values():
-        if sib.path == rm.path and sib.adapter and sib.base_signature() == base:
-            union.add(sib.adapter)
+    union = {a.path for a in rm.adapter_list}
+    for sib in models.values():
+        if sib.path == rm.path and sib.adapter_list and sib.base_signature() == base:
+            union.update(a.path for a in sib.adapter_list)
     rm.adapters = tuple(sorted(union))
+    rm.adapter_slots = tuple(rm.adapters.index(a.path) for a in rm.adapter_list)
 
 
-def _register_image(iid: str, rm) -> None:
-    _IMAGE_MODELS[iid] = rm
-    _IMAGE_PATH_TO_IDS.setdefault(rm.path, []).append(iid)
+def _register_image(iid: str, rm, images: dict, image_path_to_ids: dict) -> None:
+    images[iid] = rm
+    image_path_to_ids.setdefault(rm.path, []).append(iid)
 
 
 def _register_resolved_models_locked(cfg) -> None:
     from gmlx.config import MissingModelFile, resolve_image_model
 
-    _clear_registries()
+    _GGUF_VLM_REGISTRY.clear()
+    _GGUF_MTP_REGISTRY.clear()
+    _MTP_DRAFTER_STASH.clear()
     for root in getattr(cfg, "model_dirs", None) or []:
         expanded = os.path.expanduser(os.path.expandvars(root))
         if not os.path.isdir(expanded):
@@ -1352,6 +1442,10 @@ def _register_resolved_models_locked(cfg) -> None:
                   "root resolves against the server's own cwd; use an "
                   "absolute path, or restore/remount the directory)",
                   file=sys.stderr)
+    models: dict = {}
+    path_to_ids: dict = {}
+    images: dict = {}
+    image_path_to_ids: dict = {}
     skipped = []
     for mid in cfg.models:
         try:
@@ -1359,14 +1453,16 @@ def _register_resolved_models_locked(cfg) -> None:
         except MissingModelFile as e:           # disk state, not config shape
             skipped.append((mid, e))
             continue
-        _register_one(mid, rm)
-    for rm in _RESOLVED_MODELS.values():
-        _fill_adapters(rm)
+        _register_one(mid, rm, models, path_to_ids)
+    for rm in models.values():
+        _fill_adapters(rm, models)
     for iid in getattr(cfg, "image_models", {}):
         try:
-            _register_image(iid, resolve_image_model(iid, cfg))
+            _register_image(iid, resolve_image_model(iid, cfg), images,
+                            image_path_to_ids)
         except MissingModelFile as e:
             skipped.append((iid, e))
+    _bind_registry(_Registry(cfg, models, path_to_ids, images, image_path_to_ids))
     for mid, e in skipped:
         print(f"[server] skipping model {mid!r}: {e}", file=sys.stderr)
     if skipped:
@@ -1384,39 +1480,52 @@ def reregister_missing_models() -> bool:
     re-resolves), but ``/v1/models`` reads the registration table - without
     this, a healed model serves fine while staying invisible to clients that
     enumerate models. Cheap when nothing is missing (a set-membership pass);
-    one resolve attempt per still-missing id otherwise. True if any healed."""
-    from gmlx.config import ConfigError
+    one resolve attempt per still-missing id otherwise. True if any healed.
+    The healed tables are built on a copy and swapped in at once."""
+    from gmlx.config import ConfigError, resolve_image_model
 
-    cfg = _SERVER_CFG
-    if cfg is None:
-        return False
-    healed = False
-    for mid in cfg.models:
-        if mid in _RESOLVED_MODELS:
-            continue
-        try:
-            rm = _resolve_served(mid, cfg)
-        except ConfigError:
-            continue                      # still missing (or still malformed)
-        _register_one(mid, rm)
-        print(f"[server] model {mid!r} is back on disk; re-registered",
-              file=sys.stderr)
-        healed = True
-    if healed:
-        for rm in _RESOLVED_MODELS.values():
-            _fill_adapters(rm)
-    from gmlx.config import resolve_image_model
-    for iid in getattr(cfg, "image_models", {}):
-        if iid in _IMAGE_MODELS:
-            continue
-        try:
-            _register_image(iid, resolve_image_model(iid, cfg))
-        except ConfigError:
-            continue
-        print(f"[server] image model {iid!r} is back on disk; re-registered",
-              file=sys.stderr)
-        healed = True
-    return healed
+    with _REGISTRY_WRITE_LOCK:
+        reg = _REGISTRY
+        cfg = reg.cfg if reg is not None else None
+        if cfg is None:
+            return False
+        models = dict(reg.models)
+        path_to_ids = {k: list(v) for k, v in reg.path_to_ids.items()}
+        images = dict(reg.image_models)
+        image_path_to_ids = {k: list(v) for k, v in reg.image_path_to_ids.items()}
+        healed_chat = healed = False
+        for mid in cfg.models:
+            if mid in models:
+                continue
+            try:
+                rm = _resolve_served(mid, cfg)
+            except ConfigError:
+                continue                      # still missing (or still malformed)
+            _register_one(mid, rm, models, path_to_ids)
+            print(f"[server] model {mid!r} is back on disk; re-registered",
+                  file=sys.stderr)
+            healed_chat = healed = True
+        if healed_chat:
+            # A fresh copy of each spec: the old generation's stay as they were.
+            import copy
+            models = {k: copy.copy(v) for k, v in models.items()}
+            for rm in models.values():
+                _fill_adapters(rm, models)
+        for iid in getattr(cfg, "image_models", {}):
+            if iid in images:
+                continue
+            try:
+                _register_image(iid, resolve_image_model(iid, cfg), images,
+                                image_path_to_ids)
+            except ConfigError:
+                continue
+            print(f"[server] image model {iid!r} is back on disk; re-registered",
+                  file=sys.stderr)
+            healed = True
+        if healed:
+            _bind_registry(_Registry(cfg, models, path_to_ids, images,
+                                     image_path_to_ids))
+        return healed
 
 
 def clear_resolved_models() -> None:
@@ -1470,18 +1579,20 @@ def default_model_id() -> str | None:
     return None
 
 
-def split_profile_address(model_field: str) -> tuple[str, str | None]:
+def split_profile_address(model_field: str, cfg=None) -> tuple[str, str | None]:
     """Split ``id@profile`` (or ``alias@profile``) on the **last** ``@``. The right
     side is taken as a profile only if it names a known one, so hf ``org/model@rev``
-    and ids/aliases containing ``@``-like text stay intact. ``(head, profile|None)``."""
-    if _SERVER_CFG is None:
+    and ids/aliases containing ``@``-like text stay intact. ``(head, profile|None)``.
+    ``cfg`` defaults to the live config."""
+    cfg = _SERVER_CFG if cfg is None else cfg
+    if cfg is None:
         return model_field, None
     from gmlx.config import profile_names, split_address
-    return split_address(model_field, profile_names(_SERVER_CFG))
+    return split_address(model_field, profile_names(cfg))
 
 
-def _default_model_id() -> str:
-    cfg = _SERVER_CFG
+def _default_model_id(cfg=None) -> str:
+    cfg = _SERVER_CFG if cfg is None else cfg
     if cfg.defaults.model:
         if cfg.defaults.model not in cfg.models:
             raise ModelNotFound(cfg.defaults.model, cfg.models)
@@ -1504,21 +1615,26 @@ def resolve_request_model(model_field: str | None, *,
     :class:`ModelFileMissing`, and an unknown profile :class:`UnknownProfile` -
     **never** an HF fetch. Re-resolves through :func:`config.resolve_model` so the
     chosen profile reshapes the merged sampling/load spec (and a skipped model
-    self-heals here the moment its file is back)."""
+    self-heals here the moment its file is back).
+
+    The whole resolve reads one registry generation (its config and its id
+    table), so a request during a reload sees the old generation or the new
+    one, never a mix. A registered id reuses its registered adapter list."""
     from gmlx.config import MissingModelFile, profile_names, split_address
 
-    cfg = _SERVER_CFG
-    if cfg is None:
+    reg = _REGISTRY
+    if reg is None:
         raise RuntimeError(
             "no config registered; call register_resolved_models() first")
+    cfg = reg.cfg
 
     known = profile_names(cfg)
     raw = (model_field or "").strip()
     if not raw:
-        model_id = _default_model_id()
+        model_id = _default_model_id(cfg)
         request_profile = profile_field
     else:
-        head, inline_profile = split_profile_address(raw)
+        head, inline_profile = split_profile_address(raw, cfg)
         base_profile = None
         if head in cfg.aliases:                       # expand alias -> id (+ profile)
             head, base_profile = split_address(cfg.aliases[head], known)
@@ -1540,11 +1656,14 @@ def resolve_request_model(model_field: str | None, *,
                 raise UnknownProfile(t, known)
         raise ModelNotFound(model_id, cfg.models)
 
+    registered = reg.models.get(model_id)
     try:
-        rm = _resolve_served(model_id, cfg, request_profile=request_profile)
+        rm = _resolve_served(model_id, cfg, request_profile=request_profile,
+                             adapter_list=(registered.adapter_list
+                                           if registered is not None else None))
     except MissingModelFile as e:
         raise ModelFileMissing(model_id, str(e)) from None
-    _fill_adapters(rm)
+    _fill_adapters(rm, reg.models)
     return rm.path, rm
 
 

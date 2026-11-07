@@ -766,3 +766,22 @@ def test_plan_reason_follows_reported_band_when_concurrency_fails(monkeypatch):
     p = est.capacity_plan(1, 100)
     assert p["band"] == "red" and p["reason"] == "governor red"
     assert p["admit_now"] is False
+
+
+@pytest.mark.parametrize("resident", [False, True])
+def test_estimate_refuses_a_bad_adapter_field_resident_or_cold(tmp_path, resident):
+    (tmp_path / "a.gguf").write_bytes(b"GGUF")
+    serving.register_resolved_models(build_config(
+        {"models": {"q": {"path": "/abs/q.gguf",
+                          "adapters": [str(tmp_path / "a.gguf")]}}}))
+    entry = SimpleNamespace(response_generator=None, apc_manager=None,
+                            model_cache={})
+    _PKG._kq_residency_pool = SimpleNamespace(
+        resident_entry=lambda p: entry if resident else None)
+    body = {"model": "q", "messages": [{"role": "user", "content": "x"}]}
+    st, out = est.estimate_request(dict(body, adapters=["b.gguf"]))
+    assert st == 400
+    assert out["error"]["message"].startswith(
+        "adapter 'b.gguf' is not an adapter of model 'q'")
+    st, out = est.estimate_request(dict(body, adapters=[], lora=[]))
+    assert (st, out["error"]["message"]) == (400, "Set adapters or lora, not both.")
