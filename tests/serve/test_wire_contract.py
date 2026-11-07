@@ -88,6 +88,7 @@ class _FakeResponseGenerator:
         self.prefill_delay_s = 0.0  # models prefill: first next() blocks
         self.iter_closed = False
         self.overflow_on = ()       # seams that run the context check
+        self.raise_on_generate = None  # an engine error generate raises
         self.token_script = None    # list[StreamingToken kwargs] override
 
     def _tokens(self):
@@ -104,6 +105,8 @@ class _FakeResponseGenerator:
     def generate(self, prompt=None, images=None, audio=None, args=None):
         self.calls.append({"prompt": prompt, "args": args})
         self._check_budget("generate", args)
+        if self.raise_on_generate is not None:
+            raise self.raise_on_generate
         ctx = _GEN.GenerationContext(uid=1, prompt_tokens=self.prompt_tokens)
 
         def _iter():
@@ -1728,3 +1731,23 @@ def test_an_adapter_field_reaches_the_row(wire, fields, scales):
                                                                  **fields))
     assert r.status_code == 200, r.text
     assert wire.gen.calls[-1]["args"]._kq_lora.scales == scales
+
+
+@pytest.mark.parametrize("route,status,shown", [
+    ("chat", 500, "no loaded adapter identities"),
+    ("responses", 500, "no loaded adapter identities"),
+    ("messages", 500, "no loaded adapter identities"),
+    ("completions", 500, "generation failed (AdapterIdentityMissing)"),
+])
+def test_a_missing_adapter_identity_is_a_server_error(wire, route, status, shown):
+    """The engine raises it from the row's insert, and generate raises it:
+    a server defect, never reported as the client's 400. Completions names
+    the type and leaves the message to the server log."""
+    from gmlx.serve.lora_request import AdapterIdentityMissing
+
+    wire.gen.raise_on_generate = AdapterIdentityMissing(
+        "model 'stub-mix' has no loaded adapter identities; this is a gmlx defect")
+    path, body = _ADAPTER_ROUTES[route]
+    r = wire.client.post(path, json=body(MIX_ID))
+    assert r.status_code == status, r.text
+    assert shown in r.text
