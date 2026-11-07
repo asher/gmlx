@@ -409,7 +409,8 @@ def _make_text_processor(tokenizer) -> "_GgufServerProcessor":
 
 def _load_serveable_mtp(
     gguf_path: str, *, draft_gguf_path: str | None = None,
-    chat_template: str | None = None, adapter_gguf: str | None = None,
+    chat_template: str | None = None,
+    adapter_gguf: str | tuple[str, ...] | None = None,
 ) -> tuple[object, object, object]:
     """Load an MTP (speculative) text target + drafter for the batched engine.
 
@@ -646,7 +647,7 @@ def load_serveable_model(
     speculative: bool = False,
     draft_gguf_path: str | None = None,
     chat_template: str | None = None,
-    adapter_gguf: str | None = None,
+    adapter_gguf: str | tuple[str, ...] | None = None,
     stream=None,
     moe_experts: int | None = None,
     moe_expert_mass: float | None = None,
@@ -1044,9 +1045,12 @@ def install_gguf_server_bridge() -> None:
             # load_serveable_model (text path; VLM/MTP+adapter raise there, never a
             # silent drop). Distinct from the stock ``adapter_path`` param above, which
             # is mlx-vlm's HF-PEFT mechanism (unsupported on a GGUF base).
-            effective = getattr(spec, "effective_adapters", None)
-            adapter_gguf = tuple(effective() if callable(effective)
-                                 else getattr(spec, "adapters", None) or ()) or None
+            effective: Callable[[], tuple[str, ...]] | None = getattr(
+                spec, "effective_adapters", None)
+            adapters: tuple[str, ...] = (
+                tuple(effective()) if callable(effective)
+                else tuple(getattr(spec, "adapters", None) or ()))
+            adapter_gguf = adapters or None
             # The stream placement rides the same build-spec channel (config
             # `stream:` / `serve --stream-experts` / `--stream-cpu`): it is
             # applied to the loaded base in load_serveable_model (text path;

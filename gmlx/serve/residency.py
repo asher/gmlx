@@ -2718,7 +2718,8 @@ def text_adapter_bytes(build_spec) -> int:
     each file of the entry's adapter union. The load copies the tensors
     out of the file, and the per-dtype tables add at most that again. A
     missing file prices at 0; its load fails."""
-    effective = getattr(build_spec, "effective_adapters", None)
+    effective: Callable[[], tuple[str, ...]] | None = getattr(
+        build_spec, "effective_adapters", None)
     if not callable(effective):
         return 0
     return sum(2 * os.path.getsize(p) for p in effective() if os.path.isfile(p))
