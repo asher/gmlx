@@ -41,6 +41,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   does, and one refused for memory names the GB it needs.
 - An image LoRA takes less memory: loading one no longer holds its file
   twice, and fewer of its weights are copied while it runs.
+- The images API prices a request body from the memory free before it reads
+  it, where it refused bodies over 64 MiB and inline images over 32 MiB.
+- A JSON `/v1/images/edits` request takes bare base64 image data in `image`
+  and `images[].image_url`, beside data URLs.
+- A chat model's cold load no longer waits for a running image job, unless
+  it unloads a model of the worker that runs the job.
+- A LoRA upload to the ComfyUI step routes is admitted before its body is
+  read, so a 413 or a 503 comes before the upload.
+- A chat model's cold load counts the request LoRAs an image model holds or
+  is loading, so it unloads an idle model sooner to make room.
+- An image LoRA at a strength not 1 or an alpha not its rank scales in float32
+  off the K-quant kernel, so a seed's image differs from the last release's.
+- The ComfyUI nodes send a step again, up to three times, when the server
+  let its tensors go, and a 503 they show ends "Queue the prompt again then."
 - In the Python API, `gmlx.image.lora.pair_hash` and `register_pair` take no
   alpha, and `register_patch` returns `(hash, alpha)` for its table entry.
 - Nemotron-H models prefill in less memory, and a request takes the largest
