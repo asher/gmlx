@@ -276,6 +276,28 @@ def test_a_file_that_changes_while_it_loads_is_refused(tmp_path, monkeypatch):
     assert next(keys) == 6
 
 
+def test_a_file_that_changes_once_loads_on_the_retry(tmp_path, monkeypatch):
+    import hashlib
+
+    p = tmp_path / "a.gguf"
+    _save_adapter(p, mx.ones((1, 8)), mx.ones((4, 1)))
+    real = adapter._file_key
+    calls = []
+
+    def key(path):
+        calls.append(path)
+        if len(calls) == 2:              # the first read saw the old bytes
+            _save_adapter(p, 2 * mx.ones((1, 8)), mx.ones((4, 1)))
+            return (-1,) + real(path)[1:]
+        return real(path)
+
+    monkeypatch.setattr(adapter, "_file_key", key)
+    plan = adapter.load_lora_adapter(str(p), base_arch="llama")
+    assert len(calls) == 4
+    assert plan.sha256 == hashlib.sha256(p.read_bytes()).hexdigest()
+    assert mx.array_equal(plan.modules[_DOWN].a, 2 * mx.ones((1, 8)))
+
+
 def test_apply_returns_the_module_count(tmp_path):
     class _Block(nn.Module):
         def __init__(self):

@@ -321,7 +321,7 @@ def test_a_finished_uid_still_in_a_round_reads_as_zeros(ar):
         lora_rows.publish_uids([7])                    # never stored
 
 
-def test_remove_keeps_the_row_and_the_store_prunes_only_dead_uids(ar, monkeypatch):
+def test_retire_keeps_the_live_row_and_the_store_prunes_only_dead_uids(ar, monkeypatch):
     from gmlx.serve import row_sampling
     monkeypatch.setattr(row_sampling, "MAX_ROWS", 8)
     lora_rows.configure("rows", 1)

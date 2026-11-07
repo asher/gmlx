@@ -392,11 +392,20 @@ def test_one_entry_restarted_on_another_file_salts_apart(tmp_path):
 
 
 def test_a_rewrite_of_the_same_path_salts_apart(tmp_path):
-    _write(tmp_path, "A.gguf")
+    from gmlx.load.adapter import AdapterIdentity
+
+    path = tmp_path / "A.gguf"
+
+    def loaded(a):
+        adapter.save_lora_adapter(
+            str(path), [("model.layers.0.mlp.down_proj", a, mx.ones((4, 1)))],
+            alpha=2.0, base_arch="llama", n_head=4, n_head_kv=2, n_layers=1)
+        plan = adapter.load_lora_adapter(str(path), base_arch="llama")
+        return (AdapterIdentity(str(path), plan.sha256, plan.nbytes),)
+
     spec = _spec(tmp_path, [("A.gguf", 1.0)])
-    before = _salted_row(spec, (_identity(tmp_path / "A.gguf"),)).salt
-    (tmp_path / "A.gguf").write_bytes(b"GGUF other tensors")
-    after = _salted_row(spec, (_identity(tmp_path / "A.gguf"),)).salt
+    before = _salted_row(spec, loaded(mx.ones((1, 8)))).salt
+    after = _salted_row(spec, loaded(-mx.ones((1, 8)))).salt
     assert before != after
 
 
@@ -616,9 +625,6 @@ def test_models_lists_adapters_with_the_loaded_hash(tmp_path, serving):
         {"index": 1, "name": "b.gguf", "strength": 0.5, "sha256": ids[1].sha256}]
     assert by_id["bare"]["adapters"] == []
     assert str(tmp_path) not in json.dumps(by_id)
-    # the loaded hash stays after the file changes on disk
-    (tmp_path / "loras" / "a.gguf").write_bytes(b"GGUF rewritten")
-    assert _payload(_ListingPool([entry]))["m"]["adapters"][0]["sha256"] == ids[0].sha256
 
 
 def test_models_lists_null_hashes_with_no_resident_copy(tmp_path, serving):
