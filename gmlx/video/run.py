@@ -131,7 +131,7 @@ def read_anchors(fam, s: dict, *, first: str | None = None,
                 raise ValueError(f"{label}: its frames are {gw}x{gh}, over "
                                  f"the {max_pixels} pixels the server "
                                  "decodes")
-        n = most = None
+        n, most = 0, None
         if flag == "--guide":
             # 17 frames past those left from the frame tell a guide that
             # does not fit from one that does. One that does not fit is

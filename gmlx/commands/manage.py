@@ -2931,13 +2931,13 @@ def _video_row(cfg, vm) -> dict:
     files = [vm.path, vm.encoder, vm.encoder_mmproj, vm.vae, vm.audio_vae,
              *(a[0] for a in vm.adapters)]
     sizes = [_model_size_bytes(p, cfg.model_dirs) for p in files if p]
+    known = [x for x in sizes if x is not None]
     flags = [vm.variant or "video"]
     if vm.upsampler:
         flags.append(f"upsampler {vm.upsampler}")
     return {"id": vm.id, "kind": "video", "path": vm.path, "profile": None,
             "source": "config", "default": False, "flags": flags,
-            "size_bytes": (None if any(x is None for x in sizes)
-                           else sum(sizes))}
+            "size_bytes": sum(known) if len(known) == len(sizes) else None}
 
 
 # ps - the residency view of a running server
