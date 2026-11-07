@@ -70,6 +70,61 @@ def test_armed_criteria_reset_restores_prompt_seed():
     assert c.in_thinking is False                       # back to the prompt seed
 
 
+def _built_criteria(args, prompt):
+    """The criteria as the installed builder makes it."""
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    cls = gen.ResponseGenerator
+    original = cls._make_thinking_budget_criteria
+    try:
+        sp.install_thinking_budget_fix()
+        me = types.SimpleNamespace(tokenizer=_MsgThinkTok())
+        return cls._make_thinking_budget_criteria(me, args, prompt)
+    finally:
+        cls._make_thinking_budget_criteria = original
+
+
+class _MsgThinkTok(_FakeThinkTok):
+    _MAP = dict(_FakeThinkTok._MAP, **{"Answer now.": [60, 61]})
+
+
+def _builder_args(**kw):
+    base = dict(thinking_budget=2, enable_thinking=False,
+                thinking_start_token=None, thinking_end_token=None,
+                thinking_budget_message="Answer now.")
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+def test_budget_fix_builder_passes_message():
+    crit = _built_criteria(_builder_args(), mx.array([[1, 99, 10]]))
+    assert crit.in_thinking and crit.thinking_token_count == 1  # seeded
+    assert _drive(crit, [5, 6, 60, 61, 100]) == [60, 61, 100, None, None]
+
+
+def test_budget_fix_builder_takes_no_negative_budget():
+    assert _built_criteria(_builder_args(thinking_budget=-1),
+                           mx.array([[1, 99]])) is None
+
+
+def test_mtp_build_hook_passes_message():
+    from gmlx.serve.patches import mtp_thinking
+
+    rg = types.SimpleNamespace(tokenizer=_MsgThinkTok())
+    hook = mtp_thinking._build_hook(rg, _builder_args(thinking_budget=5),
+                                    mx.array([[1, 99, 10]]))
+    assert hook.forced_ids == [60, 61, 100]
+    assert hook.in_thinking and hook.count == 1
+
+
+def test_split_puts_message_in_reasoning():
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
+    text = "Plan the trip.Time is up, so I will answer now.</think>Day one."
+    reasoning, content = sp_chat._split_thinking_keep_indent(
+        rs, rs.ThinkingStreamState, "<think>" + text, "<think>", "</think>")
+    assert reasoning == "Plan the trip.Time is up, so I will answer now."
+    assert content == "Day one."
+
+
 # ATEM (Muse Spark, Muse Glimmer) with the real token ids: the reasoning
 # header is five tokens and ends on <|message|>, which opens every message.
 # Counting must start only on the whole header, and a commentary <|eom|>

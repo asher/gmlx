@@ -8,8 +8,11 @@ rounds, the same seam the CLI ^T/budget path uses), so the server route is:
 
 * defer - ``ResponseGenerator.generate`` moves ``args.thinking_budget``
   aside for MTP-drafted models only, so the upstream raise never fires.
-  Non-MTP drafters keep the stock error, and the pre-generate readers
-  (chat-template kwargs) ran before generate and saw the real value.
+  On a separate drafter (a stock drafter of another kind) a budget from
+  the config is dropped with a warning; a client budget was refused with
+  a 400 on its route, and the stock error stays as a backstop. The
+  pre-generate readers (chat-template kwargs) ran before generate and saw
+  the real value.
 * restore + build - an outermost wrapper on
   ``_make_thinking_budget_criteria`` (over the thinking-budget-fix
   rebind) puts the value back before delegating, so every later reader
@@ -31,6 +34,8 @@ import logging
 from typing import Any
 
 from gmlx.upstream.patching import link, wrapped_with
+
+from .sampling import separate_drafter_kind
 
 _log = logging.getLogger(__name__)
 
@@ -78,7 +83,9 @@ def _build_hook(rg, args, input_ids):
         start_token=getattr(args, "thinking_start_token", None),
         end_token=getattr(args, "thinking_end_token", None),
         prompt_ids=prompt_tail_ids(input_ids),
-        tools=getattr(args, "_kq_has_tools", False))
+        tools=getattr(args, "_kq_has_tools", False),
+        message=getattr(args, "thinking_budget_message", None),
+        reasoning_ids=input_ids)
 
 
 def _install_defer(cls) -> None:
@@ -88,13 +95,19 @@ def _install_defer(cls) -> None:
 
     def _generate(self, prompt, images=None, audio=None, args=None,
                   videos=None):
-        if (args is not None and getattr(args, "_kq_off_budget", False)
-                and getattr(self, "draft_model", None) is not None
-                and not _is_mtp(self)):
-            # Thinking off on a template with no switch is a budget of 0,
-            # which this drafter cannot run. Thinking stays on, as before.
-            _log.warning("thinking off ignored: this model has no thinking "
-                         "switch, and its drafter cannot run a thinking budget")
+        if (args is not None
+                and getattr(args, "thinking_budget", None) is not None
+                and not getattr(args, "_kq_budget_field", None)
+                and separate_drafter_kind(self)):
+            if getattr(args, "_kq_off_budget", False):
+                # Thinking off on a template with no switch is a budget of
+                # 0, which this drafter cannot run. Thinking stays on.
+                _log.warning("thinking off ignored: this model has no "
+                             "thinking switch, and its drafter cannot run a "
+                             "thinking budget")
+            else:
+                _log.warning("thinking_budget ignored: this model's drafter "
+                             "cannot run a thinking budget")
             args.thinking_budget = None
         if (_is_mtp(self) and args is not None
                 and getattr(args, "thinking_budget", None) is not None):

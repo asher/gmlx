@@ -113,6 +113,9 @@ def test_gmlx_extras_allowlist_matches_patch_reads():
         "xtc_probability",      # sampling XTC
         "xtc_threshold",
         "thinking",             # chat_behavior: z.ai {"type": en/disabled} spelling
+        "thinking_budget_message",   # sampling: the thinking-budget fields
+        "reasoning_budget_tokens",
+        "reasoning_budget_message",
     }
 
 

@@ -495,6 +495,99 @@ def test_completions_rejects_out_of_scope(wire):
     assert r.status_code == 400
 
 
+# 4a. thinking-budget fields (sampling): llama-server's names reach the
+#     engine, and a bad field is a 400 in each route's error body.
+_BUDGET_ROUTES = {
+    "chat": ("/v1/chat/completions", lambda **kw: _chat_body(**kw)),
+    "responses": ("/v1/responses",
+                  lambda **kw: {"model": MODEL_ID, "input": "hi", **kw}),
+    "messages": ("/v1/messages", lambda **kw: {
+        "model": MODEL_ID, "max_tokens": 8,
+        "messages": [{"role": "user", "content": "hi"}], **kw}),
+    "completions": ("/v1/completions",
+                    lambda **kw: {"model": MODEL_ID, "prompt": "hi", **kw}),
+}
+
+
+@pytest.mark.parametrize("route", sorted(_BUDGET_ROUTES))
+def test_llama_server_budget_names_reach_the_engine(wire, route):
+    path, body = _BUDGET_ROUTES[route]
+    r = wire.client.post(path, json=body(reasoning_budget_tokens=32,
+                                         reasoning_budget_message="Go."))
+    assert r.status_code == 200, r.text
+    args = wire.gen.calls[-1]["args"]
+    assert (args.thinking_budget, args.thinking_budget_message) == (32, "Go.")
+
+
+def _error_message(r):
+    body = r.json()
+    return body["error"]["message"]
+
+
+@pytest.mark.parametrize("route", sorted(_BUDGET_ROUTES))
+@pytest.mark.parametrize("fields,message", [
+    ({"thinking_budget": 8, "reasoning_budget_tokens": 8},
+     "Set thinking_budget or reasoning_budget_tokens, not both."),
+    ({"thinking_budget_message": "a", "reasoning_budget_message": "b"},
+     "Set thinking_budget_message or reasoning_budget_message, not both."),
+    ({"reasoning_budget_tokens": "5"},
+     "reasoning_budget_tokens must be an integer of -1 or more."),
+    ({"thinking_budget": -2},
+     "thinking_budget must be an integer of -1 or more."),
+    ({"reasoning_budget_message": 7},
+     "reasoning_budget_message must be a string."),
+])
+def test_budget_field_errors_are_400(wire, route, fields, message):
+    path, body = _BUDGET_ROUTES[route]
+    r = wire.client.post(path, json=body(**fields))
+    assert r.status_code == 400, r.text
+    assert _error_message(r) == message
+    if route == "messages":
+        assert r.json()["type"] == "error"
+    assert not wire.gen.calls
+
+
+def test_messages_budget_tokens_conflict_names_its_field(wire):
+    path, body = _BUDGET_ROUTES["messages"]
+    r = wire.client.post(path, json=body(
+        thinking={"type": "enabled", "budget_tokens": 64},
+        reasoning_budget_tokens=32))
+    assert r.status_code == 400, r.text
+    assert _error_message(r) == (
+        "Set thinking.budget_tokens or reasoning_budget_tokens, not both.")
+
+
+@pytest.mark.parametrize("route", sorted(_BUDGET_ROUTES))
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_budget_on_a_stock_drafter_is_400_before_the_reply(
+        wire, monkeypatch, route, stream):
+    monkeypatch.setattr(wire.gen, "draft_model", object(), raising=False)
+    monkeypatch.setattr(wire.gen, "draft_kind", "eagle3", raising=False)
+    path, body = _BUDGET_ROUTES[route]
+    r = wire.client.post(path, json=body(reasoning_budget_tokens=16,
+                                         stream=stream))
+    assert r.status_code == 400, r.text
+    assert _error_message(r) == (
+        "This model cannot run a thinking budget while it speculates with "
+        "draft kind 'eagle3'. Remove reasoning_budget_tokens, or serve the "
+        "model without the drafter.")
+    assert not wire.gen.calls
+
+
+def test_a_count_with_a_budget_on_a_stock_drafter_still_counts(
+        wire, monkeypatch):
+    monkeypatch.setattr(wire.gen, "draft_model", object(), raising=False)
+    monkeypatch.setattr(wire.gen, "draft_kind", "eagle3", raising=False)
+    monkeypatch.setattr(
+        wire.gen, "_cpu_preprocess",
+        lambda prompt, images, audio: {"input_ids": [[1, 2, 3]]}, raising=False)
+    r = wire.client.post("/v1/messages/count_tokens", json={
+        "model": MODEL_ID, "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_budget_tokens": 16})
+    assert r.status_code == 200, r.text
+    assert "input_tokens" in r.json()
+
+
 # 4b. tool_choice "none" enforcement (api_contract): tools are dropped before
 #     the handler, so the tools-present skip_special_tokens flip never fires.
 def test_chat_tool_choice_none_drops_tools_end_to_end(wire):

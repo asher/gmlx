@@ -1,9 +1,11 @@
 """Sampling-surface patches: profile injection into unset request
-fields, the chat ``max_completion_tokens`` cap, the until-EOS default cap,
-XTC as a per-request logits processor, and the fast positioned sampler."""
+fields, the chat ``max_completion_tokens`` cap, the thinking-budget fields
+and their llama-server names, the until-EOS default cap, XTC as a
+per-request logits processor, and the fast positioned sampler."""
 
 from __future__ import annotations
 
+import contextvars
 import importlib
 import logging
 
@@ -12,8 +14,11 @@ from gmlx.spec.topk import HIER_MIN_V, topk_ids
 from gmlx.upstream.patching import link, wrapped_with
 
 from ._common import (
+    _CHAT_PATHS,
     _PATCH_FLAG,
     _install_gen_args_transform,
+    _wrap_post_routes,
+    refuse_both_spellings,
 )
 
 _log = logging.getLogger(__name__)
@@ -34,7 +39,9 @@ _GEN_ARG_REQUEST_FIELDS = {
     "presence_penalty": ("presence_penalty",),
     "frequency_penalty": ("frequency_penalty",),
     "enable_thinking": ("enable_thinking",),
-    "thinking_budget": ("thinking_budget",),
+    "thinking_budget": ("thinking_budget", "reasoning_budget_tokens"),
+    "thinking_budget_message": ("thinking_budget_message",
+                                "reasoning_budget_message"),
 }
 
 
@@ -104,6 +111,158 @@ def install_max_completion_tokens() -> None:
     beats a profile ``max_tokens``."""
     _install_gen_args_transform(_MAX_COMPLETION_FLAG,
                                 _apply_max_completion_tokens)
+
+
+# Thinking-budget fields
+# thinking_budget_message is forced ahead of the end marker when the budget
+# runs out. reasoning_budget_tokens and reasoning_budget_message are
+# llama-server's names for the two fields. A -1 budget asks for the server
+# default, as on llama-server, and any negative budget left after that is
+# no budget.
+_BUDGET_FIELDS_FLAG = "_kq_gguf_thinking_budget_fields"
+_BUDGET_ROUTE_FLAG = "_kq_gguf_thinking_budget_route"
+# The routes that generate. The count, estimate and upsample callers of
+# _build_gen_args are not on them, so they never refuse a budget.
+_GENERATION_PATHS = _CHAT_PATHS + (
+    "/responses", "/v1/responses", "/messages", "/v1/messages",
+    "/completions", "/v1/completions")
+_generation_route: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "gmlx_generation_route", default=False)
+
+
+def _bad_field(detail: str):
+    from fastapi import HTTPException
+
+    return HTTPException(status_code=400, detail=detail)
+
+
+def _budget_field(name: str, value):
+    """A client budget: an int of -1 or more (not a bool), or None."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < -1:
+        raise _bad_field(f"{name} must be an integer of -1 or more.")
+    return value
+
+
+def _message_field(name: str, value):
+    if value is not None and not isinstance(value, str):
+        raise _bad_field(f"{name} must be a string.")
+    return value
+
+
+def _server_thinking_budget():
+    """The budget a client -1 asks for: the active spec's (profile, model
+    override, --thinking-budget, family default), else the environment's."""
+    spec = serving.get_active_spec()
+    sampling = (getattr(spec, "sampling", None) or {}) if spec is not None else {}
+    value = sampling.get("thinking_budget")
+    if value is None:
+        gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+        value = gen.get_server_thinking_budget()
+    return value
+
+
+def _budget_display_name(request) -> str:
+    """``thinking.budget_tokens`` when a Messages request set the budget
+    there, else ``thinking_budget``."""
+    schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
+    thinking = getattr(request, "thinking", None)
+    if (isinstance(request, schemas.AnthropicRequest)
+            and isinstance(thinking, dict)
+            and thinking.get("budget_tokens") is not None):
+        return "thinking.budget_tokens"
+    return "thinking_budget"
+
+
+def separate_drafter_kind(rg) -> str | None:
+    """The draft kind of a loaded drafter that cannot run a thinking budget,
+    else None."""
+    from gmlx.spec.engine import spec_kind_unsupported
+
+    if rg is None or getattr(rg, "draft_model", None) is None:
+        return None
+    return spec_kind_unsupported(rg)
+
+
+def _apply_thinking_budget_fields(args, request, _processor):
+    """Resolve the budget and the message from either spelling. Runs after
+    profile injection, which skips a field the client set under either
+    name. Returns ``args`` (mutated)."""
+    fields = getattr(request, "model_fields_set", None) or set()
+    present = {f for f in fields if getattr(request, f, None) is not None}
+    name = _budget_display_name(request)
+    fs = present | ({name} if "thinking_budget" in present else set())
+    refuse_both_spellings(fs, name, "reasoning_budget_tokens")
+    refuse_both_spellings(fs, "thinking_budget_message",
+                          "reasoning_budget_message")
+
+    args._kq_budget_field = None
+    for field, shown in (("thinking_budget", name),
+                         ("reasoning_budget_tokens", "reasoning_budget_tokens")):
+        if field not in present:
+            continue
+        value = _budget_field(shown, getattr(request, field))
+        if value == -1:
+            args.thinking_budget = _server_thinking_budget()
+        else:
+            args.thinking_budget = value
+            args._kq_budget_field = shown
+    budget = getattr(args, "thinking_budget", None)
+    if isinstance(budget, int) and budget < 0:
+        args.thinking_budget = None
+
+    messages = ("thinking_budget_message", "reasoning_budget_message")
+    for field in messages:
+        if field in present:
+            args.thinking_budget_message = _message_field(
+                field, getattr(request, field))
+            break
+    else:
+        if any(f in fields for f in messages):
+            args.thinking_budget_message = None  # an explicit null
+
+    kind = (separate_drafter_kind(_runtime().response_generator)
+            if _generation_route.get() and args._kq_budget_field
+            and args.thinking_budget is not None else None)
+    if kind:
+        raise _bad_field(
+            f"This model cannot run a thinking budget while it speculates "
+            f"with draft kind '{kind}'. Remove {args._kq_budget_field}, or "
+            f"serve the model without the drafter.")
+    return args
+
+
+def _runtime():
+    return importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
+
+
+def install_thinking_budget_fields() -> None:
+    """Honor ``thinking_budget_message`` and llama-server's
+    ``reasoning_budget_tokens`` and ``reasoning_budget_message``. Install
+    after :func:`install_max_completion_tokens` and before the template
+    kwargs transform, so profile injection runs first and the off-by-budget
+    rule sees the result."""
+    _install_gen_args_transform(_BUDGET_FIELDS_FLAG,
+                                _apply_thinking_budget_fields)
+
+
+def install_thinking_budget_route() -> None:
+    """Mark the generation routes, so a client budget that the drafter
+    cannot run is a 400 before the response starts. Install after the
+    completions route is registered. Idempotent per route."""
+    app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
+
+    def _make(original):
+        async def endpoint(*args, **kwargs):
+            token = _generation_route.set(True)
+            try:
+                return await original(*args, **kwargs)
+            finally:
+                _generation_route.reset(token)
+        return endpoint
+
+    _wrap_post_routes(app, _GENERATION_PATHS, _BUDGET_ROUTE_FLAG, _make)
 
 
 # Until-EOS default output cap

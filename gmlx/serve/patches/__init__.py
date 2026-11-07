@@ -144,6 +144,8 @@ from .sampling import (
     install_fast_sampler,
     install_gen_args_profile_injection,
     install_max_completion_tokens,
+    install_thinking_budget_fields,
+    install_thinking_budget_route,
     install_xtc_sampling,
 )
 
@@ -180,6 +182,8 @@ __all__ = [
     "install_keep_route",
     "install_loopback_host_guard",
     "install_max_completion_tokens",
+    "install_thinking_budget_fields",
+    "install_thinking_budget_route",
     "install_messages_route",
     "install_metrics_prometheus",
     "install_models_endpoint_override",
@@ -237,6 +241,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_health_liveness_override()
     install_gen_args_profile_injection()
     install_max_completion_tokens()
+    install_thinking_budget_fields()
     install_vanilla_stream_chunks()
     install_xtc_sampling()
     if os.environ.get("GMLX_STEP_LOG"):
@@ -320,6 +325,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # Before the load-offload / profile-capture / keepalive wrappers so they
     # wrap the completions route too.
     install_completions_route()
+    install_thinking_budget_route()
     # engine_jobs imports mlx_vlm.server statically, so it loads here.
     from gmlx.config import SystemoneCfg
     from gmlx.serve.engine_jobs import install_engine_jobs

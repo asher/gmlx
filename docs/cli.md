@@ -163,7 +163,7 @@ the [`sampling` keys](config.md#sampling):
 | `--adapter PATH` | None | Apply this GGUF LoRA adapter at load, for text only. |
 | `--profile NAME` | None | Apply a built-in intent such as `coding` or `reasoning-high`, resolved for the model's family. |
 | `--system-prompt STR` | None | Use this system prompt when the request has none. |
-| `--thinking-budget N` | Unlimited | Cap reasoning tokens for each request. `0` closes thinking at once. |
+| `--thinking-budget N` | Unlimited | Cap reasoning tokens for each request. `0` closes thinking at once, and `-1` sets no budget. |
 | `--kv-quant-scheme {auto,uniform,kvarn}` | `auto` | Pick the [scheme](kv-quantization.md#the-scheme-gmlx-picks) for the model, affine, or kvarn, where `--kv-bits` defaults to 6. |
 | `--max-kv-size N` | None | Cap the request context budget at N tokens. |
 

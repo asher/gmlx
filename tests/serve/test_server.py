@@ -126,6 +126,16 @@ def test_bg_serve_args_forwards_thinking_flags():
     assert "--thinking" not in bare and "--thinking-budget" not in bare
 
 
+def test_thinking_budget_flag_takes_minus_one_and_up():
+    import argparse
+    ap = argparse.ArgumentParser()
+    srv._add_serve_args(ap)
+    assert ap.parse_args(["m.gguf", "--thinking-budget", "-1"]).thinking_budget == -1
+    for bad in ("-2", "x"):
+        with pytest.raises(SystemExit):
+            ap.parse_args(["m.gguf", "--thinking-budget", bad])
+
+
 def test_bg_serve_args_forwards_the_stochastic_mtp_choice():
     """--no-stochastic-mtp (exact decode) and --stochastic-mtp survive the
     background re-exec; the default forwards nothing, so the config's

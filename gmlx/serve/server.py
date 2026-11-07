@@ -91,6 +91,18 @@ def _ratio_flag(raw: str):
             f"expected a number or 'auto', got {raw!r}")
 
 
+def _thinking_budget_arg(raw: str) -> int:
+    """--thinking-budget value: an integer of -1 or more."""
+    try:
+        value = int(raw)
+    except ValueError:
+        value = None
+    if value is None or value < -1:
+        raise argparse.ArgumentTypeError(
+            f"expected an integer of -1 or more, got {raw!r}")
+    return value
+
+
 def _has_uvloop() -> bool:
     try:
         import uvloop  # noqa: F401
@@ -1698,7 +1710,8 @@ def register_downloads(paths: list, config_path=None, *,
 # (argparse dest, sampling key) for the positional-model sampling flags: the
 # server's SAMPLING_KEYS minus the three serve covers elsewhere (max_tokens is
 # the server-wide --max-tokens, thinking_budget has its own flag, and
-# enable_thinking is --thinking). Named as `gmlx run` names them.
+# enable_thinking is --thinking) and thinking_budget_message, which has no
+# flag. Named as `gmlx run` names them.
 _SAMPLING_FLAGS = (
     ("temp", "temperature"), ("top_p", "top_p"), ("top_k", "top_k"),
     ("min_p", "min_p"), ("seed", "seed"),
@@ -1810,10 +1823,12 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "onto the variable its chat template reads (config mode: "
                          "the per-profile/model `thinking:` key). Default: the "
                          "template's own default.")
-    ap.add_argument("--thinking-budget", type=int, default=None, metavar="N",
+    ap.add_argument("--thinking-budget", type=_thinking_budget_arg, default=None,
+                    metavar="N",
                     help="Cap a single positional model's thinking tokens per "
-                         "request; 0 closes thinking at once (config mode: the "
-                         "sampling `thinking_budget:` key; requests may override).")
+                         "request; 0 closes thinking at once, -1 sets no budget "
+                         "(config mode: the sampling `thinking_budget:` key; "
+                         "requests may override).")
     ap.add_argument("--adapter", default=None, metavar="PATH",
                     help="GGUF LoRA adapter applied live over a single positional "
                          "model at load - base stays K-quant, no merge (config mode: "

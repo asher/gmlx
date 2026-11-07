@@ -62,11 +62,14 @@ _GEN_ARGS_CONSUMED = frozenset({
 })
 
 # gmlx server patches (stop resolver, profile capture, template kwargs,
-# XTC) read these off every generation request.
+# XTC, the thinking-budget fields) read these off every generation request.
 _GMLX_CONSUMED = frozenset({
     "profile", "chat_template_kwargs", "xtc_probability", "xtc_threshold",
     # z.ai / GLM API spelling of the thinking switch: {"type": "enabled"|"disabled"}
     "thinking",
+    # the budget message, and llama-server's names for the two budget fields
+    "thinking_budget_message", "reasoning_budget_tokens",
+    "reasoning_budget_message",
 })
 
 # /v1/chat/completions (openai.py chat_completions_endpoint + the gmlx stop
