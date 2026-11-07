@@ -32,6 +32,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `gmlx run`, chat and `gmlx serve`, and answers `/v1/audio/transcriptions`
   and `/v1/audio/translations` itself, with word times and speakers.
   `gmlx pull nemotron-3.5-transcribe` downloads the model with its encoder.
+- `/v1/chat/completions` continues a partial last assistant message with
+  `continue_final_message` and `add_generation_prompt: false`, in the prompt
+  llama-server renders, and `add_generation_prompt: false` alone renders no
+  generation prompt. See [Assistant prefill](docs/api.md#assistant-prefill).
 
 ### Changed
 
