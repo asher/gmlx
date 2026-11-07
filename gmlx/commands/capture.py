@@ -293,7 +293,8 @@ def run_capture(model, processor, config, sets, *, positions: int,
                 mx.eval(*arrays.values())
     finally:
         cb_phase.restore(before)
-    return arrays, sizes, int(total.shape[1]), len(layers)
+    n_embd = int(arrays[f"{sets[0][0]}.mean"].shape[1])
+    return arrays, sizes, n_embd, len(layers)
 
 
 def save(path: str, arrays: dict, metadata: dict) -> None:

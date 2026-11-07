@@ -236,6 +236,7 @@ include = [
     "gmlx/cache/fresh_gate.py",
     "gmlx/cache/retire_key.py",
     "gmlx/cache/snapshot.py",
+    "gmlx/commands/capture.py",
     "gmlx/commands/cli.py",
     "gmlx/distill/eval.py",
     "gmlx/distill/student.py",
