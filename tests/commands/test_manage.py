@@ -1516,6 +1516,21 @@ def test_rm_sharded_removes_all_and_parts(tmp_path):
     assert (lib / "keep.gguf").exists()
 
 
+def test_rm_removes_what_an_interrupted_pull_left(tmp_path, capsys):
+    """rm deletes, and lists in its plan, what a pull stopped part way
+    leaves beside a model file: the partial download, its sha256 mark
+    and the copy an update was replacing."""
+    cfg, lib = _rm_setup(tmp_path)
+    left = ["gone.gguf.part", "gone.gguf.part.sha256", "gone.gguf.old"]
+    for name in left:
+        (lib / name).write_bytes(b"x")
+    assert manage.cmd_rm(["gone", "--config", str(cfg), "--yes"]) == 0
+    plan = capsys.readouterr().out
+    assert all(str(lib / name) in plan for name in left), plan
+    assert not list(lib.glob("gone*"))
+    assert (lib / "keep.gguf").exists()
+
+
 def test_rm_shared_mmproj_kept_exclusive_removed(tmp_path, capsys):
     body = """
 server:

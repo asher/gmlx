@@ -845,10 +845,10 @@ gmlx validate https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/main/Qwen3.8-
 
 ## gmlx rm
 
-`gmlx rm` deletes a model's GGUF files, partial downloads and companions,
-and removes its entry, aliases and default from the config. A file another
-model still uses is kept. `rm` prints the plan and asks before it deletes
-anything.
+`gmlx rm` deletes a model's GGUF files, partial downloads, the old copy an
+interrupted update left, and companions, and removes its entry, aliases
+and default from the config. A file another model still uses is kept. `rm`
+prints the plan and asks before it deletes anything.
 
 An image model id removes its DiT, VAE, text encoder and vision tower. A text encoder
 that is a chat model, or that another image model uses, is kept, and `rm`

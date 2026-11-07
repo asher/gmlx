@@ -2350,12 +2350,14 @@ def _file_key(path: str) -> tuple:
 
 def _shard_files(path: str) -> list[str]:
     """Every existing shard of ``path``'s split set (tolerant of gaps, unlike
-    preflight), plus any ``.part`` resume leftovers."""
+    preflight), plus what a pull stopped part way left beside each: the
+    ``.part`` resume file, its ``.part.sha256`` mark, and the ``.old`` copy
+    an update was replacing."""
     d, base = os.path.split(path)
     out = []
     for name in _shard_names(base):
         p = os.path.join(d, name)
-        for cand in (p, p + ".part"):
+        for cand in (p, p + ".part", p + ".part.sha256", p + ".old"):
             if os.path.exists(cand):
                 out.append(cand)
     return out
