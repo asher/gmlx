@@ -265,6 +265,21 @@ def test_a_render_with_no_system_message_does_not_change(faithful, case):
                    **kw) == before
 
 
+@pytest.mark.parametrize("template", sorted(_TEMPLATES))
+@pytest.mark.parametrize("model_type", _GEMMA4_TYPES)
+def test_a_video_request_puts_no_marker_in_a_developer_turn(
+        faithful, model_type, template):
+    """A developer message after the system message once got a video
+    marker too, one more than the processor had videos to expand."""
+    messages = [{"role": "system", "content": "Be brief."},
+                {"role": "developer", "content": "Answer in French."},
+                {"role": "user", "content": "What happens?"}]
+    got = _render(faithful, _Gemma4Processor(_TEMPLATES[template], model_type),
+                  model_type, messages, video=["clip.mp4"])
+    assert "<|turn>developer\nAnswer in French.<turn|>" in got
+    assert got.count("<|video|>") == 1
+
+
 @pytest.mark.integration
 def test_the_gguf_vocab_encodes_no_space_before_the_system_turn_end(
         gguf_index, faithful):
