@@ -211,11 +211,12 @@ def _json_plan(buf, verify: bool = False) -> tuple[int, int]:
     """``(price, escape)``: the bytes the parse of the UTF-8 JSON body
     ``buf`` holds at its peak, read from its bytes with no parse, and the
     bytes of it that are not ASCII when the parse escapes it to ASCII
-    first, the way that holds less and parses the same, else 0. A str takes the width of its widest character, so a body
-    decoded as it is takes the width of its widest at every character; a
-    body escaped to ASCII takes a byte at each, at 3 bytes for each byte
-    that is not ASCII. The strs the parse makes take their own width
-    either way. Each step holds:
+    first, the way that holds less and parses the same, else 0. A str
+    takes the width of its widest character, so a body decoded as it is
+    takes the width of its widest at every character; a body escaped to
+    ASCII takes a byte at each, at 3 bytes for each byte that is not
+    ASCII. The strs the parse makes take their own width either way. Each
+    step holds:
 
     - the escape: the body and its escaped copy;
     - the decode: the body, escaped or not, and its str, with the
@@ -547,8 +548,9 @@ async def read_json(request: Request, free: int | None = None, then=None):
     a byte of it is read, or of what arrived as a body with none arrives,
     then at :func:`json_price` once read. The price, the parse and the
     checks run in a worker thread, one body at a time (:func:`_in_turn`),
-    which holds the only reference to the body. The body was priced whole, so an inline image takes no byte
-    limit of its own; the item count and the pixel limits hold."""
+    which holds the only reference to the body. The body was priced
+    whole, so an inline image takes no byte limit of its own; the item
+    count and the pixel limits hold."""
     from ._common import SESSION_BODY_KEY, SESSION_SCOPE_KEY
 
     if free is None:
@@ -657,7 +659,8 @@ async def read_form_in_ram(request: Request, free: int | None = None,
         raise BodyRefused(400, f"the multipart form cannot be read: {e}") \
             from None
     # A body that ends inside a file leaves that file out of the form.
-    kept = {id(v.file) for _, v in form.multi_items() if not isinstance(v, str)}
+    kept = {id(v.file) for _, v in form.multi_items()
+            if not isinstance(v, str)}
     for f in parser._files_to_close_on_error:
         if id(f) not in kept:
             f.close()
