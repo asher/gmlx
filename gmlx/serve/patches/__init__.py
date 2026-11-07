@@ -317,8 +317,6 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     from gmlx.cache.kvarn_apc import install_kvarn_apc
     install_kvarn_apc()
     install_chat_template_kwargs()
-    from gmlx.upstream.system_content_fix import install_system_content_fix
-    install_system_content_fix()
     from gmlx.upstream.single_bos_fix import install_single_bos_fix
     install_single_bos_fix(count_routes=True)
     install_stream_timings()

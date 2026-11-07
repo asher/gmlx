@@ -241,6 +241,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   do not think, to Gemma 4, to Kimi K3 and Nemotron-3.5-Bolt-E4B with thinking
   off, and to gpt-oss, Beam, MiniMax-M3, Hy3 and HY4 with `family_defaults:
   false`. Before, they waited for a `</think>` that these models never write.
+- A system or developer message on a Gemma 4 model with vision (`mmproj:`,
+  `--mmproj` or an MLX-format checkpoint) renders as on the text model. It got
+  an extra space before the end of its turn, one more per video, a video
+  marker, or on older templates a Python list.
 
 ## [0.5.4] - 2026-10-29
 

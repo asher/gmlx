@@ -134,6 +134,10 @@ MODEL_CONFIG = {
     "minimax_m3_vision": MessageFormat.LIST_WITH_IMAGE_FIRST,
 }
 
+# gmlx: the model types whose template prints a list system or developer
+# message other than as its text.
+_SYSTEM_TEXT_TYPES = ("gemma4", "gemma4_unified", "diffusion_gemma")
+
 # Models that don't support multi-image
 SINGLE_IMAGE_ONLY_MODELS = {
     "llava_next",
@@ -304,6 +308,14 @@ class MessageFormatter:
                 f"Model {self.model_name} does not support multi-image chat. "
                 f"Please only use 1 image."
             )
+
+        # gmlx: Gemma 4 system and developer text stays a string, as the
+        # text model renders it, also on a video request.
+        if (
+            role in ("system", "developer")
+            and self.model_name in _SYSTEM_TEXT_TYPES
+        ):
+            return {"role": role, "content": prompt}
 
         # Handle video format for specific models
         if self.model_name in [

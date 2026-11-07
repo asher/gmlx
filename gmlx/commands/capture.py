@@ -208,12 +208,10 @@ def prompt_ids(model, processor, config, user: str, system: str | None,
 
 
 def install_render_fixes() -> None:
-    """The serve installs that change how a plain chat prompt renders and
-    encodes: a system message as a string, and one BOS."""
+    """The serve install that changes how a plain chat prompt encodes: one
+    BOS."""
     from gmlx.upstream.single_bos_fix import install_single_bos_fix
-    from gmlx.upstream.system_content_fix import install_system_content_fix
 
-    install_system_content_fix()
     install_single_bos_fix()
 
 
@@ -238,8 +236,7 @@ def load(args):
     """``(model, processor, config)`` through serve's text load, with the
     placement the flags ask for."""
     import gmlx.load.loadlog as loadlog
-    from gmlx.serve.bridge_vlm import _model_type, load_serveable_model
-    from gmlx.upstream.system_content_fix import enable_system_content_fix
+    from gmlx.serve.bridge_vlm import load_serveable_model
 
     from .cli import rope_override_from_args
 
@@ -257,7 +254,6 @@ def load(args):
     if is_diffusion_model(model):
         raise ValueError("gmlx capture runs causal text models, and "
                          f"{os.path.basename(args.gguf)} is a diffusion model")
-    enable_system_content_fix(processor, _model_type(config))
     return model, processor, config
 
 

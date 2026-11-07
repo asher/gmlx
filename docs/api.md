@@ -348,7 +348,7 @@ llama-server renders for the same messages:
 
 - Qwen3.5 and later Qwen templates, and the other templates that write tool
   calls in the same `<tool_call>` and `<function=...>` form.
-- Gemma 4, on a model set up without `mmproj:`.
+- Gemma 4.
 - SmolLM2-135M-Instruct.
 
 A request to any other model gets a 400. So does a last message with
@@ -364,6 +364,10 @@ gmlx differs from llama-server in these ways:
   message of any role, and gmlx needs an assistant message.
 - gmlx merges all system messages into one system message at the start.
   llama-server keeps each one where the client sent it.
+- gmlx gives the template a system message as one string, also when the
+  client sends it as text parts. llama-server can give the template the
+  parts, and a Gemma 4 template renders parts with a space before the end of
+  the turn.
 - The reply holds only the new text. A llama-server reply that is not
   streamed also holds the prefill.
 - llama-server turns thinking on when the template has a switch, and gmlx

@@ -845,10 +845,7 @@ class _GateTok:
 
 
 def test_a_served_render_keeps_the_templates_thinking_default():
-    from gmlx.upstream.system_content_fix import install_system_content_fix
-
     sp.install_chat_template_kwargs()
-    install_system_content_fix()
     pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
     msgs = [{"role": "user", "content": "hi"}]
     assert pu.get_chat_template(_GateTok(), msgs, True) == "THINK"
