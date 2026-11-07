@@ -319,7 +319,8 @@ def _queue_wait_s(metrics, waiting: int) -> float:
 
 def estimate_request(body: dict, *, tenant_id=None) -> tuple:
     """Dry-run a chat-completions ``body``. Returns ``(status, payload)``:
-    404 for an unknown model, 400 for a body without messages, else 200
+    404 for an unknown model, 400 for a body without messages or one that
+    breaks a prefill rule, else 200
     with the estimate (``resident: false`` and null fits for a model that
     is not loaded; ``media: true`` and null fits when the request carries
     images / audio / video)."""
@@ -330,6 +331,13 @@ def estimate_request(body: dict, *, tenant_id=None) -> tuple:
     messages = body.get("messages") if isinstance(body, dict) else None
     if not isinstance(messages, list) or not messages:
         return 400, {"error": {"message": "messages required",
+                               "type": "invalid_request_error"}}
+    from gmlx.serve.patches.prefill import body_error
+
+    # The prefill rules, before the model check, as on the chat route.
+    rule = body_error(body)
+    if rule:
+        return 400, {"error": {"message": rule,
                                "type": "invalid_request_error"}}
     try:
         path, spec = serving.resolve_request_model(model_id)

@@ -39,6 +39,9 @@ AUTOPARSER_TEMPLATES = frozenset({
     "872be49dbb638044ad01b60388f48d469ff2980e5f0dccdc22ec907db54d0788",
 })
 
+# The handlers continued_prompt has a recipe for.
+RECIPES = frozenset({"qwen3-coder", "gemma4", "gemma4-legacy", "autoparser"})
+
 
 @dataclass(frozen=True)
 class Continuation:

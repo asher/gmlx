@@ -341,9 +341,14 @@ def test_a_python_chat_template_gets_a_400(chat):
     assert _gen_args_refusal(_prefill(_C), proc) == prefill.UNSUPPORTED
 
 
-def test_the_gemma4_processor_renders_the_llama_tail(chat, monkeypatch):
-    """Gemma4Processor renders the template text through its tokenizer,
-    so it may continue a message."""
+_GEMMA_CONT_ROWS = [
+    r["id"] for r in _FIXTURE["rows"]
+    if r["run"] == "llama-server/gemma4_12b" and "continue_final_message" in r["body"]]
+
+
+def test_the_gemma4_processor_gets_a_400(chat, monkeypatch):
+    """Gemma4Processor renders another prompt than llama-server, so it may
+    not continue a message."""
     row = _row("gemma4_12b/think-off/content")
     processor = _Gemma4Processor(
         (_FIXTURES / row["template"]).read_text(), "<bos>")
@@ -353,9 +358,72 @@ def test_the_gemma4_processor_renders_the_llama_tail(chat, monkeypatch):
 
     r = TestClient(_APP.app).post("/v1/chat/completions", json={
         "model": "m", "max_tokens": 1, **row["body"]})
-    assert r.status_code == 200, r.text
-    assert _RUNTIME.response_generator.calls[-1].endswith(
-        "<|turn>model\n<|channel>thought\n<channel|>Hello")
+    assert r.status_code == 400, r.text
+    assert prefill.UNSUPPORTED in r.text
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "Gemma4Processor rebuilds a string system message as a list of text "
+    "parts, and the template renders each part with a trailing space"))
+@pytest.mark.parametrize("rid", _GEMMA_CONT_ROWS)
+def test_the_gemma4_processor_renders_llama_servers_prompt(chat, rid):
+    """When this passes, Gemma4Processor may go back on the allowlist."""
+    row = _row(rid)
+    processor = _Gemma4Processor(
+        (_FIXTURES / row["template"]).read_text(), "<bos>")
+    from gmlx.gen.continuation import handler_for, parse_continue, resolve
+
+    msgs = [dict(m) for m in row["body"]["messages"]]
+    cont = resolve(parse_continue(row["body"]["continue_final_message"]),
+                   msgs[-1], handler_for(processor.chat_template))
+    out = _OPENAI.apply_chat_template(
+        processor, {"model_type": "gemma4_unified"}, msgs,
+        add_generation_prompt=False, **{prefill.CONTINUE_KEY: cont},
+        **row["body"]["chat_template_kwargs"])
+    want, got = _expected(row, out)
+    assert got == want
+
+
+def test_a_render_error_in_a_prefill_is_not_a_template_refusal():
+    """The real render error surfaces, as it does without prefill."""
+    processor, config = _processor_for(_QWEN)
+    cont = Continuation(mode="content", content="x", reasoning="",
+                        handler="qwen3-coder")
+
+    def fails(*a, **kw):
+        raise ValueError("bad history")
+
+    with pytest.raises(ValueError, match="bad history"):
+        prefill.render_continued(fails, processor, config, [*_HISTORY, _C],
+                                 **{prefill.CONTINUE_KEY: cont})
+
+
+def test_a_render_that_is_not_text_gets_a_400():
+    from fastapi import HTTPException
+
+    processor, config = _processor_for(_QWEN)
+    cont = Continuation(mode="content", content="x", reasoning="",
+                        handler="qwen3-coder")
+    with pytest.raises(HTTPException) as e:
+        prefill.render_continued(lambda *a, **kw: {"role": "user"}, processor,
+                                 config, [*_HISTORY, _C],
+                                 **{prefill.CONTINUE_KEY: cont})
+    assert (e.value.status_code, e.value.detail) == (400, prefill.UNSUPPORTED)
+
+
+def test_a_handler_with_no_recipe_gets_a_400_before_any_render():
+    from fastapi import HTTPException
+
+    processor, config = _processor_for(_QWEN)
+    cont = Continuation(mode="content", content="x", reasoning="",
+                        handler="kimi-k3")
+    calls = []
+    with pytest.raises(HTTPException) as e:
+        prefill.render_continued(lambda *a, **kw: calls.append(a) or "",
+                                 processor, config, [*_HISTORY, _C],
+                                 **{prefill.CONTINUE_KEY: cont})
+    assert (e.value.status_code, e.value.detail) == (400, prefill.UNSUPPORTED)
+    assert calls == []
 
 
 def test_a_last_message_only_model_gets_a_400_not_a_500(chat, monkeypatch):
@@ -580,6 +648,21 @@ def test_the_estimate_answers_a_request_rule_with_its_message(chat, monkeypatch)
     status, out = est.estimate_request({"model": "m", **_prefill(
         {"role": "assistant", "content": ""})})
     assert status == 400 and out["error"]["message"] == prefill.EMPTY
+
+
+@pytest.mark.parametrize("body,message", [
+    (_prefill(_C, cont="yes"), prefill.INVALID_VALUE),
+    ({"messages": [*_HISTORY, _C], "continue_final_message": True},
+     prefill.BOTH_TRUE),
+    (_prefill({"role": "assistant", "content": ""}), prefill.EMPTY),
+])
+def test_the_estimate_of_a_model_not_resident_answers_a_request_rule(
+        chat, body, message):
+    serving.register_resolved_models(build_config(
+        {"models": {"m": {"path": "/abs/m.gguf"}}}))
+    _PKG._kq_residency_pool = types.SimpleNamespace(resident_entry=lambda p: None)
+    status, out = est.estimate_request({"model": "m", **body})
+    assert status == 400 and out["error"]["message"] == message
 
 
 def test_every_template_kwargs_render_site_is_known():

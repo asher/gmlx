@@ -27,6 +27,7 @@ import importlib
 
 from gmlx.gen.continuation import (
     INVALID_VALUE,
+    RECIPES,
     continued_prompt,
     handler_for,
     parse_continue,
@@ -66,12 +67,16 @@ UNSUPPORTED = ("continue_final_message is not supported for this model's chat "
 _MISSING = object()
 
 # Processor apply_chat_template overrides known to render the template text
-# that handler_for reads. Gemma4Processor rebuilds the messages again and
-# calls its tokenizer's template, inside the faithful-history wrap.
+# that handler_for reads, as llama-server renders it. Gemma4Processor is not
+# one: its rebuild turns a string system message into text parts, which the
+# template renders with a trailing space.
 _JINJA_OVERRIDES = (
-    ("gmlx._vendor.mlx_vlm.models.gemma4.processing_gemma4", "Gemma4Processor"),
     ("gmlx._vendor.mlx_lm.tokenizer_utils", "TokenizerWrapper"),
 )
+
+
+class _NotText(Exception):
+    """The render returned something other than a prompt string."""
 
 
 def _fields(request) -> tuple:
@@ -128,6 +133,17 @@ def parse_request(request):
     if _response_format_set(request):
         return requested, agp, RESPONSE_FORMAT
     return requested, agp, None
+
+
+def body_error(body: dict) -> str | None:
+    """The request rule a chat ``body`` breaks, or None. For a caller that
+    answers before any model loads, as the route wrap does."""
+    try:
+        request = _chat_request_type()(**body)
+    except Exception:
+        # The caller's own validation answers a malformed body.
+        return None
+    return parse_request(request)[2]
 
 
 def _chat_request_type():
@@ -206,15 +222,20 @@ def render_continued(fn, processor, config, prompt, *a, **kw):
     if cfg.get("model_type") in _LAST_MESSAGE_ONLY:
         # The render returns the last message alone, not a prompt.
         raise refusal_type()(400, UNSUPPORTED)
+    if cont.handler not in RECIPES:
+        raise refusal_type()(400, UNSUPPORTED)
     head = list(prompt[:-1])
 
     def render(gen):
-        return fn(processor, config, head, *a,
-                  **{**kw, "add_generation_prompt": gen})
+        out = fn(processor, config, head, *a,
+                 **{**kw, "add_generation_prompt": gen})
+        if not isinstance(out, str):
+            raise _NotText
+        return out
 
     try:
         return continued_prompt(cont, template_for(processor, kw), render)
-    except (TypeError, ValueError):
+    except _NotText:
         raise refusal_type()(400, UNSUPPORTED) from None
 
 
