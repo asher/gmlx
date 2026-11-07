@@ -188,6 +188,19 @@ class Mux:
         return False
 
 
+_WRITTEN = re.compile(r"(frame_\d{6}\.png|audio\.wav)(\.part)?")
+
+
+def clear_frames(folder: str) -> None:
+    """Remove the files a clip's frames take in ``folder``: the PNGs of
+    :func:`write_frames`, ``audio.wav`` and their part files, so an
+    earlier, longer clip leaves none past this one's end. Other files
+    stay."""
+    for e in os.scandir(folder):
+        if _WRITTEN.fullmatch(e.name) and not e.is_dir(follow_symlinks=False):
+            os.remove(e.path)
+
+
 def write_frames(folder: str, frames, start: int) -> int:
     """PNG files ``frame_000001.png`` on of frames (n, H, W, 3) in [0, 1]
     from frame ``start`` + 1, and the next start."""

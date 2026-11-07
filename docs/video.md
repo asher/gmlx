@@ -342,7 +342,9 @@ gmlx video generate h3-fast --preview --seed 3 --prompt "..."
 
 ## Frames without ffmpeg
 
-`--frames-dir` writes the clip as PNG frames and an `audio.wav` file.
+`--frames-dir` writes the clip as PNG frames and an `audio.wav` file,
+in place of the frames and `audio.wav` of an earlier clip in that folder.
+Other files in the folder stay.
 Alone, it writes the clip without ffmpeg, though guide videos and sounds
 are still read through it:
 

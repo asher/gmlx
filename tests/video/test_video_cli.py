@@ -462,6 +462,24 @@ def test_a_run_writes_the_mp4_and_the_frames(stubbed, tmp_path, capsys):
         str(out), "fl2va", 5)
 
 
+def test_a_shorter_clip_leaves_no_frames_of_the_one_before(stubbed,
+                                                           tmp_path):
+    """A frames folder that holds a longer earlier clip holds this clip's
+    5 frames and audio.wav after the run, and every other file it held."""
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    for name in [*(f"frame_{i:06d}.png" for i in range(1, 10)),
+                 "frame_000009.png.part", "audio.wav", "notes.txt",
+                 "frame_7.png"]:
+        (frames / name).write_bytes(b"earlier")
+    (frames / "frame_000008.png.d").mkdir()
+    assert stubbed("--frames-dir", str(frames)) == 0
+    assert sorted(p.name for p in frames.iterdir()) == [
+        "audio.wav", *(f"frame_{i:06d}.png" for i in range(1, 6)),
+        "frame_000008.png.d", "frame_7.png", "notes.txt"]
+    assert (frames / "notes.txt").read_bytes() == b"earlier"
+
+
 def test_the_latents_land_at_the_path_given(stubbed, tmp_path):
     """A --save-latent path without .npz is written as given, not beside
     it with .npz added."""

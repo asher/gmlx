@@ -174,7 +174,7 @@ def decode_and_mux(xv, xa, *, video_vae: Callable, audio_vae: Callable,
     the model ``audio_vae()`` loads, which goes before the video VAE of
     ``video_vae()`` decodes the frames a chunk at a time into the MP4
     ``out`` (written as ``out.part``, then renamed) and the PNGs of
-    ``frames_dir``. ``between(k)`` runs after each chunk, with ``k``
+    ``frames_dir``, cleared of an earlier clip's frames first. ``between(k)`` runs after each chunk, with ``k``
     frames decoded, and may raise to stop: the MP4 is then aborted and
     its part removed. Returns {"audio_s", "decode_s"}."""
     import time
@@ -206,6 +206,7 @@ def decode_and_mux(xv, xa, *, video_vae: Callable, audio_vae: Callable,
     try:
         if frames_dir is not None:
             os.makedirs(os.path.expanduser(frames_dir), exist_ok=True)
+            io.clear_frames(os.path.expanduser(frames_dir))
         with tempfile.TemporaryDirectory(prefix=".gmlx-video-") as tmp:
             wav = io.write_wav(os.path.join(tmp, "audio.wav"), wave, rate)
             mux = None
