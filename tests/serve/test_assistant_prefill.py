@@ -768,10 +768,6 @@ class _WrapperByteTokenizer(_ByteTokenizer):
     think_end_tokens = tuple(think_end.encode())
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "The plain criteria take the think markers from the args only, else "
-    "<think>. Gemma names neither in its template's known pairs, so a "
-    "gemma budget with no configured markers stays disarmed."))
 def test_a_gemma_prefill_budget_arms_without_configured_markers(chat):
     run = "llama-server/gemma4_12b"
     ids, k, tok, args, _end = _budget_prefill(chat, run, "reasoning", 0)
@@ -780,6 +776,242 @@ def test_a_gemma_prefill_budget_arms_without_configured_markers(chat):
     crit = _plain_criteria(_WrapperByteTokenizer(tok.chat_template), args,
                            ids)
     assert crit.thinking_token_count == k
+
+
+# The server's own shapes. On text and MTP serve, rg.tokenizer is the raw
+# backend, which carries no think markers; the processor forwards the
+# loader wrapper's. On VLM serve there is no wrapper at all.
+_GEMMA_SINGLES = ("<|channel>", "<channel|>", "<|think|>", "<|turn>",
+                  "<turn|>")
+_GEMMA = ("<|channel>thought", "<channel|>")
+
+
+def _gemma_template(name="gemma4_12b_template.jinja"):
+    return (_FIXTURES / name).read_text()
+
+
+def _served(template, shape="text", singles=_GEMMA_SINGLES, merges=()):
+    """``(rg, tokenizer)``: a generator stub with the server's processor
+    shape over a synthetic vocab."""
+    import think_vocab as tv
+
+    raw = tv.tokenizer(template, singles=singles, merges=merges)
+    if shape == "text":
+        proc = tv.text_processor(raw)
+    else:
+        from gmlx.load.vlm import _synthesize_vlm_processor
+
+        proc = _synthesize_vlm_processor(
+            "gemma4", raw, {"clip.vision.patch_size": 16,
+                            "clip.vision.image_size": 224})
+    return types.SimpleNamespace(tokenizer=proc.tokenizer, processor=proc), raw
+
+
+def _no_markers(budget):
+    return types.SimpleNamespace(
+        thinking_budget=budget, thinking_start_token=None,
+        thinking_end_token=None, thinking_budget_message=None,
+        _kq_has_tools=False)
+
+
+def _served_prefill(chat, shape):
+    """The gemma reasoning prefill on a served processor: its ids, the k
+    reasoning tokens after the open marker, the stub and its tokenizer."""
+    import think_vocab as tv
+
+    prompt = chat("llama-server/gemma4_12b", {**_prefill(
+        {"role": "assistant", "content": "",
+         "reasoning_content": _LONG_REASONING}),
+        "chat_template_kwargs": {"enable_thinking": True}})
+    rg, tok = _served(_gemma_template(), shape)
+    ids = tv.ids(tok, prompt)
+    k = len(tv.ids(tok, "\n" + _LONG_REASONING))
+    assert ids[-k:] == tv.ids(tok, "\n" + _LONG_REASONING)
+    return ids, k, rg, tok
+
+
+@pytest.mark.parametrize("shape", ["text", "vlm"])
+def test_a_gemma_prefill_budget_arms_on_the_served_processor(chat, shape):
+    """The plain criteria on the server's processor shape, with no markers
+    configured, seed the count from the prefill and force <channel|> at
+    the budget."""
+    import mlx.core as mx
+
+    import think_vocab as tv
+
+    ids, k, rg, tok = _served_prefill(chat, shape)
+    assert not hasattr(rg.tokenizer, "think_start")
+    if shape == "text":
+        assert rg.processor.think_start == _GEMMA[0]
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    sp_chat.install_thinking_budget_fix()
+    crit = gen.ResponseGenerator._make_thinking_budget_criteria(
+        rg, _no_markers(k + 1), mx.array([ids]))
+    assert crit.thinking_token_count == k and crit.in_thinking
+    assert crit(_THINK) is not None
+    run = [crit.forced_token_id]
+    while (forced := crit(run[-1])) is not None:
+        run.append(forced)
+    assert run[-1:] == tv.ids(tok, _GEMMA[1])
+
+
+@pytest.mark.parametrize("shape", ["text", "vlm"])
+def test_a_gemma_prefill_budget_arms_the_served_mtp_hook(chat, shape):
+    """The MTP hook on the server's processor shape starts inside the
+    block with the prefill's count and closes at the first round boundary
+    past the budget."""
+    import mlx.core as mx
+
+    import think_vocab as tv
+    from gmlx.serve.patches.mtp_thinking import _build_hook
+
+    ids, k, rg, tok = _served_prefill(chat, shape)
+    hook = _build_hook(rg, _no_markers(k + 2), mx.array([ids]))
+    assert hook is not None
+    assert hook.in_thinking and hook.count == k
+    assert hook.start_seq == tuple(tv.ids(tok, _GEMMA[0]))
+    hook.observe(_THINK)
+    assert hook.take_forced() is None
+    for _ in range(3):
+        hook.observe(_THINK)
+    forced = hook.take_forced()
+    assert forced is not None and forced[-1:] == tv.ids(tok, _GEMMA[1])
+
+
+def test_a_gemma_generated_budget_closes_and_recloses_a_trailing_channel():
+    """Thinking on, no prefill: the criteria start outside, enter on the
+    generated channel opener, force <channel|> after the budget, and close
+    the empty channel Gemma may write after its answer at once."""
+    import mlx.core as mx
+
+    import think_vocab as tv
+
+    rg, tok = _served(_gemma_template())
+    prompt = rg.processor.apply_chat_template(
+        [{"role": "user", "content": "Hi"}], tokenize=False,
+        add_generation_prompt=True, enable_thinking=True)
+    assert prompt.endswith("<|turn>model\n")
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    sp_chat.install_thinking_budget_fix()
+    crit = gen.ResponseGenerator._make_thinking_budget_criteria(
+        rg, _no_markers(4), mx.array([tv.ids(tok, prompt)]))
+    assert not crit.in_thinking
+    for t in tv.ids(tok, _GEMMA[0]):
+        assert crit(t) is None
+    assert crit.in_thinking
+    forced = None
+    for n, t in enumerate(tv.ids(tok, "abcdefgh"), 1):
+        forced = crit(t)
+        if forced is not None:
+            break
+    assert n == 4
+    run = [forced]
+    while (forced := crit(run[-1])) is not None:
+        run.append(forced)
+    assert run[-1:] == tv.ids(tok, _GEMMA[1])
+    for t in tv.ids(tok, "Hello."):
+        assert crit(t) is None
+    forced = None
+    for t in tv.ids(tok, _GEMMA[0]):
+        forced = crit(t)
+    assert forced is not None
+    run = [forced]
+    while (forced := crit(run[-1])) is not None:
+        run.append(forced)
+    assert run[-1:] == tv.ids(tok, _GEMMA[1])
+    assert not crit.done
+
+
+def _plain_and_hook(rg, args, ids):
+    import mlx.core as mx
+
+    from gmlx.serve.patches.mtp_thinking import _build_hook
+
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    sp_chat.install_thinking_budget_fix()
+    crit = gen.ResponseGenerator._make_thinking_budget_criteria(
+        rg, args, mx.array([ids]))
+    return crit, _build_hook(rg, args, mx.array([ids]))
+
+
+def _pair_ids(tok, pair):
+    import think_vocab as tv
+
+    return tuple(tv.ids(tok, pair[0])), tuple(tv.ids(tok, pair[1]))
+
+
+_QWEN_SINGLES = ("<think>", "</think>", "<|im_start|>", "<|im_end|>")
+
+
+def test_qwen_keeps_its_think_markers():
+    rg, tok = _served((_FIXTURES / "qwen36_template.jinja").read_text(),
+                      singles=_QWEN_SINGLES)
+    crit, hook = _plain_and_hook(rg, _no_markers(4), tok.encode("x"))
+    want = _pair_ids(tok, ("<think>", "</think>"))
+    assert (crit._start_seq, crit._end_seq) == want
+    assert (hook.start_seq, hook.end_seq) == want
+
+
+def test_a_think_template_wins_over_the_vocab_markers():
+    """Nemotron-3.5-Bolt-E4B has the Gemma vocab, so mlx-lm infers the
+    channel pair, but its template thinks in <think>."""
+    rg, tok = _served((_FIXTURES / "nemotron_bolt_template.jinja").read_text())
+    assert rg.processor.think_start == _GEMMA[0]
+    crit, hook = _plain_and_hook(rg, _no_markers(4), tok.encode("x"))
+    want = _pair_ids(tok, ("<think>", "</think>"))
+    assert (crit._start_seq, crit._end_seq) == want
+    assert (hook.start_seq, hook.end_seq) == want
+
+
+_NO_PAIR = "{% for m in messages %}{{ m['content'] }}{% endfor %}"
+
+
+def test_no_markers_anywhere_keeps_the_think_fallback_and_no_hook(caplog):
+    rg, tok = _served(_NO_PAIR, singles=())
+    crit, hook = _plain_and_hook(rg, _no_markers(4), tok.encode("x"))
+    assert crit._end_seq == tuple(tok.encode("</think>",
+                                             add_special_tokens=False))
+    assert hook is None
+
+
+def test_a_gemma_vocab_without_a_template_pair_gets_the_whole_start():
+    # The VLM shape has no wrapper, so only the vocab probe finds the pair.
+    rg, tok = _served(_NO_PAIR, shape="vlm")
+    _crit, hook = _plain_and_hook(rg, _no_markers(4), tok.encode("x"))
+    assert hook is not None
+    assert (hook.start_seq, hook.end_seq) == _pair_ids(tok, _GEMMA)
+
+
+def test_a_processor_pair_resolves_when_the_template_names_none():
+    rg, tok = _served(_NO_PAIR)
+    assert rg.processor.think_start == _GEMMA[0]
+    crit, hook = _plain_and_hook(rg, _no_markers(4), tok.encode("x"))
+    assert (crit._start_seq, crit._end_seq) == _pair_ids(tok, _GEMMA)
+    assert (hook.start_seq, hook.end_seq) == _pair_ids(tok, _GEMMA)
+
+
+@pytest.mark.parametrize("start,end,want", [
+    ("<a>", "</a>", ("<a>", "</a>")),
+    ("<a>", None, ("<a>", "</think>")),
+    (None, "</a>", ("<think>", "</a>")),
+])
+def test_configured_markers_win_and_one_keeps_its_default_side(start, end,
+                                                               want):
+    rg, tok = _served(_gemma_template())
+    args = _no_markers(4)
+    args.thinking_start_token, args.thinking_end_token = start, end
+    crit, _hook = _plain_and_hook(rg, args, tok.encode("x"))
+    assert (crit._start_seq, crit._end_seq) == _pair_ids(tok, want)
+
+
+def test_a_gemma_budget_leaves_the_request_markers_unset():
+    rg, tok = _served(_gemma_template())
+    args = _no_markers(4)
+    crit, hook = _plain_and_hook(rg, args, tok.encode("x"))
+    assert crit._end_seq == _pair_ids(tok, _GEMMA)[1]
+    assert hook is not None
+    assert args.thinking_start_token is None
+    assert args.thinking_end_token is None
 
 
 @pytest.mark.parametrize("run", _BUDGET_RUNS)

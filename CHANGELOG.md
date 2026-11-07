@@ -123,6 +123,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `run`, chat and `gmlx serve` refuse an embedding adapter that the model
   cannot take before the model loads, so `gmlx serve` unloads no model for
   it.
+- With a `response_format` schema or XTC on `gmlx serve`, a reply on Qwen3,
+  MiniMax-M3, Flint, Ripple, Hy3 or HY4 starts with a thinking block or with
+  the schema, where its first token was free. A top-level `enable_thinking:
+  false` that the template does not turn off (GLM-5, K2 Horizon, Kimi K2.5 and
+  K3, and gpt-oss, Beam and Muse with `family_defaults: false`) gets the
+  schema after the reasoning, where the schema constrained the reasoning.
 
 ### Fixed
 
@@ -228,6 +234,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   where they said the server did not answer.
 - A chat, Responses, Messages or images request with a lone surrogate
   escape gets a 400 naming the field, where it returned a 500.
+- A thinking budget on Gemma 4 closes the thinking block at the budget, where
+  the budget never ran: `thinking_budget` on `gmlx serve`, and on `gmlx run`
+  and `gmlx chat` with an mmproj, and a Messages `thinking.budget_tokens`.
+- A `response_format` schema and XTC now apply on `gmlx serve` to models that
+  do not think, to Gemma 4, to Kimi K3 and Nemotron-3.5-Bolt-E4B with thinking
+  off, and to gpt-oss, Beam, MiniMax-M3, Hy3 and HY4 with `family_defaults:
+  false`. Before, they waited for a `</think>` that these models never write.
 
 ## [0.5.4] - 2026-10-29
 

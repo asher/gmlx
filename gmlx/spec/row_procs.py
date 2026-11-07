@@ -39,10 +39,14 @@ class UnsupportedProcessor(ValueError):
 @dataclass
 class _Gate:
     """Thinking state of one wrapped processor. ``start`` indexes the row
-    context where the processor's own context begins, once active."""
+    context where the processor's own context begins, once active.
+    ``maybe`` is the start marker of the wrapper's maybe state, until the
+    first token: the processor skips that token, then waits for the end
+    marker after the first start token and runs after any other."""
 
     opener: AnswerGate
     start: int | None
+    maybe: tuple | None = None
 
 
 @dataclass
@@ -102,8 +106,11 @@ class SpecRowProcessors:
         for proc in processors or ():
             gate, inner = None, proc
             if isinstance(proc, ThinkingAwareLogitsProcessor):
+                maybe = (proc._maybe_seq
+                         if getattr(proc, "_maybe", None) else None)
                 gate = _Gate(proc.answer_gate.restart(context[-16:]),
-                             len(context) if proc._active else None)
+                             len(context) if proc._active else None,
+                             maybe or None)
                 inner = proc.processor
             if isinstance(inner, LLGuidanceLogitsProcessor):
                 if grammar is not None:
@@ -112,8 +119,10 @@ class SpecRowProcessors:
                 grammar = SpecGrammar(
                     _fresh_matcher(inner),
                     vocab_size=inner.llg_tokenizer.vocab_size,
-                    active=gate.start is not None if gate else True,
-                    gate=gate.opener.restart(gate.opener.tail) if gate else None)
+                    active=(gate.start is not None or gate.maybe is not None)
+                    if gate else True,
+                    gate=gate.opener.restart(gate.opener.tail) if gate else None,
+                    maybe=gate.maybe if gate else None)
                 steps.append(_Step(None, None))
             elif callable(inner) and not hasattr(inner, "process_last_token"):
                 if gate is None and isinstance(inner, OutputPenalty):
@@ -144,6 +153,10 @@ class SpecRowProcessors:
             gate = step.gate
             if gate is None and isinstance(step.fn, OutputPenalty):
                 step.fn.commit(tokens)
+            if gate is not None and gate.maybe is not None:
+                first, gate.maybe = gate.maybe[0], None
+                if tokens[0] != first:
+                    gate.start = n
             if gate is not None and gate.start is None:
                 j = gate.opener.advance(tokens)
                 if j is not None:
@@ -166,6 +179,10 @@ class SpecRowProcessors:
             gate = step.gate
             start = 0 if gate is None else gate.start
             hit = gate.opener.find(drafts) if start is None else None
+            if gate is not None and gate.maybe is not None and drafts:
+                # The first position is skipped. A first draft that is not
+                # the start token lets the processor run from the next.
+                hit = 0 if drafts[0] != gate.maybe[0] else hit
             rows = []
             for j in range(n_pos):
                 rows.append(start)

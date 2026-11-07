@@ -96,13 +96,22 @@ def _decode_generated(ctx: dict, generated: list[int]) -> str:
     return text
 
 
-def _thinking_markers(kw: dict):
+def _split_pair(ctx: dict):
+    """The (start, end) markers the reply split took: the request's, else
+    the pair the render resolved (the render capture keeps it)."""
+    kw = ctx.get("kw") or {}
+    ts, te = kw.get("thinking_start_token"), kw.get("thinking_end_token")
+    if not (ts or te) and ctx.get("think"):
+        ts, te = ctx["think"]
+    return ts, te
+
+
+def _thinking_markers(ctx: dict):
     """The same (open, close) marker pairs the response splitter tries,
     including its built-in defaults -- the request kwargs rarely carry
     explicit thinking tokens."""
     from gmlx._vendor.mlx_vlm.server.responses_state import ThinkingStreamState
-    return ThinkingStreamState._build_open_close_markers(
-        kw.get("thinking_start_token"), kw.get("thinking_end_token"))
+    return ThinkingStreamState._build_open_close_markers(*_split_pair(ctx))
 
 
 def _gen_prompt_text(ctx: dict) -> str:
@@ -137,7 +146,7 @@ def _virtually_finish(ctx: dict, text: str) -> str:
     its first tick -- the virtual closer restores the honest question.
     """
     try:
-        markers = _thinking_markers(ctx.get("kw") or {})
+        markers = _thinking_markers(ctx)
     except Exception:
         return text
     for sm, em in markers:
@@ -164,6 +173,26 @@ def truncated_thinking(text, pairs, prompt) -> bool:
         if sm in text or em in text:
             return False
     return any(prompt.rfind(sm) > prompt.rfind(em) for sm, em in pairs)
+
+
+def header_split(text, prompt):
+    """``(reasoning, content)`` of a harmony (gpt-oss) or ATEM (Muse) reply,
+    else None. The stock splitter knows none of these markers and returns
+    the raw markup as content, which the model's own chat template rejects
+    once a client sends the reply back as history. ATEM writes no channel
+    marker: a ``prompt`` that ends mid-header and a header close in the
+    reply mark it. Shared rule for the server's splitter and the retirement
+    mirror, as in :func:`truncated_thinking`."""
+    in_header = isinstance(prompt, str) and prompt.rstrip().endswith(
+        "<|start|>assistant")
+    if not text or not ("<|channel|>" in text
+                        or (in_header and "<|message|>" in text)):
+        return None
+    # Gemma's lopsided "<|channel>thought" lacks the closing pipe, so this
+    # cannot misfire on it.
+    from gmlx.tui.reasoning import split_harmony_reply
+
+    return split_harmony_reply(text, start_in_header=in_header)
 
 
 _CHANNEL_HINTS = ("<|channel|>", "<|channel>", "<|start|>assistant")
@@ -203,15 +232,15 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
     from gmlx._vendor.mlx_vlm.server import openai as srv
 
     kw = ctx.get("kw") or {}
-    ts = kw.get("thinking_start_token")
-    te = kw.get("thinking_end_token")
-    reasoning, content = srv._split_thinking(full_text, ts, te)
+    ts, te = _split_pair(ctx)
+    split = header_split(full_text, _gen_prompt_text(ctx))
+    reasoning, content = split or srv._split_thinking(full_text, ts, te)
     if reasoning is None:
         ch_reasoning, ch_content = _channel_split(full_text)
         if ch_reasoning is not None:
             reasoning, content = ch_reasoning, ch_content
     if reasoning is None and content and truncated_thinking(
-            full_text, _thinking_markers(kw), _gen_prompt_text(ctx)):
+            full_text, _thinking_markers(ctx), _gen_prompt_text(ctx)):
         reasoning, content = content, ""
 
     tool_calls = None
