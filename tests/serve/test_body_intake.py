@@ -400,3 +400,63 @@ def test_short_strs_after_the_last_long_one_are_priced_as_text():
     # A str with no closing quote is made up to the end of the body.
     cut = first[:-30000]
     assert bi.json_price(cut + b'"' + b"x" * 30000) > bi.json_price(cut)
+
+
+def _cut_form(file_field: str) -> tuple[bytes, str]:
+    """A form whose body ends inside its file, with no closing boundary."""
+    b = "gmlxboundary"
+    body = (f'--{b}\r\nContent-Disposition: form-data; name="prompt"\r\n\r\n'
+            f'a cat\r\n--{b}\r\nContent-Disposition: form-data; '
+            f'name="{file_field}"; filename="a.png"\r\nContent-Type: '
+            f"image/png\r\n\r\n").encode() + b"x" * 3000
+    return body, f"multipart/form-data; boundary={b}"
+
+
+def test_a_cut_images_form_closes_the_file_it_began(monkeypatch):
+    """A form whose body ends inside a file reads its whole parts; the
+    file it began is closed, not left open to the end of the process."""
+    import asyncio
+    import tempfile
+
+    from starlette import formparsers
+
+    made: list = []
+
+    class Spool(tempfile.SpooledTemporaryFile):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            made.append(self)
+    monkeypatch.setattr(formparsers, "SpooledTemporaryFile", Spool)
+    body, ctype = _cut_form("image")
+
+    async def read():
+        form = await bi.read_form_in_ram(
+            _form_request("/v1/images/edits", body, ctype), 1 << 30)
+        items = list(form.multi_items())
+        await form.close()
+        return items
+    items = asyncio.run(read())
+    assert items == [("prompt", "a cat")]
+    assert made and all(f.closed for f in made)
+
+
+def test_a_cut_video_form_leaves_no_part_file(tmp_path):
+    """A video form whose body ends inside a file removes the part it
+    began, and keeps no handle on it."""
+    import asyncio
+    import gc
+    import warnings
+
+    body, ctype = _cut_form("first_frame")
+
+    async def take(n):
+        return True, n, 0
+    folder = tmp_path / "in"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ResourceWarning)
+        fields, files = asyncio.run(bi.read_form_to_disk(
+            _form_request("/v1/videos", body, ctype), str(folder), take,
+            free=None))
+        gc.collect()
+    assert fields == [("prompt", "a cat")] and files == {}
+    assert list(folder.iterdir()) == []

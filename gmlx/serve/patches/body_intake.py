@@ -652,6 +652,11 @@ async def read_form_in_ram(request: Request, free: int | None = None,
             f.close()
         raise BodyRefused(400, f"the multipart form cannot be read: {e}") \
             from None
+    # A body that ends inside a file leaves that file out of the form.
+    kept = {id(v.file) for _, v in form.multi_items() if not isinstance(v, str)}
+    for f in parser._files_to_close_on_error:
+        if id(f) not in kept:
+            f.close()
     # The parser holds the bytes of the last part it read.
     del parser
     try:
@@ -733,7 +738,8 @@ async def read_form_to_disk(request: Request, folder: str, take,
     each time the bytes arrived pass what it holds, so it holds the room
     as its body comes, and the read stops where a step does not fit. A
     form that sends nothing for STALL_S seconds is refused with a 408. A
-    refusal or a failed read removes every file it began."""
+    refusal or a failed read removes every file it began, and a body that
+    ends inside a file removes that file."""
     from starlette.datastructures import UploadFile
     from starlette.formparsers import MultiPartException, MultiPartParser
     from starlette.requests import ClientDisconnect
@@ -746,6 +752,7 @@ async def read_form_to_disk(request: Request, folder: str, take,
         raise _over_room(n, room, arriving)
     os.makedirs(folder, exist_ok=True)
     began: list = []
+    opened: list = []
     names: dict = {}
     text = _TextPrice()
 
@@ -766,6 +773,7 @@ async def read_form_to_disk(request: Request, folder: str, take,
             part.file = UploadFile(open(path, "wb+"),  # noqa: SIM115
                                    filename=part.file.filename,
                                    headers=part.file.headers)
+            opened.append(part.file.file)
 
         def on_part_data(self, data: bytes, start: int, end: int) -> None:
             part = self._current_part
@@ -827,8 +835,17 @@ async def read_form_to_disk(request: Request, folder: str, take,
             done = names[key][:-len(".part")]
             os.replace(names[key], done)
             files[key] = done
+        # A body that ends inside a file leaves that file out of the form.
+        for f in opened:
+            f.close()
+        for name, path in names.items():
+            if name not in files:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(path)
         return fields, files
     except BaseException:
+        for f in opened:
+            f.close()
         for path in began:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)
