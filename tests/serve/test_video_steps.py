@@ -295,7 +295,12 @@ def test_a_plan_sums_the_refined_rows_while_the_worker_keeps_one(
 
     monkeypatch.setattr(image_service, "held_bytes", lambda pipe: (0, 0))
     dim = 4
-    dit = SimpleNamespace(cfg=SimpleNamespace(dim=dim), caption=lambda f: f)
+    entered = threading.Event()
+
+    def refine(f):
+        entered.set()
+        return f
+    dit = SimpleNamespace(cfg=SimpleNamespace(dim=dim), caption=refine)
     served = ServedVideo(pipe=SimpleNamespace(dit=dit), spec=None,
                          plan=SimpleNamespace(  # type: ignore
                              text_rows=vs.PRICED_TEXT_ROWS))
@@ -312,7 +317,10 @@ def test_a_plan_sums_the_refined_rows_while_the_worker_keeps_one(
                                      args=(served, "new", feats, "t"))
                 worker.append(t)
                 t.start()
-                t.join(0.5)
+                # A worker past the cache's lock refines the rows and
+                # keeps them before the sum goes on.
+                if entered.wait(0.5):
+                    t.join(10)
             return 64
 
     served.captions[("old", "t")] = Rows()
