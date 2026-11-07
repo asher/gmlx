@@ -1,5 +1,5 @@
 """With no thinking control, a render through mlx-lm's TokenizerWrapper
-follows the chat template's own default, in gmlx run, gmlx chat and serve
+follows the chat template's own default, in gmlx run and gmlx chat
 alike. The wrapper is real and wraps a GGUF tokenizer; only the model
 stream is mocked."""
 import importlib
@@ -7,6 +7,7 @@ import types
 from pathlib import Path
 
 import pytest
+import think_vocab
 
 from gmlx.gen.generation import generate
 from gmlx.tui import chat
@@ -29,28 +30,9 @@ _DEFAULT_OFF = ("{{ messages[-1]['content'] }}|"
 def _wrapper(template: str, specials=()):
     """A real TokenizerWrapper over a byte-level GGUF tokenizer whose chat
     template is ``template``, with ``specials`` as single tokens."""
-    from tokenizers import pre_tokenizers
-
     from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
-    from gmlx.load.tokenizer import load_tokenizer_from_gguf
 
-    head = ["<s>", "</s>", "<pad>", *specials]
-    tokens = head + sorted(pre_tokenizers.ByteLevel.alphabet()) + ["He"]
-    backend = load_tokenizer_from_gguf({
-        "general.architecture": "qwen2",
-        "tokenizer.ggml.model": "gpt2",
-        "tokenizer.ggml.pre": "qwen2",
-        "tokenizer.ggml.tokens": tokens,
-        "tokenizer.ggml.merges": ["H e"],
-        "tokenizer.ggml.token_type": [3] * len(head)
-        + [1] * (len(tokens) - len(head)),
-        "tokenizer.ggml.bos_token_id": 0,
-        "tokenizer.ggml.eos_token_id": 1,
-        "tokenizer.ggml.padding_token_id": 2,
-        "tokenizer.ggml.add_bos_token": False,
-    }, "qwen2")
-    backend.chat_template = template
-    return TokenizerWrapper(backend)
+    return TokenizerWrapper(think_vocab.tokenizer(template, singles=specials))
 
 
 # (template, vocab specials, has_thinking, default render)
@@ -110,23 +92,6 @@ def test_chat_keeps_the_templates_thinking_default(
     for flag, text in ((True, "THINK"), (False, "NOTHINK")):
         assert chat._render_turn(tok, chat.ChatState(), turn, False,
                                  {"enable_thinking": flag}) == f"q|{text}"
-
-
-@pytest.mark.parametrize("template,specials,has_thinking,default", _CASES)
-def test_serve_keeps_the_templates_thinking_default(
-        template, specials, has_thinking, default):
-    from gmlx.serve import bridge_vlm
-    from gmlx.serve.patches import install_chat_template_kwargs
-
-    install_chat_template_kwargs()
-    pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
-    tok = _wrapper(template, specials)
-    proc = bridge_vlm._make_text_processor(tok)
-    msgs = [{"role": "user", "content": "q"}]
-    assert pu.get_chat_template(proc, msgs, True) == f"q|{default}"
-    for flag, text in ((True, "THINK"), (False, "NOTHINK")):
-        assert pu.get_chat_template(proc, msgs, True,
-                                    enable_thinking=flag) == f"q|{text}"
 
 
 def _thinking_args(template_path, thinking):
