@@ -399,6 +399,14 @@ def test_stream_xtml_content_trims_as_the_reply_split(monkeypatch, prompt,
     assert content == want
 
 
+@pytest.mark.parametrize("step", [1, 4])
+def test_stream_split_keeps_xtml_text_for_other_markers(monkeypatch, step):
+    text = "x</think>keep <|close|>message<|sep|> text"
+    _r, content = _stream_split(monkeypatch, "<think>", text, step,
+                                ("<think>", "</think>"))
+    assert content == "keep <|close|>message<|sep|> text"
+
+
 def test_nonstream_split_keeps_first_line_code_indent():
     """The stock splitter .strip()s content, which deletes the first line's
     leading indent from verbatim-code replies. The seeded splitter trims
