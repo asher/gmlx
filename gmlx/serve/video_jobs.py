@@ -163,7 +163,10 @@ class VideoJobs:
         return path
 
     def inputs(self, jid: str) -> str:
-        return os.path.join(self._dir("inputs"), jid)
+        """The folder of job ``jid``'s inputs, made by no one here: a POST
+        makes inputs/ at :meth:`begin`, past its refusals."""
+        assert self.root is not None
+        return os.path.join(self.root, "inputs", jid)
 
     def clip(self, jid: str) -> str:
         return os.path.join(self._dir("files"), f"{jid}.mp4")
@@ -180,8 +183,7 @@ class VideoJobs:
         os.replace(part, path)
 
     def _drop_inputs(self, jid: str) -> None:
-        shutil.rmtree(os.path.join(self._dir("inputs"), jid),
-                      ignore_errors=True)
+        shutil.rmtree(self.inputs(jid), ignore_errors=True)
 
     def _forget(self, jid: str) -> None:
         """Remove a job's record, inputs and clip; under ``lock``."""
@@ -341,6 +343,7 @@ class VideoJobs:
         """Reserve the job id of a POST before its first byte: the sweep
         leaves its inputs until :meth:`submit` or :meth:`abandon`."""
         with self.lock:
+            self._dir("inputs")
             self.pending[jid] = 0
 
     def take(self, jid: str, n: int | None) -> tuple[bool, int, int]:

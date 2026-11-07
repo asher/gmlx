@@ -749,6 +749,21 @@ def routes(tmp_path, monkeypatch):
                            client=TestClient(app), spec=spec)
 
 
+def test_a_post_refused_before_its_body_leaves_no_store_behind(
+        routes, monkeypatch):
+    """A server with no ffmpeg refuses a POST before its body: the store
+    no job has used stays unmade, as the server found it."""
+    import shutil
+
+    from gmlx.serve import media_programs
+
+    shutil.rmtree(routes.store.root)
+    monkeypatch.setattr(media_programs, "find", lambda n: None)
+    r = routes.client.post("/v1/videos", json={"prompt": "a cat"})
+    assert r.status_code == 501, r.text
+    assert not os.path.exists(routes.store.root)
+
+
 def test_a_json_job_runs_to_its_mp4_through_the_routes(routes):
     c = routes.client
     r = c.post("/v1/videos", json={"prompt": "a cat", "seconds": "1",
