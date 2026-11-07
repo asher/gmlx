@@ -1140,6 +1140,26 @@ def test_a_json_body_past_the_free_figure_is_a_413_with_no_byte_read(
         conn.close()
 
 
+@pytest.mark.parametrize("how", ["memory", "not_json"])
+def test_a_video_body_refusal_is_in_the_server_log(routes, monkeypatch,
+                                                   capsys, how):
+    """The video route reads its own body, as the images routes do, and
+    prints the body's refusal to the log as the media gate does."""
+    from gmlx.serve.patches import hardening
+
+    monkeypatch.setattr(hardening, "_refusal_logs", {})
+    body = b'{"prompt": "a cat"'
+    if how == "memory":
+        monkeypatch.setattr(body_intake, "free_bytes", lambda: 1 << 10)
+        body = json.dumps({"prompt": "a cat " * 1000}).encode()
+    r = routes.client.post("/v1/videos", content=body, headers={
+        "content-type": "application/json"})
+    assert r.status_code in (400, 413), r.text
+    message = r.json()["error"]["message"]
+    assert (f"[server] refused a request with status {r.status_code}: "
+            f"{message}" in capsys.readouterr().out.splitlines())
+
+
 @pytest.mark.parametrize("kind", ["json", "form", "form_wide"])
 def test_a_video_body_is_priced_at_the_copies_its_parse_holds(
         routes, monkeypatch, kind):

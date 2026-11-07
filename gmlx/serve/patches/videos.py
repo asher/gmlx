@@ -39,6 +39,7 @@ from .body_intake import (
     _mib,
     arriving_note,
     check_media,
+    log_refusal,
     read_form_to_disk,
     read_in_ram,
 )
@@ -489,6 +490,7 @@ async def create(request: Request):
                     raise Refused(400, "the body is no JSON object")
                 files = {}
         except BodyRefused as e:
+            log_refusal(e.status, str(e))
             raise Refused(e.status, str(e), e.param,
                           headers=e.headers) from None
         record, params = await asyncio.to_thread(prepare, fields, files,

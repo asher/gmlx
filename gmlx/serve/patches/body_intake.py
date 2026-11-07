@@ -61,6 +61,14 @@ class BodyRefused(Exception):
         return {"Connection": "close"} if self.status == 413 else {}
 
 
+def log_refusal(status: int, message: str) -> None:
+    """Print a refusal of a body or its media to the log, as the media
+    gate prints the refusals of the routes it reads."""
+    from .hardening import _log_refusal
+
+    _log_refusal(f"{status} {message}", message, status, kind="media")
+
+
 def reads_own_body(request) -> bool:
     """Whether the route of ``request`` reads and prices its own body, so
     the gate leaves it unread."""

@@ -257,11 +257,9 @@ def _decoded(data: bytes, param: str):
 
 
 def _log_media(status: int, message: str) -> None:
-    """Print a refusal of a body or its media to the log, as the media
-    gate prints the refusals of the routes it reads."""
-    from .hardening import _log_refusal
+    from .body_intake import log_refusal
 
-    _log_refusal(f"{status} {message}", message, status, kind="media")
+    log_refusal(status, message)
 
 
 async def _read_body(route: str, request: Request):
