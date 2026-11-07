@@ -57,6 +57,19 @@ def _restore_batch_next():
     ar.BatchGenerator._next = saved
 
 
+def _render_seams() -> list:
+    """The render and stream-splitter bindings the chat patches wrap."""
+    openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
+    state = rs.ThinkingStreamState
+    return ([(t, "apply_chat_template") for t in sp_common._render_target_modules()]
+            + [(openai, "extract_text_from_content"),
+               (openai, "_normalize_instruction_messages"),
+               (state, "__init__"), (state, "feed"),
+               (_APP, "_split_thinking_text"), (rs, "_split_thinking"),
+               (_PKG, "apply_chat_template")])
+
+
 def _engine_classes() -> list:
     """The mlx-vlm engine classes that the server patches wrap."""
     ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
@@ -172,6 +185,7 @@ def _restore_mlxvlm(request):
     saved["to_template_kwargs"] = gen.GenerationArguments.to_template_kwargs
     pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
     saved["get_chat_template"] = pu.get_chat_template
+    saved["render_seams"] = [(o, a, vars(o).get(a, _UNSET)) for o, a in _render_seams()]
     saved["engine_seams"] = _snapshot_engine_seams()
     schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     saved["stream_chunk_dump"] = schemas.ChatStreamChunk.model_dump_json
@@ -183,6 +197,12 @@ def _restore_mlxvlm(request):
     apc._kq_lone_harvest = saved["apc_lone_flag"]
     gen.GenerationArguments.to_template_kwargs = saved["to_template_kwargs"]
     pu.get_chat_template = saved["get_chat_template"]
+    for obj, attr, value in saved["render_seams"]:
+        if value is _UNSET:
+            if attr in vars(obj):
+                delattr(obj, attr)
+        elif vars(obj).get(attr) is not value:
+            setattr(obj, attr, value)
     _restore_engine_seams(saved["engine_seams"])
     schemas.ChatStreamChunk.model_dump_json = saved["stream_chunk_dump"]
     _APP._build_gen_args = saved["build_gen_args"]
