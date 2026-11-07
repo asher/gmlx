@@ -243,8 +243,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Hy3 and HY4 with `family_defaults: false`. Before, they waited for a
   `</think>` that these models never write, or refused the answer header that
   Kimi K3 writes after its reasoning.
+- On Kimi K3, the schema and XTC apply after the `<|open|>response<|sep|>`
+  header, and a thinking budget that closes the reasoning writes that header.
+  An MLX-format Kimi K3 checkpoint gets the same schema, XTC, budget and
+  reasoning split as the GGUF.
 - Streamed Kimi K3 replies on `gmlx serve` no longer show the
-  `<|open|>response<|sep|>` header or the section closers in the content.
+  `<|open|>response<|sep|>` header or the response and message closers in the
+  content, and trim whitespace as non-streamed replies do.
 - A system or developer message on a Gemma 4 model with vision (`mmproj:`,
   `--mmproj` or an MLX-format checkpoint) renders as on the text model. It got
   an extra space before the end of its turn, one more per video, a video
