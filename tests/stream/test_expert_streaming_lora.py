@@ -1,7 +1,7 @@
 """Expert LoRA on a fused MoE block needs the routed experts in memory, so a
 load that streams them refuses: in the streaming install, before any table
 wrap, wire or credit, and before the load from the headers, at the serve
-pool's explicit and for-memory sites. Faked budgets, plans and builds over
+pool's explicit and for-memory sites and in the run and chat verbs. Faked budgets, plans and builds over
 minted headers; no GPU."""
 from __future__ import annotations
 
@@ -237,7 +237,13 @@ def test_a_for_memory_stream_refuses_before_it_latches(files, monkeypatch,
 
 @pytest.mark.parametrize("flags,refuses", [
     ({"stream_experts": True}, True), ({"stream_cpu": True}, True),
-    ({"stream_experts": True, "speculative": True}, False), ({}, False)])
+    ({"stream_experts": True, "speculative": True}, False),
+    ({"stream_experts": True, "native_mtp": True}, False),
+    ({"stream_experts": True, "draft_gguf": "/m/d.gguf"}, False),
+    ({"stream_experts": True, "draft_gguf": "/m/d.gguf", "draft_gguf_auto": True}, True),
+    ({"stream_experts": True, "speculative": True, "no_speculative": True}, True),
+    ({}, False)],
+    ids=["experts", "cpu", "mtp", "native-mtp", "draft", "auto-draft", "no-mtp", "plain"])
 def test_the_cli_checks_a_streamed_adapter_before_the_load(files, monkeypatch,
                                                           flags, refuses):
     import gmlx.commands.cli as cli
@@ -248,3 +254,32 @@ def test_the_cli_checks_a_streamed_adapter_before_the_load(files, monkeypatch,
                            speculative=None)
     vars(args).update(flags)
     assert (cli._streamed_adapter_refusal(args) is not None) is refuses
+
+
+@pytest.mark.parametrize("flags,refuses", [
+    (["--stream-experts"], True), (["--stream-experts", "--mtp"], False)],
+    ids=["plain", "mtp"])
+def test_chat_checks_a_streamed_adapter_before_the_load(files, monkeypatch, capsys,
+                                                       flags, refuses):
+    import gmlx.tui.chat as chat
+
+    monkeypatch.setenv("GMLX_NO_FAMILY_DEFAULTS", "1")
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config",
+                        lambda *a, **k: None)
+
+    class _Checked(Exception):
+        """Chat got past its checks before the load."""
+
+    def past(*a, **k):
+        raise _Checked
+
+    monkeypatch.setattr(chat, "_wire_input", past)
+    argv = [files.qwen35moe, "--adapter", files.expert, *flags]
+    if refuses:
+        assert chat.cmd_chat(argv) == 2
+        assert "--adapter: adapter expert.gguf adapts expert tensor" in \
+            capsys.readouterr().err
+    else:
+        with pytest.raises(_Checked):
+            chat.cmd_chat(argv)

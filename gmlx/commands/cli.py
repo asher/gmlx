@@ -1512,9 +1512,22 @@ def _apply_cli_adapter(args, model, config) -> None:
     loadlog.note(f"[adapter] applied {n}-module GGUF LoRA from {adapter}")
 
 
-def _streamed_adapter_refusal(args) -> str | None:
+def _streamed_mtp(args) -> bool:
+    """Whether a streamed run takes the MTP path, as ``resolve_speculative``
+    decides it, without its side effects. Streaming turns auto MTP off, so
+    only an explicit choice counts."""
+    if getattr(args, "no_speculative", False):
+        return False
+    if getattr(args, "native_mtp", False) or getattr(args, "speculative", None):
+        return True
+    return bool(getattr(args, "draft_gguf", None)
+                and not getattr(args, "draft_gguf_auto", False))
+
+
+def _streamed_adapter_refusal(args, mtp: bool | None = None) -> str | None:
     """Why ``--adapter`` cannot load with the requested expert streaming,
-    from the headers alone, or None."""
+    from the headers alone, or None. ``mtp`` is the caller's MTP choice,
+    when it has made one."""
     if not getattr(args, "adapter", None) or not (
             getattr(args, "stream_experts", False)
             or getattr(args, "stream_cpu", False)):
@@ -1523,7 +1536,7 @@ def _streamed_adapter_refusal(args) -> str | None:
 
     return fused_expert_lora_refusal(
         args.gguf, (os.path.expanduser(args.adapter),),
-        mtp=bool(getattr(args, "speculative", False)))
+        mtp=_streamed_mtp(args) if mtp is None else mtp)
 
 
 def _cli_adapter_hook(args):

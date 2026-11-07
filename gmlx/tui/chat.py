@@ -3721,6 +3721,12 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 file=sys.stderr,
             )
             return 2
+        from gmlx.commands.cli import _streamed_adapter_refusal
+
+        why = _streamed_adapter_refusal(args, mtp=speculative)
+        if why:
+            print(f"error: --adapter: {why}", file=sys.stderr)
+            return 2
         if speculative or vlm_mtp:
             dropped = mtp_dropped_chat_flags(args)
             if dropped:
