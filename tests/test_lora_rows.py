@@ -426,3 +426,44 @@ def test_adapters_off_runs_the_base_and_restores_the_outer_state():
     assert lora_rows._local.off is outer[1]
     assert lora_rows._local.derived is outer[2] and outer[2]
     lora_rows.clear_rows()
+
+
+# one tuple published for a scope (the serve prompt embedding)
+
+
+def test_tuple_scope_does_nothing_in_static_mode():
+    with lora_rows.tuple_scope((0.5,), 1):
+        assert lora_rows._local.current is None
+        assert lora_rows.row_scales(0) is None
+
+
+def test_tuple_scope_publishes_marks_off_and_clears():
+    lora_rows.configure("rows", 2)
+    with lora_rows.tuple_scope((1.5, 0.0), 1):
+        assert np.array(lora_rows._local.current).tolist() == [[1.5, 0.0]]
+        assert not lora_rows.slot_off(0) and lora_rows.slot_off(1)
+    assert lora_rows._local.current is None and lora_rows._local.off is None
+    with pytest.raises(ValueError):
+        with lora_rows.tuple_scope((1.0,), 1):
+            raise ValueError("body")
+    assert lora_rows._local.current is None
+
+
+def test_tuple_scope_refuses_to_nest():
+    lora_rows.configure("rows", 1)
+    lora_rows.set_rows([1.0])
+    with pytest.raises(lora_rows.LoraRowsError):
+        with lora_rows.tuple_scope((1.0,), 1):
+            pass
+    assert np.array(lora_rows._local.current).tolist() == [[1.0]]
+    lora_rows.clear_rows()
+
+
+def test_row_tuple_reads_the_row_lora():
+    assert lora_rows.row_tuple(None) == ()
+    assert lora_rows.row_tuple(SimpleNamespace(lora=None)) == ()
+    lora_rows.configure("rows", 2)
+    assert lora_rows.row_tuple(_settings((0.5, 1.0))) == (0.5, 1.0)
+    for settings in (None, SimpleNamespace(lora=None)):
+        with pytest.raises(lora_rows.LoraRowsError):
+            lora_rows.row_tuple(settings)
