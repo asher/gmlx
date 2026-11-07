@@ -20,6 +20,7 @@ so generalizing architecture coverage never touches this file.
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -2799,17 +2800,18 @@ def _stamp_gate_slots(by_path: dict, paths, slot: int, *,
             break
 
 
-def refuse_streamed_fused_expert_lora(model: nn.Module) -> None:
+def refuse_streamed_fused_expert_lora(model) -> None:
     """Raise when a fused MoE block in ``model``'s decoder layers carries
     an expert adapter target. Expert streaming calls this before it wraps,
     wires or credits anything."""
-    layers = getattr(model, "layers", None)
+    layers: Any = getattr(model, "layers", None)
     if layers is None:
         layers = getattr(getattr(model, "model", None), "layers", None) or ()
-    hits = []
+    hits: list[str] = []
     for i, layer in enumerate(layers):
-        named = getattr(layer, "named_modules", None)
-        mods = named() if callable(named) else (("", m) for m in layer.modules())
+        walk: Any = getattr(layer, "named_modules", None)
+        mods = (list(walk()) if walk is not None
+                else [("", m) for m in layer.modules()])
         hits += [f"layers.{i}.{p}".rstrip(".") for p, m in mods
                  if getattr(m, "__dict__", {}).get("_kq_expert_lora")]
     if hits:
