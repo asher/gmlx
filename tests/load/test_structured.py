@@ -4,9 +4,11 @@
 The feature itself is mlx-vlm's: its server wraps `_build_gen_args` (where the
 grammar is compiled) in `try/except -> HTTP 400`, and `build_json_schema_logits_
 processor` constrains decoding via llguidance (a hard dep of mlx-vlm). gmlx
-adds no code on the happy path. The one gmlx-specific risk is that our
-*synthesized* GGUF tokenizer must remain acceptable to `llguidance.hf.from_
-tokenizer` across mlx-vlm/llguidance bumps - so this freezes that contract:
+edits that path. One edit caches an llguidance tokenizer only as long as its
+tokenizer lives, so a reloaded model at a freed id gets its own vocab; the last
+test here guards it. The other gmlx-specific risk is that our *synthesized* GGUF tokenizer must
+remain acceptable to `llguidance.hf.from_tokenizer` across mlx-vlm/llguidance
+bumps - so this freezes that contract:
 
   synthesized tokenizer -> from_tokenizer accepts it -> a JSON schema compiles
   -> the grammar actually masks the first token.
@@ -97,7 +99,6 @@ def test_grammar_masks_first_token():
     assert 0 < n_allowed < vocab          # grammar forbids most first tokens
 
 
-
 class _Tok:
     pass
 
@@ -114,7 +115,13 @@ def test_tokenizer_at_a_used_id_gets_its_own_llg_tokenizer(monkeypatch):
     from gmlx._vendor.mlx_vlm import structured
 
     monkeypatch.setattr(structured, "_llg_tokenizer_cache", {})
-    monkeypatch.setattr(structured, "id", lambda obj: 1, raising=False)
+    keyed = []
+
+    def one_id(obj):
+        keyed.append(id(obj))
+        return 1
+
+    monkeypatch.setattr(structured, "id", one_id, raising=False)
     built = []
 
     def from_tokenizer(tok):
@@ -129,6 +136,7 @@ def test_tokenizer_at_a_used_id_gets_its_own_llg_tokenizer(monkeypatch):
 
     old = _Tok()
     old_llg = llg(old)
+    assert keyed == [id(old)]             # the key goes through the stand-in
     assert llg(old) is old_llg
     new = _Tok()
     new_llg = llg(new)
@@ -138,3 +146,6 @@ def test_tokenizer_at_a_used_id_gets_its_own_llg_tokenizer(monkeypatch):
     gc.collect()
     assert llg(new) is new_llg
     assert built == []
+    del new
+    gc.collect()
+    assert structured._llg_tokenizer_cache == {}
