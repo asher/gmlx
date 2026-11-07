@@ -719,7 +719,7 @@ def test_warn_if_batch_unsafe_fires_once_for_gemma2(monkeypatch, caplog, capsys)
         assert out.err == "" and out.out == ""
 
 
-@pytest.mark.parametrize("name", ["residency", "residency_types"])
+@pytest.mark.parametrize("name", ["residency", "residency_types", "residency_build"])
 def test_module_annotations_resolve(name):
     """Module-level forward-ref unions must quote the whole union
     (ContextVar["_Entry | None"], not ContextVar["_Entry" | None]) or any
