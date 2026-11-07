@@ -406,6 +406,18 @@ def _live_kv_quant_config(model=None):
                      "float", exc_info=True)
         return None
 
+def spec_kind_unsupported(rg) -> str | None:
+    """The draft kind a ``ResponseGenerator`` speculates with when the owned
+    engine does not run it, else None. Every serve drafter registers as
+    "mtp"; another kind runs the stock rounds, which carry no logprobs and
+    no per-row settings. Callers that also need a loaded drafter test
+    ``rg.draft_model`` themselves."""
+    kind = getattr(rg, "draft_kind", None)
+    if kind is None or kind == "mtp":
+        return None
+    return str(kind)
+
+
 def install_owned_spec_engine() -> None:
     """Route serve-path MTP through owned engine: B=1 scalar, B>1 batch.
 
@@ -447,9 +459,16 @@ def install_owned_spec_engine() -> None:
         prompt_tokens=None,
         row_ids=None,
         rope_deltas=None,
+        row_settings=None,
+        default_row=None,
+        logprobs_cap=0,
+        row_uids=None,
         **_extra,
     ):
         batch_size = int(first_bonus.shape[0]) if first_bonus.ndim > 0 else 1
+        # Per-row sampler and logprob settings (gmlx.serve.row_sampling).
+        rows_kw = dict(row_settings=row_settings, default_row=default_row,
+                       logprobs_cap=logprobs_cap, row_uids=row_uids)
         if draft_kind == "mtp":
             # hidden=None marks a preempted scalar generation rebuilt for
             # continuous batching: it must run the batch loop (arm-from-
@@ -473,6 +492,7 @@ def install_owned_spec_engine() -> None:
                     stop_check=stop_check,
                     eos_token_ids=eos_token_ids,
                     rope_deltas=rope_deltas,
+                    **rows_kw,
                 )
                 # This delegation frame outlives the request (the server
                 # abandons finished generators suspended at their last
@@ -503,13 +523,15 @@ def install_owned_spec_engine() -> None:
                 eos_token_ids=eos_token_ids,
                 row_ids=row_ids,
                 rope_deltas=rope_deltas,
+                **rows_kw,
             )
             del prompt_cache, hidden, shared_kv_states, prompt_tokens
             del first_bonus, _extra
             yield from rounds
             return
 
-        # Non-mtp draft kind: stock path.
+        # Non-mtp draft kind: stock path. It never serves a logprob row: the
+        # chat route refuses one up front (spec_kind_unsupported).
         yield from _orig(
             model,
             draft_model,

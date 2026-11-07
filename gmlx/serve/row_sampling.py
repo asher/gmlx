@@ -119,6 +119,18 @@ class RowSampler:
         finally:
             self._uids = saved
 
+    def rebind(self, uids) -> None:
+        """Bind ``uids`` until the next bind, for a caller that cannot hold
+        a context across its rounds."""
+        self._uids = list(uids)
+
+    def subset(self, rows) -> RowSampler:
+        """A sampler bound to the given positions of the current binding."""
+        out = RowSampler(self._settings, self._default)
+        uids = self._uids or []
+        out._uids = [uids[i] for i in rows]
+        return out
+
     def rows(self) -> list[RowSettings]:
         return [self.row(u) for u in (self._uids or ())]
 

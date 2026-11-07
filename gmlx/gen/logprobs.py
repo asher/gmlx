@@ -89,6 +89,23 @@ class RoundLogprobs:
         if targets:
             mx.async_eval(*targets)
 
+    def select(self, rows: Sequence[int]) -> RoundLogprobs:
+        """The same round for a subset of its rows, in the order given."""
+        idx = mx.array(list(rows), dtype=mx.int32)
+        out = RoundLogprobs.__new__(RoundLogprobs)
+        out.k = self.k
+        out._lp = self._lp[idx]
+        out._ids = None if self._ids is None else self._ids[idx]
+        out._vals = None if self._vals is None else self._vals[idx]
+        out._drafts = None if self._drafts is None else self._drafts[idx]
+        out._draft_vals = None if self._draft_vals is None else self._draft_vals[idx]
+        return out
+
+    def arrays(self) -> list[mx.array]:
+        """The arrays a caller may hand to ``mx.async_eval``."""
+        return [a for a in (self._ids, self._vals, self._drafts, self._draft_vals)
+                if a is not None]
+
     def entries(self, tokens_rows: Sequence[Sequence[int]]) -> list[list[LogprobEntry]]:
         """One entry per emitted token: ``tokens_rows[w][i]`` is the id the
         row emitted at verify position ``i``."""

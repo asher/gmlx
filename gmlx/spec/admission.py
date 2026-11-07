@@ -216,7 +216,8 @@ def install_continuous_batch_admission() -> None:
         for c in self.prompt_cache:
             c.filter(idx)
         for name in ("hidden", "prompt_tokens", "first_tokens",
-                     "_rope_deltas"):
+                     "_rope_deltas", "_first_lps", "_first_top_idx",
+                     "_first_top_lp"):
             arr = getattr(self, name, None)
             if arr is not None:
                 setattr(self, name, arr[idx])
@@ -311,6 +312,8 @@ def install_continuous_batch_admission() -> None:
             return False
         it = self._rounds_iter
         captured = []
+        # The tail's LogprobEntry per token, filled beside ``captured``.
+        captured_lp: list = []
         # The scalar loop fills this when the rebuilt batch can keep the
         # row's live drafter (a mixed batch); the batch loop pops it.
         handoff: dict = {}
@@ -322,14 +325,16 @@ def install_continuous_batch_admission() -> None:
         if it is not None:
             self._rounds_iter = None
             self.model._kq_preempt_capture = captured
+            self.model._kq_preempt_capture_lp = captured_lp
             self.model._kq_preempt_handoff = handoff
             try:
                 it.close()
             finally:
-                try:
-                    del self.model._kq_preempt_capture
-                except AttributeError:
-                    pass
+                for name in ("_kq_preempt_capture", "_kq_preempt_capture_lp"):
+                    try:
+                        delattr(self.model, name)
+                    except AttributeError:
+                        pass
                 if not handoff:
                     try:
                         del self.model._kq_preempt_handoff
@@ -337,7 +342,7 @@ def install_continuous_batch_admission() -> None:
                         pass
         responses = []
         uid = self._all_uids[0]
-        for tok in captured:
+        for n, tok in enumerate(captured):
             if self._finished[0]:
                 break
             tok = int(tok)
@@ -345,8 +350,11 @@ def install_continuous_batch_admission() -> None:
             finish = self._finish_reason(0, tok)
             if finish is not None:
                 self._finished[0] = True
+            entry = captured_lp[n] if n < len(captured_lp) else None
+            lp, top = self._logprob_fields(uid, entry)
             responses.append(self.Response(
-                uid=uid, token=tok, token_logprob=0.0, finish_reason=finish))
+                uid=uid, token=tok, token_logprob=lp, finish_reason=finish,
+                top_logprobs=top))
             last = tok
         self._kq_preempt_responses = responses
         if self._finished[0]:
@@ -406,6 +414,7 @@ def install_continuous_batch_admission() -> None:
 
                 mx.eval(other.first_tokens)
                 first_list = other.first_tokens.tolist()
+                first_entries = other._first_entries()
                 for row in range(B_new):
                     abs_row = base_row + row
                     tok = int(first_list[row])
@@ -413,12 +422,15 @@ def install_continuous_batch_admission() -> None:
                     finish = self._finish_reason(abs_row, tok)
                     if finish is not None:
                         self._finished[abs_row] = True
+                    lp, top = other._logprob_fields(
+                        other._all_uids[row], first_entries[row])
                     responses.append(
                         self.Response(
                             uid=other._all_uids[row],
                             token=tok,
-                            token_logprob=0.0,
+                            token_logprob=lp,
                             finish_reason=finish,
+                            top_logprobs=top,
                         )
                     )
 

@@ -194,10 +194,12 @@ def test_a_greedy_row_in_a_sampled_batch_stays_greedy(model, monkeypatch):
         [[3, 9, 4], [5, 2, 8, 1]], 6, row_settings=[RowSettings(), hot])
     _run(gen)
     gen.close()
-    assert spy.draws
+    joined = [d for d in spy.draws if {greedy, sampled} <= set(d[0])]
+    assert joined
     for uids, lp, _pos, out in spy.draws:
-        j = uids.index(greedy)
-        assert out[j] == int(np.argmax(lp[j]))
+        if greedy in uids:
+            j = uids.index(greedy)
+            assert out[j] == int(np.argmax(lp[j]))
 
 
 def test_a_seeded_row_in_a_greedy_batch_draws_its_seed_keys(model, monkeypatch):
@@ -205,11 +207,14 @@ def test_a_seeded_row_in_a_greedy_batch_draws_its_seed_keys(model, monkeypatch):
     gen = _gen(model, max_tokens=5)
     seeded = RowSettings(sampler=_FastPositionedSampler(temperature=2.0), seed=42,
                          key=("t2",))
-    _greedy, row = _ins(gen, model, [[3, 9, 4], [5, 2, 8, 1]], 5,
-                              row_settings=[RowSettings(), seeded])
+    greedy, row = _ins(gen, model, [[3, 9, 4], [5, 2, 8, 1]], 5,
+                       row_settings=[RowSettings(), seeded])
     _run(gen)
     gen.close()
+    assert [d for d in spy.draws if {greedy, row} <= set(d[0])]
     for uids, lp, pos, out in spy.draws:
+        if row not in uids:
+            continue
         j = uids.index(row)
         key = mx.random.key(_position_seed(42, 0, pos[j]))
         want = mx.random.categorical(mx.array(lp[j]) * 0.5, key=key)
