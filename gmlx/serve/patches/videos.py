@@ -313,18 +313,20 @@ def estimate(spec, fam, plan, s: dict, prompt: str, sizes, rewrites: bool,
 def _keyframes(sent: dict, folder: str, take) -> dict:
     """The path of each keyframe of ``sent`` ({name: (file, value)}), or
     None: a file as sent, a data URL written to ``folder`` within the room
-    ``take(n)`` reserves. Each must be an image the server reads."""
-    keys = {}
+    ``take(n)`` reserves. Each must be an image the server reads; a
+    refusal names the field the client sent."""
+    keys, fields = {}, {}
     for name, alias in (("first_frame", "input_reference"),
                         ("last_frame", "last_frame")):
-        field = name if _given(sent[name]) else alias
+        field = fields[name] = name if _given(sent[name]) else alias
         file, value = sent[field]
         keys[name] = file if file is not None else (
             None if value is None
             else _data_url(value, name, folder, take, field))
     for name, v in keys.items():
-        if v is not None and not _pixels(v, name):
-            raise Refused(400, f"{name} is no image the server reads", name)
+        if v is not None and not _pixels(v, fields[name]):
+            raise Refused(400, f"{fields[name]} is no image the server "
+                          "reads", fields[name])
     return keys
 
 

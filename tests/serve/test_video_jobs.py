@@ -2008,25 +2008,27 @@ def _bomb_png(w=14000, h=14000) -> bytes:
         ">IIBBBBB", w, h, 1, 0, 0, 0, 0)) + chunk(b"IEND", b""))
 
 
+@pytest.mark.parametrize("field", ["first_frame", "input_reference"])
 @pytest.mark.parametrize("how", ["form", "json"])
-def test_a_keyframe_past_the_decompression_bound_is_a_400(routes, how):
+def test_a_keyframe_past_the_decompression_bound_is_a_400(routes, how,
+                                                          field):
+    """The refusal names the field the client sent."""
     from gmlx.serve.patches.media_gate import MEDIA_MAX_PIXELS
 
     if how == "form":
-        body, ctype = _form({"prompt": "a cat"},
-                            {"first_frame": _bomb_png()})
+        body, ctype = _form({"prompt": "a cat"}, {field: _bomb_png()})
         r = routes.client.post("/v1/videos", content=body,
                                headers={"content-type": ctype})
     else:
         url = "data:image/png;base64," + base64.b64encode(
             _bomb_png()).decode()
         r = routes.client.post("/v1/videos", json={
-            "prompt": "a cat", "input_reference": url})
+            "prompt": "a cat", field: url})
     assert r.status_code == 400, r.text
     err = r.json()["error"]
     assert (err["param"], err["message"]) == (
-        "first_frame", f"first_frame is over the {MEDIA_MAX_PIXELS} pixels "
-        "the server decodes")
+        field, f"{field} is over the {MEDIA_MAX_PIXELS} pixels the server "
+        "decodes")
     assert os.listdir(os.path.join(str(routes.store.root), "inputs")) == []
     assert routes.store.pending == {}
 
@@ -2045,17 +2047,19 @@ def test_a_guide_past_the_decompression_bound_names_its_file_field(routes):
         "server decodes")
 
 
-def test_a_keyframe_in_a_format_off_the_list_is_no_image(routes):
+@pytest.mark.parametrize("field", ["first_frame", "input_reference"])
+def test_a_keyframe_in_a_format_off_the_list_is_no_image(routes, field):
     from PIL import Image
 
     buf = io.BytesIO()
     Image.new("RGB", (32, 32)).save(buf, "PPM")
-    body, ctype = _form({"prompt": "a cat"}, {"first_frame": buf.getvalue()})
+    body, ctype = _form({"prompt": "a cat"}, {field: buf.getvalue()})
     r = routes.client.post("/v1/videos", content=body,
                            headers={"content-type": ctype})
     assert r.status_code == 400, r.text
-    assert r.json()["error"]["message"] == (
-        "first_frame is no image the server reads")
+    err = r.json()["error"]
+    assert (err["param"], err["message"]) == (
+        field, f"{field} is no image the server reads")
 
 
 def test_a_form_the_parser_cannot_read_is_a_400(routes, monkeypatch):
