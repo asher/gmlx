@@ -897,10 +897,7 @@ def _mixed_walk(
             rest = logits[mx.array(others, dtype=mx.int32)]
             logprobs = rest - mx.logsumexp(rest, axis=-1, keepdims=True)
             flat = logprobs.reshape(-1, logprobs.shape[-1])
-            # A row sampler draws for the other rows only.
-            subset = getattr(sampler, "subset", None)
-            draw = subset(others) if callable(subset) else sampler
-            target = draw(flat).reshape(len(others), n_pos)
+            target = sampler(flat).reshape(len(others), n_pos)
     mx.eval(*graph, draft_tokens, *([target] if target is not None else []))
     drf = draft_tokens.tolist()
     tgt = target.tolist() if target is not None else []

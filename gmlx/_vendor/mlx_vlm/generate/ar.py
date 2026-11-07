@@ -1377,6 +1377,7 @@ class GenerationBatch:
             self._next_lps = raw[mx.arange(sampled.shape[0]), sampled]
             eval_targets.append(self._next_lps)
             if any(c is not None for c in self.thinking_budget_criteria):
+                # Read and cleared by next() within the same call.
                 self._next_raw = raw
         else:
             self._next_lps = None
@@ -1495,17 +1496,10 @@ class GenerationBatch:
             self._next_lps = other._next_lps
             self._next_top_idx = other._next_top_idx
             self._next_top_lp = other._next_top_lp
-            self._next_raw = getattr(other, "_next_raw", None)
         elif other._next_tokens is not None:
             self._next_tokens = mx.concatenate([self._next_tokens, other._next_tokens])
             self._next_lps = _concat_padded(
                 self._next_lps, other._next_lps, n_self, n_other
-            )
-            self._next_raw = _concat_padded(
-                getattr(self, "_next_raw", None),
-                getattr(other, "_next_raw", None),
-                n_self,
-                n_other,
             )
             if (
                 self._next_top_idx is not None
@@ -1573,8 +1567,6 @@ class GenerationBatch:
             if self._next_top_idx is not None:
                 self._next_top_idx = self._next_top_idx[keep_arr]
                 self._next_top_lp = self._next_top_lp[keep_arr]
-            if getattr(self, "_next_raw", None) is not None:
-                self._next_raw = self._next_raw[keep_arr]
             if self._rope_deltas is not None:
                 self._rope_deltas = self._rope_deltas[keep_arr]
 
