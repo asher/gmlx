@@ -209,6 +209,50 @@ def test_a_restart_fails_the_jobs_a_past_server_queued_or_ran(tmp_path):
         f"{done.id}.mp4"]
 
 
+def _restart(store, clock):
+    again = vj.VideoJobs(store.root, time_fn=clock, mono_fn=clock,
+                         driver=Driver())
+    again.configure(SimpleNamespace(video=VideoServerCfg()))
+    return again
+
+
+def test_a_deleted_job_stays_gone_with_a_copy_of_its_record_beside(
+        tmp_path):
+    """A copy of a record, as the Finder names one, holds the job's id
+    under another file name. The restart takes no job from it, so a job
+    deleted after it is not back at the next restart."""
+    import shutil
+
+    store, clock, driver = _store(tmp_path, _clip)
+    job = _submit(store)
+    driver.run()
+    path = store._record_path(job.id)
+    shutil.copy(path, path[:-len(".json")] + " copy.json")
+    again = _restart(store, clock)
+    assert again.delete(job.id)["deleted"] is True
+    assert _restart(store, clock).get(job.id) is None
+    assert os.listdir(os.path.join(str(store.root), "jobs")) == []
+
+
+def test_a_record_whose_id_leaves_the_store_removes_nothing_outside(
+        tmp_path):
+    """A record's id names its files: one that is not its file's own,
+    such as a path out of the store, is no job, and its sweep removes
+    nothing outside the store."""
+    store, clock, _driver = _store(tmp_path)
+    outside = os.path.join(str(store.root), "outside")
+    os.makedirs(outside)
+    jid = store.new_id()
+    with open(store._record_path(jid), "w") as f:
+        json.dump({"id": "../outside", "object": "video",
+                   "status": "completed", "created_at": 0,
+                   "completed_at": 0, "expires_at": 0, "error": None}, f)
+    again = _restart(store, clock)
+    assert os.path.isdir(outside)
+    assert again.jobs == {}
+    assert os.listdir(os.path.join(str(store.root), "jobs")) == []
+
+
 def test_a_job_past_its_expiry_is_gone_before_any_sweep(tmp_path):
     store, clock, driver = _store(tmp_path, _clip, job_ttl_s=60)
     job = _submit(store)

@@ -23,6 +23,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import threading
@@ -41,6 +42,8 @@ ENDED = frozenset({DONE, FAILED, CANCELLED})
 FIRST_RETRY_S = 60
 # The LoRA turn's subject in its refusals.
 JOB = "the LoRA factors of this video job"
+# A job's id, as :meth:`VideoJobs.new_id` makes it.
+_JOB_ID = re.compile(r"video_[0-9a-f]{32}")
 
 
 class JobFailed(Exception):
@@ -213,15 +216,17 @@ class VideoJobs:
             folder = self._dir("jobs")
             for name in os.listdir(folder):
                 path = os.path.join(folder, name)
-                if not name.endswith(".json"):
-                    with contextlib.suppress(OSError):
-                        os.unlink(path)
-                    continue
-                try:
-                    with open(path, encoding="utf-8") as f:
-                        record = json.load(f)
-                    jid = record["id"]
-                except (OSError, ValueError, KeyError, TypeError):
+                jid = name[:-len(".json")]
+                record = None
+                if name.endswith(".json") and _JOB_ID.fullmatch(jid):
+                    try:
+                        with open(path, encoding="utf-8") as f:
+                            record = json.load(f)
+                    except (OSError, ValueError):
+                        pass
+                # A job's files are named by its id: a record that is not
+                # its own file's, such as a copy, is no job.
+                if not isinstance(record, dict) or record.get("id") != jid:
                     with contextlib.suppress(OSError):
                         os.unlink(path)
                     continue
