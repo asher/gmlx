@@ -343,8 +343,9 @@ width of its own characters: a byte a character when it is plain ASCII,
 up to four when it is not or holds a `\u` escape, so a prompt that is not
 ASCII leaves an inline image at a byte a character. The text fields of a
 form are priced one at a time as they arrive, each at about twice its
-size when it is plain ASCII and up to seven times when it is not, and an
-image form adds the largest of its files, which the route reads whole.
+size when it is plain ASCII and up to about seven times when it is not,
+and an image form adds the largest of its files, which the route reads
+whole.
 With `GMLX_OVERCOMMIT=1`, or with no model pool or memory budget, the
 server reads the bodies it prices from free memory with no bound, and a
 video form's files still take the job store's room. The step routes that the [ComfyUI nodes](comfyui.md) call
