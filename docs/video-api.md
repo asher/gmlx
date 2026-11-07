@@ -157,6 +157,7 @@ status 500, and keeps the ones that ended.
 | A clip too large for the memory left beside the pinned models | 413 with the plan's phases and what to change |
 | A JSON body that its read and parse cannot hold in the memory free | 413 naming both figures, before the body is parsed |
 | A form's text fields past the memory free | 413 naming the memory free, once the text read passes it |
+| A `guides` field whose parse cannot fit in the memory free | 413 naming `guides` and both figures, before it is parsed |
 | A form's files larger than the room left in the job store | 413 naming both figures, before the files are read |
 | A JSON body or a form that sends nothing for 60 s before its end | 408, and a form frees the room it held in the job store |
 | A JSON keyframe larger than the room left in the job store | 413 naming the keyframe and both figures |

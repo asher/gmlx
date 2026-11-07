@@ -544,6 +544,31 @@ def _loads(box: list, free: int | None, verify: bool = False):
     return json.loads(text)
 
 
+def loads_field(text: str, name: str, free: int | None):
+    """The JSON value of a form's text field ``name``, priced as a JSON
+    body is (:func:`json_price`), beside the field's own str, against
+    ``free`` bytes (the pool's figure when None), and refused with a 413
+    before its parse past them; a field that is no JSON is ValueError.
+    Runs in a worker thread, in the parse turn (:func:`_in_turn`)."""
+    if free is None:
+        free = free_bytes()
+    buf = bytearray(text.encode("utf-8", "surrogatepass"))
+    held = len(text) * (WIDE_CHAR_BYTES if not text.isascii() else 1)
+    if free is not None:
+        need = _json_plan(buf)[0] + held
+        if need > free:
+            raise BodyRefused(413, f"{name} is {_mib(len(buf), True)}, its "
+                              f"parse holds {_mib(need, True)} with the "
+                              f"values it parses to, and {_mib(free)} of "
+                              "memory is free beside the models loaded; "
+                              f"send a shorter {name}, or unload a model "
+                              "to make room", name)
+    try:
+        return _loads([buf], None)
+    except RecursionError:
+        raise ValueError(f"{name} nests too deeply") from None
+
+
 def _parse_over_free(n: int, need: int, free: int) -> BodyRefused:
     return BodyRefused(413, f"the request body is {_mib(n, True)}, its read "
                        f"and parse hold {_mib(need, True)} with the values "

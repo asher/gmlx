@@ -21,7 +21,6 @@ import asyncio
 import binascii
 import contextlib
 import importlib
-import json
 import logging
 import os
 import threading
@@ -38,6 +37,7 @@ from .body_intake import (
     _in_turn,
     _mib,
     arriving_note,
+    loads_field,
     log_refusal,
     read_form_to_disk,
     read_json,
@@ -216,15 +216,10 @@ def _model(fields: dict) -> str:
     return model
 
 
-def _guides(fields: dict, files: dict) -> list:
-    raw = fields.get("guides")
+def _guides(raw, files: dict) -> list:
+    """The guides of a form, from its guides field parsed (``raw``)."""
     if raw is None:
         return []
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except (ValueError, RecursionError):
-            raise Refused(400, "guides is a JSON list", "guides") from None
     if not isinstance(raw, list):
         raise Refused(400, "guides is a JSON list", "guides")
     out = []
@@ -404,9 +399,10 @@ def prepare_head(fields: dict, files: dict) -> SimpleNamespace:
 
 
 def prepare_tail(head: SimpleNamespace, keys: dict, fields: dict,
-                 files: dict, ffmpeg: str) -> tuple:
+                 files: dict, ffmpeg: str, guides=None) -> tuple:
     """``(record, params)`` of a job from its ``head``, its keyframes'
-    paths ``keys`` and the request's fields and files, or Refused. Fields
+    paths ``keys``, the request's fields and files, and a form's guides
+    field parsed (``guides``, by :func:`loads_field`), or Refused. Fields
     and files the route does not read are named in a warning, as the
     images API does. Runs in a worker thread."""
     from ..image_service import ImageRequestError
@@ -417,7 +413,7 @@ def prepare_tail(head: SimpleNamespace, keys: dict, fields: dict,
     if isinstance(fields.get("guides"), list) and fields["guides"]:
         raise Refused(400, "guides take files: send the job as a multipart "
                       "form", "guides")
-    guides = _guides(fields, files)
+    guides = _guides(guides, files)
     for g in guides:
         # Named by the file field the request sent it in.
         _pixels(g[1], os.path.basename(g[1]))
@@ -490,16 +486,29 @@ async def create(request: Request):
             return await asyncio.to_thread(take, n)
 
         ctype = request.headers.get("content-type", "").split(";")[0].strip()
+        guides = None
         try:
             if ctype == "multipart/form-data":
                 pairs, files = await read_form_to_disk(request, folder,
                                                        take_async)
                 await asyncio.to_thread(post.settle)
                 fields = dict(pairs)
+                if isinstance(fields.get("guides"), str):
+                    # Its parse can hold far more than its text: priced
+                    # as a JSON body, in the turn the parses take.
+                    try:
+                        guides = await _in_turn(
+                            loads_field, fields["guides"], "guides", None)
+                    except ValueError:
+                        raise Refused(400, "guides is a JSON list",
+                                      "guides") from None
             else:
                 fields = await read_json(request)
                 if not isinstance(fields, dict):
                     raise Refused(400, "the body is no JSON object")
+                if isinstance(fields.get("guides"), str) and fields["guides"]:
+                    raise Refused(400, "guides take files: send the job as "
+                                  "a multipart form", "guides")
                 files = {}
         except BodyRefused as e:
             log_refusal(e.status, str(e))
@@ -512,7 +521,7 @@ async def create(request: Request):
         keys = await (_in_turn if _inline(head.sent) else asyncio.to_thread)(
             _keyframes, head.sent, folder, take)
         record, params = await asyncio.to_thread(
-            prepare_tail, head, keys, fields, files, ffmpeg)
+            prepare_tail, head, keys, fields, files, ffmpeg, guides)
         try:
             job = await asyncio.to_thread(post.submit, record, params)
         except QueueFull as e:

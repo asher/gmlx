@@ -1086,6 +1086,24 @@ def test_a_malformed_guides_field_is_a_400(routes, guides, text):
     assert routes.store.jobs == {}
 
 
+def test_a_guides_field_whose_parse_passes_the_memory_free_is_a_413(
+        routes, monkeypatch):
+    """A guides field of many small objects parses to far more than its
+    text: it is priced as a JSON body is, and refused before its parse
+    when that passes the memory free."""
+    guides = "[" + ",".join(["{}"] * 50_000) + "]"
+    body, ctype = _form({"prompt": "a cat", "guides": guides},
+                        {"guide_0": _png(64, 64)})
+    monkeypatch.setattr(body_intake, "free_bytes", lambda: 4 << 20)
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": ctype})
+    assert r.status_code == 413, r.text
+    err = r.json()["error"]
+    assert err["param"] == "guides"
+    assert err["message"].startswith("guides is "), err["message"]
+    assert routes.store.jobs == {}
+
+
 @pytest.mark.parametrize("over", [False, True], ids=["budget", "overcommit"])
 def test_a_prompt_with_a_lone_surrogate_is_a_400(routes, monkeypatch, over):
     """A lone surrogate escape parses from JSON to a str that encodes to
