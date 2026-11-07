@@ -1348,8 +1348,9 @@ def register_resolved_models(cfg) -> None:
     would otherwise keep loading the old VLM/speculative shape). The drafter
     stash goes with them - any live engine already owns its drafter.
 
-    The id tables are built aside and swapped in at once, so a request that
-    resolves during the rebuild sees the old generation whole.
+    Every entry resolves before anything live changes. The id tables and
+    the config are then rebound together, so a request that resolves during
+    the rebuild sees the old generation whole, and a raise leaves it in place.
 
     A model whose file is gone from disk is skipped with a warning instead of
     failing the whole server: registration runs at startup and on config
@@ -1357,8 +1358,6 @@ def register_resolved_models(cfg) -> None:
     entry stays in ``cfg.models``, so it disappears from ``/v1/models`` but
     self-heals on the next reload once the file is back.
     """
-    global _SERVER_CFG
-    _SERVER_CFG = cfg
     _fill_families(cfg)
     with _residency_build_lock(), _REGISTRY_WRITE_LOCK:
         _register_resolved_models_locked(cfg)
@@ -1366,14 +1365,16 @@ def register_resolved_models(cfg) -> None:
 
 def _bind_registry(reg: _Registry | None) -> None:
     global _REGISTRY, _RESOLVED_MODELS, _PATH_TO_IDS, _IMAGE_MODELS, _IMAGE_PATH_TO_IDS
+    global _SERVER_CFG
     if reg is None:
-        _REGISTRY = None
+        _REGISTRY = _SERVER_CFG = None
         _RESOLVED_MODELS, _PATH_TO_IDS = {}, {}
         _IMAGE_MODELS, _IMAGE_PATH_TO_IDS = {}, {}
         return
     _RESOLVED_MODELS, _PATH_TO_IDS = reg.models, reg.path_to_ids
     _IMAGE_MODELS, _IMAGE_PATH_TO_IDS = reg.image_models, reg.image_path_to_ids
     _REGISTRY = reg
+    _SERVER_CFG = reg.cfg
 
 
 def _clear_registries() -> None:
@@ -1436,9 +1437,6 @@ def _register_image(iid: str, rm, images: dict, image_path_to_ids: dict) -> None
 def _register_resolved_models_locked(cfg) -> None:
     from gmlx.config import MissingModelFile, resolve_image_model
 
-    _GGUF_VLM_REGISTRY.clear()
-    _GGUF_MTP_REGISTRY.clear()
-    _MTP_DRAFTER_STASH.clear()
     for root in getattr(cfg, "model_dirs", None) or []:
         expanded = os.path.expanduser(os.path.expandvars(root))
         if not os.path.isdir(expanded):
@@ -1446,26 +1444,32 @@ def _register_resolved_models_locked(cfg) -> None:
                   "root resolves against the server's own cwd; use an "
                   "absolute path, or restore/remount the directory)",
                   file=sys.stderr)
+    resolved = []
+    resolved_images = []
+    skipped = []
+    for mid in cfg.models:
+        try:
+            resolved.append((mid, _resolve_served(mid, cfg)))   # default-profile view
+        except MissingModelFile as e:           # disk state, not config shape
+            skipped.append((mid, e))
+    for iid in getattr(cfg, "image_models", {}):
+        try:
+            resolved_images.append((iid, resolve_image_model(iid, cfg)))
+        except MissingModelFile as e:
+            skipped.append((iid, e))
+    _GGUF_VLM_REGISTRY.clear()
+    _GGUF_MTP_REGISTRY.clear()
+    _MTP_DRAFTER_STASH.clear()
     models: dict = {}
     path_to_ids: dict = {}
     images: dict = {}
     image_path_to_ids: dict = {}
-    skipped = []
-    for mid in cfg.models:
-        try:
-            rm = _resolve_served(mid, cfg)      # default-profile (no request) view
-        except MissingModelFile as e:           # disk state, not config shape
-            skipped.append((mid, e))
-            continue
+    for mid, rm in resolved:
         _register_one(mid, rm, models, path_to_ids)
     for rm in models.values():
         _fill_adapters(rm, models)
-    for iid in getattr(cfg, "image_models", {}):
-        try:
-            _register_image(iid, resolve_image_model(iid, cfg), images,
-                            image_path_to_ids)
-        except MissingModelFile as e:
-            skipped.append((iid, e))
+    for iid, rm in resolved_images:
+        _register_image(iid, rm, images, image_path_to_ids)
     _bind_registry(_Registry(cfg, models, path_to_ids, images, image_path_to_ids))
     for mid, e in skipped:
         print(f"[server] skipping model {mid!r}: {e}", file=sys.stderr)
@@ -1535,8 +1539,6 @@ def reregister_missing_models() -> bool:
 def clear_resolved_models() -> None:
     """Drop the id tables, companion registries, drafter stash + config reference
     (test isolation / pre-reload)."""
-    global _SERVER_CFG
-    _SERVER_CFG = None
     _clear_registries()
 
 

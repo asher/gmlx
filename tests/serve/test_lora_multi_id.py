@@ -169,6 +169,45 @@ def test_a_request_during_a_reload_sees_the_old_registry_whole(tmp_path, serving
     assert seen[0].load_signature() == old.load_signature()
 
 
+def test_a_refused_reload_leaves_the_old_generation_whole(tmp_path, serving):
+    from gmlx.config import ConfigError, build_config
+    _write(tmp_path, "base.gguf", "A.gguf", "mm.gguf")
+    good = build_config({"server": {"model_dirs": [str(tmp_path)]},
+                         "models": {"v": {"path": "base.gguf", "mmproj": "mm.gguf"},
+                                    "a": {"path": "base.gguf", "adapter": "A.gguf"}}})
+    serving.register_resolved_models(good)
+    reg = serving._REGISTRY
+    vlm = dict(serving._GGUF_VLM_REGISTRY)
+    assert vlm
+    bad = build_config({"server": {"model_dirs": [str(tmp_path)]},
+                        "models": {"a": {"path": "base.gguf",
+                                         "adapters": ["A.gguf",
+                                                      str(tmp_path / "A.gguf")]},
+                                   "v": {"path": "base.gguf", "mmproj": "mm.gguf"}}})
+    with pytest.raises(ConfigError, match="name the same file"):
+        serving.register_resolved_models(bad)
+    assert serving._REGISTRY is reg
+    assert serving.server_config() is good
+    assert serving._GGUF_VLM_REGISTRY == vlm
+
+
+def test_the_config_rebinds_with_the_registry(tmp_path, serving, monkeypatch):
+    cfg = _three_ids(tmp_path)
+    serving.register_resolved_models(cfg)
+    new = _three_ids(tmp_path)
+    real = serving._resolve_served
+    seen = []
+
+    def resolving(mid, c, *a, **k):
+        seen.append(serving.server_config() is serving._REGISTRY.cfg)
+        return real(mid, c, *a, **k)
+
+    monkeypatch.setattr(serving, "_resolve_served", resolving)
+    serving.register_resolved_models(new)
+    assert seen and all(seen)
+    assert serving.server_config() is new is serving._REGISTRY.cfg
+
+
 def test_a_request_during_the_self_heal_sees_one_registry(tmp_path, serving,
                                                          monkeypatch):
     cfg = _three_ids(tmp_path)
