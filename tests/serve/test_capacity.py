@@ -616,6 +616,33 @@ def test_unstamped_model_warns_once(caplog):
     assert cap.boot_kv_rates(None) == {}
 
 
+def test_unstamped_model_at_a_freed_id_warns(caplog, monkeypatch):
+    """A reloaded model at the id of a freed one warns again. Every model
+    gets the same id here, so the reuse does not depend on the allocator."""
+    import gc
+
+    class Model:
+        pass
+
+    cap.clear_table()
+    keyed = []
+
+    def one_id(obj):
+        keyed.append(id(obj))
+        return 1
+
+    monkeypatch.setattr(cap, "id", one_id, raising=False)
+    old = Model()
+    with caplog.at_level("WARNING", logger="gmlx.serve.capacity"):
+        assert cap.boot_kv_rates(old) == {}
+        assert id(old) in keyed           # the key goes through the stand-in
+        del old
+        gc.collect()
+        assert cap.boot_kv_rates(Model()) == {}
+    assert sum("no boot KV costs stamped" in r.message
+               for r in caplog.records) == 2
+
+
 def test_refused_table_leaves_the_previous_one_installed(rig, monkeypatch):
     path = rig(weights_gb=10.0, ws_gb=20.0)
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
