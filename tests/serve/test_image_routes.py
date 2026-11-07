@@ -1444,41 +1444,6 @@ def test_the_images_of_an_edit_are_priced_beside_the_arrays_before_them(
     assert post(two, free + 512 * 512 * 3).status_code == 200
 
 
-@pytest.mark.parametrize("fmt,mode", [("PNG", "RGB"), ("WEBP", "RGBA")])
-def test_the_decode_price_bounds_what_the_decode_holds(fmt, mode, tmp_path):
-    """What an image's decode holds at its peak, by the process's maximum
-    resident size, stays within the price read from its header: 4096
-    pixels square, a PNG of 22 bytes a pixel and a WebP with alpha, the
-    widest decode, of 35."""
-    import os
-    import subprocess
-    import sys
-
-    from PIL import Image
-
-    p = tmp_path / f"a.{fmt.lower()}"
-    Image.new(mode, (4096, 4096), (10, 20, 30, 40)[:len(mode)]).save(p, fmt)
-    price = svc.decode_price(p.read_bytes())[0]
-    code = f"""
-import io, resource
-from PIL import Image
-from gmlx.serve.image_service import decode_image
-tiny = io.BytesIO()
-Image.new({mode!r}, (2, 2)).save(tiny, {fmt!r})
-decode_image(tiny.getvalue(), "image")
-data = open({str(p)!r}, "rb").read()
-before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-decode_image(data, "image")
-print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before)
-"""
-    out = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                         text=True, env=os.environ, check=True)
-    # ru_maxrss is in bytes on macOS, in KiB elsewhere.
-    held = int(out.stdout.split()[-1]) * (1 if sys.platform == "darwin"
-                                          else 1024)
-    assert 0.8 * price < held <= price, (held, price)
-
-
 def _edit_bodies() -> dict:
     """An edit whose image is inline in JSON, a file in a form, or a data
     URL in a form's text field, each with its content type."""

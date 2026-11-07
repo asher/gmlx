@@ -856,34 +856,27 @@ def test_a_served_render_keeps_the_templates_thinking_default():
                                 enable_thinking=False) == "NOTHINK"
 
 
+def _served(raw):
+    """The processor serve builds for a text GGUF, over a real mlx-lm
+    TokenizerWrapper."""
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
+
+    wrapper = TokenizerWrapper(raw)
+    return wrapper, serving._GgufServerProcessor(wrapper, raw, None)
+
+
 class _PlainGateTok(_GateTok):
-    """The gate tokenizer with a vocab that holds no think tokens."""
+    """A template that thinks unless told not to, over a vocab with no
+    think tokens."""
     eos_token_id = 0
 
     def get_vocab(self):
         return {"a": 0}
 
 
-def test_a_served_text_render_keeps_the_templates_thinking_default():
-    """mlx-lm's TokenizerWrapper sets an absent enable_thinking to whether
-    the vocab holds think tokens. A served text model's render with no
-    thinking control keeps the template's own default all the same."""
-    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
-
-    pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
-    raw = _PlainGateTok()
-    wrapper = TokenizerWrapper(raw)
-    assert not wrapper.has_thinking
-    proc = serving._GgufServerProcessor(wrapper, raw, None)
-    msgs = [{"role": "user", "content": "hi"}]
-    assert pu.get_chat_template(proc, msgs, True) == "THINK"
-    assert pu.get_chat_template(proc, msgs, True,
-                                enable_thinking=False) == "NOTHINK"
-
-
 class _ThinkVocabOffTok(_GateTok):
-    """A vocab with think tokens and a template that thinks only when
-    asked, as Qwen3.5-9B and Gemma 4 do."""
+    """A template that thinks only when asked, over a vocab with think
+    tokens, as Qwen3.5-9B and Gemma 4 have."""
     eos_token_id = 0
     chat_template = ("{% if enable_thinking is defined and enable_thinking "
                      "%}THINK{% else %}NOTHINK{% endif %}")
@@ -892,14 +885,20 @@ class _ThinkVocabOffTok(_GateTok):
         return {"a": 0, "<think>": 1, "</think>": 2}
 
 
-def test_a_served_text_render_with_think_tokens_keeps_a_default_off():
-    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
-
+def test_a_served_text_render_keeps_a_template_default_on():
     pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
-    raw = _ThinkVocabOffTok()
-    wrapper = TokenizerWrapper(raw)
+    wrapper, proc = _served(_PlainGateTok())
+    assert not wrapper.has_thinking
+    msgs = [{"role": "user", "content": "hi"}]
+    assert pu.get_chat_template(proc, msgs, True) == "THINK"
+    assert pu.get_chat_template(proc, msgs, True,
+                                enable_thinking=False) == "NOTHINK"
+
+
+def test_a_served_text_render_keeps_a_template_default_off():
+    pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
+    wrapper, proc = _served(_ThinkVocabOffTok())
     assert wrapper.has_thinking
-    proc = serving._GgufServerProcessor(wrapper, raw, None)
     msgs = [{"role": "user", "content": "hi"}]
     assert pu.get_chat_template(proc, msgs, True) == "NOTHINK"
     assert pu.get_chat_template(proc, msgs, True,
@@ -907,10 +906,7 @@ def test_a_served_text_render_with_think_tokens_keeps_a_default_off():
 
 
 def test_the_prefill_gate_takes_the_served_text_processor():
-    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
-
-    raw = _ThinkVocabOffTok()
-    proc = serving._GgufServerProcessor(TokenizerWrapper(raw), raw, None)
+    _, proc = _served(_ThinkVocabOffTok())
     assert prefill._renders_template_text(proc)
 
 

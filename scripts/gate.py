@@ -65,7 +65,7 @@ DEVICE_MODULES = ("mlx", "mlx_kquant")
 _CHILD_IMPORT = re.compile(r"^\s*(?:import|from)\s+(?:mlx|mlx_kquant)\b", re.M)
 # Test files whose cases skip on one device and run on the other, that the
 # import scan misses. `scope --check` lists candidates.
-GPU_EXTRA: tuple[str, ...] = ()
+GPU_EXTRA: tuple[str, ...] = ("tests/serve/test_image_decode_memory.py",)
 
 
 def git(*args: str, cwd: Path | str | None = None, check: bool = True, stdin: str | None = None) -> str:
