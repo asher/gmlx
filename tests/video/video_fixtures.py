@@ -129,6 +129,18 @@ def vsa_kernel(monkeypatch, nax: bool = True) -> None:
     monkeypatch.setattr(kq, "nax_available", lambda: nax)
 
 
+def qk8_kernel(monkeypatch, nax: bool = True) -> None:
+    """An mlx-kquant with ``sdpa_qk8``, on a GPU with NAX units or
+    without, so a run with int8 attention does not depend on the
+    machine's kq."""
+    import mlx_kquant as kq
+
+    for name in ("sdpa_qk8_inputs", "sdpa_qk8"):
+        monkeypatch.setattr(kq, name, getattr(kq, name, lambda *a, **k: None),
+                            raising=False)
+    monkeypatch.setattr(kq, "nax_available", lambda: nax)
+
+
 @functools.lru_cache(maxsize=None)
 def _video_dits(root: str, family: str) -> tuple:
     from gmlx.image.fingerprint import view_from_scans

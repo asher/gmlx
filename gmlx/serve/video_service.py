@@ -82,6 +82,7 @@ class VideoEntryPlan:
     mmproj_bytes: int = 0           # the encoder's mmproj file, for keyframes
     tower_bytes: int = 0            # its vision tower once attached
     text_rows: int = PRICED_TEXT_ROWS  # the rows its encode is priced at
+    attention: str = "dense"        # the DiT's, from the entry's defaults
 
 
 @dataclass(eq=False)
@@ -158,7 +159,7 @@ def plan_clip(plan: VideoEntryPlan, *, frames: int, width: int, height: int,
         tower=plan.tower_bytes, blocks=blocks,
         anchor_frames=memfit.anchor_frames(fam, anchors),
         anchor_audio=[a.audio_t for a in anchors if a.audio_t],
-        budget=budget)
+        attention=plan.attention, budget=budget)
 
 
 def caption_bytes(hidden: int, rows: int = PRICED_TEXT_ROWS) -> int:
@@ -224,7 +225,8 @@ def entry_plan(spec) -> VideoEntryPlan:
     except VideoModelError as e:
         raise VideoModelError(f"video model {spec.id!r}: {e}") from None
     fam = ident.family
-    why = run_refusal(fam, ident.variant)
+    attention = (spec.defaults or {}).get("attention", "dense")
+    why = run_refusal(fam, ident.variant, attention)
     if why:
         raise VideoModelError(f"video model {spec.id!r}: {why}")
     for path, _st in spec.adapters:
@@ -244,7 +246,8 @@ def entry_plan(spec) -> VideoEntryPlan:
         audio_vae_bytes=memfit.file_bytes(spec.audio_vae), loras=loras,
         lora_dtypes=tuple(memfit.lora_dtype(p) for p, _ in spec.adapters),
         mmproj_bytes=memfit.file_bytes(mmproj) if mmproj else 0,
-        tower_bytes=memfit.tower_bytes(mmproj) if mmproj else 0)
+        tower_bytes=memfit.tower_bytes(mmproj) if mmproj else 0,
+        attention=attention)
     width, height = d["size"]
     budget = working_budget_bytes()
     rows = priced_rows(spec, fam)
@@ -303,7 +306,8 @@ def _load(spec) -> ServedVideo:
     from .image_service import bound_caches, set_share
 
     plan = entry_plan(spec)
-    pipe = pipeline.load(spec.path, variant=spec.variant, log=_log_line)
+    pipe = pipeline.load(spec.path, variant=spec.variant,
+                         attention=plan.attention, log=_log_line)
     served = ServedVideo(pipe=pipe, spec=spec, plan=plan)
     try:
         for path, _st in spec.adapters:
@@ -439,7 +443,7 @@ def ensure_dit(served: ServedVideo) -> None:
     from gmlx.video.loader import load_dit
 
     pipe.dit, _ = load_dit(str(served.spec.path), variant=served.spec.variant,
-                           log=_log_line)
+                           attention=served.plan.attention, log=_log_line)
     try:
         install.rewrap(pipe)
         _load_adapters(served)

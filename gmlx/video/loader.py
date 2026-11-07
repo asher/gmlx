@@ -3,8 +3,8 @@
 ``load_dit`` identifies the file with the video rules and hands the result
 to ``gmlx.image.loader.load_dit``, which builds the family's module tree,
 installs a KQuantLinear per quantized matrix and fills every tensor. A
-variant that runs video sparse attention is refused first where this
-install or Mac does not run it.
+variant that runs video sparse attention, or a run with int8 attention,
+is refused first where this install or Mac does not run it.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from gmlx.image.fingerprint import (Identified, ImageModelError,
                                     view_from_scans)
 
 from .fingerprint import VideoIdentified, VideoModelError, identify
-from .registry import vsa_refusal
+from .registry import attention_refusal, vsa_refusal
 
 if TYPE_CHECKING:
     from gmlx.image.registry import Family
@@ -41,9 +41,11 @@ def identify_dit(path: str, *, family: str | None = None,
 
 def load_dit(path: str, *, family: str | None = None,
              variant: str | None = None, act_dtype: mx.Dtype | None = None,
+             attention: str = "dense",
              log=print) -> tuple[nn.Module, VideoIdentified]:
-    """Load a video DiT GGUF. Raises ``VideoModelError`` for a file gmlx
-    video refuses."""
+    """Load a video DiT GGUF to run with ``attention``. Raises
+    ``VideoModelError`` for a file gmlx video refuses, or an attention
+    this install or Mac does not run."""
     from gmlx.image.loader import load_dit as load_image_dit
 
     vid = identify_dit(path, family=family, variant=variant)
@@ -62,6 +64,9 @@ def load_dit(path: str, *, family: str | None = None,
         why = vsa_refusal(fam, vid.variant)
         if why:
             raise VideoModelError(why)
+    why = attention_refusal(fam, vid.variant, attention)
+    if why:
+        raise VideoModelError(why)
     # The image loader reads only fields a video family also has.
     ident = Identified(family=cast("Family", fam), config=vid.config,
                        prefix=vid.prefix,
@@ -72,4 +77,6 @@ def load_dit(path: str, *, family: str | None = None,
                                   identified=ident, log=log, kind="video")
     except ImageModelError as e:
         raise VideoModelError(str(e)) from e
+    if attention != "dense":
+        model.attention = attention
     return model, vid

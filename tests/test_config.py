@@ -3586,7 +3586,7 @@ def test_video_models_parse_and_normalize():
         adapters=["/turbo.safetensors", {"path": "/b.safetensors",
                                          "strength": 0.5}],
         defaults={"steps": "8", "shift": 6, "size": "1344X768",
-                  "seconds": 10}))
+                  "seconds": 10, "attention": "int8"}))
     m = cfg.video_models["h3"]
     assert (m.path, m.encoder, m.vae, m.audio_vae) == (
         "/m/h3.gguf", "/m/qwen3vl-32b.gguf", "/m/video_vae.safetensors",
@@ -3594,7 +3594,7 @@ def test_video_models_parse_and_normalize():
     assert (m.encoder_mmproj, m.tiny_vae, m.variant) == (None, None, None)
     assert m.adapters == (("/turbo.safetensors", 1.0), ("/b.safetensors", 0.5))
     assert m.defaults == {"steps": 8, "shift": 6.0, "size": "1344x768",
-                          "seconds": 10.0}
+                          "seconds": 10.0, "attention": "int8"}
     assert "h3" not in cfg.models and "h3" not in cfg.image_models
 
 
@@ -3605,6 +3605,8 @@ def test_video_models_parse_and_normalize():
     ({"defaults": {"steps": 0}}, "positive"),
     ({"defaults": {"steps": 4.9}}, "whole number"),
     ({"defaults": {"shift": float("nan")}}, "positive"),
+    ({"defaults": {"attention": "int4"}},
+     "defaults.attention: expected one of dense, int8, got 'int4'"),
     ({"variant": 1}, "variant: expected a string"),
     ({"adapters": [{"path": "/a", "strength": "x"}]}, "strength"),
     ({"upsampler": "nope"}, "`upsampler` 'nope' is not a model id"),

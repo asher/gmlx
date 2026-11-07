@@ -14,6 +14,10 @@ output of its heads.
 FastH3 (config ``vsa_sparsity``) runs every DiT attention call as video
 sparse attention (``vsa``), with the gate of each block's
 ``to_gate_compress`` on the same rows as its qkv.
+
+With ``attention`` set to ``"int8"``, the DiT blocks run their dense
+attention as mlx-kquant's ``sdpa_qk8``: int8 Q K^T and bfloat16 P V. The
+token refiner keeps dense attention.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
+import mlx_kquant as kq
 import numpy as np
 
 from gmlx import mlx_guards
@@ -31,6 +36,7 @@ from gmlx.image import ops, pacing
 from gmlx.video import rope
 from gmlx.video.anchors import augment, pinned
 from gmlx.video.layout import Layout
+from gmlx.video.registry import ATTENTION
 
 from . import family as fam
 from . import vsa as h3vsa
@@ -190,6 +196,32 @@ def attend(q: mx.array, k: mx.array, v: mx.array,
     return mlx_guards.concatenate(parts, axis=2)
 
 
+def _kq(name: str):
+    """mlx-kquant's op ``name``. The loader refuses int8 attention on a
+    build without ``sdpa_qk8`` before any call."""
+    return getattr(kq, name)
+
+
+def attend_int8(q: mx.array, k: mx.array, v: mx.array,
+                chunk: int | None) -> mx.array:
+    """``attend`` with int8 Q K^T and bfloat16 P V. q and k are quantized
+    once a call, with a pause point after; then each chunk of query rows
+    reads its rows of the int8 q and their scales, with a pause point
+    after each, and the chunks join through the guard."""
+    q8, sq, k8, sk = _kq("sdpa_qk8_inputs")(q, k, q.shape[-1] ** -0.5)
+    pacing.point(q8, sq, k8, sk)
+    attn = _kq("sdpa_qk8")
+    n = q.shape[2]
+    if not chunk or n <= chunk:
+        return attn(q8, sq, k8, sk, v)
+    parts = []
+    for a in range(0, n, chunk):
+        parts.append(attn(q8[:, :, a:a + chunk], sq[:, :, a:a + chunk], k8,
+                          sk, v))
+        pacing.point(parts[-1])
+    return mlx_guards.concatenate(parts, axis=2)
+
+
 class Attention(nn.Module):
     def __init__(self, cfg: H3Config):
         super().__init__()
@@ -288,13 +320,16 @@ class DiTBlock(_Block):
         return tuple(y[:, i].astype(dtype) for i in range(6))
 
     def attention(self, h: mx.array, cos: mx.array, sin: mx.array,
-                  chunk: int | None = None, vsa=None) -> mx.array:
+                  chunk: int | None = None, vsa=None,
+                  attention: str = "dense") -> mx.array:
         """The attention rows (B, L, inner) that ``out_proj`` takes. A
         pause point after qkv keeps a LoRA delta's second product out of
         the RoPE step's peak. With a VSA geometry ``vsa`` (B = 1) the
         rows run video sparse attention with the gate of ``h``, packed
         [L, heads, head dim], with a pause point after the call, so its
-        transients are gone before ``out_proj`` and the feed-forward run."""
+        transients are gone before ``out_proj`` and the feed-forward run.
+        Else ``attention`` ``"int8"`` runs ``attend_int8`` in place of
+        ``attend``."""
         b, n, _ = h.shape
         q, k, v = self.qkv(h)
         gate = None
@@ -319,15 +354,16 @@ class DiTBlock(_Block):
                              gate, vsa, self.vsa_sparsity)
             pacing.point(o)
             return o.reshape(b, n, -1)
-        o = attend(q, k, v.transpose(0, 2, 1, 3), chunk)
+        run = attend_int8 if attention == "int8" else attend
+        o = run(q, k, v.transpose(0, 2, 1, 3), chunk)
         return o.transpose(0, 2, 1, 3).reshape(b, n, -1)
 
     def __call__(self, x: mx.array, mod: tuple, segs: tuple, cos: mx.array,
                  sin: mx.array, chunk: int | None = None,
-                 vsa=None) -> mx.array:
+                 vsa=None, attention: str = "dense") -> mx.array:
         shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = mod
         h = modulated(self.norm1(x), shift_a, scale_a, segs)
-        rows = self.attention(h, cos, sin, chunk, vsa)
+        rows = self.attention(h, cos, sin, chunk, vsa, attention)
         x = gated(x, gate_a, self.attn.out_proj(rows), segs)
         h = modulated(self.norm2(x), shift_f, scale_f, segs)
         return gated(x, gate_f, self.mlp.fc2(self.hidden(h)), segs)
@@ -354,6 +390,7 @@ class H3Transformer(nn.Module):
         cfg = H3Config.from_dict(config)
         self.cfg = cfg
         self.act_dtype = mx.bfloat16
+        self.attention = "dense"
         self.video_patch_proj = nn.Linear(cfg.patch_dim, cfg.dim)
         self.audio_patch_proj = nn.Linear(cfg.audio, cfg.dim)
         self.condition_proj = nn.Linear(cfg.text_dim, cfg.dim)
@@ -373,6 +410,19 @@ class H3Transformer(nn.Module):
             raise H3DtypeError(f"{fam.TITLE} runs in bfloat16 or float32, "
                                f"not {dtype}")
         self._act_dtype = dtype
+
+    @property
+    def attention(self) -> str:
+        """How the DiT blocks run dense attention: ``"dense"``, or
+        ``"int8"`` for ``attend_int8``."""
+        return self._attention
+
+    @attention.setter
+    def attention(self, kind: str) -> None:
+        if kind not in ATTENTION:
+            raise ValueError(f"{fam.TITLE} runs {' or '.join(ATTENTION)} "
+                             f"attention, not {kind!r}")
+        self._attention = kind
 
     def caption(self, feats: mx.array, taps: dict | None = None) -> mx.array:
         """The text rows (1, L, dim) of encoder features (1, L, text dim):
@@ -525,7 +575,7 @@ class H3Transformer(nn.Module):
             taps["t_emb"] = t_emb
         for i, blk in enumerate(self.blocks):
             x = blk(x, blk.modulation(t_emb, self.act_dtype), plan.segs,
-                    plan.cos, plan.sin, chunk, plan.vsa)
+                    plan.cos, plan.sin, chunk, plan.vsa, self.attention)
             pacing.point(x)
             if taps is not None:
                 taps[f"blocks.{i}"] = x

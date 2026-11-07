@@ -1395,6 +1395,33 @@ def test_a_video_entry_released_with_a_client_table_frees_its_pipeline(
     assert [r() for r in refs] == [None, None]
 
 
+def test_an_int8_entry_loads_its_dit_with_int8_after_each_encode(
+        monkeypatch):
+    """An entry whose plan holds int8 attention loads its DiT with it at
+    its first load and at the load after an encode lets it go, so it
+    never runs dense attention in silence."""
+    import dataclasses
+
+    from gmlx.serve import image_service
+    from gmlx.video import loader
+
+    pipe, weights = _own_pipe()
+    served = _served(pipe)
+    plan = dataclasses.replace(served.plan, attention="int8")
+    loads = []
+    monkeypatch.setattr(vs, "entry_plan", lambda spec: plan)
+    monkeypatch.setattr(pipeline, "load", lambda *a, **k: (
+        loads.append(k["attention"]), pipe)[1])
+    monkeypatch.setattr(loader, "load_dit", lambda *a, **k: (
+        loads.append(k["attention"]), (_tiny_dit(weights), None))[1])
+    monkeypatch.setattr(image_service, "_SHARES", {})
+    got = _on_worker(vs._load, served.spec)
+    _on_worker(vs.drop_dit, got)
+    _on_worker(vs.ensure_dit, got)
+    assert loads == ["int8", "int8"]
+    _on_worker(vs._release, [got])
+
+
 @pytest.mark.parametrize("cap_mb", [None, 256])
 def test_a_loaded_video_entry_bounds_its_caches_at_its_share(tmp_path,
                                                             monkeypatch,
