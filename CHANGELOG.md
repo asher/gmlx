@@ -146,6 +146,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   where they said the server did not answer.
 - A chat, Responses, Messages or images request with a lone surrogate
   escape gets a 400 naming the field, where it returned a 500.
+- Cancel in ComfyUI stops the server's prompt upsampling for a text encode,
+  where the server went on writing the caption and encoding it.
 
 ## [0.5.4] - 2026-10-29
 

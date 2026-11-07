@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import uuid
 import weakref
 
 import numpy as np
@@ -46,6 +47,10 @@ _NUMPY = {"F32": "<f4", "F16": "<f2", "BF16": "<u2", "U8": "u1", "BOOL": "?"}
 _ITEM = {"F32": 4, "F16": 2, "BF16": 2, "U8": 1, "BOOL": 1}
 
 log = logging.getLogger("gmlx")
+
+# The server feature that rewrites a prompt with the clip's frames and
+# keyframes, and stops the rewrite on an interrupt naming the encode.
+KEYFRAME_UPSAMPLING = "keyframe_upsampling"
 
 
 class GmlxError(RuntimeError):
@@ -552,15 +557,25 @@ class StepClient:
         with reference images as uint8 (H, W, C) arrays. ``clip`` gives a
         video clip's ``frames`` and ``keyframes``, the role of each image."""
         body = {"model": model, "text": text, **(clip or {})}
+        stop = None
+        if KEYFRAME_UPSAMPLING in ((self.capabilities or {}).get("features") or ()):
+            # A cancel ends the server's prompt rewrite through the interrupt.
+            token = body["interrupt_id"] = uuid.uuid4().hex
+
+            def stop():
+                try:
+                    self.interrupt(token)
+                except GmlxError as e:
+                    log.warning("gmlx: the interrupt did not reach the server: %s", e)
         if images:
             tensors = {f"image_{i}": np.ascontiguousarray(im, dtype=np.uint8)
                        for i, im in enumerate(images)}
             # ComfyUI encodes the reference latents with its own VAE node.
             out, fields, _ = self.call_tensors("/encode", tensors, {**body, "refs": False},
-                                               what="the text encode")
+                                               what="the text encode", on_interrupt=stop)
         else:
             s, _, d = self.request("POST", PREFIX + "/encode", json.dumps(body).encode(),
-                                   {"Content-Type": "application/json"})
+                                   {"Content-Type": "application/json"}, on_interrupt=stop)
             if s != 200:
                 self._fail(s, d, "the text encode")
             out, fields = unpack(d)

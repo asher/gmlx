@@ -194,6 +194,7 @@ class State:
         self.gmlx_version = a.gmlx_version
         self.no_contract_field = a.no_contract_field
         self.delay = a.step_delay_ms / 1000.0
+        self.encode_delay = a.encode_delay_ms / 1000.0
         self.cond_tokens = a.cond_tokens
         self.default_model = a.default_model
         self.upsample = a.upsample
@@ -208,6 +209,8 @@ class State:
         self.refuse_windows: list = []
         self.max_body = (1 << 30) + (1 << 20)
         self.runs: dict = {}
+        # interrupt_id -> the stop event of an encode in its delay
+        self.encodes: dict = {}
         self.log: list = []
         self.lock = threading.Lock()
 
@@ -450,8 +453,11 @@ class Handler(BaseHTTPRequestHandler):
             hit = [r for r in st.runs.values() if not rid or r.id == rid]
             for r in hit:
                 r.gen += 1
+            stop = st.encodes.get(rid) if rid else None
+            if stop is not None:
+                stop.set()
             st.event(kind="interrupt", run=rid)
-            return self._json(200, {"interrupted": len(hit)})
+            return self._json(200, {"interrupted": len(hit) + (stop is not None)})
         if sub == "/adapters/register":
             return self._err(404, "no such adapter file under the server's model folders")
         if sub == "/models/load":
@@ -493,6 +499,19 @@ class Handler(BaseHTTPRequestHandler):
         m = self._model(req.get("model"))
         if m is None:
             return
+        if st.encode_delay:
+            # As an upsampler's rewrite of the prompt takes its time, which
+            # an interrupt naming the encode's interrupt_id ends.
+            token = req.get("interrupt_id")
+            stop = threading.Event()
+            if token:
+                st.encodes[token] = stop
+            st.event(kind="encode_begin", interrupt_id=token)
+            stop.wait(st.encode_delay)
+            st.encodes.pop(token, None)
+            if stop.is_set():
+                st.event(kind="encode_interrupted", interrupt_id=token)
+                return self._err(409, "the encode was interrupted", code="interrupted")
         fam = m[0]
         spans = []
         if images and fam == "h3":
@@ -820,6 +839,7 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--step-delay-ms", type=float, default=0.0)
+    ap.add_argument("--encode-delay-ms", type=float, default=0.0)
     ap.add_argument("--contract", default="1.0")
     ap.add_argument("--api-key", default=None)
     ap.add_argument("--gmlx-version", default="stub")

@@ -18,7 +18,7 @@ import torch
 import comfy.model_patcher
 import comfy.sd
 
-from .client import GmlxError, GmlxRefusal, StepClient
+from .client import KEYFRAME_UPSAMPLING, GmlxError, GmlxRefusal, StepClient
 from .patcher import CPU, H3_FAMILY, H3_NO_REFS, token_tags
 
 log = logging.getLogger("gmlx")
@@ -37,9 +37,8 @@ _SPACE_FOR_EMPTY = frozenset({"qwen_image", "qwen_image21", "krea2", "flux3_klei
 # The conditioning key of the prompt as typed beside an upsampled one.
 TYPED = "gmlx_typed"
 
-# The server feature that rewrites a prompt with the clip's length and
-# keyframes, which GmlxH3ImageToVideo puts on its clone of the CLIP.
-KEYFRAME_UPSAMPLING = "keyframe_upsampling"
+# ComfyUI's node, and the gmlx node that puts the clip's length and
+# keyframes on its clone of the CLIP.
 STOCK_NODE = "MiniMax H3 Image to Video"
 GMLX_NODE = "gmlx MiniMax-H3 Image to Video"
 

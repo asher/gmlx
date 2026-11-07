@@ -486,6 +486,42 @@ class Interrupt(Base):
         self.assertIn("step_interrupted", [e["kind"] for e in self.stub.log()])
 
 
+class EncodeInterrupt(Base):
+    """Cancel in ComfyUI while the server rewrites the prompt: the
+    interrupt naming the encode reaches the server, which ends the
+    rewrite, and the node raises ComfyUI's interrupt."""
+    stub_args = ("--encode-delay-ms", "5000")
+
+    def test_a_cancel_during_the_rewrite_interrupts_that_encode_on_the_server(self):
+        clip = P.nodes.GmlxCLIPLoader().load(HID, self.stub.url, False)[0]
+        done = threading.Event()
+
+        def watch():
+            while not done.is_set():
+                if self.stub.events("encode_begin"):
+                    mm.interrupt_current_processing(True)
+                    return
+                time.sleep(0.02)
+        th = threading.Thread(target=watch, daemon=True)
+        th.start()
+        t0 = time.monotonic()
+        try:
+            with self.assertRaises(mm.InterruptProcessingException):
+                comfy_nodes.CLIPTextEncode().encode(clip, "a fox")
+        finally:
+            done.set()
+            mm.interrupt_current_processing(False)
+        self.assertLess(time.monotonic() - t0, 3.0)
+        (begin,) = self.stub.events("encode_begin")
+        self.assertTrue(begin["interrupt_id"])
+        self.assertEqual([e["run"] for e in self.stub.events("interrupt")],
+                         [begin["interrupt_id"]])
+        deadline = time.monotonic() + 10
+        while not self.stub.events("encode_interrupted") and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(len(self.stub.events("encode_interrupted")), 1)
+
+
 class Vaes(Base):
     def test_the_video_and_audio_vae_nodes_decode_a_sampled_clip(self):
         out = self.sample(self.model(), steps=1)

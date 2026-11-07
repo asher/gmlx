@@ -2616,3 +2616,139 @@ def test_an_encode_refuses_frames_and_keyframes_it_cannot_rewrite_with(
         _client().container("encode", tensors,
                             {"model": "h3", "text": "a fox", **sent})
     assert e.value.status == 400 and e.value.body["error"] == error
+
+
+
+_REPLY = {"instruction": "", "integrated_multimodal_description": "A fox.",
+          "overall_soundscape": "Wind.", "non_diegetic_music": "N/A"}
+
+
+def _post(path: str, body: dict):
+    import json
+
+    s, h, data = _client()._call("POST", path, json.dumps(body).encode(),
+                                 ctype="application/json")
+    json_answer = h.get("content-type", "").startswith("application/json")
+    return s, json.loads(data) if json_answer else None
+
+
+def _text_encode(monkeypatch, request, tmp_path, chat) -> list:
+    """An H3 entry whose upsampler is ``chat(stop)``; returns the list
+    each encode of a prompt appends to."""
+    from gmlx.serve import image_upsample
+
+    pipe, weights = _own_pipe()
+    served = _served(pipe)
+    _mount(_Host(served), request)
+    _encoder_by_text(monkeypatch, weights)
+    encodes: list = []
+    monkeypatch.setattr(routes, "_check_encode",
+                        lambda *a: encodes.append(1))
+    _rewrites(monkeypatch, served, tmp_path, {})
+    monkeypatch.setattr(image_upsample, "_chat",
+                        lambda up, req, stop: chat(stop))
+    return encodes
+
+
+@pytest.mark.parametrize("last", [False, True])
+def test_an_interrupt_naming_an_encode_ends_its_rewrite_and_its_encode(
+        monkeypatch, request, tmp_path, last):
+    """ComfyUI's cancel during an encode's prompt rewrite reaches the
+    upsampler through the interrupt naming the encode's interrupt_id: the
+    rewrite ends, no encode runs and the encode answers 409 interrupted.
+    A stop in the rewrite's last call, after its last token, ends the
+    encode too. The token answers as an unknown run afterwards."""
+    import json
+
+    from gmlx.serve import image_upsample
+    from gmlx.serve.image_service import JobStopped
+
+    reached: list = []
+
+    def chat(stop):
+        reached.append(_post("interrupt", {"run": "enc-1"})[1]["interrupted"])
+        if not last and stop is not None and stop.wait(5):
+            raise JobStopped(timed_out=False)
+        return json.dumps(_REPLY)
+    encodes = _text_encode(monkeypatch, request, tmp_path, chat)
+    s, body = _post("encode", {"model": "h3", "text": "a fox", "frames": 124,
+                               "keyframes": [], "interrupt_id": "enc-1"})
+    assert (s, body) == (409, {"error": "the encode was interrupted",
+                               "code": "interrupted"})
+    assert reached == [1] and encodes == [] and steps.STATE.encodes == {}
+    assert bool(image_upsample.CAPTIONS._items) == last
+    assert _post("interrupt", {"run": "enc-1"}) == (200, {"interrupted": 0})
+
+
+@pytest.mark.parametrize("answer", [200, 400, 503])
+def test_an_encodes_interrupt_id_is_let_go_on_each_answer(
+        monkeypatch, request, tmp_path, answer):
+    """The interrupt_id names the encode for its rewrite alone, whether
+    the encode is answered, refused after the rewrite or refused by the
+    upsampler; a second encode may reuse it."""
+    import json
+
+    from gmlx.serve import image_upsample
+    from gmlx.serve.image_service import ImageRequestError
+
+    held: list = []
+
+    def chat(stop):
+        held.append(set(steps.STATE.encodes))
+        if answer == 503:
+            raise ImageRequestError(503, "the upsampler is busy")
+        return json.dumps(_REPLY)
+    _text_encode(monkeypatch, request, tmp_path, chat)
+    rng = np.random.default_rng(1)
+    image = {"image_0": rng.integers(0, 256, (50, 50, 3), dtype=np.uint8)}
+    for _ in range(2):
+        image_upsample.CAPTIONS.clear()
+        if answer == 400:
+            with pytest.raises(StepsClientError) as e:
+                _client().container("encode", image, {
+                    "model": "h3", "text": "a fox", "frames": 124,
+                    "keyframes": ["first"], "interrupt_id": "enc-1"})
+            s = e.value.status
+        else:
+            s, _body = _post("encode", {
+                "model": "h3", "text": "a fox", "frames": 124,
+                "keyframes": [], "interrupt_id": "enc-1"})
+        assert s == answer and steps.STATE.encodes == {}
+    assert held == [{"enc-1"}] * 2
+
+
+def test_an_encode_whose_client_goes_away_ends_its_rewrite(
+        monkeypatch, request, tmp_path):
+    """A client that goes away during the rewrite lets go of its
+    interrupt_id and ends the rewrite on its thread."""
+    import asyncio
+    import json
+    import threading
+
+    from gmlx.serve.image_service import JobStopped
+
+    started, seen = threading.Event(), []
+
+    def chat(stop):
+        started.set()
+        seen.append(stop.wait(5))
+        raise JobStopped(timed_out=False)
+    _text_encode(monkeypatch, request, tmp_path, chat)
+    raw = json.dumps({"model": "h3", "text": "a fox", "frames": 124,
+                      "keyframes": [], "interrupt_id": "enc-1"}).encode()
+
+    async def body():
+        return raw
+
+    async def go():
+        req = SimpleNamespace(headers={"content-type": "application/json"},
+                              body=body)
+        task = asyncio.ensure_future(routes.encode(req))
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        assert set(steps.STATE.encodes) == {"enc-1"}
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    asyncio.run(go())
+    assert seen == [True] and steps.STATE.encodes == {}

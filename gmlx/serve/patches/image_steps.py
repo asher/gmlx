@@ -65,7 +65,8 @@ class ServeHost:
     def revise(self, model, text, requested, has_refs, **clip):
         """The upsampler's caption of ``text``, or None to encode it as
         typed. ``clip`` holds a video clip's ``frames``, ``first`` and
-        ``last``, when the encode names them."""
+        ``last``, when the encode names them, and ``stop``, the event that
+        ends the rewrite."""
         from ..image_upsample import revise
 
         return revise(model, text, requested, has_refs, resolve=self.resolve,
@@ -1416,8 +1417,8 @@ async def _av_step(t0, tensors, fields, run):
 
 
 async def encode(request: Request):
-    from ..image_service import ImageRequestError, decode_image
-    from ..image_steps import StepError
+    from ..image_service import ImageRequestError, JobStopped, decode_image
+    from ..image_steps import STATE, StepError
     from ..image_steps import encode as do_encode
     from ..image_wire import CONTENT_TYPE
 
@@ -1448,17 +1449,40 @@ async def encode(request: Request):
     if requested is not None and not isinstance(requested, bool):
         raise StepError(400, "prompt_upsampling is true or false")
     clip = _clip_fields(fields, len(images))
+    token = fields.get("interrupt_id")
+    if token is not None and (not isinstance(token, str) or not token):
+        raise StepError(400, "interrupt_id is a non-empty string")
     revise = getattr(SETTINGS.host, "revise", None)
     revised = None
     if revise is not None:
-        # Without the clip's frames, a prompt with images runs as typed:
-        # a video entry's keyframe task names the clip's length.
+        # An interrupt naming the interrupt_id ends the rewrite, and the
+        # encode with it.
+        stop = None
+        if token is not None:
+            stop = clip["stop"] = STATE.begin_encode(token)
         try:
+            # Without the clip's frames, a prompt with images runs as
+            # typed: a video entry's keyframe task names the clip's length.
             revised = await asyncio.to_thread(
                 revise, fields.get("model"), text, requested, bool(images),
                 **clip)
+        except JobStopped:
+            raise StepError(409, "the encode was interrupted",
+                            code="interrupted") from None
         except ImageRequestError as e:
             raise StepError(e.status, str(e)) from None
+        except asyncio.CancelledError:
+            # The client went away: end the rewrite on its thread too.
+            if stop is not None:
+                stop.set()
+            raise
+        finally:
+            if token is not None:
+                STATE.end_encode(token)
+        if stop is not None and stop.is_set():
+            # A stop after the caption's last token still ends the encode.
+            raise StepError(409, "the encode was interrupted",
+                            code="interrupted")
     hold = await _acquire(fields.get("model"))
     try:
         served = _served(hold)
