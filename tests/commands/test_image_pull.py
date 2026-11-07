@@ -1479,6 +1479,7 @@ _VIDEO_CFG = """video_models:
     encoder: own.gguf
     vae: v.safetensors
     audio_vae: a.safetensors
+    tiny_vae: taeh3.safetensors
     variant: fl2va
     adapters: [lora.safetensors]
 """
@@ -1488,7 +1489,7 @@ def test_list_shows_a_video_entry_sized_by_the_files_it_loads(images,
                                                               capsys):
     lib, cfg = images
     for f in ("h3.gguf", "v.safetensors", "a.safetensors",
-              "lora.safetensors"):
+              "taeh3.safetensors", "lora.safetensors"):
         (lib / f).write_bytes(b"x" * 100)
     cfg.write_text(cfg.read_text() + _VIDEO_CFG)
     assert manage.cmd_list(["--config", str(cfg), "--json"]) == 0
@@ -1496,7 +1497,7 @@ def test_list_shows_a_video_entry_sized_by_the_files_it_loads(images,
     assert [r["kind"] for r in rows][-1] == "video"
     row = rows[-1]
     assert (row["id"], row["flags"], row["size_bytes"]) == (
-        "h3", ["fl2va"], 500)
+        "h3", ["fl2va"], 600)
     assert manage.cmd_list(["--config", str(cfg), "--image", "--json"]) == 0
     rows = json.loads(capsys.readouterr().out)["models"]
     assert "h3" not in {r["id"] for r in rows}

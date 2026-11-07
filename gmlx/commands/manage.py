@@ -2927,9 +2927,10 @@ def _image_row(cfg, im, source: str, default_image: str | None) -> dict:
 
 def _video_row(cfg, vm) -> dict:
     """The ``gmlx list`` row of a video_models entry, sized by the files it
-    loads: its DiT, text encoder, vision tower, VAEs and LoRAs."""
+    loads: its DiT, text encoder, vision tower, VAEs, preview decoder and
+    LoRAs."""
     files = [vm.path, vm.encoder, vm.encoder_mmproj, vm.vae, vm.audio_vae,
-             *(a[0] for a in vm.adapters)]
+             vm.tiny_vae, *(a[0] for a in vm.adapters)]
     sizes = [_model_size_bytes(p, cfg.model_dirs) for p in files if p]
     known = [x for x in sizes if x is not None]
     flags = [vm.variant or "video"]
