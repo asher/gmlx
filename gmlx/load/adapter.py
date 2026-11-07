@@ -145,9 +145,7 @@ def build_adapter_plan(meta: dict, arrays: dict,
         if base_name != _TOKEN_EMBD and base_name.endswith(_TOKEN_EMBD):
             # llama.cpp's suffix test sends this pair down its token
             # embedding path, which never reads it.
-            raise ValueError(
-                f"adapter targets {base_name}. llama.cpp loads this pair but "
-                f"never applies it, so gmlx refuses it.")
+            raise ValueError(per_layer_embd_message(base_name))
         dec = parse_gguf_name(remap_arch, base_name)
         if dec.kind != RemapDecision.KIND_MAP:
             raise ValueError(
@@ -302,29 +300,47 @@ def embd_shape_message(a_shape, b_shape, n_vocab: int, n_embd: int) -> str:
             f"does not fit the embedding ({n_vocab}, {n_embd}) (wrong base model?)")
 
 
-def _hadamard_names(scan) -> list:
-    from .hadamard import KEY_VERSION
+def per_layer_embd_message(base_name: str) -> str:
+    """The refusal for a pair on a table whose name ends in
+    ``token_embd.weight`` but is not the token embedding."""
+    return (f"adapter targets {base_name}. llama.cpp loads this pair but "
+            f"never applies it, so gmlx refuses it.")
+
+
+def _folded_table(scan) -> bool:
+    """Whether the base's ``prism.hadamard`` spec stores the token
+    embedding rotated. A malformed spec counts as no fold here; the load
+    reports it."""
+    from .hadamard import KEY_VERSION, HadamardSpecError, parse_hadamard_spec
 
     if scan.kv.get(KEY_VERSION) is None:
-        return []
-    key = "prism.hadamard.weight_names"
-    if key in scan.skipped:
+        return False
+    sizes = [n for k, n in scan.skipped.items() if k.startswith("prism.hadamard.")]
+    if sizes:
         from .headerscan import scan_gguf
 
-        scan = scan_gguf(scan.path, include_tensors=False,
-                         array_limit=int(scan.skipped[key]) + 1)
-    names = scan.kv.get(key)
-    return list(names) if isinstance(names, (list, tuple)) else []
+        scan = scan_gguf(scan.path, include_tensors=False, array_limit=max(sizes) + 1)
+    try:
+        spec = parse_hadamard_spec(scan.kv)
+    except HadamardSpecError:
+        return False
+    return spec is not None and _TOKEN_EMBD in spec.inverse_names
 
 
 def embedding_refusal(adapter_path: str, base_gguf_path: str) -> str | None:
     """Why the base cannot take the adapter's ``token_embd`` pair, from the
     two headers alone, or None. None too for an adapter with no such pair.
+    A pair on a per-layer table is refused whatever the base.
     The installer makes the same checks for callers that skip this one."""
     from .headerscan import scan_gguf
     from .preflight import find_split_shards
 
     adapter = {t.name: t.shape for t in scan_gguf(adapter_path).tensors}
+    name = os.path.basename(adapter_path)
+    for t in sorted(adapter):
+        base_name = t.rsplit(".", 1)[0] if t.endswith((_A_SUFFIX, _B_SUFFIX)) else ""
+        if base_name != _TOKEN_EMBD and base_name.endswith(_TOKEN_EMBD):
+            return f"{name}: " + per_layer_embd_message(base_name)
     a_ne = adapter.get(_TOKEN_EMBD + _A_SUFFIX)
     if a_ne is None:
         return None
@@ -332,7 +348,6 @@ def embedding_refusal(adapter_path: str, base_gguf_path: str) -> str | None:
     shards = [scan_gguf(p) for p in find_split_shards(base_gguf_path)]
     tensors = {t.name: t.shape for s in shards for t in s.tensors}
     head = shards[0]
-    name = os.path.basename(adapter_path)
     if "output.weight" not in tensors:
         return f"{name}: {_EMBD_TIED}"
     embd = tensors.get(_TOKEN_EMBD)
@@ -344,7 +359,7 @@ def embedding_refusal(adapter_path: str, base_gguf_path: str) -> str | None:
             tuple(reversed(a_ne)), tuple(reversed(b_ne or ())), n_vocab, n_embd)
     if head.kv.get("general.architecture") == "graniteswitch":
         return f"{name}: {_EMBD_GRANITE_SWITCH}"
-    if _TOKEN_EMBD in _hadamard_names(head):
+    if _folded_table(head):
         return f"{name}: {_EMBD_FOLDED}"
     return None
 

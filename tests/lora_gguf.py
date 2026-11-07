@@ -31,11 +31,16 @@ def mint_base(path, *, arch="llama", tied=False, vocab=V, kv=()):
     return write(path, arch, tensors, kv)
 
 
-def mint_adapter(path, *, arch="llama", embd=True, vocab=V):
+def mint_adapter(path, *, arch="llama", embd=True, vocab=V, n_embd=D, b_rank=R,
+                 b=True, per_layer=False):
     tensors = {"blk.0.attn_q.weight.lora_a": np.zeros((R, D), np.float32),
                "blk.0.attn_q.weight.lora_b": np.zeros((D, R), np.float32)}
     if embd:
         tensors["token_embd.weight.lora_a"] = np.zeros((vocab, R), np.float32)
-        tensors["token_embd.weight.lora_b"] = np.zeros((D, R), np.float32)
+        if b:
+            tensors["token_embd.weight.lora_b"] = np.zeros((n_embd, b_rank), np.float32)
+    if per_layer:
+        tensors["per_layer_token_embd.weight.lora_a"] = np.zeros((vocab, R), np.float32)
+        tensors["per_layer_token_embd.weight.lora_b"] = np.zeros((D, R), np.float32)
     kv = (("adapter.type", "string", "lora"), ("adapter.lora.alpha", "float32", 2.0))
     return write(path, arch, tensors, kv)

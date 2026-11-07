@@ -28,10 +28,16 @@ def test_a_tied_base_is_refused(tmp_path):
     assert why == "a.gguf: " + adapter._EMBD_TIED
 
 
-def test_a_pair_of_another_vocabulary_is_refused(tmp_path):
+@pytest.mark.parametrize("kw, a_shape, b_shape", [
+    ({"vocab": V + 4}, (V + 4, R), (D, R)),
+    ({"n_embd": D + 4}, (V, R), (D + 4, R)),
+    ({"b_rank": R + 1}, (V, R), (D, R + 1)),
+    ({"b": False}, (V, R), ()),
+], ids=["vocab", "n_embd", "rank", "no-b"])
+def test_a_pair_that_does_not_fit_the_base_is_refused(tmp_path, kw, a_shape, b_shape):
     base = mint_base(tmp_path / "base.gguf")
-    why = adapter.embedding_refusal(mint_adapter(tmp_path / "a.gguf", vocab=V + 4), base)
-    assert why == "a.gguf: " + adapter.embd_shape_message((V + 4, R), (D, R), V, D)
+    why = adapter.embedding_refusal(mint_adapter(tmp_path / "a.gguf", **kw), base)
+    assert why == "a.gguf: " + adapter.embd_shape_message(a_shape, b_shape, V, D)
 
 
 def test_granite_switch_is_refused(tmp_path):
@@ -40,12 +46,40 @@ def test_granite_switch_is_refused(tmp_path):
     assert why == "a.gguf: " + adapter._EMBD_GRANITE_SWITCH
 
 
+_FOLD_KV = (("prism.hadamard.version", "uint32", 1),
+            ("prism.hadamard.block_size", "uint32", 4),
+            ("prism.hadamard.transform", "string", "normalized-sylvester-walsh-hadamard"),
+            ("prism.hadamard.axis", "string", "input-last-dimension"),
+            ("prism.hadamard.sign_mode", "string", "identity"),
+            ("prism.hadamard.weight_names", "array", ["blk.0.attn_q.weight"]))
+
+
+def _spec_of(path):
+    from gmlx.load.hadamard import parse_hadamard_spec
+    from gmlx.load.headerscan import scan_gguf
+
+    return parse_hadamard_spec(scan_gguf(path, include_tensors=False).kv)
+
+
 def test_a_hadamard_folded_table_is_refused(tmp_path):
-    kv = (("prism.hadamard.version", "uint32", 1),
-          ("prism.hadamard.weight_names", "array", ["token_embd.weight"]))
+    kv = _FOLD_KV + (("prism.hadamard.inverse_weight_names", "array", ["token_embd.weight"]),)
     base = mint_base(tmp_path / "base.gguf", kv=kv)
+    assert _spec_of(base).inverse_names == ("token_embd.weight",)
     why = adapter.embedding_refusal(mint_adapter(tmp_path / "a.gguf"), base)
     assert why == "a.gguf: " + adapter._EMBD_FOLDED
+
+
+def test_a_fold_that_leaves_the_table_alone_takes_the_pair(tmp_path):
+    base = mint_base(tmp_path / "base.gguf", kv=_FOLD_KV)
+    assert _spec_of(base).inverse_names == ()
+    assert adapter.embedding_refusal(mint_adapter(tmp_path / "a.gguf"), base) is None
+
+
+def test_a_per_layer_table_pair_is_refused_from_the_headers(tmp_path):
+    base = mint_base(tmp_path / "base.gguf", tied=True)
+    path = mint_adapter(tmp_path / "a.gguf", embd=False, per_layer=True)
+    why = adapter.embedding_refusal(path, base)
+    assert why == "a.gguf: " + adapter.per_layer_embd_message("per_layer_token_embd.weight")
 
 
 def test_the_load_refusal_raises_the_first_refusal_over_its_adapters(tmp_path):
