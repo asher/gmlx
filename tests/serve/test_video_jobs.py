@@ -206,6 +206,31 @@ def test_a_clip_sent_twice_and_deleted_counts_once_until_both_end(
     assert store.room() == room + 1000
 
 
+def test_the_sweep_leaves_a_clip_being_sent_and_frees_the_next(tmp_path):
+    """Removing a clip an answer still sends frees nothing until the
+    answer ends, so the sweep leaves it and removes the next oldest, and
+    a new job's files fit."""
+    def run(job, store):
+        clock.now += 10
+        _clip(job, store, b"x" * 2000)
+
+    store, clock, driver = _store(tmp_path, run, store_max_bytes=5000,
+                                  max_queue=3)
+    jobs = [_submit(store) for _ in range(2)]
+    driver.run()
+    _rec, link, linked = store.serve(jobs[0].id)
+    assert linked
+    jobs.append(_submit(store))
+    driver.run()
+    jid = store.new_id()
+    store.begin(jid)
+    got = store.take(jid, 500)
+    assert got == (True, 500, 0), got
+    assert os.path.exists(store.clip(jobs[0].id))
+    assert not os.path.exists(store.clip(jobs[1].id))
+    os.unlink(link)
+
+
 def test_a_queued_job_cancelled_never_runs_and_its_inputs_go(tmp_path):
     ran = []
     store, clock, driver = _store(tmp_path, lambda j, s: ran.append(j))

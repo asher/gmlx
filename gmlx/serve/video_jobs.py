@@ -303,7 +303,7 @@ class VideoJobs:
             for _at, jid in done:
                 if total <= self.settings.store_max_bytes:
                     break
-                if self.clip(jid) == keep:
+                if self.clip(jid) == keep or self._sending(self.clip(jid)):
                     continue
                 total -= self._bytes(self.clip(jid))
                 self._forget(jid)
@@ -321,6 +321,15 @@ class VideoJobs:
                       for n in os.listdir(inputs) if n not in self.pending)
                 + self._sent_bytes()
                 + sum(self.pending.values()))
+
+    @staticmethod
+    def _sending(clip: str) -> bool:
+        """Whether an answer still sends ``clip`` through a link: removing
+        it then frees nothing until the answer ends."""
+        try:
+            return os.stat(clip).st_nlink > 1
+        except OSError:
+            return False
 
     def _sent_bytes(self) -> int:
         """The bytes of the clips that only links in serving/ hold: a clip
