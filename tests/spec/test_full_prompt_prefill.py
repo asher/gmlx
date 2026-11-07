@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import os
 import re
 import warnings
@@ -1664,3 +1665,74 @@ def test_apc_hit_on_injected_request(mtp_model):
         model, ids_second, ref_second, toks_second[0],
         "injected APC-hit request B (APC-restored cache offset misaligned "
         "after BatchKVCache.extend injection)")
+
+
+# ---------------------------------------------------------------------------
+# Logprobs from the verify logits
+# ---------------------------------------------------------------------------
+
+_LP_K = 20
+# A verify block and a one-token decode step differ in GEMM width, and the
+# logits are bf16, whose step is 0.125 between 16 and 32.
+_LP_TOL = 0.25
+_LP_PROB_TOL = 0.02
+
+
+def _run_lp(model, drafter, tokenizer, ids_list, n):
+    """Greedy rows that want logprobs: (tokens, entries) per row, every
+    response included. ``drafter`` None runs plain decode."""
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
+    from gmlx.serve.row_sampling import RowSettings
+
+    _install_patches()
+    gen = BatchGenerator(
+        model, _make_processor(tokenizer), sampler=GREEDY,
+        draft_model=drafter, draft_kind="mtp" if drafter is not None else None,
+        greedy_sampling=True, max_tokens=n, prefill_step_size=_ENGINE_STEP,
+        logprobs_cap=_LP_K)
+    rs = RowSettings(logprobs=True, top_k=_LP_K)
+    uids = gen.insert(ids_list, [n] * len(ids_list),
+                      prompt_kwargs=_embed_prompts(model, ids_list),
+                      row_settings=[rs] * len(ids_list))
+    out = {u: ([], []) for u in uids}
+    while gen.has_work:
+        _p, resps = gen.next()
+        for r in resps:
+            if r.token is None:
+                continue
+            out[r.uid][0].append(int(r.token))
+            out[r.uid][1].append((r.token_logprob, r.top_logprobs))
+    gen.close()
+    return [out[u] for u in uids]
+
+
+@pytest.mark.parametrize("rows", [1, 2])
+def test_mtp_logprobs_match_a_plain_run(mtp_model, rows):
+    """Every MTP token carries its entry, and on the shared greedy tokens
+    the values match a run without speculation."""
+    model, drafter, _config, tokenizer = mtp_model
+    ids_list = [_build_prompt(tokenizer, 120 + 40 * i) for i in range(rows)]
+    spec = _run_lp(model, drafter, tokenizer, ids_list, 24)
+    plain = _run_lp(model, None, tokenizer, ids_list, 24)
+    for (s_toks, s_lps), (p_toks, p_lps) in zip(spec, plain):
+        assert len(s_toks) == 24
+        assert all(lp is not None and len(top) == _LP_K for lp, top in s_lps)
+        k = _first_divergence(s_toks, p_toks)
+        n = len(s_toks) if k is None else k + 1
+        assert n >= 4, (s_toks, p_toks)
+        for (s_lp, s_top), (p_lp, p_top) in zip(s_lps[:n], p_lps[:n]):
+            assert abs(s_lp - p_lp) <= _LP_TOL
+            # Deep in the tail a bf16 step is a large move in nats but no
+            # move in probability, so the alternatives compare as
+            # probabilities.
+            s_p = {t: math.exp(v) for t, v in s_top}
+            p_p = {t: math.exp(v) for t, v in p_top}
+            for t in s_p.keys() & p_p.keys():
+                assert abs(s_p[t] - p_p[t]) <= _LP_PROB_TOL, t
+
+
+def _first_divergence(a, b):
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x != y:
+            return i
+    return None
