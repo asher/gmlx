@@ -1,6 +1,6 @@
 """With no thinking control, a render through mlx-lm's TokenizerWrapper
-follows the chat template's own default, in gmlx run and gmlx chat
-alike. The wrapper is real and wraps a GGUF tokenizer; only the model
+follows the chat template's own default, in gmlx run, gmlx chat and gmlx
+train alike. The wrapper is real and wraps a GGUF tokenizer; only the model
 stream is mocked."""
 import importlib
 import types
@@ -94,6 +94,23 @@ def test_chat_keeps_the_templates_thinking_default(
                                  {"enable_thinking": flag}) == f"q|{text}"
 
 
+def _train_text(tok, messages):
+    """The text gmlx train trains on for one chat record."""
+    from gmlx._vendor.mlx_lm.tuner.datasets import ChatDataset
+
+    tokens, _ = ChatDataset([], tok).process({"messages": messages})
+    return tok.decode(tokens)
+
+
+@pytest.mark.parametrize("template,specials,has_thinking,default", _CASES)
+def test_train_keeps_the_templates_thinking_default(
+        template, specials, has_thinking, default):
+    tok = _wrapper(template, specials)
+    record = [{"role": "user", "content": "q"},
+              {"role": "assistant", "content": "a"}]
+    assert _train_text(tok, record) == f"a|{default}"
+
+
 def _thinking_args(template_path, thinking):
     return types.SimpleNamespace(
         thinking=thinking, reasoning_effort=None, thinking_budget=None,
@@ -122,6 +139,16 @@ def test_run_thinks_on_gemma4_only_with_thinking_on(monkeypatch):
     assert "<|think|>" not in _run_prompt(monkeypatch, tok)
     tkw = chat.fold_thinking_flag(_thinking_args(_GEMMA4, "on"), {})
     assert "<|think|>" in _run_prompt(monkeypatch, tok, template_kwargs=tkw)
+
+
+def test_train_adds_no_thinking_turn_on_gemma4():
+    tok = _wrapper(_GEMMA4.read_text(),
+                   ("<|turn>", "<turn|>", "<|think|>", "<|channel>", "<channel|>"))
+    record = [{"role": "user", "content": "Hi"},
+              {"role": "assistant", "content": "Hello."}]
+    assert _train_text(tok, record).endswith(
+        "<|turn>user\nHi<turn|>\n<|turn>model\nHello.<turn|>\n")
+    assert "<|think|>" not in _train_text(tok, record)
 
 
 def test_run_thinks_by_default_on_a_default_on_template(monkeypatch):
