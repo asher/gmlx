@@ -126,13 +126,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   request or a video job rewrites its prompt or encodes its text through it.
 - The ComfyUI nodes show the server's 413 for a step body past its limit,
   where they said the server did not answer.
-- A chat completion, Responses, Messages or images request whose text holds
-  a lone surrogate escape gets a 400 that names the field, where it returned
-  a 500.
+- A chat, Responses, Messages or images request with a lone surrogate
+  escape gets a 400 naming the field, where it returned a 500.
 - A video job whose image file is cut short or holds no image fails with a
   400 that names the file, where it failed with a 500.
-- A video form upload that stops sending is ended with a 408 after 60 s, and
-  frees the job store room it held, which refused other uploads until then.
 
 ## [0.5.4] - 2026-10-29
 
