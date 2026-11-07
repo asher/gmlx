@@ -11,7 +11,8 @@ figures, and none is read past them:
   files, which decode into arrays) against the bytes free beside the
   models loaded, read from the pool's figures with no lock, at what the
   read and the parse hold at their peak: a JSON body is read into one
-  buffer and parsed once, each step dropping the copy before it, and a form is parsed as it arrives, each text field
+  buffer and parsed once, in a worker thread, each step dropping the
+  copy before it, and a form is parsed as it arrives, each text field
   priced at its own width;
 - a video job's form files, which go to disk, against the room left in
   the job store.
@@ -395,7 +396,7 @@ def _parse(box: list, path: str, ctype: str | None, free: int | None,
     body is freed as its parse goes: priced against ``free``, escaped to
     ASCII, decoded and parsed once, then held to the media gate's checks.
     ``parsed`` is the length and document of a body the session socket
-    parsed already."""
+    parsed already. Runs in a worker thread."""
     from .media_gate import (
         _MULTIPART,
         _URLENCODED,
@@ -472,7 +473,9 @@ async def read_json(request: Request, free: int | None = None):
     reads. The body is priced against ``free`` bytes (the pool's free
     figure when None): at :func:`_min_price` of its Content-Length before
     a byte of it is read, or of what arrived as a body with none arrives,
-    then at :func:`json_price` once read. The body was priced whole, so an inline image takes no byte
+    then at :func:`json_price` once read. The price, the parse and the
+    checks run in a worker thread, which holds the only reference to the
+    body. The body was priced whole, so an inline image takes no byte
     limit of its own; the item count and the pixel limits hold."""
     from ._common import SESSION_BODY_KEY, SESSION_SCOPE_KEY
 
@@ -486,8 +489,9 @@ async def read_json(request: Request, free: int | None = None):
     parsed = request.scope.pop(SESSION_BODY_KEY, None)
     if not box[0]:
         return {}
-    return _parse(box, request.url.path, request.headers.get("content-type"),
-                  free, session, parsed)
+    return await asyncio.to_thread(
+        _parse, box, request.url.path, request.headers.get("content-type"),
+        free, session, parsed)
 
 
 async def read_form_in_ram(request: Request, free: int | None = None,

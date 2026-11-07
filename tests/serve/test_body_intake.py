@@ -129,3 +129,28 @@ def test_a_json_body_that_is_not_utf8_is_refused_as_json_loads_refuses_it():
         json.loads(body)
     assert e.value.status == 400
     assert str(e.value) == f"the request body is not valid JSON ({want.value})"
+
+
+def test_a_json_parse_leaves_the_event_loop_free(monkeypatch):
+    """The price, the scan and the parse of a JSON body run in a worker
+    thread: the loop serves other requests while a large body parses."""
+    import asyncio
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+    real = bi._loads
+
+    def parse(box, free):
+        started.set()
+        assert release.wait(10), "the loop never ran beside the parse"
+        return real(box, free)
+
+    async def main():
+        task = asyncio.create_task(
+            bi.read_json(_json_request(b'{"prompt": "a cat"}'), 1 << 30))
+        await asyncio.to_thread(started.wait, 10)
+        # Runs on the loop, so only while the parse leaves it free.
+        release.set()
+        return await task
+    monkeypatch.setattr(bi, "_loads", parse)
+    assert asyncio.run(main()) == {"prompt": "a cat"}
