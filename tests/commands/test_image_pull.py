@@ -1627,6 +1627,33 @@ def test_rm_never_takes_a_file_of_the_name_from_the_cwd(images, capsys,
                          **_cfg(cfg).video_models}
 
 
+@pytest.mark.parametrize("kind", ["image", "video"])
+def test_rm_refuses_the_upsampler_of_an_image_or_video_model(images, capsys,
+                                                             kind):
+    """A chat model an image or video entry names as its upsampler is
+    refused, naming the entry, and the config still loads."""
+    lib, cfg = images
+    text = cfg.read_text().replace("models:\n", "models:\n  writer:\n"
+                                   "    path: writer.gguf\n", 1)
+    (lib / "writer.gguf").write_bytes(b"x" * 100)
+    if kind == "image":
+        text = text.replace("  qt:\n    path: qt.gguf\n",
+                            "  qt:\n    path: qt.gguf\n"
+                            "    upsampler: writer\n")
+    else:
+        text += ("video_models:\n  h3:\n    path: h3.gguf\n"
+                 "    encoder: own.gguf\n    vae: v.safetensors\n"
+                 "    audio_vae: a.safetensors\n    upsampler: writer\n")
+    cfg.write_text(text)
+    assert manage.cmd_rm(["writer", "--config", str(cfg), "--yes"]) == 2
+    entry = "qt" if kind == "image" else "h3"
+    assert capsys.readouterr().err == (
+        f"error: writer is the prompt upsampler of {kind} model {entry}; "
+        "remove it first, or point `upsampler:` at another model\n")
+    assert (lib / "writer.gguf").exists()
+    assert "writer" in _cfg(cfg).models
+
+
 def test_rm_of_an_image_model_keeps_what_others_use(images, capsys):
     lib, cfg = images
     assert manage.cmd_rm(["qt", "--config", str(cfg), "--yes"]) == 0

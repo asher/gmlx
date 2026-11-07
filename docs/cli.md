@@ -832,7 +832,8 @@ anything.
 
 An image model id removes its DiT, VAE, text encoder and vision tower. A text encoder
 that is a chat model, or that another image model uses, is kept, and `rm`
-refuses a chat model that an image model uses as its encoder.
+refuses a chat model that an image model uses as its encoder, or that an
+image or video model names as its `upsampler`.
 
 A video model id removes its entry and its DiT, text encoder, vision
 tower, VAEs and preview decoder, keeping the files another entry uses:

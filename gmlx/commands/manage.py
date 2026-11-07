@@ -2462,8 +2462,8 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
                     "and vision tower with it unless another model uses "
                     "them, a video model its encoder, VAEs and preview "
                     "decoder, and a chat model that is an image model's "
-                    "encoder is never removed. Never touches the Hugging "
-                    "Face cache.")
+                    "encoder or an image or video model's upsampler is "
+                    "never removed. Never touches the Hugging Face cache.")
     ap.add_argument("id", metavar="ID",
                     help="Model id (or alias) from the config, or a discovered "
                          "model's id (see `gmlx list`).")
@@ -2532,6 +2532,17 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
               f"{plural_s(len(users))} {', '.join(users)}; remove "
               f"{'it' if len(users) == 1 else 'them'} first, or {other}",
               file=sys.stderr)
+        return 2
+    # An entry whose upsampler is gone fails the config's next load.
+    rewrites = [f"image model {i}" for i, im in cfg.image_models.items()
+                if im.upsampler == target]
+    rewrites += [f"video model {v}" for v, vm in cfg.video_models.items()
+                 if vm.upsampler == target]
+    if rewrites:
+        print(f"error: {target} is the prompt upsampler of "
+              f"{', '.join(rewrites)}; remove "
+              f"{'it' if len(rewrites) == 1 else 'them'} first, or point "
+              "`upsampler:` at another model", file=sys.stderr)
         return 2
 
     to_delete, sizes = _rm_deletion_plan(

@@ -78,6 +78,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `max_queue`, now fails at startup naming the key, where it was cut down.
 - `gmlx rm` keeps a file another model names in other letter case, and a file
   in the current folder named as a missing model file, where it deleted them.
+- `gmlx rm` refuses a chat model that an image model names as its `upsampler`,
+  where it removed it and left a config that no longer loaded.
 - `gmlx image --save-latent` writes the path given, making its folder, where it
   added .npz, failed after the run in a new folder, or left a broken file.
 - Distillation's pinned day renders on transformers 5.22, where a template that
