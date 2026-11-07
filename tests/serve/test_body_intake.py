@@ -289,7 +289,7 @@ def test_a_str_widened_twice_parses_within_its_price(ensure_ascii):
     import asyncio
     import tracemalloc
 
-    prompt = "中" + "a" * (2 << 20) + "\U0001F600"
+    prompt = "\u4e2d" + "a" * (2 << 20) + "\U0001F600"
     body = json.dumps({"prompt": prompt}, ensure_ascii=ensure_ascii).encode()
     need = bi.json_price(body)
     request = _json_request(body)
