@@ -2439,8 +2439,10 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
                     "plus mmproj/draft/adapter companions no other model "
                     "references. An image model takes its VAE, text encoder "
                     "and vision tower with it unless another model uses "
-                    "them, and a chat model that is an image model's encoder "
-                    "is never removed. Never touches the Hugging Face cache.")
+                    "them, a video model its encoder, VAEs and preview "
+                    "decoder, and a chat model that is an image model's "
+                    "encoder is never removed. Never touches the Hugging "
+                    "Face cache.")
     ap.add_argument("id", metavar="ID",
                     help="Model id (or alias) from the config, or a discovered "
                          "model's id (see `gmlx list`).")
@@ -2488,9 +2490,8 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
             return _rm_image(a, cfg, cfg_path, im, disc, images,
                              configured=a.id in cfg.image_models)
         if a.id in cfg.video_models:
-            print(f"error: {a.id!r} is a video model; remove its entry "
-                  f"from video_models in {cfg_path}", file=sys.stderr)
-            return 2
+            return _rm_video(a, cfg, cfg_path, cfg.video_models[a.id], disc,
+                             images)
         print(f"error: unknown model id {a.id!r} (see: gmlx list)",
               file=sys.stderr)
         return 2
@@ -2575,10 +2576,12 @@ def _all_images(cfg, images=()) -> list:
         i for i in images if i.id not in cfg.image_models]
 
 
-def _image_refs(cfg, disc, skip: str, images=()) -> set:
-    """Real paths every model but the image entry ``skip`` loads, through
-    any symlink: chat models (configured and discovered) and the other
-    image entries, configured and discovered (``images``)."""
+def _image_refs(cfg, disc, skip: str | None, images=(),
+                skip_video: str | None = None) -> set:
+    """Real paths every model but the image entry ``skip`` and the video
+    entry ``skip_video`` loads, through any symlink: chat models
+    (configured and discovered), the image entries, configured and
+    discovered (``images``), and the video entries."""
     refs: set = set()
     for mc in list(cfg.models.values()) + list(disc):
         for p in (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter):
@@ -2593,14 +2596,16 @@ def _image_refs(cfg, disc, skip: str, images=()) -> set:
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
                 refs.add(os.path.realpath(rp))
-    return refs | _video_refs(cfg)
+    return refs | _video_refs(cfg, skip_video)
 
 
-def _video_refs(cfg) -> set:
-    """Real paths the ``video_models:`` entries load, through any
-    symlink."""
+def _video_refs(cfg, skip: str | None = None) -> set:
+    """Real paths the ``video_models:`` entries but ``skip`` load,
+    through any symlink."""
     refs: set = set()
     for v in cfg.video_models.values():
+        if v.id == skip:
+            continue
         for p in (v.path, v.encoder, v.encoder_mmproj, v.vae, v.audio_vae,
                   v.tiny_vae, *(a for a, _st in v.adapters)):
             rp = _try_resolve(p, cfg.model_dirs)
@@ -2685,6 +2690,69 @@ def _rm_image(a, cfg, cfg_path, im, disc, images=(), *,
         if configured:
             what.append("config entry")
         print(f"removed {', '.join(what)}")
+    return rc
+
+
+def _rm_video(a, cfg, cfg_path, vm, disc, images=()) -> int:
+    """``gmlx rm`` of a video model: its DiT, and its text encoder, vision
+    tower, VAEs and preview decoder unless another model loads them. Its
+    LoRAs stay, as an image model's do."""
+    import gmlx.config as cfgmod
+
+    notes: list[str] = []
+    to_delete: list[str] = []
+    if not a.keep_files:
+        refs = _image_refs(cfg, disc, None, images, skip_video=vm.id)
+        for label, p in (("model file", vm.path), ("encoder", vm.encoder),
+                         ("encoder_mmproj", vm.encoder_mmproj),
+                         ("vae", vm.vae), ("audio_vae", vm.audio_vae),
+                         ("tiny_vae", vm.tiny_vae)):
+            rp = _try_resolve(p, cfg.model_dirs)
+            if rp is None:
+                continue
+            if os.path.realpath(rp) in refs:
+                notes.append(f"{label} kept: another model uses it")
+            else:
+                to_delete += _shard_files(rp)
+    to_delete = list(dict.fromkeys(to_delete))
+    sizes = {p: os.path.getsize(p) for p in to_delete if os.path.exists(p)}
+    try:
+        cfgmod.config_write_target(cfg_path)
+    except cfgmod.ConfigWriteError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if not a.json:
+        _rm_print_plan(vm.id, cfg_path, to_delete=to_delete, sizes=sizes,
+                       keep_files=a.keep_files, is_configured=True,
+                       aliases_to_drop=[], default_cleared=False, notes=notes)
+    if not a.yes:
+        bail = _rm_confirm()
+        if bail is not None:
+            return bail
+    deleted, rc = _rm_delete_files(to_delete)
+
+    def mutate(doc):
+        block = doc.get("video_models")
+        if isinstance(block, dict) and vm.id in block:
+            del block[vm.id]
+    try:
+        cfgmod.edit_config_yaml(cfg_path, mutate)
+    except cfgmod.ConfigWriteError as e:
+        print(f"error: {e.reason} The config still names {vm.id}. "
+              f"Remove {vm.id} from the config by hand.", file=sys.stderr)
+        return 1
+    from gmlx.serve.server import _reload_running
+    _reload_running(cfg_path, skip=a.no_reload)
+    freed = sum(sizes[p] for p in deleted if p in sizes)
+    if a.json:
+        print(json.dumps({
+            "id": vm.id, "kind": "video", "config": cfg_path,
+            "files_deleted": deleted, "bytes_freed": freed,
+            "config_entry_removed": True, "notes": notes}, indent=2))
+    else:
+        what = ([f"{len(deleted)} file{plural_s(len(deleted))}, "
+                 f"{_human_gb(freed)}"] if deleted else [])
+        print(f"removed {', '.join(what + ['config entry'])}")
     return rc
 
 

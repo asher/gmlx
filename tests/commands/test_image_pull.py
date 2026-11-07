@@ -1506,12 +1506,37 @@ def test_list_shows_a_video_entry_sized_by_the_files_it_loads(images,
     assert "video" in line and "fl2va" in line
 
 
-def test_rm_of_a_video_model_names_the_config_entry(images, capsys):
+def test_rm_of_a_video_model_keeps_what_others_use(images, capsys):
+    """h3 and fasth3 as video pull writes them, sharing the encoder and
+    the VAEs, the encoder an image entry's too: each rm takes the files
+    no other entry loads, and its entry. A LoRA stays, as it does for an
+    image model."""
     lib, cfg = images
-    cfg.write_text(cfg.read_text() + _VIDEO_CFG)
-    assert manage.cmd_rm(["h3", "--config", str(cfg), "--yes"]) == 2
-    assert "remove its entry from video_models" in capsys.readouterr().err
-    assert "h3:" in cfg.read_text()
+    for f in ("h3.gguf", "fasth3.gguf", "v.safetensors", "a.safetensors",
+              "taeh3.safetensors", "lora.safetensors"):
+        (lib / f).write_bytes(b"x" * 100)
+    cfg.write_text(cfg.read_text() + _VIDEO_CFG + "  fasth3:\n"
+                   "    path: fasth3.gguf\n    encoder: own.gguf\n"
+                   "    vae: v.safetensors\n    audio_vae: a.safetensors\n")
+    assert manage.cmd_rm(["h3", "--config", str(cfg), "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert not (lib / "h3.gguf").exists()
+    assert not (lib / "taeh3.safetensors").exists()
+    for f in ("own.gguf", "v.safetensors", "a.safetensors",
+              "lora.safetensors", "fasth3.gguf"):
+        assert (lib / f).exists(), f
+    assert "encoder kept: another model uses it" in out
+    assert "removed 2 files" in out and "config entry" in out
+    assert set(_cfg(cfg).video_models) == {"fasth3"}
+    assert manage.cmd_rm(["fasth3", "--config", str(cfg), "--yes",
+                          "--json"]) == 0
+    rec = json.loads(capsys.readouterr().out)
+    assert (rec["kind"], rec["config_entry_removed"]) == ("video", True)
+    assert sorted(os.path.basename(p) for p in rec["files_deleted"]) == [
+        "a.safetensors", "fasth3.gguf", "v.safetensors"]
+    assert (lib / "own.gguf").exists()
+    c = _cfg(cfg)
+    assert c.video_models == {} and set(c.image_models) == {"zit", "qi", "qt"}
 
 
 def test_rm_of_an_image_model_keeps_what_others_use(images, capsys):
