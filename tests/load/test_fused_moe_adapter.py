@@ -1,9 +1,10 @@
 """An adapter on a projection that a fused MoE decode path reads in place of
-calling it: the qwen3-next fused block takes the stock forward, the hy_v3
-shared-expert fold drops its stamp and leaves the shared expert to the
-caller, and a router concat built before the install is rebuilt. Each
-fused result must match the stock forward with the same adapter. Real kq
-kernels on the GPU."""
+calling it: the qwen3-next fused block and the gemma4 fused experts call
+their adapted members in a forward where one of the adapter's slots is on
+and stay fused otherwise, the hy_v3 shared-expert fold drops its stamp and
+leaves the shared expert to the caller, and a router concat built before
+the install is rebuilt. Each fused result must match the stock forward
+with the same adapter. Real kq kernels on the GPU."""
 from __future__ import annotations
 
 import os
@@ -63,7 +64,7 @@ def _quantize_mlp(mlp, rng):
         setattr(mlp, name, _quantized(KQuantLinear(i, o, False, "q8_0"), (o, i), rng))
 
 
-def _qwen3next_shell(seed=0):
+def _qwen3next_block(seed):
     from gmlx._vendor.mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
 
     mx.random.seed(seed)
@@ -75,9 +76,32 @@ def _qwen3next_shell(seed=0):
     _quantize_glu(block.switch_mlp, rng)
     _quantize_mlp(block.shared_expert, rng)
     block.eval()
-    shell = _Shell(block)
+    return block
+
+
+def _qwen3next_shell(seed=0):
+    shell = _Shell(_qwen3next_block(seed))
     modules.install_fused_moe_glu(shell)
     if type(shell.mlp).__name__ != "_FusedKQuantMoeBlock":
+        pytest.skip("the fused MoE block is not installable in this build")
+    mx.eval(shell.parameters())
+    return shell
+
+
+class _Two(nn.Module):
+    def __init__(self, b0, b1):
+        super().__init__()
+        self.layers = [b0, b1]
+
+    def __call__(self, x):
+        return self.layers[1](self.layers[0](x))
+
+
+def _qwen3next_shell2(seed=0):
+    """Two fused blocks in sequence under one parent."""
+    shell = _Two(_qwen3next_block(seed), _qwen3next_block(seed + 10))
+    modules.install_fused_moe_glu(shell)
+    if any(type(b).__name__ != "_FusedKQuantMoeBlock" for b in shell.layers):
         pytest.skip("the fused MoE block is not installable in this build")
     mx.eval(shell.parameters())
     return shell
@@ -103,19 +127,29 @@ def _hyv3_shell(seed=0):
     return shell
 
 
-def _install(shell, paths, seed=1, r=4):
-    """A dense LoRA pair per path, large enough to move the block output."""
+def _install(shell, paths, seed=1, r=4, slot=0, inter=INTER):
+    """A LoRA pair per path, large enough to move the block output: a dense
+    pair on a linear, an expert pair on an expert stack's down_proj."""
     rng = np.random.default_rng(seed)
     mods = {}
     for path in paths:
         leaf = dict(shell.named_modules())[path]
-        out, d_in = ((leaf.weight.shape[0], D) if hasattr(leaf, "kquant_type")
-                     else leaf.weight.shape)
+        d_in = inter if path.endswith("down_proj") else D
+        if leaf.weight.ndim == 3:
+            e, out = leaf.weight.shape[:2]
+            a = mx.array((rng.standard_normal((e, r, d_in)) * 0.5).astype(np.float32))
+            b = mx.array((rng.standard_normal((e, out, r)) * 0.5).astype(np.float32))
+            mods[path] = adapter.LoraModule(module_path=path, a=a, b=b, rank=r,
+                                            scale=1.0, experts=True)
+            continue
+        out = leaf.weight.shape[0]
+        if not hasattr(leaf, "kquant_type"):
+            d_in = leaf.weight.shape[1]
         a = mx.array((rng.standard_normal((r, d_in)) * 0.5).astype(np.float32))
         b = mx.array((rng.standard_normal((out, r)) * 0.5).astype(np.float32))
         mods[path] = adapter.LoraModule(module_path=path, a=a, b=b, rank=r, scale=1.0)
     plan = adapter.LoraAdapter(alpha=float(r), arch="qwen35moe", modules=mods)
-    assert modules.install_lora_adapter(shell, plan) == len(paths)
+    assert modules.install_lora_adapter(shell, plan, slot=slot) == len(paths)
 
 
 def _x(seed=2):
@@ -204,3 +238,251 @@ def test_adapted_shared_expert_drops_the_fold_and_reaches_the_output(monkeypatch
     ref = _stock(shell, x, monkeypatch)
     assert _rel(base, ref) > 0.2
     assert _rel(y, ref) < 0.03
+
+
+# Expert adapters on fused blocks: the block calls its members in a forward
+# where one of its adapter's slots is on, and folds otherwise.
+
+EXPERT_PATHS = ["mlp.switch_mlp.down_proj", "mlp.shared_expert.down_proj"]
+
+
+@pytest.fixture
+def kq_calls(monkeypatch):
+    """Counts the fused kernels by name and keeps each fold call's gate
+    weight, so a test can tell which block folded."""
+    import mlx_kquant as kq
+
+    seen = {"fold": [], "router": 0, "mix_ns": 0}
+
+    def wrap(name, record):
+        real = getattr(kq, name)
+
+        def spy(*a, **kw):
+            record(a)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(kq, name, spy)
+
+    wrap("moe_glu_gather_shexp_kq", lambda a: seen["fold"].append(a[1]))
+    wrap("moe_router_topk", lambda a: seen.__setitem__("router", seen["router"] + 1))
+    if hasattr(kq, "gather_qmv_mix_ns_kq"):
+        wrap("gather_qmv_mix_ns_kq",
+             lambda a: seen.__setitem__("mix_ns", seen["mix_ns"] + 1))
+    return seen
+
+
+def _rows(n, **uids):
+    """Rows mode with ``n`` slots and a registry holding each uid's row."""
+    lora_rows.configure("rows", n)
+    reg = lora_rows.UidRegistry()
+    for uid, row in uids.items():
+        reg.register(int(uid[1:]), row)
+    return reg
+
+
+def _run(reg, uids, fn):
+    with lora_rows.bind(reg), lora_rows.published(uids):
+        y = fn()
+        mx.eval(y)
+    return y
+
+
+def _reset(seen):
+    seen["fold"].clear()
+    seen["router"] = 0
+    seen["mix_ns"] = 0
+
+
+def test_expert_adapter_installs_on_the_fused_block(monkeypatch):
+    shell = _qwen3next_shell()
+    x = _x()
+    base = shell.mlp(x)
+    mx.eval(base)
+    _install(shell, ["mlp.switch_mlp.down_proj"])
+    y = shell.mlp(x)
+    mx.eval(y)
+    ref = _stock(shell, x, monkeypatch)
+    assert _rel(base, ref) > 0.2
+    assert _rel(y, ref) < 0.03
+
+
+def test_a_forward_with_every_slot_off_folds(kq_calls):
+    shell = _qwen3next_shell()
+    x = _x()
+    reg = _rows(1, u1=(0.0,))
+    pre = _run(reg, [1], lambda: shell.mlp(x))
+    _install(shell, EXPERT_PATHS)
+    _reset(kq_calls)
+    y = _run(reg, [1], lambda: shell.mlp(x))
+    assert len(kq_calls["fold"]) == 1
+    assert mx.array_equal(y, pre)
+
+
+def test_a_forward_with_a_slot_on_calls_the_members(kq_calls, monkeypatch):
+    shell = _qwen3next_shell()
+    x = _x()
+    reg = _rows(1, u1=(1.0,))
+    _install(shell, EXPERT_PATHS)
+    _reset(kq_calls)
+    y = _run(reg, [1], lambda: shell.mlp(x))
+    assert kq_calls["fold"] == []
+    if not isinstance(vars(shell.mlp).get("_kq_router_cat"), mx.array):
+        pytest.skip("this build does not fuse the router")
+    assert kq_calls["router"] == 1
+    ref = _run(reg, [1], lambda: _stock(shell, x, monkeypatch))
+    pre = _run(_rows(1, u1=(0.0,)), [1], lambda: _stock(shell, x, monkeypatch))
+    assert _rel(pre, ref) > 0.2
+    assert _rel(y, ref) < 0.03
+
+
+def test_each_row_of_a_mixed_forward_matches_its_own_reference(monkeypatch):
+    shell = _qwen3next_shell()
+    x = mx.concatenate([_x(2), _x(3)], axis=0)
+    reg = _rows(1, u1=(1.0,), u0=(0.0,))
+    _install(shell, EXPERT_PATHS)
+    y = _run(reg, [1, 0], lambda: shell.mlp(x))
+    for i, uid in enumerate((1, 0)):
+        ref = _run(reg, [uid], lambda: _stock(shell, x[i:i + 1], monkeypatch))
+        assert _rel(y[i:i + 1], ref) < 0.03
+
+
+def test_base_rows_stay_fused_across_adapted_blocks(kq_calls):
+    shell = _qwen3next_shell2()
+    x = _x()
+    reg = _rows(2, u1=(0.0, 0.0), u2=(0.0, 1.0))
+    pre = _run(reg, [1], lambda: shell(x))
+    _install(shell, ["layers.0.switch_mlp.down_proj",
+                     "layers.0.shared_expert.down_proj"], slot=0)
+    _install(shell, ["layers.1.switch_mlp.down_proj",
+                     "layers.1.shared_expert.down_proj"], seed=3, slot=1)
+    assert shell.layers[0]._kq_lora_slots == (0,)
+    assert shell.layers[1]._kq_lora_slots == (1,)
+    _reset(kq_calls)
+    y = _run(reg, [1], lambda: shell(x))
+    assert len(kq_calls["fold"]) == 2
+    assert mx.array_equal(y, pre)
+    _reset(kq_calls)
+    _run(reg, [2], lambda: shell(x))
+    gate0 = shell.layers[0].switch_mlp.gate_proj.weight
+    assert len(kq_calls["fold"]) == 1 and kq_calls["fold"][0] is gate0
+
+
+def test_a_stamped_leaf_without_slots_on_record_calls_the_members(kq_calls):
+    shell = _qwen3next_shell()
+    x = _x()
+    reg = _rows(1, u1=(0.0,))
+    _install(shell, ["mlp.switch_mlp.down_proj"])
+    del vars(shell.mlp)["_kq_lora_slots"]
+    _reset(kq_calls)
+    _run(reg, [1], lambda: shell.mlp(x))
+    assert kq_calls["fold"] == []
+
+
+QE, QK = 64, 6
+
+
+def _qwen4exp_block(quant_shared, seed=0):
+    """A qwen4exp block: fp32 router, q8_0 expert stacks, and a bf16 shared
+    expert (router-only) or a q8_0 one (fold)."""
+    from gmlx.models.qwen4_exp.model import SparseMoeBlock
+
+    mx.random.seed(seed)
+    rng = np.random.default_rng(seed)
+    block = SparseMoeBlock(SimpleNamespace(
+        hidden_size=D, moe_intermediate_size=INTER,
+        shared_expert_intermediate_size=INTER, norm_topk_prob=True,
+        num_experts=QE, num_experts_per_tok=QK))
+    from mlx_kquant.nn import KQuantSwitchLinear
+
+    for name, (o, i) in (("gate_proj", (INTER, D)), ("up_proj", (INTER, D)),
+                         ("down_proj", (D, INTER))):
+        setattr(block.switch_mlp, name, _quantized(
+            KQuantSwitchLinear(QE, o, i, False, "q8_0"), (QE, o, i), rng))
+    if quant_shared:
+        _quantize_mlp(block.shared_expert, rng)
+    else:
+        block.shared_expert.set_dtype(mx.bfloat16)
+    block.shared_expert_gate.set_dtype(mx.bfloat16)
+    block.eval()
+    shell = _Shell(block)
+    modules.install_fused_moe_glu(shell)
+    if type(shell.mlp).__name__ != "_FusedKQuantMoeBlock":
+        pytest.skip("the fused MoE block is not installable in this build")
+    assert getattr(shell.mlp, "_kq_shexp_fold", True) is quant_shared
+    mx.eval(shell.parameters())
+    return shell
+
+
+@pytest.mark.parametrize("quant_shared", [False, True], ids=["router_only", "fold"])
+def test_qwen4exp_expert_adapter_matches_the_stock_forward(
+        quant_shared, kq_calls, monkeypatch):
+    shell = _qwen4exp_block(quant_shared)
+    mx.random.seed(4)
+    x = mx.random.normal((1, 2, D)) * 0.5
+    on = _rows(1, u1=(1.0,), u0=(0.0,))
+    pre = _run(on, [0], lambda: shell.mlp(x))
+    _install(shell, EXPERT_PATHS)
+    _reset(kq_calls)
+    off = _run(on, [0], lambda: shell.mlp(x))
+    assert len(kq_calls["fold"]) == (1 if quant_shared else 0)
+    if quant_shared:
+        assert mx.array_equal(off, pre)
+    y = _run(on, [1], lambda: shell.mlp(x))
+    ref = _run(on, [1], lambda: _stock(shell, x, monkeypatch))
+    assert _rel(pre, ref) > 0.2
+    g, w = np.array(y.astype(mx.float32)), np.array(ref.astype(mx.float32))
+    assert np.abs(g - w).max() <= 2e-2 * np.abs(w).max()
+
+
+GE, GK = 8, 2
+
+
+def _gemma_experts(seed=0):
+    from gmlx.models.gemma4.language import Experts
+
+    rng = np.random.default_rng(seed)
+    ex = Experts(SimpleNamespace(hidden_size=D, moe_intermediate_size=INTER,
+                                 num_experts=GE))
+    from mlx_kquant.nn import KQuantSwitchLinear
+
+    for name, (o, i) in (("gate_proj", (INTER, D)), ("up_proj", (INTER, D)),
+                         ("down_proj", (D, INTER))):
+        setattr(ex.switch_glu, name, _quantized(
+            KQuantSwitchLinear(GE, o, i, False, "q8_0"), (GE, o, i), rng))
+    ex.eval()
+
+    class Shell(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.experts = ex
+
+    shell = Shell()
+    modules.install_fused_moe_glu(shell)
+    if type(shell.experts).__name__ != "_FusedKQuantGemmaExperts":
+        pytest.skip("the fused gemma experts are not installable in this build")
+    mx.eval(shell.parameters())
+    return shell
+
+
+def test_gemma_experts_call_the_adapted_glu_only_with_a_slot_on(kq_calls, monkeypatch):
+    shell = _gemma_experts()
+    rng = np.random.default_rng(7)
+    x = _x()
+    inds = mx.array(rng.integers(0, GE, (1, 1, GK)).astype(np.uint32))
+    w = mx.array(rng.random((1, 1, GK)).astype(np.float32)).astype(mx.bfloat16)
+    reg = _rows(1, u1=(1.0,), u0=(0.0,))
+    pre = _run(reg, [0], lambda: shell.experts(x, inds, w))
+    _install(shell, ["experts.switch_glu.down_proj"])
+    assert shell.experts._kq_lora_slots == (0,)
+    _reset(kq_calls)
+    off = _run(reg, [0], lambda: shell.experts(x, inds, w))
+    assert kq_calls["mix_ns"] == 1
+    assert mx.array_equal(off, pre)
+    _reset(kq_calls)
+    y = _run(reg, [1], lambda: shell.experts(x, inds, w))
+    assert kq_calls["mix_ns"] == 0
+    with monkeypatch.context() as m:
+        m.setattr(modules, "_FUSED_MOE_BLOCK_ENABLED", False)
+        ref = _run(reg, [1], lambda: shell.experts(x, inds, w))
+    assert _rel(pre, ref) > 0.2
+    assert mx.array_equal(y, ref)
