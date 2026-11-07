@@ -1162,7 +1162,7 @@ class _BytesContext:
             self.added = _added_text(inner)
             self.bytelevel = is_bytelevel(tokenizer)
             self.bd = byte_decoder() if self.bytelevel else None
-        except AttributeError:
+        except Exception:
             self.fallback = True
 
 

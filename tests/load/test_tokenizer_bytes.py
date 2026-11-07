@@ -167,3 +167,22 @@ def test_the_context_is_built_under_the_lock(tok_bl):
     tk.token_bytes_for(tok, [5], lock=Lock())
     tk.token_bytes_for(tok, [6], lock=Lock())
     assert held == [True]
+
+
+def test_a_failed_context_build_falls_back_to_decoded_bytes():
+    from gmlx.load.tokenizer import token_bytes_for
+
+    class Odd:
+        decoder = pre_tokenizer = None
+        all_special_ids = None
+
+        def __len__(self):
+            return 10
+
+        def convert_ids_to_tokens(self, ids):
+            raise AssertionError("no vocabulary lookup in fallback mode")
+
+        def decode(self, ids):
+            return "x"
+
+    assert token_bytes_for(Odd(), [3]) == [b"x"]
