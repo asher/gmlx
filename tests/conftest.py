@@ -507,14 +507,6 @@ def gguf_index(gguf_dir) -> dict:
     return index
 
 
-def require_arch(gguf_index: dict, arch: str) -> str:
-    """Return one GGUF path for ``arch`` from the index, or skip the test."""
-    paths = gguf_index.get(arch)
-    if not paths:
-        pytest.skip(f"no {arch!r} GGUF under KQUANT_TEST_GGUF_DIR (have: {sorted(gguf_index)})")
-    return paths[0]
-
-
 @pytest.fixture(scope="session")
 def _isolated_root(tmp_path_factory) -> str:
     # The folders of the two fixtures below. A numbered folder, as

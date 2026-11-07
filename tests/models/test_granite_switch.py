@@ -615,7 +615,7 @@ def test_without_invocation_text_the_token_opens_the_assistant_turn(name, token)
 def test_gguf_tokenizer_places_the_control_ids(gguf_index):
     """On IBM's GGUF, the rendered control tokens encode as their ids, and
     the decision marker reads as the README's ids with ``###`` swapped."""
-    from conftest import require_arch
+    from helpers import require_arch
     from gmlx.distill.tokens import tokenizer_from_gguf
 
     tok = tokenizer_from_gguf(require_arch(gguf_index, "graniteswitch"))

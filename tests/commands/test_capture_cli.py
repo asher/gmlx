@@ -424,7 +424,7 @@ def test_an_adapter_file_that_is_missing_or_named_twice_is_refused(tiny, capsys)
 
 @pytest.mark.integration
 def test_smoke_on_a_real_llama_gguf(gguf_index, tmp_path, capsys):
-    from conftest import require_arch
+    from helpers import require_arch
     from gmlx.load.headerscan import scan_gguf
 
     path = require_arch(gguf_index, "llama")

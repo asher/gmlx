@@ -224,3 +224,14 @@ def mint_lora_gguf(path, arch, pairs, *, alpha=1.0) -> None:
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
     w.close()
+
+
+def require_arch(gguf_index: dict, arch: str) -> str:
+    """Return one GGUF path for ``arch`` from the ``gguf_index`` fixture,
+    or skip the test."""
+    import pytest
+
+    paths = gguf_index.get(arch)
+    if not paths:
+        pytest.skip(f"no {arch!r} GGUF under KQUANT_TEST_GGUF_DIR (have: {sorted(gguf_index)})")
+    return paths[0]

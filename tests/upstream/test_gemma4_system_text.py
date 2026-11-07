@@ -244,7 +244,7 @@ def test_the_gguf_vocab_encodes_no_space_before_the_system_turn_end(
         gguf_index, faithful):
     """On a Gemma 4 GGUF's own vocab and template, the vision render of a
     system message encodes to the text model's ids. Header only."""
-    from conftest import require_arch
+    from helpers import require_arch
     from gmlx.distill.tokens import tokenizer_from_gguf
 
     tok = tokenizer_from_gguf(require_arch(gguf_index, "gemma4"))
