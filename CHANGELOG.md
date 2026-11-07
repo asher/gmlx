@@ -123,7 +123,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx serve` frees a finished request's images and audio at once. It kept
   the last request's inputs in memory until the next request arrived.
 - `gmlx serve` no longer unloads a chat model at its idle TTL while an image
-  request rewrites its prompt or encodes its text through it.
+  request or a video job rewrites its prompt or encodes its text through it.
 - The ComfyUI nodes show the server's 413 for a step body past its limit,
   where they said the server did not answer.
 - A chat completion or images request whose text holds a lone surrogate
