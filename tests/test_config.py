@@ -3410,6 +3410,36 @@ def test_server_video_block():
             build_config({"server": {"video": bad}})
 
 
+@pytest.mark.parametrize("block, key, value", [
+    ("server:\n  max_models: {}\n", "server.max_models", "2.5"),
+    ("server:\n  port: {}\n", "server.port", "8080.5"),
+    ("server:\n  image:\n    max_queue: {}\n", "server.image.max_queue",
+     "0.5"),
+    ("server:\n  image:\n    tensor_cache_mb: {}\n",
+     "server.image.tensor_cache_mb", "63.5"),
+    ("server:\n  video:\n    max_queue: {}\n", "server.video.max_queue",
+     "1.5"),
+    ("talk:\n  max_tokens: {}\n", "talk.max_tokens", "200.5"),
+    ("assistant:\n  memory:\n    top_k: {}\n", "assistant.memory.top_k",
+     "4.5"),
+    ("server:\n  max_models: {}\n", "server.max_models", ".inf"),
+])
+def test_a_whole_number_key_refuses_a_fraction(block, key, value):
+    """A key that takes a whole number refuses a fraction, as YAML reads
+    it, naming the key and the value, where it was cut to the whole
+    number below it (server.image.max_queue 0.5 became no queue); a
+    whole value written as 2.0 stays a whole number."""
+    import yaml
+
+    with pytest.raises(ConfigError) as e:
+        build_config(yaml.safe_load(block.format(value)))
+    assert str(e.value) == (f"{key}: expected a whole number, got "
+                            f"{yaml.safe_load(value)!r}")
+    whole = build_config(yaml.safe_load(block.format("2.0")))
+    if key == "server.image.max_queue":
+        assert whole.image.max_queue == 2
+
+
 @pytest.mark.parametrize("key, value", [("max_queue", "0.5"),
                                         ("max_queue", "2.5"),
                                         ("store_max_bytes", "1073741824.5")])

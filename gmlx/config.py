@@ -2659,14 +2659,13 @@ def _parse_systemone(raw) -> SystemoneCfg:
                         **counts)
 
 
-def _coerce_num(key: str, v, cast, *, where: str = "server",
-                whole: bool = False):
+def _coerce_num(key: str, v, cast, *, where: str = "server"):
     """Coerce a numeric config key (YAML may carry it quoted as a string),
     raising a ConfigError naming the key and the bad value. ``None`` passes.
-    With ``whole``, a fraction is refused, where an int cast cuts it."""
+    An int key refuses a fraction, which the cast would cut."""
     if v is None:
         return None
-    if whole and isinstance(v, float) and not v.is_integer():
+    if cast is int and isinstance(v, float) and not v.is_integer():
         raise ConfigError(f"{where}.{key}: expected a whole number, got "
                           f"{v!r}")
     try:
@@ -3015,18 +3014,16 @@ def _parse_video_model(video_id: str, raw) -> VideoModelCfg:
         upsample_prompt=raw.get("upsample_prompt") or None)
 
 
-def _parse_size_key(where: str, key: str, value, *,
-                    whole: bool = False) -> int | None:
+def _parse_size_key(where: str, key: str, value) -> int | None:
     """A positive byte count of a key that takes bytes or a size such as
-    8G, or None when unset; with ``whole``, a fraction of a byte is
-    refused."""
+    8G, or None when unset."""
     if isinstance(value, str):
         size = parse_size_bytes(value)
         if size is None:
             raise ConfigError(f"{where}.{key}: expected bytes or a size such "
                               f"as 2G, got {value!r}")
         value = size
-    n = _coerce_num(key, value, int, where=where, whole=whole)
+    n = _coerce_num(key, value, int, where=where)
     if n is not None and n <= 0:
         raise ConfigError(f"{where}.{key}: expected a positive size, got "
                           f"{n!r}")
@@ -3042,13 +3039,11 @@ def _parse_server_video(raw) -> VideoServerCfg:
     if ttl is not None and not 0 < ttl < float("inf"):
         raise ConfigError(f"{where}.job_ttl_s: expected a positive, finite "
                           f"number of seconds, got {ttl!r}")
-    queue = _coerce_num("max_queue", raw.get("max_queue"), int, where=where,
-                        whole=True)
+    queue = _coerce_num("max_queue", raw.get("max_queue"), int, where=where)
     if queue is not None and queue < 0:
         raise ConfigError(f"{where}.max_queue: expected 0 or more, got "
                           f"{queue!r}")
-    cap = _parse_size_key(where, "store_max_bytes", raw.get("store_max_bytes"),
-                          whole=True)
+    cap = _parse_size_key(where, "store_max_bytes", raw.get("store_max_bytes"))
     return VideoServerCfg(
         max_queue=base.max_queue if queue is None else queue,
         job_ttl_s=base.job_ttl_s if ttl is None else ttl,
@@ -3188,15 +3183,9 @@ def _parse_assistant(raw) -> AssistantCfg:
     _warn_unknown_keys("assistant", raw, _ASSISTANT_KEYS, strict=True)
 
     def num(where: str, v, cast, default, minimum):
+        v = _coerce_num(where, v, cast, where="assistant")
         if v is None:
             return default
-        try:
-            if isinstance(v, bool):
-                raise ValueError
-            v = cast(v)
-        except (TypeError, ValueError):
-            raise ConfigError(
-                f"assistant.{where}: expected a {cast.__name__}, got {v!r}")
         if v < minimum:
             raise ConfigError(f"assistant.{where}: must be >= {minimum}")
         return v
@@ -3286,14 +3275,8 @@ def _parse_talk(raw) -> TalkCfg:
     _warn_unknown_keys("talk.vad", vad_raw, _TALK_VAD_KEYS, strict=True)
 
     def num(where: str, v, cast, default):
-        if v is None:
-            return default
-        try:
-            if isinstance(v, bool):
-                raise ValueError
-            return cast(v)
-        except (TypeError, ValueError):
-            raise ConfigError(f"talk.{where}: expected a {cast.__name__}, got {v!r}")
+        v = _coerce_num(where, v, cast, where="talk")
+        return default if v is None else v
 
     mode = str(raw.get("mode", "wake")).strip().lower()
     if mode not in TALK_MODES:

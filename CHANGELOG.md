@@ -74,6 +74,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A fraction in a config key that takes a whole number, such as `port` or
+  `max_queue`, now fails at startup naming the key, where it was cut down.
 - Distillation's pinned day renders on transformers 5.22, where a template that
   prints today's date failed with "'str' object is not callable".
 - A served image model keeps its own LoRAs when a request brings others,
