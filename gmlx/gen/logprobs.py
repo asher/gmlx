@@ -19,6 +19,9 @@ LogprobEntry = tuple[float, list[int] | None, list[float] | None]
 
 JSON_FLOOR = -9999.0
 
+# The most alternatives per token that TOP_LOGPROBS_K can ask for.
+TOP_LOGPROBS_CEILING = 100
+
 
 def raw_logprobs(logits: mx.array) -> mx.array:
     """``logits`` [..., V] in any dtype -> f32 log_softmax [..., V]."""

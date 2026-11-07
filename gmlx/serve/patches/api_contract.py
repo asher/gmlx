@@ -16,6 +16,7 @@ import logging
 import os
 
 import gmlx.serve.bridge_vlm as serving
+from gmlx.gen.logprobs import TOP_LOGPROBS_CEILING
 from gmlx.systemone.extensions import GMLX_EXTENSIONS
 from gmlx.systemone.schema import JEV_EXTENSIONS
 from gmlx.upstream.patching import link, under, wrapped_with
@@ -28,9 +29,6 @@ _API_CONTRACT_FLAG = "_kq_gguf_api_contract"
 
 _RESPONSES_PATHS = ("/responses", "/v1/responses")
 _MESSAGES_PATHS = ("/messages", "/v1/messages")
-
-# The engine's TOP_LOGPROBS_K ceiling (generation.get_top_logprobs_k).
-TOP_LOGPROBS_CEILING = 100
 _COUNT_TOKENS_PATHS = ("/messages/count_tokens", "/v1/messages/count_tokens")
 
 
