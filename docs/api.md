@@ -362,6 +362,10 @@ gmlx differs from llama-server in these ways:
   message of any role, and gmlx needs an assistant message.
 - gmlx merges all system messages into one system message at the start.
   llama-server keeps each one where the client sent it.
+- gmlx gives the template a system message as one string, also when the
+  client sends it as text parts. llama-server can give the template the
+  parts, and a Gemma 4 template renders parts with a space before the end of
+  the turn.
 - The reply holds only the new text. A llama-server reply that is not
   streamed also holds the prefill.
 - llama-server turns thinking on when the template has a switch, and gmlx
