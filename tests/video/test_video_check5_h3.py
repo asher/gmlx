@@ -626,18 +626,24 @@ metal_only = pytest.mark.skipif(
 
 
 def _settled() -> int:
-    """MLX's active memory once the GPU has finished and the collector has
-    run, so neither the buffers the last eval freed nor arrays in garbage
-    cycles are counted. Garbage a collection frees in a run would lower
-    its peak below the true one."""
-    gc.collect()
+    """MLX's active memory once the GPU has finished, so the buffers the
+    last eval freed are not counted."""
     mx.synchronize()
     return mx.get_active_memory()
 
 
+def _base() -> int:
+    """``_settled()`` after the collector has run, so arrays an earlier
+    test left in garbage cycles are not counted. Freed in a run, they
+    would lower its peak below the true one. Reads within a run do not
+    collect, as a decoder's own cycles stay until the collector runs."""
+    gc.collect()
+    return _settled()
+
+
 def _peak(run) -> int:
     """MLX's peak over ``run()`` above the memory active before it."""
-    base = _settled()
+    base = _base()
     mx.reset_peak_memory()
     run()
     mx.synchronize()
@@ -649,7 +655,7 @@ def _decode(model, latents: mx.array) -> tuple[int, int]:
     writer streams them, and the most it holds between two runs, both
     above the memory active before it."""
     mx.eval(latents)
-    base = _settled()
+    base = _base()
     mx.reset_peak_memory()
     held = 0
     for frames in model.decode_frames(latents):
@@ -696,6 +702,29 @@ def test_a_peak_does_not_count_garbage_freed_in_the_run():
     finally:
         gc.enable()
     assert n <= peak < 3 * n, peak / n
+
+
+@metal_only
+def test_held_counts_a_cycle_the_decoder_keeps():
+    """A run a decoder keeps in a reference cycle stays until the
+    collector next runs, so the read between yields must not collect."""
+    n = 4 << 20
+
+    class Decoder:
+        def decode_frames(self, latents):
+            for _ in range(2):
+                carry = _Cycle()
+                carry.me, carry.x = carry, mx.zeros((n,), mx.uint8) + 1
+                mx.eval(carry.x)
+                del carry
+                yield latents + 1
+    gc.disable()
+    try:
+        _, held = _decode(Decoder(), mx.zeros((1,)))
+    finally:
+        gc.enable()
+        gc.collect()
+    assert held >= n, held / n
 
 
 @metal_only
