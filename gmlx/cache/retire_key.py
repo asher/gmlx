@@ -175,6 +175,26 @@ def truncated_thinking(text, pairs, prompt) -> bool:
     return any(prompt.rfind(sm) > prompt.rfind(em) for sm, em in pairs)
 
 
+def header_split(text, prompt):
+    """``(reasoning, content)`` of a harmony (gpt-oss) or ATEM (Muse) reply,
+    else None. The stock splitter knows none of these markers and returns
+    the raw markup as content, which the model's own chat template rejects
+    once a client sends the reply back as history. ATEM writes no channel
+    marker: a ``prompt`` that ends mid-header and a header close in the
+    reply mark it. Shared rule for the server's splitter and the retirement
+    mirror, as in :func:`truncated_thinking`."""
+    in_header = isinstance(prompt, str) and prompt.rstrip().endswith(
+        "<|start|>assistant")
+    if not text or not ("<|channel|>" in text
+                        or (in_header and "<|message|>" in text)):
+        return None
+    # Gemma's lopsided "<|channel>thought" lacks the closing pipe, so this
+    # cannot misfire on it.
+    from gmlx.tui.reasoning import split_harmony_reply
+
+    return split_harmony_reply(text, start_in_header=in_header)
+
+
 _CHANNEL_HINTS = ("<|channel|>", "<|channel>", "<|start|>assistant")
 
 
@@ -213,7 +233,8 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
 
     kw = ctx.get("kw") or {}
     ts, te = _split_pair(ctx)
-    reasoning, content = srv._split_thinking(full_text, ts, te)
+    split = header_split(full_text, _gen_prompt_text(ctx))
+    reasoning, content = split or srv._split_thinking(full_text, ts, te)
     if reasoning is None:
         ch_reasoning, ch_content = _channel_split(full_text)
         if ch_reasoning is not None:

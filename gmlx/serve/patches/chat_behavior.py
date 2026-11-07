@@ -638,21 +638,9 @@ def install_stream_thinking_seed() -> None:
                 pair = _request_think_pair()
                 if pair is not None:
                     thinking_start_token, thinking_end_token = pair
-            rendered = _LAST_RENDERED_PROMPT.get()
-            in_header = bool(rendered) and rendered.rstrip().endswith(
-                "<|start|>assistant")
-            if text and ("<|channel|>" in text or (in_header
-                                                   and "<|message|>" in text)):
-                # harmony (gpt-oss) and ATEM (Muse models): the stock splitter
-                # knows none of these markers and returns the raw markup as
-                # content, which the model's own chat template rejects with a
-                # 500 once a client sends the reply back as history. ATEM emits
-                # no channel marker at all, so it is recognised by the
-                # mid-header prompt tail plus a header close in the reply.
-                # (Gemma's lopsided "<|channel>thought" lacks the closing pipe,
-                # so this gate cannot misfire on it.)
-                from gmlx.tui.reasoning import split_harmony_reply
-                return split_harmony_reply(text, start_in_header=in_header)
+            header = retire_key.header_split(text, _LAST_RENDERED_PROMPT.get())
+            if header is not None:
+                return header
             # Stock walk with content whitespace preserved: the stock
             # splitter's .strip() eats first-line code indent.
             reasoning, content = _split_thinking_keep_indent(
