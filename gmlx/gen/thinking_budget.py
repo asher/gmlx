@@ -132,9 +132,11 @@ def soft_end_seqs(tokenizer, start_seq) -> tuple:
 
 # Harmony answers on the final channel. When the request declares no tools,
 # a forced close also opens that channel: after a cut analysis block, Beam
-# otherwise calls a bash tool that was never declared.
+# otherwise calls a bash tool that was never declared. Kimi K3 answers in
+# its response section, which the answer gate waits for.
 _ANSWER_STEER = {
     _HARMONY_PAIR[0]: "<|start|>assistant<|channel|>final<|message|>",
+    "<|open|>think<|sep|>": "<|open|>response<|sep|>",
 }
 
 

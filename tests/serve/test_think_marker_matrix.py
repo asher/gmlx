@@ -506,12 +506,26 @@ def test_c_a_budget_with_no_markers_resolves_the_pair(serve, key, shape):
     if kind == BARE:
         prefix = _reply_parts(row, row.pair, MAYBE)[0]
     gen = tv.ids(s.tok, prefix)
-    _closes_at_the_budget(crit, hook, gen, _opens_at(s, prefix), end)
+    replies = _closes_at_the_budget(crit, hook, gen, _opens_at(s, prefix), end)
+    if kind == HEADER and row.pair != _ATEM:
+        for reply in replies:
+            _answer_follows_the_close(s, _request(s, kwargs=kwargs), reply)
+
+
+def _answer_follows_the_close(s, r, reply):
+    """The forced close writes the answer header, so the grammar masks the
+    next token."""
+    proc = _gate(s, r)
+    gen = list(reply) + tv.ids(s.tok, ANSWER)
+    rows = _allowed_rows(proc, r.ids, gen, _vocab(proc))
+    assert all(rows[k].all() for k in range(len(reply)))
+    assert not rows[len(reply)].all() and rows[len(reply)][gen[len(reply)]]
 
 
 def _closes_at_the_budget(crit, hook, gen, opens, end):
     """The plain criteria and the MTP hook close the block on the same
-    reply token, after 4 reasoning tokens, with the end marker."""
+    reply token, after 4 reasoning tokens, with the end marker. Returns
+    the reply each one writes up to the end of its forced run."""
     assert crit.thinking_token_count == hook.count
     want = opens + 4 - crit.thinking_token_count - 1
     for i, t in enumerate(gen):
@@ -527,6 +541,7 @@ def _closes_at_the_budget(crit, hook, gen, opens, end):
     while (forced := crit(run[-1])) is not None:
         run.append(forced)
     assert _seq_in(run, end)
+    return list(gen[:i + 1]) + run, list(gen[:i + 1]) + list(taken)
 
 
 def _splits(s, r, text):
