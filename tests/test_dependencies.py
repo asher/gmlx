@@ -304,3 +304,14 @@ def test_a_failed_lazy_export_names_only_core_requirements(monkeypatch):
     named = {_canonical(n) for n in re.split(r",\s*(?:and\s+)?", m.group(1))}
     assert named <= set(_core()), named - set(_core())
 
+
+
+def test_the_python_floor_leaves_out_the_semaphore_that_stays_locked():
+    """On 3.11.0 an asyncio.Semaphore stays locked when a woken waiter is
+    cancelled (gh-97545), which would strand every later body parse behind
+    the serve parse turn. 3.11.1 fixed it."""
+    from packaging.specifiers import SpecifierSet
+
+    floor = SpecifierSet(_project()["requires-python"])
+    assert "3.11.0" not in floor
+    assert "3.11.1" in floor
