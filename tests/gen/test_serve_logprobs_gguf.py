@@ -24,7 +24,9 @@ ARCHES = ["qwen3", "llama", "smollm3", "falcon-h1"]
 N_TOKENS = 16
 K = 20
 # The logits are bf16, whose step is 0.125 between 16 and 32, so a one-step
-# rounding difference on a large logit moves a logprob by that much.
+# rounding difference on a large logit moves a logprob by that much. The GPU
+# sets the bound: it measured 0.063 at most on qwen3 and falcon-h1. The CPU
+# matches exactly.
 TOL = 0.13
 PROMPT = "The quick brown fox jumps over the lazy dog. The quick brown fox"
 
@@ -55,8 +57,11 @@ def test_a_lone_row_reports_the_plain_forwards_logprobs(gguf_index, arch,
 
     proc = SimpleNamespace(tokenizer=SimpleNamespace(
         stopping_criteria=StoppingCriteria([], None)))
+    # The engine's own stream was made at import, maybe before the test
+    # device was set. Both runs use one device, so the bound is per backend.
     gen = ar.BatchGenerator(lm, proc, prefill_step_size=None,
-                            max_tokens=N_TOKENS, logprobs_cap=K)
+                            max_tokens=N_TOKENS, logprobs_cap=K,
+                            stream=mx.default_stream(mx.default_device()))
     (uid,) = gen.insert(
         [ids], N_TOKENS,
         logits_processors=[make_logits_processors(None, 1.05)],
