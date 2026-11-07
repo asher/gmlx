@@ -291,8 +291,9 @@ def test_the_prompt_embedding_runs_at_the_rows_strength(monkeypatch, rows_mode):
             assert rq.get(timeout=5) is None
     finally:
         _stop(rg, thread)
-    assert [rows[0] for b in _Batch.made for rows in b.inserts] == read
-    assert all(r is not None for r in read)
+    inserted = [rows[0] for b in _Batch.made for rows in b.inserts]
+    assert len(inserted) == len(read) == 2
+    assert all(r is not None and i is r for i, r in zip(inserted, read))
     adapted, bare = _EmbedsBatch.embeds
     lora_rows.configure("static", 1)
     assert mx.array_equal(adapted, wrap(ids))
