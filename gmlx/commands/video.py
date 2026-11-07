@@ -22,7 +22,7 @@ import shutil
 import sys
 import time
 
-from .image import _adapter, save_npz
+from .image import _adapter, latent_target, save_npz
 
 _ACTIONS = ("generate", "bench", "pull")
 _ACTION_DESC = {
@@ -534,7 +534,7 @@ def _writable(a, out: str | None) -> None:
     probes = [(out, os.path.expanduser(out))] if out else []
     if a.save_latent:
         probes.append((a.save_latent,
-                       os.path.realpath(os.path.expanduser(a.save_latent))))
+                       latent_target(os.path.expanduser(a.save_latent))))
     if a.frames_dir is not None:
         d = os.path.expanduser(a.frames_dir)
         if os.path.exists(d) and not os.path.isdir(d):

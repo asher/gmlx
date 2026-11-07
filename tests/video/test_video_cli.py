@@ -634,6 +634,21 @@ def test_an_output_link_to_a_folder_not_made_is_written_at_the_link(
     assert list(volumes.iterdir()) == []
 
 
+def test_a_latent_link_whose_links_loop_is_refused_before_the_run(
+        stubbed, tmp_path, capsys):
+    """A --save-latent path whose symlinks loop is refused, naming it,
+    before the model loads, and the links stay."""
+    link, other = tmp_path / "lat.npz", tmp_path / "other.npz"
+    link.symlink_to(other)
+    other.symlink_to(link)
+    assert stubbed("--frames-dir", str(tmp_path / "f"), "--save-latent",
+                   str(link)) == 1
+    assert f"cannot write {link}: its symlinks loop" in (
+        capsys.readouterr().err)
+    assert stubbed.loads == []
+    assert link.is_symlink() and other.is_symlink()
+
+
 def test_a_quoted_home_latent_path_lands_in_the_home_folder(
         stubbed, monkeypatch, tmp_path):
     """A --save-latent of '~/lat.npz', quoted so the shell leaves the ~,

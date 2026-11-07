@@ -166,6 +166,39 @@ def test_a_latent_path_at_a_symlink_writes_its_target(env, tmp_path):
     assert [p.name for p in target.parent.iterdir()] == ["run1.npz"]
 
 
+def test_a_latent_link_whose_links_loop_is_refused_before_the_run(
+        env, tmp_path, capsys):
+    """A --save-latent path whose symlinks loop is refused, naming it,
+    before the model loads, and the links stay: it is not replaced with
+    a file."""
+    link, other = tmp_path / "lat.npz", tmp_path / "other.npz"
+    link.symlink_to(other)
+    other.symlink_to(link)
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                     "--output", str(tmp_path / "a.png"),
+                                     "--save-latent", str(link)]) == 1
+    assert f"cannot write {link}: its symlinks loop" in (
+        capsys.readouterr().err)
+    assert env.pipes == []
+    assert link.is_symlink() and other.is_symlink()
+
+
+def test_a_dangling_latent_link_writes_its_target_and_its_folders(
+        env, tmp_path):
+    """A --save-latent link to a file not made yet, in folders not made
+    yet, makes them and writes the file there; the link stays."""
+    target = tmp_path / "store" / "day" / "run1.npz"
+    link = tmp_path / "lat.npz"
+    link.symlink_to(target)
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                     "--seed", "5", "--output",
+                                     str(tmp_path / "a.png"),
+                                     "--save-latent", str(link)]) == 0
+    assert link.is_symlink()
+    assert np.load(target)["seeds"].tolist() == [5]
+    assert [p.name for p in target.parent.iterdir()] == ["run1.npz"]
+
+
 def test_an_output_link_to_a_folder_not_made_is_written_at_the_link(
         env, tmp_path):
     """An --output that is a symlink into a folder that cannot be made,

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import hashlib
 import json
 import math
@@ -112,15 +113,30 @@ def _quality(text: str) -> int:
     return n
 
 
+def latent_target(path: str) -> str:
+    """The file :func:`save_npz` writes for ``path``: ``path``, or the file
+    a symlink there names, dangling or not. A path whose symlinks loop is
+    refused, not replaced with a file."""
+    try:
+        os.stat(path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise OSError(f"cannot write {path}: its symlinks loop") from None
+        raise
+    return os.path.realpath(path)
+
+
 def save_npz(path: str, **arrays) -> None:
     """Write ``arrays`` as an .npz file at exactly ``path``, its folder
     made, through ``path.part`` synced to disk before it is renamed, so a
     write stopped part way leaves what was there. A symlink at ``path``
-    stays, and the file it names is written. The caller expands a ~ in
-    ``path`` once, before its writable check."""
+    stays, and the file it names is written (:func:`latent_target`). The
+    caller expands a ~ in ``path`` once, before its writable check."""
     import numpy as np
 
-    path = os.path.realpath(path)
+    path = latent_target(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     part = path + ".part"
     try:
@@ -890,7 +906,7 @@ def _generate(a) -> int:
     # writers write at the path, as the probe does.
     probes = [(p, p) for p in paths]
     if a.save_latent:
-        probes.append((a.save_latent, os.path.realpath(a.save_latent)))
+        probes.append((a.save_latent, latent_target(a.save_latent)))
     for path, probed in probes:
         err = probe_writable(probed)
         if err is not None:
