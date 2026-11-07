@@ -340,6 +340,19 @@ def test_a_model_without_adapters_takes_only_empty_fields(tmp_path):
     _refused(None, "loads no adapters", adapters=["a"])
 
 
+def test_an_unfilled_spec_takes_slots_from_its_effective_adapters():
+    from gmlx.serve.lora_request import AdapterIdentityMissing, request_lora
+    rm = _rm("m", "/abs/B.gguf", "/abs/A.gguf", strengths=[0.5, 0.25])
+    assert rm.adapters == () and rm.adapter_slots == ()
+    assert request_lora(rm, {}, model_dirs=[]).scales == (0.25, 0.5)
+    stray = SimpleNamespace(id="m", adapter_list=rm.adapter_list,
+                            adapters=("/abs/A.gguf",), adapter_slots=())
+    with pytest.raises(AdapterIdentityMissing,
+                       match="model 'm': adapter '/abs/B.gguf' is not in its "
+                             "adapter union; this is a gmlx defect"):
+        request_lora(stray, {}, model_dirs=[])
+
+
 # row salt: names files by content, never by slot
 
 

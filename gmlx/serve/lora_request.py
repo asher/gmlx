@@ -161,7 +161,8 @@ def request_lora(spec, request, *, model_dirs=None) -> RowLora:
     """The request's scales over its entry's adapter union. Parse and match
     only; raises :class:`AdapterRequestError` for a client error. The salt
     is 0 for a row with every slot at 0 and None otherwise, until
-    :func:`salted` sets it on the engine."""
+    :func:`salted` sets it on the engine. A spec whose adapter union lacks
+    one of its own adapters raises :class:`AdapterIdentityMissing`."""
     from gmlx.serve.patches._common import refuse_both_spellings
 
     adapters = _present(request, "adapters")
@@ -184,6 +185,14 @@ def request_lora(spec, request, *, model_dirs=None) -> RowLora:
         scales = (0.0,) * len(union)
         return RowLora(scales, np.zeros((len(scales),), np.float32), 0, model_id)
     if len(slots) != len(items):
+        effective = getattr(spec, "effective_adapters", None)
+        if callable(effective):
+            union = tuple(effective())
+        for ref in items:
+            if ref.path not in union:
+                raise AdapterIdentityMissing(
+                    f"model {model_id!r}: adapter {ref.path!r} is not in its "
+                    "adapter union; this is a gmlx defect")
         slots = tuple(union.index(ref.path) for ref in items)
     by_index = {i: ref.strength for i, ref in enumerate(items)}
     if adapters is not None:
