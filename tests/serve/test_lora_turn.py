@@ -16,8 +16,9 @@ from gmlx.serve.residency import (IMAGE_KIND, STORE, VIDEO_KIND,
                                   LoraRefused, _ResidencyPool)
 
 GB = 10**9
-# Seconds a pool thread may take before the test calls it stuck.
-WAIT = 10
+# A retry no stall on a busy machine outlasts. The waits here have no
+# bound: pytest-timeout fails a hung test with every thread's stack.
+LONG = 3600
 
 
 class Cache:
@@ -170,8 +171,7 @@ def start(name, fn):
 
 
 def finish(t, out):
-    t.join(WAIT)
-    assert not t.is_alive(), f"{t.name} is stuck"
+    t.join()
     if "error" in out:
         raise out["error"]
     return out.get("value")
@@ -239,10 +239,10 @@ class Seams:
         self.hit.append(name)
         if name in self.at and not self.at[name].is_set():
             self.at[name].set()
-            assert self.go[name].wait(WAIT)
+            self.go[name].wait()
 
     def reach(self, name):
-        assert self.at[name].wait(WAIT), f"no thread reached {name}"
+        self.at[name].wait()
 
 
 def test_a_turn_runs_on_the_worker(monkeypatch):
@@ -340,7 +340,7 @@ def test_a_video_turn_sheds_an_idle_upload_with_the_image_worker_busy(
     busy = SingleWorker("image-worker-busy")
     monkeypatch.setattr(image_service, "WORKER", busy)
     go = threading.Event()
-    blocked = busy.submit(go.wait, WAIT)
+    blocked = busy.submit(go.wait)
     try:
         # 9 GB held of 10: 2 GB more needs the upload gone.
         turn(pool, v, 3 * GB)
@@ -533,13 +533,13 @@ def test_a_turn_that_allocates_nothing_passes_on_a_pool_past_its_budget(
 
 def test_a_turn_waits_for_a_chat_model_in_use_and_runs_on_its_release(
         monkeypatch):
-    pool = make_pool(monkeypatch, 10, retry=5)
+    pool = make_pool(monkeypatch, 10, retry=LONG)
     x = image(pool, "x", 4, busy=True)
     c = chat(pool, "c", 4, busy=1)
     w = waits(pool)
     t, out = start("image-worker-test",
                    lambda: pool.lora_turn(x, 3 * GB, subject="s"))
-    assert w.waiting.wait(WAIT), "the turn did not wait"
+    w.waiting.wait()
     assert t.is_alive()
     with pool._lock:
         c.busy = 0
@@ -727,12 +727,12 @@ def test_a_torn_image_counts_until_its_pipeline_is_released(monkeypatch):
 
     def slow(box):
         at.set()
-        assert go.wait(WAIT)
+        go.wait()
         release(box)
     pool._image_fns = (fp, load, slow)
     loader = start("loader", lambda: image(pool, "z", 4))
     try:
-        assert at.wait(WAIT), "no release started"
+        at.wait()
         assert not pool.entry_resident(y)
         assert pool.figures.tearing == 4 * GB
         # x, z's build and 2 GB fit only once y's pipeline is gone.
@@ -881,7 +881,7 @@ class StoreWorker:
         return fut
 
     def drain(self):
-        self.real.submit(lambda: None).result(WAIT)
+        self.real.submit(lambda: None).result()
         self.real.get().shutdown(wait=True)
 
 
@@ -904,7 +904,7 @@ def test_a_store_turn_not_started_by_its_deadline_never_runs(monkeypatch,
     pool._seam = seams
     w = StoreWorker(monkeypatch)
     go = threading.Event()
-    w.submit(go.wait, WAIT)
+    w.submit(go.wait)
     try:
         with pytest.raises(LoraRefused) as err:
             w.store_turn(pool, n, "the upload")
@@ -936,7 +936,7 @@ def test_a_store_turn_started_by_its_deadline_runs_to_its_end(monkeypatch):
         t, out = start("upload", lambda: w.store_turn(pool, 3 * GB,
                                                       "the upload"))
         seams.reach("turn")
-        assert w.tried.wait(WAIT)
+        w.tried.wait()
         seams.go["turn"].set()
         finish(t, out)
     finally:
@@ -1039,7 +1039,9 @@ def test_a_turn_after_a_cold_loads_room_check_waits_on_the_build(
         "z", None, IMAGE_KIND, build_spec=spec("z", 2)))
     seams.reach("roomed")
     t = _turn(pool, y)
-    t[0].join(WAIT)
+    # The turn ends while the load holds the build lock: its wait for the
+    # lock runs out at the retry.
+    t[0].join()
     seams.go["roomed"].set()
     finish(*load)
     with pytest.raises(LoraRefused) as e:
@@ -1453,7 +1455,7 @@ def test_two_workers_turn_at_once_and_never_release_on_each_other(
     finish(*a)
     finish(*b)
     stop.set()
-    loader.join(WAIT)
+    loader.join()
     assert not errors, errors
     assert reserved and not [r for r in reserved if "worker" in r]
     for name, thread in pool.release_threads.items():
