@@ -1062,19 +1062,26 @@ hold newlines. Blank lines are skipped. All the sets run in one model
 load. Each prompt renders as an optional system message and one user
 message, with a generation prompt, through the same chat template and
 tokenizer path as `gmlx serve`. Each prompt runs alone, with no KV cache
-kept between prompts.
+kept between prompts. A prompt longer than 2048 tokens runs in chunks of
+2048 tokens, as a prefill does.
 
 The positional argument is a path, or a model id or alias from your server
-config. A config id brings its path, chat template and streaming settings,
-and flags you pass still win. An entry that sets an adapter is refused. A
-MoE that does not fit in memory streams its experts, as in `gmlx run`.
+config. A config id brings its path, chat template, streaming settings,
+system message, thinking controls and `chat_template_kwargs`, and flags
+you pass still win. Capture names the entry settings it does not apply:
+the KV cache settings and the `moe_*` settings. An entry that sets an
+adapter is refused. A MoE that does not fit in memory streams its experts,
+as in `gmlx run`.
 
 The recorded value of a block is its output averaged over the last
 `--positions` prompt tokens, in float32. This is the block output that
 llama.cpp's `cvector-generator` reads as `l_out`. On a model with
-several residual streams the streams are averaged. MTP and nextn blocks
-are left out, so the layer count is the GGUF's block count less its
-nextn layers.
+hyper-connection residual streams the streams are averaged, which is the
+stream mean of the block output that llama.cpp names `l_last` on these
+models. On gemma-3n the value is the active AltUp stream, the slice that
+`cvector-generator` reads. MTP and nextn blocks are left out, so the layer
+count is the GGUF's block count less its nextn layers. When the loaded
+model has another count, capture prints a note.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1101,12 +1108,12 @@ The file holds these tensors:
 | Name | Shape and type | Meaning |
 |------|----------------|---------|
 | `<set>.mean` | `[n_layer, n_embd]` float32 | The mean over the set's prompts. Every set has one. |
-| `<set>.rows` | `[n_layer, n_prompts, n_embd]` float16 | One row for each prompt. Only the sets named in `--rows` have one. |
+| `<set>.rows` | `[n_layer, n_prompts, n_embd]` float16 | One row for each prompt. Only the sets named in `--rows` have one. A value past the float16 range stops the run. |
 
-The file's metadata holds `arch`, the GGUF's `general.architecture`,
-`file` and `file_size` (all shards), `sets`, a JSON map from set name to
-prompt count, `positions`, `think` (`on`, `off` or `default`) and
-`gmlx_version`.
+The file's metadata holds `format` (`gmlx.capture`), `arch`, the GGUF's
+`general.architecture`, `file` and `file_size` (all shards), `sets`, a
+JSON map from set name to prompt count, `positions`, `think` (`on`, `off`,
+`default`, or the thinking mode of a config entry) and `gmlx_version`.
 
 With `--json`, every line on stdout is a JSON object with an `event` key,
 and other output goes to stderr:
