@@ -614,7 +614,8 @@ class _ByteTokenizer:
 
 
 # Run -> the think markers the budget path reads from the request args.
-# Qwen's are the server defaults; gemma's come from the model's config.
+# Qwen's are the server defaults. Gemma's must be configured, in the request
+# or the server config: the plain criteria fall back to <think> without them.
 _BUDGET_MARKERS = {
     _QWEN: (None, None, "<think>", "</think>"),
     "llama-server/gemma4_12b": ("<|channel>thought", "<channel|>",
@@ -625,18 +626,22 @@ _LONG_CONTENT = "Hello there, this answer is already well under way"
 
 
 def _budget_prefill(chat, run, mode, budget):
-    """The prefilled prompt's ids, the reasoning tokens llama-server counts
-    in it, the byte tokenizer, the gen args and the end marker ids."""
+    """The prefilled prompt's ids, the k reasoning tokens it ends with, the
+    byte tokenizer, the gen args and the end marker ids. k is the byte count
+    of the text after the open marker, and 0 for a content prefill."""
     last = ({"role": "assistant", "content": "",
              "reasoning_content": _LONG_REASONING} if mode == "reasoning"
             else {"role": "assistant", "content": _LONG_CONTENT})
     prompt = chat(run, {**_prefill(last),
                         "chat_template_kwargs": {"enable_thinking": True}})
     start_arg, end_arg, start, end = _BUDGET_MARKERS[run]
-    tail = prompt[prompt.rindex(start) + len(start):]
-    k = 0 if end in tail else len(tail.encode())
-    assert prompt.endswith(_LONG_REASONING if mode == "reasoning"
-                           else _LONG_CONTENT)
+    if mode == "reasoning":
+        tail = "\n" + _LONG_REASONING
+        assert prompt.endswith(start + tail)
+        k = len(tail.encode())
+    else:
+        assert prompt.endswith(_LONG_CONTENT)
+        k = 0
     processor, _ = _processor_for(run)
     args = types.SimpleNamespace(
         thinking_budget=budget, thinking_start_token=start_arg,
@@ -706,15 +711,15 @@ def test_a_prefill_budget_closes_on_the_plain_criteria(chat, run, extra,
     while (forced := crit(forced)) is not None:
         run_ids.append(forced)
     assert run_ids[-len(end_ids):] == end_ids
-    assert not crit.in_thinking
+    assert crit(_THINK) is None
 
 
 @pytest.mark.parametrize("run", _BUDGET_RUNS)
 @pytest.mark.parametrize("extra,through", [(2, 2), (0, 1)])
 def test_a_prefill_budget_closes_on_the_mtp_hook(chat, run, extra, through):
-    """The MTP hook seeds the same count. The round loop observes the
-    first token prefill samples before it asks for a forced close, so the
-    rows match the plain criteria."""
+    """The MTP hook seeds the same count. On rounds that emit one token,
+    the loop observes it before it asks for a forced close, so the rows
+    match the plain criteria."""
     ids, k, tok, args, end_ids = _budget_prefill(chat, run, "reasoning", 0)
     args.thinking_budget = k + extra
     hook = _mtp_hook(tok, args, ids)
@@ -726,7 +731,52 @@ def test_a_prefill_budget_closes_on_the_mtp_hook(chat, run, extra, through):
         forced = hook.take_forced()
     assert forced is not None
     assert forced[-len(end_ids):] == end_ids
-    assert not hook.in_thinking
+    for t in forced:
+        hook.observe(t)
+    hook.observe(_THINK)
+    assert hook.take_forced() is None
+
+
+@pytest.mark.parametrize("run", _BUDGET_RUNS)
+def test_a_prefill_budget_closes_after_an_mtp_block(chat, run):
+    """The loop observes a whole accepted block before the round boundary.
+    So with a budget of k + 2, a block of 4 thinking tokens runs 2 past the
+    budget, and the close comes at the first boundary after it."""
+    ids, k, tok, args, end_ids = _budget_prefill(chat, run, "reasoning", 0)
+    args.thinking_budget = k + 2
+    hook = _mtp_hook(tok, args, ids)
+    hook.observe(_THINK)
+    assert hook.take_forced() is None
+    for _ in range(3):
+        hook.observe(_THINK)
+    assert hook.count == k + 4
+    forced = hook.take_forced()
+    assert forced is not None
+    assert forced[-len(end_ids):] == end_ids
+
+
+class _WrapperByteTokenizer(_ByteTokenizer):
+    """A byte tokenizer that names gemma's think markers, as mlx-lm's
+    TokenizerWrapper does for a vocab with the channel tokens."""
+
+    think_start = "<|channel>thought"
+    think_end = "<channel|>"
+    think_start_tokens = tuple(think_start.encode())
+    think_end_tokens = tuple(think_end.encode())
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "The plain criteria take the think markers from the args only, else "
+    "<think>. Gemma names neither in its template's known pairs, so a "
+    "gemma budget with no configured markers stays disarmed."))
+def test_a_gemma_prefill_budget_arms_without_configured_markers(chat):
+    run = "llama-server/gemma4_12b"
+    ids, k, tok, args, _end = _budget_prefill(chat, run, "reasoning", 0)
+    args.thinking_start_token = args.thinking_end_token = None
+    args.thinking_budget = k
+    crit = _plain_criteria(_WrapperByteTokenizer(tok.chat_template), args,
+                           ids)
+    assert crit.thinking_token_count == k
 
 
 @pytest.mark.parametrize("run", _BUDGET_RUNS)
