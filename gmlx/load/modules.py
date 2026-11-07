@@ -3004,7 +3004,11 @@ def install_lora_adapter(model: nn.Module, plan,
                 raise ValueError(why)
             wrapped.add(path)
             return LoRAKQuantEmbedding(module, lm.a, lm.b, lm.scale, slot=slot)
-        if lm.embedding or not isinstance(module, (KQuantLinear, nn.Linear)):
+        if lm.embedding:
+            raise NotImplementedError(
+                f"token_embd LoRA: the token embedding {path!r} is a "
+                f"{type(module).__name__}, which gmlx cannot wrap")
+        if not isinstance(module, (KQuantLinear, nn.Linear)):
             raise NotImplementedError(
                 f"LoRA target {path!r} is a {type(module).__name__}, not a "
                 f"wrappable Linear (only the token embedding takes a LoRA pair)")

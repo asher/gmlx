@@ -199,8 +199,10 @@ def test_an_embedding_pair_on_a_linear_is_refused():
     lm = adapter.LoraModule(module_path="model.q_proj", a=mx.zeros((D, R)), b=mx.zeros((D, R)),
                             rank=R, scale=1.0, embedding=True)
     plan = adapter.LoraAdapter(alpha=0.0, arch="llama", modules={lm.module_path: lm})
-    with pytest.raises(NotImplementedError, match="only the token embedding"):
+    with pytest.raises(NotImplementedError) as e:
         modules.install_lora_adapter(_Tiny(), plan)
+    assert str(e.value) == ("token_embd LoRA: the token embedding 'model.q_proj' is a "
+                            "Linear, which gmlx cannot wrap")
 
 
 # the adapter file
