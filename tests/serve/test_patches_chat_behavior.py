@@ -14,6 +14,7 @@ import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import chat_behavior as sp_chat  # noqa: E402
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
+from gmlx.serve.patches import prefill  # noqa: E402
 from gmlx.config import ResolvedModel  # noqa: E402
 
 _APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
@@ -878,6 +879,39 @@ def test_a_served_text_render_keeps_the_templates_thinking_default():
     assert pu.get_chat_template(proc, msgs, True) == "THINK"
     assert pu.get_chat_template(proc, msgs, True,
                                 enable_thinking=False) == "NOTHINK"
+
+
+class _ThinkVocabOffTok(_GateTok):
+    """A vocab with think tokens and a template that thinks only when
+    asked, as Qwen3.5-9B and Gemma 4 do."""
+    eos_token_id = 0
+    chat_template = ("{% if enable_thinking is defined and enable_thinking "
+                     "%}THINK{% else %}NOTHINK{% endif %}")
+
+    def get_vocab(self):
+        return {"a": 0, "<think>": 1, "</think>": 2}
+
+
+def test_a_served_text_render_with_think_tokens_keeps_a_default_off():
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
+
+    pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
+    raw = _ThinkVocabOffTok()
+    wrapper = TokenizerWrapper(raw)
+    assert wrapper.has_thinking
+    proc = serving._GgufServerProcessor(wrapper, raw, None)
+    msgs = [{"role": "user", "content": "hi"}]
+    assert pu.get_chat_template(proc, msgs, True) == "NOTHINK"
+    assert pu.get_chat_template(proc, msgs, True,
+                                enable_thinking=True) == "THINK"
+
+
+def test_the_prefill_gate_takes_the_served_text_processor():
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
+
+    raw = _ThinkVocabOffTok()
+    proc = serving._GgufServerProcessor(TokenizerWrapper(raw), raw, None)
+    assert prefill._renders_template_text(proc)
 
 
 # The old-style role dispatch from issue #66: no developer alias, else-raise.

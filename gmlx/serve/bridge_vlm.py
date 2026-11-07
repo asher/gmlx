@@ -222,9 +222,10 @@ class _GgufServerProcessor:
     the processor. mlx-lm's ``TokenizerWrapper`` is not itself callable, exposes
     the callable backend as ``._tokenizer``, and rebuilds a *non-copy-safe*
     detokenizer through a class property. This adapter surfaces the callable
-    backend as ``.tokenizer``, holds a copy-safe mlx-vlm ``.detokenizer``, and
-    delegates everything else (``chat_template``, ``apply_chat_template``,
-    ``encode``/``decode`` ...) to the original tokenizer wrapper.
+    backend as ``.tokenizer``, holds a copy-safe mlx-vlm ``.detokenizer``,
+    renders as the wrapper does but keeps the template's thinking default,
+    and delegates everything else (``chat_template``, ``encode``/``decode``
+    ...) to the original tokenizer wrapper.
     """
 
     def __init__(self, wrapper, backend, detokenizer):
