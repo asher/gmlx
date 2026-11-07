@@ -82,12 +82,15 @@ def test_install_gen_args_idempotent():
 def test_gen_arg_keys_exist_upstream():
     """Drift guard: every injection key must be a declared GenerationArguments
     field and every request-field alias a declared field on some mlx-vlm request
-    schema - a rename upstream turns a silent injection no-op into a red X."""
+    schema or a request extra a gmlx patch reads (``_GMLX_CONSUMED``) - a
+    rename upstream turns a silent injection no-op into a red X."""
     import dataclasses
+
+    from gmlx.serve.patches import api_contract
     gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     ga_fields = {f.name for f in dataclasses.fields(gen.GenerationArguments)}
-    request_fields = set()
+    request_fields = set(api_contract._GMLX_CONSUMED)
     for cls in (schemas.ChatRequest, schemas.AnthropicRequest,
                 schemas.OpenAIRequest):
         request_fields |= set(cls.model_fields)
@@ -96,7 +99,7 @@ def test_gen_arg_keys_exist_upstream():
             f"{key!r} is not a GenerationArguments field anymore"
         for name in req_names:
             assert name in request_fields, \
-                f"{name!r} is not declared on any mlx-vlm request schema"
+                f"{name!r} is neither a request schema field nor a gmlx extra"
 
 
 def test_inject_profile_sampling_on_real_gen_args():
