@@ -62,12 +62,14 @@ class ServeHost:
             return residency.acquire_video_model(model)
         return residency.acquire_image_model(model)
 
-    def revise(self, model, text, requested, has_refs):
+    def revise(self, model, text, requested, has_refs, **clip):
         """The upsampler's caption of ``text``, or None to encode it as
-        typed."""
+        typed. ``clip`` holds a video clip's ``frames``, ``first`` and
+        ``last``, when the encode names them."""
         from ..image_upsample import revise
 
-        return revise(model, text, requested, has_refs, resolve=self.resolve)
+        return revise(model, text, requested, has_refs, resolve=self.resolve,
+                      **clip)
 
     def models(self) -> dict:
         out = serving.image_models()
@@ -1445,14 +1447,16 @@ async def encode(request: Request):
     requested = fields.get("prompt_upsampling")
     if requested is not None and not isinstance(requested, bool):
         raise StepError(400, "prompt_upsampling is true or false")
+    clip = _clip_fields(fields, len(images))
     revise = getattr(SETTINGS.host, "revise", None)
     revised = None
     if revise is not None:
-        # A video entry's rewrite knows no clip length here, and a prompt
-        # with keyframes runs as typed, as one with reference images.
+        # Without the clip's frames, a prompt with images runs as typed:
+        # a video entry's keyframe task names the clip's length.
         try:
             revised = await asyncio.to_thread(
-                revise, fields.get("model"), text, requested, bool(images))
+                revise, fields.get("model"), text, requested, bool(images),
+                **clip)
         except ImageRequestError as e:
             raise StepError(e.status, str(e)) from None
     hold = await _acquire(fields.get("model"))
@@ -1500,6 +1504,34 @@ async def encode(request: Request):
     finally:
         hold.release()
     return _held_encode(got, revised)
+
+
+def _clip_fields(fields: dict, images: int) -> dict:
+    """The rewrite's facts of a video clip from an encode's ``frames``
+    and ``keyframes``, the role of each image in order: ``{frames,
+    first, last}``, or {} when the encode names no frames."""
+    from ..image_steps import StepError
+
+    frames, roles = fields.get("frames"), fields.get("keyframes")
+    if frames is None:
+        if roles:
+            raise StepError(400, "keyframes needs frames: a keyframe "
+                            "prompt names the clip's length")
+        return {}
+    if isinstance(frames, bool) or not isinstance(frames, int) or frames < 1:
+        raise StepError(400, "frames is the clip's frame count, a positive "
+                        "integer")
+    roles = [] if roles is None else roles
+    if not isinstance(roles, list) or roles not in (
+            [], ["first"], ["last"], ["first", "last"]):
+        raise StepError(400, "keyframes lists the role of each image, "
+                        "\"first\" then \"last\"")
+    if len(roles) != images:
+        raise StepError(400, f"keyframes names {len(roles)} role"
+                        f"{'' if len(roles) == 1 else 's'} for {images} "
+                        f"image{'' if images == 1 else 's'}")
+    return {"frames": frames, "first": "first" in roles,
+            "last": "last" in roles}
 
 
 def _held_encode(got: dict, revised):

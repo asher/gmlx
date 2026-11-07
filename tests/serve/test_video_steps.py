@@ -2468,8 +2468,9 @@ def test_the_encode_of_an_entry_with_an_upsampler_encodes_its_caption(
 
 def test_an_encode_with_keyframes_runs_its_prompt_as_typed(
         monkeypatch, request, tmp_path):
-    """The guide's keyframe tasks name the clip's length, which the pack's
-    encode does not know: a prompt with keyframes skips the upsampler."""
+    """The guide's keyframe tasks name the clip's length: an encode that
+    names no frames, as ComfyUI's own node sends it, runs a prompt with
+    keyframes as typed."""
     import json
 
     from gmlx.serve import image_upsample
@@ -2502,3 +2503,112 @@ def test_an_encode_with_keyframes_runs_its_prompt_as_typed(
         # caption, so a rewrite fails the encode.
         assert calls == []
     assert "revised_prompt" not in fields
+
+
+def _rewrites(monkeypatch, served, tmp_path, reply: dict) -> list:
+    """The entry's upsampler stood in by ``reply``; returns the system
+    prompt of each rewrite."""
+    import json
+
+    from gmlx.serve import image_upsample
+
+    guide = tmp_path / "guide.md"
+    guide.write_text("the guide")
+    served.spec.upsampler = "chat"
+    served.spec.upsample_prompt = str(guide)
+    monkeypatch.setattr(steps, "family_of", lambda s: (hf.FAMILY, "fl2va"))
+    monkeypatch.setattr(image_upsample, "_upsampler_identity",
+                        lambda up: (up,))
+    image_upsample.CAPTIONS.clear()
+    systems: list = []
+    monkeypatch.setattr(image_upsample, "_chat", lambda up, req, stop: (
+        systems.append(req.system), json.dumps(reply))[1])
+    return systems
+
+
+@pytest.mark.parametrize("roles,task", [
+    (["first"], "an I2VA video of 5.17 seconds, where its first frame is "),
+    (["last"], "an L2VA video of 5.17 seconds, where its last frame is "),
+    (["first", "last"], "an FL2VA video of 5.17 seconds, where its first "
+     "and last frames are ")])
+def test_an_encode_with_the_clips_frames_rewrites_its_keyframe_prompt(
+        monkeypatch, request, tmp_path, roles, task):
+    """With the clip's frames and the role of each image, the pack's
+    encode rewrites the prompt as the guide's keyframe task of that
+    length, as POST /v1/videos does, and encodes the caption with the
+    keyframes."""
+    pipe, _w = _own_pipe()
+    served = _served(pipe)
+    _mount(_Host(served), request)
+    _keyframe_encoder(monkeypatch, served)
+    systems = _rewrites(monkeypatch, served, tmp_path, {
+        "instruction": "Picture 1 opens the clip.",
+        "integrated_multimodal_description": "[Shot 1] A fox.",
+        "overall_soundscape": "Wind.", "non_diegetic_music": "N/A"})
+    caption = ("Picture 1 opens the clip.\n\n"
+               "integrated_multimodal_description: [Shot 1] A fox.\n\n"
+               "overall_soundscape: Wind.\n\nnon_diegetic_music: N/A")
+    from gmlx.video import encoder as video_encoder
+
+    load, read = video_encoder.load_encoder, []
+
+    def load_encoder(*a, **k):
+        enc = load(*a, **k)
+        enc.tokenizer.pieces[caption] = [21, 22, 23]
+        read.append(enc.tokenizer.asked)
+        return enc
+    monkeypatch.setattr(video_encoder, "load_encoder", load_encoder)
+    rng = np.random.default_rng(1)
+    images = {f"image_{i}": rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)
+              for i in range(len(roles))}
+    _got, fields, _h = _client().container(
+        "encode", images, {"model": "h3", "text": "a fox", "frames": 124,
+                           "keyframes": roles})
+    assert len(systems) == 1 and task in systems[0]
+    assert fields["revised_prompt"] == caption
+    assert [caption in asked for asked in read] == [True]
+    assert len(fields["spans"]) == len(roles)
+
+
+def test_an_encode_with_the_clips_frames_names_the_length_of_a_text_prompt(
+        monkeypatch, request, tmp_path):
+    """A prompt without keyframes is rewritten as the guide's text to
+    video task of the clip's length."""
+    import json
+
+    pipe, weights = _own_pipe()
+    served = _served(pipe)
+    _mount(_Host(served), request)
+    _encoder_by_text(monkeypatch, weights)
+    systems = _rewrites(monkeypatch, served, tmp_path, {
+        "instruction": "", "integrated_multimodal_description": "[Shot 1] A fox.",
+        "overall_soundscape": "Wind.", "non_diegetic_music": "N/A"})
+    s, _h, data = _client()._call(
+        "POST", "encode", json.dumps({"model": "h3", "text": "a fox",
+                                      "frames": 124, "keyframes": []}).encode(),
+        ctype="application/json")
+    assert s == 200, data
+    assert len(systems) == 1 and "a T2VA video of 5.17 seconds. " in systems[0]
+
+
+@pytest.mark.parametrize("sent,images,error", [
+    ({"frames": 0, "keyframes": []}, 0,
+     "frames is the clip's frame count, a positive integer"),
+    ({"keyframes": ["first"]}, 1,
+     "keyframes needs frames: a keyframe prompt names the clip's length"),
+    ({"frames": 124, "keyframes": ["first"]}, 2,
+     "keyframes names 1 role for 2 images")])
+def test_an_encode_refuses_frames_and_keyframes_it_cannot_rewrite_with(
+        request, sent, images, error):
+    """A clip's frames that are no count, keyframes without the clip's
+    length and a role count other than the images' are refused before
+    any rewrite or encode."""
+    pipe, _w = _own_pipe()
+    _mount(_Host(_served(pipe)), request)
+    rng = np.random.default_rng(1)
+    tensors = {f"image_{i}": rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)
+               for i in range(images)}
+    with pytest.raises(StepsClientError) as e:
+        _client().container("encode", tensors,
+                            {"model": "h3", "text": "a fox", **sent})
+    assert e.value.status == 400 and e.value.body["error"] == error

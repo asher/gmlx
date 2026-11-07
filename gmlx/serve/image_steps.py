@@ -71,7 +71,8 @@ CLIENT_TABLE_BYTES = 16 << 20
 # The bound of a store with no cap, which its bookings bound.
 UNBOUNDED = 1 << 62
 FEATURES = ("prefix_cache", "noise_mask", "rgba_vae", "tiled_vae",
-            "ref_cache", "skip_blocks", "av_step", "anchors")
+            "ref_cache", "skip_blocks", "av_step", "anchors",
+            "keyframe_upsampling")
 
 
 @dataclass(frozen=True)
