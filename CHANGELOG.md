@@ -231,6 +231,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - On a Gemma 4 model set up with `mmproj:`, a system or developer message
   renders as on the text model and llama-server, where it got an extra space
   before the end of its turn or, on older templates, showed as a Python list.
+- A video request on a Gemma 4 model set up with `mmproj:` no longer puts one
+  space per video ahead of the system or developer text.
 
 ## [0.5.4] - 2026-10-29
 

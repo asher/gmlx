@@ -141,6 +141,19 @@ def test_the_gemma4_processor_renders_the_text_models_prompt(
     assert got == want
 
 
+@pytest.mark.parametrize("videos", [1, 2])
+@pytest.mark.parametrize("role", ["system", "developer"])
+@pytest.mark.parametrize("model_type", _GEMMA4_TYPES)
+def test_a_video_request_renders_the_text_models_system_turn(
+        faithful, model_type, role, videos):
+    """Each video once added a space ahead of the system text."""
+    messages = _conversation(role)
+    got = _render(faithful, _Gemma4Processor(_TEMPLATES["12b"], model_type),
+                  model_type, messages,
+                  video=[f"clip{i}.mp4" for i in range(videos)])
+    assert _system_turn(got) == "Be brief."
+
+
 @pytest.mark.parametrize("path", ["stock", "faithful"])
 @pytest.mark.parametrize("model_type", _GEMMA4_TYPES)
 def test_the_text_processor_on_a_vision_type_renders_the_text_models_prompt(

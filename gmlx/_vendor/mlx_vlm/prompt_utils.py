@@ -309,6 +309,14 @@ class MessageFormatter:
                 f"Please only use 1 image."
             )
 
+        # gmlx: Gemma 4 system and developer text stays a string, as the
+        # text model renders it, also on a video request.
+        if (
+            role in ("system", "developer")
+            and self.model_name in _SYSTEM_TEXT_TYPES
+        ):
+            return {"role": role, "content": prompt}
+
         # Handle video format for specific models
         if self.model_name in [
             "qwen2_vl",
@@ -338,14 +346,6 @@ class MessageFormatter:
                 num_audios,
                 **kwargs,
             )
-
-        # gmlx: Gemma 4 system and developer text stays a string, as the
-        # text model renders it.
-        if (
-            role in ("system", "developer")
-            and self.model_name in _SYSTEM_TEXT_TYPES
-        ):
-            return {"role": role, "content": prompt}
 
         # Route to appropriate formatter
         formatter_map = {
