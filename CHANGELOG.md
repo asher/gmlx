@@ -102,8 +102,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fused kernel where MLX built the whole score matrix, so Nemotron-H and
   other models with wide query groups draft faster at long context.
 - Logprobs are the log-softmax of the raw logits, before logit bias,
-  penalties and the other processors, as in llama.cpp and vLLM. Profiles and
-  the GGUF's sampling keys no longer change them.
+  penalties and the other processors, as in llama.cpp and vLLM. A profile's
+  sampling values and the GGUF's sampling keys no longer change them.
 - `TOP_LOGPROBS_K` allows up to 100 alternatives, where it stopped at 20.
 - A thinking budget of N lets N reasoning tokens through, as llama-server
   does, where it let N+1 through, and the prompt's reasoning after its last

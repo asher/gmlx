@@ -39,7 +39,7 @@ accepts. These llama-server request fields carry over:
 
 | llama-server | gmlx | Notes |
 |--------------|------|-------|
-| `lora: [{"id": 0, "scale": 0.5}]` | The same | The id is the adapter's index in `/v1/models`. A bad or repeated id gets a 400. |
+| `lora: [{"id": 0, "scale": 0.5}]` | The same | The id is the adapter's index in `/v1/models`. Each item needs its `scale`. A bad or repeated id gets a 400. |
 | `reasoning_budget_tokens`, `reasoning_budget_message` | The same | gmlx also names them `thinking_budget` and `thinking_budget_message`. |
 | A last assistant message, which llama-server continues | `continue_final_message: true` and `add_generation_prompt: false` | Send both fields to llama-server too. In gmlx, only some chat templates can continue a message. |
 | `logprobs: true` | `logprobs: true` and `top_logprobs: 20` | llama-server returns 20 alternatives by default. gmlx returns none, and the server needs `TOP_LOGPROBS_K=20` at start. |

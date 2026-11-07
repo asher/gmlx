@@ -1191,7 +1191,7 @@ stops before any load.
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `MODEL`, positional | Required | Score this GGUF, or this model id or alias from the config. |
-| `--reference FILE` | MODEL | Score MODEL against this GGUF or config id. |
+| `--reference FILE` | MODEL without adapters, with `--adapter` | Score MODEL against this GGUF or config id. |
 | `--adapter PATH[:STRENGTH]` | None | Score MODEL with this GGUF LoRA adapter at this strength, 1 when left out. Repeat for more points. |
 | `--text FILE` | Required | Score this UTF-8 text. One trailing newline is dropped, as llama.cpp does. |
 | `--ctx N` | `512` | Cut the text into chunks of N tokens. |
@@ -1223,7 +1223,9 @@ The table gives two numbers for each point, each with its standard error:
 | Mean KLD | The mean KL divergence from the reference to MODEL over the scored positions, in nats. 0 means the same distribution. |
 | Same top p | The share of scored positions where both models rank the same token first, as a percent. |
 
-This run scores one adapter at two strengths against the bare model:
+This run scores one adapter at two strengths against the bare model. The
+output starts with the full paths of MODEL and the reference, then ends
+with this table:
 
 ```sh
 gmlx kld SmolLM2-135M-Instruct-Q8_0.gguf --text page.txt --ctx 128 --chunks 4 \
@@ -1772,7 +1774,7 @@ These verbs also use other codes:
 | `rm` | 1 when you declined or a file could not be deleted, 2 for an unknown id, a bad config, or a missing `--yes`. |
 | `ps` | 1 when the server answered with an error or is not gmlx, 3 when no server was reachable. |
 | `systemone` | 1 when the file, the request or the model was refused, or no server was reachable. |
-| `capture` | 1 when the model fails to load or the run fails, 2 when a flag, prompt file or adapter file is wrong. |
+| `capture` | 1 when the model fails to load or the run fails, 2 when a flag, the model path, a prompt file or an adapter file is wrong. |
 | `kld` | 1 when a model or tokenizer fails to load, 2 when a flag, file or tokenizer match is wrong, the text is short, `TMPDIR` lacks space or a head cannot be scored. |
 | `doctor` | 1 when a check failed, 2 when the `--config` file does not exist. |
 | `launch` | The client's own status once it runs, else a code from the next table. |

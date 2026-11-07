@@ -19,8 +19,10 @@ sets up the server is in [Configuration](config.md).
   - [Tool calling](#tool-calling)
   - [Parameter support](#parameter-support)
   - [Adapters](#adapters)
+  - [Thinking budget](#thinking-budget)
   - [Structured output](#structured-output)
   - [Logprobs](#logprobs)
+  - [Assistant prefill](#assistant-prefill)
   - [Media in requests](#media-in-requests)
   - [Word timestamps in chat](#word-timestamps-in-chat)
   - [Transcription and translation](#transcription-and-translation)
@@ -232,8 +234,8 @@ order.
 
 The server tokenizes the message alone, with special tokens read as tokens,
 as llama-server does. Without a message, the server writes a newline before
-the end marker, and a model with a built-in drafter writes a short sentence
-that says the budget ran out. The message and the end marker are part of
+the end marker, and on a model with a built-in drafter a budget above 0
+writes a short sentence that says the budget ran out. The message and the end marker are part of
 `reasoning_content`, and they count against `max_tokens`.
 
 The built-in drafters, the MTP heads, DFlash, DFlash2, DSpark and
@@ -298,8 +300,7 @@ entries and in their alternatives, with `token_id:<id>`. The `bytes` do not
 change.
 
 With `logprobs: true` and no `top_logprobs`, a reply has no alternatives, as
-in the OpenAI API. llama.cpp returns 20 alternatives in that case. Send
-`top_logprobs` to get the same lists from both servers.
+in the OpenAI API.
 
 A model with a [speculative drafter](speculative-decoding.md), such as an
 MTP head or a DFlash, DSpark or LiLiCorr drafter, returns logprobs while it
@@ -355,9 +356,10 @@ fields, because its turns build their own prompt.
 
 gmlx differs from llama-server in these ways:
 
-- Prefill is opt-in. llama-server continues any last message, and gmlx
-  continues a last assistant message only when the request sets
-  `continue_final_message`.
+- Prefill is opt-in. llama-server continues a last assistant message by
+  default, and gmlx continues it only when the request sets
+  `continue_final_message`. With that field, llama-server continues a last
+  message of any role, and gmlx needs an assistant message.
 - gmlx merges all system messages into one system message at the start.
   llama-server keeps each one where the client sent it.
 - The reply holds only the new text. A llama-server reply that is not

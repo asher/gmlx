@@ -48,8 +48,8 @@ a model ends up with.
 | `mistral` | `mistral3` | temperature=0.15 | - |
 | `default` | (anything else) | temperature=0.7 top_p=0.95 | `@coding`: temperature=0.3; `@creative`: temperature=1.0 min_p=0.05 |
 
-The family values, the header's `general.sampling.*` values and your profiles
-change only which token the server samples. The
+The sampling values of a family, of the header's `general.sampling.*` keys
+and of your profiles change only which token the server samples. The
 [logprobs](api.md#logprobs) that a request gets do not depend on them.
 
 [How a request gets its settings](config.md#how-a-request-gets-its-settings)
