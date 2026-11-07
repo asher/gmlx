@@ -212,7 +212,7 @@ def _json_image(value, param: str):
     """A JSON edit image: ``{"image_url": ...}`` or a bare data URL. A
     ``file_id`` is refused, and so is a path or a URL the media gate does
     not accept."""
-    from ..image_service import _bad, decode_image
+    from ..image_service import _bad
     from .media_gate import MediaRefused, _decode_edit_image
 
     if isinstance(value, dict):
@@ -241,7 +241,19 @@ def _json_image(value, param: str):
         except (binascii.Error, ValueError):
             raise _bad(f"{param} must be a data URL or base64 image data; "
                        "send a file as multipart form data", param) from None
-    return decode_image(data, param)
+    return _decoded(data, param)
+
+
+def _decoded(data: bytes, param: str):
+    """The pixels of an image a body carries, its refusal printed to the
+    log as the media gate prints one."""
+    from ..image_service import ImageRequestError, decode_image
+
+    try:
+        return decode_image(data, param)
+    except ImageRequestError as e:
+        _log_media(e.status, str(e))
+        raise
 
 
 def _log_media(status: int, message: str) -> None:
@@ -266,7 +278,7 @@ async def _read_body(route: str, request: Request):
 
 
 async def _read_priced_body(route: str, request: Request):
-    from ..image_service import ImageRequestError, _bad, decode_image
+    from ..image_service import ImageRequestError, _bad
     from .body_intake import BodyRefused, check_media, read_in_ram
 
     ctype = request.headers.get("content-type", "").lower()
@@ -296,9 +308,9 @@ async def _read_priced_body(route: str, request: Request):
             if hasattr(value, "read"):
                 data = await value.read()
                 if key in ("image", "image[]"):
-                    images.append(decode_image(data, "image"))
+                    images.append(_decoded(data, "image"))
                 elif key == "mask":
-                    mask = decode_image(data, "mask")
+                    mask = _decoded(data, "mask")
                 else:
                     raise _bad(f"file field {key!r} is not read by this route",
                                key)

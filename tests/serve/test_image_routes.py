@@ -1007,19 +1007,34 @@ def _gated_app():
     return app
 
 
+def _truncated_png():
+    png = _png(64, 64)
+    return png[:len(png) // 2]
+
+
 @pytest.mark.parametrize("image", [
     "/tmp/a.png", "https://example.com/a.png",
-    "data:image/png;base64," + base64.b64encode(b"no image").decode()],
-    ids=["path", "url", "unreadable"])
+    "data:image/png;base64," + base64.b64encode(b"no image").decode(),
+    "base64", "multipart"],
+    ids=["path", "url", "unreadable", "base64", "multipart"])
 def test_an_images_media_refusal_is_in_the_server_log(served, monkeypatch,
                                                       capsys, image):
     """The images routes check their own media, as the gate checks the
-    other routes', and print each refusal to the log as the gate does."""
+    other routes', and print each refusal to the log as the gate does: a
+    truncated PNG sent as bare base64 or as a form file among them."""
     from gmlx.serve.patches import hardening
 
     monkeypatch.setattr(hardening, "_refusal_logs", {})
-    r = TestClient(_gated_app()).post("/v1/images/edits", json={
-        "prompt": "x", "images": [{"image_url": image}]})
+    client = TestClient(_gated_app())
+    if image == "multipart":
+        r = client.post("/v1/images/edits", data={"prompt": "x"},
+                        files={"image": ("a.png", _truncated_png(),
+                                         "image/png")})
+    else:
+        if image == "base64":
+            image = base64.b64encode(_truncated_png()).decode()
+        r = client.post("/v1/images/edits", json={
+            "prompt": "x", "images": [{"image_url": image}]})
     assert r.status_code == 400, r.text
     message = r.json()["error"]["message"]
     assert (f"[server] refused a request with status 400: {message}"
