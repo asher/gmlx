@@ -125,8 +125,8 @@ def test_batch_loop_single_row_budget_close():
     hook = _hook([S1, S2, END], budget=2, forced_ids=[14, 15, END])
     gen, d, _ = _drive_batch(hook, max_tokens=9)
     out = [t for toks, _ in gen for t in toks if t is not None]
-    assert out == [2, 3, 4, 14, 15, END,
-                   (END + 1) % VOCAB, (END + 2) % VOCAB]
+    assert out == [2, 3, 14, 15, END,
+                   (END + 1) % VOCAB, (END + 2) % VOCAB, (END + 3) % VOCAB]
     assert hook._spent and not hook.in_thinking
     # The forced round never drafted; every other decode round did.
     assert d.draft_calls == [1] * (len(out) - 4)
@@ -212,7 +212,8 @@ def test_batch_loop_single_id_forced_close():
     d = _AcceptArmDrafter(cap=0)
     gen, _d, _model = _drive_batch(hook, max_tokens=6, drafter=d)
     out = [t for toks, _ in gen for t in toks if t is not None]
-    assert out == [2, 3, END, (END + 1) % VOCAB, (END + 2) % VOCAB]
+    assert out == [2, END, (END + 1) % VOCAB, (END + 2) % VOCAB,
+                   (END + 3) % VOCAB]
     assert (1, 0) in d.accept_shapes
     assert hook._spent and not hook.in_thinking
 
@@ -369,7 +370,7 @@ def test_a_batch_forced_close_keeps_the_penalties_exact():
         seed_tokens=None, emitted=[1], max_tokens=8, sampler=None,
         draft_block_size=None, thinking_hook=hook, row_procs=[rows])
     out = [t for toks, _ in gen for t in toks if t is not None]
-    assert out[:6] == [2, 3, 4, 14, 15, END]
-    committed = [1, 2, 3, 4, 14, 15, END]
+    assert out[:5] == [2, 3, 14, 15, END]
+    committed = [1, 2, 3, 14, 15, END]
     assert penalties_at(len(prompt) + len(committed)) == {
         t: 0.5 for t in committed}

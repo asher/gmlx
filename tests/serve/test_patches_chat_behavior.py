@@ -123,17 +123,18 @@ def test_atem_serve_budget_caps_reasoning_only(template):
     text = _atem_serve_run(
         crit, " to=self<|message|>Thinking hard about it now.<|eom|>"
         + _ATEM_REST, _ATEM_REST, tok)
-    assert text == (" to=self<|message|>Thinking hard about\n<|eom|>"
+    assert text == (" to=self<|message|>Thinking hard\n<|eom|>"
                     + _ATEM_REST)
 
 
 def test_atem_serve_budget_leaves_the_answer_alone():
-    """The budget=3 case that used to cut the answer after its first token:
-    every <|message|> turned counting on."""
+    """The case that used to cut the answer after its first token: every
+    <|message|> turned counting on. Three reasoning tokens fit a budget of
+    4."""
     tok = at.AtemTokenizer()
     script = (" to=self<|message|>abc<|eom|>"
               "<|start|>assistant to=user<|message|>Hello world foo bar")
-    crit = _atem_criteria(3, tok)
+    crit = _atem_criteria(4, tok)
     assert _atem_serve_run(crit, script, "", tok) == script
     assert crit.thinking_token_count == 3
 
@@ -146,7 +147,7 @@ def test_atem_serve_commentary_first_then_capped_reasoning():
     text = _atem_serve_run(
         crit, head + " to=self<|message|>Thinking hard about it now.<|eom|>"
         + answer, answer, tok)
-    assert text == (head + " to=self<|message|>Thinking hard about\n<|eom|>"
+    assert text == (head + " to=self<|message|>Thinking hard\n<|eom|>"
                     + answer)
 
 
