@@ -31,6 +31,7 @@ class HeadSpec:
     weight: Callable | None = None  # () -> W [V, d] in a float dtype (dequantized once)
     scale: float = 1.0             # the factor fn applies after the projection (Granite, Cohere, MiniCPM)
     pre: Callable | None = None    # h -> the input fn projects, where the head transforms it first (a Hadamard fold)
+    module: Any = None             # the module fn projects with: lm_head or the tied embedding
 
     def dense_weight(self, params=None):
         """W [V, d] for the closed-form backward (dz @ W). A float weight in
@@ -81,23 +82,11 @@ def head_weight_fn(mod) -> Callable:
             return cache["w"]
         if "w" in cache:
             return cache["w"]
-        mode = getattr(mod, "mode", "affine")
         rows = int(w.shape[0])
         parts = []
         step = 8192
         for r in range(0, rows, step):
-            if mode == "kquant":
-                import mlx_kquant as kq
-
-                from gmlx.load.out_scale import weight_scale
-                block = kq.dequantize(w[r:r + step], mod["scales"], mod.kquant_type)
-                s = weight_scale(mod)   # an nvfp4 head's weight scale
-                if s is not None:
-                    block = block * s
-            else:
-                block = mx.dequantize(w[r:r + step], mod.scales[r:r + step],
-                                      mod.biases[r:r + step] if getattr(mod, "biases", None) is not None else None,
-                                      mod.group_size, mod.bits)
+            block = head_weight_rows(mod, r, min(r + step, rows))
             # bf16, never f16: the backward casts dz to this dtype and the
             # softmax cotangents (about q / N) underflow f16
             parts.append(block.astype(mx.bfloat16))
@@ -106,6 +95,29 @@ def head_weight_fn(mod) -> Callable:
         mx.eval(cache["w"])
         return cache["w"]
     return get
+
+
+def head_weight_rows(mod, r0: int, r1: int, dtype=None):
+    """Rows ``r0:r1`` of a quantized head's weight, dequantized (to
+    ``dtype`` when given), times the module's weight scale."""
+    import mlx.core as mx
+
+    from gmlx.load.out_scale import weight_scale
+    w = mod.weight
+    if getattr(mod, "kquant_type", None) is not None:
+        import mlx_kquant as kq
+        kw = {} if dtype is None else {"dtype": dtype}
+        block = kq.dequantize(w[r0:r1], mod["scales"], mod.kquant_type, **kw)
+    else:
+        biases = getattr(mod, "biases", None)
+        block = mx.dequantize(w[r0:r1], mod.scales[r0:r1],
+                              None if biases is None else biases[r0:r1],
+                              group_size=mod.group_size, bits=mod.bits,
+                              mode=getattr(mod, "mode", "affine"))
+        if dtype is not None:
+            block = block.astype(dtype)
+    s = weight_scale(mod)
+    return block if s is None else block * s
 
 
 def _input_transform(mod) -> Callable | None:
@@ -170,7 +182,7 @@ def head_spec_from_model(model) -> HeadSpec:
                 mod.update(prev)
         V = int(mod.weight.shape[0]) if hasattr(mod, "weight") else int(mod(mx_zeros(1, h_dim(inner))).shape[-1])
         return HeadSpec(fn=fn, params=mod.parameters(), softcap=softcap, V=V, live=mod.parameters,
-                        weight=head_weight_fn(mod), scale=scale, pre=_input_transform(mod))
+                        weight=head_weight_fn(mod), scale=scale, pre=_input_transform(mod), module=mod)
     emb = inner.embed_tokens
 
     def fn2(params, h):
@@ -182,7 +194,8 @@ def head_spec_from_model(model) -> HeadSpec:
             emb.update(prev)
     return HeadSpec(fn=fn2, params=emb.parameters(), softcap=softcap,
                     V=int(emb.weight.shape[0]) if hasattr(emb, "weight") else int(emb.as_linear(mx_zeros(1, h_dim(inner))).shape[-1]),
-                    live=emb.parameters, weight=head_weight_fn(emb), scale=scale, pre=_input_transform(emb))
+                    live=emb.parameters, weight=head_weight_fn(emb), scale=scale, pre=_input_transform(emb),
+                    module=emb)
 
 
 HEAD_PARITY_TOL = 0.05

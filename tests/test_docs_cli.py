@@ -93,6 +93,9 @@ def _entry(verb):
     if verb == "systemone":
         from gmlx.commands.systemone import cmd_systemone
         return cmd_systemone, [], set()
+    if verb == "kld":
+        from gmlx.commands.kld import cmd_kld
+        return cmd_kld, [], set()
     from gmlx.commands import manage
     return getattr(manage, f"cmd_{verb}"), [], set()
 
