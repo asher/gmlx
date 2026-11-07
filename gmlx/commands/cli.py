@@ -1395,6 +1395,7 @@ def _run_bench_depths(args) -> int:
     check_or_exit(args.gguf, ctx_tokens=max(depths) + decode_tokens,
                   streaming=getattr(args, "stream_experts", False))
     drafter = None
+    _check_cli_adapter(args, mtp=bool(speculative))
     if speculative:
         with loadlog.load_ui(args.verbose, args.gguf):
             model, drafter, _config, tok = load_mtp_model(
@@ -1482,6 +1483,24 @@ def _run_bench_depths(args) -> int:
             r = results[D]
             print(f"{D:>8} {r['prefill_tps']:>12.1f} {r['tg_tps']:>9.1f}")
     return 0
+
+
+def _check_cli_adapter(args, *, mtp: bool = False) -> None:
+    """``--adapter`` on the run/chat/bench trunks: refuse, from the base and
+    adapter headers and before the load, an adapter the base cannot take
+    (an embedding adapter on a tied model, say). Exits with the reason."""
+    if not getattr(args, "adapter", None):
+        return
+    from gmlx.load.adapter import adapter_load_refusal
+
+    stream = ("experts" if getattr(args, "stream_experts", False)
+              else "cpu" if getattr(args, "stream_cpu", False) else None)
+    try:
+        adapter_load_refusal(
+            args.gguf, [os.path.abspath(os.path.expanduser(args.adapter))],
+            stream=stream, mtp=mtp)
+    except ValueError as e:
+        raise SystemExit(f"error: {e}") from None
 
 
 def _apply_cli_adapter(args, model, config) -> None:
@@ -1674,6 +1693,7 @@ def _run_generate(args) -> int:
         from gmlx.gen.generation import generate_speculative
         from gmlx.spec.mtp_load import load_mtp_model
 
+        _check_cli_adapter(args, mtp=True)
         with loadlog.load_ui(args.verbose, args.gguf):
             model, drafter, _config, tok = load_mtp_model(
                 args.gguf,
@@ -1738,6 +1758,7 @@ def _run_generate(args) -> int:
 
     import gmlx.load.loadlog as loadlog
 
+    _check_cli_adapter(args)
     with loadlog.load_ui(args.verbose, args.gguf):
         model, config, tok = load_model(
             args.gguf,

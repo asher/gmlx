@@ -3204,9 +3204,10 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     # across turns exactly like the plain text path.
     from gmlx.cache.kv_cache import make_prompt_cache as _mtp_make_cache
     import gmlx.load.loadlog as loadlog
-    from gmlx.commands.cli import _apply_placement
+    from gmlx.commands.cli import _apply_placement, _check_cli_adapter
     from gmlx.spec.mtp_load import load_mtp_model
 
+    _check_cli_adapter(args, mtp=True)
     b = _ChatBackend()
     with loadlog.load_ui(args.verbose, args.gguf):
         b.model, b.drafter, b.config, b.tok = load_mtp_model(
@@ -3307,6 +3308,9 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
     from gmlx.envflags import env_bool
     from gmlx.load.loader import load_model
 
+    from gmlx.commands.cli import _check_cli_adapter
+
+    _check_cli_adapter(args)
     b = _ChatBackend()
 
     def _load_text_model():

@@ -2277,3 +2277,36 @@ def test_text_adapters_price_twice_their_files_in_every_figure(monkeypatch,
     assert seen["text"] == 5 * GB + add
     pool._keep_check("m", build_spec=bare)
     assert seen["text"] == 5 * GB
+
+
+def test_an_adapter_the_base_cannot_take_evicts_nothing(monkeypatch, tmp_path):
+    """The cold path refuses a tied base's embedding adapter from the
+    headers, beside the preflight, before any eviction or build."""
+    import dataclasses
+
+    pytest.importorskip("gguf")
+    from gmlx.config import ResolvedModel
+    from gmlx.load import adapter as adapter_mod
+    from lora_gguf import mint_adapter, mint_base
+
+    base = mint_base(tmp_path / "tied.gguf", tied=True)
+    ad = mint_adapter(tmp_path / "embd.gguf")
+    spec = dataclasses.replace(
+        ResolvedModel(id="t", path=base, sampling={}, load={}, cache={}, system=None,
+                      speculative=True, mmproj=None, draft_gguf=None, pin=False,
+                      ttl_s=None),
+        adapters=(ad,))
+    _proxy, pool, teardowns = make_pool(15, {"A": 10, base: 10})
+    acquire(pool, "A")
+    calls = []
+    real = adapter_mod.adapter_load_refusal
+    monkeypatch.setattr(adapter_mod, "adapter_load_refusal",
+                        lambda *a, **k: (calls.append((a, k)), real(*a, **k)))
+    monkeypatch.setattr(pool, "_evict_for_room",
+                        lambda *a, **k: pytest.fail("evicted for a refused adapter"))
+    with pytest.raises(ValueError, match="output head"):
+        pool.acquire(base, None, "auto", build_spec=spec)
+    assert resident(pool) == {"A"} and teardowns == []
+    ((args, kw),) = calls
+    assert args[:2] == (base, (ad,))
+    assert kw == {"stream": None, "mtp": True}

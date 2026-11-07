@@ -681,3 +681,20 @@ def test_vlm_run_hands_the_budget_kwargs_to_generate(gguf, vlm_gen, monkeypatch)
     assert seen["thinking_budget"] == 0
     assert seen["enable_thinking"] is True
     assert {k: seen[k] for k in _M3_PAIR} == _M3_PAIR
+
+
+def test_run_refuses_an_embedding_adapter_on_a_tied_model_before_the_load(
+        tmp_path, monkeypatch, capsys):
+    pytest.importorskip("gguf")
+    import gmlx.load.adapter as adapter
+    import gmlx.load.loader as loader
+    from lora_gguf import mint_adapter, mint_base
+
+    base = mint_base(tmp_path / "tied.gguf", tied=True)
+    ad = mint_adapter(tmp_path / "embd.gguf")
+    monkeypatch.setattr(loader, "load_model",
+                        lambda *a, **k: pytest.fail("loaded for a refused adapter"))
+    argv = [base, "--no-mtp", "--adapter", ad, "--prompt", "hi"]
+    assert cli._exit_code(cli.main, argv) == 1
+    err = capsys.readouterr().err
+    assert err.strip().splitlines()[-1] == "error: embd.gguf: " + adapter._EMBD_TIED

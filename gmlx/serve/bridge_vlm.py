@@ -1082,6 +1082,13 @@ def install_gguf_server_bridge() -> None:
             # MTP-registered GGUF (the lossless-oracle case) resolves to None here.
             vlm = _resolve_vlm_spec(model_path)
             mtp = _resolve_mtp_spec(model_path)
+            if vlm is None and adapter_gguf:
+                # Refused from the headers before any build, so an MTP entry
+                # is never built, degraded and rebuilt only to fail again. A
+                # VLM base refuses every adapter on its own.
+                from gmlx.load.adapter import adapter_load_refusal
+                adapter_load_refusal(model_path, adapter_gguf, stream=stream,
+                                     mtp=mtp is not None)
             if vlm is not None and mtp is not None:
                 # VLM x MTP: a resident VLM whose text-only requests speculate. Arm
                 # the drafter-load block (keyed to this GGUF -> the patched

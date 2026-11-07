@@ -875,3 +875,22 @@ def test_the_mtp_loaders_wire_their_target_only_after_the_table_install():
     assert calls["_wire_big_model"] == {("mtp_load.py", "_wire_target")}
     assert calls["_wire_target"] == {("mtp_load.py", "load_mtp_model"),
                                      ("mtp_load.py", "load_vlm_mtp_model")}
+
+
+def test_an_embedding_adapter_on_a_tied_mtp_base_is_refused_before_any_build(
+        installed_bridge, tmp_path, monkeypatch):
+    """The header check runs before the MTP branch, so a tied base is never
+    built, degraded and rebuilt plain to fail again."""
+    pytest.importorskip("gguf")
+    from lora_gguf import mint_adapter, mint_base
+
+    patched, _, serveable_calls = installed_bridge
+    base = mint_base(tmp_path / "tied.gguf", tied=True)
+    ad = mint_adapter(tmp_path / "embd.gguf")
+    serving.register_gguf_mtp(base)
+    degraded = []
+    monkeypatch.setattr(serving, "_degrade_failed_mtp", lambda *a: degraded.append(a))
+    serving.set_build_spec(_resolved_stub(path=base, speculative=True, adapters=(ad,)))
+    with pytest.raises(ValueError, match="output head"):
+        patched(base)
+    assert serveable_calls == [] and degraded == []

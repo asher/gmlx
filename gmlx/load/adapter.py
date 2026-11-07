@@ -357,6 +357,8 @@ def adapter_load_refusal(base_gguf_path: str, adapter_paths, env=None, *,
     ``env``, ``stream`` and ``mtp`` describe the build, for the checks that
     depend on it."""
     for path in adapter_paths or ():
+        if not os.path.isfile(path):
+            continue                       # the load reports a missing file
         why = embedding_refusal(str(path), str(base_gguf_path))
         if why is not None:
             raise ValueError(why)
