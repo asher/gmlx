@@ -180,6 +180,68 @@ def _results(out):
             [r for r in lines if r["event"] == "result"])
 
 
+def test_no_adapter_tensors_are_held_while_the_reference_scores(
+        rig, capsys, monkeypatch):
+    """The adapters are checked before any load, then read again for MODEL,
+    so the reference pass holds none of their tensors."""
+    import gc
+    import weakref
+
+    import gmlx.load.adapter as adapter
+
+    a, b = _adapters(rig["tmp"], "a.gguf", "b.gguf")
+    plans = []
+    real = adapter.load_lora_adapter
+
+    def load_lora(path, **kw):
+        plan = real(path, **kw)
+        plans.append(weakref.ref(plan))
+        return plan
+
+    monkeypatch.setattr(adapter, "load_lora_adapter", load_lora)
+    alive = []
+
+    def load(src, args, slots=()):
+        gc.collect()
+        alive.append((src.path.rsplit("/", 1)[-1],
+                      sum(r() is not None for r in plans)))
+        return _Model(src.path), args
+
+    monkeypatch.setattr(cmd, "_load", load)
+    rc, _, err = _run([*rig["argv"], "--adapter", f"{a}:0.5", "--adapter", b],
+                      capsys)
+    assert rc == 0, err
+    assert len(plans) == 2
+    assert alive == [("ref.gguf", 0), ("model.gguf", 0)]
+
+
+def test_model_load_reads_each_adapter_again_and_refuses_a_changed_file(
+        tmp_path, monkeypatch):
+    import gmlx.load.loader as loader
+    import gmlx.load.adapter as adapter
+
+    (a,) = _adapters(tmp_path, "a.gguf")
+    installed = []
+    monkeypatch.setattr(loader, "load_model",
+                        lambda p: (_Model(p), {}, None))
+    monkeypatch.setattr(adapter, "install_gguf_adapter",
+                        lambda m, c, plan, slot: installed.append(
+                            (plan.path, plan.sha256, slot)))
+    monkeypatch.setattr("gmlx.commands.cli._apply_placement",
+                        lambda ns, m: None)
+    monkeypatch.setattr("gmlx.lora_rows.ensure_rows", lambda n: None)
+    args = cmd.parse_args([str(tmp_path / "m.gguf"), "--text", "t.txt",
+                           "--adapter", a])
+    src = cmd.Source(str(tmp_path / "m.gguf"))
+    slots, _points = cmd.adapter_points(args.adapter, src.path,
+                                        with_bare=False)
+    cmd._load(src, args, slots)
+    assert installed == [(a, slots[0][1], 0)]
+    _adapters(tmp_path, "a.gguf", head=True)
+    with pytest.raises(cmd.Refusal, match="changed"):
+        cmd._load(src, args, slots)
+
+
 def test_without_a_reference_model_bare_is_the_reference(rig, capsys):
     """Only the adapter points score, against MODEL bare, in one load; each
     flag is a point and each distinct file a slot."""

@@ -141,9 +141,10 @@ class Point:
 
 def adapter_points(items, model_path: str, with_bare: bool):
     """``(slots, points)`` for the ``--adapter`` flags: ``slots`` holds
-    ``(path, plan)`` per distinct file in the order first named, read and
+    ``(path, sha256)`` per distinct file in the order first named, read and
     checked against MODEL's architecture; ``points`` holds MODEL bare when
-    ``with_bare``, then one point per flag. Raises Refusal."""
+    ``with_bare``, then one point per flag. The tensors are not kept: the
+    MODEL load reads them again. Raises Refusal."""
     from gmlx.load.adapter import load_lora_adapter
     from gmlx.load.discovery import header_meta
 
@@ -165,7 +166,7 @@ def adapter_points(items, model_path: str, with_bare: bool):
         if heads:
             raise Refusal(f"--adapter {path}: it adapts the output head, which "
                           "gmlx kld scores in float32 without adapters")
-        slots.append((path, plan))
+        slots.append((path, plan.sha256))
     points = [Point(BARE, None, None, ())] if with_bare else []
     for uid, (raw, st) in enumerate(items or (), start=BARE + 1):
         path = os.path.abspath(os.path.expanduser(raw))
@@ -478,12 +479,21 @@ def _load(src: Source, args, slots=()) -> tuple[object, argparse.Namespace]:
         model, config, _tok = load_model(src.path)
     if slots:
         from gmlx import lora_rows
-        from gmlx.load.adapter import install_gguf_adapter
+        from gmlx.load import adapter as lora
+        from gmlx.load.discovery import header_meta
 
+        arch = (header_meta(src.path) or {}).get("arch")
         # Before placement, as run installs its adapters.
         trunk = getattr(model, "language_model", model)
-        for slot, (_path, adapter) in enumerate(slots):
-            install_gguf_adapter(trunk, config, adapter, slot=slot)
+        for slot, (path, sha256) in enumerate(slots):
+            try:
+                plan = lora.load_lora_adapter(path, base_arch=arch)
+            except (OSError, ValueError) as e:
+                raise Refusal(f"--adapter {path}: {e}") from None
+            if plan.sha256 != sha256:
+                raise Refusal(f"--adapter {path}: the file changed after "
+                              "the run started")
+            lora.install_gguf_adapter(trunk, config, plan, slot=slot)
         lora_rows.ensure_rows(len(slots))
     _apply_placement(ns, model)
     return model, ns
