@@ -295,8 +295,6 @@ def serve(monkeypatch):
         if hasattr(obj, attr):
             monkeypatch.setattr(obj, attr, getattr(obj, attr))
     monkeypatch.setattr(_STRUCTURED, "_apply_llguidance_mask", _cpu_mask)
-    # Keyed by id(tokenizer): a freed tokenizer's id can come back.
-    monkeypatch.setattr(_STRUCTURED, "_llg_tokenizer_cache", {})
     monkeypatch.delenv("GMLX_APC_RETIRE_LCP", raising=False)
     tokens = (sp_chat._LAST_GEN_ARGS.set(None),
               sp_chat._LAST_RENDERED_PROMPT.set(None))

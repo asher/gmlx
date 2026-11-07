@@ -95,3 +95,46 @@ def test_grammar_masks_first_token():
     llguidance.numpy.fill_next_token_bitmask(matcher, bitmask, 0)
     n_allowed = int(np.unpackbits(bitmask[0].view(np.uint8)).sum())
     assert 0 < n_allowed < vocab          # grammar forbids most first tokens
+
+
+
+class _Tok:
+    pass
+
+
+def test_tokenizer_at_a_used_id_gets_its_own_llg_tokenizer(monkeypatch):
+    """A tokenizer at the id of a freed tokenizer gets its own llguidance
+    tokenizer, not the freed one's (a reloaded model's grammar vocab). Every
+    tokenizer gets the same id here, so the collision does not depend on the
+    allocator."""
+    import gc
+
+    import llguidance.hf
+
+    from gmlx._vendor.mlx_vlm import structured
+
+    monkeypatch.setattr(structured, "_llg_tokenizer_cache", {})
+    monkeypatch.setattr(structured, "id", lambda obj: 1, raising=False)
+    built = []
+
+    def from_tokenizer(tok):
+        built.append(tok)
+        return object()
+
+    monkeypatch.setattr(llguidance.hf, "from_tokenizer", from_tokenizer)
+
+    def llg(tok):
+        return structured.build_json_schema_logits_processor(
+            tok, SCHEMA).llg_tokenizer
+
+    old = _Tok()
+    old_llg = llg(old)
+    assert llg(old) is old_llg
+    new = _Tok()
+    new_llg = llg(new)
+    assert new_llg is not old_llg
+    assert built == [old, new]
+    del old, built[:]
+    gc.collect()
+    assert llg(new) is new_llg
+    assert built == []

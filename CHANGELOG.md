@@ -132,6 +132,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A `response_format` grammar uses the vocabulary of the loaded tokenizer.
+  After a model reload, it could mask tokens with the old model's vocabulary.
 - A model with a speculative drafter returns logprobs, from the target
   model's verify pass, where the lists came back empty.
 - A greedy request that joins a batch of sampled requests decodes greedily,
