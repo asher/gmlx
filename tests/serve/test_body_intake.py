@@ -220,3 +220,37 @@ def test_a_json_body_that_stops_sending_is_ended_with_a_408(monkeypatch):
         "the request body sent nothing for 0.05 s with 1.0 KiB of it still "
         "to come, so the server ended the request; send it again")
     assert e.value.headers == {"Connection": "close"}
+
+
+def test_a_chunked_form_file_past_the_memory_free_stops_as_it_passes():
+    """An images form with no Content-Length is refused once the bytes
+    arrived pass the memory free, as a Content-Length past it is, before
+    the rest of its file is spooled."""
+    import asyncio
+
+    from starlette.requests import Request
+
+    b = b"gmlxboundary"
+    head = (b"--" + b + b'\r\nContent-Disposition: form-data; name="image";'
+            b' filename="a.png"\r\nContent-Type: image/png\r\n\r\n')
+    free, chunk, total = 4 << 20, 64 << 10, 32 << 20
+    sent = [0]
+
+    async def receive():
+        if sent[0] == 0:
+            sent[0] = len(head)
+            return {"type": "http.request", "body": head, "more_body": True}
+        sent[0] += chunk
+        return {"type": "http.request", "body": b"x" * chunk,
+                "more_body": sent[0] < total}
+    request = Request({"type": "http", "method": "POST",
+                       "path": "/v1/images/edits", "query_string": b"",
+                       "headers": [(b"content-type",
+                                    b"multipart/form-data; boundary=" + b)]},
+                      receive)
+    with pytest.raises(bi.BodyRefused) as e:
+        asyncio.run(bi.read_form_in_ram(request, free))
+    assert e.value.status == 413
+    assert str(e.value).startswith("the request body is over 4.0 MiB, and "
+                                   "4.0 MiB of memory is free"), e.value
+    assert sent[0] <= free + len(head) + chunk

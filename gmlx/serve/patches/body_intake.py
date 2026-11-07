@@ -501,7 +501,8 @@ async def read_form_in_ram(request: Request, free: int | None = None,
     against ``free`` bytes (the pool's figure when None) as they arrive,
     each at its own width (:class:`_TextPrice`), with the files spooled
     beside them; once parsed, with the largest file, which the route reads
-    whole. A Content-Length past the figure is refused before the read."""
+    whole. A Content-Length past the figure is refused before the read,
+    and a body with none once the bytes arrived pass it."""
     from starlette.formparsers import MultiPartParser
     from starlette.requests import ClientDisconnect
 
@@ -550,6 +551,12 @@ async def read_form_in_ram(request: Request, free: int | None = None,
             else:
                 before = files[-1]
                 files[-1] += end - start
+                # The largest file is read whole once parsed: a body
+                # past the memory free is refused as it passes, as its
+                # Content-Length is.
+                got = text.read + sum(files)
+                if free is not None and got > free:
+                    raise _over_free(got, free, False)
                 check(text.held() + spooled(before <= spool < files[-1]))
             super().on_part_data(data, start, end)
 
