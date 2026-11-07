@@ -55,11 +55,13 @@ from gmlx.load import arch_table, catalog, remote  # noqa: E402
 from gmlx.load.catalog import MEMORY_CLASSES, TIERS, Seed  # noqa: E402
 from gmlx.load.discovery import (_classify_meta, declared_base_ids,  # noqa: E402
                                  _drafter_kind, _looks_like_drafter,
-                                 _target_ids, quant_tag)
+                                 _target_ids)
 from gmlx.load.config_synth import supported_arches  # noqa: E402
 from gmlx.load.gguf_meta import read_int, read_string  # noqa: E402
 from gmlx.load.headerscan import scan_bytes  # noqa: E402
-from gmlx.load.preflight import shard_names, strip_shard_suffix  # noqa: E402
+from gmlx.load.preflight import shard_names  # noqa: E402
+from gmlx.load.repo_files import (file_for_quant, is_companion, model_files,  # noqa: E402,F401
+                                  quant_of)
 
 HOST = remote._HF_HOST
 GiB = 1 << 30
@@ -94,10 +96,6 @@ TIER_QUANTS = {
     "xhigh": ("Q8_0", "Q8_K_XL"),
 }
 _SUB4 = re.compile(r"^(?:UD-)?(?:IQ|PTQ|PQ|Q)([123])_")
-# A hyphen-separated token of a file's quant suffix: UD, MTP, a codec
-# (Q4_K_M, IQ3_XXS, PTQ1_0, PQ2_0, Q8_0) or a full-precision type.
-_QTOKEN = re.compile(r"^(UD|MTP|[A-Z]*Q\d[A-Z0-9_]*|BF16|F16|F32|NVFP4)$")
-_COMPANION = re.compile(r"(^mmproj|^mtp-|dflash|dspark|lilicorr|imatrix)", re.I)
 USABLE = ("streams", "resident", "tables_from_file")
 
 
@@ -167,56 +165,8 @@ def scans_for(repo: str, path: str, revision: str, cache: str | None) -> list:
 
 # -- the listing's model files ----------------------------------------------
 
-def is_companion(path: str) -> bool:
-    return bool(_COMPANION.search(os.path.basename(path))) or path.startswith("MTP/")
-
-
 def sub4(quant: str) -> bool:
     return bool(_SUB4.match(quant))
-
-
-def model_files(files: dict) -> dict:
-    """The repo's model files grouped by split set: ``{first shard path:
-    (quant, ud, [shard paths], bytes)}``. Companions and full-precision
-    files are left out."""
-    groups: dict = {}
-    for path, size in files.items():
-        if not path.endswith(".gguf") or is_companion(path):
-            continue
-        stem = strip_shard_suffix(path)
-        g = groups.setdefault(stem, [])
-        g.append((path, size))
-    out = {}
-    for stem, shards in groups.items():
-        shards.sort()
-        quant = quant_of(os.path.basename(stem))
-        if not quant or quant in ("BF16", "F16", "F32"):
-            continue
-        out[shards[0][0]] = (quant, quant.startswith("UD-"), [p for p, _ in shards],
-                             sum(s for _, s in shards))
-    return out
-
-
-def quant_of(basename: str) -> str:
-    """The whole quant suffix of a model file name: the trailing run of
-    quant tokens (``UD-Q4_K_XL``, ``PQ2_0-MTP-Q8_0``), or "" when the name
-    ends in none."""
-    stem = basename[:-len(".gguf")] if basename.endswith(".gguf") else basename
-    tokens = stem.split("-")
-    run: list = []
-    while tokens and _QTOKEN.match(tokens[-1]):
-        run.insert(0, tokens.pop())
-    if not run or not quant_tag(basename):
-        return ""
-    return "-".join(run)
-
-
-def file_for_quant(groups: dict, quant: str) -> str | None:
-    """The split set whose quant suffix is ``quant``, ``UD-`` prefix exact."""
-    for first, (q, _ud, _shards, _n) in groups.items():
-        if q.upper() == quant.upper():
-            return first
-    return None
 
 
 def reads_as_drafter(scan) -> bool:

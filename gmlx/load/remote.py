@@ -434,10 +434,12 @@ def http_get_prefix(url: str, end: int, *,
 
 
 def hf_list_dir(repo: str, path: str, revision: str = "main", *,
-                recursive: bool = True, timeout: float = 30.0) -> list:
+                recursive: bool = True, timeout: float = 30.0,
+                with_sha: bool = False) -> list:
     """List a repo path via the HF tree API. Returns ``[(path, type, size), ...]``
-    where ``type`` is ``"file"`` / ``"directory"``. Raises :class:`RemoteError`.
-    Seam: monkeypatched in tests."""
+    where ``type`` is ``"file"`` / ``"directory"``; ``with_sha`` adds a fourth
+    item, a stored file's sha256 (``None`` for a file kept in git, not LFS).
+    Raises :class:`RemoteError`. Seam: monkeypatched in tests."""
     api = f"{_HF_HOST}/api/models/{repo}/tree/{revision}/{path}".rstrip("/")
     if recursive:
         api += "?recursive=true"
@@ -454,6 +456,9 @@ def hf_list_dir(repo: str, path: str, revision: str = "main", *,
         raise RemoteError(f"network error listing {repo}/{path}: {e.reason}")
     if not isinstance(data, list):
         raise RemoteError(f"unexpected Hugging Face API response for {repo}/{path}")
+    if with_sha:
+        return [(e.get("path", ""), e.get("type", ""), e.get("size", 0),
+                 (e.get("lfs") or {}).get("oid")) for e in data]
     return [(e.get("path", ""), e.get("type", ""), e.get("size", 0)) for e in data]
 
 

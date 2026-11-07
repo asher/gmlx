@@ -353,7 +353,7 @@ def test_pull_split_refuses_on_late_shard_codec(tmp_path, monkeypatch, capsys):
     s2 = _mint(tmp_path / "s2.gguf", arch="llama", codec=GT.TQ1_0)
     _serve_shards(monkeypatch, {"00001-of-00002": s1, "00002-of-00002": s2})
     monkeypatch.setattr(manage, "_download_ref",
-                        lambda ref, dest: pytest.fail("must not download"))
+                        lambda ref, dest, **k: pytest.fail("must not download"))
     rc = manage.cmd_pull(
         ["hf:org/repo/model-00001-of-00002.gguf", "--to", str(tmp_path)])
     assert rc == 1
@@ -367,7 +367,7 @@ def test_pull_out_is_alias_for_to(tmp_path, monkeypatch, capsys):
     s2 = _mint(tmp_path / "s2.gguf", arch="llama", codec=GT.TQ1_0)
     _serve_shards(monkeypatch, {"00001-of-00002": s1, "00002-of-00002": s2})
     monkeypatch.setattr(manage, "_download_ref",
-                        lambda ref, dest: pytest.fail("must not download"))
+                        lambda ref, dest, **k: pytest.fail("must not download"))
     rc = manage.cmd_pull(
         ["hf:org/repo/model-00001-of-00002.gguf", "--out", str(tmp_path)])
     assert rc == 1
@@ -451,7 +451,7 @@ def test_pull_adapter_refusal_omits_arch_reason(tmp_path, monkeypatch, capsys):
     w.close()
     _serve(monkeypatch, p.read_bytes())
     monkeypatch.setattr(manage, "_download_ref",
-                        lambda ref, dest: pytest.fail("must not download"))
+                        lambda ref, dest, **k: pytest.fail("must not download"))
 
     rc = manage.cmd_pull(["hf:org/repo/lora.gguf", "--to", str(tmp_path)])
     err = capsys.readouterr().err
@@ -464,7 +464,7 @@ def test_pull_refuses_unloadable(tmp_path, monkeypatch, capsys):
     _serve(monkeypatch, _mint(tmp_path / "iq.gguf", codec=GT.TQ1_0))
     called = []
     monkeypatch.setattr(manage, "_download_ref",
-                        lambda ref, dest: called.append((ref, dest)) or [])
+                        lambda ref, dest, **k: called.append((ref, dest)) or [])
     rc = manage.cmd_pull(["hf:org/repo/iq.gguf", "--to", str(tmp_path)])
     assert rc == 1
     assert called == []                  # never downloaded
@@ -475,7 +475,7 @@ def test_pull_force_downloads_unloadable(tmp_path, monkeypatch):
     _serve(monkeypatch, _mint(tmp_path / "iq.gguf", codec=GT.TQ1_0))
     called = []
     monkeypatch.setattr(manage, "_download_ref",
-                        lambda ref, dest: called.append((ref, dest)) or ["/x"])
+                        lambda ref, dest, **k: called.append((ref, dest)) or ["/x"])
     rc = manage.cmd_pull(["hf:org/repo/iq.gguf", "--to", str(tmp_path), "--force"])
     assert rc == 0
     assert len(called) == 1
@@ -519,7 +519,7 @@ def test_pull_insufficient_space_refuses(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(manage, "_disk_free", lambda p: 1 * 1024**3)
     called = []
     monkeypatch.setattr(manage, "_download_ref",
-                        lambda ref, dest: called.append(dest) or ["/x"])
+                        lambda ref, dest, **k: called.append(dest) or ["/x"])
     rc = manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(tmp_path)])
     err = capsys.readouterr().err
     assert rc == 1 and called == []
@@ -533,7 +533,7 @@ def test_pull_sufficient_space_proceeds(tmp_path, monkeypatch):
     monkeypatch.setattr(manage, "_disk_free", lambda p: 20 * 1024**3)
     called = []
     monkeypatch.setattr(manage, "_download_ref",
-                        lambda ref, dest: called.append(dest) or ["/x"])
+                        lambda ref, dest, **k: called.append(dest) or ["/x"])
     rc = manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(tmp_path)])
     assert rc == 0 and len(called) == 1
 
@@ -545,7 +545,7 @@ def test_pull_part_file_reduces_need(tmp_path, monkeypatch):
     monkeypatch.setattr(manage, "_disk_free", lambda p: 300)
     called = []
     monkeypatch.setattr(manage, "_download_ref",
-                        lambda ref, dest: called.append(dest) or ["/x"])
+                        lambda ref, dest, **k: called.append(dest) or ["/x"])
     rc = manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(tmp_path)])
     assert rc == 0 and len(called) == 1           # need 200 < 300 free
 
@@ -557,7 +557,7 @@ def test_pull_sharded_space_sums_all_shards(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(manage, "_disk_free", lambda p: 1000)
     called = []
     monkeypatch.setattr(manage, "_download_ref",
-                        lambda ref, dest: called.append(dest) or ["/x"])
+                        lambda ref, dest, **k: called.append(dest) or ["/x"])
     rc = manage.cmd_pull(
         ["hf:org/repo/model-00001-of-00002.gguf", "--to", str(tmp_path)])
     assert rc == 1 and called == []               # 1200 needed, 1000 free
@@ -572,7 +572,7 @@ def test_pull_unknown_size_proceeds(tmp_path, monkeypatch):
     monkeypatch.setattr(manage, "_disk_free", lambda p: 0)
     called = []
     monkeypatch.setattr(manage, "_download_ref",
-                        lambda ref, dest: called.append(dest) or ["/x"])
+                        lambda ref, dest, **k: called.append(dest) or ["/x"])
     rc = manage.cmd_pull(
         ["hf:org/repo/model-00001-of-00002.gguf", "--to", str(tmp_path)])
     assert rc == 0 and len(called) == 1
@@ -584,7 +584,7 @@ def test_pull_force_bypasses_space_check(tmp_path, monkeypatch):
     monkeypatch.setattr(manage, "_disk_free", lambda p: 0)
     called = []
     monkeypatch.setattr(manage, "_download_ref",
-                        lambda ref, dest: called.append(dest) or ["/x"])
+                        lambda ref, dest, **k: called.append(dest) or ["/x"])
     rc = manage.cmd_pull(
         ["hf:org/repo/model.gguf", "--to", str(tmp_path), "--force"])
     assert rc == 0 and len(called) == 1
@@ -1226,7 +1226,7 @@ def test_pull_mmproj_no_force_needed(tmp_path, monkeypatch):
     _serve(monkeypatch, _mint_mmproj(tmp_path / "mmproj.gguf"))
     called = []
     monkeypatch.setattr(manage, "_download_ref",
-                        lambda ref, dest: called.append((ref, dest)) or ["/x"])
+                        lambda ref, dest, **k: called.append((ref, dest)) or ["/x"])
     rc = manage.cmd_pull(["hf:org/repo/mmproj-model-f16.gguf",
                           "--to", str(tmp_path)])
     assert rc == 0
@@ -2146,3 +2146,114 @@ def test_validate_plan_rendering_failure_degrades(tmp_path, monkeypatch, capsys)
     rc = manage.cmd_validate([str(p), "--json"])
     v = json.loads(capsys.readouterr().out)
     assert rc == 0 and v["loadable"] and v["stream"] is None
+
+
+# pull: a copy on disk that is not the repo's current file
+def _like_hf(monkeypatch, content: dict, got: list):
+    """A download seam that behaves as the real one: a file on disk stays,
+    else it is written with ``content[name]``."""
+    import os
+
+    def fake(repo, filename, revision, dest_dir):
+        dest = os.path.join(dest_dir, filename)
+        got.append(filename)
+        if not os.path.exists(dest):
+            with open(dest, "wb") as f:
+                f.write(content[filename])
+        return dest
+    monkeypatch.setattr(manage, "_hf_download", fake)
+
+
+def _sha_listing(monkeypatch, files: dict):
+    """Fake the HF tree listing with each file's size and sha256."""
+    import hashlib
+    monkeypatch.setattr(
+        remote, "hf_list_dir",
+        lambda repo, path, revision="main", **k:
+        [(n, "file", len(b), hashlib.sha256(b).hexdigest()) for n, b in files.items()])
+
+
+def test_pull_replaces_a_copy_whose_size_changed(tmp_path, monkeypatch, capsys):
+    payload = _mint(tmp_path / "m.gguf", codec=GT.Q4_0)
+    _serve(monkeypatch, payload)
+    new = payload + b"\0" * 32
+    _sha_listing(monkeypatch, {"model.gguf": new})
+    got = []
+    _like_hf(monkeypatch, {"model.gguf": new}, got)
+    (tmp_path / "model.gguf").write_bytes(payload)
+    assert manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(tmp_path)]) == 0
+    assert (tmp_path / "model.gguf").read_bytes() == new
+    assert not (tmp_path / "model.gguf.old").exists()
+    io = capsys.readouterr()
+    assert "model.gguf: the copy on disk differs from Hugging Face, downloading the current file" in io.err
+    assert "downloaded 1 file" in io.out
+    # The current copy stays, with no hashing and no second download.
+    monkeypatch.setattr(manage, "_sha256", lambda p: pytest.fail("hashed without --verify"))
+    assert manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(tmp_path)]) == 0
+    assert "differs from Hugging Face" not in capsys.readouterr().err
+    assert (tmp_path / "model.gguf").read_bytes() == new
+
+
+def test_pull_verify_catches_a_change_of_the_same_size(tmp_path, monkeypatch, capsys):
+    payload = _mint(tmp_path / "m.gguf", codec=GT.Q4_0)
+    _serve(monkeypatch, payload)
+    same_size = payload[:-1] + b"\x01"
+    _sha_listing(monkeypatch, {"model.gguf": same_size})
+    _like_hf(monkeypatch, {"model.gguf": same_size}, [])
+    (tmp_path / "model.gguf").write_bytes(payload)
+    # The size check alone keeps it.
+    assert manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(tmp_path)]) == 0
+    assert (tmp_path / "model.gguf").read_bytes() == payload
+    capsys.readouterr()
+    assert manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(tmp_path), "--verify"]) == 0
+    assert (tmp_path / "model.gguf").read_bytes() == same_size
+    assert "the sha256 on disk differs from Hugging Face, downloading" in capsys.readouterr().err
+
+
+def test_a_failed_or_corrupt_replacement_keeps_the_old_copy(tmp_path, monkeypatch):
+    import hashlib
+    old, new = b"old-version", b"the-new-version"
+    sha = hashlib.sha256(new).hexdigest()
+    (tmp_path / "m.gguf").write_bytes(old)
+
+    def offline(repo, filename, revision, dest_dir):
+        raise remote.RemoteError("network down")
+    monkeypatch.setattr(manage, "_hf_download", offline)
+    with pytest.raises(remote.RemoteError, match="network down"):
+        manage._fetch_hf_file("org/r", "m.gguf", "main", str(tmp_path), len(new), sha, False)
+    assert (tmp_path / "m.gguf").read_bytes() == old
+    # A download whose bytes miss the sha256 is refused under --verify.
+    _like_hf(monkeypatch, {"m.gguf": b"corrupt-version"}, [])
+    with pytest.raises(remote.RemoteError, match="after the download"):
+        manage._fetch_hf_file("org/r", "m.gguf", "main", str(tmp_path), len(new), sha, True)
+    assert (tmp_path / "m.gguf").read_bytes() == old
+
+
+def test_a_partial_download_of_another_version_is_not_resumed(tmp_path, monkeypatch):
+    import hashlib
+    new = b"the-new-version"
+    sha = hashlib.sha256(new).hexdigest()
+    seen = {}
+
+    def record(repo, filename, revision, dest_dir):
+        seen["part"] = (tmp_path / "m.gguf.part").exists()
+        (tmp_path / "m.gguf").write_bytes(new)
+        return str(tmp_path / "m.gguf")
+    monkeypatch.setattr(manage, "_hf_download", record)
+    (tmp_path / "m.gguf.part").write_bytes(b"old-ver")
+    (tmp_path / "m.gguf.part.sha256").write_text("0" * 64)
+    manage._fetch_hf_file("org/r", "m.gguf", "main", str(tmp_path), len(new), sha, False)
+    assert seen["part"] is False and not (tmp_path / "m.gguf.part.sha256").exists()
+    # A partial of this version resumes.
+    (tmp_path / "m.gguf").unlink()
+    (tmp_path / "m.gguf.part").write_bytes(b"the-")
+    (tmp_path / "m.gguf.part.sha256").write_text(sha)
+    manage._fetch_hf_file("org/r", "m.gguf", "main", str(tmp_path), len(new), sha, False)
+    assert seen["part"] is True
+
+
+def test_verify_goes_with_a_download_of_a_model_or_a_ref(tmp_path, capsys):
+    assert manage.cmd_pull(["--list", "--verify"]) == 2
+    assert "--list downloads nothing, so --verify does not go with it" in capsys.readouterr().err
+    assert manage.cmd_pull(["z-image-turbo", "--verify", "--to", str(tmp_path)]) == 2
+    assert "--verify goes with a model name or an hf: ref" in capsys.readouterr().err

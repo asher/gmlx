@@ -158,21 +158,28 @@ def _build_report(ref: remote.Ref, *, arch: str | None = None,
     return report, len(urls), scans
 
 
+def _repo_files(repo: str, revision: str, listing_cache: dict) -> dict | None:
+    """``{path_in_repo: (bytes, sha256 or None)}`` for a repo at ``revision``
+    (cached per repo+revision), or ``None`` when the listing failed."""
+    key = (repo, revision)
+    if key not in listing_cache:
+        try:
+            listing_cache[key] = {
+                e[0]: (e[2], e[3] if len(e) > 3 else None)
+                for e in remote.hf_list_dir(repo, "", revision, with_sha=True)
+                if e[1] == "file"}
+        except remote.RemoteError:
+            listing_cache[key] = None
+    return listing_cache[key]
+
+
 def _repo_file_sizes(ref: remote.Ref, listing_cache: dict) -> dict | None:
     """``{path_in_repo: bytes}`` for an hf ref's repo (cached per repo+revision),
     or ``None`` when the listing failed / the ref is not hf."""
     if ref.kind != "hf":
         return None
-    key = (ref.repo, ref.revision)
-    if key not in listing_cache:
-        try:
-            listing_cache[key] = {
-                p: size for p, typ, size in
-                remote.hf_list_dir(ref.repo, "", ref.revision)
-                if typ == "file"}
-        except remote.RemoteError:
-            listing_cache[key] = None
-    return listing_cache[key]
+    files = _repo_files(ref.repo, ref.revision, listing_cache)
+    return None if files is None else {p: size for p, (size, _sha) in files.items()}
 
 
 def _ref_size_bytes(ref: remote.Ref, report: remote.HeaderReport) -> int | None:
@@ -1013,12 +1020,89 @@ def _model_dir_dest(config_path: str | None = None) -> str:
     return os.path.expanduser(os.path.expandvars(cfg.model_dirs[0]))
 
 
-def _download_ref(ref: remote.Ref, dest_dir: str) -> list[str]:
+# Files a pull downloaded again because the copy on disk was out of date.
+_replaced: set = set()
+
+
+def _sha256(path: str) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(8 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _out_of_date(path: str, size: int | None, sha: str | None, verify: bool) -> str | None:
+    """Why the file at ``path`` is not the repo's current file, or None."""
+    if size is not None and os.path.getsize(path) != size:
+        return "the copy on disk differs from Hugging Face"
+    if verify and sha:
+        print(f"  {os.path.basename(path)}: checking sha256", file=sys.stderr)
+        if _sha256(path) != sha:
+            return "the sha256 on disk differs from Hugging Face"
+    return None
+
+
+def _fetch_hf_file(repo: str, name: str, revision: str, dest_dir: str,
+                   size: int | None, sha: str | None, verify: bool) -> str:
+    """Download one repo file unless the copy on disk is current. An out of
+    date copy stays in place until the new one is complete, so a failed
+    download leaves the model that worked. A partial download of another
+    version of the file is discarded instead of resumed."""
+    dest = os.path.join(dest_dir, name)
+    old = None
+    if os.path.isfile(dest):
+        why = _out_of_date(dest, size, sha, verify)
+        if why is None:
+            return _hf_download(repo, name, revision, dest_dir)    # returns the file in place
+        print(f"  {name}: {why}, downloading the current file", file=sys.stderr)
+        old = dest + ".old"
+        os.replace(dest, old)
+    part, mark = dest + ".part", dest + ".part.sha256"
+    if sha:
+        try:
+            with open(mark) as f:
+                marked = f.read().strip()
+        except OSError:
+            marked = None
+        if marked not in (None, sha) and os.path.exists(part):
+            os.remove(part)
+        os.makedirs(os.path.dirname(mark), exist_ok=True)
+        with open(mark, "w") as f:
+            f.write(sha)
+    try:
+        got = _hf_download(repo, name, revision, dest_dir)
+        if verify and sha and _sha256(got) != sha:
+            os.remove(got)
+            raise remote.RemoteError(f"{name} does not match its sha256 on Hugging Face "
+                                     "after the download; pull again")
+    except BaseException:
+        if old is not None and not os.path.exists(dest):
+            os.replace(old, dest)
+        raise
+    if os.path.exists(mark):
+        os.remove(mark)
+    if old is not None:
+        os.remove(old)
+        _replaced.add(got)
+    return got
+
+
+def _download_ref(ref: remote.Ref, dest_dir: str, *, files: dict | None = None,
+                  verify: bool = False) -> list[str]:
+    """Download every shard of ``ref`` into ``dest_dir``. ``files`` is the
+    repo listing, ``{path: (bytes, sha256)}``: a copy on disk whose size
+    differs is downloaded again, and ``verify`` also checks each file's
+    sha256. Without a listing a file on disk is kept."""
     os.makedirs(dest_dir, exist_ok=True)
     out: list[str] = []
     if ref.kind == "hf":
         for name in _shard_names(ref.path_in_repo):
-            out.append(_hf_download(ref.repo, name, ref.revision, dest_dir))
+            size, sha = (files or {}).get(name, (None, None))
+            out.append(_fetch_hf_file(ref.repo, name, ref.revision, dest_dir,
+                                      size, sha, verify))
     elif ref.kind == "url":
         names = _shard_names(ref.filename)
         if len(names) == 1:                  # keep the original URL (query intact)
@@ -1265,7 +1349,8 @@ def _check_pull_flags(a, kind: str) -> str | None:
     remote_only = [f for attr, f in (("hf_source", "--hf-source"), ("max_mb", "--max-mb"))
                    if getattr(a, attr) is not None]
     downloads = [f for attr, f in (("to", "--to"), ("force", "--force"),
-                                   ("no_register", "--no-register")) if getattr(a, attr)]
+                                   ("no_register", "--no-register"), ("verify", "--verify"))
+                 if getattr(a, attr, False)]
     quant = ["--quant"] if a.quant else []
 
     def join(flags):
@@ -1297,6 +1382,8 @@ def _check_pull_flags(a, kind: str) -> str | None:
     if kind == "image":
         if catalog_only:
             return f"{join(catalog_only)} {verb(catalog_only)} with a model name, not an image model name"
+        if getattr(a, "verify", False) and not a.list:
+            return "--verify goes with a model name or an hf: ref, not an image model name"
         if a.list:
             bad = quant + image_only + downloads
             if bad:
@@ -1386,7 +1473,8 @@ def _refusal(v: dict, force: bool) -> str | None:
 
 
 def _pull_refs(refs: list, a, base_dir: str, nest: bool, *, prechecked=None,
-               report: bool = True, disk_checked: bool = False) -> tuple:
+               report: bool = True, disk_checked: bool = False,
+               listing_cache: dict | None = None) -> tuple:
     """Check each ref's header, then download it into its folder under
     ``base_dir``. ``prechecked`` maps a ref's text to the ``(ref, report,
     n_shards, scans)`` an earlier header read gave, which skips the read
@@ -1395,8 +1483,9 @@ def _pull_refs(refs: list, a, base_dir: str, nest: bool, *, prechecked=None,
     check. Returns ``(all_ok, downloaded paths)``."""
     all_ok = True
     downloaded: list[str] = []
-    listing_cache: dict = {}
+    listing_cache = {} if listing_cache is None else listing_cache
     prechecked = prechecked or {}
+    _replaced.clear()
     for raw_ref in refs:
         fresh = raw_ref.raw not in prechecked
         try:
@@ -1442,7 +1531,10 @@ def _pull_refs(refs: list, a, base_dir: str, nest: bool, *, prechecked=None,
                     all_ok = False
                     continue
         try:
-            downloaded += _download_ref(ref, dest_dir)
+            files = (_repo_files(ref.repo, ref.revision, listing_cache)
+                     if ref.kind == "hf" else None)
+            downloaded += _download_ref(ref, dest_dir, files=files,
+                                        verify=bool(getattr(a, "verify", False)))
         except (remote.RemoteError, OSError) as e:
             print(f"error: download failed: {e}", file=sys.stderr)
             all_ok = False
@@ -1460,7 +1552,7 @@ def _finish_pull(downloaded: list, a, config_path: str | None, *, pairs=None, pr
 
     if not downloaded:
         return Registered()
-    n_old = sum(p in present for p in downloaded)
+    n_old = sum(p in present and p not in _replaced for p in downloaded)
     n_new = len(downloaded) - n_old
     if n_new == 0:
         print(f"\n{n_old} file{plural_s(n_old)} already on disk:")
@@ -1745,6 +1837,17 @@ def _run_plan(plan, a, dest: Destination, box) -> int:
         if m.license_detail:
             print(m.license_detail)
         print(pc.plan_command(plan, box))
+    listing_cache: dict = {}
+
+    def listing(repo):
+        files = _repo_files(repo, "main", listing_cache)
+        return None if files is None else {p: size for p, (size, _sha) in files.items()}
+
+    try:
+        plan = pc.live_plan(plan, listing)
+    except pc.GoneFromRepo as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     status, prechecked = _confirm_plan(plan, a, dest, box)
     if status is not None:
         return status
@@ -1759,7 +1862,7 @@ def _run_plan(plan, a, dest: Destination, box) -> int:
     wanted = [p for p in pairs] + [v for d in pairs.values() for k, v in d.items() if k != "alias"]
     present = frozenset(p for p in wanted if os.path.isfile(p))
     ok, downloaded = _pull_refs(refs, a, dest.base_dir, dest.nest, prechecked=prechecked,
-                                report=False, disk_checked=True)
+                                report=False, disk_checked=True, listing_cache=listing_cache)
     reg = _finish_pull(downloaded, a, dest.config_path, pairs=pairs, present=present)
     if ok:
         _print_run_hint(plan, dest, reg, box)
@@ -2126,6 +2229,11 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                     help="Download even if the header check says it won't load, "
                          "the disk-space check fails, or this chip does not "
                          "run the image model.")
+    ap.add_argument("--verify", action="store_true",
+                    help="Check each file's sha256 against Hugging Face, the files "
+                         "already on disk too, and download again any that differ. "
+                         "Without it, a file on disk is downloaded again only when "
+                         "its size changed.")
     ap.add_argument("--hf-source", default=None,
                     help="Treat the arch as loadable with this config override.")
     ap.add_argument("--max-mb", type=int, default=None,

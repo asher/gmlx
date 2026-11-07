@@ -588,9 +588,10 @@ def test_the_picker_gets_the_chat_groups_then_the_image_group_and_its_choice_run
     assert label.startswith("room for ~") and note == ""
     flashy = groups[2].rows[0]
     assert seen["kw"]["rung_label"](flashy, flashy.rungs[0], ()) == ("from SSD, slow", "")
-    # The footer reads the disk live; the fake download has written 8-byte files by now.
+    # The footer reads the disk live. The fake download wrote 4-byte files,
+    # not the recorded sizes, so they count as other versions to replace.
     footer = seen["kw"]["footer"](dense, dense.rungs[1], ("vision",))
-    assert footer[0].startswith("Download 16.2 GB (8 B already on disk)   free disk")
+    assert footer[0].startswith("Download 16.2 GB   free disk")
     assert footer[1] == "gmlx pull dense --no-drafter"
     assert len(downloads) == 3 and "run it:  gmlx chat dense" in capsys.readouterr().out
 
@@ -853,3 +854,20 @@ def test_pull_ram_gb_reads_the_catalog_as_another_mac(cat, monkeypatch, capsys):
     monkeypatch.setenv("GMLX_PULL_RAM_GB", "0")
     assert manage.cmd_pull(["dense", "--list"]) == 2
     assert "not a whole number" in capsys.readouterr().err
+
+
+def test_a_named_pull_takes_a_quant_the_repo_split_into_new_files(cat, monkeypatch, capsys):
+    cfg, lib, downloads = cat
+    split = ["UD-Q4_K_M/Model-UD-Q4_K_M-00001-of-00002.gguf",
+             "UD-Q4_K_M/Model-UD-Q4_K_M-00002-of-00002.gguf"]
+    monkeypatch.setattr(remote, "hf_list_dir", lambda repo, path, rev="main", **k: [
+        (split[0], "file", 8 * GiB, None), (split[1], "file", 8 * GiB, None)])
+    assert manage.cmd_pull(["dense", "--config", str(cfg), "--no-vision", "--no-drafter"]) == 0
+    assert downloads == [("org/dense", split[0], "main"), ("org/dense", split[1], "main")]
+    # A quant gone from main stops before the download and says what to do.
+    downloads.clear()
+    monkeypatch.setattr(remote, "hf_list_dir", lambda repo, path, rev="main", **k: [
+        ("Model-Q8_0.gguf", "file", 1, None)])
+    assert manage.cmd_pull(["dense", "--config", str(cfg), "--no-vision", "--no-drafter"]) == 1
+    assert "has no UD-Q4_K_M file at main now (it has: Q8_0)" in capsys.readouterr().err
+    assert downloads == []

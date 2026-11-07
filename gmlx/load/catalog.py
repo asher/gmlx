@@ -24,7 +24,7 @@ from __future__ import annotations
 import difflib
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 GiB = 1 << 30
 K = 1024
@@ -1044,6 +1044,52 @@ def rung_ref(m: Model, r: Rung) -> str:
     return f"hf:{m.repo}/{r.path}"
 
 
+class GoneFromRepo(Exception):
+    """A file the plan downloads is not in its repo at main any more."""
+
+
+def live_plan(plan: PullPlan, listing) -> PullPlan:
+    """``plan`` with its files as the repos hold them at main now.
+    ``listing(repo)`` gives ``{path: bytes}``, or None when the repo could
+    not be listed, which keeps the recorded files. The quant is found by
+    its recorded path, else by the same name split into another number of
+    shards, else as the only file set of that quant; sizes come from the
+    listing. Raises :class:`GoneFromRepo` when a file is not there."""
+    from gmlx.load.repo_files import find_recorded, model_files
+
+    m, rung = plan.model, plan.rung
+    files = listing(m.repo)
+    if files is not None:
+        groups = model_files(files)
+        first = find_recorded(groups, rung.path, rung.quant)
+        if first is None:
+            have = ", ".join(sorted({q for q, *_rest in groups.values()})) or "no model files"
+            raise GoneFromRepo(f"{m.repo} has no {rung.quant} file at main now (it has: {have}); "
+                               "pick another --quant")
+        rung = replace(rung, path=first, bytes=groups[first][3])
+        if plan.mmproj and m.mmproj:
+            if m.mmproj not in files:
+                raise GoneFromRepo(f"{m.repo} has no {m.mmproj} at main now; pass --no-vision")
+            m = replace(m, mmproj_bytes=files[m.mmproj])
+    d = m.drafter
+    if plan.drafter and d is not None:
+        dfiles = files if d.repo == m.repo else listing(d.repo)
+        if dfiles is not None:
+            if d.file not in dfiles:
+                raise GoneFromRepo(f"{d.repo} has no {d.file} at main now; pass --no-drafter")
+            m = replace(m, drafter=replace(d, bytes=dfiles[d.file]))
+    a = m.asr
+    if a is not None:
+        afiles = listing(a.repo)
+        if afiles is not None:
+            if a.file not in afiles:
+                raise GoneFromRepo(f"{a.repo} has no {a.file} at main now")
+            m = replace(m, asr=replace(a, bytes=afiles[a.file]))
+    m = replace(m, rungs=tuple(sorted((rung if r == plan.rung else r for r in m.rungs),
+                                      key=lambda r: r.bytes)))
+    return replace(plan, model=m, rung=rung)
+
+
 def plan_refs(plan: PullPlan) -> list:
     """The ``hf:`` refs a plan downloads: the model, then its add-ons."""
     m = plan.model
@@ -1114,6 +1160,9 @@ def local_state(plan: PullPlan, base_dir: str, nest: bool) -> tuple:
                 complete = False
                 if os.path.isfile(p + ".part"):
                     have += os.path.getsize(p + ".part")
+        if complete and total and have != total:
+            # A copy of another size is another version: a pull replaces it.
+            have, complete = 0, False
         have = min(have, total) if total else have
         per_ref[ref] = (have, total, complete)
         on_disk += have

@@ -531,13 +531,18 @@ def test_plan_refs_pairs_bytes_and_local_state(tmp_path):
     on, remaining, per_ref = catalog.local_state(plan, str(tmp_path), True)
     assert (on, remaining) == (0, catalog.plan_bytes(plan))
     assert all(v == (0, n, False) for v, n in zip(per_ref.values(), (G(15.33), G(0.86), G(1.92))))
-    # A full tower and a partial model.
+    # A tower of another size is another version, so it is not on disk.
     (tmp_path / "org__dense").mkdir()
-    (tmp_path / "org__dense" / "mmproj-F16.gguf").write_bytes(b"x" * 1000)
+    tower = tmp_path / "org__dense" / "mmproj-F16.gguf"
+    tower.write_bytes(b"x" * 1000)
+    assert catalog.local_state(plan, str(tmp_path), True)[2][refs[1]] == (0, G(0.86), False)
+    # A full tower (sparse, so the test writes nothing) and a partial model.
+    with open(tower, "r+b") as f:
+        f.truncate(G(0.86))
     (tmp_path / "org__dense" / "Model-UD-Q4_K_M.gguf.part").write_bytes(b"y" * 500)
     on, remaining, per_ref = catalog.local_state(plan, str(tmp_path), True)
-    assert on == 1500 and remaining == catalog.plan_bytes(plan) - 1500
-    assert per_ref[refs[1]] == (1000, G(0.86), True)
+    assert on == G(0.86) + 500 and remaining == catalog.plan_bytes(plan) - on
+    assert per_ref[refs[1]] == (G(0.86), G(0.86), True)
     assert per_ref[refs[0]] == (500, G(15.33), False)
 
 
@@ -903,3 +908,46 @@ def test_seed_figures_on_real_boxes():
         for name in picks:
             m = catalog.model(name)
             assert any(catalog.rung_state(m, r, box(cls)) == catalog.RESIDENT for r in m.rungs), (cls, name)
+
+
+def test_a_recorded_quant_is_found_again_when_the_repo_renames_it():
+    from gmlx.load.repo_files import find_recorded, model_files
+    old = "UD-IQ4_XS/M-UD-IQ4_XS-00001-of-00003.gguf"
+    resplit = model_files({"UD-IQ4_XS/M-UD-IQ4_XS-00001-of-00004.gguf": 1,
+                           "UD-IQ4_XS/M-UD-IQ4_XS-00002-of-00004.gguf": 1,
+                           "Q8_0/M-Q8_0-00001-of-00002.gguf": 1, "Q8_0/M-Q8_0-00002-of-00002.gguf": 1})
+    assert find_recorded(resplit, old, "UD-IQ4_XS") == "UD-IQ4_XS/M-UD-IQ4_XS-00001-of-00004.gguf"
+    # The same path; another name with the only file of the quant; gone; two candidates.
+    same = model_files({"M-Q4_0.gguf": 1})
+    assert find_recorded(same, "M-Q4_0.gguf", "Q4_0") == "M-Q4_0.gguf"
+    assert find_recorded(model_files({"N-Q4_0.gguf": 1}), "M-Q4_0.gguf", "Q4_0") == "N-Q4_0.gguf"
+    assert find_recorded(same, "M-Q8_0.gguf", "Q8_0") is None
+    two = model_files({"M-AD-Q4_K_M.gguf": 1, "M-Q4_K_M.gguf": 1})
+    assert find_recorded(two, "M-AD-Q4_K_M.gguf", "Q4_K_M") == "M-AD-Q4_K_M.gguf"
+    assert find_recorded(two, "X-Q4_K_M.gguf", "Q4_K_M") is None
+
+
+def test_a_live_plan_downloads_the_files_main_holds_now():
+    plan = catalog.plan_for(DENSE, box(32))
+    assert plan.rung.quant == "UD-Q4_K_M" and plan.mmproj and plan.drafter
+    split = ["UD-Q4_K_M/Model-UD-Q4_K_M-00001-of-00002.gguf",
+             "UD-Q4_K_M/Model-UD-Q4_K_M-00002-of-00002.gguf"]
+    repos = {"org/dense": {split[0]: G(8), split[1]: G(8), "mmproj-F16.gguf": G(0.9)},
+             "org/drafter": {"drafter-Q8_0.gguf": G(2)}}
+    live = catalog.live_plan(plan, repos.get)
+    assert live.rung.path == split[0] and live.rung.bytes == G(16)
+    assert live.model.mmproj_bytes == G(0.9) and live.model.drafter.bytes == G(2)
+    assert catalog.plan_refs(live)[0] == f"hf:org/dense/{split[0]}"
+    assert live.rung in live.model.rungs and plan.rung not in live.model.rungs
+    # A repo that could not be listed keeps the recorded files.
+    assert catalog.live_plan(plan, lambda repo: None) == plan
+    # A quant, tower or drafter gone from main is an error that says what to do.
+    gone = {**repos, "org/dense": {"Model-Q8_0.gguf": 1, "mmproj-F16.gguf": 1}}
+    with pytest.raises(catalog.GoneFromRepo, match=r"no UD-Q4_K_M file at main now \(it has: Q8_0\)"):
+        catalog.live_plan(plan, gone.get)
+    no_tower = {**repos, "org/dense": {"Model-UD-Q4_K_M.gguf": 1}}
+    with pytest.raises(catalog.GoneFromRepo, match="--no-vision"):
+        catalog.live_plan(plan, no_tower.get)
+    no_drafter = {**repos, "org/drafter": {}}
+    with pytest.raises(catalog.GoneFromRepo, match="--no-drafter"):
+        catalog.live_plan(plan, no_drafter.get)
