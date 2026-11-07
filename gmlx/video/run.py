@@ -212,7 +212,9 @@ def decode_and_mux(xv, xa, *, video_vae: Callable, audio_vae: Callable,
             d = os.path.expanduser(frames_dir)
             os.makedirs(d, exist_ok=True)
             if lock_frames:
-                held.enter_context(io.frames_lock(d, log))
+                said = None if log is None else (
+                    lambda line: log(f"[video] {line}"))
+                held.enter_context(io.frames_lock(d, said))
         # Loaded once the folder is held: a run waiting on it holds no model.
         vae = video_vae()
         try:

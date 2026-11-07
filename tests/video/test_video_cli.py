@@ -490,7 +490,7 @@ def test_a_shorter_clip_leaves_no_frames_of_the_one_before(stubbed,
 
 
 def test_a_second_run_on_a_frames_folder_waits_for_the_first(
-        stubbed, tmp_path, monkeypatch):
+        stubbed, tmp_path, monkeypatch, capsys):
     """A run whose frames folder another run is writing waits for it to
     end before it clears a frame, so the first run's frames and part
     files stay whole, and before its video VAE loads, so it holds no
@@ -545,6 +545,8 @@ def test_a_second_run_on_a_frames_folder_waits_for_the_first(
         t.join(30)
     assert not t.is_alive() and rc == [0]
     assert loaded == ["h3_audio", "h3"]
+    assert (f"[video] waiting for another run writing frames to {frames}"
+            in capsys.readouterr().err)
     assert sorted(p.name for p in frames.iterdir()) == sorted([
         "audio.wav", *(f"frame_{i:06d}.png" for i in range(1, 6))])
 
