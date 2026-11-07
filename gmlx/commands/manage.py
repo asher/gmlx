@@ -2215,13 +2215,16 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
 
 
 # rm - delete a model's files and its config entry
-def _try_resolve(p, model_dirs) -> str | None:
-    """resolve_path that returns None instead of raising on a miss."""
+def _try_resolve(p, model_dirs, *, cwd: bool = True) -> str | None:
+    """resolve_path that returns None instead of raising on a miss. A
+    file rm deletes resolves with ``cwd`` False: a relative path whose
+    file is gone from model_dirs is missing, never a file of its name in
+    the folder rm runs from."""
     if not p:
         return None
     from gmlx.config import resolve_path
     try:
-        return resolve_path(p, model_dirs)
+        return resolve_path(p, model_dirs, cwd=cwd)
     except Exception:                        # noqa: BLE001 - missing is fine here
         return None
 
@@ -2304,7 +2307,7 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
             notes.append("path is an hf: cache ref - the cached file stays "
                          "(the HF cache manages its own blobs)")
         else:
-            main = _try_resolve(m.path, cfg.model_dirs)
+            main = _try_resolve(m.path, cfg.model_dirs, cwd=False)
             if main is None:
                 notes.append(f"model file not found ({m.path}) - removing "
                              "the config entry only")
@@ -2316,7 +2319,7 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
                             ("adapter", m.adapter)):
             if not comp or str(comp).startswith("hf:"):
                 continue
-            rp = _try_resolve(comp, cfg.model_dirs)
+            rp = _try_resolve(comp, cfg.model_dirs, cwd=False)
             if rp is None:
                 continue
             if _file_key(rp) in ref_paths:
@@ -2651,7 +2654,7 @@ def _rm_image(a, cfg, cfg_path, im, disc, images=(), *,
         if chat:
             notes.append(f"encoder {im.encoder} is a chat model; it stays")
         for label, p in parts:
-            rp = _try_resolve(p, cfg.model_dirs)
+            rp = _try_resolve(p, cfg.model_dirs, cwd=False)
             if rp is None:
                 continue
             if _file_key(rp) in refs:
@@ -2725,7 +2728,7 @@ def _rm_video(a, cfg, cfg_path, vm, disc, images=()) -> int:
                          ("encoder_mmproj", vm.encoder_mmproj),
                          ("vae", vm.vae), ("audio_vae", vm.audio_vae),
                          ("tiny_vae", vm.tiny_vae)):
-            rp = _try_resolve(p, cfg.model_dirs)
+            rp = _try_resolve(p, cfg.model_dirs, cwd=False)
             if rp is None:
                 continue
             if _file_key(rp) in refs:

@@ -1598,6 +1598,35 @@ def test_rm_keeps_a_file_another_entry_names_in_another_case(images, capsys,
     assert "kept: another model" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("kind, entry", [("chat", "m2"), ("image", "zit"),
+                                         ("video", "h3")])
+def test_rm_never_takes_a_file_of_the_name_from_the_cwd(images, capsys,
+                                                        monkeypatch, tmp_path,
+                                                        kind, entry):
+    """An entry whose file is gone from model_dirs is removed with its
+    file reported missing, and a file of that name in the folder rm runs
+    from stays."""
+    lib, cfg = images
+    text = cfg.read_text()
+    if kind == "chat":
+        text = text.replace("models:\n", "models:\n  m2:\n"
+                            "    path: m2.gguf\n", 1)
+    elif kind == "video":
+        text += ("video_models:\n  h3:\n    path: h3.gguf\n"
+                 "    encoder: own.gguf\n    vae: v.safetensors\n"
+                 "    audio_vae: a.safetensors\n")
+    cfg.write_text(text)
+    (lib / f"{entry}.gguf").unlink(missing_ok=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / f"{entry}.gguf").write_bytes(b"mine")
+    monkeypatch.chdir(work)
+    assert manage.cmd_rm([entry, "--config", str(cfg), "--yes"]) == 0
+    assert (work / f"{entry}.gguf").read_bytes() == b"mine"
+    assert entry not in {**_cfg(cfg).models, **_cfg(cfg).image_models,
+                         **_cfg(cfg).video_models}
+
+
 def test_rm_of_an_image_model_keeps_what_others_use(images, capsys):
     lib, cfg = images
     assert manage.cmd_rm(["qt", "--config", str(cfg), "--yes"]) == 0

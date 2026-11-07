@@ -76,8 +76,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A fraction in a config key that takes a whole number, such as `port` or
   `max_queue`, now fails at startup naming the key, where it was cut down.
-- `gmlx rm` keeps a file another model names with other letter case, where
-  it deleted the file they share.
+- `gmlx rm` keeps a file another model names in other letter case, and a file
+  in the current folder named as a missing model file, where it deleted them.
 - `gmlx image --save-latent` writes the path given, making its folder, where it
   added .npz, failed after the run in a new folder, or left a broken file.
 - Distillation's pinned day renders on transformers 5.22, where a template that

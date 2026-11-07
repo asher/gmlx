@@ -1348,13 +1348,15 @@ class ResolvedVideoModel:
 
 
 # Path resolution
-def resolve_path(p: str | None, model_dirs: list[str]) -> str | None:
+def resolve_path(p: str | None, model_dirs: list[str], *,
+                 cwd: bool = True) -> str | None:
     """Resolve a model/mmproj/draft path. ``None`` passes through. An
     ``hf:<org>/<repo>/<file.gguf>[@rev]`` ref resolves to its file in the **local**
     Hugging Face cache (never the network). An absolute or ``~``/``$VAR`` path is
     expanded and returned as-is; a bare/relative path is searched against
-    ``model_dirs`` in order (first existing match wins). A miss raises a
-    :class:`ConfigError` listing the roots searched (or the `pull` fix for an hf ref)."""
+    ``model_dirs`` in order (first existing match wins), then, with ``cwd``,
+    against the working directory. A miss raises a :class:`ConfigError`
+    listing the roots searched (or the `pull` fix for an hf ref)."""
     if p is None:
         return None
     if isinstance(p, str) and p.startswith("hf:"):
@@ -1369,7 +1371,7 @@ def resolve_path(p: str | None, model_dirs: list[str]) -> str | None:
             return os.path.abspath(cand)
     # Last resort: relative to cwd (lets a bare run work without model_dirs); only if
     # it exists, else report the misses so the user knows where we looked.
-    if os.path.exists(expanded):
+    if cwd and os.path.exists(expanded):
         return os.path.abspath(expanded)
     searched = roots or ["<no model_dirs set>"]
     raise MissingModelFile(
