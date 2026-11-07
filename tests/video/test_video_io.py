@@ -164,6 +164,8 @@ def test_a_real_mux_writes_an_output_named_as_an_option_or_a_protocol(
         tmp_path, monkeypatch, name):
     """A relative output that starts with "-" or holds a ":" is a file to
     ffmpeg, as --output keeps it relative."""
+    # A real ffmpeg: a stand-in cannot tell an option from a path, so only
+    # ffmpeg's own argv parsing shows the file: prefix working.
     try:
         ff = io.probe()
     except io.FfmpegError as e:
@@ -213,6 +215,8 @@ def _rgb(ffmpeg, path, w, h) -> np.ndarray:
 
 def test_a_guide_named_as_an_option_or_a_protocol_is_read(ffmpeg, tmp_path,
                                                          monkeypatch):
+    # A real ffmpeg: a stand-in cannot tell an option from a path, so only
+    # ffmpeg's own argv parsing shows the file: prefix working.
     monkeypatch.chdir(tmp_path)
     _make(ffmpeg, "-f", "lavfi", "-i", "testsrc=size=64x48:rate=30", "-t",
           "1", "-pix_fmt", "yuv420p", "file:-take:2.mp4")
