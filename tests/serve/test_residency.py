@@ -719,7 +719,7 @@ def test_warn_if_batch_unsafe_fires_once_for_gemma2(monkeypatch, caplog, capsys)
         assert out.err == "" and out.out == ""
 
 
-@pytest.mark.parametrize("name", ["residency", "residency_types", "residency_build", "residency_workers", "residency_teardown", "residency_lora"])
+@pytest.mark.parametrize("name", ["residency", "residency_types", "residency_build", "residency_workers", "residency_teardown", "residency_lora", "residency_pool"])
 def test_module_annotations_resolve(name):
     """Module-level forward-ref unions must quote the whole union
     (ContextVar["_Entry | None"], not ContextVar["_Entry" | None]) or any
@@ -1805,7 +1805,7 @@ def test_failed_build_is_torn_down_before_the_lock_drops(monkeypatch):
     live memory, and the exception keeps its type and message."""
     import pytest
 
-    from gmlx.serve import residency as R
+    from gmlx.serve import residency_pool as R
 
     proxy, pool, teardowns = make_pool(100, {"/m.gguf": 10})
     stock_get = pool._stock_get
@@ -1837,7 +1837,7 @@ def test_failed_build_of_a_registry_cache_is_torn_down(monkeypatch):
     import pytest
     from gmlx._vendor.mlx_vlm.server.runtime import ModelCacheRegistry
 
-    from gmlx.serve import residency as R
+    from gmlx.serve import residency_pool as R
 
     proxy, pool, teardowns = make_pool(100, {"/m.gguf": 10})
     stock_get = pool._stock_get
