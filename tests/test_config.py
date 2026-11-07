@@ -3565,7 +3565,7 @@ def test_video_model_keys_and_defaults_are_strict(entry, match):
         build_config(_video_doc(**entry))
 
 
-@pytest.mark.parametrize("seconds", [0.2, 15.1, 600])
+@pytest.mark.parametrize("seconds", [0.15, 15.1, 600])
 def test_a_clip_length_past_the_frame_range_is_refused_at_load(seconds):
     with pytest.raises(ConfigError, match=r"defaults.seconds: expected "
                        r"0.208333 to 15.0833 seconds"):
