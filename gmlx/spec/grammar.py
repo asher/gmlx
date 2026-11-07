@@ -26,15 +26,27 @@ class SpecGrammar:
     ``active`` is False while the model thinks: the grammar constrains the
     answer, so it starts on the token after ``gate`` opens (an
     ``AnswerGate``, the stock ``ThinkingAwareLogitsProcessor`` contract).
+    ``maybe`` (a start marker's ids) is that wrapper's maybe state: the
+    first position also allows the first start token, which, when the
+    grammar refuses it, opens a block whose rest is forced.
     """
 
     def __init__(self, matcher, *, vocab_size: int, active: bool = True,
-                 gate=None):
+                 gate=None, maybe=None):
         self.matcher = matcher
         self.words = (int(vocab_size) + 31) // 32
         self.active = bool(active)
         self.gate = gate
+        self.maybe = tuple(int(t) for t in maybe) if maybe else None
+        self.force: list[int] = []
         self.started = False
+
+    def _accepts(self, token: int) -> bool:
+        import llguidance.numpy as llg_np
+
+        row = np.full((1, self.words), -1, dtype=np.int32)
+        llg_np.fill_next_token_bitmask(self.matcher, row, 0)
+        return _allowed(row[0], token)
 
     def start(self, token: int) -> None:
         """Commit the first sampled token. A rebuilt round loop restarts
@@ -48,6 +60,22 @@ class SpecGrammar:
         m = self.matcher
         for t in tokens:
             t = int(t)
+            if self.maybe is not None:
+                start, self.maybe = self.maybe, None
+                if t == start[0] and not self._accepts(t):
+                    self.active = False
+                    self.force = list(start[1:])
+                    if self.gate is not None:
+                        self.gate.feed(t)
+                    continue
+            if self.force:
+                if t == self.force[0]:
+                    self.force.pop(0)
+                else:
+                    self.force = []
+                if self.gate is not None:
+                    self.gate.feed(t)
+                continue
             if not self.active:
                 self.active = self.gate is not None and self.gate.feed(t)
                 continue
@@ -69,6 +97,8 @@ class SpecGrammar:
         marker among the drafts).
         """
         drafts = [int(d) for d in drafts]
+        if self.maybe is not None or self.force:
+            return self._maybe_masks(drafts)
         active = self.active
         hit = None if active or self.gate is None else self.gate.find(drafts)
         if not active and hit is None:
@@ -97,6 +127,67 @@ class SpecGrammar:
             if consumed:
                 m.rollback(consumed)
         return out
+
+
+    def _maybe_masks(self, drafts) -> np.ndarray:
+        """``masks`` in the maybe state, or while a start marker's rest is
+        forced. Row j is the grammar's mask, the forced token alone, or
+        every token while a block is open."""
+        import llguidance.numpy as llg_np
+
+        m = self.matcher
+        n = len(drafts) + 1
+        out = np.full((n, self.words), -1, dtype=np.int32)
+        gate = self.gate.restart(self.gate.tail) if self.gate is not None else None
+        maybe, force = self.maybe, list(self.force)
+        active = self.active and not force
+        consumed = 0
+        try:
+            for j in range(n):
+                grammar_row = None
+                if force:
+                    out[j] = 0
+                    _allow(out[j], force[0])
+                elif active:
+                    llg_np.fill_next_token_bitmask(m, out, j)
+                    if maybe is not None:
+                        grammar_row = out[j].copy()
+                        _allow(out[j], maybe[0])
+                if j == n - 1:
+                    break
+                d = drafts[j]
+                if force:
+                    if d != force.pop(0):
+                        break
+                    if gate is not None:
+                        gate.feed(d)
+                    continue
+                if not active:
+                    active = gate is not None and gate.feed(d)
+                    continue
+                if maybe is not None:
+                    start, maybe = maybe, None
+                    if not _allowed(grammar_row, d):
+                        if d != start[0]:
+                            break
+                        active, force = False, list(start[1:])
+                        if gate is not None:
+                            gate.feed(d)
+                        continue
+                if not _allowed(out[j], d) or m.is_stopped():
+                    break
+                if not m.consume_token(d):
+                    break
+                consumed += 1
+        finally:
+            if consumed:
+                m.rollback(consumed)
+        return out
+
+
+def _allow(row: np.ndarray, token: int) -> None:
+    words = row.view(np.uint32)
+    words[token >> 5] |= np.uint32(1 << (token & 31))
 
 
 def _fresh_matcher(proc):

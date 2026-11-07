@@ -662,8 +662,10 @@ def test_vlm_budget_kwargs_without_a_budget_or_known_markers():
     assert vlm_budget_kwargs(None, None, None, proc) == {}
     assert vlm_budget_kwargs(None, "<a>", "</a>", proc) == {
         "thinking_start_token": "<a>", "thinking_end_token": "</a>"}
-    # gemma-4's channel tags are no known pair: stay unarmed.
-    assert vlm_budget_kwargs(8, None, None, _Proc("<|channel>thought")) == {}
+    # gemma-4's channel tags arm the criteria.
+    assert vlm_budget_kwargs(8, None, None, _Proc("<|channel>thought")) == {
+        "enable_thinking": True, "thinking_start_token": "<|channel>thought",
+        "thinking_end_token": "<channel|>"}
 
 
 def test_vlm_run_hands_the_budget_kwargs_to_generate(gguf, vlm_gen, monkeypatch):

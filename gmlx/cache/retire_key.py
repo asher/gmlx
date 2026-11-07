@@ -96,13 +96,22 @@ def _decode_generated(ctx: dict, generated: list[int]) -> str:
     return text
 
 
-def _thinking_markers(kw: dict):
+def _split_pair(ctx: dict):
+    """The (start, end) markers the reply split took: the request's, else
+    the pair the render resolved (the render capture keeps it)."""
+    kw = ctx.get("kw") or {}
+    ts, te = kw.get("thinking_start_token"), kw.get("thinking_end_token")
+    if not (ts or te) and ctx.get("think"):
+        ts, te = ctx["think"]
+    return ts, te
+
+
+def _thinking_markers(ctx: dict):
     """The same (open, close) marker pairs the response splitter tries,
     including its built-in defaults -- the request kwargs rarely carry
     explicit thinking tokens."""
     from gmlx._vendor.mlx_vlm.server.responses_state import ThinkingStreamState
-    return ThinkingStreamState._build_open_close_markers(
-        kw.get("thinking_start_token"), kw.get("thinking_end_token"))
+    return ThinkingStreamState._build_open_close_markers(*_split_pair(ctx))
 
 
 def _gen_prompt_text(ctx: dict) -> str:
@@ -137,7 +146,7 @@ def _virtually_finish(ctx: dict, text: str) -> str:
     its first tick -- the virtual closer restores the honest question.
     """
     try:
-        markers = _thinking_markers(ctx.get("kw") or {})
+        markers = _thinking_markers(ctx)
     except Exception:
         return text
     for sm, em in markers:
@@ -203,15 +212,14 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
     from gmlx._vendor.mlx_vlm.server import openai as srv
 
     kw = ctx.get("kw") or {}
-    ts = kw.get("thinking_start_token")
-    te = kw.get("thinking_end_token")
+    ts, te = _split_pair(ctx)
     reasoning, content = srv._split_thinking(full_text, ts, te)
     if reasoning is None:
         ch_reasoning, ch_content = _channel_split(full_text)
         if ch_reasoning is not None:
             reasoning, content = ch_reasoning, ch_content
     if reasoning is None and content and truncated_thinking(
-            full_text, _thinking_markers(kw), _gen_prompt_text(ctx)):
+            full_text, _thinking_markers(ctx), _gen_prompt_text(ctx)):
         reasoning, content = content, ""
 
     tool_calls = None

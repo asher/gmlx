@@ -168,6 +168,62 @@ def test_start_commits_the_first_token_once():
     assert _allowed(g.masks([])[0], EOS)
 
 
+START_THINK = TOK.convert_tokens_to_ids("<think>")
+
+
+def _served(*procs):
+    """``procs`` as serve wraps them for a prompt that opens and closes no
+    block, with no markers configured (the maybe state): the vocab's
+    <think> pair resolves."""
+    import importlib
+
+    from gmlx.upstream.patching import root
+
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    rg = gen.ResponseGenerator.__new__(gen.ResponseGenerator)
+    rg.tokenizer = rg.processor = TOK
+    args = SimpleNamespace(
+        logit_bias=None, repetition_penalty=None, repetition_context_size=20,
+        presence_penalty=None, presence_context_size=20,
+        frequency_penalty=None, frequency_context_size=20,
+        logits_processors=list(procs), enable_thinking=True,
+        thinking_start_token=None, thinking_end_token=None,
+        _kq_thinking_explicit=False)
+    return root(gen.ResponseGenerator._make_logits_processors)(
+        rg, args, mx.array([[DIGITS[3], DIGITS[4]]]))
+
+
+def test_a_maybe_row_allows_the_grammar_and_the_start_token_first():
+    g = _rows(_served(_proc())).grammar
+    (row,) = g.masks([])
+    assert _allowed(row, DIGITS[0]) and _allowed(row, START_THINK)
+    assert not _allowed(row, BAD)
+
+
+def test_a_maybe_row_start_draft_opens_a_block_for_the_round():
+    g = _rows(_served(_proc())).grammar
+    masks = g.masks([START_THINK, BAD, END_THINK, DIGITS[3]])
+    assert _allowed(masks[0], START_THINK) and not _allowed(masks[0], BAD)
+    assert (masks[1:3] == -1).all()
+    assert _allowed(masks[3], DIGITS[3]) and not _allowed(masks[3], BAD)
+    g.commit([START_THINK, BAD, END_THINK])
+    (row,) = g.masks([])
+    assert _allowed(row, DIGITS[0]) and not _allowed(row, BAD)
+
+
+def test_a_maybe_row_first_grammar_token_keeps_the_grammar():
+    g = _rows(_served(_proc())).grammar
+    g.start(DIGITS[1])
+    (row,) = g.masks([])
+    assert _allowed(row, DIGITS[2])
+    assert not _allowed(row, START_THINK) and not _allowed(row, BAD)
+
+
+def test_scalar_rounds_on_a_maybe_row_equal_constrained_greedy():
+    out = _scalar(_DigitDrafter(cap=0), rows=_rows(_served(_proc())))
+    assert out == _reference(DIGITS[0], 20)
+
+
 def test_no_grammar_in_plain_processors():
     assert _rows([lambda t, x: x]).grammar is None
     assert SpecRowProcessors.from_processors(None, []) is None

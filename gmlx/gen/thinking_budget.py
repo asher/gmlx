@@ -40,6 +40,9 @@ import mlx.core as mx
 # it.
 _HARMONY_PAIR = ("<|channel|>analysis<|message|>", "<|end|>")
 _START_ONLY_PAIRS = (_HARMONY_PAIR,)
+# Gemma 4's channel pair. Its start marker is always two tokens, so the
+# single-token vocab probe takes the whole encoded start.
+_GEMMA_PAIR = ("<|channel>thought", "<channel|>")
 
 # Think-tag spellings scanned when the caller relies on the defaults. The
 # suffixed pair is Hy3's (every control tag carries ':opensource'; its chat
@@ -67,6 +70,9 @@ _THINK_PAIRS = (("<think>", "</think>"),
                 ("<ifm|think>", "</ifm|think>"),
                 ("<ifm|think_fast>", "</ifm|think_fast>"),
                 ("<ifm|think_faster>", "</ifm|think_faster>"),
+                # Gemma 4: a channel named "thought". Neither literal is a
+                # substring of Harmony's <|channel|> spellings.
+                _GEMMA_PAIR,
                 # Harmony (gpt-oss, Beam): the analysis channel. Last, so a
                 # real pair keeps priority. The family markers carry the full
                 # "<|start|>assistant..." header.
@@ -232,7 +238,7 @@ def vlm_budget_kwargs(budget, start, end, processor, prompt=None) -> dict:
     template's pair (the one ``prompt`` opens, else the first), and
     ``enable_thinking=True``, so an explicit budget holds whatever the
     template's switch says, as on the text path and serve. A template with
-    no known pair (gemma-4's channel tags) leaves the criteria unarmed."""
+    no known pair leaves the criteria unarmed."""
     if budget is not None and not (start or end):
         tok = getattr(processor, "tokenizer", processor)
         pairs = think_pairs_in(getattr(processor, "chat_template", None)
@@ -598,6 +604,9 @@ _ANSWER_HEADERS = {
         "<|channel|>final<|message|>",
         "<|channel|>final <|constrain|>json<|message|>"),
 }
+# Harmony's template pair, which a request with no family markers resolves.
+_ANSWER_HEADERS[_HARMONY_PAIR[0]] = _ANSWER_HEADERS[
+    "<|start|>assistant<|channel|>analysis<|message|>"]
 
 
 def answer_opener_seqs(tokenizer, start_token, end_token) -> tuple:
@@ -611,6 +620,195 @@ def has_answer_header(start_token) -> bool:
     """Whether the answer of this marker format opens with its own header,
     so a grammar must wait for it in every request, thinking or not."""
     return (start_token or "") in _ANSWER_HEADERS
+
+
+def processor_template(processor) -> str:
+    """The chat template text ``processor`` renders with, or ""."""
+    for obj in (processor, getattr(processor, "tokenizer", None)):
+        t = getattr(obj, "chat_template", None)
+        if isinstance(t, str) and t:
+            return t
+    return ""
+
+
+def _prompt_text(prompt, tokenizer):
+    """``prompt`` as text: the rendered text as is, or its ids decoded."""
+    if prompt is None or isinstance(prompt, str):
+        return prompt
+    if tokenizer is None:
+        return None
+    try:
+        return tokenizer.decode(_flat_ids(prompt))
+    except Exception:  # noqa: BLE001 - undecodable: no prompt state
+        return None
+
+
+def _processor_think_pair(processor):
+    """The ``think_start`` / ``think_end`` that ``processor`` carries: the
+    text processor forwards them to the loader's mlx-lm wrapper."""
+    try:
+        s = getattr(processor, "think_start", None)
+        e = getattr(processor, "think_end", None)
+    except Exception:  # noqa: BLE001 - an odd processor: no pair
+        return None
+    if isinstance(s, str) and s and isinstance(e, str) and e:
+        return (s, e)
+    return None
+
+
+def _single_token_pair(tokenizer):
+    """The text of the first ``_THINK_PAIRS`` pair whose end marker is one
+    token of the vocab. The start is None when it is not one token, except
+    for Gemma's two-token start."""
+    for start_tag, end_tag in _THINK_PAIRS:
+        if (start_tag, end_tag) in _START_ONLY_PAIRS:
+            continue
+        if _single_token_id(tokenizer, end_tag) is None:
+            continue
+        if ((start_tag, end_tag) == _GEMMA_PAIR
+                or _single_token_id(tokenizer, start_tag) is not None):
+            return (start_tag, end_tag)
+        return (None, end_tag)
+    return None
+
+
+OPEN, CLOSED, PLAIN = "open", "closed", "plain"
+
+
+def think_prompt_state(text, start, end):
+    """Where a rendered prompt ``text`` leaves the reply: "open" (inside a
+    block: its last start marker comes after its last end marker),
+    "closed" (it ends with an end marker, maybe after whitespace) or
+    "plain". None with no text or no end marker. The state is read on
+    text: a vocab can encode a marker inside a prompt with other pieces
+    than the marker alone."""
+    if not isinstance(text, str) or not end:
+        return None
+    ends = (end,) + end_aliases(end)
+    last_end = max(text.rfind(e) for e in ends)
+    if start:
+        i = text.rfind(start)
+        if i != -1 and i > last_end:
+            return OPEN
+    if text.rstrip().endswith(ends):
+        return CLOSED
+    return PLAIN
+
+
+class ThinkMarkers:
+    """A request's think markers, resolved once for every reader: the
+    budget, the structured-output gate, the reasoning split and the retire
+    mirror. Never written back to the request's ``thinking_start_token`` /
+    ``thinking_end_token``, so usage counts and the template kwargs see
+    what the request sent.
+
+    ``start`` / ``end`` are the marker text, or None. ``partial`` is True
+    when the request configured one marker only: each reader then keeps
+    its own default for the missing side. ``state`` is the prompt state of
+    :func:`think_prompt_state`."""
+
+    def __init__(self, start=None, end=None, *, partial=False, prompt=None):
+        self.start = start
+        self.end = end
+        self.partial = bool(partial)
+        self._text = prompt if isinstance(prompt, str) else None
+        self.state = think_prompt_state(self._text, start, end)
+        self._seqs = None
+
+    @property
+    def pair(self):
+        """``(start, end)`` when both resolved, else None."""
+        if self.start and self.end and not self.partial:
+            return (self.start, self.end)
+        return None
+
+    def seqs(self, tokenizer):
+        """``(start_seq, end_seq)`` on ``tokenizer``. With no text pair the
+        single-token vocab probe runs, and a pair it finds becomes the
+        text pair. Computed once; call it where the request may use the
+        tokenizer (under the server's tokenizer lock, or on the engine
+        thread)."""
+        if self._seqs is not None:
+            return self._seqs
+        seqs = (None, None)
+        try:
+            if self.partial:
+                pass
+            elif self.end:
+                seqs = _tag_pair_seqs(tokenizer, self.start, self.end) or seqs
+            else:
+                pair = _single_token_pair(tokenizer)
+                if pair is not None:
+                    self.start, self.end = pair
+                    self.state = think_prompt_state(self._text, *pair)
+                    seqs = (_tag_pair_seqs(tokenizer, *pair)
+                            or seqs) if pair[0] else (
+                        None, marker_ids(tokenizer, pair[1]) or None)
+        except Exception:  # noqa: BLE001 - a tokenizer that cannot encode
+            seqs = (None, None)
+        self._seqs = seqs
+        return seqs
+
+
+def resolve_think_markers(start_token, end_token, processor, prompt=None,
+                          tokenizer=None) -> ThinkMarkers:
+    """The think markers of a request: the configured pair, else the chat
+    template's pair that ``prompt`` opens, else its first, else the
+    ``think_start`` / ``think_end`` that ``processor`` carries. One
+    configured marker gives a partial result. ``prompt`` is the rendered
+    text, or its ids, which ``tokenizer`` decodes. There is no ``<think>``
+    fallback: each caller keeps its own."""
+    text = _prompt_text(prompt, tokenizer)
+    if start_token and end_token:
+        return ThinkMarkers(start_token, end_token, prompt=text)
+    if start_token or end_token:
+        return ThinkMarkers(start_token, end_token, partial=True, prompt=text)
+    pairs = think_pairs_in(processor_template(processor))
+    if pairs:
+        pair = open_think_pair(text, pairs) or pairs[0]
+    else:
+        pair = _processor_think_pair(processor) or (None, None)
+    return ThinkMarkers(*pair, prompt=text)
+
+
+def request_think_markers(args, processor, prompt=None,
+                          tokenizer=None) -> ThinkMarkers:
+    """The request's :class:`ThinkMarkers`: the value the render seam keeps
+    on ``args``, else resolved from ``prompt`` (a raw completion has no
+    render). The second is not kept: it belongs to that prompt."""
+    found = getattr(args, "_kq_think", None)
+    if isinstance(found, ThinkMarkers):
+        return found
+    return resolve_think_markers(
+        getattr(args, "thinking_start_token", None),
+        getattr(args, "thinking_end_token", None),
+        processor, prompt, tokenizer)
+
+
+BARE, MAYBE, WAIT, HEADER = "bare", "maybe", "wait", "header"
+
+
+def answer_gate_kind(markers, start_seq, end_seq, *, thinking_off=False,
+                     continues_content=False) -> str:
+    """How a ``response_format`` grammar or XTC waits for the answer of a
+    request with ``markers`` (not partial): "header" (until the format's
+    answer header), "wait" (the prompt opens a block: until its end
+    marker), "maybe" (the reply may open a block: the first step also
+    allows the start marker) or "bare" (from the first token).
+    ``thinking_off`` is a request that turned thinking off at the top
+    level, and ``continues_content`` a request that continues the content
+    of its final assistant message."""
+    if has_answer_header(markers.start):
+        return HEADER
+    if not end_seq:
+        return BARE
+    if markers.state == OPEN:
+        return WAIT
+    if markers.state == CLOSED or continues_content:
+        return BARE
+    if start_seq and not thinking_off:
+        return MAYBE
+    return BARE
 
 
 class AnswerGate:
@@ -683,6 +881,22 @@ def _tag_pair_seqs(tokenizer, start_tag, end_tag):
             tuple(int(t) for t in end_ids))
 
 
+def _single_token_pair_seqs(tokenizer):
+    """``(start_seq, end_seq)`` of the first ``_THINK_PAIRS`` pair whose end
+    marker is one token of the vocab, or None."""
+    for start_tag, end_tag in _THINK_PAIRS:
+        if (start_tag, end_tag) in _START_ONLY_PAIRS:
+            continue
+        end_id = _single_token_id(tokenizer, end_tag)
+        if end_id is None:
+            continue
+        if (start_tag, end_tag) == _GEMMA_PAIR:
+            return (marker_ids(tokenizer, start_tag) or None, (end_id,))
+        start_id = _single_token_id(tokenizer, start_tag)
+        return ((start_id,) if start_id is not None else None, (end_id,))
+    return None
+
+
 def _thinking_token_seqs(tokenizer, start_token=None, end_token=None,
                          prompt=None):
     """``(start_seq, end_seq)`` token-id tuples for the model's thinking
@@ -718,14 +932,9 @@ def _thinking_token_seqs(tokenizer, start_token=None, end_token=None,
     if end:
         start = getattr(tokenizer, "think_start_tokens", None)
         return (tuple(start) if start else None, tuple(end))
-    for start_tag, end_tag in _THINK_PAIRS:
-        if (start_tag, end_tag) in _START_ONLY_PAIRS:
-            continue
-        end_id = _single_token_id(tokenizer, end_tag)
-        if end_id is None:
-            continue
-        start_id = _single_token_id(tokenizer, start_tag)
-        return ((start_id,) if start_id is not None else None, (end_id,))
+    seqs = _single_token_pair_seqs(tokenizer)
+    if seqs is not None:
+        return seqs
     end_id = _last_token_id(tokenizer, "</think>")
     if end_id is None:
         return (None, None)

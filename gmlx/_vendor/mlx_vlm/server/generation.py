@@ -1567,21 +1567,60 @@ class ResponseGenerator:
             args.frequency_context_size,
         )
         if args.logits_processors is not None:
-            from gmlx.gen.thinking_budget import has_answer_header, prompt_tail_ids
+            from gmlx.gen.thinking_budget import (
+                BARE,
+                MAYBE,
+                answer_gate_kind,
+                has_answer_header,
+                prompt_tail_ids,
+                request_think_markers,
+            )
 
             request_processors = args.logits_processors
-            already_closed = (
-                input_ids is not None
-                and self._prompt_thinking_already_closed(args, input_ids)
+            # gmlx: the gate reads the request's resolved think markers and
+            # the prompt state, not args.enable_thinking, which is True on
+            # every request that does not turn thinking off at the top
+            # level. A model that never writes </think> otherwise never gets
+            # its grammar.
+            markers = request_think_markers(
+                args,
+                getattr(self, "processor", None) or self.tokenizer,
+                input_ids,
+                self.tokenizer,
             )
-            # gmlx: an answer with a header of its own (ATEM) is gated on that
-            # header in every request, thinking or not.
-            if has_answer_header(args.thinking_start_token) or (
-                args.enable_thinking and not already_closed
-            ):
-                request_processors = self._wrap_processors_until_thinking_done(
-                    args, request_processors, prompt_tail_ids(input_ids)
+            if markers.partial:
+                # One configured marker: the gate as before, with <think>
+                # filling the missing side.
+                already_closed = (
+                    input_ids is not None
+                    and self._prompt_thinking_already_closed(args, input_ids)
                 )
+                wrap = has_answer_header(args.thinking_start_token) or (
+                    args.enable_thinking and not already_closed
+                )
+                if wrap:
+                    request_processors = self._wrap_processors_until_thinking_done(
+                        args, request_processors, prompt_tail_ids(input_ids)
+                    )
+            else:
+                start_seq, end_seq = markers.seqs(self.tokenizer)
+                cont = getattr(args, "_kq_continue", None)
+                kind = answer_gate_kind(
+                    markers,
+                    start_seq,
+                    end_seq,
+                    thinking_off=bool(getattr(args, "_kq_thinking_explicit", False))
+                    and not args.enable_thinking,
+                    continues_content=getattr(cont, "mode", None) == "content",
+                )
+                if kind != BARE:
+                    request_processors = self._wrap_processors_until_thinking_done(
+                        args,
+                        request_processors,
+                        prompt_tail_ids(input_ids),
+                        markers=markers,
+                        maybe_seq=start_seq if kind == MAYBE else None,
+                    )
             processors.extend(request_processors)
         return processors
 
@@ -1636,9 +1675,19 @@ class ResponseGenerator:
         args: GenerationArguments,
         processors: List[Callable[[mx.array, mx.array], mx.array]],
         prompt_ids: Optional[List[int]] = None,
+        markers=None,
+        maybe_seq=None,
     ) -> List[Callable[[mx.array, mx.array], mx.array]]:
-        thinking_start_token = args.thinking_start_token or DEFAULT_THINKING_START_TOKEN
-        thinking_end_token = args.thinking_end_token or DEFAULT_THINKING_END_TOKEN
+        # gmlx: ``markers`` (resolved think markers) replace the args pair;
+        # ``maybe_seq`` is the start marker a reply may open first.
+        pair = markers.pair if markers is not None else None
+        if pair is not None:
+            thinking_start_token, thinking_end_token = pair
+        else:
+            thinking_start_token = (
+                args.thinking_start_token or DEFAULT_THINKING_START_TOKEN
+            )
+            thinking_end_token = args.thinking_end_token or DEFAULT_THINKING_END_TOKEN
         return [
             ThinkingAwareLogitsProcessor(
                 processor=processor,
@@ -1647,6 +1696,7 @@ class ResponseGenerator:
                 thinking_end_token=thinking_end_token,
                 enable_thinking=True,
                 prompt_ids=prompt_ids,
+                maybe_seq=maybe_seq,
             )
             for processor in processors
         ]

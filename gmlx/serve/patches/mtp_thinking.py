@@ -68,20 +68,23 @@ class _HookCarrier:
 def _build_hook(rg, args, input_ids):
     from gmlx.gen.thinking_budget import make_mtp_finish_hook, prompt_tail_ids
 
-    from .chat_behavior import _prompt_opens_thinking_tokens
+    from .chat_behavior import _budget_markers, _prompt_opens_thinking_tokens
 
     try:
         start_in = _prompt_opens_thinking_tokens(rg, args, input_ids)
+        pair = _budget_markers(rg, args, input_ids).pair
     except Exception:  # noqa: BLE001
-        start_in = False
-    # Raw args marker values (not the DEFAULT_* fallbacks): the factory's
-    # own template/vocab probe resolves non-<think> spellings.
+        start_in, pair = False, None
+    # The resolved pair, else the raw args values (not the DEFAULT_*
+    # fallbacks): the factory's own vocab probe then runs.
+    start, end = pair or (getattr(args, "thinking_start_token", None),
+                          getattr(args, "thinking_end_token", None))
     return make_mtp_finish_hook(
         rg.tokenizer,
         budget=args.thinking_budget,
         start_in_thinking=start_in,
-        start_token=getattr(args, "thinking_start_token", None),
-        end_token=getattr(args, "thinking_end_token", None),
+        start_token=start,
+        end_token=end,
         prompt_ids=prompt_tail_ids(input_ids),
         tools=getattr(args, "_kq_has_tools", False),
         message=getattr(args, "thinking_budget_message", None),

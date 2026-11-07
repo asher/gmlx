@@ -131,6 +131,7 @@ def install_retire_render_capture() -> None:
     if os.environ.get("GMLX_APC_RETIRE_LCP") == "0":
         return
     import gmlx.cache.retire_key as retire_key
+    from gmlx.gen.thinking_budget import resolve_think_markers
 
     from ._common import _render_target_modules
     from .prefill import CONTINUE_KEY
@@ -156,6 +157,12 @@ def install_retire_render_capture() -> None:
                         "messages": [dict(m) for m in msgs
                                      if isinstance(m, dict)],
                         "kw": ctx_kw,
+                        # The pair the reply split takes when the request
+                        # sets no markers, resolved as the render seam does.
+                        "think": resolve_think_markers(
+                            ctx_kw.get("thinking_start_token"),
+                            ctx_kw.get("thinking_end_token"),
+                            processor, out).pair,
                         "prefill": prefill,
                         "processor": processor,
                         "config": config,

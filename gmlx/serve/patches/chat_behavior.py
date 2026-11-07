@@ -12,11 +12,15 @@ import os
 
 import gmlx.serve.bridge_vlm as serving
 from gmlx.gen.thinking_budget import (
+    OPEN,
+    ThinkMarkers,
     marker_ids,
     normalize_end_aliases,
     open_think_pair,
     prompt_opens_block,
     prompt_tail_ids,
+    request_think_markers,
+    resolve_think_markers,
     seq_thinking_budget_criteria_cls,
     think_pairs_in,
 )
@@ -326,26 +330,44 @@ def _armed_thinking_budget_criteria_cls():
     return seq_thinking_budget_criteria_cls()
 
 
-def _thinking_marker_seqs(rg, args) -> tuple[tuple, tuple]:
+def _budget_markers(rg, args, input_ids) -> ThinkMarkers:
+    """The request's think markers, with their ids on the server tokenizer.
+    The processor is the one the server renders with: the text processor
+    forwards the loader wrapper's markers, the raw tokenizer has none."""
+    processor = getattr(rg, "processor", None) or rg.tokenizer
+    found = request_think_markers(args, processor, input_ids, rg.tokenizer)
+    found.seqs(rg.tokenizer)
+    return found
+
+
+def _budget_marker_texts(found: ThinkMarkers, args) -> tuple[str, str]:
+    """The resolved pair, else the configured markers with <think> filling
+    each missing side."""
+    if found.pair is not None:
+        return found.pair
     gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
-    start = args.thinking_start_token or gen.DEFAULT_THINKING_START_TOKEN
-    end = args.thinking_end_token or gen.DEFAULT_THINKING_END_TOKEN
-    return marker_ids(rg.tokenizer, start), marker_ids(rg.tokenizer, end)
+    return (args.thinking_start_token or gen.DEFAULT_THINKING_START_TOKEN,
+            args.thinking_end_token or gen.DEFAULT_THINKING_END_TOKEN)
 
 
 def _prompt_opens_thinking_tokens(rg, args, input_ids) -> bool:
-    """Whether the prompt ``input_ids`` ends inside an open <think> block, read
-    straight from the tokens. This is the enable_thinking-independent core of
-    mlx-vlm's ``_prompt_has_open_thinking`` (which returns False whenever
+    """Whether the prompt ``input_ids`` ends inside an open thinking block.
+    This is the enable_thinking-independent core of mlx-vlm's
+    ``_prompt_has_open_thinking`` (which returns False whenever
     ``enable_thinking`` is off - and the server default is off - so it misses
     pre-fill models whose template opened <think> regardless of the flag, exactly
-    the case an explicit budget must cap). Markers match on all their tokens."""
+    the case an explicit budget must cap). A resolved pair reads the prompt
+    text; configured markers with a missing side match on all their tokens."""
     if input_ids is None:
         return False
-    start_seq, end_seq = _thinking_marker_seqs(rg, args)
+    found = _budget_markers(rg, args, input_ids)
+    if found.pair is not None and found.state is not None:
+        return found.state == OPEN
+    start, end = _budget_marker_texts(found, args)
     toks = input_ids.flatten().tolist() if hasattr(input_ids, "flatten") \
         else list(input_ids)
-    return prompt_opens_block(toks, start_seq, end_seq)
+    return prompt_opens_block(toks, marker_ids(rg.tokenizer, start),
+                              marker_ids(rg.tokenizer, end))
 
 
 
@@ -362,6 +384,10 @@ def install_thinking_budget_fix() -> None:
     armed_cls = _armed_thinking_budget_criteria_cls()
 
     def _make_thinking_budget_criteria(self, args, input_ids):
+        kept = getattr(args, "_kq_think", None)
+        if isinstance(kept, ThinkMarkers):
+            # Under the tokenizer lock, for the structured-output gate too.
+            kept.seqs(self.tokenizer)
         budget = getattr(args, "thinking_budget", None)
         if budget is None or budget < 0:
             return None
@@ -370,8 +396,8 @@ def install_thinking_budget_fix() -> None:
         # anyway. The gates arm but in_thinking is seeded from whether the prompt
         # actually opens <think> (computed independently of enable_thinking, so a
         # pre-fill model still caps), and a never-thinking answer is never closed.
-        start = args.thinking_start_token or gen.DEFAULT_THINKING_START_TOKEN
-        end = args.thinking_end_token or gen.DEFAULT_THINKING_END_TOKEN
+        start, end = _budget_marker_texts(
+            _budget_markers(self, args, input_ids), args)
         prompt_open = _prompt_opens_thinking_tokens(self, args, input_ids)
         return armed_cls(
             tokenizer=self.tokenizer,
@@ -485,6 +511,23 @@ def _adopt_prompt_think_pair(args, processor, rendered) -> None:
         args.thinking_start_token, args.thinking_end_token = pair
 
 
+def _keep_think_markers(args, processor, rendered) -> None:
+    """Keep the request's resolved think markers and prompt state on
+    ``args`` for every later reader. Set after each render, so a missing
+    value means no render ran (a raw completion)."""
+    if args is None or not isinstance(rendered, str):
+        return
+    args._kq_think = resolve_think_markers(
+        getattr(args, "thinking_start_token", None),
+        getattr(args, "thinking_end_token", None), processor, rendered)
+
+
+def _request_think_pair():
+    """The pair the render seam resolved for this request, or None."""
+    found = getattr(_LAST_GEN_ARGS.get(), "_kq_think", None)
+    return found.pair if isinstance(found, ThinkMarkers) else None
+
+
 def _prompt_tail_opens_thinking(text, open_close_markers) -> bool:
     """Whether ``text`` ends inside an open think block for any marker pair
     (last open marker after the pair's last close marker)."""
@@ -511,6 +554,16 @@ def install_stream_thinking_seed() -> None:
 
         def __init__(self, *args, **kw):
             original_init(self, *args, **kw)
+            start = kw.get("thinking_start_token",
+                           args[1] if len(args) > 1 else None)
+            end = kw.get("thinking_end_token",
+                         args[2] if len(args) > 2 else None)
+            pair = None if start or end else _request_think_pair()
+            if pair is not None:
+                self.open_close_markers = self._build_open_close_markers(*pair)
+                self.open_markers = tuple(m for m, _ in self.open_close_markers)
+                self.close_markers = tuple(
+                    m for _, m in self.open_close_markers)
             prompt = _LAST_RENDERED_PROMPT.get()
             if prompt is not None:
                 self.in_thinking = _prompt_tail_opens_thinking(
@@ -552,8 +605,10 @@ def install_stream_thinking_seed() -> None:
         def apply_chat_template(*a, **kw):
             out = fn(*a, **kw)
             _LAST_RENDERED_PROMPT.set(out if isinstance(out, str) else None)
-            _adopt_prompt_think_pair(
-                _LAST_GEN_ARGS.get(), a[0] if a else kw.get("processor"), out)
+            args = _LAST_GEN_ARGS.get()
+            processor = a[0] if a else kw.get("processor")
+            _adopt_prompt_think_pair(args, processor, out)
+            _keep_think_markers(args, processor, out)
             return out
         return link(apply_chat_template, fn, _STREAM_SEED_FLAG)
 
@@ -575,6 +630,10 @@ def install_stream_thinking_seed() -> None:
         def _split_thinking_text(text, thinking_start_token=None,
                                  thinking_end_token=None,
                                  starts_in_thinking=False, processor=None):
+            if not (thinking_start_token or thinking_end_token):
+                pair = _request_think_pair()
+                if pair is not None:
+                    thinking_start_token, thinking_end_token = pair
             rendered = _LAST_RENDERED_PROMPT.get()
             in_header = bool(rendered) and rendered.rstrip().endswith(
                 "<|start|>assistant")

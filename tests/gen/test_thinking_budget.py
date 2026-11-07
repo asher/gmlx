@@ -621,8 +621,8 @@ def test_prompt_opens_thinking_uses_tokenizer_markers():
     assert prompt_opens_thinking(
         "x <|channel>thought done <channel|> answer", tokenizer=tok
     ) is False
-    # the default <think> spelling must NOT match this model's prompt
-    assert prompt_opens_thinking("x <|channel>thought reasoning") is False
+    # With no tokenizer every known pair is scanned, gemma's among them.
+    assert prompt_opens_thinking("x <|channel>thought reasoning") is True
 
 
 def test_prompt_open_think_tag_returns_model_spelling():
