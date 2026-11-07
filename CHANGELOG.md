@@ -131,6 +131,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a 500.
 - A video job whose image file is cut short or holds no image fails with a
   400 that names the file, where it failed with a 500.
+- A video form upload that stops sending is ended with a 408 after 60 s, and
+  frees the job store room it held, which refused other uploads until then.
 
 ## [0.5.4] - 2026-10-29
 

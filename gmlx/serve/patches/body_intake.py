@@ -24,6 +24,7 @@ a URL where an image goes.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import math
 import os
@@ -43,6 +44,11 @@ VIDEO_PATHS = frozenset({"/v1/videos"})
 # the str can take 4 bytes a character: measured at 6.1.
 FORM_TEXT_COPIES = 2.25
 FORM_TEXT_WIDE_COPIES = 6.25
+# Seconds a video form may send nothing before its end: past them, the
+# read ends and the room the form holds in the job store is freed. Each
+# chunk starts the wait again, so a slow client that keeps sending reads
+# to its end.
+STALL_S = 60.0
 
 
 class BodyRefused(Exception):
@@ -56,9 +62,9 @@ class BodyRefused(Exception):
 
     @property
     def headers(self) -> dict:
-        """A 413 leaves the body unread past its figure: the answer ends
-        the connection."""
-        return {"Connection": "close"} if self.status == 413 else {}
+        """A 413 or a 408 leaves the body unread past its figure: the
+        answer ends the connection."""
+        return {"Connection": "close"} if self.status in (408, 413) else {}
 
 
 def log_refusal(status: int, message: str) -> None:
@@ -246,6 +252,22 @@ def _over_room(n: int | None, room: int, arriving: int = 0) -> BodyRefused:
                        "server.video.store_max_bytes")
 
 
+async def _within(timeout: float, aw):
+    """The wait for a form's next chunk, ``timeout`` seconds at most."""
+    return await asyncio.wait_for(aw, timeout)
+
+
+def _stalled(stall: float, got: int, n: int | None) -> BodyRefused:
+    """The 408 of a form that sent nothing for ``stall`` seconds, ``got``
+    bytes into its Content-Length ``n`` (None with none sent)."""
+    left = (f" with {_mib(n - got, True)} of it still to come"
+            if n is not None else "")
+    return BodyRefused(408, f"the form sent nothing for {stall:g} s"
+                       f"{left}, so the server ended the request and freed "
+                       "the room it held in the video job store; send the "
+                       "form again")
+
+
 async def read_form_to_disk(request: Request, folder: str, take,
                             free: int | None = None) -> tuple[list, dict]:
     """``(fields, files)`` of a multipart form: its text fields (name,
@@ -259,6 +281,7 @@ async def read_form_to_disk(request: Request, folder: str, take,
     reserves a step with ``take(None)`` before its first byte and another
     each time the bytes arrived pass what it holds, so it holds the room
     as its body comes, and the read stops where a step does not fit. A
+    form that sends nothing for STALL_S seconds is refused with a 408. A
     refusal or a failed read removes every file it began."""
     from starlette.datastructures import UploadFile
     from starlette.formparsers import MultiPartException, MultiPartParser
@@ -311,7 +334,15 @@ async def read_form_to_disk(request: Request, folder: str, take,
 
     async def stream():
         held, got = room, 0
-        async for chunk in request.stream():
+        chunks = request.stream().__aiter__()
+        while True:
+            stall = STALL_S
+            try:
+                chunk = await _within(stall, chunks.__anext__())
+            except StopAsyncIteration:
+                return
+            except TimeoutError:
+                raise _stalled(stall, got, n) from None
             got += len(chunk)
             while got > held:
                 ok, more, arriving = ((False, 0, 0) if n is not None

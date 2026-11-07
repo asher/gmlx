@@ -1160,6 +1160,32 @@ def test_a_video_body_refusal_is_in_the_server_log(routes, monkeypatch,
             f"{message}" in capsys.readouterr().out.splitlines())
 
 
+def test_a_form_that_stalls_frees_the_room_it_holds(routes, monkeypatch):
+    """A form whose client stops sending holds the room of its whole
+    Content-Length in the job store: past the stall bound, the server
+    answers 408, ends the connection and frees the room and the file it
+    began."""
+    import http.client
+
+    from live_socket import closed, peer, send, serving
+
+    monkeypatch.setattr(body_intake, "STALL_S", 0.2)
+    body, ctype = _form({"prompt": "a cat"}, {"first_frame": _png()})
+    head = body[:len(body) // 2]
+    with serving(routes.app) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        other = peer(conn)
+        r = send(conn, "/v1/videos", head, length=len(body) + (8 << 20),
+                 ctype=ctype)
+        assert r.status == 408, r.body
+        assert json.loads(r.body)["error"]["message"].startswith(
+            "the form sent nothing for 0.2 s with 8.")
+        assert closed(other)
+        conn.close()
+    assert routes.store.pending == {}
+    assert os.listdir(os.path.join(str(routes.store.root), "inputs")) == []
+
+
 @pytest.mark.parametrize("kind", ["json", "form", "form_wide"])
 def test_a_video_body_is_priced_at_the_copies_its_parse_holds(
         routes, monkeypatch, kind):

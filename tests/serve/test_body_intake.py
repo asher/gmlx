@@ -39,3 +39,43 @@ def test_a_refusal_rounds_the_need_up_and_the_figure_down():
     assert bi._mib((2 << 20) - 1) == "1.9 MiB"
     assert bi._mib((2 << 20) - 1, True) == "2.0 MiB"
     assert bi._mib(1023, True) == "1.0 KiB"
+
+
+def test_a_slow_form_waits_afresh_for_each_chunk(tmp_path, monkeypatch):
+    """A form that keeps sending is read to its end however long it takes:
+    the wait for its next chunk starts again at each one."""
+    import asyncio
+
+    from starlette.requests import Request
+
+    b = b"gmlxboundary"
+    body = (b"--" + b + b'\r\nContent-Disposition: form-data; name="prompt"'
+            b"\r\n\r\na cat\r\n--" + b + b'\r\nContent-Disposition: '
+            b'form-data; name="first_frame"; filename="f.png"\r\n'
+            b"Content-Type: image/png\r\n\r\n" + b"x" * 300 + b"\r\n--" + b
+            + b"--\r\n")
+    parts = [body[i:i + 100] for i in range(0, len(body), 100)]
+
+    async def receive():
+        chunk = parts.pop(0)
+        return {"type": "http.request", "body": chunk,
+                "more_body": bool(parts)}
+
+    request = Request({"type": "http", "method": "POST", "headers": [
+        (b"content-type", b"multipart/form-data; boundary=" + b),
+        (b"content-length", str(len(body)).encode())]}, receive)
+    waits = []
+
+    async def within(timeout, aw):
+        waits.append(timeout)
+        return await aw
+    monkeypatch.setattr(bi, "_within", within)
+
+    async def take(n):
+        return True, n, 0
+    fields, files = asyncio.run(bi.read_form_to_disk(
+        request, str(tmp_path / "in"), take, free=None))
+    assert fields == [("prompt", "a cat")] and list(files) == ["first_frame"]
+    # A full wait for each chunk, and for the end of the stream.
+    assert len(waits) > len(body) // 100
+    assert set(waits) == {bi.STALL_S}
