@@ -983,3 +983,22 @@ def test_a_set_lora_cap_logs_one_line_at_startup_and_none_shifts_unbounded(
                 state.adapters.check(bound + 1)
             assert e.value.status == 413
             assert "server.image.adapter_cache_mb" in str(e.value)
+
+
+def test_a_name_two_configured_adapters_share_is_refused(tmp_path):
+    for sub in ("one", "two"):
+        (tmp_path / sub).mkdir()
+        (tmp_path / sub / "style.safetensors").write_bytes(b"x")
+    ads = [(SimpleNamespace(path=str(tmp_path / sub / "style.safetensors")), 1.0)
+           for sub in ("one", "two")]
+    served = svc.ServedImage(pipe=None, spec=SimpleNamespace(id="zit"), plan=None,
+                             facts=None, adapters=ads)
+    for aid in ("style.safetensors", "style"):
+        with pytest.raises(svc.ImageRequestError) as e:
+            svc._request_rows(served, [(aid, 0.5)], [str(tmp_path)])
+        assert e.value.status == 400
+        assert str(e.value) == (f"adapter {aid!r} matches adapters 0 and 1 of model "
+                                "'zit'; name it by its path in a model folder")
+    rows, extra, _shown = svc._request_rows(
+        served, [("two/style.safetensors", 0.5)], [str(tmp_path)])
+    assert rows[1][1] == 0.5 and rows[0][1] == 1.0 and not extra
