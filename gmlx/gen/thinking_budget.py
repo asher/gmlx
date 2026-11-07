@@ -199,10 +199,16 @@ def think_pairs_in(template) -> list:
              or (p[1] in template and p not in _START_ONLY_PAIRS)]
     # Kimi-K3 builds its markers by macro concatenation ('<|open|>' + tag +
     # '<|sep|>'), so the literal pair never appears in the template source;
-    # detect the macro call on the 'think' tag instead.
-    if not pairs and "<|open|>" in template and "open_tag('think" in template:
+    # detect the macro call on the 'think' tag instead. An MLX-format K3
+    # processor renders in Python and carries only a sentinel.
+    if not pairs and (template == _K3_NATIVE_RENDERER or (
+            "<|open|>" in template and "open_tag('think" in template)):
         pairs = [("<|open|>think<|sep|>", "<|close|>think<|sep|>")]
     return pairs
+
+
+# The chat_template of mlx-vlm's KimiK3Processor.
+_K3_NATIVE_RENDERER = "<kimi-k3-native-python-chat-renderer>"
 
 
 def template_think_pairs(tokenizer) -> list:

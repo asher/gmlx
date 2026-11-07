@@ -706,6 +706,37 @@ def test_a_one_configured_marker_keeps_the_old_gate(serve, key, kwargs, body,
     _first_step(s, r, kind, _THINK[0])
 
 
+def _native_k3() -> Served:
+    """An MLX-format Kimi K3: its processor renders in Python and carries
+    no template text."""
+    from gmlx._vendor.mlx_vlm.models.kimi_k3.processing_kimi_k3 import (
+        KimiK3Processor)
+
+    proc = KimiK3Processor(tokenizer=tv.tokenizer(None, singles=_XTML_SINGLES))
+    rg = _GEN.ResponseGenerator.__new__(_GEN.ResponseGenerator)
+    rg.tokenizer, rg.processor = proc.tokenizer, proc
+    return Served(rg, proc.tokenizer, "kimi_k3")
+
+
+@pytest.mark.parametrize("thinking,kind", [(True, HEADER), (False, BARE)])
+def test_the_native_k3_renderer_resolves_the_xtml_pair(serve, thinking, kind):
+    s = _native_k3()
+    r = _request(s, kwargs={"thinking": thinking})
+    assert r.prompt.endswith(_XTML[0] if thinking else _XTML_ANSWER)
+    assert r.args._kq_think.pair == _XTML
+    _first_step(s, r, kind, _XTML[0])
+    if thinking:
+        _scripted(s, _request(s, kwargs={"thinking": True}), kind, _XTML,
+                  REASON + _XTML[1] + _XTML_ANSWER, ANSWER)
+        text = (REASON + _XTML[1] + _XTML_ANSWER + ANSWER
+                + "<|close|>response<|sep|>")
+        _split, stream = _splits(s, r, text)
+        assert stream == (REASON, ANSWER)
+        crit, hook = _budget_runs(s, _request(s, kwargs={"thinking": True}))
+        end = tuple(tv.ids(s.tok, _XTML[1]))
+        assert crit._end_seq == hook.end_seq == end
+
+
 # -- families with markers in their base group --------------------------------
 
 
