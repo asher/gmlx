@@ -46,6 +46,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `continue_final_message` and `add_generation_prompt: false`, in the prompt
   llama-server renders, and `add_generation_prompt: false` alone renders no
   generation prompt. See [Assistant prefill](docs/api.md#assistant-prefill).
+- `gmlx serve`, `run`, `chat`, `capture` and `kld` take
+  `--adapter PATH[:STRENGTH]` as `gmlx image` does, and repeat it for more
+  adapters. Serve makes the strength the default of requests, and chat's
+  `/adapter S` sets an absolute strength. See
+  [Use the adapter](docs/lora.md#use-the-adapter).
+- Each `gmlx kld --adapter` flag is one scored point, and without
+  `--reference` the points score against the model without adapters. See
+  [gmlx kld](docs/cli.md#gmlx-kld).
 
 ### Changed
 

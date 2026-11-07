@@ -160,7 +160,7 @@ the [`sampling` keys](config.md#sampling):
 | `--mmproj PATH` | None | Load this projector GGUF to make the model multimodal. |
 | `--asr PATH` | Found beside the model | Speech companion GGUF for a model that reads audio through one, such as [Granite Switch](granite-switch.md). |
 | `--no-asr` | Off | Pair no speech companion. |
-| `--adapter PATH` | None | Apply this GGUF LoRA adapter at load, for text only. |
+| `--adapter PATH[:STRENGTH]` | None | Load this GGUF LoRA adapter, for text only, at this default strength, 1 when left out. A request can set its own. Repeat the flag for more. |
 | `--profile NAME` | None | Apply a built-in intent such as `coding` or `reasoning-high`, resolved for the model's family. |
 | `--system-prompt STR` | None | Use this system prompt when the request has none. |
 | `--thinking-budget N` | Unlimited | Cap reasoning tokens for each request. `0` closes thinking at once, and `-1` sets no budget. |
@@ -339,7 +339,8 @@ gmlx run coder --prompt "Refactor this loop."    # a config id, with its setting
 
 The positional argument is a path, or a model id or alias from your server
 config. A config id brings its path, sampling, system prompt, template,
-adapter, drafter and streaming settings, and flags you pass still win.
+adapters at their strengths, drafter and streaming settings, and flags you
+pass still win. A typed `--adapter` replaces the entry's adapters.
 
 These flags control generation:
 
@@ -396,7 +397,7 @@ These flags control loading:
 | `--no-chat-template` | Off | Pass the prompt verbatim. |
 | `--no-remap` | Off | Keep raw GGUF tensor names. |
 | `--no-zero-copy` | Off | Copy tensors out of the mmap instead of viewing them. |
-| `--adapter PATH` | None | Apply this GGUF LoRA adapter at load, for text only. |
+| `--adapter PATH[:STRENGTH]` | None | Apply this GGUF LoRA adapter at load at this strength, 1 when left out, for text only. Repeat for more adapters. |
 
 These flags control multimodal input, as [Vision and audio](vlm.md)
 describes. Under `--mmproj`, the bench and report flags and `--stream-cpu`
@@ -523,8 +524,18 @@ These flags say where the model runs:
 | `--no-family-defaults` | Off | Do not apply the family's sampling defaults on a bare path. |
 
 Slash commands in the chat change the system prompt, sampling, penalties,
-`--reasoning`, `--thinking` and `--thinking-budget` as you go. The other
-flags last for the whole chat.
+`--reasoning`, `--thinking`, `--thinking-budget` and the `--adapter`
+strength as you go. The other flags last for the whole chat.
+
+`--adapter PATH[:STRENGTH]` applies from the first turn at the strength
+you give. A strength is absolute, never a multiple of another:
+
+| Command | Effect |
+|---------|--------|
+| `/adapter` | Print the strength in effect. |
+| `/adapter S` | Run every adapter at strength S from the next turn. |
+| `/adapter on` | Go back to the strengths given on the command line. |
+| `/adapter off` | Run every adapter at strength 0. |
 
 These flags control display and sessions:
 
@@ -1068,11 +1079,14 @@ kept between prompts. A prompt longer than 2048 tokens runs in chunks of
 
 The positional argument is a path, or a model id or alias from your server
 config. A config id brings its path, chat template, streaming settings,
-system message, thinking controls and `chat_template_kwargs`, and flags
-you pass still win. Capture names the entry settings it does not apply:
-the KV cache settings and the `moe_*` settings. An entry that sets an
-adapter is refused. A MoE that does not fit in memory streams its experts,
-as in `gmlx run`.
+system message, thinking controls, `chat_template_kwargs` and adapters,
+and flags you pass still win. Capture names the entry settings it does not
+apply: the KV cache settings and the `moe_*` settings. A MoE that does not
+fit in memory streams its experts, as in `gmlx run`.
+
+`--adapter PATH[:STRENGTH]` captures the model with that GGUF LoRA adapter
+applied, at strength 1 when left out. Each adapter takes its own slot and
+every forward runs it at its strength, as `gmlx serve` runs a request.
 
 The recorded value of a block is its output averaged over the last
 `--positions` prompt tokens, in float32. This is the block output that
@@ -1096,6 +1110,7 @@ model has another count, capture prints a note.
 | `--think`, `--no-think` | The template's default | Render with thinking on or off, through the variable the template reads. |
 | `--chat-template STR_OR_PATH` | The GGUF's | Replace the chat template with inline Jinja or a `.jinja` or `.txt` file. |
 | `--config FILE` | The first default location | Resolve a model id against this config. |
+| `--adapter PATH[:STRENGTH]` | The entry's, else none | Capture with this GGUF LoRA adapter at this strength, 1 when left out. Repeat for more adapters. |
 | `--json` | Off | Print one JSON line for each prompt and a last result line. |
 | `-v`, `--verbose` | Off | Print the full load diagnostics. |
 | `--stream-experts`, `--stream-cpu` | Off | Stream a model bigger than memory, as in [run](#streaming-flags). |
@@ -1114,7 +1129,10 @@ The file holds these tensors:
 The file's metadata holds `format` (`gmlx.capture`), `arch`, the GGUF's
 `general.architecture`, `file` and `file_size` (all shards), `sets`, a
 JSON map from set name to prompt count, `positions`, `think` (`on`, `off`,
-`default`, or the thinking mode of a config entry) and `gmlx_version`.
+`default`, or the thinking mode of a config entry), `adapters` and
+`gmlx_version`. `adapters` is a JSON list with one object for each
+adapter: its `file` name, its `strength` and the `sha256` of the bytes
+loaded. It is `[]` without an adapter.
 
 With `--json`, every line on stdout is a JSON object with an `event` key,
 and other output goes to stderr:
@@ -1136,18 +1154,34 @@ and every action's flags are in the
 
 `gmlx kld` measures how far a GGUF's next-token distribution is from a
 reference GGUF's over a text, such as a quant against the BF16 file of the
-same model. It computes the numbers that `llama-perplexity --kl-divergence`
+same model. It also measures how far LoRA adapters at given strengths move
+a model. It computes the numbers that `llama-perplexity --kl-divergence`
 reports, so the two runtimes give comparable results.
 
 ```sh
 gmlx kld Qwen3.5-9B-Q4_K_M.gguf --reference Qwen3.5-9B-BF16.gguf --text page.txt
 gmlx kld Qwen3.5-9B-Q4_K_M.gguf --reference Qwen3.5-9B-BF16.gguf --text page.txt \
     --ctx 512 --chunks 16 --json
+gmlx kld Qwen3.5-9B-Q4_K_M.gguf --text page.txt \
+    --adapter a.gguf:0.5 --adapter a.gguf:1.5 --adapter b.gguf
 ```
 
-The reference loads first, alone, and scores the text into a temporary
-file. Then it unloads and MODEL loads, so the two models never share
-memory. The temporary file needs about 127 MB per chunk at a vocabulary of
+Each `--adapter PATH[:STRENGTH]` flag is one scored point: MODEL with that
+adapter at that strength, 1 when left out. Each distinct file loads once.
+The flags and `--reference` decide what is scored:
+
+| Flags | Reference | Points |
+|-------|-----------|--------|
+| `--reference` | The reference GGUF | MODEL |
+| `--reference` and `--adapter` | The reference GGUF | MODEL, then MODEL with each adapter point |
+| `--adapter` | MODEL without adapters | Each adapter point |
+| Neither | None | The command stops. |
+
+With `--reference`, the reference loads first, alone, and scores the text
+into a temporary file. Then it unloads and MODEL loads, so the two models
+never share memory. Without it, MODEL scores the reference and the points
+in one load. One forward can hold several points of the same chunks, as
+many as keep the float32 logits under 1 GB. The temporary file needs about 127 MB per chunk at a vocabulary of
 248,320 and `--ctx 512`. It goes in the temporary folder, which `TMPDIR`
 sets, and gmlx checks the free space before the reference loads.
 
@@ -1159,7 +1193,8 @@ stops before any load.
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `MODEL`, positional | Required | Score this GGUF, or this model id or alias from the config. |
-| `--reference FILE` | Required | Score MODEL against this GGUF or config id. |
+| `--reference FILE` | MODEL | Score MODEL against this GGUF or config id. |
+| `--adapter PATH[:STRENGTH]` | None | Score MODEL with this GGUF LoRA adapter at this strength, 1 when left out. Repeat for more points. |
 | `--text FILE` | Required | Score this UTF-8 text. One trailing newline is dropped, as llama.cpp does. |
 | `--ctx N` | `512` | Cut the text into chunks of N tokens. |
 | `--chunks N` | Every whole chunk | Score at most N chunks. |
@@ -1179,13 +1214,15 @@ A model given as a config id loads with the placement of its config entry,
 `stream:` and the MoE settings, where you typed no placement flag. The
 command stops before any load when the entry sets `adapter` or
 `rope_scaling`, which `gmlx kld` does not apply. Pass the GGUF path to
-score the bare file.
+score the bare file, with `--adapter` for each adapter point. An adapter
+on the output head also stops the command, because the head runs in
+float32 without adapters.
 
 The command also stops when either vocabulary adds EOS to each text
 (`tokenizer.ggml.add_eos_token`), because llama-perplexity refuses such a
 model.
 
-The table gives two numbers, each with its standard error:
+The table gives two numbers for each point, each with its standard error:
 
 | Name | Meaning |
 |------|---------|
@@ -1194,7 +1231,7 @@ The table gives two numbers, each with its standard error:
 
 With `--json`, each line is one JSON object with an `event` key. A
 `progress` line comes after each chunk of each pass, and one `result` line
-comes last:
+for each point comes last, in the order of the table:
 
 | Key | Meaning |
 |-----|---------|
@@ -1202,7 +1239,7 @@ comes last:
 | `stage` | On a progress line, `reference` or `model`, the pass that scored the chunk. |
 | `chunk`, `chunks` | On a progress line, the chunk just scored and the chunk count. |
 | `model`, `reference` | The two GGUF paths. |
-| `adapter`, `strength` | On a result line, `null`: the bare MODEL is scored. |
+| `adapter`, `strength` | On a result line, the adapter path and strength of the point, or `null` for MODEL without adapters. |
 | `mean_kld`, `mean_kld_unc` | Mean KLD and its standard error. |
 | `same_top_p`, `same_top_p_unc` | Same top p and its standard error, as a fraction from 0 to 1. |
 | `positions`, `chunks`, `ctx` | The positions scored, the chunks and the chunk length. |
