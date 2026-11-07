@@ -17,10 +17,20 @@ The wrapper:
   gemma layer tests ``ho[0] is x`` to reuse the normed input it was
   handed;
 - averages the streams of a hyper-connection model, whose wide residual
-  is ``[B, T, streams, n_embd]``, as llama.cpp's ``hc_stream_mean`` does.
+  is ``[B, T, streams, n_embd]``, as llama.cpp's ``hc_stream_mean`` does;
+- applies the pending expand of a hyper-connection layer in carry mode,
+  which returns the residual before its last expand and the expand's
+  inputs;
+- takes the active stream, stream 0, of a gemma-3n AltUp output
+  ``[streams, B, T, n_embd]``, the slice that cvector-generator reads
+  from llama.cpp's ``[n_embd, n_tokens, n_altup]`` ``l_out``.
+
+Any other layout raises RuntimeError.
 
 ``block_outputs`` runs one prompt with a fresh cache and stops after the
-trunk, so the vocabulary head never runs. A trunk that takes
+trunk, so the vocabulary head never runs. A long prompt runs in chunks
+through the cache, as a prefill does, and only the last chunk is
+recorded; it holds every averaged position. A trunk that takes
 ``keep_last`` gets None: every layer runs on every column.
 """
 from __future__ import annotations
@@ -40,15 +50,39 @@ _RECORDER: contextvars.ContextVar = contextvars.ContextVar(
     "gmlx_capture_recorder", default=None)
 
 
-def summarize(h: mx.array, positions: int) -> mx.array:
-    """The f32 mean of the last ``positions`` columns of row 0 of a block
-    output, ``[n_embd]``. A 4-D output holds the streams of a
-    hyper-connection model on axis 2, and they are averaged first."""
-    h = h.astype(mx.float32)
-    if h.ndim == 4:
-        h = h.mean(axis=2)
-    t = h.shape[1]
-    return h[0, max(t - positions, 0):, :].mean(axis=0)
+def summarize(h: mx.array, positions: int, tokens: int) -> mx.array:
+    """The f32 mean of the last ``positions`` columns of a block output for
+    one ``tokens``-column forward, ``[n_embd]``. Raises RuntimeError on a
+    layout other than ``[1, T, D]``, ``[1, T, streams, D]`` (the streams
+    are averaged) and ``[streams, 1, T, D]`` (stream 0 is taken)."""
+    s = tuple(h.shape)
+    t0 = max(tokens - positions, 0)
+    if h.ndim in (3, 4) and s[:2] == (1, tokens):
+        h = h[0, t0:].astype(mx.float32)
+        if h.ndim == 3:
+            h = h.mean(axis=1)
+    elif h.ndim == 4 and s[1:3] == (1, tokens):
+        h = h[0, 0, t0:].astype(mx.float32)
+    else:
+        raise RuntimeError(f"capture cannot read a block output of shape {s} "
+                           f"for a {tokens}-token prompt")
+    return h.mean(axis=0)
+
+
+def _block_output(out) -> mx.array:
+    """The hidden state a layer returned. A hyper-connection layer in
+    carry mode returns ``(h, (x, residual, post, comb))``, where ``h`` is
+    the residual before its last expand; the block output is that expand."""
+    if not isinstance(out, tuple):
+        return out
+    h = out[0]
+    carry = out[1] if len(out) == 2 else None
+    if (h.ndim == 4 and isinstance(carry, tuple) and len(carry) == 4
+            and all(isinstance(a, mx.array) for a in carry)):
+        from gmlx.models.deepseek_v4 import hyper_connection
+
+        return hyper_connection.hc_expand_m1(*carry)
+    return h
 
 
 class Recorder:
@@ -60,14 +94,15 @@ class Recorder:
         self.active: set[int] = set()
         self.begin()
 
-    def begin(self) -> None:
+    def begin(self, tokens: int = 0) -> None:
+        """Start a forward of ``tokens`` columns."""
+        self.tokens = tokens
         self.rows: list = [None] * self.n_layer
         self.calls = [0] * self.n_layer
 
     def record(self, idx: int, out) -> None:
-        h = out[0] if isinstance(out, tuple) else out
         self.calls[idx] += 1
-        self.rows[idx] = summarize(h, self.positions)
+        self.rows[idx] = summarize(_block_output(out), self.positions, self.tokens)
 
     def finish(self) -> mx.array:
         """``[n_layer, n_embd]`` f32. Raises RuntimeError unless every
@@ -185,24 +220,50 @@ def _trunk_owner(model):
     return None
 
 
-def block_outputs(model, ids, rec: Recorder) -> mx.array:
-    """Run ``ids`` (one prompt) through ``model`` under ``rec`` and return
-    the evaluated ``[n_layer, n_embd]`` f32 block outputs."""
-    x = mx.array([list(ids)], dtype=mx.int32)
-    cache = model.make_cache() if hasattr(model, "make_cache") else None
-    rec.begin()
+def _chunks(n: int, positions: int, step: int | None) -> list[int]:
+    """Chunk widths for an ``n``-token prompt: pieces of ``step``, with a
+    last piece of ``max(positions, step)`` tokens or the whole prompt."""
+    if step is None or n <= step:
+        return [n]
+    last = min(n, max(positions, step))
+    head, rest = divmod(n - last, step)
+    return [step] * head + ([rest] if rest else []) + [last]
+
+
+def _forward(model, x, cache) -> None:
     owner = _trunk_owner(model)
     if owner is None:
         model(x, cache=cache)
-    else:
-        attrs = vars(owner)
-        attrs["model"] = _TrunkOnly(owner.model)
+        return
+    attrs = vars(owner)
+    attrs["model"] = _TrunkOnly(owner.model)
+    try:
+        model(x, cache=cache)
+    except _TrunkDone:
+        pass
+    finally:
+        attrs.pop("model", None)
+
+
+def block_outputs(model, ids, rec: Recorder, step: int | None = None) -> mx.array:
+    """Run ``ids`` (one prompt) through ``model`` under ``rec`` and return
+    the evaluated ``[n_layer, n_embd]`` f32 block outputs. With ``step``, a
+    longer prompt runs in chunks through the cache (see ``_chunks``)."""
+    ids = list(ids)
+    cache = model.make_cache() if hasattr(model, "make_cache") else None
+    widths = [len(ids)] if cache is None else _chunks(len(ids), rec.positions, step)
+    start = 0
+    for n in widths[:-1]:
+        tok = _RECORDER.set(None)
         try:
-            model(x, cache=cache)
-        except _TrunkDone:
-            pass
+            _forward(model, mx.array([ids[start:start + n]], dtype=mx.int32), cache)
         finally:
-            attrs.pop("model", None)
+            _RECORDER.reset(tok)
+        mx.eval([c.state for c in cache])
+        mx.clear_cache()
+        start += n
+    rec.begin(widths[-1])
+    _forward(model, mx.array([ids[start:]], dtype=mx.int32), cache)
     out = rec.finish()
     mx.eval(out)
     return out

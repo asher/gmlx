@@ -231,3 +231,119 @@ def test_layers_run_plain_outside_the_block():
     assert "_gmlx_capture_idx" not in layer.__dict__
     x = mx.ones((1, 2, _D))
     np.testing.assert_allclose(np.array(layer(x)), np.array(x + mx.tanh(x @ layer.w)))
+
+
+def _expand(x, residual, post, comb):
+    """A stand-in for the hyper-connection expand of a carry."""
+    return residual * comb + x[:, :, None, :] * post
+
+
+class _Carry(_Block):
+    """A deepseek-v4 layer in carry mode on its short-step route: it hands
+    back the residual before its last expand, with that expand pending.
+    The next layer, or the trunk after the last one, applies it."""
+
+    def __call__(self, h, carry=None):
+        if carry is not None:
+            h = _expand(*carry)
+        h = h + mx.tanh(h @ self.w)
+        x = mx.tanh(h.mean(axis=2) @ self.w)
+        s = h.shape[2]
+        post = mx.arange(1, s + 1, dtype=mx.float32)[None, None, :, None]
+        comb = mx.full((1, 1, s, 1), 0.5)
+        return h, (x, h, post, comb)
+
+
+class _CarryTrunk(_Trunk):
+    def __call__(self, inputs, cache=None, keep_last=0):
+        h = mx.broadcast_to(self.embed[inputs][:, :, None, :],
+                            (1, inputs.shape[1], self.streams, _D))
+        carry = None
+        for layer in self.layers:
+            h, carry = layer(h, carry=carry)
+        return _expand(*carry)
+
+
+def test_a_pending_expand_is_recorded_expanded(monkeypatch):
+    from gmlx.models.deepseek_v4 import hyper_connection
+
+    monkeypatch.setattr(hyper_connection, "hc_expand_m1", _expand)
+    trunk = _CarryTrunk([_Carry(i) for i in range(3)], streams=4)
+    h = mx.broadcast_to(trunk.embed[mx.array([_IDS])][:, :, None, :], (1, len(_IDS), 4, _D))
+    want, carry = [], None
+    for layer in trunk.layers:
+        h, carry = layer(h, carry=carry)
+        want.append(np.array(_expand(*carry)).mean(axis=2)[0, -2:].mean(axis=0))
+    got = _capture(_wrap(trunk), 2)
+    np.testing.assert_allclose(got, np.stack(want), rtol=1e-5, atol=1e-6)
+
+
+class _AltUp(_Block):
+    """A gemma-3n layer: the AltUp streams lead, ``[streams, B, T, D]``."""
+
+    def __call__(self, x, mask=None, cache=None):
+        mix = mx.arange(1, x.shape[0] + 1, dtype=mx.float32)[:, None, None, None]
+        return x + mx.tanh(x @ self.w) * mix
+
+
+class _AltUpTrunk(_Trunk):
+    def __call__(self, inputs, cache=None, keep_last=0):
+        h = self.embed[inputs]
+        h = mx.stack([h * (i + 1) for i in range(self.streams)])
+        for layer in self.layers:
+            h = layer(h)
+        return h
+
+
+def test_altup_streams_record_the_active_stream():
+    trunk = _AltUpTrunk([_AltUp(i) for i in range(2)], streams=4)
+    h = mx.stack([trunk.embed[mx.array([_IDS])] * (i + 1) for i in range(4)])
+    want = []
+    for layer in trunk.layers:
+        h = layer(h)
+        want.append(np.array(h)[0, 0, -2:].mean(axis=0))
+    got = _capture(_wrap(trunk), 2)
+    np.testing.assert_allclose(got, np.stack(want), rtol=1e-5, atol=1e-6)
+
+
+class _Transposed(_Block):
+    def __call__(self, x, mask=None, cache=None):
+        return x.swapaxes(1, 2)
+
+
+def test_an_unknown_layout_is_an_error():
+    trunk = _Trunk([_Transposed(0)])
+    with pytest.raises(RuntimeError, match=r"shape \(1, 16, 7\) for a 7-token"):
+        _capture(_wrap(trunk), 1)
+
+
+class _Cache:
+    def __init__(self):
+        self.state = mx.zeros((1,))
+
+
+class _ChunkLM(_LM):
+    def make_cache(self):
+        return [_Cache() for _ in self.layers]
+
+
+class _WidthTrunk(_Trunk):
+    def __call__(self, inputs, cache=None, keep_last=0):
+        self.seen.append(inputs.shape[1])
+        return super().__call__(inputs, cache=cache, keep_last=keep_last)
+
+
+@pytest.mark.parametrize("positions, step, widths", [
+    (2, 3, [3, 1, 3]),      # the last chunk is a full step
+    (5, 3, [2, 5]),         # and holds every averaged position
+    (2, 7, [7]),
+    (2, None, [7]),
+])
+def test_a_long_prompt_runs_in_chunks(positions, step, widths):
+    trunk = _WidthTrunk([_Block(i) for i in range(3)])
+    model = TextOnlyModel(_ChunkLM(trunk), config={"model_type": "toy"})
+    layers = capture_layers(model)
+    with layer_capture(layers, positions) as rec:
+        got = np.array(block_outputs(model, _IDS, rec, step=step))
+    assert [w for w in trunk.seen if w is not None] == widths
+    np.testing.assert_allclose(got, _reference(trunk, positions), rtol=1e-5, atol=1e-6)
