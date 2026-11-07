@@ -67,12 +67,14 @@ UNSUPPORTED = ("continue_final_message is not supported for this model's chat "
 _MISSING = object()
 
 # Processor apply_chat_template overrides known to render the template text
-# that handler_for reads, as llama-server renders it. Gemma4Processor is not
-# one: its rebuild turns a string system message into text parts, which the
-# template renders with a trailing space.
+# that handler_for reads, as llama-server renders it: (module, class, whether
+# it renders with its tokenizer's template). Gemma4Processor renders with
+# its tokenizer's, so that must be the template handler_for reads.
 _JINJA_OVERRIDES = (
-    ("gmlx._vendor.mlx_lm.tokenizer_utils", "TokenizerWrapper"),
-    ("gmlx.serve.bridge_vlm", "_GgufServerProcessor"),
+    ("gmlx._vendor.mlx_lm.tokenizer_utils", "TokenizerWrapper", False),
+    ("gmlx.serve.bridge_vlm", "_GgufServerProcessor", False),
+    ("gmlx._vendor.mlx_vlm.models.gemma4.processing_gemma4", "Gemma4Processor",
+     True),
 )
 
 
@@ -182,8 +184,14 @@ def _renders_template_text(processor) -> bool:
     qualname = getattr(fn, "__qualname__", "") or ""
     if module.startswith("transformers."):
         return True
-    return any(module == m and qualname == f"{cls}.apply_chat_template"
-               for m, cls in _JINJA_OVERRIDES)
+    for m, cls, via_tokenizer in _JINJA_OVERRIDES:
+        if module == m and qualname == f"{cls}.apply_chat_template":
+            if not via_tokenizer:
+                return True
+            tokenizer = getattr(processor, "tokenizer", None)
+            return (getattr(processor, "chat_template", None)
+                    == getattr(tokenizer, "chat_template", None))
+    return False
 
 
 def _stash_continuation(args, request, processor):

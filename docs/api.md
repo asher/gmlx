@@ -346,7 +346,7 @@ llama-server renders for the same messages:
 
 - Qwen3.5 and later Qwen templates, and the other templates that write tool
   calls in the same `<tool_call>` and `<function=...>` form.
-- Gemma 4, on a model set up without `mmproj:`.
+- Gemma 4.
 - SmolLM2-135M-Instruct.
 
 A request to any other model gets a 400. So does a last message with

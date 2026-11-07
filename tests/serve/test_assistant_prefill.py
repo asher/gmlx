@@ -356,22 +356,6 @@ _GEMMA_CONT_ROWS = [
     if r["run"] == "llama-server/gemma4_12b" and "continue_final_message" in r["body"]]
 
 
-def test_the_gemma4_processor_gets_a_400(chat, monkeypatch):
-    """Gemma4Processor renders another prompt than llama-server, so it may
-    not continue a message."""
-    row = _row("gemma4_12b/think-off/content")
-    processor = _Gemma4Processor(
-        (_FIXTURES / row["template"]).read_text(), "<bos>")
-    monkeypatch.setattr(_OPENAI, "get_cached_model", lambda *a, **k: (
-        None, processor, {"model_type": "gemma4_unified"}))
-    from fastapi.testclient import TestClient
-
-    r = TestClient(_APP.app).post("/v1/chat/completions", json={
-        "model": "m", "max_tokens": 1, **row["body"]})
-    assert r.status_code == 400, r.text
-    assert prefill.UNSUPPORTED in r.text
-
-
 @pytest.mark.parametrize("rid", _GEMMA_CONT_ROWS)
 def test_the_gemma4_processor_renders_llama_servers_prompt(chat, rid):
     row = _row(rid)
@@ -391,8 +375,7 @@ def test_the_gemma4_processor_renders_llama_servers_prompt(chat, rid):
 
 
 _GEMMA_ROWS = [r for r in _FIXTURE["rows"]
-               if r["run"] == "llama-server/gemma4_12b"
-               and "continue_final_message" not in r["body"]]
+               if r["run"] == "llama-server/gemma4_12b"]
 
 
 @pytest.mark.parametrize("row", _GEMMA_ROWS, ids=[r["id"] for r in _GEMMA_ROWS])
@@ -415,6 +398,45 @@ def test_a_gemma4_vision_entry_renders_a_developer_message_as_text(chat,
     got = chat(run, body, vision=True)
     assert " <turn|>" not in got
     assert got == chat(run, body)
+
+
+# A 1x1 PNG.
+_PNG = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+        "AAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==")
+
+
+def test_a_gemma4_vision_prefill_with_an_image_keeps_the_history(chat):
+    run = "llama-server/gemma4_12b"
+    history = [{"role": "system", "content": "Be brief."},
+               {"role": "user", "content": [
+                   {"type": "text", "text": "What is this?"},
+                   {"type": "image_url", "image_url": {"url": _PNG}}]}]
+    plain = chat(run, {"messages": history, "add_generation_prompt": False},
+                 vision=True)
+    got = chat(run, _prefill_of(history, {"role": "assistant",
+                                          "content": "It is"}), vision=True)
+    assert plain.count("<|image|>") == 1
+    assert got.startswith(plain)
+    assert got.endswith("It is")
+
+
+def _prefill_of(history, final):
+    return {"messages": [*history, final], "continue_final_message": True,
+            "add_generation_prompt": False}
+
+
+def test_template_for_reads_the_template_the_gemma4_processor_renders():
+    processor, _ = _processor_for("llama-server/gemma4_12b", vision=True)
+    assert prefill.template_for(processor) == processor.tokenizer.chat_template
+    prefill._stash_continuation(
+        types.SimpleNamespace(),
+        _SCHEMAS.ChatRequest(model="m", **_prefill(_C)), processor)
+
+
+def test_a_gemma4_processor_with_another_template_than_its_tokenizer_gets_a_400():
+    processor, _ = _processor_for("llama-server/gemma4_12b", vision=True)
+    processor.chat_template = processor.chat_template + "{# other #}"
+    assert _gen_args_refusal(_prefill(_C), processor) == prefill.UNSUPPORTED
 
 
 def test_a_render_error_in_a_prefill_is_not_a_template_refusal():
