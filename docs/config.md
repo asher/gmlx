@@ -478,8 +478,8 @@ profiles:
 | <a id="samplingenable_thinking"></a>`enable_thinking` | the template's | Whether the chat template opens a thinking block. A profile's [`thinking`](#profilesthinking) sets it on any family. |
 | <a id="samplingthinking_budget"></a>`thinking_budget` | no limit | Close the thinking block after this many reasoning tokens. `-1` sets no budget. |
 | <a id="samplingthinking_budget_message"></a>`thinking_budget_message` | none | Serve only. Text written in the thinking block ahead of the end marker when the budget runs out. |
-| <a id="samplingthinking_start_token"></a>`thinking_start_token` | `<think>` | Text that opens the model's reasoning. Family defaults set it for models that use other text. |
-| <a id="samplingthinking_end_token"></a>`thinking_end_token` | `</think>` | Text that closes the model's reasoning |
+| <a id="samplingthinking_start_token"></a>`thinking_start_token` | detected | Text that opens the model's reasoning. gmlx reads it from the chat template or the vocabulary. Set it when detection fails. |
+| <a id="samplingthinking_end_token"></a>`thinking_end_token` | detected | Text that closes the model's reasoning, read as the start text is |
 
 On a model with a built-in drafter, `thinking_budget` can run up to one
 draft round over, and a request that runs in a batch with other requests

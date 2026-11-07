@@ -228,6 +228,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   where they said the server did not answer.
 - A chat, Responses, Messages or images request with a lone surrogate
   escape gets a 400 naming the field, where it returned a 500.
+- A `thinking_budget` on Gemma 4 closes the thinking block at the budget on
+  `gmlx serve`, where the budget never ran. The server reads the thinking
+  markers from the chat template or the vocabulary, with or without MTP.
+- A `response_format` schema and XTC now apply on `gmlx serve` to models that
+  do not think, to Gemma 4, to Kimi K3 with thinking off and to
+  Nemotron-3.5-Bolt-E4B with thinking off. Before, they waited for a
+  `</think>` that these models never write.
 
 ## [0.5.4] - 2026-10-29
 
