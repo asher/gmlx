@@ -2363,6 +2363,49 @@ def _shard_files(path: str) -> list[str]:
     return out
 
 
+def _would_be(p, model_dirs) -> list[str]:
+    """Where model path ``p`` would be once it does not resolve: itself
+    when absolute, else under each model_dirs root, never in the folder
+    rm runs from. An ``hf:`` ref has no such place."""
+    if not p or str(p).startswith("hf:"):
+        return []
+    expanded = os.path.expanduser(os.path.expandvars(str(p)))
+    if os.path.isabs(expanded):
+        return [expanded]
+    return [os.path.abspath(os.path.join(
+        os.path.expanduser(os.path.expandvars(d)), expanded))
+        for d in model_dirs]
+
+
+def _rm_keys(p, model_dirs) -> set:
+    """The files (:func:`_file_key`) model path ``p`` holds for rm: its
+    file, or where it would be when it does not resolve, so a missing
+    path another model names keeps what a pull left of it."""
+    rp = _try_resolve(p, model_dirs)
+    if rp:
+        return {_file_key(rp)}
+    return {_file_key(c) for c in _would_be(p, model_dirs)}
+
+
+def _rm_files(p, model_dirs, refs) -> tuple[str, list[str]]:
+    """``(state, files)`` of model path ``p`` for rm: "kept" when another
+    model holds it (``refs``), "found" with its files, else "missing" with
+    what a pull stopped part way left where it would be, maybe none."""
+    rp = _try_resolve(p, model_dirs, cwd=False)
+    if rp is not None and os.path.exists(rp):
+        if _file_key(rp) in refs:
+            return "kept", []
+        return "found", _shard_files(rp)
+    kept, out = False, []
+    for cand in [rp] if rp is not None else _would_be(p, model_dirs):
+        files = _shard_files(cand)
+        if _file_key(cand) in refs:
+            kept = kept or bool(files)
+        else:
+            out += files
+    return ("kept" if kept and not out else "missing"), out
+
+
 def _rm_resolve_target(cfg, requested):
     """Resolve a requested id against aliases, config entries, and the
     discovery scan. Returns (target, model, is_configured, disc, notes);
@@ -2400,15 +2443,11 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
     ref_paths = set()
     for mc in others:
         for p in _chat_files(mc):
-            rp = _try_resolve(p, cfg.model_dirs)
-            if rp:
-                ref_paths.add(_file_key(rp))
+            ref_paths |= _rm_keys(p, cfg.model_dirs)
     # An image model that names this model's GGUF as its encoder keeps it.
     for im in _all_images(cfg, images):
         for p in (im.encoder, im.encoder_mmproj):
-            rp = _try_resolve(p, cfg.model_dirs)
-            if rp:
-                ref_paths.add(_file_key(rp))
+            ref_paths |= _rm_keys(p, cfg.model_dirs)
     ref_paths |= _video_refs(cfg)
 
     to_delete: list[str] = []
@@ -2417,25 +2456,26 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
             notes.append("path is an hf: cache ref - the cached file stays "
                          "(the HF cache manages its own blobs)")
         else:
-            main = _try_resolve(m.path, cfg.model_dirs, cwd=False)
-            if main is None:
+            # A file missing after a pull was killed part way still has
+            # what the pull left where it would be.
+            state, files = _rm_files(m.path, cfg.model_dirs, ref_paths)
+            if state == "kept":
+                notes.append("model file kept: another model references it")
+            elif state == "missing" and not files:
                 notes.append(f"model file not found ({m.path}) - removing "
                              "the config entry only")
-            elif _file_key(main) in ref_paths:
-                notes.append("model file kept: another model references it")
-            else:
-                to_delete += _shard_files(main)
+            elif state == "missing":
+                notes.append(f"model file not found ({m.path}) - removing "
+                             "what an interrupted pull left of it")
+            to_delete += files
         for label, comp in (("mmproj", m.mmproj), ("draft", m.draft_gguf),
                             ("adapter", m.adapter)):
             if not comp or str(comp).startswith("hf:"):
                 continue
-            rp = _try_resolve(comp, cfg.model_dirs, cwd=False)
-            if rp is None:
-                continue
-            if _file_key(rp) in ref_paths:
+            state, files = _rm_files(comp, cfg.model_dirs, ref_paths)
+            if state == "kept":
                 notes.append(f"{label} kept: another model references it")
-            else:
-                to_delete += _shard_files(rp)
+            to_delete += files
     to_delete = list(dict.fromkeys(to_delete))
     sizes = {p: os.path.getsize(p) for p in to_delete if os.path.exists(p)}
     return to_delete, sizes
