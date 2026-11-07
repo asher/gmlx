@@ -4,23 +4,7 @@
  "check": 3,
  "family": "flux2_klein_9b_kv",
  "script": "scripts/image_oracle/check3_flux2_klein.py",
- "argv": [
-  "check3_flux2_klein.py",
-  "--reference",
-  "src",
-  "--reference-commit",
-  "50fe5162777813d869182b139e83b10743caef15",
-  "--dit",
-  "Flux-2-Klein-9B-KV-Q8_0.gguf",
-  "--kv",
-  "--sizes",
-  "512",
-  "--rows",
-  "--refs",
-  "4",
-  "--ref-size",
-  "512"
- ],
+ "argv": ["check3_flux2_klein.py", "--reference", "src", "--reference-commit", "50fe5162777813d869182b139e83b10743caef15", "--dit", "Flux-2-Klein-9B-KV-Q8_0.gguf", "--kv", "--sizes", "512", "--rows", "--refs", "4", "--ref-size", "512"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -122,86 +106,47 @@
  "npz": "check3_flux2_klein_9b_kv_r4_512.npz",
  "tensors": {
   "features": {
-   "shape": [
-    512,
-    12288
-   ],
+   "shape": [512, 12288],
    "dtype": "float32",
    "sha256": "806f3b2190f25e0221feccdf1bab17b2f8dea78c091ea9b72f86442c7be04e6b"
   },
   "in.time_in": {
-   "shape": [
-    1,
-    256
-   ],
+   "shape": [1, 256],
    "dtype": "float32",
    "sha256": "cbacd50d6ddae5179d08ae5986820a7baaecca4b2a9962dd856fc80aa62707e4"
   },
   "in.time_in2": {
-   "shape": [
-    1,
-    256
-   ],
+   "shape": [1, 256],
    "dtype": "float32",
    "sha256": "919faf1a2d75ebe94d1406f30b2164241ff1f51756ae89a5bea168ae8bd2469f"
   },
   "latents": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "2cb3e62b5bb6a58f5b08f360ba95db386349bd0b4fe4128bd931125c8cceae04"
   },
   "latents2": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "c4e55db879884e2aa0e01c18c95bef0cd272ebe91a9b51fab019af1075cb3eb8"
   },
   "refs.0": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "7097102f2f785e6b17e40c748de6f47327eef79637c255a6c7b18a57c0fdf0e6"
   },
   "refs.1": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "36c0e4ac7ce3cd3713c2bee108ce2c0455ccb42eab274aa77806fbf31b4c1671"
   },
   "refs.2": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "8524d637b9e6b3eeb0ccf0f4e965622732cae9e4061f7e6bbc31013917d87a16"
   },
   "refs.3": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "d8de7fa4ca96f439fe7c5af8de8ed0d11a400615ebe909e80208fafd08f28681"
   },
@@ -216,42 +161,22 @@
    "sha256": "a4f97ae73ebb6b17294a19b9df4647cd141bd03e2b9381add065e8a34b6d5b89"
   },
   "velocity_cached": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "69afcbba9401f016fddb7c8d04e4fa7d65018ae97e69f8f85a2e6225dbcf4811"
   },
   "velocity_cached_bf16": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "9e2f0a88db9c9fd8d6e39e3965b33760727a58f58d3a39958a01362eaffd6ae2"
   },
   "velocity_extract": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "7766027cd88fb27a17349bc1c0088c52f72d8728d2c4b3307b4b05fddd6df5d4"
   },
   "velocity_extract_bf16": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "248f8061d6f8ecb99fac454ea2e9aa2326dc2a4225426a67c959bdaa2cb5aa48"
   }

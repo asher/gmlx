@@ -307,9 +307,7 @@ def write(a) -> int:
     for p, d in zip(paths, docs):
         d["results"]["step_nudge_spread"] = rec
         d["tolerances"]["steps"] = tols
-        tmp = p.with_name(p.name + ".part")
-        tmp.write_text(json.dumps(d, indent=1) + "\n")
-        os.replace(tmp, p)
+        fixtures.write_json(p, d)
     for i, v in steps.items():
         for s, r in v.items():
             print(f"[spread6] {a.name} step {i} {s}: spread "

@@ -4,13 +4,7 @@
  "check": 7,
  "family": "qwen_image21",
  "script": "scripts/image_oracle/check7_qwen_image21_lora.py",
- "argv": [
-  "check7_qwen_image21_lora.py",
-  "--dit",
-  "qwen-image-2.1-Q4_K_M.gguf",
-  "--config",
-  "Qwen__Qwen-Image-2.1"
- ],
+ "argv": ["check7_qwen_image21_lora.py", "--dit", "qwen-image-2.1-Q4_K_M.gguf", "--config", "Qwen__Qwen-Image-2.1"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -55,74 +49,21 @@
   }
  },
  "inputs": {
-  "target_tokens": [
-   32,
-   32
-  ],
-  "latent_shape": [
-   1,
-   64,
-   32,
-   32
-  ],
+  "target_tokens": [32, 32],
+  "latent_shape": [1, 64, 32, 32],
   "ref_shapes": [],
   "image_slots": [],
   "noise_seed": 7,
   "steps": 40,
   "step_a": 12,
   "step_b": 13,
-  "sigmas": [
-   1.0,
-   0.9849190711975098,
-   0.9695172309875488,
-   0.9537844657897949,
-   0.9377097487449646,
-   0.9212818741798401,
-   0.9044891595840454,
-   0.8873191475868225,
-   0.8697591423988342,
-   0.8517956733703613,
-   0.8334145545959473,
-   0.8146013021469116,
-   0.7953401207923889,
-   0.7756150960922241,
-   0.7554092407226562,
-   0.7347046732902527,
-   0.7134827971458435,
-   0.6917237639427185,
-   0.669407308101654,
-   0.6465113162994385,
-   0.6230131387710571,
-   0.5988887548446655,
-   0.574112594127655,
-   0.5486580729484558,
-   0.5224968194961548,
-   0.49559903144836426,
-   0.46793311834335327,
-   0.43946588039398193,
-   0.41016173362731934,
-   0.3799833059310913,
-   0.3488909602165222,
-   0.3168424963951111,
-   0.2837931513786316,
-   0.24969524145126343,
-   0.2144981026649475,
-   0.17814767360687256,
-   0.14058631658554077,
-   0.10175251960754395,
-   0.061580538749694824,
-   0.019999980926513672,
-   0.0
-  ],
+  "sigmas": [1.0, 0.9849190711975098, 0.9695172309875488, 0.9537844657897949, 0.9377097487449646, 0.9212818741798401, 0.9044891595840454, 0.8873191475868225, 0.8697591423988342, 0.8517956733703613, 0.8334145545959473, 0.8146013021469116, 0.7953401207923889, 0.7756150960922241, 0.7554092407226562, 0.7347046732902527, 0.7134827971458435, 0.6917237639427185, 0.669407308101654, 0.6465113162994385, 0.6230131387710571, 0.5988887548446655, 0.574112594127655, 0.5486580729484558, 0.5224968194961548, 0.49559903144836426, 0.46793311834335327, 0.43946588039398193, 0.41016173362731934, 0.3799833059310913, 0.3488909602165222, 0.3168424963951111, 0.2837931513786316, 0.24969524145126343, 0.2144981026649475, 0.17814767360687256, 0.14058631658554077, 0.10175251960754395, 0.061580538749694824, 0.019999980926513672, 0.0],
   "sigma_a": 0.7953401207923889,
   "sigma_b": 0.7756150960922241,
   "blocks": true,
   "config_revision": "790c92633540aa0cb11d9abf19eb46d861714758",
   "source": "check3_qwen_image21_512",
-  "size": [
-   512,
-   512
-  ],
+  "size": [512, 512],
   "variant": "plain",
   "pairs_fixture": "check7_qwen_image21_lora_512",
   "merge": "W + the sum over adapters of strength * (alpha / rank) * (up @ down) in float32, then cast to the mode's dtype; a missing alpha gives 1.0",
@@ -131,404 +72,13 @@
     "name": "check7_qwen_image21_lora_512",
     "alpha": null,
     "strength": 0.5,
-    "targets": [
-     "transformer_blocks.0.attn.to_q",
-     "transformer_blocks.0.attn.to_k",
-     "transformer_blocks.0.attn.to_v",
-     "transformer_blocks.0.attn.to_out.0",
-     "transformer_blocks.0.img_mlp.gate_layer",
-     "transformer_blocks.0.img_mlp.proj",
-     "transformer_blocks.0.img_mlp.out",
-     "transformer_blocks.4.attn.to_q",
-     "transformer_blocks.4.attn.to_k",
-     "transformer_blocks.4.attn.to_v",
-     "transformer_blocks.4.attn.to_out.0",
-     "transformer_blocks.4.img_mlp.gate_layer",
-     "transformer_blocks.4.img_mlp.proj",
-     "transformer_blocks.4.img_mlp.out",
-     "transformer_blocks.9.attn.to_q",
-     "transformer_blocks.9.attn.to_k",
-     "transformer_blocks.9.attn.to_v",
-     "transformer_blocks.9.attn.to_out.0",
-     "transformer_blocks.9.img_mlp.gate_layer",
-     "transformer_blocks.9.img_mlp.proj",
-     "transformer_blocks.9.img_mlp.out",
-     "transformer_blocks.13.attn.to_q",
-     "transformer_blocks.13.attn.to_k",
-     "transformer_blocks.13.attn.to_v",
-     "transformer_blocks.13.attn.to_out.0",
-     "transformer_blocks.13.img_mlp.gate_layer",
-     "transformer_blocks.13.img_mlp.proj",
-     "transformer_blocks.13.img_mlp.out",
-     "transformer_blocks.18.attn.to_q",
-     "transformer_blocks.18.attn.to_k",
-     "transformer_blocks.18.attn.to_v",
-     "transformer_blocks.18.attn.to_out.0",
-     "transformer_blocks.18.img_mlp.gate_layer",
-     "transformer_blocks.18.img_mlp.proj",
-     "transformer_blocks.18.img_mlp.out",
-     "transformer_blocks.22.attn.to_q",
-     "transformer_blocks.22.attn.to_k",
-     "transformer_blocks.22.attn.to_v",
-     "transformer_blocks.22.attn.to_out.0",
-     "transformer_blocks.22.img_mlp.gate_layer",
-     "transformer_blocks.22.img_mlp.proj",
-     "transformer_blocks.22.img_mlp.out",
-     "transformer_blocks.27.attn.to_q",
-     "transformer_blocks.27.attn.to_k",
-     "transformer_blocks.27.attn.to_v",
-     "transformer_blocks.27.attn.to_out.0",
-     "transformer_blocks.27.img_mlp.gate_layer",
-     "transformer_blocks.27.img_mlp.proj",
-     "transformer_blocks.27.img_mlp.out",
-     "transformer_blocks.31.attn.to_q",
-     "transformer_blocks.31.attn.to_k",
-     "transformer_blocks.31.attn.to_v",
-     "transformer_blocks.31.attn.to_out.0",
-     "transformer_blocks.31.img_mlp.gate_layer",
-     "transformer_blocks.31.img_mlp.proj",
-     "transformer_blocks.31.img_mlp.out"
-    ]
+    "targets": ["transformer_blocks.0.attn.to_q", "transformer_blocks.0.attn.to_k", "transformer_blocks.0.attn.to_v", "transformer_blocks.0.attn.to_out.0", "transformer_blocks.0.img_mlp.gate_layer", "transformer_blocks.0.img_mlp.proj", "transformer_blocks.0.img_mlp.out", "transformer_blocks.4.attn.to_q", "transformer_blocks.4.attn.to_k", "transformer_blocks.4.attn.to_v", "transformer_blocks.4.attn.to_out.0", "transformer_blocks.4.img_mlp.gate_layer", "transformer_blocks.4.img_mlp.proj", "transformer_blocks.4.img_mlp.out", "transformer_blocks.9.attn.to_q", "transformer_blocks.9.attn.to_k", "transformer_blocks.9.attn.to_v", "transformer_blocks.9.attn.to_out.0", "transformer_blocks.9.img_mlp.gate_layer", "transformer_blocks.9.img_mlp.proj", "transformer_blocks.9.img_mlp.out", "transformer_blocks.13.attn.to_q", "transformer_blocks.13.attn.to_k", "transformer_blocks.13.attn.to_v", "transformer_blocks.13.attn.to_out.0", "transformer_blocks.13.img_mlp.gate_layer", "transformer_blocks.13.img_mlp.proj", "transformer_blocks.13.img_mlp.out", "transformer_blocks.18.attn.to_q", "transformer_blocks.18.attn.to_k", "transformer_blocks.18.attn.to_v", "transformer_blocks.18.attn.to_out.0", "transformer_blocks.18.img_mlp.gate_layer", "transformer_blocks.18.img_mlp.proj", "transformer_blocks.18.img_mlp.out", "transformer_blocks.22.attn.to_q", "transformer_blocks.22.attn.to_k", "transformer_blocks.22.attn.to_v", "transformer_blocks.22.attn.to_out.0", "transformer_blocks.22.img_mlp.gate_layer", "transformer_blocks.22.img_mlp.proj", "transformer_blocks.22.img_mlp.out", "transformer_blocks.27.attn.to_q", "transformer_blocks.27.attn.to_k", "transformer_blocks.27.attn.to_v", "transformer_blocks.27.attn.to_out.0", "transformer_blocks.27.img_mlp.gate_layer", "transformer_blocks.27.img_mlp.proj", "transformer_blocks.27.img_mlp.out", "transformer_blocks.31.attn.to_q", "transformer_blocks.31.attn.to_k", "transformer_blocks.31.attn.to_v", "transformer_blocks.31.attn.to_out.0", "transformer_blocks.31.img_mlp.gate_layer", "transformer_blocks.31.img_mlp.proj", "transformer_blocks.31.img_mlp.out"]
    }
   ],
-  "dialects": [
-   "diffusers",
-   "peft"
-  ],
-  "rows": [
-   "joint.transformer_blocks.0",
-   "joint.transformer_blocks.1",
-   "joint.transformer_blocks.2",
-   "joint.transformer_blocks.3",
-   "joint.transformer_blocks.4",
-   "joint.transformer_blocks.5",
-   "joint.transformer_blocks.6",
-   "joint.transformer_blocks.7",
-   "joint.transformer_blocks.8",
-   "joint.transformer_blocks.9",
-   "joint.transformer_blocks.10",
-   "joint.transformer_blocks.11",
-   "joint.transformer_blocks.12",
-   "joint.transformer_blocks.13",
-   "joint.transformer_blocks.14",
-   "joint.transformer_blocks.15",
-   "joint.transformer_blocks.16",
-   "joint.transformer_blocks.17",
-   "joint.transformer_blocks.18",
-   "joint.transformer_blocks.19",
-   "joint.transformer_blocks.20",
-   "joint.transformer_blocks.21",
-   "joint.transformer_blocks.22",
-   "joint.transformer_blocks.23",
-   "joint.transformer_blocks.24",
-   "joint.transformer_blocks.25",
-   "joint.transformer_blocks.26",
-   "joint.transformer_blocks.27",
-   "joint.transformer_blocks.28",
-   "joint.transformer_blocks.29",
-   "joint.transformer_blocks.30",
-   "joint.transformer_blocks.31",
-   "cached.transformer_blocks.0",
-   "cached.transformer_blocks.1",
-   "cached.transformer_blocks.2",
-   "cached.transformer_blocks.3",
-   "cached.transformer_blocks.4",
-   "cached.transformer_blocks.5",
-   "cached.transformer_blocks.6",
-   "cached.transformer_blocks.7",
-   "cached.transformer_blocks.8",
-   "cached.transformer_blocks.9",
-   "cached.transformer_blocks.10",
-   "cached.transformer_blocks.11",
-   "cached.transformer_blocks.12",
-   "cached.transformer_blocks.13",
-   "cached.transformer_blocks.14",
-   "cached.transformer_blocks.15",
-   "cached.transformer_blocks.16",
-   "cached.transformer_blocks.17",
-   "cached.transformer_blocks.18",
-   "cached.transformer_blocks.19",
-   "cached.transformer_blocks.20",
-   "cached.transformer_blocks.21",
-   "cached.transformer_blocks.22",
-   "cached.transformer_blocks.23",
-   "cached.transformer_blocks.24",
-   "cached.transformer_blocks.25",
-   "cached.transformer_blocks.26",
-   "cached.transformer_blocks.27",
-   "cached.transformer_blocks.28",
-   "cached.transformer_blocks.29",
-   "cached.transformer_blocks.30",
-   "cached.transformer_blocks.31",
-   "txt_in",
-   "img_in"
-  ],
-  "free_rows": [
-   "joint.transformer_blocks.0",
-   "joint.transformer_blocks.1",
-   "joint.transformer_blocks.2",
-   "joint.transformer_blocks.3",
-   "joint.transformer_blocks.4",
-   "joint.transformer_blocks.5",
-   "joint.transformer_blocks.6",
-   "joint.transformer_blocks.7",
-   "joint.transformer_blocks.8",
-   "joint.transformer_blocks.9",
-   "joint.transformer_blocks.10",
-   "joint.transformer_blocks.11",
-   "joint.transformer_blocks.12",
-   "joint.transformer_blocks.13",
-   "joint.transformer_blocks.14",
-   "joint.transformer_blocks.15",
-   "joint.transformer_blocks.16",
-   "joint.transformer_blocks.17",
-   "joint.transformer_blocks.18",
-   "joint.transformer_blocks.19",
-   "joint.transformer_blocks.20",
-   "joint.transformer_blocks.21",
-   "joint.transformer_blocks.22",
-   "joint.transformer_blocks.23",
-   "joint.transformer_blocks.24",
-   "joint.transformer_blocks.25",
-   "joint.transformer_blocks.26",
-   "joint.transformer_blocks.27",
-   "joint.transformer_blocks.28",
-   "joint.transformer_blocks.29",
-   "joint.transformer_blocks.30",
-   "joint.transformer_blocks.31",
-   "joint.time_text_embed",
-   "joint.modulation",
-   "joint.proj_out",
-   "cached.transformer_blocks.0",
-   "cached.transformer_blocks.1",
-   "cached.transformer_blocks.2",
-   "cached.transformer_blocks.3",
-   "cached.transformer_blocks.4",
-   "cached.transformer_blocks.5",
-   "cached.transformer_blocks.6",
-   "cached.transformer_blocks.7",
-   "cached.transformer_blocks.8",
-   "cached.transformer_blocks.9",
-   "cached.transformer_blocks.10",
-   "cached.transformer_blocks.11",
-   "cached.transformer_blocks.12",
-   "cached.transformer_blocks.13",
-   "cached.transformer_blocks.14",
-   "cached.transformer_blocks.15",
-   "cached.transformer_blocks.16",
-   "cached.transformer_blocks.17",
-   "cached.transformer_blocks.18",
-   "cached.transformer_blocks.19",
-   "cached.transformer_blocks.20",
-   "cached.transformer_blocks.21",
-   "cached.transformer_blocks.22",
-   "cached.transformer_blocks.23",
-   "cached.transformer_blocks.24",
-   "cached.transformer_blocks.25",
-   "cached.transformer_blocks.26",
-   "cached.transformer_blocks.27",
-   "cached.transformer_blocks.28",
-   "cached.transformer_blocks.29",
-   "cached.transformer_blocks.30",
-   "cached.transformer_blocks.31",
-   "cached.time_text_embed",
-   "cached.modulation",
-   "cached.proj_out",
-   "cache.k.0",
-   "cache.v.0",
-   "cache.k.1",
-   "cache.v.1",
-   "cache.k.2",
-   "cache.v.2",
-   "cache.k.3",
-   "cache.v.3",
-   "cache.k.4",
-   "cache.v.4",
-   "cache.k.5",
-   "cache.v.5",
-   "cache.k.6",
-   "cache.v.6",
-   "cache.k.7",
-   "cache.v.7",
-   "cache.k.8",
-   "cache.v.8",
-   "cache.k.9",
-   "cache.v.9",
-   "cache.k.10",
-   "cache.v.10",
-   "cache.k.11",
-   "cache.v.11",
-   "cache.k.12",
-   "cache.v.12",
-   "cache.k.13",
-   "cache.v.13",
-   "cache.k.14",
-   "cache.v.14",
-   "cache.k.15",
-   "cache.v.15",
-   "cache.k.16",
-   "cache.v.16",
-   "cache.k.17",
-   "cache.v.17",
-   "cache.k.18",
-   "cache.v.18",
-   "cache.k.19",
-   "cache.v.19",
-   "cache.k.20",
-   "cache.v.20",
-   "cache.k.21",
-   "cache.v.21",
-   "cache.k.22",
-   "cache.v.22",
-   "cache.k.23",
-   "cache.v.23",
-   "cache.k.24",
-   "cache.v.24",
-   "cache.k.25",
-   "cache.v.25",
-   "cache.k.26",
-   "cache.v.26",
-   "cache.k.27",
-   "cache.v.27",
-   "cache.k.28",
-   "cache.v.28",
-   "cache.k.29",
-   "cache.v.29",
-   "cache.k.30",
-   "cache.v.30",
-   "cache.k.31",
-   "cache.v.31"
-  ],
-  "branches": [
-   "joint.transformer_blocks.0.attn",
-   "joint.transformer_blocks.0.img_mlp",
-   "joint.transformer_blocks.1.attn",
-   "joint.transformer_blocks.1.img_mlp",
-   "joint.transformer_blocks.2.attn",
-   "joint.transformer_blocks.2.img_mlp",
-   "joint.transformer_blocks.3.attn",
-   "joint.transformer_blocks.3.img_mlp",
-   "joint.transformer_blocks.4.attn",
-   "joint.transformer_blocks.4.img_mlp",
-   "joint.transformer_blocks.5.attn",
-   "joint.transformer_blocks.5.img_mlp",
-   "joint.transformer_blocks.6.attn",
-   "joint.transformer_blocks.6.img_mlp",
-   "joint.transformer_blocks.7.attn",
-   "joint.transformer_blocks.7.img_mlp",
-   "joint.transformer_blocks.8.attn",
-   "joint.transformer_blocks.8.img_mlp",
-   "joint.transformer_blocks.9.attn",
-   "joint.transformer_blocks.9.img_mlp",
-   "joint.transformer_blocks.10.attn",
-   "joint.transformer_blocks.10.img_mlp",
-   "joint.transformer_blocks.11.attn",
-   "joint.transformer_blocks.11.img_mlp",
-   "joint.transformer_blocks.12.attn",
-   "joint.transformer_blocks.12.img_mlp",
-   "joint.transformer_blocks.13.attn",
-   "joint.transformer_blocks.13.img_mlp",
-   "joint.transformer_blocks.14.attn",
-   "joint.transformer_blocks.14.img_mlp",
-   "joint.transformer_blocks.15.attn",
-   "joint.transformer_blocks.15.img_mlp",
-   "joint.transformer_blocks.16.attn",
-   "joint.transformer_blocks.16.img_mlp",
-   "joint.transformer_blocks.17.attn",
-   "joint.transformer_blocks.17.img_mlp",
-   "joint.transformer_blocks.18.attn",
-   "joint.transformer_blocks.18.img_mlp",
-   "joint.transformer_blocks.19.attn",
-   "joint.transformer_blocks.19.img_mlp",
-   "joint.transformer_blocks.20.attn",
-   "joint.transformer_blocks.20.img_mlp",
-   "joint.transformer_blocks.21.attn",
-   "joint.transformer_blocks.21.img_mlp",
-   "joint.transformer_blocks.22.attn",
-   "joint.transformer_blocks.22.img_mlp",
-   "joint.transformer_blocks.23.attn",
-   "joint.transformer_blocks.23.img_mlp",
-   "joint.transformer_blocks.24.attn",
-   "joint.transformer_blocks.24.img_mlp",
-   "joint.transformer_blocks.25.attn",
-   "joint.transformer_blocks.25.img_mlp",
-   "joint.transformer_blocks.26.attn",
-   "joint.transformer_blocks.26.img_mlp",
-   "joint.transformer_blocks.27.attn",
-   "joint.transformer_blocks.27.img_mlp",
-   "joint.transformer_blocks.28.attn",
-   "joint.transformer_blocks.28.img_mlp",
-   "joint.transformer_blocks.29.attn",
-   "joint.transformer_blocks.29.img_mlp",
-   "joint.transformer_blocks.30.attn",
-   "joint.transformer_blocks.30.img_mlp",
-   "joint.transformer_blocks.31.attn",
-   "joint.transformer_blocks.31.img_mlp",
-   "cached.transformer_blocks.0.attn",
-   "cached.transformer_blocks.0.img_mlp",
-   "cached.transformer_blocks.1.attn",
-   "cached.transformer_blocks.1.img_mlp",
-   "cached.transformer_blocks.2.attn",
-   "cached.transformer_blocks.2.img_mlp",
-   "cached.transformer_blocks.3.attn",
-   "cached.transformer_blocks.3.img_mlp",
-   "cached.transformer_blocks.4.attn",
-   "cached.transformer_blocks.4.img_mlp",
-   "cached.transformer_blocks.5.attn",
-   "cached.transformer_blocks.5.img_mlp",
-   "cached.transformer_blocks.6.attn",
-   "cached.transformer_blocks.6.img_mlp",
-   "cached.transformer_blocks.7.attn",
-   "cached.transformer_blocks.7.img_mlp",
-   "cached.transformer_blocks.8.attn",
-   "cached.transformer_blocks.8.img_mlp",
-   "cached.transformer_blocks.9.attn",
-   "cached.transformer_blocks.9.img_mlp",
-   "cached.transformer_blocks.10.attn",
-   "cached.transformer_blocks.10.img_mlp",
-   "cached.transformer_blocks.11.attn",
-   "cached.transformer_blocks.11.img_mlp",
-   "cached.transformer_blocks.12.attn",
-   "cached.transformer_blocks.12.img_mlp",
-   "cached.transformer_blocks.13.attn",
-   "cached.transformer_blocks.13.img_mlp",
-   "cached.transformer_blocks.14.attn",
-   "cached.transformer_blocks.14.img_mlp",
-   "cached.transformer_blocks.15.attn",
-   "cached.transformer_blocks.15.img_mlp",
-   "cached.transformer_blocks.16.attn",
-   "cached.transformer_blocks.16.img_mlp",
-   "cached.transformer_blocks.17.attn",
-   "cached.transformer_blocks.17.img_mlp",
-   "cached.transformer_blocks.18.attn",
-   "cached.transformer_blocks.18.img_mlp",
-   "cached.transformer_blocks.19.attn",
-   "cached.transformer_blocks.19.img_mlp",
-   "cached.transformer_blocks.20.attn",
-   "cached.transformer_blocks.20.img_mlp",
-   "cached.transformer_blocks.21.attn",
-   "cached.transformer_blocks.21.img_mlp",
-   "cached.transformer_blocks.22.attn",
-   "cached.transformer_blocks.22.img_mlp",
-   "cached.transformer_blocks.23.attn",
-   "cached.transformer_blocks.23.img_mlp",
-   "cached.transformer_blocks.24.attn",
-   "cached.transformer_blocks.24.img_mlp",
-   "cached.transformer_blocks.25.attn",
-   "cached.transformer_blocks.25.img_mlp",
-   "cached.transformer_blocks.26.attn",
-   "cached.transformer_blocks.26.img_mlp",
-   "cached.transformer_blocks.27.attn",
-   "cached.transformer_blocks.27.img_mlp",
-   "cached.transformer_blocks.28.attn",
-   "cached.transformer_blocks.28.img_mlp",
-   "cached.transformer_blocks.29.attn",
-   "cached.transformer_blocks.29.img_mlp",
-   "cached.transformer_blocks.30.attn",
-   "cached.transformer_blocks.30.img_mlp",
-   "cached.transformer_blocks.31.attn",
-   "cached.transformer_blocks.31.img_mlp"
-  ]
+  "dialects": ["diffusers", "peft"],
+  "rows": ["joint.transformer_blocks.0", "joint.transformer_blocks.1", "joint.transformer_blocks.2", "joint.transformer_blocks.3", "joint.transformer_blocks.4", "joint.transformer_blocks.5", "joint.transformer_blocks.6", "joint.transformer_blocks.7", "joint.transformer_blocks.8", "joint.transformer_blocks.9", "joint.transformer_blocks.10", "joint.transformer_blocks.11", "joint.transformer_blocks.12", "joint.transformer_blocks.13", "joint.transformer_blocks.14", "joint.transformer_blocks.15", "joint.transformer_blocks.16", "joint.transformer_blocks.17", "joint.transformer_blocks.18", "joint.transformer_blocks.19", "joint.transformer_blocks.20", "joint.transformer_blocks.21", "joint.transformer_blocks.22", "joint.transformer_blocks.23", "joint.transformer_blocks.24", "joint.transformer_blocks.25", "joint.transformer_blocks.26", "joint.transformer_blocks.27", "joint.transformer_blocks.28", "joint.transformer_blocks.29", "joint.transformer_blocks.30", "joint.transformer_blocks.31", "cached.transformer_blocks.0", "cached.transformer_blocks.1", "cached.transformer_blocks.2", "cached.transformer_blocks.3", "cached.transformer_blocks.4", "cached.transformer_blocks.5", "cached.transformer_blocks.6", "cached.transformer_blocks.7", "cached.transformer_blocks.8", "cached.transformer_blocks.9", "cached.transformer_blocks.10", "cached.transformer_blocks.11", "cached.transformer_blocks.12", "cached.transformer_blocks.13", "cached.transformer_blocks.14", "cached.transformer_blocks.15", "cached.transformer_blocks.16", "cached.transformer_blocks.17", "cached.transformer_blocks.18", "cached.transformer_blocks.19", "cached.transformer_blocks.20", "cached.transformer_blocks.21", "cached.transformer_blocks.22", "cached.transformer_blocks.23", "cached.transformer_blocks.24", "cached.transformer_blocks.25", "cached.transformer_blocks.26", "cached.transformer_blocks.27", "cached.transformer_blocks.28", "cached.transformer_blocks.29", "cached.transformer_blocks.30", "cached.transformer_blocks.31", "txt_in", "img_in"],
+  "free_rows": ["joint.transformer_blocks.0", "joint.transformer_blocks.1", "joint.transformer_blocks.2", "joint.transformer_blocks.3", "joint.transformer_blocks.4", "joint.transformer_blocks.5", "joint.transformer_blocks.6", "joint.transformer_blocks.7", "joint.transformer_blocks.8", "joint.transformer_blocks.9", "joint.transformer_blocks.10", "joint.transformer_blocks.11", "joint.transformer_blocks.12", "joint.transformer_blocks.13", "joint.transformer_blocks.14", "joint.transformer_blocks.15", "joint.transformer_blocks.16", "joint.transformer_blocks.17", "joint.transformer_blocks.18", "joint.transformer_blocks.19", "joint.transformer_blocks.20", "joint.transformer_blocks.21", "joint.transformer_blocks.22", "joint.transformer_blocks.23", "joint.transformer_blocks.24", "joint.transformer_blocks.25", "joint.transformer_blocks.26", "joint.transformer_blocks.27", "joint.transformer_blocks.28", "joint.transformer_blocks.29", "joint.transformer_blocks.30", "joint.transformer_blocks.31", "joint.time_text_embed", "joint.modulation", "joint.proj_out", "cached.transformer_blocks.0", "cached.transformer_blocks.1", "cached.transformer_blocks.2", "cached.transformer_blocks.3", "cached.transformer_blocks.4", "cached.transformer_blocks.5", "cached.transformer_blocks.6", "cached.transformer_blocks.7", "cached.transformer_blocks.8", "cached.transformer_blocks.9", "cached.transformer_blocks.10", "cached.transformer_blocks.11", "cached.transformer_blocks.12", "cached.transformer_blocks.13", "cached.transformer_blocks.14", "cached.transformer_blocks.15", "cached.transformer_blocks.16", "cached.transformer_blocks.17", "cached.transformer_blocks.18", "cached.transformer_blocks.19", "cached.transformer_blocks.20", "cached.transformer_blocks.21", "cached.transformer_blocks.22", "cached.transformer_blocks.23", "cached.transformer_blocks.24", "cached.transformer_blocks.25", "cached.transformer_blocks.26", "cached.transformer_blocks.27", "cached.transformer_blocks.28", "cached.transformer_blocks.29", "cached.transformer_blocks.30", "cached.transformer_blocks.31", "cached.time_text_embed", "cached.modulation", "cached.proj_out", "cache.k.0", "cache.v.0", "cache.k.1", "cache.v.1", "cache.k.2", "cache.v.2", "cache.k.3", "cache.v.3", "cache.k.4", "cache.v.4", "cache.k.5", "cache.v.5", "cache.k.6", "cache.v.6", "cache.k.7", "cache.v.7", "cache.k.8", "cache.v.8", "cache.k.9", "cache.v.9", "cache.k.10", "cache.v.10", "cache.k.11", "cache.v.11", "cache.k.12", "cache.v.12", "cache.k.13", "cache.v.13", "cache.k.14", "cache.v.14", "cache.k.15", "cache.v.15", "cache.k.16", "cache.v.16", "cache.k.17", "cache.v.17", "cache.k.18", "cache.v.18", "cache.k.19", "cache.v.19", "cache.k.20", "cache.v.20", "cache.k.21", "cache.v.21", "cache.k.22", "cache.v.22", "cache.k.23", "cache.v.23", "cache.k.24", "cache.v.24", "cache.k.25", "cache.v.25", "cache.k.26", "cache.v.26", "cache.k.27", "cache.v.27", "cache.k.28", "cache.v.28", "cache.k.29", "cache.v.29", "cache.k.30", "cache.v.30", "cache.k.31", "cache.v.31"],
+  "branches": ["joint.transformer_blocks.0.attn", "joint.transformer_blocks.0.img_mlp", "joint.transformer_blocks.1.attn", "joint.transformer_blocks.1.img_mlp", "joint.transformer_blocks.2.attn", "joint.transformer_blocks.2.img_mlp", "joint.transformer_blocks.3.attn", "joint.transformer_blocks.3.img_mlp", "joint.transformer_blocks.4.attn", "joint.transformer_blocks.4.img_mlp", "joint.transformer_blocks.5.attn", "joint.transformer_blocks.5.img_mlp", "joint.transformer_blocks.6.attn", "joint.transformer_blocks.6.img_mlp", "joint.transformer_blocks.7.attn", "joint.transformer_blocks.7.img_mlp", "joint.transformer_blocks.8.attn", "joint.transformer_blocks.8.img_mlp", "joint.transformer_blocks.9.attn", "joint.transformer_blocks.9.img_mlp", "joint.transformer_blocks.10.attn", "joint.transformer_blocks.10.img_mlp", "joint.transformer_blocks.11.attn", "joint.transformer_blocks.11.img_mlp", "joint.transformer_blocks.12.attn", "joint.transformer_blocks.12.img_mlp", "joint.transformer_blocks.13.attn", "joint.transformer_blocks.13.img_mlp", "joint.transformer_blocks.14.attn", "joint.transformer_blocks.14.img_mlp", "joint.transformer_blocks.15.attn", "joint.transformer_blocks.15.img_mlp", "joint.transformer_blocks.16.attn", "joint.transformer_blocks.16.img_mlp", "joint.transformer_blocks.17.attn", "joint.transformer_blocks.17.img_mlp", "joint.transformer_blocks.18.attn", "joint.transformer_blocks.18.img_mlp", "joint.transformer_blocks.19.attn", "joint.transformer_blocks.19.img_mlp", "joint.transformer_blocks.20.attn", "joint.transformer_blocks.20.img_mlp", "joint.transformer_blocks.21.attn", "joint.transformer_blocks.21.img_mlp", "joint.transformer_blocks.22.attn", "joint.transformer_blocks.22.img_mlp", "joint.transformer_blocks.23.attn", "joint.transformer_blocks.23.img_mlp", "joint.transformer_blocks.24.attn", "joint.transformer_blocks.24.img_mlp", "joint.transformer_blocks.25.attn", "joint.transformer_blocks.25.img_mlp", "joint.transformer_blocks.26.attn", "joint.transformer_blocks.26.img_mlp", "joint.transformer_blocks.27.attn", "joint.transformer_blocks.27.img_mlp", "joint.transformer_blocks.28.attn", "joint.transformer_blocks.28.img_mlp", "joint.transformer_blocks.29.attn", "joint.transformer_blocks.29.img_mlp", "joint.transformer_blocks.30.attn", "joint.transformer_blocks.30.img_mlp", "joint.transformer_blocks.31.attn", "joint.transformer_blocks.31.img_mlp", "cached.transformer_blocks.0.attn", "cached.transformer_blocks.0.img_mlp", "cached.transformer_blocks.1.attn", "cached.transformer_blocks.1.img_mlp", "cached.transformer_blocks.2.attn", "cached.transformer_blocks.2.img_mlp", "cached.transformer_blocks.3.attn", "cached.transformer_blocks.3.img_mlp", "cached.transformer_blocks.4.attn", "cached.transformer_blocks.4.img_mlp", "cached.transformer_blocks.5.attn", "cached.transformer_blocks.5.img_mlp", "cached.transformer_blocks.6.attn", "cached.transformer_blocks.6.img_mlp", "cached.transformer_blocks.7.attn", "cached.transformer_blocks.7.img_mlp", "cached.transformer_blocks.8.attn", "cached.transformer_blocks.8.img_mlp", "cached.transformer_blocks.9.attn", "cached.transformer_blocks.9.img_mlp", "cached.transformer_blocks.10.attn", "cached.transformer_blocks.10.img_mlp", "cached.transformer_blocks.11.attn", "cached.transformer_blocks.11.img_mlp", "cached.transformer_blocks.12.attn", "cached.transformer_blocks.12.img_mlp", "cached.transformer_blocks.13.attn", "cached.transformer_blocks.13.img_mlp", "cached.transformer_blocks.14.attn", "cached.transformer_blocks.14.img_mlp", "cached.transformer_blocks.15.attn", "cached.transformer_blocks.15.img_mlp", "cached.transformer_blocks.16.attn", "cached.transformer_blocks.16.img_mlp", "cached.transformer_blocks.17.attn", "cached.transformer_blocks.17.img_mlp", "cached.transformer_blocks.18.attn", "cached.transformer_blocks.18.img_mlp", "cached.transformer_blocks.19.attn", "cached.transformer_blocks.19.img_mlp", "cached.transformer_blocks.20.attn", "cached.transformer_blocks.20.img_mlp", "cached.transformer_blocks.21.attn", "cached.transformer_blocks.21.img_mlp", "cached.transformer_blocks.22.attn", "cached.transformer_blocks.22.img_mlp", "cached.transformer_blocks.23.attn", "cached.transformer_blocks.23.img_mlp", "cached.transformer_blocks.24.attn", "cached.transformer_blocks.24.img_mlp", "cached.transformer_blocks.25.attn", "cached.transformer_blocks.25.img_mlp", "cached.transformer_blocks.26.attn", "cached.transformer_blocks.26.img_mlp", "cached.transformer_blocks.27.attn", "cached.transformer_blocks.27.img_mlp", "cached.transformer_blocks.28.attn", "cached.transformer_blocks.28.img_mlp", "cached.transformer_blocks.29.attn", "cached.transformer_blocks.29.img_mlp", "cached.transformer_blocks.30.attn", "cached.transformer_blocks.30.img_mlp", "cached.transformer_blocks.31.attn", "cached.transformer_blocks.31.img_mlp"]
  },
  "results": {
   "oracle": {
@@ -541,9 +91,7 @@
    },
    "bf16_timestep": "fp32",
    "encoder_hidden_states_mask": null,
-   "plain_decoded": [
-    "txt_in.text_norm.weight"
-   ]
+   "plain_decoded": ["txt_in.text_norm.weight"]
   },
   "extract_against_joint_max_abs_fp32": 0.0,
   "extract_against_joint_max_abs_bf16": 0.0,
@@ -2554,2533 +2102,1382 @@
    "cached.transformer_blocks.31.img_mlp": 0.007432157990308152
   }
  },
- "notes": [
-  "The pipeline passes a prompt mask of ones for one unpadded prompt. These calls pass none, which gives the same values."
- ],
+ "notes": ["The pipeline passes a prompt mask of ones for one unpadded prompt. These calls pass none, which gives the same values."],
  "created": "2026-10-06T20:42:36Z",
  "npz": "check7_qwen_image21_lora_512_plain.npz",
  "tensors": {
   "cache.k.0": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "0c386ed5cdc918619bbfafe333ade2b15cc45f6843edc6ea975d832b77a87645"
   },
   "cache.k.1": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "53be557c9fcd3e415e73f28ae2c213799158e292b617a1667b18ce91ab630a6e"
   },
   "cache.k.10": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "d969e8de1f29ecbb2c6503347a786dfc4bd0280bba1a0244524f67bf41fd645e"
   },
   "cache.k.11": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "10cce2dd60dc0cb73787d4e32887094a98516212f07cee8ae90780d5c5c61ab2"
   },
   "cache.k.12": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "bcc0dec4d38af18db319149a481f02e92aaf9ff136c623e6119d0d09ecf6162e"
   },
   "cache.k.13": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "cc20f396a58725bf1fee03fe8b4c1960f78711c26e336255bdd0e66c66eebc10"
   },
   "cache.k.14": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "9235b91701204c9429f325d428314b02fcf80ae0b9ba2521776d52a6b4f4e81b"
   },
   "cache.k.15": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "2cf808788ee76670a3347ec79efffb902abd6d14390083fa236fd5d2bef521bc"
   },
   "cache.k.16": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "24bb7c5285757dedc0c64ed49c414dca660dcbc1602d1db379baa305b10968dc"
   },
   "cache.k.17": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "5b02d1b11f40ab3d9f5cada44c63b671ca1a3b44a29357ad1aed27ba84622cd0"
   },
   "cache.k.18": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "94e1f45db0c80c6763a916258229f5f3e44cfd66a2ffc5d2b6e424f23b886216"
   },
   "cache.k.19": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "3442dec325399924d2ea3795da6dad1038eb30d691d83e2a2f04fe2020479ee5"
   },
   "cache.k.2": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "38273060a98dc045f47198396353eb40dd47e56c8dc6d1bd2a7c60210ee7af21"
   },
   "cache.k.20": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "04056f40f320d7527de3c88bcc34d7c336ca2c8697db74dfffa0936e0e1c1aac"
   },
   "cache.k.21": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "74e7ad011c6e182f2e05ac3ab4e8b158bb2ca46bfbb1453d998fcb7e77897364"
   },
   "cache.k.22": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "9fc0f9154c089ab3c3fffbdf36cd09ff62f2617c3020985cada467b3d23e2966"
   },
   "cache.k.23": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "2c9d8c8f9c723b89081ac2f236b4be8dabf647b938476f5488ecc16d67331562"
   },
   "cache.k.24": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "c21f72f00dc5e5549ac85b3ab50068c83fa4dcea7dfe6a546bed39b34922a1cf"
   },
   "cache.k.25": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "05461ec176c2ec82c94802070ccf872fc1c4d6d77ac4263744349f9f6bb1e32b"
   },
   "cache.k.26": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "f841b493dd0bf88290f591ad0b3754a2f170724211dc368f7fba0eeda14d5bd1"
   },
   "cache.k.27": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "0dc47fa128140b1f7386a548b74074b45969c62d4caed6d990f1f6e39c345eec"
   },
   "cache.k.28": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "d827825c19eff91d2cc4d9f2080014ee31d818de538f56ff93dd48c937bcc2ff"
   },
   "cache.k.29": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "7b4348491964841144fca0727bcb6c1955e07140ac68e9b40883419f0db9134b"
   },
   "cache.k.3": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "92d11b3525dbdde62a49e9df76a0b975237e859c8ebc545eeb5862dc42df67fd"
   },
   "cache.k.30": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "0ff71983efca38d11401065f9143622c89017cfa63fb7f7375c81b5c38f4c621"
   },
   "cache.k.31": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "65a28c2af3568afa4db87f830efbbcb6b7c1fb30597ed6d412755c05c7ce50df"
   },
   "cache.k.4": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "0cbf16d3eb8cae0631fcb8389402a5682e0419fc9df77d860dd7a732d12cefb3"
   },
   "cache.k.5": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "f3cd5170587f211fdec93ac68106657d6d95ed42e23db4879512e6d0851ad7e6"
   },
   "cache.k.6": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "0d48f7bba818969a4a03ff84aa6aaf4d278dfda6938bae2730e758fe619bc4ef"
   },
   "cache.k.7": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "8b995524415c290654d389954768d646eea0f1cf05ae71793b5c578b5e8dcfa4"
   },
   "cache.k.8": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "bc0b6d26d692041236a9a70b2e5e763e600d97ec47b52e571d00f6dd5392f791"
   },
   "cache.k.9": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "c5c5ede6697769d6627baf6a483519ac827483c35eec5cce7c8d344eae97308f"
   },
   "cache.v.0": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "aefc95ebc22c65146e8b56b2d8d0b0dca4f2c1d523b8c7bf082dc6b2058af801"
   },
   "cache.v.1": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "b6e10c7e143c9de79684747d0286945bdc6e6270ef55c5a2c93a37696d0fe052"
   },
   "cache.v.10": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "860a97770dfbea34986956cce11541c5c520d0ec3729a6440473118e2f177b9c"
   },
   "cache.v.11": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "53ba57f1355e83596a32125594da4231c11f11e78570d089bac426bb3b78192f"
   },
   "cache.v.12": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "7339073cb8f2e80866e810b60a5947418612b07bd4ef8e87394d580ae432e832"
   },
   "cache.v.13": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "320cfd6f56d451ad7ab69de90ef290894f286a15d61bb47681d72f7390de6f88"
   },
   "cache.v.14": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "f506ffafb4f6da5b9ffd4c6eaafcf6b7633772721589033ebec6887206a6345b"
   },
   "cache.v.15": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "9af892033e62f62135fb5583cd6998f86a450b285065ba969dd8b524042aa05f"
   },
   "cache.v.16": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "41edf5b99e89e451986841ca04853435fc5f545a8d3533b88900b294a70b316c"
   },
   "cache.v.17": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "5fc861d3029eb7312661baefee5fb37074c8d9b57088c4840a8a276c7ca1e95a"
   },
   "cache.v.18": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "b667e061b2a1db0fce7d67f236b8e6b4c0c815774aaabfe4cacd72fe03a1835c"
   },
   "cache.v.19": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "76ef46f776dcb4d1999269e320fec76cc913b899a22176b8472a878cca9fe9e3"
   },
   "cache.v.2": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "934ffbcbb7af41d07f8bd73d0f7c3b67a152755da547d37dbec571a999404c85"
   },
   "cache.v.20": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "efed94d7092a8f13934c4704e3ef52532379b0fce69d1df86cbb4ae6768e2194"
   },
   "cache.v.21": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "c1c1fe337b35769e94df19bf0ac80367b7d49894875fa90a990b3367c1ae3fa7"
   },
   "cache.v.22": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "d76e4350130e50a931e53eb6ea64cc0015377ed2d261cddcc515fb737e496fe1"
   },
   "cache.v.23": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "216d226d1ec65acd7d961095ee416566836701f7866c97fd1c6a72c9e1679242"
   },
   "cache.v.24": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "8c77f12a0dfe1a4d1d37f275f8c59f10e10174daec8ef4dfcd3d472645b71223"
   },
   "cache.v.25": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "7903d4d22f7717387daf95891ca9115134b7c2b2cc08016dfcaf51dddbb438d4"
   },
   "cache.v.26": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "718494b164f905c9926518b51f8cb6c2aacb6c50394a253952c6d18d5fe670d6"
   },
   "cache.v.27": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "90245b6f8638db6fba6983f7bf02233e7b305ddeb86e8f7df19c4fcf588ea518"
   },
   "cache.v.28": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "f6be8566298261c04c50233605c811d68fb58ceabade802bc225ee9dd2f88e81"
   },
   "cache.v.29": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "4353f63a053d8261aaa0d177c123f1e9afdb6220c7a3b854d90b608c02fad85d"
   },
   "cache.v.3": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "d62a318c664c754bc1a1214257320f608d4be4f9893b8a832ba179dea831e611"
   },
   "cache.v.30": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "f3fca7151252d93004fa0914858286cb809925c8f65d78fa2d792319e9758769"
   },
   "cache.v.31": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "5d573d843d67a1886033aa94d4cd18d065355e9b4a021bb16e0f90356bfff8d6"
   },
   "cache.v.4": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "9d3130bcc3dc8068e1fe63106234e8a770d4009e7a58772d2ce4dd203b78048b"
   },
   "cache.v.5": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "545c4152b8f3608a0e02b44789fa675c656bb3e2227dd40b039a104aa71cfaaf"
   },
   "cache.v.6": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "f4c74cae6367cf5ba3776369304f514d6a6ef116e41c20cb5800e954600ace2f"
   },
   "cache.v.7": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "55b31d9d4c9c061cfae315ee482d7a6690efbc5387713e52af3cda9bc091dfe6"
   },
   "cache.v.8": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "5c3ceb58452c9086ca55b15065b0c9b3d0ea0b656a4b24bf36e219bca2a192af"
   },
   "cache.v.9": {
-   "shape": [
-    1,
-    36,
-    32,
-    128
-   ],
+   "shape": [1, 36, 32, 128],
    "dtype": "float32",
    "sha256": "3ad4ef6243bd8cc0c89b8a71620e969d3dec63da18b1ec8f358d5fdede48823e"
   },
   "cached.in": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "867f2cdd9eb35e73cb2d39de5df74452387b635611d627814b863f77dc8a31e2"
   },
   "cached.proj_out.out": {
-   "shape": [
-    1,
-    1024,
-    64
-   ],
+   "shape": [1, 1024, 64],
    "dtype": "float32",
    "sha256": "027ac58b9d05457e291daa7c88a6f2f9a940974cdd3416804f633c137c734fa2"
   },
   "cached.transformer_blocks.0.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "4c3b5731f7f86ed3de75e35d076c384bf76fec47915ce2b9c36d8e65b248d73b"
   },
   "cached.transformer_blocks.0.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "feb864305645f0a581dbde80b4651a65ea69f56581f386d80168e756db5d79a2"
   },
   "cached.transformer_blocks.0.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "c4a5943b5ee5541dd016e74e66c0d97aa380aebb1d83d5f90b9e8c008c8ba136"
   },
   "cached.transformer_blocks.1.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "3c18cb2ce5bce5672f3c1b74f4f51c2e5dadf82736752aafc2aa87235764455d"
   },
   "cached.transformer_blocks.1.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "603b7751ae32a63e9ae0845dd2b78ac191dce20ebba400e87cd36e2f3325ee5e"
   },
   "cached.transformer_blocks.1.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "8eb66b9deeb668a82c0e80cc5f90934c71e34d81bb661d520e53b4b311fe5cb1"
   },
   "cached.transformer_blocks.10.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "2fe7122a235ba50673152f393cca359f1c15bf855b9260e8b45e8ee706a2b16c"
   },
   "cached.transformer_blocks.10.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "3ffacc0f2a15a8b370e6a953dbbec870253af4299519bc72679bb7cad98f0d2a"
   },
   "cached.transformer_blocks.10.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "ae125f2c7181ede7c2bfad0986b6835c0883ec56ab3b5eddfe740a0fc0af907a"
   },
   "cached.transformer_blocks.11.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "f2240abfec2ec5d134f157f10f4b0fb07ff86008c7acdea57d3829758486931e"
   },
   "cached.transformer_blocks.11.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "bbf74edff29d21df1e205353f490db8362e7109d26c69b829441f755b3ca9348"
   },
   "cached.transformer_blocks.11.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "62f983304c73b703174240e64079deaa3f44d3c462c224c0464c79c0817448ab"
   },
   "cached.transformer_blocks.12.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "00250da7c87bc6863a74c422ad0cae363794e66743e4776d8f8f561d3fae7f58"
   },
   "cached.transformer_blocks.12.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "d00fb1f3a1256a1ed4f643cef98f73b42734b1d5680cad8165029c83a436732c"
   },
   "cached.transformer_blocks.12.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "fd246d032c0cfe6762de90b3ce10898abdbf771e07a62f76b7aedf652069b0a7"
   },
   "cached.transformer_blocks.13.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "208818df27e340ee41be3cd24e051296909f21082bdfa9b2ce984c3662a39579"
   },
   "cached.transformer_blocks.13.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "ddcadbbad3e83231da6207dd2207d5c2dd6518c4f85a377b1da57aeb5fb9ef01"
   },
   "cached.transformer_blocks.13.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "d19abfb0139512edea305abfe7a364f4cf6af444ea07e9a963623bcc286d05cf"
   },
   "cached.transformer_blocks.14.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "71adb7f042501bed7d5f7d4f638f3e18430858aad63cae4e6da93d78df588c84"
   },
   "cached.transformer_blocks.14.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "50797afdfd300c74fc6723780c1e4d879df742c1477cb7f16cad603ea614c780"
   },
   "cached.transformer_blocks.14.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "8586d851eaca95ebf775c33ebf1b9c5f3b87ce4f4320e947591b894ac791f40f"
   },
   "cached.transformer_blocks.15.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "5f54df45a3c2d5a80d3af9302ce63a9cd8c4c8aa5e83e6df3d71491f73a5751e"
   },
   "cached.transformer_blocks.15.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "fcfc4be3605bce63e092716b58e4674e86c26b7eff79a4d290f89f3803b1f41d"
   },
   "cached.transformer_blocks.15.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "f4483fdacd579234b0067af675f31be34b457b383d474f3af18d6d254f899a4d"
   },
   "cached.transformer_blocks.16.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "433639887734069236087cc727373a25d844bc0284408ca03cd21abcea7b00fe"
   },
   "cached.transformer_blocks.16.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "ca141d82241d7c08e3096179a3ca6f2d4ed65cce93c58eb7eccd579b7118e02e"
   },
   "cached.transformer_blocks.16.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "1b22686e19580a805e94586d73b6b264bf7d70a6dafb3f8f3435d6d862b2a54f"
   },
   "cached.transformer_blocks.17.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "2d9625c04e48a822c39adfed9b0fe0da4d69d2c17ccf91634569b0c307216e3b"
   },
   "cached.transformer_blocks.17.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "1e92f4d0710ff817e2a772c4e8d0f4dde0dee413bfcc6ac4b8195e07776064d2"
   },
   "cached.transformer_blocks.17.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "26fdd063d50c947d5f7fce4fb0a9449b102ab4b049f7fa7e1b404ebe4d2da902"
   },
   "cached.transformer_blocks.18.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "44ae56fd25b2c1d92ad3c2a995105198bdac699dd46a9acdfefb7a3551cd0889"
   },
   "cached.transformer_blocks.18.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "b0369ac3bef20c639a8167e20e09739a0c083ab2ff0029dd3335874b38c8c966"
   },
   "cached.transformer_blocks.18.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "c2bb4d8033d45c601c1b77b31e2ad84f2fc6493d02aa6d98ccb7817f57d9e678"
   },
   "cached.transformer_blocks.19.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "a6babe1c2c0cd5f3f3dcac81ea522931cf816e7553405b151b9f838a307d30d2"
   },
   "cached.transformer_blocks.19.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "1b9c79e1ac597b87aa86f03aad7981fd05cb4d2699a4eba482f7b096943dad49"
   },
   "cached.transformer_blocks.19.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "0eaf7e30a8dc367d1846e1d5f2262b48b73790f3844296225b19bea705646bcc"
   },
   "cached.transformer_blocks.2.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "8e5d65953a9161ed0754479107e8da250665c53d30ba58dbaa71d7959129542d"
   },
   "cached.transformer_blocks.2.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "2130cbb12283756b311068e2700f5179bf81bcb4b59f056ec8192235721263a3"
   },
   "cached.transformer_blocks.2.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "ba112e78c827ccc10d7788442704589481e1f9c422be41ca6518e9b9bc898401"
   },
   "cached.transformer_blocks.20.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "3cf36072a05cf2b18f873c8a967ca6a6a79adad7b1ca4a6ecbf2bebe569c474e"
   },
   "cached.transformer_blocks.20.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "acff25af44f88b123f5bb4c0719064b74faa5f0384cdf316e5f2e06a5cbb967c"
   },
   "cached.transformer_blocks.20.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "cce4e63bfaeca732df5adfe071ee05b7f6542eb3fc3ab41884371f8b1c6fdff9"
   },
   "cached.transformer_blocks.21.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "f3345f5cc6b6e2662647be3e8f7521d0fa12218dd135f1b0c9b4c3d3593743c1"
   },
   "cached.transformer_blocks.21.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "63072e52ada6b84c21d01d9dde229b0041c69797afb527dbcac65455ed40a775"
   },
   "cached.transformer_blocks.21.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "ca475f8c307b679db03badfb5caf9f94d4c8c8f6ff6cdbf19c61a698a3a2fa68"
   },
   "cached.transformer_blocks.22.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "0d7e140d10d5318d171a93c81feabee0e2536b7f1fc9098ab5aeee55376a0f65"
   },
   "cached.transformer_blocks.22.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "a096922770aa04772ae9c3c610126b7ec6a3680b8091813608a95a152f2d9458"
   },
   "cached.transformer_blocks.22.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "065d8107790a4ca1870a84f547ea18cd5fde96682d8b4bf27d278b26917673d1"
   },
   "cached.transformer_blocks.23.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "97db0e89fc10e318edf5c3f0717a3ff9b3ccd702b9cfa7d79179827c05bb0211"
   },
   "cached.transformer_blocks.23.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "b6baf6e041c2deb49dc057acf5f618fd9b32d3c2a536613ccc9e9245ea212676"
   },
   "cached.transformer_blocks.23.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "c31ecbf5ade2aa887be169b142fc90c43cb38b912ddb684e05cb0612020465a7"
   },
   "cached.transformer_blocks.24.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "22f7ddd31e9cad4ccf4a1f840e39b1e0ac7a71f4dc83a6942eeaf81287b83a4f"
   },
   "cached.transformer_blocks.24.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "31778e3eff869e50d5cb24b40e7bc541d9169227c0a57af7b39b25c38814be06"
   },
   "cached.transformer_blocks.24.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "430959dd3752eb285535d7f7100a6f8839ba359e6186703b2dcd4fb1ef44b365"
   },
   "cached.transformer_blocks.25.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "481f7080652eb9956ac2841255e27f00d76fba511be183f15048ede9f35733b2"
   },
   "cached.transformer_blocks.25.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "b66a39f2a276a1e4a80c69bfa67cdf8d7e90a49ae9f03c00ad281037986cc4e9"
   },
   "cached.transformer_blocks.25.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "1c4da5a182be94e8913a8ce0316c7dc3d1c6905825cdb8d0dcad9525a6e8df43"
   },
   "cached.transformer_blocks.26.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "68afce90c012d1c214abb4e033c0b48847b2839f8964f59a7fef68de66811251"
   },
   "cached.transformer_blocks.26.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "5b0f7d379f73a3425fe485f67f24a041f31c8b74555eb7d809f36639484422ff"
   },
   "cached.transformer_blocks.26.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "6e4a478f93543c857ab6ce1174dc2b51357b83def3ed6801eb36c5b4e91bc6dc"
   },
   "cached.transformer_blocks.27.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "6ecd096bcbe4b8e565c37f907d47cd6da6cc0f5f47490bc1afe254b02bdc80cc"
   },
   "cached.transformer_blocks.27.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "00e5b306962feb674a76a220e16a8746731989c7868c3c99ca43ea37bccb0875"
   },
   "cached.transformer_blocks.27.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "0cab66a9b7d17aefa1038a73e269fbb3e65c4a6f631ce11a57c44354848cb4a6"
   },
   "cached.transformer_blocks.28.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "6d2f366e8d98960286c97a2fd9ff1d522057999504dcf0d5f67610ede4226243"
   },
   "cached.transformer_blocks.28.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "97ee7498da9353b8b5e4b642e7d26f12ba3f470409691eea16bb41efdeed28c9"
   },
   "cached.transformer_blocks.28.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "8f49bf8cf25cf33f07e9e689046d6d5aca0e9f12d13f4c337ee0f2dabb1f300a"
   },
   "cached.transformer_blocks.29.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "1f1c1b8ee2cec8e0a9ca5087ccc09b216747e1772716137ed3b7b8a153ce667a"
   },
   "cached.transformer_blocks.29.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "d8a2dee47771078bfe90698a635c55f45030779ce38688561450e74050693a8f"
   },
   "cached.transformer_blocks.29.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "4b4e1b4e7d1cd2d38348df6eb497a78e9488b832052732b383afa4c0ca537627"
   },
   "cached.transformer_blocks.3.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "78e1c53156aefb48e731590c8c9ab5ed574a7b645c9ab980d52e867b2ad0d26c"
   },
   "cached.transformer_blocks.3.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "ed0fe79f7f9e82ed60d6a935000301e7d194da10f2f8ae499b76eec9e41d9d24"
   },
   "cached.transformer_blocks.3.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "eaef5dded863ee670b48f6f600564d3b5d5fc52bb2546225153c0b7b15d88924"
   },
   "cached.transformer_blocks.30.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "861b3be55499d622d50fc1fa4db15314692d9ce666a05260969c96d3b1bdeba2"
   },
   "cached.transformer_blocks.30.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "0a1db53ad642e709def23a795f21c65ddc67774b3e390cff3a168b65dcd2fd6e"
   },
   "cached.transformer_blocks.30.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "f03a2fdf5cb76c414e6b83afd987c0a755bdc2b778f017d3be874895bbcdcd7b"
   },
   "cached.transformer_blocks.31.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "1ace19d8abc201fcb845a484cc3f9aed64a009d18cd172e01342b73b5352eb3d"
   },
   "cached.transformer_blocks.31.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "7b288c99b4fdd28ef3da07a4f6a9400bfc7d18144eeb9c099d7158657fc5325e"
   },
   "cached.transformer_blocks.31.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "50eb75cc5a5d2cdea94e7b1c05abef6eb1b7b2729713f9c8405ddf5eb3912f79"
   },
   "cached.transformer_blocks.4.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "e10063fa2401370ca903e7b689204982292b3bd3913246061eb002b5d31a89cf"
   },
   "cached.transformer_blocks.4.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "192bc9c0d1e24f09ee3d37ad53d4b4ea6e7b76800a641a8976f7edee2d67e6e8"
   },
   "cached.transformer_blocks.4.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "870b0c76be4e07fc03e68a99686a27027fa3dcb9e12b1a3282eb78b808328c08"
   },
   "cached.transformer_blocks.5.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "6f4f0dbc0692320e40cf47e7531f099aa84503eee7327b5850b7c43b798e7c09"
   },
   "cached.transformer_blocks.5.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "047790af29d26fa94ab1167ebabba38f59fb8d442c6e071c9a5a995730faed8c"
   },
   "cached.transformer_blocks.5.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "83321f0a675376a249554538c0f7588e795e0faa849e847541e2c2aec1fd9522"
   },
   "cached.transformer_blocks.6.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "2f44b5333074c47b3726a9c8c106fc58bc654b980c04a3999b9a2a70ee2e1676"
   },
   "cached.transformer_blocks.6.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "3c15fe2dce1e129a23447c0605ba05ef151e9145362932842247416deb5c7579"
   },
   "cached.transformer_blocks.6.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "0c5499c113bca1c6aa96492c8937725b082f6a5f8172e6641de086fb90c08a95"
   },
   "cached.transformer_blocks.7.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "abe8c1181e09301397faf24c3097a61fe6cf24f2a10284aa5e5d98ab815cd740"
   },
   "cached.transformer_blocks.7.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "11b6ab0105c7a71faeaacceed65d12769206db18c6bd08d5c4aee419674a0e16"
   },
   "cached.transformer_blocks.7.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "30f5437e53961a67d15b35ac85c3feb912b7dac891069564d3f97f17b181252b"
   },
   "cached.transformer_blocks.8.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "2f4150c04f055cbbb4e0fb97b01b2a26fabf8dd8d88c0ba42a4570ba00fc8c95"
   },
   "cached.transformer_blocks.8.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "edc2c1a31b337cbaf9cdba5aca86b8bbadc304ef819f980ca3d0438d55a783c7"
   },
   "cached.transformer_blocks.8.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "938287176effe75cc0bece319290aa31a75c681756cbf7c1ae2aaf70fb01ae5c"
   },
   "cached.transformer_blocks.9.attn.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "c478a96b14a7bb586307cdebcd589b18b974a400a35392244e80ce4517d926e7"
   },
   "cached.transformer_blocks.9.img_mlp.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "9c93c2cbbe6a2e71fbd46ae4ad977633565acf34b151c0fa9dd9fa76668223ad"
   },
   "cached.transformer_blocks.9.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "c85b18badde4118f0792e39caf70daa6811b85eb8e0b3049176590471d1889be"
   },
   "features": {
-   "shape": [
-    36,
-    4096
-   ],
+   "shape": [36, 4096],
    "dtype": "float32",
    "sha256": "c57e64324be12eb32f6decce7af8393496b33e46359d9728a0d0a2660feec210"
   },
   "image_ids": {
-   "shape": [
-    1060
-   ],
+   "shape": [1060],
    "dtype": "int32",
    "sha256": "ea4d2fe57b8ea96f836be92ed83e6ef02cb289713da7785033d6fda625bd465c"
   },
   "image_pad_mask": {
-   "shape": [
-    1060
-   ],
+   "shape": [1060],
    "dtype": "bool",
    "sha256": "0173c22eba82430539249a82874fdfa7543819090373c3430af6cbeb54fb7fbe"
   },
   "img_in.out": {
-   "shape": [
-    1,
-    1024,
-    4096
-   ],
+   "shape": [1, 1024, 4096],
    "dtype": "float32",
    "sha256": "ac8f92ee84aa8dc92de6ea6b5c527c10721169aa40c0ce20aaed00897a60e09e"
   },
   "img_mask": {
-   "shape": [
-    36
-   ],
+   "shape": [36],
    "dtype": "bool",
    "sha256": "6db65fd59fd356f6729140571b5bcd6bb3b83492a16e1bf0a3884442fc3c8a0e"
   },
   "joint.in": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "cc006f47af0baa7ba6cece23739c3e0be2081804ae6d11882fef1a4aeaf01db6"
   },
   "joint.proj_out.out": {
-   "shape": [
-    1,
-    1060,
-    64
-   ],
+   "shape": [1, 1060, 64],
    "dtype": "float32",
    "sha256": "7016e7f569296192aec92e8590753aad16e652ba336f188c2e6fa51b6cb48109"
   },
   "joint.transformer_blocks.0.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "5565e5911955e1956d9ea6a857095e01366a9b45f135c066502d0712d80aad29"
   },
   "joint.transformer_blocks.0.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "f38c160e7b4994d6df5282335f1dc65538a10b8a126cb7accb747c977c08513b"
   },
   "joint.transformer_blocks.0.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "686caea03d7e09e88a762f06fac2b6d8afa20d8745d0038da61c30d09ea4fb0b"
   },
   "joint.transformer_blocks.1.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "48b3233c64247ab0cddc89b90a92c902cc79d9e8621bd2ff11c52ad4625f1258"
   },
   "joint.transformer_blocks.1.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "aa543585225164447e98e7a71ec75716ed243f72a76c4986a0cb545d18211a9a"
   },
   "joint.transformer_blocks.1.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "40ec8757ebf83bfabdb7a7464ec4b8425cd98ab35754db3e96899bff275b0827"
   },
   "joint.transformer_blocks.10.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "012bcaeb538b94eb8b742c456778bc45802e1d1d9a7f01910f05c880db1f14d8"
   },
   "joint.transformer_blocks.10.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "a34ad74d06836a5830284147e2f1955e25340012597bcf6c3acb1e00afa4ad1e"
   },
   "joint.transformer_blocks.10.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "1c76814692352faffa01d8116a92465cbbdc3b43122d8b7458c04d7287652745"
   },
   "joint.transformer_blocks.11.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "276e54ceb22ff84e7b84a87b63b05f4bd191bddddf3581086b7fa7b368a83673"
   },
   "joint.transformer_blocks.11.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "afbe732a4002fa4c8409b716e9a154dd2025917ee81028ebfc584ebed5b35e1e"
   },
   "joint.transformer_blocks.11.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "777e7d18030ba8b2b31289c5ba682e99dafb0a04b2573f700ed4cd3184930381"
   },
   "joint.transformer_blocks.12.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "e4723a5465a8667754f3b23a78f2a4c03ce072bf1bc05ee58f6438180f1e2279"
   },
   "joint.transformer_blocks.12.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "54f8f7f6dcfd8b2b5ee13cac6b3cb2933ff595c715915780cfc5f420461b9e48"
   },
   "joint.transformer_blocks.12.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "90520924bcd4a18cac575eecca257da4b530d0f4b649c3a04bbdbf8b5f5c2de2"
   },
   "joint.transformer_blocks.13.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "c74ce778a8b8d4966faa8e401903f928e049a878cf45ec52af043e4b2a46fba5"
   },
   "joint.transformer_blocks.13.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "75c8b9209f3834f6967892f5ea053cba36e080658b9e058ef80981890a8342b4"
   },
   "joint.transformer_blocks.13.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "187f14c2e2fea0a6a6f7e5c0e1f8a18c7e9f15aa3c50a3bff0792f1274731566"
   },
   "joint.transformer_blocks.14.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "ce6bc4952807f966672627554ac3b5412f9ec2ce11d7a7583f70c101b48068d1"
   },
   "joint.transformer_blocks.14.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "5745df32085cb5978bd8a7bf26d86ff0ce98231e525dcbf7a9954cb8cf8e811b"
   },
   "joint.transformer_blocks.14.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "eb4da387eeaa9bbf72352af532a0557c149af3112b0c07dcea582b9322a476bb"
   },
   "joint.transformer_blocks.15.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "4475e127534c6305524afc7ca4991f6a49518ccda279ffc1680c78e67abcdf0a"
   },
   "joint.transformer_blocks.15.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "f44c3e2d18cb2eb68fb99b4b08c038da93b5ba6f07bb41d72350fc1f1c3c09d1"
   },
   "joint.transformer_blocks.15.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "a0e44decd8866ed5a4da47e7ccac84042edcbdd076a8a2e9fb32dc88704a378e"
   },
   "joint.transformer_blocks.16.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "3d5e50cc6bb78779333f58844af6b7111f8422a5302ce138140eef2dc3735520"
   },
   "joint.transformer_blocks.16.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "d8dbf38b9e8653521db6cc1b5d2f679e3cd9f606a03f89dc9e85cdff8afae0b7"
   },
   "joint.transformer_blocks.16.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "fcc7124c4ff8c2f71750b8781919f74b5c3bb19f2a5d7105ae90d215f59c852d"
   },
   "joint.transformer_blocks.17.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "161929bdde7c706acefb205cc84a29f72640b619082af3a4413547f8b9503f5c"
   },
   "joint.transformer_blocks.17.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "cf6be3f50a82796a44dc4f330dd738baef78e4a30f8c9e3744a5723f16ca8b31"
   },
   "joint.transformer_blocks.17.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "b2686461e48a749f71ab2476923601d2a6ac964cf8b7e694e10b0d4eed242c7e"
   },
   "joint.transformer_blocks.18.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "9e1f2b1257c22e9ada92e36b1f6f3a94a6f69ae28309522db9d3ad263c1c133d"
   },
   "joint.transformer_blocks.18.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "2c8ab77a1fbb9b176546c5dd64478b12086bd1c019a79f984d7452c94cdc99ad"
   },
   "joint.transformer_blocks.18.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "3b1e5af101adb9b61c14c0a70294a6c947dd3d2f2b6629e13eff981a2e8d82c8"
   },
   "joint.transformer_blocks.19.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "12c3a81045ff31a3822c829fb6e56811ccc99f31fd2c2e71b6c91eacaee7da72"
   },
   "joint.transformer_blocks.19.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "66e9e5fa3c65c451e1881b679c90afa5de9a1bd9e7f94999ee3326a59b6d36b3"
   },
   "joint.transformer_blocks.19.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "7dedd1ab74e3e38c50d28a081cd6171227f79ddb9bdfdd3be5da290ab1861300"
   },
   "joint.transformer_blocks.2.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "dfecb022ccd3fdca344dd6a02382d2c99696242c12781c3335b3911faeb6a346"
   },
   "joint.transformer_blocks.2.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "2f05fded6430248e2076933f1fa151962d64a0561cb0fd923120bfc73a6afe55"
   },
   "joint.transformer_blocks.2.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "579c7b20eeb83b7c2b07c39a3fe0603eb73ae8eab72209ab44b2ffc4f7ad01d6"
   },
   "joint.transformer_blocks.20.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "2230b1cd80120a3feb92ef8cd394934a64dd1f5ce111b5f049efda684c22f02e"
   },
   "joint.transformer_blocks.20.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "fe0437fa709c9c20dea79c9fd6d786d7866d46d5b6483a135f65bc80970de98a"
   },
   "joint.transformer_blocks.20.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "77c9ceb3f8818c4b04fbcaa254d09bfb7420812237eccb5cb50414dddd333ff6"
   },
   "joint.transformer_blocks.21.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "e37cb661498bd41f0293d387500add13b64bbcb270304df647bc2a8826f54a3c"
   },
   "joint.transformer_blocks.21.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "3a411b54051a9631dcf971365f6dee8bd9c2afea4a56daa958461c33dca18545"
   },
   "joint.transformer_blocks.21.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "e531611c9d2b25f365f467403a6024229becb9d77caa7146376551248c723dc3"
   },
   "joint.transformer_blocks.22.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "f95e2562e682106af88c7cb47adc9d86e7ba021e54f9fe455973db432320454d"
   },
   "joint.transformer_blocks.22.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "328f2198ff64625458af5b307eab0c3b12bb910fd5bb938615c60ce757ebf97e"
   },
   "joint.transformer_blocks.22.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "98df3e0dccb75a942768e3621f7f39a5a97d3e0957a83f1c07d7e0ee8f50029d"
   },
   "joint.transformer_blocks.23.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "9f0956d66c530d44cdfe7b59506865aeb4abdf776b5ee530a9be4de30977a2a3"
   },
   "joint.transformer_blocks.23.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "af421c4da459287491fb7dafe684ad942a0e2e0c5d31ff7500bedfa528d5ad8b"
   },
   "joint.transformer_blocks.23.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "7fbf95ecc1dc8d604a693e54763038474d240b1c2410d702ee8e40560011b796"
   },
   "joint.transformer_blocks.24.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "c4ad5f039fab0e7be0005910921d8962859fbce79b3fbfc9e1bec9089a09f90d"
   },
   "joint.transformer_blocks.24.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "82532eeccad45c44cc4232bc56f9ebe9bcb8497243c09f7b5f55d659ed71199e"
   },
   "joint.transformer_blocks.24.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "915cb10a34df1b434b0539435b34dfbe759a43d36d755748586ffa79de8b14e2"
   },
   "joint.transformer_blocks.25.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "9a1deb4b18407ced291dc1eeb53e0b65f5d0bb077ee3cb16298aab094b376a3c"
   },
   "joint.transformer_blocks.25.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "1d111450bdbde8aa9c329605b17b03c3dda53613b0ef00a86d348dd1555abb1f"
   },
   "joint.transformer_blocks.25.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "6dcba4e82c63bb02f111a3e3959a33f3d574fc8ab6282e2acda68ec7af9ac8b2"
   },
   "joint.transformer_blocks.26.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "4702ddfc1a14c90fbd780ded865003373b7f01191b319532e2e6e0b58b5e1189"
   },
   "joint.transformer_blocks.26.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "d098a1aa0ad83347fd72c81e258c5fba70104952bcf5f05bf35daa075ef757b2"
   },
   "joint.transformer_blocks.26.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "3d4582536c23407ee2c8e6ac4c9661ae7a1b6aa390bee254c721797963d34498"
   },
   "joint.transformer_blocks.27.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "ca6229a9f653c576125c7b39cdbc2b10fd3d71dd245a052b6c5c84534e1d7d7a"
   },
   "joint.transformer_blocks.27.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "187bf43a94142aff2ebc9cfbb7c2edd8f5f2731ae0b4036eaca5e3e344d20524"
   },
   "joint.transformer_blocks.27.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "19d9eb58bc918122764a4cac7fbc7816be1b7abfd0354abcb2657e2a2daff1a2"
   },
   "joint.transformer_blocks.28.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "60a92ff328eab7b84c7d7102130c29a271fdfc29f6d3a28aa34ecb70c34e6a10"
   },
   "joint.transformer_blocks.28.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "c6af27447a0103b97f938b3cf419d841825df142d7d9e052d8e14f3f679959f2"
   },
   "joint.transformer_blocks.28.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "857585e9d5192c6fd3f7b9155f294ab802e3bf718da28550225cde682858b151"
   },
   "joint.transformer_blocks.29.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "7ebd375dfaaa40c8f47cde034c0434200dbb20a13cef75d223eb3c9759871023"
   },
   "joint.transformer_blocks.29.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "28d7303be0c3df1a5aa52d76f45a5b677dbe187665296f9725e5cf5610905a4e"
   },
   "joint.transformer_blocks.29.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "2f26bde3da86ab25c755b51b6f75b130723500a194f81847a603730aa0631736"
   },
   "joint.transformer_blocks.3.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "93b8d5b415038045fef12329379cac8f5f5eedd75feaba44a3bb2c2b91f8f133"
   },
   "joint.transformer_blocks.3.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "dbb269e8f8c8fff832eafde8d374589ac1c33dc5d648b4e629d510f271dfec86"
   },
   "joint.transformer_blocks.3.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "73d10153f7bcc9b14b2cbd6953ee29d5c64c832b0a924d1475d94b831aca4c6a"
   },
   "joint.transformer_blocks.30.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "0ae256681022c39af1b5ae5b11017f211ab62780079932a351416637a7ac8f57"
   },
   "joint.transformer_blocks.30.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "6e8357497514d6c0076f3eb033d18754b4eadeff6f04cb9e7bd5a5907cb627c0"
   },
   "joint.transformer_blocks.30.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "ccd5ff5dae4e12f9c1a09722b9692ef4aeb44af4b54812a5c56081176f012d08"
   },
   "joint.transformer_blocks.31.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "3c313dfdaa026f79aa00a79cebcc2b76353724e82c8bbcc27dd125ef7515c995"
   },
   "joint.transformer_blocks.31.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "c5af99cdca53c5a5a760f496229cbab2df250901fe61e7bb34e7185d3e1bf649"
   },
   "joint.transformer_blocks.31.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "431a584fe4f5345f5c39a4f7cfa03887b5d03d6db3c7ef0e09bc4ccb4a2f5e62"
   },
   "joint.transformer_blocks.4.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "45bde4fb6ccef9fd5ab448b5326ec84f5116834545a730faad5dbddd38636656"
   },
   "joint.transformer_blocks.4.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "ba578ace0a825124622eff69e4545d70e5449cdfe2452c8096fa51e4fc9c8ead"
   },
   "joint.transformer_blocks.4.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "1bb51cfd1fb8100e2c51bd0ca8a0cb6467c4ed7fab122ef7622a906035ff7f7b"
   },
   "joint.transformer_blocks.5.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "94af4974f2e00758bd03df98d4807f12edbd26ba4c6482039170733e5caebaef"
   },
   "joint.transformer_blocks.5.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "5a0e4a89294f2dca29ba3b4732ace980249a49325debfaf851342eccf5e5b781"
   },
   "joint.transformer_blocks.5.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "a80e178e54a0adcfc5b0922e0ca355f8f7cb0bc2352bfe08ab7beb09d73a2b9f"
   },
   "joint.transformer_blocks.6.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "cc643871b5f3b5e12b4e7b9fd24bb542ae43267b83e53e40dbc6d2cfae67af66"
   },
   "joint.transformer_blocks.6.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "f84ed288cf8e587cffae25eb175ebb97bab98db4edfd2434e45723b707e8ffe6"
   },
   "joint.transformer_blocks.6.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "eb64df21c42fa0150ae4e528959361d22d9bee293f653ca78f0205e92d1a971f"
   },
   "joint.transformer_blocks.7.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "553fece924e908981e945c266fcb6cd55528ab81183da7bd11589f7841e8d8d8"
   },
   "joint.transformer_blocks.7.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "8c7808f4a1b2f6b2cb8a486c1839a8772ef854a800f60cd15d354ff733e7aa04"
   },
   "joint.transformer_blocks.7.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "f5991da60bc43b6d2d5c6e8858a5e335f4a5c248e45e8241ef43ed2dc4c24e02"
   },
   "joint.transformer_blocks.8.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "a8f46e7f00f74a14c2b03ab1640be6a127baff7ceca86e99a4df9fd635fbdf6a"
   },
   "joint.transformer_blocks.8.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "49e9483dd08da4de5c8a57b034e1bcf099d48b41c9de2bb67460247e36139e83"
   },
   "joint.transformer_blocks.8.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "b290a95c1552f72d918d24d32f0a0d2ee3a6bf7b67db8b7f4c455a8feca45151"
   },
   "joint.transformer_blocks.9.attn.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "ad4fdd0cdec89f6c71dbc3decbfe6d592fa130ac65845804f7cf178148cd1c7b"
   },
   "joint.transformer_blocks.9.img_mlp.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "e8af5d40673ad65c1c6b8ff5603df476ed7cbc71c57452435ead9561b6cebbaa"
   },
   "joint.transformer_blocks.9.out": {
-   "shape": [
-    1,
-    1060,
-    4096
-   ],
+   "shape": [1, 1060, 4096],
    "dtype": "float32",
    "sha256": "b0afa84f832953f3f625c4f54e24fdb8b4107e87f41d807e683e8a82192222c6"
   },
   "joint_source": {
-   "shape": [
-    1060
-   ],
+   "shape": [1060],
    "dtype": "int32",
    "sha256": "6da4af9c1ed2ece7dc067b4f9b683aec976f5eb28fe28093f00710db00c86847"
   },
   "latents_a": {
-   "shape": [
-    1,
-    64,
-    32,
-    32
-   ],
+   "shape": [1, 64, 32, 32],
    "dtype": "float32",
    "sha256": "08f00e104d66fe7605cda9f853dfea16ab158e9545b5aaa460507b6ded4e55ef"
   },
   "latents_b": {
-   "shape": [
-    1,
-    64,
-    32,
-    32
-   ],
+   "shape": [1, 64, 32, 32],
    "dtype": "float32",
    "sha256": "000a73e50d72d8af928ce42a2163ae704a80b38b982c967d5388b855e8ae52ab"
   },
   "modulation_a": {
-   "shape": [
-    2,
-    16384
-   ],
+   "shape": [2, 16384],
    "dtype": "float32",
    "sha256": "5b853e0be80ad0f30c542cfda093b20f5f6a3a79630746bc2ee6d1ae5a0c0428"
   },
   "modulation_b": {
-   "shape": [
-    2,
-    16384
-   ],
+   "shape": [2, 16384],
    "dtype": "float32",
    "sha256": "14ed06cc43f80887ca467786aa772d885e70d28d646b890c4b9b061e3273a4a6"
   },
   "modulation_row": {
-   "shape": [
-    1060
-   ],
+   "shape": [1060],
    "dtype": "int8",
    "sha256": "13cc51430682610c96b2c1a53ed3999a817f79de437bb6281be085f97598ef4e"
   },
   "positions": {
-   "shape": [
-    1060,
-    3
-   ],
+   "shape": [1060, 3],
    "dtype": "int32",
    "sha256": "bb1c3c8955b0a55fec4c03d53a85277012de822dd07f4054d9e9f7d0cca9fb92"
   },
   "rope_cos": {
-   "shape": [
-    1060,
-    64
-   ],
+   "shape": [1060, 64],
    "dtype": "float32",
    "sha256": "c2809fb169fdc87955ef154f09f3acf2d09ed1938ef61d5c7182f2f6232eed9a"
   },
   "rope_sin": {
-   "shape": [
-    1060,
-    64
-   ],
+   "shape": [1060, 64],
    "dtype": "float32",
    "sha256": "68fc0f8113c929423cca61223d28e10b0eabc82a390921b2df5feeb979937184"
   },
   "segments": {
-   "shape": [
-    1,
-    3
-   ],
+   "shape": [1, 3],
    "dtype": "int32",
    "sha256": "9220d6c1a1a1472f1040ca393cdfd776823e8a317fd7453a2d4dc919c2476e0c"
   },
@@ -5095,102 +3492,62 @@
    "sha256": "8e5974008620f7ad49031d1de75216074ad07c63360057f97db8ecac15314702"
   },
   "t_embedded_a": {
-   "shape": [
-    1
-   ],
+   "shape": [1],
    "dtype": "float32",
    "sha256": "e874371051900562131d4c294b77802c179273819bb138134e11d8972ad37ad4"
   },
   "t_embedded_b": {
-   "shape": [
-    1
-   ],
+   "shape": [1],
    "dtype": "float32",
    "sha256": "20ad23e18c4ac2cfe0b9c3d812f968c10c7d3e37cc64e6c9f9517449da97ce73"
   },
   "t_passed_a": {
-   "shape": [
-    1
-   ],
+   "shape": [1],
    "dtype": "float32",
    "sha256": "73f9f4763a4034dd6c45b02f23c8eaa048ee7f918542caa51d8c3e6feed50542"
   },
   "t_passed_b": {
-   "shape": [
-    1
-   ],
+   "shape": [1],
    "dtype": "float32",
    "sha256": "8e5974008620f7ad49031d1de75216074ad07c63360057f97db8ecac15314702"
   },
   "target_token_mask": {
-   "shape": [
-    1060
-   ],
+   "shape": [1060],
    "dtype": "bool",
    "sha256": "0173c22eba82430539249a82874fdfa7543819090373c3430af6cbeb54fb7fbe"
   },
   "temb_a": {
-   "shape": [
-    2,
-    4096
-   ],
+   "shape": [2, 4096],
    "dtype": "float32",
    "sha256": "5621941f2bc0c7ffade5f5c74014e8a57eec816e934a57d9f6c3bc1397514a0f"
   },
   "temb_b": {
-   "shape": [
-    2,
-    4096
-   ],
+   "shape": [2, 4096],
    "dtype": "float32",
    "sha256": "bfe58edd53da04b5ce87046d309302e0752a16cee3b879de46c665e77aed3b48"
   },
   "txt_in.out": {
-   "shape": [
-    1,
-    36,
-    4096
-   ],
+   "shape": [1, 36, 4096],
    "dtype": "float32",
    "sha256": "904ea24047dcc22751dfdc65500187f4ea390d1f1be4bcfe7654275a73d73dc7"
   },
   "velocity_a": {
-   "shape": [
-    1,
-    64,
-    32,
-    32
-   ],
+   "shape": [1, 64, 32, 32],
    "dtype": "float32",
    "sha256": "f464448ab7076b18ea2b418e5cbdfca41d16f865576f0df889a6fb02862836f7"
   },
   "velocity_a_bf16": {
-   "shape": [
-    1,
-    64,
-    32,
-    32
-   ],
+   "shape": [1, 64, 32, 32],
    "dtype": "float32",
    "sha256": "3d367c67b77388552305c5060eb9f961fdd6d0c965160b24cd0cc700a2dd0e21"
   },
   "velocity_b": {
-   "shape": [
-    1,
-    64,
-    32,
-    32
-   ],
+   "shape": [1, 64, 32, 32],
    "dtype": "float32",
    "sha256": "85f368d4d218c4b54574e08720a69a75a655a56ba96f2df071e2e6cebb773597"
   },
   "velocity_b_bf16": {
-   "shape": [
-    1,
-    64,
-    32,
-    32
-   ],
+   "shape": [1, 64, 32, 32],
    "dtype": "float32",
    "sha256": "589ec3513cac7141c4f1a76579106d6b394be4e82b1b07abe0f9ad360a70745a"
   }

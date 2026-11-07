@@ -4,17 +4,7 @@
  "check": 5,
  "family": "h3",
  "script": "scripts/video_oracle/check5_h3.py",
- "argv": [
-  "check5_h3.py",
-  "--comfy-dir",
-  "ComfyUI-h3",
-  "--vae",
-  "minimax_h3_video_vae_fp16.safetensors",
-  "--audio-vae",
-  "minimax_h3_audio_vae_fp32.safetensors",
-  "--tiny",
-  "taeh3.safetensors"
- ],
+ "argv": ["check5_h3.py", "--comfy-dir", "ComfyUI-h3", "--vae", "minimax_h3_video_vae_fp16.safetensors", "--audio-vae", "minimax_h3_audio_vae_fp32.safetensors", "--tiny", "taeh3.safetensors"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -69,22 +59,11 @@
  "inputs": {
   "cases": {
    "clips": {
-    "256x256x22": [
-     22,
-     256,
-     256
-    ],
-    "512x320x39": [
-     39,
-     320,
-     512
-    ]
+    "256x256x22": [22, 256, 256],
+    "512x320x39": [39, 320, 512]
    },
    "images": {
-    "256x256": [
-     256,
-     256
-    ]
+    "256x256": [256, 256]
    },
    "latents": {},
    "audio_samples": 64123
@@ -94,21 +73,13 @@
    "256x256x22": {
     "latents": 7,
     "tiles_y": {
-     "starts": [
-      0
-     ],
-     "lengths": [
-      256
-     ],
+     "starts": [0],
+     "lengths": [256],
      "overlaps": []
     },
     "tiles_x": {
-     "starts": [
-      0
-     ],
-     "lengths": [
-      256
-     ],
+     "starts": [0],
+     "lengths": [256],
      "overlaps": []
     },
     "encode_pieces": 2,
@@ -123,33 +94,14 @@
    "512x320x39": {
     "latents": 12,
     "tiles_y": {
-     "starts": [
-      0,
-      64
-     ],
-     "lengths": [
-      256,
-      256
-     ],
-     "overlaps": [
-      192
-     ]
+     "starts": [0, 64],
+     "lengths": [256, 256],
+     "overlaps": [192]
     },
     "tiles_x": {
-     "starts": [
-      0,
-      128,
-      256
-     ],
-     "lengths": [
-      256,
-      256,
-      256
-     ],
-     "overlaps": [
-      128,
-      128
-     ]
+     "starts": [0, 128, 256],
+     "lengths": [256, 256, 256],
+     "overlaps": [128, 128]
     },
     "encode_pieces": 3,
     "decode_pad_latents": 0,
@@ -163,21 +115,13 @@
    "256x256": {
     "latents": 1,
     "tiles_y": {
-     "starts": [
-      0
-     ],
-     "lengths": [
-      256
-     ],
+     "starts": [0],
+     "lengths": [256],
      "overlaps": []
     },
     "tiles_x": {
-     "starts": [
-      0
-     ],
-     "lengths": [
-      256
-     ],
+     "starts": [0],
+     "lengths": [256],
      "overlaps": []
     }
    }
@@ -410,212 +354,102 @@
    }
   }
  },
- "notes": [
-  "The video VAE file is float16 and the audio VAE file float32; each mode's model takes the file's values in its own dtype."
- ],
+ "notes": ["The video VAE file is float16 and the audio VAE file float32; each mode's model takes the file's values in its own dtype."],
  "created": "2026-10-30T02:23:48Z",
  "npz": "check5_h3.npz",
  "tensors": {
   "decoded_f64_256x256": {
-   "shape": [
-    1,
-    3,
-    1,
-    256,
-    256
-   ],
+   "shape": [1, 3, 1, 256, 256],
    "dtype": "float64",
    "sha256": "e709b66018d0b2a342266bc9b0aa5ee985291f7ded6c4b456ab88a3791451a2f"
   },
   "decoded_f64_256x256x22": {
-   "shape": [
-    1,
-    3,
-    22,
-    256,
-    256
-   ],
+   "shape": [1, 3, 22, 256, 256],
    "dtype": "float64",
    "sha256": "60354de393f3cc69b54cbceaf74d78c0bfa47519131a049b10fc956b272e4dcc"
   },
   "decoded_f64_512x320x39": {
-   "shape": [
-    1,
-    3,
-    39,
-    320,
-    512
-   ],
+   "shape": [1, 3, 39, 320, 512],
    "dtype": "float64",
    "sha256": "e2584934b029cf70c80b17b256f819f7353676af66246e9a4a014cd84aab6e64"
   },
   "input_256x256": {
-   "shape": [
-    1,
-    3,
-    1,
-    256,
-    256
-   ],
+   "shape": [1, 3, 1, 256, 256],
    "dtype": "float32",
    "sha256": "3293bb27d863bebc32f46fa17b72d5a124f269ca0bd4ec7ef7940b58a0306374"
   },
   "input_256x256x22": {
-   "shape": [
-    1,
-    3,
-    22,
-    256,
-    256
-   ],
+   "shape": [1, 3, 22, 256, 256],
    "dtype": "float32",
    "sha256": "387d65857409ac50b3c5aafe806a1c5a1eaf3f61a648a3773c22492b7dc7a330"
   },
   "input_512x320x39": {
-   "shape": [
-    1,
-    3,
-    39,
-    320,
-    512
-   ],
+   "shape": [1, 3, 39, 320, 512],
    "dtype": "float32",
    "sha256": "04d78b76a6fe06899bf10a64dec30208e80bb022cec1ffc3a3c045ade72e1490"
   },
   "latents_f64_256x256": {
-   "shape": [
-    1,
-    24,
-    1,
-    16,
-    16
-   ],
+   "shape": [1, 24, 1, 16, 16],
    "dtype": "float64",
    "sha256": "3f7095c6979caff6d4cef87e0a77074f78d098e5fca118239c7e06045140432a"
   },
   "latents_f64_256x256x22": {
-   "shape": [
-    1,
-    24,
-    7,
-    16,
-    16
-   ],
+   "shape": [1, 24, 7, 16, 16],
    "dtype": "float64",
    "sha256": "10463a85dcb88caea9ce240355a6181dfcdac88d395318991b3b2677de1aa12e"
   },
   "latents_f64_512x320x39": {
-   "shape": [
-    1,
-    24,
-    12,
-    20,
-    32
-   ],
+   "shape": [1, 24, 12, 20, 32],
    "dtype": "float64",
    "sha256": "b2424d4e2725079992c9db2b474e3bdd4773d801d786c76922475473358096a8"
   },
   "latents_fp32_256x256": {
-   "shape": [
-    1,
-    24,
-    1,
-    16,
-    16
-   ],
+   "shape": [1, 24, 1, 16, 16],
    "dtype": "float32",
    "sha256": "d2669bae468e531c061b29369d1be6b3b92d806959ba1adcc1f566d921052be7"
   },
   "latents_fp32_256x256x22": {
-   "shape": [
-    1,
-    24,
-    7,
-    16,
-    16
-   ],
+   "shape": [1, 24, 7, 16, 16],
    "dtype": "float32",
    "sha256": "3f87a6d63164e9c6576306a166449a9228d42f5490a673c189e68f166bc9f6da"
   },
   "latents_fp32_512x320x39": {
-   "shape": [
-    1,
-    24,
-    12,
-    20,
-    32
-   ],
+   "shape": [1, 24, 12, 20, 32],
    "dtype": "float32",
    "sha256": "e22fd7a897c7172ba6f027b18f6a7f2d48b50ee0c15301ed8fce2717cc596945"
   },
   "tiny_f64_256x256": {
-   "shape": [
-    1,
-    3,
-    1,
-    256,
-    256
-   ],
+   "shape": [1, 3, 1, 256, 256],
    "dtype": "float64",
    "sha256": "fff2c482e1cf4450f2176a7611e31b370af9995bf5324067e121d3865c9665f5"
   },
   "tiny_f64_256x256x22": {
-   "shape": [
-    1,
-    3,
-    22,
-    256,
-    256
-   ],
+   "shape": [1, 3, 22, 256, 256],
    "dtype": "float64",
    "sha256": "3910d0e82c66ec91129e042c24f94f761c620ba5ac64a57dc55bfaced74b08f1"
   },
   "tiny_f64_512x320x39": {
-   "shape": [
-    1,
-    3,
-    39,
-    320,
-    512
-   ],
+   "shape": [1, 3, 39, 320, 512],
    "dtype": "float64",
    "sha256": "c95866183773b1e3b84f8e1822f648f993335cc4f3ed5896ed1901956f4425d7"
   },
   "wave": {
-   "shape": [
-    1,
-    2,
-    64123
-   ],
+   "shape": [1, 2, 64123],
    "dtype": "float32",
    "sha256": "5b1e58a15a6570a0a63da4860db699a3a98a2edbd8707c858254161adf55e6e5"
   },
   "wave_decoded_f64": {
-   "shape": [
-    1,
-    2,
-    64800
-   ],
+   "shape": [1, 2, 64800],
    "dtype": "float64",
    "sha256": "c3465c63e9343c3569b0dde8ecaf49d56589c03cdcbe59298cfc3dca979725af"
   },
   "wave_latents_f64": {
-   "shape": [
-    1,
-    32,
-    2,
-    81
-   ],
+   "shape": [1, 32, 2, 81],
    "dtype": "float64",
    "sha256": "77dc2b34e71acb2d1d9af2e32ef1057612f6a7303f23c03ff6b1bd68a801e987"
   },
   "wave_latents_fp32": {
-   "shape": [
-    1,
-    32,
-    2,
-    81
-   ],
+   "shape": [1, 32, 2, 81],
    "dtype": "float32",
    "sha256": "36cb1047cb0f0622feef4beb13b5bcf6c8bd64f19cf826062b9cef251244dcfa"
   }

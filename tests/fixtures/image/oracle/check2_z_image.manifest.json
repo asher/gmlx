@@ -4,13 +4,7 @@
  "check": 2,
  "family": "z_image",
  "script": "scripts/image_oracle/check2_z_image.py",
- "argv": [
-  "check2_z_image.py",
-  "--encoder",
-  "Qwen3-4B-Q4_K_M.gguf",
-  "--config",
-  "Tongyi-MAI__Z-Image-Turbo"
- ],
+ "argv": ["check2_z_image.py", "--encoder", "Qwen3-4B-Q4_K_M.gguf", "--config", "Tongyi-MAI__Z-Image-Turbo"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -219,101 +213,67 @@
   },
   "token_cosine_min": 0.999
  },
- "notes": [
-  "The unpadded rows run at batch 1 with no mask, as gmlx encodes a prompt. Their gap to the padded reference is rounding only, since a causal layer never reads a later pad."
- ],
+ "notes": ["The unpadded rows run at batch 1 with no mask, as gmlx encodes a prompt. Their gap to the padded reference is rounding only, since a causal layer never reads a later pad."],
  "created": "2026-10-16T18:17:56Z",
  "npz": "check2_z_image.npz",
  "tensors": {
   "ids_empty": {
-   "shape": [
-    8
-   ],
+   "shape": [8],
    "dtype": "int64",
    "sha256": "360c357935da9f2577f388f0d7084d9434f49929c1b0bc678839d180276f714e"
   },
   "ids_long": {
-   "shape": [
-    512
-   ],
+   "shape": [512],
    "dtype": "int64",
    "sha256": "16beeb97289dab01a74d052761efab912f183b61ac38d3e27d636b577e043ace"
   },
   "ids_non_ascii": {
-   "shape": [
-    45
-   ],
+   "shape": [45],
    "dtype": "int64",
    "sha256": "81b8264edd9973a7c4164bea7f1e8b1016af7572b73b9abb514e853880ebedf4"
   },
   "ids_plain": {
-   "shape": [
-    36
-   ],
+   "shape": [36],
    "dtype": "int64",
    "sha256": "ab75f11d21f3093902b865ce8cf33d7a381d79e589ffdd0a9ada34e999b4ff50"
   },
   "tap_bf16_empty": {
-   "shape": [
-    8,
-    2560
-   ],
+   "shape": [8, 2560],
    "dtype": "float32",
    "sha256": "2361ecce93dfb27f2d6740b3a865778e853ab94d4228d16f2f2bbc3b87914619"
   },
   "tap_bf16_long": {
-   "shape": [
-    512,
-    2560
-   ],
+   "shape": [512, 2560],
    "dtype": "float32",
    "sha256": "2304a03e9c258dffb7ea7e71379419275dbb5c40048bc43458a7bfda16f84382"
   },
   "tap_bf16_non_ascii": {
-   "shape": [
-    45,
-    2560
-   ],
+   "shape": [45, 2560],
    "dtype": "float32",
    "sha256": "c2482f743579a3666805c0aeef4fda1c5d58cf3679acd24d40435393b3de6799"
   },
   "tap_bf16_plain": {
-   "shape": [
-    36,
-    2560
-   ],
+   "shape": [36, 2560],
    "dtype": "float32",
    "sha256": "e916de9a6d4f29979ec365790be755d838b8f09b12b9ee34415e9e79052417f0"
   },
   "tap_empty": {
-   "shape": [
-    8,
-    2560
-   ],
+   "shape": [8, 2560],
    "dtype": "float32",
    "sha256": "890c62b5e044660226c1f96ac8d11bd3c70a16e32f68be363830074dc119b358"
   },
   "tap_long": {
-   "shape": [
-    512,
-    2560
-   ],
+   "shape": [512, 2560],
    "dtype": "float32",
    "sha256": "f2a104d1e333c9bc21042d83100542fdab6442aafd1e91221ef57a0e75a56e13"
   },
   "tap_non_ascii": {
-   "shape": [
-    45,
-    2560
-   ],
+   "shape": [45, 2560],
    "dtype": "float32",
    "sha256": "bee385c7400ec447956176daa61b86f1cb1cd5163149e2724370a72308d318fd"
   },
   "tap_plain": {
-   "shape": [
-    36,
-    2560
-   ],
+   "shape": [36, 2560],
    "dtype": "float32",
    "sha256": "cae0f9a036bfb3f7669fa729ea42c6905b524a6a3af8c3a22f91d37c2f02e48c"
   }

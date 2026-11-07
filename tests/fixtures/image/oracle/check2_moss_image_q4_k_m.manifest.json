@@ -4,15 +4,7 @@
  "check": 2,
  "family": "moss_image",
  "script": "scripts/image_oracle/check2_moss_image.py",
- "argv": [
-  "check2_moss_image.py",
-  "--encoder",
-  "Qwen3.5-9B-Q4_K_M.gguf",
-  "--tokenizer",
-  "tok-check2",
-  "--name",
-  "check2_moss_image_q4_k_m"
- ],
+ "argv": ["check2_moss_image.py", "--encoder", "Qwen3.5-9B-Q4_K_M.gguf", "--tokenizer", "tok-check2", "--name", "check2_moss_image_q4_k_m"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -114,26 +106,10 @@
    "Q8_0": 48
   },
   "dequant_checked": {
-   "Q6_K": [
-    "blk.0.ffn_down.weight",
-    "layers.0.mlp.down_proj.weight",
-    "bitwise"
-   ],
-   "Q4_K": [
-    "blk.4.ffn_down.weight",
-    "layers.4.mlp.down_proj.weight",
-    "bitwise"
-   ],
-   "Q5_K": [
-    "blk.0.ssm_out.weight",
-    "layers.0.linear_attn.out_proj.weight",
-    "reordered"
-   ],
-   "Q8_0": [
-    "blk.0.ssm_alpha.weight",
-    "layers.0.linear_attn.in_proj_a.weight",
-    "reordered"
-   ]
+   "Q6_K": ["blk.0.ffn_down.weight", "layers.0.mlp.down_proj.weight", "bitwise"],
+   "Q4_K": ["blk.4.ffn_down.weight", "layers.4.mlp.down_proj.weight", "bitwise"],
+   "Q5_K": ["blk.0.ssm_out.weight", "layers.0.linear_attn.out_proj.weight", "reordered"],
+   "Q8_0": ["blk.0.ssm_alpha.weight", "layers.0.linear_attn.in_proj_a.weight", "reordered"]
   },
   "rows": {
    "plain": 38,
@@ -221,147 +197,97 @@
   },
   "rule": "relative L2 = 2 x the oracle's own bf16 against fp32 relative L2 of the same prompt; per-token cosine at least 1 - 4 (1 - c), c the oracle's own smallest per-token cosine of the same prompt"
  },
- "notes": [
-  "The bf16 model is the float32 model rounded to bfloat16 once, as the release loads its encoder in bfloat16."
- ],
+ "notes": ["The bf16 model is the float32 model rounded to bfloat16 once, as the release loads its encoder in bfloat16."],
  "created": "2026-10-18T06:11:14Z",
  "npz": "check2_moss_image_q4_k_m.npz",
  "tensors": {
   "features_devanagari": {
-   "shape": [
-    19,
-    4096
-   ],
+   "shape": [19, 4096],
    "dtype": "float32",
    "sha256": "5085e4297a91d3ef38b2bc58692b5b4c5fc4e227f1040b69cb0b51bde2353e6c"
   },
   "features_devanagari_bf16": {
-   "shape": [
-    19,
-    4096
-   ],
+   "shape": [19, 4096],
    "dtype": "float32",
    "sha256": "b504d750a438e683aeabd34cc250b69c04ad28f4fe6a13860511ab9d8a9d1ddf"
   },
   "features_empty": {
-   "shape": [
-    10,
-    4096
-   ],
+   "shape": [10, 4096],
    "dtype": "float32",
    "sha256": "b3f950d323d51789c0645b413da9174e355ea9149f751b01305b8513b6cea527"
   },
   "features_empty_bf16": {
-   "shape": [
-    10,
-    4096
-   ],
+   "shape": [10, 4096],
    "dtype": "float32",
    "sha256": "b8d599ca06534d47d6c728b9b6f876018dd6723ab19ab7890a3ae29c4bef84da"
   },
   "features_long": {
-   "shape": [
-    624,
-    4096
-   ],
+   "shape": [624, 4096],
    "dtype": "float32",
    "sha256": "f5458b1a5812c960fc3c62ff974e40a66d34b7bc98b5db6125e2ac6d1bf35fa8"
   },
   "features_long_bf16": {
-   "shape": [
-    624,
-    4096
-   ],
+   "shape": [624, 4096],
    "dtype": "float32",
    "sha256": "cac750035ccf95c1e7cdbaa61b949f02ba0961e216ca3c28bc22f8d02ad235a3"
   },
   "features_non_ascii": {
-   "shape": [
-    42,
-    4096
-   ],
+   "shape": [42, 4096],
    "dtype": "float32",
    "sha256": "d3d274436148eac1dbb85c148dc198d913c83944c043ad61d4b345277041eabc"
   },
   "features_non_ascii_bf16": {
-   "shape": [
-    42,
-    4096
-   ],
+   "shape": [42, 4096],
    "dtype": "float32",
    "sha256": "561b98bbea742ccad14d43c9770b2c601e55014de2ed7fbea29b59ddcd290f82"
   },
   "features_plain": {
-   "shape": [
-    38,
-    4096
-   ],
+   "shape": [38, 4096],
    "dtype": "float32",
    "sha256": "27d8b0c99bd9aa5ab204445ec70e964d6b941f45e21b14ed19e06db3dfeebead"
   },
   "features_plain_bf16": {
-   "shape": [
-    38,
-    4096
-   ],
+   "shape": [38, 4096],
    "dtype": "float32",
    "sha256": "e958b65033f6337dfb48f72315da46103962425503d813f4a80a89a2965f509e"
   },
   "features_thai": {
-   "shape": [
-    20,
-    4096
-   ],
+   "shape": [20, 4096],
    "dtype": "float32",
    "sha256": "1b9150b2d813eb9f436aca5ca01dd0bcb7ab1aa885fa65fb9ecd6160b85786b7"
   },
   "features_thai_bf16": {
-   "shape": [
-    20,
-    4096
-   ],
+   "shape": [20, 4096],
    "dtype": "float32",
    "sha256": "43b37ec566747e83e6892b1b3c2d7f2e37b83d73c2978bc68f3e2cde966b9e1f"
   },
   "ids_devanagari": {
-   "shape": [
-    19
-   ],
+   "shape": [19],
    "dtype": "int64",
    "sha256": "1b35cfdb055d4709b7c0519682280d3c0daf5f0165459e7ca5bab60f40f78608"
   },
   "ids_empty": {
-   "shape": [
-    10
-   ],
+   "shape": [10],
    "dtype": "int64",
    "sha256": "791228b9554afb37320a489dae5451fafa841df6222f4c55607ce44d12af5e70"
   },
   "ids_long": {
-   "shape": [
-    624
-   ],
+   "shape": [624],
    "dtype": "int64",
    "sha256": "fdb2a8d4b0d78d2f68a1f8f038fde8e7ce1945c533f90e2e9aaa59d5a6a1b36a"
   },
   "ids_non_ascii": {
-   "shape": [
-    42
-   ],
+   "shape": [42],
    "dtype": "int64",
    "sha256": "17df73bdc62a885d1fdc32d051008cc7f16dad4fb06d2988de2e1b97549a529b"
   },
   "ids_plain": {
-   "shape": [
-    38
-   ],
+   "shape": [38],
    "dtype": "int64",
    "sha256": "8ea803ffe864ccf67c051ca49f80e2c1bfd70e5fec38b4e92945b2ed02ec9078"
   },
   "ids_thai": {
-   "shape": [
-    20
-   ],
+   "shape": [20],
    "dtype": "int64",
    "sha256": "dea36020e8f7a8d56545f8c6fbb877d98470d76e9ecadeb4c7885927439f722a"
   }

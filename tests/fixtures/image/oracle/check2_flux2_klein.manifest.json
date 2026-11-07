@@ -4,19 +4,7 @@
  "check": 2,
  "family": "flux2_klein",
  "script": "scripts/image_oracle/check2_flux2_klein.py",
- "argv": [
-  "check2_flux2_klein.py",
-  "--reference",
-  "src",
-  "--reference-commit",
-  "50fe5162777813d869182b139e83b10743caef15",
-  "--encoder",
-  "Qwen3-4B-Q8_0.gguf",
-  "--text-encoder",
-  "text_encoder",
-  "--tokenizer",
-  "tokenizer"
- ],
+ "argv": ["check2_flux2_klein.py", "--reference", "src", "--reference-commit", "50fe5162777813d869182b139e83b10743caef15", "--encoder", "Qwen3-4B-Q8_0.gguf", "--text-encoder", "text_encoder", "--tokenizer", "tokenizer"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -95,11 +83,7 @@
    "long": "<|im_start|>user\nA narrow cobblestone street in an old harbor town at dusk, lined with three story houses painted ochre, teal and faded red. Laundry hangs on lines strung between the balconies, and a bicycle with a wicker basket leans against a green door. A fishmonger closes the shutters of a small shop while gulls circle above the masts in the harbor. Warm lamplight spills from a cafe where two old men play chess at a marble table, and a cat watches them from a windowsill full of geraniums. Puddles from an afternoon rain reflect the lamps and the violet sky, and the far end of the street opens onto the sea, where a lighthouse is just switching on. In the foreground a girl in a yellow raincoat crouches to inspect a snail on the curb, her boots splashed with mud. Behind her a baker carries a tray of round loaves dusted with flour toward a delivery van whose rear doors stand open. A hand painted sign above the bakery reads Panificio in chipped gold letters. Strings of small bulbs zigzag overhead, some of them dark, and a pigeon sits on the wire between two of them. On the left, a stone staircase climbs toward a chapel with a bell tower, its steps worn into shallow bowls by centuries of feet. Moss grows in the cracks, and someone has left a bunch of wildflowers on the third step. A scooter with a dented fender is parked at an angle beside a bollard shaped like a lion. The sky shades from deep indigo at the top of the frame to a band of apricot just above the horizon, with a thin crescent moon and a single bright planet. Fishing boats with blue and white hulls rock at their moorings, nets heaped on their decks, and a man in a wool cap coils rope on the quay. Far out on the water the running lights of a ferry move slowly toward an island whose hills are already black. The air looks cool and damp, with a faint haze that softens the distant lights into halos. Shot on medium format film with a normal lens at eye level, shallow depth of field on the girl and the snail, gentle grain, muted greens and warm highlights, no text other than the bakery sign, no watermark. The composition follows the curve of the street from the lower left corner to the lighthouse at the upper right, leading the eye past each small story along the way. Every window tells something: a family eating soup under a hanging lamp, a tailor pinning the hem of a coat on a wooden dummy, an empty room with a piano and a vase of dry roses, a boy practicing the violin with his music stand turned toward the glass. Rainwater still drips from the gutters, catching the light in bright beads, and the cobbles shine like the backs of beetles. A black dog trots out of an alley with a paper bag in its mouth, looking over its shoulder as if someone might follow.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
    "one_pad": "<|im_start|>user\nA narrow cobblestone street in an old harbor town at dusk, lined with three story houses painted ochre, teal and faded red. Laundry hangs on lines strung between the balconies, and a bicycle with a wicker basket leans against a green door. A fishmonger closes the shutters of a small shop while gulls circle above the masts in the harbor. Warm lamplight spills from a cafe where two old men play chess at a marble table, and a cat watches them from a windowsill full of geraniums. Puddles from an afternoon rain reflect the lamps and the violet sky, and the far end of the street opens onto the sea, where a lighthouse is just switching on. In the foreground a girl in a yellow raincoat crouches to inspect a snail on the curb, her boots splashed with mud. Behind her a baker carries a tray of round loaves dusted with flour toward a delivery van whose rear doors stand open. A hand painted sign above the bakery reads Panificio in chipped gold letters. Strings of small bulbs zigzag overhead, some of them dark, and a pigeon sits on the wire between two of them. On the left, a stone staircase climbs toward a chapel with a bell tower, its steps worn into shallow bowls by centuries of feet. Moss grows in the cracks, and someone has left a bunch of wildflowers on the third step. A scooter with a dented fender is parked at an angle beside a bollard shaped like a lion. The sky shades from deep indigo at the top of the frame to a band of apricot just above the horizon, with a thin crescent moon and a single bright planet. Fishing boats with blue and white hulls rock at their moorings, nets heaped on their decks, and a man in a wool cap coils rope on the quay. Far out on the water the running lights of a ferry move slowly toward an island whose hills are already black. The air looks cool and damp, with a faint haze that softens the distant lights into halos. Shot on medium format film with a normal lens at eye level, shallow depth of field on the girl and the snail, gentle grain, muted greens and warm highlights, no text other than the bakery sign, no watermark. The composition follows the curve of the street from the lower left corner to the lighthouse at the upper right, leading the eye past each<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
   },
-  "tap_layers": [
-   9,
-   18,
-   27
-  ],
+  "tap_layers": [9, 18, 27],
   "max_length": 512,
   "reference_commit": "50fe5162777813d869182b139e83b10743caef15",
   "gguf_codecs": {
@@ -174,26 +158,11 @@
    "worst_pad_row": 511
   },
   "pad_rows_rel_l2_to_the_first": {
-   "plain": [
-    0.7136575262319458,
-    2.605666172309648
-   ],
-   "empty": [
-    0.2567397624582779,
-    0.9864455225465358
-   ],
-   "non_ascii": [
-    0.4647251459714205,
-    5.983267347908616
-   ],
-   "long": [
-    0.0,
-    0.0
-   ],
-   "one_pad": [
-    0.0,
-    0.0
-   ]
+   "plain": [0.7136575262319458, 2.605666172309648],
+   "empty": [0.2567397624582779, 0.9864455225465358],
+   "non_ascii": [0.4647251459714205, 5.983267347908616],
+   "long": [0.0, 0.0],
+   "one_pad": [0.0, 0.0]
   },
   "positions_from_the_model": {
    "plain": true,
@@ -260,199 +229,132 @@
   },
   "rule": "relative L2 = 2 x the oracle's own bf16 against fp32 relative L2 of the same prompt, over all rows, over the real rows and over the pad rows; per-token cosine of each real row at least 1 - 4 (1 - c), c the oracle's own smallest per-token cosine of the real rows of the same prompt"
  },
- "notes": [
-  "positions_from_the_model is whether the rotary embedding took position ids from the model's forward; the positions recorded are those ids, else the row indices."
- ],
+ "notes": ["positions_from_the_model is whether the rotary embedding took position ids from the model's forward; the positions recorded are those ids, else the row indices."],
  "created": "2026-10-16T12:35:42Z",
  "npz": "check2_flux2_klein.npz",
  "tensors": {
   "features_empty": {
-   "shape": [
-    512,
-    7680
-   ],
+   "shape": [512, 7680],
    "dtype": "float32",
    "sha256": "bbc7e6b3be98d976d5fcd78a7b4576085e3d07ac7a87a8c7e3d63abf30c26fb6"
   },
   "features_empty_bf16": {
-   "shape": [
-    512,
-    7680
-   ],
+   "shape": [512, 7680],
    "dtype": "float32",
    "sha256": "eafdc4e97d61cc2fe7bf0cfc4e636ea7b9b827261e9d5bad3dbab0610efde3dd"
   },
   "features_long": {
-   "shape": [
-    512,
-    7680
-   ],
+   "shape": [512, 7680],
    "dtype": "float32",
    "sha256": "4cc3d572a3eed98c268a2d9194b4d15804a218eb2a7f103dc49a728919ad8bb7"
   },
   "features_long_bf16": {
-   "shape": [
-    512,
-    7680
-   ],
+   "shape": [512, 7680],
    "dtype": "float32",
    "sha256": "2cefcccf0b33c195c3750da0bb9373d75b58cdf77e349d8ce2d85d66dc522449"
   },
   "features_non_ascii": {
-   "shape": [
-    512,
-    7680
-   ],
+   "shape": [512, 7680],
    "dtype": "float32",
    "sha256": "0dd1da92a690ea3f8cf012b16e739bcfab8bf0965ce307f9ea40aaa1d74510ee"
   },
   "features_non_ascii_bf16": {
-   "shape": [
-    512,
-    7680
-   ],
+   "shape": [512, 7680],
    "dtype": "float32",
    "sha256": "3333c0470312e65518a7d7b534856cd2a21fbf803e1e4f389864fca4b21082c0"
   },
   "features_one_pad": {
-   "shape": [
-    512,
-    7680
-   ],
+   "shape": [512, 7680],
    "dtype": "float32",
    "sha256": "5337fa90cee98fa0bd7c413760d9cbd0676a17e624b335170b5a0b2d4e04f324"
   },
   "features_one_pad_bf16": {
-   "shape": [
-    512,
-    7680
-   ],
+   "shape": [512, 7680],
    "dtype": "float32",
    "sha256": "d6b8d80c3f699034a9bd99f8954151d36e8dd8c10c3c352f4e8ce1e0b2db951e"
   },
   "features_plain": {
-   "shape": [
-    512,
-    7680
-   ],
+   "shape": [512, 7680],
    "dtype": "float32",
    "sha256": "ad55cd3cae3ec5369e0fc6fd4c14371099d78e309d0abb5569a2cdaa14c8f3f0"
   },
   "features_plain_bf16": {
-   "shape": [
-    512,
-    7680
-   ],
+   "shape": [512, 7680],
    "dtype": "float32",
    "sha256": "d6af288a6de734a494fbd349a7d9940833f4a809844c30e79b8de7e37c15aa33"
   },
   "ids_empty": {
-   "shape": [
-    512
-   ],
+   "shape": [512],
    "dtype": "int64",
    "sha256": "c4e0a29a3fdf28c261c1ccb91f302d3ebc96411fd9a664e12e494e3aafa347b6"
   },
   "ids_long": {
-   "shape": [
-    512
-   ],
+   "shape": [512],
    "dtype": "int64",
    "sha256": "16beeb97289dab01a74d052761efab912f183b61ac38d3e27d636b577e043ace"
   },
   "ids_non_ascii": {
-   "shape": [
-    512
-   ],
+   "shape": [512],
    "dtype": "int64",
    "sha256": "ba2480a1f56167bdebfa0b2ffbc5c9ca87022f11d1a4d2d15b70a329b0c99747"
   },
   "ids_one_pad": {
-   "shape": [
-    512
-   ],
+   "shape": [512],
    "dtype": "int64",
    "sha256": "e1ba6115f4b96ba056be3cc79bc7d9c8c0432b8fae893582de2b5b415f94a323"
   },
   "ids_plain": {
-   "shape": [
-    512
-   ],
+   "shape": [512],
    "dtype": "int64",
    "sha256": "cba19b77091c9331cccef6f12e3569ef10f59acdf3e745c267e6edb22e06b0c3"
   },
   "mask_empty": {
-   "shape": [
-    512
-   ],
+   "shape": [512],
    "dtype": "int64",
    "sha256": "6d5f687abe60809ffff5acda376aeaa5dbe69ab135d619b19a97d66bdfad26c1"
   },
   "mask_long": {
-   "shape": [
-    512
-   ],
+   "shape": [512],
    "dtype": "int64",
    "sha256": "8a472efbc41a4502e6da085422880bc742625c1187f2d36ed39e669d736ac113"
   },
   "mask_non_ascii": {
-   "shape": [
-    512
-   ],
+   "shape": [512],
    "dtype": "int64",
    "sha256": "fd1c57b8daa03955eff02561df5b4d6afb851ab2291d5f81154a014dad802b86"
   },
   "mask_one_pad": {
-   "shape": [
-    512
-   ],
+   "shape": [512],
    "dtype": "int64",
    "sha256": "f8d6cfb638c8259475032b7ed0a2a774856173ae0106e5cdcbd7985dbf4d6a60"
   },
   "mask_plain": {
-   "shape": [
-    512
-   ],
+   "shape": [512],
    "dtype": "int64",
    "sha256": "c3503104c3b74db2bf667c77ec73ee42b9bd400516dd561162e183ce21cd796d"
   },
   "positions_empty": {
-   "shape": [
-    1,
-    512
-   ],
+   "shape": [1, 512],
    "dtype": "int64",
    "sha256": "5738153ec97595b1c1e4dc027f7b7fb4534f19ed2ce9f9ee712e6d34a384cde7"
   },
   "positions_long": {
-   "shape": [
-    1,
-    512
-   ],
+   "shape": [1, 512],
    "dtype": "int64",
    "sha256": "5738153ec97595b1c1e4dc027f7b7fb4534f19ed2ce9f9ee712e6d34a384cde7"
   },
   "positions_non_ascii": {
-   "shape": [
-    1,
-    512
-   ],
+   "shape": [1, 512],
    "dtype": "int64",
    "sha256": "5738153ec97595b1c1e4dc027f7b7fb4534f19ed2ce9f9ee712e6d34a384cde7"
   },
   "positions_one_pad": {
-   "shape": [
-    1,
-    512
-   ],
+   "shape": [1, 512],
    "dtype": "int64",
    "sha256": "5738153ec97595b1c1e4dc027f7b7fb4534f19ed2ce9f9ee712e6d34a384cde7"
   },
   "positions_plain": {
-   "shape": [
-    1,
-    512
-   ],
+   "shape": [1, 512],
    "dtype": "int64",
    "sha256": "5738153ec97595b1c1e4dc027f7b7fb4534f19ed2ce9f9ee712e6d34a384cde7"
   }
