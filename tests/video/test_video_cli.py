@@ -493,9 +493,12 @@ def test_a_second_run_on_a_frames_folder_waits_for_the_first(
         stubbed, tmp_path, monkeypatch):
     """A run whose frames folder another run is writing waits for it to
     end before it clears a frame, so the first run's frames and part
-    files stay whole; then it writes its own."""
+    files stay whole, and before its video VAE loads, so it holds no
+    model while it waits; then it writes its own."""
     import fcntl
     import threading
+
+    from gmlx.video.vae import reader
 
     frames = tmp_path / "frames"
     frames.mkdir()
@@ -514,6 +517,10 @@ def test_a_second_run_on_a_frames_folder_waits_for_the_first(
         return flock(fd, op)
 
     monkeypatch.setattr(fcntl, "flock", watched)
+    loaded: list = []
+    load_vae = reader.load_vae
+    monkeypatch.setattr(reader, "load_vae", lambda path, family, dtype: (
+        loaded.append(family) or load_vae(path, family, dtype)))
     rc: list = []
 
     def second():
@@ -529,10 +536,12 @@ def test_a_second_run_on_a_frames_folder_waits_for_the_first(
     try:
         assert waiting.is_set(), "the second run did not wait for the first"
         assert sorted(p.name for p in frames.iterdir()) == sorted(earlier)
+        assert loaded == ["h3_audio"], loaded
     finally:
         os.close(first)                  # the first run ends
         t.join(30)
     assert not t.is_alive() and rc == [0]
+    assert loaded == ["h3_audio", "h3"]
     assert sorted(p.name for p in frames.iterdir()) == sorted([
         "audio.wav", *(f"frame_{i:06d}.png" for i in range(1, 6))])
 

@@ -207,14 +207,16 @@ def decode_and_mux(xv, xa, *, video_vae: Callable, audio_vae: Callable,
     times["audio_s"] = round(time.perf_counter() - t0, 2)
 
     t0 = time.perf_counter()
-    vae = video_vae()
-    try:
-        with contextlib.ExitStack() as held:
+    with contextlib.ExitStack() as held:
+        if frames_dir is not None:
+            d = os.path.expanduser(frames_dir)
+            os.makedirs(d, exist_ok=True)
+            if lock_frames:
+                held.enter_context(io.frames_lock(d, log))
+        # Loaded once the folder is held: a run waiting on it holds no model.
+        vae = video_vae()
+        try:
             if frames_dir is not None:
-                d = os.path.expanduser(frames_dir)
-                os.makedirs(d, exist_ok=True)
-                if lock_frames:
-                    held.enter_context(io.frames_lock(d, log))
                 io.clear_frames(d)
             with tempfile.TemporaryDirectory(prefix=".gmlx-video-") as tmp:
                 wav = io.write_wav(os.path.join(tmp, "audio.wav"), wave, rate)
@@ -247,8 +249,8 @@ def decode_and_mux(xv, xa, *, video_vae: Callable, audio_vae: Callable,
                 if frames_dir is not None:
                     io.write_wav(os.path.join(os.path.expanduser(frames_dir),
                                               "audio.wav"), wave, rate)
-    finally:
-        del vae
-        release()
+        finally:
+            del vae
+            release()
     times["decode_s"] = round(time.perf_counter() - t0, 2)
     return times
