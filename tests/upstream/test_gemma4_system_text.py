@@ -154,17 +154,29 @@ def test_a_video_request_renders_the_text_models_system_turn(
     assert _system_turn(got) == "Be brief."
 
 
+_CONVERSATION_TAIL = ("<|turn>user\nHi.<turn|>\n<|turn>model\nHello.<turn|>\n"
+                      "<|turn>user\nBye.<turn|>\n<|turn>model\n")
+# The render of _conversation("system") on the text processor before the
+# change, which joined the system parts at the template call.
+_PLAIN_BEFORE = {
+    "12b": ("<bos><|turn>system\nBe brief.<turn|>\n" + _CONVERSATION_TAIL
+            + "<|channel>thought\n<channel|>"),
+    "legacy": "<bos><|turn>system\nBe brief.<turn|>\n" + _CONVERSATION_TAIL,
+}
+
+
 @pytest.mark.parametrize("path", ["stock", "faithful"])
 @pytest.mark.parametrize("model_type", _GEMMA4_TYPES)
 def test_the_text_processor_on_a_vision_type_renders_the_text_models_prompt(
         request, path, model_type):
     """The DiffusionGemma GGUF serves its vision type on the text
-    processor, which runs the rebuild once."""
+    processor, which runs the rebuild once. Its prompt is the one it got
+    before the change."""
     render = request.getfixturevalue(path)
     messages = _conversation("system")
-    for template in _TEMPLATES.values():
+    for name, template in _TEMPLATES.items():
         got = _render(render, _Processor(template), model_type, messages)
-        assert got == _text_render(template, messages)
+        assert got == _text_render(template, messages) == _PLAIN_BEFORE[name]
 
 
 @pytest.mark.parametrize("model_type", _GEMMA4_TYPES)
@@ -205,38 +217,52 @@ def test_other_templates_render_as_before(model_type, template, want):
 _IMAGE = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
 _CALL = [{"id": "c1", "type": "function",
           "function": {"name": "look", "arguments": "{}"}}]
-# (messages, render kwargs): requests with no system or developer message.
+_THOUGHT_OFF = "<|turn>model\n<|channel>thought\n<channel|>"
+# (messages, render kwargs, the render before the change): requests with no
+# system or developer message.
 _NO_SYSTEM = {
     "images-in-place": ([{"role": "user", "content": [
         {"type": "text", "text": "Look at"}, _IMAGE,
-        {"type": "text", "text": "and"}, _IMAGE]}], {"num_images": 2}),
+        {"type": "text", "text": "and"}, _IMAGE]}], {"num_images": 2},
+        "<bos><|turn>user\nLook at<|image|>and<|image|><turn|>\n"
+        + _THOUGHT_OFF),
     "audio": ([{"role": "user", "content": [
         {"type": "text", "text": "Listen."},
         {"type": "input_audio", "input_audio": {"data": "AA==", "format": "wav"}}]}],
-        {"num_audios": 1}),
-    "video": (_conversation("user")[1:], {"video": ["clip.mp4"]}),
+        {"num_audios": 1},
+        "<bos><|turn>user\nListen.<|audio|><turn|>\n" + _THOUGHT_OFF),
+    "video": (_conversation("user")[1:], {"video": ["clip.mp4"]},
+              "<bos><|turn>user\n<|video|>Hi.<turn|>\n<|turn>model\n"
+              "<|video|>Hello.<turn|>\n<|turn>user\n<|video|>Bye.<turn|>\n"
+              + _THOUGHT_OFF),
     "tool-images": ([
         {"role": "user", "content": "Look."},
         {"role": "assistant", "content": "", "tool_calls": _CALL},
         {"role": "tool", "tool_call_id": "c1",
-         "content": [_IMAGE, {"type": "text", "text": "Done."}]},
-        {"role": "user", "content": "What is it?"}], {"num_images": 1}),
+         "content": [{"type": "image"}, {"type": "text", "text": "Done."}]},
+        {"role": "user", "content": "What is it?"}], {"num_images": 1},
+        "<bos><|turn>user\nLook.<turn|>\n<|turn>model\n"
+        "<|tool_call>call:look{}<tool_call|><|tool_response>response:look"
+        "{value:<|\"|>Done.<|\"|>}<tool_response|><|image|>"
+        "<|turn>user\nWhat is it?<turn|>\n" + _THOUGHT_OFF),
     "reasoning-tool-calls": ([
         {"role": "user", "content": "Weather?"},
         {"role": "assistant", "content": "", "reasoning_content": "Check.",
          "tool_calls": _CALL},
-        {"role": "tool", "tool_call_id": "c1", "content": "Sunny."}], {}),
+        {"role": "tool", "tool_call_id": "c1", "content": "Sunny."}], {},
+        "<bos><|turn>user\nWeather?<turn|>\n<|turn>model\n"
+        "<|channel>thought\nCheck.\n<channel|><|tool_call>call:look{}"
+        "<tool_call|><|tool_response>response:look"
+        "{value:<|\"|>Sunny.<|\"|>}<tool_response|>"),
 }
 
 
 @pytest.mark.parametrize("case", sorted(_NO_SYSTEM))
-def test_a_render_with_no_system_message_does_not_change(faithful, monkeypatch,
-                                                          case):
-    messages, kw = _NO_SYSTEM[case]
+def test_a_render_with_no_system_message_does_not_change(faithful, case):
+    messages, kw, before = _NO_SYSTEM[case]
     processor = _Gemma4Processor(_TEMPLATES["12b"], "gemma4_unified")
-    now = _render(faithful, processor, "gemma4_unified", messages, **kw)
-    monkeypatch.setattr(pu, "_SYSTEM_TEXT_TYPES", ())
-    assert _render(faithful, processor, "gemma4_unified", messages, **kw) == now
+    assert _render(faithful, processor, "gemma4_unified", messages,
+                   **kw) == before
 
 
 @pytest.mark.integration
