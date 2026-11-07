@@ -209,13 +209,10 @@ def prompt_ids(model, processor, config, user: str, system: str | None,
 
 def install_render_fixes() -> None:
     """The serve installs that change how a plain chat prompt renders and
-    encodes: the template's own thinking default, a system message as a
-    string, and one BOS."""
-    from gmlx.tui.reasoning import install_template_default_thinking
+    encodes: a system message as a string, and one BOS."""
     from gmlx.upstream.single_bos_fix import install_single_bos_fix
     from gmlx.upstream.system_content_fix import install_system_content_fix
 
-    install_template_default_thinking()
     install_system_content_fix()
     install_single_bos_fix()
 
