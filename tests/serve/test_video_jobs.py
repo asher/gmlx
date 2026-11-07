@@ -135,6 +135,35 @@ def test_a_job_that_raises_fails_with_its_status_and_no_clip(
     assert store.get(job.id) is None
 
 
+def test_a_clip_whose_completed_record_cannot_be_written_fails(
+        tmp_path, monkeypatch):
+    """The disk fills as the clip lands: its completed record is never
+    written, so the job does not read as completed, which a restart
+    would contradict. It fails, and its clip goes."""
+    full = []
+
+    def run(job, store):
+        _clip(job, store)
+        full.append(True)
+
+    store, clock, driver = _store(tmp_path, run)
+    job = _submit(store)
+    write = store._write
+
+    def write_unless_full(j):
+        if full:
+            raise OSError(28, "No space left on device")
+        write(j)
+    monkeypatch.setattr(store, "_write", write_unless_full)
+    driver.run()
+    rec = store.get(job.id)
+    assert (rec["status"], rec["error"]["status"]) == ("failed", 500)
+    assert store.content(job.id) is None
+    assert os.listdir(os.path.join(str(store.root), "files")) == []
+    assert _on_disk(store, job.id)["status"] == "in_progress"
+    assert store.metrics()["jobs_completed_total"] == 0
+
+
 def test_a_queued_job_cancelled_never_runs_and_its_inputs_go(tmp_path):
     ran = []
     store, clock, driver = _store(tmp_path, lambda j, s: ran.append(j))

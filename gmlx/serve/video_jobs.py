@@ -20,6 +20,7 @@ takes its LoRA turn, samples and decodes, as the pack's steps do.
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -459,8 +460,12 @@ class VideoJobs:
 
     def _end(self, job: Job, status: str, error: dict | None = None) -> None:
         """End ``job`` with ``status``. Its record and clip last
-        job_ttl_s from now."""
-        rec = job.record
+        job_ttl_s from now. A job reads as completed once its record
+        says so on disk: when that write fails, it raises and the job
+        stays running. A failure or a cancel holds when its write fails,
+        as a restart fails the job all the same."""
+        old = job.record
+        rec = copy.deepcopy(old)
         rec["status"] = status
         rec["completed_at"] = int(self._time())
         rec["expires_at"] = rec["completed_at"] + int(self.settings.job_ttl_s)
@@ -468,8 +473,16 @@ class VideoJobs:
         rec.get("gmlx", {}).pop("eta_s", None)
         if status == DONE:
             rec["progress"] = 100
+        job.record = rec
+        try:
+            self._write(job)
+        except OSError:
+            if status == DONE:
+                job.record = old
+                raise
+            _log.warning("video job %s: its %s record was not written",
+                         job.id, status, exc_info=True)
         self.book.counts[status] = self.book.counts.get(status, 0) + 1
-        self._write(job)
 
     def progress(self, job: Job, *, phase: str | None = None,
                  step: tuple | None = None, frames: tuple | None = None
