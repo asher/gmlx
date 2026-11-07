@@ -20,6 +20,7 @@ the fixture under GMLX_VIDEO_FIXTURES, and skip until both are there.
 """
 from __future__ import annotations
 
+import gc
 import importlib.util
 import json
 import math
@@ -625,8 +626,11 @@ metal_only = pytest.mark.skipif(
 
 
 def _settled() -> int:
-    """MLX's active memory once the GPU has finished, so the buffers the
-    last eval freed are not counted."""
+    """MLX's active memory once the GPU has finished and the collector has
+    run, so neither the buffers the last eval freed nor arrays in garbage
+    cycles are counted. Garbage a collection frees in a run would lower
+    its peak below the true one."""
+    gc.collect()
     mx.synchronize()
     return mx.get_active_memory()
 
@@ -666,6 +670,32 @@ def settled_evals(monkeypatch):
         eval_(*args)
         mx.synchronize()
     monkeypatch.setattr(mx, "eval", settled)
+
+
+class _Cycle:
+    pass
+
+
+@metal_only
+def test_a_peak_does_not_count_garbage_freed_in_the_run():
+    """Arrays an earlier test left in a reference cycle go when the
+    collector next runs. A collection in the run must not lower its
+    peak."""
+    n = 4 << 20
+    gc.disable()
+    try:
+        junk = _Cycle()
+        junk.me, junk.x = junk, mx.zeros((4 * n,), mx.uint8)
+        mx.eval(junk.x)
+        del junk
+
+        def run():
+            gc.collect()
+            mx.eval(mx.zeros((n,), mx.uint8) + 1)
+        peak = _peak(run)
+    finally:
+        gc.enable()
+    assert n <= peak < 3 * n, peak / n
 
 
 @metal_only
