@@ -47,7 +47,7 @@ none, then download the model:
 gmlx video pull h3
 ```
 
-`pull` lists the seven files it needs, where each one goes, the download
+`pull` lists the files it needs, where each one goes, the download
 size and the licenses, then asks before it downloads:
 
 ```text

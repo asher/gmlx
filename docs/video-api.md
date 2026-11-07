@@ -112,9 +112,10 @@ holds the upsampler's caption.
 
 Jobs run one at a time, in order, on a thread of their own, so a clip
 never holds up the image routes. Chat replies keep streaming while a clip
-runs, since the clip pauses for them. Beside a chat reply that streams
-without a break, a clip's steps take about 2.7 times as long as alone at
-the default share, and about 1.6 times at
+runs, since the clip pauses for them. On an M5 Max, beside a chat reply
+that streams without a break, the steps of a 768x768 clip of 22 frames
+took about 2.7 times as long as alone at the default share, and about
+1.6 times at
 [`GMLX_IMAGE_CHAT_SHARE`](env-vars.md#server) `0`, as
 [Video jobs](internals/image-serving.md#video-jobs) describes.
 When the memory a job needs is held by models in use, the job stays

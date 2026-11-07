@@ -1415,8 +1415,8 @@ time.
 | `--guide PATH[@FRAME]` | None | Anchor this image, or this video with its sound, at FRAME, cropped about its center to the canvas's aspect. Repeat the flag for more. |
 | `--guide-audio AUDIO[@FRAME]` | None | Anchor the sound of this file at FRAME, cut to the clip's sound from there. Repeat the flag for more. |
 | `--guide-no-audio` | Off | Anchor `--guide` videos without their sound. |
-| `--output PATH` | `./gmlx-<time>-<seed>.mp4`, or none with `--frames-dir` alone | Write the MP4 here. |
-| `--frames-dir DIR` | None | Write PNG frames and `audio.wav` to this folder. Alone, it writes no MP4 and needs no ffmpeg, unless a guide video or sound is read. |
+| `--output PATH` | `./gmlx-<time>-<seed>.mp4`, or none with `--frames-dir` alone | Write the MP4 here. An existing file is replaced. |
+| `--frames-dir DIR` | None | Write PNG frames and `audio.wav` to this folder. Frames of a longer earlier clip there stay. Alone, it needs no ffmpeg, unless a guide video or sound is read. |
 | `--preview [TAEH3]` | Off | Decode with TAEH3, the small preview decoder: the entry's file, or this one. |
 | `--save-latent PATH` | None | Also write the final latents to this `.npz` file. |
 | `--encoder GGUF` | The entry's | Encode the prompt with this text encoder. |
