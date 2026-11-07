@@ -1595,15 +1595,17 @@ class _ResidencyPool:
 
     def _reapable(self, entry, now) -> bool:
         """Under _lock: whether the reaper takes ``entry``, idle past its
-        TTL and neither pinned, kept nor held by an image or video job."""
+        TTL and neither pinned, kept nor held past a preload's lifetime
+        hold."""
         if (entry.pinned or entry.model_path in self._keep_paths
                 or not entry.ttl or entry.ttl <= 0):
             return False
         if now - entry.last_access < entry.ttl:
             return False
-        # An image or video job is not in the server's in-flight count;
-        # its hold is.
-        return not (entry.is_image and entry.busy > 0)
+        # A job is not in the server's in-flight count; its hold is: an
+        # image or video job, and the chat model one rewrites its prompt
+        # or encodes through.
+        return entry.busy <= entry.retained
 
     def _reap_locked(self, now, torn: list, reaped: list) -> None:
         """Under _lock: take the entries idle past their TTL out of the

@@ -122,6 +122,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   installs the safe KV quantization.
 - `gmlx serve` frees a finished request's images and audio at once. It kept
   the last request's inputs in memory until the next request arrived.
+- `gmlx serve` no longer unloads a chat model at its idle TTL while an image
+  request rewrites its prompt or encodes its text through it.
 
 ## [0.5.4] - 2026-10-29
 
