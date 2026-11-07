@@ -1,0 +1,971 @@
+{
+ "argv": {
+  "llama-server/gemma4_12b": [
+   "llama-server",
+   "-m",
+   "gemma-4-12B-it-Q6_K.gguf",
+   "--jinja",
+   "--chat-template-file",
+   "gemma4_12b_template.jinja",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "PORT",
+   "-c",
+   "512",
+   "-ngl",
+   "0",
+   "--no-warmup",
+   "-v"
+  ],
+  "llama-server/qwen35_9b": [
+   "llama-server",
+   "-m",
+   "Qwen3.5-9B-Q4_K_M.gguf",
+   "--jinja",
+   "--chat-template-file",
+   "qwen35_9b_template.jinja",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "PORT",
+   "-c",
+   "512",
+   "-ngl",
+   "0",
+   "--no-warmup",
+   "-v"
+  ],
+  "llama-server/smollm2": [
+   "llama-server",
+   "-m",
+   "SmolLM2-135M-Instruct-Q8_0.gguf",
+   "--jinja",
+   "--chat-template-file",
+   "smollm2_template.jinja",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "PORT",
+   "-c",
+   "512",
+   "-ngl",
+   "0",
+   "--no-warmup",
+   "-v"
+  ]
+ },
+ "created": "2026-11-07T06:15:19Z",
+ "files": {
+  "Qwen3.5-9B-Q4_K_M.gguf": {
+   "name": "Qwen3.5-9B-Q4_K_M.gguf",
+   "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+   "size": 5680522464
+  },
+  "SmolLM2-135M-Instruct-Q8_0.gguf": {
+   "name": "SmolLM2-135M-Instruct-Q8_0.gguf",
+   "sha256": "5a1395716f7913741cc51d98581b9b1228d80987a9f7d3664106742eb06bba83",
+   "size": 144811360
+  },
+  "gemma-4-12B-it-Q6_K.gguf": {
+   "name": "gemma-4-12B-it-Q6_K.gguf",
+   "sha256": "0f5b300b300a31632ac1d181024db13192a10a635c597828c824b244d614ae6f",
+   "size": 10239325472
+  },
+  "gemma4_12b_template.jinja": {
+   "name": "gemma4_12b_template.jinja",
+   "sha256": "36e3a42e5cf14cd0020e72d92e1fdd9970f59b82170e421f0cbe1bb42bead3f0",
+   "size": 17466
+  },
+  "qwen35_9b_template.jinja": {
+   "name": "qwen35_9b_template.jinja",
+   "sha256": "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67",
+   "size": 7816
+  },
+  "smollm2_template.jinja": {
+   "name": "smollm2_template.jinja",
+   "sha256": "872be49dbb638044ad01b60388f48d469ff2980e5f0dccdc22ec907db54d0788",
+   "size": 368
+  }
+ },
+ "llama_cpp": "8e5a58df8",
+ "rows": [
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    },
+    "continue_final_message": true,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "Qwen3.5-9B-Q4_K_M.gguf",
+   "handler": "qwen3-coder",
+   "id": "qwen35_9b/think-off/content",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nHello",
+   "run": "llama-server/qwen35_9b",
+   "template": "qwen35_9b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    },
+    "continue_final_message": true,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "Qwen3.5-9B-Q4_K_M.gguf",
+   "handler": "qwen3-coder",
+   "id": "qwen35_9b/think-off/reasoning",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\nplan",
+   "run": "llama-server/qwen35_9b",
+   "template": "qwen35_9b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    },
+    "continue_final_message": true,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "Qwen3.5-9B-Q4_K_M.gguf",
+   "handler": "qwen3-coder",
+   "id": "qwen35_9b/think-off/reasoning-and-content",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\nplan\n</think>\n\nHello",
+   "run": "llama-server/qwen35_9b",
+   "template": "qwen35_9b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    },
+    "continue_final_message": "content",
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "Qwen3.5-9B-Q4_K_M.gguf",
+   "handler": "qwen3-coder",
+   "id": "qwen35_9b/think-off/string-content",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\nplan\n</think>\n\nHello",
+   "run": "llama-server/qwen35_9b",
+   "template": "qwen35_9b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    },
+    "continue_final_message": "reasoning_content",
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "Qwen3.5-9B-Q4_K_M.gguf",
+   "handler": "qwen3-coder",
+   "id": "qwen35_9b/think-off/string-reasoning",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\nplan",
+   "run": "llama-server/qwen35_9b",
+   "template": "qwen35_9b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    },
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "Qwen3.5-9B-Q4_K_M.gguf",
+   "handler": "qwen3-coder",
+   "id": "qwen35_9b/think-off/no-generation-prompt",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n",
+   "run": "llama-server/qwen35_9b",
+   "template": "qwen35_9b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": true
+    },
+    "continue_final_message": true,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "Qwen3.5-9B-Q4_K_M.gguf",
+   "handler": "qwen3-coder",
+   "id": "qwen35_9b/think-on/content",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nHello",
+   "run": "llama-server/qwen35_9b",
+   "template": "qwen35_9b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": true
+    },
+    "continue_final_message": true,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "Qwen3.5-9B-Q4_K_M.gguf",
+   "handler": "qwen3-coder",
+   "id": "qwen35_9b/think-on/reasoning",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\nplan",
+   "run": "llama-server/qwen35_9b",
+   "template": "qwen35_9b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": true
+    },
+    "continue_final_message": true,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "Qwen3.5-9B-Q4_K_M.gguf",
+   "handler": "qwen3-coder",
+   "id": "qwen35_9b/think-on/reasoning-and-content",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\nplan\n</think>\n\nHello",
+   "run": "llama-server/qwen35_9b",
+   "template": "qwen35_9b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": true
+    },
+    "continue_final_message": "content",
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "Qwen3.5-9B-Q4_K_M.gguf",
+   "handler": "qwen3-coder",
+   "id": "qwen35_9b/think-on/string-content",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\nplan\n</think>\n\nHello",
+   "run": "llama-server/qwen35_9b",
+   "template": "qwen35_9b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": true
+    },
+    "continue_final_message": "reasoning_content",
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "Qwen3.5-9B-Q4_K_M.gguf",
+   "handler": "qwen3-coder",
+   "id": "qwen35_9b/think-on/string-reasoning",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\nplan",
+   "run": "llama-server/qwen35_9b",
+   "template": "qwen35_9b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": true
+    },
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "Qwen3.5-9B-Q4_K_M.gguf",
+   "handler": "qwen3-coder",
+   "id": "qwen35_9b/think-on/no-generation-prompt",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n",
+   "run": "llama-server/qwen35_9b",
+   "template": "qwen35_9b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    },
+    "continue_final_message": true,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": true,
+   "gguf": "gemma-4-12B-it-Q6_K.gguf",
+   "handler": "gemma4",
+   "id": "gemma4_12b/think-off/content",
+   "prompt": "<|turn>system\nBe brief.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>Hello",
+   "run": "llama-server/gemma4_12b",
+   "template": "gemma4_12b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    },
+    "continue_final_message": true,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": true,
+   "gguf": "gemma-4-12B-it-Q6_K.gguf",
+   "handler": "gemma4",
+   "id": "gemma4_12b/think-off/reasoning",
+   "prompt": "<|turn>system\nBe brief.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\nplan",
+   "run": "llama-server/gemma4_12b",
+   "template": "gemma4_12b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    },
+    "continue_final_message": true,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": true,
+   "gguf": "gemma-4-12B-it-Q6_K.gguf",
+   "handler": "gemma4",
+   "id": "gemma4_12b/think-off/reasoning-and-content",
+   "prompt": "<|turn>system\nBe brief.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\nplan<channel|>Hello",
+   "run": "llama-server/gemma4_12b",
+   "template": "gemma4_12b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    },
+    "continue_final_message": "content",
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": true,
+   "gguf": "gemma-4-12B-it-Q6_K.gguf",
+   "handler": "gemma4",
+   "id": "gemma4_12b/think-off/string-content",
+   "prompt": "<|turn>system\nBe brief.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\nplan<channel|>Hello",
+   "run": "llama-server/gemma4_12b",
+   "template": "gemma4_12b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    },
+    "continue_final_message": "reasoning_content",
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": true,
+   "gguf": "gemma-4-12B-it-Q6_K.gguf",
+   "handler": "gemma4",
+   "id": "gemma4_12b/think-off/string-reasoning",
+   "prompt": "<|turn>system\nBe brief.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\nplan",
+   "run": "llama-server/gemma4_12b",
+   "template": "gemma4_12b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    },
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     }
+    ]
+   },
+   "bos_cut": true,
+   "gguf": "gemma-4-12B-it-Q6_K.gguf",
+   "handler": "gemma4",
+   "id": "gemma4_12b/think-off/no-generation-prompt",
+   "prompt": "<|turn>system\nBe brief.<turn|>\n<|turn>user\nHi<turn|>\n",
+   "run": "llama-server/gemma4_12b",
+   "template": "gemma4_12b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": true
+    },
+    "continue_final_message": true,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": true,
+   "gguf": "gemma-4-12B-it-Q6_K.gguf",
+   "handler": "gemma4",
+   "id": "gemma4_12b/think-on/content",
+   "prompt": "<|turn>system\n<|think|>\nBe brief.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>Hello",
+   "run": "llama-server/gemma4_12b",
+   "template": "gemma4_12b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": true
+    },
+    "continue_final_message": true,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": true,
+   "gguf": "gemma-4-12B-it-Q6_K.gguf",
+   "handler": "gemma4",
+   "id": "gemma4_12b/think-on/reasoning",
+   "prompt": "<|turn>system\n<|think|>\nBe brief.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\nplan",
+   "run": "llama-server/gemma4_12b",
+   "template": "gemma4_12b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": true
+    },
+    "continue_final_message": true,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": true,
+   "gguf": "gemma-4-12B-it-Q6_K.gguf",
+   "handler": "gemma4",
+   "id": "gemma4_12b/think-on/reasoning-and-content",
+   "prompt": "<|turn>system\n<|think|>\nBe brief.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\nplan<channel|>Hello",
+   "run": "llama-server/gemma4_12b",
+   "template": "gemma4_12b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": true
+    },
+    "continue_final_message": "content",
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": true,
+   "gguf": "gemma-4-12B-it-Q6_K.gguf",
+   "handler": "gemma4",
+   "id": "gemma4_12b/think-on/string-content",
+   "prompt": "<|turn>system\n<|think|>\nBe brief.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\nplan<channel|>Hello",
+   "run": "llama-server/gemma4_12b",
+   "template": "gemma4_12b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": true
+    },
+    "continue_final_message": "reasoning_content",
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": true,
+   "gguf": "gemma-4-12B-it-Q6_K.gguf",
+   "handler": "gemma4",
+   "id": "gemma4_12b/think-on/string-reasoning",
+   "prompt": "<|turn>system\n<|think|>\nBe brief.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\nplan",
+   "run": "llama-server/gemma4_12b",
+   "template": "gemma4_12b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "chat_template_kwargs": {
+     "enable_thinking": true
+    },
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     }
+    ]
+   },
+   "bos_cut": true,
+   "gguf": "gemma-4-12B-it-Q6_K.gguf",
+   "handler": "gemma4",
+   "id": "gemma4_12b/think-on/no-generation-prompt",
+   "prompt": "<|turn>system\n<|think|>\nBe brief.<turn|>\n<|turn>user\nHi<turn|>\n",
+   "run": "llama-server/gemma4_12b",
+   "template": "gemma4_12b_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "continue_final_message": true,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "SmolLM2-135M-Instruct-Q8_0.gguf",
+   "handler": "autoparser",
+   "id": "smollm2/content",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello",
+   "run": "llama-server/smollm2",
+   "template": "smollm2_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "continue_final_message": true,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "SmolLM2-135M-Instruct-Q8_0.gguf",
+   "handler": "autoparser",
+   "id": "smollm2/reasoning",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n",
+   "run": "llama-server/smollm2",
+   "template": "smollm2_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "continue_final_message": true,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "SmolLM2-135M-Instruct-Q8_0.gguf",
+   "handler": "autoparser",
+   "id": "smollm2/reasoning-and-content",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello",
+   "run": "llama-server/smollm2",
+   "template": "smollm2_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "continue_final_message": "content",
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "SmolLM2-135M-Instruct-Q8_0.gguf",
+   "handler": "autoparser",
+   "id": "smollm2/string-content",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello",
+   "run": "llama-server/smollm2",
+   "template": "smollm2_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "continue_final_message": "reasoning_content",
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     },
+     {
+      "content": "Hello",
+      "reasoning_content": "plan",
+      "role": "assistant"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "SmolLM2-135M-Instruct-Q8_0.gguf",
+   "handler": "autoparser",
+   "id": "smollm2/string-reasoning",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n",
+   "run": "llama-server/smollm2",
+   "template": "smollm2_template.jinja"
+  },
+  {
+   "body": {
+    "add_generation_prompt": false,
+    "messages": [
+     {
+      "content": "Be brief.",
+      "role": "system"
+     },
+     {
+      "content": "Hi",
+      "role": "user"
+     }
+    ]
+   },
+   "bos_cut": false,
+   "gguf": "SmolLM2-135M-Instruct-Q8_0.gguf",
+   "handler": "autoparser",
+   "id": "smollm2/no-generation-prompt",
+   "prompt": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n",
+   "run": "llama-server/smollm2",
+   "template": "smollm2_template.jinja"
+  }
+ ]
+}
