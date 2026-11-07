@@ -276,3 +276,53 @@ def test_a_str_widened_twice_parses_within_its_price(ensure_ascii):
         tracemalloc.stop()
     assert doc == {"prompt": prompt}
     assert peak <= need, peak / need
+
+
+def _form_request(path: str, body: bytes, ctype: str):
+    """A request whose body arrives in 64 KiB chunks, as a socket's does."""
+    from starlette.requests import Request
+
+    chunks = [body[i:i + (64 << 10)] for i in range(0, len(body), 64 << 10)]
+
+    async def receive():
+        if chunks:
+            return {"type": "http.request", "body": chunks.pop(0),
+                    "more_body": bool(chunks)}
+        return {"type": "http.disconnect"}
+    return Request({"type": "http", "method": "POST", "path": path,
+                    "query_string": b"", "headers": [
+                        (b"content-type", ctype.encode()),
+                        (b"content-length", str(len(body)).encode())]},
+                   receive)
+
+
+def test_a_data_url_in_an_edit_forms_text_field_is_read_within_its_price():
+    """The gate decodes an edit form's image sent as a data URL in a text
+    field: what the read and the checks hold at their peak never passes
+    the price, so one byte less is refused."""
+    import asyncio
+    import base64
+    import os
+    import tracemalloc
+
+    b = "gmlxboundary"
+    url = ("data:image/png;base64,"
+           + base64.b64encode(os.urandom(2 << 20)).decode())
+    body = (f'--{b}\r\nContent-Disposition: form-data; name="prompt"\r\n\r\n'
+            f'a cat\r\n--{b}\r\nContent-Disposition: form-data; '
+            f'name="image"\r\n\r\n{url}\r\n--{b}--\r\n').encode()
+    ctype = f"multipart/form-data; boundary={b}"
+
+    async def read(free):
+        form = await bi.read_form_in_ram(
+            _form_request("/v1/images/edits", body, ctype), free)
+        await form.close()
+    tracemalloc.start()
+    try:
+        asyncio.run(read(1 << 40))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    with pytest.raises(bi.BodyRefused) as e:
+        asyncio.run(read(peak - 1))
+    assert e.value.status == 413

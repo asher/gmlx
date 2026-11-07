@@ -371,6 +371,16 @@ class _TextPrice:
                 + self.size * _DECODE[self.kind] + _SLACK)
 
 
+def _text_decode(value: str) -> int:
+    """The bytes the base64 decode of a form's text field ``value`` holds
+    beside it: a data URL's payload cut from it, at its own width, and the
+    bytes it decodes to."""
+    n = len(value)
+    cut = (n if value.isascii() else WIDE_CHAR_BYTES * n) \
+        if value.startswith("data:") else 0
+    return cut + math.ceil(n * 0.75)
+
+
 def _min_price(n: int) -> int:
     """The least a JSON body of ``n`` bytes holds as it is parsed: its
     bytes and their str, beside each other at the decode."""
@@ -604,10 +614,18 @@ async def read_form_in_ram(request: Request, free: int | None = None,
             f.close()
         raise BodyRefused(400, f"the multipart form cannot be read: {e}") \
             from None
+    # The parser holds the bytes of the last part it read.
+    del parser
     try:
         largest = max(files, default=0)
         check(text.held() + spooled() + largest, largest)
         fields = [(k, v) for k, v in form.multi_items() if isinstance(v, str)]
+        # The gate decodes an image sent in a text field, one at a time:
+        # a data URL's payload cut from its str, and the bytes it decodes
+        # to.
+        check(text.held() + spooled() + max(
+            (_text_decode(v) for k, v in fields
+             if k == "image" or v.startswith("data:")), default=0))
         try:
             check_form_fields(
                 fields, path,
