@@ -855,6 +855,31 @@ def test_a_served_render_keeps_the_templates_thinking_default():
                                 enable_thinking=False) == "NOTHINK"
 
 
+class _PlainGateTok(_GateTok):
+    """The gate tokenizer with a vocab that holds no think tokens."""
+    eos_token_id = 0
+
+    def get_vocab(self):
+        return {"a": 0}
+
+
+def test_a_served_text_render_keeps_the_templates_thinking_default():
+    """mlx-lm's TokenizerWrapper sets an absent enable_thinking to whether
+    the vocab holds think tokens. A served text model's render with no
+    thinking control keeps the template's own default all the same."""
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
+
+    pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
+    raw = _PlainGateTok()
+    wrapper = TokenizerWrapper(raw)
+    assert not wrapper.has_thinking
+    proc = serving._GgufServerProcessor(wrapper, raw, None)
+    msgs = [{"role": "user", "content": "hi"}]
+    assert pu.get_chat_template(proc, msgs, True) == "THINK"
+    assert pu.get_chat_template(proc, msgs, True,
+                                enable_thinking=False) == "NOTHINK"
+
+
 # The old-style role dispatch from issue #66: no developer alias, else-raise.
 _ROLE_RAISE_TMPL = ("{% if m.role == 'system' %}{% elif m.role == 'user' %}"
                     "{% else %}{{ raise_exception('Unexpected message role.') }}"

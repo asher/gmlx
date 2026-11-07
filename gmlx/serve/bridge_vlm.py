@@ -239,6 +239,19 @@ class _GgufServerProcessor:
             raise AttributeError(name)
         return getattr(self._wrapper, name)
 
+    def apply_chat_template(self, *args, **kwargs):
+        """The wrapper's render, where a render with no ``enable_thinking``
+        leaves the template's own default in charge: mlx-lm's wrapper sets
+        it to ``has_thinking``, so that render goes to the tokenizer it
+        wraps, as the wrapper's own does."""
+        w = self._wrapper
+        raw = getattr(w, "_tokenizer", None)
+        if ("enable_thinking" in kwargs or raw is None
+                or getattr(w, "_chat_template", None) is not None):
+            return w.apply_chat_template(*args, **kwargs)
+        kwargs["return_dict"] = False
+        return raw.apply_chat_template(*args, **kwargs)
+
 
 def _as_dict(config: Any) -> dict:
     if isinstance(config, dict):
