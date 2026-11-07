@@ -383,3 +383,20 @@ def test_two_json_parses_take_their_turns(monkeypatch):
     waited, one, two = asyncio.run(main())
     assert waited, "the second parse started beside the first"
     assert (one, two) == ({"prompt": "a cat"}, {"prompt": "a dog"})
+
+
+def test_short_strs_after_the_last_long_one_are_priced_as_text():
+    """The strs of a body after its last long str price as the text around
+    them, wherever that long str is: only a str with no closing quote is
+    priced as one str to the end of the body."""
+    short = ",".join(['"a\\n"'] * 30000)
+    long_ = '"' + "x" * 4000 + '"'
+    first = f'{{"a": {long_}, "b": [{short}]}}'.encode()
+    last = f'{{"b": [{short}], "a": {long_}}}'.encode()
+    assert len(first) == len(last)
+    assert bi.json_price(first) == bi.json_price(last)
+    assert bi.json_price(f'{{"b": [{short}]}}'.encode()) < \
+        bi.json_price(first)
+    # A str with no closing quote is made up to the end of the body.
+    cut = first[:-30000]
+    assert bi.json_price(cut + b'"' + b"x" * 30000) > bi.json_price(cut)

@@ -142,8 +142,11 @@ _LONG = 256
 # The strs of a body longer than _LONG, each matched after the run of
 # other text and shorter strs before it, so no str is matched from its
 # closing quote.
-_LONG_STR = re.compile(rb'(?:[^"]++|"(?>(?:[^"\\]|\\.){0,%d})")*+'
-                       rb'("(?:[^"\\]++|\\.)*+")' % _LONG, re.S)
+_SKIP = rb'(?:[^"]++|"(?>(?:[^"\\]|\\.){0,%d})")*+' % _LONG
+_LONG_STR = re.compile(_SKIP + rb'("(?:[^"\\]++|\\.)*+")', re.S)
+# The text and shorter strs after the last long str: past them, a str with
+# no closing quote.
+_TAIL = re.compile(_SKIP, re.S)
 _HIGH = re.compile(rb"[\x80-\xff]")
 # What the escape to ASCII would change the parse of: a backslash, not
 # itself escaped, before a character that is not ASCII, which then makes
@@ -242,9 +245,9 @@ def _json_plan(buf, verify: bool = False) -> tuple[int, int]:
         spans.append(m.span(1))
         pos = m.end()
     # A str with no closing quote is made up to the end of the body.
-    quote = buf.find(b'"', pos)
-    if quote >= 0:
-        spans.append((quote, n))
+    tail = _TAIL.match(buf, pos).end()
+    if tail < n:
+        spans.append((tail, n))
     for s, e in spans:
         size = e - s
         longs += size
