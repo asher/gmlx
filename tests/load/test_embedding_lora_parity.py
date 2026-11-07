@@ -55,7 +55,7 @@ def model(gguf_index):
     from gmlx.load.loader import load_model
 
     path = llama_fixture.find_file(FIXTURE, GGUF, gguf_index.get("mixtral", []))
-    llama_fixture.find_file(FIXTURE, ADAPTER.name, [ADAPTER])
+    llama_fixture.check_checked_in(FIXTURE, ADAPTER)
     mp = pytest.MonkeyPatch()
     mp.setenv("GMLX_ACTIVATION_DTYPE", "float32")
     try:

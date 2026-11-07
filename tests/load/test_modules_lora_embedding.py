@@ -302,3 +302,10 @@ def test_the_install_keeps_only_the_f32_a_and_one_table(tmp_path):
     pair_bytes = 2 * r * (v + d)
     assert resident <= rise <= resident + 16384
     assert rise <= 2 * pair_bytes
+
+
+def test_the_checked_in_adapter_is_the_one_its_fixture_recorded():
+    import llama_fixture
+
+    fixture = llama_fixture.load("lora/stories15m_moe_embd.json")
+    llama_fixture.check_checked_in(fixture, llama_fixture.FIXTURES / "lora" / "stories15m_moe_embd.gguf")
