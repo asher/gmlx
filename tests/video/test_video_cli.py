@@ -489,6 +489,54 @@ def test_a_shorter_clip_leaves_no_frames_of_the_one_before(stubbed,
     assert outside.read_bytes() == b"kept"
 
 
+def test_a_second_run_on_a_frames_folder_waits_for_the_first(
+        stubbed, tmp_path, monkeypatch):
+    """A run whose frames folder another run is writing waits for it to
+    end before it clears a frame, so the first run's frames and part
+    files stay whole; then it writes its own."""
+    import fcntl
+    import threading
+
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    earlier = [f"frame_{i:06d}.png" for i in range(1, 8)] + [
+        "frame_000008.png.part"]
+    for name in earlier:
+        (frames / name).write_bytes(b"first run")
+    first = os.open(frames, os.O_RDONLY)
+    fcntl.flock(first, fcntl.LOCK_EX)    # the first run, writing
+    waiting, done = threading.Event(), threading.Event()
+    flock = fcntl.flock
+
+    def watched(fd, op):
+        if op == fcntl.LOCK_EX and fd != first:
+            waiting.set()
+        return flock(fd, op)
+
+    monkeypatch.setattr(fcntl, "flock", watched)
+    rc: list = []
+
+    def second():
+        try:
+            rc.append(stubbed("--frames-dir", str(frames)))
+        finally:
+            done.set()
+
+    t = threading.Thread(target=second, daemon=True)
+    t.start()
+    while not (waiting.is_set() or done.is_set()):
+        done.wait(0.05)
+    try:
+        assert waiting.is_set(), "the second run did not wait for the first"
+        assert sorted(p.name for p in frames.iterdir()) == sorted(earlier)
+    finally:
+        os.close(first)                  # the first run ends
+        t.join(30)
+    assert not t.is_alive() and rc == [0]
+    assert sorted(p.name for p in frames.iterdir()) == sorted([
+        "audio.wav", *(f"frame_{i:06d}.png" for i in range(1, 6))])
+
+
 def test_the_latents_land_at_the_path_given(stubbed, tmp_path):
     """A --save-latent path without .npz is written as given, not beside
     it with .npz added."""

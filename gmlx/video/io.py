@@ -17,6 +17,8 @@ channels: mono on both, more than two mixed down by ffmpeg.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import re
 import shutil
@@ -199,6 +201,24 @@ def clear_frames(folder: str) -> None:
     for e in os.scandir(folder):
         if _WRITTEN.fullmatch(e.name) and not e.is_dir(follow_symlinks=False):
             os.remove(e.path)
+
+
+@contextlib.contextmanager
+def frames_lock(folder: str, log=None):
+    """Hold ``folder`` for one run's frames, so a second run on it waits
+    until the first has written its last frame and ``audio.wav`` before
+    it clears any of them. ``log`` gets a line when the run waits."""
+    fd = os.open(folder, os.O_RDONLY)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if log is not None:
+                log(f"waiting for another run writing frames to {folder}")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def write_frames(folder: str, frames, start: int) -> int:
