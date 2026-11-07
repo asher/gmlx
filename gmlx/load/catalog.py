@@ -1133,12 +1133,8 @@ def plan_pairs(plan: PullPlan, base_dir: str, nest: bool) -> dict:
     return {model_path: pairs}
 
 
-def local_state(plan: PullPlan, base_dir: str, nest: bool) -> tuple:
-    """``(on_disk_bytes, remaining_bytes, per_ref)`` from recorded sizes
-    and the files at the destination, with no network. ``per_ref`` maps
-    each ref to ``(on_disk, total, complete)``."""
-    from gmlx.load.preflight import shard_names
-
+def _plan_items(plan: PullPlan) -> list:
+    """``(ref, repo, path_in_repo, bytes)`` of each file a plan pulls."""
     m = plan.model
     items = [(rung_ref(m, plan.rung), m.repo, plan.rung.path, plan.rung.bytes)]
     if plan.mmproj and m.mmproj:
@@ -1149,8 +1145,33 @@ def local_state(plan: PullPlan, base_dir: str, nest: bool) -> tuple:
     if m.asr is not None:
         a = m.asr
         items.append((f"hf:{a.repo}/{a.file}", a.repo, a.file, a.bytes))
+    return items
+
+
+def replaced_bytes(plan: PullPlan, base_dir: str, nest: bool) -> int:
+    """The bytes of the copies at the destination a pull of ``plan``
+    replaces: a whole copy of another size, which stays on disk until the
+    new one is complete."""
+    from gmlx.load.preflight import shard_names
+
+    out = 0
+    for _ref, repo, path, total in _plan_items(plan):
+        paths = [dest_path(repo, n, base_dir, nest) for n in shard_names(path)]
+        if total and all(os.path.isfile(p) for p in paths):
+            have = sum(os.path.getsize(p) for p in paths)
+            if have != total:
+                out += have
+    return out
+
+
+def local_state(plan: PullPlan, base_dir: str, nest: bool) -> tuple:
+    """``(on_disk_bytes, remaining_bytes, per_ref)`` from recorded sizes
+    and the files at the destination, with no network. ``per_ref`` maps
+    each ref to ``(on_disk, total, complete)``."""
+    from gmlx.load.preflight import shard_names
+
     per_ref, on_disk, remaining = {}, 0, 0
-    for ref, repo, path, total in items:
+    for ref, repo, path, total in _plan_items(plan):
         have, complete = 0, True
         for name in shard_names(path):
             p = dest_path(repo, name, base_dir, nest)

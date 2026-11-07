@@ -1208,26 +1208,65 @@ def _disk_free(path: str) -> int:
 
 
 def _planned_download_bytes(ref: remote.Ref, dest_dir: str,
-                            listing_cache: dict) -> int | None:
-    """Bytes still needed to land ``ref`` (all shards) in ``dest_dir``, or
-    ``None`` when unknown (non-hf ref, listing failed, or a shard is missing
-    from the listing). Existing final files and ``.part`` resume files are
-    subtracted, so a re-pull or resume needs only the remainder."""
+                            listing_cache: dict) -> tuple:
+    """``(need, old)``: the bytes still needed to land ``ref`` (all shards)
+    in ``dest_dir``, ``None`` when unknown (non-hf ref, listing failed, or a
+    shard is missing from the listing), and the bytes of the out of date
+    copies an update keeps on disk until its new copies are complete. A
+    current file needs nothing, and a ``.part`` resume file is subtracted,
+    so a re-pull or resume needs only the remainder; an out of date copy
+    needs the whole new file beside it."""
     sizes = _repo_file_sizes(ref, listing_cache)
     if sizes is None:
-        return None
-    total = 0
+        return None, 0
+    total = old = 0
     for name in _shard_names(ref.path_in_repo):
         size = sizes.get(name)
         if not isinstance(size, int) or size <= 0:
-            return None
+            return None, 0
         dest = os.path.join(dest_dir, name)
         if os.path.exists(dest):
-            size -= os.path.getsize(dest)
-        elif os.path.exists(dest + ".part"):
+            have = os.path.getsize(dest)
+            if have == size:
+                continue
+            old += have
+        if os.path.exists(dest + ".part"):
             size -= os.path.getsize(dest + ".part")
         total += max(0, size)
-    return total
+    return total, old
+
+
+def _rm_hint(name: str | None, paths: list, config_path: str | None) -> str:
+    """How to delete the old copy of a model before its update: ``gmlx rm``
+    with ``name``, else with the config id of one of ``paths``, else the
+    files to delete."""
+    if name is None and config_path:
+        import gmlx.config as cfgmod
+
+        want = {os.path.abspath(p) for p in paths}
+        try:
+            cfg = cfgmod.load_config(config_path)
+        except cfgmod.ConfigError:
+            cfg = None
+        for mid, mc in (cfg.models.items() if cfg else ()):
+            rp = _try_resolve(mc.path, cfg.model_dirs, cwd=False)
+            if rp and os.path.abspath(rp) in want:
+                name = mid
+                break
+    if name is not None:
+        return f"to delete the old model first, run `gmlx rm {name}`, then pull again"
+    return (f"to delete the old copy first, delete {' '.join(paths)}, then "
+            "pull again")
+
+
+def _update_refusal(what: str, need: int, free: int, where: str, hint: str) -> str:
+    """The refusal of an update whose new copy does not fit beside the old
+    one, before any byte is fetched."""
+    return (f"error: not enough disk space to update {what}: the new copy needs "
+            f"{_human_gb(need)} beside the old one until it is complete, and "
+            f"{_human_gb(free)} is free at {where}, {_human_gb(need - free)} "
+            f"short; nothing was downloaded or deleted. {hint[0].upper()}"
+            f"{hint[1:]} (or pass --to DIR on another volume, or --force)")
 
 
 _PULL_DESCRIPTION = """\
@@ -1520,9 +1559,18 @@ def _pull_refs(refs: list, a, base_dir: str, nest: bool, *, prechecked=None,
             continue
         dest_dir = _dest_for_ref(ref, base_dir, nest)
         if not disk_checked and not a.force:
-            need = _planned_download_bytes(ref, dest_dir, listing_cache)
+            need, old = _planned_download_bytes(ref, dest_dir, listing_cache)
             if need:
                 free = _disk_free(dest_dir)
+                if free < need and old:
+                    paths = [os.path.join(dest_dir, n)
+                             for n in _shard_names(ref.path_in_repo)]
+                    print(_update_refusal(
+                        ref.filename, need, free, dest_dir,
+                        _rm_hint(None, paths, _existing_config(a))),
+                        file=sys.stderr)
+                    all_ok = False
+                    continue
                 if free < need:
                     print(f"error: not enough disk space for {ref.filename}: need "
                           f"{_human_gb(need)}, {_human_gb(free)} free at {dest_dir} "
@@ -1761,6 +1809,10 @@ def _confirm_plan(plan, a, dest: Destination, box) -> tuple:
         cannot = next((ln for ln in stream.get("lines", ()) if "cannot stream" in ln),
                       "this Mac cannot stream this file")
         return fail(f"error: {cannot}; pick a smaller quant")
+    if remaining > free and not a.force and pc.replaced_bytes(
+            plan, dest.base_dir, dest.nest):
+        return fail(_update_refusal(m.name, remaining, free, dest.base_dir,
+                                    _rm_hint(m.name, [], None)))
     if remaining > free and not a.force:
         return fail(f"error: not enough disk space: need {_human_gb(remaining)}, "
                     f"{_human_gb(free)} free at {dest.base_dir} (free space, pass "

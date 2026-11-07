@@ -2254,6 +2254,38 @@ def test_pull_replaces_a_copy_whose_size_changed(tmp_path, monkeypatch, capsys):
     assert (tmp_path / "model.gguf").read_bytes() == new
 
 
+def test_pull_refuses_an_update_the_disk_cannot_hold_beside_the_old_copy(
+        tmp_path, monkeypatch, capsys):
+    """An update keeps the old copy until the new one is complete, so it
+    needs room for the whole new file beside it: one that does not fit is
+    refused before any download, with the shortfall and the command that
+    deletes the old model, and nothing is deleted."""
+    _serve(monkeypatch, _mint(tmp_path / "m.gguf", codec=GT.Q4_0))
+    _listing(monkeypatch, {"model.gguf": 10 * 1024**3})
+    old = tmp_path / "model.gguf"
+    with open(old, "wb") as f:                # sparse: 9 GiB, no disk
+        f.truncate(9 * 1024**3)
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(f"server:\n  model_dirs:\n    - {tmp_path}\n"
+                   "models:\n  old-model:\n    path: model.gguf\n")
+    monkeypatch.setattr(manage, "_disk_free", lambda p: 5 * 1024**3)
+    called = []
+    monkeypatch.setattr(manage, "_download_ref",
+                        lambda ref, dest, **k: called.append(dest) or ["/x"])
+    rc = manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(tmp_path),
+                          "--config", str(cfg)])
+    err = capsys.readouterr().err
+    assert rc == 1 and called == [], err
+    assert (f"error: not enough disk space to update model.gguf: the new copy "
+            f"needs 10.0 GB beside the old one until it is complete, and 5.0 GB "
+            f"is free at {tmp_path}, 5.0 GB short; nothing was downloaded or "
+            "deleted. To delete the old model first, run `gmlx rm old-model`, "
+            "then pull again (or pass --to DIR on another volume, or --force)"
+            ) in err
+    assert old.stat().st_size == 9 * 1024**3
+    assert not (tmp_path / "model.gguf.old").exists()
+
+
 def test_pull_verify_catches_a_change_of_the_same_size(tmp_path, monkeypatch, capsys):
     payload = _mint(tmp_path / "m.gguf", codec=GT.Q4_0)
     _serve(monkeypatch, payload)
