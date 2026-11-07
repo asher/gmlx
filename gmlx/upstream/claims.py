@@ -89,11 +89,10 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "BatchGenerator.insert",
           "lora_rows (per-row prompt_kwargs carry the APC "
           "salt, positional order prompts, max_tokens, prompt_kwargs); "
-          "seed_rows (returned uids); mtp_prefill._install_l0_tenant_rows "
+          "mtp_prefill._install_l0_tenant_rows "
           "(each row's _apc_tenant kwarg, None included, on the generator "
           "by returned uid)",
-          wrappers=("gmlx.lora_rows", "gmlx.serve.seed_rows",
-                    "gmlx.spec.mtp_prefill")),
+          wrappers=("gmlx.lora_rows", "gmlx.spec.mtp_prefill")),
     # --- prompt batches, speculative and AR batch engine ---
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "PromptProcessingBatch.__init__",
           "cascade_sdpa.install_cascade_stamp (token-prefix stamp at "
@@ -143,7 +142,7 @@ CLAIMS: tuple[Claim, ...] = (
           "ckpt._install_plain_ckpt_decode (token accounting and "
           "decode-time snapshots)",
           wrappers=("gmlx.lora_rows", "gmlx.serve.cb_phase",
-                    "gmlx.serve.seed_rows", "gmlx.spec.ckpt")),
+                    "gmlx.spec.ckpt")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "GenerationBatch.filter",
           "ckpt._install_plain_ckpt_decode (B=1 retirement at row exit)",
           wrappers=("gmlx.spec.ckpt",)),
@@ -179,7 +178,6 @@ CLAIMS: tuple[Claim, ...] = (
           wrappers=("gmlx.serve.cb_phase",)),
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "PromptProcessingBatch.generate",
           "mtp_prefill.install_full_prompt_mtp_prefill; "
-          "seed_rows.install_per_request_seed (row-uid publish); "
           "patches.mtp_thinking (thinking-hook transport); "
           "patches.spec_processors (reads each row's processors and "
           "prompt tokens before the prefill clears them, outermost); "
@@ -188,7 +186,7 @@ CLAIMS: tuple[Claim, ...] = (
           wrappers=("gmlx.lora_rows", "gmlx.serve.cb_phase",
                     "gmlx.serve.patches.context_copy",
                     "gmlx.serve.patches.mtp_thinking",
-                    "gmlx.serve.patches.spec_processors", "gmlx.serve.seed_rows",
+                    "gmlx.serve.patches.spec_processors",
                     "gmlx.spec.mtp_prefill")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar",
           "SpeculativeGenerationBatch._start_rounds",
@@ -199,8 +197,7 @@ CLAIMS: tuple[Claim, ...] = (
                     "gmlx.serve.patches.spec_processors")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "SpeculativeGenerationBatch.next",
           "admission.install_continuous_batch_admission",
-          wrappers=("gmlx.serve.cb_phase", "gmlx.serve.seed_rows",
-                    "gmlx.spec.admission")),
+          wrappers=("gmlx.serve.cb_phase", "gmlx.spec.admission")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "SpeculativeGenerationBatch.filter",
           "admission._filter_with_release (per-row release rides the "
           "mark-finished contract; the rounds generator sheds via "
@@ -283,13 +280,11 @@ CLAIMS: tuple[Claim, ...] = (
                     "gmlx.serve.patches.sampling")),
     Claim("gmlx._vendor.mlx_vlm.server.generation",
           "ResponseGenerator._make_logits_processors",
-          "seed_rows.install_per_request_seed; "
           "lora_rows.install_row_channel (engine-thread handoff to the "
           "insert that takes the result as an argument); "
           "patches.spec_processors (puts the deferred processors back "
           "before the row's processors are built)",
-          wrappers=("gmlx.lora_rows", "gmlx.serve.patches.spec_processors",
-                    "gmlx.serve.seed_rows")),
+          wrappers=("gmlx.lora_rows", "gmlx.serve.patches.spec_processors")),
     Claim("gmlx._vendor.mlx_vlm.server.generation", "ResponseGenerator._step",
           "patches.row_failed (permanently failed rows delivered "
           "to their response queues on the engine thread)",

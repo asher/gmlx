@@ -56,6 +56,9 @@ from .common import (
 )
 from .types import GenerateKwargs, ProcessorLike, Unpack
 
+# gmlx: raw f32 logprobs and a bounded top-k for the batch engine.
+from gmlx.gen.logprobs import raw_logprobs, top_logprobs
+
 logger = logging.getLogger("gmlx._vendor.mlx_vlm.generate")
 
 DEFAULT_TOP_N_SIGMA = 0.0
@@ -1115,6 +1118,67 @@ def _sample_with_positions(
     return sampler(logprobs)
 
 
+# gmlx: per-row sampler and logprob settings (gmlx.serve.row_sampling). A
+# batch built without the generator's store (the CLI, tests) reads its own
+# sampler and flags as every row's settings.
+def _fallback_row(batch):
+    from gmlx.serve.row_sampling import GREEDY_KEY, RowSettings
+
+    sampler = getattr(batch, "sampler", None)
+    greedy = bool(getattr(batch, "greedy_sampling", False)) or sampler is None
+    return RowSettings(
+        sampler=None if greedy else sampler,
+        logprobs=bool(getattr(batch, "compute_logprobs", False)),
+        top_k=int(getattr(batch, "top_logprobs_k", 0) or 0),
+        key=GREEDY_KEY if greedy else ("batch",),
+    )
+
+
+def _row_store(batch):
+    store = getattr(batch, "_row_settings", None)
+    default = getattr(batch, "_default_row", None) or _fallback_row(batch)
+    return ({} if store is None else store), default
+
+
+def _rows_for(batch, uids):
+    store, default = _row_store(batch)
+    return [store.get(u, default) for u in uids]
+
+
+def _logprobs_cap(batch) -> int:
+    cap = getattr(batch, "logprobs_cap", None)
+    if cap is None:
+        cap = getattr(batch, "top_logprobs_k", 0)
+    return int(cap or 0)
+
+
+def _row_sampler(batch):
+    from gmlx.serve.row_sampling import RowSampler
+
+    store, default = _row_store(batch)
+    return RowSampler(store, default)
+
+
+def _concat_padded(a, b, n_a: int, n_b: int):
+    """Concatenate two per-row arrays, standing zero rows in for a side
+    that has none. None when neither side has one."""
+    if a is None and b is None:
+        return None
+    ref = a if a is not None else b
+    if a is None:
+        a = mx.zeros((n_a,) + tuple(ref.shape[1:]), dtype=ref.dtype)
+    if b is None:
+        b = mx.zeros((n_b,) + tuple(ref.shape[1:]), dtype=ref.dtype)
+    return mx.concatenate([a, b])
+
+
+def _bind_rows(batch, rows):
+    """Attach the generator's row store to a batch it built."""
+    if rows is not None:
+        batch._row_settings, batch._default_row, batch.logprobs_cap = rows
+    return batch
+
+
 class GenerationBatch:
     """
     Batched token generator with double-buffered pipelining.
@@ -1128,7 +1192,7 @@ class GenerationBatch:
     class Response:
         uid: int
         token: int
-        token_logprob: float
+        token_logprob: Optional[float]
         finish_reason: Optional[str]
         top_logprobs: Optional[List[Tuple[int, float]]] = None
 
@@ -1148,12 +1212,19 @@ class GenerationBatch:
             List[Optional[List[Callable[[mx.array, mx.array], mx.array]]]]
         ] = None,
         thinking_budget_criteria: Optional[List[Any]] = None,
+        row_settings: Optional[dict] = None,
+        default_row: Any = None,
+        logprobs_cap: Optional[int] = None,
     ):
         self.model = model
         self._language_model = getattr(model, "language_model", model)
         self.uids = uids
         self.prompt_cache = prompt_cache
         self.sampler = sampler
+        # gmlx: the generator's per-row settings, by reference.
+        self._row_settings = row_settings
+        self._default_row = default_row
+        self.logprobs_cap = logprobs_cap
         self.stop_criteria = stop_criteria
         self.max_tokens = max_tokens
         self._num_tokens = [0] * len(uids)
@@ -1171,6 +1242,7 @@ class GenerationBatch:
         self._next_lps = None
         self._next_top_idx = None
         self._next_top_lp = None
+        self._next_raw = None
 
         # Per-sequence MRoPE delta
         self._rope_deltas = None
@@ -1201,8 +1273,10 @@ class GenerationBatch:
         elif len(self.token_context) > len(self.uids):
             self.token_context = self.token_context[: len(self.uids)]
 
-    def _fused_greedy_step(self, inputs: mx.array, fwd_kwargs: dict):
-        if not self.greedy_sampling or self.compute_logprobs or self.top_logprobs_k > 0:
+    def _fused_greedy_step(self, inputs: mx.array, fwd_kwargs: dict, rows=None):
+        # gmlx: only when every row is greedy and none wants logprobs.
+        rows = _rows_for(self, self.uids) if rows is None else rows
+        if any(r.sampler is not None or r.logprobs or r.top_k > 0 for r in rows):
             return None
 
         fused_greedy_decode = getattr(self._language_model, "fused_greedy_decode", None)
@@ -1240,7 +1314,13 @@ class GenerationBatch:
         if self._rope_deltas is not None:
             fwd_kwargs["rope_deltas"] = self._rope_deltas
 
-        sampled = self._fused_greedy_step(inputs, fwd_kwargs)
+        # gmlx: per-row settings; logprobs are f32 of the raw logits.
+        rows = _rows_for(self, self.uids)
+        wants_lp = any(r.logprobs for r in rows)
+        k = _logprobs_cap(self) if any(r.top_k > 0 for r in rows) else 0
+        self._next_raw = None
+
+        sampled = self._fused_greedy_step(inputs, fwd_kwargs, rows)
         if sampled is not None:
             self._next_tokens = sampled
             self._next_lps = None
@@ -1255,6 +1335,7 @@ class GenerationBatch:
         )
         logits = output.logits if hasattr(output, "logits") else output
         logits = logits[:, -1, :]
+        raw = raw_logprobs(logits) if (wants_lp or k) else None
 
         if self.logits_processors and any(self.logits_processors):
             last_tokens = inputs.tolist()
@@ -1279,30 +1360,29 @@ class GenerationBatch:
             logits = mx.concatenate(processed_logits, axis=0)
 
         logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
-        sampled = _sample_with_positions(
-            self.sampler,
-            logprobs,
-            row_ids=[0] * len(self.uids),
-            positions=[n + 1 for n in self._num_tokens],
-        )
+        row_sampler = _row_sampler(self)
+        with row_sampler.bind(self.uids):
+            sampled = row_sampler.sample_target(
+                logprobs,
+                row_ids=[0] * len(self.uids),
+                positions=[n + 1 for n in self._num_tokens],
+            )
 
         self._next_tokens = sampled
         prev_top_idx = self._next_top_idx
         prev_top_lp = self._next_top_lp
 
         eval_targets = [self._next_tokens]
-        if self.compute_logprobs:
-            self._next_lps = logprobs[mx.arange(sampled.shape[0]), sampled]
+        if wants_lp:
+            self._next_lps = raw[mx.arange(sampled.shape[0]), sampled]
             eval_targets.append(self._next_lps)
+            if any(c is not None for c in self.thinking_budget_criteria):
+                self._next_raw = raw
         else:
             self._next_lps = None
 
-        k = self.top_logprobs_k
         if k > 0:
-            # argsort ascending; take last K columns and reverse for descending.
-            sort_idx = mx.argsort(logprobs, axis=-1)
-            top_idx = sort_idx[..., -k:][..., ::-1].astype(mx.int32)
-            top_lp = mx.take_along_axis(logprobs, top_idx, axis=-1)
+            top_idx, top_lp = top_logprobs(raw, k)
             self._next_top_idx = top_idx
             self._next_top_lp = top_lp
             eval_targets.extend([top_idx, top_lp])
@@ -1339,6 +1419,7 @@ class GenerationBatch:
             self._next_lps,
             self._next_top_idx,
             self._next_top_lp,
+            getattr(self, "_next_raw", None),
             self._rope_deltas,
         ]
         for c in self.prompt_cache:
@@ -1388,42 +1469,58 @@ class GenerationBatch:
         self._ensure_logits_processor_slots()
         self._ensure_token_context()
 
+        # gmlx: a side without logprobs or top-k pads zero rows, so every
+        # per-row array stays aligned with uids (rows that did not ask
+        # drop the padding in next()).
+        n_self = 0 if self._next_tokens is None else int(self._next_tokens.shape[0])
+        n_other = (
+            0 if other._next_tokens is None else int(other._next_tokens.shape[0])
+        )
         if self._current_tokens is None:
             self._current_tokens = other._current_tokens
             self._current_lps = other._current_lps
         elif other._current_tokens is not None:
+            self._current_lps = _concat_padded(
+                self._current_lps,
+                other._current_lps,
+                int(self._current_tokens.shape[0]),
+                int(other._current_tokens.shape[0]),
+            )
             self._current_tokens = mx.concatenate(
                 [self._current_tokens, other._current_tokens]
             )
-            if self._current_lps is not None and other._current_lps is not None:
-                self._current_lps = mx.concatenate(
-                    [self._current_lps, other._current_lps]
-                )
 
         if self._next_tokens is None:
             self._next_tokens = other._next_tokens
             self._next_lps = other._next_lps
             self._next_top_idx = other._next_top_idx
             self._next_top_lp = other._next_top_lp
+            self._next_raw = getattr(other, "_next_raw", None)
         elif other._next_tokens is not None:
             self._next_tokens = mx.concatenate([self._next_tokens, other._next_tokens])
-            if self._next_lps is not None and other._next_lps is not None:
-                self._next_lps = mx.concatenate([self._next_lps, other._next_lps])
-
+            self._next_lps = _concat_padded(
+                self._next_lps, other._next_lps, n_self, n_other
+            )
+            self._next_raw = _concat_padded(
+                getattr(self, "_next_raw", None),
+                getattr(other, "_next_raw", None),
+                n_self,
+                n_other,
+            )
             if (
                 self._next_top_idx is not None
                 and other._next_top_idx is not None
-                and self._next_top_idx.shape[-1] == other._next_top_idx.shape[-1]
+                and self._next_top_idx.shape[-1] != other._next_top_idx.shape[-1]
             ):
-                self._next_top_idx = mx.concatenate(
-                    [self._next_top_idx, other._next_top_idx]
-                )
-                self._next_top_lp = mx.concatenate(
-                    [self._next_top_lp, other._next_top_lp]
-                )
-            else:
                 self._next_top_idx = None
                 self._next_top_lp = None
+            else:
+                self._next_top_idx = _concat_padded(
+                    self._next_top_idx, other._next_top_idx, n_self, n_other
+                )
+                self._next_top_lp = _concat_padded(
+                    self._next_top_lp, other._next_top_lp, n_self, n_other
+                )
 
         if self_was_empty:
             self._rope_deltas = other._rope_deltas
@@ -1460,6 +1557,7 @@ class GenerationBatch:
             self._next_lps = None
             self._next_top_idx = None
             self._next_top_lp = None
+            self._next_raw = None
             self._rope_deltas = None
             self.token_context = []
             self.logits_processors = []
@@ -1475,6 +1573,8 @@ class GenerationBatch:
             if self._next_top_idx is not None:
                 self._next_top_idx = self._next_top_idx[keep_arr]
                 self._next_top_lp = self._next_top_lp[keep_arr]
+            if getattr(self, "_next_raw", None) is not None:
+                self._next_raw = self._next_raw[keep_arr]
             if self._rope_deltas is not None:
                 self._rope_deltas = self._rope_deltas[keep_arr]
 
@@ -1483,6 +1583,8 @@ class GenerationBatch:
         if not self.uids:
             return []
 
+        # gmlx: the rows' settings as of the tokens this step emits.
+        rows = _rows_for(self, self.uids)
         tokens, lp_list, top_idx_list, top_lp_list = self._step()
 
         keep = []
@@ -1509,14 +1611,19 @@ class GenerationBatch:
                 keep.append(i)
 
             top_lp = None
-            if top_idx_list is not None:
-                top_lp = list(zip(top_idx_list[i], top_lp_list[i]))
+            if top_idx_list is not None and rows[i].top_k > 0:
+                n_top = rows[i].top_k
+                top_lp = list(zip(top_idx_list[i][:n_top], top_lp_list[i][:n_top]))
 
             responses.append(
                 self.Response(
                     uid=self.uids[i],
                     token=tok,
-                    token_logprob=lp_list[i] if lp_list is not None else 0.0,
+                    token_logprob=(
+                        lp_list[i]
+                        if lp_list is not None and rows[i].logprobs
+                        else None
+                    ),
                     finish_reason=finish_reason,
                     top_logprobs=top_lp,
                 )
@@ -1532,9 +1639,18 @@ class GenerationBatch:
                 dtype=self._next_tokens.dtype,
             )
             self._next_tokens = mx.where(force_mask, replacements, self._next_tokens)
+            # gmlx: a forced token reports its own raw logprob; the top-k
+            # already describes the distribution at that position.
+            raw = getattr(self, "_next_raw", None)
+            if raw is not None and self._next_lps is not None:
+                forced_lps = raw[mx.arange(replacements.shape[0]), replacements]
+                self._next_lps = mx.where(force_mask, forced_lps, self._next_lps)
+        self._next_raw = None
 
         if has_forced_next_tokens:
             mx.async_eval(self._next_tokens)
+            if self._next_lps is not None:
+                mx.async_eval(self._next_lps)
 
         if len(keep) < len(self.uids):
             self.filter(keep)
@@ -1573,7 +1689,11 @@ class GenerationBatch:
         batch._next_lps = None
         batch._next_top_idx = None
         batch._next_top_lp = None
+        batch._next_raw = None
         batch._rope_deltas = None
+        batch._row_settings = None
+        batch._default_row = None
+        batch.logprobs_cap = None
         return batch
 
 
@@ -1622,9 +1742,49 @@ class SpeculativeGenerationBatch:
         self._finished = [False] * len(uids)
         self._sent_first = False
         self._rounds_iter = None
+        # gmlx: per-row settings and the first token's logprobs, set by
+        # PromptProcessingBatch.generate.
+        self._row_settings = None
+        self._default_row = None
+        self.logprobs_cap = None
+        self._first_lps = None
+        self._first_top_idx = None
+        self._first_top_lp = None
 
     def __len__(self):
         return sum(not done for done in self._finished)
+
+    # gmlx: a row's logprob fields from a LogprobEntry, per its settings.
+    def _logprob_fields(self, uid, entry):
+        rs = _rows_for(self, [uid])[0]
+        if not rs.logprobs or entry is None:
+            return None, None
+        lp, ids, vals = entry
+        top = None
+        if rs.top_k > 0 and ids is not None and vals is not None:
+            top = list(zip(ids[: rs.top_k], vals[: rs.top_k]))
+        return float(lp), top
+
+    def _first_entries(self) -> list:
+        """The first token's LogprobEntry per row, or None per row."""
+        n = int(self.first_tokens.shape[0]) if self.first_tokens is not None else 0
+        lps = getattr(self, "_first_lps", None)
+        if lps is None:
+            return [None] * n
+        idx = getattr(self, "_first_top_idx", None)
+        val = getattr(self, "_first_top_lp", None)
+        mx.eval(*[a for a in (lps, idx, val) if a is not None])
+        lp_l = lps.tolist()
+        idx_l = idx.tolist() if idx is not None else None
+        val_l = val.tolist() if val is not None else None
+        return [
+            (
+                lp_l[r],
+                idx_l[r] if idx_l is not None else None,
+                val_l[r] if val_l is not None else None,
+            )
+            for r in range(len(lp_l))
+        ]
 
     def _refresh_uids(self):
         self.uids = [
@@ -1658,7 +1818,11 @@ class SpeculativeGenerationBatch:
         self,
         responses: List[GenerationBatch.Response],
         tok_list: List[Optional[int]],
+        meta: Optional[dict] = None,
     ) -> None:
+        # gmlx: the rounds put one LogprobEntry or None per row in
+        # meta["logprobs"]; a missing entry is None, never 0.0.
+        entries = meta.get("logprobs") if isinstance(meta, dict) else None
         for row, token in enumerate(tok_list):
             if token is None or self._finished[row]:
                 continue
@@ -1667,12 +1831,17 @@ class SpeculativeGenerationBatch:
             finish_reason = self._finish_reason(row, token)
             if finish_reason is not None:
                 self._finished[row] = True
+            entry = (
+                entries[row] if entries is not None and row < len(entries) else None
+            )
+            lp, top = self._logprob_fields(self._all_uids[row], entry)
             responses.append(
                 self.Response(
                     uid=self._all_uids[row],
                     token=token,
-                    token_logprob=0.0,
+                    token_logprob=lp,
                     finish_reason=finish_reason,
+                    top_logprobs=top,
                 )
             )
 
@@ -1708,6 +1877,11 @@ class SpeculativeGenerationBatch:
             # rounds loop carries them per row and passes them on every
             # target forward, so another request's prefill cannot reach it.
             rope_deltas=getattr(self, "_rope_deltas", None),
+            # gmlx: per-row sampler and logprob settings.
+            row_settings=_row_store(self)[0],
+            default_row=_row_store(self)[1],
+            logprobs_cap=_logprobs_cap(self),
+            row_uids=list(self._all_uids),
         )
 
     def next(self) -> List[GenerationBatch.Response]:
@@ -1718,6 +1892,8 @@ class SpeculativeGenerationBatch:
         if not self._sent_first:
             self._sent_first = True
             mx.eval(self.first_tokens)
+            entries = self._first_entries()
+            self._first_lps = self._first_top_idx = self._first_top_lp = None
             for row, token in enumerate(self.first_tokens.tolist()):
                 if self._finished[row]:
                     continue
@@ -1726,12 +1902,14 @@ class SpeculativeGenerationBatch:
                 finish_reason = self._finish_reason(row, token)
                 if finish_reason is not None:
                     self._finished[row] = True
+                lp, top = self._logprob_fields(self._all_uids[row], entries[row])
                 responses.append(
                     self.Response(
                         uid=self._all_uids[row],
                         token=token,
-                        token_logprob=0.0,
+                        token_logprob=lp,
                         finish_reason=finish_reason,
+                        top_logprobs=top,
                     )
                 )
             self._refresh_uids()
@@ -1748,14 +1926,14 @@ class SpeculativeGenerationBatch:
                         self.Response(
                             uid=self._all_uids[row],
                             token=None,
-                            token_logprob=0.0,
+                            token_logprob=None,
                             finish_reason="length",
                         )
                     )
             self._refresh_uids()
             return responses
 
-        self._append_token_responses(responses, tok_list)
+        self._append_token_responses(responses, tok_list, round_meta)
         while isinstance(round_meta, dict) and int(
             round_meta.get("round_pos", 0)
         ) + 1 < int(round_meta.get("round_len", 1)):
@@ -1763,7 +1941,7 @@ class SpeculativeGenerationBatch:
                 tok_list, round_meta = next(self._rounds_iter)
             except StopIteration:
                 break
-            self._append_token_responses(responses, tok_list)
+            self._append_token_responses(responses, tok_list, round_meta)
 
         self._refresh_uids()
         return responses
@@ -2207,9 +2385,25 @@ class PromptProcessingBatch:
         ]
 
     def generate(
-        self, sampler, stop_criteria, compute_logprobs=True, top_logprobs_k=0
+        self,
+        sampler,
+        stop_criteria,
+        compute_logprobs=True,
+        top_logprobs_k=0,
+        rows=None,
     ) -> GenerationBatch:
-        """Process final tokens and transition to GenerationBatch."""
+        """Process final tokens and transition to GenerationBatch.
+
+        ``rows`` is the generator's (row settings, default row, top-k cap);
+        without it every row takes ``sampler`` and the logprob flags."""
+        # gmlx: per-row settings for the first token and the batch it builds.
+        self.sampler = sampler
+        self.compute_logprobs = compute_logprobs
+        self.top_logprobs_k = top_logprobs_k
+        _bind_rows(self, rows)
+        row_list = _rows_for(self, self.uids)
+        wants_lp = any(r.logprobs for r in row_list)
+        topk = _logprobs_cap(self) if any(r.top_k > 0 for r in row_list) else 0
         call_kwargs = dict(self._prompt_kwargs)
         if self.draft_model is not None and self.draft_kind is not None:
             call_kwargs.update(
@@ -2250,6 +2444,7 @@ class PromptProcessingBatch:
             self._finished_prompt_logits.clear()
         else:
             logits = logits[:, -1, :]
+        raw = raw_logprobs(logits) if (wants_lp or topk) else None
         if self.logits_processors and any(self.logits_processors):
             processed_logits = []
             for i in range(logits.shape[0]):
@@ -2263,12 +2458,18 @@ class PromptProcessingBatch:
             logits = mx.concatenate(processed_logits, axis=0)
 
         logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
-        first_tokens = _sample_with_positions(
-            sampler,
-            logprobs,
-            row_ids=[0] * len(self.uids),
-            positions=[0] * len(self.uids),
-        )
+        row_sampler = _row_sampler(self)
+        with row_sampler.bind(self.uids):
+            first_tokens = row_sampler.sample_target(
+                logprobs,
+                row_ids=[0] * len(self.uids),
+                positions=[0] * len(self.uids),
+            )
+        first_lps = top_idx = top_lp = None
+        if wants_lp:
+            first_lps = raw[mx.arange(first_tokens.shape[0]), first_tokens]
+        if topk > 0:
+            top_idx, top_lp = top_logprobs(raw, topk)
 
         mx.async_eval(first_tokens)
 
@@ -2318,7 +2519,12 @@ class PromptProcessingBatch:
                 token_dtype=self._input_ids.dtype,
                 greedy_sampling=self.greedy_sampling,
             )
-            compute_logprobs = False
+            gen_batch.compute_logprobs = compute_logprobs
+            gen_batch.top_logprobs_k = top_logprobs_k
+            # gmlx: the first token's logprobs go out with it.
+            gen_batch._first_lps = first_lps
+            gen_batch._first_top_idx = top_idx
+            gen_batch._first_top_lp = top_lp
         else:
             gen_batch = GenerationBatch(
                 model=self.model,
@@ -2334,21 +2540,11 @@ class PromptProcessingBatch:
                 logits_processors=list(self.logits_processors),
                 thinking_budget_criteria=list(self.thinking_budget_criteria),
             )
-        gen_batch.compute_logprobs = compute_logprobs
-
-        if compute_logprobs and isinstance(gen_batch, GenerationBatch):
-            gen_batch._next_lps = logprobs[
-                mx.arange(first_tokens.shape[0]), first_tokens
-            ]
-
-        # Prime top-K buffers so the first token can emit top_logprobs too.
-        if top_logprobs_k > 0 and isinstance(gen_batch, GenerationBatch):
-            k = top_logprobs_k
-            sort_idx = mx.argsort(logprobs, axis=-1)
-            top_idx = sort_idx[..., -k:][..., ::-1].astype(mx.int32)
-            top_lp = mx.take_along_axis(logprobs, top_idx, axis=-1)
+            gen_batch.compute_logprobs = compute_logprobs
+            gen_batch._next_lps = first_lps
             gen_batch._next_top_idx = top_idx
             gen_batch._next_top_lp = top_lp
+        _bind_rows(gen_batch, rows)
 
         language_model = getattr(self.model, "language_model", self.model)
         rope_deltas = self._capture_rope_deltas_from_prompt_kwargs(
@@ -2369,10 +2565,7 @@ class PromptProcessingBatch:
         eval_targets = [first_tokens]
         if cache_states:
             eval_targets.append(cache_states)
-        if compute_logprobs and isinstance(gen_batch, GenerationBatch):
-            eval_targets.append(gen_batch._next_lps)
-        if top_logprobs_k > 0 and isinstance(gen_batch, GenerationBatch):
-            eval_targets.extend([gen_batch._next_top_idx, gen_batch._next_top_lp])
+        eval_targets.extend(a for a in (first_lps, top_idx, top_lp) if a is not None)
         if rope_deltas is not None:
             eval_targets.append(rope_deltas)
         mx.eval(*eval_targets)
@@ -2526,6 +2719,7 @@ class BatchGenerator:
         draft_kind: Optional[str] = None,
         draft_block_size: Optional[int] = None,
         greedy_sampling: bool = False,
+        logprobs_cap: Optional[int] = None,
     ):
         self.model = model
         self.max_tokens = max_tokens
@@ -2545,11 +2739,11 @@ class BatchGenerator:
         self.draft_kind = draft_kind
         self.draft_block_size = draft_block_size
         self.greedy_sampling = greedy_sampling or sampler is None
-        if self.draft_model is not None:
-            compute_logprobs = False
-            top_logprobs_k = 0
-            self.compute_logprobs = False
-            self.top_logprobs_k = 0
+        # gmlx: speculative rows take logprobs from the verify logits, so a
+        # drafter no longer turns them off. The constructor's sampler and
+        # flags are the default row; each insert brings its rows' own.
+        self.logprobs_cap = int(top_logprobs_k if logprobs_cap is None else logprobs_cap)
+        self._row_settings: Dict[int, Any] = {}
         self.apc = (
             _apc.APCCoordinator(apc_manager, model) if apc_manager is not None else None
         )
@@ -2563,6 +2757,7 @@ class BatchGenerator:
             processor.tokenizer if hasattr(processor, "tokenizer") else processor
         )
         self.sampler = sampler or (lambda x: mx.argmax(x, axis=-1))
+        self._default_row = _fallback_row(self)
         self.uid_count = 0
         self.prefill_step_size = prefill_step_size
         self.prefill_batch_size = prefill_batch_size
@@ -2572,13 +2767,16 @@ class BatchGenerator:
 
         self.tokenizer.stopping_criteria.add_eos_token_ids(stop_tokens)
 
-        self._generation_batch = GenerationBatch.empty(
-            self.model,
-            self.sampler,
-            self.tokenizer.stopping_criteria,
-            compute_logprobs=self.compute_logprobs,
-            top_logprobs_k=self.top_logprobs_k,
-            greedy_sampling=self.greedy_sampling,
+        self._generation_batch = _bind_rows(
+            GenerationBatch.empty(
+                self.model,
+                self.sampler,
+                self.tokenizer.stopping_criteria,
+                compute_logprobs=self.compute_logprobs,
+                top_logprobs_k=self.top_logprobs_k,
+                greedy_sampling=self.greedy_sampling,
+            ),
+            self._rows(),
         )
         self._prompt_batch: Optional[PromptProcessingBatch] = None
         self._unprocessed_sequences = []
@@ -2940,12 +3138,16 @@ class BatchGenerator:
         ] = None,
         thinking_budget_criteria: Optional[List[Any]] = None,
         attention_mask: Optional[mx.array] = None,
+        row_settings: Optional[List[Any]] = None,
     ):
         """Queue prompts, consuming tokenizer padding metadata when provided.
 
         A dense ``prompts`` array may include tokenizer padding when accompanied
         by a same-shaped ``attention_mask``. The padded columns are removed from
         tokens and sequence-aligned prompt tensors before anything is queued.
+
+        ``row_settings`` holds one ``gmlx.serve.row_sampling.RowSettings`` per
+        prompt; a row without one takes the generator's default row.
         """
         uids = []
 
@@ -2965,16 +3167,30 @@ class BatchGenerator:
             thinking_budget_criteria = [None] * len(prompts)
         elif len(thinking_budget_criteria) != len(prompts):
             raise ValueError("Insufficient number of thinking_budget_criteria provided")
+        if row_settings is not None and len(row_settings) != len(prompts):
+            raise ValueError("Insufficient number of row_settings provided")
 
-        for p, m, kw, lp, tc in zip(
+        # gmlx: past the bound, forget uids that are no longer live.
+        from gmlx.serve.row_sampling import prune, register_seed
+
+        store = getattr(self, "_row_settings", None)
+        if store is None:
+            store = self._row_settings = {}
+        prune(store, self)
+        for i, (p, m, kw, lp, tc) in enumerate(zip(
             prompts,
             max_tokens,
             prompt_kwargs,
             logits_processors,
             thinking_budget_criteria,
-        ):
-            self._unprocessed_sequences.append((self.uid_count, p, m, kw, lp, tc))
-            uids.append(self.uid_count)
+        )):
+            uid = self.uid_count
+            if row_settings is not None and row_settings[i] is not None:
+                rs = row_settings[i]
+                store[uid] = rs
+                register_seed(rs.sampler, uid, rs.seed)
+            self._unprocessed_sequences.append((uid, p, m, kw, lp, tc))
+            uids.append(uid)
             self.uid_count += 1
         # Sort in ascending order of length
         self._unprocessed_sequences = sorted(
@@ -3117,6 +3333,7 @@ class BatchGenerator:
                 self.tokenizer.stopping_criteria,
                 compute_logprobs=self.compute_logprobs,
                 top_logprobs_k=self.top_logprobs_k,
+                rows=self._rows(),
             )
             elapsed = time.perf_counter() - tic
             self._prompt_time_counter += elapsed
@@ -3166,6 +3383,7 @@ class BatchGenerator:
                         self.tokenizer.stopping_criteria,
                         compute_logprobs=self.compute_logprobs,
                         top_logprobs_k=self.top_logprobs_k,
+                        rows=self._rows(),
                     )
                     elapsed = time.perf_counter() - tic
                     self._prompt_time_counter += elapsed
@@ -3239,6 +3457,7 @@ class BatchGenerator:
                     self.tokenizer.stopping_criteria,
                     compute_logprobs=self.compute_logprobs,
                     top_logprobs_k=self.top_logprobs_k,
+                    rows=self._rows(),
                 )
                 elapsed = time.perf_counter() - tic
                 self._prompt_time_counter += elapsed
@@ -3254,7 +3473,25 @@ class BatchGenerator:
 
     def next(self, **kwargs):
         with mx.stream(self._stream):
-            return self._next(**kwargs)
+            prompt_responses, generation_responses = self._next(**kwargs)
+        # gmlx: a uid's settings go with the response that finishes it.
+        for r in generation_responses:
+            if r.finish_reason is not None:
+                self._retire_row(r.uid)
+        return prompt_responses, generation_responses
+
+    # gmlx: the generator's per-row store (gmlx.serve.row_sampling).
+    def _rows(self):
+        return (
+            getattr(self, "_row_settings", None),
+            getattr(self, "_default_row", None),
+            getattr(self, "logprobs_cap", None),
+        )
+
+    def _retire_row(self, uid) -> None:
+        store = getattr(self, "_row_settings", None)
+        if store is not None:
+            store.pop(uid, None)
 
 
 def batch_generate(

@@ -552,16 +552,16 @@ def test_stream_watch_skips_non_forced_and_non_streams():
 def test_top_logprobs_cap_clamped_to_engine_max(caplog, monkeypatch):
     import types
 
-    monkeypatch.setenv("TOP_LOGPROBS_K", "50")
-    req = types.SimpleNamespace(top_logprobs=30)
+    monkeypatch.setenv("TOP_LOGPROBS_K", "500")
+    req = types.SimpleNamespace(top_logprobs=150)
     with caplog.at_level(logging.WARNING, logger=sp_api.__name__):
         sp_api._maybe_warn_top_logprobs("/v1/chat/completions", req)
-    # the engine clamps the effective cap to 20, so 30 must warn even though
-    # the raw env value says 50
-    assert any("top_logprobs=30 exceeds the server cap 20" in r.message
+    # the engine clamps the effective cap to 100, so 150 must warn even
+    # though the raw env value says 500
+    assert any("top_logprobs=150 exceeds the server cap 100" in r.message
                for r in caplog.records)
     caplog.clear()
-    req = types.SimpleNamespace(top_logprobs=15)
+    req = types.SimpleNamespace(top_logprobs=50)
     with caplog.at_level(logging.WARNING, logger=sp_api.__name__):
         sp_api._maybe_warn_top_logprobs("/v1/chat/completions", req)
     assert not caplog.records                     # within the effective cap

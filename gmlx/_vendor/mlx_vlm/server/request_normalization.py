@@ -208,6 +208,7 @@ def _build_gen_args(
         typical_p=getattr(request, "typical_p", 1.0),
         seed=getattr(request, "seed", None),
         logprobs=bool(getattr(request, "logprobs", False)),
+        top_logprobs=int(getattr(request, "top_logprobs", 0) or 0),  # gmlx
         repetition_penalty=getattr(request, "repetition_penalty", None),
         repetition_context_size=_request_field_or_default(
             request,
