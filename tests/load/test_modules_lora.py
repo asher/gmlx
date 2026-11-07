@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as np
 import pytest
 
 import gmlx.load.adapter as adapter  # noqa: E402
@@ -316,3 +317,29 @@ def test_apply_returns_the_module_count(tmp_path):
     m = _Model()
     assert adapter.apply_gguf_adapter(m, {}, str(p), base_arch="llama") == 1
     assert isinstance(m.model.layers[0].mlp.down_proj, modules.LoRAKQuantLinear)
+
+
+def test_a_rank_one_lora_a_stored_without_its_unit_dim_loads(tmp_path):
+    """ggml writes a rank-1 lora_a of ne [n_in, 1] with one dimension, and
+    llama.cpp reads it back as [n_in, 1]."""
+    import gguf
+
+    mx.random.seed(5)
+    a, b = mx.random.normal((1, 8)), mx.random.normal((4, 1))
+    two_d = tmp_path / "two_d.gguf"
+    _save_adapter(two_d, a, b)
+    one_d = tmp_path / "one_d.gguf"
+    w = gguf.GGUFWriter(str(one_d), "llama")
+    w.add_type(gguf.GGUFType.ADAPTER)
+    w.add_string(gguf.Keys.Adapter.TYPE, "lora")
+    w.add_float32(gguf.Keys.Adapter.LORA_ALPHA, 1.0)
+    w.add_tensor("blk.0.ffn_down.weight.lora_a", np.array(a.reshape(8)))
+    w.add_tensor("blk.0.ffn_down.weight.lora_b", np.array(b))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    want = adapter.load_lora_adapter(str(two_d), base_arch="llama").modules[_DOWN]
+    got = adapter.load_lora_adapter(str(one_d), base_arch="llama").modules[_DOWN]
+    assert got.rank == 1
+    assert mx.array_equal(got.b @ got.a, want.b @ want.a)

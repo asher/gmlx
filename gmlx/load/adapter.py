@@ -168,6 +168,10 @@ def build_adapter_plan(meta: dict, arrays: dict,
                 module_path=module_path, a=a, b=b, rank=rank,
                 scale=_lora_scale(alpha, rank), embedding=True)
             continue
+        rank_one = a.ndim == 1
+        if rank_one:
+            # ggml drops the trailing unit dim of a rank-1 lora_a, ne [in, 1].
+            a = a.reshape(1, -1)
         experts = a.ndim == 3 or b.ndim == 3
         if experts:
             # Per-expert stack: GGUF ne order reversed gives a (E, rank, in),
@@ -179,6 +183,8 @@ def build_adapter_plan(meta: dict, arrays: dict,
                     f"{module_path}: expert lora pair lora_a {tuple(a.shape)} / "
                     f"lora_b {tuple(b.shape)} is not (E, r, in) / (E, out, r)")
             rank = int(a.shape[1])
+        elif rank_one and b.ndim == 2 and b.shape[1] == 1:
+            rank = 1
         else:
             rank = _infer_rank(module_path, a, b)
         modules[module_path] = LoraModule(
