@@ -128,8 +128,9 @@ def test_the_chat_turn_is_the_cards_instruction_greedy_and_budgeted():
     # Every field a profile could fill is the client's.
     for f in ("temperature", "top_p", "top_k", "min_p", "repetition_penalty",
               "presence_penalty", "frequency_penalty", "enable_thinking",
-              "thinking_budget", "max_tokens"):
+              "thinking_budget", "thinking_budget_message", "max_tokens"):
         assert f in req.model_fields_set
+    assert req.thinking_budget_message is None
     req = native_stt.chat_request("ears", "transcribe",
                                   _fields(response_format="srt", diarization="1"), 9.0)
     assert req.messages[0].content[0]["text"] == tr.SPEAKERS
