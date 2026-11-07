@@ -342,13 +342,10 @@ def test_a_data_url_in_an_edit_forms_text_field_is_read_within_its_price():
         form = await bi.read_form_in_ram(
             _form_request("/v1/images/edits", body, ctype), free)
         await form.close()
-    # The gate's Image.open meets a format Pillow's preinit did not
-    # register and runs Image.init(), which imports every format plugin
-    # once per process (about 6 MB traced with bytecode cached). The price
-    # covers a read, not that import, so it is made here first.
-    from PIL import Image
-
-    Image.init()
+    # A first read of the same body loads what a read loads once per
+    # process, such as Pillow's format plugins; the price covers a read,
+    # so the second read is the one measured.
+    asyncio.run(read(1 << 40))
     tracemalloc.start()
     try:
         asyncio.run(read(1 << 40))
