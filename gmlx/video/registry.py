@@ -221,9 +221,8 @@ def attention_refusal(fam: VideoFamily, variant: str,
     row = fam.variant_row(variant)
     if row is not None and row.vsa_sparsity:
         return (f"{fam.title} {variant} runs video sparse attention, and "
-                f"--attention {attention} applies to dense attention only")
-    what = (f"{fam.title} {variant} with --attention {attention} runs int8 "
-            f"attention")
+                f"int8 attention applies to dense attention only")
+    what = f"{fam.title} {variant} runs with int8 attention"
     if getattr(kq, "sdpa_qk8", None) is None:
         return (f"{what}, and the installed mlx-kquant {kq.__version__} "
                 f"has no sdpa_qk8; update mlx-kquant to 0.5.10 or later")

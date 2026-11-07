@@ -823,6 +823,32 @@ def test_a_video_model_loads_and_releases_through_its_own_kind(monkeypatch,
     assert calls == [("load", "h3"), ("release", "VID")]
 
 
+def test_two_video_entries_apart_only_in_attention_load_apart(monkeypatch,
+                                                                request):
+    """h3 and h3-int8 on the same files, asked for in turn, each load
+    with their own attention: the pool does not hand one the other's."""
+    from gmlx.config import build_config
+    from gmlx.serve import capacity as cap
+
+    h3 = _VIDEO["video_models"]["h3"]
+    serving.register_resolved_models(build_config({**_VIDEO, "video_models": {
+        "h3": {**h3, "defaults": {"attention": "dense"}},
+        "h3-int8": {**h3, "defaults": {"attention": "int8"}}}}))
+    request.addfinalizer(serving.clear_resolved_models)
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    proxy, pool, seen_env, _td = make_pool()
+    loads = []
+    pool._video_fns = (lambda spec: 30 * GB,
+                       lambda spec: loads.append(
+                           (spec.id, spec.defaults["attention"])) or spec.id,
+                       lambda box: box.clear())
+    for name in ("h3", "h3-int8"):
+        hold = residency.acquire_video_model(name, pool=pool)
+        assert hold._entry.pipeline == name
+        hold.release()
+    assert loads == [("h3", "dense"), ("h3-int8", "int8")]
+
+
 # The published files of the h3 recipes, in bytes: the DiT, the text
 # encoder, the video and audio VAEs, the 8-step LoRA and FastH3's DiT.
 _H3_FILES = {"dit": 11_420_663_904, "enc": 19_762_151_200,
@@ -950,8 +976,8 @@ def test_an_int8_entry_checks_the_kernel_and_books_its_step(monkeypatch):
     with pytest.raises(VideoModelError) as e:
         vs.entry_plan(spec)
     assert str(e.value).startswith(
-        "video model 'h3-base': MiniMax-H3 fl2va with --attention int8 runs "
-        "int8 attention, and the installed mlx-kquant")
+        "video model 'h3-base': MiniMax-H3 fl2va runs with int8 attention, "
+        "and the installed mlx-kquant")
     monkeypatch.setattr(kq, "sdpa_qk8", lambda *a: None, raising=False)
     monkeypatch.setattr(kq, "nax_available", lambda: True)
     got = vs.entry_plan(spec)

@@ -1340,12 +1340,14 @@ class ResolvedVideoModel:
 
     def load_signature(self) -> tuple:
         """What makes two loads of the entry the same: every file, the
-        adapter list, and the size, length and caption rows its memory is
-        priced at, the last set by whether it names an upsampler."""
+        adapter list, the DiT's attention, and the size, length and
+        caption rows its memory is priced at, the last set by whether it
+        names an upsampler."""
         d = self.defaults or {}
         return (self.path, self.variant, self.encoder, self.encoder_mmproj,
                 self.vae, self.audio_vae, tuple(self.adapters),
-                d.get("size"), d.get("seconds"), self.upsampler is not None)
+                d.get("size"), d.get("seconds"), self.upsampler is not None,
+                d.get("attention") or "dense")
 
 
 # Path resolution

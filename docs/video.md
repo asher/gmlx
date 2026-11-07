@@ -171,10 +171,10 @@ gmlx video generate h3 --attention int8 --prompt "..."
 ```
 
 `--attention int8` runs the attention of MiniMax-H3's DiT with int8
-products, so a step takes less time. It is lossy: the clip differs from
-the one that the default dense attention makes from the same seed. The
-text encoder and the VAEs run as before. It needs an M5 or newer, and
-it does not run with `fasth3`.
+products. It is opt-in and lossy: the clip differs from the one that the
+default dense attention makes from the same seed. The text encoder and
+the VAEs run as before. It needs an M5 or newer, and it does not run
+with `fasth3`.
 
 To run every clip of an entry this way, set `attention: int8` in its
 [`defaults`](config.md#video_modelsdefaults). `gmlx serve` and the

@@ -504,6 +504,18 @@ def test_the_attention_flag_reaches_the_plan_the_load_and_the_record(
                                       (64, 64, 5), TEXT, False).phases
 
 
+def test_int8_without_nax_is_refused_before_any_load(bench, monkeypatch,
+                                                    capsys):
+    qk8_kernel(monkeypatch, nax=False)
+    assert bench("--attention", "int8", "--variant", "fl2va",
+                 "--steps", "1") == 1
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        "error: MiniMax-H3 fl2va runs with int8 attention, whose kernel "
+        "needs a GPU with NAX units (M5 or newer), and this Mac's GPU has "
+        "none")
+    assert _kinds(bench.ev, "identify") and len(bench.ev) == 1
+
+
 def test_fasth3_without_nax_is_refused_before_any_load(bench, monkeypatch,
                                                        capsys):
     vsa_kernel(monkeypatch, nax=False)

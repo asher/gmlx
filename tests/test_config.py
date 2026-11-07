@@ -3691,6 +3691,16 @@ def test_a_video_models_upsampler_and_its_prompt_resolve(tmp_path):
     assert sig["chat"] == sig["chat2"] != sig[None]
 
 
+def test_the_attention_of_a_video_entry_splits_its_load():
+    """Two entries on the same files that differ only in
+    defaults.attention load apart, and an entry without the key loads as
+    one set to dense."""
+    sig = {a: cfgmod.resolve_video_model("h3", build_config(_video_doc(
+        defaults={} if a is None else {"attention": a}))).load_signature()
+        for a in (None, "dense", "int8")}
+    assert sig[None] == sig["dense"] != sig["int8"]
+
+
 def test_video_models_round_trip_through_print_config():
     import yaml
 

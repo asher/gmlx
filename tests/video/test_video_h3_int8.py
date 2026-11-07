@@ -57,7 +57,7 @@ def int8_load(monkeypatch):
     return go
 
 
-_WHAT = "MiniMax-H3 fl2va with --attention int8 runs int8 attention"
+_WHAT = "MiniMax-H3 fl2va runs with int8 attention"
 
 
 def test_a_kquant_without_sdpa_qk8_is_refused(int8_load, monkeypatch):
@@ -89,8 +89,8 @@ def test_fasth3_with_int8_attention_is_refused(int8_load, monkeypatch):
     with pytest.raises(vfp.VideoModelError) as ei:
         int8_load(fast=True)
     assert str(ei.value) == (
-        "MiniMax-H3 fasth3 runs video sparse attention, and --attention "
-        "int8 applies to dense attention only")
+        "MiniMax-H3 fasth3 runs video sparse attention, and int8 "
+        "attention applies to dense attention only")
     assert int8_load.loads == []
 
 
