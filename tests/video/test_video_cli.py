@@ -466,20 +466,27 @@ def test_a_shorter_clip_leaves_no_frames_of_the_one_before(stubbed,
                                                            tmp_path):
     """A frames folder that holds a longer earlier clip holds this clip's
     5 frames and audio.wav after the run, and every other file it held:
-    a frame name in digits other than ASCII is no name it writes."""
+    a frame name in digits other than ASCII is no name it writes, and a
+    folder under a frame's name stays. A link under a frame's name goes,
+    and the file it points to stays."""
     frames = tmp_path / "frames"
     frames.mkdir()
     other = "frame_\u0661\u0662\u0663\u0664\u0665\u0666.png"
-    for name in [*(f"frame_{i:06d}.png" for i in range(1, 10)),
+    for name in [*(f"frame_{i:06d}.png" for i in range(1, 8)),
                  "frame_000009.png.part", "audio.wav", "notes.txt",
                  "frame_7.png", other]:
         (frames / name).write_bytes(b"earlier")
-    (frames / "frame_000008.png.d").mkdir()
+    (frames / "frame_000008.png").mkdir()
+    outside = tmp_path / "keep.png"
+    outside.write_bytes(b"kept")
+    (frames / "frame_000009.png").symlink_to(outside)
     assert stubbed("--frames-dir", str(frames)) == 0
     assert sorted(p.name for p in frames.iterdir()) == sorted([
         "audio.wav", *(f"frame_{i:06d}.png" for i in range(1, 6)),
-        "frame_000008.png.d", "frame_7.png", "notes.txt", other])
+        "frame_000008.png", "frame_7.png", "notes.txt", other])
     assert (frames / "notes.txt").read_bytes() == b"earlier"
+    assert (frames / "frame_000008.png").is_dir()
+    assert outside.read_bytes() == b"kept"
 
 
 def test_the_latents_land_at_the_path_given(stubbed, tmp_path):
