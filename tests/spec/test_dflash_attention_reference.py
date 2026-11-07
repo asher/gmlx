@@ -21,6 +21,7 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
+from gmlx.image.float32 import f32_products_exact
 from gmlx.spec.dflash_drafter import DFlashConfig, DFlashDrafter
 
 DIM, HEADS, KV, HD = 32, 4, 2, 8
@@ -101,6 +102,8 @@ def test_draft_attention_matches_the_reference(n_ctx, seed_rows):
         attn.q_norm.weight = 1 + 0.1 * mx.random.normal((HD,))
         attn.k_norm.weight = 1 + 0.1 * mx.random.normal((HD,))
     caches = drafter.make_cache()
+    # A GPU that multiplies float32 at TF32 reaches 1.1e-2 here, a third of its bound.
+    bound = 1e-4 if f32_products_exact() else 3e-2
     rng = np.random.default_rng(1)
     ctx = rng.standard_normal((n_ctx, DIM))
     block = rng.standard_normal((BLOCK, DIM))
@@ -119,4 +122,4 @@ def test_draft_attention_matches_the_reference(n_ctx, seed_rows):
                           sliding=layer_types[i] == "sliding_attention",
                           roped=rope_layers[i])
         err = np.abs(np.array(got[0], dtype=np.float64) - want).max()
-        assert err < 1e-4, f"layer {i}: max error {err:.2e}"
+        assert err < bound, f"layer {i}: max error {err:.2e}"
