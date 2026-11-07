@@ -34,6 +34,16 @@ class _Shell(nn.Module):
         self.mlp = block
 
 
+def _quantize(w, codec):
+    """``kq.quantize`` on the CPU stream, evaluated. An iq2_s expert stack
+    takes about two seconds to quantize, and on a shared GPU one command
+    buffer that long can trip the Metal timeout."""
+    with mx.stream(mx.cpu):
+        q = kq.quantize(w, codec)
+        mx.eval(q)
+    return q
+
+
 def _block(sgate="iq4_xs", sup="iq3_s", sdown="iq4_nl", seed=0):
     """iq2_s expert gate and up stacks with a q2_0 down stack, and a
     shared expert in three other codecs."""
@@ -53,11 +63,11 @@ def _block(sgate="iq4_xs", sup="iq3_s", sdown="iq4_nl", seed=0):
             ("down_proj", (D, INTER), "q2_0", sdown)):
         leaf = KQuantSwitchLinear(E, o, i, False, codec)
         w = mx.array((rng.standard_normal((E, o, i)) * 0.05).astype(np.float32))
-        leaf.weight, leaf.scales = kq.quantize(w, codec)
+        leaf.weight, leaf.scales = _quantize(w, codec)
         setattr(block.switch_mlp, name, leaf)
         dense = KQuantLinear(i, o, False, scodec)
         w = mx.array((rng.standard_normal((o, i)) * 0.05).astype(np.float32))
-        dense.weight, dense.scales = kq.quantize(w, scodec)
+        dense.weight, dense.scales = _quantize(w, scodec)
         setattr(block.shared_expert, name, dense)
     block.shared_expert_gate.set_dtype(mx.bfloat16)
     block.eval()
