@@ -2975,6 +2975,34 @@ def test_register_downloads_adds_a_downloaded_image_dit(monkeypatch, tmp_path,
     assert "registered z in" in capsys.readouterr().out
 
 
+def test_register_downloads_passes_over_the_configured_video_dit_quietly(
+        monkeypatch, tmp_path, capsys):
+    """A pull into the folder of a configured video model scans its DiT
+    as a configured file: no skip line for its arch."""
+    import numpy as np
+    from gguf import GGUFWriter
+
+    from gmlx.load import discovery
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setattr(discovery, "_HEADER_MEMO", {})
+    monkeypatch.setattr(discovery, "_HEADER_DISK", None)
+    cfg_path, lib = _reg_config(tmp_path, (
+        "video_models:\n  h3:\n    path: h3.gguf\n    encoder: e.gguf\n"
+        "    vae: v.safetensors\n    audio_vae: a.safetensors\n"))
+    w = GGUFWriter(str(lib / "h3.gguf"), "minimax_h3")
+    w.add_tensor("x.weight", np.zeros(4, dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    new = lib / "new.gguf"
+    new.write_bytes(b"x")
+    monkeypatch.setattr(srv, "_reload_running", lambda path, skip: None)
+    srv.register_downloads([str(new)], str(cfg_path))
+    assert "h3.gguf" not in capsys.readouterr().err
+
+
 def test_register_downloads_adds_entry_and_reloads(monkeypatch, tmp_path, capsys):
     cfg_path, lib = _reg_config(tmp_path)
     sub = lib / "org__repo-GGUF"
