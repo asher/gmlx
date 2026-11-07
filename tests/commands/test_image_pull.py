@@ -1565,6 +1565,39 @@ def test_rm_keeps_a_file_a_chat_model_reads_audio_through(images, capsys,
     assert "encoder kept: another model uses it" in capsys.readouterr().out
 
 
+_CASE_ENTRIES = {
+    "chat": ("m2", "models:\n", "models:\n  m2:\n    path: m2.gguf\n"
+             "    mmproj: Tower.gguf\n"),
+    "image": ("q2", "image_models:\n", "image_models:\n  q2:\n"
+              "    path: q2.gguf\n    encoder: own2.gguf\n"
+              "    encoder_mmproj: Tower.gguf\n    vae: q2vae.gguf\n"),
+    "video": ("h3", None, "video_models:\n  h3:\n    path: h3.gguf\n"
+              "    encoder: own2.gguf\n    encoder_mmproj: Tower.gguf\n"
+              "    vae: v.safetensors\n    audio_vae: a.safetensors\n"),
+}
+
+
+@pytest.mark.parametrize("kind", ["chat", "image", "video"])
+def test_rm_keeps_a_file_another_entry_names_in_another_case(images, capsys,
+                                                             kind):
+    """On a volume that folds case, Tower.gguf is the tower.gguf vl and qt
+    load: rm of an entry that names it so keeps it."""
+    lib, cfg = images
+    if not (lib / "TOWER.gguf").exists():
+        pytest.skip("the volume tells case apart")
+    for f in ("m2.gguf", "q2.gguf", "own2.gguf", "q2vae.gguf", "h3.gguf",
+              "v.safetensors", "a.safetensors"):
+        (lib / f).write_bytes(b"x" * 100)
+    entry, anchor, block = _CASE_ENTRIES[kind]
+    text = cfg.read_text()
+    text = text.replace(anchor, block, 1) if anchor else text + block
+    cfg.write_text(text)
+    assert manage.cmd_rm([entry, "--config", str(cfg), "--yes"]) == 0
+    assert (lib / "tower.gguf").exists()
+    assert not (lib / f"{entry}.gguf").exists()
+    assert "kept: another model" in capsys.readouterr().out
+
+
 def test_rm_of_an_image_model_keeps_what_others_use(images, capsys):
     lib, cfg = images
     assert manage.cmd_rm(["qt", "--config", str(cfg), "--yes"]) == 0

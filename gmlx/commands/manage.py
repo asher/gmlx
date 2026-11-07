@@ -2226,6 +2226,17 @@ def _try_resolve(p, model_dirs) -> str | None:
         return None
 
 
+def _file_key(path: str) -> tuple:
+    """What makes two paths one file for rm: its device and inode, which
+    a symlink or a case the volume folds still reach, or for a path that
+    does not stat, its real path."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return ("path", os.path.realpath(path))
+    return ("inode", st.st_dev, st.st_ino)
+
+
 def _shard_files(path: str) -> list[str]:
     """Every existing shard of ``path``'s split set (tolerant of gaps, unlike
     preflight), plus any ``.part`` resume leftovers."""
@@ -2269,8 +2280,8 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
     """Files to delete (all shards + companions no other model references)
     and their sizes; explanatory notes append to ``notes``. ``images`` are
     the discovered image models."""
-    # Paths any other model (configured or discovered) still resolves to,
-    # through any symlink, so a file one model reaches by a link stays.
+    # Files any other model (configured or discovered) still resolves to,
+    # by inode (_file_key), so a file one model reaches by a link stays.
     others = [mc for mid, mc in cfg.models.items() if mid != target]
     others += [mc for mc in disc if mc.id != target]
     ref_paths = set()
@@ -2278,13 +2289,13 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
         for p in _chat_files(mc):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
-                ref_paths.add(os.path.realpath(rp))
+                ref_paths.add(_file_key(rp))
     # An image model that names this model's GGUF as its encoder keeps it.
     for im in _all_images(cfg, images):
         for p in (im.encoder, im.encoder_mmproj):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
-                ref_paths.add(os.path.realpath(rp))
+                ref_paths.add(_file_key(rp))
     ref_paths |= _video_refs(cfg)
 
     to_delete: list[str] = []
@@ -2297,7 +2308,7 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
             if main is None:
                 notes.append(f"model file not found ({m.path}) - removing "
                              "the config entry only")
-            elif os.path.realpath(main) in ref_paths:
+            elif _file_key(main) in ref_paths:
                 notes.append("model file kept: another model references it")
             else:
                 to_delete += _shard_files(main)
@@ -2308,7 +2319,7 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
             rp = _try_resolve(comp, cfg.model_dirs)
             if rp is None:
                 continue
-            if os.path.realpath(rp) in ref_paths:
+            if _file_key(rp) in ref_paths:
                 notes.append(f"{label} kept: another model references it")
             else:
                 to_delete += _shard_files(rp)
@@ -2585,8 +2596,8 @@ def _all_images(cfg, images=()) -> list:
 
 def _image_refs(cfg, disc, skip: str | None, images=(),
                 skip_video: str | None = None) -> set:
-    """Real paths every model but the image entry ``skip`` and the video
-    entry ``skip_video`` loads, through any symlink: chat models
+    """The files (:func:`_file_key`) every model but the image entry
+    ``skip`` and the video entry ``skip_video`` loads: chat models
     (configured and discovered), the image entries, configured and
     discovered (``images``), and the video entries."""
     refs: set = set()
@@ -2594,7 +2605,7 @@ def _image_refs(cfg, disc, skip: str | None, images=(),
         for p in _chat_files(mc):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
-                refs.add(os.path.realpath(rp))
+                refs.add(_file_key(rp))
     for im in _all_images(cfg, images):
         if im.id == skip:
             continue
@@ -2602,13 +2613,13 @@ def _image_refs(cfg, disc, skip: str | None, images=(),
                   *(a for a, _st in im.adapters)):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
-                refs.add(os.path.realpath(rp))
+                refs.add(_file_key(rp))
     return refs | _video_refs(cfg, skip_video)
 
 
 def _video_refs(cfg, skip: str | None = None) -> set:
-    """Real paths the ``video_models:`` entries but ``skip`` load,
-    through any symlink."""
+    """The files (:func:`_file_key`) the ``video_models:`` entries but
+    ``skip`` load."""
     refs: set = set()
     for v in cfg.video_models.values():
         if v.id == skip:
@@ -2617,7 +2628,7 @@ def _video_refs(cfg, skip: str | None = None) -> set:
                   v.tiny_vae, *(a for a, _st in v.adapters)):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
-                refs.add(os.path.realpath(rp))
+                refs.add(_file_key(rp))
     return refs
 
 
@@ -2643,7 +2654,7 @@ def _rm_image(a, cfg, cfg_path, im, disc, images=(), *,
             rp = _try_resolve(p, cfg.model_dirs)
             if rp is None:
                 continue
-            if os.path.realpath(rp) in refs:
+            if _file_key(rp) in refs:
                 notes.append(f"{label} kept: another model uses it")
             else:
                 to_delete += _shard_files(rp)
@@ -2717,7 +2728,7 @@ def _rm_video(a, cfg, cfg_path, vm, disc, images=()) -> int:
             rp = _try_resolve(p, cfg.model_dirs)
             if rp is None:
                 continue
-            if os.path.realpath(rp) in refs:
+            if _file_key(rp) in refs:
                 notes.append(f"{label} kept: another model uses it")
             else:
                 to_delete += _shard_files(rp)
