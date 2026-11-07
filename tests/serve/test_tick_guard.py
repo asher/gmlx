@@ -309,7 +309,7 @@ def test_a_rebuilt_row_keeps_its_row_settings(monkeypatch):
         assert r.token == r.top_logprobs[0][0]          # greedy
 
 
-def test_a_rebuilt_adapted_row_keeps_its_scales(monkeypatch):
+def test_a_rebuilt_adapted_row_keeps_its_scales(monkeypatch, engine_seams):
     """In rows mode a row the guard retires and requeues keeps its uid, so
     its RowLora stays in the generator's store and each forward after the
     rebuild publishes the row's own strengths."""
@@ -339,6 +339,7 @@ def test_a_rebuilt_adapted_row_keeps_its_scales(monkeypatch):
         return forward(self, *a, **kw)
 
     monkeypatch.setattr(type(lm), "__call__", recording)
+    seams = engine_seams.snapshot()
     lora_rows.install_row_channel()
     lora_rows.configure("rows", 1)
     try:
@@ -367,3 +368,4 @@ def test_a_rebuilt_adapted_row_keeps_its_scales(monkeypatch):
         assert seen and all(row == [0.75] for row in seen)
     finally:
         lora_rows.configure("static", 1)
+        engine_seams.restore(seams)
