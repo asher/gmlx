@@ -23,6 +23,8 @@ import sys
 import tempfile
 import time
 
+from .adapter_flag import add_adapter_flag
+
 _ACTIONS = ("generate", "bench", "pack-vae")
 _ACTION_DESC = {
     "generate": "generate images from a DiT GGUF, its text encoder and VAE",
@@ -112,34 +114,10 @@ def _quality(text: str) -> int:
     return n
 
 
-def _adapter(text: str) -> tuple[str, float]:
-    """PATH or PATH:STRENGTH. The text after the last colon is a strength
-    only when it parses as a float, so a path may hold colons."""
-    head, sep, tail = text.rpartition(":")
-    path, strength = text, 1.0
-    if sep and head:
-        try:
-            path, strength = head, float(tail)
-        except ValueError:
-            path, strength = text, 1.0
-        else:
-            # float() reads 1_0 as 10, which nobody means as a strength.
-            if "_" in tail:
-                raise argparse.ArgumentTypeError(
-                    f"a strength is written without underscores, got "
-                    f"{tail!r} in {text!r}")
-    if not path or not math.isfinite(strength):
-        raise argparse.ArgumentTypeError(
-            f"a LoRA file with an optional finite strength, as PATH or "
-            f"PATH:STRENGTH, is required, got {text!r}")
-    return path, strength
-
-
 def _add_adapter_flag(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--adapter", action="append", type=_adapter, default=None,
-                   metavar="PATH[:STRENGTH]",
-                   help="Apply this LoRA safetensors file at this strength "
-                        "(default 1). Repeat the flag to stack adapters.")
+    add_adapter_flag(p, help="Apply this LoRA safetensors file at this "
+                             "strength (default 1). Repeat the flag to stack "
+                             "adapters.")
 
 
 def _generate_parser(prog: str) -> argparse.ArgumentParser:

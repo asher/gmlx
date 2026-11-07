@@ -50,6 +50,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   trains `embed_tokens`, loads on a model with its own output head, in `run`,
   chat and `gmlx serve` at per-request strengths. See
   [Limitations](docs/lora.md#limitations).
+- `gmlx serve`, `run`, `chat`, `capture` and `kld` take
+  `--adapter PATH[:STRENGTH]` as `gmlx image` does, and repeat it for more
+  adapters. Serve makes the strength the default of requests, and chat's
+  `/adapter S` sets an absolute strength. See
+  [Use the adapter](docs/lora.md#use-the-adapter).
+- Each `gmlx kld --adapter` flag is one scored point, and without
+  `--reference` the points score against the model without adapters. See
+  [gmlx kld](docs/cli.md#gmlx-kld).
 
 ### Changed
 

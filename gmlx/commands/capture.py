@@ -7,6 +7,10 @@ with a generation prompt, through the serve path's own render
 with a fresh cache. The output is safetensors: ``<set>.mean``
 ``[n_layer, n_embd]`` f32 for every set, and ``<set>.rows``
 ``[n_layer, n_prompts, n_embd]`` f16 for the sets named in ``--rows``.
+
+``--adapter PATH[:STRENGTH]`` loads each adapter into its own row-channel
+slot, as serve does, and every forward publishes the strengths by uid.
+The metadata names each adapter's file, strength and sha256.
 """
 from __future__ import annotations
 
@@ -18,6 +22,8 @@ import os
 import re
 import sys
 import types
+
+from .adapter_flag import add_adapter_flag, adapter_paths, duplicate_adapter
 
 _SET_NAME = re.compile(r"[A-Za-z0-9_-]+")
 # Config entry settings that capture takes in and does not apply: the KV
@@ -69,6 +75,9 @@ def _build_parser(prog: str) -> argparse.ArgumentParser:
                     help="Server config to resolve a model id against when "
                          "the positional is not a file (default: the first "
                          "existing default config).")
+    add_adapter_flag(ap, help="Capture with this GGUF LoRA adapter applied at "
+                              "this strength (default 1). Repeat for more "
+                              "adapters.")
     ap.add_argument("--json", action="store_true",
                     help="Print one JSON line per prompt and a last result "
                          "line on stdout, each with an \"event\" key of "
@@ -95,11 +104,11 @@ def _build_parser(prog: str) -> argparse.ArgumentParser:
                      help="Activation dtype (default auto: float16 on M1 "
                           "and M2, bfloat16 elsewhere).")
     add_rope_args(ap)
-    # A config entry's adapter lands here, and capture refuses it. No
-    # drafter loads, which the preload wire check reads. An entry's system
-    # message and thinking controls land in their own dests, and the flags
-    # win over them. Capture names the settings it does not apply.
-    ap.set_defaults(adapter=None, no_speculative=True, system_prompt=None,
+    # No drafter loads, which the preload wire check reads. An entry's
+    # adapters, system message and thinking controls land in their own
+    # dests, and the flags win over them. Capture names the settings it does
+    # not apply.
+    ap.set_defaults(no_speculative=True, system_prompt=None,
                     thinking=None, reasoning_effort=None,
                     chat_template_config=None,
                     **dict.fromkeys(_IGNORED, None))
@@ -238,10 +247,13 @@ def load(args):
     from .cli import rope_override_from_args
 
     stream = "cpu" if args.stream_cpu else ("experts" if args.stream_experts else None)
+    adapters = tuple(os.path.abspath(os.path.expanduser(p))
+                     for p in adapter_paths(args.adapter))
     with loadlog.load_ui(args.verbose, args.gguf):
         model, processor, config = load_serveable_model(
             args.gguf, chat_template=args.chat_template, stream=stream,
             feeder_prefill=args.prefill_feeder,
+            adapter_gguf=adapters or None,
             rope_override=rope_override_from_args(args))
     from gmlx.gen.diffusion import is_diffusion_model
 
@@ -288,14 +300,30 @@ class _Emitter:
         self.out.flush()
 
 
+def adapter_scope(strengths):
+    """The adapter strengths of every forward in the scope, by slot, as a
+    row of a bound uid registry; ``published(rows)`` publishes it for one
+    forward. A no-op without strengths."""
+    from gmlx import lora_rows
+
+    if not strengths:
+        return contextlib.nullcontext(None)
+    reg = lora_rows.UidRegistry()
+    reg.register(0, tuple(float(s) for s in strengths))
+    return lora_rows.bind(reg)
+
+
 def run_capture(model, processor, config, sets, *, positions: int,
                 rows: set, system: str | None, think, n_layer: int | None,
-                emit: _Emitter, effort=None, template_extra: dict | None = None):
+                emit: _Emitter, effort=None, template_extra: dict | None = None,
+                strengths: tuple = ()):
     """Capture every set. Returns ``(arrays, sizes, n_embd, n_layer)``.
     Each prompt runs in chunks of the stock prefill step, the step the
-    preload wire check prices."""
+    preload wire check prices. ``strengths`` are the loaded adapters'
+    strengths in slot order; each forward publishes them."""
     import mlx.core as mx
 
+    from gmlx import lora_rows
     from gmlx.gen.prefill_decay import _STOCK_BASE
     from gmlx.serve import cb_phase
     from gmlx.tune.capture import block_outputs, capture_layers, layer_capture
@@ -318,13 +346,15 @@ def run_capture(model, processor, config, sets, *, positions: int,
     before = cb_phase.snapshot()
     cb_phase.flip("prefill", model)
     try:
-        with wired, layer_capture(layers, positions) as rec:
+        with wired, layer_capture(layers, positions) as rec, \
+                adapter_scope(strengths) as reg:
             for name, prompts in sets:
                 total = None
                 per_prompt = []
                 for i, text in enumerate(prompts):
                     ids = prompt_ids(model, processor, config, text, system, kwargs)
-                    out = block_outputs(model, ids, rec, step=_STOCK_BASE)
+                    with lora_rows.published([0] if reg is not None else []):
+                        out = block_outputs(model, ids, rec, step=_STOCK_BASE)
                     total = out if total is None else total + out
                     if name in rows:
                         per_prompt.append(f16_rows(out, name, i + 1))
@@ -339,6 +369,17 @@ def run_capture(model, processor, config, sets, *, positions: int,
         cb_phase.restore(before)
     n_embd = int(arrays[f"{sets[0][0]}.mean"].shape[1])
     return arrays, sizes, n_embd, len(layers)
+
+
+def adapter_metadata(model, items: list[tuple[str, float]] | None) -> list:
+    """``file``, ``strength`` and the ``sha256`` of the bytes loaded, for
+    each adapter in slot order."""
+    ids = tuple(getattr(model, "gmlx_adapter_identities", ()) or ())
+    out = []
+    for i, (path, strength) in enumerate(items or ()):
+        out.append({"file": os.path.basename(path), "strength": float(strength),
+                    "sha256": ids[i].sha256 if i < len(ids) else None})
+    return out
 
 
 def save(path: str, arrays: dict, metadata: dict) -> None:
@@ -379,12 +420,16 @@ def cmd_capture(argv: list | None = None, prog: str = "gmlx capture") -> int:
         from .cli import (_TEMPLATE_TOKENS, _ensure_stream_cb_caps,
                           maybe_load_from_config, preload_wire_check)
 
-        rc = maybe_load_from_config(args, ap, argv, adapter_list_refusal=False)
+        rc = maybe_load_from_config(args, ap, argv)
         if rc is not None:
             return rc
-        if args.adapter:
-            print(f"error: the config entry sets an adapter ({args.adapter}), "
-                  "which gmlx capture does not apply", file=sys.stderr)
+        for p in adapter_paths(args.adapter):
+            if not os.path.isfile(os.path.expanduser(p)):
+                print(f"error: --adapter: no such file: {p}", file=sys.stderr)
+                return 2
+        twice = duplicate_adapter(args.adapter)
+        if twice is not None:
+            print(f"error: --adapter: {twice} is given twice", file=sys.stderr)
             return 2
         ignored = [k for k in _IGNORED if getattr(args, k) is not None]
         if ignored:
@@ -417,7 +462,8 @@ def cmd_capture(argv: list | None = None, prog: str = "gmlx capture") -> int:
             model, processor, config, sets, positions=args.positions,
             rows=rows, system=system, think=think,
             n_layer=facts["n_layer"], emit=emit, effort=args.reasoning_effort,
-            template_extra=extra)
+            template_extra=extra,
+            strengths=tuple(st for _p, st in args.adapter or ()))
         import gmlx
 
         metadata = {
@@ -428,6 +474,7 @@ def cmd_capture(argv: list | None = None, prog: str = "gmlx capture") -> int:
             "sets": json.dumps(sizes),
             "positions": str(args.positions),
             "think": think_label(think),
+            "adapters": json.dumps(adapter_metadata(model, args.adapter)),
             "gmlx_version": gmlx.__version__,
         }
         out = os.path.expanduser(args.out)

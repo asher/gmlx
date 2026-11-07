@@ -6,7 +6,6 @@ refuses, and refuse what gmlx cannot render the same way."""
 from __future__ import annotations
 
 import importlib
-import importlib.util
 import json
 import re
 import types
@@ -790,16 +789,6 @@ def test_a_content_prefill_does_not_arm_the_budget(chat, run):
         assert hook.take_forced() is None
     assert crit.thinking_token_count == 0 and not crit.in_thinking
     assert hook.count == 0 and not hook.in_thinking
-
-
-@pytest.mark.skipif(
-    importlib.util.find_spec("gmlx.serve.lora_request") is None,
-    reason="needs the per-request lora field")
-def test_a_prefill_with_an_adapter_scores_as_decode_did():
-    pytest.fail(
-        "Write the adapter row in tests/serve/test_prefill_logp.py: one Qwen "
-        "row again with an adapter loaded and requested at strength 1.0 "
-        "through lora, with the same prompt id and logprob checks.")
 
 
 def test_the_render_key_never_reaches_the_stock_render(chat, monkeypatch):

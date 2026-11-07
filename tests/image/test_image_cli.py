@@ -1271,35 +1271,6 @@ def _digest(path) -> str:
         return hashlib.sha256(f.read()).hexdigest()
 
 
-@pytest.mark.parametrize("text, want", [
-    ("a.safetensors", ("a.safetensors", 1.0)),
-    ("a.safetensors:0.5", ("a.safetensors", 0.5)),
-    ("a.safetensors:-1", ("a.safetensors", -1.0)),
-    ("a.safetensors:1e-1", ("a.safetensors", 0.1)),
-    ("my:lora.safetensors", ("my:lora.safetensors", 1.0)),
-    ("my:lora.safetensors:2", ("my:lora.safetensors", 2.0)),
-    ("dir/0.5", ("dir/0.5", 1.0)),
-    ("a.safetensors:strong", ("a.safetensors:strong", 1.0)),
-    (":0.5", (":0.5", 1.0)),
-])
-def test_the_adapter_tail_is_a_strength_only_when_it_is_a_float(text, want):
-    assert cmd._adapter(text) == want
-
-
-@pytest.mark.parametrize("tail", ["1_0", "1_000.5", "1e1_0", "-0_5"])
-def test_a_strength_with_an_underscore_is_refused(tail):
-    import argparse
-
-    assert float(tail)      # Python reads it, as 10 for the first one
-    with pytest.raises(argparse.ArgumentTypeError,
-                       match="without underscores"):
-        cmd._adapter(f"a.safetensors:{tail}")
-    # An underscore in the path, or in a tail that is no number, is fine.
-    assert cmd._adapter("my_lora.safetensors:0.5") == \
-        ("my_lora.safetensors", 0.5)
-    assert cmd._adapter("dir:my_lora_1") == ("dir:my_lora_1", 1.0)
-
-
 def test_adapters_reach_sample_as_one_patch_table(tiny, tmp_path, capsys,
                                                   monkeypatch):
     from PIL import Image

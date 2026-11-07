@@ -183,17 +183,65 @@ def test_a_direct_publish_never_counts_as_off():
 
 # chat /adapter rides the static-mode channel for the single chat row
 
-def test_chat_adapter_command_publishes_single_row_scale(capsys):
+def _chat_state(chat, *strengths):
+    lora_rows.configure("static", len(strengths))
+    return chat.ChatState(adapter_strengths=tuple(strengths),
+                          adapter_live=tuple(strengths))
+
+
+def test_chat_publishes_the_command_line_strength_from_the_first_turn():
     chat = pytest.importorskip("gmlx.tui.chat")
-    state = chat.ChatState()
-    chat._handle_slash("/adapter off", state)
-    assert lora_rows.row_scales(0).tolist() == [0.0]
+    state = _chat_state(chat, 0.8)
+    chat._begin_turn(state, cache=None, first_turn=True)
+    assert lora_rows.row_scales(0).tolist() == pytest.approx([0.8])
+    assert not lora_rows.slot_off(0)
+
+
+def test_chat_adapter_strength_is_absolute(capsys):
+    chat = pytest.importorskip("gmlx.tui.chat")
+    state = _chat_state(chat, 0.8)
     chat._handle_slash("/adapter 0.5", state)
     assert lora_rows.row_scales(0).tolist() == [0.5]
-    chat._handle_slash("/adapter on", state)
-    assert lora_rows.row_scales(0) is None            # static: scale 1.0
+    assert capsys.readouterr().out.strip() == "[chat] adapter strength: 0.5"
     chat._handle_slash("/adapter", state)
-    assert "adapter scale: 1" in capsys.readouterr().out
+    assert capsys.readouterr().out.strip() == "[chat] adapter strength: 0.5"
+    chat._begin_turn(state, cache=None, first_turn=False)
+    assert lora_rows.row_scales(0).tolist() == [0.5]
+    chat._handle_slash("/adapter off", state)
+    assert lora_rows.row_scales(0).tolist() == [0.0] and lora_rows.slot_off(0)
+    chat._handle_slash("/adapter on", state)
+    assert lora_rows.row_scales(0).tolist() == pytest.approx([0.8])
+    assert "adapter strength: 0.8" in capsys.readouterr().out
+
+
+def test_chat_adapter_strength_sets_every_adapter(capsys):
+    chat = pytest.importorskip("gmlx.tui.chat")
+    state = _chat_state(chat, 0.8, 1.0)
+    chat._handle_slash("/adapter", state)
+    assert capsys.readouterr().out.strip() == "[chat] adapter strength: 0.8, 1"
+    chat._handle_slash("/adapter 2", state)
+    assert lora_rows.row_scales(0).tolist() == [2.0]
+    assert lora_rows.row_scales(1).tolist() == [2.0]
+    chat._handle_slash("/adapter on", state)
+    assert lora_rows.row_scales(1).tolist() == [1.0]
+
+
+@pytest.mark.parametrize("arg", ["strong", "inf", "1_0"])
+def test_chat_adapter_refuses_a_strength_that_is_no_finite_number(arg, capsys):
+    chat = pytest.importorskip("gmlx.tui.chat")
+    state = _chat_state(chat, 0.8)
+    chat._handle_slash(f"/adapter {arg}", state)
+    assert "usage: /adapter" in capsys.readouterr().out
+    assert state.adapter_live == (0.8,)
+
+
+def test_chat_adapter_without_an_adapter_publishes_nothing(capsys):
+    chat = pytest.importorskip("gmlx.tui.chat")
+    state = chat.ChatState()
+    chat._handle_slash("/adapter 0.5", state)
+    chat._begin_turn(state, cache=None, first_turn=True)
+    assert lora_rows.row_scales(0) is None
+    assert "no adapter is loaded" in capsys.readouterr().out
 
 
 # uid lookups: per generator, per thread, retirement, padding

@@ -102,16 +102,39 @@ gmlx run qwen3-0.6b-q8 --prompt "What's the weather like today?"    # The model 
 Qwen3 is a thinking model, so `run` prints its reasoning first. The adapted
 model thinks briefly and then answers like a pirate.
 
-In `gmlx chat`, `/adapter off` and `/adapter on` turn the adapter off and
-on for the next turns, and `/adapter 0.5` scales it.
+`--adapter PATH:STRENGTH` applies the adapter at a strength, 1 when left
+out. Strength 0.5 adds half the adapter's change, 2 adds twice, and a
+negative strength subtracts it. `serve`, `run`, `chat`, `capture` and
+`kld` read the flag the same way: the text after the last colon is a
+strength only when it is a number, so a path that holds a colon needs no
+suffix. Repeat the flag to apply more adapters.
+
+```sh
+gmlx run qwen3-0.6b-q8 --adapter ~/models/pirate-lora.gguf:0.5 --prompt "What's the weather like today?"
+```
+
+In `gmlx chat`, the command-line strength applies from the first turn.
+A strength is absolute, never a multiple of another:
+
+| Command | Effect |
+|---------|--------|
+| `/adapter` | Print the strength in effect. |
+| `/adapter 0.5` | Run the adapter at strength 0.5 from the next turn. |
+| `/adapter on` | Go back to the command-line strength. |
+| `/adapter off` | Run the adapter at strength 0. |
 
 `gmlx serve` with `--adapter` needs no config file. It serves the adapted
 model under an id from the model's file name, here `qwen3-0.6b`, and the
-model without the adapter as `qwen3-0.6b-base`:
+model without the adapter as `qwen3-0.6b-base`. The strength is the
+default for requests that set none, as an entry's
+[`adapters`](#mixing-adapters-per-request) strength is:
 
 ```sh
-gmlx serve ~/models/unsloth__Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --adapter ~/models/pirate-lora.gguf
+gmlx serve ~/models/unsloth__Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --adapter ~/models/pirate-lora.gguf:0.8
 ```
+
+To measure how far an adapter moves the model at a few strengths, run
+[`gmlx kld`](cli.md#gmlx-kld) with one `--adapter` flag for each strength.
 
 ## Serving one base with many adapters
 
@@ -257,8 +280,8 @@ rows, where llama.cpp adds it. `gmlx train` writes no such pair.
   applies.
 - Adapters work on text models only, so `--adapter` does not combine with
   `--mmproj`.
-- `gmlx run` and `gmlx chat` take one adapter at strength 1. They refuse an
-  entry with more adapters or another strength, which `gmlx serve` runs.
+- `gmlx run` and `gmlx chat` apply an entry's adapters at the entry's
+  strengths. In `gmlx chat`, `/adapter S` sets every adapter to S.
 - A drafter for speculative decoding uses the model's output head and
   token embedding without an adapter on them, as llama.cpp's drafters do.
   Only the draft ignores an `output.weight` or `token_embd.weight` pair,

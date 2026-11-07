@@ -22,7 +22,7 @@ import shutil
 import sys
 import time
 
-from .image import _adapter
+from .adapter_flag import parse_adapter as _adapter
 
 _ACTIONS = ("generate", "bench", "pull")
 _ACTION_DESC = {

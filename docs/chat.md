@@ -63,7 +63,7 @@ process.
 | `/render rich\|lite\|plain` | The markdown renderer |
 | `/theme NAME [cb]` | The color theme. `cb` adds colorblind-safe accents. |
 | `/model`, `/stats` | The model card and the session totals. With a server model, `/model <id>` switches models. |
-| `/adapter [on\|off\|SCALE]` | Turns the `--adapter` LoRA on or off, or scales it |
+| `/adapter [on\|off\|STRENGTH]` | Prints the `--adapter` strength, sets it, or goes back to the command-line strength (`on`) or to 0 (`off`) |
 | `/history [on\|off\|clear]` | Prompt history saving |
 | `/save [name]`, `/sessions`, `/load-session <name\|N>` | Saves, lists and restores sessions |
 | `/export [file.md]` | Writes the conversation as markdown |

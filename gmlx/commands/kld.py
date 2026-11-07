@@ -1,9 +1,15 @@
 """``gmlx kld``: the KL divergence over a text from a reference model to
 MODEL, as llama.cpp's ``llama-perplexity --kl-divergence`` computes it.
 
-The reference loads first, alone, and scores the text into a temporary
-file of uint16 log-prob records. It unloads, then MODEL loads and scores
-against that file. ``gmlx.gen.kld`` holds the arithmetic.
+The reference scores the text into a temporary file of uint16 log-prob
+records, then MODEL scores against that file. With ``--reference`` the
+reference loads first, alone, and unloads before MODEL loads; MODEL bare
+is a scored point, and so is MODEL with each ``--adapter``. Without it,
+MODEL bare is the reference, and only the adapter points are scored, in
+the same load. Each ``--adapter`` flag is one point and each distinct
+file one row-channel slot; every forward publishes its rows' strengths by
+uid, so the rows of one forward can hold several points. The loop runs
+chunk-major. ``gmlx.gen.kld`` holds the arithmetic.
 """
 
 from __future__ import annotations
@@ -16,12 +22,14 @@ import os
 import shutil
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import numpy as np
 
 from gmlx.gen import kld as K
+
+from .adapter_flag import add_adapter_flag
 
 # The float32 logits of one head pass stay under this budget.
 ROW_BUDGET_BYTES = 1 << 30
@@ -29,6 +37,8 @@ ROW_BUDGET_BYTES = 1 << 30
 HEAD_BLOCK = 16384
 # Free disk the reference file leaves on its volume.
 DISK_MARGIN_BYTES = 1 << 30
+# The row uid of MODEL without its adapters.
+BARE = 0
 
 
 class Refusal(Exception):
@@ -49,7 +59,8 @@ def build_parser(prog: str = "gmlx kld") -> argparse.ArgumentParser:
                     "your server config.")
     ap.add_argument("--reference", metavar="FILE", default=None,
                     help="The GGUF to score MODEL against, such as the BF16 "
-                    "file of the same model. Required.")
+                    "file of the same model. Without it, MODEL is the "
+                    "reference and only the --adapter points are scored.")
     ap.add_argument("--text", metavar="FILE", required=True,
                     help="The UTF-8 text to score. It must hold at least "
                     "2 x --ctx tokens.")
@@ -66,6 +77,9 @@ def build_parser(prog: str = "gmlx kld") -> argparse.ArgumentParser:
                     help="Server config to resolve a model name against when "
                     "MODEL or --reference is not a file (default: the first "
                     "existing default config).")
+    add_adapter_flag(ap, help="Score MODEL with this GGUF LoRA adapter at this "
+                              "strength (default 1). Repeat the flag for more "
+                              "points; each flag is one point.")
     add_placement_args(ap)
     add_verbosity_arg(ap)
     return ap
@@ -109,8 +123,69 @@ def resolve_model(raw: str, config: str | None) -> Source | None:
                    if v is not None]
     if unsupported:
         raise Refusal(f"{raw}: the config entry sets {' and '.join(unsupported)}, "
-                      "which gmlx kld does not apply; pass the GGUF path")
+                      "which gmlx kld does not apply; pass the GGUF path, "
+                      "with --adapter for each adapter point")
     return Source(rm.path, rm)
+
+
+@dataclass
+class Point:
+    """One scored row kind: MODEL bare (``adapter`` None) or with one
+    adapter at a strength. ``scales`` holds the strength of every slot."""
+
+    uid: int
+    adapter: str | None
+    strength: float | None
+    scales: tuple
+
+
+def adapter_points(items: list[tuple[str, float]] | None, model_path: str,
+                   with_bare: bool):
+    """``(slots, points)`` for the ``--adapter`` flags: ``slots`` holds
+    ``(path, sha256)`` per distinct file in the order first named, read and
+    checked against MODEL's architecture; ``points`` holds MODEL bare when
+    ``with_bare``, then one point per flag. The tensors are not kept: the
+    MODEL load reads them again. Raises Refusal."""
+    from gmlx.load.adapter import load_lora_adapter
+    from gmlx.load.discovery import header_meta
+
+    arch = (header_meta(model_path) or {}).get("arch")
+    order: list[str] = []
+    for raw, _st in items or ():
+        path = os.path.abspath(os.path.expanduser(raw))
+        if not os.path.isfile(path):
+            raise Refusal(f"--adapter: no such file: {raw}")
+        if path not in order:
+            order.append(path)
+    slots = []
+    for path in order:
+        try:
+            plan = load_lora_adapter(path, base_arch=arch)
+        except (OSError, ValueError) as e:
+            raise Refusal(f"--adapter {path}: {e}") from None
+        heads = [m for m in plan.modules if m.rsplit(".", 1)[-1] == "lm_head"]
+        if heads:
+            raise Refusal(f"--adapter {path}: it adapts the output head, which "
+                          "gmlx kld scores in float32 without adapters")
+        slots.append((path, plan.sha256))
+    points = [Point(BARE, None, None, ())] if with_bare else []
+    for uid, (raw, st) in enumerate(items or (), start=BARE + 1):
+        path = os.path.abspath(os.path.expanduser(raw))
+        scales = [0.0] * len(order)
+        scales[order.index(path)] = float(st)
+        points.append(Point(uid, path, float(st), tuple(scales)))
+    return slots, points
+
+
+def point_registry(points):
+    """A uid registry that holds MODEL bare and every point."""
+    from gmlx import lora_rows
+
+    reg = lora_rows.UidRegistry()
+    reg.register(BARE, ())
+    for p in points:
+        reg.register(p.uid, p.scales)
+    return reg
 
 
 def tokenize(tokenizer, text: str) -> tuple[np.ndarray, int | None]:
@@ -203,6 +278,12 @@ class Scorer:
         self.n_ctx = n_ctx
         self.first, self.n_scored = K.scored_span(n_ctx)
 
+    @staticmethod
+    def _published(uids):
+        from gmlx import lora_rows
+
+        return lora_rows.published(list(uids))
+
     def _project(self, h, out: np.ndarray) -> None:
         import mlx.core as mx
 
@@ -223,19 +304,21 @@ class Scorer:
             mx.eval(z)
             out[:, r0:r1] = np.asarray(z)
 
-    def slices(self, ids: np.ndarray):
+    def slices(self, ids: np.ndarray, uids=None):
         """Float32 logits of the scored positions of chunk ids [rows, n_ctx],
         chunk-major, in slices [k, width] of at most slice_rows(width)
-        positions. The trunk runs once."""
+        positions. The trunk runs once, with row i at the adapter
+        strengths of ``uids[i]`` (default: MODEL bare)."""
         import mlx.core as mx
 
         from gmlx.distill.student import trunk_hidden
 
         rows = int(ids.shape[0])
-        h = trunk_hidden(self.inner, mx.array(ids))
-        h = h[:, self.first:self.first + self.n_scored, :]
-        h = h.reshape(rows * self.n_scored, h.shape[-1])
-        mx.eval(h)
+        with self._published([BARE] * rows if uids is None else uids):
+            h = trunk_hidden(self.inner, mx.array(ids))
+            h = h[:, self.first:self.first + self.n_scored, :]
+            h = h.reshape(rows * self.n_scored, h.shape[-1])
+            mx.eval(h)
         step = slice_rows(self.width)
         for p0 in range(0, int(h.shape[0]), step):
             hs = h[p0:p0 + step]
@@ -251,9 +334,11 @@ class Scorer:
         from gmlx.distill.student import trunk_hidden
 
         x = mx.array(ids[None])
-        ref = self.inner(x)
-        ref = np.array(getattr(ref, "logits", ref)[0].astype(mx.float32))
-        h = trunk_hidden(self.inner, x)[0]
+        with self._published([BARE]):
+            ref = self.inner(x)
+            ref = np.array(getattr(ref, "logits", ref)[0].astype(mx.float32))
+            h = trunk_hidden(self.inner, x)[0]
+            mx.eval(h)
         mine = np.empty((h.shape[0], self.width), dtype=np.float32)
         self._project(h, mine)
         if ref.shape != mine.shape:
@@ -263,13 +348,16 @@ class Scorer:
 
 @dataclass
 class Plan:
-    """What both passes share: the ids, the chunking and the widths."""
+    """What both passes share: the ids, the chunking, the widths, the
+    adapter slots and the scored points."""
 
     tokens: np.ndarray
     bos: int | None
     n_ctx: int
     n_chunk: int
     width: int
+    slots: list = field(default_factory=list)
+    points: list = field(default_factory=list)
 
     def groups(self, rows: int):
         for c0 in range(0, self.n_chunk, rows):
@@ -306,15 +394,45 @@ def score_reference(scorer: Scorer, plan: Plan, f, progress: Progress) -> None:
         f.write(K.quantize_logprobs(z).tobytes())
 
 
-def score_model(scorer: Scorer, plan: Plan, f, progress: Progress) -> K.KldSums:
-    """KL sums of a model against the reference file ``f``."""
+def score_points(scorer: Scorer, plan: Plan, f,
+                 progress: Progress) -> list[K.KldSums]:
+    """KL sums of each point against the reference file ``f``, in the
+    order of ``plan.points``. Chunk-major: the rows of one forward are
+    (chunk, point) pairs, chunk by chunk, as many as the budget holds."""
     n_ctx, width, n_chunk, tokens = K.read_reference_header(f)
     if (n_ctx, width, n_chunk) != (plan.n_ctx, plan.width, plan.n_chunk) \
             or not np.array_equal(tokens, plan.tokens[:n_ctx * n_chunk]):
         raise ValueError("the reference file does not match this run")
-    sums = K.KldSums()
-    for z in _slices(scorer, plan, "model", progress):
-        sums.add(z, K.read_reference_records(f, len(z), width))
+    points = plan.points
+    n = scorer.n_scored
+    sums = [K.KldSums() for _ in points]
+    items = [(c, j) for c in range(n_chunk) for j in range(len(points))]
+    rows = rows_per_forward(n, width, len(items))
+    records: dict[int, np.ndarray] = {}
+    reported = 0
+    for g0 in range(0, len(items), rows):
+        group = items[g0:g0 + rows]
+        for c, _j in group:
+            if c not in records:
+                records[c] = K.read_reference_records(f, n, width)
+        ids = np.stack([K.chunk_ids(plan.tokens, c, n_ctx, plan.bos)
+                        for c, _j in group])
+        pos = 0
+        for z in scorer.slices(ids, [points[j].uid for _c, j in group]):
+            z0 = 0
+            while z0 < len(z):
+                row, at = divmod(pos, n)
+                take = min(len(z) - z0, n - at)
+                c, j = group[row]
+                sums[j].add(z[z0:z0 + take], records[c][at:at + take])
+                z0 += take
+                pos += take
+        done = group[-1][0] + (group[-1][1] == len(points) - 1)
+        for c in [c for c in records if c < done]:
+            del records[c]
+        while reported < done:
+            reported += 1
+            progress("model", reported, n_chunk)
     return sums
 
 
@@ -345,8 +463,9 @@ def _model_args(src: Source, args) -> argparse.Namespace:
     return ns
 
 
-def _load(src: Source, args) -> tuple[object, argparse.Namespace]:
-    """Load one model. Returns it and the flags it loaded under."""
+def _load(src: Source, args, slots=()) -> tuple[object, argparse.Namespace]:
+    """Load one model, with each adapter of ``slots`` in its slot. Returns
+    it and the flags it loaded under."""
     import gmlx.load.loadlog as loadlog
     from gmlx.load.loader import load_model
     from gmlx.serve.cb_phase import relift
@@ -358,7 +477,25 @@ def _load(src: Source, args) -> tuple[object, argparse.Namespace]:
         relift()
     _ensure_stream_cb_caps(ns)
     with loadlog.load_ui(args.verbose, src.path):
-        model, _config, _tok = load_model(src.path)
+        model, config, _tok = load_model(src.path)
+    if slots:
+        from gmlx import lora_rows
+        from gmlx.load import adapter as lora
+        from gmlx.load.discovery import header_meta
+
+        arch = (header_meta(src.path) or {}).get("arch")
+        # Before placement, as run installs its adapters.
+        trunk = getattr(model, "language_model", model)
+        for slot, (path, sha256) in enumerate(slots):
+            try:
+                plan = lora.load_lora_adapter(path, base_arch=arch)
+            except (OSError, ValueError) as e:
+                raise Refusal(f"--adapter {path}: {e}") from None
+            if plan.sha256 != sha256:
+                raise Refusal(f"--adapter {path}: the file changed after "
+                              "the run started")
+            lora.install_gguf_adapter(trunk, config, plan, slot=slot)
+        lora_rows.ensure_rows(len(slots))
     _apply_placement(ns, model)
     return model, ns
 
@@ -419,8 +556,9 @@ def _check_head(scorer: Scorer, plan: Plan, label: str) -> None:
 
 
 def prepare(args) -> tuple[Source, Source, Plan]:
-    """(MODEL, reference, plan), from GGUF headers only. Raises Refusal
-    before any model loads."""
+    """(MODEL, reference, plan), from GGUF headers and the adapter files.
+    The reference is MODEL without --reference. Raises Refusal before any
+    model loads."""
     from gmlx.distill.tokens import logits_width_from_gguf, tokenizer_from_gguf
     from gmlx.load.tokenizer import hf_inner
 
@@ -428,13 +566,19 @@ def prepare(args) -> tuple[Source, Source, Plan]:
         raise Refusal("--ctx must be at least 3")
     if args.chunks is not None and args.chunks < 1:
         raise Refusal("--chunks must be at least 1")
+    if not args.reference and not args.adapter:
+        raise Refusal("give --reference FILE, the GGUF to score MODEL "
+                      "against, or --adapter PATH[:STRENGTH] points to score "
+                      "against MODEL, or both")
     model = resolve_model(args.model, args.config)
     if model is None:
         raise Refusal(f"no such file or config model: {args.model}")
-    ref = resolve_model(args.reference, args.config)
-    if ref is None:
-        raise Refusal(f"--reference: no such file or config model: "
-                      f"{args.reference}")
+    ref = model
+    if args.reference:
+        ref = resolve_model(args.reference, args.config)
+        if ref is None:
+            raise Refusal(f"--reference: no such file or config model: "
+                          f"{args.reference}")
     model_path, ref_path = model.path, ref.path
     try:
         text = K.read_text(os.path.expanduser(args.text))
@@ -460,8 +604,10 @@ def prepare(args) -> tuple[Source, Source, Plan]:
         n_chunk = K.chunk_count(len(ref_ids), args.ctx, args.chunks)
     except ValueError as e:
         raise Refusal(str(e)) from None
+    slots, points = adapter_points(args.adapter, model_path,
+                                   with_bare=bool(args.reference))
     plan = Plan(tokens=ref_ids, bos=bos, n_ctx=args.ctx, n_chunk=n_chunk,
-                width=width)
+                width=width, slots=slots, points=points)
     why = check_disk(tempfile.gettempdir(),
                      K.reference_bytes(args.ctx, width, n_chunk))
     if why:
@@ -469,11 +615,15 @@ def prepare(args) -> tuple[Source, Source, Plan]:
     return model, ref, plan
 
 
-def run(args, emit: Callable[[dict], None], log: Callable[[str], None]) -> dict:
-    """Both passes. Returns the result record; raises Refusal when the
-    command refuses the run."""
+def run(args, emit: Callable[[dict], None],
+        log: Callable[[str], None]) -> list[dict]:
+    """Both passes. Returns one result record per point; raises Refusal
+    when the command refuses the run."""
+    from gmlx import lora_rows
+
     model_src, ref_src, plan = prepare(args)
     model_path, ref_path = model_src.path, ref_src.path
+    separate = bool(args.reference)
     n_chunk = plan.n_chunk
     tmpdir = tempfile.gettempdir()
 
@@ -485,55 +635,89 @@ def run(args, emit: Callable[[dict], None], log: Callable[[str], None]) -> dict:
                                     dir=tmpdir)
     os.close(fd)
     try:
-        log(f"[kld] reference {os.path.basename(ref_path)}: {n_chunk} chunks "
-            f"of {args.ctx} tokens")
-        model, ns = _load(ref_src, args)
-        try:
-            scorer = Scorer(model, args.ctx)
-            _check_head(scorer, plan, "--reference")
-            with _resident_wire(model, ns), open(ref_file, "wb") as f:
-                score_reference(scorer, plan, f, progress)
-        finally:
-            scorer = None
-            _release(model, ref_path)
-            model = None
-            _unload()
-        log(f"[kld] model {os.path.basename(model_path)}")
-        model, ns = _load(model_src, args)
-        try:
-            scorer = Scorer(model, args.ctx)
-            _check_head(scorer, plan, "MODEL")
-            with _resident_wire(model, ns), open(ref_file, "rb") as f:
-                sums = score_model(scorer, plan, f, progress)
-        finally:
-            scorer = None
-            _release(model, model_path)
-            model = None
-            _unload()
+        with lora_rows.bind(point_registry(plan.points)):
+            sums = _passes(args, plan, model_src, ref_src, separate, ref_file,
+                           progress, log)
     finally:
         with contextlib.suppress(OSError):
             os.unlink(ref_file)
-    mean, mean_unc = sums.mean_kld()
-    top, top_unc = sums.same_top()
-    return {"event": "result", "model": model_path, "reference": ref_path,
-            "adapter": None, "strength": None, "mean_kld": mean,
-            "mean_kld_unc": mean_unc, "same_top_p": top,
-            "same_top_p_unc": top_unc, "positions": sums.count,
-            "chunks": n_chunk, "ctx": args.ctx}
+    out = []
+    for point, s in zip(plan.points, sums):
+        mean, mean_unc = s.mean_kld()
+        top, top_unc = s.same_top()
+        out.append({"event": "result", "model": model_path,
+                    "reference": ref_path, "adapter": point.adapter,
+                    "strength": point.strength, "mean_kld": mean,
+                    "mean_kld_unc": mean_unc, "same_top_p": top,
+                    "same_top_p_unc": top_unc, "positions": s.count,
+                    "chunks": n_chunk, "ctx": args.ctx})
+    return out
 
 
-def format_table(result: dict) -> str:
-    return "\n".join([
-        f"model:      {result['model']}",
-        f"reference:  {result['reference']}",
-        f"scored:     {result['positions']} positions in {result['chunks']} "
-        f"chunks of {result['ctx']} tokens",
+def _passes(args, plan: Plan, model_src: Source, ref_src: Source,
+            separate: bool, ref_file: str, progress: Progress,
+            log: Callable[[str], None]) -> list[K.KldSums]:
+    """The reference pass into ``ref_file``, then the points. A separate
+    reference unloads before MODEL loads; otherwise MODEL bare scores the
+    reference in the load that scores the points."""
+    model_path, ref_path = model_src.path, ref_src.path
+    log(f"[kld] reference {os.path.basename(ref_path)}: {plan.n_chunk} "
+        f"chunks of {args.ctx} tokens")
+    model = scorer = None
+    try:
+        if separate:
+            model, ns = _load(ref_src, args)
+            try:
+                scorer = Scorer(model, args.ctx)
+                _check_head(scorer, plan, "--reference")
+                with _resident_wire(model, ns), open(ref_file, "wb") as f:
+                    score_reference(scorer, plan, f, progress)
+            finally:
+                scorer = None
+                _release(model, ref_path)
+                model = None
+                _unload()
+        log(f"[kld] model {os.path.basename(model_path)}")
+        model, ns = _load(model_src, args, plan.slots)
+        scorer = Scorer(model, args.ctx)
+        _check_head(scorer, plan, "MODEL")
+        with _resident_wire(model, ns):
+            if not separate:
+                with open(ref_file, "wb") as f:
+                    score_reference(scorer, plan, f, progress)
+            with open(ref_file, "rb") as f:
+                return score_points(scorer, plan, f, progress)
+    finally:
+        scorer = None
+        if model is not None:
+            _release(model, model_path)
+            model = None
+            _unload()
+
+
+def _label(result: dict) -> str:
+    if result.get("adapter") is None:
+        return "MODEL"
+    return f"{os.path.basename(result['adapter'])}:{result['strength']:g}"
+
+
+def format_table(results: list[dict]) -> str:
+    first = results[0]
+    w = max(8, *(len(_label(r)) + 2 for r in results))
+    lines = [
+        f"model:      {first['model']}",
+        f"reference:  {first['reference']}",
+        f"scored:     {first['positions']} positions in {first['chunks']} "
+        f"chunks of {first['ctx']} tokens",
         "",
-        f"{'point':<8}{'Mean KLD':<23}Same top p",
-        f"{'MODEL':<8}{result['mean_kld']:.6f} +/- {result['mean_kld_unc']:.6f}"
-        f"  {100 * result['same_top_p']:.3f} +/- "
-        f"{100 * result['same_top_p_unc']:.3f} %",
-    ])
+        f"{'point':<{w}}{'Mean KLD':<23}Same top p",
+    ]
+    for r in results:
+        lines.append(
+            f"{_label(r):<{w}}{r['mean_kld']:.6f} +/- {r['mean_kld_unc']:.6f}"
+            f"  {100 * r['same_top_p']:.3f} +/- "
+            f"{100 * r['same_top_p_unc']:.3f} %")
+    return "\n".join(lines)
 
 
 def parse_args(argv: list[str], prog: str = "gmlx kld") -> argparse.Namespace:
@@ -549,10 +733,6 @@ def parse_args(argv: list[str], prog: str = "gmlx kld") -> argparse.Namespace:
 
 def cmd_kld(argv: list[str], prog: str = "gmlx kld") -> int:
     args = parse_args(argv, prog)
-    if not args.reference:
-        print(f"error: {prog} needs --reference FILE, the GGUF to score "
-              "MODEL against", file=sys.stderr)
-        return 2
     out = sys.stdout
 
     def emit(rec: dict) -> None:
@@ -571,12 +751,13 @@ def cmd_kld(argv: list[str], prog: str = "gmlx kld") -> int:
                 else contextlib.nullcontext())
     try:
         with redirect:
-            result = run(args, emit, log)
+            results = run(args, emit, log)
     except Refusal as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     if args.json:
-        emit(result)
+        for r in results:
+            emit(r)
     else:
-        print(format_table(result))
+        print(format_table(results))
     return 0

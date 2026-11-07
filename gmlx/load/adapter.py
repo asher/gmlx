@@ -14,6 +14,7 @@ model is :func:`modules.install_lora_adapter`.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 from dataclasses import dataclass, field
@@ -236,7 +237,8 @@ def _config_as_dict(config) -> dict:
 
 
 def apply_gguf_adapter(raw_model, config, adapter_gguf: str,
-                       *, base_arch: str | None = None, slot: int = 0) -> int:
+                       *, base_arch: str | None = None, slot: int = 0,
+                       strength: float = 1.0) -> int:
     """Apply a GGUF LoRA adapter live over a loaded base text model - no merge (the
     base stays K-quant; the adapter rides alongside in full precision). Returns the
     number of modules installed.
@@ -251,17 +253,25 @@ def apply_gguf_adapter(raw_model, config, adapter_gguf: str,
     structurally - a target path with no matching module makes
     :func:`modules.install_lora_adapter` raise, never a silent no-op. ``slot`` is
     the adapter's column in the row channel; a second adapter on an already
-    adapted model installs alongside the first (see the installer)."""
+    adapted model installs alongside the first (see the installer).
+    ``strength`` multiplies every module's static scale, for callers that
+    publish no row vector."""
     plan = load_lora_adapter(adapter_gguf, base_arch=base_arch)
-    return install_gguf_adapter(raw_model, config, plan, slot=slot)
+    return install_gguf_adapter(raw_model, config, plan, slot=slot,
+                                strength=strength)
 
 
-def install_gguf_adapter(raw_model, config, plan: LoraAdapter, *, slot: int = 0) -> int:
+def install_gguf_adapter(raw_model, config, plan: LoraAdapter, *, slot: int = 0,
+                         strength: float = 1.0) -> int:
     """Install an adapter plan that is already loaded, as
     :func:`apply_gguf_adapter` does. Returns the number of modules
     installed."""
     from .modules import install_lora_adapter
 
+    if strength != 1.0:
+        plan = dataclasses.replace(plan, modules={
+            k: dataclasses.replace(m, scale=m.scale * float(strength))
+            for k, m in plan.modules.items()})
     cfg = _config_as_dict(config)
     text_cfg = cfg.get("text_config") or {}
     n_head = cfg.get("num_attention_heads", text_cfg.get("num_attention_heads"))

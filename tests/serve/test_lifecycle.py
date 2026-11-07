@@ -996,6 +996,16 @@ def test_restart_keeps_a_server_whose_model_file_is_gone(monkeypatch, capsys, tm
         "keeps running. Put the file back, then run gmlx restart.\n")
 
 
+def test_restart_reads_an_adapter_strength_as_no_part_of_the_path(tmp_path):
+    model = tmp_path / "m.gguf"
+    lora = tmp_path / "a.gguf"
+    model.write_bytes(b"GGUF")
+    lora.write_bytes(b"GGUF")
+    assert lc._missing_start_file([str(model), "--adapter", f"{lora}:0.5"]) is None
+    assert lc._missing_start_file([str(model), "--adapter", "/gone/a.gguf:0.5"]) \
+        == "/gone/a.gguf, the --adapter file this server started with, is gone"
+
+
 def test_restart_sends_its_errors_to_the_err_stream(monkeypatch, capsys, tmp_path):
     import io
     model = tmp_path / "m.gguf"
