@@ -708,3 +708,56 @@ def test_a_chat_string_with_a_lone_surrogate_is_a_400(monkeypatch, body,
     err = r.json()["error"]
     assert (err["message"], err["param"]) == (
         f"{field} holds a lone surrogate escape", field)
+
+
+@pytest.mark.parametrize("path, body, field", [
+    ("/v1/responses", {"input": "a \ud800 cat"}, "input"),
+    ("/v1/responses", {"input": [{"role": "user", "content": [
+        {"type": "input_text", "text": "a \udc00 cat"}]}]},
+     "input[0].content[0].text"),
+    ("/v1/responses", {"input": "a", "instructions": "Be \udc80 brief."},
+     "instructions"),
+    ("/v1/messages", {"messages": [{"role": "user",
+                                    "content": "a \ud800 cat"}]},
+     "messages[0].content"),
+    ("/v1/messages", {"system": "Be \udc80 brief.",
+                      "messages": [{"role": "user", "content": "a"}]},
+     "system")])
+def test_a_responses_or_messages_string_with_a_lone_surrogate_is_a_400(
+        monkeypatch, path, body, field):
+    """The Responses and Messages routes parse their own body, and a lone
+    surrogate escape in it reached the tokenizer's UTF-8 encode as a 500:
+    each refuses it with the chat route's 400, in its own error shape."""
+    import json
+
+    from fastapi.testclient import TestClient
+
+    openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    anthropic = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.server.anthropic")
+    runtime = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.server.runtime").runtime
+    cached = lambda *a, **k: (  # noqa: E731
+        None, _QwenProcessor(), {"model_type": "qwen3_5"})
+    monkeypatch.setattr(openai, "get_cached_model", cached)
+    monkeypatch.setattr(anthropic, "get_cached_model", cached)
+    monkeypatch.setattr(runtime, "response_generator", _Tokenizing(),
+                        raising=False)
+    monkeypatch.setattr(_APP.app, "exception_handlers",
+                        dict(_APP.app.exception_handlers))
+    monkeypatch.setattr(_APP.app, "middleware_stack", None)
+    sp.install_resolver_error_handlers()
+    sp.install_api_contract()
+    client = TestClient(_APP.app, raise_server_exceptions=False)
+    r = client.post(path, content=json.dumps(
+        {"model": "m", "max_tokens": 1, "max_output_tokens": 16,
+         **body}).encode(), headers={"content-type": "application/json"})
+    assert r.status_code == 400, r.text
+    message = f"{field} holds a lone surrogate escape"
+    if path == "/v1/messages":
+        assert r.json() == {"type": "error", "error": {
+            "type": "invalid_request_error", "message": message}}
+    else:
+        err = r.json()["error"]
+        assert (err["type"], err["message"], err["param"]) == (
+            "invalid_request_error", message, field)

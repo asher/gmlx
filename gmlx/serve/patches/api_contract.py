@@ -326,11 +326,32 @@ def _warn_image_tool(path: str, body: dict) -> None:
                      "dropped; call /v1/images/generations instead", path)
 
 
-def _make_raw_endpoint(consumed, fallback_path):
+def _surrogate_answer(body, anthropic: bool):
+    """The 400 of a raw-``Request`` route's parsed body with a lone
+    surrogate escape in any string, in the route's own error shape, or
+    None."""
+    from fastapi.responses import JSONResponse
+
+    from ._common import body_surrogate, surrogate_message
+
+    field = body_surrogate(body)
+    if field is None:
+        return None
+    message = surrogate_message(field)
+    if anthropic:
+        return JSONResponse(status_code=400, content={"type": "error", "error": {
+            "type": "invalid_request_error", "message": message}})
+    return JSONResponse(status_code=400, content={"error": {
+        "type": "invalid_request_error", "message": message, "param": field,
+        "code": None}})
+
+
+def _make_raw_endpoint(consumed, fallback_path, anthropic: bool = False):
     """Wrapper factory for the raw-``Request`` routes (responses/anthropic):
     the handler parses the JSON body itself, so warn/enforce on the cached
     body dict (starlette caches ``_json``; the handler's own ``json()`` call
-    returns the same mutated object)."""
+    returns the same mutated object). A lone surrogate escape in any string
+    of the body is a 400, in the Messages shape with ``anthropic``."""
     def make(original):
         async def endpoint(*args, **kwargs):
             values = list(args) + list(kwargs.values())
@@ -342,6 +363,9 @@ def _make_raw_endpoint(consumed, fallback_path):
                     body = await http.json()
                 except Exception:
                     body = None
+                refused = _surrogate_answer(body, anthropic)
+                if refused is not None:
+                    return refused
                 if isinstance(body, dict):
                     tc = body.get("tool_choice")
                     warn_ignored_fields(path, set(body) - consumed)
@@ -367,7 +391,7 @@ def install_api_contract() -> None:
                                          _RESPONSES_PATHS[-1]))
     _wrap_post_routes(app, _MESSAGES_PATHS, _API_CONTRACT_FLAG,
                       _make_raw_endpoint(ANTHROPIC_CONSUMED,
-                                         _MESSAGES_PATHS[-1]))
+                                         _MESSAGES_PATHS[-1], anthropic=True))
 
 
 # Context overflow wording
