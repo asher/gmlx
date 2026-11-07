@@ -1096,6 +1096,16 @@ The placement flags apply to each model in turn, as the
 `--moe-expert-mass`, `--moe-expert-probe`, `--moe-miss-shed`,
 `--moe-layer-shed` and `--moe-prestage`.
 
+A model given as a config id loads with the placement of its config entry,
+`stream:` and the MoE settings, where you typed no placement flag. The
+command stops before any load when the entry sets `adapter` or
+`rope_scaling`, which `gmlx kld` does not apply. Pass the GGUF path to
+score the bare file.
+
+The command also stops when either vocabulary adds EOS to each text
+(`tokenizer.ggml.add_eos_token`), because llama-perplexity refuses such a
+model.
+
 The table gives two numbers, each with its standard error:
 
 | Name | Meaning |
@@ -1113,6 +1123,7 @@ comes last:
 | `stage` | On a progress line, `reference` or `model`, the pass that scored the chunk. |
 | `chunk`, `chunks` | On a progress line, the chunk just scored and the chunk count. |
 | `model`, `reference` | The two GGUF paths. |
+| `adapter`, `strength` | On a result line, `null`: the bare MODEL is scored. |
 | `mean_kld`, `mean_kld_unc` | Mean KLD and its standard error. |
 | `same_top_p`, `same_top_p_unc` | Same top p and its standard error, as a fraction from 0 to 1. |
 | `positions`, `chunks`, `ctx` | The positions scored, the chunks and the chunk length. |
@@ -1636,7 +1647,7 @@ These verbs also use other codes:
 | `rm` | 1 when you declined or a file could not be deleted, 2 for an unknown id, a bad config, or a missing `--yes`. |
 | `ps` | 1 when the server answered with an error or is not gmlx, 3 when no server was reachable. |
 | `systemone` | 1 when the file, the request or the model was refused, or no server was reachable. |
-| `kld` | 1 when a model fails to load, 2 when a flag, file or tokenizer is wrong, the text is short, the disk is full or a head cannot be scored. |
+| `kld` | 1 when a model or tokenizer fails to load, 2 when a flag, file or tokenizer match is wrong, the text is short, `TMPDIR` lacks space or a head cannot be scored. |
 | `doctor` | 1 when a check failed, 2 when the `--config` file does not exist. |
 | `launch` | The client's own status once it runs, else a code from the next table. |
 

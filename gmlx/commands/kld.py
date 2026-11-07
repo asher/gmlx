@@ -17,21 +17,18 @@ import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 
 from gmlx.gen import kld as K
 
-# The float32 logits of one forward stay under this budget.
+# The float32 logits of one head pass stay under this budget.
 ROW_BUDGET_BYTES = 1 << 30
 # Vocabulary rows per float32 head block.
 HEAD_BLOCK = 16384
 # Free disk the reference file leaves on its volume.
 DISK_MARGIN_BYTES = 1 << 30
-# The head may differ from the model's own logits by this share of the
-# largest logit (the model's are bfloat16).
-HEAD_PARITY_TOL = 0.05
 
 
 class Refusal(Exception):
@@ -74,12 +71,22 @@ def build_parser(prog: str = "gmlx kld") -> argparse.ArgumentParser:
     return ap
 
 
-def resolve_model_path(raw: str, config: str | None) -> str | None:
-    """A GGUF path for ``raw``: the file itself, or a server-config model
-    id or alias. None when neither matches."""
+@dataclass
+class Source:
+    """A model to load: its GGUF and the server-config entry it came from,
+    if any."""
+
+    path: str
+    entry: Any = None
+
+
+def resolve_model(raw: str, config: str | None) -> Source | None:
+    """The GGUF for ``raw``: the file itself, or a server-config model id
+    or alias. None when neither matches. Refuses an entry that sets what
+    gmlx kld does not apply."""
     path = os.path.expanduser(raw)
     if os.path.exists(path):
-        return os.path.abspath(path)
+        return Source(os.path.abspath(path))
     if "/" in raw or os.sep in raw or raw.lower().endswith(".gguf"):
         return None
     import gmlx.config as cfgmod
@@ -95,7 +102,14 @@ def resolve_model_path(raw: str, config: str | None) -> str | None:
         rm = cfgmod.resolve_cli_model(raw, cfg)
     except cfgmod.ConfigError as e:
         raise Refusal(str(e)) from None
-    return None if rm is None else rm.path
+    if rm is None:
+        return None
+    unsupported = [k for k in ("adapter", "rope_scaling")
+                   if getattr(rm, k, None) is not None]
+    if unsupported:
+        raise Refusal(f"{raw}: the config entry sets {' and '.join(unsupported)}, "
+                      "which gmlx kld does not apply; pass the GGUF path")
+    return Source(rm.path, rm)
 
 
 def tokenize(tokenizer, text: str) -> tuple[np.ndarray, int | None]:
@@ -150,43 +164,27 @@ def rows_per_forward(n_scored: int, width: int, n_items: int,
     return max(1, min(n_items, budget // max(per_row, 1)))
 
 
-def _head_module(inner):
-    """The output projection the logits come from: ``lm_head``, else the
-    tied embedding."""
-    from gmlx.distill.head import model_args
-
-    args = model_args(inner)
-    tied = getattr(args, "tie_word_embeddings", None)
-    head = getattr(inner, "lm_head", None)
-    if head is not None and not (isinstance(tied, bool) and tied):
-        return head
-    return getattr(inner, "model", inner).embed_tokens
+def slice_rows(width: int, budget: int | None = None) -> int:
+    """Scored positions per head pass: as many as keep their float32
+    logits under ``budget`` (default ROW_BUDGET_BYTES), at least one."""
+    if budget is None:
+        budget = ROW_BUDGET_BYTES
+    return max(1, budget // (4 * width))
 
 
 def _weight_block(mod, r0: int, r1: int):
-    """Rows ``r0:r1`` of the head weight in float32."""
+    """Rows ``r0:r1`` of the head weight in float32, times its weight
+    scale."""
     import mlx.core as mx
 
-    w = mod["weight"]
-    kq_type = getattr(mod, "kquant_type", None)
-    if kq_type is not None:
-        import mlx_kquant as kq
+    from gmlx.distill.head import head_weight_rows
+    from gmlx.load.out_scale import weight_scale
 
-        from gmlx.load.out_scale import weight_scale
-
-        blk = kq.dequantize(w[r0:r1], mod["scales"], kq_type,
-                            dtype=mx.float32)
-        s = weight_scale(mod)
-        return blk * s.astype(mx.float32) if s is not None else blk
     if "scales" in mod:
-        biases = mod.get("biases") if hasattr(mod, "get") else None
-        blk = mx.dequantize(
-            w[r0:r1], mod["scales"][r0:r1],
-            biases[r0:r1] if biases is not None else None,
-            group_size=mod.group_size, bits=mod.bits,
-            mode=getattr(mod, "mode", "affine"))
-        return blk.astype(mx.float32)
-    return w[r0:r1].astype(mx.float32)
+        return head_weight_rows(mod, r0, r1, mx.float32)
+    blk = mod["weight"][r0:r1].astype(mx.float32)
+    s = weight_scale(mod)
+    return blk if s is None else blk * s.astype(mx.float32)
 
 
 class Scorer:
@@ -199,7 +197,7 @@ class Scorer:
 
         self.inner = getattr(model, "language_model", model)
         self.spec = head_spec_from_model(self.inner)
-        self.mod = _head_module(self.inner)
+        self.mod = self.spec.module
         self.width = int(self.spec.V)
         self.n_ctx = n_ctx
         self.first, self.n_scored = K.scored_span(n_ctx)
@@ -224,8 +222,10 @@ class Scorer:
             mx.eval(z)
             out[:, r0:r1] = np.asarray(z)
 
-    def logits(self, ids: np.ndarray) -> np.ndarray:
-        """[rows, n_scored, width] float32 for chunk ids [rows, n_ctx]."""
+    def slices(self, ids: np.ndarray):
+        """Float32 logits of the scored positions of chunk ids [rows, n_ctx],
+        chunk-major, in slices [k, width] of at most slice_rows(width)
+        positions. The trunk runs once."""
         import mlx.core as mx
 
         from gmlx.distill.student import trunk_hidden
@@ -234,9 +234,13 @@ class Scorer:
         h = trunk_hidden(self.inner, mx.array(ids))
         h = h[:, self.first:self.first + self.n_scored, :]
         h = h.reshape(rows * self.n_scored, h.shape[-1])
-        out = np.empty((rows * self.n_scored, self.width), dtype=np.float32)
-        self._project(h, out)
-        return out.reshape(rows, self.n_scored, self.width)
+        mx.eval(h)
+        step = slice_rows(self.width)
+        for p0 in range(0, int(h.shape[0]), step):
+            hs = h[p0:p0 + step]
+            out = np.empty((int(hs.shape[0]), self.width), dtype=np.float32)
+            self._project(hs, out)
+            yield out
 
     def parity_gap(self, ids: np.ndarray) -> float:
         """The largest gap between this head and the model's own logits
@@ -278,31 +282,38 @@ class Plan:
 Progress = Callable[[str, int, int], None]
 
 
+def _slices(scorer: Scorer, plan: Plan, stage: str, progress: Progress):
+    """Every scored position's logits in file order, in slices, with a
+    progress call as each chunk completes."""
+    rows = rows_per_forward(scorer.n_scored, plan.width, plan.n_chunk)
+    done = reported = 0
+    for chunks in plan.groups(rows):
+        for z in scorer.slices(plan.ids(chunks)):
+            yield z
+            done += len(z)
+            while reported < min(done // scorer.n_scored, plan.n_chunk):
+                reported += 1
+                progress(stage, reported, plan.n_chunk)
+
+
 def score_reference(scorer: Scorer, plan: Plan, f, progress: Progress) -> None:
-    """Write the reference file: the header, then each chunk's records."""
+    """Write the reference file: the header, then each position's
+    record."""
     K.write_reference_header(f, plan.n_ctx, plan.width, plan.n_chunk,
                              plan.tokens)
-    rows = rows_per_forward(scorer.n_scored, plan.width, plan.n_chunk)
-    for chunks in plan.groups(rows):
-        z = scorer.logits(plan.ids(chunks))
-        for j, c in enumerate(chunks):
-            f.write(K.quantize_logprobs(z[j]).tobytes())
-            progress("reference", c + 1, plan.n_chunk)
+    for z in _slices(scorer, plan, "reference", progress):
+        f.write(K.quantize_logprobs(z).tobytes())
 
 
 def score_model(scorer: Scorer, plan: Plan, f, progress: Progress) -> K.KldSums:
-    """KL sums of a model against the reference file ``f``, chunk-major."""
+    """KL sums of a model against the reference file ``f``."""
     n_ctx, width, n_chunk, tokens = K.read_reference_header(f)
     if (n_ctx, width, n_chunk) != (plan.n_ctx, plan.width, plan.n_chunk) \
             or not np.array_equal(tokens, plan.tokens[:n_ctx * n_chunk]):
         raise ValueError("the reference file does not match this run")
     sums = K.KldSums()
-    rows = rows_per_forward(scorer.n_scored, plan.width, plan.n_chunk)
-    for chunks in plan.groups(rows):
-        z = scorer.logits(plan.ids(chunks))
-        for j, c in enumerate(chunks):
-            sums.add(z[j], K.read_reference_chunk(f, n_ctx, width))
-            progress("model", c + 1, plan.n_chunk)
+    for z in _slices(scorer, plan, "model", progress):
+        sums.add(z, K.read_reference_records(f, len(z), width))
     return sums
 
 
@@ -316,20 +327,39 @@ def check_disk(directory: str, need: int) -> str | None:
     return None
 
 
-def _load(path: str, args) -> object:
-    """Load one model with the command's placement flags."""
+def _streams(ns) -> bool:
+    return bool(getattr(ns, "stream_experts", False)
+                or getattr(ns, "stream_cpu", False))
+
+
+def _model_args(src: Source, args) -> argparse.Namespace:
+    """The flags one model loads under: the command's, with its config
+    entry's placement where no flag was typed."""
+    from .cli import _apply_resolved_to_args
+
+    ns = argparse.Namespace(**vars(args))
+    if src.entry is not None:
+        _apply_resolved_to_args(ns, src.entry, getattr(args, "_explicit", set()))
+    ns.gguf = src.path
+    return ns
+
+
+def _load(src: Source, args) -> tuple[object, argparse.Namespace]:
+    """Load one model. Returns it and the flags it loaded under."""
     import gmlx.load.loadlog as loadlog
     from gmlx.load.loader import load_model
+    from gmlx.serve.cb_phase import relift
 
     from .cli import _apply_placement, _ensure_stream_cb_caps
 
-    ns = argparse.Namespace(**vars(args))
-    ns.gguf = path
+    ns = _model_args(src, args)
+    if _streams(ns):
+        relift()
     _ensure_stream_cb_caps(ns)
-    with loadlog.load_ui(args.verbose, path):
-        model, _config, _tok = load_model(path)
+    with loadlog.load_ui(args.verbose, src.path):
+        model, _config, _tok = load_model(src.path)
     _apply_placement(ns, model)
-    return model
+    return model, ns
 
 
 @contextlib.contextmanager
@@ -340,9 +370,7 @@ def _resident_wire(model, args):
     from gmlx.device import cpu_default_device, metal_value
     from gmlx.distill.teacher import experts_streaming
 
-    streamed = (getattr(args, "stream_experts", False)
-                or getattr(args, "stream_cpu", False)
-                or experts_streaming(model))
+    streamed = _streams(args) or experts_streaming(model)
     prev = None
     if not streamed and not cpu_default_device():
         try:
@@ -357,6 +385,16 @@ def _resident_wire(model, args):
             mx.set_wired_limit(prev)
 
 
+def _release(model, path: str) -> None:
+    """Close the model's streaming install (prefetcher, feeders, arena,
+    weight pin) and sweep its page cache, before the next model loads."""
+    from gmlx.stream.installs import release
+    from gmlx.stream.pagecache import release_streaming_for
+
+    release(model)
+    release_streaming_for(path)
+
+
 def _unload() -> None:
     import mlx.core as mx
 
@@ -365,6 +403,8 @@ def _unload() -> None:
 
 
 def _check_head(scorer: Scorer, plan: Plan, label: str) -> None:
+    from gmlx.distill.head import HEAD_PARITY_TOL
+
     if scorer.width != plan.width:
         raise Refusal(f"{label}: the model's output width {scorer.width} "
                       f"is not the header's {plan.width}")
@@ -377,28 +417,36 @@ def _check_head(scorer: Scorer, plan: Plan, label: str) -> None:
             "after the projection in a way gmlx kld does not carry")
 
 
-def prepare(args) -> tuple[str, str, Plan]:
-    """(model path, reference path, plan), from GGUF headers only. Raises
-    Refusal before any model loads."""
+def prepare(args) -> tuple[Source, Source, Plan]:
+    """(MODEL, reference, plan), from GGUF headers only. Raises Refusal
+    before any model loads."""
     from gmlx.distill.tokens import logits_width_from_gguf, tokenizer_from_gguf
+    from gmlx.load.tokenizer import hf_inner
 
     if args.ctx < 3:
         raise Refusal("--ctx must be at least 3")
     if args.chunks is not None and args.chunks < 1:
         raise Refusal("--chunks must be at least 1")
-    model_path = resolve_model_path(args.model, args.config)
-    if model_path is None:
+    model = resolve_model(args.model, args.config)
+    if model is None:
         raise Refusal(f"no such file or config model: {args.model}")
-    ref_path = resolve_model_path(args.reference, args.config)
-    if ref_path is None:
+    ref = resolve_model(args.reference, args.config)
+    if ref is None:
         raise Refusal(f"--reference: no such file or config model: "
                       f"{args.reference}")
+    model_path, ref_path = model.path, ref.path
     try:
         text = K.read_text(os.path.expanduser(args.text))
     except (OSError, ValueError) as e:
         raise Refusal(f"--text: {e}") from None
     ref_tok = tokenizer_from_gguf(ref_path)
     tok = tokenizer_from_gguf(model_path)
+    for label, t in (("--reference", ref_tok), ("MODEL", tok)):
+        # llama-perplexity asserts the vocabulary adds no EOS.
+        if getattr(hf_inner(t), "_gguf_add_eos_token", False) is True:
+            raise Refusal(f"{label}: the vocabulary adds EOS to each text "
+                          "(tokenizer.ggml.add_eos_token), which "
+                          "llama-perplexity does not score")
     ref_ids, bos = tokenize(ref_tok, text)
     ids, _ = tokenize(tok, text)
     width = logits_width_from_gguf(ref_path)
@@ -417,13 +465,14 @@ def prepare(args) -> tuple[str, str, Plan]:
                      K.reference_bytes(args.ctx, width, n_chunk))
     if why:
         raise Refusal(why)
-    return model_path, ref_path, plan
+    return model, ref, plan
 
 
 def run(args, emit: Callable[[dict], None], log: Callable[[str], None]) -> dict:
     """Both passes. Returns the result record; raises Refusal when the
     command refuses the run."""
-    model_path, ref_path, plan = prepare(args)
+    model_src, ref_src, plan = prepare(args)
+    model_path, ref_path = model_src.path, ref_src.path
     n_chunk = plan.n_chunk
     tmpdir = tempfile.gettempdir()
 
@@ -437,24 +486,28 @@ def run(args, emit: Callable[[dict], None], log: Callable[[str], None]) -> dict:
     try:
         log(f"[kld] reference {os.path.basename(ref_path)}: {n_chunk} chunks "
             f"of {args.ctx} tokens")
-        model = _load(ref_path, args)
+        model, ns = _load(ref_src, args)
         try:
             scorer = Scorer(model, args.ctx)
             _check_head(scorer, plan, "--reference")
-            with _resident_wire(model, args), open(ref_file, "wb") as f:
+            with _resident_wire(model, ns), open(ref_file, "wb") as f:
                 score_reference(scorer, plan, f, progress)
         finally:
-            scorer = model = None
+            scorer = None
+            _release(model, ref_path)
+            model = None
             _unload()
         log(f"[kld] model {os.path.basename(model_path)}")
-        model = _load(model_path, args)
+        model, ns = _load(model_src, args)
         try:
             scorer = Scorer(model, args.ctx)
             _check_head(scorer, plan, "MODEL")
-            with _resident_wire(model, args), open(ref_file, "rb") as f:
+            with _resident_wire(model, ns), open(ref_file, "rb") as f:
                 sums = score_model(scorer, plan, f, progress)
         finally:
-            scorer = model = None
+            scorer = None
+            _release(model, model_path)
+            model = None
             _unload()
     finally:
         with contextlib.suppress(OSError):
@@ -462,7 +515,7 @@ def run(args, emit: Callable[[dict], None], log: Callable[[str], None]) -> dict:
     mean, mean_unc = sums.mean_kld()
     top, top_unc = sums.same_top()
     return {"event": "result", "model": model_path, "reference": ref_path,
-            "mean_kld": mean,
+            "adapter": None, "strength": None, "mean_kld": mean,
             "mean_kld_unc": mean_unc, "same_top_p": top,
             "same_top_p_unc": top_unc, "positions": sums.count,
             "chunks": n_chunk, "ctx": args.ctx}
@@ -482,8 +535,19 @@ def format_table(result: dict) -> str:
     ])
 
 
+def parse_args(argv: list[str], prog: str = "gmlx kld") -> argparse.Namespace:
+    """The parsed flags, with the set the user passed in ``_explicit``, so
+    a config entry never overrides a typed flag."""
+    from .cli import _explicit_dests
+
+    parser = build_parser(prog)
+    args = parser.parse_args(argv)
+    args._explicit = _explicit_dests(parser, argv)
+    return args
+
+
 def cmd_kld(argv: list[str], prog: str = "gmlx kld") -> int:
-    args = build_parser(prog).parse_args(argv)
+    args = parse_args(argv, prog)
     if not args.reference:
         print(f"error: {prog} needs --reference FILE, the GGUF to score "
               "MODEL against", file=sys.stderr)
