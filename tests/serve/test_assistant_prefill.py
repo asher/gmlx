@@ -6,6 +6,7 @@ refuses, and refuse what gmlx cannot render the same way."""
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 import re
 import types
@@ -461,6 +462,25 @@ def test_a_request_without_the_fields_renders_as_before(chat):
     assert with_prefill.endswith("<|im_start|>assistant\n<think>\n")
 
 
+def test_a_request_without_the_fields_keeps_its_gen_args(chat):
+    """The transform and the to_template_kwargs wrap leave such a request
+    as the layers under them build it."""
+    from gmlx.upstream.patching import under
+
+    req = _SCHEMAS.ChatRequest(model="m", messages=[*_HISTORY, _C],
+                               chat_template_kwargs={"enable_thinking": True})
+    processor = _processor_for(_QWEN)[0]
+    assert vars(prefill._stash_continuation(
+        types.SimpleNamespace(), req, processor)) == {}
+    args = _APP._build_gen_args(req, processor)
+    assert not {"_kq_continue", "_kq_add_gen"} & set(vars(args))
+    cls = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.server.generation").GenerationArguments
+    stock = under(cls.to_template_kwargs, prefill._FLAG)
+    assert stock is not cls.to_template_kwargs
+    assert args.to_template_kwargs() == stock(args)
+
+
 def test_the_install_places_prefill_inside_the_retire_capture(monkeypatch):
     """role(seed(retire(prefill(faithful(stock))))) on every render binding."""
     import gmlx.serve.patches as sp
@@ -564,14 +584,46 @@ def test_the_stream_splitter_starts_where_the_prefill_ends(chat, rid, in_thinkin
     ("gemma4_12b/think-on/reasoning", "<|channel>thought", "<channel|>", True),
     ("gemma4_12b/think-on/content", "<|channel>thought", "<channel|>", False),
 ])
-def test_a_reasoning_prefill_starts_the_budget_inside_a_block(rid, start, end,
-                                                              opens):
-    """The budget criteria start inside a block when the prompt ends inside
-    one: a reasoning prefill does, a content prefill does not."""
+def test_a_reasoning_prefill_prompt_ends_inside_a_block(chat, rid, start, end,
+                                                        opens):
+    """The prompt gmlx renders ends inside a thinking block for a reasoning
+    prefill, and outside one for a content prefill, so the budget criteria
+    start in the right state."""
     from gmlx.gen.thinking_budget import prompt_opens_block
 
-    prompt = _row(rid)["prompt"]
+    row = _row(rid)
+    prompt = _expected(row, chat(row["run"], row["body"]))[1]
     assert prompt_opens_block(_ids(prompt), _ids(start), _ids(end)) is opens
+
+
+def _has_prompt_reasoning_tokens():
+    from gmlx.gen import thinking_budget
+
+    return hasattr(thinking_budget, "prompt_reasoning_tokens")
+
+
+# Rows that wait on the prompt budget count. Once it lands they fail until
+# someone writes them.
+@pytest.mark.skipif(not _has_prompt_reasoning_tokens(),
+                    reason="needs prompt_reasoning_tokens in thinking_budget")
+def test_a_prefill_budget_counts_the_prefilled_reasoning():
+    pytest.fail(
+        "Write the prefill budget rows: a reasoning prefill of k tokens, "
+        "longer than 16 ids, with a budget of k + 2 forces the close after "
+        "2 generated tokens on the plain criteria and on the MTP hook; a "
+        "budget of k lets one thinking token through; a content prefill does "
+        "not arm the count; prompt_reasoning_tokens on the prefilled ids "
+        "returns k for a reasoning prefill and 0 for a content prefill.")
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("gmlx.serve.lora_request") is None,
+    reason="needs the per-request lora field")
+def test_a_prefill_with_an_adapter_scores_as_decode_did():
+    pytest.fail(
+        "Write the adapter row in tests/serve/test_prefill_logp.py: one Qwen "
+        "row again with an adapter loaded and requested at strength 1.0 "
+        "through lora, with the same prompt id and logprob checks.")
 
 
 def test_the_render_key_never_reaches_the_stock_render(chat, monkeypatch):
