@@ -1385,10 +1385,11 @@ def test_the_images_of_an_edit_are_priced_beside_the_arrays_before_them(
 
 @pytest.mark.parametrize("fmt,mode", [("PNG", "RGB"), ("WEBP", "RGBA")])
 def test_the_decode_price_bounds_what_the_decode_holds(fmt, mode, tmp_path):
-    """What an image's decode holds at its peak, by the process's maximum
-    resident size, stays within the price read from its header: 4096
-    pixels square, a PNG of 22 bytes a pixel and a WebP with alpha, the
-    widest decode, of 35."""
+    """What an image's decode holds at its peak, by the process's lifetime
+    maximum physical footprint, stays within the price read from its
+    header: 4096 pixels square, a PNG of 22 bytes a pixel and a WebP with
+    alpha, the widest decode, of 35. On macOS the footprint counts pages
+    the compressor takes, which ru_maxrss drops on a loaded host."""
     import os
     import subprocess
     import sys
@@ -1399,22 +1400,27 @@ def test_the_decode_price_bounds_what_the_decode_holds(fmt, mode, tmp_path):
     Image.new(mode, (4096, 4096), (10, 20, 30, 40)[:len(mode)]).save(p, fmt)
     price = svc.decode_price(p.read_bytes())[0]
     code = f"""
-import io, resource
+import ctypes, io, os, resource, sys
 from PIL import Image
 from gmlx.serve.image_service import decode_image
+def peak():
+    if sys.platform != "darwin":
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+    # rusage_info_v4: ri_lifetime_max_phys_footprint at bytes 240:248.
+    buf = ctypes.create_string_buffer(512)
+    assert ctypes.CDLL(None).proc_pid_rusage(os.getpid(), 4, buf) == 0
+    return int.from_bytes(buf.raw[240:248], "little")
 tiny = io.BytesIO()
 Image.new({mode!r}, (2, 2)).save(tiny, {fmt!r})
 decode_image(tiny.getvalue(), "image")
 data = open({str(p)!r}, "rb").read()
-before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+before = peak()
 decode_image(data, "image")
-print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before)
+print(peak() - before)
 """
     out = subprocess.run([sys.executable, "-c", code], capture_output=True,
                          text=True, env=os.environ, check=True)
-    # ru_maxrss is in bytes on macOS, in KiB elsewhere.
-    held = int(out.stdout.split()[-1]) * (1 if sys.platform == "darwin"
-                                          else 1024)
+    held = int(out.stdout.split()[-1])
     assert 0.8 * price < held <= price, (held, price)
 
 
