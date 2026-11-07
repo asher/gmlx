@@ -1061,6 +1061,29 @@ def _form(fields: dict, files: dict) -> tuple[bytes, str]:
     return b"".join(out), f"multipart/form-data; boundary={b}"
 
 
+@pytest.mark.parametrize("how", ["json", "form"])
+@pytest.mark.parametrize("field", ["first_frame", "input_reference",
+                                   "last_frame"])
+def test_an_empty_keyframe_field_is_a_400_naming_it(routes, how, field):
+    """A client that sends a keyframe field empty gets a 400, not a clip
+    without that keyframe."""
+    if how == "form":
+        body, ctype = _form({"prompt": "a cat", field: ""}, {})
+        r = routes.client.post("/v1/videos", content=body,
+                               headers={"content-type": ctype})
+    else:
+        r = routes.client.post("/v1/videos",
+                               json={"prompt": "a cat", field: ""})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert (err["param"], err["message"]) == (
+        field, f"{field} is an image as a data URL "
+        "(data:image/png;base64,...) in a JSON body, or a file in a "
+        "multipart form")
+    assert routes.store.jobs == {}
+    assert routes.store.pending == {}
+
+
 def test_a_form_streams_its_files_to_the_jobs_inputs(routes):
     body, ctype = _form({"prompt": "a cat", "guides": json.dumps(
         [{"file": "guide_0", "frame": 0}]), "guide_no_audio": "true"},

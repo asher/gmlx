@@ -154,29 +154,36 @@ def _int(fields: dict, name: str) -> int | None:
     return n
 
 
-def _data_url(value, name: str, folder: str, take) -> str:
-    """Write the image of the data URL ``value`` to ``folder``, within the
-    room ``take(n)`` reserves in the job store."""
+def _no_data_url(field: str) -> Refused:
+    return Refused(400, f"{field} is an image as a data URL "
+                   "(data:image/png;base64,...) in a JSON body, or a file "
+                   "in a multipart form", field)
+
+
+def _data_url(value, name: str, folder: str, take,
+              field: str | None = None) -> str:
+    """Write the image of the data URL ``value`` to ``folder`` as ``name``,
+    within the room ``take(n)`` reserves in the job store. A refusal names
+    ``field``, the field the client sent, else ``name``."""
+    field = field or name
     if not isinstance(value, str) or not value.startswith("data:image/") \
             or ";base64," not in value:
-        raise Refused(400, f"{name} is an image as a data URL "
-                      "(data:image/png;base64,...) in a JSON body, or a "
-                      "file in a multipart form", name)
+        raise _no_data_url(field)
     from .media_gate import b64decode
 
     try:
         data = b64decode(value[value.index(",") + 1:], validate=True)
     except (binascii.Error, ValueError):
-        raise Refused(400, f"{name} is not base64", name) from None
+        raise Refused(400, f"{field} is not base64", field) from None
     if take is not None:
         ok, left, arriving = take(len(data))
         if not ok:
-            raise Refused(413, f"the keyframe {name} is "
+            raise Refused(413, f"the keyframe {field} is "
                           f"{_mib(len(data), True)}, and the video job "
                           f"store has {_mib(left)} of room left"
                           f"{arriving_note(arriving)}; send a smaller "
                           "image, delete finished jobs, or raise "
-                          "server.video.store_max_bytes", name)
+                          "server.video.store_max_bytes", field)
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, name)
     with open(path, "wb") as f:
@@ -310,13 +317,20 @@ def _keyframes(sent: dict, folder: str, take) -> dict:
     keys = {}
     for name, alias in (("first_frame", "input_reference"),
                         ("last_frame", "last_frame")):
-        file, value = sent[name] if any(sent[name]) else sent[alias]
+        field = name if _given(sent[name]) else alias
+        file, value = sent[field]
         keys[name] = file if file is not None else (
-            None if value is None else _data_url(value, name, folder, take))
+            None if value is None
+            else _data_url(value, name, folder, take, field))
     for name, v in keys.items():
         if v is not None and not _pixels(v, name):
             raise Refused(400, f"{name} is no image the server reads", name)
     return keys
+
+
+def _given(pair: tuple) -> bool:
+    """Whether a keyframe field's (file, value) was sent, empty or not."""
+    return any(v is not None for v in pair)
 
 
 def _inline(sent: dict) -> bool:
@@ -391,7 +405,11 @@ def prepare_head(fields: dict, files: dict) -> SimpleNamespace:
     # input_reference is the OpenAI field of the first frame.
     sent = {k: (files.get(k), fields.get(k)) for k in
             ("first_frame", "input_reference", "last_frame")}
-    if any(sent["first_frame"]) and any(sent["input_reference"]):
+    # An empty field is refused, not read as no keyframe.
+    for k, (file, value) in sent.items():
+        if file is None and value is not None and not value:
+            raise _no_data_url(k)
+    if _given(sent["first_frame"]) and _given(sent["input_reference"]):
         raise Refused(400, "first_frame and input_reference both name the "
                       "first frame; send one", "input_reference")
     return SimpleNamespace(prompt=prompt, path=path, spec=spec, plan=plan,
