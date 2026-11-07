@@ -875,12 +875,20 @@ def test_a_clip_removed_as_its_content_goes_out_is_sent_whole(routes, end):
     sent = []
 
     async def receive():
+        # A connected client sends nothing more: the response cancels this
+        # wait once the clip has gone out.
+        await asyncio.Event().wait()
         return {"type": "http.disconnect"}
 
     async def send(message):
         sent.append(message)
-    asyncio.run(response({"type": "http", "method": "GET", "headers": []},
-                         receive, send))
+    raised = None
+    try:
+        asyncio.run(response({"type": "http", "method": "GET",
+                              "headers": []}, receive, send))
+    except RuntimeError as e:       # the server answers it with a 500
+        raised = e
+    assert raised is None, raised
     assert sent[0]["status"] == 200
     assert b"".join(m.get("body", b"") for m in sent[1:]) == b"mp4"
     assert not os.path.exists(response.path)
