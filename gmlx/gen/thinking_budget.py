@@ -132,9 +132,11 @@ def soft_end_seqs(tokenizer, start_seq) -> tuple:
 
 # Harmony answers on the final channel. When the request declares no tools,
 # a forced close also opens that channel: after a cut analysis block, Beam
-# otherwise calls a bash tool that was never declared.
+# otherwise calls a bash tool that was never declared. Kimi K3 answers in
+# its response section, which the answer gate waits for.
 _ANSWER_STEER = {
     _HARMONY_PAIR[0]: "<|start|>assistant<|channel|>final<|message|>",
+    "<|open|>think<|sep|>": "<|open|>response<|sep|>",
 }
 
 
@@ -197,10 +199,16 @@ def think_pairs_in(template) -> list:
              or (p[1] in template and p not in _START_ONLY_PAIRS)]
     # Kimi-K3 builds its markers by macro concatenation ('<|open|>' + tag +
     # '<|sep|>'), so the literal pair never appears in the template source;
-    # detect the macro call on the 'think' tag instead.
-    if not pairs and "<|open|>" in template and "open_tag('think" in template:
+    # detect the macro call on the 'think' tag instead. An MLX-format K3
+    # processor renders in Python and carries only a sentinel.
+    if not pairs and (template == _K3_NATIVE_RENDERER or (
+            "<|open|>" in template and "open_tag('think" in template)):
         pairs = [("<|open|>think<|sep|>", "<|close|>think<|sep|>")]
     return pairs
+
+
+# The chat_template of mlx-vlm's KimiK3Processor.
+_K3_NATIVE_RENDERER = "<kimi-k3-native-python-chat-renderer>"
 
 
 def template_think_pairs(tokenizer) -> list:
@@ -597,7 +605,9 @@ def seq_thinking_budget_criteria_cls():
 # starts only after "<|start|>assistant to=user<|message|>". The recipient
 # is optional, as in llama.cpp's Muse parsers.
 # Harmony's answer is the final channel, with the JSON-constrained variant
-# llama.cpp's response-format rule accepts.
+# llama.cpp's response-format rule accepts. Kimi K3 writes its response
+# section opener after the think section; with thinking off the prompt ends
+# with it.
 _ANSWER_HEADERS = {
     "<|start|>assistant to=self<|message|>": (
         "<|start|>assistant to=user<|message|>",
@@ -605,6 +615,7 @@ _ANSWER_HEADERS = {
     "<|start|>assistant<|channel|>analysis<|message|>": (
         "<|channel|>final<|message|>",
         "<|channel|>final <|constrain|>json<|message|>"),
+    "<|open|>think<|sep|>": ("<|open|>response<|sep|>",),
 }
 # Harmony's template pair, which a request with no family markers resolves.
 _ANSWER_HEADERS[_HARMONY_PAIR[0]] = _ANSWER_HEADERS[

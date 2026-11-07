@@ -133,6 +133,8 @@ def test_markers_split_as_the_synthetic_vocab_splits_them(serve, real, key):
     markers = [m for m in (row.pair or ()) if m]
     if row.pair == mx_._HARMONY:
         markers += ["<|channel|>final<|message|>", "<|start|>assistant"]
+    if row.pair == mx_._XTML:
+        markers.append(mx_._XTML_ANSWER)
     checked = 0
     for text in texts:
         for marker in markers:

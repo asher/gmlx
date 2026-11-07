@@ -101,13 +101,8 @@ _SLASH_MERGES = ("> <", ">< /", ". <", ".< /")
 
 _ON = {"enable_thinking": True}
 _OFF = {"enable_thinking": False}
-_K3_QUESTION = (
-    "Kimi K3 writes <|open|>response<|sep|> after <|close|>think<|sep|>, "
-    "and the grammar refuses it. Gating on the response opener waits for a "
-    "decision (design note, question 14.9).")
-_K3_STREAM = ("The stream splitter strips only its own content markers, so "
-              "Kimi K3's <|open|>response<|sep|> reaches the streamed "
-              "content. The reply split strips it.")
+# Kimi K3's answer header, after <|close|>think<|sep|> or in the prompt.
+_XTML_ANSWER = "<|open|>response<|sep|>"
 
 
 @dataclass(frozen=True)
@@ -127,9 +122,6 @@ class Row:
     singles: tuple = ()
     merges: tuple = ()
     vlm: str | None = None
-    on_reply: str | None = None
-    xfail_on: str | None = None
-    xfail_stream: str | None = None
     exclude: str | None = None
 
 
@@ -170,10 +162,8 @@ ROWS: dict[str, Row] = {
         "deepseek_v3", _THINK, ({"thinking": True}, WAIT),
         ({"thinking": False}, BARE), WAIT, _THINK_SINGLES, vlm="kimi_k25"),
     "fixtures/kimi_k3_template.jinja": Row(
-        "kimi_k3", _XTML, ({"thinking": True}, WAIT),
-        ({"thinking": False}, MAYBE), WAIT, _XTML_SINGLES,
-        on_reply=REASON + _XTML[1] + "<|open|>response<|sep|>" + ANSWER,
-        xfail_on=_K3_QUESTION, xfail_stream=_K3_STREAM),
+        "kimi_k3", _XTML, ({"thinking": True}, HEADER),
+        ({"thinking": False}, BARE), HEADER, _XTML_SINGLES),
     "fixtures/minicpmv46_template.jinja": Row(
         "qwen3", _THINK, (_ON, WAIT), (_OFF, BARE), BARE, _THINK_SINGLES,
         vlm="minicpmv4_6"),
@@ -290,6 +280,7 @@ def serve(monkeypatch):
                 (_RS.ThinkingStreamState, "feed"),
                 (_APP, "_split_thinking_text"), (_RS, "_split_thinking"),
                 (_GEN.ResponseGenerator, "_preprocess_request"),
+                (_GEN.ResponseGenerator, "_make_thinking_budget_criteria"),
                 (_PKG, "_infer_tool_parser_from_processor")])
     for obj, attr in seams:
         if hasattr(obj, attr):
@@ -411,6 +402,8 @@ def _first_step(s, r, kind, start):
 def _reply_parts(row, pair, kind):
     """``(prefix, answer)``: the scripted reply before its answer."""
     if kind == HEADER:
+        if pair == _XTML:
+            return REASON + pair[1] + _XTML_ANSWER, ANSWER
         if pair == _HARMONY:
             return (pair[0] + REASON + pair[1]
                     + "<|start|>assistant<|channel|>final<|message|>", ANSWER)
@@ -463,17 +456,12 @@ def test_a2_thinking_off_at_the_top_level(serve, key, shape):
 
 
 @pytest.mark.parametrize("key,shape", _CASES)
-def test_b_thinking_on_masks_only_the_answer(serve, key, shape, request):
+def test_b_thinking_on_masks_only_the_answer(serve, key, shape):
     row = ROWS[key]
-    if row.xfail_on:
-        request.applymarker(pytest.mark.xfail(strict=True,
-                                              reason=row.xfail_on))
     s = _served(TEMPLATES[key], row, shape)
     kwargs, kind = row.on
     r = _request(s, kwargs=kwargs)
     prefix, answer = _reply_parts(row, row.pair, kind)
-    if row.on_reply:
-        prefix, answer = row.on_reply[:-len(ANSWER)], ANSWER
     _scripted(s, r, kind, row.pair, prefix, answer)
     if kind == MAYBE:
         _scripted(s, _request(s, kwargs=kwargs), kind, row.pair, "", ANSWER)
@@ -493,14 +481,9 @@ def _budget_runs(s, r):
     return crit, hook
 
 
-def _opens_at(s, row, kind):
+def _opens_at(s, prefix):
     """The number of reply tokens before the reasoning text."""
-    if kind == MAYBE:
-        return len(tv.ids(s.tok, row.pair[0]))
-    if kind == HEADER:
-        head = (row.pair[0] if row.pair == _HARMONY else " to=self<|message|>")
-        return len(tv.ids(s.tok, head))
-    return 0
+    return len(tv.ids(s.tok, prefix[:prefix.index(REASON)]))
 
 
 @pytest.mark.parametrize("key,shape", _CASES)
@@ -517,15 +500,32 @@ def test_c_a_budget_with_no_markers_resolves_the_pair(serve, key, shape):
     start, end = (tuple(tv.ids(s.tok, m)) for m in row.pair)
     assert (crit._start_seq, crit._end_seq) == (start, end)
     assert (hook.start_seq, hook.end_seq) == (start, end)
-    assert crit.in_thinking is hook.in_thinking is (kind == WAIT)
-    reply = MAYBE if kind == BARE else kind
-    gen = tv.ids(s.tok, _reply_parts(row, row.pair, reply)[0])
-    _closes_at_the_budget(crit, hook, gen, _opens_at(s, row, reply), end)
+    # The prompt opens the block when the reply starts with reasoning.
+    prefix = _reply_parts(row, row.pair, kind)[0]
+    assert crit.in_thinking is hook.in_thinking is prefix.startswith(REASON)
+    if kind == BARE:
+        prefix = _reply_parts(row, row.pair, MAYBE)[0]
+    gen = tv.ids(s.tok, prefix)
+    replies = _closes_at_the_budget(crit, hook, gen, _opens_at(s, prefix), end)
+    if kind == HEADER and row.pair != _ATEM:
+        for reply in replies:
+            _answer_follows_the_close(s, _request(s, kwargs=kwargs), reply)
+
+
+def _answer_follows_the_close(s, r, reply):
+    """The forced close writes the answer header, so the grammar masks the
+    next token."""
+    proc = _gate(s, r)
+    gen = list(reply) + tv.ids(s.tok, ANSWER)
+    rows = _allowed_rows(proc, r.ids, gen, _vocab(proc))
+    assert all(rows[k].all() for k in range(len(reply)))
+    assert not rows[len(reply)].all() and rows[len(reply)][gen[len(reply)]]
 
 
 def _closes_at_the_budget(crit, hook, gen, opens, end):
     """The plain criteria and the MTP hook close the block on the same
-    reply token, after 4 reasoning tokens, with the end marker."""
+    reply token, after 4 reasoning tokens, with the end marker. Returns
+    the reply each one writes up to the end of its forced run."""
     assert crit.thinking_token_count == hook.count
     want = opens + 4 - crit.thinking_token_count - 1
     for i, t in enumerate(gen):
@@ -541,6 +541,7 @@ def _closes_at_the_budget(crit, hook, gen, opens, end):
     while (forced := crit(run[-1])) is not None:
         run.append(forced)
     assert _seq_in(run, end)
+    return list(gen[:i + 1]) + run, list(gen[:i + 1]) + list(taken)
 
 
 def _splits(s, r, text):
@@ -566,7 +567,7 @@ def _on_reply(row):
     if row.pair is None or kind == BARE:
         return ANSWER, ""
     prefix, answer = _reply_parts(row, row.pair, kind)
-    return (row.on_reply or prefix + answer), REASON
+    return prefix + answer, REASON
 
 
 @pytest.mark.parametrize("key,shape", _CASES)
@@ -610,12 +611,8 @@ def test_d_the_retire_mirror_splits_as_the_reply_split(serve, key, shape):
 
 
 @pytest.mark.parametrize("key,shape", _CASES)
-def test_d_the_stream_split_takes_the_resolved_pair(serve, key, shape,
-                                                    request):
+def test_d_the_stream_split_takes_the_resolved_pair(serve, key, shape):
     row = ROWS[key]
-    if row.xfail_stream:
-        request.applymarker(pytest.mark.xfail(strict=True,
-                                              reason=row.xfail_stream))
     s = _served(TEMPLATES[key], row, shape)
     text, want = _on_reply(row)
     _split, stream = _splits(s, _request(s, kwargs=row.on[0]), text)
@@ -709,6 +706,37 @@ def test_a_one_configured_marker_keeps_the_old_gate(serve, key, kwargs, body,
     _first_step(s, r, kind, _THINK[0])
 
 
+def _native_k3() -> Served:
+    """An MLX-format Kimi K3: its processor renders in Python and carries
+    no template text."""
+    from gmlx._vendor.mlx_vlm.models.kimi_k3.processing_kimi_k3 import (
+        KimiK3Processor)
+
+    proc = KimiK3Processor(tokenizer=tv.tokenizer(None, singles=_XTML_SINGLES))
+    rg = _GEN.ResponseGenerator.__new__(_GEN.ResponseGenerator)
+    rg.tokenizer, rg.processor = proc.tokenizer, proc
+    return Served(rg, proc.tokenizer, "kimi_k3")
+
+
+@pytest.mark.parametrize("thinking,kind", [(True, HEADER), (False, BARE)])
+def test_the_native_k3_renderer_resolves_the_xtml_pair(serve, thinking, kind):
+    s = _native_k3()
+    r = _request(s, kwargs={"thinking": thinking})
+    assert r.prompt.endswith(_XTML[0] if thinking else _XTML_ANSWER)
+    assert r.args._kq_think.pair == _XTML
+    _first_step(s, r, kind, _XTML[0])
+    if thinking:
+        _scripted(s, _request(s, kwargs={"thinking": True}), kind, _XTML,
+                  REASON + _XTML[1] + _XTML_ANSWER, ANSWER)
+        text = (REASON + _XTML[1] + _XTML_ANSWER + ANSWER
+                + "<|close|>response<|sep|>")
+        _split, stream = _splits(s, r, text)
+        assert stream == (REASON, ANSWER)
+        crit, hook = _budget_runs(s, _request(s, kwargs={"thinking": True}))
+        end = tuple(tv.ids(s.tok, _XTML[1]))
+        assert crit._end_seq == hook.end_seq == end
+
+
 # -- families with markers in their base group --------------------------------
 
 
@@ -723,7 +751,7 @@ FAMILY_ROWS = {
     "beam": FamilyRow(_HARMONY_SINGLES, header=True),
     "muse": FamilyRow(_ATEM_SINGLES, header=True),
     "muse-spark": FamilyRow(_ATEM_SINGLES, header=True),
-    "kimi": FamilyRow(_XTML_SINGLES),
+    "kimi": FamilyRow(_XTML_SINGLES, header=True),
     "minimax-m3": FamilyRow(_MM),
     "hy3": FamilyRow(("<think:opensource>", "</think:opensource>")),
     "hy4": FamilyRow(("<think:6124c78e>", "</think:6124c78e>")),
@@ -739,6 +767,17 @@ def _family_pair(family):
 def _family_prompts(family):
     """Prompt -> (gate kind, top-level-off gate kind, scripted prefix)."""
     start, end = _family_pair(family)
+    if start == _XTML[0]:
+        # The header gate opens on a prompt that ends with the header.
+        return {
+            "open": ("Q" + start + "\n", HEADER, HEADER,
+                     REASON + "\n" + end + _XTML_ANSWER),
+            "closed": ("Q" + start + "\n\n" + end, HEADER, HEADER,
+                       _XTML_ANSWER),
+            "plain": ("Q\n", HEADER, HEADER,
+                      start + REASON + "\n" + end + _XTML_ANSWER),
+            "answer": ("Q" + _XTML_ANSWER, BARE, BARE, ""),
+        }
     if FAMILY_ROWS[family].header:
         if "channel" in start:
             prompt = "Q<|end|><|start|>assistant"
@@ -797,11 +836,11 @@ def test_c_a_family_budget_takes_the_family_pair(serve, family, name):
     start, end = (tuple(tv.ids(s.tok, m)) for m in pair)
     assert (crit._start_seq, crit._end_seq) == (start, end)
     assert (hook.start_seq, hook.end_seq) == (start, end)
-    assert crit.in_thinking is hook.in_thinking is (kind == WAIT)
-    if kind == BARE:
+    assert crit.in_thinking is hook.in_thinking is prefix.startswith(REASON)
+    if REASON not in prefix:
         prefix = pair[0] + REASON + "\n" + pair[1]
-    opens = len(tv.ids(s.tok, prefix[:prefix.index(REASON)]))
-    _closes_at_the_budget(crit, hook, tv.ids(s.tok, prefix), opens, end)
+    _closes_at_the_budget(crit, hook, tv.ids(s.tok, prefix),
+                          _opens_at(s, prefix), end)
 
 
 @pytest.mark.parametrize("family,name", _FAMILY_CASES)
@@ -810,7 +849,7 @@ def test_a_family_marker_split(serve, family, name):
     s, r = _family_request(family, _prompt)
     text = prefix + ANSWER
     split, stream = _splits(s, r, text)
-    want = REASON if prefix else ""
+    want = REASON if REASON in prefix else ""
     assert ((split[0] or "").strip(), split[1].strip()) == (want, ANSWER)
     assert (stream[0].strip(), stream[1].strip()) == (want, ANSWER)
     assert _retired(r, text) == (want, ANSWER)
