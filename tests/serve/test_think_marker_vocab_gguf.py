@@ -31,7 +31,8 @@ from gmlx.gen.thinking_budget import rfind_seq  # noqa: E402
 
 _GEMMA = ("gemma4", "gemma-4-12B-it-Q6_K.gguf")
 _QWEN35 = ("qwen35", "Qwen3.5-9B-Q4_K_M.gguf")
-_QWEN36 = ("qwen35", "Qwen_Qwen3.6-27B-Q4_K_S.gguf")
+_QWEN36 = ("qwen35",
+           "Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-Q6_K.gguf")
 
 # Matrix row -> (architecture, GGUF file name).
 VOCABS = {
