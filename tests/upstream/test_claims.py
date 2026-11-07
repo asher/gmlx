@@ -510,6 +510,7 @@ _CENSUSED = (
     "gmlx.serve.patches.messages_route",
     "gmlx.serve.patches.mtp_thinking",
     "gmlx.serve.patches.observability",
+    "gmlx.serve.patches.prefill",
     "gmlx.serve.patches.render",
     "gmlx.serve.patches.routes",
     "gmlx.serve.patches.row_failed",

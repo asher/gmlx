@@ -241,7 +241,6 @@ include = [
     "gmlx/distill/eval.py",
     "gmlx/distill/student.py",
     "gmlx/gen/benchmarks.py",
-    "gmlx/gen/continuation.py",
     "gmlx/gen/generation.py",
     "gmlx/gen/media_spans.py",
     "gmlx/gen/prefill_decay.py",
