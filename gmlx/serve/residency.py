@@ -249,6 +249,8 @@ class _Store:
 
 
 STORE = _Store()
+# A turn's answer that it waits on a release queued on the other worker.
+_ASIDE = object()
 
 
 class _Ledger:
@@ -591,6 +593,8 @@ class _ResidencyPool:
         # not put yet.
         self._tearing = 0
         self._incoming = 0
+        # The tearing bytes of the pipelines each worker kind releases.
+        self._tearing_kind = dict.fromkeys(_WORKER_KINDS, 0)
         # Injectable for tests: the measured room; an entry's LoRA figures
         # ({request key: bytes}, own bytes) from its caches; the shed of an
         # entry's request LoRA bytes and of the idle uploads, each returning
@@ -984,7 +988,9 @@ class _ResidencyPool:
         it keeps and ``beside`` the other entries its job holds, such as a
         borrowed encoder, which count as its own. Sheds idle LoRA bytes,
         evicts idle models as a cold load does, measures and books, or
-        waits for chat models in use within the deadline. Raises
+        waits for chat models in use within the deadline. A release
+        queued on the other worker frees its bytes first: the turn waits
+        on it within the deadline before it sheds or evicts. Raises
         LoraRefused: 413 when no unload makes room, else 503 with
         Retry-After."""
         from .capacity import overcommit
@@ -1024,11 +1030,22 @@ class _ResidencyPool:
                                          beside)
             try:
                 got = self._turn_room(owner, need, subject, hold, held,
-                                      store, retry, over, beside)
+                                      store, retry, over, beside,
+                                      aside=left > 0)
             finally:
                 self._build_lock.release()
             if got is None:
                 return
+            if got is _ASIDE:
+                # Off the build lock, which the release may wait on; past
+                # the deadline, the turn sheds and evicts as before.
+                with self._lock:
+                    while self._aside(owner):
+                        left = deadline - time.monotonic()
+                        if left <= 0:
+                            break
+                        self._idle.wait(left)
+                continue
             seen, err = got
             with self._lock:
                 while self._releases == seen:
@@ -1038,14 +1055,18 @@ class _ResidencyPool:
                     self._idle.wait(left)
 
     def _turn_room(self, owner, need, subject, hold, held, store, retry,
-                   over, beside):
+                   over, beside, aside: bool = True):
         """Under the build lock: shed, evict, measure, then check and book
-        in one hold. Returns None when booked, or (the release count, the
-        503) to wait on."""
+        in one hold. Returns None when booked, (the release count, the
+        503) to wait on, or, with ``aside``, _ASIDE when a release queued
+        on the other worker frees bytes the turn is short of: the turn
+        waits on it before it sheds or picks a victim."""
         self._hit("turn")
         head = None if over else self._measured_lora_room()
         with self._lock:
             short = self._shortfall(owner, need, head, self._uploads())
+            if short > 0 and aside and not over and self._aside(owner):
+                return _ASIDE
         if short > 0:
             self._shed_for(owner, short, hold, store)
         torn: list = []
@@ -1806,8 +1827,29 @@ class _ResidencyPool:
             self._proxy._last_entry = None
         entry.tearing = self._entry_bytes(entry)
         self._tearing += entry.tearing
+        if entry.is_image:
+            self._tearing_kind[entry.kind] += entry.tearing
         entry.lora = None
         torn.append(entry)
+
+    def _torn(self, kind, n: int) -> None:
+        """Under _lock: ``n`` tearing bytes, of a pipeline of worker
+        ``kind`` or of a chat model (None), are gone. A turn that waits on
+        the other worker's release wakes."""
+        self._tearing = max(0, self._tearing - n)
+        if kind is not None:
+            self._tearing_kind[kind] = max(0, self._tearing_kind[kind] - n)
+        self._publish()
+        if n:
+            self._idle.notify_all()
+
+    def _aside(self, owner) -> int:
+        """Under _lock: the tearing bytes of the pipelines the other worker
+        than the turn's of ``owner`` releases. With the build lock held,
+        each is a release queued there by a teardown done after it dropped
+        the lock, which frees its bytes once it runs."""
+        kind = _owner_kind(owner)
+        return sum(n for k, n in self._tearing_kind.items() if k != kind)
 
     def _teardown_all(self, torn: list, released: list) -> None:
         """Tear down the entries taken out of the pool, with no _lock held:
@@ -1827,8 +1869,7 @@ class _ResidencyPool:
                 # An image entry's bytes went with its pipeline.
                 with self._lock:
                     n, entry.tearing = entry.tearing, 0
-                    self._tearing = max(0, self._tearing - n)
-                    self._publish()
+                    self._torn(entry.kind if entry.is_image else None, n)
         if first is not None:
             raise first
 
@@ -2396,8 +2437,7 @@ class _ResidencyPool:
             finally:
                 if n:
                     with self._lock:
-                        self._tearing = max(0, self._tearing - n)
-                        self._publish()
+                        self._torn(kind, n)
 
     def _teardown_chat(self, entry: _Entry):
         from . import bridge_vlm as _serving

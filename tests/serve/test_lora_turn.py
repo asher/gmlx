@@ -324,6 +324,61 @@ def test_a_video_turn_evicts_its_own_idle_entries_and_chat(monkeypatch):
     assert pool.release_threads == {"old": "video-worker-test"}
 
 
+def test_a_video_turn_waits_on_an_image_release_before_it_evicts(
+        monkeypatch):
+    """An unload of an image model, as its job ends, releases its pipeline
+    on the image worker once the build lock drops, so its 3 GB still
+    count as the video turn takes the lock. The turn waits on that
+    release, which makes its room, where it evicted the idle chat
+    model."""
+    pool = make_pool(monkeypatch, 10, retry=WAIT)
+    zimage = image(pool, "zimage", 3)
+    qwen = chat(pool, "qwen3", 3, busy=0)
+    v = video(pool, "v", 3, busy=True)
+    # The unload does not hold the image worker: its job held it at the
+    # unload's reservation.
+    monkeypatch.setattr(residency, "_holds_image_worker", lambda: False)
+    fp, load, release = pool._image_fns
+    at, go, either = threading.Event(), threading.Event(), threading.Event()
+
+    def queued(box):
+        # Queued on the image worker behind its next job.
+        at.set()
+        assert go.wait(WAIT)
+        release(box)
+    pool._image_fns = (fp, load, queued)
+    w = waits(pool)
+    cond_wait = w.wait
+
+    def wait(timeout=None):
+        either.set()
+        return cond_wait(timeout)
+    w.wait = wait
+    unload = start("unload", lambda: pool.evict("zimage"))
+    assert at.wait(WAIT), "no release started"
+    assert not pool.entry_resident(zimage)
+    done = threading.Event()
+
+    def run():
+        try:
+            pool.lora_turn(v, 3 * GB, subject="the test's LoRA")
+            done.set()
+        finally:
+            either.set()
+    job = start("video-worker-test", run)
+    try:
+        assert either.wait(WAIT)
+        assert w.waiting.is_set() and not done.is_set(), \
+            "the turn did not wait on the release"
+    finally:
+        go.set()
+    finish(*job)
+    finish(*unload)
+    assert pool.entry_resident(qwen)
+    assert v.lora.pending == 3 * GB
+    assert pool.figures.tearing == 0
+
+
 def test_a_video_turn_sheds_an_idle_upload_with_the_image_worker_busy(
         monkeypatch):
     """An upload is its body's bytes, made on no worker: a video turn
