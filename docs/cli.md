@@ -1167,7 +1167,8 @@ gmlx kld Qwen3.5-9B-Q4_K_M.gguf --text page.txt \
 ```
 
 Each `--adapter PATH[:STRENGTH]` flag is one scored point: MODEL with that
-adapter at that strength, 1 when left out. Each distinct file loads once.
+adapter at that strength, 1 when left out. gmlx checks each distinct file
+before any model loads, and loads it once, with MODEL.
 The flags and `--reference` decide what is scored:
 
 | Flags | Reference | Points |
@@ -1178,12 +1179,13 @@ The flags and `--reference` decide what is scored:
 | Neither | None | The command stops. |
 
 With `--reference`, the reference loads first, alone, and scores the text
-into a temporary file. Then it unloads and MODEL loads, so the two models
-never share memory. Without it, MODEL scores the reference and the points
-in one load. One forward can hold several points of the same chunks, as
-many as keep the float32 logits under 1 GB. The temporary file needs about 127 MB per chunk at a vocabulary of
-248,320 and `--ctx 512`. It goes in the temporary folder, which `TMPDIR`
-sets, and gmlx checks the free space before the reference loads.
+into a temporary file. Then it unloads and MODEL loads with the adapters,
+so the two models never share memory. Without it, MODEL scores the
+reference and the points in one load. One forward holds as many (chunk,
+point) rows, chunk by chunk, as keep the float32 logits under 1 GB. The
+temporary file needs about 127 MB per chunk at a vocabulary of 248,320
+and `--ctx 512`. It goes in the temporary folder, which `TMPDIR` sets, and
+gmlx checks the free space before the reference loads.
 
 The text is cut into chunks of `--ctx` tokens, and each chunk is scored
 from its middle position to its second-last. The text must hold at least
@@ -1212,11 +1214,11 @@ The placement flags apply to each model in turn, as the
 
 A model given as a config id loads with the placement of its config entry,
 `stream:` and the MoE settings, where you typed no placement flag. The
-command stops before any load when the entry sets `adapter` or
-`rope_scaling`, which `gmlx kld` does not apply. Pass the GGUF path to
-score the bare file, with `--adapter` for each adapter point. An adapter
-on the output head also stops the command, because the head runs in
-float32 without adapters.
+command stops before any load when the entry sets `adapters` (or
+`adapter`) or `rope_scaling`, which `gmlx kld` does not apply. Pass the
+GGUF path to score the bare file, with `--adapter` for each adapter point.
+An adapter on the output head also stops the command, because the head
+runs in float32 without adapters.
 
 The command also stops when either vocabulary adds EOS to each text
 (`tokenizer.ggml.add_eos_token`), because llama-perplexity refuses such a
