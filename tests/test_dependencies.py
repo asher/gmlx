@@ -324,7 +324,8 @@ def test_each_standalone_script_states_the_projects_python_floor():
 
     floor = _project()["requires-python"]
     stated = {}
-    for path in [*_ROOT.glob("scripts/*.py"), *_ROOT.glob("tests/e2e/*.py")]:
+    for path in [*_ROOT.glob("scripts/**/*.py"),
+                 *_ROOT.glob("tests/e2e/**/*.py")]:
         for got in re.findall(r'requires-python = "([^"]+)"', path.read_text()):
             stated.setdefault(got, []).append(path.relative_to(_ROOT).as_posix())
     assert stated, "no script states a floor"
