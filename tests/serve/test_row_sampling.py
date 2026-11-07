@@ -48,7 +48,7 @@ def _settings(**rows):
     return out
 
 
-# --- the sampler-side keyed path ---
+# The sampler-side keyed path.
 
 def test_unseeded_rows_keep_stock_keys():
     s = _sampler()
@@ -81,7 +81,7 @@ def test_seeded_target_draw_replays():
     assert s._kq_rows == ["u"]      # context restored
 
 
-# --- RowSampler ---
+# RowSampler.
 
 def test_a_one_config_batch_draws_the_stock_keys_byte_for_byte():
     lp = _logprobs(rows=3)
@@ -185,7 +185,7 @@ def test_prune_keeps_live_uids(monkeypatch):
     assert sorted(store) == [0, 1, 2, 3, 4]
 
 
-# --- request to row ---
+# Request to row.
 
 class _RG:
     top_logprobs_k = 5

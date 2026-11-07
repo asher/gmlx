@@ -147,7 +147,7 @@ def _check(first, toks, entries, k=K):
             np.testing.assert_allclose(vals, row[ids], atol=1e-5)
 
 
-# -- the B=1 scalar loop ----------------------------------------------------
+# The B=1 scalar loop.
 
 
 def _scalar(*, sampler=None, max_tokens=8, b=3, row_procs=None, hook=None,
@@ -261,7 +261,7 @@ def test_a_preempt_tail_carries_its_entries():
     _check(first, tail, model._kq_preempt_capture_lp)
 
 
-# -- owned_server_rounds (B=1 serve) ------------------------------------------
+# owned_server_rounds, the B=1 serve path.
 
 
 def _server(row, *, sampler=None, greedy_sampling=True, uid=4, max_tokens=7):
@@ -304,7 +304,7 @@ def test_a_seeded_lone_row_replays():
     assert run(1234) != run(99)
 
 
-# -- the batch loop -----------------------------------------------------------
+# The batch loop.
 
 
 def _settings(rows):
@@ -478,7 +478,7 @@ def test_the_row_sampler_default_is_greedy():
     assert RowSettings().key == GREEDY_KEY and RowSettings().sampler is None
 
 
-# -- SpeculativeGenerationBatch -------------------------------------------------
+# SpeculativeGenerationBatch.
 
 
 def _entry(x):

@@ -139,14 +139,14 @@ def test_a_tokenizer_without_a_fast_backend_gets_decoded_bytes(caplog):
 
     class Slow:
         def decode(self, ids):
-            return {7: "é", 8: "x"}[ids[0]]
+            return {7: "\u00e9", 8: "x"}[ids[0]]
 
         def convert_ids_to_tokens(self, ids):
             raise AssertionError("no vocabulary lookup in fallback mode")
 
     slow = Slow()
     with caplog.at_level("WARNING", logger="gmlx.load.tokenizer"):
-        assert token_bytes_for(slow, [7, 8]) == ["é".encode(), b"x"]
+        assert token_bytes_for(slow, [7, 8]) == ["\u00e9".encode(), b"x"]
         assert token_bytes_for(slow, [8]) == [b"x"]
     assert sum("fast backend" in r.message for r in caplog.records) == 1
 

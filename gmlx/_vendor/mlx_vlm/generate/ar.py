@@ -2740,8 +2740,8 @@ class BatchGenerator:
         self.draft_block_size = draft_block_size
         self.greedy_sampling = greedy_sampling or sampler is None
         # gmlx: speculative rows take logprobs from the verify logits, so a
-        # drafter no longer turns them off. The constructor's sampler and
-        # flags are the default row; each insert brings its rows' own.
+        # drafter keeps them on. The constructor's sampler and flags are the
+        # default row; each insert brings its rows' own.
         self.logprobs_cap = int(top_logprobs_k if logprobs_cap is None else logprobs_cap)
         self._row_settings: Dict[int, Any] = {}
         self.apc = (
@@ -3170,7 +3170,7 @@ class BatchGenerator:
         if row_settings is not None and len(row_settings) != len(prompts):
             raise ValueError("Insufficient number of row_settings provided")
 
-        # gmlx: past the bound, forget uids that are no longer live.
+        # gmlx: past the bound, forget uids that are not live.
         from gmlx.serve.row_sampling import prune, register_seed
 
         store = getattr(self, "_row_settings", None)
