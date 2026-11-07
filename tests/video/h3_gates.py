@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from collections import Counter
 from contextlib import contextmanager
+from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
@@ -502,9 +504,47 @@ def free_row(name: str) -> bool:
 FLOORS = {"free": ("exact_free_floor", "exact_free"),
           **{v: (f"exact_{v}_floor", f"exact_{v}") for v in VELOCITIES}}
 NUDGE_SEEDS = (0, 1, 2, 3)
-# Set to 1 to record the floors measured now in the manifests, for new
-# fixtures or another machine.
+# Set to a directory to record the floors measured now, for new fixtures
+# or another machine: each manifest the exact gate reads is written there
+# with them, to copy over the committed one under
+# tests/fixtures/video/oracle/ and the one under GMLX_VIDEO_FIXTURES. A run
+# never rewrites either.
 RECORD = "GMLX_VIDEO_RECORD_FLOORS"
+_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+
+
+def record_dir() -> Path | None:
+    """The directory RECORD names, or None while it is unset."""
+    value = os.environ.get(RECORD)
+    if not value:
+        return None
+    out = Path(value).expanduser().resolve()
+    assert out.is_dir(), (f"{RECORD}={value} is not a directory: set it to "
+                          "the directory for the recorded manifests")
+    kept = [_FIXTURES.resolve()]
+    if os.environ.get("GMLX_VIDEO_FIXTURES"):
+        kept.append(Path(os.environ["GMLX_VIDEO_FIXTURES"]).expanduser()
+                    .resolve())
+    for d in kept:
+        assert not out.is_relative_to(d), (
+            f"{RECORD}={value} is under {d}, whose manifests a run reads: "
+            "name another directory and copy the recorded manifests over")
+    return out
+
+
+def write_recorded(m: dict, paths, edit) -> None:
+    """The manifest at each of ``paths`` with ``edit`` applied to it,
+    written under the same name in the RECORD directory."""
+    out = record_dir()
+    assert out is not None, f"{RECORD} is not set"
+    for path in paths:
+        doc = json.loads(Path(path).read_text())
+        assert doc["npz"] == m["npz"], path
+        edit(doc)
+        dst = out / Path(path).name
+        tmp = dst.with_name(dst.name + ".part")
+        tmp.write_text(json.dumps(doc, indent=1) + "\n")
+        tmp.replace(dst)
 
 
 def nudged(arrays: dict, seed: int) -> dict:
@@ -585,7 +625,9 @@ def check_floor(m: dict, floor: dict, label: str) -> dict:
 
 def record_floors(m: dict, floor: dict, paths) -> dict:
     """Write the floors measured now, and the tolerances the rule gives
-    them, into each manifest at ``paths``. Returns the new manifest."""
+    them, into a copy of each manifest at ``paths`` in the RECORD
+    directory. Returns the new manifest."""
+    record_dir()
     now = floors_now(floor)
     how = (f"the largest relative L2 between gmlx's exact step on the GPU "
            f"and the same step on the CPU stream or on inputs nudged by "
@@ -600,14 +642,10 @@ def record_floors(m: dict, floor: dict, paths) -> dict:
                                    "measured": how.format(v)}
     tols = {key: {"rel_l2": max(bg.EXACT_TOL, 2 * res[r]["rel_l2"])}
             for r, key in FLOORS.values()}
-    for path in paths:
-        doc = json.loads(path.read_text())
-        assert doc["npz"] == m["npz"], path
+    def edit(doc):
         doc["results"].update(res)
         doc["tolerances"].update(tols)
-        tmp = path.with_name(path.name + ".part")
-        tmp.write_text(json.dumps(doc, indent=1) + "\n")
-        tmp.replace(path)
+    write_recorded(m, paths, edit)
     return {**m, "results": {**m["results"], **res},
             "tolerances": {**m["tolerances"], **tols}}
 

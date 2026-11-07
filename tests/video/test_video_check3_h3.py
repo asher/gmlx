@@ -24,7 +24,8 @@ arithmetic, every K-quant product dense on its dequantized weight and
 every float tensor of the file in float32. It holds the teacher-forced
 rows to EXACT_TOL, and the free rows and each velocity to the larger of
 EXACT_TOL and twice gmlx's own fp32 floor that the manifest records;
-GMLX_VIDEO_RECORD_FLOORS=1 records the floors measured now. The
+GMLX_VIDEO_RECORD_FLOORS=<dir> writes manifests with the floors
+measured now to <dir>, to copy over the committed ones. The
 site gate holds each op of every block and each linear leaf on the path a
 request takes to the stock op in float32 on the same input, within 2 n u
 (h3_gates.py).
@@ -48,6 +49,7 @@ skip until both are there.
 from __future__ import annotations
 
 import copy
+import json
 import os
 from pathlib import Path
 
@@ -157,6 +159,50 @@ def test_a_restart_spread_widens_free_block_rows_alone(wrong):
     wrong(m)
     with pytest.raises(AssertionError):
         hg.assert_manifest_rule(m)
+
+
+def _recordable(tmp_path):
+    m = copy.deepcopy(_manifest(REAL[0]))
+    src = tmp_path / "oracle" / f"{m['name']}.manifest.json"
+    src.parent.mkdir()
+    src.write_text(json.dumps(m, indent=1) + "\n")
+    floor = {"condition_proj": 3e-6, "blocks.0": 9e-6,
+             "velocity_video": 2e-6, "velocity_audio": 1e-6}
+    return m, src, floor
+
+
+def test_recording_floors_writes_a_copy_and_leaves_the_manifest(
+        tmp_path, monkeypatch):
+    """The floors a run records go to a manifest in the directory
+    GMLX_VIDEO_RECORD_FLOORS names, for the user to copy; the manifest
+    the run read is left as it was."""
+    m, src, floor = _recordable(tmp_path)
+    before = src.read_text()
+    out = tmp_path / "recorded"
+    out.mkdir()
+    monkeypatch.setenv(hg.RECORD, str(out))
+    got = hg.record_floors(m, floor, (src,))
+    assert src.read_text() == before
+    doc = json.loads((out / src.name).read_text())
+    assert doc["results"]["exact_free_floor"]["rel_l2"] == 3e-6
+    assert doc["results"]["exact_free_floor"]["row"] == "condition_proj"
+    assert doc["tolerances"] == got["tolerances"]
+    assert doc["npz"] == m["npz"] and doc["tensors"] == m["tensors"]
+
+
+@pytest.mark.parametrize("value", ("1", "oracle", "fixtures"))
+def test_recording_floors_refuses_a_flag_or_a_folder_of_manifests(
+        tmp_path, monkeypatch, value):
+    """A value that is no directory, the committed manifests' folder or
+    the fixture directory is refused before anything is written."""
+    m, src, floor = _recordable(tmp_path)
+    before = src.read_text()
+    monkeypatch.setenv(fx.ENV, str(src.parent))
+    named = {"1": "1", "oracle": str(ORACLE), "fixtures": str(src.parent)}
+    monkeypatch.setenv(hg.RECORD, named[value])
+    with pytest.raises(AssertionError, match=hg.RECORD):
+        hg.record_floors(m, floor, (src,))
+    assert src.read_text() == before
 
 
 @pytest.fixture(scope="module")
@@ -380,6 +426,7 @@ def test_check3_exact_gate(request, name):
     arithmetic, and the free rows and the velocities within the fixture's
     gates from the floors measured now."""
     fixture_present(_manifest(name)["name"])
+    record = hg.record_dir() is not None
     if not exact_process():
         return rerun_exact(request, f"h3 check3 exact {name}")
     arrays, m = fixture(name)
@@ -387,10 +434,9 @@ def test_check3_exact_gate(request, name):
     label = f"h3 check3 exact {name}"
     with hg.exact_floats(model) as n:
         floor = hg.exact_free_floor(model, arrays, m)
-        if os.environ.get(hg.RECORD) == "1":
-            m = hg.record_floors(m, floor, (
-                ORACLE / f"{name}.manifest.json",
-                fx.fixture_root() / f"{name}.manifest.json"))
+        if record:
+            m = hg.record_floors(m, floor,
+                                 (ORACLE / f"{name}.manifest.json",))
         tol = hg.check_floor(m, floor, label)
         got = hg.exact_measures(model, arrays, m)
     print(hg.exact_line(f"{label}, {n} float tensors cast to fp32", got,

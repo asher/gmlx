@@ -868,8 +868,8 @@ def _record(m: dict, floor: dict, step_floor: dict, steps: list,
             paths) -> dict:
     """Write the run floor measured now, the step floors of the steps and
     streams that miss EXACT_TOL (none, the key dropped), and the gates
-    they give, into each manifest at ``paths``. Returns the new
-    manifest."""
+    they give, into a copy of each manifest at ``paths`` in the RECORD
+    directory. Returns the new manifest."""
     files = [m["files"][k] for k in ("dit", "lora") if k in m["files"]]
     named = " with ".join(f"{f['name']} {f['sha256'][:8]}" for f in files)
     how = (f"the largest relative L2 between gmlx's exact {{}} on the GPU "
@@ -893,16 +893,12 @@ def _record(m: dict, floor: dict, step_floor: dict, steps: list,
         tols["exact_steps"] = {k: {s: {"rel_l2": max(bg.EXACT_TOL, 2 * f)}
                                    for s, f in v.items()}
                                for k, v in step_floor.items()}
-    for path in paths:
-        doc = json.loads(path.read_text())
-        assert doc["npz"] == m["npz"], path
+    def edit(doc):
         doc["results"].pop("exact_step_floor", None)
         doc["tolerances"].pop("exact_steps", None)
         doc["results"].update(res)
         doc["tolerances"].update(tols)
-        tmp = path.with_name(path.name + ".part")
-        tmp.write_text(json.dumps(doc, indent=1) + "\n")
-        tmp.replace(path)
+    hg.write_recorded(m, paths, edit)
     results = {k: v for k, v in m["results"].items()
                if k != "exact_step_floor"}
     tolerances = {k: v for k, v in m["tolerances"].items()
@@ -930,7 +926,7 @@ def test_check6_exact_gates(gguf_dir, request, name):
     if not bg.exact_process():
         return bg.rerun_exact(request, label)
     arrays, m = fixture(_manifest(name)["name"])
-    record = os.environ.get(hg.RECORD) == "1"
+    record = hg.record_dir() is not None
     if not record:
         _floor(m)
     pipe = _load(gguf_dir, m)
@@ -952,8 +948,7 @@ def test_check6_exact_gates(gguf_dir, request, name):
         step_floor = measure(miss) if record and miss else {}
         if record:
             m = _record(m, floor, step_floor, steps,
-                        (ORACLE / f"{name}.manifest.json",
-                         fx.fixture_root() / f"{name}.manifest.json"))
+                        (ORACLE / f"{name}.manifest.json",))
         gates = _step_gates(m, steps, (lambda _: step_floor) if record
                             else measure)
         bare = None
