@@ -21,7 +21,9 @@ Checks per template and server shape:
 - (b) thinking on: a scripted reply; only the answer is masked;
 - (c) a budget of 4 with no markers configured: the plain criteria and
   the MTP hook;
-- (d) the reply split and the stream splitter.
+- (d) the reply split, the stream splitter and the retire mirror.
+
+A raw completion of each rendered prompt gates as its chat request.
 
 A template file with no row fails ``test_every_template_has_a_row``, so a
 new fixture enters every check.
@@ -29,6 +31,7 @@ new fixture enters every check.
 
 from __future__ import annotations
 
+import copy
 import importlib
 import re
 from dataclasses import dataclass
@@ -43,10 +46,13 @@ import numpy as np  # noqa: E402
 import think_vocab as tv  # noqa: E402
 
 import gmlx  # noqa: E402
+from gmlx.cache import retire_key  # noqa: E402
 from gmlx.gen import profiles  # noqa: E402
+from gmlx.gen import thinking_budget as tb  # noqa: E402
 from gmlx.load import tokenizer as gguf_tokenizer  # noqa: E402
 from gmlx.serve.patches import chat_behavior as sp_chat  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
+from gmlx.serve.patches.apc import install_retire_render_capture  # noqa: E402
 from gmlx.upstream.patching import root  # noqa: E402
 
 _GEN = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
@@ -54,6 +60,7 @@ _APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
 _OPENAI = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
 _RS = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
 _SCHEMAS = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
+_PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
 _STRUCTURED = importlib.import_module("gmlx._vendor.mlx_vlm.structured")
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
@@ -275,25 +282,31 @@ def _cpu_mask(logits, mask):
 
 @pytest.fixture
 def serve(monkeypatch):
-    """The gen-args transforms, the render seam and the splitters as serve
-    installs them. The grammar masks on the CPU."""
+    """The gen-args transforms, the render seam, the retire capture and the
+    splitters as serve installs them. The grammar masks on the CPU."""
     seams = ([(t, "apply_chat_template")
               for t in sp_common._render_target_modules()]
              + [(_RS.ThinkingStreamState, "__init__"),
                 (_RS.ThinkingStreamState, "feed"),
-                (_APP, "_split_thinking_text"), (_RS, "_split_thinking")])
+                (_APP, "_split_thinking_text"), (_RS, "_split_thinking"),
+                (_GEN.ResponseGenerator, "_preprocess_request"),
+                (_PKG, "_infer_tool_parser_from_processor")])
     for obj, attr in seams:
         if hasattr(obj, attr):
             monkeypatch.setattr(obj, attr, getattr(obj, attr))
     monkeypatch.setattr(_STRUCTURED, "_apply_llguidance_mask", _cpu_mask)
     # Keyed by id(tokenizer): a freed tokenizer's id can come back.
     monkeypatch.setattr(_STRUCTURED, "_llg_tokenizer_cache", {})
+    monkeypatch.delenv("GMLX_APC_RETIRE_LCP", raising=False)
     tokens = (sp_chat._LAST_GEN_ARGS.set(None),
               sp_chat._LAST_RENDERED_PROMPT.set(None))
+    retire_key._reset_for_tests()
     sp_chat.install_chat_template_kwargs()
+    install_retire_render_capture()
     sp_chat.install_stream_thinking_seed()
     sp_chat.install_thinking_budget_fix()
     yield
+    retire_key._reset_for_tests()
     sp_chat._LAST_GEN_ARGS.reset(tokens[0])
     sp_chat._LAST_RENDERED_PROMPT.reset(tokens[1])
 
@@ -466,6 +479,10 @@ def test_b_thinking_on_masks_only_the_answer(serve, key, shape, request):
         _scripted(s, _request(s, kwargs=kwargs), kind, row.pair, "", ANSWER)
 
 
+def _seq_in(run, seq) -> bool:
+    return tb.rfind_seq(list(run), list(seq)) >= 0
+
+
 def _budget_runs(s, r):
     from gmlx.serve.patches.mtp_thinking import _build_hook
 
@@ -501,29 +518,29 @@ def test_c_a_budget_with_no_markers_resolves_the_pair(serve, key, shape):
     assert (crit._start_seq, crit._end_seq) == (start, end)
     assert (hook.start_seq, hook.end_seq) == (start, end)
     assert crit.in_thinking is hook.in_thinking is (kind == WAIT)
-    assert crit.thinking_token_count == hook.count
     reply = MAYBE if kind == BARE else kind
     gen = tv.ids(s.tok, _reply_parts(row, row.pair, reply)[0])
-    want = _opens_at(s, row, reply) + 4 - crit.thinking_token_count - 1
+    _closes_at_the_budget(crit, hook, gen, _opens_at(s, row, reply), end)
+
+
+def _closes_at_the_budget(crit, hook, gen, opens, end):
+    """The plain criteria and the MTP hook close the block on the same
+    reply token, after 4 reasoning tokens, with the end marker."""
+    assert crit.thinking_token_count == hook.count
+    want = opens + 4 - crit.thinking_token_count - 1
     for i, t in enumerate(gen):
         hook.observe(t)
         taken, forced = hook.take_forced(), crit(t)
         if taken is not None or forced is not None:
             assert (i, forced is not None) == (want, True)
-            assert tv_seq_in(taken, end)
+            assert _seq_in(taken, end)
             break
     else:
         pytest.fail("the budget never closed the block")
     run = [crit.forced_token_id]
     while (forced := crit(run[-1])) is not None:
         run.append(forced)
-    assert tv_seq_in(run, end)
-
-
-def tv_seq_in(run, seq) -> bool:
-    from gmlx.gen.thinking_budget import rfind_seq
-
-    return rfind_seq(list(run), list(seq)) >= 0
+    assert _seq_in(run, end)
 
 
 def _splits(s, r, text):
@@ -564,6 +581,34 @@ def test_d_the_reply_split_takes_the_resolved_pair(serve, key, shape):
         assert (split[0], split[1].strip()) == (None, ANSWER)
 
 
+def _retired(r, text):
+    """``(reasoning, content)`` of the retire mirror's assistant message.
+    It runs at retirement, outside the request's context."""
+    ctx = retire_key._TEXT_MEMO[r.prompt]
+    tokens = (sp_chat._LAST_GEN_ARGS.set(None),
+              sp_chat._LAST_RENDERED_PROMPT.set(None))
+    try:
+        msg = retire_key.build_assistant_message(ctx, text)
+    finally:
+        sp_chat._LAST_GEN_ARGS.reset(tokens[0])
+        sp_chat._LAST_RENDERED_PROMPT.reset(tokens[1])
+    return (msg.get("reasoning_content") or "").strip(), msg["content"].strip()
+
+
+@pytest.mark.parametrize("key,shape", _CASES)
+def test_d_the_retire_mirror_splits_as_the_reply_split(serve, key, shape):
+    row = ROWS[key]
+    s = _served(TEMPLATES[key], row, shape)
+    text, want = _on_reply(row)
+    r = _request(s, kwargs=row.on[0])
+    split, _stream = _splits(s, r, text)
+    assert ((split[0] or "").strip(), split[1].strip()) == (want, ANSWER)
+    assert _retired(r, text) == (want, ANSWER)
+    if row.off is not None and row.off[1] != WAIT:
+        r = _request(s, kwargs=row.off[0])
+        assert _retired(r, ANSWER) == ("", ANSWER)
+
+
 @pytest.mark.parametrize("key,shape", _CASES)
 def test_d_the_stream_split_takes_the_resolved_pair(serve, key, shape,
                                                     request):
@@ -578,6 +623,90 @@ def test_d_the_stream_split_takes_the_resolved_pair(serve, key, shape,
     if row.off is not None and row.off[1] != WAIT:
         _split, stream = _splits(s, _request(s, kwargs=row.off[0]), ANSWER)
         assert (stream[0].strip(), stream[1].strip()) == ("", ANSWER)
+
+
+# -- a raw completion, a seeded first step, one configured marker -------------
+
+
+def _raw(r: Request) -> Request:
+    """``r`` as a raw completion of its prompt: no render kept markers."""
+    args = copy.copy(r.args)
+    del args._kq_think
+    return Request(args, r.prompt, r.ids)
+
+
+@pytest.mark.parametrize("key,shape", _CASES)
+def test_a_raw_completion_gates_as_its_chat_request(serve, key, shape,
+                                                    monkeypatch):
+    """With no render, the engine resolves the markers from the prompt ids:
+    one decode, in the budget hook under the tokenizer lock, and none on
+    the GPU worker. The gate then matches the chat request's."""
+    row = ROWS[key]
+    s = _served(TEMPLATES[key], row, shape)
+    decodes = []
+    prompt_text = tb._prompt_text
+    monkeypatch.setattr(tb, "_prompt_text", lambda p, t: (
+        decodes.append(p), prompt_text(p, t))[1])
+    for kwargs, _kind in [row.on] + ([row.off] if row.off else []):
+        chat = _request(s, kwargs=kwargs)
+        raw = _raw(_request(s, kwargs=kwargs))
+        proc = _gate(s, chat)
+        want = _allowed_rows(proc, chat.ids, [0], _vocab(proc))
+        decodes.clear()
+        _budget_runs(s, raw)
+        assert len(decodes) == 1
+        proc = _gate(s, raw)
+        assert len(decodes) == 1
+        got = _allowed_rows(proc, raw.ids, [0], _vocab(proc))
+        assert (got[0] == want[0]).all()
+
+
+def _seeded_rows(proc, prompt_ids, gen, vocab):
+    """As ``_allowed_rows``, when the batch loop hands the prompt's last
+    token to ``process_last_token`` before the first step."""
+    logits = mx.zeros((1, vocab))
+    return [np.isfinite(np.array(proc.process_last_token(t, logits)))[0]
+            for t in [prompt_ids[-1]] + gen[:-1]]
+
+
+_MAYBE_CASES = [c for c in _CASES if ROWS[c.values[0]].on[1] == MAYBE]
+
+
+@pytest.mark.parametrize("key,shape", _MAYBE_CASES)
+def test_b_a_seeded_maybe_row_masks_as_after_the_prompt(serve, key, shape):
+    row = ROWS[key]
+    s = _served(TEMPLATES[key], row, shape)
+    kwargs = row.on[0]
+    for prefix in (_reply_parts(row, row.pair, MAYBE)[0], ""):
+        gen = tv.ids(s.tok, prefix + ANSWER)
+        r = _request(s, kwargs=kwargs)
+        proc = _gate(s, r)
+        want = _allowed_rows(proc, r.ids, gen, _vocab(proc))
+        r = _request(s, kwargs=kwargs)
+        proc = _gate(s, r)
+        got = _seeded_rows(proc, r.ids, gen, _vocab(proc))
+        for k, (a, b) in enumerate(zip(got, want)):
+            assert (a == b).all(), f"step {k} differs"
+
+
+@pytest.mark.parametrize("key,kwargs,body,kind", [
+    # The resolved pair finds no thinking: bare. One configured marker
+    # keeps the old gate, which waits for </think>.
+    ("fixtures/smollm2_template.jinja", {}, None, WAIT),
+    ("fixtures/smollm2_template.jinja", {}, {"enable_thinking": False}, BARE),
+    # The off prompt ends with </think>: bare, as before.
+    ("fixtures/qwen3_template.jinja", _OFF, None, BARE),
+    # The prompt opens <think> and the old gate waits, as the resolved
+    # one does.
+    ("fixtures/qwen35_9b_template.jinja", _ON, None, WAIT),
+])
+def test_a_one_configured_marker_keeps_the_old_gate(serve, key, kwargs, body,
+                                                    kind):
+    row = ROWS[key]
+    s = _served(TEMPLATES[key], row, "text")
+    r = _request(s, kwargs=kwargs, body=body, markers=(None, _THINK[1]))
+    assert r.args._kq_think.partial
+    _first_step(s, r, kind, _THINK[0])
 
 
 # -- families with markers in their base group --------------------------------
@@ -660,6 +789,22 @@ def test_a_family_marker_gate(serve, family, name):
 
 
 @pytest.mark.parametrize("family,name", _FAMILY_CASES)
+def test_c_a_family_budget_takes_the_family_pair(serve, family, name):
+    prompt, kind, _top, prefix = _family_prompts(family)[name]
+    pair = _family_pair(family)
+    s, r = _family_request(family, prompt)
+    crit, hook = _budget_runs(s, r)
+    start, end = (tuple(tv.ids(s.tok, m)) for m in pair)
+    assert (crit._start_seq, crit._end_seq) == (start, end)
+    assert (hook.start_seq, hook.end_seq) == (start, end)
+    assert crit.in_thinking is hook.in_thinking is (kind == WAIT)
+    if kind == BARE:
+        prefix = pair[0] + REASON + "\n" + pair[1]
+    opens = len(tv.ids(s.tok, prefix[:prefix.index(REASON)]))
+    _closes_at_the_budget(crit, hook, tv.ids(s.tok, prefix), opens, end)
+
+
+@pytest.mark.parametrize("family,name", _FAMILY_CASES)
 def test_a_family_marker_split(serve, family, name):
     _prompt, kind, _top, prefix = _family_prompts(family)[name]
     s, r = _family_request(family, _prompt)
@@ -668,3 +813,4 @@ def test_a_family_marker_split(serve, family, name):
     want = REASON if prefix else ""
     assert ((split[0] or "").strip(), split[1].strip()) == (want, ANSWER)
     assert (stream[0].strip(), stream[1].strip()) == (want, ANSWER)
+    assert _retired(r, text) == (want, ANSWER)
