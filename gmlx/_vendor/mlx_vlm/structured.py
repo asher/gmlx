@@ -1,4 +1,5 @@
 import json
+import weakref
 from typing import Any
 
 import mlx.core as mx
@@ -380,8 +381,29 @@ def _serialize_schema(schema: str | dict[str, Any]) -> str:
 
 
 # Building an llguidance tokenizer walks the entire vocab (~1.5s for a 150k
-# token model), so we keep the result around for the lifetime of the process.
+# token model), so we keep the result around.
+# gmlx: an entry is freed with its tokenizer, not kept for the process. A bare
+# id(tokenizer) key kept every old vocab and gave a new tokenizer at a freed id
+# the old one.
 _llg_tokenizer_cache = {}
+
+
+def _cached_llg_tokenizer(tokenizer):
+    key = id(tokenizer)
+    entry = _llg_tokenizer_cache.get(key)
+    if entry is not None and entry[0]() is tokenizer:
+        return entry[1]
+    import llguidance.hf
+
+    llg_tokenizer = llguidance.hf.from_tokenizer(tokenizer)
+
+    def _drop(ref, key=key):
+        if _llg_tokenizer_cache.get(key, (None,))[0] is ref:
+            del _llg_tokenizer_cache[key]
+
+    # from_tokenizer takes only a PreTrainedTokenizerFast, which takes weak refs.
+    _llg_tokenizer_cache[key] = (weakref.ref(tokenizer, _drop), llg_tokenizer)
+    return llg_tokenizer
 
 
 def build_json_schema_logits_processor(tokenizer, schema: str | dict[str, Any]):
@@ -394,10 +416,7 @@ def build_json_schema_logits_processor(tokenizer, schema: str | dict[str, Any]):
             "Install mlx-vlm with llguidance available."
         ) from exc
 
-    llg_tokenizer = _llg_tokenizer_cache.get(id(tokenizer))
-    if llg_tokenizer is None:
-        llg_tokenizer = llguidance.hf.from_tokenizer(tokenizer)
-        _llg_tokenizer_cache[id(tokenizer)] = llg_tokenizer
+    llg_tokenizer = _cached_llg_tokenizer(tokenizer)  # gmlx: weak entry
 
     schema_text = _serialize_schema(schema)
     if hasattr(llg, "JsonCompiler"):
