@@ -700,7 +700,7 @@ def install_full_prompt_mtp_prefill() -> None:
 
     def _mtp_generate(
         self, sampler, stop_criteria, compute_logprobs=True, top_logprobs_k=0,
-        **kwargs,
+        rows=None,
     ):
         if self.draft_kind == "mtp":
             # A one-column prompt never enters prompt_step, so the APC
@@ -712,7 +712,7 @@ def install_full_prompt_mtp_prefill() -> None:
             stop_criteria,
             compute_logprobs=compute_logprobs,
             top_logprobs_k=top_logprobs_k,
-            **kwargs,
+            rows=rows,
         )
         from gmlx._vendor.mlx_vlm.generate.ar import SpeculativeGenerationBatch
 

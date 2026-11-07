@@ -550,3 +550,13 @@ def test_spec_batch_entries_for_first_tokens_rounds_tails_and_injections(
     assert (7, 12, -0.25) in got
     assert not hasattr(model, "_kq_preempt_capture_lp")
     assert not hasattr(model, "_kq_preempt_capture")
+
+
+@pytest.mark.parametrize("kind,want", [
+    ("mtp", None), (None, None), ("eagle", "eagle"), ("dflash", "dflash"),
+])
+def test_spec_kind_unsupported(kind, want):
+    from gmlx.spec.engine import spec_kind_unsupported
+
+    assert spec_kind_unsupported(SimpleNamespace(draft_kind=kind)) == want
+    assert spec_kind_unsupported(SimpleNamespace()) is None

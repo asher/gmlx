@@ -466,9 +466,6 @@ def install_owned_spec_engine() -> None:
         **_extra,
     ):
         batch_size = int(first_bonus.shape[0]) if first_bonus.ndim > 0 else 1
-        # Per-row sampler and logprob settings (gmlx.serve.row_sampling).
-        rows_kw = dict(row_settings=row_settings, default_row=default_row,
-                       logprobs_cap=logprobs_cap, row_uids=row_uids)
         if draft_kind == "mtp":
             # hidden=None marks a preempted scalar generation rebuilt for
             # continuous batching: it must run the batch loop (arm-from-
@@ -492,7 +489,9 @@ def install_owned_spec_engine() -> None:
                     stop_check=stop_check,
                     eos_token_ids=eos_token_ids,
                     rope_deltas=rope_deltas,
-                    **rows_kw,
+                    # Per-row sampler and logprob settings (gmlx.serve.row_sampling).
+                    row_settings=row_settings, default_row=default_row,
+                    logprobs_cap=int(logprobs_cap or 0), row_uids=row_uids,
                 )
                 # This delegation frame outlives the request (the server
                 # abandons finished generators suspended at their last
@@ -523,7 +522,9 @@ def install_owned_spec_engine() -> None:
                 eos_token_ids=eos_token_ids,
                 row_ids=row_ids,
                 rope_deltas=rope_deltas,
-                **rows_kw,
+                # Per-row sampler and logprob settings (gmlx.serve.row_sampling).
+                row_settings=row_settings, default_row=default_row,
+                logprobs_cap=int(logprobs_cap or 0), row_uids=row_uids,
             )
             del prompt_cache, hidden, shared_kv_states, prompt_tokens
             del first_bonus, _extra

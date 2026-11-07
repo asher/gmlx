@@ -309,6 +309,45 @@ def _chat_usage_chunk(
     )
 
 
+# gmlx: faithful logprobs. A logprob request on an entry that cannot
+# report the model's own distribution is refused, and a logprob row that
+# reaches the route without its entry is an internal error, never 0.0.
+def _refuse_unfaithful_logprobs(model_id, model, gen_args) -> None:
+    if not getattr(gen_args, "logprobs", False):
+        return
+    from gmlx.spec.engine import spec_kind_unsupported
+
+    from ..generate.diffusion import is_diffusion_model
+
+    if is_diffusion_model(model):
+        raise HTTPException(
+            status_code=400,
+            detail=f"logprobs are not available on diffusion model '{model_id}'",
+        )
+    rg = runtime.response_generator
+    kind = (
+        spec_kind_unsupported(rg)
+        if rg is not None and getattr(rg, "draft_model", None) is not None
+        else None
+    )
+    if kind:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"logprobs are not available while model '{model_id}' speculates "
+                f"with draft kind '{kind}'; set speculative: false on the entry"
+            ),
+        )
+
+
+def _has_logprob_entry(token) -> bool:
+    if getattr(token, "token_count", 1) == 0:
+        return False
+    if token.logprobs is None:
+        raise RuntimeError(f"no logprob entry for token {token.token}")
+    return True
+
+
 def register_routes(app, deps):
     global _INHERIT_ADAPTER
     global get_cached_model, _build_gen_args, _read_tenant_id
@@ -1683,6 +1722,7 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
             )
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
+        _refuse_unfaithful_logprobs(request.model, model, gen_args)  # gmlx
         if tools and tool_module is not None:
             gen_args.skip_special_tokens = False
 
@@ -1806,16 +1846,23 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                             )
 
                             chunk_logprobs = None
-                            if request.logprobs and token.finish_reason != "stop":
+                            # gmlx: the stop token keeps its entry; a row
+                            # with no token adds none.
+                            if request.logprobs and _has_logprob_entry(token):
                                 req_top_k = int(request.top_logprobs or 0)
+                                rg = runtime.response_generator
                                 chunk_logprobs = ChatLogprobs(
                                     content=[
                                         _make_logprob_content(
-                                            runtime.response_generator.tokenizer,
+                                            rg.tokenizer,
                                             token.token,
                                             token.logprobs,
                                             top_logprobs=token.top_logprobs,
                                             top_k=req_top_k,
+                                            as_ids=bool(
+                                                request.return_tokens_as_token_ids
+                                            ),
+                                            lock=getattr(rg, "_tokenizer_lock", None),
                                         )
                                     ]
                                 )
@@ -2114,7 +2161,8 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                             text += token.text
                             gt += getattr(token, "token_count", 1)
                             metrics.record_chunk(token)
-                            if request.logprobs and token.finish_reason != "stop":
+                            # gmlx: as in the stream.
+                            if request.logprobs and _has_logprob_entry(token):
                                 logprobs.append(
                                     (token.token, token.logprobs, token.top_logprobs)
                                 )
@@ -2221,6 +2269,10 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                 lp,
                                 top_logprobs=top_lps,
                                 top_k=req_top_k,
+                                as_ids=bool(request.return_tokens_as_token_ids),
+                                lock=getattr(
+                                    runtime.response_generator, "_tokenizer_lock", None
+                                ),
                             )
                             for tid, lp, top_lps in collected_logprobs
                         ]

@@ -157,7 +157,8 @@ fields differ by route:
 | `timings_per_token` | Honored | Ignored | Ignored | Streamed chunks carry `timings.predicted_n`, the output-token count so far, as in llama.cpp |
 | `response_format` | Honored | Honored | Honored | `json_schema` or `json_object`, as [Structured output](#structured-output) shows |
 | `logprobs` | Honored | Ignored | Ignored | Token logprobs, as [Logprobs](#logprobs) shows |
-| `top_logprobs` | Honored | Ignored | Ignored | Capped by `TOP_LOGPROBS_K` |
+| `top_logprobs` | Honored | Ignored | Ignored | 0 to 100, capped by `TOP_LOGPROBS_K` |
+| `return_tokens_as_token_ids` | Honored | Ignored | Ignored | Names each logprob token as `token_id:<id>` |
 | `stop` | Honored | Ignored | Ignored | Anthropic clients use `stop_sequences` |
 | `stop_sequences` | Ignored | Ignored | Honored | Anthropic spelling of `stop` |
 | `chat_template_kwargs` | Honored | Honored | Honored | Template variables that override the profile's. `chat_template` itself gets a 400. |
@@ -192,14 +193,44 @@ on a model takes about 1.5 s longer, once per process.
 
 ### Logprobs
 
-`logprobs: true` returns each token's logprob, and `top_logprobs: N` asks
-for the N most likely alternatives. The server caps the alternatives with
-the `TOP_LOGPROBS_K` environment variable, 0 to 20, which is 0 by default.
-Raise it when you start the server, or the lists stay empty:
+`logprobs: true` returns the logprob of each token in the reply, and
+`top_logprobs: N` asks for the N most likely alternatives at each position.
+The server caps the alternatives with the `TOP_LOGPROBS_K` environment
+variable, 0 to 100, which is 0 by default. Raise it when you start the
+server, or the lists stay empty:
 
 ```sh
-TOP_LOGPROBS_K=5 gmlx serve --config ~/.config/gmlx/gmlx.yaml
+TOP_LOGPROBS_K=20 gmlx serve --config ~/.config/gmlx/gmlx.yaml
 ```
+
+The values are the model's own distribution: the log-softmax of its raw
+logits, in 32-bit floats. Logit bias, penalties, XTC, structured output and
+the profile's sampling values change which token the server samples. They do
+not change the logprobs. A token that the thinking budget forces in reports
+the logprob that the model gave it. The token that ends the reply gets its
+entry too. A logprob below -9999 comes back as -9999.0.
+
+`bytes` holds the token's raw bytes from the vocabulary. A token that holds
+part of a multi-byte character returns only that part, so the `bytes` of
+all the tokens join to the exact UTF-8 of the reply.
+`return_tokens_as_token_ids: true` replaces each `token` string, in the
+entries and in their alternatives, with `token_id:<id>`. The `bytes` do not
+change.
+
+With `logprobs: true` and no `top_logprobs`, a reply has no alternatives, as
+in the OpenAI API. llama.cpp returns 20 alternatives in that case. Send
+`top_logprobs` to get the same lists from both servers.
+
+A model with MTP speculative decoding returns logprobs while it speculates.
+They come from the target model's pass over the drafted tokens, so they
+match a run without speculation to float tolerance. A diffusion model
+refuses a logprob request with a 400.
+
+While a request with logprobs is in a batch, each step of that batch takes
+longer, because the server also computes the alternatives. While an image or
+video job runs, each of its pauses for chat waits through at least one chat
+step, so those pauses get longer too. `GMLX_IMAGE_CHAT_SHARE` sets the
+balance, but even at `0` each pause waits through one chat step.
 
 ### Media in requests
 

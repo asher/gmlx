@@ -847,7 +847,7 @@ class StreamingToken:
 
     text: str
     token: int
-    logprobs: float
+    logprobs: Optional[float]  # gmlx: None when the row wants no logprobs
     finish_reason: Optional[str]
     peak_memory: float = 0.0
     prompt_tps: Optional[float] = None
