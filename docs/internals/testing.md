@@ -172,8 +172,9 @@ names instead, as the loader does, because the GGUFs of
 `unsloth/Qwen-Image-2.1-GGUF` carry no metadata keys at all. The `gmlx kld`
 parity rows and the assistant prefill rows find their files by name and
 size, because they compare with a fixture that llama.cpp recorded on those
-exact files. The prefill rows find them through `tests/llama_fixture.py`,
-which also checks the sha256 of each file of at most 512 MiB.
+exact files. The prefill rows and the embedding adapter rows find them
+through `tests/llama_fixture.py`, which also checks the sha256 of each file
+of at most 512 MiB.
 
 | Module | Extra gate | What it checks |
 |--------|------------|----------------|
@@ -201,6 +202,8 @@ which also checks the sha256 of each file of at most 512 MiB.
 | `tests/image/test_image_check6_qwen.py` | `GMLX_IMAGE_FIXTURES` | A whole Qwen-Image 2.1 run from the oracle's conditioning and noise ends within the gate of the oracle's fp32 latents, on its schedule. |
 | `tests/image/test_image_check7_qwen.py` | `GMLX_IMAGE_FIXTURES` | A Qwen-Image 2.1 step at 512x512 under one live LoRA or two matches the oracle on merged weights, and each leaf its exact product. Wrong tables fail. |
 | `tests/models/test_nemotron_transcribe_speech.py` | `GMLX_TEST_NEMOTRON_TRANSCRIBE` and `GMLX_SPEECH_FIXTURES` in place of `KQUANT_TEST_GGUF_DIR` | The Nemotron 3.5 Transcribe encoder holds the transformers oracle's tolerances on three clips. Its tiny tests run in the CPU tier. |
+| `tests/load/test_embedding_lora_parity.py` | `stories15M_MOE-F16.gguf` of the fixture's size | Under the checked-in token embedding adapter, the greedy ids and the shift of each top-k logprob match the llama-server fixture at strengths 0, 1 and 1.5. |
+| `tests/load/test_embedding_lora_memory.py` | `Qwen3.5-9B-Q4_K_M.gguf` | A 32k token prompt embedded under a rank-16 embedding adapter peaks within one extra prompt-sized array of the bare lookup. |
 | `tests/serve/test_prefill_logp.py` | `Qwen3.5-9B-Q4_K_M.gguf` or `gemma-4-12B-it-Q6_K.gguf` of the fixture's sizes | A prompt that continues the first k generated tokens tokenizes to the generation prompt and those k ids, and scores the next token close to the decode logprob. |
 | `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` adds the multi-GB rows. | One model per cache-shape family runs through the server's load path and batch engine, and its own tier counters move. |
 | `tests/models/test_qwen3vl_integration.py` | None | A Qwen3-VL pair loads with every tensor used, the text model and the pair agree before the final norm, and prompt layout and image features match llama.cpp. |

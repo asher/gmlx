@@ -235,21 +235,35 @@ ignore them for the count.
 Adapters use the llama.cpp GGUF LoRA format. gmlx loads PEFT adapters
 converted with llama.cpp's `convert_lora_to_gguf.py` and the GGUF adapters
 published for llama.cpp, and llama.cpp loads gmlx adapters with `--lora`.
+An adapter with no `adapter.lora.alpha`, or an alpha of 0, applies at its
+strength with no alpha scaling, as in llama.cpp.
+
+A PEFT adapter that trains `embed_tokens` holds a `token_embd.weight`
+pair. gmlx adds its delta to each looked-up row before the model scales the
+rows, where llama.cpp adds it. `gmlx train` writes no such pair.
 
 ## Limitations
 
 - Only LoRA adapters work. DoRA on a quantized model is not supported.
-- An adapter can change the dense linear layers and the down projections
-  of MoE experts. Loading refuses an adapter that changes the gate or up
-  projections of experts, the embeddings, or any expert weight on a model
-  that runs a fused MoE block, such as Gemma and gpt-oss.
+- An adapter can change the dense linear layers, the down projections of
+  MoE experts and the token embedding. Loading refuses an adapter that
+  changes the gate or up projections of experts, or any expert weight on a
+  model that runs a fused MoE block, such as Gemma and gpt-oss.
+- Loading refuses a token embedding pair before the model loads on a model
+  that uses its token embedding as the output head, such as Gemma 4, on a
+  Hadamard-rotated embedding and on Granite Switch. llama.cpp cannot apply
+  the pair on these models either. It also refuses a
+  `per_layer_token_embd.weight` pair, which llama.cpp loads but never
+  applies.
 - Adapters work on text models only, so `--adapter` does not combine with
   `--mmproj`.
 - `gmlx run` and `gmlx chat` take one adapter at strength 1. They refuse an
   entry with more adapters or another strength, which `gmlx serve` runs.
-- A drafter for speculative decoding uses the model's output head without
-  an adapter on it, so only the draft head ignores an `output.weight`
-  adapter. The verify step uses the adapters, so the output is the same.
+- A drafter for speculative decoding uses the model's output head and
+  token embedding without an adapter on them, as llama.cpp's drafters do.
+  Only the draft ignores an `output.weight` or `token_embd.weight` pair,
+  which can lower the share of accepted drafts. The verify step uses the
+  adapters, so the output is the same.
 - An image model that borrows a chat model as its text encoder runs the
   encoder with every adapter off.
 - `--grad-checkpoint` is refused on Kimi K3 and DeepSeek-V4.1.
