@@ -1045,6 +1045,16 @@ def _out_of_date(path: str, size: int | None, sha: str | None, verify: bool) -> 
     return None
 
 
+def _restore_old(path: str) -> None:
+    """Put back the copy an update set aside as ``path.old`` when the
+    update ended before its new copy landed, as a hard kill leaves it."""
+    old = path + ".old"
+    if not os.path.exists(path) and os.path.isfile(old):
+        print(f"  {os.path.basename(path)}: restoring the copy an interrupted "
+              "update set aside", file=sys.stderr)
+        os.replace(old, path)
+
+
 def _fetch_hf_file(repo: str, name: str, revision: str, dest_dir: str,
                    size: int | None, sha: str | None, verify: bool) -> str:
     """Download one repo file unless the copy on disk is current. An out of
@@ -1052,6 +1062,7 @@ def _fetch_hf_file(repo: str, name: str, revision: str, dest_dir: str,
     download leaves the model that worked. A partial download of another
     version of the file is discarded instead of resumed."""
     dest = os.path.join(dest_dir, name)
+    _restore_old(dest)
     old = None
     if os.path.isfile(dest):
         why = _out_of_date(dest, size, sha, verify)
@@ -1558,6 +1569,9 @@ def _pull_refs(refs: list, a, base_dir: str, nest: bool, *, prechecked=None,
             all_ok = False
             continue
         dest_dir = _dest_for_ref(ref, base_dir, nest)
+        if ref.kind == "hf":
+            for name in _shard_names(ref.path_in_repo):
+                _restore_old(os.path.join(dest_dir, name))
         if not disk_checked and not a.force:
             need, old = _planned_download_bytes(ref, dest_dir, listing_cache)
             if need:
@@ -1783,6 +1797,8 @@ def _confirm_plan(plan, a, dest: Destination, box) -> tuple:
     stream = v.get("stream") or {}
     sv = (stream.get("box") or {}).get("verdict")
     state = pc.rung_state(m, plan.rung, box)
+    for p in pc.plan_paths(plan, dest.base_dir, dest.nest):
+        _restore_old(p)
     on_disk, remaining, _per = pc.local_state(plan, dest.base_dir, dest.nest)
     free = _disk_free(dest.base_dir)
     out = dict(v)

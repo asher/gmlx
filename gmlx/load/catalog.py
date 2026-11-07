@@ -1148,6 +1148,15 @@ def _plan_items(plan: PullPlan) -> list:
     return items
 
 
+def plan_paths(plan: PullPlan, base_dir: str, nest: bool) -> list:
+    """Where a pull of ``plan`` puts each of its files, every shard."""
+    from gmlx.load.preflight import shard_names
+
+    return [dest_path(repo, n, base_dir, nest)
+            for _ref, repo, path, _total in _plan_items(plan)
+            for n in shard_names(path)]
+
+
 def replaced_bytes(plan: PullPlan, base_dir: str, nest: bool) -> int:
     """The bytes of the copies at the destination a pull of ``plan``
     replaces: a whole copy of another size, which stays on disk until the

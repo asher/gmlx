@@ -2286,6 +2286,28 @@ def test_pull_refuses_an_update_the_disk_cannot_hold_beside_the_old_copy(
     assert not (tmp_path / "model.gguf.old").exists()
 
 
+@pytest.mark.parametrize("current", [True, False])
+def test_pull_restores_the_copy_a_killed_update_set_aside(
+        tmp_path, monkeypatch, capsys, current):
+    """A hard kill mid-update leaves the old copy as model.gguf.old and no
+    model.gguf: the next pull puts it back before anything else, keeps it
+    when it is current, and updates it when it is not."""
+    payload = _mint(tmp_path / "m.gguf", codec=GT.Q4_0)
+    _serve(monkeypatch, payload)
+    new = payload if current else payload + b"\0" * 32
+    _sha_listing(monkeypatch, {"model.gguf": new})
+    got = []
+    _like_hf(monkeypatch, {"model.gguf": new}, got)
+    (tmp_path / "model.gguf.old").write_bytes(payload)
+    assert manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(tmp_path)]) == 0
+    assert (tmp_path / "model.gguf").read_bytes() == new
+    assert not (tmp_path / "model.gguf.old").exists()
+    err = capsys.readouterr().err
+    assert ("model.gguf: restoring the copy an interrupted update set aside"
+            in err)
+    assert ("differs from Hugging Face" in err) is not current
+
+
 def test_pull_verify_catches_a_change_of_the_same_size(tmp_path, monkeypatch, capsys):
     payload = _mint(tmp_path / "m.gguf", codec=GT.Q4_0)
     _serve(monkeypatch, payload)
