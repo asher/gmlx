@@ -34,6 +34,7 @@ import json
 import math
 import os
 import re
+import weakref
 
 from starlette.requests import Request
 
@@ -420,6 +421,35 @@ async def _read_bytes(request: Request, n: int | None,
     return buf
 
 
+# One parse turn for each event loop: the server runs one.
+_TURNS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+async def _in_turn(fn, *args):
+    """``fn(*args)`` in a worker thread, one at a time. Each body is priced
+    against the same free figure, which books nothing, so two peaks never
+    run at once. The wait is on the loop and books no memory. The turn
+    ends when the thread does, past a cancel of the request."""
+    loop = asyncio.get_running_loop()
+    turn = _TURNS.get(loop)
+    if turn is None:
+        turn = _TURNS[loop] = asyncio.Semaphore(1)
+    await turn.acquire()
+    try:
+        task = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    except BaseException:
+        turn.release()
+        raise
+
+    def ended(task) -> None:
+        turn.release()
+        # A cancelled request never reads what its thread raised.
+        if not task.cancelled():
+            task.exception()
+    task.add_done_callback(ended)
+    return await asyncio.shield(task)
+
+
 def _parse(box: list, path: str, ctype: str | None, free: int | None,
            inline_only: bool, parsed):
     """The JSON document of the body in ``box``, which this takes, so the
@@ -504,8 +534,8 @@ async def read_json(request: Request, free: int | None = None):
     figure when None): at :func:`_min_price` of its Content-Length before
     a byte of it is read, or of what arrived as a body with none arrives,
     then at :func:`json_price` once read. The price, the parse and the
-    checks run in a worker thread, which holds the only reference to the
-    body. The body was priced whole, so an inline image takes no byte
+    checks run in a worker thread, one body at a time (:func:`_in_turn`),
+    which holds the only reference to the body. The body was priced whole, so an inline image takes no byte
     limit of its own; the item count and the pixel limits hold."""
     from ._common import SESSION_BODY_KEY, SESSION_SCOPE_KEY
 
@@ -519,7 +549,7 @@ async def read_json(request: Request, free: int | None = None):
     parsed = request.scope.pop(SESSION_BODY_KEY, None)
     if not box[0]:
         return {}
-    return await asyncio.to_thread(
+    return await _in_turn(
         _parse, box, request.url.path, request.headers.get("content-type"),
         free, session, parsed)
 

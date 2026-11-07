@@ -326,3 +326,52 @@ def test_a_data_url_in_an_edit_forms_text_field_is_read_within_its_price():
     with pytest.raises(bi.BodyRefused) as e:
         asyncio.run(read(peak - 1))
     assert e.value.status == 413
+
+
+def test_two_json_parses_take_their_turns(monkeypatch):
+    """Each parse is priced against the same free figure, which books
+    nothing: the second waits for the first to end before its worker
+    thread starts, so their peaks never add up."""
+    import asyncio
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+    real, real_to_thread = bi._loads, asyncio.to_thread
+    entered: list = []
+
+    def parse(*a):
+        if not started.is_set():
+            started.set()
+            assert release.wait(10), "the first parse was never let go"
+        return real(*a)
+
+    async def to_thread(fn, *a, **kw):
+        entered.append(fn)
+        return await real_to_thread(fn, *a, **kw)
+
+    async def main():
+        read = asyncio.Event()
+        second = _json_request(b'{"prompt": "a dog"}')
+        receive = second.receive
+
+        async def last():
+            message = await receive()
+            if not message.get("more_body"):
+                read.set()
+            return message
+        second._receive = last
+        one = asyncio.create_task(
+            bi.read_json(_json_request(b'{"prompt": "a cat"}'), 1 << 30))
+        await real_to_thread(started.wait, 10)
+        two = asyncio.create_task(bi.read_json(second, 1 << 30))
+        # The second body is read, and its task runs on to its first wait
+        # before this one wakes.
+        await read.wait()
+        waited = len(entered) == 1
+        release.set()
+        return waited, await one, await two
+    monkeypatch.setattr(bi, "_loads", parse)
+    monkeypatch.setattr(asyncio, "to_thread", to_thread)
+    waited, one, two = asyncio.run(main())
+    assert waited, "the second parse started beside the first"
+    assert (one, two) == ({"prompt": "a cat"}, {"prompt": "a dog"})
