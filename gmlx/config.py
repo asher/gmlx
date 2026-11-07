@@ -66,7 +66,7 @@ SAMPLING_KEYS = frozenset({
     "temperature", "top_p", "top_k", "min_p", "max_tokens", "seed",
     "repetition_penalty", "presence_penalty", "frequency_penalty",
     "repetition_context_size", "enable_thinking", "thinking_budget",
-    "thinking_start_token", "thinking_end_token",
+    "thinking_budget_message", "thinking_start_token", "thinking_end_token",
     "stop", "xtc_probability", "xtc_threshold",
 })
 
@@ -2405,6 +2405,22 @@ def _validate_stop(where: str, sampling: dict) -> None:
         f"(got {stop!r}); token *ids* are not accepted - use the token's text")
 
 
+def _validate_thinking_budget(where: str, sampling: dict) -> None:
+    """``sampling.thinking_budget`` must be an integer of -1 or more, and
+    ``sampling.thinking_budget_message`` a string, at load time."""
+    budget = sampling.get("thinking_budget")
+    if budget is not None and (isinstance(budget, bool)
+                               or not isinstance(budget, int) or budget < -1):
+        raise ConfigError(
+            f"{where} sampling.thinking_budget must be an integer of -1 or "
+            f"more (got {budget!r}); -1 means no budget")
+    message = sampling.get("thinking_budget_message")
+    if message is not None and not isinstance(message, str):
+        raise ConfigError(
+            f"{where} sampling.thinking_budget_message must be a string "
+            f"(got {message!r})")
+
+
 def _validate_server_dtype(dtype):
     """``server.dtype`` must name an activation dtype we actually offer.
 
@@ -2737,6 +2753,7 @@ def _parse_profile(name: str, raw: dict) -> Profile:
                                    raw.get("sampling"))
     _warn_unknown_keys(f"profile {name!r} sampling", sampling, SAMPLING_KEYS)
     _validate_stop(f"profile {name!r}", sampling)
+    _validate_thinking_budget(f"profile {name!r}", sampling)
     load = _section_mapping(f"profile {name!r} load", raw.get("load"))
     cache = _normalize_cache(f"profile {name!r} cache", raw.get("cache"))
     ctk = drop_template_call_keys(
@@ -2797,6 +2814,8 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
     _warn_unknown_keys(f"model {model_id!r} overrides.sampling",
                        ov.get("sampling") or {}, SAMPLING_KEYS)
     _validate_stop(f"model {model_id!r} overrides", ov.get("sampling") or {})
+    _validate_thinking_budget(f"model {model_id!r} overrides",
+                              ov.get("sampling") or {})
     for g in ("load", "chat_template_kwargs"):
         if g in ov:
             ov[g] = _section_mapping(f"model {model_id!r} overrides.{g}",
@@ -2827,6 +2846,8 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
                            pv.get("sampling") or {}, SAMPLING_KEYS)
         _validate_stop(f"model {model_id!r} profiles.{pname!r}",
                        pv.get("sampling") or {})
+        _validate_thinking_budget(f"model {model_id!r} profiles.{pname!r}",
+                                  pv.get("sampling") or {})
         for g in ("load", "chat_template_kwargs"):
             if g in pv:
                 pv[g] = _section_mapping(

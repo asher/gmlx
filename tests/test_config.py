@@ -2149,6 +2149,37 @@ def test_sampling_stop_validated_at_load():
     assert ok.profiles["p"].sampling["stop"] == ["END"]
 
 
+def _sampling_docs(sampling):
+    return [
+        {"profiles": {"p": {"sampling": sampling}}},
+        {"models": {"m": {"path": "/x.gguf",
+                          "overrides": {"sampling": sampling}}}},
+        {"models": {"m": {"path": "/x.gguf",
+                          "profiles": {"q": {"sampling": sampling}}}}},
+    ]
+
+
+def test_profile_budget_message_must_be_string():
+    for doc in _sampling_docs({"thinking_budget_message": 5}):
+        with pytest.raises(ConfigError) as e:
+            build_config(doc)
+        assert "thinking_budget_message must be a string" in str(e.value)
+    ok = build_config({"profiles": {"p": {"sampling": {
+        "thinking_budget_message": ""}}}})
+    assert ok.profiles["p"].sampling["thinking_budget_message"] == ""
+
+
+def test_profile_budget_below_minus_one_is_rejected():
+    for bad in (-2, True, "64", 1.5):
+        for doc in _sampling_docs({"thinking_budget": bad}):
+            with pytest.raises(ConfigError) as e:
+                build_config(doc)
+            assert "thinking_budget must be an integer of -1 or more" in str(
+                e.value)
+    ok = build_config({"profiles": {"p": {"sampling": {"thinking_budget": -1}}}})
+    assert ok.profiles["p"].sampling["thinking_budget"] == -1
+
+
 def test_config_path_directory_and_binary_are_named_errors(tmp_path):
     from gmlx.config import load_config
     with pytest.raises(ConfigError, match="directory"):

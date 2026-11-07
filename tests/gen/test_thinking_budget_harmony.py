@@ -168,8 +168,8 @@ def test_family_markers_for_beam_and_gpt_oss():
 
 
 @pytest.mark.parametrize("budget, cut", [
-    (0, "<|channel|>analysis<|message|>Thinking\n<|end|>"),
-    (3, "<|channel|>analysis<|message|>Thinking hard about it"
+    (0, "<|channel|>analysis<|message|>\n<|end|>"),
+    (3, "<|channel|>analysis<|message|>Thinking hard about"
         + BUDGET_WRAP_PHRASE + "<|end|>"),
 ])
 def test_budget_caps_analysis_then_the_answer_runs(budget, cut):
@@ -183,7 +183,7 @@ def test_budget_caps_analysis_then_the_answer_runs(budget, cut):
 
 def test_mtp_and_serve_closes_open_the_final_channel():
     tok = _tok()
-    cut = "<|channel|>analysis<|message|>Thinking\n<|end|>"
+    cut = "<|channel|>analysis<|message|>\n<|end|>"
     h = make_mtp_finish_hook(tok, budget=0, prompt_ids=tok.encode(_PROMPT),
                              **_markers())
     assert _mtp_run(h, _REASON + _FINAL, _ANSWER, tok) == cut + _STEER + _ANSWER
@@ -198,7 +198,7 @@ def test_with_tools_declared_the_close_is_end_only(path):
     """The model may answer or call a tool after the close, so it writes
     no header."""
     tok = _tok()
-    cut = "<|channel|>analysis<|message|>Thinking\n<|end|>"
+    cut = "<|channel|>analysis<|message|>\n<|end|>"
     if path == "cli":
         b = make_thinking_budget_processor(tok, 0, start_in_thinking=False,
                                            tools=True, **_markers())

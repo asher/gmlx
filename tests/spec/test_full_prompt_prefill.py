@@ -1740,3 +1740,95 @@ def _first_divergence(a, b):
         if x != y:
             return i
     return None
+
+
+# ---------------------------------------------------------------------------
+# Thinking-budget message on the MTP rounds
+# ---------------------------------------------------------------------------
+
+_BUDGET = 8
+_BUDGET_MESSAGE = "\n\nI am out of time, so I will answer now."
+
+
+def test_mtp_budget_message_then_end_marker(mtp_model):
+    """A lone greedy MTP row with a budget of 8 and a message: the message's
+    ids and the end marker land whole, within one draft block of the
+    budget, and the reasoning ends with the message."""
+    from types import SimpleNamespace
+
+    from gmlx._vendor.mlx_vlm.generate.ar import (
+        BatchGenerator,
+        PromptProcessingBatch,
+    )
+    from gmlx._vendor.mlx_vlm.server.generation import GenerationArguments
+    from gmlx.gen.thinking_budget import budget_message_ids
+    from gmlx.serve.patches import mtp_thinking
+    from gmlx.spec.helpers import _resolve_block_total
+
+    model, drafter, _config, tokenizer = mtp_model
+    _install_patches()
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "Explain why the sky is blue."}],
+        add_generation_prompt=True, tokenize=False, enable_thinking=True)
+    think = prompt.rfind("<think>")
+    if think != -1 and "</think>" in prompt[think:]:
+        # A template that closes the block at once: open it, so the model
+        # thinks.
+        prompt = prompt[:think] + "<think>\n"
+    ids = list(tokenizer.encode(prompt, add_special_tokens=False))
+    args = GenerationArguments(max_tokens=64, thinking_budget=_BUDGET,
+                               thinking_budget_message=_BUDGET_MESSAGE)
+    hook = mtp_thinking._build_hook(SimpleNamespace(tokenizer=tokenizer), args,
+                                    mx.array([ids]))
+    if hook is None:
+        pytest.skip("no thinking markers resolve for this model")
+    forced = list(hook.forced_ids)
+    assert forced[:len(budget_message_ids(tokenizer, _BUDGET_MESSAGE))] == list(
+        budget_message_ids(tokenizer, _BUDGET_MESSAGE))
+    seed, prompt_open = hook.count, hook.in_thinking
+    carrier = mtp_thinking._HookCarrier()
+    carrier._kq_mtp_hook = hook
+
+    saved = PromptProcessingBatch.generate
+    try:
+        mtp_thinking._install_transport(PromptProcessingBatch)
+        gen = BatchGenerator(
+            model, _make_processor(tokenizer), sampler=GREEDY,
+            draft_model=drafter, draft_kind="mtp", greedy_sampling=True,
+            max_tokens=64, prefill_step_size=_ENGINE_STEP)
+        (uid,) = gen.insert([ids], [64],
+                            prompt_kwargs=_embed_prompts(model, [ids]),
+                            thinking_budget_criteria=[carrier])
+        out = []
+        while gen.has_work:
+            _p, resps = gen.next()
+            out += [int(r.token) for r in resps
+                    if r.uid == uid and r.token is not None]
+        gen.close()
+    finally:
+        PromptProcessingBatch.generate = saved
+
+    at = next((i for i in range(len(out))
+               if out[i:i + len(forced)] == forced), None)
+    if not prompt_open and hook.start_seq:
+        start = len(hook.start_seq)
+        opened = next((i + start for i in range(len(out))
+                       if tuple(out[i:i + start]) == hook.start_seq), None)
+        if opened is None:
+            assert at is None, tokenizer.decode(out)
+            pytest.skip("the model opened no thinking block")
+    else:
+        opened = 0
+    block = _resolve_block_total(drafter, None)
+    if at is None:
+        end = list(hook.end_seq)
+        close = next((i for i in range(opened, len(out))
+                      if out[i:i + len(end)] == end), None)
+        if close is not None and close - opened + seed <= _BUDGET + block:
+            pytest.skip("the model closed its thinking inside the budget")
+    assert at is not None, tokenizer.decode(out)
+    thought = at - opened + seed
+    assert _BUDGET <= thought <= _BUDGET + block, (thought, block)
+    reasoning = tokenizer.decode(out[:at + len(forced)])
+    assert reasoning.endswith(_BUDGET_MESSAGE + tokenizer.decode(
+        list(hook.end_seq)))

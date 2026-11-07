@@ -38,6 +38,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [Mixing adapters per request](docs/lora.md#mixing-adapters-per-request).
 - `/v1/models` lists each chat entry's adapters with their index, default
   strength and the sha256 of the loaded file.
+- A request's `thinking_budget_message` puts its text in the thinking block
+  before the end marker when the thinking budget runs out, and llama-server's
+  `reasoning_budget_tokens` and `reasoning_budget_message` name the two
+  fields. See [Thinking budget](docs/api.md#thinking-budget).
 
 ### Changed
 
@@ -76,6 +80,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Speculative decoding verifies 2 to 8 drafted tokens at head dim 128 on a
   fused kernel where MLX built the whole score matrix, so Nemotron-H and
   other models with wide query groups draft faster at long context.
+- A thinking budget of N lets N reasoning tokens through, as llama-server
+  does, where it let N+1 through, and the prompt's reasoning after its last
+  start marker counts against it.
+- A thinking budget of -1 takes the server's budget, and a negative budget in
+  the config or the environment means no budget, where it closed thinking at
+  once.
 
 ### Fixed
 
@@ -144,6 +154,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   installs the safe KV quantization.
 - `gmlx serve` frees a finished request's images and audio at once. It kept
   the last request's inputs in memory until the next request arrived.
+- A request's thinking budget on a model whose stock drafter is not of kind
+  `mtp` gets a 400, where it got a 500, and a budget from the config there is
+  dropped with a warning.
+- The image and video prompt upsampler no longer takes the thinking budget of
+  the chat model's profile.
 
 ## [0.5.4] - 2026-10-29
 

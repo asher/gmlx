@@ -196,12 +196,13 @@ def _chat_in_context(up: str, req, stop) -> str:
     token_iter = None
     try:
         # Every sampling field is set, so no profile of the chat model
-        # changes the decode.
+        # changes the decode. A null budget still takes the environment's.
         request = schemas.ChatRequest(
             model=up, messages=messages, max_tokens=req.max_tokens,
             temperature=req.temperature, top_p=1.0, top_k=0, min_p=0.0,
             presence_penalty=req.presence_penalty, repetition_penalty=None,
             frequency_penalty=None, xtc_probability=0.0,
+            thinking_budget=None, thinking_budget_message=None,
             thinking=req.thinking, stream=False)
         gen_args = app_mod._build_gen_args(request, processor)
         gen_args.logprobs = False

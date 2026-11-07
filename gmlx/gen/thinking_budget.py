@@ -365,6 +365,39 @@ def prompt_opens_block(toks, start_seq, end_seq) -> bool:
     return last_start >= 0 and last_start > rfind_seq(toks, end_seq)
 
 
+def _flat_ids(ids) -> list:
+    if ids is None:
+        return []
+    flat = ids.flatten() if hasattr(ids, "flatten") else ids
+    return [int(t) for t in (flat.tolist() if hasattr(flat, "tolist") else flat)]
+
+
+def prompt_reasoning_tokens(ids, start_seq, end_seqs) -> int:
+    """The number of ``ids`` after the last start marker when ``ids`` ends
+    inside an open block, else 0. ``end_seqs`` holds every end marker that
+    closes the block. Markers match on all their tokens. The thinking budget
+    counts these prompt tokens, as llama.cpp counts the generation prompt."""
+    if not start_seq:
+        return 0
+    toks = _flat_ids(ids)
+    start = rfind_seq(toks, list(start_seq))
+    if start < 0:
+        return 0
+    rest = toks[start + len(start_seq):]
+    if any(s and rfind_seq(rest, list(s)) >= 0 for s in end_seqs):
+        return 0
+    return len(rest)
+
+
+def budget_message_ids(tokenizer, message) -> tuple | None:
+    """The token ids of a thinking-budget message, or None for no message.
+    No BOS, and special tokens in the text are parsed, as llama-server
+    tokenizes ``reasoning_budget_message``."""
+    if message is None:
+        return None
+    return tuple(int(t) for t in _encode_ids(tokenizer, message)) if message else ()
+
+
 def prompt_tail_ids(input_ids, n: int = 16) -> list:
     """The last ``n`` token ids of ``input_ids`` (an array or a list) as a
     list. ``n`` is longer than any thinking marker."""
@@ -384,16 +417,20 @@ def seq_thinking_budget_criteria_cls():
     tokens, so a start marker the generation prompt begins (ATEM's prompt
     ends ``<|start|>assistant``) completes on the generated rest.
     ``prompt_open_thinking`` is the in-thinking state at the start, kept
-    apart from the stock ``enable_thinking`` gates. Single-token markers
-    behave as the stock criteria. Built lazily so importing this module
-    never imports mlx-vlm."""
+    apart from the stock ``enable_thinking`` gates. ``reasoning_ids`` (the
+    whole prompt) seeds the count with the prompt's tokens after its last
+    start marker. A budget of N lets N thinking tokens through, and 0
+    closes at the start marker. ``message`` is forced ahead of the end
+    marker on the first close, in place of the newline. A forced run always
+    runs to its end. Built lazily so importing this module never imports
+    mlx-vlm."""
     from gmlx._vendor.mlx_vlm.utils import ThinkingBudgetCriteria
 
     class SeqThinkingBudgetCriteria(ThinkingBudgetCriteria):
         def __init__(self, tokenizer, thinking_budget,
                      thinking_end_token="</think>", thinking_start_token=None,
                      *, prompt_open_thinking=False, prompt_ids=None,
-                     tools=False, **kw):
+                     tools=False, message=None, reasoning_ids=None, **kw):
             super().__init__(tokenizer, thinking_budget,
                              thinking_end_token=thinking_end_token,
                              thinking_start_token=thinking_start_token, **kw)
@@ -403,8 +440,12 @@ def seq_thinking_budget_criteria_cls():
                 s for s in (marker_ids(tokenizer, a)
                             for a in end_aliases(thinking_end_token)) if s)
             self._soft_end_seqs = soft_end_seqs(tokenizer, self._start_seq)
-            self._forced_sequence = (self._forced_sequence[:-1]
-                                     + list(self._end_seq))
+            self._reclose = self._forced_sequence[:-1] + list(self._end_seq)
+            message_ids = budget_message_ids(tokenizer, message)
+            self._first_close = (self._reclose if message_ids is None
+                                 else list(message_ids) + list(self._end_seq))
+            self._forced_sequence = self._first_close
+            self._force_left = 0
             # Fed after the close lands, as our own tokens.
             self._steer = ([] if tools
                            else answer_steer_ids(tokenizer, self._start_seq))
@@ -419,6 +460,10 @@ def seq_thinking_budget_criteria_cls():
             self._tail = list(self._prompt_tail)
             self._prompt_open = bool(prompt_open_thinking)
             self.in_thinking = self._prompt_open
+            self._count_seed = (prompt_reasoning_tokens(
+                reasoning_ids, self._start_seq, self._end_seqs)
+                if self._prompt_open and reasoning_ids is not None else 0)
+            self.thinking_token_count = self._count_seed
             self._reset_stand_down()
 
         def _reset_stand_down(self):
@@ -433,6 +478,9 @@ def seq_thinking_budget_criteria_cls():
         def reset_thinking_state(self):
             super().reset_thinking_state()
             self.in_thinking = self._prompt_open
+            self.thinking_token_count = self._count_seed
+            self._forced_sequence = self._first_close
+            self._force_left = 0
             self._tail = list(self._prompt_tail)
             self._steer_left = []
             self._steering = False
@@ -454,36 +502,39 @@ def seq_thinking_budget_criteria_cls():
             self.forced_token_id = forced
             return forced
 
+        def _force_next(self):
+            forced = self._forced_sequence[self._forced_index]
+            self._forced_index += 1
+            self.forced_token_id = forced
+            return forced
+
         def __call__(self, token_id):
             self._tail.append(int(token_id))
             del self._tail[:-self._tail_max]
             if self._steering:
                 return self._steer_next()
+            if self._force_left:
+                # Our own forced token came back. The run goes to its end,
+                # whatever markers its tokens spell.
+                self._force_left -= 1
+                if self._force_left:
+                    return self._force_next()
+                return self._land()
             if self.done:
                 self.forced_token_id = None
                 return None
             if self.enable_thinking and ends_with_seq(self._tail, self._start_seq):
                 self.in_thinking = True
+                if self.thinking_token_count >= self.thinking_budget:
+                    return self._start_forcing()
                 return None
             if any(ends_with_seq(self._tail, s) for s in self._end_seqs):
                 # Also a commentary <|eom|> outside reasoning, where it
                 # changes nothing.
-                landing = self.budget_exceeded
                 self.in_thinking = False
                 self.budget_exceeded = False
                 self._forced_index = 0
-                if landing:
-                    # A forced close just landed.
-                    self._forced_closes += 1
-                    self._spent = True
-                    if self._answer_pending:
-                        self._strike()
-                    self._answer_pending = True
-                    if self._steer:
-                        self._steering = True
-                        self._steer_left = list(self._steer)
-                        return self._steer_next()
-                elif self._spent and self._answer_pending:
+                if self._spent and self._answer_pending:
                     self._strike()  # stray close with no answer between
                 return None
             if self.in_thinking and not self.budget_exceeded and any(
@@ -496,15 +547,37 @@ def seq_thinking_budget_criteria_cls():
                 self._strikes = 0
             if self.in_thinking:
                 self.thinking_token_count += 1
-                if self.thinking_token_count > self.thinking_budget:
-                    self.budget_exceeded = True
-            if (self.budget_exceeded
-                    and self._forced_index < len(self._forced_sequence)):
-                forced = self._forced_sequence[self._forced_index]
-                self._forced_index += 1
-                self.forced_token_id = forced
-                return forced
+                if self.thinking_token_count >= self.thinking_budget:
+                    return self._start_forcing()
             self.forced_token_id = None
+            return None
+
+        def _start_forcing(self):
+            # Once spent, a reopened block gets the bare close.
+            self.budget_exceeded = True
+            self._forced_sequence = (self._reclose if self._spent
+                                     else self._first_close)
+            self._forced_index = 0
+            if not self._forced_sequence:
+                return self._land()
+            self._force_left = len(self._forced_sequence)
+            return self._force_next()
+
+        def _land(self):
+            """The last forced token came back: the block is closed."""
+            self.in_thinking = False
+            self.budget_exceeded = False
+            self._forced_index = 0
+            self.forced_token_id = None
+            self._forced_closes += 1
+            self._spent = True
+            if self._answer_pending:
+                self._strike()
+            self._answer_pending = True
+            if self._steer:
+                self._steering = True
+                self._steer_left = list(self._steer)
+                return self._steer_next()
             return None
 
     return SeqThinkingBudgetCriteria
@@ -721,6 +794,7 @@ class ThinkingBudgetProcessor:
         skip_ids=None,
         alt_end_seqs=(),
         soft_end_seqs=(),
+        count_seed=0,
     ):
         self.end_seq = tuple(end_seq)
         self.alt_end_seqs = tuple(tuple(s) for s in alt_end_seqs if s)
@@ -731,7 +805,7 @@ class ThinkingBudgetProcessor:
         self.skip_ids = list(skip_ids) if skip_ids else self.forced_ids
         self.budget = None if budget is None else max(0, int(budget))
         self.in_thinking = bool(start_in_thinking)
-        self.count = 0
+        self.count = int(count_seed) if self.in_thinking else 0
         self._close_requested = False
         self._baseline = None  # len(tokens) at first call -> skip the prompt
         self._tail: list[int] = []  # last tokens seen, for marker matching
@@ -855,7 +929,7 @@ class ThinkingBudgetProcessor:
                     self._strikes = 0
         if self.done:
             return logits
-        over = self.budget is not None and self.count > self.budget
+        over = self.budget is not None and self.count >= self.budget
         if not self._forcing and self.in_thinking and (
                 over or self._close_requested):
             self._forcing = True
@@ -929,11 +1003,12 @@ def think_tokenizer_for(processor):
     return wrapped
 
 
-def _forced_close_ids(tokenizer, budget, end_seq, steer=()):
+def _forced_close_ids(tokenizer, budget, end_seq, steer=(), message_ids=None):
     """``(reclose_ids, forced_ids, skip_ids)`` for a resolved ``end_seq``:
     the terse newline+close, and the budget/^T variants carrying their wrap
     phrases when the budget funds any thinking at all (``None`` or > 0).
-    Each ends with ``steer`` (``answer_steer_ids``) when given."""
+    Each ends with ``steer`` (``answer_steer_ids``) when given.
+    ``message_ids`` replaces the budget close's newline or wrap phrase."""
     nl_id = _last_token_id(tokenizer, "\n")
     close = list(end_seq) + list(steer)
     reclose_ids = ([nl_id] if nl_id is not None else []) + close
@@ -946,6 +1021,8 @@ def _forced_close_ids(tokenizer, budget, end_seq, steer=()):
         wrap = _encode_ids(tokenizer, _SKIP_WRAP_PHRASE)
         if wrap:
             skip_ids = list(wrap) + close
+    if message_ids is not None:
+        forced_ids = list(message_ids) + close
     return reclose_ids, forced_ids, skip_ids
 
 
@@ -1040,6 +1117,10 @@ def make_thinking_budget_processor(
         tokenizer, budget, end_seq, steer)
     if verbose and budget is not None:
         _announce_budget(tokenizer, budget, end_seq)
+    alt_end_seqs = alias_end_seqs(tokenizer, end_seq)
+    seed = (_prompt_text_reasoning_tokens(
+        tokenizer, prompt, start_seq, (tuple(end_seq),) + alt_end_seqs)
+        if budget is not None and start_in_thinking else 0)
     return ThinkingBudgetProcessor(
         end_seq=end_seq,
         forced_ids=forced_ids,
@@ -1049,9 +1130,29 @@ def make_thinking_budget_processor(
         eos_ids=_eos_id_list(tokenizer) if eos_floor else [],
         reclose_ids=reclose_ids,
         skip_ids=skip_ids,
-        alt_end_seqs=alias_end_seqs(tokenizer, end_seq),
+        alt_end_seqs=alt_end_seqs,
         soft_end_seqs=soft_end_seqs(tokenizer, start_seq),
+        count_seed=seed,
     )
+
+
+def _prompt_text_reasoning_tokens(tokenizer, prompt, start_seq, end_seqs) -> int:
+    """:func:`prompt_reasoning_tokens` for a rendered prompt given as text.
+    It encodes the prompt from its last start marker, and the whole prompt
+    when that piece does not open with the marker's ids."""
+    if not isinstance(prompt, str) or not start_seq:
+        return 0
+    try:
+        start_text = tokenizer.decode(list(start_seq))
+        i = prompt.rfind(start_text) if start_text else -1
+        if i >= 0:
+            ids = list(_encode_ids(tokenizer, prompt[i:]))
+            if ids[:len(start_seq)] == list(start_seq):
+                return prompt_reasoning_tokens(ids, start_seq, end_seqs)
+        return prompt_reasoning_tokens(
+            _encode_ids(tokenizer, prompt), start_seq, end_seqs)
+    except Exception:  # noqa: BLE001 - no seed when the prompt will not encode
+        return 0
 
 
 class MTPFinishThinking:
@@ -1078,7 +1179,8 @@ class MTPFinishThinking:
 
     def __init__(self, *, end_seq, skip_ids, reclose_ids, forced_ids=None,
                  budget=None, start_seq=None, start_in_thinking=False,
-                 prompt_ids=None, alt_end_seqs=(), soft_end_seqs=()):
+                 prompt_ids=None, alt_end_seqs=(), soft_end_seqs=(),
+                 count_seed=0):
         self.end_seq = tuple(end_seq)
         self.alt_end_seqs = tuple(tuple(s) for s in alt_end_seqs if s)
         self.soft_end_seqs = tuple(tuple(s) for s in soft_end_seqs if s)
@@ -1088,7 +1190,7 @@ class MTPFinishThinking:
         self.forced_ids = list(forced_ids) if forced_ids else self.skip_ids
         self.budget = None if budget is None else max(0, int(budget))
         self.in_thinking = bool(start_in_thinking)
-        self.count = 0
+        self.count = int(count_seed) if self.in_thinking else 0
         self.done = False
         self._close_requested = False
         self._spent = False
@@ -1166,7 +1268,7 @@ class MTPFinishThinking:
         self._close_requested = False
         if self.done or not self.in_thinking:
             return None
-        over = self.budget is not None and self.count > self.budget
+        over = self.budget is not None and self.count >= self.budget
         if not (requested or over):
             return None
         if self._answer_pending:
@@ -1194,7 +1296,7 @@ class MTPFinishThinking:
 def make_mtp_finish_hook(
     tokenizer, *, budget=None, start_in_thinking=False, verbose=False,
     start_token=None, end_token=None, prompt_ids=None, prompt=None,
-    tools=False,
+    tools=False, message=None, reasoning_ids=None,
 ):
     """Build the thinking-budget/^T hook for the owned MTP round loop, or
     ``None`` when the model's thinking delimiters can't be resolved (the
@@ -1205,7 +1307,9 @@ def make_mtp_finish_hook(
     array) lets a start marker that the prompt begins complete on the
     generated tokens. ``prompt`` (the rendered text, else ``prompt_ids``)
     picks the pair it opens when the template names several. ``tools`` is
-    as in ``make_thinking_budget_processor``."""
+    as in ``make_thinking_budget_processor``. ``message`` is forced ahead of
+    the end marker on the budget close, and ``reasoning_ids`` (the whole
+    prompt) seeds the count, as in the serve criteria."""
     if budget is not None and budget < 0:
         return None
     try:
@@ -1223,9 +1327,14 @@ def make_mtp_finish_hook(
         return None
     steer = [] if tools else answer_steer_ids(tokenizer, start_seq)
     reclose_ids, forced_ids, skip_ids = _forced_close_ids(
-        tokenizer, budget, end_seq, steer)
+        tokenizer, budget, end_seq, steer,
+        message_ids=budget_message_ids(tokenizer, message))
     if verbose and budget is not None:
         _announce_budget(tokenizer, budget, end_seq)
+    alt_end_seqs = alias_end_seqs(tokenizer, end_seq)
+    seed = (prompt_reasoning_tokens(
+        reasoning_ids, start_seq, (tuple(end_seq),) + alt_end_seqs)
+        if start_in_thinking and reasoning_ids is not None else 0)
     return MTPFinishThinking(
         end_seq=end_seq,
         skip_ids=skip_ids,
@@ -1235,8 +1344,9 @@ def make_mtp_finish_hook(
         start_seq=start_seq,
         start_in_thinking=start_in_thinking,
         prompt_ids=prompt_ids,
-        alt_end_seqs=alias_end_seqs(tokenizer, end_seq),
+        alt_end_seqs=alt_end_seqs,
         soft_end_seqs=soft_end_seqs(tokenizer, start_seq),
+        count_seed=seed,
     )
 
 

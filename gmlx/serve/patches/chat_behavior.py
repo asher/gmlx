@@ -366,7 +366,8 @@ def install_thinking_budget_fix() -> None:
     armed_cls = _armed_thinking_budget_criteria_cls()
 
     def _make_thinking_budget_criteria(self, args, input_ids):
-        if getattr(args, "thinking_budget", None) is None:
+        budget = getattr(args, "thinking_budget", None)
+        if budget is None or budget < 0:
             return None
         # Honor an explicit budget regardless of enable_thinking: a group/profile
         # config may disable it, or the model may ignore the flag and emit <think>
@@ -385,6 +386,8 @@ def install_thinking_budget_fix() -> None:
             prompt_open_thinking=prompt_open,  # but only start inside if pre-filled
             prompt_ids=prompt_tail_ids(input_ids),
             tools=getattr(args, "_kq_has_tools", False),
+            message=getattr(args, "thinking_budget_message", None),
+            reasoning_ids=input_ids,
         )
 
     _make_thinking_budget_criteria.__dict__[_TBUDGET_FLAG] = True

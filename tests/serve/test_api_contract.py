@@ -115,6 +115,9 @@ def test_gmlx_extras_allowlist_matches_patch_reads():
         "thinking",             # chat_behavior: z.ai {"type": en/disabled} spelling
         "adapters",             # lora_request: per-request adapter strengths
         "lora",                 # lora_request: llama-server spelling, by index
+        "thinking_budget_message",   # sampling: the thinking-budget fields
+        "reasoning_budget_tokens",
+        "reasoning_budget_message",
     }
 
 

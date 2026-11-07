@@ -160,9 +160,10 @@ def test_mtp_thinking_defers_budget_only_for_mtp(_mtp_seams):
     assert cls.generate(_mtp_self(), "p", args=args) == "gen"
     assert seen[-1] is None                              # moved aside
     assert getattr(args, sp_mtp._DEFERRED_ATTR) == 6
-    # Non-MTP drafter: untouched, so the upstream raise still fires there.
+    # A client budget on a stock drafter: untouched, so the upstream raise
+    # still fires there as a backstop.
     eagle = types.SimpleNamespace(draft_model=object(), draft_kind="eagle")
-    args2 = _budget_args()
+    args2 = _budget_args(_kq_budget_field="thinking_budget")
     cls.generate(eagle, "p", args=args2)
     assert seen[-1] == 6 and not hasattr(args2, sp_mtp._DEFERRED_ATTR)
     # Plain model and args=None: untouched.
@@ -171,6 +172,32 @@ def test_mtp_thinking_defers_budget_only_for_mtp(_mtp_seams):
     cls.generate(plain, "p", args=args3)
     assert seen[-1] == 6
     cls.generate(_mtp_self(), "p")                       # args=None tolerated
+
+
+def test_defer_drops_config_budget_on_separate_drafter(_mtp_seams, caplog):
+    gen, _ar = _mtp_seams
+    cls = gen.ResponseGenerator
+    seen = []
+
+    def stub(self, prompt, images=None, audio=None, args=None, videos=None):
+        seen.append(args.thinking_budget)
+        return "gen"
+
+    cls.generate = stub
+    sp_mtp.install_mtp_thinking_budget()
+    eagle = types.SimpleNamespace(draft_model=object(), draft_kind="eagle3")
+    args = _budget_args(_kq_budget_field=None)
+    with caplog.at_level("WARNING", logger=sp_mtp.__name__):
+        assert cls.generate(eagle, "p", args=args) == "gen"
+    assert seen[-1] is None and args.thinking_budget is None
+    assert [r.message for r in caplog.records] == [
+        "thinking_budget ignored: this model's drafter cannot run a "
+        "thinking budget"]
+    # A kind with no drafter loaded is no drafter.
+    args = _budget_args()
+    cls.generate(types.SimpleNamespace(draft_model=None, draft_kind="eagle3"),
+                 "p", args=args)
+    assert seen[-1] == 6
 
 
 def test_mtp_thinking_criteria_restores_even_on_early_out(_mtp_seams):
@@ -608,3 +635,261 @@ def test_fast_sampler_install_lands():
         assert (s.top_k, s.min_p, s.seed) == (40, 0.05, 3)
     finally:
         cls._make_sampler = original
+
+
+# 6c. thinking-budget fields and llama-server's names for them
+_RUNTIME = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
+
+
+@pytest.fixture
+def budget_seam(monkeypatch):
+    """The gen-args seam with the budget transform, installed in the
+    server's order. Call it with a request and an optional profile."""
+    monkeypatch.delenv("MLX_VLM_THINKING_BUDGET", raising=False)
+    monkeypatch.setattr(_RUNTIME, "response_generator", None)
+    sp.install_gen_args_profile_injection()
+    sp.install_max_completion_tokens()
+    sp.install_thinking_budget_fields()
+
+    def build(request, spec=None, *, route=False):
+        tok = serving.set_active_spec(spec)
+        rtok = sp_sampling._generation_route.set(route)
+        try:
+            return _APP._build_gen_args(request)
+        finally:
+            sp_sampling._generation_route.reset(rtok)
+            serving.reset_active_spec(tok)
+    return build
+
+
+def _refused(build, request, spec=None, **kw):
+    with pytest.raises(sp_common.refusal_type()) as e:
+        build(request, spec, **kw)
+    assert e.value.status_code == 400
+    return str(e.value)
+
+
+def _anthropic(**kw):
+    return _SCHEMAS.AnthropicRequest(
+        model="m", max_tokens=64, messages=[{"role": "user", "content": "hi"}],
+        **kw)
+
+
+def _completion(**kw):
+    from gmlx.serve.patches.completions import CompletionRequest
+    return CompletionRequest(model="m", prompt="hi", **kw)
+
+
+def test_reasoning_budget_tokens_sets_thinking_budget(budget_seam):
+    args = budget_seam(_chat(reasoning_budget_tokens=32))
+    assert args.thinking_budget == 32
+    assert args._kq_budget_field == "reasoning_budget_tokens"
+    args = budget_seam(_completion(reasoning_budget_tokens=0))
+    assert args.thinking_budget == 0
+
+
+def test_both_budget_names_is_400(budget_seam):
+    msg = _refused(budget_seam, _chat(thinking_budget=8,
+                                      reasoning_budget_tokens=8))
+    assert msg == "Set thinking_budget or reasoning_budget_tokens, not both."
+    # A null under one name is no value, so it does not conflict.
+    args = budget_seam(_chat(thinking_budget=None, reasoning_budget_tokens=8))
+    assert args.thinking_budget == 8
+
+
+def test_both_message_names_is_400(budget_seam):
+    msg = _refused(budget_seam, _chat(thinking_budget_message="a",
+                                      reasoning_budget_message=""))
+    assert msg == ("Set thinking_budget_message or reasoning_budget_message, "
+                   "not both.")
+    args = budget_seam(_chat(thinking_budget_message=None,
+                             reasoning_budget_message="Stop."))
+    assert args.thinking_budget_message == "Stop."
+
+
+def test_anthropic_budget_tokens_conflict_names_thinking_budget_tokens(
+        budget_seam):
+    anthropic = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
+    req = anthropic._anthropic_request_with_derived_fields(_anthropic(
+        thinking={"type": "enabled", "budget_tokens": 64},
+        reasoning_budget_tokens=32))
+    assert _refused(budget_seam, req) == (
+        "Set thinking.budget_tokens or reasoning_budget_tokens, not both.")
+    req = anthropic._anthropic_request_with_derived_fields(_anthropic(
+        thinking={"type": "enabled", "budget_tokens": -2}))
+    assert _refused(budget_seam, req) == (
+        "thinking.budget_tokens must be an integer of -1 or more.")
+
+
+def test_anthropic_explicit_thinking_budget_keeps_its_name(budget_seam,
+                                                           monkeypatch):
+    """thinking.budget_tokens is named only when the budget came from it."""
+    anthropic = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
+
+    def req(budget):
+        return anthropic._anthropic_request_with_derived_fields(_anthropic(
+            thinking={"type": "enabled", "budget_tokens": 2048},
+            thinking_budget=budget))
+
+    assert _refused(budget_seam, req(-2)) == (
+        "thinking_budget must be an integer of -1 or more.")
+    _drafter(monkeypatch, object(), "eagle3")
+    assert "Remove thinking_budget," in _refused(budget_seam, req(8),
+                                                 route=True)
+
+
+def test_alias_blocks_profile_budget(budget_seam):
+    args = budget_seam(_chat(reasoning_budget_tokens=32),
+                       _spec(thinking_budget=1024))
+    assert args.thinking_budget == 32
+    assert budget_seam(_chat(), _spec(thinking_budget=1024)).thinking_budget == 1024
+
+
+def test_profile_message_fills_an_unset_message(budget_seam):
+    args = budget_seam(_chat(), _spec(thinking_budget_message="Answer."))
+    assert args.thinking_budget_message == "Answer."
+    args = budget_seam(_chat(reasoning_budget_message="Go."),
+                       _spec(thinking_budget_message="Answer."))
+    assert args.thinking_budget_message == "Go."
+
+
+def test_empty_alias_message_blocks_profile_message(budget_seam):
+    args = budget_seam(_chat(reasoning_budget_message=""),
+                       _spec(thinking_budget_message="Answer."))
+    assert args.thinking_budget_message == ""
+
+
+@pytest.mark.parametrize("field", ["thinking_budget_message",
+                                   "reasoning_budget_message"])
+def test_null_message_blocks_profile_message(budget_seam, field):
+    args = budget_seam(_chat(**{field: None}),
+                       _spec(thinking_budget_message="Answer."))
+    assert args.thinking_budget_message is None
+
+
+def test_upsampler_style_null_message_blocks_profile_message(budget_seam):
+    req = _chat(thinking_budget=None, thinking_budget_message=None)
+    args = budget_seam(req, _spec(thinking_budget=64,
+                                  thinking_budget_message="Answer."))
+    assert args.thinking_budget is None
+    assert args.thinking_budget_message is None
+
+
+def test_null_alias_budget_is_no_budget(budget_seam):
+    args = budget_seam(_chat(reasoning_budget_tokens=None),
+                       _spec(thinking_budget=1024))
+    assert args.thinking_budget is None
+    assert args._kq_budget_field is None
+
+
+@pytest.mark.parametrize("field", ["thinking_budget", "reasoning_budget_tokens"])
+def test_client_minus_one_takes_profile_budget(budget_seam, field):
+    args = budget_seam(_chat(**{field: -1}), _spec(thinking_budget=96))
+    assert args.thinking_budget == 96
+    assert args._kq_budget_field is None  # not the client's budget
+
+
+def test_client_minus_one_takes_env_budget(budget_seam, monkeypatch):
+    monkeypatch.setenv("MLX_VLM_THINKING_BUDGET", "48")
+    assert budget_seam(_chat(reasoning_budget_tokens=-1)).thinking_budget == 48
+    monkeypatch.delenv("MLX_VLM_THINKING_BUDGET")
+    assert budget_seam(_chat(reasoning_budget_tokens=-1)).thinking_budget is None
+
+
+def test_profile_minus_one_is_no_budget(budget_seam, monkeypatch):
+    assert budget_seam(_chat(), _spec(thinking_budget=-1)).thinking_budget is None
+    monkeypatch.setenv("MLX_VLM_THINKING_BUDGET", "-1")
+    assert budget_seam(_chat()).thinking_budget is None
+
+
+@pytest.mark.parametrize("value", [True, 2.0, "5", -2])
+def test_alias_budget_types_are_400(budget_seam, value):
+    assert _refused(budget_seam, _chat(reasoning_budget_tokens=value)) == (
+        "reasoning_budget_tokens must be an integer of -1 or more.")
+
+
+@pytest.mark.parametrize("value", [True, 2.0, "5", -2])
+def test_completions_budget_types_are_400(budget_seam, value):
+    assert _refused(budget_seam, _completion(thinking_budget=value)) == (
+        "thinking_budget must be an integer of -1 or more.")
+
+
+def test_declared_budget_below_minus_one_is_400(budget_seam):
+    assert _refused(budget_seam, _chat(thinking_budget=-2)) == (
+        "thinking_budget must be an integer of -1 or more.")
+    # The declared field keeps the schema's coercion.
+    assert budget_seam(_chat(thinking_budget=2.0)).thinking_budget == 2
+
+
+@pytest.mark.parametrize("field", ["thinking_budget_message",
+                                   "reasoning_budget_message"])
+@pytest.mark.parametrize("value", [5, ["a"], True])
+def test_message_types_are_400(budget_seam, field, value):
+    assert _refused(budget_seam, _chat(**{field: value})) == (
+        f"{field} must be a string.")
+
+
+def _drafter(monkeypatch, draft_model, kind):
+    rg = types.SimpleNamespace(draft_model=draft_model, draft_kind=kind)
+    monkeypatch.setattr(_RUNTIME, "response_generator", rg)
+
+
+def test_budget_on_separate_drafter_is_400(budget_seam, monkeypatch):
+    _drafter(monkeypatch, object(), "eagle3")
+    assert _refused(budget_seam, _chat(reasoning_budget_tokens=16),
+                    route=True) == (
+        "This model cannot run a thinking budget while it speculates with "
+        "draft kind 'eagle3'. Remove reasoning_budget_tokens, or serve the "
+        "model without the drafter.")
+    assert "Remove thinking_budget," in _refused(
+        budget_seam, _chat(thinking_budget=0), route=True)
+
+
+def test_budget_on_mtp_kind_drafter_does_not_refuse(budget_seam, monkeypatch):
+    _drafter(monkeypatch, object(), "mtp")
+    args = budget_seam(_chat(reasoning_budget_tokens=16), route=True)
+    assert args.thinking_budget == 16
+
+
+def test_kind_without_drafter_does_not_refuse(budget_seam, monkeypatch):
+    _drafter(monkeypatch, None, "eagle3")
+    args = budget_seam(_chat(reasoning_budget_tokens=16), route=True)
+    assert args.thinking_budget == 16
+
+
+def test_count_with_budget_on_separate_drafter_does_not_refuse(
+        budget_seam, monkeypatch):
+    _drafter(monkeypatch, object(), "eagle3")
+    args = budget_seam(_chat(reasoning_budget_tokens=16), route=False)
+    assert args.thinking_budget == 16
+
+
+def test_minus_one_on_separate_drafter_does_not_refuse(budget_seam,
+                                                      monkeypatch):
+    _drafter(monkeypatch, object(), "eagle3")
+    args = budget_seam(_chat(reasoning_budget_tokens=-1),
+                       _spec(thinking_budget=64), route=True)
+    assert args.thinking_budget == 64 and args._kq_budget_field is None
+
+
+def test_budget_route_marks_generation_routes_only():
+    seen = {}
+
+    async def stub(request):
+        seen["route"] = sp_sampling._generation_route.get()
+
+    app = _APP.app
+    sp_common._remove_routes(app, "/v1/chat/completions",
+                             "/v1/messages/count_tokens")
+    app.add_api_route("/v1/chat/completions", stub, methods=["POST"])
+    app.add_api_route("/v1/messages/count_tokens", stub, methods=["POST"])
+    sp.install_thinking_budget_route()
+    sp.install_thinking_budget_route()   # idempotent
+    import asyncio
+    chat = sp_common._find_route(app, "/v1/chat/completions", "POST")
+    count = sp_common._find_route(app, "/v1/messages/count_tokens", "POST")
+    asyncio.run(chat.endpoint(request=None))
+    assert seen["route"] is True
+    asyncio.run(count.endpoint(request=None))
+    assert seen["route"] is False
+    assert sp_sampling._generation_route.get() is False

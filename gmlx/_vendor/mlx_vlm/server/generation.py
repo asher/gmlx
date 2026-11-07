@@ -646,6 +646,8 @@ class GenerationArguments:
     reasoning: Optional[bool] = None
     reasoning_effort: Optional[str] = None
     thinking_budget: Optional[int] = None
+    # gmlx: forced ahead of the end marker when the budget runs out.
+    thinking_budget_message: Optional[str] = None
     thinking_start_token: Optional[str] = None
     thinking_end_token: Optional[str] = None
     skip_special_tokens: bool = True

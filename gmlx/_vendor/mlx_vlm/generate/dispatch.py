@@ -1014,7 +1014,8 @@ def stream_generate(
             elif warm_cache is None and matched_blocks:
                 apc_coordinator.release_hit(plan)
 
-    if thinking_budget is not None:
+    # gmlx: a budget below 0 sets no budget, as on the text path.
+    if thinking_budget is not None and thinking_budget >= 0:
         # gmlx: match each marker on all its tokens. The last token of ATEM's
         # "<|start|>assistant to=self<|message|>" opens every message, so the
         # stock id check counted the answer too. The whole prompt decides
@@ -1039,6 +1040,7 @@ def stream_generate(
             prompt_preopens_thinking=prompt_preopens_thinking,
             prompt_open_thinking=enable_thinking and prompt_preopens_thinking,
             prompt_ids=full_input_ids_list[-16:],
+            reasoning_ids=full_input_ids_list,
         )
         kwargs["thinking_budget_criteria"] = tokenizer.thinking_budget_criteria
     else:

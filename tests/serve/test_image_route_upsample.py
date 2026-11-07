@@ -177,6 +177,16 @@ def test_the_server_sends_bfls_turn_and_encodes_the_caption(server):
     assert meta["revised_prompt"] == CAPTION
 
 
+def test_upsampler_request_blocks_profile_budget_message(server):
+    """Both budget fields are set to null, so no profile of the chat model
+    caps or messages the caption's thinking."""
+    _request(server, {"prompt": "a red bicycle", "seed": 1})
+    (sent,) = server.requests
+    for field in ("thinking_budget", "thinking_budget_message"):
+        assert field in sent.model_fields_set
+        assert getattr(sent, field) is None
+
+
 def test_a_rerun_with_a_new_seed_writes_no_caption_and_loads_no_encoder(
         server):
     fields = {"prompt": "a red bicycle", "guidance": "4",

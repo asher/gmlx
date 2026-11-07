@@ -476,13 +476,19 @@ profiles:
 | <a id="samplingxtc_probability"></a>`xtc_probability` | off | Chance that XTC removes the most likely candidates, to vary the text |
 | <a id="samplingxtc_threshold"></a>`xtc_threshold` | `0.0` | XTC removes candidates whose probability is above this value |
 | <a id="samplingenable_thinking"></a>`enable_thinking` | the template's | Whether the chat template opens a thinking block. A profile's [`thinking`](#profilesthinking) sets it on any family. |
-| <a id="samplingthinking_budget"></a>`thinking_budget` | no limit | Close the thinking block after this many reasoning tokens. A model with a separate drafter refuses it. |
+| <a id="samplingthinking_budget"></a>`thinking_budget` | no limit | Close the thinking block after this many reasoning tokens. `-1` sets no budget. |
+| <a id="samplingthinking_budget_message"></a>`thinking_budget_message` | none | Serve only. Text written in the thinking block ahead of the end marker when the budget runs out. |
 | <a id="samplingthinking_start_token"></a>`thinking_start_token` | `<think>` | Text that opens the model's reasoning. Family defaults set it for models that use other text. |
 | <a id="samplingthinking_end_token"></a>`thinking_end_token` | `</think>` | Text that closes the model's reasoning |
 
-On a model that drafts with its own MTP head, `thinking_budget` can run up
-to one draft round over. Such a model ignores the budget of a request that
-runs in a batch with other requests, or that is paused and resumed.
+The built-in drafters, the MTP heads, DFlash, DFlash2, DSpark and LiLiCorr,
+honor `thinking_budget` and `thinking_budget_message`, up to one draft
+round over. Such a model ignores both on a request that runs in a batch
+with other requests, or that is paused and resumed. A drafter that
+`MLX_VLM_DRAFT_MODEL` loads with a draft kind other than `mtp` answers a
+request's budget with a 400, and ignores a budget from the config with a
+warning. `gmlx run` and `gmlx chat` ignore `thinking_budget_message`.
+[Thinking budget](api.md#thinking-budget) describes the request fields.
 
 ## Model loading
 
