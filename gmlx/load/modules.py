@@ -2389,6 +2389,13 @@ class LoRAKQuantLinear(nn.Module):
         return r
 
 
+def lora_base(m):
+    """The base module of a LoRA-wrapped linear, else ``m`` itself. A
+    drafter binds the target's head through it: its draft calls publish
+    no row vector."""
+    return m.base if isinstance(m, LoRAKQuantLinear) else m
+
+
 class ExpertLoRA:
     """Stamped on an expert-stack leaf (``object.__setattr__``, outside the
     parameter tree): the per-expert factors in gather_mm orientation,
@@ -2553,6 +2560,8 @@ def _extra_expert_delta(extra, h_rows, idx, indices, dtype, order=None):
     and owner table; ``None`` when there are none."""
     d = None
     for lo2 in extra:
+        if lora_rows.slot_off(lo2.slot):
+            continue
         ef, mask = lora_expert_ids(lo2, idx.reshape(-1))
         s_rows = _mask_rows(
             _lora_flat_row_scales(lo2.slot, indices, dtype, order), mask)
@@ -2614,13 +2623,16 @@ def _make_lora_switch_glu(base_cls, caps=None):
         def __call__(self, x, indices, scores=None):
             lo = getattr(self.down_proj, "_kq_lora", None)
             extra = getattr(self.down_proj, "_kq_lora_extra", None) or ()
-            # Stamp removed, or every row of this forward at scale 0 in
-            # every slot: plain base behaviour.
-            if lo is None or lora_rows.all_off(
-                    (lo.slot,) + tuple(e.slot for e in extra)):
+            # Only the slots some row of this forward has on do work; the
+            # first of them is the primary the epilogue serves. Stamp
+            # removed, or every slot off: plain base behaviour.
+            stamps = (lo,) + tuple(extra) if lo is not None else ()
+            on = [e for e in stamps if not lora_rows.slot_off(e.slot)]
+            if not on:
                 return super().__call__(x, indices, scores) \
                     if scores is not None and hasattr(self, "_fused_ok") \
                     else super().__call__(x, indices)
+            lo, extra = on[0], on[1:]
             k = indices.shape[-1]
             fused = hasattr(self, "_fused_ok") and self._fused_ok(x, indices)
             if fused:
