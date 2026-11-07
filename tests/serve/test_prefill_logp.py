@@ -38,7 +38,9 @@ ADAPTER = ADAPTER_FIXTURE["rows"][0]["adapter"]
 # decode steps, and the two kernels round differently. The error of a
 # logprob scales with the probability left to the other tokens, so the
 # bound is LOGP_TOL + LOGP_SPREAD * (1 - p). Measured on GPU and CPU, the
-# worst spread was 0.115 (gemma-4-12B think-on, logprob -1.10, GPU).
+# worst case was the Qwen3.5-9B adapter row on CPU at k=2: diff 0.107 at
+# logprob -0.72, 0.21 per unit of (1 - p). Next was gemma-4-12B think-on
+# on GPU: diff 0.115 at logprob -1.10, 0.17 per unit.
 LOGP_TOL = 1e-3
 LOGP_SPREAD = 0.25
 TOP = 5
