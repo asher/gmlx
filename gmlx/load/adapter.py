@@ -355,7 +355,10 @@ def adapter_load_refusal(base_gguf_path: str, adapter_paths, env=None, *,
     from the headers alone. Raises ``ValueError`` with the first refusal
     over ``adapter_paths``; returns None when every adapter can load.
     ``env``, ``stream`` and ``mtp`` describe the build, for the checks that
-    depend on it."""
+    depend on it. A base that is not a GGUF file has no header to read."""
+    base = str(base_gguf_path)
+    if not (base.endswith(".gguf") and os.path.isfile(base)):
+        return None
     for path in adapter_paths or ():
         if not os.path.isfile(path):
             continue                       # the load reports a missing file
