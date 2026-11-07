@@ -946,30 +946,6 @@ def test_split_harmony_reply_reads_spark_commentary_as_content():
     assert split_harmony_reply(capped, start_in_header=True) == ("x", "Wor")
 
 
-def test_undefined_sentinel_renders_like_an_absent_variable():
-    """The install_template_default_thinking sentinel must be
-    indistinguishable from a truly absent variable to the template gates
-    templates actually use (Qwen3's `is defined and is false`, plain
-    truthiness, and printing)."""
-    jinja2 = pytest.importorskip("jinja2")
-    undef = jinja2.Undefined(name="enable_thinking")
-    env = jinja2.Environment()
-
-    qwen_gate = env.from_string(
-        "{% if enable_thinking is defined and enable_thinking is false %}"
-        "NOTHINK{% else %}THINK{% endif %}")
-    assert qwen_gate.render() == "THINK"
-    assert qwen_gate.render(enable_thinking=undef) == "THINK"
-    assert qwen_gate.render(enable_thinking=False) == "NOTHINK"
-
-    truthy_gate = env.from_string(
-        "{% if enable_thinking %}ON{% else %}OFF{% endif %}")
-    assert truthy_gate.render() == truthy_gate.render(enable_thinking=undef)
-
-    assert env.from_string("{{ enable_thinking }}").render(
-        enable_thinking=undef) == ""
-
-
 # Kimi K2.x generation-prompt tail: a bare `thinking` variable gates the
 # pre-filled think-open; `thinking is false` renders the closed pair.
 _KIMI_TAIL = (

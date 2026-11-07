@@ -1267,7 +1267,7 @@ def test_a_dit_pull_this_chip_does_not_run_says_so_alone(tmp_path,
         _report("lumina2"), 1, None))
     monkeypatch.setattr(manage, "_ref_size_bytes", lambda ref, rep: 5 << 30)
     monkeypatch.setattr(manage, "_download_ref",
-                        lambda ref, dest: pytest.fail("must not download"))
+                        lambda ref, dest, **k: pytest.fail("must not download"))
     rc = manage.cmd_pull(["hf:unsloth/Z-Image-Turbo-GGUF/"
                           "z-image-turbo-Q4_K_M.gguf", "--to", str(tmp_path)])
     err = capsys.readouterr().err

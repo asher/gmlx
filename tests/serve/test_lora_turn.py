@@ -5,6 +5,7 @@ holds image entries whose pipelines are stand-ins, so no model loads;
 their caches are dicts of keys and bytes."""
 
 import contextlib
+import gc
 import random
 import threading
 from types import SimpleNamespace
@@ -82,6 +83,10 @@ def make_pool(monkeypatch, budget_gb, retry=1):
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
     monkeypatch.setattr(residency, "_holds_image_worker", lambda: True)
     monkeypatch.setattr(residency, "_holds_video_worker", lambda: True)
+    # The pool collects after each pipeline release. The pipelines here are
+    # stand-ins, so a collection frees nothing, and in a full test process
+    # each one walks a large heap.
+    monkeypatch.setattr(gc, "collect", lambda generation=2: 0)
     released = []
     # The thread each pipeline release ran on, by pipeline.
     pool_threads: dict = {}

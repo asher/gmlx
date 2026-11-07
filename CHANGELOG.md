@@ -8,6 +8,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `gmlx pull --verify` checks each file's sha256 against Hugging Face and
+  downloads again any file that differs.
 - `gmlx video` makes clips of up to 15 seconds with sound from a text prompt
   with MiniMax-H3. See [Video generation](docs/video.md) and its
   [licenses](docs/video.md#licenses).
@@ -36,6 +38,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - gmlx needs Python 3.11.1 or newer: 3.11.0 can stall image and video uploads.
+- `gmlx pull <name>` downloads each file from the latest commit of its
+  repository, so a quant its publisher updates reaches you without a new gmlx
+  release, and pulling again replaces a copy whose size changed.
 - An image LoRA runs when the Mac has the memory for it, where `gmlx serve`
   refused LoRAs over 256 MB.
 - `server.image.adapter_cache_mb` is now an optional cap with no default.
@@ -74,6 +79,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Served and VLM chat prompts render on transformers 5.22.2, where a request
+  that set no thinking control failed with "'enable_thinking' is undefined".
 - A fraction in a config key that takes a whole number, such as `port` or
   `max_queue`, now fails at startup naming the key, where it was cut down.
 - `gmlx rm` keeps a file another model names in other letter case, and a file

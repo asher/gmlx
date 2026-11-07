@@ -5009,10 +5009,6 @@ def load_vlm_model(
     """
     _log = loadlog.verbose_print
 
-    # Absent enable_thinking must keep meaning "template default" when
-    # mlx-vlm renders the prompt (chat and run paths both call in here).
-    from gmlx.tui.reasoning import install_template_default_thinking
-    install_template_default_thinking()
     # A text-only system message reaches a Gemma-4 template as a string;
     # the processor built below enables it.
     from gmlx.upstream.system_content_fix import install_system_content_fix
