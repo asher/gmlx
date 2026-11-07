@@ -465,18 +465,20 @@ def test_a_run_writes_the_mp4_and_the_frames(stubbed, tmp_path, capsys):
 def test_a_shorter_clip_leaves_no_frames_of_the_one_before(stubbed,
                                                            tmp_path):
     """A frames folder that holds a longer earlier clip holds this clip's
-    5 frames and audio.wav after the run, and every other file it held."""
+    5 frames and audio.wav after the run, and every other file it held:
+    a frame name in digits other than ASCII is no name it writes."""
     frames = tmp_path / "frames"
     frames.mkdir()
+    other = "frame_\u0661\u0662\u0663\u0664\u0665\u0666.png"
     for name in [*(f"frame_{i:06d}.png" for i in range(1, 10)),
                  "frame_000009.png.part", "audio.wav", "notes.txt",
-                 "frame_7.png"]:
+                 "frame_7.png", other]:
         (frames / name).write_bytes(b"earlier")
     (frames / "frame_000008.png.d").mkdir()
     assert stubbed("--frames-dir", str(frames)) == 0
-    assert sorted(p.name for p in frames.iterdir()) == [
+    assert sorted(p.name for p in frames.iterdir()) == sorted([
         "audio.wav", *(f"frame_{i:06d}.png" for i in range(1, 6)),
-        "frame_000008.png.d", "frame_7.png", "notes.txt"]
+        "frame_000008.png.d", "frame_7.png", "notes.txt", other])
     assert (frames / "notes.txt").read_bytes() == b"earlier"
 
 

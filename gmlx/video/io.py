@@ -188,7 +188,7 @@ class Mux:
         return False
 
 
-_WRITTEN = re.compile(r"(frame_\d{6}\.png|audio\.wav)(\.part)?")
+_WRITTEN = re.compile(r"(frame_[0-9]{6}\.png|audio\.wav)(\.part)?")
 
 
 def clear_frames(folder: str) -> None:
