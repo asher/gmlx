@@ -164,6 +164,6 @@ def test_reference_file_round_trip():
     assert head[:3] == (n_ctx, V, n_chunk)
     assert head[3].tolist() == list(range(16))
     for c in chunks:
-        np.testing.assert_array_equal(K.read_reference_chunk(buf, n_ctx, V), c)
-    with pytest.raises(ValueError, match="ends inside a chunk"):
-        K.read_reference_chunk(buf, n_ctx, V)
+        np.testing.assert_array_equal(K.read_reference_records(buf, n, V), c)
+    with pytest.raises(ValueError, match="ends before"):
+        K.read_reference_records(buf, 1, V)

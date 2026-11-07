@@ -194,11 +194,10 @@ def read_reference_header(f: BinaryIO) -> tuple[int, int, int, np.ndarray]:
     return n_ctx, n_vocab, n_chunk, np.frombuffer(raw, dtype="<i4").copy()
 
 
-def read_reference_chunk(f: BinaryIO, n_ctx: int, n_vocab: int) -> np.ndarray:
-    """The records of the next chunk [count, record_width(n_vocab)]."""
-    _, n = scored_span(n_ctx)
+def read_reference_records(f: BinaryIO, n: int, n_vocab: int) -> np.ndarray:
+    """The next ``n`` records [n, record_width(n_vocab)]."""
     w = record_width(n_vocab)
     raw = f.read(2 * n * w)
     if len(raw) != 2 * n * w:
-        raise ValueError("the reference file ends inside a chunk")
+        raise ValueError("the reference file ends before its last record")
     return np.frombuffer(raw, dtype="<u2").reshape(n, w)
