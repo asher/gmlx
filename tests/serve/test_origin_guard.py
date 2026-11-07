@@ -506,7 +506,7 @@ def test_refusals_logged_from_many_threads_at_once_raise_nothing(monkeypatch,
     monkeypatch.setattr(sp_hardening, "_REFUSALS_LOGGED_MAX", 1 << 30)
     interval = sys.getswitchinterval()
     threads, calls = 8, 2000
-    barrier = threading.Barrier(threads)
+    barrier = threading.Barrier(threads, timeout=30)
     errors: list = []
 
     def log(t):
@@ -524,9 +524,10 @@ def test_refusals_logged_from_many_threads_at_once_raise_nothing(monkeypatch,
         for w in workers:
             w.start()
         for w in workers:
-            w.join()
+            w.join(timeout=30)
     finally:
         sys.setswitchinterval(interval)
+    assert not any(w.is_alive() for w in workers), "a logging thread hangs"
     assert errors == []
     assert len(capsys.readouterr().out.splitlines()) == threads * calls
     assert len(sp_hardening._refusal_logs["media"].keys) <= 2
