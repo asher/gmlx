@@ -1064,6 +1064,11 @@ message, with a generation prompt, through the same chat template and
 tokenizer path as `gmlx serve`. Each prompt runs alone, with no KV cache
 kept between prompts.
 
+The positional argument is a path, or a model id or alias from your server
+config. A config id brings its path, chat template and streaming settings,
+and flags you pass still win. An entry that sets an adapter is refused. A
+MoE that does not fit in memory streams its experts, as in `gmlx run`.
+
 The recorded value of a block is its output averaged over the last
 `--positions` prompt tokens, in float32. This is the block output that
 llama.cpp's `cvector-generator` reads as `l_out`. On a model with

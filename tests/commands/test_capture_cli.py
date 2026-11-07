@@ -220,6 +220,27 @@ def test_argument_errors(tiny, capsys, args, message):
     assert message in capsys.readouterr().err
 
 
+def test_a_config_id_resolves_and_an_entry_adapter_is_refused(tiny, capsys, monkeypatch):
+    path, files, tmp = tiny
+    monkeypatch.setenv("HOME", str(tmp))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp / "cache"))
+    adapter = tmp / "a.gguf"
+    adapter.write_bytes(b"")
+    cfg = tmp / "gmlx.yaml"
+    cfg.write_text(f"models:\n  tiny:\n    path: {path}\n"
+                   f"  tuned:\n    path: {path}\n    adapter: {adapter}\n")
+    out = tmp / "cap.safetensors"
+    rc, io = _run(["tiny", "--config", str(cfg), "--prompts", f"a={files['harmful']}",
+                   "--json", "--out", str(out)], capsys)
+    assert rc == 0, io.err
+    assert json.loads(io.out.splitlines()[-1])["event"] == "result"
+    assert "[config] 'tiny'" in io.err
+    rc, io = _run(["tuned", "--config", str(cfg), "--prompts", f"a={files['harmful']}",
+                   "--out", str(tmp / "o")], capsys)
+    assert rc == 2
+    assert "sets an adapter" in io.err
+
+
 @pytest.mark.integration
 def test_smoke_on_a_real_llama_gguf(gguf_index, tmp_path, capsys):
     from conftest import require_arch

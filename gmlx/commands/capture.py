@@ -88,8 +88,9 @@ def _build_parser(prog: str) -> argparse.ArgumentParser:
                      help="Activation dtype (default auto: float16 on M1 "
                           "and M2, bfloat16 elsewhere).")
     add_rope_args(ap)
-    # A config entry's adapter lands here, and capture refuses it.
-    ap.set_defaults(adapter=None)
+    # A config entry's adapter lands here, and capture refuses it. No
+    # drafter loads, which the preload wire check reads.
+    ap.set_defaults(adapter=None, no_speculative=True)
     return ap
 
 
@@ -205,6 +206,11 @@ def load(args):
             args.gguf, chat_template=args.chat_template, stream=stream,
             feeder_prefill=args.prefill_feeder,
             rope_override=rope_override_from_args(args))
+    from gmlx.gen.diffusion import is_diffusion_model
+
+    if is_diffusion_model(model):
+        raise ValueError("gmlx capture runs causal text models, and "
+                         f"{os.path.basename(args.gguf)} is a diffusion model")
     enable_system_content_fix(processor, _model_type(config))
     return model, processor, config
 
@@ -325,7 +331,8 @@ def cmd_capture(argv: list | None = None, prog: str = "gmlx capture") -> int:
 
     emit = _Emitter(args.json)
     with emit.quiet_stdout():
-        from .cli import _ensure_stream_cb_caps, maybe_load_from_config
+        from .cli import (_TEMPLATE_TOKENS, _ensure_stream_cb_caps,
+                          maybe_load_from_config, preload_wire_check)
 
         rc = maybe_load_from_config(args, ap, argv)
         if rc is not None:
@@ -346,6 +353,10 @@ def cmd_capture(argv: list | None = None, prog: str = "gmlx capture") -> int:
             print(f"error: {e}", file=sys.stderr)
             return 2
         facts = gguf_facts(path)
+        # The KV room is priced at the longest prompt, a token for each byte.
+        longest = max(len(p.encode()) for _, ps in sets for p in ps)
+        preload_wire_check(args, depth=longest + len((args.system or "").encode())
+                           + _TEMPLATE_TOKENS)
         _ensure_stream_cb_caps(args)
         install_render_fixes()
         model, processor, config = load(args)
