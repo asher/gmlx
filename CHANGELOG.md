@@ -88,9 +88,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   loaded model, since the server keeps its own copy of the weights.
 - A request during a config reload no longer sees a model list from both
   the old and the new config.
-- A speculative drafter and an image model that borrows a chat model as its
-  text encoder run without the chat model's adapters, where both failed in
-  a server with adapters.
+- A speculative drafter's head and an image model that borrows a chat model
+  as its text encoder run without the chat model's adapters, where both
+  failed in a server with adapters.
 - The server counts the memory of a chat model's adapters when it checks
   whether the model fits.
 - An image request that names a file name two of the model's adapters share

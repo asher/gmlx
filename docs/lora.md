@@ -247,9 +247,9 @@ published for llama.cpp, and llama.cpp loads gmlx adapters with `--lora`.
   `--mmproj`.
 - `gmlx run` and `gmlx chat` take one adapter at strength 1. They refuse an
   entry with more adapters or another strength, which `gmlx serve` runs.
-- A drafter for speculative decoding runs on the model without the
-  adapters, as in llama.cpp. The verify step uses the adapters, so the
-  output is the same.
+- A drafter for speculative decoding uses the model's output head without
+  an adapter on it, so only the draft head ignores an `output.weight`
+  adapter. The verify step uses the adapters, so the output is the same.
 - An image model that borrows a chat model as its text encoder runs the
   encoder with every adapter off.
 - `--grad-checkpoint` is refused on Kimi K3 and DeepSeek-V4.1.
