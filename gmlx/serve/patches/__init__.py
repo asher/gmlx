@@ -102,6 +102,7 @@ from .hardening import (
     install_loopback_host_guard,
 )
 from .messages_route import install_messages_route
+from .prefill import install_assistant_prefill
 from .mtp_thinking import install_mtp_thinking_budget
 from .context_copy import install_context_copy_transport
 from .spec_processors import install_mtp_logits_processors
@@ -154,6 +155,7 @@ __all__ = [
     "install_retire_render_capture",
     "install_api_contract",
     "install_api_key_auth",
+    "install_assistant_prefill",
     "install_audio_speech_route",
     "install_audio_transcription_route",
     "install_audio_translation_route",
@@ -349,7 +351,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_scoped_cache_reset()
     install_capacity_plan()
     install_estimate()
-    # Render-wrap nesting per target: seed(retire(faithful(orig))).
+    # Render-wrap nesting per target: role(seed(retire(prefill(faithful(orig))))).
     # Faithful innermost so the retire capture memoizes it and predictions
     # see the render the server produces. Seed outermost for two reasons:
     # the faithful wrap's inner return_messages=True call would feed an
@@ -368,6 +370,11 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_native_audio()
     install_messages_route()
     install_apc_lone_harvest()
+    # Outside faithful history (it renders the history without the continued
+    # message through it) and inside the retire capture, which records the
+    # continued prompt. Its chat-route check lands outside the dry-run and
+    # load-offload wraps, so an invalid request loads no model.
+    install_assistant_prefill()
     install_retire_render_capture()
     install_stream_thinking_seed()
     # Outermost render wrap: the retire capture below it must memoize the

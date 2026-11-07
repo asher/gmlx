@@ -128,6 +128,16 @@ def test_known_ignored_params_do_warn():
     assert "output_config" in sp_api.ANTHROPIC_CONSUMED
 
 
+def test_prefill_fields_are_chat_only():
+    """The chat route reads the prefill fields; Responses and Messages warn
+    on them."""
+    for name in ("continue_final_message", "add_generation_prompt"):
+        assert name in sp_api.CHAT_CONSUMED
+        assert name not in sp_api.RESPONSES_CONSUMED
+        assert name not in sp_api.ANTHROPIC_CONSUMED
+        assert f"| `{name}` | Honored | Ignored | Ignored |" in _DOCS.read_text()
+
+
 def test_doc_table_rows_match_allowlists():
     """Cross-check the docs/api.md "Parameter support" table
     against the consumed sets: an `ignored` cell must be off the allowlist,

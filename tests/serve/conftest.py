@@ -36,6 +36,8 @@ _PATCH_MODULES = {
     "test_image_routes",
     "test_image_steps",
     "test_patches_sampling",
+    "test_assistant_prefill",
+    "test_prefill_logp",
 }
 
 

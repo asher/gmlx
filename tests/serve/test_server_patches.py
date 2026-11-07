@@ -660,6 +660,7 @@ def test_a_second_install_of_the_render_wraps_adds_no_layer(monkeypatch):
     did not added a second layer: a doubled faithful-history layer counts
     a tool-result image out twice, and the prompt loses its placeholder."""
     from gmlx.serve.patches.apc import install_retire_render_capture
+    from gmlx.serve.patches.prefill import install_assistant_prefill
     from gmlx.serve.patches.render import install_chat_image_placement, install_faithful_history
     from gmlx.upstream.patching import root
 
@@ -672,8 +673,9 @@ def test_a_second_install_of_the_render_wraps_adds_no_layer(monkeypatch):
         monkeypatch.setattr(obj, attr, getattr(obj, attr))
     sp.install_server_patches(build_config({"server": {}}), reload_fn=lambda *a, **k: None)
     installed = [getattr(obj, attr) for obj, attr in seams]
-    for install in (install_faithful_history, install_chat_image_placement, install_retire_render_capture,
-                    sp_chat.install_stream_thinking_seed, sp_chat.install_role_normalization):
+    for install in (install_faithful_history, install_chat_image_placement, install_assistant_prefill,
+                    install_retire_render_capture, sp_chat.install_stream_thinking_seed,
+                    sp_chat.install_role_normalization):
         install()
     assert [getattr(obj, attr) for obj, attr in seams] == installed
     for obj, attr in renders:

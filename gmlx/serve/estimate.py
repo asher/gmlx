@@ -402,12 +402,15 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
                     entry, msgs, media, tenant_id):
     """The resident half of :func:`estimate_request`, run with the request
     spec bound to the serving seam (the caller resets it)."""
+    from fastapi import HTTPException
+
     try:
         from gmlx._vendor.mlx_vlm.server import openai as _oa
         from gmlx._vendor.mlx_vlm.server.app import _build_gen_args
         from gmlx._vendor.mlx_vlm.server.schemas import ChatRequest
 
         from gmlx.serve.patches.chat_behavior import roles_for_render
+        from gmlx.serve.patches.prefill import render_continued
 
         req = ChatRequest(**body)
         # The chat route's order: the instruction merge (developer messages
@@ -420,14 +423,21 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
         if tool_choice is not None:
             template_kwargs["tool_choice"] = tool_choice
         msgs = roles_for_render(processor, msgs, template_kwargs)
-        prompt = pkg.apply_chat_template(processor, config, msgs, num_images=0,
-                                         tools=tools or None, **template_kwargs)
+        # Through the prefill helper, as the chat route's render wraps: it
+        # continues the final assistant message and keeps its key from Jinja.
+        prompt = render_continued(pkg.apply_chat_template, processor, config,
+                                  msgs, num_images=0, tools=tools or None,
+                                  **template_kwargs)
         from gmlx.serve.patches.sampling import client_max_tokens
 
         client_set = ("max_tokens" in body or client_max_tokens(
             body.get("max_completion_tokens")) is not None)
         pinned = int(getattr(gen_args, "max_tokens", 0) or 0) \
             if client_set else 0
+    except HTTPException as e:
+        # A request rule the chat route answers the same way.
+        return e.status_code, {"error": {"message": str(e.detail),
+                                         "type": "invalid_request_error"}}
     except Exception as e:
         _log.debug("estimate: prompt render failed", exc_info=True)
         return 400, {"error": {"message": f"cannot render prompt: {e}",
