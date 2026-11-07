@@ -382,8 +382,9 @@ def _serialize_schema(schema: str | dict[str, Any]) -> str:
 
 # Building an llguidance tokenizer walks the entire vocab (~1.5s for a 150k
 # token model), so we keep the result around.
-# gmlx: an entry lives as long as its tokenizer. A bare id(tokenizer) key gave
-# a new tokenizer at a freed id the old vocab.
+# gmlx: an entry is freed with its tokenizer, not kept for the process. A bare
+# id(tokenizer) key kept every old vocab and gave a new tokenizer at a freed id
+# the old one.
 _llg_tokenizer_cache = {}
 
 
