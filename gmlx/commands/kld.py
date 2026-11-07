@@ -475,7 +475,7 @@ def format_table(result: dict) -> str:
         f"scored:     {result['positions']} positions in {result['chunks']} "
         f"chunks of {result['ctx']} tokens",
         "",
-        f"{'point':<8}{'Mean KLD':<24}Same top p",
+        f"{'point':<8}{'Mean KLD':<23}Same top p",
         f"{'MODEL':<8}{result['mean_kld']:.6f} +/- {result['mean_kld_unc']:.6f}"
         f"  {100 * result['same_top_p']:.3f} +/- "
         f"{100 * result['same_top_p_unc']:.3f} %",
