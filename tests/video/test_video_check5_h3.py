@@ -682,8 +682,21 @@ class _Cycle:
     pass
 
 
+class _OneFrame:
+    """A decoder whose one frame is what ``run`` returns."""
+
+    def __init__(self, run):
+        self.run = run
+
+    def decode_frames(self, latents):
+        yield self.run()
+
+
 @metal_only
-def test_a_peak_does_not_count_garbage_freed_in_the_run():
+@pytest.mark.parametrize("measure", [
+    _peak, lambda run: _decode(_OneFrame(run), mx.zeros((1,)))[0]],
+    ids=["peak", "decode"])
+def test_a_peak_does_not_count_garbage_freed_in_the_run(measure):
     """Arrays an earlier test left in a reference cycle go when the
     collector next runs. A collection in the run must not lower its
     peak."""
@@ -697,8 +710,10 @@ def test_a_peak_does_not_count_garbage_freed_in_the_run():
 
         def run():
             gc.collect()
-            mx.eval(mx.zeros((n,), mx.uint8) + 1)
-        peak = _peak(run)
+            x = mx.zeros((n,), mx.uint8) + 1
+            mx.eval(x)
+            return x
+        peak = measure(run)
     finally:
         gc.enable()
     assert n <= peak < 3 * n, peak / n
