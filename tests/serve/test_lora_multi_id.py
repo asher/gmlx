@@ -564,7 +564,7 @@ def test_single_model_serve_registers_bare_base_sibling(tmp_path):
     base.write_bytes(b"GGUF")
     lora = tmp_path / "pirate.gguf"
     lora.write_bytes(b"GGUF")
-    a = SimpleNamespace(model=str(base), adapter=str(lora), mmproj=None,
+    a = SimpleNamespace(model=str(base), adapter=[(str(lora), 1.0)], mmproj=None,
                         draft_gguf=None, speculative=False, host=None, port=None,
                         budget_gb=None, max_models=None, hf_cache=None,
                         chat_template=None)
