@@ -462,6 +462,42 @@ def test_a_run_writes_the_mp4_and_the_frames(stubbed, tmp_path, capsys):
         str(out), "fl2va", 5)
 
 
+def test_the_latents_land_at_the_path_given(stubbed, tmp_path):
+    """A --save-latent path without .npz is written as given, not beside
+    it with .npz added."""
+    lat = tmp_path / "lat" / "run1"
+    assert stubbed("--frames-dir", str(tmp_path / "f"), "--save-latent",
+                   str(lat)) == 0
+    assert sorted(np.load(lat).files) == ["audio", "seed", "steps", "video"]
+    assert [p.name for p in lat.parent.iterdir()] == ["run1"]
+
+
+def test_an_interrupted_latent_write_keeps_the_file_there(stubbed,
+                                                          monkeypatch,
+                                                          tmp_path):
+    """A latent write stopped part way leaves the file an earlier run
+    wrote, and no part file."""
+    lat = tmp_path / "lat" / "x.npz"
+    lat.parent.mkdir()
+    np.savez(lat, video=np.ones(3))
+    before = lat.read_bytes()
+    savez = np.savez
+
+    def stopped(file, **arrays):
+        f = open(file, "wb") if isinstance(file, (str, os.PathLike)) \
+            else file
+        f.write(b"PK\x03\x04 part of a zip")
+        f.flush()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(np, "savez", stopped)
+    assert stubbed("--frames-dir", str(tmp_path / "f"), "--save-latent",
+                   str(lat)) == 130
+    monkeypatch.setattr(np, "savez", savez)
+    assert lat.read_bytes() == before
+    assert [p.name for p in lat.parent.iterdir()] == ["x.npz"]
+
+
 @pytest.mark.parametrize("decoded", [7200, 6000])
 def test_the_mp4_and_the_frames_get_audio_of_the_clips_length(
         stubbed, monkeypatch, tmp_path, decoded):
