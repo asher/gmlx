@@ -128,8 +128,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   where they said the server did not answer.
 - A chat, Responses, Messages or images request with a lone surrogate
   escape gets a 400 naming the field, where it returned a 500.
-- A video job whose image file is cut short or holds no image fails with a
-  400 that names the file, where it failed with a 500.
 
 ## [0.5.4] - 2026-10-29
 
