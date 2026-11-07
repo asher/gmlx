@@ -176,6 +176,7 @@ names instead, as the loader does, because the GGUFs of
 | `tests/gen/test_batch_parity.py` | None | A batch of one matches single-stream decode, and a ragged batch diverges from it only at exact logit ties. |
 | `tests/gen/test_long_context.py` | None | A long decode keeps its ids in range, its logprobs finite and its output free of single-token collapse. |
 | `tests/gen/test_long_context.py::test_long_prefill_parity` | `KQUANT_LLAMACPP_BIN` | Long-prefill greedy output agrees with llama.cpp. |
+| `tests/gen/test_serve_logprobs_gguf.py` | None | A lone serve row with a repetition penalty reports the f32 log_softmax of a plain step-by-step forward. |
 | `tests/spec/test_full_prompt_prefill.py` | `KQUANT_TEST_MTP_GGUF` | The MTP serve path handles prefill, the prompt cache, batching and injection. |
 | `tests/image/test_image_check3.py` | `GMLX_IMAGE_FIXTURES` | A Z-Image-Turbo step matches the oracle at 512x512 per block and per attention and FFN output, teacher-forced and free running, and in velocity at 512 and 1024. |
 | `tests/image/test_image_check3_qwen.py` | `GMLX_IMAGE_FIXTURES` | A Qwen-Image 2.1 step matches the oracle per block at 512x512 and in velocity at 1024, and each op of a block its stock op. |

@@ -210,9 +210,10 @@ not change the logprobs. A token that the thinking budget forces in reports
 the logprob that the model gave it. The token that ends the reply gets its
 entry too. A logprob below -9999 comes back as -9999.0.
 
-`bytes` holds the token's raw bytes from the vocabulary. A token that holds
-part of a multi-byte character returns only that part, so the `bytes` of
-all the tokens join to the exact UTF-8 of the reply.
+`bytes` holds the token's raw bytes from the vocabulary. A multi-byte
+character can split across tokens, and each of those tokens returns only
+its part. A special token, such as the token that ends the turn, returns
+the UTF-8 of its token text, for example `<|im_end|>`.
 `return_tokens_as_token_ids: true` replaces each `token` string, in the
 entries and in their alternatives, with `token_id:<id>`. The `bytes` do not
 change.
@@ -221,10 +222,11 @@ With `logprobs: true` and no `top_logprobs`, a reply has no alternatives, as
 in the OpenAI API. llama.cpp returns 20 alternatives in that case. Send
 `top_logprobs` to get the same lists from both servers.
 
-A model with MTP speculative decoding returns logprobs while it speculates.
-They come from the target model's pass over the drafted tokens, so they
-match a run without speculation to float tolerance. A diffusion model
-refuses a logprob request with a 400.
+A model with a [speculative drafter](speculative-decoding.md), such as an
+MTP head or a DFlash, DSpark or LiLiCorr drafter, returns logprobs while it
+speculates. They come from the target model's pass over the drafted tokens,
+and agree with a run without speculation to within bf16 rounding. A
+diffusion model refuses a logprob request with a 400.
 
 While a request with logprobs is in a batch, each step of that batch takes
 longer, because the server also computes the alternatives. While an image or
