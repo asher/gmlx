@@ -3172,6 +3172,7 @@ _VERBS = (
     "profiles",
     "doctor",
     "train",
+    "capture",
     "distill",
     "image",
     "video",
@@ -3214,6 +3215,7 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
         "(add an id to resolve one model)\n"
         "  doctor       check the runtime, config, models, and services in one pass\n"
         "  train        finetune a LoRA adapter on a GGUF base (writes a GGUF adapter)\n"
+        "  capture      record the residual stream after each block over prompt files\n"
         "  distill      offline distillation: cache a teacher, align, train, eval\n"
         "  image        generate images from GGUF diffusion models\n"
         "  video        generate clips with sound from GGUF diffusion models\n"
@@ -3372,6 +3374,10 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             from .train import cmd_train
 
             return cmd_train(rest, prog=f"{prog} train")
+        if verb == "capture":
+            from .capture import cmd_capture
+
+            return cmd_capture(rest, prog=f"{prog} capture")
         if verb == "distill":
             from .distill import cmd_distill
 

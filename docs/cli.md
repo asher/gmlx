@@ -32,6 +32,7 @@ gmlx help serve       # the same as gmlx serve --help
 | [`gmlx profiles`](#gmlx-profiles) | Show the family sampling defaults and intents. |
 | [`gmlx talk`](#gmlx-talk) | Voice chat with a served model. |
 | [`gmlx train`](#gmlx-train) | Train a LoRA adapter on a GGUF base. |
+| [`gmlx capture`](#gmlx-capture) | Record the residual stream after each block over sets of prompts. |
 | [`gmlx distill`](#gmlx-distill) | Distill a teacher GGUF into a student adapter offline. |
 | [`gmlx image`](#gmlx-image) | Generate images from GGUF diffusion models. |
 | [`gmlx comfyui`](#gmlx-comfyui) | Put the gmlx node pack into ComfyUI, or remove it. |
@@ -1043,6 +1044,72 @@ gmlx run base-Q8_0.gguf --adapter my-lora.gguf --prompt "..."
 
 The data can be chat messages, prompt and completion pairs, or plain text,
 in the formats mlx-lm's trainer accepts.
+
+## gmlx capture
+
+`gmlx capture` runs sets of prompts through a model and records the
+residual stream after each decoder block. Steering and interpretability
+tools read the output, a safetensors file.
+
+```sh
+gmlx capture model.gguf --prompts harmful=harmful.jsonl \
+    --prompts harmless=harmless.jsonl --rows harmless --no-think \
+    --out capture.safetensors
+```
+
+A prompt file is JSONL: one JSON string on each line, so a prompt can
+hold newlines. Blank lines are skipped. All the sets run in one model
+load. Each prompt renders as an optional system message and one user
+message, with a generation prompt, through the same chat template and
+tokenizer path as `gmlx serve`. Each prompt runs alone, with no KV cache
+kept between prompts.
+
+The recorded value of a block is its output averaged over the last
+`--positions` prompt tokens, in float32. This is the block output that
+llama.cpp's `cvector-generator` reads as `l_out`. On a model with
+several residual streams the streams are averaged. MTP and nextn blocks
+are left out, so the layer count is the GGUF's block count less its
+nextn layers.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `MODEL`, positional | Required | Load this GGUF, or this config id or alias. |
+| `--prompts NAME=FILE` | Required | Add a set named NAME from a JSONL file. Repeat for more sets. A name holds letters, digits, `_` and `-`. |
+| `--out FILE` | Required | Write the safetensors file here. |
+| `--positions N` | `1` | Average each block output over the last N prompt tokens. |
+| `--rows SET` | None | Also write the per-prompt rows of this set. Repeat the flag, or give a comma list. |
+| `--limit N` | All | Use only the first N prompts of each set. |
+| `--system TEXT` | None | Render each prompt after this system message. |
+| `--think`, `--no-think` | The template's default | Render with thinking on or off, through the variable the template reads. |
+| `--chat-template STR_OR_PATH` | The GGUF's | Replace the chat template with inline Jinja or a `.jinja` or `.txt` file. |
+| `--config FILE` | The first default location | Resolve a model id against this config. |
+| `--json` | Off | Print one JSON line for each prompt and a last result line. |
+| `-v`, `--verbose` | Off | Print the full load diagnostics. |
+| `--stream-experts`, `--stream-cpu` | Off | Stream a model bigger than memory, as in [run](#streaming-flags). |
+| `--prefill-feeder`, `--no-prefill-feeder` | On | Stage a streamed model's experts directly from the GGUF. |
+| `--dtype DTYPE` | `auto` | Set the activation dtype: `auto`, `bfloat16` or `float16`. |
+| `--rope-scaling`, `--rope-scale`, `--rope-freq-base`, `--rope-freq-scale`, `--yarn-orig-ctx` | The header's | Set the rope scaling, as in [run](#rope-scaling-flags). |
+| `--yarn-ext-factor`, `--yarn-attn-factor`, `--yarn-beta-slow`, `--yarn-beta-fast` | The header's | Set the YaRN factors, as in [run](#rope-scaling-flags). |
+
+The file holds these tensors:
+
+| Name | Shape and type | Meaning |
+|------|----------------|---------|
+| `<set>.mean` | `[n_layer, n_embd]` float32 | The mean over the set's prompts. Every set has one. |
+| `<set>.rows` | `[n_layer, n_prompts, n_embd]` float16 | One row for each prompt. Only the sets named in `--rows` have one. |
+
+The file's metadata holds `arch`, the GGUF's `general.architecture`,
+`file` and `file_size` (all shards), `sets`, a JSON map from set name to
+prompt count, `positions`, `think` (`on`, `off` or `default`) and
+`gmlx_version`.
+
+With `--json`, every line on stdout is a JSON object with an `event` key,
+and other output goes to stderr:
+
+```json
+{"event": "progress", "set": "harmful", "done": 1, "total": 128, "tokens": 41}
+{"event": "result", "out": "capture.safetensors", "n_layer": 32, "n_embd": 4096, "sets": {"harmful": 128, "harmless": 128}, "rows": ["harmless"]}
+```
 
 ## gmlx distill
 

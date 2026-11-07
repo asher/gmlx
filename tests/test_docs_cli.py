@@ -78,6 +78,9 @@ def _entry(verb):
     if verb == "train":
         from gmlx.commands.train import cmd_train
         return cmd_train, [], set()
+    if verb == "capture":
+        from gmlx.commands.capture import cmd_capture
+        return cmd_capture, [], set()
     if verb == "doctor":
         from gmlx.commands.doctor import cmd_doctor
         return cmd_doctor, [], set()

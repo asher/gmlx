@@ -31,7 +31,8 @@ _HID, _LAYERS, _HEADS, _KV, _FFN, _HD = 64, 2, 4, 2, 128, 16
 def _mint_tiny_llama(path: str, *, yarn: bool = False,
                      q8_0: bool = False, extra_tokens: tuple = (),
                      untied: bool = False,
-                     nvfp4_down_scale: float | None = None) -> None:
+                     nvfp4_down_scale: float | None = None,
+                     chat_template: str | None = None) -> None:
     """A complete, loadable llama-arch GGUF: full KV metadata + every tensor
     the 2-layer model needs (tied embeddings; F32 so no quant kernels).
     ``yarn`` adds rope-scaling KVs so the built model carries a YarnRoPE with
@@ -41,7 +42,8 @@ def _mint_tiny_llama(path: str, *, yarn: bool = False,
     appends control tokens to the vocab, and ``untied`` writes an
     ``output.weight`` for a text tower that does not tie its embeddings.
     ``nvfp4_down_scale`` writes each ffn_down as NVFP4 with that F32
-    ``.scale``, as the llama.cpp converter does for a ModelOpt checkpoint."""
+    ``.scale``, as the llama.cpp converter does for a ModelOpt checkpoint.
+    ``chat_template`` writes ``tokenizer.chat_template``."""
     tokens = _TOKENS + list(extra_tokens)
     vocab = len(tokens)
     w = GGUFWriter(path, "llama")
@@ -69,6 +71,8 @@ def _mint_tiny_llama(path: str, *, yarn: bool = False,
     # A declared turn-end token distinct from eos (the GLM shape): must land
     # in the wrapper's public stop set, not just tokenizer-private state.
     w.add_uint32("tokenizer.ggml.eot_token_id", 2)
+    if chat_template is not None:
+        w.add_string("tokenizer.chat_template", chat_template)
 
     rng = np.random.default_rng(0)
 
