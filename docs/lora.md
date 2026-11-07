@@ -241,8 +241,20 @@ published for llama.cpp, and llama.cpp loads gmlx adapters with `--lora`.
 - Only LoRA adapters work. DoRA on a quantized model is not supported.
 - An adapter can change the dense linear layers and the down projections
   of MoE experts. Loading refuses an adapter that changes the gate or up
-  projections of experts, the embeddings, or any expert weight on a model
-  that runs a fused MoE block, such as Gemma and gpt-oss.
+  projections of experts or the embeddings. It also refuses expert weights
+  on gpt-oss and on native-FP expert stacks, which `GMLX_FUSED_MOE=0` loads
+  unfused.
+- On a model whose MoE blocks run fused, such as Qwen3.5 and Qwen3.6 MoE,
+  Qwen3.8-Flash-Next and the Gemma 4 MoE models, a block runs its slower
+  unfused path only in a step where a request has one of the block's
+  adapters on. In `gmlx serve` the other steps keep the fused speed. `gmlx
+  run`, `gmlx bench` and `gmlx chat` run every step of an adapted block
+  unfused.
+- An adapter that changes expert weights on such a model needs the experts
+  in memory. A load that streams the experts refuses it, with
+  `stream: experts`, `--stream-experts`, `--stream-cpu`, or a model too
+  large for memory. Set `GMLX_FUSED_MOE_BLOCK=0` to load the blocks unfused
+  and stream them.
 - Adapters work on text models only, so `--adapter` does not combine with
   `--mmproj`.
 - `gmlx run` and `gmlx chat` take one adapter at strength 1. They refuse an

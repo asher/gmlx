@@ -42,6 +42,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before the end marker when the thinking budget runs out, and llama-server's
   `reasoning_budget_tokens` and `reasoning_budget_message` name the two
   fields. See [Thinking budget](docs/api.md#thinking-budget).
+- An adapter that changes expert weights loads on models whose MoE blocks run
+  fused, such as Qwen3.5 and Qwen3.6 MoE, Qwen3.8-Flash-Next and the Gemma 4
+  MoE models, when they run in memory. In `gmlx serve` a block leaves its
+  fused path only in a step where a request has one of its adapters on.
 - `/v1/chat/completions` continues a partial last assistant message with
   `continue_final_message` and `add_generation_prompt: false`, in the prompt
   llama-server renders, and `add_generation_prompt: false` alone renders no
@@ -93,6 +97,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Speculative decoding on a Qwen3.5 or Qwen3.6 MoE model with an adapter that
+  changes expert weights now verifies drafts against the adapted experts,
+  where it skipped them on drafts of two or more tokens.
+- An MTP load with an adapter that changes expert weights no longer fails
+  when the load reads a lookup table from the file, or when it streams experts
+  that run unfused.
 - A request on a text model with an adapter no longer reuses prompt cache
   that another adapter file or a rewrite of the file wrote under the same id.
 - Two models with adapters that decode at once on one server no longer
