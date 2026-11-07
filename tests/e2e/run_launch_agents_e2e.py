@@ -101,7 +101,7 @@ OUTPUT_AT = r"its output goes to (\S+)\. gmlx launch --list"
 PYPROJECT = '''[project]
 name = "e2e-agent"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.11.1"
 dependencies = ["langchain-openai", "langchain-core"]
 
 [project.scripts]
@@ -166,7 +166,7 @@ if __name__ == "__main__":
 '''
 
 WEB_CODE = '''# /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.11.1"
 # dependencies = []
 # ///
 """The web agent of the launch-agents end-to-end script: one JSON page that
@@ -200,7 +200,7 @@ server.serve_forever()
 '''
 
 BUILD_CODE = '''# /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.11.1"
 # dependencies = []
 # ///
 """Print the file that the agent's own Containerfile adds."""
@@ -210,7 +210,7 @@ print("E2E_BUILD", open("/opt/e2e-marker").read().strip(), sys.version.split()[0
 '''
 
 API_CODE = '''# /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.11.1"
 # dependencies = []
 # ///
 """One request to the Messages route with the Anthropic variables only."""

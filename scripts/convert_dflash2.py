@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Asher Feldman
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.11.1"
 # dependencies = ["mlx-kquant>=0.5.9,<0.6", "gguf>=0.19", "numpy"]
 # ///
 """Convert a DFlash2 drafter checkpoint to a llama.cpp ``dflash`` GGUF.

@@ -315,3 +315,17 @@ def test_the_python_floor_leaves_out_the_semaphore_that_stays_locked():
     floor = SpecifierSet(_project()["requires-python"])
     assert "3.11.0" not in floor
     assert "3.11.1" in floor
+
+
+def test_each_standalone_script_states_the_projects_python_floor():
+    """The inline script headers of the converters and the end-to-end
+    runner's generated agents name the floor pyproject.toml does."""
+    import re
+
+    floor = _project()["requires-python"]
+    stated = {}
+    for path in [*_ROOT.glob("scripts/*.py"), *_ROOT.glob("tests/e2e/*.py")]:
+        for got in re.findall(r'requires-python = "([^"]+)"', path.read_text()):
+            stated.setdefault(got, []).append(path.relative_to(_ROOT).as_posix())
+    assert stated, "no script states a floor"
+    assert set(stated) == {floor}, stated

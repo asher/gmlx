@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Asher Feldman
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.11.1"
 # dependencies = ["numpy", "gguf>=0.19", "huggingface_hub"]
 # ///
 """Convert IBM's Granite Speech 5.0 TurboCTC checkpoint to a GGUF that gmlx
