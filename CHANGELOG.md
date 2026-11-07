@@ -116,6 +116,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A rank-1 LoRA adapter written by llama.cpp's tools now loads. gmlx refused
   it with "share no dimension - cannot infer rank".
+- An adapter that changes the gate or up projections of experts is refused
+  before the model loads, with a message that names the adapter and tensor.
 - Speculative decoding on a Qwen3.5 or Qwen3.6 MoE model with an adapter that
   changes expert weights now verifies drafts against the adapted experts,
   where it skipped them on drafts of two or more tokens.

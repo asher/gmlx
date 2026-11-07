@@ -381,6 +381,24 @@ def embedding_refusal(adapter_path: str, base_gguf_path: str) -> str | None:
     return None
 
 
+_GATE_UP_EXPS = ("ffn_gate_exps.weight", "ffn_up_exps.weight",
+                 "ffn_gate_up_exps.weight")
+
+
+def expert_gate_up_refusal(adapter_path: str) -> str | None:
+    """Why gmlx cannot apply the adapter's expert pairs, from its header,
+    or None. Expert adapters apply to the down projection only."""
+    from .headerscan import scan_gguf
+
+    for t in scan_gguf(adapter_path).tensors:
+        base_name = t.name[: -len(_A_SUFFIX)] if t.name.endswith(_A_SUFFIX) else ""
+        if base_name.endswith(_GATE_UP_EXPS):
+            return (f"{os.path.basename(adapter_path)}: adapter targets "
+                    f"{base_name}. gmlx applies expert adapters to the down "
+                    f"projection only, not the gate or up projections.")
+    return None
+
+
 def adapter_load_refusal(base_gguf_path: str, adapter_paths, env=None, *,
                          stream=None, mtp: bool = False) -> None:
     """Refuse, before any model build, an adapter the base cannot take,
@@ -395,7 +413,8 @@ def adapter_load_refusal(base_gguf_path: str, adapter_paths, env=None, *,
         if not os.path.isfile(path):
             continue                       # the load reports a missing file
         try:
-            why = embedding_refusal(str(path), str(base_gguf_path))
+            why = (embedding_refusal(str(path), str(base_gguf_path))
+                   or expert_gate_up_refusal(str(path)))
         except (ValueError, struct.error, IndexError):
             continue                       # and a file that is not a GGUF
         if why is not None:

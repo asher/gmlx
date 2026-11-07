@@ -4,6 +4,7 @@ before any build, a pair the base cannot take. CPU-only (minted GGUF
 headers, no model)."""
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 gguf = pytest.importorskip("gguf")
@@ -99,3 +100,27 @@ def test_an_adapter_that_is_not_a_gguf_is_left_to_the_load(tmp_path, data):
     bad = tmp_path / "a.gguf"
     bad.write_bytes(data)
     assert adapter.adapter_load_refusal(str(base), [str(bad)]) is None
+
+
+@pytest.mark.parametrize("proj", ["ffn_gate_exps", "ffn_up_exps"])
+def test_an_expert_gate_or_up_pair_is_refused_from_the_headers(tmp_path, proj):
+    from lora_gguf import write
+
+    base = mint_base(tmp_path / "base.gguf")
+    ad = write(tmp_path / "experts.gguf", "llama", {
+        f"blk.0.{proj}.weight.lora_a": np.zeros((4, 1, D), np.float32),
+        f"blk.0.{proj}.weight.lora_b": np.zeros((4, D, 1), np.float32)},
+        kv=(("adapter.type", "string", "lora"),))
+    with pytest.raises(ValueError, match=rf"blk\.0\.{proj}\.weight.*down projection"):
+        adapter.adapter_load_refusal(str(base), [ad])
+
+
+def test_an_expert_down_pair_passes_the_header_check(tmp_path):
+    from lora_gguf import write
+
+    base = mint_base(tmp_path / "base.gguf")
+    ad = write(tmp_path / "down.gguf", "llama", {
+        "blk.0.ffn_down_exps.weight.lora_a": np.zeros((4, 1, D), np.float32),
+        "blk.0.ffn_down_exps.weight.lora_b": np.zeros((4, D, 1), np.float32)},
+        kv=(("adapter.type", "string", "lora"),))
+    assert adapter.adapter_load_refusal(str(base), [ad]) is None
