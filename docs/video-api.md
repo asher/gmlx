@@ -162,7 +162,7 @@ status 500, and keeps the ones that ended.
 | A keyframe or guide image over 64 Mi pixels | 400 naming the field |
 | A guide video whose frames are over 64 Mi pixels | The job fails with 400 naming the guide, before a frame is read |
 | A guide video that does not fit in the clip from its frame | The job fails with 400 naming the guide |
-| A guide video whose encode does not fit beside the models loaded, even a few seconds at a time | The job fails with 400 naming the guide, the memory it needs and the memory free |
+| A guide video whose encode does not fit beside the models loaded, even a few seconds at a time | The job fails with 400 naming the guide: "... does not fit in memory beside the models now loaded: no window fits; the clip needs NEED, and FREE is free" |
 | `references` | 400 naming Ref2VA |
 | `prompt_upsampling: true` on an entry without an upsampler | 400 naming the `upsampler` setting |
 | An unknown or expired job | 404 `not_found` |
