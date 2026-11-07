@@ -1810,17 +1810,24 @@ def test_mtp_budget_message_then_end_marker(mtp_model):
 
     at = next((i for i in range(len(out))
                if out[i:i + len(forced)] == forced), None)
-    if at is None and any(t in out for t in hook.end_seq):
-        pytest.skip("the model closed its thinking inside the budget")
-    assert at is not None, tokenizer.decode(out)
     if not prompt_open and hook.start_seq:
         start = len(hook.start_seq)
-        opened = next(i for i in range(len(out))
-                      if tuple(out[i:i + start]) == hook.start_seq) + start
+        opened = next((i + start for i in range(len(out))
+                       if tuple(out[i:i + start]) == hook.start_seq), None)
+        if opened is None:
+            assert at is None, tokenizer.decode(out)
+            pytest.skip("the model opened no thinking block")
     else:
         opened = 0
-    thought = at - opened + seed
     block = _resolve_block_total(drafter, None)
+    if at is None:
+        end = list(hook.end_seq)
+        close = next((i for i in range(opened, len(out))
+                      if out[i:i + len(end)] == end), None)
+        if close is not None and close - opened + seed <= _BUDGET + block:
+            pytest.skip("the model closed its thinking inside the budget")
+    assert at is not None, tokenizer.decode(out)
+    thought = at - opened + seed
     assert _BUDGET <= thought <= _BUDGET + block, (thought, block)
     reasoning = tokenizer.decode(out[:at + len(forced)])
     assert reasoning.endswith(_BUDGET_MESSAGE + tokenizer.decode(
