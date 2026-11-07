@@ -333,9 +333,8 @@ class TokenizerWrapper:
             )
 
     def apply_chat_template(self, *args, tokenize=True, **kwargs):
-        if "enable_thinking" not in kwargs:
-            kwargs["enable_thinking"] = self.has_thinking
-
+        # gmlx: an absent enable_thinking stays absent, so the template's
+        # own default holds. Think tokens in the vocab do not turn it on.
         if self._chat_template is not None:
             out = self._chat_template(*args, **kwargs)
             if tokenize:

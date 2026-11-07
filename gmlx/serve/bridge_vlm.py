@@ -223,9 +223,8 @@ class _GgufServerProcessor:
     the callable backend as ``._tokenizer``, and rebuilds a *non-copy-safe*
     detokenizer through a class property. This adapter surfaces the callable
     backend as ``.tokenizer``, holds a copy-safe mlx-vlm ``.detokenizer``,
-    renders as the wrapper does but keeps the template's thinking default,
-    and delegates everything else (``chat_template``, ``encode``/``decode``
-    ...) to the original tokenizer wrapper.
+    and delegates everything else (``apply_chat_template``, ``chat_template``,
+    ``encode``/``decode`` ...) to the original tokenizer wrapper.
     """
 
     def __init__(self, wrapper, backend, detokenizer):
@@ -239,19 +238,6 @@ class _GgufServerProcessor:
         if name == "_wrapper":
             raise AttributeError(name)
         return getattr(self._wrapper, name)
-
-    def apply_chat_template(self, *args, **kwargs):
-        """The wrapper's render, where a render with no ``enable_thinking``
-        leaves the template's own default in charge: mlx-lm's wrapper sets
-        it to ``has_thinking``, so that render goes to the tokenizer it
-        wraps, as the wrapper's own does."""
-        w = self._wrapper
-        raw = getattr(w, "_tokenizer", None)
-        if ("enable_thinking" in kwargs or raw is None
-                or getattr(w, "_chat_template", None) is not None):
-            return w.apply_chat_template(*args, **kwargs)
-        kwargs["return_dict"] = False
-        return raw.apply_chat_template(*args, **kwargs)
 
 
 def _as_dict(config: Any) -> dict:

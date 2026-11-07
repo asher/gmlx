@@ -68,6 +68,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `gmlx run`, `gmlx chat` and `gmlx train` now follow the chat template's
+  thinking default, as `gmlx serve` does. Models whose template thinks only
+  when asked, such as Gemma 4, Qwen3.5-9B, MiniCPM-V 4.6 and
+  Nemotron-3.5-Bolt-E4B without an mmproj, no longer think unless asked, and
+  `gmlx train` no longer adds a thinking system turn to their chat records.
 - gmlx needs Python 3.11.1 or newer: 3.11.0 can stall image and video uploads.
 - `gmlx pull <name>` downloads each file from the latest commit of its
   repository, so a quant its publisher updates reaches you without a new gmlx
