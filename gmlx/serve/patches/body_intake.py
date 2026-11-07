@@ -437,9 +437,11 @@ _TURNS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 async def _in_turn(fn, *args):
     """``fn(*args)`` in a worker thread, one at a time. Each body is priced
-    against the same free figure, which books nothing, so two peaks never
-    run at once. The wait is on the loop and books no memory. The turn
-    ends when the thread does, past a cancel of the request."""
+    against the same free figure, which books nothing, so the work its
+    price counts runs here: a JSON parse and the gate's checks, the decode
+    of a video job's keyframes and an images form's files. Two such peaks
+    never run at once. The wait is on the loop and books no memory. The
+    turn ends when the thread does, past a cancel of the request."""
     loop = asyncio.get_running_loop()
     turn = _TURNS.get(loop)
     if turn is None:

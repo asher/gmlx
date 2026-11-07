@@ -267,7 +267,7 @@ async def _read_body(route: str, request: Request):
 
 async def _read_priced_body(route: str, request: Request):
     from ..image_service import ImageRequestError
-    from .body_intake import BodyRefused, read_form_in_ram, read_json
+    from .body_intake import BodyRefused, _in_turn, read_form_in_ram, read_json
 
     ctype = request.headers.get("content-type", "").lower()
     is_form = ctype.startswith("multipart/form-data")
@@ -283,7 +283,9 @@ async def _read_priced_body(route: str, request: Request):
         raise ImageRequestError(e.status, str(e), param=e.param,
                                 headers=e.headers) from None
     try:
-        return await asyncio.to_thread(_form_parts, form)
+        # In the turn the parses take: the form's price counts its
+        # largest file, which this reads whole.
+        return await _in_turn(_form_parts, form)
     finally:
         await form.close()
 

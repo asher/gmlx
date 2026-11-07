@@ -1288,6 +1288,24 @@ def _photo(w: int, h: int) -> bytes:
     return buf.getvalue()
 
 
+def test_a_keyframe_decodes_in_the_parse_turn(routes, monkeypatch):
+    """A JSON keyframe's decode is priced with its body, so it runs in the
+    turn the parses take, never beside another body's parse."""
+    url = "data:image/png;base64," + base64.b64encode(_png()).decode()
+    body = json.dumps({"prompt": "a cat", "first_frame": url}).encode()
+    held: list = []
+    real = videos._data_url
+
+    def decode(*a):
+        held.append(any(t.locked() for t in body_intake._TURNS.values()))
+        return real(*a)
+    monkeypatch.setattr(videos, "_data_url", decode)
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": "application/json"})
+    assert r.status_code == 200, r.text
+    assert held == [True]
+
+
 def test_a_keyframe_job_is_read_within_its_price(routes, monkeypatch,
                                                  tmp_path):
     """A job with a photo for its first frame and a prompt that is not

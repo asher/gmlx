@@ -35,6 +35,7 @@ import gmlx.serve.bridge_vlm as serving
 from ._common import _error_content, _remove_routes
 from .body_intake import (
     BodyRefused,
+    _in_turn,
     _mib,
     arriving_note,
     log_refusal,
@@ -479,8 +480,10 @@ async def create(request: Request):
             log_refusal(e.status, str(e))
             raise Refused(e.status, str(e), e.param,
                           headers=e.headers) from None
-        record, params = await asyncio.to_thread(prepare, fields, files,
-                                                 folder, ffmpeg, take)
+        # The keyframes decode in the turn the parses take: the price of
+        # a JSON body counts them.
+        record, params = await _in_turn(prepare, fields, files, folder,
+                                        ffmpeg, take)
         try:
             job = await asyncio.to_thread(post.submit, record, params)
         except QueueFull as e:

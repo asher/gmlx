@@ -1318,6 +1318,26 @@ def test_an_edits_image_decodes_off_the_event_loop(served, monkeypatch,
         [] if kind == "form_text" else [(32, 32, 3)])
 
 
+def test_an_edit_forms_files_decode_in_the_parse_turn(served,
+                                                     monkeypatch):
+    """The largest file of an edit form is priced with its body, so its
+    read and decode run in the turn the parses take."""
+    from gmlx.serve.patches import body_intake as bi
+
+    held: list = []
+    real = images._decoded
+
+    def decode(*a):
+        held.append(any(t.locked() for t in bi._TURNS.values()))
+        return real(*a)
+    monkeypatch.setattr(images, "_decoded", decode)
+    body, ctype = _edit_form("x")
+    r = TestClient(_gated_app()).post("/v1/images/edits", content=body,
+                                      headers={"content-type": ctype})
+    assert r.status_code == 200, r.text
+    assert held == [True]
+
+
 def _shaped(shape: str, n: int = 64 << 10) -> bytes:
     """A JSON body of about ``n`` bytes whose parse the price must bound:
     lists of small values, a dict of short keys, a prompt with one emoji
