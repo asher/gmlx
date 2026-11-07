@@ -27,10 +27,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The gmlx ComfyUI nodes run the MiniMax-H3 recipes, with the new
   `minimax-h3-t2v`, `minimax-h3-i2v` and `fasth3-t2v` workflows. See
   [Make a video](docs/comfyui.md#make-a-video).
-- In ComfyUI, `gmlx MiniMax-H3 Image to Video` tells the server the
-  clip's length and its first and last frames, so the entry's upsampler
-  rewrites the prompt as `POST /v1/videos` does. ComfyUI's own node
-  gives it neither.
+- In ComfyUI, `gmlx MiniMax-H3 Image to Video` gives the upsampler the
+  clip's length and keyframes, which ComfyUI's own node does not.
 - Ricursive Ripple-65B Preview loads, and `gmlx pull ripple-65b` fetches it with
   its DFlash2 drafter for speculative decoding. `scripts/convert_dflash2.py`
   converts the drafter to GGUF.
