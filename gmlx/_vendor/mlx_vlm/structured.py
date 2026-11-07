@@ -400,11 +400,8 @@ def _cached_llg_tokenizer(tokenizer):
         if _llg_tokenizer_cache.get(key, (None,))[0] is ref:
             del _llg_tokenizer_cache[key]
 
-    try:
-        ref = weakref.ref(tokenizer, _drop)
-    except TypeError:
-        return llg_tokenizer
-    _llg_tokenizer_cache[key] = (ref, llg_tokenizer)
+    # from_tokenizer takes only a PreTrainedTokenizerFast, which takes weak refs.
+    _llg_tokenizer_cache[key] = (weakref.ref(tokenizer, _drop), llg_tokenizer)
     return llg_tokenizer
 
 
