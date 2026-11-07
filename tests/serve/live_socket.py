@@ -40,20 +40,29 @@ def send(conn: http.client.HTTPConnection, path: str, head: bytes,
     """POST ``head`` then ``rest`` on ``conn``, under the Content-Length
     ``length`` (theirs by default), and return the response, read whole.
     With ``ready``, ``rest`` goes once the server sets it, so the server
-    has acted on ``head`` alone."""
+    has acted on ``head`` alone. A server that refuses a body by its
+    length answers and closes before reading it, so a send it cuts off
+    is kept on the response as ``sent_error`` and the answer read."""
     conn.putrequest("POST", path)
     conn.putheader("Content-Type", ctype)
     for k, v in (headers or {}).items():
         conn.putheader(k, v)
     conn.putheader("Content-Length",
                    str(len(head) + len(rest) if length is None else length))
-    conn.endheaders(head)
-    if rest:
-        assert ready is None or ready.wait(30), \
-            "the server did not act on the head before the rest was sent"
-        conn.send(rest)
+    sent = None
+    try:
+        conn.endheaders(head)
+        if rest:
+            assert ready is None or ready.wait(30), \
+                "the server did not act on the head before the rest was sent"
+            conn.send(rest)
+    except (ConnectionError, OSError) as e:
+        if isinstance(e, TimeoutError):
+            raise
+        sent = e
     r = conn.getresponse()
     r.body = r.read()
+    r.sent_error = sent
     return r
 
 

@@ -1719,7 +1719,8 @@ def test_a_sweep_while_a_form_arrives_leaves_its_files(routes,
 def test_two_forms_that_each_fit_alone_cannot_pass_the_room_together(
         routes):
     """The first POST reserves its Content-Length before its first byte:
-    the second, which fits alone, is refused beside it."""
+    the second, which fits alone, is refused beside it on its headers,
+    before any of its body is sent."""
     import http.client
 
     from live_socket import send, serving
@@ -1734,7 +1735,7 @@ def test_two_forms_that_each_fit_alone_cannot_pass_the_room_together(
         _start(ca, a[:64], len(a), ctype)
         assert _until(lambda: list(store.pending.values()) == [len(a)])
         cb = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-        r = send(cb, "/v1/videos", b, ctype=ctype)
+        r = send(cb, "/v1/videos", b"", length=len(b), ctype=ctype)
         assert r.status == 413, r.body
         assert json.loads(r.body)["error"]["message"] == (
             f"the files of this job are {body_intake._mib(len(b), True)}, "
