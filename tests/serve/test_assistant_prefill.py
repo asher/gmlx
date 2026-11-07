@@ -170,7 +170,10 @@ def chat(monkeypatch):
             loads.append(a) or (None, processor, config)))
         r = client.post(path, json={"model": "m", "max_tokens": 1, **body})
         assert r.status_code == status, r.text
-        return rg.calls.pop() if status == 200 else r.json()["error"]["message"]
+        if status == 200:
+            return rg.calls.pop()
+        err = r.json()
+        return err["error"]["message"] if "error" in err else str(err["detail"])
 
     def reinstall(with_prefill):
         for obj, attr, fn in saved:
@@ -659,3 +662,10 @@ def test_an_assistant_alias_with_tools_passes_the_fields(chat, monkeypatch):
     assert turns == []
     assert _RUNTIME.response_generator.calls[-1].endswith(
         "<|im_start|>assistant\n<think>\n\n</think>\n\nHello")
+
+
+@pytest.mark.parametrize("name", ["continue_final_message",
+                                  "add_generation_prompt"])
+def test_chat_template_kwargs_cannot_carry_the_fields(chat, name):
+    body = {"messages": [*_HISTORY, _C], "chat_template_kwargs": {name: False}}
+    assert name in chat(_QWEN, body, status=400)
