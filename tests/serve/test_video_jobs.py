@@ -436,6 +436,23 @@ def test_progress_runs_over_the_steps_then_the_frames(tmp_path):
     assert job.record["gmlx"]["phase"] == "denoising"
 
 
+def test_progress_reads_0_until_the_prompt_encode(tmp_path):
+    """The phases before the encode, the model's load among them, are no
+    part of the clip's work: progress counts 5 from the encode on, a
+    wait for memory after it included."""
+    store, clock, driver = _store(tmp_path)
+    job = _submit(store)
+    job.record["status"] = "in_progress"
+    job.started = clock.now
+    seen = []
+    for phase in ("reading the inputs", "rewriting the prompt",
+                  "loading the model", "waiting for memory",
+                  "encoding the prompt", "waiting for memory"):
+        store.progress(job, phase=phase)
+        seen.append(job.record["progress"])
+    assert seen == [0, 0, 0, 0, 5, 5]
+
+
 def test_a_wait_for_memory_holds_the_job_and_fails_it_past_expiry(
         tmp_path):
     from gmlx.serve.image_service import JobStopped

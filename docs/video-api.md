@@ -104,8 +104,8 @@ The job is the OpenAI video object, with a `gmlx` part:
 
 `status` runs from `queued` to `in_progress`, and ends `completed`,
 `failed` or `cancelled`. `seconds` is the clip's length, its frames over 24.
-`progress` is 5 once the job runs, counts the steps to 90 and the decode
-after them, and is 100 when the MP4 is written.
+`progress` is 0 until the prompt encode, 5 from it, counts the steps to 90
+and the decode after them, and is 100 when the MP4 is written.
 `gmlx.phase` names the work now running, `gmlx.step` the steps done, and
 `gmlx.eta_s` the seconds the job expects to take still. `revised_prompt`
 holds the upsampler's caption.

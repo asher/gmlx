@@ -41,6 +41,10 @@ QUEUED, RUNNING, DONE, FAILED, CANCELLED = (
 ENDED = frozenset({DONE, FAILED, CANCELLED})
 # Retry-After of a full queue with no clip timed yet.
 FIRST_RETRY_S = 60
+# The phase of the prompt encode, and the phases that can come before it.
+ENCODING = "encoding the prompt"
+_BEFORE_ENCODE = frozenset({"reading the inputs", "rewriting the prompt",
+                            "loading the model", "waiting for memory"})
 # The LoRA turn's subject in its refusals.
 JOB = "the LoRA factors of this video job"
 # A job's id, as :meth:`VideoJobs.new_id` makes it.
@@ -80,6 +84,8 @@ class Job:
     started: float | None = None
     # The encode's results, kept across a wait for memory.
     kept: dict = field(default_factory=dict)
+    # Whether the prompt encode began: progress counts 5 from it.
+    encoding: bool = False
 
 
 def default_root(port=None) -> str:
@@ -535,7 +541,8 @@ class VideoJobs:
                  step: tuple | None = None, frames: tuple | None = None
                  ) -> None:
         """Set the running job's phase, its step i of N and its frames k
-        of F decoded: progress is 5 + 85 i/N + 10 k/F."""
+        of F decoded: progress is 0 before the prompt encode, then
+        5 + 85 i/N + 10 k/F."""
         with self.lock:
             rec = job.record
             if rec["status"] != RUNNING:
@@ -543,6 +550,11 @@ class VideoJobs:
             g = rec.setdefault("gmlx", {})
             if phase is not None:
                 g["phase"] = phase
+            job.encoding = job.encoding or step is not None \
+                or frames is not None \
+                or (phase is not None and phase not in _BEFORE_ENCODE)
+            if not job.encoding:
+                return
             if step is not None:
                 g["step"], g["steps"] = step
             if frames is not None:
@@ -765,7 +777,7 @@ def _encode_part(job: Job, store: VideoJobs, hold, text: str, keyframes,
     if why:
         raise StepError(400, why)
     sizes = [(int(i.shape[1]), int(i.shape[0])) for i in keyframes]
-    store.progress(job, phase="encoding the prompt")
+    store.progress(job, phase=ENCODING)
     try:
         _check_encode(hold, served, text, sizes)
         feats, spans = vs.encode(served, text, keyframes)
