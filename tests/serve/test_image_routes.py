@@ -1245,8 +1245,12 @@ def test_an_edit_with_a_photo_is_read_within_its_price(served, monkeypatch,
 def _shaped(shape: str, n: int = 64 << 10) -> bytes:
     """A JSON body of about ``n`` bytes whose parse the price must bound:
     lists of small values, a dict of short keys, a prompt with one emoji
-    escaped or literal, or one plain string."""
+    escaped or literal, one that widens twice, to 2 bytes a character at
+    its first and to 4 at its end, or one plain string."""
     emoji = "\U0001F600"
+    if shape == "cjk_emoji":
+        prompt = "\u4e2d" + "a" * n + emoji
+        return json.dumps({"prompt": prompt}, ensure_ascii=False).encode()
     if shape in ("emoji_escaped", "emoji_literal", "string"):
         prompt = "a" * n + ("" if shape == "string" else emoji)
         return json.dumps({"prompt": prompt},
@@ -1260,7 +1264,7 @@ def _shaped(shape: str, n: int = 64 << 10) -> bytes:
 
 
 SHAPES = ["objects", "floats", "strs", "pairs", "emoji_escaped",
-          "emoji_literal", "string"]
+          "emoji_literal", "cjk_emoji", "string"]
 
 
 @pytest.mark.parametrize("shape", SHAPES)

@@ -254,3 +254,25 @@ def test_a_chunked_form_file_past_the_memory_free_stops_as_it_passes():
     assert str(e.value).startswith("the request body is over 4.0 MiB, and "
                                    "4.0 MiB of memory is free"), e.value
     assert sent[0] <= free + len(head) + chunk
+
+
+@pytest.mark.parametrize("ensure_ascii", [False, True])
+def test_a_str_widened_twice_parses_within_its_price(ensure_ascii):
+    """A str whose parse widens it to 2 bytes a character, then to 4, holds
+    each narrower copy as it widens: its read and parse peak within the
+    price."""
+    import asyncio
+    import tracemalloc
+
+    prompt = "中" + "a" * (2 << 20) + "\U0001F600"
+    body = json.dumps({"prompt": prompt}, ensure_ascii=ensure_ascii).encode()
+    need = bi.json_price(body)
+    request = _json_request(body)
+    tracemalloc.start()
+    try:
+        doc = asyncio.run(bi.read_json(request, need))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert doc == {"prompt": prompt}
+    assert peak <= need, peak / need

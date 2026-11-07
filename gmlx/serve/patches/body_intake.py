@@ -147,6 +147,13 @@ _HIGH = re.compile(rb"[\x80-\xff]")
 # The UTF-8 lead bytes of a character past U+FFFF, and of one past U+00FF.
 _LEAD4 = re.compile(rb"[\xf0-\xff]")
 _LEAD2 = re.compile(rb"[\xc4-\xef]")
+# What makes a str the parse is making take 2 bytes a character: a
+# character past U+00FF, or a \u escape of one that is not the first of a
+# surrogate pair. And what makes it take 4: a character past U+FFFF, or
+# the first of a surrogate pair.
+_WIDEN2 = re.compile(rb"[\xc4-\xef]|\\u(?!00)(?![dD][89abAB][0-9a-fA-F]{2}"
+                     rb"\\u[dD][c-fC-F])[0-9a-fA-F]{4}")
+_WIDEN4 = re.compile(rb"[\xf0-\xff]|\\u[dD][89abAB]")
 # The bytes a str decoded from UTF-8 holds for each byte decoded, by its
 # kind (:func:`_kind`): at the end of its decode, the str and the narrower
 # copy the decoder widens it from, by tracemalloc; once decoded, the str.
@@ -206,8 +213,10 @@ def _json_plan(buf) -> tuple[int, int]:
     WIDE_CHAR_BYTES once it is not ASCII or holds a \\u escape. It grows
     1.25 times past its end, and once a \\u escape widens it, to 6.25
     times its characters with the narrow copy it widens from, by
-    tracemalloc. A value or container starts the body or follows a ",",
-    ":", "[" or "{", so their count bounds the values."""
+    tracemalloc; widened to 2 bytes a character then to 4, to 7.5 times
+    its characters with both narrower copies. A value or container starts
+    the body or follows a ",", ":", "[" or "{", so their count bounds the
+    values."""
     n = len(buf)
     high = _high_bytes(buf)
     wide = high > 0 or buf.find(b"\\u") >= 0
@@ -229,7 +238,10 @@ def _json_plan(buf) -> tuple[int, int]:
         own = size * WIDE_CHAR_BYTES if u else size
         strs += own
         if u:
-            grows = max(grows, math.ceil(size * 2.25))
+            two = _WIDEN2.search(buf, s, e)
+            twice = two is not None and _WIDEN4.search(
+                buf, two.end(), e) is not None
+            grows = max(grows, math.ceil(size * (3.5 if twice else 2.25)))
         elif buf.find(b"\\", s, e) >= 0:
             grows = max(grows, math.ceil(size * 0.25))
         cut = own if buf.startswith(b'"data:', s) else 0
