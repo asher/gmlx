@@ -1717,7 +1717,7 @@ class _ResidencyPool:
                 break
             if e.is_image:
                 kinds.add(e.kind)
-            held -= e.footprint
+            held -= self._entry_bytes(e)
             count -= 1
         return frozenset(kinds)
 

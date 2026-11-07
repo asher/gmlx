@@ -1372,6 +1372,24 @@ def test_a_cold_load_that_evicts_on_both_workers_holds_image_then_video(
     assert sorted(p.name for p in pool.released) == ["clip", "zimage"]
 
 
+def test_a_cold_load_counts_a_victims_lora_bytes_when_it_picks_workers(
+        monkeypatch):
+    """An idle image entry holds 3 GB of LoRA factors beside its 2 GB of
+    weights. Its eviction makes the room of an image load, so the load
+    holds the image worker alone, and not the video worker of the idle
+    clip it leaves resident."""
+    pool = make_pool(monkeypatch, 10)
+    zimage = image(pool, "zimage", 2, busy=True)
+    job(pool, zimage, "z1", 3 * GB)
+    pool.release(zimage)
+    clip = video(pool, "clip", 3)
+    order = _recorded_holds(monkeypatch, pool)
+    pool.release(pool.acquire("new", None, IMAGE_KIND,
+                              build_spec=spec("new", 5)))
+    assert order == [IMAGE_KIND]
+    assert not pool.entry_resident(zimage) and pool.entry_resident(clip)
+
+
 @pytest.mark.parametrize("seed", [1, 2, 3])
 def test_two_workers_turn_at_once_and_never_release_on_each_other(
         monkeypatch, seed):
