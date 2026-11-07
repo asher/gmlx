@@ -252,8 +252,8 @@ curl localhost:8080/v1/chat/completions -d '{
 }'
 ```
 
-The server renders the prompt that llama-server renders for the same
-messages, so a reply or a logprob from gmlx matches one from llama.cpp.
+For the templates below, the server renders the same prompt that
+llama-server renders for the same messages.
 The reply holds only the new text, in `content` or `reasoning_content`.
 `usage.prompt_tokens` counts the prefill, and `max_tokens`, `logprobs` and
 `stop` apply to the new tokens only.
@@ -268,11 +268,11 @@ reasoning before the content.
 
 These chat templates can continue a message: Qwen3.5 and later Qwen
 templates, the other templates that write tool calls in the same
-`<tool_call>` and `<function=...>` form, Gemma 4 and SmolLM2-135M-Instruct.
-A request to any other model gets a 400, and so does a request to a model
-whose processor builds its prompt in Python. A last message with
-`tool_calls`, both fields true, and
-`response_format` with `continue_final_message` also get a 400. An
+`<tool_call>` and `<function=...>` form, Gemma 4 without `mmproj:` and
+SmolLM2-135M-Instruct. A request to any other model gets a 400, and so does
+a request to a model whose processor builds its prompt in Python. A last
+message with `tool_calls`, both fields true, and `response_format` with
+`continue_final_message` also get a 400. An
 [assistant](assistant.md#served-assistants) without `tools` refuses both
 fields, because its turns build their own prompt.
 
@@ -293,6 +293,9 @@ gmlx differs from llama-server in these ways:
   true.
 - `response_format` with `continue_final_message` gets a 400.
 - Templates outside the list above get a 400.
+- A Gemma 4 model set up with `mmproj:` gets a 400 for
+  `continue_final_message`. Its processor adds a space after the system
+  message, so its prompt is not the one llama-server renders.
 - gmlx merges all system messages into one system message at the start.
   llama-server keeps each one where the client sent it.
 - The reply holds only the new text. A llama-server reply that is not
