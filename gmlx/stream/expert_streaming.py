@@ -614,6 +614,7 @@ def install_expert_streaming(
     """
     from gmlx.load.modules import (
         glu_unsorted_call,
+        refuse_streamed_fused_expert_lora,
         stock_glu_calls,
         switch_layer_types,
     )
@@ -678,6 +679,8 @@ def install_expert_streaming(
     plan = stream_plan(ladder_bytes, tables, budget,
                        force_stream=force_stream,
                        latched=tables_for_memory(gguf_path))
+    if force_stream or plan.experts:
+        refuse_streamed_fused_expert_lora(model)
     compose = plan.tables and plan.experts
     table_only = plan.tables and not plan.experts
     if plan.table_kept and table_bytes(model):
@@ -701,6 +704,7 @@ def install_expert_streaming(
             skip_ids=frozenset(streamed_table_array_ids(model)),
             keep=wire_keep)
         if not early_wired:
+            refuse_streamed_fused_expert_lora(model)
             table_only = False
             compose = bool(plan.tables)
             force_stream = fell_back = True

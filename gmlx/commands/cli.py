@@ -1510,6 +1510,20 @@ def _apply_cli_adapter(args, model, config) -> None:
     print(f"[adapter] applied {n}-module GGUF LoRA from {adapter}")
 
 
+def _streamed_adapter_refusal(args) -> str | None:
+    """Why ``--adapter`` cannot load with the requested expert streaming,
+    from the headers alone, or None."""
+    if not getattr(args, "adapter", None) or not (
+            getattr(args, "stream_experts", False)
+            or getattr(args, "stream_cpu", False)):
+        return None
+    from gmlx.load.adapter import fused_expert_lora_refusal
+
+    return fused_expert_lora_refusal(
+        args.gguf, (os.path.expanduser(args.adapter),),
+        mtp=bool(getattr(args, "speculative", False)))
+
+
 def _cli_adapter_hook(args):
     """The ``before_wire`` hook of an MTP load: the ``--adapter`` install on
     the trunk before the table install and the wire, or None."""
@@ -3101,6 +3115,10 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     apply_transcription_defaults(args, parser, argv)
     # After the config/family overlays: either may have seeded a cap.
     resolve_max_tokens(args)
+    why = _streamed_adapter_refusal(args)
+    if why:
+        print(f"error: --adapter: {why}", file=sys.stderr)
+        return 2
     from gmlx.load.arch_table import UnsupportedArchError
     from gmlx.load.preflight import UnsupportedCodecError
 

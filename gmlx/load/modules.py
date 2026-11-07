@@ -2799,6 +2799,22 @@ def _stamp_gate_slots(by_path: dict, paths, slot: int, *,
             break
 
 
+def refuse_streamed_fused_expert_lora(model: nn.Module) -> None:
+    """Raise when a fused MoE block under ``model`` carries an expert
+    adapter target. Expert streaming calls this before it wraps, wires or
+    credits anything."""
+    hits = [p for p, m in model.named_modules()
+            if m.__dict__.get("_kq_expert_lora")]
+    if hits:
+        n = (f"{len(hits)} blocks carry" if len(hits) > 1 else "1 block carries")
+        raise NotImplementedError(
+            f"expert LoRA on a fused MoE block needs the routed experts in "
+            f"memory, and this load streams them. {n} expert targets, the "
+            f"first at {hits[0]}. Load the model without "
+            f"expert streaming, use an adapter without expert targets, or set "
+            f"GMLX_FUSED_MOE_BLOCK=0 to load the blocks unfused.")
+
+
 def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
     """Stamp each expert-stack ``down_proj`` target with its ``ExpertLoRA``
     and swap the owning SwitchGLU onto ``_LoRASwitchGLU``. The leaf keeps its
