@@ -141,7 +141,8 @@ keeps running. `gmlx sync-models` removes such entries.
 | <a id="modelsnative_mtp"></a>`native_mtp` | `false` | Draft with the GGUF's own MTP head even when `draft_gguf` is set |
 | <a id="modelsspeculative_width_cap"></a>`speculative_width_cap` | `null` | Speculate on at most this many requests at a time. `null` takes the drafter's default, `0` removes the cap. |
 | <a id="modelscontext_copy"></a>`context_copy` | `false` | Also draft from the prompt, as [Context copy](speculative-decoding.md#context-copy) describes. |
-| <a id="modelsadapter"></a>`adapter` | none | [LoRA adapter](lora.md) GGUF applied at load. Ids with the same `path` and different adapters share the base weights. |
+| <a id="modelsadapters"></a>`adapters` | none | [LoRA](lora.md) GGUFs, each a path or `{path, strength}`, strength 1 by default. A path listed twice is an error. |
+| <a id="modelsadapter"></a>`adapter` | none | Shorthand for one `adapters` entry at strength 1. Set `adapter` or `adapters`, not both. |
 | <a id="modelspin"></a>`pin` | `false` | Load at start and stay loaded. Only `POST /unload` unloads a pinned model. |
 | <a id="modelsttl_s"></a>`ttl_s` | `server.defaults.ttl_s` | Seconds without a request before the model unloads. `null` or `0` turns off the timeout. |
 | <a id="modelsstream"></a>`stream` | none | Run a model larger than memory. `experts` streams the routed experts from disk, `cpu` runs the whole model on the CPU. |
@@ -149,6 +150,11 @@ keeps running. `gmlx sync-models` removes such entries.
 Each drafter has its own default `speculative_width_cap`, which
 [Several requests at once](speculative-decoding.md#several-requests-at-once)
 lists.
+
+Ids with the same `path` and different `adapters` share one loaded copy.
+The strength in `adapters` is the default of a request, and a request can
+set another without a reload, as
+[Mixing adapters per request](lora.md#mixing-adapters-per-request) shows.
 
 `profiles` changes one profile for one model. Here `@coding` also sets
 `min_p` on this model, and other models keep the plain intent:
@@ -284,7 +290,7 @@ entries.
 | <a id="image_modelsttl_s"></a>`ttl_s` | `server.defaults.ttl_s` | Seconds without a request before the model unloads. `null` or `0` turns off the timeout. |
 
 The `auto` choice of `encoder_release` counts no request LoRAs. A shared
-encoder must be a model without an `adapter`. A quantized chat GGUF used as
+encoder must be a model without adapters. A quantized chat GGUF used as
 the encoder gives slightly different images than a full precision encoder
 file.
 
@@ -589,8 +595,8 @@ scanned folder. A model with `stream` set gets no drafter.
 An image DiT becomes an [image model](#image-models) when the scan also
 finds its family's text encoder and VAE. Files are matched by their
 weights, not their names, and the nearest match to the DiT wins. A text
-encoder that is also a chat model, scanned or configured without an
-`adapter`, is shared by its id; for the Qwen-Image models the chat model
+encoder that is also a chat model, scanned or configured without
+adapters, is shared by its id; for the Qwen-Image models the chat model
 must also have its `mmproj`. A DiT without its encoder or VAE is
 reported with the `gmlx pull` command that fetches them.
 
@@ -639,7 +645,7 @@ which run on the Mac, so prefer one extension's own origin to a wildcard.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| <a id="servermodel_dirs"></a>`model_dirs` | none | Folders searched in order for a relative `path`, `mmproj`, `asr`, `draft_gguf` or `adapter`. `gmlx pull` downloads into the first. |
+| <a id="servermodel_dirs"></a>`model_dirs` | none | Folders searched in order for a relative `path`, `mmproj`, `asr`, `draft_gguf` or adapter. `gmlx pull` downloads into the first. |
 | <a id="serverhf_cache"></a>`hf_cache` | `false` | Run the Hugging Face libraries offline, so the server never downloads. `gmlx init --from-hf-cache` sets it. |
 
 ### Services

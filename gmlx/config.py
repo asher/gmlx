@@ -11,7 +11,7 @@ Shape (see ``docs/config.md`` for the full reference)::
     server:    {host, port, api_key, no_auth, media_urls, cors_origins, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
-    models:    {<id>: {path, profile, family, profiles, mmproj, asr, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, context_copy, rope_scaling, overrides, pin, ttl_s}}
+    models:    {<id>: {path, profile, family, profiles, mmproj, asr, draft_gguf, adapter, adapters, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, context_copy, rope_scaling, overrides, pin, ttl_s}}
     aliases:   {<name>: <id> | <id>@<profile>}    # friendly name / profile preset
     discover:  [{dir, recursive, pair_mmproj, speculative}]
     talk:      {model, voice, speed, system, language, max_tokens, mode, wake_word, wake_threshold, vad, input_device, output_device, chime, brain, push_to_talk_modifier}
@@ -191,7 +191,7 @@ TEMPLATE_CALL_KEYS = frozenset({
     "num_images", "num_audios", "video", "max_pixels", "fps", "audio_token",
     "processor_kwargs", "load_audio_from_video"})
 _MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj", "asr",
-                         "draft_gguf", "native_mtp", "adapter", "stream",
+                         "draft_gguf", "native_mtp", "adapter", "adapters", "stream",
                          "cpu_moe",  # deprecated alias for `stream:`
                          "moe_experts", "moe_expert_mass",
                          "moe_miss_shed", "moe_layer_shed", "moe_prestage",
@@ -567,7 +567,9 @@ class ModelCfg:
     # Draft with the GGUF's own MTP head even when draft_gguf is set (an
     # external drafter otherwise wins).
     native_mtp: bool = False
-    adapter: str | None = None          # GGUF LoRA adapter applied live at load
+    # GGUF LoRA adapters applied live at load, as (written path, default
+    # strength) pairs in config order. `adapter: X` is ((X, 1.0),).
+    adapters: tuple = ()
     # Execution placement (normalized by _normalize_stream): "experts" streams
     # only the routed-expert stacks from disk (every-token layers + KV cache
     # stay on GPU); "cpu" runs the whole model on the CPU device, all weights
@@ -607,6 +609,10 @@ class ModelCfg:
     overrides: dict = field(default_factory=dict)   # {sampling, load, cache, system}
     pin: bool = False
     ttl_s: float | None = None      # None => server default; 0 => never
+
+    def adapter_paths(self) -> tuple:
+        """The adapter paths as written, in config order."""
+        return tuple(p for p, _st in self.adapters)
 
 
 @dataclass
@@ -1140,6 +1146,15 @@ class ServerCfg:
     themes: dict = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class AdapterRef:
+    """One adapter of a text entry: the path as written in the config, the
+    resolved path and the default strength."""
+    written: str
+    path: str
+    strength: float
+
+
 @dataclass
 class ResolvedModel:
     """A model with every layer merged - what the server actually serves. ``sampling``
@@ -1167,12 +1182,16 @@ class ResolvedModel:
     # template spelling at the gen-args seam. Per-request - not load-affecting.
     thinking: Any = None
     reasoning_effort: str | None = None
-    # resolved GGUF LoRA adapter abspath, applied live over the base at load. Ids on
-    # one GGUF that differ only in adapter share one resident entry: `adapters` is
-    # the sorted union of their adapters (filled by the serving registry; slot i of
-    # the row channel holds adapters[i]) and is what enters load_signature.
-    adapter: str | None = None
+    # This id's GGUF LoRA adapters (AdapterRef), applied live over the base at
+    # load, in config order. Ids on one GGUF that differ only in adapters share
+    # one resident entry: `adapters` is the sorted union of their adapter paths
+    # (filled by the serving registry; slot i of the row channel holds
+    # adapters[i]) and is what enters load_signature. `adapter_slots[i]` is
+    # the union slot of config index i. Strengths stay out of the signature:
+    # each row carries its own.
+    adapter_list: tuple = ()
     adapters: tuple = ()
+    adapter_slots: tuple = ()
     # Speech companion: a resolved abspath, or None to let discovery pair one;
     # no_asr turns pairing off. Loaded on first audio, not load-affecting.
     asr: str | None = None
@@ -1212,8 +1231,8 @@ class ResolvedModel:
 
     def effective_adapters(self) -> tuple:
         """The adapters the resident entry serving this id carries: the
-        registry-filled union, else this id's own adapter alone."""
-        return tuple(self.adapters) or ((self.adapter,) if self.adapter else ())
+        registry-filled union, else this id's own adapters, sorted."""
+        return tuple(self.adapters) or tuple(sorted({a.path for a in self.adapter_list}))
 
     def base_signature(self) -> tuple:
         """:meth:`load_signature` with the adapter component blanked: ids
@@ -1950,8 +1969,25 @@ def split_address(field: str, profiles) -> tuple[str, str | None]:
 
 
 # Resolution
+def _resolve_adapter_list(model: ModelCfg, model_dirs) -> tuple:
+    """The entry's adapters as :class:`AdapterRef` in config order, each
+    path resolved through ``model_dirs``. Two items that name one file are
+    an error."""
+    refs = tuple(AdapterRef(written, resolve_path(written, model_dirs), float(st))
+                 for written, st in model.adapters)
+    seen: dict = {}
+    for i, ref in enumerate(refs):
+        real = os.path.realpath(ref.path)
+        if real in seen:
+            raise ConfigError(f"model {model.id!r}: adapters[{seen[real]}] and "
+                              f"adapters[{i}] name the same file")
+        seen[real] = i
+    return refs
+
+
 def resolve_model(
-    model_id: str, cfg: ServerCfg, request_profile: str | None = None
+    model_id: str, cfg: ServerCfg, request_profile: str | None = None,
+    *, adapter_list=None,
 ) -> ResolvedModel:
     """Merge every layer for ``model_id`` into a :class:`ResolvedModel`.
 
@@ -1962,7 +1998,8 @@ def resolve_model(
     request ``profile`` field) replaces the model's configured profile and may
     name a built-in intent; a user profile shadows a built-in of the same name.
     Raises :class:`KeyError` for an unknown ``model_id`` and :class:`ConfigError`
-    for an unknown ``request_profile``."""
+    for an unknown ``request_profile``. ``adapter_list`` is the entry's
+    adapters resolved before (its registration), reused as they are."""
     model = cfg.models[model_id]
     # User profiles shadow built-in intents by name; built-ins resolve per this
     # model's family, so `coding` means the right thing for each model.
@@ -2098,7 +2135,8 @@ def resolve_model(
         no_asr=model.asr is False,
         draft_gguf=(None if model.native_mtp
                     else resolve_path(model.draft_gguf, cfg.model_dirs)),
-        adapter=resolve_path(model.adapter, cfg.model_dirs),
+        adapter_list=(tuple(adapter_list) if adapter_list is not None
+                      else _resolve_adapter_list(model, cfg.model_dirs)),
         stream=model.stream or None,
         moe_experts=model.moe_experts,
         moe_expert_mass=model.moe_expert_mass,
@@ -2720,6 +2758,21 @@ def _parse_profile(name: str, raw: dict) -> Profile:
     )
 
 
+def _model_adapters(model_id: str, raw: dict) -> tuple:
+    """A text entry's ``adapters:`` list, or its ``adapter:`` shorthand as
+    one item at strength 1."""
+    if "adapter" in raw and "adapters" in raw:
+        raise ConfigError(f"model {model_id!r}: set adapter or adapters, not both")
+    one = raw.get("adapter")
+    if one is not None:
+        if not isinstance(one, str):
+            raise ConfigError(f"model {model_id!r} adapter must be a path "
+                              f"(got {type(one).__name__}: {one!r})")
+        return ((one, 1.0),)
+    return _parse_adapter_list(f"model {model_id!r}.adapters", raw.get("adapters"),
+                               unique=True)
+
+
 def _parse_model(model_id: str, raw: dict) -> ModelCfg:
     raw = raw or {}
     if not isinstance(raw, dict):
@@ -2798,7 +2851,7 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
         asr=_normalize_asr(raw.get("asr"), f"model {model_id!r}"),
         draft_gguf=raw.get("draft_gguf"),
         native_mtp=bool(raw.get("native_mtp", False)),
-        adapter=raw.get("adapter"),
+        adapters=_model_adapters(model_id, raw),
         stream=_normalize_stream(raw.get("stream"), f"model {model_id!r}",
                                  legacy=raw.get("cpu_moe")),
         moe_experts=_normalize_moe_experts(
@@ -2869,10 +2922,12 @@ def _parse_image_defaults(where: str, raw) -> dict:
     return out
 
 
-def _parse_image_adapters(where: str, raw) -> tuple:
+def _parse_adapter_list(where: str, raw, unique: bool = False) -> tuple:
     """``adapters:`` as ``(path, strength)`` pairs. An entry is a path, or
-    a mapping of ``path`` and an optional ``strength`` (default 1)."""
+    a mapping of ``path`` and an optional ``strength`` (default 1). With
+    ``unique`` a path written twice is an error."""
     out = []
+    seen: set = set()
     for i, entry in enumerate(_section_list(where, raw)):
         here = f"{where}[{i}]"
         if isinstance(entry, str):
@@ -2887,6 +2942,11 @@ def _parse_image_adapters(where: str, raw) -> tuple:
         if strength is None or not math.isfinite(strength):
             raise ConfigError(f"{here}.strength: expected a finite number, "
                               f"got {entry.get('strength')!r}")
+        if unique:
+            norm = os.path.normpath(entry["path"])
+            if norm in seen:
+                raise ConfigError(f"{here}: path {entry['path']!r} is listed twice")
+            seen.add(norm)
         out.append((entry["path"], strength))
     return tuple(out)
 
@@ -2921,8 +2981,8 @@ def _parse_image_model(image_id: str, raw) -> ImageModelCfg:
         vae=raw["vae"], family=raw.get("family"),
         variant=raw.get("variant"),
         encoder_mmproj=raw.get("encoder_mmproj"),
-        adapters=_parse_image_adapters(f"{where}.adapters",
-                                       raw.get("adapters")),
+        adapters=_parse_adapter_list(f"{where}.adapters",
+                                     raw.get("adapters")),
         defaults=_parse_image_defaults(f"{where}.defaults",
                                        raw.get("defaults")),
         encoder_release=release, pin=bool(raw.get("pin", False)),
@@ -3002,8 +3062,8 @@ def _parse_video_model(video_id: str, raw) -> VideoModelCfg:
         vae=raw["vae"], audio_vae=raw["audio_vae"],
         encoder_mmproj=raw.get("encoder_mmproj"),
         tiny_vae=raw.get("tiny_vae"), variant=raw.get("variant"),
-        adapters=_parse_image_adapters(f"{where}.adapters",
-                                       raw.get("adapters")),
+        adapters=_parse_adapter_list(f"{where}.adapters",
+                                     raw.get("adapters")),
         defaults=_parse_video_defaults(f"{where}.defaults",
                                        raw.get("defaults")),
         upsampler=raw.get("upsampler") or None, upsample=upsample,
@@ -3855,10 +3915,10 @@ def _validate_image_models(cfg: ServerCfg) -> None:
                                   f"{what}; rename one")
         shared = cfg.models.get(m.encoder)
         if shared is not None:
-            if shared.adapter:
+            if shared.adapter_paths():
                 raise ConfigError(
                     f"image model {iid!r} shares the encoder {m.encoder!r}, "
-                    "which has an adapter; name its GGUF as `encoder` "
+                    "which loads adapters; name its GGUF as `encoder` "
                     "instead")
             if m.encoder_mmproj:
                 raise ConfigError(

@@ -602,10 +602,10 @@ def test_adapter_threads_into_serveable_via_build_spec(installed_bridge):
     chat_template) and reaches the text loader as the 7th serveable arg."""
     patched, _, serveable_calls = installed_bridge
     serving.set_build_spec(
-        types.SimpleNamespace(chat_template=None, adapter="/m/ad.lora.gguf"))
+        types.SimpleNamespace(chat_template=None, adapters=("/m/ad.lora.gguf",)))
     patched("/m/text.gguf")
     assert serveable_calls == [
-        ("/m/text.gguf", None, None, False, None, None, "/m/ad.lora.gguf")]
+        ("/m/text.gguf", None, None, False, None, None, ("/m/ad.lora.gguf",))]
 
 
 def test_moe_expert_mass_threads_into_serveable_via_build_spec(
@@ -622,7 +622,7 @@ def test_moe_expert_mass_threads_into_serveable_via_build_spec(
 
     monkeypatch.setattr(serving, "load_serveable_model", recorder)
     serving.set_build_spec(types.SimpleNamespace(
-        chat_template=None, adapter=None, stream="experts",
+        chat_template=None, adapters=(), stream="experts",
         moe_expert_mass=0.9))
     patched("/m/text.gguf")
     assert seen["stream"] == "experts"
@@ -636,9 +636,9 @@ def test_adapter_rides_build_spec_not_active_spec_across_thread(installed_bridge
     patched, _, serveable_calls = installed_bridge
     serving._active_spec.set(
         types.SimpleNamespace(speculative=False, chat_template=None,
-                              adapter="WRONG-FROM-CONTEXTVAR"))
+                              adapters=("WRONG-FROM-CONTEXTVAR",)))
     serving.set_build_spec(
-        types.SimpleNamespace(chat_template=None, adapter="/m/right.lora.gguf"))
+        types.SimpleNamespace(chat_template=None, adapters=("/m/right.lora.gguf",)))
     seen = {}
 
     def worker():
@@ -650,7 +650,7 @@ def test_adapter_rides_build_spec_not_active_spec_across_thread(installed_bridge
     t.join()
     assert seen["active_spec"] is None
     assert serveable_calls == [
-        ("/m/text.gguf", None, None, False, None, None, "/m/right.lora.gguf")]
+        ("/m/text.gguf", None, None, False, None, None, ("/m/right.lora.gguf",))]
 
 
 def test_text_branch_applies_adapter(fake_load_mtp_model, monkeypatch):
@@ -668,7 +668,7 @@ def test_text_branch_applies_adapter(fake_load_mtp_model, monkeypatch):
     monkeypatch.setattr(
         serving, "_apply_gguf_adapter",
         lambda r, cfg, ad, base_gguf_path=None:
-        applied.append((r, cfg, ad, base_gguf_path)))
+        applied.append((r, cfg, ad, base_gguf_path)) or ())
     serving.load_serveable_model("/m/text.gguf", adapter_gguf="/m/ad.lora.gguf")
     # base_gguf_path rides along so the adapter's arch is gated against the
     # base's before install (clean mismatch error, not missing-targets).
@@ -714,7 +714,7 @@ def test_serveable_mtp_applies_adapter_to_language_model(monkeypatch):
     monkeypatch.setattr(
         serving, "_apply_gguf_adapter",
         lambda r, cfg, ad, base_gguf_path=None:
-        applied.append((r, ad, base_gguf_path)))
+        applied.append((r, ad, base_gguf_path)) or ())
     monkeypatch.setattr(serving, "_ensure_inner_config", lambda m, c: None)
     monkeypatch.setattr(serving, "_make_text_processor", lambda tok: "PROC")
     serving._load_serveable_mtp("/m/t.gguf", adapter_gguf="/m/ad.lora.gguf")

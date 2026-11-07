@@ -270,18 +270,20 @@ def test_expanded_media_ids_mark_a_turn_without_the_fold(monkeypatch):
 
 def test_l0_keeps_adapted_and_bare_rows_apart(ar):
     """Without an APC manager lora_rows salts nothing, so the L0 key
-    carries the row's adapter scales itself."""
+    carries the row's adapter salt itself."""
     model = _Model()
     model._spec_prefix_cache = SpecPrefixCache(min_prefix=2)
     text1 = [1, 5, 6, 7, 2, 3]
     lora_rows.configure("rows", 1)
+    reg = lora_rows.UidRegistry()
     try:
-        lora_rows.register_uid(1, (1.0,))
-        lora_rows.register_uid(2, None)
-        lora_rows.register_uid(3, (1.0,))
-        assert _prefill(ar, model, text1, uid=1) == 0
-        assert _prefill(ar, model, text1 + [4, 5], uid=2) == 0
-        assert _prefill(ar, model, text1 + [4, 5], uid=3) == 6
+        with lora_rows.bind(reg):
+            reg.register(1, (1.0,), salt=77)
+            reg.register(2, (0.0,))
+            reg.register(3, (1.0,), salt=77)
+            assert _prefill(ar, model, text1, uid=1) == 0
+            assert _prefill(ar, model, text1 + [4, 5], uid=2) == 0
+            assert _prefill(ar, model, text1 + [4, 5], uid=3) == 6
     finally:
         lora_rows.configure("static", 1)
 

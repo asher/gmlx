@@ -32,6 +32,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `gmlx run`, chat and `gmlx serve`, and answers `/v1/audio/transcriptions`
   and `/v1/audio/translations` itself, with word times and speakers.
   `gmlx pull nemotron-3.5-transcribe` downloads the model with its encoder.
+- A chat model entry loads several LoRA adapters with `adapters:`, each at a
+  default strength, and a request sets their strengths for itself with
+  `adapters` or the llama-server `lora` field. See
+  [Mixing adapters per request](docs/lora.md#mixing-adapters-per-request).
+- `/v1/models` lists each chat entry's adapters with their index, default
+  strength and the sha256 of the loaded file.
 
 ### Changed
 
@@ -73,6 +79,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A request on a text model with an adapter no longer reuses prompt cache
+  that another adapter file or a rewrite of the file wrote under the same id.
+- Two models with adapters that decode at once on one server no longer
+  take each other's adapter rows, and a long-running request keeps its
+  adapter when many requests finish around it.
+- An adapter file rewritten while the server runs no longer changes the
+  loaded model, since the server keeps its own copy of the weights.
+- A request during a config reload no longer sees a model list from both
+  the old and the new config.
+- A speculative drafter's head and an image model that borrows a chat model
+  as its text encoder run without the chat model's adapters, where both
+  failed in a server with adapters.
+- The server counts the memory of a chat model's adapters when it checks
+  whether the model fits.
+- An image request that names a file name two of the model's adapters share
+  gets a 400, where the server picked one of them.
 - Distillation's pinned day renders on transformers 5.22, where a template that
   prints today's date failed with "'str' object is not callable".
 - A served image model keeps its own LoRAs when a request brings others,

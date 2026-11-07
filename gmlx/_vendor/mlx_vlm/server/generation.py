@@ -1536,12 +1536,20 @@ class ResponseGenerator:
         cap = int(self.top_logprobs_k or 0)
         logprobs = bool(getattr(args, "logprobs", False))
         top_k = min(int(getattr(args, "top_logprobs", 0) or 0), cap) if logprobs else 0
+        # gmlx: the row's adapter scales, salted from the adapters this
+        # copy loaded. A missing identity raises into the insert's except.
+        lora = getattr(args, "_kq_lora", None)
+        if lora is not None:
+            from gmlx.serve.lora_request import salted
+
+            lora = salted(lora, getattr(self.model, "gmlx_adapter_identities", None))
         return RowSettings(
             sampler=sampler,
             seed=None if seed is None else int(seed),
             logprobs=logprobs,
             top_k=max(0, top_k),
             key=key,
+            lora=lora,
         )
 
     def _make_logits_processors(

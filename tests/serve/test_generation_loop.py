@@ -158,3 +158,55 @@ def test_the_loop_passes_the_cap_and_each_requests_row_settings(monkeypatch):
     assert row.sampler.temperature == 0.7
     assert (row.seed, row.logprobs, row.top_k) == (5, True, 3)
     assert row.key == sampler_key(sampled)
+
+
+def _lora_args(scales, salt=None):
+    import numpy as np
+
+    from gmlx.serve.lora_request import RowLora
+
+    args = _GEN.GenerationArguments(max_tokens=1)
+    args._kq_lora = RowLora(tuple(scales), np.asarray(scales, np.float32),
+                            salt, "m")
+    return args
+
+
+def test_an_adapted_row_without_identities_fails_its_request(monkeypatch):
+    from gmlx.serve.lora_request import AdapterIdentityMissing
+
+    rg = _response_generator(monkeypatch)
+    thread = threading.Thread(target=rg._run_impl, daemon=True)
+    thread.start()
+    try:
+        rq: queue.Queue = queue.Queue()
+        rg.requests.put(_GEN.QueuedGenerationRequest(
+            rqueue=rq, raw_inputs={"input_ids": None, "audio_clips": []},
+            prompt_tokens=2, args=_lora_args((1.0,))))
+        got = rq.get(timeout=5)
+        assert isinstance(got, AdapterIdentityMissing)
+        assert str(got) == ("model 'm' has no loaded adapter identities; this is "
+                            "a gmlx defect")
+        # A base row on the same copy needs no identity.
+        _request(rg, _lora_args((0.0,), salt=0))
+    finally:
+        _stop(rg, thread)
+    rows = [rows for b in _Batch.made for rows in b.inserts]
+    assert rows[-1][0].lora.salt == 0
+
+
+def test_an_adapted_row_is_salted_from_its_copys_identities(monkeypatch):
+    from types import SimpleNamespace
+
+    from gmlx import lora_rows
+
+    rg = _response_generator(monkeypatch)
+    ids = (SimpleNamespace(sha256="a" * 64),)
+    object.__setattr__(rg.model, "gmlx_adapter_identities", ids)
+    thread = threading.Thread(target=rg._run_impl, daemon=True)
+    thread.start()
+    try:
+        _request(rg, _lora_args((0.5,)))
+    finally:
+        _stop(rg, thread)
+    (row,) = [rows for b in _Batch.made for rows in b.inserts][-1]
+    assert row.lora.salt == lora_rows.row_salt(ids, (0.5,)) != 0

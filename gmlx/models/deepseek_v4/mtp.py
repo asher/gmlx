@@ -353,8 +353,12 @@ class DeepseekV4MTPDrafter(nn.Module):
             )
         self._input_embed = inner.embed_tokens
         lm = getattr(target_model, "language_model", target_model)
-        self._lm_head_fn = getattr(target_model, "lm_head", None) or getattr(
-            lm, "lm_head", None
+        from gmlx.load.modules import lora_base
+
+        # The base head: an output.weight adapter's wrapper reads a row
+        # vector, and a draft call publishes none.
+        self._lm_head_fn = lora_base(
+            getattr(target_model, "lm_head", None) or getattr(lm, "lm_head", None)
         )
         if self._lm_head_fn is None:
             raise AttributeError(

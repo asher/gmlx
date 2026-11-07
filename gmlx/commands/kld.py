@@ -104,8 +104,9 @@ def resolve_model(raw: str, config: str | None) -> Source | None:
         raise Refusal(str(e)) from None
     if rm is None:
         return None
-    unsupported = [k for k in ("adapter", "rope_scaling")
-                   if getattr(rm, k, None) is not None]
+    unsupported = [k for k, v in (("adapter", getattr(rm, "adapter_list", ()) or None),
+                                  ("rope_scaling", getattr(rm, "rope_scaling", None)))
+                   if v is not None]
     if unsupported:
         raise Refusal(f"{raw}: the config entry sets {' and '.join(unsupported)}, "
                       "which gmlx kld does not apply; pass the GGUF path")

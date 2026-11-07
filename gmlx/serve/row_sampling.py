@@ -9,8 +9,9 @@ logprobs gets them in any batch.
 Lifetime. ``remove(uid)`` keeps the entry: the tick guard requeues the
 same uid, and a cancelled speculative row stays in the rounds until its
 stop check fires. The entry goes when a response that finishes the uid
-leaves ``BatchGenerator.next``. Past ``MAX_ROWS`` entries an insert drops
-every uid that is not live, never a live one.
+leaves ``BatchGenerator.next``, and the uid joins the generator's retired
+set. Past ``MAX_ROWS`` entries an insert drops every uid that is not live,
+never a live one, and the retired marks of uids that are not live.
 
 Seeds. Each row's sampler is built without the request's seed, so its base
 seed is the stock default. The seed rides in the settings and is
@@ -44,6 +45,7 @@ class RowSettings:
     logprobs: bool = False
     top_k: int = 0                    # logprob alternatives, 0..cap
     key: tuple = GREEDY_KEY           # sampler config without the seed
+    lora: Any = None                  # gmlx.serve.lora_request.RowLora, salted
 
 
 def sampler_key(args) -> tuple:
@@ -197,10 +199,14 @@ def live_uids(gen) -> set:
     return live
 
 
-def prune(settings: dict, gen) -> None:
-    """Drop every uid that is not live once ``settings`` passes MAX_ROWS."""
-    if len(settings) <= MAX_ROWS:
+def prune(settings: dict, gen, retired: set | None = None) -> None:
+    """Drop every uid that is not live once ``settings`` or ``retired``
+    (the uids whose settings went with their finish response) passes
+    MAX_ROWS."""
+    if len(settings) <= MAX_ROWS and (retired is None or len(retired) <= MAX_ROWS):
         return
     live = live_uids(gen)
     for uid in [u for u in settings if u not in live]:
         del settings[uid]
+    if retired is not None:
+        retired.intersection_update(live)

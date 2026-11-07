@@ -307,3 +307,65 @@ def test_a_rebuilt_row_keeps_its_row_settings(monkeypatch):
     for r in out:
         assert r.token_logprob is not None and len(r.top_logprobs) == 3
         assert r.token == r.top_logprobs[0][0]          # greedy
+
+
+def test_a_rebuilt_adapted_row_keeps_its_scales(monkeypatch, engine_seams):
+    """In rows mode a row the guard retires and requeues keeps its uid, so
+    its RowLora stays in the generator's store and each forward after the
+    rebuild publishes the row's own strengths."""
+    import mlx.core as mx
+    import numpy as np
+
+    from gmlx import lora_rows
+    from gmlx._vendor.mlx_lm.models import llama
+    from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
+    from gmlx.models.vlm_text_only import TextOnlyModel
+    from gmlx.serve.lora_request import RowLora
+    from gmlx.serve.row_sampling import RowSettings
+
+    monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
+    monkeypatch.setenv("GMLX_CB_PHASE", "0")
+    mx.random.seed(0)
+    model = TextOnlyModel(llama.Model(llama.ModelArgs(
+        model_type="llama", hidden_size=32, num_hidden_layers=2,
+        intermediate_size=64, num_attention_heads=4, num_key_value_heads=2,
+        rms_norm_eps=1e-5, vocab_size=64)))
+    lm = model.language_model
+    seen = []
+    forward = type(lm).__call__
+
+    def recording(self, *a, **kw):
+        seen.append(lora_rows.row_scales(0).tolist())
+        return forward(self, *a, **kw)
+
+    monkeypatch.setattr(type(lm), "__call__", recording)
+    seams = engine_seams.snapshot()
+    lora_rows.install_row_channel()
+    lora_rows.configure("rows", 1)
+    try:
+        proc = types.SimpleNamespace(tokenizer=types.SimpleNamespace(
+            stopping_criteria=StoppingCriteria([], None)))
+        gen = ar.BatchGenerator(lm, proc, prefill_step_size=None)
+        prompt = [3, 9, 4, 7]
+        lora = RowLora((0.75,), np.asarray((0.75,), np.float32), 5, "m")
+        (uid,) = gen.insert([prompt], 8, prompt_kwargs=[
+            {"inputs_embeds": lm.input_embeds(mx.array([prompt]))}],
+            row_settings=[RowSettings(lora=lora)])
+        st = tg._state(gen)
+        tg._harvest_pending(gen, st)
+        delivered = []
+        for _ in range(3):
+            delivered += [r.token for r in gen.next()[1]]
+        st.ledger[uid].committed = list(delivered)
+        replay = prompt + delivered
+        st.ledger[uid].kwargs = {"inputs_embeds": lm.input_embeds(mx.array([replay]))}
+        tg._rebuild_row(gen, st, uid)
+        assert gen._row_settings[uid].lora is lora
+        seen.clear()
+        while gen.has_work:
+            gen.next()
+        gen.close()
+        assert seen and all(row == [0.75] for row in seen)
+    finally:
+        lora_rows.configure("static", 1)
+        engine_seams.restore(seams)

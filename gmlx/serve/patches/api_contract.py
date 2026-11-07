@@ -67,6 +67,9 @@ _GMLX_CONSUMED = frozenset({
     "profile", "chat_template_kwargs", "xtc_probability", "xtc_threshold",
     # z.ai / GLM API spelling of the thinking switch: {"type": "enabled"|"disabled"}
     "thinking",
+    # Per-request adapter strengths (lora_request.py): the gmlx spelling,
+    # by path or file name, and the llama-server spelling, by index.
+    "adapters", "lora",
 })
 
 # /v1/chat/completions (openai.py chat_completions_endpoint + the gmlx stop
@@ -121,6 +124,7 @@ COMPLETIONS_CONSUMED = (
 
 SYSTEMONE_CONSUMED = frozenset({
     "model", "state", "questions", "seed", "images", "profile",
+    "adapters", "lora",
 }) | frozenset(JEV_EXTENSIONS) | frozenset(GMLX_EXTENSIONS)
 
 

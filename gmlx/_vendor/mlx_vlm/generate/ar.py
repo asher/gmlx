@@ -3170,7 +3170,7 @@ class BatchGenerator:
         store = getattr(self, "_row_settings", None)
         if store is None:
             store = self._row_settings = {}
-        prune(store, self)
+        prune(store, self, getattr(self, "_retired_rows", None))
         for i, (p, m, kw, lp, tc) in enumerate(zip(
             prompts,
             max_tokens,
@@ -3486,6 +3486,12 @@ class BatchGenerator:
         store = getattr(self, "_row_settings", None)
         if store is not None:
             store.pop(uid, None)
+        # gmlx: a finished row still physical in a round reads as retired,
+        # not as a uid that never had settings.
+        retired = getattr(self, "_retired_rows", None)
+        if retired is None:
+            retired = self._retired_rows = set()
+        retired.add(uid)
 
 
 def batch_generate(

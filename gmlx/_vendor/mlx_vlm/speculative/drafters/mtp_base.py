@@ -47,9 +47,13 @@ class AutoregressiveMTPDraftModel(nn.Module):
         self._input_embed = inner.embed_tokens
 
         lm = getattr(target_model, "language_model", target_model)
+        from gmlx.load.modules import lora_base
+
+        # gmlx: the base head. An output.weight adapter's wrapper reads a
+        # row vector, and a draft call publishes none.
         self._lm_head_fn = (
-            getattr(target_model, "lm_head", None)
-            or getattr(lm, "lm_head", None)
+            lora_base(getattr(target_model, "lm_head", None)
+                      or getattr(lm, "lm_head", None))
             or self._input_embed.as_linear
         )
         return self

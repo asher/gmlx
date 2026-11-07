@@ -18,6 +18,7 @@ sets up the server is in [Configuration](config.md).
 - [Request features](#request-features)
   - [Tool calling](#tool-calling)
   - [Parameter support](#parameter-support)
+  - [Adapters](#adapters)
   - [Structured output](#structured-output)
   - [Logprobs](#logprobs)
   - [Media in requests](#media-in-requests)
@@ -75,7 +76,9 @@ and `/v1/capacity/plan`.
 
 `GET /v1/models` lists the configured ids, discovered ids and aliases, never
 the Hugging Face cache. Each entry carries the markers `resident`, `pinned`,
-`speculative`, `vlm`, `profile` and `default`.
+`speculative`, `vlm`, `profile` and `default`. A chat entry also lists its
+`adapters`, each with the `index`, file `name`, default `strength` and the
+`sha256` of the loaded file, as [Adapters](#adapters) describes.
 
 Each [image model](config.md#image-models) is listed too, with the fields
 that [Routes](image-api.md#routes) describes.
@@ -164,6 +167,30 @@ fields differ by route:
 | `chat_template_kwargs` | Honored | Honored | Honored | Template variables that override the profile's. `chat_template` itself gets a 400. |
 | `profile` | Honored | Honored | Honored | A [profile](config.md#profiles) by name |
 | `xtc_probability` | Honored | Honored | Honored | XTC sampling, with `xtc_threshold` |
+| `adapters` | Honored | Honored | Honored | Adapter strengths for the request, by path or file name, as [Adapters](#adapters) shows |
+| `lora` | Honored | Honored | Honored | Adapter strengths by index, in the llama-server form, as [Adapters](#adapters) shows |
+
+### Adapters
+
+A model entry with [`adapters`](config.md#modelsadapters) takes a strength
+for each of them in each request. `adapters` names an adapter by its path
+in the config or its file name, and the adapters it does not list keep
+their default. `lora` names an adapter by its index in `/v1/models`, and
+the adapters it does not list run at 0:
+
+```sh
+curl localhost:8080/v1/chat/completions -d '{
+  "model": "qwen3-0.6b-mix",
+  "lora": [{"id": 1, "scale": 0.5}],
+  "messages": [{"role": "user", "content": "Hello"}]
+}'
+```
+
+The chat, completions, Responses and Messages routes take both fields, and
+so do `/v1/systemone` and `/v1/prewarm`. A request that sets both, or names
+an adapter its model does not load, gets a 400.
+[Mixing adapters per request](lora.md#mixing-adapters-per-request) lists the
+rules.
 
 ### Structured output
 

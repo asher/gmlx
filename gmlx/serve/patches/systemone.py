@@ -154,14 +154,14 @@ def _letter_reader(lrt: _LetterRuntime, engine_rg) -> ar_reader.LetterReader:
     return lrt.reader
 
 
-def _prefixes(engine_rg, reader, scales, tenant: str | None = None):
+def _prefixes(engine_rg, reader, lora_salt: int, tenant: str | None = None):
     """Where the engine keeps decision prefixes: its APC manager, or none."""
     from gmlx.systemone.prefixes import ApcPrefixes, Prefixes, prefix_salt
 
     manager = getattr(engine_rg, "apc_manager", None)
     if manager is None:
         return Prefixes()
-    return ApcPrefixes(manager, prefix_salt(scales, tenant), reader.make_cache)
+    return ApcPrefixes(manager, prefix_salt(lora_salt, tenant), reader.make_cache)
 
 
 def _tenant(http_request: Request) -> str | None:
@@ -172,19 +172,40 @@ def _tenant(http_request: Request) -> str | None:
 
 def _rows_scope(scales):
     """Publishes the request's adapter scales around each reader forward
-    while the server runs adapters per row."""
+    while the server runs adapters per row. Slots at 0 do no work."""
     @contextlib.contextmanager
     def scope(rows: int):
         if lora_rows.mode() != "rows":
             yield
             return
-        pad = (0.0,) * max(lora_rows.n_slots() - len(scales), 0)
-        lora_rows.set_rows([tuple(scales) + pad] * rows)
+        lora_rows.publish_tuple(scales, rows)
         try:
             yield
         finally:
             lora_rows.clear_rows()
     return scope
+
+
+def _request_lora(spec, body):
+    """The request's adapter scales, or a 400 for a malformed field."""
+    from gmlx.serve.lora_request import AdapterRequestError, request_lora
+
+    try:
+        return request_lora(spec, body)
+    except AdapterRequestError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+
+
+def _salted(lora, rg):
+    """``lora`` salted from the adapters ``rg``'s copy loaded; a missing
+    identity is a server defect, a 500."""
+    from gmlx.serve.bridge_vlm import loaded_adapters_of
+    from gmlx.serve.lora_request import AdapterIdentityMissing, salted
+
+    try:
+        return salted(lora, loaded_adapters_of(rg))
+    except AdapterIdentityMissing as e:
+        raise HTTPException(status_code=500, detail=str(e)) from None
 
 
 def _settings(installed):
@@ -396,7 +417,7 @@ def make_systemone_endpoint(installed):
 
             return schema, job, admitted
 
-        def _letters_job(rg, spec, resolved):
+        def _letters_job(rg, spec, resolved, lora):
             schema, state = _backend("letters")
             if letters.has_image(body.get("state")):
                 raise HTTPException(status_code=400, detail=_NO_IMAGES)
@@ -406,14 +427,14 @@ def make_systemone_endpoint(installed):
             texts = (letters.pass_texts(schema, state, style)
                      + letters.winner_bounds(schema, state, style))
             admitted = _admit_letters(rg, tokens, texts, ar_reader.TAIL_TOKENS)
-            scales = lora_rows.request_scales(spec)
+            lora = _salted(lora, rg)
 
             def job(engine_rg, should_stop):
                 reader = _letter_reader(lrt, engine_rg)
                 return ar_reader.decide_letters(
                     reader, tokens, schema, state,
-                    prefixes=_prefixes(engine_rg, reader, scales, tenant),
-                    should_stop=should_stop, rows_scope=_rows_scope(scales),
+                    prefixes=_prefixes(engine_rg, reader, lora.salt, tenant),
+                    should_stop=should_stop, rows_scope=_rows_scope(lora.scales),
                     style=style)
 
             return schema, job, admitted
@@ -428,13 +449,14 @@ def make_systemone_endpoint(installed):
             try:
                 resolved = spec.id if spec is not None else (model_str or shown["model"])
                 shown["model"] = resolved
+                lora = _request_lora(spec, body)
                 if is_diffusion_model(getattr(rg, "model", None)):
                     schema, job, admitted = _diffusion_job(rg)
                     result, completion_tokens = run_on_engine(
                         rg, job, request_id=request_id, prompt_tokens=admitted,
                         stop=stop, timeout_s=gen.get_token_queue_timeout())
                     return "diffusion", schema, resolved, result, completion_tokens
-                schema, job, admitted = _letters_job(rg, spec, resolved)
+                schema, job, admitted = _letters_job(rg, spec, resolved, lora)
                 result = run_on_engine(
                     rg, job, request_id=request_id, prompt_tokens=admitted,
                     stop=stop, timeout_s=gen.get_token_queue_timeout(),
@@ -542,6 +564,7 @@ def make_prewarm_endpoint(installed):
                 body.get("model"), profile, cfg, runtime)
             try:
                 resolved = spec.id if spec is not None else model_str
+                lora = _request_lora(spec, body)
                 if is_diffusion_model(getattr(rg, "model", None)):
                     raise HTTPException(status_code=400, detail=(
                         f"model {resolved!r} reads decisions without a kept "
@@ -551,14 +574,14 @@ def make_prewarm_endpoint(installed):
                 ids, _split = ar_reader.split_point(tokens, state, style)
                 _admit_letters(rg, tokens,
                                [letters.as_format(style).prefix_text(state)], 1)
-                scales = lora_rows.request_scales(spec)
+                lora = _salted(lora, rg)
 
                 def job(engine_rg, should_stop):
                     reader = _letter_reader(lrt, engine_rg)
                     return ar_reader.prewarm(
                         reader, tokens, state,
-                        prefixes=_prefixes(engine_rg, reader, scales, tenant),
-                        rows_scope=_rows_scope(scales), style=style)
+                        prefixes=_prefixes(engine_rg, reader, lora.salt, tenant),
+                        rows_scope=_rows_scope(lora.scales), style=style)
 
                 prefix = run_on_engine(
                     rg, job, request_id=f"pw-{uuid.uuid4().hex[:12]}",

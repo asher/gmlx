@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""P4 serve binding: ids on one GGUF that differ only in adapter share one
-resident entry (the adapter union is the signature's adapter component and
-the row channel's slot list), each request selects its slot, adapted rows
-salt their APC hash, and a second adapter installs on an already adapted
-model as a further slot on every target. CPU-only."""
+"""Serve binding of text adapters: ids on one GGUF that differ only in
+adapters share one resident entry (the adapter union is the signature's
+adapter component and the row channel's slot list), the registry swaps in
+whole, each request sets its strengths with ``adapters`` or ``lora``,
+adapted rows salt their APC hash by file content, and a second adapter
+installs on an already adapted model as a further slot on every target.
+CPU-only."""
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -25,12 +28,19 @@ def _static():
     lora_rows.configure("static", 1)
 
 
-def _rm(mid, adapter_path, **kw):
+def _refs(*paths, strengths=None):
+    strengths = strengths or [1.0] * len(paths)
+    return tuple(cfgmod.AdapterRef(p, p, float(st)) for p, st in zip(paths, strengths))
+
+
+def _rm(mid, *adapter_paths, strengths=None, **kw):
     common = dict(path="/p/base.gguf", load={}, cache={}, system=None,
                   speculative=False, mmproj=None, draft_gguf=None, pin=False,
                   ttl_s=None, sampling={})
     common.update(kw)
-    return cfgmod.ResolvedModel(id=mid, adapter=adapter_path, **common)
+    return cfgmod.ResolvedModel(id=mid, adapter_list=_refs(*adapter_paths,
+                                                            strengths=strengths),
+                                **common)
 
 
 # signature: the adapter union is the adapter component
@@ -38,7 +48,7 @@ def _rm(mid, adapter_path, **kw):
 def test_union_signature_shares_entry_and_forks_on_change():
     a = _rm("a", "/abs/A.gguf")
     b = _rm("b", "/abs/B.gguf")
-    bare = _rm("d", None)
+    bare = _rm("d")
     assert a.load_signature() != b.load_signature()          # unfilled: own adapter
     assert a.base_signature() == b.base_signature() == bare.base_signature()
     for rm in (a, b, bare):
@@ -51,14 +61,27 @@ def test_union_signature_shares_entry_and_forks_on_change():
     assert other.base_signature() != a.base_signature()       # different load: no share
 
 
-def test_registry_fills_union_over_siblings(tmp_path):
+def _write(tmp_path, *names):
+    for n in names:
+        p = tmp_path / n
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"GGUF" + n.encode())
+
+
+@pytest.fixture
+def serving():
     pytest.importorskip("gmlx._vendor.mlx_vlm")
     import gmlx.serve.bridge_vlm as serving
+    serving.clear_resolved_models()
+    yield serving
+    serving.clear_resolved_models()
+
+
+def test_registry_fills_union_over_siblings(tmp_path, serving):
     from gmlx.config import build_config
+    from gmlx.serve.lora_request import request_lora
+    _write(tmp_path, "base.gguf", "A.gguf", "B.gguf")
     base = tmp_path / "base.gguf"
-    base.write_bytes(b"GGUF")
-    (tmp_path / "A.gguf").write_bytes(b"GGUF")
-    (tmp_path / "B.gguf").write_bytes(b"GGUF")
     doc = {
         "server": {"model_dirs": [str(tmp_path)]},
         "profiles": {"kv8": {"load": {"kv_bits": 8}}},
@@ -70,95 +93,372 @@ def test_registry_fills_union_over_siblings(tmp_path):
                       "profile": "kv8"},
         },
     }
-    serving.clear_resolved_models()
-    try:
-        serving.register_resolved_models(build_config(doc))
-        rms = serving._RESOLVED_MODELS
-        union = (str(tmp_path / "A.gguf"), str(tmp_path / "B.gguf"))
-        assert rms["base"].adapters == union
-        assert rms["a"].adapters == union and rms["b"].adapters == union
-        assert rms["a-kv8"].adapters == (str(tmp_path / "A.gguf"),)   # other load
-        sig = {rms[k].load_signature() for k in ("base", "a", "b")}
-        assert len(sig) == 1                                  # one resident entry
-        assert rms["a-kv8"].load_signature() not in sig
-        # request-time resolution fills the same union
-        _path, rm = serving.resolve_request_model("b")
-        assert rm.adapters == union
-        assert lora_rows.request_scales(rm) == (0.0, 1.0)
-        _path, rm = serving.resolve_request_model("base")
-        assert lora_rows.request_scales(rm) == (0.0, 0.0)
-    finally:
-        serving.clear_resolved_models()
+    serving.register_resolved_models(build_config(doc))
+    rms = serving._RESOLVED_MODELS
+    union = (str(tmp_path / "A.gguf"), str(tmp_path / "B.gguf"))
+    assert rms["base"].adapters == union
+    assert rms["a"].adapters == union and rms["b"].adapters == union
+    assert rms["a-kv8"].adapters == (str(tmp_path / "A.gguf"),)   # other load
+    sig = {rms[k].load_signature() for k in ("base", "a", "b")}
+    assert len(sig) == 1                                  # one resident entry
+    assert rms["a-kv8"].load_signature() not in sig
+    # request-time resolution fills the same union
+    _path, rm = serving.resolve_request_model("b")
+    assert rm.adapters == union and rm.adapter_slots == (1,)
+    assert request_lora(rm, {}).scales == (0.0, 1.0)
+    _path, rm = serving.resolve_request_model("base")
+    assert request_lora(rm, {}).scales == (0.0, 0.0)
 
 
-# row channel: slots grow, tuples index the union, adapted rows salt APC
-
-def test_request_scales_index_the_entry_union():
-    lora_rows.ensure_rows(2)
-    spec = SimpleNamespace(adapter="/B", adapters=("/A", "/B"))
-    assert lora_rows.request_scales(spec) == (0.0, 1.0)
-    spec = SimpleNamespace(adapter="/A", adapters=("/A", "/B"))
-    assert lora_rows.request_scales(spec) == (1.0, 0.0)
-    assert lora_rows.request_scales(SimpleNamespace(adapter=None, adapters=("/A",))) \
-        == (0.0, 0.0)
-    with pytest.raises(lora_rows.LoraRowsError):
-        lora_rows.request_scales(SimpleNamespace(adapter="/C", adapters=("/A", "/B")))
-
-
-def test_ensure_rows_grows_without_dropping_registrations():
-    lora_rows.ensure_rows(1)
-    lora_rows.register_uid(7, (1.0,))
-    lora_rows.ensure_rows(3)
-    assert lora_rows.mode() == "rows" and lora_rows.n_slots() == 3
-    assert lora_rows.scales_for(7) == (1.0, 0.0, 0.0)
-    lora_rows.register_uid(8, (0.0, 1.0))                  # short tuple pads
-    assert lora_rows.scales_for(8) == (0.0, 1.0, 0.0)
-    lora_rows.ensure_rows(2)                               # never shrinks
-    assert lora_rows.n_slots() == 3
+def test_a_shared_path_is_one_slot_with_each_entrys_default(tmp_path, serving):
+    from gmlx.config import build_config
+    _write(tmp_path, "base.gguf", "p/s.gguf", "p/t.gguf", "p/u.gguf")
+    doc = {"server": {"model_dirs": [str(tmp_path)]},
+           "models": {
+               "x": {"path": "base.gguf", "adapters": [
+                   {"path": "p/u.gguf", "strength": 0.5}, "p/s.gguf"]},
+               "y": {"path": "base.gguf", "adapters": [
+                   {"path": "p/s.gguf", "strength": 0}, "p/t.gguf"]}}}
+    serving.register_resolved_models(build_config(doc))
+    x, y = serving._RESOLVED_MODELS["x"], serving._RESOLVED_MODELS["y"]
+    want = tuple(str(tmp_path / "p" / n) for n in ("s.gguf", "t.gguf", "u.gguf"))
+    assert x.adapters == y.adapters == want
+    assert x.adapter_slots == (2, 0) and y.adapter_slots == (0, 1)
+    from gmlx.serve.lora_request import request_lora
+    assert request_lora(x, {}).scales == (1.0, 0.0, 0.5)
+    assert request_lora(y, {}).scales == (0.0, 1.0, 0.0)
 
 
-def test_lora_salt_is_stable_and_distinct():
-    assert lora_rows.lora_salt((1.0, 0.0)) == lora_rows.lora_salt([1, 0])
-    assert lora_rows.lora_salt((1.0, 0.0)) != lora_rows.lora_salt((0.0, 1.0))
+def test_the_request_path_reuses_the_registered_adapter_list(tmp_path, serving):
+    from gmlx.config import build_config
+    _write(tmp_path, "base.gguf", "a.gguf", "b.gguf")
+    doc = {"server": {"model_dirs": [str(tmp_path)]},
+           "models": {"m": {"path": "base.gguf", "adapters": ["a.gguf", "b.gguf"]}}}
+    serving.register_resolved_models(build_config(doc))
+    before = serving._RESOLVED_MODELS["m"].adapter_list
+    (tmp_path / "b.gguf").unlink()
+    _path, rm = serving.resolve_request_model("m")
+    assert rm.adapter_list == before
 
 
-def test_insert_salts_apc_hash_for_adapted_rows_only():
+def _three_ids(tmp_path):
+    from gmlx.config import build_config
+    _write(tmp_path, "base.gguf", "A.gguf", "B.gguf")
+    return build_config({"server": {"model_dirs": [str(tmp_path)]},
+                         "models": {"base": {"path": "base.gguf"},
+                                    "a": {"path": "base.gguf", "adapter": "A.gguf"},
+                                    "b": {"path": "base.gguf", "adapter": "B.gguf"}}})
+
+
+def test_a_request_during_a_reload_sees_the_old_registry_whole(tmp_path, serving,
+                                                               monkeypatch):
+    cfg = _three_ids(tmp_path)
+    serving.register_resolved_models(cfg)
+    _p, old = serving.resolve_request_model("b")
+    real = serving._resolve_served
+    seen = []
+
+    def resolving(mid, c, *a, **k):
+        if mid == "a" and not seen:
+            seen.append(serving.resolve_request_model("b")[1])
+        return real(mid, c, *a, **k)
+
+    monkeypatch.setattr(serving, "_resolve_served", resolving)
+    serving.register_resolved_models(cfg)
+    assert seen and seen[0].adapters == old.adapters
+    assert seen[0].load_signature() == old.load_signature()
+
+
+def test_a_refused_reload_leaves_the_old_generation_whole(tmp_path, serving):
+    from gmlx.config import ConfigError, build_config
+    _write(tmp_path, "base.gguf", "A.gguf", "mm.gguf")
+    good = build_config({"server": {"model_dirs": [str(tmp_path)]},
+                         "models": {"v": {"path": "base.gguf", "mmproj": "mm.gguf"},
+                                    "a": {"path": "base.gguf", "adapter": "A.gguf"}}})
+    serving.register_resolved_models(good)
+    reg = serving._REGISTRY
+    vlm = dict(serving._GGUF_VLM_REGISTRY)
+    assert vlm
+    bad = build_config({"server": {"model_dirs": [str(tmp_path)]},
+                        "models": {"a": {"path": "base.gguf",
+                                         "adapters": ["A.gguf",
+                                                      str(tmp_path / "A.gguf")]},
+                                   "v": {"path": "base.gguf", "mmproj": "mm.gguf"}}})
+    with pytest.raises(ConfigError, match="name the same file"):
+        serving.register_resolved_models(bad)
+    assert serving._REGISTRY is reg
+    assert serving.server_config() is good
+    assert serving._GGUF_VLM_REGISTRY == vlm
+
+
+def test_the_config_rebinds_with_the_registry(tmp_path, serving, monkeypatch):
+    cfg = _three_ids(tmp_path)
+    serving.register_resolved_models(cfg)
+    new = _three_ids(tmp_path)
+    real = serving._resolve_served
+    seen = []
+
+    def resolving(mid, c, *a, **k):
+        seen.append(serving.server_config() is serving._REGISTRY.cfg)
+        return real(mid, c, *a, **k)
+
+    monkeypatch.setattr(serving, "_resolve_served", resolving)
+    serving.register_resolved_models(new)
+    assert seen and all(seen)
+    assert serving.server_config() is new is serving._REGISTRY.cfg
+
+
+def test_a_request_during_the_self_heal_sees_one_registry(tmp_path, serving,
+                                                         monkeypatch):
+    cfg = _three_ids(tmp_path)
+    (tmp_path / "A.gguf").unlink()
+    serving.register_resolved_models(cfg)
+    assert "a" not in serving._RESOLVED_MODELS
+    _p, old = serving.resolve_request_model("b")
+    _write(tmp_path, "A.gguf")
+    real = serving._resolve_served
+    seen = []
+
+    def resolving(mid, c, *a, **k):
+        if mid == "a" and not seen:
+            seen.append(serving.resolve_request_model("b")[1])
+        return real(mid, c, *a, **k)
+
+    monkeypatch.setattr(serving, "_resolve_served", resolving)
+    assert serving.reregister_missing_models()
+    assert seen[0].adapters == old.adapters
+    _p, new = serving.resolve_request_model("b")
+    assert len(new.adapters) == 2
+
+
+# request fields: adapters and lora
+
+
+def _spec(tmp_path, items, *, model_id="m", union=None):
+    paths = [str(tmp_path / w) for w, _st in items]
+    refs = tuple(cfgmod.AdapterRef(w, p, float(st))
+                 for (w, st), p in zip(items, paths))
+    union = tuple(sorted(set(paths) | set(union or ())))
+    return SimpleNamespace(id=model_id, adapter_list=refs, adapters=union,
+                           adapter_slots=tuple(union.index(p) for p in paths))
+
+
+def _req(spec, model_dirs=(), **fields):
+    from gmlx.serve.lora_request import request_lora
+    return request_lora(spec, fields, model_dirs=list(model_dirs)).scales
+
+
+def _refused(spec, match, model_dirs=(), **fields):
+    from gmlx.serve.lora_request import AdapterRequestError, request_lora
+    with pytest.raises(AdapterRequestError, match=match):
+        request_lora(spec, fields, model_dirs=list(model_dirs))
+
+
+def test_adapters_set_listed_strengths_and_keep_the_rest(tmp_path):
+    spec = _spec(tmp_path, [("p/a.gguf", 0.0), ("p/b.gguf", 0.25)])
+    assert _req(spec) == (0.0, 0.25)
+    assert _req(spec, adapters=[{"id": "p/a.gguf", "strength": 0.8}]) == (0.8, 0.25)
+    assert _req(spec, adapters=["b.gguf"]) == (0.0, 1.0)            # bare: 1
+    assert _req(spec, adapters=[{"id": "a", "strength": -2}]) == (-2.0, 0.25)   # stem
+
+
+def test_lora_sets_listed_scales_and_zeroes_the_rest(tmp_path):
+    spec = _spec(tmp_path, [("p/a.gguf", 0.5), ("p/b.gguf", 0.25)])
+    assert _req(spec, lora=[{"id": 1, "scale": 1.5}]) == (0.0, 1.5)
+    assert _req(spec, lora=[]) == (0.5, 0.25)                        # defaults
+
+
+def test_ids_name_paths_across_folders_and_refuse_ambiguity(tmp_path):
+    spec = _spec(tmp_path, [("one/s.gguf", 0.0), ("two/s.gguf", 0.0)])
+    assert _req(spec, adapters=[{"id": "two/s.gguf", "strength": 1}]) == (0.0, 1.0)
+    assert _req(spec, adapters=[{"id": "two/./s.gguf", "strength": 1}]) == (0.0, 1.0)
+    _refused(spec, "adapter 's.gguf' matches adapters 0 and 1 of model 'm'; name it "
+             "by its path in the config, or use lora with its index",
+             adapters=["s.gguf"])
+
+
+def test_an_id_under_a_model_folder_names_its_file(tmp_path):
+    root = tmp_path / "root"
+    _write(root, "deep/x.gguf")
+    spec = SimpleNamespace(id="m", adapter_list=(cfgmod.AdapterRef(
+        str(root / "deep" / "x.gguf"), str(root / "deep" / "x.gguf"), 0.0),),
+        adapters=(str(root / "deep" / "x.gguf"),), adapter_slots=(0,))
+    assert _req(spec, [str(root)], adapters=["deep/x.gguf"]) == (1.0,)
+
+
+def test_unknown_sibling_and_absolute_ids_are_refused(tmp_path):
+    spec = _spec(tmp_path, [("p/a.gguf", 0.0)], union=[str(tmp_path / "q/sib.gguf")])
+    _refused(spec, "adapter 'sib.gguf' is not an adapter of model 'm'; a request "
+             "sets the strength of the adapters its model entry loads",
+             adapters=["sib.gguf"])
+    _refused(spec, "never an absolute path", adapters=[str(tmp_path / "p/a.gguf")])
+    for bad in ("~/a.gguf", "../a.gguf", "p\\a.gguf"):
+        _refused(spec, "never an absolute path", adapters=[bad])
+
+
+@pytest.mark.parametrize("fields,match", [
+    ({"adapters": "a"}, "adapters must be a list of {id, strength}"),
+    ({"adapters": [3]}, "each adapter is {id, strength}, with id a string"),
+    ({"adapters": [{"id": "a", "x": 1}]},
+     r"adapter fields \['x'\] are unknown; an adapter is {id, strength}"),
+    ({"adapters": [{"id": "a", "strength": 101}]},
+     r"adapters\[0\].strength must be a finite number from -100 to 100"),
+    ({"adapters": ["a", "p/a.gguf"]}, "adapter 'p/a.gguf' is listed twice"),
+    ({"lora": {"id": 0}}, "lora must be a list of {id, scale}"),
+    ({"lora": [{"id": "0", "scale": 1}]}, r"lora\[0\].id must be an integer"),
+    ({"lora": [{"id": 5, "scale": 1}]},
+     "lora id 5 is out of range; model 'm' has 2 adapters \\(ids 0 to 1\\)"),
+    ({"lora": [{"id": 0, "scale": 1}, {"id": 0, "scale": 2}]},
+     "lora id 0 is listed twice"),
+    ({"lora": [{"id": 0}]}, r"lora\[0\].scale must be a finite number from -100 to 100"),
+])
+def test_malformed_fields_are_refused(tmp_path, fields, match):
+    spec = _spec(tmp_path, [("p/a.gguf", 0.0), ("p/b.gguf", 0.0)])
+    _refused(spec, match, **fields)
+
+
+def test_both_spellings_are_refused(tmp_path):
+    from fastapi import HTTPException
+
+    from gmlx.serve.lora_request import request_lora
+    spec = _spec(tmp_path, [("p/a.gguf", 0.0)])
+    with pytest.raises(HTTPException) as e:
+        request_lora(spec, {"adapters": [], "lora": []}, model_dirs=[])
+    assert e.value.status_code == 400
+    assert e.value.detail == "Set adapters or lora, not both."
+    assert _req(spec, adapters=None, lora=[{"id": 0, "scale": 2}]) == (2.0,)
+
+
+def test_a_model_without_adapters_takes_only_empty_fields(tmp_path):
+    bare = SimpleNamespace(id="m", adapter_list=(), adapters=("/u/x.gguf",),
+                           adapter_slots=())
+    for spec in (bare, None):
+        assert _req(spec, adapters=[], lora=None) == ((0.0,) if spec else ())
+        assert _req(spec, lora=[]) == ((0.0,) if spec else ())
+    _refused(bare, "model 'm' loads no adapters; adapters and lora apply only to a "
+             "model entry with adapters", lora=[{"id": 0, "scale": 1}])
+    _refused(None, "loads no adapters", adapters=["a"])
+
+
+def test_an_unfilled_spec_takes_slots_from_its_effective_adapters():
+    from gmlx.serve.lora_request import AdapterIdentityMissing, request_lora
+    rm = _rm("m", "/abs/B.gguf", "/abs/A.gguf", strengths=[0.5, 0.25])
+    assert rm.adapters == () and rm.adapter_slots == ()
+    assert request_lora(rm, {}, model_dirs=[]).scales == (0.25, 0.5)
+    stray = SimpleNamespace(id="m", adapter_list=rm.adapter_list,
+                            adapters=("/abs/A.gguf",), adapter_slots=())
+    with pytest.raises(AdapterIdentityMissing,
+                       match="model 'm': adapter '/abs/B.gguf' is not in its "
+                             "adapter union; this is a gmlx defect"):
+        request_lora(stray, {}, model_dirs=[])
+
+
+# row salt: names files by content, never by slot
+
+
+def _identity(path):
+    import hashlib
+    from gmlx.load.adapter import AdapterIdentity
+    data = open(path, "rb").read()
+    return AdapterIdentity(str(path), hashlib.sha256(data).hexdigest(), len(data))
+
+
+def _inserted_hash(lora, base=99):
     pytest.importorskip("gmlx._vendor.mlx_vlm")
     from gmlx._vendor.mlx_vlm.generate import ar as _ar
-    from gmlx._vendor.mlx_vlm.server.generation import ResponseGenerator as RG
+    from gmlx.serve.row_sampling import RowSettings
     lora_rows.install_row_channel()
-    lora_rows.ensure_rows(2)
+    bg = SimpleNamespace(max_tokens=8, logits_processors=None,
+                         _unprocessed_sequences=[], uid_count=0,
+                         apc_manager=object(), _apc_extra_hash=lambda kw: 1234)
+    kw = {"_apc_semantic_hash": base}
+    _ar.BatchGenerator.insert(bg, [[1, 2]], prompt_kwargs=[kw],
+                              row_settings=[RowSettings(lora=lora)])
+    return kw["_apc_semantic_hash"]
 
-    def fake_bg():
-        return SimpleNamespace(max_tokens=8, logits_processors=None,
-                               _unprocessed_sequences=[], uid_count=100,
-                               apc_manager=object(),
-                               _apc_extra_hash=lambda kw: 1234)
 
-    def args(scales):
-        return SimpleNamespace(
-            logit_bias=None, repetition_penalty=None, repetition_context_size=20,
-            presence_penalty=None, presence_context_size=20,
-            frequency_penalty=None, frequency_context_size=20,
-            logits_processors=None, enable_thinking=False, _kq_lora=scales)
+def _salted_row(spec, identities, **fields):
+    from gmlx.serve.lora_request import request_lora, salted
+    return salted(request_lora(spec, fields, model_dirs=[]), identities)
 
-    bg = fake_bg()
-    kw = {"_apc_semantic_hash": 99}
-    RG._make_logits_processors(SimpleNamespace(), args((0.0, 0.0)), None)
-    _ar.BatchGenerator.insert(bg, [[1, 2]], prompt_kwargs=[kw])
-    assert kw["_apc_semantic_hash"] == 99                  # bare row: untouched
-    kw = {"_apc_semantic_hash": 99}
-    RG._make_logits_processors(SimpleNamespace(), args((1.0, 0.0)), None)
-    _ar.BatchGenerator.insert(bg, [[1, 2]], prompt_kwargs=[kw])
-    assert kw["_apc_semantic_hash"] == 99 ^ lora_rows.lora_salt((1.0, 0.0))
-    kw = {}
-    RG._make_logits_processors(SimpleNamespace(), args((0.0, 1.0)), None)
-    _ar.BatchGenerator.insert(bg, [[1, 2]], prompt_kwargs=[kw])
-    assert kw["_apc_semantic_hash"] == 1234 ^ lora_rows.lora_salt((0.0, 1.0))
-    RG._make_logits_processors(SimpleNamespace(), args((0.0, 1.0)), None)
-    _ar.BatchGenerator.insert(bg, [[1, 2]])                # no kwargs at all
-    seq_kw = bg._unprocessed_sequences[-1][3]
-    assert seq_kw["_apc_semantic_hash"] == 1234 ^ lora_rows.lora_salt((0.0, 1.0))
+
+def test_two_entries_on_one_gguf_with_other_files_salt_apart(tmp_path):
+    """X with [A] and Y with [B] under different load profiles: one slot
+    each, one disk namespace. The slot tuples are equal; the salts are
+    not."""
+    _write(tmp_path, "A.gguf", "B.gguf")
+    lora_rows.ensure_rows(1)
+    x = _spec(tmp_path, [("A.gguf", 1.0)])
+    y = _spec(tmp_path, [("B.gguf", 1.0)])
+    hx = _inserted_hash(_salted_row(x, (_identity(tmp_path / "A.gguf"),)))
+    hy = _inserted_hash(_salted_row(y, (_identity(tmp_path / "B.gguf"),)))
+    assert hx != hy and hx != 99 and hy != 99
+
+
+def test_one_entry_restarted_on_another_file_salts_apart(tmp_path):
+    _write(tmp_path, "A.gguf", "B.gguf")
+    lora_rows.ensure_rows(1)
+    first = _spec(tmp_path, [("A.gguf", 1.0)])
+    second = _spec(tmp_path, [("B.gguf", 1.0)])
+    assert _inserted_hash(_salted_row(first, (_identity(tmp_path / "A.gguf"),))) \
+        != _inserted_hash(_salted_row(second, (_identity(tmp_path / "B.gguf"),)))
+
+
+def test_a_rewrite_of_the_same_path_salts_apart(tmp_path):
+    from gmlx.load.adapter import AdapterIdentity
+
+    path = tmp_path / "A.gguf"
+
+    def loaded(a):
+        adapter.save_lora_adapter(
+            str(path), [("model.layers.0.mlp.down_proj", a, mx.ones((4, 1)))],
+            alpha=2.0, base_arch="llama", n_head=4, n_head_kv=2, n_layers=1)
+        plan = adapter.load_lora_adapter(str(path), base_arch="llama")
+        return (AdapterIdentity(str(path), plan.sha256, plan.nbytes),)
+
+    spec = _spec(tmp_path, [("A.gguf", 1.0)])
+    before = _salted_row(spec, loaded(mx.ones((1, 8)))).salt
+    after = _salted_row(spec, loaded(-mx.ones((1, 8)))).salt
+    assert before != after
+
+
+def test_a_slot_count_grow_keeps_the_salt(tmp_path):
+    _write(tmp_path, "A.gguf")
+    spec = _spec(tmp_path, [("A.gguf", 1.0)])
+    ids = (_identity(tmp_path / "A.gguf"),)
+    lora_rows.ensure_rows(1)
+    before = _inserted_hash(_salted_row(spec, ids))
+    lora_rows.ensure_rows(5)
+    assert _inserted_hash(_salted_row(spec, ids)) == before
+
+
+def test_base_rows_salt_zero_and_need_no_identity(tmp_path):
+    from gmlx.serve.lora_request import AdapterIdentityMissing
+    spec = _spec(tmp_path, [("A.gguf", 0.0)])
+    row = _salted_row(spec, None)
+    assert row.salt == 0 and _inserted_hash(row) == 99
+    with pytest.raises(AdapterIdentityMissing,
+                       match="model 'm' has no loaded adapter identities; this is a "
+                             "gmlx defect"):
+        _salted_row(spec, None, adapters=["A.gguf"])
+    _write(tmp_path, "A.gguf")
+    with pytest.raises(AdapterIdentityMissing):        # another union's identities
+        _salted_row(spec, (_identity(tmp_path / "A.gguf"),) * 2, adapters=["A.gguf"])
+
+
+def test_the_seam_never_raises_a_missing_identity(tmp_path):
+    from gmlx.serve.lora_request import request_lora
+    spec = _spec(tmp_path, [("A.gguf", 0.0)])
+    row = request_lora(spec, {"adapters": ["A.gguf"]}, model_dirs=[])
+    assert row.salt is None and row.scales == (1.0,)
+
+
+def test_ensure_rows_only_grows():
+    lora_rows.ensure_rows(1)
+    lora_rows.ensure_rows(3)
+    assert lora_rows.mode() == "rows" and lora_rows.n_slots() == 3
+    lora_rows.ensure_rows(2)                               # never shrinks
+    assert lora_rows.n_slots() == 3
 
 
 # two adapters on one model: dense and expert targets
@@ -271,7 +571,86 @@ def test_single_model_serve_registers_bare_base_sibling(tmp_path):
     cfg = server._single_model_cfg(a)
     ids = set(cfg.models)
     assert len(ids) == 2 and cfg.defaults.model in ids
-    bare = [m for m in cfg.models.values() if m.adapter is None]
+    bare = [m for m in cfg.models.values() if not m.adapters]
     assert len(bare) == 1 and bare[0].id.endswith("-base")
     assert bare[0].path == cfg.models[cfg.defaults.model].path
-    assert cfg.models[cfg.defaults.model].adapter == str(lora)
+    assert cfg.models[cfg.defaults.model].adapters == ((str(lora), 1.0),)
+
+
+# /v1/models: index, name, default strength, sha256 of the loaded bytes
+
+
+class _ListingPool:
+    """The pool surface ``_models_payload`` reads, with the real
+    ``resident_chat_entry`` over a ``figures`` snapshot."""
+
+    def __init__(self, entries=()):
+        from gmlx.serve import residency
+        self.figures = residency._Figures(entries=tuple(entries))
+        self.resident_chat_entry = residency._ResidencyPool.resident_chat_entry.__get__(self)
+
+    def stats(self):
+        return {"resident": [{"model_path": e.model_path, "pinned": False,
+                              "kind": "chat", "footprint_bytes": 1, "idle_s": 0.0}
+                             for e in self.figures.entries]}
+
+
+def _listing_cfg(tmp_path):
+    from gmlx.config import build_config
+    _write(tmp_path, "base.gguf", "loras/a.gguf", "loras/b.gguf")
+    return build_config({"server": {"model_dirs": [str(tmp_path)]},
+                         "models": {"m": {"path": "base.gguf", "adapters": [
+                             {"path": "loras/a.gguf", "strength": 0.0},
+                             {"path": "loras/b.gguf", "strength": 0.5}]},
+                                    "bare": {"path": "base.gguf"}}})
+
+
+def _resident(tmp_path, serving, identities):
+    from gmlx.serve import residency
+    rm = serving._RESOLVED_MODELS["m"]
+    model = SimpleNamespace()
+    if identities is not None:
+        object.__setattr__(model, "gmlx_adapter_identities", identities)
+    return residency._Entry(cache_key=(rm.path, None, "auto") + rm.load_signature(),
+                            model_path=rm.path,
+                            response_generator=SimpleNamespace(model=model))
+
+
+def _payload(pool):
+    from gmlx.serve.patches import routes as sp_routes
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
+    saved = getattr(pkg, "_kq_residency_pool", None)
+    pkg._kq_residency_pool = pool
+    try:
+        return {m["id"]: m for m in sp_routes._models_payload()["data"]}
+    finally:
+        pkg._kq_residency_pool = saved
+
+
+def test_models_lists_adapters_with_the_loaded_hash(tmp_path, serving):
+    import json
+    serving.register_resolved_models(_listing_cfg(tmp_path))
+    ids = tuple(_identity(tmp_path / "loras" / n) for n in ("a.gguf", "b.gguf"))
+    entry = _resident(tmp_path, serving, ids)
+    by_id = _payload(_ListingPool([entry]))
+    assert by_id["m"]["adapters"] == [
+        {"index": 0, "name": "a.gguf", "strength": 0.0, "sha256": ids[0].sha256},
+        {"index": 1, "name": "b.gguf", "strength": 0.5, "sha256": ids[1].sha256}]
+    assert by_id["bare"]["adapters"] == []
+    assert str(tmp_path) not in json.dumps(by_id)
+
+
+def test_models_lists_null_hashes_with_no_resident_copy(tmp_path, serving):
+    serving.register_resolved_models(_listing_cfg(tmp_path))
+    for pool in (None, _ListingPool()):                   # never loaded, unloaded
+        got = _payload(pool)["m"]["adapters"]
+        assert [a["sha256"] for a in got] == [None, None]
+        assert [a["index"] for a in got] == [0, 1]
+
+
+def test_models_lists_null_hashes_for_an_entry_mid_teardown(tmp_path, serving):
+    serving.register_resolved_models(_listing_cfg(tmp_path))
+    entry = _resident(tmp_path, serving, None)
+    entry.response_generator = None
+    got = _payload(_ListingPool([entry]))["m"]["adapters"]
+    assert [a["sha256"] for a in got] == [None, None]

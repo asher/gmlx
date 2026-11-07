@@ -376,7 +376,7 @@ def _configured_model_paths() -> tuple[set[str], set[str]]:
     models, adapters = set(), set()
     for rm in serving.resolved_models().values():
         models.update(p for p in (rm.path, rm.draft_gguf, rm.mmproj) if p)
-        adapters.update(a for a in (getattr(rm, "adapter", None),
+        adapters.update(a for a in (*(r.path for r in getattr(rm, "adapter_list", ())),
                                     *(getattr(rm, "adapters", ()) or ())) if a)
     return models, adapters
 

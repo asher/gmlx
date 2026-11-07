@@ -252,7 +252,8 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
         # Arm the strict per-forward publish invariant (a missed publish
         # site raises instead of serving a stale or absent row vector).
         lora_rows.configure("rows", 1)
-    lora_rows.install_lora_gen_args()
+    from gmlx.serve.lora_request import install_lora_gen_args
+    install_lora_gen_args()
     lora_rows.install_row_channel()
     from gmlx.spec.admission import install_continuous_batch_admission
     from gmlx.spec.engine import install_owned_spec_engine

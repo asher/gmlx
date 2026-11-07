@@ -2268,7 +2268,8 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
     others += [mc for mc in disc if mc.id != target]
     ref_paths = set()
     for mc in others:
-        for p in (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter):
+        for p in (mc.path, mc.mmproj, mc.draft_gguf,
+                  *(a for a, _st in mc.adapters)):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
                 ref_paths.add(os.path.realpath(rp))
@@ -2295,7 +2296,7 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
             else:
                 to_delete += _shard_files(main)
         for label, comp in (("mmproj", m.mmproj), ("draft", m.draft_gguf),
-                            ("adapter", m.adapter)):
+                            *(("adapter", a) for a, _st in m.adapters)):
             if not comp or str(comp).startswith("hf:"):
                 continue
             rp = _try_resolve(comp, cfg.model_dirs)
@@ -2581,7 +2582,8 @@ def _image_refs(cfg, disc, skip: str, images=()) -> set:
     image entries, configured and discovered (``images``)."""
     refs: set = set()
     for mc in list(cfg.models.values()) + list(disc):
-        for p in (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter):
+        for p in (mc.path, mc.mmproj, mc.draft_gguf,
+                  *(a for a, _st in mc.adapters)):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
                 refs.add(os.path.realpath(rp))
@@ -2720,7 +2722,7 @@ def _model_flags(m) -> list[str]:
         flags.append("vlm")
     if getattr(m, "speculative", False) or getattr(m, "draft_gguf", None):
         flags.append("mtp")
-    if getattr(m, "adapter", None):
+    if getattr(m, "adapters", None):
         flags.append("lora")
     stream = getattr(m, "stream", None)
     if stream == "cpu":

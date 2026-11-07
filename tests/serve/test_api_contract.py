@@ -113,6 +113,8 @@ def test_gmlx_extras_allowlist_matches_patch_reads():
         "xtc_probability",      # sampling XTC
         "xtc_threshold",
         "thinking",             # chat_behavior: z.ai {"type": en/disabled} spelling
+        "adapters",             # lora_request: per-request adapter strengths
+        "lora",                 # lora_request: llama-server spelling, by index
     }
 
 

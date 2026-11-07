@@ -778,8 +778,8 @@ def _image_paths(cfg) -> set:
 
 def _encoder_ids(known_models: dict) -> dict:
     """Resolved path -> id of the configured chat models an image entry
-    may share as its encoder: those without an adapter."""
-    return {p: mc.id for p, mc in known_models.items() if not mc.adapter}
+    may share as its encoder: those without adapters."""
+    return {p: mc.id for p, mc in known_models.items() if not mc.adapters}
 
 
 def _image_entry(im, dirs) -> dict:
@@ -2832,6 +2832,7 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
         m.pop("id")
         if m.pop("speculative_auto") and m.get("speculative"):
             m["speculative"] = "auto"
+        m["adapters"] = [{"path": p, "strength": st} for p, st in m["adapters"]]
         models[mid] = m
     images = {}
     for iid, m in d.pop("image_models").items():
@@ -2923,8 +2924,8 @@ def _single_model_cfg(a) -> ServerCfg:
         draft_gguf=(os.path.abspath(os.path.expanduser(a.draft_gguf))
                     if a.draft_gguf and not native_mtp else None),
         native_mtp=native_mtp,
-        adapter=(os.path.abspath(os.path.expanduser(a.adapter))
-                 if a.adapter else None),
+        adapters=(((os.path.abspath(os.path.expanduser(a.adapter)), 1.0),)
+                  if a.adapter else ()),
         speculative=speculative,
         overrides=overrides,
         stream=("cpu" if getattr(a, "stream_cpu", False)
@@ -2942,13 +2943,13 @@ def _single_model_cfg(a) -> ServerCfg:
         pin=True,                            # the single model is always pinned
     )
     models = {mid: model}
-    if model.adapter:
+    if model.adapters:
         # The bare base under `<id>-base` on the same resident entry (the
         # adapter is a per-request slot, not a second load), so a client or a
         # bench config can address both without a config file. Ids may not
         # carry `@` (it addresses profiles), hence the `-base` suffix.
         models[f"{mid}-base"] = dataclasses.replace(model, id=f"{mid}-base",
-                                                    adapter=None)
+                                                    adapters=())
     return ServerCfg(
         host=a.host or "127.0.0.1",
         port=a.port or 8080,

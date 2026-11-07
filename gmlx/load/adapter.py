@@ -14,7 +14,10 @@ model is :func:`modules.install_lora_adapter`.
 """
 from __future__ import annotations
 
+import hashlib
+import os
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import mlx.core as mx
 
@@ -53,6 +56,18 @@ class LoraAdapter:
     arch: str | None
     modules: dict = field(default_factory=dict)   # module_path -> LoraModule
     path: str | None = None
+    sha256: str = ""          # digest of the file bytes this plan loaded
+    nbytes: int = 0           # size of that file
+
+
+class AdapterIdentity(NamedTuple):
+    """What a loaded copy holds in one adapter slot."""
+    path: str
+    sha256: str
+    nbytes: int
+
+
+_LOAD_TRIES = 3
 
 
 def _infer_rank(module_path: str, a: mx.array, b: mx.array) -> int:
@@ -148,17 +163,37 @@ def build_adapter_plan(meta: dict, arrays: dict,
     return LoraAdapter(alpha=alpha, arch=arch, modules=modules)
 
 
+def _file_key(path: str) -> tuple:
+    st = os.stat(path)
+    return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
 def load_lora_adapter(adapter_path: str,
                       *, base_arch: str | None = None) -> LoraAdapter:
     """Read a GGUF LoRA adapter from disk and build its apply plan. The adapter's
     a/b tensors are full-precision (F32), so the wire-byte reader returns them as
-    plain arrays (no kquant codec)."""
+    plain arrays (no kquant codec).
+
+    The tensors are copied out of the file, so a later rewrite of the file
+    never changes what the loaded copy serves. ``sha256`` is the digest of
+    the file bytes. A file that changes while it loads is read again, and
+    refused after three tries."""
     from .wire import load_gguf_wire_bytes
 
-    arrays, _kquant_meta, _arch, meta, _shapes = load_gguf_wire_bytes(
-        adapter_path, expect_quant=False)
+    for _ in range(_LOAD_TRIES):
+        before = _file_key(adapter_path)
+        with open(adapter_path, "rb") as fh:
+            digest = hashlib.file_digest(fh, "sha256").hexdigest()
+        arrays, _kquant_meta, _arch, meta, _shapes = load_gguf_wire_bytes(
+            adapter_path, zero_copy=False, expect_quant=False)
+        if _file_key(adapter_path) == before:
+            break
+    else:
+        raise ValueError(f"adapter file {adapter_path} changed while it loaded")
     plan = build_adapter_plan(meta, arrays, base_arch=base_arch)
     plan.path = adapter_path
+    plan.sha256 = digest
+    plan.nbytes = int(before[1])
     return plan
 
 
@@ -192,6 +227,14 @@ def apply_gguf_adapter(raw_model, config, adapter_gguf: str,
     :func:`modules.install_lora_adapter` raise, never a silent no-op. ``slot`` is
     the adapter's column in the row channel; a second adapter on an already
     adapted model installs alongside the first (see the installer)."""
+    plan = load_lora_adapter(adapter_gguf, base_arch=base_arch)
+    return install_gguf_adapter(raw_model, config, plan, slot=slot)
+
+
+def install_gguf_adapter(raw_model, config, plan: LoraAdapter, *, slot: int = 0) -> int:
+    """Install an adapter plan that is already loaded, as
+    :func:`apply_gguf_adapter` does. Returns the number of modules
+    installed."""
     from .modules import install_lora_adapter
 
     cfg = _config_as_dict(config)
@@ -199,7 +242,6 @@ def apply_gguf_adapter(raw_model, config, adapter_gguf: str,
     n_head = cfg.get("num_attention_heads", text_cfg.get("num_attention_heads"))
     n_head_kv = cfg.get("num_key_value_heads",
                         text_cfg.get("num_key_value_heads", n_head))
-    plan = load_lora_adapter(adapter_gguf, base_arch=base_arch)
     return install_lora_adapter(_text_root(raw_model, plan), plan, n_head=n_head,
                                 n_head_kv=n_head_kv, slot=slot)
 

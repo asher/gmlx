@@ -155,12 +155,72 @@ def test_all_off_rows_take_the_stock_expert_path(monkeypatch):
     _install(model, mx.random.normal((4, 2, 16)), mx.random.normal((4, 8, 2)), 0.5)
     monkeypatch.setattr(modules, "expert_delta",
                         lambda *a, **k: pytest.fail("adapter delta computed"))
-    lora_rows.register_uid(1, (0.0,))
+    reg = lora_rows.UidRegistry()
+    reg.register(1, (0.0,))
     x = mx.random.normal((2, 3, 8))
     idx = mx.random.randint(0, 4, (2, 3, 2)).astype(mx.uint32)
-    with lora_rows.published([1, 1]):
+    with lora_rows.bind(reg), lora_rows.published([1, 1]):
         y = model.switch_mlp(x, idx)
     assert mx.array_equal(y, ref_glu(x, idx))
+
+
+def _slots_model(n, seed=5):
+    glu = _glu(seed=seed)
+    model = _Holder(glu)
+    mx.random.seed(seed)
+    pairs = [(mx.random.normal((4, 2, 16)), mx.random.normal((4, 8, 2)))
+             for _ in range(n)]
+    for slot, (a, b) in enumerate(pairs):
+        plan = adapter.LoraAdapter(alpha=1.0, arch="qwen3moe", modules={
+            "switch_mlp.down_proj": _lm(a, b, 0.5)})
+        modules.install_lora_adapter(model, plan, slot=slot)
+    return model, pairs
+
+
+def _spy_slots(monkeypatch):
+    seen = []
+    real = modules.expert_delta
+
+    def spy(lo, *a, **k):
+        seen.append(lo.slot)
+        return real(lo, *a, **k)
+
+    monkeypatch.setattr(modules, "expert_delta", spy)
+    return seen
+
+
+@pytest.mark.parametrize("n,row,want", [
+    (2, (0.0, 1.0), [1]),
+    (3, (1.0, 0.0, 0.0), [0]),
+    (3, (0.0, 0.0, 1.0), [2]),
+])
+def test_expert_slots_that_are_off_do_no_work(monkeypatch, n, row, want):
+    lora_rows.configure("rows", n)
+    model, _pairs = _slots_model(n)
+    seen = _spy_slots(monkeypatch)
+    reg = lora_rows.UidRegistry()
+    reg.register(1, row)
+    x = mx.random.normal((2, 3, 8))
+    idx = mx.random.randint(0, 4, (2, 3, 2)).astype(mx.uint32)
+    with lora_rows.bind(reg), lora_rows.published([1, 1]):
+        model.switch_mlp(x, idx)
+    assert sorted(set(seen)) == want
+
+
+def test_the_slot_that_is_on_matches_it_installed_alone():
+    lora_rows.configure("rows", 2)
+    model, pairs = _slots_model(2)
+    alone = _Holder(_glu(seed=5))
+    a, b = pairs[1]
+    _install(alone, a, b, 0.5)
+    reg = lora_rows.UidRegistry()
+    reg.register(1, (0.0, 1.0))
+    x = mx.random.normal((2, 3, 8))
+    idx = mx.random.randint(0, 4, (2, 3, 2)).astype(mx.uint32)
+    with lora_rows.bind(reg), lora_rows.published([1, 1]):
+        y = model.switch_mlp(x, idx)
+    lora_rows.configure("static", 1)
+    assert mx.allclose(y, alone.switch_mlp(x, idx), atol=1e-5)
 
 
 def test_rows_mode_unpublished_raises_in_expert_path():

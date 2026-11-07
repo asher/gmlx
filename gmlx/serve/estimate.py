@@ -337,6 +337,12 @@ def estimate_request(body: dict, *, tenant_id=None) -> tuple:
         return 404, {"error": {"message": str(e), "type": "not_found_error",
                                "model": model_id}}
     mid = getattr(spec, "id", None) or model_id
+    # The adapter fields fail the same whether or not the model is resident.
+    from .lora_request import request_fields_error
+
+    bad = request_fields_error(spec, body)
+    if bad is not None:
+        return 400, {"error": {"message": bad, "type": "invalid_request_error"}}
     out = {"model": mid, "resident": False, "media": False,
            "prompt_tokens": None, "prompt_chars": None, "max_tokens": None,
            "warm_tokens": 0, "cache_tier": None,
@@ -497,6 +503,23 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
                 tenant=tenant_id, image_hash=0, media={},
                 model=getattr(model, "language_model", model),
                 processor=processor)
+        lora = getattr(gen_args, "_kq_lora", None)
+        if lora is not None:
+            # The hit the adapted row would get. A copy whose identities
+            # do not fit the request's union reports no warm prefix.
+            from gmlx.cache.media_salt import as_salt
+
+            from .bridge_vlm import loaded_adapters
+            from .lora_request import AdapterIdentityMissing, salted
+
+            try:
+                salt = salted(lora, loaded_adapters(entry)).salt
+            except AdapterIdentityMissing:
+                salt = None
+            if salt is None:
+                raise LookupError("no adapter identity for the warm probe")
+            if salt:
+                extra_hash = as_salt(extra_hash) ^ salt
         warm, tier = _warm_tokens(entry.apc_manager, ids, extra_hash, model)
         out["warm_tokens"], out["cache_tier"] = warm, tier
     except Exception:
