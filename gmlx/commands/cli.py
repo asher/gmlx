@@ -1499,11 +1499,9 @@ def _check_cli_adapter(args, *, mtp: bool = False) -> None:
 
     stream = ("experts" if getattr(args, "stream_experts", False)
               else "cpu" if getattr(args, "stream_cpu", False) else None)
+    paths = [os.path.abspath(os.path.expanduser(p)) for p, _ in args.adapter]
     try:
-        adapter_load_refusal(
-            args.gguf,
-            [os.path.abspath(os.path.expanduser(p)) for p, _ in args.adapter],
-            stream=stream, mtp=mtp)
+        adapter_load_refusal(args.gguf, paths, stream=stream, mtp=mtp)
     except ValueError as e:
         raise SystemExit(f"error: {e}") from None
 

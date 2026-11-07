@@ -1261,7 +1261,8 @@ def test_chat_refuses_an_embedding_adapter_on_a_tied_model_before_the_load(
     for mod, name in ((loader, "load_model"), (mtp_load, "load_mtp_model")):
         monkeypatch.setattr(mod, name,
                             lambda *a, **k: pytest.fail("loaded for a refused adapter"))
-    args = SimpleNamespace(gguf=base, adapter=ad, stream_experts=False, stream_cpu=False)
+    args = SimpleNamespace(gguf=base, adapter=[(ad, 1.0)], stream_experts=False,
+                           stream_cpu=False)
     with pytest.raises(SystemExit) as e:
         getattr(chat, backend)(args, {})
     assert str(e.value) == "error: embd.gguf: " + adapter._EMBD_TIED

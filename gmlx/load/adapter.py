@@ -17,6 +17,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import os
+import struct
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -389,7 +390,7 @@ def adapter_load_refusal(base_gguf_path: str, adapter_paths, env=None, *,
             continue                       # the load reports a missing file
         try:
             why = embedding_refusal(str(path), str(base_gguf_path))
-        except ValueError:
+        except (ValueError, struct.error, IndexError):
             continue                       # and a file that is not a GGUF
         if why is not None:
             raise ValueError(why)
@@ -415,7 +416,7 @@ def _expert_target(adapter_path: str) -> str | None:
 
     try:
         tensors = scan_gguf(adapter_path).tensors
-    except ValueError:
+    except (ValueError, struct.error, IndexError):
         return None                        # the load reports it
     for t in tensors:
         if "_exps." in t.name and t.name.endswith(_A_SUFFIX):

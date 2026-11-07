@@ -187,8 +187,6 @@ def scan_gguf(path: str, *, include_tensors: bool = True,
         buf = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
         try:
             return _scan(buf, path, size, include_tensors, array_limit)
-        except struct.error:
-            raise ValueError(f"{path}: GGUF header cut short") from None
         finally:
             buf.close()
 

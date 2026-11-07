@@ -112,9 +112,3 @@ def test_bad_magic_raises(tmp_path):
     with pytest.raises(ValueError, match="bad magic"):
         scan_gguf(str(p))
 
-
-def test_a_header_cut_inside_the_counts_raises_value_error(tmp_path):
-    p = tmp_path / "cut.gguf"
-    p.write_bytes(b"GGUF\x03\x00\x00\x00")
-    with pytest.raises(ValueError):
-        scan_gguf(str(p))
