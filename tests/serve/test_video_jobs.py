@@ -1729,6 +1729,20 @@ def test_a_keyframe_past_the_decompression_bound_is_a_400(routes, how):
     assert routes.store.pending == {}
 
 
+def test_a_guide_past_the_decompression_bound_names_its_file_field(routes):
+    from gmlx.serve.patches.media_gate import MEDIA_MAX_PIXELS
+
+    body, ctype = _form({"prompt": "a cat", "guides": json.dumps(
+        [{"file": "guide_0", "frame": 0}])}, {"guide_0": _bomb_png()})
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": ctype})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert (err["param"], err["message"]) == (
+        "guide_0", f"guide_0 is over the {MEDIA_MAX_PIXELS} pixels the "
+        "server decodes")
+
+
 def test_a_keyframe_in_a_format_off_the_list_is_no_image(routes):
     from PIL import Image
 

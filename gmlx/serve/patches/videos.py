@@ -400,7 +400,8 @@ def prepare(fields: dict, files: dict, folder: str, ffmpeg: str,
                       "form", "guides")
     guides = _guides(fields, files)
     for g in guides:
-        _pixels(g[1], g[3])
+        # Named by the file field the request sent it in.
+        _pixels(g[1], os.path.basename(g[1]))
     row = fam.variant_row(plan.variant)
     n = sum(v is not None for v in keys.values()) + len(guides)
     if n and row is not None and row.vsa_sparsity:
