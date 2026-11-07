@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import math
 import os
@@ -459,12 +460,13 @@ async def _in_turn(fn, *args):
 
 
 def _parse(box: list, path: str, ctype: str | None, free: int | None,
-           inline_only: bool, parsed):
+           inline_only: bool, parsed, then=None):
     """The JSON document of the body in ``box``, which this takes, so the
     body is freed as its parse goes: priced against ``free``, escaped to
-    ASCII, decoded and parsed once, then held to the media gate's checks.
-    ``parsed`` is the length and document of a body the session socket
-    parsed already. Runs in a worker thread."""
+    ASCII, decoded and parsed once, then held to the media gate's checks,
+    and ``then(doc)`` in its place with ``then``. ``parsed`` is the length
+    and document of a body the session socket parsed already. Runs in a
+    worker thread."""
     from .media_gate import (
         _MULTIPART,
         _URLENCODED,
@@ -498,7 +500,7 @@ def _parse(box: list, path: str, ctype: str | None, free: int | None,
             check_json(doc, path, inline_only=inline_only)
     except MediaRefused as e:
         raise BodyRefused(400, str(e), e.param) from None
-    return doc
+    return doc if then is None else then(doc)
 
 
 def _loads(box: list, free: int | None, verify: bool = False):
@@ -535,10 +537,12 @@ def _parse_over_free(n: int, need: int, free: int) -> BodyRefused:
                        "unload a model to make room")
 
 
-async def read_json(request: Request, free: int | None = None):
+async def read_json(request: Request, free: int | None = None, then=None):
     """The JSON document of the body of ``request``, ``{}`` for an empty
     body, held to the media gate's checks as the gate holds every route it
-    reads. The body is priced against ``free`` bytes (the pool's free
+    reads, or ``then(doc)`` with ``then``, which runs in the parse's worker
+    thread, so the route's own decode of the media the body carries runs
+    there too. The body is priced against ``free`` bytes (the pool's free
     figure when None): at :func:`_min_price` of its Content-Length before
     a byte of it is read, or of what arrived as a body with none arrives,
     then at :func:`json_price` once read. The price, the parse and the
@@ -556,10 +560,10 @@ async def read_json(request: Request, free: int | None = None):
     session = request.scope.get(SESSION_SCOPE_KEY) is not None
     parsed = request.scope.pop(SESSION_BODY_KEY, None)
     if not box[0]:
-        return {}
+        return {} if then is None else then({})
     return await _in_turn(
         _parse, box, request.url.path, request.headers.get("content-type"),
-        free, session, parsed)
+        free, session, parsed, then)
 
 
 async def read_form_in_ram(request: Request, free: int | None = None,
@@ -670,9 +674,10 @@ async def read_form_in_ram(request: Request, free: int | None = None,
             (_text_decode(v) for k, v in fields
              if k == "image" or v.startswith("data:")), default=0))
         try:
-            check_form_fields(
-                fields, path,
-                inline_only=request.scope.get(SESSION_SCOPE_KEY) is not None)
+            # Off the loop: the gate decodes an image in a text field.
+            await _in_turn(functools.partial(
+                check_form_fields, fields, path,
+                inline_only=request.scope.get(SESSION_SCOPE_KEY) is not None))
         except MediaRefused as e:
             raise BodyRefused(400, str(e), e.param) from None
     except BaseException:

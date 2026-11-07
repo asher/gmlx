@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import functools
 import importlib
 import json
 import logging
@@ -265,7 +266,7 @@ async def _read_body(route: str, request: Request):
 
 
 async def _read_priced_body(route: str, request: Request):
-    from ..image_service import ImageRequestError, _bad
+    from ..image_service import ImageRequestError
     from .body_intake import BodyRefused, read_form_in_ram, read_json
 
     ctype = request.headers.get("content-type", "").lower()
@@ -274,34 +275,50 @@ async def _read_priced_body(route: str, request: Request):
         if is_form:
             form = await read_form_in_ram(request)
         else:
-            body = await read_json(request)
+            # The images decode in the parse's worker thread.
+            return await read_json(request,
+                                   then=functools.partial(_json_parts, route))
     except BodyRefused as e:
         _log_media(e.status, str(e))
         raise ImageRequestError(e.status, str(e), param=e.param,
                                 headers=e.headers) from None
-    images, mask = [], None
-    if is_form:
-        fields = {}
-        try:
-            for key, value in form.multi_items():
-                if hasattr(value, "read"):
-                    data = await value.read()
-                    if key in ("image", "image[]"):
-                        images.append(_decoded(data, "image"))
-                    elif key == "mask":
-                        mask = _decoded(data, "mask")
-                    else:
-                        raise _bad(f"file field {key!r} is not read by this "
-                                   "route", key)
-                    del data
-                    fields[key] = "<file>"
-                else:
-                    fields[key] = value
-        finally:
-            await form.close()
-        return fields, images, mask
+    try:
+        return await asyncio.to_thread(_form_parts, form)
+    finally:
+        await form.close()
+
+
+def _form_parts(form):
+    """``(fields, images, mask)`` of a parsed form, its images decoded.
+    Runs in a worker thread."""
+    from ..image_service import _bad
+
+    fields, images, mask = {}, [], None
+    for key, value in form.multi_items():
+        if hasattr(value, "read"):
+            data = value.file.read()
+            if key in ("image", "image[]"):
+                images.append(_decoded(data, "image"))
+            elif key == "mask":
+                mask = _decoded(data, "mask")
+            else:
+                raise _bad(f"file field {key!r} is not read by this route",
+                           key)
+            del data
+            fields[key] = "<file>"
+        else:
+            fields[key] = value
+    return fields, images, mask
+
+
+def _json_parts(route: str, body):
+    """``(body, images, mask)`` of a parsed JSON body, its images decoded.
+    Runs in the parse's worker thread."""
+    from ..image_service import _bad
+
     if not isinstance(body, dict):
         raise _bad("request body must be a JSON object")
+    images, mask = [], None
     if route != "generations":
         raw = body.get("images", body.get("image"))
         for item in raw if isinstance(raw, list) else ([] if raw is None else [raw]):

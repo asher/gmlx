@@ -1263,6 +1263,61 @@ def test_an_edit_with_a_photo_is_read_within_its_price(served, monkeypatch,
     assert e.value.status == 413, e.value
 
 
+def _edit_bodies() -> dict:
+    """An edit whose image is inline in JSON, a file in a form, or a data
+    URL in a form's text field, each with its content type."""
+    url = "data:image/png;base64," + base64.b64encode(_png()).decode()
+    b = "gmlxboundary"
+    text = (f'--{b}\r\nContent-Disposition: form-data; name="prompt"\r\n'
+            f'\r\nx\r\n--{b}\r\nContent-Disposition: form-data; '
+            f'name="image"\r\n\r\n{url}\r\n--{b}--\r\n').encode()
+    form, ctype = _edit_form("x")
+    return {"json": (json.dumps({"prompt": "x", "image": url}).encode(),
+                     "application/json"),
+            "form": (form, ctype),
+            "form_text": (text, f"multipart/form-data; boundary={b}")}
+
+
+@pytest.mark.parametrize("kind", ["json", "form", "form_text"])
+def test_an_edits_image_decodes_off_the_event_loop(served, monkeypatch,
+                                                   kind):
+    """The gate's decode of an image in a form's text field, and the route's
+    decode, verify and pixel decode of an edit's images, run in a worker
+    thread: the loop serves other requests while they run."""
+    import asyncio
+
+    from gmlx.serve.patches import body_intake as bi
+    from gmlx.serve.patches import media_gate as mg
+
+    started, release = threading.Event(), threading.Event()
+
+    def blocking(real):
+        def run(*a, **kw):
+            started.set()
+            assert release.wait(10), "the loop never ran beside the decode"
+            return real(*a, **kw)
+        return run
+    if kind == "form_text":
+        monkeypatch.setattr(mg, "check_form_fields",
+                            blocking(mg.check_form_fields))
+    else:
+        monkeypatch.setattr(images, "_decoded", blocking(images._decoded))
+    monkeypatch.setattr(bi, "free_bytes", lambda: 1 << 30)
+    body, ctype = _edit_bodies()[kind]
+
+    async def main():
+        task = asyncio.create_task(images._read_body(
+            "edits", _request("/v1/images/edits", body, ctype)))
+        await asyncio.to_thread(started.wait, 10)
+        # Runs on the loop, so only while the decode leaves it free.
+        release.set()
+        return await task
+    fields, decoded, _mask = asyncio.run(main())
+    assert fields["prompt"] == "x"
+    assert [im.shape for im in decoded] == (
+        [] if kind == "form_text" else [(32, 32, 3)])
+
+
 def _shaped(shape: str, n: int = 64 << 10) -> bytes:
     """A JSON body of about ``n`` bytes whose parse the price must bound:
     lists of small values, a dict of short keys, a prompt with one emoji
