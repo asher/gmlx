@@ -520,8 +520,9 @@ class VideoJobs:
             if job.record["status"] != QUEUED:
                 return
             if self._time() >= job.record["expires_at"]:
-                # Its record would read 404 once it ran: it never runs,
-                # and its timed_out record lasts job_ttl_s from now.
+                # A job waits in the queue at most job_ttl_s from its
+                # creation: it never runs, and its timed_out record lasts
+                # job_ttl_s from now.
                 self._end(job, FAILED, error={
                     "code": "timed_out",
                     "message": "the job was still queued when it expired; "

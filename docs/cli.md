@@ -836,7 +836,8 @@ refuses a chat model that an image model uses as its encoder.
 
 `rm` does not take a video model id. To remove a video model, delete its
 entry under `video_models` in the config, then delete the files that no
-other entry uses: the h3 recipes share their DiT, encoder and VAEs.
+other entry uses: h3, h3-fast and h3-base share their DiT, encoder and
+VAEs, and fasth3 shares their encoder and VAEs.
 
 ```sh
 gmlx rm old-model
