@@ -13,6 +13,8 @@ import os
 import sys
 import time
 
+from .adapter_flag import add_adapter_flag, adapter_paths, duplicate_adapter
+
 
 def _prog() -> str:
     """The command name shown in help/usage text - always ``gmlx`` (the console
@@ -1091,13 +1093,11 @@ def _build_parser(prog: str = "gmlx run") -> argparse.ArgumentParser:
         action="store_true",
         help="Pair no speech companion, even one found beside the model.",
     )
-    ap.add_argument(
-        "--adapter",
-        default=None,
-        metavar="PATH",
-        help="GGUF LoRA adapter applied live over the base at load - "
-        "base stays K-quant, no merge. Text path only (not "
-        "--mmproj / --speculative).",
+    add_adapter_flag(
+        ap,
+        help="GGUF LoRA adapter applied live over the base at load, at "
+        "this strength (default 1); base stays K-quant, no merge. Repeat "
+        "for more adapters. Text path only (not --mmproj).",
     )
 
     add_speculative_args(ap)
@@ -1484,25 +1484,34 @@ def _run_bench_depths(args) -> int:
     return 0
 
 
-def _apply_cli_adapter(args, model, config) -> None:
-    """``--adapter`` on the run/chat/bench trunks: install the live GGUF LoRA
-    on the text trunk (``model.language_model`` on an MTP target, whose leaf
-    paths the adapter remap targets) before placement, so the installer sees
-    the plain SwitchGLU owners (it refuses offload/fusion wrappers in the
+def _apply_cli_adapter(args, model, config, *, fold: bool = True) -> None:
+    """``--adapter`` on the run/chat/bench trunks: install each live GGUF
+    LoRA, adapter i in row-channel slot i, on the text trunk
+    (``model.language_model`` on an MTP target, whose leaf paths the
+    adapter remap targets) before placement, so the installer sees the
+    plain SwitchGLU owners (it refuses offload/fusion wrappers in the
     owner's MRO). The base arch gates the adapter up front: a mismatched
     family fails with "adapter arch X != base arch Y", not a missing-targets
-    install error."""
-    if not getattr(args, "adapter", None):
+    install error.
+
+    ``fold`` multiplies each adapter's strength into its static scale, for
+    run, which publishes no row vector. Chat installs at strength 1 and
+    publishes the strengths instead, so ``/adapter`` can change them."""
+    items = getattr(args, "adapter", None)
+    if not items:
         return
     from gmlx.load.adapter import apply_gguf_adapter
     from gmlx.load.discovery import header_meta
 
-    adapter = os.path.abspath(os.path.expanduser(args.adapter))
     base_arch = (getattr(args, "arch", None)
                  or (header_meta(args.gguf) or {}).get("arch"))
     trunk = getattr(model, "language_model", model)
-    n = apply_gguf_adapter(trunk, config, adapter, base_arch=base_arch)
-    print(f"[adapter] applied {n}-module GGUF LoRA from {adapter}")
+    for slot, (path, strength) in enumerate(items):
+        adapter = os.path.abspath(os.path.expanduser(path))
+        n = apply_gguf_adapter(trunk, config, adapter, base_arch=base_arch,
+                               slot=slot, strength=strength if fold else 1.0)
+        print(f"[adapter] applied {n}-module GGUF LoRA from {adapter} at "
+              f"strength {strength:g}")
 
 
 def _apply_placement(args, model) -> None:
@@ -2215,7 +2224,7 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
     if not getattr(args, "no_mmproj", False):
         _set("mmproj", rm.mmproj, "mmproj")
     items = tuple(getattr(rm, "adapter_list", ()) or ())
-    _set("adapter", items[0].path if items else None, "adapter")
+    _set("adapter", [(a.path, a.strength) for a in items] or None, "adapter")
     _set("draft_gguf", rm.draft_gguf, "draft_gguf")
     if not getattr(args, "no_asr", False):
         _set("asr", getattr(rm, "asr", None), "asr")
@@ -2398,12 +2407,7 @@ def vlm_kv_width(args, model) -> int | None:
     return kv_bits
 
 
-ADAPTER_LIST_REFUSAL = ("`gmlx run` and `gmlx chat` take one adapter at strength 1; "
-                        "serve this entry instead")
-
-
-def maybe_load_from_config(args, parser, argv, *,
-                           adapter_list_refusal: bool = True) -> int | None:
+def maybe_load_from_config(args, parser, argv) -> int | None:
     """If the positional model isn't an on-disk file (nor a remote ref), resolve it as a
     server-config model id/alias and overlay that model's settings onto ``args`` (and
     set ``args.gguf`` to its resolved path - including hf-cache-resident GGUFs). Returns
@@ -2441,11 +2445,6 @@ def maybe_load_from_config(args, parser, argv, *,
     if rm is None:
         return None
     explicit = _explicit_dests(parser, argv)
-    items = tuple(getattr(rm, "adapter_list", ()) or ())
-    if (adapter_list_refusal and "adapter" not in explicit
-            and (len(items) > 1 or any(a.strength != 1.0 for a in items))):
-        print(f"error: {raw}: {ADAPTER_LIST_REFUSAL}", file=sys.stderr)
-        return 2
     applied = _apply_resolved_to_args(args, rm, explicit)
     args.gguf = rm.path
     args._config_resolved = True
@@ -3076,11 +3075,15 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     for flag, val in (
         ("--mmproj", args.mmproj),
         ("--draft-gguf", args.draft_gguf),
-        ("--adapter", args.adapter),
+        *(("--adapter", p) for p in adapter_paths(args.adapter)),
     ):
         if val and not os.path.exists(os.path.expanduser(val)):
             print(f"error: {flag}: no such file: {val}", file=sys.stderr)
             return 2
+    twice = duplicate_adapter(args.adapter)
+    if twice is not None:
+        print(f"error: --adapter: {twice} is given twice", file=sys.stderr)
+        return 2
     normalize_kv_scheme(args)
     rc = apply_family_defaults(args, parser, argv)
     if rc is not None:

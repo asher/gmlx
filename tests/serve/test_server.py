@@ -5,6 +5,7 @@ write semantics (--force refusal, next-command hint). CPU-only - discovery is
 faked so no GGUF is read and no server starts."""
 from __future__ import annotations
 
+import argparse
 import importlib
 import logging
 import os
@@ -368,7 +369,7 @@ def test_single_model_cfg_adapter_passthrough(tmp_path):
     ad = tmp_path / "pirate.lora.gguf"
     g.write_text("x")
     ad.write_text("x")
-    cfg = srv._single_model_cfg(_ns(model=str(g), adapter=str(ad)))
+    cfg = srv._single_model_cfg(_ns(model=str(g), adapter=[(str(ad), 1.0)]))
     # The adapter id plus its `<id>-base` sibling share one resident entry.
     ids = sorted(cfg.models)
     assert len(ids) == 2 and ids[1] == ids[0] + "-base"
@@ -377,6 +378,52 @@ def test_single_model_cfg_adapter_passthrough(tmp_path):
     assert m.adapter_paths() in ((str(ad.resolve()),), (str(ad),))
     assert tuple(r.path for r in resolve_model(mid, cfg).adapter_list) \
         == m.adapter_paths()
+
+
+def test_single_model_adapter_strength_is_the_entry_default(tmp_path):
+    """--adapter PATH:0.5 serves the adapter at 0.5 to a request that sets
+    no strength, and a request's strength replaces it."""
+    from gmlx.config import resolve_model
+    from gmlx.serve.lora_request import request_lora
+
+    g = tmp_path / "Qwen3-0.6B-Q4_K_M.gguf"
+    a, b = tmp_path / "a.gguf", tmp_path / "b:2.gguf"
+    for f in (g, a, b):
+        f.write_text("x")
+    ap = argparse.ArgumentParser()
+    srv._add_serve_args(ap)
+    args = ap.parse_args([str(g), "--adapter", f"{a}:0.5", "--adapter", str(b)])
+    cfg = srv._single_model_cfg(args)
+    mid = sorted(cfg.models)[0]
+    assert cfg.models[mid].adapters == ((str(a), 0.5), (str(b), 1.0))
+    rm = resolve_model(mid, cfg)
+    rm.adapters = rm.effective_adapters()
+    assert request_lora(rm, {}).scales == (0.5, 1.0)
+    got = request_lora(rm, {"lora": [{"id": 0, "scale": 2.0}]})
+    assert got.scales == (2.0, 0.0)
+
+
+def test_bg_serve_args_keep_each_adapter_strength(tmp_path):
+    ap = argparse.ArgumentParser()
+    srv._add_serve_args(ap)
+    args = ap.parse_args(["m.gguf", "--adapter", "x:y.gguf", "--adapter",
+                          "z.gguf:0.25"])
+    out = srv._bg_serve_args(args, None)
+    vals = [out[i + 1] for i, w in enumerate(out) if w == "--adapter"]
+    again = ap.parse_args(["m.gguf", *(f for v in vals for f in ("--adapter", v))])
+    assert again.adapter == [(os.path.abspath("x:y.gguf"), 1.0),
+                             (os.path.abspath("z.gguf"), 0.25)]
+
+
+def test_serve_refuses_an_adapter_named_twice(tmp_path, capsys):
+    g = tmp_path / "m.gguf"
+    a = tmp_path / "a.gguf"
+    g.write_text("x")
+    a.write_text("x")
+    with pytest.raises(SystemExit) as exc:
+        srv._cmd_serve([str(g), "--adapter", str(a), "--adapter", f"{a}:0.5"])
+    assert exc.value.code == 2
+    assert "is given twice" in capsys.readouterr().err
 
 
 # discovery mode (faked scan)

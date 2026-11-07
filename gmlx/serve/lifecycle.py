@@ -1196,13 +1196,27 @@ def _older_config_missing(run: dict, rel: str, folder: str | None) -> str:
     return f"{gone} Put {back} {moved}"
 
 
+def _adapter_path(parse, value: str) -> str:
+    import argparse
+
+    try:
+        return parse(value)[0]
+    except argparse.ArgumentTypeError:
+        return value
+
+
 def _missing_start_file(args: list) -> str | None:
     """Which file named by the words after ``serve`` is gone, as a phrase, or
     None. gmlx serve refuses a missing model, --mmproj, --draft-gguf or
     --adapter file, so restart checks them before it stops the server."""
+    from gmlx.commands.adapter_flag import parse_adapter
+
     named = [("model", args[0])] if args and not args[0].startswith("-") else []
     named += [(f"{w} file", args[j + 1]) for j, w in enumerate(args[:-1])
-              if w in ("--mmproj", "--draft-gguf", "--adapter")]
+              if w in ("--mmproj", "--draft-gguf")]
+    # An --adapter value may end in :STRENGTH.
+    named += [("--adapter file", _adapter_path(parse_adapter, args[j + 1]))
+              for j, w in enumerate(args[:-1]) if w == "--adapter"]
     for what, value in named:
         if not os.path.exists(os.path.expanduser(value)):
             return f"{value}, the {what} this server started with, is gone"

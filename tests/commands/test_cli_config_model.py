@@ -592,27 +592,20 @@ def _adapters_config(tmp_path, adapters):
         f"models:\n  m: {{path: m-Q4_K_M.gguf, adapters: {adapters}}}\n"))
 
 
-@pytest.mark.parametrize("adapters", [
-    "[a.gguf, b.gguf]",
-    "[{path: a.gguf, strength: 0.5}]",
+@pytest.mark.parametrize("adapters, want", [
+    ("[a.gguf, b.gguf]", [("a.gguf", 1.0), ("b.gguf", 1.0)]),
+    ("[{path: a.gguf, strength: 0.5}]", [("a.gguf", 0.5)]),
+    ("[{path: a.gguf, strength: 1}]", [("a.gguf", 1.0)]),
 ])
-def test_an_entry_run_cannot_apply_is_refused(tmp_path, capsys, adapters):
-    cfg, _ = _adapters_config(tmp_path, adapters)
-    rc, _args = _resolve(["m", "--config", cfg])
-    assert rc == 2
-    assert capsys.readouterr().err.strip() == (
-        "error: m: `gmlx run` and `gmlx chat` take one adapter at strength 1; "
-        "serve this entry instead")
-
-
-def test_one_adapter_at_strength_1_still_applies(tmp_path):
-    cfg, gguf = _adapters_config(tmp_path, "[{path: a.gguf, strength: 1}]")
+def test_an_entry_runs_with_its_adapters_and_strengths(tmp_path, adapters, want):
+    cfg, gguf = _adapters_config(tmp_path, adapters)
     rc, args = _resolve(["m", "--config", cfg])
     assert rc is None and args.gguf == gguf
-    assert args.adapter == str(tmp_path / "a.gguf")
+    assert args.adapter == [(str(tmp_path / p), st) for p, st in want]
 
 
-def test_a_typed_adapter_runs_an_entry_with_several(tmp_path):
-    cfg, gguf = _adapters_config(tmp_path, "[a.gguf, b.gguf]")
-    rc, args = _resolve(["m", "--config", cfg, "--adapter", str(tmp_path / "b.gguf")])
-    assert rc is None and args.adapter == str(tmp_path / "b.gguf")
+def test_a_typed_adapter_replaces_the_entry_adapters(tmp_path):
+    cfg, _ = _adapters_config(tmp_path, "[a.gguf, b.gguf]")
+    rc, args = _resolve(["m", "--config", cfg, "--adapter",
+                         f"{tmp_path / 'b.gguf'}:0.5"])
+    assert rc is None and args.adapter == [(str(tmp_path / "b.gguf"), 0.5)]

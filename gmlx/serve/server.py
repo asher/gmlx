@@ -42,6 +42,8 @@ import sys
 from pathlib import Path
 
 import gmlx.load.discovery as discovery
+from gmlx.commands.adapter_flag import (add_adapter_flag, adapter_paths,
+                                        duplicate_adapter, format_adapter)
 from gmlx.config import (
     DEFAULT_CONFIG_WRITE,
     LOAD_ENV,
@@ -1829,10 +1831,12 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "request; 0 closes thinking at once, -1 sets no budget "
                          "(config mode: the sampling `thinking_budget:` key; "
                          "requests may override).")
-    ap.add_argument("--adapter", default=None, metavar="PATH",
-                    help="GGUF LoRA adapter applied live over a single positional "
-                         "model at load - base stays K-quant, no merge (config mode: "
-                         "set `adapter:` per model instead).")
+    add_adapter_flag(
+        ap, help="GGUF LoRA adapter applied live over a single positional "
+                 "model at this default strength (default 1); a request's "
+                 "adapters or lora field sets its own. Base stays K-quant, no "
+                 "merge. Repeat for more adapters (config mode: set "
+                 "`adapters:` per model instead).")
     ap.add_argument("--system-prompt", default=None, metavar="STR",
                     help="System prompt for a single positional model, used when "
                          "a request sends none (config mode: the per-profile/model "
@@ -2168,8 +2172,8 @@ def _bg_serve_args(a, cfg_path) -> list:
         ct = a.chat_template
         out += ["--chat-template",
                 _abs(ct) if os.path.exists(os.path.expanduser(ct)) else ct]
-    if a.adapter:
-        out += ["--adapter", _abs(a.adapter)]
+    for path, strength in a.adapter or ():
+        out += ["--adapter", format_adapter(_abs(path), strength)]
     if getattr(a, "thinking", None) is not None:
         out += ["--thinking", a.thinking]
     if getattr(a, "thinking_budget", None) is not None:
@@ -2490,8 +2494,8 @@ def _cmd_service(argv: list, prog: str = "gmlx service") -> int:
                          help="--headless: don't auto-restart on crash.")
         a = ap.parse_args(rest)
         for flag, value in (("model", a.model), ("--mmproj", a.mmproj),
-                            ("--asr", a.asr),
-                            ("--draft-gguf", a.draft_gguf), ("--adapter", a.adapter),
+                            ("--asr", a.asr), ("--draft-gguf", a.draft_gguf),
+                            *(("--adapter", p) for p in adapter_paths(a.adapter)),
                             ("--config", a.config)):
             if value and not os.path.exists(os.path.expanduser(value)):
                 print(f"error: {flag}: no such file: {value}", file=sys.stderr)
@@ -2571,13 +2575,16 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
     # forward (gemma4 needs --draft-gguf; qwen3.5/3.6 use the native head).
     if a.model and a.mmproj and a.adapter:
         ap.error("--adapter (live GGUF LoRA) on a VLM (--mmproj) is not supported yet.")
+    twice = duplicate_adapter(a.adapter)
+    if twice is not None:
+        ap.error(f"--adapter: {twice} is given twice")
 
     # Validate every positional/flag file cheaply before the engine import and
     # the port bind, so a path typo gets one clear line instead of a half-up
     # server failing inside the uvicorn worker.
     for flag, value in (("model", a.model), ("--mmproj", a.mmproj),
-                        ("--asr", a.asr),
-                        ("--draft-gguf", a.draft_gguf), ("--adapter", a.adapter),
+                        ("--asr", a.asr), ("--draft-gguf", a.draft_gguf),
+                        *(("--adapter", p) for p in adapter_paths(a.adapter)),
                         ("--config", a.config)):
         if value and not os.path.exists(os.path.expanduser(value)):
             hint = ""
@@ -2939,8 +2946,8 @@ def _single_model_cfg(a) -> ServerCfg:
         draft_gguf=(os.path.abspath(os.path.expanduser(a.draft_gguf))
                     if a.draft_gguf and not native_mtp else None),
         native_mtp=native_mtp,
-        adapters=(((os.path.abspath(os.path.expanduser(a.adapter)), 1.0),)
-                  if a.adapter else ()),
+        adapters=tuple((os.path.abspath(os.path.expanduser(p)), float(st))
+                       for p, st in a.adapter or ()),
         speculative=speculative,
         overrides=overrides,
         stream=("cpu" if getattr(a, "stream_cpu", False)

@@ -4,6 +4,8 @@ different strengths matches each row run alone. The tolerances absorb
 rounding of the bfloat16 activations and of batched matmuls."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import mlx.core as mx
 import pytest
 
@@ -36,11 +38,19 @@ def rig(tmp_path_factory):
     for name, scale in (("one", 1.0), ("half", 0.5), ("neg", -1.5)):
         _write(d / f"{name}.gguf", scale)
 
-    def model(adapter_name):
+    def model(adapter_name, cli=None):
         m, cfg, _tok = gmlx.load_model(str(d / "tiny.gguf"))
-        if adapter_name:
+        if adapter_name and cli is None:
             adapter.apply_gguf_adapter(m, cfg, str(d / f"{adapter_name}.gguf"),
                                        base_arch="llama")
+        elif adapter_name:
+            from gmlx.commands.adapter_flag import parse_adapter
+            from gmlx.commands.cli import _apply_cli_adapter
+
+            path = f"{d / adapter_name}.gguf:{cli['strength']}"
+            args = SimpleNamespace(adapter=[parse_adapter(path)], arch="llama",
+                                   gguf=str(d / "tiny.gguf"))
+            _apply_cli_adapter(args, m, cfg, fold=cli["fold"])
         return m
 
     return model
@@ -79,3 +89,32 @@ def test_a_mixed_strength_batch_matches_each_row_alone(rig):
     for i, s in enumerate(scales):
         alone = _rows_forward(m, [s])
         assert mx.abs(batch[i:i + 1] - alone).max().item() <= 1e-3 * mx.abs(alone).max().item()
+
+
+def _gap(got, want, base):
+    return mx.abs(got - want).max().item(), mx.abs(got - base).max().item()
+
+
+def test_run_folds_a_flag_strength_into_the_static_scale(rig):
+    """gmlx run --adapter PATH:0.5 publishes nothing and gives half the
+    delta."""
+    lora_rows.configure("static", 1)
+    got = rig("one", cli={"strength": 0.5, "fold": True})(_X)
+    want = rig("half")(_X)
+    off, moved = _gap(got, want, rig(None)(_X))
+    assert off < 0.02 * moved, (off, moved)
+
+
+def test_chat_publishes_a_flag_strength_over_strength_one(rig):
+    """gmlx chat --adapter PATH:0.5 installs at strength 1 and publishes
+    0.5, which gives half the delta."""
+    m = rig("one", cli={"strength": 0.5, "fold": False})
+    lora_rows.configure("static", 1)
+    try:
+        assert mx.allclose(m(_X), rig("one")(_X))       # installed at 1
+        lora_rows.publish_tuple((0.5,), 1)
+        got = m(_X)
+    finally:
+        lora_rows.configure("static", 1)
+    off, moved = _gap(got, rig("half")(_X), rig(None)(_X))
+    assert off < 0.02 * moved, (off, moved)

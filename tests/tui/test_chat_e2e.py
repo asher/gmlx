@@ -1563,7 +1563,7 @@ def _run_text_mtp_chat(monkeypatch, tmp_path, lines, *, extra_argv=(),
     monkeypatch.setattr("gmlx.commands.cli._apply_placement",
                         lambda args, model: None)
     monkeypatch.setattr("gmlx.commands.cli._apply_cli_adapter",
-                        lambda args, model, config: None)
+                        lambda args, model, config, fold=True: None)
     monkeypatch.setattr(
         "gmlx.spec.mtp_load.load_mtp_model",
         lambda *a, **k: (_Model(), drafter, {"model_type": "fake"},

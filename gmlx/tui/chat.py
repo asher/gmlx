@@ -82,6 +82,9 @@ import sys
 import time
 from typing import Any, cast
 
+from gmlx.commands.adapter_flag import (add_adapter_flag, adapter_paths,
+                                        duplicate_adapter)
+
 
 class _ChatExit(Exception):
     """Deferred-setup failure (raised at the background-load join) carrying
@@ -184,13 +187,12 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
         help="Send each turn verbatim, applying no chat template (for base / "
         "non-instruct GGUFs that carry no template). Plain-text models only.",
     )
-    ap.add_argument(
-        "--adapter",
-        default=None,
-        metavar="PATH",
-        help="GGUF LoRA adapter applied live over the base at "
-        "load - base stays K-quant, no merge (text path "
-        "only, not --mmproj).",
+    add_adapter_flag(
+        ap,
+        help="GGUF LoRA adapter applied live over the base at load, at "
+        "this strength (default 1); base stays K-quant, no merge. Repeat "
+        "for more adapters. /adapter changes the strength live. Text path "
+        "only, not --mmproj.",
     )
     mmproj_group = ap.add_mutually_exclusive_group()
     mmproj_group.add_argument(
@@ -427,7 +429,9 @@ class ChatState:
     history_loaded: bool = False    # history file read once per session
     ptk_session: Any = None
     input_fn: Any = None      # scripted-input seam for the e2e loop tests
-    adapter_scale: float | None = None   # /adapter: None = on (1.0)
+    # --adapter strengths, and the strengths /adapter put in effect.
+    adapter_strengths: tuple | None = None
+    adapter_live: tuple | None = None
 
     # staged input for the next turn
     staged: list = dataclasses.field(default_factory=list)         # /! blocks
@@ -887,7 +891,7 @@ def _print_shim_help(state: ChatState) -> None:
     )
     print("- '/thinking [on|off|adaptive|default]' the model's reasoning switch")
     print("- '/thinking-budget [N|off]' cap thinking tokens per reply")
-    print("- '/adapter [on|off|SCALE]' toggle or scale the --adapter LoRA live")
+    print("- '/adapter [on|off|STRENGTH]' set the --adapter strength live")
     print(
         "- '/reasoning [show|hide|raw]' control how thinking is displayed "
         "(Ctrl-O collapses/expands it live during a reply)"
@@ -991,6 +995,7 @@ def _begin_turn(state: ChatState, *, cache, first_turn: bool, vlm_lens=(0, 0, 0)
     """Checkpoint the pre-turn session shape (for the transcript, /retry, /undo).
     ``_compose_user_content`` fills in the composed user text; staged media are
     captured here, before the generation paths pop them."""
+    _publish_adapter(state)
     state.turn_checkpoint = {
         "cache_before": _cache_tokens(cache),
         "first_turn_before": first_turn,
@@ -1140,7 +1145,8 @@ def _build_model_info(args, config, drafter, vlm_mtp: bool) -> dict:
         except OSError:
             pass
     if getattr(args, "adapter", None):
-        info["adapter"] = args.adapter
+        info["adapter"] = ", ".join(f"{p} at strength {st:g}"
+                                    for p, st in args.adapter)
     if drafter is not None:
         kind = _drafter_kind_label(drafter, args)
         block = getattr(getattr(drafter, "config", None), "block_size", None)
@@ -1367,29 +1373,51 @@ def _slash_system(cmd, arg, state):
     return "reset"
 
 
-def _slash_adapter(cmd, arg, state):
-    """Scale the live --adapter LoRA for the next turns without a reload: the
-    single chat row's scale rides the lora_rows channel (static mode). No
-    effect when the model carries no adapter."""
+def _adapter_strength_text(strengths) -> str:
+    return ", ".join(f"{s:g}" for s in strengths)
+
+
+def _publish_adapter(state) -> None:
+    """Publish the strengths in effect as the chat row's vector. Strength
+    is absolute: the adapters install at strength 1."""
+    if state.adapter_live is None:
+        return
     import gmlx.lora_rows as lora_rows
 
-    cur = getattr(state, "adapter_scale", None)
+    lora_rows.publish_tuple(state.adapter_live, 1)
+
+
+def _slash_adapter(cmd, arg, state):
+    """Set the --adapter strength for the next turns without a reload: the
+    chat row's strength rides the lora_rows channel. ``on`` is the
+    command-line strength, ``off`` is 0, and a number applies to every
+    adapter."""
+    import math
+
+    if state.adapter_strengths is None:
+        print("[chat] no adapter is loaded; start chat with --adapter "
+              "PATH[:STRENGTH]")
+        return None
     if not arg:
-        print(f"[chat] adapter scale: {1.0 if cur is None else cur:g}")
+        print(f"[chat] adapter strength: "
+              f"{_adapter_strength_text(state.adapter_live)}")
         return None
     if arg == "on":
-        scale = None
+        live = state.adapter_strengths
     elif arg == "off":
-        scale = 0.0
+        live = (0.0,) * len(state.adapter_strengths)
     else:
         try:
-            scale = float(arg)
+            value = float(arg)
         except ValueError:
-            print("[chat] usage: /adapter [on|off|SCALE]")
+            value = math.nan
+        if not math.isfinite(value) or "_" in arg:
+            print("[chat] usage: /adapter [on|off|STRENGTH]")
             return None
-    state.adapter_scale = scale
-    lora_rows.set_rows(None if scale is None else [scale])
-    print(f"[chat] adapter scale: {1.0 if scale is None else scale:g}")
+        live = (value,) * len(state.adapter_strengths)
+    state.adapter_live = tuple(live)
+    _publish_adapter(state)
+    print(f"[chat] adapter strength: {_adapter_strength_text(live)}")
     return None
 
 
@@ -3221,7 +3249,7 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
         )
     from gmlx.commands.cli import _apply_cli_adapter
 
-    _apply_cli_adapter(args, b.model, b.config)
+    _apply_cli_adapter(args, b.model, b.config, fold=False)
     # Streaming placement applies to the target trunk only (the drafter
     # stays resident); same composition as the run/bench entry points.
     _apply_placement(args, getattr(b.model, "language_model", b.model))
@@ -3348,7 +3376,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
 
         from gmlx.commands.cli import _apply_cli_adapter, _apply_placement
 
-        _apply_cli_adapter(args, b.model, b.config)
+        _apply_cli_adapter(args, b.model, b.config, fold=False)
         _apply_placement(args, b.model)
         from gmlx.stream.expert_streaming import _resolve_prefill_step
 
@@ -3657,6 +3685,14 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 file=sys.stderr,
             )
             return 2
+        for path in adapter_paths(args.adapter):
+            if not os.path.exists(os.path.expanduser(path)):
+                print(f"error: --adapter: no such file: {path}", file=sys.stderr)
+                return 2
+        twice = duplicate_adapter(args.adapter)
+        if twice is not None:
+            print(f"error: --adapter: {twice} is given twice", file=sys.stderr)
+            return 2
         if args.mmproj and (
             args.stream_cpu
             or args.moe_experts is not None
@@ -3739,6 +3775,13 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
 
     state = _wire_input(no_history=args.no_history)
     state.vlm = args.mmproj is not None
+    if args.adapter:
+        import gmlx.lora_rows as lora_rows
+
+        # One slot per adapter; each turn publishes the strengths.
+        lora_rows.configure("static", len(args.adapter))
+        state.adapter_strengths = tuple(float(st) for _p, st in args.adapter)
+        state.adapter_live = state.adapter_strengths
     from gmlx.commands.cli import is_speech_encoder
     if is_speech_encoder(args.mmproj):
         from gmlx.models.nemotron_h.transcription import transcription_instruction
