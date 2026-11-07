@@ -237,3 +237,24 @@ def test_a_render_with_no_system_message_does_not_change(faithful, monkeypatch,
     now = _render(faithful, processor, "gemma4_unified", messages, **kw)
     monkeypatch.setattr(pu, "_SYSTEM_TEXT_TYPES", ())
     assert _render(faithful, processor, "gemma4_unified", messages, **kw) == now
+
+
+@pytest.mark.integration
+def test_the_gguf_vocab_encodes_no_space_before_the_system_turn_end(
+        gguf_index, faithful):
+    """On a Gemma 4 GGUF's own vocab and template, the vision render of a
+    system message encodes to the text model's ids. Header only."""
+    from conftest import require_arch
+    from gmlx.distill.tokens import tokenizer_from_gguf
+
+    tok = tokenizer_from_gguf(require_arch(gguf_index, "gemma4"))
+    processor = _Gemma4Processor(tok.chat_template, "gemma4_unified")
+    processor.tokenizer = tok
+    messages = _conversation("system")
+    got = tok.encode(_render(faithful, processor, "gemma4_unified", messages),
+                     add_special_tokens=False)
+    want = tok.encode(_render(pu.apply_chat_template, tok, "gemma4_text",
+                              messages), add_special_tokens=False)
+    end = tok.convert_tokens_to_ids("<turn|>")
+    assert got[got.index(end) - 1] != tok.convert_tokens_to_ids("\u2581")
+    assert got == want
