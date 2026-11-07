@@ -1328,6 +1328,7 @@ def test_a_turn_after_a_cold_loads_room_check_waits_on_the_build(
     seams.reach("roomed")
     t = _turn(pool, y)
     t[0].join(WAIT)
+    assert not t[0].is_alive(), "the turn outwaited the paused build"
     seams.go["roomed"].set()
     finish(*load)
     with pytest.raises(LoraRefused) as e:
@@ -1737,20 +1738,23 @@ def test_two_workers_turn_at_once_and_never_release_on_each_other(
     def loads():
         rng = random.Random(seed)
         n = 0
-        while not stop.is_set():
-            kind = rng.choice([IMAGE_KIND, VIDEO_KIND])
-            name = f"{kind[5]}{n}"
-            n += 1
-            kinds[name] = kind
-            make = image if kind == IMAGE_KIND else video
-            make(pool, name, rng.randrange(1, 4))
-            if rng.random() < 0.3:
-                es = entries(rng.choice([IMAGE_KIND, VIDEO_KIND]))
-                if es:
-                    try:
-                        pool.evict(rng.choice(es).model_path)
-                    except residency.ModelBusyError:
-                        pass
+        try:
+            while not stop.is_set():
+                kind = rng.choice([IMAGE_KIND, VIDEO_KIND])
+                name = f"{kind[5]}{n}"
+                n += 1
+                kinds[name] = kind
+                make = image if kind == IMAGE_KIND else video
+                make(pool, name, rng.randrange(1, 4))
+                if rng.random() < 0.3:
+                    es = entries(rng.choice([IMAGE_KIND, VIDEO_KIND]))
+                    if es:
+                        try:
+                            pool.evict(rng.choice(es).model_path)
+                        except residency.ModelBusyError:
+                            pass
+        except BaseException as err:  # noqa: BLE001 - reported below
+            errors.append(err)
 
     loader = threading.Thread(target=loads, daemon=True)
     loader.start()
@@ -1760,6 +1764,7 @@ def test_two_workers_turn_at_once_and_never_release_on_each_other(
     finish(*b)
     stop.set()
     loader.join(WAIT)
+    assert not loader.is_alive(), "the loader is stuck"
     assert not errors, errors
     assert reserved and not [r for r in reserved if "worker" in r]
     for name, thread in pool.release_threads.items():

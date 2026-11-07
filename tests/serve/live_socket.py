@@ -29,6 +29,7 @@ def serving(app):
         server.should_exit = True
         thread.join(30)
         sock.close()
+    assert not thread.is_alive(), "the server did not stop"
 
 
 def send(conn: http.client.HTTPConnection, path: str, head: bytes,
