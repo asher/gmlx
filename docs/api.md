@@ -221,52 +221,27 @@ curl localhost:8080/v1/chat/completions -d '{
 
 The fields work on `/v1/chat/completions`, `/v1/responses`, `/v1/messages`
 and `/v1/completions`. On `/v1/messages`, `thinking.budget_tokens` also
-sets the budget.
+sets the budget. A request that sets both names of one field, such as
+`thinking_budget` and `reasoning_budget_tokens`, gets a 400.
 
-A budget of N lets N reasoning tokens through, as llama-server does. The
-prompt's tokens after its last start marker count too, such as the newline
-that follows `<think>` in a generation prompt, or reasoning that the client
-wrote into the prompt. The first token of a reply comes from the prompt, so
-when the prompt alone uses up the budget, one reasoning token gets through
-before the close.
-
-Without a message, the server writes a newline before the end marker. On a
-model with a built-in drafter, a budget above 0 writes a short sentence that
-says the budget ran out, and a budget of 0 writes the newline. A message
-replaces either one, and an empty message leaves only the end marker. The
-server tokenizes the message alone, with no BOS token and with special
-tokens read as tokens, as llama-server does. A message that holds an
-end-of-generation token ends the reply there.
-
-The message and the end marker are part of `reasoning_content`. They count
-in `completion_tokens` and against `max_tokens`, so a long message can end
-the reply before the answer. A message with no budget does nothing.
-
-`-1` takes the budget of the model's profile or overrides, of
+A budget of N lets N reasoning tokens through, as llama-server does.
+Reasoning that the prompt already holds after its last start marker counts
+too. `-1` takes the budget of the model's profile or overrides, of
 `gmlx serve --thinking-budget`, or of `MLX_VLM_THINKING_BUDGET`, in that
-order. A budget below 0 from any of them means no budget. `null` under any
-of the four names sets no value, and it also keeps the profile's value off
-that field.
+order.
 
-These requests get a 400:
-
-- Both names of one field set to values in one request, such as
-  `thinking_budget` and `reasoning_budget_tokens`. A `null` under one name
-  is no value, so it does not conflict.
-- A budget below -1.
-- A `reasoning_budget_tokens` that is not an integer, such as `true`,
-  `2.0` or `"5"`. `thinking_budget` takes what the request schema
-  converts, so `true` is 1 and `2.0` is 2 there. `/v1/completions` reads
-  `thinking_budget` as strictly as `reasoning_budget_tokens`.
-- A message that is not a string.
+The server tokenizes the message alone, with special tokens read as tokens,
+as llama-server does. Without a message, the server writes a newline before
+the end marker, and a model with a built-in drafter writes a short sentence
+that says the budget ran out. The message and the end marker are part of
+`reasoning_content`, and they count against `max_tokens`.
 
 The built-in drafters, the MTP heads, DFlash, DFlash2, DSpark and
 LiLiCorr, honor the budget and the message on a request that runs alone.
 The close can come up to one draft round late. A request that runs in a
 batch with other requests, or that is paused and resumed, drops both. A
 drafter that `MLX_VLM_DRAFT_MODEL` loads with a draft kind other than `mtp`
-answers a request's budget with a 400, and ignores a budget from the
-config with a warning.
+answers a request's budget with a 400.
 
 ### Structured output
 
@@ -310,9 +285,9 @@ The values are the model's own distribution: the log-softmax of its raw
 logits. The model writes its logits in 16-bit floats, and the server takes
 the log-softmax in 32-bit floats. Logit bias, penalties, XTC, structured
 output and the profile's sampling values change which token the server
-samples. They do not change the logprobs. A token that the thinking budget forces in reports
-the logprob that the model gave it. The token that ends the reply gets its
-entry too. A logprob below -9999 comes back as -9999.0.
+samples, but not the logprobs. A token that the thinking budget forces in
+reports the logprob that the model gave it. The token that ends the reply
+gets its entry too. A logprob below -9999 comes back as -9999.0.
 
 `bytes` holds the token's raw bytes from the vocabulary. A multi-byte
 character can split across tokens, and each of those tokens returns only
@@ -333,10 +308,7 @@ and agree with a run without speculation to within bf16 rounding. A
 diffusion model refuses a logprob request with a 400.
 
 While a request with logprobs is in a batch, each step of that batch takes
-longer, because the server also computes the alternatives. While an image or
-video job runs, each of its pauses for chat waits through at least one chat
-step, so those pauses get longer too. `GMLX_IMAGE_CHAT_SHARE` sets the
-balance, but even at `0` each pause waits through one chat step.
+longer, because the server also computes the alternatives.
 
 ### Assistant prefill
 
@@ -354,8 +326,6 @@ curl localhost:8080/v1/chat/completions -d '{
 }'
 ```
 
-For the templates below, the server renders the same prompt that
-llama-server renders for the same messages.
 The reply holds only the new text, in `content` or `reasoning_content`.
 `usage.prompt_tokens` counts the prefill, and `max_tokens`, `logprobs` and
 `stop` apply to the new tokens only.
@@ -366,42 +336,32 @@ The reply holds only the new text, in `content` or `reasoning_content`.
 | `add_generation_prompt` | `true` | `false` renders the messages with no generation prompt. Send it with `continue_final_message`. |
 
 A part name is `"content"` or `"reasoning_content"`. `"content"` closes the
-reasoning before the content.
+reasoning before the content. `add_generation_prompt: false` alone renders
+the messages as they are, so a last assistant message stays a finished
+turn.
 
-These chat templates can continue a message: Qwen3.5 and later Qwen
-templates, the other templates that write tool calls in the same
-`<tool_call>` and `<function=...>` form, Gemma 4 without `mmproj:` and
-SmolLM2-135M-Instruct. A request to any other model gets a 400, and so does
-a request to a model whose processor builds its prompt in Python. A last
-message with `tool_calls`, both fields true, and `response_format` with
-`continue_final_message` also get a 400. An
+These chat templates can continue a message, in the prompt that
+llama-server renders for the same messages:
+
+- Qwen3.5 and later Qwen templates, and the other templates that write tool
+  calls in the same `<tool_call>` and `<function=...>` form.
+- Gemma 4, on a model set up without `mmproj:`.
+- SmolLM2-135M-Instruct.
+
+A request to any other model gets a 400. So does a last message with
+`tool_calls`, or `response_format` with `continue_final_message`. An
 [assistant](assistant.md#served-assistants) without `tools` refuses both
 fields, because its turns build their own prompt.
 
-`add_generation_prompt: false` alone renders the messages as they are, so
-a last assistant message stays a finished turn.
-
 gmlx differs from llama-server in these ways:
 
-- Prefill is opt-in. llama-server continues any last assistant message,
-  and gmlx continues it only when the request sets
+- Prefill is opt-in. llama-server continues any last message, and gmlx
+  continues a last assistant message only when the request sets
   `continue_final_message`.
-- `continue_final_message` needs the last message to be an assistant
-  message. llama-server continues any last message.
-- A last message with no content and no `reasoning_content` gets a 400.
-  llama-server renders the other messages with no generation prompt.
-- An `add_generation_prompt` that is not a boolean gets a 400. llama-server
-  reads it as true and then refuses the request because both fields are
-  true.
-- `response_format` with `continue_final_message` gets a 400.
-- Templates outside the list above get a 400.
-- A Gemma 4 model set up with `mmproj:` gets a 400 for
-  `continue_final_message`. Its processor adds a space after the system
-  message, so its prompt is not the one llama-server renders.
 - gmlx merges all system messages into one system message at the start.
   llama-server keeps each one where the client sent it.
 - The reply holds only the new text. A llama-server reply that is not
-  streamed also holds the prefill. Its stream does not.
+  streamed also holds the prefill.
 - llama-server turns thinking on when the template has a switch, and gmlx
   keeps the template's default. Send `chat_template_kwargs` with
   `enable_thinking` to get the same prompt from both servers.
