@@ -27,6 +27,9 @@ def lone_surrogate(value, name: str) -> str | None:
     a tokenizer and the JSON of an answer then fail on. A key that holds
     one names the field it is in."""
     if isinstance(value, str):
+        # An ASCII string, base64 data included, holds none: no copy.
+        if value.isascii():
+            return None
         try:
             value.encode("utf-8")
         except UnicodeEncodeError:
