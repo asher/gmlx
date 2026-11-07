@@ -124,6 +124,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the last request's inputs in memory until the next request arrived.
 - `gmlx serve` no longer unloads a chat model at its idle TTL while an image
   request rewrites its prompt or encodes its text through it.
+- The ComfyUI nodes show the server's 413 for a step body past its limit,
+  where they said the server did not answer.
 
 ## [0.5.4] - 2026-10-29
 
