@@ -469,6 +469,18 @@ def test_template_for_reads_the_template_the_gemma4_processor_renders():
         _SCHEMAS.ChatRequest(model="m", **_prefill(_C)), processor)
 
 
+@pytest.mark.parametrize("template", [None, ""])
+def test_a_gemma4_processor_with_no_template_of_its_own_continues(template):
+    """The render and template_for then both read the tokenizer's."""
+    processor, _ = _processor_for("llama-server/gemma4_12b", vision=True)
+    processor.chat_template = template
+    assert prefill.template_for(processor) == processor.tokenizer.chat_template
+    args = prefill._stash_continuation(
+        types.SimpleNamespace(),
+        _SCHEMAS.ChatRequest(model="m", **_prefill(_C)), processor)
+    assert args._kq_continue.mode == "content"
+
+
 def test_a_gemma4_processor_with_another_template_than_its_tokenizer_gets_a_400():
     processor, _ = _processor_for("llama-server/gemma4_12b", vision=True)
     processor.chat_template = processor.chat_template + "{# other #}"

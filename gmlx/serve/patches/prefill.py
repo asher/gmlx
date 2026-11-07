@@ -189,8 +189,7 @@ def _renders_template_text(processor) -> bool:
             if not via_tokenizer:
                 return True
             tokenizer = getattr(processor, "tokenizer", None)
-            return (getattr(processor, "chat_template", None)
-                    == getattr(tokenizer, "chat_template", None))
+            return template == getattr(tokenizer, "chat_template", None)
     return False
 
 
