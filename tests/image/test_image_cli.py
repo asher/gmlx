@@ -149,6 +149,23 @@ def test_the_latents_land_at_the_path_given(env, tmp_path):
     assert [p.name for p in lat.parent.iterdir()] == ["run1"]
 
 
+def test_a_latent_path_at_a_symlink_writes_its_target(env, tmp_path):
+    """A --save-latent path that is a symlink keeps the link and writes
+    the latents to the file it names, as a plain write to it would."""
+    target = tmp_path / "store" / "run1.npz"
+    target.parent.mkdir()
+    np.savez(target, seeds=np.ones(3))
+    link = tmp_path / "lat.npz"
+    link.symlink_to(target)
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                     "--seed", "5", "--output",
+                                     str(tmp_path / "a.png"),
+                                     "--save-latent", str(link)]) == 0
+    assert link.is_symlink() and link.resolve() == target.resolve()
+    assert np.load(target)["seeds"].tolist() == [5]
+    assert [p.name for p in target.parent.iterdir()] == ["run1.npz"]
+
+
 def test_a_quoted_home_latent_path_is_checked_where_it_is_written(
         env, tmp_path, monkeypatch, capsys):
     """A --save-latent of '~/lat.npz', quoted so the shell leaves the ~,

@@ -537,7 +537,7 @@ def _writable(a, out: str | None) -> None:
                           "file")
         paths.append(os.path.join(d, "audio.wav"))
     for p in paths:
-        err = probe_writable(os.path.expanduser(p))
+        err = probe_writable(os.path.realpath(os.path.expanduser(p)))
         if err is not None:
             raise OSError(f"cannot write {p}: {err}")
 

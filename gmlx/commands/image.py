@@ -115,11 +115,13 @@ def _quality(text: str) -> int:
 def save_npz(path: str, **arrays) -> None:
     """Write ``arrays`` as an .npz file at exactly ``path``, its folder
     made, through ``path.part`` synced to disk before it is renamed, so a
-    write stopped part way leaves what was there. The caller expands a ~
-    in ``path`` once, before its writable check."""
+    write stopped part way leaves what was there. A symlink at ``path``
+    stays, and the file it names is written. The caller expands a ~ in
+    ``path`` once, before its writable check."""
     import numpy as np
 
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    path = os.path.realpath(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     part = path + ".part"
     try:
         with open(part, "wb") as f:
@@ -885,7 +887,7 @@ def _generate(a) -> int:
         # Checked where it is written: a quoted ~ is the home folder.
         a.save_latent = os.path.expanduser(a.save_latent)
     for path in paths + ([a.save_latent] if a.save_latent else []):
-        err = probe_writable(path)
+        err = probe_writable(os.path.realpath(path))
         if err is not None:
             raise OSError(f"cannot write {path}: {err}")
 

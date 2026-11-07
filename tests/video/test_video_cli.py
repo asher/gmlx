@@ -499,6 +499,22 @@ def test_the_latents_land_at_the_path_given(stubbed, tmp_path):
     assert [p.name for p in lat.parent.iterdir()] == ["run1"]
 
 
+def test_a_latent_path_at_a_symlink_writes_its_target(stubbed, tmp_path):
+    """A --save-latent path that is a symlink keeps the link and writes
+    the latents to the file it names."""
+    target = tmp_path / "store" / "run1.npz"
+    target.parent.mkdir()
+    np.savez(target, old=np.ones(3))
+    link = tmp_path / "lat.npz"
+    link.symlink_to(target)
+    assert stubbed("--frames-dir", str(tmp_path / "f"), "--save-latent",
+                   str(link)) == 0
+    assert link.is_symlink() and link.resolve() == target.resolve()
+    assert sorted(np.load(target).files) == ["audio", "seed", "steps",
+                                             "video"]
+    assert [p.name for p in target.parent.iterdir()] == ["run1.npz"]
+
+
 def test_a_quoted_home_latent_path_lands_in_the_home_folder(
         stubbed, monkeypatch, tmp_path):
     """A --save-latent of '~/lat.npz', quoted so the shell leaves the ~,
