@@ -2293,7 +2293,7 @@ def _prompt_cache_off(served: tuple[str | None, dict] | None, model_id: str | No
             entry = cfg.models.get(head) or config.ModelCfg(id=head, path=os.devnull)
             cfg.models[head] = dataclasses.replace(entry, path=os.devnull, family=None,
                                                    mmproj=None, draft_gguf=None,
-                                                   adapter=None)
+                                                   adapters=())
             resolved = config.resolve_cli_model(model_id, cfg)
     except Exception:  # noqa: BLE001 - a note that launch cannot work out is left out
         return False

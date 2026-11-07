@@ -582,3 +582,37 @@ def test_no_mmproj_refuses_mmproj(build):
     with pytest.raises(SystemExit) as exc:
         build().parse_args(["m.gguf", "--mmproj", "mm.gguf", "--no-mmproj"])
     assert exc.value.code == 2
+
+
+def _adapters_config(tmp_path, adapters):
+    for name in ("a.gguf", "b.gguf"):
+        (tmp_path / name).write_bytes(b"GGUF")
+    return _config(tmp_path, body=(
+        f"server:\n  model_dirs: [{tmp_path}]\n"
+        f"models:\n  m: {{path: m-Q4_K_M.gguf, adapters: {adapters}}}\n"))
+
+
+@pytest.mark.parametrize("adapters", [
+    "[a.gguf, b.gguf]",
+    "[{path: a.gguf, strength: 0.5}]",
+])
+def test_an_entry_run_cannot_apply_is_refused(tmp_path, capsys, adapters):
+    cfg, _ = _adapters_config(tmp_path, adapters)
+    rc, _args = _resolve(["m", "--config", cfg])
+    assert rc == 2
+    assert capsys.readouterr().err.strip() == (
+        "error: m: `gmlx run` and `gmlx chat` take one adapter at strength 1; "
+        "serve this entry instead")
+
+
+def test_one_adapter_at_strength_1_still_applies(tmp_path):
+    cfg, gguf = _adapters_config(tmp_path, "[{path: a.gguf, strength: 1}]")
+    rc, args = _resolve(["m", "--config", cfg])
+    assert rc is None and args.gguf == gguf
+    assert args.adapter == str(tmp_path / "a.gguf")
+
+
+def test_a_typed_adapter_runs_an_entry_with_several(tmp_path):
+    cfg, gguf = _adapters_config(tmp_path, "[a.gguf, b.gguf]")
+    rc, args = _resolve(["m", "--config", cfg, "--adapter", str(tmp_path / "b.gguf")])
+    assert rc is None and args.adapter == str(tmp_path / "b.gguf")

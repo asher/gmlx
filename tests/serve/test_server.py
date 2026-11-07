@@ -352,7 +352,7 @@ def test_single_model_cfg_moe_expert_mass_passthrough(tmp_path):
 
 def test_single_model_cfg_adapter_passthrough(tmp_path):
     """--adapter lands on the ModelCfg and resolves onto the ResolvedModel (and so
-    into its load_signature) - the single-model analog of a config `adapter:`."""
+    into its load_signature) - the single-model analog of a config `adapters:` list of one."""
     from gmlx.config import resolve_model
     g = tmp_path / "Qwen3-0.6B-Q4_K_M.gguf"
     ad = tmp_path / "pirate.lora.gguf"
@@ -363,9 +363,10 @@ def test_single_model_cfg_adapter_passthrough(tmp_path):
     ids = sorted(cfg.models)
     assert len(ids) == 2 and ids[1] == ids[0] + "-base"
     mid, m = ids[0], cfg.models[ids[0]]
-    assert cfg.models[ids[1]].adapter is None
-    assert m.adapter == str(ad.resolve()) or m.adapter == str(ad)
-    assert resolve_model(mid, cfg).adapter == m.adapter
+    assert cfg.models[ids[1]].adapters == ()
+    assert m.adapter_paths() in ((str(ad.resolve()),), (str(ad),))
+    assert tuple(r.path for r in resolve_model(mid, cfg).adapter_list) \
+        == m.adapter_paths()
 
 
 # discovery mode (faked scan)

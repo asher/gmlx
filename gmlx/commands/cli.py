@@ -2214,7 +2214,8 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
          "reasoning_effort")
     if not getattr(args, "no_mmproj", False):
         _set("mmproj", rm.mmproj, "mmproj")
-    _set("adapter", rm.adapter, "adapter")
+    items = tuple(getattr(rm, "adapter_list", ()) or ())
+    _set("adapter", items[0].path if items else None, "adapter")
     _set("draft_gguf", rm.draft_gguf, "draft_gguf")
     if not getattr(args, "no_asr", False):
         _set("asr", getattr(rm, "asr", None), "asr")
@@ -2397,7 +2398,12 @@ def vlm_kv_width(args, model) -> int | None:
     return kv_bits
 
 
-def maybe_load_from_config(args, parser, argv) -> int | None:
+ADAPTER_LIST_REFUSAL = ("`gmlx run` and `gmlx chat` take one adapter at strength 1; "
+                        "serve this entry instead")
+
+
+def maybe_load_from_config(args, parser, argv, *,
+                           adapter_list_refusal: bool = True) -> int | None:
     """If the positional model isn't an on-disk file (nor a remote ref), resolve it as a
     server-config model id/alias and overlay that model's settings onto ``args`` (and
     set ``args.gguf`` to its resolved path - including hf-cache-resident GGUFs). Returns
@@ -2435,6 +2441,11 @@ def maybe_load_from_config(args, parser, argv) -> int | None:
     if rm is None:
         return None
     explicit = _explicit_dests(parser, argv)
+    items = tuple(getattr(rm, "adapter_list", ()) or ())
+    if (adapter_list_refusal and "adapter" not in explicit
+            and (len(items) > 1 or any(a.strength != 1.0 for a in items))):
+        print(f"error: {raw}: {ADAPTER_LIST_REFUSAL}", file=sys.stderr)
+        return 2
     applied = _apply_resolved_to_args(args, rm, explicit)
     args.gguf = rm.path
     args._config_resolved = True

@@ -129,7 +129,7 @@ def _chat_encoders(cfg, family: str) -> dict:
 
     out = {}
     for mid, mc in cfg.models.items():
-        if mc.adapter or str(mc.path).startswith("hf:"):
+        if mc.adapters or str(mc.path).startswith("hf:"):
             continue
         try:
             rp = resolve_path(mc.path, cfg.model_dirs)

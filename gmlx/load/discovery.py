@@ -849,7 +849,7 @@ def discovered_models(cfg, *, progress=False, images=None) -> list[ModelCfg]:
             rp = None
         if rp:
             known_paths.add(rp)
-            if not m.adapter:
+            if not m.adapters:
                 encoder_ids[rp] = m.id
                 if m.mmproj:
                     tower_ids.add(m.id)

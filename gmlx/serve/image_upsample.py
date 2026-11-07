@@ -154,9 +154,9 @@ def revise(model_field, prompt: str, requested: bool | None = None,
 
 def _upsampler_identity(up: str) -> tuple:
     """What tells one chat model of the pool from another: the load
-    signature of its resolved entry, its adapter and its template
-    controls. A config reload that changes any of them writes new
-    captions."""
+    signature of its resolved entry, its adapters with their default
+    strengths and its template controls. A config reload that changes
+    any of them writes new captions."""
     from .residency import _http_from_resolver_error
 
     try:
@@ -165,7 +165,8 @@ def _upsampler_identity(up: str) -> tuple:
             serving.UnknownProfile, serving.NoModelSpecified) as e:
         raise (_http_from_resolver_error(e) or e) from e
     kwargs = getattr(spec, "chat_template_kwargs", None) or {}
-    return (spec.load_signature(), getattr(spec, "adapter", None),
+    adapters = tuple((a.path, a.strength) for a in getattr(spec, "adapter_list", ()))
+    return (spec.load_signature(), adapters,
             tuple(sorted((k, repr(v)) for k, v in kwargs.items())),
             repr(getattr(spec, "thinking", None)))
 

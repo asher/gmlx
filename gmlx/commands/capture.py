@@ -379,7 +379,7 @@ def cmd_capture(argv: list | None = None, prog: str = "gmlx capture") -> int:
         from .cli import (_TEMPLATE_TOKENS, _ensure_stream_cb_caps,
                           maybe_load_from_config, preload_wire_check)
 
-        rc = maybe_load_from_config(args, ap, argv)
+        rc = maybe_load_from_config(args, ap, argv, adapter_list_refusal=False)
         if rc is not None:
             return rc
         if args.adapter:

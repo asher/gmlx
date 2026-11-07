@@ -255,6 +255,7 @@ def test_a_config_entry_brings_its_placement_and_a_typed_flag_wins(
 
 @pytest.mark.parametrize("entry, key", [
     ("adapter: ad.gguf", "adapter"),
+    ("adapters: [{path: ad.gguf, strength: 0}]", "adapter"),
     ("rope_scaling: {type: yarn, factor: 2}", "rope_scaling"),
 ])
 def test_a_config_entry_kld_cannot_apply_refuses(tmp_path, entry, key):
