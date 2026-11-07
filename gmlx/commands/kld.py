@@ -139,7 +139,8 @@ class Point:
     scales: tuple
 
 
-def adapter_points(items, model_path: str, with_bare: bool):
+def adapter_points(items: list[tuple[str, float]] | None, model_path: str,
+                   with_bare: bool):
     """``(slots, points)`` for the ``--adapter`` flags: ``slots`` holds
     ``(path, sha256)`` per distinct file in the order first named, read and
     checked against MODEL's architecture; ``points`` holds MODEL bare when
