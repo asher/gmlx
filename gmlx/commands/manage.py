@@ -2767,17 +2767,13 @@ def _image_refs(cfg, disc, skip: str | None, images=(),
     refs: set = set()
     for mc in list(cfg.models.values()) + list(disc):
         for p in _chat_files(mc):
-            rp = _try_resolve(p, cfg.model_dirs)
-            if rp:
-                refs.add(_file_key(rp))
+            refs |= _rm_keys(p, cfg.model_dirs)
     for im in _all_images(cfg, images):
         if im.id == skip:
             continue
         for p in (im.path, im.vae, im.encoder, im.encoder_mmproj,
                   *(a for a, _st in im.adapters)):
-            rp = _try_resolve(p, cfg.model_dirs)
-            if rp:
-                refs.add(_file_key(rp))
+            refs |= _rm_keys(p, cfg.model_dirs)
     return refs | _video_refs(cfg, skip_video)
 
 
@@ -2790,9 +2786,7 @@ def _video_refs(cfg, skip: str | None = None) -> set:
             continue
         for p in (v.path, v.encoder, v.encoder_mmproj, v.vae, v.audio_vae,
                   v.tiny_vae, *(a for a, _st in v.adapters)):
-            rp = _try_resolve(p, cfg.model_dirs)
-            if rp:
-                refs.add(_file_key(rp))
+            refs |= _rm_keys(p, cfg.model_dirs)
     return refs
 
 
@@ -2815,13 +2809,12 @@ def _rm_image(a, cfg, cfg_path, im, disc, images=(), *,
         if chat:
             notes.append(f"encoder {im.encoder} is a chat model; it stays")
         for label, p in parts:
-            rp = _try_resolve(p, cfg.model_dirs, cwd=False)
-            if rp is None:
-                continue
-            if _file_key(rp) in refs:
+            # A file missing after a pull was killed part way still has
+            # what the pull left where it would be.
+            state, files = _rm_files(p, cfg.model_dirs, refs)
+            if state == "kept":
                 notes.append(f"{label} kept: another model uses it")
-            else:
-                to_delete += _shard_files(rp)
+            to_delete += files
     to_delete = list(dict.fromkeys(to_delete))
     sizes = {p: os.path.getsize(p) for p in to_delete if os.path.exists(p)}
     default_cleared = cfg.defaults.image_model == im.id
@@ -2889,13 +2882,12 @@ def _rm_video(a, cfg, cfg_path, vm, disc, images=()) -> int:
                          ("encoder_mmproj", vm.encoder_mmproj),
                          ("vae", vm.vae), ("audio_vae", vm.audio_vae),
                          ("tiny_vae", vm.tiny_vae)):
-            rp = _try_resolve(p, cfg.model_dirs, cwd=False)
-            if rp is None:
-                continue
-            if _file_key(rp) in refs:
+            # A file missing after a pull was killed part way still has
+            # what the pull left where it would be.
+            state, files = _rm_files(p, cfg.model_dirs, refs)
+            if state == "kept":
                 notes.append(f"{label} kept: another model uses it")
-            else:
-                to_delete += _shard_files(rp)
+            to_delete += files
     to_delete = list(dict.fromkeys(to_delete))
     sizes = {p: os.path.getsize(p) for p in to_delete if os.path.exists(p)}
     try:

@@ -1627,6 +1627,23 @@ def test_rm_never_takes_a_file_of_the_name_from_the_cwd(images, capsys,
                          **_cfg(cfg).video_models}
 
 
+def test_rm_of_an_image_model_a_killed_pull_left_without_its_dit(images,
+                                                                 capsys):
+    """An image entry whose DiT a killed pull left missing has what the
+    pull left where it would be removed and listed: the old copy of an
+    update, the partial download and its sha256 mark."""
+    lib, cfg = images
+    (lib / "qt.gguf").unlink()
+    left = ("qt.gguf.old", "qt.gguf.part", "qt.gguf.part.sha256")
+    for name in left:
+        (lib / name).write_bytes(b"x")
+    assert manage.cmd_rm(["qt", "--config", str(cfg), "--yes"]) == 0
+    plan = capsys.readouterr().out
+    assert all(str(lib / name) in plan for name in left), plan
+    assert not list(lib.glob("qt.gguf*"))
+    assert (lib / "qvae.gguf").exists() and (lib / "tower.gguf").exists()
+
+
 @pytest.mark.parametrize("kind", ["image", "video"])
 def test_rm_refuses_the_upsampler_of_an_image_or_video_model(images, capsys,
                                                              kind):
