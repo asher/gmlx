@@ -190,11 +190,7 @@ def install_chat_template_kwargs() -> None:
     wrapper folds that stash into the kwargs mlx-vlm passes to the template.
 
     The pop below leaves ``enable_thinking`` absent so the template's own
-    default governs; ``get_chat_template`` would then re-inject False
-    (mlx-vlm >= 0.6.15), so the render seam is guarded too."""
-    from gmlx.tui.reasoning import install_template_default_thinking
-
-    install_template_default_thinking()
+    default governs."""
     _install_gen_args_transform(_CTKW_FLAG, _stash_template_kwargs)
 
     gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")

@@ -8,6 +8,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `gmlx pull --verify` checks each file's sha256 against Hugging Face and
+  downloads again any file that differs.
 - `gmlx video` makes clips of up to 15 seconds with sound from a text prompt
   with MiniMax-H3. See [Video generation](docs/video.md) and its
   [licenses](docs/video.md#licenses).
@@ -66,6 +68,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `gmlx pull <name>` downloads each file from the latest commit of its
+  repository, so a quant its publisher updates reaches you without a new gmlx
+  release, and pulling again replaces a copy whose size changed.
 - An image or video LoRA runs when the Mac has the memory for it, where
   `gmlx serve` refused LoRAs over 256 MB.
 - `server.image.adapter_cache_mb` is now an optional cap with no default.
@@ -152,6 +157,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whether the model fits.
 - An image request that names a file name two of the model's adapters share
   gets a 400, where the server picked one of them.
+- Served and VLM chat prompts render on transformers 5.22.2, where a request
+  that set no thinking control failed with "'enable_thinking' is undefined".
 - Distillation's pinned day renders on transformers 5.22, where a template that
   prints today's date failed with "'str' object is not callable".
 - A served image model keeps its own LoRAs when a request brings others,

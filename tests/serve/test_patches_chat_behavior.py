@@ -800,8 +800,7 @@ def test_request_enable_thinking_beats_request_thinking_control(monkeypatch):
 
 
 class _RecordingTok:
-    """A tokenizer stand-in whose **kwargs signature makes mlx-vlm's
-    enable_thinking capability probe say yes (the 0.6.15 injection path)."""
+    """A tokenizer stand-in that records the kwargs a render passes it."""
     chat_template = "{{ messages }}"
 
     def __init__(self):
@@ -812,37 +811,48 @@ class _RecordingTok:
         return "rendered"
 
 
-def test_template_default_thinking_blocks_0615_false_injection():
-    """Regression: mlx-vlm >= 0.6.15 get_chat_template injects
-    enable_thinking=False when the kwarg is absent, so served models with
-    default-on reasoning templates rendered the dead think prefill and
-    stopped thinking. The seeded Jinja Undefined must reach the tokenizer
-    instead of False, and an explicit value must pass through verbatim."""
-    import jinja2
-
-    import gmlx.tui.reasoning as reasoning
-    from gmlx.upstream.patching import wrapped_with
-
-    sp.install_chat_template_kwargs()      # installs the render guard too
+def test_an_absent_enable_thinking_reaches_the_template_absent():
+    """A render with no enable_thinking leaves the template's own default
+    in charge. An explicit value passes through as sent."""
+    sp.install_chat_template_kwargs()
     pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
-    # A model load and the server install their own render wraps above the
-    # guard, so the guard is looked up in the whole chain.
-    assert wrapped_with(pu.get_chat_template, reasoning._TEMPLATE_DEFAULT_FLAG)
-
     tok = _RecordingTok()
     msgs = [{"role": "user", "content": "hi"}]
     assert pu.get_chat_template(tok, msgs, True) == "rendered"
-    assert isinstance(tok.kwargs["enable_thinking"], jinja2.Undefined)
+    assert "enable_thinking" not in tok.kwargs
+    for value in (False, True):
+        pu.get_chat_template(tok, msgs, True, enable_thinking=value)
+        assert tok.kwargs["enable_thinking"] is value
 
-    pu.get_chat_template(tok, msgs, True, enable_thinking=False)
-    assert tok.kwargs["enable_thinking"] is False
-    pu.get_chat_template(tok, msgs, True, enable_thinking=True)
-    assert tok.kwargs["enable_thinking"] is True
 
-    # idempotent: a second install keeps the same wrapper
-    fn = pu.get_chat_template
-    reasoning.install_template_default_thinking()
-    assert pu.get_chat_template is fn
+class _GateTok:
+    """A tokenizer stand-in that renders through transformers, with the
+    thinking gate of a Qwen3 template."""
+    chat_template = ("{% if enable_thinking is defined and enable_thinking "
+                     "is false %}NOTHINK{% else %}THINK{% endif %}")
+
+    def apply_chat_template(self, messages, tokenize=False,
+                            add_generation_prompt=True, **kwargs):
+        from transformers.utils.chat_template_utils import (
+            render_jinja_template)
+
+        out = render_jinja_template(
+            [messages], chat_template=self.chat_template,
+            add_generation_prompt=add_generation_prompt, **kwargs)
+        rendered = out[0] if isinstance(out, tuple) else out
+        return rendered[0] if isinstance(rendered, list) else rendered
+
+
+def test_a_served_render_keeps_the_templates_thinking_default():
+    from gmlx.upstream.system_content_fix import install_system_content_fix
+
+    sp.install_chat_template_kwargs()
+    install_system_content_fix()
+    pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
+    msgs = [{"role": "user", "content": "hi"}]
+    assert pu.get_chat_template(_GateTok(), msgs, True) == "THINK"
+    assert pu.get_chat_template(_GateTok(), msgs, True,
+                                enable_thinking=False) == "NOTHINK"
 
 
 # The old-style role dispatch from issue #66: no developer alias, else-raise.

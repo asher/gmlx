@@ -783,6 +783,7 @@ names the encoder file and the vision tower that `pull` adds.
 | `--config FILE` | The first default location | Read `model_dirs` from this config. With no config at all, a pull by name or from the picker asks for a model folder and writes one. |
 | `--force` | Off | Download even when the header check, the disk-space check or the chip check of an image model fails. |
 | `--no-register` | Off | Do not add the file to the config. |
+| `--verify` | Off | Check each file's sha256 against Hugging Face, files already on disk too, and download again any that differ. |
 | `--hf-source ID` | None | Treat the architecture as loadable with this config override. |
 | `--max-mb N` | `128` | Cap the header range read. |
 | `--json` | Off | Emit each verdict as JSON before downloading. With no name, or with `--list`, the recommendations as JSON. |
@@ -794,6 +795,25 @@ Inside a `model_dirs` root, downloads go under `<org>__<repo>/`. An
 interrupted `pull` resumes on the next run. A gated or private repo needs a
 token in `HF_TOKEN`, or one stored by `hf auth login`. The retry settings
 are in [Environment variables](env-vars.md).
+
+### Update a model you already pulled
+
+`pull` downloads from the latest commit of the repository. Run the same pull
+again to get a quant its publisher has updated. A file whose size changed
+downloads again, and the old copy stays in use until the new one is
+complete:
+
+```text
+  Qwen3.8-27B-UD-Q6_K.gguf: the copy on disk differs from Hugging Face, downloading the current file
+```
+
+A publisher can also change a file without changing its size. `--verify`
+catches that by checking each file's sha256, which reads every file in
+full:
+
+```sh
+gmlx pull qwen3.8-27b --verify
+```
 
 ## gmlx validate
 
