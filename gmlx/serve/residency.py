@@ -42,7 +42,7 @@ import time
 from collections import OrderedDict
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 
 import gmlx.load.loadlog as loadlog
@@ -249,8 +249,15 @@ class _Store:
 
 
 STORE = _Store()
-# A turn's answer that it waits on a release queued on the other worker.
-_ASIDE = object()
+
+
+class _Aside(NamedTuple):
+    """A turn's answer that it waits on the releases queued on the other
+    worker: the bytes it is short of, and the bytes they were tearing
+    down as it saw them."""
+
+    short: int
+    tearing: int
 
 
 class _Ledger:
@@ -989,9 +996,11 @@ class _ResidencyPool:
         borrowed encoder, which count as its own. Sheds idle LoRA bytes,
         evicts idle models as a cold load does, measures and books, or
         waits for chat models in use within the deadline. A release
-        queued on the other worker frees its bytes first: the turn waits
-        on it, for at most half the deadline left, after it sheds and
-        before it evicts; the rest keeps the wait for the build lock.
+        queued on the other worker frees its bytes first: after it sheds
+        and before it evicts, the turn waits on it until the bytes freed
+        cover its shortfall, within one window of half the deadline left
+        when it first waits, which it may wait in more than once; the
+        rest keeps the wait for the build lock.
         Raises LoraRefused: 413 when no unload makes room, else 503 with
         Retry-After."""
         from .capacity import overcommit
@@ -1040,14 +1049,16 @@ class _ResidencyPool:
                 self._build_lock.release()
             if got is None:
                 return
-            if got is _ASIDE:
-                # Off the build lock, which the release may wait on. Half
-                # the deadline left at most: past it, the turn evicts as
-                # before, with the rest to wait for the build lock.
+            if isinstance(got, _Aside):
+                # Off the build lock, which the release may wait on. One
+                # window, half the deadline left as the turn first waits:
+                # past it, the turn evicts as before, with the rest to
+                # wait for the build lock.
                 if aside_end is None:
-                    aside_end = now + left / 2
+                    t = time.monotonic()
+                    aside_end = t + (deadline - t) / 2
                 with self._lock:
-                    while self._aside(owner):
+                    while 0 < self._aside(owner) > got.tearing - got.short:
                         left = aside_end - time.monotonic()
                         if left <= 0:
                             break
@@ -1065,9 +1076,10 @@ class _ResidencyPool:
                    over, beside, aside: bool = True):
         """Under the build lock: shed, evict, measure, then check and book
         in one hold. Returns None when booked, (the release count, the
-        503) to wait on, or, with ``aside``, _ASIDE when a release queued
-        on the other worker frees the bytes the turn is still short of
-        after it sheds: the turn waits on it before it picks a victim."""
+        503) to wait on, or, with ``aside``, an _Aside when the releases
+        queued on the other worker free the bytes the turn is still short
+        of after it sheds: the turn waits on them before it picks a
+        victim."""
         self._hit("turn")
         head = None if over else self._measured_lora_room()
         with self._lock:
@@ -1079,8 +1091,9 @@ class _ResidencyPool:
                 with self._lock:
                     short = self._shortfall(owner, need, head,
                                             self._uploads())
-                    if 0 < short <= self._aside(owner):
-                        return _ASIDE
+                    tearing = self._aside(owner)
+                    if 0 < short <= tearing:
+                        return _Aside(short, tearing)
         torn: list = []
         released: list = []
         try:
