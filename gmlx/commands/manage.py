@@ -2257,6 +2257,13 @@ def _rm_resolve_target(cfg, requested):
     return target, m, entry is not None, disc, notes
 
 
+def _chat_files(mc) -> tuple:
+    """The files a chat model entry names: its GGUF, mmproj, draft,
+    adapter, and the speech companion ``asr`` names as a path."""
+    asr = mc.asr if isinstance(mc.asr, str) else None
+    return (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter, asr)
+
+
 def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
                       images=()):
     """Files to delete (all shards + companions no other model references)
@@ -2268,7 +2275,7 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
     others += [mc for mc in disc if mc.id != target]
     ref_paths = set()
     for mc in others:
-        for p in (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter):
+        for p in _chat_files(mc):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
                 ref_paths.add(os.path.realpath(rp))
@@ -2584,7 +2591,7 @@ def _image_refs(cfg, disc, skip: str | None, images=(),
     discovered (``images``), and the video entries."""
     refs: set = set()
     for mc in list(cfg.models.values()) + list(disc):
-        for p in (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter):
+        for p in _chat_files(mc):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
                 refs.add(os.path.realpath(rp))

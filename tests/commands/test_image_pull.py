@@ -1539,6 +1539,32 @@ def test_rm_of_a_video_model_keeps_what_others_use(images, capsys):
     assert c.video_models == {} and set(c.image_models) == {"zit", "qi", "qt"}
 
 
+@pytest.mark.parametrize("kind", ["image", "video"])
+def test_rm_keeps_a_file_a_chat_model_reads_audio_through(images, capsys,
+                                                          kind):
+    """A chat model's speech companion, named by its ``asr``, stays when
+    an image or video entry that names the same file is removed."""
+    lib, cfg = images
+    for f in ("h3.gguf", "v.safetensors", "a.safetensors"):
+        (lib / f).write_bytes(b"x" * 100)
+    text = cfg.read_text().replace(
+        "  vl:\n    path: vl.gguf\n",
+        "  vl:\n    path: vl.gguf\n    asr: own.gguf\n")
+    if kind == "video":
+        text += ("video_models:\n  h3:\n    path: h3.gguf\n"
+                 "    encoder: own.gguf\n    vae: v.safetensors\n"
+                 "    audio_vae: a.safetensors\n")
+        # qt shares vl, so own.gguf is the video encoder and vl's asr.
+        text = text.replace("    encoder: own.gguf\n"
+                            "    encoder_mmproj: tower.gguf\n",
+                            "    encoder: vl\n")
+    cfg.write_text(text)
+    entry = "qt" if kind == "image" else "h3"
+    assert manage.cmd_rm([entry, "--config", str(cfg), "--yes"]) == 0
+    assert (lib / "own.gguf").exists()
+    assert "encoder kept: another model uses it" in capsys.readouterr().out
+
+
 def test_rm_of_an_image_model_keeps_what_others_use(images, capsys):
     lib, cfg = images
     assert manage.cmd_rm(["qt", "--config", str(cfg), "--yes"]) == 0
