@@ -4,19 +4,7 @@
  "check": 7,
  "family": "krea2",
  "script": "scripts/image_oracle/check7_krea2_lora.py",
- "argv": [
-  "check7_krea2_lora.py",
-  "--dit",
-  "Krea-2-Turbo-Q4_K_M.gguf",
-  "--lora",
-  "krea2_kidsdrawing.safetensors",
-  "--lora-source",
-  "krea2_kidsdrawing.safetensors at eb1eddd3983a54678545a9b2c178c5853b30f7be",
-  "--source",
-  "check3_krea2_s4_512",
-  "--name",
-  "check7_krea2_comfy_512"
- ],
+ "argv": ["check7_krea2_lora.py", "--dit", "Krea-2-Turbo-Q4_K_M.gguf", "--lora", "krea2_kidsdrawing.safetensors", "--lora-source", "krea2_kidsdrawing.safetensors at eb1eddd3983a54678545a9b2c178c5853b30f7be", "--source", "check3_krea2_s4_512", "--name", "check7_krea2_comfy_512"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -85,277 +73,10 @@
   "source": "check3_krea2_s4_512",
   "strength": 1.0,
   "lora_pairs": 264,
-  "lora_ranks": [
-   32
-  ],
+  "lora_ranks": [32],
   "lora_alphas": [],
   "lora_source": "krea2_kidsdrawing.safetensors at eb1eddd3983a54678545a9b2c178c5853b30f7be",
-  "targets": [
-   "final_layer.linear",
-   "img_in",
-   "text_fusion.layerwise_blocks.0.attn.to_gate",
-   "text_fusion.layerwise_blocks.0.attn.to_k",
-   "text_fusion.layerwise_blocks.0.attn.to_out.0",
-   "text_fusion.layerwise_blocks.0.attn.to_q",
-   "text_fusion.layerwise_blocks.0.attn.to_v",
-   "text_fusion.layerwise_blocks.0.ff.down",
-   "text_fusion.layerwise_blocks.0.ff.gate",
-   "text_fusion.layerwise_blocks.0.ff.up",
-   "text_fusion.layerwise_blocks.1.attn.to_gate",
-   "text_fusion.layerwise_blocks.1.attn.to_k",
-   "text_fusion.layerwise_blocks.1.attn.to_out.0",
-   "text_fusion.layerwise_blocks.1.attn.to_q",
-   "text_fusion.layerwise_blocks.1.attn.to_v",
-   "text_fusion.layerwise_blocks.1.ff.down",
-   "text_fusion.layerwise_blocks.1.ff.gate",
-   "text_fusion.layerwise_blocks.1.ff.up",
-   "text_fusion.projector",
-   "text_fusion.refiner_blocks.0.attn.to_gate",
-   "text_fusion.refiner_blocks.0.attn.to_k",
-   "text_fusion.refiner_blocks.0.attn.to_out.0",
-   "text_fusion.refiner_blocks.0.attn.to_q",
-   "text_fusion.refiner_blocks.0.attn.to_v",
-   "text_fusion.refiner_blocks.0.ff.down",
-   "text_fusion.refiner_blocks.0.ff.gate",
-   "text_fusion.refiner_blocks.0.ff.up",
-   "text_fusion.refiner_blocks.1.attn.to_gate",
-   "text_fusion.refiner_blocks.1.attn.to_k",
-   "text_fusion.refiner_blocks.1.attn.to_out.0",
-   "text_fusion.refiner_blocks.1.attn.to_q",
-   "text_fusion.refiner_blocks.1.attn.to_v",
-   "text_fusion.refiner_blocks.1.ff.down",
-   "text_fusion.refiner_blocks.1.ff.gate",
-   "text_fusion.refiner_blocks.1.ff.up",
-   "time_embed.linear_1",
-   "time_embed.linear_2",
-   "time_mod_proj",
-   "transformer_blocks.0.attn.to_gate",
-   "transformer_blocks.0.attn.to_k",
-   "transformer_blocks.0.attn.to_out.0",
-   "transformer_blocks.0.attn.to_q",
-   "transformer_blocks.0.attn.to_v",
-   "transformer_blocks.0.ff.down",
-   "transformer_blocks.0.ff.gate",
-   "transformer_blocks.0.ff.up",
-   "transformer_blocks.1.attn.to_gate",
-   "transformer_blocks.1.attn.to_k",
-   "transformer_blocks.1.attn.to_out.0",
-   "transformer_blocks.1.attn.to_q",
-   "transformer_blocks.1.attn.to_v",
-   "transformer_blocks.1.ff.down",
-   "transformer_blocks.1.ff.gate",
-   "transformer_blocks.1.ff.up",
-   "transformer_blocks.10.attn.to_gate",
-   "transformer_blocks.10.attn.to_k",
-   "transformer_blocks.10.attn.to_out.0",
-   "transformer_blocks.10.attn.to_q",
-   "transformer_blocks.10.attn.to_v",
-   "transformer_blocks.10.ff.down",
-   "transformer_blocks.10.ff.gate",
-   "transformer_blocks.10.ff.up",
-   "transformer_blocks.11.attn.to_gate",
-   "transformer_blocks.11.attn.to_k",
-   "transformer_blocks.11.attn.to_out.0",
-   "transformer_blocks.11.attn.to_q",
-   "transformer_blocks.11.attn.to_v",
-   "transformer_blocks.11.ff.down",
-   "transformer_blocks.11.ff.gate",
-   "transformer_blocks.11.ff.up",
-   "transformer_blocks.12.attn.to_gate",
-   "transformer_blocks.12.attn.to_k",
-   "transformer_blocks.12.attn.to_out.0",
-   "transformer_blocks.12.attn.to_q",
-   "transformer_blocks.12.attn.to_v",
-   "transformer_blocks.12.ff.down",
-   "transformer_blocks.12.ff.gate",
-   "transformer_blocks.12.ff.up",
-   "transformer_blocks.13.attn.to_gate",
-   "transformer_blocks.13.attn.to_k",
-   "transformer_blocks.13.attn.to_out.0",
-   "transformer_blocks.13.attn.to_q",
-   "transformer_blocks.13.attn.to_v",
-   "transformer_blocks.13.ff.down",
-   "transformer_blocks.13.ff.gate",
-   "transformer_blocks.13.ff.up",
-   "transformer_blocks.14.attn.to_gate",
-   "transformer_blocks.14.attn.to_k",
-   "transformer_blocks.14.attn.to_out.0",
-   "transformer_blocks.14.attn.to_q",
-   "transformer_blocks.14.attn.to_v",
-   "transformer_blocks.14.ff.down",
-   "transformer_blocks.14.ff.gate",
-   "transformer_blocks.14.ff.up",
-   "transformer_blocks.15.attn.to_gate",
-   "transformer_blocks.15.attn.to_k",
-   "transformer_blocks.15.attn.to_out.0",
-   "transformer_blocks.15.attn.to_q",
-   "transformer_blocks.15.attn.to_v",
-   "transformer_blocks.15.ff.down",
-   "transformer_blocks.15.ff.gate",
-   "transformer_blocks.15.ff.up",
-   "transformer_blocks.16.attn.to_gate",
-   "transformer_blocks.16.attn.to_k",
-   "transformer_blocks.16.attn.to_out.0",
-   "transformer_blocks.16.attn.to_q",
-   "transformer_blocks.16.attn.to_v",
-   "transformer_blocks.16.ff.down",
-   "transformer_blocks.16.ff.gate",
-   "transformer_blocks.16.ff.up",
-   "transformer_blocks.17.attn.to_gate",
-   "transformer_blocks.17.attn.to_k",
-   "transformer_blocks.17.attn.to_out.0",
-   "transformer_blocks.17.attn.to_q",
-   "transformer_blocks.17.attn.to_v",
-   "transformer_blocks.17.ff.down",
-   "transformer_blocks.17.ff.gate",
-   "transformer_blocks.17.ff.up",
-   "transformer_blocks.18.attn.to_gate",
-   "transformer_blocks.18.attn.to_k",
-   "transformer_blocks.18.attn.to_out.0",
-   "transformer_blocks.18.attn.to_q",
-   "transformer_blocks.18.attn.to_v",
-   "transformer_blocks.18.ff.down",
-   "transformer_blocks.18.ff.gate",
-   "transformer_blocks.18.ff.up",
-   "transformer_blocks.19.attn.to_gate",
-   "transformer_blocks.19.attn.to_k",
-   "transformer_blocks.19.attn.to_out.0",
-   "transformer_blocks.19.attn.to_q",
-   "transformer_blocks.19.attn.to_v",
-   "transformer_blocks.19.ff.down",
-   "transformer_blocks.19.ff.gate",
-   "transformer_blocks.19.ff.up",
-   "transformer_blocks.2.attn.to_gate",
-   "transformer_blocks.2.attn.to_k",
-   "transformer_blocks.2.attn.to_out.0",
-   "transformer_blocks.2.attn.to_q",
-   "transformer_blocks.2.attn.to_v",
-   "transformer_blocks.2.ff.down",
-   "transformer_blocks.2.ff.gate",
-   "transformer_blocks.2.ff.up",
-   "transformer_blocks.20.attn.to_gate",
-   "transformer_blocks.20.attn.to_k",
-   "transformer_blocks.20.attn.to_out.0",
-   "transformer_blocks.20.attn.to_q",
-   "transformer_blocks.20.attn.to_v",
-   "transformer_blocks.20.ff.down",
-   "transformer_blocks.20.ff.gate",
-   "transformer_blocks.20.ff.up",
-   "transformer_blocks.21.attn.to_gate",
-   "transformer_blocks.21.attn.to_k",
-   "transformer_blocks.21.attn.to_out.0",
-   "transformer_blocks.21.attn.to_q",
-   "transformer_blocks.21.attn.to_v",
-   "transformer_blocks.21.ff.down",
-   "transformer_blocks.21.ff.gate",
-   "transformer_blocks.21.ff.up",
-   "transformer_blocks.22.attn.to_gate",
-   "transformer_blocks.22.attn.to_k",
-   "transformer_blocks.22.attn.to_out.0",
-   "transformer_blocks.22.attn.to_q",
-   "transformer_blocks.22.attn.to_v",
-   "transformer_blocks.22.ff.down",
-   "transformer_blocks.22.ff.gate",
-   "transformer_blocks.22.ff.up",
-   "transformer_blocks.23.attn.to_gate",
-   "transformer_blocks.23.attn.to_k",
-   "transformer_blocks.23.attn.to_out.0",
-   "transformer_blocks.23.attn.to_q",
-   "transformer_blocks.23.attn.to_v",
-   "transformer_blocks.23.ff.down",
-   "transformer_blocks.23.ff.gate",
-   "transformer_blocks.23.ff.up",
-   "transformer_blocks.24.attn.to_gate",
-   "transformer_blocks.24.attn.to_k",
-   "transformer_blocks.24.attn.to_out.0",
-   "transformer_blocks.24.attn.to_q",
-   "transformer_blocks.24.attn.to_v",
-   "transformer_blocks.24.ff.down",
-   "transformer_blocks.24.ff.gate",
-   "transformer_blocks.24.ff.up",
-   "transformer_blocks.25.attn.to_gate",
-   "transformer_blocks.25.attn.to_k",
-   "transformer_blocks.25.attn.to_out.0",
-   "transformer_blocks.25.attn.to_q",
-   "transformer_blocks.25.attn.to_v",
-   "transformer_blocks.25.ff.down",
-   "transformer_blocks.25.ff.gate",
-   "transformer_blocks.25.ff.up",
-   "transformer_blocks.26.attn.to_gate",
-   "transformer_blocks.26.attn.to_k",
-   "transformer_blocks.26.attn.to_out.0",
-   "transformer_blocks.26.attn.to_q",
-   "transformer_blocks.26.attn.to_v",
-   "transformer_blocks.26.ff.down",
-   "transformer_blocks.26.ff.gate",
-   "transformer_blocks.26.ff.up",
-   "transformer_blocks.27.attn.to_gate",
-   "transformer_blocks.27.attn.to_k",
-   "transformer_blocks.27.attn.to_out.0",
-   "transformer_blocks.27.attn.to_q",
-   "transformer_blocks.27.attn.to_v",
-   "transformer_blocks.27.ff.down",
-   "transformer_blocks.27.ff.gate",
-   "transformer_blocks.27.ff.up",
-   "transformer_blocks.3.attn.to_gate",
-   "transformer_blocks.3.attn.to_k",
-   "transformer_blocks.3.attn.to_out.0",
-   "transformer_blocks.3.attn.to_q",
-   "transformer_blocks.3.attn.to_v",
-   "transformer_blocks.3.ff.down",
-   "transformer_blocks.3.ff.gate",
-   "transformer_blocks.3.ff.up",
-   "transformer_blocks.4.attn.to_gate",
-   "transformer_blocks.4.attn.to_k",
-   "transformer_blocks.4.attn.to_out.0",
-   "transformer_blocks.4.attn.to_q",
-   "transformer_blocks.4.attn.to_v",
-   "transformer_blocks.4.ff.down",
-   "transformer_blocks.4.ff.gate",
-   "transformer_blocks.4.ff.up",
-   "transformer_blocks.5.attn.to_gate",
-   "transformer_blocks.5.attn.to_k",
-   "transformer_blocks.5.attn.to_out.0",
-   "transformer_blocks.5.attn.to_q",
-   "transformer_blocks.5.attn.to_v",
-   "transformer_blocks.5.ff.down",
-   "transformer_blocks.5.ff.gate",
-   "transformer_blocks.5.ff.up",
-   "transformer_blocks.6.attn.to_gate",
-   "transformer_blocks.6.attn.to_k",
-   "transformer_blocks.6.attn.to_out.0",
-   "transformer_blocks.6.attn.to_q",
-   "transformer_blocks.6.attn.to_v",
-   "transformer_blocks.6.ff.down",
-   "transformer_blocks.6.ff.gate",
-   "transformer_blocks.6.ff.up",
-   "transformer_blocks.7.attn.to_gate",
-   "transformer_blocks.7.attn.to_k",
-   "transformer_blocks.7.attn.to_out.0",
-   "transformer_blocks.7.attn.to_q",
-   "transformer_blocks.7.attn.to_v",
-   "transformer_blocks.7.ff.down",
-   "transformer_blocks.7.ff.gate",
-   "transformer_blocks.7.ff.up",
-   "transformer_blocks.8.attn.to_gate",
-   "transformer_blocks.8.attn.to_k",
-   "transformer_blocks.8.attn.to_out.0",
-   "transformer_blocks.8.attn.to_q",
-   "transformer_blocks.8.attn.to_v",
-   "transformer_blocks.8.ff.down",
-   "transformer_blocks.8.ff.gate",
-   "transformer_blocks.8.ff.up",
-   "transformer_blocks.9.attn.to_gate",
-   "transformer_blocks.9.attn.to_k",
-   "transformer_blocks.9.attn.to_out.0",
-   "transformer_blocks.9.attn.to_q",
-   "transformer_blocks.9.attn.to_v",
-   "transformer_blocks.9.ff.down",
-   "transformer_blocks.9.ff.gate",
-   "transformer_blocks.9.ff.up",
-   "txt_in.linear_1",
-   "txt_in.linear_2"
-  ],
+  "targets": ["final_layer.linear", "img_in", "text_fusion.layerwise_blocks.0.attn.to_gate", "text_fusion.layerwise_blocks.0.attn.to_k", "text_fusion.layerwise_blocks.0.attn.to_out.0", "text_fusion.layerwise_blocks.0.attn.to_q", "text_fusion.layerwise_blocks.0.attn.to_v", "text_fusion.layerwise_blocks.0.ff.down", "text_fusion.layerwise_blocks.0.ff.gate", "text_fusion.layerwise_blocks.0.ff.up", "text_fusion.layerwise_blocks.1.attn.to_gate", "text_fusion.layerwise_blocks.1.attn.to_k", "text_fusion.layerwise_blocks.1.attn.to_out.0", "text_fusion.layerwise_blocks.1.attn.to_q", "text_fusion.layerwise_blocks.1.attn.to_v", "text_fusion.layerwise_blocks.1.ff.down", "text_fusion.layerwise_blocks.1.ff.gate", "text_fusion.layerwise_blocks.1.ff.up", "text_fusion.projector", "text_fusion.refiner_blocks.0.attn.to_gate", "text_fusion.refiner_blocks.0.attn.to_k", "text_fusion.refiner_blocks.0.attn.to_out.0", "text_fusion.refiner_blocks.0.attn.to_q", "text_fusion.refiner_blocks.0.attn.to_v", "text_fusion.refiner_blocks.0.ff.down", "text_fusion.refiner_blocks.0.ff.gate", "text_fusion.refiner_blocks.0.ff.up", "text_fusion.refiner_blocks.1.attn.to_gate", "text_fusion.refiner_blocks.1.attn.to_k", "text_fusion.refiner_blocks.1.attn.to_out.0", "text_fusion.refiner_blocks.1.attn.to_q", "text_fusion.refiner_blocks.1.attn.to_v", "text_fusion.refiner_blocks.1.ff.down", "text_fusion.refiner_blocks.1.ff.gate", "text_fusion.refiner_blocks.1.ff.up", "time_embed.linear_1", "time_embed.linear_2", "time_mod_proj", "transformer_blocks.0.attn.to_gate", "transformer_blocks.0.attn.to_k", "transformer_blocks.0.attn.to_out.0", "transformer_blocks.0.attn.to_q", "transformer_blocks.0.attn.to_v", "transformer_blocks.0.ff.down", "transformer_blocks.0.ff.gate", "transformer_blocks.0.ff.up", "transformer_blocks.1.attn.to_gate", "transformer_blocks.1.attn.to_k", "transformer_blocks.1.attn.to_out.0", "transformer_blocks.1.attn.to_q", "transformer_blocks.1.attn.to_v", "transformer_blocks.1.ff.down", "transformer_blocks.1.ff.gate", "transformer_blocks.1.ff.up", "transformer_blocks.10.attn.to_gate", "transformer_blocks.10.attn.to_k", "transformer_blocks.10.attn.to_out.0", "transformer_blocks.10.attn.to_q", "transformer_blocks.10.attn.to_v", "transformer_blocks.10.ff.down", "transformer_blocks.10.ff.gate", "transformer_blocks.10.ff.up", "transformer_blocks.11.attn.to_gate", "transformer_blocks.11.attn.to_k", "transformer_blocks.11.attn.to_out.0", "transformer_blocks.11.attn.to_q", "transformer_blocks.11.attn.to_v", "transformer_blocks.11.ff.down", "transformer_blocks.11.ff.gate", "transformer_blocks.11.ff.up", "transformer_blocks.12.attn.to_gate", "transformer_blocks.12.attn.to_k", "transformer_blocks.12.attn.to_out.0", "transformer_blocks.12.attn.to_q", "transformer_blocks.12.attn.to_v", "transformer_blocks.12.ff.down", "transformer_blocks.12.ff.gate", "transformer_blocks.12.ff.up", "transformer_blocks.13.attn.to_gate", "transformer_blocks.13.attn.to_k", "transformer_blocks.13.attn.to_out.0", "transformer_blocks.13.attn.to_q", "transformer_blocks.13.attn.to_v", "transformer_blocks.13.ff.down", "transformer_blocks.13.ff.gate", "transformer_blocks.13.ff.up", "transformer_blocks.14.attn.to_gate", "transformer_blocks.14.attn.to_k", "transformer_blocks.14.attn.to_out.0", "transformer_blocks.14.attn.to_q", "transformer_blocks.14.attn.to_v", "transformer_blocks.14.ff.down", "transformer_blocks.14.ff.gate", "transformer_blocks.14.ff.up", "transformer_blocks.15.attn.to_gate", "transformer_blocks.15.attn.to_k", "transformer_blocks.15.attn.to_out.0", "transformer_blocks.15.attn.to_q", "transformer_blocks.15.attn.to_v", "transformer_blocks.15.ff.down", "transformer_blocks.15.ff.gate", "transformer_blocks.15.ff.up", "transformer_blocks.16.attn.to_gate", "transformer_blocks.16.attn.to_k", "transformer_blocks.16.attn.to_out.0", "transformer_blocks.16.attn.to_q", "transformer_blocks.16.attn.to_v", "transformer_blocks.16.ff.down", "transformer_blocks.16.ff.gate", "transformer_blocks.16.ff.up", "transformer_blocks.17.attn.to_gate", "transformer_blocks.17.attn.to_k", "transformer_blocks.17.attn.to_out.0", "transformer_blocks.17.attn.to_q", "transformer_blocks.17.attn.to_v", "transformer_blocks.17.ff.down", "transformer_blocks.17.ff.gate", "transformer_blocks.17.ff.up", "transformer_blocks.18.attn.to_gate", "transformer_blocks.18.attn.to_k", "transformer_blocks.18.attn.to_out.0", "transformer_blocks.18.attn.to_q", "transformer_blocks.18.attn.to_v", "transformer_blocks.18.ff.down", "transformer_blocks.18.ff.gate", "transformer_blocks.18.ff.up", "transformer_blocks.19.attn.to_gate", "transformer_blocks.19.attn.to_k", "transformer_blocks.19.attn.to_out.0", "transformer_blocks.19.attn.to_q", "transformer_blocks.19.attn.to_v", "transformer_blocks.19.ff.down", "transformer_blocks.19.ff.gate", "transformer_blocks.19.ff.up", "transformer_blocks.2.attn.to_gate", "transformer_blocks.2.attn.to_k", "transformer_blocks.2.attn.to_out.0", "transformer_blocks.2.attn.to_q", "transformer_blocks.2.attn.to_v", "transformer_blocks.2.ff.down", "transformer_blocks.2.ff.gate", "transformer_blocks.2.ff.up", "transformer_blocks.20.attn.to_gate", "transformer_blocks.20.attn.to_k", "transformer_blocks.20.attn.to_out.0", "transformer_blocks.20.attn.to_q", "transformer_blocks.20.attn.to_v", "transformer_blocks.20.ff.down", "transformer_blocks.20.ff.gate", "transformer_blocks.20.ff.up", "transformer_blocks.21.attn.to_gate", "transformer_blocks.21.attn.to_k", "transformer_blocks.21.attn.to_out.0", "transformer_blocks.21.attn.to_q", "transformer_blocks.21.attn.to_v", "transformer_blocks.21.ff.down", "transformer_blocks.21.ff.gate", "transformer_blocks.21.ff.up", "transformer_blocks.22.attn.to_gate", "transformer_blocks.22.attn.to_k", "transformer_blocks.22.attn.to_out.0", "transformer_blocks.22.attn.to_q", "transformer_blocks.22.attn.to_v", "transformer_blocks.22.ff.down", "transformer_blocks.22.ff.gate", "transformer_blocks.22.ff.up", "transformer_blocks.23.attn.to_gate", "transformer_blocks.23.attn.to_k", "transformer_blocks.23.attn.to_out.0", "transformer_blocks.23.attn.to_q", "transformer_blocks.23.attn.to_v", "transformer_blocks.23.ff.down", "transformer_blocks.23.ff.gate", "transformer_blocks.23.ff.up", "transformer_blocks.24.attn.to_gate", "transformer_blocks.24.attn.to_k", "transformer_blocks.24.attn.to_out.0", "transformer_blocks.24.attn.to_q", "transformer_blocks.24.attn.to_v", "transformer_blocks.24.ff.down", "transformer_blocks.24.ff.gate", "transformer_blocks.24.ff.up", "transformer_blocks.25.attn.to_gate", "transformer_blocks.25.attn.to_k", "transformer_blocks.25.attn.to_out.0", "transformer_blocks.25.attn.to_q", "transformer_blocks.25.attn.to_v", "transformer_blocks.25.ff.down", "transformer_blocks.25.ff.gate", "transformer_blocks.25.ff.up", "transformer_blocks.26.attn.to_gate", "transformer_blocks.26.attn.to_k", "transformer_blocks.26.attn.to_out.0", "transformer_blocks.26.attn.to_q", "transformer_blocks.26.attn.to_v", "transformer_blocks.26.ff.down", "transformer_blocks.26.ff.gate", "transformer_blocks.26.ff.up", "transformer_blocks.27.attn.to_gate", "transformer_blocks.27.attn.to_k", "transformer_blocks.27.attn.to_out.0", "transformer_blocks.27.attn.to_q", "transformer_blocks.27.attn.to_v", "transformer_blocks.27.ff.down", "transformer_blocks.27.ff.gate", "transformer_blocks.27.ff.up", "transformer_blocks.3.attn.to_gate", "transformer_blocks.3.attn.to_k", "transformer_blocks.3.attn.to_out.0", "transformer_blocks.3.attn.to_q", "transformer_blocks.3.attn.to_v", "transformer_blocks.3.ff.down", "transformer_blocks.3.ff.gate", "transformer_blocks.3.ff.up", "transformer_blocks.4.attn.to_gate", "transformer_blocks.4.attn.to_k", "transformer_blocks.4.attn.to_out.0", "transformer_blocks.4.attn.to_q", "transformer_blocks.4.attn.to_v", "transformer_blocks.4.ff.down", "transformer_blocks.4.ff.gate", "transformer_blocks.4.ff.up", "transformer_blocks.5.attn.to_gate", "transformer_blocks.5.attn.to_k", "transformer_blocks.5.attn.to_out.0", "transformer_blocks.5.attn.to_q", "transformer_blocks.5.attn.to_v", "transformer_blocks.5.ff.down", "transformer_blocks.5.ff.gate", "transformer_blocks.5.ff.up", "transformer_blocks.6.attn.to_gate", "transformer_blocks.6.attn.to_k", "transformer_blocks.6.attn.to_out.0", "transformer_blocks.6.attn.to_q", "transformer_blocks.6.attn.to_v", "transformer_blocks.6.ff.down", "transformer_blocks.6.ff.gate", "transformer_blocks.6.ff.up", "transformer_blocks.7.attn.to_gate", "transformer_blocks.7.attn.to_k", "transformer_blocks.7.attn.to_out.0", "transformer_blocks.7.attn.to_q", "transformer_blocks.7.attn.to_v", "transformer_blocks.7.ff.down", "transformer_blocks.7.ff.gate", "transformer_blocks.7.ff.up", "transformer_blocks.8.attn.to_gate", "transformer_blocks.8.attn.to_k", "transformer_blocks.8.attn.to_out.0", "transformer_blocks.8.attn.to_q", "transformer_blocks.8.attn.to_v", "transformer_blocks.8.ff.down", "transformer_blocks.8.ff.gate", "transformer_blocks.8.ff.up", "transformer_blocks.9.attn.to_gate", "transformer_blocks.9.attn.to_k", "transformer_blocks.9.attn.to_out.0", "transformer_blocks.9.attn.to_q", "transformer_blocks.9.attn.to_v", "transformer_blocks.9.ff.down", "transformer_blocks.9.ff.gate", "transformer_blocks.9.ff.up", "txt_in.linear_1", "txt_in.linear_2"],
   "application": "unmerged: strength * (alpha / rank) * up(down(x)) added to each target's output in the mode's dtype, alpha absent gives 1.0"
  },
  "results": {
@@ -845,323 +566,182 @@
    "rel_l2": 0.00025290845138786555
   }
  },
- "notes": [
-  "the adapter is applied unmerged as PEFT applies it; the gmlx side runs it under a patch table"
- ],
+ "notes": ["the adapter is applied unmerged as PEFT applies it; the gmlx side runs it under a patch table"],
  "created": "2026-10-10T09:59:40Z",
  "npz": "check7_krea2_comfy_512.npz",
  "tensors": {
   "blocks.0": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "72a8da50fba7584e552af63b56b9cbd51a2cfac95749d876ed78004264d69ee5"
   },
   "blocks.1": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "07dbb1f3319d2dcd553e06dbedc97b59fcaf9f176ae626e6faacb5d5c47f3080"
   },
   "blocks.10": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "292c7fe955da1b644a575ac9f2a5e310c2008c03161690025267b7171cc8808a"
   },
   "blocks.11": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "1c401abc9fbd404f7e3f65d46236da5cadbe2bafb4ccd7372d5fd91234ec1acd"
   },
   "blocks.12": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "d3eb160beff3b2a9bee845f43273f9544fcdd6ff60d299b690066b385bc92b72"
   },
   "blocks.13": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "f06a5535944d42164aac37c4df1fa94222261a9da666fdb49f6fe3267560851c"
   },
   "blocks.14": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "de1ded25934392ee0b7f287f83cdfee5f2a12376d3c68fd6b8cf971f2079e2f4"
   },
   "blocks.15": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "fcb3ad7b04efeb4d2c86398b200fabe4e7a7ada41d6860138c51bea33a43f15e"
   },
   "blocks.16": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "6b891a5d319e18742c81aa30f318471fa6b08957391486771a85e2f68db0056d"
   },
   "blocks.17": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "5b0a451cf9cfc9b84cdc89ad77fd022f5fb7628964f1e2e2fca8346e8ad2403c"
   },
   "blocks.18": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "b3b79d8d550d7be2707b876679bce2f0be699b7abc005499d98b58559a4004c4"
   },
   "blocks.19": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "97cd6a9035195441d82930f1152b2ae19f5557425fddba9e57b94307c9d67ffa"
   },
   "blocks.2": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "4087a352a2aeef34113ad83623d8d3e15c60f819a54b3f25bb5166762de578a2"
   },
   "blocks.20": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "e03a52a51e7ba6555bc75d76a486a3a9da2862ef7288b990433a52e5a43314af"
   },
   "blocks.21": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "37d699a8b33b4d7f18e41304d668fc2c24f5e283e072d7299ffa1b8837916793"
   },
   "blocks.22": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "ba2a4a0acaea99ef6382e1960810f56ecf699bfc80de6ba04692dd64dbc7bc1d"
   },
   "blocks.23": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "6ca17e3de9022b2893df7695688068a8afe751d96978704f67866456ee930088"
   },
   "blocks.24": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "9daff465f595cba8d50209580239bae0b498513cee7efdf658a636ec7a9ae606"
   },
   "blocks.25": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "cbb1535b23d1b7e2e76285c657754bb034752c0739effb12a062fc462f24a5dd"
   },
   "blocks.26": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "02c324e3c1fc67a529d09107a606f11483a3819d7903ab15660f630d62b98934"
   },
   "blocks.27": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "6c899c40c2e2683e233241339d18d3245af072c63354c898a4657e6468f8b04e"
   },
   "blocks.3": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "6605adce178c467cc32812454ef5099e4af6b8496c7e114b1a6393905057201f"
   },
   "blocks.4": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "495af59d83dc2f6921831431d53b53f90757e44f7c0c512a07b7c3521f975b33"
   },
   "blocks.5": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "333aef9ccef77018c4f692e19e620943fdc1e0edb5b36fc440af9fb4f6391c7d"
   },
   "blocks.6": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "f18b98d652f3132f9edb239a0e6e8e6d5543188286828cb0f9e86cbf19cceb3e"
   },
   "blocks.7": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "1b427f58365dcf4e99c70e10433e74727be222c61f79788998512fe0dcb56286"
   },
   "blocks.8": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "371419a916490dd597744f42e0ba97f0da65a327e72775bef534baae358e66ad"
   },
   "blocks.9": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "456a2fe6831af6b8a860146213db976e0ce29972f65382f1a5e9ddac6b1bce3b"
   },
   "features": {
-   "shape": [
-    19,
-    30720
-   ],
+   "shape": [19, 30720],
    "dtype": "float32",
    "sha256": "aed9293f823f338c5f30a12d990e83dfc302ff8412875d2959ec7b5a13431248"
   },
   "first": {
-   "shape": [
-    1,
-    1024,
-    6144
-   ],
+   "shape": [1, 1024, 6144],
    "dtype": "float32",
    "sha256": "8bed62121f6b076d60269a46e517859e2381beb68880bd29a778f83ffdd86b43"
   },
   "in.blocks.0": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "b8c015949ef63742675f1b5e8385f814bcc21081e6a9aebc200516dcd92840b8"
   },
   "in.last": {
-   "shape": [
-    1,
-    1024,
-    6144
-   ],
+   "shape": [1, 1024, 6144],
    "dtype": "float32",
    "sha256": "b00023ad02cf89d6ca5521b6a6589ee71bac706cfaddb36069980ee597681c6e"
   },
   "last": {
-   "shape": [
-    1,
-    1024,
-    64
-   ],
+   "shape": [1, 1024, 64],
    "dtype": "float32",
    "sha256": "9804deaf5e77a599d1d31aefeb63b1aa7b39ae2313eb2da31140cc381f66060a"
   },
   "latents": {
-   "shape": [
-    1,
-    16,
-    64,
-    64
-   ],
+   "shape": [1, 16, 64, 64],
    "dtype": "float32",
    "sha256": "abd2584892e5a09476db1359edc4b79ef2f699633c8e5949545c751bd5f4a0d9"
   },
   "position_ids": {
-   "shape": [
-    1043,
-    3
-   ],
+   "shape": [1043, 3],
    "dtype": "int32",
    "sha256": "9b62f6b471715670f97a24c35abf3d0676ea23704197721d2204c40d229a2e34"
   },
@@ -1171,94 +751,52 @@
    "sha256": "9be87bae00e1dd8dbf473fb8439b14e4f9e3da217749730d53876c0406babf34"
   },
   "tmlp": {
-   "shape": [
-    1,
-    1,
-    6144
-   ],
+   "shape": [1, 1, 6144],
    "dtype": "float32",
    "sha256": "634dfd9002a8cb163e3f86186eafda4b50ec4f5b6a3109cf99f19f07f3bb55c5"
   },
   "tproj": {
-   "shape": [
-    1,
-    1,
-    36864
-   ],
+   "shape": [1, 1, 36864],
    "dtype": "float32",
    "sha256": "59831e309bb365595e3717fea2bd150f86ec3067b9de501b55bc707ba5bbf64f"
   },
   "txtfusion.layerwise_blocks.0": {
-   "shape": [
-    19,
-    12,
-    2560
-   ],
+   "shape": [19, 12, 2560],
    "dtype": "float32",
    "sha256": "43d63b230c770f1f5a2f2a51ba588b1ec051dcf9c7c5da594d72dc18a7030c6b"
   },
   "txtfusion.layerwise_blocks.1": {
-   "shape": [
-    19,
-    12,
-    2560
-   ],
+   "shape": [19, 12, 2560],
    "dtype": "float32",
    "sha256": "6ff9fbdfda1d74dda2adf119fef5f80c0c1fe4399faa8870f9132d9eb966c854"
   },
   "txtfusion.projector": {
-   "shape": [
-    1,
-    19,
-    2560
-   ],
+   "shape": [1, 19, 2560],
    "dtype": "float32",
    "sha256": "e1514fa2a25c730a6420ec54df81795bb51bdf3c2673530ebe20b534024d4587"
   },
   "txtfusion.refiner_blocks.0": {
-   "shape": [
-    1,
-    19,
-    2560
-   ],
+   "shape": [1, 19, 2560],
    "dtype": "float32",
    "sha256": "6aab5721dc4ea4aa8659e97bc5f2429248de456e9f585985a45dbc3e32fbf562"
   },
   "txtfusion.refiner_blocks.1": {
-   "shape": [
-    1,
-    19,
-    2560
-   ],
+   "shape": [1, 19, 2560],
    "dtype": "float32",
    "sha256": "d35ad39e6077a16912f0976f2839451c4008b2aaf42d8032775fb6710eff00d3"
   },
   "txtmlp": {
-   "shape": [
-    1,
-    19,
-    6144
-   ],
+   "shape": [1, 19, 6144],
    "dtype": "float32",
    "sha256": "d282ac423469a2c2d5929b703eb19bb025accd6d321fb8ea88373182eecf4625"
   },
   "velocity": {
-   "shape": [
-    1,
-    16,
-    64,
-    64
-   ],
+   "shape": [1, 16, 64, 64],
    "dtype": "float32",
    "sha256": "b45f00fe8d03c10d8978c96fe2cb000ca10321151987fe5e1b8ac5a7b122c96f"
   },
   "velocity_bf16": {
-   "shape": [
-    1,
-    16,
-    64,
-    64
-   ],
+   "shape": [1, 16, 64, 64],
    "dtype": "float32",
    "sha256": "e1a54c002bf8a9a21268395d7adf2003dd5c26e1e038c1332e2044a65abd632d"
   }

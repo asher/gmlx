@@ -4,24 +4,7 @@
  "check": 6,
  "family": "flux2_klein",
  "script": "scripts/image_oracle/check6_flux2_klein.py",
- "argv": [
-  "check6_flux2_klein.py",
-  "--reference",
-  "src",
-  "--reference-commit",
-  "50fe5162777813d869182b139e83b10743caef15",
-  "--features",
-  "check2_flux2_klein.npz",
-  "--dit",
-  "flux-2-klein-4b-Q4_K_M.gguf",
-  "--variant",
-  "distilled",
-  "--sizes",
-  "512",
-  "1024",
-  "--bf16",
-  "512"
- ],
+ "argv": ["check6_flux2_klein.py", "--reference", "src", "--reference-commit", "50fe5162777813d869182b139e83b10743caef15", "--features", "check2_flux2_klein.npz", "--dit", "flux-2-klein-4b-Q4_K_M.gguf", "--variant", "distilled", "--sizes", "512", "1024", "--bf16", "512"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -78,11 +61,7 @@
   "guidance": 1.0,
   "seed": 6,
   "bf16": false,
-  "kept_steps": [
-   1,
-   2,
-   3
-  ],
+  "kept_steps": [1, 2, 3],
   "refs": 0,
   "tokens": 4096,
   "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, shape (1, 128, size / 16, size / 16); the CLI's noise is bf16, so it is rounded",
@@ -107,9 +86,7 @@
   "run": {
    "fp32_s": 82.8,
    "fp32_median_step_s": 20.54,
-   "rows": [
-    1
-   ]
+   "rows": [1]
   },
   "gmlx_bf16": {
    "rel_l2": {
@@ -130,81 +107,47 @@
   "exact_rel_l2": 0.001,
   "rule": "latents after a kept step and after the last. At 512: gmlx's bf16 run at relative L2 twice the oracle's own bf16 against fp32 relative L2 after that step. At any other size: gmlx's exact fp32 run against the fp32 latents at exact_rel_l2, and its bf16 run read as a share of the 512 gate of the step, not gated"
  },
- "notes": [
-  "results.gmlx_bf16: gmlx's bf16 latents at 1024, kernel routes at their default, against the fp32 latents after each kept step and the last, and as a share of the 512 gate of that step, as tests/image/test_image_check6_flux2_klein.py prints them, to three digits. A reading, not a gate."
- ],
+ "notes": ["results.gmlx_bf16: gmlx's bf16 latents at 1024, kernel routes at their default, against the fp32 latents after each kept step and the last, and as a share of the 512 gate of that step, as tests/image/test_image_check6_flux2_klein.py prints them, to three digits. A reading, not a gate."],
  "created": "2026-10-16T13:03:30Z",
  "npz": "check6_flux2_klein_1024.npz",
  "tensors": {
   "features": {
-   "shape": [
-    512,
-    7680
-   ],
+   "shape": [512, 7680],
    "dtype": "float32",
    "sha256": "d826e5b160e0d8ed351f4fa73c61332506de8c02987d73ab1a215b694316469e"
   },
   "latents": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "5a49427f0ac3ef210bdca1605936c07d7369b1b7b9349377bffcea332fdd6406"
   },
   "latents_step1": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "ef921be7ed9ce593d174c10d7b0a14cf791deaac81b3f6fc79a933dc07470f54"
   },
   "latents_step2": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "67c329372a848260bf5561388f096cb964ce31dbf49987a96c55f9032679463c"
   },
   "latents_step3": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "385b3159bb79db684c51a5cc47682ef6cc741d32cfcae8e55be7bff03d115f00"
   },
   "noise": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "bcd95295bb6b6d4f2030450a235b4f3e631d78cfeabead17132ec18138429b6a"
   },
   "schedule": {
-   "shape": [
-    5
-   ],
+   "shape": [5],
    "dtype": "float32",
    "sha256": "716bbd15043b4b31e63d84374538c884b85e67c0924198a9d4a112b7d9b3d59d"
   },
   "times": {
-   "shape": [
-    4
-   ],
+   "shape": [4],
    "dtype": "float32",
    "sha256": "3dbb533432a33b3793d501553be8eba6200fc0dda87edff05c71d4a1900468be"
   }

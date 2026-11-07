@@ -67,6 +67,18 @@ def _sigmas():
         "optional": {"width": size, "height": size}}
 
 
+def _h3_prompt():
+    size = {"min": 32, "max": 16384, "step": 32}
+    return {"required": {
+        "clip": ("CLIP",),
+        "vae": ("VAE",),
+        "prompt": ("STRING", {"multiline": True, "dynamicPrompts": True}),
+        "width": ("INT", {"default": 1344, **size}),
+        "height": ("INT", {"default": 768, **size}),
+        "length": ("INT", {"default": 124, "min": 5, "max": 3600, "step": 17})},
+        "optional": {"first_frame": ("IMAGE",), "last_frame": ("IMAGE",)}}
+
+
 # Each node: its inputs, outputs, output names and whether it is an output
 # node, as nodes.py declares them.
 SPECS = {
@@ -76,6 +88,7 @@ SPECS = {
     "GmlxVideoVAELoader": (_loader, ("VAE",), None, False),
     "GmlxAudioVAELoader": (_loader, ("VAE",), None, False),
     "GmlxSigmas": (_sigmas, ("SIGMAS", "FLOAT"), ("sigmas", "cfg"), False),
+    "GmlxH3ImageToVideo": (_h3_prompt, ("CONDITIONING", "LATENT"), ("positive", "LATENT"), False),
     "GmlxServerStatus": (_loader, ("STRING",), None, True),
 }
 
@@ -86,6 +99,7 @@ DISPLAY_NAMES = {
     "GmlxVideoVAELoader": "gmlx Video VAE Loader",
     "GmlxAudioVAELoader": "gmlx Audio VAE Loader",
     "GmlxSigmas": "gmlx Sigmas",
+    "GmlxH3ImageToVideo": "gmlx MiniMax-H3 Image to Video",
     "GmlxServerStatus": "gmlx Server Status",
 }
 

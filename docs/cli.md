@@ -803,6 +803,11 @@ complete:
   Qwen3.8-27B-UD-Q6_K.gguf: the copy on disk differs from Hugging Face, downloading the current file
 ```
 
+An update needs room for the new copy beside the old one until the
+download completes; when the disk cannot hold both, the pull refuses before
+downloading, names the shortfall, and gives the `gmlx rm` command, or the
+files to delete, that frees room for the new copy.
+
 A publisher can also change a file without changing its size. `--verify`
 catches that by checking each file's sha256, which reads every file in
 full:

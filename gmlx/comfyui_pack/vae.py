@@ -23,7 +23,7 @@ from .patcher import CPU, FASTH3, H3_NO_REFS
 # The stock nodes whose VAE encodes a gmlx model refuses at its AV step:
 # references on every MiniMax-H3, keyframes and guides on FastH3.
 REFS_NODE = "MiniMaxH3ReferenceToVideo"
-ANCHOR_NODES = ("MiniMaxH3AddGuide", "MiniMaxH3ImageToVideo")
+ANCHOR_NODES = ("MiniMaxH3AddGuide", "MiniMaxH3ImageToVideo", "GmlxH3ImageToVideo")
 
 
 class _StubDecoder(torch.nn.Module):

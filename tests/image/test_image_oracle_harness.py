@@ -63,6 +63,14 @@ def test_round_trip_writes_the_arrays_the_manifest_and_the_index(tmp_path):
     assert index["fixtures"]["check3_tiny"]["tensors"] == 3
 
 
+def test_the_manifest_keeps_a_list_of_scalars_on_one_line(tmp_path):
+    w = _writer()
+    text = w.write(tmp_path).read_text()
+    assert '\n "argv": ["x.py"],\n' in text
+    assert '\n  "latents": {\n   "shape": [1, 4, 2, 3],\n' in text
+    assert json.loads(text) == w.manifest
+
+
 def test_load_refuses_an_array_that_changed_after_the_manifest(tmp_path):
     w = _writer()
     w.write(tmp_path)

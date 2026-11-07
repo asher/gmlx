@@ -4,13 +4,7 @@
  "check": 5,
  "family": "krea2",
  "script": "scripts/image_oracle/check5_krea2_vae.py",
- "argv": [
-  "check5_krea2_vae.py",
-  "--vae",
-  "qwen_image_vae.safetensors",
-  "--sizes",
-  "512"
- ],
+ "argv": ["check5_krea2_vae.py", "--vae", "qwen_image_vae.safetensors", "--sizes", "512"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -56,56 +50,17 @@
  },
  "inputs": {
   "sizes": [
-   [
-    512,
-    512
-   ]
+   [512, 512]
   ],
   "seed": 5,
   "image": "synthetic_image(height, width, seed) of check5_qwen_image21_vae.py, RGB, NCHW in [-1, 1]",
-  "latents_mean": [
-   -0.7571,
-   -0.7089,
-   -0.9113,
-   0.1075,
-   -0.1745,
-   0.9653,
-   -0.1517,
-   1.5508,
-   0.4134,
-   -0.0715,
-   0.5517,
-   -0.3632,
-   -0.1922,
-   -0.9497,
-   0.2503,
-   -0.2921
-  ],
-  "latents_std": [
-   2.8184,
-   1.4541,
-   2.3275,
-   2.6558,
-   1.2196,
-   1.7708,
-   2.6052,
-   2.0743,
-   3.2687,
-   2.1526,
-   2.8652,
-   1.5579,
-   1.6382,
-   1.1253,
-   2.8251,
-   1.916
-  ],
+  "latents_mean": [-0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508, 0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921],
+  "latents_std": [2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743, 3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.916],
   "latents": "(encoder mean - latents_mean) / latents_std, from the fp32 VAE",
   "decode_input": "latents * latents_std + latents_mean in float32, cast to the VAE dtype",
   "decoded": "RGB, NCHW, clamped to [-1, 1] by the VAE",
   "psnr": "on x / 2 + 0.5 clamped to [0, 1], peak 1",
-  "source_dtypes": [
-   "torch.bfloat16"
-  ],
+  "source_dtypes": ["torch.bfloat16"],
   "load": "convert_wan_vae_to_diffusers, then AutoencoderKLQwenImage() strict, in float32"
  },
  "results": {
@@ -166,69 +121,37 @@
    }
   }
  },
- "notes": [
-  "The file holds bfloat16 weights. The fp32 VAE holds them exactly in float32, and the bf16 VAE is a bfloat16 copy, which is the file's own values."
- ],
+ "notes": ["The file holds bfloat16 weights. The fp32 VAE holds them exactly in float32, and the bf16 VAE is a bfloat16 copy, which is the file's own values."],
  "created": "2026-10-10T07:11:25Z",
  "npz": "check5_krea2_vae.npz",
  "tensors": {
   "decoded_512x512": {
-   "shape": [
-    1,
-    3,
-    512,
-    512
-   ],
+   "shape": [1, 3, 512, 512],
    "dtype": "float32",
    "sha256": "67b7f683c6300043c308846462a1c3ab6edf657a876723c443da407d31289d5c"
   },
   "decoded_bf16_512x512": {
-   "shape": [
-    1,
-    3,
-    512,
-    512
-   ],
+   "shape": [1, 3, 512, 512],
    "dtype": "float32",
    "sha256": "ba9cfd7ddfc4623038b664717a245f08335116bfb7fc1c205629f24ca1ab351c"
   },
   "encode_mean_512x512": {
-   "shape": [
-    1,
-    16,
-    64,
-    64
-   ],
+   "shape": [1, 16, 64, 64],
    "dtype": "float32",
    "sha256": "2f555b0c1ce32a7d858c9b7de96c3172e5ea9346906c4807405d18a60ec2c74c"
   },
   "encode_mean_bf16_512x512": {
-   "shape": [
-    1,
-    16,
-    64,
-    64
-   ],
+   "shape": [1, 16, 64, 64],
    "dtype": "float32",
    "sha256": "6d5c8c3df5520b8ae65a7f6fc945f699aa371389f70f46bd4c18c6a118a6a8bf"
   },
   "image_512x512": {
-   "shape": [
-    1,
-    3,
-    512,
-    512
-   ],
+   "shape": [1, 3, 512, 512],
    "dtype": "float32",
    "sha256": "4020c0997410077532d908bbecca27898c4c7b7cfb2d7ba29333177c2c44ee5e"
   },
   "latents_512x512": {
-   "shape": [
-    1,
-    16,
-    64,
-    64
-   ],
+   "shape": [1, 16, 64, 64],
    "dtype": "float32",
    "sha256": "da53b8e5db37500761add2354811678689c32e54a53ccd95552903af9842909a"
   }

@@ -4,29 +4,7 @@
  "check": 3,
  "family": "krea2",
  "script": "scripts/image_oracle/check3_krea2.py",
- "argv": [
-  "check3_krea2.py",
-  "--dit",
-  "Krea-2-Turbo-Q4_K_M.gguf",
-  "--sizes",
-  "1024",
-  "--rows",
-  "512",
-  "--features",
-  "check2_krea2_check8.npz",
-  "--features-key",
-  "features_check8",
-  "--features-source",
-  "check2_krea2_check8 fp32 features of check 8's prompt",
-  "--latents",
-  "check8_stock16_1024.npz",
-  "--step",
-  "7",
-  "--latents-source",
-  "check 8 stock16 x_i at 1024, ComfyUI 8d534945 with ComfyUI-GGUF on the same GGUF",
-  "--name",
-  "check3_krea2_s7"
- ],
+ "argv": ["check3_krea2.py", "--dit", "Krea-2-Turbo-Q4_K_M.gguf", "--sizes", "1024", "--rows", "512", "--features", "check2_krea2_check8.npz", "--features-key", "features_check8", "--features-source", "check2_krea2_check8 fp32 features of check 8's prompt", "--latents", "check8_stock16_1024.npz", "--step", "7", "--latents-source", "check 8 stock16 x_i at 1024, ComfyUI 8d534945 with ComfyUI-GGUF on the same GGUF", "--name", "check3_krea2_s7"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -121,28 +99,17 @@
  "npz": "check3_krea2_s7_1024.npz",
  "tensors": {
   "features": {
-   "shape": [
-    19,
-    30720
-   ],
+   "shape": [19, 30720],
    "dtype": "float32",
    "sha256": "aed9293f823f338c5f30a12d990e83dfc302ff8412875d2959ec7b5a13431248"
   },
   "latents": {
-   "shape": [
-    1,
-    16,
-    128,
-    128
-   ],
+   "shape": [1, 16, 128, 128],
    "dtype": "float32",
    "sha256": "61c62ecac41eabb0abe1d5ec64bbf2b427c9488f179994176f5e41d6fb7bfae8"
   },
   "position_ids": {
-   "shape": [
-    4115,
-    3
-   ],
+   "shape": [4115, 3],
    "dtype": "int32",
    "sha256": "f66cebbbc896a91ea3ee016bf3d9604831be7dd21325eab92ad803a8a507b2a9"
   },
@@ -152,22 +119,12 @@
    "sha256": "13afcb595b3adcd1b8154e36d49ca0b0cfeac223d0c549cd2dfca8d917df9460"
   },
   "velocity": {
-   "shape": [
-    1,
-    16,
-    128,
-    128
-   ],
+   "shape": [1, 16, 128, 128],
    "dtype": "float32",
    "sha256": "052a5eb677c186d096a95ce925e88d51e58c4332ced9c5c5582f076bc660ae2b"
   },
   "velocity_bf16": {
-   "shape": [
-    1,
-    16,
-    128,
-    128
-   ],
+   "shape": [1, 16, 128, 128],
    "dtype": "float32",
    "sha256": "4b604bd09977a94dfe559d7e5e1c8f705bf424fbd07f2a1d4b7c75eb0c3f2a49"
   }

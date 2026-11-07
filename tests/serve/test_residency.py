@@ -719,15 +719,30 @@ def test_warn_if_batch_unsafe_fires_once_for_gemma2(monkeypatch, caplog, capsys)
         assert out.err == "" and out.out == ""
 
 
-def test_module_annotations_resolve():
+@pytest.mark.parametrize("name", ["residency", "residency_types", "residency_build", "residency_workers", "residency_teardown", "residency_lora", "residency_pool"])
+def test_module_annotations_resolve(name):
     """Module-level forward-ref unions must quote the whole union
     (ContextVar["_Entry | None"], not ContextVar["_Entry" | None]) or any
-    annotation introspection raises TypeError."""
+    annotation introspection raises TypeError. Each residency module that
+    defines a class: its own annotations, its classes' and their methods',
+    and its functions', each against the names the module imports."""
+    import importlib
+    import inspect
     import typing
 
-    import gmlx.serve.residency as residency
-
-    typing.get_type_hints(residency)
+    mod = importlib.import_module(f"gmlx.serve.{name}")
+    typing.get_type_hints(mod)
+    for obj in vars(mod).values():
+        if getattr(obj, "__module__", None) != mod.__name__:
+            continue
+        if inspect.isclass(obj):
+            typing.get_type_hints(obj)
+            for member in vars(obj).values():
+                fn = getattr(member, "__func__", member)
+                if inspect.isfunction(fn):
+                    typing.get_type_hints(fn)
+        elif inspect.isfunction(obj):
+            typing.get_type_hints(obj)
 
 
 def test_teardown_closes_streaming_helpers_under_the_serving_wrapper():
@@ -1790,7 +1805,7 @@ def test_failed_build_is_torn_down_before_the_lock_drops(monkeypatch):
     live memory, and the exception keeps its type and message."""
     import pytest
 
-    from gmlx.serve import residency as R
+    from gmlx.serve import residency_pool as R
 
     proxy, pool, teardowns = make_pool(100, {"/m.gguf": 10})
     stock_get = pool._stock_get
@@ -1822,7 +1837,7 @@ def test_failed_build_of_a_registry_cache_is_torn_down(monkeypatch):
     import pytest
     from gmlx._vendor.mlx_vlm.server.runtime import ModelCacheRegistry
 
-    from gmlx.serve import residency as R
+    from gmlx.serve import residency_pool as R
 
     proxy, pool, teardowns = make_pool(100, {"/m.gguf": 10})
     stock_get = pool._stock_get

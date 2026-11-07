@@ -234,7 +234,7 @@ _WIDGETS = {
     "GmlxAudioVAELoader": ["model_name", "server_url", "start_server"],
     "MiniMaxH3SigmaShift": ["shift_video", "shift_audio"],
     "GmlxSigmas": ["steps", "denoise", "width", "height"],
-    "MiniMaxH3ImageToVideo": ["prompt", "width", "height", "length"],
+    "GmlxH3ImageToVideo": ["prompt", "width", "height", "length"],
     "BasicGuider": [],
     "VAEDecodeAudio": [],
     "CreateVideo": ["fps", "bit_depth", "color_space"],

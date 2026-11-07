@@ -4,14 +4,7 @@
  "check": 3,
  "family": "flux2_klein",
  "script": "scripts/image_oracle/check3_flux2_klein.py",
- "argv": [
-  "check3_flux2_klein.py",
-  "--reference",
-  "src",
-  "--reference-commit",
-  "50fe5162777813d869182b139e83b10743caef15",
-  "--self-test"
- ],
+ "argv": ["check3_flux2_klein.py", "--reference", "src", "--reference-commit", "50fe5162777813d869182b139e83b10743caef15", "--self-test"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -52,12 +45,7 @@
  "inputs": {
   "config": {
    "attention_head_dim": 16,
-   "axes_dims_rope": [
-    4,
-    4,
-    4,
-    4
-   ],
+   "axes_dims_rope": [4, 4, 4, 4],
    "eps": 1e-06,
    "guidance_embeds": false,
    "in_channels": 8,
@@ -72,19 +60,10 @@
    "timestep_guidance_channels": 256
   },
   "case": {
-   "latent": [
-    4,
-    6
-   ],
+   "latent": [4, 6],
    "refs": [
-    [
-     2,
-     3
-    ],
-    [
-     2,
-     2
-    ]
+    [2, 3],
+    [2, 2]
    ],
    "text": 10,
    "sigma": 0.73
@@ -263,139 +242,87 @@
   },
   "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each block and the final layer, free running for the time vector, modulations and embeddings and for the velocity"
  },
- "notes": [
-  "the weights are in selftest_flux2_klein_tiny_weights by GGUF name in torch order"
- ],
+ "notes": ["the weights are in selftest_flux2_klein_tiny_weights by GGUF name in torch order"],
  "created": "2026-10-16T13:40:10Z",
  "npz": "selftest_flux2_klein_tiny_norefs.npz",
  "tensors": {
   "double_blocks.0.img": {
-   "shape": [
-    24,
-    64
-   ],
+   "shape": [24, 64],
    "dtype": "float32",
    "sha256": "657d504556c7c2955a9540ed216047d60bed5ec7281b4b0945cc5b5005ec35a2"
   },
   "double_blocks.0.txt": {
-   "shape": [
-    10,
-    64
-   ],
+   "shape": [10, 64],
    "dtype": "float32",
    "sha256": "20ab1f26c0bf17c5a078b354cd3738406fe56b08261c7c810fc0baf3821bd61c"
   },
   "double_blocks.1.img": {
-   "shape": [
-    24,
-    64
-   ],
+   "shape": [24, 64],
    "dtype": "float32",
    "sha256": "fcfb9ef1ca32af1ef476b6459aceb58b5a343115f5f35abcaae09e48c46bfcf8"
   },
   "double_blocks.1.txt": {
-   "shape": [
-    10,
-    64
-   ],
+   "shape": [10, 64],
    "dtype": "float32",
    "sha256": "5082b2d7f0ff6fb291306fc7bd4296af054188932f6decf381aae7df8eeefcae"
   },
   "double_stream_modulation_img": {
-   "shape": [
-    1,
-    384
-   ],
+   "shape": [1, 384],
    "dtype": "float32",
    "sha256": "bb2bf75bbf705cc0cd526a626c03661ec6c16099c81d1bf524783f4bd977eb11"
   },
   "double_stream_modulation_txt": {
-   "shape": [
-    1,
-    384
-   ],
+   "shape": [1, 384],
    "dtype": "float32",
    "sha256": "15a03eeaaf772afc75428c68ba2e9ae4005475900c3b6d040a39fb9aad0874bb"
   },
   "features": {
-   "shape": [
-    10,
-    24
-   ],
+   "shape": [10, 24],
    "dtype": "float32",
    "sha256": "266f8fc9fef4b1ceddb650a2aea642fb520784c50439535366e924e013a4e372"
   },
   "final_layer": {
-   "shape": [
-    24,
-    8
-   ],
+   "shape": [24, 8],
    "dtype": "float32",
    "sha256": "eecacd22e1cf49de130730d12bcea25f2b073594de23f7ac6530a5bfef673b09"
   },
   "final_layer.adaLN_modulation": {
-   "shape": [
-    1,
-    128
-   ],
+   "shape": [1, 128],
    "dtype": "float32",
    "sha256": "2e3e0a10bf7e690b12449e24b3f046f010c767af20fa4afe2d791776a880f5f2"
   },
   "ids.image": {
-   "shape": [
-    24,
-    4
-   ],
+   "shape": [24, 4],
    "dtype": "float32",
    "sha256": "367cd1dab521640e9eb751eb45386ebd36b7b58ba4843b2e219866d3d7e0fcf7"
   },
   "ids.text": {
-   "shape": [
-    10,
-    4
-   ],
+   "shape": [10, 4],
    "dtype": "float32",
    "sha256": "e0ad99a12c7367bc4496c4a622d4a5853b020d1432107824791b86d2b03e5ec4"
   },
   "img_in": {
-   "shape": [
-    24,
-    64
-   ],
+   "shape": [24, 64],
    "dtype": "float32",
    "sha256": "fd0283692e2f83a80d777be1604f79fd10f90c8aed6e9f0b6d5747771b754e68"
   },
   "in.final_layer": {
-   "shape": [
-    24,
-    64
-   ],
+   "shape": [24, 64],
    "dtype": "float32",
    "sha256": "92fa38140a92b3046376716357977483ede2d9e108811f9c9abf76acd41ddbea"
   },
   "in.single_blocks.0": {
-   "shape": [
-    34,
-    64
-   ],
+   "shape": [34, 64],
    "dtype": "float32",
    "sha256": "748ec893dd70dad21a00c06beac68fd643ccca5b6a7104da2b7169d10b56e099"
   },
   "in.time_in": {
-   "shape": [
-    1,
-    256
-   ],
+   "shape": [1, 256],
    "dtype": "float32",
    "sha256": "5ca568a959a2467ebedb33adad8652492de1aef351cbc6b7d876d272126ebf1f"
   },
   "latents": {
-   "shape": [
-    1,
-    8,
-    4,
-    6
-   ],
+   "shape": [1, 8, 4, 6],
    "dtype": "float32",
    "sha256": "7d0aefea8d2160266e2a288916d22681bf085288383a2ca5041be76b90993927"
   },
@@ -405,62 +332,37 @@
    "sha256": "86c887cea8c0b376b06f829ed68d9d51c2a186f1f504370fe2e3352d6c5bd181"
   },
   "single_blocks.0": {
-   "shape": [
-    34,
-    64
-   ],
+   "shape": [34, 64],
    "dtype": "float32",
    "sha256": "ec49d3bc7d1744a98417192dbaa6f870e2dd275f58d23c3b016b95ce26a4455d"
   },
   "single_blocks.1": {
-   "shape": [
-    34,
-    64
-   ],
+   "shape": [34, 64],
    "dtype": "float32",
    "sha256": "15f09000b3fa5630de797a76dcd293d142107b01ea1f3b594975d5760e840bc1"
   },
   "single_stream_modulation": {
-   "shape": [
-    1,
-    192
-   ],
+   "shape": [1, 192],
    "dtype": "float32",
    "sha256": "b016749ee74287f116ac70b723f667c37419ae5d95465f3ab9d9fd613a2d254d"
   },
   "txt_in": {
-   "shape": [
-    10,
-    64
-   ],
+   "shape": [10, 64],
    "dtype": "float32",
    "sha256": "4054bd3d93170f7bc76e1abd877be5e9301a2e9aaf4d7de05d61b6a820f332a0"
   },
   "vec": {
-   "shape": [
-    1,
-    64
-   ],
+   "shape": [1, 64],
    "dtype": "float32",
    "sha256": "62554ee727d99cf7832656ee902cdb97a9bc4e73fdd44c4164d4a044bbd12b76"
   },
   "velocity": {
-   "shape": [
-    1,
-    8,
-    4,
-    6
-   ],
+   "shape": [1, 8, 4, 6],
    "dtype": "float32",
    "sha256": "f7c70b6bb54852c0a1044c203b88f9ac66d2b19cc45f395e15674628213fbab2"
   },
   "velocity_bf16": {
-   "shape": [
-    1,
-    8,
-    4,
-    6
-   ],
+   "shape": [1, 8, 4, 6],
    "dtype": "float32",
    "sha256": "8d7ac2dc07fc96912c9be93a1d450e2d6f86230d2e875f5fb40ac1ab120a9b0d"
   }

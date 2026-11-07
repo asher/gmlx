@@ -341,12 +341,13 @@ room for one. On a 32 GB Mac an `h3` entry with an upsampler loads at
 768x768 and not at its 1344x768 default, so set `defaults.size:
 768x768` there, and on a 36 GB Mac it loads at 1344x768.
 
-Through the [ComfyUI nodes](comfyui.md#make-a-video), the text encode
-knows neither the clip's length nor its keyframes. A prompt without
-keyframes is rewritten as the guide's text to video form, which names no
-length, and a prompt with keyframes is encoded as typed.
 [`POST /v1/videos`](video-api.md) rewrites every prompt as the command
-line does.
+line does, and so does the server for the `gmlx MiniMax-H3 Image to Video`
+node of the [ComfyUI nodes](comfyui.md#make-a-video), which tells it the
+clip's length and which keyframes it has. ComfyUI's own
+`MiniMax H3 Image to Video` tells it neither: a prompt without keyframes
+is rewritten as the guide's text to video form, which names no length,
+and a prompt with keyframes is encoded as typed.
 
 ## Use the preview decoder
 

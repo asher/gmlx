@@ -130,7 +130,8 @@ that names it:
 - On MiniMax-H3: the references of `MiniMax H3 Reference to Video`, the
   Fun ControlNet (`Apply MiniMax H3 Fun ControlNet`), a noise mask on the
   latent, such as one from `Set Latent Noise Mask`, and on FastH3 a first
-  or last frame of `MiniMax H3 Image to Video` or a guide from
+  or last frame of `MiniMax H3 Image to Video` or
+  `gmlx MiniMax-H3 Image to Video`, or a guide from
   `Add Guide for MiniMax H3`.
 
 On FastH3, a run on its trained noise levels, or on a part of them as a

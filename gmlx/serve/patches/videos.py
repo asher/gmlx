@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import binascii
 import contextlib
+import functools
 import importlib
 import logging
 import os
@@ -33,6 +34,7 @@ import gmlx.serve.bridge_vlm as serving
 
 from ._common import _error_content, _remove_routes
 from .body_intake import (
+    BodyHold,
     BodyRefused,
     _in_turn,
     _mib,
@@ -154,29 +156,36 @@ def _int(fields: dict, name: str) -> int | None:
     return n
 
 
-def _data_url(value, name: str, folder: str, take) -> str:
-    """Write the image of the data URL ``value`` to ``folder``, within the
-    room ``take(n)`` reserves in the job store."""
+def _no_data_url(field: str) -> Refused:
+    return Refused(400, f"{field} is an image as a data URL "
+                   "(data:image/png;base64,...) in a JSON body, or a file "
+                   "in a multipart form", field)
+
+
+def _data_url(value, name: str, folder: str, take,
+              field: str | None = None) -> str:
+    """Write the image of the data URL ``value`` to ``folder`` as ``name``,
+    within the room ``take(n)`` reserves in the job store. A refusal names
+    ``field``, the field the client sent, else ``name``."""
+    field = field or name
     if not isinstance(value, str) or not value.startswith("data:image/") \
             or ";base64," not in value:
-        raise Refused(400, f"{name} is an image as a data URL "
-                      "(data:image/png;base64,...) in a JSON body, or a "
-                      "file in a multipart form", name)
+        raise _no_data_url(field)
     from .media_gate import b64decode
 
     try:
         data = b64decode(value[value.index(",") + 1:], validate=True)
     except (binascii.Error, ValueError):
-        raise Refused(400, f"{name} is not base64", name) from None
+        raise Refused(400, f"{field} is not base64", field) from None
     if take is not None:
         ok, left, arriving = take(len(data))
         if not ok:
-            raise Refused(413, f"the keyframe {name} is "
+            raise Refused(413, f"the keyframe {field} is "
                           f"{_mib(len(data), True)}, and the video job "
                           f"store has {_mib(left)} of room left"
                           f"{arriving_note(arriving)}; send a smaller "
                           "image, delete finished jobs, or raise "
-                          "server.video.store_max_bytes", name)
+                          "server.video.store_max_bytes", field)
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, name)
     with open(path, "wb") as f:
@@ -306,17 +315,26 @@ def estimate(spec, fam, plan, s: dict, prompt: str, sizes, rewrites: bool,
 def _keyframes(sent: dict, folder: str, take) -> dict:
     """The path of each keyframe of ``sent`` ({name: (file, value)}), or
     None: a file as sent, a data URL written to ``folder`` within the room
-    ``take(n)`` reserves. Each must be an image the server reads."""
-    keys = {}
+    ``take(n)`` reserves. Each must be an image the server reads; a
+    refusal names the field the client sent."""
+    keys, fields = {}, {}
     for name, alias in (("first_frame", "input_reference"),
                         ("last_frame", "last_frame")):
-        file, value = sent[name] if any(sent[name]) else sent[alias]
+        field = fields[name] = name if _given(sent[name]) else alias
+        file, value = sent[field]
         keys[name] = file if file is not None else (
-            None if value is None else _data_url(value, name, folder, take))
+            None if value is None
+            else _data_url(value, name, folder, take, field))
     for name, v in keys.items():
-        if v is not None and not _pixels(v, name):
-            raise Refused(400, f"{name} is no image the server reads", name)
+        if v is not None and not _pixels(v, fields[name]):
+            raise Refused(400, f"{fields[name]} is no image the server "
+                          "reads", fields[name])
     return keys
+
+
+def _given(pair: tuple) -> bool:
+    """Whether a keyframe field's (file, value) was sent, empty or not."""
+    return any(v is not None for v in pair)
 
 
 def _inline(sent: dict) -> bool:
@@ -391,7 +409,11 @@ def prepare_head(fields: dict, files: dict) -> SimpleNamespace:
     # input_reference is the OpenAI field of the first frame.
     sent = {k: (files.get(k), fields.get(k)) for k in
             ("first_frame", "input_reference", "last_frame")}
-    if any(sent["first_frame"]) and any(sent["input_reference"]):
+    # An empty field is refused, not read as no keyframe.
+    for k, (file, value) in sent.items():
+        if file is None and value is not None and not value:
+            raise _no_data_url(k)
+    if _given(sent["first_frame"]) and _given(sent["input_reference"]):
         raise Refused(400, "first_frame and input_reference both name the "
                       "first frame; send one", "input_reference")
     return SimpleNamespace(prompt=prompt, path=path, spec=spec, plan=plan,
@@ -465,6 +487,10 @@ async def create(request: Request):
     # Refused before the body is read: the answer ends the connection, so
     # the server does not drain a body it will not use.
     close = {"Connection": "close"}
+    # What the JSON body or the form's text holds in RAM, counted beside
+    # the other bodies being read until the route drops it: past the
+    # keyframes, at its end.
+    hold = BodyHold()
     try:
         ffmpeg = media_programs.find("ffmpeg")
         if ffmpeg is None:
@@ -489,8 +515,8 @@ async def create(request: Request):
         guides = None
         try:
             if ctype == "multipart/form-data":
-                pairs, files = await read_form_to_disk(request, folder,
-                                                       take_async)
+                pairs, files = await read_form_to_disk(
+                    request, folder, take_async, hold=hold)
                 await asyncio.to_thread(post.settle)
                 fields = dict(pairs)
                 if isinstance(fields.get("guides"), str):
@@ -498,12 +524,13 @@ async def create(request: Request):
                     # as a JSON body, in the turn the parses take.
                     try:
                         guides = await _in_turn(
-                            loads_field, fields["guides"], "guides", None)
+                            loads_field, fields["guides"], "guides", None,
+                            hold, hold=hold)
                     except ValueError:
                         raise Refused(400, "guides is a JSON list",
                                       "guides") from None
             else:
-                fields = await read_json(request)
+                fields = await read_json(request, hold=hold)
                 if not isinstance(fields, dict):
                     raise Refused(400, "the body is no JSON object")
                 if isinstance(fields.get("guides"), str) and fields["guides"]:
@@ -518,7 +545,8 @@ async def create(request: Request):
         # A data URL keyframe decodes in the turn the parses take: the
         # price of a JSON body counts it. A cancel while it waits for the
         # turn ends before the keyframe is written.
-        keys = await (_in_turn if _inline(head.sent) else asyncio.to_thread)(
+        keys = await (functools.partial(_in_turn, hold=hold)
+                      if _inline(head.sent) else asyncio.to_thread)(
             _keyframes, head.sent, folder, take)
         record, params = await asyncio.to_thread(
             prepare_tail, head, keys, fields, files, ffmpeg, guides)
@@ -537,6 +565,8 @@ async def create(request: Request):
         # abandon runs in the executor, and nothing waits for it.
         asyncio.get_running_loop().run_in_executor(None, post.abandon)
         raise
+    finally:
+        hold.release()
     rec = await asyncio.to_thread(store.get, job.id)
     return JSONResponse(status_code=200, content=rec or job.record)
 

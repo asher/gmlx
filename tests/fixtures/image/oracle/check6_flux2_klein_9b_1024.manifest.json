@@ -4,24 +4,7 @@
  "check": 6,
  "family": "flux2_klein_9b",
  "script": "scripts/image_oracle/check6_flux2_klein.py",
- "argv": [
-  "check6_flux2_klein.py",
-  "--reference",
-  "src",
-  "--reference-commit",
-  "50fe5162777813d869182b139e83b10743caef15",
-  "--features",
-  "check2_flux2_klein_9b.npz",
-  "--dit",
-  "flux-2-klein-9b-Q4_K_M.gguf",
-  "--variant",
-  "distilled",
-  "--sizes",
-  "512",
-  "1024",
-  "--bf16",
-  "512"
- ],
+ "argv": ["check6_flux2_klein.py", "--reference", "src", "--reference-commit", "50fe5162777813d869182b139e83b10743caef15", "--features", "check2_flux2_klein_9b.npz", "--dit", "flux-2-klein-9b-Q4_K_M.gguf", "--variant", "distilled", "--sizes", "512", "1024", "--bf16", "512"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -78,11 +61,7 @@
   "guidance": 1.0,
   "seed": 6,
   "bf16": false,
-  "kept_steps": [
-   1,
-   2,
-   3
-  ],
+  "kept_steps": [1, 2, 3],
   "refs": 0,
   "tokens": 4096,
   "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, shape (1, 128, size / 16, size / 16); the CLI's noise is bf16, so it is rounded",
@@ -107,9 +86,7 @@
   "run": {
    "fp32_s": 223.0,
    "fp32_median_step_s": 57.46,
-   "rows": [
-    1
-   ]
+   "rows": [1]
   },
   "gmlx_bf16": {
    "rel_l2": {
@@ -135,74 +112,42 @@
  "npz": "check6_flux2_klein_9b_1024.npz",
  "tensors": {
   "features": {
-   "shape": [
-    512,
-    12288
-   ],
+   "shape": [512, 12288],
    "dtype": "float32",
    "sha256": "358044c890dcd4d9d2e7169de8e86383ebd5ec0d80c21cd8facf551e53355cb9"
   },
   "latents": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "c59742a7cfbc6b96759b1b61a9f9d987f6b9d6e122fd908c15c8978e304ce642"
   },
   "latents_step1": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "81c1bf862c8c73c7f62c80dc4de2335bb76aa6aba773b85070d876c042afddae"
   },
   "latents_step2": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "54d487cbd50518deedbc9fa23f3ed4f03c72ba61de095027defc65f39b491079"
   },
   "latents_step3": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "fbb315852e80714256b4cc6a54ece539c55cc1fdb1858c36b4b7be5577db09c6"
   },
   "noise": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "bcd95295bb6b6d4f2030450a235b4f3e631d78cfeabead17132ec18138429b6a"
   },
   "schedule": {
-   "shape": [
-    5
-   ],
+   "shape": [5],
    "dtype": "float32",
    "sha256": "716bbd15043b4b31e63d84374538c884b85e67c0924198a9d4a112b7d9b3d59d"
   },
   "times": {
-   "shape": [
-    4
-   ],
+   "shape": [4],
    "dtype": "float32",
    "sha256": "3dbb533432a33b3793d501553be8eba6200fc0dda87edff05c71d4a1900468be"
   }

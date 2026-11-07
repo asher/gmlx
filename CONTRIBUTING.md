@@ -126,6 +126,14 @@ docs index. The site's CI build fails on a page that is missing from the
   Every patch has a row in the claims table, is guarded, and raises rather
   than doing nothing when the name it rebinds is missing. The rules are in
   [Upstream releases](docs/internals/upstream-upgrades.md).
+- `gmlx/serve/residency.py` keeps the server seam and composes the
+  residency pool from one class per concern: `residency_pool.py` (entries,
+  cold load, eviction, unload, the idle reaper), `residency_lora.py` (the
+  LoRA turn), `residency_workers.py` (image and video worker admission and
+  release), `residency_teardown.py`, `residency_build.py` (the chat cold
+  build), `residency_footprint.py` (what a model costs resident) and
+  `residency_types.py` (entries, ledgers, kinds). A test patches a module
+  global on the module whose code reads it.
 - Each concern has a module. Tensor-name remap is in `gmlx/load/remap.py`,
   config synthesis in `gmlx/load/config_synth.py` and arch metadata in
   `gmlx/load/arch_table.py`. Those three are where a new architecture lands.
