@@ -774,7 +774,7 @@ def test_estimate_refuses_a_bad_adapter_field_resident_or_cold(tmp_path, residen
     serving.register_resolved_models(build_config(
         {"models": {"q": {"path": "/abs/q.gguf",
                           "adapters": [str(tmp_path / "a.gguf")]}}}))
-    entry = SimpleNamespace(response_generator=None, apc_manager=None,
+    entry = SimpleNamespace(response_generator=SimpleNamespace(), apc_manager=None,
                             model_cache={})
     _PKG._kq_residency_pool = SimpleNamespace(
         resident_entry=lambda p: entry if resident else None)
@@ -785,3 +785,64 @@ def test_estimate_refuses_a_bad_adapter_field_resident_or_cold(tmp_path, residen
         "adapter 'b.gguf' is not an adapter of model 'q'")
     st, out = est.estimate_request(dict(body, adapters=[], lora=[]))
     assert (st, out["error"]["message"]) == (400, "Set adapters or lora, not both.")
+
+
+@pytest.mark.parametrize("loaded", [True, False])
+def test_the_warm_probe_salts_an_adapted_request(tmp_path, monkeypatch, loaded):
+    """An adapted request probes the APC with its row salt folded into the
+    hash; a copy with no adapter identities reports no warm prefix."""
+    import hashlib
+
+    import mlx.core as mx
+
+    from gmlx import lora_rows
+    from gmlx.load.adapter import AdapterIdentity
+    from gmlx.serve.lora_request import request_lora
+
+    a = tmp_path / "a.gguf"
+    a.write_bytes(b"GGUF a")
+    serving.register_resolved_models(build_config(
+        {"models": {"q": {"path": "/abs/q.gguf", "adapters": [str(a)]}}}))
+    ident = AdapterIdentity(str(a), hashlib.sha256(a.read_bytes()).hexdigest(), 6)
+    model = SimpleNamespace(config={})
+    if loaded:
+        object.__setattr__(model, "gmlx_adapter_identities", (ident,))
+    rg = SimpleNamespace(model=model, apc_mode=None, kv_bits=None,
+                         _preprocess_request=lambda prompt: {
+                             "input_ids": mx.array([[1, 2, 3, 4]])})
+    probed = []
+
+    class _Mgr:
+        def lookup_prefix(self, ids, extra_hash=0):
+            probed.append(extra_hash)
+            return [], 3
+
+        def release(self, blocks):
+            pass
+
+        def find_exact_prefix(self, ids, extra_hash=0):
+            return None
+
+    entry = SimpleNamespace(response_generator=rg, apc_manager=_Mgr(),
+                            model_cache={"model": model, "processor": None,
+                                         "config": {}})
+    _PKG._kq_residency_pool = SimpleNamespace(resident_entry=lambda p: entry)
+    monkeypatch.setattr(_PKG, "apply_chat_template", lambda *a, **k: "p",
+                        raising=False)
+
+    def gen_args(req, processor=None, tenant_id=None):
+        lora = request_lora(serving.get_active_spec(), req, model_dirs=[])
+        return SimpleNamespace(to_template_kwargs=lambda: {}, max_tokens=0,
+                               _kq_lora=lora)
+
+    monkeypatch.setattr(_APP, "_build_gen_args", gen_args)
+    body = {"model": "q", "messages": [{"role": "user", "content": "x"}],
+            "adapters": [{"id": "a.gguf", "strength": 0.5}]}
+    st, out = est.estimate_request(body)
+    assert st == 200 and out["resident"] is True
+    if loaded:
+        assert probed == [lora_rows.row_salt((ident,), (0.5,))]
+        assert (out["warm_tokens"], out["cache_tier"]) == (3, "block")
+    else:
+        assert probed == []
+        assert (out["warm_tokens"], out["cache_tier"]) == (0, None)
