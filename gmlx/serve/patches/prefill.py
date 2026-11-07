@@ -270,4 +270,4 @@ def install_assistant_prefill() -> None:
     for target in _render_target_modules():
         fn = getattr(target, "apply_chat_template", None)
         if fn is not None and not wrapped_with(fn, _FLAG):
-            target.apply_chat_template = _wrap(fn)
+            setattr(target, "apply_chat_template", _wrap(fn))
