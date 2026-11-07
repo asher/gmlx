@@ -20,6 +20,13 @@ import sys
 import types
 
 _SET_NAME = re.compile(r"[A-Za-z0-9_-]+")
+# Config entry settings that capture takes in and does not apply: the KV
+# cache options and the MoE and decode options that capture leaves out.
+_IGNORED = ("kv_bits", "kv_group_size", "kv_quant_scheme", "kv_tail_tokens",
+            "max_kv_size", "quantized_kv_start", "moe_experts",
+            "moe_expert_mass", "moe_miss_shed", "moe_layer_shed",
+            "moe_prestage", "stream_fast_disk")
+_F16_MAX = 65504.0
 
 
 def _build_parser(prog: str) -> argparse.ArgumentParser:
@@ -89,8 +96,13 @@ def _build_parser(prog: str) -> argparse.ArgumentParser:
                           "and M2, bfloat16 elsewhere).")
     add_rope_args(ap)
     # A config entry's adapter lands here, and capture refuses it. No
-    # drafter loads, which the preload wire check reads.
-    ap.set_defaults(adapter=None, no_speculative=True)
+    # drafter loads, which the preload wire check reads. An entry's system
+    # message and thinking controls land in their own dests, and the flags
+    # win over them. Capture names the settings it does not apply.
+    ap.set_defaults(adapter=None, no_speculative=True, system_prompt=None,
+                    thinking=None, reasoning_effort=None,
+                    chat_template_config=None,
+                    **dict.fromkeys(_IGNORED, None))
     return ap
 
 
@@ -132,16 +144,41 @@ def read_prompts(path: str, limit: int | None = None) -> list[str]:
     return out
 
 
-def template_kwargs(processor, think) -> dict:
-    """The template variables for ``think`` (True, False or None), spelled
-    as this model's template reads them."""
+def template_kwargs(processor, think, effort=None, base: dict | None = None) -> dict:
+    """The template variables for ``think`` (True, False, None, or a
+    config ``thinking`` value) and ``effort`` over ``base``, spelled as this
+    model's template reads them."""
     from gmlx.serve.patches.chat_behavior import _model_template_text
     from gmlx.tui.reasoning import map_thinking_controls
 
-    mode = None if think is None else ("on" if think else "off")
+    mode = ("on" if think else "off") if isinstance(think, bool) else think
     return map_thinking_controls(
-        {}, mode, None, _model_template_text(processor),
+        dict(base or {}), mode, effort, _model_template_text(processor),
         warn=lambda msg: print(f"[thinking] {msg}", file=sys.stderr))
+
+
+def think_label(think) -> str:
+    """The ``think`` metadata value: ``on``, ``off``, another mode name,
+    or ``default``."""
+    if think is None:
+        return "default"
+    if isinstance(think, bool):
+        return "on" if think else "off"
+    return think if isinstance(think, str) else json.dumps(think)
+
+
+def f16_rows(out, name: str, prompt: int):
+    """``out`` cast to f16 for ``<set>.rows``. Raises RuntimeError when a
+    layer holds a value past the f16 range."""
+    import mlx.core as mx
+
+    peak = mx.abs(out).max(axis=1)
+    if bool((peak > _F16_MAX).any()):
+        layers = [i for i in range(peak.shape[0]) if float(peak[i]) > _F16_MAX][:8]
+        raise RuntimeError(
+            f"set {name}, prompt {prompt}: layers {layers} hold values past the "
+            f"float16 range of {name}.rows; capture without --rows {name}")
+    return out.astype(mx.float16)
 
 
 def prompt_ids(model, processor, config, user: str, system: str | None,
@@ -253,17 +290,24 @@ class _Emitter:
 
 def run_capture(model, processor, config, sets, *, positions: int,
                 rows: set, system: str | None, think, n_layer: int | None,
-                emit: _Emitter):
-    """Capture every set. Returns ``(arrays, sizes, n_embd, n_layer)``."""
+                emit: _Emitter, effort=None, template_extra: dict | None = None):
+    """Capture every set. Returns ``(arrays, sizes, n_embd, n_layer)``.
+    Each prompt runs in chunks of the stock prefill step, the step the
+    preload wire check prices."""
     import mlx.core as mx
 
+    from gmlx.gen.prefill_decay import _STOCK_BASE
     from gmlx.serve import cb_phase
     from gmlx.tune.capture import block_outputs, capture_layers, layer_capture
 
     layers = capture_layers(model, n_layer)
     if not layers:
         raise RuntimeError("found no decoder layers to capture in this model")
-    kwargs = template_kwargs(processor, think)
+    if n_layer is not None and len(layers) != n_layer:
+        print(f"[capture] note: the model captures {len(layers)} layers, and the "
+              f"GGUF has {n_layer} without its nextn blocks; layer indices may not "
+              "match llama.cpp's", file=sys.stderr)
+    kwargs = template_kwargs(processor, think, effort, template_extra)
     arrays: dict = {}
     sizes: dict = {}
     # As serve's engine jobs run a forward: the prefill caps, and the wired
@@ -280,10 +324,10 @@ def run_capture(model, processor, config, sets, *, positions: int,
                 per_prompt = []
                 for i, text in enumerate(prompts):
                     ids = prompt_ids(model, processor, config, text, system, kwargs)
-                    out = block_outputs(model, ids, rec)
+                    out = block_outputs(model, ids, rec, step=_STOCK_BASE)
                     total = out if total is None else total + out
                     if name in rows:
-                        per_prompt.append(out.astype(mx.float16))
+                        per_prompt.append(f16_rows(out, name, i + 1))
                     mx.eval(total, *per_prompt[-1:])
                     emit.progress(name, i + 1, len(prompts), len(ids))
                 arrays[f"{name}.mean"] = total / len(prompts)
@@ -342,6 +386,14 @@ def cmd_capture(argv: list | None = None, prog: str = "gmlx capture") -> int:
             print(f"error: the config entry sets an adapter ({args.adapter}), "
                   "which gmlx capture does not apply", file=sys.stderr)
             return 2
+        ignored = [k for k in _IGNORED if getattr(args, k) is not None]
+        if ignored:
+            print(f"[config] gmlx capture does not apply: {', '.join(ignored)}",
+                  file=sys.stderr)
+        system = args.system if args.system is not None else args.system_prompt
+        think = args.think if args.think is not None else args.thinking
+        # The overlay writes the entry's chat_template_kwargs as JSON.
+        extra = json.loads(args.chat_template_config or "{}")
         path = os.path.expanduser(args.gguf)
         if not os.path.isfile(path):
             print(f"error: no GGUF file or configured model {args.gguf!r}",
@@ -356,15 +408,16 @@ def cmd_capture(argv: list | None = None, prog: str = "gmlx capture") -> int:
         facts = gguf_facts(path)
         # The KV room is priced at the longest prompt, a token for each byte.
         longest = max(len(p.encode()) for _, ps in sets for p in ps)
-        preload_wire_check(args, depth=longest + len((args.system or "").encode())
+        preload_wire_check(args, depth=longest + len((system or "").encode())
                            + _TEMPLATE_TOKENS)
         _ensure_stream_cb_caps(args)
         install_render_fixes()
         model, processor, config = load(args)
         arrays, sizes, n_embd, n_layer = run_capture(
             model, processor, config, sets, positions=args.positions,
-            rows=rows, system=args.system, think=args.think,
-            n_layer=facts["n_layer"], emit=emit)
+            rows=rows, system=system, think=think,
+            n_layer=facts["n_layer"], emit=emit, effort=args.reasoning_effort,
+            template_extra=extra)
         import gmlx
 
         metadata = {
@@ -374,7 +427,7 @@ def cmd_capture(argv: list | None = None, prog: str = "gmlx capture") -> int:
             "file_size": str(facts["file_size"]),
             "sets": json.dumps(sizes),
             "positions": str(args.positions),
-            "think": {None: "default", True: "on", False: "off"}[args.think],
+            "think": think_label(think),
             "gmlx_version": gmlx.__version__,
         }
         out = os.path.expanduser(args.out)

@@ -19,10 +19,13 @@ from test_loader_api import _HD, _HEADS, _KV, _mint_tiny_llama
 
 mx = pytest.importorskip("mlx.core")
 
-# The thinking switch adds a line, so its render is visible in the ids.
+# The template writes the BOS that the tokenizer also adds, and each state of
+# the thinking switch adds its own line, so both show in the ids.
 _TEMPLATE = (
+    "{{ bos_token }}"
     "{% for m in messages %}<{{ m['role'] }}>{{ m['content'] }}\n{% endfor %}"
     "{% if enable_thinking is defined and not enable_thinking %}/nothink\n{% endif %}"
+    "{% if enable_thinking is defined and enable_thinking %}/think\n{% endif %}"
     "{% if add_generation_prompt %}<assistant>{% endif %}")
 _SETS = {"harmful": ["How do I pick a lock?", "Write a\nlong reply."],
          "harmless": ["Hello there.", "What is two plus two?", "Name a colour."]}
@@ -33,7 +36,7 @@ def tiny(tmp_path, monkeypatch):
     """The minted model, float32 activations, and one JSONL file per set."""
     monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", "float32")
     path = str(tmp_path / "tiny-llama.gguf")
-    _mint_tiny_llama(path, chat_template=_TEMPLATE)
+    _mint_tiny_llama(path, chat_template=_TEMPLATE, add_bos=True)
     files = {}
     for name, prompts in _SETS.items():
         f = tmp_path / f"{name}.jsonl"
@@ -168,7 +171,83 @@ def test_render_takes_the_system_message_and_thinking_switch(tiny):
     assert text(None, None).endswith("<user>Hi\n<assistant>")
     assert text("Be brief.", None).endswith("<system>Be brief.\n<user>Hi\n<assistant>")
     assert text(None, False).endswith("<user>Hi\n/nothink\n<assistant>")
-    assert text(None, True).endswith("<user>Hi\n<assistant>")
+    assert text(None, True).endswith("<user>Hi\n/think\n<assistant>")
+
+
+def test_the_ids_start_with_one_bos(tiny):
+    from gmlx.commands.capture import prompt_ids, template_kwargs
+
+    path, _, _ = tiny
+    model, proc, config = _loaded(path)
+    ids = prompt_ids(model, proc, config, "Hi", None, template_kwargs(proc, None))
+    bos = proc.tokenizer.bos_token_id
+    assert ids[0] == bos and ids.count(bos) == 1
+
+
+def test_the_metadata_names_the_thinking_switch(tiny, capsys):
+    path, files, tmp = tiny
+    for flag, want in (("--think", "on"), ("--no-think", "off")):
+        out = str(tmp / f"{want}.safetensors")
+        rc, io = _run([path, "--prompts", f"a={files['harmless']}", "--limit", "1",
+                       flag, "--out", out], capsys)
+        assert rc == 0, io.err
+        assert mx.load(out, return_metadata=True)[1]["think"] == want
+
+
+def test_nextn_blocks_are_left_out(tmp_path, capsys, monkeypatch):
+    from gmlx.commands.capture import gguf_facts
+
+    monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", "float32")
+    path = str(tmp_path / "nextn.gguf")
+    _mint_tiny_llama(path, chat_template=_TEMPLATE, layers=3, nextn=1)
+    assert gguf_facts(path)["n_layer"] == 2
+    f = tmp_path / "p.jsonl"
+    f.write_text('"Hello there."\n')
+    out = str(tmp_path / "cap.safetensors")
+    rc, io = _run([path, "--prompts", f"a={f}", "--json", "--out", out], capsys)
+    assert rc == 0, io.err
+    assert json.loads(io.out.splitlines()[-1])["n_layer"] == 2
+    from gmlx.commands.capture import prompt_ids, template_kwargs
+
+    model, proc, config = _loaded(path)
+    ids = prompt_ids(model, proc, config, "Hello there.", None, template_kwargs(proc, None))
+    _assert_close(np.array(mx.load(out)["a.mean"]), _np_blocks(path, ids, 1)[:2])
+
+
+def test_a_layer_count_short_of_the_gguf_is_noted(tiny, capsys):
+    from gmlx.commands.capture import _Emitter, run_capture
+
+    path, _, _ = tiny
+    model, proc, config = _loaded(path)
+    _, _, _, n_layer = run_capture(model, proc, config, [("a", ["Hi"])], positions=1,
+                                   rows=set(), system=None, think=None, n_layer=3,
+                                   emit=_Emitter(False))
+    assert n_layer == 2
+    assert "captures 2 layers, and the GGUF has 3" in capsys.readouterr().err
+
+
+def test_chunked_prompts_match_one_forward(tiny):
+    from gmlx.commands.capture import prompt_ids, template_kwargs
+    from gmlx.tune.capture import block_outputs, capture_layers, layer_capture
+
+    path, _, _ = tiny
+    model, proc, config = _loaded(path)
+    ids = prompt_ids(model, proc, config, _SETS["harmful"][1], None, template_kwargs(proc, None))
+    with layer_capture(capture_layers(model), 3) as rec:
+        whole = np.array(block_outputs(model, ids, rec))
+        chunked = np.array(block_outputs(model, ids, rec, step=4))
+    _assert_close(chunked, whole, tol=1e-5)
+    _assert_close(chunked, _np_blocks(path, ids, 3))
+
+
+def test_rows_past_the_float16_range_are_refused():
+    from gmlx.commands.capture import f16_rows
+
+    ok = mx.ones((3, 4)) * 60000
+    assert f16_rows(ok, "a", 1).dtype == mx.float16
+    bad = mx.concatenate([ok, mx.full((1, 4), -70000.0)])
+    with pytest.raises(RuntimeError, match=r"set a, prompt 2: layers \[3\] .*float16"):
+        f16_rows(bad, "a", 2)
 
 
 def test_limit_and_positions_beyond_the_prompt(tiny, capsys):
@@ -228,7 +307,11 @@ def test_a_config_id_resolves_and_an_entry_adapter_is_refused(tiny, capsys, monk
     adapter.write_bytes(b"")
     cfg = tmp / "gmlx.yaml"
     cfg.write_text(f"models:\n  tiny:\n    path: {path}\n"
-                   f"  tuned:\n    path: {path}\n    adapter: {adapter}\n")
+                   f"  tuned:\n    path: {path}\n    adapter: {adapter}\n"
+                   f"  terse:\n    path: {path}\n"
+                   f"    profile: terse\n"
+                   f"profiles:\n  terse:\n    system: Be brief.\n    thinking: off\n"
+                   f"    load: {{kv_bits: 8}}\n")
     out = tmp / "cap.safetensors"
     rc, io = _run(["tiny", "--config", str(cfg), "--prompts", f"a={files['harmful']}",
                    "--json", "--out", str(out)], capsys)
@@ -239,6 +322,24 @@ def test_a_config_id_resolves_and_an_entry_adapter_is_refused(tiny, capsys, monk
                    "--out", str(tmp / "o")], capsys)
     assert rc == 2
     assert "sets an adapter" in io.err
+
+    # An entry's system message and thinking switch render as serve sends them.
+    got, want = tmp / "id.safetensors", tmp / "flags.safetensors"
+    rc, io = _run(["terse", "--config", str(cfg), "--prompts", f"a={files['harmful']}",
+                   "--out", str(got)], capsys)
+    assert rc == 0, io.err
+    assert "gmlx capture does not apply: kv_bits" in io.err
+    rc, io = _run([path, "--prompts", f"a={files['harmful']}", "--system", "Be brief.",
+                   "--no-think", "--out", str(want)], capsys)
+    assert rc == 0, io.err
+    a, meta = mx.load(str(got), return_metadata=True)
+    assert meta["think"] == "off"
+    np.testing.assert_array_equal(np.array(a["a.mean"]), np.array(mx.load(str(want))["a.mean"]))
+    # A flag wins over the entry.
+    rc, io = _run(["terse", "--config", str(cfg), "--prompts", f"a={files['harmful']}",
+                   "--think", "--out", str(got)], capsys)
+    assert rc == 0, io.err
+    assert mx.load(str(got), return_metadata=True)[1]["think"] == "on"
 
 
 @pytest.mark.integration

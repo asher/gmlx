@@ -32,7 +32,8 @@ def _mint_tiny_llama(path: str, *, yarn: bool = False,
                      q8_0: bool = False, extra_tokens: tuple = (),
                      untied: bool = False,
                      nvfp4_down_scale: float | None = None,
-                     chat_template: str | None = None) -> None:
+                     chat_template: str | None = None, add_bos: bool = False,
+                     layers: int = _LAYERS, nextn: int = 0) -> None:
     """A complete, loadable llama-arch GGUF: full KV metadata + every tensor
     the 2-layer model needs (tied embeddings; F32 so no quant kernels).
     ``yarn`` adds rope-scaling KVs so the built model carries a YarnRoPE with
@@ -43,7 +44,9 @@ def _mint_tiny_llama(path: str, *, yarn: bool = False,
     ``output.weight`` for a text tower that does not tie its embeddings.
     ``nvfp4_down_scale`` writes each ffn_down as NVFP4 with that F32
     ``.scale``, as the llama.cpp converter does for a ModelOpt checkpoint.
-    ``chat_template`` writes ``tokenizer.chat_template``."""
+    ``chat_template`` writes ``tokenizer.chat_template``, and ``add_bos``
+    sets ``tokenizer.ggml.add_bos_token``. ``layers`` sets the block count,
+    and ``nextn`` writes ``llama.nextn_predict_layers``."""
     tokens = _TOKENS + list(extra_tokens)
     vocab = len(tokens)
     w = GGUFWriter(path, "llama")
@@ -52,7 +55,9 @@ def _mint_tiny_llama(path: str, *, yarn: bool = False,
         w.add_float32("llama.rope.scaling.factor", 2.0)
         w.add_uint32("llama.rope.scaling.original_context_length", 512)
     w.add_uint32("llama.embedding_length", _HID)
-    w.add_uint32("llama.block_count", _LAYERS)
+    w.add_uint32("llama.block_count", layers)
+    if nextn:
+        w.add_uint32("llama.nextn_predict_layers", nextn)
     w.add_uint32("llama.attention.head_count", _HEADS)
     w.add_uint32("llama.attention.head_count_kv", _KV)
     w.add_uint32("llama.feed_forward_length", _FFN)
@@ -73,6 +78,8 @@ def _mint_tiny_llama(path: str, *, yarn: bool = False,
     w.add_uint32("tokenizer.ggml.eot_token_id", 2)
     if chat_template is not None:
         w.add_string("tokenizer.chat_template", chat_template)
+    if add_bos:
+        w.add_bool("tokenizer.ggml.add_bos_token", True)
 
     rng = np.random.default_rng(0)
 
@@ -97,7 +104,7 @@ def _mint_tiny_llama(path: str, *, yarn: bool = False,
     t("output_norm.weight", _HID)
     if untied:
         t("output.weight", vocab, _HID)
-    for i in range(_LAYERS):
+    for i in range(layers):
         t(f"blk.{i}.attn_norm.weight", _HID)
         t(f"blk.{i}.ffn_norm.weight", _HID)
         t(f"blk.{i}.attn_q.weight", _HEADS * _HD, _HID)
