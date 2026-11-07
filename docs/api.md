@@ -335,9 +335,10 @@ cannot change it.
 The read and the parse of a body hold more than its bytes, so its price
 counts what they hold at their peak. A JSON body is read into one buffer
 and parsed once, which holds about twice its size. A data URL that the
-route decodes adds its payload and the bytes it decodes to, and each value
-the body parses to adds 80 bytes, counted from its commas, colons and
-opening brackets and braces before the parse. Each string counts at the
+route decodes adds its payload and the bytes it decodes to, and twice those
+bytes for an image that an edit or a variation checks with Pillow. Each
+value the body parses to adds 80 bytes, counted from its commas, colons
+and opening brackets and braces before the parse. Each string counts at the
 width of its own characters: a byte a character when it is plain ASCII,
 up to four when it is not or holds a `\u` escape, so a prompt that is not
 ASCII leaves an inline image at a byte a character. The text fields of a

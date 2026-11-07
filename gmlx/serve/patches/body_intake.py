@@ -185,13 +185,19 @@ def _high_bytes(buf) -> int:
                          for i in range(0, len(buf), _PIECE)))
 
 
-def json_price(buf) -> int:
+def json_price(buf, verify: bool = False) -> int:
     """The bytes the parse of the UTF-8 JSON body ``buf`` holds at its
     peak, read from its bytes with no parse (:func:`_json_plan`)."""
-    return _json_plan(buf)[0]
+    return _json_plan(buf, verify)[0]
 
 
-def _json_plan(buf) -> tuple[int, int]:
+def _verifies(path: str) -> bool:
+    """Whether the route of ``path`` verifies the inline images of its
+    JSON body with Pillow once parsed: the image edits and variations."""
+    return path.endswith(("/images/edits", "/images/variations"))
+
+
+def _json_plan(buf, verify: bool = False) -> tuple[int, int]:
     """``(price, escape)``: the bytes the parse of the UTF-8 JSON body
     ``buf`` holds at its peak, read from its bytes with no parse, and the
     bytes of it that are not ASCII when the parse escapes it to ASCII
@@ -207,7 +213,9 @@ def _json_plan(buf) -> tuple[int, int]:
     - the parse: that str, every str it makes, JSON_VALUE_BYTES for each
       value, and the str it is making, which grows past its end;
     - an inline image or video decoded after the parse: every str, a
-      data URL's payload cut from its str, and the bytes it decodes to.
+      data URL's payload cut from its str, and the bytes it decodes to;
+      with ``verify``, an image's bytes once more, as Pillow verifies a
+      PNG whose pixels are one chunk.
 
     A str the parse makes takes a byte for each byte of it, or
     WIDE_CHAR_BYTES once it is not ASCII or holds a \\u escape. It grows
@@ -245,7 +253,8 @@ def _json_plan(buf) -> tuple[int, int]:
         elif buf.find(b"\\", s, e) >= 0:
             grows = max(grows, math.ceil(size * 0.25))
         cut = own if buf.startswith(b'"data:', s) else 0
-        decode = max(decode, cut + math.ceil(size * 0.75))
+        again = verify and buf.startswith(b'"data:image/', s)
+        decode = max(decode, cut + math.ceil(size * (1.5 if again else 0.75)))
     strs += (n - longs) * (WIDE_CHAR_BYTES if wide else 1)
     values = JSON_VALUE_BYTES * (sum(buf.count(c) for c in b",:[{") + 1)
     after = strs + values + decode
@@ -426,7 +435,7 @@ def _parse(box: list, path: str, ctype: str | None, free: int | None,
         doc = parsed[1]
     else:
         try:
-            doc = _loads(box, free)
+            doc = _loads(box, free, _verifies(path))
         except RecursionError:
             raise BodyRefused(400, "the request body nests too deeply") \
                 from None
@@ -444,7 +453,7 @@ def _parse(box: list, path: str, ctype: str | None, free: int | None,
     return doc
 
 
-def _loads(box: list, free: int | None):
+def _loads(box: list, free: int | None, verify: bool = False):
     """The document of the JSON body in ``box``, which this takes, priced
     against ``free`` (:func:`json_price`), escaped to ASCII, decoded and
     parsed once. Each step drops the copy before it."""
@@ -460,7 +469,7 @@ def _loads(box: list, free: int | None):
         if free is not None and need > free:
             raise _parse_over_free(len(buf), need, free)
         buf = buf.decode(encoding).encode("utf-8", "surrogatepass")
-    need, high = _json_plan(buf)
+    need, high = _json_plan(buf, verify)
     if free is not None and need > free:
         raise _parse_over_free(len(buf), need, free)
     if high:

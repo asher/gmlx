@@ -1059,7 +1059,7 @@ def test_the_gate_leaves_an_images_body_to_the_route_and_its_price(
     monkeypatch.setattr(mg, "BODY_MAX_BYTES", len(body) // 2)
     monkeypatch.setattr(mg, "MEDIA_MAX_BYTES", len(png) // 2)
     monkeypatch.setattr(body_intake, "free_bytes",
-                        lambda: body_intake.json_price(body.encode()))
+                        lambda: body_intake.json_price(body.encode(), True))
     r = TestClient(_gated_app()).post(
         "/v1/images/edits", content=body,
         headers={"content-type": "application/json"})
@@ -1163,6 +1163,25 @@ def _photo(w: int, h: int) -> bytes:
     return buf.getvalue()
 
 
+def _photo_one_idat(w: int, h: int) -> bytes:
+    """A PNG of noise whose pixels are one IDAT chunk, as some encoders
+    write it: Pillow's verify reads the chunk whole."""
+    import struct
+    import zlib
+
+    import numpy as np
+
+    pixels = np.random.default_rng(0).integers(0, 256, (h, w * 3), np.uint8)
+    raw = np.concatenate([np.zeros((h, 1), np.uint8), pixels], 1).tobytes()
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data)))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 1)) + chunk(b"IEND", b""))
+
+
 def _heap_peak(run) -> int:
     """The Python heap ``run()``, a coroutine function, peaks at past what
     it starts with, by tracemalloc."""
@@ -1195,20 +1214,22 @@ def _request(path: str, body: bytes, ctype: str):
                    receive)
 
 
-@pytest.mark.parametrize("kind", ["json", "form"])
+@pytest.mark.parametrize("kind", ["json", "json_one_idat", "form"])
 def test_an_edit_with_a_photo_is_read_within_its_price(served, monkeypatch,
                                                        kind):
     """An edit of a photo, inline in JSON or a file in a form, fits at
     twice its body and a little more, where the copies of the body the
     read and the parse made took five; and what its read and parse hold
-    at their peak never passes the price: one byte less is refused."""
+    at their peak never passes the price: one byte less is refused. A PNG
+    whose pixels are one IDAT chunk holds that chunk again as the gate
+    verifies it."""
     import asyncio
 
     from gmlx.serve.patches import body_intake as bi
 
-    photo = _photo(768, 768)
+    photo = (_photo_one_idat if kind == "json_one_idat" else _photo)(768, 768)
     prompt = "make the sky a deep blue, keep the rest as it is"
-    if kind == "json":
+    if kind != "form":
         url = "data:image/png;base64," + base64.b64encode(photo).decode()
         body = json.dumps({"prompt": prompt, "image": url}).encode()
         ctype = "application/json"
@@ -1220,7 +1241,7 @@ def test_an_edit_with_a_photo_is_read_within_its_price(served, monkeypatch,
                 f"image/png\r\n\r\n").encode() + photo + \
             f"\r\n--{b}--\r\n".encode()
         ctype = f"multipart/form-data; boundary={b}"
-    budget = (3 if kind == "json" else 2) * len(body) + bi._SLACK
+    budget = (2 if kind == "form" else 4) * len(body) + bi._SLACK
     monkeypatch.setattr(bi, "free_bytes", lambda: budget)
     r = TestClient(_gated_app()).post("/v1/images/edits", content=body,
                                       headers={"content-type": ctype})

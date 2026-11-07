@@ -140,10 +140,10 @@ def test_a_json_parse_leaves_the_event_loop_free(monkeypatch):
     started, release = threading.Event(), threading.Event()
     real = bi._loads
 
-    def parse(box, free):
+    def parse(*a):
         started.set()
         assert release.wait(10), "the loop never ran beside the parse"
-        return real(box, free)
+        return real(*a)
 
     async def main():
         task = asyncio.create_task(
