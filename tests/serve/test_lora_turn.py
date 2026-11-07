@@ -429,6 +429,28 @@ class BuildLock:
         self.release()
 
 
+def test_a_turn_evicts_once_its_wait_on_a_stuck_release_elapses(
+        monkeypatch):
+    """A release queued behind a job that does not end keeps its bytes:
+    the turn waits on it for half its deadline at most, then evicts the
+    idle chat model and books, with the release still counted."""
+    pool = make_pool(monkeypatch, 10, retry=1)
+    image(pool, "zimage", 3)
+    qwen = chat(pool, "qwen3", 3, busy=0)
+    v = video(pool, "v", 3, busy=True)
+    q = Queued(pool, monkeypatch, "zimage")
+    w = waits(pool)
+    try:
+        turn(pool, v, 3 * GB)
+        assert not pool.entry_resident(qwen)
+        assert v.lora.pending == 3 * GB
+        assert pool.figures.tearing == 3 * GB
+        assert w.timeouts and 0 < w.timeouts[0] <= 0.5
+    finally:
+        q.run()
+    assert pool.figures.tearing == 0
+
+
 def test_a_turn_waits_for_the_build_lock_after_its_wait_aside(
         monkeypatch):
     """The wait on a release takes half the deadline: a build that holds
