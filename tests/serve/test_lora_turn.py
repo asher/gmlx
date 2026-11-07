@@ -379,6 +379,81 @@ def test_a_video_turn_waits_on_an_image_release_before_it_evicts(
     assert pool.figures.tearing == 0
 
 
+class Queued:
+    """An unload of an image entry whose pipeline release is queued on the
+    image worker behind a job: it runs once ``go`` is set."""
+
+    def __init__(self, pool, monkeypatch, name):
+        # The unload does not hold the image worker: its job held it at
+        # the unload's reservation.
+        monkeypatch.setattr(residency, "_holds_image_worker", lambda: False)
+        fp, load, release = pool._image_fns
+        self.at, self.go = threading.Event(), threading.Event()
+
+        def queued(box):
+            self.at.set()
+            assert self.go.wait(WAIT)
+            release(box)
+        pool._image_fns = (fp, load, queued)
+        self.unload = start("unload", lambda: pool.evict(name))
+        assert self.at.wait(WAIT), "no release started"
+
+    def run(self):
+        self.go.set()
+        finish(*self.unload)
+
+
+class BuildLock:
+    """The pool's build lock, setting ``blocked`` when a turn finds it
+    held by another thread once ``armed`` is set."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.armed = threading.Event()
+        self.blocked = threading.Event()
+
+    def acquire(self, blocking=True, timeout=-1):
+        if self.armed.is_set() and self.lock.acquire(blocking=False):
+            return True
+        if self.armed.is_set():
+            self.blocked.set()
+        return self.lock.acquire(blocking, timeout)
+
+    def release(self):
+        self.lock.release()
+
+    def __enter__(self):
+        self.acquire()
+
+    def __exit__(self, *exc):
+        self.release()
+
+
+def test_a_turn_waits_for_the_build_lock_after_its_wait_aside(
+        monkeypatch):
+    """The wait on a release takes half the deadline: a build that holds
+    the lock as it ends makes the turn wait for it and evict, not 503."""
+    pool = make_pool(monkeypatch, 10, retry=2)
+    image(pool, "zimage", 3)
+    qwen = chat(pool, "qwen3", 3, busy=0)
+    v = video(pool, "v", 3, busy=True)
+    q = Queued(pool, monkeypatch, "zimage")
+    lock = pool._build_lock = BuildLock()
+    w = waits(pool)
+    try:
+        job = start("video-worker-test", lambda: pool.lora_turn(
+            v, 3 * GB, subject="the test's LoRA"))
+        assert w.waiting.wait(WAIT), "the turn did not wait on the release"
+        with lock:
+            lock.armed.set()
+            assert lock.blocked.wait(WAIT)
+        finish(*job)
+        assert not pool.entry_resident(qwen)
+        assert v.lora.pending == 3 * GB
+    finally:
+        q.run()
+
+
 def test_a_video_turn_sheds_an_idle_upload_with_the_image_worker_busy(
         monkeypatch):
     """An upload is its body's bytes, made on no worker: a video turn

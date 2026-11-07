@@ -990,8 +990,9 @@ class _ResidencyPool:
         evicts idle models as a cold load does, measures and books, or
         waits for chat models in use within the deadline. A release
         queued on the other worker frees its bytes first: the turn waits
-        on it within the deadline before it sheds or evicts. Raises
-        LoraRefused: 413 when no unload makes room, else 503 with
+        on it, for at most half the deadline left, before it sheds or
+        evicts; the rest keeps the wait for the build lock.
+        Raises LoraRefused: 413 when no unload makes room, else 503 with
         Retry-After."""
         from .capacity import overcommit
 
@@ -1016,8 +1017,10 @@ class _ResidencyPool:
         if ok:
             return
         err = None
+        aside_end = None
         while True:
-            left = deadline - time.monotonic()
+            now = time.monotonic()
+            left = deadline - now
             if err is not None and left <= 0:
                 raise err
             if not self._build_lock.acquire(timeout=max(0.0, left)):
@@ -1029,19 +1032,23 @@ class _ResidencyPool:
                     raise self._late_503(owner, need, subject, retry, head,
                                          beside)
             try:
-                got = self._turn_room(owner, need, subject, hold, held,
-                                      store, retry, over, beside,
-                                      aside=left > 0)
+                got = self._turn_room(
+                    owner, need, subject, hold, held, store, retry, over,
+                    beside, aside=left > 0 and (aside_end is None
+                                                or now < aside_end))
             finally:
                 self._build_lock.release()
             if got is None:
                 return
             if got is _ASIDE:
-                # Off the build lock, which the release may wait on; past
-                # the deadline, the turn sheds and evicts as before.
+                # Off the build lock, which the release may wait on. Half
+                # the deadline left at most: past it, the turn evicts as
+                # before, with the rest to wait for the build lock.
+                if aside_end is None:
+                    aside_end = now + left / 2
                 with self._lock:
                     while self._aside(owner):
-                        left = deadline - time.monotonic()
+                        left = aside_end - time.monotonic()
                         if left <= 0:
                             break
                         self._idle.wait(left)
