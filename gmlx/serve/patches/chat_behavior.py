@@ -457,6 +457,27 @@ def _strip_xtml_sections(content: str) -> str:
     return _trim_content_ws(content)
 
 
+class _XtmlStreamStrip:
+    """Drops the XTML section markers from streamed content. A tail that
+    can start a marker waits for the next chunk."""
+
+    def __init__(self):
+        self.held = ""
+
+    def feed(self, text: str, last: bool = False) -> str:
+        text = self.held + text
+        self.held = ""
+        for m in _XTML_SECTION_MARKERS:
+            text = text.replace(m, "")
+        if not last:
+            longest = max(len(m) for m in _XTML_SECTION_MARKERS)
+            for i in range(max(0, len(text) - longest + 1), len(text)):
+                if any(m.startswith(text[i:]) for m in _XTML_SECTION_MARKERS):
+                    text, self.held = text[:i], text[i:]
+                    break
+        return text
+
+
 def _trim_content_ws(text: str) -> str:
     from gmlx.tui.reasoning import trim_content_ws
     return trim_content_ws(text)
@@ -568,6 +589,8 @@ def install_stream_thinking_seed() -> None:
                 self.open_markers = tuple(m for m, _ in self.open_close_markers)
                 self.close_markers = tuple(
                     m for _, m in self.open_close_markers)
+            if _XTML_THINK_OPEN in self.open_markers:
+                self._kq_xtml = _XtmlStreamStrip()
             prompt = _LAST_RENDERED_PROMPT.get()
             if prompt is not None:
                 self.in_thinking = _prompt_tail_opens_thinking(
@@ -591,7 +614,12 @@ def install_stream_thinking_seed() -> None:
         def feed(self, text, **kw):
             filt = getattr(self, "_kq_harmony", None)
             if filt is None:
-                return original_feed(self, text, **kw)
+                delta = original_feed(self, text, **kw)
+                xtml = getattr(self, "_kq_xtml", None)
+                if xtml is not None:
+                    delta.content = xtml.feed(
+                        delta.content or "", kw.get("last", False)) or None
+                return delta
             spans = filt.feed(text or "")
             reasoning = "".join(t for t, m in spans if m == "reason")
             content = "".join(t for t, m in spans if m == "answer")

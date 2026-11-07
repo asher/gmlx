@@ -339,6 +339,36 @@ def test_nonstream_split_strips_xtml_section_markers():
         sp_chat._LAST_RENDERED_PROMPT.reset(tok)
 
 
+@pytest.mark.parametrize("prompt,text", [
+    ("<|open|>think<|sep|>",
+     "plan<|close|>think<|sep|><|open|>response<|sep|>2+2 equals 4."
+     "<|close|>response<|sep|><|close|>message<|sep|><|end_of_msg|>"),
+    ("<|open|>response<|sep|>",
+     "2+2 equals 4.<|close|>response<|sep|><|close|>message<|sep|>"),
+])
+@pytest.mark.parametrize("step", [1, 2, 5])
+def test_stream_split_strips_xtml_section_markers(monkeypatch, prompt, text,
+                                                  step):
+    """Kimi-K3: the streamed content drops the section markers, also when
+    a marker arrives split over chunks."""
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
+    cls = rs.ThinkingStreamState
+    monkeypatch.setattr(cls, "__init__", cls.__init__)
+    monkeypatch.setattr(cls, "feed", cls.feed)
+    sp.install_stream_thinking_seed()
+    tok = sp_chat._LAST_RENDERED_PROMPT.set("<|open|>message<|sep|>" + prompt)
+    try:
+        st = cls(True, "<|open|>think<|sep|>", "<|close|>think<|sep|>")
+        deltas = [st.feed(text[i:i + step]) for i in range(0, len(text), step)]
+        deltas.append(st.feed("", last=True))
+    finally:
+        sp_chat._LAST_RENDERED_PROMPT.reset(tok)
+    reasoning = "".join(d.reasoning or "" for d in deltas)
+    content = "".join(d.content or "" for d in deltas)
+    assert reasoning == ("plan" if "think" in prompt else "")
+    assert content == "2+2 equals 4."
+
+
 def test_nonstream_split_keeps_first_line_code_indent():
     """The stock splitter .strip()s content, which deletes the first line's
     leading indent from verbatim-code replies. The seeded splitter trims

@@ -597,7 +597,9 @@ def seq_thinking_budget_criteria_cls():
 # starts only after "<|start|>assistant to=user<|message|>". The recipient
 # is optional, as in llama.cpp's Muse parsers.
 # Harmony's answer is the final channel, with the JSON-constrained variant
-# llama.cpp's response-format rule accepts.
+# llama.cpp's response-format rule accepts. Kimi K3 writes its response
+# section opener after the think section; with thinking off the prompt ends
+# with it.
 _ANSWER_HEADERS = {
     "<|start|>assistant to=self<|message|>": (
         "<|start|>assistant to=user<|message|>",
@@ -605,6 +607,7 @@ _ANSWER_HEADERS = {
     "<|start|>assistant<|channel|>analysis<|message|>": (
         "<|channel|>final<|message|>",
         "<|channel|>final <|constrain|>json<|message|>"),
+    "<|open|>think<|sep|>": ("<|open|>response<|sep|>",),
 }
 # Harmony's template pair, which a request with no family markers resolves.
 _ANSWER_HEADERS[_HARMONY_PAIR[0]] = _ANSWER_HEADERS[

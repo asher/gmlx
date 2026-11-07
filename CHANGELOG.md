@@ -238,9 +238,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the budget never ran: `thinking_budget` on `gmlx serve`, and on `gmlx run`
   and `gmlx chat` with an mmproj, and a Messages `thinking.budget_tokens`.
 - A `response_format` schema and XTC now apply on `gmlx serve` to models that
-  do not think, to Gemma 4, to Kimi K3 and Nemotron-3.5-Bolt-E4B with thinking
-  off, and to gpt-oss, Beam, MiniMax-M3, Hy3 and HY4 with `family_defaults:
-  false`. Before, they waited for a `</think>` that these models never write.
+  do not think, to Gemma 4, to Kimi K3 with thinking on or off, to
+  Nemotron-3.5-Bolt-E4B with thinking off, and to gpt-oss, Beam, MiniMax-M3,
+  Hy3 and HY4 with `family_defaults: false`. Before, they waited for a
+  `</think>` that these models never write, or refused the answer header that
+  Kimi K3 writes after its reasoning.
+- Streamed Kimi K3 replies on `gmlx serve` no longer show the
+  `<|open|>response<|sep|>` header or the section closers in the content.
 - A system or developer message on a Gemma 4 model with vision (`mmproj:`,
   `--mmproj` or an MLX-format checkpoint) renders as on the text model. It got
   an extra space before the end of its turn, one more per video, a video
