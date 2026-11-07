@@ -28,12 +28,14 @@ commits the forced close sequence directly as fully-accepted verify rounds.
 from __future__ import annotations
 
 import functools
+import logging
 import os
 import signal
 import sys
 
 import mlx.core as mx
 
+_log = logging.getLogger(__name__)
 
 # Harmony's analysis pair. Phi-3 also ends turns with <|end|>, so this pair
 # is matched by its start tag only, and the single-token vocab probe skips
@@ -700,7 +702,8 @@ class ThinkMarkers:
     budget, the structured-output gate, the reasoning split and the retire
     mirror. Never written back to the request's ``thinking_start_token`` /
     ``thinking_end_token``, so usage counts and the template kwargs see
-    what the request sent.
+    what the request sent. A value never changes after it is built, so
+    readers on other threads see one pair.
 
     ``start`` / ``end`` are the marker text, or None. ``partial`` is True
     when the request configured one marker only: each reader then keeps
@@ -713,7 +716,8 @@ class ThinkMarkers:
         self.partial = bool(partial)
         self._text = prompt if isinstance(prompt, str) else None
         self.state = think_prompt_state(self._text, start, end)
-        self._seqs = None
+        self._vocab = None
+        self._seqs = (None, None)
 
     @property
     def pair(self):
@@ -722,32 +726,39 @@ class ThinkMarkers:
             return (self.start, self.end)
         return None
 
-    def seqs(self, tokenizer):
-        """``(start_seq, end_seq)`` on ``tokenizer``. With no text pair the
-        single-token vocab probe runs, and a pair it finds becomes the
-        text pair. Computed once; call it where the request may use the
-        tokenizer (under the server's tokenizer lock, or on the engine
-        thread)."""
-        if self._seqs is not None:
-            return self._seqs
-        seqs = (None, None)
+    def on_vocab(self, tokenizer) -> ThinkMarkers:
+        """These markers with their ids on ``tokenizer``. With no text pair
+        the single-token vocab probe runs, and a pair it finds comes back
+        as a new value. The engine readers (the budget and the gate) take
+        it; the reasoning split and the retire mirror keep the pair of the
+        render. Computed once; call it where the request may use the
+        tokenizer (under the server's tokenizer lock)."""
+        if self._vocab is None:
+            self._vocab = self._probe(tokenizer)
+        return self._vocab
+
+    def seqs(self, tokenizer) -> tuple:
+        """``(start_seq, end_seq)`` of :meth:`on_vocab`."""
+        return self.on_vocab(tokenizer)._seqs
+
+    def _probe(self, tokenizer) -> ThinkMarkers:
+        found, seqs = self, (None, None)
         try:
-            if self.partial:
-                pass
-            elif self.end:
+            if self.end and not self.partial:
                 seqs = _tag_pair_seqs(tokenizer, self.start, self.end) or seqs
-            else:
+            elif not self.partial:
                 pair = _single_token_pair(tokenizer)
                 if pair is not None:
-                    self.start, self.end = pair
-                    self.state = think_prompt_state(self._text, *pair)
-                    seqs = (_tag_pair_seqs(tokenizer, *pair)
-                            or seqs) if pair[0] else (
-                        None, marker_ids(tokenizer, pair[1]) or None)
-        except Exception:  # noqa: BLE001 - a tokenizer that cannot encode
-            seqs = (None, None)
-        self._seqs = seqs
-        return seqs
+                    found = ThinkMarkers(*pair, prompt=self._text)
+                    seqs = (marker_ids(tokenizer, pair[0]) or None,
+                            marker_ids(tokenizer, pair[1]) or None)
+        except Exception as exc:  # noqa: BLE001 - a tokenizer that cannot encode
+            _log.warning("think markers %r, %r do not encode: %s; the "
+                         "structured-output gate and the budget run without "
+                         "them", self.start, self.end, exc)
+            found, seqs = self, (None, None)
+        found._seqs, found._vocab = seqs, found
+        return found
 
 
 def resolve_think_markers(start_token, end_token, processor, prompt=None,
@@ -771,18 +782,37 @@ def resolve_think_markers(start_token, end_token, processor, prompt=None,
     return ThinkMarkers(*pair, prompt=text)
 
 
+def _prompt_key(prompt):
+    if prompt is None or isinstance(prompt, str):
+        return prompt
+    n = getattr(prompt, "size", None)
+    return (int(n) if n is not None else len(prompt),
+            tuple(prompt_tail_ids(prompt)))
+
+
 def request_think_markers(args, processor, prompt=None,
                           tokenizer=None) -> ThinkMarkers:
     """The request's :class:`ThinkMarkers`: the value the render seam keeps
     on ``args``, else resolved from ``prompt`` (a raw completion has no
-    render). The second is not kept: it belongs to that prompt."""
+    render). The second decodes the prompt, so it is kept apart on
+    ``args``, keyed by the prompt, and the request's later readers take
+    it."""
     found = getattr(args, "_kq_think", None)
     if isinstance(found, ThinkMarkers):
         return found
-    return resolve_think_markers(
+    key = _prompt_key(prompt)
+    kept = getattr(args, "_kq_think_prompt", None)
+    if kept is not None and kept[0] == key:
+        return kept[1]
+    found = resolve_think_markers(
         getattr(args, "thinking_start_token", None),
         getattr(args, "thinking_end_token", None),
         processor, prompt, tokenizer)
+    try:
+        args._kq_think_prompt = (key, found)
+    except AttributeError:
+        pass
+    return found
 
 
 BARE, MAYBE, WAIT, HEADER = "bare", "maybe", "wait", "header"
@@ -882,19 +912,12 @@ def _tag_pair_seqs(tokenizer, start_tag, end_tag):
 
 
 def _single_token_pair_seqs(tokenizer):
-    """``(start_seq, end_seq)`` of the first ``_THINK_PAIRS`` pair whose end
-    marker is one token of the vocab, or None."""
-    for start_tag, end_tag in _THINK_PAIRS:
-        if (start_tag, end_tag) in _START_ONLY_PAIRS:
-            continue
-        end_id = _single_token_id(tokenizer, end_tag)
-        if end_id is None:
-            continue
-        if (start_tag, end_tag) == _GEMMA_PAIR:
-            return (marker_ids(tokenizer, start_tag) or None, (end_id,))
-        start_id = _single_token_id(tokenizer, start_tag)
-        return ((start_id,) if start_id is not None else None, (end_id,))
-    return None
+    """``(start_seq, end_seq)`` of :func:`_single_token_pair`, or None."""
+    pair = _single_token_pair(tokenizer)
+    if pair is None:
+        return None
+    return (marker_ids(tokenizer, pair[0]) or None,
+            marker_ids(tokenizer, pair[1]))
 
 
 def _thinking_token_seqs(tokenizer, start_token=None, end_token=None,

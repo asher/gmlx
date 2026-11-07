@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from queue import Empty as QueueEmpty
 from queue import Queue
 from threading import Event, Lock, Thread
-from typing import Callable, Generator, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Generator, List, Optional, Tuple
 
 import mlx.core as mx
 from fastapi import HTTPException
@@ -45,6 +45,9 @@ from ..structured import ThinkingAwareLogitsProcessor
 from ..tokenizer_utils import _ServerTokenStreamer, make_streaming_detokenizer
 from ..utils import ThinkingBudgetCriteria, load, prepare_inputs, resolve_eos_token_ids
 from .runtime import runtime
+
+if TYPE_CHECKING:
+    from gmlx.gen.thinking_budget import ThinkMarkers
 
 logger = logging.getLogger("gmlx._vendor.mlx_vlm.server")
 
@@ -1581,13 +1584,14 @@ class ResponseGenerator:
             # the prompt state, not args.enable_thinking, which is True on
             # every request that does not turn thinking off at the top
             # level. A model that never writes </think> otherwise never gets
-            # its grammar.
+            # its grammar. The budget hook resolved the markers under the
+            # tokenizer lock; this takes that value.
             markers = request_think_markers(
                 args,
                 getattr(self, "processor", None) or self.tokenizer,
                 input_ids,
                 self.tokenizer,
-            )
+            ).on_vocab(self.tokenizer)
             if markers.partial:
                 # One configured marker: the gate as before, with <think>
                 # filling the missing side.
@@ -1675,8 +1679,8 @@ class ResponseGenerator:
         args: GenerationArguments,
         processors: List[Callable[[mx.array, mx.array], mx.array]],
         prompt_ids: Optional[List[int]] = None,
-        markers=None,
-        maybe_seq=None,
+        markers: Optional["ThinkMarkers"] = None,
+        maybe_seq: Optional[Tuple[int, ...]] = None,
     ) -> List[Callable[[mx.array, mx.array], mx.array]]:
         # gmlx: ``markers`` (resolved think markers) replace the args pair;
         # ``maybe_seq`` is the start marker a reply may open first.

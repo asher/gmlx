@@ -1442,3 +1442,54 @@ def test_mtp_factory_message_replaces_wrap_phrase():
     h0 = make_mtp_finish_hook(_MsgTok(), budget=0, start_in_thinking=True,
                               message="")
     assert h0.forced_ids == [END]
+
+
+def test_the_vocab_probe_never_changes_the_shared_markers():
+    from gmlx.gen.thinking_budget import ThinkMarkers
+
+    kept = ThinkMarkers(prompt="Q <think>\n")
+    found = kept.on_vocab(_FakeTok())
+    assert found.pair == ("<think>", "</think>") and found.state == "open"
+    assert found.seqs(_FakeTok()) == ((START,), (END,))
+    # The reasoning split and the retire mirror read the render's pair.
+    assert (kept.pair, kept.start, kept.end, kept.state) == (None,) * 4
+    assert kept.on_vocab(_FakeTok()) is found
+    assert kept.seqs(_FakeTok()) == ((START,), (END,))
+
+
+def test_markers_that_do_not_encode_log_and_gate_bare(caplog):
+    from gmlx.gen.thinking_budget import BARE, ThinkMarkers, answer_gate_kind
+
+    class _Broken:
+        def encode(self, text, add_special_tokens=True):
+            raise RuntimeError("no backend")
+
+    markers = ThinkMarkers("<think>", "</think>", prompt="Q")
+    with caplog.at_level("WARNING", logger="gmlx.gen.thinking_budget"):
+        seqs = markers.seqs(_Broken())
+    assert seqs == (None, None)
+    assert "do not encode" in caplog.text
+    assert answer_gate_kind(markers, *seqs) == BARE
+
+
+def test_a_raw_prompt_resolves_once_per_request():
+    from types import SimpleNamespace
+
+    from gmlx.gen import thinking_budget as tb
+
+    decodes = []
+
+    class _Tok(_FakeTok):
+        def decode(self, ids, **_kw):
+            decodes.append(list(ids))
+            return "Q <think>\n"
+
+    args = SimpleNamespace(thinking_start_token="<think>",
+                           thinking_end_token="</think>")
+    ids = mx.array([[1, 2, START, NL]])
+    first = tb.request_think_markers(args, None, ids, _Tok())
+    assert tb.request_think_markers(args, None, ids, _Tok()) is first
+    assert first.state == "open" and len(decodes) == 1
+    # Another prompt on the same arguments resolves again.
+    other = tb.request_think_markers(args, None, mx.array([[1, 2]]), _Tok())
+    assert other is not first and len(decodes) == 2

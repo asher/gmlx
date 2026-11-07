@@ -17,6 +17,7 @@ from gmlx.gen.thinking_budget import (
     marker_ids,
     normalize_end_aliases,
     open_think_pair,
+    processor_template,
     prompt_opens_block,
     prompt_tail_ids,
     request_think_markers,
@@ -118,14 +119,7 @@ def _template_call_keys() -> frozenset:
     return frozenset(keys)
 
 
-def _model_template_text(processor) -> str:
-    """The serving model's chat template source, for control mapping; "" when
-    the processor carries none."""
-    for obj in (processor, getattr(processor, "tokenizer", None)):
-        t = getattr(obj, "chat_template", None)
-        if isinstance(t, str) and t:
-            return t
-    return ""
+_model_template_text = processor_template
 
 
 def _stash_template_kwargs(args, request, _processor):
@@ -335,9 +329,8 @@ def _budget_markers(rg, args, input_ids) -> ThinkMarkers:
     The processor is the one the server renders with: the text processor
     forwards the loader wrapper's markers, the raw tokenizer has none."""
     processor = getattr(rg, "processor", None) or rg.tokenizer
-    found = request_think_markers(args, processor, input_ids, rg.tokenizer)
-    found.seqs(rg.tokenizer)
-    return found
+    return request_think_markers(
+        args, processor, input_ids, rg.tokenizer).on_vocab(rg.tokenizer)
 
 
 def _budget_marker_texts(found: ThinkMarkers, args) -> tuple[str, str]:
@@ -348,6 +341,16 @@ def _budget_marker_texts(found: ThinkMarkers, args) -> tuple[str, str]:
     gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     return (args.thinking_start_token or gen.DEFAULT_THINKING_START_TOKEN,
             args.thinking_end_token or gen.DEFAULT_THINKING_END_TOKEN)
+
+
+def _gates_answer(args) -> bool:
+    """Whether the request's processors wait for the answer: a rendered
+    request, or one with processors (moved aside on MTP models)."""
+    from .spec_processors import _DEFERRED_ATTR
+
+    return (isinstance(getattr(args, "_kq_think", None), ThinkMarkers)
+            or getattr(args, "logits_processors", None) is not None
+            or getattr(args, _DEFERRED_ATTR, None) is not None)
 
 
 def _prompt_opens_thinking_tokens(rg, args, input_ids) -> bool:
@@ -384,12 +387,13 @@ def install_thinking_budget_fix() -> None:
     armed_cls = _armed_thinking_budget_criteria_cls()
 
     def _make_thinking_budget_criteria(self, args, input_ids):
-        kept = getattr(args, "_kq_think", None)
-        if isinstance(kept, ThinkMarkers):
-            # Under the tokenizer lock, for the structured-output gate too.
-            kept.seqs(self.tokenizer)
         budget = getattr(args, "thinking_budget", None)
-        if budget is None or budget < 0:
+        armed = budget is not None and budget >= 0
+        if armed or _gates_answer(args):
+            # Under the tokenizer lock, once per request: the MTP hook and
+            # the structured-output gate on the GPU worker take this value.
+            _budget_markers(self, args, input_ids)
+        if not armed:
             return None
         # Honor an explicit budget regardless of enable_thinking: a group/profile
         # config may disable it, or the model may ignore the flag and emit <think>
