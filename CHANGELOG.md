@@ -43,8 +43,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `reasoning_budget_tokens` and `reasoning_budget_message` name the two
   fields. See [Thinking budget](docs/api.md#thinking-budget).
 - An adapter that changes expert weights loads on models whose MoE blocks run
-  fused, such as Qwen3.5 and Qwen3.6 MoE, Qwen3.8-Flash-Next and the Gemma 4
-  MoE models, when they run in memory. In `gmlx serve` a block leaves its
+  fused, such as Qwen3.5 and Qwen3.6 MoE, when they run in memory. In `gmlx serve` a block leaves its
   fused path only in a step where a request has one of its adapters on.
 - `/v1/chat/completions` continues a partial last assistant message with
   `continue_final_message` and `add_generation_prompt: false`, in the prompt

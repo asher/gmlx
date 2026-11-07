@@ -244,10 +244,9 @@ published for llama.cpp, and llama.cpp loads gmlx adapters with `--lora`.
   projections of experts or the embeddings. It also refuses expert weights
   on gpt-oss and on native-FP expert stacks, which `GMLX_FUSED_MOE=0` loads
   unfused.
-- On a model whose MoE blocks run fused, such as Qwen3.5 and Qwen3.6 MoE,
-  Qwen3.8-Flash-Next and the Gemma 4 MoE models, a block runs its slower
-  unfused path only in a step where a request has one of the block's
-  adapters on. In `gmlx serve` the other steps keep the fused speed. `gmlx
+- On a model whose MoE blocks run fused, such as Qwen3.5 and Qwen3.6 MoE, a
+  block runs its slower unfused path only in a step where a request has one
+  of the block's adapters on. In `gmlx serve` the other steps keep the fused speed. `gmlx
   run`, `gmlx bench` and `gmlx chat` run every step of an adapted block
   unfused.
 - An adapter that changes expert weights on such a model needs the experts
