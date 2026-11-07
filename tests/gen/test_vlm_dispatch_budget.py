@@ -120,3 +120,20 @@ def test_a_prompt_that_opens_reasoning_counts_from_the_start(monkeypatch):
                           "Thinking hard about it now.<|eom|>" + _ANSWER,
                           _ANSWER, prompt=prompt)
     assert text == "Thinking hard\n<|eom|>" + _ANSWER
+
+
+def test_prompt_reasoning_after_the_start_marker_counts(monkeypatch):
+    # "Th" and "inking" in the prompt spend two of the three tokens.
+    prompt = _PROMPT + " to=self<|message|>Thinking"
+    tok, text = _generate(monkeypatch, at.AtemTokenizer(),
+                          " hard about it now.<|eom|>" + _ANSWER,
+                          _ANSWER, prompt=prompt)
+    assert text == " hard\n<|eom|>" + _ANSWER
+    assert tok.thinking_budget_criteria.thinking_token_count == 3
+
+
+def test_budget_minus_one_sets_no_budget(monkeypatch):
+    tok, text = _generate(monkeypatch, at.AtemTokenizer(),
+                          _REASON + _ANSWER, "", budget=-1)
+    assert text == _REASON + _ANSWER
+    assert tok.thinking_budget_criteria is None
