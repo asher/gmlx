@@ -382,7 +382,10 @@ def test_single_model_cfg_adapter_passthrough(tmp_path):
 
 def test_single_model_adapter_strength_is_the_entry_default(tmp_path):
     """--adapter PATH:0.5 serves the adapter at 0.5 to a request that sets
-    no strength, and a request's strength replaces it."""
+    no strength, and a request's strength replaces it. The forward takes
+    these scales through the row channel: tests/test_lora_rows.py checks
+    the uid publish, and tests/load/test_lora_strength.py that a published
+    strength s gives s times the delta."""
     from gmlx.config import resolve_model
     from gmlx.serve.lora_request import request_lora
 
