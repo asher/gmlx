@@ -97,3 +97,18 @@ def test_the_reader_turns_by_exif_and_drops_alpha(tmp_path, reader):
     Image.fromarray(rgba[..., :3]).save(plain)
     np.testing.assert_array_equal(images.read(str(plain), reader),
                                   rgba[..., :3])
+
+
+def test_a_truncated_image_names_its_file_through_pillow(tmp_path):
+    """A PNG cut short, as a copy that stopped: Pillow's error names the
+    file, as ffmpeg's does, and is the ValueError a run refuses with."""
+    from PIL import Image
+
+    rng = np.random.default_rng(5)
+    path = tmp_path / "first.png"
+    Image.fromarray(rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)).save(
+        path)
+    data = path.read_bytes()
+    path.write_bytes(data[:len(data) // 2])
+    with pytest.raises(ValueError, match=f"^Pillow could not read {path}: "):
+        images.read(str(path), None)
