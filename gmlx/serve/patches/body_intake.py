@@ -145,6 +145,11 @@ _LONG = 256
 _LONG_STR = re.compile(rb'(?:[^"]++|"(?>(?:[^"\\]|\\.){0,%d})")*+'
                        rb'("(?:[^"\\]++|\\.)*+")' % _LONG, re.S)
 _HIGH = re.compile(rb"[\x80-\xff]")
+# What the escape to ASCII would change the parse of: a backslash, not
+# itself escaped, before a character that is not ASCII, which then makes
+# an escape of its own, and a surrogate encoded as UTF-8, which joins the
+# surrogate beside it.
+_NO_ESCAPE = re.compile(rb'(?<!\\)(?:\\\\)*\\[\x80-\xff]|\xed[\xa0-\xbf]')
 # The UTF-8 lead bytes of a character past U+FFFF, and of one past U+00FF.
 _LEAD4 = re.compile(rb"[\xf0-\xff]")
 _LEAD2 = re.compile(rb"[\xc4-\xef]")
@@ -202,7 +207,7 @@ def _json_plan(buf, verify: bool = False) -> tuple[int, int]:
     """``(price, escape)``: the bytes the parse of the UTF-8 JSON body
     ``buf`` holds at its peak, read from its bytes with no parse, and the
     bytes of it that are not ASCII when the parse escapes it to ASCII
-    first, the way that holds less, else 0. A str takes the width of its widest character, so a body
+    first, the way that holds less and parses the same, else 0. A str takes the width of its widest character, so a body
     decoded as it is takes the width of its widest at every character; a
     body escaped to ASCII takes a byte at each, at 3 bytes for each byte
     that is not ASCII. The strs the parse makes take their own width
@@ -263,7 +268,7 @@ def _json_plan(buf, verify: bool = False) -> tuple[int, int]:
     kind = _kind(buf)
     plain = max(n + n * _DECODE[kind],
                 n * _DECODED[kind] + strs + grows + values, after)
-    if not high:
+    if not high or _NO_ESCAPE.search(buf):
         return plain + _SLACK, 0
     escaped = n + 2 * high
     ascii_ = max(2 * n + 2 * high, 2 * escaped,

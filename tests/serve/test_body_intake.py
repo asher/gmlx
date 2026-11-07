@@ -105,8 +105,11 @@ def _json_request(body: bytes, ctype: str = "application/json"):
     '{"prompt": "un caf\u00e9 \u4e00 \U0001F600", "seed": 1}'.encode(),
     # A body that holds a \x or \U of its own takes the escape's slow way.
     '{"prompt": "C:\\\\xampp \u00e9 \\\\U", "x": [1.5, null]}'.encode(),
-    # A surrogate encoded as UTF-8 reads as json.loads reads it.
+    # A surrogate encoded as UTF-8 reads as json.loads reads it, and so
+    # does a pair of them, or one before the \u escape of the other.
     b'{"prompt": "a \xed\xa0\x80 b \xc3\xa9"}',
+    b'{"prompt": "a \xed\xa0\xbd\xed\xb8\x80 \xc3\xa9"}',
+    b'{"prompt": "\xed\xa0\xbd\\ude00 \xc3\xa9"}',
     b'\xef\xbb\xbf{"prompt": "\xc3\xa9"}',
     '{"prompt": "\u00e9\U0001F600"}'.encode("utf-16"),
 ])
@@ -119,13 +122,18 @@ def test_a_json_body_reads_as_json_loads_reads_it(body):
         json.loads(body)
 
 
-def test_a_json_body_that_is_not_utf8_is_refused_as_json_loads_refuses_it():
+@pytest.mark.parametrize("body", [
+    b'{"prompt": "caf\xe9 au lait \xc3\xa9"}',
+    # A backslash before a character that is not ASCII escapes nothing.
+    '{"prompt": "\\\U0001F600"}'.encode(),
+    '{"prompt": "a \\\\\\\u00e9"}'.encode(),
+])
+def test_a_json_body_json_loads_refuses_is_refused_with_its_error(body):
     import asyncio
 
-    body = b'{"prompt": "caf\xe9 au lait \xc3\xa9"}'
     with pytest.raises(bi.BodyRefused) as e:
         asyncio.run(bi.read_json(_json_request(body), 1 << 30))
-    with pytest.raises(UnicodeDecodeError) as want:
+    with pytest.raises(ValueError) as want:
         json.loads(body)
     assert e.value.status == 400
     assert str(e.value) == f"the request body is not valid JSON ({want.value})"
