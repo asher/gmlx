@@ -99,9 +99,10 @@ def test_the_reader_turns_by_exif_and_drops_alpha(tmp_path, reader):
                                   rgba[..., :3])
 
 
-def test_a_truncated_image_names_its_file_through_pillow(tmp_path):
+def test_a_truncated_image_names_its_file(tmp_path, reader):
     """A PNG cut short, as a copy that stopped: Pillow's error names the
-    file, as ffmpeg's does, and is the ValueError a run refuses with."""
+    file, as ffmpeg's does, and is the ValueError a run refuses with. The
+    ffmpeg reader reads its EXIF orientation through Pillow first."""
     from PIL import Image
 
     rng = np.random.default_rng(5)
@@ -111,4 +112,4 @@ def test_a_truncated_image_names_its_file_through_pillow(tmp_path):
     data = path.read_bytes()
     path.write_bytes(data[:len(data) // 2])
     with pytest.raises(ValueError, match=f"^Pillow could not read {path}: "):
-        images.read(str(path), None)
+        images.read(str(path), reader)
