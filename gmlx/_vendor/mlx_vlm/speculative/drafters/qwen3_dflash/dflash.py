@@ -211,7 +211,10 @@ class DFlashDraftModel(nn.Module):
                 raise AttributeError(
                     f"Cannot find embed_tokens in {type(target_model).__name__}"
                 )
-            self.embed_tokens = (
+            from gmlx.load.modules import lora_base
+
+            # The base table: a draft call publishes no row vector.
+            self.embed_tokens = lora_base(
                 inner.embed_tokens
                 if hasattr(inner, "embed_tokens")
                 else inner.embeddings

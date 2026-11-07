@@ -224,7 +224,10 @@ class Eagle3DraftModel(nn.Module):
             inner = target_model.language_model.model
 
         if inner is not None:
-            target_embed = inner.embed_tokens
+            from gmlx.load.modules import lora_base
+
+            # The base table: a draft call publishes no row vector.
+            target_embed = lora_base(inner.embed_tokens)
             weight = getattr(target_embed, "weight", None)
             if weight is not None and tuple(weight.shape) == tuple(
                 self.embed_tokens.weight.shape

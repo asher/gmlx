@@ -240,8 +240,9 @@ class MuseGlimmerAssistantDraftModel(nn.Module):
         self.validate_target_compatibility(target_model)
         # Muse's target embedding applies a scale-free RMSNorm during normal
         # decoding. DFlash intentionally consumes the raw lookup table.
-        self.embed_tokens = inner.embed_tokens
         from gmlx.load.modules import lora_base
+
+        self.embed_tokens = lora_base(inner.embed_tokens)
 
         # gmlx: the base head. An output.weight adapter's wrapper reads a row
         # vector, and a draft call publishes none.

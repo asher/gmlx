@@ -89,7 +89,10 @@ class Gemma4AssistantDraftModel(nn.Module):
         ):
             inner = target_model.language_model.model
         if inner is not None:
-            self._input_embed = inner.embed_tokens
+            from gmlx.load.modules import lora_base
+
+            # The base table: a draft call publishes no row vector.
+            self._input_embed = lora_base(inner.embed_tokens)
             self._input_embed_scale = float(getattr(inner, "embed_scale", 1.0))
 
         try:
