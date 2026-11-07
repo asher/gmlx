@@ -285,7 +285,7 @@ class LagunaDFlashDraftModel(nn.Module):
         )
         from gmlx.load.modules import lora_base
 
-        # The base table: a draft call publishes no row vector.
+        # gmlx: the base table. A draft call publishes no row vector.
         self.embed_tokens = lora_base(inner.embed_tokens)
         self.embed_scale = getattr(self.embed_tokens, "embed_scale", 1.0)
 

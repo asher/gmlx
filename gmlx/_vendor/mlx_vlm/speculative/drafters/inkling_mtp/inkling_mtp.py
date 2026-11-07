@@ -151,7 +151,7 @@ class InklingMTPDraftModel(nn.Module):
 
         from gmlx.load.modules import lora_base
 
-        # The base table: a draft call publishes no row vector.
+        # gmlx: the base table. A draft call publishes no row vector.
         self._input_embed = lora_base(inner.embed_tokens)
         lm = getattr(target_model, "language_model", target_model)
 

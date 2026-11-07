@@ -242,6 +242,7 @@ class MuseGlimmerAssistantDraftModel(nn.Module):
         # decoding. DFlash intentionally consumes the raw lookup table.
         from gmlx.load.modules import lora_base
 
+        # gmlx: the base table. A draft call publishes no row vector.
         self.embed_tokens = lora_base(inner.embed_tokens)
 
         # gmlx: the base head. An output.weight adapter's wrapper reads a row
