@@ -821,6 +821,55 @@ def test_a_served_render_keeps_the_templates_thinking_default():
                                 enable_thinking=False) == "NOTHINK"
 
 
+def _served(raw):
+    """The processor serve builds for a text GGUF, over a real mlx-lm
+    TokenizerWrapper."""
+    from gmlx._vendor.mlx_lm.tokenizer_utils import TokenizerWrapper
+
+    wrapper = TokenizerWrapper(raw)
+    return wrapper, serving._GgufServerProcessor(wrapper, raw, None)
+
+
+class _PlainGateTok(_GateTok):
+    """A template that thinks unless told not to, over a vocab with no
+    think tokens."""
+    eos_token_id = 0
+
+    def get_vocab(self):
+        return {"a": 0}
+
+
+class _ThinkVocabOffTok(_GateTok):
+    """A template that thinks only when asked, over a vocab with think
+    tokens, as Qwen3.5-9B and Gemma 4 have."""
+    eos_token_id = 0
+    chat_template = ("{% if enable_thinking is defined and enable_thinking "
+                     "%}THINK{% else %}NOTHINK{% endif %}")
+
+    def get_vocab(self):
+        return {"a": 0, "<think>": 1, "</think>": 2}
+
+
+def test_a_served_text_render_keeps_a_template_default_on():
+    pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
+    wrapper, proc = _served(_PlainGateTok())
+    assert not wrapper.has_thinking
+    msgs = [{"role": "user", "content": "hi"}]
+    assert pu.get_chat_template(proc, msgs, True) == "THINK"
+    assert pu.get_chat_template(proc, msgs, True,
+                                enable_thinking=False) == "NOTHINK"
+
+
+def test_a_served_text_render_keeps_a_template_default_off():
+    pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
+    wrapper, proc = _served(_ThinkVocabOffTok())
+    assert wrapper.has_thinking
+    msgs = [{"role": "user", "content": "hi"}]
+    assert pu.get_chat_template(proc, msgs, True) == "NOTHINK"
+    assert pu.get_chat_template(proc, msgs, True,
+                                enable_thinking=True) == "THINK"
+
+
 # The old-style role dispatch from issue #66: no developer alias, else-raise.
 _ROLE_RAISE_TMPL = ("{% if m.role == 'system' %}{% elif m.role == 'user' %}"
                     "{% else %}{{ raise_exception('Unexpected message role.') }}"
