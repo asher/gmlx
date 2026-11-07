@@ -1490,6 +1490,7 @@ shapes that ran still get their records, each with an `error` field.
 | `MODEL`, positional | Required | Bench the `video_models` entry of this id, or this DiT GGUF. |
 | `--config FILE` | The first default location | Read the `video_models` entry that `MODEL` names from this config. |
 | `--variant NAME` | The entry's `variant`, else from the weights | Run the DiT as this variant. |
+| `--attention {dense,int8}` | The entry's, else `dense` | Run the DiT's attention as this kind, as `generate` does. |
 | `--shapes LIST` | `512x512x22,768x768x124,1344x768x124` | Bench these shapes, each `WxHxF` with F frames. |
 | `--steps N` | `3` | Sample each shape for N steps. |
 | `--seed N` | `0` | Seed every shape. |
