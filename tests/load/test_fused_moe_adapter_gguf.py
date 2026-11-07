@@ -6,10 +6,14 @@ block with the fused blocks off, at the input it saw in that step, and the
 logits move from the base. On the MTP target of a qwen35moe file, a verify
 block applies the adapter as a plain forward over the same tokens does.
 
-The logits of the whole step with the fused blocks off are a loose
-reference only: the stock router rounds its scores to bfloat16 and flips an
-expert at a near tie on some unadapted layers, where the fused router
-keeps float32.
+The per-block checks are the claim. Each adapted block also matches the
+stock leaf with the plain-op delta (``_FUSED_MOE_ENABLED`` off), so the
+check does not rest on the fused epilogue alone. The logits of the whole
+step with the fused blocks off are a sanity check only: the stock router
+rounds its scores to bfloat16 and flips an expert at a near tie on some
+unadapted layers, where the fused router keeps float32. Their bound is the
+same step's gap with the slot off plus half the move, so it fails when the
+delta is skipped, but not when one adapted layer is.
 
 ``integration``; skips unless ``KQUANT_TEST_GGUF_DIR`` holds a qwen35moe
 GGUF, or the Qwen3.8-Flash-Next UD-IQ4_XS shards for the qwen4exp row.
@@ -37,13 +41,15 @@ if os.environ.get("KQUANT_FORCE_CPU") or not mx.metal.is_available():
 
 PROMPT = "The capital of France is Paris. The capital of Italy is"
 LAYERS = (0, 1)
-# Relative L2 bounds, set on the first runs (M3 Max, qwen35moe Q6_K). An
-# adapted block against the same block with the fused blocks off, at the
-# decode step's input: measured 0.0096 at most.
+# Relative L2 bounds, set on the first runs (M3 Max, qwen35moe Q6_K and
+# IQ3_M). An adapted block against the same block with the fused blocks
+# off, at the decode step's input: measured 0.0096 at most; against the
+# stock leaf: 0.0146 at most.
 BLOCK_TOL = 0.02
-# The step's logits against the step with the fused blocks off: measured
-# 0.041, against a floor of 0.020 with the slot off.
-LOGITS_TOL = 0.08
+# The step's logits against the step with the fused blocks off may differ
+# by the gap with the slot off plus this share of the move: measured 0.041,
+# against a gap of 0.020 and a move of 0.092.
+MOVE_SHARE = 0.5
 # The least move of the logits from the base with the slot on: measured
 # 0.092 (plain) and 0.129 (verify).
 MIN_MOVE = 0.05
@@ -221,10 +227,12 @@ def _fused_block_check(gguf, tmp_path, monkeypatch):
         with monkeypatch.context() as m:
             m.setattr(modules, "_FUSED_MOE_BLOCK_ENABLED", False)
             ref = step(1)
+            gap = _rel(base, step(0))
         move, err = _rel(on, base), _rel(on, ref)
-        print(f"[{arch}] logits: slot on vs base {move:.4f}, vs blocks off {err:.4f}")
+        print(f"[{arch}] logits: slot on vs base {move:.4f}, vs blocks off "
+              f"{err:.4f}, gap with the slot off {gap:.4f}")
         assert move > MIN_MOVE
-        assert err < LOGITS_TOL
+        assert err < gap + MOVE_SHARE * move
         for b in adapted:
             x = seen[id(b)]
             with lora_rows.bind(reg), lora_rows.published([1]):
@@ -232,11 +240,15 @@ def _fused_block_check(gguf, tmp_path, monkeypatch):
                 with monkeypatch.context() as m:
                     m.setattr(modules, "_FUSED_MOE_BLOCK_ENABLED", False)
                     want = _np(b(x))
+                with monkeypatch.context() as m:
+                    m.setattr(modules, "_FUSED_MOE_ENABLED", False)
+                    stock = _np(b(x))
             with lora_rows.bind(reg), lora_rows.published([0]):
                 bare = _np(b(x))
             print(f"[{arch}] block: vs blocks off {_rel(got, want):.4f}, "
-                  f"move {_rel(got, bare):.4f}")
+                  f"vs stock {_rel(got, stock):.4f}, move {_rel(got, bare):.4f}")
             assert _rel(got, want) < BLOCK_TOL
+            assert _rel(got, stock) < BLOCK_TOL
             assert _rel(got, bare) > 10 * BLOCK_TOL
     finally:
         _free(raw)
