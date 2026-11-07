@@ -186,6 +186,26 @@ def test_a_clip_deleted_as_it_goes_out_counts_in_the_store_until_sent(
     assert store.room() == room + 1000
 
 
+def test_a_clip_sent_twice_and_deleted_counts_once_until_both_end(
+        tmp_path):
+    """Two answers of one clip each hold a link to it: once a DELETE
+    removes the clip, the store counts its bytes once, until the last
+    answer ends."""
+    store, clock, driver = _store(
+        tmp_path, lambda j, s: _clip(j, s, b"x" * 1000),
+        store_max_bytes=5000)
+    job = _submit(store)
+    driver.run()
+    room = store.room()
+    links = [store.serve(job.id)[1] for _ in range(2)]
+    store.delete(job.id)
+    assert store.room() == room
+    os.unlink(links[0])
+    assert store.room() == room
+    os.unlink(links[1])
+    assert store.room() == room + 1000
+
+
 def test_a_queued_job_cancelled_never_runs_and_its_inputs_go(tmp_path):
     ran = []
     store, clock, driver = _store(tmp_path, lambda j, s: ran.append(j))

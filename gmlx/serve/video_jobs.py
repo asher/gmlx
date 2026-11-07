@@ -323,18 +323,19 @@ class VideoJobs:
                 + sum(self.pending.values()))
 
     def _sent_bytes(self) -> int:
-        """The bytes of the links in serving/ whose clip is gone from
-        files/: a link to a clip still there counts with the clip."""
+        """The bytes of the clips that only links in serving/ hold: a clip
+        still in files/ counts with files/. Each clip counts once, however
+        many answers send it."""
         serving = os.path.join(self.root, "serving")
-        n = 0
+        links: dict[int, list] = {}
         with contextlib.suppress(FileNotFoundError):
             with os.scandir(serving) as it:
                 for entry in it:
                     with contextlib.suppress(OSError):
                         st = entry.stat()
-                        if st.st_nlink == 1:
-                            n += st.st_size
-        return n
+                        links.setdefault(st.st_ino, []).append(st)
+        return sum(sts[0].st_size for sts in links.values()
+                   if sts[0].st_nlink == len(sts))
 
     def room(self) -> int:
         """The bytes left in the store for a new job's inputs, after a
