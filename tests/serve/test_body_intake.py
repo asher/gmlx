@@ -336,52 +336,78 @@ def test_a_data_url_in_an_edit_forms_text_field_is_read_within_its_price():
     assert e.value.status == 413
 
 
+class _Turn:
+    """A parse turn that sets ``parked`` when a body waits on it while
+    another holds it."""
+
+    def __init__(self):
+        import asyncio
+        import threading
+
+        self.sem = asyncio.Semaphore(1)
+        self.parked = threading.Event()
+
+    def locked(self):
+        return self.sem.locked()
+
+    async def acquire(self):
+        if self.sem.locked():
+            self.parked.set()
+        return await self.sem.acquire()
+
+    def release(self):
+        self.sem.release()
+
+
+def _own_turn(monkeypatch) -> _Turn:
+    """The parse turn of the next event loop, recorded."""
+    turn = _Turn()
+
+    class Turns(dict):
+        def get(self, loop, default=None):
+            return turn
+    monkeypatch.setattr(bi, "_TURNS", Turns())
+    return turn
+
+
 def test_two_json_parses_take_their_turns(monkeypatch):
     """Each parse is priced against the same free figure, which books
-    nothing: the second waits for the first to end before its worker
-    thread starts, so their peaks never add up."""
+    nothing: the second waits on the turn the first holds, and its parse
+    starts only once the first ends, so their peaks never add up."""
     import asyncio
     import threading
 
-    started, release = threading.Event(), threading.Event()
-    real, real_to_thread = bi._loads, asyncio.to_thread
-    entered: list = []
+    first, release = threading.Event(), threading.Event()
+    second = threading.Event()
+    real = bi._loads
 
-    def parse(*a):
-        if not started.is_set():
-            started.set()
+    def parse(box, *a):
+        if bytes(box[0]) == b'{"prompt": "a cat"}':
+            first.set()
             assert release.wait(10), "the first parse was never let go"
-        return real(*a)
-
-    async def to_thread(fn, *a, **kw):
-        entered.append(fn)
-        return await real_to_thread(fn, *a, **kw)
+        else:
+            second.set()
+        return real(box, *a)
 
     async def main():
-        read = asyncio.Event()
-        second = _json_request(b'{"prompt": "a dog"}')
-        receive = second.receive
-
-        async def last():
-            message = await receive()
-            if not message.get("more_body"):
-                read.set()
-            return message
-        second._receive = last
         one = asyncio.create_task(
             bi.read_json(_json_request(b'{"prompt": "a cat"}'), 1 << 30))
-        await real_to_thread(started.wait, 10)
-        two = asyncio.create_task(bi.read_json(second, 1 << 30))
-        # The second body is read, and its task runs on to its first wait
-        # before this one wakes.
-        await read.wait()
-        waited = len(entered) == 1
+        await asyncio.to_thread(first.wait, 10)
+        two = asyncio.create_task(
+            bi.read_json(_json_request(b'{"prompt": "a dog"}'), 1 << 30))
+        # Until the second body parks on the turn, or its parse starts.
+        for _ in range(1_000_000):
+            if turn.parked.is_set() or second.is_set():
+                break
+            await asyncio.sleep(0)
+        parked, started = turn.parked.is_set(), second.is_set()
         release.set()
-        return waited, await one, await two
+        return parked, started, await one, await two
+    turn = _own_turn(monkeypatch)
     monkeypatch.setattr(bi, "_loads", parse)
-    monkeypatch.setattr(asyncio, "to_thread", to_thread)
-    waited, one, two = asyncio.run(main())
-    assert waited, "the second parse started beside the first"
+    parked, started, one, two = asyncio.run(main())
+    assert parked and not started, \
+        "the second parse started beside the first"
     assert (one, two) == ({"prompt": "a cat"}, {"prompt": "a dog"})
 
 
