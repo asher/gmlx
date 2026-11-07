@@ -212,12 +212,12 @@ def _same(now, mirror) -> list:
 
 def test_h4_a_vlm_load_wraps_the_render_functions():
     from gmlx.serve.patches import render
-    from gmlx.tui.reasoning import install_template_default_thinking
+    from gmlx.upstream.system_content_fix import install_system_content_fix
 
     _MIRRORS["render"] = _bound(_RENDER)
     # load_vlm_model wraps get_chat_template, and the serve patches' nested
     # layer wraps both.
-    install_template_default_thinking()
+    install_system_content_fix()
     render._install_nested_in_place(
         importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils"))
     assert _same(_bound(_RENDER), _MIRRORS["render"]) == [False, False]
@@ -399,8 +399,7 @@ _VLM_WRAPS = '''
 import importlib
 
 from gmlx.serve.patches import render
-from gmlx.tui import reasoning
-from gmlx.upstream import single_bos_fix
+from gmlx.upstream import single_bos_fix, system_content_fix
 from gmlx.upstream.patching import wrapped_with
 
 
@@ -411,7 +410,7 @@ def wraps() -> dict:
     utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
     got = {
         "get_chat_template": wrapped_with(pu.get_chat_template,
-                                          reasoning._TEMPLATE_DEFAULT_FLAG),
+                                          system_content_fix._FLAG),
         "apply_chat_template": wrapped_with(pu.apply_chat_template,
                                             render._NESTED_FLAG),
         "process_inputs": wrapped_with(utils.process_inputs,
@@ -428,8 +427,7 @@ import importlib
 import pytest
 
 from gmlx.serve.patches import render
-from gmlx.tui import reasoning
-from gmlx.upstream import single_bos_fix
+from gmlx.upstream import single_bos_fix, system_content_fix
 from vlm_wraps import wraps
 
 
@@ -437,7 +435,7 @@ from vlm_wraps import wraps
 def vlm_load():
     # Two installs load_vlm_model runs, and the serve patches' nested
     # render layer, in a module fixture as the real-file VLM tests do.
-    reasoning.install_template_default_thinking()
+    system_content_fix.install_system_content_fix()
     render._install_nested_in_place(
         importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils"))
     single_bos_fix.install_single_bos_fix()

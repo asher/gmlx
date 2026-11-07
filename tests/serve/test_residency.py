@@ -2038,7 +2038,9 @@ def test_image_eviction_with_a_cyclic_busy_hold_does_not_deadlock(monkeypatch):
         t = threading.Thread(target=pool.evict, args=("/dit.safetensors",),
                              daemon=True)
         t.start()
-        t.join(5.0)
+        # Two full collections run on the test process's heap. A deadlock
+        # never ends, so the bound only keeps one from holding the run.
+        t.join(60)
         assert not t.is_alive(), "evict deadlocked against the image worker"
     finally:
         gc.enable()
