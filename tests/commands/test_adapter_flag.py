@@ -73,7 +73,7 @@ def _parsers():
     }
 
 
-@pytest.mark.parametrize("command", ["run", "chat", "serve", "capture"])
+@pytest.mark.parametrize("command", ["run", "chat", "serve", "capture", "kld"])
 def test_every_text_command_parses_the_flag_one_way(command):
     parse = _parsers()[command]
     args = parse(["--adapter", "my:dir/a.gguf:0.5", "--adapter", "b.gguf"])

@@ -13,6 +13,7 @@ from gmlx.gen import kld as K
 V = 41
 N_CTX = 16
 _RELEASE = cmd._release
+_SLOT_SHIFT = (0.3, -0.7)
 
 
 def _fake_logits(ids: np.ndarray, shift: float) -> np.ndarray:
@@ -30,6 +31,9 @@ class _Model:
 
 
 class _Scorer:
+    """MODEL's logits are the reference's shifted by 0.5, plus each slot's
+    strength times the slot's own shift."""
+
     gap = 0.0
     forwards: list = []
 
@@ -38,9 +42,17 @@ class _Scorer:
         self.width = V
         self.first, self.n_scored = K.scored_span(n_ctx)
 
-    def slices(self, ids):
-        self.forwards.append(ids.shape[0])
-        z = _fake_logits(ids, self.shift).reshape(-1, V)
+    def slices(self, ids, uids=None):
+        from gmlx import lora_rows
+
+        uids = [cmd.BARE] * len(ids) if uids is None else list(uids)
+        self.forwards.append(uids)
+        rows = []
+        for row, uid in zip(ids, uids):
+            scales = lora_rows.scales_for(uid) or ()
+            shift = self.shift + sum(s * _SLOT_SHIFT[i] for i, s in enumerate(scales))
+            rows.append(_fake_logits(row[None], shift))
+        z = np.concatenate(rows).reshape(-1, V)
         step = cmd.slice_rows(V)
         for p0 in range(0, len(z), step):
             yield z[p0:p0 + step]
@@ -65,8 +77,10 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setattr(cmd, "tokenize", lambda tok, t: (tokens.copy(), 3))
     monkeypatch.setattr(cmd, "tokenizer_mismatch", lambda *a: None)
 
-    def load(src, args):
+    def load(src, args, slots=()):
         events.append(("load", src.path.rsplit("/", 1)[-1]))
+        if slots:
+            events.append(("slots", [p.rsplit("/", 1)[-1] for p, _ in slots]))
         return _Model(src.path), args
 
     monkeypatch.setattr(cmd, "_load", load)
@@ -84,12 +98,12 @@ def rig(tmp_path, monkeypatch):
             "tmp": tmp_path}
 
 
-def _expected(tokens, n_chunk, bos):
+def _expected(tokens, n_chunk, bos, ref_shift=0.0, shift=0.5):
     sums = K.KldSums()
     for c in range(n_chunk):
         ids = K.chunk_ids(tokens, c, N_CTX, bos)[None]
-        rec = K.quantize_logprobs(_fake_logits(ids, 0.0)[0])
-        sums.add(_fake_logits(ids, 0.5)[0], rec)
+        rec = K.quantize_logprobs(_fake_logits(ids, ref_shift)[0])
+        sums.add(_fake_logits(ids, shift)[0], rec)
     return sums
 
 
@@ -121,7 +135,7 @@ def test_both_passes_match_the_arithmetic(rig, capsys, monkeypatch, budget):
                              ("load", "model.gguf"), ("unload",)]
     assert not list(rig["tmp"].glob("gmlx-kld-*"))
     rows = 1 if budget == 1 else n_chunk
-    assert _Scorer.forwards == [rows] * (2 * n_chunk // rows)
+    assert [len(f) for f in _Scorer.forwards] == [rows] * (2 * n_chunk // rows)
 
 
 def test_chunks_caps_the_run_and_the_table_prints_a_percent(rig, capsys):
@@ -132,11 +146,117 @@ def test_chunks_caps_the_run_and_the_table_prints_a_percent(rig, capsys):
     assert f"{want.mean_kld()[0]:.6f}" in out
 
 
-def test_no_reference_refuses(rig, capsys):
-    rc, _, err = _run([a for a in rig["argv"]
-                       if a not in ("--reference", str(rig["tmp"] / "ref.gguf"))],
-                      capsys)
-    assert rc == 2 and "--reference" in err
+def test_neither_reference_nor_adapter_refuses(rig, capsys):
+    rc, _, err = _run(_no_reference(rig), capsys)
+    assert rc == 2 and "--reference" in err and "--adapter" in err
+    assert rig["events"] == []
+
+
+def _no_reference(rig):
+    return [a for a in rig["argv"]
+            if a not in ("--reference", str(rig["tmp"] / "ref.gguf"))]
+
+
+def _adapters(tmp_path, *names, head=False):
+    """Rank-1 llama adapters on one target each, or on the output head."""
+    import mlx.core as mx
+
+    from gmlx.load.adapter import save_lora_adapter
+
+    out = []
+    for i, name in enumerate(names):
+        module = "lm_head" if head else f"model.layers.{i}.mlp.down_proj"
+        n_in = 8 if head else 16
+        pair = (module, mx.ones((1, n_in)), mx.ones((8, 1)))
+        save_lora_adapter(str(tmp_path / name), [pair], alpha=1.0,
+                          base_arch="llama", n_head=2, n_head_kv=2, n_layers=2)
+        out.append(str(tmp_path / name))
+    return out
+
+
+def _results(out):
+    lines = [json.loads(s) for s in out.splitlines()]
+    return ([r for r in lines if r["event"] == "progress"],
+            [r for r in lines if r["event"] == "result"])
+
+
+def test_without_a_reference_model_bare_is_the_reference(rig, capsys):
+    """Only the adapter points score, against MODEL bare, in one load; each
+    flag is a point and each distinct file a slot."""
+    a, b = _adapters(rig["tmp"], "a.gguf", "b.gguf")
+    rc, out, err = _run([*_no_reference(rig), "--json", "--adapter", f"{a}:0.5",
+                         "--adapter", f"{a}:1.5", "--adapter", b], capsys)
+    assert rc == 0, err
+    progress, results = _results(out)
+    n_chunk = 100 // N_CTX
+    assert [(r["stage"], r["chunk"]) for r in progress] == (
+        [("reference", c) for c in range(1, n_chunk + 1)]
+        + [("model", c) for c in range(1, n_chunk + 1)])
+    assert rig["events"] == [("load", "model.gguf"), ("slots", ["a.gguf", "b.gguf"]),
+                             ("unload",)]
+    assert [(r["adapter"], r["strength"]) for r in results] == [
+        (a, 0.5), (a, 1.5), (b, 1.0)]
+    for r, shift in zip(results, (0.5 * 0.3, 1.5 * 0.3, -0.7)):
+        want = _expected(rig["tokens"], n_chunk, 3, 0.5, 0.5 + shift)
+        assert r["reference"] == r["model"]
+        assert r["mean_kld"] == pytest.approx(want.mean_kld()[0], rel=1e-12)
+        assert r["same_top_p"] == pytest.approx(want.same_top()[0])
+    assert not list(rig["tmp"].glob("gmlx-kld-*"))
+
+
+@pytest.mark.parametrize("budget_rows", [1, 3, 64])
+def test_with_a_reference_the_bare_model_and_each_point_score(
+        rig, capsys, monkeypatch, budget_rows):
+    """MODEL bare scores first; the rows of one forward are (chunk, point)
+    pairs, chunk-major, as many as the budget holds."""
+    monkeypatch.setattr(cmd, "ROW_BUDGET_BYTES",
+                        budget_rows * 4 * V * (N_CTX - 1 - N_CTX // 2))
+    (a,) = _adapters(rig["tmp"], "a.gguf")
+    rc, out, err = _run([*rig["argv"], "--json", "--adapter", f"{a}:2"], capsys)
+    assert rc == 0, err
+    _, results = _results(out)
+    n_chunk = 100 // N_CTX
+    assert [r["adapter"] for r in results] == [None, a]
+    for r, shift in zip(results, (0.5, 0.5 + 2 * 0.3)):
+        want = _expected(rig["tokens"], n_chunk, 3, 0.0, shift)
+        assert r["mean_kld"] == pytest.approx(want.mean_kld()[0], rel=1e-12)
+    items = [uid for _c in range(n_chunk) for uid in (cmd.BARE, 1)]
+    rows = min(budget_rows, len(items))
+    want = [items[g:g + rows] for g in range(0, len(items), rows)]
+    assert _Scorer.forwards[-len(want):] == want
+
+
+def test_the_table_has_a_row_per_point(rig, capsys):
+    (a,) = _adapters(rig["tmp"], "a.gguf")
+    rc, out, _ = _run([*rig["argv"], "--adapter", f"{a}:0.25"], capsys)
+    assert rc == 0
+    rows = out.splitlines()[-2:]
+    assert rows[0].startswith("MODEL ") and rows[1].startswith("a.gguf:0.25 ")
+
+
+@pytest.mark.parametrize("case, message", [
+    ("missing", "--adapter: no such file"),
+    ("head", "output head"),
+    ("not-lora", "not a LoRA adapter"),
+])
+def test_an_adapter_kld_cannot_score_refuses_before_any_load(
+        rig, capsys, case, message):
+    if case == "missing":
+        path = str(rig["tmp"] / "gone.gguf")
+    elif case == "head":
+        (path,) = _adapters(rig["tmp"], "h.gguf", head=True)
+    else:
+        from gguf import GGUFWriter
+
+        path = str(rig["tmp"] / "plain.gguf")
+        w = GGUFWriter(path, "llama")
+        w.add_tensor("token_embd.weight", np.zeros((4, 8), np.float32))
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+    rc, _, err = _run([*_no_reference(rig), "--adapter", path], capsys)
+    assert rc == 2 and message in err, err
     assert rig["events"] == []
 
 
@@ -193,7 +313,7 @@ def test_each_streaming_install_closes_before_the_next_load(rig, capsys,
 
     events = rig["events"]
 
-    def load(src, args):
+    def load(src, args, slots=()):
         name = src.path.rsplit("/", 1)[-1]
         events.append(("load", name))
         m = _Model(src.path)
@@ -423,3 +543,75 @@ def test_scorer_slices_a_chunk_over_the_budget(monkeypatch):
     assert [len(p) for p in parts] == [3] * (2 * n // 3) + [2 * n % 3] * bool(2 * n % 3)
     full = np.array(model(mx.array(_IDS)).astype(mx.float32))
     np.testing.assert_allclose(got, full[:, first:first + n], rtol=1e-5, atol=1e-5)
+
+
+def test_adapter_points_on_a_tiny_llama_match_each_adapter_folded(
+        tmp_path, monkeypatch):
+    """Real loads: three points on two slots score in shared forwards, and
+    each matches the arithmetic on a model with that one adapter folded
+    into its static scale, scored alone."""
+    import mlx.core as mx
+
+    import gmlx
+    from gmlx import lora_rows
+    from gmlx.load.adapter import apply_gguf_adapter, save_lora_adapter
+    from test_loader_api import _FFN, _HEADS, _HID, _KV, _mint_tiny_llama
+
+    monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", "float32")
+    path = str(tmp_path / "tiny.gguf")
+    _mint_tiny_llama(path)
+    from gguf import GGUFReader
+
+    # The minted weights give near-flat logits; widen them in the file.
+    (norm,) = [t for t in GGUFReader(path, "r+").tensors
+               if t.name == "output_norm.weight"]
+    norm.data[:] = norm.data * 400
+    rng = np.random.default_rng(5)
+    lora = {}
+    for name, module, n_in in (("a.gguf", "model.layers.0.mlp.down_proj", _FFN),
+                               ("b.gguf", "model.layers.1.self_attn.o_proj",
+                                _HEADS * 16)):
+        pair = (module, mx.array(rng.standard_normal((1, n_in)) * 30, mx.float32),
+                mx.array(rng.standard_normal((_HID, 1)) * 30, mx.float32))
+        lora[name] = str(tmp_path / name)
+        save_lora_adapter(lora[name], [pair], alpha=1.0, base_arch="llama",
+                          n_head=_HEADS, n_head_kv=_KV, n_layers=2)
+    text = tmp_path / "t.txt"
+    text.write_text("Hello world, we go on. " * 6)
+    points = [("a.gguf", 0.5), ("a.gguf", 2.0), ("b.gguf", 1.0)]
+    args = cmd.parse_args([path, "--text", str(text), "--ctx", str(N_CTX),
+                           *(f for n, s in points
+                             for f in ("--adapter", f"{lora[n]}:{s}"))])
+    try:
+        results = cmd.run(args, lambda rec: None, lambda msg: None)
+    finally:
+        lora_rows.configure("static", 1)
+    assert lora_rows.mode() == "static"
+
+    from gmlx.distill.tokens import tokenizer_from_gguf
+
+    tokens, bos = cmd.tokenize(tokenizer_from_gguf(path), text.read_text())
+    n_chunk = len(tokens) // N_CTX
+    first, n = K.scored_span(N_CTX)
+
+    def logits(model):
+        out = []
+        for c in range(n_chunk):
+            ids = mx.array(K.chunk_ids(tokens, c, N_CTX, bos)[None])
+            out.append(np.array(model(ids)[0, first:first + n].astype(mx.float32)))
+        return out
+
+    base, cfg, _ = gmlx.load_model(path)
+    records = [K.quantize_logprobs(z) for z in logits(base)]
+    assert [r["adapter"] for r in results] == [lora[n] for n, _ in points]
+    for r, (name, strength) in zip(results, points):
+        m, cfg, _ = gmlx.load_model(path)
+        apply_gguf_adapter(m, cfg, lora[name], base_arch="llama",
+                           strength=strength)
+        sums = K.KldSums()
+        for z, rec in zip(logits(m), records):
+            sums.add(z, rec)
+        assert r["positions"] == sums.count == n_chunk * n
+        assert sums.mean_kld()[0] > 1e-3
+        assert r["mean_kld"] == pytest.approx(sums.mean_kld()[0], rel=2e-3)
+        assert abs(r["same_top_p"] - sums.same_top()[0]) <= 1 / sums.count

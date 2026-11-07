@@ -67,16 +67,16 @@ if os.environ.get("KQUANT_FORCE_CPU"):
     mx.set_default_device(mx.cpu)
 active_at_load = []
 real_load = cmd._load
-def load(src, args):
+def load(src, args, *rest):
     active_at_load.append(mx.get_active_memory())
-    return real_load(src, args)
+    return real_load(src, args, *rest)
 cmd._load = load
 args = cmd.parse_args(sys.argv[1:])
 mx.clear_cache()
 mx.reset_peak_memory()
-result = cmd.run(args, lambda rec: None, lambda msg: None)
-result.update(active_at_load=active_at_load, peak=mx.get_peak_memory())
-print(json.dumps(result))
+results = cmd.run(args, lambda rec: None, lambda msg: None)
+print(json.dumps({"results": results, "active_at_load": active_at_load,
+                  "peak": mx.get_peak_memory()}))
 """
 
 
@@ -88,7 +88,8 @@ def test_mean_kld_matches_llama_perplexity(case):
          case["reference"], "--text", case["text"], "--ctx", str(row["ctx"])],
         capture_output=True, text=True, env=env, cwd=REPO)
     assert r.returncode == 0, r.stderr[-4000:]
-    result = json.loads(r.stdout.splitlines()[-1])
+    out = json.loads(r.stdout.splitlines()[-1])
+    (result,) = out["results"]
     want = row["mean_kld"]
     print(f"mean_kld {result['mean_kld']:.6f} (fixture {want:.6f}), "
           f"same_top_p {result['same_top_p']:.5f} (fixture {row['same_top_p']:.5f})")
@@ -98,6 +99,6 @@ def test_mean_kld_matches_llama_perplexity(case):
         result["mean_kld"]
     assert abs(result["same_top_p"] - row["same_top_p"]) <= SAME_TOP_ABS_TOL
     # The reference is gone before MODEL loads.
-    first, second = result["active_at_load"]
+    first, second = out["active_at_load"]
     assert second - first < 10**9
-    assert result["peak"] < BUDGET_BYTES
+    assert out["peak"] < BUDGET_BYTES
