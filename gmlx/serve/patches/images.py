@@ -306,21 +306,20 @@ async def _read_priced_body(route: str, request: Request):
         BodyHold,
         BodyRefused,
         _in_turn,
-        free_bytes,
+        free_beside,
         read_form_in_ram,
         read_json,
     )
 
     ctype = request.headers.get("content-type", "").lower()
     is_form = ctype.startswith("multipart/form-data")
-    # What a JSON body holds in RAM, counted beside the other bodies being
+    # What the body holds in RAM, counted beside the other bodies being
     # read until its images are decoded.
     hold = BodyHold()
     try:
         try:
             if is_form:
-                free = free_bytes()
-                form = await read_form_in_ram(request, free)
+                form = await read_form_in_ram(request, hold=hold)
             else:
                 # The images decode in the parse's worker thread.
                 return await read_json(
@@ -330,14 +329,16 @@ async def _read_priced_body(route: str, request: Request):
             _log_media(e.status, str(e))
             raise ImageRequestError(e.status, str(e), param=e.param,
                                     headers=e.headers) from None
+        try:
+            # In the turn the parses take: the form's price counts its
+            # largest file, which this reads whole.
+            return await _in_turn(
+                _form_parts, form, _Pixels(free_beside(hold), form.price),
+                hold=hold)
+        finally:
+            await form.close()
     finally:
         hold.release()
-    try:
-        # In the turn the parses take: the form's price counts its
-        # largest file, which this reads whole.
-        return await _in_turn(_form_parts, form, _Pixels(free, form.price))
-    finally:
-        await form.close()
 
 
 def _form_parts(form, pixels):

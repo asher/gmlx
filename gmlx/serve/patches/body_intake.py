@@ -780,7 +780,8 @@ async def read_json(request: Request, free: int | None = None, then=None,
 
 
 async def read_form_in_ram(request: Request, free: int | None = None,
-                           max_files: int = 64):
+                           max_files: int = 64,
+                           hold: BodyHold | None = None):
     """The multipart form of ``request``, parsed as it arrives with no
     copy of its body held, its text fields held to the media gate's checks
     as the gate holds every route it reads. Its text fields are priced
@@ -790,7 +791,10 @@ async def read_form_in_ram(request: Request, free: int | None = None,
     whole. A Content-Length past the figure is refused before the read,
     and a body with none once the bytes arrived pass it. Each chunk waits
     STALL_S seconds at most. The form's ``price`` is the bytes its read and
-    parse were priced at."""
+    parse were priced at. With the pool's figure and ``hold``, what the
+    form holds is counted on it beside the other bodies being read as it
+    arrives, against the figure read at each chunk, and a form that fits
+    only once the others are read is a 503."""
     from starlette.formparsers import MultiPartParser
     from starlette.requests import ClientDisconnect
 
@@ -801,11 +805,19 @@ async def read_form_in_ram(request: Request, free: int | None = None,
     if not path.endswith(_FORM_ROUTES):
         raise BodyRefused(400, "this route takes a JSON body, not a "
                           "multipart form")
-    if free is None:
-        free = free_bytes()
+    if free is None and hold is not None:
+        figure = _pool_free
+    else:
+        hold = None
+        if free is None:
+            free = free_bytes()
+
+        def figure():
+            return free
     n = content_length(request)
-    if n is not None and free is not None and n > free:
-        raise _over_free(n, free, True)
+    f = figure()
+    if n is not None and f is not None and n > f:
+        raise _over_free(n, f, True)
     text = _TextPrice()
     spool = MultiPartParser.spool_max_size
     files: list = []
@@ -819,18 +831,20 @@ async def read_form_in_ram(request: Request, free: int | None = None,
             math.ceil(spool * _TextPrice.GROW) + spool if moving else 0)
 
     def check(need: int, largest: int = 0) -> None:
-        if free is None or need <= free:
-            return
+        free = figure()
+        _price(hold, need, free, functools.partial(over, need, largest, free))
+
+    def over(need: int, largest: int, free: int) -> BodyRefused:
         what = (f"the largest file of this form is {_mib(largest, True)}, "
                 f"its read holds {_mib(need, True)} beside the text fields "
                 "and the files spooled" if largest else
                 f"the text fields of this form are over {_mib(text.read)}, "
                 f"their read and parse hold {_mib(need, True)} with the "
                 "files spooled")
-        raise BodyRefused(413, f"{what}, and {_mib(free)} of memory is free "
-                          "beside the models loaded; send shorter text "
-                          "fields or smaller files, or unload a model to "
-                          "make room")
+        return BodyRefused(413, f"{what}, and {_mib(free)} of memory is "
+                           "free beside the models loaded; send shorter "
+                           "text fields or smaller files, or unload a model "
+                           "to make room")
 
     class _Priced(MultiPartParser):
         def on_part_data(self, data: bytes, start: int, end: int) -> None:
@@ -842,7 +856,7 @@ async def read_form_in_ram(request: Request, free: int | None = None,
                 # The largest file is read whole once parsed: a body
                 # past the memory free is refused as it passes, as its
                 # Content-Length is.
-                got = text.read + sum(files)
+                got, free = text.read + sum(files), figure()
                 if free is not None and got > free:
                     raise _over_free(got, free, False)
                 check(text.held() + spooled(before <= spool < files[-1]))

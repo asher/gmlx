@@ -1248,6 +1248,106 @@ def test_an_images_json_body_is_priced_at_what_its_read_and_parse_hold(
     assert req.prompt == prompt
 
 
+def test_two_images_forms_whose_text_fits_alone_cannot_hold_it_together(
+        served, monkeypatch):
+    """An images form counts what it holds beside the other bodies being
+    read as it arrives: a second form whose text fits the memory free
+    alone, but not beside the first's, is a 503 naming what the first
+    holds, and runs once the first is read. The pool is never booked."""
+    import http.client
+
+    from live_socket import serving
+
+    from gmlx.serve.patches import body_intake as bi
+
+    text = "a" * (6 << 20)
+    a, ctype = _edit_form(text)
+    held = math.ceil(len(text) * 1.125) + len(text) + bi._SLACK
+    # Room for the image's decode beside the text, short of a second text.
+    free = held + svc.decode_price(_png())[0] + (64 << 10)
+    assert free < 2 * held
+    pool = _body_pool(monkeypatch, free)
+    head = a[:a.index(text.encode()) + len(text)]
+    path = "/v1/images/edits"
+    with serving(_gated_app()) as port:
+        ca = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        ca.putrequest("POST", path)
+        ca.putheader("Content-Type", ctype)
+        ca.putheader("Content-Length", str(len(a)))
+        ca.endheaders(head)
+        counted = _wait_for(lambda: bi.held_bytes() >= held - 64)
+        first = bi.held_bytes()
+        r = TestClient(_gated_app()).post(path, content=a,
+                                          headers={"content-type": ctype})
+        assert r.status_code == 503, r.text
+        assert int(r.headers["retry-after"]) > 0
+        message = r.json()["error"]["message"]
+        assert message.startswith("the body of this request holds "), message
+        assert message.endswith(
+            f", and {bi._mib(first)} of it is held by uploads arriving now; "
+            "send it again once they are read"), message
+        assert counted
+        assert pool.figures.incoming == 0
+        ca.send(a[len(head):])
+        r = ca.getresponse()
+        assert r.status == 200, r.read()
+        r.read()
+        ca.close()
+        assert _wait_for(lambda: bi.held_bytes() == 0)
+    r = TestClient(_gated_app()).post(path, content=a,
+                                      headers={"content-type": ctype})
+    assert r.status_code == 200, r.text
+    assert bi.held_bytes() == 0
+    assert pool.figures.incoming == 0
+    assert len(served.jobs) == 2
+
+
+@pytest.mark.parametrize("ending", ["bad form", "bad image", "client leaves",
+                                    "stall"])
+def test_an_images_forms_count_ends_however_its_request_ends(
+        served, monkeypatch, ending):
+    """The count an images form holds ends on every exit of its request:
+    a form that cannot be read, an image the route refuses, a client that
+    leaves mid-text and a form that stops sending. The pool is never
+    booked."""
+    import http.client
+
+    from live_socket import send, serving
+
+    from gmlx.serve.patches import body_intake as bi
+
+    monkeypatch.setattr(bi, "STALL_S", 0.5)
+    pool = _body_pool(monkeypatch, 64 << 20)
+    text = "a" * (1 << 20)
+    path = "/v1/images/edits"
+    body, ctype = _edit_form(text)
+    if ending == "bad form":
+        body = b"--gmlxboundary\r\nno headers\r\n\r\n"
+    elif ending == "bad image":
+        body = body.replace(_png(), _truncated_png())
+    with serving(_gated_app()) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        if ending in ("bad form", "bad image"):
+            r = send(conn, path, body, ctype=ctype)
+            assert r.status == 400, r.body
+        else:
+            conn.putrequest("POST", path)
+            conn.putheader("Content-Type", ctype)
+            conn.putheader("Content-Length", str(len(body)))
+            conn.endheaders(body[:body.index(text.encode()) + len(text)])
+            assert _wait_for(lambda: bi.held_bytes() > len(text))
+            assert pool.figures.incoming == 0
+            if ending == "client leaves":
+                conn.sock.close()
+            else:
+                r = conn.getresponse()
+                assert r.status == 408, r.read()
+        conn.close()
+        assert _wait_for(lambda: bi.held_bytes() == 0)
+    assert pool.figures.incoming == 0
+    assert served.jobs == []
+
+
 @pytest.mark.parametrize("wide", [False, True])
 def test_an_images_form_is_priced_as_its_text_arrives(served, monkeypatch,
                                                       wide):
