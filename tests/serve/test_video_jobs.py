@@ -1569,7 +1569,7 @@ def test_the_jobs_pacer_reaches_the_sampler_and_stops_the_job(
     job = _clip_job(store)
     with pytest.raises(JobStopped):
         vj._clip_part(job, store, hold, store.clip(job.id))
-    assert seen["pacer"] is not None and seen["stopped"]
+    assert seen.get("pacer") is not None and seen.get("stopped")
     assert job.record["gmlx"]["step"] == 1
     assert order[-1] == ("settle", vj.JOB)
 
