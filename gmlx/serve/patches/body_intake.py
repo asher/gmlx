@@ -43,10 +43,10 @@ IMAGE_PATHS = frozenset(f"{p}/images/{r}" for p in ("/v1", "")
                         for r in ("generations", "edits", "variations"))
 VIDEO_PATHS = frozenset({"/v1/videos"})
 
-# Seconds a video form may send nothing before its end: past them, the
-# read ends and the room the form holds in the job store is freed. Each
-# chunk starts the wait again, so a slow client that keeps sending reads
-# to its end.
+# Seconds a JSON body or a video form may send nothing before its end:
+# past them, the read ends, and a form frees the room it holds in the job
+# store. Each chunk starts the wait again, so a slow client that keeps
+# sending reads to its end.
 STALL_S = 60.0
 
 
@@ -358,26 +358,25 @@ def _min_price(n: int) -> int:
 
 async def _read_bytes(request: Request, n: int | None,
                       free: int | None) -> bytearray:
-    """The body of ``request`` in one bytearray, made at its Content-Length
-    ``n`` before the read, so it holds no copy of the chunks. A body with
-    no length is held as its chunks until its end, refused once
-    :func:`_min_price` of what arrived passes ``free``, then moved into
-    one, a chunk at a time."""
-    if n is not None:
-        buf = bytearray(n)
-        got = 0
-        async for chunk in request.stream():
-            if got + len(chunk) > n:
-                raise BodyRefused(400, "the request body is longer than "
-                                  "its Content-Length")
-            buf[got:got + len(chunk)] = chunk
-            got += len(chunk)
-        del buf[got:]
-        return buf
+    """The body of ``request`` in one bytearray. It is held as its chunks
+    until its end, so a client holds only the bytes it sent, then moved
+    into one, a chunk at a time. A body past its Content-Length ``n`` is
+    refused, and one with no length once :func:`_min_price` of what
+    arrived passes ``free``. Each chunk waits STALL_S seconds at most."""
     chunks, size = [], 0
-    async for chunk in request.stream():
+    it = request.stream().__aiter__()
+    while True:
+        try:
+            chunk = await _within(STALL_S, it.__anext__())
+        except StopAsyncIteration:
+            break
+        except TimeoutError:
+            raise _stalled(STALL_S, size, n, form=False) from None
         size += len(chunk)
-        if free is not None and _min_price(size) > free:
+        if n is not None and size > n:
+            raise BodyRefused(400, "the request body is longer than its "
+                              "Content-Length")
+        if n is None and free is not None and _min_price(size) > free:
             raise _over_free(size, free, False, _min_price(size))
         chunks.append(chunk)
     buf = bytearray(size)
@@ -614,15 +613,21 @@ def _over_room(n: int | None, room: int, arriving: int = 0) -> BodyRefused:
 
 
 async def _within(timeout: float, aw):
-    """The wait for a form's next chunk, ``timeout`` seconds at most."""
+    """The wait for a body's next chunk, ``timeout`` seconds at most."""
     return await asyncio.wait_for(aw, timeout)
 
 
-def _stalled(stall: float, got: int, n: int | None) -> BodyRefused:
-    """The 408 of a form that sent nothing for ``stall`` seconds, ``got``
-    bytes into its Content-Length ``n`` (None with none sent)."""
+def _stalled(stall: float, got: int, n: int | None,
+             form: bool = True) -> BodyRefused:
+    """The 408 of a video form, or a JSON body, that sent nothing for
+    ``stall`` seconds, ``got`` bytes into its Content-Length ``n`` (None
+    with none sent)."""
     left = (f" with {_mib(n - got, True)} of it still to come"
             if n is not None else "")
+    if not form:
+        return BodyRefused(408, f"the request body sent nothing for "
+                           f"{stall:g} s{left}, so the server ended the "
+                           "request; send it again")
     return BodyRefused(408, f"the form sent nothing for {stall:g} s"
                        f"{left}, so the server ended the request and freed "
                        "the room it held in the video job store; send the "

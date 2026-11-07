@@ -154,3 +154,69 @@ def test_a_json_parse_leaves_the_event_loop_free(monkeypatch):
         return await task
     monkeypatch.setattr(bi, "_loads", parse)
     assert asyncio.run(main()) == {"prompt": "a cat"}
+
+
+def _stuck_request(head: bytes, length: int):
+    """A JSON request with Content-Length ``length`` that sends ``head``,
+    then nothing, and an Event set once its read waits past ``head``."""
+    import asyncio
+
+    from starlette.requests import Request
+
+    waiting = asyncio.Event()
+    parts = [head]
+
+    async def receive():
+        if parts:
+            return {"type": "http.request", "body": parts.pop(),
+                    "more_body": True}
+        waiting.set()
+        await asyncio.Event().wait()
+    request = Request({"type": "http", "method": "POST", "path": "/v1/videos",
+                       "query_string": b"", "headers": [
+                           (b"content-type", b"application/json"),
+                           (b"content-length", str(length).encode())]},
+                      receive)
+    return request, waiting
+
+
+def test_a_json_body_that_stops_sending_holds_only_the_bytes_it_sent():
+    """A client that sends a 64 MiB Content-Length and 10 bytes holds
+    those bytes, not a buffer of its length, while the read waits."""
+    import asyncio
+    import tracemalloc
+
+    async def main():
+        request, waiting = _stuck_request(b'{"prompt":', 64 << 20)
+        task = asyncio.create_task(bi.read_json(request, 1 << 30))
+        await waiting.wait()
+        held = tracemalloc.get_traced_memory()[0]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return held
+    tracemalloc.start()
+    try:
+        held = asyncio.run(main())
+    finally:
+        tracemalloc.stop()
+    assert held < 1 << 20, held
+
+
+def test_a_json_body_that_stops_sending_is_ended_with_a_408(monkeypatch):
+    """Each chunk of a JSON body waits STALL_S seconds at most, as a
+    form's does: past it, the read ends with a 408."""
+    import asyncio
+
+    monkeypatch.setattr(bi, "STALL_S", 0.05)
+
+    async def main():
+        request, _ = _stuck_request(b'{"prompt":', 1000)
+        return await asyncio.wait_for(bi.read_json(request, 1 << 30), 10)
+    with pytest.raises(bi.BodyRefused) as e:
+        asyncio.run(main())
+    assert e.value.status == 408
+    assert str(e.value) == (
+        "the request body sent nothing for 0.05 s with 1.0 KiB of it still "
+        "to come, so the server ended the request; send it again")
+    assert e.value.headers == {"Connection": "close"}

@@ -158,7 +158,7 @@ status 500, and keeps the ones that ended.
 | A JSON body that its read and parse cannot hold in the memory free | 413 naming both figures, before the body is parsed |
 | A form's text fields past the memory free | 413 naming the memory free, once the text read passes it |
 | A form's files larger than the room left in the job store | 413 naming both figures, before the files are read |
-| A form that sends nothing for 60 s before its end | 408, and the room it held in the job store is freed |
+| A JSON body or a form that sends nothing for 60 s before its end | 408, and a form frees the room it held in the job store |
 | A JSON keyframe larger than the room left in the job store | 413 naming the keyframe and both figures |
 | A keyframe or guide image over 64 Mi pixels | 400 naming the field |
 | A guide video whose frames are over 64 Mi pixels | The job fails with 400 naming the guide, before a frame is read |

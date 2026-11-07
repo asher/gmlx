@@ -328,6 +328,7 @@ cannot change it.
 | A body to the [image API](image-api.md), or a JSON body to [`POST /v1/videos`](video-api.md), whose read and parse need more than the memory free | 413 before the body is parsed, or an image form's files are read, with the body's size and the memory free | `GMLX_OVERCOMMIT=1` |
 | The text fields of an [image API](image-api.md) or [`POST /v1/videos`](video-api.md) form past the memory free | 413 once the text read passes the memory free, with the memory free | `GMLX_OVERCOMMIT=1` |
 | The files of a [`POST /v1/videos`](video-api.md) form larger than the room left in the video job store | 413 before the files are read, with their size and the room | [`video.store_max_bytes`](config.md#video-jobs) |
+| A JSON body to the [image API](image-api.md) or [`POST /v1/videos`](video-api.md), or a `POST /v1/videos` form, that sends nothing for 60 s before its end | 408 | None |
 | From a [launch session](container-security.md#what-the-client-reaches-on-the-server), a body over 32 MiB, or 64 MiB for audio | 413 before the body is read | None |
 | More than 64 media items, more than 256 Mi pixels in all, or audio over 128 Mi samples or with a sample rate over 384 kHz | 400 before decoding | None |
 
