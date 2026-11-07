@@ -981,6 +981,26 @@ def _gated_app():
     return app
 
 
+@pytest.mark.parametrize("image", [
+    "/tmp/a.png", "https://example.com/a.png",
+    "data:image/png;base64," + base64.b64encode(b"no image").decode()],
+    ids=["path", "url", "unreadable"])
+def test_an_images_media_refusal_is_in_the_server_log(served, monkeypatch,
+                                                      capsys, image):
+    """The images routes check their own media, as the gate checks the
+    other routes', and print each refusal to the log as the gate does."""
+    from gmlx.serve.patches import hardening
+
+    monkeypatch.setattr(hardening, "_refusal_logs", {})
+    r = TestClient(_gated_app()).post("/v1/images/edits", json={
+        "prompt": "x", "images": [{"image_url": image}]})
+    assert r.status_code == 400, r.text
+    message = r.json()["error"]["message"]
+    assert (f"[server] refused a request with status 400: {message}"
+            in capsys.readouterr().out.splitlines())
+    assert served.jobs == []
+
+
 def test_the_gate_leaves_an_images_body_to_the_route_and_its_price(
         served, monkeypatch):
     """An edit body past the gate's own bound, its inline image past the

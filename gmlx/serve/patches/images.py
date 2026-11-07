@@ -230,6 +230,7 @@ def _json_image(value, param: str):
         try:
             data, _suffix, _px = _decode_edit_image(value)
         except MediaRefused as e:
+            _log_media(400, str(e))
             raise _bad(str(e), param) from None
     else:
         import base64
@@ -241,6 +242,14 @@ def _json_image(value, param: str):
             raise _bad(f"{param} must be a data URL or base64 image data; "
                        "send a file as multipart form data", param) from None
     return decode_image(data, param)
+
+
+def _log_media(status: int, message: str) -> None:
+    """Print a refusal of a body or its media to the log, as the media
+    gate prints the refusals of the routes it reads."""
+    from .hardening import _log_refusal
+
+    _log_refusal(f"{status} {message}", message, status, kind="media")
 
 
 async def _read_body(route: str, request: Request):
@@ -268,6 +277,7 @@ async def _read_priced_body(route: str, request: Request):
             str_copies=None if is_form else JSON_STR_COPIES)
         await check_media(request, raw)
     except BodyRefused as e:
+        _log_media(e.status, str(e))
         raise ImageRequestError(e.status, str(e), param=e.param,
                                 headers=e.headers) from None
     images, mask = [], None
