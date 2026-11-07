@@ -146,6 +146,16 @@ def _own_launch_state(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _sigint_raises():
+    """Each test starts with Python's own SIGINT handler. A run started with
+    ``&`` from a shell script inherits SIGINT ignored, and launch keeps an
+    ignored signal ignored, so the Ctrl-C tests would see no Ctrl-C."""
+    saved = signal.signal(signal.SIGINT, signal.default_int_handler)
+    yield
+    signal.signal(signal.SIGINT, saved)
+
+
+@pytest.fixture(autouse=True)
 def _no_browser(monkeypatch):
     """No test opens an address in the Mac's browser. A test that checks
     what launch opens puts its own recorder in place of this one."""
