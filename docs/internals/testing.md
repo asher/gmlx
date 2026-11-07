@@ -180,7 +180,8 @@ a fixture that llama.cpp recorded on those exact files.
 | `tests/gen/test_long_context.py::test_long_prefill_parity` | `KQUANT_LLAMACPP_BIN` | Long-prefill greedy output agrees with llama.cpp. |
 | `tests/gen/test_kld_llama_parity.py` | `Qwen3.5-9B-Q4_K_M.gguf` and `Qwen3.5-9B-BF16.gguf` of the fixture's sizes | `gmlx kld` of the Q4_K_M file against the BF16 file matches the llama-perplexity fixture, and the text tokenizes to its ids. |
 | `tests/gen/test_serve_logprobs_gguf.py` | None | A lone serve row with a repetition penalty reports the f32 log_softmax of a plain step-by-step forward. |
-| `tests/spec/test_full_prompt_prefill.py` | `KQUANT_TEST_MTP_GGUF` | The MTP serve path handles prefill, the prompt cache, batching and injection. |
+| `tests/gen/test_budget_message_gguf.py` | None | On the serve plain path, a thinking budget of 8 with a message forces the message and the end marker right after the budget. |
+| `tests/spec/test_full_prompt_prefill.py` | `KQUANT_TEST_MTP_GGUF` | The MTP serve path handles prefill, the prompt cache, batching, injection and the thinking-budget message. |
 | `tests/image/test_image_check3.py` | `GMLX_IMAGE_FIXTURES` | A Z-Image-Turbo step matches the oracle at 512x512 per block and per attention and FFN output, teacher-forced and free running, and in velocity at 512 and 1024. |
 | `tests/image/test_image_check3_qwen.py` | `GMLX_IMAGE_FIXTURES` | A Qwen-Image 2.1 step matches the oracle per block at 512x512 and in velocity at 1024, and each op of a block its stock op. |
 | `tests/image/test_image_qwen_real.py` | None | A Qwen-Image 2.1 DiT GGUF has the committed header, loads with each tensor as bytes of the file, and a small cached step is finite with and without a reference. |
