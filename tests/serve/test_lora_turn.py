@@ -368,7 +368,7 @@ def test_a_video_turn_waits_on_an_image_release_before_it_evicts(
     job = start("video-worker-test", run)
     try:
         assert either.wait(WAIT)
-        assert w.waiting.is_set() and not done.is_set(), \
+        assert w.waiting.wait(WAIT) and not done.is_set(), \
             "the turn did not wait on the release"
     finally:
         go.set()
