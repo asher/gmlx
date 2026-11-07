@@ -105,7 +105,7 @@ NO_ANCHORS = ((), [], ())
 def _floor(m: dict) -> dict:
     assert "exact_free_floor" in m["results"], (
         f"{m['name']} records no exact_free_floor: run "
-        f"test_check6_exact_gates with {hg.RECORD}=1")
+        f"test_check6_exact_gates with {hg.RECORD}=<dir>")
     return m["results"]["exact_free_floor"]
 
 
@@ -805,7 +805,7 @@ def _step_gates(m: dict, steps: list, measure) -> list:
     rec = m["results"].get("exact_step_floor", {}).get("steps", {})
     tols = m["tolerances"].get("exact_steps", {})
     hint = (f"on another machine, or after an mlx, mlx-kquant or macOS "
-            f"update, run with {hg.RECORD}=1")
+            f"update, run with {hg.RECORD}=<dir>")
     for k, streams in miss.items():
         for s in streams:
             assert s in rec.get(k, {}), (
@@ -977,7 +977,7 @@ def test_check6_exact_gates(gguf_dir, request, name):
             1.25 * rec[s]["rel_l2"], (
             f"{s} floor {floor[s]:.3e} is not within 1.25x of the recorded "
             f"{rec[s]['rel_l2']:.3e}; on another machine, or after an mlx, "
-            f"mlx-kquant or macOS update, run with {hg.RECORD}=1")
+            f"mlx-kquant or macOS update, run with {hg.RECORD}=<dir>")
     over = [(i + 1, s, r[s], g[s]) for i, (r, g) in enumerate(zip(steps, gates))
             for s in STREAMS if not r[s] <= g[s]]
     assert not over, over

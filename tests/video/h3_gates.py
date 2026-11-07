@@ -587,7 +587,7 @@ def exact_tols(m: dict) -> dict:
     out = {}
     for kind, (res, key) in FLOORS.items():
         assert res in m["results"], (f"{m['name']} records no {res}: run "
-                                     f"the exact gate with {RECORD}=1")
+                                     f"the exact gate with {RECORD}=<dir>")
         floor = m["results"][res]["rel_l2"]
         tol = m["tolerances"][key]["rel_l2"]
         assert tol == max(bg.EXACT_TOL, 2 * floor), (kind, tol, floor)
@@ -619,7 +619,7 @@ def check_floor(m: dict, floor: dict, label: str) -> dict:
             f"{kind} floor {now[kind]:.3e} is not within 1.25x of the "
             f"recorded {rec:.3e}; on another machine, or after an mlx, "
             f"mlx-kquant or macOS update, run the exact gate with "
-            f"{RECORD}=1")
+            f"{RECORD}=<dir>")
     return tols
 
 
