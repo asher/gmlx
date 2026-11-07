@@ -5,7 +5,8 @@ subclasses of the vendored mlx-vlm 0.6.15 classes (``language``,
 ``moe_language``) whose ``__init__`` mirrors the base body but constructs
 the owned attention/GDN/MLP classes. Dispatch-only ``__call__`` bodies
 are verbatim upstream copies, source-equality-tested against the
-vendored base; the MLP and sparse-block forwards route projections
+vendored base (``_target_verify_switch_glu`` carries the vendored copy's
+one edit, the expert adapter delta); the MLP and sparse-block forwards route projections
 through the owned verify-linear family. The mirrored constructors draw
 parameters in the base order, so a seeded owned build is
 weight-identical to a seeded base build (certified by the
@@ -32,7 +33,8 @@ from .verify_linear import verify_linear, verify_linears
 __all__ = ["OwnedQwen3_5MLP", "OwnedQwen3_5DecoderLayer", "moe_layer_classes"]
 
 
-# --- verbatim upstream copy (qwen3_5_moe/language.py) ---
+# --- upstream copy (qwen3_5_moe/language.py), with the expert adapter
+# delta added; equal to the edited copy in moe_language.py ---
 
 
 def _target_verify_switch_glu(switch_mlp: SwitchGLU, x, indices, target_verify: bool):
