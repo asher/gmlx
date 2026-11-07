@@ -25,6 +25,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The gmlx ComfyUI nodes run the MiniMax-H3 recipes, with the new
   `minimax-h3-t2v`, `minimax-h3-i2v` and `fasth3-t2v` workflows. See
   [Make a video](docs/comfyui.md#make-a-video).
+- Ricursive Ripple-65B Preview loads, and `gmlx pull ripple-65b` fetches it with
+  its DFlash2 drafter for speculative decoding. `scripts/convert_dflash2.py`
+  converts the drafter to GGUF.
 - NVIDIA Nemotron 3.5 Transcribe hears audio through its speech encoder in
   `gmlx run`, chat and `gmlx serve`, and answers `/v1/audio/transcriptions`
   and `/v1/audio/translations` itself, with word times and speakers.
@@ -58,6 +61,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   let its tensors go, and a 503 they show ends "Queue the prompt again then."
 - In the Python API, `gmlx.image.lora.pair_hash` and `register_pair` take no
   alpha, and `register_patch` returns `(hash, alpha)` for its table entry.
+- gmlx now requires transformers older than 5.23, so a new transformers release
+  cannot break an install before gmlx is tested against it.
+- When `gmlx serve` checks whether a request fits in memory, it counts the
+  prompt hidden states a DFlash drafter keeps.
 - Nemotron-H models prefill in less memory, and a request takes the largest
   prefill step that fits beside the loaded models.
 - Speculative decoding verifies 2 to 8 drafted tokens at head dim 128 on a
@@ -66,6 +73,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Distillation's pinned day renders on transformers 5.22, where a template that
+  prints today's date failed with "'str' object is not callable".
 - A served image model keeps its own LoRAs when a request brings others,
   where requests failed with "patch table names adapter ...".
 - A served model's own LoRA sent again by ComfyUI, which reads no alpha from

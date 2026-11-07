@@ -96,6 +96,8 @@ def test_empty_modules_raises(tmp_path):
 _OWNED = {
     "beam": [("model.layers.0.self_attn.gate_proj", "blk.0.attn_gate.weight", IN),
              ("model.layers.1.mlp.up_proj", "blk.1.ffn_up.weight", IN)],
+    "ricursive": [("model.layers.0.self_attn.gate_proj", "blk.0.attn_gate.weight", IN),
+                  ("model.layers.1.mlp.down_proj", "blk.1.ffn_down.weight", IN)],
     "flint": [("model.layers.0.self_attn.q_proj", "blk.0.attn_q.weight", IN),
               ("model.layers.1.mlp.shared_experts.down_proj", "blk.1.ffn_down_shexp.weight", IN)],
     "deepseek4": [("model.layers.0.attn.wq_a", "blk.0.attn_q_a.weight", IN),

@@ -98,6 +98,10 @@ _CANDIDATES = {
     "flint_q4_1": [
         "RecursiveSI__flint-int4-gguf/flint-int4-q4_1.gguf",
     ],
+    # Ripple-65B Preview Q4_K_M: 40 GB dense, with JSON tool calls.
+    "ripple_q4_k_m": [
+        "AtomicChat__Ripple-65B-Preview-GGUF/Ripple-65B-Preview-AD-Q4_K_M.gguf",
+    ],
     # DeepSeek-V4-Flash-Vision-Exp pair (103 GB, single-row image turns):
     # the block-expansion VLM path. Last vlm fallback, and the target of the
     # dsv4-vision scenarios when present.
@@ -150,6 +154,8 @@ _SOURCES = {
     "beam_iq2xxs": "hf:unsloth/Beam-1.0-501B-A23B-GGUF/UD-IQ2_XXS/"
     "Beam-1.0-501B-A23B-UD-IQ2_XXS-00001-of-00004.gguf",
     "flint_q4_1": "hf:RecursiveSI/flint-int4-gguf/flint-int4-q4_1.gguf",
+    "ripple_q4_k_m": "hf:AtomicChat/Ripple-65B-Preview-GGUF/"
+    "Ripple-65B-Preview-AD-Q4_K_M.gguf",
 }
 
 # Preference order for the default LLM judge (a bigger, coherent model judges
@@ -174,7 +180,7 @@ _ROLES = {
     "mtp_native": [("qwen35_9b_mtp",), ("qwen36_27b",)],
     # An official model that calls tools, for an agent through the session socket.
     "tools": [("qwen38_27b",), ("qwen35_9b_q4",), ("gemma4_12b",),
-              ("flint_q4_1",)],
+              ("flint_q4_1",), ("ripple_q4_k_m",)],
     # A third small model, distinct from the two qwen3-0.6b quants.
     "lru_small": [("gemma3_1b",), ("falcon_h1_0_5b",)],
     # Over-RAM MoE models. The stream tier keeps the first one the planner

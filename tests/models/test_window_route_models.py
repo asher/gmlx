@@ -1,4 +1,4 @@
-"""The sliding layers of Flint, Muse Glimmer, Muse Spark and Gemma 4 run a
+"""The sliding layers of Flint, Ripple, Muse Glimmer, Muse Spark and Gemma 4 run a
 prefill chunk on kq's window kernel and give the logits stock attention
 gives under the band mask. A Gemma 4 chunk that carries image tokens, whose
 sliding mask has the bidirectional block overlay, stays on stock attention.
@@ -32,6 +32,14 @@ def _flint():
 
     args = _tiny_args(head_dim=128, sliding_window=_WINDOW, num_experts=4,
                       num_experts_per_tok=4)
+    return Model(args), _LAYER_TYPES
+
+
+def _ripple():
+    from gmlx.models.ricursive.model import Model
+    from test_ricursive import _LAYER_TYPES, _tiny_args
+
+    args = _tiny_args(head_dim=128, sliding_window=_WINDOW, vocab_size=_VOCAB)
     return Model(args), _LAYER_TYPES
 
 
@@ -130,8 +138,9 @@ def _errs(model, ids, monkeypatch, token_types=None):
     return [(mx.abs(got - want).max() / scale).item() for got in (routed, stock)]
 
 
-@pytest.mark.parametrize("build", [_flint, _glimmer, _spark, _gemma4],
-                         ids=["flint", "muse_glimmer", "muse_spark", "gemma4"])
+@pytest.mark.parametrize("build", [_flint, _ripple, _glimmer, _spark, _gemma4],
+                         ids=["flint", "ricursive", "muse_glimmer", "muse_spark",
+                              "gemma4"])
 def test_sliding_layers_take_the_window_kernel(build, calls, monkeypatch):
     model, types = _built(build)
     sliding = types.count("sliding_attention")
@@ -152,8 +161,9 @@ def test_gemma4_chunk_with_image_tokens_stays_on_stock(calls, monkeypatch):
     assert routed <= stock * 1.1 + 1e-3
 
 
-@pytest.mark.parametrize("build", [_flint, _glimmer, _spark, _gemma4],
-                         ids=["flint", "muse_glimmer", "muse_spark", "gemma4"])
+@pytest.mark.parametrize("build", [_flint, _ripple, _glimmer, _spark, _gemma4],
+                         ids=["flint", "ricursive", "muse_glimmer", "muse_spark",
+                              "gemma4"])
 def test_declined_calls_reach_the_model_modules_sdpa(build, monkeypatch):
     model, types = _built(build)
     if not window_sdpa._on_gpu():

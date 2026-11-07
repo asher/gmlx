@@ -64,6 +64,7 @@ CANDIDATE_ARCHES = [
     "muse-spark",
     "beam",
     "flint",
+    "ricursive",
     "graniteswitch",
 ]
 

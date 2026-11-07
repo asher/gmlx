@@ -731,6 +731,7 @@ The recommended models:
 | `nemotron-3.5-transcribe` | 30B-A4B | OpenMDW-1.1 | transcription and speech |
 | `nemotron-3.5-super-vl` | 120B-A12B | NVIDIA Open Model License | long documents and images |
 | `qwen3.8-flash-next` | 177B | Qwen Community License | documents, code and tool calls |
+| `ripple-65b` | 65B | Apache 2.0 | reasoning and chat, long context |
 | `glm-5.3-flash` | 321B | MIT | coding and agents |
 | `deepseek-v4-flash-0731` | 284B | MIT | chat and code |
 | `deepseek-v4.1-flash-1017` | 748B-A16B | MIT | code and agents, 1M context |

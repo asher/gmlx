@@ -311,6 +311,52 @@ def test_gqa_decode_hd128_routes_flint_from_the_floor(monkeypatch):
     assert not elig(32, 4, 65536, b=2)
 
 
+def test_gqa_decode_hd128_group_10_needs_the_wide_probe(monkeypatch):
+    # A group of 10 (Ripple, 80/8) takes the op from the same floor, but its
+    # 320-thread pass needs a pipeline that fits it. A failed probe keeps
+    # stock; a group of 12 is unmeasured and stays stock.
+    monkeypatch.setattr(attn_hd512, "_GQA_MIN_KV_128", 1024)
+    probes = []
+
+    def fake_probe(dtype, hd, group):
+        probes.append((dtype, hd, group))
+        return fits
+
+    monkeypatch.setattr(attn_hd512, "_gqa_wide_ok", fake_probe)
+
+    def elig(hq, hkv, kL):
+        return attn_hd512._gqa_decode_eligible(
+            mx.zeros((1, hq, 1, 128), dtype=mx.bfloat16),
+            mx.zeros((1, hkv, kL, 128), dtype=mx.bfloat16),
+            mx.zeros((1, hkv, kL, 128), dtype=mx.bfloat16), None)
+
+    fits = True
+    assert elig(80, 8, 1024)
+    assert not elig(80, 8, 1023)
+    assert not elig(96, 8, 65536)
+    assert elig(32, 4, 1024)
+    assert probes == [(mx.bfloat16, 128, 10)]
+    fits = False
+    assert not elig(80, 8, 65536)
+
+
+def test_gqa_wide_probe_caches_a_refusal(monkeypatch):
+    # The probe runs once per shape; a kernel that refuses the width is
+    # remembered, so later calls pay nothing.
+    calls = []
+
+    def refuse(*a, **kw):
+        calls.append(1)
+        raise RuntimeError("threadgroup of 320 threads exceeds the limit")
+
+    monkeypatch.setattr(attn_hd512, "_GQA_WIDE_OK", {})
+    monkeypatch.setattr(attn_hd512, "mlx_kquant",
+                        type("KQ", (), {"sdpa_decode_gqa": staticmethod(refuse)}))
+    assert not attn_hd512._gqa_wide_ok(mx.bfloat16, 128, 10)
+    assert not attn_hd512._gqa_wide_ok(mx.bfloat16, 128, 10)
+    assert len(calls) == 1
+
+
 def test_gqa_decode_hd512_nax_eligibility(monkeypatch):
     # With it, every KV-head count with a group of 2 to 8 takes the op
     # once KV heads x batch x keys reaches 3072. A group of 16 stays on

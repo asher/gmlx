@@ -69,6 +69,13 @@ CONFIGS = {
         moe_intermediate_size=256, routed_scaling_factor=2.5, norm_topk_prob=True,
         final_logit_softcapping=30.0, rms_norm_eps=1e-6, rope_parameters=_ROPE,
         rope_theta=10000.0, max_position_embeddings=4096, tie_word_embeddings=False),
+    "ricursive": dict(
+        model_type="ricursive", hidden_size=256, intermediate_size=512, num_hidden_layers=5,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=64, vocab_size=512,
+        layer_types=["sliding_attention"] * 4 + ["full_attention"], sliding_window=512,
+        embedding_scale=16.0, swiglu_limits=[20.0] * 5, use_gated_attention=True,
+        use_valres=True, rms_norm_eps=1e-6, rope_parameters=_ROPE, rope_theta=10000.0,
+        max_position_embeddings=4096, tie_word_embeddings=False),
     "flint": dict(
         model_type="flint", hidden_size=256, intermediate_size=512, num_hidden_layers=4,
         num_attention_heads=4, num_key_value_heads=2, head_dim=64, vocab_size=512,
@@ -194,6 +201,7 @@ CASES = {
     "muse_spark": Case("muse-spark"),
     "beam": Case("beam"),
     "flint": Case("flint"),
+    "ricursive": Case("ricursive"),
     "granite_switch": Case("graniteswitch"),
     "k2_horizon": Case("k2-horizon"),
     "hy_v3": Case("hy_v3", (r"router\.gate$",)),

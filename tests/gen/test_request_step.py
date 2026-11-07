@@ -127,6 +127,8 @@ def test_held_counts_kv_states_rows_and_audio():
     assert pd.request_held_bytes(m, 100, 50, audio_tokens=10,
                                  embedded_rows=100) == (
         kv + 100 * args.hidden_size * 2 + 70)
+    m.drafter_held_bytes = lambda n: 3 * n
+    assert pd.request_held_bytes(m, 100, 50) == kv + 300
 
 
 @pytest.mark.parametrize("heads,hidden,measured", [

@@ -147,6 +147,7 @@ back.
 - K2 Horizon, dense and MoVA
 - Beam-1.0
 - Flint
+- Ripple-65B
 
 Each family's output is checked against llama.cpp at 16k context. The
 [coverage table](https://asher.github.io/gmlx/arch-coverage.html) lists the

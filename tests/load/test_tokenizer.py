@@ -918,6 +918,27 @@ def test_flint_stop_set():
         "<|end_of_text|>"]
 
 
+_RIPPLE_SPECIALS = ["<|endoftext|>", "<|fim_prefix|>", "<|im_start|>",
+                    "<|im_end|>", "<|pad|>"]
+
+
+def test_ripple_stop_set():
+    """Ripple ends a turn on <|im_end|>, its EOS and EOT, and on
+    <|endoftext|>, its BOS, as the HF eos_token_id list and llama.cpp's EOG
+    scan both give."""
+    from pathlib import Path
+
+    template = (Path(__file__).parents[1] / "fixtures"
+                / "ricursive_template.jinja").read_text()
+    meta = _control_meta(_RIPPLE_SPECIALS, 3, template, "ricursive")
+    meta["tokenizer.ggml.pre"] = "dbrx"
+    meta["tokenizer.ggml.eot_token_id"] = 3
+    tok = load_tokenizer_from_gguf(meta, "ricursive")
+    names = [_RIPPLE_SPECIALS[t] for t in tok._gguf_eos_token_ids]
+    assert names[0] == "<|im_end|>"
+    assert set(names) == {"<|im_end|>", "<|endoftext|>"}
+
+
 def test_k2_horizon_pre_full_pattern_override():
     # The llama3 split with marks, ZWNJ and ZWJ inside letter runs, as the
     # HF tokenizer.json and llama.cpp's K2_HORIZON pre spell it.

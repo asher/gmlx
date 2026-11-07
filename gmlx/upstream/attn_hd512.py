@@ -121,15 +121,17 @@ _HD256_VERIFY = env_bool("GMLX_HD256_VERIFY", True)
 # probe pipelined independent calls (throughput) where the decode step
 # serializes the two-pass dispatch (latency). Opt back in with
 # GMLX_GQA_SDPA_HD256=1 (e.g. to re-measure under batch/verify). hd128
-# routes one row with a group of 8 (Flint, 32 query and 4 KV heads) from
-# GMLX_GQA_SDPA_MINKV128 keys: chained per call, 1.07-1.13x over stock from
-# 1k keys. A group of 4 (llama3-class, 32/8) stays on stock, which matches
-# or beats the kernel from 2k to 110k.
+# routes one row with a group of 8 (Flint, 32 query and 4 KV heads) or 10
+# (Ripple, 80/8) from GMLX_GQA_SDPA_MINKV128 keys: chained per call,
+# 1.07-1.13x over stock from 1k keys at 8, 1.01-1.12x to 16k and 1.09-1.14x
+# at 64-128k at 10. A group of 4 (llama3-class, 32/8) stays on stock, which
+# matches or beats the kernel from 2k to 110k.
 _GQA_DECODE = env_bool("GMLX_GQA_SDPA", True)
 _GQA_MIN_KV = env_int("GMLX_GQA_SDPA_MINKV", 4096)
 _GQA_MIN_KV_128 = env_int("GMLX_GQA_SDPA_MINKV128", 1024)
 _GQA_HD256 = env_bool("GMLX_GQA_SDPA_HD256", False)
 _GQA_MIN_KV_256 = env_int("GMLX_GQA_SDPA_MINKV256", 49152)
+_GQA_GROUPS_128 = (8, 10)
 # hd512 GQA decode (gemma-4 global layers). On NAX GPUs, mlx-kquant 0.4.15
 # and later runs the op's one-query hd512 pass on the matrix units
 # (KQ_GQA_NAX=0 turns that off), and decode takes it at every KV-head count
@@ -408,7 +410,7 @@ def _gqa_decode_eligible(q, k, v, mask):
     if hd == 64:
         min_kv = _GQA_MIN_KV
     elif (hd == 128 and q.shape[0] == 1 and k.shape[1]
-          and q.shape[1] // k.shape[1] == 8):
+          and q.shape[1] // k.shape[1] in _GQA_GROUPS_128):
         min_kv = _GQA_MIN_KV_128
     elif hd == 256 and _GQA_HD256:
         min_kv = _GQA_MIN_KV_256
@@ -424,9 +426,38 @@ def _gqa_decode_eligible(q, k, v, mask):
     kv_heads = k.shape[1]
     if kv_heads == 0 or q.shape[1] % kv_heads != 0:
         return False
-    if not 2 <= q.shape[1] // kv_heads <= 8:
+    group = q.shape[1] // kv_heads
+    if not 2 <= group <= (10 if hd == 128 else 8):
         return False
-    return _causal_str(mask)
+    if not _causal_str(mask):
+        return False
+    return group <= 8 or _gqa_wide_ok(q.dtype, hd, group)
+
+
+_GQA_WIDE_OK: dict = {}
+
+
+def _gqa_wide_ok(dtype, hd, group):
+    # Past 256 threads (a group over 8) some GPUs cap the register-heavy
+    # pass-1 pipeline below the dispatch width, and kq refuses that at eval
+    # time, after this route is chosen. One tiny run per shape finds out.
+    key = (dtype, hd, group)
+    ok = _GQA_WIDE_OK.get(key)
+    if ok is None:
+        try:
+            from gmlx.eval_guard import guard
+
+            q = mx.zeros((1, group, 1, hd), dtype=dtype)
+            kv = mx.zeros((1, 1, 64, hd), dtype=dtype)
+            # Scratch arrays: the guard drains before the fallback runs.
+            guard.eval(mlx_kquant.sdpa_decode_gqa(q, kv, kv, 1.0),
+                       site="gqa-wide-probe", owner="scratch")
+            ok = True
+        except Exception as exc:
+            _warn_fallback_once("gqa_decode", exc)
+            ok = False
+        _GQA_WIDE_OK[key] = ok
+    return ok
 
 
 def _verify_gemm_eligible(q, k, v, mask):

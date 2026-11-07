@@ -1245,6 +1245,33 @@ def prefill_room_bytes() -> float | None:
     return room
 
 
+def note_drafter_held(model, drafter) -> None:
+    """Loader hook: requests on ``model`` also hold what ``drafter``
+    keeps of the prompt (``capture_held_bytes``) while it drafts."""
+    import weakref
+
+    if not callable(getattr(drafter, "capture_held_bytes", None)):
+        return
+    ref = weakref.ref(drafter)
+
+    def held(prompt_tokens: int) -> int:
+        d = ref()
+        return 0 if d is None else int(d.capture_held_bytes(prompt_tokens))
+
+    model.drafter_held_bytes = held
+
+
+def drafter_held_bytes(model, prompt_tokens: int) -> int:
+    """What the drafter on ``model`` holds of a prompt of
+    ``prompt_tokens``, 0 without one."""
+    for holder in (model, getattr(model, "language_model", None)):
+        hook: Callable[[int], int] | None = getattr(
+            holder, "drafter_held_bytes", None)
+        if callable(hook):
+            return int(hook(int(prompt_tokens)))
+    return 0
+
+
 # A budget this large is "until EOS" (run's and serve's uncapped defaults).
 _UNBOUNDED_TOKENS = 1 << 25
 
@@ -1268,8 +1295,8 @@ def request_held_bytes(model, prompt_tokens: int, gen_tokens: int,
                        audio_tokens: int = 0, embedded_rows: int = 0) -> float:
     """What a request holds besides its chunk: the KV and recurrent states
     of the prompt and its output budget (``output_budget`` of
-    ``gen_tokens``), the embedded prompt rows the loop chunks, and the
-    encoder output of its audio."""
+    ``gen_tokens``), the drafter's prompt capture, the embedded prompt rows
+    the loop chunks, and the encoder output of its audio."""
     from gmlx.serve.mem_preflight import (
         _get,
         _lm_config,
@@ -1280,6 +1307,7 @@ def request_held_bytes(model, prompt_tokens: int, gen_tokens: int,
     costs = kv_layer_costs(model, 2.0) or []
     gen = output_budget(model, prompt_tokens, gen_tokens)
     held = prompt_kv_bytes(costs, int(prompt_tokens) + gen)
+    held += drafter_held_bytes(model, prompt_tokens)
     hidden = _get(_lm_config(model), "hidden_size") or 0
     held += int(embedded_rows) * int(hidden) * _ROWS_BYTES
     hook: Callable[[int], int] | None = getattr(model, "audio_held_bytes", None)

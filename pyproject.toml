@@ -65,8 +65,10 @@ dependencies = [
     # The first release with granite_speech5, which the Granite Speech
     # companion is ported from and tested against. The old <5.13 ceiling
     # (AutoTokenizer.register() vs mlx-lm's NewlineTokenizer) no longer
-    # reproduces on 5.15.1.
-    "transformers>=5.16.0",
+    # reproduces on 5.15.1. Verified through 5.22.2; gmlx imports private
+    # chat-template helpers, and 5.22 changed what a template render
+    # accepts, so the ceiling guards the next minor release.
+    "transformers>=5.16.0,<5.23",
     "tokenizers",
     "gguf",
     # comment-preserving YAML round-trip for `gmlx sync-models`.

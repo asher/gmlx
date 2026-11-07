@@ -1,6 +1,6 @@
 # Supported architectures
 
-gmlx maps 48 GGUF architectures to model types, and 47 of them load end-to-end
+gmlx maps 49 GGUF architectures to model types, and 48 of them load end-to-end
 with no `hf_source`. `scripts/check-coverage.py` generates this page from the
 architecture table and the mlx-lm that gmlx carries, so do not edit it by hand.
 
@@ -70,5 +70,6 @@ family, backend, status and caveat:
 | `qwen3vl` | qwen3 | mlx-lm | loadable |  |
 | `qwen3vlmoe` | qwen3 | mlx-lm | loadable |  |
 | `qwen4exp` | qwen3 | mlx-lm | loadable | Speculative decoding needs a companion MTP GGUF beside the model or in an `MTP` folder, or named with `--draft-gguf`. |
+| `ricursive` | ripple | mlx-lm | loadable | Speculative decoding needs the DFlash2 drafter GGUF: `gmlx pull ripple-65b` pairs it; otherwise name it with `--draft-gguf`. |
 | `seed_oss` | seed_oss | mlx-lm | loadable |  |
 | `smollm3` | llama | mlx-lm | loadable |  |
