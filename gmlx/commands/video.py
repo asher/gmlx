@@ -22,7 +22,7 @@ import shutil
 import sys
 import time
 
-from .image import _adapter
+from .image import _adapter, save_npz
 
 _ACTIONS = ("generate", "bench", "pull")
 _ACTION_DESC = {
@@ -542,28 +542,6 @@ def _writable(a, out: str | None) -> None:
             raise OSError(f"cannot write {p}: {err}")
 
 
-def _makedirs_for(path: str) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-
-
-def _save_latent(path: str, **arrays) -> None:
-    """Write ``arrays`` as an .npz file at exactly ``path``, through
-    ``path.part``, so a write stopped part way leaves what was there."""
-    import numpy as np
-
-    path = os.path.expanduser(path)
-    _makedirs_for(path)
-    part = path + ".part"
-    try:
-        with open(part, "wb") as f:
-            np.savez(f, **arrays)
-        os.replace(part, path)
-    except BaseException:
-        if os.path.exists(part):
-            os.remove(part)
-        raise
-
-
 def _release() -> None:
     import gc
 
@@ -780,8 +758,8 @@ def _generate(a) -> int:
     _release()
     times["denoise_s"] = round(time.perf_counter() - t0, 2)
     if a.save_latent:
-        _save_latent(a.save_latent, video=np.array(xv), audio=np.array(xa),
-                     seed=s["seed"], steps=s["steps"])
+        save_npz(a.save_latent, video=np.array(xv), audio=np.array(xa),
+                 seed=s["seed"], steps=s["steps"])
 
     hf = _family()
     times.update(run.decode_and_mux(

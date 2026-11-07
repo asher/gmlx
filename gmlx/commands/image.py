@@ -112,6 +112,25 @@ def _quality(text: str) -> int:
     return n
 
 
+def save_npz(path: str, **arrays) -> None:
+    """Write ``arrays`` as an .npz file at exactly ``path``, its folder
+    made, through ``path.part``, so a write stopped part way leaves what
+    was there."""
+    import numpy as np
+
+    path = os.path.expanduser(path)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    part = path + ".part"
+    try:
+        with open(part, "wb") as f:
+            np.savez(f, **arrays)
+        os.replace(part, path)
+    except BaseException:
+        if os.path.exists(part):
+            os.remove(part)
+        raise
+
+
 def _adapter(text: str) -> tuple[str, float]:
     """PATH or PATH:STRENGTH. The text after the last colon is a strength
     only when it parses as a float, so a path may hold colons."""
@@ -969,7 +988,7 @@ def _generate(a) -> int:
         images.append({"path": path, "seed": s, "seconds": round(secs, 3)})
         log(f"[image] wrote {path} (seed {s}, {secs:.2f} s)")
     if a.save_latent:
-        np.savez(a.save_latent, latents=np.concatenate(latents, axis=0),
+        save_npz(a.save_latent, latents=np.concatenate(latents, axis=0),
                  seeds=np.array(seeds, np.int64))
     if a.json:
         print(json.dumps({

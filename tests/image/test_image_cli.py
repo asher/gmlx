@@ -137,6 +137,45 @@ def test_cli_latents_equal_sample_with_the_seed_noise(env, tmp_path, capsys):
     assert env.checks[0]["height"] == 32 and env.checks[0]["width"] == 48
 
 
+def test_the_latents_land_at_the_path_given(env, tmp_path):
+    """A --save-latent path without .npz, in a folder not made yet, is
+    written as given, not beside it with .npz added."""
+    lat = tmp_path / "lat" / "run1"
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                     "--seed", "5", "--output",
+                                     str(tmp_path / "a.png"),
+                                     "--save-latent", str(lat)]) == 0
+    assert np.load(lat)["seeds"].tolist() == [5]
+    assert [p.name for p in lat.parent.iterdir()] == ["run1"]
+
+
+def test_a_failed_latent_write_keeps_the_file_there(env, tmp_path,
+                                                    monkeypatch, capsys):
+    """A latent write that fails part way, as on a full disk, leaves the
+    file an earlier run wrote, and no part file."""
+    lat = tmp_path / "lat" / "x.npz"
+    lat.parent.mkdir()
+    np.savez(lat, seeds=np.ones(3))
+    before = lat.read_bytes()
+    savez = np.savez
+
+    def full(file, **arrays):
+        f = open(file, "wb") if isinstance(file, (str, os.PathLike)) \
+            else file
+        f.write(b"PK\x03\x04 part of a zip")
+        f.flush()
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(np, "savez", full)
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                     "--output", str(tmp_path / "a.png"),
+                                     "--save-latent", str(lat)]) == 1
+    monkeypatch.setattr(np, "savez", savez)
+    assert "No space left on device" in capsys.readouterr().err
+    assert lat.read_bytes() == before
+    assert [p.name for p in lat.parent.iterdir()] == ["x.npz"]
+
+
 def test_a_variant_with_fixed_sigmas_runs_them_and_no_other_count(
         env, tmp_path, capsys, monkeypatch):
     import dataclasses
