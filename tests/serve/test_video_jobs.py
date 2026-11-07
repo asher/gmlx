@@ -1557,14 +1557,19 @@ def test_the_jobs_pacer_reaches_the_sampler_and_stops_the_job(
         k["pacer"](())
         k["on_step"](0, 2)
         job.stop.set()
-        k["pacer"](())
+        try:
+            k["pacer"](())
+        except JobStopped:
+            seen["stopped"] = True
+            raise
+        pytest.fail("the pacer ran on past the stop")
 
     hold = _clip_part_stubs(monkeypatch, order, generate)
     store, clock, driver = _store(tmp_path)
     job = _clip_job(store)
     with pytest.raises(JobStopped):
         vj._clip_part(job, store, hold, store.clip(job.id))
-    assert seen["pacer"] is not None
+    assert seen["pacer"] is not None and seen["stopped"]
     assert job.record["gmlx"]["step"] == 1
     assert order[-1] == ("settle", vj.JOB)
 
@@ -2239,7 +2244,9 @@ def test_the_clip_samples_with_the_jobs_settings_and_anchors(
     job.kept.update(anchors=((0, video, None),), spans=((3, 9),))
     job.params["settings"].update(seed=1234, shifts={"video": 3.0})
     vj._clip_part(job, store, hold, store.clip(job.id))
-    (anchor,) = seen.pop("anchors")
+    anchors = seen.pop("anchors")
+    assert len(anchors) == 1, f"the sampler got anchors {anchors!r}"
+    anchor = anchors[0]
     assert anchor.frame == 0 and anchor.audio is None
     np.testing.assert_array_equal(np.array(anchor.video), video)
     seen.pop("on_step"), seen.pop("pacer")
