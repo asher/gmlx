@@ -67,16 +67,29 @@ def _refuse_outside_roots(aid: str) -> None:
             "a model folder, never an absolute path")
 
 
-def _match(aid: str, items, model_id: str, model_dirs) -> int:
-    """The config index ``aid`` names among ``items`` (AdapterRefs)."""
+class _Index:
+    """The ways a request names an entry's adapters, built once per
+    request: the written relative path, the file name and its stem."""
+
+    def __init__(self, items):
+        self.items = items
+        self.written: dict = {}
+        self.names: dict = {}
+        for i, ref in enumerate(items):
+            if not os.path.isabs(ref.written):
+                self.written.setdefault(os.path.normpath(ref.written), i)
+            base = os.path.basename(ref.path)
+            for name in {base, os.path.splitext(base)[0]}:
+                self.names.setdefault(name, []).append(i)
+
+
+def _match(aid: str, index: _Index, model_id: str, model_dirs) -> int:
+    """The config index ``aid`` names among the entry's adapters."""
     _refuse_outside_roots(aid)
-    norm = os.path.normpath(aid)
-    for i, ref in enumerate(items):
-        if not os.path.isabs(ref.written) and os.path.normpath(ref.written) == norm:
-            return i
-    hits = [i for i, ref in enumerate(items)
-            if aid in (os.path.basename(ref.path),
-                       os.path.splitext(os.path.basename(ref.path))[0])]
+    at = index.written.get(os.path.normpath(aid))
+    if at is not None:
+        return at
+    hits = index.names.get(aid, [])
     if len(hits) > 1:
         raise AdapterRequestError(
             f"adapter {aid!r} matches adapters {hits[0]} and {hits[1]} of model "
@@ -84,7 +97,7 @@ def _match(aid: str, items, model_id: str, model_dirs) -> int:
             "with its index")
     if hits:
         return hits[0]
-    real = {os.path.realpath(ref.path): i for i, ref in enumerate(items)}
+    real = {os.path.realpath(ref.path): i for i, ref in enumerate(index.items)}
     for root in model_dirs or ():
         root = os.path.realpath(os.path.expanduser(os.path.expandvars(root)))
         cand = os.path.realpath(os.path.join(root, aid))
@@ -100,6 +113,7 @@ def _from_adapters(value, items, model_id: str, model_dirs) -> dict:
     if not isinstance(value, list):
         raise AdapterRequestError("adapters must be a list of {id, strength}")
     out: dict = {}
+    index = _Index(items)
     for n, item in enumerate(value):
         if isinstance(item, str):
             item = {"id": item}
@@ -115,7 +129,7 @@ def _from_adapters(value, items, model_id: str, model_dirs) -> dict:
         st = item.get("strength")
         st = 1.0 if st is None else _strength(st, f"adapters[{n}].strength")
         aid = item["id"].strip()
-        i = _match(aid, items, model_id, model_dirs)
+        i = _match(aid, index, model_id, model_dirs)
         if i in out:
             raise AdapterRequestError(f"adapter {aid!r} is listed twice")
         out[i] = st
