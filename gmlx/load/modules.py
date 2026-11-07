@@ -2800,11 +2800,18 @@ def _stamp_gate_slots(by_path: dict, paths, slot: int, *,
 
 
 def refuse_streamed_fused_expert_lora(model: nn.Module) -> None:
-    """Raise when a fused MoE block under ``model`` carries an expert
-    adapter target. Expert streaming calls this before it wraps, wires or
-    credits anything."""
-    hits = [p for p, m in model.named_modules()
-            if m.__dict__.get("_kq_expert_lora")]
+    """Raise when a fused MoE block in ``model``'s decoder layers carries
+    an expert adapter target. Expert streaming calls this before it wraps,
+    wires or credits anything."""
+    layers = getattr(model, "layers", None)
+    if layers is None:
+        layers = getattr(getattr(model, "model", None), "layers", None) or ()
+    hits = []
+    for i, layer in enumerate(layers):
+        named = getattr(layer, "named_modules", None)
+        mods = named() if callable(named) else (("", m) for m in layer.modules())
+        hits += [f"layers.{i}.{p}".rstrip(".") for p, m in mods
+                 if getattr(m, "__dict__", {}).get("_kq_expert_lora")]
     if hits:
         n = (f"{len(hits)} blocks carry" if len(hits) > 1 else "1 block carries")
         raise NotImplementedError(
