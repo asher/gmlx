@@ -134,6 +134,10 @@ MODEL_CONFIG = {
     "minimax_m3_vision": MessageFormat.LIST_WITH_IMAGE_FIRST,
 }
 
+# gmlx: the model types whose template prints a list system or developer
+# message other than as its text.
+_SYSTEM_TEXT_TYPES = ("gemma4", "gemma4_unified", "diffusion_gemma")
+
 # Models that don't support multi-image
 SINGLE_IMAGE_ONLY_MODELS = {
     "llava_next",
@@ -334,6 +338,14 @@ class MessageFormatter:
                 num_audios,
                 **kwargs,
             )
+
+        # gmlx: Gemma 4 system and developer text stays a string, as the
+        # text model renders it.
+        if (
+            role in ("system", "developer")
+            and self.model_name in _SYSTEM_TEXT_TYPES
+        ):
+            return {"role": role, "content": prompt}
 
         # Route to appropriate formatter
         formatter_map = {

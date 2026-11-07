@@ -228,6 +228,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   where they said the server did not answer.
 - A chat, Responses, Messages or images request with a lone surrogate
   escape gets a 400 naming the field, where it returned a 500.
+- On a Gemma 4 model set up with `mmproj:`, a system or developer message
+  renders as on the text model and llama-server, where it got an extra space
+  before the end of its turn or, on older templates, showed as a Python list.
 
 ## [0.5.4] - 2026-10-29
 

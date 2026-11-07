@@ -101,10 +101,15 @@ class _Gemma4Processor:
         self.chat_template = template
 
 
-def _processor_for(run):
+def _processor_for(run, vision=False):
+    """The processor and config of the text GGUF of ``run``, or with
+    ``vision`` those of a Gemma 4 GGUF set up with ``mmproj:``."""
     row = next(r for r in _FIXTURE["rows"] if r["run"] == run)
     template = (_FIXTURES / row["template"]).read_text()
     model_type, bos = _MODELS[run]
+    if vision:
+        assert model_type == "gemma4_text"
+        return _Gemma4Processor(template, bos), {"model_type": "gemma4_unified"}
     return _Processor(template, bos), {"model_type": model_type}
 
 
@@ -167,8 +172,9 @@ def chat(monkeypatch):
     client = TestClient(_APP.app)
     loads = []
 
-    def post(run, body, status=200, path="/v1/chat/completions"):
-        processor, config = _processor_for(run)
+    def post(run, body, status=200, path="/v1/chat/completions",
+             vision=False):
+        processor, config = _processor_for(run, vision)
         monkeypatch.setattr(_OPENAI, "get_cached_model", lambda *a, **k: (
             loads.append(a) or (None, processor, config)))
         r = client.post(path, json={"model": "m", "max_tokens": 1, **body})
@@ -366,12 +372,8 @@ def test_the_gemma4_processor_gets_a_400(chat, monkeypatch):
     assert prefill.UNSUPPORTED in r.text
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Gemma4Processor rebuilds a string system message as a list of text "
-    "parts, and the template renders each part with a trailing space"))
 @pytest.mark.parametrize("rid", _GEMMA_CONT_ROWS)
 def test_the_gemma4_processor_renders_llama_servers_prompt(chat, rid):
-    """When this passes, Gemma4Processor may go back on the allowlist."""
     row = _row(rid)
     processor = _Gemma4Processor(
         (_FIXTURES / row["template"]).read_text(), "<bos>")
@@ -386,6 +388,33 @@ def test_the_gemma4_processor_renders_llama_servers_prompt(chat, rid):
         **row["body"]["chat_template_kwargs"])
     want, got = _expected(row, out)
     assert got == want
+
+
+_GEMMA_ROWS = [r for r in _FIXTURE["rows"]
+               if r["run"] == "llama-server/gemma4_12b"
+               and "continue_final_message" not in r["body"]]
+
+
+@pytest.mark.parametrize("row", _GEMMA_ROWS, ids=[r["id"] for r in _GEMMA_ROWS])
+def test_a_gemma4_vision_entry_renders_llama_servers_prompt(chat, row):
+    want, got = _expected(row, chat(row["run"], row["body"], vision=True))
+    assert got == want
+
+
+@pytest.mark.parametrize("messages", [
+    [{"role": "developer", "content": "Be brief."},
+     {"role": "user", "content": "Hi"}],
+    [{"role": "system", "content": "Be brief."},
+     {"role": "developer", "content": "Answer in French."},
+     {"role": "user", "content": "Hi"}],
+], ids=["leading", "after-system"])
+def test_a_gemma4_vision_entry_renders_a_developer_message_as_text(chat,
+                                                                  messages):
+    run = "llama-server/gemma4_12b"
+    body = {"messages": messages}
+    got = chat(run, body, vision=True)
+    assert " <turn|>" not in got
+    assert got == chat(run, body)
 
 
 def test_a_render_error_in_a_prefill_is_not_a_template_refusal():

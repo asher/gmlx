@@ -424,13 +424,11 @@ CLAIMS: tuple[Claim, ...] = (
           wrappers=("gmlx.serve.patches.render",)),
     Claim("gmlx._vendor.mlx_vlm.prompt_utils", "get_chat_template",
           "patches.render.install_faithful_history (owned render "
-          "tail mirrors the stock function's); system_content_fix (a text-only "
-          "system or developer message reaches the template as a "
-          "string); render._install_nested_in_place (wrapped: within an "
+          "tail mirrors the stock function's); "
+          "render._install_nested_in_place (wrapped: within an "
           "in-place render, the images of a nested rebuild go back in "
           "place)",
-          wrappers=("gmlx.serve.patches.render",
-                    "gmlx.upstream.system_content_fix")),
+          wrappers=("gmlx.serve.patches.render",)),
     Claim("gmlx._vendor.mlx_vlm.server", "_infer_tool_parser_from_processor",
           "patches.apc.install_retire_render_capture (wrapped: "
           "records the request's tool_parser override for the retirement "

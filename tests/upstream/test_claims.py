@@ -530,7 +530,6 @@ _CENSUSED = (
     "gmlx.upstream.dsv32_patches",
     "gmlx.upstream.gdn_patches",
     "gmlx.upstream.single_bos_fix",
-    "gmlx.upstream.system_content_fix",
 )
 
 
