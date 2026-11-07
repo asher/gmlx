@@ -45,8 +45,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   does, and one refused for memory names the GB it needs.
 - An image LoRA takes less memory: loading one no longer holds its file
   twice, and fewer of its weights are copied while it runs.
-- The images API prices a request body from the memory free before it reads
-  it, where it refused bodies over 64 MiB and inline images over 32 MiB.
+- The images API prices a request body and each image's decode from the memory
+  free first, where it refused bodies over 64 MiB and inline images over 32 MiB.
 - A JSON `/v1/images/edits` request takes bare base64 image data in `image`
   and `images[].image_url`, beside data URLs.
 - A chat model's cold load no longer waits for a running image job, unless

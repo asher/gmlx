@@ -197,10 +197,10 @@ async def _watch_disconnect(request: Request, stop: threading.Event):
         _log.debug("image request disconnect watch ended", exc_info=True)
 
 
-def _json_image(value, param: str):
-    """A JSON edit image: ``{"image_url": ...}`` or a bare data URL. A
-    ``file_id`` is refused, and so is a path or a URL the media gate does
-    not accept."""
+def _json_image(value, param: str, pixels):
+    """A JSON edit image: ``{"image_url": ...}`` or a bare data URL,
+    decoded by ``pixels`` (:class:`_Pixels`). A ``file_id`` is refused, and
+    so is a path or a URL the media gate does not accept."""
     from ..image_service import _bad
     from .media_gate import MediaRefused, _decode_edit_image
 
@@ -231,7 +231,7 @@ def _json_image(value, param: str):
         except (binascii.Error, ValueError):
             raise _bad(f"{param} must be a data URL or base64 image data; "
                        "send a file as multipart form data", param) from None
-    return _decoded(data, param)
+    return pixels.decode(data, param)
 
 
 def _decoded(data: bytes, param: str):
@@ -246,6 +246,39 @@ def _decoded(data: bytes, param: str):
         raise
 
 
+class _Pixels:
+    """The decode of a request's images, each priced from its header before
+    it decodes (image_service.decode_price), beside the arrays of the
+    images decoded before it, against the ``free`` figure the body was
+    priced against less ``price``, what its read and parse were priced at:
+    an image past it is refused with a 413 before its decode. With
+    ``free`` None it prices nothing."""
+
+    def __init__(self, free: int | None, price: int):
+        self.room = None if free is None else max(0, free - price)
+        self.held = 0
+
+    def decode(self, data: bytes, param: str):
+        from ..image_service import ImageRequestError, decode_price
+        from .body_intake import _mib
+
+        priced = None if self.room is None else decode_price(data)
+        if priced is not None and priced[0] + self.held > self.room:
+            need, w, h = priced
+            before = (f" beside the {_mib(self.held, True)} of the images "
+                      "decoded before it" if self.held else "")
+            message = (f"{param} is {w}x{h} pixels, its decode holds "
+                       f"{_mib(need, True)}{before}, and {_mib(self.room)} "
+                       "of memory is free beside the models loaded and the "
+                       "body's read; send smaller or fewer images, or "
+                       "unload a model to make room")
+            _log_media(413, message)
+            raise ImageRequestError(413, message, param=param)
+        pixels = _decoded(data, param)
+        self.held += pixels.nbytes
+        return pixels
+
+
 def _log_media(status: int, message: str) -> None:
     from .body_intake import log_refusal
 
@@ -256,9 +289,11 @@ async def _read_body(route: str, request: Request):
     """``(fields, images, mask)`` of a JSON body or a multipart form. The
     media gate leaves the body to the route: the whole body, its images
     with it, is priced against the memory free before a byte of it is
-    read, then held to the gate's media rules (body_intake). The price is
-    an estimate and books nothing; the job's admission prices the decoded
-    images. Its inline images take no byte limit of their own."""
+    read, then held to the gate's media rules (body_intake), and each
+    image's decode is priced from its header before it runs (:class:`_Pixels`).
+    The prices are estimates and book nothing; the job's admission prices
+    the decoded images. Its inline images take no byte limit of their
+    own."""
     from .media_gate import body_priced
 
     with body_priced():
@@ -267,17 +302,24 @@ async def _read_body(route: str, request: Request):
 
 async def _read_priced_body(route: str, request: Request):
     from ..image_service import ImageRequestError
-    from .body_intake import BodyRefused, _in_turn, read_form_in_ram, read_json
+    from .body_intake import (
+        BodyRefused,
+        _in_turn,
+        free_bytes,
+        read_form_in_ram,
+        read_json,
+    )
 
     ctype = request.headers.get("content-type", "").lower()
     is_form = ctype.startswith("multipart/form-data")
+    free = free_bytes()
     try:
         if is_form:
-            form = await read_form_in_ram(request)
+            form = await read_form_in_ram(request, free)
         else:
             # The images decode in the parse's worker thread.
-            return await read_json(request,
-                                   then=functools.partial(_json_parts, route))
+            return await read_json(request, free, then=functools.partial(
+                _json_parts, route, free))
     except BodyRefused as e:
         _log_media(e.status, str(e))
         raise ImageRequestError(e.status, str(e), param=e.param,
@@ -285,14 +327,14 @@ async def _read_priced_body(route: str, request: Request):
     try:
         # In the turn the parses take: the form's price counts its
         # largest file, which this reads whole.
-        return await _in_turn(_form_parts, form)
+        return await _in_turn(_form_parts, form, _Pixels(free, form.price))
     finally:
         await form.close()
 
 
-def _form_parts(form):
-    """``(fields, images, mask)`` of a parsed form, its images decoded.
-    Runs in a worker thread."""
+def _form_parts(form, pixels):
+    """``(fields, images, mask)`` of a parsed form, its images decoded by
+    ``pixels`` (:class:`_Pixels`). Runs in a worker thread."""
     from ..image_service import _bad
 
     fields, images, mask = {}, [], None
@@ -300,9 +342,9 @@ def _form_parts(form):
         if hasattr(value, "read"):
             data = value.file.read()
             if key in ("image", "image[]"):
-                images.append(_decoded(data, "image"))
+                images.append(pixels.decode(data, "image"))
             elif key == "mask":
-                mask = _decoded(data, "mask")
+                mask = pixels.decode(data, "mask")
             else:
                 raise _bad(f"file field {key!r} is not read by this route",
                            key)
@@ -313,20 +355,22 @@ def _form_parts(form):
     return fields, images, mask
 
 
-def _json_parts(route: str, body):
-    """``(body, images, mask)`` of a parsed JSON body, its images decoded.
-    Runs in the parse's worker thread."""
+def _json_parts(route: str, free: int | None, body, price: int):
+    """``(body, images, mask)`` of a parsed JSON body, its images decoded
+    against ``free`` less ``price``, what the body was priced at
+    (:class:`_Pixels`). Runs in the parse's worker thread."""
     from ..image_service import _bad
 
     if not isinstance(body, dict):
         raise _bad("request body must be a JSON object")
     images, mask = [], None
     if route != "generations":
+        pixels = _Pixels(free, price)
         raw = body.get("images", body.get("image"))
         for item in raw if isinstance(raw, list) else ([] if raw is None else [raw]):
-            images.append(_json_image(item, "images"))
+            images.append(_json_image(item, "images", pixels))
         if body.get("mask") is not None:
-            mask = _json_image(body["mask"], "mask")
+            mask = _json_image(body["mask"], "mask", pixels)
     return body, images, mask
 
 def _budget(hold):

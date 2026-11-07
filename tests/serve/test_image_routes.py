@@ -1059,7 +1059,8 @@ def test_the_gate_leaves_an_images_body_to_the_route_and_its_price(
     monkeypatch.setattr(mg, "BODY_MAX_BYTES", len(body) // 2)
     monkeypatch.setattr(mg, "MEDIA_MAX_BYTES", len(png) // 2)
     monkeypatch.setattr(body_intake, "free_bytes",
-                        lambda: body_intake.json_price(body.encode(), True))
+                        lambda: body_intake.json_price(body.encode(), True)
+                        + svc.decode_price(png)[0])
     r = TestClient(_gated_app()).post(
         "/v1/images/edits", content=body,
         headers={"content-type": "application/json"})
@@ -1140,7 +1141,9 @@ def test_an_images_form_is_priced_as_its_text_arrives(served, monkeypatch,
     # the narrower copy the decode widens from.
     n = len(prompt.encode())
     need = math.ceil(n * 1.125) + n * (6 if wide else 1) + bi._SLACK
-    for free, status in ((need - 1, 413), (need, 200)):
+    # Its image decodes past the read, priced on its own.
+    decode = svc.decode_price(_png())[0]
+    for free, status in ((need - 1, 413), (need + decode, 200)):
         monkeypatch.setattr(bi, "free_bytes", lambda f=free: f)
         r = TestClient(_gated_app()).post("/v1/images/edits", content=body,
                                           headers={"content-type": ctype})
@@ -1241,14 +1244,20 @@ def test_an_edit_with_a_photo_is_read_within_its_price(served, monkeypatch,
                 f"image/png\r\n\r\n").encode() + photo + \
             f"\r\n--{b}--\r\n".encode()
         ctype = f"multipart/form-data; boundary={b}"
-    budget = (2 if kind == "form" else 4) * len(body) + bi._SLACK
+    # Its read and parse, and its decode at 22 bytes a pixel and 8 MiB.
+    budget = ((2 if kind == "form" else 4) * len(body) + bi._SLACK
+              + 768 * 768 * 22 + (8 << 20))
     monkeypatch.setattr(bi, "free_bytes", lambda: budget)
     r = TestClient(_gated_app()).post("/v1/images/edits", content=body,
                                       headers={"content-type": ctype})
     assert r.status_code == 200, r.text
-    # The image decodes into arrays the job's admission prices, so the
-    # peak is the read and the parse.
-    monkeypatch.setattr(images, "_decoded", lambda data, param: None)
+    # Pillow's buffers are not on the Python heap, and the decode is
+    # priced from the image's header on its own, so the peak is the read
+    # and the parse.
+    import numpy as np
+
+    monkeypatch.setattr(images, "_decoded",
+                        lambda data, param: np.zeros(0, np.uint8))
 
     def run(free):
         monkeypatch.setattr(bi, "free_bytes", lambda: free)
@@ -1261,6 +1270,152 @@ def test_an_edit_with_a_photo_is_read_within_its_price(served, monkeypatch,
     with pytest.raises(svc.ImageRequestError) as e:
         asyncio.run(run(peak - 1)())
     assert e.value.status == 413, e.value
+
+
+def _png_header(w: int, h: int) -> bytes:
+    """A PNG of a few bytes whose header claims ``w`` x ``h`` RGB pixels,
+    its pixels cut short."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data)))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"\0" * 64)) + chunk(b"IEND", b""))
+
+
+def _edit_of(kind: str, image: bytes) -> tuple[bytes, str]:
+    """An edit of ``image``, inline in JSON or a file in a form."""
+    if kind == "json":
+        url = "data:image/png;base64," + base64.b64encode(image).decode()
+        return (json.dumps({"prompt": "x", "image": url}).encode(),
+                "application/json")
+    b = "gmlxboundary"
+    return (f'--{b}\r\nContent-Disposition: form-data; name="prompt"\r\n'
+            f"\r\nx\r\n--{b}\r\nContent-Disposition: form-data; "
+            f'name="image"; filename="a.png"\r\nContent-Type: image/png'
+            f"\r\n\r\n").encode() + image + f"\r\n--{b}--\r\n".encode(), \
+        f"multipart/form-data; boundary={b}"
+
+
+def _body_price(post, n: int) -> int:
+    """The bytes an edit's read and parse are priced at, ``n`` the body's
+    length: the least memory free at which ``post(free)`` is not refused
+    for its body."""
+    def body_refused(free: int) -> bool:
+        r = post(free)
+        return r.status_code == 413 and \
+            r.json()["error"]["message"].startswith("the ")
+    lo, hi = 0, 8 * n + (4 << 20)
+    assert body_refused(lo) and not body_refused(hi)
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (mid, hi) if body_refused(mid) else (lo, mid)
+    return hi
+
+
+@pytest.mark.parametrize("image", ["photo", "header"])
+@pytest.mark.parametrize("kind", ["json", "form"])
+def test_an_edit_image_whose_decode_passes_the_memory_free_is_a_413(
+        served, monkeypatch, kind, image):
+    """An edit's image is priced from its header before it decodes, at
+    what its decode holds beside the body's read and parse: an RGB image
+    at 22 bytes a pixel and 8 MiB (Pillow's image, its upright copy, its
+    convert and the array). One byte under is a 413 before a pixel
+    decodes, and at the price a photo decodes, and a file of a few bytes
+    whose header claims 8192x8192 pixels decodes and is refused for its
+    pixels cut short."""
+    from gmlx.serve.patches import body_intake as bi
+
+    w = 512 if image == "photo" else 8192
+    body, ctype = _edit_of(kind, _photo(w, w) if image == "photo"
+                           else _png_header(w, w))
+    client = TestClient(_gated_app())
+
+    def post(free):
+        monkeypatch.setattr(bi, "free_bytes", lambda: free)
+        return client.post("/v1/images/edits", content=body,
+                           headers={"content-type": ctype})
+    price = _body_price(post, len(body))
+    term = w * w * 22 + (8 << 20)
+    r = post(price + term - 1)
+    assert r.status_code == 413, r.text
+    error = r.json()["error"]
+    assert error["param"] == ("images" if kind == "json" else "image")
+    assert error["message"].startswith(f"{error['param']} is {w}x{w} "
+                                       "pixels, its decode holds "), error
+    r = post(price + term)
+    if image == "photo":
+        assert r.status_code == 200, r.text
+    else:
+        assert r.status_code == 400, r.text
+        assert "not a readable" in r.json()["error"]["message"], r.text
+
+
+def test_the_images_of_an_edit_are_priced_beside_the_arrays_before_them(
+        served, monkeypatch):
+    """Each image of an edit is priced beside the arrays of the images
+    decoded before it, which the request holds until the job's
+    admission: a second image that fits alone is refused beside the
+    first."""
+    from gmlx.serve.patches import body_intake as bi
+
+    url = "data:image/png;base64," + base64.b64encode(_photo(512, 512)) \
+        .decode()
+    one = json.dumps({"prompt": "x", "image": [url]}).encode()
+    two = json.dumps({"prompt": "x", "image": [url, url]}).encode()
+    client = TestClient(_gated_app())
+
+    def post(body, free):
+        monkeypatch.setattr(bi, "free_bytes", lambda: free)
+        return client.post("/v1/images/edits", content=body,
+                           headers={"content-type": "application/json"})
+    term = 512 * 512 * 22 + (8 << 20)
+    # The second image's price, beside the body and the first array.
+    free = _body_price(lambda f: post(two, f), len(two)) + term
+    assert post(one, free).status_code == 200
+    r = post(two, free + 512 * 512 * 3 - 1)
+    assert r.status_code == 413, r.text
+    assert "beside the 768.0 KiB of the images decoded before it" in \
+        r.json()["error"]["message"], r.text
+    assert post(two, free + 512 * 512 * 3).status_code == 200
+
+
+@pytest.mark.parametrize("fmt,mode", [("PNG", "RGB"), ("WEBP", "RGBA")])
+def test_the_decode_price_bounds_what_the_decode_holds(fmt, mode, tmp_path):
+    """What an image's decode holds at its peak, by the process's maximum
+    resident size, stays within the price read from its header: 4096
+    pixels square, a PNG of 22 bytes a pixel and a WebP with alpha, the
+    widest decode, of 35."""
+    import os
+    import subprocess
+    import sys
+
+    from PIL import Image
+
+    p = tmp_path / f"a.{fmt.lower()}"
+    Image.new(mode, (4096, 4096), (10, 20, 30, 40)[:len(mode)]).save(p, fmt)
+    price = svc.decode_price(p.read_bytes())[0]
+    code = f"""
+import io, resource
+from PIL import Image
+from gmlx.serve.image_service import decode_image
+tiny = io.BytesIO()
+Image.new({mode!r}, (2, 2)).save(tiny, {fmt!r})
+decode_image(tiny.getvalue(), "image")
+data = open({str(p)!r}, "rb").read()
+before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+decode_image(data, "image")
+print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before)
+"""
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                         text=True, env=os.environ, check=True)
+    # ru_maxrss is in bytes on macOS, in KiB elsewhere.
+    held = int(out.stdout.split()[-1]) * (1 if sys.platform == "darwin"
+                                          else 1024)
+    assert 0.8 * price < held <= price, (held, price)
 
 
 def _edit_bodies() -> dict:

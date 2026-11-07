@@ -479,9 +479,10 @@ def _parse(box: list, path: str, ctype: str | None, free: int | None,
     """The JSON document of the body in ``box``, which this takes, so the
     body is freed as its parse goes: priced against ``free``, escaped to
     ASCII, decoded and parsed once, then held to the media gate's checks,
-    and ``then(doc)`` in its place with ``then``. ``parsed`` is the length
-    and document of a body the session socket parsed already. Runs in a
-    worker thread."""
+    and ``then(doc, price)`` in its place with ``then``, ``price`` the
+    bytes the parse was priced at. ``parsed`` is the length and document
+    of a body the session socket parsed already. Runs in a worker
+    thread."""
     from .media_gate import (
         _MULTIPART,
         _URLENCODED,
@@ -496,11 +497,12 @@ def _parse(box: list, path: str, ctype: str | None, free: int | None,
         raise BodyRefused(400, "this route takes a JSON body, not a "
                           "multipart form")
     if parsed is not None and parsed[0] == len(box[0]):
+        price = 0 if then is None else json_price(box[0], _verifies(path))
         box.clear()
         doc = parsed[1]
     else:
         try:
-            doc = _loads(box, free, _verifies(path))
+            doc, price = _loads(box, free, _verifies(path))
         except RecursionError:
             raise BodyRefused(400, "the request body nests too deeply") \
                 from None
@@ -515,15 +517,17 @@ def _parse(box: list, path: str, ctype: str | None, free: int | None,
             check_json(doc, path, inline_only=inline_only)
     except MediaRefused as e:
         raise BodyRefused(400, str(e), e.param) from None
-    return doc if then is None else then(doc)
+    return doc if then is None else then(doc, price)
 
 
 def _loads(box: list, free: int | None, verify: bool = False):
-    """The document of the JSON body in ``box``, which this takes, priced
-    against ``free`` (:func:`json_price`), escaped to ASCII, decoded and
-    parsed once. Each step drops the copy before it."""
+    """``(doc, price)``: the document of the JSON body in ``box``, which
+    this takes, priced against ``free`` (:func:`json_price`), escaped to
+    ASCII, decoded and parsed once, and that price. Each step drops the
+    copy before it."""
     buf = box.pop()
     encoding = json.detect_encoding(bytes(buf[:4]))
+    wide = 0
     if encoding == "utf-8-sig":
         del buf[:3]
     elif encoding != "utf-8":
@@ -534,6 +538,7 @@ def _loads(box: list, free: int | None, verify: bool = False):
         if free is not None and need > free:
             raise _parse_over_free(len(buf), need, free)
         buf = buf.decode(encoding).encode("utf-8", "surrogatepass")
+        wide = need
     need, high = _json_plan(buf, verify)
     if free is not None and need > free:
         raise _parse_over_free(len(buf), need, free)
@@ -541,7 +546,7 @@ def _loads(box: list, free: int | None, verify: bool = False):
         buf = _escaped(buf, high)
     text = buf.decode("utf-8", "surrogatepass")
     del buf
-    return json.loads(text)
+    return json.loads(text), max(need, wide)
 
 
 def loads_field(text: str, name: str, free: int | None):
@@ -564,7 +569,7 @@ def loads_field(text: str, name: str, free: int | None):
                               f"send a shorter {name}, or unload a model "
                               "to make room", name)
     try:
-        return _loads([buf], None)
+        return _loads([buf], None)[0]
     except RecursionError:
         raise ValueError(f"{name} nests too deeply") from None
 
@@ -580,9 +585,9 @@ def _parse_over_free(n: int, need: int, free: int) -> BodyRefused:
 async def read_json(request: Request, free: int | None = None, then=None):
     """The JSON document of the body of ``request``, ``{}`` for an empty
     body, held to the media gate's checks as the gate holds every route it
-    reads, or ``then(doc)`` with ``then``, which runs in the parse's worker
-    thread, so the route's own decode of the media the body carries runs
-    there too. The body is priced against ``free`` bytes (the pool's free
+    reads, or ``then(doc, price)`` with ``then``, ``price`` the bytes the
+    body was priced at, which runs in the parse's worker thread, so the
+    route's own decode of the media the body carries runs there too. The body is priced against ``free`` bytes (the pool's free
     figure when None): at :func:`_min_price` of its Content-Length before
     a byte of it is read, or of what arrived as a body with none arrives,
     then at :func:`json_price` once read. The price, the parse and the
@@ -601,7 +606,7 @@ async def read_json(request: Request, free: int | None = None, then=None):
     session = request.scope.get(SESSION_SCOPE_KEY) is not None
     parsed = request.scope.pop(SESSION_BODY_KEY, None)
     if not box[0]:
-        return {} if then is None else then({})
+        return {} if then is None else then({}, 0)
     return await _in_turn(
         _parse, box, request.url.path, request.headers.get("content-type"),
         free, session, parsed, then)
@@ -617,7 +622,8 @@ async def read_form_in_ram(request: Request, free: int | None = None,
     beside them; once parsed, with the largest file, which the route reads
     whole. A Content-Length past the figure is refused before the read,
     and a body with none once the bytes arrived pass it. Each chunk waits
-    STALL_S seconds at most."""
+    STALL_S seconds at most. The form's ``price`` is the bytes its read and
+    parse were priced at."""
     from starlette.formparsers import MultiPartParser
     from starlette.requests import ClientDisconnect
 
@@ -726,9 +732,10 @@ async def read_form_in_ram(request: Request, free: int | None = None,
         # The gate decodes an image sent in a text field, one at a time:
         # a data URL's payload cut from its str, and the bytes it decodes
         # to.
-        check(text.held() + spooled() + max(
-            (_text_decode(v) for k, v in fields
-             if k == "image" or v.startswith("data:")), default=0))
+        decode = max((_text_decode(v) for k, v in fields
+                      if k == "image" or v.startswith("data:")), default=0)
+        check(text.held() + spooled() + decode)
+        form.price = text.held() + spooled() + max(largest, decode)
         try:
             # Off the loop: the gate decodes an image in a text field.
             await _in_turn(functools.partial(

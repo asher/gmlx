@@ -156,6 +156,7 @@ for event in stream:
 | The entry's VAE, encoder or mmproj is of another model | 400 `image_model_mismatch` |
 | A size that does not fit in memory beside the loaded models | 400 naming the largest size of its shape that fits |
 | More reference images than fit in memory | 400 naming the count and the reference size that fit |
+| An edit image whose decode, priced from its header beside the body and the images before it, needs more than the memory free | 413 naming the image's pixels and both figures, before it decodes |
 | The request's `adapters` need more memory than the budget leaves beside the model, its shared encoder and the pinned models | 413 naming the GB they need and the room |
 | The request's `adapters` need memory that is not free now | 503 `server_overloaded` with `Retry-After` and what to wait for or free ([A LoRA is refused for memory](troubleshooting.md#a-lora-is-refused-for-memory)) |
 | A request LoRA over a set [`image.adapter_cache_mb`](config.md#serverimageadapter_cache_mb) | 400 naming that key |

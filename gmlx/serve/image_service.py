@@ -845,6 +845,46 @@ def parse_request(route: str, fields: dict) -> ImageRequest:
     return req
 
 
+# What decode_image holds at its peak, by the image's header, measured on
+# PNG, JPEG, GIF and WebP from 2048 to 8192 pixels square: Pillow holds
+# the image loaded at the bytes it stores a pixel in, its upright copy and
+# its convert at 4 bytes a pixel, and the array, the bytes it is read from
+# and their copy at 3 bytes a pixel, or 4 with alpha. The decoder holds a
+# byte a pixel more, a WebP 10, and each decode up to 4 MiB besides,
+# priced at twice that.
+_DECODER_PIXEL_BYTES = 1
+_WEBP_PIXEL_BYTES = 10
+_DECODE_FIXED_BYTES = 8 << 20
+
+
+def decode_price(data: bytes) -> tuple[int, int, int] | None:
+    """``(price, width, height)`` of image bytes: what :func:`decode_image`
+    holds at its peak past them, read from the header with no decode. None
+    for bytes it refuses before a decode: not an image it reads, or past
+    the media pixel limit."""
+    import io
+
+    from PIL import Image
+
+    from .patches.media_gate import MEDIA_MAX_PIXELS
+
+    try:
+        with Image.open(io.BytesIO(data),
+                        formats=["PNG", "JPEG", "WEBP", "GIF"]) as im:
+            w, h, mode, fmt = im.width, im.height, im.mode, im.format
+            alpha = mode in ("RGBA", "LA", "PA") or (
+                mode == "P" and "transparency" in im.info)
+    except Exception:  # noqa: BLE001 - decode_image refuses it
+        return None
+    if w * h > MEDIA_MAX_PIXELS:
+        return None
+    stored = 1 if mode in ("1", "L", "P") else (
+        2 if mode.startswith("I;16") else 4)
+    per = 2 * stored + 4 + 3 * (4 if alpha else 3) + _DECODER_PIXEL_BYTES + (
+        _WEBP_PIXEL_BYTES if fmt == "WEBP" else 0)
+    return w * h * per + _DECODE_FIXED_BYTES, w, h
+
+
 def decode_image(data: bytes, param: str):
     """Image bytes as uint8 (H, W, 3), or (H, W, 4) for an image with
     alpha, upright by its EXIF orientation. PNG, JPEG, WebP and GIF only,
