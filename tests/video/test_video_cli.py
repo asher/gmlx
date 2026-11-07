@@ -607,6 +607,31 @@ def test_a_frames_folder_that_cannot_lock_is_said_first_and_written(
     assert order[0] == "flock" and "encoder" in order
 
 
+def test_a_new_frames_folder_in_a_folder_it_cannot_read_is_written(
+        stubbed, tmp_path, monkeypatch):
+    """A new --frames-dir inside a folder the user may write into but not
+    read, a drop box, is not refused by the lock probe, which cannot open
+    that folder; the run makes its folder, locks it and writes the
+    frames."""
+    import errno
+
+    drop = tmp_path / "drop"
+    drop.mkdir()
+    real_open = os.open
+
+    def no_read(path, flags, *a, **k):
+        if os.fspath(path) == str(drop) and flags == os.O_RDONLY:
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES),
+                                  str(drop))
+        return real_open(path, flags, *a, **k)
+
+    monkeypatch.setattr(os, "open", no_read)
+    frames = drop / "new"
+    assert stubbed("--frames-dir", str(frames)) == 0
+    assert sorted(p.name for p in frames.iterdir()) == [
+        "audio.wav", *(f"frame_{i:06d}.png" for i in range(1, 6))]
+
+
 def test_an_output_link_to_a_folder_not_made_is_written_at_the_link(
         stubbed, tmp_path, capsys):
     """An --output and a --frames-dir audio.wav that are symlinks into a

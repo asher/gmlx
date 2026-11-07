@@ -219,11 +219,16 @@ def _unlocked(folder: str, e: OSError) -> str:
 def lock_refusal(folder: str) -> str | None:
     """The line to print when the filesystem of ``folder``, or of the
     nearest folder above it that exists, cannot lock it; None when it
-    can."""
+    can, or when that folder cannot be opened to try (one the user may
+    write into but not read): :func:`frames_lock` then tries the folder
+    the run makes."""
     d = os.path.abspath(folder)
     while not os.path.isdir(d) and os.path.dirname(d) != d:
         d = os.path.dirname(d)
-    fd = os.open(d, os.O_RDONLY)
+    try:
+        fd = os.open(d, os.O_RDONLY)
+    except OSError:
+        return None
     try:
         fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
     except BlockingIOError:
