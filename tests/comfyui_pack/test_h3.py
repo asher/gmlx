@@ -934,19 +934,20 @@ class Refusals(Base):
 
     def test_a_keyframe_of_keys_the_step_does_not_read_is_refused(self):
         """A keyframe that names none of the keys the step reads, or a
-        latent with no frame, is refused, not dropped."""
-        pos, _ = self.cond()
+        latent with no frame, is refused, not dropped. ComfyUI's own layout
+        reads each keyframe's frame first, so the step's check is called
+        on the payload here. A frame with no latent anchors nothing, as in
+        ComfyUI's forward."""
         z = torch.rand(1, 24, 1, SIZE // 16, SIZE // 16)
         for kf in ({"frame_index": 0, "video_latent": z}, {"latent": z}):
-            with self.subTest(sorted(kf)):
-                self.stub.reset()
-                p = node_helpers.conditioning_set_values(pos, {"minimax_keyframes": [kf]})
-                with self.assertRaises(C.GmlxError) as e:
-                    self.sample(self.model(), pos=p, steps=1)
-                self.assertIn(f"gmlx: a MiniMax-H3 keyframe holds {sorted(kf)}, and the gmlx "
-                              "nodes read resolved_frame_index, latent, audio_latent",
-                              str(e.exception))
-                self.assertEqual(self.stub.events("av_step"), [])
+            with self.subTest(sorted(kf)), self.assertRaises(C.GmlxError) as e:
+                P.model._h3_keyframes({"keyframes": [kf]})
+            self.assertIn(f"gmlx: a MiniMax-H3 keyframe holds {sorted(kf)}, and the gmlx "
+                          "nodes read resolved_frame_index, latent, audio_latent",
+                          str(e.exception))
+        held = {"resolved_frame_index": 0, "latent": z}
+        self.assertEqual(P.model._h3_keyframes(
+            {"keyframes": [{"resolved_frame_index": 4}, held]}), [held])
 
     def running(self, node):
         """Run the test body as if ComfyUI ran the stock node ``node``."""
