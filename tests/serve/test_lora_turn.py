@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gmlx.serve import residency, residency_workers
+from gmlx.serve import residency, residency_lora, residency_workers
 from gmlx.serve.residency import (IMAGE_KIND, STORE, VIDEO_KIND,
                                   LoraRefused, _ResidencyPool)
 
@@ -446,7 +446,7 @@ def slow_first_pass(pool, monkeypatch, seconds):
     import time
 
     ahead = [0.0]
-    monkeypatch.setattr(residency, "time", SimpleNamespace(
+    monkeypatch.setattr(residency_lora, "time", SimpleNamespace(
         monotonic=lambda: time.monotonic() + ahead[0], sleep=time.sleep,
         time=time.time))
     shed = pool._lora_shed
