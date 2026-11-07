@@ -3410,6 +3410,27 @@ def test_server_video_block():
             build_config({"server": {"video": bad}})
 
 
+@pytest.mark.parametrize("key, value", [("max_queue", "0.5"),
+                                        ("max_queue", "2.5"),
+                                        ("store_max_bytes", "1073741824.5")])
+def test_server_video_refuses_a_fraction_of_a_count(key, value):
+    """A fraction for a count, as YAML reads it, is refused naming the
+    key, where it was cut to the whole number below it: max_queue 0.5 was
+    no queue at all. job_ttl_s takes fractions, and a size string such as
+    1.5G is a size."""
+    import yaml
+
+    doc = yaml.safe_load(f"server:\n  video:\n    {key}: {value}\n")
+    with pytest.raises(ConfigError, match=rf"server\.video\.{key}: "
+                       "expected a whole number"):
+        build_config(doc)
+    cfg = build_config(yaml.safe_load(
+        "server:\n  video:\n    job_ttl_s: 0.5\n    max_queue: 2.0\n"
+        "    store_max_bytes: 1.5G\n"))
+    assert cfg.video == cfgmod.VideoServerCfg(max_queue=2, job_ttl_s=0.5,
+                                              store_max_bytes=3 << 29)
+
+
 def test_server_video_round_trips_through_print_config():
     import yaml
 

@@ -2659,11 +2659,16 @@ def _parse_systemone(raw) -> SystemoneCfg:
                         **counts)
 
 
-def _coerce_num(key: str, v, cast, *, where: str = "server"):
+def _coerce_num(key: str, v, cast, *, where: str = "server",
+                whole: bool = False):
     """Coerce a numeric config key (YAML may carry it quoted as a string),
-    raising a ConfigError naming the key and the bad value. ``None`` passes."""
+    raising a ConfigError naming the key and the bad value. ``None`` passes.
+    With ``whole``, a fraction is refused, where an int cast cuts it."""
     if v is None:
         return None
+    if whole and isinstance(v, float) and not v.is_integer():
+        raise ConfigError(f"{where}.{key}: expected a whole number, got "
+                          f"{v!r}")
     try:
         if isinstance(v, bool):   # bool is an int subclass; `port: true` is a typo
             raise ValueError
@@ -3010,16 +3015,18 @@ def _parse_video_model(video_id: str, raw) -> VideoModelCfg:
         upsample_prompt=raw.get("upsample_prompt") or None)
 
 
-def _parse_size_key(where: str, key: str, value) -> int | None:
+def _parse_size_key(where: str, key: str, value, *,
+                    whole: bool = False) -> int | None:
     """A positive byte count of a key that takes bytes or a size such as
-    8G, or None when unset."""
+    8G, or None when unset; with ``whole``, a fraction of a byte is
+    refused."""
     if isinstance(value, str):
         size = parse_size_bytes(value)
         if size is None:
             raise ConfigError(f"{where}.{key}: expected bytes or a size such "
                               f"as 2G, got {value!r}")
         value = size
-    n = _coerce_num(key, value, int, where=where)
+    n = _coerce_num(key, value, int, where=where, whole=whole)
     if n is not None and n <= 0:
         raise ConfigError(f"{where}.{key}: expected a positive size, got "
                           f"{n!r}")
@@ -3035,11 +3042,13 @@ def _parse_server_video(raw) -> VideoServerCfg:
     if ttl is not None and not 0 < ttl < float("inf"):
         raise ConfigError(f"{where}.job_ttl_s: expected a positive, finite "
                           f"number of seconds, got {ttl!r}")
-    queue = _coerce_num("max_queue", raw.get("max_queue"), int, where=where)
+    queue = _coerce_num("max_queue", raw.get("max_queue"), int, where=where,
+                        whole=True)
     if queue is not None and queue < 0:
         raise ConfigError(f"{where}.max_queue: expected 0 or more, got "
                           f"{queue!r}")
-    cap = _parse_size_key(where, "store_max_bytes", raw.get("store_max_bytes"))
+    cap = _parse_size_key(where, "store_max_bytes", raw.get("store_max_bytes"),
+                          whole=True)
     return VideoServerCfg(
         max_queue=base.max_queue if queue is None else queue,
         job_ttl_s=base.job_ttl_s if ttl is None else ttl,
