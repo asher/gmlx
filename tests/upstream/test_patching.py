@@ -113,14 +113,14 @@ def _render_layers():
     return n
 
 
-@pytest.mark.parametrize("reasoning_first", [True, False])
+@pytest.mark.parametrize("nested_first", [True, False])
 def test_loads_keep_one_get_chat_template_layer_per_installer(
-        monkeypatch, reasoning_first):
-    """The VLM loader installs the thinking default and the system content
-    fix on every load, and the server installs both again. Each wrapped the
-    other's layer, so every load added two."""
+        monkeypatch, nested_first):
+    """The VLM loader installs the system content fix on every load, and
+    the server installs it again beside its nested render layer. Each
+    wrapped the other's layer, so every load added two."""
     pu = pytest.importorskip("gmlx._vendor.mlx_vlm.prompt_utils")
-    from gmlx.tui.reasoning import install_template_default_thinking
+    from gmlx.serve.patches import render
     from gmlx.upstream.system_content_fix import install_system_content_fix
 
     seen = []
@@ -131,9 +131,9 @@ def test_loads_keep_one_get_chat_template_layer_per_installer(
         return ""
 
     monkeypatch.setattr(pu, "get_chat_template", get_chat_template)
-    installers = [install_template_default_thinking,
+    installers = [lambda: render._install_nested_in_place(pu),
                   install_system_content_fix]
-    if not reasoning_first:
+    if not nested_first:
         installers.reverse()
     for _load in range(5):
         for install in installers:

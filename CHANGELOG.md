@@ -73,6 +73,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Served and VLM chat prompts render on transformers 5.22.2, where a request
+  that set no thinking control failed with "'enable_thinking' is undefined".
 - Distillation's pinned day renders on transformers 5.22, where a template that
   prints today's date failed with "'str' object is not callable".
 - A served image model keeps its own LoRAs when a request brings others,

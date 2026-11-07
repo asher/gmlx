@@ -848,10 +848,8 @@ def get_chat_template(
             return _messages_to_plain_prompt()
 
         template_kwargs = dict(kwargs)
-        if "enable_thinking" not in template_kwargs and _supports_template_kw(
-            template_processor, "enable_thinking"
-        ):
-            template_kwargs["enable_thinking"] = False
+        # gmlx: an absent enable_thinking stays absent, so the template's own
+        # default governs. Upstream sets it to False here.
         if (
             "thinking_mode" not in template_kwargs
             and template_kwargs.get("enable_thinking") is True

@@ -48,10 +48,10 @@ TURNS = [
 ]
 
 
-def _render(processor, model_type, num_images=0):
+def _render(processor, model_type, num_images=0, **kwargs):
     return prompt_utils.apply_chat_template(
         processor, {"model_type": model_type}, [dict(m) for m in TURNS],
-        add_generation_prompt=True, num_images=num_images)
+        add_generation_prompt=True, num_images=num_images, **kwargs)
 
 
 def test_string_content_leaves_user_turns_and_media_as_sent():
@@ -95,7 +95,8 @@ def test_v4_vision_renders_system_and_history_as_text():
 def test_v41_vision_renders_system_and_history_as_text():
     proc, _ = _processor_v41()
     proc.chat_template = bundled_chat_template("deepseek_v41")
-    out = _render(proc, "deepseek_v41_vl", num_images=1)
+    # The V4.1 template thinks by default. Off, it closes the think block.
+    out = _render(proc, "deepseek_v41_vl", num_images=1, enable_thinking=False)
     assert "'type'" not in out
     assert "be brief" in out and "hi there" + END in out
     assert out.endswith(f"{U}{IMG}\n\nwhat is this{A}</think>")
