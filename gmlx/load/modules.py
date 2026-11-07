@@ -2416,6 +2416,7 @@ class LoRAKQuantEmbedding(nn.Module):
 
     _lora_bt: dict
     _kq_extra: list
+    _out_dtype: mx.Dtype
 
     def __init__(self, base: nn.Module, a: mx.array, b: mx.array, scale: float,
                  slot: int = 0):
