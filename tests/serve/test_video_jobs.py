@@ -1198,8 +1198,10 @@ def test_a_job_still_queued_at_its_expiry_never_runs(tmp_path):
     clock.now += 60
     driver.run()
     assert ran == []
-    assert job.record["status"] == "failed"
-    assert job.record["error"] == {
+    rec = store.get(job.id)
+    assert rec is not None and rec["status"] == "failed"
+    assert rec["expires_at"] == rec["completed_at"] + 60
+    assert rec["error"] == {
         "code": "timed_out", "message": "the job was still queued when it "
         "expired; submit it again, or raise server.video.job_ttl_s",
         "type": "server_error", "status": 503}

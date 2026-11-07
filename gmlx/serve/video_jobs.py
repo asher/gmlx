@@ -452,16 +452,13 @@ class VideoJobs:
 
     # Transitions; under ``lock``.
 
-    def _end(self, job: Job, status: str, error: dict | None = None,
-             keep_expiry: bool = False) -> None:
+    def _end(self, job: Job, status: str, error: dict | None = None) -> None:
         """End ``job`` with ``status``. Its record and clip last
-        job_ttl_s from now, unless ``keep_expiry``."""
+        job_ttl_s from now."""
         rec = job.record
         rec["status"] = status
         rec["completed_at"] = int(self._time())
-        if not keep_expiry:
-            rec["expires_at"] = (rec["completed_at"]
-                                 + int(self.settings.job_ttl_s))
+        rec["expires_at"] = rec["completed_at"] + int(self.settings.job_ttl_s)
         rec["error"] = error
         rec.get("gmlx", {}).pop("eta_s", None)
         if status == DONE:
@@ -523,12 +520,13 @@ class VideoJobs:
             if job.record["status"] != QUEUED:
                 return
             if self._time() >= job.record["expires_at"]:
-                # Its record would read 404 once it ran: it never runs.
+                # Its record would read 404 once it ran: it never runs,
+                # and its timed_out record lasts job_ttl_s from now.
                 self._end(job, FAILED, error={
                     "code": "timed_out",
                     "message": "the job was still queued when it expired; "
                     "submit it again, or raise server.video.job_ttl_s",
-                    "type": "server_error", "status": 503}, keep_expiry=True)
+                    "type": "server_error", "status": 503})
                 self._drop_inputs(job.id)
                 job.kept.clear()
                 return
