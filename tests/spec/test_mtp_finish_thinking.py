@@ -92,6 +92,50 @@ def test_budget_trips_at_round_boundary_without_keypress():
     assert hook._spent and not hook.in_thinking
 
 
+class _MsgTok:
+    """The think tags, a newline and one budget message of seven ids."""
+
+    MESSAGE = "Answer now, please."
+    _MAP = {"<think>": [16], "</think>": [END], "\n": [13],
+            MESSAGE: [20, 21, 22, 23, 24, 25, 26]}
+
+    def encode(self, text, add_special_tokens=True):
+        return list(self._MAP.get(text, []))
+
+
+def _message_hook(budget):
+    from gmlx.gen.thinking_budget import make_mtp_finish_hook
+
+    return make_mtp_finish_hook(
+        _MsgTok(), budget=budget, start_in_thinking=True,
+        start_token="<think>", end_token="</think>", message=_MsgTok.MESSAGE)
+
+
+def test_hook_forces_budget_message_in_block_width_chunks():
+    hook = _message_hook(4)
+    assert hook.forced_ids == _MsgTok._MAP[_MsgTok.MESSAGE] + [END]
+    out, _d = _drive(hook, press_after=10**9, max_tokens=17)
+    # The count meets 4 during round two, so the message and the close land
+    # whole at the next boundary, one draft round over at most, and echo
+    # decode resumes after them.
+    assert out[:6] == [6, 7, 8, 9, 10, 11]
+    assert out[6:14] == hook.forced_ids
+    assert out[14:16] == [(END + 1) % VOCAB, (END + 2) % VOCAB]
+    assert hook._spent and not hook.in_thinking
+
+
+def test_hook_reclose_after_spend_omits_message():
+    hook = _message_hook(1)
+    hook.observe(50)
+    forced = hook.take_forced()
+    assert forced == _MsgTok._MAP[_MsgTok.MESSAGE] + [END]
+    for t in forced:
+        hook.observe(t)
+    hook.observe(40)  # an answer token
+    hook.observe(16)  # the model reopens thinking
+    assert hook.take_forced() == [13, END]
+
+
 def test_generator_close_mid_forced_round():
     hook = _hook([S1, S2, END])
     gen, _d = _make_gen(hook, max_tokens=30)
