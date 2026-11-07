@@ -353,6 +353,11 @@ def test_drafter_gates(refresh, dense_repo, monkeypatch, tmp_path):
     facts, problems, _ = refresh.record_entry(
         catalog.Seed(**{**other.__dict__, "cross_base": True}), None, None)
     assert problems == [] and facts["drafter"] == ("dflash2", "9999999999", len(hub.repos["org/other"]["Other-DFlash2-Q8_0.gguf"]))
+    # A drafter that follows a branch records the branch, not the head sha.
+    facts, problems, notes = refresh.record_entry(
+        catalog.Seed(**{**other.__dict__, "cross_base": True, "drafter_revision": "main"}), None, None)
+    assert problems == [] and facts["drafter"][1] == "main"
+    assert not any("pinned" in n for n in notes)
     # A drafter the table says cannot serve the base, and a base with no wired target.
     monkeypatch.setattr(refresh.arch_table, "drafter_serves", lambda d, a: False)
     _f, problems, _ = refresh.record_entry(_seed(

@@ -96,6 +96,8 @@ _MTP_WIDTH_LIMIT_BY_MODEL_TYPE = {
     "qwen4_exp": 1,
     # Glm5NextMTPDrafter.make_cache raises on batched left_padding.
     "glm5_next": 1,
+    # The DFlash2 loader stamps hard_limit=1 for every target.
+    "ricursive": 1,
 }
 # Unknown arch: cap conservatively rather than opting a new family into the
 # losing regime. Uncapped is earned by measurement, not inherited by default.
@@ -1298,6 +1300,16 @@ def _dflash_config_from_meta(
         "sliding_attention" if bool(t) else "full_attention" for t in pattern
     ] or ["full_attention"] * n_layers
     window = int(meta.get("dflash.attention.sliding_window") or 0) or None
+    # NoPE layers and a context window for full layers: keys gmlx's own
+    # converter writes (llama.cpp reads rope_pattern for targets only).
+    rope_layers = [bool(v) for v in
+                   (meta.get("dflash.attention.rope_pattern") or ())]
+    if rope_layers and len(rope_layers) != n_layers:
+        raise ValueError(
+            f"{draft_gguf_path}: dflash.attention.rope_pattern has "
+            f"{len(rope_layers)} entries for {n_layers} layers")
+    context_window = meta.get("dflash.attention.context_window")
+    context_window = int(context_window) if context_window else None
     native_total, block_total = _drafter_block_depths(
         block_size, _DFLASH_BLOCK_DEFAULT[container])
     rope_scaling = None
@@ -1321,7 +1333,8 @@ def _dflash_config_from_meta(
     softcap = meta.get("dflash.final_logit_softcapping",
                        target_config_dict.get("final_logit_softcapping"))
     markov_rank, confidence, snr_range, anchor = 0, False, None, True
-    runtime_block = None
+    runtime_block = (_measured_block(meta, block_total)
+                     if container == "dflash2" else None)
     if container == "dflash_dspark":
         markov_rank, confidence, snr_range, anchor = _dspark_head_keys(
             draft_gguf_path, meta, arrays, shapes)
@@ -1353,6 +1366,8 @@ def _dflash_config_from_meta(
         num_target_layers=n_target_layers,
         layer_types=layer_types,
         sliding_window=window,
+        rope_layers=rope_layers,
+        context_window=context_window,
         is_causal=None if causal is None else bool(causal),
         final_logit_softcapping=softcap or None,
         output_multiplier=float(meta.get(
@@ -1458,7 +1473,7 @@ def _wire_dflash_capture(target, layer_ids) -> None:
     if not callable(getattr(lm, "set_dflash_capture", None)):
         raise RuntimeError(
             "DFlash drafters need a target carrying the _dflash_capture seam "
-            f"(muse_glimmer, gemma4, owned qwen3_5); got {type(lm).__name__}"
+            f"(muse_glimmer, gemma4, owned qwen3_5, ricursive); got {type(lm).__name__}"
         )
     lm.set_dflash_capture(layer_ids)
 
@@ -2233,10 +2248,11 @@ def load_mtp_model(
         _wire_target(model, gguf_path)
     wait_for_populate(pf.shards, log=_log)
     collect_after_load()
-    from gmlx.gen.prefill_decay import note_resident_model
+    from gmlx.gen.prefill_decay import note_drafter_held, note_resident_model
 
     note_resident_model(model)
     note_resident_model(drafter)
+    note_drafter_held(model, drafter)
     return model, drafter, config, tokenizer
 
 
@@ -2419,9 +2435,10 @@ def load_vlm_mtp_model(
     # wire=False: as for load_mtp_model, a caller that installs streaming.
     if wire:
         _wire_target(model, gguf_path)
-    from gmlx.gen.prefill_decay import note_resident_model
+    from gmlx.gen.prefill_decay import note_drafter_held, note_resident_model
 
     note_resident_model(drafter)
+    note_drafter_held(model, drafter)
     return model, drafter, config, tokenizer, processor
 
 

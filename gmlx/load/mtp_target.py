@@ -67,6 +67,13 @@ _MTP_TARGET_HOOKS_BY_TYPE = {
         "speculative_argmax_from_hidden",
         "speculative_verify_hidden",
     ),
+    # RicursiveSpecLM (owned class): same lean set as deepseek_v4.
+    "ricursive": (
+        "rollback_speculative_cache",
+        "speculative_logits_from_hidden",
+        "speculative_argmax_from_hidden",
+        "speculative_verify_hidden",
+    ),
     # NemotronHSpecLM (stock mlx-lm class + hooks): same lean set.
     "nemotron_h": (
         "rollback_speculative_cache",
@@ -228,6 +235,14 @@ def _mtp_target_classes(
             return glm5_next_mtp.Glm5NextSpecLM(ModelArgs.from_dict(config))
 
         return glm5_next_mtp.Glm5NextSpecLM, build
+    if model_type == "ricursive":
+        import gmlx.models.ricursive.mtp as ricursive_mtp
+        from gmlx.models.ricursive.model import ModelArgs
+
+        def build(config: dict) -> nn.Module:
+            return ricursive_mtp.RicursiveSpecLM(ModelArgs.from_dict(config))
+
+        return ricursive_mtp.RicursiveSpecLM, build
     if model_type == "nemotron_h":
         import gmlx.models.nemotron_h.mtp as nemotron_h_mtp
         from gmlx.models.nemotron_h.model import ModelArgs

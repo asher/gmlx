@@ -3127,6 +3127,121 @@ def test_flint_synth_refuses_what_the_model_cannot_run(key, value, exc, match):
         synthesize_config(m, tensor_shapes=_FLINT_SHAPES)
 
 
+# ricursive
+
+def _ricursive_meta() -> dict:
+    """The shipped header shape: no sliding_window_pattern or rope_pattern
+    key (period 5), a scalar swiglu_clamp and an embedding scale."""
+    arch = "ricursive"
+    m = _base_meta(arch)
+    m[f"{arch}.block_count"] = 5
+    m[f"{arch}.attention.head_count"] = 8
+    m[f"{arch}.feed_forward_length"] = 96
+    m[f"{arch}.attention.value_length"] = 16
+    m[f"{arch}.attention.sliding_window"] = 4
+    m[f"{arch}.embedding_scale"] = 8.0
+    m[f"{arch}.swiglu_clamp"] = 20.0
+    return m
+
+
+_RICURSIVE_SHAPES = {
+    "output.weight": [64, VOCAB],
+    **{f"blk.{i}.attn_gate.weight": [64, 128] for i in range(5)},
+    **{f"blk.{i}.attn_vres_lambda.weight": [1] for i in range(5)},
+}
+
+
+def test_ricursive_synth_fields():
+    c = synthesize_config(_ricursive_meta(), tensor_shapes=_RICURSIVE_SHAPES)
+    assert c["model_type"] == "ricursive"
+    # llama.cpp's default when the pattern key is absent: every fifth full.
+    assert c["layer_types"] == ["sliding_attention"] * 4 + ["full_attention"]
+    assert c["sliding_window"] == 4
+    assert c["rope_parameters"] == {"rope_theta": 10000.0,
+                                    "rope_type": "default"}
+    assert c["embedding_scale"] == 8.0
+    assert c["swiglu_limits"] == [20.0] * 5
+    assert c["use_gated_attention"] is True
+    assert c["use_valres"] is True
+    assert c["head_dim"] == 16
+    assert not c["tie_word_embeddings"]
+
+
+def test_ricursive_synth_instantiates():
+    from gmlx.models.ricursive.model import Model, ModelArgs
+
+    c = synthesize_config(_ricursive_meta(), tensor_shapes=_RICURSIVE_SHAPES)
+    model, args = _get_classes(c)
+    assert model is Model and args is ModelArgs
+    m = Model(ModelArgs.from_dict(c))
+    mx.eval(m.parameters())
+    assert m(mx.array([[1, 2, 3]])).shape == (1, 3, VOCAB)
+    assert [ly.self_attn.rope is not None for ly in m.layers] == [
+        True, True, True, True, False]
+
+
+def test_ricursive_synth_reads_every_pattern_and_clamp_form():
+    m = _ricursive_meta()
+    m["ricursive.attention.sliding_window_pattern"] = [True, False] * 2 + [True]
+    m["ricursive.attention.rope_pattern"] = [True, False] * 2 + [True]
+    m["ricursive.swiglu_clamp"] = [0.0, 5.0, 0.0, 5.0, 7.0]
+    m["ricursive.rope.freq_base_swa"] = 500.0
+    c = synthesize_config(m, tensor_shapes=_RICURSIVE_SHAPES)
+    assert [t == "sliding_attention" for t in c["layer_types"]] == [
+        True, False, True, False, True]
+    assert c["swiglu_limits"] == [0.0, 5.0, 0.0, 5.0, 7.0]
+    assert c["rope_theta"] == 500.0
+    # A scalar pattern is a period: the last layer of each period is full.
+    m = _ricursive_meta()
+    m["ricursive.attention.sliding_window_pattern"] = 2
+    del m["ricursive.swiglu_clamp"]
+    del m["ricursive.embedding_scale"]
+    c = synthesize_config(m, tensor_shapes={"output.weight": [64, VOCAB]})
+    assert [t == "sliding_attention" for t in c["layer_types"]] == [
+        True, False, True, False, True]
+    assert c["swiglu_limits"] == [0.0] * 5
+    assert c["embedding_scale"] == 1.0
+    assert c["use_gated_attention"] is False and c["use_valres"] is False
+
+
+@pytest.mark.parametrize("key", [
+    "attention.sliding_window", "attention.key_length",
+])
+def test_ricursive_required_keys_fail_loud(key):
+    m = _ricursive_meta()
+    del m[f"ricursive.{key}"]
+    with pytest.raises(ValueError, match=f"ricursive.{key}"):
+        synthesize_config(m, tensor_shapes=_RICURSIVE_SHAPES)
+
+
+@pytest.mark.parametrize("key,value,exc,match", [
+    ("attention.sliding_window", 0, ValueError, "must be positive"),
+    ("attention.sliding_window_pattern", [True, False], ValueError,
+     "entries for"),
+    ("attention.sliding_window_pattern", [False] * 5, NotImplementedError,
+     "no sliding-window layer"),
+    ("attention.rope_pattern", [True] * 5, NotImplementedError,
+     "differs from"),
+    ("attention.value_length", 32, NotImplementedError, "value_length"),
+    ("swiglu_clamp", -1.0, ValueError, "non-negative"),
+    ("swiglu_clamp", [1.0, 2.0], ValueError, "entries for"),
+])
+def test_ricursive_synth_refuses_what_llama_cpp_refuses(key, value, exc, match):
+    m = _ricursive_meta()
+    m[f"ricursive.{key}"] = value
+    with pytest.raises(exc, match=match):
+        synthesize_config(m, tensor_shapes=_RICURSIVE_SHAPES)
+
+
+@pytest.mark.parametrize("tensor", ["attn_gate.weight",
+                                    "attn_vres_lambda.weight"])
+def test_ricursive_synth_refuses_a_switch_in_some_layers_only(tensor):
+    shapes = dict(_RICURSIVE_SHAPES)
+    del shapes[f"blk.3.{tensor}"]
+    with pytest.raises(ValueError, match="all layers or in none"):
+        synthesize_config(_ricursive_meta(), tensor_shapes=shapes)
+
+
 # graniteswitch
 
 # The embedding has three rows past the tokenizer's list, as in IBM's

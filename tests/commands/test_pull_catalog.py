@@ -607,6 +607,24 @@ def test_the_transcribe_entry_keeps_its_encoder_and_drops_the_head_on_32_gb(tmp_
     assert big.mmproj and big.head and catalog.plan_speculates(big)
 
 
+def test_the_ripple_entry_steps_down_the_quants_by_memory_class():
+    m = catalog.model("ripple")
+    assert m is not None and m.arch == "ricursive" and catalog.has_tiers(m)
+    picks = {}
+    for cls in (32, 48, 64, 128):
+        dp = catalog.default_plan(m, catalog.box_for_class(cls))
+        assert dp is not None and not dp.streaming
+        picks[cls] = (dp.rung.quant, dp.drafter)
+    # The drafter stays on wherever a tier fits beside it.
+    assert picks == {32: ("IQ2_XXS", False), 48: ("IQ3_XXS", True),
+                     64: ("Q4_K_M", True), 128: ("Q4_K_M", True)}
+    # The drafter repo is not pinned: its ref follows main.
+    refs = catalog.plan_refs(catalog.default_plan(m, catalog.box_for_class(128)))
+    assert refs[1] == "hf:ashbash/Ripple-65B-Preview-DFlash2-GGUF/Ripple-65B-Preview-DFlash2-Q4_K_M.gguf@main"
+    assert catalog.needs_class(m, catalog.find_rung(m, "balanced")) == 64
+    assert catalog.needs_class(m, catalog.find_rung(m, "xhigh")) == 96
+
+
 # -- text ----------------------------------------------------------------------------
 
 def test_recommendation_and_entry_text_are_plain(small_catalog):
@@ -715,7 +733,9 @@ def test_seed_rungs_are_well_formed(m):
             assert re.match(r"^(UD-)?(IQ|Q)[123]_", r.quant), (m.name, r.quant)
     if m.drafter is not None:
         d = m.drafter
-        assert d.repo and d.revision != "main" and d.file.endswith(".gguf") and d.bytes > 0
+        branch = catalog.SEEDS[m.name].drafter_revision
+        assert d.revision == branch if branch else d.revision != "main", (m.name, d.revision)
+        assert d.repo and d.file.endswith(".gguf") and d.bytes > 0
         assert d.kind == "dflash2" or arch_table.drafter_serves(d.kind, m.arch) is not False, d
     if m.mmproj:
         assert m.mmproj.endswith(".gguf") and m.mmproj_bytes > 0

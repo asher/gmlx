@@ -189,6 +189,11 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # full ones, and a sigmoid MoE with an ungated shared expert after two
     # dense layers. Model class owned by gmlx (no mlx-lm class).
     "flint": "flint",
+    # Ricursive Ripple: dense GQA with per-head QK-norm, sandwich norms, a
+    # sigmoid output gate, a value residual from the scaled embeddings,
+    # NeoX RoPE on the sliding-window layers and NoPE on the full ones, and
+    # a clamped SwiGLU. Model class owned by gmlx (no mlx-lm class).
+    "ricursive": "ricursive",
     # Moonshot Kimi-K3 (2.8T-A50B): hybrid KDA (linear, per-channel decay) +
     # nope-only MLA layers from the per-layer head_count_kv schedule, latent
     # 896-expert sigmoid MoE behind down/up projections, situ activation,
@@ -2259,6 +2264,112 @@ def _synth_flint(meta, shapes, config: dict) -> None:
         shapes, f"blk.{n_dense}.exp_probs_b.bias")
 
 
+# ricursive (Ricursive Ripple)
+
+def _synth_ricursive(meta, shapes, config: dict) -> None:
+    """Synthesize a ricursive config from a 'ricursive'-arch GGUF.
+
+    The universal fields cover hidden/layers/heads/kv/ffn/ctx/eps/tie/vocab.
+    This adds what llama.cpp's ``load_arch_hparams`` reads: the sliding/full
+    schedule (an array per layer, a scalar period, or period 5 when absent),
+    the optional rope pattern that must equal it, the sliding layers' rope
+    base, the embedding scale, the per-layer SwiGLU clamp, and the gate and
+    value residual switches, which follow tensor presence in every layer or
+    none.
+    """
+    arch = "ricursive"
+    n_layers = config["num_hidden_layers"]
+
+    def req(read, key):
+        return _require(read(meta, f"{arch}.{key}"), arch=arch,
+                        gguf_field=f"{arch}.{key}")
+
+    _require(config.get("rms_norm_eps"), arch=arch,
+             gguf_field=f"{arch}.attention.layer_norm_rms_epsilon")
+    head_dim = req(_read_int, "attention.key_length")
+    value_length = _read_int(meta, f"{arch}.attention.value_length")
+    if value_length is not None and value_length != head_dim:
+        raise NotImplementedError(
+            f"ricursive synth: value_length {value_length} differs from "
+            f"key_length {head_dim}; llama.cpp refuses that.")
+    config["head_dim"] = head_dim
+
+    window = req(_read_int, "attention.sliding_window")
+    if window <= 0:
+        raise ValueError(
+            "ricursive synth: attention.sliding_window must be positive")
+    config["sliding_window"] = window
+
+    key = f"{arch}.attention.sliding_window_pattern"
+    n_pattern = _array_len(meta, key)
+    if n_pattern is None:
+        period = 5
+    elif n_pattern == 1 and n_layers != 1:
+        period = int(_read_int(meta, key))
+    else:
+        period = None
+    if period is None:
+        swa = _read_bool_array(meta, key)
+        if len(swa) != n_layers:
+            raise ValueError(
+                f"ricursive synth: {key} has {len(swa)} entries for "
+                f"{n_layers} layers")
+    else:
+        swa = [period == 0 or i % period < period - 1
+               for i in range(n_layers)]
+    if not any(swa):
+        raise NotImplementedError(
+            "ricursive synth: no sliding-window layer, so no layer would "
+            "carry a position; llama.cpp refuses that.")
+
+    rope = _read_bool_array(meta, f"{arch}.attention.rope_pattern")
+    if rope is not None:
+        if len(rope) == 1:
+            rope = rope * n_layers
+        if list(rope) != list(swa):
+            raise NotImplementedError(
+                "ricursive synth: attention.rope_pattern differs from "
+                "attention.sliding_window_pattern; llama.cpp rotates exactly "
+                "the sliding layers.")
+    config["layer_types"] = [
+        "sliding_attention" if v else "full_attention" for v in swa]
+
+    # Only the sliding layers rotate, with the sliding base when present.
+    theta = _read_float(meta, f"{arch}.rope.freq_base_swa")
+    if theta is None:
+        theta = req(_read_float, "rope.freq_base")
+    config["rope_theta"] = theta
+    config["rope_parameters"] = {"rope_theta": theta, "rope_type": "default"}
+
+    scale = _read_float(meta, f"{arch}.embedding_scale")
+    config["embedding_scale"] = 1.0 if scale is None else scale
+
+    clamps = _read_float_array(meta, f"{arch}.swiglu_clamp") or [0.0]
+    if len(clamps) == 1:
+        clamps = clamps * n_layers
+    if len(clamps) < n_layers:
+        raise ValueError(
+            f"ricursive synth: {arch}.swiglu_clamp has {len(clamps)} entries "
+            f"for {n_layers} layers")
+    clamps = [float(c) for c in clamps[:n_layers]]
+    if any(not math.isfinite(c) or c < 0 for c in clamps):
+        raise ValueError(
+            f"ricursive synth: {arch}.swiglu_clamp must be finite and "
+            f"non-negative, got {clamps}")
+    config["swiglu_limits"] = clamps
+
+    for flag, tensor in (("use_gated_attention", "attn_gate.weight"),
+                         ("use_valres", "attn_vres_lambda.weight")):
+        present = [_has_tensor(shapes, f"blk.{i}.{tensor}")
+                   for i in range(n_layers)]
+        if any(present) and not all(present):
+            raise ValueError(
+                f"ricursive synth: {tensor} must be present in all layers "
+                f"or in none (layers 0 and "
+                f"{present.index(not present[0])} differ)")
+        config[flag] = all(present)
+
+
 # granitehybrid (IBM Granite 4.x hybrid: H-Micro / H-Tiny / H-Small)
 
 def _synth_granite_hybrid(meta, shapes, config: dict) -> None:
@@ -4316,6 +4427,7 @@ _SYNTH = {
     "k2-horizon": _synth_k2_horizon,
     "beam": _synth_beam,
     "flint": _synth_flint,
+    "ricursive": _synth_ricursive,
     "graniteswitch": _synth_graniteswitch,
     "granitehybrid": _synth_granite_hybrid,
     "falcon-h1": _synth_falcon_h1,

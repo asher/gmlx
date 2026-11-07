@@ -474,10 +474,11 @@ def available_drained_bytes():
 
 
 def _need_bytes(model, costs, prompt_tokens: int, gen_tokens: int = 0):
-    from gmlx.gen.prefill_decay import score_transient_bytes
+    from gmlx.gen.prefill_decay import drafter_held_bytes, score_transient_bytes
 
     kv = prompt_kv_bytes(costs, prompt_tokens + gen_tokens)
-    return kv + score_transient_bytes(model, None, prompt_tokens)
+    return (kv + score_transient_bytes(model, None, prompt_tokens)
+            + drafter_held_bytes(model, prompt_tokens))
 
 
 def _audio_cost(model, audio) -> tuple[int, int] | None:

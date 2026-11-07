@@ -186,6 +186,18 @@ def test_media_requests_skip(tight):
     mp.preflight_prompt_memory(rg, "x" * 200_000, images=["img"])
 
 
+def test_a_drafter_capture_counts_toward_the_prompt(tight):
+    # 30k tokens of KV is 0.24 GB; a drafter holding 0.3 GB of the prompt
+    # tips it past the 0.5 GB room.
+    rg = _rg(DENSE, tokens=30_000)
+    mp.preflight_prompt_memory(rg, "x" * 60_000)
+    model = SimpleNamespace(config=DENSE.config,
+                            drafter_held_bytes=lambda n: 10_000 * n)
+    rg = _rg(model, tokens=30_000)
+    with pytest.raises(PromptTooLongError):
+        mp.preflight_prompt_memory(rg, "x" * 60_000)
+
+
 def _hearing(tokens_per_clip=10_000, encoder_bytes=0):
     """DENSE with a model hook that prices its audio."""
     calls = []

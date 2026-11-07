@@ -90,6 +90,7 @@ flags refuses.
 | `qwen3`, `qwen3moe`, `qwen3next` | |
 | `qwen35`, `qwen35moe`, `qwen3vl`, `qwen3vlmoe` | The vision tower's text model scales too. |
 | `qwen4exp` | The sparse attention indexer scales with the attention. |
+| `ricursive` | Only the sliding window layers rotate, and they keep the header's scale, so the flags change only the reported context. |
 | `seed_oss` | |
 | `smollm3` | |
 

@@ -291,6 +291,7 @@ def _later_arches():
         "k2-horizon": (t._k2_horizon_mova_meta, t._K2_HORIZON_MOVA_SHAPES),
         "beam": (t._beam_meta, t._BEAM_SHAPES),
         "flint": (t._flint_meta, t._FLINT_SHAPES),
+        "ricursive": (t._ricursive_meta, t._RICURSIVE_SHAPES),
         "minimax-m3": (t._minimax_m3_meta, t._MINIMAX_M3_SHAPES),
         "falcon-h1": (t._falcon_h1_meta, t._FALCON_H1_SHAPES),
         "granitehybrid": (t._granitehybrid_meta, {}),
@@ -300,7 +301,7 @@ def _later_arches():
 
 
 @pytest.mark.parametrize("arch", ["hy_v3", "hyv4", "muse-glimmer",
-                                  "muse-spark", "k2-horizon", "beam", "flint",
+                                  "muse-spark", "k2-horizon", "beam", "flint", "ricursive",
                                   "minimax-m3",
                                   "falcon-h1", "granitehybrid", "graniteswitch",
                                   "ernie4_5-moe"])

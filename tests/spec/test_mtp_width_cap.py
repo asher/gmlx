@@ -388,7 +388,7 @@ PER_ROW_TARGETS = {"qwen3_5", "qwen3_5_moe", "gemma4_text"}
 
 def test_target_classes_declare_a_per_row_rollback():
     """Every wired MTP target class carries ragged_spec_rollback exactly when
-    its rollback takes the per-row list; the six whose hook takes one int
+    its rollback takes the per-row list; the seven whose hook takes one int
     speculate one row at a time. A newly wired target fails here until it
     is sorted into one group."""
     from gmlx.load.arch_table import MTP_WIRED_MODEL_TYPES
@@ -406,7 +406,7 @@ def test_target_classes_declare_a_per_row_rollback():
     assert PER_ROW_TARGETS <= MTP_WIRED_MODEL_TYPES
     one_row = MTP_WIRED_MODEL_TYPES - PER_ROW_TARGETS
     assert one_row == {"deepseek_v4", "hy_v3", "muse_glimmer", "qwen4_exp",
-                       "glm5_next", "nemotron_h"}
+                       "glm5_next", "nemotron_h", "ricursive"}
     for model_type in sorted(MTP_WIRED_MODEL_TYPES):
         cls, _build = _mtp_target_classes(model_type)
         assert callable(getattr(cls, "rollback_speculative_cache", None))

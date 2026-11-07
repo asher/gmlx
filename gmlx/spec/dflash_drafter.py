@@ -39,6 +39,11 @@ row at ring offset ``q`` sees context key ``k`` only while ``q - k <
 sliding_window``. A missing ``attention.causal`` key means a non-causal block,
 which is llama.cpp's behavior.
 
+A drafter with a context window (``attention.context_window``) bounds its
+full layers too: every block row sees the last ``context_window`` committed
+rows, the same span for each row. A ``rope_pattern`` entry of false makes a
+layer NoPE on both paths.
+
 Positions are relative: seeding only the trailing window of the prompt
 shifts context and block queries by the same amount, which RoPE is invariant
 to. Correctness never rests on the drafter regardless: the verify walk emits
@@ -122,6 +127,10 @@ class DFlashConfig:
     sample_from_anchor: bool = True
     # Per-head attention sinks in every draft layer (Nemotron drafters).
     attention_sinks: bool = False
+    # Per layer, whether it rotates; empty means every layer does.
+    rope_layers: List[bool] = field(default_factory=list)
+    # Context rows every block row of a full layer sees; None is unbounded.
+    context_window: Optional[int] = None
     # The LiLiCorr lattice head; lilicorr_layers == 0 means none.
     lilicorr_layers: int = 0
     lilicorr_hidden_size: int = 0
@@ -146,6 +155,13 @@ class DFlashConfig:
             raise ValueError(f"unsupported draft layer_types {sorted(unknown)}")
         if "sliding_attention" in self.layer_types and not self.sliding_window:
             raise ValueError("sliding_attention layers need sliding_window")
+        self.rope_layers = [bool(v) for v in self.rope_layers]
+        if self.rope_layers and len(self.rope_layers) != n:
+            raise ValueError(
+                f"rope_layers has {len(self.rope_layers)} entries for "
+                f"{n} layers")
+        if self.context_window is not None and int(self.context_window) <= 0:
+            raise ValueError("context_window must be positive")
 
     @property
     def is_dflash2(self) -> bool:
@@ -157,20 +173,22 @@ class DFlashConfig:
 
 
 def block_attention_mask(ctx_len: int, block: int, window: Optional[int],
-                         causal: bool):
+                         causal: bool, context: Optional[int] = None):
     """Bool mask ``[block, ctx_len + block]`` for a draft block over a ring.
 
     Ring rows are indexed as time (the ring is temporal), so a block row at
     ``q = ctx_len + i`` keeps context key ``k`` while ``q - k < window``; the
-    block term is all-true, or lower-triangular when causal. None when no key
-    would be masked. Hand-rolled: ``BufferedRotatingKVCache.make_mask`` is
-    causal and sizes its window from a planned insert of the query rows,
+    block term is all-true, or lower-triangular when causal. ``context``
+    keeps the last ``context`` ring rows for every block row alike. None when
+    no key would be masked. Hand-rolled: ``BufferedRotatingKVCache.make_mask``
+    is causal and sizes its window from a planned insert of the query rows,
     which the draft block never is.
     """
-    if window is None and not causal:
-        return None
-    if window is not None and not causal and ctx_len + block - 1 < window:
-        return None
+    if not causal:
+        open_window = window is None or ctx_len + block - 1 < window
+        open_context = context is None or ctx_len <= context
+        if open_window and open_context:
+            return None
     q = ctx_len + mx.arange(block)[:, None]
     k = mx.arange(ctx_len + block)[None, :]
     in_block = k >= ctx_len
@@ -179,6 +197,8 @@ def block_attention_mask(ctx_len: int, block: int, window: Optional[int],
     in_ctx = k < ctx_len
     if window is not None:
         in_ctx = in_ctx & (q - k < window)
+    if context is not None:
+        in_ctx = in_ctx & (k >= ctx_len - context)
     return in_block | in_ctx
 
 
@@ -422,6 +442,17 @@ class DFlashAttention(nn.Module):
         self.scale = self.head_dim ** -0.5
         self.is_sliding = config.layer_types[layer_idx] == "sliding_attention"
         self.sliding_window = config.sliding_window if self.is_sliding else None
+        self.use_rope = (config.rope_layers[layer_idx] if config.rope_layers
+                         else True)
+        self.context_window = (None if self.is_sliding
+                               else config.context_window)
+        # The most context rows this layer ever reads. A longer inject only
+        # projects the trailing ones, which leaves each layer's relative
+        # positions as they were.
+        if self.sliding_window is not None:
+            self.ring_rows = int(self.sliding_window) - 1
+        else:
+            self.ring_rows = self.context_window
         self.is_causal = bool(config.is_causal) if config.is_causal is not None else False
         self.q_proj = nn.Linear(dim, self.n_heads * self.head_dim, bias=config.attention_bias)
         self.k_proj = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=config.attention_bias)
@@ -434,11 +465,15 @@ class DFlashAttention(nn.Module):
 
     def inject(self, h_ctx: mx.array, rope, cache) -> None:
         """Write the context rows' K/V into the ring at the ring's positions."""
+        if self.ring_rows is not None and int(h_ctx.shape[1]) > self.ring_rows:
+            h_ctx = h_ctx[:, -self.ring_rows:]
         B, S, _ = h_ctx.shape
         keys = self.k_norm(
             self.k_proj(h_ctx).reshape(B, S, self.n_kv_heads, -1)).transpose(0, 2, 1, 3)
         values = self.v_proj(h_ctx).reshape(B, S, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
-        cache.update_and_fetch(rope(keys, offset=cache.offset), values)
+        if self.use_rope:
+            keys = rope(keys, offset=cache.offset)
+        cache.update_and_fetch(keys, values)
 
     def draft(self, x: mx.array, rope, cache) -> mx.array:
         """Block rows attend the ring plus their siblings. The block's own
@@ -447,15 +482,17 @@ class DFlashAttention(nn.Module):
         q = self.q_norm(self.q_proj(x).reshape(B, L, self.n_heads, -1)).transpose(0, 2, 1, 3)
         k = self.k_norm(self.k_proj(x).reshape(B, L, self.n_kv_heads, -1)).transpose(0, 2, 1, 3)
         v = self.v_proj(x).reshape(B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
-        q = rope(q, offset=cache.offset)
-        k = rope(k, offset=cache.offset)
+        if self.use_rope:
+            q = rope(q, offset=cache.offset)
+            k = rope(k, offset=cache.offset)
         ck, cv = cache.state
         ctx_len = 0
         if ck is not None:
             ctx_len = int(ck.shape[2])
             k = mx.concatenate([ck, k], axis=2)
             v = mx.concatenate([cv, v], axis=2)
-        mask = block_attention_mask(ctx_len, L, self.sliding_window, self.is_causal)
+        mask = block_attention_mask(ctx_len, L, self.sliding_window,
+                                    self.is_causal, self.context_window)
         sinks = self["sinks"].astype(q.dtype) if "sinks" in self else None
         o = mx.fast.scaled_dot_product_attention(
             q, k, v, scale=self.scale, mask=mask, sinks=sinks)
@@ -562,8 +599,22 @@ class DFlashDrafter(nn.Module):
         # Only the trailing ring-capacity rows of the prompt capture are
         # usable; the engine trims the retained prefill hidden to this.
         window = int(config.sliding_window or 0)
-        self.hidden_capture_limit = (window - 1) if window else None
+        if config.context_window is not None:
+            self.hidden_capture_limit = max(
+                int(config.context_window), window - 1)
+        else:
+            self.hidden_capture_limit = (window - 1) if window else None
         self._cache: List[Any] = []
+
+    def capture_held_bytes(self, prompt_tokens: int) -> int:
+        """Peak bytes of the prompt capture as the ring seeds: the packed
+        target hidden, its tap slice and the ``fc`` output, over the rows
+        the drafter keeps. 0 when the capture has no row limit."""
+        limit = self.hidden_capture_limit
+        if not limit:
+            return 0
+        rows = min(int(prompt_tokens), int(limit))
+        return rows * self._hidden * (2 * self._n_targets + 2) * 2
 
     # --- lifecycle ----------------------------------------------------------
 
@@ -602,6 +653,12 @@ class DFlashDrafter(nn.Module):
                 # directly and indexes its rows as time.
                 caches.append(BufferedRotatingKVCache(
                     max_size=int(self.config.sliding_window) - 1,
+                    buffer_size=_RING_SLACK))
+            elif self.config.context_window is not None:
+                # One row over the window: after a compaction the ring keeps
+                # max_size - 1 rows, so the mask always has the full window.
+                caches.append(BufferedRotatingKVCache(
+                    max_size=int(self.config.context_window) + 1,
                     buffer_size=_RING_SLACK))
             else:
                 caches.append(KVCache())
