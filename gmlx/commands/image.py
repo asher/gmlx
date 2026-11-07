@@ -886,8 +886,13 @@ def _generate(a) -> int:
     if a.save_latent:
         # Checked where it is written: a quoted ~ is the home folder.
         a.save_latent = os.path.expanduser(a.save_latent)
-    for path in paths + ([a.save_latent] if a.save_latent else []):
-        err = probe_writable(os.path.realpath(path))
+    # save_npz writes the file a --save-latent link names; the image
+    # writers write at the path, as the probe does.
+    probes = [(p, p) for p in paths]
+    if a.save_latent:
+        probes.append((a.save_latent, os.path.realpath(a.save_latent)))
+    for path, probed in probes:
+        err = probe_writable(probed)
         if err is not None:
             raise OSError(f"cannot write {path}: {err}")
 

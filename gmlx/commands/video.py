@@ -529,15 +529,21 @@ def _writable(a, out: str | None) -> None:
     """Refuse an output the run could not write, before any model loads."""
     from gmlx.tune.lora import probe_writable
 
-    paths = [p for p in (out, a.save_latent) if p]
+    # save_npz writes the file a --save-latent link names; the MP4 and
+    # the frames are written at the path, as the probe does.
+    probes = [(out, os.path.expanduser(out))] if out else []
+    if a.save_latent:
+        probes.append((a.save_latent,
+                       os.path.realpath(os.path.expanduser(a.save_latent))))
     if a.frames_dir is not None:
         d = os.path.expanduser(a.frames_dir)
         if os.path.exists(d) and not os.path.isdir(d):
             raise OSError(f"cannot write frames to {a.frames_dir}: it is a "
                           "file")
-        paths.append(os.path.join(d, "audio.wav"))
-    for p in paths:
-        err = probe_writable(os.path.realpath(os.path.expanduser(p)))
+        wav = os.path.join(d, "audio.wav")
+        probes.append((wav, wav))
+    for p, probed in probes:
+        err = probe_writable(probed)
         if err is not None:
             raise OSError(f"cannot write {p}: {err}")
 

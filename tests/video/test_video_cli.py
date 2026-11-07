@@ -563,6 +563,36 @@ def test_a_latent_path_at_a_symlink_writes_its_target(stubbed, tmp_path):
     assert [p.name for p in target.parent.iterdir()] == ["run1.npz"]
 
 
+def test_an_output_link_to_a_folder_not_made_is_written_at_the_link(
+        stubbed, tmp_path, capsys):
+    """An --output and a --frames-dir audio.wav that are symlinks into a
+    folder that cannot be made, such as a volume not mounted, are probed
+    at the link, where they are written, and not refused for the folder
+    they name. A --save-latent link there is refused before the run."""
+    volumes = tmp_path / "volumes"
+    volumes.mkdir()
+    out = tmp_path / "a.mp4"
+    out.symlink_to(volumes / "card" / "a.mp4")
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    (frames / "audio.wav").symlink_to(volumes / "card" / "audio.wav")
+    lat = tmp_path / "lat.npz"
+    lat.symlink_to(volumes / "card" / "lat.npz")
+    volumes.chmod(0o500)
+    try:
+        assert stubbed("--output", str(out), "--save-latent",
+                       str(lat)) == 1
+        assert f"cannot write {lat}" in capsys.readouterr().err
+        assert stubbed.loads == []
+        assert stubbed("--output", str(out), "--frames-dir",
+                       str(frames)) == 0
+    finally:
+        volumes.chmod(0o700)
+    assert not out.is_symlink() and out.stat().st_size == 5 * 32 * 32 * 3
+    assert not (frames / "audio.wav").is_symlink()
+    assert list(volumes.iterdir()) == []
+
+
 def test_a_quoted_home_latent_path_lands_in_the_home_folder(
         stubbed, monkeypatch, tmp_path):
     """A --save-latent of '~/lat.npz', quoted so the shell leaves the ~,

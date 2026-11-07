@@ -166,6 +166,26 @@ def test_a_latent_path_at_a_symlink_writes_its_target(env, tmp_path):
     assert [p.name for p in target.parent.iterdir()] == ["run1.npz"]
 
 
+def test_an_output_link_to_a_folder_not_made_is_written_at_the_link(
+        env, tmp_path):
+    """An --output that is a symlink into a folder that cannot be made,
+    such as a volume not mounted, is probed at the link, where the image
+    is written, and not refused for the folder it names."""
+    volumes = tmp_path / "volumes"
+    volumes.mkdir()
+    link = tmp_path / "a.png"
+    link.symlink_to(volumes / "card" / "a.png")
+    volumes.chmod(0o500)
+    try:
+        assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                         "--seed", "5", "--output",
+                                         str(link)]) == 0
+    finally:
+        volumes.chmod(0o700)
+    assert not link.is_symlink() and link.stat().st_size > 0
+    assert list(volumes.iterdir()) == []
+
+
 def test_a_quoted_home_latent_path_is_checked_where_it_is_written(
         env, tmp_path, monkeypatch, capsys):
     """A --save-latent of '~/lat.npz', quoted so the shell leaves the ~,
