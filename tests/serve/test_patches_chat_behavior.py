@@ -339,6 +339,26 @@ def test_nonstream_split_strips_xtml_section_markers():
         sp_chat._LAST_RENDERED_PROMPT.reset(tok)
 
 
+_XTML_PAIR = ("<|open|>think<|sep|>", "<|close|>think<|sep|>")
+
+
+def _stream_split(monkeypatch, prompt, text, step, pair=_XTML_PAIR):
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
+    cls = rs.ThinkingStreamState
+    monkeypatch.setattr(cls, "__init__", cls.__init__)
+    monkeypatch.setattr(cls, "feed", cls.feed)
+    sp.install_stream_thinking_seed()
+    tok = sp_chat._LAST_RENDERED_PROMPT.set("<|open|>message<|sep|>" + prompt)
+    try:
+        st = cls(True, *pair)
+        deltas = [st.feed(text[i:i + step]) for i in range(0, len(text), step)]
+        deltas.append(st.feed("", last=True))
+    finally:
+        sp_chat._LAST_RENDERED_PROMPT.reset(tok)
+    return ("".join(d.reasoning or "" for d in deltas),
+            "".join(d.content or "" for d in deltas))
+
+
 @pytest.mark.parametrize("prompt,text", [
     ("<|open|>think<|sep|>",
      "plan<|close|>think<|sep|><|open|>response<|sep|>2+2 equals 4."
@@ -351,22 +371,32 @@ def test_stream_split_strips_xtml_section_markers(monkeypatch, prompt, text,
                                                   step):
     """Kimi-K3: the streamed content drops the section markers, also when
     a marker arrives split over chunks."""
-    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
-    cls = rs.ThinkingStreamState
-    monkeypatch.setattr(cls, "__init__", cls.__init__)
-    monkeypatch.setattr(cls, "feed", cls.feed)
-    sp.install_stream_thinking_seed()
-    tok = sp_chat._LAST_RENDERED_PROMPT.set("<|open|>message<|sep|>" + prompt)
-    try:
-        st = cls(True, "<|open|>think<|sep|>", "<|close|>think<|sep|>")
-        deltas = [st.feed(text[i:i + step]) for i in range(0, len(text), step)]
-        deltas.append(st.feed("", last=True))
-    finally:
-        sp_chat._LAST_RENDERED_PROMPT.reset(tok)
-    reasoning = "".join(d.reasoning or "" for d in deltas)
-    content = "".join(d.content or "" for d in deltas)
+    reasoning, content = _stream_split(monkeypatch, prompt, text, step)
     assert reasoning == ("plan" if "think" in prompt else "")
     assert content == "2+2 equals 4."
+
+
+@pytest.mark.parametrize("prompt,text", [
+    ("<|open|>think<|sep|>",
+     "plan<|close|>think<|sep|><|open|>response<|sep|>\n\n  x = 1 \n"
+     "<|close|>response<|sep|><|close|>message<|sep|>"),
+    ("<|open|>response<|sep|>", " \n\tx < y\n\n  z <\n<|close|>response<|sep|>"),
+    ("<|open|>response<|sep|>", "a <|close|>response<|sep|> \n"),
+])
+@pytest.mark.parametrize("step", [1, 3, 64])
+def test_stream_xtml_content_trims_as_the_reply_split(monkeypatch, prompt,
+                                                      text, step):
+    """Kimi-K3: the streamed content keeps the whitespace the reply split
+    keeps."""
+    monkeypatch.setattr(_APP, "_split_thinking_text",
+                        _APP._split_thinking_text)
+    content = _stream_split(monkeypatch, prompt, text, step)[1]
+    tok = sp_chat._LAST_RENDERED_PROMPT.set("<|open|>message<|sep|>" + prompt)
+    try:
+        want = _APP._split_thinking_text(text, *_XTML_PAIR)[1]
+    finally:
+        sp_chat._LAST_RENDERED_PROMPT.reset(tok)
+    assert content == want
 
 
 def test_nonstream_split_keeps_first_line_code_indent():

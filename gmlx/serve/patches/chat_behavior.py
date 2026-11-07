@@ -458,11 +458,14 @@ def _strip_xtml_sections(content: str) -> str:
 
 
 class _XtmlStreamStrip:
-    """Drops the XTML section markers from streamed content. A tail that
-    can start a marker waits for the next chunk."""
+    """Drops the XTML section markers from streamed content and trims it
+    as ``_strip_xtml_sections`` does. A tail that can start a marker, and
+    trailing whitespace, wait for the next chunk."""
 
     def __init__(self):
         self.held = ""
+        self.ws = ""
+        self.lead = True
 
     def feed(self, text: str, last: bool = False) -> str:
         text = self.held + text
@@ -475,7 +478,19 @@ class _XtmlStreamStrip:
                 if any(m.startswith(text[i:]) for m in _XTML_SECTION_MARKERS):
                     text, self.held = text[:i], text[i:]
                     break
-        return text
+        text, self.ws = self.ws + text, ""
+        if self.lead:
+            body = text.lstrip()
+            if not body:
+                self.ws = "" if last else text
+                return ""
+            # Leading blank lines go; the first line keeps its indent.
+            pad = text[:len(text) - len(body)]
+            text, self.lead = pad[pad.rfind("\n") + 1:] + body, False
+        body = text.rstrip()
+        if not last:
+            self.ws = text[len(body):]
+        return body
 
 
 def _trim_content_ws(text: str) -> str:
