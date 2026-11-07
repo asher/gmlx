@@ -271,10 +271,12 @@ def _refuse_video(view: HeaderView) -> None:
     try:
         video = video_family_of(view)
     except VideoModelError as e:
-        # A refusal by identity says "this is" itself.
-        why = str(e)
-        raise ImageModelError(why if why.startswith("this is ")
-                              else f"this is {why}") from None
+        raise ImageModelError(f"this is {e}") from None
+    except OSError as e:
+        path = e.filename or next(
+            (t.path for t in view.tensors.values() if t.path), "the file")
+        raise ImageModelError(f"cannot read {path}: "
+                              f"{e.strerror or e}") from None
     if video is not None:
         raise ImageModelError(
             f"this is a {video.title} video GGUF, run it with gmlx video")

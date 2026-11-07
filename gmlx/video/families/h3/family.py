@@ -271,7 +271,7 @@ for _table, _hash in (
     _table[_hash] = _FASTH3
 REFUSED = {
     "247d976f868cf75afaa2aacee59150489afbc7006da79dec9adfb15d81b580bb": (
-        "this is the %s Ref2VA checkpoint (reference images, video or audio); "
+        "the %s Ref2VA checkpoint (reference images, video or audio); "
         "gmlx video runs the FL2VA checkpoint, and Ref2VA is a follow-up "
         "release" % TITLE),
 }
