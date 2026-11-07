@@ -23,11 +23,19 @@ pytestmark = pytest.mark.integration
 ARCHES = ["qwen3", "llama", "smollm3", "falcon-h1"]
 N_TOKENS = 16
 K = 20
-# The logits are bf16, whose step is 0.125 between 16 and 32, so a one-step
-# rounding difference on a large logit moves a logprob by that much. The GPU
-# sets the bound: it measured 0.063 at most on qwen3 and falcon-h1. The CPU
+# The logits are bf16, so a one-step rounding difference on a large logit
+# moves a logprob by one bf16 step at that logit's size (0.125 between 16 and
+# 32), and the normalizer moves with it. The GPU measured 0.063 at most on
+# qwen3 and falcon-h1, and 0.133 on SmolLM2, whose logits reach 16. The CPU
 # matches exactly.
-TOL = 0.13
+LSE_TOL = 0.02
+
+
+def _tol(logits) -> float:
+    """One bf16 step at the row's largest logit, plus the normalizer's
+    share."""
+    top = float(np.abs(logits).max())
+    return 2.0 ** (np.floor(np.log2(top)) - 7) + LSE_TOL
 PROMPT = "The quick brown fox jumps over the lazy dog. The quick brown fox"
 
 
@@ -78,17 +86,18 @@ def test_a_lone_row_reports_the_plain_forwards_logprobs(gguf_index, arch,
     # per forward, with no processors.
     toks = [int(r.token) for r in resps]
     cache = make_prompt_cache(raw)
-    rows = []
+    rows, tols = [], []
     for part in [ids] + [[t] for t in toks[:-1]]:
         out = lm(mx.array([part]), cache=cache)
         last = getattr(out, "logits", out)[0, -1].astype(mx.float32)
         rows.append(np.array(last - mx.logsumexp(last)))
+        tols.append(_tol(np.array(last)))
     for i, r in enumerate(resps):
-        row = rows[i]
-        assert abs(r.token_logprob - row[r.token]) <= TOL, (arch, i)
+        row, tol = rows[i], tols[i]
+        assert abs(r.token_logprob - row[r.token]) <= tol, (arch, i)
         top_ids = [t for t, _ in r.top_logprobs]
         vals = np.array([v for _, v in r.top_logprobs])
         assert len(top_ids) == K
-        np.testing.assert_allclose(vals, np.sort(row)[::-1][:K], atol=TOL)
-        np.testing.assert_allclose(vals, row[top_ids], atol=TOL)
+        np.testing.assert_allclose(vals, np.sort(row)[::-1][:K], atol=tol)
+        np.testing.assert_allclose(vals, row[top_ids], atol=tol)
         assert (np.diff(vals) <= 0).all()
