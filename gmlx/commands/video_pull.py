@@ -428,8 +428,8 @@ def _parser(prog: str) -> argparse.ArgumentParser:
                    help="The config to register the entry in (default: "
                         "the usual config search).")
     p.add_argument("--dir", default=None, metavar="DIR",
-                   help="Where downloads go (default: the config's first "
-                        "model_dirs folder).")
+                   help="Where downloads go, a folder inside one of the "
+                        "config's model_dirs (default: the first of them).")
     p.add_argument("--yes", "-y", action="store_true",
                    help="Download without asking.")
     p.add_argument("--force", action="store_true",

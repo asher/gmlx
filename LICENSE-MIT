@@ -1,7 +1,7 @@
 This license applies only to the files in this repository that carry an
 "SPDX-License-Identifier: MIT" header, or a header that names MIT beside
-another license, such as "Apache-2.0 AND MIT", which applies to the parts
-gmlx wrote. All other files are covered by the
+another license, such as "Apache-2.0 AND MIT", in which MIT covers the
+parts gmlx wrote. All other files are covered by the
 Business Source License 1.1 in LICENSE, except the third-party files that
 licenses/ lists. MIT files derived from mlx-lm retain Apple's copyright on
 the derived portions.

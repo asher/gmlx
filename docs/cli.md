@@ -834,7 +834,8 @@ that is a chat model, or that another image model uses, is kept, and `rm`
 refuses a chat model that an image model uses as its encoder.
 
 `rm` does not take a video model id. To remove a video model, delete its
-entry under `video_models` in the config, then delete its files.
+entry under `video_models` in the config, then delete the files that no
+other entry uses: the h3 recipes share their DiT, encoder and VAEs.
 
 ```sh
 gmlx rm old-model
@@ -1359,7 +1360,7 @@ id, or `h3-2` when another entry has that id.
 |------|---------|---------|
 | `RECIPE`, positional | Required | Pull this recipe. |
 | `--config FILE` | The first default location | Add the entry to this config, and search its `model_dirs`. |
-| `--dir DIR` | The first `model_dirs` folder | Download into this folder, which must lie inside a `model_dirs` folder. |
+| `--dir DIR` | The first `model_dirs` folder | Download into this folder. With a config, it must lie inside a `model_dirs` folder. |
 | `--yes`, `-y` | Off | Download without asking. |
 | `--force` | Off | Download even when the free disk space looks too small, or this Mac's chip or memory does not run the model. |
 | `--dry-run` | Off | Print what the pull finds and would download, and stop. |

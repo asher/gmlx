@@ -51,8 +51,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   read, so a 413 or a 503 comes before the upload.
 - A chat model's cold load counts the request LoRAs an image model holds or
   is loading, so it unloads an idle model sooner to make room.
-- An image LoRA at a strength not 1 or an alpha not its rank scales in float32
-  off the K-quant kernel, so a seed's image differs from the last release's.
+- On a layer the K-quant kernel does not take, an image LoRA at a strength not
+  1 or an alpha not its rank scales in float32, so a seed's image may not
+  match the last release's bit for bit.
 - The ComfyUI nodes send a step again, up to three times, when the server
   let its tensors go, and a 503 they show ends "Queue the prompt again then."
 - In the Python API, `gmlx.image.lora.pair_hash` and `register_pair` take no
