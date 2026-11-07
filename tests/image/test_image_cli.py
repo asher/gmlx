@@ -176,6 +176,31 @@ def test_a_failed_latent_write_keeps_the_file_there(env, tmp_path,
     assert [p.name for p in lat.parent.iterdir()] == ["x.npz"]
 
 
+def test_the_latent_part_file_is_on_disk_before_its_rename(env, tmp_path,
+                                                          monkeypatch):
+    """The part file is synced before it takes the latents' name, so a
+    power loss after the rename never leaves an empty file there."""
+    lat = tmp_path / "x.npz"
+    events = []
+    fsync, replace = os.fsync, os.replace
+
+    def synced(fd):
+        events.append(("fsync", os.fstat(fd).st_size))
+        return fsync(fd)
+
+    def renamed(src, dst):
+        events.append(("replace", os.path.basename(src)))
+        return replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", synced)
+    monkeypatch.setattr(os, "replace", renamed)
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                     "--output", str(tmp_path / "a.png"),
+                                     "--save-latent", str(lat)]) == 0
+    i = events.index(("replace", "x.npz.part"))
+    assert events[i - 1] == ("fsync", lat.stat().st_size)
+
+
 def test_a_variant_with_fixed_sigmas_runs_them_and_no_other_count(
         env, tmp_path, capsys, monkeypatch):
     import dataclasses

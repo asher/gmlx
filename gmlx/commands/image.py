@@ -114,8 +114,8 @@ def _quality(text: str) -> int:
 
 def save_npz(path: str, **arrays) -> None:
     """Write ``arrays`` as an .npz file at exactly ``path``, its folder
-    made, through ``path.part``, so a write stopped part way leaves what
-    was there."""
+    made, through ``path.part`` synced to disk before it is renamed, so a
+    write stopped part way leaves what was there."""
     import numpy as np
 
     path = os.path.expanduser(path)
@@ -124,6 +124,8 @@ def save_npz(path: str, **arrays) -> None:
     try:
         with open(part, "wb") as f:
             np.savez(f, **arrays)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(part, path)
     except BaseException:
         if os.path.exists(part):
