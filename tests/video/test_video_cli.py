@@ -575,13 +575,14 @@ def test_a_latent_path_at_a_symlink_writes_its_target(stubbed, tmp_path):
     assert [p.name for p in target.parent.iterdir()] == ["run1.npz"]
 
 
-@pytest.mark.parametrize("err", ["ENOTSUP", "EOPNOTSUPP", "ENOLCK"])
+@pytest.mark.parametrize("err", ["ENOTSUP", "EOPNOTSUPP", "ENOLCK",
+                                 "EINVAL"])
 def test_a_frames_folder_that_cannot_lock_is_said_first_and_written(
         stubbed, tmp_path, monkeypatch, capsys, err):
     """A frames folder on a filesystem that cannot lock (flock fails with
     ENOTSUP or EOPNOTSUPP on some SMB and FUSE mounts, ENOLCK on NFS
-    without locks) gets one line that says so, before any model loads,
-    and the run writes its frames without the lock."""
+    without locks, EINVAL on others) gets one line that says so, before
+    any model loads, and the run writes its frames without the lock."""
     import errno
     import fcntl
 

@@ -18,7 +18,6 @@ channels: mono on both, more than two mixed down by ffmpeg.
 from __future__ import annotations
 
 import contextlib
-import errno
 import fcntl
 import os
 import re
@@ -204,12 +203,6 @@ def clear_frames(folder: str) -> None:
             os.remove(e.path)
 
 
-# flock fails with these where the folder's filesystem cannot lock it (an
-# NFS mount without locks, some SMB and FUSE mounts), not where another
-# run holds the lock.
-_NO_LOCK = frozenset({errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOLCK})
-
-
 def _unlocked(folder: str, e: OSError) -> str:
     return (f"warning: cannot lock the frames folder {folder} "
             f"({e.strerror}), so its frames are written without the lock: "
@@ -218,10 +211,11 @@ def _unlocked(folder: str, e: OSError) -> str:
 
 def lock_refusal(folder: str) -> str | None:
     """The line to print when the filesystem of ``folder``, or of the
-    nearest folder above it that exists, cannot lock it; None when it
-    can, or when that folder cannot be opened to try (one the user may
-    write into but not read): :func:`frames_lock` then tries the folder
-    the run makes."""
+    nearest folder above it that exists, cannot lock it: flock fails with
+    any error but a held lock (ENOTSUP on some SMB and FUSE mounts, ENOLCK
+    on NFS without locks, EINVAL on others). None when it can, or when
+    that folder cannot be opened to try (one the user may write into but
+    not read): :func:`frames_lock` then tries the folder the run makes."""
     d = os.path.abspath(folder)
     while not os.path.isdir(d) and os.path.dirname(d) != d:
         d = os.path.dirname(d)
@@ -234,8 +228,6 @@ def lock_refusal(folder: str) -> str | None:
     except BlockingIOError:
         pass                        # another run holds it
     except OSError as e:
-        if e.errno not in _NO_LOCK:
-            raise
         return _unlocked(folder, e)
     finally:
         os.close(fd)
@@ -247,8 +239,8 @@ def frames_lock(folder: str, log=None):
     """Hold ``folder`` for one run's frames, so a second run on it waits
     until the first has written its last frame and ``audio.wav`` before
     it clears any of them. ``log`` gets a line when the run waits. A
-    folder whose filesystem cannot lock is held without the lock, and
-    ``log`` gets a line that says so."""
+    folder flock fails on for any reason but a held lock is held without
+    the lock, and ``log`` gets a line that says so."""
     fd = os.open(folder, os.O_RDONLY)
     try:
         try:
@@ -259,8 +251,6 @@ def frames_lock(folder: str, log=None):
                     log(f"waiting for another run writing frames to {folder}")
                 fcntl.flock(fd, fcntl.LOCK_EX)
         except OSError as e:
-            if e.errno not in _NO_LOCK:
-                raise
             if log is not None:
                 log(_unlocked(folder, e))
         yield
