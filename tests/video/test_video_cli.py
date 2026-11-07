@@ -497,6 +497,7 @@ def test_a_second_run_on_a_frames_folder_waits_for_the_first(
     model while it waits; then it writes its own."""
     import fcntl
     import threading
+    import time
 
     from gmlx.video.vae import reader
 
@@ -531,7 +532,9 @@ def test_a_second_run_on_a_frames_folder_waits_for_the_first(
 
     t = threading.Thread(target=second, daemon=True)
     t.start()
-    while not (waiting.is_set() or done.is_set()):
+    deadline = time.monotonic() + 30
+    while not (waiting.is_set() or done.is_set()) \
+            and time.monotonic() < deadline:
         done.wait(0.05)
     try:
         assert waiting.is_set(), "the second run did not wait for the first"
