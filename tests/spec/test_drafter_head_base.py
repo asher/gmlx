@@ -67,11 +67,14 @@ def _bare_head_reads(source: str, names=_HEAD) -> list:
         for child in ast.iter_child_nodes(node):
             parents[child] = node
 
+    def is_self(v) -> bool:
+        return isinstance(v, ast.Name) and v.id == "self"
+
     def own(v) -> bool:
         # self.x, or for an embedding self.model.x: the drafter's own table.
-        while names is not _HEAD and isinstance(v, ast.Attribute):
+        if names is not _HEAD and isinstance(v, ast.Attribute) and v.attr == "model":
             v = v.value
-        return isinstance(v, ast.Name) and v.id == "self"
+        return is_self(v)
 
     def reads_head(n) -> bool:
         if isinstance(n, ast.Attribute) and n.attr in names \
@@ -143,8 +146,10 @@ def test_the_guard_finds_a_bare_embedding_bind():
         "        self.f = getattr(backbone, 'embeddings', None)\n"
         "        self.ok = lora_base(inner.embed_tokens)\n"
         "        self.mine = self.embed_tokens\n"
-        "        self.own = self.model.embed_tokens\n")
-    assert _bare_head_reads(sample, _EMBED_NAMES) == [3, 4]
+        "        self.own = self.model.embed_tokens\n"
+        "        self.t = self.target.model.embed_tokens\n"
+        "        self.u = getattr(self._lm.model, 'embed_tokens')\n")
+    assert _bare_head_reads(sample, _EMBED_NAMES) == [3, 4, 8, 9]
 
 
 # the embedding binds
