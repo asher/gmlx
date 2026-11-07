@@ -164,16 +164,25 @@ class _TrunkOnly:
 
 
 def _trunk_owner(model):
-    """The wrapped model whose ``model`` attribute is its trunk, or None."""
+    """The module whose ``model`` attribute is the trunk that holds the
+    layers, found under the text wrapper and any ``language_model`` links
+    below it (qwen3.5 nests its text model so), or None."""
     from gmlx.models.vlm_text_only import LanguageModel
 
     lm = getattr(model, "language_model", None)
     if not isinstance(lm, LanguageModel):
         return None
-    inner = lm._model
-    if "model" in vars(inner) or not isinstance(getattr(inner, "model", None), nn.Module):
-        return None
-    return inner
+    owner = lm._model
+    for _ in range(4):
+        if "model" in vars(owner):
+            return None
+        trunk = getattr(owner, "model", None)
+        if isinstance(trunk, nn.Module) and getattr(trunk, "layers", None) is not None:
+            return owner
+        owner = getattr(owner, "language_model", None)
+        if not isinstance(owner, nn.Module):
+            return None
+    return None
 
 
 def block_outputs(model, ids, rec: Recorder) -> mx.array:

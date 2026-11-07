@@ -109,8 +109,27 @@ class _LM(nn.Module):
         return [None] * len(self.layers)
 
 
-def _wrap(trunk):
-    return TextOnlyModel(_LM(trunk), config={"model_type": "toy"})
+class _Nested(nn.Module):
+    """The qwen3.5 shape: the text model sits under ``language_model``."""
+
+    def __init__(self, trunk):
+        super().__init__()
+        self.language_model = _LM(trunk)
+
+    def __call__(self, inputs, cache=None):
+        return self.language_model(inputs, cache=cache)
+
+    @property
+    def layers(self):
+        return self.language_model.layers
+
+    def make_cache(self):
+        return self.language_model.make_cache()
+
+
+def _wrap(trunk, nested=False):
+    inner = _Nested(trunk) if nested else _LM(trunk)
+    return TextOnlyModel(inner, config={"model_type": "toy"})
 
 
 def _reference(trunk, positions: int) -> np.ndarray:
@@ -137,10 +156,10 @@ def _capture(model, positions: int, n_layer=None) -> np.ndarray:
     return np.array(out)
 
 
-@pytest.mark.parametrize("positions", [1, 3, 50])
-def test_plain_layers_match_the_loop_and_skip_the_head(positions):
+@pytest.mark.parametrize("positions, nested", [(1, False), (3, False), (50, False), (2, True)])
+def test_plain_layers_match_the_loop_and_skip_the_head(positions, nested):
     trunk = _Trunk([_Block(i) for i in range(3)])
-    got = _capture(_wrap(trunk), positions)
+    got = _capture(_wrap(trunk, nested), positions)
     assert got.shape == (3, _D)
     np.testing.assert_allclose(got, _reference(trunk, positions), rtol=1e-5, atol=1e-6)
     # Every layer runs every column.
