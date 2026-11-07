@@ -325,24 +325,24 @@ cannot change it.
 | A model cannot load beside the pinned or busy models | 503 `model_load_deferred`, with `Retry-After` | `GMLX_OVERCOMMIT=1` |
 | Memory runs out while a request streams | The [governor](glossary.md#governor) ends the largest request: `server_overloaded_shed`, `finish_reason` `shed` | `GMLX_GOVERNOR=0` |
 | A body over 64 MiB, or an audio form over 1024 MiB, to a route other than the image API, `POST /v1/videos` and the step routes | 413 before the body is read | None |
-| A body to the [image API](image-api.md), or a JSON body to [`POST /v1/videos`](video-api.md), whose read and parse need more than the memory free | 413 before the body is read, with the body's size and the memory free | `GMLX_OVERCOMMIT=1` |
-| The text fields of a [`POST /v1/videos`](video-api.md) form past the memory free | 413 once the text read passes the memory free, with the memory free | `GMLX_OVERCOMMIT=1` |
+| A body to the [image API](image-api.md), or a JSON body to [`POST /v1/videos`](video-api.md), whose read and parse need more than the memory free | 413 before the body is parsed, or an image form's files are read, with the body's size and the memory free | `GMLX_OVERCOMMIT=1` |
+| The text fields of an [image API](image-api.md) or [`POST /v1/videos`](video-api.md) form past the memory free | 413 once the text read passes the memory free, with the memory free | `GMLX_OVERCOMMIT=1` |
 | The files of a [`POST /v1/videos`](video-api.md) form larger than the room left in the video job store | 413 before the files are read, with their size and the room | [`video.store_max_bytes`](config.md#video-jobs) |
 | From a [launch session](container-security.md#what-the-client-reaches-on-the-server), a body over 32 MiB, or 64 MiB for audio | 413 before the body is read | None |
 | More than 64 media items, more than 256 Mi pixels in all, or audio over 128 Mi samples or with a sample rate over 384 kHz | 400 before decoding | None |
 
-The read and the parse of a body hold it a few times over, so its price
-counts each copy, about three for an image form, five for a JSON body to
-the image API, four for one to `POST /v1/videos`, and two for a video
-form's text. A JSON body adds 80 bytes for each value it can parse to,
-counted from its commas, colons and opening brackets and braces before
-the parse. A JSON body that is not plain ASCII, or that holds a `\u`
-escape, counts its strings at four bytes a character, and so does the
-text of a video form that is not plain ASCII. An image form is priced at
-its copies alone, whatever its text. With `GMLX_OVERCOMMIT=1`, or with no
-model pool or memory budget, the server reads the bodies it prices from
-free memory with no bound, and a video form's files still take the job
-store's room. The step routes that the [ComfyUI nodes](comfyui.md) call
+The read and the parse of a JSON body hold it a few times over, so its
+price counts each copy, five for a JSON body to the image API and four
+for one to `POST /v1/videos`. A JSON body adds 80 bytes for each value it
+can parse to, counted from its commas, colons and opening brackets and
+braces before the parse. A JSON body that is not plain ASCII, or that
+holds a `\u` escape, counts its strings at four bytes a character. The
+text fields of a form are priced one at a time as they arrive, each at
+about twice its size when it is plain ASCII and up to seven times when it
+is not, and an image form adds the largest of its files, which the route
+reads whole. With `GMLX_OVERCOMMIT=1`, or with no model pool or memory
+budget, the server reads the bodies it prices from free memory with no
+bound, and a video form's files still take the job store's room. The step routes that the [ComfyUI nodes](comfyui.md) call
 take a body of up to one 1 GiB tensor and its header, and price the work
 it asks for from the memory free. The nodes send a video's frames in
 windows that fit.

@@ -10,7 +10,8 @@ figures, and none is read past them:
 - what stays in RAM (a JSON body, a form's text fields, the images API's
   files, which decode into arrays) against the bytes free beside the
   models loaded, read from the pool's figures with no lock, at the copies
-  of it the read and the parse hold;
+  of a JSON body the read and the parse hold, and a form's text fields as
+  they arrive, each at its own width;
 - a video job's form files, which go to disk, against the room left in
   the job store.
 
@@ -28,6 +29,7 @@ import asyncio
 import contextlib
 import math
 import os
+import re
 
 from starlette.requests import Request
 
@@ -37,13 +39,6 @@ IMAGE_PATHS = frozenset(f"{p}/images/{r}" for p in ("/v1", "")
                         for r in ("generations", "edits", "variations"))
 VIDEO_PATHS = frozenset({"/v1/videos"})
 
-# A video form's text fields are held twice while the form is parsed:
-# Starlette's bytearray of each part, with its growth slack, and the str
-# it decodes to. The sum is priced at that factor, measured at 2.1; the
-# post-V6 parse change removes the copy. Once a text chunk is not ASCII
-# the str can take 4 bytes a character: measured at 6.1.
-FORM_TEXT_COPIES = 2.25
-FORM_TEXT_WIDE_COPIES = 6.25
 # Seconds a video form may send nothing before its end: past them, the
 # read ends and the room the form holds in the job store is freed. Each
 # chunk starts the wait again, so a slow client that keeps sending reads
@@ -155,14 +150,65 @@ def json_held(raw: bytes, copies: float, str_copies: float) -> int:
     return held(len(raw), copies) + JSON_VALUE_BYTES * (count + 1)
 
 
-def _text_over_free(n: int, free: int, copies: float) -> BodyRefused:
-    """The 413 of a form whose text fields, ``n`` bytes so far, passed the
-    memory free at ``copies``."""
+# The bytes a read and a parse hold beside the figures priced: a chunk as
+# it arrives, the objects' headers.
+_SLACK = 1 << 20
+# The UTF-8 lead bytes of a character past U+FFFF, and of one past U+00FF.
+_LEAD4 = re.compile(rb"[\xf0-\xff]")
+_LEAD2 = re.compile(rb"[\xc4-\xef]")
+# The bytes a str decoded from UTF-8 holds for each byte decoded, by its
+# kind (:func:`_kind`): at the end of its decode, the str and the narrower
+# copy the decoder widens it from, by tracemalloc; once decoded, the str.
+_DECODE = {0: 1, 1: 2, 2: 3, 4: 6}
+_DECODED = {0: 1, 1: 1, 2: 2, 4: 4}
+
+
+def _kind(buf) -> int:
+    """0 when UTF-8 ``buf`` is ASCII, else the bytes a character takes in
+    the str it decodes to, from the lead byte of its widest character."""
+    if buf.isascii():
+        return 0
+    return 4 if _LEAD4.search(buf) else 2 if _LEAD2.search(buf) else 1
+
+
+class _TextPrice:
+    """The bytes a form's text fields hold as they are parsed: each field
+    read, as the str it decoded to, and the field arriving, as its bytes
+    with the room the bytearray grows by and the str they decode to at
+    its end. Each str takes the width of its own widest character
+    (:data:`_DECODE`)."""
+
+    # The room a bytearray holds past its bytes as it grows, one eighth.
+    GROW = 1.125
+
+    def __init__(self) -> None:
+        self.read = self.done = self.size = self.kind = 0
+
+    def add(self, chunk: bytes) -> int:
+        """Count ``chunk`` of the field arriving; answer what all hold."""
+        self.read += len(chunk)
+        self.size += len(chunk)
+        self.kind = max(self.kind, _kind(chunk))
+        return self.held()
+
+    def end(self) -> None:
+        """The field arriving ends: it is now its str."""
+        self.done += self.size * _DECODED[self.kind]
+        self.size = self.kind = 0
+
+    def held(self) -> int:
+        return (self.done + math.ceil(self.size * self.GROW)
+                + self.size * _DECODE[self.kind] + _SLACK)
+
+
+def _text_over_free(n: int, free: int, need: int) -> BodyRefused:
+    """The 413 of a form whose text fields, ``n`` bytes so far, hold
+    ``need`` bytes as they are parsed, past the memory free."""
     return BodyRefused(413, f"the text fields of this form are over "
-                       f"{_mib(n)}, their read holds {copies:g} times that, "
-                       f"and {_mib(free)} of memory is free beside the "
-                       "models loaded; send shorter text fields, or unload "
-                       "a model to make room")
+                       f"{_mib(n)}, their read and parse hold "
+                       f"{_mib(need, True)}, and {_mib(free)} of memory is "
+                       "free beside the models loaded; send shorter text "
+                       "fields, or unload a model to make room")
 
 
 def _over_free(n: int, free: int, sent: bool,
@@ -232,6 +278,105 @@ async def check_media(request: Request, raw: bytes) -> None:
         raise BodyRefused(400, str(e), e.param) from None
 
 
+async def read_form_in_ram(request: Request, free: int | None = None,
+                           max_files: int = 64):
+    """The multipart form of ``request``, parsed as it arrives with no
+    copy of its body held, its text fields held to the media gate's checks
+    as the gate holds every route it reads. Its text fields are priced
+    against ``free`` bytes (the pool's figure when None) as they arrive,
+    each at its own width (:class:`_TextPrice`), with the files spooled
+    beside them; once parsed, with the largest file, which the route reads
+    whole. A Content-Length past the figure is refused before the read."""
+    from starlette.formparsers import MultiPartParser
+    from starlette.requests import ClientDisconnect
+
+    from ._common import SESSION_SCOPE_KEY
+    from .media_gate import _FORM_ROUTES, MediaRefused, check_form_fields
+
+    path = request.url.path
+    if not path.endswith(_FORM_ROUTES):
+        raise BodyRefused(400, "this route takes a JSON body, not a "
+                          "multipart form")
+    if free is None:
+        free = free_bytes()
+    n = content_length(request)
+    if n is not None and free is not None and n > free:
+        raise _over_free(n, free, True)
+    text = _TextPrice()
+    spool = MultiPartParser.spool_max_size
+    files: list = []
+
+    def spooled(moving: bool = False) -> int:
+        # A file holds its bytes in RAM up to the spool's size, with the
+        # room its buffer grows by, and none once it moves to disk; as it
+        # moves, that buffer and a copy of its bytes.
+        held = sum(f for f in files if f <= spool)
+        return math.ceil(held * _TextPrice.GROW) + (
+            math.ceil(spool * _TextPrice.GROW) + spool if moving else 0)
+
+    def check(need: int, largest: int = 0) -> None:
+        if free is None or need <= free:
+            return
+        what = (f"the largest file of this form is {_mib(largest, True)}, "
+                f"its read holds {_mib(need, True)} beside the text fields "
+                "and the files spooled" if largest else
+                f"the text fields of this form are over {_mib(text.read)}, "
+                f"their read and parse hold {_mib(need, True)} with the "
+                "files spooled")
+        raise BodyRefused(413, f"{what}, and {_mib(free)} of memory is free "
+                          "beside the models loaded; send shorter text "
+                          "fields or smaller files, or unload a model to "
+                          "make room")
+
+    class _Priced(MultiPartParser):
+        def on_part_data(self, data: bytes, start: int, end: int) -> None:
+            if self._current_part.file is None:
+                check(text.add(data[start:end]) + spooled())
+            else:
+                before = files[-1]
+                files[-1] += end - start
+                check(text.held() + spooled(before <= spool < files[-1]))
+            super().on_part_data(data, start, end)
+
+        def on_part_end(self) -> None:
+            if self._current_part.file is None:
+                text.end()
+            super().on_part_end()
+
+        def on_headers_finished(self) -> None:
+            super().on_headers_finished()
+            if self._current_part.file is not None:
+                files.append(0)
+
+    parser = _Priced(request.headers, request.stream(), max_files=max_files,
+                     max_part_size=n if n else 1 << 62)
+    try:
+        form = await parser.parse()
+    except (BodyRefused, ClientDisconnect):
+        for f in parser._files_to_close_on_error:
+            f.close()
+        raise
+    except Exception as e:  # noqa: BLE001 - as the gate's form parse
+        for f in parser._files_to_close_on_error:
+            f.close()
+        raise BodyRefused(400, f"the multipart form cannot be read: {e}") \
+            from None
+    try:
+        largest = max(files, default=0)
+        check(text.held() + spooled() + largest, largest)
+        fields = [(k, v) for k, v in form.multi_items() if isinstance(v, str)]
+        try:
+            check_form_fields(
+                fields, path,
+                inline_only=request.scope.get(SESSION_SCOPE_KEY) is not None)
+        except MediaRefused as e:
+            raise BodyRefused(400, str(e), e.param) from None
+    except BaseException:
+        await form.close()
+        raise
+    return form
+
+
 def arriving_note(arriving: int) -> str:
     """The part of a store refusal that names the bytes the other POSTs
     still arriving hold, when they hold any."""
@@ -271,8 +416,9 @@ def _stalled(stall: float, got: int, n: int | None) -> BodyRefused:
 async def read_form_to_disk(request: Request, folder: str, take,
                             free: int | None = None) -> tuple[list, dict]:
     """``(fields, files)`` of a multipart form: its text fields (name,
-    value) in RAM, priced together against ``free`` bytes (the pool's
-    figure when None) as they arrive, and its files written to
+    value) in RAM, priced against ``free`` bytes (the pool's figure when
+    None) as they arrive, each at its own width (:class:`_TextPrice`),
+    and its files written to
     ``folder``, by field name, each as ``NAME.part`` while it arrives and
     renamed once whole. ``await take(n)`` reserves the body's ``n`` bytes
     of the room left in the job store before the read and answers ``(ok,
@@ -296,8 +442,7 @@ async def read_form_to_disk(request: Request, folder: str, take,
     os.makedirs(folder, exist_ok=True)
     began: list = []
     names: dict = {}
-    text = [0]
-    wide = [False]
+    text = _TextPrice()
 
     class _ToDisk(MultiPartParser):
         def on_headers_finished(self) -> None:
@@ -322,15 +467,17 @@ async def read_form_to_disk(request: Request, folder: str, take,
             if part.file is not None:
                 super().on_part_data(data, start, end)
                 return
-            # The text fields stay in RAM: their sum is priced, not each,
-            # at the copies the parse holds, wide once a chunk is not ASCII.
+            # The text fields stay in RAM, each priced at its own width.
             chunk = data[start:end]
-            text[0] += len(chunk)
-            wide[0] = wide[0] or not chunk.isascii()
-            copies = FORM_TEXT_WIDE_COPIES if wide[0] else FORM_TEXT_COPIES
-            if free is not None and held(text[0], copies) > free:
-                raise _text_over_free(text[0], free, copies)
+            need = text.add(chunk)
+            if free is not None and need > free:
+                raise _text_over_free(text.read, free, need)
             part.data.extend(chunk)
+
+        def on_part_end(self) -> None:
+            if self._current_part.file is None:
+                text.end()
+            super().on_part_end()
 
     async def stream():
         held, got = room, 0

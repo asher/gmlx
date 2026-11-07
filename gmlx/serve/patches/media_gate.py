@@ -683,35 +683,48 @@ async def check_request(method: str, path: str, headers, raw: bytes, *,
     body that the session socket already parsed."""
     if not raw:
         return
+    kind = form_type(headers.get("content-type"))
+    if kind == _MULTIPART:
+        if not path.endswith(_FORM_ROUTES):
+            raise MediaRefused("this route takes a JSON body, not a multipart form")
+        try:
+            fields = await multipart_text_fields(headers, raw)
+        except Exception as e:
+            raise MediaRefused(f"the multipart form cannot be read: {e}") from None
+        check_form_fields(fields, path, inline_only=inline_only)
+        return
+    if parsed is not None and parsed[0] == len(raw):
+        check_json(parsed[1], path, inline_only=inline_only)
+        return
+    # Every other route reads its body with json.loads, whatever the
+    # Content-Type says, so a form-encoded body that holds JSON is JSON.
+    try:
+        body = json.loads(raw)
+    except RecursionError:
+        raise MediaRefused("the request body nests too deeply") from None
+    except ValueError as e:
+        if kind == _URLENCODED:
+            raise MediaRefused("this route takes a JSON body, not a form") from None
+        raise MediaRefused(f"the request body is not valid JSON ({e})") from None
+    check_json(body, path, inline_only=inline_only)
+
+
+def check_json(body, path: str, *, inline_only: bool = False) -> None:
+    """:func:`check_body` on the parsed JSON ``body`` of a request to
+    ``path``; ``inline_only`` refuses files in the media folder and URLs
+    too."""
     token = _inline_only.set(inline_only)
     try:
-        kind = form_type(headers.get("content-type"))
-        if kind == _MULTIPART:
-            if not path.endswith(_FORM_ROUTES):
-                raise MediaRefused("this route takes a JSON body, not a multipart form")
-            try:
-                fields = await multipart_text_fields(headers, raw)
-            except Exception as e:
-                raise MediaRefused(f"the multipart form cannot be read: {e}") from None
-            for name, value in fields:
-                check_body({name: value}, path)
-            return
-        if parsed is not None and parsed[0] == len(raw):
-            check_body(parsed[1], path)
-            return
-        # Every other route reads its body with json.loads, whatever the
-        # Content-Type says, so a form-encoded body that holds JSON is JSON.
-        try:
-            body = json.loads(raw)
-        except RecursionError:
-            raise MediaRefused("the request body nests too deeply") from None
-        except ValueError as e:
-            if kind == _URLENCODED:
-                raise MediaRefused("this route takes a JSON body, not a form") from None
-            raise MediaRefused(f"the request body is not valid JSON ({e})") from None
         check_body(body, path)
     finally:
         _inline_only.reset(token)
+
+
+def check_form_fields(fields, path: str, *, inline_only: bool = False) -> None:
+    """:func:`check_body` on each text field ``(name, value)`` of a
+    multipart form sent to ``path``."""
+    for name, value in fields:
+        check_json({name: value}, path, inline_only=inline_only)
 
 
 def _decode_edit_image(value: str) -> tuple[bytes, str, int]:

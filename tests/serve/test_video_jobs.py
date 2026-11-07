@@ -1186,32 +1186,45 @@ def test_a_form_that_stalls_frees_the_room_it_holds(routes, monkeypatch):
     assert os.listdir(os.path.join(str(routes.store.root), "inputs")) == []
 
 
-@pytest.mark.parametrize("kind", ["json", "form", "form_wide"])
 def test_a_video_body_is_priced_at_the_copies_its_parse_holds(
-        routes, monkeypatch, kind):
-    """A JSON body is held a few times over while it is read and parsed,
-    and a form's text twice, or six times once a chunk of it is not
-    ASCII: each fits only where all its copies fit."""
+        routes, monkeypatch):
+    """A JSON body is held a few times over while it is read and parsed:
+    it fits only where all its copies fit."""
     url = "data:image/png;base64," + base64.b64encode(_png()).decode()
-    text = "a" * (256 << 10)
-    if kind == "json":
-        body = json.dumps({"prompt": text, "first_frame": url}).encode()
-        ctype = "application/json"
-        copies = 4.25
-        need = _json_need(body, copies)
-    else:
-        text += "\U0001F600" if kind == "form_wide" else ""
-        body, ctype = _form({"prompt": text}, {"first_frame": _png()})
-        copies = 6.25 if kind == "form_wide" else 2.25
-        need = math.ceil(len(text.encode()) * copies)
+    body = json.dumps({"prompt": "a" * (256 << 10),
+                       "first_frame": url}).encode()
+    need = _json_need(body, 4.25)
+    for free, status in ((need - 1, 413), (need, 200)):
+        monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
+        r = routes.client.post("/v1/videos", content=body,
+                               headers={"content-type": "application/json"})
+        assert r.status_code == status, r.text
+        if status == 413:
+            assert " with the values it parses to, " in \
+                r.json()["error"]["message"]
+    assert len(routes.store.jobs) == 1
+    assert routes.store.pending == {}
+
+
+@pytest.mark.parametrize("wide", [False, True])
+def test_a_video_forms_text_is_priced_at_its_own_width(routes, monkeypatch,
+                                                       wide):
+    """A form's text field is priced as it arrives, at its bytes and the
+    str they decode to at the width of its own characters: it fits only
+    where that fits."""
+    text = "a" * (256 << 10) + ("\U0001F600" if wide else "")
+    body, ctype = _form({"prompt": text}, {"first_frame": _png()})
+    # The field's bytes with a bytearray's room to grow, and its str with
+    # the narrower copy the decode widens from.
+    n = len(text.encode())
+    need = math.ceil(n * 1.125) + n * (6 if wide else 1) + body_intake._SLACK
     for free, status in ((need - 1, 413), (need, 200)):
         monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
         r = routes.client.post("/v1/videos", content=body,
                                headers={"content-type": ctype})
         assert r.status_code == status, r.text
         if status == 413:
-            assert (" with the values it parses to, " if kind == "json"
-                    else f", their read holds {copies:g} times that, ") in \
+            assert ", their read and parse hold " in \
                 r.json()["error"]["message"]
     assert len(routes.store.jobs) == 1
     assert routes.store.pending == {}

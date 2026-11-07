@@ -47,15 +47,12 @@ _DISCONNECT_POLL_S = 0.25
 _CONSUMED = {"generations": IMAGES_GENERATIONS_CONSUMED,
              "edits": IMAGES_EDITS_CONSUMED,
              "variations": IMAGES_VARIATIONS_CONSUMED}
-# The copies of a body its read and parse hold, which its price counts.
-# A form: the body, and the route form's bytearray and str of its text,
-# measured at 3.04. A JSON body: the body, the gate's json.loads and its
-# decode of an edit image, then the route's, measured at 4.75 with a data
-# URL. The post-V6 parse change removes the copies. Two of a JSON body's
-# copies are strs (the gate's json.loads and the route's), which widen in
-# a body that is not ASCII, and the values it parses to add
-# body_intake.JSON_VALUE_BYTES each.
-FORM_COPIES = 3.25
+# The copies of a JSON body its read and parse hold, which its price
+# counts: the body, the gate's json.loads and its decode of an edit image,
+# then the route's, measured at 4.75 with a data URL. The post-V6 parse
+# change removes the copies. Two of them are strs (the gate's json.loads
+# and the route's), which widen in a body that is not ASCII, and the
+# values it parses to add body_intake.JSON_VALUE_BYTES each.
 JSON_COPIES = 5
 JSON_STR_COPIES = 2
 
@@ -277,44 +274,46 @@ async def _read_body(route: str, request: Request):
 
 async def _read_priced_body(route: str, request: Request):
     from ..image_service import ImageRequestError, _bad
-    from .body_intake import BodyRefused, check_media, read_in_ram
+    from .body_intake import (
+        BodyRefused,
+        check_media,
+        read_form_in_ram,
+        read_in_ram,
+    )
 
     ctype = request.headers.get("content-type", "").lower()
     is_form = ctype.startswith("multipart/form-data")
     try:
-        raw = await read_in_ram(
-            request, copies=FORM_COPIES if is_form else JSON_COPIES,
-            str_copies=None if is_form else JSON_STR_COPIES)
-        await check_media(request, raw)
+        if is_form:
+            form = await read_form_in_ram(request)
+        else:
+            raw = await read_in_ram(request, copies=JSON_COPIES,
+                                    str_copies=JSON_STR_COPIES)
+            await check_media(request, raw)
     except BodyRefused as e:
         _log_media(e.status, str(e))
         raise ImageRequestError(e.status, str(e), param=e.param,
                                 headers=e.headers) from None
     images, mask = [], None
     if is_form:
-        if route == "generations":
-            raise _bad("this route takes a JSON body, not a multipart form")
-        try:
-            # The body was priced whole and is in RAM: no part of it
-            # is larger, so its length bounds a text part.
-            form = await request.form(max_files=64,
-                                      max_part_size=max(1, len(raw)))
-        except Exception as e:  # noqa: BLE001 - any parse failure is a 400
-            raise _bad(f"could not parse multipart form data: {e}") from None
         fields = {}
-        for key, value in form.multi_items():
-            if hasattr(value, "read"):
-                data = await value.read()
-                if key in ("image", "image[]"):
-                    images.append(_decoded(data, "image"))
-                elif key == "mask":
-                    mask = _decoded(data, "mask")
+        try:
+            for key, value in form.multi_items():
+                if hasattr(value, "read"):
+                    data = await value.read()
+                    if key in ("image", "image[]"):
+                        images.append(_decoded(data, "image"))
+                    elif key == "mask":
+                        mask = _decoded(data, "mask")
+                    else:
+                        raise _bad(f"file field {key!r} is not read by this "
+                                   "route", key)
+                    del data
+                    fields[key] = "<file>"
                 else:
-                    raise _bad(f"file field {key!r} is not read by this route",
-                               key)
-                fields[key] = "<file>"
-            else:
-                fields[key] = value
+                    fields[key] = value
+        finally:
+            await form.close()
         return fields, images, mask
     try:
         body = json.loads(await request.body() or b"{}")
@@ -329,7 +328,6 @@ async def _read_priced_body(route: str, request: Request):
         if body.get("mask") is not None:
             mask = _json_image(body["mask"], "mask")
     return body, images, mask
-
 
 def _budget(hold):
     """The bytes a request may plan on, or None with GMLX_OVERCOMMIT set:
