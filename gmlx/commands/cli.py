@@ -1315,6 +1315,7 @@ def _run_bench(args) -> int:
             verbose=args.verbose,
         )
     print_family_note(args)
+    _apply_cli_adapter(args, model, _config)
     _apply_placement(args, model)
     decode_tokens = args.bench_decode_tokens or _BENCH_DECODE["bench"]
     print(

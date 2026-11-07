@@ -79,3 +79,45 @@ def test_every_text_command_parses_the_flag_one_way(command):
     args = parse(["--adapter", "my:dir/a.gguf:0.5", "--adapter", "b.gguf"])
     assert args.adapter == [("my:dir/a.gguf", 0.5), ("b.gguf", 1.0)]
     assert parse([]).adapter is None
+
+
+class _Installed(Exception):
+    pass
+
+
+@pytest.mark.parametrize("argv", [
+    ["--prompt", "hi"],
+    ["--prompt", "hi", "--speculative"],
+    ["--bench", "16"],
+    ["--bench-depths", "16"],
+], ids=["generate", "mtp", "bench", "bench-depths"])
+def test_run_folds_the_strength_into_the_install(tmp_path, monkeypatch, argv):
+    """run publishes no row vector, so each path installs with fold on."""
+    from gmlx.commands import cli
+
+    gguf, lora = tmp_path / "m.gguf", tmp_path / "a.gguf"
+    gguf.write_bytes(b"GGUF")
+    lora.write_bytes(b"GGUF")
+    seen = []
+
+    def loader(name, *out):
+        return lambda *a, **k: (seen.append(name), out)[1]
+
+    monkeypatch.setattr(cli, "maybe_load_from_config", lambda *a, **k: None)
+    mtp = "--speculative" in argv
+    monkeypatch.setattr(cli, "_has_native_mtp_head", lambda *a, **k: mtp)
+    monkeypatch.setattr("gmlx.commands.tool_preflight.check_or_exit",
+                        lambda *a, **k: None)
+    monkeypatch.setattr("gmlx.load.loader.load_model",
+                        loader("plain", object(), {}, object()))
+    monkeypatch.setattr("gmlx.spec.mtp_load.load_mtp_model",
+                        loader("mtp", object(), object(), {}, object()))
+
+    def install(args, m, config, *, fold=True):
+        seen.append((args.adapter, fold))
+        raise _Installed
+
+    monkeypatch.setattr(cli, "_apply_cli_adapter", install)
+    with pytest.raises(_Installed):
+        cli.main([str(gguf), "--adapter", f"{lora}:0.5", *argv])
+    assert seen == ["mtp" if mtp else "plain", ([(str(lora), 0.5)], True)]
