@@ -5,8 +5,10 @@
 """mlx-vlm 0.6.15 qwen3.5 MoE text model over the vendored dense layers.
 
 Edits to the upstream file: imports are absolute or point at the vendored
-dense modules, and ``SwitchGLU`` is mlx-lm's, whose body matches the
-mlx-vlm 0.6.15 copy (mlx-vlm 0.7.3's copy adds a decode-block route).
+dense modules, ``SwitchGLU`` is mlx-lm's, whose body matches the
+mlx-vlm 0.6.15 copy (mlx-vlm 0.7.3's copy adds a decode-block route), and
+``_target_verify_switch_glu`` adds the expert adapter delta that its
+direct leaf calls would skip.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
+from gmlx.load.modules import expert_lora_delta
 from .language import LanguageModel as Qwen3_5LanguageModel
 from .language import Qwen3_5Attention as Qwen3_5MoeAttention
 from .language import Qwen3_5GatedDeltaNet as Qwen3_5MoeGatedDeltaNet
@@ -41,11 +44,17 @@ def _target_verify_switch_glu(switch_mlp: SwitchGLU, x, indices, target_verify: 
 
     up = switch_mlp.up_proj(flat_x, flat_indices, sorted_indices=False)
     gate = switch_mlp.gate_proj(flat_x, flat_indices, sorted_indices=False)
+    h = switch_mlp.activation(up, gate)
     out = switch_mlp.down_proj(
-        switch_mlp.activation(up, gate),
+        h,
         flat_indices,
         sorted_indices=False,
     )
+    # gmlx: the direct leaf calls skip the container, so add the expert
+    # adapter delta here.
+    d = expert_lora_delta(switch_mlp.down_proj, h, flat_indices, indices)
+    if d is not None:
+        out = out + d.reshape(out.shape).astype(out.dtype)
     return out.squeeze(-2).reshape(B, T, k, -1)
 
 

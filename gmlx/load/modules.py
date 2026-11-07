@@ -2608,6 +2608,28 @@ def _extra_expert_delta(extra, h_rows, idx, indices, dtype, order=None):
     return d
 
 
+def expert_lora_delta(down, h, idx, indices, order=None):
+    """The summed delta of every expert stamp on ``down`` whose slot is
+    on, as ``(R, 1, out)`` at ``h``'s dtype, or None when there is none.
+    ``h`` holds one row per routed id in ``idx``, in ``idx``'s order;
+    ``indices`` are the ``(B, ..., k)`` ids the published row factor
+    follows, and ``order`` the sort that took them to ``idx``."""
+    lo = getattr(down, "_kq_lora", None)
+    if lo is None:
+        return None
+    h_rows = h.reshape(idx.size, 1, h.shape[-1])
+    d = None
+    for e in (lo,) + tuple(getattr(down, "_kq_lora_extra", None) or ()):
+        if lora_rows.slot_off(e.slot):
+            continue
+        ef, mask = lora_expert_ids(e, idx.reshape(-1))
+        s_rows = _mask_rows(
+            _lora_flat_row_scales(e.slot, indices, h.dtype, order), mask)
+        d2 = expert_delta(e, h_rows, ef, s_rows)
+        d = d2 if d is None else d + d2
+    return d
+
+
 def _lora_flat_row_scales(slot: int, indices, dtype, order=None):
     """Per-flat-row factor ``(R, 1, 1)`` for ``indices (B, ..., k)``: the
     published (B,) row vector expanded over the token axis and ``k``
@@ -2728,15 +2750,7 @@ def _make_lora_switch_glu(base_cls, caps=None):
                 x_gate = self.gate_proj(xe, idx, sorted_indices=do_sort)
                 h = self.activation(x_up, x_gate)
                 y = self.down_proj(h, idx, sorted_indices=do_sort)
-                rr = idx.size
-                h_rows = h.reshape(rr, 1, h.shape[-1])
-                ef, mask = lora_expert_ids(lo, idx.reshape(-1))
-                s_rows = _mask_rows(
-                    _lora_flat_row_scales(lo.slot, indices, h.dtype, order), mask)
-                d = expert_delta(lo, h_rows, ef, s_rows)
-                d2 = _extra_expert_delta(extra, h_rows, idx, indices, h.dtype, order)
-                if d2 is not None:
-                    d = d + d2
+                d = expert_lora_delta(self.down_proj, h, idx, indices, order)
                 y = y + d.reshape(y.shape).astype(y.dtype)
                 if do_sort:
                     y = _lora_scatter_unsort(y, inv_order, indices.shape)
