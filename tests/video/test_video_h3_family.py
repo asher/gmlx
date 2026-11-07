@@ -380,6 +380,18 @@ def test_gmlx_image_names_why_gmlx_video_refuses_an_h3_file(add):
     assert str(ei.value) == f"this is {_refused(view)}"
 
 
+def test_gmlx_image_names_the_ref2va_refusal(monkeypatch):
+    """A Ref2VA file, refused by its weights' identity, gets gmlx video's
+    refusal from gmlx image, said once."""
+    ref = next(r["variant_hash"] for n, r in
+               load_json(H3_IDENTITY)["files"].items() if "_ref2va_" in n)
+    monkeypatch.setattr(vfp, "weight_identity", lambda view, names: ref)
+    with pytest.raises(ifp.ImageModelError) as ei:
+        ifp.identify(fixture_view(H3_HEADER))
+    assert str(ei.value) == hf.REFUSED[ref] == _refused(
+        fixture_view(H3_HEADER))
+
+
 def test_gmlx_video_takes_no_image_file():
     import image_fixtures
 

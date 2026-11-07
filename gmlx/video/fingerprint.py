@@ -83,12 +83,18 @@ def layout_identity(view: HeaderView, fam: VideoFamily) -> str | None:
 def video_family_of(view: HeaderView) -> VideoFamily | None:
     """The video family whose tensors an unstripped view has, or None.
     Raises ``VideoModelError`` with the family's reason for a file of its
-    tensors that gmlx video refuses."""
+    tensors that gmlx video refuses, by its layout or, read only once the
+    layout matches, by its weights' identity."""
     for fam in families():
-        res = fam.fingerprint(strip_prefix(view, fam.strip_prefixes))
+        v = strip_prefix(view, fam.strip_prefixes)
+        res = fam.fingerprint(v)
         if isinstance(res, Refusal):
             raise VideoModelError(res.reason)
         if res is not None:
+            if fam.refused:
+                ident = weight_identity(v, fam.identity_tensors)
+                if ident in fam.refused:
+                    raise VideoModelError(fam.refused[ident])
             return fam
     return None
 

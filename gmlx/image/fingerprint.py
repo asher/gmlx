@@ -271,7 +271,10 @@ def _refuse_video(view: HeaderView) -> None:
     try:
         video = video_family_of(view)
     except VideoModelError as e:
-        raise ImageModelError(f"this is {e}") from None
+        # A refusal by identity says "this is" itself.
+        why = str(e)
+        raise ImageModelError(why if why.startswith("this is ")
+                              else f"this is {why}") from None
     if video is not None:
         raise ImageModelError(
             f"this is a {video.title} video GGUF, run it with gmlx video")
