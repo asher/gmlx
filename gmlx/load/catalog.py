@@ -1,6 +1,7 @@
 """The chat models ``gmlx pull`` recommends, and the plan a pull of one makes.
 
-``MODELS`` names each entry: its repository at a pinned revision, the
+``MODELS`` names each entry: its repository, which every pull reads at
+the head of its main branch, the
 quality tiers (``fastest``, ``balanced``, ``high``, ``xhigh``) and compact
 quants it offers, its vision tower and drafter, and the figures the
 refresh script recorded (sizes, lookup-table bytes, KV costs, the trained
@@ -23,7 +24,7 @@ from __future__ import annotations
 import difflib
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 GiB = 1 << 30
 K = 1024
@@ -57,7 +58,6 @@ class Rung:
 class Drafter:
     kind: str                        # as discovery names it: dflash2, dflash or the arch
     repo: str
-    revision: str
     file: str
     bytes: int
     cross_base: bool = False         # trained for another checkpoint than the entry's
@@ -68,7 +68,6 @@ class Asr:
     """A speech companion: every pull of the entry downloads it, and the
     model pairs with it from the folder the pull leaves it in."""
     repo: str
-    revision: str
     file: str
     bytes: int
 
@@ -87,7 +86,6 @@ class Model:
     name: str
     title: str
     repo: str
-    revision: str
     rungs: tuple                     # ascending by bytes
     preferred: str                   # a tier, or a quant for an entry with no tiers
     params: str
@@ -177,7 +175,6 @@ class Seed:
     mmproj: str | None = None
     drafter_repo: str = ""
     drafter_file: str = ""
-    drafter_revision: str = ""       # a branch the drafter follows; empty pins the measured sha
     cross_base: bool = False
     asr_repo: str = ""
     asr_file: str = ""
@@ -354,7 +351,6 @@ _SEED = (
          aliases=("ripple",),
          drafter_repo="ashbash/Ripple-65B-Preview-DFlash2-GGUF",
          drafter_file="Ripple-65B-Preview-DFlash2-Q4_K_M.gguf",
-         drafter_revision="main",
          params="65B",
          use="reasoning and chat, long context"),
     Seed("glm-5.3-flash", "GLM-5.3-Flash", "unsloth/GLM-5.3-Flash-GGUF", "balanced",
@@ -429,17 +425,15 @@ def _build(seed: Seed, facts: dict) -> Model:
                          key=lambda r: r.bytes))
     drafter = None
     if seed.drafter_file:
-        kind, revision, nbytes = facts.get("drafter") or ("", "", 0)
-        drafter = Drafter(kind=kind, repo=seed.drafter_repo, revision=revision,
-                          file=seed.drafter_file, bytes=nbytes, cross_base=seed.cross_base)
+        kind, nbytes = facts.get("drafter") or ("", 0)
+        drafter = Drafter(kind=kind, repo=seed.drafter_repo, file=seed.drafter_file,
+                          bytes=nbytes, cross_base=seed.cross_base)
     asr = None
     if seed.asr_file:
-        revision, nbytes = facts.get("asr") or ("main", 0)
-        asr = Asr(repo=seed.asr_repo, revision=revision, file=seed.asr_file, bytes=nbytes)
+        asr = Asr(repo=seed.asr_repo, file=seed.asr_file, bytes=facts.get("asr") or 0)
     kv = facts.get("kv_cost")
     return Model(
-        name=seed.name, title=seed.title, repo=seed.repo,
-        revision=facts.get("revision", "main"), rungs=rungs, preferred=seed.preferred,
+        name=seed.name, title=seed.title, repo=seed.repo, rungs=rungs, preferred=seed.preferred,
         params=_params_label(seed, facts), blurb=seed.blurb, speed=seed.speed, use=seed.use,
         license=facts.get("license", ""), license_url=facts.get("license_url", ""),
         license_note=seed.license_note or facts.get("license_name", ""),
@@ -1047,7 +1041,53 @@ def plan_bytes(plan: PullPlan) -> int:
 
 
 def rung_ref(m: Model, r: Rung) -> str:
-    return f"hf:{m.repo}/{r.path}@{m.revision}"
+    return f"hf:{m.repo}/{r.path}"
+
+
+class GoneFromRepo(Exception):
+    """A file the plan downloads is not in its repo at main any more."""
+
+
+def live_plan(plan: PullPlan, listing) -> PullPlan:
+    """``plan`` with its files as the repos hold them at main now.
+    ``listing(repo)`` gives ``{path: bytes}``, or None when the repo could
+    not be listed, which keeps the recorded files. The quant is found by
+    its recorded path, else by the same name split into another number of
+    shards, else as the only file set of that quant; sizes come from the
+    listing. Raises :class:`GoneFromRepo` when a file is not there."""
+    from gmlx.load.repo_files import find_recorded, model_files
+
+    m, rung = plan.model, plan.rung
+    files = listing(m.repo)
+    if files is not None:
+        groups = model_files(files)
+        first = find_recorded(groups, rung.path, rung.quant)
+        if first is None:
+            have = ", ".join(sorted({q for q, *_rest in groups.values()})) or "no model files"
+            raise GoneFromRepo(f"{m.repo} has no {rung.quant} file at main now (it has: {have}); "
+                               "pick another --quant")
+        rung = replace(rung, path=first, bytes=groups[first][3])
+        if plan.mmproj and m.mmproj:
+            if m.mmproj not in files:
+                raise GoneFromRepo(f"{m.repo} has no {m.mmproj} at main now; pass --no-vision")
+            m = replace(m, mmproj_bytes=files[m.mmproj])
+    d = m.drafter
+    if plan.drafter and d is not None:
+        dfiles = files if d.repo == m.repo else listing(d.repo)
+        if dfiles is not None:
+            if d.file not in dfiles:
+                raise GoneFromRepo(f"{d.repo} has no {d.file} at main now; pass --no-drafter")
+            m = replace(m, drafter=replace(d, bytes=dfiles[d.file]))
+    a = m.asr
+    if a is not None:
+        afiles = listing(a.repo)
+        if afiles is not None:
+            if a.file not in afiles:
+                raise GoneFromRepo(f"{a.repo} has no {a.file} at main now")
+            m = replace(m, asr=replace(a, bytes=afiles[a.file]))
+    m = replace(m, rungs=tuple(sorted((rung if r == plan.rung else r for r in m.rungs),
+                                      key=lambda r: r.bytes)))
+    return replace(plan, model=m, rung=rung)
 
 
 def plan_refs(plan: PullPlan) -> list:
@@ -1055,12 +1095,12 @@ def plan_refs(plan: PullPlan) -> list:
     m = plan.model
     refs = [rung_ref(m, plan.rung)]
     if plan.mmproj and m.mmproj:
-        refs.append(f"hf:{m.repo}/{m.mmproj}@{m.revision}")
+        refs.append(f"hf:{m.repo}/{m.mmproj}")
     if plan.drafter and m.drafter is not None:
         d = m.drafter
-        refs.append(f"hf:{d.repo}/{d.file}@{d.revision}")
+        refs.append(f"hf:{d.repo}/{d.file}")
     if m.asr is not None:
-        refs.append(f"hf:{m.asr.repo}/{m.asr.file}@{m.asr.revision}")
+        refs.append(f"hf:{m.asr.repo}/{m.asr.file}")
     return refs
 
 
@@ -1102,13 +1142,13 @@ def local_state(plan: PullPlan, base_dir: str, nest: bool) -> tuple:
     m = plan.model
     items = [(rung_ref(m, plan.rung), m.repo, plan.rung.path, plan.rung.bytes)]
     if plan.mmproj and m.mmproj:
-        items.append((f"hf:{m.repo}/{m.mmproj}@{m.revision}", m.repo, m.mmproj, m.mmproj_bytes))
+        items.append((f"hf:{m.repo}/{m.mmproj}", m.repo, m.mmproj, m.mmproj_bytes))
     if plan.drafter and m.drafter is not None:
         d = m.drafter
-        items.append((f"hf:{d.repo}/{d.file}@{d.revision}", d.repo, d.file, d.bytes))
+        items.append((f"hf:{d.repo}/{d.file}", d.repo, d.file, d.bytes))
     if m.asr is not None:
         a = m.asr
-        items.append((f"hf:{a.repo}/{a.file}@{a.revision}", a.repo, a.file, a.bytes))
+        items.append((f"hf:{a.repo}/{a.file}", a.repo, a.file, a.bytes))
     per_ref, on_disk, remaining = {}, 0, 0
     for ref, repo, path, total in items:
         have, complete = 0, True
@@ -1120,6 +1160,9 @@ def local_state(plan: PullPlan, base_dir: str, nest: bool) -> tuple:
                 complete = False
                 if os.path.isfile(p + ".part"):
                     have += os.path.getsize(p + ".part")
+        if complete and total and have != total:
+            # A copy of another size is another version: a pull replaces it.
+            have, complete = 0, False
         have = min(have, total) if total else have
         per_ref[ref] = (have, total, complete)
         on_disk += have

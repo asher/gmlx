@@ -86,6 +86,7 @@ class Hub:
         self.repos: dict = {}
         self.cards: dict = {}
         self.fetched: list = []
+        self.revs: set = set()
         monkeypatch.setattr(refresh, "hf_list_dir", self.list_dir)
         monkeypatch.setattr(refresh, "fetch_header_bytes", self.fetch)
         monkeypatch.setattr(refresh, "_hf_api_get", self.api_get)
@@ -106,8 +107,9 @@ class Hub:
 
     def fetch(self, url, **kw):
         m = re.match(rf"{re.escape(HOST)}/(.+?)/resolve/([^/]+)/(.+)$", url)
-        repo, _rev, path = m.groups()
+        repo, rev, path = m.groups()
         self.fetched.append((repo, path))
+        self.revs.add(rev)
         data = self.repos[repo][path]
         return data, len(data)
 
@@ -144,7 +146,9 @@ def test_dense_entry_records_tiers_costs_and_the_tower(refresh, dense_repo, monk
     seed = _seed(mmproj="mmproj-F16.gguf")
     facts, problems, notes = refresh.record_entry(seed, None, None)
     assert problems == []
-    assert facts["revision"] == "abcdef1234567890" and facts["arch"] == "qwen2"
+    assert "revision" not in facts and facts["arch"] == "qwen2"
+    # Every read is at the commit main is at now.
+    assert dense_repo.revs == {"abcdef1234567890"}
     assert facts["params"] == "4B" and facts["moe"] is False and facts["native_mtp"] is False
     assert facts["n_params"] == VOCAB * 64   # the one tensor the fixture writes
     assert facts["license"] == "apache-2.0" and facts["license_url"] == f"{HOST}/org/dense"
@@ -158,7 +162,7 @@ def test_dense_entry_records_tiers_costs_and_the_tower(refresh, dense_repo, monk
     assert facts["mmproj_bytes"] == len(dense_repo.repos["org/dense"]["mmproj-F16.gguf"])
     assert facts["drafter"] is None
     # The cost row rebuilds to boot_costs' entries, in both speculation states.
-    scans = refresh.scans_for("org/dense", "Model-Q6_K.gguf", facts["revision"], None)
+    scans = refresh.scans_for("org/dense", "Model-Q6_K.gguf", "abcdef1234567890", None)
     costs = catalog.kv_costs(catalog.KvCost(facts["kv_cost"]))
     for env in ({}, {"MLX_VLM_GGUF_SPECULATIVE": "1"}):
         _cfg, want, heads = boot_costs(None, env=env, scans=scans)
@@ -309,7 +313,7 @@ def test_repo_companions_the_entry_lacks_are_flagged(refresh, dense_repo, monkey
         _seed(mmproj="mmproj-F16.gguf", drafter_repo="org/dense", drafter_file="mtp-Model.gguf"),
         None, None)
     assert problems == []
-    assert facts["drafter"] == ("qwen2", "abcdef1234567890", len(hub.repos["org/dense"]["mtp-Model.gguf"]))
+    assert facts["drafter"] == ("qwen2", len(hub.repos["org/dense"]["mtp-Model.gguf"]))
     # An entry whose every rung has a head is never asked for a drafter.
     hub.add("org/headed", {"H-Q4_K_M.gguf": _gguf(
         tmp_path, "H-Q4_K_M.gguf", _meta(**{"qwen2.nextn_predict_layers": 1}),
@@ -345,19 +349,16 @@ def test_drafter_gates(refresh, dense_repo, monkeypatch, tmp_path):
     # Same repo: the publisher pairs it, whatever it declares.
     facts, problems, _ = refresh.record_entry(_seed(
         mmproj="mmproj-F16.gguf", drafter_repo="org/dense", drafter_file="Model-DFlash2-Q8_0.gguf"), None, None)
-    assert problems == [] and facts["drafter"][0] == "dflash2" and facts["drafter"][1] == "abcdef1234567890"
+    assert problems == [] and facts["drafter"] == ("dflash2", len(hub.repos["org/dense"]["Model-DFlash2-Q8_0.gguf"]))
     # Another repo whose declared base misses the model: cross_base or a failure.
     other = _seed(mmproj="mmproj-F16.gguf", drafter_repo="org/other", drafter_file="Other-DFlash2-Q8_0.gguf")
     _f, problems, _ = refresh.record_entry(other, None, None)
     assert any("set cross_base" in p for p in problems)
     facts, problems, _ = refresh.record_entry(
         catalog.Seed(**{**other.__dict__, "cross_base": True}), None, None)
-    assert problems == [] and facts["drafter"] == ("dflash2", "9999999999", len(hub.repos["org/other"]["Other-DFlash2-Q8_0.gguf"]))
-    # A drafter that follows a branch records the branch, not the head sha.
-    facts, problems, notes = refresh.record_entry(
-        catalog.Seed(**{**other.__dict__, "cross_base": True, "drafter_revision": "main"}), None, None)
-    assert problems == [] and facts["drafter"][1] == "main"
-    assert not any("pinned" in n for n in notes)
+    assert problems == [] and facts["drafter"] == ("dflash2", len(hub.repos["org/other"]["Other-DFlash2-Q8_0.gguf"]))
+    # The drafter's own repo reads at its own head.
+    assert "9999999999" in hub.revs
     # A drafter the table says cannot serve the base, and a base with no wired target.
     monkeypatch.setattr(refresh.arch_table, "drafter_serves", lambda d, a: False)
     _f, problems, _ = refresh.record_entry(_seed(
@@ -382,11 +383,11 @@ def test_speech_companion_gates(refresh, dense_repo, monkeypatch, tmp_path):
     monkeypatch.setattr(refresh.arch_table, "ASR_COMPANION_REPOS", {"qwen2": "speech-GGUF"})
     seed = _seed(mmproj="mmproj-F16.gguf", asr_repo="me/speech-GGUF", asr_file="speech.gguf")
     facts, problems, _ = refresh.record_entry(seed, None, None)
-    assert problems == [] and facts["asr"] == ("5555555555", len(speech))
-    assert f"'asr': ('5555555555', {len(speech)})," in refresh.facts_text({"dense": facts})
-    # A recorded revision stays pinned.
-    facts, _p, notes = refresh.record_entry(seed, {"asr": ("4444444444", 1)}, None)
-    assert facts["asr"][0] == "4444444444" and any("newer than the pinned 44444444" in n for n in notes)
+    assert problems == [] and facts["asr"] == len(speech) and "5555555555" in dense_repo.revs
+    assert f"'asr': {len(speech)}," in refresh.facts_text({"dense": facts})
+    # A recorded size is replaced by the size at the head.
+    facts, _p, _n = refresh.record_entry(seed, {"asr": 1}, None)
+    assert facts["asr"] == len(speech)
     # A file that is no speech companion, one that is missing, and an arch that pairs elsewhere.
     _f, problems, _ = refresh.record_entry(
         catalog.Seed(**{**seed.__dict__, "asr_file": "chat.gguf"}), None, None)
@@ -412,7 +413,7 @@ def test_other_license_records_its_name_and_a_resolved_link(refresh, monkeypatch
     seed = _seed(repo="org/other", preferred="balanced")
     facts, problems, _ = refresh.record_entry(seed, None, None)
     assert facts["license"] == "other" and facts["license_name"] == "qwen-community-1.0"
-    assert facts["license_url"] == f"{HOST}/org/other/blob/feedbeef00/LICENSE"
+    assert facts["license_url"] == f"{HOST}/org/other/blob/main/LICENSE"
     assert any("needs a license_note" in p for p in problems)
     noted = catalog.Seed(**{**seed.__dict__, "license_note": "Qwen Community License"})
     _f, problems, _ = refresh.record_entry(noted, None, None)
@@ -422,7 +423,7 @@ def test_other_license_records_its_name_and_a_resolved_link(refresh, monkeypatch
     # No link on the card: the repo's LICENSE file, else the repo page.
     hub.add("org/file", {"M-Q4_K_M.gguf": buf, "LICENSE.md": b"x"}, license="other", license_name="x")
     facts, _p, _ = refresh.record_entry(_seed(repo="org/file", preferred="balanced", license_note="X"), None, None)
-    assert facts["license_url"] == f"{HOST}/org/file/blob/abcdef1234567890/LICENSE.md"
+    assert facts["license_url"] == f"{HOST}/org/file/blob/main/LICENSE.md"
     hub.add("org/page", {"M-Q4_K_M.gguf": buf}, license="other", license_name="x",
             license_link="https://example.invalid/license")
     facts, _p, _ = refresh.record_entry(_seed(repo="org/page", preferred="balanced", license_note="X"), None, None)
@@ -494,12 +495,11 @@ def test_main_prints_facts_and_the_walk_and_check_compares(refresh, dense_repo, 
     monkeypatch.setattr(refresh, "_url_ok", lambda url: False)
     assert refresh.main(["--check"]) == 1
     assert "license page" in capsys.readouterr().err
-    # A newer main than the pinned revision is a note, not a failure.
+    # A newer main is read, and with the same files nothing differs.
     monkeypatch.setattr(refresh, "_url_ok", lambda url: True)
     dense_repo.cards["org/dense"]["sha"] = "0000000000000000"
     assert refresh.main(["--check"]) == 0
-    err = capsys.readouterr().err
-    assert "note: org/dense: main is at 00000000, newer than the pinned abcdef12" in err
+    assert "0000000000000000" in dense_repo.revs and "pinned" not in capsys.readouterr().err
     # --only limits the run; an unknown name runs nothing.
     assert refresh.main(["--only", "nothing"]) == 0
     assert "'dense'" in capsys.readouterr().out   # the recorded facts still print
@@ -548,7 +548,7 @@ def test_compare_images_reports_each_changed_size(refresh):
 
 
 def test_compare_reports_each_changed_field(refresh):
-    old = {"revision": "a", "heads": 4, "kv_cost": (("full", 0, 1.0, 2),), "rungs": (("Q4_0", "fastest", "p", 1, 1, 0, None, False),)}
+    old = {"heads": 4, "kv_cost": (("full", 0, 1.0, 2),), "rungs": (("Q4_0", "fastest", "p", 1, 1, 0, None, False),)}
     assert refresh.compare("x", old, dict(old)) == []
     new = {**old, "heads": 8, "kv_cost": (("full", 0, 2.0, 2),),
            "rungs": (("Q4_0", "fastest", "p", 2, 1, 0, None, False),)}
@@ -561,10 +561,10 @@ def test_compare_reports_each_changed_field(refresh):
 def test_walk_text_shows_each_name_with_and_without_add_ons(refresh, monkeypatch):
     seed = catalog.Seed("w", "W", "org/w", "high", "B.", "Q.", mmproj="mmproj-F16.gguf",
                         drafter_repo="org/w", drafter_file="d.gguf")
-    facts = {"revision": "r", "params": "7B", "n_params": 7 * 10**9, "arch": "qwen2",
+    facts = {"params": "7B", "n_params": 7 * 10**9, "arch": "qwen2",
              "moe": False, "native_mtp": False,
              "license": "mit", "license_url": "", "license_name": "", "mmproj_bytes": 1 << 29,
-             "drafter": ("dflash2", "r", 1 << 29), "heads": 32, "trained_ctx": 131072,
+             "drafter": ("dflash2", 1 << 29), "heads": 32, "trained_ctx": 131072,
              "kv_cost": (("full", 0, 65536.0, 32),),
              "rungs": (("Q4_K_M", "balanced", "m-Q4_K_M.gguf", 4 << 30, 4 << 30, 0, None, False),
                        ("Q6_K", "high", "m-Q6_K.gguf", 6 << 30, 6 << 30, 0, None, False))}
