@@ -33,6 +33,7 @@ gmlx help serve       # the same as gmlx serve --help
 | [`gmlx talk`](#gmlx-talk) | Voice chat with a served model. |
 | [`gmlx train`](#gmlx-train) | Train a LoRA adapter on a GGUF base. |
 | [`gmlx distill`](#gmlx-distill) | Distill a teacher GGUF into a student adapter offline. |
+| [`gmlx kld`](#gmlx-kld) | Measure the KL divergence of a GGUF from a reference GGUF over a text. |
 | [`gmlx image`](#gmlx-image) | Generate images from GGUF diffusion models. |
 | [`gmlx comfyui`](#gmlx-comfyui) | Put the gmlx node pack into ComfyUI, or remove it. |
 | [`gmlx doctor`](#gmlx-doctor) | Check the runtime, config, models and services. |
@@ -1052,6 +1053,70 @@ outputs. [Distillation](distill.md) is the guide,
 and every action's flags are in the
 [Distillation reference](distill-reference.md).
 
+## gmlx kld
+
+`gmlx kld` measures how far a GGUF's next-token distribution is from a
+reference GGUF's over a text, such as a quant against the BF16 file of the
+same model. It computes the numbers that `llama-perplexity --kl-divergence`
+reports, so the two runtimes give comparable results.
+
+```sh
+gmlx kld Qwen3.5-9B-Q4_K_M.gguf --reference Qwen3.5-9B-BF16.gguf --text page.txt
+gmlx kld Qwen3.5-9B-Q4_K_M.gguf --reference Qwen3.5-9B-BF16.gguf --text page.txt \
+    --ctx 512 --chunks 16 --json
+```
+
+The reference loads first, alone, and scores the text into a temporary
+file. Then it unloads and MODEL loads, so the two models never share
+memory. The temporary file needs about 127 MB per chunk at a vocabulary of
+248,320 and `--ctx 512`. It goes in the temporary folder, which `TMPDIR`
+sets, and gmlx checks the free space before the reference loads.
+
+The text is cut into chunks of `--ctx` tokens, and each chunk is scored
+from its middle position to its second-last. The text must hold at least
+two chunks. The two GGUFs must have the same tokenizer, or the command
+stops before any load.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `MODEL`, positional | Required | Score this GGUF, or this model id or alias from the config. |
+| `--reference FILE` | Required | Score MODEL against this GGUF or config id. |
+| `--text FILE` | Required | Score this UTF-8 text. One trailing newline is dropped, as llama.cpp does. |
+| `--ctx N` | `512` | Cut the text into chunks of N tokens. |
+| `--chunks N` | Every whole chunk | Score at most N chunks. |
+| `--json` | Off | Print JSON lines in place of the table. |
+| `--config FILE` | The first default location | Resolve a model id against this config. |
+| `-v`, `--verbose` | Off | Print the full load diagnostics. |
+
+The placement flags apply to each model in turn, as the
+[Streaming flags](#streaming-flags) table describes: `--stream-experts`,
+`--stream-cpu`, `--stream-fast-disk`, `--prefill-feeder`,
+`--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`,
+`--gpu-keepwarm`, `--no-gpu-keepwarm`, `--moe-experts`,
+`--moe-expert-mass`, `--moe-expert-probe`, `--moe-miss-shed`,
+`--moe-layer-shed` and `--moe-prestage`.
+
+The table gives two numbers, each with its standard error:
+
+| Name | Meaning |
+|------|---------|
+| Mean KLD | The mean KL divergence from the reference to MODEL over the scored positions, in nats. 0 means the same distribution. |
+| Same top p | The share of scored positions where both models rank the same token first, as a percent. |
+
+With `--json`, each line is one JSON object with an `event` key. A
+`progress` line comes after each chunk of each pass, and one `result` line
+comes last:
+
+| Key | Meaning |
+|-----|---------|
+| `event` | `progress` or `result`. |
+| `stage` | On a progress line, `reference` or `model`, the pass that scored the chunk. |
+| `chunk`, `chunks` | On a progress line, the chunk just scored and the chunk count. |
+| `model`, `reference` | The two GGUF paths. |
+| `mean_kld`, `mean_kld_unc` | Mean KLD and its standard error. |
+| `same_top_p`, `same_top_p_unc` | Same top p and its standard error, as a fraction from 0 to 1. |
+| `positions`, `chunks`, `ctx` | The positions scored, the chunks and the chunk length. |
+
 ## gmlx image
 
 `gmlx image` generates images from GGUF diffusion models, which
@@ -1571,6 +1636,7 @@ These verbs also use other codes:
 | `rm` | 1 when you declined or a file could not be deleted, 2 for an unknown id, a bad config, or a missing `--yes`. |
 | `ps` | 1 when the server answered with an error or is not gmlx, 3 when no server was reachable. |
 | `systemone` | 1 when the file, the request or the model was refused, or no server was reachable. |
+| `kld` | 1 when a model fails to load, 2 when a flag, file or tokenizer is wrong, the text is short, the disk is full or a head cannot be scored. |
 | `doctor` | 1 when a check failed, 2 when the `--config` file does not exist. |
 | `launch` | The client's own status once it runs, else a code from the next table. |
 
