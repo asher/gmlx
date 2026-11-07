@@ -11,10 +11,10 @@ published for cannot silently reuse a stale vector.
 Modes:
 
 - ``static`` (run, chat, tests): nothing publishes. A wrapper that finds
-  no vector uses scale 1.0 for every row, today's behaviour. ``chat``'s
-  ``/adapter`` command publishes a one-row vector to toggle or scale the
-  adapter without a reload.
-- ``rows`` (serve with a hot-swappable adapter): every forward must have
+  no vector uses scale 1.0 for every row; ``run`` folds each adapter's
+  strength into its static scale. ``chat`` publishes a one-row vector of
+  its strengths each turn, which ``/adapter`` changes without a reload.
+- ``rows`` (serve, capture and kld with adapters): every forward must have
   a publish. A wrapper that finds no vector raises, so a forward path
   that was missed at wiring time is a crash on the first request, never
   a base-id row served through the adapter.
