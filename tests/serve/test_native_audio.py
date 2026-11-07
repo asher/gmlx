@@ -336,9 +336,12 @@ def stamps(native, monkeypatch):
 
 def test_chat_word_timestamps_ride_the_completion(stamps):
     messages = [{"role": "user", "content": [{"type": "text", "text": "Hi"}, _clip(1.0)]}]
+    # The template thinks by default, so the reply would land in reasoning
+    # once serve's template-kwargs patch is installed; transcription runs
+    # with thinking off.
     for opt in ({"mm_processor_kwargs": {"capture_ctc_timestamps": True}},
                 {"timestamp_granularities": ["word"]}):
-        r = _chat(stamps, messages, **opt)
+        r = _chat(stamps, messages, enable_thinking=False, **opt)
         assert r.status_code == 200, r.text
         assert r.json()["ctc_timestamps"]["error"] is None
     assert stamps.stamped == [("capture16000", "ok")] * 2
