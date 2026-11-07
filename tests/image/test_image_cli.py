@@ -149,6 +149,28 @@ def test_the_latents_land_at_the_path_given(env, tmp_path):
     assert [p.name for p in lat.parent.iterdir()] == ["run1"]
 
 
+def test_a_quoted_home_latent_path_is_checked_where_it_is_written(
+        env, tmp_path, monkeypatch, capsys):
+    """A --save-latent of '~/lat.npz', quoted so the shell leaves the ~,
+    is checked in the home folder it is written to: one that cannot be
+    written is refused before the model loads, not after the run."""
+    import stat
+
+    home = tmp_path / "home"
+    home.mkdir()
+    home.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    monkeypatch.setenv("HOME", str(home))
+    try:
+        rc = umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                       "--output", str(tmp_path / "a.png"),
+                                       "--save-latent", "~/lat.npz"])
+    finally:
+        home.chmod(stat.S_IRWXU)
+    assert rc == 1
+    assert f"cannot write {home}/lat.npz" in capsys.readouterr().err
+    assert env.pipes == [] and not (tmp_path / "~").exists()
+
+
 def test_a_failed_latent_write_keeps_the_file_there(env, tmp_path,
                                                     monkeypatch, capsys):
     """A latent write that fails part way, as on a full disk, leaves the

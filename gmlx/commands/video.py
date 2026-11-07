@@ -670,6 +670,8 @@ def _generate(a) -> int:
             f"merged in, and each adapter runs on top of it")
     s = _settings(a, fam, vid.variant)
     out = _output(a, s["seed"]) if ffmpeg is not None else None
+    if a.save_latent:
+        a.save_latent = os.path.expanduser(a.save_latent)
     _writable(a, out)
     keyframes, todo = _read_anchors(a, fam, s)
     tokenizer = video_encoder.header_tokenizer(fam, a.encoder)

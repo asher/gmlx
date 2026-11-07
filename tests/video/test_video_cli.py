@@ -499,6 +499,19 @@ def test_the_latents_land_at_the_path_given(stubbed, tmp_path):
     assert [p.name for p in lat.parent.iterdir()] == ["run1"]
 
 
+def test_a_quoted_home_latent_path_lands_in_the_home_folder(
+        stubbed, monkeypatch, tmp_path):
+    """A --save-latent of '~/lat.npz', quoted so the shell leaves the ~,
+    is checked and written in the home folder."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    assert stubbed("--frames-dir", str(tmp_path / "f"), "--save-latent",
+                   "~/lat.npz") == 0
+    assert [p.name for p in home.iterdir()] == ["lat.npz"]
+    assert not (tmp_path / "~").exists()
+
+
 def test_an_interrupted_latent_write_keeps_the_file_there(stubbed,
                                                           monkeypatch,
                                                           tmp_path):
