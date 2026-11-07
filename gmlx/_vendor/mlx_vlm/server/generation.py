@@ -1843,6 +1843,8 @@ class ResponseGenerator:
                         request, backend="continuous_batching"
                     )
                     if batch_gen is None:
+                        from gmlx.serve.row_sampling import RowSettings
+
                         batch_gen = BatchGenerator(
                             self.model.language_model,
                             self.processor,
@@ -1859,7 +1861,10 @@ class ResponseGenerator:
                             compute_logprobs=bool(args.logprobs),
                             top_logprobs_k=self.top_logprobs_k if args.logprobs else 0,
                             # gmlx: the server cap, whatever the first request.
+                            # A row whose settings are gone reads the greedy
+                            # default, not the first request's.
                             logprobs_cap=self.top_logprobs_k or 0,
+                            default_row=RowSettings(),
                             stream=generation_stream,
                             apc_manager=self.apc_manager,
                             draft_model=self.draft_model,

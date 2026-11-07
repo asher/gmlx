@@ -1,6 +1,8 @@
 """The engine's batch loop lets go of a request's inputs once the request is
 in the batch: an idle server must not keep the last request's images or
-audio rows alive until the next request comes. No model is loaded."""
+audio rows alive until the next request comes. It builds the batch with the
+server's logprob cap and a neutral default row, and inserts each request
+with its own row settings. No model is loaded."""
 
 from __future__ import annotations
 
@@ -26,20 +28,26 @@ class _Inputs:
 class _Batch:
     unprocessed_prompts: list = []
     has_work = False
+    made: list = []
 
     def __init__(self, *a, **kw):
         self.uid = 0
+        self.kw = kw
+        self.inserts = []
+        self.made.append(self)
 
     def insert(self, prompts, **kw):
         self.uid += 1
+        self.inserts.append(kw.get("row_settings"))
         return [self.uid]
 
     def close(self):
         pass
 
 
-def test_an_idle_loop_holds_no_finished_requests_inputs(monkeypatch):
+def _response_generator(monkeypatch):
     monkeypatch.setattr(_GEN, "BatchGenerator", _Batch)
+    monkeypatch.setattr(_Batch, "made", [])
     monkeypatch.setattr(_GEN, "is_diffusion_model", lambda m: False)
     monkeypatch.setattr(_GEN, "_ServerTokenStreamer", lambda *a: None)
     monkeypatch.setattr(_GEN, "make_streaming_detokenizer", lambda p: None)
@@ -67,6 +75,26 @@ def test_an_idle_loop_holds_no_finished_requests_inputs(monkeypatch):
             active.pop(uid)["rqueue"].put(None)
 
     rg._step = step
+    return rg
+
+
+def _request(rg, args, raw=None):
+    rq: queue.Queue = queue.Queue()
+    rg.requests.put(_GEN.QueuedGenerationRequest(
+        rqueue=rq, raw_inputs=raw or {"input_ids": None, "audio_clips": []},
+        prompt_tokens=2, args=args))
+    assert isinstance(rq.get(timeout=5), _GEN.GenerationContext)
+    assert rq.get(timeout=5) is None
+
+
+def _stop(rg, thread):
+    rg._stop = True
+    rg.requests.put(None)
+    thread.join(timeout=5)
+
+
+def test_an_idle_loop_holds_no_finished_requests_inputs(monkeypatch):
+    rg = _response_generator(monkeypatch)
     finished = threading.Event()
     idle = threading.Event()
     collect = rg._collect_pending_requests
@@ -94,6 +122,39 @@ def test_an_idle_loop_holds_no_finished_requests_inputs(monkeypatch):
         gc.collect()
         assert alive() is None
     finally:
-        rg._stop = True
-        rg.requests.put(None)
-        thread.join(timeout=5)
+        _stop(rg, thread)
+
+
+class _Sampler:
+    def __init__(self, temperature):
+        self.temperature = temperature
+        self._kq_row_seeds = {}
+
+
+def test_the_loop_passes_the_cap_and_each_requests_row_settings(monkeypatch):
+    from gmlx.serve.row_sampling import GREEDY_KEY, RowSettings, sampler_key
+
+    rg = _response_generator(monkeypatch)
+    rg.top_logprobs_k = 7
+    rg._make_sampler = lambda args: (
+        _Sampler(args.temperature) if args.temperature else None)
+    thread = threading.Thread(target=rg._run_impl, daemon=True)
+    thread.start()
+    sampled = _GEN.GenerationArguments(
+        max_tokens=1, temperature=0.7, seed=5, logprobs=True, top_logprobs=3)
+    try:
+        _request(rg, _GEN.GenerationArguments(max_tokens=1, temperature=0.0))
+        _request(rg, sampled)
+    finally:
+        _stop(rg, thread)
+
+    # The first request asked for no logprobs, yet its batch takes the cap.
+    for batch in _Batch.made:
+        assert batch.kw["logprobs_cap"] == 7
+        assert batch.kw["default_row"] == RowSettings()
+    first, second = (rows for b in _Batch.made for rows in b.inserts)
+    assert first == [RowSettings(key=GREEDY_KEY)]
+    (row,) = second
+    assert row.sampler.temperature == 0.7
+    assert (row.seed, row.logprobs, row.top_k) == (5, True, 3)
+    assert row.key == sampler_key(sampled)

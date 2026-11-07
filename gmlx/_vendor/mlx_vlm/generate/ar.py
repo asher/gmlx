@@ -2720,6 +2720,7 @@ class BatchGenerator:
         draft_block_size: Optional[int] = None,
         greedy_sampling: bool = False,
         logprobs_cap: Optional[int] = None,
+        default_row: Optional[Any] = None,
     ):
         self.model = model
         self.max_tokens = max_tokens
@@ -2741,7 +2742,8 @@ class BatchGenerator:
         self.greedy_sampling = greedy_sampling or sampler is None
         # gmlx: speculative rows take logprobs from the verify logits, so a
         # drafter keeps them on. The constructor's sampler and flags are the
-        # default row; each insert brings its rows' own.
+        # default row unless default_row is given; each insert brings its
+        # rows' own.
         self.logprobs_cap = int(top_logprobs_k if logprobs_cap is None else logprobs_cap)
         self._row_settings: Dict[int, Any] = {}
         self.apc = (
@@ -2757,7 +2759,7 @@ class BatchGenerator:
             processor.tokenizer if hasattr(processor, "tokenizer") else processor
         )
         self.sampler = sampler or (lambda x: mx.argmax(x, axis=-1))
-        self._default_row = _fallback_row(self)
+        self._default_row = default_row or _fallback_row(self)
         self.uid_count = 0
         self.prefill_step_size = prefill_step_size
         self.prefill_batch_size = prefill_batch_size
