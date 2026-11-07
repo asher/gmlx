@@ -20,6 +20,40 @@ SESSION_SCOPE_KEY = "gmlx.session"
 SESSION_BODY_KEY = "gmlx.session_body"
 
 
+def lone_surrogate(value, name: str) -> str | None:
+    """The field under ``name`` in ``value`` that holds a string with a
+    lone surrogate escape, as ``name``, ``name.key`` or ``name[i]``, or
+    None. JSON parses the escape to a str that encodes to no UTF-8, which
+    a tokenizer and the JSON of an answer then fail on. A key that holds
+    one names the field it is in."""
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return name
+        return None
+    if isinstance(value, dict):
+        items = []
+        for k, v in value.items():
+            if lone_surrogate(str(k), name) is not None:
+                return name
+            items.append((f"{name}.{k}", v))
+    elif isinstance(value, (list, tuple)):
+        items = [(f"{name}[{i}]", v) for i, v in enumerate(value)]
+    else:
+        return None
+    for field, v in items:
+        hit = lone_surrogate(v, field)
+        if hit is not None:
+            return hit
+    return None
+
+
+def surrogate_message(field: str) -> str:
+    """The 400 text of a field :func:`lone_surrogate` names."""
+    return f"{field} holds a lone surrogate escape"
+
+
 @functools.cache
 def refusal_type():
     """An HTTPException whose str() is its detail alone. The routes turn an

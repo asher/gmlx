@@ -799,6 +799,11 @@ def parse_request(route: str, fields: dict) -> ImageRequest:
     if scheduler not in (None, "", "default"):
         raise _bad("scheduler takes only default, the variant's own "
                    "schedule", "scheduler")
+    from .patches._common import lone_surrogate, surrogate_message
+
+    for name in ("prompt", "negative_prompt", "model"):
+        if lone_surrogate(fields.get(name), name) is not None:
+            raise _bad(surrogate_message(name), name)
     q = fields.get("quality")
     q = _QUALITY_ALIASES.get(str(q).strip().lower(), q) if q else q
     req = ImageRequest(

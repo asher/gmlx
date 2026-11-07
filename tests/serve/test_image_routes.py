@@ -147,6 +147,32 @@ def test_refused_fields_answer_400_naming_the_field(served, body, param):
     assert served.jobs == []
 
 
+@pytest.mark.parametrize("route, body, field", [
+    ("generations", b'{"prompt": "a \\ud800 cat"}', "prompt"),
+    ("generations", b'{"prompt": "a cat", "negative_prompt": "\\udfff"}',
+     "negative_prompt"),
+    ("edits", b'{"prompt": "a \\ud800 cat"}', "prompt")])
+def test_a_prompt_with_a_lone_surrogate_is_a_400(served, route, body, field):
+    """A lone surrogate escape parses from JSON to a str that encodes to
+    no UTF-8: the job's text encoder failed on it with a 500. The route
+    refuses it with the 400 the video route gives."""
+    def job(req, kw):
+        # As the tokenizer, it encodes the texts.
+        for text in (req.prompt, req.negative_prompt or ""):
+            text.encode("utf-8")
+        raise AssertionError("the job ran")
+    served.job = job
+    r = TestClient(_APP.app, base_url="http://127.0.0.1",
+                   raise_server_exceptions=False).post(
+        f"/v1/images/{route}", content=body,
+        headers={"content-type": "application/json"})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert (err["message"], err["param"]) == (
+        f"{field} holds a lone surrogate escape", field)
+    assert served.jobs == []
+
+
 def test_generations_answer_b64_by_default(served):
     r = _client().post("/images/generations",
                        json={"prompt": "a cat", "n": 2, "model": "dall-e-3",

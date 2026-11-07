@@ -605,3 +605,80 @@ def test_context_limit_reads_under_a_later_wrap(monkeypatch):
         assert gen.get_configured_context_limit is later
     finally:
         serving.reset_active_spec(token)
+
+
+# -- a lone surrogate escape -------------------------------------------------
+
+class _QwenProcessor:
+    """Renders the Qwen3.5 fixture template as its tokenizer does."""
+
+    chat_template = (Path(__file__).resolve().parents[1] / "fixtures"
+                     / "qwen35_template.jinja").read_text()
+
+    def apply_chat_template(self, messages, tokenize=False,
+                            add_generation_prompt=True, **kw):
+        from transformers.utils.chat_template_utils import (
+            render_jinja_template)
+
+        out = render_jinja_template(
+            [messages], chat_template=self.chat_template,
+            add_generation_prompt=add_generation_prompt, **kw)
+        rendered = out[0] if isinstance(out, tuple) else out
+        return rendered[0] if isinstance(rendered, list) else rendered
+
+
+class _Tokenizing:
+    """The engine as far as its tokenizer, which encodes the prompt."""
+
+    def generate(self, prompt, images=None, audio=None, args=None,
+                 videos=None):
+        import types
+
+        prompt.encode("utf-8")
+
+        class Tok:
+            text, finish_reason, token_count = "ok", "stop", 1
+        return types.SimpleNamespace(prompt_tokens=1, uid=1), iter([Tok()])
+
+
+@pytest.mark.parametrize("body, field", [
+    ({"messages": [{"role": "user", "content": "a \ud800 cat"}]},
+     "messages[0].content"),
+    ({"messages": [{"role": "system", "content": "Be brief."},
+                   {"role": "user", "content": [
+                       {"type": "text", "text": "a \udc00 cat"}]}]},
+     "messages[1].content[0].text"),
+    ({"model": "m\ud800", "messages": [{"role": "user", "content": "a"}]},
+     "model")])
+def test_a_chat_string_with_a_lone_surrogate_is_a_400(monkeypatch, body,
+                                                      field):
+    """JSON parses a lone surrogate escape to a str that encodes to no
+    UTF-8, which the tokenizer then fails on: the chat route refuses it
+    with the 400 the video route gives, naming the field."""
+    import json
+
+    from fastapi.testclient import TestClient
+
+    openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    runtime = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.server.runtime").runtime
+    monkeypatch.setattr(openai, "get_cached_model", lambda *a, **k: (
+        None, _QwenProcessor(), {"model_type": "qwen3_5"}))
+    monkeypatch.setattr(runtime, "response_generator", _Tokenizing(),
+                        raising=False)
+    # The server's error handlers, on this test's copy of the app's, take
+    # effect in the next middleware stack the app builds.
+    monkeypatch.setattr(_APP.app, "exception_handlers",
+                        dict(_APP.app.exception_handlers))
+    monkeypatch.setattr(_APP.app, "middleware_stack", None)
+    sp.install_resolver_error_handlers()
+    sp.install_api_contract()
+    client = TestClient(_APP.app, raise_server_exceptions=False)
+    r = client.post("/v1/chat/completions",
+                    content=json.dumps({"model": "m", "max_tokens": 1,
+                                        **body}).encode(),
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert (err["message"], err["param"]) == (
+        f"{field} holds a lone surrogate escape", field)
