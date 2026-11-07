@@ -538,3 +538,37 @@ def test_an_images_form_that_stops_sending_is_ended_with_a_408(monkeypatch):
         "the request body sent nothing for 0.05 s with 1.0 KiB of it still "
         "to come, so the server ended the request; send it again")
     assert e.value.headers == {"Connection": "close"}
+
+
+def test_a_json_body_sent_in_small_pieces_holds_its_bytes_not_theirs():
+    """A client that sends its body two bytes at a time makes a bytes
+    object of each piece: the read holds the body's bytes, within the
+    price of its read, not each piece's object."""
+    import asyncio
+    import tracemalloc
+
+    from starlette.requests import Request
+
+    n = 128 << 10
+    sent = [0]
+
+    async def receive():
+        # Each piece made as it arrives, as a socket's are, with the loop
+        # run between them.
+        await asyncio.sleep(0)
+        piece = bytes((120, 120))
+        sent[0] += 2
+        return {"type": "http.request", "body": piece,
+                "more_body": sent[0] < n}
+    request = Request({"type": "http", "method": "POST", "path": "/v1/videos",
+                       "query_string": b"", "headers": [
+                           (b"content-type", b"application/json"),
+                           (b"content-length", str(n).encode())]}, receive)
+    tracemalloc.start()
+    try:
+        buf = asyncio.run(bi._read_bytes(request, n, 1 << 30))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert len(buf) == n
+    assert peak <= bi._min_price(n) + bi._SLACK, peak

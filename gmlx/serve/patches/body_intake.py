@@ -400,12 +400,15 @@ def _min_price(n: int) -> int:
 
 async def _read_bytes(request: Request, n: int | None,
                       free: int | None) -> bytearray:
-    """The body of ``request`` in one bytearray. It is held as its chunks
-    until its end, so a client holds only the bytes it sent, then moved
-    into one, a chunk at a time. A body past its Content-Length ``n`` is
+    """The body of ``request`` in one bytearray. It is held as pieces of
+    _PIECE bytes or more, joined from its chunks as they arrive, until
+    its end, so a client holds only the bytes it sent, however small its
+    chunks, then moved into one, a piece at a time: at most the body
+    twice, its read's price. A body past its Content-Length ``n`` is
     refused, and one with no length once :func:`_min_price` of what
     arrived passes ``free``. Each chunk waits STALL_S seconds at most."""
-    chunks, size = [], 0
+    pieces, size = [], 0
+    pending = bytearray()
     it = request.stream().__aiter__()
     while True:
         try:
@@ -420,14 +423,23 @@ async def _read_bytes(request: Request, n: int | None,
                               "Content-Length")
         if n is None and free is not None and _min_price(size) > free:
             raise _over_free(size, free, False, _min_price(size))
-        chunks.append(chunk)
+        if len(chunk) >= _PIECE and not pending:
+            pieces.append(chunk)
+            continue
+        pending += chunk
+        if len(pending) >= _PIECE:
+            pieces.append(bytes(pending))
+            pending = bytearray()
+    if pending:
+        pieces.append(bytes(pending))
+    del pending
     buf = bytearray(size)
-    chunks.reverse()
+    pieces.reverse()
     got = 0
-    while chunks:
-        chunk = chunks.pop()
-        buf[got:got + len(chunk)] = chunk
-        got += len(chunk)
+    while pieces:
+        piece = pieces.pop()
+        buf[got:got + len(piece)] = piece
+        got += len(piece)
     return buf
 
 
