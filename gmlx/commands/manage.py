@@ -1254,8 +1254,8 @@ def _planned_download_bytes(ref: remote.Ref, dest_dir: str,
 
 def _rm_hint(name: str | None, paths: list, config_path: str | None) -> str:
     """How to delete the old copy of a model before its update: ``gmlx rm``
-    with ``name``, else with the config id of one of ``paths``, else the
-    files to delete."""
+    with ``name``, else with the config id or the discovered id of one of
+    ``paths``, else the files to delete."""
     if name is None and config_path:
         import gmlx.config as cfgmod
 
@@ -1264,11 +1264,21 @@ def _rm_hint(name: str | None, paths: list, config_path: str | None) -> str:
             cfg = cfgmod.load_config(config_path)
         except cfgmod.ConfigError:
             cfg = None
-        for mid, mc in (cfg.models.items() if cfg else ()):
-            rp = _try_resolve(mc.path, cfg.model_dirs, cwd=False)
-            if rp and os.path.abspath(rp) in want:
-                name = mid
-                break
+        if cfg is not None:
+            import gmlx.load.discovery as discovery
+
+            entries = list(cfg.models.items())
+            for mid, mc in entries:
+                rp = _try_resolve(mc.path, cfg.model_dirs, cwd=False)
+                if rp and os.path.abspath(rp) in want:
+                    name = mid
+                    break
+            else:
+                for d in discovery.discovered_models(cfg):
+                    rp = _try_resolve(d.path, cfg.model_dirs, cwd=False)
+                    if rp and os.path.abspath(rp) in want:
+                        name = d.id
+                        break
     if name is not None:
         return f"to delete the old model first, run `gmlx rm {name}`, then pull again"
     return (f"to delete the old copy first, delete {' '.join(paths)}, then "
