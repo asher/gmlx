@@ -326,13 +326,13 @@ def test_a_forward_with_a_slot_on_calls_the_members(kq_calls, monkeypatch):
     _reset(kq_calls)
     y = _run(reg, [1], lambda: shell.mlp(x))
     assert kq_calls["fold"] == []
-    if not isinstance(vars(shell.mlp).get("_kq_router_cat"), mx.array):
-        pytest.skip("this build does not fuse the router")
-    assert kq_calls["router"] == 1
+    routed = kq_calls["router"]
     ref = _run(reg, [1], lambda: _stock(shell, x, monkeypatch))
     pre = _run(_rows(1, u1=(0.0,)), [1], lambda: _stock(shell, x, monkeypatch))
     assert _rel(pre, ref) > 0.2
     assert _rel(y, ref) < 0.03
+    if isinstance(vars(shell.mlp).get("_kq_router_cat"), mx.array):
+        assert routed == 1
 
 
 def test_each_row_of_a_mixed_forward_matches_its_own_reference(monkeypatch):
@@ -376,6 +376,47 @@ def test_a_stamped_leaf_without_slots_on_record_calls_the_members(kq_calls):
     _reset(kq_calls)
     _run(reg, [1], lambda: shell.mlp(x))
     assert kq_calls["fold"] == []
+
+
+def test_a_table_only_offload_wrap_keeps_the_adapted_block(kq_calls, monkeypatch):
+    """A table-only plan whose wire holds keeps the experts resident and
+    wraps the adapted SwitchGLU in the offload class: the block still calls
+    its members with the slot on and folds with it off."""
+    import gmlx.stream.expert_streaming as es
+    import gmlx.stream.table_stream as ts
+
+    shell = _qwen3next_shell()
+
+    class _Trunk(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = [shell]
+
+    x = _x()
+    reg = _rows(1, u1=(1.0,), u0=(0.0,))
+    pre = _run(reg, [0], lambda: shell.mlp(x))
+    _install(shell, EXPERT_PATHS)
+    on = _run(reg, [1], lambda: shell.mlp(x))
+    monkeypatch.setattr(es, "stream_budget_bytes", lambda: 1 << 40)
+    monkeypatch.setattr(ts, "file_table_bytes", lambda m: 0)
+    monkeypatch.setattr(ts, "table_bytes", lambda m: 0)
+    monkeypatch.setattr(ts, "tables_for_memory", lambda p: False)
+    monkeypatch.setattr(ts, "streamed_table_array_ids", lambda m: ())
+    monkeypatch.setattr(ts, "install_table_streaming", lambda m: (0, ["t"]))
+    monkeypatch.setattr(ts, "stream_plan", lambda *a, **k: SimpleNamespace(
+        tables=True, experts=False, table_kept=False))
+    monkeypatch.setattr(es, "_wire_resident_experts", lambda *a, **k: True)
+    monkeypatch.setattr(es, "credit_streamed", lambda *a, **k: 0.0)
+    monkeypatch.setattr(es, "end_build_credit", lambda *a, **k: None)
+    es.install_expert_streaming(_Trunk())
+    names = [c.__name__ for c in type(shell.mlp.switch_mlp).__mro__]
+    assert names[0].endswith("_CPUOffload") and "_LoRASwitchGLU" in names
+    _reset(kq_calls)
+    assert mx.array_equal(_run(reg, [1], lambda: shell.mlp(x)), on)
+    assert kq_calls["fold"] == []
+    off = _run(reg, [0], lambda: shell.mlp(x))
+    assert len(kq_calls["fold"]) == 1
+    assert mx.array_equal(off, pre)
 
 
 QE, QK = 64, 6
@@ -425,8 +466,7 @@ def test_qwen4exp_expert_adapter_matches_the_stock_forward(
     _reset(kq_calls)
     off = _run(on, [0], lambda: shell.mlp(x))
     assert len(kq_calls["fold"]) == (1 if quant_shared else 0)
-    if quant_shared:
-        assert mx.array_equal(off, pre)
+    assert mx.array_equal(off, pre)
     y = _run(on, [1], lambda: shell.mlp(x))
     ref = _run(on, [1], lambda: _stock(shell, x, monkeypatch))
     assert _rel(pre, ref) > 0.2
@@ -481,8 +521,15 @@ def test_gemma_experts_call_the_adapted_glu_only_with_a_slot_on(kq_calls, monkey
     _reset(kq_calls)
     y = _run(reg, [1], lambda: shell.experts(x, inds, w))
     assert kq_calls["mix_ns"] == 0
-    with monkeypatch.context() as m:
-        m.setattr(modules, "_FUSED_MOE_BLOCK_ENABLED", False)
-        ref = _run(reg, [1], lambda: shell.experts(x, inds, w))
+    # The stock leaf with the plain-op delta, not the fused epilogue.
+    ref = _run(reg, [1], lambda: _stock_experts(shell, x, inds, w, monkeypatch))
     assert _rel(pre, ref) > 0.2
-    assert mx.array_equal(y, ref)
+    assert _rel(y, ref) < 0.03
+
+
+def _stock_experts(shell, x, inds, w, monkeypatch):
+    with monkeypatch.context() as m:
+        m.setattr(modules, "_FUSED_MOE_ENABLED", False)
+        y = shell.experts(x, inds, w)
+        mx.eval(y)
+    return y
