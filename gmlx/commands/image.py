@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import hashlib
 import json
 import math
@@ -110,6 +111,42 @@ def _quality(text: str) -> int:
         raise argparse.ArgumentTypeError(
             f"a quality from 1 to 100 is required, got {text!r}")
     return n
+
+
+def latent_target(path: str) -> str:
+    """The file :func:`save_npz` writes for ``path``: ``path``, or the file
+    a symlink there names, dangling or not. A path whose symlinks loop is
+    refused, not replaced with a file; any other error is the writable
+    probe's to report."""
+    try:
+        os.stat(path)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise OSError(f"cannot write {path}: its symlinks loop") from None
+    return os.path.realpath(path)
+
+
+def save_npz(path: str, **arrays) -> None:
+    """Write ``arrays`` as an .npz file at exactly ``path``, its folder
+    made, through ``path.part`` synced to disk before it is renamed, so a
+    write stopped part way leaves what was there. A symlink at ``path``
+    stays, and the file it names is written (:func:`latent_target`). The
+    caller expands a ~ in ``path`` once, before its writable check."""
+    import numpy as np
+
+    path = latent_target(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    part = path + ".part"
+    try:
+        with open(part, "wb") as f:
+            np.savez(f, **arrays)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(part, path)
+    except BaseException:
+        if os.path.exists(part):
+            os.remove(part)
+        raise
 
 
 def _adapter(text: str) -> tuple[str, float]:
@@ -860,8 +897,16 @@ def _generate(a) -> int:
     fmt = _format(a)
     alpha = _check_background(a, fam, fmt)
     paths = output_paths(a.output, seeds, fmt, time.strftime("%Y%m%d-%H%M%S"))
-    for path in paths + ([a.save_latent] if a.save_latent else []):
-        err = probe_writable(path)
+    if a.save_latent:
+        # Checked where it is written: a quoted ~ is the home folder.
+        a.save_latent = os.path.expanduser(a.save_latent)
+    # save_npz writes the file a --save-latent link names; the image
+    # writers write at the path, as the probe does.
+    probes = [(p, p) for p in paths]
+    if a.save_latent:
+        probes.append((a.save_latent, latent_target(a.save_latent)))
+    for path, probed in probes:
+        err = probe_writable(probed)
         if err is not None:
             raise OSError(f"cannot write {path}: {err}")
 
@@ -969,7 +1014,7 @@ def _generate(a) -> int:
         images.append({"path": path, "seed": s, "seconds": round(secs, 3)})
         log(f"[image] wrote {path} (seed {s}, {secs:.2f} s)")
     if a.save_latent:
-        np.savez(a.save_latent, latents=np.concatenate(latents, axis=0),
+        save_npz(a.save_latent, latents=np.concatenate(latents, axis=0),
                  seeds=np.array(seeds, np.int64))
     if a.json:
         print(json.dumps({

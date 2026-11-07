@@ -29,17 +29,18 @@ def serving(app):
         server.should_exit = True
         thread.join(30)
         sock.close()
+    assert not thread.is_alive(), "the server did not stop"
 
 
 def send(conn: http.client.HTTPConnection, path: str, head: bytes,
          rest: bytes = b"", *, length: int | None = None,
-         ctype: str = "application/json", pause: float = 0.0,
+         ctype: str = "application/json",
+         ready: threading.Event | None = None,
          headers: dict | None = None):
-    """POST ``head`` then ``rest`` on ``conn``, ``pause`` seconds apart,
-    under the Content-Length ``length`` (theirs by default), and return
-    the response, read whole."""
-    import time
-
+    """POST ``head`` then ``rest`` on ``conn``, under the Content-Length
+    ``length`` (theirs by default), and return the response, read whole.
+    With ``ready``, ``rest`` goes once the server sets it, so the server
+    has acted on ``head`` alone."""
     conn.putrequest("POST", path)
     conn.putheader("Content-Type", ctype)
     for k, v in (headers or {}).items():
@@ -48,7 +49,8 @@ def send(conn: http.client.HTTPConnection, path: str, head: bytes,
                    str(len(head) + len(rest) if length is None else length))
     conn.endheaders(head)
     if rest:
-        time.sleep(pause)
+        assert ready is None or ready.wait(30), \
+            "the server did not act on the head before the rest was sent"
         conn.send(rest)
     r = conn.getresponse()
     r.body = r.read()

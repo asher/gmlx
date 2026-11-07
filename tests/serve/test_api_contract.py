@@ -605,3 +605,212 @@ def test_context_limit_reads_under_a_later_wrap(monkeypatch):
         assert gen.get_configured_context_limit is later
     finally:
         serving.reset_active_spec(token)
+
+
+# -- a lone surrogate escape -------------------------------------------------
+
+class _QwenProcessor:
+    """Renders the Qwen3.5 fixture template as its tokenizer does."""
+
+    chat_template = (Path(__file__).resolve().parents[1] / "fixtures"
+                     / "qwen35_template.jinja").read_text()
+
+    def apply_chat_template(self, messages, tokenize=False,
+                            add_generation_prompt=True, **kw):
+        from transformers.utils.chat_template_utils import (
+            render_jinja_template)
+
+        out = render_jinja_template(
+            [messages], chat_template=self.chat_template,
+            add_generation_prompt=add_generation_prompt, **kw)
+        rendered = out[0] if isinstance(out, tuple) else out
+        return rendered[0] if isinstance(rendered, list) else rendered
+
+
+class _OpensThinking(_QwenProcessor):
+    """The fixture template, which opens its thinking block with the start
+    token the request names, as the route hands it to the template."""
+
+    chat_template = _QwenProcessor.chat_template + (
+        "{%- if thinking_start_token is defined %}{{ thinking_start_token }}"
+        "{%- endif %}")
+
+
+class _Tokenizing:
+    """The engine as far as its tokenizer, which encodes the prompt."""
+
+    def generate(self, prompt, images=None, audio=None, args=None,
+                 videos=None):
+        import types
+
+        prompt.encode("utf-8")
+
+        class Tok:
+            text, finish_reason, token_count = "ok", "stop", 1
+        return types.SimpleNamespace(prompt_tokens=1, uid=1), iter([Tok()])
+
+
+@pytest.mark.parametrize("body, field", [
+    ({"messages": [{"role": "user", "content": "a \ud800 cat"}]},
+     "messages[0].content"),
+    ({"messages": [{"role": "system", "content": "Be brief."},
+                   {"role": "user", "content": [
+                       {"type": "text", "text": "a \udc00 cat"}]}]},
+     "messages[1].content[0].text"),
+    ({"model": "m\ud800", "messages": [{"role": "user", "content": "a"}]},
+     "model"),
+    ({"messages": [{"role": "user", "content": "a"}],
+      "tool_choice": {"type": "function", "function": {"name": "f\udc80"}},
+      "tools": [{"type": "function", "function": {"name": "f",
+                                                  "parameters": {}}}]},
+     "tool_choice.function.name"),
+    ({"messages": [{"role": "user", "content": "a"}],
+      "response_format": {"type": "json_schema", "json_schema": {
+          "name": "s", "schema": {"type": "object",
+                                  "description": "a \udc80"}}}},
+     "response_format.json_schema.schema.description"),
+    ({"messages": [{"role": "user", "content": "a"}],
+      "thinking_start_token": "<think\udc80>"},
+     "thinking_start_token"),
+    ({"messages": [{"role": "user", "content": "a"}],
+      "instructions": "Be \udc80 brief."},
+     "instructions")])
+def test_a_chat_string_with_a_lone_surrogate_is_a_400(monkeypatch, body,
+                                                      field):
+    """JSON parses a lone surrogate escape to a str that encodes to no
+    UTF-8, which the tokenizer then fails on: the chat route refuses it
+    with the 400 the video route gives, naming the field, in any field of
+    the body."""
+    import json
+
+    from fastapi.testclient import TestClient
+
+    openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    runtime = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.server.runtime").runtime
+    monkeypatch.setattr(openai, "get_cached_model", lambda *a, **k: (
+        None, _OpensThinking(), {"model_type": "qwen3_5"}))
+    monkeypatch.setattr(runtime, "response_generator", _Tokenizing(),
+                        raising=False)
+    # The server's error handlers, on this test's copy of the app's, take
+    # effect in the next middleware stack the app builds.
+    monkeypatch.setattr(_APP.app, "exception_handlers",
+                        dict(_APP.app.exception_handlers))
+    monkeypatch.setattr(_APP.app, "middleware_stack", None)
+    sp.install_resolver_error_handlers()
+    sp.install_api_contract()
+    client = TestClient(_APP.app, raise_server_exceptions=False)
+    r = client.post("/v1/chat/completions",
+                    content=json.dumps({"model": "m", "max_tokens": 1,
+                                        **body}).encode(),
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert (err["message"], err["param"]) == (
+        f"{field} holds a lone surrogate escape", field)
+
+
+@pytest.mark.parametrize("path, body, field", [
+    ("/v1/responses", {"input": "a \ud800 cat"}, "input"),
+    ("/v1/responses", {"input": [{"role": "user", "content": [
+        {"type": "input_text", "text": "a \udc00 cat"}]}]},
+     "input[0].content[0].text"),
+    ("/v1/responses", {"input": "a", "instructions": "Be \udc80 brief."},
+     "instructions"),
+    ("/v1/messages", {"messages": [{"role": "user",
+                                    "content": "a \ud800 cat"}]},
+     "messages[0].content"),
+    ("/v1/messages", {"system": "Be \udc80 brief.",
+                      "messages": [{"role": "user", "content": "a"}]},
+     "system")])
+def test_a_responses_or_messages_string_with_a_lone_surrogate_is_a_400(
+        monkeypatch, path, body, field):
+    """The Responses and Messages routes parse their own body, and a lone
+    surrogate escape in it reached the tokenizer's UTF-8 encode as a 500:
+    each refuses it with the chat route's 400, in its own error shape."""
+    import json
+
+    from fastapi.testclient import TestClient
+
+    openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    anthropic = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.server.anthropic")
+    runtime = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.server.runtime").runtime
+    cached = lambda *a, **k: (  # noqa: E731
+        None, _QwenProcessor(), {"model_type": "qwen3_5"})
+    monkeypatch.setattr(openai, "get_cached_model", cached)
+    monkeypatch.setattr(anthropic, "get_cached_model", cached)
+    monkeypatch.setattr(runtime, "response_generator", _Tokenizing(),
+                        raising=False)
+    monkeypatch.setattr(_APP.app, "exception_handlers",
+                        dict(_APP.app.exception_handlers))
+    monkeypatch.setattr(_APP.app, "middleware_stack", None)
+    sp.install_resolver_error_handlers()
+    sp.install_api_contract()
+    client = TestClient(_APP.app, raise_server_exceptions=False)
+    r = client.post(path, content=json.dumps(
+        {"model": "m", "max_tokens": 1, "max_output_tokens": 16,
+         **body}).encode(), headers={"content-type": "application/json"})
+    assert r.status_code == 400, r.text
+    message = f"{field} holds a lone surrogate escape"
+    if path == "/v1/messages":
+        assert r.json() == {"type": "error", "error": {
+            "type": "invalid_request_error", "message": message}}
+    else:
+        err = r.json()["error"]
+        assert (err["type"], err["message"], err["param"]) == (
+            "invalid_request_error", message, field)
+
+
+class _CountsTokens(_Tokenizing):
+    """The engine's preprocess, which tokenizes the prompt to count it."""
+
+    def _cpu_preprocess(self, prompt, images=None, audio=None):
+        prompt.encode("utf-8")
+        return {"input_ids": [1, 2, 3]}
+
+
+@pytest.mark.parametrize("path, body, field", [
+    ("/v1/responses/input_tokens", {"input": "a \ud800 cat"}, "input"),
+    ("/v1/messages/count_tokens", {"messages": [
+        {"role": "user", "content": "a \ud800 cat"}]},
+     "messages[0].content")])
+def test_a_token_count_of_a_string_with_a_lone_surrogate_is_a_400(
+        monkeypatch, path, body, field):
+    """The token counting routes of Responses and Messages tokenize the
+    prompt as their generation routes do: a lone surrogate escape gets
+    the same 400, in the route's own error shape."""
+    import json
+
+    from fastapi.testclient import TestClient
+
+    openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    anthropic = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.server.anthropic")
+    runtime = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.server.runtime").runtime
+    cached = lambda *a, **k: (  # noqa: E731
+        None, _QwenProcessor(), {"model_type": "qwen3_5"})
+    monkeypatch.setattr(openai, "get_cached_model", cached)
+    monkeypatch.setattr(anthropic, "get_cached_model", cached)
+    monkeypatch.setattr(runtime, "response_generator", _CountsTokens(),
+                        raising=False)
+    monkeypatch.setattr(_APP.app, "exception_handlers",
+                        dict(_APP.app.exception_handlers))
+    monkeypatch.setattr(_APP.app, "middleware_stack", None)
+    sp.install_resolver_error_handlers()
+    sp.install_api_contract()
+    client = TestClient(_APP.app, raise_server_exceptions=False)
+    r = client.post(path, content=json.dumps(
+        {"model": "m", "max_tokens": 1, **body}).encode(),
+        headers={"content-type": "application/json"})
+    assert r.status_code == 400, r.text
+    message = f"{field} holds a lone surrogate escape"
+    if path.startswith("/v1/messages"):
+        assert r.json() == {"type": "error", "error": {
+            "type": "invalid_request_error", "message": message}}
+    else:
+        err = r.json()["error"]
+        assert (err["type"], err["message"], err["param"]) == (
+            "invalid_request_error", message, field)

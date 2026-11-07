@@ -2323,28 +2323,87 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
 
 
 # rm - delete a model's files and its config entry
-def _try_resolve(p, model_dirs) -> str | None:
-    """resolve_path that returns None instead of raising on a miss."""
+def _try_resolve(p, model_dirs, *, cwd: bool = True) -> str | None:
+    """resolve_path that returns None instead of raising on a miss. A
+    file rm deletes resolves with ``cwd`` False: a relative path whose
+    file is gone from model_dirs is missing, never a file of its name in
+    the folder rm runs from."""
     if not p:
         return None
     from gmlx.config import resolve_path
     try:
-        return resolve_path(p, model_dirs)
+        return resolve_path(p, model_dirs, cwd=cwd)
     except Exception:                        # noqa: BLE001 - missing is fine here
         return None
 
 
+def _file_key(path: str) -> tuple:
+    """What makes two paths one file for rm: its device and inode, which
+    a symlink or a case the volume folds still reach, or for a path that
+    does not stat, its real path."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return ("path", os.path.realpath(path))
+    return ("inode", st.st_dev, st.st_ino)
+
+
 def _shard_files(path: str) -> list[str]:
     """Every existing shard of ``path``'s split set (tolerant of gaps, unlike
-    preflight), plus any ``.part`` resume leftovers."""
+    preflight), plus what a pull stopped part way left beside each: the
+    ``.part`` resume file, its ``.part.sha256`` mark, and the ``.old`` copy
+    an update was replacing."""
     d, base = os.path.split(path)
     out = []
     for name in _shard_names(base):
         p = os.path.join(d, name)
-        for cand in (p, p + ".part"):
+        for cand in (p, p + ".part", p + ".part.sha256", p + ".old"):
             if os.path.exists(cand):
                 out.append(cand)
     return out
+
+
+def _would_be(p, model_dirs) -> list[str]:
+    """Where model path ``p`` would be once it does not resolve: itself
+    when absolute, else under each model_dirs root, never in the folder
+    rm runs from. An ``hf:`` ref has no such place."""
+    if not p or str(p).startswith("hf:"):
+        return []
+    expanded = os.path.expanduser(os.path.expandvars(str(p)))
+    if os.path.isabs(expanded):
+        return [expanded]
+    return [os.path.abspath(os.path.join(
+        os.path.expanduser(os.path.expandvars(d)), expanded))
+        for d in model_dirs]
+
+
+def _rm_keys(p, model_dirs) -> set:
+    """The files (:func:`_file_key`) model path ``p`` holds for rm: its
+    file, or where it would be when it does not resolve, so a missing
+    path another model names keeps what a pull left of it."""
+    rp = _try_resolve(p, model_dirs)
+    if rp:
+        return {_file_key(rp)}
+    return {_file_key(c) for c in _would_be(p, model_dirs)}
+
+
+def _rm_files(p, model_dirs, refs) -> tuple[str, list[str]]:
+    """``(state, files)`` of model path ``p`` for rm: "kept" when another
+    model holds it (``refs``), "found" with its files, else "missing" with
+    what a pull stopped part way left where it would be, maybe none."""
+    rp = _try_resolve(p, model_dirs, cwd=False)
+    if rp is not None and os.path.exists(rp):
+        if _file_key(rp) in refs:
+            return "kept", []
+        return "found", _shard_files(rp)
+    kept, out = False, []
+    for cand in [rp] if rp is not None else _would_be(p, model_dirs):
+        files = _shard_files(cand)
+        if _file_key(cand) in refs:
+            kept = kept or bool(files)
+        else:
+            out += files
+    return ("kept" if kept and not out else "missing"), out
 
 
 def _rm_resolve_target(cfg, requested):
@@ -2365,27 +2424,30 @@ def _rm_resolve_target(cfg, requested):
     return target, m, entry is not None, disc, notes
 
 
+def _chat_files(mc) -> tuple:
+    """The files a chat model entry names: its GGUF, mmproj, draft,
+    adapter, and the speech companion ``asr`` names as a path."""
+    asr = mc.asr if isinstance(mc.asr, str) else None
+    return (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter, asr)
+
+
 def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
                       images=()):
     """Files to delete (all shards + companions no other model references)
     and their sizes; explanatory notes append to ``notes``. ``images`` are
     the discovered image models."""
-    # Paths any other model (configured or discovered) still resolves to,
-    # through any symlink, so a file one model reaches by a link stays.
+    # Files any other model (configured or discovered) still resolves to,
+    # by inode (_file_key), so a file one model reaches by a link stays.
     others = [mc for mid, mc in cfg.models.items() if mid != target]
     others += [mc for mc in disc if mc.id != target]
     ref_paths = set()
     for mc in others:
-        for p in (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter):
-            rp = _try_resolve(p, cfg.model_dirs)
-            if rp:
-                ref_paths.add(os.path.realpath(rp))
+        for p in _chat_files(mc):
+            ref_paths |= _rm_keys(p, cfg.model_dirs)
     # An image model that names this model's GGUF as its encoder keeps it.
     for im in _all_images(cfg, images):
         for p in (im.encoder, im.encoder_mmproj):
-            rp = _try_resolve(p, cfg.model_dirs)
-            if rp:
-                ref_paths.add(os.path.realpath(rp))
+            ref_paths |= _rm_keys(p, cfg.model_dirs)
     ref_paths |= _video_refs(cfg)
 
     to_delete: list[str] = []
@@ -2394,25 +2456,26 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
             notes.append("path is an hf: cache ref - the cached file stays "
                          "(the HF cache manages its own blobs)")
         else:
-            main = _try_resolve(m.path, cfg.model_dirs)
-            if main is None:
+            # A file missing after a pull was killed part way still has
+            # what the pull left where it would be.
+            state, files = _rm_files(m.path, cfg.model_dirs, ref_paths)
+            if state == "kept":
+                notes.append("model file kept: another model references it")
+            elif state == "missing" and not files:
                 notes.append(f"model file not found ({m.path}) - removing "
                              "the config entry only")
-            elif os.path.realpath(main) in ref_paths:
-                notes.append("model file kept: another model references it")
-            else:
-                to_delete += _shard_files(main)
+            elif state == "missing":
+                notes.append(f"model file not found ({m.path}) - removing "
+                             "what an interrupted pull left of it")
+            to_delete += files
         for label, comp in (("mmproj", m.mmproj), ("draft", m.draft_gguf),
                             ("adapter", m.adapter)):
             if not comp or str(comp).startswith("hf:"):
                 continue
-            rp = _try_resolve(comp, cfg.model_dirs)
-            if rp is None:
-                continue
-            if os.path.realpath(rp) in ref_paths:
+            state, files = _rm_files(comp, cfg.model_dirs, ref_paths)
+            if state == "kept":
                 notes.append(f"{label} kept: another model references it")
-            else:
-                to_delete += _shard_files(rp)
+            to_delete += files
     to_delete = list(dict.fromkeys(to_delete))
     sizes = {p: os.path.getsize(p) for p in to_delete if os.path.exists(p)}
     return to_delete, sizes
@@ -2547,8 +2610,10 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
                     "plus mmproj/draft/adapter companions no other model "
                     "references. An image model takes its VAE, text encoder "
                     "and vision tower with it unless another model uses "
-                    "them, and a chat model that is an image model's encoder "
-                    "is never removed. Never touches the Hugging Face cache.")
+                    "them, a video model its encoder, VAEs and preview "
+                    "decoder, and a chat model that is an image model's "
+                    "encoder or an image or video model's upsampler is "
+                    "never removed. Never touches the Hugging Face cache.")
     ap.add_argument("id", metavar="ID",
                     help="Model id (or alias) from the config, or a discovered "
                          "model's id (see `gmlx list`).")
@@ -2596,9 +2661,8 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
             return _rm_image(a, cfg, cfg_path, im, disc, images,
                              configured=a.id in cfg.image_models)
         if a.id in cfg.video_models:
-            print(f"error: {a.id!r} is a video model; remove its entry "
-                  f"from video_models in {cfg_path}", file=sys.stderr)
-            return 2
+            return _rm_video(a, cfg, cfg_path, cfg.video_models[a.id], disc,
+                             images)
         print(f"error: unknown model id {a.id!r} (see: gmlx list)",
               file=sys.stderr)
         return 2
@@ -2618,6 +2682,17 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
               f"{plural_s(len(users))} {', '.join(users)}; remove "
               f"{'it' if len(users) == 1 else 'them'} first, or {other}",
               file=sys.stderr)
+        return 2
+    # An entry whose upsampler is gone fails the config's next load.
+    rewrites = [f"image model {i}" for i, im in cfg.image_models.items()
+                if im.upsampler == target]
+    rewrites += [f"video model {v}" for v, vm in cfg.video_models.items()
+                 if vm.upsampler == target]
+    if rewrites:
+        print(f"error: {target} is the prompt upsampler of "
+              f"{', '.join(rewrites)}; remove "
+              f"{'it' if len(rewrites) == 1 else 'them'} first, or point "
+              "`upsampler:` at another model", file=sys.stderr)
         return 2
 
     to_delete, sizes = _rm_deletion_plan(
@@ -2683,37 +2758,35 @@ def _all_images(cfg, images=()) -> list:
         i for i in images if i.id not in cfg.image_models]
 
 
-def _image_refs(cfg, disc, skip: str, images=()) -> set:
-    """Real paths every model but the image entry ``skip`` loads, through
-    any symlink: chat models (configured and discovered) and the other
-    image entries, configured and discovered (``images``)."""
+def _image_refs(cfg, disc, skip: str | None, images=(),
+                skip_video: str | None = None) -> set:
+    """The files (:func:`_file_key`) every model but the image entry
+    ``skip`` and the video entry ``skip_video`` loads: chat models
+    (configured and discovered), the image entries, configured and
+    discovered (``images``), and the video entries."""
     refs: set = set()
     for mc in list(cfg.models.values()) + list(disc):
-        for p in (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter):
-            rp = _try_resolve(p, cfg.model_dirs)
-            if rp:
-                refs.add(os.path.realpath(rp))
+        for p in _chat_files(mc):
+            refs |= _rm_keys(p, cfg.model_dirs)
     for im in _all_images(cfg, images):
         if im.id == skip:
             continue
         for p in (im.path, im.vae, im.encoder, im.encoder_mmproj,
                   *(a for a, _st in im.adapters)):
-            rp = _try_resolve(p, cfg.model_dirs)
-            if rp:
-                refs.add(os.path.realpath(rp))
-    return refs | _video_refs(cfg)
+            refs |= _rm_keys(p, cfg.model_dirs)
+    return refs | _video_refs(cfg, skip_video)
 
 
-def _video_refs(cfg) -> set:
-    """Real paths the ``video_models:`` entries load, through any
-    symlink."""
+def _video_refs(cfg, skip: str | None = None) -> set:
+    """The files (:func:`_file_key`) the ``video_models:`` entries but
+    ``skip`` load."""
     refs: set = set()
     for v in cfg.video_models.values():
+        if v.id == skip:
+            continue
         for p in (v.path, v.encoder, v.encoder_mmproj, v.vae, v.audio_vae,
                   v.tiny_vae, *(a for a, _st in v.adapters)):
-            rp = _try_resolve(p, cfg.model_dirs)
-            if rp:
-                refs.add(os.path.realpath(rp))
+            refs |= _rm_keys(p, cfg.model_dirs)
     return refs
 
 
@@ -2736,13 +2809,12 @@ def _rm_image(a, cfg, cfg_path, im, disc, images=(), *,
         if chat:
             notes.append(f"encoder {im.encoder} is a chat model; it stays")
         for label, p in parts:
-            rp = _try_resolve(p, cfg.model_dirs)
-            if rp is None:
-                continue
-            if os.path.realpath(rp) in refs:
+            # A file missing after a pull was killed part way still has
+            # what the pull left where it would be.
+            state, files = _rm_files(p, cfg.model_dirs, refs)
+            if state == "kept":
                 notes.append(f"{label} kept: another model uses it")
-            else:
-                to_delete += _shard_files(rp)
+            to_delete += files
     to_delete = list(dict.fromkeys(to_delete))
     sizes = {p: os.path.getsize(p) for p in to_delete if os.path.exists(p)}
     default_cleared = cfg.defaults.image_model == im.id
@@ -2793,6 +2865,68 @@ def _rm_image(a, cfg, cfg_path, im, disc, images=(), *,
         if configured:
             what.append("config entry")
         print(f"removed {', '.join(what)}")
+    return rc
+
+
+def _rm_video(a, cfg, cfg_path, vm, disc, images=()) -> int:
+    """``gmlx rm`` of a video model: its DiT, and its text encoder, vision
+    tower, VAEs and preview decoder unless another model loads them. Its
+    LoRAs stay, as an image model's do."""
+    import gmlx.config as cfgmod
+
+    notes: list[str] = []
+    to_delete: list[str] = []
+    if not a.keep_files:
+        refs = _image_refs(cfg, disc, None, images, skip_video=vm.id)
+        for label, p in (("model file", vm.path), ("encoder", vm.encoder),
+                         ("encoder_mmproj", vm.encoder_mmproj),
+                         ("vae", vm.vae), ("audio_vae", vm.audio_vae),
+                         ("tiny_vae", vm.tiny_vae)):
+            # A file missing after a pull was killed part way still has
+            # what the pull left where it would be.
+            state, files = _rm_files(p, cfg.model_dirs, refs)
+            if state == "kept":
+                notes.append(f"{label} kept: another model uses it")
+            to_delete += files
+    to_delete = list(dict.fromkeys(to_delete))
+    sizes = {p: os.path.getsize(p) for p in to_delete if os.path.exists(p)}
+    try:
+        cfgmod.config_write_target(cfg_path)
+    except cfgmod.ConfigWriteError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if not a.json:
+        _rm_print_plan(vm.id, cfg_path, to_delete=to_delete, sizes=sizes,
+                       keep_files=a.keep_files, is_configured=True,
+                       aliases_to_drop=[], default_cleared=False, notes=notes)
+    if not a.yes:
+        bail = _rm_confirm()
+        if bail is not None:
+            return bail
+    deleted, rc = _rm_delete_files(to_delete)
+
+    def mutate(doc):
+        block = doc.get("video_models")
+        if isinstance(block, dict) and vm.id in block:
+            del block[vm.id]
+    try:
+        cfgmod.edit_config_yaml(cfg_path, mutate)
+    except cfgmod.ConfigWriteError as e:
+        print(f"error: {e.reason} The config still names {vm.id}. "
+              f"Remove {vm.id} from the config by hand.", file=sys.stderr)
+        return 1
+    from gmlx.serve.server import _reload_running
+    _reload_running(cfg_path, skip=a.no_reload)
+    freed = sum(sizes[p] for p in deleted if p in sizes)
+    if a.json:
+        print(json.dumps({
+            "id": vm.id, "kind": "video", "config": cfg_path,
+            "files_deleted": deleted, "bytes_freed": freed,
+            "config_entry_removed": True, "notes": notes}, indent=2))
+    else:
+        what = ([f"{len(deleted)} file{plural_s(len(deleted))}, "
+                 f"{_human_gb(freed)}"] if deleted else [])
+        print(f"removed {', '.join(what + ['config entry'])}")
     return rc
 
 

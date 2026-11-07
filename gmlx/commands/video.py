@@ -22,7 +22,7 @@ import shutil
 import sys
 import time
 
-from .image import _adapter
+from .image import _adapter, latent_target, save_npz
 
 _ACTIONS = ("generate", "bench", "pull")
 _ACTION_DESC = {
@@ -529,21 +529,23 @@ def _writable(a, out: str | None) -> None:
     """Refuse an output the run could not write, before any model loads."""
     from gmlx.tune.lora import probe_writable
 
-    paths = [p for p in (out, a.save_latent) if p]
+    # save_npz writes the file a --save-latent link names; the MP4 and
+    # the frames are written at the path, as the probe does.
+    probes = [(out, os.path.expanduser(out))] if out else []
+    if a.save_latent:
+        probes.append((a.save_latent,
+                       latent_target(os.path.expanduser(a.save_latent))))
     if a.frames_dir is not None:
         d = os.path.expanduser(a.frames_dir)
         if os.path.exists(d) and not os.path.isdir(d):
             raise OSError(f"cannot write frames to {a.frames_dir}: it is a "
                           "file")
-        paths.append(os.path.join(d, "audio.wav"))
-    for p in paths:
-        err = probe_writable(os.path.expanduser(p))
+        wav = os.path.join(d, "audio.wav")
+        probes.append((wav, wav))
+    for p, probed in probes:
+        err = probe_writable(probed)
         if err is not None:
             raise OSError(f"cannot write {p}: {err}")
-
-
-def _makedirs_for(path: str) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
 
 def _release() -> None:
@@ -674,7 +676,15 @@ def _generate(a) -> int:
             f"merged in, and each adapter runs on top of it")
     s = _settings(a, fam, vid.variant)
     out = _output(a, s["seed"]) if ffmpeg is not None else None
+    if a.save_latent:
+        a.save_latent = os.path.expanduser(a.save_latent)
     _writable(a, out)
+    # Said before any model loads; the frames are then written unlocked.
+    unlocked = None
+    if a.frames_dir is not None:
+        unlocked = io.lock_refusal(os.path.expanduser(a.frames_dir))
+        if unlocked:
+            log(f"[video] {unlocked}")
     keyframes, todo = _read_anchors(a, fam, s)
     tokenizer = video_encoder.header_tokenizer(fam, a.encoder)
     texts: dict = {}
@@ -762,15 +772,14 @@ def _generate(a) -> int:
     _release()
     times["denoise_s"] = round(time.perf_counter() - t0, 2)
     if a.save_latent:
-        _makedirs_for(os.path.expanduser(a.save_latent))
-        np.savez(os.path.expanduser(a.save_latent), video=np.array(xv),
-                 audio=np.array(xa), seed=s["seed"], steps=s["steps"])
+        save_npz(a.save_latent, video=np.array(xv), audio=np.array(xa),
+                 seed=s["seed"], steps=s["steps"])
 
     hf = _family()
     times.update(run.decode_and_mux(
         xv, xa, frames=s["frames"], width=s["width"], height=s["height"],
         fps=hf.FPS, rate=SAMPLE_RATE, out=out, ffmpeg=ffmpeg,
-        frames_dir=a.frames_dir, log=log,
+        frames_dir=a.frames_dir, lock_frames=not unlocked, log=log,
         audio_vae=lambda: load_vae(os.path.expanduser(a.audio_vae),
                                    family="h3_audio", dtype=mx.float32),
         video_vae=lambda: load_vae(os.path.expanduser(preview or a.vae),

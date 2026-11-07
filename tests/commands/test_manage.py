@@ -1516,6 +1516,21 @@ def test_rm_sharded_removes_all_and_parts(tmp_path):
     assert (lib / "keep.gguf").exists()
 
 
+def test_rm_removes_what_an_interrupted_pull_left(tmp_path, capsys):
+    """rm deletes, and lists in its plan, what a pull stopped part way
+    leaves beside a model file: the partial download, its sha256 mark
+    and the copy an update was replacing."""
+    cfg, lib = _rm_setup(tmp_path)
+    left = ["gone.gguf.part", "gone.gguf.part.sha256", "gone.gguf.old"]
+    for name in left:
+        (lib / name).write_bytes(b"x")
+    assert manage.cmd_rm(["gone", "--config", str(cfg), "--yes"]) == 0
+    plan = capsys.readouterr().out
+    assert all(str(lib / name) in plan for name in left), plan
+    assert not list(lib.glob("gone*"))
+    assert (lib / "keep.gguf").exists()
+
+
 def test_rm_shared_mmproj_kept_exclusive_removed(tmp_path, capsys):
     body = """
 server:
@@ -1620,6 +1635,51 @@ def test_rm_missing_file_entry_only(tmp_path, capsys):
     assert rc == 0
     assert "model file not found" in out
     assert "gone" not in yaml.safe_load(cfg.read_text())["models"]
+
+
+@pytest.mark.parametrize("left", [
+    ("gone.gguf.old", "gone.gguf.part", "gone.gguf.part.sha256"),
+    ("gone.gguf.part", "gone.gguf.part.sha256")], ids=["update", "first"])
+@pytest.mark.parametrize("form", ["relative", "absolute"])
+def test_rm_of_a_model_a_killed_pull_left_without_its_file(
+        tmp_path, monkeypatch, capsys, left, form):
+    """An entry whose file a killed pull left missing, named relative to
+    a model_dirs root as pull registers it or by its absolute path, has
+    what the pull left where the file would be removed and listed: the
+    old copy of an update, the partial download and its sha256 mark. The
+    folder rm runs from is never searched."""
+    body = _RM_CFG
+    if form == "absolute":
+        body = body.replace("path: gone.gguf", "path: <LIB>/gone.gguf")
+    cfg, lib = _rm_setup(tmp_path, body, files=("keep.gguf",))
+    for name in left:
+        (lib / name).write_bytes(b"x")
+    here = tmp_path / "here"
+    here.mkdir()
+    (here / "gone.gguf.part").write_bytes(b"x")
+    monkeypatch.chdir(here)
+    assert manage.cmd_rm(["gone", "--config", str(cfg), "--yes"]) == 0
+    plan = capsys.readouterr().out
+    assert all(str(lib / name) in plan for name in left), plan
+    assert "removing what an interrupted pull left" in plan
+    assert not list(lib.glob("gone*"))
+    assert (here / "gone.gguf.part").exists()
+
+
+def test_rm_keeps_what_a_pull_left_of_a_missing_file_another_model_names(
+        tmp_path, capsys):
+    """A missing file another entry names too keeps what a pull left of
+    it."""
+    body = _RM_CFG.replace("aliases:", "  also:\n    path: gone.gguf\n"
+                           "aliases:")
+    cfg, lib = _rm_setup(tmp_path, body, files=("keep.gguf",))
+    left = ("gone.gguf.old", "gone.gguf.part", "gone.gguf.part.sha256")
+    for name in left:
+        (lib / name).write_bytes(b"x")
+    assert manage.cmd_rm(["gone", "--config", str(cfg), "--yes"]) == 0
+    assert "model file kept: another model references it" in (
+        capsys.readouterr().out)
+    assert all((lib / name).exists() for name in left)
 
 
 def test_validate_junk_local_file_is_clean_verdict(tmp_path, capsys):

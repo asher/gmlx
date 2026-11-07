@@ -368,6 +368,51 @@ def test_gmlx_image_refuses_an_h3_file_by_name(arch):
                              "gmlx video")
 
 
+@pytest.mark.parametrize("add", [
+    {"blocks.0.attn.qkv_proj.weight_scale": ((21504,), "F32")},
+    {"time_embedder.proj_in.weight": ((256, 5376), "F32")}])
+def test_gmlx_image_names_why_gmlx_video_refuses_an_h3_file(add):
+    """gmlx image does not send a user to gmlx video with a file gmlx
+    video refuses: it gives gmlx video's reason."""
+    view = fixture_view(H3_HEADER, add=add)
+    with pytest.raises(ifp.ImageModelError) as ei:
+        ifp.identify(view)
+    assert str(ei.value) == f"this is {_refused(view)}"
+
+
+def test_gmlx_image_names_the_ref2va_refusal(monkeypatch):
+    """A Ref2VA file, refused by its weights' identity, gets gmlx video's
+    refusal from gmlx image, said once."""
+    ref = next(r["variant_hash"] for n, r in
+               load_json(H3_IDENTITY)["files"].items() if "_ref2va_" in n)
+    monkeypatch.setattr(vfp, "weight_identity", lambda view, names: ref)
+    with pytest.raises(ifp.ImageModelError) as ei:
+        ifp.identify(fixture_view(H3_HEADER))
+    assert str(ei.value) == f"this is {hf.REFUSED[ref]}" == _refused(
+        fixture_view(H3_HEADER))
+
+
+def test_gmlx_image_names_an_h3_file_it_cannot_read(tmp_path):
+    """An H3 file whose weights cannot be read once its layout matched is
+    an ImageModelError naming the file, as identify's callers expect."""
+    import dataclasses
+    import os
+
+    p = tmp_path / "h3.gguf"
+    p.write_bytes(b"\0" * 64)
+    view = fixture_view(H3_HEADER)
+    for n in hf.IDENTITY_TENSORS:
+        view.tensors[n] = dataclasses.replace(view.tensors[n], path=str(p),
+                                              nbytes=4)
+    os.chmod(p, 0)
+    try:
+        with pytest.raises(ifp.ImageModelError) as ei:
+            ifp.identify(view)
+    finally:
+        os.chmod(p, 0o600)
+    assert str(ei.value).startswith(f"cannot read {p}: "), str(ei.value)
+
+
 def test_gmlx_video_takes_no_image_file():
     import image_fixtures
 

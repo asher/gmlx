@@ -43,12 +43,18 @@ def read(path: str, ffmpeg: str | None = "ffmpeg") -> np.ndarray:
     from PIL import Image, ImageOps
 
     exe = shutil.which(ffmpeg) if ffmpeg else None
-    with Image.open(path) as img:
-        if exe is None:
-            img.seek(0)
-            return np.asarray(ImageOps.exif_transpose(img).convert("RGB"),
-                              np.uint8).copy()
-        turn = _TURNS.get(img.getexif().get(0x0112, 1))
+    try:
+        with Image.open(path) as img:
+            if exe is None:
+                img.seek(0)
+                return np.asarray(ImageOps.exif_transpose(img).convert("RGB"),
+                                  np.uint8).copy()
+            # A PNG with no eXIf chunk loads its pixels to find one.
+            turn = _TURNS.get(img.getexif().get(0x0112, 1))
+    except MemoryError:
+        raise
+    except Exception as e:  # noqa: BLE001 - Pillow raises many types for bad data
+        raise ValueError(f"Pillow could not read {path}: {e}") from None
     pixels = _decode(exe, path)
     if turn is None:
         return pixels

@@ -37,20 +37,21 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- gmlx needs Python 3.11.1 or newer: 3.11.0 can stall image and video uploads.
 - `gmlx pull <name>` downloads each file from the latest commit of its
   repository, so a quant its publisher updates reaches you without a new gmlx
   release, and pulling again replaces a copy whose size changed.
-- An image or video LoRA runs when the Mac has the memory for it, where
-  `gmlx serve` refused LoRAs over 256 MB.
+- An image LoRA runs when the Mac has the memory for it, where `gmlx serve`
+  refused LoRAs over 256 MB.
 - `server.image.adapter_cache_mb` is now an optional cap with no default.
-- An image or video model reserves no memory for request LoRAs at load, so it
-  fits beside more models.
+- An image model reserves no memory for request LoRAs at load, so it fits
+  beside more models.
 - A LoRA that fits once an idle model unloads makes room as a model load
   does, and one refused for memory names the GB it needs.
 - An image LoRA takes less memory: loading one no longer holds its file
   twice, and fewer of its weights are copied while it runs.
-- The images API prices a request body from the memory free before it reads
-  it, where it refused bodies over 64 MiB and inline images over 32 MiB.
+- The images API prices a request body and each image's decode from the memory
+  free first, where it refused bodies over 64 MiB and inline images over 32 MiB.
 - A JSON `/v1/images/edits` request takes bare base64 image data in `image`
   and `images[].image_url`, beside data URLs.
 - A chat model's cold load no longer waits for a running image job, unless
@@ -80,6 +81,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Served and VLM chat prompts render on transformers 5.22.2, where a request
   that set no thinking control failed with "'enable_thinking' is undefined".
+- A fraction in a config key that takes a whole number, such as `port` or
+  `max_queue`, now fails at startup naming the key, where it was cut down.
+- `gmlx rm` keeps a file another model names in other letter case, and a file
+  in the current folder named as a missing model file, where it deleted them.
+- `gmlx rm` refuses a chat model that an image model names as its `upsampler`,
+  where it removed it and left a config that no longer loaded.
+- `gmlx image --save-latent` writes the path given, making its folder, where it
+  added .npz, failed after the run in a new folder, or left a broken file.
 - Distillation's pinned day renders on transformers 5.22, where a template that
   prints today's date failed with "'str' object is not callable".
 - A served image model keeps its own LoRAs when a request brings others,
@@ -129,6 +138,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   installs the safe KV quantization.
 - `gmlx serve` frees a finished request's images and audio at once. It kept
   the last request's inputs in memory until the next request arrived.
+- `gmlx serve` no longer unloads a chat model at its idle TTL while an image
+  request rewrites its prompt or encodes its text through it.
+- The ComfyUI nodes show the server's 413 for a step body past its limit,
+  where they said the server did not answer.
+- A chat, Responses, Messages or images request with a lone surrogate
+  escape gets a 400 naming the field, where it returned a 500.
 
 ## [0.5.4] - 2026-10-29
 

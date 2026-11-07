@@ -6,7 +6,7 @@ the [gmlx documentation](docs/README.md) is authoritative.
 
 ## Dev setup
 
-gmlx needs Python 3.11 or newer, and macOS 26.2 or newer on Apple Silicon.
+gmlx needs Python 3.11.1 or newer, and macOS 26.2 or newer on Apple Silicon.
 Its kernel dependency, `mlx-kquant`, comes from PyPI as a prebuilt arm64
 wheel. On Linux, `mlx-kquant` builds CPU-only, which is enough for the
 default test tier. gmlx carries mlx-vlm and mlx-lm in `gmlx/_vendor`, and

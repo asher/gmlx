@@ -73,7 +73,7 @@ class VideoFamily:
     fp32_keep: tuple = ()
     identity_tensors: tuple = ()     # tensors hashed for the variant
     variants: dict = field(default_factory=dict)   # hash -> VideoVariantRow
-    refused: dict = field(default_factory=dict)    # hash -> reason
+    refused: dict = field(default_factory=dict)    # hash -> what it is
     # (layout hash) -> VideoVariantRow: files whose qkv rows are known
     layouts: dict = field(default_factory=dict)
     layout_tensor: str = ""          # the fused qkv tensor the hash reads

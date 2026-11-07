@@ -18,10 +18,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import binascii
+import contextlib
 import importlib
-import json
 import logging
 import os
 import threading
@@ -35,11 +34,13 @@ import gmlx.serve.bridge_vlm as serving
 from ._common import _error_content, _remove_routes
 from .body_intake import (
     BodyRefused,
+    _in_turn,
     _mib,
     arriving_note,
-    check_media,
+    loads_field,
+    log_refusal,
     read_form_to_disk,
-    read_in_ram,
+    read_json,
 )
 
 _log = logging.getLogger(__name__)
@@ -49,14 +50,6 @@ FIELDS = ("prompt", "model", "seconds", "size", "seed", "prompt_upsampling",
           "first_frame", "last_frame", "input_reference", "guides",
           "guide_no_audio", "references")
 KEYFRAMES = ("first_frame", "last_frame")
-# A JSON body is held about four times while it is read: the body, the
-# gate's json.loads, the route's, and a data-URL keyframe's decode,
-# measured at 4.0. The post-V6 parse change removes the copies. Two of
-# them are strs (the gate's json.loads and the route's), which widen in a
-# body that is not ASCII, and the values it parses to add
-# body_intake.JSON_VALUE_BYTES each.
-JSON_COPIES = 4.25
-JSON_STR_COPIES = 2
 _KINDS = {"video": "--guide", "audio": "--guide-audio"}
 # The entry plans and encoder tokenizers the estimate reads, by entry.
 _PLANS: dict = {}
@@ -169,8 +162,10 @@ def _data_url(value, name: str, folder: str, take) -> str:
         raise Refused(400, f"{name} is an image as a data URL "
                       "(data:image/png;base64,...) in a JSON body, or a "
                       "file in a multipart form", name)
+    from .media_gate import b64decode
+
     try:
-        data = base64.b64decode(value.split(",", 1)[1], validate=True)
+        data = b64decode(value[value.index(",") + 1:], validate=True)
     except (binascii.Error, ValueError):
         raise Refused(400, f"{name} is not base64", name) from None
     if take is not None:
@@ -221,15 +216,10 @@ def _model(fields: dict) -> str:
     return model
 
 
-def _guides(fields: dict, files: dict) -> list:
-    raw = fields.get("guides")
+def _guides(raw, files: dict) -> list:
+    """The guides of a form, from its guides field parsed (``raw``)."""
     if raw is None:
         return []
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except (ValueError, RecursionError):
-            raise Refused(400, "guides is a JSON list", "guides") from None
     if not isinstance(raw, list):
         raise Refused(400, "guides is a JSON list", "guides")
     out = []
@@ -313,17 +303,36 @@ def estimate(spec, fam, plan, s: dict, prompt: str, sizes, rewrites: bool,
                       f"memory: {got.describe()}; {got.hint()}", "size")
 
 
-def prepare(fields: dict, files: dict, folder: str, ffmpeg: str,
-            take=None) -> tuple:
-    """``(record, params)`` of a job from the request's fields and files,
-    or Refused. A data URL keyframe goes to ``folder`` within the room
-    ``take(n)`` reserves in the job store. Fields and files the route
-    does not read are named in a warning, as the images API does."""
+def _keyframes(sent: dict, folder: str, take) -> dict:
+    """The path of each keyframe of ``sent`` ({name: (file, value)}), or
+    None: a file as sent, a data URL written to ``folder`` within the room
+    ``take(n)`` reserves. Each must be an image the server reads."""
+    keys = {}
+    for name, alias in (("first_frame", "input_reference"),
+                        ("last_frame", "last_frame")):
+        file, value = sent[name] if any(sent[name]) else sent[alias]
+        keys[name] = file if file is not None else (
+            None if value is None else _data_url(value, name, folder, take))
+    for name, v in keys.items():
+        if v is not None and not _pixels(v, name):
+            raise Refused(400, f"{name} is no image the server reads", name)
+    return keys
+
+
+def _inline(sent: dict) -> bool:
+    """Whether a keyframe of ``sent`` is a data URL, which decodes."""
+    return any(file is None and value is not None
+               for file, value in sent.values())
+
+
+def prepare_head(fields: dict, files: dict) -> SimpleNamespace:
+    """The checks of a job's fields before its keyframes, or Refused: the
+    entry, its plan and settings, and ``sent``, each keyframe field's
+    (file, value). Runs in a worker thread; the keyframes come next
+    (:func:`_keyframes`), then :func:`prepare_tail`."""
     from gmlx.commands import video as cmd
     from gmlx.video.registry import get_family
 
-    from ..image_service import ImageRequestError
-    from ..image_upsample import upsampler_for
     from ..residency import _http_from_resolver_error
 
     refs = fields.get("references")
@@ -385,21 +394,29 @@ def prepare(fields: dict, files: dict, folder: str, ffmpeg: str,
     if any(sent["first_frame"]) and any(sent["input_reference"]):
         raise Refused(400, "first_frame and input_reference both name the "
                       "first frame; send one", "input_reference")
-    keys = {}
-    for name, alias in (("first_frame", "input_reference"),
-                        ("last_frame", "last_frame")):
-        file, value = sent[name] if any(sent[name]) else sent[alias]
-        keys[name] = file if file is not None else (
-            None if value is None else _data_url(value, name, folder, take))
-    for name, v in keys.items():
-        if v is not None and not _pixels(v, name):
-            raise Refused(400, f"{name} is no image the server reads", name)
+    return SimpleNamespace(prompt=prompt, path=path, spec=spec, plan=plan,
+                           fam=fam, settings=s, sent=sent)
+
+
+def prepare_tail(head: SimpleNamespace, keys: dict, fields: dict,
+                 files: dict, ffmpeg: str, guides=None) -> tuple:
+    """``(record, params)`` of a job from its ``head``, its keyframes'
+    paths ``keys``, the request's fields and files, and a form's guides
+    field parsed (``guides``, by :func:`loads_field`), or Refused. Fields
+    and files the route does not read are named in a warning, as the
+    images API does. Runs in a worker thread."""
+    from ..image_service import ImageRequestError
+    from ..image_upsample import upsampler_for
+
+    prompt, path, spec, plan, fam, s = (head.prompt, head.path, head.spec,
+                                        head.plan, head.fam, head.settings)
     if isinstance(fields.get("guides"), list) and fields["guides"]:
         raise Refused(400, "guides take files: send the job as a multipart "
                       "form", "guides")
-    guides = _guides(fields, files)
+    guides = _guides(guides, files)
     for g in guides:
-        _pixels(g[1], g[3])
+        # Named by the file field the request sent it in.
+        _pixels(g[1], os.path.basename(g[1]))
     row = fam.variant_row(plan.variant)
     n = sum(v is not None for v in keys.values()) + len(guides)
     if n and row is not None and row.vsa_sparsity:
@@ -469,28 +486,42 @@ async def create(request: Request):
             return await asyncio.to_thread(take, n)
 
         ctype = request.headers.get("content-type", "").split(";")[0].strip()
+        guides = None
         try:
             if ctype == "multipart/form-data":
                 pairs, files = await read_form_to_disk(request, folder,
                                                        take_async)
                 await asyncio.to_thread(post.settle)
                 fields = dict(pairs)
+                if isinstance(fields.get("guides"), str):
+                    # Its parse can hold far more than its text: priced
+                    # as a JSON body, in the turn the parses take.
+                    try:
+                        guides = await _in_turn(
+                            loads_field, fields["guides"], "guides", None)
+                    except ValueError:
+                        raise Refused(400, "guides is a JSON list",
+                                      "guides") from None
             else:
-                raw = await read_in_ram(request, copies=JSON_COPIES,
-                                        str_copies=JSON_STR_COPIES)
-                await check_media(request, raw)
-                try:
-                    fields = json.loads(raw or b"{}")
-                except ValueError:
-                    raise Refused(400, "the body is no JSON object") from None
+                fields = await read_json(request)
                 if not isinstance(fields, dict):
                     raise Refused(400, "the body is no JSON object")
+                if isinstance(fields.get("guides"), str) and fields["guides"]:
+                    raise Refused(400, "guides take files: send the job as "
+                                  "a multipart form", "guides")
                 files = {}
         except BodyRefused as e:
+            log_refusal(e.status, str(e))
             raise Refused(e.status, str(e), e.param,
                           headers=e.headers) from None
-        record, params = await asyncio.to_thread(prepare, fields, files,
-                                                 folder, ffmpeg, take)
+        head = await asyncio.to_thread(prepare_head, fields, files)
+        # A data URL keyframe decodes in the turn the parses take: the
+        # price of a JSON body counts it. A cancel while it waits for the
+        # turn ends before the keyframe is written.
+        keys = await (_in_turn if _inline(head.sent) else asyncio.to_thread)(
+            _keyframes, head.sent, folder, take)
+        record, params = await asyncio.to_thread(
+            prepare_tail, head, keys, fields, files, ffmpeg, guides)
         try:
             job = await asyncio.to_thread(post.submit, record, params)
         except QueueFull as e:
@@ -521,10 +552,26 @@ async def retrieve(video_id: str):
     return _missing(video_id) if rec is None else JSONResponse(rec)
 
 
+class _LinkResponse(FileResponse):
+    """The clip through a link made for this answer, removed once the
+    answer ends, sent or not."""
+
+    async def __call__(self, scope, receive, send):
+        ext = scope.get("extensions") or {}
+        if "http.response.pathsend" in ext:
+            # The server would read the link after this call returns.
+            scope = {**scope, "extensions": {
+                k: v for k, v in ext.items()
+                if k != "http.response.pathsend"}}
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(self.path)
+
+
 async def content(video_id: str):
-    store = _store()
-    rec, path = await asyncio.to_thread(
-        lambda: (store.get(video_id), store.content(video_id)))
+    rec, path, linked = await asyncio.to_thread(_store().serve, video_id)
     if rec is None:
         return _missing(video_id)
     if path is None:
@@ -532,8 +579,8 @@ async def content(video_id: str):
                                f"{rec['status']}; its content is ready "
                                "once it is completed", "video_id",
                                code="not_ready"))
-    return FileResponse(path, media_type="video/mp4",
-                        filename=f"{video_id}.mp4")
+    return (_LinkResponse if linked else FileResponse)(
+        path, media_type="video/mp4", filename=f"{video_id}.mp4")
 
 
 async def delete(video_id: str):

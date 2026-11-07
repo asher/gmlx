@@ -29,6 +29,7 @@ _API_CONTRACT_FLAG = "_kq_gguf_api_contract"
 _RESPONSES_PATHS = ("/responses", "/v1/responses")
 _MESSAGES_PATHS = ("/messages", "/v1/messages")
 _COUNT_TOKENS_PATHS = ("/messages/count_tokens", "/v1/messages/count_tokens")
+_INPUT_TOKENS_PATHS = ("/responses/input_tokens", "/v1/responses/input_tokens")
 
 
 # Consumed-parameter sets, one per dialect. "Consumed" means some code path
@@ -271,6 +272,23 @@ def _http_request_of(values):
                  if hasattr(o, "receive") and hasattr(o, "json")), None)
 
 
+def _refuse_lone_surrogate(request) -> None:
+    """The 400 of a chat request with a lone surrogate escape in any string
+    of its body, which the template, the tokenizer or the answer's JSON
+    would fail on with a 500."""
+    from fastapi import HTTPException
+
+    from ._common import body_surrogate, surrogate_message
+
+    body = (request.model_dump(exclude_none=True)
+            if hasattr(request, "model_dump") else None)
+    field = body_surrogate(body)
+    if field is not None:
+        raise HTTPException(status_code=400, detail={"error": {
+            "type": "invalid_request_error",
+            "message": surrogate_message(field), "param": field}})
+
+
 def _make_chat_endpoint(original):
     """Wrapper for the parsed-body chat routes: warn on unread fields off
     ``model_fields_set`` (extras included) and drop ``tools`` when
@@ -285,6 +303,7 @@ def _make_chat_endpoint(original):
         tc = getattr(request, "tool_choice", None) if request is not None \
             else None
         if request is not None:
+            _refuse_lone_surrogate(request)
             warn_ignored_fields(
                 path, set(request.model_fields_set) - CHAT_CONSUMED)
             _maybe_warn_top_logprobs(path, request)
@@ -308,11 +327,32 @@ def _warn_image_tool(path: str, body: dict) -> None:
                      "dropped; call /v1/images/generations instead", path)
 
 
-def _make_raw_endpoint(consumed, fallback_path):
+def _surrogate_answer(body, anthropic: bool):
+    """The 400 of a raw-``Request`` route's parsed body with a lone
+    surrogate escape in any string, in the route's own error shape, or
+    None."""
+    from fastapi.responses import JSONResponse
+
+    from ._common import body_surrogate, surrogate_message
+
+    field = body_surrogate(body)
+    if field is None:
+        return None
+    message = surrogate_message(field)
+    if anthropic:
+        return JSONResponse(status_code=400, content={"type": "error", "error": {
+            "type": "invalid_request_error", "message": message}})
+    return JSONResponse(status_code=400, content={"error": {
+        "type": "invalid_request_error", "message": message, "param": field,
+        "code": None}})
+
+
+def _make_raw_endpoint(consumed, fallback_path, anthropic: bool = False):
     """Wrapper factory for the raw-``Request`` routes (responses/anthropic):
     the handler parses the JSON body itself, so warn/enforce on the cached
     body dict (starlette caches ``_json``; the handler's own ``json()`` call
-    returns the same mutated object)."""
+    returns the same mutated object). A lone surrogate escape in any string
+    of the body is a 400, in the Messages shape with ``anthropic``."""
     def make(original):
         async def endpoint(*args, **kwargs):
             values = list(args) + list(kwargs.values())
@@ -324,6 +364,9 @@ def _make_raw_endpoint(consumed, fallback_path):
                     body = await http.json()
                 except Exception:
                     body = None
+                refused = _surrogate_answer(body, anthropic)
+                if refused is not None:
+                    return refused
                 if isinstance(body, dict):
                     tc = body.get("tool_choice")
                     warn_ignored_fields(path, set(body) - consumed)
@@ -334,6 +377,26 @@ def _make_raw_endpoint(consumed, fallback_path):
             result = await original(*args, **kwargs)
             _maybe_warn_unfulfilled_tool_choice(path, tc, result)
             return result
+        return endpoint
+    return make
+
+
+def _make_count_endpoint(anthropic: bool = False):
+    """Wrapper factory for the token counting routes of Responses and
+    Messages, which tokenize the prompt as their generation routes do: a
+    lone surrogate escape in any string of the body is the same 400."""
+    def make(original):
+        async def endpoint(*args, **kwargs):
+            http = _http_request_of(list(args) + list(kwargs.values()))
+            if http is not None:
+                try:
+                    body = await http.json()
+                except Exception:
+                    body = None
+                refused = _surrogate_answer(body, anthropic)
+                if refused is not None:
+                    return refused
+            return await original(*args, **kwargs)
         return endpoint
     return make
 
@@ -349,7 +412,11 @@ def install_api_contract() -> None:
                                          _RESPONSES_PATHS[-1]))
     _wrap_post_routes(app, _MESSAGES_PATHS, _API_CONTRACT_FLAG,
                       _make_raw_endpoint(ANTHROPIC_CONSUMED,
-                                         _MESSAGES_PATHS[-1]))
+                                         _MESSAGES_PATHS[-1], anthropic=True))
+    _wrap_post_routes(app, _INPUT_TOKENS_PATHS, _API_CONTRACT_FLAG,
+                      _make_count_endpoint())
+    _wrap_post_routes(app, _COUNT_TOKENS_PATHS, _API_CONTRACT_FLAG,
+                      _make_count_endpoint(anthropic=True))
 
 
 # Context overflow wording

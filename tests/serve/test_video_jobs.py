@@ -135,6 +135,102 @@ def test_a_job_that_raises_fails_with_its_status_and_no_clip(
     assert store.get(job.id) is None
 
 
+def test_a_clip_whose_completed_record_cannot_be_written_fails(
+        tmp_path, monkeypatch):
+    """The disk fills as the clip lands: its completed record is never
+    written, so the job does not read as completed, which a restart
+    would contradict. It fails, and its clip goes."""
+    full = []
+
+    def run(job, store):
+        _clip(job, store)
+        clock.now += 60
+        full.append(True)
+
+    store, clock, driver = _store(tmp_path, run)
+    job = _submit(store)
+    write = store._write
+
+    def write_unless_full(j):
+        if full:
+            raise OSError(28, "No space left on device")
+        write(j)
+    monkeypatch.setattr(store, "_write", write_unless_full)
+    driver.run()
+    rec = store.get(job.id)
+    assert (rec["status"], rec["error"]["status"]) == ("failed", 500)
+    assert store.content(job.id) is None
+    assert os.listdir(os.path.join(str(store.root), "files")) == []
+    assert _on_disk(store, job.id)["status"] == "in_progress"
+    assert store.metrics()["jobs_completed_total"] == 0
+    assert store.metrics()["clip_s"] is None
+
+
+def test_a_clip_deleted_as_it_goes_out_counts_in_the_store_until_sent(
+        tmp_path):
+    """A DELETE removes a clip an answer still sends through its link:
+    its bytes stay on disk, so the store counts them until the answer
+    ends, and a new job cannot carry the store past its limit."""
+    store, clock, driver = _store(
+        tmp_path, lambda j, s: _clip(j, s, b"x" * 1000),
+        store_max_bytes=5000)
+    job = _submit(store)
+    driver.run()
+    room = store.room()
+    _rec, link, linked = store.serve(job.id)
+    assert linked
+    store.delete(job.id)
+    assert not os.path.exists(store.clip(job.id))
+    assert store.room() == room
+    os.unlink(link)
+    assert store.room() == room + 1000
+
+
+def test_a_clip_sent_twice_and_deleted_counts_once_until_both_end(
+        tmp_path):
+    """Two answers of one clip each hold a link to it: once a DELETE
+    removes the clip, the store counts its bytes once, until the last
+    answer ends."""
+    store, clock, driver = _store(
+        tmp_path, lambda j, s: _clip(j, s, b"x" * 1000),
+        store_max_bytes=5000)
+    job = _submit(store)
+    driver.run()
+    room = store.room()
+    links = [store.serve(job.id)[1] for _ in range(2)]
+    store.delete(job.id)
+    assert store.room() == room
+    os.unlink(links[0])
+    assert store.room() == room
+    os.unlink(links[1])
+    assert store.room() == room + 1000
+
+
+def test_the_sweep_leaves_a_clip_being_sent_and_frees_the_next(tmp_path):
+    """Removing a clip an answer still sends frees nothing until the
+    answer ends, so the sweep leaves it and removes the next oldest, and
+    a new job's files fit."""
+    def run(job, store):
+        clock.now += 10
+        _clip(job, store, b"x" * 2000)
+
+    store, clock, driver = _store(tmp_path, run, store_max_bytes=5000,
+                                  max_queue=3)
+    jobs = [_submit(store) for _ in range(2)]
+    driver.run()
+    _rec, link, linked = store.serve(jobs[0].id)
+    assert linked
+    jobs.append(_submit(store))
+    driver.run()
+    jid = store.new_id()
+    store.begin(jid)
+    got = store.take(jid, 500)
+    assert got == (True, 500, 0), got
+    assert os.path.exists(store.clip(jobs[0].id))
+    assert not os.path.exists(store.clip(jobs[1].id))
+    os.unlink(link)
+
+
 def test_a_queued_job_cancelled_never_runs_and_its_inputs_go(tmp_path):
     ran = []
     store, clock, driver = _store(tmp_path, lambda j, s: ran.append(j))
@@ -207,6 +303,50 @@ def test_a_restart_fails_the_jobs_a_past_server_queued_or_ran(tmp_path):
     assert again.get(done.id)["status"] == "completed"
     assert os.listdir(os.path.join(str(store.root), "files")) == [
         f"{done.id}.mp4"]
+
+
+def _restart(store, clock):
+    again = vj.VideoJobs(store.root, time_fn=clock, mono_fn=clock,
+                         driver=Driver())
+    again.configure(SimpleNamespace(video=VideoServerCfg()))
+    return again
+
+
+def test_a_deleted_job_stays_gone_with_a_copy_of_its_record_beside(
+        tmp_path):
+    """A copy of a record, as the Finder names one, holds the job's id
+    under another file name. The restart takes no job from it, so a job
+    deleted after it is not back at the next restart."""
+    import shutil
+
+    store, clock, driver = _store(tmp_path, _clip)
+    job = _submit(store)
+    driver.run()
+    path = store._record_path(job.id)
+    shutil.copy(path, path[:-len(".json")] + " copy.json")
+    again = _restart(store, clock)
+    assert again.delete(job.id)["deleted"] is True
+    assert _restart(store, clock).get(job.id) is None
+    assert os.listdir(os.path.join(str(store.root), "jobs")) == []
+
+
+def test_a_record_whose_id_leaves_the_store_removes_nothing_outside(
+        tmp_path):
+    """A record's id names its files: one that is not its file's own,
+    such as a path out of the store, is no job, and its sweep removes
+    nothing outside the store."""
+    store, clock, _driver = _store(tmp_path)
+    outside = os.path.join(str(store.root), "outside")
+    os.makedirs(outside)
+    jid = store.new_id()
+    with open(store._record_path(jid), "w") as f:
+        json.dump({"id": "../outside", "object": "video",
+                   "status": "completed", "created_at": 0,
+                   "completed_at": 0, "expires_at": 0, "error": None}, f)
+    again = _restart(store, clock)
+    assert os.path.isdir(outside)
+    assert again.jobs == {}
+    assert os.listdir(os.path.join(str(store.root), "jobs")) == []
 
 
 def test_a_job_past_its_expiry_is_gone_before_any_sweep(tmp_path):
@@ -339,6 +479,23 @@ def test_progress_runs_over_the_steps_then_the_frames(tmp_path):
     store.progress(job, step=(20, 20), frames=(50, 100))
     assert job.record["progress"] == 95
     assert job.record["gmlx"]["phase"] == "denoising"
+
+
+def test_progress_reads_0_until_the_prompt_encode(tmp_path):
+    """The phases before the encode, the model's load among them, are no
+    part of the clip's work: progress counts 5 from the encode on, a
+    wait for memory after it included."""
+    store, clock, driver = _store(tmp_path)
+    job = _submit(store)
+    job.record["status"] = "in_progress"
+    job.started = clock.now
+    seen = []
+    for phase in ("reading the inputs", "rewriting the prompt",
+                  "loading the model", "waiting for memory",
+                  "encoding the prompt", "waiting for memory"):
+        store.progress(job, phase=phase)
+        seen.append(job.record["progress"])
+    assert seen == [0, 0, 0, 0, 5, 5]
 
 
 def test_a_wait_for_memory_holds_the_job_and_fails_it_past_expiry(
@@ -654,6 +811,21 @@ def routes(tmp_path, monkeypatch):
                            client=TestClient(app), spec=spec)
 
 
+def test_a_post_refused_before_its_body_leaves_no_store_behind(
+        routes, monkeypatch):
+    """A server with no ffmpeg refuses a POST before its body: the store
+    no job has used stays unmade, as the server found it."""
+    import shutil
+
+    from gmlx.serve import media_programs
+
+    shutil.rmtree(routes.store.root)
+    monkeypatch.setattr(media_programs, "find", lambda n: None)
+    r = routes.client.post("/v1/videos", json={"prompt": "a cat"})
+    assert r.status_code == 501, r.text
+    assert not os.path.exists(routes.store.root)
+
+
 def test_a_json_job_runs_to_its_mp4_through_the_routes(routes):
     c = routes.client
     r = c.post("/v1/videos", json={"prompt": "a cat", "seconds": "1",
@@ -681,6 +853,45 @@ def test_a_json_job_runs_to_its_mp4_through_the_routes(routes):
     assert r.json()["error"]["message"] == (
         f"no video job {jid!r}; a job is gone once it expires or is "
         "deleted")
+
+
+@pytest.mark.parametrize("end", ["delete", "expiry"])
+def test_a_clip_removed_as_its_content_goes_out_is_sent_whole(routes, end):
+    """GET content answers with the clip, then a DELETE, or the sweep at
+    the job's expiry, removes it before a byte of it goes out: the
+    answer is still the whole clip, never a 500."""
+    import asyncio
+
+    store, clock = routes.store, routes.clock
+    job = _submit(store)
+    routes.driver.run()
+    response = asyncio.run(videos.content(job.id))
+    if end == "delete":
+        store.delete(job.id)
+    else:
+        clock.now += store.settings.job_ttl_s
+        store.sweep()
+    assert not os.path.exists(store.clip(job.id))
+    sent = []
+
+    async def receive():
+        # A connected client sends nothing more: the response cancels this
+        # wait once the clip has gone out.
+        await asyncio.Event().wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+    raised = None
+    try:
+        asyncio.run(response({"type": "http", "method": "GET",
+                              "headers": []}, receive, send))
+    except RuntimeError as e:       # the server answers it with a 500
+        raised = e
+    assert raised is None, raised
+    assert sent[0]["status"] == 200
+    assert b"".join(m.get("body", b"") for m in sent[1:]) == b"mp4"
+    assert not os.path.exists(response.path)
 
 
 def test_a_json_keyframe_is_a_data_url_written_to_the_jobs_inputs(routes):
@@ -883,6 +1094,24 @@ def test_a_malformed_guides_field_is_a_400(routes, guides, text):
     assert routes.store.jobs == {}
 
 
+def test_a_guides_field_whose_parse_passes_the_memory_free_is_a_413(
+        routes, monkeypatch):
+    """A guides field of many small objects parses to far more than its
+    text: it is priced as a JSON body is, and refused before its parse
+    when that passes the memory free."""
+    guides = "[" + ",".join(["{}"] * 50_000) + "]"
+    body, ctype = _form({"prompt": "a cat", "guides": guides},
+                        {"guide_0": _png(64, 64)})
+    monkeypatch.setattr(body_intake, "free_bytes", lambda: 4 << 20)
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": ctype})
+    assert r.status_code == 413, r.text
+    err = r.json()["error"]
+    assert err["param"] == "guides"
+    assert err["message"].startswith("guides is "), err["message"]
+    assert routes.store.jobs == {}
+
+
 @pytest.mark.parametrize("over", [False, True], ids=["budget", "overcommit"])
 def test_a_prompt_with_a_lone_surrogate_is_a_400(routes, monkeypatch, over):
     """A lone surrogate escape parses from JSON to a str that encodes to
@@ -975,52 +1204,237 @@ def test_a_json_body_past_the_free_figure_is_a_413_with_no_byte_read(
         r = send(conn, "/v1/videos", b"{", length=8 << 20)
         assert r.status == 413, r.body
         assert json.loads(r.body)["error"]["message"] == (
-            "the request body is 8.0 MiB, its read holds 4.25 times that, "
-            "and 1.0 MiB of memory is free beside the models loaded; send "
-            "a smaller body, or unload a model to make room")
+            "the request body is 8.0 MiB, its read and parse hold at least "
+            "16.0 MiB, and 1.0 MiB of memory is free beside the models "
+            "loaded; send a smaller body, or unload a model to make room")
         assert closed(other)
         conn.close()
 
 
-@pytest.mark.parametrize("kind", ["json", "form", "form_wide"])
-def test_a_video_body_is_priced_at_the_copies_its_parse_holds(
-        routes, monkeypatch, kind):
-    """A JSON body is held a few times over while it is read and parsed,
-    and a form's text twice, or six times once a chunk of it is not
-    ASCII: each fits only where all its copies fit."""
+@pytest.mark.parametrize("how", ["memory", "not_json"])
+def test_a_video_body_refusal_is_in_the_server_log(routes, monkeypatch,
+                                                   capsys, how):
+    """The video route reads its own body, as the images routes do, and
+    prints the body's refusal to the log as the media gate does."""
+    from gmlx.serve.patches import hardening
+
+    monkeypatch.setattr(hardening, "_refusal_logs", {})
+    body = b'{"prompt": "a cat"'
+    if how == "memory":
+        monkeypatch.setattr(body_intake, "free_bytes", lambda: 1 << 10)
+        body = json.dumps({"prompt": "a cat " * 1000}).encode()
+    r = routes.client.post("/v1/videos", content=body, headers={
+        "content-type": "application/json"})
+    assert r.status_code in (400, 413), r.text
+    message = r.json()["error"]["message"]
+    assert (f"[server] refused a request with status {r.status_code}: "
+            f"{message}" in capsys.readouterr().out.splitlines())
+
+
+def test_a_form_that_stalls_frees_the_room_it_holds(routes, monkeypatch):
+    """A form whose client stops sending holds the room of its whole
+    Content-Length in the job store: past the stall bound, the server
+    answers 408, ends the connection and frees the room and the file it
+    began."""
+    import http.client
+
+    from live_socket import closed, peer, send, serving
+
+    monkeypatch.setattr(body_intake, "STALL_S", 0.2)
+    body, ctype = _form({"prompt": "a cat"}, {"first_frame": _png()})
+    head = body[:len(body) // 2]
+    with serving(routes.app) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        other = peer(conn)
+        r = send(conn, "/v1/videos", head, length=len(body) + (8 << 20),
+                 ctype=ctype)
+        assert r.status == 408, r.body
+        assert json.loads(r.body)["error"]["message"].startswith(
+            "the form sent nothing for 0.2 s with 8.")
+        assert closed(other)
+        conn.close()
+    assert routes.store.pending == {}
+    assert os.listdir(os.path.join(str(routes.store.root), "inputs")) == []
+
+
+def test_a_video_json_body_is_priced_at_what_its_read_and_parse_hold(
+        routes, monkeypatch):
+    """A JSON body is priced at what its one read and parse hold, each str
+    at the width of its own characters, so a prompt that is not ASCII
+    leaves its keyframe at a byte a character: it fits only where that
+    fits."""
     url = "data:image/png;base64," + base64.b64encode(_png()).decode()
-    text = "a" * (256 << 10)
-    if kind == "json":
-        body = json.dumps({"prompt": text, "first_frame": url}).encode()
-        ctype = "application/json"
-        copies = 4.25
-        need = _json_need(body, copies)
-    else:
-        text += "\U0001F600" if kind == "form_wide" else ""
-        body, ctype = _form({"prompt": text}, {"first_frame": _png()})
-        copies = 6.25 if kind == "form_wide" else 2.25
-        need = math.ceil(len(text.encode()) * copies)
+    body = json.dumps({"prompt": "un caf\u00e9 " + "a" * (256 << 10),
+                       "first_frame": url}).encode()
+    need = body_intake.json_price(body)
+    for free, status in ((need - 1, 413), (need, 200)):
+        monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
+        r = routes.client.post("/v1/videos", content=body,
+                               headers={"content-type": "application/json"})
+        assert r.status_code == status, r.text
+        if status == 413:
+            assert " with the values it parses to, " in \
+                r.json()["error"]["message"]
+    assert len(routes.store.jobs) == 1
+    assert routes.store.pending == {}
+
+
+@pytest.mark.parametrize("wide", [False, True])
+def test_a_video_forms_text_is_priced_at_its_own_width(routes, monkeypatch,
+                                                       wide):
+    """A form's text field is priced as it arrives, at its bytes and the
+    str they decode to at the width of its own characters: it fits only
+    where that fits."""
+    text = "a" * (256 << 10) + ("\U0001F600" if wide else "")
+    body, ctype = _form({"prompt": text}, {"first_frame": _png()})
+    # The field's bytes with a bytearray's room to grow, and its str with
+    # the narrower copy the decode widens from.
+    n = len(text.encode())
+    need = math.ceil(n * 1.125) + n * (6 if wide else 1) + body_intake._SLACK
     for free, status in ((need - 1, 413), (need, 200)):
         monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
         r = routes.client.post("/v1/videos", content=body,
                                headers={"content-type": ctype})
         assert r.status_code == status, r.text
         if status == 413:
-            assert (" with the values it parses to, " if kind == "json"
-                    else f", their read holds {copies:g} times that, ") in \
+            assert ", their read and parse hold " in \
                 r.json()["error"]["message"]
     assert len(routes.store.jobs) == 1
     assert routes.store.pending == {}
 
 
-def _json_need(body: bytes, copies: float) -> int:
-    """What a JSON body's read and parse hold, as priced: its copies, two
-    of them strs at 4 bytes a character in a body that is not ASCII or
-    holds a \\u escape, and 80 bytes for each value it can parse to."""
-    wide = not body.isascii() or b"\\u" in body
-    count = sum(body.count(c) for c in (b",", b":", b"[", b"{"))
-    return math.ceil(len(body) * (copies + (6 if wide else 0))) + \
-        80 * (count + 1)
+def _photo(w: int, h: int) -> bytes:
+    """A PNG of noise, which compresses as little as a photo does."""
+    import numpy as np
+    from PIL import Image
+
+    pixels = np.random.default_rng(0).integers(0, 256, (h, w, 3), np.uint8)
+    buf = io.BytesIO()
+    Image.fromarray(pixels).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_a_keyframe_decodes_in_the_parse_turn(routes, monkeypatch):
+    """A JSON keyframe's decode is priced with its body, so it runs in the
+    turn the parses take, never beside another body's parse. The estimate,
+    which tokenizes the prompt, however long, runs out of the turn."""
+    url = "data:image/png;base64," + base64.b64encode(_png()).decode()
+    body = json.dumps({"prompt": "a cat " * 10000,
+                       "first_frame": url}).encode()
+    held: dict = {}
+
+    def turn_held():
+        return any(t.locked() for t in body_intake._TURNS.values())
+
+    def recorded(name, real):
+        def run(*a):
+            held.setdefault(name, []).append(turn_held())
+            return real(*a)
+        return run
+    monkeypatch.setattr(videos, "_data_url",
+                        recorded("decode", videos._data_url))
+    monkeypatch.setattr(videos, "_pixels", recorded("pixels", videos._pixels))
+    monkeypatch.setattr(videos, "estimate",
+                        recorded("estimate", videos.estimate))
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": "application/json"})
+    assert r.status_code == 200, r.text
+    assert held == {"decode": [True], "pixels": [True], "estimate": [False]}
+
+
+def test_keyframe_posts_past_the_executors_width_all_answer(routes):
+    """Three keyframe jobs posted at once on a loop whose default executor
+    has two threads all answer: no worker thread waits on the loop for the
+    parse turn, so the turn's own thread always gets one."""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    import httpx
+
+    routes.store.configure(SimpleNamespace(video=VideoServerCfg(max_queue=3)))
+    url = "data:image/png;base64," + base64.b64encode(_png()).decode()
+    executor = ThreadPoolExecutor(max_workers=2)
+
+    async def main():
+        asyncio.get_running_loop().set_default_executor(executor)
+        transport = httpx.ASGITransport(app=routes.app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as client:
+            posts = [asyncio.create_task(client.post("/v1/videos", json={
+                "prompt": f"a cat {i}", "first_frame": url}))
+                for i in range(3)]
+            done, pending = await asyncio.wait(posts, timeout=30)
+            return [t.result().status_code for t in done], len(pending)
+
+    loop = asyncio.new_event_loop()
+    try:
+        codes, stuck = loop.run_until_complete(main())
+    finally:
+        # A stuck post leaves threads that wait on the loop: cancel every
+        # task, so they wake, before the loop closes.
+        tasks = asyncio.all_tasks(loop)
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            loop.run_until_complete(asyncio.wait(tasks))
+        executor.shutdown(wait=False, cancel_futures=True)
+        loop.close()
+    assert stuck == 0, "a keyframe post never answered"
+    assert codes == [200, 200, 200]
+
+
+def test_a_keyframe_job_is_read_within_its_price(routes, monkeypatch,
+                                                 tmp_path):
+    """A job with a photo for its first frame and a prompt that is not
+    ASCII fits at three times its body and a little more, where the copies
+    of the body the read and the parse made, all at four bytes a character,
+    took ten; and what its read, its parse and the keyframe's decode hold
+    at their peak never passes the price: one byte less is refused."""
+    import asyncio
+    import tracemalloc
+
+    from starlette.requests import Request
+
+    url = "data:image/png;base64," + base64.b64encode(_photo(768, 768)) \
+        .decode()
+    body = json.dumps({"prompt": "un caf\u00e9 au soleil, la cam\u00e9ra "
+                       "avance lentement", "first_frame": url},
+                      ensure_ascii=False).encode()
+    budget = 3 * len(body) + body_intake._SLACK
+    monkeypatch.setattr(body_intake, "free_bytes", lambda: budget)
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": "application/json"})
+    assert r.status_code == 200, r.text
+
+    def run(free):
+        chunks = [body[i:i + (64 << 10)]
+                  for i in range(0, len(body), 64 << 10)]
+
+        async def receive():
+            if chunks:
+                return {"type": "http.request", "body": chunks.pop(0),
+                        "more_body": bool(chunks)}
+            return {"type": "http.disconnect"}
+        req = Request({"type": "http", "method": "POST", "path": "/v1/videos",
+                       "query_string": b"", "headers": [
+                           (b"content-type", b"application/json"),
+                           (b"content-length", str(len(body)).encode())]},
+                      receive)
+
+        async def read():
+            doc = await body_intake.read_json(req, free)
+            await asyncio.to_thread(videos._data_url, doc["first_frame"],
+                                    "first_frame", str(tmp_path), None)
+        return read
+    tracemalloc.start()
+    try:
+        asyncio.run(run(budget)())
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    with pytest.raises(body_intake.BodyRefused) as e:
+        asyncio.run(run(peak - 1)())
+    assert e.value.status == 413, e.value
 
 
 def _shaped(shape: str, n: int = 64 << 10) -> bytes:
@@ -1047,11 +1461,11 @@ SHAPES = ["objects", "floats", "strs", "pairs", "emoji_escaped",
 @pytest.mark.parametrize("shape", SHAPES)
 def test_a_json_body_is_priced_by_what_its_parse_makes(routes, monkeypatch,
                                                        shape):
-    """Small values parse to far more than their text, and one emoji
-    widens every str of the body: each shape is refused a byte under its
-    price and fits at it."""
+    """Small values parse to far more than their text, and an emoji widens
+    the str it is in: each shape is refused a byte under its price and fits
+    at it."""
     body = _shaped(shape)
-    need = _json_need(body, 4.25)
+    need = body_intake.json_price(body)
     for free, status in ((need - 1, 413), (need, 200)):
         monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
         r = routes.client.post("/v1/videos", content=body,
@@ -1151,14 +1565,19 @@ def test_the_jobs_pacer_reaches_the_sampler_and_stops_the_job(
         k["pacer"](())
         k["on_step"](0, 2)
         job.stop.set()
-        k["pacer"](())
+        try:
+            k["pacer"](())
+        except JobStopped:
+            seen["stopped"] = True
+            raise
+        pytest.fail("the pacer ran on past the stop")
 
     hold = _clip_part_stubs(monkeypatch, order, generate)
     store, clock, driver = _store(tmp_path)
     job = _clip_job(store)
     with pytest.raises(JobStopped):
         vj._clip_part(job, store, hold, store.clip(job.id))
-    assert seen["pacer"] is not None
+    assert seen.get("pacer") is not None and seen.get("stopped")
     assert job.record["gmlx"]["step"] == 1
     assert order[-1] == ("settle", vj.JOB)
 
@@ -1588,6 +2007,20 @@ def test_a_keyframe_past_the_decompression_bound_is_a_400(routes, how):
     assert routes.store.pending == {}
 
 
+def test_a_guide_past_the_decompression_bound_names_its_file_field(routes):
+    from gmlx.serve.patches.media_gate import MEDIA_MAX_PIXELS
+
+    body, ctype = _form({"prompt": "a cat", "guides": json.dumps(
+        [{"file": "guide_0", "frame": 0}])}, {"guide_0": _bomb_png()})
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": ctype})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert (err["param"], err["message"]) == (
+        "guide_0", f"guide_0 is over the {MEDIA_MAX_PIXELS} pixels the "
+        "server decodes")
+
+
 def test_a_keyframe_in_a_format_off_the_list_is_no_image(routes):
     from PIL import Image
 
@@ -1819,7 +2252,9 @@ def test_the_clip_samples_with_the_jobs_settings_and_anchors(
     job.kept.update(anchors=((0, video, None),), spans=((3, 9),))
     job.params["settings"].update(seed=1234, shifts={"video": 3.0})
     vj._clip_part(job, store, hold, store.clip(job.id))
-    (anchor,) = seen.pop("anchors")
+    anchors = seen.pop("anchors")
+    assert len(anchors) == 1, f"the sampler got anchors {anchors!r}"
+    anchor = anchors[0]
     assert anchor.frame == 0 and anchor.audio is None
     np.testing.assert_array_equal(np.array(anchor.video), video)
     seen.pop("on_step"), seen.pop("pacer")

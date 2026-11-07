@@ -9,24 +9,33 @@ figures, and none is read past them:
 
 - what stays in RAM (a JSON body, a form's text fields, the images API's
   files, which decode into arrays) against the bytes free beside the
-  models loaded, read from the pool's figures with no lock, at the copies
-  of it the read and the parse hold;
+  models loaded, read from the pool's figures with no lock, at what the
+  read and the parse hold at their peak: a JSON body is read into one
+  buffer and parsed once, in a worker thread, each step dropping the
+  copy before it, and a form is parsed as it arrives, each text field
+  priced at its own width;
 - a video job's form files, which go to disk, against the room left in
   the job store.
 
 A body with no Content-Length is read until it passes its figure, and
-refused there; a video form with none takes its room a step at a time. The gate's own checks of the media a JSON or images API
-body names run here, on the body read, as the gate runs them on every
-other route. A video form's text fields have no gate rule: the route's
-own checks of each field it reads are their check, and refuse a path or
-a URL where an image goes.
+refused there; a video form with none takes its room a step at a time.
+The gate's own checks of the media a JSON or images API body names run
+here, on the body read, as the gate runs them on every other route. A
+video form's text fields have no gate rule: the route's own checks of
+each field it reads are their check, and refuse a path or a URL where an
+image goes.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import functools
+import json
 import math
 import os
+import re
+import weakref
 
 from starlette.requests import Request
 
@@ -36,13 +45,11 @@ IMAGE_PATHS = frozenset(f"{p}/images/{r}" for p in ("/v1", "")
                         for r in ("generations", "edits", "variations"))
 VIDEO_PATHS = frozenset({"/v1/videos"})
 
-# A video form's text fields are held twice while the form is parsed:
-# Starlette's bytearray of each part, with its growth slack, and the str
-# it decodes to. The sum is priced at that factor, measured at 2.1; the
-# post-V6 parse change removes the copy. Once a text chunk is not ASCII
-# the str can take 4 bytes a character: measured at 6.1.
-FORM_TEXT_COPIES = 2.25
-FORM_TEXT_WIDE_COPIES = 6.25
+# Seconds a JSON body or a form may send nothing before its end:
+# past them, the read ends, and a form frees the room it holds in the job
+# store. Each chunk starts the wait again, so a slow client that keeps
+# sending reads to its end.
+STALL_S = 60.0
 
 
 class BodyRefused(Exception):
@@ -56,9 +63,17 @@ class BodyRefused(Exception):
 
     @property
     def headers(self) -> dict:
-        """A 413 leaves the body unread past its figure: the answer ends
-        the connection."""
-        return {"Connection": "close"} if self.status == 413 else {}
+        """A 413 or a 408 leaves the body unread past its figure: the
+        answer ends the connection."""
+        return {"Connection": "close"} if self.status in (408, 413) else {}
+
+
+def log_refusal(status: int, message: str) -> None:
+    """Print a refusal of a body or its media to the log, as the media
+    gate prints the refusals of the routes it reads."""
+    from .hardening import _log_refusal
+
+    _log_refusal(f"{status} {message}", message, status, kind="media")
 
 
 def reads_own_body(request) -> bool:
@@ -115,107 +130,623 @@ def content_length(request) -> int | None:
     return n
 
 
-def held(n: int, copies: float) -> int:
-    """The bytes a read of ``n`` bytes holds at ``copies`` copies."""
-    return math.ceil(n * copies)
-
-
 # Bytes a parsed JSON value holds past its text, 63.7 at most by tracemalloc.
 JSON_VALUE_BYTES = 80
-# The bytes a character of a str takes at most, in a body that is not
-# ASCII or holds a \u escape.
+# The bytes a character of a str takes at most.
 WIDE_CHAR_BYTES = 4
+# The bytes a read and a parse hold beside the figures priced: a chunk as
+# it arrives, a piece of a body escaped to ASCII, the objects' headers.
+_SLACK = 1 << 20
+# A str of a JSON body at most this long is priced with the text around
+# it; a longer one on its own.
+_LONG = 256
+# The strs of a body longer than _LONG, each matched after the run of
+# other text and shorter strs before it, so no str is matched from its
+# closing quote.
+_SKIP = rb'(?:[^"]++|"(?>(?:[^"\\]|\\.){0,%d})")*+' % _LONG
+_LONG_STR = re.compile(_SKIP + rb'("(?:[^"\\]++|\\.)*+")', re.S)
+# The text and shorter strs after the last long str: past them, a str with
+# no closing quote.
+_TAIL = re.compile(_SKIP, re.S)
+_HIGH = re.compile(rb"[\x80-\xff]")
+# What the escape to ASCII would change the parse of: a backslash, not
+# itself escaped, before a character that is not ASCII, which then makes
+# an escape of its own, and a surrogate encoded as UTF-8, which joins the
+# surrogate beside it.
+_NO_ESCAPE = re.compile(rb'(?<!\\)(?:\\\\)*\\[\x80-\xff]|\xed[\xa0-\xbf]')
+# The UTF-8 lead bytes of a character past U+FFFF, and of one past U+00FF.
+_LEAD4 = re.compile(rb"[\xf0-\xff]")
+_LEAD2 = re.compile(rb"[\xc4-\xef]")
+# What makes a str the parse is making take 2 bytes a character: a
+# character past U+00FF, or a \u escape of one that is not the first of a
+# surrogate pair. And what makes it take 4: a character past U+FFFF, or
+# the first of a surrogate pair.
+_WIDEN2 = re.compile(rb"[\xc4-\xef]|\\u(?!00)(?![dD][89abAB][0-9a-fA-F]{2}"
+                     rb"\\u[dD][c-fC-F])[0-9a-fA-F]{4}")
+_WIDEN4 = re.compile(rb"[\xf0-\xff]|\\u[dD][89abAB]")
+# The bytes a str decoded from UTF-8 holds for each byte decoded, by its
+# kind (:func:`_kind`): at the end of its decode, the str and the narrower
+# copy the decoder widens it from, by tracemalloc; once decoded, the str.
+_DECODE = {0: 1, 1: 2, 2: 3, 4: 6}
+_DECODED = {0: 1, 1: 1, 2: 2, 4: 4}
+_HIGH_BYTES = bytes(range(0x80, 0x100))
+_ASTRAL = re.compile(rb"\\U([0-9a-f]{8})")
+_NON_ASCII = re.compile(r"[^\x00-\x7f]+")
+# The bytes of a body escaped to ASCII at a time.
+_PIECE = 64 << 10
 
 
-def json_held(raw: bytes, copies: float, str_copies: float) -> int:
-    """The bytes a JSON body's read and parse hold: ``copies`` of its
-    length, of which ``str_copies`` are the strs it parses to, each at 4
-    bytes a character when the body is not ASCII or holds a ``\\u``
-    escape, and JSON_VALUE_BYTES for each value or container it can parse
-    to. A value or container starts the body or follows a ",", ":", "["
-    or "{", so their count bounds it, read with no parse."""
-    if not raw.isascii() or b"\\u" in raw:
-        copies += str_copies * (WIDE_CHAR_BYTES - 1)
-    count = (raw.count(b",") + raw.count(b":") + raw.count(b"[")
-             + raw.count(b"{"))
-    return held(len(raw), copies) + JSON_VALUE_BYTES * (count + 1)
+def _kind(buf) -> int:
+    """0 when UTF-8 ``buf`` is ASCII, else the bytes a character takes in
+    the str it decodes to, from the lead byte of its widest character."""
+    if buf.isascii():
+        return 0
+    return 4 if _LEAD4.search(buf) else 2 if _LEAD2.search(buf) else 1
 
 
-def _text_over_free(n: int, free: int, copies: float) -> BodyRefused:
-    """The 413 of a form whose text fields, ``n`` bytes so far, passed the
-    memory free at ``copies``."""
-    return BodyRefused(413, f"the text fields of this form are over "
-                       f"{_mib(n)}, their read holds {copies:g} times that, "
-                       f"and {_mib(free)} of memory is free beside the "
-                       "models loaded; send shorter text fields, or unload "
-                       "a model to make room")
+def _high_bytes(buf) -> int:
+    """The bytes of ``buf`` that are not ASCII, counted a piece at a
+    time."""
+    if buf.isascii():
+        return 0
+    mv = memoryview(buf)
+    return sum(len(p) - len(p.translate(None, _HIGH_BYTES))
+               for p in (bytes(mv[i:i + _PIECE])
+                         for i in range(0, len(buf), _PIECE)))
+
+
+def json_price(buf, verify: bool = False) -> int:
+    """The bytes the parse of the UTF-8 JSON body ``buf`` holds at its
+    peak, read from its bytes with no parse (:func:`_json_plan`)."""
+    return _json_plan(buf, verify)[0]
+
+
+def _verifies(path: str) -> bool:
+    """Whether the route of ``path`` verifies the inline images of its
+    JSON body with Pillow once parsed: the image edits and variations."""
+    return path.endswith(("/images/edits", "/images/variations"))
+
+
+def _json_plan(buf, verify: bool = False) -> tuple[int, int]:
+    """``(price, escape)``: the bytes the parse of the UTF-8 JSON body
+    ``buf`` holds at its peak, read from its bytes with no parse, and the
+    bytes of it that are not ASCII when the parse escapes it to ASCII
+    first, the way that holds less and parses the same, else 0. A str
+    takes the width of its widest character, so a body decoded as it is
+    takes the width of its widest at every character; a body escaped to
+    ASCII takes a byte at each, at 3 bytes for each byte that is not
+    ASCII. The strs the parse makes take their own width either way. Each
+    step holds:
+
+    - the escape: the body and its escaped copy;
+    - the decode: the body, escaped or not, and its str, with the
+      narrower copy the decoder widens it from;
+    - the parse: that str, every str it makes, JSON_VALUE_BYTES for each
+      value, and the str it is making, which grows past its end;
+    - an inline image or video decoded after the parse: every str, a
+      data URL's payload cut from its str, and the bytes it decodes to;
+      with ``verify``, an image's bytes once more, as Pillow verifies a
+      PNG whose pixels are one chunk.
+
+    A str the parse makes takes a byte for each byte of it, or
+    WIDE_CHAR_BYTES once it is not ASCII or holds a \\u escape. It grows
+    1.25 times past its end, and once a \\u escape widens it, to 6.25
+    times its characters with the narrow copy it widens from, by
+    tracemalloc; widened to 2 bytes a character then to 4, to 7.5 times
+    its characters with both narrower copies. A value or container starts
+    the body or follows a ",", ":", "[" or "{", so their count bounds the
+    values."""
+    n = len(buf)
+    high = _high_bytes(buf)
+    wide = high > 0 or buf.find(b"\\u") >= 0
+    strs = longs = 0
+    grows = decode = int(1.75 * _LONG * WIDE_CHAR_BYTES)
+    pos = 0
+    spans = []
+    while (m := _LONG_STR.match(buf, pos)) is not None:
+        spans.append(m.span(1))
+        pos = m.end()
+    # A str with no closing quote is made up to the end of the body.
+    tail = _TAIL.match(buf, pos).end()
+    if tail < n:
+        spans.append((tail, n))
+    for s, e in spans:
+        size = e - s
+        longs += size
+        u = buf.find(b"\\u", s, e) >= 0 or _HIGH.search(buf, s, e) is not None
+        own = size * WIDE_CHAR_BYTES if u else size
+        strs += own
+        if u:
+            two = _WIDEN2.search(buf, s, e)
+            twice = two is not None and _WIDEN4.search(
+                buf, two.end(), e) is not None
+            grows = max(grows, math.ceil(size * (3.5 if twice else 2.25)))
+        elif buf.find(b"\\", s, e) >= 0:
+            grows = max(grows, math.ceil(size * 0.25))
+        cut = own if buf.startswith(b'"data:', s) else 0
+        again = verify and buf.startswith(b'"data:image/', s)
+        decode = max(decode, cut + math.ceil(size * (1.5 if again else 0.75)))
+    strs += (n - longs) * (WIDE_CHAR_BYTES if wide else 1)
+    values = JSON_VALUE_BYTES * (sum(buf.count(c) for c in b",:[{") + 1)
+    after = strs + values + decode
+    # Decoded as it is, the str takes the width of the widest character.
+    kind = _kind(buf)
+    plain = max(n + n * _DECODE[kind],
+                n * _DECODED[kind] + strs + grows + values, after)
+    if not high or _NO_ESCAPE.search(buf):
+        return plain + _SLACK, 0
+    escaped = n + 2 * high
+    ascii_ = max(2 * n + 2 * high, 2 * escaped,
+                 escaped + strs + grows + values, after)
+    return min(plain, ascii_) + _SLACK, high if ascii_ < plain else 0
+
+
+def _escaped(buf, high: int):
+    """``buf``, a UTF-8 JSON body with ``high`` bytes that are not ASCII,
+    with each character that is not ASCII written as its \\u escape, as
+    ``json.dumps`` writes one, so the str it decodes to is ASCII and each
+    str the parse makes takes the width of its own characters. Bytes that
+    are not UTF-8 raise ValueError, as ``json.loads`` raises."""
+    # With no \x or \U in the body, every one after Python's backslash
+    # escape is one it wrote.
+    fast = buf.find(b"\\x") < 0 and buf.find(b"\\U") < 0
+    n = len(buf)
+    out = bytearray(n + 2 * high)
+    mv = memoryview(buf)
+    i = o = 0
+    while i < n:
+        j = min(i + _PIECE, n)
+        # End the piece on the first byte of a character.
+        while i < j < n and buf[j] & 0xC0 == 0x80:
+            j -= 1
+        if j == i:
+            j = min(i + _PIECE, n)
+        piece = bytes(mv[i:j])
+        if not piece.isascii():
+            try:
+                text = piece.decode("utf-8", "surrogatepass")
+            except UnicodeDecodeError as e:
+                raise ValueError(
+                    f"'utf-8' codec can't decode byte 0x{piece[e.start]:02x} "
+                    f"in position {i + e.start}: {e.reason}") from None
+            if fast:
+                piece = text.encode("ascii", "backslashreplace").replace(
+                    b"\\x", b"\\u00")
+                if b"\\U" in piece:
+                    piece = _ASTRAL.sub(_surrogates, piece)
+            else:
+                piece = _NON_ASCII.sub(lambda m: json.dumps(m.group())[1:-1],
+                                       text).encode("ascii")
+        out[o:o + len(piece)] = piece
+        o += len(piece)
+        i = j
+    mv.release()
+    del out[o:]
+    return out
+
+
+def _surrogates(m) -> bytes:
+    """The \\u escapes of the surrogate pair of a \\U escape."""
+    c = int(m.group(1), 16) - 0x10000
+    return b"\\u%04x\\u%04x" % (0xD800 + (c >> 10), 0xDC00 + (c & 0x3FF))
 
 
 def _over_free(n: int, free: int, sent: bool,
-               copies: float = 1) -> BodyRefused:
+               need: int | None = None) -> BodyRefused:
     size = _mib(n, True) if sent else f"over {_mib(n)}"
-    times = f", its read holds {copies:g} times that," if copies != 1 else ","
-    return BodyRefused(413, f"the request body is {size}{times} and "
+    hold = (f", its read and parse hold at least {_mib(need, True)},"
+            if need is not None else ",")
+    return BodyRefused(413, f"the request body is {size}{hold} and "
                        f"{_mib(free)} of memory is free beside the models "
                        "loaded; send a smaller body, or unload a model to "
                        "make room")
 
 
-async def read_in_ram(request: Request, free: int | None = None,
-                      copies: float = 1,
-                      str_copies: float | None = None) -> bytes:
-    """The body of ``request``, priced against ``free`` bytes (the pool's
-    free figure when None) before a byte of it is read, at the ``copies``
-    of it the route's read and parse hold. A body with no Content-Length
-    is refused once what arrived, at that factor, passes the figure. A
-    JSON body, whose parse makes ``str_copies`` of its strs, is priced
-    again once read and before it is parsed, with the width of its strs
-    and the values it can parse to (:func:`json_held`). The body
-    read is kept on the request, so ``request.form()`` and
-    ``request.json()`` parse it after."""
+def _text_over_free(n: int, free: int, need: int) -> BodyRefused:
+    """The 413 of a form whose text fields, ``n`` bytes so far, hold
+    ``need`` bytes as they are parsed, past the memory free."""
+    return BodyRefused(413, f"the text fields of this form are over "
+                       f"{_mib(n)}, their read and parse hold "
+                       f"{_mib(need, True)}, and {_mib(free)} of memory is "
+                       "free beside the models loaded; send shorter text "
+                       "fields, or unload a model to make room")
+
+
+class _TextPrice:
+    """The bytes a form's text fields hold as they are parsed: each field
+    read, as the str it decoded to, and the field arriving, as its bytes
+    with the room the bytearray grows by and the str they decode to at
+    its end. Each str takes the width of its own widest character
+    (:data:`_DECODE`)."""
+
+    # The room a bytearray holds past its bytes as it grows, one eighth.
+    GROW = 1.125
+
+    def __init__(self) -> None:
+        self.read = self.done = self.size = self.kind = 0
+
+    def add(self, chunk: bytes) -> int:
+        """Count ``chunk`` of the field arriving; answer what all hold."""
+        self.read += len(chunk)
+        self.size += len(chunk)
+        self.kind = max(self.kind, _kind(chunk))
+        return self.held()
+
+    def end(self) -> None:
+        """The field arriving ends: it is now its str."""
+        self.done += self.size * _DECODED[self.kind]
+        self.size = self.kind = 0
+
+    def held(self) -> int:
+        return (self.done + math.ceil(self.size * self.GROW)
+                + self.size * _DECODE[self.kind] + _SLACK)
+
+
+def _text_decode(value: str) -> int:
+    """The bytes the base64 decode of a form's text field ``value`` holds
+    beside it: a data URL's payload cut from it, at its own width, and the
+    bytes it decodes to."""
+    n = len(value)
+    cut = (n if value.isascii() else WIDE_CHAR_BYTES * n) \
+        if value.startswith("data:") else 0
+    return cut + math.ceil(n * 0.75)
+
+
+def _min_price(n: int) -> int:
+    """The least a JSON body of ``n`` bytes holds as it is parsed: its
+    bytes and their str, beside each other at the decode."""
+    return 2 * n
+
+
+async def _read_bytes(request: Request, n: int | None,
+                      free: int | None) -> bytearray:
+    """The body of ``request`` in one bytearray. It is held as pieces of
+    _PIECE bytes or more, joined from its chunks as they arrive, until
+    its end, so a client holds only the bytes it sent, however small its
+    chunks, then moved into one, a piece at a time: at most the body
+    twice, its read's price. A body past its Content-Length ``n`` is
+    refused, and one with no length once :func:`_min_price` of what
+    arrived passes ``free``. Each chunk waits STALL_S seconds at most."""
+    pieces, size = [], 0
+    pending = bytearray()
+    it = request.stream().__aiter__()
+    while True:
+        try:
+            chunk = await _within(STALL_S, it.__anext__())
+        except StopAsyncIteration:
+            break
+        except TimeoutError:
+            raise _stalled(STALL_S, size, n, form=False) from None
+        size += len(chunk)
+        if n is not None and size > n:
+            raise BodyRefused(400, "the request body is longer than its "
+                              "Content-Length")
+        if n is None and free is not None and _min_price(size) > free:
+            raise _over_free(size, free, False, _min_price(size))
+        if len(chunk) >= _PIECE and not pending:
+            pieces.append(chunk)
+            continue
+        pending += chunk
+        if len(pending) >= _PIECE:
+            pieces.append(bytes(pending))
+            pending = bytearray()
+    if pending:
+        pieces.append(bytes(pending))
+    del pending
+    buf = bytearray(size)
+    pieces.reverse()
+    got = 0
+    while pieces:
+        piece = pieces.pop()
+        buf[got:got + len(piece)] = piece
+        got += len(piece)
+    return buf
+
+
+# One parse turn for each event loop: the server runs one.
+_TURNS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+async def _in_turn(fn, *args):
+    """``fn(*args)`` in a worker thread, one at a time. Each body is priced
+    against the same free figure, which books nothing, so the work its
+    price counts runs here: a JSON parse and the gate's checks, the decode
+    of a video job's keyframes and an images form's files. Two such peaks
+    never run at once. The wait is on the loop and books no memory. The
+    turn ends when the thread does, past a cancel of the request."""
+    loop = asyncio.get_running_loop()
+    turn = _TURNS.get(loop)
+    if turn is None:
+        turn = _TURNS[loop] = asyncio.Semaphore(1)
+    await turn.acquire()
+    try:
+        task = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    except BaseException:
+        turn.release()
+        raise
+
+    def ended(task) -> None:
+        turn.release()
+        # A cancelled request never reads what its thread raised.
+        if not task.cancelled():
+            task.exception()
+    task.add_done_callback(ended)
+    return await asyncio.shield(task)
+
+
+def _parse(box: list, path: str, ctype: str | None, free: int | None,
+           inline_only: bool, parsed, then=None):
+    """The JSON document of the body in ``box``, which this takes, so the
+    body is freed as its parse goes: priced against ``free``, escaped to
+    ASCII, decoded and parsed once, then held to the media gate's checks,
+    and ``then(doc, price)`` in its place with ``then``, ``price`` the
+    bytes the parse was priced at. ``parsed`` is the length and document
+    of a body the session socket parsed already. Runs in a worker
+    thread."""
+    from .media_gate import (
+        _MULTIPART,
+        _URLENCODED,
+        MediaRefused,
+        body_priced,
+        check_json,
+        form_type,
+    )
+
+    kind = form_type(ctype)
+    if kind == _MULTIPART:
+        raise BodyRefused(400, "this route takes a JSON body, not a "
+                          "multipart form")
+    if parsed is not None and parsed[0] == len(box[0]):
+        price = 0 if then is None else json_price(box[0], _verifies(path))
+        box.clear()
+        doc = parsed[1]
+    else:
+        try:
+            doc, price = _loads(box, free, _verifies(path))
+        except RecursionError:
+            raise BodyRefused(400, "the request body nests too deeply") \
+                from None
+        except ValueError as e:
+            if kind == _URLENCODED:
+                raise BodyRefused(400, "this route takes a JSON body, not "
+                                  "a form") from None
+            raise BodyRefused(400, f"the request body is not valid JSON "
+                              f"({e})") from None
+    try:
+        with body_priced():
+            check_json(doc, path, inline_only=inline_only)
+    except MediaRefused as e:
+        raise BodyRefused(400, str(e), e.param) from None
+    return doc if then is None else then(doc, price)
+
+
+def _loads(box: list, free: int | None, verify: bool = False):
+    """``(doc, price)``: the document of the JSON body in ``box``, which
+    this takes, priced against ``free`` (:func:`json_price`), escaped to
+    ASCII, decoded and parsed once, and that price. Each step drops the
+    copy before it."""
+    buf = box.pop()
+    encoding = json.detect_encoding(bytes(buf[:4]))
+    wide = 0
+    if encoding == "utf-8-sig":
+        del buf[:3]
+    elif encoding != "utf-8":
+        # A UTF-16 or UTF-32 body, as json.loads reads one: the body, its
+        # str, at most twice its bytes, and that str in UTF-8, at most 1.5
+        # times.
+        need = math.ceil(4.5 * len(buf)) + _SLACK
+        if free is not None and need > free:
+            raise _parse_over_free(len(buf), need, free)
+        buf = buf.decode(encoding).encode("utf-8", "surrogatepass")
+        wide = need
+    need, high = _json_plan(buf, verify)
+    if free is not None and need > free:
+        raise _parse_over_free(len(buf), need, free)
+    if high:
+        buf = _escaped(buf, high)
+    text = buf.decode("utf-8", "surrogatepass")
+    del buf
+    return json.loads(text), max(need, wide)
+
+
+def loads_field(text: str, name: str, free: int | None):
+    """The JSON value of a form's text field ``name``, priced as a JSON
+    body is (:func:`json_price`), beside the field's own str, against
+    ``free`` bytes (the pool's figure when None), and refused with a 413
+    before its parse past them; a field that is no JSON is ValueError.
+    Runs in a worker thread, in the parse turn (:func:`_in_turn`)."""
+    if free is None:
+        free = free_bytes()
+    buf = bytearray(text.encode("utf-8", "surrogatepass"))
+    held = len(text) * (WIDE_CHAR_BYTES if not text.isascii() else 1)
+    if free is not None:
+        need = _json_plan(buf)[0] + held
+        if need > free:
+            raise BodyRefused(413, f"{name} is {_mib(len(buf), True)}, its "
+                              f"parse holds {_mib(need, True)} with the "
+                              f"values it parses to, and {_mib(free)} of "
+                              "memory is free beside the models loaded; "
+                              f"send a shorter {name}, or unload a model "
+                              "to make room", name)
+    try:
+        return _loads([buf], None)[0]
+    except RecursionError:
+        raise ValueError(f"{name} nests too deeply") from None
+
+
+def _parse_over_free(n: int, need: int, free: int) -> BodyRefused:
+    return BodyRefused(413, f"the request body is {_mib(n, True)}, its read "
+                       f"and parse hold {_mib(need, True)} with the values "
+                       f"it parses to, and {_mib(free)} of memory is free "
+                       "beside the models loaded; send a smaller body, or "
+                       "unload a model to make room")
+
+
+async def read_json(request: Request, free: int | None = None, then=None):
+    """The JSON document of the body of ``request``, ``{}`` for an empty
+    body, held to the media gate's checks as the gate holds every route it
+    reads, or ``then(doc, price)`` with ``then``, ``price`` the bytes the
+    body was priced at, which runs in the parse's worker thread, so the
+    route's own decode of the media the body carries runs there too. The body is priced against ``free`` bytes (the pool's free
+    figure when None): at :func:`_min_price` of its Content-Length before
+    a byte of it is read, or of what arrived as a body with none arrives,
+    then at :func:`json_price` once read. The price, the parse and the
+    checks run in a worker thread, one body at a time (:func:`_in_turn`),
+    which holds the only reference to the body. The body was priced
+    whole, so an inline image takes no byte limit of its own; the item
+    count and the pixel limits hold."""
+    from ._common import SESSION_BODY_KEY, SESSION_SCOPE_KEY
+
     if free is None:
         free = free_bytes()
     n = content_length(request)
-    if n is not None and free is not None and held(n, copies) > free:
-        raise _over_free(n, free, True, copies)
-    chunks, size = [], 0
-    async for chunk in request.stream():
-        size += len(chunk)
-        if free is not None and held(size, copies) > free:
-            raise _over_free(size, free, False, copies)
-        chunks.append(chunk)
-    raw = b"".join(chunks)
-    if str_copies is not None and free is not None:
-        need = json_held(raw, copies, str_copies)
-        if need > free:
-            raise BodyRefused(413, f"the request body is "
-                              f"{_mib(len(raw), True)}, its read and parse "
-                              f"hold {_mib(need, True)} with the values it "
-                              f"parses to, and {_mib(free)} of memory is "
-                              "free beside the models loaded; send a "
-                              "smaller body, or unload a model to make room")
-    request._body = raw
-    return raw
-
-
-async def check_media(request: Request, raw: bytes) -> None:
-    """The media gate's checks of the body ``raw``, as the gate runs them
-    on every route it reads: a media reference the server does not take,
-    a form sent to a route that takes JSON, a body that is not JSON. The
-    body was priced whole, so an inline image takes no byte limit of its
-    own; the item count and the pixel limits hold."""
-    from ._common import SESSION_BODY_KEY, SESSION_SCOPE_KEY
-    from .media_gate import MediaRefused, body_priced, check_request
-
+    if n is not None and free is not None and _min_price(n) > free:
+        raise _over_free(n, free, True, _min_price(n))
+    box = [await _read_bytes(request, n, free)]
     session = request.scope.get(SESSION_SCOPE_KEY) is not None
     parsed = request.scope.pop(SESSION_BODY_KEY, None)
+    if not box[0]:
+        return {} if then is None else then({}, 0)
+    return await _in_turn(
+        _parse, box, request.url.path, request.headers.get("content-type"),
+        free, session, parsed, then)
+
+
+async def read_form_in_ram(request: Request, free: int | None = None,
+                           max_files: int = 64):
+    """The multipart form of ``request``, parsed as it arrives with no
+    copy of its body held, its text fields held to the media gate's checks
+    as the gate holds every route it reads. Its text fields are priced
+    against ``free`` bytes (the pool's figure when None) as they arrive,
+    each at its own width (:class:`_TextPrice`), with the files spooled
+    beside them; once parsed, with the largest file, which the route reads
+    whole. A Content-Length past the figure is refused before the read,
+    and a body with none once the bytes arrived pass it. Each chunk waits
+    STALL_S seconds at most. The form's ``price`` is the bytes its read and
+    parse were priced at."""
+    from starlette.formparsers import MultiPartParser
+    from starlette.requests import ClientDisconnect
+
+    from ._common import SESSION_SCOPE_KEY
+    from .media_gate import _FORM_ROUTES, MediaRefused, check_form_fields
+
+    path = request.url.path
+    if not path.endswith(_FORM_ROUTES):
+        raise BodyRefused(400, "this route takes a JSON body, not a "
+                          "multipart form")
+    if free is None:
+        free = free_bytes()
+    n = content_length(request)
+    if n is not None and free is not None and n > free:
+        raise _over_free(n, free, True)
+    text = _TextPrice()
+    spool = MultiPartParser.spool_max_size
+    files: list = []
+
+    def spooled(moving: bool = False) -> int:
+        # A file holds its bytes in RAM up to the spool's size, with the
+        # room its buffer grows by, and none once it moves to disk; as it
+        # moves, that buffer and a copy of its bytes.
+        held = sum(f for f in files if f <= spool)
+        return math.ceil(held * _TextPrice.GROW) + (
+            math.ceil(spool * _TextPrice.GROW) + spool if moving else 0)
+
+    def check(need: int, largest: int = 0) -> None:
+        if free is None or need <= free:
+            return
+        what = (f"the largest file of this form is {_mib(largest, True)}, "
+                f"its read holds {_mib(need, True)} beside the text fields "
+                "and the files spooled" if largest else
+                f"the text fields of this form are over {_mib(text.read)}, "
+                f"their read and parse hold {_mib(need, True)} with the "
+                "files spooled")
+        raise BodyRefused(413, f"{what}, and {_mib(free)} of memory is free "
+                          "beside the models loaded; send shorter text "
+                          "fields or smaller files, or unload a model to "
+                          "make room")
+
+    class _Priced(MultiPartParser):
+        def on_part_data(self, data: bytes, start: int, end: int) -> None:
+            if self._current_part.file is None:
+                check(text.add(data[start:end]) + spooled())
+            else:
+                before = files[-1]
+                files[-1] += end - start
+                # The largest file is read whole once parsed: a body
+                # past the memory free is refused as it passes, as its
+                # Content-Length is.
+                got = text.read + sum(files)
+                if free is not None and got > free:
+                    raise _over_free(got, free, False)
+                check(text.held() + spooled(before <= spool < files[-1]))
+            super().on_part_data(data, start, end)
+
+        def on_part_end(self) -> None:
+            if self._current_part.file is None:
+                text.end()
+            super().on_part_end()
+
+        def on_headers_finished(self) -> None:
+            super().on_headers_finished()
+            if self._current_part.file is not None:
+                files.append(0)
+
+    async def stream():
+        got = 0
+        chunks = request.stream().__aiter__()
+        while True:
+            try:
+                chunk = await _within(STALL_S, chunks.__anext__())
+            except StopAsyncIteration:
+                return
+            except TimeoutError:
+                raise _stalled(STALL_S, got, n, form=False) from None
+            got += len(chunk)
+            yield chunk
+
+    parser = _Priced(request.headers, stream(), max_files=max_files,
+                     max_part_size=n if n else 1 << 62)
     try:
-        with body_priced():
-            await check_request(request.method, request.url.path,
-                                request.headers, raw, inline_only=session,
-                                parsed=parsed)
-    except MediaRefused as e:
-        raise BodyRefused(400, str(e), e.param) from None
+        form = await parser.parse()
+    except (BodyRefused, ClientDisconnect):
+        for f in parser._files_to_close_on_error:
+            f.close()
+        raise
+    except Exception as e:  # noqa: BLE001 - as the gate's form parse
+        for f in parser._files_to_close_on_error:
+            f.close()
+        raise BodyRefused(400, f"the multipart form cannot be read: {e}") \
+            from None
+    # A body that ends inside a file leaves that file out of the form.
+    kept = {id(v.file) for _, v in form.multi_items()
+            if not isinstance(v, str)}
+    for f in parser._files_to_close_on_error:
+        if id(f) not in kept:
+            f.close()
+    # The parser holds the bytes of the last part it read.
+    del parser
+    try:
+        largest = max(files, default=0)
+        check(text.held() + spooled() + largest, largest)
+        fields = [(k, v) for k, v in form.multi_items() if isinstance(v, str)]
+        # The gate decodes an image sent in a text field, one at a time:
+        # a data URL's payload cut from its str, and the bytes it decodes
+        # to.
+        decode = max((_text_decode(v) for k, v in fields
+                      if k == "image" or v.startswith("data:")), default=0)
+        check(text.held() + spooled() + decode)
+        form.price = text.held() + spooled() + max(largest, decode)
+        try:
+            # Off the loop: the gate decodes an image in a text field.
+            await _in_turn(functools.partial(
+                check_form_fields, fields, path,
+                inline_only=request.scope.get(SESSION_SCOPE_KEY) is not None))
+        except MediaRefused as e:
+            raise BodyRefused(400, str(e), e.param) from None
+    except BaseException:
+        await form.close()
+        raise
+    return form
 
 
 def arriving_note(arriving: int) -> str:
@@ -238,11 +769,38 @@ def _over_room(n: int | None, room: int, arriving: int = 0) -> BodyRefused:
                        "server.video.store_max_bytes")
 
 
+async def _within(timeout: float, aw):
+    """The wait for a body's next chunk, ``timeout`` seconds at most."""
+    # Not asyncio.wait_for: on 3.11 its inner task keeps the stream's end
+    # in a cycle with the reader's frame, so the body outlives its read
+    # until the gc runs, past the price.
+    async with asyncio.timeout(timeout):
+        return await aw
+
+
+def _stalled(stall: float, got: int, n: int | None,
+             form: bool = True) -> BodyRefused:
+    """The 408 of a video form, or a JSON body, that sent nothing for
+    ``stall`` seconds, ``got`` bytes into its Content-Length ``n`` (None
+    with none sent)."""
+    left = (f" with {_mib(n - got, True)} of it still to come"
+            if n is not None else "")
+    if not form:
+        return BodyRefused(408, f"the request body sent nothing for "
+                           f"{stall:g} s{left}, so the server ended the "
+                           "request; send it again")
+    return BodyRefused(408, f"the form sent nothing for {stall:g} s"
+                       f"{left}, so the server ended the request and freed "
+                       "the room it held in the video job store; send the "
+                       "form again")
+
+
 async def read_form_to_disk(request: Request, folder: str, take,
                             free: int | None = None) -> tuple[list, dict]:
     """``(fields, files)`` of a multipart form: its text fields (name,
-    value) in RAM, priced together against ``free`` bytes (the pool's
-    figure when None) as they arrive, and its files written to
+    value) in RAM, priced against ``free`` bytes (the pool's figure when
+    None) as they arrive, each at its own width (:class:`_TextPrice`),
+    and its files written to
     ``folder``, by field name, each as ``NAME.part`` while it arrives and
     renamed once whole. ``await take(n)`` reserves the body's ``n`` bytes
     of the room left in the job store before the read and answers ``(ok,
@@ -251,7 +809,9 @@ async def read_form_to_disk(request: Request, folder: str, take,
     reserves a step with ``take(None)`` before its first byte and another
     each time the bytes arrived pass what it holds, so it holds the room
     as its body comes, and the read stops where a step does not fit. A
-    refusal or a failed read removes every file it began."""
+    form that sends nothing for STALL_S seconds is refused with a 408. A
+    refusal or a failed read removes every file it began, and a body that
+    ends inside a file removes that file."""
     from starlette.datastructures import UploadFile
     from starlette.formparsers import MultiPartException, MultiPartParser
     from starlette.requests import ClientDisconnect
@@ -264,9 +824,9 @@ async def read_form_to_disk(request: Request, folder: str, take,
         raise _over_room(n, room, arriving)
     os.makedirs(folder, exist_ok=True)
     began: list = []
+    opened: list = []
     names: dict = {}
-    text = [0]
-    wide = [False]
+    text = _TextPrice()
 
     class _ToDisk(MultiPartParser):
         def on_headers_finished(self) -> None:
@@ -285,25 +845,36 @@ async def read_form_to_disk(request: Request, folder: str, take,
             part.file = UploadFile(open(path, "wb+"),  # noqa: SIM115
                                    filename=part.file.filename,
                                    headers=part.file.headers)
+            opened.append(part.file.file)
 
         def on_part_data(self, data: bytes, start: int, end: int) -> None:
             part = self._current_part
             if part.file is not None:
                 super().on_part_data(data, start, end)
                 return
-            # The text fields stay in RAM: their sum is priced, not each,
-            # at the copies the parse holds, wide once a chunk is not ASCII.
+            # The text fields stay in RAM, each priced at its own width.
             chunk = data[start:end]
-            text[0] += len(chunk)
-            wide[0] = wide[0] or not chunk.isascii()
-            copies = FORM_TEXT_WIDE_COPIES if wide[0] else FORM_TEXT_COPIES
-            if free is not None and held(text[0], copies) > free:
-                raise _text_over_free(text[0], free, copies)
+            need = text.add(chunk)
+            if free is not None and need > free:
+                raise _text_over_free(text.read, free, need)
             part.data.extend(chunk)
+
+        def on_part_end(self) -> None:
+            if self._current_part.file is None:
+                text.end()
+            super().on_part_end()
 
     async def stream():
         held, got = room, 0
-        async for chunk in request.stream():
+        chunks = request.stream().__aiter__()
+        while True:
+            stall = STALL_S
+            try:
+                chunk = await _within(stall, chunks.__anext__())
+            except StopAsyncIteration:
+                return
+            except TimeoutError:
+                raise _stalled(stall, got, n) from None
             got += len(chunk)
             while got > held:
                 ok, more, arriving = ((False, 0, 0) if n is not None
@@ -336,8 +907,17 @@ async def read_form_to_disk(request: Request, folder: str, take,
             done = names[key][:-len(".part")]
             os.replace(names[key], done)
             files[key] = done
+        # A body that ends inside a file leaves that file out of the form.
+        for f in opened:
+            f.close()
+        for name, path in names.items():
+            if name not in files:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(path)
         return fields, files
     except BaseException:
+        for f in opened:
+            f.close()
         for path in began:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)

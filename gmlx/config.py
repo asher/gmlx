@@ -1348,13 +1348,15 @@ class ResolvedVideoModel:
 
 
 # Path resolution
-def resolve_path(p: str | None, model_dirs: list[str]) -> str | None:
+def resolve_path(p: str | None, model_dirs: list[str], *,
+                 cwd: bool = True) -> str | None:
     """Resolve a model/mmproj/draft path. ``None`` passes through. An
     ``hf:<org>/<repo>/<file.gguf>[@rev]`` ref resolves to its file in the **local**
     Hugging Face cache (never the network). An absolute or ``~``/``$VAR`` path is
     expanded and returned as-is; a bare/relative path is searched against
-    ``model_dirs`` in order (first existing match wins). A miss raises a
-    :class:`ConfigError` listing the roots searched (or the `pull` fix for an hf ref)."""
+    ``model_dirs`` in order (first existing match wins), then, with ``cwd``,
+    against the working directory. A miss raises a :class:`ConfigError`
+    listing the roots searched (or the `pull` fix for an hf ref)."""
     if p is None:
         return None
     if isinstance(p, str) and p.startswith("hf:"):
@@ -1369,7 +1371,7 @@ def resolve_path(p: str | None, model_dirs: list[str]) -> str | None:
             return os.path.abspath(cand)
     # Last resort: relative to cwd (lets a bare run work without model_dirs); only if
     # it exists, else report the misses so the user knows where we looked.
-    if os.path.exists(expanded):
+    if cwd and os.path.exists(expanded):
         return os.path.abspath(expanded)
     searched = roots or ["<no model_dirs set>"]
     raise MissingModelFile(
@@ -2661,9 +2663,13 @@ def _parse_systemone(raw) -> SystemoneCfg:
 
 def _coerce_num(key: str, v, cast, *, where: str = "server"):
     """Coerce a numeric config key (YAML may carry it quoted as a string),
-    raising a ConfigError naming the key and the bad value. ``None`` passes."""
+    raising a ConfigError naming the key and the bad value. ``None`` passes.
+    An int key refuses a fraction, which the cast would cut."""
     if v is None:
         return None
+    if cast is int and isinstance(v, float) and not v.is_integer():
+        raise ConfigError(f"{where}.{key}: expected a whole number, got "
+                          f"{v!r}")
     try:
         if isinstance(v, bool):   # bool is an int subclass; `port: true` is a typo
             raise ValueError
@@ -3179,15 +3185,9 @@ def _parse_assistant(raw) -> AssistantCfg:
     _warn_unknown_keys("assistant", raw, _ASSISTANT_KEYS, strict=True)
 
     def num(where: str, v, cast, default, minimum):
+        v = _coerce_num(where, v, cast, where="assistant")
         if v is None:
             return default
-        try:
-            if isinstance(v, bool):
-                raise ValueError
-            v = cast(v)
-        except (TypeError, ValueError):
-            raise ConfigError(
-                f"assistant.{where}: expected a {cast.__name__}, got {v!r}")
         if v < minimum:
             raise ConfigError(f"assistant.{where}: must be >= {minimum}")
         return v
@@ -3277,14 +3277,8 @@ def _parse_talk(raw) -> TalkCfg:
     _warn_unknown_keys("talk.vad", vad_raw, _TALK_VAD_KEYS, strict=True)
 
     def num(where: str, v, cast, default):
-        if v is None:
-            return default
-        try:
-            if isinstance(v, bool):
-                raise ValueError
-            return cast(v)
-        except (TypeError, ValueError):
-            raise ConfigError(f"talk.{where}: expected a {cast.__name__}, got {v!r}")
+        v = _coerce_num(where, v, cast, where="talk")
+        return default if v is None else v
 
     mode = str(raw.get("mode", "wake")).strip().lower()
     if mode not in TALK_MODES:

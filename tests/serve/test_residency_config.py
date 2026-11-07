@@ -165,12 +165,31 @@ def test_build_spec_does_not_leak_to_sibling_build():
 def test_reaper_unloads_idle_nonpinned_when_drained():
     clock = _Clock(1000.0)
     _proxy, pool, _seen, teardowns = make_pool(in_flight=0, clock=clock)
-    _acq(pool, "/m/a.gguf", ttl=900)
+    pool.release(_acq(pool, "/m/a.gguf", ttl=900))  # request done
     clock.t = 1000 + 901                           # idle past ttl
     reaped = pool.reap_idle()
     assert reaped == ["/m/a.gguf"]
     assert teardowns == ["/m/a.gguf"]
     assert pool.stats()["resident"] == []
+
+
+def test_reaper_keeps_a_chat_model_held_by_a_job_outside_the_requests():
+    """A video job rewrites its prompt through a chat model on its driver
+    thread, where no request is in flight, and the caption can outlast
+    the model's TTL. The job's hold keeps the model until the caption
+    ends. A preload's lifetime hold keeps none."""
+    clock = _Clock(1000.0)
+    _proxy, pool, _seen, teardowns = make_pool(in_flight=0, clock=clock)
+    up = pool.acquire("/m/up.gguf", None, "auto", ttl=900)
+    pre = pool.acquire("/m/pre.gguf", None, "auto", ttl=900)
+    preload = residency._BusyHold(pool, pre)
+    pool.mark_retained(preload)
+    clock.t = 1000 + 901
+    assert pool.reap_idle() == ["/m/pre.gguf"]
+    assert teardowns == ["/m/pre.gguf"]
+    pool.release(up)
+    assert pool.reap_idle() == ["/m/up.gguf"]
+    assert preload._entry is pre
 
 
 def test_reaper_skips_within_ttl():
@@ -415,7 +434,7 @@ def test_kept_path_survives_the_reaper():
 def test_unkeep_re_arms_the_reaper():
     clock = _Clock(1000.0)
     _proxy, pool, _seen, teardowns = make_pool(in_flight=0, clock=clock)
-    _acq(pool, "/m/a.gguf", ttl=900)
+    pool.release(_acq(pool, "/m/a.gguf", ttl=900))
     pool.set_keep("/m/a.gguf", True)
     pool.set_keep("/m/a.gguf", False)              # release the keep
     clock.t = 1000 + 901
@@ -431,7 +450,7 @@ def test_evict_drops_the_keep_mark():
     pool.release(e)                                # request done -> evictable
     assert pool.evict("/m/a.gguf") is True
     # a later reload of the same path is NOT silently re-kept - the ttl governs again
-    _acq(pool, "/m/a.gguf", ttl=900)
+    pool.release(_acq(pool, "/m/a.gguf", ttl=900))
     clock.t = 1000 + 901
     assert pool.reap_idle() == ["/m/a.gguf"]
 

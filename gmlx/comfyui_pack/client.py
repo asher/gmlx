@@ -313,15 +313,27 @@ class StepClient:
                 log.debug("gmlx: %s %s on a reused connection failed (%r); retrying",
                           method, path, e)
                 continue
+            sent = None
             try:
                 if body:
-                    conn.send(body)
+                    try:
+                        conn.send(body)
+                    except (ConnectionError, OSError) as e:
+                        if isinstance(e, TimeoutError):
+                            raise
+                        # A server that refuses a body by its length, such
+                        # as a 413 past its limit, answers and closes before
+                        # it reads it: its answer is still there to read.
+                        sent = e
                 r = conn.getresponse()
                 data = r.read()
             except (ConnectionError, http.client.HTTPException, OSError) as e:
                 # The server may have read the request, so it is never resent.
                 conn.close()
-                raise self._lost(method, path, e) from None
+                raise self._lost(method, path, sent or e) from None
+            if sent is not None:
+                conn.close()
+                return r.status, {k.lower(): v for k, v in r.getheaders()}, data
             if r.getheader("Connection", "").lower() == "close":
                 conn.close()
             else:

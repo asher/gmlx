@@ -20,9 +20,11 @@ takes its LoRA turn, samples and decodes, as the pack's steps do.
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import threading
@@ -39,8 +41,14 @@ QUEUED, RUNNING, DONE, FAILED, CANCELLED = (
 ENDED = frozenset({DONE, FAILED, CANCELLED})
 # Retry-After of a full queue with no clip timed yet.
 FIRST_RETRY_S = 60
+# The phase of the prompt encode, and the phases that can come before it.
+ENCODING = "encoding the prompt"
+_BEFORE_ENCODE = frozenset({"reading the inputs", "rewriting the prompt",
+                            "loading the model", "waiting for memory"})
 # The LoRA turn's subject in its refusals.
 JOB = "the LoRA factors of this video job"
+# A job's id, as :meth:`VideoJobs.new_id` makes it.
+_JOB_ID = re.compile(r"video_[0-9a-f]{32}")
 
 
 class JobFailed(Exception):
@@ -76,6 +84,8 @@ class Job:
     started: float | None = None
     # The encode's results, kept across a wait for memory.
     kept: dict = field(default_factory=dict)
+    # Whether the prompt encode began: progress counts 5 from it.
+    encoding: bool = False
 
 
 def default_root(port=None) -> str:
@@ -159,7 +169,10 @@ class VideoJobs:
         return path
 
     def inputs(self, jid: str) -> str:
-        return os.path.join(self._dir("inputs"), jid)
+        """The folder of job ``jid``'s inputs, made by no one here: a POST
+        makes inputs/ at :meth:`begin`, past its refusals."""
+        assert self.root is not None
+        return os.path.join(self.root, "inputs", jid)
 
     def clip(self, jid: str) -> str:
         return os.path.join(self._dir("files"), f"{jid}.mp4")
@@ -176,8 +189,7 @@ class VideoJobs:
         os.replace(part, path)
 
     def _drop_inputs(self, jid: str) -> None:
-        shutil.rmtree(os.path.join(self._dir("inputs"), jid),
-                      ignore_errors=True)
+        shutil.rmtree(self.inputs(jid), ignore_errors=True)
 
     def _forget(self, jid: str) -> None:
         """Remove a job's record, inputs and clip; under ``lock``."""
@@ -213,15 +225,17 @@ class VideoJobs:
             folder = self._dir("jobs")
             for name in os.listdir(folder):
                 path = os.path.join(folder, name)
-                if not name.endswith(".json"):
-                    with contextlib.suppress(OSError):
-                        os.unlink(path)
-                    continue
-                try:
-                    with open(path, encoding="utf-8") as f:
-                        record = json.load(f)
-                    jid = record["id"]
-                except (OSError, ValueError, KeyError, TypeError):
+                jid = name[:-len(".json")]
+                record = None
+                if name.endswith(".json") and _JOB_ID.fullmatch(jid):
+                    try:
+                        with open(path, encoding="utf-8") as f:
+                            record = json.load(f)
+                    except (OSError, ValueError):
+                        pass
+                # A job's files are named by its id: a record that is not
+                # its own file's, such as a copy, is no job.
+                if not isinstance(record, dict) or record.get("id") != jid:
                     with contextlib.suppress(OSError):
                         os.unlink(path)
                     continue
@@ -242,6 +256,9 @@ class VideoJobs:
                 if name.endswith(".part"):
                     with contextlib.suppress(OSError):
                         os.unlink(os.path.join(self._dir("files"), name))
+            # The links of answers a past server was sending.
+            shutil.rmtree(os.path.join(self.root, "serving"),
+                          ignore_errors=True)
 
     def _bytes(self, path: str) -> int:
         try:
@@ -286,7 +303,7 @@ class VideoJobs:
             for _at, jid in done:
                 if total <= self.settings.store_max_bytes:
                     break
-                if self.clip(jid) == keep:
+                if self.clip(jid) == keep or self._sending(self.clip(jid)):
                     continue
                 total -= self._bytes(self.clip(jid))
                 self._forget(jid)
@@ -295,13 +312,39 @@ class VideoJobs:
 
     def _held(self) -> int:
         """The bytes on disk and reserved: the clips, the inputs of the
-        jobs, and the reservation of each POST still arriving in place of
-        what it wrote so far. Under ``lock``."""
+        jobs, the clips a DELETE or the sweep removed that an answer still
+        sends through its link, and the reservation of each POST still
+        arriving in place of what it wrote so far. Under ``lock``."""
         inputs = self._dir("inputs")
         return (self._bytes(self._dir("files"))
                 + sum(self._bytes(os.path.join(inputs, n))
                       for n in os.listdir(inputs) if n not in self.pending)
+                + self._sent_bytes()
                 + sum(self.pending.values()))
+
+    @staticmethod
+    def _sending(clip: str) -> bool:
+        """Whether an answer still sends ``clip`` through a link: removing
+        it then frees nothing until the answer ends."""
+        try:
+            return os.stat(clip).st_nlink > 1
+        except OSError:
+            return False
+
+    def _sent_bytes(self) -> int:
+        """The bytes of the clips that only links in serving/ hold: a clip
+        still in files/ counts with files/. Each clip counts once, however
+        many answers send it."""
+        serving = os.path.join(self.root, "serving")
+        links: dict[int, list] = {}
+        with contextlib.suppress(FileNotFoundError):
+            with os.scandir(serving) as it:
+                for entry in it:
+                    with contextlib.suppress(OSError):
+                        st = entry.stat()
+                        links.setdefault(st.st_ino, []).append(st)
+        return sum(sts[0].st_size for sts in links.values()
+                   if sts[0].st_nlink == len(sts))
 
     def room(self) -> int:
         """The bytes left in the store for a new job's inputs, after a
@@ -316,6 +359,7 @@ class VideoJobs:
         """Reserve the job id of a POST before its first byte: the sweep
         leaves its inputs until :meth:`submit` or :meth:`abandon`."""
         with self.lock:
+            self._dir("inputs")
             self.pending[jid] = 0
 
     def take(self, jid: str, n: int | None) -> tuple[bool, int, int]:
@@ -416,11 +460,14 @@ class VideoJobs:
     def get(self, jid: str) -> dict | None:
         """The record of job ``jid``, None when it is unknown or expired."""
         with self.lock:
-            job = self.jobs.get(jid)
-            if job is None or (job.record["status"] in ENDED and
-                               self._time() >= job.record["expires_at"]):
-                return None
-            return json.loads(json.dumps(job.record))
+            return self._record(jid)
+
+    def _record(self, jid: str) -> dict | None:
+        job = self.jobs.get(jid)
+        if job is None or (job.record["status"] in ENDED and
+                           self._time() >= job.record["expires_at"]):
+            return None
+        return json.loads(json.dumps(job.record))
 
     def content(self, jid: str) -> str | None:
         """The clip of a completed job, None otherwise."""
@@ -429,6 +476,28 @@ class VideoJobs:
             return None
         path = self.clip(jid)
         return path if os.path.isfile(path) else None
+
+    def serve(self, jid: str) -> tuple[dict | None, str | None, bool]:
+        """``(record, path, linked)`` of job ``jid`` in one hold: its
+        record, None when unknown or expired, and for a completed job a
+        link to its clip made for one answer (``linked``), which the
+        answer removes once sent. A DELETE or a sweep meanwhile removes
+        the clip, never the link. A store on a volume with no hard links
+        answers with the clip itself."""
+        with self.lock:
+            rec = self._record(jid)
+            if rec is None or rec["status"] != DONE:
+                return rec, None, False
+            clip = self.clip(jid)
+            link = os.path.join(self._dir("serving"),
+                                f"{secrets.token_hex(16)}.mp4")
+            try:
+                os.link(clip, link)
+            except FileNotFoundError:
+                return rec, None, False
+            except OSError:
+                return rec, clip, False
+            return rec, link, True
 
     def delete(self, jid: str) -> dict | None:
         """Cancel a queued or running job, or remove a finished one with
@@ -454,8 +523,12 @@ class VideoJobs:
 
     def _end(self, job: Job, status: str, error: dict | None = None) -> None:
         """End ``job`` with ``status``. Its record and clip last
-        job_ttl_s from now."""
-        rec = job.record
+        job_ttl_s from now. A job reads as completed once its record
+        says so on disk: when that write fails, it raises and the job
+        stays running. A failure or a cancel holds when its write fails,
+        as a restart fails the job all the same."""
+        old = job.record
+        rec = copy.deepcopy(old)
         rec["status"] = status
         rec["completed_at"] = int(self._time())
         rec["expires_at"] = rec["completed_at"] + int(self.settings.job_ttl_s)
@@ -463,14 +536,23 @@ class VideoJobs:
         rec.get("gmlx", {}).pop("eta_s", None)
         if status == DONE:
             rec["progress"] = 100
+        job.record = rec
+        try:
+            self._write(job)
+        except OSError:
+            if status == DONE:
+                job.record = old
+                raise
+            _log.warning("video job %s: its %s record was not written",
+                         job.id, status, exc_info=True)
         self.book.counts[status] = self.book.counts.get(status, 0) + 1
-        self._write(job)
 
     def progress(self, job: Job, *, phase: str | None = None,
                  step: tuple | None = None, frames: tuple | None = None
                  ) -> None:
         """Set the running job's phase, its step i of N and its frames k
-        of F decoded: progress is 5 + 85 i/N + 10 k/F."""
+        of F decoded: progress is 0 before the prompt encode, then
+        5 + 85 i/N + 10 k/F."""
         with self.lock:
             rec = job.record
             if rec["status"] != RUNNING:
@@ -478,6 +560,11 @@ class VideoJobs:
             g = rec.setdefault("gmlx", {})
             if phase is not None:
                 g["phase"] = phase
+            job.encoding = job.encoding or step is not None \
+                or frames is not None \
+                or (phase is not None and phase not in _BEFORE_ENCODE)
+            if not job.encoding:
+                return
             if step is not None:
                 g["step"], g["steps"] = step
             if frames is not None:
@@ -541,9 +628,11 @@ class VideoJobs:
             (self._run or run_clip)(job, self)
             with self.lock:
                 if job.record["status"] == RUNNING:
-                    self.book.timed(self._mono() - job.started)
+                    took = self._mono() - job.started
                     keep = self.clip(job.id)
                     self._end(job, DONE)
+                    # A clip counts once its completed record is written.
+                    self.book.timed(took)
         except JobStopped:
             pass
         except BaseException as e:  # noqa: BLE001 - the job's failure
@@ -698,7 +787,7 @@ def _encode_part(job: Job, store: VideoJobs, hold, text: str, keyframes,
     if why:
         raise StepError(400, why)
     sizes = [(int(i.shape[1]), int(i.shape[0])) for i in keyframes]
-    store.progress(job, phase="encoding the prompt")
+    store.progress(job, phase=ENCODING)
     try:
         _check_encode(hold, served, text, sizes)
         feats, spans = vs.encode(served, text, keyframes)

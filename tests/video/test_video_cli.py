@@ -462,6 +462,263 @@ def test_a_run_writes_the_mp4_and_the_frames(stubbed, tmp_path, capsys):
         str(out), "fl2va", 5)
 
 
+def test_a_shorter_clip_leaves_no_frames_of_the_one_before(stubbed,
+                                                           tmp_path):
+    """A frames folder that holds a longer earlier clip holds this clip's
+    5 frames and audio.wav after the run, and every other file it held:
+    a frame name in digits other than ASCII is no name it writes, and a
+    folder under a frame's name stays. A link under a frame's name goes,
+    and the file it points to stays."""
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    other = "frame_\u0661\u0662\u0663\u0664\u0665\u0666.png"
+    for name in [*(f"frame_{i:06d}.png" for i in range(1, 8)),
+                 "frame_000009.png.part", "audio.wav", "notes.txt",
+                 "frame_7.png", other]:
+        (frames / name).write_bytes(b"earlier")
+    (frames / "frame_000008.png").mkdir()
+    outside = tmp_path / "keep.png"
+    outside.write_bytes(b"kept")
+    (frames / "frame_000009.png").symlink_to(outside)
+    assert stubbed("--frames-dir", str(frames)) == 0
+    assert sorted(p.name for p in frames.iterdir()) == sorted([
+        "audio.wav", *(f"frame_{i:06d}.png" for i in range(1, 6)),
+        "frame_000008.png", "frame_7.png", "notes.txt", other])
+    assert (frames / "notes.txt").read_bytes() == b"earlier"
+    assert (frames / "frame_000008.png").is_dir()
+    assert outside.read_bytes() == b"kept"
+
+
+def test_a_second_run_on_a_frames_folder_waits_for_the_first(
+        stubbed, tmp_path, monkeypatch, capsys):
+    """A run whose frames folder another run is writing waits for it to
+    end before it clears a frame, so the first run's frames and part
+    files stay whole, and before its video VAE loads, so it holds no
+    model while it waits; then it writes its own."""
+    import fcntl
+    import threading
+    import time
+
+    from gmlx.video.vae import reader
+
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    earlier = [f"frame_{i:06d}.png" for i in range(1, 8)] + [
+        "frame_000008.png.part"]
+    for name in earlier:
+        (frames / name).write_bytes(b"first run")
+    first = os.open(frames, os.O_RDONLY)
+    fcntl.flock(first, fcntl.LOCK_EX)    # the first run, writing
+    waiting, done = threading.Event(), threading.Event()
+    flock = fcntl.flock
+
+    def watched(fd, op):
+        if op == fcntl.LOCK_EX and fd != first:
+            waiting.set()
+        return flock(fd, op)
+
+    monkeypatch.setattr(fcntl, "flock", watched)
+    loaded: list = []
+    load_vae = reader.load_vae
+    monkeypatch.setattr(reader, "load_vae", lambda path, family, dtype: (
+        loaded.append(family) or load_vae(path, family, dtype)))
+    rc: list = []
+
+    def second():
+        try:
+            rc.append(stubbed("--frames-dir", str(frames)))
+        finally:
+            done.set()
+
+    t = threading.Thread(target=second, daemon=True)
+    t.start()
+    deadline = time.monotonic() + 30
+    while not (waiting.is_set() or done.is_set()) \
+            and time.monotonic() < deadline:
+        done.wait(0.05)
+    try:
+        assert waiting.is_set(), "the second run did not wait for the first"
+        assert sorted(p.name for p in frames.iterdir()) == sorted(earlier)
+        assert loaded == ["h3_audio"], loaded
+    finally:
+        os.close(first)                  # the first run ends
+        t.join(30)
+    assert not t.is_alive() and rc == [0]
+    assert loaded == ["h3_audio", "h3"]
+    assert (f"[video] waiting for another run writing frames to {frames}"
+            in capsys.readouterr().err)
+    assert sorted(p.name for p in frames.iterdir()) == sorted([
+        "audio.wav", *(f"frame_{i:06d}.png" for i in range(1, 6))])
+
+
+def test_the_latents_land_at_the_path_given(stubbed, tmp_path):
+    """A --save-latent path without .npz is written as given, not beside
+    it with .npz added."""
+    lat = tmp_path / "lat" / "run1"
+    assert stubbed("--frames-dir", str(tmp_path / "f"), "--save-latent",
+                   str(lat)) == 0
+    assert sorted(np.load(lat).files) == ["audio", "seed", "steps", "video"]
+    assert [p.name for p in lat.parent.iterdir()] == ["run1"]
+
+
+def test_a_latent_path_at_a_symlink_writes_its_target(stubbed, tmp_path):
+    """A --save-latent path that is a symlink keeps the link and writes
+    the latents to the file it names."""
+    target = tmp_path / "store" / "run1.npz"
+    target.parent.mkdir()
+    np.savez(target, old=np.ones(3))
+    link = tmp_path / "lat.npz"
+    link.symlink_to(target)
+    assert stubbed("--frames-dir", str(tmp_path / "f"), "--save-latent",
+                   str(link)) == 0
+    assert link.is_symlink() and link.resolve() == target.resolve()
+    assert sorted(np.load(target).files) == ["audio", "seed", "steps",
+                                             "video"]
+    assert [p.name for p in target.parent.iterdir()] == ["run1.npz"]
+
+
+@pytest.mark.parametrize("err", ["ENOTSUP", "EOPNOTSUPP", "ENOLCK",
+                                 "EINVAL"])
+def test_a_frames_folder_that_cannot_lock_is_said_first_and_written(
+        stubbed, tmp_path, monkeypatch, capsys, err):
+    """A frames folder on a filesystem that cannot lock (flock fails with
+    ENOTSUP or EOPNOTSUPP on some SMB and FUSE mounts, ENOLCK on NFS
+    without locks, EINVAL on others) gets one line that says so, before
+    any model loads, and the run writes its frames without the lock."""
+    import errno
+    import fcntl
+
+    from gmlx.video import encoder
+
+    code = getattr(errno, err)
+    order: list = []
+
+    def no_lock(fd, op):
+        order.append("flock")
+        raise OSError(code, os.strerror(code))
+
+    monkeypatch.setattr(fcntl, "flock", no_lock)
+    monkeypatch.setattr(encoder, "load_encoder", lambda *a, **k: (
+        order.append("encoder") or _Handle()))
+    frames = tmp_path / "frames"
+    assert stubbed("--frames-dir", str(frames)) == 0
+    assert sorted(p.name for p in frames.iterdir()) == [
+        "audio.wav", *(f"frame_{i:06d}.png" for i in range(1, 6))]
+    said = [x for x in capsys.readouterr().err.splitlines()
+            if "cannot lock the frames folder" in x]
+    assert len(said) == 1 and os.strerror(code) in said[0]
+    assert order[0] == "flock" and "encoder" in order
+
+
+def test_a_new_frames_folder_in_a_folder_it_cannot_read_is_written(
+        stubbed, tmp_path, monkeypatch):
+    """A new --frames-dir inside a folder the user may write into but not
+    read, a drop box, is not refused by the lock probe, which cannot open
+    that folder; the run makes its folder, locks it and writes the
+    frames."""
+    import errno
+
+    drop = tmp_path / "drop"
+    drop.mkdir()
+    real_open = os.open
+
+    def no_read(path, flags, *a, **k):
+        if os.fspath(path) == str(drop) and flags == os.O_RDONLY:
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES),
+                                  str(drop))
+        return real_open(path, flags, *a, **k)
+
+    monkeypatch.setattr(os, "open", no_read)
+    frames = drop / "new"
+    assert stubbed("--frames-dir", str(frames)) == 0
+    assert sorted(p.name for p in frames.iterdir()) == [
+        "audio.wav", *(f"frame_{i:06d}.png" for i in range(1, 6))]
+
+
+def test_an_output_link_to_a_folder_not_made_is_written_at_the_link(
+        stubbed, tmp_path, capsys):
+    """An --output and a --frames-dir audio.wav that are symlinks into a
+    folder that cannot be made, such as a volume not mounted, are probed
+    at the link, where they are written, and not refused for the folder
+    they name. A --save-latent link there is refused before the run."""
+    volumes = tmp_path / "volumes"
+    volumes.mkdir()
+    out = tmp_path / "a.mp4"
+    out.symlink_to(volumes / "card" / "a.mp4")
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    (frames / "audio.wav").symlink_to(volumes / "card" / "audio.wav")
+    lat = tmp_path / "lat.npz"
+    lat.symlink_to(volumes / "card" / "lat.npz")
+    volumes.chmod(0o500)
+    try:
+        assert stubbed("--output", str(out), "--save-latent",
+                       str(lat)) == 1
+        assert f"cannot write {lat}" in capsys.readouterr().err
+        assert stubbed.loads == []
+        assert stubbed("--output", str(out), "--frames-dir",
+                       str(frames)) == 0
+    finally:
+        volumes.chmod(0o700)
+    assert not out.is_symlink() and out.stat().st_size == 5 * 32 * 32 * 3
+    assert not (frames / "audio.wav").is_symlink()
+    assert list(volumes.iterdir()) == []
+
+
+def test_a_latent_link_whose_links_loop_is_refused_before_the_run(
+        stubbed, tmp_path, capsys):
+    """A --save-latent path whose symlinks loop is refused, naming it,
+    before the model loads, and the links stay."""
+    link, other = tmp_path / "lat.npz", tmp_path / "other.npz"
+    link.symlink_to(other)
+    other.symlink_to(link)
+    assert stubbed("--frames-dir", str(tmp_path / "f"), "--save-latent",
+                   str(link)) == 1
+    assert f"cannot write {link}: its symlinks loop" in (
+        capsys.readouterr().err)
+    assert stubbed.loads == []
+    assert link.is_symlink() and other.is_symlink()
+
+
+def test_a_quoted_home_latent_path_lands_in_the_home_folder(
+        stubbed, monkeypatch, tmp_path):
+    """A --save-latent of '~/lat.npz', quoted so the shell leaves the ~,
+    is checked and written in the home folder."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    assert stubbed("--frames-dir", str(tmp_path / "f"), "--save-latent",
+                   "~/lat.npz") == 0
+    assert [p.name for p in home.iterdir()] == ["lat.npz"]
+    assert not (tmp_path / "~").exists()
+
+
+def test_an_interrupted_latent_write_keeps_the_file_there(stubbed,
+                                                          monkeypatch,
+                                                          tmp_path):
+    """A latent write stopped part way leaves the file an earlier run
+    wrote, and no part file."""
+    lat = tmp_path / "lat" / "x.npz"
+    lat.parent.mkdir()
+    np.savez(lat, video=np.ones(3))
+    before = lat.read_bytes()
+    savez = np.savez
+
+    def stopped(file, **arrays):
+        f = open(file, "wb") if isinstance(file, (str, os.PathLike)) \
+            else file
+        f.write(b"PK\x03\x04 part of a zip")
+        f.flush()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(np, "savez", stopped)
+    assert stubbed("--frames-dir", str(tmp_path / "f"), "--save-latent",
+                   str(lat)) == 130
+    monkeypatch.setattr(np, "savez", savez)
+    assert lat.read_bytes() == before
+    assert [p.name for p in lat.parent.iterdir()] == ["x.npz"]
+
+
 @pytest.mark.parametrize("decoded", [7200, 6000])
 def test_the_mp4_and_the_frames_get_audio_of_the_clips_length(
         stubbed, monkeypatch, tmp_path, decoded):

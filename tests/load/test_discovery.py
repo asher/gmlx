@@ -2077,6 +2077,42 @@ def test_a_scan_skips_pull_stages_and_takes_video_ids(tmp_path, monkeypatch):
     assert "h3" in seen["known_ids"]
 
 
+def test_a_scan_passes_over_the_configured_video_dit_quietly(
+        tmp_path, monkeypatch, capsys):
+    """A video model's DiT in a discover folder is a configured file, as
+    a chat or image model's is: the scan skips it and prints no skip line
+    for its arch, which no chat model loads."""
+    from gguf import GGUFWriter
+    import numpy as np
+
+    from gmlx.config import load_config
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setattr(disc, "_HEADER_MEMO", {})
+    monkeypatch.setattr(disc, "_HEADER_DISK", None)
+    models = tmp_path / "models"
+    models.mkdir()
+    w = GGUFWriter(str(models / "h3.gguf"), "minimax_h3")
+    w.add_tensor("x.weight", np.zeros(4, dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    stray = models / "other-h3.gguf"
+    stray.write_bytes((models / "h3.gguf").read_bytes())
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(f"server:\n  model_dirs: [{models}]\n"
+                   f"discover:\n  - {{dir: {models}}}\n"
+                   "video_models:\n  h3:\n    path: h3.gguf\n"
+                   "    encoder: e.gguf\n    vae: v.safetensors\n"
+                   "    audio_vae: a.safetensors\n")
+    assert disc.discovered_models(load_config(str(cfg))) == []
+    err = capsys.readouterr().err
+    assert str(models / "h3.gguf") not in err
+    # A video DiT no entry names is still reported.
+    assert f"[discover] skip (unsupported arch 'minimax_h3'): {stray}" in err
+
+
 # Nemotron 3.5 Transcribe: a speech encoder pairs by NeMo checkpoint id
 def _speech_classify(monkeypatch):
     def _f(path):

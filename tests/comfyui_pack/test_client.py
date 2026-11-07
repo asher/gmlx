@@ -282,6 +282,48 @@ class KeepAlive(unittest.TestCase):
         self.assertEqual(_Idle.hits.get("/slow"), 1)
 
 
+class _TooLarge(http.server.BaseHTTPRequestHandler):
+    """The server's answer to a body past its limit: a 413 from the
+    Content-Length, before a byte of the body is read, and the
+    connection closed."""
+    protocol_version = "HTTP/1.1"
+    LIMIT = 1 << 20
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        body = json.dumps({"error": f"the body is {n} bytes, over the limit "
+                                    f"of {self.LIMIT}"}).encode()
+        self.send_response(413)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self.close_connection = True
+
+
+class TooLarge(unittest.TestCase):
+    def test_a_body_past_the_servers_limit_gets_its_413(self):
+        """The body is larger than the socket takes before the server
+        closes, so its send fails: the 413 the server sent is still the
+        answer, where the user read that the server did not answer."""
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _TooLarge)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            c = C.StepClient(f"http://127.0.0.1:{srv.server_address[1]}")
+            n = 64 << 20
+            with self.assertRaises(C.GmlxError) as e:
+                c.call_tensors("/vae/encode", {"image": torch.zeros(n // 4)}, {},
+                               what="the VAE encode")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertRegex(str(e.exception), r"^gmlx: the VAE encode failed \(413\): the body "
+                         r"is \d+ bytes, over the limit of 1048576$")
+
+
 def _free_port() -> int:
     import socket
     with socket.socket() as s:

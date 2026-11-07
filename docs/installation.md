@@ -42,7 +42,7 @@ format other than WAV or PCM, and video generation need ffmpeg.
 ## pip
 
 To call the [Python API](python.md) from an environment you manage, install
-with pip. It needs Python 3.11 or newer.
+with pip. It needs Python 3.11.1 or newer.
 
 ```sh
 python3 -m venv .venv
