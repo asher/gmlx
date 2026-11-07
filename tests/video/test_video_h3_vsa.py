@@ -133,7 +133,7 @@ def test_a_kquant_without_vsa_attention_is_refused(fasth3_load, monkeypatch):
     assert str(ei.value) == (
         f"MiniMax-H3 fasth3 runs video sparse attention, and the installed "
         f"mlx-kquant {kq.__version__} has no vsa_attention; update "
-        f"mlx-kquant to a release that has it")
+        f"mlx-kquant to 0.5.9 or later")
     assert fasth3_load.loads == []
 
 
