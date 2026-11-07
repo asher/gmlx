@@ -96,6 +96,10 @@ from .residency_build import (  # noqa: F401 - re-exported
     _say_tables_offloaded,
     _warn_if_batch_unsafe,
 )
+from .residency_workers import (  # noqa: F401 - re-exported
+    _holds_worker,
+    _Workers,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -314,7 +318,7 @@ class _RuntimeProxy:
         return getattr(self._original, name)
 
 
-class _ResidencyPool(_ChatBuild):
+class _ResidencyPool(_Workers, _ChatBuild):
     """Pinned + LRU pool of resident models, backed by stock load/teardown."""
 
     def __init__(
@@ -1683,27 +1687,6 @@ class _ResidencyPool(_ChatBuild):
         if first is not None:
             raise first
 
-    def _image_fn(self, i: int) -> Callable[..., Any]:
-        if self._image_fns is None:
-            from . import image_service
-
-            self._image_fns = (image_service.entry_footprint,
-                               image_service.load_on_worker,
-                               image_service.release_on_worker)
-        return self._image_fns[i]
-
-    def _kind_fn(self, kind: str, i: int) -> Callable[..., Any]:
-        """Function ``i`` of a worker kind's (footprint, load, release)."""
-        if kind == IMAGE_KIND:
-            return self._image_fn(i)
-        if self._video_fns is None:
-            from . import video_service
-
-            self._video_fns = (video_service.entry_footprint,
-                               video_service.load_on_worker,
-                               video_service.release_on_worker)
-        return self._video_fns[i]
-
     def _build(self, cache_key, model_path, adapter_path, model_kind, footprint,
                *, ttl=None, env=None, build_spec=None) -> _Entry:
         """Build one entry of ``model_kind``: the shared gate and
@@ -1722,16 +1705,6 @@ class _ResidencyPool(_ChatBuild):
                       pinned=model_path in self._pinned_paths,
                       footprint=footprint, ttl=ttl,
                       last_access=self._time_fn(), **fields)
-
-    def _build_image(self, cache_key, model_path, footprint, *, ttl=None,
-                     build_spec=None, kind: str = IMAGE_KIND) -> _Entry:
-        """An image or video entry: the kind's ``load`` on the image
-        worker, gated on the weights and the activation reserve together.
-        Never reaches the stock loader."""
-        self._gate(footprint, model_path, image=True)
-        pipe = self._kind_fn(kind, 1)(build_spec)
-        return self._new_entry(cache_key, model_path, footprint, ttl,
-                               kind=kind, pipeline=pipe)
 
     def _discard_failed_build(self, cache_key, model_path, scratch) -> None:
         """Tear down what a failed build left in its scratch: the stock
@@ -1791,58 +1764,6 @@ class _ResidencyPool(_ChatBuild):
                     self._release_images(held)
         finally:
             self._release_images(released)
-
-    def _worker_for(self, build_kind=None, *, incoming: int | None = None,
-                    force: frozenset = frozenset(), teardown=None):
-        """Hold the workers before the build lock, image before video,
-        that a build loads its pipeline on (``build_kind``) or may release
-        one on: those whose entries the eviction for ``incoming`` bytes
-        takes, or, with ``incoming`` None, a teardown's, the workers of the
-        idle entries ``teardown(entry)`` picks (every idle one when None);
-        and those of ``force``. Then the lock is never held
-        while a worker runs a job, and a chat cold load waits behind no
-        job of a worker it does not release on. Without any, nothing is
-        held."""
-        with self._lock:
-            kinds = set(force)
-            if build_kind in _WORKER_KINDS:
-                kinds.add(build_kind)
-            if incoming is None:
-                kinds.update(e.kind for e in self._entries.values()
-                             if e.is_image and e.busy == 0
-                             and (teardown is None or teardown(e)))
-            else:
-                kinds.update(self._victim_kinds(incoming))
-        if not kinds:
-            return contextlib.nullcontext()
-        return _reserved_workers(frozenset(kinds))
-
-    def _release_images(self, pipelines: list) -> None:
-        """Release image and video pipelines, ``(kind, pipeline, bytes)``,
-        each on its kind's worker, where its arrays were made, and wait for
-        each, so the next gate measures the memory back. Each one's bytes
-        leave the tearing count once its release ends. Call without
-        ``_lock``."""
-        while pipelines:
-            kind, pipe, n = pipelines.pop()
-            try:
-                if pipe is None:
-                    continue
-                box = [pipe]
-                try:
-                    self._kind_fn(kind, 2)(box)
-                except Exception:
-                    _log.warning("teardown: image pipeline release failed",
-                                 exc_info=True)
-                finally:
-                    box.clear()
-                    del pipe
-                    import gc
-                    gc.collect()
-            finally:
-                if n:
-                    with self._lock:
-                        self._torn(kind, n)
 
     def _teardown_chat(self, entry: _Entry):
         from . import bridge_vlm as _serving
@@ -1972,39 +1893,6 @@ def _default_store_live() -> int:
     from .image_steps import STATE
 
     return STATE.adapters.bytes
-
-
-def _holds_image_worker() -> bool:
-    from . import image_service
-
-    return image_service.worker_reserved()
-
-
-def _holds_video_worker() -> bool:
-    from . import video_service
-
-    return video_service.worker_reserved()
-
-
-def _holds_worker(kind: str) -> bool:
-    """Whether the calling thread holds the worker of ``kind`` or is it."""
-    return _holds_image_worker() if kind == IMAGE_KIND else \
-        _holds_video_worker()
-
-
-@contextlib.contextmanager
-def _reserved_workers(kinds: frozenset):
-    """Hold the workers of ``kinds``, image before video, the one order
-    every thread takes them in."""
-    from . import image_service, video_service
-
-    holds = {IMAGE_KIND: image_service.reserved_worker,
-             VIDEO_KIND: video_service.reserved_worker}
-    with contextlib.ExitStack() as stack:
-        for k in _WORKER_ORDER:
-            if k in kinds:
-                stack.enter_context(holds[k]())
-        yield
 
 
 def _collect_failed_build() -> None:
