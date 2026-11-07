@@ -13,6 +13,7 @@ __pycache__/
 .venv/
 venv/
 *.gguf
+!tests/fixtures/lora/*.gguf
 .coverage
 # local server config (the first default config path; never commit it)
 /gmlx.yaml

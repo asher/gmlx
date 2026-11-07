@@ -648,6 +648,14 @@ class _ResidencyPool:
                 and os.path.isfile(model_path)):
             from gmlx.load.preflight import preflight
             preflight(model_path)
+            # An adapter the base cannot take is refused from the headers,
+            # so it evicts nothing.
+            from gmlx.load.adapter import adapter_load_refusal
+            effective = getattr(build_spec, "effective_adapters", None)
+            adapter_load_refusal(
+                model_path, effective() if callable(effective) else (), env,
+                stream=getattr(build_spec, "stream", None),
+                mtp=bool(getattr(build_spec, "speculative", False)))
         # Image pipelines a post-build refit evicts. The worker reservation
         # was decided before the build, which may have seen them busy, so
         # they are released after the build lock drops: a reservation taken

@@ -83,7 +83,10 @@ class Qwen3_5MTPDraftModel(nn.Module):
                 f"Cannot find embed_tokens in {type(target_model).__name__}"
             )
 
-        self._input_embed = inner.embed_tokens
+        from gmlx.load.modules import lora_base
+
+        # gmlx: the base table. A draft call publishes no row vector.
+        self._input_embed = lora_base(inner.embed_tokens)
         self._input_embed_scale = float(getattr(inner, "embed_scale", 1.0))
 
         lm = getattr(target_model, "language_model", target_model)

@@ -1674,8 +1674,16 @@ class ResponseGenerator:
         raw_inputs: dict,
         images=None,
         apc_semantic_hash: Optional[int] = None,
+        *,
+        row_settings=None,
     ) -> Tuple[mx.array, dict]:
-        """GPU-only: run vision encoder if needed. Must run on GPU thread."""
+        """GPU-only: run vision encoder if needed. Must run on GPU thread.
+
+        gmlx: ``row_settings`` is the row's ``RowSettings``; its adapter
+        scales are published for the embedding call, so a token embedding
+        adapter adds its delta at the row's strengths."""
+        from gmlx import lora_rows
+
         input_ids = raw_inputs.get("input_ids")
         pixel_values = raw_inputs.get("pixel_values")
         mask = raw_inputs.get("attention_mask")
@@ -1699,9 +1707,10 @@ class ResponseGenerator:
                 and getattr(input_ids, "shape", (0,))[0] == 1):
             data_kwargs["prompt_rows"] = True
         # Always call get_input_embeddings — BatchGenerator requires inputs_embeds
-        embed = self.model.get_input_embeddings(
-            input_ids, pixel_values, mask=mask, **data_kwargs
-        )
+        with lora_rows.tuple_scope(lora_rows.row_tuple(row_settings), rows=1):
+            embed = self.model.get_input_embeddings(
+                input_ids, pixel_values, mask=mask, **data_kwargs
+            )
         # Remove cache kwargs before passing to BatchGenerator
         data_kwargs.pop("vision_cache", None)
         data_kwargs.pop("_image_key", None)
@@ -1886,6 +1895,14 @@ class ResponseGenerator:
                             prefill_step_size=self._effective_prefill_step_size(),
                         )
 
+                    # gmlx: one RowSettings per request, read by the prompt
+                    # embedding and handed to the insert.
+                    try:
+                        settings = self._row_settings(args)
+                    except Exception as e:
+                        rqueue.put(e)
+                        continue
+
                     # Vision encoder runs on the GPU thread; text tokenization
                     # already happened on the caller thread.
                     coordinator = getattr(batch_gen, "apc", None)
@@ -1894,11 +1911,19 @@ class ResponseGenerator:
                             prompt_tokens,
                             prefill_step_size=self._effective_prefill_step_size(),
                         )
-                    input_ids, gen_kwargs = self._gpu_embed(
-                        raw_inputs,
-                        images,
-                        apc_semantic_hash=request.apc_semantic_hash,
-                    )
+                    # gmlx: a missed adapter publish fails its own request.
+                    from gmlx import lora_rows
+
+                    try:
+                        input_ids, gen_kwargs = self._gpu_embed(
+                            raw_inputs,
+                            images,
+                            apc_semantic_hash=request.apc_semantic_hash,
+                            row_settings=settings,
+                        )
+                    except lora_rows.LoraRowsError as e:
+                        rqueue.put(e)
+                        continue
                     has_embeds = bool(gen_kwargs.get("inputs_embeds") is not None)
                     # Preserve tenant isolation for manually queued requests
                     # that predate server-side semantic hash computation.
@@ -1928,7 +1953,7 @@ class ResponseGenerator:
                             ],
                             thinking_budget_criteria=[thinking_budget_criteria],
                             # gmlx: the request's own sampler and logprobs.
-                            row_settings=[self._row_settings(args)],
+                            row_settings=[settings],
                         )
                     except Exception as e:
                         rqueue.put(e)
@@ -1955,6 +1980,7 @@ class ResponseGenerator:
                 # gmlx: the loop variables would keep the last request's
                 # inputs (images, audio rows) alive until the next request.
                 request = raw_inputs = images = input_ids = gen_kwargs = None
+                settings = None
 
                 if not active or batch_gen is None:
                     continue

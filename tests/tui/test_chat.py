@@ -1243,3 +1243,25 @@ def test_run_audio_puts_clips_before_the_prompt_and_splices(monkeypatch):
         {"role": "user", "content": [{"type": "audio"}, {"type": "audio"},
                                      {"type": "text", "text": "Which is louder?"}]}])
     assert ids == asr.splice(tok.encode(text), 900, ["said 1", "said 2"], tok.encode)
+
+
+@pytest.mark.parametrize("backend", ["_backend_plain_text", "_backend_mtp_text"])
+def test_chat_refuses_an_embedding_adapter_on_a_tied_model_before_the_load(
+        tmp_path, monkeypatch, backend):
+    from types import SimpleNamespace
+
+    pytest.importorskip("gguf")
+    import gmlx.load.adapter as adapter
+    import gmlx.load.loader as loader
+    import gmlx.spec.mtp_load as mtp_load
+    from lora_gguf import mint_adapter, mint_base
+
+    base = mint_base(tmp_path / "tied.gguf", tied=True)
+    ad = mint_adapter(tmp_path / "embd.gguf")
+    for mod, name in ((loader, "load_model"), (mtp_load, "load_mtp_model")):
+        monkeypatch.setattr(mod, name,
+                            lambda *a, **k: pytest.fail("loaded for a refused adapter"))
+    args = SimpleNamespace(gguf=base, adapter=ad, stream_experts=False, stream_cpu=False)
+    with pytest.raises(SystemExit) as e:
+        getattr(chat, backend)(args, {})
+    assert str(e.value) == "error: embd.gguf: " + adapter._EMBD_TIED

@@ -106,3 +106,32 @@ def test_third_party_import_error_passes_through():
     for name in ("numpy.linalg", "misaki", None):
         exc = ModuleNotFoundError(f"No module named {name!r}", name=name)
         assert bridge._raise_if_first_party_import(exc) is None
+
+
+@pytest.mark.parametrize("per_layer", [False, True], ids=["tied", "per-layer"])
+def test_an_mtp_entry_refuses_an_embedding_adapter_before_any_build(
+        tmp_path, monkeypatch, per_layer):
+    """The header check runs before the MTP try, so a refused adapter is
+    never built, degraded and rebuilt plain."""
+    import importlib
+    import types
+
+    pytest.importorskip("gguf")
+    from lora_gguf import mint_adapter, mint_base
+
+    base = mint_base(tmp_path / "base.gguf", tied=True)
+    ad = mint_adapter(tmp_path / "a.gguf", embd=not per_layer, per_layer=per_layer)
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    monkeypatch.setattr(gen, bridge._BRIDGE_FLAG, False, raising=False)
+    monkeypatch.setattr(gen, "load_model_resources", gen.load_model_resources)
+    monkeypatch.setattr(bridge, "load_serveable_model",
+                        lambda *a, **k: pytest.fail("built for a refused adapter"))
+    monkeypatch.setattr(bridge, "_degrade_failed_mtp",
+                        lambda *a, **k: pytest.fail("degraded for a refused adapter"))
+    monkeypatch.setitem(bridge._GGUF_MTP_REGISTRY, os.path.abspath(base),
+                        {"draft_gguf_path": None})
+    monkeypatch.setattr(bridge, "_current_build_spec",
+                        types.SimpleNamespace(effective_adapters=lambda: (ad,)))
+    bridge.install_gguf_server_bridge()
+    with pytest.raises(ValueError, match="a.gguf: "):
+        gen.load_model_resources(base, None)

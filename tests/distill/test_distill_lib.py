@@ -1797,6 +1797,21 @@ def test_align_identity_path_at_a_wider_student_head(tmp_path, tok_bl):
     assert sorted(out.glob("view-*.safetensors"))
 
 
+def test_a_student_adapter_the_base_cannot_take_is_refused_before_the_load(
+        tmp_path, monkeypatch):
+    pytest.importorskip("gguf")
+    import gmlx.load.loader as loader
+    from gmlx.distill.student import load_gguf_student
+    from lora_gguf import mint_adapter, mint_base
+
+    base = mint_base(tmp_path / "tied.gguf", tied=True)
+    ad = mint_adapter(tmp_path / "embd.gguf")
+    monkeypatch.setattr(loader, "load_model",
+                        lambda *a, **k: pytest.fail("loaded for a refused adapter"))
+    with pytest.raises(ValueError, match="output head"):
+        load_gguf_student(base, adapter=ad)
+
+
 def test_adapter_disabled_reaches_expert_lora_stamps():
     """Expert adapters are objects stamped on the expert-stack leaf outside
     the module tree; the before-score toggle zeroes every slot's scale,

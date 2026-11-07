@@ -318,6 +318,39 @@ def publish_tuple(scales, rows: int) -> None:
     _local.off = tuple((vec == 0).tolist())
 
 
+@contextlib.contextmanager
+def tuple_scope(scales, rows: int):
+    """Publish one scale tuple for ``rows`` rows for the scope, and clear
+    it at exit. Does nothing in ``static`` mode. Refuses to nest: in
+    ``rows`` mode a vector already published raises."""
+    if _mode != "rows":
+        yield
+        return
+    if _local.current is not None:
+        raise LoraRowsError(
+            "a LoRA row vector is already published on this thread; "
+            "tuple_scope does not nest")
+    publish_tuple(scales, rows)
+    try:
+        yield
+    finally:
+        clear_rows()
+
+
+def row_tuple(settings) -> tuple:
+    """The scale tuple of a row's settings (its ``RowLora.scales``). In
+    ``rows`` mode settings with no ``RowLora`` raise; in ``static`` mode
+    the tuple is empty."""
+    if _mode != "rows":
+        return ()
+    lora = getattr(settings, "lora", None) if settings is not None else None
+    if lora is None:
+        raise LoraRowsError(
+            "a row's settings carry no RowLora (rows mode): the request's "
+            "adapter scales did not reach its prompt embedding")
+    return tuple(lora.scales)
+
+
 # Row salt
 
 

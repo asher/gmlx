@@ -42,3 +42,14 @@ def find_file(fixture: dict, name: str, candidates) -> str:
         if h.hexdigest() != want["sha256"]:
             pytest.fail(f"{p} is not the file the fixture recorded")
     return str(p)
+
+
+def check_checked_in(fixture: dict, path: Path) -> None:
+    """Fail when a file checked in beside the fixture is not the one the
+    fixture recorded. Unlike ``find_file``, never skips."""
+    import hashlib
+
+    want = fixture["files"][path.name]
+    data = path.read_bytes()
+    if (len(data), hashlib.sha256(data).hexdigest()) != (want["size"], want["sha256"]):
+        pytest.fail(f"{path} is not the file the fixture recorded; regenerate both")

@@ -44,10 +44,12 @@ class AutoregressiveMTPDraftModel(nn.Module):
                 f"Cannot find embed_tokens in {type(target_model).__name__}"
             )
 
-        self._input_embed = inner.embed_tokens
+        from gmlx.load.modules import lora_base
+
+        # gmlx: the base table. A draft call publishes no row vector.
+        self._input_embed = lora_base(inner.embed_tokens)
 
         lm = getattr(target_model, "language_model", target_model)
-        from gmlx.load.modules import lora_base
 
         # gmlx: the base head. An output.weight adapter's wrapper reads a
         # row vector, and a draft call publishes none.

@@ -46,6 +46,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `continue_final_message` and `add_generation_prompt: false`, in the prompt
   llama-server renders, and `add_generation_prompt: false` alone renders no
   generation prompt. See [Assistant prefill](docs/api.md#assistant-prefill).
+- A LoRA adapter with a `token_embd.weight` pair, such as a PEFT adapter that
+  trains `embed_tokens`, loads on a model with its own output head, in `run`,
+  chat and `gmlx serve` at per-request strengths. See
+  [Limitations](docs/lora.md#limitations).
 
 ### Changed
 
@@ -90,6 +94,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A thinking budget of -1 takes the server's budget, and a negative budget in
   the config or the environment means no budget, where it closed thinking at
   once.
+- An adapter with no alpha, or an alpha of 0, applies at its strength with no
+  alpha scaling, as llama.cpp applies it, where gmlx refused it or applied
+  none of it.
+- `run`, chat and `gmlx serve` refuse an embedding adapter that the model
+  cannot take from the file headers, before the model loads, so `gmlx serve`
+  unloads no model for it.
 
 ### Fixed
 

@@ -283,9 +283,11 @@ class LagunaDFlashDraftModel(nn.Module):
             target_tokenizer_length=tokenizer_length,
             target_language_model=lm,
         )
-        self.embed_tokens = inner.embed_tokens
-        self.embed_scale = getattr(self.embed_tokens, "embed_scale", 1.0)
         from gmlx.load.modules import lora_base
+
+        # gmlx: the base table. A draft call publishes no row vector.
+        self.embed_tokens = lora_base(inner.embed_tokens)
+        self.embed_scale = getattr(self.embed_tokens, "embed_scale", 1.0)
 
         # gmlx: the base head. An output.weight adapter's wrapper reads a row
         # vector, and a draft call publishes none.

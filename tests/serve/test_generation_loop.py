@@ -2,7 +2,9 @@
 in the batch: an idle server must not keep the last request's images or
 audio rows alive until the next request comes. It builds the batch with the
 server's logprob cap and a neutral default row, and inserts each request
-with its own row settings. No model is loaded."""
+with its own row settings. The prompt embedding reads the same settings,
+so a token embedding adapter embeds at the row's strengths. No model is
+loaded."""
 
 from __future__ import annotations
 
@@ -67,7 +69,7 @@ def _response_generator(monkeypatch):
     rg._make_sampler = lambda args: None
     rg._make_logits_processors = lambda args, ids: []
     rg._effective_prefill_step_size = lambda: 2048
-    rg._gpu_embed = lambda raw, images, apc_semantic_hash=None: (
+    rg._gpu_embed = lambda raw, images, apc_semantic_hash=None, row_settings=None: (
         mx.array([[1, 2]]), {"inputs_embeds": raw["audio_clips"]})
 
     def step(batch_gen, active):
@@ -210,3 +212,110 @@ def test_an_adapted_row_is_salted_from_its_copys_identities(monkeypatch):
         _stop(rg, thread)
     (row,) = [rows for b in _Batch.made for rows in b.inserts][-1]
     assert row.lora.salt == lora_rows.row_salt(ids, (0.5,)) != 0
+
+
+# the prompt embedding publishes the row's adapter scales
+
+
+def _embedding_model():
+    import mlx.nn as nn
+    import numpy as np
+    from types import SimpleNamespace
+
+    from gmlx._vendor.mlx_vlm.models.base import InputEmbeddingsFeatures
+    from gmlx.load.modules import LoRAKQuantEmbedding
+
+    base = nn.Embedding(10, 4)
+    base.weight = mx.array((np.arange(40, dtype=np.float32).reshape(10, 4) % 5) * 0.5)
+    a = mx.array((np.arange(20, dtype=np.float32).reshape(10, 2) % 3) - 1.0)
+    b = mx.array((np.arange(8, dtype=np.float32).reshape(4, 2) % 4) * 0.25)
+    wrap = LoRAKQuantEmbedding(base, a, b, 0.5)
+
+    def get_input_embeddings(input_ids, pixel_values=None, mask=None, **kw):
+        return InputEmbeddingsFeatures(inputs_embeds=wrap(input_ids))
+
+    model = SimpleNamespace(language_model=None, get_input_embeddings=get_input_embeddings)
+    object.__setattr__(model, "gmlx_adapter_identities", (SimpleNamespace(sha256="a" * 64),))
+    return model, wrap, base
+
+
+class _EmbedsBatch(_Batch):
+    embeds: list = []
+
+    def insert(self, prompts, **kw):
+        embeds = kw["prompt_kwargs"][0]["inputs_embeds"]
+        mx.eval(embeds)                  # on the loop thread's stream
+        self.embeds.append(embeds)
+        return super().insert(prompts, **kw)
+
+
+def _embed_request(rg, args, ids):
+    rq: queue.Queue = queue.Queue()
+    rg.requests.put(_GEN.QueuedGenerationRequest(
+        rqueue=rq, raw_inputs={"input_ids": ids}, prompt_tokens=int(ids.shape[1]), args=args))
+    return rq
+
+
+@pytest.fixture
+def rows_mode():
+    from gmlx import lora_rows
+
+    lora_rows.configure("rows", 1)
+    yield
+    lora_rows.configure("static", 1)
+
+
+def test_the_prompt_embedding_runs_at_the_rows_strength(monkeypatch, rows_mode):
+    from gmlx import lora_rows
+
+    rg = _response_generator(monkeypatch)
+    monkeypatch.setattr(_GEN, "BatchGenerator", _EmbedsBatch)
+    monkeypatch.setattr(_EmbedsBatch, "embeds", [])
+    rg.model, wrap, base = _embedding_model()
+    rg.vision_cache = None
+    real = _GEN.ResponseGenerator._gpu_embed
+    read = []
+
+    def gpu_embed(*a, **kw):
+        read.append(kw.get("row_settings"))
+        return real(rg, *a, **kw)
+
+    rg._gpu_embed = gpu_embed
+    ids = mx.array([[1, 4, 7]])
+    thread = threading.Thread(target=rg._run_impl, daemon=True)
+    thread.start()
+    try:
+        for scales in ((1.0,), (0.0,)):
+            rq = _embed_request(rg, _lora_args(scales), ids)
+            assert isinstance(rq.get(timeout=5), _GEN.GenerationContext)
+            assert rq.get(timeout=5) is None
+    finally:
+        _stop(rg, thread)
+    inserted = [rows[0] for b in _Batch.made for rows in b.inserts]
+    assert len(inserted) == len(read) == 2
+    assert all(r is not None and i is r for i, r in zip(inserted, read))
+    adapted, bare = _EmbedsBatch.embeds
+    lora_rows.configure("static", 1)
+    assert mx.array_equal(adapted, wrap(ids))
+    assert mx.array_equal(bare, base(ids))
+    assert not mx.array_equal(adapted, bare)
+
+
+def test_a_row_without_adapter_scales_fails_only_its_request(monkeypatch, rows_mode):
+    from gmlx import lora_rows
+
+    rg = _response_generator(monkeypatch)
+    rg.model, _wrap, _base = _embedding_model()
+    rg.vision_cache = None
+    rg._gpu_embed = lambda *a, **kw: _GEN.ResponseGenerator._gpu_embed(rg, *a, **kw)
+    ids = mx.array([[2, 3]])
+    thread = threading.Thread(target=rg._run_impl, daemon=True)
+    thread.start()
+    try:
+        missing = _embed_request(rg, _GEN.GenerationArguments(max_tokens=1), ids)
+        assert isinstance(missing.get(timeout=5), lora_rows.LoraRowsError)
+        rq = _embed_request(rg, _lora_args((1.0,)), ids)
+        assert isinstance(rq.get(timeout=5), _GEN.GenerationContext)
+        assert rq.get(timeout=5) is None
+    finally:
+        _stop(rg, thread)

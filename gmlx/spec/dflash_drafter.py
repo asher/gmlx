@@ -629,13 +629,16 @@ class DFlashDrafter(nn.Module):
         else:
             raise AttributeError(
                 f"cannot find embed_tokens in {type(target_model).__name__}")
-        self.embed_tokens = inner.embed_tokens
+        from gmlx.load.modules import lora_base
+
+        # The base table, as llama.cpp drafts: a draft call publishes no
+        # row vector.
+        self.embed_tokens = lora_base(inner.embed_tokens)
         # The raw table times the drafter's own scale, as llama.cpp reads it.
         # The converter writes a target's embed_scale (Gemma's sqrt(hidden))
         # into that scale.
         self.embed_scale = float(self.config.input_embedding_scale)
         lm = getattr(target_model, "language_model", target_model)
-        from gmlx.load.modules import lora_base
 
         # The base head: an output.weight adapter's wrapper reads a row
         # vector, and a draft call publishes none.
