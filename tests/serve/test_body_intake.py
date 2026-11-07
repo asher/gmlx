@@ -44,9 +44,12 @@ def test_a_refusal_rounds_the_need_up_and_the_figure_down():
     assert bi._mib(1023, True) == "1.0 KiB"
 
 
-def test_a_slow_form_waits_afresh_for_each_chunk(tmp_path, monkeypatch):
-    """A form that keeps sending is read to its end however long it takes:
-    the wait for its next chunk starts again at each one."""
+@pytest.mark.parametrize("to_disk", [True, False])
+def test_a_slow_form_waits_afresh_for_each_chunk(tmp_path, monkeypatch,
+                                                 to_disk):
+    """A video form, or an images form, that keeps sending is read to its
+    end however long it takes: the wait for its next chunk starts again
+    at each one."""
     import asyncio
 
     from starlette.requests import Request
@@ -64,9 +67,13 @@ def test_a_slow_form_waits_afresh_for_each_chunk(tmp_path, monkeypatch):
         return {"type": "http.request", "body": chunk,
                 "more_body": bool(parts)}
 
-    request = Request({"type": "http", "method": "POST", "headers": [
-        (b"content-type", b"multipart/form-data; boundary=" + b),
-        (b"content-length", str(len(body)).encode())]}, receive)
+    request = Request({"type": "http", "method": "POST",
+                       "path": "/v1/videos" if to_disk else "/v1/images/edits",
+                       "query_string": b"", "headers": [
+                           (b"content-type",
+                            b"multipart/form-data; boundary=" + b),
+                           (b"content-length", str(len(body)).encode())]},
+                      receive)
     waits = []
 
     async def within(timeout, aw):
@@ -76,8 +83,18 @@ def test_a_slow_form_waits_afresh_for_each_chunk(tmp_path, monkeypatch):
 
     async def take(n):
         return True, n, 0
+
+    async def in_ram():
+        form = await bi.read_form_in_ram(request, None)
+        try:
+            items = list(form.multi_items())
+            return ([(k, v) for k, v in items if isinstance(v, str)],
+                    {k: v for k, v in items if not isinstance(v, str)})
+        finally:
+            await form.close()
     fields, files = asyncio.run(bi.read_form_to_disk(
-        request, str(tmp_path / "in"), take, free=None))
+        request, str(tmp_path / "in"), take, free=None) if to_disk
+        else in_ram())
     assert fields == [("prompt", "a cat")] and list(files) == ["first_frame"]
     # A full wait for each chunk, and for the end of the stream.
     assert len(waits) > len(body) // 100
