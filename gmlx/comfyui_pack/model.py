@@ -816,19 +816,33 @@ def _h3_keys(patcher) -> None:
         def encode(self, frames):
             return torch.zeros(1, 24, 1, frames.shape[1] // 16, frames.shape[2] // 16)
 
-    def guided():
+    class _AudioEncoder:
+        """An audio VAE that encodes a sound to one latent of zeros, at the
+        rate the probe sends, so the node resamples nothing."""
+        audio_sample_rate = 32000
+
+        def encode(self, wave):
+            return torch.zeros(1, 32, 2, 1)
+
+    def guided(**given):
         out = EmptyMiniMaxH3LatentAV.execute(width=64, height=64, length=5)
         latent = (out.result if hasattr(out, "result") else out)[0]
-        out = MiniMaxH3AddGuide.execute([[torch.zeros(1, 1, 8), {}]], latent, 0,
-                                        vae=_Encoder(), image=torch.zeros(1, 64, 64, 3))
+        out = MiniMaxH3AddGuide.execute([[torch.zeros(1, 1, 8), {}]], latent, 0, **given)
         pos = (out.result if hasattr(out, "result") else out)[0]
         return (pos[0][1].get("minimax_keyframes") or [None])[-1]
 
-    kf = probe("MiniMaxH3AddGuide", guided, "a 64x64 image at frame 0")
+    kf = probe("MiniMaxH3AddGuide", lambda: guided(
+        vae=_Encoder(), image=torch.zeros(1, 64, 64, 3)), "a 64x64 image at frame 0")
     for key, what in (("resolved_frame_index", "a guide's frame"),
                       ("latent", "a guide's latents")):
         if not isinstance(kf, dict) or key not in kf:
             refuse("MiniMaxH3AddGuide", f"a keyframe's {key!r}", what)
+    kf = probe("MiniMaxH3AddGuide", lambda: guided(
+        audio_vae=_AudioEncoder(),
+        audio={"waveform": torch.zeros(1, 2, 800), "sample_rate": 32000}),
+        "a sound at frame 0")
+    if not isinstance(kf, dict) or "audio_latent" not in kf:
+        refuse("MiniMaxH3AddGuide", "a keyframe's 'audio_latent'", "a guide's sound latents")
     import comfy.ldm.minimax.model as h3_model
 
     for stream, (_key, name, value) in H3_COND_AUG.items():

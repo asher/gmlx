@@ -173,8 +173,9 @@ class Model(Base):
             comfy.model_base.MiniMaxH3.extra_conds = real
 
     def test_a_keyframe_key_comfyui_stops_writing_is_named_at_the_load(self):
-        """The AV step reads a guide's frame and latents by key; a ComfyUI
-        whose MiniMaxH3AddGuide renames one is named at the load."""
+        """The AV step reads a guide's frame, latents and sound latents by
+        key; a ComfyUI whose MiniMaxH3AddGuide renames one is named at the
+        load."""
         real = H.MiniMaxH3AddGuide.__dict__["execute"]
         add = H.MiniMaxH3AddGuide.execute
 
@@ -182,11 +183,12 @@ class Model(Base):
             def execute(positive, latent, frame_idx, **kw):
                 pos = _out(add(positive, latent, frame_idx, **kw))[0]
                 kf = pos[0][1]["minimax_keyframes"][-1]
-                kf[key + "_v2"] = kf.pop(key)
+                if key in kf:
+                    kf[key + "_v2"] = kf.pop(key)
                 return (pos,)
             return execute
 
-        for key in ("resolved_frame_index", "latent"):
+        for key in ("resolved_frame_index", "latent", "audio_latent"):
             with self.subTest(key):
                 H.MiniMaxH3AddGuide.execute = renamed(key)
                 try:
