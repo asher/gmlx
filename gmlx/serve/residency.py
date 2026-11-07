@@ -253,11 +253,11 @@ STORE = _Store()
 
 class _Aside(NamedTuple):
     """A turn's answer that it waits on the releases queued on the other
-    worker: the bytes it is short of, and the bytes they were tearing
-    down as it saw them."""
+    worker: the bytes it is short of, and the running count of the bytes
+    their releases freed as it saw it."""
 
     short: int
-    tearing: int
+    freed: int
 
 
 class _Ledger:
@@ -602,6 +602,8 @@ class _ResidencyPool:
         self._incoming = 0
         # The tearing bytes of the pipelines each worker kind releases.
         self._tearing_kind = dict.fromkeys(_WORKER_KINDS, 0)
+        # The running count of the tearing bytes each worker kind freed.
+        self._freed_kind = dict.fromkeys(_WORKER_KINDS, 0)
         # Injectable for tests: the measured room; an entry's LoRA figures
         # ({request key: bytes}, own bytes) from its caches; the shed of an
         # entry's request LoRA bytes and of the idle uploads, each returning
@@ -1058,7 +1060,8 @@ class _ResidencyPool:
                     t = time.monotonic()
                     aside_end = t + (deadline - t) / 2
                 with self._lock:
-                    while 0 < self._aside(owner) > got.tearing - got.short:
+                    while (self._aside(owner) > 0 and self._aside_freed(owner)
+                           - got.freed < got.short):
                         left = aside_end - time.monotonic()
                         if left <= 0:
                             break
@@ -1091,9 +1094,8 @@ class _ResidencyPool:
                 with self._lock:
                     short = self._shortfall(owner, need, head,
                                             self._uploads())
-                    tearing = self._aside(owner)
-                    if 0 < short <= tearing:
-                        return _Aside(short, tearing)
+                    if 0 < short <= self._aside(owner):
+                        return _Aside(short, self._aside_freed(owner))
         torn: list = []
         released: list = []
         try:
@@ -1863,7 +1865,9 @@ class _ResidencyPool:
         the other worker's release wakes."""
         self._tearing = max(0, self._tearing - n)
         if kind is not None:
-            self._tearing_kind[kind] = max(0, self._tearing_kind[kind] - n)
+            left = max(0, self._tearing_kind[kind] - n)
+            self._freed_kind[kind] += self._tearing_kind[kind] - left
+            self._tearing_kind[kind] = left
         self._publish()
         if n:
             self._idle.notify_all()
@@ -1879,6 +1883,12 @@ class _ResidencyPool:
         the lock, which frees its bytes once it runs."""
         kind = _owner_kind(owner)
         return sum(n for k, n in self._tearing_kind.items() if k != kind)
+
+    def _aside_freed(self, owner) -> int:
+        """Under _lock: the running count of the bytes the releases on the
+        other worker than the turn's of ``owner`` freed."""
+        kind = _owner_kind(owner)
+        return sum(n for k, n in self._freed_kind.items() if k != kind)
 
     def _teardown_all(self, torn: list, released: list) -> None:
         """Tear down the entries taken out of the pool, with no _lock held:

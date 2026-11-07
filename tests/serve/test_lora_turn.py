@@ -577,6 +577,41 @@ def test_a_turn_stops_waiting_once_the_first_of_two_releases_covers_it(
         q.run()
 
 
+def test_a_release_queued_during_the_wait_does_not_hide_the_bytes_freed(
+        monkeypatch):
+    """A second release queued on the image worker while the turn waits
+    adds to the bytes tearing down: the first release still frees what the
+    turn is short of, so it books then."""
+    pool = make_pool(monkeypatch, 12, retry=4 * WAIT)
+    image(pool, "za", 2)
+    image(pool, "zb", 3)
+    qwen = chat(pool, "qwen3", 3, busy=0)
+    v = video(pool, "v", 3, busy=True)
+    q = Queued(pool, monkeypatch, "za")
+    w = waits(pool)
+    done = threading.Event()
+
+    def run():
+        pool.lora_turn(v, 2 * GB, subject="the test's LoRA")
+        done.set()
+    job_ = start("video-worker-test", run)
+    try:
+        # 2 + 3 + 3 + 3 held of 12: 2 GB more is 1 GB short.
+        assert w.waiting.wait(WAIT), "the turn did not wait on the release"
+        q.at["zb"], q.go["zb"] = threading.Event(), threading.Event()
+        q.unloads["zb"] = start("unload-zb", lambda: pool.evict("zb"))
+        assert q.at["zb"].wait(WAIT), "no release of zb started"
+        q.run("za")
+        assert done.wait(WAIT), "the turn waited past the release that " \
+            "covers it"
+        finish(*job_)
+        assert pool.entry_resident(qwen)
+        assert v.lora.pending == 2 * GB
+        assert pool.figures.tearing == 3 * GB
+    finally:
+        q.run()
+
+
 def test_a_video_turn_sheds_an_idle_upload_with_the_image_worker_busy(
         monkeypatch):
     """An upload is its body's bytes, made on no worker: a video turn
