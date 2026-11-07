@@ -15,7 +15,7 @@ import os
 import numpy as np
 import pytest
 
-from test_loader_api import _HD, _HEADS, _KV, _mint_tiny_llama
+from test_loader_api import _FFN, _HD, _HEADS, _HID, _KV, _mint_tiny_llama
 
 mx = pytest.importorskip("mlx.core")
 
@@ -53,12 +53,15 @@ def _loaded(path):
     return load_serveable_model(path)
 
 
-def _np_blocks(path: str, ids: list[int], positions: int) -> np.ndarray:
+def _np_blocks(path: str, ids: list[int], positions: int,
+               deltas: dict | None = None) -> np.ndarray:
     """Each block's output, averaged over the last ``positions`` tokens,
-    ``[n_layer, n_embd]``."""
+    ``[n_layer, n_embd]``. ``deltas`` adds to GGUF weights by name."""
     from gguf import GGUFReader
 
     t = {x.name: np.array(x.data, dtype=np.float64) for x in GGUFReader(path).tensors}
+    for name, d in (deltas or {}).items():
+        t[name] = t[name] + d
     n_layer = 1 + max(int(k.split(".")[1]) for k in t if k.startswith("blk."))
     h = t["token_embd.weight"][ids]
     n = len(ids)
@@ -136,7 +139,7 @@ def test_capture_matches_the_reference_forward(tiny, capsys):
     assert meta == {"format": "gmlx.capture", "arch": "llama",
                     "file": "tiny-llama.gguf", "file_size": str(os.path.getsize(path)),
                     "sets": json.dumps({"harmful": 2, "harmless": 3}),
-                    "positions": "2", "think": "default",
+                    "positions": "2", "think": "default", "adapters": "[]",
                     "gmlx_version": meta["gmlx_version"]}
 
     from gmlx.commands.capture import prompt_ids, template_kwargs
@@ -299,15 +302,12 @@ def test_argument_errors(tiny, capsys, args, message):
     assert message in capsys.readouterr().err
 
 
-def test_a_config_id_resolves_and_an_entry_adapter_is_refused(tiny, capsys, monkeypatch):
+def test_a_config_id_resolves(tiny, capsys, monkeypatch):
     path, files, tmp = tiny
     monkeypatch.setenv("HOME", str(tmp))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp / "cache"))
-    adapter = tmp / "a.gguf"
-    adapter.write_bytes(b"")
     cfg = tmp / "gmlx.yaml"
     cfg.write_text(f"models:\n  tiny:\n    path: {path}\n"
-                   f"  tuned:\n    path: {path}\n    adapter: {adapter}\n"
                    f"  terse:\n    path: {path}\n"
                    f"    profile: terse\n"
                    f"profiles:\n  terse:\n    system: Be brief.\n    thinking: off\n"
@@ -318,10 +318,6 @@ def test_a_config_id_resolves_and_an_entry_adapter_is_refused(tiny, capsys, monk
     assert rc == 0, io.err
     assert json.loads(io.out.splitlines()[-1])["event"] == "result"
     assert "[config] 'tiny'" in io.err
-    rc, io = _run(["tuned", "--config", str(cfg), "--prompts", f"a={files['harmful']}",
-                   "--out", str(tmp / "o")], capsys)
-    assert rc == 2
-    assert "sets an adapter" in io.err
 
     # An entry's system message and thinking switch render as serve sends them.
     got, want = tmp / "id.safetensors", tmp / "flags.safetensors"
@@ -340,6 +336,90 @@ def test_a_config_id_resolves_and_an_entry_adapter_is_refused(tiny, capsys, monk
                    "--think", "--out", str(got)], capsys)
     assert rc == 0, io.err
     assert mx.load(str(got), return_metadata=True)[1]["think"] == "on"
+
+
+_TARGETS = {"model.layers.0.mlp.down_proj": ("blk.0.ffn_down.weight", _FFN),
+            "model.layers.1.self_attn.o_proj": ("blk.1.attn_output.weight", _HID)}
+
+
+@pytest.fixture
+def adapter(tiny):
+    """A rank-1 GGUF adapter on the tiny llama, and the weight delta it adds
+    at strength 1, by GGUF tensor name."""
+    from gmlx import lora_rows
+    from gmlx.load.adapter import save_lora_adapter
+
+    rng = np.random.default_rng(3)
+    pairs, deltas = [], {}
+    for module, (name, n_in) in _TARGETS.items():
+        a = rng.standard_normal((1, n_in)).astype(np.float32) * 0.3
+        b = rng.standard_normal((_HID, 1)).astype(np.float32) * 0.3
+        pairs.append((module, mx.array(a), mx.array(b)))
+        deltas[name] = 2.0 * (b.astype(np.float64) @ a.astype(np.float64))
+    path = tiny[2] / "pair.gguf"
+    save_lora_adapter(str(path), pairs, alpha=2.0, base_arch="llama",
+                      n_head=_HEADS, n_head_kv=_KV, n_layers=2)
+    yield str(path), deltas
+    lora_rows.configure("static", 1)
+
+
+def test_an_adapter_applies_at_its_strength(tiny, adapter, capsys, monkeypatch):
+    """--adapter PATH:0.5 captures the forward with half the adapter's
+    delta, publishes it by uid, and records the file and strength. A config
+    entry's adapter at the same strength captures the same."""
+    import hashlib
+
+    path, files, tmp = tiny
+    lora, deltas = adapter
+    out = str(tmp / "a.safetensors")
+    rc, io = _run([path, "--prompts", f"harmless={files['harmless']}",
+                   "--adapter", f"{lora}:0.5", "--out", out], capsys)
+    assert rc == 0, io.err
+    arrays, meta = mx.load(out, return_metadata=True)
+    with open(lora, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    assert json.loads(meta["adapters"]) == [
+        {"file": "pair.gguf", "strength": 0.5, "sha256": digest}]
+
+    from gmlx import lora_rows
+    from gmlx.commands.capture import prompt_ids, template_kwargs
+
+    assert lora_rows.mode() == "rows"
+    lora_rows.configure("static", 1)
+    model, proc, config = _loaded(path)
+    kw = template_kwargs(proc, None)
+    half = {k: 0.5 * v for k, v in deltas.items()}
+    per, base = [], []
+    for text in _SETS["harmless"]:
+        ids = prompt_ids(model, proc, config, text, None, kw)
+        per.append(_np_blocks(path, ids, 1, half))
+        base.append(_np_blocks(path, ids, 1))
+    got = np.array(arrays["harmless.mean"])
+    _assert_close(got, np.mean(per, axis=0))
+    assert np.linalg.norm(got[1] - np.mean(base, axis=0)[1]) > \
+        10 * np.linalg.norm(got[1] - np.mean(per, axis=0)[1])
+
+    monkeypatch.setenv("HOME", str(tmp))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp / "cache"))
+    cfg = tmp / "gmlx.yaml"
+    cfg.write_text(f"models:\n  tuned:\n    path: {path}\n"
+                   f"    adapters: [{{path: {lora}, strength: 0.5}}]\n")
+    entry = str(tmp / "entry.safetensors")
+    rc, io = _run(["tuned", "--config", str(cfg), "--prompts",
+                   f"harmless={files['harmless']}", "--out", entry], capsys)
+    assert rc == 0, io.err
+    np.testing.assert_array_equal(np.array(mx.load(entry)["harmless.mean"]), got)
+
+
+def test_an_adapter_file_that_is_missing_or_named_twice_is_refused(tiny, capsys):
+    path, files, tmp = tiny
+    base = [path, "--prompts", f"a={files['harmful']}", "--out", str(tmp / "o")]
+    rc, io = _run(base + ["--adapter", str(tmp / "gone.gguf")], capsys)
+    assert rc == 2 and "--adapter: no such file" in io.err
+    lora = tmp / "x.gguf"
+    lora.write_bytes(b"")
+    rc, io = _run(base + ["--adapter", str(lora), "--adapter", f"{lora}:2"], capsys)
+    assert rc == 2 and "is given twice" in io.err
 
 
 @pytest.mark.integration
