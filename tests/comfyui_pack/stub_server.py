@@ -316,7 +316,7 @@ class Handler(BaseHTTPRequestHandler):
                 "wire": {"container": "safetensors", "dtypes": ["f32", "f16", "bf16", "u8"]},
                 "families": sorted(COMFY), "conventions": ["comfy"], "patch_kinds": ["lora"],
                 "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae", "ref_cache",
-                             "skip_blocks", "av_step", "anchors"],
+                             "skip_blocks", "av_step", "anchors", "keyframe_upsampling"],
                 "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16,
                            "max_body_bytes": st.max_body}})
         if sub == "/models":
@@ -516,10 +516,16 @@ class Handler(BaseHTTPRequestHandler):
             return rng.standard_normal((1, n, st.context_dim(fam)), dtype=np.float32) * 0.5
 
         revised = None
-        if st.upsample and not images and req.get("prompt_upsampling") is not False:
-            revised = "a caption of: " + req["text"]
+        clip = req.get("frames"), req.get("keyframes")
+        if st.upsample and req.get("prompt_upsampling") is not False:
+            # A clip's keyframes, named with its length, are rewritten too.
+            if clip[0] is not None:
+                revised = f"a caption of {clip[0]} frames, {clip[1]}: " + req["text"]
+            elif not images:
+                revised = "a caption of: " + req["text"]
         out = {"cond": features(revised or req["text"])}
-        if revised:
+        if revised and fam != "h3":
+            # A video encode answers no typed prompt.
             out["cond_typed"] = features(req["text"])
         stride, ch = COMFY[fam]["latent"]["stride"], COMFY[fam]["latent"]["channels"]
         want_refs = req.get("refs", True) and fam != "h3"
@@ -534,10 +540,13 @@ class Handler(BaseHTTPRequestHandler):
         fields = {"cond": hashes["cond"], "ref_latents": [hashes[k] for k in out if k.startswith("ref_")],
                   "image_slots": [2 + 3 * i for i in range(len(images))], "num_tokens": n}
         if revised:
-            fields.update(revised_prompt=revised, cond_typed=hashes["cond_typed"])
+            fields.update(revised_prompt=revised)
+        if "cond_typed" in hashes:
+            fields.update(cond_typed=hashes["cond_typed"])
         if spans:
             fields.update(spans=spans, image_slots=[])
         st.event(kind="encode", model=req["model"], text=req["text"], tokens=n, images=len(images), refs=want_refs,
+                 frames=clip[0], keyframes=clip[1], revised=revised,
                  cond=hashes["cond"], cond_typed=hashes.get("cond_typed"), spans=spans,
                  image_shapes=[list(im.shape) for im in images],
                  image_sums=[int(im.astype(np.int64).sum()) for im in images])
@@ -818,7 +827,8 @@ def main():
     ap.add_argument("--cond-tokens", type=int, default=32)
     ap.add_argument("--default-model", default=None)
     ap.add_argument("--upsample", action="store_true",
-                    help="encode a prompt without images as a caption, as an upsampler does")
+                    help="encode a prompt without images, or one with a clip's frames, as a "
+                         "caption, as an upsampler does")
     serve(ap.parse_args())
 
 

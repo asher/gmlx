@@ -594,8 +594,8 @@ class Cases:
         self.check("no step served", n == 0, n)
 
     async def h3_t2v(self):
-        """The MiniMax-H3 example workflow: the prompt from MiniMaxH3ImageToVideo,
-        AV steps at the recipe's shifts on ComfyUI's simple schedule, and the
+        """The MiniMax-H3 example workflow: the prompt from GmlxH3ImageToVideo
+        with the clip's length, AV steps at the recipe's shifts on ComfyUI's simple schedule, and the
         clip decoded by the gmlx video and audio VAEs into a saved video."""
         wf = workflow("minimax-h3-t2v.json")
         wf["6"]["inputs"].update(width=64, height=64, length=22)
@@ -608,6 +608,9 @@ class Cases:
         self.check("the prompt encoded once, with no images",
                    [(e["text"], e["images"]) for e in enc] == [(wf["6"]["inputs"]["prompt"], 0)],
                    [(e["text"][:20], e["images"]) for e in enc])
+        self.check("the encode names the clip's 22 frames and no keyframes",
+                   [(e["frames"], e["keyframes"]) for e in enc] == [(22, [])],
+                   [(e["frames"], e["keyframes"]) for e in enc])
         steps = kinds(log, "av_step")
         self.check("one row a step at the recipe's shifts and audio scale",
                    len(steps) == 2 and all(e["shifts"] == {"video": 6.0, "audio": 3.0}
@@ -657,7 +660,8 @@ class Cases:
 
     async def h3_i2v(self):
         """The MiniMax-H3 first frame workflow: the image from Load Image
-        encoded with the prompt and by the gmlx video VAE, and every step
+        encoded with the prompt, the clip's length and the frame's role, and
+        by the gmlx video VAE, and every step
         anchored at frame 0 with the prompt's vision span."""
         wf = workflow("minimax-h3-i2v.json")
         wf["6"]["inputs"].update(width=64, height=64, length=22)
@@ -670,6 +674,9 @@ class Cases:
         self.check("the prompt encoded once, with the first frame at the canvas",
                    [(e["images"], e["image_shapes"]) for e in enc] == [(1, [[64, 64, 3]])],
                    [(e["images"], e["image_shapes"]) for e in enc])
+        self.check("the encode names the clip's 22 frames and a first frame",
+                   [(e["frames"], e["keyframes"]) for e in enc] == [(22, ["first"])],
+                   [(e["frames"], e["keyframes"]) for e in enc])
         self.check("the first frame encoded once by the video VAE",
                    [e["shape"] for e in kinds(log, "video_encode")] == [[1, 64, 64, 3]],
                    [e["shape"] for e in kinds(log, "video_encode")])

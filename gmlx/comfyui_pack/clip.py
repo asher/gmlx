@@ -18,7 +18,7 @@ import torch
 import comfy.model_patcher
 import comfy.sd
 
-from .client import GmlxRefusal, StepClient
+from .client import GmlxError, GmlxRefusal, StepClient
 from .patcher import CPU, H3_FAMILY, H3_NO_REFS, token_tags
 
 log = logging.getLogger("gmlx")
@@ -36,6 +36,12 @@ _SPACE_FOR_EMPTY = frozenset({"qwen_image", "qwen_image21", "krea2", "flux3_klei
 
 # The conditioning key of the prompt as typed beside an upsampled one.
 TYPED = "gmlx_typed"
+
+# The server feature that rewrites a prompt with the clip's length and
+# keyframes, which GmlxH3ImageToVideo puts on its clone of the CLIP.
+KEYFRAME_UPSAMPLING = "keyframe_upsampling"
+STOCK_NODE = "MiniMax H3 Image to Video"
+GMLX_NODE = "gmlx MiniMax-H3 Image to Video"
 
 
 class TypedPrompt:
@@ -88,6 +94,8 @@ class GmlxCLIP(comfy.sd.CLIP):
     gmlx_client: StepClient | None = None
     gmlx_model: str | None = None
     gmlx_family: str | None = None
+    # {"frames", "keyframes"} of the clip GmlxH3ImageToVideo encodes for.
+    gmlx_clip: dict | None = None
 
     def __init__(self, client: StepClient | None = None, model_id: str | None = None,
                  family: str | None = None):
@@ -110,6 +118,7 @@ class GmlxCLIP(comfy.sd.CLIP):
         n = GmlxCLIP()
         n.gmlx_client, n.gmlx_model = self.gmlx_client, self.gmlx_model
         n.gmlx_family = self.gmlx_family
+        n.gmlx_clip = self.gmlx_clip
         n.patcher = self.patcher.clone()
         n.cond_stage_model = self.cond_stage_model
         n.tokenizer = None
@@ -141,13 +150,14 @@ class GmlxCLIP(comfy.sd.CLIP):
             # MiniMaxH3ReferenceToVideo shows its references to the encoder.
             raise GmlxRefusal("gmlx: references (minimax_ref_items, from "
                               f"MiniMaxH3ReferenceToVideo) reached a gmlx CLIP; {H3_NO_REFS}")
-        # MiniMaxH3ImageToVideo shows its first and last frames to the
-        # encoder, at the clip's canvas, before its VAE encodes them.
+        # MiniMaxH3ImageToVideo, which GmlxH3ImageToVideo runs, shows its
+        # first and last frames to the encoder, at the clip's canvas,
+        # before its VAE encodes them.
         images = list(kwargs.get("images") or [])
         if kwargs.get("image") is not None and not images:
             img = kwargs["image"]
             images = [img[i:i + 1] for i in range(img.shape[0])]
-        return {"gmlx": {"text": str(text), "images": images,
+        return {"gmlx": {"text": str(text), "images": images, "clip": self.gmlx_clip,
                          "llama_template": kwargs.get("llama_template"),
                          "keep_vision": bool(kwargs.get("keep_vision", False)),
                          "prevent_empty_text": bool(kwargs.get("prevent_empty_text", False))}}
@@ -167,6 +177,34 @@ class GmlxCLIP(comfy.sd.CLIP):
             log.warning("gmlx: weighted prompt syntax is passed to the server as plain text")
         return p
 
+    def _clip_facts(self, clip: dict | None, images: int) -> dict | None:
+        """The clip's frames and keyframes the encode sends, when the
+        server takes them. Warns once a CLIP when the server does not, and
+        when ComfyUI's own node sends keyframes without them."""
+        caps = getattr(self.gmlx_client, "capabilities", None) or {}
+        takes = KEYFRAME_UPSAMPLING in (caps.get("features") or ())
+        if clip is None:
+            if images and takes and self.gmlx_family == H3_FAMILY and "stock" not in self.warned:
+                self.warned.add("stock")
+                log.warning("gmlx: ComfyUI's %s sends the server no clip length or keyframes; "
+                            "%s sends both, and an upsampler on the server's entry rewrites "
+                            "the prompt with them", STOCK_NODE, GMLX_NODE)
+            return None
+        if len(clip["keyframes"]) != images:
+            from .version import COMFYUI_FLOOR, COMFYUI_TESTED
+
+            raise GmlxError(f"gmlx: ComfyUI's {STOCK_NODE} showed the encoder {images} images "
+                            f"for {len(clip['keyframes'])} keyframes; the gmlx nodes are tested "
+                            f"on ComfyUI {COMFYUI_FLOOR} to {COMFYUI_TESTED}")
+        if not takes:
+            if "keyframe_upsampling" not in self.warned:
+                self.warned.add("keyframe_upsampling")
+                log.warning("gmlx: this gmlx server does not tell its upsampler the clip's "
+                            "length and keyframes, so a prompt with keyframes runs as typed; "
+                            "update it")
+            return None
+        return clip
+
     def encode_from_tokens(self, tokens, return_pooled=False, return_dict=False):
         p = self._payload(tokens)
         images = []
@@ -175,7 +213,8 @@ class GmlxCLIP(comfy.sd.CLIP):
         text = p["text"]
         if p.get("prevent_empty_text") and text == "" and self.gmlx_family in _SPACE_FOR_EMPTY:
             text = " "
-        out, fields = self.gmlx_client.encode(self.gmlx_model, text, images)
+        out, fields = self.gmlx_client.encode(self.gmlx_model, text, images,
+                                              self._clip_facts(p.get("clip"), len(images)))
         if fields.get("revised_prompt"):
             log.info("gmlx: the server encoded the upsampled prompt: %s",
                      fields["revised_prompt"])

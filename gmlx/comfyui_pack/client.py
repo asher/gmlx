@@ -546,19 +546,20 @@ class StepClient:
 
     # Work.
 
-    def encode(self, model: str, text: str, images: list | None = None) -> tuple:
+    def encode(self, model: str, text: str, images: list | None = None,
+               clip: dict | None = None) -> tuple:
         """Conditioning (1, L, D) f32 and the answer's fields for ``text``,
-        with reference images as uint8 (H, W, C) arrays."""
+        with reference images as uint8 (H, W, C) arrays. ``clip`` gives a
+        video clip's ``frames`` and ``keyframes``, the role of each image."""
+        body = {"model": model, "text": text, **(clip or {})}
         if images:
             tensors = {f"image_{i}": np.ascontiguousarray(im, dtype=np.uint8)
                        for i, im in enumerate(images)}
             # ComfyUI encodes the reference latents with its own VAE node.
-            out, fields, _ = self.call_tensors("/encode", tensors,
-                                               {"model": model, "text": text, "refs": False},
+            out, fields, _ = self.call_tensors("/encode", tensors, {**body, "refs": False},
                                                what="the text encode")
         else:
-            s, _, d = self.request("POST", PREFIX + "/encode",
-                                   json.dumps({"model": model, "text": text}).encode(),
+            s, _, d = self.request("POST", PREFIX + "/encode", json.dumps(body).encode(),
                                    {"Content-Type": "application/json"})
             if s != 200:
                 self._fail(s, d, "the text encode")
