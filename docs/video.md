@@ -15,6 +15,8 @@ gmlx video generate h3 --prompt "waves on a pebble beach at dawn" --output beach
 
 Video needs a Mac with an M3 chip or newer, 32 GB of memory or more,
 ffmpeg, and about 40 GB of disk for the model's files.
+It needs no pip extra: the `video` extra is OpenCV, for video input to
+vision models.
 [FastH3](#fasth3), a faster version of the model, needs an M5 chip or
 newer.
 
