@@ -52,6 +52,22 @@ def lone_surrogate(value, name: str) -> str | None:
     return None
 
 
+def body_surrogate(body) -> str | None:
+    """The field of a parsed JSON body that holds a lone surrogate escape,
+    named as :func:`lone_surrogate` names it, or None. A top-level key
+    that holds one is named with its escape written out."""
+    if not isinstance(body, dict):
+        return None
+    for k, v in body.items():
+        name = str(k)
+        if lone_surrogate(name, name) is not None:
+            return name.encode("utf-8", "backslashreplace").decode("utf-8")
+        hit = lone_surrogate(v, name)
+        if hit is not None:
+            return hit
+    return None
+
+
 def surrogate_message(field: str) -> str:
     """The 400 text of a field :func:`lone_surrogate` names."""
     return f"{field} holds a lone surrogate escape"

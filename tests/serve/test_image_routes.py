@@ -151,11 +151,14 @@ def test_refused_fields_answer_400_naming_the_field(served, body, param):
     ("generations", b'{"prompt": "a \\ud800 cat"}', "prompt"),
     ("generations", b'{"prompt": "a cat", "negative_prompt": "\\udfff"}',
      "negative_prompt"),
-    ("edits", b'{"prompt": "a \\ud800 cat"}', "prompt")])
+    ("edits", b'{"prompt": "a \\ud800 cat"}', "prompt"),
+    ("generations", b'{"prompt": "a cat", "adapters": [{"id": "x\\ud800"}]}',
+     "adapters[0].id")])
 def test_a_prompt_with_a_lone_surrogate_is_a_400(served, route, body, field):
     """A lone surrogate escape parses from JSON to a str that encodes to
     no UTF-8: the job's text encoder failed on it with a 500. The route
-    refuses it with the 400 the video route gives."""
+    refuses it with the 400 the video route gives, in any field of the
+    body, an adapter's id among them."""
     def job(req, kw):
         # As the tokenizer, it encodes the texts.
         for text in (req.prompt, req.negative_prompt or ""):

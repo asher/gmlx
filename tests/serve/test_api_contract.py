@@ -627,6 +627,15 @@ class _QwenProcessor:
         return rendered[0] if isinstance(rendered, list) else rendered
 
 
+class _OpensThinking(_QwenProcessor):
+    """The fixture template, which opens its thinking block with the start
+    token the request names, as the route hands it to the template."""
+
+    chat_template = _QwenProcessor.chat_template + (
+        "{%- if thinking_start_token is defined %}{{ thinking_start_token }}"
+        "{%- endif %}")
+
+
 class _Tokenizing:
     """The engine as far as its tokenizer, which encodes the prompt."""
 
@@ -649,12 +658,29 @@ class _Tokenizing:
                        {"type": "text", "text": "a \udc00 cat"}]}]},
      "messages[1].content[0].text"),
     ({"model": "m\ud800", "messages": [{"role": "user", "content": "a"}]},
-     "model")])
+     "model"),
+    ({"messages": [{"role": "user", "content": "a"}],
+      "tool_choice": {"type": "function", "function": {"name": "f\udc80"}},
+      "tools": [{"type": "function", "function": {"name": "f",
+                                                  "parameters": {}}}]},
+     "tool_choice.function.name"),
+    ({"messages": [{"role": "user", "content": "a"}],
+      "response_format": {"type": "json_schema", "json_schema": {
+          "name": "s", "schema": {"type": "object",
+                                  "description": "a \udc80"}}}},
+     "response_format.json_schema.schema.description"),
+    ({"messages": [{"role": "user", "content": "a"}],
+      "thinking_start_token": "<think\udc80>"},
+     "thinking_start_token"),
+    ({"messages": [{"role": "user", "content": "a"}],
+      "instructions": "Be \udc80 brief."},
+     "instructions")])
 def test_a_chat_string_with_a_lone_surrogate_is_a_400(monkeypatch, body,
                                                       field):
     """JSON parses a lone surrogate escape to a str that encodes to no
     UTF-8, which the tokenizer then fails on: the chat route refuses it
-    with the 400 the video route gives, naming the field."""
+    with the 400 the video route gives, naming the field, in any field of
+    the body."""
     import json
 
     from fastapi.testclient import TestClient
@@ -663,7 +689,7 @@ def test_a_chat_string_with_a_lone_surrogate_is_a_400(monkeypatch, body,
     runtime = importlib.import_module(
         "gmlx._vendor.mlx_vlm.server.runtime").runtime
     monkeypatch.setattr(openai, "get_cached_model", lambda *a, **k: (
-        None, _QwenProcessor(), {"model_type": "qwen3_5"}))
+        None, _OpensThinking(), {"model_type": "qwen3_5"}))
     monkeypatch.setattr(runtime, "response_generator", _Tokenizing(),
                         raising=False)
     # The server's error handlers, on this test's copy of the app's, take

@@ -272,25 +272,20 @@ def _http_request_of(values):
 
 
 def _refuse_lone_surrogate(request) -> None:
-    """The 400 of a chat request whose model, messages, tools or stop
-    strings hold a lone surrogate escape, which the template, the
-    tokenizer or the answer's JSON would fail on with a 500."""
+    """The 400 of a chat request with a lone surrogate escape in any string
+    of its body, which the template, the tokenizer or the answer's JSON
+    would fail on with a 500."""
     from fastapi import HTTPException
 
-    from ._common import lone_surrogate, surrogate_message
+    from ._common import body_surrogate, surrogate_message
 
-    messages = [m.model_dump(exclude_none=True)
-                if hasattr(m, "model_dump") else m
-                for m in getattr(request, "messages", None) or ()]
-    for name, value in (("model", getattr(request, "model", None)),
-                        ("messages", messages),
-                        ("tools", getattr(request, "tools", None)),
-                        ("stop", getattr(request, "stop", None))):
-        field = lone_surrogate(value, name)
-        if field is not None:
-            raise HTTPException(status_code=400, detail={"error": {
-                "type": "invalid_request_error",
-                "message": surrogate_message(field), "param": field}})
+    body = (request.model_dump(exclude_none=True)
+            if hasattr(request, "model_dump") else None)
+    field = body_surrogate(body)
+    if field is not None:
+        raise HTTPException(status_code=400, detail={"error": {
+            "type": "invalid_request_error",
+            "message": surrogate_message(field), "param": field}})
 
 
 def _make_chat_endpoint(original):
