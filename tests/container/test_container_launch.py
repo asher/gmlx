@@ -4279,6 +4279,22 @@ def test_step_8_leaves_a_signal_ignored_on_entry(signum):
         signal.signal(signum, saved)
 
 
+def test_ctrl_c_tests_pass_in_a_run_that_starts_with_sigint_ignored():
+    """A shell script that starts the tests with ``&`` ignores SIGINT in
+    them, and launch keeps an ignored signal ignored."""
+    root = Path(__file__).resolve().parents[2]
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("PYTEST_") and k != "KQUANT_TEST_GGUF_DIR"}
+    start = ("import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_IGN); "
+             "os.execv(sys.executable, [sys.executable, '-m', 'pytest', *sys.argv[1:]])")
+    done = subprocess.run(
+        [sys.executable, "-c", start, "-q", "-p", "no:cacheprovider",
+         "tests/container/test_container_launch.py::"
+         "test_step_8_counts_ctrl_c_with_the_other_signals"],
+        cwd=root, env=env, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+
+
 def test_step_7_leaves_an_owed_builder_for_a_build_about_to_run(env, monkeypatch):
     from gmlx.container import images
     seen = []
