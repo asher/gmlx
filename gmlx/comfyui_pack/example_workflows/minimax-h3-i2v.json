@@ -205,7 +205,7 @@
   },
   {
    "id": 6,
-   "type": "MiniMaxH3ImageToVideo",
+   "type": "GmlxH3ImageToVideo",
    "pos": [
     340,
     210
@@ -257,7 +257,7 @@
    ],
    "title": "Prompt and clip size",
    "properties": {
-    "Node name for S&R": "MiniMaxH3ImageToVideo"
+    "Node name for S&R": "GmlxH3ImageToVideo"
    },
    "widgets_values": [
     "The camera holds on the scene as it comes to life: people and things in it start to move, a light wind passes, and the sounds of the place rise around them.",

@@ -194,6 +194,7 @@ class State:
         self.gmlx_version = a.gmlx_version
         self.no_contract_field = a.no_contract_field
         self.delay = a.step_delay_ms / 1000.0
+        self.encode_delay = a.encode_delay_ms / 1000.0
         self.cond_tokens = a.cond_tokens
         self.default_model = a.default_model
         self.upsample = a.upsample
@@ -208,6 +209,8 @@ class State:
         self.refuse_windows: list = []
         self.max_body = (1 << 30) + (1 << 20)
         self.runs: dict = {}
+        # interrupt_id -> the stop event of an encode in its delay
+        self.encodes: dict = {}
         self.log: list = []
         self.lock = threading.Lock()
 
@@ -316,7 +319,7 @@ class Handler(BaseHTTPRequestHandler):
                 "wire": {"container": "safetensors", "dtypes": ["f32", "f16", "bf16", "u8"]},
                 "families": sorted(COMFY), "conventions": ["comfy"], "patch_kinds": ["lora"],
                 "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae", "ref_cache",
-                             "skip_blocks", "av_step", "anchors"],
+                             "skip_blocks", "av_step", "anchors", "keyframe_upsampling"],
                 "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16,
                            "max_body_bytes": st.max_body}})
         if sub == "/models":
@@ -450,8 +453,11 @@ class Handler(BaseHTTPRequestHandler):
             hit = [r for r in st.runs.values() if not rid or r.id == rid]
             for r in hit:
                 r.gen += 1
+            stop = st.encodes.get(rid) if rid else None
+            if stop is not None:
+                stop.set()
             st.event(kind="interrupt", run=rid)
-            return self._json(200, {"interrupted": len(hit)})
+            return self._json(200, {"interrupted": len(hit) + (stop is not None)})
         if sub == "/adapters/register":
             return self._err(404, "no such adapter file under the server's model folders")
         if sub == "/models/load":
@@ -493,6 +499,19 @@ class Handler(BaseHTTPRequestHandler):
         m = self._model(req.get("model"))
         if m is None:
             return
+        if st.encode_delay:
+            # As an upsampler's rewrite of the prompt takes its time, which
+            # an interrupt naming the encode's interrupt_id ends.
+            token = req.get("interrupt_id")
+            stop = threading.Event()
+            if token:
+                st.encodes[token] = stop
+            st.event(kind="encode_begin", interrupt_id=token)
+            stop.wait(st.encode_delay)
+            st.encodes.pop(token, None)
+            if stop.is_set():
+                st.event(kind="encode_interrupted", interrupt_id=token)
+                return self._err(409, "the encode was interrupted", code="interrupted")
         fam = m[0]
         spans = []
         if images and fam == "h3":
@@ -516,10 +535,16 @@ class Handler(BaseHTTPRequestHandler):
             return rng.standard_normal((1, n, st.context_dim(fam)), dtype=np.float32) * 0.5
 
         revised = None
-        if st.upsample and not images and req.get("prompt_upsampling") is not False:
-            revised = "a caption of: " + req["text"]
+        clip = req.get("frames"), req.get("keyframes")
+        if st.upsample and req.get("prompt_upsampling") is not False:
+            # A clip's keyframes, named with its length, are rewritten too.
+            if clip[0] is not None:
+                revised = f"a caption of {clip[0]} frames, {clip[1]}: " + req["text"]
+            elif not images:
+                revised = "a caption of: " + req["text"]
         out = {"cond": features(revised or req["text"])}
-        if revised:
+        if revised and fam != "h3":
+            # A video encode answers no typed prompt.
             out["cond_typed"] = features(req["text"])
         stride, ch = COMFY[fam]["latent"]["stride"], COMFY[fam]["latent"]["channels"]
         want_refs = req.get("refs", True) and fam != "h3"
@@ -534,10 +559,13 @@ class Handler(BaseHTTPRequestHandler):
         fields = {"cond": hashes["cond"], "ref_latents": [hashes[k] for k in out if k.startswith("ref_")],
                   "image_slots": [2 + 3 * i for i in range(len(images))], "num_tokens": n}
         if revised:
-            fields.update(revised_prompt=revised, cond_typed=hashes["cond_typed"])
+            fields.update(revised_prompt=revised)
+        if "cond_typed" in hashes:
+            fields.update(cond_typed=hashes["cond_typed"])
         if spans:
             fields.update(spans=spans, image_slots=[])
         st.event(kind="encode", model=req["model"], text=req["text"], tokens=n, images=len(images), refs=want_refs,
+                 frames=clip[0], keyframes=clip[1], revised=revised,
                  cond=hashes["cond"], cond_typed=hashes.get("cond_typed"), spans=spans,
                  image_shapes=[list(im.shape) for im in images],
                  image_sums=[int(im.astype(np.int64).sum()) for im in images])
@@ -811,6 +839,7 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--step-delay-ms", type=float, default=0.0)
+    ap.add_argument("--encode-delay-ms", type=float, default=0.0)
     ap.add_argument("--contract", default="1.0")
     ap.add_argument("--api-key", default=None)
     ap.add_argument("--gmlx-version", default="stub")
@@ -818,7 +847,8 @@ def main():
     ap.add_argument("--cond-tokens", type=int, default=32)
     ap.add_argument("--default-model", default=None)
     ap.add_argument("--upsample", action="store_true",
-                    help="encode a prompt without images as a caption, as an upsampler does")
+                    help="encode a prompt without images, or one with a clip's frames, as a "
+                         "caption, as an upsampler does")
     serve(ap.parse_args())
 
 

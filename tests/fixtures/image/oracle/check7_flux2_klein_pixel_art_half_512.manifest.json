@@ -4,18 +4,7 @@
  "check": 7,
  "family": "flux2_klein",
  "script": "scripts/image_oracle/check7_flux2_klein_community.py",
- "argv": [
-  "check7_flux2_klein_community.py",
-  "--reference",
-  "src",
-  "--spec",
-  "adapters.json",
-  "--only",
-  "pixel_art_half",
-  "--gguf",
-  "flux-2-klein-4b-Q4_K_M.gguf",
-  "flux-2-klein-base-4b-Q4_K_M.gguf"
- ],
+ "argv": ["check7_flux2_klein_community.py", "--reference", "src", "--spec", "adapters.json", "--only", "pixel_art_half", "--gguf", "flux-2-klein-4b-Q4_K_M.gguf", "flux-2-klein-base-4b-Q4_K_M.gguf"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -94,18 +83,12 @@
    "license": "apache-2.0",
    "pairs": 86,
    "spelling": "diffusers",
-   "ranks": [
-    64
-   ],
+   "ranks": [64],
    "alphas": null,
-   "scales": [
-    16.0
-   ],
+   "scales": [16.0],
    "scale_source": "peft 0.18.1 LoraConfig from the header",
    "peft": "0.18.1",
-   "tensor_dtypes": [
-    "float32"
-   ],
+   "tensor_dtypes": ["float32"],
    "header_config": {
     "transformer.alora_invocation_tokens": null,
     "transformer.alpha_pattern": {},
@@ -136,25 +119,7 @@
     "transformer.r": 64,
     "transformer.rank_pattern": {},
     "transformer.revision": null,
-    "transformer.target_modules": [
-     "linear_out",
-     "to_qkv_mlp_proj",
-     "add_q_proj",
-     "context_embedder",
-     "single_stream_modulation.linear",
-     "proj_out",
-     "double_stream_modulation_img.linear",
-     "add_k_proj",
-     "double_stream_modulation_txt.linear",
-     "to_k",
-     "to_q",
-     "to_v",
-     "to_add_out",
-     "linear_in",
-     "to_out.0",
-     "add_v_proj",
-     "x_embedder"
-    ],
+    "transformer.target_modules": ["linear_out", "to_qkv_mlp_proj", "add_q_proj", "context_embedder", "single_stream_modulation.linear", "proj_out", "double_stream_modulation_img.linear", "add_k_proj", "double_stream_modulation_txt.linear", "to_k", "to_q", "to_v", "to_add_out", "linear_in", "to_out.0", "add_v_proj", "x_embedder"],
     "transformer.target_parameters": null,
     "transformer.task_type": null,
     "transformer.trainable_token_indices": null,
@@ -165,440 +130,182 @@
   },
   "lora_pairs": 86,
   "targets": [
+   ["double_blocks.0.img_attn.proj", null],
    [
-    "double_blocks.0.img_attn.proj",
-    null
+    "double_blocks.0.img_attn.qkv",
+    [0, 3072]
    ],
    [
     "double_blocks.0.img_attn.qkv",
-    [
-     0,
-     3072
-    ]
+    [3072, 3072]
    ],
    [
     "double_blocks.0.img_attn.qkv",
-    [
-     3072,
-     3072
-    ]
+    [6144, 3072]
    ],
+   ["double_blocks.0.img_mlp.0", null],
+   ["double_blocks.0.img_mlp.2", null],
+   ["double_blocks.0.txt_attn.proj", null],
    [
-    "double_blocks.0.img_attn.qkv",
-    [
-     6144,
-     3072
-    ]
-   ],
-   [
-    "double_blocks.0.img_mlp.0",
-    null
-   ],
-   [
-    "double_blocks.0.img_mlp.2",
-    null
-   ],
-   [
-    "double_blocks.0.txt_attn.proj",
-    null
+    "double_blocks.0.txt_attn.qkv",
+    [0, 3072]
    ],
    [
     "double_blocks.0.txt_attn.qkv",
-    [
-     0,
-     3072
-    ]
+    [3072, 3072]
    ],
    [
     "double_blocks.0.txt_attn.qkv",
-    [
-     3072,
-     3072
-    ]
+    [6144, 3072]
    ],
+   ["double_blocks.0.txt_mlp.0", null],
+   ["double_blocks.0.txt_mlp.2", null],
+   ["double_blocks.1.img_attn.proj", null],
    [
-    "double_blocks.0.txt_attn.qkv",
-    [
-     6144,
-     3072
-    ]
-   ],
-   [
-    "double_blocks.0.txt_mlp.0",
-    null
-   ],
-   [
-    "double_blocks.0.txt_mlp.2",
-    null
-   ],
-   [
-    "double_blocks.1.img_attn.proj",
-    null
+    "double_blocks.1.img_attn.qkv",
+    [0, 3072]
    ],
    [
     "double_blocks.1.img_attn.qkv",
-    [
-     0,
-     3072
-    ]
+    [3072, 3072]
    ],
    [
     "double_blocks.1.img_attn.qkv",
-    [
-     3072,
-     3072
-    ]
+    [6144, 3072]
    ],
+   ["double_blocks.1.img_mlp.0", null],
+   ["double_blocks.1.img_mlp.2", null],
+   ["double_blocks.1.txt_attn.proj", null],
    [
-    "double_blocks.1.img_attn.qkv",
-    [
-     6144,
-     3072
-    ]
-   ],
-   [
-    "double_blocks.1.img_mlp.0",
-    null
-   ],
-   [
-    "double_blocks.1.img_mlp.2",
-    null
-   ],
-   [
-    "double_blocks.1.txt_attn.proj",
-    null
+    "double_blocks.1.txt_attn.qkv",
+    [0, 3072]
    ],
    [
     "double_blocks.1.txt_attn.qkv",
-    [
-     0,
-     3072
-    ]
+    [3072, 3072]
    ],
    [
     "double_blocks.1.txt_attn.qkv",
-    [
-     3072,
-     3072
-    ]
+    [6144, 3072]
    ],
+   ["double_blocks.1.txt_mlp.0", null],
+   ["double_blocks.1.txt_mlp.2", null],
+   ["double_blocks.2.img_attn.proj", null],
    [
-    "double_blocks.1.txt_attn.qkv",
-    [
-     6144,
-     3072
-    ]
-   ],
-   [
-    "double_blocks.1.txt_mlp.0",
-    null
-   ],
-   [
-    "double_blocks.1.txt_mlp.2",
-    null
-   ],
-   [
-    "double_blocks.2.img_attn.proj",
-    null
+    "double_blocks.2.img_attn.qkv",
+    [0, 3072]
    ],
    [
     "double_blocks.2.img_attn.qkv",
-    [
-     0,
-     3072
-    ]
+    [3072, 3072]
    ],
    [
     "double_blocks.2.img_attn.qkv",
-    [
-     3072,
-     3072
-    ]
+    [6144, 3072]
    ],
+   ["double_blocks.2.img_mlp.0", null],
+   ["double_blocks.2.img_mlp.2", null],
+   ["double_blocks.2.txt_attn.proj", null],
    [
-    "double_blocks.2.img_attn.qkv",
-    [
-     6144,
-     3072
-    ]
-   ],
-   [
-    "double_blocks.2.img_mlp.0",
-    null
-   ],
-   [
-    "double_blocks.2.img_mlp.2",
-    null
-   ],
-   [
-    "double_blocks.2.txt_attn.proj",
-    null
+    "double_blocks.2.txt_attn.qkv",
+    [0, 3072]
    ],
    [
     "double_blocks.2.txt_attn.qkv",
-    [
-     0,
-     3072
-    ]
+    [3072, 3072]
    ],
    [
     "double_blocks.2.txt_attn.qkv",
-    [
-     3072,
-     3072
-    ]
+    [6144, 3072]
    ],
+   ["double_blocks.2.txt_mlp.0", null],
+   ["double_blocks.2.txt_mlp.2", null],
+   ["double_blocks.3.img_attn.proj", null],
    [
-    "double_blocks.2.txt_attn.qkv",
-    [
-     6144,
-     3072
-    ]
-   ],
-   [
-    "double_blocks.2.txt_mlp.0",
-    null
-   ],
-   [
-    "double_blocks.2.txt_mlp.2",
-    null
-   ],
-   [
-    "double_blocks.3.img_attn.proj",
-    null
+    "double_blocks.3.img_attn.qkv",
+    [0, 3072]
    ],
    [
     "double_blocks.3.img_attn.qkv",
-    [
-     0,
-     3072
-    ]
+    [3072, 3072]
    ],
    [
     "double_blocks.3.img_attn.qkv",
-    [
-     3072,
-     3072
-    ]
+    [6144, 3072]
    ],
+   ["double_blocks.3.img_mlp.0", null],
+   ["double_blocks.3.img_mlp.2", null],
+   ["double_blocks.3.txt_attn.proj", null],
    [
-    "double_blocks.3.img_attn.qkv",
-    [
-     6144,
-     3072
-    ]
-   ],
-   [
-    "double_blocks.3.img_mlp.0",
-    null
-   ],
-   [
-    "double_blocks.3.img_mlp.2",
-    null
-   ],
-   [
-    "double_blocks.3.txt_attn.proj",
-    null
+    "double_blocks.3.txt_attn.qkv",
+    [0, 3072]
    ],
    [
     "double_blocks.3.txt_attn.qkv",
-    [
-     0,
-     3072
-    ]
+    [3072, 3072]
    ],
    [
     "double_blocks.3.txt_attn.qkv",
-    [
-     3072,
-     3072
-    ]
+    [6144, 3072]
    ],
+   ["double_blocks.3.txt_mlp.0", null],
+   ["double_blocks.3.txt_mlp.2", null],
+   ["double_blocks.4.img_attn.proj", null],
    [
-    "double_blocks.3.txt_attn.qkv",
-    [
-     6144,
-     3072
-    ]
-   ],
-   [
-    "double_blocks.3.txt_mlp.0",
-    null
-   ],
-   [
-    "double_blocks.3.txt_mlp.2",
-    null
-   ],
-   [
-    "double_blocks.4.img_attn.proj",
-    null
+    "double_blocks.4.img_attn.qkv",
+    [0, 3072]
    ],
    [
     "double_blocks.4.img_attn.qkv",
-    [
-     0,
-     3072
-    ]
+    [3072, 3072]
    ],
    [
     "double_blocks.4.img_attn.qkv",
-    [
-     3072,
-     3072
-    ]
+    [6144, 3072]
    ],
+   ["double_blocks.4.img_mlp.0", null],
+   ["double_blocks.4.img_mlp.2", null],
+   ["double_blocks.4.txt_attn.proj", null],
    [
-    "double_blocks.4.img_attn.qkv",
-    [
-     6144,
-     3072
-    ]
-   ],
-   [
-    "double_blocks.4.img_mlp.0",
-    null
-   ],
-   [
-    "double_blocks.4.img_mlp.2",
-    null
-   ],
-   [
-    "double_blocks.4.txt_attn.proj",
-    null
+    "double_blocks.4.txt_attn.qkv",
+    [0, 3072]
    ],
    [
     "double_blocks.4.txt_attn.qkv",
-    [
-     0,
-     3072
-    ]
+    [3072, 3072]
    ],
    [
     "double_blocks.4.txt_attn.qkv",
-    [
-     3072,
-     3072
-    ]
+    [6144, 3072]
    ],
-   [
-    "double_blocks.4.txt_attn.qkv",
-    [
-     6144,
-     3072
-    ]
-   ],
-   [
-    "double_blocks.4.txt_mlp.0",
-    null
-   ],
-   [
-    "double_blocks.4.txt_mlp.2",
-    null
-   ],
-   [
-    "double_stream_modulation_img.lin",
-    null
-   ],
-   [
-    "double_stream_modulation_txt.lin",
-    null
-   ],
-   [
-    "final_layer.linear",
-    null
-   ],
-   [
-    "img_in",
-    null
-   ],
-   [
-    "single_blocks.0.linear1",
-    null
-   ],
-   [
-    "single_blocks.1.linear1",
-    null
-   ],
-   [
-    "single_blocks.10.linear1",
-    null
-   ],
-   [
-    "single_blocks.11.linear1",
-    null
-   ],
-   [
-    "single_blocks.12.linear1",
-    null
-   ],
-   [
-    "single_blocks.13.linear1",
-    null
-   ],
-   [
-    "single_blocks.14.linear1",
-    null
-   ],
-   [
-    "single_blocks.15.linear1",
-    null
-   ],
-   [
-    "single_blocks.16.linear1",
-    null
-   ],
-   [
-    "single_blocks.17.linear1",
-    null
-   ],
-   [
-    "single_blocks.18.linear1",
-    null
-   ],
-   [
-    "single_blocks.19.linear1",
-    null
-   ],
-   [
-    "single_blocks.2.linear1",
-    null
-   ],
-   [
-    "single_blocks.3.linear1",
-    null
-   ],
-   [
-    "single_blocks.4.linear1",
-    null
-   ],
-   [
-    "single_blocks.5.linear1",
-    null
-   ],
-   [
-    "single_blocks.6.linear1",
-    null
-   ],
-   [
-    "single_blocks.7.linear1",
-    null
-   ],
-   [
-    "single_blocks.8.linear1",
-    null
-   ],
-   [
-    "single_blocks.9.linear1",
-    null
-   ],
-   [
-    "single_stream_modulation.lin",
-    null
-   ],
-   [
-    "txt_in",
-    null
-   ]
+   ["double_blocks.4.txt_mlp.0", null],
+   ["double_blocks.4.txt_mlp.2", null],
+   ["double_stream_modulation_img.lin", null],
+   ["double_stream_modulation_txt.lin", null],
+   ["final_layer.linear", null],
+   ["img_in", null],
+   ["single_blocks.0.linear1", null],
+   ["single_blocks.1.linear1", null],
+   ["single_blocks.10.linear1", null],
+   ["single_blocks.11.linear1", null],
+   ["single_blocks.12.linear1", null],
+   ["single_blocks.13.linear1", null],
+   ["single_blocks.14.linear1", null],
+   ["single_blocks.15.linear1", null],
+   ["single_blocks.16.linear1", null],
+   ["single_blocks.17.linear1", null],
+   ["single_blocks.18.linear1", null],
+   ["single_blocks.19.linear1", null],
+   ["single_blocks.2.linear1", null],
+   ["single_blocks.3.linear1", null],
+   ["single_blocks.4.linear1", null],
+   ["single_blocks.5.linear1", null],
+   ["single_blocks.6.linear1", null],
+   ["single_blocks.7.linear1", null],
+   ["single_blocks.8.linear1", null],
+   ["single_blocks.9.linear1", null],
+   ["single_stream_modulation.lin", null],
+   ["txt_in", null]
   ],
   "application": "unmerged: strength * scale * up(down(x)) added to each pair's rows of its layer's output in the mode's dtype"
  },
@@ -921,9 +628,7 @@
    "layers": 89,
    "converter_names": 109,
    "same_layer_and_rows": true,
-   "halves_the_converter_leaves_unswapped": [
-    "norm_out.linear"
-   ]
+   "halves_the_converter_leaves_unswapped": ["norm_out.linear"]
   },
   "diffusers_loader": {
    "ran": true,
@@ -1108,187 +813,117 @@
    "rel_l2": 5e-05
   }
  },
- "notes": [
-  "the adapter is applied unmerged as PEFT applies it; the gmlx side runs it under a patch table"
- ],
+ "notes": ["the adapter is applied unmerged as PEFT applies it; the gmlx side runs it under a patch table"],
  "created": "2026-10-16T21:43:30Z",
  "npz": "check7_flux2_klein_pixel_art_half_512.npz",
  "tensors": {
   "double_blocks.0.img": {
-   "shape": [
-    1024,
-    3072
-   ],
+   "shape": [1024, 3072],
    "dtype": "float32",
    "sha256": "e5e4125028eaaf0baf865c4a167203fe98dddfadab0434db6dcbe428eaa5d380"
   },
   "double_blocks.0.txt": {
-   "shape": [
-    512,
-    3072
-   ],
+   "shape": [512, 3072],
    "dtype": "float32",
    "sha256": "f0a01fcbe10c8f4ce6d1e8dfb62ddd8f98e879c8e49e205ce5062868c46fa3f6"
   },
   "double_blocks.1.img": {
-   "shape": [
-    1024,
-    3072
-   ],
+   "shape": [1024, 3072],
    "dtype": "float32",
    "sha256": "47078f5c07b88259430131cf9ccf68680f3f9fc5eccd3f59be8737599edaa49c"
   },
   "double_blocks.1.txt": {
-   "shape": [
-    512,
-    3072
-   ],
+   "shape": [512, 3072],
    "dtype": "float32",
    "sha256": "822f881c81aac8d1331debbb40b85f7548ff6e3b4394552ac75f6fd8ae974ce2"
   },
   "double_blocks.2.img": {
-   "shape": [
-    1024,
-    3072
-   ],
+   "shape": [1024, 3072],
    "dtype": "float32",
    "sha256": "c7c000c31538d9f58d1c192f32b0c796b12b855c9a1e78d0aebf397c53342e22"
   },
   "double_blocks.2.txt": {
-   "shape": [
-    512,
-    3072
-   ],
+   "shape": [512, 3072],
    "dtype": "float32",
    "sha256": "f9a4e01c2a930ff98ddfbe1804ac564709717f1f26a2720f9625bd9bc2d08cd5"
   },
   "double_blocks.3.img": {
-   "shape": [
-    1024,
-    3072
-   ],
+   "shape": [1024, 3072],
    "dtype": "float32",
    "sha256": "97c913476828d13c6fb985760028f0ae067f9cda714d961ece5924d747158b72"
   },
   "double_blocks.3.txt": {
-   "shape": [
-    512,
-    3072
-   ],
+   "shape": [512, 3072],
    "dtype": "float32",
    "sha256": "b45d3a8ec6e1b395c2aad849e6c67357a91510c87982712a302044afdf0b120a"
   },
   "double_blocks.4.img": {
-   "shape": [
-    1024,
-    3072
-   ],
+   "shape": [1024, 3072],
    "dtype": "float32",
    "sha256": "943b8f07cd3a3666dee9fdb9b0b9ec24e84f83243e2586b3d2d3de17772e9b68"
   },
   "double_blocks.4.txt": {
-   "shape": [
-    512,
-    3072
-   ],
+   "shape": [512, 3072],
    "dtype": "float32",
    "sha256": "c363873da47cffbce8e6b08797d45d4dc8e2e1855af516ba0f37aeb61128f9d3"
   },
   "double_stream_modulation_img": {
-   "shape": [
-    1,
-    18432
-   ],
+   "shape": [1, 18432],
    "dtype": "float32",
    "sha256": "8d0155d6111e4361cb2a3e77b5bd1cc72f546298ca47b43ff55301c1cdf8cf46"
   },
   "double_stream_modulation_txt": {
-   "shape": [
-    1,
-    18432
-   ],
+   "shape": [1, 18432],
    "dtype": "float32",
    "sha256": "b671db899326581ce850e6e8c362e140ad31e4e95e3fc7a59c13f0548e70e391"
   },
   "features": {
-   "shape": [
-    512,
-    7680
-   ],
+   "shape": [512, 7680],
    "dtype": "float32",
    "sha256": "3482cc3e89168264731155ce529cc5ff9299b09f9e6ade75b1a420d631896802"
   },
   "final_layer": {
-   "shape": [
-    1024,
-    128
-   ],
+   "shape": [1024, 128],
    "dtype": "float32",
    "sha256": "db668ec6a068a81ea3be75b7f9fc513bbbec69fbdc0e21502157d034ed8d8770"
   },
   "final_layer.adaLN_modulation": {
-   "shape": [
-    1,
-    6144
-   ],
+   "shape": [1, 6144],
    "dtype": "float32",
    "sha256": "0ebb63d3a29bea2dafbbdad9050417c53dcd46ce81c8461ac79056aa81f95cb5"
   },
   "ids.image": {
-   "shape": [
-    1024,
-    4
-   ],
+   "shape": [1024, 4],
    "dtype": "float32",
    "sha256": "8e6ca6477f8b787a44f1d3a6c05641319299ae79d0c43802e3396b7e9558fe8d"
   },
   "ids.text": {
-   "shape": [
-    512,
-    4
-   ],
+   "shape": [512, 4],
    "dtype": "float32",
    "sha256": "914a4d07f258895514e1b52023c57a677aa4925531d34e54831414224030a0f8"
   },
   "img_in": {
-   "shape": [
-    1024,
-    3072
-   ],
+   "shape": [1024, 3072],
    "dtype": "float32",
    "sha256": "0eace63dbc748682595a323a69e2ed5e3c6f0ebefa66ad9f2c43dad67f093939"
   },
   "in.final_layer": {
-   "shape": [
-    1024,
-    3072
-   ],
+   "shape": [1024, 3072],
    "dtype": "float32",
    "sha256": "ffe96497f6da729a0654f41b741a534903111b1e88d0a8f600ee17bc3df40a00"
   },
   "in.single_blocks.0": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "53e7154e19b22a79354fe675f89b652e74dc57a167551ca6376803dfc7886871"
   },
   "in.time_in": {
-   "shape": [
-    1,
-    256
-   ],
+   "shape": [1, 256],
    "dtype": "float32",
    "sha256": "cbacd50d6ddae5179d08ae5986820a7baaecca4b2a9962dd856fc80aa62707e4"
   },
   "latents": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "2cb3e62b5bb6a58f5b08f360ba95db386349bd0b4fe4128bd931125c8cceae04"
   },
@@ -1298,206 +933,127 @@
    "sha256": "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c"
   },
   "single_blocks.0": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "4d3eeb9a5c1b2742ff3f4862cc1519ae5fb45f77a2827e10be9c15fae5a32d99"
   },
   "single_blocks.1": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "fd00bd28b8da0b231b8b81c9d1038d865181251190e93066ed4d42c8e33b22a4"
   },
   "single_blocks.10": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "8110b4faa69189c64d649364a2a3edc5273368ccb0bb96cfce385ee30b42c994"
   },
   "single_blocks.11": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "7df7666ed8366b036919622517f30343dff874d9f50f4677ec4798b1f233ad26"
   },
   "single_blocks.12": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "6dd0089ecfa650b85e73b26043c61af976cf23ce3a0369ea2b4edc3311cb825d"
   },
   "single_blocks.13": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "c6fd11acf3404bbb83948e4f1c4245c795eedbfb042a97976d434974cf80e737"
   },
   "single_blocks.14": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "009af7e051df0b0bab73d4582c7ef4d35dec89f30e9f94dad5e276f11ed24e13"
   },
   "single_blocks.15": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "796abca7195aab1f8b469b6b02415d6a8c19082d059e936746162d2ce16ca8d3"
   },
   "single_blocks.16": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "2ce5fc91e465b0bcd9b00003f16ff98643c76f8b8ae629062a7390c426a3c21b"
   },
   "single_blocks.17": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "4746b47114fd70431451b92e75ca95c20d9cc6aabfd01bb9adc15a23716e8f20"
   },
   "single_blocks.18": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "670fefee3fd1a70a1a0f9fb13580ce65529d57cd7993f34e74c4854d5dfcb56a"
   },
   "single_blocks.19": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "e9fd41ea33f246babc28a10115e992bea3f5be19bfea79dc1db42b9f2ae80426"
   },
   "single_blocks.2": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "a1263213dee7aebe0868591dc07224426b53e4a40678617db672cf03237c35a9"
   },
   "single_blocks.3": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "180263eee306acf9831c8ac7d28ae59e2eaeb6c8753706db7bee9eaf82023b78"
   },
   "single_blocks.4": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "a0164614dac14017e6eedcf2c9a7a9c8c145292bd982dbbd5b1097b52cc90d4a"
   },
   "single_blocks.5": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "71c79758de2f0607bd479b77468ea0be00d0770f81b8ca4a973abf62d346d115"
   },
   "single_blocks.6": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "b5169d5e7b5df9c159f68066974d517bc524d96f7a7a1de72efba0122e48f53f"
   },
   "single_blocks.7": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "8d1a039440883483367428f4dfacd7e539a4bba491553dc6f20736daa82dadc9"
   },
   "single_blocks.8": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "c5efd468e0d4c6d1067df95fdbfc0b1153a650ea78ca08e339a9b45a08c2637f"
   },
   "single_blocks.9": {
-   "shape": [
-    1536,
-    3072
-   ],
+   "shape": [1536, 3072],
    "dtype": "float32",
    "sha256": "bc5528e43a70cf72adcb347d4604c36c897da07671054961cace00a88a114222"
   },
   "single_stream_modulation": {
-   "shape": [
-    1,
-    9216
-   ],
+   "shape": [1, 9216],
    "dtype": "float32",
    "sha256": "6c14c484d878e7b69d72a62aa2b2adc27520a6897af8118b7d44df5654f9f3e2"
   },
   "txt_in": {
-   "shape": [
-    512,
-    3072
-   ],
+   "shape": [512, 3072],
    "dtype": "float32",
    "sha256": "92059192795cf5c7fb1bc808534e23360cd46f9c450b05b4e7f0a16b322e3d14"
   },
   "vec": {
-   "shape": [
-    1,
-    3072
-   ],
+   "shape": [1, 3072],
    "dtype": "float32",
    "sha256": "1f669d07af0ecb908139d999eb12e9dfffa7216d21ec7ae4cc9fc56d1335f3b2"
   },
   "velocity": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "5c5ddddc615f4d1c6b5c883c2e330dc507c044fb8813078237fc4baea5274f0b"
   },
   "velocity_bf16": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "555aaa77e86ff4ae80ed56d2d16334cfa20f9dbb3e4fde0004bf4f512367ea48"
   }

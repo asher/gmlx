@@ -242,10 +242,11 @@ stock nodes work with a gmlx model and what runs where.
 ## Make a video
 
 The gmlx nodes run the MiniMax-H3 recipes `h3`, `h3-fast`, `h3-base` and
-`fasth3` with ComfyUI's own MiniMax-H3 nodes. The gmlx server runs each
-step and decodes the clip, so you can make 1344x768 clips with sound in
-ComfyUI. Video needs a Mac with an M3 chip or newer and 32 GB of memory or
-more, and `fasth3` an M5 chip or newer. Download the model:
+`fasth3` with ComfyUI's own MiniMax-H3 nodes and a gmlx prompt node. The
+gmlx server runs each step and decodes the clip, so you can make 1344x768
+clips with sound in ComfyUI. Video needs a Mac with an M3 chip or newer
+and 32 GB of memory or more, and `fasth3` an M5 chip or newer. Download
+the model:
 
 ```sh
 gmlx video pull h3
@@ -263,7 +264,7 @@ steps, and ComfyUI saves it as `gmlx/minimax-h3_00001_.mp4` in its
 | `gmlx Video VAE Loader` | Loads the video VAE, which decodes the frames on the server. |
 | `gmlx Audio VAE Loader` | Loads the audio VAE, which decodes the sound on the server. |
 | `Shifts of the h3 recipe` | ComfyUI's `ModelSamplingMiniMaxH3` at the recipe's shifts, 6 for the video and 3 for the sound. |
-| `Prompt and clip size` | ComfyUI's `MiniMax H3 Image to Video`: the prompt, the clip's `width` and `height`, and its `length` in frames at 24 a second. |
+| `Prompt and clip size` | `gmlx MiniMax-H3 Image to Video`, which runs ComfyUI's `MiniMax H3 Image to Video`: the prompt, and the clip's `width`, `height` and `length` in frames. |
 | `Schedule` | `BasicScheduler` with the `simple` scheduler and the recipe's 8 steps. |
 | `Noise` | `RandomNoise`: the seed of the clip. |
 | `Sampler` | `KSamplerSelect` with `euler`. |
@@ -301,10 +302,11 @@ keyframes needs a larger Mac. At 768x768, a step with both keyframes runs
 beside the caches on a 32 GB Mac.
 
 On an entry with an [upsampler](video.md#prompt-upsampling), the server
-rewrites the prompt of `Prompt and clip size` before it encodes it, and
-ComfyUI's log shows the caption. [Prompt
-upsampling](video.md#prompt-upsampling) says which prompts the nodes have
-rewritten.
+rewrites the prompt of `Prompt and clip size` before it encodes it, as
+`POST /v1/videos` does: the upsampler is told the clip's length and
+whether it has a first or a last frame. ComfyUI's log shows the caption.
+ComfyUI's own `MiniMax H3 Image to Video` tells the server neither, so
+through it a prompt with keyframes is encoded as typed.
 
 A reference of `MiniMax H3 Reference to Video`, the Fun ControlNet or a
 noise mask on the latent stops the run with an error that names it, and
@@ -357,7 +359,7 @@ with the commands that install the gmlx nodes and pull its model.
 | `flux-2-klein-9b-kv-edit-two-references` | A FLUX.2 klein 9B KV edit from two reference images, through `ReferenceLatent` and `Flux KV Cache` | `gmlx pull flux-2-klein-9b-kv`, a Mac with 24 GB or more, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
 | `flux-3-klein-t2i` | FLUX.3 klein text to image at 1024x1024 in 16 steps, through `EmptyFlux2LatentImage` | `gmlx pull flux-3-klein`, and ComfyUI 0.41 or newer |
 | `flux-3-klein-edit-two-references` | A FLUX.3 klein edit from two reference images, through `ReferenceMultiLatent` | `gmlx pull flux-3-klein`, ComfyUI 0.41 or newer, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
-| `minimax-h3-t2v` | A MiniMax-H3 clip with sound from a text prompt, 5 seconds at 1344x768 in 8 steps, through `MiniMax H3 Image to Video` and the gmlx video and audio VAE loaders | `gmlx video pull h3`, and a Mac with 32 GB or more |
+| `minimax-h3-t2v` | A MiniMax-H3 clip with sound from a text prompt, 5 seconds at 1344x768 in 8 steps, through `gmlx MiniMax-H3 Image to Video` and the gmlx video and audio VAEs | `gmlx video pull h3`, and a Mac with 32 GB or more |
 | `minimax-h3-i2v` | The same clip started at an image, which `Load Image` gives to `first_frame` | `gmlx video pull h3`, a Mac with 32 GB or more, and `first-frame.png` in ComfyUI's `input` folder |
 | `fasth3-t2v` | A FastH3 clip with sound from a text prompt, 5 seconds at 1344x768 on its 8 trained noise levels, through `gmlx Sigmas` | `gmlx video pull fasth3`, and a Mac with an M5 chip or newer and 36 GB or more |
 

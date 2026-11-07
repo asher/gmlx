@@ -392,9 +392,9 @@ def _own_turn(monkeypatch) -> _Turn:
 
 
 def test_two_json_parses_take_their_turns(monkeypatch):
-    """Each parse is priced against the same free figure, which books
-    nothing: the second waits on the turn the first holds, and its parse
-    starts only once the first ends, so their peaks never add up."""
+    """Each parse peaks in its turn: the second waits on the turn the
+    first holds, and its parse starts only once the first ends, so their
+    peaks never add up."""
     import asyncio
     import threading
 
@@ -576,3 +576,121 @@ def test_a_json_body_sent_in_small_pieces_holds_its_bytes_not_theirs():
         tracemalloc.stop()
     assert len(buf) == n
     assert peak <= bi._min_price(n) + bi._SLACK, peak
+
+
+def _pool(monkeypatch, free: int) -> SimpleNamespace:
+    """A pool with ``free`` bytes of its budget free, and none admitted."""
+    figures = SimpleNamespace(budget=free, resident=0, incoming=0)
+    monkeypatch.setattr(_common, "_get_pool",
+                        lambda: SimpleNamespace(figures=figures))
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    return figures
+
+
+def test_a_body_cancelled_while_it_waits_for_the_turn_ends_its_count(
+        monkeypatch):
+    """A body waiting for the parse turn holds its count; a cancel there
+    ends it at once, while a body whose parse thread runs past a cancel
+    keeps its count until the thread ends. The pool is never booked."""
+    import asyncio
+    import threading
+
+    first, release = threading.Event(), threading.Event()
+    real = bi._loads
+    a, b = b'{"prompt": "a cat"}', b'{"prompt": "a lion"}'
+
+    def parse(box, *rest):
+        if bytes(box[0]) == a:
+            first.set()
+            assert release.wait(10), "the first parse was never let go"
+        return real(box, *rest)
+
+    async def main():
+        one = asyncio.create_task(bi.read_json(_json_request(a)))
+        await asyncio.to_thread(first.wait, 10)
+        two = asyncio.create_task(bi.read_json(_json_request(b)))
+        for _ in range(1_000_000):
+            if turn.parked.is_set():
+                break
+            await asyncio.sleep(0)
+        both = bi.held_bytes()
+        two.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await two
+        queued_gone = bi.held_bytes()
+        one.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await one
+        running_kept = bi.held_bytes()
+        release.set()
+        for _ in range(1_000_000):
+            if not bi.held_bytes():
+                break
+            await asyncio.sleep(0.001)
+        return both, queued_gone, running_kept
+    figures = _pool(monkeypatch, 1 << 30)
+    turn = _own_turn(monkeypatch)
+    monkeypatch.setattr(bi, "_loads", parse)
+    both, queued_gone, running_kept = asyncio.run(main())
+    # The first parse is held before its price grows the count.
+    assert both == 2 * len(a) + 2 * len(b)
+    assert queued_gone == running_kept == 2 * len(a)
+    assert bi.held_bytes() == 0
+    assert figures.incoming == 0
+
+
+def test_a_body_with_no_length_is_counted_a_step_at_a_time(monkeypatch):
+    """A JSON body with no Content-Length holds a count of the steps its
+    bytes reached, not of a length it never sent; with GMLX_OVERCOMMIT
+    nothing is counted."""
+    import asyncio
+
+    from starlette.requests import Request
+
+    from gmlx.serve import image_steps
+
+    monkeypatch.setattr(image_steps, "BODY_STEP", 64 << 10)
+
+    async def main():
+        waiting = asyncio.Event()
+        parts = [b'{"prompt": "' + b"a" * (100 << 10)]
+
+        async def receive():
+            if parts:
+                return {"type": "http.request", "body": parts.pop(),
+                        "more_body": True}
+            waiting.set()
+            await asyncio.Event().wait()
+        request = Request({"type": "http", "method": "POST",
+                           "path": "/v1/videos", "query_string": b"",
+                           "headers": [(b"content-type",
+                                        b"application/json")]}, receive)
+        task = asyncio.create_task(bi.read_json(request))
+        await waiting.wait()
+        held = bi.held_bytes()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return held
+    figures = _pool(monkeypatch, 1 << 30)
+    assert asyncio.run(main()) == 2 * (128 << 10)
+    assert bi.held_bytes() == 0
+    monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
+    assert asyncio.run(main()) == 0
+    assert figures.incoming == 0
+
+
+def test_a_parse_prices_against_the_figure_read_in_its_turn(monkeypatch):
+    """The figure a body was let in at can shrink while it waits for its
+    turn: the parse reads it again, and refuses a body that no longer
+    fits."""
+    import asyncio
+
+    body = b'{"prompt": "' + b"a" * (1 << 20) + b'"}'
+    price = bi.json_price(body)
+    figures = iter([price, price - 1])
+    monkeypatch.setattr(bi, "_pool_free", lambda: next(figures))
+    with pytest.raises(bi.BodyRefused) as e:
+        asyncio.run(bi.read_json(_json_request(body)))
+    assert e.value.status == 413
+    assert bi.held_bytes() == 0

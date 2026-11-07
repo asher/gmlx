@@ -703,6 +703,27 @@ def test_a_disk_refusal_covers_the_whole_plan_once(cat, monkeypatch, capsys):
     assert manage.cmd_pull(["dense", "--config", str(cfg), "--force"]) == 0
 
 
+def test_an_update_the_disk_cannot_hold_names_the_rm_command(cat, monkeypatch,
+                                                           capsys):
+    """A copy of another size on disk is replaced only once the new one is
+    complete: an update that does not fit beside it is refused with the
+    shortfall and `gmlx rm` of the model the user pulled."""
+    cfg, lib, downloads = cat
+    old = lib / "org__dense" / "Model-UD-Q4_K_M.gguf"
+    old.parent.mkdir()
+    with open(old, "wb") as f:                # sparse: 15 GiB, no disk
+        f.truncate(G(15))
+    monkeypatch.setattr(manage, "_disk_free", lambda p: G(17))
+    assert manage.cmd_pull(["dense", "--config", str(cfg)]) == 1
+    err = capsys.readouterr().err
+    assert ("error: not enough disk space to update dense: the new copy needs "
+            "18.1 GB beside the old one until it is complete, and 17.0 GB is "
+            f"free at {lib}, 1.1 GB short; nothing was downloaded or deleted. "
+            "To delete the old model first, run `gmlx rm dense`, then pull "
+            "again (or pass --to DIR on another volume, or --force)") in err
+    assert downloads == [] and old.stat().st_size == G(15)
+
+
 @pytest.mark.parametrize("free_gb, startup, warns", [
     (20.0, True, True), (20.0, False, False), (40.0, True, False)])
 def test_the_swap_warning(cat, monkeypatch, capsys, free_gb, startup, warns):

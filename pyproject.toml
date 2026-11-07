@@ -265,7 +265,7 @@ include = [
     "gmlx/serve/patches/context_copy.py",
     "gmlx/serve/patches/mtp_thinking.py",
     "gmlx/serve/patches/spec_processors.py",
-    "gmlx/serve/residency.py",
+    "gmlx/serve/residency_footprint.py",
     "gmlx/spec/admission.py",
     "gmlx/spec/ckpt.py",
     "gmlx/spec/dflash_drafter.py",

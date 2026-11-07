@@ -109,7 +109,8 @@ def revise(model_field, prompt: str, requested: bool | None = None,
     image or video model, returns None, so the model's own acquire refuses
     it. ``stop`` is a threading.Event that ends the rewrite between tokens.
     A video family's system prompt names the clip's ``frames``, when
-    known, and its keyframes, ``first`` and ``last``."""
+    known, and its keyframes, ``first`` and ``last``; with ``frames``,
+    a video family's images are keyframes and ``has_refs`` is unread."""
     from gmlx.image.upsample import (UpsampleError, cache_key, system_prompt,
                                      upsample)
 
@@ -123,13 +124,17 @@ def revise(model_field, prompt: str, requested: bool | None = None,
         family, _variant = family_of(spec)
     except Exception:  # noqa: BLE001 - the acquire refuses it with its status
         return None
-    up = upsampler_for(spec, family, requested, has_refs)
+    video = getattr(family, "upsample_system", None) is not None
+    # A video clip's images are its keyframes, which the system prompt
+    # names with the clip's length.
+    up = upsampler_for(spec, family, requested,
+                       has_refs and not (video and frames is not None))
     if up is None:
         return None
     t0 = time.monotonic()
     try:
         path = getattr(spec, "upsample_prompt", None)
-        if getattr(family, "upsample_system", None) is not None:
+        if video:
             from gmlx.video.run import upsample_system
 
             system = upsample_system(family, path, frames=frames,
@@ -146,7 +151,7 @@ def revise(model_field, prompt: str, requested: bool | None = None,
     except UpsampleError as e:
         raise ImageRequestError(500, str(e), err_type="server_error") from e
     CAPTIONS.put(key, caption)
-    tag = "video" if getattr(family, "upsample_system", None) else "image"
+    tag = "video" if video else "image"
     _log.info("[%s] prompt upsampled by %s in %.1f s, %d words", tag, up,
               time.monotonic() - t0, len(caption.split()))
     return caption

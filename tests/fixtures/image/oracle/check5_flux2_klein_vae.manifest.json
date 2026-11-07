@@ -4,14 +4,7 @@
  "check": 5,
  "family": "flux2_klein",
  "script": "scripts/image_oracle/check5_flux3_klein_vae.py",
- "argv": [
-  "check5_flux3_klein_vae.py",
-  "--vae",
-  "diffusion_pytorch_model.safetensors",
-  "--sizes",
-  "512",
-  "1024"
- ],
+ "argv": ["check5_flux3_klein_vae.py", "--vae", "diffusion_pytorch_model.safetensors", "--sizes", "512", "1024"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -62,30 +55,18 @@
  },
  "inputs": {
   "sizes": [
-   [
-    512,
-    512
-   ],
-   [
-    1024,
-    1024
-   ]
+   [512, 512],
+   [1024, 1024]
   ],
   "seed": 5,
   "image": "synthetic_image(height, width, seed) of check5_qwen_image21_vae.py, RGB, NCHW in [-1, 1]",
   "batch_norm_eps": 0.0001,
-  "patch_size": [
-   2,
-   2
-  ],
+  "patch_size": [2, 2],
   "latents": "Flux2KleinPipeline._patchify_latents of the encoder mean, then (z - running_mean) / sqrt(running_var + batch_norm_eps), in float32 from each mode's mean",
   "decode_input": "latents * sqrt(running_var + eps) + running_mean, then Flux2KleinPipeline._unpatchify_latents, in float32 from the fp32 latents, cast to the VAE dtype",
   "decoded": "RGB, NCHW, unclamped as the VAE returns it",
   "psnr": "on x / 2 + 0.5 clamped to [0, 1], peak 1",
-  "source_dtypes": [
-   "torch.bfloat16",
-   "torch.int64"
-  ],
+  "source_dtypes": ["torch.bfloat16", "torch.int64"],
   "config_revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
   "load": "AutoencoderKLFlux2.from_config(vae/config.json), then the file strict, in float32"
  },
@@ -198,164 +179,87 @@
    }
   }
  },
- "notes": [
-  "The file holds bfloat16 weights, which the fp32 and float64 runs read upcast. The bf16 VAE is a bfloat16 copy with its BatchNorm statistics kept float32.",
-  "The run took no --family and recorded flux3_klein, the script's one label then. The family was corrected to flux2_klein afterwards, without a new run: the arrays are those of the FLUX.2 klein 4B VAE."
- ],
+ "notes": ["The file holds bfloat16 weights, which the fp32 and float64 runs read upcast. The bf16 VAE is a bfloat16 copy with its BatchNorm statistics kept float32.", "The run took no --family and recorded flux3_klein, the script's one label then. The family was corrected to flux2_klein afterwards, without a new run: the arrays are those of the FLUX.2 klein 4B VAE."],
  "created": "2026-10-16T19:02:48Z",
  "npz": "check5_flux2_klein_vae.npz",
  "tensors": {
   "bn_running_mean": {
-   "shape": [
-    128
-   ],
+   "shape": [128],
    "dtype": "float32",
    "sha256": "9027fac5727854f779ebbeae3032cfce0d47a11bc85f4329eb0a317c9ad90217"
   },
   "bn_running_var": {
-   "shape": [
-    128
-   ],
+   "shape": [128],
    "dtype": "float32",
    "sha256": "8b4656821cfe8827490068f768f0dba57e09423e900b8b018da097f0c4537009"
   },
   "decoded_1024x1024": {
-   "shape": [
-    1,
-    3,
-    1024,
-    1024
-   ],
+   "shape": [1, 3, 1024, 1024],
    "dtype": "float32",
    "sha256": "b877df123ac14c97784e85e19e449d37304548239ef8cd16380c5ce468854fe5"
   },
   "decoded_512x512": {
-   "shape": [
-    1,
-    3,
-    512,
-    512
-   ],
+   "shape": [1, 3, 512, 512],
    "dtype": "float32",
    "sha256": "35d5356b9353573fce7e50f5da6988b312cbb388f42277225a5d2081841f8df3"
   },
   "decoded_bf16_1024x1024": {
-   "shape": [
-    1,
-    3,
-    1024,
-    1024
-   ],
+   "shape": [1, 3, 1024, 1024],
    "dtype": "float32",
    "sha256": "60b21b15764cb3d46837a156883da6644e519a410b8b113dd8e26a7be22dbb3a"
   },
   "decoded_bf16_512x512": {
-   "shape": [
-    1,
-    3,
-    512,
-    512
-   ],
+   "shape": [1, 3, 512, 512],
    "dtype": "float32",
    "sha256": "fd9c89ebfa73f2e4873931ceeab9d1f7ea28bccb1797a9ecb8078350ea4a6ce2"
   },
   "encode_mean_1024x1024": {
-   "shape": [
-    1,
-    32,
-    128,
-    128
-   ],
+   "shape": [1, 32, 128, 128],
    "dtype": "float32",
    "sha256": "e25c0df3d5be4d976cb92dd01191ec0df279372b74bf5505844aeddb41dfa8ad"
   },
   "encode_mean_512x512": {
-   "shape": [
-    1,
-    32,
-    64,
-    64
-   ],
+   "shape": [1, 32, 64, 64],
    "dtype": "float32",
    "sha256": "72c807775e530a0c4fc07a96c4ebff86251dd839d93c135f5a5643050b4a86ad"
   },
   "encode_mean_bf16_1024x1024": {
-   "shape": [
-    1,
-    32,
-    128,
-    128
-   ],
+   "shape": [1, 32, 128, 128],
    "dtype": "float32",
    "sha256": "d91533b309cd78a00fb0c5dd0050b70ed397c30d3655e64f508a6a982c6aa4cc"
   },
   "encode_mean_bf16_512x512": {
-   "shape": [
-    1,
-    32,
-    64,
-    64
-   ],
+   "shape": [1, 32, 64, 64],
    "dtype": "float32",
    "sha256": "11a390e65832643f0e9a888bd14bae293bf0158dd705b5d9fb56e47b1287a578"
   },
   "image_1024x1024": {
-   "shape": [
-    1,
-    3,
-    1024,
-    1024
-   ],
+   "shape": [1, 3, 1024, 1024],
    "dtype": "float32",
    "sha256": "3930a02c0be88010b140dd1b6c71a1bf518c6f75d78d0ad2fa78942f998cb1a6"
   },
   "image_512x512": {
-   "shape": [
-    1,
-    3,
-    512,
-    512
-   ],
+   "shape": [1, 3, 512, 512],
    "dtype": "float32",
    "sha256": "4020c0997410077532d908bbecca27898c4c7b7cfb2d7ba29333177c2c44ee5e"
   },
   "latents_1024x1024": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "c87fce5ec93e1ab0acb0d2e56d27af75dcc2d67eb2666abe43bbda04292c5e26"
   },
   "latents_512x512": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "280deb3315669ad11024f79090922a6dab13f83fd043e665629eb5225c323811"
   },
   "latents_bf16_1024x1024": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "91cedc4bfe75ab2aa1e4e0fc2fb846aa4a68af95eddf503df2149e916e6f2d8f"
   },
   "latents_bf16_512x512": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "ce4a39f7da605086a42796276ec3c88a8ebc3d7013acf2b46dcb6d92ad942de0"
   }

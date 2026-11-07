@@ -205,7 +205,7 @@
   },
   {
    "id": 6,
-   "type": "MiniMaxH3ImageToVideo",
+   "type": "GmlxH3ImageToVideo",
    "pos": [
     340,
     210
@@ -257,7 +257,7 @@
    ],
    "title": "Prompt and clip size",
    "properties": {
-    "Node name for S&R": "MiniMaxH3ImageToVideo"
+    "Node name for S&R": "GmlxH3ImageToVideo"
    },
    "widgets_values": [
     "A street musician in a gray coat plays an acoustic guitar under a stone bridge on a rainy evening. Rain falls on the cobblestones, people with umbrellas walk past, and the warm guitar melody echoes under the arch.",

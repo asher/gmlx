@@ -4,9 +4,11 @@
 The loaders give a stock MODEL, CLIP and VAE whose work runs on a gmlx
 server, so stock sampler, LoRA, conditioning and image nodes compose with
 them. MiniMax-H3 has a video VAE and an audio VAE, each with its own
-loader. ``GmlxSigmas`` gives the schedule a model variant was distilled to,
-or the schedule of the image size for a variant whose schedule follows
-it, for the custom sampler nodes.
+loader, and ``GmlxH3ImageToVideo`` runs ComfyUI's MiniMax-H3 prompt node
+with the clip's length and keyframes told to the server. ``GmlxSigmas``
+gives the schedule a model variant was distilled to, or the schedule of
+the image size for a variant whose schedule follows it, for the custom
+sampler nodes.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import comfy.samplers
 
 from . import discovery, schedules
 from .client import GmlxError, GmlxRefusal, get_client
-from .clip import GmlxCLIP
+from .clip import GMLX_NODE, GmlxCLIP
 from .model import load_model
 from .vae import GmlxAudioVAE, GmlxVAE, GmlxVideoVAE
 from .version import __version__
@@ -198,6 +200,56 @@ class GmlxSigmas:
         return (variant_sigmas(model, steps, denoise, width, height), cfg)
 
 
+_FRAMES_TIP = ("Frame count at 24 fps, snapped up to the model's 17k+5 grid (124 = ~5s; "
+               "trained range is ~124-362, longer is untested)")
+
+
+class GmlxH3ImageToVideo:
+    @classmethod
+    def INPUT_TYPES(cls):
+        size = {"min": 32, "max": 16384, "step": 32}
+        return {"required": {
+            "clip": ("CLIP",),
+            "vae": ("VAE",),
+            "prompt": ("STRING", {"multiline": True, "dynamicPrompts": True}),
+            "width": ("INT", {"default": 1344, **size}),
+            "height": ("INT", {"default": 768, **size}),
+            "length": ("INT", {"default": 124, "min": 5, "max": 3600, "step": 17,
+                               "tooltip": _FRAMES_TIP})},
+            "optional": {"first_frame": ("IMAGE",), "last_frame": ("IMAGE",)}}
+
+    RETURN_TYPES = ("CONDITIONING", "LATENT")
+    RETURN_NAMES = ("positive", "LATENT")
+    FUNCTION = "encode"
+    CATEGORY = CATEGORY
+    DESCRIPTION = ("ComfyUI's MiniMax H3 Image to Video, which also tells the gmlx server the "
+                   "clip's length and its first and last frames, so an upsampler on the "
+                   "model's entry rewrites the prompt as POST /v1/videos does.")
+
+    def encode(self, clip, vae, prompt, width, height, length, first_frame=None,
+               last_frame=None):
+        from . import compat
+
+        missing = compat.first_missing(compat.H3_NODE_NAMES)
+        if missing:
+            from .version import COMFYUI_FLOOR, COMFYUI_TESTED
+
+            raise GmlxError(f"gmlx: ComfyUI {compat.comfyui_version()} has no {missing}, which "
+                            f"{GMLX_NODE} runs; the gmlx nodes are tested on ComfyUI "
+                            f"{COMFYUI_FLOOR} to {COMFYUI_TESTED}")
+        from comfy_extras.nodes_minimax_h3 import MiniMaxH3ImageToVideo, temporal_shape
+
+        if isinstance(clip, GmlxCLIP) and clip.gmlx_client is not None:
+            # The stock node shows the encoder the first frame, then the last.
+            keyframes = (["first"] if first_frame is not None else []) + (
+                ["last"] if last_frame is not None else [])
+            clip = clip.clone()
+            clip.gmlx_clip = {"frames": int(temporal_shape(length)[0]), "keyframes": keyframes}
+        out = MiniMaxH3ImageToVideo.execute(clip, vae, prompt, width, height, length,
+                                            first_frame=first_frame, last_frame=last_frame)
+        return tuple(out.result if hasattr(out, "result") else out)
+
+
 class GmlxServerStatus(_Loader):
     RETURN_TYPES = ("STRING",)
     FUNCTION = "status"
@@ -233,6 +285,7 @@ NODE_CLASS_MAPPINGS = {
     "GmlxVideoVAELoader": GmlxVideoVAELoader,
     "GmlxAudioVAELoader": GmlxAudioVAELoader,
     "GmlxSigmas": GmlxSigmas,
+    "GmlxH3ImageToVideo": GmlxH3ImageToVideo,
     "GmlxServerStatus": GmlxServerStatus,
 }
 
@@ -243,5 +296,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GmlxVideoVAELoader": VIDEO_VAE,
     "GmlxAudioVAELoader": AUDIO_VAE,
     "GmlxSigmas": "gmlx Sigmas",
+    "GmlxH3ImageToVideo": GMLX_NODE,
     "GmlxServerStatus": "gmlx Server Status",
 }

@@ -486,6 +486,42 @@ class Interrupt(Base):
         self.assertIn("step_interrupted", [e["kind"] for e in self.stub.log()])
 
 
+class EncodeInterrupt(Base):
+    """Cancel in ComfyUI while the server rewrites the prompt: the
+    interrupt naming the encode reaches the server, which ends the
+    rewrite, and the node raises ComfyUI's interrupt."""
+    stub_args = ("--encode-delay-ms", "5000")
+
+    def test_a_cancel_during_the_rewrite_interrupts_that_encode_on_the_server(self):
+        clip = P.nodes.GmlxCLIPLoader().load(HID, self.stub.url, False)[0]
+        done = threading.Event()
+
+        def watch():
+            while not done.is_set():
+                if self.stub.events("encode_begin"):
+                    mm.interrupt_current_processing(True)
+                    return
+                time.sleep(0.02)
+        th = threading.Thread(target=watch, daemon=True)
+        th.start()
+        t0 = time.monotonic()
+        try:
+            with self.assertRaises(mm.InterruptProcessingException):
+                comfy_nodes.CLIPTextEncode().encode(clip, "a fox")
+        finally:
+            done.set()
+            mm.interrupt_current_processing(False)
+        self.assertLess(time.monotonic() - t0, 3.0)
+        (begin,) = self.stub.events("encode_begin")
+        self.assertTrue(begin["interrupt_id"])
+        self.assertEqual([e["run"] for e in self.stub.events("interrupt")],
+                         [begin["interrupt_id"]])
+        deadline = time.monotonic() + 10
+        while not self.stub.events("encode_interrupted") and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(len(self.stub.events("encode_interrupted")), 1)
+
+
 class Vaes(Base):
     def test_the_video_and_audio_vae_nodes_decode_a_sampled_clip(self):
         out = self.sample(self.model(), steps=1)
@@ -813,6 +849,100 @@ class Anchors(Base):
         self.assertEqual(str(e.exception), "gmlx: this gmlx server runs no keyframes or guides; "
                          "update it")
         self.assertEqual(self.stub.events("av_step"), [])
+
+
+class KeyframeCaptions(Base):
+    """GmlxH3ImageToVideo runs ComfyUI's MiniMaxH3ImageToVideo and tells
+    the encode the clip's length and the role of each frame, which an
+    upsampler on the server's entry rewrites the prompt with."""
+
+    stub_args = ("--upsample",)
+    FIRST, LAST = torch.rand(1, 48, 80, 3), torch.rand(1, 80, 48, 3)
+
+    def nodes(self):
+        clip = P.nodes.GmlxCLIPLoader().load(HID, self.stub.url, False)[0]
+        video = P.nodes.GmlxVideoVAELoader().load(HID, self.stub.url, False)[0]
+        return clip, video
+
+    def run_node(self, node, clip, video, **frames):
+        out = _out(node(clip, video, "a dog", SIZE, SIZE, FRAMES, **frames))
+        (enc,) = self.stub.events("encode")
+        self.stub.reset()
+        return out, enc
+
+    def test_the_node_tells_the_encode_the_clips_length_and_each_frames_role(self):
+        """Each frame's role reaches the encode, a last frame alone too,
+        with the clip's frame count. The encoder, the VAE and the step get
+        what ComfyUI's own node gives them, which sends neither."""
+        gmlx = P.nodes.GmlxH3ImageToVideo().encode
+        for frames, roles in (({"first_frame": self.FIRST}, ["first"]),
+                              ({"last_frame": self.LAST}, ["last"]),
+                              ({"first_frame": self.FIRST, "last_frame": self.LAST},
+                               ["first", "last"])):
+            with self.subTest(roles=roles):
+                clip, video = self.nodes()
+                self.stub.reset()
+                (pos, latent), enc = self.run_node(gmlx, clip, video, **frames)
+                (want, want_latent), stock = self.run_node(H.MiniMaxH3ImageToVideo.execute,
+                                                           clip, video, **frames)
+                self.assertEqual((enc["frames"], enc["keyframes"]), (FRAMES, roles))
+                self.assertEqual((stock["frames"], stock["keyframes"]), (None, None))
+                for k in ("image_shapes", "image_sums", "spans"):
+                    self.assertEqual(enc[k], stock[k], k)
+                got, wanted = pos[0][1]["minimax_keyframes"], want[0][1]["minimax_keyframes"]
+                self.assertEqual([kf["resolved_frame_index"] for kf in got],
+                                 [kf["resolved_frame_index"] for kf in wanted])
+                for a, b in zip(got, wanted):
+                    self.assertTrue(torch.equal(a["latent"], b["latent"]))
+                self.assertTrue(torch.equal(pos[0][1]["minimax_token_tags"],
+                                            want[0][1]["minimax_token_tags"]))
+                self.assertEqual(latent["samples"].shape, want_latent["samples"].shape)
+
+    def test_a_keyframe_prompt_samples_on_the_servers_caption(self):
+        """On an entry with an upsampler, the prompt with a first frame is
+        encoded as the caption the server wrote for the clip's length and
+        keyframe, and the step samples on that caption's conditioning."""
+        clip, video = self.nodes()
+        (pos, latent), enc = self.run_node(P.nodes.GmlxH3ImageToVideo().encode, clip, video,
+                                           first_frame=self.FIRST)
+        self.assertEqual(enc["revised"], f"a caption of {FRAMES} frames, ['first']: a dog")
+        (_out_,) = comfy_nodes.common_ksampler(P.model.load_model(self.client, HID), 1, 1, 1.0,
+                                               "res_multistep", "simple", pos, pos, latent)
+        (step,) = self.stub.events("av_step")
+        self.assertEqual(step["conds"], [enc["cond"]])
+
+    def test_a_server_without_keyframe_upsampling_encodes_as_before_with_one_warning(self):
+        """A server that takes no clip length or keyframes gets the encode
+        ComfyUI's own node sends, and the CLIP warns once that the prompt
+        with keyframes runs as typed."""
+        clip, video = self.nodes()
+        caps = clip.gmlx_client.capabilities
+        had = caps["features"]
+        caps["features"] = [f for f in had if f != "keyframe_upsampling"]
+        try:
+            with self.assertLogs("gmlx", "WARNING") as logs:
+                encs = [self.run_node(P.nodes.GmlxH3ImageToVideo().encode, clip, video,
+                                      first_frame=self.FIRST)[1] for _ in range(2)]
+        finally:
+            caps["features"] = had
+        self.assertEqual([(e["frames"], e["keyframes"], e["revised"]) for e in encs],
+                         [(None, None, None)] * 2)
+        self.assertEqual(logs.output, [
+            "WARNING:gmlx:gmlx: this gmlx server does not tell its upsampler the clip's "
+            "length and keyframes, so a prompt with keyframes runs as typed; update it"])
+
+    def test_comfyuis_own_node_with_keyframes_is_noted_once(self):
+        """ComfyUI's own node sends keyframes with no clip length or roles:
+        the CLIP says once that the gmlx node sends both."""
+        clip, video = self.nodes()
+        with self.assertLogs("gmlx", "WARNING") as logs:
+            for _ in range(2):
+                self.run_node(H.MiniMaxH3ImageToVideo.execute, clip, video,
+                              first_frame=self.FIRST)
+        self.assertEqual(logs.output, [
+            "WARNING:gmlx:gmlx: ComfyUI's MiniMax H3 Image to Video sends the server no clip "
+            "length or keyframes; gmlx MiniMax-H3 Image to Video sends both, and an upsampler "
+            "on the server's entry rewrites the prompt with them"])
 
 
 class Refusals(Base):

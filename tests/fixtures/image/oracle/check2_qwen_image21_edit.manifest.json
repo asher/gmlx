@@ -4,15 +4,7 @@
  "check": 2,
  "family": "qwen_image21",
  "script": "scripts/image_oracle/check2_qwen_image21_edit.py",
- "argv": [
-  "check2_qwen_image21_edit.py",
-  "--encoder",
-  "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
-  "--mmproj",
-  "mmproj-BF16.gguf",
-  "--config",
-  "Qwen__Qwen-Image-2.1"
- ],
+ "argv": ["check2_qwen_image21_edit.py", "--encoder", "Qwen3-VL-8B-Instruct-Q4_K_M.gguf", "--mmproj", "mmproj-BF16.gguf", "--config", "Qwen__Qwen-Image-2.1"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -85,36 +77,23 @@
   "cases": {
    "one": {
     "prompt": "Paint the largest rectangle bright red and leave the rest of the picture as it is.",
-    "images": [
-     "a"
-    ]
+    "images": ["a"]
    },
    "one_neg": {
     "prompt": "blurry, low quality, distorted, watermark",
-    "images": [
-     "a"
-    ]
+    "images": ["a"]
    },
    "two": {
     "prompt": "Place the shapes of the first picture over the background of the second picture.",
-    "images": [
-     "b",
-     "c"
-    ]
+    "images": ["b", "c"]
    },
    "two_neg": {
     "prompt": "blurry, low quality, distorted, watermark",
-    "images": [
-     "b",
-     "c"
-    ]
+    "images": ["b", "c"]
    },
    "two_swapped": {
     "prompt": "Place the shapes of the first picture over the background of the second picture.",
-    "images": [
-     "c",
-     "b"
-    ]
+    "images": ["c", "b"]
    }
   },
   "images": {
@@ -152,96 +131,46 @@
   },
   "layout": {
    "one": {
-    "images": [
-     "a"
-    ],
+    "images": ["a"],
     "sizes": [
-     [
-      512,
-      512
-     ]
+     [512, 512]
     ],
-    "image_rows": [
-     256
-    ],
+    "image_rows": [256],
     "first_slot": 8
    },
    "one_neg": {
-    "images": [
-     "a"
-    ],
+    "images": ["a"],
     "sizes": [
-     [
-      512,
-      512
-     ]
+     [512, 512]
     ],
-    "image_rows": [
-     256
-    ],
+    "image_rows": [256],
     "first_slot": 8
    },
    "two": {
-    "images": [
-     "b",
-     "c"
-    ],
+    "images": ["b", "c"],
     "sizes": [
-     [
-      576,
-      448
-     ],
-     [
-      448,
-      576
-     ]
+     [576, 448],
+     [448, 576]
     ],
-    "image_rows": [
-     252,
-     252
-    ],
+    "image_rows": [252, 252],
     "first_slot": 8
    },
    "two_neg": {
-    "images": [
-     "b",
-     "c"
-    ],
+    "images": ["b", "c"],
     "sizes": [
-     [
-      576,
-      448
-     ],
-     [
-      448,
-      576
-     ]
+     [576, 448],
+     [448, 576]
     ],
-    "image_rows": [
-     252,
-     252
-    ],
+    "image_rows": [252, 252],
     "first_slot": 8
    },
    "two_swapped": {
-    "images": [
-     "c",
-     "b"
-    ],
+    "images": ["c", "b"],
     "sizes": [
-     [
-      448,
-      576
-     ],
-     [
-      576,
-      448
-     ]
+     [448, 576],
+     [576, 448]
     ],
-    "image_rows": [
-     252,
-     252
-    ],
+    "image_rows": [252, 252],
     "first_slot": 8
    }
   },
@@ -556,278 +485,177 @@
    "two_swapped": 0.08737704434357599
   }
  },
- "notes": [
-  "The pipeline encodes one prompt with its images at batch 1 with no padding and no mask, as gmlx encodes one.",
-  "The pipeline loads the encoder in bfloat16, tower and all. The run with the tower in bfloat16 is recorded under bf16_with_tower_vs_fp32 and sets no gate."
- ],
+ "notes": ["The pipeline encodes one prompt with its images at batch 1 with no padding and no mask, as gmlx encodes one.", "The pipeline loads the encoder in bfloat16, tower and all. The run with the tower in bfloat16 is recorded under bf16_with_tower_vs_fp32 and sets no gate."],
  "created": "2026-10-07T07:18:59Z",
  "npz": "check2_qwen_image21_edit.npz",
  "tensors": {
   "grids_one": {
-   "shape": [
-    1,
-    3
-   ],
+   "shape": [1, 3],
    "dtype": "int64",
    "sha256": "b2792a6c5b2a0c672ebf7b2b54dd0d5c41f66f287722f636642e5c7b7ede5a7a"
   },
   "grids_one_neg": {
-   "shape": [
-    1,
-    3
-   ],
+   "shape": [1, 3],
    "dtype": "int64",
    "sha256": "b2792a6c5b2a0c672ebf7b2b54dd0d5c41f66f287722f636642e5c7b7ede5a7a"
   },
   "grids_two": {
-   "shape": [
-    2,
-    3
-   ],
+   "shape": [2, 3],
    "dtype": "int64",
    "sha256": "fc037d78bd54d330a5550c0b8375c5d678d83b760e34085001534a9e299c1457"
   },
   "grids_two_neg": {
-   "shape": [
-    2,
-    3
-   ],
+   "shape": [2, 3],
    "dtype": "int64",
    "sha256": "fc037d78bd54d330a5550c0b8375c5d678d83b760e34085001534a9e299c1457"
   },
   "grids_two_swapped": {
-   "shape": [
-    2,
-    3
-   ],
+   "shape": [2, 3],
    "dtype": "int64",
    "sha256": "96e43859e6371ac0a9a9c0ddfcca1c2d2d3d3d61df65db5a8e7d9234dd4cd191"
   },
   "ids_one": {
-   "shape": [
-    301
-   ],
+   "shape": [301],
    "dtype": "int64",
    "sha256": "bc964638834f8c74a9c111e38cb8e055352bebfbb274acfab00e43cb9d7e74fe"
   },
   "ids_one_neg": {
-   "shape": [
-    293
-   ],
+   "shape": [293],
    "dtype": "int64",
    "sha256": "7c08bca28824b0c488002b0386c321df9cb4cc8bf2e43028a2a6eb7bf84a4fbb"
   },
   "ids_two": {
-   "shape": [
-    553
-   ],
+   "shape": [553],
    "dtype": "int64",
    "sha256": "a99ca2cee53d4d1588733debaa8ed88a06a3b811f81777d5faf1c458ba2ee934"
   },
   "ids_two_neg": {
-   "shape": [
-    547
-   ],
+   "shape": [547],
    "dtype": "int64",
    "sha256": "ff4ba1d4ecbf6a6c3a33995334246c4a868c387afb3f5751f579157cdb38d84c"
   },
   "ids_two_swapped": {
-   "shape": [
-    553
-   ],
+   "shape": [553],
    "dtype": "int64",
    "sha256": "a99ca2cee53d4d1588733debaa8ed88a06a3b811f81777d5faf1c458ba2ee934"
   },
   "patches_a": {
-   "shape": [
-    1024,
-    1536
-   ],
+   "shape": [1024, 1536],
    "dtype": "float32",
    "sha256": "8dcad66be136cfd523d3cd370c848cabc655a8fe07463fadff9b06490714601b"
   },
   "patches_b": {
-   "shape": [
-    1008,
-    1536
-   ],
+   "shape": [1008, 1536],
    "dtype": "float32",
    "sha256": "f616577ef0947c866551b08916b20f8f33407622b8dfcace6a7d4021d739ba42"
   },
   "patches_c": {
-   "shape": [
-    1008,
-    1536
-   ],
+   "shape": [1008, 1536],
    "dtype": "float32",
    "sha256": "644c37736fe07c45f02421cf6e07e383ec92ae72e93b9ef63dccca4ec6b7d145"
   },
   "resized_a": {
-   "shape": [
-    512,
-    512,
-    4
-   ],
+   "shape": [512, 512, 4],
    "dtype": "uint8",
    "sha256": "403056602449587bb98e25cfe041403bceb6a014a1dbed10ee3219abe55d8534"
   },
   "resized_b": {
-   "shape": [
-    448,
-    576,
-    4
-   ],
+   "shape": [448, 576, 4],
    "dtype": "uint8",
    "sha256": "2e8bcc3217a5439b1f24af553abb9f8cbca0a5a33cd57b63dadc2561cb5ab32b"
   },
   "resized_c": {
-   "shape": [
-    576,
-    448,
-    4
-   ],
+   "shape": [576, 448, 4],
    "dtype": "uint8",
    "sha256": "c0d01f183c0b8a5d48da75f25f744c275d8d3676f7e0b820f3f9ad7a0a775316"
   },
   "slots_one": {
-   "shape": [
-    256
-   ],
+   "shape": [256],
    "dtype": "int64",
    "sha256": "794239664e19bce020aeaf13601bae222e9ed1decbeaaf19a12e924307140681"
   },
   "slots_one_neg": {
-   "shape": [
-    256
-   ],
+   "shape": [256],
    "dtype": "int64",
    "sha256": "794239664e19bce020aeaf13601bae222e9ed1decbeaaf19a12e924307140681"
   },
   "slots_two": {
-   "shape": [
-    504
-   ],
+   "shape": [504],
    "dtype": "int64",
    "sha256": "cd242630f69ac9909ef5ee73039db38aa5d87927c848dd6989bf4b02eb30ebbe"
   },
   "slots_two_neg": {
-   "shape": [
-    504
-   ],
+   "shape": [504],
    "dtype": "int64",
    "sha256": "cd242630f69ac9909ef5ee73039db38aa5d87927c848dd6989bf4b02eb30ebbe"
   },
   "slots_two_swapped": {
-   "shape": [
-    504
-   ],
+   "shape": [504],
    "dtype": "int64",
    "sha256": "cd242630f69ac9909ef5ee73039db38aa5d87927c848dd6989bf4b02eb30ebbe"
   },
   "source_a": {
-   "shape": [
-    768,
-    768,
-    3
-   ],
+   "shape": [768, 768, 3],
    "dtype": "uint8",
    "sha256": "611fb9ec5c97cf0572c262b7bf3ea58acc54984610900763ad8db5431153b18a"
   },
   "source_b": {
-   "shape": [
-    480,
-    640,
-    3
-   ],
+   "shape": [480, 640, 3],
    "dtype": "uint8",
    "sha256": "c731ea4444a67eac1a6b7acc35d21561587c05b07bdafd3f1da2080d61d12911"
   },
   "source_c": {
-   "shape": [
-    640,
-    480,
-    4
-   ],
+   "shape": [640, 480, 4],
    "dtype": "uint8",
    "sha256": "6ea9b070bcb6aebf7faf31b97a66e766d49b98b2a644aa796227a3076f4de416"
   },
   "tap_bf16_one": {
-   "shape": [
-    287,
-    4096
-   ],
+   "shape": [287, 4096],
    "dtype": "float32",
    "sha256": "e32475a5afcf052b00c9a5f8154a521759254d0eae1150deae5fe49b5564cf08"
   },
   "tap_bf16_one_neg": {
-   "shape": [
-    279,
-    4096
-   ],
+   "shape": [279, 4096],
    "dtype": "float32",
    "sha256": "de2eae33e814ebcacd1fa836a8e90d9744f483f5ba74198b8254110a1f330ce0"
   },
   "tap_bf16_two": {
-   "shape": [
-    539,
-    4096
-   ],
+   "shape": [539, 4096],
    "dtype": "float32",
    "sha256": "bfa77c9ffcfde4002268ffaf96f16fd7d82d68ca9eadbc646c2983afefaad83d"
   },
   "tap_bf16_two_neg": {
-   "shape": [
-    533,
-    4096
-   ],
+   "shape": [533, 4096],
    "dtype": "float32",
    "sha256": "e7ad5c2cd829956fddcc11d54fb42e11d354c829937d057bb0716b67d3a221bd"
   },
   "tap_bf16_two_swapped": {
-   "shape": [
-    539,
-    4096
-   ],
+   "shape": [539, 4096],
    "dtype": "float32",
    "sha256": "ad183b70ad5600debe88d968191b3e579d37ede9c2210289a25b84bdcea00a3f"
   },
   "tap_one": {
-   "shape": [
-    287,
-    4096
-   ],
+   "shape": [287, 4096],
    "dtype": "float32",
    "sha256": "36cb9652bb22e364d12c9781cdc020cb72397f75e60b51ad106fab0df19533c3"
   },
   "tap_one_neg": {
-   "shape": [
-    279,
-    4096
-   ],
+   "shape": [279, 4096],
    "dtype": "float32",
    "sha256": "d421fce6d132be9b959640639a8c244f7e2f06e80af7f7b8f39a17ab6b080d64"
   },
   "tap_two": {
-   "shape": [
-    539,
-    4096
-   ],
+   "shape": [539, 4096],
    "dtype": "float32",
    "sha256": "630a9de5a8a8911d51a07e14821a0d8d92adafbe9e116693fbeb84a781478059"
   },
   "tap_two_neg": {
-   "shape": [
-    533,
-    4096
-   ],
+   "shape": [533, 4096],
    "dtype": "float32",
    "sha256": "e180391167bd1d045e0d5b9ff432dbd93742e1729f846c7e20f69bea51324e28"
   },
   "tap_two_swapped": {
-   "shape": [
-    539,
-    4096
-   ],
+   "shape": [539, 4096],
    "dtype": "float32",
    "sha256": "5e0bba406135b2b65118f8d5fbc4237c353e2c5e067392cbb4f6382e1e12b1a2"
   }

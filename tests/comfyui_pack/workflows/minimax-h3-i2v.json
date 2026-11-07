@@ -76,7 +76,7 @@
       "height": 768,
       "length": 124
     },
-    "class_type": "MiniMaxH3ImageToVideo",
+    "class_type": "GmlxH3ImageToVideo",
     "_meta": {
       "title": "Prompt and clip size"
     }

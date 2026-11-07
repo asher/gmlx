@@ -71,7 +71,8 @@ CLIENT_TABLE_BYTES = 16 << 20
 # The bound of a store with no cap, which its bookings bound.
 UNBOUNDED = 1 << 62
 FEATURES = ("prefix_cache", "noise_mask", "rgba_vae", "tiled_vae",
-            "ref_cache", "skip_blocks", "av_step", "anchors")
+            "ref_cache", "skip_blocks", "av_step", "anchors",
+            "keyframe_upsampling")
 
 
 @dataclass(frozen=True)
@@ -584,6 +585,8 @@ class StepsState:
         # room one of them keeps in the tensor cache for a cond.
         self._share, self._tensor_floor = 1.0, 0
         self.runs: dict = {}
+        # interrupt_id -> the stop event of an encode's prompt rewrite
+        self.encodes: dict = {}
         # model id -> (weak reference to its pipeline, ClientTables)
         self.tables: dict = {}
         self.lock = threading.Lock()
@@ -748,17 +751,36 @@ class StepsState:
 
     def interrupt(self, run_id: str | None) -> int:
         """Interrupt the run ``run_id``: its step in flight is discarded
-        and its later steps are refused. A request that names no run
-        interrupts nothing. Returns how many runs it reached."""
+        and its later steps are refused. An encode whose interrupt_id is
+        ``run_id`` stops its prompt rewrite. A request that names no run
+        interrupts nothing. Returns how many runs and encodes it
+        reached."""
         if not run_id:
             return 0
         with self.lock:
             run = self.runs.get(run_id)
+            stop = self.encodes.get(run_id)
+        if stop is not None:
+            stop.set()
         if run is None:
-            return 0
+            return int(stop is not None)
         run.interrupted = True
         run.gen += 1
-        return 1
+        return 1 + int(stop is not None)
+
+    def begin_encode(self, token: str) -> threading.Event:
+        """The stop event of the encode ``token`` names, which an
+        interrupt naming it sets while its prompt is rewritten."""
+        with self.lock:
+            if token in self.encodes:
+                raise StepError(400, "interrupt_id names an encode in "
+                                     "progress")
+            stop = self.encodes[token] = threading.Event()
+        return stop
+
+    def end_encode(self, token: str) -> None:
+        with self.lock:
+            self.encodes.pop(token, None)
 
     # Patch tables.
 
@@ -785,6 +807,7 @@ class StepsState:
         self.adapters.clear()
         with self.lock:
             self.tables.clear()
+            self.encodes.clear()
 
 
 STATE = StepsState()

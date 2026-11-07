@@ -4,24 +4,7 @@
  "check": 3,
  "family": "flux2_klein",
  "script": "scripts/image_oracle/check3_flux2_klein.py",
- "argv": [
-  "check3_flux2_klein.py",
-  "--reference",
-  "src",
-  "--reference-commit",
-  "50fe5162777813d869182b139e83b10743caef15",
-  "--dit",
-  "flux-2-klein-base-4b-Q4_K_M.gguf",
-  "--sizes",
-  "512",
-  "1024",
-  "--rows",
-  "512",
-  "--steps",
-  "50",
-  "--name",
-  "check3_flux2_klein_base"
- ],
+ "argv": ["check3_flux2_klein.py", "--reference", "src", "--reference-commit", "50fe5162777813d869182b139e83b10743caef15", "--dit", "flux-2-klein-base-4b-Q4_K_M.gguf", "--sizes", "512", "1024", "--rows", "512", "--steps", "50", "--name", "check3_flux2_klein_base"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -110,44 +93,27 @@
  "npz": "check3_flux2_klein_base_1024.npz",
  "tensors": {
   "features": {
-   "shape": [
-    512,
-    7680
-   ],
+   "shape": [512, 7680],
    "dtype": "float32",
    "sha256": "3482cc3e89168264731155ce529cc5ff9299b09f9e6ade75b1a420d631896802"
   },
   "ids.image": {
-   "shape": [
-    4096,
-    4
-   ],
+   "shape": [4096, 4],
    "dtype": "float32",
    "sha256": "e0fd52cd4061c2c0d3094706675d76769012c61ad3e12de6ed0464ff4cd3a971"
   },
   "ids.text": {
-   "shape": [
-    512,
-    4
-   ],
+   "shape": [512, 4],
    "dtype": "float32",
    "sha256": "914a4d07f258895514e1b52023c57a677aa4925531d34e54831414224030a0f8"
   },
   "in.time_in": {
-   "shape": [
-    1,
-    256
-   ],
+   "shape": [1, 256],
    "dtype": "float32",
    "sha256": "cbacd50d6ddae5179d08ae5986820a7baaecca4b2a9962dd856fc80aa62707e4"
   },
   "latents": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "2ce0f3a03885ff5202f83cc448e3caeafce143ff69753702eb39499c5466df80"
   },
@@ -157,22 +123,12 @@
    "sha256": "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c"
   },
   "velocity": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "291f27f5cb93048b7d6a08d0e14a2b1ba080279a2a6bd766e13fa237b6007eee"
   },
   "velocity_bf16": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "187f2d887beee6eb66b57bb049309836dd140eaaba2fca51cfa85a0e82e09cb2"
   }

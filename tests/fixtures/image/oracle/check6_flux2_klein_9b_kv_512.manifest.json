@@ -4,24 +4,7 @@
  "check": 6,
  "family": "flux2_klein_9b_kv",
  "script": "scripts/image_oracle/check6_flux2_klein.py",
- "argv": [
-  "check6_flux2_klein.py",
-  "--reference",
-  "src",
-  "--reference-commit",
-  "50fe5162777813d869182b139e83b10743caef15",
-  "--dit",
-  "Flux-2-Klein-9B-KV-Q8_0.gguf",
-  "--kv",
-  "--variant",
-  "distilled",
-  "--features",
-  "check2_flux2_klein_9b.npz",
-  "--sizes",
-  "512",
-  "--bf16",
-  "512"
- ],
+ "argv": ["check6_flux2_klein.py", "--reference", "src", "--reference-commit", "50fe5162777813d869182b139e83b10743caef15", "--dit", "Flux-2-Klein-9B-KV-Q8_0.gguf", "--kv", "--variant", "distilled", "--features", "check2_flux2_klein_9b.npz", "--sizes", "512", "--bf16", "512"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -78,11 +61,7 @@
   "guidance": 1.0,
   "seed": 6,
   "bf16": true,
-  "kept_steps": [
-   1,
-   2,
-   3
-  ],
+  "kept_steps": [1, 2, 3],
   "refs": 0,
   "tokens": 1024,
   "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, shape (1, 128, size / 16, size / 16); the CLI's noise is bf16, so it is rounded",
@@ -106,31 +85,19 @@
   "run": {
    "fp32_s": 54.9,
    "fp32_median_step_s": 13.76,
-   "rows": [
-    1
-   ],
+   "rows": [1],
    "bf16_s": 112.9,
    "latents_bf16_vs_fp32": {
     "rel_l2": 0.14197372818035664,
     "cosine": 0.9899265319217013,
     "max_abs": 2.872929573059082
    },
-   "bf16_vs_fp32_by_step": [
-    0.004208190466112454,
-    0.012722007804399854,
-    0.03456875868593133,
-    0.14197372818035664
-   ]
+   "bf16_vs_fp32_by_step": [0.004208190466112454, 0.012722007804399854, 0.03456875868593133, 0.14197372818035664]
   }
  },
  "tolerances": {
   "latents_rel_l2": 0.2839474563607133,
-  "by_step_rel_l2": [
-   0.008416380932224908,
-   0.02544401560879971,
-   0.06913751737186266,
-   0.2839474563607133
-  ],
+  "by_step_rel_l2": [0.008416380932224908, 0.02544401560879971, 0.06913751737186266, 0.2839474563607133],
   "rule": "latents after a kept step and after the last. At 512: gmlx's bf16 run at relative L2 twice the oracle's own bf16 against fp32 relative L2 after that step. At any other size: gmlx's exact fp32 run against the fp32 latents at exact_rel_l2, and its bf16 run read as a share of the 512 gate of the step, not gated"
  },
  "notes": [],
@@ -138,84 +105,47 @@
  "npz": "check6_flux2_klein_9b_kv_512.npz",
  "tensors": {
   "features": {
-   "shape": [
-    512,
-    12288
-   ],
+   "shape": [512, 12288],
    "dtype": "float32",
    "sha256": "358044c890dcd4d9d2e7169de8e86383ebd5ec0d80c21cd8facf551e53355cb9"
   },
   "latents": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "0ff2d1c757be50819581343b8de0adfff8d57e8fe0ec24841c56ae3e795108e8"
   },
   "latents_bf16": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "60a8092bac309e5f2b13426351ffd6c41142254b0a37780ce74d636b6511cd4f"
   },
   "latents_step1": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "758b9216817db1a0b77c3cad3fed332ae00311b443ce0296af5fae9e017e61fe"
   },
   "latents_step2": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "c306a7f520451c8b13cb384f6014e102dd2e99c77654feebe97c985e83ade767"
   },
   "latents_step3": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "e9df14b80dfebffe078ae0abbf121d5c86c44106921cbff036453fd252875a08"
   },
   "noise": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "d614e8f6414c19a6e58b7af3fb3e7e866a4c21c40c780bf93ece8c4f09d875de"
   },
   "schedule": {
-   "shape": [
-    5
-   ],
+   "shape": [5],
    "dtype": "float32",
    "sha256": "9f2da4a92411327695519cb907933a612b2c6a5c66593a012e960ca146d7755d"
   },
   "times": {
-   "shape": [
-    4
-   ],
+   "shape": [4],
    "dtype": "float32",
    "sha256": "dc88fa8eb61cc7d72b0f02c6dc49b252aa99e0be170fccf10a05a81e261ec3b1"
   }
