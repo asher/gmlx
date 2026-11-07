@@ -11,6 +11,7 @@ agent or chat app that does not connect, read its entry under
 - [Requests](#requests)
 - [Memory](#memory)
 - [Image generation](#image-generation)
+- [Video generation](#video-generation)
 - [ComfyUI](#comfyui)
 - [Container mode](#container-mode)
 - [Custom agents](#custom-agents)
@@ -413,7 +414,172 @@ such as `loras/watercolor.safetensors`, or by the file name of one in the
 entry's `adapters`. Move the file into a model folder and use its path
 there.
 
+### A LoRA is refused for memory
+
+When a LoRA needs memory that is not free, the server makes room for it
+before it runs: it lets idle LoRAs and uploads go and unloads idle
+models, as a model load does. A pinned model stays loaded, as
+[`pin`](config.md#modelspin) describes. A LoRA that still does not fit
+is refused. The message names what needs the memory, such as the
+request's adapters or the LoRA matrices of an upload, the GB it needs,
+and the room or what holds the request up. Each 503 carries
+`Retry-After`:
+
+- `... need ... GB of memory, over the ... GB the server's memory budget
+  leaves beside ...` (413): the LoRAs do not fit beside the pinned models,
+  even with every other model unloaded. An images API request on an
+  image model counts that model and the chat model it shares as its
+  encoder too, loaded or not, and the message names them. Use a smaller
+  LoRA or fewer of them, or unpin a model.
+- `... and ... GB is free beside the models in use (...); retry when one
+  is idle` (503): the models named are generating, and their memory goes
+  once they are idle. The server waits for a chat model among them up to
+  the `Retry-After` seconds before it answers. Send the request again
+  when one finishes. In ComfyUI, queue the prompt again.
+- `... and the image worker is busy with ...; retry when it is idle`
+  (503): an upload waited the `Retry-After` seconds for a job of the
+  image models named, with the memory free. Send it again when the job
+  ends.
+- `... and the server is loading ... (... GB) now; retry when it is
+  loaded` (503): a model load holds the memory. Send the request again
+  once the model is loaded.
+- `... and the server is loading or unloading another model now; retry
+  when it is done` (503): a model load or unload held the request up past
+  the `Retry-After` seconds. Send it again when that ends.
+- `... and ... GB is free; unload a model or retry when the requests in
+  flight finish` (503): no model whose memory goes once idle is
+  generating, and a preloaded or pinned model or the LoRAs and uploads of
+  other requests hold the room. Unload a model with
+  [`POST /unload`](api.md#endpoints), or send the request again once the
+  other requests finish.
+- `... GB is free in the working set now; retry when the models in use
+  finish` (503): macOS has less memory free than the plan counts on while
+  other models run. Retry when they finish.
+- `... GB is free in the working set now; close other apps or unload a
+  model to make room` (503): no model is in use, and other apps hold the
+  memory macOS has free. Close one, or unload a model with
+  [`POST /unload`](api.md#endpoints).
+- `... and ... is idle on the image worker; unload it (POST /unload) to
+  make room` (503), or `on the video worker`: the room is held by idle
+  models of the other kind, image or video, which a LoRA's turn does not
+  unload. Unload them with [`POST /unload`](api.md#endpoints), then send
+  the request again. A video job fails with this message.
+
+With
+[`image.adapter_cache_mb`](config.md#serverimageadapter_cache_mb) set, a
+LoRA over that cap is refused with a message that names the key. Raise the
+cap, or remove the key to let LoRAs use the memory free.
+
+## Video generation
+
+### `the smallest MiniMax-H3 clip does not fit in memory`
+
+MiniMax-H3 needs 32 GB of memory or more. On a smaller Mac,
+`gmlx video pull` refuses before it downloads anything, since the text
+encoder alone needs more memory than gmlx may use there. `--force`
+downloads the files anyway, and `gmlx video generate` then refuses every
+clip.
+
+### `this clip does not fit in memory`
+
+`gmlx video generate` checks the clip against the Mac's memory before it
+loads anything, and the message names the setting to change.
+[Clip length, size and memory](video.md#clip-length-size-and-memory)
+lists the largest clip each Mac makes. `GMLX_OVERCOMMIT=1` skips the
+check, and the Mac then swaps, as
+[`image request does not fit`](#image-request-does-not-fit) describes.
+
+### `MiniMax-H3 needs an M3 or newer`
+
+The model runs in bfloat16, which M1 and M2 chips lack. `gmlx video pull`
+refuses it on those Macs before it downloads anything, and `--force`
+downloads it anyway. `gmlx video generate` and `gmlx video bench` refuse
+to run it.
+
+### `--first-frame needs the encoder's vision tower`
+
+A first or last frame is read through the text encoder's vision tower,
+its `mmproj` file, which `gmlx video pull` downloads with the model and
+names in the entry as
+[`encoder_mmproj`](config.md#video_modelsencoder_mmproj). Pass
+`--mmproj` when `MODEL` is a DiT GGUF, or add the key to an entry you
+wrote yourself. A `gmlx serve` entry without the key refuses a ComfyUI
+first or last frame with `names no encoder_mmproj`.
+
+### `MiniMax-H3 fasth3 runs text to video only`
+
+FastH3 takes no keyframe or guide. Run the clip on `h3`, or without
+`--first-frame`, `--last-frame`, `--guide` and `--guide-audio`. In
+ComfyUI, leave `first_frame` and `last_frame` unconnected and add no
+`Add Guide for MiniMax H3` node.
+
+### `a ...-frame guide clip at frame ... does not fit in the clip's ... frames`
+
+The frames a guide video keeps, which
+[Keyframes and guides](video.md#keyframes-and-guides) gives, must fit in
+the clip from the guide's frame on. Move the guide to an earlier frame,
+make the clip longer, or cut the video shorter.
+
+### Video jobs
+
+These are the answers and job errors of
+[`POST /v1/videos`](video-api.md#errors).
+
+- `The gmlx server finds no ffmpeg on its PATH` (501): the server writes
+  each MP4 through ffmpeg. Install it with `brew install ffmpeg`, or start
+  the server from a shell whose PATH holds it.
+- `the video job queue is full; retry later` (429): more jobs wait than
+  [`video.max_queue`](config.md#video-jobs). Send the job again after the
+  `Retry-After` seconds, or raise the setting.
+- `the files of this job are ..., and the video job store has ... of room
+  left` (413), or `the keyframe ... is ..., and the video job store has
+  ... of room left` (413) for a JSON body's keyframe: the job store holds
+  [`video.store_max_bytes`](config.md#video-jobs) of clips and inputs.
+  Delete finished jobs you have downloaded, send smaller files, or raise
+  the setting. With `..., and ... of it is held by uploads arriving now`,
+  other jobs' files are arriving in the store. They stay as those jobs'
+  inputs until the jobs end, so wait for one to end or delete one.
+- `a ... clip of ... frames on ... does not fit in memory` (413): the clip
+  does not fit beside the pinned models even with every other model
+  unloaded. The message lists the memory of each phase and what to
+  change, as [`this clip does not fit in
+  memory`](#this-clip-does-not-fit-in-memory) describes.
+- `a clip of ... does not fit in memory beside the models now loaded`, as
+  a job's error with status 400: the clip did not fit beside the models
+  loaded when it ran. Unload a model with [`POST /unload`](api.md#endpoints)
+  and submit the job again, or make the clip smaller.
+- `the encode of ..., a guide clip of ... frames of ..., does not fit in
+  memory beside the models now loaded: no window fits`, as a job's error
+  with status 400: the guide video's encode did not fit beside the models
+  loaded, even a few seconds at a time. Unload a model with
+  [`POST /unload`](api.md#endpoints) and submit the job again, or make the
+  clip smaller.
+- `server_restarted`: the server stopped while the job was queued or
+  running, and a job does not resume. Submit it again.
+- `upsample_failed`: the entry's upsampler gave no caption for a job whose
+  prompt it rewrites. The server log names the reason. Fix the entry's
+  `upsampler`, or send the job with `prompt_upsampling: false`.
+- `timed_out`, `the job waited for memory until it expired`: models in use
+  held the memory the job needed until the job's
+  [`video.job_ttl_s`](config.md#video-jobs) ran out. Submit it again when
+  the server is less busy.
+- `timed_out`, `the job was still queued when it expired`: the jobs ahead
+  of it ran for its whole `job_ttl_s`. Submit it again, or raise
+  `job_ttl_s`.
+
 ## ComfyUI
+
+### `a video encode ... does not fit in memory beside the models now loaded`
+
+The server answers 400 when the gmlx video VAE cannot encode a first or
+last frame or an image guide, or a part of a guide video, beside the
+models it holds. The nodes send a long guide video in parts of up to 124
+frames, and the message gives the memory the frame or the part needs,
+the memory free and, for a part, the largest part that fits now. The
+nodes then send the parts that remain, from the first frame of the
+refused part on, in parts of that size, and stop if one is refused
+again. When no part fits, unload chat models with
+[`POST /unload`](api.md#endpoints) or make the clip smaller.
 
 ### `no ComfyUI found`
 

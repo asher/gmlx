@@ -453,8 +453,12 @@ def _resident_models_view() -> list:
     out = []
     for e in pool.stats()["resident"]:
         kind = e.get("kind", "chat")
-        ids = (serving.image_ids_for_path(e["model_path"]) if kind == "image"
-               else path_to_ids.get(e["model_path"], []))
+        if kind == "image":
+            ids = serving.image_ids_for_path(e["model_path"])
+        elif kind == "video":
+            ids = [e["loaded_as"]] if e.get("loaded_as") else []
+        else:
+            ids = path_to_ids.get(e["model_path"], [])
         out.append({
             "ids": ids,
             "kind": kind,
@@ -583,6 +587,13 @@ def install_runtime_snapshot_enrichment() -> None:
         except Exception:
             _log.debug("metrics snapshot: images unavailable", exc_info=True)
         try:
+            if serving.video_model_ids():
+                from ..video_jobs import STORE as _videos
+
+                base["videos"] = _videos.metrics()
+        except Exception:
+            _log.debug("metrics snapshot: videos unavailable", exc_info=True)
+        try:
             from ..live_requests import live_requests_view
 
             base["requests"] = live_requests_view()
@@ -609,13 +620,17 @@ def install_pool_aware_unload() -> None:
     app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
     async def unload_endpoint(request: Request):
-        pool = _get_pool()
         try:
             body = await request.json()
         except Exception:
             body = None
         model_id = (body or {}).get("model") if isinstance(body, dict) else None
+        # An unload waits on the build lock and the image worker: off the
+        # event loop.
+        return await run_in_threadpool(_unload, model_id)
 
+    def _unload(model_id):
+        pool = _get_pool()
         if model_id:
             if pool is None:
                 # 503, not 200: without a pool the unload cannot be honored.
@@ -1051,6 +1066,8 @@ def install_service_routes(cfg) -> None:
     install_image_routes(cfg)
     from .image_steps import install_image_step_routes
     install_image_step_routes(cfg)
+    from .videos import install_video_routes
+    install_video_routes(cfg)
     _list_services(stt, tts, embeddings, rerank,
                    getattr(cfg, "model_dirs", ()) or ())
     _refresh_unconfigured_answers(cfg)
@@ -1069,7 +1086,9 @@ def install_reload_route(reload_fn) -> None:
                 "status": "unsupported",
                 "message": "reload requires a --config launch"})
         try:
-            result = reload_fn() or {}
+            # Off the event loop: a reload re-registers models under the
+            # pool's build lock, which a worker's turn or a load holds.
+            result = await run_in_threadpool(reload_fn) or {}
         except Exception as exc:
             # An admin route: the message (usually a config-validation error)
             # is the point, but a failed reload must not answer 200.

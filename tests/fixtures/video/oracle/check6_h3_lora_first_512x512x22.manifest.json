@@ -1,0 +1,1027 @@
+{
+ "schema": 1,
+ "name": "check6_h3_lora_first_512x512x22",
+ "check": 6,
+ "family": "h3",
+ "script": "scripts/video_oracle/check6_h3.py",
+ "argv": [
+  "check6_h3.py",
+  "--comfy-dir",
+  "ComfyUI-h3",
+  "--dit",
+  "minimax_h3_fl2va_pruned-Q4_K.gguf",
+  "--features",
+  "check2_h3.npz",
+  "--keyframes",
+  "check2_h3_keyframes.npz",
+  "--vae",
+  "minimax_h3_video_vae_fp16.safetensors",
+  "--audio-vae",
+  "minimax_h3_audio_vae_fp32.safetensors",
+  "--lora",
+  "minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+  "--lora-merge",
+  "float32",
+  "--shift-video",
+  "6",
+  "--shape",
+  "512x512x22",
+  "--cases",
+  "first",
+  "last",
+  "both",
+  "mid_audio",
+  "clip17"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.0"
+   },
+   "diffusers": null,
+   "transformers": {
+    "version": "5.17.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": null,
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   },
+   "comfy-kitchen": {
+    "version": "0.2.40"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "minimax_h3_fl2va_pruned-Q4_K.gguf",
+   "size": 11420663904,
+   "sha256": "dd948e08ad0ba3c71bd42f368e283dd82e790f5122a63b276e22a3e0283d0c10"
+  },
+  "lora": {
+   "name": "minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+   "size": 1956193000,
+   "sha256": "fb4c00361c94bad47f878d5e096c6cab2f45063b0968bd5756dcb7da6936f53e"
+  },
+  "features": {
+   "name": "check2_h3_keyframes.npz",
+   "size": 120067586,
+   "sha256": "d5d6c245f6f1a986a6135e17877cf8a3a01e307f1e18a8cf66362eddd26c02ff"
+  },
+  "vae": {
+   "name": "minimax_h3_video_vae_fp16.safetensors",
+   "size": 5207808496,
+   "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522"
+  },
+  "first_frame": {
+   "name": "check6_h3_lora_first_frame.png",
+   "size": 463980,
+   "sha256": "20a889c81c0a36694f22730e7283422366c5fd2dc4c97232d89d3dc642df9acb"
+  }
+ },
+ "inputs": {
+  "shape": [
+   512,
+   512,
+   22
+  ],
+  "steps": 8,
+  "seed": 6,
+  "shifts": {
+   "video": 6.0,
+   "audio": 3.0
+  },
+  "lora": "minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+  "lora_strength": 1.0,
+  "lora_pairs": 208,
+  "lora_merge": "float32",
+  "lora_merge_means": "each weight patched per call dequantized and patched in float32, then cast to the pass dtype once, as ComfyUI core merges a LoRA on the CPU",
+  "dequant": "ComfyUI-GGUF dequantize_tensor with dequant_dtype float32: K-quant block math in float32, on every call",
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "euler": "Euler in float32 per stream; the audio sigmas the time shift of the video sigmas, as the forward derives the audio time",
+  "timestep": "sigma x 1000 in float32",
+  "attention": "attention_pytorch",
+  "comfy": "426f5eea52a7ece1dd599fff4cb6cd1f352ddd24",
+  "comfy_gguf": "373048b8403a7820620065210a691263d4da0a61",
+  "modes": [
+   "fp32",
+   "bf16_forced"
+  ],
+  "prompt": "keyframe",
+  "forwards": 8,
+  "text_rows": 278,
+  "video_shape": [
+   1,
+   24,
+   7,
+   32,
+   32
+  ],
+  "audio_shape": [
+   1,
+   32,
+   2,
+   37
+  ],
+  "case": "first",
+  "anchors": [
+   {
+    "frame": 0,
+    "video_t": 1,
+    "audio_t": 0
+   }
+  ],
+  "spans": [
+   [
+    6,
+    264
+   ]
+  ],
+  "anchor_seed": 6,
+  "anchor_spec": {
+   "prompt": "keyframe",
+   "first": "png"
+  }
+ },
+ "results": {
+  "times": {
+   "fp32_s": 929.6,
+   "bf16_forced_s": 3669.7,
+   "max_rss_gib": 34.82
+  },
+  "step_bf16_vs_fp32": [
+   {
+    "video": {
+     "rel_l2": 0.05610993692959255,
+     "cosine": 0.9985666409825867,
+     "max_abs": 1.2800283432006836
+    },
+    "audio": {
+     "rel_l2": 0.017060645137067034,
+     "cosine": 0.9998740792147932,
+     "max_abs": 0.08728611469268799
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.03344747422361404,
+     "cosine": 0.9994490623954024,
+     "max_abs": 0.4778045415878296
+    },
+    "audio": {
+     "rel_l2": 0.015344528473635526,
+     "cosine": 0.9998886152707461,
+     "max_abs": 0.10246145725250244
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.052641705320166904,
+     "cosine": 0.9986377182933124,
+     "max_abs": 1.576062023639679
+    },
+    "audio": {
+     "rel_l2": 0.01646790206007795,
+     "cosine": 0.9998644233550116,
+     "max_abs": 0.14207029342651367
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.02704363849382689,
+     "cosine": 0.9996342539480532,
+     "max_abs": 0.7154003083705902
+    },
+    "audio": {
+     "rel_l2": 0.018326899845302405,
+     "cosine": 0.999832094462023,
+     "max_abs": 0.11939402669668198
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.019971319581747644,
+     "cosine": 0.9998006037547158,
+     "max_abs": 1.0338404178619385
+    },
+    "audio": {
+     "rel_l2": 0.019731980321928917,
+     "cosine": 0.9998063596794001,
+     "max_abs": 0.13158267736434937
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.0161068090667475,
+     "cosine": 0.9998702769381321,
+     "max_abs": 0.3541454076766968
+    },
+    "audio": {
+     "rel_l2": 0.019544032521321128,
+     "cosine": 0.9998099850583178,
+     "max_abs": 0.16861853003501892
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.016955354591855588,
+     "cosine": 0.999856358839994,
+     "max_abs": 0.5933529138565063
+    },
+    "audio": {
+     "rel_l2": 0.024280577602913044,
+     "cosine": 0.999705183333967,
+     "max_abs": 0.09918870031833649
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.016979456103980953,
+     "cosine": 0.9998560483351376,
+     "max_abs": 0.598572701215744
+    },
+    "audio": {
+     "rel_l2": 0.020025248601053484,
+     "cosine": 0.9998004947557403,
+     "max_abs": 0.23263335227966309
+    }
+   }
+  ],
+  "exact_free_floor": {
+   "video": {
+    "rel_l2": 0.010006973272960995,
+    "measured": "the largest relative L2 between gmlx's exact run on the GPU and the same run on the CPU stream or from inputs nudged by one float32 step (4 seeds); tests/video/test_video_check6_h3.py on minimax_h3_fl2va_pruned-Q4_K.gguf dd948e08 with minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors fb4c0036, Apple M5 Max"
+   },
+   "audio": {
+    "rel_l2": 0.0036734990656033975,
+    "measured": "the largest relative L2 between gmlx's exact run on the GPU and the same run on the CPU stream or from inputs nudged by one float32 step (4 seeds); tests/video/test_video_check6_h3.py on minimax_h3_fl2va_pruned-Q4_K.gguf dd948e08 with minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors fb4c0036, Apple M5 Max"
+   }
+  },
+  "step_nudge_spread": {
+   "rule": "a shipping step and stream whose gmlx reading misses twice the oracle's one-sample bf16 against fp32 gap while the case's exact gates pass: tolerance = the larger of that and the nudge spread, the oracle's own largest bf16 against fp32 relative L2 at the step over its recorded base and the same bf16 step from the step's input latents and features nudged one float32 step (seeds 0 to 2), sigmas not nudged; measured once per fixture by scripts/video_oracle/check6_h3_spread.py",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "steps": {
+    "8": {
+     "audio": {
+      "rel_l2": 0.03844251152515378,
+      "run": "nudge2",
+      "runs": {
+       "recorded": 0.020025248601053484,
+       "nudge0": 0.020070618572635694,
+       "nudge1": 0.01579280973264053,
+       "nudge2": 0.03844251152515378
+      },
+      "gmlx": 0.0418915144132822,
+      "base_rerun": 0.020025248601053484,
+      "mark": "recorded",
+      "derived": 0.04005049720210697,
+      "factor": 1.25,
+      "reason": "gmlx's bf16 path rounds twice where the reference rounds once, at every live-LoRA leaf (1.32 to 1.74x one rounding) and at every block norm (1.2 to 1.3x), measured site by site in probe 3 at last step 2. The reference's own bf16 gap is small on audio rows because its rope table is exact at the audio rows' zero angles, so the excess shows on audio rows and not on video rows. The post-V5 rounding item prices the fix, a fused once-rounding LoRA leaf."
+     }
+    }
+   },
+   "recorded_rule": "a recorded cell, a shipping step and stream whose gmlx reading is over the gate above and within 2.5 x the nudge spread: tolerance = the larger of that gate (derived) and 1.25 x gmlx's reading, with the reason it is recorded; a re-record that lands inside the derived gate drops the mark",
+   "measured": "ComfyUI 426f5eea52a7ece1dd599fff4cb6cd1f352ddd24, ComfyUI-GGUF 373048b8403a7820620065210a691263d4da0a61, 8 CPU threads, bf16 matmul emulation; scripts/video_oracle/check6_h3_spread.py"
+  }
+ },
+ "tolerances": {
+  "steps": [
+   {
+    "video": {
+     "rel_l2": 0.1122198738591851
+    },
+    "audio": {
+     "rel_l2": 0.03412129027413407
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.06689494844722808
+    },
+    "audio": {
+     "rel_l2": 0.030689056947271053
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.10528341064033381
+    },
+    "audio": {
+     "rel_l2": 0.0329358041201559
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.05408727698765378
+    },
+    "audio": {
+     "rel_l2": 0.03665379969060481
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.03994263916349529
+    },
+    "audio": {
+     "rel_l2": 0.039463960643857834
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.032213618133495
+    },
+    "audio": {
+     "rel_l2": 0.039088065042642256
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.033910709183711175
+    },
+    "audio": {
+     "rel_l2": 0.04856115520582609
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.033958912207961905
+    },
+    "audio": {
+     "rel_l2": 0.05236439301660275
+    }
+   }
+  ],
+  "rule": "steps: the velocity of each step from the fp32 latents before it, tolerance = 2 x the oracle's own bf16 against fp32 relative L2 at that step, video and audio apart; the exact gates are the gmlx test's, from the floors it records; the LoRA merged as inputs.lora_merge records",
+  "exact_free": {
+   "video": {
+    "rel_l2": 0.02001394654592199
+   },
+   "audio": {
+    "rel_l2": 0.007346998131206795
+   }
+  }
+ },
+ "notes": [
+  "oracle: ComfyUI 426f5eea52a7ece1dd599fff4cb6cd1f352ddd24, ComfyUI-GGUF 373048b8403a7820620065210a691263d4da0a61, UnetLoaderGGUF with dequant_dtype float32, LoRA through comfy.sd.load_lora_for_models, merge float32: each weight patched per call dequantized and patched in float32, then cast to the pass dtype once, as ComfyUI core merges a LoRA on the CPU"
+ ],
+ "created": "2026-11-05T12:42:19Z",
+ "npz": "check6_h3_lora_first_512x512x22.npz",
+ "tensors": {
+  "anchor.0.frame": {
+   "shape": [],
+   "dtype": "int64",
+   "sha256": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc"
+  },
+  "anchor.0.video": {
+   "shape": [
+    1,
+    24,
+    1,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "edd74b9e83fa0350efa06def3bb5680c71f4cbda180dee7fd0da974fecf44659"
+  },
+  "anchor_noise.0": {
+   "shape": [
+    256,
+    96
+   ],
+   "dtype": "float32",
+   "sha256": "0324ee15b179470e246674a516123096dad06aadecf09c0880fe75b3f6a170d0"
+  },
+  "anchor_seed": {
+   "shape": [],
+   "dtype": "int64",
+   "sha256": "23d7f42b1cdc1f0d492ebd756ed0fe8003995dda554d99418d47a81813650207"
+  },
+  "audio": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "e58d244211b95f90bc0c7c82e59e0ff9c8067a43e8fd648d799d7a886adffc2d"
+  },
+  "audio_step1": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "be8c9a74016d9d2421b70f5f70e0e6f9f25a6a1712f6ded097052dc6321e5820"
+  },
+  "audio_step2": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "4ff5c3fdd0536ae005ab7763feffb9bde9d1db7245bcc57eeeb243ed3501e6a0"
+  },
+  "audio_step3": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "6df93a49df1dde53b4613c53723964d0b8cc6d698c84aabe7b989156aacb893e"
+  },
+  "audio_step4": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "50d19729eefa900a355396e1ab588a410204e6b1cd0ac8c4385ddb5408b397b3"
+  },
+  "audio_step5": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "f3c257d4749605012f31e8e4a925b9506c5c652e966677fdebff756518c5a4f9"
+  },
+  "audio_step6": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "9642cff6fa83f0033bb729b40bdae6155127c288ff24996d028e0a141a78dafd"
+  },
+  "audio_step7": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "1daedf26e5d5711dda0e3fc12c011b43bdcde70836ecca277370e8e058d07c76"
+  },
+  "audio_step8": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "e58d244211b95f90bc0c7c82e59e0ff9c8067a43e8fd648d799d7a886adffc2d"
+  },
+  "features": {
+   "shape": [
+    278,
+    5120
+   ],
+   "dtype": "float32",
+   "sha256": "384839eb1715514a5de403f533801ec3e4b0b4f1bc656218cd55416018603770"
+  },
+  "first_frame_canvas": {
+   "shape": [
+    512,
+    512,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "8024452997a54f3ca559c096aab1f1ff0431f6bab62074360213d09b96aac540"
+  },
+  "first_frame_read": {
+   "shape": [
+    400,
+    640,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "fd236b72e46ad5aed8ed331bbf02448c7736e738a4b4d18a53b8e4484754a622"
+  },
+  "ids": {
+   "shape": [
+    278
+   ],
+   "dtype": "int32",
+   "sha256": "2fbb4477edfe7b05cc0926c1161b2fe043e601baff3cfa4e7e94d3cbea3a01b5"
+  },
+  "noise_audio": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "34d3aaa38e78de3424a394d5650d99e1761c10f1c6eb03cd7c54e2941b2bea38"
+  },
+  "noise_video": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "359ce19a33d79d438fd6d89ac31c3e13832100d4d018503e6e96ead8459c8deb"
+  },
+  "sigmas_audio": {
+   "shape": [
+    9
+   ],
+   "dtype": "float32",
+   "sha256": "19d9257bb0cc7eb48d8947137b425a9164605cf22bd0e34ef544263c86d15ef9"
+  },
+  "sigmas_video": {
+   "shape": [
+    9
+   ],
+   "dtype": "float32",
+   "sha256": "61400f4c2e9f0a8985d0d196c20c21c73e23e1f98a3e3509d4832bcd871e597c"
+  },
+  "spans": {
+   "shape": [
+    1,
+    2
+   ],
+   "dtype": "int64",
+   "sha256": "361416edffffbaadba8150ca9121a56e9e191857f45d10359eea10bb0838166f"
+  },
+  "text_token_tags": {
+   "shape": [
+    278
+   ],
+   "dtype": "int64",
+   "sha256": "cc03fc977a02c97fa294762eeb79e1ed9a5e064109c7017ca57d32bfd3a8cf95"
+  },
+  "velocity_audio_step1": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "91a657dbed59fc47a8b87eb8e399be03f4d8d32ddb0abc5635de590e0374f982"
+  },
+  "velocity_audio_step2": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "41d59ecd5b94996c7d7815ee89b117b66d307484cee44f26fd7e236b6c0f5b47"
+  },
+  "velocity_audio_step3": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "9c9268479fca6db9bbec1e331b3f5ad697a440cdcc191fe0b8ef019010bd7fc1"
+  },
+  "velocity_audio_step4": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "09fd5cffa67dd9444a315cf431f18c151c398e4f7d00fbbbf4eecf92ae700d08"
+  },
+  "velocity_audio_step5": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "5665fae2c9807fe35beede1432467ceadaad4269efdf9c675bf1c4319549cfc5"
+  },
+  "velocity_audio_step6": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "43ed0bfe497f0c8cb31ad0bec0233dae6bee94c76ffd66c9ce149d00d2814bbc"
+  },
+  "velocity_audio_step7": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "a1d86e9f5e4446f62b6bf50d3bcb8e81e7db8a081b94b095d475fb888756858f"
+  },
+  "velocity_audio_step8": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "b3c4070af91941537dee5db07f219c5610efbfc1cbad33679a6c845e118fa4c1"
+  },
+  "velocity_bf16_audio_step1": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "a34d9b317536b3557f8d4aa1bd70e09609c29e0c84aca47d29957093b4331373"
+  },
+  "velocity_bf16_audio_step2": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "c849c958ee758f5b102851ddcfa375aeff8bf88e9b39bcf95eb69a4e7fdc18c5"
+  },
+  "velocity_bf16_audio_step3": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "f8960db0decfaaae10c0db0ce0049f3a9b075ecd5c958f08107e8dd4c82500c4"
+  },
+  "velocity_bf16_audio_step4": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "97f71e2e78e67452c603448cecb6ca9e8b39ef76b8c931b6afaf8de2f323e78c"
+  },
+  "velocity_bf16_audio_step5": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "fe26eeca196f4da2c77e2671780b78c643ae7de61304745da0fa7e9495803b06"
+  },
+  "velocity_bf16_audio_step6": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "471684085c62ded3ea7a416f331698dea750643d86e4c96d8717247e25ef90c5"
+  },
+  "velocity_bf16_audio_step7": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "2e3329ba513c98d244c0205f602efd172ad7fc5121e4f43da629497f33047d88"
+  },
+  "velocity_bf16_audio_step8": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "22c43960a96025ad8f7081b39796923c3dd902f851ce621c1ab2ba10bf43377a"
+  },
+  "velocity_bf16_video_step1": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "a874dff7b41f424e3351c690aabce21267957560ffc42daa91a0ed93fc24e007"
+  },
+  "velocity_bf16_video_step2": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "0ead713d854b466bcf1129b7aabcf774ba0cf5f579c7262ff95645e548d5757d"
+  },
+  "velocity_bf16_video_step3": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "ca74f86d1b583b71f07f35ac2d7f6fa9745c56e5e806dbf46896e303fde48c0a"
+  },
+  "velocity_bf16_video_step4": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "17db3e0206aa373d6339c9946f32506a9a68ed1337663fbd9f6d030581655aef"
+  },
+  "velocity_bf16_video_step5": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "0f6fb04703c14ca04116d303ee7c92f0cacd608a8d9000cf7f06ab90e3a38dc3"
+  },
+  "velocity_bf16_video_step6": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "c681d7bec5aab08ca42faa28237940e4de3f17b54b261335acd16e32421861bc"
+  },
+  "velocity_bf16_video_step7": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "e5b8dd68cbaa524310779a8071b9bd604a0356cb909c6fcd3a7937ebeb17bf8c"
+  },
+  "velocity_bf16_video_step8": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "c5d2f4695d763615a7e91d01cbef42dc29acd78bf612a2e6ba93f059713629f8"
+  },
+  "velocity_video_step1": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "2343957a104796cc24fc82059b26faf323bcf9d097d479e69f1754ea7c6c6d76"
+  },
+  "velocity_video_step2": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "b3b337e609adf4805c2e66b252318d2676e54d001a050d19d7b813eda8564476"
+  },
+  "velocity_video_step3": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "bc7284805021780dd8e29a0ab39b758fd214be8b521f6f3163147a3b7127b83b"
+  },
+  "velocity_video_step4": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "fa319215311e54eaaecac646418887edfd1a66447b6dfd57942eebdc09f9da5f"
+  },
+  "velocity_video_step5": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "f13bf6fb7a521c28ca1198b8037d15538f0b7f701e69cf55228dd83c8aca7a6f"
+  },
+  "velocity_video_step6": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "ecdbc919020adb84c31a47a3477b18ba297024c2db9c57adb7bdc21e1b126ccf"
+  },
+  "velocity_video_step7": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "77843c07bfcc1e558a7d0828704ca974d413f5f96372307cf46a6a4fa4313eab"
+  },
+  "velocity_video_step8": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "e707f552f7aaaf6b560e3cf30507c67fd17efeae50a564a307efa31643e6ae94"
+  },
+  "video": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "6a7fe549c0982b0cde8210f12b53a7b513f46aa9549e5b6a461ba0ce48623f86"
+  },
+  "video_step1": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "d1e771dcea421ab9dbda2ad6753074a1935cf55caf9ab556b5480db8c6634a24"
+  },
+  "video_step2": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "af877a49a5b89ecc8fefb91d12893509a9827f056741166b7ca9adb51ba581b0"
+  },
+  "video_step3": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "de41748b88d3f51b1a4a46f84696366cac443c6c31d84ca4dd3af83b6df9190d"
+  },
+  "video_step4": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "4e323dc68eb636bc1f0228b4d899f9a25edf04d36b93ffa0225250bad3e16de7"
+  },
+  "video_step5": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "711005da0b1fa48cd036f56ae02093ddcd1169ab18aa33a846f9b8d8fa412f23"
+  },
+  "video_step6": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "486b0a7e55fff5ab5f255d10377668138fc65f1549d5cd2ab9b4df8b68263a39"
+  },
+  "video_step7": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "5cae5381558c72e161ae774bb91d0df711e6bc1e00ba91a97c3f607290a46e42"
+  },
+  "video_step8": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "6a7fe549c0982b0cde8210f12b53a7b513f46aa9549e5b6a461ba0ce48623f86"
+  }
+ }
+}

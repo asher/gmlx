@@ -9,7 +9,9 @@ Usage: stub_server.py [--port 0] [--step-delay-ms 0] [--contract 1.0]
                       [--no-contract-field] [--default-model ID]
 It prints one JSON line with its address, then serves until killed.
 Test routes outside the contract: GET /stub/log, POST /stub/log/reset,
-POST /stub/forget (drop every tensor, adapter and table held).
+POST /stub/forget (drop every tensor, adapter and table held), POST
+/stub/lose-table {"steps": n} (the next n steps that name a table drop it
+first, as a server whose adapter cache let its matrices go would).
 """
 
 from __future__ import annotations
@@ -67,10 +69,21 @@ COMFY = {
                    "latent": {"channels": 128, "stride": 16, "patch": 1},
                    "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": False,
                    "context": ("text_embedder.proj.weight", 1)},
+    # MiniMax-H3 steps on a video and an audio latent, its AV step.
+    "h3": {"model_class": "MiniMaxH3", "image_model": "minimax_h3",
+           "latent": {"channels": 24, "stride": 16, "patch": 2, "temporal": 4},
+           "vae": {"channels_out": 3, "stride": 16, "space": "model", "encode_pieces": 7},
+           "edit": False, "context": ("condition_proj.weight", 1),
+           "audio": {"channels": 32, "stereo": 2, "sample_rate": 32000,
+                     "latents_per_second": 40}},
 }
 # The families whose DiT leaves out the blocks a step names.
 SKIPS = {"moss_image"}
 TURBO_SIGMAS = [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0]
+# FastH3's video sigmas: its eight trained timesteps over 1000 under the
+# flow shift 10, in float64, each rounded once to float32, then 0.
+FASTH3_SIGMAS = [float(np.float32(10.0 * b / (1.0 + 9.0 * b)))
+                 for b in (t / 1000.0 for t in (999, 874, 749, 624, 500, 375, 250, 125))] + [0.0]
 # The schedule rules of the server's status, for the families whose
 # schedule follows the image size.
 QWEN21_RULE = {"rule": "qwen_image21", "base_len": 256, "max_len": 8192, "base_shift": 0.5,
@@ -103,6 +116,10 @@ MODELS = {
                                                   "sigmas": None, "schedule": None}),
     "moss-image": ("moss_image", "sft", {"steps": 50, "cfg": 3.0, "shift": 5.0, "sigmas": None,
                                          "schedule": None, "neg_skip": [22]}),
+    "h3": ("h3", "fl2va", {"steps": 8, "cfg": 1.0, "shift": 6.0, "audio_shift": 3.0,
+                           "sigmas": None, "schedule": None}),
+    "fasth3": ("h3", "fasth3", {"steps": 8, "cfg": 1.0, "shift": 10.0, "audio_shift": 3.0,
+                                "sigmas": FASTH3_SIGMAS, "schedule": None}),
 }
 # The manifest of a model whose file is not its family's fixture.
 FIXTURE = {"flux-3-klein-base": "flux3_klein-base"}
@@ -184,6 +201,12 @@ class State:
         self.tensors: dict = {}
         self.adapters: dict = {}
         self.tables: dict = {}
+        self.lose_table = 0
+        # Windows the next video encodes refuse for memory, each naming the
+        # window that fits or None to answer that encode, and the body
+        # limit the capabilities name.
+        self.refuse_windows: list = []
+        self.max_body = (1 << 30) + (1 << 20)
         self.runs: dict = {}
         self.log: list = []
         self.lock = threading.Lock()
@@ -293,8 +316,9 @@ class Handler(BaseHTTPRequestHandler):
                 "wire": {"container": "safetensors", "dtypes": ["f32", "f16", "bf16", "u8"]},
                 "families": sorted(COMFY), "conventions": ["comfy"], "patch_kinds": ["lora"],
                 "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae", "ref_cache",
-                             "skip_blocks"],
-                "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16}})
+                             "skip_blocks", "av_step", "anchors"],
+                "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16,
+                           "max_body_bytes": st.max_body}})
         if sub == "/models":
             return self._json(200, {"models": [{"model": m, "family": f, "variant": v, "resident": True}
                                                for m, (f, v, _s) in MODELS.items()],
@@ -309,11 +333,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {**st.manifest(parts[1]), "model": parts[1]})
             if parts[2] == "status":
                 f = COMFY[fam]
+                extra = {"audio": dict(f["audio"])} if "audio" in f else {}
                 return self._json(200, {
                     "model": parts[1], "family": fam, "variant": variant, "resident": True,
                     "comfy": {"model_class": f["model_class"], "image_model": f["image_model"]},
                     "latent": dict(f["latent"]), "vae": dict(f["vae"]), "edit_capable": f["edit"],
-                    "sampling": dict(sampling), "compute_dtype": "bf16",
+                    "sampling": dict(sampling), "compute_dtype": "bf16", **extra,
                     "memory": {"dit_bytes": 1, "encoder_bytes": 1, "vae_bytes": 1,
                                "activation_reserve_bytes": 0, "resident_bytes": 3}})
         self._err(404, "not found", path=p)
@@ -383,12 +408,25 @@ class Handler(BaseHTTPRequestHandler):
             st.tables.clear()
             st.event(kind="forget")
             return self._json(200, {})
+        if p == "/stub/lose-table":
+            st.lose_table = int(json.loads(self._body())["steps"])
+            return self._json(200, {})
+        if p == "/stub/video-encode":
+            req = json.loads(self._body())
+            st.refuse_windows = [None if k is None else int(k)
+                                 for k in req.get("refuse", ())]
+            st.max_body = int(req.get("max_body", st.max_body))
+            return self._json(200, {})
         if not p.startswith(PREFIX):
             return self._err(404, "not found")
         sub = p[len(PREFIX):]
         if not self._gate(sub):
             return
         t0 = time.perf_counter()
+        if sub == "/vae/video/encode" and st.refuse_windows:
+            k = st.refuse_windows.pop(0)
+            if k is not None:
+                return self._refuse_window(k)
         body = self._body()
         ctype = self.headers.get("Content-Type", "").split(";")[0]
         if sub == "/runs/begin":
@@ -432,6 +470,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._step(body, t0)
         if sub in ("/vae/decode", "/vae/encode"):
             return self._vae(sub, body)
+        if sub in ("/vae/video/decode", "/vae/audio/decode"):
+            return self._av_decode(sub, body)
+        if sub in ("/vae/video/encode", "/vae/audio/encode"):
+            return self._av_encode(sub, body)
         self._err(404, "not found")
 
     def _encode(self, body, ctype):
@@ -452,9 +494,22 @@ class Handler(BaseHTTPRequestHandler):
         if m is None:
             return
         fam = m[0]
-        if images and not COMFY[fam]["edit"]:
+        spans = []
+        if images and fam == "h3":
+            # Keyframes: a 3-token label and a block of one pad per 32 x 32
+            # pixels with its two markers each, before the prompt.
+            if m[1] == "fasth3":
+                return self._err(400, "MiniMax-H3 fasth3 runs text to video only")
+            at = 0
+            for im in images:
+                if im.shape[0] % 32 or im.shape[1] % 32:
+                    return self._err(400, f"keyframe {im.shape[1]}x{im.shape[0]} is no canvas")
+                at += 3
+                spans.append([at, at + (im.shape[0] // 32) * (im.shape[1] // 32) + 2])
+                at = spans[-1][1]
+        elif images and not COMFY[fam]["edit"]:
             return self._err(400, "this family takes no reference images")
-        n = int(req.get("num_tokens") or st.cond_tokens)
+        n = int(req.get("num_tokens") or st.cond_tokens) + (spans[-1][1] if spans else 0)
 
         def features(text):
             rng = np.random.default_rng(int(hashlib.sha256(text.encode()).hexdigest()[:8], 16))
@@ -467,7 +522,7 @@ class Handler(BaseHTTPRequestHandler):
         if revised:
             out["cond_typed"] = features(req["text"])
         stride, ch = COMFY[fam]["latent"]["stride"], COMFY[fam]["latent"]["channels"]
-        want_refs = req.get("refs", True)
+        want_refs = req.get("refs", True) and fam != "h3"
         for i, im in enumerate(images if want_refs else []):
             h, w = -(-im.shape[0] // stride), -(-im.shape[1] // stride)
             out[f"ref_{i}"] = np.full((1, ch, h, w), float(im.mean()) / 255.0, np.float32)
@@ -480,8 +535,12 @@ class Handler(BaseHTTPRequestHandler):
                   "image_slots": [2 + 3 * i for i in range(len(images))], "num_tokens": n}
         if revised:
             fields.update(revised_prompt=revised, cond_typed=hashes["cond_typed"])
+        if spans:
+            fields.update(spans=spans, image_slots=[])
         st.event(kind="encode", model=req["model"], text=req["text"], tokens=n, images=len(images), refs=want_refs,
-                 cond=hashes["cond"], cond_typed=hashes.get("cond_typed"))
+                 cond=hashes["cond"], cond_typed=hashes.get("cond_typed"), spans=spans,
+                 image_shapes=[list(im.shape) for im in images],
+                 image_sums=[int(im.astype(np.int64).sum()) for im in images])
         self._send(200, write_body(out, fields), ctype=CONTENT_TYPE)
 
     def _step(self, body, t0):
@@ -493,6 +552,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(404, f"no run {rid!r}; it ended or sat idle past 120 seconds")
         if self._model(req.get("model")) is None:
             return
+        if req.get("patch_table") and st.lose_table > 0:
+            st.lose_table -= 1
+            st.tables.pop(req["patch_table"], None)
+        if "video" in tensors or "audio" in tensors:
+            return self._av_step(tensors, req, t0, rid, run)
         x, ts = tensors.get("x"), tensors.get("timestep")
         rows = req.get("rows") or []
         if x is None or ts is None or len(x[1]) != 4 or x[1][0] != len(rows) or not rows:
@@ -552,6 +616,153 @@ class Handler(BaseHTTPRequestHandler):
             "X-Gmlx-Forward-Ms": f"{fwd:.3f}",
             "X-Gmlx-Server-Ms": f"{(time.perf_counter() - t0) * 1000:.3f}",
             "X-Gmlx-Prefix-Cache": "none"})
+
+    def _wait(self, run, rid) -> bool:
+        """Sleep the step delay; False when an interrupt or run end came."""
+        gen = run.gen if run else 0
+        deadline = time.perf_counter() + self.st.delay
+        while time.perf_counter() < deadline:
+            if run is not None and (run.gen != gen or run.ended):
+                self.st.event(kind="step_interrupted", run=rid,
+                              by="run_end" if run.ended else "interrupt")
+                self._err(409, "the step was interrupted", code="interrupted")
+                return False
+            time.sleep(0.005)
+        return True
+
+    def _av_step(self, tensors, req, t0, rid, run):
+        """A stub AV step: one clip, its video (1, C, T, h, w) and audio
+        (1, C, 2, T), one row with its cond alone, and the shifts."""
+        st = self.st
+        if MODELS[req["model"]][0] != "h3":
+            return self._err(400, f"{req['model']!r} is no video model; its step takes x")
+        v, a, ts = tensors.get("video"), tensors.get("audio"), tensors.get("timestep")
+        rows = req.get("rows") or []
+        if v is None or a is None or ts is None or len(v[1]) != 5 or len(a[1]) != 4 \
+                or v[1][0] != 1 or a[1][0] != 1 or len(rows) != 1 or set(rows[0]) != {"cond"}:
+            return self._err(400, "an AV step takes one clip and one row with its cond")
+        shifts = req.get("shifts")
+        if not isinstance(shifts, dict) or set(shifts) != {"video", "audio"}:
+            return self._err(400, "an AV step names its shifts, video and audio")
+        anchors = req.get("anchors") or []
+        named = [a[k] for a in anchors for k in ("video", "noise", "audio") if a.get(k)]
+        missing = [h for h in [rows[0]["cond"], *named] if h not in st.tensors]
+        if req.get("patch_table") and req["patch_table"] not in st.tables:
+            missing.append(req["patch_table"])
+        if missing:
+            st.event(kind="step_missing", run=rid, missing=len(set(missing)))
+            return self._err(409, "not held", missing=sorted(set(missing)))
+        st.event(kind="step_begin", run=rid)
+        if not self._wait(run, rid):
+            return
+        tf = time.perf_counter()
+        t = np.float32(ts[3].astype(np.float32).reshape(-1)[0])
+        k = np.float32(scalar(rows[0]["cond"]) + scalar(req.get("patch_table") or "none") * 0.1)
+        scale = np.float32(req.get("audio_scale", 1.0))
+        vv = v[3].astype(np.float32) * np.float32(-0.25) + t * np.float32(0.05) + k * np.float32(0.02)
+        va = a[3].astype(np.float32) * np.float32(-0.5) + scale * np.float32(0.01) + k
+        fwd = (time.perf_counter() - tf) * 1000
+        st.event(kind="av_step", run=rid, model=req["model"], video_shape=v[1], audio_shape=a[1],
+                 video_dtype=v[0], timestep=float(t), shifts=shifts,
+                 audio_scale=req.get("audio_scale"), conds=[rows[0]["cond"]],
+                 patch_table=req.get("patch_table"), fields=sorted(req), tensors=sorted(tensors),
+                 anchors=anchors, spans=req.get("spans") or [],
+                 anchor_tensors={h: st.tensors[h][2].tolist() for h in named})
+        self._send(200, write_body({"video": vv, "audio": va}), ctype=CONTENT_TYPE, headers={
+            "X-Gmlx-Forward-Ms": f"{fwd:.3f}",
+            "X-Gmlx-Server-Ms": f"{(time.perf_counter() - t0) * 1000:.3f}",
+            "X-Gmlx-Prefix-Cache": "miss"})
+
+    def _av_decode(self, sub, body):
+        """Stub decodes of MiniMax-H3's latents: frames (F, H, W, 3) f16 of
+        5 k + 2 latents to 17 k + 5 frames, and a stereo waveform (1, 2,
+        800 T) f32."""
+        tensors, req = read_body(body)
+        m = self._model(req.get("model"))
+        if m is None:
+            return
+        if m[0] != "h3":
+            return self._err(400, f"{req['model']!r} is an image model; {sub[1:]} takes a "
+                                  "video model")
+        lat = tensors.get("latents")
+        if sub == "/vae/video/decode":
+            if lat is None or len(lat[1]) != 5 or lat[1][:2] != [1, 24]:
+                return self._err(400, "vae/video/decode takes the latents of one clip "
+                                      "(1, 24, T, h, w)")
+            _, _, T, h, w = lat[1]
+            g = 1.0 / (1.0 + np.exp(-lat[3].astype(np.float32).mean(axis=(0, 1))))
+            g = g[np.minimum(np.arange((T - 2) // 5 * 17 + 5) // 4, T - 1)]
+            img = np.repeat(np.repeat(g, 16, axis=1), 16, axis=2)[..., None].repeat(3, axis=-1)
+            self.st.event(kind="video_decode", shape=lat[1])
+            return self._send(200, write_body({"frames": img.astype(np.float16)}),
+                              ctype=CONTENT_TYPE)
+        if lat is None or len(lat[1]) != 4 or lat[1][:3] != [1, 32, 2]:
+            return self._err(400, "vae/audio/decode takes the latents of one clip (1, 32, 2, T)")
+        a = lat[3].astype(np.float32).mean(axis=1)
+        wave = np.repeat(a, 800, axis=-1)
+        self.st.event(kind="audio_decode", shape=lat[1])
+        self._send(200, write_body({"waveform": wave.astype(np.float32)}), ctype=CONTENT_TYPE)
+
+    def _refuse_window(self, k):
+        """A video encode refused for memory from its header alone, as the
+        server refuses one: the rest of the body read and dropped, then
+        the answer, naming the window ``k`` that fits."""
+        n = int(self.headers.get("Content-Length", "0"))
+        head = self.rfile.read(8)
+        hn = struct.unpack("<Q", head)[0]
+        spec = json.loads(self.rfile.read(hn))
+        shape = spec["frames"]["shape"]
+        at = json.loads(spec.get("__metadata__", {}).get("gmlx", "{}")).get("at")
+        left = n - 8 - hn
+        while left > 0:
+            left -= len(self.rfile.read(min(left, 1 << 20)))
+        self.st.event(kind="video_encode_refused", shape=shape, at=at, window=k)
+        return self._err(400, f"a video encode of a window of {shape[0]} frames does not fit "
+                              f"in memory beside the models now loaded; a window of {17 * k} "
+                              "frames fits", window=k)
+
+    def _av_encode(self, sub, body):
+        """Stub encodes of MiniMax-H3's anchors: frames (T, H, W, 3) in
+        [0, 1], 1 or 17 k + 5 of them, to latents (1, 24, t, H/16, W/16) of
+        their means, and a waveform (1, 2, n) to latents (1, 32, 2,
+        ceil(n / 800)) of each channel's mean."""
+        tensors, req = read_body(body)
+        m = self._model(req.get("model"))
+        if m is None:
+            return
+        if m[0] != "h3":
+            return self._err(400, f"{req['model']!r} is an image model; {sub[1:]} takes a "
+                                  "video model")
+        if sub == "/vae/video/encode":
+            fr = tensors.get("frames")
+            if fr is None or len(fr[1]) != 4 or fr[1][3] != 3:
+                return self._err(400, "vae/video/encode takes frames (T, H, W, 3) in [0, 1]")
+            T, H, W, _ = fr[1]
+            at, clip, is_open = req.get("at", 0), req.get("clip_frames", T), req.get("open", False)
+            if is_open:
+                if T % 17 or at % 17 or at + T >= clip or H % 32 or W % 32:
+                    return self._err(400, f"an open window of {T} frames at {at} of {clip}")
+                t = T // 17 * 5
+            elif (T != 1 and (T < 5 or (T - 5) % 17)) or at % 17 or at + T != clip \
+                    or H % 32 or W % 32:
+                return self._err(400, f"frames {fr[1]} are no MiniMax-H3 keyframe or guide clip")
+            else:
+                t = 1 if T == 1 else (T - 5) // 17 * 5 + 2
+            x = fr[3].astype(np.float32) / (255.0 if fr[0] == "U8" else 1.0)
+            g = x.mean(axis=(0, 3)).reshape(H // 16, 16, W // 16, 16)
+            z = np.broadcast_to(g.mean(axis=(1, 3)), (1, 24, t, H // 16, W // 16))
+            self.st.event(kind="video_encode", shape=fr[1], dtype=fr[0], at=at, open=is_open)
+            return self._send(200, write_body({"latents": np.ascontiguousarray(z, np.float32)}),
+                              ctype=CONTENT_TYPE)
+        wav = tensors.get("waveform")
+        if wav is None or len(wav[1]) != 3 or wav[1][:2] != [1, 2]:
+            return self._err(400, "vae/audio/encode takes the waveform of one sound (1, 2, n)")
+        t = -(-wav[1][2] // 800)
+        z = np.broadcast_to(wav[3].astype(np.float32).mean(axis=2)[:, None, :, None],
+                            (1, 32, 2, t))
+        self.st.event(kind="audio_encode", shape=wav[1])
+        self._send(200, write_body({"latents": np.ascontiguousarray(z, np.float32)}),
+                   ctype=CONTENT_TYPE)
 
     def _vae(self, sub, body):
         tensors, req = read_body(body)

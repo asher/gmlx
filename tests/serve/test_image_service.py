@@ -166,8 +166,13 @@ GB = 1024**3
 
 
 def _ident(family, variant, **config):
-    """What identify_dit returns, with the config flags a test gives."""
-    return SimpleNamespace(family=family, variant=variant, config=config)
+    """What identify_dit returns, with the config flags a test gives and
+    a text input of 64 wide unless it gives its own."""
+    from gmlx.image import memfit
+
+    width = dict.fromkeys(memfit.COND_WIDTH[family.name], 64)
+    return SimpleNamespace(family=family, variant=variant,
+                           config=width | config)
 
 
 def _spec(**kw):
@@ -178,6 +183,12 @@ def _spec(**kw):
                 encoder_release="auto")
     base.update(kw)
     return SimpleNamespace(**base)
+
+
+def _facts(**kw):
+    base = dict(act_dtype="bf16", vae_dtype=None, size_multiple=16,
+                flow_map=False, ref_cache=False, blocks=None)
+    return image_service.DitFacts(**(base | kw))
 
 
 @pytest.fixture
@@ -290,11 +301,46 @@ def test_the_caches_of_a_tight_entry_take_the_room_its_image_leaves(
         plan_stubs, monkeypatch):
     _modes(monkeypatch, caches=True)
     b = image_service._CACHE_BYTES
-    full = 2 * b["tensor"] + b["steps"] + 2 * b["adapter"]
+    full = 2 * b["tensor"] + b["steps"]
     plan_stubs.budget = 5 * GB + full // 2
     plan = image_service.entry_plan(_spec())
     assert plan.staged and 0.4 < plan.cache_share <= 0.5
     assert 5 * GB < plan.footprint <= plan_stubs.budget
+
+
+# One cond of FLUX.2 klein 4B's 512 text rows of its 7680-wide features
+# in f32, 15 MiB.
+_KLEIN_COND = 512 * 7680 * 4
+MiB = 1 << 20
+
+
+def test_a_tight_image_entry_keeps_one_cond_in_the_tensor_cache(
+        plan_stubs, monkeypatch):
+    """An image entry books the step routes' tensor cache at no less than
+    one cond of its family's priced rows. FLUX.2 klein 4B within 30 MiB
+    of its budget would leave that cache 10/64 of its 64 MiB, under its
+    15 MiB cond: it books the cond beside a share of 7/64. Its image and
+    one cond fit with every cache empty, and a byte less refuses it, the
+    need shown rounded up and the budget down."""
+    from gmlx.image import loader, memfit
+    from gmlx.image.registry import get_family
+
+    _modes(monkeypatch, caches=True)
+    fam = get_family("flux2_klein")
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: _ident(
+        fam, "distilled", joint_attention_dim=7680))
+    plan_stubs.budget = 5 * GB + 30 * MiB
+    plan = image_service.entry_plan(_spec())
+    assert plan.staged and plan.tensor_floor == _KLEIN_COND
+    assert (plan.cache_share, plan.footprint) == (7 / 64, 5 * GB + 29 * MiB)
+    plan_stubs.budget = 5 * GB + _KLEIN_COND
+    plan = image_service.entry_plan(_spec())
+    assert (plan.cache_share, plan.footprint) == (0.0, plan_stubs.budget)
+    plan_stubs.budget -= 1
+    with pytest.raises(memfit.ImageMemoryError) as e:
+        image_service.entry_plan(_spec())
+    assert " needs 5.02 GiB for one " in str(e.value)
+    assert " over the working budget of 5.01 GiB. " in str(e.value)
 
 
 @pytest.mark.parametrize("release,budget_gb,hint", [
@@ -340,7 +386,7 @@ def test_a_request_on_turbo_takes_only_its_own_step_count(variant, steps,
 
     q = get_family("qwen_image21")
     served = SimpleNamespace(pipe=SimpleNamespace(family=q, variant=variant),
-                             spec=SimpleNamespace(id="qi"))
+                             spec=SimpleNamespace(id="qi"), facts=_facts())
     req = image_service.parse_request("generations", {
         "prompt": "p", **({"steps": steps} if steps else {})})
     if not refused:
@@ -363,7 +409,7 @@ def test_a_distilled_flux2_request_refuses_guidance(variant, guidance,
     fam = get_family("flux2_klein")
     served = SimpleNamespace(pipe=SimpleNamespace(family=fam, variant=variant),
                              spec=SimpleNamespace(id="f2"),
-                             plan=SimpleNamespace(cfg=default))
+                             plan=SimpleNamespace(cfg=default), facts=_facts())
     req = image_service.parse_request("generations", {
         "prompt": "p", **({} if guidance is None else {"guidance": guidance})})
     if not refused:
@@ -379,15 +425,16 @@ def test_a_distilled_flux2_request_refuses_guidance(variant, guidance,
 
 
 def _flux3_served(flow_map: bool, cfg: float = 1.0, defaults=None):
+    """A FLUX.3 klein entry with its DiT out, as a staged entry's is after
+    an encode: the checks read the facts the entry kept from its load."""
     from gmlx.image.registry import get_family
 
     return SimpleNamespace(
         pipe=SimpleNamespace(
             family=get_family("flux3_klein"),
-            variant="distilled" if flow_map else "base",
-            dit=SimpleNamespace(cfg=SimpleNamespace(flow_map=flow_map))),
+            variant="distilled" if flow_map else "base", dit=None),
         spec=SimpleNamespace(id="f3", defaults=defaults),
-        plan=SimpleNamespace(cfg=cfg))
+        plan=SimpleNamespace(cfg=cfg), facts=_facts(flow_map=flow_map))
 
 
 @pytest.mark.parametrize("fields,default,param", [
@@ -461,29 +508,41 @@ def test_a_flow_map_entry_refuses_a_guidance_or_sampler_default(
     assert image_service.entry_plan(_spec(defaults=defaults))
 
 
-def test_an_entry_books_both_caches_at_twice_their_bound(plan_stubs,
-                                                         monkeypatch):
+def test_an_entry_books_its_tensor_caches_and_no_lora_room(plan_stubs,
+                                                           monkeypatch):
+    """An entry with no LoRA of its own books its two tensor caches, and
+    with the step routes on their tensor cache, at their bounds: no room
+    for request LoRAs, whose bytes their job's turns book, whatever the
+    cap."""
     from gmlx.image import memfit
 
     seen = []
     plan = memfit.plan_memory
 
     def spy(*a, **kw):
-        seen.append((kw["adapters"], kw["cache_bytes"]))
+        seen.append((tuple(kw["adapters"]), kw["cache_bytes"]))
         return plan(*a, **kw)
 
     monkeypatch.setattr(memfit, "plan_memory", spy)
+    fps: dict = {}
+    calls: dict = {}
     try:
-        for steps_api in (False, True):
-            image_service.configure_caches(SimpleNamespace(
-                tensor_cache_mb=3, adapter_cache_mb=5, steps_api=steps_api))
-            image_service.entry_plan(_spec())
+        for cap in (None, 1, 256):
+            for steps_api in (False, True):
+                image_service.configure_caches(SimpleNamespace(
+                    tensor_cache_mb=3, adapter_cache_mb=cap,
+                    steps_api=steps_api))
+                seen.clear()
+                fps.setdefault(steps_api, set()).add(
+                    image_service.entry_plan(_spec()).footprint)
+                calls.setdefault(steps_api, set()).update(seen)
     finally:
         image_service.configure_caches(SimpleNamespace(tensor_cache_mb=64,
-                                                       adapter_cache_mb=256))
-    # With the step routes on, the entry also books their two caches.
-    assert seen[0] == ([2 * (5 << 20)], 2 * (3 << 20))
-    assert seen[-1] == ([2 * (5 << 20)], 2 * (3 << 20) + (8 << 20))
+                                                       adapter_cache_mb=None))
+    # With the step routes on, the entry also books their tensor cache.
+    assert calls == {False: {((), 2 * (3 << 20))},
+                     True: {((), 3 * (3 << 20))}}
+    assert [len(f) for f in fps.values()] == [1, 1]
 
 
 def test_a_served_pipeline_caches_hold_at_most_their_bound():
@@ -498,19 +557,19 @@ def test_a_served_pipeline_caches_hold_at_most_their_bound():
         image_service.bound_caches(pipe, configured=7)
     finally:
         image_service.configure_caches(SimpleNamespace(tensor_cache_mb=64,
-                                                       adapter_cache_mb=256))
+                                                       adapter_cache_mb=None))
     assert pipe.conditionings.max_bytes == 1 << 20
     assert pipe.reference_latents.max_bytes == 1 << 20
     assert pipe.adapters.max_bytes == (2 << 20) + 7
     assert pipe.tables.max_bytes == (2 << 20) + 7
 
 
-def test_the_default_cache_bounds_are_small():
+def test_the_default_tensor_bound_is_small_and_no_lora_cap_is_set():
     from gmlx.config import ImageServerCfg
 
     cfg = ImageServerCfg()
-    assert (cfg.tensor_cache_mb, cfg.adapter_cache_mb) == (64, 256)
-    assert image_service.cache_bytes() == (64 << 20, 256 << 20)
+    assert (cfg.tensor_cache_mb, cfg.adapter_cache_mb) == (64, None)
+    assert image_service.cache_bytes() == (64 << 20, None)
 
 
 def test_the_parts_are_checked_before_the_entry_is_priced(plan_stubs, monkeypatch):
@@ -563,9 +622,14 @@ class _Encoder:
 
 class _Cache(dict):
     max_bytes = 1 << 20
+    bytes = 0
 
     def keep(self, keys):
         self.kept = set(keys)
+
+    def drop_where(self, match):
+        for k in [k for k, v in self.items() if match(v)]:
+            del self[k]
 
     def nbytes(self, key):
         return 0
@@ -575,12 +639,16 @@ def _pipe(encoder=None):
     return SimpleNamespace(encoder=encoder, conditionings=_Cache(),
                            captions={}, modulations={}, adapters=_Cache(),
                            tables=_Cache(), reference_latents=_Cache(),
-                           default_table=None)
+                           default_table=None, size_multiple=16, lora=None,
+                           dit=SimpleNamespace(act_dtype="bf16",
+                                               cfg=SimpleNamespace()),
+                           vae="VAE")
 
 
 def test_a_release_drops_the_owned_encoder():
     enc = _Encoder()
-    served = image_service.ServedImage(pipe=_pipe(enc), spec=_spec(), plan=None)
+    served = image_service.ServedImage(pipe=_pipe(enc), spec=_spec(),
+                                       plan=None, facts=_facts())
     image_service._release([served])
     assert enc.released == 1 and served.pipe is None
 
@@ -614,11 +682,50 @@ def test_a_loaded_entry_bounds_its_caches(load_stubs):
         served = image_service._load(_spec(encoder=None))
     finally:
         image_service.configure_caches(SimpleNamespace(tensor_cache_mb=64,
-                                                       adapter_cache_mb=256))
+                                                       adapter_cache_mb=None))
     pipe = served.pipe
     assert pipe.conditionings.max_bytes == 1 << 20
     assert pipe.reference_latents.max_bytes == 1 << 20
     assert pipe.adapters.max_bytes == pipe.tables.max_bytes == 2 << 20
+
+
+@pytest.mark.parametrize("cap_mb", [None, 256])
+def test_a_loaded_image_entry_keeps_its_cond_in_the_step_tensor_cache(
+        load_stubs, monkeypatch, cap_mb):
+    """The step routes' tensor cache takes a loaded image entry's share of
+    1/16 and keeps its cond floor of 15 MiB over the 4 MiB that share
+    leaves, and the upload store keeps the cap at any share, or no bound
+    with none. Released, the entry's floor goes with it. The load and the
+    release enter and drop the share through the table's lock."""
+    from gmlx.config import ImageServerCfg
+    from gmlx.serve import image_steps
+
+    monkeypatch.setattr(image_service, "entry_plan", lambda spec: _plan(
+        cache_share=1 / 16, tensor_floor=_KLEIN_COND))
+    tensor, _cap = image_service.cache_bytes()
+    image_steps.STATE.configure(ImageServerCfg(adapter_cache_mb=cap_mb))
+    adapter = image_steps.UNBOUNDED if cap_mb is None else cap_mb << 20
+    calls, locked = [], []
+    for name in ("set_share", "drop_share"):
+        real = getattr(image_service, name)
+        monkeypatch.setattr(image_service, name, lambda served, *a, r=real,
+                            n=name: (calls.append(n), r(served, *a))[1])
+    scale = image_service._scale_step_caches
+    monkeypatch.setattr(image_service, "_scale_step_caches", lambda: (
+        locked.append(image_service._SHARES_LOCK.locked()), scale())[1])
+    try:
+        served = image_service._load(_spec(encoder=None))
+        held = (image_steps.STATE.tensors.max_bytes,
+                image_steps.STATE.adapters.max_bytes)
+        image_service._release([served])
+        after = image_steps.STATE.tensors.max_bytes
+    finally:
+        image_service._SHARES.clear()
+        image_steps.STATE.configure(ImageServerCfg())
+        scale()
+    assert held == (_KLEIN_COND, adapter) and after == tensor
+    assert calls == ["set_share", "drop_share"]
+    assert locked == [True, True]
 
 
 def test_the_fit_of_a_step_counts_what_the_step_caches_hold(monkeypatch):
@@ -637,7 +744,8 @@ def test_the_fit_of_a_step_counts_what_the_step_caches_hold(monkeypatch):
                            tables=held,
                            family=SimpleNamespace(name="z_image", step=None),
                            vae=None, conditionings=held, modulations=held)
-    served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(keep_encoder=True))
+    served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(keep_encoder=True),
+                             facts=_facts())
     assert image_service.size_fits(served, 64, 64, 1 << 30)
     assert not image_service.size_fits(served, 512, 512, 1 << 30)
     assert image_service.size_fits(served, 4096, 4096, None)
@@ -645,15 +753,18 @@ def test_the_fit_of_a_step_counts_what_the_step_caches_hold(monkeypatch):
 
 
 def test_a_staged_request_is_priced_with_its_encoder_loaded_alone():
+    # The DiT and the VAE are out, as between an encode and the next call
+    # that reads them, and the plan takes their dtypes from the entry.
     held = SimpleNamespace(bytes=0)
-    pipe = SimpleNamespace(encoder=None, dit=SimpleNamespace(act_dtype="bf16"),
+    pipe = SimpleNamespace(encoder=None, dit=None,
                            weights={"dit": 1, "vae": 1}, adapters=held,
                            tables=held,
                            family=SimpleNamespace(name="z_image", step=None),
                            vae=None, conditionings=held, modulations=held)
     served = SimpleNamespace(pipe=pipe, plan=_plan(
         staged=True, keep_encoder=False, encoder_bytes=5, mmproj_bytes=7,
-        load_parts=(1, 2), tower_parts=(3, 2)))
+        load_parts=(1, 2), tower_parts=(3, 2)),
+        facts=_facts(vae_dtype="f32"))
     text = image_service._fit_args(pipe, served, 1 << 30, 1.0)
     edit = image_service._fit_args(pipe, served, 1 << 30, 1.0, tower=True)
     assert (text["encoder"], text["mmproj"], text["load_parts"]) == (
@@ -661,6 +772,7 @@ def test_a_staged_request_is_priced_with_its_encoder_loaded_alone():
     assert (edit["encoder"], edit["mmproj"], edit["load_parts"]) == (
         5, 7, (3, 2))
     assert text["encoder_owned"] and edit["encoder_owned"]
+    assert (text["dtype"], text["vae_dtype"]) == ("bf16", "f32")
 
 
 def test_a_shared_encoder_loads_no_mmproj_of_its_own(load_stubs):
@@ -681,9 +793,12 @@ def test_a_staged_entry_loads_no_encoder_and_shares_its_caches(
     served = image_service._load(_spec(encoder_mmproj="/own-mmproj.gguf"))
     assert load_stubs[-1]["text_encoder"] is None
     assert load_stubs[-1]["mmproj"] is None
-    tensor, adapter = image_service.cache_bytes()
+    tensor, cap = image_service.cache_bytes()
     assert served.pipe.conditionings.max_bytes == tensor // 4
-    assert served.pipe.adapters.max_bytes == adapter // 4
+    # The share bounds the tensor caches only; the pool books LoRA bytes,
+    # with no cap set.
+    assert cap is None
+    assert served.pipe.adapters.max_bytes == image_steps.UNBOUNDED
     image_service._release([served])
     assert scaled == [0.25, 1.0]
 
@@ -742,7 +857,7 @@ def staged_stubs(monkeypatch):
                                edit=SimpleNamespace(text_only=False)))
     served = image_service.ServedImage(
         pipe=pipe, spec=_spec(encoder_mmproj="/tower.gguf"),
-        plan=_plan(staged=True, keep_encoder=False))
+        plan=_plan(staged=True, keep_encoder=False), facts=_facts())
     return SimpleNamespace(served=served, pipe=pipe, events=events)
 
 
@@ -750,7 +865,12 @@ def test_a_staged_encode_holds_the_encoder_without_the_dit(staged_stubs):
     st = staged_stubs
     image_service._encode(st.served, "a", None, ())
     assert st.events == ["drop", ("encoder", None), ("encode", "a", None, None),
-                         "release", "dit", "wrap", "vae"]
+                         "release"]
+    # The DiT and the VAE stay out until a call that reads them.
+    assert (st.pipe.dit, st.pipe.vae) == (None, None)
+    image_service.ensure_dit(st.served)
+    image_service.ensure_dit(st.served)
+    assert st.events[4:] == ["dit", "wrap", "vae"]
     assert (st.pipe.dit, st.pipe.vae) == ("DIT2", "VAE2")
     # A prompt in the cache runs on the released encoder's tokenizer.
     del st.events[:]
@@ -767,12 +887,77 @@ def test_a_staged_encode_holds_the_encoder_without_the_dit(staged_stubs):
     assert st.events[:2] == ["drop", ("encoder", None)]
 
 
-def test_a_failed_staged_encode_leaves_the_dit_loaded(staged_stubs):
+def test_a_cached_staged_encode_with_the_dit_out_loads_no_dit(staged_stubs):
+    """A guided run whose negative prompt sits in the cache from a run
+    before: its positive encode lets the DiT and the VAE go, the cached
+    negative runs on the released encoder's tokenizer and leaves them
+    out, and the first step loads them once."""
+    st = staged_stubs
+    image_service._encode(st.served, "", None, ())
+    image_service.ensure_dit(st.served)
+    del st.events[:]
+    image_service._encode(st.served, "a", None, ())
+    image_service._encode(st.served, "", None, ())
+    assert st.events == ["drop", ("encoder", None), ("encode", "a", None, None),
+                         "release", ("encode", "", None, None)]
+    assert (st.pipe.dit, st.pipe.vae) == (None, None)
+    image_service.ensure_dit(st.served)
+    assert st.events[5:] == ["dit", "wrap", "vae"]
+
+
+def test_a_failed_staged_encode_releases_its_encoder(staged_stubs):
     st = staged_stubs
     with pytest.raises(RuntimeError, match="encode failed"):
         image_service._encode(st.served, "boom", None, ())
-    assert st.events[-4:] == ["release", "dit", "wrap", "vae"]
-    assert st.pipe.encoder.released and st.pipe.dit == "DIT2"
+    assert st.events[-1] == "release" and st.pipe.encoder.released
+    # The next call that reads the DiT loads it.
+    image_service.ensure_dit(st.served)
+    assert st.events[-3:] == ["dit", "wrap", "vae"] and st.pipe.dit == "DIT2"
+
+
+def test_a_request_adapter_after_a_staged_encode_loads_the_dit_for_it(
+        staged_stubs, monkeypatch, tmp_path):
+    """A request's adapters are read against the DiT and its table is
+    defined on it. After an encode that failed or came from the step
+    routes the DiT is out, and the table loads it first."""
+    from gmlx.image import api, lora
+
+    st = staged_stubs
+    st.pipe.adapters = _Cache()
+    (tmp_path / "style.safetensors").write_bytes(b"x")
+    monkeypatch.setattr(lora, "load_adapter", lambda pipe, p, hold=(): (
+        st.events.append(("adapter", pipe.dit))
+        or SimpleNamespace(path=p, dit=(), text=())))
+    monkeypatch.setattr(lora, "table_entries", lambda rows: list(rows))
+    monkeypatch.setattr(api, "define_patch_table", lambda pipe, rows: (
+        st.events.append(("table", pipe.dit)) or "tid"))
+    image_service._encode(st.served, "a", None, ())
+    table, _ = image_service._adapter_table(
+        st.served, [("style.safetensors", 0.7)], [str(tmp_path)])
+    assert table == "tid"
+    assert st.events[-5:] == ["dit", "wrap", "vae", ("adapter", "DIT2"),
+                              ("table", "DIT2")]
+
+
+def test_a_configured_adapter_loads_into_a_cache_that_holds_it(
+        load_stubs, monkeypatch, tmp_path):
+    """The entry books its adapters' files, so the cache holds a file
+    over its bound when the file loads."""
+    from gmlx.image import api, lora
+
+    path = tmp_path / "big.safetensors"
+    path.write_bytes(bytes(3 << 20))
+    seen = []
+
+    def load_adapter(pipe, p, hold=()):
+        seen.append(pipe.adapters.max_bytes)
+        return SimpleNamespace(warnings=(), dit=(), text=())
+
+    monkeypatch.setattr(lora, "load_adapter", load_adapter)
+    monkeypatch.setattr(lora, "apply_text_adapters", lambda pipe, rows: None)
+    monkeypatch.setattr(api, "define_patch_table", lambda pipe, e: "table")
+    image_service._load(_spec(adapters=((str(path), 1.0),)))
+    assert seen == [3 << 20]
 
 
 def test_a_failed_adapter_frees_the_loaded_pipeline(load_stubs, monkeypatch):
@@ -784,7 +969,7 @@ def test_a_failed_adapter_frees_the_loaded_pipeline(load_stubs, monkeypatch):
                         lambda box: pipes.append(box[0].pipe.encoder)
                         or real_release(box))
 
-    def bad_adapter(pipe, path):
+    def bad_adapter(pipe, path, hold=()):
         raise ValueError("not a LoRA")
 
     monkeypatch.setattr(lora, "load_adapter", bad_adapter)
@@ -859,7 +1044,8 @@ def _fit_served(monkeypatch, fits_px: int):
                                step=None),
         vae=None, conditionings=nb, modulations=nb, size_multiple=16)
     served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(
-        keep_encoder=True, cfg=1.0), spec=SimpleNamespace(id="zit"))
+        keep_encoder=True, cfg=1.0), spec=SimpleNamespace(id="zit"),
+        facts=_facts(act_dtype="bfloat16"))
     return served, calls
 
 
@@ -895,7 +1081,7 @@ def _edit_served(family: str, mmproj=True, encoder_model=None):
         pipe=SimpleNamespace(family=fam, variant="base", size_multiple=16),
         spec=SimpleNamespace(id="m", encoder_model=encoder_model,
                              encoder_mmproj="/mm.gguf" if mmproj else None),
-        plan=SimpleNamespace(size=(1024, 1024)))
+        plan=SimpleNamespace(size=(1024, 1024)), facts=_facts())
 
 
 def _edit_req(n: int, shape=(32, 32), route="edits", **fields):
@@ -1144,15 +1330,16 @@ def test_a_request_naming_an_entry_adapter_sets_its_strength_once(
     (root / "lora").mkdir(parents=True)
     path = root / "lora" / "style.safetensors"
     path.write_bytes(b"x")
-    entry = SimpleNamespace(path=str(path), dit=(), text=(("t", "k"),))
+    entry = SimpleNamespace(path=str(path), dit=(), text=(("t", None, "k"),))
     other = SimpleNamespace(path=str(root / "lora" / "b.safetensors"),
                             dit=(), text=())
-    monkeypatch.setattr(lora, "load_adapter", lambda pipe, p: (
+    monkeypatch.setattr(lora, "load_adapter", lambda pipe, p, hold=(): (
         entry if os.path.realpath(p) == os.path.realpath(path) else other))
     monkeypatch.setattr(lora, "table_entries", lambda rows: list(rows))
     monkeypatch.setattr(api, "define_patch_table", lambda pipe, rows: rows)
     (root / "lora" / "b.safetensors").write_bytes(b"x")
-    served = SimpleNamespace(pipe=_pipe(), adapters=[(entry, 1.0)])
+    served = SimpleNamespace(pipe=_pipe(), adapters=[(entry, 1.0)],
+                             plan=_plan())
     table, shown = image_service._adapter_table(
         served, [(aid, 0.4), ("lora/b.safetensors", 0.7)], [str(root)])
     assert table == [(entry, 0.4), (other, 0.7)]
@@ -1163,20 +1350,28 @@ def test_a_request_naming_an_entry_adapter_sets_its_strength_once(
 
 @pytest.fixture
 def tiny_served(monkeypatch, tmp_path):
-    """A tiny Z-Image entry loaded with one LoRA of its own, its request
-    adapter cache half a LoRA file: room for one request LoRA, not two."""
+    """A tiny Z-Image entry loaded with a one-pair LoRA of its own, its
+    request adapter cap one and a half LoRA files: room for one request
+    LoRA, not two. With no pool, the pair cache holds the cap beside the
+    room the entry books for its own, which one pair leaves for little
+    else, so a second request's LoRA sheds the first's."""
     from gmlx.image import api
-    from lora_fixtures import tiny_z_adapter, write_adapter
+    from image_fixtures import TINY_Z_CONFIG
+    from lora_fixtures import make_pair, tiny_z_adapter, write_adapter
     from test_image_lora_apply import _pipe as tiny_pipe
 
-    files = [write_adapter(tmp_path / f"{name}.safetensors", "kohya",
-                           tiny_z_adapter(seed, 4.0, wide=True))
-             for name, seed in (("own", 1), ("a", 11), ("b", 12))]
+    dim = TINY_Z_CONFIG["dim"]
+    own = {"layers.1.attention.to_k": make_pair(
+        np.random.default_rng(1), dim, dim, 2, 4.0)}
+    files = [write_adapter(tmp_path / "own.safetensors", "kohya", own)]
+    files += [write_adapter(tmp_path / f"{name}.safetensors", "kohya",
+                            tiny_z_adapter(seed, 4.0, wide=True))
+              for name, seed in (("a", 11), ("b", 12))]
     monkeypatch.setattr(api, "load", lambda path, **kw: tiny_pipe())
     monkeypatch.setattr(image_service, "entry_plan", lambda spec: _plan())
     monkeypatch.setattr(image_service, "_SHARES", {})
     monkeypatch.setitem(image_service._CACHE_BYTES, "adapter",
-                        os.path.getsize(files[1]) // 2)
+                        3 * os.path.getsize(files[1]) // 2)
     served = image_service._load(_spec(encoder=None,
                                        adapters=((files[0], 1.0),)))
     yield served, str(tmp_path)
@@ -1190,14 +1385,38 @@ def _entry_steps(pipe) -> bool:
     return bool(np.isfinite(_step(pipe, pipe.default_table)).all())
 
 
+def _pairs_held(pipe, keys) -> bool:
+    """Every pair of ``keys`` is in the pair cache."""
+    return all(pipe.adapters.peek(k) is not None for k in keys)
+
+
 def test_request_adapters_over_the_cache_are_refused_by_name(tiny_served):
     served, root = tiny_served
+    own = image_service._pair_keys(served.adapters)
     with pytest.raises(image_service.ImageRequestError,
                        match="server.image.adapter_cache_mb") as e:
         image_service._adapter_table(
             served, [("a.safetensors", 1.0), ("b.safetensors", 1.0)], [root])
     assert e.value.status == 400 and e.value.param == "adapters"
+    assert _pairs_held(served.pipe, own)
     assert _entry_steps(served.pipe)
+
+
+@pytest.mark.parametrize("room,size,need,bound", [
+    ((1 << 20), (1 << 20) + 1, "1.1", "1.0"),
+    ((1 << 20) - 1, 1 << 20, "1.0", "0.9")])
+def test_request_adapters_just_over_the_room_read_their_need_above_it(
+        tmp_path, monkeypatch, room, size, need, bound):
+    """The refusal rounds the files' bytes up and the room down, so a need
+    just over the room never reads at or under it."""
+    path = tmp_path / "style.safetensors"
+    path.write_bytes(bytes(size))
+    monkeypatch.setitem(image_service._CACHE_BYTES, "adapter", room)
+    served = SimpleNamespace(pipe=SimpleNamespace(), adapters=[])
+    with pytest.raises(image_service.ImageRequestError) as e:
+        image_service._room_for(served, [str(path)])
+    assert (f"take {need} MiB, more than the {bound} MiB this image model "
+            "keeps for request adapters") in str(e.value)
 
 
 def test_a_request_may_reweight_the_entry_adapter_beside_its_own(
@@ -1210,22 +1429,47 @@ def test_a_request_may_reweight_the_entry_adapter_beside_its_own(
     tid, shown = image_service._adapter_table(
         served, [("own", 0.5), ("a.safetensors", 1.0)], [root])
     assert [s["strength"] for s in shown] == [0.5, 1.0]
+    assert _pairs_held(served.pipe, image_service._pair_keys(served.adapters))
     assert np.isfinite(_step(served.pipe, tid)).all()
     assert _entry_steps(served.pipe)
 
 
 def test_requests_in_turn_never_shed_the_entry_adapter(tiny_served):
-    """Each request's LoRA takes the room of the one before, and the
-    entry's own table still steps after the last. Its pairs go unused
-    meanwhile, so they are the least recent entries."""
+    """Each request's LoRA takes the room of the one before, every table
+    builds, and the entry's own table still steps after the last."""
     from test_image_lora_apply import _step
 
     served, root = tiny_served
     pipe = served.pipe
+    own = image_service._pair_keys(served.adapters)
     for name in ("a", "b", "a"):
         tid, _ = image_service._adapter_table(
             served, [(f"{name}.safetensors", 1.0)], [root])
+        assert _pairs_held(pipe, own), name
         assert np.isfinite(_step(pipe, tid)).all()
+    assert _entry_steps(pipe)
+
+
+def test_a_patch_table_after_a_request_lora_never_sheds_the_entry_adapter(
+        tiny_served):
+    """A steps route table holds only its own pairs as it puts them, so
+    the entry's pairs stay through the keep set of the load alone: the
+    pairs of a LoRA the size of a request's, put after one."""
+    from gmlx.image.lora import install
+
+    served, root = tiny_served
+    pipe = served.pipe
+    own = image_service._pair_keys(served.adapters)
+    image_service._adapter_table(served, [("a.safetensors", 1.0)], [root])
+    others = pipe.adapters.keys(lambda k: k not in own)
+    assert others
+    put: list = []
+    for k in others:
+        # As define_table puts a table's pairs: each holds the ones before.
+        pair = pipe.adapters.peek(k)
+        put.append(install.register_pair(
+            pipe, pair.down, pair.up * 2.0, hold=list(put)))
+    assert _pairs_held(pipe, own)
     assert _entry_steps(pipe)
 
 
@@ -1241,8 +1485,15 @@ def test_a_scheduler_other_than_the_variant_own_is_refused(scheduler):
 
 
 def test_a_size_off_the_family_stride_is_refused():
-    served = SimpleNamespace(pipe=SimpleNamespace(size_multiple=16),
-                             plan=SimpleNamespace(size=(1024, 1024)))
+    from gmlx.image import api
+    from gmlx.image.registry import get_family
+
+    # A Z-Image entry with its DiT out, as a staged entry's is after an
+    # encode: the stride is one DiT patch, kept from the load.
+    pipe = api.ImagePipeline(dit=None, family=get_family("z_image"),
+                             variant="turbo")
+    served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(size=(1024, 1024)),
+                             facts=_facts())
     req = image_service.parse_request("generations", {
         "prompt": "x", "size": "1000x1024"})
     with pytest.raises(image_service.ImageRequestError,
@@ -1255,7 +1506,8 @@ def test_a_large_edit_image_gives_the_largest_size_of_its_shape():
     import numpy as np
 
     served = SimpleNamespace(pipe=SimpleNamespace(size_multiple=16),
-                             plan=SimpleNamespace(size=(1024, 1024)))
+                             plan=SimpleNamespace(size=(1024, 1024)),
+                             facts=_facts())
     req = image_service.parse_request("edits", {"prompt": "x"})
     req.images = [np.zeros((3000, 6000, 3), np.uint8)]
     w, h = image_service.target_size(req, served)
@@ -1291,7 +1543,8 @@ _RICH = "a highly detailed scene " * 170        # 4 KB
 
 def _qwen_served(defaults=None):
     """A Qwen-Image 2.1 entry with its encoder and tower resident beside
-    the DiT, sampling unguided as the base variant does."""
+    the DiT, sampling unguided as the base variant does, and the DiT facts
+    its load keeps."""
     from gmlx.image.registry import get_family
 
     nb = SimpleNamespace(bytes=0)
@@ -1305,7 +1558,8 @@ def _qwen_served(defaults=None):
         pipe=pipe, plan=SimpleNamespace(keep_encoder=True, cfg=1.0,
                                         staged=False),
         spec=SimpleNamespace(id="qwen-image", defaults=defaults or {},
-                             encoder_model=None, encoder_mmproj="/mm.gguf"))
+                             encoder_model=None, encoder_mmproj="/mm.gguf"),
+        facts=_facts(act_dtype="bfloat16"))
 
 
 def _need(served, size: int, prompt: str | None = None,
@@ -1640,3 +1894,18 @@ def test_an_edit_is_priced_as_the_image_command_prices_it(monkeypatch,
     assert rows == 512 if prompt == "swap the hats" else rows > len(prompt)
     assert serve["prefix_rows"] == cli["prefix_rows"] == [
         rows + 4 * (1024 // 16) ** 2]
+
+
+def test_the_cache_shares_and_their_scale_change_under_one_lock(
+        monkeypatch):
+    """The image and the video worker both load and release entries: the
+    table and the scale it sets are written together, under one lock."""
+    seen = []
+    monkeypatch.setattr(image_service, "_SHARES", {})
+    monkeypatch.setattr(image_service, "_scale_step_caches", lambda: seen.append(
+        (image_service._SHARES_LOCK.locked(), dict(image_service._SHARES))))
+    a = object()
+    image_service.set_share(a, 0.5, 7)
+    image_service.drop_share(a)
+    image_service.drop_share(a)
+    assert seen == [(True, {id(a): (0.5, 7)}), (True, {})]

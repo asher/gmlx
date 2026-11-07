@@ -255,12 +255,12 @@ def test_a_patch_table_is_named_by_its_content_and_kept_frozen():
     spec[0]["band"][1] = out // 3
     assert pipe.patch_tables[tid] is table
     assert table["entries"][0] == ("layers.0.attention.qkv",
-                                   (0, 0, out // 3), ((a, 0.8),))
+                                   (0, 0, out // 3), ((a, 0.8, None),))
     with pytest.raises(TypeError):
         table["entries"] = ()
     other = api.define_patch_table(pipe, spec)
     assert other not in (tid, api.EMPTY_TABLE)
-    assert pipe.patch_tables[tid]["entries"][0][2] == ((a, 0.8),)
+    assert pipe.patch_tables[tid]["entries"][0][2] == ((a, 0.8, None),)
 
 
 def test_rows_that_give_the_same_delta_share_a_table_id():
@@ -280,7 +280,17 @@ def test_rows_that_give_the_same_delta_share_a_table_id():
     assert api.define_patch_table(
         pipe, [(qkv, band, [(b, -0.2), (a, 0.5)])]) == tid
     assert pipe.patch_tables[tid]["entries"][0][2] == tuple(
-        sorted(((a, 0.5), (b, -0.2))))
+        sorted(((a, 0.5, None), (b, -0.2, None))))
+    # A patch without an alpha is one with alpha None. An alpha is part of
+    # the delta, and one pair under two alphas is two patches, the one
+    # without an alpha first.
+    assert api.define_patch_table(
+        pipe, [(qkv, band, [(a, 0.5, None), (b, -0.2)])]) == tid
+    assert api.define_patch_table(
+        pipe, [(qkv, band, [(a, 0.5, 4.0), (b, -0.2)])]) != tid
+    two = api.define_patch_table(pipe, [(qkv, band, [(a, 0.5, 4), (a, 0.5)])])
+    assert pipe.patch_tables[two]["entries"][0][2] == (
+        (a, 0.5, None), (a, 0.5, 4.0))
     # A band of numpy integers is the band of plain ones.
     assert api.define_patch_table(
         pipe, [(qkv, tuple(np.int64(v) for v in band),
@@ -305,7 +315,8 @@ def test_rows_that_give_the_same_delta_share_a_table_id():
         == whole
     assert api.define_patch_table(pipe, [(qkv, (1, 0, inp), [(c, 0.7)])]) \
         == whole
-    assert pipe.patch_tables[whole]["entries"] == ((qkv, None, ((c, 0.7),)),)
+    assert pipe.patch_tables[whole]["entries"] == (
+        (qkv, None, ((c, 0.7, None),)),)
     both = api.define_patch_table(pipe, [(qkv, None, [(c, 0.7), (c, 0.1)])])
     assert api.define_patch_table(pipe, [(qkv, (0, 0, out), [(c, 0.1)]),
                                          (qkv, None, [(c, 0.7)])]) == both
@@ -331,6 +342,10 @@ def test_a_bad_patch_table_entry_is_refused():
             ((qkv, None, []), "no patches"),
             ((qkv, None, [("", 1.0)]), "non-empty string"),
             ((qkv, None, [("a", float("nan"))]), "strength"),
+            ((qkv, None, [("a", 1.0, float("inf"))]), "alpha"),
+            ((qkv, None, [("a", 1.0, True)]), "alpha"),
+            ((qkv, None, [("a", 1.0, "4")]), "alpha"),
+            ((qkv, None, [("a", 1.0, 4.0, 1)]), "strength, alpha"),
             ({"module": qkv, "patches": [("a", 1)], "scale": 2},
              "unknown keys")):
         with pytest.raises(ValueError, match=match):

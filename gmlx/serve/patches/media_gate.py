@@ -6,12 +6,35 @@ server open that file on the Mac, and one that names it by URL makes the
 server fetch it. A client can run with less access than the server has,
 such as a client in a launch container, which gets a placeholder key and
 reaches the server through a scoped session socket. So neither may happen
-by default. The gate reads every request body before its route runs and
+by default. The gate reads each request body before its route runs and
 answers 400 for any media reference that is not a ``data:`` URI of the
 right kind, or an absolute path inside the media folder
 (``$XDG_CACHE_HOME/gmlx/media``). A request on a launch session socket may
 not name the media folder either. The gate never stats, opens or fetches the
 reference. ``server.media_urls`` lets http(s) URLs through.
+
+Three classes of body are left to their routes, unread:
+
+- the safetensors bodies of the image and video step routes (the step,
+  encode and adapter upload routes), which name no media. Each route
+  reads its body to ``MAX_BODY_BYTES``, the pack's transfer unit, held
+  from its Content-Length before the read; the video encode prices a
+  window from its header, and an adapter upload is admitted into the
+  store, before its tensors are read.
+- POST bodies to the images API, whose route prices the whole body from
+  free memory before it reads a byte, then runs the gate's checks on it,
+  with no byte limit on one inline image
+  (:mod:`gmlx.serve.patches.body_intake`).
+- POST bodies to /v1/videos, whose route prices a JSON body or a form's
+  text fields from free memory and streams a form's files to the video
+  job store, within the room it reserves there. It runs the gate's
+  checks on a JSON body; a form's text fields have no gate rule, and the
+  route's own checks of each field refuse a path or a URL
+  (:mod:`gmlx.serve.patches.body_intake`).
+
+A request on a launch session socket keeps the session's body limit: the
+gate reads an images API body to it, as before, and the route reads the
+copy. A session does not serve /v1/videos.
 
 The gate is the fast, clearly worded refusal. The boundary is in
 :mod:`gmlx.serve.media_sinks`, which checks every reference again in the
@@ -62,7 +85,8 @@ UPLOAD_MAX_BYTES = 1 << 30
 SESSION_BODY_MAX_BYTES = 32 << 20
 SESSION_UPLOAD_MAX_BYTES = 64 << 20
 # The largest image, audio clip or video one inline reference or one fetch
-# may hold, decoded.
+# may hold, decoded. The routes that price their own body from free memory
+# (body_intake) hold their inline images to that price instead.
 MEDIA_MAX_BYTES = 32 << 20
 # The most pixels an image may decode to.
 MEDIA_MAX_PIXELS = 64 << 20
@@ -92,6 +116,25 @@ _media_root_forms: tuple[str, ...] = ()
 # socket, which takes media only inline: no file and no URL.
 _inline_only: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "gmlx_media_inline_only", default=False)
+# True while a route that priced its whole body against the memory free
+# reads it (body_intake): its inline media take no byte limit of their own.
+_body_priced: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "gmlx_media_body_priced", default=False)
+
+
+@contextlib.contextmanager
+def body_priced():
+    """Inline media read inside the block take no :data:`MEDIA_MAX_BYTES`
+    limit: the route priced the body that carries them."""
+    token = _body_priced.set(True)
+    try:
+        yield
+    finally:
+        _body_priced.reset(token)
+
+
+def _over_media_bytes(n: int) -> bool:
+    return n > MEDIA_MAX_BYTES and not _body_priced.get()
 
 _IMAGE_PART_TYPES = frozenset({"image_url", "input_image"})
 _VIDEO_PART_TYPES = frozenset({"video", "video_url", "input_video"})
@@ -125,7 +168,16 @@ _EDIT_IMAGE_FORMATS = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp", "GIF": ".
 
 
 class MediaRefused(ValueError):
-    """A request names media in a form the server does not accept."""
+    """A request names media in a form the server does not accept, with
+    the request field it names as ``param`` when there is one."""
+
+    param: str | None = None
+
+
+def _field_refusal(field: str, message: str) -> MediaRefused:
+    e = MediaRefused(message)
+    e.param = field
+    return e
 
 
 def set_media_root(root: str | None, forms: tuple[str, ...] = ()) -> None:
@@ -259,20 +311,20 @@ def _too_large(field: str) -> MediaRefused:
 def _data_uri(value: str, kind: str, field: str = "media") -> bytes | None:
     """The decoded bytes of a ``data:<kind>/...;base64,`` URI, else None.
     A payload over :data:`MEDIA_MAX_BYTES` is refused before it is
-    decoded."""
+    decoded, unless its body was priced (:func:`body_priced`)."""
     head, comma, payload = value.partition(",")
     if not comma or not head.lower().startswith(f"data:{kind}/"):
         return None
     params = head[5:].split(";")
     if not _MEDIA_TYPE.fullmatch(params[0]) or "base64" not in params[1:]:
         return None
-    if len(payload) // 4 * 3 > MEDIA_MAX_BYTES + 3:
+    if _over_media_bytes(len(payload) // 4 * 3 - 3):
         raise _too_large(field)
     try:
         data = base64.b64decode(payload, validate=False)
     except (binascii.Error, ValueError):
         return None
-    if len(data) > MEDIA_MAX_BYTES:
+    if _over_media_bytes(len(data)):
         raise _too_large(field)
     return data
 
@@ -492,6 +544,22 @@ def _check_part(d: dict, tally: Tally) -> None:
             tally.item()
 
 
+def _check_edit_image(value, field: str, tally: Tally) -> None:
+    """An image of a JSON edit: a data URI, or bare base64 image data,
+    which the edit decodes as bytes and never reads as a path."""
+    if isinstance(value, str) and not value.startswith("data:"):
+        if _over_media_bytes(len(value) // 4 * 3 - 3):
+            raise _too_large(field)
+        try:
+            data = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError):
+            data = None
+        if data:
+            tally.image(data, field)
+            return
+    check_image(value, field, tally)
+
+
 def check_body(body, path: str) -> None:
     """Raise :class:`MediaRefused` for a media reference the server does not
     accept anywhere in the JSON ``body`` of a request to ``path``, and for
@@ -502,22 +570,22 @@ def check_body(body, path: str) -> None:
         if path.endswith(_IMAGE_ROUTES):
             for key in _IMAGE_PATH_FIELDS:
                 if body.get(key) is not None:
-                    raise MediaRefused(f"{key} is not accepted by this server")
+                    raise _field_refusal(key, f"{key} is not accepted by this server")
             if body.get("response_format") == "path":
-                raise MediaRefused("response_format 'path' is not accepted by this "
-                                   "server. Use b64_json.")
+                raise _field_refusal("response_format", "response_format 'path' is "
+                                     "not accepted by this server. Use b64_json.")
             if path.endswith("/images/edits") and "image" in body:
                 refs = body["image"]
                 for ref in refs if isinstance(refs, list) else [refs]:
-                    check_image(ref, "image", tally)
+                    _check_edit_image(ref, "image", tally)
             if path.endswith("/images/edits"):
                 refs = body.get("images")
                 for ref in refs if isinstance(refs, list) else []:
                     if isinstance(ref, dict) and isinstance(ref.get("image_url"),
                                                             (str, dict)):
                         url = ref["image_url"]
-                        check_image(url.get("url") if isinstance(url, dict)
-                                    else url, "images", tally)
+                        _check_edit_image(url.get("url") if isinstance(url, dict)
+                                          else url, "images", tally)
         if path.endswith(_SPEECH_ROUTE):
             voice = body.get("voice")
             if voice not in (None, "") and not (isinstance(voice, str)
@@ -584,7 +652,8 @@ class _Discard:
 
 async def multipart_text_fields(headers, raw: bytes) -> list[tuple[str, str]]:
     """The text fields of a multipart body, parsed by the parser a route's
-    ``request.form()`` uses, with the file parts discarded unread."""
+    ``request.form()`` uses, with the file parts discarded unread. The
+    body is in RAM whole, so its length bounds a text part."""
     from starlette.formparsers import MultiPartParser
 
     class _TextParser(MultiPartParser):
@@ -596,7 +665,7 @@ async def multipart_text_fields(headers, raw: bytes) -> list[tuple[str, str]]:
     async def stream():
         yield raw
 
-    parser = _TextParser(headers, stream())
+    parser = _TextParser(headers, stream(), max_part_size=max(1, len(raw)))
     try:
         form = await parser.parse()
     finally:
@@ -827,12 +896,15 @@ def _is_upload(request) -> bool:
 
 
 def _is_step_tensors(request) -> bool:
-    """True for a safetensors body sent to the image step routes, which
-    read and check it themselves."""
-    from gmlx.serve.image_wire import CONTENT_TYPE, PREFIX
+    """True for a safetensors body sent to an image or video step route
+    that carries tensors, which reads, prices and checks it itself. The
+    JSON step routes take the gate's bound whatever their content type."""
+    from gmlx.serve.image_wire import CONTENT_TYPE, PREFIX, TENSOR_ROUTES
 
     ctype = (request.headers.get("content-type") or "").split(";", 1)[0]
-    return (request.url.path.startswith(PREFIX + "/")
+    path = request.url.path
+    return (path.startswith(PREFIX + "/")
+            and TENSOR_ROUTES.fullmatch(path[len(PREFIX):]) is not None
             and ctype.strip().lower() == CONTENT_TYPE)
 
 
@@ -885,6 +957,14 @@ def _refusal(path: str, status: int, message: str):
         path, status, "invalid_request_error", message))
 
 
+def reads_own_body(request) -> bool:
+    """True for a route that reads and prices its own body
+    (``body_intake``): the images API and POST /v1/videos."""
+    from .body_intake import reads_own_body as own
+
+    return own(request)
+
+
 def install_media_gate(allow_urls: bool = False, app=None) -> None:
     """Answer 400 for a request whose body names media by a file path, or by
     a URL unless ``allow_urls``, or that sends a form to a route that takes
@@ -919,22 +999,20 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
 
     async def _gate(request):
         """The refusal for ``request``, or None when the route may run."""
+        if _is_step_tensors(request):
+            # Tensors, not JSON, which name no media: the step routes read
+            # the container themselves, its header first, and price it
+            # before its tensors are read.
+            return None
+        session = request.scope.get(SESSION_SCOPE_KEY) is not None
+        if reads_own_body(request) and not session:
+            # A payload the route prices before it reads a byte, then
+            # checks here (body_intake). A launch session keeps its limit.
+            return None
         # Every method: a route reads a body whatever the method is.
         upload = _is_upload(request)
-        session = request.scope.get(SESSION_SCOPE_KEY) is not None
         # Taken out of the scope, so that the route does not keep it.
         parsed = request.scope.pop(SESSION_BODY_KEY, None)
-        if _is_step_tensors(request):
-            # Tensors, not JSON: the step routes read the container and
-            # hold it to their own limit, and it names no media.
-            from gmlx.serve.image_wire import MAX_BODY_BYTES
-
-            limit = SESSION_UPLOAD_MAX_BYTES if session else MAX_BODY_BYTES
-            if await _read_body(request, limit) is None:
-                return _refusal(request.url.path, 413,
-                                f"the tensor body is larger than the "
-                                f"{limit >> 20} MiB limit")
-            return None
         raw = await _read_body(request, body_limit(upload, session))
         if raw is None:
             return _refusal(request.url.path, 413,

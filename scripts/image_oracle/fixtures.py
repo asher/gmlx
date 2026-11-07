@@ -57,7 +57,7 @@ def fixture_root(path: str | os.PathLike | None = None, *,
     """The fixture directory: ``path``, else GMLX_IMAGE_FIXTURES."""
     raw = path if path is not None else os.environ.get(ENV)
     if not raw:
-        raise FixtureError(f"set {ENV} to the image fixture directory")
+        raise FixtureError(f"set {ENV} to the fixture directory")
     root = Path(raw).expanduser()
     if create:
         root.mkdir(parents=True, exist_ok=True)
@@ -199,7 +199,11 @@ class FixtureWriter:
         # np.require keeps a 0-d array 0-d; ascontiguousarray would not.
         self.arrays[key] = np.require(a, requirements="C")
 
-    def write(self, root: str | os.PathLike | None = None) -> Path:
+    def write(self, root: str | os.PathLike | None = None, *,
+              compressed: bool = False) -> Path:
+        """Write the fixture under ``root``. ``compressed`` deflates the
+        ``.npz``, as for a fixture committed beside its manifest; ``load``
+        reads either."""
         root = fixture_root(root, create=True)
         self.manifest["created"] = _now()
         self.manifest["npz"] = f"{self.name}.npz"
@@ -208,7 +212,8 @@ class FixtureWriter:
         npz = root / f"{self.name}.npz"
         tmp = root / f".{self.name}.npz.tmp"
         with open(tmp, "wb") as f:
-            np.savez(f, **self.arrays)
+            (np.savez_compressed if compressed else np.savez)(
+                f, **self.arrays)
         os.replace(tmp, npz)
         path = root / f"{self.name}.manifest.json"
         _write_json(path, self.manifest)

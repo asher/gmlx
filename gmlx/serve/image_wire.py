@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import struct
 from dataclasses import dataclass
 from typing import Any
@@ -26,6 +27,12 @@ CONTENT_TYPE = "application/vnd.gmlx.tensors+safetensors"
 CONTRACT_HEADER = "X-Gmlx-Steps-Contract"
 CONTRACT = (1, 0)
 PREFIX = "/internal/image-steps/v1"
+# The step routes whose body is a tensor container, which they read, price
+# and check themselves, as paths under PREFIX. The JSON routes under it are
+# read by the media gate to its bound.
+TENSOR_ROUTES = re.compile(
+    r"/(step|encode|vae/(decode|encode)|vae/(video|audio)/(decode|encode)"
+    r"|(tensors|adapters)/[0-9a-f]{64})")
 # The dtypes the contract carries, with numpy's name and the item size.
 DTYPES = {"F32": ("<f4", 4), "F16": ("<f2", 2), "BF16": ("<u2", 2),
           "U8": ("u1", 1), "BOOL": ("?", 1)}

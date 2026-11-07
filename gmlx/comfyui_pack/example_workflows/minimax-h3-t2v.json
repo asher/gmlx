@@ -1,0 +1,795 @@
+{
+ "id": "a3291ff9-7ef2-5c63-b150-cee014329a1e",
+ "revision": 0,
+ "last_node_id": 16,
+ "last_link_id": 18,
+ "nodes": [
+  {
+   "id": 16,
+   "type": "Note",
+   "pos": [
+    -440,
+    80
+   ],
+   "size": [
+    400,
+    520
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [],
+   "title": "gmlx nodes: install",
+   "properties": {},
+   "widgets_values": [
+    "These gmlx nodes run MiniMax-H3 on a gmlx server on your Mac (Apple Silicon, M3 or newer, 32 GB or more). The workflow makes a 5 second clip with sound at 1344x768 with the h3 recipe: the server applies its 8-step Turbo LoRA, and ModelSamplingMiniMaxH3 sets the recipe's shifts, 6 and 3. The largest clip each Mac makes is in the video guide: https://asher.github.io/gmlx/video.html#clip-length-size-and-memory\n\nTo start the clip at an image, open the minimax-h3-i2v workflow, or connect a Load Image node to first_frame of Prompt and clip size. Read the model's license before you use the clips: https://asher.github.io/gmlx/video.html#licenses\n\n1. Install gmlx: https://asher.github.io/gmlx/installation.html\n2. Put the nodes into ComfyUI, then restart ComfyUI:\n\n   gmlx comfyui install\n\n3. Download the model:\n\n   gmlx video pull h3\n\nGuide: https://asher.github.io/gmlx/comfyui.html"
+   ]
+  },
+  {
+   "id": 1,
+   "type": "GmlxModelLoader",
+   "pos": [
+    0,
+    80
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 1,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      1
+     ]
+    }
+   ],
+   "title": "gmlx Model Loader",
+   "properties": {
+    "Node name for S&R": "GmlxModelLoader"
+   },
+   "widgets_values": [
+    "h3",
+    "http://127.0.0.1:8080",
+    true
+   ]
+  },
+  {
+   "id": 2,
+   "type": "GmlxCLIPLoader",
+   "pos": [
+    0,
+    250
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 2,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "CLIP",
+     "type": "CLIP",
+     "links": [
+      2
+     ]
+    }
+   ],
+   "title": "gmlx CLIP Loader",
+   "properties": {
+    "Node name for S&R": "GmlxCLIPLoader"
+   },
+   "widgets_values": [
+    "h3",
+    "http://127.0.0.1:8080",
+    true
+   ]
+  },
+  {
+   "id": 3,
+   "type": "GmlxVideoVAELoader",
+   "pos": [
+    0,
+    420
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 3,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      3,
+      13
+     ]
+    }
+   ],
+   "title": "gmlx Video VAE Loader",
+   "properties": {
+    "Node name for S&R": "GmlxVideoVAELoader"
+   },
+   "widgets_values": [
+    "h3",
+    "http://127.0.0.1:8080",
+    true
+   ]
+  },
+  {
+   "id": 4,
+   "type": "GmlxAudioVAELoader",
+   "pos": [
+    0,
+    590
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 4,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      15
+     ]
+    }
+   ],
+   "title": "gmlx Audio VAE Loader",
+   "properties": {
+    "Node name for S&R": "GmlxAudioVAELoader"
+   },
+   "widgets_values": [
+    "h3",
+    "http://127.0.0.1:8080",
+    true
+   ]
+  },
+  {
+   "id": 5,
+   "type": "MiniMaxH3SigmaShift",
+   "pos": [
+    340,
+    80
+   ],
+   "size": [
+    300,
+    90
+   ],
+   "flags": {},
+   "order": 5,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 1
+    }
+   ],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      4,
+      5
+     ]
+    }
+   ],
+   "title": "Shifts of the h3 recipe",
+   "properties": {
+    "Node name for S&R": "MiniMaxH3SigmaShift"
+   },
+   "widgets_values": [
+    6.0,
+    3.0
+   ]
+  },
+  {
+   "id": 6,
+   "type": "MiniMaxH3ImageToVideo",
+   "pos": [
+    340,
+    210
+   ],
+   "size": [
+    400,
+    300
+   ],
+   "flags": {},
+   "order": 6,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 2
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 3
+    },
+    {
+     "name": "first_frame",
+     "type": "IMAGE",
+     "link": null
+    },
+    {
+     "name": "last_frame",
+     "type": "IMAGE",
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "positive",
+     "type": "CONDITIONING",
+     "links": [
+      6
+     ]
+    },
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      11
+     ]
+    }
+   ],
+   "title": "Prompt and clip size",
+   "properties": {
+    "Node name for S&R": "MiniMaxH3ImageToVideo"
+   },
+   "widgets_values": [
+    "A street musician in a gray coat plays an acoustic guitar under a stone bridge on a rainy evening. Rain falls on the cobblestones, people with umbrellas walk past, and the warm guitar melody echoes under the arch.",
+    1344,
+    768,
+    124
+   ]
+  },
+  {
+   "id": 7,
+   "type": "BasicScheduler",
+   "pos": [
+    340,
+    550
+   ],
+   "size": [
+    300,
+    110
+   ],
+   "flags": {},
+   "order": 7,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 4
+    }
+   ],
+   "outputs": [
+    {
+     "name": "SIGMAS",
+     "type": "SIGMAS",
+     "links": [
+      10
+     ]
+    }
+   ],
+   "title": "Schedule",
+   "properties": {
+    "Node name for S&R": "BasicScheduler"
+   },
+   "widgets_values": [
+    "simple",
+    8,
+    1.0
+   ]
+  },
+  {
+   "id": 8,
+   "type": "RandomNoise",
+   "pos": [
+    780,
+    80
+   ],
+   "size": [
+    300,
+    90
+   ],
+   "flags": {},
+   "order": 8,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "NOISE",
+     "type": "NOISE",
+     "links": [
+      7
+     ]
+    }
+   ],
+   "title": "Noise",
+   "properties": {
+    "Node name for S&R": "RandomNoise"
+   },
+   "widgets_values": [
+    42,
+    "fixed"
+   ]
+  },
+  {
+   "id": 9,
+   "type": "KSamplerSelect",
+   "pos": [
+    780,
+    210
+   ],
+   "size": [
+    300,
+    60
+   ],
+   "flags": {},
+   "order": 9,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "SAMPLER",
+     "type": "SAMPLER",
+     "links": [
+      9
+     ]
+    }
+   ],
+   "title": "Sampler",
+   "properties": {
+    "Node name for S&R": "KSamplerSelect"
+   },
+   "widgets_values": [
+    "euler"
+   ]
+  },
+  {
+   "id": 10,
+   "type": "BasicGuider",
+   "pos": [
+    780,
+    310
+   ],
+   "size": [
+    300,
+    50
+   ],
+   "flags": {},
+   "order": 10,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 5
+    },
+    {
+     "name": "conditioning",
+     "type": "CONDITIONING",
+     "link": 6
+    }
+   ],
+   "outputs": [
+    {
+     "name": "GUIDER",
+     "type": "GUIDER",
+     "links": [
+      8
+     ]
+    }
+   ],
+   "title": "Guider",
+   "properties": {
+    "Node name for S&R": "BasicGuider"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 11,
+   "type": "SamplerCustomAdvanced",
+   "pos": [
+    1120,
+    80
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 11,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "noise",
+     "type": "NOISE",
+     "link": 7
+    },
+    {
+     "name": "guider",
+     "type": "GUIDER",
+     "link": 8
+    },
+    {
+     "name": "sampler",
+     "type": "SAMPLER",
+     "link": 9
+    },
+    {
+     "name": "sigmas",
+     "type": "SIGMAS",
+     "link": 10
+    },
+    {
+     "name": "latent_image",
+     "type": "LATENT",
+     "link": 11
+    }
+   ],
+   "outputs": [
+    {
+     "name": "output",
+     "type": "LATENT",
+     "links": [
+      12,
+      14
+     ]
+    },
+    {
+     "name": "denoised_output",
+     "type": "LATENT",
+     "links": []
+    }
+   ],
+   "title": "Sample",
+   "properties": {
+    "Node name for S&R": "SamplerCustomAdvanced"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 12,
+   "type": "VAEDecode",
+   "pos": [
+    1460,
+    80
+   ],
+   "size": [
+    210,
+    50
+   ],
+   "flags": {},
+   "order": 12,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "samples",
+     "type": "LATENT",
+     "link": 12
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 13
+    }
+   ],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      16
+     ]
+    }
+   ],
+   "title": "Decode the video",
+   "properties": {
+    "Node name for S&R": "VAEDecode"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 13,
+   "type": "VAEDecodeAudio",
+   "pos": [
+    1460,
+    170
+   ],
+   "size": [
+    210,
+    50
+   ],
+   "flags": {},
+   "order": 13,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "samples",
+     "type": "LATENT",
+     "link": 14
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 15
+    }
+   ],
+   "outputs": [
+    {
+     "name": "AUDIO",
+     "type": "AUDIO",
+     "links": [
+      17
+     ]
+    }
+   ],
+   "title": "Decode the sound",
+   "properties": {
+    "Node name for S&R": "VAEDecodeAudio"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 14,
+   "type": "CreateVideo",
+   "pos": [
+    1710,
+    80
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 14,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 16
+    },
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "link": 17
+    }
+   ],
+   "outputs": [
+    {
+     "name": "VIDEO",
+     "type": "VIDEO",
+     "links": [
+      18
+     ]
+    }
+   ],
+   "title": "Create Video",
+   "properties": {
+    "Node name for S&R": "CreateVideo"
+   },
+   "widgets_values": [
+    24,
+    "auto",
+    "sRGB"
+   ]
+  },
+  {
+   "id": 15,
+   "type": "SaveVideo",
+   "pos": [
+    2050,
+    80
+   ],
+   "size": [
+    420,
+    470
+   ],
+   "flags": {},
+   "order": 15,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "video",
+     "type": "VIDEO",
+     "link": 18
+    }
+   ],
+   "outputs": [],
+   "title": "Save Video",
+   "properties": {
+    "Node name for S&R": "SaveVideo"
+   },
+   "widgets_values": [
+    "gmlx/minimax-h3",
+    "auto",
+    "auto"
+   ]
+  }
+ ],
+ "links": [
+  [
+   1,
+   1,
+   0,
+   5,
+   0,
+   "MODEL"
+  ],
+  [
+   2,
+   2,
+   0,
+   6,
+   0,
+   "CLIP"
+  ],
+  [
+   3,
+   3,
+   0,
+   6,
+   1,
+   "VAE"
+  ],
+  [
+   4,
+   5,
+   0,
+   7,
+   0,
+   "MODEL"
+  ],
+  [
+   5,
+   5,
+   0,
+   10,
+   0,
+   "MODEL"
+  ],
+  [
+   6,
+   6,
+   0,
+   10,
+   1,
+   "CONDITIONING"
+  ],
+  [
+   7,
+   8,
+   0,
+   11,
+   0,
+   "NOISE"
+  ],
+  [
+   8,
+   10,
+   0,
+   11,
+   1,
+   "GUIDER"
+  ],
+  [
+   9,
+   9,
+   0,
+   11,
+   2,
+   "SAMPLER"
+  ],
+  [
+   10,
+   7,
+   0,
+   11,
+   3,
+   "SIGMAS"
+  ],
+  [
+   11,
+   6,
+   1,
+   11,
+   4,
+   "LATENT"
+  ],
+  [
+   12,
+   11,
+   0,
+   12,
+   0,
+   "LATENT"
+  ],
+  [
+   13,
+   3,
+   0,
+   12,
+   1,
+   "VAE"
+  ],
+  [
+   14,
+   11,
+   0,
+   13,
+   0,
+   "LATENT"
+  ],
+  [
+   15,
+   4,
+   0,
+   13,
+   1,
+   "VAE"
+  ],
+  [
+   16,
+   12,
+   0,
+   14,
+   0,
+   "IMAGE"
+  ],
+  [
+   17,
+   13,
+   0,
+   14,
+   1,
+   "AUDIO"
+  ],
+  [
+   18,
+   14,
+   0,
+   15,
+   0,
+   "VIDEO"
+  ]
+ ],
+ "groups": [],
+ "config": {},
+ "extra": {
+  "ds": {
+   "scale": 0.6,
+   "offset": [
+    480,
+    40
+   ]
+  }
+ },
+ "version": 0.4
+}

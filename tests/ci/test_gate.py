@@ -225,6 +225,9 @@ def test_the_gate_set_is_the_numerics_folders_and_the_mlx_importers(tmp_path, mo
         "tests/models/test_m.py": "",
         "tests/serve/test_capacity.py": "def test_a():\n    import mlx.core as mx\n",
         "tests/serve/test_kq.py": "from mlx_kquant import ops\n",
+        "tests/serve/test_skip.py": "import pytest\nmx = pytest.importorskip('mlx.core')\n",
+        "tests/serve/test_skip_kq.py": "from pytest import importorskip\nkq = importorskip('mlx_kquant')\n",
+        "tests/serve/test_skip_other.py": "import pytest\nnp = pytest.importorskip('numpy')\n",
         # split, so the scan does not take this file for one that runs a child
         "tests/serve/test_child.py": "import sys\nCODE = '''\nimport mlx.core\n'''\nRUN = [sys." "executable]\n",
         # source text a test reads, never runs
@@ -235,7 +238,8 @@ def test_the_gate_set_is_the_numerics_folders_and_the_mlx_importers(tmp_path, mo
     })
     monkeypatch.setattr(gate, "GPU_EXTRA", ("tests/test_extra.py", "tests/test_gone.py"))
     assert gate.gate_set(tmp_path) == ["tests/models", "tests/serve/test_capacity.py", "tests/serve/test_child.py",
-                                       "tests/serve/test_kq.py", "tests/test_extra.py"]
+                                       "tests/serve/test_kq.py", "tests/serve/test_skip.py",
+                                       "tests/serve/test_skip_kq.py", "tests/test_extra.py"]
 
 
 def _junit(cases: dict[str, bool]) -> str:

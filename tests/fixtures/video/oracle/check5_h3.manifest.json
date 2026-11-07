@@ -1,0 +1,623 @@
+{
+ "schema": 1,
+ "name": "check5_h3",
+ "check": 5,
+ "family": "h3",
+ "script": "scripts/video_oracle/check5_h3.py",
+ "argv": [
+  "check5_h3.py",
+  "--comfy-dir",
+  "ComfyUI-h3",
+  "--vae",
+  "minimax_h3_video_vae_fp16.safetensors",
+  "--audio-vae",
+  "minimax_h3_audio_vae_fp32.safetensors",
+  "--tiny",
+  "taeh3.safetensors"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.0"
+   },
+   "diffusers": null,
+   "transformers": {
+    "version": "5.17.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": null,
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   },
+   "comfy-kitchen": {
+    "version": "0.2.40"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "vae": {
+   "name": "minimax_h3_video_vae_fp16.safetensors",
+   "size": 5207808496,
+   "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522"
+  },
+  "tiny": {
+   "name": "taeh3.safetensors",
+   "size": 22709752,
+   "sha256": "4fd022bfcab08772fe0536b17ea1a3bbb5625be11e397868d1c5d891863d4c13"
+  },
+  "audio_vae": {
+   "name": "minimax_h3_audio_vae_fp32.safetensors",
+   "size": 605254808,
+   "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+  }
+ },
+ "inputs": {
+  "cases": {
+   "clips": {
+    "256x256x22": [
+     22,
+     256,
+     256
+    ],
+    "512x320x39": [
+     39,
+     320,
+     512
+    ]
+   },
+   "images": {
+    "256x256": [
+     256,
+     256
+    ]
+   },
+   "latents": {},
+   "audio_samples": 64123
+  },
+  "seed": 5,
+  "plans": {
+   "256x256x22": {
+    "latents": 7,
+    "tiles_y": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      256
+     ],
+     "overlaps": []
+    },
+    "tiles_x": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      256
+     ],
+     "overlaps": []
+    },
+    "encode_pieces": 2,
+    "decode_pad_latents": 0,
+    "decode_runs": 1,
+    "tokens_chunk_size": 5,
+    "token_overlap": 2,
+    "token_drop": 3,
+    "frame_pre_padding": 3,
+    "frame_overlap": 5
+   },
+   "512x320x39": {
+    "latents": 12,
+    "tiles_y": {
+     "starts": [
+      0,
+      64
+     ],
+     "lengths": [
+      256,
+      256
+     ],
+     "overlaps": [
+      192
+     ]
+    },
+    "tiles_x": {
+     "starts": [
+      0,
+      128,
+      256
+     ],
+     "lengths": [
+      256,
+      256,
+      256
+     ],
+     "overlaps": [
+      128,
+      128
+     ]
+    },
+    "encode_pieces": 3,
+    "decode_pad_latents": 0,
+    "decode_runs": 2,
+    "tokens_chunk_size": 5,
+    "token_overlap": 2,
+    "token_drop": 3,
+    "frame_pre_padding": 3,
+    "frame_overlap": 5
+   },
+   "256x256": {
+    "latents": 1,
+    "tiles_y": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      256
+     ],
+     "overlaps": []
+    },
+    "tiles_x": {
+     "starts": [
+      0
+     ],
+     "lengths": [
+      256
+     ],
+     "overlaps": []
+    }
+   }
+  },
+  "clip": "h3_vae_tiny.clip(frames, height, width, seed): (1, 3, T, H, W) in [-1, 1]; an image is clip(1, height, width, seed)",
+  "wave": "h3_vae_tiny.wave(samples, seed): (1, 2, n) in [-1, 1]",
+  "seeded_latents": "numpy default_rng(seed).standard_normal((1, 24, T, H, W)) in float32, drawn in the order of cases['latents']",
+  "latents": "the class's encode: (mean - latents_mean) / latents_std, (1, 24, T, H, W)",
+  "decoded": "the class's decode: (1, 3, T, H, W) float32 in [0, 1]",
+  "tiny": "TAEHV(latent_channels=24).decode of each fp32 latent: (1, 3, T, H, W) in [0, 1]",
+  "wave_latents": "(1, 32, 2, T)",
+  "wave_decoded": "(1, 2, T * 800)"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "comfyui": "426f5eea52a7ece1dd599fff4cb6cd1f352ddd24",
+   "f16_math": "each linear, convolution, norm and attention in float32 over float16 operands, one float16 rounding"
+  },
+  "gaps": {
+   "encode 256x256x22": {
+    "fp32_vs_f64": {
+     "rel_l2": 4.348149686833328e-06,
+     "cosine": 0.9999999999905482,
+     "max_abs": 0.0005498528480529785
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0011777002304948206,
+     "cosine": 0.9999993073543123,
+     "max_abs": 0.07071548700332642
+    }
+   },
+   "encode 512x320x39": {
+    "fp32_vs_f64": {
+     "rel_l2": 4.453490600376638e-06,
+     "cosine": 0.9999999999900849,
+     "max_abs": 0.000536799430847168
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0026609712939512364,
+     "cosine": 0.9999964645947971,
+     "max_abs": 0.17183184623718262
+    }
+   },
+   "encode 256x256": {
+    "fp32_vs_f64": {
+     "rel_l2": 2.7607630582345476e-06,
+     "cosine": 0.99999999999619,
+     "max_abs": 4.100799560546875e-05
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0014584120560088671,
+     "cosine": 0.999998938558198,
+     "max_abs": 0.04449307173490524
+    }
+   },
+   "decode 256x256x22": {
+    "fp32_vs_f64": {
+     "rel_l2": 5.017846403685455e-07,
+     "cosine": 0.9999999999998485,
+     "max_abs": 7.033348083496094e-06
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0008958218888214984,
+     "cosine": 0.9999996019501217,
+     "max_abs": 0.03245061635971069,
+     "psnr_db": 65.67898463310291
+    }
+   },
+   "decode 512x320x39": {
+    "fp32_vs_f64": {
+     "rel_l2": 5.165371093934432e-07,
+     "cosine": 0.9999999999998062,
+     "max_abs": 1.5556812286376953e-05
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0011843614525555452,
+     "cosine": 0.9999993016435673,
+     "max_abs": 0.04757118225097656,
+     "psnr_db": 63.26025578541821
+    }
+   },
+   "decode 256x256": {
+    "fp32_vs_f64": {
+     "rel_l2": 4.883165318850825e-07,
+     "cosine": 0.9999999999998848,
+     "max_abs": 4.320759687148623e-06
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0005585751899785274,
+     "cosine": 0.9999998451755233,
+     "max_abs": 0.003813765498280719,
+     "psnr_db": 69.94744825770498
+    }
+   },
+   "tiny 256x256x22": {
+    "fp32_vs_f64": {
+     "rel_l2": 6.259680706418541e-07,
+     "cosine": 0.9999999999997906,
+     "max_abs": 6.729203301969466e-06
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0006282329883998742,
+     "cosine": 0.9999998026616872,
+     "max_abs": 0.0064019376892692215,
+     "psnr_db": 68.66153198895714
+    }
+   },
+   "tiny 512x320x39": {
+    "fp32_vs_f64": {
+     "rel_l2": 5.887125670948834e-07,
+     "cosine": 0.999999999999791,
+     "max_abs": 7.756638119582604e-06
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.000606253430590852,
+     "cosine": 0.9999998162335711,
+     "max_abs": 0.008456659134689293,
+     "psnr_db": 68.96829942993116
+    }
+   },
+   "tiny 256x256": {
+    "fp32_vs_f64": {
+     "rel_l2": 5.858278525626792e-07,
+     "cosine": 0.9999999999998299,
+     "max_abs": 5.927778018999241e-06
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0006373161926592879,
+     "cosine": 0.9999997969207459,
+     "max_abs": 0.006335286565695819,
+     "psnr_db": 68.64977433900401
+    }
+   },
+   "audio encode": {
+    "fp32_vs_f64": {
+     "rel_l2": 2.7234574997548173e-06,
+     "cosine": 0.9999999999962916,
+     "max_abs": 4.2853292055389236e-05
+    }
+   },
+   "audio decode": {
+    "fp32_vs_f64": {
+     "rel_l2": 1.9393458087277923e-06,
+     "cosine": 0.9999999999981203,
+     "max_abs": 1.9739676486491345e-05
+    }
+   }
+  },
+  "times": {
+   "fp32 video loaded rss gib": 10.18,
+   "fp32 encode 256x256x22": 17.1,
+   "fp32 encode 512x320x39": 152.3,
+   "fp32 encode 256x256": 0.2,
+   "fp32 video encoded rss gib": 16.16,
+   "fp32 decode 256x256x22": 6.2,
+   "fp32 decode 512x320x39": 71.6,
+   "fp32 decode 256x256": 4.4,
+   "fp32 video peak rss gib": 20.66,
+   "f16 video loaded rss gib": 7.82,
+   "f16 encode 256x256x22": 17.3,
+   "f16 encode 512x320x39": 154.7,
+   "f16 encode 256x256": 0.2,
+   "f16 video encoded rss gib": 14.0,
+   "f16 decode 256x256x22": 6.4,
+   "f16 decode 512x320x39": 72.3,
+   "f16 decode 256x256": 4.5,
+   "f16 video peak rss gib": 20.66,
+   "f64 video loaded rss gib": 21.02,
+   "f64 encode 256x256x22": 56.9,
+   "f64 encode 512x320x39": 510.8,
+   "f64 encode 256x256": 0.8,
+   "f64 video encoded rss gib": 29.67,
+   "f64 decode 256x256x22": 23.3,
+   "f64 decode 512x320x39": 281.9,
+   "f64 decode 256x256": 16.4,
+   "f64 video peak rss gib": 35.24,
+   "fp32 tiny decodes": 1.8,
+   "f16 tiny decodes": 2.0,
+   "f64 tiny decodes": 4.7,
+   "fp32 audio": 6.1,
+   "f64 audio": 7.0
+  }
+ },
+ "tolerances": {
+  "rule": "against the float64 result: fp32 relative L2 at twice the oracle's own fp32 relative L2; float16 decode PSNR at the oracle's own float16 PSNR less 20 log10(2) dB; float16 encode relative L2 at twice the oracle's own float16 relative L2",
+  "items": {
+   "encode 256x256x22": {
+    "fp32_rel_l2": 8.696299373666656e-06,
+    "f16_rel_l2": 0.002355400460989641
+   },
+   "encode 512x320x39": {
+    "fp32_rel_l2": 8.906981200753276e-06,
+    "f16_rel_l2": 0.005321942587902473
+   },
+   "encode 256x256": {
+    "fp32_rel_l2": 5.521526116469095e-06,
+    "f16_rel_l2": 0.0029168241120177342
+   },
+   "decode 256x256x22": {
+    "fp32_rel_l2": 1.003569280737091e-06,
+    "f16_psnr_db": 59.65838471982329
+   },
+   "decode 512x320x39": {
+    "fp32_rel_l2": 1.0330742187868864e-06,
+    "f16_psnr_db": 57.239655872138584
+   },
+   "decode 256x256": {
+    "fp32_rel_l2": 9.76633063770165e-07,
+    "f16_psnr_db": 63.92684834442535
+   },
+   "tiny 256x256x22": {
+    "fp32_rel_l2": 1.2519361412837081e-06,
+    "f16_psnr_db": 62.64093207567751
+   },
+   "tiny 512x320x39": {
+    "fp32_rel_l2": 1.1774251341897668e-06,
+    "f16_psnr_db": 62.94769951665154
+   },
+   "tiny 256x256": {
+    "fp32_rel_l2": 1.1716557051253584e-06,
+    "f16_psnr_db": 62.629174425724386
+   },
+   "audio encode": {
+    "fp32_rel_l2": 5.4469149995096345e-06
+   },
+   "audio decode": {
+    "fp32_rel_l2": 3.8786916174555845e-06
+   }
+  }
+ },
+ "notes": [
+  "The video VAE file is float16 and the audio VAE file float32; each mode's model takes the file's values in its own dtype."
+ ],
+ "created": "2026-10-30T02:23:48Z",
+ "npz": "check5_h3.npz",
+ "tensors": {
+  "decoded_f64_256x256": {
+   "shape": [
+    1,
+    3,
+    1,
+    256,
+    256
+   ],
+   "dtype": "float64",
+   "sha256": "e709b66018d0b2a342266bc9b0aa5ee985291f7ded6c4b456ab88a3791451a2f"
+  },
+  "decoded_f64_256x256x22": {
+   "shape": [
+    1,
+    3,
+    22,
+    256,
+    256
+   ],
+   "dtype": "float64",
+   "sha256": "60354de393f3cc69b54cbceaf74d78c0bfa47519131a049b10fc956b272e4dcc"
+  },
+  "decoded_f64_512x320x39": {
+   "shape": [
+    1,
+    3,
+    39,
+    320,
+    512
+   ],
+   "dtype": "float64",
+   "sha256": "e2584934b029cf70c80b17b256f819f7353676af66246e9a4a014cd84aab6e64"
+  },
+  "input_256x256": {
+   "shape": [
+    1,
+    3,
+    1,
+    256,
+    256
+   ],
+   "dtype": "float32",
+   "sha256": "3293bb27d863bebc32f46fa17b72d5a124f269ca0bd4ec7ef7940b58a0306374"
+  },
+  "input_256x256x22": {
+   "shape": [
+    1,
+    3,
+    22,
+    256,
+    256
+   ],
+   "dtype": "float32",
+   "sha256": "387d65857409ac50b3c5aafe806a1c5a1eaf3f61a648a3773c22492b7dc7a330"
+  },
+  "input_512x320x39": {
+   "shape": [
+    1,
+    3,
+    39,
+    320,
+    512
+   ],
+   "dtype": "float32",
+   "sha256": "04d78b76a6fe06899bf10a64dec30208e80bb022cec1ffc3a3c045ade72e1490"
+  },
+  "latents_f64_256x256": {
+   "shape": [
+    1,
+    24,
+    1,
+    16,
+    16
+   ],
+   "dtype": "float64",
+   "sha256": "3f7095c6979caff6d4cef87e0a77074f78d098e5fca118239c7e06045140432a"
+  },
+  "latents_f64_256x256x22": {
+   "shape": [
+    1,
+    24,
+    7,
+    16,
+    16
+   ],
+   "dtype": "float64",
+   "sha256": "10463a85dcb88caea9ce240355a6181dfcdac88d395318991b3b2677de1aa12e"
+  },
+  "latents_f64_512x320x39": {
+   "shape": [
+    1,
+    24,
+    12,
+    20,
+    32
+   ],
+   "dtype": "float64",
+   "sha256": "b2424d4e2725079992c9db2b474e3bdd4773d801d786c76922475473358096a8"
+  },
+  "latents_fp32_256x256": {
+   "shape": [
+    1,
+    24,
+    1,
+    16,
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "d2669bae468e531c061b29369d1be6b3b92d806959ba1adcc1f566d921052be7"
+  },
+  "latents_fp32_256x256x22": {
+   "shape": [
+    1,
+    24,
+    7,
+    16,
+    16
+   ],
+   "dtype": "float32",
+   "sha256": "3f87a6d63164e9c6576306a166449a9228d42f5490a673c189e68f166bc9f6da"
+  },
+  "latents_fp32_512x320x39": {
+   "shape": [
+    1,
+    24,
+    12,
+    20,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "e22fd7a897c7172ba6f027b18f6a7f2d48b50ee0c15301ed8fce2717cc596945"
+  },
+  "tiny_f64_256x256": {
+   "shape": [
+    1,
+    3,
+    1,
+    256,
+    256
+   ],
+   "dtype": "float64",
+   "sha256": "fff2c482e1cf4450f2176a7611e31b370af9995bf5324067e121d3865c9665f5"
+  },
+  "tiny_f64_256x256x22": {
+   "shape": [
+    1,
+    3,
+    22,
+    256,
+    256
+   ],
+   "dtype": "float64",
+   "sha256": "3910d0e82c66ec91129e042c24f94f761c620ba5ac64a57dc55bfaced74b08f1"
+  },
+  "tiny_f64_512x320x39": {
+   "shape": [
+    1,
+    3,
+    39,
+    320,
+    512
+   ],
+   "dtype": "float64",
+   "sha256": "c95866183773b1e3b84f8e1822f648f993335cc4f3ed5896ed1901956f4425d7"
+  },
+  "wave": {
+   "shape": [
+    1,
+    2,
+    64123
+   ],
+   "dtype": "float32",
+   "sha256": "5b1e58a15a6570a0a63da4860db699a3a98a2edbd8707c858254161adf55e6e5"
+  },
+  "wave_decoded_f64": {
+   "shape": [
+    1,
+    2,
+    64800
+   ],
+   "dtype": "float64",
+   "sha256": "c3465c63e9343c3569b0dde8ecaf49d56589c03cdcbe59298cfc3dca979725af"
+  },
+  "wave_latents_f64": {
+   "shape": [
+    1,
+    32,
+    2,
+    81
+   ],
+   "dtype": "float64",
+   "sha256": "77dc2b34e71acb2d1d9af2e32ef1057612f6a7303f23c03ff6b1bd68a801e987"
+  },
+  "wave_latents_fp32": {
+   "shape": [
+    1,
+    32,
+    2,
+    81
+   ],
+   "dtype": "float32",
+   "sha256": "36cb1047cb0f0622feef4beb13b5bcf6c8bd64f19cf826062b9cef251244dcfa"
+  }
+ }
+}

@@ -32,6 +32,7 @@ import uuid
 import aiohttp
 import numpy as np
 
+from stub_server import FASTH3_SIGMAS
 from support import PACK, Stub, manifest, write_zimage_lora
 
 # API-format copies of the example workflows, which the UI files convert to.
@@ -77,7 +78,7 @@ def workflow(name: str) -> dict:
         wf = json.load(f)
     for node in wf.values():
         node.pop("_meta", None)
-        if node["class_type"].startswith("Gmlx"):
+        if "server_url" in node["inputs"]:
             assert node["inputs"]["server_url"] == "http://127.0.0.1:8080", name
             node["inputs"]["start_server"] = False
     return wf
@@ -256,7 +257,7 @@ class Cases:
         if not upsample:
             return self.stub
         for node in wf.values():
-            if node["class_type"].startswith("Gmlx"):
+            if "server_url" in node["inputs"]:
                 node["inputs"]["server_url"] = self.stub3.url
         return self.stub3
 
@@ -592,6 +593,125 @@ class Cases:
         n = len(kinds(self.stub.log(), "step"))
         self.check("no step served", n == 0, n)
 
+    async def h3_t2v(self):
+        """The MiniMax-H3 example workflow: the prompt from MiniMaxH3ImageToVideo,
+        AV steps at the recipe's shifts on ComfyUI's simple schedule, and the
+        clip decoded by the gmlx video and audio VAEs into a saved video."""
+        wf = workflow("minimax-h3-t2v.json")
+        wf["6"]["inputs"].update(width=64, height=64, length=22)
+        wf["7"]["inputs"]["steps"] = 2
+        wf["15"]["inputs"]["filename_prefix"] = "video/h3"
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        enc = kinds(log, "encode")
+        self.check("the prompt encoded once, with no images",
+                   [(e["text"], e["images"]) for e in enc] == [(wf["6"]["inputs"]["prompt"], 0)],
+                   [(e["text"][:20], e["images"]) for e in enc])
+        steps = kinds(log, "av_step")
+        self.check("one row a step at the recipe's shifts and audio scale",
+                   len(steps) == 2 and all(e["shifts"] == {"video": 6.0, "audio": 3.0}
+                                           and e["audio_scale"] == 2.0 for e in steps),
+                   [(e["shifts"], e["audio_scale"]) for e in steps])
+        self.check("the clip's latents", {(tuple(e["video_shape"]), tuple(e["audio_shape"]))
+                                          for e in steps} == {((1, 24, 7, 4, 4), (1, 32, 2, 37))},
+                   [(e["video_shape"], e["audio_shape"]) for e in steps][:1])
+        got = [e["timestep"] for e in steps]
+        want = [1000.0, 6 * 0.5 / (1 + 5 * 0.5) * 1000]
+        self.check("timesteps of the simple schedule at shift 6", np.allclose(got, want, atol=1e-2),
+                   {"got": got, "want": want})
+        self.check("video and audio decoded once each",
+                   (len(kinds(log, "video_decode")), len(kinds(log, "audio_decode"))) == (1, 1),
+                   (len(kinds(log, "video_decode")), len(kinds(log, "audio_decode"))))
+        d = os.path.join(self.work, "output", "video")
+        saved = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        self.check("video saved", any(f.startswith("h3_") and f.endswith(".mp4") for f in saved),
+                   saved)
+
+    async def h3_long_guide(self):
+        """A 15 s clip guided from frame 0 by a 362-frame clip, the longest
+        guide ComfyUI makes at that length: MiniMaxH3AddGuide's frames go
+        to the gmlx video VAE as uint8 levels in windows of 7 pieces that
+        tile the clip, and every step anchors the guide at frame 0."""
+        wf = workflow("minimax-h3-t2v.json")
+        wf["6"]["inputs"].update(width=64, height=64, length=362)
+        wf["7"]["inputs"]["steps"] = 1
+        wf["15"]["inputs"]["filename_prefix"] = "video/h3-guide"
+        wf["90"] = {"class_type": "EmptyImage",
+                    "inputs": {"width": 80, "height": 64, "batch_size": 362, "color": 0x336699}}
+        wf["91"] = {"class_type": "MiniMaxH3AddGuide",
+                    "inputs": {"positive": ["6", 0], "latent": ["6", 1], "frame_idx": 0,
+                               "vae": ["3", 0], "image": ["90", 0]}}
+        wf["10"]["inputs"]["conditioning"] = ["91", 0]
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        got = [(e["shape"][0], e["at"], e["open"], e["dtype"]) for e in kinds(log, "video_encode")]
+        self.check("the guide in three uint8 windows that tile it",
+                   got == [(119, 0, True, "U8"), (119, 119, True, "U8"), (124, 238, False, "U8")],
+                   got)
+        steps = kinds(log, "av_step")
+        self.check("the step anchors the guide at frame 0",
+                   len(steps) == 1 and [a["frame"] for a in steps[0]["anchors"]] == [0],
+                   [e["anchors"] for e in steps])
+
+    async def h3_i2v(self):
+        """The MiniMax-H3 first frame workflow: the image from Load Image
+        encoded with the prompt and by the gmlx video VAE, and every step
+        anchored at frame 0 with the prompt's vision span."""
+        wf = workflow("minimax-h3-i2v.json")
+        wf["6"]["inputs"].update(width=64, height=64, length=22)
+        wf["7"]["inputs"]["steps"] = 2
+        wf["15"]["inputs"]["filename_prefix"] = "video/h3-i2v"
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        enc = kinds(log, "encode")
+        self.check("the prompt encoded once, with the first frame at the canvas",
+                   [(e["images"], e["image_shapes"]) for e in enc] == [(1, [[64, 64, 3]])],
+                   [(e["images"], e["image_shapes"]) for e in enc])
+        self.check("the first frame encoded once by the video VAE",
+                   [e["shape"] for e in kinds(log, "video_encode")] == [[1, 64, 64, 3]],
+                   [e["shape"] for e in kinds(log, "video_encode")])
+        steps = kinds(log, "av_step")
+        self.check("each step anchored at frame 0 with one vision span",
+                   len(steps) == 2 and all(
+                       [a["frame"] for a in e["anchors"]] == [0] and len(e["spans"]) == 1
+                       for e in steps),
+                   [(e["anchors"], e["spans"]) for e in steps])
+        d = os.path.join(self.work, "output", "video")
+        saved = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        self.check("video saved",
+                   any(f.startswith("h3-i2v_") and f.endswith(".mp4") for f in saved), saved)
+
+    async def fasth3_t2v(self):
+        """The FastH3 example workflow: AV steps on the trained sigmas gmlx
+        Sigmas hands over, at the recipe's shifts, and the clip decoded by
+        the gmlx video and audio VAEs into a saved video."""
+        wf = workflow("fasth3-t2v.json")
+        wf["6"]["inputs"].update(width=64, height=64, length=22)
+        wf["15"]["inputs"]["filename_prefix"] = "video/fasth3"
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        steps = kinds(log, "av_step")
+        self.check("one row a step at the recipe's shifts and audio scale",
+                   len(steps) == 8 and all(e["shifts"] == {"video": 10.0, "audio": 3.0}
+                                           and abs(e["audio_scale"] - 10.0 / 3.0) < 1e-6
+                                           for e in steps),
+                   [(e["shifts"], e["audio_scale"]) for e in steps])
+        got = [e["timestep"] for e in steps]
+        want = [float(np.float32(s) * np.float32(1000.0)) for s in FASTH3_SIGMAS[:-1]]
+        self.check("timesteps of the trained sigmas", np.allclose(got, want, rtol=0, atol=1e-3),
+                   {"got": got, "want": want})
+        self.check("video and audio decoded once each",
+                   (len(kinds(log, "video_decode")), len(kinds(log, "audio_decode"))) == (1, 1),
+                   (len(kinds(log, "video_decode")), len(kinds(log, "audio_decode"))))
+        d = os.path.join(self.work, "output", "video")
+        saved = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        self.check("video saved",
+                   any(f.startswith("fasth3_") and f.endswith(".mp4") for f in saved), saved)
+
     async def turbo_sigmas(self):
         wf = {
             "1": {"class_type": "GmlxModelLoader", "inputs": {"model_name": "qwen-image-2.1-turbo",
@@ -631,6 +751,8 @@ async def amain(a) -> dict:
         os.path.join(work, "input", "reference-1.png"))
     Image.fromarray(rng.integers(0, 255, (512, 512, 4), dtype=np.uint8), "RGBA").save(
         os.path.join(work, "input", "reference-2.png"))
+    Image.fromarray(rng.integers(0, 255, (96, 128, 3), dtype=np.uint8)).save(
+        os.path.join(work, "input", "first-frame.png"))
     stub = Stub("--step-delay-ms", str(a.step_delay_ms))
     stub2 = Stub("--contract", "2.0")
     stub3 = Stub("--upsample")
@@ -676,6 +798,10 @@ async def amain(a) -> dict:
                          c.flux2_reference_method)
             await c.case("moss-image t2i under SkipLayerGuidanceDiTSimple", c.moss_t2i)
             await c.case("moss-image: a prompt queued behind the running one", c.moss_queued)
+            await c.case("minimax-h3 t2v with the gmlx video and audio VAEs", c.h3_t2v)
+            await c.case("minimax-h3 i2v from a Load Image first frame", c.h3_i2v)
+            await c.case("minimax-h3 with a 362-frame guide clip", c.h3_long_guide)
+            await c.case("fasth3 t2v on its trained sigmas", c.fasth3_t2v)
             if comfy_version(a.comfy) >= (0, 41, 0):
                 await c.case("flux-3-klein t2i", c.flux3_t2i)
                 await c.case("flux-3-klein edit with two references", c.flux3_edit)

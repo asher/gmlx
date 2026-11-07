@@ -2162,6 +2162,11 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
               "its companions", file=sys.stderr)
         return 2
     elif kinds[0][1] == _UNKNOWN and not kinds[0][0].endswith(".gguf"):
+        from gmlx.video import catalog as video_catalog
+        if video_catalog.recipe(kinds[0][0]) is not None:
+            print(f"error: {kinds[0][0]} is a video recipe; run `gmlx video "
+                  f"pull {kinds[0][0]}`", file=sys.stderr)
+            return 2
         print(_unknown_ref_error(kinds[0][0]), file=sys.stderr)
         return 2
     else:
@@ -2273,6 +2278,7 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
                 ref_paths.add(os.path.realpath(rp))
+    ref_paths |= _video_refs(cfg)
 
     to_delete: list[str] = []
     if not keep_files:
@@ -2481,6 +2487,10 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
         if im is not None:
             return _rm_image(a, cfg, cfg_path, im, disc, images,
                              configured=a.id in cfg.image_models)
+        if a.id in cfg.video_models:
+            print(f"error: {a.id!r} is a video model; remove its entry "
+                  f"from video_models in {cfg_path}", file=sys.stderr)
+            return 2
         print(f"error: unknown model id {a.id!r} (see: gmlx list)",
               file=sys.stderr)
         return 2
@@ -2580,6 +2590,19 @@ def _image_refs(cfg, disc, skip: str, images=()) -> set:
             continue
         for p in (im.path, im.vae, im.encoder, im.encoder_mmproj,
                   *(a for a, _st in im.adapters)):
+            rp = _try_resolve(p, cfg.model_dirs)
+            if rp:
+                refs.add(os.path.realpath(rp))
+    return refs | _video_refs(cfg)
+
+
+def _video_refs(cfg) -> set:
+    """Real paths the ``video_models:`` entries load, through any
+    symlink."""
+    refs: set = set()
+    for v in cfg.video_models.values():
+        for p in (v.path, v.encoder, v.encoder_mmproj, v.vae, v.audio_vae,
+                  v.tiny_vae, *(a for a, _st in v.adapters)):
             rp = _try_resolve(p, cfg.model_dirs)
             if rp:
                 refs.add(os.path.realpath(rp))
@@ -2772,6 +2795,8 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
                          ("discovered", images)):
         for im in entries:
             rows.append(_image_row(cfg, im, src, default_image))
+    for vm in cfg.video_models.values():
+        rows.append(_video_row(cfg, vm))
 
     images_only = a.image or a.family or a.edit or a.shared_encoder
     if images_only:
@@ -2781,7 +2806,8 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
                      or _family_key(r["family_title"] or "") == want)
                 and (not a.edit or r["edit"])
                 and (not a.shared_encoder or r["shared_encoder"])]
-    rows.sort(key=lambda r: (r["kind"] != "chat", r["id"]))
+    order = {"chat": 0, "image": 1, "video": 2}
+    rows.sort(key=lambda r: (order[r["kind"]], r["id"]))
     aliases = dict(cfg.aliases)
     for r in rows:
         if r["kind"] == "chat":
@@ -2897,6 +2923,22 @@ def _image_row(cfg, im, source: str, default_image: str | None) -> dict:
             "vae": im.vae,
             "size_bytes": (None if any(x is None for x in sizes)
                            else sum(sizes))}
+
+
+def _video_row(cfg, vm) -> dict:
+    """The ``gmlx list`` row of a video_models entry, sized by the files it
+    loads: its DiT, text encoder, vision tower, VAEs, preview decoder and
+    LoRAs."""
+    files = [vm.path, vm.encoder, vm.encoder_mmproj, vm.vae, vm.audio_vae,
+             vm.tiny_vae, *(a[0] for a in vm.adapters)]
+    sizes = [_model_size_bytes(p, cfg.model_dirs) for p in files if p]
+    known = [x for x in sizes if x is not None]
+    flags = [vm.variant or "video"]
+    if vm.upsampler:
+        flags.append(f"upsampler {vm.upsampler}")
+    return {"id": vm.id, "kind": "video", "path": vm.path, "profile": None,
+            "source": "config", "default": False, "flags": flags,
+            "size_bytes": sum(known) if len(known) == len(sizes) else None}
 
 
 # ps - the residency view of a running server

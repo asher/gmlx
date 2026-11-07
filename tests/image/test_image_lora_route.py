@@ -7,6 +7,8 @@ tensor ops and a stand-in on the stock ops elsewhere. Every call the
 route does not take is held bit for bit to the path with no route."""
 from __future__ import annotations
 
+import math
+
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
@@ -108,7 +110,7 @@ def _entries(pipe, path: str, rows: list) -> list:
     by_band: dict = {}
     for band, (d, u, a), s in rows:
         by_band.setdefault(band, []).append(
-            (lora.register_pair(pipe, d, u, a), s))
+            (lora.register_pair(pipe, d, u), s, a))
     return [(path, band, patches) for band, patches in by_band.items()]
 
 
@@ -320,10 +322,50 @@ def test_a_strength_change_builds_no_new_pair(op):
                 if k[0] == install.KERNEL]) == 2
 
 
-def test_a_shed_pair_is_counted_in_the_tables_that_hold_it(op):
-    """The pair two tables share is counted once while the cache keeps
-    it. Shed, it is counted in each built table that still holds it, so
-    the cache's bytes never leave it out."""
+def test_an_alpha_change_builds_its_own_pair(op):
+    """Two tables of the same held pairs, one with no alpha as ComfyUI
+    reads a file without a header and one at the alpha the header gives.
+    B holds alpha / rank, so each table runs on a pair of its own, and
+    each output is that of its alpha."""
+    pipe = _pipe()
+    x = _x()
+    for alpha in (None, 3.0):
+        rows = _qkv_rows([(d, u, alpha) for d, u, _a in _pairs(7)])
+        y = _run(pipe, _entries(pipe, QKV, rows), QKV, x)
+        assert rel_l2(_f64(y), _ref(pipe, QKV, x, rows)) <= TOL, alpha
+    assert len(pipe.adapters) == 3
+    assert op.seen[1][0][4] is not op.seen[0][0][4]
+    assert len([k for k in pipe.tables._items
+                if k[0] == install.KERNEL]) == 2
+
+
+def test_a_table_naming_a_pair_under_two_alphas_runs_each_at_its_own(op):
+    """One table names each held pair twice on its band: at strength 1
+    with no alpha, and at strength -1 at alpha 3, as two LoRA nodes of
+    one file with and without its header alpha give it. The pipeline
+    holds each pair once and the table builds one kernel pair, whose B
+    holds each part at its own alpha / rank. One alpha for both parts
+    would cancel them and leave the base output."""
+    pipe = _pipe()
+    x = _x()
+    pairs = [(d, u) for d, u, _a in _pairs(7)]
+    rows = (_qkv_rows([(d, u, None) for d, u in pairs], 1.0)
+            + _qkv_rows([(d, u, 3.0) for d, u in pairs], -1.0))
+    entries = _entries(pipe, QKV, rows)
+    assert all(len(patches) == 2 for _m, _b, patches in entries)
+    y = _f64(_run(pipe, entries, QKV, x))
+    assert rel_l2(y, _ref(pipe, QKV, x, rows)) <= TOL
+    assert rel_l2(y, _ref(pipe, QKV, x, [])) > 10 * TOL
+    assert len(pipe.adapters) == 3 and op.calls == 1
+    assert len([k for k in pipe.tables._items
+                if k[0] == install.KERNEL]) == 1
+
+
+def test_a_kernel_pair_stays_while_a_table_built_over_it_is_held(op):
+    """The kernel pair two tables share is counted once, under its own
+    key, and in neither table. Bounds lowered to nothing shed the table
+    that last ran only with its pairs, and the kernel pair only with the
+    last table built over it."""
     pipe = _pipe()
     pairs = _pairs(7)
     x = _x()
@@ -335,21 +377,219 @@ def test_a_shed_pair_is_counted_in_the_tables_that_hold_it(op):
     (key,) = [k for k in pipe.tables._items if k[0] == install.KERNEL]
     a_t, b_t, _ = pipe.tables.peek(key)
     pair = int(a_t.nbytes) + int(b_t.nbytes)
-    keys = [k for k in pipe.tables._items if k[0] in tids]
-    assert len(keys) == 2
+    built = [pipe.tables.peek(k) for k in pipe.tables._items if k[0] in tids]
+    assert len(built) == 2
+    assert pipe.tables.bytes == sum(t.nbytes for t in built) + pair
+    pipe.tables.max_bytes = 0
+    install.shed_to_bounds(pipe)
+    (cur,) = pipe.lora._cur.values()
+    assert cur is built[1]
+    assert [pipe.tables.peek(k) for k in pipe.tables._items
+            if k[0] in tids] == [cur]
+    assert pipe.tables.peek(key) is not None
+    assert pipe.tables.bytes == cur.nbytes + pair
+    pipe.adapters.max_bytes = 0
+    install.shed_to_bounds(pipe)
+    assert pipe.adapters.bytes == pipe.tables.bytes == 0
+    assert not pipe.lora._cur
 
-    def recount():
-        for k in keys:
-            pipe.tables.put(k, pipe.tables.peek(k), pipe.tables.peek(k).nbytes)
-        return pipe.tables.bytes
 
-    before = [pipe.tables.peek(k).nbytes for k in keys]
-    assert recount() == sum(before) + pair
-    pipe.tables.shed_others(set(keys), 0)
-    assert pipe.tables.peek(key) is None
-    assert [pipe.tables.peek(k).nbytes for k in keys] == [
-        n + pair for n in before]
-    assert recount() == sum(before) + 2 * pair
+def test_a_put_that_drops_the_table_that_ran_sheds_its_kernel_pair(op):
+    """The table that ran last is held past a tables bound of nothing,
+    with its kernel pair. A put that needs the room of its pairs drops
+    it, and the kernel pair it kept goes in the same call."""
+    pipe = _pipe()
+    _run(pipe, _entries(pipe, QKV, _qkv_rows(_pairs(7))), QKV, _x())
+    pipe.tables.max_bytes = 0
+    install.shed_to_bounds(pipe)
+    assert pipe.lora._cur and pipe.tables.bytes > 0
+    pipe.adapters.max_bytes = pipe.adapters.bytes
+    lora.register_pair(pipe, *_pairs(8)[0][:2])
+    assert not pipe.lora._cur
+    assert pipe.tables.bytes == 0
+
+
+def _two_over_one_dit() -> tuple:
+    p1 = _pipe()
+    return p1, api.ImagePipeline(dit=p1.dit, family=p1.family,
+                                 variant="turbo")
+
+
+def test_each_pipeline_over_one_dit_runs_and_counts_its_own_table(op):
+    """Two pipelines over one DiT define the same table, under one id.
+    Each runs the table built over its own pairs and counts it in its own
+    tables cache. The pipeline whose table did not run last holds nothing
+    for the patch state, and its forward that stops before the first
+    leaf records nothing in either cache."""
+    p1, p2 = _two_over_one_dit()
+    pairs, x = _pairs(7), _x()
+    y1 = _run(p1, _entries(p1, QKV, _qkv_rows(pairs)), QKV, x)
+    (t1,) = p1.lora._cur.values()
+    y2 = _run(p2, _entries(p2, QKV, _qkv_rows(pairs)), QKV, x)
+    ((key, t2),) = p2.lora._cur.items()
+    assert p2.lora is p1.lora and t2 is not t1 and _same(y1, y2)
+    assert p1.tables.peek(key) is t1 and p2.tables.peek(key) is t2
+    stepped = p2.tables.used(key)
+    install.restore(p1, install.activate(p1, key[0]))
+    assert p1.tables.peek(key) is t1 and p2.lora._cur == {key: t2}
+    assert p2.tables.used(key) == stepped
+    p1.tables.max_bytes = 0
+    install.shed_to_bounds(p1)
+    assert p1.tables.bytes == 0
+
+
+def test_drop_built_keeps_the_tables_another_pipeline_over_the_dit_ran(op):
+    """drop_built of one pipeline over a DiT drops its own tables and
+    keeps those the patch state holds for the other, whose tables cache
+    stays over its bound by them alone."""
+    p1, p2 = _two_over_one_dit()
+    pairs, x = _pairs(7), _x()
+    _run(p1, _entries(p1, QKV, _qkv_rows(pairs)), QKV, x)
+    _run(p2, _entries(p2, QKV, _qkv_rows(pairs, 0.6)), QKV, x)
+    cur = dict(p2.lora._cur)
+    p2.tables.max_bytes = 0
+    install.shed_to_bounds(p2)
+    held = p2.tables.bytes
+    install.drop_built(p1)
+    assert not [k for k in p1.tables.keys(lambda k: k[0] != install.KERNEL)]
+    assert p2.lora._cur == cur and p2.tables.bytes == held > 0
+    _check_caches(p2)
+
+
+def _w1_patch(pipe, rng, hold=()) -> str:
+    """A ComfyUI patch on the K-quant w1, kept as register_patch keeps
+    one."""
+    out, inp = install.linear_dims(_leaf(pipe, W1))
+    d, u, _ = make_pair(rng, out, inp, 4)
+    key, _alpha = lora.register_patch(pipe, mx.array(u), mx.array(d),
+                                      hold=hold)
+    return key
+
+
+def _w1_step(pipe, keys) -> None:
+    """A forward of w1 under the table of ``keys``, or of the base model
+    without keys."""
+    _w1_run(pipe, api.define_patch_table(
+        pipe, [(W1, None, [(k, 1.0) for k in keys])] if keys else []))
+
+
+def _w1_run(pipe, tid) -> None:
+    """A forward of w1 under the table ``tid``, defined before."""
+    inp = install.linear_dims(_leaf(pipe, W1))[1]
+    x = mx.array(np.random.default_rng(0).standard_normal(
+        (1, 64, inp)).astype(np.float32)).astype(mx.bfloat16)
+    prev = install.activate(pipe, tid)
+    try:
+        mx.eval(_leaf(pipe, W1)(x))
+    finally:
+        install.restore(pipe, prev)
+
+
+def test_patches_kept_with_no_hold_shed_the_stale_tables_before_them(
+        op, monkeypatch):
+    """A library caller keeps a table's two patches with no hold on a full
+    pair cache whose pairs two stepped tables hold. The tables go in the
+    order they stepped, each before the pairs kept after its step, so the
+    first patch is still held for the define. Each put drops one table, in
+    the order the check gives."""
+    order = _OrderCheck(monkeypatch)
+    rng = np.random.default_rng(11)
+    pipe = _pipe()
+    for _ in range(2):
+        _w1_step(pipe, [_w1_patch(pipe, rng)])
+    pipe.adapters.max_bytes = pipe.adapters.bytes
+    keys = [_w1_patch(pipe, rng) for _ in range(2)]
+    _w1_step(pipe, keys)
+    assert pipe.adapters.bytes == pipe.adapters.max_bytes
+    assert order.drops == 2
+
+
+def test_register_patch_keeps_the_pairs_it_holds_for_the_table(op):
+    """A table's first patch is kept, another table steps after it, and
+    the second patch needs room on a full pair cache. With the first
+    patch held, the room sheds the stepped table and its pair, though
+    the first patch was used before that step."""
+    rng = np.random.default_rng(12)
+    pipe = _pipe()
+    old = [_w1_patch(pipe, rng)]
+    _w1_step(pipe, old)
+    pipe.adapters.max_bytes = 2 * pipe.adapters.bytes
+    first = _w1_patch(pipe, rng)
+    _w1_step(pipe, old)
+    keys = [first, _w1_patch(pipe, rng, hold=[first])]
+    _w1_step(pipe, keys)
+    assert pipe.adapters.peek(old[0]) is None
+
+
+def test_a_forward_of_the_base_model_is_no_step_of_the_last_table(op):
+    """The table that ran last stays held through a forward of the base
+    model, which does not step it. A patch kept between the two was used
+    after the table's step, so the room for another drops the table and
+    its pair first."""
+    rng = np.random.default_rng(13)
+    pipe = _pipe()
+    old = [_w1_patch(pipe, rng)]
+    _w1_step(pipe, old)
+    pipe.adapters.max_bytes = 2 * pipe.adapters.bytes
+    kept = _w1_patch(pipe, rng)
+    _w1_step(pipe, [])
+    assert pipe.lora._cur
+    _w1_patch(pipe, rng)
+    assert pipe.adapters.peek(kept) is not None
+    assert pipe.adapters.peek(old[0]) is None
+
+
+def test_a_define_is_a_use_of_the_pairs_it_names(op):
+    """A library caller keeps patch p, steps a table over another patch,
+    then defines a table over p and keeps one more patch on a full pair
+    cache. The define is p's last use, after that step, so the stepped
+    table and its patch go, p stays, and the new table steps."""
+    rng = np.random.default_rng(31)
+    pipe = _pipe()
+    p = _w1_patch(pipe, rng)
+    _w1_step(pipe, [_w1_patch(pipe, rng)])
+    tid = api.define_patch_table(pipe, [(W1, None, [(p, 1.0)])])
+    pipe.adapters.max_bytes = pipe.adapters.bytes
+    _w1_patch(pipe, rng)
+    assert pipe.adapters.peek(p) is not None
+    _w1_run(pipe, tid)
+
+
+def test_a_build_is_a_use_of_the_pairs_it_reads(op):
+    """A table is defined over patch q, patch r is kept, and the table
+    steps, which builds it over q. The table then leaves the tables cache
+    for another's build, and a patch that needs one pair of room sheds r,
+    kept before the build, so the table steps again over q."""
+    rng = np.random.default_rng(32)
+    pipe = _pipe()
+    q = _w1_patch(pipe, rng)
+    tid = api.define_patch_table(pipe, [(W1, None, [(q, 1.0)])])
+    r = _w1_patch(pipe, rng)
+    _w1_run(pipe, tid)
+    pipe.tables.max_bytes = pipe.tables.bytes
+    _w1_step(pipe, [_w1_patch(pipe, rng)])
+    assert not any(k[0] == tid for k in pipe.tables.keys(lambda k: True))
+    pipe.adapters.max_bytes = pipe.adapters.bytes
+    _w1_patch(pipe, rng)
+    assert pipe.adapters.peek(q) is not None and pipe.adapters.peek(r) is None
+    _w1_run(pipe, tid)
+
+
+def test_a_run_of_steps_makes_its_last_step_the_tables_use(op):
+    """A table steps, a patch is kept, and the table steps again from the
+    patch state, which reads no cache at the step's start. The end of that
+    step is the table's use, so the room for another patch sheds the patch
+    kept between the steps and keeps the table."""
+    rng = np.random.default_rng(25)
+    pipe = _pipe()
+    t = [_w1_patch(pipe, rng)]
+    _w1_step(pipe, t)
+    between = _w1_patch(pipe, rng)
+    _w1_step(pipe, t)
+    pipe.adapters.max_bytes = pipe.adapters.bytes
+    _w1_patch(pipe, rng)
+    assert pipe.adapters.peek(between) is None
+    assert pipe.adapters.peek(t[0]) is not None and pipe.lora._cur
 
 
 @pytest.mark.parametrize("strength,alpha", [(1.0, None), (1.0, 3.0),
@@ -752,3 +992,393 @@ def test_a_timed_leaf_keeps_the_route_and_books_one_record(op):
         ("module", "KQuantLinear")]
     assert type(_leaf(pipe, QKV).base) is KQuantLinear
     assert ops.lora_fused is kq_routes.lora_fused
+
+
+# The two LoRA caches under a random sequence of their callers'
+# operations, in the kernel form and on stock leaves.
+
+SLOTS = [*((QKV, b) for b in BANDS), (QKV, None), (OTHER, None), (W1, None),
+         ("layers.0.attention.out", None), ("layers.1.feed_forward.w2", None)]
+OWN_ALPHA = 4.0
+ALPHAS = (None, 2.0, OWN_ALPHA, 8.0)
+OPS_PER_SEED = 300
+
+
+def _slot_dims(pipe, slot) -> tuple:
+    path, band = slot
+    out, inp = install.linear_dims(_leaf(pipe, path))
+    return (band[2] if band else out), inp
+
+
+def _new_pair(pipe, rng, slot) -> tuple:
+    out, inp = _slot_dims(pipe, slot)
+    d, u, _ = make_pair(rng, out, inp, int(rng.choice([2, 4, 8])))
+    dtype = mx.bfloat16 if rng.random() < 0.5 else mx.float32
+    d, u = mx.array(d).astype(dtype), mx.array(u).astype(dtype)
+    mx.eval(d, u)
+    return d, u
+
+
+def _reach(obj, out: dict) -> None:
+    """The arrays ``obj`` keeps alive, by identity: a pair, a built table's
+    parts and factors, a kernel pair. The leaves of the DiT and the
+    closures over them are left out."""
+    if isinstance(obj, mx.array):
+        out[id(obj)] = obj
+    elif isinstance(obj, (list, tuple)):
+        for o in obj:
+            _reach(o, out)
+    elif isinstance(obj, dict):
+        for o in obj.values():
+            _reach(o, out)
+    elif isinstance(obj, (install.Pair, plan.Part)):
+        _reach([obj.down, obj.up], out)
+    elif type(obj).__module__ == install.__name__:
+        for k, v in vars(obj).items():
+            if k not in ("_leaves", "_pairs", "_plain", "fns"):
+                _reach(v, out)
+
+
+def _check_caches(pipe) -> None:
+    """The distinct arrays the two caches and the patch state keep alive
+    add up to the bytes the caches count; a cache over its bound holds
+    only what is pinned; every held table's pairs are in the pair cache;
+    each cache's clock holds a use for each of its entries and no other."""
+    ad, tb = pipe.adapters, pipe.tables
+    for cache in (ad, tb):
+        assert set(cache._used) == set(cache.keys(lambda k: True))
+    live: dict = {}
+    for k in ad.keys(lambda k: True):
+        _reach(ad.peek(k), live)
+    held = []
+    for k in tb.keys(lambda k: True):
+        v = tb.peek(k)
+        if k[0] == install.KERNEL:
+            _reach(v, live)
+        else:
+            held.append(v)
+    cur = list(pipe.lora._cur.values()) if pipe.lora is not None else []
+    for t in held + cur:
+        _reach(t, live)
+    assert sum(int(a.nbytes) for a in live.values()) == ad.bytes + tb.bytes
+    if ad.bytes > ad.max_bytes:
+        assert set(ad.keys(lambda k: True)) <= ad.kept
+    if tb.bytes > tb.max_bytes:
+        mine = {id(t) for t in cur}
+        kernels = set().union(*(t.kernels for t in cur))
+        free = [(k[0][:8], tb.nbytes(k)) for k in tb.keys(lambda k: True)
+                if k not in kernels and id(tb.peek(k)) not in mine]
+        assert not free, (tb.bytes, tb.max_bytes, free)
+    pair_arrays: dict = {}
+    for k in ad.keys(lambda k: True):
+        _reach(ad.peek(k), pair_arrays)
+    for t in held + cur:
+        assert all(ad.peek(k) is not None for k in t.keys)
+        parts: dict = {}
+        _reach(t._parts, parts)
+        assert parts.keys() <= pair_arrays.keys()
+
+
+class _Sequence:
+    """A pipeline, the entry's own pairs, and the pairs and tables the
+    operations made, with one method per operation."""
+
+    def __init__(self, seed: int):
+        self.rng = np.random.default_rng(seed)
+        self.pipe = _pipe()
+        self.own = [(slot, *_new_pair(self.pipe, self.rng, slot))
+                    for slot in (SLOTS[1], (W1, None), SLOTS[-2])]
+        self.own_keys: list = []
+        self.load_own()
+        own = self.pipe.adapters.bytes
+        self.bounds = {"adapters": own + (96 << 10), "tables": 96 << 10}
+        self.pipe.adapters.max_bytes = self.bounds["adapters"]
+        self.pipe.tables.max_bytes = self.bounds["tables"]
+        self.pool: list = []        # (slot, down, up, alpha)
+        self.tids: list = []
+        self.refused = self.missing = self.held_again = 0
+
+    def load_own(self) -> None:
+        # The entry reads its file into a cache fitted to hold it, then
+        # sets the keep set.
+        need = sum(int(d.nbytes) + int(u.nbytes) for _s, d, u in self.own)
+        self.pipe.adapters.max_bytes = max(self.pipe.adapters.max_bytes, need)
+        self.own_keys = []
+        for _slot, d, u in self.own:
+            self.own_keys.append(install.register_pair(
+                self.pipe, d, u, hold=self.own_keys))
+        self.pipe.adapters.keep(self.own_keys)
+
+    def _held(self) -> tuple:
+        pipe = self.pipe
+        cur = pipe.lora._cur.values() if pipe.lora is not None else ()
+        return (set(pipe.adapters.keys(lambda k: True)),
+                set(pipe.tables.keys(lambda k: True)), {id(t) for t in cur})
+
+    def _put(self, row, hold=()) -> str | None:
+        _slot, d, u, _alpha = row
+        pipe = self.pipe
+        nbytes = int(d.nbytes) + int(u.nbytes)
+        before = self._held()
+        try:
+            return install.register_pair(pipe, d, u, hold=hold)
+        except install.PairRoomError:
+            # Only a pair that cannot fit beside the pairs that stay, and
+            # its refusal sheds nothing.
+            stay = set(pipe.adapters.kept) | set(hold)
+            assert sum(pipe.adapters.nbytes(k) for k in stay) + nbytes \
+                > pipe.adapters.max_bytes
+            assert self._held() == before
+            self.refused += 1
+            return None
+
+    def _fresh(self) -> tuple:
+        slot = SLOTS[self.rng.integers(len(SLOTS))]
+        alpha = None if self.rng.random() < 0.5 else 2.0
+        return (slot, *_new_pair(self.pipe, self.rng, slot), alpha)
+
+    def _alpha(self, *but) -> float | None:
+        alphas = [a for a in ALPHAS if a not in but]
+        return alphas[self.rng.integers(len(alphas))]
+
+    def _copied(self, d, u) -> tuple:
+        # The same pair read from another file: new arrays, same bytes.
+        if self.rng.random() < 0.5:
+            return d, u
+        d, u = (mx.array(np.array(a.astype(mx.float32))).astype(a.dtype)
+                for a in (d, u))
+        mx.eval(d, u)
+        return d, u
+
+    def _own_row(self) -> tuple:
+        # The entry's own pair as a client sends it: from the entry's
+        # file, a ComfyUI read of it or a header-less copy, at any alpha.
+        slot, d, u = self.own[self.rng.integers(len(self.own))]
+        return (slot, *self._copied(d, u), self._alpha())
+
+    def register(self) -> None:
+        row = self._fresh()
+        if self._put(row) is not None:
+            self.pool.append(row)
+
+    def again(self) -> None:
+        # A pair put again under another alpha, by the step route or the
+        # images API. A held pair takes no new bytes and keeps one key.
+        rows = self.pool + [(*o, OWN_ALPHA) for o in self.own]
+        slot, d, u, alpha = rows[self.rng.integers(len(rows))]
+        row = (slot, *self._copied(d, u), self._alpha(alpha))
+        key = install.pair_hash(d, u)
+        ad = self.pipe.adapters
+        before = (ad.bytes, set(ad.keys(lambda k: True)))
+        got = self._put(row)
+        if key in before[1]:
+            assert got == key
+            assert (ad.bytes, set(ad.keys(lambda k: True))) == before
+            self.held_again += 1
+        if got is not None:
+            self.pool.append(row)
+
+    def define(self) -> None:
+        # A step route's define: every pair of the body registered, the
+        # earlier ones held for the later, then the table.
+        rows = []
+        for _ in range(int(self.rng.integers(1, 4))):
+            pick = self.rng.random()
+            if pick < 0.4 or not self.pool:
+                rows.append(self._fresh())
+            elif pick < 0.8:
+                rows.append(self.pool[self.rng.integers(len(self.pool))])
+            else:
+                rows.append(self._own_row())
+        if self.rng.random() < 0.3:
+            rows.append((*self.own[self.rng.integers(len(self.own))],
+                         OWN_ALPHA))
+        keys: list = []
+        entries: dict = {}
+        for row in rows:
+            key = self._put(row, keys)
+            if key is None:
+                return
+            keys.append(key)
+            patches = entries.setdefault(row[0], [])
+            if (key, row[3]) not in [(k, a) for k, _s, a in patches]:
+                patches.append((key, float(self.rng.choice([1.0, 0.5,
+                                                            -0.7])),
+                                row[3]))
+        self.pool += [r for r in rows if not any(r is q for q in self.pool)]
+        self.tids.append(api.define_patch_table(
+            self.pipe, [(p, b, patches) for (p, b), patches in
+                        entries.items()]))
+
+    def step(self) -> None:
+        pipe = self.pipe
+        self.tids = [t for t in self.tids if t in pipe.patch_tables]
+        if not self.tids:
+            return
+        tid = self.tids[self.rng.integers(len(self.tids))]
+        dtype = mx.bfloat16 if self.rng.random() < 0.7 else mx.float32
+        rows = int(self.rng.choice([2, 64]))
+        paths = sorted({p for p, _b, _s in pipe.patch_tables[tid]["entries"]})
+        prev = install.activate(pipe, tid)
+        try:
+            for path in paths:
+                inp = install.linear_dims(_leaf(pipe, path))[1]
+                x = mx.array(self.rng.standard_normal(
+                    (1, rows, inp)).astype(np.float32)).astype(dtype)
+                mx.eval(_leaf(pipe, path)(x))
+        except lora.AdapterError:
+            # The step route's 409: a pair of the table is no longer held.
+            assert any(pipe.adapters.peek(k) is None
+                       for _p, _b, patches in pipe.patch_tables[tid]["entries"]
+                       for k, _s, _a in patches)
+            self.missing += 1
+        finally:
+            install.restore(pipe, prev)
+
+    def shrink(self) -> None:
+        which = "adapters" if self.rng.random() < 0.5 else "tables"
+        frac = float(self.rng.choice([0.0, 0.125, 0.25, 0.5, 1.0, 1.0]))
+        cache = getattr(self.pipe, which)
+        cache.max_bytes = int(self.bounds[which] * frac)
+        install.shed_to_bounds(self.pipe)
+
+    def drop_dit(self) -> None:
+        from types import SimpleNamespace
+
+        from gmlx.serve import image_service, video_service
+
+        pipe, dit, vae = self.pipe, self.pipe.dit, self.pipe.vae
+        served = SimpleNamespace(pipe=pipe, adapters=[])
+        if self.rng.random() < 0.5:
+            # A video entry's encode: the DiT and every pair go, and its
+            # ensure_dit reads the entry's file again.
+            video_service.drop_dit(served)
+            pipe.dit = dit
+            install.rewrap(pipe)
+            self.load_own()
+        else:
+            # A staged image entry's encode: the DiT goes, the pairs stay.
+            image_service._drop_dit(served)
+            pipe.dit, pipe.vae = dit, vae
+            install.rewrap(pipe)
+
+    def release(self) -> None:
+        from types import SimpleNamespace
+
+        from gmlx.serve import image_service
+
+        # The pool lets the entry go, and loads it again.
+        image_service._release([SimpleNamespace(pipe=self.pipe)])
+        self.load_own()
+
+    OPS = (("register", 4), ("again", 2), ("define", 5),
+           ("step", 6), ("shrink", 2), ("drop_dit", 1), ("release", 1))
+
+
+# The pair cache's order of use, modelled apart from make_room: at each
+# turn the oldest of the unpinned pairs, by last use, and of the held
+# tables that can go, by last step, goes until the bytes fit. A pair stays
+# pinned while any held table names it.
+
+def _pair_room_inputs(pipe, hold) -> tuple:
+    """What the pair branch of make_room reads, without a use: each pair
+    with its bytes and last use, the keep set with ``hold``, and each held
+    table with its keys, last step and whether a forward runs it."""
+    ad, tb = pipe.adapters, pipe.tables
+    pairs = [(k, ad.nbytes(k), ad.used(k)) for k in ad.keys(lambda k: True)]
+    steps = {id(tb.peek(k)): tb.used(k)
+             for k in tb.keys(lambda k: k[0] != install.KERNEL)}
+    running = install._running(pipe)
+    tables = [(id(t), t.keys, steps.get(id(t), math.inf), id(t) in running)
+              for t in install._tables(pipe)]
+    return pairs, set(ad.kept) | set(hold), tables, ad.bytes, ad.max_bytes
+
+
+def _one_order(inputs, nbytes: int) -> tuple:
+    """The pairs shed, the tables dropped and whether ``nbytes`` fit, in
+    one order of use."""
+    pairs, base, tables, total, bound = inputs
+    if total + nbytes <= bound:
+        return set(), set(), True
+    base = set(base).union(*(keys for _i, keys, _s, run in tables if run))
+    if nbytes and total - sum(b for k, b, _u in pairs if k not in base) \
+            + nbytes > bound:
+        return set(), set(), False
+    left = {k: (b, u) for k, b, u in pairs}
+    live = {i: (keys, step) for i, keys, step, run in tables if not run}
+    shed, dropped = set(), set()
+    while total + nbytes > bound:
+        pinned = base.union(*(keys for keys, _s in live.values()))
+        turns = [(u, 0, k) for k, (_b, u) in left.items() if k not in pinned]
+        turns += [(step, 1, i) for i, (keys, step) in live.items()
+                  if not keys <= base]
+        if not turns:
+            break
+        _use, kind, x = min(turns, key=lambda t: t[:2])
+        if kind == 0:
+            total -= left.pop(x)[0]
+            shed.add(x)
+        else:
+            del live[x]
+            dropped.add(x)
+    return shed, dropped, total + nbytes <= bound
+
+
+class _OrderCheck:
+    """make_room with each call for the pair cache checked against
+    ``_one_order``. ``puts`` counts the puts, of more than 0 bytes, that
+    shed or dropped, ``drops`` the puts that dropped a table, and
+    ``bounds`` the sheds to a bound, of 0 bytes, that shed or dropped."""
+
+    def __init__(self, monkeypatch):
+        self.make_room = install.make_room
+        self.puts = self.drops = self.bounds = 0
+        monkeypatch.setattr(install, "make_room", self)
+
+    def __call__(self, pipe, cache, nbytes, hold=()):
+        if cache is not pipe.adapters:
+            return self.make_room(pipe, cache, nbytes, hold)
+        hold = list(hold)
+        inputs = _pair_room_inputs(pipe, hold)
+        want = _one_order(inputs, nbytes)
+        fit = self.make_room(pipe, cache, nbytes, hold)
+        got = ({k for k, _b, _u in inputs[0]} - set(cache.keys(lambda k: True)),
+               {i for i, *_ in inputs[2]}
+               - {id(t) for t in install._tables(pipe)}, fit)
+        if nbytes:
+            self.puts += bool(got[0] or got[1])
+            self.drops += bool(got[1])
+        else:
+            self.bounds += bool(got[0] or got[1])
+        assert got == want, (nbytes, sorted(k[:8] for k in got[0]),
+                             sorted(k[:8] for k in want[0]), len(got[1]),
+                             len(want[1]), fit, want[2])
+        return fit
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_a_random_sequence_counts_every_lora_array_once(op, monkeypatch, seed):
+    """Every array the pair cache, the tables cache and the patch state
+    keep alive is counted once, each cache is over its bound only by what
+    is pinned, every held table's pairs are held, and the pair cache sheds
+    in one order of use, after each of a few hundred operations of the
+    step routes, the images API and the entry in a seeded random order."""
+    order = _OrderCheck(monkeypatch)
+    seq = _Sequence(seed)
+    names = [n for n, _w in _Sequence.OPS]
+    weights = np.array([w for _n, w in _Sequence.OPS], np.float64)
+    ran = dict.fromkeys(names, 0)
+    done: list = []
+    for _ in range(OPS_PER_SEED):
+        name = names[seq.rng.choice(len(names), p=weights / weights.sum())]
+        getattr(seq, name)()
+        ran[name] += 1
+        done.append(name)
+        try:
+            _check_caches(seq.pipe)
+        except AssertionError as e:
+            raise AssertionError(f"after {done[-6:]}, op {len(done)}") from e
+    assert (all(ran.values()) and seq.refused and seq.missing
+            and seq.held_again and order.puts and order.bounds), (
+        ran, seq.refused, seq.missing, seq.held_again, order.puts,
+        order.bounds)

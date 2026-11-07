@@ -3378,7 +3378,7 @@ def test_server_image_block():
                                              "adapter_cache_mb": 128}}})
     assert (cfg.image.tensor_cache_mb, cfg.image.adapter_cache_mb) == (32, 128)
     base = build_config({}).image
-    assert (base.tensor_cache_mb, base.adapter_cache_mb) == (64, 256)
+    assert (base.tensor_cache_mb, base.adapter_cache_mb) == (64, None)
     for bad in ({"tensor_cache_mb": 0}, {"adapter_cache_mb": -5},
                 {"tensor_cache_mb": "lots"}):
         with pytest.raises(ConfigError, match=next(iter(bad))):
@@ -3389,6 +3389,40 @@ def test_server_image_block():
         build_config({"server": {"image": {"max_queue": -1}}})
 
 
+def test_server_video_block():
+    """server.video sets the job store of POST /v1/videos: two queued
+    jobs, a day's life and 8 GiB by default; sizes read as bytes or as
+    8G; a bad queue, life or size and an unknown key are refused naming
+    the key."""
+    assert build_config({}).video == cfgmod.VideoServerCfg(
+        max_queue=2, job_ttl_s=86400.0, store_max_bytes=8 << 30)
+    cfg = build_config({"server": {"video": {
+        "max_queue": 0, "job_ttl_s": 600, "store_max_bytes": "8G"}}})
+    assert cfg.video == cfgmod.VideoServerCfg(
+        max_queue=0, job_ttl_s=600.0, store_max_bytes=8 << 30)
+    cfg = build_config({"server": {"video": {"store_max_bytes": 1 << 20}}})
+    assert cfg.video.store_max_bytes == 1 << 20
+    for bad in ({"max_queue": -1}, {"max_queue": "two"}, {"job_ttl_s": 0},
+                {"job_ttl_s": float("nan")}, {"job_ttl_s": float("inf")},
+                {"store_max_bytes": "lots"},
+                {"store_max_bytes": 0}, {"max_queue_x": 1}):
+        with pytest.raises(ConfigError, match=next(iter(bad))):
+            build_config({"server": {"video": bad}})
+
+
+def test_server_video_round_trips_through_print_config():
+    import yaml
+
+    pytest.importorskip("gmlx.serve.server")
+    from gmlx.serve import server as srv
+
+    cfg = build_config({"server": {"video": {"max_queue": 5,
+                                             "store_max_bytes": "1G"}}})
+    doc = yaml.safe_load(srv._dump_cfg_yaml(cfg))
+    assert doc["server"]["video"]["store_max_bytes"] == 1 << 30
+    assert build_config(doc).video == cfg.video
+
+
 def test_default_image_model_must_be_an_image_model():
     doc = _image_doc()
     doc["server"] = {"defaults": {"image_model": "zit"}}
@@ -3396,6 +3430,36 @@ def test_default_image_model_must_be_an_image_model():
     doc["server"] = {"defaults": {"image_model": "chat"}}
     with pytest.raises(ConfigError, match="image_model"):
         build_config(doc)
+
+
+def test_server_image_adapter_cache_mb_is_an_optional_cap():
+    """server.image.adapter_cache_mb has no default: absent and null leave
+    it unset, a positive number of MB sets the cap, and 0, -5 and a word
+    are refused naming the key."""
+    assert build_config({}).image.adapter_cache_mb is None
+    cfg = build_config({"server": {"image": {"adapter_cache_mb": None}}})
+    assert cfg.image.adapter_cache_mb is None
+    cfg = build_config({"server": {"image": {"adapter_cache_mb": 256}}})
+    assert cfg.image.adapter_cache_mb == 256
+    for bad in (0, -5, "lots"):
+        with pytest.raises(ConfigError, match="adapter_cache_mb"):
+            build_config({"server": {"image": {"adapter_cache_mb": bad}}})
+
+
+def test_print_config_writes_no_lora_cap_and_reads_back_none():
+    """print-config writes the unset cap as null, which a --config read
+    of the output leaves unset; a set cap writes its MB."""
+    import yaml
+
+    from gmlx.serve import server as srv
+
+    cfg = build_config({})
+    text = srv._dump_cfg_yaml(cfg)
+    assert "    adapter_cache_mb: null\n" in text
+    again = build_config(yaml.safe_load(text))
+    assert again.image.adapter_cache_mb is None
+    cfg = build_config({"server": {"image": {"adapter_cache_mb": 256}}})
+    assert "    adapter_cache_mb: 256\n" in srv._dump_cfg_yaml(cfg)
 
 
 def test_image_models_round_trip_through_print_config():
@@ -3453,3 +3517,134 @@ def test_discovery_never_takes_an_image_id(monkeypatch):
     doc["discover"] = [{"dir": "/m"}]
     discovery.discovered_models(build_config(doc))
     assert {"chat", "zit"} <= seen["ids"]
+
+
+# --- video_models: a sibling block with its own keys, in the same namespace ---
+
+def _video_doc(**entry):
+    base = {"path": "/m/h3.gguf", "encoder": "/m/qwen3vl-32b.gguf",
+            "vae": "/m/video_vae.safetensors",
+            "audio_vae": "/m/audio_vae.safetensors"}
+    base.update(entry)
+    return {"models": {"chat": {"path": "/m/chat.gguf"}},
+            "video_models": {"h3": base}}
+
+
+def test_video_models_parse_and_normalize():
+    cfg = build_config(_video_doc(
+        adapters=["/turbo.safetensors", {"path": "/b.safetensors",
+                                         "strength": 0.5}],
+        defaults={"steps": "8", "shift": 6, "size": "1344X768",
+                  "seconds": 10}))
+    m = cfg.video_models["h3"]
+    assert (m.path, m.encoder, m.vae, m.audio_vae) == (
+        "/m/h3.gguf", "/m/qwen3vl-32b.gguf", "/m/video_vae.safetensors",
+        "/m/audio_vae.safetensors")
+    assert (m.encoder_mmproj, m.tiny_vae, m.variant) == (None, None, None)
+    assert m.adapters == (("/turbo.safetensors", 1.0), ("/b.safetensors", 0.5))
+    assert m.defaults == {"steps": 8, "shift": 6.0, "size": "1344x768",
+                          "seconds": 10.0}
+    assert "h3" not in cfg.models and "h3" not in cfg.image_models
+
+
+@pytest.mark.parametrize("entry,match", [
+    ({"pin": True}, "pin"),
+    ({"defaults": {"guidance": 4}}, "guidance"),
+    ({"defaults": {"size": "1000x768"}}, "multiples of 32"),
+    ({"defaults": {"steps": 0}}, "positive"),
+    ({"defaults": {"steps": 4.9}}, "whole number"),
+    ({"defaults": {"shift": float("nan")}}, "positive"),
+    ({"variant": 1}, "variant: expected a string"),
+    ({"adapters": [{"path": "/a", "strength": "x"}]}, "strength"),
+    ({"upsampler": "nope"}, "`upsampler` 'nope' is not a model id"),
+    ({"upsample": "yes"}, "upsample: expected true or false"),
+    ({"upsample_prompt": 3}, "upsample_prompt: expected a string"),
+])
+def test_video_model_keys_and_defaults_are_strict(entry, match):
+    with pytest.raises(ConfigError, match=match):
+        build_config(_video_doc(**entry))
+
+
+@pytest.mark.parametrize("seconds", [0.15, 15.1, 600])
+def test_a_clip_length_past_the_frame_range_is_refused_at_load(seconds):
+    with pytest.raises(ConfigError, match=r"defaults.seconds: expected "
+                       r"0.208333 to 15.0833 seconds"):
+        build_config(_video_doc(defaults={"seconds": seconds}))
+
+
+@pytest.mark.parametrize("seconds", [0.2085, 5 / 24, 15.08, 362 / 24])
+def test_a_clip_length_inside_the_frame_range_loads(seconds):
+    cfg = build_config(_video_doc(defaults={"seconds": seconds}))
+    assert cfg.video_models["h3"].defaults["seconds"] == seconds
+
+
+def test_a_video_model_needs_its_four_files():
+    doc = _video_doc()
+    del doc["video_models"]["h3"]["audio_vae"]
+    with pytest.raises(ConfigError, match="needs `audio_vae`"):
+        build_config(doc)
+
+
+@pytest.mark.parametrize("where", ["models", "image_models", "aliases"])
+def test_video_id_collision_is_a_config_error(where):
+    doc = _video_doc()
+    if where == "aliases":
+        doc["aliases"] = {"h3": "chat"}
+    elif where == "models":
+        doc["models"]["h3"] = {"path": "/m/other.gguf"}
+    else:
+        doc["image_models"] = {"h3": {
+            "path": "/m/z.gguf", "encoder": "/m/e.gguf", "vae": "/m/v.gguf"}}
+    with pytest.raises(ConfigError, match="collides"):
+        build_config(doc)
+
+
+def test_a_video_model_resolves_under_model_dirs(tmp_path):
+    for name in ("h3.gguf", "enc.gguf", "v.safetensors", "a.safetensors",
+                 "lora.safetensors"):
+        (tmp_path / name).write_bytes(b"x")
+    doc = {"server": {"model_dirs": [str(tmp_path)]},
+           "video_models": {"h3": {
+               "path": "h3.gguf", "encoder": "enc.gguf",
+               "vae": "v.safetensors", "audio_vae": "a.safetensors",
+               "adapters": [{"path": "lora.safetensors", "strength": 0.8}],
+               "variant": "fl2va"}}}
+    rm = cfgmod.resolve_video_model("h3", build_config(doc))
+    assert rm.path == str(tmp_path / "h3.gguf")
+    assert rm.audio_vae == str(tmp_path / "a.safetensors")
+    assert rm.adapters == ((str(tmp_path / "lora.safetensors"), 0.8),)
+    assert (rm.tiny_vae, rm.variant) == (None, "fl2va")
+    assert (rm.upsampler, rm.upsample, rm.upsample_prompt) == (None, True,
+                                                               None)
+
+
+def test_a_video_models_upsampler_and_its_prompt_resolve(tmp_path):
+    """A video entry names its upsampler, a chat model id, and the guide
+    it reads, found under model_dirs as the entry's files are."""
+    (tmp_path / "guide.md").write_text("the guide")
+    doc = _video_doc(upsampler="chat", upsample=False,
+                     upsample_prompt="guide.md")
+    doc["server"] = {"model_dirs": [str(tmp_path)]}
+    rm = cfgmod.resolve_video_model("h3", build_config(doc))
+    assert (rm.upsampler, rm.upsample, rm.upsample_prompt) == (
+        "chat", False, str(tmp_path / "guide.md"))
+    # An upsampler prices the entry's text rows, so naming one reloads it,
+    # and another chat model does not.
+    doc["models"]["chat2"] = {"path": "/m/chat2.gguf"}
+    sig = {up: cfgmod.resolve_video_model("h3", build_config(
+        {**doc, "video_models": {"h3": {**doc["video_models"]["h3"],
+                                        "upsampler": up}}})).load_signature()
+        for up in ("chat", "chat2", None)}
+    assert sig["chat"] == sig["chat2"] != sig[None]
+
+
+def test_video_models_round_trip_through_print_config():
+    import yaml
+
+    from gmlx.serve import server as srv
+    cfg = build_config(_video_doc(
+        adapters=[{"path": "/a.safetensors", "strength": 0.5}],
+        defaults={"steps": 8}, tiny_vae="/m/taeh3.safetensors",
+        upsampler="chat", upsample_prompt="/m/guide.md"))
+    again = build_config(yaml.safe_load(srv._dump_cfg_yaml(cfg)))
+    assert again.video_models == cfg.video_models

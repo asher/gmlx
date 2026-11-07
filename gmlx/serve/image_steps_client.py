@@ -231,6 +231,38 @@ class StepsClient:
             headers.get("x-gmlx-prefix-cache", "")))
         return got["out"]
 
+    def av_step(self, model: str, run: str | None, video, audio, timestep,
+                row: dict, *, shifts: dict, audio_scale: float = 1.0,
+                patch_table: str | None = None, anchors=None,
+                spans=None) -> tuple:
+        """The video and audio output of a model with both streams for one
+        clip's latents, video (1, C, T, h, w) and audio (1, C, 2, T), as
+        ComfyUI's sampler carries them: at ``timestep`` (sigma x 1000) on
+        the stream ``shifts`` {"video", "audio"}. While ``audio_scale`` is
+        not 1, the sampler carries the audio at sigma_v / sigma_a times its
+        latent, and ``audio_scale`` scales its target. ``anchors`` are
+        {"frame", "video", "noise", "audio"} objects naming uploaded
+        tensors by hash and ``spans`` the cond's vision spans, as the
+        encode gave them. Records the times of the call."""
+        fields = {"model": model, "run": run, "patch_table": patch_table,
+                  "rows": [row], "audio_scale": float(audio_scale),
+                  "shifts": {k: float(v) for k, v in shifts.items()}}
+        if anchors:
+            fields["anchors"] = list(anchors)
+        if spans:
+            fields["spans"] = [list(sp) for sp in spans]
+        tensors = {"video": np.ascontiguousarray(video, np.float32),
+                   "audio": np.ascontiguousarray(audio, np.float32),
+                   "timestep": np.asarray(timestep, np.float32).reshape(-1)}
+        t0 = self.clock()
+        got, _f, headers = self.container("step", tensors, fields)
+        wall = (self.clock() - t0) * 1000
+        self.records.append(StepRecord(
+            wall, float(headers.get("x-gmlx-forward-ms", "nan")),
+            float(headers.get("x-gmlx-server-ms", "nan")),
+            headers.get("x-gmlx-prefix-cache", "")))
+        return got["video"], got["audio"]
+
     def sample(self, model: str, noise, sigmas, rows: list, *,
                cfg: float = 1.0, neg_rows: list | None = None,
                patch_table: str | None = None, run: str | None = None,

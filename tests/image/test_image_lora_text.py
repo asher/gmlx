@@ -95,7 +95,8 @@ def test_text_halves_apply_on_an_owned_encoder(tmp_path):
     a1 = lora.load_adapter(pipe, _write(tmp_path / "one.safetensors", one,
                                         tiny_z_adapter(1, 4.0)))
     a2 = lora.load_adapter(pipe, _write(tmp_path / "two.safetensors", two))
-    assert len(a1.dit) == 8 and sorted(p for p, _ in a1.text) == [Q, K, UP]
+    assert len(a1.dit) == 8
+    assert sorted(p for p, _a, _k in a1.text) == [Q, K, UP]
     assert a2.dit == () and lora.table_entries([(a2, 1.0)]) == []
     base = np.array(enc.encode("ab").hidden[0], np.float64)
     before = api.encode_text(pipe, "ab")

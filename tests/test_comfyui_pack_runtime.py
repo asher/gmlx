@@ -358,6 +358,11 @@ def test_pull_names_are_the_catalog_recipes(widgets):
     assert widgets.settings.FALLBACK_MODEL in widgets.PULL_NAMES
 
 
+def test_video_pull_names_are_the_video_recipes_the_nodes_run(widgets):
+    from gmlx.video.catalog import RECIPES
+    assert list(widgets.VIDEO_PULL_NAMES) == list(RECIPES)
+
+
 def test_a_kept_list_is_probed_again_after_keep_seconds(widgets, tmp_path, monkeypatch):
     """A slow probe keeps its answer no longer: R after a pull shows the new
     list within seconds."""
@@ -523,6 +528,17 @@ def test_an_unconfigured_model_is_refused_with_its_pull(widgets):
     assert widgets.validate(" ") == "model_name is empty"
 
 
+def test_a_video_model_the_server_lacks_is_refused_with_its_video_pull(widgets):
+    """h3-fast steps on the same DiT as h3 under its own LoRA and steps, so
+    h3 on the server is no stand-in for it."""
+    rows = _rows("z-image-turbo") + [{"model": "h3", "family": "h3", "variant": "fl2va"}]
+    msg = widgets.not_on_server("h3-fast", "http://127.0.0.1:8080", rows)
+    assert msg == ("gmlx: the gmlx server at http://127.0.0.1:8080 has no video model "
+                   "'h3-fast' (it has: z-image-turbo, h3). Run `gmlx video pull h3-fast`, "
+                   "which downloads it and adds it to gmlx's config, then run the workflow "
+                   "again.")
+
+
 @pytest.mark.parametrize("asked, has", [("qwen-image-2.1", "qwen-image"),
                                         ("qwen-image", "qwen-image-2.1")])
 def test_a_model_the_server_has_under_another_id_is_named(widgets, asked, has):
@@ -563,7 +579,7 @@ def test_the_server_names_a_size_rule_for_each_family_whose_schedule_follows_the
     from gmlx.image.registry import get_family
     from gmlx.serve import image_steps as steps
 
-    for name in steps.COMFY:
+    for name in set(steps.COMFY) - steps.AV_FAMILIES:
         fam = get_family(name)
         for variant, row in fam.sampling.items():
             needs = False
@@ -624,10 +640,14 @@ def test_gmlx_sigmas_without_a_size_is_refused_on_a_size_schedule():
 
 def test_the_stub_server_carries_the_status_size_rules():
     """The stub the pack suites run against gives each model the rule the
-    server's status gives it."""
+    server's status gives it, and a video model none."""
     spec = importlib.util.spec_from_file_location(
         "_pack_stub", _ROOT / "tests" / "comfyui_pack" / "stub_server.py")
     stub = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(stub)
+    from gmlx.serve import image_steps as steps
+
     for mid, (family, variant, sampling) in stub.MODELS.items():
-        assert sampling["schedule"] == _status(family, variant)["sampling"]["schedule"], mid
+        want = None if family in steps.AV_FAMILIES else \
+            _status(family, variant)["sampling"]["schedule"]
+        assert sampling["schedule"] == want, mid

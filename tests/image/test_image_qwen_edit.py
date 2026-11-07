@@ -18,7 +18,7 @@ import mlx.nn as nn
 
 from image_fixtures import load_json
 
-from gmlx.image import api, memfit
+from gmlx.image import api, memfit, vision_tap
 from gmlx.image import text_encoder as te
 from gmlx.image.conditioning import (Conditioning, Reference,
                                      conditioning_key, latents_hash)
@@ -364,40 +364,9 @@ def test_the_tap_with_images_is_the_forward_of_the_class(handle, refs):
         assert text.features.dtype == mx.float32
 
 
-def test_a_split_product_is_float32_in_this_process():
-    """``exact_matmul`` holds float32 precision whatever MLX's TF32 switch
-    reads in this process, at the magnitudes of the tower's residual
-    stream, for ``a @ b`` and ``a @ b.T``."""
-    rng = np.random.default_rng(0)
-    a = (rng.standard_normal((96, 160)) * 3000).astype(np.float32)
-    b = rng.standard_normal((160, 72)).astype(np.float32) / 12
-    want = a.astype(np.float64) @ b.astype(np.float64)
-    for got in (edit.exact_matmul(mx.array(a), mx.array(b)),
-                edit.exact_matmul(mx.array(a), mx.array(b.T.copy()),
-                                  b_t=True)):
-        assert got.dtype == mx.float32
-        gap = np.linalg.norm(np.array(got, np.float64) - want) \
-            / np.linalg.norm(want)
-        assert gap < 2e-6, gap
-    # The high part keeps 10 mantissa bits, and the parts sum to the input.
-    high, low = edit._split(mx.array(a))
-    assert not (np.array(high).view(np.uint32) & 0x1FFF).any()
-    assert np.array_equal(np.array(high + low), a)
-    # A matrix read from bfloat16 is its own high part: the product that
-    # leaves it whole is the split product, bit for bit.
-    b16 = mx.array(b).astype(mx.bfloat16).astype(mx.float32)
-    assert edit.tf32_exact(b16).item() and not edit.tf32_exact(
-        mx.array(b)).item()
-    for t in (False, True):
-        w = b16.T if t else b16
-        assert mx.array_equal(
-            edit.exact_matmul(mx.array(a), w, b_t=t, b_exact=True),
-            edit.exact_matmul(mx.array(a), w, b_t=t)).item()
-
-
 def _linears(module) -> dict:
     return {p: id(m) for p, m in module.named_modules()
-            if isinstance(m, (nn.Linear, edit.ExactLinear))}
+            if isinstance(m, (nn.Linear, vision_tap.ExactLinear))}
 
 
 def _gap(a, b) -> float:
@@ -428,19 +397,20 @@ def test_the_tower_computes_float32_where_it_runs(handle, refs, monkeypatch,
 
         def __call__(self, pixels, grid):
             kinds = {type(m) for m in tower.modules()
-                     if isinstance(m, (nn.Linear, edit.ExactLinear))}
+                     if isinstance(m, (nn.Linear, vision_tap.ExactLinear))}
             kinds |= {type(b) for b in tower.blocks}
             seen.append((mx.default_stream(mx.default_device()), kinds))
             return tower(pixels, grid)
 
     monkeypatch.setattr(handle.model, "vision_tower", Watched())
-    monkeypatch.setattr(edit, "f32_products_exact", lambda: products)
-    monkeypatch.setattr(edit, "sdpa_exact", lambda d: d == 8 and attention)
+    monkeypatch.setattr(vision_tap, "f32_products_exact", lambda: products)
+    monkeypatch.setattr(vision_tap, "sdpa_exact",
+                        lambda d: d == 8 and attention)
     edit.encode(handle, "x", refs)
     stream = mx.default_stream(mx.cpu if where == "cpu"
                                else mx.default_device())
-    kinds = ({edit.ExactLinear, edit.EvaluatedBlock} if where == "split"
-             else {nn.Linear, type(blocks[0])})
+    kinds = ({vision_tap.ExactLinear, vision_tap.EvaluatedBlock}
+             if where == "split" else {nn.Linear, type(blocks[0])})
     assert seen == [(stream, kinds)] * 2
     assert _linears(tower) == leaves
     assert all(a is b for a, b in zip(tower.blocks, blocks, strict=True))
@@ -463,8 +433,8 @@ def test_the_split_tower_is_the_float32_tower_on_this_device(refs, bf16):
         tower.update(tree_map(
             lambda a: a.astype(mx.bfloat16).astype(mx.float32)
             if a.dtype == mx.float32 else a, tower.parameters()))
-    assert edit._head_dims(tower) == {72}
-    assert edit.sdpa_exact(72)
+    assert vision_tap._head_dims(tower) == {72}
+    assert vision_tap.sdpa_exact(72)
     h = te.EncoderHandle(model, _Tokenizer(), _spec(), owned=True,
                          source_key="tiny72+mmproj", processor=proc)
     for ref in refs:
@@ -473,41 +443,38 @@ def test_the_split_tower_is_the_float32_tower_on_this_device(refs, bf16):
         with mx.stream(mx.cpu):
             f, d = tower(pixels, grid)
             want = [f, *d]
-        with edit.float32_products(tower):
+        with vision_tap.float32_products(tower):
             f, d = tower(pixels, grid)
             got = [f, *d]
             split = [m for _, m in tower.named_modules()
-                     if isinstance(m, edit.ExactLinear)]
-        if not edit.f32_products_exact():
+                     if isinstance(m, vision_tap.ExactLinear)]
+        if not vision_tap.f32_products_exact():
             assert split and {m.weight_exact for m in split} == {bf16}
         assert max(_gap(g, w) for g, w in zip(got, want)) < 1e-5
-        if not edit.f32_products_exact():
+        if not vision_tap.f32_products_exact():
             f, d = tower(pixels, grid)
             assert max(_gap(g, w) for g, w in zip([f, *d], want)) > 1e-4
 
 
 def test_the_attention_check_reads_the_device(monkeypatch):
-    monkeypatch.setattr(edit, "_SDPA_EXACT", {})
+    monkeypatch.setattr(vision_tap, "_SDPA_EXACT", {})
     with mx.stream(mx.cpu):
-        assert edit.sdpa_exact(8) and edit.sdpa_exact(72)
+        assert vision_tap.sdpa_exact(8) and vision_tap.sdpa_exact(72)
         cpu = str(mx.default_device())
-    assert set(edit._SDPA_EXACT) == {(cpu, 8), (cpu, 72)}
-    with mx.stream(mx.cpu):
-        monkeypatch.setattr(edit, "_F32_EXACT", {})
-        assert edit.f32_products_exact() is True
-        assert edit._F32_EXACT == {str(mx.default_device()): True}
+    assert set(vision_tap._SDPA_EXACT) == {(cpu, 8), (cpu, 72)}
 
 
 def test_the_split_layers_go_back_when_the_tower_raises(handle, monkeypatch):
     tower = handle.model.vision_tower
     before = _linears(tower)
     blocks = list(tower.blocks)
-    monkeypatch.setattr(edit, "f32_products_exact", lambda: False)
-    monkeypatch.setattr(edit, "sdpa_exact", lambda d: True)
+    monkeypatch.setattr(vision_tap, "f32_products_exact", lambda: False)
+    monkeypatch.setattr(vision_tap, "sdpa_exact", lambda d: True)
     with pytest.raises(RuntimeError, match="stop"):
-        with edit.float32_products(tower):
+        with vision_tap.float32_products(tower):
             assert {type(m) for m in tower.modules() if isinstance(
-                m, (nn.Linear, edit.ExactLinear))} == {edit.ExactLinear}
+                m, (nn.Linear, vision_tap.ExactLinear))} == {
+                    vision_tap.ExactLinear}
             assert all(w.block is b for w, b in zip(tower.blocks, blocks,
                                                     strict=True))
             raise RuntimeError("stop")

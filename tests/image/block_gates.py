@@ -69,6 +69,7 @@ and its worst token row 0.34, and the worst row of the glu kernel 0.26.
 """
 from __future__ import annotations
 
+import gc
 import hashlib
 import os
 import subprocess
@@ -263,7 +264,7 @@ def tf32() -> bool:
     """Whether this process multiplies float32 at TF32 precision, as
     measured: MLX reads MLX_ENABLE_TF32 once, so the variable set after
     the first product says nothing of the process."""
-    from gmlx.image.families.qwen_image21.edit import f32_products_exact
+    from gmlx.image.float32 import f32_products_exact
 
     return not f32_products_exact()
 
@@ -333,7 +334,10 @@ def stock_ops_only():
 def _rerun(request, tag: str, env: dict) -> None:
     """Rerun this test in a child process with ``env`` set. A child that
     skips, as one without the model's GGUF does, skips this test with
-    its reason."""
+    its reason. The child loads its own model, so this process first
+    frees what MLX caches for it."""
+    gc.collect()
+    mx.clear_cache()
     r = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-s", "-rs", "-p",
          "no:cacheprovider", request.node.nodeid],

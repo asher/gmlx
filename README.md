@@ -104,6 +104,9 @@ The recording runs at true speed, with a 27B model in a local server.
   FLUX.2 klein and FLUX.3 klein GGUFs, on the command line, on the OpenAI image routes
   and in ComfyUI. It needs an M3 chip or newer. See
   [Image generation](https://asher.github.io/gmlx/images.html).
+- Video clips with sound from a text prompt with MiniMax-H3, on the command
+  line and in ComfyUI. It needs an M3 chip or newer and 32 GB of memory. See
+  [Video generation](https://asher.github.io/gmlx/video.html).
 - A decision API at `/v1/systemone` that returns a probability for each
   answer to yes-or-no, choice and score questions about a text. See
   [Structured decisions](https://asher.github.io/gmlx/decisions.html).
@@ -209,7 +212,9 @@ weights have their own licenses.
 
 The files listed in
 [LICENSE-MIT](https://github.com/asher/gmlx/blob/main/LICENSE-MIT) are MIT
-licensed and have an SPDX header saying so. The ComfyUI node pack in
+licensed and have an SPDX header saying so. A header that names MIT beside
+another license, such as `Apache-2.0 AND MIT`, puts the parts gmlx wrote
+under MIT. The ComfyUI node pack in
 `gmlx/comfyui_pack` is licensed under the Apache License 2.0, with its own
 LICENSE file. Vendored third-party code is
 documented in

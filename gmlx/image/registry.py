@@ -227,6 +227,10 @@ class Family:
     # given by name, as when the schedule depends on the variant.
     needs_variant: bool = False
     lora_map: Callable | None = None   # config -> lora.reader.LoraKeyMap
+    # Path patterns (fnmatch) of the linear leaves that see float32 rows
+    # under any activation dtype, whose LoRA factors are built and priced
+    # in float32.
+    lora_f32: tuple = ()
     step: StepParts | None = None      # None runs the DiT's own step
     # () -> text_encoder.EncoderSpec; None reads text_encoder.ENCODERS
     encoder: Callable | None = None

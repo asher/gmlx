@@ -22,7 +22,7 @@ import time
 import unittest
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
-UNIT = ["test_wire", "test_client", "test_comfy"]
+UNIT = ["test_wire", "test_client", "test_comfy", "test_h3"]
 
 
 class Recorder(unittest.TextTestResult):

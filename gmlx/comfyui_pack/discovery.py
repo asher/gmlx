@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Where the server is and which image models the loaders list.
+"""Where the server is and which models the loaders list.
 
 The server address: the node's widget, then ``GMLX_BASE_URL``, then the
 settings file, then ``gmlx status --json``, then the default. With no
 server running, ``gmlx status`` gives the host and port of gmlx's config,
 where ``gmlx serve`` starts one.
 
-The model list: the image model ids of the server at that address, else
-those ``gmlx list --image --json`` prints, the default model first. With
+The model list: the image and video model ids of the server at that
+address, else the image model ids ``gmlx list --image --json`` prints, the
+default model first. With
 none, it holds only the default model's name, and a run with it is
 refused with the ``gmlx pull`` that adds it. ComfyUI asks for the
 widgets at startup, on a refresh and for each queued prompt, so the probes
@@ -69,6 +70,10 @@ PULL_KINDS = {
     "flux-3-klein": ("flux3_klein", "distilled"),
     "flux-3-klein-base": ("flux3_klein", "base"),
 }
+
+# The video models `gmlx video pull` downloads that the gmlx nodes run, in
+# the order of gmlx.video.catalog.RECIPES. gmlx's tests hold the two equal.
+VIDEO_PULL_NAMES = ("h3", "h3-fast", "h3-base", "fasth3")
 
 # Timeouts of the widget probes, in seconds, and how long an answer is kept.
 STATUS_TIMEOUT = 3.0
@@ -156,8 +161,8 @@ def resolve_api_key() -> str | None:
 
 
 def _server_models(url: str, timeout: float) -> tuple[list, str | None] | None:
-    """The image model ids of the server at ``url`` and its default image
-    model, or None when it does not answer in time."""
+    """The model ids of the server at ``url`` and its default image model,
+    or None when it does not answer in time."""
     try:
         u = urllib.parse.urlparse(url)
         port = u.port or 80
@@ -292,8 +297,8 @@ def loader_inputs() -> dict:
     return {"required": {
         "model_name": (models, {
             "default": models[0],
-            "tooltip": "An image model of the gmlx server. With none in its config, the "
-                       "list holds the default model, which `gmlx pull` adds."}),
+            "tooltip": "An image or video model of the gmlx server. With none in its "
+                       "config, the list holds the default model, which `gmlx pull` adds."}),
         "server_url": ("STRING", {
             "default": w["url"],
             "tooltip": "The gmlx server's address. Empty, or the default "
@@ -327,6 +332,14 @@ def not_on_server(name: str, url: str, models: list) -> str:
     the refusal names that id."""
     ids = [str(m.get("model")) for m in models if isinstance(m, dict) and m.get("model")]
     have = ", ".join(ids) if ids else "none"
+    video = str(name).strip().lower()
+    if video in VIDEO_PULL_NAMES:
+        # The MiniMax-H3 recipes share one DiT and differ by their LoRA and
+        # steps, and FastH3 has a DiT of its own, so another id is no
+        # stand-in.
+        return (f"gmlx: the gmlx server at {url} has no video model {name!r} (it has: "
+                f"{have}). Run `gmlx video pull {video}`, which downloads it and adds it to "
+                "gmlx's config, then run the workflow again.")
     head = f"gmlx: the gmlx server at {url} has no image model {name!r} (it has: {have})."
     recipe = pull_name(name)
     if recipe:

@@ -26,6 +26,8 @@ These pages are the starting points:
   connected client.
 - [Image generation](images.md): Choosing an image model, a first image on
   the command line, the API, and LoRAs.
+- [Video generation](video.md): Clips with sound from a prompt, on the
+  command line and in ComfyUI.
 - [Migrating from other tools](migrating.md): What carries over from
   llama.cpp, Ollama and LM Studio.
 
@@ -39,8 +41,10 @@ These pages are the starting points:
   beside chat models.
 - [Image API](image-api.md): The OpenAI image routes, their request fields
   and their errors.
+- [Video API](video-api.md): The OpenAI video routes, their jobs, the job
+  store and their errors.
 - [ComfyUI](comfyui.md): The gmlx node pack, which runs the server's image
-  models in ComfyUI graphs.
+  and video models in ComfyUI graphs.
 - [RAG pipelines](rag.md): Retrieval with the embeddings and rerank services.
 - [Structured decisions](decisions.md): A probability for each answer to a
   fixed set of questions.

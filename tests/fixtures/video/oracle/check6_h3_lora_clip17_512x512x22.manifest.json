@@ -1,0 +1,999 @@
+{
+ "schema": 1,
+ "name": "check6_h3_lora_clip17_512x512x22",
+ "check": 6,
+ "family": "h3",
+ "script": "scripts/video_oracle/check6_h3.py",
+ "argv": [
+  "check6_h3.py",
+  "--comfy-dir",
+  "ComfyUI-h3",
+  "--dit",
+  "minimax_h3_fl2va_pruned-Q4_K.gguf",
+  "--features",
+  "check2_h3.npz",
+  "--keyframes",
+  "check2_h3_keyframes.npz",
+  "--vae",
+  "minimax_h3_video_vae_fp16.safetensors",
+  "--audio-vae",
+  "minimax_h3_audio_vae_fp32.safetensors",
+  "--lora",
+  "minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+  "--lora-merge",
+  "float32",
+  "--shift-video",
+  "6",
+  "--shape",
+  "512x512x22",
+  "--cases",
+  "first",
+  "last",
+  "both",
+  "mid_audio",
+  "clip17"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.0"
+   },
+   "diffusers": null,
+   "transformers": {
+    "version": "5.17.0"
+   },
+   "tokenizers": {
+    "version": "0.23.2"
+   },
+   "accelerate": null,
+   "huggingface-hub": {
+    "version": "1.33.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.3"
+   },
+   "comfy-kitchen": {
+    "version": "0.2.40"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "minimax_h3_fl2va_pruned-Q4_K.gguf",
+   "size": 11420663904,
+   "sha256": "dd948e08ad0ba3c71bd42f368e283dd82e790f5122a63b276e22a3e0283d0c10"
+  },
+  "lora": {
+   "name": "minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+   "size": 1956193000,
+   "sha256": "fb4c00361c94bad47f878d5e096c6cab2f45063b0968bd5756dcb7da6936f53e"
+  },
+  "features": {
+   "name": "check2_h3.npz",
+   "size": 31997508,
+   "sha256": "dddcd954d8b2a1a58e8508cea7972683d33cb98fa19f00884db6de614d97e6a0"
+  },
+  "vae": {
+   "name": "minimax_h3_video_vae_fp16.safetensors",
+   "size": 5207808496,
+   "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522"
+  }
+ },
+ "inputs": {
+  "shape": [
+   512,
+   512,
+   22
+  ],
+  "steps": 8,
+  "seed": 6,
+  "shifts": {
+   "video": 6.0,
+   "audio": 3.0
+  },
+  "lora": "minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+  "lora_strength": 1.0,
+  "lora_pairs": 208,
+  "lora_merge": "float32",
+  "lora_merge_means": "each weight patched per call dequantized and patched in float32, then cast to the pass dtype once, as ComfyUI core merges a LoRA on the CPU",
+  "dequant": "ComfyUI-GGUF dequantize_tensor with dequant_dtype float32: K-quant block math in float32, on every call",
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "euler": "Euler in float32 per stream; the audio sigmas the time shift of the video sigmas, as the forward derives the audio time",
+  "timestep": "sigma x 1000 in float32",
+  "attention": "attention_pytorch",
+  "comfy": "426f5eea52a7ece1dd599fff4cb6cd1f352ddd24",
+  "comfy_gguf": "373048b8403a7820620065210a691263d4da0a61",
+  "modes": [
+   "fp32",
+   "bf16_forced"
+  ],
+  "prompt": "dialogue",
+  "forwards": 8,
+  "text_rows": 56,
+  "video_shape": [
+   1,
+   24,
+   7,
+   32,
+   32
+  ],
+  "audio_shape": [
+   1,
+   32,
+   2,
+   37
+  ],
+  "case": "clip17",
+  "anchors": [
+   {
+    "frame": 17,
+    "video_t": 2,
+    "audio_t": 0
+   }
+  ],
+  "spans": [],
+  "anchor_seed": 6,
+  "anchor_spec": {
+   "guides": [
+    [
+     17,
+     5,
+     false
+    ]
+   ]
+  }
+ },
+ "results": {
+  "times": {
+   "fp32_s": 554.1,
+   "bf16_forced_s": 1978.2,
+   "max_rss_gib": 34.82
+  },
+  "step_bf16_vs_fp32": [
+   {
+    "video": {
+     "rel_l2": 0.05280769571264364,
+     "cosine": 0.9986869678097628,
+     "max_abs": 1.118132770061493
+    },
+    "audio": {
+     "rel_l2": 0.025023658593643326,
+     "cosine": 0.9996994322971674,
+     "max_abs": 0.10557842254638672
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.031089217983776007,
+     "cosine": 0.9995199647985321,
+     "max_abs": 0.3358462452888489
+    },
+    "audio": {
+     "rel_l2": 0.01843459607593471,
+     "cosine": 0.9998305641311004,
+     "max_abs": 0.09526758641004562
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.033300977467684637,
+     "cosine": 0.9994479963360099,
+     "max_abs": 1.1191538870334625
+    },
+    "audio": {
+     "rel_l2": 0.010192137613519213,
+     "cosine": 0.9999482343700177,
+     "max_abs": 0.04772442579269409
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.02470120597975113,
+     "cosine": 0.9996951631709564,
+     "max_abs": 0.7783212065696716
+    },
+    "audio": {
+     "rel_l2": 0.01733388028233492,
+     "cosine": 0.9998531892566663,
+     "max_abs": 0.11963975429534912
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.016989603305670134,
+     "cosine": 0.9998558098839881,
+     "max_abs": 0.46007782220840454
+    },
+    "audio": {
+     "rel_l2": 0.02696580169434862,
+     "cosine": 0.9996571511431999,
+     "max_abs": 0.25246500968933105
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.013632413092658729,
+     "cosine": 0.999907083171299,
+     "max_abs": 0.5559443235397339
+    },
+    "audio": {
+     "rel_l2": 0.03376507992764356,
+     "cosine": 0.9994436899472323,
+     "max_abs": 0.19596222043037415
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.012974574528233427,
+     "cosine": 0.9999158599534553,
+     "max_abs": 0.34567320346832275
+    },
+    "audio": {
+     "rel_l2": 0.01728157886015563,
+     "cosine": 0.9998515436055668,
+     "max_abs": 0.08765208721160889
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.012118144340530549,
+     "cosine": 0.9999267711813753,
+     "max_abs": 0.5245019197463989
+    },
+    "audio": {
+     "rel_l2": 0.016703583383652597,
+     "cosine": 0.9998605349804285,
+     "max_abs": 0.10122457146644592
+    }
+   }
+  ],
+  "exact_free_floor": {
+   "video": {
+    "rel_l2": 0.001440718667795623,
+    "measured": "the largest relative L2 between gmlx's exact run on the GPU and the same run on the CPU stream or from inputs nudged by one float32 step (4 seeds); tests/video/test_video_check6_h3.py on minimax_h3_fl2va_pruned-Q4_K.gguf dd948e08 with minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors fb4c0036, Apple M5 Max"
+   },
+   "audio": {
+    "rel_l2": 0.0011106315577410796,
+    "measured": "the largest relative L2 between gmlx's exact run on the GPU and the same run on the CPU stream or from inputs nudged by one float32 step (4 seeds); tests/video/test_video_check6_h3.py on minimax_h3_fl2va_pruned-Q4_K.gguf dd948e08 with minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors fb4c0036, Apple M5 Max"
+   }
+  },
+  "step_nudge_spread": {
+   "rule": "a shipping step and stream whose gmlx reading misses twice the oracle's one-sample bf16 against fp32 gap while the case's exact gates pass: tolerance = the larger of that and the nudge spread, the oracle's own largest bf16 against fp32 relative L2 at the step over its recorded base and the same bf16 step from the step's input latents and features nudged one float32 step (seeds 0 to 2), sigmas not nudged; measured once per fixture by scripts/video_oracle/check6_h3_spread.py",
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "steps": {
+    "7": {
+     "audio": {
+      "rel_l2": 0.026288213943628014,
+      "run": "nudge0",
+      "runs": {
+       "recorded": 0.01728157886015563,
+       "nudge0": 0.026288213943628014,
+       "nudge1": 0.01965357282526379,
+       "nudge2": 0.01714475072933106
+      },
+      "gmlx": 0.056107926459860125,
+      "base_rerun": 0.01728157886015563,
+      "mark": "recorded",
+      "derived": 0.03456315772031126,
+      "factor": 1.25,
+      "reason": "gmlx's bf16 path rounds twice where the reference rounds once, at every live-LoRA leaf (1.32 to 1.74x one rounding) and at every block norm (1.2 to 1.3x), measured site by site in probe 3 at last step 2. The reference's own bf16 gap is small on audio rows because its rope table is exact at the audio rows' zero angles, so the excess shows on audio rows and not on video rows. The post-V5 rounding item prices the fix, a fused once-rounding LoRA leaf."
+     }
+    }
+   },
+   "recorded_rule": "a recorded cell, a shipping step and stream whose gmlx reading is over the gate above and within 2.5 x the nudge spread: tolerance = the larger of that gate (derived) and 1.25 x gmlx's reading, with the reason it is recorded; a re-record that lands inside the derived gate drops the mark",
+   "measured": "ComfyUI 426f5eea52a7ece1dd599fff4cb6cd1f352ddd24, ComfyUI-GGUF 373048b8403a7820620065210a691263d4da0a61, 8 CPU threads, bf16 matmul emulation; scripts/video_oracle/check6_h3_spread.py"
+  }
+ },
+ "tolerances": {
+  "steps": [
+   {
+    "video": {
+     "rel_l2": 0.10561539142528728
+    },
+    "audio": {
+     "rel_l2": 0.05004731718728665
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.062178435967552015
+    },
+    "audio": {
+     "rel_l2": 0.03686919215186942
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.06660195493536927
+    },
+    "audio": {
+     "rel_l2": 0.020384275227038427
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.04940241195950226
+    },
+    "audio": {
+     "rel_l2": 0.03466776056466984
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.03397920661134027
+    },
+    "audio": {
+     "rel_l2": 0.05393160338869724
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.027264826185317458
+    },
+    "audio": {
+     "rel_l2": 0.06753015985528713
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.025949149056466853
+    },
+    "audio": {
+     "rel_l2": 0.07013490807482516
+    }
+   },
+   {
+    "video": {
+     "rel_l2": 0.024236288681061098
+    },
+    "audio": {
+     "rel_l2": 0.033407166767305194
+    }
+   }
+  ],
+  "rule": "steps: the velocity of each step from the fp32 latents before it, tolerance = 2 x the oracle's own bf16 against fp32 relative L2 at that step, video and audio apart; the exact gates are the gmlx test's, from the floors it records; the LoRA merged as inputs.lora_merge records",
+  "exact_free": {
+   "video": {
+    "rel_l2": 0.002881437335591246
+   },
+   "audio": {
+    "rel_l2": 0.0022212631154821592
+   }
+  }
+ },
+ "notes": [
+  "oracle: ComfyUI 426f5eea52a7ece1dd599fff4cb6cd1f352ddd24, ComfyUI-GGUF 373048b8403a7820620065210a691263d4da0a61, UnetLoaderGGUF with dequant_dtype float32, LoRA through comfy.sd.load_lora_for_models, merge float32: each weight patched per call dequantized and patched in float32, then cast to the pass dtype once, as ComfyUI core merges a LoRA on the CPU"
+ ],
+ "created": "2026-11-05T16:17:04Z",
+ "npz": "check6_h3_lora_clip17_512x512x22.npz",
+ "tensors": {
+  "anchor.0.frame": {
+   "shape": [],
+   "dtype": "int64",
+   "sha256": "35e3a6176b50da27fcb868bf840f0e76290bd9bf55c40545e67bac66353d0674"
+  },
+  "anchor.0.video": {
+   "shape": [
+    1,
+    24,
+    2,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "493befe02dec6458b027a5639f98aa7d69d7a121d10681d12c58dae1ddab57e7"
+  },
+  "anchor_noise.0": {
+   "shape": [
+    512,
+    96
+   ],
+   "dtype": "float32",
+   "sha256": "1be2492333d2465f17c865b5055aa0b3e2051df49e2d7260e76e4b00203d9cf9"
+  },
+  "anchor_seed": {
+   "shape": [],
+   "dtype": "int64",
+   "sha256": "23d7f42b1cdc1f0d492ebd756ed0fe8003995dda554d99418d47a81813650207"
+  },
+  "audio": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "3c8a0d0e39625992ba21ff44379a77b1b02ab00a3437d980516d2749bf638626"
+  },
+  "audio_step1": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "b8698f6f809cf4dfbf510f1e766fbebc67bf5391bb41f88f2036c1dd54232e0d"
+  },
+  "audio_step2": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "8c52e9fe8d15803840f85c289cfa30cdde430df579801fd215ea65c64e9c7cd1"
+  },
+  "audio_step3": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "51e2da709ca0e05036e7d6645f6aff0aca79154d5ff2189b7102630b57637aae"
+  },
+  "audio_step4": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "6315c98bb53172a3c50b37910cb6f83a8ef57c2d7cac3bb0e752cbc55239dc74"
+  },
+  "audio_step5": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "d76a3294cc024b858274a9611a31397145a54c1fb8f156a45a4af722d626b412"
+  },
+  "audio_step6": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "1d199fda57a5a3476e3b4872d6115fe30a774e3d1616be1e8f15dac05199c43d"
+  },
+  "audio_step7": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "e9651c4710ecb38485ef9c846e70638c37deecb7400f9afaad099f58aee9a574"
+  },
+  "audio_step8": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "3c8a0d0e39625992ba21ff44379a77b1b02ab00a3437d980516d2749bf638626"
+  },
+  "features": {
+   "shape": [
+    56,
+    5120
+   ],
+   "dtype": "float32",
+   "sha256": "bb52a95f87e76ac52ac9a32ec48f9c7712dc16dfe12d464cf68cc9d658717283"
+  },
+  "guide_0_frames": {
+   "shape": [
+    5,
+    400,
+    640,
+    3
+   ],
+   "dtype": "uint8",
+   "sha256": "b327d2b073dc35a02b8856ddc9fb88a94b1817ae48603a42099935bf74405b2e"
+  },
+  "ids": {
+   "shape": [
+    56
+   ],
+   "dtype": "int32",
+   "sha256": "690793da56915b257a3e066e6f4bd69b7b91d0bbb3a2804e689b25016c75d9f2"
+  },
+  "noise_audio": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "34d3aaa38e78de3424a394d5650d99e1761c10f1c6eb03cd7c54e2941b2bea38"
+  },
+  "noise_video": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "359ce19a33d79d438fd6d89ac31c3e13832100d4d018503e6e96ead8459c8deb"
+  },
+  "sigmas_audio": {
+   "shape": [
+    9
+   ],
+   "dtype": "float32",
+   "sha256": "19d9257bb0cc7eb48d8947137b425a9164605cf22bd0e34ef544263c86d15ef9"
+  },
+  "sigmas_video": {
+   "shape": [
+    9
+   ],
+   "dtype": "float32",
+   "sha256": "61400f4c2e9f0a8985d0d196c20c21c73e23e1f98a3e3509d4832bcd871e597c"
+  },
+  "velocity_audio_step1": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "0accc789bd137a43aa86ad7639b9e67b2d651474862e0e5d3675697c8a0be3a2"
+  },
+  "velocity_audio_step2": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "5e148c10e2625b9055f66d5c737eabb2704bf7de304b2cf357f495e1be5748e8"
+  },
+  "velocity_audio_step3": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "d491ec41b6f47f90658af4f7e66d10688ad8055628cd90cf811b143f05e13992"
+  },
+  "velocity_audio_step4": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "5334900805b5b3691859876fd215b66ff3421e3b3bf1dbc3176cf2e8171a710a"
+  },
+  "velocity_audio_step5": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "1fa961f22cdc65365f5b2483da578f01e6638146165fc7dff0d0629c343b7e49"
+  },
+  "velocity_audio_step6": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "e23f89b2a609edaf5899d218122b40051e763c01a8bd7b878fadeffaabe7f243"
+  },
+  "velocity_audio_step7": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "26524a6cbcd75770294a49f0a5d12f51969f88ba86c7c32dae256db76816fea9"
+  },
+  "velocity_audio_step8": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "75adfe460c0b53d6f1d674c49f75a02b301fc32578632d95962988ebf8f5bdb4"
+  },
+  "velocity_bf16_audio_step1": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "400a3a2508b2581cabbfebcf209e29ee76f254652533bcc648173c9d8458c9ef"
+  },
+  "velocity_bf16_audio_step2": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "ecae69276aae43a22a2cd1fa7044a45923853ebc56a660fbc1b8222c1e8cddaf"
+  },
+  "velocity_bf16_audio_step3": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "0f769dde8a024ec4bee2bfdf467f49a0f3caff0c9a4f5af87c3bfb69a2218346"
+  },
+  "velocity_bf16_audio_step4": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "0ef7c9887a6298feb0a6db7c9f845d1427654b38f5733f4fcf09ba3f7e48e948"
+  },
+  "velocity_bf16_audio_step5": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "46019eda63c92df1bd6f0c57a1403238ad3792f013811a7cf27dfb5d35992b32"
+  },
+  "velocity_bf16_audio_step6": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "f1bdb9858bb62fc095e0525a02483cc760a9b5322efcf8cae5705f078d364033"
+  },
+  "velocity_bf16_audio_step7": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "75d6b5c6e3504f60bb1c5606f8876cedc895f82cc159d42c6561b6ef873cb7f3"
+  },
+  "velocity_bf16_audio_step8": {
+   "shape": [
+    1,
+    32,
+    2,
+    37
+   ],
+   "dtype": "float32",
+   "sha256": "027fd3dae77e70dbeaa416fa420870c1a8f69d2a4298a030d68f2bcc975dbc27"
+  },
+  "velocity_bf16_video_step1": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "16ca93f60bd2f599c65bdc8d4b7f3a4acdc5afb72f1fcabeb2bc3b1a5d35ea93"
+  },
+  "velocity_bf16_video_step2": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "83e245d08faff3557806eea836893e50226e9f5be67fe836ff62c6c574568509"
+  },
+  "velocity_bf16_video_step3": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "7e781efe9fe9a6dbc23389677408b2a4404253cd2aa12c746eb761aaf377026c"
+  },
+  "velocity_bf16_video_step4": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "5cdd5b81a8eb16b98b4f6e3699e3f25e76b2d2e4efdccf7d4e3b4afcbc2af951"
+  },
+  "velocity_bf16_video_step5": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "71d0da443d8289567002105505a450492325622580bd6021229761fb2acd3167"
+  },
+  "velocity_bf16_video_step6": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "80bb79ed6b7e3719c37ce56a9153df75b6bec49f5092a8e79a84765228c79c09"
+  },
+  "velocity_bf16_video_step7": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "60c2f0f10c63c2983f4845b16b21b1e646d70521700c5eee8cf440bdd54b18a2"
+  },
+  "velocity_bf16_video_step8": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "ebb757e55e4a0c305b5c24e81ce7e52362914010b17ab4131f3ac81ea33f4dc7"
+  },
+  "velocity_video_step1": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "8f9613e078a49d79f1cf1a50e1eed15714a04ed64bd2904057f7fc5277f16632"
+  },
+  "velocity_video_step2": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "e185af0abfdc08f2f6e27c9edb94f92d2ceaa45657071b275db71e6249578885"
+  },
+  "velocity_video_step3": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "1bbdf51fc4770293e5ad19a0c5ace6fa2a5761c8311bb43ef3966f0bc3a02336"
+  },
+  "velocity_video_step4": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "9fac48889e7aee02c43f8d8daab1b282e024a1e8090c90d8221c69b88c006077"
+  },
+  "velocity_video_step5": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "58e864c997a7de1e7e6aa7ee25ff9b0727960d5ff955ca85c2db27242030d9fe"
+  },
+  "velocity_video_step6": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "ba8fb0cd2afc40ff07bba8c16b2385ed25f3e3b38e6ad1f1eed032789244dd24"
+  },
+  "velocity_video_step7": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "a47fd96061ad4d94e4fd55130e96f97dfd365cf963de18162df7958b86e3ead2"
+  },
+  "velocity_video_step8": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "550722d93406068cbd395fd12836282bbff73de7967b6d8c2ee1ca1de67de581"
+  },
+  "video": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "9371bd0a0e6ff57ecb47e4e476f244f52125c7e90c639ac0f5e619569a23dc35"
+  },
+  "video_step1": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "e1b96b12110b6601a460b6af02daf322dac29a16f13d5a00164ff7e881763b97"
+  },
+  "video_step2": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "ad689d815cc31af1d0e036edabae35b0ba8bfdf66fd1f146d14723ec66ae5b2c"
+  },
+  "video_step3": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "c75d80b9981e2672941465197b4b66314ac74538424ed9efea216748dd31fdd2"
+  },
+  "video_step4": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "6b862a9e96b37fe85f33dba4f00ca67b9b576ff06530c22c4493e810c22720ff"
+  },
+  "video_step5": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "6b6fe36b0c7930e1375d5d1b78fced05b1cb94aba90bdc4b20840ff657d14ebc"
+  },
+  "video_step6": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "b6932e01fae7076ec553770d0796fb6cda6862f7087f22c3e750a775bea55c42"
+  },
+  "video_step7": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "d975f0c133ed92072646e64075bce66ae8110a9765c2c931c497dc7df767ecde"
+  },
+  "video_step8": {
+   "shape": [
+    1,
+    24,
+    7,
+    32,
+    32
+   ],
+   "dtype": "float32",
+   "sha256": "9371bd0a0e6ff57ecb47e4e476f244f52125c7e90c639ac0f5e619569a23dc35"
+  }
+ }
+}

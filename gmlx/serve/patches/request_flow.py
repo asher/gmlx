@@ -63,12 +63,10 @@ async def _extract_request_model(values, inherit):
     return None, inherit
 
 
-def _load_deferred_response(model_id, exc):
-    """503 for a gate-deferred load: typed error body carrying the gate's
-    numbers, ``Retry-After`` from the live admission state (the readiness
-    verdict's own backoff when the server is busy, else the floor)."""
-    from fastapi.responses import JSONResponse
-
+def deferred_retry_after() -> int:
+    """The ``Retry-After`` seconds of a deferred load, from the live
+    admission state: the readiness verdict's own backoff when the server
+    is busy, else the floor."""
     from ..queue_cap import _RETRY_MIN_S
 
     retry = _RETRY_MIN_S
@@ -80,6 +78,15 @@ def _load_deferred_response(model_id, exc):
             retry = max(int(r), int(_RETRY_MIN_S))
     except Exception:  # noqa: S110 - readiness unreadable -> the floor Retry-After
         pass
+    return int(retry)
+
+
+def _load_deferred_response(model_id, exc):
+    """503 for a gate-deferred load: typed error body carrying the gate's
+    numbers, with ``deferred_retry_after``."""
+    from fastapi.responses import JSONResponse
+
+    retry = deferred_retry_after()
     return JSONResponse(status_code=503, content={
         "error": {"message": str(exc), "type": "model_load_deferred",
                   "code": "load_deferred", "model": model_id},

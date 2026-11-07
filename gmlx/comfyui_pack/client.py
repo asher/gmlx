@@ -65,11 +65,12 @@ class GmlxVersionError(GmlxError):
 
 
 class GmlxMissing(GmlxError):
-    """The server does not hold some tensors or tables a request named."""
+    """The server does not hold some tensors or tables a request named.
+    ``msg`` is the server's answer."""
 
-    def __init__(self, missing):
+    def __init__(self, missing, msg: str | None = None):
         self.missing = list(missing)
-        super().__init__(f"the gmlx server does not hold {len(self.missing)} "
+        super().__init__(msg or f"the gmlx server does not hold {len(self.missing)} "
                          "tensor(s) or table(s)")
 
 
@@ -353,7 +354,7 @@ class StepClient:
             doc = {}
         msg = doc.get("error") or data[:300].decode("utf-8", "replace")
         if status == 409 and doc.get("missing") is not None:
-            raise GmlxMissing(doc["missing"])
+            raise GmlxMissing(doc["missing"], f"gmlx: {what}: {msg}")
         if status == 409 and doc.get("code") == "interrupted":
             raise GmlxInterrupted(f"{what}: {msg}")
         if status == 400 and "step contract" in str(msg):
@@ -365,6 +366,10 @@ class StepClient:
             raise GmlxError(f"gmlx: {what} was refused ({status}): {msg}. The server takes "
                             "step requests from its own Mac only: run ComfyUI there, or set "
                             "server.image.steps_remote in the server's config")
+        if status == 503:
+            # Memory that a model in use or a load in flight holds: a
+            # refusal the pack does not retry, which passes once it ends.
+            msg = f"{str(msg).rstrip('.')}. Queue the prompt again then."
         raise GmlxError(f"gmlx: {what} failed ({status}): {msg}")
 
     def call_json(self, method: str, path: str, obj=None, *, what: str = "",
@@ -565,6 +570,69 @@ class StepClient:
         self.stats["steps"] += 1
         return out["out"], h
 
+    def av_step(self, video: torch.Tensor, audio: torch.Tensor, timestep: torch.Tensor,
+                fields: dict, on_interrupt=None) -> tuple:
+        """The video and audio output of a model with both streams, for the
+        latents as ComfyUI's sampler carries them."""
+        out, _, h = self.call_tensors("/step", {"video": video, "audio": audio,
+                                                "timestep": timestep}, fields,
+                                      what="the step", on_interrupt=on_interrupt)
+        self.stats["steps"] += 1
+        return (out["video"], out["audio"]), h
+
+    def video_decode(self, model: str, latents: torch.Tensor) -> torch.Tensor:
+        """Frames (F, H, W, 3) in [0, 1] of video latents (1, C, T, h, w)."""
+        out, _, _ = self.call_tensors("/vae/video/decode", {"latents": latents.float()},
+                                      {"model": model}, what="the video VAE decode")
+        return out["frames"]
+
+    def audio_decode(self, model: str, latents: torch.Tensor) -> torch.Tensor:
+        """The waveform (1, 2, samples) of audio latents (1, C, 2, T)."""
+        out, _, _ = self.call_tensors("/vae/audio/decode", {"latents": latents.float()},
+                                      {"model": model}, what="the audio VAE decode")
+        return out["waveform"]
+
+    def video_encode(self, model: str, frames: torch.Tensor,
+                     pieces: int | None = None) -> torch.Tensor:
+        """Video latents (1, C, t, h, w) of frames (T, H, W, 3) in [0, 1].
+        A server that names its window of ``pieces`` pieces of 17 frames
+        takes the frames as uint8 levels when they are such levels
+        exactly, and a long clip in windows that tile it in order, each
+        within its body limit. A window refused for memory is sent again
+        once, at the window the refusal names."""
+        what = "the video VAE encode"
+        if not pieces:
+            out, _, _ = self.call_tensors("/vae/video/encode", {"frames": frames.float()},
+                                          {"model": model}, what=what)
+            return out["latents"]
+        wire = wire_frames(frames)
+        limit = int(((getattr(self, "capabilities", None) or {}).get("limits") or {}).get(
+            "max_body_bytes") or 0)
+        m = window_pieces(pieces, frames[0].numel() * wire.element_size(), limit)
+        n, at, parts, retried = len(wire), 0, [], False
+        while at < n:
+            size, is_open = next_window(n, at, m)
+            fields = {"model": model, "at": at, "clip_frames": n, "open": is_open}
+            s, _, d = self.request("POST", PREFIX + "/vae/video/encode",
+                                   pack({"frames": wire[at:at + size]}, fields),
+                                   {"Content-Type": CONTENT_TYPE})
+            if s == 400 and not retried:
+                k = _refused_window(d)
+                if k is not None and 0 < k < m:
+                    m, retried = k, True
+                    continue
+            if s != 200:
+                self._fail(s, d, what)
+            parts.append(unpack(d)[0]["latents"])
+            at += size
+        return torch.cat(parts, dim=2)
+
+    def audio_encode(self, model: str, waveform: torch.Tensor) -> torch.Tensor:
+        """Audio latents (1, C, 2, T) of a waveform (1, 2, samples)."""
+        out, _, _ = self.call_tensors("/vae/audio/encode", {"waveform": waveform.float()},
+                                      {"model": model}, what="the audio VAE encode")
+        return out["latents"]
+
     def vae_decode(self, model: str, latents: torch.Tensor, alpha: bool) -> torch.Tensor:
         out, _, _ = self.call_tensors("/vae/decode", {"latents": latents.float()},
                                       {"model": model, "alpha": bool(alpha)},
@@ -586,6 +654,43 @@ class StepClient:
         self.call_json("POST", "/interrupt", {"run": run}, what="the interrupt",
                        timeout=INTERRUPT_TIMEOUT)
 
+
+
+def wire_frames(frames: torch.Tensor) -> torch.Tensor:
+    """Frames in [0, 1] as uint8 levels when each is k / 255 exactly as
+    float32, which a level k read from an image gives, else as float32."""
+    f = frames.float()
+    u8 = (f * 255).round().clamp(0, 255).to(torch.uint8)
+    return u8 if torch.equal(u8.float() / 255, f) else f
+
+
+def window_pieces(pieces: int, frame_bytes: int, limit: int) -> int:
+    """The pieces of 17 frames a window takes: at most the server's
+    ``pieces``, and few enough that a window of them and the 5 frames of
+    a clip's end fit a body of ``limit`` bytes, with 1 MiB for the
+    header."""
+    if limit <= 0:
+        return pieces
+    fit = ((limit - (1 << 20)) // max(frame_bytes, 1) - 5) // 17
+    return max(1, min(pieces, fit))
+
+
+def next_window(n: int, at: int, m: int) -> tuple[int, bool]:
+    """``(frames, open)`` of the window at frame ``at`` of an ``n``-frame
+    clip in windows of ``m`` pieces: an open window of 17 m frames while
+    more than 17 m + 5 are left, then the rest, 1 or 17 j + 5 frames."""
+    left = n - at
+    return (17 * m, True) if left > 17 * m + 5 else (left, False)
+
+
+def _refused_window(data: bytes) -> int | None:
+    """The window a refusal for memory names, if it names one."""
+    try:
+        doc = json.loads(data)
+    except ValueError:
+        return None
+    k = doc.get("window") if isinstance(doc, dict) else None
+    return k if isinstance(k, int) and not isinstance(k, bool) else None
 
 # The interrupt is sent while the user waits on Cancel.
 INTERRUPT_TIMEOUT = 5.0

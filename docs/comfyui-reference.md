@@ -56,13 +56,14 @@ When it stops before it answers, the run stops with what `gmlx serve`
 printed and the end of the server's log. Cancel in ComfyUI stops the wait
 for the server.
 
-The `model_name` list holds the image models of the server at the address
-found, else those that `gmlx list --image` prints, with the default image
-model first. With none, it holds only the default model's name. The nodes
-read the list in the background, so the list updates within a few seconds
-of a refresh. A loader whose model the server does not have stops with the
-`gmlx pull` command that adds it, or, when the server has that model under
-another id, with the id to pick.
+The `model_name` list holds the image and video models of the server at
+the address found, else the image models that `gmlx list --image` prints,
+with the default image model first. With none, it holds only the default
+model's name. The nodes read the list in the background, so the list
+updates within a few seconds of a refresh. A loader whose model the server
+does not have stops with the `gmlx pull` command that adds it, or, when
+the server has that model under another id, with the id to pick. A video
+model the server does not have stops with its `gmlx video pull` command.
 
 Desktop starts ComfyUI without your shell's `PATH`, so the nodes run the
 `gmlx` command whose path `gmlx comfyui install` recorded. After you
@@ -84,6 +85,16 @@ call to the model is one request to the gmlx server, which runs the DiT,
 encodes the text and runs the VAE. The tiled VAE nodes call the same
 route, since the server tiles large images itself. ComfyUI's interrupt
 stops the step in progress on the server.
+
+On MiniMax-H3, ComfyUI samples the video and the sound as one latent, as
+its own MiniMax-H3 model does, and the server reads each step as that
+model's forward reads it: the timestep, the two shifts that
+`ModelSamplingMiniMaxH3` sets and the scale the sound is carried at. The
+server also refines the prompt's text features under the step's LoRAs.
+`gmlx Video VAE Loader` and `gmlx Audio VAE Loader` give VAEs that decode
+on the server, and `VAE Decode` and `VAE Decode Audio` take their halves
+of the latent as with ComfyUI's own VAEs. `gmlx VAE Loader` refuses a
+video model and names these two loaders, and they refuse an image model.
 
 ## Comfy Desktop installs
 
@@ -116,6 +127,18 @@ that names it:
   model merges, and any node that scales the model's own weights.
 - Saving a gmlx model, text encoder or VAE with the checkpoint save nodes,
   since ComfyUI holds no weights for them.
+- On MiniMax-H3: the references of `MiniMax H3 Reference to Video`, the
+  Fun ControlNet (`Apply MiniMax H3 Fun ControlNet`), a noise mask on the
+  latent, such as one from `Set Latent Noise Mask`, and on FastH3 a first
+  or last frame of `MiniMax H3 Image to Video` or a guide from
+  `Add Guide for MiniMax H3`.
+
+On FastH3, a run on its trained noise levels, or on a part of them as a
+split schedule samples, stops at shifts other than the `fasth3` recipe's
+10 and 3, with an error that names `ModelSamplingMiniMaxH3` and the two
+shifts. Without that node, ComfyUI's forward would derive the sound's
+noise levels at 12 and 3, off those FastH3 was trained at, with no error.
+FastH3 on noise levels of another schedule runs at any shift.
 
 `Flux KV Cache` on FLUX.2 klein 9B KV is not refused. The server keeps the
 keys and values of the reference images of each row of the batch from the

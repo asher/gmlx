@@ -209,7 +209,7 @@ def mutations(pipe, entries) -> dict:
         if len(kept) < len(entries):
             out[f"{group} left out"] = (kept, "group", group)
     for f in (0.9, 1.1):
-        out[f"strength x{f}"] = ([(p, b, [(k, s * f) for k, s in ps])
+        out[f"strength x{f}"] = ([(p, b, [(k, s * f, a) for k, s, a in ps])
                                   for p, b, ps in entries], "strength", f)
     swap = {(0, 0, inner): (0, inner, inner), (0, inner, inner): (0, 0, inner)}
     out["q and k swapped"] = ([(p, swap.get(b, b), ps)

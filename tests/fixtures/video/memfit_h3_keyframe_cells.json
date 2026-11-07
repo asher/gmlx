@@ -1,0 +1,338 @@
+{
+ "what": "MLX active peaks of a MiniMax-H3 encode with keyframes and of its anchors' encodes, on an M5 Max under bounded_cache. The encoder loads text alone, its layers past the tap dropped, then attaches the vision tower from the mmproj at float32. encode: the text load's peak, what it keeps, the attach's peak from there and what stays, then prompts with one or two keyframe blocks of random pixels, at a short prompt and at 42 and 210 repeats of a 24-token sentence; tower: the tower's pass alone over one and two blocks, its features held; video_encode: frames and guide clips of random pixels through the video VAE in fp16; audio_encode: stereo noise through the audio VAE in fp32, windowed at 160 latents. Peaks are bytes, with each model loaded.",
+ "mlx": "0.32.3",
+ "files": {
+  "encoder": 19762151200,
+  "mmproj": 1200334496,
+  "vae": 5207808496,
+  "audio_vae": 605254808
+ },
+ "encode": {
+  "load_peak": 19763393322,
+  "kept": 14928142919,
+  "attach_peak": 17958827079,
+  "resident": 17311622407,
+  "cells": [
+   {
+    "shape": [
+     320,
+     192
+    ],
+    "blocks": [
+     60
+    ],
+    "rows": 82,
+    "start": 17311622407,
+    "peak": 17475679299
+   },
+   {
+    "shape": [
+     672,
+     384
+    ],
+    "blocks": [
+     252
+    ],
+    "rows": 274,
+    "start": 17311622455,
+    "peak": 17688884479
+   },
+   {
+    "shape": [
+     768,
+     768
+    ],
+    "blocks": [
+     576
+    ],
+    "rows": 598,
+    "start": 17311622407,
+    "peak": 18082283127
+   },
+   {
+    "shape": [
+     768,
+     768
+    ],
+    "blocks": [
+     576,
+     576
+    ],
+    "rows": 1182,
+    "start": 17311622455,
+    "peak": 18330721303
+   },
+   {
+    "shape": [
+     1344,
+     768
+    ],
+    "blocks": [
+     1008
+    ],
+    "rows": 1030,
+    "start": 17311622455,
+    "peak": 18631770207
+   },
+   {
+    "shape": [
+     1344,
+     768
+    ],
+    "blocks": [
+     1008,
+     1008
+    ],
+    "rows": 2046,
+    "start": 17311622459,
+    "peak": 18714345511
+   },
+   {
+    "shape": [
+     768,
+     768
+    ],
+    "blocks": [
+     576,
+     576
+    ],
+    "rows": 2219,
+    "start": 17311622407,
+    "peak": 18655463743
+   },
+   {
+    "shape": [
+     1344,
+     768
+    ],
+    "blocks": [
+     1008,
+     1008
+    ],
+    "rows": 3083,
+    "start": 17311622455,
+    "peak": 19125560387
+   },
+   {
+    "shape": [
+     1344,
+     768
+    ],
+    "blocks": [
+     1008,
+     1008
+    ],
+    "rows": 7283,
+    "start": 17311622407,
+    "peak": 19844719935
+   }
+  ]
+ },
+ "tower": [
+  {
+   "shape": [
+    320,
+    192
+   ],
+   "blocks": 1,
+   "tokens": 60,
+   "start": 17311622407,
+   "peak": 17429587359
+  },
+  {
+   "shape": [
+    672,
+    384
+   ],
+   "blocks": 1,
+   "tokens": 252,
+   "start": 17313097015,
+   "peak": 17688884479
+  },
+  {
+   "shape": [
+    768,
+    768
+   ],
+   "blocks": 1,
+   "tokens": 576,
+   "start": 17317815611,
+   "peak": 18082283147
+  },
+  {
+   "shape": [
+    768,
+    768
+   ],
+   "blocks": 2,
+   "tokens": 576,
+   "start": 17325778239,
+   "peak": 18129469067
+  },
+  {
+   "shape": [
+    1344,
+    768
+   ],
+   "blocks": 1,
+   "tokens": 1008,
+   "start": 17325778239,
+   "peak": 18631770159
+  },
+  {
+   "shape": [
+    1344,
+    768
+   ],
+   "blocks": 2,
+   "tokens": 1008,
+   "start": 17336395075,
+   "peak": 18714345575
+  }
+ ],
+ "video_encode": [
+  {
+   "shape": [
+    320,
+    192,
+    1
+   ],
+   "latent_t": 1,
+   "peak": 6065866008
+  },
+  {
+   "shape": [
+    672,
+    384,
+    1
+   ],
+   "latent_t": 1,
+   "peak": 6148624348
+  },
+  {
+   "shape": [
+    320,
+    192,
+    22
+   ],
+   "latent_t": 7,
+   "peak": 7884057284
+  },
+  {
+   "shape": [
+    672,
+    384,
+    22
+   ],
+   "latent_t": 7,
+   "peak": 8886382608
+  },
+  {
+   "shape": [
+    512,
+    512,
+    1
+   ],
+   "latent_t": 1,
+   "peak": 6148755420
+  },
+  {
+   "shape": [
+    768,
+    768,
+    1
+   ],
+   "latent_t": 1,
+   "peak": 6156095452
+  },
+  {
+   "shape": [
+    1344,
+    768,
+    1
+   ],
+   "latent_t": 1,
+   "peak": 6166171612
+  },
+  {
+   "shape": [
+    512,
+    512,
+    22
+   ],
+   "latent_t": 7,
+   "peak": 8889462816
+  },
+  {
+   "shape": [
+    768,
+    768,
+    22
+   ],
+   "latent_t": 7,
+   "peak": 9101308032
+  },
+  {
+   "shape": [
+    1344,
+    768,
+    22
+   ],
+   "latent_t": 7,
+   "peak": 9388552488
+  },
+  {
+   "shape": [
+    672,
+    384,
+    56
+   ],
+   "latent_t": 17,
+   "peak": 9021911216
+  },
+  {
+   "shape": [
+    672,
+    384,
+    124
+   ],
+   "latent_t": 37,
+   "peak": 9292984816
+  },
+  {
+   "shape": [
+    1344,
+    768,
+    56
+   ],
+   "latent_t": 17,
+   "peak": 9928733688
+  },
+  {
+   "shape": [
+    1344,
+    768,
+    124
+   ],
+   "latent_t": 37,
+   "peak": 11009096088
+  }
+ ],
+ "audio_encode": [
+  {
+   "seconds": 1.0,
+   "latents": 40,
+   "peak": 1707750204
+  },
+  {
+   "seconds": 4.0,
+   "latents": 160,
+   "peak": 2359417980
+  },
+  {
+   "seconds": 15.0,
+   "latents": 600,
+   "peak": 2479947796
+  }
+ ]
+}

@@ -232,7 +232,7 @@ def wrong_tables(pipe, tmp, m: dict, rows: list, each: bool = True,
             band = "" if b is None else f"_band_{b[1] // ffn}"
             out[f"only_{p}{band}_left_out"] = entries[:i] + entries[i + 1:]
     for f in (0.9, 1.1):
-        out[f"strength_x{f}"] = [(p, b, [(k, s * f) for k, s in ps])
+        out[f"strength_x{f}"] = [(p, b, [(k, s * f, a) for k, s, a in ps])
                                  for p, b, ps in entries]
     if len(rows) > 1:
         for i, row in enumerate(rows):
@@ -294,9 +294,9 @@ def structural_tables(pipe, entries: list) -> dict:
                 (*other[half(e)[1]], e[2]) if half(e)[0] == i and half(e)[1]
                 else e for e in entries]
         out[f"sign_in_block_{i}"] = [
-            (p, b, [(k, -s if _block(p) == i else s) for k, s in ps])
+            (p, b, [(k, -s if _block(p) == i else s, a) for k, s, a in ps])
             for p, b, ps in entries]
-    out["sign_of_every_strength"] = [(p, b, [(k, -s) for k, s in ps])
+    out["sign_of_every_strength"] = [(p, b, [(k, -s, a) for k, s, a in ps])
                                      for p, b, ps in entries]
     free = [i for i in range(len(pipe.dit.transformer_blocks))
             if i not in blocks]
@@ -625,10 +625,11 @@ def test_each_placement_gives_the_tiny_step_of_the_merged_oracle(
     built = pipe.lora._cur[(tid, mx.float32, install.form())]
     ffn = pipe.dit.cfg.ffn_dim
     # Block 0 has both bands of the fused weight and block 1 its gate
-    # band alone. A whole weight is a block under every placement.
+    # band alone. A whole weight runs on its cached pair under every
+    # placement.
     both, gate = (built.get(f"{B}{i}.img_mlp.gate_up") for i in (0, 1))
     assert type(both).__name__ == kind and type(gate).__name__ == kind
-    assert type(built.get(B + "0.img_mlp.out")).__name__ == "_Block"
+    assert type(built.get(B + "0.img_mlp.out")).__name__ == "_Own"
     if how != "block":
         assert [s[:2] for s in both.spans] == [(0, ffn), (ffn, 2 * ffn)]
         assert [s[:2] for s in gate.spans] == (
@@ -664,7 +665,7 @@ def test_a_gate_up_key_gives_the_tiny_step_of_the_merged_oracle(pipes,
 
     pipe = pipes["fused"]
     ad = lora.load_adapter(pipe, path)
-    assert (mlp + "gate_up", None) in {(p, b) for p, b, _ in ad.dit}
+    assert (mlp + "gate_up", None) in {(p, b) for p, b, _a, _k in ad.dit}
     assert len(ad.dit) == len(pairs) - 1 and ad.warnings == ()
     tid = api.define_patch_table(pipe, lora.table_entries([(ad, strength)]))
     got = ratios(pipe, arrays, tid, "gate_up key")
@@ -710,7 +711,7 @@ def test_a_dense_gate_up_pair_gives_the_tiny_step_of_the_merged_oracle(
     pipe = pipes["fused"]
     ad = lora.load_adapter(pipe, write_adapter(
         tmp_path / "dense.safetensors", "kohya", dense))
-    assert sorted((p, b) for p, b, _ in ad.dit) == [
+    assert sorted((p, b) for p, b, _a, _k in ad.dit) == [
         (B + "0.img_mlp.gate_up", None), (B + "1.attn.to_q", None),
         (B + "1.img_mlp.gate_up", None)]
     tid = api.define_patch_table(pipe, lora.table_entries([(ad, strength)]))
@@ -757,12 +758,12 @@ def test_a_header_config_scales_the_tiny_step_as_the_reference_reads_it(
 
     ad = load("header", row["header"])
     targets = patch_table.key_map(pipe).targets
-    held = {(module, band): pipe.adapters.get(key)
-            for module, band, key in ad.dit}
+    held = {(module, band): (pipe.adapters.get(key), a)
+            for module, band, a, key in ad.dit}
     assert len(held) == len(row["scales"]) == 18
     for target, (rank, alpha) in row["scales"].items():
-        pair = held[targets[target]]
-        assert (int(pair.down.shape[0]), pair.alpha) == (rank, alpha)
+        pair, a = held[targets[target]]
+        assert (int(pair.down.shape[0]), a) == (rank, alpha)
     assert len(ad.warnings) == 1
     assert "ComfyUI does not read the header" in ad.warnings[0]
     tid = api.define_patch_table(pipe, lora.table_entries([(ad, strength)]))

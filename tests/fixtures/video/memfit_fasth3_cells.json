@@ -1,0 +1,205 @@
+{
+ "what": "MLX active peaks per phase of FastH3 video runs (vantagewithai's Q4_K_M GGUF, video sparse attention at sparsity 0.8) on an M5 Max under bounded_cache, one shape per process, 2 steps (1 at 1344x768x362), with no LoRA or lightx2v's 8-step LoRA; the denoise peak includes the DiT load. The encoder, VAEs and LoRA are the H3 cells' files.",
+ "mlx": "0.32.3",
+ "kq": "0.5.8",
+ "variant": "fasth3",
+ "vsa_sparsity": 0.8,
+ "files": {
+  "dit": 13613532704,
+  "encoder": 19762151200,
+  "vae": 5207808496,
+  "audio_vae": 605254808,
+  "lora": 1956193000
+ },
+ "cells": [
+  {
+   "shape": [
+    512,
+    512,
+    22
+   ],
+   "loras": 0,
+   "steps": 2,
+   "rows": {
+    "text": 25,
+    "total": 1891,
+    "video": 1792,
+    "audio": 74
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 14217969338,
+    "audio": 2001646020,
+    "decode": 6388019056
+   }
+  },
+  {
+   "shape": [
+    768,
+    768,
+    56
+   ],
+   "loras": 0,
+   "steps": 2,
+   "rows": {
+    "text": 25,
+    "total": 10003,
+    "video": 9792,
+    "audio": 186
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 15894499852,
+    "audio": 2803978752,
+    "decode": 6542606896
+   }
+  },
+  {
+   "shape": [
+    768,
+    768,
+    124
+   ],
+   "loras": 0,
+   "steps": 2,
+   "rows": {
+    "text": 25,
+    "total": 21751,
+    "video": 21312,
+    "audio": 414
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 18397010332,
+    "audio": 2992632356,
+    "decode": 6551685392
+   }
+  },
+  {
+   "shape": [
+    1344,
+    768,
+    124
+   ],
+   "loras": 0,
+   "steps": 2,
+   "rows": {
+    "text": 25,
+    "total": 37735,
+    "video": 37296,
+    "audio": 414
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 22222051184,
+    "audio": 2967169140,
+    "decode": 6758043072
+   }
+  },
+  {
+   "shape": [
+    768,
+    768,
+    124
+   ],
+   "loras": 1,
+   "steps": 2,
+   "rows": {
+    "text": 25,
+    "total": 21751,
+    "video": 21312,
+    "audio": 414
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 20353128860,
+    "audio": 2960634860,
+    "decode": 6551685392
+   }
+  },
+  {
+   "shape": [
+    1344,
+    768,
+    124
+   ],
+   "loras": 1,
+   "steps": 2,
+   "rows": {
+    "text": 25,
+    "total": 37735,
+    "video": 37296,
+    "audio": 414
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 24178169712,
+    "audio": 2967107444,
+    "decode": 6758043072
+   }
+  },
+  {
+   "shape": [
+    512,
+    512,
+    22
+   ],
+   "loras": 1,
+   "steps": 2,
+   "rows": {
+    "text": 25,
+    "total": 1891,
+    "video": 1792,
+    "audio": 74
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 16174181786,
+    "audio": 2001578224,
+    "decode": 6388031964
+   }
+  },
+  {
+   "shape": [
+    768,
+    768,
+    56
+   ],
+   "loras": 1,
+   "steps": 2,
+   "rows": {
+    "text": 25,
+    "total": 10003,
+    "video": 9792,
+    "audio": 186
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 17850616332,
+    "audio": 2799046144,
+    "decode": 6542606896
+   }
+  },
+  {
+   "shape": [
+    1344,
+    768,
+    362
+   ],
+   "loras": 0,
+   "steps": 1,
+   "rows": {
+    "text": 25,
+    "total": 109087,
+    "video": 107856,
+    "audio": 1206
+   },
+   "peak": {
+    "encode": 19763393322,
+    "denoise": 38745205444,
+    "audio": 4457221500,
+    "decode": 6813477752
+   }
+  }
+ ]
+}

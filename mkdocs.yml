@@ -102,12 +102,14 @@ nav:
           - installation.md
           - quickstart.md
           - images.md
+          - video.md
           - migrating.md
       - Serving:
           - config.md
           - menubar.md
           - services.md
           - image-api.md
+          - video-api.md
           - comfyui.md
           - rag.md
           - decisions.md

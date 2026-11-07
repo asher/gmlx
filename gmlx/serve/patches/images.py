@@ -28,6 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 import gmlx.serve.bridge_vlm as serving
 
 from ._common import _error_content, _remove_routes
+from .jobs import JobBook
 from .api_contract import (
     IMAGES_EDITS_CONSUMED,
     IMAGES_GENERATIONS_CONSUMED,
@@ -46,6 +47,17 @@ _DISCONNECT_POLL_S = 0.25
 _CONSUMED = {"generations": IMAGES_GENERATIONS_CONSUMED,
              "edits": IMAGES_EDITS_CONSUMED,
              "variations": IMAGES_VARIATIONS_CONSUMED}
+# The copies of a body its read and parse hold, which its price counts.
+# A form: the body, and the route form's bytearray and str of its text,
+# measured at 3.04. A JSON body: the body, the gate's json.loads and its
+# decode of an edit image, then the route's, measured at 4.75 with a data
+# URL. The post-V6 parse change removes the copies. Two of a JSON body's
+# copies are strs (the gate's json.loads and the route's), which widen in
+# a body that is not ASCII, and the values it parses to add
+# body_intake.JSON_VALUE_BYTES each.
+FORM_COPIES = 3.25
+JSON_COPIES = 5
+JSON_STR_COPIES = 2
 
 
 class _State:
@@ -59,12 +71,19 @@ class _State:
         self.settings = ImageServerCfg()
         self.model_dirs: tuple = ()
         self.store = None
-        self.lock = threading.Lock()
-        self.in_flight = 0
-        self.durations: list = []           # seconds of recent jobs
-        self.counts = {"jobs": 0, "failed": 0, "cancelled": 0, "images": 0,
-                       "steps": 0}
+        self.book = JobBook("jobs", "failed", "cancelled", "images", "steps")
+        self.lock = self.book.lock
+        self.counts = self.book.counts
         self.recent: list = []              # (image_s, step_s) per image
+
+    @property
+    def in_flight(self) -> int:
+        return self.book.in_flight
+
+    @in_flight.setter
+    def in_flight(self, n: int) -> None:
+        with self.lock:
+            self.book.in_flight = n
 
     def configure(self, cfg) -> None:
         from gmlx.config import ImageServerCfg
@@ -88,17 +107,10 @@ class _State:
     def admit(self) -> bool:
         """Take a slot, or refuse when ``max_queue`` requests wait behind
         the one running."""
-        with self.lock:
-            if self.in_flight > self.settings.max_queue:
-                return False
-            self.in_flight += 1
-            return True
+        return self.book.admit(self.settings.max_queue)
 
     def leave(self, seconds: float | None = None) -> None:
-        with self.lock:
-            self.in_flight = max(0, self.in_flight - 1)
-            if seconds is not None:
-                self.durations = (self.durations + [seconds])[-16:]
+        self.book.leave(seconds)
 
     def record(self, status: str, result=None) -> None:
         """Count a finished job; an ``ok`` one adds its seconds per image
@@ -138,9 +150,9 @@ class _State:
             }
 
     def retry_after(self) -> int:
-        with self.lock:
-            typical = statistics.median(self.durations) if self.durations else 10.0
-            waiting = max(1, self.in_flight)
+        typical = self.book.typical()
+        waiting = max(1, self.in_flight)
+        typical = 10.0 if typical is None else typical
         return int(min(600, max(2, round(typical * waiting))))
 
 
@@ -232,16 +244,41 @@ def _json_image(value, param: str):
 
 
 async def _read_body(route: str, request: Request):
-    """``(fields, images, mask)`` of a JSON body or a multipart form."""
-    from ..image_service import _bad, decode_image
+    """``(fields, images, mask)`` of a JSON body or a multipart form. The
+    media gate leaves the body to the route: the whole body, its images
+    with it, is priced against the memory free before a byte of it is
+    read, then held to the gate's media rules (body_intake). The price is
+    an estimate and books nothing; the job's admission prices the decoded
+    images. Its inline images take no byte limit of their own."""
+    from .media_gate import body_priced
+
+    with body_priced():
+        return await _read_priced_body(route, request)
+
+
+async def _read_priced_body(route: str, request: Request):
+    from ..image_service import ImageRequestError, _bad, decode_image
+    from .body_intake import BodyRefused, check_media, read_in_ram
 
     ctype = request.headers.get("content-type", "").lower()
+    is_form = ctype.startswith("multipart/form-data")
+    try:
+        raw = await read_in_ram(
+            request, copies=FORM_COPIES if is_form else JSON_COPIES,
+            str_copies=None if is_form else JSON_STR_COPIES)
+        await check_media(request, raw)
+    except BodyRefused as e:
+        raise ImageRequestError(e.status, str(e), param=e.param,
+                                headers=e.headers) from None
     images, mask = [], None
-    if ctype.startswith("multipart/form-data"):
+    if is_form:
         if route == "generations":
             raise _bad("this route takes a JSON body, not a multipart form")
         try:
-            form = await request.form(max_files=64)
+            # The body was priced whole and is in RAM: no part of it
+            # is larger, so its length bounds a text part.
+            form = await request.form(max_files=64,
+                                      max_part_size=max(1, len(raw)))
         except Exception as e:  # noqa: BLE001 - any parse failure is a 400
             raise _bad(f"could not parse multipart form data: {e}") from None
         fields = {}
@@ -275,8 +312,12 @@ async def _read_body(route: str, request: Request):
 
 
 def _budget(hold):
-    """The bytes a request may plan on: the working budget less the other
-    resident models, or None with GMLX_OVERCOMMIT set."""
+    """The bytes a request may plan on, or None with GMLX_OVERCOMMIT set:
+    the working budget less what the pool holds beside the entry's
+    weights and its held LoRA bytes, and less the upload bodies in
+    flight. The plan counts the entry's weights, its held LoRA bytes and
+    the held uploads itself. Read from the pool's figures with no pool
+    lock; the pending bookings stay in."""
     from ..capacity import overcommit, working_budget_bytes
 
     if overcommit():
@@ -285,8 +326,52 @@ def _budget(hold):
     if total is None:
         return None
     pool = hold._pool
-    others = pool.stats()["resident_bytes"] - hold._entry.footprint
-    return max(0, total - others)
+    beside = pool.plan_beside(hold._entry) + pool.figures.incoming
+    return max(0, total - beside)
+
+
+def _hopeless(hold, served, req, beside=None) -> None:
+    """The route's 413 for a request whose adapters' bytes, from their
+    headers, no unload makes room for beside its model and the entries
+    ``beside`` its job holds, or before the borrow (None), the encoder it
+    will borrow. The job's turns book them."""
+    from ..image_service import ADAPTERS, lora_refusal, request_estimate
+    from ..residency import LoraRefused
+
+    n = request_estimate(served, req.adapters, STATE.model_dirs)
+    if n <= 0:
+        return
+    if beside is None:
+        beside = _encoder(hold, served)
+    try:
+        hold._pool.lora_hopeless(hold._entry, n, ADAPTERS, beside)
+    except LoraRefused as e:
+        raise lora_refusal(e) from None
+
+
+def _encoder(hold, served) -> tuple:
+    """The chat model a job borrows as its encoder, before the borrow: its
+    resident entry, or one at the bytes its load books. Empty when the
+    model shares no encoder or the id does not resolve, which the borrow
+    answers."""
+    model_id = served.spec.encoder_model
+    if model_id is None:
+        return ()
+    from gmlx.config import env_for
+
+    try:
+        path, spec = serving.resolve_request_model(
+            model_id, profile_field=serving.get_request_profile())
+        return (hold._pool.load_entry(path, spec, env_for(spec)),)
+    except Exception:  # noqa: BLE001 - the borrow resolves it and answers
+        return ()
+
+
+def _beside(holds) -> tuple:
+    """The pool entries a job holds besides its model, ``holds[0]``: the
+    chat model it borrows as its encoder."""
+    return tuple(e for e in (getattr(h, "_entry", None) for h in holds[1:])
+                 if e is not None)
 
 
 def _text_model(model):
@@ -449,6 +534,7 @@ def make_endpoint(route: str):
             served = hold._entry.pipeline
             check_family(req, served)
             size = target_size(req, served)
+            _hopeless(hold, served, req)
             budget = _budget(hold)
             fit_check(req, served, size, budget)
             borrow = None
@@ -456,6 +542,9 @@ def make_endpoint(route: str):
                 fn, chat_hold = _borrow_for(served.spec)
                 if chat_hold is not None:
                     holds.append(chat_hold)
+                    # The encoder the job holds is its own, for its turns
+                    # too.
+                    _hopeless(hold, served, req, _beside(holds))
 
                 def borrow(run, _fn=fn, _pipe=served.pipe):
                     return _fn(_pipe, run, stop, timeout_s)
@@ -507,6 +596,8 @@ def make_endpoint(route: str):
             return _error(path, 500, f"{path} failed ({type(e).__name__}); "
                           "see the server log", err_type="server_error")
         model_id = served.spec.id
+        pool, entry = holds[0]._pool, holds[0]._entry
+        beside = _beside(holds)
         submitted = time.monotonic()
         loop = asyncio.get_running_loop()
         events: asyncio.Queue = asyncio.Queue()
@@ -526,7 +617,8 @@ def make_endpoint(route: str):
                                submitted=submitted, borrow=borrow,
                                emit=emit if req.stream else None,
                                model_dirs=STATE.model_dirs,
-                               embed_metadata=STATE.settings.embed_metadata)
+                               embed_metadata=STATE.settings.embed_metadata,
+                               pool=pool, entry=entry, beside=beside)
 
         future = WORKER.submit(job)
 
@@ -706,12 +798,16 @@ def _job_failure(path: str, e: Exception, finish) -> JSONResponse:
 
 def _stream_error(path: str, e: Exception) -> dict:
     """The error frame of a streamed job that raised ``e``: the error the
-    non-streamed path answers with."""
+    non-streamed path answers with. A refusal with a Retry-After header,
+    as a turn's 503, carries its seconds as ``retry_after``, since a
+    frame has no headers."""
     from ..image_service import ImageRequestError
 
     if isinstance(e, ImageRequestError):
+        retry = e.headers.get("Retry-After")
+        extra = {} if retry is None else {"retry_after": int(retry)}
         return _error_content(path, e.status, e.err_type, str(e),
-                              param=e.param, code=e.code)
+                              param=e.param, code=e.code, **extra)
     refusal = _job_refusal(e)
     if refusal is not None:
         message, param, _ = refusal

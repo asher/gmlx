@@ -28,9 +28,11 @@ def _patches(pipe, stack, prefix="diffusion_model.") -> list:
     for adapter, strength in stack:
         for target, (down, up, alpha) in adapter.items():
             module, band = km.targets[target]
-            key = lora.register_patch(pipe, up, down, alpha, None, None, None)
+            key, alpha = lora.register_patch(pipe, up, down, alpha, None,
+                                             None, None)
             rows.setdefault((module, band), []).append(
-                {"adapter": key, "strength": strength, "strength_model": 1.0})
+                {"adapter": key, "alpha": alpha, "strength": strength,
+                 "strength_model": 1.0})
     return [{"key": f"{prefix}{module}.weight",
              "band": None if band is None else list(band), "patches": p}
             for (module, band), p in rows.items()]
@@ -65,20 +67,25 @@ def test_an_offset_key_and_tensor_forms_are_read(tmp_path):
     pipe = _pipe()
     rng = np.random.default_rng(0)
     d, u, _ = make_pair(rng, 64, 64, 2)
-    h = lora.register_patch(pipe, u, d, 3.0)
-    assert h == lora.pair_hash(mx.array(d), mx.array(u), 3.0)
+    h, alpha = lora.register_patch(pipe, u, d, 3.0)
+    assert (h, alpha) == (lora.pair_hash(mx.array(d), mx.array(u)), 3.0)
     # Alpha as a tensor, and the factors of a 1x1 kernel.
     assert lora.register_patch(pipe, u.reshape(64, 2, 1, 1),
                                d.reshape(2, 64, 1, 1),
-                               np.float32(3.0)) == h
+                               np.float32(3.0)) == (h, 3.0)
     assert lora.register_patch(pipe, mx.array(u), mx.array(d),
-                               mx.array([3.0])) == h
-    assert lora.register_patch(pipe, u, d) != h and len(pipe.adapters) == 2
+                               mx.array([3.0])) == (h, 3.0)
+    # Without an alpha it is the same pair.
+    assert lora.register_patch(pipe, u, d) == (h, None)
+    assert len(pipe.adapters) == 1
     entries = lora.plans_from_patches(pipe.family, [
         {"key": "diffusion_model.layers.0.attention.qkv.weight",
          "offset": (0, 128, 64),
-         "patches": [{"adapter": h, "strength": 1}]}])
-    assert entries == [("layers.0.attention.qkv", (0, 128, 64), [(h, 1.0)])]
+         "patches": [{"adapter": h, "strength": 1},
+                     {"adapter": h, "strength": 1,
+                      "alpha": mx.array([3.0])}]}])
+    assert entries == [("layers.0.attention.qkv", (0, 128, 64),
+                        [(h, 1.0, None), (h, 1.0, 3.0)])]
     assert api.define_patch_table(pipe, entries) != api.EMPTY_TABLE
 
 
@@ -94,7 +101,7 @@ def test_patches_gmlx_does_not_apply_are_refused_by_name():
             lora.register_patch(pipe, u, d, 1.0, **kw)
         assert e.value.kind == kind
     assert len(pipe.adapters) == 0
-    h = lora.register_patch(pipe, u, d, 1.0)
+    h, _alpha = lora.register_patch(pipe, u, d, 1.0)
     row = {"key": "diffusion_model.layers.0.attention.out.weight",
            "band": None, "patches": [{"adapter": h, "strength": 1.0}]}
     scaled = dict(row, patches=[{"adapter": h, "strength": 1.0,

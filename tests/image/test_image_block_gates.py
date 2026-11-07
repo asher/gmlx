@@ -351,7 +351,7 @@ CHILD = "GMLX_BLOCK_GATES_CHILD"
 def test_the_exact_path_reads_the_process_not_the_variable(monkeypatch):
     """A variable set after the first product, as a command run in this
     process once set it, does not make the process exact."""
-    from gmlx.image.families.qwen_image21.edit import f32_products_exact
+    from gmlx.image.float32 import f32_products_exact
 
     want = not f32_products_exact()
     for value in ("0", "1"):
@@ -767,7 +767,7 @@ def adapted():
     rng = np.random.default_rng(5)
     path = f"layers.0.{LEAVES['qkv']}"
     return pipe, [(path, (0, i * WIDTH, WIDTH), [(lora.register_pair(
-        pipe, *make_pair(rng, WIDTH, WIDTH, 4)), 0.8)]) for i in range(3)]
+        pipe, *make_pair(rng, WIDTH, WIDTH, 4)[:2]), 0.8)]) for i in range(3)]
 
 
 def test_a_leaf_on_the_lora_op_is_one_site_at_the_count_of_the_op(

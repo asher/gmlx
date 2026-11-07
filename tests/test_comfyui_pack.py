@@ -67,7 +67,7 @@ TITLES = {"z_image": "Z-Image", "qwen_image21": "Qwen-Image 2.1",
           "krea2": "Krea 2", "flux2_klein": "FLUX.2 klein",
           "flux2_klein_9b": "FLUX.2 klein 9B",
           "flux2_klein_9b_kv": "FLUX.2 klein 9B KV",
-          "flux3_klein": "FLUX.3 klein", "moss_image": "MOSS-Image"}
+          "flux3_klein": "FLUX.3 klein", "moss_image": "MOSS-Image", "h3": "MiniMax-H3"}
 
 
 def _served_families() -> set:
@@ -95,10 +95,12 @@ def test_the_readme_lists_every_family_the_pack_serves_with_its_parity_rows():
 
 
 
-def test_the_moss_image_step_rows_sit_under_headers_that_name_their_cells():
-    """MOSS-Image reads its step distances from stock fp32 against the
-    larger of the stock bf16 and in-process gmlx ones, so its rows sit in
-    a table of their own whose headers name both."""
+@pytest.mark.parametrize("title", ["MOSS-Image", "MiniMax-H3"])
+def test_the_cpu_device_step_rows_sit_under_headers_that_name_their_cells(
+        title):
+    """MOSS-Image and MiniMax-H3 read their step distances from stock fp32
+    against the larger of the stock bf16 and in-process gmlx ones, so their
+    rows sit in tables whose headers name both."""
     parity = (_PACK / "README.md").read_text().split(
         "### Parity with the stock loaders", 1)[1]
     step = parity.split("The final image check", 1)[0]
@@ -107,7 +109,7 @@ def test_the_moss_image_step_rows_sit_under_headers_that_name_their_cells():
     for ln in step.splitlines():
         if ln.startswith("| Model |"):
             header = ln
-        elif ln.startswith("| MOSS-Image |"):
+        elif ln.startswith(f"| {title} |"):
             rows.append((header, ln))
     assert rows
     for header, row in rows:
@@ -145,7 +147,7 @@ def test_the_wheel_ships_every_pack_file():
     for want in ("gmlx/comfyui_pack/LICENSE", "gmlx/comfyui_pack/__init__.py",
                  "gmlx/comfyui_pack/version.py"):
         assert want in files
-    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 11
+    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 14
 
 
 def test_the_pack_keeps_its_apache_license():
@@ -228,6 +230,15 @@ _WIDGETS = {
     "FluxKVCache": [],
     "ModelSamplingSD3": ["shift"],
     "SkipLayerGuidanceDiTSimple": ["double_layers", "single_layers", "start_percent", "end_percent"],
+    "GmlxVideoVAELoader": ["model_name", "server_url", "start_server"],
+    "GmlxAudioVAELoader": ["model_name", "server_url", "start_server"],
+    "MiniMaxH3SigmaShift": ["shift_video", "shift_audio"],
+    "GmlxSigmas": ["steps", "denoise", "width", "height"],
+    "MiniMaxH3ImageToVideo": ["prompt", "width", "height", "length"],
+    "BasicGuider": [],
+    "VAEDecodeAudio": [],
+    "CreateVideo": ["fps", "bit_depth", "color_space"],
+    "SaveVideo": ["filename_prefix", "format", "format.codec"],
 }
 _FRONTEND_ONLY = {"control_after_generate", "upload"}
 
@@ -270,7 +281,8 @@ def test_example_workflow_is_a_ui_graph_with_the_install_note(path):
     notes = [n for n in ui["nodes"] if n["type"] == "Note"]
     assert len(notes) == 1
     text = notes[0]["widgets_values"][0]
-    assert "gmlx comfyui install" in text and "gmlx pull " in text
+    assert "gmlx comfyui install" in text
+    assert "gmlx pull " in text or "gmlx video pull " in text
     assert text.isascii()
     assert ui["last_node_id"] == max(nodes)
     assert ui["last_link_id"] == len(ui["links"])
@@ -294,12 +306,15 @@ def test_api_copy_is_its_example_workflow(path):
 
 def test_every_example_workflow_names_a_known_model_id():
     from gmlx.image.catalog import RECIPES
+    from gmlx.video.catalog import RECIPES as VIDEO_RECIPES
 
-    ids = set(RECIPES)
+    ids = set(RECIPES) | set(VIDEO_RECIPES)
     for path in _ui_files():
         for n in json.loads(path.read_text())["nodes"]:
-            if n["type"].startswith("Gmlx"):
-                assert n["widgets_values"][0] in ids, (path.name, n["widgets_values"][0])
+            names = _WIDGETS.get(n["type"], [])
+            if "model_name" in names:
+                got = n["widgets_values"][names.index("model_name")]
+                assert got in ids, (path.name, got)
 
 
 def test_ascii_only():

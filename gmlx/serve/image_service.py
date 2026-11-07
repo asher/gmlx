@@ -13,9 +13,13 @@ plan. With the text encoder released after each encode, that is the
 larger of the encode phase and the denoise phase, not their sum. An
 entry whose encoder does not fit beside its DiT is staged as the image
 command stages a load: each encode that the cache does not hold lets
-the DiT and the VAE go, loads the encoder alone, and loads them again
-after its release. Its caches take the room its image leaves, up to
-their bounds.
+the DiT and the VAE go and loads the encoder alone, and the next call
+that reads them loads them again, so encodes back to back load them
+once. The routes read what they check of the DiT and the VAE before any
+work from the entry, which keeps it from the load. Its caches take the
+room its image leaves, up to their bounds, and the step routes' tensor
+cache keeps room for one uploaded cond of the family's priced text rows
+at any share.
 """
 
 from __future__ import annotations
@@ -51,24 +55,57 @@ class EntryPlan:
     size: tuple                     # default (width, height)
     cfg: float
     # Each encode runs with the DiT and the VAE out of memory: the owned
-    # encoder loads, encodes and goes, and the DiT and the VAE load again.
+    # encoder loads, encodes and goes, and the next reader of the DiT and
+    # the VAE loads them again.
     staged: bool = False
     cache_share: float = 1.0        # of each cache's configured bound
+    tensor_floor: int = 0           # step tensor cache bytes kept for a cond
     encoder_bytes: int = 0          # an owned encoder's, from its header
     mmproj_bytes: int = 0
     load_parts: tuple | None = None   # see memfit.plan_memory, no tower
     tower_parts: tuple | None = None  # the same with the vision tower
 
 
+@dataclass(frozen=True)
+class DitFacts:
+    """What the routes read of the DiT and the VAE before their work runs
+    on the worker, kept from the load. A staged entry's DiT and VAE are
+    out from an encode until the next call on the worker that reads them,
+    and the handlers run beside the worker, so they read these."""
+    act_dtype: Any                  # the DiT's activation dtype
+    vae_dtype: Any                  # the VAE's
+    size_multiple: int              # of an image's width and height
+    flow_map: bool                  # the DiT is a flow map
+    ref_cache: bool                 # the DiT keeps a cache of reference K and V
+    blocks: int | None              # the blocks a step may skip, None for none
+
+
+def dit_facts(pipe) -> DitFacts:
+    """The DitFacts of a pipeline with its DiT and VAE loaded."""
+    dit = pipe.dit
+    return DitFacts(act_dtype=dit.act_dtype,
+                    vae_dtype=getattr(pipe.vae, "dtype", None),
+                    size_multiple=int(pipe.size_multiple),
+                    flow_map=bool(getattr(dit.cfg, "flow_map", False)),
+                    ref_cache=hasattr(dit, "extract"),
+                    blocks=(len(dit.layers)
+                            if getattr(dit, "skips_blocks", False) else None))
+
+
 @dataclass(eq=False)
 class ServedImage:
     """What an image entry holds: the pipeline, the resolved config entry,
-    the plan it was priced by and its configured adapters as (adapter,
-    strength) rows."""
+    the plan it was priced by, the facts of its DiT and VAE and its
+    configured adapters as (adapter, strength) rows."""
     pipe: Any
     spec: Any
     plan: EntryPlan
+    facts: DitFacts
     adapters: list = field(default_factory=list)
+    # The footprint's term for the own LoRAs: 2x the files, the pairs and
+    # the default table's built factors, beyond which the pool books
+    # their excess.
+    lora_own_term: int = 0
 
 
 def family_matches(name: str, family, variant: str) -> bool:
@@ -88,19 +125,28 @@ def default_size(spec, defaults) -> tuple:
 
 
 # The bytes each cache of an image model may hold: conditionings and
-# reference latents (tensor), request adapter pairs and built patch tables
-# (adapter). server.image sets them; an entry books each at its bound.
-# The step routes keep one cache of uploaded tensors and one of adapter
-# matrices for the server (steps), which each image entry books too.
-_CACHE_BYTES = {"tensor": 64 << 20, "adapter": 256 << 20,
-                "steps": (64 + 256) << 20}
+# reference latents (tensor), and the optional cap on request adapter
+# pairs and built patch tables (adapter), None when unset. server.image
+# sets them; an entry books each tensor cache at its bound, and the pool
+# books LoRA bytes at the turn of the job that reads or builds them. The
+# step routes keep one cache of uploaded tensors for the server (steps),
+# which each image entry books too; their uploaded adapter matrices are
+# admitted before their bodies are read.
+_CACHE_BYTES: dict = {"tensor": 64 << 20, "adapter": None,
+                      "steps": 64 << 20}
 
 
 def configure_caches(settings) -> None:
-    """Take the cache bounds of ``server.image``."""
+    """Take the cache bounds of ``server.image``, and log the cap on
+    request LoRAs when one is set."""
     _CACHE_BYTES["tensor"] = int(settings.tensor_cache_mb) << 20
-    _CACHE_BYTES["adapter"] = int(settings.adapter_cache_mb) << 20
-    _CACHE_BYTES["steps"] = (_CACHE_BYTES["tensor"] + _CACHE_BYTES["adapter"]
+    amb = settings.adapter_cache_mb
+    _CACHE_BYTES["adapter"] = None if amb is None else int(amb) << 20
+    if amb is not None:
+        _log.info("server.image.adapter_cache_mb: %d caps each image "
+                  "model's request LoRAs at %d MiB; remove the key to let "
+                  "LoRAs use free memory", int(amb), int(amb))
+    _CACHE_BYTES["steps"] = (_CACHE_BYTES["tensor"]
                              if getattr(settings, "steps_api", True) else 0)
 
 
@@ -113,6 +159,15 @@ def _steps_cache_bytes() -> int:
         runs = list(STATE.runs.values())
     return (STATE.tensors.bytes + STATE.adapters.bytes
             + sum(c.nbytes for r in runs for c in r.ref_cache.values()))
+
+
+def held_bytes(pipe) -> tuple:
+    """(adapters, caches) a served pipeline holds beside its weights, as a
+    request's plan counts them: its LoRA pairs and patch tables, and its
+    conditioning and modulation caches with the step routes' caches."""
+    return (pipe.adapters.bytes + pipe.tables.bytes,
+            pipe.conditionings.bytes + pipe.modulations.bytes
+            + _steps_cache_bytes())
 
 
 def _live_conds() -> set:
@@ -131,27 +186,95 @@ def cache_bytes() -> tuple:
 
 
 def bound_caches(pipe, configured: int = 0, share: float = 1.0) -> None:
-    """Bound the caches of a served pipeline at ``share`` of their
-    configured bounds. The adapter cache also holds the ``configured``
-    bytes of the entry's own adapters, which the entry books on their
-    own."""
-    tensor, adapter = cache_bytes()
-    tensor, adapter = int(tensor * share), int(adapter * share)
+    """Bound the tensor caches of a served pipeline at ``share`` of their
+    configured bounds, and its pair and tables caches at the
+    ``configured`` bytes of the entry's own adapters plus the optional
+    cap, or no bound with none. The pool's ledger counts each request
+    LoRA byte, and each turn bounds those two at what it booked
+    (``bound_lora``)."""
+    from gmlx.image.lora import install
+
+    from .image_steps import UNBOUNDED
+
+    tensor, cap = cache_bytes()
+    tensor = int(tensor * share)
     pipe.conditionings.max_bytes = tensor
     pipe.reference_latents.max_bytes = tensor
-    pipe.adapters.max_bytes = adapter + int(configured)
-    pipe.tables.max_bytes = adapter + int(configured)
+    room = UNBOUNDED if cap is None else cap
+    pipe.adapters.max_bytes = room + int(configured)
+    pipe.tables.max_bytes = room + int(configured)
+    install.shed_to_bounds(pipe)
 
 
-# The cache share of each loaded entry, by id of its ServedImage. The
-# step routes' caches serve every entry and take the smallest share.
+# The (cache share, tensor floor) of each loaded entry, by id of its
+# ServedImage or ServedVideo. The step routes' caches serve every entry
+# and take the smallest share, and their tensor cache the largest floor.
+# The image and video workers both load and release entries: the table
+# and the scale it sets change together under _SHARES_LOCK.
 _SHARES: dict = {}
+_SHARES_LOCK = threading.Lock()
 
 
 def _scale_step_caches() -> None:
+    """Scale the step routes' caches to the table; under _SHARES_LOCK."""
     from .image_steps import STATE
 
-    STATE.scale_caches(min(_SHARES.values(), default=1.0))
+    shares = list(_SHARES.values())
+    STATE.floor_tensors(max((f for _s, f in shares), default=0))
+    STATE.scale_caches(min((s for s, _f in shares), default=1.0))
+
+
+def set_share(served, share: float, floor: int) -> None:
+    """Enter a loaded entry's cache share and tensor floor, and scale the
+    step routes' caches to the table."""
+    with _SHARES_LOCK:
+        _SHARES[id(served)] = (share, floor)
+        _scale_step_caches()
+
+
+def drop_share(served) -> None:
+    """Take a released entry out of the table, and scale the step routes'
+    caches to what is left."""
+    with _SHARES_LOCK:
+        if _SHARES.pop(id(served), None) is not None:
+            _scale_step_caches()
+
+
+# The grid of cache shares an entry is fitted on.
+SHARE_STEPS = 64
+
+
+def fit_share(price, budget):
+    """(footprint, cache share) of an entry whose peak with each tensor
+    cache at ``share`` of its bound is ``price(share)``, or None when it
+    does not fit with them empty. Each takes the room the work leaves, up
+    to its bound. LoRA bytes are booked at the job's turns, outside it."""
+    full = price(1.0)
+    if budget is None or full <= budget:
+        return full, 1.0
+    bare = price(0.0)
+    if bare > budget:
+        return None
+    steps = SHARE_STEPS
+    k = min(steps - 1, int(steps * (budget - bare) / max(1, full - bare)))
+    while k > 0 and price(k / steps) > budget:
+        k -= 1
+    return price(k / steps), k / steps
+
+
+def fit_floored(price, budget):
+    """``fit_share`` of an entry whose ``price(share, kept)`` books the
+    step routes' tensor cache at no less than ``kept`` bytes, and
+    ``price(share)`` at its cond floor: the share the work leaves the
+    caches with no floor, then the largest one under it that leaves the
+    tensor cache its floor too."""
+    got = fit_share(lambda share: price(share, 0), budget)
+    if got is None or budget is None:
+        return got
+    k = round(got[1] * SHARE_STEPS)
+    while k >= 0 and price(k / SHARE_STEPS) > budget:
+        k -= 1
+    return (price(k / SHARE_STEPS), k / SHARE_STEPS) if k >= 0 else None
 
 
 def _load_figures(spec, act) -> dict:
@@ -181,6 +304,7 @@ def entry_plan(spec) -> EntryPlan:
                                 sampler_defaults)
     from gmlx.image.dtypes import image_activation
     from gmlx.image.loader import identify_dit
+    from gmlx.video.memfit import gib
 
     from .capacity import overcommit, working_budget_bytes
 
@@ -221,7 +345,7 @@ def entry_plan(spec) -> EntryPlan:
             raise ImageModelError(
                 f"image model {spec.id!r}: defaults.{name}: {e}") from None
     act = image_activation(fam.name)
-    tensor_cache, adapter_cache = cache_bytes()
+    tensor_cache, _cap = cache_bytes()
     own = [2 * os.path.getsize(p) for p, _ in spec.adapters]
     caches = 2 * tensor_cache + _CACHE_BYTES["steps"]
     dit = _header_bytes(spec.path, "dit")
@@ -232,28 +356,35 @@ def entry_plan(spec) -> EntryPlan:
         mmproj = _header_bytes(spec.encoder_mmproj, "mmproj")
     load = _load_figures(spec, act)
     budget = working_budget_bytes()
+    # The step routes' tensor cache keeps room for one cond of the priced
+    # rows, the f32 encoder features a client uploads, at any share.
+    floor = (min(memfit.cond_bytes(fam.name, ident.config), tensor_cache)
+             if _CACHE_BYTES["steps"] else 0)
 
-    def common(share: float) -> dict:
-        return dict(adapters=own + [int(2 * adapter_cache * share)],
+    def common(share: float, cond: int) -> dict:
+        return dict(adapters=own,
                     family=fam.name, height=height, width=width, cfg=cfg,
                     dtype=act.dit, vae_dtype=act.vae, overcommit=True,
-                    cache_bytes=int(caches * share))
+                    cache_bytes=int(caches * share)
+                    + max(0, cond - int(tensor_cache * share)))
 
-    def kept(share: float):
+    def kept(share: float, cond: int = floor):
         return memfit.plan_memory(dit, enc, vae, mmproj,
                                   encoder_owned=False,
-                                  load_peak=load["peak"], **common(share))
+                                  load_peak=load["peak"],
+                                  **common(share, cond))
 
-    def price(mode: str, share: float) -> int:
+    def price(mode: str, share: float, cond: int = floor) -> int:
         """The peak of an image at the default size, as serve runs it in
-        ``mode``, with each cache at ``share`` of its bound."""
+        ``mode``, with each cache at ``share`` of its bound and the step
+        routes' tensor cache with room for ``cond`` bytes."""
         if mode == "keep":
-            return kept(share).peak
+            return kept(share, cond).peak
         if mode == "release":
             # The encoder loads for each encode beside the DiT and the VAE,
             # and is gone before the first step.
-            keep = kept(share)
-            alone = memfit.plan_memory(dit, 0, vae, **common(share))
+            keep = kept(share, cond)
+            alone = memfit.plan_memory(dit, 0, vae, **common(share, cond))
             return max(keep.phases["encode"], keep.phases.get("load", 0),
                        alone.peak)
         # The encoder loads alone for each encode, without its vision
@@ -262,7 +393,7 @@ def entry_plan(spec) -> EntryPlan:
         return memfit.plan_memory(dit, enc, vae, 0, encoder_owned=True,
                                   load_peak=load["text_peak"],
                                   load_parts=load["parts"],
-                                  **common(share)).peak
+                                  **common(share, cond)).peak
 
     def mode_of(release: str) -> str:
         if not enc or release == "never":
@@ -275,41 +406,32 @@ def entry_plan(spec) -> EntryPlan:
         return "staged"
 
     def fitted(mode: str):
-        """(footprint, cache share) of ``mode``, or None when it does not
-        fit with its caches empty. Each cache takes the room the image
-        leaves, up to its bound."""
-        full = price(mode, 1.0)
-        if budget is None or full <= budget:
-            return full, 1.0
-        bare = price(mode, 0.0)
-        if bare > budget:
-            return None
-        steps = 64
-        k = min(steps - 1, int(steps * (budget - bare) / max(1, full - bare)))
-        while k > 0 and price(mode, k / steps) > budget:
-            k -= 1
-        return price(mode, k / steps), k / steps
+        return fit_floored(lambda share, cond=floor: price(mode, share, cond),
+                           budget)
 
     mode = mode_of(spec.encoder_release)
     got = fitted(mode)
     if got is None and overcommit():
         got = price(mode, 1.0), 1.0
     if got is None:
+        # An entry is refused only against a budget.
+        assert budget is not None
         need = price(mode, 0.0)
         hint = "use a smaller quant of the DiT or of the text encoder"
         if spec.encoder_release == "never" and enc and fitted(
                 mode_of("auto")) is not None:
             hint = "set encoder_release: auto"
         raise memfit.ImageMemoryError(
-            f"image model {spec.id!r} needs {need / memfit.GiB:.2f} GiB "
+            f"image model {spec.id!r} needs {gib(need, True)} GiB "
             f"for one {width}x{height} image, over the working budget of "
-            f"{budget / memfit.GiB:.2f} GiB. Set a smaller defaults.size, or "
+            f"{gib(budget, False)} GiB. Set a smaller defaults.size, or "
             f"{hint}. GMLX_OVERCOMMIT=1 overrides.")
     footprint, share = got
     return EntryPlan(footprint=int(footprint), keep_encoder=mode == "keep",
                      family=fam.name, variant=ident.variant,
                      size=(width, height), cfg=float(cfg),
                      staged=mode == "staged", cache_share=share,
+                     tensor_floor=floor,
                      encoder_bytes=int(enc), mmproj_bytes=int(mmproj),
                      load_parts=load["parts"],
                      tower_parts=load["tower_parts"])
@@ -357,12 +479,14 @@ def _load(spec) -> ServedImage:
     pipe = api.load(spec.path, text_encoder=owned, vae=spec.vae,
                     mmproj=spec.encoder_mmproj if owned else None,
                     memory="off", variant=spec.variant, log=_log_line)
-    served = ServedImage(pipe=pipe, spec=spec, plan=plan)
+    served = ServedImage(pipe=pipe, spec=spec, plan=plan,
+                         facts=dit_facts(pipe))
     try:
         rows = []
         if spec.adapters:
+            lora.fit_cache(pipe, [path for path, _ in spec.adapters])
             for path, strength in spec.adapters:
-                ad = lora.load_adapter(pipe, path)
+                ad = lora.load_adapter(pipe, path, hold=rows)
                 for w in ad.warnings:
                     _log.warning("image model %s: %s", spec.id, w)
                 rows.append((ad, strength))
@@ -372,11 +496,10 @@ def _load(spec) -> ServedImage:
                 pipe, lora.table_entries(rows))
             # A request's pairs never shed the entry's own.
             pipe.adapters.keep(_pair_keys(rows))
-        bound_caches(pipe, sum(2 * os.path.getsize(p)
-                               for p, _ in spec.adapters),
-                     plan.cache_share)
-        _SHARES[id(served)] = plan.cache_share
-        _scale_step_caches()
+        served.lora_own_term = sum(2 * os.path.getsize(p)
+                                   for p, _ in spec.adapters)
+        bound_caches(pipe, served.lora_own_term, plan.cache_share)
+        set_share(served, plan.cache_share, plan.tensor_floor)
     except BaseException:
         # The pipeline loaded and an adapter failed: free it here, as the
         # pool never holds it.
@@ -387,71 +510,23 @@ def _load(spec) -> ServedImage:
     return served
 
 
-_reservation = threading.local()
-
-
-@contextlib.contextmanager
 def reserved_worker():
-    """Hold the image worker for the calling thread: wait here, before the
-    caller takes any lock, for the jobs queued ahead to finish, then keep
-    the worker idle until the block ends. ``load_on_worker`` and
-    ``release_on_worker`` called inside the block run on it at once. So a
-    pool build that loads or releases an image pipeline never waits on the
-    worker's queue while it holds the pool's build lock. Nested blocks
-    share the outer hold, and on the worker itself there is nothing to
-    hold."""
-    if getattr(_reservation, "run", None) is not None or \
-            threading.current_thread().name.startswith("image-worker"):
-        yield
-        return
-    import concurrent.futures
-    import queue
-
-    started = threading.Event()
-    jobs: queue.SimpleQueue = queue.SimpleQueue()
-
-    def hold():
-        started.set()
-        while True:
-            item = jobs.get()
-            if item is None:
-                return
-            fn, args, fut = item
-            try:
-                fut.set_result(fn(*args))
-            except BaseException as e:  # noqa: BLE001 - handed to the caller
-                fut.set_exception(e)
-
-    outer = WORKER.submit(hold)
-    started.wait()
-
-    def run(fn, *args):
-        fut: concurrent.futures.Future = concurrent.futures.Future()
-        jobs.put((fn, args, fut))
-        return fut.result()
-
-    _reservation.run = run
-    try:
-        yield
-    finally:
-        _reservation.run = None
-        jobs.put(None)
-        outer.result()
+    """Hold the image worker for the calling thread, as
+    :meth:`SingleWorker.reserved` does."""
+    return WORKER.reserved()
 
 
 def worker_reserved() -> bool:
-    """True when the calling thread holds the image worker (a
-    :func:`reserved_worker` block) or is the worker itself, so a release
-    from it runs at once instead of queueing."""
-    return (getattr(_reservation, "run", None) is not None
-            or threading.current_thread().name.startswith("image-worker"))
+    """True when the calling thread holds the image worker or is the
+    worker itself, so a release from it runs at once instead of
+    queueing."""
+    return WORKER.held()
 
 
 def _on_worker(fn, *args):
-    run = getattr(_reservation, "run", None)
-    if run is not None:
-        return run(fn, *args)
-    return WORKER.submit(fn, *args).result()
+    """``fn`` on the image worker: inline on the worker itself, where a
+    turn's eviction releases a pipeline, or in the caller's hold."""
+    return WORKER.run(fn, *args)
 
 
 def load_on_worker(spec) -> ServedImage:
@@ -463,10 +538,14 @@ def _release(box: list) -> None:
     served = box.pop() if box else None
     if served is None:
         return
-    if _SHARES.pop(id(served), None) is not None:
-        _scale_step_caches()
+    drop_share(served)
     pipe, served.pipe = served.pipe, None
     if pipe is not None:
+        from gmlx.image.lora import install
+
+        # The patch state outlives the pipeline when another one shares
+        # its DiT: the built tables it holds go with the caches.
+        install.drop_built(pipe)
         enc = pipe.encoder
         if enc is not None:
             enc.release()           # an owned encoder; a borrowed one stays
@@ -942,11 +1021,12 @@ class FileStore:
             return removed
 
 
-def default_store_root(port=None) -> str:
-    """The URL file folder of the server on ``port``: each server keeps its
-    own, so one server's sweep never takes another's files."""
+def default_store_root(port=None, kind: str = "images") -> str:
+    """The folder of the server on ``port`` for its ``kind`` of files, the
+    images API's URL files or the video jobs: each server keeps its own,
+    so one server's sweep never takes another's files."""
     base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    root = os.path.join(base, "gmlx", "images")
+    root = os.path.join(base, "gmlx", kind)
     return root if port is None else os.path.join(root, str(int(port)))
 
 
@@ -982,8 +1062,8 @@ def quality_steps(family, variant: str, quality: str) -> int | None:
     return dict(row.quality).get(quality)
 
 
-def _stride(pipe) -> int:
-    return int(pipe.size_multiple)
+def _stride(served: ServedImage) -> int:
+    return served.facts.size_multiple
 
 
 def target_size(req: ImageRequest, served: ServedImage) -> tuple:
@@ -994,7 +1074,7 @@ def target_size(req: ImageRequest, served: ServedImage) -> tuple:
     from gmlx.image.registry import edit_size
 
     pipe = served.pipe
-    unit = _stride(pipe)
+    unit = _stride(served)
     if req.size is not None:
         w, h = req.size
         if w % unit or h % unit:
@@ -1073,8 +1153,7 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
     if n is not None and req.steps is not None and req.steps != n:
         raise _bad(f"steps: {fam.title} {pipe.variant} runs {n} steps, the "
                    f"schedule it was distilled to, not {req.steps}", "steps")
-    dit_cfg = getattr(getattr(pipe, "dit", None), "cfg", None)
-    flow_map = bool(getattr(dit_cfg, "flow_map", False))
+    flow_map = served.facts.flow_map
     if flow_map or pipe.variant in fam.unguided:
         try:
             check_sampling(fam, pipe.variant, flow_map, _guided(req, served))
@@ -1160,7 +1239,8 @@ def _fit_args(pipe, served: ServedImage, budget, cfg: float,
     own."""
     enc = pipe.encoder
     resident = enc is not None and not enc.released
-    act = pipe.dit.act_dtype
+    act = served.facts.act_dtype
+    adapters, caches = held_bytes(pipe)
     staged, states = {}, {}
     if pipe.family.step is not None:
         held = pipe.captions.bytes
@@ -1177,14 +1257,11 @@ def _fit_args(pipe, served: ServedImage, budget, cfg: float,
         encoder=pipe.weights.get("encoder", 0) if resident else 0,
         vae=pipe.weights.get("vae", 0),
         mmproj=pipe.weights.get("mmproj", 0) if resident else 0,
-        adapters=pipe.adapters.bytes + pipe.tables.bytes,
-        family=pipe.family.name, cfg=cfg, dtype=act,
-        vae_dtype=getattr(pipe.vae, "dtype", None),
+        adapters=adapters, family=pipe.family.name, cfg=cfg, dtype=act,
+        vae_dtype=served.facts.vae_dtype,
         encoder_owned=bool(resident and enc.owned
                            and not served.plan.keep_encoder),
-        cache_bytes=(pipe.conditionings.bytes + pipe.modulations.bytes
-                     + _steps_cache_bytes()),
-        budget=budget, overcommit=False) | staged | states
+        cache_bytes=caches, budget=budget, overcommit=False) | staged | states
 
 
 def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
@@ -1277,7 +1354,7 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     w, h = size
     if budget is None or fits(w, h, refs):
         return
-    unit = _stride(pipe)
+    unit = _stride(served)
 
     def scaled(k: int) -> tuple:
         scale = k * unit / max(w, h)
@@ -1405,48 +1482,58 @@ def _drop_dit(served: ServedImage) -> None:
     mx.clear_cache()
 
 
-def _ensure_dit(served: ServedImage) -> None:
-    """Load the DiT and the VAE of a staged entry again, with the DiT's
-    leaves wrapped for the patch tables the pipeline holds."""
+def ensure_vae(served: ServedImage) -> None:
+    """Load the VAE of a staged entry again after an encode let it go.
+    Every call on the worker that reads the VAE alone calls it first: a
+    reference's latents and the VAE routes."""
     pipe = served.pipe
-    if pipe.dit is not None and pipe.vae is not None:
+    if not getattr(served.plan, "staged", False) or pipe.vae is not None:
         return
     from gmlx.image.dtypes import image_activation
-    from gmlx.image.loader import load_dit
-    from gmlx.image.lora import install
     from gmlx.image.vae import load_vae
 
-    act = image_activation(pipe.family.name)
+    pipe.vae = load_vae(str(served.spec.vae), family=pipe.family.name,
+                        dtype=image_activation(pipe.family.name).vae)
+
+
+def ensure_dit(served: ServedImage) -> None:
+    """Load the DiT and the VAE of a staged entry again after an encode let
+    them go, with the DiT's leaves wrapped for the patch tables the
+    pipeline holds. Every call on the worker that reads the DiT calls it
+    first: a step, a table's define and an image of the images API."""
+    pipe = served.pipe
+    if not getattr(served.plan, "staged", False):
+        return
     if pipe.dit is None:
+        from gmlx.image.dtypes import image_activation
+        from gmlx.image.loader import load_dit
+        from gmlx.image.lora import install
+
+        act = image_activation(pipe.family.name)
         pipe.dit, _ = load_dit(str(served.spec.path), act_dtype=act.dit,
                                variant=served.spec.variant, log=_log_line)
         install.rewrap(pipe)
-    if pipe.vae is None:
-        pipe.vae = load_vae(str(served.spec.vae), family=pipe.family.name,
-                            dtype=act.vae)
+    ensure_vae(served)
 
 
 def _staged_encode(served: ServedImage, run, prompts: list, refs):
     """``run()`` on a staged entry. A request whose conditionings are all
     in the cache runs on the released encoder's tokenizer. Any other
-    lets the DiT and the VAE go, loads the encoder, encodes, releases it
-    and loads the DiT and the VAE again, so the encoder is never resident
-    beside them."""
+    lets the DiT and the VAE go, loads the encoder, encodes and releases
+    it, so the encoder is never resident beside them. The DiT and the VAE
+    stay out after it: the next call that reads them loads them, so the
+    two encodes of a guided ComfyUI run load them once."""
     from gmlx.image import api
 
     pipe = served.pipe
     if all(api.conditioning_cached(pipe, p, images=refs) for p in prompts):
-        _ensure_dit(served)
         return run()
     _drop_dit(served)
+    _ensure_encoder(served, tower=_tower(pipe, refs))
     try:
-        _ensure_encoder(served, tower=_tower(pipe, refs))
-        try:
-            return run()
-        finally:
-            pipe.encoder.release()
+        return run()
     finally:
-        _ensure_dit(served)
+        pipe.encoder.release()
 
 
 def _encode(served: ServedImage, prompt: str, neg: str | None, refs,
@@ -1480,15 +1567,12 @@ def _encode(served: ServedImage, prompt: str, neg: str | None, refs,
     return run()
 
 
-def _adapter_table(served: ServedImage, rows: list, model_dirs) -> tuple:
-    """The patch table of the configured adapters with the request's,
-    each found by id: the file name of a configured adapter, or a path
-    relative to a model folder."""
-    from gmlx.image import api, lora
-
-    pipe = served.pipe
-    if not rows:
-        return None, []
+def _request_rows(served: ServedImage, rows: list, model_dirs) -> tuple:
+    """(table rows, extra, shown) of a request's adapters, each found by
+    id: the file name of a configured adapter, or a path relative to a
+    model folder. A configured adapter the request names takes its
+    strength in the table rows; any other is an (id, path, strength) of
+    ``extra``, read into the table by ``_adapter_table``."""
     named = {}
     for ad, _st in served.adapters:
         named[os.path.basename(ad.path)] = ad.path
@@ -1509,14 +1593,185 @@ def _adapter_table(served: ServedImage, rows: list, model_dirs) -> tuple:
         else:
             extra.append((aid, path, strength))
         shown.append({"id": aid, "strength": strength})
-    _room_for(served, [path for _aid, path, _st in extra])
-    for aid, path, strength in extra:
-        ad = lora.load_adapter(pipe, path)
-        if ad.text:
-            raise _bad(f"adapter {aid!r} has text encoder layers; set it on "
-                       "the image model's adapters instead", "adapters")
-        table_rows.append((ad, strength))
+    return table_rows, extra, shown
+
+
+def _adapter_table(served: ServedImage, rows: list, model_dirs,
+                   turn=None) -> tuple:
+    """The patch table of the configured adapters with the request's, and
+    the rows the image's metadata shows. ``turn(paths)`` books the pairs
+    of the request's files before any is read, and returns the context
+    they load in."""
+    from gmlx.image import api, lora
+
+    pipe = served.pipe
+    if not rows:
+        return None, []
+    table_rows, extra, shown = _request_rows(served, rows, model_dirs)
+    paths = [path for _aid, path, _st in extra]
+    _room_for(served, paths)
+    loads = turn(paths) if turn is not None else contextlib.nullcontext()
+    # The adapters are read against the DiT, and the table is defined on it.
+    ensure_dit(served)
+    with loads:
+        for aid, path, strength in extra:
+            ad = lora.load_adapter(pipe, path, hold=table_rows)
+            if ad.text:
+                raise _bad(f"adapter {aid!r} has text encoder layers; set "
+                           "it on the image model's adapters instead",
+                           "adapters")
+            table_rows.append((ad, strength))
     return api.define_patch_table(pipe, lora.table_entries(table_rows)), shown
+
+
+def shed_lora(entry, nbytes: int, hold=(), own: bool = False) -> int:
+    """Shed ``nbytes`` of a pool entry's request LoRA bytes for a turn,
+    on the image worker, where no forward runs: its built tables and
+    kernel pairs first, then its pairs. ``hold`` names what the turn's
+    job keeps on its own entry (``own``): its pair keys and its table
+    ids. The tables of a step that ended let go first, except on the
+    turn's own entry while they are its table's. Returns the bytes
+    dropped."""
+    from gmlx.image.lora import install
+
+    pipe = getattr(entry.pipeline, "pipe", None)
+    if pipe is None or not hasattr(pipe, "adapters"):
+        return 0
+    hold = set(hold)
+    start = pipe.adapters.bytes + pipe.tables.bytes
+    state = pipe.lora
+    if state is not None and state._held() is pipe and (
+            not own or any(k[0] not in hold for k in state._cur)):
+        install._release_cur(state)
+    # The built tables of the held table ids, and the kernel pairs built
+    # over held pairs alone.
+    tables_hold = {k for k in pipe.tables.keys(bool)
+                   if k[0] in hold or (k[0] == install.KERNEL
+                                       and all(n[0] in hold for n in k[2]))}
+    left = int(nbytes)
+    for cache in (pipe.tables, pipe.adapters):
+        if left <= 0:
+            break
+        bound, before = cache.max_bytes, cache.bytes
+        cache.max_bytes = max(0, before - left)
+        try:
+            install.make_room(pipe, cache, 0,
+                              hold if cache is pipe.adapters else tables_hold)
+        finally:
+            cache.max_bytes = bound
+        left -= before - cache.bytes
+    return max(0, start - pipe.adapters.bytes - pipe.tables.bytes)
+
+
+def lora_figures(entry) -> tuple | None:
+    """({request key: bytes}, own bytes) the LoRA caches of a pool entry
+    hold now. Own keys are the keep set's pairs, the built tables of the
+    default table and the kernel pairs built over kept pairs alone; the
+    footprint counts them up to its own term. Each read takes its cache's
+    lock: call with no pool lock."""
+    from gmlx.image.lora import install
+
+    pipe = getattr(entry.pipeline, "pipe", None)
+    if pipe is None or not hasattr(pipe, "adapters"):
+        return None
+    kept = pipe.adapters.kept
+    default = getattr(pipe, "default_table", None)
+    keys: dict = {}
+    own = 0
+    for cache in (pipe.adapters, pipe.tables):
+        for k, n in cache.sizes().items():
+            if k in kept or (isinstance(k, tuple) and (
+                    (k[0] == install.KERNEL
+                     and all(p[0] in kept for p in k[2]))
+                    or (default is not None and k[0] == default))):
+                own += n
+            else:
+                keys[k] = n
+    return keys, own
+
+
+def bound_lora(pool, entry, pipe) -> None:
+    """Bound the pipeline's pair and tables caches at what the entry's
+    ledger counts in each plus its pending bytes, within the optional
+    cap. On the worker, after a turn and a settle."""
+    pending, ledger = pool.lora_ledger(entry)
+    cap = cache_bytes()[1]
+    for cache in (pipe.adapters, pipe.tables):
+        sizes = cache.sizes()
+        booked = sum(n for k, n in ledger.items() if k in sizes)
+        room = booked + pending
+        if cap is not None:
+            room = min(cap, room)
+        cache.max_bytes = max(0, cache.bytes - booked) + room
+
+
+def lora_turn(pool, entry, need: int, *, subject: str, held: int = 0,
+              hold=(), store=(), beside=()) -> None:
+    """A job's turn on the worker: room for ``need`` bytes its dry run
+    allocates next. The shed keeps the entry's keys in ``hold``, ``held``
+    bytes of them held now, and the uploads in ``store``; ``beside`` are
+    the other entries the job holds, such as its borrowed encoder. The
+    entry's caches are then bound to what it booked, before it
+    allocates."""
+    pool.lora_turn(entry, need, subject=subject, hold=tuple(hold),
+                   held=held, store=tuple(store), beside=tuple(beside))
+    bound_lora(pool, entry, entry.pipeline.pipe)
+
+
+def lora_settle(pool, entry, subject: str) -> None:
+    """A job's settle on the worker, in its finally: the ledger set to the
+    caches, the booking ended and the caches bound to it."""
+    pool.lora_settle(entry, subject)
+    pipe = getattr(entry.pipeline, "pipe", None)
+    if pipe is not None and hasattr(pipe, "adapters"):
+        bound_lora(pool, entry, pipe)
+
+
+def store_turn(pool, n: int, subject: str, hold=()) -> None:
+    """An upload's store turn: the image worker sheds idle uploads, then
+    the entries' idle LoRA bytes, evicts idle models as a cold load does
+    and admits ``n`` bytes into the store. The upload waits for the worker
+    up to the turn's deadline: a turn that has not started by then is
+    cancelled and raises the turn's own 503, and one that started runs to
+    its end, which its own deadline bounds, so no upload leaves with bytes
+    admitted for it."""
+    import concurrent.futures
+
+    from .residency import STORE
+
+    fut = WORKER.submit(pool.lora_turn, STORE, n, subject=subject,
+                        store=tuple(hold))
+    try:
+        fut.result(timeout=pool._retry())
+        return
+    except concurrent.futures.TimeoutError:
+        if fut.cancel():
+            pool.lora_late(STORE, n, subject)
+    fut.result()
+
+
+def turn_figures(entry, pipe, tid) -> tuple:
+    """(need, held) of a forward on table ``tid``, the pipeline's default
+    for None, by the dry run against what is built: the factors and
+    kernel pairs it builds yet at the dtypes its leaves run at, and the
+    bytes of them held now. For the default table, the growth of its own
+    bytes past the footprint's own term. On the worker after the job's
+    last drop."""
+    from gmlx.image.lora import install
+
+    if tid is None:
+        tid = getattr(pipe, "default_table", None)
+    table = pipe.patch_tables.get(tid) if tid is not None else None
+    if tid is None or not table or not table["entries"]:
+        return 0, 0
+    figs = install.dry_run(pipe, tid)
+    need = sum(max(0, f - h) for f, h in figs.values())
+    if install._is_default(pipe, tid):
+        got = lora_figures(entry)
+        own = 0 if got is None else got[1]
+        term = int(getattr(entry.pipeline, "lora_own_term", 0) or 0)
+        return max(0, own + need - term) - max(0, own - term), 0
+    return need, sum(h for _f, h in figs.values())
 
 
 def _pair_keys(rows) -> set:
@@ -1525,22 +1780,142 @@ def _pair_keys(rows) -> set:
 
 
 def _room_for(served: ServedImage, paths: list) -> None:
-    """Refuse request adapters whose files take more than the pair cache
-    holds beside the entry's own pairs."""
-    pipe = served.pipe
-    own = sum(pipe.adapters.nbytes(k) for k in _pair_keys(served.adapters))
-    room = pipe.adapters.max_bytes - own
+    """Refuse request adapters whose files take more than the optional cap
+    server.image.adapter_cache_mb, with a 400 that names it. With no cap
+    the pool books their pairs, and refuses them there."""
+    from .image_steps import _mib
+
+    cap = cache_bytes()[1]
+    if cap is None:
+        return
     need = 0
     for p in {os.path.realpath(p) for p in paths}:
         try:
             need += os.path.getsize(p)
         except OSError:
             continue
-    if need > room:
-        raise _bad(f"the request's adapters take {need / 2**20:.1f} MB, more "
-                   f"than the {room / 2**20:.1f} MB this image model keeps "
+    if need > cap:
+        raise _bad(f"the request's adapters take {_mib(need, True)}, more "
+                   f"than the {_mib(cap, False)} this image model keeps "
                    "for request adapters; raise "
                    "server.image.adapter_cache_mb", "adapters")
+
+
+def own_bytes(pipe, keys) -> int:
+    """Bytes the pair cache holds of ``keys``, the entry's own left out:
+    a job's own keys, which its turn's shed keeps."""
+    return sum(pipe.adapters.nbytes(k) or 0 for k in keys
+               if k not in pipe.adapters.kept)
+
+
+def file_pairs(pipe, path: str) -> tuple:
+    """(bytes not held, bytes, held keys, memo) of the LoRA pairs of the
+    file at ``path``, by a dry run that reads no tensor. A file the
+    pipeline read before is priced from its memo: none when the pair
+    cache holds all its pairs, else its pairs less those held. Any other
+    is priced at the bytes of its tensors, from its header. A file that
+    cannot be read is priced at nothing, for its load to name."""
+    from gmlx.image.lora.patch_table import _file_key
+    from gmlx.image.vae.reader import VAEError, safetensors_header
+
+    try:
+        hit = pipe.adapter_files.get(_file_key(path) + (False,))
+        if hit is None:
+            _header, start = safetensors_header(path)
+            size = max(0, os.path.getsize(path) - start)
+            return size, size, set(), None
+    except (OSError, VAEError):
+        return 0, 0, set(), None
+    keys = {r[-1] for r in (*hit.dit, *hit.text)}
+    held = {k for k in keys if pipe.adapters.peek(k) is not None}
+    got = sum(pipe.adapters.nbytes(k) or 0 for k in held)
+    return (0 if held == keys else max(0, hit.nbytes - got)), hit.nbytes, \
+        held, hit
+
+
+def request_estimate(served: ServedImage, rows: list, model_dirs) -> int:
+    """The LoRA bytes an images API request's files hold at its forward,
+    from their headers alone, for the route's 413: no memo, cache or
+    pipeline is read. A file that cannot be read counts nothing, for its
+    load to name."""
+    from gmlx.image.vae.reader import VAEError, safetensors_header
+
+    _rows, extra, _shown = _request_rows(served, rows, model_dirs)
+    n = 0
+    for _aid, path, _strength in extra:
+        try:
+            _header, start = safetensors_header(path)
+            n += max(0, os.path.getsize(path) - start)
+        except (OSError, VAEError):
+            continue
+    return n
+
+
+ADAPTERS = "the request's adapters"
+
+
+def lora_refusal(e) -> "ImageRequestError":
+    """The ImageRequestError of a LoraRefused: a 413 that stays until the
+    setup changes, or a 503 with Retry-After as a deferred load has it."""
+    if e.status == 503:
+        retry = e.retry_after
+        if retry is None:
+            from .patches.request_flow import deferred_retry_after
+
+            retry = deferred_retry_after()
+        return ImageRequestError(503, e.message, param="adapters",
+                                 err_type="server_overloaded",
+                                 headers={"Retry-After": str(retry)})
+    return ImageRequestError(e.status, e.message, param="adapters")
+
+
+def pair_turn(pool, entry, served: ServedImage, paths: list,
+              beside=()) -> None:
+    """The images API job's first turn, on the worker before a file is
+    read: the pairs of the request's files not held. ``beside`` are the
+    entries the job holds besides ``entry``. Raises the ImageRequestError
+    of a refusal."""
+    from .residency import LoraRefused
+
+    pipe = served.pipe
+    need, held = 0, set()
+    for p in paths:
+        n, _size, keys, _hit = file_pairs(pipe, p)
+        need += n
+        held |= keys
+    try:
+        lora_turn(pool, entry, need, subject=ADAPTERS,
+                  held=own_bytes(pipe, held), hold=tuple(held),
+                  beside=beside)
+    except LoraRefused as e:
+        raise lora_refusal(e) from None
+
+
+def table_turn(pool, entry, served: ServedImage, tid,
+               subject: str = ADAPTERS, beside=()) -> None:
+    """The turn of a forward on table ``tid``, the default for None, on
+    the worker after the job's last drop: the factors and kernel pairs it
+    builds yet, or the growth of the default table's own bytes. The
+    table's pairs and built tables are the job's own keys. Raises the
+    ImageRequestError of a refusal."""
+    from .residency import LoraRefused
+
+    pipe = served.pipe
+    need, held = turn_figures(entry, pipe, tid)
+    if tid is None:
+        tid = getattr(pipe, "default_table", None)
+    table = pipe.patch_tables.get(tid) if tid is not None else None
+    hold = [tid] if tid is not None else []
+    if table:
+        pairs = {k for _p, _b, patches in table["entries"]
+                 for k, _s, _a in patches}
+        hold += list(pairs)
+        held += own_bytes(pipe, pairs)
+    try:
+        lora_turn(pool, entry, need, subject=subject, held=held, hold=hold,
+                  beside=beside)
+    except LoraRefused as e:
+        raise lora_refusal(e) from None
 
 
 def _adapter_under_roots(aid: str, model_dirs) -> str:
@@ -1568,15 +1943,59 @@ def partial_steps(steps: int, count: int) -> list:
     return picks[:count]
 
 
+class _JobTurns:
+    """The LoRA turns of an images API job on pool entry ``entry``: the
+    pairs before a file is read, the table after the encode, and the
+    settle in the job's finally. ``beside`` are the other entries the job
+    holds, its borrowed encoder. With no pool there is none."""
+
+    def __init__(self, pool, entry, beside=()):
+        self.pool, self.entry, self.beside = pool, entry, tuple(beside)
+
+    def pairs(self, paths: list):
+        """The first turn. Returns the context the files load in."""
+        pair_turn(self.pool, self.entry, self.entry.pipeline, paths,
+                  self.beside)
+        return contextlib.nullcontext()
+
+    def table(self, tid) -> None:
+        """The second turn, after the encode and ``ensure_dit``."""
+        if self.pool is not None:
+            table_turn(self.pool, self.entry, self.entry.pipeline, tid,
+                       beside=self.beside)
+
+    def settle(self) -> None:
+        if self.pool is not None:
+            lora_settle(self.pool, self.entry, ADAPTERS)
+
+
 def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
             budget, stop, timeout_s: float | None = None,
             submitted: float | None = None, borrow=None, emit=None,
-            model_dirs=(), embed_metadata: bool = False) -> ImageJobResult:
+            model_dirs=(), embed_metadata: bool = False, pool=None,
+            entry=None, beside=()) -> ImageJobResult:
     """Run one request on the image worker's thread. ``stop`` is a
     threading.Event a disconnect sets; ``emit(index, bytes)`` takes the
     partial images of a stream. Raises :class:`JobStopped` when ``stop``
     ends the job between steps, or when it waits ``timeout_s`` for its
-    turn after ``submitted`` or for one step."""
+    turn after ``submitted`` or for one step. With ``pool``, the job books
+    the LoRA bytes of pool entry ``entry`` at two turns, the pairs before
+    a file is read and the table after the encode, and settles them in
+    its finally. ``beside`` are the other pool entries the job holds,
+    which its turns count as its own."""
+    book = _JobTurns(pool, entry, beside)
+    try:
+        return _run_job(served, req, book, size=size, budget=budget,
+                        stop=stop, timeout_s=timeout_s, submitted=submitted,
+                        borrow=borrow, emit=emit, model_dirs=model_dirs,
+                        embed_metadata=embed_metadata)
+    finally:
+        book.settle()
+
+
+def _run_job(served: ServedImage, req: ImageRequest, book: _JobTurns, *,
+             size: tuple, budget, stop, timeout_s, submitted, borrow, emit,
+             model_dirs, embed_metadata) -> ImageJobResult:
     import secrets
     import time
 
@@ -1626,11 +2045,17 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
         if req.mask is not None:
             mask = mask_from_image(req.mask, (width, height))
 
-    table, adapters = _adapter_table(served, req.adapters, model_dirs)
+    table, adapters = _adapter_table(
+        served, req.adapters, model_dirs,
+        turn=book.pairs if book.pool is not None else None)
     _make_room(served, cfg, size, refs, init is not None, budget,
                [text] + ([] if neg_text is None else [neg_text]))
     t0 = time.perf_counter()
     cond, neg = _encode(served, text, neg_text, refs, borrow)
+    # A staged entry's encode let the DiT and the VAE go.
+    ensure_dit(served)
+    # The factors the forward builds, after the encode's drop.
+    book.table(table)
     plan = api.plan_request(
         pipe, height=height, width=width, cfg=cfg,
         conds=[cond] if neg is None else [cond, neg], patch_table=table,
@@ -1713,10 +2138,10 @@ def run_job(served: ServedImage, req: ImageRequest, *, size: tuple,
         t_img = time.perf_counter()
         try:
             x = api.sample(pipe, cond, neg=neg, cfg=cfg, height=height,
-                           width=width, steps=steps, seed=s, sampler=sampler,
-                           init_latents=init_latents, denoise=denoise,
-                           mask=mask, patch_table=table, plan=plan,
-                           on_step=on_step,
+                           width=width, steps=steps, seed=s,
+                           sampler=sampler, init_latents=init_latents,
+                           denoise=denoise, mask=mask, patch_table=table,
+                           plan=plan, on_step=on_step,
                            should_stop=should_stop)
         except api.SampleStopped:
             raise JobStopped(timed_out=not stop.is_set()) from None

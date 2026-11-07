@@ -1,0 +1,67 @@
+{
+  "h3_fl2va_q4_k.header.json": {
+    "repo": "unsloth/MiniMax-H3-GGUF",
+    "revision": "babc040eff0084465460ead58fdb8ec44296f8dd",
+    "file": "minimax_h3_fl2va_pruned-Q4_K.gguf",
+    "size": 11420663904,
+    "sha256": "dd948e08ad0ba3c71bd42f368e283dd82e790f5122a63b276e22a3e0283d0c10"
+  },
+  "h3_transformer_config.json": {
+    "repo": "MiniMaxAI/MiniMax-H3",
+    "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+    "file": "transformer/config.json",
+    "size": 546,
+    "sha256": "74c11bff524336576096993cbfcdcdc2ef4fa2fa4409df693bdcbc6c666282ae"
+  },
+  "h3_identity.json": {
+    "repo": "unsloth/MiniMax-H3-GGUF",
+    "revision": "babc040eff0084465460ead58fdb8ec44296f8dd",
+    "file": "the identity tensors and the layout rows of every MiniMax-H3 DiT .gguf, by HTTP range reads",
+    "note": "each file size and sha256 is from the hub listing at the revision"
+  },
+  "h3_identity_molbal.json": {
+    "repo": "molbal/MiniMax-H3-GGUF",
+    "revision": "b45874371c61c49bf04096602f5527aac71b360b",
+    "file": "the identity tensors and the layout rows of every MiniMax-H3 DiT .gguf, by HTTP range reads",
+    "note": "each file size and sha256 is from the hub listing at the revision"
+  },
+  "h3_identity_molbal_turbo.json": {
+    "repo": "molbal/MiniMax-H3-Turbo-GGUF",
+    "revision": "0d2775ed26fc79ed6acc92a3511a8e85190e4ee4",
+    "file": "the identity tensors and the layout rows of every MiniMax-H3 DiT .gguf, by HTTP range reads",
+    "note": "each file size and sha256 is from the hub listing at the revision"
+  },
+  "memfit_h3_cells.json": {
+    "source": "measured",
+    "file": "MLX active peaks per phase of runs of the h3 recipe's pinned files on an M5 Max, mlx 0.32.3",
+    "note": "the video memory plan's fits are tested against these cells"
+  },
+  "memfit_fasth3_cells.json": {
+    "source": "measured",
+    "file": "MLX active peaks per phase of runs of the fasth3 recipe's pinned DiT, with the h3 recipe's encoder, VAEs and 8-step LoRA, on an M5 Max, mlx 0.32.3, mlx-kquant with vsa_attention",
+    "note": "FastH3's step fits are tested against these cells"
+  },
+  "memfit_h3_keyframe_cells.json": {
+    "source": "measured",
+    "file": "MLX active peaks of encodes with keyframes, the h3 recipe's pinned encoder with unsloth's mmproj-BF16.gguf, and of anchors through its VAEs, on an M5 Max, mlx 0.32.3",
+    "note": "the video memory plan's keyframe and anchor fits are tested against these cells"
+  },
+  "fasth3_fv_geometry.npz": {
+    "repo": "hao-ai-lab/FastVideo",
+    "revision": "4d0a10d98914b6f0110454a8dc4ef89662fc3ac0",
+    "file": "fastvideo/mlx_runtime/minimax_h3_vsa.py: build_h3_segment_geometry(segments, 64) at the 512x512x22, 768x768x39 and 1344x768x124 FastH3 layouts",
+    "script": "scripts/video_oracle/fasth3_geometry.py",
+    "argv": [
+      "fasth3_geometry.py",
+      "--fastvideo",
+      "FastVideo"
+    ],
+    "note": "per shape, the four index arrays of MiniMaxH3VSAGeometry as int32 and its scalar fields in meta (JSON bytes); the segments are gmlx's packed H3 layout of each shape with 56 text rows"
+  },
+  "h3_identity_fasth3.json": {
+    "repo": "vantagewithai/FastVideo-FastH3-8-Step-V2-ComfyUI-GGUF",
+    "revision": "448ffec4210efe431a6b4a945672d88aea5f25f4",
+    "file": "the identity tensors and the layout rows of the FastH3 v2 Q4_K_M DiT .gguf, read from the file",
+    "note": "the file's size and sha256 are of the copy read, which match the hub listing at the revision"
+  }
+}

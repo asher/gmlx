@@ -31,12 +31,16 @@ from __future__ import annotations
 import os
 import sys
 from contextlib import contextmanager
+from typing import TYPE_CHECKING
 
 import mlx.core as mx
 
 from gmlx.envflags import _BOOL_FALSE, _BOOL_TRUE
 
 from . import attention
+
+if TYPE_CHECKING:
+    from mlx_kquant.nn import KQuantLinear
 
 ROUTES = ("qk", "glu", "lora", "resid", "conv")
 
@@ -240,7 +244,7 @@ def qk_norm_rope(q: mx.array, k: mx.array, q_w: mx.array, k_w: mx.array,
     return attention.qk_norm_rope(q, k, q_w, k_w, cos, sin, eps)
 
 
-def kquant_leaf(m, dtype):
+def kquant_leaf(m, dtype) -> KQuantLinear | None:
     """The KQuantLinear whose product is all of ``m(x)`` for x in
     ``dtype``, or None. That is a plain KQuantLinear, or the base of an
     ImageLoRALinear that has no delta for its path under the active patch
@@ -250,16 +254,20 @@ def kquant_leaf(m, dtype):
     from gmlx.image.lora.install import ImageLoRALinear
 
     if isinstance(m, ImageLoRALinear):
-        if m._state.factors(m._path, dtype) is not None:
+        # A probe: precise asks at bfloat16 and then runs the leaf on a
+        # float32 row, so it builds no factors at the dtype it asks.
+        if m._state.names(m._path, dtype):
             return None
         m = m.base
     cls = type(m)
-    if getattr(cls, "_prof_base", cls) is not KQuantLinear:
+    if (not isinstance(m, KQuantLinear)
+            or getattr(cls, "_prof_base", cls) is not KQuantLinear):
         return None
     return m
 
 
-def glu_pair(gate, up, x: mx.array):
+def glu_pair(gate, up,
+             x: mx.array) -> tuple[mx.array, mx.array, str] | None:
     """``(w_gate, w_up, codec)`` when ``swiglu_fused`` takes
     ``silu(gate(x)) * up(x)``, else None, and the caller then composes the
     two products and ``swiglu``. The kernel takes two K-quant leaves of one
@@ -289,7 +297,8 @@ def glu_pair(gate, up, x: mx.array):
     return w_gate, w_up, codec
 
 
-def glu_halves(lin, x: mx.array):
+def glu_halves(lin,
+               x: mx.array) -> tuple[mx.array, mx.array, str] | None:
     """``(w_gate, w_up, codec)`` when ``swiglu_fused`` takes ``silu(a) *
     b`` for the two halves ``a, b`` of ``lin(x)``, a gate and up pair
     stored as one matrix, else None. The halves are the first and the

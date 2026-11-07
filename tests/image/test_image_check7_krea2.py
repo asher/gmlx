@@ -295,7 +295,7 @@ def wrong_tables(entries: list, strength: float, moved: bool) -> dict:
     mid, last = blocks[len(blocks) // 2], blocks[-1]
 
     def scaled(k):
-        return [(p, band, [(key, s * k) for key, s in patches])
+        return [(p, band, [(key, s * k, a) for key, s, a in patches])
                 for p, band, patches in entries]
 
     out = {"strength a tenth low": scaled(0.9),

@@ -8,6 +8,23 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `gmlx video` makes clips of up to 15 seconds with sound from a text prompt
+  with MiniMax-H3. See [Video generation](docs/video.md) and its
+  [licenses](docs/video.md#licenses).
+- A clip can start or end at an image, which the text encoder's vision tower
+  reads, and follow guide images, videos and sounds. See
+  [Keyframes and guides](docs/video.md#keyframes-and-guides).
+- The `fasth3` recipe runs FastVideo's FastH3, an 8-step MiniMax-H3 whose
+  steps take about half as long as `h3`'s, on an M5 or newer. See
+  [FastH3](docs/video.md#fasth3).
+- A chat model rewrites MiniMax-H3 prompts in the form of MiniMax's prompt
+  guide, which `gmlx video pull` fetches. See
+  [Prompt upsampling](docs/video.md#prompt-upsampling).
+- `gmlx serve` makes MiniMax-H3 clips as jobs on the OpenAI video routes,
+  `POST /v1/videos` and its MP4 download. See [Video API](docs/video-api.md).
+- The gmlx ComfyUI nodes run the MiniMax-H3 recipes, with the new
+  `minimax-h3-t2v`, `minimax-h3-i2v` and `fasth3-t2v` workflows. See
+  [Make a video](docs/comfyui.md#make-a-video).
 - Ricursive Ripple-65B Preview loads, and `gmlx pull ripple-65b` fetches it with
   its DFlash2 drafter for speculative decoding. `scripts/convert_dflash2.py`
   converts the drafter to GGUF.
@@ -18,6 +35,32 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- An image or video LoRA runs when the Mac has the memory for it, where
+  `gmlx serve` refused LoRAs over 256 MB.
+- `server.image.adapter_cache_mb` is now an optional cap with no default.
+- An image or video model reserves no memory for request LoRAs at load, so it
+  fits beside more models.
+- A LoRA that fits once an idle model unloads makes room as a model load
+  does, and one refused for memory names the GB it needs.
+- An image LoRA takes less memory: loading one no longer holds its file
+  twice, and fewer of its weights are copied while it runs.
+- The images API prices a request body from the memory free before it reads
+  it, where it refused bodies over 64 MiB and inline images over 32 MiB.
+- A JSON `/v1/images/edits` request takes bare base64 image data in `image`
+  and `images[].image_url`, beside data URLs.
+- A chat model's cold load no longer waits for a running image job, unless
+  it unloads a model of the worker that runs the job.
+- A LoRA upload to the ComfyUI step routes is admitted before its body is
+  read, so a 413 or a 503 comes before the upload.
+- A chat model's cold load counts the request LoRAs an image model holds or
+  is loading, so it unloads an idle model sooner to make room.
+- On a layer the K-quant kernel does not take, an image LoRA at a strength not
+  1 or an alpha not its rank scales in float32, so a seed's image may not
+  match the last release's bit for bit.
+- The ComfyUI nodes send a step again, up to three times, when the server
+  let its tensors go, and a 503 they show ends "Queue the prompt again then."
+- In the Python API, `gmlx.image.lora.pair_hash` and `register_pair` take no
+  alpha, and `register_patch` returns `(hash, alpha)` for its table entry.
 - gmlx now requires transformers older than 5.23, so a new transformers release
   cannot break an install before gmlx is tested against it.
 - When `gmlx serve` checks whether a request fits in memory, it counts the
@@ -32,9 +75,24 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Distillation's pinned day renders on transformers 5.22, where a template that
   prints today's date failed with "'str' object is not callable".
-- A served image model keeps its own LoRAs when a request brings others, and
-  a request over the adapter cache is refused, where requests failed with
-  "patch table names adapter ...".
+- A served image model keeps its own LoRAs when a request brings others,
+  where requests failed with "patch table names adapter ...".
+- A served model's own LoRA sent again by ComfyUI, which reads no alpha from
+  the file's header, no longer takes its memory twice.
+- Two ComfyUI workflows whose LoRAs fit in memory run at once, where they
+  could push each other's LoRA out until a run failed.
+- An unload sent while a model loads or an image job runs no longer holds
+  up the server's other requests until that ends.
+- A LoRA in a ComfyUI workflow adds to the LoRAs of the `gmlx serve` image
+  model's `adapters` key, in place of replacing them.
+- A ComfyUI step whose LoRA the server let go for another workflow's LoRA
+  sends its LoRA again, in place of failing.
+- `gmlx serve` frees an image LoRA that a later ComfyUI or images API LoRA
+  pushed out, which its patch table kept in memory.
+- An image model that `gmlx serve` refuses for memory shows its need above
+  its budget, where both could read the same.
+- A ComfyUI workflow with a negative prompt loads the DiT and VAE once, not
+  twice, before its first step when the text encoder cannot fit beside them.
 - `gmlx serve` no longer corrupts the KV cache when one of several decoding
   requests passes about 260K tokens, or when a long request joins them.
 - FLUX.2 klein and the FLUX.1 VAE encoder no longer leave rows of the image

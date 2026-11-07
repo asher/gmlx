@@ -534,11 +534,12 @@ def _upsample(a, family, prompt: str, refs, log) -> str | None:
 
 
 def run_upsampler(path: str, family, prompt: str, log,
-                  quiet: bool = False, system: str | None = None) -> str:
+                  quiet: bool = False, system: str | None = None,
+                  tag: str = "image") -> str:
     """Load the chat model at ``path``, write the caption of ``prompt``,
     and release the model before returning, under ``system``, by default
     the family's shipped system prompt. ``quiet`` keeps the load's lines
-    off stdout."""
+    off stdout; ``tag`` heads the line that reports the rewrite."""
     import gc
 
     import mlx.core as mx
@@ -605,7 +606,7 @@ def run_upsampler(path: str, family, prompt: str, log,
         mx.clear_cache()
         if prev is not None:
             mx.set_cache_limit(prev)
-    log(f"[image] prompt upsampled by {name} in "
+    log(f"[{tag}] prompt upsampled by {name} in "
         f"{time.perf_counter() - t0:.1f} s, {len(caption.split())} words")
     return caption
 
@@ -717,9 +718,10 @@ def _read_adapters(a, pipe, log) -> list:
         return []
     from gmlx.image import lora
 
+    lora.fit_cache(pipe, [path for path, _ in a.adapter])
     rows = []
     for path, strength in a.adapter:
-        ad = lora.load_adapter(pipe, path)
+        ad = lora.load_adapter(pipe, path, hold=rows)
         for w in ad.warnings:
             log(f"warning: {w}")
         rows.append((ad, strength))
@@ -1332,6 +1334,8 @@ def _bench(a) -> int:
     if a.json:
         sys.stdout.write(lines)
     if a.json_out is not None:
+        os.makedirs(os.path.dirname(os.path.abspath(a.json_out)),
+                    exist_ok=True)
         with open(a.json_out, "w", encoding="utf-8") as f:
             f.write(lines)
     return 0

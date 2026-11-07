@@ -63,16 +63,31 @@ def opened(monkeypatch):
 
 
 def _client(allow_urls=False):
-    """A stand-in server with the gate, whose routes record that they ran."""
+    """A stand-in server with the gate, whose routes record that they ran.
+    The images routes read their body as the served ones do: the gate
+    leaves it to them, and they run its checks on it."""
     app = FastAPI()
     ran = []
 
     async def route(request: Request):
         ran.append(await request.json())
         return {"ok": True}
+
+    async def image_route(request: Request):
+        from gmlx.serve.image_service import ImageRequestError
+        from gmlx.serve.patches import images
+
+        try:
+            await images._read_body(request.url.path.rsplit("/", 1)[1],
+                                    request)
+        except ImageRequestError as e:
+            return images._from_request_error(request.url.path, e)
+        return await route(request)
     for path in ("/v1/chat/completions", "/v1/responses", "/v1/messages",
-                 "/v1/images/generations", "/v1/images/edits", "/v1/audio/speech"):
+                 "/v1/audio/speech"):
         app.add_api_route(path, route, methods=["POST"])
+    for path in ("/v1/images/generations", "/v1/images/edits"):
+        app.add_api_route(path, image_route, methods=["POST"])
     mg.install_media_gate(allow_urls, app=app)
     # Outside the gate, as in the server.
     from gmlx.serve.patches.hardening import install_json_content_type_tolerance
@@ -709,3 +724,17 @@ def test_a_disconnect_inside_a_route_still_raises():
 
     with pytest.raises(ClientDisconnect):
         asyncio.run(app(scope, receive, send))
+
+
+def test_the_gate_reads_a_forms_text_part_past_a_mib():
+    import asyncio
+
+    from starlette.datastructures import Headers
+
+    b = "b0"
+    text = "a" * (2 << 20)
+    raw = (f'--{b}\r\nContent-Disposition: form-data; name="prompt"\r\n\r\n'
+           f"{text}\r\n--{b}--\r\n").encode()
+    headers = Headers({"content-type": f"multipart/form-data; boundary={b}"})
+    assert asyncio.run(mg.multipart_text_fields(headers, raw)) == [
+        ("prompt", text)]

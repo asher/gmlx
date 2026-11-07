@@ -1,0 +1,39 @@
+{
+ "_note": "The identity tensors and the layout rows of the layout tensor of every MiniMax-H3 DiT GGUF of the repository, by HTTP range reads: the sha256 of the identity tensors' bf16 bits as gmlx.image.fingerprint.weight_identity forms it, and the sha256 of the layout rows as gmlx.video.fingerprint.layout_identity reads them",
+ "repo": "molbal/MiniMax-H3-Turbo-GGUF",
+ "revision": "0d2775ed26fc79ed6acc92a3511a8e85190e4ee4",
+ "identity_tensors": [
+  "adaln_t_table",
+  "rope.inv_freq",
+  "final_layer.norm.weight",
+  "token_refiner.final_norm.weight"
+ ],
+ "layout_tensor": "blocks.0.attn.qkv_proj.weight",
+ "layout_rows": 4,
+ "files": {
+  "minimax_h3_fl2v_turbo_4step_v1.0_768p_Q4_0.gguf": {
+   "variant_hash": "6f575c5d2a38a3f69ec31f42aabc6438008497a2032d720a80666e7e549e0414",
+   "layout_hash": "42fa5234f0b9973ad0ae8f52ab254fba61d8f5ae2e931cbb0d22595a407e1e47",
+   "layout_codec": "Q4_0",
+   "n_tensors": 532,
+   "size": 11387241184,
+   "sha256": "094d070ef2834e4a240394d1ce290e2d513eb37a00a36bd8ecab9d94d0be6676"
+  },
+  "minimax_h3_fl2v_turbo_4step_v1.0_768p_Q8_0.gguf": {
+   "variant_hash": "6f575c5d2a38a3f69ec31f42aabc6438008497a2032d720a80666e7e549e0414",
+   "layout_hash": "f390cb4d174178f6c5d59bfeeb0471a632f0da35ecff7ccd94ed73680ddeef48",
+   "layout_codec": "Q8_0",
+   "n_tensors": 532,
+   "size": 21420835552,
+   "sha256": "ecf6a627c0842b6a785bd13fb5a11b9ad95d5e157e367017cbd3ec2a14d9d4c1"
+  },
+  "minimax_h3_fl2v_turbo_4step_v1.0_768p_Q8_CR.gguf": {
+   "variant_hash": "6f575c5d2a38a3f69ec31f42aabc6438008497a2032d720a80666e7e549e0414",
+   "layout_hash": "a41d9a04bd168cbab06de0c7c597546b3c4729231f1c5fbb6214c1fd3d63ac5b",
+   "layout_codec": "I8",
+   "n_tensors": 796,
+   "size": 20160044352,
+   "sha256": "9a86fa543337ad250e7ca3ef450f7621c01f42595591896e5f2419b94276c554"
+  }
+ }
+}

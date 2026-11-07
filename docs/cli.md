@@ -302,9 +302,10 @@ For the menu bar side, read [Menu bar app](menubar.md).
 
 `gmlx list` lists the model ids a request can address. Discovered models
 are tagged, aliases follow, and the default model is marked with `*`. The
-KIND column reads `chat` or `image`. An image model's size counts its DiT,
-VAE and vision tower, and its text encoder unless it shares a chat model's,
-which that model's row counts.
+KIND column reads `chat`, `image` or `video`. An image model's size counts
+its DiT, VAE and vision tower, and its text encoder unless it shares a chat
+model's, which that model's row counts. A video model's size counts every
+file its entry loads.
 
 ```sh
 gmlx list
@@ -833,6 +834,11 @@ An image model id removes its DiT, VAE, text encoder and vision tower. A text en
 that is a chat model, or that another image model uses, is kept, and `rm`
 refuses a chat model that an image model uses as its encoder.
 
+`rm` does not take a video model id. To remove a video model, delete its
+entry under `video_models` in the config, then delete the files that no
+other entry uses: h3, h3-fast and h3-base share their DiT, encoder and
+VAEs, and fasth3 shares their encoder and VAEs.
+
 ```sh
 gmlx rm old-model
 gmlx rm old-model --yes
@@ -1310,6 +1316,171 @@ and a `--source-config` that is not one is refused.
 | `--source-config FILE` | `config.json` beside `SRC`, when it is a VAE config | Record this VAE config. |
 | `--force` | Off | Replace `--out` when it exists. |
 | `--json` | Off | Print a JSON record of the packed file. |
+
+## gmlx video
+
+`gmlx video` makes short clips with sound from a text prompt, on
+MiniMax-H3, as [Video generation](video.md) introduces. Its actions
+follow.
+
+- `pull` fetches a recipe's files, or finds them in your model folders,
+  and adds the model to your config.
+- `generate` writes an MP4 from a prompt.
+- `bench` times the steps at a few clip shapes and takes their peak
+  memory.
+
+```sh
+gmlx video pull h3
+gmlx video generate h3 --prompt "a red bicycle rolls down a wet street, rain on the roofs" --output bicycle.mp4
+gmlx video generate h3 --prompt "waves on a pebble beach" --seconds 10 --size 768x768 --seed 1
+gmlx video generate h3 --prompt "the fox turns and runs into the snow" --first-frame fox.png --output fox.mp4
+```
+
+Every action exits 0 on success, 1 on a refusal or a runtime failure, 2 on
+a usage error and 130 on an interrupt.
+
+### video pull
+
+`pull` lists each file of the recipe, where it found it or where it will
+download it, the total to download and the licenses, then asks before it
+downloads. A file already in a `model_dirs` folder is used where it is,
+unless it is a larger copy that keeps every clip out of this Mac's memory,
+such as a Q8_0 text encoder on a 32 GB Mac. `pull` then uses another
+copy it finds that fits, or downloads the recipe's file.
+An interrupted download resumes on the next pull. The recipe is then
+added under `video_models:` in the config, with the recipe's name as its
+id, or `h3-2` when another entry has that id.
+
+| Recipe | Steps | Meaning |
+|--------|-------|---------|
+| `h3` | 8 | MiniMax-H3 with lightx2v's Turbo 8-step [LoRA](video.md#licenses). The default. |
+| `h3-fast` | 4 | The Turbo 4-step [LoRA](video.md#licenses): faster, with softer motion. |
+| `h3-base` | 20 | The base model at video shift 12, with no LoRA. |
+| `fasth3` | 8 | FastVideo's FastH3 at video shift 10, with video sparse attention and no LoRA. Needs an M5 or newer. See [FastH3](video.md#fasth3). |
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `RECIPE`, positional | Required | Pull this recipe. |
+| `--config FILE` | The first default location | Add the entry to this config, and search its `model_dirs`. |
+| `--dir DIR` | The first `model_dirs` folder | Download into this folder. With a config, it must lie inside a `model_dirs` folder. |
+| `--yes`, `-y` | Off | Download without asking. |
+| `--force` | Off | Download even when the free disk space looks too small, or this Mac's chip or memory does not run the model. |
+| `--dry-run` | Off | Print what the pull finds and would download, and stop. |
+| `--json` | Off | Print the plan as JSON on stdout. |
+
+### video generate
+
+`generate` encodes the prompt, samples the clip with the DiT, decodes the
+sound and the frames, and writes the MP4 through ffmpeg. Only one model is
+in memory at a time.
+
+The MP4 needs ffmpeg with the `h264_videotoolbox` encoder, which
+Homebrew's build has:
+
+```sh
+brew install ffmpeg
+```
+
+Without ffmpeg, pass `--frames-dir` to get PNG frames and `audio.wav`.
+
+A clip has 17 k + 5 frames, so `--seconds` rounds up, as
+[Clip length, size and memory](video.md#clip-length-size-and-memory)
+shows. The step count and the shift come from the entry, else from the
+DiT's variant.
+
+`--first-frame` and `--last-frame` start or end the clip at an image,
+which the prompt also reads. `--guide` anchors an image, or a video with
+its sound, at a frame, and `--guide-audio` anchors a sound alone. ffmpeg
+reads guide videos and sounds, and the images too when it is installed.
+FRAME is `0` when none is given, a negative frame counts from the end,
+and only an integer after the last `@` is a frame. A guide video keeps
+the frames that [Keyframes and guides](video.md#keyframes-and-guides)
+gives, counted from its start, and they must fit in the clip from FRAME.
+The anchors are encoded after the text encoder is released, one VAE at a
+time.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `MODEL`, positional | Required | Generate with the `video_models` entry of this id, or this DiT GGUF. |
+| `--config FILE` | The first default location | Read the `video_models` entry that `MODEL` names from this config. |
+| `--variant NAME` | The entry's `variant`, else from the weights | Run the DiT as this variant, such as `fl2va-turbo4` for a merged Turbo file gmlx does not know. |
+| `--prompt TEXT` | Required, or `--prompt-file` | Generate from this prompt. |
+| `--prompt-file FILE` | None | Read the prompt from this file. |
+| `--seconds S` | The entry's, else `5` | Make a clip this long, rounded up to whole frames as above. |
+| `--frames N` | None | Make a clip of exactly N frames, 17 k + 5 from 5 to 362. |
+| `--size WxH` | The entry's, else `1344x768` | Set the width and height, multiples of 32. |
+| `--steps N` | The entry's, else the variant's | Sample for N steps. |
+| `--seed N` | Random, and printed | Seed the noise with an integer under 2^64. |
+| `--shift S` | The entry's, else the variant's | Set the video flow shift. |
+| `--adapter PATH[:STRENGTH]` | The entry's | Apply this LoRA safetensors file after the entry's. Repeat the flag to stack adapters. |
+| `--first-frame IMAGE` | None | Start the clip at this image, stretched to the canvas. |
+| `--last-frame IMAGE` | None | End the clip at this image, cropped about its center to the canvas's aspect. |
+| `--guide PATH[@FRAME]` | None | Anchor this image, or this video with its sound, at FRAME, cropped about its center to the canvas's aspect. Repeat the flag for more. |
+| `--guide-audio AUDIO[@FRAME]` | None | Anchor the sound of this file at FRAME, cut to the clip's sound from there. Repeat the flag for more. |
+| `--guide-no-audio` | Off | Anchor `--guide` videos without their sound. |
+| `--output PATH` | `./gmlx-<time>-<seed>.mp4`, or none with `--frames-dir` alone | Write the MP4 here. An existing file is replaced. |
+| `--frames-dir DIR` | None | Write PNG frames and `audio.wav` to this folder. Frames of a longer earlier clip there stay. Alone, it needs no ffmpeg, unless a guide video or sound is read. |
+| `--preview [TAEH3]` | Off | Decode with TAEH3, the small preview decoder: the entry's file, or this one. |
+| `--save-latent PATH` | None | Also write the final latents to this `.npz` file. |
+| `--encoder GGUF` | The entry's | Encode the prompt with this text encoder. |
+| `--mmproj GGUF` | The entry's `encoder_mmproj` | Read `--first-frame` and `--last-frame` with this vision tower of the text encoder. Required with them when `MODEL` is a DiT GGUF. |
+| `--upsampler GGUF` | The entry's `upsampler` | Rewrite the prompt with this chat model, a GGUF or a `models` id, as [Prompt upsampling](video.md#prompt-upsampling) describes. |
+| `--no-upsample` | Off | Run the prompt as typed, without the upsampler. |
+| `--upsample-prompt FILE` | The entry's `upsample_prompt` | The upsampler reads this prompt guide in place of the entry's. |
+| `--vae PATH` | The entry's | Decode the frames with this video VAE, and encode the keyframes and guides. Required with `--preview` and a keyframe or a guide image or video. |
+| `--audio-vae PATH` | The entry's | Decode the sound with this audio VAE, and encode the guides' sound. |
+| `--json` | Off | Print a JSON record of the run on stdout. |
+
+### video bench
+
+`bench` runs what `generate` runs at a few clip shapes, loading each model
+once. It prints the step time and the seconds of each phase for each
+shape, and the peak memory of each phase beside what gmlx planned for it.
+
+```sh
+gmlx video bench h3
+gmlx video bench h3 --shapes 768x768x124 --steps 2 --json-out bench.jsonl
+```
+
+Each shape gets a JSON record of schema `gmlx.video.bench/1`. It holds:
+
+- the time of every step, with the first apart from the median and mean
+  of the rest
+- `summary.phases_s`, the seconds of the encode, the denoise, the audio
+  decode, the video decode and the mux into an MP4, without the model
+  loads, which `load_s` holds
+- the peak memory of the encode, the denoise, the audio decode and the
+  video decode, each with its model's load, and `predicted`, the memory
+  plan of each phase beside them
+
+The bench writes each MP4 to a temporary folder and deletes it. Without
+ffmpeg it skips the mux and records its time as `null`. With
+`--no-decode`, the record has no audio, decode or mux times.
+
+A shape that does not fit in memory stops the bench before anything
+loads. Drop it from `--shapes`, or set `GMLX_OVERCOMMIT=1` to measure it
+anyway. A refusal that points to the text encoder or the prompt holds at
+every shape, so dropping shapes does not help. When a shape fails, the
+shapes that ran still get their records, each with an `error` field.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `MODEL`, positional | Required | Bench the `video_models` entry of this id, or this DiT GGUF. |
+| `--config FILE` | The first default location | Read the `video_models` entry that `MODEL` names from this config. |
+| `--variant NAME` | The entry's `variant`, else from the weights | Run the DiT as this variant. |
+| `--shapes LIST` | `512x512x22,768x768x124,1344x768x124` | Bench these shapes, each `WxHxF` with F frames. |
+| `--steps N` | `3` | Sample each shape for N steps. |
+| `--seed N` | `0` | Seed every shape. |
+| `--shift S` | The entry's, else the variant's | Set the video flow shift. |
+| `--adapter PATH[:STRENGTH]` | The entry's | Apply this LoRA after the entry's. Repeat the flag to stack adapters. |
+| `--prompt TEXT` | A fixed bench prompt | Encode this prompt. |
+| `--no-decode` | Off | Skip the sound and frame decodes and the mux, so no VAE loads. |
+| `--encoder GGUF` | The entry's | Encode the prompt with this text encoder. |
+| `--vae PATH` | The entry's | Decode the frames with this video VAE. |
+| `--audio-vae PATH` | The entry's | Decode the sound with this audio VAE. |
+| `--label TEXT` | None | Record this label with the results. |
+| `--json` | Off | Print one JSON record per shape on stdout. |
+| `--json-out FILE` | None | Write one JSON record per shape to this file. |
 
 ## gmlx comfyui
 

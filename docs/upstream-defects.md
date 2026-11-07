@@ -171,7 +171,24 @@ print((out[:, 0] != want).sum())  # 0
     attention and feed-forward rows on the last axis. 9B passes from 131,073 rows and 4B from
     174,763, which the ComfyUI steps route reaches with several large references and `gmlx image`
     with a large canvas.
-- Guard: `concatenate` in `gmlx/mlx_guards.py`, which all three call. Past 2^31 output elements it
+  - `pair_halves` in `gmlx/video/rope.py` reorders the 96 rotated dims of each 128-dim head of a
+    MiniMax-H3 block's queries and keys and joins the other 32 back on the last axis. With 56 heads,
+    H3 and FastH3 pass from 299,594 rows of the packed sequence. A 15 s clip at 2240x1280 has
+    299,600 video rows, and `gmlx video` reaches it with H3 on a 96 GB Mac and with FastH3 on a
+    128 GB Mac.
+  - `attend` in `gmlx/video/families/h3/model.py` joins H3's dense attention of query chunks of
+    4,096 rows on the token axis of [1, 56, L, 128]. It passes from 304,966 rows. A 15 s clip at
+    2304x1280 has 308,160 video rows, and `gmlx video` reaches it on a 96 GB Mac. FastH3 runs video
+    sparse attention instead.
+  - `MemBlock` in `gmlx/video/vae/tiny.py` joins each frame's features and those of the frame
+    before on the last axis in TAEH3, the decoder of `gmlx video --preview`. The three blocks at 64
+    channels, over the 10 frames that a run of 5 latents grows to at a quarter of the canvas a
+    side, pass at canvases from 26,844,160 to 53,686,272 pixels, 5184x5184 and 7200x3744 among
+    them, on clips of 22 frames or more. Past that range each input gets 64-bit offsets. A 128 GB
+    Mac reaches canvases up to 30,450,261 pixels and a 256 GB Mac the whole range. A run of 2
+    latents, the last of every clip, passes from 67,109,888 pixels and the blocks at 128 channels
+    from 107,374,592, and a 512 GB Mac reaches both, up to 122,255,187 pixels.
+- Guard: `concatenate` in `gmlx/mlx_guards.py`, which all six call. Past 2^31 output elements it
   builds the output as zeros with each input written in by a slice update. At or under 2^31 it is
   the stock op, so the graph of every smaller shape is unchanged. At the tested shapes it holds the
   stock op's memory peak. It stays until an MLX release carries df46f58 and an A/B on these shapes
@@ -186,9 +203,48 @@ print((out[:, 0] != want).sum())  # 0
   shared-KV pad 1,024, and the single block its last row of 16,384, written over its attention
   rows. `test_concatenate_takes_a_slice_update_only_past_the_limit` in `tests/test_mlx_guards.py`
   holds the routing on small arrays in every run, and `tests/cache/test_kv_guard_calls.py`,
-  `test_pad_concatenates_through_the_guard` in `tests/spec/test_shared_kv_inject_merge.py` and
-  `tests/image/test_image_guard_calls.py` fail in every run when a caller calls the stock op
-  instead. The past-limit tests run as the pad's do.
+  `test_pad_concatenates_through_the_guard` in `tests/spec/test_shared_kv_inject_merge.py`,
+  `tests/image/test_image_guard_calls.py` and `tests/video/test_video_guard_calls.py` fail in every
+  run when a caller calls the stock op instead. The past-limit tests run as the pad's do. The video
+  sites have no past-limit test.
+
+## A gather misreads a strided view that spans more than INT32_MAX elements on the GPU
+
+- Dependency: mlx 0.32.3, GPU streams. The CPU stream is right.
+- Affected: a gather, `mx.take(x, indices, axis=...)` or an index such as `x[0]` or `x[idx]`,
+  when x is a strided view of at most INT32_MAX elements whose elements span more than INT32_MAX
+  elements of its buffer: one part of a split of a fused product with many rows, or a band of
+  columns of a wide array. Any dtype.
+- What goes wrong: the gather picks 32-bit source offsets from the number of elements of x, not
+  from the span of its strides, and reads each element past the 32-bit limit at a wrapped
+  offset. The rows from the limit on come back wrong, and no error is raised.
+- Not affected: a row-major x; a copy of the view, as `mx.contiguous` makes.
+
+Smallest repro (a 2 GiB buffer):
+
+```python
+import mlx.core as mx
+
+rows, width = 65600, 32768
+base = (mx.arange(rows) % 251).astype(mx.uint8)[:, None] + mx.zeros((1, width), mx.uint8)
+view = base[:, :16]  # [65600, 16], rows 32768 apart
+want = (mx.arange(rows) % 251).astype(mx.uint8)
+print((mx.take(view, mx.arange(rows), axis=0)[:, 0] != want).sum())  # GPU: 64, from row 65536
+print((view[mx.arange(rows)][:, 0] != want).sum())  # GPU: 64
+print((mx.take(view, mx.arange(rows), axis=0, stream=mx.cpu)[:, 0] != want).sum())  # 0
+print((mx.take(mx.contiguous(view), mx.arange(rows), axis=0)[:, 0] != want).sum())  # 0
+```
+
+- Where gmlx meets it: a FastH3 block, `DiTBlock.attention` in
+  `gmlx/video/families/h3/model.py`, splits its fused qkv product, so v is a view with rows
+  3 x 56 x 128 apart. Its span passes INT32_MAX elements from 99,866 packed rows, which
+  1344x768 reaches at 345 frames. `v[0]` on that view is a gather.
+- Guard: the block hands `vsa_attention` q, k and v as views, through `squeeze(0)` and
+  transposes, never through a gather. mlx-kquant's `vsa_attention` copies a view that spans past
+  the limit to row-major before its own gathers (its docs/upstream-defects.md).
+- Test: `test_a_sparse_block_hands_the_call_views_not_gathers` in
+  `tests/video/test_video_h3_vsa.py`. It stubs the call and checks that the graph of the q, k
+  and v the call receives holds no gather. It needs no kernel, so it runs on any device.
 
 ## The diffusers single-file loader leaves a BF16 tensor outside a linear layer undecoded
 

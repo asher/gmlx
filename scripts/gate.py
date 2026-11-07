@@ -200,9 +200,21 @@ def _summary_lines(log: Path) -> list[str]:
     return [ln.replace(str(Path.home()), "~") for ln in keep + tail]
 
 
+def _importorskip_device(node) -> bool:
+    """Whether ``node`` is a call of pytest.importorskip, or importorskip,
+    on mlx or mlx-kquant."""
+    if not isinstance(node, ast.Call) or not node.args:
+        return False
+    f = node.func
+    name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
+    arg = node.args[0]
+    return (name == "importorskip" and isinstance(arg, ast.Constant)
+            and isinstance(arg.value, str) and arg.value.split(".")[0] in DEVICE_MODULES)
+
+
 def imports_device(path: Path) -> bool:
-    """Whether a test file imports mlx or mlx-kquant, itself or in code it
-    runs in a child interpreter."""
+    """Whether a test file imports mlx or mlx-kquant, itself, through
+    pytest.importorskip, or in code it runs in a child interpreter."""
     try:
         text = path.read_text()
         tree = ast.parse(text, filename=str(path))
@@ -214,6 +226,8 @@ def imports_device(path: Path) -> bool:
             return True
         if isinstance(node, ast.ImportFrom) and not node.level \
                 and (node.module or "").split(".")[0] in DEVICE_MODULES:
+            return True
+        if _importorskip_device(node):
             return True
         if child and isinstance(node, ast.Constant) and isinstance(node.value, str) \
                 and _CHILD_IMPORT.search(node.value):

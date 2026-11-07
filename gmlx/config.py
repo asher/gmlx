@@ -130,7 +130,8 @@ CACHE_DISK_ENV = {
 # leaves a model unpinned) - so we warn loudly instead. Structural breakage (missing
 # path, unknown profile reference, extends cycle) is what *raises*; see _validate.
 _TOP_KEYS = frozenset({"server", "profiles", "rules", "models", "aliases",
-                       "image_models", "discover", "talk", "assistant",
+                       "image_models", "video_models", "discover", "talk",
+                       "assistant",
                        "theme", "themes", "launch"})
 _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "media_urls",
                           "cors_origins", "model_dirs",
@@ -141,7 +142,7 @@ _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "media_urls",
                           "decode_prefill_ratio", "prefill_tick_ms",
                           "cache_limit_gb", "family_defaults", "stochastic_mtp",
                           "gpu_keepwarm", "assistants", "assistant_allow_remote",
-                          "image"})
+                          "image", "video"})
 _DEFAULTS_KEYS = frozenset({"profile", "ttl_s", "model", "preload",
                             "image_model"})
 # An image model entry: the DiT and its companions, never merged with the
@@ -158,6 +159,14 @@ _SERVER_IMAGE_KEYS = frozenset({"url_ttl_s", "url_max_bytes", "max_queue",
                                 "embed_metadata", "tensor_cache_mb",
                                 "adapter_cache_mb", "steps_api",
                                 "steps_remote"})
+_SERVER_VIDEO_KEYS = frozenset({"max_queue", "job_ttl_s", "store_max_bytes"})
+# A video model entry: the DiT and its companions, a sibling block as
+# image_models is.
+_VIDEO_MODEL_KEYS = frozenset({"path", "variant", "encoder", "encoder_mmproj",
+                               "vae", "audio_vae", "tiny_vae", "adapters",
+                               "defaults", "upsampler", "upsample",
+                               "upsample_prompt"})
+_VIDEO_DEFAULTS_KEYS = frozenset({"steps", "shift", "size", "seconds"})
 IMAGE_SAMPLERS = ("euler", "uni_pc_bh2")
 IMAGE_ENCODER_RELEASE = ("auto", "always", "never")
 _SYSTEMONE_KEYS = frozenset({"model", "canvas", "constrained", "max_questions",
@@ -644,6 +653,30 @@ class ImageModelCfg:
     upsample_prompt: str | None = None
 
 
+@dataclass
+class VideoModelCfg:
+    """One ``video_models:`` entry: a video DiT GGUF with its text
+    encoder, vision tower, video and audio VAEs and preview decoder.
+    ``adapters`` holds ``(path, strength)`` pairs applied to every clip,
+    and ``defaults`` the steps, shift, size and seconds it runs at.
+    ``upsampler`` is the chat model id that rewrites a prompt, by default
+    while ``upsample`` is on, under the system prompt of the text file
+    ``upsample_prompt``, as on an image entry."""
+    id: str
+    path: str
+    encoder: str
+    vae: str
+    audio_vae: str
+    encoder_mmproj: str | None = None
+    tiny_vae: str | None = None
+    adapters: tuple = ()
+    defaults: dict = field(default_factory=dict)
+    variant: str | None = None
+    upsampler: str | None = None
+    upsample: bool = True
+    upsample_prompt: str | None = None
+
+
 @dataclass(frozen=True)
 class ImageServerCfg:
     """``server.image``: the serve settings of the image routes."""
@@ -652,9 +685,17 @@ class ImageServerCfg:
     max_queue: int = 4               # image jobs waiting before a 429
     embed_metadata: bool = False     # API outputs carry the PNG text chunk
     tensor_cache_mb: int = 64        # each cache of conditionings, latents
-    adapter_cache_mb: int = 256      # each cache of request adapters, tables
+    adapter_cache_mb: int | None = None  # optional cap on request LoRAs
     steps_api: bool = True           # serve the image step contract
     steps_remote: bool = False       # step clients beyond loopback
+
+
+@dataclass(frozen=True)
+class VideoServerCfg:
+    """``server.video``: the job store of POST /v1/videos."""
+    max_queue: int = 2               # queued video jobs before a 429
+    job_ttl_s: float = 86400.0       # life of a job, its record and its MP4
+    store_max_bytes: int = 8 << 30   # the job store's files, oldest out first
 
 
 @dataclass(frozen=True)
@@ -1077,7 +1118,10 @@ class ServerCfg:
     aliases: dict[str, str] = field(default_factory=dict)   # name -> id | id@profile
     # Image models: their own block, one id namespace with `models`.
     image_models: dict[str, ImageModelCfg] = field(default_factory=dict)
+    # Video models: their own block, in the same id namespace.
+    video_models: dict[str, VideoModelCfg] = field(default_factory=dict)
     image: ImageServerCfg = field(default_factory=ImageServerCfg)
+    video: VideoServerCfg = field(default_factory=VideoServerCfg)
     discover: list[DiscoverSpec] = field(default_factory=list)
     talk: TalkCfg = field(default_factory=TalkCfg)
     launch: LaunchCfg = field(default_factory=LaunchCfg)
@@ -1271,6 +1315,36 @@ class ResolvedImageModel:
                 self.encoder_model, self.encoder_mmproj, self.vae,
                 tuple(self.adapters), self.encoder_release, d.get("size"),
                 d.get("guidance"))
+
+
+@dataclass
+class ResolvedVideoModel:
+    """A ``video_models:`` entry with its files resolved."""
+    id: str
+    path: str
+    encoder: str
+    vae: str
+    audio_vae: str
+    encoder_mmproj: str | None
+    tiny_vae: str | None
+    adapters: tuple                 # ((abspath, strength), ...)
+    defaults: dict
+    variant: str | None = None
+    # A video entry has no idle unload and shares no chat encoder.
+    ttl_s: float | None = None
+    encoder_model: str | None = None
+    upsampler: str | None = None
+    upsample: bool = True
+    upsample_prompt: str | None = None
+
+    def load_signature(self) -> tuple:
+        """What makes two loads of the entry the same: every file, the
+        adapter list, and the size, length and caption rows its memory is
+        priced at, the last set by whether it names an upsampler."""
+        d = self.defaults or {}
+        return (self.path, self.variant, self.encoder, self.encoder_mmproj,
+                self.vae, self.audio_vae, tuple(self.adapters),
+                d.get("size"), d.get("seconds"), self.upsampler is not None)
 
 
 # Path resolution
@@ -2119,6 +2193,26 @@ def resolve_image_model(image_id: str, cfg: ServerCfg) -> ResolvedImageModel:
         upsample_prompt=_prompt_path(m.upsample_prompt, dirs))
 
 
+def resolve_video_model(video_id: str, cfg) -> ResolvedVideoModel:
+    """The ``video_models:`` entry ``video_id`` with its files resolved
+    as a model ``path`` is. Raises :class:`KeyError` for an unknown id
+    and :class:`MissingModelFile` for a file that is not there."""
+    m = cfg.video_models[video_id]
+    dirs = cfg.model_dirs
+    return ResolvedVideoModel(
+        id=video_id, path=resolve_path(m.path, dirs),
+        encoder=resolve_path(m.encoder, dirs),
+        vae=resolve_path(m.vae, dirs),
+        audio_vae=resolve_path(m.audio_vae, dirs),
+        encoder_mmproj=resolve_path(m.encoder_mmproj, dirs),
+        tiny_vae=resolve_path(m.tiny_vae, dirs),
+        adapters=tuple((resolve_path(a, dirs), float(st))
+                       for a, st in m.adapters),
+        defaults=dict(m.defaults), variant=m.variant,
+        upsampler=m.upsampler, upsample=m.upsample,
+        upsample_prompt=_prompt_path(m.upsample_prompt, dirs))
+
+
 def _prompt_path(p: str | None, dirs: list[str]) -> str | None:
     """An entry's ``upsample_prompt``: the file under ``model_dirs`` as a
     model path resolves, or the expanded path when there is none."""
@@ -2840,6 +2934,118 @@ def _parse_image_model(image_id: str, raw) -> ImageModelCfg:
                                 where=where)))
 
 
+def _parse_video_defaults(where: str, raw) -> dict:
+    raw = _section_mapping(where, raw)
+    _warn_unknown_keys(where, raw, _VIDEO_DEFAULTS_KEYS, strict=True)
+    out: dict = {}
+    if raw.get("size") is not None:
+        out["size"] = _video_size(f"{where}.size", raw["size"])
+    for key in ("steps", "seconds", "shift"):
+        v = _coerce_num(key, raw.get(key), float, where=where)
+        if v is None:
+            continue
+        if not (v > 0 and math.isfinite(v)):
+            raise ConfigError(f"{where}.{key}: expected a positive number, "
+                              f"got {raw.get(key)!r}")
+        if key == "steps":
+            if not v.is_integer():
+                raise ConfigError(f"{where}.steps: expected a whole number, "
+                                  f"got {raw.get(key)!r}")
+            v = int(v)
+        if key == "seconds":
+            _clip_seconds(f"{where}.seconds", raw.get(key), v)
+        out[key] = v
+    return out
+
+
+def _clip_seconds(where: str, raw, seconds: float) -> None:
+    """Refuse a clip length outside the family's frame range, counted in
+    whole frames as ``gmlx video --seconds`` counts them."""
+    from gmlx.commands.video import _clip_seconds as fits, _seconds_range
+
+    if not fits(seconds):
+        raise ConfigError(f"{where}: expected {_seconds_range()} seconds, "
+                          f"got {raw!r}")
+
+
+def _video_size(where: str, raw) -> str:
+    w, sep, h = str(raw).lower().partition("x")
+    if not (sep and w.isdigit() and h.isdigit() and int(w) > 0
+            and int(h) > 0 and int(w) % 32 == 0 and int(h) % 32 == 0):
+        raise ConfigError(f"{where}: expected WxH in multiples of 32, got "
+                          f"{raw!r}")
+    return f"{int(w)}x{int(h)}"
+
+
+def _parse_video_model(video_id: str, raw) -> VideoModelCfg:
+    where = f"video model {video_id!r}"
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"{where} must be a mapping with `path`, `encoder`, `vae` and "
+            f"`audio_vae` (got {type(raw).__name__}: {raw!r})")
+    _warn_unknown_keys(where, raw, _VIDEO_MODEL_KEYS, strict=True)
+    for key in ("path", "encoder", "vae", "audio_vae"):
+        if not isinstance(raw.get(key), str) or not raw[key]:
+            raise ConfigError(f"{where} needs `{key}` (keys present: "
+                              f"{sorted(raw)})")
+    for key in ("variant", "encoder_mmproj", "tiny_vae", "upsampler",
+                "upsample_prompt"):
+        if raw.get(key) is not None and not isinstance(raw[key], str):
+            raise ConfigError(f"{where}.{key}: expected a string, got "
+                              f"{raw[key]!r}")
+    upsample = raw.get("upsample", True)
+    if not isinstance(upsample, bool):
+        raise ConfigError(f"{where}.upsample: expected true or false, got "
+                          f"{upsample!r}")
+    return VideoModelCfg(
+        id=video_id, path=raw["path"], encoder=raw["encoder"],
+        vae=raw["vae"], audio_vae=raw["audio_vae"],
+        encoder_mmproj=raw.get("encoder_mmproj"),
+        tiny_vae=raw.get("tiny_vae"), variant=raw.get("variant"),
+        adapters=_parse_image_adapters(f"{where}.adapters",
+                                       raw.get("adapters")),
+        defaults=_parse_video_defaults(f"{where}.defaults",
+                                       raw.get("defaults")),
+        upsampler=raw.get("upsampler") or None, upsample=upsample,
+        upsample_prompt=raw.get("upsample_prompt") or None)
+
+
+def _parse_size_key(where: str, key: str, value) -> int | None:
+    """A positive byte count of a key that takes bytes or a size such as
+    8G, or None when unset."""
+    if isinstance(value, str):
+        size = parse_size_bytes(value)
+        if size is None:
+            raise ConfigError(f"{where}.{key}: expected bytes or a size such "
+                              f"as 2G, got {value!r}")
+        value = size
+    n = _coerce_num(key, value, int, where=where)
+    if n is not None and n <= 0:
+        raise ConfigError(f"{where}.{key}: expected a positive size, got "
+                          f"{n!r}")
+    return n
+
+
+def _parse_server_video(raw) -> VideoServerCfg:
+    where = "server.video"
+    raw = _section_mapping(where, raw)
+    _warn_unknown_keys(where, raw, _SERVER_VIDEO_KEYS, strict=True)
+    base = VideoServerCfg()
+    ttl = _coerce_num("job_ttl_s", raw.get("job_ttl_s"), float, where=where)
+    if ttl is not None and not 0 < ttl < float("inf"):
+        raise ConfigError(f"{where}.job_ttl_s: expected a positive, finite "
+                          f"number of seconds, got {ttl!r}")
+    queue = _coerce_num("max_queue", raw.get("max_queue"), int, where=where)
+    if queue is not None and queue < 0:
+        raise ConfigError(f"{where}.max_queue: expected 0 or more, got "
+                          f"{queue!r}")
+    cap = _parse_size_key(where, "store_max_bytes", raw.get("store_max_bytes"))
+    return VideoServerCfg(
+        max_queue=base.max_queue if queue is None else queue,
+        job_ttl_s=base.job_ttl_s if ttl is None else ttl,
+        store_max_bytes=base.store_max_bytes if cap is None else cap)
+
+
 def _parse_server_image(raw) -> ImageServerCfg:
     where = "server.image"
     raw = _section_mapping(where, raw)
@@ -2849,17 +3055,7 @@ def _parse_server_image(raw) -> ImageServerCfg:
     if ttl is not None and ttl <= 0:
         raise ConfigError(f"{where}.url_ttl_s: expected a positive number "
                           f"of seconds, got {ttl!r}")
-    cap = raw.get("url_max_bytes")
-    if isinstance(cap, str):
-        size = parse_size_bytes(cap)
-        if size is None:
-            raise ConfigError(f"{where}.url_max_bytes: expected bytes or a "
-                              f"size such as 2G, got {cap!r}")
-        cap = size
-    cap = _coerce_num("url_max_bytes", cap, int, where=where)
-    if cap is not None and cap <= 0:
-        raise ConfigError(f"{where}.url_max_bytes: expected a positive size, "
-                          f"got {cap!r}")
+    cap = _parse_size_key(where, "url_max_bytes", raw.get("url_max_bytes"))
     queue = _coerce_num("max_queue", raw.get("max_queue"), int, where=where)
     if queue is not None and queue < 0:
         raise ConfigError(f"{where}.max_queue: expected 0 or more, got "
@@ -3623,7 +3819,11 @@ def build_config(doc: dict) -> ServerCfg:
         image_models={str(iid): _parse_image_model(str(iid), r) for iid, r in
                       _section_mapping("image_models",
                                        doc.get("image_models")).items()},
+        video_models={str(v): _parse_video_model(str(v), r) for v, r in
+                      _section_mapping("video_models",
+                                       doc.get("video_models")).items()},
         image=_parse_server_image(srv.get("image")),
+        video=_parse_server_video(srv.get("video")),
         discover=[_parse_discover(d) for d in
                   _section_list("discover", doc.get("discover"))],
         talk=_parse_talk(doc.get("talk")),
@@ -3675,6 +3875,27 @@ def _validate_image_models(cfg: ServerCfg) -> None:
         raise ConfigError(
             f"server.defaults.image_model {name!r} is not a configured image "
             f"model; known: {sorted(cfg.image_models)}")
+
+
+def _validate_video_models(cfg) -> None:
+    """Video ids share one namespace with model ids, image ids, aliases
+    and served assistants."""
+    for vid in cfg.video_models:
+        if "@" in vid:
+            raise ConfigError(f"video model id {vid!r} must not contain '@'")
+        for what, names in (("a model id", cfg.models),
+                            ("an image model id", cfg.image_models),
+                            ("an alias name", cfg.aliases),
+                            ("a served assistant", cfg.assistants)):
+            if vid in names:
+                raise ConfigError(f"video model {vid!r} collides with "
+                                  f"{what}; rename one")
+        m = cfg.video_models[vid]
+        if m.upsampler is not None and m.upsampler not in cfg.models:
+            raise ConfigError(
+                f"video model {vid!r}: `upsampler` {m.upsampler!r} is not a "
+                f"model id; name a chat model under models: (known: "
+                f"{sorted(cfg.models)})")
 
 
 def load_config(path) -> ServerCfg:
@@ -3774,6 +3995,7 @@ def _validate(cfg: ServerCfg) -> None:
             f"model; known: {sorted(cfg.models)}")
 
     _validate_image_models(cfg)
+    _validate_video_models(cfg)
 
     # The systemone fallback model, if named, must be a model id or an alias,
     # with an optional known profile, so the fallback can always resolve.

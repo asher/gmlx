@@ -8,8 +8,8 @@ newer. Install it with Homebrew:
 brew install asher/gmlx/gmlx
 ```
 
-The formula installs gmlx with every optional feature, plus ffmpeg for voice
-and audio, in an environment of its own. There is no Python setup to do.
+The formula installs gmlx with every optional feature, plus ffmpeg for voice,
+audio and video, in an environment of its own. There is no Python setup to do.
 
 Each model takes several GB of disk space, and the model you can run depends
 on your Mac's memory, as [Choosing a model](quickstart.md#choosing-a-model)
@@ -36,8 +36,8 @@ brew install ffmpeg
 ```
 
 uv puts the `gmlx` command on your PATH and downloads a Python when your
-system has none. Voice, speech-to-text on the server, and speech output in
-a format other than WAV or PCM need ffmpeg.
+system has none. Voice, speech-to-text on the server, speech output in a
+format other than WAV or PCM, and video generation need ffmpeg.
 
 ## pip
 
@@ -67,7 +67,7 @@ runs the menu bar app and has the prompts of `gmlx chat`, `gmlx init` and
 | `tts` | Text-to-speech on the server, with mlx-audio, for Kokoro, Qwen3-TTS and other speech models |
 | `talk` | The voice client [`gmlx talk`](talk.md), with `stt` and `tts` |
 | `assistant` | MCP tools for the built-in [assistant](assistant.md) |
-| `video` | OpenCV, which video input and DeepSeek-VL image input need. A few other vision models, such as SAM 3, use it to resize or draw |
+| `video` | OpenCV, which video input to vision models and DeepSeek-VL image input need. SAM 3 and a few others use it. `gmlx video` does not |
 | `all` | Every extra above except `video` |
 
 To add or remove extras with uv, install again and list every extra you

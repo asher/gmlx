@@ -21,6 +21,10 @@ that stays unread may hold integers, and a GGUF holds a scalar at shape
 video conv, which pads its frames in front: one frame reads its last time
 slice alone, and that slice is the kernel. A GGUF holds such a kernel
 flattened to rank 4, with its shape under ``comfy.gguf.orig_shape``.
+
+The video package reads its VAEs through the same path with its own rows
+table: a row may read a file under its own names, give each tensor's
+layout and set the dtypes its VAE runs in.
 """
 
 from __future__ import annotations
@@ -57,7 +61,9 @@ class VaeRow:
     config_from_shapes: Callable    # torch shapes -> config, or None
     build: Callable                 # config -> nn.Module
     latent_channels: int
-    latent_space: Callable          # family constants -> config fields
+    latent_space: Callable | None = None    # family constants -> config
+                                    # fields; None for a VAE outside the
+                                    # image registry
     expected_unused: Callable | None = None     # config -> the tensors a
                                                 # file may hold that stay
                                                 # unread, name -> torch shape
@@ -69,6 +75,15 @@ class VaeRow:
                                         # -> fields that differ from the
                                         # VAE's constants
     fp32_keep: tuple = ()               # parameters kept in float32
+    layout: Callable | None = None      # (name, torch shape) -> (axes or
+                                        # None, module shape), for tensors
+                                        # outside the image layout
+    dtypes: tuple = ()                  # decode dtypes, the default first;
+                                        # () for bfloat16 or float32
+    own_names: bool = False             # read under the file's names, with
+                                        # no rename to diffusers names
+    refusal: Callable | None = None     # VaeHeader -> why gmlx does not run
+                                        # the file, or None
 
 
 def _flux1_space(c: dict) -> dict:
@@ -131,7 +146,8 @@ class VaeHeader:
     path: str
     format: str                     # "gguf" or "safetensors"
     layout: str                     # "diffusers", "original" (FLUX.1
-                                    # and FLUX.2) or "wan" (Qwen-Image)
+                                    # and FLUX.2), "wan" (Qwen-Image) or
+                                    # "own" (the file's names)
     names: dict                     # diffusers name -> file name
     shapes: dict                    # diffusers name -> torch shape
     dtypes: dict                    # diffusers name -> "F32", "F16", "BF16"
@@ -240,15 +256,19 @@ def diffusers_names(names: dict) -> tuple[str, dict]:
     return "diffusers", names
 
 
-def read_header(path: str) -> VaeHeader:
-    """Names, shapes and dtypes under diffusers names, with no bytes read."""
+def read_header(path: str, own_names: bool = False) -> VaeHeader:
+    """Names, shapes and dtypes under diffusers names, or under the file's
+    names with ``own_names``, with no bytes read."""
     fmt, shapes, dtypes, meta = _raw_header(str(path))
     if fmt == "gguf":
         layout = meta.get("gmlx.vae.layout", LAYOUT)
         if layout != LAYOUT:
             raise VAEError(f"{path} has VAE layout {layout!r}; gmlx reads "
                            f"{LAYOUT!r}")
-    layout, names = diffusers_names(strip_names(shapes))
+    if own_names:
+        layout, names = "own", strip_names(shapes)
+    else:
+        layout, names = diffusers_names(strip_names(shapes))
     out_shapes = {}
     for n, f in names.items():
         s = shapes[f]
@@ -259,22 +279,26 @@ def read_header(path: str) -> VaeHeader:
                      {n: dtypes[f] for n, f in names.items()}, meta)
 
 
-def vae_row(family: str) -> VaeRow:
+def vae_row(family: str, rows: dict = VAES) -> VaeRow:
     try:
-        return VAES[family]
+        return rows[family]
     except KeyError:
-        known = ", ".join(sorted(VAES))
-        raise VAEError(f"no VAE is known for image family {family!r}; "
+        known = ", ".join(sorted(rows))
+        what = "image family" if rows is VAES else "family"
+        raise VAEError(f"no VAE is known for {what} {family!r}; "
                        f"known: {known}") from None
 
 
-def identify(header: VaeHeader, family: str):
-    """The VAE config for ``family``, or a VAEError that says what the file
-    holds instead."""
-    row = vae_row(family)
+def identify(header: VaeHeader, family: str, rows: dict = VAES):
+    """The VAE config for ``family`` in ``rows``, or a VAEError that says
+    what the file holds instead."""
+    row = vae_row(family, rows)
     cfg = row.config_from_shapes(header.shapes)
     if cfg is None:
-        raise VAEError(_holds(header, family, row))
+        raise VAEError(_holds(header, family, row, rows))
+    why = row.refusal(header) if row.refusal else None
+    if why:
+        raise VAEError(why)
     if cfg.latent_channels != row.latent_channels:
         raise VAEError(f"this VAE has {cfg.latent_channels} latent channels, "
                        f"and {family} decodes with {row.title} at "
@@ -286,23 +310,26 @@ def identify(header: VaeHeader, family: str):
                        f"with {row.title} at {row.image_channels}")
     text = header.metadata.get(CONFIG_KEY)
     if header.format == "gguf" and text is not None:
-        check_config(header.path, text, family)
+        check_config(header.path, text, family, rows)
     unread = row.expected_unused(cfg) if row.expected_unused else {}
     bad = sorted({d for n, d in header.dtypes.items()
                   if d not in FLOAT_CODECS and n not in unread})
     if bad:
         raise VAEError(f"VAE tensors must be F32, F16 or BF16, and this file "
                        f"holds {', '.join(bad)}")
+    if row.latent_space is None:
+        return cfg
     from ..registry import get_family
 
     space = row.latent_space(get_family(family).constants.values)
     return replace(cfg, **space)
 
 
-def check_config(path: str, text: str, family: str) -> None:
+def check_config(path: str, text: str, family: str,
+                 rows: dict = VAES) -> None:
     """Refuse the vae/config.json text of ``path`` when a field that gmlx
     takes from the constants of ``family``'s VAE differs in it."""
-    row = vae_row(family)
+    row = vae_row(family, rows)
     if row.config_disagreements is None:
         return
     try:
@@ -317,21 +344,27 @@ def check_config(path: str, text: str, family: str) -> None:
                        f"{', '.join(bad)}")
 
 
-def _holds(header: VaeHeader, family: str, row: VaeRow) -> str:
+def _holds(header: VaeHeader, family: str, row: VaeRow,
+           rows: dict = VAES) -> str:
     """Why ``header`` is not ``family``'s VAE, naming what it holds when
-    that is another family's VAE or a relative of one."""
-    for name, other in VAES.items():
-        if name != family and other.config_from_shapes(
-                header.shapes) is not None:
-            return (f"{header.path} holds {other.title}, the {name} VAE, "
-                    f"and {family} decodes with {row.title}")
-    for other in VAES.values():
-        what = other.relative and other.relative(header.shapes)
-        if what:
-            return (f"{header.path} holds {what}, and {family} decodes "
-                    f"with {row.title}")
+    that is another VAE of ``rows`` or of the image families, or a
+    relative of one."""
+    tables = [rows] if rows is VAES else [rows, VAES]
+    for table in tables:
+        for name, other in table.items():
+            if name != family and other.config_from_shapes(
+                    header.shapes) is not None:
+                return (f"{header.path} holds {other.title}, the {name} "
+                        f"VAE, and {family} decodes with {row.title}")
+    for table in tables:
+        for other in table.values():
+            what = other.relative and other.relative(header.shapes)
+            if what:
+                return (f"{header.path} holds {what}, and {family} decodes "
+                        f"with {row.title}")
     first = ", ".join(list(header.shapes)[:4])
-    return (f"{header.path} is not a VAE gmlx image reads: "
+    reads = "gmlx image reads" if rows is VAES else "gmlx reads"
+    return (f"{header.path} is not a VAE {reads}: "
             f"{len(header.shapes)} tensors, first {first}")
 
 
@@ -340,7 +373,8 @@ def check_names(header: VaeHeader, params: dict, row: VaeRow, cfg) -> None:
     missing = sorted(set(params) - set(header.shapes))
     extra = sorted(set(header.shapes) - set(params) - set(unread))
     wrong = sorted(n for n in set(params) & set(header.shapes)
-                   if _mlx_shape(header.shapes[n]) != params[n].shape)
+                   if _module_shape(row, n, header.shapes[n])
+                   != params[n].shape)
     # A tensor that stays unread is still held to its shape, so a file of
     # another model does not pass on the names alone.
     wrong += sorted(n for n, shape in unread.items() if n in header.shapes
@@ -366,6 +400,12 @@ def _same_shape(header: VaeHeader, name: str, shape: tuple) -> bool:
                                    and got == (1,))
 
 
+def _module_shape(row: VaeRow, name: str, shape: tuple) -> tuple:
+    if row.layout is not None:
+        return tuple(row.layout(name, tuple(shape))[1])
+    return _mlx_shape(shape)
+
+
 def _mlx_shape(shape: tuple) -> tuple:
     if len(shape) == 5:
         return (shape[0], *shape[3:], shape[1])
@@ -378,17 +418,30 @@ def frame_kernel(a: mx.array) -> mx.array:
     return a[:, :, -1]
 
 
-def resolve_dtype(dtype) -> mx.Dtype:
-    """The decode dtype: bf16 or fp32, never fp16. None picks bf16 on chips
-    with native bf16 and fp32 on M1 and M2 chips."""
-    if dtype is None:
-        from ..dtypes import vae_dtype
+_DTYPE_NAMES = {mx.bfloat16: "bfloat16", mx.float16: "float16",
+                mx.float32: "float32"}
 
-        return vae_dtype()
+
+def resolve_dtype(dtype, allowed: tuple = ()) -> mx.Dtype:
+    """The decode dtype. With no ``allowed`` set it is bf16 or fp32, never
+    fp16, and None picks bf16 on chips with native bf16 and fp32 on M1 and
+    M2 chips. Otherwise it is one of ``allowed``, and None picks the
+    first."""
     names = {"bf16": mx.bfloat16, "bfloat16": mx.bfloat16,
              "fp32": mx.float32, "float32": mx.float32,
              "fp16": mx.float16, "float16": mx.float16}
     dt = names.get(dtype, dtype) if isinstance(dtype, str) else dtype
+    if allowed:
+        if dtype is None:
+            return allowed[0]
+        if dt not in allowed:
+            runs = " or ".join(_DTYPE_NAMES[d] for d in allowed)
+            raise VAEError(f"this VAE runs in {runs}, not {dtype!r}")
+        return dt
+    if dtype is None:
+        from ..dtypes import vae_dtype
+
+        return vae_dtype()
     if dt == mx.float16:
         raise VAEError("the VAE never runs in float16; use bfloat16 or "
                        "float32")
@@ -413,16 +466,18 @@ def _file_arrays(header: VaeHeader, skip=()) -> dict:
     return mx.load(header.path)
 
 
-def load_vae(path, *, family: str, dtype=None, conv: str | None = None):
+def load_vae(path, *, family: str, dtype=None, conv: str | None = None,
+             rows: dict = VAES):
     """The VAE module for ``family`` from a GGUF or safetensors file, with
     weights in the decode dtype. ``conv`` picks the conv path, "kq",
-    "exact" or "winograd" (``conv.CONV`` when None; see ``conv``). The module carries
-    ``family``, ``source``, ``source_format`` and ``conv``."""
-    dt = resolve_dtype(dtype)
+    "exact" or "winograd" (``conv.CONV`` when None; see ``conv``). ``rows``
+    is the table ``family`` is found in. The module carries ``family``,
+    ``source``, ``source_format`` and ``conv``."""
+    row = vae_row(family, rows)
+    dt = resolve_dtype(dtype, row.dtypes)
     conv = conv_path(conv)
-    row = vae_row(family)
-    header = read_header(str(path))
-    cfg = identify(header, family)
+    header = read_header(str(path), own_names=row.own_names)
+    cfg = identify(header, family, rows)
     vae = row.build(cfg)
     params = dict(tree_flatten(vae.parameters()))
     check_names(header, params, row, cfg)
@@ -436,10 +491,14 @@ def load_vae(path, *, family: str, dtype=None, conv: str | None = None):
         a = arrays.pop(header.names[name])
         if tuple(a.shape) != header.shapes[name]:
             a = a.reshape(header.shapes[name])
-        if a.ndim == 5:
-            a = frame_kernel(a)
-        if a.ndim == 4:
-            a = a.transpose(0, 2, 3, 1)
+        if row.layout is not None:
+            axes, shape = row.layout(name, tuple(a.shape))
+            a = a.transpose(axes) if axes else a.reshape(shape)
+        else:
+            if a.ndim == 5:
+                a = frame_kernel(a)
+            if a.ndim == 4:
+                a = a.transpose(0, 2, 3, 1)
         weights.append((name, mx.contiguous(
             a.astype(mx.float32 if name in keep else dt))))
     del arrays

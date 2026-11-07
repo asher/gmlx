@@ -14,6 +14,7 @@ each bounded in bytes.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import threading
 from collections import OrderedDict
@@ -122,6 +123,11 @@ def array_bytes(arrays) -> int:
     return sum(int(a.nbytes) for a in arrays)
 
 
+# The clock of the uses of every ByteLRU, so that the uses of two caches
+# compare.
+_USES = itertools.count()
+
+
 class ByteLRU:
     """A least recently used map that holds at most ``max_bytes`` of
     values. An entry larger than the bound is not kept. A caller with a
@@ -133,6 +139,7 @@ class ByteLRU:
     def __init__(self, max_bytes: int):
         self.max_bytes = int(max_bytes)
         self._items: OrderedDict = OrderedDict()
+        self._used: dict = {}
         self._bytes = 0
         self._kept: frozenset = frozenset()
         self._lock = threading.Lock()
@@ -142,6 +149,11 @@ class ByteLRU:
         before. Their entries still count toward the bound."""
         with self._lock:
             self._kept = frozenset(keys)
+
+    @property
+    def kept(self) -> frozenset:
+        """The keys given to ``keep``."""
+        return self._kept
 
     def __len__(self) -> int:
         return len(self._items)
@@ -156,6 +168,7 @@ class ByteLRU:
             if hit is None:
                 return None
             self._items.move_to_end(key)
+            self._used[key] = next(_USES)
             return hit[0]
 
     def peek(self, key):
@@ -165,12 +178,24 @@ class ByteLRU:
             hit = self._items.get(key)
             return None if hit is None else hit[0]
 
+    def used(self, key) -> int:
+        """When the entry at ``key`` was last put or got, on a clock that
+        every ByteLRU shares, or -1 without one."""
+        with self._lock:
+            return self._used.get(key, -1)
+
     def nbytes(self, key) -> int:
         """Bytes of the entry at ``key``, 0 without one. The order of use
         does not change."""
         with self._lock:
             hit = self._items.get(key)
             return 0 if hit is None else hit[1]
+
+    def sizes(self) -> dict:
+        """{key: bytes} of every entry, read in one hold of the cache's
+        lock. The order of use does not change."""
+        with self._lock:
+            return {k: n for k, (_v, n) in self._items.items()}
 
     def keys(self, match) -> list:
         """The keys that ``match`` takes, the least recently used first.
@@ -187,11 +212,17 @@ class ByteLRU:
                     return key
         return None
 
+    def _pop(self, key) -> int:
+        """Remove the entry at ``key`` and return its bytes."""
+        n = self._items.pop(key)[1]
+        del self._used[key]
+        self._bytes -= n
+        return n
+
     def put(self, key, value, nbytes: int, shed: bool = True) -> None:
         with self._lock:
-            old = self._items.pop(key, None)
-            if old is not None:
-                self._bytes -= old[1]
+            if key in self._items:
+                self._pop(key)
             nbytes = int(nbytes)
             if shed and self._bytes + nbytes > self.max_bytes:
                 kept = sum(n for k, (_, n) in self._items.items()
@@ -201,9 +232,25 @@ class ByteLRU:
                 for k in [k for k in self._items if k not in self._kept]:
                     if self._bytes + nbytes <= self.max_bytes:
                         break
-                    self._bytes -= self._items.pop(k)[1]
+                    self._pop(k)
             self._items[key] = (value, nbytes)
+            self._used[key] = next(_USES)
             self._bytes += nbytes
+
+    def shed_for(self, nbytes: int, pinned, before: int | None = None) -> bool:
+        """Shed the entries whose key is not in ``pinned``, the least
+        recently used first, until ``nbytes`` more fit, and return
+        whether they fit. With ``before``, a use of the clock of ``used``,
+        only the entries last used before it go."""
+        with self._lock:
+            for k in list(self._items):
+                if self._bytes + nbytes <= self.max_bytes:
+                    break
+                if before is not None and self._used[k] > before:
+                    break
+                if k not in pinned:
+                    self._pop(k)
+            return self._bytes + nbytes <= self.max_bytes
 
     def shed_others(self, own, room: int) -> None:
         """Shed the entries whose key is not in ``own``, the least
@@ -215,9 +262,7 @@ class ByteLRU:
             for k in others:
                 if held <= room:
                     break
-                n = self._items.pop(k)[1]
-                held -= n
-                self._bytes -= n
+                held -= self._pop(k)
 
     def shed_by(self, nbytes: int, rank) -> int:
         """Drop entries until ``nbytes`` are gone, the lowest ``rank`` of
@@ -228,18 +273,17 @@ class ByteLRU:
             for k in sorted(self._items, key=rank):
                 if gone >= nbytes:
                     break
-                n = self._items.pop(k)[1]
-                self._bytes -= n
-                gone += n
+                gone += self._pop(k)
             return gone
 
     def drop_where(self, match) -> None:
         """Drop the entries whose value ``match`` takes."""
         with self._lock:
             for k in [k for k, v in self._items.items() if match(v[0])]:
-                self._bytes -= self._items.pop(k)[1]
+                self._pop(k)
 
     def clear(self) -> None:
         with self._lock:
             self._items.clear()
+            self._used.clear()
             self._bytes = 0

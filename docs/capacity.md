@@ -132,6 +132,7 @@ sections and fields.
 | `capacity` | The capacity table that the plan route reads. |
 | `rates` | Decode rate now, means over recent requests, and the lifetime mean. |
 | `images` | Jobs of the OpenAI image routes done, failed and cancelled, running and waiting, and the median seconds per image and per step. Step route work is not counted. |
+| `videos` | Jobs of `POST /v1/videos` done, failed and cancelled, queued and running, the queue's bound and the median seconds per clip. A restart's failed jobs count. |
 
 In a request row, `cache.tier` is where its prefix hit in the
 [prompt cache](prompt-cache.md): `exact`, `block`, `ckpt`, `anchor` or

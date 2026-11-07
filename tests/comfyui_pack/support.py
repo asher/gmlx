@@ -59,6 +59,16 @@ class Stub:
     def forget(self):
         self.call("/stub/forget", {})
 
+    def lose_table(self, steps: int):
+        """The next ``steps`` steps that name a table find it dropped."""
+        self.call("/stub/lose-table", {"steps": steps})
+
+    def video_encode(self, refuse=(), max_body=(1 << 30) + (1 << 20)):
+        """The next video encodes refuse for memory, each naming its
+        window of ``refuse``, or go when its entry is None; the
+        capabilities name ``max_body``."""
+        self.call("/stub/video-encode", {"refuse": list(refuse), "max_body": max_body})
+
     def close(self):
         self.proc.terminate()
         try:

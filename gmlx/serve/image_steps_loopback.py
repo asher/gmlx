@@ -31,13 +31,17 @@ class OneModelHost:
     log_requests = False
 
     def __init__(self, model_id: str, pipe, paths: dict):
+        from .image_service import dit_facts
+
         self.model_id = model_id
         self.spec = SimpleNamespace(id=model_id, path=paths["dit"],
                                     encoder=paths.get("encoder"),
                                     vae=paths.get("vae"), encoder_model=None)
+        # The step routes read the DiT's facts from the entry, as a
+        # server's entry keeps them from its load.
         self.served = SimpleNamespace(
             pipe=pipe, spec=self.spec, adapters=(),
-            plan=SimpleNamespace(keep_encoder=True))
+            plan=SimpleNamespace(keep_encoder=True), facts=dit_facts(pipe))
 
     def resolve(self, model):
         if model not in (None, "", self.model_id):

@@ -33,7 +33,8 @@ def test_records_cover_the_step_and_every_seam():
     booked = sum(r.seconds for r in records)
     assert booked == pytest.approx(wall, rel=1e-6, abs=1e-6)
     seams = {r.name for r in records if r.kind == "seam"}
-    assert seams == set(ops.SEAMS) | {"layer_norm"}
+    # Only MiniMax-H3 calls gated_residual_once.
+    assert seams == set(ops.SEAMS) - {"gated_residual_once"} | {"layer_norm"}
     paths = {(r.name, r.path) for r in records if r.kind == "seam"}
     assert ("sdpa", "layers.1.attention") in paths
     assert ("swiglu", "context_refiner.0.feed_forward") in paths

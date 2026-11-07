@@ -212,5 +212,8 @@ FAMILY = Family(
     variants=VARIANTS,
     sampling=SAMPLING,
     lora_map=lora_map,
+    # The time embedder's float32 weights under fp32_keep take its rows
+    # in float32.
+    lora_f32=("t_embedder.mlp.0", "t_embedder.mlp.2"),
     upsample=UPSAMPLE,
 )

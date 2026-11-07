@@ -4,9 +4,10 @@
 making images in a browser. A workflow in it is a graph of nodes, boxes
 that each do one part of the work, such as loading the model, running the
 [steps](glossary.md#steps) or saving the image. The gmlx nodes, a node pack
-that ships with gmlx, run the gmlx [image models](images.md) on the gmlx
-server, and ComfyUI's own nodes work with them. Like the rest of image
-generation, it needs a Mac with an M3 chip or newer.
+that ships with gmlx, run the gmlx [image models](images.md) and the
+MiniMax-H3 [video recipes](video.md) on the gmlx server, and ComfyUI's own
+nodes work with them. Like the rest of image generation, it needs a Mac
+with an M3 chip or newer.
 
 ![The gmlx model, CLIP and VAE loaders feeding ComfyUI's KSampler in Comfy Desktop, with the image it made](assets/comfyui/z-image-turbo-workflow.png)
 
@@ -108,7 +109,7 @@ gmlx launch comfyui
 is running, then starts ComfyUI. Among its lines it prints:
 
 ```text
-[launch] installed the gmlx nodes in ~/ComfyUI/custom_nodes/comfyui-gmlx (a ComfyUI folder, ComfyUI 0.41.1)
+[launch] installed the gmlx nodes in ~/ComfyUI/custom_nodes/comfyui-gmlx (a ComfyUI folder, ComfyUI 0.43.0)
 [launch] ComfyUI runs at http://localhost:8188, which you open in a browser, from /Users/you/ComfyUI.
 ```
 
@@ -149,9 +150,9 @@ The first workflow has these nodes, under the titles they show:
 | `VAE Decode` | Turns the result into pixels. |
 | `Save Image` | Shows the image and saves it in `output`, named by `filename_prefix`. |
 
-The `model_name` list of each loader holds the image models in the gmlx
-server's config. Before you pull one, it holds only the default model's
-name, and a run with it stops with its pull command. After a
+The `model_name` list of each loader holds the image and video models in
+the gmlx server's config. Before you pull one, it holds only the default
+model's name, and a run with it stops with its pull command. After a
 pull, press R in ComfyUI to refresh the list. The nodes read the list in
 the background, so if the model is not there yet, press R again a few
 seconds later. A new loader's `server_url` shows the address the nodes
@@ -238,9 +239,108 @@ and the gmlx version of the nodes. The
 [ComfyUI reference](comfyui-reference.md#how-the-work-is-shared) says which
 stock nodes work with a gmlx model and what runs where.
 
+## Make a video
+
+The gmlx nodes run the MiniMax-H3 recipes `h3`, `h3-fast`, `h3-base` and
+`fasth3` with ComfyUI's own MiniMax-H3 nodes. The gmlx server runs each
+step and decodes the clip, so you can make 1344x768 clips with sound in
+ComfyUI. Video needs a Mac with an M3 chip or newer and 32 GB of memory or
+more, and `fasth3` an M5 chip or newer. Download the model:
+
+```sh
+gmlx video pull h3
+```
+
+Then open the `minimax-h3-t2v` workflow from the templates, as for the
+first image, and press Run. It makes a 5 second clip at 1344x768 in 8
+steps, and ComfyUI saves it as `gmlx/minimax-h3_00001_.mp4` in its
+`output` folder. Its nodes, under the titles they show:
+
+| Node | What it does |
+|------|--------------|
+| `gmlx Model Loader` | Loads the DiT of the recipe picked in `model_name`, with the recipe's LoRA. |
+| `gmlx CLIP Loader` | Loads the text encoder. |
+| `gmlx Video VAE Loader` | Loads the video VAE, which decodes the frames on the server. |
+| `gmlx Audio VAE Loader` | Loads the audio VAE, which decodes the sound on the server. |
+| `Shifts of the h3 recipe` | ComfyUI's `ModelSamplingMiniMaxH3` at the recipe's shifts, 6 for the video and 3 for the sound. |
+| `Prompt and clip size` | ComfyUI's `MiniMax H3 Image to Video`: the prompt, the clip's `width` and `height`, and its `length` in frames at 24 a second. |
+| `Schedule` | `BasicScheduler` with the `simple` scheduler and the recipe's 8 steps. |
+| `Noise` | `RandomNoise`: the seed of the clip. |
+| `Sampler` | `KSamplerSelect` with `euler`. |
+| `Guider` | `BasicGuider`: the model and the prompt, with no negative prompt. |
+| `Sample` | `SamplerCustomAdvanced`: samples the clip with the noise, the guider, the sampler and the schedule. |
+| `Decode the video`, `Decode the sound` | `VAE Decode` and `VAE Decode Audio`. |
+| `Create Video`, `Save Video` | Put the frames and the sound together at 24 frames a second and save the clip. |
+
+For `h3-fast`, pick it in `model_name` on the four loaders and set `steps`
+to 4. For `h3-base`, pick it, set the shifts to 12 and 3 and set `steps`
+to 20. A clip too large for the Mac's memory stops with an error from the
+server before its first step.
+[Clip length, size and memory](video.md#clip-length-size-and-memory)
+lists the largest clip each Mac makes.
+
+To start the clip at an image, open the `minimax-h3-i2v` workflow. Its
+`First frame` node, a stock `Load Image`, feeds `first_frame` of
+`Prompt and clip size`, and an image in `last_frame` ends the clip at it.
+The prompt reads both images through the text encoder's vision tower, and
+the gmlx video VAE encodes them on the server.
+`Add Guide for MiniMax H3` anchors an image, a video or a sound at a
+frame of the clip, as `--guide` does on the command line. A guide video
+runs when the Mac's memory holds its encode beside the models: the nodes
+send a long one to the server a few seconds at a time, and one that does
+not fit stops with
+[`a video encode ... does not fit in memory`](troubleshooting.md#a-video-encode--does-not-fit-in-memory-beside-the-models-now-loaded).
+[Keyframes and guides](video.md#keyframes-and-guides) describes each,
+and [Clip length, size and memory](video.md#clip-length-size-and-memory)
+the memory they take on the command line. Through the nodes, a step is
+priced beside the caches the server holds, at the share its model's entry
+books. On a 32 GB Mac at 1344x768, a step with a first frame, a last
+frame or an image guide runs beside the caches, a step with a 5-frame guide
+video and its sound runs only while the caches are empty, and a step with both
+keyframes needs a larger Mac. At 768x768, a step with both keyframes runs
+beside the caches on a 32 GB Mac.
+
+On an entry with an [upsampler](video.md#prompt-upsampling), the server
+rewrites the prompt of `Prompt and clip size` before it encodes it, and
+ComfyUI's log shows the caption. [Prompt
+upsampling](video.md#prompt-upsampling) says which prompts the nodes have
+rewritten.
+
+A reference of `MiniMax H3 Reference to Video`, the Fun ControlNet or a
+noise mask on the latent stops the run with an error that names it, and
+so do keyframes and guides on `fasth3`, which runs text to video only.
+
+### FastH3
+
+[FastH3](video.md#fasth3) makes a clip in 8 steps, each in about half the
+time of an `h3` step, on an M5 chip or newer. Download it, then open the
+`fasth3-t2v` workflow from the templates and press Run:
+
+```sh
+gmlx video pull fasth3
+```
+
+The workflow is the `minimax-h3-t2v` graph with `fasth3` in `model_name`
+on the four gmlx loaders and two nodes changed, and ComfyUI saves its clip
+as `gmlx/fasth3_00001_.mp4`:
+
+| Node | What it does |
+|------|--------------|
+| `Shifts of the fasth3 recipe` | ComfyUI's `ModelSamplingMiniMaxH3` at the recipe's shifts, 10 for the video and 3 for the sound. |
+| `Trained noise levels` | `gmlx Sigmas`, in place of `BasicScheduler`: the 8 noise levels FastH3 was trained at, which no stock scheduler gives. |
+
+The clip at 1344x768 for 5 seconds needs a Mac with 36 GB or more. On a
+32 GB Mac, set [`defaults.size`](config.md#video_modelsdefaults) to
+`768x768` in the `fasth3` entry and `width` and `height` to 768 in
+`Prompt and clip size`. Keep the shifts at 10 and 3: on the trained noise
+levels at other shifts, the run stops with an error that names
+`ModelSamplingMiniMaxH3`. With `BasicScheduler` in place of `gmlx Sigmas`,
+FastH3 samples at the shifts in force, 12 and 3 without
+`ModelSamplingMiniMaxH3`, as ComfyUI does.
+
 ## The example workflows
 
-ComfyUI's template browser lists eleven workflows under `comfyui-gmlx`. Their
+ComfyUI's template browser lists fourteen workflows under `comfyui-gmlx`. Their
 files are in `custom_nodes/comfyui-gmlx/example_workflows`. Each has a note
 with the commands that install the gmlx nodes and pull its model.
 
@@ -257,6 +357,9 @@ with the commands that install the gmlx nodes and pull its model.
 | `flux-2-klein-9b-kv-edit-two-references` | A FLUX.2 klein 9B KV edit from two reference images, through `ReferenceLatent` and `Flux KV Cache` | `gmlx pull flux-2-klein-9b-kv`, a Mac with 24 GB or more, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
 | `flux-3-klein-t2i` | FLUX.3 klein text to image at 1024x1024 in 16 steps, through `EmptyFlux2LatentImage` | `gmlx pull flux-3-klein`, and ComfyUI 0.41 or newer |
 | `flux-3-klein-edit-two-references` | A FLUX.3 klein edit from two reference images, through `ReferenceMultiLatent` | `gmlx pull flux-3-klein`, ComfyUI 0.41 or newer, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
+| `minimax-h3-t2v` | A MiniMax-H3 clip with sound from a text prompt, 5 seconds at 1344x768 in 8 steps, through `MiniMax H3 Image to Video` and the gmlx video and audio VAE loaders | `gmlx video pull h3`, and a Mac with 32 GB or more |
+| `minimax-h3-i2v` | The same clip started at an image, which `Load Image` gives to `first_frame` | `gmlx video pull h3`, a Mac with 32 GB or more, and `first-frame.png` in ComfyUI's `input` folder |
+| `fasth3-t2v` | A FastH3 clip with sound from a text prompt, 5 seconds at 1344x768 on its 8 trained noise levels, through `gmlx Sigmas` | `gmlx video pull fasth3`, and a Mac with an M5 chip or newer and 36 GB or more |
 
 ## LoRAs
 
@@ -268,6 +371,16 @@ to a workflow, double-click an empty part of the canvas, search for
 the MODEL and CLIP outputs of the gmlx loaders to its inputs, and its
 outputs to the nodes that the loaders fed before. The gmlx nodes send each
 LoRA to the server once, so a change of strength costs one small request.
+A LoRA runs when the Mac has the memory for it. One that does not fit is
+refused with the memory it needs, as
+[A LoRA is refused for memory](troubleshooting.md#a-lora-is-refused-for-memory)
+describes. A 503 means the memory is not free yet, and its message says
+what to wait for or what to free: queue the prompt again when that
+finishes, or unload a model or close an app as the message says.
+A LoRA stacks on the LoRA that `gmlx Model Loader` loads with a recipe
+that has one, as `--adapter` does. A `LoraLoader` of the recipe's own
+LoRA file sets its strength in place of the recipe's, so that LoRA
+applies once.
 `LoraLoader` works at any `strength_model`. The text encoder half of a
 LoRA is not applied in ComfyUI, so set `strength_clip` to 0. To apply both
 halves, use the LoRA with [`gmlx image generate`](images.md#use-a-lora).
