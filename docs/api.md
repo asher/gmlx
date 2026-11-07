@@ -265,7 +265,9 @@ curl localhost:8080/v1/chat/completions -d '{
 `"json_object"` allows any JSON object. An unknown type or a malformed
 schema gets a 400. On `/v1/messages`, an `output_config` of type
 `json_schema` works the same way. On a thinking model the schema applies to
-the answer after the thinking.
+the answer after the thinking. When the prompt neither opens nor closes a
+thinking block, the reply can open one first, and the schema applies after
+the block ends.
 
 A model with MTP speculative decoding keeps speculating under a schema, and
 its output is the same as without speculation. The first structured request
