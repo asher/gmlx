@@ -170,7 +170,6 @@ def test_the_header_check(files, monkeypatch, base, adapters, env, mtp, refuses)
 # the serve pool sites
 
 def _pool(monkeypatch, files):
-    from gmlx.serve import residency
     from gmlx.serve.residency import _ResidencyPool, _RuntimeProxy
 
     proxy = _RuntimeProxy(SimpleNamespace(metrics=None))
@@ -182,9 +181,11 @@ def _pool(monkeypatch, files):
 
     pool = _ResidencyPool(proxy, stock_get, lambda: True, int(40 * GB), (),
                           footprint_fn=lambda p: int(10 * GB))
-    monkeypatch.setattr(residency, "_streaming_footprint",
+    monkeypatch.setattr("gmlx.serve.residency_pool._streaming_footprint",
                         lambda p, fb, env, held_bytes=0: fb)
-    monkeypatch.setattr(residency, "_plain_footprint", lambda p, fb, env=None: fb)
+    for mod in ("residency_pool", "residency_build"):
+        monkeypatch.setattr(f"gmlx.serve.{mod}._plain_footprint",
+                            lambda p, fb, env=None: fb)
     hits = []
     pool._seam = hits.append
     return pool, hits

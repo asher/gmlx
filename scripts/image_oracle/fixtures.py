@@ -221,9 +221,30 @@ class FixtureWriter:
         return path
 
 
+def _dumps(obj, level: int = 0) -> str:
+    """JSON at indent 1, with a list of scalars on one line."""
+    if isinstance(obj, dict):
+        items = [(k if isinstance(k, str) else json.dumps(k), v)
+                 for k, v in obj.items()]
+    elif isinstance(obj, (list, tuple)):
+        if not any(isinstance(v, (dict, list, tuple)) for v in obj):
+            return json.dumps(obj)
+        items = [(None, v) for v in obj]
+    else:
+        return json.dumps(obj)
+    if not items:
+        return json.dumps(obj)
+    pad = " " * (level + 1)
+    body = ",\n".join(
+        pad + (json.dumps(k) + ": " if k is not None else "")
+        + _dumps(v, level + 1) for k, v in items)
+    o, c = ("{", "}") if isinstance(obj, dict) else ("[", "]")
+    return f"{o}\n{body}\n{' ' * level}{c}"
+
+
 def _write_json(path: Path, obj) -> None:
     tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(obj, indent=1, sort_keys=False) + "\n")
+    tmp.write_text(_dumps(obj) + "\n")
     os.replace(tmp, path)
 
 

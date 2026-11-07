@@ -205,7 +205,7 @@
   },
   {
    "id": 6,
-   "type": "MiniMaxH3ImageToVideo",
+   "type": "GmlxH3ImageToVideo",
    "pos": [
     340,
     210
@@ -257,7 +257,7 @@
    ],
    "title": "Prompt and clip size",
    "properties": {
-    "Node name for S&R": "MiniMaxH3ImageToVideo"
+    "Node name for S&R": "GmlxH3ImageToVideo"
    },
    "widgets_values": [
     "A fishing boat comes into a small harbor at dawn. Gulls circle over the mast, the engine hums, and waves slap against the stone pier.",

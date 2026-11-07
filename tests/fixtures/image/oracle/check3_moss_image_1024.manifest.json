@@ -4,18 +4,7 @@
  "check": 3,
  "family": "moss_image",
  "script": "scripts/image_oracle/check3_moss_image.py",
- "argv": [
-  "check3_moss_image.py",
-  "--pipeline",
-  "pipeline_moss_image.py",
-  "--dit",
-  "MOSS-Image-SFT-Q4_K_M.gguf",
-  "--config",
-  "config.json",
-  "--sizes",
-  "512",
-  "1024"
- ],
+ "argv": ["check3_moss_image.py", "--pipeline", "pipeline_moss_image.py", "--dit", "MOSS-Image-SFT-Q4_K_M.gguf", "--config", "config.json", "--sizes", "512", "1024"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -109,20 +98,12 @@
  "npz": "check3_moss_image_1024.npz",
  "tensors": {
   "features": {
-   "shape": [
-    48,
-    4096
-   ],
+   "shape": [48, 4096],
    "dtype": "float32",
    "sha256": "51f2174fad964908bd5817f252f645cdc220c2c13ca457e1ad899301a9c3ca6b"
   },
   "latents": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "a4b2103b3964c8a64efd0ddead9b65e6e2e11aed1e4cb4b625caae7c425a6bb6"
   },
@@ -132,29 +113,17 @@
    "sha256": "9a8208635e00348ab64aac2b759e76391fd47089e9a749bbcec770d9eb5c6421"
   },
   "timestep": {
-   "shape": [
-    1
-   ],
+   "shape": [1],
    "dtype": "float32",
    "sha256": "1d77e51c3092b797b15b02104368537eea7b222148a4d2ba2d2d578491c50ac5"
   },
   "velocity": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "cbb8347e7e9ed8836f5e2c3fd337957896ba67127b5613595e1cbc86697b9a0e"
   },
   "velocity_bf16": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "60afef324b6f6aaca3aae7d6b2f13bade821fa2eace5eb78772e8f7bd4db3401"
   }

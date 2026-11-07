@@ -4,13 +4,7 @@
  "check": 2,
  "family": "qwen_image21",
  "script": "scripts/image_oracle/check2_qwen_image21.py",
- "argv": [
-  "check2_qwen_image21.py",
-  "--encoder",
-  "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
-  "--config",
-  "Qwen__Qwen-Image-2.1"
- ],
+ "argv": ["check2_qwen_image21.py", "--encoder", "Qwen3-VL-8B-Instruct-Q4_K_M.gguf", "--config", "Qwen__Qwen-Image-2.1"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -251,101 +245,67 @@
    "long": 0.9140461760248906
   }
  },
- "notes": [
-  "The pipeline encodes one prompt at batch 1 with no padding and no mask, as gmlx encodes a prompt."
- ],
+ "notes": ["The pipeline encodes one prompt at batch 1 with no padding and no mask, as gmlx encodes a prompt."],
  "created": "2026-10-06T19:24:54Z",
  "npz": "check2_qwen_image21.npz",
  "tensors": {
   "ids_empty": {
-   "shape": [
-    23
-   ],
+   "shape": [23],
    "dtype": "int64",
    "sha256": "63f8d93d6ceb60d0355f2825d00d207ea5993b88294aecfb4122eefc67633117"
   },
   "ids_long": {
-   "shape": [
-    639
-   ],
+   "shape": [639],
    "dtype": "int64",
    "sha256": "a84ca67b1f9652767b061e1ebbacc263a0e2a0cc3e9de2a43a314ef8ee588aa9"
   },
   "ids_non_ascii": {
-   "shape": [
-    59
-   ],
+   "shape": [59],
    "dtype": "int64",
    "sha256": "a78aba18c7ec2f74b557b81b91f62bc6e4840da087791c8fb34015751b2a3f1b"
   },
   "ids_plain": {
-   "shape": [
-    50
-   ],
+   "shape": [50],
    "dtype": "int64",
    "sha256": "a38eed2369786601fc09e20d83f314a758475f97aa563fff49c67577ebe1c3b7"
   },
   "tap_bf16_empty": {
-   "shape": [
-    9,
-    4096
-   ],
+   "shape": [9, 4096],
    "dtype": "float32",
    "sha256": "87337e12c1db54c245b047e62ff65ad5192b38d194f80c2552c920f331e8a99b"
   },
   "tap_bf16_long": {
-   "shape": [
-    625,
-    4096
-   ],
+   "shape": [625, 4096],
    "dtype": "float32",
    "sha256": "5e8001b28b1ea379f57e0d661622639b094b631772b613d42e9a8e56bfc1fd53"
   },
   "tap_bf16_non_ascii": {
-   "shape": [
-    45,
-    4096
-   ],
+   "shape": [45, 4096],
    "dtype": "float32",
    "sha256": "786bef5e143eb095ff32622d481286566210173bb0450ae61fac4766aaf299cc"
   },
   "tap_bf16_plain": {
-   "shape": [
-    36,
-    4096
-   ],
+   "shape": [36, 4096],
    "dtype": "float32",
    "sha256": "d8e4d9b206c27045a1eaee1a8b0a2e3b9a97191b8c135e76be94f9da199bc6f7"
   },
   "tap_empty": {
-   "shape": [
-    9,
-    4096
-   ],
+   "shape": [9, 4096],
    "dtype": "float32",
    "sha256": "c18de9b160fac258480b650004f73f303587908647a69f2e688430a7dcfd3266"
   },
   "tap_long": {
-   "shape": [
-    625,
-    4096
-   ],
+   "shape": [625, 4096],
    "dtype": "float32",
    "sha256": "1c55c1fc2c2d5e6196f8bc9f1115ebd49bf34e42e1be07e59def19defb0e6b6b"
   },
   "tap_non_ascii": {
-   "shape": [
-    45,
-    4096
-   ],
+   "shape": [45, 4096],
    "dtype": "float32",
    "sha256": "a24b1324167b09686b8e2074ab2ee45b4fcfe1047773f2361b5dbf3f2145261b"
   },
   "tap_plain": {
-   "shape": [
-    36,
-    4096
-   ],
+   "shape": [36, 4096],
    "dtype": "float32",
    "sha256": "c57e64324be12eb32f6decce7af8393496b33e46359d9728a0d0a2660feec210"
   }

@@ -4,15 +4,7 @@
  "check": 2,
  "family": "moss_image",
  "script": "scripts/image_oracle/check2_moss_image.py",
- "argv": [
-  "check2_moss_image.py",
-  "--encoder",
-  "Qwen3.5-9B-Q8_0.gguf",
-  "--tokenizer",
-  "tok-check2",
-  "--name",
-  "check2_moss_image_q8_0"
- ],
+ "argv": ["check2_moss_image.py", "--encoder", "Qwen3.5-9B-Q8_0.gguf", "--tokenizer", "tok-check2", "--name", "check2_moss_image_q8_0"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -111,11 +103,7 @@
    "F32": 177
   },
   "dequant_checked": {
-   "Q8_0": [
-    "blk.0.ffn_down.weight",
-    "layers.0.mlp.down_proj.weight",
-    "bitwise"
-   ]
+   "Q8_0": ["blk.0.ffn_down.weight", "layers.0.mlp.down_proj.weight", "bitwise"]
   },
   "rows": {
    "plain": 38,
@@ -203,147 +191,97 @@
   },
   "rule": "relative L2 = 2 x the oracle's own bf16 against fp32 relative L2 of the same prompt; per-token cosine at least 1 - 4 (1 - c), c the oracle's own smallest per-token cosine of the same prompt"
  },
- "notes": [
-  "The bf16 model is the float32 model rounded to bfloat16 once, as the release loads its encoder in bfloat16."
- ],
+ "notes": ["The bf16 model is the float32 model rounded to bfloat16 once, as the release loads its encoder in bfloat16."],
  "created": "2026-10-18T06:15:06Z",
  "npz": "check2_moss_image_q8_0.npz",
  "tensors": {
   "features_devanagari": {
-   "shape": [
-    19,
-    4096
-   ],
+   "shape": [19, 4096],
    "dtype": "float32",
    "sha256": "71705e2f81c09f454e064b6b98202890331f47217ef9d1fd86e533e91161a714"
   },
   "features_devanagari_bf16": {
-   "shape": [
-    19,
-    4096
-   ],
+   "shape": [19, 4096],
    "dtype": "float32",
    "sha256": "68d4a189aa72df8d87d8437ae447bda322a70a8cc7140dcf743e5ec90a980923"
   },
   "features_empty": {
-   "shape": [
-    10,
-    4096
-   ],
+   "shape": [10, 4096],
    "dtype": "float32",
    "sha256": "62dc84e4bdef784bf5365091e6b5552df9269755fb2ab41869b6512bdeb85074"
   },
   "features_empty_bf16": {
-   "shape": [
-    10,
-    4096
-   ],
+   "shape": [10, 4096],
    "dtype": "float32",
    "sha256": "d13fd0823e378e2c27d71f8f71ffc0a125dc85445ef8a27853a0bebde360a5ae"
   },
   "features_long": {
-   "shape": [
-    624,
-    4096
-   ],
+   "shape": [624, 4096],
    "dtype": "float32",
    "sha256": "241a66f62651d05b60046d99f5b228ee835728fd8e05a67a18695b67f0a669b5"
   },
   "features_long_bf16": {
-   "shape": [
-    624,
-    4096
-   ],
+   "shape": [624, 4096],
    "dtype": "float32",
    "sha256": "12e70e2a5e995cddf7387c295cc9f3d82cd12ad05541dc8adefe75a91e6aa66b"
   },
   "features_non_ascii": {
-   "shape": [
-    42,
-    4096
-   ],
+   "shape": [42, 4096],
    "dtype": "float32",
    "sha256": "e2d2ac9e78daf5f27338cc74799756bde2bae7d8a2d4df9408ff04d6bfa2620a"
   },
   "features_non_ascii_bf16": {
-   "shape": [
-    42,
-    4096
-   ],
+   "shape": [42, 4096],
    "dtype": "float32",
    "sha256": "e08142ffc531a72ee34f9107531b5a74d6c7157cb927e34f92ff491d8ab1c348"
   },
   "features_plain": {
-   "shape": [
-    38,
-    4096
-   ],
+   "shape": [38, 4096],
    "dtype": "float32",
    "sha256": "012ba987671e1c79a361c5a6ce972ffbbb7c47c6a5938268d57b0f63fb345c4e"
   },
   "features_plain_bf16": {
-   "shape": [
-    38,
-    4096
-   ],
+   "shape": [38, 4096],
    "dtype": "float32",
    "sha256": "f551bb467976534bd652023c051470e27006fd0426789663aae36466109e8ed5"
   },
   "features_thai": {
-   "shape": [
-    20,
-    4096
-   ],
+   "shape": [20, 4096],
    "dtype": "float32",
    "sha256": "b7391180ecc5085d239d4e36926d8457b29420800295c2e64879df2eaf6a9e9c"
   },
   "features_thai_bf16": {
-   "shape": [
-    20,
-    4096
-   ],
+   "shape": [20, 4096],
    "dtype": "float32",
    "sha256": "9825a8d120007fd797884586bf607167a2de84e33f15ffd28449c40780bfb893"
   },
   "ids_devanagari": {
-   "shape": [
-    19
-   ],
+   "shape": [19],
    "dtype": "int64",
    "sha256": "1b35cfdb055d4709b7c0519682280d3c0daf5f0165459e7ca5bab60f40f78608"
   },
   "ids_empty": {
-   "shape": [
-    10
-   ],
+   "shape": [10],
    "dtype": "int64",
    "sha256": "791228b9554afb37320a489dae5451fafa841df6222f4c55607ce44d12af5e70"
   },
   "ids_long": {
-   "shape": [
-    624
-   ],
+   "shape": [624],
    "dtype": "int64",
    "sha256": "fdb2a8d4b0d78d2f68a1f8f038fde8e7ce1945c533f90e2e9aaa59d5a6a1b36a"
   },
   "ids_non_ascii": {
-   "shape": [
-    42
-   ],
+   "shape": [42],
    "dtype": "int64",
    "sha256": "17df73bdc62a885d1fdc32d051008cc7f16dad4fb06d2988de2e1b97549a529b"
   },
   "ids_plain": {
-   "shape": [
-    38
-   ],
+   "shape": [38],
    "dtype": "int64",
    "sha256": "8ea803ffe864ccf67c051ca49f80e2c1bfd70e5fec38b4e92945b2ed02ec9078"
   },
   "ids_thai": {
-   "shape": [
-    20
-   ],
+   "shape": [20],
    "dtype": "int64",
    "sha256": "dea36020e8f7a8d56545f8c6fbb877d98470d76e9ecadeb4c7885927439f722a"
   }

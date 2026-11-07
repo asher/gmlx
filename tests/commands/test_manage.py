@@ -2254,6 +2254,112 @@ def test_pull_replaces_a_copy_whose_size_changed(tmp_path, monkeypatch, capsys):
     assert (tmp_path / "model.gguf").read_bytes() == new
 
 
+def test_pull_refuses_an_update_the_disk_cannot_hold_beside_the_old_copy(
+        tmp_path, monkeypatch, capsys):
+    """An update keeps the old copy until the new one is complete, so it
+    needs room for the whole new file beside it: one that does not fit is
+    refused before any download, with the shortfall and the command that
+    deletes the old model, and nothing is deleted."""
+    _serve(monkeypatch, _mint(tmp_path / "m.gguf", codec=GT.Q4_0))
+    _listing(monkeypatch, {"model.gguf": 10 * 1024**3})
+    old = tmp_path / "model.gguf"
+    with open(old, "wb") as f:                # sparse: 9 GiB, no disk
+        f.truncate(9 * 1024**3)
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(f"server:\n  model_dirs:\n    - {tmp_path}\n"
+                   "models:\n  old-model:\n    path: model.gguf\n")
+    monkeypatch.setattr(manage, "_disk_free", lambda p: 5 * 1024**3)
+    called = []
+    monkeypatch.setattr(manage, "_download_ref",
+                        lambda ref, dest, **k: called.append(dest) or ["/x"])
+    rc = manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(tmp_path),
+                          "--config", str(cfg)])
+    err = capsys.readouterr().err
+    assert rc == 1 and called == [], err
+    assert (f"error: not enough disk space to update model.gguf: the new copy "
+            f"needs 10.0 GB beside the old one until it is complete, and 5.0 GB "
+            f"is free at {tmp_path}, 5.0 GB short; nothing was downloaded or "
+            "deleted. To delete the old model first, run `gmlx rm old-model`, "
+            "then pull again (or pass --to DIR on another volume, or --force)"
+            ) in err
+    assert old.stat().st_size == 9 * 1024**3
+    assert not (tmp_path / "model.gguf.old").exists()
+
+
+@pytest.mark.parametrize("found", ["discovered", "nowhere"])
+def test_an_update_refusal_names_the_discovered_id_or_the_files(
+        tmp_path, monkeypatch, capsys, found):
+    """An old copy no config entry holds is deleted with `gmlx rm` of the id
+    discovery lists it under; one discovery does not list either is named
+    as the file to delete."""
+    payload = _mint(tmp_path / "hdr.gguf", codec=GT.Q4_0)
+    _serve(monkeypatch, payload)
+    _listing(monkeypatch, {"model.gguf": 10 * 1024**3})
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    old = lib / "model.gguf"
+    old.write_bytes(payload)
+    scan = f"discover:\n  - dir: {lib}\n" if found == "discovered" else ""
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(f"server:\n  model_dirs:\n    - {lib}\n{scan}models: {{}}\n")
+    monkeypatch.setattr(manage, "_disk_free", lambda p: 5 * 1024**3)
+    called = []
+    monkeypatch.setattr(manage, "_download_ref",
+                        lambda ref, dest, **k: called.append(dest) or ["/x"])
+    rc = manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(lib),
+                          "--config", str(cfg)])
+    err = capsys.readouterr().err
+    assert rc == 1 and called == [], err
+    hint = ("To delete the old model first, run `gmlx rm model`, then pull "
+            "again" if found == "discovered" else
+            f"To delete the old copy first, delete {old}, then pull again")
+    assert f"nothing was downloaded or deleted. {hint} (or pass --to" in err
+    assert old.read_bytes() == payload
+
+
+@pytest.mark.parametrize("current", [True, False])
+def test_pull_restores_the_copy_a_killed_update_set_aside(
+        tmp_path, monkeypatch, capsys, current):
+    """A hard kill mid-update leaves the old copy as model.gguf.old and no
+    model.gguf: the next pull puts it back before anything else, keeps it
+    when it is current, and updates it when it is not."""
+    payload = _mint(tmp_path / "m.gguf", codec=GT.Q4_0)
+    _serve(monkeypatch, payload)
+    new = payload if current else payload + b"\0" * 32
+    _sha_listing(monkeypatch, {"model.gguf": new})
+    got = []
+    _like_hf(monkeypatch, {"model.gguf": new}, got)
+    (tmp_path / "model.gguf.old").write_bytes(payload)
+    assert manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(tmp_path)]) == 0
+    assert (tmp_path / "model.gguf").read_bytes() == new
+    assert not (tmp_path / "model.gguf.old").exists()
+    err = capsys.readouterr().err
+    assert ("model.gguf: restoring the copy an interrupted update set aside"
+            in err)
+    assert ("differs from Hugging Face" in err) is not current
+
+
+def test_pull_removes_the_old_copy_a_killed_update_left_beside_the_new_one(
+        tmp_path, monkeypatch, capsys):
+    """A kill between the new copy landing and the old one's removal leaves
+    model.gguf.old beside a current model.gguf: the next pull downloads
+    nothing and removes it."""
+    payload = _mint(tmp_path / "m.gguf", codec=GT.Q4_0)
+    _serve(monkeypatch, payload)
+    _sha_listing(monkeypatch, {"model.gguf": payload})
+    got = []
+    _like_hf(monkeypatch, {"model.gguf": payload}, got)
+    (tmp_path / "model.gguf").write_bytes(payload)
+    (tmp_path / "model.gguf.old").write_bytes(payload[:-32])
+    assert manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(tmp_path)]) == 0
+    assert not (tmp_path / "model.gguf.old").exists()
+    assert (tmp_path / "model.gguf").read_bytes() == payload
+    err = capsys.readouterr().err
+    assert "differs from Hugging Face" not in err
+    assert ("model.gguf: removing the old copy an interrupted update left "
+            "beside the current one") in err
+
+
 def test_pull_verify_catches_a_change_of_the_same_size(tmp_path, monkeypatch, capsys):
     payload = _mint(tmp_path / "m.gguf", codec=GT.Q4_0)
     _serve(monkeypatch, payload)

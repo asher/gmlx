@@ -61,6 +61,7 @@ cosine = _fx.cosine
 max_abs = _fx.max_abs
 psnr = _fx.psnr
 compare = _fx.compare
+write_json = _fx._write_json
 
 
 if __name__ == "__main__":

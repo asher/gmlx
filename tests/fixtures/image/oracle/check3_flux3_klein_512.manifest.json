@@ -4,17 +4,7 @@
  "check": 3,
  "family": "flux3_klein",
  "script": "scripts/image_oracle/check3_flux3_klein.py",
- "argv": [
-  "check3_flux3_klein.py",
-  "--reference",
-  "src",
-  "--dit",
-  "flux3_image_klein_sd-Q4_K_M.gguf",
-  "--sizes",
-  "512",
-  "--rows",
-  "512"
- ],
+ "argv": ["check3_flux3_klein.py", "--reference", "src", "--dit", "flux3_image_klein_sd-Q4_K_M.gguf", "--sizes", "512", "--rows", "512"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -643,132 +633,82 @@
  "npz": "check3_flux3_klein_512.npz",
  "tensors": {
   "content_mode_blocks.image.0": {
-   "shape": [
-    1024,
-    3072
-   ],
+   "shape": [1024, 3072],
    "dtype": "float32",
    "sha256": "0643120509f495fba1daf79093843a4d9d43ed766584ea4a0db8ca369b3d1281"
   },
   "content_mode_blocks.image.1": {
-   "shape": [
-    1024,
-    3072
-   ],
+   "shape": [1024, 3072],
    "dtype": "float32",
    "sha256": "03b15a96c3d409c9a908322bc7211ab98695a03d3f4062ff2bf64c999d455db9"
   },
   "content_mode_blocks.image.2": {
-   "shape": [
-    1024,
-    3072
-   ],
+   "shape": [1024, 3072],
    "dtype": "float32",
    "sha256": "d52a637d8d0782c501e54508ca3818a18b79d64fdfc4cafb70bb2d9dc2d894dc"
   },
   "content_mode_blocks.image.3": {
-   "shape": [
-    1024,
-    3072
-   ],
+   "shape": [1024, 3072],
    "dtype": "float32",
    "sha256": "299f1c14e0564b23b6c8fc3b19948947fb985aaa534d0a6de2bd95b7c694fb8f"
   },
   "content_mode_blocks.image.4": {
-   "shape": [
-    1024,
-    3072
-   ],
+   "shape": [1024, 3072],
    "dtype": "float32",
    "sha256": "48c1bb4b4f79f0f842bb408907fdec13480e1bb72007d88b1d06d33c3463365d"
   },
   "early_stream_modulations.image": {
-   "shape": [
-    1,
-    9216
-   ],
+   "shape": [1, 9216],
    "dtype": "float32",
    "sha256": "4dc747f8e73180ac3debacd251c4b44c032c152d37e28c23ccc9dd0712c74a3c"
   },
   "early_stream_modulations.txt": {
-   "shape": [
-    1,
-    9216
-   ],
+   "shape": [1, 9216],
    "dtype": "float32",
    "sha256": "b899c415402682c9d628ce4337a762ebb35cd7648ce3745c2f3b73d515a0b05e"
   },
   "emb_in.image": {
-   "shape": [
-    1024,
-    3072
-   ],
+   "shape": [1024, 3072],
    "dtype": "float32",
    "sha256": "33aefd32ec2251c815c568eb9aaadd1dcee338365b1c66fac6c3ab22b33fc824"
   },
   "features": {
-   "shape": [
-    80,
-    20480
-   ],
+   "shape": [80, 20480],
    "dtype": "float32",
    "sha256": "8ae373574c359b583e859051a3113833f5c94e9d8e86257d9b8e91e0eeba3d50"
   },
   "final_layer.image": {
-   "shape": [
-    1024,
-    128
-   ],
+   "shape": [1024, 128],
    "dtype": "float32",
    "sha256": "adbb552ad8c114bfbcbd54cd55ad9a607f1581d1ccb6321663ca12ad8c8803c7"
   },
   "final_layer.image.adaLN_modulation": {
-   "shape": [
-    1,
-    6144
-   ],
+   "shape": [1, 6144],
    "dtype": "float32",
    "sha256": "e46ce00d4f74bcfa8eb4435b08fcb641d83b8e4d8f33b05e6154e33480587d40"
   },
   "ids.image": {
-   "shape": [
-    1024,
-    4
-   ],
+   "shape": [1024, 4],
    "dtype": "float32",
    "sha256": "7b216fc4acdf6bd01247343fe634474200f9e114a35744b224160e8999f8e31a"
   },
   "ids.text": {
-   "shape": [
-    80,
-    4
-   ],
+   "shape": [80, 4],
    "dtype": "float32",
    "sha256": "224a00ab6f99d629c82e4c0178b72cbea0b65fea84bf452e0fa0150c70f94769"
   },
   "in.final_layer.image": {
-   "shape": [
-    1024,
-    3072
-   ],
+   "shape": [1024, 3072],
    "dtype": "float32",
    "sha256": "5a35e37555240202452d84e43c3ed4f0403c8b2cd9f8accb2266ec5eb68ef3e1"
   },
   "in.single_blocks.0": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "6e12af234ae3eae3620ca33b4fc176fcc3629c52939660492c8a4a291febdbcf"
   },
   "latents": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "2cb3e62b5bb6a58f5b08f360ba95db386349bd0b4fe4128bd931125c8cceae04"
   },
@@ -778,242 +718,152 @@
    "sha256": "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c"
   },
   "single_blocks.0": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "79ad82184f86528b8e1b93fe9ba7b82b13407cdb2abb4e8787ae4a7f9a920e49"
   },
   "single_blocks.1": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "21c8d90d441f7776ea149305c18f0277f767bdadccf6acbafcbfb364c83a3e80"
   },
   "single_blocks.10": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "a4c903ad04a75bbd397231f0ab011b533a83f9511e8f3abe6d27d72a775a59b1"
   },
   "single_blocks.11": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "d2984a717a0b8dd2957225666f7b5f97cb9ea1f0dfc0a266d73610b9d44ecaed"
   },
   "single_blocks.12": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "7734f354768c5d3bfaa867da1e745d62e333d0f39d37acfebb8e18befbdac9ed"
   },
   "single_blocks.13": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "934776a12e6c238156a2510470442088f75e36103197ea9a01f4f0f248e45b5e"
   },
   "single_blocks.14": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "6fb58ce4500ac6e2fc6fe7e6401a208afba5449af3537a31baf907f1ae7c15da"
   },
   "single_blocks.15": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "e664d635a4c6fb804153a3bfbfd756e1d8bc6f5f8d3598e3304f9b6862b39d0d"
   },
   "single_blocks.16": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "d80daab46f4ec3c73c5add3ea1b1c36e25e26afca1c4f4ee411f43aba6af17ef"
   },
   "single_blocks.17": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "c80aa4fb048dad107d8e7badf0cc8b8a21ace6261e714c1f47d624f6bfa38b90"
   },
   "single_blocks.18": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "2aa6512f20e0cde1c8b2b80647b9dd67e09d9fa84c022b8ff05ace859ad0af21"
   },
   "single_blocks.19": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "d7e0f82712798410b19253931ca914cd5ecec123e78e900d74542f26aa00c525"
   },
   "single_blocks.2": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "c83ae99dd3fad6a2b99e09de9bc6cb982f07be9489d36584c8242bda2e6e337c"
   },
   "single_blocks.20": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "768c500996f48cfd83421e2f0d46e4f7999f749e7780eca399ac42e8652d2e66"
   },
   "single_blocks.21": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "e7cc4040e6724fa6f4b19b26939520a8a8441f5f12abfddec41a832147f4416b"
   },
   "single_blocks.22": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "6febc6a3134d41ecc7bfc24ca49b34709259f003674764221793e8786502742e"
   },
   "single_blocks.23": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "09cc51f9acd6c2e3b779771856a908b0ac66aa48af3d95efa62eeae564b3c559"
   },
   "single_blocks.24": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "551615515e43bc4f13a8d08abebb29352832dfaa59ee7777523e7d00cf7d8377"
   },
   "single_blocks.25": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "8cff20243234e3333bf6b68f217c3a95e8ea8e372ce6cf2140fe84a931b8ee99"
   },
   "single_blocks.26": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "b8d4b7877e7541b65ad90ee4182e1df9494cea424aa33c491b557704ed287b87"
   },
   "single_blocks.27": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "476e1196902d6e8c9a1005789379e9bd159452884d1e061a2dd2d6b1cc699269"
   },
   "single_blocks.3": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "496004bc9d606126c8b7c9d943832a465768a3ccee2fad873019c8945aa3b0f5"
   },
   "single_blocks.4": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "b84c04232d0f2e2606ccbfb1bbdaf5c1eb44e4a01980fb89551f1c26d3ed569d"
   },
   "single_blocks.5": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "2d3e8f15a494487b2a4dca0be94f198438ef7d9373ebb7575305acbf695d772d"
   },
   "single_blocks.6": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "27263f453a6a86617b8e4532e19029c88d2bf5efdb1c614306eb1fa8e09b918d"
   },
   "single_blocks.7": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "4e05c778d56ac8910c8995fe4b2ff25967ba09fa0a53dbb983cece5f75f6c317"
   },
   "single_blocks.8": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "7c14f370c1b701b8d26fdeddbb9a0aecfa6b5486c6e583cd430d553be96497ed"
   },
   "single_blocks.9": {
-   "shape": [
-    1104,
-    3072
-   ],
+   "shape": [1104, 3072],
    "dtype": "float32",
    "sha256": "a4259c3592e7a5dccc507379a0b8b5051e5b4ab87bb26527ea7a3e4fdd5e370f"
   },
   "single_stream_modulations.image": {
-   "shape": [
-    1,
-    9216
-   ],
+   "shape": [1, 9216],
    "dtype": "float32",
    "sha256": "31d2ca218f01a733d6df57e629456005d8bf3ce0e9a1eb6e4c4cdedccb8d606d"
   },
   "single_stream_modulations.txt": {
-   "shape": [
-    1,
-    9216
-   ],
+   "shape": [1, 9216],
    "dtype": "float32",
    "sha256": "079e829f3e0cb6e96aecb04c752a22e0ae63ec301d2876141ddb726acc21929e"
   },
@@ -1023,86 +873,52 @@
    "sha256": "9af754e75c29d68c32982161c4940b316b654d7e28f10394a3490b3f93992e8c"
   },
   "txt_in": {
-   "shape": [
-    80,
-    3072
-   ],
+   "shape": [80, 3072],
    "dtype": "float32",
    "sha256": "6a6127947a1c3725a43e8b9168f41c384315bde3f83669ee196fdc795d661b53"
   },
   "txt_mode_blocks.0": {
-   "shape": [
-    80,
-    3072
-   ],
+   "shape": [80, 3072],
    "dtype": "float32",
    "sha256": "bae4c0efc0c4cbfa8efbeee2d213adf11fd9ec166acb9e4593ad5ac7e634e0bf"
   },
   "txt_mode_blocks.1": {
-   "shape": [
-    80,
-    3072
-   ],
+   "shape": [80, 3072],
    "dtype": "float32",
    "sha256": "ce85732ea1e0fbef5205b6b2fe36079e93ff5b87199f175a2249b413e44fb27e"
   },
   "txt_mode_blocks.2": {
-   "shape": [
-    80,
-    3072
-   ],
+   "shape": [80, 3072],
    "dtype": "float32",
    "sha256": "31908a82dd8cfc8f084a5d60344f38ddc9c832b8f3f7ae84d358e4cf19087012"
   },
   "txt_mode_blocks.3": {
-   "shape": [
-    80,
-    3072
-   ],
+   "shape": [80, 3072],
    "dtype": "float32",
    "sha256": "03d4b3b31d4c4f028a6bf788b0a743bfbb9030a994bf9e416408963f47370606"
   },
   "txt_mode_blocks.4": {
-   "shape": [
-    80,
-    3072
-   ],
+   "shape": [80, 3072],
    "dtype": "float32",
    "sha256": "33a7bc3340d1ca35a8c0932765f5bc9647f2df2345465409bf13ad408d636c85"
   },
   "vec.image": {
-   "shape": [
-    1,
-    3072
-   ],
+   "shape": [1, 3072],
    "dtype": "float32",
    "sha256": "ff94b8940aa6eb3766f464486d7b6428cb4200dceca53cc89b32a2fb617f1b0f"
   },
   "vec.text": {
-   "shape": [
-    1,
-    3072
-   ],
+   "shape": [1, 3072],
    "dtype": "float32",
    "sha256": "2376929d388a5a29a217c31f079828356c0d1f08226f9f27877078fa43118cdd"
   },
   "velocity": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "446c5f5182ff0032bad99ea9360f29ea68f6aa5f09dc859c2032ec1670d9e6fd"
   },
   "velocity_bf16": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "b74a23e047eafd839fffe9e26eaa6a8cab5757c5a78667b008763f948f83a217"
   }

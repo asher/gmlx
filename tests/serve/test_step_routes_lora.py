@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from gmlx.config import ImageServerCfg  # noqa: E402
 from gmlx.image.samplers import noise_from_seed  # noqa: E402
 from gmlx.serve import image_service, residency  # noqa: E402
+from gmlx.serve import residency_workers  # noqa: E402
 from gmlx.serve import image_steps as steps  # noqa: E402
 from gmlx.serve import image_wire as wire  # noqa: E402
 from gmlx.serve.image_steps_client import (MissingTensors,  # noqa: E402
@@ -50,8 +51,8 @@ def _pool(monkeypatch, budget: int) -> _Pool:
 
     monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
-    monkeypatch.setattr(residency, "_holds_image_worker", lambda: True)
-    monkeypatch.setattr(residency, "_holds_video_worker", lambda: True)
+    monkeypatch.setattr(residency_workers, "_holds_image_worker", lambda: True)
+    monkeypatch.setattr(residency_workers, "_holds_video_worker", lambda: True)
     pool = _Pool(
         SimpleNamespace(_last_entry=None), None, None, int(budget), (),
         image_fns=(lambda spec: spec.fp, lambda spec: spec.pipe,

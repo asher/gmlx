@@ -4,24 +4,7 @@
  "check": 6,
  "family": "flux2_klein",
  "script": "scripts/image_oracle/check6_flux2_klein.py",
- "argv": [
-  "check6_flux2_klein.py",
-  "--reference",
-  "src",
-  "--reference-commit",
-  "50fe5162777813d869182b139e83b10743caef15",
-  "--features",
-  "check2_flux2_klein.npz",
-  "--dit",
-  "flux-2-klein-base-4b-Q4_K_M.gguf",
-  "--variant",
-  "base",
-  "--sizes",
-  "512",
-  "1024",
-  "--bf16",
-  "512"
- ],
+ "argv": ["check6_flux2_klein.py", "--reference", "src", "--reference-commit", "50fe5162777813d869182b139e83b10743caef15", "--features", "check2_flux2_klein.npz", "--dit", "flux-2-klein-base-4b-Q4_K_M.gguf", "--variant", "base", "--sizes", "512", "1024", "--bf16", "512"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -78,13 +61,7 @@
   "guidance": 4.0,
   "seed": 6,
   "bf16": false,
-  "kept_steps": [
-   1,
-   2,
-   5,
-   10,
-   25
-  ],
+  "kept_steps": [1, 2, 5, 10, 25],
   "refs": 0,
   "tokens": 4096,
   "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, shape (1, 128, size / 16, size / 16); the CLI's noise is bf16, so it is rounded",
@@ -109,9 +86,7 @@
   "run": {
    "fp32_s": 1997.0,
    "fp32_median_step_s": 39.94,
-   "rows": [
-    2
-   ]
+   "rows": [2]
   },
   "gmlx_bf16": {
    "rel_l2": {
@@ -136,109 +111,62 @@
   "exact_rel_l2": 0.001,
   "rule": "latents after a kept step and after the last. At 512: gmlx's bf16 run at relative L2 twice the oracle's own bf16 against fp32 relative L2 after that step. At any other size: gmlx's exact fp32 run against the fp32 latents at exact_rel_l2, and its bf16 run read as a share of the 512 gate of the step, not gated"
  },
- "notes": [
-  "results.gmlx_bf16: gmlx's bf16 latents at 1024, kernel routes at their default, against the fp32 latents after each kept step and the last, and as a share of the 512 gate of that step, as tests/image/test_image_check6_flux2_klein.py prints them, to three digits. A reading, not a gate."
- ],
+ "notes": ["results.gmlx_bf16: gmlx's bf16 latents at 1024, kernel routes at their default, against the fp32 latents after each kept step and the last, and as a share of the 512 gate of that step, as tests/image/test_image_check6_flux2_klein.py prints them, to three digits. A reading, not a gate."],
  "created": "2026-10-16T14:13:01Z",
  "npz": "check6_flux2_klein_base_1024.npz",
  "tensors": {
   "features": {
-   "shape": [
-    512,
-    7680
-   ],
+   "shape": [512, 7680],
    "dtype": "float32",
    "sha256": "d826e5b160e0d8ed351f4fa73c61332506de8c02987d73ab1a215b694316469e"
   },
   "features_empty": {
-   "shape": [
-    512,
-    7680
-   ],
+   "shape": [512, 7680],
    "dtype": "float32",
    "sha256": "ccb1e251d828b7fcaa0ba4734488ec4d8654ad0e9889f3ed11e80edc555c4145"
   },
   "latents": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "8de4a996297c66716391eabbf20e209e66e76344becf72eadbea6c4cc9cc8613"
   },
   "latents_step1": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "2b27aa77e4524ed4ad71969da7c6cd86702f50f9a8d1ac5300e2e365fcdde565"
   },
   "latents_step10": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "bdcdf3ab32f14f4e94420addf17ea8ceb544443f31bda77fdcf3a325c836e565"
   },
   "latents_step2": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "bc27ce896415f62dad58b30ec5e6a2f8a03723160ce690c193e58e0f725f3bd4"
   },
   "latents_step25": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "b1989cc0f45e8836603118545101cb3fa6eea9758df55b54382e74c7fc8e5527"
   },
   "latents_step5": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "83bbc6a7bdc7f01cc3187e3f1178951196f3a5270d032c2ae1e077b29cdafbaf"
   },
   "noise": {
-   "shape": [
-    1,
-    128,
-    64,
-    64
-   ],
+   "shape": [1, 128, 64, 64],
    "dtype": "float32",
    "sha256": "bcd95295bb6b6d4f2030450a235b4f3e631d78cfeabead17132ec18138429b6a"
   },
   "schedule": {
-   "shape": [
-    51
-   ],
+   "shape": [51],
    "dtype": "float32",
    "sha256": "fbe3fc79eb7fcd229c63d2cd225c34045e10ab4d54a9cc57fb71559933566237"
   },
   "times": {
-   "shape": [
-    50
-   ],
+   "shape": [50],
    "dtype": "float32",
    "sha256": "c8e08a1da0f4a3b17d8b56f9136bd303d132b8022a156e1583b7b5ab70577b3d"
   }

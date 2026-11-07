@@ -604,7 +604,8 @@ class RemoteForward:
             shape = tuple(x.shape) if hasattr(x, "shape") else type(x).__name__
             raise GmlxError(f"gmlx: {self.b.model_id!r} samples a video and an audio latent, "
                             f"and this call carries {shape}; start from "
-                            "EmptyMiniMaxH3LatentAV or MiniMaxH3ImageToVideo")
+                            "EmptyMiniMaxH3LatentAV, MiniMaxH3ImageToVideo or "
+                            "GmlxH3ImageToVideo")
         payload = kwargs.pop("minimax_payload", None) or {}
         self._h3_conditions(payload, kwargs)
         self._check(control, to, kwargs)

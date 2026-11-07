@@ -101,6 +101,14 @@ An encode that upsamples the prompt returns the caption as
 as `cond_typed`. A client that adds reference images after the encode,
 as ComfyUI does, samples an edit and a negative on `cond_typed`.
 
+On a server whose features list `keyframe_upsampling`, the encode of a
+video model takes the clip's `frames` and `keyframes`, the role of each
+image in order, `"first"` then `"last"`. The upsampler is then told the
+clip's length and which keyframes it has, as for `POST /v1/videos`, and
+the images go to the encoder as keyframes. Without `frames`, a prompt with images is
+encoded as typed. `keyframes` without `frames`, or with a role count other
+than the images', gets 400.
+
 ## Steps and runs
 
 A step names its conditionings and its patch table by hash. When the

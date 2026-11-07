@@ -4,10 +4,7 @@
  "check": 3,
  "family": "z_image",
  "script": "scripts/image_oracle/check3_z_image.py",
- "argv": [
-  "check3_z_image.py",
-  "--self-test"
- ],
+ "argv": ["check3_z_image.py", "--self-test"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -46,16 +43,8 @@
  },
  "files": {},
  "inputs": {
-  "size": [
-   48,
-   48
-  ],
-  "latent_shape": [
-   1,
-   4,
-   6,
-   6
-  ],
+  "size": [48, 48],
+  "latent_shape": [1, 4, 6, 6],
   "noise_seed": 0,
   "noise": "numpy default_rng(seed) standard_normal float32, NCHW",
   "prompt": "A red bicycle leaning against a weathered brick wall at sunset, a cat asleep in its basket, warm light, 35mm photograph",
@@ -63,56 +52,14 @@
   "length": 5,
   "steps": 8,
   "step": 3,
-  "sigmas": [
-   1.0,
-   0.875,
-   0.75,
-   0.625,
-   0.5,
-   0.375,
-   0.25,
-   0.125
-  ],
-  "timesteps": [
-   1000.0,
-   875.0,
-   750.0,
-   625.0,
-   500.0,
-   375.0,
-   250.0,
-   125.0
-  ],
+  "sigmas": [1.0, 0.875, 0.75, 0.625, 0.5, 0.375, 0.25, 0.125],
+  "timesteps": [1000.0, 875.0, 750.0, 625.0, 500.0, 375.0, 250.0, 125.0],
   "sigma": 0.625,
   "t_model": 0.375,
   "config_revision": null,
-  "rows": [
-   "t_embedder",
-   "x_embed",
-   "cap_embed",
-   "noise_refiner.0",
-   "context_refiner.0",
-   "layers.0",
-   "layers.1",
-   "final_layer"
-  ],
-  "free_rows": [
-   "noise_refiner.0",
-   "context_refiner.0",
-   "layers.0",
-   "layers.1",
-   "final_layer"
-  ],
-  "branches": [
-   "noise_refiner.0.attention",
-   "noise_refiner.0.feed_forward",
-   "context_refiner.0.attention",
-   "context_refiner.0.feed_forward",
-   "layers.0.attention",
-   "layers.0.feed_forward",
-   "layers.1.attention",
-   "layers.1.feed_forward"
-  ]
+  "rows": ["t_embedder", "x_embed", "cap_embed", "noise_refiner.0", "context_refiner.0", "layers.0", "layers.1", "final_layer"],
+  "free_rows": ["noise_refiner.0", "context_refiner.0", "layers.0", "layers.1", "final_layer"],
+  "branches": ["noise_refiner.0.attention", "noise_refiner.0.feed_forward", "context_refiner.0.attention", "context_refiner.0.feed_forward", "layers.0.attention", "layers.0.feed_forward", "layers.1.attention", "layers.1.feed_forward"]
  },
  "results": {
   "oracle": {
@@ -287,171 +234,97 @@
  "npz": "selftest_z_image_tiny_48.npz",
  "tensors": {
   "cap_feats": {
-   "shape": [
-    5,
-    16
-   ],
+   "shape": [5, 16],
    "dtype": "float32",
    "sha256": "0d203635259a1e14a658e226b1a947beeb0884f2543bb20366b9ec305a798799"
   },
   "context_refiner.0.attention.out": {
-   "shape": [
-    1,
-    32,
-    64
-   ],
+   "shape": [1, 32, 64],
    "dtype": "float32",
    "sha256": "257f0028b190a1f8abcb6b7df6002cec69e4c4f98d7b7cbe78d9189e5a19864f"
   },
   "context_refiner.0.feed_forward.out": {
-   "shape": [
-    1,
-    32,
-    64
-   ],
+   "shape": [1, 32, 64],
    "dtype": "float32",
    "sha256": "912391ca9daa2ac19f665b136020ffe8ec52d238d98c6abb920b954591d16a7d"
   },
   "context_refiner.0.in": {
-   "shape": [
-    1,
-    32,
-    64
-   ],
+   "shape": [1, 32, 64],
    "dtype": "float32",
    "sha256": "ef71d1f693d22c3ee9e5e5a9c10c9b457743c86d3c73caef03280d5f8ae84b30"
   },
   "context_refiner.0.out": {
-   "shape": [
-    1,
-    32,
-    64
-   ],
+   "shape": [1, 32, 64],
    "dtype": "float32",
    "sha256": "96dbf376f2603eb4ced395d0cb8e7a9a3dae8a80cb562b98a438908c0008aaf1"
   },
   "final_layer.out": {
-   "shape": [
-    1,
-    64,
-    16
-   ],
+   "shape": [1, 64, 16],
    "dtype": "float32",
    "sha256": "f1fa033f467ca5949cab573af37d61cce21c73a360cc681959b23d7ec6c8a017"
   },
   "latents": {
-   "shape": [
-    1,
-    4,
-    6,
-    6
-   ],
+   "shape": [1, 4, 6, 6],
    "dtype": "float32",
    "sha256": "0bc5997b2475d1ef7907286f9829dd4db8a305e04bf2ea32fc64a5e2930180ac"
   },
   "layers.0.attention.out": {
-   "shape": [
-    1,
-    64,
-    64
-   ],
+   "shape": [1, 64, 64],
    "dtype": "float32",
    "sha256": "c875526850223e07b72f98fc55d3bf6206dc8afd1d505cbdb0626fe56ccbceb4"
   },
   "layers.0.feed_forward.out": {
-   "shape": [
-    1,
-    64,
-    64
-   ],
+   "shape": [1, 64, 64],
    "dtype": "float32",
    "sha256": "c8d535a9e9d9546192319d19abf7ad9cc3e37b64d3ec808eaa8016350ba22675"
   },
   "layers.0.in": {
-   "shape": [
-    1,
-    64,
-    64
-   ],
+   "shape": [1, 64, 64],
    "dtype": "float32",
    "sha256": "49c1cff5552145505881d3a696820d16eab797e5b38de85e214f6cc7efba7db1"
   },
   "layers.0.out": {
-   "shape": [
-    1,
-    64,
-    64
-   ],
+   "shape": [1, 64, 64],
    "dtype": "float32",
    "sha256": "27cce384f3575f7a5c405c407b68ea50bf0e4c60e30246315b53d2381c2ed65f"
   },
   "layers.1.attention.out": {
-   "shape": [
-    1,
-    64,
-    64
-   ],
+   "shape": [1, 64, 64],
    "dtype": "float32",
    "sha256": "e96059eb4d2c14a745dfec6ba2f6503de50ac4d25d28e34d8730ebe7ee651dbd"
   },
   "layers.1.feed_forward.out": {
-   "shape": [
-    1,
-    64,
-    64
-   ],
+   "shape": [1, 64, 64],
    "dtype": "float32",
    "sha256": "e8e301a5a3606dbbd0551a0a13f99541122e62d443f9beed5334ca5d6273a499"
   },
   "layers.1.out": {
-   "shape": [
-    1,
-    64,
-    64
-   ],
+   "shape": [1, 64, 64],
    "dtype": "float32",
    "sha256": "566fe44f91fffca9d4624c8e63e009027dbc79e123abf882470209479a7759be"
   },
   "noise_refiner.0.attention.out": {
-   "shape": [
-    1,
-    32,
-    64
-   ],
+   "shape": [1, 32, 64],
    "dtype": "float32",
    "sha256": "010186b9bf428057a7fd5a8491ccc190188146fc351a2ab5349603fad0bacdf6"
   },
   "noise_refiner.0.feed_forward.out": {
-   "shape": [
-    1,
-    32,
-    64
-   ],
+   "shape": [1, 32, 64],
    "dtype": "float32",
    "sha256": "c2a0ee370fe1e31734d5ef54cf23a047318ed505bc5a41cd2f4491d240cae3de"
   },
   "noise_refiner.0.in": {
-   "shape": [
-    1,
-    32,
-    64
-   ],
+   "shape": [1, 32, 64],
    "dtype": "float32",
    "sha256": "2f7dfb7f10d933f35e0d34ae07dcbc361a809f5a4c89c5600c4c9a27658892c3"
   },
   "noise_refiner.0.out": {
-   "shape": [
-    1,
-    32,
-    64
-   ],
+   "shape": [1, 32, 64],
    "dtype": "float32",
    "sha256": "a0f84ce9129c9b3e5f6e5192f4a20f662b49b63209b3a20f179f766391c136ac"
   },
   "prompt_ids": {
-   "shape": [
-    0
-   ],
+   "shape": [0],
    "dtype": "int64",
    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
@@ -461,44 +334,27 @@
    "sha256": "f3cdf0320e41c4ed5579a3c9f9f114692c01d392cde482d3ae802c5b25290f68"
   },
   "t_embedder.in": {
-   "shape": [
-    1
-   ],
+   "shape": [1],
    "dtype": "float32",
    "sha256": "8f557c9fe2610bdd82e832c8de87e8ea7eaae8f5834d8fea9e84846210609a45"
   },
   "t_embedder.out": {
-   "shape": [
-    1,
-    64
-   ],
+   "shape": [1, 64],
    "dtype": "float32",
    "sha256": "66d83e18be2a5876ef6540413cce556c0e091ff4d509806229f1c21d9cb544d5"
   },
   "t_model": {
-   "shape": [
-    1
-   ],
+   "shape": [1],
    "dtype": "float32",
    "sha256": "55b51bbfa89c63511da11a52068292b17b6644163afdaf734beee7bcaf33b6e3"
   },
   "velocity": {
-   "shape": [
-    1,
-    4,
-    6,
-    6
-   ],
+   "shape": [1, 4, 6, 6],
    "dtype": "float32",
    "sha256": "d328ded1d721e8009a97403000509c037669d7e34921ed9c8f820f93c27bf862"
   },
   "velocity_bf16": {
-   "shape": [
-    1,
-    4,
-    6,
-    6
-   ],
+   "shape": [1, 4, 6, 6],
    "dtype": "float32",
    "sha256": "093c47bbaeae2bb8a0231d095c74d6ccb2a4e50ee698ebb4c186d81617a8e7b9"
   }

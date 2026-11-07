@@ -80,6 +80,13 @@ H3_NAMES = (
     ("comfy_extras.nodes_minimax_h3", "MiniMaxH3SigmaShift.execute"),
 )
 
+# What GmlxH3ImageToVideo runs of ComfyUI's MiniMax-H3 nodes, probed when
+# it runs.
+H3_NODE_NAMES = (
+    ("comfy_extras.nodes_minimax_h3", "temporal_shape"),
+    ("comfy_extras.nodes_minimax_h3", "MiniMaxH3ImageToVideo.execute"),
+)
+
 # Arguments the pack passes by name to a ComfyUI signature.
 SIGNATURES = (
     ("comfy.model_patcher", "ModelPatcher.__init__",

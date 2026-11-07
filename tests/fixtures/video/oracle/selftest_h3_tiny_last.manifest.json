@@ -4,12 +4,7 @@
  "check": 3,
  "family": "h3",
  "script": "scripts/video_oracle/check3_h3.py",
- "argv": [
-  "check3_h3.py",
-  "--comfy-dir",
-  "ComfyUI-h3",
-  "--self-test"
- ],
+ "argv": ["check3_h3.py", "--comfy-dir", "ComfyUI-h3", "--self-test"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -55,11 +50,7 @@
    "ffn_hidden_size": 48,
    "latents_dim": 24,
    "audio_latents_dim": 32,
-   "patch_size": [
-    1,
-    2,
-    2
-   ],
+   "patch_size": [1, 2, 2],
    "text_dim": 40,
    "time_embed_dim": 8,
    "rope_inv_freq_len": 8,
@@ -77,11 +68,7 @@
    "ffn_dim": 48,
    "in_channels": 24,
    "audio_in_channels": 32,
-   "patch_size": [
-    1,
-    2,
-    2
-   ],
+   "patch_size": [1, 2, 2],
    "text_dim": 40,
    "adaln_basis": 8,
    "rope_freq_dim": 8,
@@ -92,11 +79,7 @@
   },
   "case": "last",
   "seed": 0,
-  "shape": [
-   96,
-   64,
-   22
-  ],
+  "shape": [96, 64, 22],
   "text_rows": 8,
   "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
   "attention": "attention_pytorch",
@@ -109,10 +92,7 @@
    }
   ],
   "spans": [
-   [
-    2,
-    6
-   ]
+   [2, 6]
   ],
   "anchor_seed": 5,
   "sigma_v": 0.6875,
@@ -122,12 +102,7 @@
    "video": 12.0,
    "audio": 3.0
   },
-  "segment_kinds": [
-   "text",
-   "cond",
-   "audio",
-   "video"
-  ]
+  "segment_kinds": ["text", "cond", "audio", "video"]
  },
  "results": {
   "velocity_bf16_vs_fp32": {
@@ -311,9 +286,7 @@
   },
   "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each refiner block, the refiner's norm, each block and the heads, free running for the other rows and for the velocities, and free running for each teacher-forced row as 'free <row>'; rows in float32 in both modes take a float32 tolerance"
  },
- "notes": [
-  "the weights are in selftest_h3_tiny_weights by name in torch order"
- ],
+ "notes": ["the weights are in selftest_h3_tiny_weights by name in torch order"],
  "created": "2026-11-06T23:45:31Z",
  "npz": "selftest_h3_tiny_last.npz",
  "tensors": {
@@ -323,21 +296,12 @@
    "sha256": "debcea1f166010e428df48387304e45c0bf7843a1fa7f1beb38f852228df789b"
   },
   "anchor.0.video": {
-   "shape": [
-    1,
-    24,
-    1,
-    4,
-    6
-   ],
+   "shape": [1, 24, 1, 4, 6],
    "dtype": "float32",
    "sha256": "9fbed7e9d675f03be1f9986bb4770a02b02585838399c4ed3b30b27eeb4aa29b"
   },
   "anchor_noise.0": {
-   "shape": [
-    6,
-    96
-   ],
+   "shape": [6, 96],
    "dtype": "float32",
    "sha256": "0304fb3de6698bc8b35973a0c72909f2c6f4445867a85e381c7ad619bdb56aad"
   },
@@ -347,116 +311,72 @@
    "sha256": "f13ee6ed54ea2aae9fc49a9faeb5da6e8ddef0e12ed5d30d35a624ae813e0485"
   },
   "audio": {
-   "shape": [
-    1,
-    32,
-    2,
-    37
-   ],
+   "shape": [1, 32, 2, 37],
    "dtype": "float32",
    "sha256": "4ac406776f215591e7261066912d000dce61680257f8f569bf5dd61b7e0220ec"
   },
   "audio_patch_proj": {
-   "shape": [
-    74,
-    32
-   ],
+   "shape": [74, 32],
    "dtype": "float32",
    "sha256": "a5da77bcf05a0ef928f40424eba1a4b46d51c8a80437d6f4769bf870771f773e"
   },
   "blocks.0": {
-   "shape": [
-    130,
-    32
-   ],
+   "shape": [130, 32],
    "dtype": "float32",
    "sha256": "e2d5f1ba79af3d8dfdc54f47965b31f64a03922e127c00ceb84d2d27b1cef825"
   },
   "blocks.1": {
-   "shape": [
-    130,
-    32
-   ],
+   "shape": [130, 32],
    "dtype": "float32",
    "sha256": "5477594cb41ca1f3b9f404d6cad3bc9f0431878ed2abf18000b9daab4953405a"
   },
   "condition_proj": {
-   "shape": [
-    8,
-    32
-   ],
+   "shape": [8, 32],
    "dtype": "float32",
    "sha256": "1ba3835987da839266e7edbbffcfc0fe6b33bcf55f34f0eaee4d087ce9bc193d"
   },
   "features": {
-   "shape": [
-    8,
-    40
-   ],
+   "shape": [8, 40],
    "dtype": "float32",
    "sha256": "6990670c1a3e5ace9f0a87b4113ee0257f41c0ac2476154fde3062a7dbb11545"
   },
   "final_layer.adaln_proj.linear": {
-   "shape": [
-    3,
-    64
-   ],
+   "shape": [3, 64],
    "dtype": "float32",
    "sha256": "dfd77486bcfd05cd555e08ca2fc627e9eaba56d6871cce115b4d14fb7ce2b4b9"
   },
   "final_layer.audio_out": {
-   "shape": [
-    74,
-    32
-   ],
+   "shape": [74, 32],
    "dtype": "float32",
    "sha256": "3c0d460d881abd688eefc1c2e5f5200dc2059d5e9c7ac44c3830584f834919f9"
   },
   "final_layer.video_out": {
-   "shape": [
-    42,
-    96
-   ],
+   "shape": [42, 96],
    "dtype": "float32",
    "sha256": "d62cbd52117bdee9071cfefa68432555a591013fa6395985ac2b72a9ad2b3cfe"
   },
   "in.blocks.0": {
-   "shape": [
-    130,
-    32
-   ],
+   "shape": [130, 32],
    "dtype": "float32",
    "sha256": "f0c354019e21d29282449f018c0b219a5ed630d70fbf4bf2d9e4910fa936162b"
   },
   "in.final_layer": {
-   "shape": [
-    130,
-    32
-   ],
+   "shape": [130, 32],
    "dtype": "float32",
    "sha256": "5477594cb41ca1f3b9f404d6cad3bc9f0431878ed2abf18000b9daab4953405a"
   },
   "positions": {
-   "shape": [
-    130,
-    3
-   ],
+   "shape": [130, 3],
    "dtype": "float64",
    "sha256": "95142f798772062e9ace22c047feea0d540b3fd7532eb16df9468f2bf4aeb857"
   },
   "rope.angles": {
-   "shape": [
-    130,
-    48
-   ],
+   "shape": [130, 48],
    "dtype": "float32",
    "sha256": "3ddfa781958c8a50410aed054692951826cd3d409ce82e9335e05df3252458df"
   },
   "segments": {
-   "shape": [
-    6,
-    3
-   ],
+   "shape": [6, 3],
    "dtype": "int64",
    "sha256": "3d8bf1a276c83f80529c32537e973ed64d64a5200aa6572a07aa82dd027bb94a"
   },
@@ -466,116 +386,67 @@
    "sha256": "06ebd70f712594b2c876556943aaa43db9d26e9c3f4fa8fcfe39e589eae9940c"
   },
   "spans": {
-   "shape": [
-    1,
-    2
-   ],
+   "shape": [1, 2],
    "dtype": "int64",
    "sha256": "d162ed45b72302f8d3324fe5ddb3808cf7899d9a0f999942ae38b1306f64025b"
   },
   "t_emb": {
-   "shape": [
-    3,
-    8
-   ],
+   "shape": [3, 8],
    "dtype": "float32",
    "sha256": "532bc1f7b9fc0f8afea7e4429c769c21715b8afba7a49484fa389d35cfe75dbd"
   },
   "t_values": {
-   "shape": [
-    3
-   ],
+   "shape": [3],
    "dtype": "float64",
    "sha256": "dfcecddca6cc3637737b0db71dbf5d9ffb7f7769649f5db2b8607667d6b9d8ed"
   },
   "text_token_tags": {
-   "shape": [
-    8
-   ],
+   "shape": [8],
    "dtype": "int64",
    "sha256": "e32ffa38e1523fe5b824b9fd02261be7f1904410333132786c5d716fd3146e4f"
   },
   "timestep": {
-   "shape": [
-    1
-   ],
+   "shape": [1],
    "dtype": "float32",
    "sha256": "723b6da32a396adc2f865ec9e3980269bc9bd75f0fc1d8a7fdb7cb3267df19dd"
   },
   "token_refiner.blocks.0": {
-   "shape": [
-    8,
-    32
-   ],
+   "shape": [8, 32],
    "dtype": "float32",
    "sha256": "b5589f2bb24a3a326079afd29f237b0d8519d3dd5f3e246bd88d4530cc5d47e5"
   },
   "token_refiner.final_norm": {
-   "shape": [
-    8,
-    32
-   ],
+   "shape": [8, 32],
    "dtype": "float32",
    "sha256": "b961a6081666e0561a2f21b94e16993dd853e0cbc760e02b1deab2b5f7ea7a0b"
   },
   "velocity_audio": {
-   "shape": [
-    1,
-    32,
-    2,
-    37
-   ],
+   "shape": [1, 32, 2, 37],
    "dtype": "float32",
    "sha256": "22731ce2cecaddf9f1eaebf64d57a1f69376172837d1e175ff5e6b5b1acdbbd4"
   },
   "velocity_audio_bf16": {
-   "shape": [
-    1,
-    32,
-    2,
-    37
-   ],
+   "shape": [1, 32, 2, 37],
    "dtype": "float32",
    "sha256": "3126a61ffd90c3c985a2f0bd6fe3091b162bbdb2a2771b19640135d5ce2a0a7a"
   },
   "velocity_video": {
-   "shape": [
-    1,
-    24,
-    7,
-    4,
-    6
-   ],
+   "shape": [1, 24, 7, 4, 6],
    "dtype": "float32",
    "sha256": "04dbb88c444ebd21f4c4e3e200640a988e80860f3de9e22d7470eff0471909f7"
   },
   "velocity_video_bf16": {
-   "shape": [
-    1,
-    24,
-    7,
-    4,
-    6
-   ],
+   "shape": [1, 24, 7, 4, 6],
    "dtype": "float32",
    "sha256": "36930be52cb326b7d243e7fef6b1595db7190c978b6aefe715ea9afcb0cc92b7"
   },
   "video": {
-   "shape": [
-    1,
-    24,
-    7,
-    4,
-    6
-   ],
+   "shape": [1, 24, 7, 4, 6],
    "dtype": "float32",
    "sha256": "30046a0ae38170a25ee144f567b5efb2db839094d70e94b8db4caa16d2f402eb"
   },
   "video_patch_proj": {
-   "shape": [
-    48,
-    32
-   ],
+   "shape": [48, 32],
    "dtype": "float32",
    "sha256": "ad0e027866c2a1afbe040e20380855b102f254f616f2bc04b61769bd3f1673bd"
   }

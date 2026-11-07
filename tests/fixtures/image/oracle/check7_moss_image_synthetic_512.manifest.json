@@ -4,15 +4,7 @@
  "check": 7,
  "family": "moss_image",
  "script": "scripts/image_oracle/check7_moss_image_lora.py",
- "argv": [
-  "check7_moss_image_lora.py",
-  "--pipeline",
-  "pipeline_moss_image.py",
-  "--dit",
-  "MOSS-Image-SFT-Q4_K_M.gguf",
-  "--config",
-  "config.json"
- ],
+ "argv": ["check7_moss_image_lora.py", "--pipeline", "pipeline_moss_image.py", "--dit", "MOSS-Image-SFT-Q4_K_M.gguf", "--config", "config.json"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -85,50 +77,10 @@
   "source": "check3_moss_image_512",
   "strength": 1.0,
   "lora_pairs": 29,
-  "lora_ranks": [
-   4,
-   8,
-   12,
-   16
-  ],
-  "lora_alphas": [
-   2.0,
-   4.0,
-   6.0,
-   8.0
-  ],
+  "lora_ranks": [4, 8, 12, 16],
+  "lora_alphas": [2.0, 4.0, 6.0, 8.0],
   "lora_source": "synthetic, seed 7, each delta at 0.08 of its weight's Frobenius norm, ranks 4 to 16, alpha half the rank",
-  "targets": [
-   "final_linear_video",
-   "layers.0.proj.ffn_down",
-   "layers.0.proj.ffn_up_gate",
-   "layers.0.proj.k",
-   "layers.0.proj.o",
-   "layers.0.proj.q",
-   "layers.0.proj.v",
-   "layers.21.proj.ffn_down",
-   "layers.21.proj.ffn_up_gate",
-   "layers.21.proj.k",
-   "layers.21.proj.o",
-   "layers.21.proj.q",
-   "layers.21.proj.v",
-   "layers.41.proj.ffn_down",
-   "layers.41.proj.ffn_up_gate",
-   "layers.41.proj.k",
-   "layers.41.proj.o",
-   "layers.41.proj.q",
-   "layers.41.proj.v",
-   "shared_block_modulation",
-   "text_embedder.blocks.1.ffn_down",
-   "text_embedder.blocks.1.ffn_gate",
-   "text_embedder.blocks.1.ffn_up",
-   "text_embedder.blocks.1.proj",
-   "text_embedder.blocks.1.qkv",
-   "text_embedder.proj",
-   "time_embedding.2",
-   "video_embedder",
-   "video_head_modulation"
-  ],
+  "targets": ["final_linear_video", "layers.0.proj.ffn_down", "layers.0.proj.ffn_up_gate", "layers.0.proj.k", "layers.0.proj.o", "layers.0.proj.q", "layers.0.proj.v", "layers.21.proj.ffn_down", "layers.21.proj.ffn_up_gate", "layers.21.proj.k", "layers.21.proj.o", "layers.21.proj.q", "layers.21.proj.v", "layers.41.proj.ffn_down", "layers.41.proj.ffn_up_gate", "layers.41.proj.k", "layers.41.proj.o", "layers.41.proj.q", "layers.41.proj.v", "shared_block_modulation", "text_embedder.blocks.1.ffn_down", "text_embedder.blocks.1.ffn_gate", "text_embedder.blocks.1.ffn_up", "text_embedder.blocks.1.proj", "text_embedder.blocks.1.qkv", "text_embedder.proj", "time_embedding.2", "video_embedder", "video_head_modulation"],
   "lora_pair_alphas": {
    "layers.0.proj.q": 2.0,
    "layers.0.proj.k": 4.0,
@@ -795,672 +747,392 @@
    "rel_l2": 5e-05
   }
  },
- "notes": [
-  "the adapter is applied unmerged as PEFT applies it; the gmlx side runs it under a patch table"
- ],
+ "notes": ["the adapter is applied unmerged as PEFT applies it; the gmlx side runs it under a patch table"],
  "created": "2026-10-18T12:10:14Z",
  "npz": "check7_moss_image_synthetic_512.npz",
  "tensors": {
   "down.final_linear_video": {
-   "shape": [
-    4,
-    3072
-   ],
+   "shape": [4, 3072],
    "dtype": "float32",
    "sha256": "229816ec33698fba4a71f8d3026d3c14266261881af17f80b3b39fc7596b5c4c"
   },
   "down.layers.0.proj.ffn_down": {
-   "shape": [
-    8,
-    8192
-   ],
+   "shape": [8, 8192],
    "dtype": "float32",
    "sha256": "b5dc6cc4648b8a2a3e5e6e07dfd263b1d15a5cfd94e855b4fef0e1eba003c207"
   },
   "down.layers.0.proj.ffn_up_gate": {
-   "shape": [
-    4,
-    3072
-   ],
+   "shape": [4, 3072],
    "dtype": "float32",
    "sha256": "9687d9728fd2376f4baebd89015678c4285987744b4f420e45e856efa3fba25c"
   },
   "down.layers.0.proj.k": {
-   "shape": [
-    8,
-    3072
-   ],
+   "shape": [8, 3072],
    "dtype": "float32",
    "sha256": "4f1e1c4e2d12edee9e346f19fa576a335c29f57bca3989f629f9b58db365d4c4"
   },
   "down.layers.0.proj.o": {
-   "shape": [
-    16,
-    3072
-   ],
+   "shape": [16, 3072],
    "dtype": "float32",
    "sha256": "c4cff7b1f4548e801e76ddb987d83b048e15b4770ea284e978189be5a84c3799"
   },
   "down.layers.0.proj.q": {
-   "shape": [
-    4,
-    3072
-   ],
+   "shape": [4, 3072],
    "dtype": "float32",
    "sha256": "e6415c3573b6c76ecab2e80520335c45b92d7986a6f4fb02e18b2364ef78cfe2"
   },
   "down.layers.0.proj.v": {
-   "shape": [
-    12,
-    3072
-   ],
+   "shape": [12, 3072],
    "dtype": "float32",
    "sha256": "51c86f31233e8b388da6620f0afea0415de35f9c71af21983096d16d0838a1c9"
   },
   "down.layers.21.proj.ffn_down": {
-   "shape": [
-    16,
-    8192
-   ],
+   "shape": [16, 8192],
    "dtype": "float32",
    "sha256": "064025075b4230c415585396af109fb18c1122ac973ee9bab3da182408ed6e59"
   },
   "down.layers.21.proj.ffn_up_gate": {
-   "shape": [
-    12,
-    3072
-   ],
+   "shape": [12, 3072],
    "dtype": "float32",
    "sha256": "c6dcdb6199c7662fcc59168c7adb374e109edf4c773d2e5fa769e86fd081a514"
   },
   "down.layers.21.proj.k": {
-   "shape": [
-    16,
-    3072
-   ],
+   "shape": [16, 3072],
    "dtype": "float32",
    "sha256": "90ea71bf270710d8341dbb873fbaa006e9a95a1206469cd124d728627fe00646"
   },
   "down.layers.21.proj.o": {
-   "shape": [
-    8,
-    3072
-   ],
+   "shape": [8, 3072],
    "dtype": "float32",
    "sha256": "168ea4ad5432ce95d00532261cb1f14eaa4fdd62c293752f202b1feaabb4ad5a"
   },
   "down.layers.21.proj.q": {
-   "shape": [
-    12,
-    3072
-   ],
+   "shape": [12, 3072],
    "dtype": "float32",
    "sha256": "a93905d38920fcdc20ced92c9264ce139b5b235742ee9b52d3b5e5b6e336fa85"
   },
   "down.layers.21.proj.v": {
-   "shape": [
-    4,
-    3072
-   ],
+   "shape": [4, 3072],
    "dtype": "float32",
    "sha256": "ca47d7c9de02c62328b5e355c784bd264a18e2bd10ebff0dc039ef268b307559"
   },
   "down.layers.41.proj.ffn_down": {
-   "shape": [
-    8,
-    8192
-   ],
+   "shape": [8, 8192],
    "dtype": "float32",
    "sha256": "9a2a191c41b4da7b34b3de64c735896282f59dc115250f797efecbf0ad0bdbe5"
   },
   "down.layers.41.proj.ffn_up_gate": {
-   "shape": [
-    4,
-    3072
-   ],
+   "shape": [4, 3072],
    "dtype": "float32",
    "sha256": "7febc3d410924618797042a065b1cf5c031a50680d7197ee025579f6531686ee"
   },
   "down.layers.41.proj.k": {
-   "shape": [
-    8,
-    3072
-   ],
+   "shape": [8, 3072],
    "dtype": "float32",
    "sha256": "2f6f3694ff3aedc6132f98008b31ebdaf9e38617a071a2cb79b143689034bdfe"
   },
   "down.layers.41.proj.o": {
-   "shape": [
-    16,
-    3072
-   ],
+   "shape": [16, 3072],
    "dtype": "float32",
    "sha256": "05be0e939d4032e7bf45bbc2fe26964ff1b85557f5f1d57058f5dea84c4027ab"
   },
   "down.layers.41.proj.q": {
-   "shape": [
-    4,
-    3072
-   ],
+   "shape": [4, 3072],
    "dtype": "float32",
    "sha256": "ccf6dcf1f2d55b701b88c590335d19b9397bdb2ddcfaa4c4ea630e11276966d4"
   },
   "down.layers.41.proj.v": {
-   "shape": [
-    12,
-    3072
-   ],
+   "shape": [12, 3072],
    "dtype": "float32",
    "sha256": "2bec251d9ddea951019346eb985779c9302359a18d80115f6a658f2703d96904"
   },
   "down.shared_block_modulation": {
-   "shape": [
-    12,
-    3072
-   ],
+   "shape": [12, 3072],
    "dtype": "float32",
    "sha256": "7f3e974405c38bedb623475bf4bef4ad1e3e93f8567cd798ab1c2e5f0c211679"
   },
   "down.text_embedder.blocks.1.ffn_down": {
-   "shape": [
-    12,
-    8192
-   ],
+   "shape": [12, 8192],
    "dtype": "float32",
    "sha256": "6a71c220ceec73b0324daa8488fca9e541a90761ddfa6aec434dc1a12a648d69"
   },
   "down.text_embedder.blocks.1.ffn_gate": {
-   "shape": [
-    4,
-    3072
-   ],
+   "shape": [4, 3072],
    "dtype": "float32",
    "sha256": "bd27a8a461d4ad807b86eec85e54658a68b5ab2eae8f7fd4ec08c27cdbf0ac08"
   },
   "down.text_embedder.blocks.1.ffn_up": {
-   "shape": [
-    8,
-    3072
-   ],
+   "shape": [8, 3072],
    "dtype": "float32",
    "sha256": "4f8c5f5d6b95619e3fbdd7fd9c750406e120463f5919ba1d5d069c0333202904"
   },
   "down.text_embedder.blocks.1.proj": {
-   "shape": [
-    16,
-    3072
-   ],
+   "shape": [16, 3072],
    "dtype": "float32",
    "sha256": "5b1dc7d0dbfaa0d4f3ec5b63014dbbb840cbdb4ceb42ef578c6f3c93b27e7a09"
   },
   "down.text_embedder.blocks.1.qkv": {
-   "shape": [
-    12,
-    3072
-   ],
+   "shape": [12, 3072],
    "dtype": "float32",
    "sha256": "fb0dc5bc211329aca5b4e1ea83753409664251af03e6b0fedc35b5c04757f10d"
   },
   "down.text_embedder.proj": {
-   "shape": [
-    4,
-    4096
-   ],
+   "shape": [4, 4096],
    "dtype": "float32",
    "sha256": "a70d00dea3d02592da9db83038a0c79197247eb00a6edd2b0faee8dec5d77d78"
   },
   "down.time_embedding.2": {
-   "shape": [
-    8,
-    3072
-   ],
+   "shape": [8, 3072],
    "dtype": "float32",
    "sha256": "714b80261eb07232f15a4135e3c63d7e6a847ee119c82dc13830abd3d7afb562"
   },
   "down.video_embedder": {
-   "shape": [
-    16,
-    128
-   ],
+   "shape": [16, 128],
    "dtype": "float32",
    "sha256": "dfd2ffa71b132bc50741cd7e261ebc8e9aa89b9b05944f05a412432c8bb8c79b"
   },
   "down.video_head_modulation": {
-   "shape": [
-    16,
-    3072
-   ],
+   "shape": [16, 3072],
    "dtype": "float32",
    "sha256": "a88551eeeba34e487a9919140db85f59597a9db8c4a7da2a1c2a7ff296a8f0ab"
   },
   "features": {
-   "shape": [
-    48,
-    4096
-   ],
+   "shape": [48, 4096],
    "dtype": "float32",
    "sha256": "51f2174fad964908bd5817f252f645cdc220c2c13ca457e1ad899301a9c3ca6b"
   },
   "final_linear_video": {
-   "shape": [
-    1,
-    1024,
-    128
-   ],
+   "shape": [1, 1024, 128],
    "dtype": "float32",
    "sha256": "5c24e6b9da463bf47d602b12ad1d71949536e5ddfcc6d780b998e17a5b8b8011"
   },
   "in.final_norm_video": {
-   "shape": [
-    1,
-    1024,
-    3072
-   ],
+   "shape": [1, 1024, 3072],
    "dtype": "float32",
    "sha256": "39131e523f8f1d78283047250ffdafe8ee2fab7253b72b7fd30d977653d35ed1"
   },
   "in.layers.0": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "bb325a22457ba5d40cfd5037ef78ee143e1e46314f66aa95e7da21c4b1e5ca55"
   },
   "latents": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "4399e6b9bd209dc9af6f745557507a33dcfe730a81abebb0bce079d2b441f34c"
   },
   "layers.0": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "0c8c7f95c69d7ec12b3028a0efa2e49c688bf0198e6507b85a4c5475390fed9d"
   },
   "layers.1": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "06ce0afa4380da9e96711ab8095e53f101d962aaa63b4c99f69e7a8d4ae4d8cd"
   },
   "layers.10": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "08f6051caefa3cdf85950259503b8420dfa156f42b5611e687d694cdbd5ac9b0"
   },
   "layers.11": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "0e4f6236d98d9baf0588bb8384a43fd8ddb3c091341ceadd1486d9b07558baf4"
   },
   "layers.12": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "e7408e21f1aeee72324609e4cafe1a7374d59d2f76c6aa8d12e3d8d882e99609"
   },
   "layers.13": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "a9133d4386934a78cc5450d6f87012dab823d5de5761773e923387a841adcfe7"
   },
   "layers.14": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "37e757afa482f2719e938574e20847322c56665dac482011bb8738cd2a38a5e1"
   },
   "layers.15": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "d2bd0515669642e2f3f99803aac511133cc5cacb4d5115453bdaa3b028515afd"
   },
   "layers.16": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "c1e5f181551eb476ebc6986090f992dcdd80128de7e46eedc6688cdf0a426d34"
   },
   "layers.17": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "04ed2d3838d839259a8874894180829bf3215324ce20e0836e5937539cf0c52a"
   },
   "layers.18": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "4df78b68567c4e115208f1fda48bb3a2e1ada3346a7199c8fb5f8e8b851c37b3"
   },
   "layers.19": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "ef7450fe534bf68fa5e75123f19eba232425838deca76b025d2a1310e0d39d9f"
   },
   "layers.2": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "b6d942f4c2d72fcbb0eaf0b98ae0e1d4bfd1a9ae166b44a889cbb24426c14e30"
   },
   "layers.20": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "81cae6bdae12e1ff7e63301f877740b7c38fea869fd0f0126316184c0ff3efd6"
   },
   "layers.21": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "57aa179c684f33d6491c1edb36f832a87e1af9627d0b50feca2ead5a6ac5995b"
   },
   "layers.22": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "2a70b76e81517f711619626b59d2bb155d45d1a22a6124c5fd709bc5f04a8b6f"
   },
   "layers.23": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "285ce32dc8a0915fc00dd91795a519885a467065aa9f5c0f81aaaaa241db46db"
   },
   "layers.24": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "bc2dd44770d33e593d63517828d088e7d6940d980a9bf9ac987a81cb6d7e67a3"
   },
   "layers.25": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "45f8c557a1278cb960a56e664eec83455f1cf34805b25ae91bc4ae07d94cfd3f"
   },
   "layers.26": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "cca082266f23a08f529e52e27677e78a86ca2a1366a2cc17aab27ef04946beaa"
   },
   "layers.27": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "640871f0fa2cf0a18d603e75bf71caae0c573536cd4fa06c2b0469fce52f809e"
   },
   "layers.28": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "ccee1e5b9c3365e6244ccad97a7d3bb49ff9f40f5fee2862274f61bb4e54d5d6"
   },
   "layers.29": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "848b9a275483d3cbf07c8613d085aebecc663ecec7d65c398650c6a60cc4d9ac"
   },
   "layers.3": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "ffe3c4502acbd9407ad9004ae60445dfef193835f7be7cd202744e4bb8c8f258"
   },
   "layers.30": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "0417c0e6fa561ebbb7e7dbd0ff3e4305f9e3787efe923163e36d5b4226d794b4"
   },
   "layers.31": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "49dbb7fe401617f68707bdc460300be1231e73fdb31fcdaba104f06ca16dcf77"
   },
   "layers.32": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "ce4cda5087ed510b5ddfc63efded9bd2a4e2828220031b9bc0f55367c992b221"
   },
   "layers.33": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "2240642f089c3d26f3dcce9c254b83b0d82da1ad24b5b9dd7d2bc8da93cb7e84"
   },
   "layers.34": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "9c90620b0cc23cc38d5ad504137fdf404b69619751f9ba7fb93a5b794cbfa9b6"
   },
   "layers.35": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "2a8bd6cdd9e4b441c1c92f0b33798086315237a42f0e15523566115c8652d4b6"
   },
   "layers.36": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "57e34a8f38ea64aef04d3c209aefec4619e61f140b8fb8e479885b04905648a2"
   },
   "layers.37": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "765eec2b870c22c702dbbf20bde3941e6b8f5ed21d2ae037ac57cb6b4011d76f"
   },
   "layers.38": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "34df46918ac04c9eccf63dfea7455106d2b3142274d8dded2c0f38ebc3737eea"
   },
   "layers.39": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "b6a69d3a4e79a155e9e7586f9921d93abff298b5ae1a6db708d7b42321af8664"
   },
   "layers.4": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "5eb34df9416e150b1bfcce2a87830aa98432beae361e3643fdc84c7159e1a1d8"
   },
   "layers.40": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "a28bb73dd29d229c0f94dd9e7f684cefaeb23553c8015cd5266953cabd2cfcc8"
   },
   "layers.41": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "7003bd8cbe5187ee5d86de91f6e2bdda30e0294589e74d4c8960f4db8ff788a1"
   },
   "layers.5": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "ebe752bedac45e55a5915c30095df32c945520820622aa980b90cd91f8ca23c0"
   },
   "layers.6": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "adda867b39d68c70892e3c49c26e0016bb83a6e2e00e50182559465dbf93d9cd"
   },
   "layers.7": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "1c8c25a8fdf221792b80e28807524d5c0aaf6b393037147efc126cfb542d6c86"
   },
   "layers.8": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "c4310a45bdfedb4b09def77fbb760b661908c625f84d518f4a97e3745e58a8ec"
   },
   "layers.9": {
-   "shape": [
-    1,
-    1072,
-    3072
-   ],
+   "shape": [1, 1072, 3072],
    "dtype": "float32",
    "sha256": "5d62b6f73c341dcddbbdd173801e2da5c70584d3e1125ce8a8570985e162a94b"
   },
   "shared_block_modulation": {
-   "shape": [
-    1,
-    18432
-   ],
+   "shape": [1, 18432],
    "dtype": "float32",
    "sha256": "b8792658ee3dc24f801619914c90548b4c6d46e0a2dfb447d0256d80d3b15b02"
   },
@@ -1470,313 +1142,192 @@
    "sha256": "9a8208635e00348ab64aac2b759e76391fd47089e9a749bbcec770d9eb5c6421"
   },
   "text_embedder.blocks.0": {
-   "shape": [
-    1,
-    48,
-    3072
-   ],
+   "shape": [1, 48, 3072],
    "dtype": "float32",
    "sha256": "6002c43257ead6b015a99fa4c8c0c292506bf5186af99f0c8dcf2f0f4dfffc0a"
   },
   "text_embedder.blocks.1": {
-   "shape": [
-    1,
-    48,
-    3072
-   ],
+   "shape": [1, 48, 3072],
    "dtype": "float32",
    "sha256": "7299e45b216651b8f7f92717ff7b7d7e103d124ce888133c2f1eaeff7f993aec"
   },
   "text_embedder.proj": {
-   "shape": [
-    1,
-    48,
-    3072
-   ],
+   "shape": [1, 48, 3072],
    "dtype": "float32",
    "sha256": "231b30d31457f41feeb9094119d655c851236ea7a00593f00d0d0f7fb30ff053"
   },
   "time_embedding": {
-   "shape": [
-    1,
-    3072
-   ],
+   "shape": [1, 3072],
    "dtype": "float32",
    "sha256": "1f374466cc191b5012c3bafb15574f220574fc85d600e1a0dd4e462dedff1395"
   },
   "timestep": {
-   "shape": [
-    1
-   ],
+   "shape": [1],
    "dtype": "float32",
    "sha256": "1d77e51c3092b797b15b02104368537eea7b222148a4d2ba2d2d578491c50ac5"
   },
   "up.final_linear_video": {
-   "shape": [
-    128,
-    4
-   ],
+   "shape": [128, 4],
    "dtype": "float32",
    "sha256": "1afabdd48d8f12b0e668a9b44229a9b1fc6b20a6cd8de1e0edcf1bdb1fedc97c"
   },
   "up.layers.0.proj.ffn_down": {
-   "shape": [
-    3072,
-    8
-   ],
+   "shape": [3072, 8],
    "dtype": "float32",
    "sha256": "759139c381d1943bb75c6c7d45dbfb504293fa36a3e029df473c182a34d282fb"
   },
   "up.layers.0.proj.ffn_up_gate": {
-   "shape": [
-    16384,
-    4
-   ],
+   "shape": [16384, 4],
    "dtype": "float32",
    "sha256": "5bea065e271c608837e2a0c3da156f1ec20c1e12c177c2cd299459902660a6a8"
   },
   "up.layers.0.proj.k": {
-   "shape": [
-    3072,
-    8
-   ],
+   "shape": [3072, 8],
    "dtype": "float32",
    "sha256": "589f97a48ffbb1764212bb0becf58079a2d2b936c01b47794731db6b8a73e84c"
   },
   "up.layers.0.proj.o": {
-   "shape": [
-    3072,
-    16
-   ],
+   "shape": [3072, 16],
    "dtype": "float32",
    "sha256": "674c2153275c6d9c95de9bf22895c8ce089d75ba21d6f8d6eaf563b918892bdd"
   },
   "up.layers.0.proj.q": {
-   "shape": [
-    3072,
-    4
-   ],
+   "shape": [3072, 4],
    "dtype": "float32",
    "sha256": "74e1574bc9007bba529f407bc51707887817e54390fc6cd6b65d24dd20ee0769"
   },
   "up.layers.0.proj.v": {
-   "shape": [
-    3072,
-    12
-   ],
+   "shape": [3072, 12],
    "dtype": "float32",
    "sha256": "39b5b8320d2b3a885bc9fb007a37e80a7b998fc88b1943a6477eb71c94926bbc"
   },
   "up.layers.21.proj.ffn_down": {
-   "shape": [
-    3072,
-    16
-   ],
+   "shape": [3072, 16],
    "dtype": "float32",
    "sha256": "96c57498970b6adba77b17697c7dc18976037ab38b60a386e6cf53dc2ccc8fbe"
   },
   "up.layers.21.proj.ffn_up_gate": {
-   "shape": [
-    16384,
-    12
-   ],
+   "shape": [16384, 12],
    "dtype": "float32",
    "sha256": "59c66eb16126cbd6965f2276af11e79f81013bafd34f4c0d541a2ab29d640861"
   },
   "up.layers.21.proj.k": {
-   "shape": [
-    3072,
-    16
-   ],
+   "shape": [3072, 16],
    "dtype": "float32",
    "sha256": "cecefd2ba1280b37f45a5e2df47cb231a9d758c4c8cec3658cdce39b74b15f50"
   },
   "up.layers.21.proj.o": {
-   "shape": [
-    3072,
-    8
-   ],
+   "shape": [3072, 8],
    "dtype": "float32",
    "sha256": "82ee6a782d7510207184a9c85249e7623b471c04cd72e4a3e47d629ad1dae946"
   },
   "up.layers.21.proj.q": {
-   "shape": [
-    3072,
-    12
-   ],
+   "shape": [3072, 12],
    "dtype": "float32",
    "sha256": "d4bf6a0aee1df533f0e72b43c2d1b59fefd37701c4b658063334d8499f6f48d8"
   },
   "up.layers.21.proj.v": {
-   "shape": [
-    3072,
-    4
-   ],
+   "shape": [3072, 4],
    "dtype": "float32",
    "sha256": "8d0f9158c1bbf12443d0fae98cbfe176fcb676a2db0f3b7c71cf2b01abc1839b"
   },
   "up.layers.41.proj.ffn_down": {
-   "shape": [
-    3072,
-    8
-   ],
+   "shape": [3072, 8],
    "dtype": "float32",
    "sha256": "67e70378f8255fa3501ec674f2fc9f756452f3d2f88450fbd603d0e40c5cb9e4"
   },
   "up.layers.41.proj.ffn_up_gate": {
-   "shape": [
-    16384,
-    4
-   ],
+   "shape": [16384, 4],
    "dtype": "float32",
    "sha256": "c77310a640dbab3685f234589b8dc0837624028ce41d6b3b9b7e54a61ba06250"
   },
   "up.layers.41.proj.k": {
-   "shape": [
-    3072,
-    8
-   ],
+   "shape": [3072, 8],
    "dtype": "float32",
    "sha256": "f2bdf7d2c80b0417f7c9444d608c0adc5ec6351bbbdacbfc4e92aca7529914dc"
   },
   "up.layers.41.proj.o": {
-   "shape": [
-    3072,
-    16
-   ],
+   "shape": [3072, 16],
    "dtype": "float32",
    "sha256": "cfe30b4eb36e5eabe6ff8a9bc5d5025e8ff8b5b17e92fc1254e95e413ff50191"
   },
   "up.layers.41.proj.q": {
-   "shape": [
-    3072,
-    4
-   ],
+   "shape": [3072, 4],
    "dtype": "float32",
    "sha256": "4fe3e70f32cb6fe7ed341b26f359f610388c4d2033454e0d8db2c8dfb9ef592f"
   },
   "up.layers.41.proj.v": {
-   "shape": [
-    3072,
-    12
-   ],
+   "shape": [3072, 12],
    "dtype": "float32",
    "sha256": "e07864cd63b7b3657395195b3e979253204b7666e25b1a364fe5f6dfa95880f3"
   },
   "up.shared_block_modulation": {
-   "shape": [
-    18432,
-    12
-   ],
+   "shape": [18432, 12],
    "dtype": "float32",
    "sha256": "8052c8181ca91273d8a41266ed93a4492cead115ccf7e29f2231963a70d51243"
   },
   "up.text_embedder.blocks.1.ffn_down": {
-   "shape": [
-    3072,
-    12
-   ],
+   "shape": [3072, 12],
    "dtype": "float32",
    "sha256": "a9516aa6414234dc22836c3f5a0adc5035b447a7500ba0178a47771d25aae722"
   },
   "up.text_embedder.blocks.1.ffn_gate": {
-   "shape": [
-    8192,
-    4
-   ],
+   "shape": [8192, 4],
    "dtype": "float32",
    "sha256": "224178d0c90d39a80d79282dc7ab13958b76537b11fc197a69116afdad35f083"
   },
   "up.text_embedder.blocks.1.ffn_up": {
-   "shape": [
-    8192,
-    8
-   ],
+   "shape": [8192, 8],
    "dtype": "float32",
    "sha256": "f027b7be2b82f37b21aff40dddfb35b15a1e86e413164e648657b4ee2417443b"
   },
   "up.text_embedder.blocks.1.proj": {
-   "shape": [
-    3072,
-    16
-   ],
+   "shape": [3072, 16],
    "dtype": "float32",
    "sha256": "e9c42c4aae76d3cb66d1b1600bf8c32c7e7d4df1f107143db492ead01fd30f4e"
   },
   "up.text_embedder.blocks.1.qkv": {
-   "shape": [
-    9216,
-    12
-   ],
+   "shape": [9216, 12],
    "dtype": "float32",
    "sha256": "cf5fbab28dd118848ac2f63ca5024485ae8074b38331e62ab598b61a55d8233c"
   },
   "up.text_embedder.proj": {
-   "shape": [
-    3072,
-    4
-   ],
+   "shape": [3072, 4],
    "dtype": "float32",
    "sha256": "e6a00b564e52ac986cc65bcf76d0ddb686129123f60166cfdbc2134f78b9ddbb"
   },
   "up.time_embedding.2": {
-   "shape": [
-    3072,
-    8
-   ],
+   "shape": [3072, 8],
    "dtype": "float32",
    "sha256": "48125f880ecd30b193030121fa745a3e6bb9ada485757691b264071f3bafa14b"
   },
   "up.video_embedder": {
-   "shape": [
-    3072,
-    16
-   ],
+   "shape": [3072, 16],
    "dtype": "float32",
    "sha256": "3c4739649dba8e716aa8733c12b03a78e171e3fc164cc476ef8707460a64c053"
   },
   "up.video_head_modulation": {
-   "shape": [
-    6144,
-    16
-   ],
+   "shape": [6144, 16],
    "dtype": "float32",
    "sha256": "6b614ed56fa23bba6944c3a5a41c080febec2c4e07ac4835cb36ddef854d04f0"
   },
   "velocity": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "9362a2c80e9ad045fa4548cb9407e8b9c8033b8993195a285f81e7317bf743bb"
   },
   "velocity_bf16": {
-   "shape": [
-    1,
-    128,
-    32,
-    32
-   ],
+   "shape": [1, 128, 32, 32],
    "dtype": "float32",
    "sha256": "21c644d0aec9ae45defeca5b8fe14dbab5ca07a25a9e72a72f83f9328a106bc4"
   },
   "video_embedder": {
-   "shape": [
-    1,
-    1024,
-    3072
-   ],
+   "shape": [1, 1024, 3072],
    "dtype": "float32",
    "sha256": "c3830c017b383b9a444815a49883a424b85a8ec5c843e5f7515f85674e35d368"
   },
   "video_head_modulation": {
-   "shape": [
-    1,
-    6144
-   ],
+   "shape": [1, 6144],
    "dtype": "float32",
    "sha256": "8da4a6455a794a4a4381c68cd0276e751d40b8e90d2617a86bab0ac1848e3c36"
   }

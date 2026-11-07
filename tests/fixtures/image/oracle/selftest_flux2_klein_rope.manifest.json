@@ -4,14 +4,7 @@
  "check": 3,
  "family": "flux2_klein",
  "script": "scripts/image_oracle/check3_flux2_klein.py",
- "argv": [
-  "check3_flux2_klein.py",
-  "--reference",
-  "src",
-  "--reference-commit",
-  "50fe5162777813d869182b139e83b10743caef15",
-  "--self-test"
- ],
+ "argv": ["check3_flux2_klein.py", "--reference", "src", "--reference-commit", "50fe5162777813d869182b139e83b10743caef15", "--self-test"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -50,12 +43,7 @@
  },
  "files": {},
  "inputs": {
-  "axes_dims": [
-   32,
-   32,
-   32,
-   32
-  ],
+  "axes_dims": [32, 32, 32, 32],
   "theta": 2000,
   "reference_commit": "50fe5162777813d869182b139e83b10743caef15",
   "ids": "int64, as prc_img and prc_txt give them"
@@ -67,26 +55,17 @@
  "npz": "selftest_flux2_klein_rope.npz",
  "tensors": {
   "cos": {
-   "shape": [
-    75,
-    64
-   ],
+   "shape": [75, 64],
    "dtype": "float32",
    "sha256": "6732727905d7a070c3f8855446f072e31c88db1521606f8de4c0555960071e1c"
   },
   "ids": {
-   "shape": [
-    75,
-    4
-   ],
+   "shape": [75, 4],
    "dtype": "int64",
    "sha256": "f3bbf26fa1f5268f372c54d28cd86e2eb128f34d8c3c521ba3e960ce39718e4c"
   },
   "sin": {
-   "shape": [
-    75,
-    64
-   ],
+   "shape": [75, 64],
    "dtype": "float32",
    "sha256": "025d95297c4cb5a84f3007885d2eabd8e3b83def09f31f48fb1b1b7f436bd5c5"
   }

@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gmlx.serve import residency
+from gmlx.serve import residency, residency_lora, residency_workers
 from gmlx.serve.residency import (IMAGE_KIND, STORE, VIDEO_KIND,
                                   LoraRefused, _ResidencyPool)
 
@@ -82,8 +82,8 @@ def make_pool(monkeypatch, budget_gb, retry=1):
 
     monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
-    monkeypatch.setattr(residency, "_holds_image_worker", lambda: True)
-    monkeypatch.setattr(residency, "_holds_video_worker", lambda: True)
+    monkeypatch.setattr(residency_workers, "_holds_image_worker", lambda: True)
+    monkeypatch.setattr(residency_workers, "_holds_video_worker", lambda: True)
     # The pool collects after each pipeline release. The pipelines here are
     # stand-ins, so a collection frees nothing, and in a full test process
     # each one walks a large heap.
@@ -342,7 +342,7 @@ def test_a_video_turn_waits_on_an_image_release_before_it_evicts(
     v = video(pool, "v", 3, busy=True)
     # The unload does not hold the image worker: its job held it at the
     # unload's reservation.
-    monkeypatch.setattr(residency, "_holds_image_worker", lambda: False)
+    monkeypatch.setattr(residency_workers, "_holds_image_worker", lambda: False)
     fp, load, release = pool._image_fns
     at, go, either = threading.Event(), threading.Event(), threading.Event()
 
@@ -391,7 +391,7 @@ class Queued:
     def __init__(self, pool, monkeypatch, *names):
         # The unload does not hold the image worker: its job held it at
         # the unload's reservation.
-        monkeypatch.setattr(residency, "_holds_image_worker", lambda: False)
+        monkeypatch.setattr(residency_workers, "_holds_image_worker", lambda: False)
         fp, load, release = pool._image_fns
         self.at = {n: threading.Event() for n in names}
         self.go = {n: threading.Event() for n in names}
@@ -446,7 +446,7 @@ def slow_first_pass(pool, monkeypatch, seconds):
     import time
 
     ahead = [0.0]
-    monkeypatch.setattr(residency, "time", SimpleNamespace(
+    monkeypatch.setattr(residency_lora, "time", SimpleNamespace(
         monotonic=lambda: time.monotonic() + ahead[0], sleep=time.sleep,
         time=time.time))
     shed = pool._lora_shed
@@ -1606,9 +1606,9 @@ def _recorded_holds(monkeypatch, pool):
 
     monkeypatch.setattr(image_service, "reserved_worker", fake(IMAGE_KIND))
     monkeypatch.setattr(video_service, "reserved_worker", fake(VIDEO_KIND))
-    monkeypatch.setattr(residency, "_holds_image_worker",
+    monkeypatch.setattr(residency_workers, "_holds_image_worker",
                         lambda: IMAGE_KIND in held)
-    monkeypatch.setattr(residency, "_holds_video_worker",
+    monkeypatch.setattr(residency_workers, "_holds_video_worker",
                         lambda: VIDEO_KIND in held)
     return order
 
@@ -1702,7 +1702,7 @@ def test_two_workers_turn_at_once_and_never_release_on_each_other(
 
     # The pool's own reservations, recorded by the thread that takes them.
     del pool._worker_for
-    monkeypatch.setattr(residency, "_reserved_workers", record)
+    monkeypatch.setattr(residency_workers, "_reserved_workers", record)
     stop = threading.Event()
     errors: list = []
 

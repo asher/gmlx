@@ -4,17 +4,7 @@
  "check": 7,
  "family": "krea2",
  "script": "scripts/image_oracle/check7_krea2_lora.py",
- "argv": [
-  "check7_krea2_lora.py",
-  "--dit",
-  "Krea-2-Turbo-Q4_K_M.gguf",
-  "--synthetic",
-  "7",
-  "--source",
-  "check3_krea2_s4_512",
-  "--name",
-  "check7_krea2_synthetic_512"
- ],
+ "argv": ["check7_krea2_lora.py", "--dit", "Krea-2-Turbo-Q4_K_M.gguf", "--synthetic", "7", "--source", "check3_krea2_s4_512", "--name", "check7_krea2_synthetic_512"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -78,64 +68,10 @@
   "source": "check3_krea2_s4_512",
   "strength": 1.0,
   "lora_pairs": 43,
-  "lora_ranks": [
-   4,
-   8,
-   12,
-   16
-  ],
-  "lora_alphas": [
-   2.0,
-   4.0,
-   6.0,
-   8.0
-  ],
+  "lora_ranks": [4, 8, 12, 16],
+  "lora_alphas": [2.0, 4.0, 6.0, 8.0],
   "lora_source": "synthetic, seed 7, gain 1.0, ranks 4 to 16, alpha half the rank",
-  "targets": [
-   "final_layer.linear",
-   "img_in",
-   "text_fusion.layerwise_blocks.0.attn.to_gate",
-   "text_fusion.layerwise_blocks.0.attn.to_k",
-   "text_fusion.layerwise_blocks.0.attn.to_out.0",
-   "text_fusion.layerwise_blocks.0.attn.to_q",
-   "text_fusion.layerwise_blocks.0.attn.to_v",
-   "text_fusion.layerwise_blocks.0.ff.down",
-   "text_fusion.layerwise_blocks.0.ff.gate",
-   "text_fusion.layerwise_blocks.0.ff.up",
-   "text_fusion.refiner_blocks.1.attn.to_gate",
-   "text_fusion.refiner_blocks.1.attn.to_k",
-   "text_fusion.refiner_blocks.1.attn.to_out.0",
-   "text_fusion.refiner_blocks.1.attn.to_q",
-   "text_fusion.refiner_blocks.1.attn.to_v",
-   "text_fusion.refiner_blocks.1.ff.down",
-   "text_fusion.refiner_blocks.1.ff.gate",
-   "text_fusion.refiner_blocks.1.ff.up",
-   "transformer_blocks.0.attn.to_gate",
-   "transformer_blocks.0.attn.to_k",
-   "transformer_blocks.0.attn.to_out.0",
-   "transformer_blocks.0.attn.to_q",
-   "transformer_blocks.0.attn.to_v",
-   "transformer_blocks.0.ff.down",
-   "transformer_blocks.0.ff.gate",
-   "transformer_blocks.0.ff.up",
-   "transformer_blocks.13.attn.to_gate",
-   "transformer_blocks.13.attn.to_k",
-   "transformer_blocks.13.attn.to_out.0",
-   "transformer_blocks.13.attn.to_q",
-   "transformer_blocks.13.attn.to_v",
-   "transformer_blocks.13.ff.down",
-   "transformer_blocks.13.ff.gate",
-   "transformer_blocks.13.ff.up",
-   "transformer_blocks.27.attn.to_gate",
-   "transformer_blocks.27.attn.to_k",
-   "transformer_blocks.27.attn.to_out.0",
-   "transformer_blocks.27.attn.to_q",
-   "transformer_blocks.27.attn.to_v",
-   "transformer_blocks.27.ff.down",
-   "transformer_blocks.27.ff.gate",
-   "transformer_blocks.27.ff.up",
-   "txt_in.linear_1"
-  ],
+  "targets": ["final_layer.linear", "img_in", "text_fusion.layerwise_blocks.0.attn.to_gate", "text_fusion.layerwise_blocks.0.attn.to_k", "text_fusion.layerwise_blocks.0.attn.to_out.0", "text_fusion.layerwise_blocks.0.attn.to_q", "text_fusion.layerwise_blocks.0.attn.to_v", "text_fusion.layerwise_blocks.0.ff.down", "text_fusion.layerwise_blocks.0.ff.gate", "text_fusion.layerwise_blocks.0.ff.up", "text_fusion.refiner_blocks.1.attn.to_gate", "text_fusion.refiner_blocks.1.attn.to_k", "text_fusion.refiner_blocks.1.attn.to_out.0", "text_fusion.refiner_blocks.1.attn.to_q", "text_fusion.refiner_blocks.1.attn.to_v", "text_fusion.refiner_blocks.1.ff.down", "text_fusion.refiner_blocks.1.ff.gate", "text_fusion.refiner_blocks.1.ff.up", "transformer_blocks.0.attn.to_gate", "transformer_blocks.0.attn.to_k", "transformer_blocks.0.attn.to_out.0", "transformer_blocks.0.attn.to_q", "transformer_blocks.0.attn.to_v", "transformer_blocks.0.ff.down", "transformer_blocks.0.ff.gate", "transformer_blocks.0.ff.up", "transformer_blocks.13.attn.to_gate", "transformer_blocks.13.attn.to_k", "transformer_blocks.13.attn.to_out.0", "transformer_blocks.13.attn.to_q", "transformer_blocks.13.attn.to_v", "transformer_blocks.13.ff.down", "transformer_blocks.13.ff.gate", "transformer_blocks.13.ff.up", "transformer_blocks.27.attn.to_gate", "transformer_blocks.27.attn.to_k", "transformer_blocks.27.attn.to_out.0", "transformer_blocks.27.attn.to_q", "transformer_blocks.27.attn.to_v", "transformer_blocks.27.ff.down", "transformer_blocks.27.ff.gate", "transformer_blocks.27.ff.up", "txt_in.linear_1"],
   "application": "unmerged: strength * (alpha / rank) * up(down(x)) added to each target's output in the mode's dtype, alpha absent gives 1.0",
   "lora_pair_alphas": {
    "transformer_blocks.0.attn.to_q": 2.0,
@@ -670,667 +606,397 @@
    "rel_l2": 0.0004927439029330487
   }
  },
- "notes": [
-  "the adapter is applied unmerged as PEFT applies it; the gmlx side runs it under a patch table"
- ],
+ "notes": ["the adapter is applied unmerged as PEFT applies it; the gmlx side runs it under a patch table"],
  "created": "2026-10-10T10:19:00Z",
  "npz": "check7_krea2_synthetic_512.npz",
  "tensors": {
   "blocks.0": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "394ed288d3418a46aa9fabed47d8648c3c5f5b87d5328ff6c8fd46dfa602382b"
   },
   "blocks.1": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "a2a58d04c31e609a7100a0e4be5e3747ce6c3d675ffe451a860a2274f7faf9ae"
   },
   "blocks.10": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "7d1ab0fd5bf94123975c110c840f6f7cf9814ec7cb1e69de4d9fb3f24781f956"
   },
   "blocks.11": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "ae6ab6d83af01dbfbfb08bebc2d2e74493670580220fdaa91bb05a9e09503286"
   },
   "blocks.12": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "f64cb5099b6670a41dff9f40a58aeb82451c6093b38b25f9498636bfb03994e6"
   },
   "blocks.13": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "62c566a520523de423f3c20f3ca6ec5605898ec5fd1aefb3b46405142e083a07"
   },
   "blocks.14": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "dfe4e3c7942a953a2bc5aa66c1a9da058b83044f1c91a7e9554d0c9743061110"
   },
   "blocks.15": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "740156a74abc7e6fb208c844867edc1c0b60e581fb24539a5a0d9bd387454b71"
   },
   "blocks.16": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "82d778ebf848975b13a3b2dee210bc40b57e25a10b951344e8c386b4770d5d47"
   },
   "blocks.17": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "19e6bfbf65cab90d1afd57397bfe8f375cc8ede70fbcc69de6e7eafdb33cfe66"
   },
   "blocks.18": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "36cae6a8ad650b47dc9cc6d67f9021da636242531b182e21345fa440a9c891b3"
   },
   "blocks.19": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "d3f74b2fb45d41f3db63048c18ffd2a958df734311a5afae5c924b863bf630da"
   },
   "blocks.2": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "aafa875fdc890bdc734eb2fc89554a24b789d9292ce255b25f44004a0dfc25c8"
   },
   "blocks.20": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "3c740ff43ef361a4872cf844eeda07b5a14abe229b524ec4d2a80fdc63e3831b"
   },
   "blocks.21": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "0a9b1fa0e0a00b72b902998d7785caac6f01fb54e591d65a3a9b27010edeac9c"
   },
   "blocks.22": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "245cd30c3581f836bf192b2496e65760d8667e3298e88990692032e3f8ef0768"
   },
   "blocks.23": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "488149416397b958d0448034d32a4adedc5ccf80c2fba842a5246fe0d0b7a0b9"
   },
   "blocks.24": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "ac63cd1e245b9b9458b5915462933c93a40e494a40cd9da4b57a79a58b1715ef"
   },
   "blocks.25": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "bbf13cc6c49947208b24d37b2d6147f6ca7339816621607ce0461f0ec51ba531"
   },
   "blocks.26": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "edbb1764dc2314c4e75cac9abf3bc8be54c1dd1f59e6811fc8af2824c9d24bba"
   },
   "blocks.27": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "e63c171f8f760278eb1ab5bee2c2ba09117e1b72daa5a4529e46d682e9cd366f"
   },
   "blocks.3": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "d993e642faeb8fcc583c1f93a7ef34c78010c6d17e4daebf14a5e0627cacd6c7"
   },
   "blocks.4": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "0ff3bd3f78bc78f22b3a56a6c5f9992c882d37da22a83b9cc2cb35c9ded3c15f"
   },
   "blocks.5": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "d924f1f4bab0f6896289fca244ba6f41f03ce37221583b1305eecc76a11751f3"
   },
   "blocks.6": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "7f154ea93eebd6648edac7a92c6f36c58fb4db2fac2f1b1055bb201ee514ea7f"
   },
   "blocks.7": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "2a6bf9475ece213d241da7597704a9befd6049c4b725ec31fb543ad8d8f08fb5"
   },
   "blocks.8": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "32ffcd6e6e611805efaf5eeecaf842999355c729850eb517da5792bd00494f9a"
   },
   "blocks.9": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "ee12cbc12c962af95f0249437941aa4fd6cc7dffd10427bcaa1f66fb5d8ae168"
   },
   "down.final_layer.linear": {
-   "shape": [
-    12,
-    6144
-   ],
+   "shape": [12, 6144],
    "dtype": "float32",
    "sha256": "6aa5234ccd16c422526351d1fd2384a9b802fd02c7c06dd25c9f3a40c1cbad93"
   },
   "down.img_in": {
-   "shape": [
-    4,
-    64
-   ],
+   "shape": [4, 64],
    "dtype": "float32",
    "sha256": "11251856b86047334cafc4f9b19d55d0cf68b3690ea8a7db159b8f45b94e2b25"
   },
   "down.text_fusion.layerwise_blocks.0.attn.to_gate": {
-   "shape": [
-    16,
-    2560
-   ],
+   "shape": [16, 2560],
    "dtype": "float32",
    "sha256": "557df79c554169cc37f02f017f20d7cfbf9d4fcc08ad5d20bd79d001bb777a0f"
   },
   "down.text_fusion.layerwise_blocks.0.attn.to_k": {
-   "shape": [
-    8,
-    2560
-   ],
+   "shape": [8, 2560],
    "dtype": "float32",
    "sha256": "744c851e8126fd7559f8f542b03a4067072b9b5eec748000fcc3341f1bbec06a"
   },
   "down.text_fusion.layerwise_blocks.0.attn.to_out.0": {
-   "shape": [
-    4,
-    2560
-   ],
+   "shape": [4, 2560],
    "dtype": "float32",
    "sha256": "4317a4c60867db56a6913d9117f7a64a090ef99c58ffa032b39d33e90c714f9e"
   },
   "down.text_fusion.layerwise_blocks.0.attn.to_q": {
-   "shape": [
-    4,
-    2560
-   ],
+   "shape": [4, 2560],
    "dtype": "float32",
    "sha256": "3e651218a4b64208fd7347d603df977fe08dcf5bb4b750af4a7a9e6eb71ff237"
   },
   "down.text_fusion.layerwise_blocks.0.attn.to_v": {
-   "shape": [
-    12,
-    2560
-   ],
+   "shape": [12, 2560],
    "dtype": "float32",
    "sha256": "1156a7a3df97b77bb67c3bb2b433ed5f6f2d153f54feed229fc97e0c2007fd98"
   },
   "down.text_fusion.layerwise_blocks.0.ff.down": {
-   "shape": [
-    16,
-    6912
-   ],
+   "shape": [16, 6912],
    "dtype": "float32",
    "sha256": "484d63cb416917f7b4d08fc75ddd2c60b59c6c91e656bb7c399773c96bfda8ce"
   },
   "down.text_fusion.layerwise_blocks.0.ff.gate": {
-   "shape": [
-    8,
-    2560
-   ],
+   "shape": [8, 2560],
    "dtype": "float32",
    "sha256": "9b7264589994ee4a95b1d1dedc4540195bc39d9d6ebcae5d5701a82d072e8c90"
   },
   "down.text_fusion.layerwise_blocks.0.ff.up": {
-   "shape": [
-    12,
-    2560
-   ],
+   "shape": [12, 2560],
    "dtype": "float32",
    "sha256": "bb6791dd84b258853989752d5253a58d545cce2188f90825d17dc299d3f5ec51"
   },
   "down.text_fusion.refiner_blocks.1.attn.to_gate": {
-   "shape": [
-    16,
-    2560
-   ],
+   "shape": [16, 2560],
    "dtype": "float32",
    "sha256": "a333425b80f410e6216a8fbf5a1df3f92edb4978d521bbabd541a5ecbc37be7e"
   },
   "down.text_fusion.refiner_blocks.1.attn.to_k": {
-   "shape": [
-    8,
-    2560
-   ],
+   "shape": [8, 2560],
    "dtype": "float32",
    "sha256": "ae4296ccf16d54df55f918c8fda09cd3b0d06464c758c7c3f1ce644a2739021b"
   },
   "down.text_fusion.refiner_blocks.1.attn.to_out.0": {
-   "shape": [
-    4,
-    2560
-   ],
+   "shape": [4, 2560],
    "dtype": "float32",
    "sha256": "1e2af336a97960730ef77cf142e2e465894d79365a794827a7ff78feebfd1728"
   },
   "down.text_fusion.refiner_blocks.1.attn.to_q": {
-   "shape": [
-    4,
-    2560
-   ],
+   "shape": [4, 2560],
    "dtype": "float32",
    "sha256": "5e4378b25c4c4d6c5269961057e93d97370d5e32ea566364ad2703e73edb7452"
   },
   "down.text_fusion.refiner_blocks.1.attn.to_v": {
-   "shape": [
-    12,
-    2560
-   ],
+   "shape": [12, 2560],
    "dtype": "float32",
    "sha256": "345871a9aeb4304f40a42b4b28ecf91f228777c813ff6241e53b3a835a425f56"
   },
   "down.text_fusion.refiner_blocks.1.ff.down": {
-   "shape": [
-    16,
-    6912
-   ],
+   "shape": [16, 6912],
    "dtype": "float32",
    "sha256": "88b2c26f52611f8000132d906bc1963237bd5bc69e2cd8faa5c2176ba1731782"
   },
   "down.text_fusion.refiner_blocks.1.ff.gate": {
-   "shape": [
-    8,
-    2560
-   ],
+   "shape": [8, 2560],
    "dtype": "float32",
    "sha256": "4ee6b95c4a5b2bcbdeb92a49eeecc1cd85550430dc7c800e745c644e43f70641"
   },
   "down.text_fusion.refiner_blocks.1.ff.up": {
-   "shape": [
-    12,
-    2560
-   ],
+   "shape": [12, 2560],
    "dtype": "float32",
    "sha256": "09200c89b63d591bf45db956a1c7f7833fb42cbdf60f12457ca3b05b393bf0c8"
   },
   "down.transformer_blocks.0.attn.to_gate": {
-   "shape": [
-    16,
-    6144
-   ],
+   "shape": [16, 6144],
    "dtype": "float32",
    "sha256": "d4b036f650e507726c952206f5a47db3ef07697c7db01737401b720ce194a37e"
   },
   "down.transformer_blocks.0.attn.to_k": {
-   "shape": [
-    8,
-    6144
-   ],
+   "shape": [8, 6144],
    "dtype": "float32",
    "sha256": "628657a2f04ead05dcd362fe77c987520b99c455791f7d640fb2d13a0867929a"
   },
   "down.transformer_blocks.0.attn.to_out.0": {
-   "shape": [
-    4,
-    6144
-   ],
+   "shape": [4, 6144],
    "dtype": "float32",
    "sha256": "fc1a027ca92dfa932ccdb3b11aa67dc8707af606193fd1b6c4fc8865f289fd00"
   },
   "down.transformer_blocks.0.attn.to_q": {
-   "shape": [
-    4,
-    6144
-   ],
+   "shape": [4, 6144],
    "dtype": "float32",
    "sha256": "59b0c064b415bab72e5f6ab4ece5e0bc99c3e27993849d1239e9ddd6845c413f"
   },
   "down.transformer_blocks.0.attn.to_v": {
-   "shape": [
-    12,
-    6144
-   ],
+   "shape": [12, 6144],
    "dtype": "float32",
    "sha256": "14c41ad72c2d01057e93752bf8fe40ec421fca09143e295e174be2bd4595ff99"
   },
   "down.transformer_blocks.0.ff.down": {
-   "shape": [
-    16,
-    16384
-   ],
+   "shape": [16, 16384],
    "dtype": "float32",
    "sha256": "5ce6f6f352abb50a9c4efbb1da3f40d1fcdc0c05b17a56aaefcade68ca19f771"
   },
   "down.transformer_blocks.0.ff.gate": {
-   "shape": [
-    8,
-    6144
-   ],
+   "shape": [8, 6144],
    "dtype": "float32",
    "sha256": "d4d871143180ddfebebcadab672df7b6317b35c36ceb238389fa41acda139194"
   },
   "down.transformer_blocks.0.ff.up": {
-   "shape": [
-    12,
-    6144
-   ],
+   "shape": [12, 6144],
    "dtype": "float32",
    "sha256": "b944134930e622332e2aff2d5c8518259f0446210bf685666907ddd6a88114ff"
   },
   "down.transformer_blocks.13.attn.to_gate": {
-   "shape": [
-    16,
-    6144
-   ],
+   "shape": [16, 6144],
    "dtype": "float32",
    "sha256": "0a027ed7579fed391fcfc20d64ac7fcef481f799062e3b8d4738da3b127b05c9"
   },
   "down.transformer_blocks.13.attn.to_k": {
-   "shape": [
-    8,
-    6144
-   ],
+   "shape": [8, 6144],
    "dtype": "float32",
    "sha256": "4f0c55b713196a1d7dfa2365657fca7b5d015390d901f889f2bb0b2f1b8615d8"
   },
   "down.transformer_blocks.13.attn.to_out.0": {
-   "shape": [
-    4,
-    6144
-   ],
+   "shape": [4, 6144],
    "dtype": "float32",
    "sha256": "66992ed6bbd5aa22cb6aae6c98fd3c0131b1c929e9df8f0cfbef2f9161b6aa6e"
   },
   "down.transformer_blocks.13.attn.to_q": {
-   "shape": [
-    4,
-    6144
-   ],
+   "shape": [4, 6144],
    "dtype": "float32",
    "sha256": "1e437b3eada035053cd988e3d6721d0893553b4d1f1d84d672a50beca06c1570"
   },
   "down.transformer_blocks.13.attn.to_v": {
-   "shape": [
-    12,
-    6144
-   ],
+   "shape": [12, 6144],
    "dtype": "float32",
    "sha256": "65dffb5185701a3eece724120198007458a165be39c81ad6e5cee9b288a9d1d6"
   },
   "down.transformer_blocks.13.ff.down": {
-   "shape": [
-    16,
-    16384
-   ],
+   "shape": [16, 16384],
    "dtype": "float32",
    "sha256": "c181d21e47e9fa144b1a4c0414fae1d05008fbd2a8f7bafe34f4f667f832ba0f"
   },
   "down.transformer_blocks.13.ff.gate": {
-   "shape": [
-    8,
-    6144
-   ],
+   "shape": [8, 6144],
    "dtype": "float32",
    "sha256": "4ddae66968beaa3f4e6387b61552b281eff49d650ad32ee4192386057b17d4f0"
   },
   "down.transformer_blocks.13.ff.up": {
-   "shape": [
-    12,
-    6144
-   ],
+   "shape": [12, 6144],
    "dtype": "float32",
    "sha256": "08ea22b6560e59d2b203741971178ae690f706d588f7f794144a478c79611db1"
   },
   "down.transformer_blocks.27.attn.to_gate": {
-   "shape": [
-    16,
-    6144
-   ],
+   "shape": [16, 6144],
    "dtype": "float32",
    "sha256": "a0bea7a7f389f6c303fbdf27e96304f24e6b411f553b239f3efc32979695797f"
   },
   "down.transformer_blocks.27.attn.to_k": {
-   "shape": [
-    8,
-    6144
-   ],
+   "shape": [8, 6144],
    "dtype": "float32",
    "sha256": "fe98000dd6e92edf46c6c6e05181b02e7457e17e186fb5d43d421797d6f8089f"
   },
   "down.transformer_blocks.27.attn.to_out.0": {
-   "shape": [
-    4,
-    6144
-   ],
+   "shape": [4, 6144],
    "dtype": "float32",
    "sha256": "158597f08c861229b7892a068bec52a7c9b112b6ce0d19d052f2f8cd77581fb6"
   },
   "down.transformer_blocks.27.attn.to_q": {
-   "shape": [
-    4,
-    6144
-   ],
+   "shape": [4, 6144],
    "dtype": "float32",
    "sha256": "fc768897fa45ee8ad852be1d123b2f20c1dc70988711ff74ab4c9f3f807e96d8"
   },
   "down.transformer_blocks.27.attn.to_v": {
-   "shape": [
-    12,
-    6144
-   ],
+   "shape": [12, 6144],
    "dtype": "float32",
    "sha256": "5e0a5bd93b03edae255fa24fd79946995f160dfd14d93bd692a04f7f9709e275"
   },
   "down.transformer_blocks.27.ff.down": {
-   "shape": [
-    16,
-    16384
-   ],
+   "shape": [16, 16384],
    "dtype": "float32",
    "sha256": "589b44fb75b1ffc01e8c9025175027d8dff249dbbabb225df603bfb37039d4e9"
   },
   "down.transformer_blocks.27.ff.gate": {
-   "shape": [
-    8,
-    6144
-   ],
+   "shape": [8, 6144],
    "dtype": "float32",
    "sha256": "4d7b404e530fa0b7556e6525e3818226199b1df9aedc0de7b67defc022537ab8"
   },
   "down.transformer_blocks.27.ff.up": {
-   "shape": [
-    12,
-    6144
-   ],
+   "shape": [12, 6144],
    "dtype": "float32",
    "sha256": "05a99ad0db22b5b39e42516f85842c5861326f8a9f51dbb1ba8e61a811d72858"
   },
   "down.txt_in.linear_1": {
-   "shape": [
-    8,
-    2560
-   ],
+   "shape": [8, 2560],
    "dtype": "float32",
    "sha256": "96f09f5bd6716aa8e9576fcf98e0b8e196ae939319e61a170c7ea34ec185b479"
   },
   "features": {
-   "shape": [
-    19,
-    30720
-   ],
+   "shape": [19, 30720],
    "dtype": "float32",
    "sha256": "aed9293f823f338c5f30a12d990e83dfc302ff8412875d2959ec7b5a13431248"
   },
   "first": {
-   "shape": [
-    1,
-    1024,
-    6144
-   ],
+   "shape": [1, 1024, 6144],
    "dtype": "float32",
    "sha256": "743f3c293f8961ace20f010bccb1144b74800822d825cdb22065b5405e05c0b0"
   },
   "in.blocks.0": {
-   "shape": [
-    1,
-    1043,
-    6144
-   ],
+   "shape": [1, 1043, 6144],
    "dtype": "float32",
    "sha256": "3bcb8c6a4feae2ba831217da4de32e1fda9dfe695c567aa2c1158ca8e4f9c19b"
   },
   "in.last": {
-   "shape": [
-    1,
-    1024,
-    6144
-   ],
+   "shape": [1, 1024, 6144],
    "dtype": "float32",
    "sha256": "88642cff435a2fcb3f389c70cdb323ab0bb65e13649489ff728c5b113bd8ed20"
   },
   "last": {
-   "shape": [
-    1,
-    1024,
-    64
-   ],
+   "shape": [1, 1024, 64],
    "dtype": "float32",
    "sha256": "3febd9c8497106e927a1570ec2e729a39a4a5745171f56813f2e7177b8dbaab8"
   },
   "latents": {
-   "shape": [
-    1,
-    16,
-    64,
-    64
-   ],
+   "shape": [1, 16, 64, 64],
    "dtype": "float32",
    "sha256": "abd2584892e5a09476db1359edc4b79ef2f699633c8e5949545c751bd5f4a0d9"
   },
   "position_ids": {
-   "shape": [
-    1043,
-    3
-   ],
+   "shape": [1043, 3],
    "dtype": "int32",
    "sha256": "9b62f6b471715670f97a24c35abf3d0676ea23704197721d2204c40d229a2e34"
   },
@@ -1340,438 +1006,267 @@
    "sha256": "9be87bae00e1dd8dbf473fb8439b14e4f9e3da217749730d53876c0406babf34"
   },
   "tmlp": {
-   "shape": [
-    1,
-    1,
-    6144
-   ],
+   "shape": [1, 1, 6144],
    "dtype": "float32",
    "sha256": "1d24ba089e3bdf62e6efcbebf26bbb1aaf4d61d6e557d844e1faa39e991aed23"
   },
   "tproj": {
-   "shape": [
-    1,
-    1,
-    36864
-   ],
+   "shape": [1, 1, 36864],
    "dtype": "float32",
    "sha256": "dd183dbd8f5a5151f79858535879b440784f8f45397566b5e04afbe1c54b4681"
   },
   "txtfusion.layerwise_blocks.0": {
-   "shape": [
-    19,
-    12,
-    2560
-   ],
+   "shape": [19, 12, 2560],
    "dtype": "float32",
    "sha256": "7289eba2644f8ee55892d2cded31c05ab646eced8c22df7bb529b2455a536ee5"
   },
   "txtfusion.layerwise_blocks.1": {
-   "shape": [
-    19,
-    12,
-    2560
-   ],
+   "shape": [19, 12, 2560],
    "dtype": "float32",
    "sha256": "dc8d33f1932ecc772a25f7bda8d9ec0dcb3b609554e9a04057be0f93b423d3a1"
   },
   "txtfusion.projector": {
-   "shape": [
-    1,
-    19,
-    2560
-   ],
+   "shape": [1, 19, 2560],
    "dtype": "float32",
    "sha256": "ffbe0f7c7536223fac42bccc092f70af0defc0276b28e2d3e9daaeb22233cc32"
   },
   "txtfusion.refiner_blocks.0": {
-   "shape": [
-    1,
-    19,
-    2560
-   ],
+   "shape": [1, 19, 2560],
    "dtype": "float32",
    "sha256": "89771c4903682598572138a06e2d196ac8de6c502a0ae27cb7eb2c63f4b64f7e"
   },
   "txtfusion.refiner_blocks.1": {
-   "shape": [
-    1,
-    19,
-    2560
-   ],
+   "shape": [1, 19, 2560],
    "dtype": "float32",
    "sha256": "a95229b7e7e150e4d60b1c3865810210b31a5f33a0b51e91bc5f64020d5b4559"
   },
   "txtmlp": {
-   "shape": [
-    1,
-    19,
-    6144
-   ],
+   "shape": [1, 19, 6144],
    "dtype": "float32",
    "sha256": "a57137eb1cf4c43f187f51cf80b397de14838fa63fdc5d98bbed3045457dfab0"
   },
   "up.final_layer.linear": {
-   "shape": [
-    64,
-    12
-   ],
+   "shape": [64, 12],
    "dtype": "float32",
    "sha256": "f039c639fb80b16983bba85556285c0cfe9a7945d5601bb4fb77a499e44357a8"
   },
   "up.img_in": {
-   "shape": [
-    6144,
-    4
-   ],
+   "shape": [6144, 4],
    "dtype": "float32",
    "sha256": "68ec820cfd7d0b76ba3280f6d47dd86a1cace954aae3ec511429607d867c4fac"
   },
   "up.text_fusion.layerwise_blocks.0.attn.to_gate": {
-   "shape": [
-    2560,
-    16
-   ],
+   "shape": [2560, 16],
    "dtype": "float32",
    "sha256": "21688bd47b42413e7710bb513a1d088f1c9b053eb9d33fb5959d945a981c6869"
   },
   "up.text_fusion.layerwise_blocks.0.attn.to_k": {
-   "shape": [
-    2560,
-    8
-   ],
+   "shape": [2560, 8],
    "dtype": "float32",
    "sha256": "85809a3f74ea8954e9205e212fcecab3cb7795fc4800dabfdd97cdc9c10d5813"
   },
   "up.text_fusion.layerwise_blocks.0.attn.to_out.0": {
-   "shape": [
-    2560,
-    4
-   ],
+   "shape": [2560, 4],
    "dtype": "float32",
    "sha256": "1fc592376bbc616c782f2fb9a6c56bfcd09a35548cee2e92334e7222481eedec"
   },
   "up.text_fusion.layerwise_blocks.0.attn.to_q": {
-   "shape": [
-    2560,
-    4
-   ],
+   "shape": [2560, 4],
    "dtype": "float32",
    "sha256": "5220f040c1c140d56124c55743b8553444b36c39f243fe3a48d735020a23ee76"
   },
   "up.text_fusion.layerwise_blocks.0.attn.to_v": {
-   "shape": [
-    2560,
-    12
-   ],
+   "shape": [2560, 12],
    "dtype": "float32",
    "sha256": "b7ac2a7fafdbb08e02ef9a217c03a1bed28d1781c5a9db9fff4c7fe2790a01da"
   },
   "up.text_fusion.layerwise_blocks.0.ff.down": {
-   "shape": [
-    2560,
-    16
-   ],
+   "shape": [2560, 16],
    "dtype": "float32",
    "sha256": "6ade0d6e74aebe0797ac3d8b69d984497f7df18c1b2ba7a86d6861e0003481c6"
   },
   "up.text_fusion.layerwise_blocks.0.ff.gate": {
-   "shape": [
-    6912,
-    8
-   ],
+   "shape": [6912, 8],
    "dtype": "float32",
    "sha256": "48981ab4d0d3c18c2e11a49fbcb752f80788848db91a1be7c286d851041ff4da"
   },
   "up.text_fusion.layerwise_blocks.0.ff.up": {
-   "shape": [
-    6912,
-    12
-   ],
+   "shape": [6912, 12],
    "dtype": "float32",
    "sha256": "6cee04c16e41f942867bf96a7715b5465bf3076c030aa996c49d4a9b3713da57"
   },
   "up.text_fusion.refiner_blocks.1.attn.to_gate": {
-   "shape": [
-    2560,
-    16
-   ],
+   "shape": [2560, 16],
    "dtype": "float32",
    "sha256": "0c9d6e670eed6e011bb55f57a0ebf662f0520bebfeba90f78e7af5c81a47da13"
   },
   "up.text_fusion.refiner_blocks.1.attn.to_k": {
-   "shape": [
-    2560,
-    8
-   ],
+   "shape": [2560, 8],
    "dtype": "float32",
    "sha256": "6227bd771a577d61c39052c296c4c0ec4f304f820305ce9c6dc1f953588a40dd"
   },
   "up.text_fusion.refiner_blocks.1.attn.to_out.0": {
-   "shape": [
-    2560,
-    4
-   ],
+   "shape": [2560, 4],
    "dtype": "float32",
    "sha256": "4d9b993e6a59237eaf419086e333357c24d9d397cd44260218f9924c0da1aa49"
   },
   "up.text_fusion.refiner_blocks.1.attn.to_q": {
-   "shape": [
-    2560,
-    4
-   ],
+   "shape": [2560, 4],
    "dtype": "float32",
    "sha256": "224f89eeb286ac6328e971c2ef5d0d9f06666c95c4a55e796f1b113aca4fdd51"
   },
   "up.text_fusion.refiner_blocks.1.attn.to_v": {
-   "shape": [
-    2560,
-    12
-   ],
+   "shape": [2560, 12],
    "dtype": "float32",
    "sha256": "061f648551c17c247d98b2dd26773310d0dd6c455a16d5eee433d65564610ba6"
   },
   "up.text_fusion.refiner_blocks.1.ff.down": {
-   "shape": [
-    2560,
-    16
-   ],
+   "shape": [2560, 16],
    "dtype": "float32",
    "sha256": "e02dad8a3b4f0ed0a08e651982d5d0741f278a9549a35329f5247a94c0af6db4"
   },
   "up.text_fusion.refiner_blocks.1.ff.gate": {
-   "shape": [
-    6912,
-    8
-   ],
+   "shape": [6912, 8],
    "dtype": "float32",
    "sha256": "a646b4f2fd7860917d60726d078da5df56645630d7a52a6bd37628e6628cf63d"
   },
   "up.text_fusion.refiner_blocks.1.ff.up": {
-   "shape": [
-    6912,
-    12
-   ],
+   "shape": [6912, 12],
    "dtype": "float32",
    "sha256": "36b42f5ffe886d51dddf12ca7359966cce90e252fe29d5d3f2d5a2ef41e2d067"
   },
   "up.transformer_blocks.0.attn.to_gate": {
-   "shape": [
-    6144,
-    16
-   ],
+   "shape": [6144, 16],
    "dtype": "float32",
    "sha256": "4faea56e8e2ebf64aee4b46690e71afbd0c62f214328f887588c0ff0b99ebd10"
   },
   "up.transformer_blocks.0.attn.to_k": {
-   "shape": [
-    1536,
-    8
-   ],
+   "shape": [1536, 8],
    "dtype": "float32",
    "sha256": "b957259f7bcaa24e52d2948aa14aacd0522fe6f4350064360d0721b4edf3a6ac"
   },
   "up.transformer_blocks.0.attn.to_out.0": {
-   "shape": [
-    6144,
-    4
-   ],
+   "shape": [6144, 4],
    "dtype": "float32",
    "sha256": "216163777db482e688a8f8a8772ef92b19c95d3ceee18427213cd7c7c742da2b"
   },
   "up.transformer_blocks.0.attn.to_q": {
-   "shape": [
-    6144,
-    4
-   ],
+   "shape": [6144, 4],
    "dtype": "float32",
    "sha256": "10560eb32d447ac64a6ec458d466e8424f51d13194185866f0a6b99ac4aaeb12"
   },
   "up.transformer_blocks.0.attn.to_v": {
-   "shape": [
-    1536,
-    12
-   ],
+   "shape": [1536, 12],
    "dtype": "float32",
    "sha256": "617c5626ccbdd66137199d6a801dc2b1ca514a25b6a2a103147b6146d57c2ee2"
   },
   "up.transformer_blocks.0.ff.down": {
-   "shape": [
-    6144,
-    16
-   ],
+   "shape": [6144, 16],
    "dtype": "float32",
    "sha256": "16397071b18405cbb82e9baa3adb249f22bb0bdcad00fc6694a934a61a45c2b3"
   },
   "up.transformer_blocks.0.ff.gate": {
-   "shape": [
-    16384,
-    8
-   ],
+   "shape": [16384, 8],
    "dtype": "float32",
    "sha256": "522d8c29a9dbb267cebc82561aac136dbab895e31a3d97a86401f67f9b236de9"
   },
   "up.transformer_blocks.0.ff.up": {
-   "shape": [
-    16384,
-    12
-   ],
+   "shape": [16384, 12],
    "dtype": "float32",
    "sha256": "f68df6c8739671b1ce748199ef2810292030d9709502a6398a8887dea14d3673"
   },
   "up.transformer_blocks.13.attn.to_gate": {
-   "shape": [
-    6144,
-    16
-   ],
+   "shape": [6144, 16],
    "dtype": "float32",
    "sha256": "97cc5b756f4a79c9553755f45e868bb07f4ea15372b7eb900b1b8b65706c2470"
   },
   "up.transformer_blocks.13.attn.to_k": {
-   "shape": [
-    1536,
-    8
-   ],
+   "shape": [1536, 8],
    "dtype": "float32",
    "sha256": "f3bcd0e8fb48606285bfd5a72f6c0e5f6a66bfc2ecdabb5b7c36af1f1df031f6"
   },
   "up.transformer_blocks.13.attn.to_out.0": {
-   "shape": [
-    6144,
-    4
-   ],
+   "shape": [6144, 4],
    "dtype": "float32",
    "sha256": "838b0d96a7042764146844aae6fc489470d5ef5947c24efc2e9d3b55a08aabbb"
   },
   "up.transformer_blocks.13.attn.to_q": {
-   "shape": [
-    6144,
-    4
-   ],
+   "shape": [6144, 4],
    "dtype": "float32",
    "sha256": "7773bf539862fbd30ccc5cdf1f11162fc8877164be0343069363333a16cd0cf4"
   },
   "up.transformer_blocks.13.attn.to_v": {
-   "shape": [
-    1536,
-    12
-   ],
+   "shape": [1536, 12],
    "dtype": "float32",
    "sha256": "5881aea3750e6feed52938d9c63ab21dce152caecc032fb53b35dd295d06cc76"
   },
   "up.transformer_blocks.13.ff.down": {
-   "shape": [
-    6144,
-    16
-   ],
+   "shape": [6144, 16],
    "dtype": "float32",
    "sha256": "be626a22e3b5a2b3c7867310d1c5df1b78c7e72b9ca0765e84199c2e4bc150a6"
   },
   "up.transformer_blocks.13.ff.gate": {
-   "shape": [
-    16384,
-    8
-   ],
+   "shape": [16384, 8],
    "dtype": "float32",
    "sha256": "e6fa0bf33b696d449a4dec8fa83e0e3b33858877f2325f319a2d18069d7622d6"
   },
   "up.transformer_blocks.13.ff.up": {
-   "shape": [
-    16384,
-    12
-   ],
+   "shape": [16384, 12],
    "dtype": "float32",
    "sha256": "bb7646687db1823e97d1d68f1a9bdbdadbe7d4271006ae4b98b6185cb47ae3da"
   },
   "up.transformer_blocks.27.attn.to_gate": {
-   "shape": [
-    6144,
-    16
-   ],
+   "shape": [6144, 16],
    "dtype": "float32",
    "sha256": "7da8bf27ddc799bf4fec2cf069db0f4c61c4e6d727994e2e29ef8e52b9ddd61a"
   },
   "up.transformer_blocks.27.attn.to_k": {
-   "shape": [
-    1536,
-    8
-   ],
+   "shape": [1536, 8],
    "dtype": "float32",
    "sha256": "54a0910db49ab43759a0006331c539302cc5fac610c3f8c0bc9e8a2ede3c9674"
   },
   "up.transformer_blocks.27.attn.to_out.0": {
-   "shape": [
-    6144,
-    4
-   ],
+   "shape": [6144, 4],
    "dtype": "float32",
    "sha256": "6cfd483d188fa30078534f226ec0f2e290d60424d4434e9be3fce5025fcca4ec"
   },
   "up.transformer_blocks.27.attn.to_q": {
-   "shape": [
-    6144,
-    4
-   ],
+   "shape": [6144, 4],
    "dtype": "float32",
    "sha256": "e8a2f5681f9602f7d0082b9bf6ada20a522bc0144a70370a8dd7460a1fac478d"
   },
   "up.transformer_blocks.27.attn.to_v": {
-   "shape": [
-    1536,
-    12
-   ],
+   "shape": [1536, 12],
    "dtype": "float32",
    "sha256": "64263d741a9329e1b72cf23d0fb713b4ad53236d6f09d9c5579f445116510c13"
   },
   "up.transformer_blocks.27.ff.down": {
-   "shape": [
-    6144,
-    16
-   ],
+   "shape": [6144, 16],
    "dtype": "float32",
    "sha256": "20631672cb48790a28d388134afb482e8f05d468a94d3724d2c1c9771e3208ca"
   },
   "up.transformer_blocks.27.ff.gate": {
-   "shape": [
-    16384,
-    8
-   ],
+   "shape": [16384, 8],
    "dtype": "float32",
    "sha256": "1899262389336f0906fdc81623fcdab0cb6b3f2b96333042d61782f8508112c1"
   },
   "up.transformer_blocks.27.ff.up": {
-   "shape": [
-    16384,
-    12
-   ],
+   "shape": [16384, 12],
    "dtype": "float32",
    "sha256": "b8ee905f9dfb0cbe2cf8609cff5bab385f0687519f63f2f11d2382ea1d353901"
   },
   "up.txt_in.linear_1": {
-   "shape": [
-    6144,
-    8
-   ],
+   "shape": [6144, 8],
    "dtype": "float32",
    "sha256": "02db506c0b37d674fb29ece1ee3a9936e15e8caed2a795752a71af5cd674b92b"
   },
   "velocity": {
-   "shape": [
-    1,
-    16,
-    64,
-    64
-   ],
+   "shape": [1, 16, 64, 64],
    "dtype": "float32",
    "sha256": "909730205506d1c0919d60bc0830b1a5301f3e21a66adf66e9b72f3f40a16b0b"
   },
   "velocity_bf16": {
-   "shape": [
-    1,
-    16,
-    64,
-    64
-   ],
+   "shape": [1, 16, 64, 64],
    "dtype": "float32",
    "sha256": "972186ac436d98745621677c75a532a83e2995caee1c0b230181f41ef6f8797b"
   }

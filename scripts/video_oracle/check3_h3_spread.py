@@ -244,9 +244,7 @@ def write(a) -> int:
     for p, d in zip(paths, docs):
         d["results"]["free_restart_spread"] = rec
         d["tolerances"].update(tols)
-        tmp = p.with_name(p.name + ".part")
-        tmp.write_text(json.dumps(d, indent=1) + "\n")
-        os.replace(tmp, p)
+        fixtures.write_json(p, d)
     for k, r in rows.items():
         print(f"[spread] {a.name} free {k}: spread {r['rel_l2']:.4f} "
               f"({r['run']}), twice the free gap "

@@ -4,13 +4,7 @@
  "check": 2,
  "family": "krea2",
  "script": "scripts/image_oracle/check2_krea2.py",
- "argv": [
-  "check2_krea2.py",
-  "--encoder",
-  "Qwen3-VL-4B-Instruct-Q8_0.gguf",
-  "--config",
-  "Qwen__Qwen-Image-2.1"
- ],
+ "argv": ["check2_krea2.py", "--encoder", "Qwen3-VL-4B-Instruct-Q8_0.gguf", "--config", "Qwen__Qwen-Image-2.1"],
  "oracle": {
   "python": "3.12.11",
   "platform": "macOS-26.5-arm64-arm-64bit",
@@ -62,20 +56,7 @@
    "long": "A narrow cobblestone street in an old harbor town at dusk, lined with three story houses painted ochre, teal and faded red. Laundry hangs on lines strung between the balconies, and a bicycle with a wicker basket leans against a green door. A fishmonger closes the shutters of a small shop while gulls circle above the masts in the harbor. Warm lamplight spills from a cafe where two old men play chess at a marble table, and a cat watches them from a windowsill full of geraniums. Puddles from an afternoon rain reflect the lamps and the violet sky, and the far end of the street opens onto the sea, where a lighthouse is just switching on. In the foreground a girl in a yellow raincoat crouches to inspect a snail on the curb, her boots splashed with mud. Behind her a baker carries a tray of round loaves dusted with flour toward a delivery van whose rear doors stand open. A hand painted sign above the bakery reads Panificio in chipped gold letters. Strings of small bulbs zigzag overhead, some of them dark, and a pigeon sits on the wire between two of them. On the left, a stone staircase climbs toward a chapel with a bell tower, its steps worn into shallow bowls by centuries of feet. Moss grows in the cracks, and someone has left a bunch of wildflowers on the third step. A scooter with a dented fender is parked at an angle beside a bollard shaped like a lion. The sky shades from deep indigo at the top of the frame to a band of apricot just above the horizon, with a thin crescent moon and a single bright planet. Fishing boats with blue and white hulls rock at their moorings, nets heaped on their decks, and a man in a wool cap coils rope on the quay. Far out on the water the running lights of a ferry move slowly toward an island whose hills are already black. The air looks cool and damp, with a faint haze that softens the distant lights into halos. Shot on medium format film with a normal lens at eye level, shallow depth of field on the girl and the snail, gentle grain, muted greens and warm highlights, no text other than the bakery sign, no watermark. The composition follows the curve of the street from the lower left corner to the lighthouse at the upper right, leading the eye past each small story along the way. Every window tells something: a family eating soup under a hanging lamp, a tailor pinning the hem of a coat on a wooden dummy, an empty room with a piano and a vase of dry roses, a boy practicing the violin with his music stand turned toward the glass. Rainwater still drips from the gutters, catching the light in bright beads, and the cobbles shine like the backs of beetles. A black dog trots out of an alley with a paper bag in its mouth, looking over its shoulder as if someone might follow."
   },
   "drop_index": 34,
-  "tap_layers": [
-   2,
-   5,
-   8,
-   11,
-   14,
-   17,
-   20,
-   23,
-   26,
-   29,
-   32,
-   35
-  ],
+  "tap_layers": [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35],
   "max_sequence_length": 512,
   "suffix_tokens": 5,
   "gguf_codecs": {
@@ -146,101 +127,67 @@
   },
   "rule": "relative L2 = 2 x the oracle's own bf16 against fp32 relative L2 of the same prompt; per-token cosine at least 1 - 4 (1 - c), c the oracle's own smallest per-token cosine of the same prompt"
  },
- "notes": [
-  "The bf16 model is the float32 one cast to bfloat16, with its rotary frequencies left in float32."
- ],
+ "notes": ["The bf16 model is the float32 one cast to bfloat16, with its rotary frequencies left in float32."],
  "created": "2026-10-16T18:15:03Z",
  "npz": "check2_krea2.npz",
  "tensors": {
   "features_empty": {
-   "shape": [
-    5,
-    30720
-   ],
+   "shape": [5, 30720],
    "dtype": "float32",
    "sha256": "a47047588f1a4751796df4833a3199e9fa3355edca534d773ab4e53cc33fbe07"
   },
   "features_empty_bf16": {
-   "shape": [
-    5,
-    30720
-   ],
+   "shape": [5, 30720],
    "dtype": "float32",
    "sha256": "042c8f141637eef2a0d989279757079f2ac9317ffab87899ab4817fb0103e067"
   },
   "features_long": {
-   "shape": [
-    512,
-    30720
-   ],
+   "shape": [512, 30720],
    "dtype": "float32",
    "sha256": "e967b8c63407a068551ae549d5cec9b8b55e4d02891941150e13e021a35a1089"
   },
   "features_long_bf16": {
-   "shape": [
-    512,
-    30720
-   ],
+   "shape": [512, 30720],
    "dtype": "float32",
    "sha256": "c89124c31cb45921a3bba2b29daee14446f17a62079f047c3916f3ff53c1e21d"
   },
   "features_non_ascii": {
-   "shape": [
-    42,
-    30720
-   ],
+   "shape": [42, 30720],
    "dtype": "float32",
    "sha256": "954e596cc78fcf3fe8dea0f047dfd8b52854fd76227874aee2daca0131169a05"
   },
   "features_non_ascii_bf16": {
-   "shape": [
-    42,
-    30720
-   ],
+   "shape": [42, 30720],
    "dtype": "float32",
    "sha256": "f0ab9d723a195363d599dbacfc109fc29fab205cd14e5efc7a365f589ba222ae"
   },
   "features_plain": {
-   "shape": [
-    33,
-    30720
-   ],
+   "shape": [33, 30720],
    "dtype": "float32",
    "sha256": "811128d73c767a209605b6b6585b955e834aa467ca1484e5cfa7c4e86c2c151a"
   },
   "features_plain_bf16": {
-   "shape": [
-    33,
-    30720
-   ],
+   "shape": [33, 30720],
    "dtype": "float32",
    "sha256": "e4560c619473f6146d28f17285d94dbb840f5c5d64ffdee84f18cab55b03b0cd"
   },
   "ids_empty": {
-   "shape": [
-    39
-   ],
+   "shape": [39],
    "dtype": "int64",
    "sha256": "7c64969197786781c75f3d8a9f622d18283b93ef01979e8d2f73fe7fe7dea51c"
   },
   "ids_long": {
-   "shape": [
-    546
-   ],
+   "shape": [546],
    "dtype": "int64",
    "sha256": "93a42f4d464d15e48666d14e71514fa9344b244a6221dd52c3d93d809cc5755d"
   },
   "ids_non_ascii": {
-   "shape": [
-    76
-   ],
+   "shape": [76],
    "dtype": "int64",
    "sha256": "05c22eb6ab8b328a8741c0832b996264ab8de6521f0b065da71f469445d03f87"
   },
   "ids_plain": {
-   "shape": [
-    67
-   ],
+   "shape": [67],
    "dtype": "int64",
    "sha256": "a3d497ab416caf25a5c29ff3234eaa2ea3675fb06fdfb075b60d3379249ac7ef"
   }
