@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import binascii
 import contextlib
+import functools
 import importlib
 import json
 import logging
@@ -308,11 +309,29 @@ def estimate(spec, fam, plan, s: dict, prompt: str, sizes, rewrites: bool,
                       f"memory: {got.describe()}; {got.hint()}", "size")
 
 
+def _keyframes(sent: dict, folder: str, take) -> dict:
+    """The path of each keyframe of ``sent`` ({name: (file, value)}), or
+    None: a file as sent, a data URL written to ``folder`` within the room
+    ``take(n)`` reserves. Each must be an image the server reads."""
+    keys = {}
+    for name, alias in (("first_frame", "input_reference"),
+                        ("last_frame", "last_frame")):
+        file, value = sent[name] if any(sent[name]) else sent[alias]
+        keys[name] = file if file is not None else (
+            None if value is None else _data_url(value, name, folder, take))
+    for name, v in keys.items():
+        if v is not None and not _pixels(v, name):
+            raise Refused(400, f"{name} is no image the server reads", name)
+    return keys
+
+
 def prepare(fields: dict, files: dict, folder: str, ffmpeg: str,
-            take=None) -> tuple:
+            take=None, in_turn=None) -> tuple:
     """``(record, params)`` of a job from the request's fields and files,
     or Refused. A data URL keyframe goes to ``folder`` within the room
-    ``take(n)`` reserves in the job store. Fields and files the route
+    ``take(n)`` reserves in the job store. ``in_turn(step)`` runs the
+    keyframes' decode, which the price of a JSON body counts, in the turn
+    the parses take; the rest runs out of it. Fields and files the route
     does not read are named in a warning, as the images API does."""
     from gmlx.commands import video as cmd
     from gmlx.video.registry import get_family
@@ -380,15 +399,8 @@ def prepare(fields: dict, files: dict, folder: str, ffmpeg: str,
     if any(sent["first_frame"]) and any(sent["input_reference"]):
         raise Refused(400, "first_frame and input_reference both name the "
                       "first frame; send one", "input_reference")
-    keys = {}
-    for name, alias in (("first_frame", "input_reference"),
-                        ("last_frame", "last_frame")):
-        file, value = sent[name] if any(sent[name]) else sent[alias]
-        keys[name] = file if file is not None else (
-            None if value is None else _data_url(value, name, folder, take))
-    for name, v in keys.items():
-        if v is not None and not _pixels(v, name):
-            raise Refused(400, f"{name} is no image the server reads", name)
+    step = functools.partial(_keyframes, sent, folder, take)
+    keys = step() if in_turn is None else in_turn(step)
     if isinstance(fields.get("guides"), list) and fields["guides"]:
         raise Refused(400, "guides take files: send the job as a multipart "
                       "form", "guides")
@@ -480,10 +492,15 @@ async def create(request: Request):
             log_refusal(e.status, str(e))
             raise Refused(e.status, str(e), e.param,
                           headers=e.headers) from None
-        # The keyframes decode in the turn the parses take: the price of
-        # a JSON body counts them.
-        record, params = await _in_turn(prepare, fields, files, folder,
-                                        ffmpeg, take)
+        loop = asyncio.get_running_loop()
+
+        def in_turn(step):
+            # From prepare's thread: the step waits for the turn on the
+            # loop and runs in a thread of its own.
+            return asyncio.run_coroutine_threadsafe(
+                _in_turn(step), loop).result()
+        record, params = await asyncio.to_thread(
+            prepare, fields, files, folder, ffmpeg, take, in_turn)
         try:
             job = await asyncio.to_thread(post.submit, record, params)
         except QueueFull as e:

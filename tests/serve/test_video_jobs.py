@@ -1290,20 +1290,30 @@ def _photo(w: int, h: int) -> bytes:
 
 def test_a_keyframe_decodes_in_the_parse_turn(routes, monkeypatch):
     """A JSON keyframe's decode is priced with its body, so it runs in the
-    turn the parses take, never beside another body's parse."""
+    turn the parses take, never beside another body's parse. The estimate,
+    which tokenizes the prompt, however long, runs out of the turn."""
     url = "data:image/png;base64," + base64.b64encode(_png()).decode()
-    body = json.dumps({"prompt": "a cat", "first_frame": url}).encode()
-    held: list = []
-    real = videos._data_url
+    body = json.dumps({"prompt": "a cat " * 10000,
+                       "first_frame": url}).encode()
+    held: dict = {}
 
-    def decode(*a):
-        held.append(any(t.locked() for t in body_intake._TURNS.values()))
-        return real(*a)
-    monkeypatch.setattr(videos, "_data_url", decode)
+    def turn_held():
+        return any(t.locked() for t in body_intake._TURNS.values())
+
+    def recorded(name, real):
+        def run(*a):
+            held.setdefault(name, []).append(turn_held())
+            return real(*a)
+        return run
+    monkeypatch.setattr(videos, "_data_url",
+                        recorded("decode", videos._data_url))
+    monkeypatch.setattr(videos, "_pixels", recorded("pixels", videos._pixels))
+    monkeypatch.setattr(videos, "estimate",
+                        recorded("estimate", videos.estimate))
     r = routes.client.post("/v1/videos", content=body,
                            headers={"content-type": "application/json"})
     assert r.status_code == 200, r.text
-    assert held == [True]
+    assert held == {"decode": [True], "pixels": [True], "estimate": [False]}
 
 
 def test_a_keyframe_job_is_read_within_its_price(routes, monkeypatch,
