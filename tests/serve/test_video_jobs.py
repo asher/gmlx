@@ -1125,7 +1125,7 @@ def test_a_guides_field_whose_parse_passes_the_memory_free_is_a_413(
     guides = "[" + ",".join(["{}"] * 50_000) + "]"
     body, ctype = _form({"prompt": "a cat", "guides": guides},
                         {"guide_0": _png(64, 64)})
-    monkeypatch.setattr(body_intake, "free_bytes", lambda: 4 << 20)
+    monkeypatch.setattr(body_intake, "_pool_free", lambda: 4 << 20)
     r = routes.client.post("/v1/videos", content=body,
                            headers={"content-type": ctype})
     assert r.status_code == 413, r.text
@@ -1220,7 +1220,7 @@ def test_a_json_body_past_the_free_figure_is_a_413_with_no_byte_read(
 
     from live_socket import closed, peer, send, serving
 
-    monkeypatch.setattr(body_intake, "free_bytes", lambda: 1 << 20)
+    monkeypatch.setattr(body_intake, "_pool_free", lambda: 1 << 20)
     with serving(routes.app) as port:
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
         other = peer(conn)
@@ -1244,7 +1244,7 @@ def test_a_video_body_refusal_is_in_the_server_log(routes, monkeypatch,
     monkeypatch.setattr(hardening, "_refusal_logs", {})
     body = b'{"prompt": "a cat"'
     if how == "memory":
-        monkeypatch.setattr(body_intake, "free_bytes", lambda: 1 << 10)
+        monkeypatch.setattr(body_intake, "_pool_free", lambda: 1 << 10)
         body = json.dumps({"prompt": "a cat " * 1000}).encode()
     r = routes.client.post("/v1/videos", content=body, headers={
         "content-type": "application/json"})
@@ -1291,7 +1291,7 @@ def test_a_video_json_body_is_priced_at_what_its_read_and_parse_hold(
                        "first_frame": url}).encode()
     need = body_intake.json_price(body)
     for free, status in ((need - 1, 413), (need, 200)):
-        monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
+        monkeypatch.setattr(body_intake, "_pool_free", lambda f=free: f)
         r = routes.client.post("/v1/videos", content=body,
                                headers={"content-type": "application/json"})
         assert r.status_code == status, r.text
@@ -1315,7 +1315,7 @@ def test_a_video_forms_text_is_priced_at_its_own_width(routes, monkeypatch,
     n = len(text.encode())
     need = math.ceil(n * 1.125) + n * (6 if wide else 1) + body_intake._SLACK
     for free, status in ((need - 1, 413), (need, 200)):
-        monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
+        monkeypatch.setattr(body_intake, "_pool_free", lambda f=free: f)
         r = routes.client.post("/v1/videos", content=body,
                                headers={"content-type": ctype})
         assert r.status_code == status, r.text
@@ -1424,7 +1424,7 @@ def test_a_keyframe_job_is_read_within_its_price(routes, monkeypatch,
                        "avance lentement", "first_frame": url},
                       ensure_ascii=False).encode()
     budget = 3 * len(body) + body_intake._SLACK
-    monkeypatch.setattr(body_intake, "free_bytes", lambda: budget)
+    monkeypatch.setattr(body_intake, "_pool_free", lambda: budget)
     r = routes.client.post("/v1/videos", content=body,
                            headers={"content-type": "application/json"})
     assert r.status_code == 200, r.text
@@ -1490,7 +1490,7 @@ def test_a_json_body_is_priced_by_what_its_parse_makes(routes, monkeypatch,
     body = _shaped(shape)
     need = body_intake.json_price(body)
     for free, status in ((need - 1, 413), (need, 200)):
-        monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
+        monkeypatch.setattr(body_intake, "_pool_free", lambda f=free: f)
         r = routes.client.post("/v1/videos", content=body,
                                headers={"content-type": "application/json"})
         assert r.status_code == status, r.text
@@ -1776,6 +1776,117 @@ def test_two_forms_that_each_fit_alone_cannot_pass_the_room_together(
     assert store.pending == {}
     assert len(store.jobs) == 1
     assert store.room() == (1 << 20) - len(_png() + pad)
+
+
+def _body_pool(monkeypatch, free: int) -> SimpleNamespace:
+    """A pool with ``free`` bytes of its budget free, and none admitted."""
+    from gmlx.serve.patches import _common
+
+    pool = SimpleNamespace(figures=SimpleNamespace(
+        budget=free, resident=0, incoming=0))
+    monkeypatch.setattr(_common, "_get_pool", lambda: pool)
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    return pool
+
+
+def _json_job(prompt: str, pad: int) -> bytes:
+    """A JSON job whose first frame, a data URL, is ``pad`` bytes long."""
+    url = "data:image/png;base64," + base64.b64encode(
+        _png() + b"\0" * pad).decode()
+    return json.dumps({"prompt": prompt, "first_frame": url}).encode()
+
+
+def test_two_json_jobs_that_each_fit_alone_cannot_hold_the_memory_together(
+        routes, monkeypatch):
+    """A JSON body counts what its read holds beside the other bodies
+    being read from before its first byte: the second of two bodies that
+    each fit the memory free alone, but not beside each other, is a 503
+    on its headers, naming what the first holds. The pool is never
+    booked."""
+    import http.client
+
+    from live_socket import send, serving
+
+    monkeypatch.setattr(body_intake, "STALL_S", 5.0)
+    a = _json_job("a cat", 3 << 20)
+    b = _json_job("a dog", 3 << 20)
+    # The first fits its parse; the second fits alone, not beside it.
+    need = body_intake.json_price(a)
+    assert body_intake.json_price(b) <= need < 4 * len(a)
+    pool = _body_pool(monkeypatch, need)
+    ctype = "application/json"
+    with serving(routes.app) as port:
+        ca = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        _start(ca, a[:64], len(a), ctype)
+        assert _until(lambda: bool(routes.store.pending))
+        counted = _until(
+            lambda: body_intake.free_bytes() == need - 2 * len(a))
+        cb = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        r = send(cb, "/v1/videos", b"", length=len(b), ctype=ctype)
+        cb.close()
+        assert r.status == 503, r.body
+        assert int(r.getheader("Retry-After")) > 0
+        assert json.loads(r.body)["error"]["message"] == (
+            f"the body of this request holds "
+            f"{body_intake._mib(2 * len(b), True)} as it is read and "
+            f"parsed, with {body_intake._mib(need)} of memory free beside "
+            f"the models loaded, and {body_intake._mib(2 * len(a))} of it is "
+            "held by uploads arriving now; send it again once they are "
+            "read")
+        assert counted
+        assert pool.figures.incoming == 0
+        ca.send(a[64:])
+        r = ca.getresponse()
+        assert r.status == 200, r.read()
+        r.read()
+        ca.close()
+        assert _until(lambda: body_intake.held_bytes() == 0)
+        cb = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        r = send(cb, "/v1/videos", b)
+        cb.close()
+        assert r.status == 200, r.body
+    assert body_intake.held_bytes() == 0
+    assert pool.figures.incoming == 0
+    assert len(routes.store.jobs) == 2
+
+
+@pytest.mark.parametrize("ending", ["bad json", "empty first_frame",
+                                    "client leaves", "stall"])
+def test_a_json_bodys_count_ends_however_its_request_ends(
+        routes, monkeypatch, ending):
+    """The count a JSON body holds ends on every exit of its request: a
+    parse refusal, the route's own 400, a client that leaves mid-body and
+    a body that stops sending. The pool is never booked."""
+    import http.client
+
+    from live_socket import send, serving
+
+    monkeypatch.setattr(body_intake, "STALL_S", 0.5)
+    pool = _body_pool(monkeypatch, 64 << 20)
+    body = {"bad json": b'{"prompt": "a cat",' + b" " * (1 << 20),
+            "empty first_frame": json.dumps(
+                {"prompt": "a cat", "first_frame": ""}).encode(),
+            "client leaves": _json_job("a cat", 1 << 20),
+            "stall": _json_job("a cat", 1 << 20)}[ending]
+    with serving(routes.app) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        if ending in ("bad json", "empty first_frame"):
+            r = send(conn, "/v1/videos", body)
+            assert r.status == 400, r.body
+        else:
+            _start(conn, body[:64], len(body), "application/json")
+            assert _until(
+                lambda: body_intake.held_bytes() == 2 * len(body))
+            assert pool.figures.incoming == 0
+            if ending == "client leaves":
+                conn.sock.close()
+            else:
+                r = conn.getresponse()
+                assert r.status == 408, r.read()
+        conn.close()
+        assert _until(lambda: body_intake.held_bytes() == 0)
+    assert pool.figures.incoming == 0
+    assert routes.store.jobs == {}
 
 
 def test_a_form_whose_client_leaves_frees_its_reservation(routes):
@@ -2088,7 +2199,7 @@ def test_a_forms_text_past_the_free_figure_is_a_413(routes, monkeypatch,
                                                      fields):
     """The text fields stay in RAM: their sum is priced against the
     memory free, and one field past it is the same 413."""
-    monkeypatch.setattr(body_intake, "free_bytes", lambda: 1 << 20)
+    monkeypatch.setattr(body_intake, "_pool_free", lambda: 1 << 20)
     body, ctype = _form(fields, {"first_frame": _png()})
     r = routes.client.post("/v1/videos", content=body,
                            headers={"content-type": ctype})

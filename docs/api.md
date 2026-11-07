@@ -326,6 +326,7 @@ cannot change it.
 | Memory runs out while a request streams | The [governor](glossary.md#governor) ends the largest request: `server_overloaded_shed`, `finish_reason` `shed` | `GMLX_GOVERNOR=0` |
 | A body over 64 MiB, or an audio form over 1024 MiB, to a route other than the image API, `POST /v1/videos` and the step routes | 413 before the body is read | None |
 | A body to the [image API](image-api.md), or a JSON body to [`POST /v1/videos`](video-api.md), whose read and parse need more than the memory free | 413 before the body is parsed, an image form's files are read, or an image decodes, with the body's size or the image's pixels and the memory free | `GMLX_OVERCOMMIT=1` |
+| A JSON body to [`POST /v1/videos`](video-api.md) that fits the memory free alone, but not beside the other bodies being read | 503 with `Retry-After`, before the body is read or parsed, with what those bodies hold | `GMLX_OVERCOMMIT=1` |
 | The text fields of an [image API](image-api.md) or [`POST /v1/videos`](video-api.md) form past the memory free | 413 once the text read passes the memory free, with the memory free | `GMLX_OVERCOMMIT=1` |
 | The files of a [`POST /v1/videos`](video-api.md) form larger than the room left in the video job store | 413 before the files are read, with their size and the room | [`video.store_max_bytes`](config.md#video-jobs) |
 | A JSON body or a form to the [image API](image-api.md) or [`POST /v1/videos`](video-api.md) that sends nothing for 60 s before its end | 408 | None |

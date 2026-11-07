@@ -35,6 +35,7 @@ import json
 import math
 import os
 import re
+import threading
 import weakref
 
 from starlette.requests import Request
@@ -56,16 +57,22 @@ class BodyRefused(Exception):
     """A body a route does not read: ``status``, the message, and the
     request field it names as ``param`` when there is one."""
 
-    def __init__(self, status: int, message: str, param: str | None = None):
+    def __init__(self, status: int, message: str, param: str | None = None,
+                 retry_after: int | None = None):
         super().__init__(message)
         self.status = status
         self.param = param
+        self.retry_after = retry_after
 
     @property
     def headers(self) -> dict:
-        """A 413 or a 408 leaves the body unread past its figure: the
-        answer ends the connection."""
-        return {"Connection": "close"} if self.status in (408, 413) else {}
+        """A 413, a 408 or a 503 leaves the body unread past its figure:
+        the answer ends the connection. A 503 says when to send again."""
+        out = ({"Connection": "close"} if self.status in (408, 413, 503)
+               else {})
+        if self.retry_after is not None:
+            out["Retry-After"] = str(self.retry_after)
+        return out
 
 
 def log_refusal(status: int, message: str) -> None:
@@ -97,7 +104,7 @@ def _mib(n: int, up: bool = False) -> str:
     raise AssertionError("unreachable")
 
 
-def free_bytes() -> int | None:
+def _pool_free() -> int | None:
     """The bytes free beside what the pool holds and the uploads admitted,
     from its figures with no lock, or None with no budget to price by
     (no pool, no working budget, or GMLX_OVERCOMMIT set)."""
@@ -114,6 +121,105 @@ def free_bytes() -> int | None:
     if not f.budget:
         return None
     return max(0, f.budget - f.resident - f.incoming)
+
+
+# The bytes the request bodies being read hold in RAM, each counted by its
+# BodyHold. The intake's own count, under its own lock: the pool never
+# sees it.
+_HELD_LOCK = threading.Lock()
+_held = 0
+
+
+def held_bytes() -> int:
+    """The bytes the request bodies being read hold, as counted."""
+    with _HELD_LOCK:
+        return _held
+
+
+def free_bytes() -> int | None:
+    """The bytes free beside what the pool holds, the uploads admitted and
+    the request bodies being read, or None with no budget to price by
+    (no pool, no working budget, or GMLX_OVERCOMMIT set)."""
+    free = _pool_free()
+    return None if free is None else max(0, free - held_bytes())
+
+
+class BodyHold:
+    """The bytes one request's body holds in RAM, counted beside the
+    other bodies being read from before its first byte until its route
+    drops what it parsed and calls :meth:`release`. A turn that runs on
+    the body (:func:`_in_turn`) keeps the count until its thread ends."""
+
+    def __init__(self) -> None:
+        self.n = 0
+        self._turns = 0
+        self._ended = False
+
+    def admit(self, need: int, free: int, over, add: int | None = None):
+        """Count ``add`` more bytes, by default up to ``need``, when
+        ``need``, what the body holds at its peak, fits ``free``, the
+        pool's figure, beside what the other bodies hold. Raises
+        ``over()``, its 413, when it does not fit alone, and a 503 when it
+        fits once the others are read."""
+        global _held
+        with _HELD_LOCK:
+            others = _held - self.n
+            if need <= free - others:
+                add = max(0, need - self.n) if add is None else add
+                _held += add
+                self.n += add
+                return
+        if need > free:
+            raise over()
+        raise _busy(need, free, others)
+
+    def _turn(self) -> None:
+        with _HELD_LOCK:
+            self._turns += 1
+
+    def _turn_ended(self) -> None:
+        with _HELD_LOCK:
+            self._turns -= 1
+            self._drop()
+
+    def release(self) -> None:
+        """The route dropped the body and what it parsed: the count ends,
+        or once the turn running on it ends."""
+        with _HELD_LOCK:
+            self._ended = True
+            self._drop()
+
+    def _drop(self) -> None:
+        global _held
+        if self._ended and not self._turns:
+            _held -= self.n
+            self.n = 0
+
+
+def _busy(need: int, free: int, others: int) -> BodyRefused:
+    """The 503 of a body that fits the memory free once the other bodies
+    being read, ``others`` bytes, are read."""
+    from .request_flow import deferred_retry_after
+
+    return BodyRefused(503, f"the body of this request holds "
+                       f"{_mib(need, True)} as it is read and parsed, "
+                       f"with {_mib(free)} of memory free beside the models "
+                       f"loaded{arriving_note(others)}; send it again once "
+                       "they are read", retry_after=deferred_retry_after())
+
+
+def _price(hold: BodyHold | None, need: int, free: int | None, over,
+           add: int | None = None) -> None:
+    """Price ``need`` bytes against ``free``: counted on ``hold`` beside
+    the other bodies (:meth:`BodyHold.admit`), or with no hold against
+    ``free`` alone. No figure, no price."""
+    if free is None:
+        return
+    if hold is None:
+        if need > free:
+            raise over()
+        return
+    hold.admit(need, free, over, add)
 
 
 def content_length(request) -> int | None:
@@ -398,16 +504,20 @@ def _min_price(n: int) -> int:
     return 2 * n
 
 
-async def _read_bytes(request: Request, n: int | None,
-                      free: int | None) -> bytearray:
+async def _read_bytes(request: Request, n: int | None, figure,
+                      hold: BodyHold | None = None) -> bytearray:
     """The body of ``request`` in one bytearray. It is held as pieces of
     _PIECE bytes or more, joined from its chunks as they arrive, until
     its end, so a client holds only the bytes it sent, however small its
     chunks, then moved into one, a piece at a time: at most the body
     twice, its read's price. A body past its Content-Length ``n`` is
     refused, and one with no length once :func:`_min_price` of what
-    arrived passes ``free``. Each chunk waits STALL_S seconds at most."""
-    pieces, size = [], 0
+    arrived passes ``figure()``; ``hold`` counts it at that price a
+    BODY_STEP at a time as it arrives. Each chunk waits STALL_S seconds at
+    most."""
+    from ..image_steps import BODY_STEP
+
+    pieces, size, counted = [], 0, 0
     pending = bytearray()
     it = request.stream().__aiter__()
     while True:
@@ -421,8 +531,15 @@ async def _read_bytes(request: Request, n: int | None,
         if n is not None and size > n:
             raise BodyRefused(400, "the request body is longer than its "
                               "Content-Length")
-        if n is None and free is not None and _min_price(size) > free:
-            raise _over_free(size, free, False, _min_price(size))
+        if n is None:
+            free, need = figure(), _min_price(size)
+            step = counted
+            while size > step:
+                step += BODY_STEP
+            _price(hold, need, free, functools.partial(
+                _over_free, size, free, False, need),
+                _min_price(step) - _min_price(counted))
+            counted = step
         if len(chunk) >= _PIECE and not pending:
             pieces.append(chunk)
             continue
@@ -447,13 +564,15 @@ async def _read_bytes(request: Request, n: int | None,
 _TURNS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
-async def _in_turn(fn, *args):
-    """``fn(*args)`` in a worker thread, one at a time. Each body is priced
-    against the same free figure, which books nothing, so the work its
-    price counts runs here: a JSON parse and the gate's checks, the decode
-    of a video job's keyframes and an images form's files. Two such peaks
-    never run at once. The wait is on the loop and books no memory. The
-    turn ends when the thread does, past a cancel of the request."""
+async def _in_turn(fn, *args, hold: BodyHold | None = None):
+    """``fn(*args)`` in a worker thread, one at a time. A body waiting for
+    its turn is counted at what it holds (:class:`BodyHold`), and the
+    peak its price counts runs here: a JSON parse and the gate's checks,
+    the decode of a video job's keyframes and an images form's files. Two
+    such peaks never run at once. The wait is on the loop and books no
+    memory. The turn ends when the thread does, past a cancel of the
+    request, and ``hold``, the count of the body it works on, lasts until
+    then."""
     loop = asyncio.get_running_loop()
     turn = _TURNS.get(loop)
     if turn is None:
@@ -464,9 +583,13 @@ async def _in_turn(fn, *args):
     except BaseException:
         turn.release()
         raise
+    if hold is not None:
+        hold._turn()
 
     def ended(task) -> None:
         turn.release()
+        if hold is not None:
+            hold._turn_ended()
         # A cancelled request never reads what its thread raised.
         if not task.cancelled():
             task.exception()
@@ -474,10 +597,12 @@ async def _in_turn(fn, *args):
     return await asyncio.shield(task)
 
 
-def _parse(box: list, path: str, ctype: str | None, free: int | None,
-           inline_only: bool, parsed, then=None):
+def _parse(box: list, path: str, ctype: str | None, figure,
+           inline_only: bool, parsed, then=None,
+           hold: BodyHold | None = None):
     """The JSON document of the body in ``box``, which this takes, so the
-    body is freed as its parse goes: priced against ``free``, escaped to
+    body is freed as its parse goes: priced against ``figure()``, read
+    now, beside the other bodies ``hold`` counts it with, escaped to
     ASCII, decoded and parsed once, then held to the media gate's checks,
     and ``then(doc, price)`` in its place with ``then``, ``price`` the
     bytes the parse was priced at. ``parsed`` is the length and document
@@ -502,7 +627,7 @@ def _parse(box: list, path: str, ctype: str | None, free: int | None,
         doc = parsed[1]
     else:
         try:
-            doc, price = _loads(box, free, _verifies(path))
+            doc, price = _loads(box, figure(), _verifies(path), hold)
         except RecursionError:
             raise BodyRefused(400, "the request body nests too deeply") \
                 from None
@@ -520,11 +645,12 @@ def _parse(box: list, path: str, ctype: str | None, free: int | None,
     return doc if then is None else then(doc, price)
 
 
-def _loads(box: list, free: int | None, verify: bool = False):
+def _loads(box: list, free: int | None, verify: bool = False,
+           hold: BodyHold | None = None):
     """``(doc, price)``: the document of the JSON body in ``box``, which
-    this takes, priced against ``free`` (:func:`json_price`), escaped to
-    ASCII, decoded and parsed once, and that price. Each step drops the
-    copy before it."""
+    this takes, priced against ``free`` (:func:`json_price`), on ``hold``
+    beside the other bodies when given, escaped to ASCII, decoded and
+    parsed once, and that price. Each step drops the copy before it."""
     buf = box.pop()
     encoding = json.detect_encoding(bytes(buf[:4]))
     wide = 0
@@ -535,13 +661,13 @@ def _loads(box: list, free: int | None, verify: bool = False):
         # str, at most twice its bytes, and that str in UTF-8, at most 1.5
         # times.
         need = math.ceil(4.5 * len(buf)) + _SLACK
-        if free is not None and need > free:
-            raise _parse_over_free(len(buf), need, free)
+        _price(hold, need, free,
+               functools.partial(_parse_over_free, len(buf), need, free))
         buf = buf.decode(encoding).encode("utf-8", "surrogatepass")
         wide = need
     need, high = _json_plan(buf, verify)
-    if free is not None and need > free:
-        raise _parse_over_free(len(buf), need, free)
+    _price(hold, need, free,
+           functools.partial(_parse_over_free, len(buf), need, free))
     if high:
         buf = _escaped(buf, high)
     text = buf.decode("utf-8", "surrogatepass")
@@ -582,7 +708,8 @@ def _parse_over_free(n: int, need: int, free: int) -> BodyRefused:
                        "unload a model to make room")
 
 
-async def read_json(request: Request, free: int | None = None, then=None):
+async def read_json(request: Request, free: int | None = None, then=None,
+                    hold: BodyHold | None = None):
     """The JSON document of the body of ``request``, ``{}`` for an empty
     body, held to the media gate's checks as the gate holds every route it
     reads, or ``then(doc, price)`` with ``then``, ``price`` the bytes the
@@ -594,22 +721,46 @@ async def read_json(request: Request, free: int | None = None, then=None):
     checks run in a worker thread, one body at a time (:func:`_in_turn`),
     which holds the only reference to the body. The body was priced
     whole, so an inline image takes no byte limit of its own; the item
-    count and the pixel limits hold."""
+    count and the pixel limits hold.
+
+    With the pool's figure, the body is counted beside the other bodies
+    being read (:class:`BodyHold`): at :func:`_min_price` of its
+    Content-Length from before its first byte, or a BODY_STEP at a time as
+    a body with none arrives, and at its parse's price in its turn,
+    against the figure read again there. A body that fits only once the
+    others are read is a 503. ``hold`` keeps the count until the route
+    releases it, once it drops the document; with none, the count ends as
+    this returns. An explicit ``free`` is a fixed figure, and nothing is
+    counted."""
     from ._common import SESSION_BODY_KEY, SESSION_SCOPE_KEY
 
+    own = None
     if free is None:
-        free = free_bytes()
-    n = content_length(request)
-    if n is not None and free is not None and _min_price(n) > free:
-        raise _over_free(n, free, True, _min_price(n))
-    box = [await _read_bytes(request, n, free)]
-    session = request.scope.get(SESSION_SCOPE_KEY) is not None
-    parsed = request.scope.pop(SESSION_BODY_KEY, None)
-    if not box[0]:
-        return {} if then is None else then({}, 0)
-    return await _in_turn(
-        _parse, box, request.url.path, request.headers.get("content-type"),
-        free, session, parsed, then)
+        figure = _pool_free
+        if hold is None:
+            hold = own = BodyHold()
+    else:
+        def figure():
+            return free
+        hold = None
+    try:
+        n = content_length(request)
+        if n is not None:
+            f = figure()
+            _price(hold, _min_price(n), f, functools.partial(
+                _over_free, n, f, True, _min_price(n)))
+        box = [await _read_bytes(request, n, figure, hold)]
+        session = request.scope.get(SESSION_SCOPE_KEY) is not None
+        parsed = request.scope.pop(SESSION_BODY_KEY, None)
+        if not box[0]:
+            return {} if then is None else then({}, 0)
+        return await _in_turn(
+            _parse, box, request.url.path,
+            request.headers.get("content-type"), figure, session, parsed,
+            then, hold, hold=hold)
+    finally:
+        if own is not None:
+            own.release()
 
 
 async def read_form_in_ram(request: Request, free: int | None = None,

@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import binascii
 import contextlib
+import functools
 import importlib
 import logging
 import os
@@ -33,6 +34,7 @@ import gmlx.serve.bridge_vlm as serving
 
 from ._common import _error_content, _remove_routes
 from .body_intake import (
+    BodyHold,
     BodyRefused,
     _in_turn,
     _mib,
@@ -485,6 +487,9 @@ async def create(request: Request):
     # Refused before the body is read: the answer ends the connection, so
     # the server does not drain a body it will not use.
     close = {"Connection": "close"}
+    # What the JSON body holds in RAM, counted beside the other bodies
+    # being read until the route drops it: past the keyframes, at its end.
+    hold = BodyHold()
     try:
         ffmpeg = media_programs.find("ffmpeg")
         if ffmpeg is None:
@@ -523,7 +528,7 @@ async def create(request: Request):
                         raise Refused(400, "guides is a JSON list",
                                       "guides") from None
             else:
-                fields = await read_json(request)
+                fields = await read_json(request, hold=hold)
                 if not isinstance(fields, dict):
                     raise Refused(400, "the body is no JSON object")
                 if isinstance(fields.get("guides"), str) and fields["guides"]:
@@ -538,7 +543,8 @@ async def create(request: Request):
         # A data URL keyframe decodes in the turn the parses take: the
         # price of a JSON body counts it. A cancel while it waits for the
         # turn ends before the keyframe is written.
-        keys = await (_in_turn if _inline(head.sent) else asyncio.to_thread)(
+        keys = await (functools.partial(_in_turn, hold=hold)
+                      if _inline(head.sent) else asyncio.to_thread)(
             _keyframes, head.sent, folder, take)
         record, params = await asyncio.to_thread(
             prepare_tail, head, keys, fields, files, ffmpeg, guides)
@@ -557,6 +563,8 @@ async def create(request: Request):
         # abandon runs in the executor, and nothing waits for it.
         asyncio.get_running_loop().run_in_executor(None, post.abandon)
         raise
+    finally:
+        hold.release()
     rec = await asyncio.to_thread(store.get, job.id)
     return JSONResponse(status_code=200, content=rec or job.record)
 

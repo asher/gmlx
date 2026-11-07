@@ -156,6 +156,7 @@ status 500, and keeps the ones that ended.
 | `seconds` past 15, or a `size` that is no multiple of 32 | 400 naming the field |
 | A clip too large for the memory left beside the pinned models | 413 with the plan's phases and what to change |
 | A JSON body that its read and parse cannot hold in the memory free | 413 naming both figures, before the body is parsed |
+| A JSON body that fits the memory free alone, but not beside the other bodies being read | 503 with `Retry-After`, naming what those bodies hold |
 | A form's text fields past the memory free | 413 naming the memory free, once the text read passes it |
 | A `guides` field whose parse cannot fit in the memory free | 413 naming `guides` and both figures, before it is parsed |
 | A form's files larger than the room left in the job store | 413 naming both figures, before the files are read |
