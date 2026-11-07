@@ -104,8 +104,8 @@ The job is the OpenAI video object, with a `gmlx` part:
 
 `status` runs from `queued` to `in_progress`, and ends `completed`,
 `failed` or `cancelled`. `seconds` is the clip's length, its frames over 24.
-`progress` is 5 once the job runs, counts the steps to 90 and the decode
-after them, and is 100 when the MP4 is written.
+`progress` is 0 until the prompt encode, 5 from it, counts the steps to 90
+and the decode after them, and is 100 when the MP4 is written.
 `gmlx.phase` names the work now running, `gmlx.step` the steps done, and
 `gmlx.eta_s` the seconds the job expects to take still. `revised_prompt`
 holds the upsampler's caption.
@@ -155,14 +155,16 @@ status 500, and keeps the ones that ended.
 | The entry's file is no video DiT, its chip, an adapter or its defaults are refused, or its default clip does not fit the working budget | 400 `video_model_mismatch` |
 | `seconds` past 15, or a `size` that is no multiple of 32 | 400 naming the field |
 | A clip too large for the memory left beside the pinned models | 413 with the plan's phases and what to change |
-| A JSON body that its read and parse cannot hold in the memory free | 413 naming both figures, before the body is read |
+| A JSON body that its read and parse cannot hold in the memory free | 413 naming both figures, before the body is parsed |
 | A form's text fields past the memory free | 413 naming the memory free, once the text read passes it |
+| A `guides` field whose parse cannot fit in the memory free | 413 naming `guides` and both figures, before it is parsed |
 | A form's files larger than the room left in the job store | 413 naming both figures, before the files are read |
+| A JSON body or a form that sends nothing for 60 s before its end | 408, and a form frees the room it held in the job store |
 | A JSON keyframe larger than the room left in the job store | 413 naming the keyframe and both figures |
 | A keyframe or guide image over 64 Mi pixels | 400 naming the field |
 | A guide video whose frames are over 64 Mi pixels | The job fails with 400 naming the guide, before a frame is read |
 | A guide video that does not fit in the clip from its frame | The job fails with 400 naming the guide |
-| A guide video whose encode does not fit beside the models loaded, even a few seconds at a time | The job fails with 400 naming the guide, the memory it needs and the memory free |
+| A guide video whose encode does not fit beside the models loaded, even a few seconds at a time | The job fails with 400 naming the guide: "... does not fit in memory beside the models now loaded: no window fits; the clip needs NEED, and FREE is free" |
 | `references` | 400 naming Ref2VA |
 | `prompt_upsampling: true` on an entry without an upsampler | 400 naming the `upsampler` setting |
 | An unknown or expired job | 404 `not_found` |

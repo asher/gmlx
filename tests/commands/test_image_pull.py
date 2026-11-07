@@ -1506,12 +1506,169 @@ def test_list_shows_a_video_entry_sized_by_the_files_it_loads(images,
     assert "video" in line and "fl2va" in line
 
 
-def test_rm_of_a_video_model_names_the_config_entry(images, capsys):
+def test_rm_of_a_video_model_keeps_what_others_use(images, capsys):
+    """h3 and fasth3 as video pull writes them, sharing the encoder and
+    the VAEs, the encoder an image entry's too: each rm takes the files
+    no other entry loads, and its entry. A LoRA stays, as it does for an
+    image model."""
     lib, cfg = images
-    cfg.write_text(cfg.read_text() + _VIDEO_CFG)
-    assert manage.cmd_rm(["h3", "--config", str(cfg), "--yes"]) == 2
-    assert "remove its entry from video_models" in capsys.readouterr().err
-    assert "h3:" in cfg.read_text()
+    for f in ("h3.gguf", "fasth3.gguf", "v.safetensors", "a.safetensors",
+              "taeh3.safetensors", "lora.safetensors"):
+        (lib / f).write_bytes(b"x" * 100)
+    cfg.write_text(cfg.read_text() + _VIDEO_CFG + "  fasth3:\n"
+                   "    path: fasth3.gguf\n    encoder: own.gguf\n"
+                   "    vae: v.safetensors\n    audio_vae: a.safetensors\n")
+    assert manage.cmd_rm(["h3", "--config", str(cfg), "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert not (lib / "h3.gguf").exists()
+    assert not (lib / "taeh3.safetensors").exists()
+    for f in ("own.gguf", "v.safetensors", "a.safetensors",
+              "lora.safetensors", "fasth3.gguf"):
+        assert (lib / f).exists(), f
+    assert "encoder kept: another model uses it" in out
+    assert "removed 2 files" in out and "config entry" in out
+    assert set(_cfg(cfg).video_models) == {"fasth3"}
+    assert manage.cmd_rm(["fasth3", "--config", str(cfg), "--yes",
+                          "--json"]) == 0
+    rec = json.loads(capsys.readouterr().out)
+    assert (rec["kind"], rec["config_entry_removed"]) == ("video", True)
+    assert sorted(os.path.basename(p) for p in rec["files_deleted"]) == [
+        "a.safetensors", "fasth3.gguf", "v.safetensors"]
+    assert (lib / "own.gguf").exists()
+    c = _cfg(cfg)
+    assert c.video_models == {} and set(c.image_models) == {"zit", "qi", "qt"}
+
+
+@pytest.mark.parametrize("kind", ["image", "video"])
+def test_rm_keeps_a_file_a_chat_model_reads_audio_through(images, capsys,
+                                                          kind):
+    """A chat model's speech companion, named by its ``asr``, stays when
+    an image or video entry that names the same file is removed."""
+    lib, cfg = images
+    for f in ("h3.gguf", "v.safetensors", "a.safetensors"):
+        (lib / f).write_bytes(b"x" * 100)
+    text = cfg.read_text().replace(
+        "  vl:\n    path: vl.gguf\n",
+        "  vl:\n    path: vl.gguf\n    asr: own.gguf\n")
+    if kind == "video":
+        text += ("video_models:\n  h3:\n    path: h3.gguf\n"
+                 "    encoder: own.gguf\n    vae: v.safetensors\n"
+                 "    audio_vae: a.safetensors\n")
+        # qt shares vl, so own.gguf is the video encoder and vl's asr.
+        text = text.replace("    encoder: own.gguf\n"
+                            "    encoder_mmproj: tower.gguf\n",
+                            "    encoder: vl\n")
+    cfg.write_text(text)
+    entry = "qt" if kind == "image" else "h3"
+    assert manage.cmd_rm([entry, "--config", str(cfg), "--yes"]) == 0
+    assert (lib / "own.gguf").exists()
+    assert "encoder kept: another model uses it" in capsys.readouterr().out
+
+
+_CASE_ENTRIES = {
+    "chat": ("m2", "models:\n", "models:\n  m2:\n    path: m2.gguf\n"
+             "    mmproj: Tower.gguf\n"),
+    "image": ("q2", "image_models:\n", "image_models:\n  q2:\n"
+              "    path: q2.gguf\n    encoder: own2.gguf\n"
+              "    encoder_mmproj: Tower.gguf\n    vae: q2vae.gguf\n"),
+    "video": ("h3", None, "video_models:\n  h3:\n    path: h3.gguf\n"
+              "    encoder: own2.gguf\n    encoder_mmproj: Tower.gguf\n"
+              "    vae: v.safetensors\n    audio_vae: a.safetensors\n"),
+}
+
+
+@pytest.mark.parametrize("kind", ["chat", "image", "video"])
+def test_rm_keeps_a_file_another_entry_names_in_another_case(images, capsys,
+                                                             kind):
+    """On a volume that folds case, Tower.gguf is the tower.gguf vl and qt
+    load: rm of an entry that names it so keeps it."""
+    lib, cfg = images
+    if not (lib / "TOWER.gguf").exists():
+        pytest.skip("the volume tells case apart")
+    for f in ("m2.gguf", "q2.gguf", "own2.gguf", "q2vae.gguf", "h3.gguf",
+              "v.safetensors", "a.safetensors"):
+        (lib / f).write_bytes(b"x" * 100)
+    entry, anchor, block = _CASE_ENTRIES[kind]
+    text = cfg.read_text()
+    text = text.replace(anchor, block, 1) if anchor else text + block
+    cfg.write_text(text)
+    assert manage.cmd_rm([entry, "--config", str(cfg), "--yes"]) == 0
+    assert (lib / "tower.gguf").exists()
+    assert not (lib / f"{entry}.gguf").exists()
+    assert "kept: another model" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("kind, entry", [("chat", "m2"), ("image", "zit"),
+                                         ("video", "h3")])
+def test_rm_never_takes_a_file_of_the_name_from_the_cwd(images, capsys,
+                                                        monkeypatch, tmp_path,
+                                                        kind, entry):
+    """An entry whose file is gone from model_dirs is removed with its
+    file reported missing, and a file of that name in the folder rm runs
+    from stays."""
+    lib, cfg = images
+    text = cfg.read_text()
+    if kind == "chat":
+        text = text.replace("models:\n", "models:\n  m2:\n"
+                            "    path: m2.gguf\n", 1)
+    elif kind == "video":
+        text += ("video_models:\n  h3:\n    path: h3.gguf\n"
+                 "    encoder: own.gguf\n    vae: v.safetensors\n"
+                 "    audio_vae: a.safetensors\n")
+    cfg.write_text(text)
+    (lib / f"{entry}.gguf").unlink(missing_ok=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / f"{entry}.gguf").write_bytes(b"mine")
+    monkeypatch.chdir(work)
+    assert manage.cmd_rm([entry, "--config", str(cfg), "--yes"]) == 0
+    assert (work / f"{entry}.gguf").read_bytes() == b"mine"
+    assert entry not in {**_cfg(cfg).models, **_cfg(cfg).image_models,
+                         **_cfg(cfg).video_models}
+
+
+def test_rm_of_an_image_model_a_killed_pull_left_without_its_dit(images,
+                                                                 capsys):
+    """An image entry whose DiT a killed pull left missing has what the
+    pull left where it would be removed and listed: the old copy of an
+    update, the partial download and its sha256 mark."""
+    lib, cfg = images
+    (lib / "qt.gguf").unlink()
+    left = ("qt.gguf.old", "qt.gguf.part", "qt.gguf.part.sha256")
+    for name in left:
+        (lib / name).write_bytes(b"x")
+    assert manage.cmd_rm(["qt", "--config", str(cfg), "--yes"]) == 0
+    plan = capsys.readouterr().out
+    assert all(str(lib / name) in plan for name in left), plan
+    assert not list(lib.glob("qt.gguf*"))
+    assert (lib / "qvae.gguf").exists() and (lib / "tower.gguf").exists()
+
+
+@pytest.mark.parametrize("kind", ["image", "video"])
+def test_rm_refuses_the_upsampler_of_an_image_or_video_model(images, capsys,
+                                                             kind):
+    """A chat model an image or video entry names as its upsampler is
+    refused, naming the entry, and the config still loads."""
+    lib, cfg = images
+    text = cfg.read_text().replace("models:\n", "models:\n  writer:\n"
+                                   "    path: writer.gguf\n", 1)
+    (lib / "writer.gguf").write_bytes(b"x" * 100)
+    if kind == "image":
+        text = text.replace("  qt:\n    path: qt.gguf\n",
+                            "  qt:\n    path: qt.gguf\n"
+                            "    upsampler: writer\n")
+    else:
+        text += ("video_models:\n  h3:\n    path: h3.gguf\n"
+                 "    encoder: own.gguf\n    vae: v.safetensors\n"
+                 "    audio_vae: a.safetensors\n    upsampler: writer\n")
+    cfg.write_text(text)
+    assert manage.cmd_rm(["writer", "--config", str(cfg), "--yes"]) == 2
+    entry = "qt" if kind == "image" else "h3"
+    assert capsys.readouterr().err == (
+        f"error: writer is the prompt upsampler of {kind} model {entry}; "
+        "remove it first, or point `upsampler:` at another model\n")
+    assert (lib / "writer.gguf").exists()
+    assert "writer" in _cfg(cfg).models
 
 
 def test_rm_of_an_image_model_keeps_what_others_use(images, capsys):

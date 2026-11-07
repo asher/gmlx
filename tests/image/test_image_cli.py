@@ -137,6 +137,162 @@ def test_cli_latents_equal_sample_with_the_seed_noise(env, tmp_path, capsys):
     assert env.checks[0]["height"] == 32 and env.checks[0]["width"] == 48
 
 
+def test_the_latents_land_at_the_path_given(env, tmp_path):
+    """A --save-latent path without .npz, in a folder not made yet, is
+    written as given, not beside it with .npz added."""
+    lat = tmp_path / "lat" / "run1"
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                     "--seed", "5", "--output",
+                                     str(tmp_path / "a.png"),
+                                     "--save-latent", str(lat)]) == 0
+    assert np.load(lat)["seeds"].tolist() == [5]
+    assert [p.name for p in lat.parent.iterdir()] == ["run1"]
+
+
+def test_a_latent_path_at_a_symlink_writes_its_target(env, tmp_path):
+    """A --save-latent path that is a symlink keeps the link and writes
+    the latents to the file it names, as a plain write to it would."""
+    target = tmp_path / "store" / "run1.npz"
+    target.parent.mkdir()
+    np.savez(target, seeds=np.ones(3))
+    link = tmp_path / "lat.npz"
+    link.symlink_to(target)
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                     "--seed", "5", "--output",
+                                     str(tmp_path / "a.png"),
+                                     "--save-latent", str(link)]) == 0
+    assert link.is_symlink() and link.resolve() == target.resolve()
+    assert np.load(target)["seeds"].tolist() == [5]
+    assert [p.name for p in target.parent.iterdir()] == ["run1.npz"]
+
+
+def test_a_latent_link_whose_links_loop_is_refused_before_the_run(
+        env, tmp_path, capsys):
+    """A --save-latent path whose symlinks loop is refused, naming it,
+    before the model loads, and the links stay: it is not replaced with
+    a file."""
+    link, other = tmp_path / "lat.npz", tmp_path / "other.npz"
+    link.symlink_to(other)
+    other.symlink_to(link)
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                     "--output", str(tmp_path / "a.png"),
+                                     "--save-latent", str(link)]) == 1
+    assert f"cannot write {link}: its symlinks loop" in (
+        capsys.readouterr().err)
+    assert env.pipes == []
+    assert link.is_symlink() and other.is_symlink()
+
+
+def test_a_dangling_latent_link_writes_its_target_and_its_folders(
+        env, tmp_path):
+    """A --save-latent link to a file not made yet, in folders not made
+    yet, makes them and writes the file there; the link stays."""
+    target = tmp_path / "store" / "day" / "run1.npz"
+    link = tmp_path / "lat.npz"
+    link.symlink_to(target)
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                     "--seed", "5", "--output",
+                                     str(tmp_path / "a.png"),
+                                     "--save-latent", str(link)]) == 0
+    assert link.is_symlink()
+    assert np.load(target)["seeds"].tolist() == [5]
+    assert [p.name for p in target.parent.iterdir()] == ["run1.npz"]
+
+
+def test_an_output_link_to_a_folder_not_made_is_written_at_the_link(
+        env, tmp_path):
+    """An --output that is a symlink into a folder that cannot be made,
+    such as a volume not mounted, is probed at the link, where the image
+    is written, and not refused for the folder it names."""
+    volumes = tmp_path / "volumes"
+    volumes.mkdir()
+    link = tmp_path / "a.png"
+    link.symlink_to(volumes / "card" / "a.png")
+    volumes.chmod(0o500)
+    try:
+        assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                         "--seed", "5", "--output",
+                                         str(link)]) == 0
+    finally:
+        volumes.chmod(0o700)
+    assert not link.is_symlink() and link.stat().st_size > 0
+    assert list(volumes.iterdir()) == []
+
+
+def test_a_quoted_home_latent_path_is_checked_where_it_is_written(
+        env, tmp_path, monkeypatch, capsys):
+    """A --save-latent of '~/lat.npz', quoted so the shell leaves the ~,
+    is checked in the home folder it is written to: one that cannot be
+    written is refused before the model loads, not after the run."""
+    import stat
+
+    home = tmp_path / "home"
+    home.mkdir()
+    home.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    monkeypatch.setenv("HOME", str(home))
+    try:
+        rc = umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                       "--output", str(tmp_path / "a.png"),
+                                       "--save-latent", "~/lat.npz"])
+    finally:
+        home.chmod(stat.S_IRWXU)
+    assert rc == 1
+    assert f"cannot write {home}/lat.npz" in capsys.readouterr().err
+    assert env.pipes == [] and not (tmp_path / "~").exists()
+
+
+def test_a_failed_latent_write_keeps_the_file_there(env, tmp_path,
+                                                    monkeypatch, capsys):
+    """A latent write that fails part way, as on a full disk, leaves the
+    file an earlier run wrote, and no part file."""
+    lat = tmp_path / "lat" / "x.npz"
+    lat.parent.mkdir()
+    np.savez(lat, seeds=np.ones(3))
+    before = lat.read_bytes()
+    savez = np.savez
+
+    def full(file, **arrays):
+        f = open(file, "wb") if isinstance(file, (str, os.PathLike)) \
+            else file
+        f.write(b"PK\x03\x04 part of a zip")
+        f.flush()
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(np, "savez", full)
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                     "--output", str(tmp_path / "a.png"),
+                                     "--save-latent", str(lat)]) == 1
+    monkeypatch.setattr(np, "savez", savez)
+    assert "No space left on device" in capsys.readouterr().err
+    assert lat.read_bytes() == before
+    assert [p.name for p in lat.parent.iterdir()] == ["x.npz"]
+
+
+def test_the_latent_part_file_is_on_disk_before_its_rename(env, tmp_path,
+                                                          monkeypatch):
+    """The part file is synced before it takes the latents' name, so a
+    power loss after the rename never leaves an empty file there."""
+    lat = tmp_path / "x.npz"
+    events = []
+    fsync, replace = os.fsync, os.replace
+
+    def synced(fd):
+        events.append(("fsync", os.fstat(fd).st_size))
+        return fsync(fd)
+
+    def renamed(src, dst):
+        events.append(("replace", os.path.basename(src)))
+        return replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", synced)
+    monkeypatch.setattr(os, "replace", renamed)
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                     "--output", str(tmp_path / "a.png"),
+                                     "--save-latent", str(lat)]) == 0
+    i = events.index(("replace", "x.npz.part"))
+    assert events[i - 1] == ("fsync", lat.stat().st_size)
+
+
 def test_a_variant_with_fixed_sigmas_runs_them_and_no_other_count(
         env, tmp_path, capsys, monkeypatch):
     import dataclasses

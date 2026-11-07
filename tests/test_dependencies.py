@@ -304,3 +304,29 @@ def test_a_failed_lazy_export_names_only_core_requirements(monkeypatch):
     named = {_canonical(n) for n in re.split(r",\s*(?:and\s+)?", m.group(1))}
     assert named <= set(_core()), named - set(_core())
 
+
+
+def test_the_python_floor_leaves_out_the_semaphore_that_stays_locked():
+    """On 3.11.0 an asyncio.Semaphore stays locked when a woken waiter is
+    cancelled (gh-97545), which would strand every later body parse behind
+    the serve parse turn. 3.11.1 fixed it."""
+    from packaging.specifiers import SpecifierSet
+
+    floor = SpecifierSet(_project()["requires-python"])
+    assert "3.11.0" not in floor
+    assert "3.11.1" in floor
+
+
+def test_each_standalone_script_states_the_projects_python_floor():
+    """The inline script headers of the converters and the end-to-end
+    runner's generated agents name the floor pyproject.toml does."""
+    import re
+
+    floor = _project()["requires-python"]
+    stated = {}
+    for path in [*_ROOT.glob("scripts/**/*.py"),
+                 *_ROOT.glob("tests/e2e/**/*.py")]:
+        for got in re.findall(r'requires-python = "([^"]+)"', path.read_text()):
+            stated.setdefault(got, []).append(path.relative_to(_ROOT).as_posix())
+    assert stated, "no script states a floor"
+    assert set(stated) == {floor}, stated

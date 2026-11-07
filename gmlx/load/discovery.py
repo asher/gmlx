@@ -853,7 +853,7 @@ def discovered_models(cfg, *, progress=False, images=None) -> list[ModelCfg]:
                 encoder_ids[rp] = m.id
                 if m.mmproj:
                     tower_ids.add(m.id)
-    for im in cfg.image_models.values():
+    for im in (*cfg.image_models.values(), *cfg.video_models.values()):
         try:
             rp = resolve_path(im.path, cfg.model_dirs)
         except ConfigError:

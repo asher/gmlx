@@ -42,7 +42,7 @@ import time
 from collections import OrderedDict
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 
 import gmlx.load.loadlog as loadlog
@@ -249,6 +249,15 @@ class _Store:
 
 
 STORE = _Store()
+
+
+class _Aside(NamedTuple):
+    """A turn's answer that it waits on the releases queued on the other
+    worker: the bytes it is short of, and the running count of the bytes
+    their releases freed as it saw it."""
+
+    short: int
+    freed: int
 
 
 class _Ledger:
@@ -591,6 +600,10 @@ class _ResidencyPool:
         # not put yet.
         self._tearing = 0
         self._incoming = 0
+        # The tearing bytes of the pipelines each worker kind releases.
+        self._tearing_kind = dict.fromkeys(_WORKER_KINDS, 0)
+        # The running count of the tearing bytes each worker kind freed.
+        self._freed_kind = dict.fromkeys(_WORKER_KINDS, 0)
         # Injectable for tests: the measured room; an entry's LoRA figures
         # ({request key: bytes}, own bytes) from its caches; the shed of an
         # entry's request LoRA bytes and of the idle uploads, each returning
@@ -1004,8 +1017,13 @@ class _ResidencyPool:
         it keeps and ``beside`` the other entries its job holds, such as a
         borrowed encoder, which count as its own. Sheds idle LoRA bytes,
         evicts idle models as a cold load does, measures and books, or
-        waits for chat models in use within the deadline. Raises
-        LoraRefused: 413 when no unload makes room, else 503 with
+        waits for chat models in use within the deadline. A release
+        queued on the other worker frees its bytes first: after it sheds
+        and before it evicts, the turn waits on it until the bytes freed
+        cover its shortfall, within one window of half the deadline left
+        when it first waits, which it may wait in more than once; the
+        rest keeps the wait for the build lock.
+        Raises LoraRefused: 413 when no unload makes room, else 503 with
         Retry-After."""
         from .capacity import overcommit
 
@@ -1030,8 +1048,10 @@ class _ResidencyPool:
         if ok:
             return
         err = None
+        aside_end = None
         while True:
-            left = deadline - time.monotonic()
+            now = time.monotonic()
+            left = deadline - now
             if err is not None and left <= 0:
                 raise err
             if not self._build_lock.acquire(timeout=max(0.0, left)):
@@ -1043,12 +1063,30 @@ class _ResidencyPool:
                     raise self._late_503(owner, need, subject, retry, head,
                                          beside)
             try:
-                got = self._turn_room(owner, need, subject, hold, held,
-                                      store, retry, over, beside)
+                got = self._turn_room(
+                    owner, need, subject, hold, held, store, retry, over,
+                    beside, aside=left > 0 and (aside_end is None
+                                                or now < aside_end))
             finally:
                 self._build_lock.release()
             if got is None:
                 return
+            if isinstance(got, _Aside):
+                # Off the build lock, which the release may wait on. One
+                # window, half the deadline left as the turn first waits:
+                # past it, the turn evicts as before, with the rest to
+                # wait for the build lock.
+                if aside_end is None:
+                    t = time.monotonic()
+                    aside_end = t + (deadline - t) / 2
+                with self._lock:
+                    while (self._aside(owner) > 0 and self._aside_freed(owner)
+                           - got.freed < got.short):
+                        left = aside_end - time.monotonic()
+                        if left <= 0:
+                            break
+                        self._idle.wait(left)
+                continue
             seen, err = got
             with self._lock:
                 while self._releases == seen:
@@ -1058,16 +1096,26 @@ class _ResidencyPool:
                     self._idle.wait(left)
 
     def _turn_room(self, owner, need, subject, hold, held, store, retry,
-                   over, beside):
+                   over, beside, aside: bool = True):
         """Under the build lock: shed, evict, measure, then check and book
-        in one hold. Returns None when booked, or (the release count, the
-        503) to wait on."""
+        in one hold. Returns None when booked, (the release count, the
+        503) to wait on, or, with ``aside``, an _Aside when the releases
+        queued on the other worker free the bytes the turn is still short
+        of after it sheds: the turn waits on them before it picks a
+        victim."""
         self._hit("turn")
         head = None if over else self._measured_lora_room()
         with self._lock:
             short = self._shortfall(owner, need, head, self._uploads())
         if short > 0:
             self._shed_for(owner, short, hold, store)
+            if aside and not over and self._has_aside(owner):
+                head = self._measured_lora_room()
+                with self._lock:
+                    short = self._shortfall(owner, need, head,
+                                            self._uploads())
+                    if 0 < short <= self._aside(owner):
+                        return _Aside(short, self._aside_freed(owner))
         torn: list = []
         released: list = []
         try:
@@ -1615,15 +1663,17 @@ class _ResidencyPool:
 
     def _reapable(self, entry, now) -> bool:
         """Under _lock: whether the reaper takes ``entry``, idle past its
-        TTL and neither pinned, kept nor held by an image or video job."""
+        TTL and neither pinned, kept nor held past a preload's lifetime
+        hold."""
         if (entry.pinned or entry.model_path in self._keep_paths
                 or not entry.ttl or entry.ttl <= 0):
             return False
         if now - entry.last_access < entry.ttl:
             return False
-        # An image or video job is not in the server's in-flight count;
-        # its hold is.
-        return not (entry.is_image and entry.busy > 0)
+        # A job is not in the server's in-flight count; its hold is: an
+        # image or video job, and the chat model one rewrites its prompt
+        # or encodes through.
+        return entry.busy <= entry.retained
 
     def _reap_locked(self, now, torn: list, reaped: list) -> None:
         """Under _lock: take the entries idle past their TTL out of the
@@ -1737,7 +1787,7 @@ class _ResidencyPool:
                 break
             if e.is_image:
                 kinds.add(e.kind)
-            held -= e.footprint
+            held -= self._entry_bytes(e)
             count -= 1
         return frozenset(kinds)
 
@@ -1824,8 +1874,41 @@ class _ResidencyPool:
             self._proxy._last_entry = None
         entry.tearing = self._entry_bytes(entry)
         self._tearing += entry.tearing
+        if entry.is_image:
+            self._tearing_kind[entry.kind] += entry.tearing
         entry.lora = None
         torn.append(entry)
+
+    def _torn(self, kind, n: int) -> None:
+        """Under _lock: ``n`` tearing bytes, of a pipeline of worker
+        ``kind`` or of a chat model (None), are gone. A turn that waits on
+        the other worker's release wakes."""
+        self._tearing = max(0, self._tearing - n)
+        if kind is not None:
+            left = max(0, self._tearing_kind[kind] - n)
+            self._freed_kind[kind] += self._tearing_kind[kind] - left
+            self._tearing_kind[kind] = left
+        self._publish()
+        if n:
+            self._idle.notify_all()
+
+    def _has_aside(self, owner) -> bool:
+        with self._lock:
+            return self._aside(owner) > 0
+
+    def _aside(self, owner) -> int:
+        """Under _lock: the tearing bytes of the pipelines the other worker
+        than the turn's of ``owner`` releases. With the build lock held,
+        each is a release queued there by a teardown done after it dropped
+        the lock, which frees its bytes once it runs."""
+        kind = _owner_kind(owner)
+        return sum(n for k, n in self._tearing_kind.items() if k != kind)
+
+    def _aside_freed(self, owner) -> int:
+        """Under _lock: the running count of the bytes the releases on the
+        other worker than the turn's of ``owner`` freed."""
+        kind = _owner_kind(owner)
+        return sum(n for k, n in self._freed_kind.items() if k != kind)
 
     def _teardown_all(self, torn: list, released: list) -> None:
         """Tear down the entries taken out of the pool, with no _lock held:
@@ -1845,8 +1928,7 @@ class _ResidencyPool:
                 # An image entry's bytes went with its pipeline.
                 with self._lock:
                     n, entry.tearing = entry.tearing, 0
-                    self._tearing = max(0, self._tearing - n)
-                    self._publish()
+                    self._torn(entry.kind if entry.is_image else None, n)
         if first is not None:
             raise first
 
@@ -2422,8 +2504,7 @@ class _ResidencyPool:
             finally:
                 if n:
                     with self._lock:
-                        self._tearing = max(0, self._tearing - n)
-                        self._publish()
+                        self._torn(kind, n)
 
     def _teardown_chat(self, entry: _Entry):
         from . import bridge_vlm as _serving

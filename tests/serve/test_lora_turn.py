@@ -222,7 +222,7 @@ def job(pool, e, key, need, **kw):
             pool.caches[e.model_path].items[key] = int(need)
         finally:
             pool.lora_settle(e, "the test's LoRA")
-    on_worker(run)
+    on_worker(run, e.kind)
 
 
 def live_sums(pool):
@@ -327,6 +327,292 @@ def test_a_video_turn_evicts_its_own_idle_entries_and_chat(monkeypatch):
     assert not pool.entry_resident(old) and not pool.entry_resident(qwen)
     assert pool.entry_resident(zimage)
     assert pool.release_threads == {"old": "video-worker-test"}
+
+
+def test_a_video_turn_waits_on_an_image_release_before_it_evicts(
+        monkeypatch):
+    """An unload of an image model, as its job ends, releases its pipeline
+    on the image worker once the build lock drops, so its 3 GB still
+    count as the video turn takes the lock. The turn waits on that
+    release, which makes its room, where it evicted the idle chat
+    model."""
+    pool = make_pool(monkeypatch, 10, retry=LONG)
+    zimage = image(pool, "zimage", 3)
+    qwen = chat(pool, "qwen3", 3, busy=0)
+    v = video(pool, "v", 3, busy=True)
+    # The unload does not hold the image worker: its job held it at the
+    # unload's reservation.
+    monkeypatch.setattr(residency, "_holds_image_worker", lambda: False)
+    fp, load, release = pool._image_fns
+    at, go, either = threading.Event(), threading.Event(), threading.Event()
+
+    def queued(box):
+        # Queued on the image worker behind its next job.
+        at.set()
+        go.wait()
+        release(box)
+    pool._image_fns = (fp, load, queued)
+    w = waits(pool)
+    cond_wait = w.wait
+
+    def wait(timeout=None):
+        either.set()
+        return cond_wait(timeout)
+    w.wait = wait
+    unload = start("unload", lambda: pool.evict("zimage"))
+    at.wait()
+    assert not pool.entry_resident(zimage)
+    done = threading.Event()
+
+    def run():
+        try:
+            pool.lora_turn(v, 3 * GB, subject="the test's LoRA")
+            done.set()
+        finally:
+            either.set()
+    job = start("video-worker-test", run)
+    try:
+        either.wait()
+        assert not done.is_set(), "the turn did not wait on the release"
+        w.waiting.wait()
+    finally:
+        go.set()
+    finish(*job)
+    finish(*unload)
+    assert pool.entry_resident(qwen)
+    assert v.lora.pending == 3 * GB
+    assert pool.figures.tearing == 0
+
+
+class Queued:
+    """Unloads of image entries whose pipeline releases are queued on the
+    image worker behind a job: each runs once its ``go`` is set."""
+
+    def __init__(self, pool, monkeypatch, *names):
+        # The unload does not hold the image worker: its job held it at
+        # the unload's reservation.
+        monkeypatch.setattr(residency, "_holds_image_worker", lambda: False)
+        fp, load, release = pool._image_fns
+        self.at = {n: threading.Event() for n in names}
+        self.go = {n: threading.Event() for n in names}
+
+        def queued(box):
+            name = box[-1].name
+            self.at[name].set()
+            self.go[name].wait()
+            release(box)
+        pool._image_fns = (fp, load, queued)
+        self.unloads = {}
+        for n in names:
+            self.unloads[n] = start(f"unload-{n}", lambda n=n: pool.evict(n))
+            self.at[n].wait()
+
+    def run(self, *names):
+        for n in names or list(self.unloads):
+            self.go[n].set()
+            if n in self.unloads:
+                finish(*self.unloads.pop(n))
+
+
+class BuildLock:
+    """The pool's build lock, setting ``blocked`` when a turn finds it
+    held by another thread once ``armed`` is set."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.armed = threading.Event()
+        self.blocked = threading.Event()
+
+    def acquire(self, blocking=True, timeout=-1):
+        if self.armed.is_set() and self.lock.acquire(blocking=False):
+            return True
+        if self.armed.is_set():
+            self.blocked.set()
+        return self.lock.acquire(blocking, timeout)
+
+    def release(self):
+        self.lock.release()
+
+    def __enter__(self):
+        self.acquire()
+
+    def __exit__(self, *exc):
+        self.release()
+
+
+def slow_first_pass(pool, monkeypatch, seconds):
+    """The turn's clock runs ``seconds`` ahead at each shed, as a shed of
+    large caches takes that long, with no sleep."""
+    import time
+
+    ahead = [0.0]
+    monkeypatch.setattr(residency, "time", SimpleNamespace(
+        monotonic=lambda: time.monotonic() + ahead[0], sleep=time.sleep,
+        time=time.time))
+    shed = pool._lora_shed
+
+    def slow(*a):
+        ahead[0] += seconds
+        return shed(*a)
+    pool._lora_shed = slow
+
+
+def test_a_turn_evicts_once_its_wait_on_a_stuck_release_elapses(
+        monkeypatch):
+    """A release queued behind a job that does not end keeps its bytes:
+    the turn waits on it for half the deadline left after a slow shed,
+    then evicts the idle chat model and books, with the release still
+    counted."""
+    pool = make_pool(monkeypatch, 10, retry=1)
+    image(pool, "zimage", 3)
+    qwen = chat(pool, "qwen3", 3, busy=0)
+    v = video(pool, "v", 3, busy=True)
+    q = Queued(pool, monkeypatch, "zimage")
+    w = waits(pool)
+    slow_first_pass(pool, monkeypatch, 0.6)
+    try:
+        turn(pool, v, 3 * GB)
+        assert not pool.entry_resident(qwen)
+        assert v.lora.pending == 3 * GB
+        assert pool.figures.tearing == 3 * GB
+        # Half the 0.4 s left once the 0.6 s shed is done.
+        assert w.timeouts and 0 < w.timeouts[0] <= 0.2
+    finally:
+        q.run()
+    assert pool.figures.tearing == 0
+
+
+def test_a_turn_waits_for_the_build_lock_after_its_wait_aside(
+        monkeypatch):
+    """The wait on a release takes half the deadline: a build that holds
+    the lock as it ends makes the turn wait for it and evict, not 503."""
+    pool = make_pool(monkeypatch, 10, retry=2)
+    image(pool, "zimage", 3)
+    qwen = chat(pool, "qwen3", 3, busy=0)
+    v = video(pool, "v", 3, busy=True)
+    q = Queued(pool, monkeypatch, "zimage")
+    lock = pool._build_lock = BuildLock()
+    w = waits(pool)
+    try:
+        job = start("video-worker-test", lambda: pool.lora_turn(
+            v, 3 * GB, subject="the test's LoRA"))
+        w.waiting.wait()
+        with lock:
+            lock.armed.set()
+            lock.blocked.wait()
+        finish(*job)
+        assert not pool.entry_resident(qwen)
+        assert v.lora.pending == 3 * GB
+    finally:
+        q.run()
+
+
+def test_a_turn_short_of_more_than_a_release_frees_does_not_wait(
+        monkeypatch):
+    """A release on the other worker that frees less than the turn is
+    short of leaves it to evict anyway: the turn evicts at once."""
+    pool = make_pool(monkeypatch, 10, retry=1)
+    image(pool, "zimage", 1)
+    qwen = chat(pool, "qwen3", 3, busy=0)
+    v = video(pool, "v", 4, busy=True)
+    q = Queued(pool, monkeypatch, "zimage")
+    w = waits(pool)
+    try:
+        # 1 + 3 + 4 held of 10: 4 GB more is 2 GB short, 1 GB tearing.
+        turn(pool, v, 4 * GB)
+        assert not pool.entry_resident(qwen)
+        assert v.lora.pending == 4 * GB
+        assert w.timeouts == []
+    finally:
+        q.run()
+
+
+def test_a_turn_whose_shed_covers_it_books_beside_a_queued_release(
+        monkeypatch):
+    """The turn sheds its own idle LoRA bytes before it looks at a release
+    queued on the other worker: when the shed covers it, it books with no
+    wait and evicts nothing."""
+    pool = make_pool(monkeypatch, 12, retry=1)
+    image(pool, "zimage", 3)
+    qwen = chat(pool, "qwen3", 3, busy=0)
+    v = video(pool, "v", 3, busy=True)
+    job(pool, v, "old", 2 * GB)
+    q = Queued(pool, monkeypatch, "zimage")
+    w = waits(pool)
+    try:
+        # 3 + 3 + 3 + 2 held of 12: 2 GB more is 1 GB short, and the
+        # idle 2 GB of "old" covers it.
+        turn(pool, v, 2 * GB)
+        assert w.timeouts == []
+        assert pool.entry_resident(qwen)
+        assert pool.caches["v"].items == {}
+        assert v.lora.pending == 2 * GB
+    finally:
+        q.run()
+
+
+def test_a_turn_stops_waiting_once_the_first_of_two_releases_covers_it(
+        monkeypatch):
+    """Two releases queued on the image worker: the first frees what the
+    turn is short of, so it books then, with the second still queued."""
+    pool = make_pool(monkeypatch, 12, retry=LONG)
+    image(pool, "za", 2)
+    image(pool, "zb", 3)
+    qwen = chat(pool, "qwen3", 3, busy=0)
+    v = video(pool, "v", 3, busy=True)
+    q = Queued(pool, monkeypatch, "za", "zb")
+    w = waits(pool)
+    done = threading.Event()
+
+    def run():
+        pool.lora_turn(v, 2 * GB, subject="the test's LoRA")
+        done.set()
+    job_ = start("video-worker-test", run)
+    try:
+        # 2 + 3 + 3 + 3 held of 12: 2 GB more is 1 GB short.
+        w.waiting.wait()
+        q.run("za")
+        done.wait()
+        finish(*job_)
+        assert pool.entry_resident(qwen)
+        assert v.lora.pending == 2 * GB
+        assert pool.figures.tearing == 3 * GB
+    finally:
+        q.run()
+
+
+def test_a_release_queued_during_the_wait_does_not_hide_the_bytes_freed(
+        monkeypatch):
+    """A second release queued on the image worker while the turn waits
+    adds to the bytes tearing down: the first release still frees what the
+    turn is short of, so it books then."""
+    pool = make_pool(monkeypatch, 12, retry=LONG)
+    image(pool, "za", 2)
+    image(pool, "zb", 3)
+    qwen = chat(pool, "qwen3", 3, busy=0)
+    v = video(pool, "v", 3, busy=True)
+    q = Queued(pool, monkeypatch, "za")
+    w = waits(pool)
+    done = threading.Event()
+
+    def run():
+        pool.lora_turn(v, 2 * GB, subject="the test's LoRA")
+        done.set()
+    job_ = start("video-worker-test", run)
+    try:
+        # 2 + 3 + 3 + 3 held of 12: 2 GB more is 1 GB short.
+        w.waiting.wait()
+        q.at["zb"], q.go["zb"] = threading.Event(), threading.Event()
+        q.unloads["zb"] = start("unload-zb", lambda: pool.evict("zb"))
+        q.at["zb"].wait()
+        q.run("za")
+        done.wait()
+        finish(*job_)
+        assert pool.entry_resident(qwen)
+        assert v.lora.pending == 2 * GB
+        assert pool.figures.tearing == 3 * GB
+    finally:
+        q.run()
 
 
 def test_a_video_turn_sheds_an_idle_upload_with_the_image_worker_busy(
@@ -1379,6 +1665,24 @@ def test_a_cold_load_that_evicts_on_both_workers_holds_image_then_video(
     assert sorted(p.name for p in pool.released) == ["clip", "zimage"]
 
 
+def test_a_cold_load_counts_a_victims_lora_bytes_when_it_picks_workers(
+        monkeypatch):
+    """An idle image entry holds 3 GB of LoRA factors beside its 2 GB of
+    weights. Its eviction makes the room of an image load, so the load
+    holds the image worker alone, and not the video worker of the idle
+    clip it leaves resident."""
+    pool = make_pool(monkeypatch, 10)
+    zimage = image(pool, "zimage", 2, busy=True)
+    job(pool, zimage, "z1", 3 * GB)
+    pool.release(zimage)
+    clip = video(pool, "clip", 3)
+    order = _recorded_holds(monkeypatch, pool)
+    pool.release(pool.acquire("new", None, IMAGE_KIND,
+                              build_spec=spec("new", 5)))
+    assert order == [IMAGE_KIND]
+    assert not pool.entry_resident(zimage) and pool.entry_resident(clip)
+
+
 @pytest.mark.parametrize("seed", [1, 2, 3])
 def test_two_workers_turn_at_once_and_never_release_on_each_other(
         monkeypatch, seed):
@@ -1438,20 +1742,23 @@ def test_two_workers_turn_at_once_and_never_release_on_each_other(
     def loads():
         rng = random.Random(seed)
         n = 0
-        while not stop.is_set():
-            kind = rng.choice([IMAGE_KIND, VIDEO_KIND])
-            name = f"{kind[5]}{n}"
-            n += 1
-            kinds[name] = kind
-            make = image if kind == IMAGE_KIND else video
-            make(pool, name, rng.randrange(1, 4))
-            if rng.random() < 0.3:
-                es = entries(rng.choice([IMAGE_KIND, VIDEO_KIND]))
-                if es:
-                    try:
-                        pool.evict(rng.choice(es).model_path)
-                    except residency.ModelBusyError:
-                        pass
+        try:
+            while not stop.is_set():
+                kind = rng.choice([IMAGE_KIND, VIDEO_KIND])
+                name = f"{kind[5]}{n}"
+                n += 1
+                kinds[name] = kind
+                make = image if kind == IMAGE_KIND else video
+                make(pool, name, rng.randrange(1, 4))
+                if rng.random() < 0.3:
+                    es = entries(rng.choice([IMAGE_KIND, VIDEO_KIND]))
+                    if es:
+                        try:
+                            pool.evict(rng.choice(es).model_path)
+                        except residency.ModelBusyError:
+                            pass
+        except BaseException as err:  # noqa: BLE001 - reported below
+            errors.append(err)
 
     loader = threading.Thread(target=loads, daemon=True)
     loader.start()

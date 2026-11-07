@@ -17,6 +17,8 @@ channels: mono on both, more than two mixed down by ffmpeg.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import re
 import shutil
@@ -186,6 +188,74 @@ class Mux:
         else:
             self.abort()
         return False
+
+
+_WRITTEN = re.compile(r"(frame_[0-9]{6}\.png|audio\.wav)(\.part)?")
+
+
+def clear_frames(folder: str) -> None:
+    """Remove the files a clip's frames take in ``folder``: the PNGs of
+    :func:`write_frames`, ``audio.wav`` and their part files, so an
+    earlier, longer clip leaves none past this one's end. Other files
+    stay."""
+    for e in os.scandir(folder):
+        if _WRITTEN.fullmatch(e.name) and not e.is_dir(follow_symlinks=False):
+            os.remove(e.path)
+
+
+def _unlocked(folder: str, e: OSError) -> str:
+    return (f"warning: cannot lock the frames folder {folder} "
+            f"({e.strerror}), so its frames are written without the lock: "
+            "a second run on it must not start before this one ends")
+
+
+def lock_refusal(folder: str) -> str | None:
+    """The line to print when the filesystem of ``folder``, or of the
+    nearest folder above it that exists, cannot lock it: flock fails with
+    any error but a held lock (ENOTSUP on some SMB and FUSE mounts, ENOLCK
+    on NFS without locks, EINVAL on others). None when it can, or when
+    that folder cannot be opened to try (one the user may write into but
+    not read): :func:`frames_lock` then tries the folder the run makes."""
+    d = os.path.abspath(folder)
+    while not os.path.isdir(d) and os.path.dirname(d) != d:
+        d = os.path.dirname(d)
+    try:
+        fd = os.open(d, os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        pass                        # another run holds it
+    except OSError as e:
+        return _unlocked(folder, e)
+    finally:
+        os.close(fd)
+    return None
+
+
+@contextlib.contextmanager
+def frames_lock(folder: str, log=None):
+    """Hold ``folder`` for one run's frames, so a second run on it waits
+    until the first has written its last frame and ``audio.wav`` before
+    it clears any of them. ``log`` gets a line when the run waits. A
+    folder flock fails on for any reason but a held lock is held without
+    the lock, and ``log`` gets a line that says so."""
+    fd = os.open(folder, os.O_RDONLY)
+    try:
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if log is not None:
+                    log(f"waiting for another run writing frames to {folder}")
+                fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as e:
+            if log is not None:
+                log(_unlocked(folder, e))
+        yield
+    finally:
+        os.close(fd)
 
 
 def write_frames(folder: str, frames, start: int) -> int:

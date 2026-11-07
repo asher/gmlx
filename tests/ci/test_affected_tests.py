@@ -150,3 +150,27 @@ def test_a_docs_change_selects_the_docs_tests(tree):
 def test_another_file_selects_the_tests_that_name_it(tree):
     (tree / "tests" / "test_entry.py").write_text("CRATE = 'crates/gmlx-entry'\n")
     assert at.select(["crates/gmlx-entry/src/session.rs"], tree) == (["tests/test_entry.py"], [])
+
+
+def _committed(*folders: str) -> list[str]:
+    return _git(_ROOT, "ls-files", *folders).splitlines()
+
+
+def test_the_oracle_fixtures_runners_and_workflows_select_the_tests_that_read_them():
+    fixtures = _committed("tests/fixtures/video/oracle", "tests/fixtures/image/oracle")
+    workflows = _committed("gmlx/comfyui_pack/example_workflows", "tests/comfyui_pack/workflows")
+    runners = ["scripts/video_oracle/run.py", "scripts/image_oracle/run.py"]
+    assert fixtures and workflows
+    tests, unmatched = at.select([*fixtures, *workflows, *runners], _ROOT)
+    assert unmatched == []
+    scan = at.Scan(_ROOT)
+    for path, reader in [
+            ("tests/fixtures/video/oracle/check3_h3_last_64x64x5.manifest.json",
+             "tests/video/test_video_check3_h3.py"),
+            ("tests/fixtures/image/oracle/check3_z_image_turbo_512.manifest.json",
+             "tests/image/test_image_check3.py"),
+            ("scripts/video_oracle/run.py", "tests/video/test_video_oracle_harness.py"),
+            ("scripts/image_oracle/run.py", "tests/video/test_video_oracle_harness.py"),
+            ("gmlx/comfyui_pack/example_workflows/minimax-h3-t2v.json", "tests/test_comfyui_pack.py"),
+            ("tests/comfyui_pack/workflows/fasth3-t2v.json", "tests/test_comfyui_pack.py")]:
+        assert reader in at._readers(path, scan) and reader in tests, path

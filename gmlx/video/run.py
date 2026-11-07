@@ -11,6 +11,7 @@ VAE alone, so a clip's latents give the same file from either.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
 import tempfile
@@ -168,15 +169,19 @@ def decode_and_mux(xv, xa, *, video_vae: Callable, audio_vae: Callable,
                    frames: int, width: int, height: int, fps: int,
                    rate: int, out: str | None, ffmpeg: str | None,
                    frames_dir: str | None = None,
+                   lock_frames: bool = True,
                    between: Callable | None = None,
                    log: Callable | None = None) -> dict:
     """Decode the latents ``xv`` and ``xa`` of a clip: the audio through
     the model ``audio_vae()`` loads, which goes before the video VAE of
     ``video_vae()`` decodes the frames a chunk at a time into the MP4
     ``out`` (written as ``out.part``, then renamed) and the PNGs of
-    ``frames_dir``. ``between(k)`` runs after each chunk, with ``k``
-    frames decoded, and may raise to stop: the MP4 is then aborted and
-    its part removed. Returns {"audio_s", "decode_s"}."""
+    ``frames_dir``, cleared of an earlier clip's frames first. The frames
+    folder is held by :func:`io.frames_lock` unless ``lock_frames`` is
+    False, for a folder whose filesystem the caller found cannot lock.
+    ``between(k)`` runs after each chunk, with ``k`` frames decoded, and
+    may raise to stop: the MP4 is then aborted and its part removed.
+    Returns {"audio_s", "decode_s"}."""
     import time
 
     import mlx.core as mx
@@ -202,43 +207,52 @@ def decode_and_mux(xv, xa, *, video_vae: Callable, audio_vae: Callable,
     times["audio_s"] = round(time.perf_counter() - t0, 2)
 
     t0 = time.perf_counter()
-    vae = video_vae()
-    try:
+    with contextlib.ExitStack() as held:
         if frames_dir is not None:
-            os.makedirs(os.path.expanduser(frames_dir), exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix=".gmlx-video-") as tmp:
-            wav = io.write_wav(os.path.join(tmp, "audio.wav"), wave, rate)
-            mux = None
-            if out is not None:
-                os.makedirs(os.path.dirname(os.path.abspath(out)),
-                            exist_ok=True)
-                mux = io.Mux(out, width=width, height=height, fps=fps,
-                             wav=wav, ffmpeg=ffmpeg or "")
-            try:
-                n = 0
-                for chunk in vae.decode_frames(xv):
-                    got = np.array(chunk[0])
-                    if mux is not None:
-                        mux.write(got)
-                    if frames_dir is not None:
-                        n = io.write_frames(os.path.expanduser(frames_dir),
-                                            got, n)
-                    done = mux.frames if mux else n
-                    if log is not None:
-                        log(f"decoded {done} of {frames} frames")
-                    if between is not None:
-                        between(done)
-                if mux is not None:
-                    mux.close()
-            except BaseException:
-                if mux is not None:
-                    mux.abort()
-                raise
+            d = os.path.expanduser(frames_dir)
+            os.makedirs(d, exist_ok=True)
+            if lock_frames:
+                said = None if log is None else (
+                    lambda line: log(f"[video] {line}"))
+                held.enter_context(io.frames_lock(d, said))
+        # Loaded once the folder is held: a run waiting on it holds no model.
+        vae = video_vae()
+        try:
             if frames_dir is not None:
-                io.write_wav(os.path.join(os.path.expanduser(frames_dir),
-                                          "audio.wav"), wave, rate)
-    finally:
-        del vae
-        release()
+                io.clear_frames(d)
+            with tempfile.TemporaryDirectory(prefix=".gmlx-video-") as tmp:
+                wav = io.write_wav(os.path.join(tmp, "audio.wav"), wave, rate)
+                mux = None
+                if out is not None:
+                    os.makedirs(os.path.dirname(os.path.abspath(out)),
+                                exist_ok=True)
+                    mux = io.Mux(out, width=width, height=height, fps=fps,
+                                 wav=wav, ffmpeg=ffmpeg or "")
+                try:
+                    n = 0
+                    for chunk in vae.decode_frames(xv):
+                        got = np.array(chunk[0])
+                        if mux is not None:
+                            mux.write(got)
+                        if frames_dir is not None:
+                            n = io.write_frames(os.path.expanduser(frames_dir),
+                                                got, n)
+                        done = mux.frames if mux else n
+                        if log is not None:
+                            log(f"decoded {done} of {frames} frames")
+                        if between is not None:
+                            between(done)
+                    if mux is not None:
+                        mux.close()
+                except BaseException:
+                    if mux is not None:
+                        mux.abort()
+                    raise
+                if frames_dir is not None:
+                    io.write_wav(os.path.join(os.path.expanduser(frames_dir),
+                                              "audio.wav"), wave, rate)
+        finally:
+            del vae
+            release()
     times["decode_s"] = round(time.perf_counter() - t0, 2)
     return times

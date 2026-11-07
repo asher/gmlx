@@ -937,19 +937,40 @@ class Refusals(Base):
     def test_a_keyframe_of_keys_the_step_does_not_read_is_refused(self):
         """A keyframe that names none of the keys the step reads, or a
         latent with no frame, is refused, not dropped. ComfyUI's own layout
-        reads each keyframe's frame first, so the step's check is called
-        on the payload here. A frame with no latent anchors nothing, as in
-        ComfyUI's forward."""
+        reads each keyframe's frame first, so the payload goes to the DiT
+        forward as a sampler calls it. A frame with no latent anchors
+        nothing, as in ComfyUI's forward."""
         z = torch.rand(1, 24, 1, SIZE // 16, SIZE // 16)
+
+        def forward(keyframes):
+            model = self.model()
+            mm.load_models_gpu([model])
+            model.pre_run()
+            pos, _ = self.cond()
+            video, audio = self.latent()["samples"].unbind()
+            try:
+                model.model.diffusion_model.forward(
+                    [video, audio], torch.tensor([999.9]), context=pos[0][0],
+                    transformer_options={"cond_or_uncond": [0], "uuids": [uuid.uuid4()]},
+                    minimax_payload={"audio_scale": 10.0 / 3.0, "keyframes": keyframes})
+            finally:
+                model.cleanup()
+
         for kf in ({"frame_index": 0, "video_latent": z}, {"latent": z}):
-            with self.subTest(sorted(kf)), self.assertRaises(C.GmlxError) as e:
-                P.model._h3_keyframes({"keyframes": [kf]})
-            self.assertIn(f"gmlx: a MiniMax-H3 keyframe holds {sorted(kf)}, and the gmlx "
-                          "nodes read resolved_frame_index, latent, audio_latent",
-                          str(e.exception))
-        held = {"resolved_frame_index": 0, "latent": z}
-        self.assertEqual(P.model._h3_keyframes(
-            {"keyframes": [{"resolved_frame_index": 4}, held]}), [held])
+            with self.subTest(sorted(kf)):
+                self.stub.reset()
+                with self.assertRaises(Exception) as e:
+                    forward([kf])
+                self.assertIsInstance(e.exception, C.GmlxError)
+                self.assertIn(f"gmlx: a MiniMax-H3 keyframe holds {sorted(kf)}, and the gmlx "
+                              "nodes read resolved_frame_index, latent, audio_latent",
+                              str(e.exception))
+                self.assertEqual(self.stub.events("av_step"), [])
+        self.stub.reset()
+        forward([{"resolved_frame_index": 4}, {"resolved_frame_index": 0, "latent": z}])
+        (step,) = self.stub.events("av_step")
+        (a,) = step["anchors"]
+        self.assertEqual((a["frame"], step["anchor_tensors"][a["video"]]), (0, z.tolist()))
 
     def running(self, node):
         """Run the test body as if ComfyUI ran the stock node ``node``."""

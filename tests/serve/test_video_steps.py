@@ -2314,6 +2314,7 @@ def test_a_refused_window_on_a_live_socket_is_drained_and_the_next_runs(
     names runs next on the same connection."""
     import http.client
     import json
+    import threading
 
     from live_socket import send, serving
 
@@ -2330,9 +2331,14 @@ def test_a_refused_window_on_a_live_socket_is_drained_and_the_next_runs(
     host.budget_bytes = adapters + caches + need(56, 17)
     got: list = [0]
     priced: list = []
+    asked = threading.Event()
     budget = host.budget
-    monkeypatch.setattr(host, "budget", lambda hold: priced.append(got[-1])
-                        or budget(hold))
+
+    def priced_at(hold):
+        priced.append(got[-1])
+        asked.set()
+        return budget(hold)
+    monkeypatch.setattr(host, "budget", priced_at)
     more = routes._Stream._more
 
     async def _more(self):
@@ -2355,11 +2361,11 @@ def test_a_refused_window_on_a_live_socket_is_drained_and_the_next_runs(
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
         version = {wire.CONTRACT_HEADER: f"{wire.CONTRACT[0]}.{wire.CONTRACT[1]}"}
         r = send(conn, f"{wire.PREFIX}/vae/video/encode", big[:head],
-                 big[head:], ctype=wire.CONTENT_TYPE, pause=0.3,
+                 big[head:], ctype=wire.CONTENT_TYPE, ready=asked,
                  headers=version)
         assert r.status == 400 and json.loads(r.body)["window"] == 3, r.body
         assert not r.will_close
-        assert priced and priced[0] < len(big)
+        assert priced[0] == head            # priced on the header alone
         assert got[-1] == 0                 # the drain kept none of it
         sock = conn.sock
         fit = wire.write({"frames": _levels(51)}, fields)

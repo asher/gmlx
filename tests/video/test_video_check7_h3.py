@@ -119,16 +119,16 @@ def test_check7_exact_gate(request):
     """Every teacher-forced row within EXACT_TOL of the oracle in its
     arithmetic, and the free rows and the velocities within the fixture's
     gates from the floors measured now."""
+    record = hg.record_dir() is not None
     if not exact_process():
         return rerun_exact(request, "h3 check7 exact")
     pipe, _, tid, arrays, m = request.getfixturevalue("real")
     label = f"h3 check7 exact {NAME}"
     with hg.exact_floats(pipe.dit) as n:
         floor = _under(pipe, tid, hg.exact_free_floor, arrays, m)
-        if os.environ.get(hg.RECORD) == "1":
-            m = hg.record_floors(m, floor, (
-                ORACLE / f"{NAME}.manifest.json",
-                fx.fixture_root() / f"{NAME}.manifest.json"))
+        if record:
+            m = hg.record_floors(m, floor,
+                                 (ORACLE / f"{NAME}.manifest.json",))
         tol = hg.check_floor(m, floor, label)
         got = _under(pipe, tid, hg.exact_measures, arrays, m)
     print(hg.exact_line(f"{label}, {n} float tensors cast to fp32", got,

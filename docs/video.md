@@ -15,6 +15,8 @@ gmlx video generate h3 --prompt "waves on a pebble beach at dawn" --output beach
 
 Video needs a Mac with an M3 chip or newer, 32 GB of memory or more,
 ffmpeg, and about 40 GB of disk for the model's files.
+It needs no pip extra: the `video` extra is OpenCV, for video input to
+vision models.
 [FastH3](#fasth3), a faster version of the model, needs an M5 chip or
 newer.
 
@@ -342,7 +344,12 @@ gmlx video generate h3-fast --preview --seed 3 --prompt "..."
 
 ## Frames without ffmpeg
 
-`--frames-dir` writes the clip as PNG frames and an `audio.wav` file.
+`--frames-dir` writes the clip as PNG frames and an `audio.wav` file,
+in place of the frames and `audio.wav` of an earlier clip in that folder.
+Other files in the folder stay. A run whose folder another run is
+writing waits for that run to finish first. On a filesystem that
+cannot lock a folder, such as an NFS mount without locks, the run says
+so and writes its frames without waiting.
 Alone, it writes the clip without ffmpeg, though guide videos and sounds
 are still read through it:
 

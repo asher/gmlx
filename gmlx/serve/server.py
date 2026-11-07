@@ -692,7 +692,7 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
             specs, dirs,
             known_ids=(set(cfg.models) | set(cfg.image_models)
                        | set(cfg.video_models)),
-            known_paths=known_paths | _image_paths(cfg),
+            known_paths=known_paths | _dit_paths(cfg),
             known_models=known_models, progress=True, stats=stats,
             images=images, encoder_ids=_encoder_ids(known_models))
         draft_pairs = _open_pairs(path, "draft_gguf",
@@ -777,10 +777,10 @@ def _pinned_paths(resolved: dict, images: dict, cli_pins) -> tuple:
     return paths, image_pins
 
 
-def _image_paths(cfg) -> set:
-    """The resolved DiT paths of the configured image models."""
+def _dit_paths(cfg) -> set:
+    """The resolved DiT paths of the configured image and video models."""
     out = set()
-    for m in cfg.image_models.values():
+    for m in (*cfg.image_models.values(), *cfg.video_models.values()):
         try:
             rp = resolve_path(m.path, cfg.model_dirs)
         except ConfigError:
@@ -1608,7 +1608,7 @@ def register_downloads(paths: list, config_path=None, *,
                                     known_ids=(set(cfg.models)
                                                | set(cfg.image_models)
                                                | set(cfg.video_models)),
-                                    known_paths=known_paths | _image_paths(cfg) | asr,
+                                    known_paths=known_paths | _dit_paths(cfg) | asr,
                                     known_models=known_models, stats=stats,
                                     images=images,
                                     encoder_ids=_encoder_ids(known_models),

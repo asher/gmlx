@@ -849,19 +849,20 @@ gmlx validate https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/main/Qwen3.8-
 
 ## gmlx rm
 
-`gmlx rm` deletes a model's GGUF files, partial downloads and companions,
-and removes its entry, aliases and default from the config. A file another
-model still uses is kept. `rm` prints the plan and asks before it deletes
-anything.
+`gmlx rm` deletes a model's GGUF files, partial downloads, the old copy an
+interrupted update left, and companions, and removes its entry, aliases
+and default from the config. A file another model still uses is kept. `rm`
+prints the plan and asks before it deletes anything.
 
 An image model id removes its DiT, VAE, text encoder and vision tower. A text encoder
 that is a chat model, or that another image model uses, is kept, and `rm`
-refuses a chat model that an image model uses as its encoder.
+refuses a chat model that an image model uses as its encoder, or that an
+image or video model names as its `upsampler`.
 
-`rm` does not take a video model id. To remove a video model, delete its
-entry under `video_models` in the config, then delete the files that no
-other entry uses: h3, h3-fast and h3-base share their DiT, encoder and
-VAEs, and fasth3 shares their encoder and VAEs.
+A video model id removes its entry and its DiT, text encoder, vision
+tower, VAEs and preview decoder, keeping the files another entry uses:
+h3, h3-fast and h3-base share their DiT, encoder and VAEs, and fasth3
+shares their encoder and VAEs. Its LoRAs stay.
 
 ```sh
 gmlx rm old-model
@@ -1642,7 +1643,7 @@ time.
 | `--guide-audio AUDIO[@FRAME]` | None | Anchor the sound of this file at FRAME, cut to the clip's sound from there. Repeat the flag for more. |
 | `--guide-no-audio` | Off | Anchor `--guide` videos without their sound. |
 | `--output PATH` | `./gmlx-<time>-<seed>.mp4`, or none with `--frames-dir` alone | Write the MP4 here. An existing file is replaced. |
-| `--frames-dir DIR` | None | Write PNG frames and `audio.wav` to this folder. Frames of a longer earlier clip there stay. Alone, it needs no ffmpeg, unless a guide video or sound is read. |
+| `--frames-dir DIR` | None | Write PNG frames and `audio.wav` here, in place of an earlier clip's, after a run writing there ends. Alone, it needs ffmpeg only for a guide video or sound. |
 | `--preview [TAEH3]` | Off | Decode with TAEH3, the small preview decoder: the entry's file, or this one. |
 | `--save-latent PATH` | None | Also write the final latents to this `.npz` file. |
 | `--encoder GGUF` | The entry's | Encode the prompt with this text encoder. |
