@@ -1564,10 +1564,13 @@ def _run_text_mtp_chat(monkeypatch, tmp_path, lines, *, extra_argv=(),
     monkeypatch.setattr("gmlx.commands.cli._apply_placement",
                         lambda args, model: None)
     monkeypatch.setattr("gmlx.commands.cli._apply_cli_adapter", apply_adapter)
-    monkeypatch.setattr(
-        "gmlx.spec.mtp_load.load_mtp_model",
-        lambda *a, **k: (_Model(), drafter, {"model_type": "fake"},
-                         tok or _FakeTok()))
+    def load_mtp_model(*a, before_wire=None, **k):
+        model, config = _Model(), {"model_type": "fake"}
+        if before_wire is not None:
+            before_wire(model.language_model, config)
+        return model, drafter, config, tok or _FakeTok()
+
+    monkeypatch.setattr("gmlx.spec.mtp_load.load_mtp_model", load_mtp_model)
     monkeypatch.setattr("gmlx.cache.kv_cache.make_prompt_cache",
                         lambda lm: ["mtp-cache"])
     monkeypatch.setattr("gmlx.gen.generation.stream_generate_speculative",

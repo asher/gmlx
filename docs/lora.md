@@ -270,14 +270,25 @@ rows, where llama.cpp adds it. `gmlx train` writes no such pair.
 - Only LoRA adapters work. DoRA on a quantized model is not supported.
 - An adapter can change the dense linear layers, the down projections of
   MoE experts and the token embedding. Loading refuses an adapter that
-  changes the gate or up projections of experts, or any expert weight on a
-  model that runs a fused MoE block, such as Gemma and gpt-oss.
+  changes the gate or up projections of experts. It also refuses expert
+  weights on gpt-oss and on native-FP expert stacks, which
+  `GMLX_FUSED_MOE=0` loads unfused.
 - Loading refuses a token embedding pair before the model loads on a model
   that uses its token embedding as the output head, such as Gemma 4, on a
   Hadamard-rotated embedding and on Granite Switch. llama.cpp cannot apply
   the pair on these models either. It also refuses a
   `per_layer_token_embd.weight` pair, which llama.cpp loads but never
   applies.
+- On a model whose MoE blocks run fused, such as Qwen3.5 and Qwen3.6 MoE, a
+  block runs its slower unfused path only in a step where a request has one
+  of the block's adapters on. In `gmlx serve` the other steps keep the
+  fused speed. `gmlx run`, `gmlx bench` and `gmlx chat` run every step of
+  an adapted block unfused.
+- An adapter that changes expert weights on such a model needs the experts
+  in memory. A load that streams the experts refuses it, with
+  `stream: experts`, `--stream-experts`, `--stream-cpu`, or a model too
+  large for memory. Set `GMLX_FUSED_MOE_BLOCK=0` to load the blocks unfused
+  and stream them.
 - Adapters work on text models only, so `--adapter` does not combine with
   `--mmproj`.
 - `gmlx run` and `gmlx chat` apply an entry's adapters at the entry's

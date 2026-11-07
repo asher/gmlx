@@ -205,3 +205,22 @@ def spy_guards(monkeypatch) -> list:
     monkeypatch.setattr(mlx_guards, "pad", spy_pad)
     monkeypatch.setattr(mlx_guards, "concatenate", spy_concatenate)
     return calls
+
+
+def mint_lora_gguf(path, arch, pairs, *, alpha=1.0) -> None:
+    """Write a GGUF LoRA adapter: ``pairs`` maps a base tensor name to its
+    ``(a, b)`` numpy factors, ``a (r, in)`` and ``b (out, r)`` for a dense
+    target, ``a (E, r, in)`` and ``b (E, out, r)`` for an expert stack."""
+    import gguf
+    import numpy as np
+
+    w = gguf.GGUFWriter(str(path), arch)
+    w.add_string("adapter.type", "lora")
+    w.add_float32("adapter.lora.alpha", float(alpha))
+    for name, (a, b) in pairs.items():
+        w.add_tensor(f"{name}.lora_a", np.ascontiguousarray(a, np.float32))
+        w.add_tensor(f"{name}.lora_b", np.ascontiguousarray(b, np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()

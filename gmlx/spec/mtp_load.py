@@ -12,7 +12,7 @@ import dataclasses
 import os
 import re
 import sys
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -2073,6 +2073,7 @@ def load_mtp_model(
     verbose: bool = False,
     wire: bool = True,
     rope_override: rope_mod.RopeOverride | None = None,
+    before_wire: Callable[[nn.Module, dict], None] | None = None,
 ):
     """Load an MTP target+drafter pair: the text target on mlx-vlm classes plus
     a drafter. Two drafter-acquisition shapes:
@@ -2094,6 +2095,10 @@ def load_mtp_model(
     buffer set, and on an over-RAM zero-copy target that wires the whole
     model's mmap views - a fast march straight through the free-page floor.
     The streaming installers manage their own (arena) wiring.
+
+    ``before_wire(language_model, config)`` runs once the weights are in,
+    before the table install and the wire. An adapter installs there, so
+    it sees the plain SwitchGLU owners.
     """
 
     _log = loadlog.verbose_print
@@ -2244,6 +2249,9 @@ def load_mtp_model(
     tokenizer = TokenizerWrapper(raw_tokenizer, eos_token_ids=eos_ids)
 
     materialize_module_arrays(model, drafter)
+    if before_wire is not None:
+        loadlog.stage("applying adapter")
+        before_wire(model.language_model, config)
     if wire:
         _wire_target(model, gguf_path)
     wait_for_populate(pf.shards, log=_log)

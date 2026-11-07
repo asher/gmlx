@@ -166,13 +166,17 @@ def fake_load_mtp_model(monkeypatch):
     calls = []
     drafter = object()
 
-    def _fake(gguf_path, *, draft_gguf_path=None, chat_template=None, verbose=True):
+    def _fake(gguf_path, *, draft_gguf_path=None, chat_template=None, verbose=True,
+              before_wire=None):
         calls.append(
             {"gguf": gguf_path, "draft_gguf_path": draft_gguf_path,
              "chat_template": chat_template, "verbose": verbose}
         )
+        target = _FakeTarget()
+        if before_wire is not None:
+            before_wire(target.language_model, {"model_type": "qwen3_5_moe"})
         tok = types.SimpleNamespace(eos_token_ids={1})
-        return _FakeTarget(), drafter, {"model_type": "qwen3_5_moe"}, tok
+        return target, drafter, {"model_type": "qwen3_5_moe"}, tok
 
     mtp_load = types.ModuleType("gmlx.spec.mtp_load")
     mtp_load.load_mtp_model = _fake
@@ -706,10 +710,12 @@ def test_serveable_mtp_applies_adapter_to_language_model(monkeypatch):
             self.config = {"model_type": "deepseek_v4"}
 
     target = _Target()
-    monkeypatch.setattr(
-        "gmlx.spec.mtp_load.load_mtp_model",
-        lambda path, **kw: (target, "DRAFTER", {"model_type": "deepseek_v4"},
-                            object()))
+
+    def load(path, before_wire=None, **kw):
+        before_wire(target.language_model, {"model_type": "deepseek_v4"})
+        return target, "DRAFTER", {"model_type": "deepseek_v4"}, object()
+
+    monkeypatch.setattr("gmlx.spec.mtp_load.load_mtp_model", load)
     applied = []
     monkeypatch.setattr(
         serving, "_apply_gguf_adapter",

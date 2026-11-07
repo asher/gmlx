@@ -3232,7 +3232,8 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     # across turns exactly like the plain text path.
     from gmlx.cache.kv_cache import make_prompt_cache as _mtp_make_cache
     import gmlx.load.loadlog as loadlog
-    from gmlx.commands.cli import _apply_placement, _check_cli_adapter
+    from gmlx.commands.cli import (_apply_placement, _check_cli_adapter,
+                                   _cli_adapter_hook)
     from gmlx.spec.mtp_load import load_mtp_model
 
     _check_cli_adapter(args, mtp=True)
@@ -3247,10 +3248,8 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
             rope_override=rope_override_from_args(args),
             verbose=args.verbose,
             wire=not getattr(args, "stream_experts", False),
+            before_wire=_cli_adapter_hook(args, fold=False),
         )
-    from gmlx.commands.cli import _apply_cli_adapter
-
-    _apply_cli_adapter(args, b.model, b.config, fold=False)
     # Streaming placement applies to the target trunk only (the drafter
     # stays resident); same composition as the run/bench entry points.
     _apply_placement(args, getattr(b.model, "language_model", b.model))
@@ -3762,6 +3761,12 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 f"error: {which} on an MTP base is not supported{hint}.",
                 file=sys.stderr,
             )
+            return 2
+        from gmlx.commands.cli import _streamed_adapter_refusal
+
+        why = _streamed_adapter_refusal(args, mtp=speculative)
+        if why:
+            print(f"error: --adapter: {why}", file=sys.stderr)
             return 2
         if speculative or vlm_mtp:
             dropped = mtp_dropped_chat_flags(args)

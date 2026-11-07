@@ -2063,6 +2063,7 @@ class _ResidencyPool:
             if for_memory:
                 # Priced and gated as a stream build; the install streams
                 # the experts without trying the wire.
+                _refuse_streamed_fused_adapter(model_path, build_spec, env)
                 stream_experts_for_memory(model_path, for_memory)
                 force_table_stream(True)
                 shares = predicted_stream_bytes(str(model_path), env)
@@ -2719,6 +2720,20 @@ def _drafter_bytes(model_path: str, build_spec) -> int:
     from gmlx.load.discovery import mtp_block_bytes
 
     return mtp_block_bytes(model_path)
+
+
+def _refuse_streamed_fused_adapter(model_path, build_spec, env) -> None:
+    """Raise before a streamed load whose adapters adapt the experts of a
+    fused MoE block. ``env`` is the build's env window at the call."""
+    from gmlx.load.adapter import fused_expert_lora_refusal
+
+    effective = getattr(build_spec, "effective_adapters", None)
+    paths = effective() if callable(effective) else ()
+    why = fused_expert_lora_refusal(
+        str(model_path), paths, env,
+        mtp=bool(getattr(build_spec, "speculative", False)))
+    if why:
+        raise ValueError(why)
 
 
 def text_adapter_bytes(build_spec) -> int:

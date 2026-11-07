@@ -1408,6 +1408,7 @@ def _run_bench_depths(args) -> int:
                 rope_override=rope_override_from_args(args),
                 verbose=args.verbose,
                 wire=not getattr(args, "stream_experts", False),
+                before_wire=_cli_adapter_hook(args),
             )
     else:
         with loadlog.load_ui(args.verbose, args.gguf):
@@ -1421,7 +1422,7 @@ def _run_bench_depths(args) -> int:
                 rope_override=rope_override_from_args(args),
                 verbose=args.verbose,
             )
-    _apply_cli_adapter(args, model, _config)
+        _apply_cli_adapter(args, model, _config)
     _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
 
@@ -1489,7 +1490,9 @@ def _run_bench_depths(args) -> int:
 def _check_cli_adapter(args, *, mtp: bool = False) -> None:
     """``--adapter`` on the run/chat/bench trunks: refuse, from the base and
     adapter headers and before the load, an adapter the base cannot take
-    (an embedding adapter on a tied model, say). Exits with the reason."""
+    (an embedding adapter on a tied model, say, or expert LoRA on a fused
+    MoE block that streams its experts). ``mtp`` is the load's MTP choice.
+    Exits with the reason."""
     if not getattr(args, "adapter", None):
         return
     from gmlx.load.adapter import adapter_load_refusal
@@ -1510,10 +1513,11 @@ def _apply_cli_adapter(args, model, config, *, fold: bool = True) -> None:
     LoRA, adapter i in row-channel slot i, on the text trunk
     (``model.language_model`` on an MTP target, whose leaf paths the
     adapter remap targets) before placement, so the installer sees the
-    plain SwitchGLU owners (it refuses offload/fusion wrappers in the
-    owner's MRO). The base arch gates the adapter up front: a mismatched
-    family fails with "adapter arch X != base arch Y", not a missing-targets
-    install error.
+    plain SwitchGLU owners (it refuses offload wrappers in the owner's
+    MRO). An MTP load runs it through ``before_wire``. A trunk that already
+    carries these adapters is left as is. The base arch gates the adapter
+    up front: a mismatched family fails with "adapter arch X != base arch
+    Y", not a missing-targets install error.
 
     ``fold`` multiplies each adapter's strength into its static scale, for
     run, which publishes no row vector. Chat installs at strength 1 and
@@ -1524,15 +1528,56 @@ def _apply_cli_adapter(args, model, config, *, fold: bool = True) -> None:
     from gmlx.load.adapter import apply_gguf_adapter
     from gmlx.load.discovery import header_meta
 
+    paths = tuple(os.path.abspath(os.path.expanduser(p)) for p, _ in items)
+    trunk = getattr(model, "language_model", model)
+    if trunk.__dict__.get("_kq_cli_adapter") == paths:
+        return
     base_arch = (getattr(args, "arch", None)
                  or (header_meta(args.gguf) or {}).get("arch"))
-    trunk = getattr(model, "language_model", model)
-    for slot, (path, strength) in enumerate(items):
-        adapter = os.path.abspath(os.path.expanduser(path))
+    import gmlx.load.loadlog as loadlog
+
+    for slot, (adapter, (_p, strength)) in enumerate(zip(paths, items)):
         n = apply_gguf_adapter(trunk, config, adapter, base_arch=base_arch,
                                slot=slot, strength=strength if fold else 1.0)
-        print(f"[adapter] applied {n}-module GGUF LoRA from {adapter} at "
-              f"strength {strength:g}")
+        loadlog.note(f"[adapter] applied {n}-module GGUF LoRA from {adapter} "
+                     f"at strength {strength:g}")
+    object.__setattr__(trunk, "_kq_cli_adapter", paths)
+
+
+def _streamed_mtp(args) -> bool:
+    """Whether a streamed run takes the MTP path, as ``resolve_speculative``
+    decides it, without its side effects. Streaming turns auto MTP off, so
+    only an explicit choice counts."""
+    if getattr(args, "no_speculative", False):
+        return False
+    if getattr(args, "native_mtp", False) or getattr(args, "speculative", None):
+        return True
+    return bool(getattr(args, "draft_gguf", None)
+                and not getattr(args, "draft_gguf_auto", False))
+
+
+def _streamed_adapter_refusal(args, mtp: bool | None = None) -> str | None:
+    """Why ``--adapter`` cannot load with the requested expert streaming,
+    from the headers alone, or None. ``mtp`` is the caller's MTP choice,
+    when it has made one."""
+    if not getattr(args, "adapter", None) or not (
+            getattr(args, "stream_experts", False)
+            or getattr(args, "stream_cpu", False)):
+        return None
+    from gmlx.load.adapter import fused_expert_lora_refusal
+
+    return fused_expert_lora_refusal(
+        args.gguf, [os.path.expanduser(p) for p, _ in args.adapter],
+        mtp=_streamed_mtp(args) if mtp is None else mtp)
+
+
+def _cli_adapter_hook(args, *, fold: bool = True):
+    """The ``before_wire`` hook of an MTP load: the ``--adapter`` install on
+    the trunk before the table install and the wire, or None."""
+    if not getattr(args, "adapter", None):
+        return None
+    return lambda trunk, config: _apply_cli_adapter(args, trunk, config,
+                                                    fold=fold)
 
 
 def _apply_placement(args, model) -> None:
@@ -1715,8 +1760,8 @@ def _run_generate(args) -> int:
                 rope_override=rope_override_from_args(args),
                 verbose=args.verbose,
                 wire=not args.stream_experts,
+                before_wire=_cli_adapter_hook(args),
             )
-        _apply_cli_adapter(args, model, _config)
         # Streaming placement applies to the target trunk only (the drafter
         # block is small and stays resident); the verify calls ride the
         # decode-feeder arena like any small chunk.
@@ -3114,6 +3159,10 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     apply_transcription_defaults(args, parser, argv)
     # After the config/family overlays: either may have seeded a cap.
     resolve_max_tokens(args)
+    why = _streamed_adapter_refusal(args)
+    if why:
+        print(f"error: --adapter: {why}", file=sys.stderr)
+        return 2
     from gmlx.load.arch_table import UnsupportedArchError
     from gmlx.load.preflight import UnsupportedCodecError
 

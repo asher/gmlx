@@ -393,6 +393,69 @@ def adapter_load_refusal(base_gguf_path: str, adapter_paths, env=None, *,
             continue                       # and a file that is not a GGUF
         if why is not None:
             raise ValueError(why)
+    if stream in ("experts", "cpu"):
+        why = fused_expert_lora_refusal(
+            base, [p for p in adapter_paths or () if os.path.isfile(p)], env,
+            mtp=mtp)
+        if why is not None:
+            raise ValueError(why)
+    return None
+
+
+# Base architectures whose MoE blocks fuse on a resident load. qwen35moe
+# fuses only on the plain text path: its MTP target builds the owned block.
+_FUSED_BLOCK_ARCHS = frozenset({"qwen3next", "qwen4exp", "qwen35moe", "gemma4"})
+_FALSE_WORDS = ("0", "false", "no", "off")
+_TRUE_WORDS = ("1", "true", "yes", "on")
+
+
+def _expert_target(adapter_path: str) -> str | None:
+    """The first expert-stack tensor ``adapter_path`` adapts, or None."""
+    from .headerscan import scan_gguf
+
+    try:
+        tensors = scan_gguf(adapter_path).tensors
+    except ValueError:
+        return None                        # the load reports it
+    for t in tensors:
+        if "_exps." in t.name and t.name.endswith(_A_SUFFIX):
+            return t.name[: -len(_A_SUFFIX)]
+    return None
+
+
+def fused_expert_lora_refusal(gguf_path: str, adapter_paths, env=None, *,
+                              mtp: bool = False) -> str | None:
+    """Why a streamed load of ``gguf_path`` cannot take ``adapter_paths``,
+    or None. Expert LoRA on a fused MoE block needs the experts in memory.
+    Header reads only; ``env`` is the build's env window over
+    ``os.environ``, and ``mtp`` the caller's speculative choice, which a
+    false ``MLX_VLM_GGUF_SPECULATIVE`` overrides as the serve bridge does."""
+    from gmlx.envflags import env_value
+
+    from .headerscan import scan_gguf
+
+    paths = tuple(p for p in adapter_paths if p)
+    if not paths:
+        return None
+    for name in ("GMLX_FUSED_MOE", "GMLX_FUSED_MOE_BLOCK"):
+        if (env_value(name, env) or "1") == "0":
+            return None
+    arch = scan_gguf(gguf_path, include_tensors=False).kv.get("general.architecture")
+    if arch not in _FUSED_BLOCK_ARCHS:
+        return None
+    if arch == "qwen35moe":
+        spec = (env_value("MLX_VLM_GGUF_SPECULATIVE", env) or "").strip().lower()
+        if spec not in _FALSE_WORDS and (mtp or spec in _TRUE_WORDS):
+            return None
+    for path in paths:
+        target = _expert_target(path)
+        if target is not None:
+            return (f"adapter {os.path.basename(path)} adapts expert tensor "
+                    f"{target}, and expert LoRA on a fused MoE block needs the "
+                    f"routed experts in memory, but this load streams them. Load "
+                    f"the model without expert streaming, use an adapter without "
+                    f"expert targets, or set GMLX_FUSED_MOE_BLOCK=0 to load the "
+                    f"blocks unfused.")
     return None
 
 

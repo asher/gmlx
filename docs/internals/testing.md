@@ -182,6 +182,7 @@ of at most 512 MiB.
 | `tests/gen/test_long_context.py` | None | A long decode keeps its ids in range, its logprobs finite and its output free of single-token collapse. |
 | `tests/gen/test_long_context.py::test_long_prefill_parity` | `KQUANT_LLAMACPP_BIN` | Long-prefill greedy output agrees with llama.cpp. |
 | `tests/gen/test_kld_llama_parity.py` | `Qwen3.5-9B-Q4_K_M.gguf` and `Qwen3.5-9B-BF16.gguf` of the fixture's sizes | `gmlx kld` of Q4_K_M against BF16, and of Q4_K_M with a checked-in adapter against bare Q4_K_M, match llama-perplexity. The text tokenizes to its ids. |
+| `tests/load/test_fused_moe_adapter_gguf.py` | The Flash-Next row needs the three `Qwen3.8-Flash-Next-UD-IQ4_XS` shards of the catalog size. | A minted expert adapter keeps base steps fused and bit-exact, matches the unfused block when on, and reaches qwen35moe MTP verify. |
 | `tests/gen/test_serve_logprobs_gguf.py` | None | A lone serve row with a repetition penalty reports the f32 log_softmax of a plain step-by-step forward. |
 | `tests/gen/test_budget_message_gguf.py` | None | On the serve plain path, a thinking budget of 8 with a message forces the message and the end marker right after the budget. |
 | `tests/spec/test_full_prompt_prefill.py` | `KQUANT_TEST_MTP_GGUF` | The MTP serve path handles prefill, the prompt cache, batching, injection and the thinking-budget message. |

@@ -101,7 +101,12 @@ def test_run_folds_the_strength_into_the_install(tmp_path, monkeypatch, argv):
     seen = []
 
     def loader(name, *out):
-        return lambda *a, **k: (seen.append(name), out)[1]
+        def load(*a, before_wire=None, **k):
+            seen.append(name)
+            if before_wire is not None:
+                before_wire(object(), {})
+            return out
+        return load
 
     monkeypatch.setattr(cli, "maybe_load_from_config", lambda *a, **k: None)
     mtp = "--speculative" in argv
