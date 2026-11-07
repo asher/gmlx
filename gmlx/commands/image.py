@@ -116,15 +116,13 @@ def _quality(text: str) -> int:
 def latent_target(path: str) -> str:
     """The file :func:`save_npz` writes for ``path``: ``path``, or the file
     a symlink there names, dangling or not. A path whose symlinks loop is
-    refused, not replaced with a file."""
+    refused, not replaced with a file; any other error is the writable
+    probe's to report."""
     try:
         os.stat(path)
-    except FileNotFoundError:
-        pass
     except OSError as e:
         if e.errno == errno.ELOOP:
             raise OSError(f"cannot write {path}: its symlinks loop") from None
-        raise
     return os.path.realpath(path)
 
 
