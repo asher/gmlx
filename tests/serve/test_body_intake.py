@@ -486,3 +486,38 @@ def test_a_cut_video_form_leaves_no_part_file(tmp_path):
         gc.collect()
     assert fields == [("prompt", "a cat")] and files == {}
     assert list(folder.iterdir()) == []
+
+
+def test_an_images_form_that_stops_sending_is_ended_with_a_408(monkeypatch):
+    """Each chunk of an images form waits STALL_S seconds at most, as a
+    JSON body's does: past it, the read ends with a 408."""
+    import asyncio
+
+    from starlette.requests import Request
+
+    monkeypatch.setattr(bi, "STALL_S", 0.05)
+    body, ctype = _cut_form("image")
+    parts = [body]
+
+    async def receive():
+        if parts:
+            return {"type": "http.request", "body": parts.pop(),
+                    "more_body": True}
+        await asyncio.Event().wait()
+    length = len(body) + 1000
+    request = Request({"type": "http", "method": "POST",
+                       "path": "/v1/images/edits", "query_string": b"",
+                       "headers": [(b"content-type", ctype.encode()),
+                                   (b"content-length", str(length).encode())]},
+                      receive)
+
+    async def main():
+        return await asyncio.wait_for(bi.read_form_in_ram(request, 1 << 30),
+                                      10)
+    with pytest.raises(bi.BodyRefused) as e:
+        asyncio.run(main())
+    assert e.value.status == 408
+    assert str(e.value) == (
+        "the request body sent nothing for 0.05 s with 1.0 KiB of it still "
+        "to come, so the server ended the request; send it again")
+    assert e.value.headers == {"Connection": "close"}

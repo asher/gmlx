@@ -45,7 +45,7 @@ IMAGE_PATHS = frozenset(f"{p}/images/{r}" for p in ("/v1", "")
                         for r in ("generations", "edits", "variations"))
 VIDEO_PATHS = frozenset({"/v1/videos"})
 
-# Seconds a JSON body or a video form may send nothing before its end:
+# Seconds a JSON body or a form may send nothing before its end:
 # past them, the read ends, and a form frees the room it holds in the job
 # store. Each chunk starts the wait again, so a slow client that keeps
 # sending reads to its end.
@@ -579,7 +579,8 @@ async def read_form_in_ram(request: Request, free: int | None = None,
     each at its own width (:class:`_TextPrice`), with the files spooled
     beside them; once parsed, with the largest file, which the route reads
     whole. A Content-Length past the figure is refused before the read,
-    and a body with none once the bytes arrived pass it."""
+    and a body with none once the bytes arrived pass it. Each chunk waits
+    STALL_S seconds at most."""
     from starlette.formparsers import MultiPartParser
     from starlette.requests import ClientDisconnect
 
@@ -647,7 +648,20 @@ async def read_form_in_ram(request: Request, free: int | None = None,
             if self._current_part.file is not None:
                 files.append(0)
 
-    parser = _Priced(request.headers, request.stream(), max_files=max_files,
+    async def stream():
+        got = 0
+        chunks = request.stream().__aiter__()
+        while True:
+            try:
+                chunk = await _within(STALL_S, chunks.__anext__())
+            except StopAsyncIteration:
+                return
+            except TimeoutError:
+                raise _stalled(STALL_S, got, n, form=False) from None
+            got += len(chunk)
+            yield chunk
+
+    parser = _Priced(request.headers, stream(), max_files=max_files,
                      max_part_size=n if n else 1 << 62)
     try:
         form = await parser.parse()
