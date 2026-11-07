@@ -718,6 +718,23 @@ def test_anthropic_budget_tokens_conflict_names_thinking_budget_tokens(
         "thinking.budget_tokens must be an integer of -1 or more.")
 
 
+def test_anthropic_explicit_thinking_budget_keeps_its_name(budget_seam,
+                                                           monkeypatch):
+    """thinking.budget_tokens is named only when the budget came from it."""
+    anthropic = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
+
+    def req(budget):
+        return anthropic._anthropic_request_with_derived_fields(_anthropic(
+            thinking={"type": "enabled", "budget_tokens": 2048},
+            thinking_budget=budget))
+
+    assert _refused(budget_seam, req(-2)) == (
+        "thinking_budget must be an integer of -1 or more.")
+    _drafter(monkeypatch, object(), "eagle3")
+    assert "Remove thinking_budget," in _refused(budget_seam, req(8),
+                                                 route=True)
+
+
 def test_alias_blocks_profile_budget(budget_seam):
     args = budget_seam(_chat(reasoning_budget_tokens=32),
                        _spec(thinking_budget=1024))

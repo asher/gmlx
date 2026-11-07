@@ -164,15 +164,21 @@ def _server_thinking_budget():
 
 
 def _budget_display_name(request) -> str:
-    """``thinking.budget_tokens`` when a Messages request set the budget
-    there, else ``thinking_budget``."""
+    """``thinking.budget_tokens`` when a Messages request's budget came from
+    there, else ``thinking_budget``. The Messages route copies
+    ``budget_tokens`` only into a null ``thinking_budget``, as an int."""
     schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     thinking = getattr(request, "thinking", None)
-    if (isinstance(request, schemas.AnthropicRequest)
+    if not (isinstance(request, schemas.AnthropicRequest)
             and isinstance(thinking, dict)
             and thinking.get("budget_tokens") is not None):
-        return "thinking.budget_tokens"
-    return "thinking_budget"
+        return "thinking_budget"
+    budget = getattr(request, "thinking_budget", None)
+    try:
+        derived = type(budget) is int and budget == int(thinking["budget_tokens"])
+    except (TypeError, ValueError):
+        derived = False
+    return "thinking.budget_tokens" if derived else "thinking_budget"
 
 
 def separate_drafter_kind(rg) -> str | None:
