@@ -481,14 +481,11 @@ profiles:
 | <a id="samplingthinking_start_token"></a>`thinking_start_token` | `<think>` | Text that opens the model's reasoning. Family defaults set it for models that use other text. |
 | <a id="samplingthinking_end_token"></a>`thinking_end_token` | `</think>` | Text that closes the model's reasoning |
 
-The built-in drafters, the MTP heads, DFlash, DFlash2, DSpark and LiLiCorr,
-honor `thinking_budget` and `thinking_budget_message`, up to one draft
-round over. Such a model ignores both on a request that runs in a batch
-with other requests, or that is paused and resumed. A drafter that
-`MLX_VLM_DRAFT_MODEL` loads with a draft kind other than `mtp` answers a
-request's budget with a 400, and ignores a budget from the config with a
-warning. `gmlx run` and `gmlx chat` ignore `thinking_budget_message`.
-[Thinking budget](api.md#thinking-budget) describes the request fields.
+On a model with a built-in drafter, `thinking_budget` can run up to one
+draft round over, and a request that runs in a batch with other requests
+drops it. `gmlx run` and `gmlx chat` ignore `thinking_budget_message`.
+[Thinking budget](api.md#thinking-budget) describes the request fields and
+the drafters.
 
 ## Model loading
 

@@ -34,33 +34,35 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `gmlx pull nemotron-3.5-transcribe` downloads the model with its encoder.
 - A chat model entry loads several LoRA adapters with `adapters:`, each at a
   default strength, and a request sets their strengths for itself with
-  `adapters` or the llama-server `lora` field. See
+  `adapters` or llama-server's `lora` field. `/v1/models` lists each entry's
+  adapters with the sha256 of the loaded file. See
   [Mixing adapters per request](docs/lora.md#mixing-adapters-per-request).
-- `/v1/models` lists each chat entry's adapters with their index, default
-  strength and the sha256 of the loaded file.
-- A request's `thinking_budget_message` puts its text in the thinking block
-  before the end marker when the thinking budget runs out, and llama-server's
-  `reasoning_budget_tokens` and `reasoning_budget_message` name the two
-  fields. See [Thinking budget](docs/api.md#thinking-budget).
-- An adapter that changes expert weights loads on models whose MoE blocks run
-  fused, such as Qwen3.5 and Qwen3.6 MoE, when they run in memory. In `gmlx serve` a block leaves its
-  fused path only in a step where a request has one of its adapters on.
-- `/v1/chat/completions` continues a partial last assistant message with
-  `continue_final_message` and `add_generation_prompt: false`, in the prompt
-  llama-server renders, and `add_generation_prompt: false` alone renders no
-  generation prompt. See [Assistant prefill](docs/api.md#assistant-prefill).
-- A LoRA adapter with a `token_embd.weight` pair, such as a PEFT adapter that
-  trains `embed_tokens`, loads on a model with its own output head, in `run`,
-  chat and `gmlx serve` at per-request strengths. See
-  [Limitations](docs/lora.md#limitations).
 - `gmlx serve`, `run`, `chat`, `capture` and `kld` take
   `--adapter PATH[:STRENGTH]` as `gmlx image` does, and repeat it for more
-  adapters. Serve makes the strength the default of requests, and chat's
-  `/adapter S` sets an absolute strength. See
+  adapters. In chat, `/adapter S` sets an absolute strength. See
   [Use the adapter](docs/lora.md#use-the-adapter).
-- Each `gmlx kld --adapter` flag is one scored point, and without
-  `--reference` the points score against the model without adapters. See
-  [gmlx kld](docs/cli.md#gmlx-kld).
+- `gmlx capture` records the residual stream after each decoder block over
+  sets of prompts, into a safetensors file. See
+  [gmlx capture](docs/cli.md#gmlx-capture).
+- `gmlx kld` reports the KL divergence over a text from a reference GGUF to a
+  model, as `llama-perplexity --kl-divergence` does, and scores adapters at
+  several strengths in one run. See [gmlx kld](docs/cli.md#gmlx-kld).
+- `/v1/chat/completions` continues a partial last assistant message with
+  `continue_final_message` and `add_generation_prompt: false`, in the prompt
+  llama-server renders. See [Assistant prefill](docs/api.md#assistant-prefill).
+- A request's `thinking_budget_message` puts its text in the thinking block
+  before the end marker when the budget runs out. llama-server's
+  `reasoning_budget_tokens` and `reasoning_budget_message` work too. See
+  [Thinking budget](docs/api.md#thinking-budget).
+- `return_tokens_as_token_ids: true` names each logprob token
+  `token_id:<id>`, as vLLM does. See [Logprobs](docs/api.md#logprobs).
+- A LoRA adapter with a `token_embd.weight` pair, such as a PEFT adapter that
+  trains `embed_tokens`, loads on a model with its own output head. See
+  [Limitations](docs/lora.md#limitations).
+- An adapter that changes expert weights loads on models whose MoE blocks
+  run fused, such as Qwen3.5 and Qwen3.6 MoE, when they run in memory. In
+  `gmlx serve` a block leaves its fused path only in a step where a request
+  has one of its adapters on.
 
 ### Changed
 
@@ -99,6 +101,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Speculative decoding verifies 2 to 8 drafted tokens at head dim 128 on a
   fused kernel where MLX built the whole score matrix, so Nemotron-H and
   other models with wide query groups draft faster at long context.
+- Logprobs are the log-softmax of the raw logits, before logit bias,
+  penalties and the other processors, as in llama.cpp and vLLM. A profile's
+  sampling values and the GGUF's sampling keys no longer change them.
+- `TOP_LOGPROBS_K` allows up to 100 alternatives, where it stopped at 20.
 - A thinking budget of N lets N reasoning tokens through, as llama-server
   does, where it let N+1 through, and the prompt's reasoning after its last
   start marker counts against it.
@@ -109,11 +115,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   alpha scaling, as llama.cpp applies it, where gmlx refused it or applied
   none of it.
 - `run`, chat and `gmlx serve` refuse an embedding adapter that the model
-  cannot take from the file headers, before the model loads, so `gmlx serve`
-  unloads no model for it.
+  cannot take before the model loads, so `gmlx serve` unloads no model for
+  it.
 
 ### Fixed
 
+- A model with a speculative drafter returns logprobs, from the target
+  model's verify pass, where the lists came back empty.
+- A greedy request that joins a batch of sampled requests decodes greedily,
+  and a request that asks for logprobs gets them in any batch.
+- A logprob's `bytes` hold the token's raw bytes from the vocabulary, where a
+  token that held part of a character came back as U+FFFD.
 - A rank-1 LoRA adapter written by llama.cpp's tools now loads. gmlx refused
   it with "share no dimension - cannot infer rank".
 - An adapter that changes the gate or up projections of experts is refused

@@ -525,17 +525,8 @@ These flags say where the model runs:
 
 Slash commands in the chat change the system prompt, sampling, penalties,
 `--reasoning`, `--thinking`, `--thinking-budget` and the `--adapter`
-strength as you go. The other flags last for the whole chat.
-
-`--adapter PATH[:STRENGTH]` applies from the first turn at the strength
-you give. A strength is absolute, never a multiple of another:
-
-| Command | Effect |
-|---------|--------|
-| `/adapter` | Print the strength in effect. |
-| `/adapter S` | Run every adapter at strength S from the next turn. |
-| `/adapter on` | Go back to the strengths given on the command line. |
-| `/adapter off` | Run every adapter at strength 0. |
+strength as you go, as [Use the adapter](lora.md#use-the-adapter) shows for
+`/adapter`. The other flags last for the whole chat.
 
 These flags control display and sessions:
 
@@ -1085,8 +1076,7 @@ apply: the KV cache settings and the `moe_*` settings. A MoE that does not
 fit in memory streams its experts, as in `gmlx run`.
 
 `--adapter PATH[:STRENGTH]` captures the model with that GGUF LoRA adapter
-applied, at strength 1 when left out. Each adapter takes its own slot and
-every forward runs it at its strength, as `gmlx serve` runs a request.
+applied, at strength 1 when left out.
 
 The recorded value of a block is its output averaged over the last
 `--positions` prompt tokens, in float32. This is the block output that
@@ -1095,8 +1085,7 @@ hyper-connection residual streams the streams are averaged, which is the
 stream mean of the block output that llama.cpp names `l_last` on these
 models. On gemma-3n the value is the active AltUp stream, the slice that
 `cvector-generator` reads. MTP and nextn blocks are left out, so the layer
-count is the GGUF's block count less its nextn layers. When the loaded
-model has another count, capture prints a note.
+count is the GGUF's block count less its nextn layers.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1126,20 +1115,29 @@ The file holds these tensors:
 | `<set>.mean` | `[n_layer, n_embd]` float32 | The mean over the set's prompts. Every set has one. |
 | `<set>.rows` | `[n_layer, n_prompts, n_embd]` float16 | One row for each prompt. Only the sets named in `--rows` have one. A value past the float16 range stops the run. |
 
-The file's metadata holds `format` (`gmlx.capture`), `arch`, the GGUF's
-`general.architecture`, `file` and `file_size` (all shards), `sets`, a
-JSON map from set name to prompt count, `positions`, `think` (`on`, `off`,
-`default`, or the thinking mode of a config entry), `adapters` and
-`gmlx_version`. `adapters` is a JSON list with one object for each
-adapter: its `file` name, its `strength` and the `sha256` of the bytes
-loaded. It is `[]` without an adapter.
+The file's metadata holds these keys, each a string:
+
+| Key | Meaning |
+|-----|---------|
+| `format` | `gmlx.capture` |
+| `arch` | The GGUF's `general.architecture`, such as `llama` |
+| `file`, `file_size` | The GGUF's file name, and its size in bytes over all its shards |
+| `sets` | A JSON map from set name to prompt count |
+| `positions` | The `--positions` value |
+| `think` | `on`, `off`, `default`, or the thinking mode of a config entry |
+| `adapters` | A JSON list with the `file` name, `strength` and loaded `sha256` of each adapter, or `[]` |
+| `gmlx_version` | The gmlx version that wrote the file |
 
 With `--json`, every line on stdout is a JSON object with an `event` key,
-and other output goes to stderr:
+and other output goes to stderr. This run on SmolLM2-135M-Instruct had two
+prompts in each set:
 
 ```json
-{"event": "progress", "set": "harmful", "done": 1, "total": 128, "tokens": 41}
-{"event": "result", "out": "capture.safetensors", "n_layer": 32, "n_embd": 4096, "sets": {"harmful": 128, "harmless": 128}, "rows": ["harmless"]}
+{"event": "progress", "set": "harmful", "done": 1, "total": 2, "tokens": 36}
+{"event": "progress", "set": "harmful", "done": 2, "total": 2, "tokens": 34}
+{"event": "progress", "set": "harmless", "done": 1, "total": 2, "tokens": 33}
+{"event": "progress", "set": "harmless", "done": 2, "total": 2, "tokens": 36}
+{"event": "result", "out": "capture.safetensors", "n_layer": 30, "n_embd": 576, "sets": {"harmful": 2, "harmless": 2}, "rows": ["harmless"]}
 ```
 
 ## gmlx distill
@@ -1167,9 +1165,8 @@ gmlx kld Qwen3.5-9B-Q4_K_M.gguf --text page.txt \
 ```
 
 Each `--adapter PATH[:STRENGTH]` flag is one scored point: MODEL with that
-adapter at that strength, 1 when left out. gmlx checks each distinct file
-before any model loads, and loads it once, with MODEL.
-The flags and `--reference` decide what is scored:
+adapter at that strength, 1 when left out. The flags and `--reference`
+decide what is scored:
 
 | Flags | Reference | Points |
 |-------|-----------|--------|
@@ -1181,11 +1178,10 @@ The flags and `--reference` decide what is scored:
 With `--reference`, the reference loads first, alone, and scores the text
 into a temporary file. Then it unloads and MODEL loads with the adapters,
 so the two models never share memory. Without it, MODEL scores the
-reference and the points in one load. One forward holds as many (chunk,
-point) rows, chunk by chunk, as keep the float32 logits under 1 GB. The
-temporary file needs about 127 MB per chunk at a vocabulary of 248,320
-and `--ctx 512`. It goes in the temporary folder, which `TMPDIR` sets, and
-gmlx checks the free space before the reference loads.
+reference and the points in one load. The temporary file needs about
+127 MB per chunk at a vocabulary of 248,320 and `--ctx 512`. It goes in
+the temporary folder, which `TMPDIR` sets, and gmlx checks the free space
+before the reference loads.
 
 The text is cut into chunks of `--ctx` tokens, and each chunk is scored
 from its middle position to its second-last. The text must hold at least
@@ -1195,7 +1191,7 @@ stops before any load.
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `MODEL`, positional | Required | Score this GGUF, or this model id or alias from the config. |
-| `--reference FILE` | MODEL | Score MODEL against this GGUF or config id. |
+| `--reference FILE` | MODEL without adapters, with `--adapter` | Score MODEL against this GGUF or config id. |
 | `--adapter PATH[:STRENGTH]` | None | Score MODEL with this GGUF LoRA adapter at this strength, 1 when left out. Repeat for more points. |
 | `--text FILE` | Required | Score this UTF-8 text. One trailing newline is dropped, as llama.cpp does. |
 | `--ctx N` | `512` | Cut the text into chunks of N tokens. |
@@ -1220,16 +1216,29 @@ GGUF path to score the bare file, with `--adapter` for each adapter point.
 An adapter on the output head also stops the command, because the head
 runs in float32 without adapters.
 
-The command also stops when either vocabulary adds EOS to each text
-(`tokenizer.ggml.add_eos_token`), because llama-perplexity refuses such a
-model.
-
 The table gives two numbers for each point, each with its standard error:
 
 | Name | Meaning |
 |------|---------|
 | Mean KLD | The mean KL divergence from the reference to MODEL over the scored positions, in nats. 0 means the same distribution. |
 | Same top p | The share of scored positions where both models rank the same token first, as a percent. |
+
+This run scores one adapter at two strengths against the bare model. The
+output starts with the full paths of MODEL and the reference, then ends
+with this table:
+
+```sh
+gmlx kld SmolLM2-135M-Instruct-Q8_0.gguf --text page.txt --ctx 128 --chunks 4 \
+    --adapter a.gguf:0.5 --adapter a.gguf
+```
+
+```text
+scored:     252 positions in 4 chunks of 128 tokens
+
+point       Mean KLD               Same top p
+a.gguf:0.5  0.030248 +/- 0.002329  95.238 +/- 1.344 %
+a.gguf:1    0.092942 +/- 0.007206  92.460 +/- 1.667 %
+```
 
 With `--json`, each line is one JSON object with an `event` key. A
 `progress` line comes after each chunk of each pass, and one `result` line
@@ -1239,7 +1248,7 @@ for each point comes last, in the order of the table:
 |-----|---------|
 | `event` | `progress` or `result`. |
 | `stage` | On a progress line, `reference` or `model`, the pass that scored the chunk. |
-| `chunk`, `chunks` | On a progress line, the chunk just scored and the chunk count. |
+| `chunk`, `chunks` | On a progress line, the chunk it scored and the chunk count. |
 | `model`, `reference` | The two GGUF paths. |
 | `adapter`, `strength` | On a result line, the adapter path and strength of the point, or `null` for MODEL without adapters. |
 | `mean_kld`, `mean_kld_unc` | Mean KLD and its standard error. |
@@ -1765,6 +1774,7 @@ These verbs also use other codes:
 | `rm` | 1 when you declined or a file could not be deleted, 2 for an unknown id, a bad config, or a missing `--yes`. |
 | `ps` | 1 when the server answered with an error or is not gmlx, 3 when no server was reachable. |
 | `systemone` | 1 when the file, the request or the model was refused, or no server was reachable. |
+| `capture` | 1 when the model fails to load or the run fails, 2 when a flag, the model path, a prompt file or an adapter file is wrong. |
 | `kld` | 1 when a model or tokenizer fails to load, 2 when a flag, file or tokenizer match is wrong, the text is short, `TMPDIR` lacks space or a head cannot be scored. |
 | `doctor` | 1 when a check failed, 2 when the `--config` file does not exist. |
 | `launch` | The client's own status once it runs, else a code from the next table. |

@@ -244,10 +244,7 @@ A request gets a 400 in these cases:
 - An id is listed twice, or a strength is not a number from -100 to 100.
 - The entry loads no adapters and a field is not empty.
 
-A request cannot add an adapter the entry does not load. The image routes
-answer an unknown id with a 404, because an image request may add a LoRA
-file from a model folder. The token count routes check the fields and
-ignore them for the count.
+A request cannot add an adapter the entry does not load.
 
 `lora` differs from llama-server in three ways: a bad or repeated id gets a
 400, a `lora` item needs its `scale`, and the server has no
@@ -282,8 +279,8 @@ rows, where llama.cpp adds it. `gmlx train` writes no such pair.
 - On a model whose MoE blocks run fused, such as Qwen3.5 and Qwen3.6 MoE, a
   block runs its slower unfused path only in a step where a request has one
   of the block's adapters on. In `gmlx serve` the other steps keep the
-  fused speed. `gmlx run`, `gmlx bench` and `gmlx chat` run every step of
-  an adapted block unfused.
+  fused speed. `gmlx run`, its `--bench` included, and `gmlx chat` run
+  every step of an adapted block unfused.
 - An adapter that changes expert weights on such a model needs the experts
   in memory. A load that streams the experts refuses it, with
   `stream: experts`, `--stream-experts`, `--stream-cpu`, or a model too
