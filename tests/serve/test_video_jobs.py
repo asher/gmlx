@@ -1889,6 +1889,100 @@ def test_a_json_bodys_count_ends_however_its_request_ends(
     assert routes.store.jobs == {}
 
 
+def test_two_video_forms_whose_text_fits_alone_cannot_hold_it_together(
+        routes, monkeypatch):
+    """A form's text fields count what they hold beside the other bodies
+    being read as they arrive: a second form whose text fits the memory
+    free alone, but not beside the first's, is a 503 naming what the first
+    holds, and runs once the first is read. The pool is never booked."""
+    import http.client
+
+    from live_socket import serving
+
+    text = "a" * (1 << 20)
+    a, ctype = _form({"prompt": text}, {"first_frame": _png()})
+    b, _ = _form({"prompt": text}, {"first_frame": _png()})
+    # What a text field holds once all of it arrived, before its end.
+    held = math.ceil(len(text) * 1.125) + len(text) + body_intake._SLACK
+    pool = _body_pool(monkeypatch, held + (64 << 10))
+    head = a[:a.index(text.encode()) + len(text)]
+    with serving(routes.app) as port:
+        ca = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        _start(ca, head, len(a), ctype)
+        counted = _until(lambda: body_intake.held_bytes() >= held - 64)
+        first = body_intake.held_bytes()
+        r = routes.client.post("/v1/videos", content=b,
+                               headers={"content-type": ctype})
+        assert r.status_code == 503, r.text
+        assert int(r.headers["retry-after"]) > 0
+        message = r.json()["error"]["message"]
+        assert message.startswith("the body of this request holds "), message
+        assert message.endswith(
+            f", and {body_intake._mib(first)} of it is held by uploads "
+            "arriving now; send it again once they are read"), message
+        assert counted
+        assert pool.figures.incoming == 0
+        ca.send(a[len(head):])
+        r = ca.getresponse()
+        assert r.status == 200, r.read()
+        r.read()
+        ca.close()
+        assert _until(lambda: body_intake.held_bytes() == 0)
+    r = routes.client.post("/v1/videos", content=b,
+                           headers={"content-type": ctype})
+    assert r.status_code == 200, r.text
+    assert body_intake.held_bytes() == 0
+    assert pool.figures.incoming == 0
+    assert len(routes.store.jobs) == 2
+
+
+@pytest.mark.parametrize("ending", ["bad form", "empty first_frame",
+                                    "guides 413", "client leaves", "stall"])
+def test_a_video_forms_count_ends_however_its_request_ends(
+        routes, monkeypatch, ending):
+    """The count a form's text holds ends on every exit of its request: a
+    form that cannot be read, the route's own 400, a guides parse past the
+    memory free, a client that leaves mid-text and a form that stops
+    sending. The pool is never booked."""
+    import http.client
+
+    from live_socket import send, serving
+
+    monkeypatch.setattr(body_intake, "STALL_S", 0.5)
+    pool = _body_pool(monkeypatch, 4 << 20)
+    text = "a" * (1 << 20)
+    if ending == "bad form":
+        body, ctype = b"--gmlxboundary\r\nno headers\r\n\r\n", \
+            "multipart/form-data; boundary=gmlxboundary"
+    elif ending == "empty first_frame":
+        body, ctype = _form({"prompt": text, "first_frame": ""}, {})
+    elif ending == "guides 413":
+        body, ctype = _form({"prompt": "a cat", "guides": "[" + ",".join(
+            ["{}"] * 50_000) + "]"}, {"guide_0": _png(64, 64)})
+    else:
+        body, ctype = _form({"prompt": text}, {"first_frame": _png()})
+    with serving(routes.app) as port:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        if ending in ("bad form", "empty first_frame", "guides 413"):
+            r = send(conn, "/v1/videos", body, ctype=ctype)
+            assert r.status == (413 if ending == "guides 413" else 400), \
+                r.body
+        else:
+            head = body[:body.index(text.encode()) + len(text)]
+            _start(conn, head, len(body), ctype)
+            assert _until(lambda: body_intake.held_bytes() > len(text))
+            assert pool.figures.incoming == 0
+            if ending == "client leaves":
+                conn.sock.close()
+            else:
+                r = conn.getresponse()
+                assert r.status == 408, r.read()
+        conn.close()
+        assert _until(lambda: body_intake.held_bytes() == 0)
+    assert pool.figures.incoming == 0
+    assert routes.store.jobs == {}
+
+
 def test_a_form_whose_client_leaves_frees_its_reservation(routes):
     import http.client
 

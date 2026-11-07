@@ -685,25 +685,31 @@ def _loads(box: list, free: int | None, verify: bool = False,
     return json.loads(text), max(need, wide)
 
 
-def loads_field(text: str, name: str, free: int | None):
+def loads_field(text: str, name: str, free: int | None,
+                hold: BodyHold | None = None):
     """The JSON value of a form's text field ``name``, priced as a JSON
     body is (:func:`json_price`), beside the field's own str, against
     ``free`` bytes (the pool's figure when None), and refused with a 413
     before its parse past them; a field that is no JSON is ValueError.
-    Runs in a worker thread, in the parse turn (:func:`_in_turn`)."""
-    if free is None:
-        free = free_bytes()
+    With ``hold``, the form's count, which holds the field's str, the
+    parse is counted on it beside the other bodies being read, against
+    the pool's figure read now. Runs in a worker thread, in the parse
+    turn (:func:`_in_turn`)."""
     buf = bytearray(text.encode("utf-8", "surrogatepass"))
-    held = len(text) * (WIDE_CHAR_BYTES if not text.isascii() else 1)
-    if free is not None:
-        need = _json_plan(buf)[0] + held
-        if need > free:
-            raise BodyRefused(413, f"{name} is {_mib(len(buf), True)}, its "
-                              f"parse holds {_mib(need, True)} with the "
-                              f"values it parses to, and {_mib(free)} of "
-                              "memory is free beside the models loaded; "
-                              f"send a shorter {name}, or unload a model "
-                              "to make room", name)
+    if hold is not None and free is None:
+        free = _pool_free()
+        need = hold.n + _json_plan(buf)[0]
+    else:
+        if free is None:
+            free = free_bytes()
+        held = len(text) * (WIDE_CHAR_BYTES if not text.isascii() else 1)
+        need = (_json_plan(buf)[0] + held) if free is not None else 0
+        hold = None
+    _price(hold, need, free, functools.partial(
+        BodyRefused, 413, f"{name} is {_mib(len(buf), True)}, its parse "
+        f"holds {_mib(need, True)} with the values it parses to, and "
+        f"{_mib(free or 0)} of memory is free beside the models loaded; "
+        f"send a shorter {name}, or unload a model to make room", name))
     try:
         return _loads([buf], None)[0]
     except RecursionError:
@@ -957,7 +963,9 @@ def _stalled(stall: float, got: int, n: int | None,
 
 
 async def read_form_to_disk(request: Request, folder: str, take,
-                            free: int | None = None) -> tuple[list, dict]:
+                            free: int | None = None,
+                            hold: BodyHold | None = None
+                            ) -> tuple[list, dict]:
     """``(fields, files)`` of a multipart form: its text fields (name,
     value) in RAM, priced against ``free`` bytes (the pool's figure when
     None) as they arrive, each at its own width (:class:`_TextPrice`),
@@ -972,13 +980,23 @@ async def read_form_to_disk(request: Request, folder: str, take,
     as its body comes, and the read stops where a step does not fit. A
     form that sends nothing for STALL_S seconds is refused with a 408. A
     refusal or a failed read removes every file it began, and a body that
-    ends inside a file removes that file."""
+    ends inside a file removes that file. With the pool's figure and
+    ``hold``, the text fields are counted on it beside the other bodies
+    being read as they arrive, against the figure read at each chunk, and
+    a form whose text fits only once the others are read is a 503."""
     from starlette.datastructures import UploadFile
     from starlette.formparsers import MultiPartException, MultiPartParser
     from starlette.requests import ClientDisconnect
 
-    if free is None:
-        free = free_bytes()
+    if free is None and hold is not None:
+        figure = _pool_free
+    else:
+        hold = None
+        if free is None:
+            free = free_bytes()
+
+        def figure():
+            return free
     n = content_length(request)
     ok, room, arriving = await take(n)
     if not ok:
@@ -1015,9 +1033,9 @@ async def read_form_to_disk(request: Request, folder: str, take,
                 return
             # The text fields stay in RAM, each priced at its own width.
             chunk = data[start:end]
-            need = text.add(chunk)
-            if free is not None and need > free:
-                raise _text_over_free(text.read, free, need)
+            need, f = text.add(chunk), figure()
+            _price(hold, need, f, functools.partial(
+                _text_over_free, text.read, f, need))
             part.data.extend(chunk)
 
         def on_part_end(self) -> None:

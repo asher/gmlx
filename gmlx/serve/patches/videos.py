@@ -487,8 +487,9 @@ async def create(request: Request):
     # Refused before the body is read: the answer ends the connection, so
     # the server does not drain a body it will not use.
     close = {"Connection": "close"}
-    # What the JSON body holds in RAM, counted beside the other bodies
-    # being read until the route drops it: past the keyframes, at its end.
+    # What the JSON body or the form's text holds in RAM, counted beside
+    # the other bodies being read until the route drops it: past the
+    # keyframes, at its end.
     hold = BodyHold()
     try:
         ffmpeg = media_programs.find("ffmpeg")
@@ -514,8 +515,8 @@ async def create(request: Request):
         guides = None
         try:
             if ctype == "multipart/form-data":
-                pairs, files = await read_form_to_disk(request, folder,
-                                                       take_async)
+                pairs, files = await read_form_to_disk(
+                    request, folder, take_async, hold=hold)
                 await asyncio.to_thread(post.settle)
                 fields = dict(pairs)
                 if isinstance(fields.get("guides"), str):
@@ -523,7 +524,8 @@ async def create(request: Request):
                     # as a JSON body, in the turn the parses take.
                     try:
                         guides = await _in_turn(
-                            loads_field, fields["guides"], "guides", None)
+                            loads_field, fields["guides"], "guides", None,
+                            hold, hold=hold)
                     except ValueError:
                         raise Refused(400, "guides is a JSON list",
                                       "guides") from None
