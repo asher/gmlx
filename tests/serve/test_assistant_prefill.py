@@ -32,7 +32,7 @@ from gmlx.serve.patches.render import (  # noqa: E402
     install_chat_image_placement,
     install_faithful_history,
 )
-from gmlx.upstream.patching import _walk  # noqa: E402
+from gmlx.upstream.patching import _walk, root  # noqa: E402
 
 _OPENAI = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
 _APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
@@ -491,6 +491,10 @@ def test_the_install_places_prefill_inside_the_retire_capture(monkeypatch):
     for obj, attr in _render_seams():
         if hasattr(obj, attr):
             monkeypatch.setattr(obj, attr, getattr(obj, attr))
+    # Start from the stock render, whatever wraps earlier tests left.
+    for target in sp_common._render_target_modules():
+        monkeypatch.setattr(target, "apply_chat_template",
+                            root(target.apply_chat_template))
     sp.install_server_patches(build_config({"server": {}}),
                               reload_fn=lambda *a, **k: None)
     flags = ["_kq_gguf_role_normalization", "_kq_gguf_stream_thinking_seed",
