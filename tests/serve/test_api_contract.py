@@ -761,3 +761,56 @@ def test_a_responses_or_messages_string_with_a_lone_surrogate_is_a_400(
         err = r.json()["error"]
         assert (err["type"], err["message"], err["param"]) == (
             "invalid_request_error", message, field)
+
+
+class _CountsTokens(_Tokenizing):
+    """The engine's preprocess, which tokenizes the prompt to count it."""
+
+    def _cpu_preprocess(self, prompt, images=None, audio=None):
+        prompt.encode("utf-8")
+        return {"input_ids": [1, 2, 3]}
+
+
+@pytest.mark.parametrize("path, body, field", [
+    ("/v1/responses/input_tokens", {"input": "a \ud800 cat"}, "input"),
+    ("/v1/messages/count_tokens", {"messages": [
+        {"role": "user", "content": "a \ud800 cat"}]},
+     "messages[0].content")])
+def test_a_token_count_of_a_string_with_a_lone_surrogate_is_a_400(
+        monkeypatch, path, body, field):
+    """The token counting routes of Responses and Messages tokenize the
+    prompt as their generation routes do: a lone surrogate escape gets
+    the same 400, in the route's own error shape."""
+    import json
+
+    from fastapi.testclient import TestClient
+
+    openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    anthropic = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.server.anthropic")
+    runtime = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.server.runtime").runtime
+    cached = lambda *a, **k: (  # noqa: E731
+        None, _QwenProcessor(), {"model_type": "qwen3_5"})
+    monkeypatch.setattr(openai, "get_cached_model", cached)
+    monkeypatch.setattr(anthropic, "get_cached_model", cached)
+    monkeypatch.setattr(runtime, "response_generator", _CountsTokens(),
+                        raising=False)
+    monkeypatch.setattr(_APP.app, "exception_handlers",
+                        dict(_APP.app.exception_handlers))
+    monkeypatch.setattr(_APP.app, "middleware_stack", None)
+    sp.install_resolver_error_handlers()
+    sp.install_api_contract()
+    client = TestClient(_APP.app, raise_server_exceptions=False)
+    r = client.post(path, content=json.dumps(
+        {"model": "m", "max_tokens": 1, **body}).encode(),
+        headers={"content-type": "application/json"})
+    assert r.status_code == 400, r.text
+    message = f"{field} holds a lone surrogate escape"
+    if path.startswith("/v1/messages"):
+        assert r.json() == {"type": "error", "error": {
+            "type": "invalid_request_error", "message": message}}
+    else:
+        err = r.json()["error"]
+        assert (err["type"], err["message"], err["param"]) == (
+            "invalid_request_error", message, field)

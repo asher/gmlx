@@ -29,6 +29,7 @@ _API_CONTRACT_FLAG = "_kq_gguf_api_contract"
 _RESPONSES_PATHS = ("/responses", "/v1/responses")
 _MESSAGES_PATHS = ("/messages", "/v1/messages")
 _COUNT_TOKENS_PATHS = ("/messages/count_tokens", "/v1/messages/count_tokens")
+_INPUT_TOKENS_PATHS = ("/responses/input_tokens", "/v1/responses/input_tokens")
 
 
 # Consumed-parameter sets, one per dialect. "Consumed" means some code path
@@ -380,6 +381,26 @@ def _make_raw_endpoint(consumed, fallback_path, anthropic: bool = False):
     return make
 
 
+def _make_count_endpoint(anthropic: bool = False):
+    """Wrapper factory for the token counting routes of Responses and
+    Messages, which tokenize the prompt as their generation routes do: a
+    lone surrogate escape in any string of the body is the same 400."""
+    def make(original):
+        async def endpoint(*args, **kwargs):
+            http = _http_request_of(list(args) + list(kwargs.values()))
+            if http is not None:
+                try:
+                    body = await http.json()
+                except Exception:
+                    body = None
+                refused = _surrogate_answer(body, anthropic)
+                if refused is not None:
+                    return refused
+            return await original(*args, **kwargs)
+        return endpoint
+    return make
+
+
 def install_api_contract() -> None:
     """Wrap the three generation dialects with the unread-parameter warning
     and ``tool_choice: "none"`` enforcement. Idempotent per route."""
@@ -392,6 +413,10 @@ def install_api_contract() -> None:
     _wrap_post_routes(app, _MESSAGES_PATHS, _API_CONTRACT_FLAG,
                       _make_raw_endpoint(ANTHROPIC_CONSUMED,
                                          _MESSAGES_PATHS[-1], anthropic=True))
+    _wrap_post_routes(app, _INPUT_TOKENS_PATHS, _API_CONTRACT_FLAG,
+                      _make_count_endpoint())
+    _wrap_post_routes(app, _COUNT_TOKENS_PATHS, _API_CONTRACT_FLAG,
+                      _make_count_endpoint(anthropic=True))
 
 
 # Context overflow wording
