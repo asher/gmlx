@@ -883,6 +883,32 @@ def test_a_malformed_guides_field_is_a_400(routes, guides, text):
     assert routes.store.jobs == {}
 
 
+@pytest.mark.parametrize("over", [False, True], ids=["budget", "overcommit"])
+def test_a_prompt_with_a_lone_surrogate_is_a_400(routes, monkeypatch, over):
+    """A lone surrogate escape parses from JSON to a str that encodes to
+    no UTF-8: the tokenizer of the budget's estimate fails on it, and so
+    does the record's JSON under overcommit."""
+    from gmlx.serve import residency
+    from gmlx.video import memfit
+
+    pool = SimpleNamespace(figures=SimpleNamespace(budget=100 << 30,
+                                                   entries=()))
+    monkeypatch.setattr(residency, "_installed_pool", lambda: pool)
+    monkeypatch.setenv("GMLX_OVERCOMMIT", "1" if over else "0")
+    monkeypatch.setattr(videos, "_tokenizer", lambda fam, spec: None)
+    # As a tokenizer, it encodes the prompt.
+    monkeypatch.setattr(memfit, "prompt_rows",
+                        lambda fam, text, tok, sizes: len(text.encode()))
+    client = TestClient(routes.app, raise_server_exceptions=False)
+    r = client.post("/v1/videos",
+                    content=b'{"prompt": "a \\ud800 cat", "model": "h3"}',
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["message"] == (
+        "prompt holds a lone surrogate escape")
+    assert routes.store.jobs == {}
+
+
 def test_a_seed_past_any_number_is_a_400(routes):
     """1e999 parses to inf, which int() refuses with OverflowError."""
     r = routes.client.post("/v1/videos",

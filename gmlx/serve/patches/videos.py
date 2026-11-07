@@ -334,6 +334,16 @@ def prepare(fields: dict, files: dict, folder: str, ffmpeg: str,
     prompt = fields.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise Refused(400, "prompt is the text of the clip", "prompt")
+    # JSON parses a lone surrogate escape to a str that encodes to no
+    # UTF-8, which the tokenizer and the record's JSON then fail on.
+    for name in ("prompt", "model"):
+        value = fields.get(name)
+        if isinstance(value, str):
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
+                raise Refused(400, f"{name} holds a lone surrogate escape",
+                              name) from None
     model = _model(fields)
     try:
         path, spec = serving.resolve_video_request(model)
