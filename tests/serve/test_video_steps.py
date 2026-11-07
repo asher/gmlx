@@ -323,11 +323,14 @@ def test_a_plan_sums_the_refined_rows_while_the_worker_keeps_one(
                     t.join(10)
             return 64
 
+    # Two rows: an iterator past its last item misses a change.
     served.captions[("old", "t")] = Rows()
-    assert vs.held_bytes(served) == (0, 64)
+    served.captions[("older", "t")] = Rows()
+    assert vs.held_bytes(served) == (0, 128)
     worker[0].join(10)
     assert not worker[0].is_alive()
-    assert list(served.captions) == [("old", "t"), ("new", "t")]
+    assert list(served.captions) == [("old", "t"), ("older", "t"),
+                                     ("new", "t")]
 
 
 def test_the_refined_rows_keep_to_the_bytes_the_entry_books():
