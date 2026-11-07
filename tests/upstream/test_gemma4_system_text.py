@@ -19,10 +19,9 @@ import pytest
 
 pytest.importorskip("gmlx._vendor.mlx_vlm")
 
-import gmlx._vendor.mlx_vlm.prompt_utils as pu  # noqa: E402
-from gmlx._vendor.mlx_vlm.models.gemma4.processing_gemma4 import Gemma4Processor  # noqa: E402
-from transformers.utils.chat_template_utils import render_jinja_template  # noqa: E402
+from chat_fakes import Gemma4VisionProcessor, Processor  # noqa: E402
 
+import gmlx._vendor.mlx_vlm.prompt_utils as pu  # noqa: E402
 from gmlx.serve.patches._common import _render_target_modules  # noqa: E402
 from gmlx.serve.patches.render import install_faithful_history  # noqa: E402
 
@@ -41,49 +40,6 @@ _IDEFICS3 = (
     "{% elif line['type'] == 'image' %}{{ '<image>' }}{% endif %}"
     "{% endfor %}<end_of_utterance>\n{% endfor %}"
     "{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}")
-
-
-class _Tokenizer:
-    """Renders a template as an HF tokenizer does."""
-
-    def __init__(self, template, bos="<bos>"):
-        self.chat_template = template
-        self._special = {"bos_token": bos} if bos else {}
-
-    def apply_chat_template(self, messages, tokenize=False,
-                            add_generation_prompt=True, **kw):
-        out = render_jinja_template(
-            [messages], chat_template=self.chat_template,
-            add_generation_prompt=add_generation_prompt,
-            **{**self._special, **kw})
-        rendered = out[0] if isinstance(out, tuple) else out
-        return rendered[0] if isinstance(rendered, list) else rendered
-
-
-class _Processor:
-    """Forwards to its tokenizer, as the GGUF text processor does."""
-
-    def __init__(self, template, bos="<bos>"):
-        self._inner = _Tokenizer(template, bos)
-
-    def __getattr__(self, name):
-        if name == "_inner":
-            raise AttributeError(name)
-        return getattr(self._inner, name)
-
-
-class _Gemma4Processor:
-    """Renders as Gemma4Processor does: the rebuild once more, then the
-    tokenizer."""
-
-    apply_chat_template = Gemma4Processor.apply_chat_template
-    _extract_media_from_messages = Gemma4Processor._extract_media_from_messages
-    _as_list = staticmethod(Gemma4Processor._as_list)
-
-    def __init__(self, template, model_type):
-        self.model_type = model_type
-        self.tokenizer = _Tokenizer(template)
-        self.chat_template = template
 
 
 @pytest.fixture
@@ -117,7 +73,7 @@ def _render(render, processor, model_type, messages, **kw):
 
 
 def _text_render(template, messages):
-    return _render(pu.apply_chat_template, _Processor(template),
+    return _render(pu.apply_chat_template, Processor(template, "<bos>"),
                    "gemma4_text", messages)
 
 
@@ -134,7 +90,7 @@ def test_the_gemma4_processor_renders_the_text_models_prompt(
         request, path, role, template, model_type):
     render = request.getfixturevalue(path)
     messages = _conversation(role)
-    got = _render(render, _Gemma4Processor(_TEMPLATES[template], model_type),
+    got = _render(render, Gemma4VisionProcessor(_TEMPLATES[template], model_type),
                   model_type, messages)
     want = _text_render(_TEMPLATES[template], messages)
     assert _system_turn(want) == "Be brief."
@@ -148,7 +104,7 @@ def test_a_video_request_renders_the_text_models_system_turn(
         faithful, model_type, role, videos):
     """Each video once added a space ahead of the system text."""
     messages = _conversation(role)
-    got = _render(faithful, _Gemma4Processor(_TEMPLATES["12b"], model_type),
+    got = _render(faithful, Gemma4VisionProcessor(_TEMPLATES["12b"], model_type),
                   model_type, messages,
                   video=[f"clip{i}.mp4" for i in range(videos)])
     assert _system_turn(got) == "Be brief."
@@ -175,7 +131,7 @@ def test_the_text_processor_on_a_vision_type_renders_the_text_models_prompt(
     render = request.getfixturevalue(path)
     messages = _conversation("system")
     for name, template in _TEMPLATES.items():
-        got = _render(render, _Processor(template), model_type, messages)
+        got = _render(render, Processor(template, "<bos>"), model_type, messages)
         assert got == _text_render(template, messages) == _PLAIN_BEFORE[name]
 
 
@@ -209,7 +165,7 @@ def test_other_list_types_keep_list_system_content(model_type):
      "User: Bye.<end_of_utterance>\nAssistant:"),
 ])
 def test_other_templates_render_as_before(model_type, template, want):
-    out = _render(pu.apply_chat_template, _Processor(template, bos=None),
+    out = _render(pu.apply_chat_template, Processor(template),
                   model_type, _conversation("system"))
     assert out == want
 
@@ -260,7 +216,7 @@ _NO_SYSTEM = {
 @pytest.mark.parametrize("case", sorted(_NO_SYSTEM))
 def test_a_render_with_no_system_message_does_not_change(faithful, case):
     messages, kw, before = _NO_SYSTEM[case]
-    processor = _Gemma4Processor(_TEMPLATES["12b"], "gemma4_unified")
+    processor = Gemma4VisionProcessor(_TEMPLATES["12b"], "gemma4_unified")
     assert _render(faithful, processor, "gemma4_unified", messages,
                    **kw) == before
 
@@ -274,7 +230,7 @@ def test_a_video_request_puts_no_marker_in_a_developer_turn(
     messages = [{"role": "system", "content": "Be brief."},
                 {"role": "developer", "content": "Answer in French."},
                 {"role": "user", "content": "What happens?"}]
-    got = _render(faithful, _Gemma4Processor(_TEMPLATES[template], model_type),
+    got = _render(faithful, Gemma4VisionProcessor(_TEMPLATES[template], model_type),
                   model_type, messages, video=["clip.mp4"])
     assert "<|turn>developer\nAnswer in French.<turn|>" in got
     assert got.count("<|video|>") == 1
@@ -289,7 +245,7 @@ def test_the_gguf_vocab_encodes_no_space_before_the_system_turn_end(
     from gmlx.distill.tokens import tokenizer_from_gguf
 
     tok = tokenizer_from_gguf(require_arch(gguf_index, "gemma4"))
-    processor = _Gemma4Processor(tok.chat_template, "gemma4_unified")
+    processor = Gemma4VisionProcessor(tok.chat_template, "gemma4_unified")
     processor.tokenizer = tok
     messages = _conversation("system")
     got = tok.encode(_render(faithful, processor, "gemma4_unified", messages),

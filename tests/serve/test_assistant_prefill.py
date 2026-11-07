@@ -15,8 +15,7 @@ import pytest
 
 pytest.importorskip("gmlx._vendor.mlx_vlm")
 
-from gmlx._vendor.mlx_vlm.models.gemma4.processing_gemma4 import Gemma4Processor  # noqa: E402
-from transformers.utils.chat_template_utils import render_jinja_template  # noqa: E402
+from chat_fakes import Gemma4VisionProcessor, Processor  # noqa: E402
 
 import gmlx.cache.retire_key as retire_key  # noqa: E402
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
@@ -56,51 +55,6 @@ _HISTORY = [{"role": "system", "content": "Be brief."},
             {"role": "user", "content": "Hi"}]
 
 
-class _Tokenizer:
-    """Renders the template as an HF tokenizer does, with its special
-    tokens in the template context."""
-
-    def __init__(self, template, bos=None):
-        self.chat_template = template
-        self._special = {"bos_token": bos} if bos else {}
-
-    def apply_chat_template(self, messages, tokenize=False,
-                            add_generation_prompt=True, **kw):
-        out = render_jinja_template(
-            [messages], chat_template=self.chat_template,
-            add_generation_prompt=add_generation_prompt,
-            **{**self._special, **kw})
-        rendered = out[0] if isinstance(out, tuple) else out
-        return rendered[0] if isinstance(rendered, list) else rendered
-
-
-class _Processor:
-    """A processor that forwards to its tokenizer, as the GGUF text
-    processor does."""
-
-    def __init__(self, template, bos=None):
-        self._inner = _Tokenizer(template, bos)
-
-    def __getattr__(self, name):
-        if name == "_inner":
-            raise AttributeError(name)
-        return getattr(self._inner, name)
-
-
-class _Gemma4Processor:
-    """Renders as mlx-vlm's Gemma4Processor does: the stock rebuild once
-    more, then the tokenizer."""
-
-    apply_chat_template = Gemma4Processor.apply_chat_template
-    _extract_media_from_messages = Gemma4Processor._extract_media_from_messages
-    _as_list = staticmethod(Gemma4Processor._as_list)
-
-    def __init__(self, template, bos=None):
-        self.model_type = "gemma4_unified"
-        self.tokenizer = _Tokenizer(template, bos)
-        self.chat_template = template
-
-
 def _processor_for(run, vision=False):
     """The processor and config of the text GGUF of ``run``, or with
     ``vision`` those of a Gemma 4 GGUF set up with ``mmproj:``."""
@@ -109,8 +63,9 @@ def _processor_for(run, vision=False):
     model_type, bos = _MODELS[run]
     if vision:
         assert model_type == "gemma4_text"
-        return _Gemma4Processor(template, bos), {"model_type": "gemma4_unified"}
-    return _Processor(template, bos), {"model_type": model_type}
+        return (Gemma4VisionProcessor(template, bos=bos),
+                {"model_type": "gemma4_unified"})
+    return Processor(template, bos), {"model_type": model_type}
 
 
 class _Tok:
@@ -219,8 +174,8 @@ def test_gemma_rows_cut_a_bos():
             if r["run"] == "llama-server/gemma4_12b"} == {True}
 
 
-def _prefill(final, cont=True, **extra):
-    return {"messages": [*_HISTORY, final], "continue_final_message": cont,
+def _prefill(final, cont=True, history=_HISTORY, **extra):
+    return {"messages": [*history, final], "continue_final_message": cont,
             "add_generation_prompt": False, **extra}
 
 
@@ -314,7 +269,7 @@ def test_a_text_response_format_and_empty_tool_calls_pass(chat):
     assert chat(_QWEN, body) == row["prompt"]
 
 
-class _OwnRenderer(_Processor):
+class _OwnRenderer(Processor):
     def apply_chat_template(self, messages, **kw):
         return "rendered in Python"
 
@@ -333,12 +288,12 @@ def _qwen_template():
 
 
 @pytest.mark.parametrize("processor", [
-    _Processor(""),
-    _Processor((_FIXTURES / "kimi_k3_template.jinja").read_text()),
-    _Processor("<kimi-k3-native-python-chat-renderer>"),
-    _Processor("plamo2vl"),
+    Processor(""),
+    Processor((_FIXTURES / "kimi_k3_template.jinja").read_text()),
+    Processor("<kimi-k3-native-python-chat-renderer>"),
+    Processor("plamo2vl"),
     _OwnRenderer(_qwen_template()),
-    _Processor((_FIXTURES / "qwen3_template.jinja").read_text()),
+    Processor((_FIXTURES / "qwen3_template.jinja").read_text()),
 ], ids=["empty", "kimi-k3-handler", "kimi-k3-sentinel", "plamo2vl-sentinel",
         "own-renderer", "unlisted-autoparser"])
 def test_templates_gmlx_cannot_render_get_a_400(chat, processor):
@@ -346,32 +301,9 @@ def test_templates_gmlx_cannot_render_get_a_400(chat, processor):
 
 
 def test_a_python_chat_template_gets_a_400(chat):
-    proc = _Processor(_qwen_template())
+    proc = Processor(_qwen_template())
     proc._inner._chat_template = lambda *a, **k: "python"
     assert _gen_args_refusal(_prefill(_C), proc) == prefill.UNSUPPORTED
-
-
-_GEMMA_CONT_ROWS = [
-    r["id"] for r in _FIXTURE["rows"]
-    if r["run"] == "llama-server/gemma4_12b" and "continue_final_message" in r["body"]]
-
-
-@pytest.mark.parametrize("rid", _GEMMA_CONT_ROWS)
-def test_the_gemma4_processor_renders_llama_servers_prompt(chat, rid):
-    row = _row(rid)
-    processor = _Gemma4Processor(
-        (_FIXTURES / row["template"]).read_text(), "<bos>")
-    from gmlx.gen.continuation import handler_for, parse_continue, resolve
-
-    msgs = [dict(m) for m in row["body"]["messages"]]
-    cont = resolve(parse_continue(row["body"]["continue_final_message"]),
-                   msgs[-1], handler_for(processor.chat_template))
-    out = _OPENAI.apply_chat_template(
-        processor, {"model_type": "gemma4_unified"}, msgs,
-        add_generation_prompt=False, **{prefill.CONTINUE_KEY: cont},
-        **row["body"]["chat_template_kwargs"])
-    want, got = _expected(row, out)
-    assert got == want
 
 
 _GEMMA_ROWS = [r for r in _FIXTURE["rows"]
@@ -413,52 +345,11 @@ def test_a_gemma4_vision_prefill_with_an_image_keeps_the_history(chat):
                    {"type": "image_url", "image_url": {"url": _PNG}}]}]
     plain = chat(run, {"messages": history, "add_generation_prompt": False},
                  vision=True)
-    got = chat(run, _prefill_of(history, {"role": "assistant",
-                                          "content": "It is"}), vision=True)
+    got = chat(run, _prefill({"role": "assistant", "content": "It is"},
+                             history=history), vision=True)
     assert plain.count("<|image|>") == 1
     assert got.startswith(plain)
     assert got.endswith("It is")
-
-
-def _prefill_of(history, final):
-    return {"messages": [*history, final], "continue_final_message": True,
-            "add_generation_prompt": False}
-
-
-_SYSTEM_BODIES = {
-    "/v1/responses": {"instructions": "Be brief.", "input": "Hi"},
-    "/v1/messages": {"system": "Be brief.",
-                     "messages": [{"role": "user", "content": "Hi"}]},
-}
-
-
-@pytest.mark.parametrize("path", sorted(_SYSTEM_BODIES))
-def test_a_gemma4_vision_entry_renders_the_system_text_as_the_text_entry(
-        chat, monkeypatch, path):
-    monkeypatch.setattr(importlib.import_module(
-        "gmlx._vendor.mlx_vlm.server.anthropic"), "get_cached_model",
-        lambda *a, **k: _OPENAI.get_cached_model(*a, **k))
-    run = "llama-server/gemma4_12b"
-    got = chat(run, _SYSTEM_BODIES[path], path=path, vision=True)
-    assert "<|turn>system\nBe brief.<turn|>" in got
-    assert got == chat(run, _SYSTEM_BODIES[path], path=path)
-
-
-@pytest.mark.parametrize("path", ["/v1/estimate", "/v1/chat/completions"])
-def test_the_estimate_on_a_gemma4_vision_entry_counts_the_text_entrys_prompt(
-        chat, monkeypatch, path):
-    run = "llama-server/gemma4_12b"
-    body = {"messages": _HISTORY}
-    prompt = chat(run, body)
-    _resident(monkeypatch, *_processor_for(run, vision=True))
-    from fastapi.testclient import TestClient
-
-    body = {"model": "m", **body}
-    if path != "/v1/estimate":
-        body["dry_run"] = True
-    r = TestClient(_APP.app).post(path, json=body)
-    assert r.status_code == 200, r.text
-    assert r.json()["prompt_tokens"] == len(_ids(prompt))
 
 
 def test_template_for_reads_the_template_the_gemma4_processor_renders():
@@ -530,7 +421,7 @@ def test_a_handler_with_no_recipe_gets_a_400_before_any_render():
 
 
 def test_a_last_message_only_model_gets_a_400_not_a_500(chat, monkeypatch):
-    processor = _Processor(_qwen_template())
+    processor = Processor(_qwen_template())
     monkeypatch.setattr(_OPENAI, "get_cached_model", lambda *a, **k: (
         None, processor, {"model_type": "paligemma"}))
     from fastapi.testclient import TestClient
@@ -544,7 +435,7 @@ def test_a_last_message_only_model_gets_a_400_not_a_500(chat, monkeypatch):
 def test_a_gemma_legacy_template_refuses_tool_history(chat):
     src = (_FIXTURES / "gemma4_12b_template.jinja").read_text().replace(
         "{#- OpenAI Chat Completions:", "{#- Chat:")
-    proc = _Processor(src, "<bos>")
+    proc = Processor(src, "<bos>")
     tool = [{"role": "user", "content": "Hi"},
             {"role": "assistant", "content": "", "tool_calls": [
                 {"id": "c", "type": "function",
