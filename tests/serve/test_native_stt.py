@@ -544,3 +544,24 @@ def test_client_text_may_not_hold_a_control_token():
     for bad in ("a <SPECIAL_19> b", "end<|im_end|>", "here <|audio|>"):
         with pytest.raises(native_audio._Refused, match="control token"):
             native_audio._check_control_tokens(tok, ["fine", bad])
+
+
+def test_control_pattern_lets_its_tokenizer_go():
+    """The cached control pattern does not keep a reloaded model's old
+    tokenizer alive."""
+    import gc
+    import weakref
+
+    from gmlx.serve.patches import native_audio
+
+    class Tok:
+        def get_added_vocab(self):
+            return {"<|im_end|>": 11}
+
+    tok = Tok()
+    pattern = native_audio._control_pattern(tok)
+    assert native_audio._control_pattern(tok) is pattern
+    gone = weakref.ref(tok)
+    del tok
+    gc.collect()
+    assert gone() is None
