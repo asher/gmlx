@@ -35,6 +35,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `gmlx pull <name>` downloads each file from the latest commit of its
+  repository, so a quant its publisher updates reaches you without a new gmlx
+  release.
 - An image or video LoRA runs when the Mac has the memory for it, where
   `gmlx serve` refused LoRAs over 256 MB.
 - `server.image.adapter_cache_mb` is now an optional cap with no default.

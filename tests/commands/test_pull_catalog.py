@@ -42,11 +42,11 @@ def _m(name, rungs, preferred, *, mmproj=0.0, drafter=0.0, kind="dflash2", moe=F
        native=False, cost=(("full", 0, 4096.0, 48),), heads=32, ctx=262144,
        cross_base=False, blurb="Good at long documents and code.", speed="Quick."):
     return catalog.Model(
-        name=name, title=name.replace("-", " ").title(), repo=f"org/{name}", revision="abc1234",
+        name=name, title=name.replace("-", " ").title(), repo=f"org/{name}",
         rungs=tuple(sorted(rungs, key=lambda r: r.bytes)), preferred=preferred, params="27B",
         blurb=blurb, speed=speed, license="apache-2.0", moe=moe, native_mtp=native,
         mmproj="mmproj-F16.gguf" if mmproj else None, mmproj_bytes=G(mmproj),
-        drafter=(catalog.Drafter(kind, "org/drafter", "def5678", "drafter-Q8_0.gguf",
+        drafter=(catalog.Drafter(kind, "org/drafter", "drafter-Q8_0.gguf",
                                  G(drafter), cross_base) if drafter else None),
         kv_cost=catalog.KvCost(tuple(cost)) if cost else None, heads=heads, trained_ctx=ctx)
 
@@ -506,13 +506,14 @@ def test_plan_refs_pairs_bytes_and_local_state(tmp_path):
     b = box(32)
     plan = catalog.plan_for(DENSE, b)
     refs = catalog.plan_refs(plan)
-    assert refs == ["hf:org/dense/Model-UD-Q4_K_M.gguf@abc1234",
-                    "hf:org/dense/mmproj-F16.gguf@abc1234",
-                    "hf:org/drafter/drafter-Q8_0.gguf@def5678"]
+    assert refs == ["hf:org/dense/Model-UD-Q4_K_M.gguf",
+                    "hf:org/dense/mmproj-F16.gguf",
+                    "hf:org/drafter/drafter-Q8_0.gguf"]
     for ref in refs:
         parsed = remote.parse_ref(ref)
         assert parsed.kind == "hf" and not parsed.is_dir
-    assert remote.parse_ref(refs[0]).revision == "abc1234"
+    # No revision: every file comes from the head of the repo's main branch.
+    assert {remote.parse_ref(r).revision for r in refs} == {"main"}
     assert catalog.plan_bytes(plan) == G(15.33) + G(0.86) + G(1.92)
     pairs = catalog.plan_pairs(plan, str(tmp_path), True)
     model_path = str(tmp_path / "org__dense" / "Model-UD-Q4_K_M.gguf")
@@ -541,11 +542,11 @@ def test_plan_refs_pairs_bytes_and_local_state(tmp_path):
 
 
 def test_a_speech_companion_rides_every_plan(tmp_path):
-    asr = catalog.Asr("me/speech-GGUF", "fed9876", "speech.gguf", G(0.88))
+    asr = catalog.Asr("me/speech-GGUF", "speech.gguf", G(0.88))
     m = dataclasses.replace(MID, asr=asr)
     plan = catalog.plan_for(m, box(16), mmproj=False, drafter=False)
     refs = catalog.plan_refs(plan)
-    assert refs[-1] == "hf:me/speech-GGUF/speech.gguf@fed9876" and len(refs) == 2
+    assert refs[-1] == "hf:me/speech-GGUF/speech.gguf" and len(refs) == 2
     assert catalog.plan_bytes(plan) == plan.rung.bytes + G(0.88)
     assert "audio" in catalog.tags(m)
     assert catalog.extras_text(m).endswith("audio input 0.9 GB")
@@ -618,9 +619,9 @@ def test_the_ripple_entry_steps_down_the_quants_by_memory_class():
     # The drafter stays on wherever a tier fits beside it.
     assert picks == {32: ("IQ2_XXS", False), 48: ("IQ3_XXS", True),
                      64: ("Q4_K_M", True), 128: ("Q4_K_M", True)}
-    # The drafter repo is not pinned: its ref follows main.
+    # The drafter repo is not pinned: its ref reads main.
     refs = catalog.plan_refs(catalog.default_plan(m, catalog.box_for_class(128)))
-    assert refs[1] == "hf:ashbash/Ripple-65B-Preview-DFlash2-GGUF/Ripple-65B-Preview-DFlash2-Q4_K_M.gguf@main"
+    assert refs[1] == "hf:ashbash/Ripple-65B-Preview-DFlash2-GGUF/Ripple-65B-Preview-DFlash2-Q4_K_M.gguf"
     assert catalog.needs_class(m, catalog.find_rung(m, "balanced")) == 64
     assert catalog.needs_class(m, catalog.find_rung(m, "xhigh")) == 96
 
@@ -693,7 +694,6 @@ def _seed_models():
 def test_every_seed_has_its_facts():
     for m in _seed_models():
         assert m.rungs, f"{m.name}: no rungs recorded; run scripts/refresh_pull_catalog.py"
-        assert m.revision != "main" and len(m.revision) >= 7, m.name
         assert m.license, m.name
         assert m.arch, m.name
 
@@ -722,7 +722,7 @@ def test_seed_rungs_are_well_formed(m):
         if r.tier:
             assert quant_tag(base) == catalog._norm_quant(r.quant), (m.name, r.quant)
         ref = remote.parse_ref(catalog.rung_ref(m, r))
-        assert ref.kind == "hf" and not ref.is_dir and ref.revision == m.revision
+        assert ref.kind == "hf" and not ref.is_dir and ref.revision == "main"
         assert 0 < r.text_bytes <= r.bytes, (m.name, r.quant)
         assert r.table_bytes < r.bytes
         if not m.moe:
@@ -733,15 +733,13 @@ def test_seed_rungs_are_well_formed(m):
             assert re.match(r"^(UD-)?(IQ|Q)[123]_", r.quant), (m.name, r.quant)
     if m.drafter is not None:
         d = m.drafter
-        branch = catalog.SEEDS[m.name].drafter_revision
-        assert d.revision == branch if branch else d.revision != "main", (m.name, d.revision)
         assert d.repo and d.file.endswith(".gguf") and d.bytes > 0
         assert d.kind == "dflash2" or arch_table.drafter_serves(d.kind, m.arch) is not False, d
     if m.mmproj:
         assert m.mmproj.endswith(".gguf") and m.mmproj_bytes > 0
     if m.asr is not None:
         a = m.asr
-        assert a.revision != "main" and a.file.endswith(".gguf") and a.bytes > 0
+        assert a.file.endswith(".gguf") and a.bytes > 0
         assert arch_table.ASR_COMPANION_REPOS.get(m.arch) == a.repo.split("/")[-1], m.name
     for f in m.ignored_files:
         assert f.endswith(".gguf")

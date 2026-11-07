@@ -37,12 +37,12 @@ def _r(quant, gb, tier="", *, text=None, table=0.0, sf=None):
 def _m(name, rungs, preferred, *, mmproj=0.0, drafter=0.0, moe=False, cross_base=False,
        cost=(("full", 0, 4096.0, 48),), heads=32, ctx=262144):
     return catalog.Model(
-        name=name, title=name.title(), repo=f"org/{name}", revision="abc1234",
+        name=name, title=name.title(), repo=f"org/{name}",
         rungs=tuple(sorted(rungs, key=lambda r: r.bytes)), preferred=preferred, params="27B",
         blurb="Good at long documents and code.", speed="Quick.", license="apache-2.0",
         license_url="https://example.invalid/LICENSE", moe=moe,
         mmproj="mmproj-F16.gguf" if mmproj else None, mmproj_bytes=G(mmproj),
-        drafter=(catalog.Drafter("dflash2", "org/drafter", "def5678", "drafter-Q8_0.gguf",
+        drafter=(catalog.Drafter("dflash2", "org/drafter", "drafter-Q8_0.gguf",
                                  G(drafter), cross_base) if drafter else None),
         kv_cost=catalog.KvCost(tuple(cost)), heads=heads, trained_ctx=ctx)
 
@@ -180,9 +180,9 @@ def _stream_verdict(monkeypatch, verdict, lines=()):
 def test_a_named_pull_downloads_registers_and_names_the_model(cat, capsys):
     cfg, lib, downloads = cat
     assert manage.cmd_pull(["dense", "--config", str(cfg)]) == 0
-    assert downloads == [("org/dense", "Model-UD-Q4_K_M.gguf", "abc1234"),
-                         ("org/dense", "mmproj-F16.gguf", "abc1234"),
-                         ("org/drafter", "drafter-Q8_0.gguf", "def5678")]
+    assert downloads == [("org/dense", "Model-UD-Q4_K_M.gguf", "main"),
+                         ("org/dense", "mmproj-F16.gguf", "main"),
+                         ("org/drafter", "drafter-Q8_0.gguf", "main")]
     assert (lib / "org__dense" / "Model-UD-Q4_K_M.gguf").exists()
     assert (lib / "org__drafter" / "drafter-Q8_0.gguf").exists()
     c = _cfg(cfg)
@@ -235,7 +235,7 @@ def test_a_re_pull_that_adds_only_the_drafter_writes_it_and_hints_short(cat, cap
     assert len(downloads) == 2 and "draft_gguf" not in cfg.read_text()
     capsys.readouterr()
     assert manage.cmd_pull(["dense", "--config", str(cfg)]) == 0
-    assert downloads[-1] == ("org/drafter", "drafter-Q8_0.gguf", "def5678")
+    assert downloads[-1] == ("org/drafter", "drafter-Q8_0.gguf", "main")
     assert _cfg(cfg).models["model-ud-q4"].draft_gguf == "org__drafter/drafter-Q8_0.gguf"
     out = capsys.readouterr().out
     assert "registered drafter-Q8_0.gguf for faster replies on model-ud-q4" in out
@@ -302,7 +302,7 @@ def test_toggles_drop_or_add_refs_and_the_command_says_so(cat, capsys):
     cfg, lib, downloads = cat
     assert manage.cmd_pull(["dense", "--config", str(cfg), "--no-vision",
                             "--no-drafter"]) == 0
-    assert downloads == [("org/dense", "Model-UD-Q4_K_M.gguf", "abc1234")]
+    assert downloads == [("org/dense", "Model-UD-Q4_K_M.gguf", "main")]
     assert "gmlx pull dense --no-vision --no-drafter\n" in capsys.readouterr().out
     downloads.clear()
     # The tight entry's default leaves faster replies off; --drafter adds it.

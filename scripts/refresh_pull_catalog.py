@@ -7,13 +7,13 @@
   python scripts/refresh_pull_catalog.py --cache DIR      # keep header reads between runs
 
 For each entry of gmlx/load/catalog.py it reads the model card, lists the
-repo at its pinned revision (main before one is recorded), range-reads
+repo at the head of its main branch, which is what a pull downloads, range-reads
 every shard header of each rung, the vision tower, the drafter and the
 speech companion, and
 prints what gmlx/load/catalog_facts.py should hold: the files each
 quality tier maps to, their sizes, text and lookup-table bytes, the
-memory class a MoE streams from, the full-precision cache cost, the
-license and the revision. It also verifies what registration would
+memory class a MoE streams from, the full-precision cache cost and the
+license. It also verifies what registration would
 check (a supported arch, a head on a wired arch, a drafter that serves
 the base and declares it) and flags a vision tower or drafter the repo
 ships that the entry leaves out. Then it prints, per memory class, the
@@ -295,8 +295,9 @@ def _streams_from(mp, ram_classes=MEMORY_CLASSES) -> tuple:
 
 def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
     """``(facts, problems, notes)`` for one seed. ``recorded`` is the
-    current FACTS row, which pins the revision and names the compact
-    quants to keep."""
+    current FACTS row, which names the compact quants to keep. Every repo
+    reads at the commit its main branch is at now, so one run sees one
+    snapshot, and the facts record no revision: a pull reads main."""
     strip_env()
     from gmlx.load.vlm import resolve_vlm_model_type
     from gmlx.serve.capacity import boot_costs
@@ -307,10 +308,7 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
     c = card(seed.repo)
     if c["gated"] not in (False, None):
         problems.append(f"{seed.repo} is gated ({c['gated']!r}); a pull needs a login")
-    revision = (recorded or {}).get("revision") or c["sha"]
-    if recorded and c["sha"] != revision:
-        notes.append(f"{seed.repo}: main is at {c['sha'][:8]}, newer than the pinned "
-                     f"{revision[:8]} ({c['modified'][:10]})")
+    revision = c["sha"]
     files = listing(seed.repo, revision)
     groups = model_files(files)
     if not groups:
@@ -431,16 +429,8 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
     if seed.drafter_file:
         if seed.drafter_repo == seed.repo:
             d_rev, d_files = revision, files
-        elif seed.drafter_revision:
-            d_rev = seed.drafter_revision
-            d_files = listing(seed.drafter_repo, d_rev)
         else:
-            d_card = card(seed.drafter_repo)
-            d_rec = (recorded or {}).get("drafter")
-            d_rev = d_rec[1] if d_rec and d_rec[1] else d_card["sha"]
-            if d_rec and d_card["sha"] != d_rev:
-                notes.append(f"{seed.drafter_repo}: main is at {d_card['sha'][:8]}, newer "
-                             f"than the pinned {d_rev[:8]}")
+            d_rev = card(seed.drafter_repo)["sha"]
             d_files = listing(seed.drafter_repo, d_rev)
         if seed.drafter_file not in d_files:
             problems.append(f"{seed.name}: drafter {seed.drafter_file} is not in "
@@ -461,7 +451,7 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
                 if not declared & targets:
                     problems.append(f"{seed.name}: drafter declares {sorted(declared)}, the "
                                     f"model answers to {sorted(targets)}; set cross_base")
-            drafter = (kind, d_rev, int(d_files[seed.drafter_file]))
+            drafter = (kind, int(d_files[seed.drafter_file]))
     elif not native:
         for path in files:
             if not path.endswith(".gguf") or path in seed.ignored_files:
@@ -476,12 +466,7 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
     # The speech companion.
     asr = None
     if seed.asr_file:
-        a_card = card(seed.asr_repo)
-        a_rec = (recorded or {}).get("asr")
-        a_rev = a_rec[0] if a_rec else a_card["sha"]
-        if a_rec and a_card["sha"] != a_rev:
-            notes.append(f"{seed.asr_repo}: main is at {a_card['sha'][:8]}, newer "
-                         f"than the pinned {a_rev[:8]}")
+        a_rev = card(seed.asr_repo)["sha"]
         a_files = listing(seed.asr_repo, a_rev)
         if seed.asr_file not in a_files:
             problems.append(f"{seed.name}: speech companion {seed.asr_file} is not in "
@@ -494,12 +479,12 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
                                 "speech companion")
             if arch_table.ASR_COMPANION_REPOS.get(arch) != seed.asr_repo.split("/")[-1]:
                 problems.append(f"{seed.name}: {arch} does not pair with {seed.asr_repo}")
-            asr = (a_rev, int(a_files[seed.asr_file]))
+            asr = int(a_files[seed.asr_file])
 
     facts = {
-        "revision": revision, "params": params, "n_params": n_params, "arch": arch, "moe": moe,
+        "params": params, "n_params": n_params, "arch": arch, "moe": moe,
         "native_mtp": native, "license": c["license"],
-        "license_url": _license_url(seed.repo, revision, c, files),
+        "license_url": _license_url(seed.repo, "main", c, files),
         "license_name": c["license_name"] if c["license"] == "other" else "",
         "mmproj_bytes": int(mmproj_bytes), "drafter": drafter,
         "heads": int(heads or 0), "trained_ctx": trained_ctx,
@@ -521,7 +506,7 @@ def facts_text(facts: dict) -> str:
              'hand; ``catalog._SEED`` holds the words."""', "", "FACTS: dict = {"]
     for name, f in facts.items():
         lines.append(f"    {name!r}: {{")
-        for key in ("revision", "params", "n_params", "arch", "moe", "native_mtp", "license",
+        for key in ("params", "n_params", "arch", "moe", "native_mtp", "license",
                     "license_url", "license_name", "mmproj_bytes", "drafter", "heads",
                     "trained_ctx", "kv_cost"):
             lines.append(f"        {key!r}: {f[key]!r},")

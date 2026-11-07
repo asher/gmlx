@@ -1787,7 +1787,7 @@ def _model_json(m, box, group: str | None = None) -> dict:
     mm, dr = (dp.mmproj, dp.drafter) if dp is not None else (False, False)
     addon = pc.addon_bytes(m, mm, dr)
     out = {"name": m.name, "title": m.title, "params": m.params, "repo": m.repo,
-           "revision": m.revision, "license": m.license, "license_url": m.license_url,
+           "license": m.license, "license_url": m.license_url,
            "license_note": m.license_note, "tags": pc.tags(m), "blurb": m.blurb,
            "speed": m.speed, "use": m.use,
            "rungs": [_rung_json(m, r, box, addon, dr) for r in m.rungs]}
@@ -1862,14 +1862,14 @@ def _pick_row(m, dp, box, dest: Destination, free: int):
             id="vision", label="image input", size_label=pc.human_gb(m.mmproj_bytes),
             on=bool(base and base.mmproj),
             streaming_note="Images work only with gmlx serve when the model runs from the SSD.",
-            on_disk=done[f"hf:{m.repo}/{m.mmproj}@{m.revision}"]))
+            on_disk=done[f"hf:{m.repo}/{m.mmproj}"]))
     if m.drafter is not None:
         d = m.drafter
         done = _complete_on_disk(pc.PullPlan(m, dp.rung, False, True, False), dest)
         toggles.append(pick.Toggle(
             id="drafter", label="faster replies", size_label=pc.human_gb(d.bytes),
             on=bool(base and base.drafter), hide_when_streaming=True,
-            on_disk=done[f"hf:{d.repo}/{d.file}@{d.revision}"]))
+            on_disk=done[f"hf:{d.repo}/{d.file}"]))
     _on, remaining, _per = pc.local_state(dp, dest.base_dir, dest.nest)
     return pick.Row(
         id=m.name, title=m.title, params=m.params, tags=tuple(pc.tags(m)),
