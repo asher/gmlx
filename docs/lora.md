@@ -19,6 +19,7 @@ This page covers chat models. Image models take LoRAs too, as
 - [Train an adapter](#train-an-adapter)
 - [Use the adapter](#use-the-adapter)
 - [Serving one base with many adapters](#serving-one-base-with-many-adapters)
+- [Mixing adapters per request](#mixing-adapters-per-request)
 - [Adapter format and interop](#adapter-format-and-interop)
 - [Limitations](#limitations)
 
@@ -130,7 +131,7 @@ models:
 ```
 
 The model loads once, and a request applies the adapter of the id it
-names. Nothing else in the API concerns adapters:
+names:
 
 ```sh
 curl -s http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' -d '{
@@ -143,7 +144,7 @@ Requests to different ids batch together and do not wait for each other.
 To keep one shared copy:
 
 - Keep every other setting the same across the ids, including
-  `speculative`. An id that differs in more than `adapter` loads its own
+  `speculative`. An id that differs in more than its adapters loads its own
   copy. A shared [profile](config.md#profiles) keeps the settings equal.
 - Write a relative adapter path as you would a model path. It resolves in
   [`server.model_dirs`](config.md#servermodel_dirs).
@@ -163,6 +164,72 @@ To compare adapters in one conversation, run
 `gmlx chat --server qwen3-0.6b-pirate` and switch with
 [`/model <id>`](chat.md#undo-retry-and-sessions).
 
+The adapter files count in the copy's memory at twice their size, beside
+the model, when the server checks whether the model fits.
+
+## Mixing adapters per request
+
+An entry can load several adapters, each at a default strength. List them
+in [`adapters`](config.md#modelsadapters). A bare path runs at strength 1:
+
+```yaml
+models:
+  qwen3-0.6b-mix:
+    path: unsloth__Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
+    adapters:
+      - {path: pirate-lora.gguf, strength: 0}
+      - {path: formal-lora.gguf, strength: 0.5}
+```
+
+A request sets the strength of any of these adapters for itself only.
+Requests at different strengths batch together, and a strength change does
+not reload the model. The chat, completions, Responses and Messages routes
+take two fields, and so do `/v1/systemone` and `/v1/prewarm`:
+
+| Field | Shape | Adapters the request does not list |
+|-------|-------|-------------------------------------|
+| `adapters` | `[{"id": "pirate-lora.gguf", "strength": 0.8}]`, or a bare id for strength 1 | Keep the entry's default strength |
+| `lora` | `[{"id": 0, "scale": 0.8}]`, as in llama-server | Run at 0. An empty list keeps the defaults. |
+
+```sh
+curl -s http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' -d '{
+  "model": "qwen3-0.6b-mix",
+  "adapters": [{"id": "pirate-lora.gguf", "strength": 0.8}],
+  "messages": [{"role": "user", "content": "What is the weather like today?"}]
+}'
+```
+
+An `adapters` id is one of these:
+
+- The adapter's path as the config writes it, such as `loras/pirate-lora.gguf`.
+- The file name, with or without its extension, when only one adapter of
+  the entry has it.
+- A path inside a model folder that is the same file as one of the
+  entry's adapters.
+
+A `lora` id is the adapter's index in the entry's `adapters` list, from 0.
+`/v1/models` lists each entry's adapters with their `index`, file `name`,
+default `strength` and `sha256`. The `sha256` is the hash of the bytes the
+loaded copy read, and it is `null` while the model is not loaded.
+
+A request gets a 400 in these cases:
+
+- It sets both `adapters` and `lora`.
+- An id is an absolute path, starts with `~`, or has a `..` part.
+- An id names no adapter of the entry, including one of another entry
+  on the same model, or a file name that two adapters share.
+- An id is listed twice, or a strength is not a number from -100 to 100.
+- The entry loads no adapters and a field is not empty.
+
+A request cannot add an adapter the entry does not load. The image routes
+answer an unknown id with a 404, because an image request may add a LoRA
+file from a model folder. The token count routes check the fields and
+ignore them for the count.
+
+`lora` differs from llama-server in three ways: a bad or repeated id gets a
+400, a `lora` item needs its `scale`, and the server has no
+`/lora-adapters` route for global strengths.
+
 ## Adapter format and interop
 
 Adapters use the llama.cpp GGUF LoRA format. gmlx loads PEFT adapters
@@ -178,6 +245,13 @@ published for llama.cpp, and llama.cpp loads gmlx adapters with `--lora`.
   that runs a fused MoE block, such as Gemma and gpt-oss.
 - Adapters work on text models only, so `--adapter` does not combine with
   `--mmproj`.
+- `gmlx run` and `gmlx chat` take one adapter at strength 1. They refuse an
+  entry with more adapters or another strength, which `gmlx serve` runs.
+- A drafter for speculative decoding runs on the model without the
+  adapters, as in llama.cpp. The verify step uses the adapters, so the
+  output is the same.
+- An image model that borrows a chat model as its text encoder runs the
+  encoder with every adapter off.
 - `--grad-checkpoint` is refused on Kimi K3 and DeepSeek-V4.1.
 - The loader checks that the adapter is for the model's architecture, but
   not that the model is the one it was trained on.

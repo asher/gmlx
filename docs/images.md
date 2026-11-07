@@ -162,8 +162,10 @@ adapter, which sets that adapter's strength for the request:
  "adapters": [{"id": "loras/watercolor.safetensors", "strength": 0.8}]}
 ```
 
-An absolute path gets 400, and so does a request LoRA with text encoder
-layers. List that one in the entry's `adapters`, where both halves apply.
+An absolute path gets 400, and so does a file name that two entry adapters
+share, and a request LoRA with text encoder layers. Chat models take the
+same id forms, as
+[Mixing adapters per request](lora.md#mixing-adapters-per-request) describes. List that one in the entry's `adapters`, where both halves apply.
 LoHa, LoKr, DoRA and the other kinds that are not plain LoRA pairs are
 refused by name, as is a LoRA of another model. The server books a
 request LoRA's memory when its job runs, before it reads the file, and

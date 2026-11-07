@@ -61,6 +61,8 @@ same fields as the letter readout.
 | `chunk_prompt` | `"own"` | `"own"` gives each chunk a system prompt with only its questions. `"shared"` gives every chunk all of them. |
 | `sequential` | `false` | With `true`, the chunks are read in order on one prompt, and each sees the answers before it. |
 | `seed` | `42` | The random tokens that each DiffusionGemma read starts from. |
+| `adapters` | The entry's strengths | Adapter strengths for the reads, as [Mixing adapters per request](lora.md#mixing-adapters-per-request) describes. |
+| `lora` | The entry's strengths | Adapter strengths by index, in the llama-server form. |
 
 `samples` and `auto_max` above
 [`server.systemone.max_samples`](config.md#serversystemonemax_samples) are
