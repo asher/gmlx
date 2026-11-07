@@ -719,15 +719,30 @@ def test_warn_if_batch_unsafe_fires_once_for_gemma2(monkeypatch, caplog, capsys)
         assert out.err == "" and out.out == ""
 
 
-def test_module_annotations_resolve():
+@pytest.mark.parametrize("name", ["residency", "residency_types"])
+def test_module_annotations_resolve(name):
     """Module-level forward-ref unions must quote the whole union
     (ContextVar["_Entry | None"], not ContextVar["_Entry" | None]) or any
-    annotation introspection raises TypeError."""
+    annotation introspection raises TypeError. Each residency module that
+    defines a class: its own annotations, its classes' and their methods',
+    and its functions', each against the names the module imports."""
+    import importlib
+    import inspect
     import typing
 
-    import gmlx.serve.residency as residency
-
-    typing.get_type_hints(residency)
+    mod = importlib.import_module(f"gmlx.serve.{name}")
+    typing.get_type_hints(mod)
+    for obj in vars(mod).values():
+        if getattr(obj, "__module__", None) != mod.__name__:
+            continue
+        if inspect.isclass(obj):
+            typing.get_type_hints(obj)
+            for member in vars(obj).values():
+                fn = getattr(member, "__func__", member)
+                if inspect.isfunction(fn):
+                    typing.get_type_hints(fn)
+        elif inspect.isfunction(obj):
+            typing.get_type_hints(obj)
 
 
 def test_teardown_closes_streaming_helpers_under_the_serving_wrapper():
