@@ -461,6 +461,273 @@ def cmd_continuation(args) -> int:
     return 0
 
 
+def cmd_embedding_lora(args) -> int:
+    """embedding-lora: llama-server greedy ids and top-k logprobs of the
+    stories15M MoE model under a checked-in adapter with a token_embd pair
+    and attention pairs, at strengths 0, 1 and 1.5.
+
+    The prompt goes in as token ids, BOS included. For each strength the
+    rows hold the 8 greedy ids with the top-k at each position, and the
+    top-k of the same contexts at strength 0, so a test can compare the
+    adapter's shift. The recorded run is the CPU backend. A Metal run and
+    two merged models from llama-export-lora must agree with it, and
+    gmlx's own run must hold the tolerance, before the fixture is written.
+    The tolerance is a multiple of gmlx's gap to llama-server at strength 0.
+
+      GMLX_LLAMA_SERVER=.../llama-server \\
+      GMLX_LLAMA_EXPORT_LORA=.../llama-export-lora \\
+          python scripts/llama_fixtures.py embedding-lora
+    """
+    import numpy as np
+
+    strengths = (0.0, 1.0, 1.5)
+    n_predict, top_k, rank, alpha = 8, 10, 2, 4.0
+    linear_sites = ("blk.0.attn_q.weight", "blk.2.attn_v.weight",
+                    "blk.4.attn_output.weight")
+    margin = 4.0                    # tolerance = margin * strength-0 gap
+    floor = 1e-4
+
+    gguf_path = Path(args.gguf).expanduser().resolve()
+    adapter = Path(args.adapter).expanduser().resolve()
+    out = Path(args.out)
+    if not gguf_path.is_file():
+        raise SystemExit(f"error: no such file: {gguf_path}")
+    server_bin = binary("llama-server")
+    export_bin = os.environ.get("GMLX_LLAMA_EXPORT_LORA", "")
+    if not export_bin or not os.access(export_bin, os.X_OK):
+        raise SystemExit("error: set GMLX_LLAMA_EXPORT_LORA to the "
+                         "llama-export-lora binary")
+    commit = llama_commit(server_bin)
+    if llama_commit(export_bin) != commit:
+        raise SystemExit("error: llama-server and llama-export-lora are from "
+                         "different llama.cpp commits")
+    ident = _image_fixtures().file_identity
+    portable = _image_fixtures().portable_argv
+    log_dir = Path(args.log_dir)
+
+    def mint() -> None:
+        """Write the adapter once: rank-2 F32 pairs scaled to a fixed share
+        of the base weights, from a seeded generator."""
+        import gguf
+
+        reader = gguf.GGUFReader(str(gguf_path))
+        base = {t.name: np.array(t.data, dtype=np.float32) for t in reader.tensors
+                if t.name in ("token_embd.weight", *linear_sites)}
+        rng = np.random.default_rng(15)
+        scale = alpha / rank
+        w = gguf.GGUFWriter(str(adapter), "llama")
+        w.add_type(gguf.GGUFType.ADAPTER)
+        w.add_string(gguf.Keys.Adapter.TYPE, "lora")
+        w.add_float32(gguf.Keys.Adapter.LORA_ALPHA, alpha)
+        emb = base["token_embd.weight"]                    # (n_vocab, n_embd)
+        a = rng.standard_normal((emb.shape[0], rank)).astype(np.float32)
+        b = rng.standard_normal((emb.shape[1], rank)).astype(np.float32)
+        ratio = (np.linalg.norm(scale * a @ b.T, axis=1).mean()
+                 / np.linalg.norm(emb, axis=1).mean())
+        w.add_tensor("token_embd.weight.lora_a", a)
+        w.add_tensor("token_embd.weight.lora_b", (b * (0.3 / ratio)).astype(np.float32))
+        for name in linear_sites:
+            weight = base[name]                            # (out, in)
+            a = rng.standard_normal((rank, weight.shape[1])).astype(np.float32)
+            b = rng.standard_normal((weight.shape[0], rank)).astype(np.float32)
+            ratio = np.linalg.norm(scale * b @ a) / np.linalg.norm(weight)
+            w.add_tensor(f"{name}.lora_a", a)
+            w.add_tensor(f"{name}.lora_b", (b * (0.15 / ratio)).astype(np.float32))
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+        print(f"wrote {_shown(adapter)}")
+
+    if not adapter.is_file():
+        adapter.parent.mkdir(parents=True, exist_ok=True)
+        mint()
+    check_recorded_files(out, [gguf_path, adapter])
+
+    def top(entry) -> dict:
+        return {int(p["id"]): float(p["logprob"]) for p in entry["top_logprobs"]}
+
+    class Server:
+        def __init__(self, label, model, extra):
+            self.label = label
+            self.port = str(free_port())
+            self.argv = [server_bin, "-m", str(model), *extra,
+                         "--host", "127.0.0.1", "--port", self.port,
+                         "-c", "256", "-np", "1", "--no-warmup", "--seed", "0"]
+            name = label.replace("/", "-")
+            self.proc = LlamaServer(self.argv, log_dir / f"embedding-lora-{name}.log")
+            self.proc.wait_ready(args.start_timeout)
+
+        def complete(self, ids, n, strength=None) -> list:
+            body = {"prompt": ids, "n_predict": n, "temperature": 0.0,
+                    "n_probs": top_k, "cache_prompt": False}
+            if strength is not None:
+                body["lora"] = [{"id": 0, "scale": strength}]
+            status, reply = post_json(
+                f"http://127.0.0.1:{self.port}/completion", body)
+            if status != 200:
+                raise SystemExit(f"error: {self.label}: HTTP {status}: {reply}")
+            got = reply["completion_probabilities"]
+            if len(got) != n:
+                raise SystemExit(f"error: {self.label} stopped after {len(got)} "
+                                 f"of {n} tokens; pick a longer prompt")
+            return got
+
+        def portable_argv(self):
+            return portable([a if a != self.port else "PORT" for a in self.argv])
+
+    argvs: dict = {}
+    record: dict = {}
+    with tempfile.TemporaryDirectory(prefix="llama-embd-lora-",
+                                     dir=args.work_dir) as tmp:
+        backends = {"llama-server/cpu": ["--device", "none", "-ngl", "0"],
+                    "llama-server/metal": ["-ngl", "99"]}
+        runs: dict = {}
+        prompt_ids: list = []
+        for label, extra in backends.items():
+            srv = Server(label, gguf_path, [*extra, "--lora", str(adapter)])
+            try:
+                if not prompt_ids:
+                    status, reply = post_json(
+                        f"http://127.0.0.1:{srv.port}/tokenize",
+                        {"content": args.prompt, "add_special": True})
+                    if status != 200:
+                        raise SystemExit(f"error: tokenize: HTTP {status}")
+                    prompt_ids = [int(t) for t in reply["tokens"]]
+                per = {}
+                for s in strengths:
+                    gen = srv.complete(prompt_ids, n_predict, s)
+                    ids = [int(e["id"]) for e in gen]
+                    base_top = [top(srv.complete(prompt_ids + ids[:k], 1, 0.0)[0])
+                                for k in range(n_predict)]
+                    per[s] = {"ids": ids, "top": [top(e) for e in gen],
+                              "base_top": base_top}
+                runs[label] = per
+            finally:
+                srv.proc.stop()
+            argvs[label] = srv.portable_argv()
+        for s in strengths[1:]:
+            tag = f"s{s:g}"
+            merged = Path(tmp) / f"stories15m_moe_merged_{tag}.gguf"
+            argv = [export_bin, "-m", str(gguf_path), "--lora-scaled",
+                    f"{adapter}:{s:g}", "-o", str(merged)]
+            run_logged(argv, log_dir / f"embedding-lora-export-{tag}.log")
+            argvs[f"llama-export-lora/{tag}"] = portable(argv)
+            label = f"llama-server/merged-{tag}"
+            srv = Server(label, merged, ["--device", "none", "-ngl", "0"])
+            try:
+                gen = srv.complete(prompt_ids, n_predict)
+                runs[label] = {"ids": [int(e["id"]) for e in gen],
+                               "top": [top(e) for e in gen]}
+            finally:
+                srv.proc.stop()
+            argvs[label] = srv.portable_argv()
+        record = runs
+
+    # gmlx: one forward over the prompt and each strength's ids, at that
+    # strength and at strength 0, in float32 with exact products.
+    os.environ["GMLX_ACTIVATION_DTYPE"] = "float32"
+    sys.path.insert(0, str(REPO))
+    import mlx.core as mx
+
+    from gmlx import lora_rows
+    from gmlx.image.float32 import f32_products_exact
+    from gmlx.load.adapter import apply_gguf_adapter
+    from gmlx.load.loader import load_model
+
+    model, config, _tok = load_model(str(gguf_path))
+    apply_gguf_adapter(getattr(model, "language_model", model), config,
+                       str(adapter), base_arch="llama")
+    lora_rows.configure("static", 1)
+
+    def gmlx_lp(ids, s):
+        lora_rows.set_rows([s])
+        try:
+            logits = model(mx.array([ids]))
+            mx.eval(logits)
+        finally:
+            lora_rows.clear_rows()
+        x = np.array(logits[0].astype(mx.float32), dtype=np.float64)
+        x = x - x.max(axis=-1, keepdims=True)
+        return x - np.log(np.exp(x).sum(axis=-1, keepdims=True))
+
+    cpu = record["llama-server/cpu"]
+    n_prompt = len(prompt_ids)
+    gm = {}
+    for s in strengths:
+        seq = prompt_ids + cpu[s]["ids"]
+        lp_s, lp_0 = gmlx_lp(seq, s), gmlx_lp(seq, 0.0)
+        gm[s] = (lp_s[n_prompt - 1:n_prompt - 1 + n_predict],
+                 lp_0[n_prompt - 1:n_prompt - 1 + n_predict])
+
+    def gap(a_tops, b_tops) -> float:
+        worst = 0.0
+        for ta, tb in zip(a_tops, b_tops):
+            for i in set(ta) & set(tb):
+                worst = max(worst, abs(ta[i] - tb[i]))
+        return worst
+
+    gap0 = 0.0
+    for s in strengths:
+        for k, t in enumerate(cpu[s]["base_top"]):
+            for i, v in t.items():
+                gap0 = max(gap0, abs(gm[s][1][k][i] - v))
+    tol = max(margin * gap0, floor)
+    checks = {"strength0_gap": gap0}
+    metal = record["llama-server/metal"]
+    for s in strengths:
+        if metal[s]["ids"] != cpu[s]["ids"]:
+            raise SystemExit(f"error: Metal and CPU disagree on the ids at {s:g}")
+        checks[f"metal_gap_s{s:g}"] = gap(metal[s]["top"], cpu[s]["top"])
+    for s in strengths[1:]:
+        merged = record[f"llama-server/merged-s{s:g}"]
+        if merged["ids"] != cpu[s]["ids"]:
+            raise SystemExit(f"error: the merged model at {s:g} drafts other ids "
+                             f"({merged['ids']} vs {cpu[s]['ids']})")
+        checks[f"merged_gap_s{s:g}"] = gap(merged["top"], cpu[s]["top"])
+    worst_shift = 0.0
+    for s in strengths:
+        lp_s, lp_0 = gm[s]
+        if [int(np.argmax(r)) for r in lp_s] != cpu[s]["ids"]:
+            raise SystemExit(f"error: gmlx's greedy ids differ at strength {s:g}")
+        for k in range(n_predict):
+            ts, t0 = cpu[s]["top"][k], cpu[s]["base_top"][k]
+            for i in set(ts) & set(t0):
+                worst_shift = max(worst_shift, abs(
+                    (lp_s[k][i] - lp_0[k][i]) - (ts[i] - t0[i])))
+    checks["gmlx_shift_gap"] = worst_shift
+    for name, v in checks.items():
+        print(f"{name}: {v:.3g}")
+    for name, v in checks.items():
+        if name != "strength0_gap" and v > tol:
+            raise SystemExit(f"error: {name} {v:.3g} is over the tolerance "
+                             f"{tol:.3g}")
+
+    rows = []
+    for s in strengths:
+        r = cpu[s]
+        rows.append({
+            "run": "llama-server/cpu", "gguf": gguf_path.name,
+            "adapter": adapter.name, "strength": s, "prompt_ids": prompt_ids,
+            "ids": r["ids"],
+            "top": [[[i, v] for i, v in sorted(t.items(), key=lambda kv: -kv[1])]
+                    for t in r["top"]],
+            "base_top": [[[i, v] for i, v in sorted(t.items(), key=lambda kv: -kv[1])]
+                         for t in r["base_top"]],
+        })
+    write_fixture(out, {
+        "llama_cpp": commit, "created": now(), "argv": argvs,
+        "files": {p.name: ident(p) for p in (gguf_path, adapter)},
+        "rows": rows,
+        "backend": "cpu",
+        "prompt": args.prompt,
+        "tolerances": {"shift": tol, "margin": margin, "floor": floor},
+        "checks": checks,
+        "f32_products_exact": bool(f32_products_exact()),
+    })
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -494,6 +761,26 @@ def main(argv: list[str] | None = None) -> int:
     co.add_argument("--log-dir", default=".",
                     help="where each server's output log goes")
     co.set_defaults(fn=cmd_continuation)
+    el = sub.add_parser(
+        "embedding-lora",
+        help="llama-server greedy ids and top-k of the stories15M MoE model "
+        "under a token embedding adapter at strengths 0, 1 and 1.5")
+    el.add_argument("--gguf", default=str(
+        Path.home() / "llm" / "gguf" / "ggml-org__stories15M_MOE"
+        / "stories15M_MOE-F16.gguf"))
+    el.add_argument("--adapter", default=str(
+        FIXTURES / "lora" / "stories15m_moe_embd.gguf"),
+        help="the adapter; minted once when the file is missing")
+    el.add_argument("--prompt", default="Once upon a time, there was a little")
+    el.add_argument("--out", default=str(FIXTURES / "lora" / "stories15m_moe_embd.json"))
+    el.add_argument("--start-timeout", type=float, default=600.0,
+                    help="seconds to wait for llama-server to load a GGUF")
+    el.add_argument("--work-dir", default=None,
+                    help="where the merged models go (default: the temporary "
+                    "directory)")
+    el.add_argument("--log-dir", default=".",
+                    help="where each run's output log goes")
+    el.set_defaults(fn=cmd_embedding_lora)
     args = ap.parse_args(argv)
     return args.fn(args)
 
