@@ -91,3 +91,11 @@ def test_the_load_refusal_raises_the_first_refusal_over_its_adapters(tmp_path):
     with pytest.raises(ValueError) as e:
         adapter.adapter_load_refusal(base, [ok, bad])
     assert str(e.value) == "bad.gguf: " + adapter._EMBD_TIED
+
+
+@pytest.mark.parametrize("data", [b"GGUF", b"GGUF\x03\x00\x00\x00", b"not a gguf"])
+def test_an_adapter_that_is_not_a_gguf_is_left_to_the_load(tmp_path, data):
+    base = mint_base(tmp_path / "base.gguf")
+    bad = tmp_path / "a.gguf"
+    bad.write_bytes(data)
+    assert adapter.adapter_load_refusal(str(base), [str(bad)]) is None
