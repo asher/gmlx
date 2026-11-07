@@ -295,15 +295,35 @@ def test_a_plan_sums_the_refined_rows_while_the_worker_keeps_one(
 
     monkeypatch.setattr(image_service, "held_bytes", lambda pipe: (0, 0))
     dim = 4
-    entered = threading.Event()
+    # Set when the worker reaches the cache's lock or, past no lock,
+    # refines the rows.
+    reached, entered = threading.Event(), threading.Event()
 
     def refine(f):
         entered.set()
+        reached.set()
         return f
     dit = SimpleNamespace(cfg=SimpleNamespace(dim=dim), caption=refine)
     served = ServedVideo(pipe=SimpleNamespace(dit=dit), spec=None,
                          plan=SimpleNamespace(  # type: ignore
                              text_rows=vs.PRICED_TEXT_ROWS))
+
+    class Lock:
+        """The entry's lock, which tells when the worker reaches it."""
+
+        def __init__(self):
+            self.real = threading.Lock()
+
+        def __enter__(self):
+            if threading.current_thread() is not main:
+                reached.set()
+            self.real.acquire()
+
+        def __exit__(self, *exc):
+            self.real.release()
+
+    main = threading.current_thread()
+    served.captions_lock = Lock()
     feats = mx.zeros((1, 8, dim), mx.float32)
     mx.eval(feats)
     worker: list = []
@@ -317,17 +337,18 @@ def test_a_plan_sums_the_refined_rows_while_the_worker_keeps_one(
                                      args=(served, "new", feats, "t"))
                 worker.append(t)
                 t.start()
-                # A worker past the cache's lock refines the rows and
-                # keeps them before the sum goes on.
-                if entered.wait(0.5):
-                    t.join(10)
+                assert reached.wait(60), "the worker reached neither"
+                if entered.is_set():
+                    # Past no lock, it keeps the rows before the sum goes
+                    # on. Behind the lock the sum holds, a join would hang.
+                    t.join(60)
             return 64
 
     # Two rows: an iterator past its last item misses a change.
     served.captions[("old", "t")] = Rows()
     served.captions[("older", "t")] = Rows()
     assert vs.held_bytes(served) == (0, 128)
-    worker[0].join(10)
+    worker[0].join(60)
     assert not worker[0].is_alive()
     assert list(served.captions) == [("old", "t"), ("older", "t"),
                                      ("new", "t")]
