@@ -35,11 +35,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- An image or video LoRA runs when the Mac has the memory for it, where
-  `gmlx serve` refused LoRAs over 256 MB.
+- An image LoRA runs when the Mac has the memory for it, where `gmlx serve`
+  refused LoRAs over 256 MB.
 - `server.image.adapter_cache_mb` is now an optional cap with no default.
-- An image or video model reserves no memory for request LoRAs at load, so it
-  fits beside more models.
+- An image model reserves no memory for request LoRAs at load, so it fits
+  beside more models.
 - A LoRA that fits once an idle model unloads makes room as a model load
   does, and one refused for memory names the GB it needs.
 - An image LoRA takes less memory: loading one no longer holds its file
@@ -123,7 +123,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx serve` frees a finished request's images and audio at once. It kept
   the last request's inputs in memory until the next request arrived.
 - `gmlx serve` no longer unloads a chat model at its idle TTL while an image
-  request or a video job rewrites its prompt or encodes its text through it.
+  request rewrites its prompt or encodes its text through it.
 - The ComfyUI nodes show the server's 413 for a step body past its limit,
   where they said the server did not answer.
 - A chat, Responses, Messages or images request with a lone surrogate
