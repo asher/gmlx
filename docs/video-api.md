@@ -122,7 +122,8 @@ When the memory a job needs is held by models in use, the job stays
 `in_progress` with `gmlx.phase` `waiting for memory`, and tries again
 once they finish. A failed job has `error` with its `code`, `message` and
 the HTTP `status` the request would have had. A job still queued when
-it expires never runs, and reads 404 as any expired job does.
+it expires never runs. It fails with `timed_out` and keeps its record as
+any failed job does.
 
 `DELETE` on a queued job cancels it at once. On a running job it answers
 at once, and the job stops at its next step or decoded piece. A cancelled
@@ -168,6 +169,7 @@ status 500, and keeps the ones that ended.
 | The content of a job not completed | 409 `not_ready` |
 | A clip that does not fit beside the models loaded when it runs | The job fails with 400, as [this clip does not fit in memory](troubleshooting.md#this-clip-does-not-fit-in-memory) describes |
 | Memory held by models in use past the job's expiry | The job fails with `timed_out` |
+| A job still queued at its expiry | The job fails with `timed_out`, "the job was still queued when it expired" |
 | The upsampler gives no caption for a job whose prompt it rewrites | The job fails with 500 `upsample_failed` |
 | The server restarted during the job | The job fails with 500 `server_restarted` |
 

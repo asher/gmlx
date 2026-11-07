@@ -563,6 +563,9 @@ These are the answers and job errors of
   held the memory the job needed until the job's
   [`video.job_ttl_s`](config.md#video-jobs) ran out. Submit it again when
   the server is less busy.
+- `timed_out`, `the job was still queued when it expired`: the jobs ahead
+  of it ran for its whole `job_ttl_s`. Submit it again, or raise
+  `job_ttl_s`.
 
 ## ComfyUI
 
