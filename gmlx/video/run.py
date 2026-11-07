@@ -169,13 +169,16 @@ def decode_and_mux(xv, xa, *, video_vae: Callable, audio_vae: Callable,
                    frames: int, width: int, height: int, fps: int,
                    rate: int, out: str | None, ffmpeg: str | None,
                    frames_dir: str | None = None,
+                   lock_frames: bool = True,
                    between: Callable | None = None,
                    log: Callable | None = None) -> dict:
     """Decode the latents ``xv`` and ``xa`` of a clip: the audio through
     the model ``audio_vae()`` loads, which goes before the video VAE of
     ``video_vae()`` decodes the frames a chunk at a time into the MP4
     ``out`` (written as ``out.part``, then renamed) and the PNGs of
-    ``frames_dir``, cleared of an earlier clip's frames first.
+    ``frames_dir``, cleared of an earlier clip's frames first. The frames
+    folder is held by :func:`io.frames_lock` unless ``lock_frames`` is
+    False, for a folder whose filesystem the caller found cannot lock.
     ``between(k)`` runs after each chunk, with ``k`` frames decoded, and
     may raise to stop: the MP4 is then aborted and its part removed.
     Returns {"audio_s", "decode_s"}."""
@@ -210,7 +213,8 @@ def decode_and_mux(xv, xa, *, video_vae: Callable, audio_vae: Callable,
             if frames_dir is not None:
                 d = os.path.expanduser(frames_dir)
                 os.makedirs(d, exist_ok=True)
-                held.enter_context(io.frames_lock(d, log))
+                if lock_frames:
+                    held.enter_context(io.frames_lock(d, log))
                 io.clear_frames(d)
             with tempfile.TemporaryDirectory(prefix=".gmlx-video-") as tmp:
                 wav = io.write_wav(os.path.join(tmp, "audio.wav"), wave, rate)

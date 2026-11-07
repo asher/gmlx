@@ -145,6 +145,35 @@ def test_frames_are_numbered_pngs(tmp_path):
         "frame_000001.png", "frame_000002.png", "frame_000003.png"]
 
 
+@pytest.mark.parametrize("err", ["ENOTSUP", "EOPNOTSUPP", "ENOLCK"])
+def test_a_frames_lock_the_filesystem_refuses_goes_on_unlocked(
+        tmp_path, monkeypatch, err):
+    """A frames lock whose flock fails because the filesystem cannot lock
+    holds the folder without the lock and logs one line; flock failing
+    for another reason still raises."""
+    import errno
+    import fcntl
+
+    code = getattr(errno, err)
+
+    def no_lock(fd, op):
+        raise OSError(code, os.strerror(code))
+
+    monkeypatch.setattr(fcntl, "flock", no_lock)
+    lines: list = []
+    with io.frames_lock(str(tmp_path), lines.append):
+        pass
+    assert len(lines) == 1 and "cannot lock the frames folder" in lines[0]
+    assert io.lock_refusal(str(tmp_path / "new" / "frames")) is not None
+
+    def bad(fd, op):
+        raise OSError(errno.EBADF, os.strerror(errno.EBADF))
+
+    monkeypatch.setattr(fcntl, "flock", bad)
+    with pytest.raises(OSError), io.frames_lock(str(tmp_path)):
+        pass
+
+
 def test_a_real_mux_with_audio(tmp_path):
     """The system ffmpeg, when it has VideoToolbox H.264 and AAC."""
     try:

@@ -563,6 +563,38 @@ def test_a_latent_path_at_a_symlink_writes_its_target(stubbed, tmp_path):
     assert [p.name for p in target.parent.iterdir()] == ["run1.npz"]
 
 
+@pytest.mark.parametrize("err", ["ENOTSUP", "EOPNOTSUPP", "ENOLCK"])
+def test_a_frames_folder_that_cannot_lock_is_said_first_and_written(
+        stubbed, tmp_path, monkeypatch, capsys, err):
+    """A frames folder on a filesystem that cannot lock (flock fails with
+    ENOTSUP or EOPNOTSUPP on some SMB and FUSE mounts, ENOLCK on NFS
+    without locks) gets one line that says so, before any model loads,
+    and the run writes its frames without the lock."""
+    import errno
+    import fcntl
+
+    from gmlx.video import encoder
+
+    code = getattr(errno, err)
+    order: list = []
+
+    def no_lock(fd, op):
+        order.append("flock")
+        raise OSError(code, os.strerror(code))
+
+    monkeypatch.setattr(fcntl, "flock", no_lock)
+    monkeypatch.setattr(encoder, "load_encoder", lambda *a, **k: (
+        order.append("encoder") or _Handle()))
+    frames = tmp_path / "frames"
+    assert stubbed("--frames-dir", str(frames)) == 0
+    assert sorted(p.name for p in frames.iterdir()) == [
+        "audio.wav", *(f"frame_{i:06d}.png" for i in range(1, 6))]
+    said = [x for x in capsys.readouterr().err.splitlines()
+            if "cannot lock the frames folder" in x]
+    assert len(said) == 1 and os.strerror(code) in said[0]
+    assert order[0] == "flock" and "encoder" in order
+
+
 def test_an_output_link_to_a_folder_not_made_is_written_at_the_link(
         stubbed, tmp_path, capsys):
     """An --output and a --frames-dir audio.wav that are symlinks into a

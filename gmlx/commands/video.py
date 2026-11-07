@@ -679,6 +679,12 @@ def _generate(a) -> int:
     if a.save_latent:
         a.save_latent = os.path.expanduser(a.save_latent)
     _writable(a, out)
+    # Said before any model loads; the frames are then written unlocked.
+    unlocked = None
+    if a.frames_dir is not None:
+        unlocked = io.lock_refusal(os.path.expanduser(a.frames_dir))
+        if unlocked:
+            log(f"[video] {unlocked}")
     keyframes, todo = _read_anchors(a, fam, s)
     tokenizer = video_encoder.header_tokenizer(fam, a.encoder)
     texts: dict = {}
@@ -773,7 +779,7 @@ def _generate(a) -> int:
     times.update(run.decode_and_mux(
         xv, xa, frames=s["frames"], width=s["width"], height=s["height"],
         fps=hf.FPS, rate=SAMPLE_RATE, out=out, ffmpeg=ffmpeg,
-        frames_dir=a.frames_dir, log=log,
+        frames_dir=a.frames_dir, lock_frames=not unlocked, log=log,
         audio_vae=lambda: load_vae(os.path.expanduser(a.audio_vae),
                                    family="h3_audio", dtype=mx.float32),
         video_vae=lambda: load_vae(os.path.expanduser(preview or a.vae),

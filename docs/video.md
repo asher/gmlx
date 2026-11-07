@@ -347,7 +347,9 @@ gmlx video generate h3-fast --preview --seed 3 --prompt "..."
 `--frames-dir` writes the clip as PNG frames and an `audio.wav` file,
 in place of the frames and `audio.wav` of an earlier clip in that folder.
 Other files in the folder stay. A run whose folder another run is
-writing waits for that run to finish first.
+writing waits for that run to finish first. On a filesystem that
+cannot lock a folder, such as an NFS mount without locks, the run says
+so before the model loads and writes its frames without waiting.
 Alone, it writes the clip without ffmpeg, though guide videos and sounds
 are still read through it:
 
