@@ -600,24 +600,146 @@ def test_a_reasoning_prefill_prompt_ends_inside_a_block(chat, rid, start, end,
     assert prompt_opens_block(_ids(prompt), _ids(start), _ids(end)) is opens
 
 
-def _has_prompt_reasoning_tokens():
-    from gmlx.gen import thinking_budget
+class _ByteTokenizer:
+    """One id per byte, so a prompt's ids are its UTF-8 bytes."""
 
-    return hasattr(thinking_budget, "prompt_reasoning_tokens")
+    def __init__(self, template):
+        self.chat_template = template
+
+    def encode(self, text, add_special_tokens=True):
+        return list(text.encode())
+
+    def decode(self, ids):
+        return bytes(int(t) for t in ids).decode(errors="replace")
 
 
-# Rows that wait on the prompt budget count. Once it lands they fail until
-# someone writes them.
-@pytest.mark.skipif(not _has_prompt_reasoning_tokens(),
-                    reason="needs prompt_reasoning_tokens in thinking_budget")
-def test_a_prefill_budget_counts_the_prefilled_reasoning():
-    pytest.fail(
-        "Write the prefill budget rows: a reasoning prefill of k tokens, "
-        "longer than 16 ids, with a budget of k + 2 forces the close after "
-        "2 generated tokens on the plain criteria and on the MTP hook; a "
-        "budget of k lets one thinking token through; a content prefill does "
-        "not arm the count; prompt_reasoning_tokens on the prefilled ids "
-        "returns k for a reasoning prefill and 0 for a content prefill.")
+# Run -> the think markers the budget path reads from the request args.
+# Qwen's are the server defaults; gemma's come from the model's config.
+_BUDGET_MARKERS = {
+    _QWEN: (None, None, "<think>", "</think>"),
+    "llama-server/gemma4_12b": ("<|channel>thought", "<channel|>",
+                                "<|channel>thought", "<channel|>"),
+}
+_LONG_REASONING = "Count the letters first, then answer in one word."
+_LONG_CONTENT = "Hello there, this answer is already well under way"
+
+
+def _budget_prefill(chat, run, mode, budget):
+    """The prefilled prompt's ids, the reasoning tokens llama-server counts
+    in it, the byte tokenizer, the gen args and the end marker ids."""
+    last = ({"role": "assistant", "content": "",
+             "reasoning_content": _LONG_REASONING} if mode == "reasoning"
+            else {"role": "assistant", "content": _LONG_CONTENT})
+    prompt = chat(run, {**_prefill(last),
+                        "chat_template_kwargs": {"enable_thinking": True}})
+    start_arg, end_arg, start, end = _BUDGET_MARKERS[run]
+    tail = prompt[prompt.rindex(start) + len(start):]
+    k = 0 if end in tail else len(tail.encode())
+    assert prompt.endswith(_LONG_REASONING if mode == "reasoning"
+                           else _LONG_CONTENT)
+    processor, _ = _processor_for(run)
+    args = types.SimpleNamespace(
+        thinking_budget=budget, thinking_start_token=start_arg,
+        thinking_end_token=end_arg, thinking_budget_message=None,
+        _kq_has_tools=False)
+    return (_ids(prompt), k, _ByteTokenizer(processor.chat_template), args,
+            _ids(end))
+
+
+def _plain_criteria(tok, args, ids):
+    import mlx.core as mx
+
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    sp_chat.install_thinking_budget_fix()
+    rg = types.SimpleNamespace(tokenizer=tok)
+    return gen.ResponseGenerator._make_thinking_budget_criteria(
+        rg, args, mx.array([ids]))
+
+
+def _mtp_hook(tok, args, ids):
+    import mlx.core as mx
+
+    from gmlx.serve.patches.mtp_thinking import _build_hook
+
+    return _build_hook(types.SimpleNamespace(tokenizer=tok), args,
+                       mx.array([ids]))
+
+
+_THINK = ord("x")
+_BUDGET_RUNS = list(_BUDGET_MARKERS)
+
+
+@pytest.mark.parametrize("run", _BUDGET_RUNS)
+@pytest.mark.parametrize("mode", ["reasoning", "content"])
+def test_the_budget_count_of_a_prefilled_prompt(chat, run, mode):
+    """prompt_reasoning_tokens on the prefilled ids gives the k tokens after
+    the open marker for a reasoning prefill, k longer than the 16-id tail,
+    and 0 for a content prefill."""
+    from gmlx.gen.thinking_budget import prompt_reasoning_tokens
+
+    ids, k, _tok, _args, end_ids = _budget_prefill(chat, run, mode, 0)
+    start = _BUDGET_MARKERS[run][2]
+    assert prompt_reasoning_tokens(ids, _ids(start), (end_ids,)) == k
+    if mode == "reasoning":
+        assert k > 16
+    else:
+        assert k == 0
+
+
+@pytest.mark.parametrize("run", _BUDGET_RUNS)
+@pytest.mark.parametrize("extra,through", [(2, 2), (0, 1)])
+def test_a_prefill_budget_closes_on_the_plain_criteria(chat, run, extra,
+                                                       through):
+    """A budget of k + 2 on a reasoning prefill of k tokens forces the close
+    after 2 generated tokens. A budget of k lets the one token prefill
+    samples through, then forces the close."""
+    ids, k, tok, args, end_ids = _budget_prefill(chat, run, "reasoning", 0)
+    args.thinking_budget = k + extra
+    crit = _plain_criteria(tok, args, ids)
+    assert crit.thinking_token_count == k
+    forced = None
+    for _ in range(through):
+        assert forced is None
+        forced = crit(_THINK)
+    assert forced is not None
+    run_ids = [forced]
+    while (forced := crit(forced)) is not None:
+        run_ids.append(forced)
+    assert run_ids[-len(end_ids):] == end_ids
+    assert not crit.in_thinking
+
+
+@pytest.mark.parametrize("run", _BUDGET_RUNS)
+@pytest.mark.parametrize("extra,through", [(2, 2), (0, 1)])
+def test_a_prefill_budget_closes_on_the_mtp_hook(chat, run, extra, through):
+    """The MTP hook seeds the same count. The round loop observes the
+    first token prefill samples before it asks for a forced close, so the
+    rows match the plain criteria."""
+    ids, k, tok, args, end_ids = _budget_prefill(chat, run, "reasoning", 0)
+    args.thinking_budget = k + extra
+    hook = _mtp_hook(tok, args, ids)
+    assert hook.count == k
+    forced = None
+    for _ in range(through):
+        assert forced is None
+        hook.observe(_THINK)
+        forced = hook.take_forced()
+    assert forced is not None
+    assert forced[-len(end_ids):] == end_ids
+    assert not hook.in_thinking
+
+
+@pytest.mark.parametrize("run", _BUDGET_RUNS)
+def test_a_content_prefill_does_not_arm_the_budget(chat, run):
+    ids, _k, tok, args, _end = _budget_prefill(chat, run, "content", 1)
+    crit = _plain_criteria(tok, args, ids)
+    hook = _mtp_hook(tok, args, ids)
+    for _ in range(3 * len(_LONG_CONTENT)):
+        assert crit(_THINK) is None
+        hook.observe(_THINK)
+        assert hook.take_forced() is None
+    assert crit.thinking_token_count == 0 and not crit.in_thinking
+    assert hook.count == 0 and not hook.in_thinking
 
 
 @pytest.mark.skipif(
