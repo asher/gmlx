@@ -3204,7 +3204,7 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     # across turns exactly like the plain text path.
     from gmlx.cache.kv_cache import make_prompt_cache as _mtp_make_cache
     import gmlx.load.loadlog as loadlog
-    from gmlx.commands.cli import _apply_placement
+    from gmlx.commands.cli import _apply_placement, _cli_adapter_hook
     from gmlx.spec.mtp_load import load_mtp_model
 
     b = _ChatBackend()
@@ -3218,10 +3218,8 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
             rope_override=rope_override_from_args(args),
             verbose=args.verbose,
             wire=not getattr(args, "stream_experts", False),
+            before_wire=_cli_adapter_hook(args),
         )
-    from gmlx.commands.cli import _apply_cli_adapter
-
-    _apply_cli_adapter(args, b.model, b.config)
     # Streaming placement applies to the target trunk only (the drafter
     # stays resident); same composition as the run/bench entry points.
     _apply_placement(args, getattr(b.model, "language_model", b.model))

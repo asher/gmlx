@@ -428,18 +428,24 @@ def _load_serveable_mtp(
     """
     from gmlx.spec.mtp_load import load_mtp_model
 
-    model, drafter, _config, tokenizer = load_mtp_model(
-        gguf_path, draft_gguf_path=draft_gguf_path,
-        chat_template=chat_template, verbose=False
-    )
     identities: tuple = ()
-    if adapter_gguf is not None:
+
+    def _install(trunk, config):
         # The trunk (``model.language_model``) carries the HF leaf paths the
         # adapter remap targets; the drafter has no targets (a target on an
         # MTP block fails the install as a missing module). Verify runs
-        # against the adapted target, so speculation stays lossless.
-        identities = _apply_gguf_adapter(model.language_model, _config, adapter_gguf,
+        # against the adapted target, so speculation stays lossless. It
+        # installs before the load's table install and wire, which would
+        # wrap the expert owners.
+        nonlocal identities
+        identities = _apply_gguf_adapter(trunk, config, adapter_gguf,
                                          base_gguf_path=gguf_path)
+
+    model, drafter, _config, tokenizer = load_mtp_model(
+        gguf_path, draft_gguf_path=draft_gguf_path,
+        chat_template=chat_template, verbose=False,
+        before_wire=_install if adapter_gguf is not None else None,
+    )
     _stamp_adapter_identities(model, identities)
     # MTPTextTarget.config is a plain dict (the CLI path only reads it
     # dict-style). The server also reads it attribute-style

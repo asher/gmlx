@@ -1406,6 +1406,7 @@ def _run_bench_depths(args) -> int:
                 rope_override=rope_override_from_args(args),
                 verbose=args.verbose,
                 wire=not getattr(args, "stream_experts", False),
+                before_wire=_cli_adapter_hook(args),
             )
     else:
         with loadlog.load_ui(args.verbose, args.gguf):
@@ -1419,7 +1420,7 @@ def _run_bench_depths(args) -> int:
                 rope_override=rope_override_from_args(args),
                 verbose=args.verbose,
             )
-    _apply_cli_adapter(args, model, _config)
+        _apply_cli_adapter(args, model, _config)
     _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
 
@@ -1488,21 +1489,33 @@ def _apply_cli_adapter(args, model, config) -> None:
     """``--adapter`` on the run/chat/bench trunks: install the live GGUF LoRA
     on the text trunk (``model.language_model`` on an MTP target, whose leaf
     paths the adapter remap targets) before placement, so the installer sees
-    the plain SwitchGLU owners (it refuses offload/fusion wrappers in the
-    owner's MRO). The base arch gates the adapter up front: a mismatched
-    family fails with "adapter arch X != base arch Y", not a missing-targets
-    install error."""
+    the plain SwitchGLU owners (it refuses offload wrappers in the owner's
+    MRO). An MTP load runs it through ``before_wire``. A trunk that already
+    carries this adapter is left as is. The base arch gates the adapter up
+    front: a mismatched family fails with "adapter arch X != base arch Y",
+    not a missing-targets install error."""
     if not getattr(args, "adapter", None):
         return
     from gmlx.load.adapter import apply_gguf_adapter
     from gmlx.load.discovery import header_meta
 
     adapter = os.path.abspath(os.path.expanduser(args.adapter))
+    trunk = getattr(model, "language_model", model)
+    if trunk.__dict__.get("_kq_cli_adapter") == adapter:
+        return
     base_arch = (getattr(args, "arch", None)
                  or (header_meta(args.gguf) or {}).get("arch"))
-    trunk = getattr(model, "language_model", model)
     n = apply_gguf_adapter(trunk, config, adapter, base_arch=base_arch)
+    object.__setattr__(trunk, "_kq_cli_adapter", adapter)
     print(f"[adapter] applied {n}-module GGUF LoRA from {adapter}")
+
+
+def _cli_adapter_hook(args):
+    """The ``before_wire`` hook of an MTP load: the ``--adapter`` install on
+    the trunk before the table install and the wire, or None."""
+    if not getattr(args, "adapter", None):
+        return None
+    return lambda trunk, config: _apply_cli_adapter(args, trunk, config)
 
 
 def _apply_placement(args, model) -> None:
@@ -1684,8 +1697,8 @@ def _run_generate(args) -> int:
                 rope_override=rope_override_from_args(args),
                 verbose=args.verbose,
                 wire=not args.stream_experts,
+                before_wire=_cli_adapter_hook(args),
             )
-        _apply_cli_adapter(args, model, _config)
         # Streaming placement applies to the target trunk only (the drafter
         # block is small and stays resident); the verify calls ride the
         # decode-feeder arena like any small chunk.
