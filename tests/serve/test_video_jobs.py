@@ -756,6 +756,37 @@ def test_a_json_job_runs_to_its_mp4_through_the_routes(routes):
         "deleted")
 
 
+@pytest.mark.parametrize("end", ["delete", "expiry"])
+def test_a_clip_removed_as_its_content_goes_out_is_sent_whole(routes, end):
+    """GET content answers with the clip, then a DELETE, or the sweep at
+    the job's expiry, removes it before a byte of it goes out: the
+    answer is still the whole clip, never a 500."""
+    import asyncio
+
+    store, clock = routes.store, routes.clock
+    job = _submit(store)
+    routes.driver.run()
+    response = asyncio.run(videos.content(job.id))
+    if end == "delete":
+        store.delete(job.id)
+    else:
+        clock.now += store.settings.job_ttl_s
+        store.sweep()
+    assert not os.path.exists(store.clip(job.id))
+    sent = []
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+    asyncio.run(response({"type": "http", "method": "GET", "headers": []},
+                         receive, send))
+    assert sent[0]["status"] == 200
+    assert b"".join(m.get("body", b"") for m in sent[1:]) == b"mp4"
+    assert not os.path.exists(response.path)
+
+
 def test_a_json_keyframe_is_a_data_url_written_to_the_jobs_inputs(routes):
     url = "data:image/png;base64," + base64.b64encode(_png()).decode()
     r = routes.client.post("/v1/videos", json={"prompt": "a cat",

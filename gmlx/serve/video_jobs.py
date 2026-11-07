@@ -248,6 +248,9 @@ class VideoJobs:
                 if name.endswith(".part"):
                     with contextlib.suppress(OSError):
                         os.unlink(os.path.join(self._dir("files"), name))
+            # The links of answers a past server was sending.
+            shutil.rmtree(os.path.join(self.root, "serving"),
+                          ignore_errors=True)
 
     def _bytes(self, path: str) -> int:
         try:
@@ -422,11 +425,14 @@ class VideoJobs:
     def get(self, jid: str) -> dict | None:
         """The record of job ``jid``, None when it is unknown or expired."""
         with self.lock:
-            job = self.jobs.get(jid)
-            if job is None or (job.record["status"] in ENDED and
-                               self._time() >= job.record["expires_at"]):
-                return None
-            return json.loads(json.dumps(job.record))
+            return self._record(jid)
+
+    def _record(self, jid: str) -> dict | None:
+        job = self.jobs.get(jid)
+        if job is None or (job.record["status"] in ENDED and
+                           self._time() >= job.record["expires_at"]):
+            return None
+        return json.loads(json.dumps(job.record))
 
     def content(self, jid: str) -> str | None:
         """The clip of a completed job, None otherwise."""
@@ -435,6 +441,28 @@ class VideoJobs:
             return None
         path = self.clip(jid)
         return path if os.path.isfile(path) else None
+
+    def serve(self, jid: str) -> tuple[dict | None, str | None, bool]:
+        """``(record, path, linked)`` of job ``jid`` in one hold: its
+        record, None when unknown or expired, and for a completed job a
+        link to its clip made for one answer (``linked``), which the
+        answer removes once sent. A DELETE or a sweep meanwhile removes
+        the clip, never the link. A store on a volume with no hard links
+        answers with the clip itself."""
+        with self.lock:
+            rec = self._record(jid)
+            if rec is None or rec["status"] != DONE:
+                return rec, None, False
+            clip = self.clip(jid)
+            link = os.path.join(self._dir("serving"),
+                                f"{secrets.token_hex(16)}.mp4")
+            try:
+                os.link(clip, link)
+            except FileNotFoundError:
+                return rec, None, False
+            except OSError:
+                return rec, clip, False
+            return rec, link, True
 
     def delete(self, jid: str) -> dict | None:
         """Cancel a queued or running job, or remove a finished one with

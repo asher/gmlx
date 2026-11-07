@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import base64
 import binascii
+import contextlib
 import importlib
 import json
 import logging
@@ -521,10 +522,26 @@ async def retrieve(video_id: str):
     return _missing(video_id) if rec is None else JSONResponse(rec)
 
 
+class _LinkResponse(FileResponse):
+    """The clip through a link made for this answer, removed once the
+    answer ends, sent or not."""
+
+    async def __call__(self, scope, receive, send):
+        ext = scope.get("extensions") or {}
+        if "http.response.pathsend" in ext:
+            # The server would read the link after this call returns.
+            scope = {**scope, "extensions": {
+                k: v for k, v in ext.items()
+                if k != "http.response.pathsend"}}
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(self.path)
+
+
 async def content(video_id: str):
-    store = _store()
-    rec, path = await asyncio.to_thread(
-        lambda: (store.get(video_id), store.content(video_id)))
+    rec, path, linked = await asyncio.to_thread(_store().serve, video_id)
     if rec is None:
         return _missing(video_id)
     if path is None:
@@ -532,8 +549,8 @@ async def content(video_id: str):
                                f"{rec['status']}; its content is ready "
                                "once it is completed", "video_id",
                                code="not_ready"))
-    return FileResponse(path, media_type="video/mp4",
-                        filename=f"{video_id}.mp4")
+    return (_LinkResponse if linked else FileResponse)(
+        path, media_type="video/mp4", filename=f"{video_id}.mp4")
 
 
 async def delete(video_id: str):
