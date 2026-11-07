@@ -702,6 +702,9 @@ def test_both_message_names_is_400(budget_seam):
                                       reasoning_budget_message=""))
     assert msg == ("Set thinking_budget_message or reasoning_budget_message, "
                    "not both.")
+    args = budget_seam(_chat(thinking_budget_message=None,
+                             reasoning_budget_message="Stop."))
+    assert args.thinking_budget_message == "Stop."
 
 
 def test_anthropic_budget_tokens_conflict_names_thinking_budget_tokens(

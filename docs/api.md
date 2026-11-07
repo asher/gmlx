@@ -139,13 +139,13 @@ and their `*_context_size` companions, `enable_thinking`,
 `thinking_budget`, `thinking_budget_message`, llama-server's
 `reasoning_budget_tokens` and `reasoning_budget_message`, and the OpenAI
 `reasoning` and `reasoning_effort` controls.
-[Thinking budget](#thinking-budget) shows the budget fields. The three chat routes ignore `n`, `user`, `parallel_tool_calls`
-and `metadata`: they return one choice, and the template decides how many
-tool calls to make. `presence_penalty` and `frequency_penalty` count every
-token generated so far and never the prompt, as vLLM and SGLang do.
-`presence_context_size` or `frequency_context_size` set to N counts only the
-last N generated tokens, and 0 or no value counts all of them. The other
-fields differ by route:
+[Thinking budget](#thinking-budget) shows the budget fields. The three chat
+routes ignore `n`, `user`, `parallel_tool_calls` and `metadata`: they return
+one choice, and the template decides how many tool calls to make.
+`presence_penalty` and `frequency_penalty` count every token generated so
+far and never the prompt, as vLLM and SGLang do. `presence_context_size` or
+`frequency_context_size` set to N counts only the last N generated tokens,
+and 0 or no value counts all of them. The other fields differ by route:
 
 | Parameter | `/v1/chat/completions` | `/v1/responses` | `/v1/messages` | Notes |
 |-----------|------------------------|-----------------|----------------|-------|
@@ -197,16 +197,17 @@ sets the budget.
 A budget of N lets N reasoning tokens through, as llama-server does. The
 prompt's tokens after its last start marker count too, such as the newline
 that follows `<think>` in a generation prompt, or reasoning that the client
-wrote into the prompt. The first token of a reply comes from the prompt, so when the
-prompt alone uses up the budget, one reasoning token gets through before
-the close.
+wrote into the prompt. The first token of a reply comes from the prompt, so
+when the prompt alone uses up the budget, one reasoning token gets through
+before the close.
 
-Without a message, the server writes a newline before the end marker. A
-model that drafts with its own MTP head writes a short sentence that says
-the budget ran out. A message replaces either one, and an empty message
-leaves only the end marker. The server tokenizes the message alone, with
-no BOS token and with special tokens read as tokens, as llama-server does.
-A message that holds an end-of-generation token ends the reply there.
+Without a message, the server writes a newline before the end marker. On a
+model with a built-in drafter, a budget above 0 writes a short sentence that
+says the budget ran out, and a budget of 0 writes the newline. A message
+replaces either one, and an empty message leaves only the end marker. The
+server tokenizes the message alone, with no BOS token and with special
+tokens read as tokens, as llama-server does. A message that holds an
+end-of-generation token ends the reply there.
 
 The message and the end marker are part of `reasoning_content`. They count
 in `completion_tokens` and against `max_tokens`, so a long message can end
@@ -220,8 +221,9 @@ that field.
 
 These requests get a 400:
 
-- Both names of one field in one request, such as `thinking_budget` and
-  `reasoning_budget_tokens`.
+- Both names of one field set to values in one request, such as
+  `thinking_budget` and `reasoning_budget_tokens`. A `null` under one name
+  is no value, so it does not conflict.
 - A budget below -1.
 - A `reasoning_budget_tokens` that is not an integer, such as `true`,
   `2.0` or `"5"`. `thinking_budget` takes what the request schema
