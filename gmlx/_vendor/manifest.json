@@ -148,7 +148,7 @@
   "mlx_lm/sample_utils.py": {"sha256": "5a378f35926d2f0f6b191370dc9fd6659b022ccdb9f08aae80f926587db09536", "status": "edited", "upstream": "c0ce439f8dbf0d4e6d0f37f728a324f3f72878e6a9123df41be520804c596d67"},
   "mlx_lm/server.py": {"sha256": "f8ee9966dc1d0d2219f45a44e2b17628889fbc141453866c4dd8a2b53a96dcb2", "status": "edited", "upstream": "cdfcb4ac848636f9927851a0ec7a951584526530cb7832ba58049e4a9144db8b"},
   "mlx_lm/share.py": {"sha256": "a216a734543aff85839a30fdcf7636b56c4ef6c710c340d2fd6d644e6f4b0811", "status": "codemod", "upstream": "3c25e46d4b413d67cf5bde546f47d09fbcea9ccc446e878721543af43cf91c19"},
-  "mlx_lm/tokenizer_utils.py": {"sha256": "1843480722194ebf1afe7350b1e99245f202ea586c9ea8d20f7d43844760a4da", "status": "codemod", "upstream": "25784bb03c922d0d7832ce6c66a6cd4eb3a4820b6c5a8e583dedb63a018fb56a"},
+  "mlx_lm/tokenizer_utils.py": {"sha256": "fb421c256e01ced66ff3455685ce1991744329167e1c40fcf07cfd28462be374", "status": "edited", "upstream": "25784bb03c922d0d7832ce6c66a6cd4eb3a4820b6c5a8e583dedb63a018fb56a"},
   "mlx_lm/tool_parsers/__init__.py": {"status": "verbatim", "upstream": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
   "mlx_lm/tool_parsers/function_gemma.py": {"status": "verbatim", "upstream": "b8531d412cb87d1ceaecd5e2d15b162ff8036e093a4daa9e3f872d005191defc"},
   "mlx_lm/tool_parsers/gemma4.py": {"status": "verbatim", "upstream": "8806c0593a9ababb7f8617a2ffcb9c50f19a0cebdf659124691adba6e09c826c"},

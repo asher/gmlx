@@ -68,6 +68,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `gmlx run` and `gmlx chat` now follow the chat template's thinking default,
+  as `gmlx serve` does, so Gemma 4 and Qwen3.5-9B text-only models no longer
+  think unless asked.
 - gmlx needs Python 3.11.1 or newer: 3.11.0 can stall image and video uploads.
 - `gmlx pull <name>` downloads each file from the latest commit of its
   repository, so a quant its publisher updates reaches you without a new gmlx

@@ -72,7 +72,6 @@ _MISSING = object()
 # its tokenizer's, so that must be the template handler_for reads.
 _JINJA_OVERRIDES = (
     ("gmlx._vendor.mlx_lm.tokenizer_utils", "TokenizerWrapper", False),
-    ("gmlx.serve.bridge_vlm", "_GgufServerProcessor", False),
     ("gmlx._vendor.mlx_vlm.models.gemma4.processing_gemma4", "Gemma4Processor",
      True),
 )
@@ -176,8 +175,8 @@ def _renders_template_text(processor) -> bool:
     owner = next((c for c in type(processor).__mro__
                   if "apply_chat_template" in vars(c)), None)
     if owner is None:
-        # A delegating wrapper: the tokenizer it forwards to was checked
-        # above.
+        # A delegating wrapper, such as the GGUF text processor: the
+        # tokenizer it forwards to was checked above.
         return True
     fn = vars(owner)["apply_chat_template"]
     module = getattr(fn, "__module__", "") or ""
