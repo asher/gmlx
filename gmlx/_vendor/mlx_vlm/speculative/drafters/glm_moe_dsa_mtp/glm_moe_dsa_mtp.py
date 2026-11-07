@@ -46,7 +46,11 @@ class GlmMoeDsaMTPDraftModel(nn.Module):
                 f"Cannot find embed_tokens in {type(target_model).__name__}"
             )
         self._input_embed = target.model.embed_tokens
-        self._lm_head_fn = target.lm_head
+        from gmlx.load.modules import lora_base
+
+        # gmlx: the base head. An output.weight adapter's wrapper reads a row
+        # vector, and a draft call publishes none.
+        self._lm_head_fn = lora_base(target.lm_head)
         return self
 
     def make_cache(self, left_padding: Optional[List[int]] = None) -> List[Any]:
