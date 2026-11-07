@@ -144,6 +144,7 @@ def test_a_clip_whose_completed_record_cannot_be_written_fails(
 
     def run(job, store):
         _clip(job, store)
+        clock.now += 60
         full.append(True)
 
     store, clock, driver = _store(tmp_path, run)
@@ -162,6 +163,7 @@ def test_a_clip_whose_completed_record_cannot_be_written_fails(
     assert os.listdir(os.path.join(str(store.root), "files")) == []
     assert _on_disk(store, job.id)["status"] == "in_progress"
     assert store.metrics()["jobs_completed_total"] == 0
+    assert store.metrics()["clip_s"] is None
 
 
 def test_a_queued_job_cancelled_never_runs_and_its_inputs_go(tmp_path):

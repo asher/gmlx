@@ -587,9 +587,11 @@ class VideoJobs:
             (self._run or run_clip)(job, self)
             with self.lock:
                 if job.record["status"] == RUNNING:
-                    self.book.timed(self._mono() - job.started)
+                    took = self._mono() - job.started
                     keep = self.clip(job.id)
                     self._end(job, DONE)
+                    # A clip counts once its completed record is written.
+                    self.book.timed(took)
         except JobStopped:
             pass
         except BaseException as e:  # noqa: BLE001 - the job's failure
