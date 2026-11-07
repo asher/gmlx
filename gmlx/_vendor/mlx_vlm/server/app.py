@@ -307,17 +307,19 @@ def _split_thinking(
     )
 
 
-def _decode_token(tokenizer, token_id: int) -> Tuple[str, Optional[List[int]]]:
-    """Decode a single token id to its string + UTF-8 bytes."""
+# gmlx: bytes are the token's raw vocabulary bytes, so byte-fallback pieces
+# keep their own bytes; values are JSON-safe; as_ids names tokens by id.
+def _token_text_and_bytes(
+    tokenizer, token_id: int, lock=None
+) -> Tuple[str, Optional[List[int]]]:
+    """A token id's decoded text and its raw vocabulary bytes."""
+    from gmlx.load.tokenizer import token_bytes_for
+
     try:
         text = tokenizer.decode([int(token_id)])
     except Exception:
         text = ""
-    try:
-        token_bytes = list(text.encode("utf-8"))
-    except Exception:
-        token_bytes = None
-    return text, token_bytes
+    return text, list(token_bytes_for(tokenizer, [int(token_id)], lock=lock)[0])
 
 
 def _make_logprob_content(
@@ -326,17 +328,28 @@ def _make_logprob_content(
     logprob: float,
     top_logprobs: Optional[List[Tuple[int, float]]] = None,
     top_k: int = 0,
+    as_ids: bool = False,
+    lock=None,
 ) -> "ChatLogprobContent":
     """Build an OpenAI-style logprob entry for a single token."""
-    token_text, token_bytes = _decode_token(tokenizer, token_id)
+    from gmlx.gen.logprobs import json_logprob
+
+    def _name(tid, text):
+        return f"token_id:{int(tid)}" if as_ids else text
+
+    token_text, token_bytes = _token_text_and_bytes(tokenizer, token_id, lock)
     top_list: List[TopLogprob] = []
     if top_k > 0 and top_logprobs:
         for tid, lp in top_logprobs[:top_k]:
-            t_text, t_bytes = _decode_token(tokenizer, tid)
-            top_list.append(TopLogprob(token=t_text, logprob=float(lp), bytes=t_bytes))
+            t_text, t_bytes = _token_text_and_bytes(tokenizer, tid, lock)
+            top_list.append(
+                TopLogprob(
+                    token=_name(tid, t_text), logprob=json_logprob(lp), bytes=t_bytes
+                )
+            )
     return ChatLogprobContent(
-        token=token_text,
-        logprob=float(logprob),
+        token=_name(token_id, token_text),
+        logprob=json_logprob(logprob),
         bytes=token_bytes,
         top_logprobs=top_list,
     )

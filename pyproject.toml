@@ -325,7 +325,6 @@ backlog = [
     "gmlx/serve/patches/row_failed.py",
     "gmlx/serve/patches/sampling.py",
     "gmlx/serve/queue_cap.py",
-    "gmlx/serve/seed_rows.py",
     "gmlx/serve/step_timing.py",
     "gmlx/serve/tick_guard.py",
     "gmlx/upstream/dsv32_patches.py",

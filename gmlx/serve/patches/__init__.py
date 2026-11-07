@@ -247,8 +247,6 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # This rebinds the criteria seam without delegating, so a wrapper of
     # that seam (mtp_thinking's restore) installs after it.
     install_thinking_budget_fix()
-    from ..seed_rows import install_per_request_seed
-    install_per_request_seed()
     import gmlx.lora_rows as lora_rows
     if os.environ.get("GMLX_LORA_ROWS"):
         # Arm the strict per-forward publish invariant (a missed publish

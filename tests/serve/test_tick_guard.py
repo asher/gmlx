@@ -258,3 +258,52 @@ def test_a_rebuilt_row_penalizes_its_delivered_tokens(wrapped, monkeypatch):
     out = lp[0](tg.mx.array([22]), tg.mx.zeros((1, 32))).reshape(-1)
     assert {t: -v for t, v in enumerate(out.tolist()) if v} == {
         21: 1.5, 22: 1.5}
+
+
+def test_a_rebuilt_row_keeps_its_row_settings(monkeypatch):
+    """A row the guard retires and requeues keeps its uid, so it keeps its
+    sampler and logprob settings: a greedy logprob row comes back greedy,
+    with logprobs, in a generator whose default row samples."""
+    import mlx.core as mx
+
+    from gmlx._vendor.mlx_lm.models import llama
+    from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
+    from gmlx.models.vlm_text_only import TextOnlyModel
+    from gmlx.serve.patches.sampling import _FastPositionedSampler
+    from gmlx.serve.row_sampling import RowSettings
+
+    monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
+    monkeypatch.setenv("GMLX_CB_PHASE", "0")
+    mx.random.seed(0)
+    model = TextOnlyModel(llama.Model(llama.ModelArgs(
+        model_type="llama", hidden_size=32, num_hidden_layers=2,
+        intermediate_size=64, num_attention_heads=4, num_key_value_heads=2,
+        rms_norm_eps=1e-5, vocab_size=64)))
+    lm = model.language_model
+    proc = types.SimpleNamespace(tokenizer=types.SimpleNamespace(
+        stopping_criteria=StoppingCriteria([], None)))
+    gen = ar.BatchGenerator(lm, proc, sampler=_FastPositionedSampler(temperature=8.0),
+                            greedy_sampling=False, prefill_step_size=None,
+                            logprobs_cap=3)
+    prompt = [3, 9, 4, 7]
+    rs = RowSettings(logprobs=True, top_k=3)
+    (uid,) = gen.insert([prompt], 8, prompt_kwargs=[
+        {"inputs_embeds": lm.input_embeds(mx.array([prompt]))}], row_settings=[rs])
+    st = tg._state(gen)
+    tg._harvest_pending(gen, st)
+    delivered = []
+    for _ in range(3):
+        delivered += [r.token for r in gen.next()[1]]
+    st.ledger[uid].committed = list(delivered)
+    replay = prompt + delivered
+    st.ledger[uid].kwargs = {"inputs_embeds": lm.input_embeds(mx.array([replay]))}
+    tg._rebuild_row(gen, st, uid)
+    assert gen._row_settings[uid] is rs
+    out = []
+    while gen.has_work:
+        out += gen.next()[1]
+    gen.close()
+    assert out and all(r.uid == uid for r in out)
+    for r in out:
+        assert r.token_logprob is not None and len(r.top_logprobs) == 3
+        assert r.token == r.top_logprobs[0][0]          # greedy

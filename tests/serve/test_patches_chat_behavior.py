@@ -364,34 +364,17 @@ def test_make_criteria_honors_budget_when_enable_thinking_false():
         cls._make_thinking_budget_criteria = original
 
 
-def test_seed_leaves_the_thinking_budget_criteria_to_the_budget_fix():
-    # The seed rides the logits-processors hook, which the engine thread
-    # builds as an argument of the request's insert. The criteria hook runs
-    # on the request's own thread when it arrives, so a seed stashed there
-    # reached whichever insert came next. tbfix keeps the criteria seam to
-    # itself: one call runs its construction and stashes no seed, and a
-    # tbfix re-install sees its own flag and no-ops.
-    import gmlx.serve.seed_rows as sr
+def test_the_budget_fix_owns_the_criteria_seam():
+    # tbfix rebinds the criteria seam without delegating: one call runs its
+    # construction, and a re-install sees its own flag and no-ops. The
+    # request's seed rides its row settings, never this seam.
     gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
-    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
     cls = gen.ResponseGenerator
-    saved = (cls._make_thinking_budget_criteria, cls._make_logits_processors,
-             ar.BatchGenerator.insert, ar.GenerationBatch._step,
-             ar.PromptProcessingBatch.generate,
-             ar.SpeculativeGenerationBatch.next)
-    sr._PENDING.clear()
-    # A full server install in an earlier test leaves the seed installed and
-    # wraps the processors seam again, so the flag is checked only when this
-    # test installs the seed itself.
-    fresh = not getattr(ar.BatchGenerator.insert, sr._INSTALLED_FLAG, False)
+    saved = cls._make_thinking_budget_criteria
     try:
         sp.install_thinking_budget_fix()
-        sr.install_per_request_seed()
         crit = cls._make_thinking_budget_criteria
-        assert not getattr(crit, sr._INSTALLED_FLAG, False)  # no seed on this seam
         assert getattr(crit, sp_chat._TBUDGET_FLAG, False)
-        if fresh:
-            assert getattr(cls._make_logits_processors, sr._INSTALLED_FLAG, False)
         sp.install_thinking_budget_fix()
         assert cls._make_thinking_budget_criteria is crit    # re-install no-ops
         me = types.SimpleNamespace(
@@ -402,13 +385,8 @@ def test_seed_leaves_the_thinking_budget_criteria_to_the_budget_fix():
             thinking_start_token=None, thinking_end_token=None)
         out = crit(me, args, [1, 2, 3])
         assert out is not None and out.in_thinking is False  # tbfix ran
-        assert not sr._PENDING                               # no seed stashed here
     finally:
-        (cls._make_thinking_budget_criteria, cls._make_logits_processors,
-         ar.BatchGenerator.insert, ar.GenerationBatch._step,
-         ar.PromptProcessingBatch.generate,
-         ar.SpeculativeGenerationBatch.next) = saved
-        sr._PENDING.clear()
+        cls._make_thinking_budget_criteria = saved
 
 
 # 7b. chat_template_kwargs passthrough

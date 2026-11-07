@@ -981,6 +981,17 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             notes="greedy spec vs greedy base under kvarn records; the "
                   "rollback path trims records instead of raw K/V"))
 
+        # Logprobs from the verify logits, at the 100 cap, named by id.
+        add(Scenario(
+            key="mtp_logprobs", tier="mtp", needs=native_needs,
+            title=f"MTP logprobs: {native_needs[0]} native MTP, top 50, token ids",
+            env={"TOP_LOGPROBS_K": "100"},
+            config={"models": {"spec": _model_entry(native_mtp, native_mtp=True)}},
+            targets=[],
+            post=[_pc_logprob_ids("spec", 50)],
+            notes="every token carries an entry and 50 alternatives, each "
+                  "named token_id:N"))
+
     # stream: an over-RAM MoE with `stream: experts`
     stream_h, stream_path, _why = streaming_pick(reg)
     if stream_path:
@@ -1174,6 +1185,37 @@ def _pc_mtp_lossless(spec_id: str, base_id: str, *, chat_kwargs=None) -> Callabl
             "provenance:base_is_non_spec", n_mtp == 1,
             f"{n_mtp} MTP target build(s) (expect 1: only {spec_id!r}, not {base_id!r})"))
         return out
+    return _check
+
+
+def _pc_logprob_ids(model_id: str, top: int) -> Callable:
+    import re
+
+    named = re.compile(r"token_id:\d+")
+
+    def _check(client):
+        pr = P.p_capital()
+        st, body = client.chat(
+            model_id, pr.messages, max_tokens=24, temperature=0.0,
+            logprobs=True, top_logprobs=top, return_tokens_as_token_ids=True,
+            chat_template_kwargs={"enable_thinking": False})
+        if st != 200 or not isinstance(body, dict):
+            return [CheckResult("logprobs:status", False, f"{st} {str(body)[:200]}")]
+        content = ((body["choices"][0].get("logprobs") or {}).get("content")) or []
+        n = (body.get("usage") or {}).get("completion_tokens")
+        bad = [e for e in content
+               if not named.fullmatch(e.get("token", ""))
+               or not e.get("logprob", 1.0) <= 0.0
+               or len(e.get("top_logprobs") or []) != top
+               or not all(named.fullmatch(t.get("token", ""))
+                          for t in e["top_logprobs"])]
+        return [
+            CheckResult("logprobs:one_per_token", bool(content) and len(content) == n,
+                        f"{len(content)} entries, {n} completion tokens"),
+            CheckResult("logprobs:token_ids", not bad,
+                        "every entry named by id" if not bad
+                        else f"{len(bad)} bad entries, first {str(bad[0])[:160]}"),
+        ]
     return _check
 
 

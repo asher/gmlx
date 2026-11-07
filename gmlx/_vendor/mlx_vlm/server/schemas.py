@@ -813,10 +813,18 @@ class VLMRequest(FlexibleBaseModel):
     )
     top_logprobs: Optional[int] = Field(
         None,
+        ge=0,  # gmlx
         description=(
             "Number of most-likely tokens to return at each position "
-            "(0-20). Requires logprobs=true. The server-side cap is set by "
+            "(0-100). Requires logprobs=true. The server-side cap is set by "
             "the TOP_LOGPROBS_K env var; values above the cap are clamped."
+        ),
+    )
+    # gmlx: logprob entries name tokens as "token_id:<id>".
+    return_tokens_as_token_ids: Optional[bool] = Field(
+        None,
+        description=(
+            'Name each logprob token as "token_id:<id>" instead of its text.'
         ),
     )
     resize_shape: Optional[ResizeShapeInput] = Field(

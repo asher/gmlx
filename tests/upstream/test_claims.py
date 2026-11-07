@@ -517,7 +517,6 @@ _CENSUSED = (
     "gmlx.serve.patches.spec_processors",
     "gmlx.serve.queue_cap",
     "gmlx.serve.residency",
-    "gmlx.serve.seed_rows",
     "gmlx.serve.tick_guard",
     "gmlx.spec.admission",
     "gmlx.spec.ckpt",

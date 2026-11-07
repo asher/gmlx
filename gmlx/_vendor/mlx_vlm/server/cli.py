@@ -264,7 +264,7 @@ def main():
         type=int,
         default=None,
         help=(
-            "Server-side cap for per-token top_logprobs (0-20, default 0 = "
+            "Server-side cap for per-token top_logprobs (0-100, default 0 = "  # gmlx: cap 100
             "disabled). Maps to the TOP_LOGPROBS_K env var."
         ),
     )

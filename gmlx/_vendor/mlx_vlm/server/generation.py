@@ -308,11 +308,14 @@ def get_quantized_kv_start():
 def get_top_logprobs_k():
     """Max per-token top_logprobs honored by the server (0 = disabled).
 
-    Set via TOP_LOGPROBS_K env var. OpenAI caps this at 20. When 0, requests
-    with top_logprobs>0 still succeed but the top_logprobs list stays empty.
+    Set via TOP_LOGPROBS_K env var. gmlx: capped at TOP_LOGPROBS_CEILING,
+    100 (OpenAI caps at 20). When 0, requests with top_logprobs>0 still
+    succeed but the top_logprobs list stays empty.
     """
+    from gmlx.gen.logprobs import TOP_LOGPROBS_CEILING
+
     k = int(os.environ.get("TOP_LOGPROBS_K", 0))
-    return max(0, min(k, 20))
+    return max(0, min(k, TOP_LOGPROBS_CEILING))
 
 
 def _token_window_rate(token_times: List[float], window: int) -> Optional[float]:
@@ -618,6 +621,7 @@ class GenerationArguments:
     typical_p: float = 1.0
     seed: Optional[int] = None
     logprobs: bool = False
+    top_logprobs: int = 0  # gmlx: the request's alternatives per token
     repetition_penalty: Optional[float] = None
     repetition_context_size: Optional[int] = DEFAULT_REPETITION_CONTEXT_SIZE
     presence_penalty: Optional[float] = None
@@ -845,7 +849,7 @@ class StreamingToken:
 
     text: str
     token: int
-    logprobs: float
+    logprobs: Optional[float]  # gmlx: None when the row wants no logprobs
     finish_reason: Optional[str]
     peak_memory: float = 0.0
     prompt_tps: Optional[float] = None
@@ -1509,6 +1513,37 @@ class ResponseGenerator:
             seed=args.seed,
         )
 
+    # gmlx: one request's row settings for BatchGenerator.insert. The
+    # sampler is built without the seed, which rides in the settings and is
+    # registered on this instance for the row's uid.
+    def _row_settings(self, args: GenerationArguments):
+        import copy
+
+        from gmlx.serve.row_sampling import RowSettings, sampler_key, takes_row_seeds
+
+        seed = getattr(args, "seed", None)
+        seedless = copy.copy(args)
+        seedless.seed = None
+        sampler = self._make_sampler(seedless)
+        key = sampler_key(args)
+        if sampler is None:
+            seed = None
+        elif seed is not None and not takes_row_seeds(sampler):
+            # A sampler without per-row keys keeps the seed as its base.
+            sampler = self._make_sampler(args)
+            key = key + (("seed", int(seed)),)
+            seed = None
+        cap = int(self.top_logprobs_k or 0)
+        logprobs = bool(getattr(args, "logprobs", False))
+        top_k = min(int(getattr(args, "top_logprobs", 0) or 0), cap) if logprobs else 0
+        return RowSettings(
+            sampler=sampler,
+            seed=None if seed is None else int(seed),
+            logprobs=logprobs,
+            top_k=max(0, top_k),
+            key=key,
+        )
+
     def _make_logits_processors(
         self, args: GenerationArguments, input_ids: Optional[mx.array] = None
     ) -> List[Callable[[mx.array, mx.array], mx.array]]:
@@ -1810,6 +1845,8 @@ class ResponseGenerator:
                         request, backend="continuous_batching"
                     )
                     if batch_gen is None:
+                        from gmlx.serve.row_sampling import RowSettings
+
                         batch_gen = BatchGenerator(
                             self.model.language_model,
                             self.processor,
@@ -1825,6 +1862,11 @@ class ResponseGenerator:
                             quantized_kv_start=self.quantized_kv_start,
                             compute_logprobs=bool(args.logprobs),
                             top_logprobs_k=self.top_logprobs_k if args.logprobs else 0,
+                            # gmlx: the server cap, whatever the first request.
+                            # A row whose settings are gone reads the greedy
+                            # default, not the first request's.
+                            logprobs_cap=self.top_logprobs_k or 0,
+                            default_row=RowSettings(),
                             stream=generation_stream,
                             apc_manager=self.apc_manager,
                             draft_model=self.draft_model,
@@ -1875,6 +1917,8 @@ class ResponseGenerator:
                                 self._make_logits_processors(args, input_ids)
                             ],
                             thinking_budget_criteria=[thinking_budget_criteria],
+                            # gmlx: the request's own sampler and logprobs.
+                            row_settings=[self._row_settings(args)],
                         )
                     except Exception as e:
                         rqueue.put(e)

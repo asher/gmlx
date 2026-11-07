@@ -108,3 +108,81 @@ def test_vocab_map_hash_is_stable_and_separates_vocabularies(tok_bl, tok_spm):
     assert vocab_map_hash(tok_bl) == vocab_map_hash(tok_bl)
     assert vocab_map_hash(tok_bl) != vocab_map_hash(tok_spm)
     assert len(vocab_map_hash(tok_bl)) == 16
+
+
+def test_token_bytes_for_matches_token_bytes_on_every_plain_id(tok_bl, tok_spm):
+    from gmlx.load.tokenizer import special_ids, token_bytes_for
+
+    for tok in (tok_bl, tok_spm):
+        tb = token_bytes(tok)
+        special = special_ids(tok)
+        ids = [i for i in range(len(tb)) if i not in special]
+        assert token_bytes_for(tok, ids) == [tb[i] for i in ids]
+
+
+def test_byte_fallback_pieces_keep_their_own_byte(tok_spm):
+    from gmlx.load.tokenizer import token_bytes_for
+
+    ids = tok_spm.convert_tokens_to_ids(["<0xE4>", "<0xB8>", "<0xAD>"])
+    assert token_bytes_for(tok_spm, ids) == [b"\xe4", b"\xb8", b"\xad"]
+
+
+def test_specials_get_their_text_and_padded_ids_get_nothing(tok_spm):
+    from gmlx.load.tokenizer import token_bytes_for
+
+    got = token_bytes_for(tok_spm, [tok_spm.eos_token_id, len(tok_spm) + 3])
+    assert got == [b"<eos>", b""]
+
+
+def test_a_tokenizer_without_a_fast_backend_gets_decoded_bytes(caplog):
+    from gmlx.load.tokenizer import token_bytes_for
+
+    class Slow:
+        def decode(self, ids):
+            return {7: "\u00e9", 8: "x"}[ids[0]]
+
+        def convert_ids_to_tokens(self, ids):
+            raise AssertionError("no vocabulary lookup in fallback mode")
+
+    slow = Slow()
+    with caplog.at_level("WARNING", logger="gmlx.load.tokenizer"):
+        assert token_bytes_for(slow, [7, 8]) == ["\u00e9".encode(), b"x"]
+        assert token_bytes_for(slow, [8]) == [b"x"]
+    assert sum("fast backend" in r.message for r in caplog.records) == 1
+
+
+def test_the_context_is_built_under_the_lock(tok_bl):
+    from gmlx.load import tokenizer as tk
+
+    tok = tk.PreTrainedTokenizerFast(tokenizer_object=tok_bl._tokenizer)
+    held = []
+
+    class Lock:
+        def __enter__(self):
+            held.append(True)
+
+        def __exit__(self, *exc):
+            return False
+
+    tk.token_bytes_for(tok, [5], lock=Lock())
+    tk.token_bytes_for(tok, [6], lock=Lock())
+    assert held == [True]
+
+
+def test_a_failed_context_build_falls_back_to_decoded_bytes():
+    from gmlx.load.tokenizer import token_bytes_for
+
+    class Odd:
+        decoder = pre_tokenizer = None
+        all_special_ids = None
+
+        def __len__(self):
+            return 10
+
+        def convert_ids_to_tokens(self, ids):
+            raise AssertionError("no vocabulary lookup in fallback mode")
+
+        def decode(self, ids):
+            return "x"
+
+    assert token_bytes_for(Odd(), [3]) == [b"x"]

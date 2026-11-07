@@ -315,7 +315,7 @@ class _FastPositionedSampler:
         self.min_p = float(min_p or 0.0)
         self.seed = DEFAULT_SEED if seed is None else int(seed)
         # Per-request seeds (uid -> seed) and the row->uid context for the
-        # draw in flight, maintained by gmlx.serve.seed_rows. A row with a
+        # draw in flight, published by gmlx.serve.row_sampling. A row with a
         # registered seed draws from its own key stream; every other row
         # keeps the stock derivation byte for byte.
         self._kq_row_seeds: dict = {}
