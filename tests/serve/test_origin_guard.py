@@ -492,3 +492,41 @@ def test_a_file_page_is_named_as_one():
     r = client.get("/zz-origin-probe", headers={"Origin": "null"})
     assert r.status_code == 403 and calls == []
     assert "such as a file opened from disk" in r.json()["error"]["message"]
+
+
+def test_refusals_logged_from_many_threads_at_once_raise_nothing(monkeypatch,
+                                                                 capsys):
+    """The image routes log refusals from worker threads: callers that
+    log at once, past the keys the log keeps, each print their line and
+    raise nothing."""
+    import threading
+
+    monkeypatch.setattr(sp_hardening, "_refusal_logs", {})
+    monkeypatch.setattr(sp_hardening, "_REFUSAL_KEYS_MAX", 2)
+    monkeypatch.setattr(sp_hardening, "_REFUSALS_LOGGED_MAX", 1 << 30)
+    interval = sys.getswitchinterval()
+    threads, calls = 8, 2000
+    barrier = threading.Barrier(threads)
+    errors: list = []
+
+    def log(t):
+        barrier.wait()
+        try:
+            for i in range(calls):
+                sp_hardening._log_refusal(f"{t} {i}", "bad body", 400,
+                                          kind="media")
+        except Exception as e:  # noqa: BLE001 - the test reports any
+            errors.append(e)
+    sys.setswitchinterval(1e-6)
+    try:
+        workers = [threading.Thread(target=log, args=(t,))
+                   for t in range(threads)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join()
+    finally:
+        sys.setswitchinterval(interval)
+    assert errors == []
+    assert len(capsys.readouterr().out.splitlines()) == threads * calls
+    assert len(sp_hardening._refusal_logs["media"].keys) <= 2

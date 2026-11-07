@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib
 import os
 import re
+import threading
 import time
 
 
@@ -260,6 +261,8 @@ class _RefusalLog:
 
 
 _refusal_logs: dict[str, _RefusalLog] = {}
+# The routes log refusals from worker threads too.
+_refusal_lock = threading.Lock()
 
 
 def origin_allowed(origin: str) -> bool:
@@ -319,6 +322,22 @@ def _log_refusal(key: str, message: str, status: int = 403, kind: str = "origin"
     :data:`REFUSAL_KINDS`, has its own budget of lines a minute."""
     from gmlx.container.text import printable
 
+    with _refusal_lock:
+        line = _refusal_line(key, kind)
+    if line == "more":
+        reason = REFUSAL_KINDS.get(kind, "the same cause")
+        print(f"[server] refused more requests because of {reason} in this minute. The "
+              f"log shows at most {_REFUSALS_LOGGED_MAX} such refusals a minute.",
+              flush=True)
+    elif line:
+        print(f"[server] refused a request with status {status}: {printable(message)}",
+              flush=True)
+
+
+def _refusal_line(key: str, kind: str) -> str | None:
+    """Under _refusal_lock: "line" when the refusal of ``key`` is printed,
+    "more" when it is the first past the budget of ``kind`` this minute,
+    else None."""
     log = _refusal_logs.setdefault(kind, _RefusalLog())
     now = time.monotonic()
     if now - log.start >= _REFUSAL_LOG_EVERY:
@@ -327,21 +346,16 @@ def _log_refusal(key: str, message: str, status: int = 403, kind: str = "origin"
     last = log.keys.pop(key, None)
     if last is not None and now - last < _REFUSAL_LOG_EVERY:
         log.keys[key] = last
-        return
+        return None
     if log.count > _REFUSALS_LOGGED_MAX:
-        return
+        return None
     log.count += 1
     if log.count > _REFUSALS_LOGGED_MAX:
-        reason = REFUSAL_KINDS.get(kind, "the same cause")
-        print(f"[server] refused more requests because of {reason} in this minute. The "
-              f"log shows at most {_REFUSALS_LOGGED_MAX} such refusals a minute.",
-              flush=True)
-        return
+        return "more"
     log.keys[key] = now
     while len(log.keys) > _REFUSAL_KEYS_MAX:
         del log.keys[next(iter(log.keys))]
-    print(f"[server] refused a request with status {status}: {printable(message)}",
-          flush=True)
+    return "line"
 
 
 def _session_page(origin: str, scope) -> tuple[str, int, bool] | None:
