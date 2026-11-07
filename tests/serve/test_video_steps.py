@@ -2597,12 +2597,16 @@ def test_an_encode_with_the_clips_frames_names_the_length_of_a_text_prompt(
     ({"keyframes": ["first"]}, 1,
      "keyframes needs frames: a keyframe prompt names the clip's length"),
     ({"frames": 124, "keyframes": ["first"]}, 2,
-     "keyframes names 1 role for 2 images")])
+     "keyframes names 1 role for 2 images"),
+    ({"frames": 124, "keyframes": ["last", "first"]}, 2,
+     "keyframes lists the role of each image, \"first\" then \"last\""),
+    ({"frames": 124, "keyframes": "first"}, 1,
+     "keyframes lists the role of each image, \"first\" then \"last\"")])
 def test_an_encode_refuses_frames_and_keyframes_it_cannot_rewrite_with(
         request, sent, images, error):
     """A clip's frames that are no count, keyframes without the clip's
-    length and a role count other than the images' are refused before
-    any rewrite or encode."""
+    length, a role count other than the images' and roles that are no
+    list or out of order are refused before any rewrite or encode."""
     pipe, _w = _own_pipe()
     _mount(_Host(_served(pipe)), request)
     rng = np.random.default_rng(1)
