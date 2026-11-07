@@ -75,4 +75,7 @@ def gated_residual_once(x: mx.array, gate: mx.array,
         g = gate[..., a:b, :] if by_row else gate
         out[..., a:b, :] = _added_once(x[..., a:b, :], g, y[..., a:b, :])
         mx.eval(out)
+        # Until its command buffer's completed handler runs, MLX holds out
+        # and the block's copies, and the next update copies out whole.
+        mx.synchronize()
     return out
