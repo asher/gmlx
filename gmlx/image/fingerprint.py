@@ -263,11 +263,15 @@ def _families(name: str | None):
 
 
 def _refuse_video(view: HeaderView) -> None:
-    """Refuse a video DiT by name. Some converters label H3 files with a
-    text arch, so this runs before the text-arch refusal too."""
-    from gmlx.video.fingerprint import video_family_of
+    """Refuse a video DiT by name, or by gmlx video's reason for a file
+    it refuses. Some converters label H3 files with a text arch, so this
+    runs before the text-arch refusal too."""
+    from gmlx.video.fingerprint import VideoModelError, video_family_of
 
-    video = video_family_of(view)
+    try:
+        video = video_family_of(view)
+    except VideoModelError as e:
+        raise ImageModelError(f"this is {e}") from None
     if video is not None:
         raise ImageModelError(
             f"this is a {video.title} video GGUF, run it with gmlx video")

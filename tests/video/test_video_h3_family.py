@@ -368,6 +368,18 @@ def test_gmlx_image_refuses_an_h3_file_by_name(arch):
                              "gmlx video")
 
 
+@pytest.mark.parametrize("add", [
+    {"blocks.0.attn.qkv_proj.weight_scale": ((21504,), "F32")},
+    {"time_embedder.proj_in.weight": ((256, 5376), "F32")}])
+def test_gmlx_image_names_why_gmlx_video_refuses_an_h3_file(add):
+    """gmlx image does not send a user to gmlx video with a file gmlx
+    video refuses: it gives gmlx video's reason."""
+    view = fixture_view(H3_HEADER, add=add)
+    with pytest.raises(ifp.ImageModelError) as ei:
+        ifp.identify(view)
+    assert str(ei.value) == f"this is {_refused(view)}"
+
+
 def test_gmlx_video_takes_no_image_file():
     import image_fixtures
 

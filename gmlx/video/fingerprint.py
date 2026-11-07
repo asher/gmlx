@@ -81,9 +81,14 @@ def layout_identity(view: HeaderView, fam: VideoFamily) -> str | None:
 
 
 def video_family_of(view: HeaderView) -> VideoFamily | None:
-    """The video family whose tensors an unstripped view has, or None."""
+    """The video family whose tensors an unstripped view has, or None.
+    Raises ``VideoModelError`` with the family's reason for a file of its
+    tensors that gmlx video refuses."""
     for fam in families():
-        if fam.fingerprint(strip_prefix(view, fam.strip_prefixes)) is not None:
+        res = fam.fingerprint(strip_prefix(view, fam.strip_prefixes))
+        if isinstance(res, Refusal):
+            raise VideoModelError(res.reason)
+        if res is not None:
             return fam
     return None
 
