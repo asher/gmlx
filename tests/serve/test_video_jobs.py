@@ -1316,6 +1316,47 @@ def test_a_keyframe_decodes_in_the_parse_turn(routes, monkeypatch):
     assert held == {"decode": [True], "pixels": [True], "estimate": [False]}
 
 
+def test_keyframe_posts_past_the_executors_width_all_answer(routes):
+    """Three keyframe jobs posted at once on a loop whose default executor
+    has two threads all answer: no worker thread waits on the loop for the
+    parse turn, so the turn's own thread always gets one."""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    import httpx
+
+    routes.store.configure(SimpleNamespace(video=VideoServerCfg(max_queue=3)))
+    url = "data:image/png;base64," + base64.b64encode(_png()).decode()
+    executor = ThreadPoolExecutor(max_workers=2)
+
+    async def main():
+        asyncio.get_running_loop().set_default_executor(executor)
+        transport = httpx.ASGITransport(app=routes.app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as client:
+            posts = [asyncio.create_task(client.post("/v1/videos", json={
+                "prompt": f"a cat {i}", "first_frame": url}))
+                for i in range(3)]
+            done, pending = await asyncio.wait(posts, timeout=30)
+            return [t.result().status_code for t in done], len(pending)
+
+    loop = asyncio.new_event_loop()
+    try:
+        codes, stuck = loop.run_until_complete(main())
+    finally:
+        # A stuck post leaves threads that wait on the loop: cancel every
+        # task, so they wake, before the loop closes.
+        tasks = asyncio.all_tasks(loop)
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            loop.run_until_complete(asyncio.wait(tasks))
+        executor.shutdown(wait=False, cancel_futures=True)
+        loop.close()
+    assert stuck == 0, "a keyframe post never answered"
+    assert codes == [200, 200, 200]
+
+
 def test_a_keyframe_job_is_read_within_its_price(routes, monkeypatch,
                                                  tmp_path):
     """A job with a photo for its first frame and a prompt that is not

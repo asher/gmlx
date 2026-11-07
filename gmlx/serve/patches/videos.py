@@ -20,7 +20,6 @@ import argparse
 import asyncio
 import binascii
 import contextlib
-import functools
 import importlib
 import json
 import logging
@@ -325,19 +324,20 @@ def _keyframes(sent: dict, folder: str, take) -> dict:
     return keys
 
 
-def prepare(fields: dict, files: dict, folder: str, ffmpeg: str,
-            take=None, in_turn=None) -> tuple:
-    """``(record, params)`` of a job from the request's fields and files,
-    or Refused. A data URL keyframe goes to ``folder`` within the room
-    ``take(n)`` reserves in the job store. ``in_turn(step)`` runs the
-    keyframes' decode, which the price of a JSON body counts, in the turn
-    the parses take; the rest runs out of it. Fields and files the route
-    does not read are named in a warning, as the images API does."""
+def _inline(sent: dict) -> bool:
+    """Whether a keyframe of ``sent`` is a data URL, which decodes."""
+    return any(file is None and value is not None
+               for file, value in sent.values())
+
+
+def prepare_head(fields: dict, files: dict) -> SimpleNamespace:
+    """The checks of a job's fields before its keyframes, or Refused: the
+    entry, its plan and settings, and ``sent``, each keyframe field's
+    (file, value). Runs in a worker thread; the keyframes come next
+    (:func:`_keyframes`), then :func:`prepare_tail`."""
     from gmlx.commands import video as cmd
     from gmlx.video.registry import get_family
 
-    from ..image_service import ImageRequestError
-    from ..image_upsample import upsampler_for
     from ..residency import _http_from_resolver_error
 
     refs = fields.get("references")
@@ -399,8 +399,21 @@ def prepare(fields: dict, files: dict, folder: str, ffmpeg: str,
     if any(sent["first_frame"]) and any(sent["input_reference"]):
         raise Refused(400, "first_frame and input_reference both name the "
                       "first frame; send one", "input_reference")
-    step = functools.partial(_keyframes, sent, folder, take)
-    keys = step() if in_turn is None else in_turn(step)
+    return SimpleNamespace(prompt=prompt, path=path, spec=spec, plan=plan,
+                           fam=fam, settings=s, sent=sent)
+
+
+def prepare_tail(head: SimpleNamespace, keys: dict, fields: dict,
+                 files: dict, ffmpeg: str) -> tuple:
+    """``(record, params)`` of a job from its ``head``, its keyframes'
+    paths ``keys`` and the request's fields and files, or Refused. Fields
+    and files the route does not read are named in a warning, as the
+    images API does. Runs in a worker thread."""
+    from ..image_service import ImageRequestError
+    from ..image_upsample import upsampler_for
+
+    prompt, path, spec, plan, fam, s = (head.prompt, head.path, head.spec,
+                                        head.plan, head.fam, head.settings)
     if isinstance(fields.get("guides"), list) and fields["guides"]:
         raise Refused(400, "guides take files: send the job as a multipart "
                       "form", "guides")
@@ -492,15 +505,14 @@ async def create(request: Request):
             log_refusal(e.status, str(e))
             raise Refused(e.status, str(e), e.param,
                           headers=e.headers) from None
-        loop = asyncio.get_running_loop()
-
-        def in_turn(step):
-            # From prepare's thread: the step waits for the turn on the
-            # loop and runs in a thread of its own.
-            return asyncio.run_coroutine_threadsafe(
-                _in_turn(step), loop).result()
+        head = await asyncio.to_thread(prepare_head, fields, files)
+        # A data URL keyframe decodes in the turn the parses take: the
+        # price of a JSON body counts it. A cancel while it waits for the
+        # turn ends before the keyframe is written.
+        keys = await (_in_turn if _inline(head.sent) else asyncio.to_thread)(
+            _keyframes, head.sent, folder, take)
         record, params = await asyncio.to_thread(
-            prepare, fields, files, folder, ffmpeg, take, in_turn)
+            prepare_tail, head, keys, fields, files, ffmpeg)
         try:
             job = await asyncio.to_thread(post.submit, record, params)
         except QueueFull as e:
