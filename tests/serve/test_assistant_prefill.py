@@ -425,6 +425,42 @@ def _prefill_of(history, final):
             "add_generation_prompt": False}
 
 
+_SYSTEM_BODIES = {
+    "/v1/responses": {"instructions": "Be brief.", "input": "Hi"},
+    "/v1/messages": {"system": "Be brief.",
+                     "messages": [{"role": "user", "content": "Hi"}]},
+}
+
+
+@pytest.mark.parametrize("path", sorted(_SYSTEM_BODIES))
+def test_a_gemma4_vision_entry_renders_the_system_text_as_the_text_entry(
+        chat, monkeypatch, path):
+    monkeypatch.setattr(importlib.import_module(
+        "gmlx._vendor.mlx_vlm.server.anthropic"), "get_cached_model",
+        lambda *a, **k: _OPENAI.get_cached_model(*a, **k))
+    run = "llama-server/gemma4_12b"
+    got = chat(run, _SYSTEM_BODIES[path], path=path, vision=True)
+    assert "<|turn>system\nBe brief.<turn|>" in got
+    assert got == chat(run, _SYSTEM_BODIES[path], path=path)
+
+
+@pytest.mark.parametrize("path", ["/v1/estimate", "/v1/chat/completions"])
+def test_the_estimate_on_a_gemma4_vision_entry_counts_the_text_entrys_prompt(
+        chat, monkeypatch, path):
+    run = "llama-server/gemma4_12b"
+    body = {"messages": _HISTORY}
+    prompt = chat(run, body)
+    _resident(monkeypatch, *_processor_for(run, vision=True))
+    from fastapi.testclient import TestClient
+
+    body = {"model": "m", **body}
+    if path != "/v1/estimate":
+        body["dry_run"] = True
+    r = TestClient(_APP.app).post(path, json=body)
+    assert r.status_code == 200, r.text
+    assert r.json()["prompt_tokens"] == len(_ids(prompt))
+
+
 def test_template_for_reads_the_template_the_gemma4_processor_renders():
     processor, _ = _processor_for("llama-server/gemma4_12b", vision=True)
     assert prefill.template_for(processor) == processor.tokenizer.chat_template
