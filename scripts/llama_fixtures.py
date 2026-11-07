@@ -4,8 +4,6 @@
 Each subcommand runs one llama.cpp tool and writes one plain JSON fixture
 under tests/fixtures/. The binaries come from environment variables:
 
-  GMLX_LLAMA_SERVER        llama-server
-  GMLX_LLAMA_EXPORT_LORA   llama-export-lora
   GMLX_LLAMA_PERPLEXITY    llama-perplexity
 
 A fixture holds the llama.cpp commit (``llama_cpp``), the time it was made
@@ -21,28 +19,22 @@ the old fixture names against its recorded sha256.
 
 from __future__ import annotations
 
+import argparse
+import datetime as _dt
+import hashlib
+import importlib.util
+import json
 import os
-
-# gmlx runs inside a subcommand compute in exact float32.
-os.environ["MLX_ENABLE_TF32"] = "0"
-
-import argparse  # noqa: E402
-import datetime as _dt  # noqa: E402
-import hashlib  # noqa: E402
-import importlib.util  # noqa: E402
-import json  # noqa: E402
-import re  # noqa: E402
-import struct  # noqa: E402
-import subprocess  # noqa: E402
-import sys  # noqa: E402
-import tempfile  # noqa: E402
-from pathlib import Path  # noqa: E402
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 FIXTURES = REPO / "tests" / "fixtures"
 BINARIES = {
-    "llama-server": "GMLX_LLAMA_SERVER",
-    "llama-export-lora": "GMLX_LLAMA_EXPORT_LORA",
     "llama-perplexity": "GMLX_LLAMA_PERPLEXITY",
 }
 KLD_TEXT = FIXTURES / "kld" / "streaming.txt"
